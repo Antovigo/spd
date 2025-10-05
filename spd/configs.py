@@ -29,6 +29,9 @@ class TrainMetricConfig(BaseModel):
         ...,
         description="Coefficient used for weighting into loss/total.",
     )
+    coeff_anneal_start_frac: float = 1.0
+    coeff_anneal_final_value: float | None = None
+    coeff_anneal_end_frac: float = 1.0
 
 
 class CIMaskedReconSubsetLossTrainConfig(TrainMetricConfig):
@@ -265,6 +268,10 @@ class Config(BaseModel):
     lr_warmup_pct: Probability = Field(
         default=0.0,
         description="Fraction of total steps to linearly warm up the learning rate",
+    )
+    lr_decay_start_frac: float = Field(
+        default=0.0,
+        description="Fraction of training after warmup when LR decay begins (0.0 = start immediately after warmup)",
     )
 
     # --- Logging & Saving ---

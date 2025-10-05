@@ -177,11 +177,25 @@ def get_lr_with_warmup(
     lr: float,
     lr_schedule_fn: Callable[[int, int], float],
     lr_warmup_pct: float,
+    lr_decay_start_frac: float = 0.0,
 ) -> float:
     warmup_steps = int(steps * lr_warmup_pct)
+    decay_start_step = int(steps * lr_decay_start_frac)
+
+    # Ensure decay_start_step is at least after warmup
+    decay_start_step = max(decay_start_step, warmup_steps)
+
+    # Warmup phase
     if step < warmup_steps:
         return lr * (step / warmup_steps)
-    return lr * lr_schedule_fn(step - warmup_steps, steps - warmup_steps)
+
+    # Constant phase (between warmup end and decay start)
+    if step < decay_start_step:
+        return lr
+
+    # Decay phase
+    decay_steps = steps - decay_start_step
+    return lr * lr_schedule_fn(step - decay_start_step, decay_steps)
 
 
 def replace_deprecated_param_names(
@@ -382,42 +396,38 @@ def save_pre_run_info(
             wandb.save(str(filepath), base_path=out_dir, policy="now")
 
 
-def get_linear_annealed_p(
-    step: int,
-    steps: int,
-    initial_p: float,
-    p_anneal_start_frac: float,
-    p_anneal_final_p: float | None,
-    p_anneal_end_frac: float = 1.0,
+def get_linear_annealed_value(
+    current_frac_of_training: float,
+    initial_value: float,
+    anneal_start_frac: float,
+    anneal_final_value: float | None,
+    anneal_end_frac: float,
 ) -> float:
-    """Calculate the linearly annealed p value for L_p sparsity loss.
+    """Calculate linearly annealed value during training.
 
     Args:
-        step: Current training step
-        steps: Total number of training steps
-        initial_p: Starting p value
-        p_anneal_start_frac: Fraction of training after which to start annealing
-        p_anneal_final_p: Final p value to anneal to
-        p_anneal_end_frac: Fraction of training when annealing ends. We stay at the final p value from this point onward
+        current_frac_of_training: Current fraction of training (0.0 to 1.0)
+        initial_value: Starting value
+        anneal_start_frac: Fraction of training after which to start annealing
+        anneal_final_value: Final value to anneal to (None = no annealing)
+        anneal_end_frac: Fraction of training when annealing ends
 
     Returns:
-        Current p value based on linear annealing schedule
+        Current value based on linear annealing schedule
     """
-    if p_anneal_final_p is None or p_anneal_start_frac >= 1.0:
-        return initial_p
+    if anneal_final_value is None or anneal_start_frac >= 1.0:
+        return initial_value
 
-    assert p_anneal_end_frac >= p_anneal_start_frac, (
-        f"p_anneal_end_frac ({p_anneal_end_frac}) must be >= "
-        f"p_anneal_start_frac ({p_anneal_start_frac})"
+    assert anneal_end_frac >= anneal_start_frac, (
+        f"anneal_end_frac ({anneal_end_frac}) must be >= anneal_start_frac ({anneal_start_frac})"
     )
 
-    cur_frac = step / steps
-
-    if cur_frac < p_anneal_start_frac:
-        return initial_p
-    elif cur_frac >= p_anneal_end_frac:
-        return p_anneal_final_p
+    if current_frac_of_training < anneal_start_frac:
+        return initial_value
+    elif current_frac_of_training >= anneal_end_frac:
+        return anneal_final_value
     else:
-        # Linear interpolation between start and end fractions
-        progress = (cur_frac - p_anneal_start_frac) / (p_anneal_end_frac - p_anneal_start_frac)
-        return initial_p + (p_anneal_final_p - initial_p) * progress
+        progress = (current_frac_of_training - anneal_start_frac) / (
+            anneal_end_frac - anneal_start_frac
+        )
+        return initial_value + (anneal_final_value - initial_value) * progress

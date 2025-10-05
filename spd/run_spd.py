@@ -219,6 +219,7 @@ def optimize(
             lr=config.lr,
             lr_schedule_fn=lr_schedule_fn,
             lr_warmup_pct=config.lr_warmup_pct,
+            lr_decay_start_frac=config.lr_decay_start_frac,
         )
 
         for group in optimizer.param_groups:
@@ -247,7 +248,7 @@ def optimize(
 
             alive_tracker.update(ci=causal_importances)
 
-            microbatch_total_loss, microbatch_loss_terms = compute_total_loss(
+            microbatch_total_loss, microbatch_loss_terms, scheduled_params = compute_total_loss(
                 loss_metric_configs=config.loss_metric_configs,
                 model=component_model,
                 batch=batch,
@@ -267,6 +268,9 @@ def optimize(
                 microbatch_log_data[f"train/loss/{loss_name}"] += (
                     loss_value / config.gradient_accumulation_steps
                 )
+
+            for param_name, param_value in scheduled_params.items():
+                microbatch_log_data[param_name] = param_value
 
             for layer_name, layer_ci in causal_importances.items():
                 l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
