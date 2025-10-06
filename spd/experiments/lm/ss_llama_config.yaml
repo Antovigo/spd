@@ -26,14 +26,14 @@ loss_metric_configs:
 output_loss_type: kl
 
 # --- Training ---
-batch_size: 300 # was 128
+batch_size: 250 # was 128
 eval_batch_size: 64
 steps: 50000
 lr: 0.0005
 lr_schedule: cosine
 lr_warmup_pct: 0.0
 lr_decay_start_frac: 0.95
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 3
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 200
