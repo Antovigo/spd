@@ -71,6 +71,9 @@ class TMSModel(LoadableModule):
                 layer = nn.Linear(config.n_hidden, config.n_hidden, bias=False)
                 self.hidden_layers.append(layer)
 
+        assert config.act_fn_name in ["gelu", "relu"]
+        self.act_fn = F.gelu if config.act_fn_name == "gelu" else F.relu
+
         if config.tied_weights:
             self.tie_weights_()
 
@@ -93,8 +96,8 @@ class TMSModel(LoadableModule):
         if self.hidden_layers is not None:
             for layer in self.hidden_layers:
                 hidden = layer(hidden)
-        out_pre_relu = self.linear2(hidden)
-        out = F.relu(out_pre_relu)
+        out_pre_act = self.linear2(hidden)
+        out = self.act_fn(out_pre_act)
         return out
 
     @staticmethod

@@ -13,6 +13,10 @@ class TMSModelConfig(BaseModel):
     tied_weights: bool
     init_bias_to_zero: bool
     device: str
+    act_fn_name: Literal["gelu", "relu"] = Field(
+        default="relu",
+        description="Defines the activation function in the model output layer."
+    )
 
 
 class TMSTrainConfig(BaseModel):

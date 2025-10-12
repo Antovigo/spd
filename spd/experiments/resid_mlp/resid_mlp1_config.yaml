@@ -20,7 +20,10 @@ use_delta_component: true
 # --- Loss config ---
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 1e-5
+    coeff: 5e-5
+    coeff_anneal_final_value: 1e-7
+    coeff_anneal_start_frac: 0.0
+    coeff_anneal_end_frac: 1.0
     pnorm: 2.0
   - classname: "StochasticReconLayerwiseLoss"
     coeff: 1.0
@@ -31,7 +34,7 @@ output_loss_type: mse
 # --- Training ---
 batch_size: 2048
 eval_batch_size: 2048
-steps: 10_000
+steps: 60_000
 lr: 2e-3
 lr_schedule: constant
 lr_warmup_pct: 0.0
@@ -71,7 +74,9 @@ eval_metric_configs:
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"
-pretrained_model_path: "wandb:goodfire/spd/runs/pziyck78"
+#pretrained_model_path: "wandb:goodfire/spd/runs/pziyck78"
+#pretrained_model_path: "/home/antoine/spd_cache/runs/spd-fs9taopt (train Resid_MLP1, ReLU)/resid_mlp.pth"
+pretrained_model_path: "/home/antoine/spd_cache/runs/spd-9lm1ovjo (train Resid_MLP1, GeLU)/resid_mlp.pth"
 
 # --- Task Specific ---
 task_config:
