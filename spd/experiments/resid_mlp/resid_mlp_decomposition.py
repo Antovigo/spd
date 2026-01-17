@@ -80,18 +80,73 @@ def main(
         wandb.save(str(out_dir / "label_coeffs.json"), base_path=out_dir, policy="now")
 
     synced_inputs = target_run_info.config.synced_inputs
+    n_features = target_model.config.n_features
+    task_config = config.task_config
+
+    # Determine non-target features as complement of target features
+    target_features = task_config.target_features
+    if target_features is not None:
+        all_features = set(range(n_features))
+        nontarget_features = list(all_features - set(target_features))
+    else:
+        nontarget_features = None
+
     dataset = ResidMLPDataset(
-        n_features=target_model.config.n_features,
-        feature_probability=config.task_config.feature_probability,
+        n_features=n_features,
+        feature_probability=task_config.feature_probability,
         device=device,
         calc_labels=False,  # Our labels will be the output of the target model
         label_type=None,
         act_fn_name=None,
         label_fn_seed=None,
         label_coeffs=None,
-        data_generation_type=config.task_config.data_generation_type,
+        data_generation_type=task_config.data_generation_type,
         synced_inputs=synced_inputs,
     )
+
+    target_loader = None
+    nontarget_loader = None
+
+    if target_features is not None:
+        assert config.target_batch_size is not None, (
+            "target_batch_size must be set when target_features is set"
+        )
+        assert config.nontarget_batch_size is not None, (
+            "nontarget_batch_size must be set when target_features is set"
+        )
+
+        target_dataset = ResidMLPDataset(
+            n_features=n_features,
+            feature_probability=task_config.feature_probability,
+            device=device,
+            calc_labels=False,
+            label_type=None,
+            act_fn_name=None,
+            label_fn_seed=None,
+            label_coeffs=None,
+            data_generation_type=task_config.data_generation_type,
+            synced_inputs=synced_inputs,
+            active_features=target_features,
+        )
+        nontarget_dataset = ResidMLPDataset(
+            n_features=n_features,
+            feature_probability=task_config.feature_probability,
+            device=device,
+            calc_labels=False,
+            label_type=None,
+            act_fn_name=None,
+            label_fn_seed=None,
+            label_coeffs=None,
+            data_generation_type=task_config.data_generation_type,
+            synced_inputs=synced_inputs,
+            active_features=nontarget_features,
+        )
+        target_loader = DatasetGeneratedDataLoader(
+            target_dataset, batch_size=config.target_batch_size, shuffle=False
+        )
+        nontarget_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_batch_size, shuffle=False
+        )
 
     train_loader = DatasetGeneratedDataLoader(
         dataset, batch_size=config.microbatch_size, shuffle=False
@@ -110,6 +165,8 @@ def main(
         eval_loader=eval_loader,
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
+        target_loader=target_loader,
+        nontarget_loader=nontarget_loader,
     )
 
     if config.wandb_project:

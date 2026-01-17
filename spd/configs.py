@@ -77,6 +77,11 @@ class TMSTaskConfig(BaseConfig):
         default="at_least_zero_active",
         description="Strategy for generating synthetic data for TMS training",
     )
+    target_features: list[int] | None = Field(
+        default=None,
+        description="Feature indices for target data in targeted decomposition. "
+        "If None, targeted decomposition is disabled.",
+    )
 
 
 class ResidMLPTaskConfig(BaseConfig):
@@ -93,6 +98,11 @@ class ResidMLPTaskConfig(BaseConfig):
     ] = Field(
         default="at_least_zero_active",
         description="Strategy for generating synthetic data for residual-MLP training",
+    )
+    target_features: list[int] | None = Field(
+        default=None,
+        description="Feature indices for target data in targeted decomposition. "
+        "If None, targeted decomposition is disabled.",
     )
 
 
@@ -340,6 +350,14 @@ class UVPlotsConfig(BaseConfig):
     dense_patterns: list[str] | None
 
 
+class FeatureComponentMatrixConfig(BaseConfig):
+    classname: Literal["FeatureComponentMatrix"] = "FeatureComponentMatrix"
+    n_features: int
+    ci_threshold: float = 0.1
+    target_features: list[int] | None = None
+    input_activation: float = 0.75
+
+
 ReconLossConfigType = (
     UnmaskedReconLossConfig
     | CIMaskedReconLossConfig
@@ -362,6 +380,7 @@ EvalOnlyMetricConfigType = (
     | CI_L0Config
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
+    | FeatureComponentMatrixConfig
     | IdentityCIErrorConfig
     | PermutedCIPlotsConfig
     | UVPlotsConfig
@@ -475,6 +494,16 @@ class Config(BaseConfig):
     gradient_accumulation_steps: PositiveInt = Field(
         default=1,
         description="Number of steps to accumulate gradients over before updating parameters",
+    )
+    target_batch_size: PositiveInt | None = Field(
+        default=None,
+        description="Batch size for target data in targeted decomposition. "
+        "Only used when task_config has target_features set.",
+    )
+    nontarget_batch_size: PositiveInt | None = Field(
+        default=None,
+        description="Batch size for non-target data in targeted decomposition. "
+        "Only used when task_config has target_features set.",
     )
     grad_clip_norm_components: PositiveFloat | None = Field(
         default=None,

@@ -111,22 +111,54 @@ def get_unique_metric_configs(
     return eval_metric_configs
 
 
+DataLoaderType = (
+    DataLoader[Int[Tensor, "..."]] | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+)
+
+
 def optimize(
     target_model: nn.Module,
     config: Config,
     device: str,
-    train_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
-    eval_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
+    train_loader: DataLoaderType,
+    eval_loader: DataLoaderType,
     n_eval_steps: int,
     out_dir: Path | None,
     tied_weights: list[tuple[str, str]] | None = None,
     ln_stds: dict[str, float] | None = None,
+    target_loader: DataLoaderType | None = None,
+    nontarget_loader: DataLoaderType | None = None,
 ) -> None:
-    """Run the optimization loop for LM decomposition."""
+    """Run the optimization loop for LM decomposition.
 
-    train_iterator = loop_dataloader(train_loader)
+    Args:
+        target_model: The pretrained model to decompose.
+        config: Configuration for the SPD run.
+        device: Device to run on (e.g., "cuda", "cpu").
+        train_loader: Standard training dataloader (used when not in targeted mode).
+        eval_loader: Evaluation dataloader.
+        n_eval_steps: Number of evaluation steps.
+        out_dir: Output directory for saving models and logs.
+        tied_weights: Optional list of (src, tgt) weight pairs to tie.
+        ln_stds: Optional dict of layernorm std values to patch in.
+        target_loader: Dataloader for target data in targeted decomposition mode.
+        nontarget_loader: Dataloader for non-target data in targeted decomposition mode.
+
+    For targeted decomposition (when target_loader and nontarget_loader are provided):
+        - Target data: delta mask is stochastic (standard SPD ablation)
+        - Non-target data: delta mask is always 1.0 (delta fully active)
+    """
+    targeted_decomposition = target_loader is not None and nontarget_loader is not None
+    if targeted_decomposition:
+        assert target_loader is not None and nontarget_loader is not None
+        target_iterator = loop_dataloader(target_loader)
+        nontarget_iterator = loop_dataloader(nontarget_loader)
+        train_iterator = None
+    else:
+        train_iterator = loop_dataloader(train_loader)
+        target_iterator = None
+        nontarget_iterator = None
+
     eval_iterator = loop_dataloader(eval_loader)
 
     def create_pgd_data_iter() -> (
@@ -225,12 +257,24 @@ def optimize(
     batch_dims: tuple[int, ...] | None = None
 
     # Track which components are alive based on firing frequency
-    sample_batch = extract_batch_data(next(train_iterator))
-    batch_dims = (
-        sample_batch.shape[:-1]
-        if config.output_loss_type == "mse"  # if mse then input is a vector
-        else sample_batch.shape  # else it's a batch of token ids
-    )
+    if targeted_decomposition:
+        assert target_iterator is not None and nontarget_iterator is not None
+        target_sample = extract_batch_data(next(target_iterator))
+        nontarget_sample = extract_batch_data(next(nontarget_iterator))
+        combined_batch_size = target_sample.shape[0] + nontarget_sample.shape[0]
+        batch_dims = (
+            torch.Size([combined_batch_size]) + target_sample.shape[1:-1]
+            if config.output_loss_type == "mse"
+            else torch.Size([combined_batch_size]) + target_sample.shape[1:]
+        )
+    else:
+        assert train_iterator is not None
+        sample_batch = extract_batch_data(next(train_iterator))
+        batch_dims = (
+            sample_batch.shape[:-1]
+            if config.output_loss_type == "mse"  # if mse then input is a vector
+            else sample_batch.shape  # else it's a batch of token ids
+        )
     alive_tracker = AliveComponentsTracker(
         module_to_c=model.module_to_c,
         device=device,
@@ -253,7 +297,21 @@ def optimize(
         microbatch_log_data: defaultdict[str, float] = defaultdict(float)
 
         for _ in range(config.gradient_accumulation_steps):
-            microbatch = extract_batch_data(next(train_iterator)).to(device)
+            if targeted_decomposition:
+                assert target_iterator is not None and nontarget_iterator is not None
+                target_batch = extract_batch_data(next(target_iterator)).to(device)
+                nontarget_batch = extract_batch_data(next(nontarget_iterator)).to(device)
+                microbatch = torch.cat([target_batch, nontarget_batch], dim=0)
+                is_target = torch.cat(
+                    [
+                        torch.ones(target_batch.shape[0], dtype=torch.bool, device=device),
+                        torch.zeros(nontarget_batch.shape[0], dtype=torch.bool, device=device),
+                    ]
+                )
+            else:
+                assert train_iterator is not None
+                microbatch = extract_batch_data(next(train_iterator)).to(device)
+                is_target = None
 
             # NOTE: we need to call the wrapped_model at least once each step in order to setup
             # the DDP gradient syncing for all parameters in the component model. Gradients will
@@ -281,6 +339,7 @@ def optimize(
                 use_delta_component=config.use_delta_component,
                 n_mask_samples=config.n_mask_samples,
                 output_loss_type=config.output_loss_type,
+                is_target=is_target,
             )
             microbatch_total_loss.div_(config.gradient_accumulation_steps).backward()
 
@@ -289,11 +348,68 @@ def optimize(
                     loss_value / config.gradient_accumulation_steps
                 )
 
+            # Log separate reconstruction loss for target vs non-target
+            if is_target is not None:
+                with torch.no_grad():
+                    # Compute unmasked output for recon loss calculation
+                    unmasked_out = component_model(microbatch)
+                    if config.output_loss_type == "mse":
+                        target_recon = torch.nn.functional.mse_loss(
+                            unmasked_out[is_target], target_model_output.output[is_target]
+                        ).item()
+                        nontarget_recon = torch.nn.functional.mse_loss(
+                            unmasked_out[~is_target], target_model_output.output[~is_target]
+                        ).item()
+                    else:  # kl
+                        target_logprobs = torch.nn.functional.log_softmax(
+                            unmasked_out[is_target], dim=-1
+                        )
+                        target_probs = torch.nn.functional.softmax(
+                            target_model_output.output[is_target], dim=-1
+                        )
+                        target_recon = (
+                            torch.nn.functional.kl_div(
+                                target_logprobs, target_probs, reduction="batchmean"
+                            ).item()
+                        )
+                        nontarget_logprobs = torch.nn.functional.log_softmax(
+                            unmasked_out[~is_target], dim=-1
+                        )
+                        nontarget_probs = torch.nn.functional.softmax(
+                            target_model_output.output[~is_target], dim=-1
+                        )
+                        nontarget_recon = (
+                            torch.nn.functional.kl_div(
+                                nontarget_logprobs, nontarget_probs, reduction="batchmean"
+                            ).item()
+                        )
+                    microbatch_log_data["train/loss/recon_target"] += (
+                        target_recon / config.gradient_accumulation_steps
+                    )
+                    microbatch_log_data["train/loss/recon_nontarget"] += (
+                        nontarget_recon / config.gradient_accumulation_steps
+                    )
+
             for layer_name, layer_ci in ci.lower_leaky.items():
                 l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
                 microbatch_log_data[f"train/l0/{layer_name}"] += (
                     l0_val / config.gradient_accumulation_steps
                 )
+
+                # Log separate L0 for target vs non-target in targeted decomposition
+                if is_target is not None:
+                    target_ci = layer_ci[is_target]
+                    nontarget_ci = layer_ci[~is_target]
+                    if target_ci.numel() > 0:
+                        target_l0 = calc_ci_l_zero(target_ci, config.ci_alive_threshold)
+                        microbatch_log_data[f"train/l0_target/{layer_name}"] += (
+                            target_l0 / config.gradient_accumulation_steps
+                        )
+                    if nontarget_ci.numel() > 0:
+                        nontarget_l0 = calc_ci_l_zero(nontarget_ci, config.ci_alive_threshold)
+                        microbatch_log_data[f"train/l0_nontarget/{layer_name}"] += (
+                            nontarget_l0 / config.gradient_accumulation_steps
+                        )
 
         # --- Train Logging --- #
         if step % config.train_log_freq == 0:

@@ -143,13 +143,37 @@ class SparseFeatureDataset(
         data_generation_type: DataGenerationType = "at_least_zero_active",
         value_range: tuple[float, float] = (0.0, 1.0),
         synced_inputs: list[list[int]] | None = None,
+        active_features: list[int] | None = None,
     ):
+        """Sparse feature dataset for synthetic data generation.
+
+        Args:
+            n_features: Total number of features in the output vectors.
+            feature_probability: Probability that a given feature is active.
+            device: Device to generate data on.
+            data_generation_type: Strategy for generating data.
+            value_range: Range of values for active features.
+            synced_inputs: Feature indices that should be synced (all on or all off together).
+            active_features: If provided, only these feature indices can be active.
+                Other features will always be zero. Useful for targeted decomposition
+                where target/non-target data should use different feature subsets.
+        """
         self.n_features: int = n_features
         self.feature_probability: float = feature_probability
         self.device: str = device
         self.data_generation_type: DataGenerationType = data_generation_type
         self.value_range: tuple[float, float] = value_range
         self.synced_inputs: list[list[int]] | None = synced_inputs
+        self.active_features: list[int] | None = active_features
+
+        # Compute adjusted probability to maintain expected active features when using active_features
+        if active_features is not None:
+            n_available = len(active_features)
+            self.adjusted_feature_probability = min(
+                1.0, feature_probability * (n_features / n_available)
+            )
+        else:
+            self.adjusted_feature_probability = feature_probability
 
     def __len__(self) -> int:
         return 2**31
@@ -206,25 +230,33 @@ class SparseFeatureDataset(
         Args:
             batch_size: Number of samples in the batch
             n: Number of features to activate per sample
+
+        If active_features is set, features are selected only from those indices.
         """
-        if n > self.n_features:
+        # Determine which features can be activated
+        if self.active_features is not None:
+            available_features = torch.tensor(self.active_features, device=self.device)
+            n_available = len(self.active_features)
+        else:
+            available_features = torch.arange(self.n_features, device=self.device)
+            n_available = self.n_features
+
+        if n > n_available:
             raise ValueError(
-                f"Cannot activate {n} features when only {self.n_features} features exist"
+                f"Cannot activate {n} features when only {n_available} features are available"
             )
 
         batch = torch.zeros(batch_size, self.n_features, device=self.device)
 
-        # Create indices for all features
-        feature_indices = torch.arange(self.n_features, device=self.device)
-        # Expand to batch size
-        feature_indices = feature_indices.expand(batch_size, self.n_features)
+        # Expand available features to batch size
+        feature_indices = available_features.expand(batch_size, n_available)
 
-        # For each instance in the batch, randomly permute the features
+        # For each instance in the batch, randomly permute the available features
         perm = torch.rand_like(feature_indices.float()).argsort(dim=-1)
         permuted_features = feature_indices.gather(dim=-1, index=perm)
 
         # Take first n indices for each instance - guaranteed no duplicates
-        active_features = permuted_features[..., :n]
+        selected_features = permuted_features[..., :n]
 
         # Generate random values in value_range for the active features
         min_val, max_val = self.value_range
@@ -234,7 +266,7 @@ class SparseFeatureDataset(
         # Place each active feature
         for i in range(n):
             batch.scatter_(
-                dim=1, index=active_features[..., i : i + 1], src=random_values[..., i : i + 1]
+                dim=1, index=selected_features[..., i : i + 1], src=random_values[..., i : i + 1]
             )
 
         return batch
@@ -242,13 +274,23 @@ class SparseFeatureDataset(
     def _masked_batch_generator(self, batch_size: int) -> Float[Tensor, "batch_size n_features"]:
         """Generate a batch where each feature activates independently with probability
         `feature_probability`.
+
+        If active_features is set, only those features can be active, and the probability
+        is adjusted to maintain the same expected number of active features.
         """
         min_val, max_val = self.value_range
         batch = (
             torch.rand((batch_size, self.n_features), device=self.device) * (max_val - min_val)
             + min_val
         )
-        mask = torch.rand_like(batch) < self.feature_probability
+        mask = torch.rand_like(batch) < self.adjusted_feature_probability
+
+        if self.active_features is not None:
+            # Zero out features not in active_features
+            feature_mask = torch.zeros(self.n_features, dtype=torch.bool, device=self.device)
+            feature_mask[self.active_features] = True
+            mask = mask & feature_mask.unsqueeze(0)
+
         return batch * mask
 
     def _generate_multi_feature_batch_no_zero_samples(

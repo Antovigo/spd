@@ -1,7 +1,7 @@
 from typing import Any, ClassVar, Literal, override
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from torch.distributed import ReduceOp
 
@@ -23,6 +23,7 @@ def _stochastic_recon_layerwise_loss_update(
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+    is_target: Bool[Tensor, "..."] | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     assert ci, "Empty ci"
     device = get_obj_device(ci)
@@ -35,6 +36,7 @@ def _stochastic_recon_layerwise_loss_update(
             component_mask_sampling=sampling,
             weight_deltas=weight_deltas,
             router=AllLayersRouter(),
+            is_target=is_target,
         )
         for _ in range(n_mask_samples)
     ]
@@ -64,6 +66,7 @@ def stochastic_recon_layerwise_loss(
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+    is_target: Bool[Tensor, "..."] | None = None,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _stochastic_recon_layerwise_loss_update(
         model=model,
@@ -74,6 +77,7 @@ def stochastic_recon_layerwise_loss(
         target_out=target_out,
         ci=ci,
         weight_deltas=weight_deltas,
+        is_target=is_target,
     )
     return _stochastic_recon_layerwise_loss_compute(sum_loss, n_examples)
 

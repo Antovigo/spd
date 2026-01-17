@@ -1,7 +1,7 @@
 from typing import Literal
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from spd.configs import (
@@ -52,6 +52,7 @@ def compute_total_loss(
     use_delta_component: bool,
     n_mask_samples: int,
     output_loss_type: Literal["mse", "kl"],
+    is_target: Bool[Tensor, "..."] | None = None,
 ) -> tuple[Float[Tensor, ""], dict[str, float]]:
     """Compute weighted total loss and per-term raw values using new loss primitives.
 
@@ -118,6 +119,7 @@ def compute_total_loss(
                     target_out=target_out,
                     ci=ci.lower_leaky,
                     weight_deltas=weight_deltas if use_delta_component else None,
+                    is_target=is_target,
                 )
             case StochasticReconLossConfig():
                 loss = stochastic_recon_loss(
@@ -129,6 +131,7 @@ def compute_total_loss(
                     target_out=target_out,
                     ci=ci.lower_leaky,
                     weight_deltas=weight_deltas if use_delta_component else None,
+                    is_target=is_target,
                 )
             case StochasticReconSubsetLossConfig():
                 loss = stochastic_recon_subset_loss(

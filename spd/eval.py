@@ -19,6 +19,7 @@ from spd.configs import (
     CIMeanPerComponentConfig,
     ComponentActivationDensityConfig,
     Config,
+    FeatureComponentMatrixConfig,
     FaithfulnessLossConfig,
     IdentityCIErrorConfig,
     ImportanceMinimalityLossConfig,
@@ -48,6 +49,7 @@ from spd.metrics.ci_masked_recon_subset_loss import CIMaskedReconSubsetLoss
 from spd.metrics.ci_mean_per_component import CIMeanPerComponent
 from spd.metrics.component_activation_density import ComponentActivationDensity
 from spd.metrics.faithfulness_loss import FaithfulnessLoss
+from spd.metrics.feature_component_matrix import FeatureComponentMatrix
 from spd.metrics.identity_ci_error import IdentityCIError
 from spd.metrics.importance_minimality_loss import ImportanceMinimalityLoss
 from spd.metrics.permuted_ci_plots import PermutedCIPlots
@@ -174,6 +176,15 @@ def init_metric(
         case ComponentActivationDensityConfig():
             metric = ComponentActivationDensity(
                 model=model, device=device, ci_alive_threshold=run_config.ci_alive_threshold
+            )
+        case FeatureComponentMatrixConfig():
+            metric = FeatureComponentMatrix(
+                model=model,
+                device=device,
+                n_features=cfg.n_features,
+                ci_threshold=cfg.ci_threshold,
+                target_features=cfg.target_features,
+                input_activation=cfg.input_activation,
             )
         case IdentityCIErrorConfig():
             metric = IdentityCIError(

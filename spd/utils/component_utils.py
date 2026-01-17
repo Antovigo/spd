@@ -1,5 +1,5 @@
 import torch
-from jaxtyping import Float
+from jaxtyping import Bool, Float
 from torch import Tensor
 
 from spd.configs import SamplingType
@@ -12,7 +12,20 @@ def calc_stochastic_component_mask_info(
     component_mask_sampling: SamplingType,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     router: Router,
+    is_target: Bool[Tensor, "..."] | None = None,
 ) -> dict[str, ComponentsMaskInfo]:
+    """Calculate stochastic component mask info for SPD forward passes.
+
+    Args:
+        causal_importances: CI values per layer with shape [..., C]
+        component_mask_sampling: Sampling strategy for component masks
+        weight_deltas: Delta weights per layer (if using delta component)
+        router: Router for determining which layers to mask
+        is_target: Boolean mask indicating target samples. For targeted decomposition:
+            - Target samples (True): delta mask is stochastic (standard SPD ablation)
+            - Non-target samples (False): delta mask is always 1.0 (delta fully active)
+            If None, all samples use stochastic delta masks (standard SPD behavior).
+    """
     ci_sample = next(iter(causal_importances.values()))
     leading_dims = ci_sample.shape[:-1]
     device = ci_sample.device
@@ -31,10 +44,12 @@ def calc_stochastic_component_mask_info(
     if weight_deltas is not None:
         weight_deltas_and_masks = {}
         for layer in causal_importances:
-            weight_deltas_and_masks[layer] = (
-                weight_deltas[layer],
-                torch.rand(leading_dims, device=device, dtype=dtype),
-            )
+            delta_mask = torch.rand(leading_dims, device=device, dtype=dtype)
+
+            if is_target is not None: # set delta_mask to one on nontarget samples
+                delta_mask = torch.where(is_target, delta_mask, torch.ones_like(delta_mask))
+
+            weight_deltas_and_masks[layer] = (weight_deltas[layer], delta_mask)
 
     routing_masks = router.get_masks(
         module_names=list(causal_importances.keys()),

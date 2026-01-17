@@ -485,3 +485,101 @@ def plot_ci_values_histograms(
     plt.close(fig)
 
     return fig_img
+
+
+def plot_active_subcomponent_weights(
+    feature_data: dict[int, tuple[list[int], list[Tensor]]],
+    module_name: str,
+    ci_threshold: float,
+    input_activation: float,
+) -> Image.Image:
+    """Plot weight matrices (V @ U) for subcomponents active on each feature.
+
+    Args:
+        feature_data: Dict mapping feature_idx to (active_component_indices, weight_matrices).
+        module_name: Name of the module for the title.
+        ci_threshold: CI threshold used to determine active components.
+        input_activation: Input activation value used for the feature.
+
+    Returns:
+        PIL Image of the figure.
+    """
+    # Count total number of subplots needed
+    total_matrices = sum(len(indices) for indices, _ in feature_data.values())
+
+    if total_matrices == 0:
+        # No active components found
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(
+            0.5,
+            0.5,
+            f"No active components found\n(threshold={ci_threshold})",
+            ha="center",
+            va="center",
+            fontsize=12,
+        )
+        ax.set_title(f"Active Subcomponents: {module_name}")
+        ax.axis("off")
+        fig_img = _render_figure(fig)
+        plt.close(fig)
+        return fig_img
+
+    # Create grid layout: one row per feature, columns for each active component
+    n_features = len(feature_data)
+    max_components = max(len(indices) for indices, _ in feature_data.values())
+
+    fig, axs = plt.subplots(
+        n_features,
+        max_components,
+        figsize=(3 * max_components, 3 * n_features),
+        squeeze=False,
+    )
+
+    # Find global min/max for consistent colorbar
+    all_weights = []
+    for _, weight_matrices in feature_data.values():
+        for W in weight_matrices:
+            all_weights.append(W.numpy())
+    if all_weights:
+        vmin = min(w.min() for w in all_weights)
+        vmax = max(w.max() for w in all_weights)
+        # Make symmetric around 0
+        vabs = max(abs(vmin), abs(vmax))
+        vmin, vmax = -vabs, vabs
+    else:
+        vmin, vmax = -1, 1
+
+    images = []
+    for row_idx, (feature_idx, (active_indices, weight_matrices)) in enumerate(
+        sorted(feature_data.items())
+    ):
+        for col_idx in range(max_components):
+            ax = axs[row_idx, col_idx]
+
+            if col_idx < len(active_indices):
+                comp_idx = active_indices[col_idx]
+                weight_mat = weight_matrices[col_idx].numpy()
+
+                im = ax.imshow(weight_mat, aspect="auto", cmap="coolwarm", vmin=vmin, vmax=vmax)
+                ax.set_title(f"Feature {feature_idx}, Comp {comp_idx}")
+                ax.set_xlabel("d_out")
+                ax.set_ylabel("d_in")
+                images.append(im)
+            else:
+                ax.axis("off")
+
+    # Add colorbar
+    if images:
+        fig.colorbar(images[0], ax=axs, shrink=0.6, label="Weight")
+
+    fig.suptitle(
+        f"Active Subcomponent Weights: {module_name}\n"
+        f"(input={input_activation}, CI threshold={ci_threshold})",
+        fontsize=12,
+    )
+    fig.tight_layout()
+
+    fig_img = _render_figure(fig)
+    plt.close(fig)
+
+    return fig_img
