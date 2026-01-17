@@ -60,6 +60,7 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "CI_L0": "CI_L0",
     "CIMeanPerComponent": "CIMeanPerComp",
     "ComponentActivationDensity": "CompActDens",
+    "FeatureComponentMatrix": "FeatCompMat",
     "IdentityCIError": "IdCIErr",
     "PermutedCIPlots": "PermCIPlots",
     "UVPlots": "UVPlots",

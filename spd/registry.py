@@ -46,6 +46,12 @@ EXPERIMENT_REGISTRY: dict[str, ExperimentConfig] = {
         expected_runtime=4,
         canonical_run="wandb:goodfire/spd/runs/2orsxfx4",
     ),
+    "tms_5-2-id-target-0": ExperimentConfig(
+        task_name="tms",
+        decomp_script=Path("spd/experiments/tms/tms_decomposition.py"),
+        config_path=Path("spd/experiments/tms/tms_5-2-id-target-0_config.yaml"),
+        expected_runtime=4,
+    ),
     "tms_40-10": ExperimentConfig(
         task_name="tms",
         decomp_script=Path("spd/experiments/tms/tms_decomposition.py"),
