@@ -178,12 +178,16 @@ def init_metric(
                 model=model, device=device, ci_alive_threshold=run_config.ci_alive_threshold
             )
         case FeatureComponentMatrixConfig():
+            target_features = cfg.target_features
+            if target_features is None:
+                task_target = getattr(run_config.task_config, "target_features", None)
+                target_features = task_target
             metric = FeatureComponentMatrix(
                 model=model,
                 device=device,
                 n_features=cfg.n_features,
                 ci_threshold=cfg.ci_threshold,
-                target_features=cfg.target_features,
+                target_features=target_features,
                 input_activation=cfg.input_activation,
             )
         case IdentityCIErrorConfig():
