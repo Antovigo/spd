@@ -52,9 +52,7 @@ class FeatureComponentMatrix(Metric):
         self._computed = False
         self._results: dict[str, dict[int, tuple[list[int], list[Tensor]]]] = {}
 
-    def _generate_single_feature_input(
-        self, feature_idx: int
-    ) -> Float[Tensor, "1 n_features"]:
+    def _generate_single_feature_input(self, feature_idx: int) -> Float[Tensor, "1 n_features"]:
         """Generate single input where only the specified feature is active."""
         batch = torch.zeros(1, self.n_features, device=self.device)
         batch[0, feature_idx] = self.input_activation

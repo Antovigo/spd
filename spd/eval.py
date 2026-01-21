@@ -19,8 +19,8 @@ from spd.configs import (
     CIMeanPerComponentConfig,
     ComponentActivationDensityConfig,
     Config,
-    FeatureComponentMatrixConfig,
     FaithfulnessLossConfig,
+    FeatureComponentMatrixConfig,
     IdentityCIErrorConfig,
     ImportanceMinimalityLossConfig,
     MetricConfigType,
@@ -30,6 +30,7 @@ from spd.configs import (
     PGDReconLayerwiseLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
+    ReferenceDecompositionSimilarityConfig,
     StochasticHiddenActsReconLossConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
@@ -57,6 +58,7 @@ from spd.metrics.pgd_masked_recon_layerwise_loss import PGDReconLayerwiseLoss
 from spd.metrics.pgd_masked_recon_loss import PGDReconLoss
 from spd.metrics.pgd_masked_recon_subset_loss import PGDReconSubsetLoss
 from spd.metrics.pgd_utils import CreateDataIter, calc_multibatch_pgd_masked_recon_loss
+from spd.metrics.reference_decomposition_similarity import ReferenceDecompositionSimilarity
 from spd.metrics.stochastic_hidden_acts_recon_loss import StochasticHiddenActsReconLoss
 from spd.metrics.stochastic_recon_layerwise_loss import StochasticReconLayerwiseLoss
 from spd.metrics.stochastic_recon_loss import StochasticReconLoss
@@ -187,6 +189,17 @@ def init_metric(
                 device=device,
                 n_features=cfg.n_features,
                 ci_threshold=cfg.ci_threshold,
+                target_features=target_features,
+                input_activation=cfg.input_activation,
+            )
+        case ReferenceDecompositionSimilarityConfig():
+            target_features = cfg.target_features
+            if target_features is None:
+                target_features = getattr(run_config.task_config, "target_features", None)
+            metric = ReferenceDecompositionSimilarity(
+                model=model,
+                device=device,
+                reference_model_path=cfg.reference_model_path,
                 target_features=target_features,
                 input_activation=cfg.input_activation,
             )

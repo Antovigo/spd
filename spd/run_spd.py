@@ -367,22 +367,18 @@ def optimize(
                         target_probs = torch.nn.functional.softmax(
                             target_model_output.output[is_target], dim=-1
                         )
-                        target_recon = (
-                            torch.nn.functional.kl_div(
-                                target_logprobs, target_probs, reduction="batchmean"
-                            ).item()
-                        )
+                        target_recon = torch.nn.functional.kl_div(
+                            target_logprobs, target_probs, reduction="batchmean"
+                        ).item()
                         nontarget_logprobs = torch.nn.functional.log_softmax(
                             unmasked_out[~is_target], dim=-1
                         )
                         nontarget_probs = torch.nn.functional.softmax(
                             target_model_output.output[~is_target], dim=-1
                         )
-                        nontarget_recon = (
-                            torch.nn.functional.kl_div(
-                                nontarget_logprobs, nontarget_probs, reduction="batchmean"
-                            ).item()
-                        )
+                        nontarget_recon = torch.nn.functional.kl_div(
+                            nontarget_logprobs, nontarget_probs, reduction="batchmean"
+                        ).item()
                     microbatch_log_data["train/loss/recon_target"] += (
                         target_recon / config.gradient_accumulation_steps
                     )

@@ -144,6 +144,7 @@ def compute_total_loss(
                     ci=ci.lower_leaky,
                     weight_deltas=weight_deltas if use_delta_component else None,
                     routing=cfg.routing,
+                    is_target=is_target,
                 )
             case PGDReconLossConfig():
                 loss = pgd_recon_loss(

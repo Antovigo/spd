@@ -358,6 +358,13 @@ class FeatureComponentMatrixConfig(BaseConfig):
     input_activation: float = 0.75
 
 
+class ReferenceDecompositionSimilarityConfig(BaseConfig):
+    classname: Literal["ReferenceDecompositionSimilarity"] = "ReferenceDecompositionSimilarity"
+    reference_model_path: str
+    target_features: list[int] | None = None
+    input_activation: float = 0.75
+
+
 ReconLossConfigType = (
     UnmaskedReconLossConfig
     | CIMaskedReconLossConfig
@@ -383,6 +390,7 @@ EvalOnlyMetricConfigType = (
     | FeatureComponentMatrixConfig
     | IdentityCIErrorConfig
     | PermutedCIPlotsConfig
+    | ReferenceDecompositionSimilarityConfig
     | UVPlotsConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig
@@ -408,6 +416,12 @@ class Config(BaseConfig):
     wandb_run_name_prefix: str = Field(
         default="",
         description="Prefix prepended to an auto-generated WandB run name",
+    )
+
+    # --- Output
+    out_dir_name: str | None = Field(
+        default=None,
+        description="Name for the output directory. If None, a random ID is generated.",
     )
 
     # --- General ---

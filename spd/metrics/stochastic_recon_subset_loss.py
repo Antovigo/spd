@@ -1,7 +1,7 @@
 from typing import Any, ClassVar, Literal, override
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from torch.distributed import ReduceOp
 
@@ -24,6 +24,7 @@ def _stochastic_recon_subset_loss_update(
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     router: Router,
+    is_target: Bool[Tensor, "..."] | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     assert ci, "Empty ci"
     device = get_obj_device(ci)
@@ -36,6 +37,7 @@ def _stochastic_recon_subset_loss_update(
             component_mask_sampling=sampling,
             weight_deltas=weight_deltas,
             router=router,
+            is_target=is_target,
         )
         for _ in range(n_mask_samples)
     ]
@@ -66,6 +68,7 @@ def stochastic_recon_subset_loss(
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     routing: SubsetRoutingType,
+    is_target: Bool[Tensor, "..."] | None = None,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _stochastic_recon_subset_loss_update(
         model=model,
@@ -77,6 +80,7 @@ def stochastic_recon_subset_loss(
         ci=ci,
         weight_deltas=weight_deltas,
         router=get_subset_router(routing, batch.device),
+        is_target=is_target,
     )
     return _stochastic_recon_subset_loss_compute(sum_loss, n_examples)
 

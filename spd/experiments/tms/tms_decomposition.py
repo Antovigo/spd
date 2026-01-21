@@ -47,7 +47,10 @@ def main(
     set_seed(config.seed)
 
     out_dir, run_id, tags = setup_decomposition_run(
-        experiment_tag="tms", evals_id=evals_id, sweep_id=sweep_id
+        experiment_tag="tms",
+        evals_id=evals_id,
+        sweep_id=sweep_id,
+        out_dir_name=config.out_dir_name,
     )
     if config.wandb_project:
         init_wandb(
@@ -143,7 +146,7 @@ def main(
 
     tied_weights = None
     # if target_model.config.tied_weights:
-        # tied_weights = [("linear1", "linear2")]
+    # tied_weights = [("linear1", "linear2")]
 
     optimize(
         target_model=target_model,

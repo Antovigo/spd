@@ -27,6 +27,9 @@ from .pgd_masked_recon_loss import PGDReconLoss as PGDReconLoss
 from .pgd_masked_recon_loss import pgd_recon_loss as pgd_recon_loss
 from .pgd_masked_recon_subset_loss import PGDReconSubsetLoss as PGDReconSubsetLoss
 from .pgd_masked_recon_subset_loss import pgd_recon_subset_loss as pgd_recon_subset_loss
+from .reference_decomposition_similarity import (
+    ReferenceDecompositionSimilarity as ReferenceDecompositionSimilarity,
+)
 from .stochastic_hidden_acts_recon_loss import (
     StochasticHiddenActsReconLoss as StochasticHiddenActsReconLoss,
 )

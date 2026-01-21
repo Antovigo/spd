@@ -525,15 +525,25 @@ def plot_active_subcomponent_weights(
         return fig_img
 
     # Create grid layout: one row per feature, columns for each active component
+    # Use gridspec to reserve space for colorbar on left
     n_features = len(feature_data)
     max_components = max(len(indices) for indices, _ in feature_data.values())
 
-    fig, axs = plt.subplots(
+    # Extra width for colorbar column on left
+    fig = plt.figure(figsize=(3 * max_components + 1, 3 * n_features))
+    gs = fig.add_gridspec(
         n_features,
-        max_components,
-        figsize=(3 * max_components, 3 * n_features),
-        squeeze=False,
+        max_components + 1,
+        width_ratios=[0.15] + [1] * max_components,
+        wspace=0.3,
     )
+
+    # Create axes for plots (skip first column which is for colorbar)
+    axs = [
+        [fig.add_subplot(gs[row, col + 1]) for col in range(max_components)]
+        for row in range(n_features)
+    ]
+    axs = np.array(axs)
 
     # Find global min/max for consistent colorbar
     all_weights = []
@@ -568,16 +578,17 @@ def plot_active_subcomponent_weights(
             else:
                 ax.axis("off")
 
-    # Add colorbar
+    # Add colorbar in the reserved left column (spans all rows)
     if images:
-        fig.colorbar(images[0], ax=axs, shrink=0.6, label="Weight")
+        cbar_ax = fig.add_subplot(gs[:, 0])
+        fig.colorbar(images[0], cax=cbar_ax, label="Weight")
 
     fig.suptitle(
         f"Active Subcomponent Weights: {module_name}\n"
         f"(input={input_activation}, CI threshold={ci_threshold})",
         fontsize=12,
     )
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
 
     fig_img = _render_figure(fig)
     plt.close(fig)

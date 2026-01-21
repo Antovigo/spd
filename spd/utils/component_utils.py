@@ -46,7 +46,7 @@ def calc_stochastic_component_mask_info(
         for layer in causal_importances:
             delta_mask = torch.rand(leading_dims, device=device, dtype=dtype)
 
-            if is_target is not None: # set delta_mask to one on nontarget samples
+            if is_target is not None:  # set delta_mask to one on nontarget samples
                 delta_mask = torch.where(is_target, delta_mask, torch.ones_like(delta_mask))
 
             weight_deltas_and_masks[layer] = (weight_deltas[layer], delta_mask)

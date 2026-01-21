@@ -54,7 +54,10 @@ def main(
 
     if is_main_process():
         out_dir, run_id, tags = setup_decomposition_run(
-            experiment_tag="lm", evals_id=evals_id, sweep_id=sweep_id
+            experiment_tag="lm",
+            evals_id=evals_id,
+            sweep_id=sweep_id,
+            out_dir_name=config.out_dir_name,
         )
         if config.wandb_project:
             init_wandb(

@@ -7,7 +7,7 @@ wandb_run_name_prefix: ""
 # --- General ---
 seed: 0
 n_mask_samples: 1
-ci_fn_type: "mlp"
+ci_fn_type: "shared_mlp"
 ci_fn_hidden_dims: [16]
 sigmoid_type: "leaky_hard"
 module_info:
@@ -47,9 +47,9 @@ faithfulness_warmup_weight_decay: 0.1
 
 # --- Logging & Saving ---
 train_log_freq: 100
-eval_freq: 1000
+eval_freq: 100
 n_eval_steps: 100
-slow_eval_freq: 5_000
+slow_eval_freq: 1000
 save_freq: null
 ci_alive_threshold: 0.1
 n_examples_until_dead: 4_096_000
@@ -73,10 +73,15 @@ eval_metric_configs:
     groups: null
   - classname: "CIMeanPerComponent"
   - classname: "StochasticHiddenActsReconLoss"
+  - classname: "FeatureComponentMatrix"
+    n_features: 5
+    ci_threshold: 0.1
+    input_activation: 0.75
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.tms.models.TMSModel"
-pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/gfgchmxj" # 1 hidden w/fixed identity
+#pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/gfgchmxj" # 1 hidden w/fixed identity
+pretrained_model_path: "/home/antoine/Documents/MATS/TMS_models/TMS_5_2/tms.pth"
 
 # --- Task Specific ---
 task_config:

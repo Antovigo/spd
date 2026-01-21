@@ -1,11 +1,11 @@
-# TMS 40-10 w/ fixed identity
+# TMS 40-10 w/ fixed identity, targeted decomposition
 # --- WandB ---
 wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-out_dir_name: "TMS_40-10/Full"
+out_dir_name: "TMS_40-10/Target 5"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -31,6 +31,8 @@ output_loss_type: "mse"
 
 # --- Training ---
 batch_size: 4096
+target_batch_size: 2048
+nontarget_batch_size: 2048
 eval_batch_size: 4096
 steps: 20_000
 lr_schedule:
@@ -40,7 +42,7 @@ lr_schedule:
   final_val_frac: 0.0
 
 # --- Faithfulness Warmup ---
-faithfulness_warmup_steps: 200
+faithfulness_warmup_steps: 0
 faithfulness_warmup_lr: 0.01
 faithfulness_warmup_weight_decay: 0.1
 
@@ -48,7 +50,7 @@ faithfulness_warmup_weight_decay: 0.1
 train_log_freq: 100
 eval_freq: 1000
 n_eval_steps: 100
-slow_eval_freq: 5_000
+slow_eval_freq: 1000
 save_freq: null
 ci_alive_threshold: 0.1
 n_examples_until_dead: 4_096_000
@@ -86,3 +88,4 @@ task_config:
   task_name: tms
   feature_probability: 0.05
   data_generation_type: "at_least_zero_active"
+  target_features: [5]

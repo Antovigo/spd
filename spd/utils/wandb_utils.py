@@ -63,6 +63,7 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "FeatureComponentMatrix": "FeatCompMat",
     "IdentityCIError": "IdCIErr",
     "PermutedCIPlots": "PermCIPlots",
+    "ReferenceDecompositionSimilarity": "RefDecompSim",
     "UVPlots": "UVPlots",
     "StochasticReconSubsetCEAndKL": "StochReconSubCEKL",
     "PGDMultiBatchReconLoss": "PGDMultiBatchRecon",

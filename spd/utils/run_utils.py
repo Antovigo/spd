@@ -325,16 +325,17 @@ RUN_TYPE_ABBREVIATIONS: Final[dict[RunType, str]] = {
 
 
 class ExecutionStamp(NamedTuple):
-    run_id: str
+    run_id: str  # Used for WandB (no slashes allowed)
+    out_dir_name: str  # Used for local output directory (can have slashes)
     snapshot_branch: str
     commit_hash: str
     run_type: RunType
 
     @staticmethod
-    def _generate_run_id(run_type: RunType) -> str:
-        """Generate a unique run identifier,
+    def _generate_random_id(run_type: RunType) -> str:
+        """Generate a unique run identifier.
 
-        Format: `{type_abbr}-{random_hex}`
+        Format: `{type_abbr}-{random_hex}`.
         """
         type_abbr: str = RUN_TYPE_ABBREVIATIONS[run_type]
         random_hex: str = secrets.token_hex(4)
@@ -345,9 +346,24 @@ class ExecutionStamp(NamedTuple):
         cls,
         run_type: RunType,
         create_snapshot: bool,
+        out_dir_name: str | None = None,
     ) -> "ExecutionStamp":
-        """Create an execution stamp, possibly including a git snapshot branch."""
-        run_id = ExecutionStamp._generate_run_id(run_type)
+        """Create an execution stamp, possibly including a git snapshot branch.
+
+        Args:
+            run_type: Type of run (spd, train, etc.)
+            create_snapshot: Whether to create a git snapshot branch
+            out_dir_name: Custom output directory name. Can include slashes for subfolders
+                (e.g., "experiment/run1"). If None, uses the generated run_id.
+        """
+        if out_dir_name is not None:
+            # Use the last component of the path as run_id (for WandB compatibility)
+            run_id = Path(out_dir_name).name
+            effective_out_dir_name = out_dir_name
+        else:
+            run_id = ExecutionStamp._generate_random_id(run_type)
+            effective_out_dir_name = run_id
+
         snapshot_branch: str
         commit_hash: str
 
@@ -367,6 +383,7 @@ class ExecutionStamp(NamedTuple):
 
         return ExecutionStamp(
             run_id=run_id,
+            out_dir_name=effective_out_dir_name,
             snapshot_branch=snapshot_branch,
             commit_hash=commit_hash,
             run_type=run_type,
@@ -375,7 +392,7 @@ class ExecutionStamp(NamedTuple):
     @property
     def out_dir(self) -> Path:
         """Get the output directory for this execution stamp."""
-        run_dir = SPD_OUT_DIR / self.run_type / self.run_id
+        run_dir = SPD_OUT_DIR / self.run_type / self.out_dir_name
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
@@ -384,6 +401,7 @@ def setup_decomposition_run(
     experiment_tag: str,
     evals_id: str | None = None,
     sweep_id: str | None = None,
+    out_dir_name: str | None = None,
 ) -> tuple[Path, str, list[str]]:
     """Set up run infrastructure for a decomposition experiment.
 
@@ -394,11 +412,14 @@ def setup_decomposition_run(
         experiment_tag: Tag for the experiment type (e.g., "lm", "tms", "resid_mlp")
         evals_id: Optional evaluation identifier to add as W&B tag
         sweep_id: Optional sweep identifier to add as W&B tag
+        out_dir_name: Optional name for output directory. If None, a random ID is generated.
 
     Returns:
         Tuple of (output directory, run_id, tags for W&B).
     """
-    execution_stamp = ExecutionStamp.create(run_type="spd", create_snapshot=False)
+    execution_stamp = ExecutionStamp.create(
+        run_type="spd", create_snapshot=False, out_dir_name=out_dir_name
+    )
     out_dir = execution_stamp.out_dir
     logger.info(f"Run ID: {execution_stamp.run_id}")
     logger.info(f"Output directory: {out_dir}")
