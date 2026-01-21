@@ -362,6 +362,7 @@ class ReferenceDecompositionSimilarityConfig(BaseConfig):
     classname: Literal["ReferenceDecompositionSimilarity"] = "ReferenceDecompositionSimilarity"
     reference_model_path: str
     target_features: list[int] | None = None
+    n_features: int | None = None
     input_activation: float = 0.75
 
 

@@ -5,6 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
+out_dir_name: "ResidMLP2/Reference"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: shared_mlp

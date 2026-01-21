@@ -201,6 +201,7 @@ def init_metric(
                 device=device,
                 reference_model_path=cfg.reference_model_path,
                 target_features=target_features,
+                n_features=cfg.n_features,
                 input_activation=cfg.input_activation,
             )
         case IdentityCIErrorConfig():

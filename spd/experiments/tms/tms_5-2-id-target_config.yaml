@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-out_dir_name: "Target 0-1-2"
+out_dir_name: "Target 2 only"
 seed: 2
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -33,8 +33,8 @@ output_loss_type: mse
 
 # --- Training ---
 batch_size: 4096  # Used for eval and as fallback
-target_batch_size: 2048
-nontarget_batch_size: 2048
+#target_batch_size: 2048
+#nontarget_batch_size: 2048
 eval_batch_size: 4096
 steps: 5_000
 lr_schedule:
@@ -94,4 +94,4 @@ task_config:
   task_name: tms
   feature_probability: 0.05
   data_generation_type: "at_least_zero_active"
-  target_features: [0,1,2]  # Features to use as the target data
+  target_features: [2]  # Features to use as the target data

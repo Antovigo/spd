@@ -32,6 +32,7 @@ class ReferenceDecompositionSimilarity(Metric):
         device: str,
         reference_model_path: str,
         target_features: list[int] | None,
+        n_features: int | None = None,
         input_activation: float = 0.75,
     ) -> None:
         """Initialize the reference decomposition similarity metric.
@@ -41,6 +42,8 @@ class ReferenceDecompositionSimilarity(Metric):
             device: Device to run computations on.
             reference_model_path: Path to the reference model (wandb: or local path).
             target_features: Feature indices to evaluate. If None, uses all features.
+            n_features: Number of input features. If None, inferred from first component
+                (may be incorrect for models with varying layer input dimensions).
             input_activation: The input value to use for the active feature.
         """
         self.model = model
@@ -48,9 +51,13 @@ class ReferenceDecompositionSimilarity(Metric):
         self.reference_model_path = reference_model_path
         self.input_activation = input_activation
 
-        # Infer n_features from model's first component input dimension
-        first_module = list(model.components.keys())[0]
-        self.n_features = model.components[first_module].V.shape[0]
+        if n_features is not None:
+            self.n_features = n_features
+        else:
+            # Infer n_features from model's first component input dimension
+            # Warning: may be incorrect for models with varying layer input dimensions
+            first_module = list(model.components.keys())[0]
+            self.n_features = model.components[first_module].V.shape[0]
 
         # Fall back to all features if not specified
         self.target_features = (
