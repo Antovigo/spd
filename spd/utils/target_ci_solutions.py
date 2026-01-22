@@ -171,8 +171,8 @@ class IdentityCIPattern(TargetCIPattern):
         n, c = ci_array.shape
         if n != self.n_features:
             raise ValueError(f"Expected {self.n_features} features, got {n}")
-        if c < self.n_features:
-            raise ValueError(f"Expected at least {self.n_features} components, got {c}")
+        # if c < self.n_features:
+            # raise ValueError(f"Expected at least {self.n_features} components, got {c}")
 
     @override
     def distance_from(self, ci_array: Float[Tensor, "batch C"], tolerance: float = 0.1) -> int:

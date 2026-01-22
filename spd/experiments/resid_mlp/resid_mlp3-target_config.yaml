@@ -9,19 +9,19 @@ out_dir_name: "ResidMLP3/Target"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
-ci_fn_hidden_dims: [128]
+ci_fn_hidden_dims: [50]
 sigmoid_type: "leaky_hard"
 module_info:
   - module_pattern: "layers.*.mlp_in"
-    C: 500
+    C: 50
   - module_pattern: "layers.*.mlp_out"
-    C: 500
+    C: 50
 use_delta_component: true
 
 # --- Loss config ---
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 1e-5
+    coeff: 3e-5
     pnorm: 1.0
     beta: 0
   - classname: "StochasticReconSubsetLoss"
@@ -33,7 +33,7 @@ batch_size: 2048
 target_batch_size: 1024
 nontarget_batch_size: 1024
 eval_batch_size: 2048
-steps: 50_000
+steps: 20_000
 lr_schedule:
   start_val: 1e-3
   fn_type: cosine
@@ -82,4 +82,4 @@ task_config:
   task_name: resid_mlp
   feature_probability: 0.01
   data_generation_type: "at_least_zero_active"
-  target_features: [0]  # Features to use as the target data
+  target_features: [15,20,25]  # Features to use as the target data

@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-out_dir_name: "TMS_40-10/Target 5 (0 nontarget data)"
+out_dir_name: "TMS_40-10/Target 5 (zero nontarget data)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -31,8 +31,8 @@ output_loss_type: "mse"
 
 # --- Training ---
 batch_size: 4096
-target_batch_size: 2048
-nontarget_batch_size: 1
+#target_batch_size: 2048
+#nontarget_batch_size: 2048
 eval_batch_size: 4096
 steps: 10_000
 lr_schedule:

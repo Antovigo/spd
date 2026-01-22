@@ -117,6 +117,8 @@ def main(
     nontarget_loader = None
 
     if use_targeted_decomposition:
+        assert config.target_batch_size is not None
+        assert config.nontarget_batch_size is not None
 
         target_dataset = SparseFeatureDataset(
             n_features=n_features,

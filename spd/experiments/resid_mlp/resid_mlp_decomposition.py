@@ -94,6 +94,17 @@ def main(
     else:
         nontarget_features = None
 
+    # Determine if we're in targeted decomposition mode (with separate loaders)
+    # or just filtering to a subset of features with standard SPD
+    use_targeted_decomposition = (
+        target_features is not None
+        and config.target_batch_size is not None
+        and config.nontarget_batch_size is not None
+    )
+
+    # For standard SPD (or subset SPD), optionally filter to active_features
+    active_features_for_main = target_features if not use_targeted_decomposition else None
+
     dataset = ResidMLPDataset(
         n_features=n_features,
         feature_probability=task_config.feature_probability,
@@ -105,18 +116,15 @@ def main(
         label_coeffs=None,
         data_generation_type=task_config.data_generation_type,
         synced_inputs=synced_inputs,
+        active_features=active_features_for_main,
     )
 
     target_loader = None
     nontarget_loader = None
 
-    if target_features is not None:
-        assert config.target_batch_size is not None, (
-            "target_batch_size must be set when target_features is set"
-        )
-        assert config.nontarget_batch_size is not None, (
-            "nontarget_batch_size must be set when target_features is set"
-        )
+    if use_targeted_decomposition:
+        assert config.target_batch_size is not None
+        assert config.nontarget_batch_size is not None
 
         target_dataset = ResidMLPDataset(
             n_features=n_features,

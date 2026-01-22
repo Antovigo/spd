@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-out_dir_name: "Target 2 only"
+out_dir_name: "Target 2 (zero nontarget data)"
 seed: 2
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
