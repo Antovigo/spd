@@ -384,6 +384,7 @@ def setup_decomposition_run(
     experiment_tag: str,
     evals_id: str | None = None,
     sweep_id: str | None = None,
+    output_dir_name: str | None = None,
 ) -> tuple[Path, str, list[str]]:
     """Set up run infrastructure for a decomposition experiment.
 
@@ -394,12 +395,20 @@ def setup_decomposition_run(
         experiment_tag: Tag for the experiment type (e.g., "lm", "tms", "resid_mlp")
         evals_id: Optional evaluation identifier to add as W&B tag
         sweep_id: Optional sweep identifier to add as W&B tag
+        output_dir_name: Optional custom directory name. If None, uses auto-generated run_id.
+            Supports slashes to create nested directories.
 
     Returns:
         Tuple of (output directory, run_id, tags for W&B).
     """
     execution_stamp = ExecutionStamp.create(run_type="spd", create_snapshot=False)
-    out_dir = execution_stamp.out_dir
+
+    if output_dir_name is not None:
+        out_dir = SPD_OUT_DIR / execution_stamp.run_type / output_dir_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir = execution_stamp.out_dir
+
     logger.info(f"Run ID: {execution_stamp.run_id}")
     logger.info(f"Output directory: {out_dir}")
 
