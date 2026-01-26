@@ -44,7 +44,10 @@ def main(
     set_seed(config.seed)
 
     out_dir, run_id, tags = setup_decomposition_run(
-        experiment_tag="resid_mlp", evals_id=evals_id, sweep_id=sweep_id
+        experiment_tag="resid_mlp",
+        evals_id=evals_id,
+        sweep_id=sweep_id,
+        output_dir_name=config.output_dir_name,
     )
     if config.wandb_project:
         init_wandb(

@@ -391,6 +391,13 @@ class Config(BaseConfig):
         description="Prefix prepended to an auto-generated WandB run name",
     )
 
+    # --- Output ---
+    output_dir_name: str | None = Field(
+        default=None,
+        description="Custom name for the output directory. If None, uses auto-generated run_id. "
+        "Supports slashes to create nested directories (e.g., 'experiment/run1').",
+    )
+
     # --- General ---
     seed: int = Field(default=0, description="Random seed for reproducibility")
     n_mask_samples: PositiveInt = Field(
