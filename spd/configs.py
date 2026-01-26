@@ -77,6 +77,10 @@ class TMSTaskConfig(BaseConfig):
         default="at_least_zero_active",
         description="Strategy for generating synthetic data for TMS training",
     )
+    active_indices: list[NonNegativeInt] | None = Field(
+        default=None,
+        description="If set, only these feature indices can be active. Others are always zero.",
+    )
 
 
 class ResidMLPTaskConfig(BaseConfig):
@@ -582,6 +586,20 @@ class Config(BaseConfig):
         discriminator="task_name",
         description="Nested task-specific configuration selected by the `task_name` discriminator",
     )
+    nontarget_task_config: TaskConfig | None = Field(
+        default=None,
+        discriminator="task_name",
+        description="Task config for nontarget data in targeted mode. If None, targeted mode is disabled.",
+    )
+    nontarget_batch_size: PositiveInt | None = Field(
+        default=None,
+        description="Batch size for nontarget data. Defaults to batch_size if not specified.",
+    )
+
+    @property
+    def nontarget_microbatch_size(self) -> PositiveInt:
+        nontarget_bs = self.nontarget_batch_size or self.batch_size
+        return nontarget_bs // self.gradient_accumulation_steps
 
     DEPRECATED_CONFIG_KEYS: ClassVar[list[str]] = [
         "image_on_first_step",
@@ -699,6 +717,15 @@ class Config(BaseConfig):
             assert self.gradient_accumulation_steps == 1, (
                 "gradient_accumulation_steps must be 1 if we are using PGD losses with "
                 "mask_scope='shared_across_batch'"
+            )
+
+        if self.nontarget_task_config is not None:
+            assert self.nontarget_task_config.task_name == self.task_config.task_name, (
+                "nontarget_task_config must have same task_name as task_config"
+            )
+            nontarget_bs = self.nontarget_batch_size or self.batch_size
+            assert nontarget_bs % self.gradient_accumulation_steps == 0, (
+                "nontarget_batch_size must be divisible by gradient_accumulation_steps"
             )
 
         return self

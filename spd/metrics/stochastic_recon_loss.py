@@ -23,6 +23,7 @@ def _stochastic_recon_loss_update(
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+    force_delta_mask_one: bool = False,
 ) -> tuple[Float[Tensor, ""], int]:
     assert ci, "Empty ci"
     device = get_obj_device(ci)
@@ -35,6 +36,7 @@ def _stochastic_recon_loss_update(
             component_mask_sampling=sampling,
             weight_deltas=weight_deltas,
             router=AllLayersRouter(),
+            force_delta_mask_one=force_delta_mask_one,
         )
         for _ in range(n_mask_samples)
     ]
@@ -62,6 +64,7 @@ def stochastic_recon_loss(
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+    force_delta_mask_one: bool = False,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _stochastic_recon_loss_update(
         model,
@@ -72,6 +75,7 @@ def stochastic_recon_loss(
         target_out,
         ci,
         weight_deltas,
+        force_delta_mask_one,
     )
     return _stochastic_recon_loss_compute(sum_loss, n_examples)
 

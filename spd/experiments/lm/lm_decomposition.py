@@ -171,6 +171,41 @@ def main(
         dist_state=dist_state,
     )
 
+    nontarget_train_loader = None
+    if config.nontarget_task_config is not None:
+        assert isinstance(config.nontarget_task_config, LMTaskConfig)
+        nontarget_data_config = DatasetConfig(
+            name=config.nontarget_task_config.dataset_name,
+            hf_tokenizer_path=config.tokenizer_name,
+            split=config.nontarget_task_config.train_data_split,
+            n_ctx=config.nontarget_task_config.max_seq_len,
+            is_tokenized=config.nontarget_task_config.is_tokenized,
+            streaming=config.nontarget_task_config.streaming,
+            column_name=config.nontarget_task_config.column_name,
+            shuffle_each_epoch=config.nontarget_task_config.shuffle_each_epoch,
+            seed=None,
+        )
+
+        match dist_state:
+            case DistributedState(world_size=world_size):
+                assert (
+                    config.nontarget_microbatch_size % world_size == 0
+                    and config.nontarget_microbatch_size > 0
+                ), (
+                    f"Nontarget microbatch size {config.nontarget_microbatch_size} is not divisible by world size {world_size}."
+                )
+                nontarget_rank_microbatch_size = config.nontarget_microbatch_size // world_size
+            case None:
+                nontarget_rank_microbatch_size = config.nontarget_microbatch_size
+
+        nontarget_train_loader, _ = create_data_loader(
+            dataset_config=nontarget_data_config,
+            batch_size=nontarget_rank_microbatch_size,
+            buffer_size=config.nontarget_task_config.buffer_size,
+            global_seed=config.seed + 2,
+            dist_state=dist_state,
+        )
+
     if is_main_process():
         logger.info("Starting optimization...")
 
@@ -183,6 +218,7 @@ def main(
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
         ln_stds=ln_stds,
+        nontarget_train_loader=nontarget_train_loader,
     )
 
     if is_main_process():

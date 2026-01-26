@@ -86,6 +86,7 @@ def main(
         data_generation_type=task_config.data_generation_type,
         value_range=(0.0, 1.0),
         synced_inputs=synced_inputs,
+        active_indices=task_config.active_indices,
     )
     train_loader = DatasetGeneratedDataLoader(
         dataset, batch_size=config.microbatch_size, shuffle=False
@@ -94,9 +95,25 @@ def main(
         dataset, batch_size=config.eval_batch_size, shuffle=False
     )
 
+    nontarget_train_loader = None
+    if config.nontarget_task_config is not None:
+        assert isinstance(config.nontarget_task_config, TMSTaskConfig)
+        nontarget_dataset = SparseFeatureDataset(
+            n_features=target_model.config.n_features,
+            feature_probability=config.nontarget_task_config.feature_probability,
+            device=device,
+            data_generation_type=config.nontarget_task_config.data_generation_type,
+            value_range=(0.0, 1.0),
+            synced_inputs=synced_inputs,
+            active_indices=config.nontarget_task_config.active_indices,
+        )
+        nontarget_train_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_microbatch_size, shuffle=False
+        )
+
     tied_weights = None
-    if target_model.config.tied_weights:
-        tied_weights = [("linear1", "linear2")]
+    # if target_model.config.tied_weights:
+        # tied_weights = [("linear1", "linear2")]
 
     optimize(
         target_model=target_model,
@@ -107,6 +124,7 @@ def main(
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
         tied_weights=tied_weights,
+        nontarget_train_loader=nontarget_train_loader,
     )
 
     if config.wandb_project:

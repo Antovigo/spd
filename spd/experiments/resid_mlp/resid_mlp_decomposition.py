@@ -100,6 +100,25 @@ def main(
         dataset, batch_size=config.eval_batch_size, shuffle=False
     )
 
+    nontarget_train_loader = None
+    if config.nontarget_task_config is not None:
+        assert isinstance(config.nontarget_task_config, ResidMLPTaskConfig)
+        nontarget_dataset = ResidMLPDataset(
+            n_features=target_model.config.n_features,
+            feature_probability=config.nontarget_task_config.feature_probability,
+            device=device,
+            calc_labels=False,
+            label_type=None,
+            act_fn_name=None,
+            label_fn_seed=None,
+            label_coeffs=None,
+            data_generation_type=config.nontarget_task_config.data_generation_type,
+            synced_inputs=synced_inputs,
+        )
+        nontarget_train_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_microbatch_size, shuffle=False
+        )
+
     # TODO: Below not needed when TMS supports config.n_eval_steps
     assert config.n_eval_steps is not None, "n_eval_steps must be set"
     optimize(
@@ -110,6 +129,7 @@ def main(
         eval_loader=eval_loader,
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
+        nontarget_train_loader=nontarget_train_loader,
     )
 
     if config.wandb_project:

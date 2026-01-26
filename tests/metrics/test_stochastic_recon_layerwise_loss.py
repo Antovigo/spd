@@ -60,6 +60,7 @@ class TestStochasticReconLayerwiseLoss:
             component_mask_sampling: SamplingType,  # pyright: ignore[reportUnusedParameter]
             router: Router,  # pyright: ignore[reportUnusedParameter]
             weight_deltas: dict[str, Tensor] | None,  # pyright: ignore[reportUnusedParameter]
+            force_delta_mask_one: bool = False,  # pyright: ignore[reportUnusedParameter]
         ) -> dict[str, ComponentsMaskInfo]:
             # Get the current call index (we'll cycle through sample_masks)
             idx = call_count[0] % len(sample_masks)

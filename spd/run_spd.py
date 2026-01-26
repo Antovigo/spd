@@ -123,11 +123,17 @@ def optimize(
     out_dir: Path | None,
     tied_weights: list[tuple[str, str]] | None = None,
     ln_stds: dict[str, float] | None = None,
+    nontarget_train_loader: DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | None = None,
 ) -> None:
     """Run the optimization loop for LM decomposition."""
 
     train_iterator = loop_dataloader(train_loader)
     eval_iterator = loop_dataloader(eval_loader)
+    nontarget_train_iterator = (
+        loop_dataloader(nontarget_train_loader) if nontarget_train_loader is not None else None
+    )
 
     def create_pgd_data_iter() -> (
         Iterator[Int[Tensor, "..."]] | Iterator[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
@@ -281,8 +287,12 @@ def optimize(
                 use_delta_component=config.use_delta_component,
                 n_mask_samples=config.n_mask_samples,
                 output_loss_type=config.output_loss_type,
+                force_delta_mask_one=False,
             )
-            microbatch_total_loss.div_(config.gradient_accumulation_steps).backward()
+            # If nontarget batch follows, retain graph so weight_deltas gradients can flow
+            microbatch_total_loss.div_(config.gradient_accumulation_steps).backward(
+                retain_graph=nontarget_train_iterator is not None
+            )
 
             for loss_name, loss_value in microbatch_loss_terms.items():
                 microbatch_log_data[f"train/{loss_name}"] += (
@@ -294,6 +304,47 @@ def optimize(
                 microbatch_log_data[f"train/l0/{layer_name}"] += (
                     l0_val / config.gradient_accumulation_steps
                 )
+
+            # ===== NONTARGET BATCH (if targeted mode enabled) =====
+            if nontarget_train_iterator is not None:
+                nontarget_batch = extract_batch_data(next(nontarget_train_iterator)).to(device)
+                nontarget_output: OutputWithCache = wrapped_model(
+                    nontarget_batch, cache_type="input"
+                )
+
+                nontarget_ci = component_model.calc_causal_importances(
+                    pre_weight_acts=nontarget_output.cache,
+                    detach_inputs=False,
+                    sampling=config.sampling,
+                )
+
+                nontarget_loss, nontarget_terms = compute_total_loss(
+                    loss_metric_configs=config.loss_metric_configs,
+                    model=component_model,
+                    batch=nontarget_batch,
+                    ci=nontarget_ci,
+                    target_out=nontarget_output.output,
+                    weight_deltas=weight_deltas,
+                    pre_weight_acts=nontarget_output.cache,
+                    current_frac_of_training=step / config.steps,
+                    sampling=config.sampling,
+                    use_delta_component=config.use_delta_component,
+                    n_mask_samples=config.n_mask_samples,
+                    output_loss_type=config.output_loss_type,
+                    force_delta_mask_one=True,
+                )
+                nontarget_loss.div_(config.gradient_accumulation_steps).backward()
+
+                for loss_name, loss_value in nontarget_terms.items():
+                    microbatch_log_data[f"train/nontarget/{loss_name}"] += (
+                        loss_value / config.gradient_accumulation_steps
+                    )
+
+                for layer_name, layer_ci in nontarget_ci.lower_leaky.items():
+                    l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
+                    microbatch_log_data[f"train/nontarget/l0/{layer_name}"] += (
+                        l0_val / config.gradient_accumulation_steps
+                    )
 
         # --- Train Logging --- #
         if step % config.train_log_freq == 0:

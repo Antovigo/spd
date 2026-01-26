@@ -22,6 +22,7 @@ def pgd_recon_loss(
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     pgd_config: PGDConfig,
+    force_delta_mask_one: bool = False,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = pgd_masked_recon_loss_update(
         model=model,
@@ -32,6 +33,7 @@ def pgd_recon_loss(
         output_loss_type=output_loss_type,
         router=AllLayersRouter(),
         pgd_config=pgd_config,
+        force_delta_mask_one=force_delta_mask_one,
     )
     return sum_loss / n_examples
 

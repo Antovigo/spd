@@ -143,6 +143,7 @@ class SparseFeatureDataset(
         data_generation_type: DataGenerationType = "at_least_zero_active",
         value_range: tuple[float, float] = (0.0, 1.0),
         synced_inputs: list[list[int]] | None = None,
+        active_indices: list[int] | None = None,
     ):
         self.n_features: int = n_features
         self.feature_probability: float = feature_probability
@@ -150,6 +151,11 @@ class SparseFeatureDataset(
         self.data_generation_type: DataGenerationType = data_generation_type
         self.value_range: tuple[float, float] = value_range
         self.synced_inputs: list[list[int]] | None = synced_inputs
+        self.active_indices: list[int] | None = active_indices
+        if active_indices is not None:
+            assert all(0 <= i < n_features for i in active_indices), (
+                f"active_indices must be in range [0, {n_features})"
+            )
 
     def __len__(self) -> int:
         return 2**31
@@ -207,19 +213,25 @@ class SparseFeatureDataset(
             batch_size: Number of samples in the batch
             n: Number of features to activate per sample
         """
-        if n > self.n_features:
+        # Determine which features can be activated
+        if self.active_indices is not None:
+            eligible_features = torch.tensor(self.active_indices, device=self.device)
+            n_eligible = len(self.active_indices)
+        else:
+            eligible_features = torch.arange(self.n_features, device=self.device)
+            n_eligible = self.n_features
+
+        if n > n_eligible:
             raise ValueError(
-                f"Cannot activate {n} features when only {self.n_features} features exist"
+                f"Cannot activate {n} features when only {n_eligible} eligible features exist"
             )
 
         batch = torch.zeros(batch_size, self.n_features, device=self.device)
 
-        # Create indices for all features
-        feature_indices = torch.arange(self.n_features, device=self.device)
-        # Expand to batch size
-        feature_indices = feature_indices.expand(batch_size, self.n_features)
+        # Create indices for eligible features and expand to batch size
+        feature_indices = eligible_features.expand(batch_size, n_eligible)
 
-        # For each instance in the batch, randomly permute the features
+        # For each instance in the batch, randomly permute the eligible features
         perm = torch.rand_like(feature_indices.float()).argsort(dim=-1)
         permuted_features = feature_indices.gather(dim=-1, index=perm)
 
@@ -249,6 +261,13 @@ class SparseFeatureDataset(
             + min_val
         )
         mask = torch.rand_like(batch) < self.feature_probability
+
+        # If active_indices is set, zero out all other features
+        if self.active_indices is not None:
+            inactive_mask = torch.ones(self.n_features, device=self.device, dtype=torch.bool)
+            inactive_mask[self.active_indices] = False
+            mask[:, inactive_mask] = False
+
         return batch * mask
 
     def _generate_multi_feature_batch_no_zero_samples(
