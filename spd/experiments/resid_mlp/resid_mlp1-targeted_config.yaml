@@ -1,29 +1,29 @@
-# TMS 5-2 w/ fixed identity - Targeted Decomposition
+# ResidualMLP 1 layer - Targeted Decomposition
 # --- WandB ---
 wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "TMS 5-2-id/Target 2"
+output_dir_name: "resid_mlp1/Target 15-20-25"
 seed: 0
 n_mask_samples: 1
-ci_fn_type: "mlp"
-ci_fn_hidden_dims: [16]
+ci_fn_type: "shared_mlp"
+ci_fn_hidden_dims: [50]
 sigmoid_type: "leaky_hard"
 module_info:
-  - module_pattern: "linear1"
-    C: 20
-  - module_pattern: "linear2"
-    C: 20
-  - module_pattern: "hidden_layers.0"
-    C: 20
+  - module_pattern: "layers.*.mlp_in"
+    C: 60
+  - module_pattern: "layers.*.mlp_out"
+    C: 60
+identity_module_info: null
 use_delta_component: true
 
+# --- Loss config ---
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 3e-3
-    pnorm: 1.0
+    coeff: 1e-5
+    pnorm: 2.0
     beta: 0
   - classname: "StochasticReconLayerwiseLoss"
     coeff: 1.0
@@ -32,14 +32,13 @@ loss_metric_configs:
 output_loss_type: mse
 
 # --- Training ---
-batch_size: 4096
-eval_batch_size: 4096
-steps: 3_000
+batch_size: 1024
+eval_batch_size: 1024
+steps: 5_000
 lr_schedule:
-  start_val: 1e-3
-  fn_type: cosine
+  start_val: 2e-3
+  fn_type: constant
   warmup_pct: 0.0
-  final_val_frac: 0.0
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 0
@@ -50,44 +49,43 @@ faithfulness_warmup_weight_decay: 0.1
 train_log_freq: 100
 eval_freq: 500
 n_eval_steps: 100
-slow_eval_freq: 500
+slow_eval_freq: 1_000
+slow_eval_on_first_step: true
 save_freq: null
 ci_alive_threshold: 0.1
-n_examples_until_dead: 4_096_000
+n_examples_until_dead: 204_800
 eval_metric_configs:
   - classname: "CIHistograms"
     n_batches_accum: 5
   - classname: "ComponentActivationDensity"
   - classname: "PermutedCIPlots"
-    identity_patterns: ["linear1", "linear2"]
-    dense_patterns: ["hidden_layers.0"]
-  - classname: "IdentityCIError"
-    identity_ci:
-      - layer_pattern: "linear1"
-        n_features: 5
-      - layer_pattern: "linear2"
-        n_features: 5
-    dense_ci:
-      - layer_pattern: "hidden_layers.0"
-        k: 2
+    identity_patterns: ["layers.*.mlp_in"]
+    dense_patterns: ["layers.*.mlp_out"]
+  #- classname: "IdentityCIError"
+    #identity_ci:
+      #- layer_pattern: "layers.*.mlp_in"
+        #n_features: 100
+    #dense_ci:
+      #- layer_pattern: "layers.*.mlp_out"
+        #k: 50
   - classname: "CI_L0"
     groups: null
   - classname: "CIMeanPerComponent"
   - classname: "StochasticHiddenActsReconLoss"
 
 # --- Pretrained model info ---
-pretrained_model_class: "spd.experiments.tms.models.TMSModel"
-pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/gfgchmxj" # 1 hidden w/fixed identity
+pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"
+pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/pziyck78"
 
 # --- Task Specific ---
 task_config:
-  task_name: tms
-  feature_probability: 0.05
+  task_name: resid_mlp
+  feature_probability: 0.01
   data_generation_type: "exactly_one_active"
-  active_indices: [2]
+  active_indices: [15,20,25]
 
 # --- Targeted Mode (nontarget data) ---
 nontarget_task_config:
-  task_name: tms
-  feature_probability: 0.05
+  task_name: resid_mlp
+  feature_probability: 0.01
   data_generation_type: "at_least_zero_active"

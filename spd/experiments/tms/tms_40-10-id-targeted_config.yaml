@@ -1,40 +1,40 @@
-# TMS 5-2 w/ fixed identity - Targeted Decomposition
+# TMS 40-10 w/ fixed identity - Targeted Decomposition
 # --- WandB ---
 wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "TMS 5-2-id/Target 2"
+output_dir_name: "TMS 40-10-id/Target 15-20-25 (shared_mlp)"
 seed: 0
 n_mask_samples: 1
-ci_fn_type: "mlp"
-ci_fn_hidden_dims: [16]
+ci_fn_type: "shared_mlp"
+ci_fn_hidden_dims: [50]
 sigmoid_type: "leaky_hard"
 module_info:
   - module_pattern: "linear1"
-    C: 20
+    C: 60
   - module_pattern: "linear2"
-    C: 20
+    C: 60
   - module_pattern: "hidden_layers.0"
-    C: 20
+    C: 60
 use_delta_component: true
 
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 3e-3
-    pnorm: 1.0
+    coeff: 3e-4
+    pnorm: 2.0
     beta: 0
   - classname: "StochasticReconLayerwiseLoss"
     coeff: 1.0
   - classname: "StochasticReconLoss"
     coeff: 1.0
-output_loss_type: mse
+output_loss_type: "mse"
 
 # --- Training ---
-batch_size: 4096
-eval_batch_size: 4096
-steps: 3_000
+batch_size: 2048
+eval_batch_size: 2048
+steps: 5_000
 lr_schedule:
   start_val: 1e-3
   fn_type: cosine
@@ -50,7 +50,7 @@ faithfulness_warmup_weight_decay: 0.1
 train_log_freq: 100
 eval_freq: 500
 n_eval_steps: 100
-slow_eval_freq: 500
+slow_eval_freq: 1_000
 save_freq: null
 ci_alive_threshold: 0.1
 n_examples_until_dead: 4_096_000
@@ -64,12 +64,12 @@ eval_metric_configs:
   - classname: "IdentityCIError"
     identity_ci:
       - layer_pattern: "linear1"
-        n_features: 5
+        n_features: 40
       - layer_pattern: "linear2"
-        n_features: 5
+        n_features: 40
     dense_ci:
       - layer_pattern: "hidden_layers.0"
-        k: 2
+        k: 10
   - classname: "CI_L0"
     groups: null
   - classname: "CIMeanPerComponent"
@@ -77,14 +77,14 @@ eval_metric_configs:
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.tms.models.TMSModel"
-pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/gfgchmxj" # 1 hidden w/fixed identity
+pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/eggs3wp8" # 1 hidden w/fixed identity
 
 # --- Task Specific ---
 task_config:
   task_name: tms
   feature_probability: 0.05
   data_generation_type: "exactly_one_active"
-  active_indices: [2]
+  active_indices: [15,20,25]
 
 # --- Targeted Mode (nontarget data) ---
 nontarget_task_config:

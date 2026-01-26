@@ -94,6 +94,7 @@ def main(
         label_coeffs=None,
         data_generation_type=config.task_config.data_generation_type,
         synced_inputs=synced_inputs,
+        active_indices=config.task_config.active_indices,
     )
 
     train_loader = DatasetGeneratedDataLoader(
@@ -117,6 +118,7 @@ def main(
             label_coeffs=None,
             data_generation_type=config.nontarget_task_config.data_generation_type,
             synced_inputs=synced_inputs,
+            active_indices=config.nontarget_task_config.active_indices,
         )
         nontarget_train_loader = DatasetGeneratedDataLoader(
             nontarget_dataset, batch_size=config.nontarget_microbatch_size, shuffle=False

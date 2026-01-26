@@ -98,6 +98,10 @@ class ResidMLPTaskConfig(BaseConfig):
         default="at_least_zero_active",
         description="Strategy for generating synthetic data for residual-MLP training",
     )
+    active_indices: list[NonNegativeInt] | None = Field(
+        default=None,
+        description="If set, only these feature indices can be active. Others are always zero.",
+    )
 
 
 class IHTaskConfig(BaseConfig):
