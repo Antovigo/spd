@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp3/Target 2"
+output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 1, 50 ci_fn_hidden_dims)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -22,11 +22,9 @@ use_delta_component: true
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
     coeff: 1e-5
-    pnorm: 2.0
+    pnorm: 1.0
     beta: 0
-  - classname: "StochasticReconLayerwiseLoss"
-    coeff: 1.0
-  - classname: "StochasticReconLoss"
+  - classname: "StochasticReconSubsetLoss"
     coeff: 1.0
 output_loss_type: mse
 
@@ -70,7 +68,7 @@ eval_metric_configs:
   - classname: "CI_L0"
     groups: null
   - classname: "CIMeanPerComponent"
-  - classname: "StochasticHiddenActsReconLoss"
+  #- classname: "StochasticHiddenActsReconLoss"
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"
@@ -81,7 +79,7 @@ task_config:
   task_name: resid_mlp
   feature_probability: 0.01
   data_generation_type: "exactly_one_active"
-  active_indices: [2]
+  active_indices: [15,20,25]
 
 # --- Targeted Mode (nontarget data) ---
 nontarget_task_config:
