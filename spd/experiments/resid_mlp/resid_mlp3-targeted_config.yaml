@@ -21,13 +21,15 @@ use_delta_component: true
 # --- Loss config ---
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 1e-5
-    #pnorm: 1.0
+    coeff: 3e-5
+    coeff_anneal_start_frac: 0.0
+    coeff_anneal_final_value: 3e-6
+    coeff_anneal_end_frac: 1.0
     pnorm: 2.0
-    beta: 0
     p_anneal_start_frac: 0.0
     p_anneal_final_p: 1.0
     p_anneal_end_frac: 1.0
+    beta: 0
   - classname: "StochasticReconSubsetLoss"
     coeff: 2.0
   # - classname: "CIMaskedReconSubsetLoss"
