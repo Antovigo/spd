@@ -58,6 +58,16 @@ class TestResolveConfigPath:
         result = resolve_config_path("loss_metric_configs[ImportanceMinimalityLoss].coeff", config)
         assert result == 0.003
 
+    def test_module_info_lookup(self) -> None:
+        config = {
+            "module_info": [
+                {"module_pattern": "h.*.mlp", "C": 10},
+                {"module_pattern": "h.*.attn", "C": 20},
+            ]
+        }
+        result = resolve_config_path("module_info[h.*.mlp].C", config)
+        assert result == 10
+
     def test_invalid_field(self) -> None:
         config = {"seed": 42}
         with pytest.raises(AssertionError, match="Field 'nonexistent' not found"):
@@ -104,6 +114,15 @@ class TestResolveTemplateString:
             "Coeff {loss_metric_configs[ImportanceMinimalityLoss].coeff}", config
         )
         assert result == "Coeff 0.003"
+
+    def test_module_info_replacement(self) -> None:
+        config = {
+            "module_info": [
+                {"module_pattern": "h.*.mlp", "C": 10},
+            ]
+        }
+        result = resolve_template_string("C_{module_info[h.*.mlp].C}", config)
+        assert result == "C_10"
 
     def test_multiple_placeholders(self) -> None:
         config = {
