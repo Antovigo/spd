@@ -5,17 +5,17 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 2-to-1, im 3e-5-to-3e-6, Stoch, 5k steps with cosine LR)"
+output_dir_name: "resid_mlp3/Target 5-15-25-35-45 (C50, seed 0)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
-ci_fn_hidden_dims: [60]
+ci_fn_hidden_dims: [80]
 sigmoid_type: "leaky_hard"
 module_info:
   - module_pattern: "layers.*.mlp_in"
-    C: 60
+    C: 50
   - module_pattern: "layers.*.mlp_out"
-    C: 60
+    C: 50
 use_delta_component: true
 
 # --- Loss config ---
@@ -23,7 +23,7 @@ loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
     coeff: 3e-5
     coeff_anneal_start_frac: 0.0
-    coeff_anneal_final_value: 3e-6
+    coeff_anneal_final_value: 1e-5
     coeff_anneal_end_frac: 1.0
     pnorm: 2.0
     p_anneal_start_frac: 0.0
@@ -50,6 +50,7 @@ lr_schedule:
   start_val: 1e-3
   fn_type: cosine
   warmup_pct: 0.0
+save_freq: 1_000
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 0
@@ -93,7 +94,7 @@ task_config:
   task_name: resid_mlp
   feature_probability: 0.01
   data_generation_type: "exactly_one_active"
-  active_indices: [15,20,25]
+  active_indices: [5,15,25,35,45]
 
 # --- Targeted Mode (nontarget data) ---
 nontarget_task_config:
