@@ -350,3 +350,40 @@ def dict_safe_update_(d1: dict[str, Any], d2: dict[str, Any]) -> None:
     the first dictionary."""
     assert not set(d1.keys()) & set(d2.keys()), "The dictionaries must have no overlapping keys"
     d1.update(d2)
+
+
+def get_linear_annealed_value(
+    current_frac_of_training: float,
+    initial_value: float,
+    anneal_start_frac: float,
+    anneal_final_value: float | None,
+    anneal_end_frac: float,
+) -> float:
+    """Calculate a linearly annealed value based on training progress.
+
+    Args:
+        current_frac_of_training: Current fraction of training (0.0 to 1.0)
+        initial_value: Starting value
+        anneal_start_frac: Fraction of training after which to start annealing
+        anneal_final_value: Final value to anneal to (None = no annealing)
+        anneal_end_frac: Fraction of training when annealing ends
+
+    Returns:
+        Current value based on linear annealing schedule
+    """
+    if anneal_final_value is None or anneal_start_frac >= 1.0:
+        return initial_value
+
+    assert anneal_end_frac >= anneal_start_frac, (
+        f"anneal_end_frac ({anneal_end_frac}) must be >= anneal_start_frac ({anneal_start_frac})"
+    )
+
+    if current_frac_of_training < anneal_start_frac:
+        return initial_value
+    elif current_frac_of_training >= anneal_end_frac:
+        return anneal_final_value
+    else:
+        progress = (current_frac_of_training - anneal_start_frac) / (
+            anneal_end_frac - anneal_start_frac
+        )
+        return initial_value + (anneal_final_value - initial_value) * progress

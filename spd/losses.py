@@ -37,6 +37,7 @@ from spd.metrics import (
     unmasked_recon_loss,
 )
 from spd.models.component_model import CIOutputs, ComponentModel
+from spd.utils.general_utils import get_linear_annealed_value
 
 
 def compute_total_loss(
@@ -52,20 +53,43 @@ def compute_total_loss(
     use_delta_component: bool,
     n_mask_samples: int,
     output_loss_type: Literal["mse", "kl"],
-) -> tuple[Float[Tensor, ""], dict[str, float]]:
+) -> tuple[Float[Tensor, ""], dict[str, float], dict[str, float]]:
     """Compute weighted total loss and per-term raw values using new loss primitives.
 
-    Returns (total, terms_dict). terms_dict contains raw per-term values (no coeffs) and a weighted total.
+    Returns (total, terms_dict, scheduled_params). terms_dict contains raw per-term values
+    (no coeffs) and a weighted total. scheduled_params contains scheduled values for logging.
     """
     total = torch.tensor(0.0, device=batch.device)
     terms: dict[str, float] = {}
+    scheduled_params: dict[str, float] = {}
 
     for cfg in loss_metric_configs:
         assert cfg.coeff is not None, "All loss metric configs must have a coeff"
+        coeff = cfg.coeff
         match cfg:
             case FaithfulnessLossConfig():
                 loss = faithfulness_loss(weight_deltas=weight_deltas)
             case ImportanceMinimalityLossConfig():
+                if cfg.coeff_anneal_final_value is not None and cfg.coeff_anneal_start_frac < 1.0:
+                    coeff = get_linear_annealed_value(
+                        current_frac_of_training=current_frac_of_training,
+                        initial_value=cfg.coeff,
+                        anneal_start_frac=cfg.coeff_anneal_start_frac,
+                        anneal_final_value=cfg.coeff_anneal_final_value,
+                        anneal_end_frac=cfg.coeff_anneal_end_frac,
+                    )
+                    scheduled_params["scheduled/ImportanceMinimalityLoss_coeff"] = coeff
+
+                if cfg.p_anneal_final_p is not None and cfg.p_anneal_start_frac < 1.0:
+                    pnorm = get_linear_annealed_value(
+                        current_frac_of_training=current_frac_of_training,
+                        initial_value=cfg.pnorm,
+                        anneal_start_frac=cfg.p_anneal_start_frac,
+                        anneal_final_value=cfg.p_anneal_final_p,
+                        anneal_end_frac=cfg.p_anneal_end_frac,
+                    )
+                    scheduled_params["scheduled/ImportanceMinimalityLoss_pnorm"] = pnorm
+
                 loss = importance_minimality_loss(
                     ci_upper_leaky=ci.upper_leaky,
                     current_frac_of_training=current_frac_of_training,
@@ -186,8 +210,8 @@ def compute_total_loss(
 
         terms[f"loss/{cfg.classname}"] = loss.item()
 
-        total = total + cfg.coeff * loss
+        total = total + coeff * loss
 
     terms["loss/total"] = total.item()
 
-    return total, terms
+    return total, terms, scheduled_params
