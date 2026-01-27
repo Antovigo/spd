@@ -321,7 +321,7 @@ def optimize(
                     sampling=config.sampling,
                 )
 
-                nontarget_loss, nontarget_terms = compute_total_loss(
+                nontarget_loss, nontarget_terms, nontarget_scheduled_params = compute_total_loss(
                     loss_metric_configs=config.loss_metric_configs,
                     model=component_model,
                     batch=nontarget_batch,
@@ -342,6 +342,9 @@ def optimize(
                     microbatch_log_data[f"train/nontarget/{loss_name}"] += (
                         loss_value / config.gradient_accumulation_steps
                     )
+
+                for param_name, param_value in nontarget_scheduled_params.items():
+                    microbatch_log_data[f"train/nontarget/{param_name}"] = param_value
 
                 for layer_name, layer_ci in nontarget_ci.lower_leaky.items():
                     l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)

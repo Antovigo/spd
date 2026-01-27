@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 2-to-1 full, im 1e-5, Stoch, 5k steps with cosine LR)"
+output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 2-to-1, im 3e-5-to-3e-6, Stoch, 5k steps with cosine LR)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
