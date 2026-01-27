@@ -709,3 +709,22 @@ class Config(BaseConfig):
             )
 
         return self
+
+    def resolve_output_dir_name(self) -> str | None:
+        """Resolve template variables in output_dir_name.
+
+        Supports template syntax:
+            - {field} - top-level field, e.g. {seed}
+            - {nested.field} - nested object access, e.g. {task_config.feature_probability}
+            - {list[Key].field} - discriminated list lookup, e.g.
+              {loss_metric_configs[ImportanceMinimalityLoss].coeff}
+
+        Returns:
+            The resolved output_dir_name, or None if output_dir_name is None
+        """
+        if self.output_dir_name is None:
+            return None
+
+        from spd.utils.run_utils import resolve_template_string
+
+        return resolve_template_string(self.output_dir_name, self.model_dump(mode="json"))

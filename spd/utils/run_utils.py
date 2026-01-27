@@ -4,9 +4,11 @@ import copy
 import itertools
 import json
 import os
+import re
 import secrets
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
@@ -27,6 +29,124 @@ _DISCRIMINATED_LIST_FIELDS: dict[str, str] = {
     "loss_metric_configs": "classname",
     "eval_metric_configs": "classname",
 }
+
+
+# --- Template variable resolution for output_dir_name ---
+
+
+@dataclass
+class PathSegment:
+    """Represents a parsed segment of a template path."""
+
+    field: str
+    list_key: str | None = None
+
+
+def parse_path_segments(path: str) -> list[PathSegment]:
+    """Parse a template path like 'field[key].nested' into segments.
+
+    Examples:
+        'seed' -> [PathSegment(field='seed')]
+        'task_config.feature_probability' -> [PathSegment(field='task_config'),
+                                               PathSegment(field='feature_probability')]
+        'loss_metric_configs[ImportanceMinimalityLoss].coeff' ->
+            [PathSegment(field='loss_metric_configs', list_key='ImportanceMinimalityLoss'),
+             PathSegment(field='coeff')]
+    """
+    segments: list[PathSegment] = []
+    # Split by dots, but handle brackets specially
+    # Pattern: field_name optionally followed by [key]
+    segment_pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(?:\[([^\]]+)\])?")
+
+    parts = path.split(".")
+    for part in parts:
+        match = segment_pattern.fullmatch(part)
+        assert match, f"Invalid path segment: '{part}' in path '{path}'"
+        field = match.group(1)
+        list_key = match.group(2)
+        segments.append(PathSegment(field=field, list_key=list_key))
+
+    return segments
+
+
+def resolve_config_path(path: str, config_dict: dict[str, Any]) -> Any:
+    """Resolve a single path against a config dictionary.
+
+    Args:
+        path: Path like 'seed', 'task_config.feature_probability',
+              or 'loss_metric_configs[ImportanceMinimalityLoss].coeff'
+        config_dict: The config as a dictionary (from model_dump)
+
+    Returns:
+        The resolved value
+
+    Raises:
+        AssertionError: If path is invalid or value not found
+    """
+    segments = parse_path_segments(path)
+    current: Any = config_dict
+
+    for segment in segments:
+        assert isinstance(current, dict), (
+            f"Expected dict at '{segment.field}' in path '{path}', got {type(current).__name__}"
+        )
+        assert segment.field in current, (
+            f"Field '{segment.field}' not found in config. Available fields: {list(current.keys())}"
+        )
+
+        current = current[segment.field]
+
+        if segment.list_key is not None:
+            # List lookup by discriminator
+            assert isinstance(current, list), (
+                f"Expected list for '{segment.field}[{segment.list_key}]' in path '{path}', "
+                f"got {type(current).__name__}"
+            )
+            assert segment.field in _DISCRIMINATED_LIST_FIELDS, (
+                f"Field '{segment.field}' is not a known discriminated list field. "
+                f"Known fields: {list(_DISCRIMINATED_LIST_FIELDS.keys())}"
+            )
+            discriminator = _DISCRIMINATED_LIST_FIELDS[segment.field]
+
+            found = None
+            for item in current:
+                if item.get(discriminator) == segment.list_key:
+                    found = item
+                    break
+
+            assert found is not None, (
+                f"No item with {discriminator}='{segment.list_key}' found in '{segment.field}'. "
+                f"Available: {[item.get(discriminator) for item in current]}"
+            )
+            current = found
+
+    return current
+
+
+def resolve_template_string(template: str, config_dict: dict[str, Any]) -> str:
+    """Replace all {path} placeholders in a template string.
+
+    Args:
+        template: String with {path} placeholders, e.g. "Seed {seed}"
+        config_dict: The config as a dictionary (from model_dump)
+
+    Returns:
+        The template with all placeholders replaced
+
+    Raises:
+        AssertionError: If any path is invalid or resolves to a non-scalar
+    """
+    placeholder_pattern = re.compile(r"\{([^}]+)\}")
+
+    def replace_placeholder(match: re.Match[str]) -> str:
+        path = match.group(1)
+        value = resolve_config_path(path, config_dict)
+        assert not isinstance(value, (dict, list)), (
+            f"Path '{path}' resolved to {type(value).__name__}, expected scalar value"
+        )
+        return str(value)
+
+    return placeholder_pattern.sub(replace_placeholder, template)
 
 
 def _save_json(data: Any, path: Path | str, **kwargs: Any) -> None:

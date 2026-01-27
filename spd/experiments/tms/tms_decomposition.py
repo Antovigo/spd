@@ -50,7 +50,7 @@ def main(
         experiment_tag="tms",
         evals_id=evals_id,
         sweep_id=sweep_id,
-        output_dir_name=config.output_dir_name,
+        output_dir_name=config.resolve_output_dir_name(),
     )
     if config.wandb_project:
         init_wandb(
