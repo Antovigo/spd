@@ -188,6 +188,9 @@ class ImportanceMinimalityLossConfig(LossMetricConfig):
     p_anneal_start_frac: Probability = 1.0
     p_anneal_final_p: NonNegativeFloat | None = None
     p_anneal_end_frac: Probability = 1.0
+    coeff_anneal_start_frac: Probability = 1.0
+    coeff_anneal_final_value: NonNegativeFloat | None = None
+    coeff_anneal_end_frac: Probability = 1.0
     eps: NonNegativeFloat = 1e-12
 
     @model_validator(mode="before")

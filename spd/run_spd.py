@@ -274,7 +274,7 @@ def optimize(
 
             alive_tracker.update(ci=ci.lower_leaky)
 
-            microbatch_total_loss, microbatch_loss_terms = compute_total_loss(
+            microbatch_total_loss, microbatch_loss_terms, scheduled_params = compute_total_loss(
                 loss_metric_configs=config.loss_metric_configs,
                 model=component_model,
                 batch=microbatch,
@@ -298,6 +298,9 @@ def optimize(
                 microbatch_log_data[f"train/{loss_name}"] += (
                     loss_value / config.gradient_accumulation_steps
                 )
+
+            for param_name, param_value in scheduled_params.items():
+                microbatch_log_data[f"train/{param_name}"] = param_value
 
             for layer_name, layer_ci in ci.lower_leaky.items():
                 l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
