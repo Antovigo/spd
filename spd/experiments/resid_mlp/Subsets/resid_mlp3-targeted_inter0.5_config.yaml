@@ -1,0 +1,103 @@
+# ResidualMLP 3 layers - Targeted Decomposition
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+
+# --- General ---
+output_dir_name: "resid_mlp3/Target 5-15-25-35-45 (C50, inter 0.5, seed 0)"
+seed: 0
+n_mask_samples: 1
+ci_fn_type: "shared_mlp"
+ci_fn_hidden_dims: [80]
+sigmoid_type: "leaky_hard"
+module_info:
+  - module_pattern: "layers.*.mlp_in"
+    C: 50
+  - module_pattern: "layers.*.mlp_out"
+    C: 50
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: "ImportanceMinimalityLoss"
+    coeff: 3e-5
+    coeff_anneal_start_frac: 0.0
+    coeff_anneal_final_value: 1e-5
+    coeff_anneal_end_frac: 1.0
+    pnorm: 2.0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 1.0
+    p_anneal_end_frac: 1.0
+    beta: 0
+  - classname: "StochasticReconSubsetLoss"
+    coeff: 2.0
+  # - classname: "CIMaskedReconSubsetLoss"
+  #   coeff: 1.0
+  # - classname: "PGDReconSubsetLoss"
+  #   coeff: 1.0
+  #   init: random
+  #   step_size: 1.0
+  #   n_steps: 1
+  #   mask_scope: shared_across_batch
+output_loss_type: mse
+
+# --- Training ---
+batch_size: 1024
+eval_batch_size: 1024
+steps: 5_000
+lr_schedule:
+  start_val: 1e-3
+  fn_type: cosine
+  warmup_pct: 0.0
+save_freq: 1_000
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+faithfulness_warmup_lr: 0.01
+faithfulness_warmup_weight_decay: 0.1
+
+# --- Logging & Saving ---
+train_log_freq: 50
+eval_freq: 500
+n_eval_steps: 100
+slow_eval_freq: 1_000
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.1
+n_examples_until_dead: 1_024_000
+eval_metric_configs:
+  - classname: "CIHistograms"
+    n_batches_accum: 5
+  - classname: "ComponentActivationDensity"
+  - classname: "PermutedCIPlots"
+    identity_patterns: ["layers.*.mlp_in"]
+    dense_patterns: ["layers.*.mlp_out"]
+  #- classname: "IdentityCIError"
+    #identity_ci:
+      #- layer_pattern: "layers.*.mlp_in"
+        #n_features: 102
+    #dense_ci:
+      #- layer_pattern: "layers.*.mlp_out"
+        #k: 17
+  - classname: "CI_L0"
+    groups: null
+  - classname: "CIMeanPerComponent"
+  #- classname: "StochasticHiddenActsReconLoss"
+
+# --- Pretrained model info ---
+pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"
+pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/6hk3uciu"
+
+# --- Task Specific ---
+task_config:
+  task_name: resid_mlp
+  feature_probability: 0.5
+  data_generation_type: "at_least_zero_active"
+  active_indices: [5,15,25,35,45]
+
+# --- Targeted Mode (nontarget data) ---
+nontarget_task_config:
+  task_name: resid_mlp
+  feature_probability: 0.01
+  data_generation_type: "at_least_zero_active"
