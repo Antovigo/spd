@@ -432,8 +432,7 @@ def optimize(
 
         # --- Saving Checkpoint --- #
         if (
-            (config.save_freq is not None and step % config.save_freq == 0 and step > 0)
-            or step == config.steps
+            (config.save_freq is not None and step % config.save_freq == 0) or step == config.steps
         ) and is_main_process():
             assert out_dir is not None
             # Save the state dict of the underlying module (not DDP wrapper)
