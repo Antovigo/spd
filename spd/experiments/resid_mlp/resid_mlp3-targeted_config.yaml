@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 2->1, im 1e-5, Masked and PGD)"
+output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 2-to-1, im 1e-5, Stoch, 10k steps)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -22,30 +22,31 @@ use_delta_component: true
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
     coeff: 1e-5
+    #pnorm: 1.0
     pnorm: 2.0
     beta: 0
     p_anneal_start_frac: 0.0
     p_anneal_final_p: 1.0
-    p_anneal_end_frac: 1.0
-  - classname: "CIMaskedReconSubsetLoss"
-    coeff: 1.0
-  #- classname: "StochasticReconSubsetLoss"
-    #coeff: 1.0
-  - classname: "PGDReconSubsetLoss"
-    coeff: 1.0
-    init: random
-    step_size: 1.0
-    n_steps: 1
-    mask_scope: shared_across_batch
+    p_anneal_end_frac: 0.5
+  - classname: "StochasticReconSubsetLoss"
+    coeff: 2.0
+  # - classname: "CIMaskedReconSubsetLoss"
+  #   coeff: 1.0
+  # - classname: "PGDReconSubsetLoss"
+  #   coeff: 1.0
+  #   init: random
+  #   step_size: 1.0
+  #   n_steps: 1
+  #   mask_scope: shared_across_batch
 output_loss_type: mse
 
 # --- Training ---
 batch_size: 1024
 eval_batch_size: 1024
-steps: 5_000
+steps: 10_000
 lr_schedule:
   start_val: 1e-3
-  fn_type: constant
+  fn_type: cosine
   warmup_pct: 0.0
 
 # --- Faithfulness Warmup ---
