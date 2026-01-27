@@ -5,11 +5,11 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 1, 50 ci_fn_hidden_dims)"
+output_dir_name: "resid_mlp3/Target 15-20-25 (pnorm 1, im 1e-5, Masked and PGD)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
-ci_fn_hidden_dims: [50]
+ci_fn_hidden_dims: [60]
 sigmoid_type: "leaky_hard"
 module_info:
   - module_pattern: "layers.*.mlp_in"
@@ -24,8 +24,16 @@ loss_metric_configs:
     coeff: 1e-5
     pnorm: 1.0
     beta: 0
-  - classname: "StochasticReconSubsetLoss"
+  - classname: "CIMaskedReconSubsetLoss"
     coeff: 1.0
+  #- classname: "StochasticReconSubsetLoss"
+    #coeff: 1.0
+  - classname: "PGDReconSubsetLoss"
+    coeff: 1.0
+    init: random
+    step_size: 1.0
+    n_steps: 1
+    mask_scope: shared_across_batch
 output_loss_type: mse
 
 # --- Training ---

@@ -160,14 +160,21 @@ def init_metric(
                 device=device,
                 output_loss_type=run_config.output_loss_type,
                 routing=cfg.routing,
+                use_delta_component=run_config.use_delta_component,
             )
         case CIMaskedReconLayerwiseLossConfig():
             metric = CIMaskedReconLayerwiseLoss(
-                model=model, device=device, output_loss_type=run_config.output_loss_type
+                model=model,
+                device=device,
+                output_loss_type=run_config.output_loss_type,
+                use_delta_component=run_config.use_delta_component,
             )
         case CIMaskedReconLossConfig():
             metric = CIMaskedReconLoss(
-                model=model, device=device, output_loss_type=run_config.output_loss_type
+                model=model,
+                device=device,
+                output_loss_type=run_config.output_loss_type,
+                use_delta_component=run_config.use_delta_component,
             )
         case CIMeanPerComponentConfig():
             metric = CIMeanPerComponent(model=model, device=device)

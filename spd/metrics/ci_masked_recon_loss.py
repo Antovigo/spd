@@ -7,7 +7,7 @@ from torch.distributed import ReduceOp
 
 from spd.metrics.base import Metric
 from spd.models.component_model import CIOutputs, ComponentModel
-from spd.models.components import make_mask_infos
+from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.utils.distributed_utils import all_reduce
 from spd.utils.general_utils import calc_sum_recon_loss_lm
 
@@ -18,8 +18,21 @@ def _ci_masked_recon_loss_update(
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
+    weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
+    force_delta_mask_one: bool = False,
 ) -> tuple[Float[Tensor, ""], int]:
-    mask_infos = make_mask_infos(ci, weight_deltas_and_masks=None)
+    weight_deltas_and_masks: dict[str, WeightDeltaAndMask] | None = None
+    if weight_deltas is not None:
+        leading_dims = next(iter(ci.values())).shape[:-1]
+        delta_mask_value = 1.0 if force_delta_mask_one else 0.0
+        weight_deltas_and_masks = {
+            layer: (
+                weight_deltas[layer],
+                torch.full(leading_dims, delta_mask_value, device=batch.device),
+            )
+            for layer in ci
+        }
+    mask_infos = make_mask_infos(ci, weight_deltas_and_masks=weight_deltas_and_masks)
     out = model(batch, mask_infos=mask_infos)
     loss_type = output_loss_type
     loss = calc_sum_recon_loss_lm(pred=out, target=target_out, loss_type=loss_type)
@@ -38,6 +51,8 @@ def ci_masked_recon_loss(
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
+    weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
+    force_delta_mask_one: bool = False,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _ci_masked_recon_loss_update(
         model=model,
@@ -45,6 +60,8 @@ def ci_masked_recon_loss(
         batch=batch,
         target_out=target_out,
         ci=ci,
+        weight_deltas=weight_deltas,
+        force_delta_mask_one=force_delta_mask_one,
     )
     return _ci_masked_recon_loss_compute(sum_loss, n_examples)
 
@@ -55,10 +72,15 @@ class CIMaskedReconLoss(Metric):
     metric_section: ClassVar[str] = "loss"
 
     def __init__(
-        self, model: ComponentModel, device: str, output_loss_type: Literal["mse", "kl"]
+        self,
+        model: ComponentModel,
+        device: str,
+        output_loss_type: Literal["mse", "kl"],
+        use_delta_component: bool = False,
     ) -> None:
         self.model = model
         self.output_loss_type: Literal["mse", "kl"] = output_loss_type
+        self.use_delta_component = use_delta_component
         self.sum_loss = torch.tensor(0.0, device=device)
         self.n_examples = torch.tensor(0, device=device)
 
@@ -69,6 +91,7 @@ class CIMaskedReconLoss(Metric):
         batch: Int[Tensor, "..."] | Float[Tensor, "..."],
         target_out: Float[Tensor, "... vocab"],
         ci: CIOutputs,
+        weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
         **_: Any,
     ) -> None:
         sum_loss, n_examples = _ci_masked_recon_loss_update(
@@ -77,6 +100,7 @@ class CIMaskedReconLoss(Metric):
             batch=batch,
             target_out=target_out,
             ci=ci.lower_leaky,
+            weight_deltas=weight_deltas if self.use_delta_component else None,
         )
         self.sum_loss += sum_loss
         self.n_examples += n_examples

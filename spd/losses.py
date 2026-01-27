@@ -92,6 +92,8 @@ def compute_total_loss(
                     target_out=target_out,
                     ci=ci.lower_leaky,
                     routing=cfg.routing,
+                    weight_deltas=weight_deltas if use_delta_component else None,
+                    force_delta_mask_one=force_delta_mask_one,
                 )
             case CIMaskedReconLayerwiseLossConfig():
                 loss = ci_masked_recon_layerwise_loss(
@@ -100,6 +102,8 @@ def compute_total_loss(
                     batch=batch,
                     target_out=target_out,
                     ci=ci.lower_leaky,
+                    weight_deltas=weight_deltas if use_delta_component else None,
+                    force_delta_mask_one=force_delta_mask_one,
                 )
             case CIMaskedReconLossConfig():
                 loss = ci_masked_recon_loss(
@@ -108,6 +112,8 @@ def compute_total_loss(
                     batch=batch,
                     target_out=target_out,
                     ci=ci.lower_leaky,
+                    weight_deltas=weight_deltas if use_delta_component else None,
+                    force_delta_mask_one=force_delta_mask_one,
                 )
             case StochasticReconLayerwiseLossConfig():
                 loss = stochastic_recon_layerwise_loss(
