@@ -1,0 +1,14 @@
+#out_dir_name: 'TMS_5-2 planner test/Seed 0'
+seed: 0
+steps: 1000
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
+---
+#out_dir_name: 'TMS_5-2 planner test/Seed 1'
+seed: 1
+steps: 1000
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
+---
+#out_dir_name: 'TMS_5-2 planner test/Seed 2'
+seed: 2
+steps: 1000
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-3
