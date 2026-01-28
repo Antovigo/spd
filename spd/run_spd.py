@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from spd.configs import (
     Config,
+    ImportanceMinimalityLossConfig,
     LossMetricConfigType,
     MetricConfigType,
     PGDMultiBatchConfig,
@@ -134,6 +135,25 @@ def optimize(
     nontarget_train_iterator = (
         loop_dataloader(nontarget_train_loader) if nontarget_train_loader is not None else None
     )
+
+    # Create nontarget loss configs with scaled impmin coeff (done once, not per step)
+    nontarget_loss_configs: list[LossMetricConfigType] | None = None
+    if config.nontarget_task_config is not None:
+        nontarget_loss_configs = [
+            cfg.model_copy(
+                update={
+                    "coeff": cfg.coeff * config.nontarget_impmin_coeff_ratio,
+                    "coeff_anneal_final_value": (
+                        cfg.coeff_anneal_final_value * config.nontarget_impmin_coeff_ratio
+                        if cfg.coeff_anneal_final_value is not None
+                        else None
+                    ),
+                }
+            )
+            if isinstance(cfg, ImportanceMinimalityLossConfig) and cfg.coeff is not None
+            else cfg
+            for cfg in config.loss_metric_configs
+        ]
 
     def create_pgd_data_iter() -> (
         Iterator[Int[Tensor, "..."]] | Iterator[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
@@ -321,8 +341,9 @@ def optimize(
                     sampling=config.sampling,
                 )
 
+                assert nontarget_loss_configs is not None
                 nontarget_loss, nontarget_terms, nontarget_scheduled_params = compute_total_loss(
-                    loss_metric_configs=config.loss_metric_configs,
+                    loss_metric_configs=nontarget_loss_configs,
                     model=component_model,
                     batch=nontarget_batch,
                     ci=nontarget_ci,

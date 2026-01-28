@@ -609,6 +609,11 @@ class Config(BaseConfig):
         default=None,
         description="Batch size for nontarget data. Defaults to batch_size if not specified.",
     )
+    nontarget_impmin_coeff_ratio: NonNegativeFloat = Field(
+        default=1.0,
+        description="Multiplier for importance-minimality coefficient on nontarget batches. "
+        "The nontarget impmin coeff = base coeff * this ratio.",
+    )
 
     @property
     def nontarget_microbatch_size(self) -> PositiveInt:

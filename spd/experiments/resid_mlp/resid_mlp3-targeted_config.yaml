@@ -41,6 +41,7 @@ loss_metric_configs:
   #   n_steps: 1
   #   mask_scope: shared_across_batch
 output_loss_type: mse
+nontarget_impmin_coeff_ratio: 1.5
 
 # --- Training ---
 batch_size: 1024
