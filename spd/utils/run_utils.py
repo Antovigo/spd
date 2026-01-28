@@ -28,6 +28,7 @@ from spd.utils.git_utils import (
 _DISCRIMINATED_LIST_FIELDS: dict[str, str] = {
     "loss_metric_configs": "classname",
     "eval_metric_configs": "classname",
+    "module_info": "module_pattern",
 }
 
 
@@ -52,19 +53,25 @@ def parse_path_segments(path: str) -> list[PathSegment]:
         'loss_metric_configs[ImportanceMinimalityLoss].coeff' ->
             [PathSegment(field='loss_metric_configs', list_key='ImportanceMinimalityLoss'),
              PathSegment(field='coeff')]
+        'module_info[h.*.mlp].C' ->
+            [PathSegment(field='module_info', list_key='h.*.mlp'),
+             PathSegment(field='C')]
     """
     segments: list[PathSegment] = []
-    # Split by dots, but handle brackets specially
-    # Pattern: field_name optionally followed by [key]
-    segment_pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(?:\[([^\]]+)\])?")
+    # Pattern matches: field_name, optional [key], followed by . or end of string
+    # The key inside brackets can contain dots (e.g., module patterns like h.*.mlp)
+    segment_pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(?:\[([^\]]+)\])?(?:\.|$)")
 
-    parts = path.split(".")
-    for part in parts:
-        match = segment_pattern.fullmatch(part)
-        assert match, f"Invalid path segment: '{part}' in path '{path}'"
+    pos = 0
+    for match in segment_pattern.finditer(path):
+        assert match.start() == pos, f"Invalid path at position {pos}: '{path}'"
         field = match.group(1)
         list_key = match.group(2)
         segments.append(PathSegment(field=field, list_key=list_key))
+        pos = match.end()
+
+    assert pos == len(path), f"Incomplete path parse at position {pos}: '{path}'"
+    assert segments, f"No segments found in path: '{path}'"
 
     return segments
 
