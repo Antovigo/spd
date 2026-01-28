@@ -1,0 +1,17 @@
+output_dir_name: "resid_mlp3_subsets/Target 5-15-25-35-45"
+task_config.active_indices: [5, 15, 25, 35, 45]
+---
+output_dir_name: "resid_mlp3_subsets/Target 25"
+task_config.active_indices: [25]
+---
+output_dir_name: "resid_mlp3_subsets/Target 35"
+task_config.active_indices: [35]
+---
+output_dir_name: "resid_mlp3_subsets/Target 45"
+task_config.active_indices: [45]
+---
+output_dir_name: "resid_mlp3_subsets/Target 25-35"
+task_config.active_indices: [25, 35]
+---
+output_dir_name: "resid_mlp3_subsets/Target 25-35-45"
+task_config.active_indices: [25, 35, 45]
