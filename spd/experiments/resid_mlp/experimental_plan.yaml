@@ -1,17 +1,47 @@
-output_dir_name: "resid_mlp3_subsets/Target 5-15-25-35-45"
+output_dir_name: "resid_mlp3_subsets/Target 5-15-25-35-45 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
 task_config.active_indices: [5, 15, 25, 35, 45]
+nontarget_impmin_coeff_ratio: 1.5
 ---
-output_dir_name: "resid_mlp3_subsets/Target 25"
+output_dir_name: "resid_mlp3_subsets/Target 25 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
 task_config.active_indices: [25]
+nontarget_impmin_coeff_ratio: 1.5
 ---
-output_dir_name: "resid_mlp3_subsets/Target 35"
+output_dir_name: "resid_mlp3_subsets/Target 35 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
 task_config.active_indices: [35]
+nontarget_impmin_coeff_ratio: 1.5
 ---
-output_dir_name: "resid_mlp3_subsets/Target 45"
+output_dir_name: "resid_mlp3_subsets/Target 45 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
 task_config.active_indices: [45]
+nontarget_impmin_coeff_ratio: 1.5
 ---
-output_dir_name: "resid_mlp3_subsets/Target 25-35"
+output_dir_name: "resid_mlp3_subsets/Target 25-35 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
 task_config.active_indices: [25, 35]
+nontarget_impmin_coeff_ratio: 1.5
 ---
-output_dir_name: "resid_mlp3_subsets/Target 25-35-45"
+output_dir_name: "resid_mlp3_subsets/Target 25-35-45 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
 task_config.active_indices: [25, 35, 45]
+nontarget_impmin_coeff_ratio: 1.5
+---
+output_dir_name: "resid_mlp3_subsets/Target 5-15-25-35-45 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
+task_config.active_indices: [5, 15, 25, 35, 45]
+nontarget_impmin_coeff_ratio: 2
+---
+output_dir_name: "resid_mlp3_subsets/Target 25 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
+task_config.active_indices: [25]
+nontarget_impmin_coeff_ratio: 2
+---
+output_dir_name: "resid_mlp3_subsets/Target 35 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
+task_config.active_indices: [35]
+nontarget_impmin_coeff_ratio: 2
+---
+output_dir_name: "resid_mlp3_subsets/Target 45 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
+task_config.active_indices: [45]
+nontarget_impmin_coeff_ratio: 2
+---
+output_dir_name: "resid_mlp3_subsets/Target 25-35 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
+task_config.active_indices: [25, 35]
+nontarget_impmin_coeff_ratio: 2
+---
+output_dir_name: "resid_mlp3_subsets/Target 25-35-45 (nontarget_ratio {nontarget_impmin_coeff_ratio})"
+task_config.active_indices: [25, 35, 45]
+nontarget_impmin_coeff_ratio: 2
