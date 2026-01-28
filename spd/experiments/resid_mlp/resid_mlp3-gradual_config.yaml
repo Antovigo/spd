@@ -34,7 +34,7 @@ nontarget_impmin_coeff_ratio: 1.5
 # --- Training ---
 batch_size: 1024
 eval_batch_size: 1024
-# Steps will be overridden by gradual_expansion.get_total_steps() = 24000
+# Steps will be overridden by gradual_expansion.get_total_steps()
 steps: 24_000
 lr_schedule:
   start_val: 1e-3
@@ -50,7 +50,7 @@ faithfulness_warmup_weight_decay: 0.1
 train_log_freq: 50
 eval_freq: 500
 n_eval_steps: 100
-slow_eval_freq: 5_000
+slow_eval_freq: 1_000
 slow_eval_on_first_step: true
 save_freq: null
 ci_alive_threshold: 0.1
@@ -80,7 +80,7 @@ task_config:
     expansion_step_size: 5
     expansion_interval: 1000
     total_n_features: 100
-    post_expansion_steps: 5000
+    post_expansion_steps: 6000
 
 # --- Targeted Mode (Nontarget data: full dataset) ---
 nontarget_task_config:
