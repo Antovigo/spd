@@ -157,6 +157,14 @@ class SparseFeatureDataset(
                 f"active_indices must be in range [0, {n_features})"
             )
 
+    def update_active_indices(self, active_indices: list[int] | None) -> None:
+        """Update active indices dynamically during training."""
+        if active_indices is not None:
+            assert all(0 <= i < self.n_features for i in active_indices), (
+                f"active_indices must be in range [0, {self.n_features})"
+            )
+        self.active_indices = active_indices
+
     def __len__(self) -> int:
         return 2**31
 

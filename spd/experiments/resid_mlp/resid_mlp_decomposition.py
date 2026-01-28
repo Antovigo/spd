@@ -1,6 +1,7 @@
 """Residual MLP decomposition script."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import fire
@@ -62,6 +63,7 @@ def main(
     device = get_device()
     logger.info(f"Using device: {device}")
     assert isinstance(config.task_config, ResidMLPTaskConfig)
+    task_config = config.task_config
 
     assert config.pretrained_model_path, "pretrained_model_path must be set"
     target_run_info = ResidMLPTargetRunInfo.from_path(config.pretrained_model_path)
@@ -76,25 +78,34 @@ def main(
         sweep_params=sweep_params,
         target_model=target_model,
         train_config=target_run_info.config,
-        task_name=config.task_config.task_name,
+        task_name=task_config.task_name,
     )
     save_file(target_run_info.label_coeffs.detach().cpu().tolist(), out_dir / "label_coeffs.json")
     if config.wandb_project:
         wandb.save(str(out_dir / "label_coeffs.json"), base_path=out_dir, policy="now")
 
     synced_inputs = target_run_info.config.synced_inputs
+    gradual_expansion = task_config.gradual_expansion
+
+    # Determine initial active_indices
+    if gradual_expansion is not None:
+        config = config.model_copy(update={"steps": gradual_expansion.get_total_steps()})
+        initial_indices: list[int] | None = list(range(gradual_expansion.initial_n_features))
+    else:
+        initial_indices = task_config.active_indices
+
     dataset = ResidMLPDataset(
         n_features=target_model.config.n_features,
-        feature_probability=config.task_config.feature_probability,
+        feature_probability=task_config.feature_probability,
         device=device,
         calc_labels=False,  # Our labels will be the output of the target model
         label_type=None,
         act_fn_name=None,
         label_fn_seed=None,
         label_coeffs=None,
-        data_generation_type=config.task_config.data_generation_type,
+        data_generation_type=task_config.data_generation_type,
         synced_inputs=synced_inputs,
-        active_indices=config.task_config.active_indices,
+        active_indices=initial_indices,
     )
 
     train_loader = DatasetGeneratedDataLoader(
@@ -124,6 +135,25 @@ def main(
             nontarget_dataset, batch_size=config.nontarget_microbatch_size, shuffle=False
         )
 
+    # Create step_callback for gradual expansion
+    step_callback: Callable[[int], None] | None = None
+    if gradual_expansion is not None:
+
+        def make_step_callback() -> Callable[[int], None]:
+            expansion_config = gradual_expansion
+            assert expansion_config is not None
+
+            def callback(step: int) -> None:
+                n_active = expansion_config.get_n_active_at_step(step)
+                new_indices = list(range(n_active))
+                if dataset.active_indices != new_indices:
+                    dataset.update_active_indices(new_indices)
+                    logger.info(f"Step {step}: Expanded to {n_active} features")
+
+            return callback
+
+        step_callback = make_step_callback()
+
     # TODO: Below not needed when TMS supports config.n_eval_steps
     assert config.n_eval_steps is not None, "n_eval_steps must be set"
     optimize(
@@ -135,6 +165,7 @@ def main(
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
         nontarget_train_loader=nontarget_train_loader,
+        step_callback=step_callback,
     )
 
     if config.wandb_project:

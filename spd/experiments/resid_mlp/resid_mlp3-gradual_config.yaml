@@ -1,0 +1,89 @@
+# ResidualMLP 3 layers - Targeted Decomposition with Gradual Feature Expansion
+# Target data: gradually expanding features (5 -> 100)
+# Nontarget data: full dataset with all features
+
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+
+# --- General ---
+seed: 0
+n_mask_samples: 1
+ci_fn_type: "shared_mlp"
+ci_fn_hidden_dims: [200]
+sigmoid_type: "leaky_hard"
+module_info:
+  - module_pattern: "layers.*.mlp_in"
+    C: 200
+  - module_pattern: "layers.*.mlp_out"
+    C: 200
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: "ImportanceMinimalityLoss"
+    coeff: 3e-5
+    pnorm: 2.0
+    beta: 0.1
+  - classname: "StochasticReconSubsetLoss"
+    coeff: 2.0
+output_loss_type: mse
+nontarget_impmin_coeff_ratio: 1.5
+
+# --- Training ---
+batch_size: 1024
+eval_batch_size: 1024
+# Steps will be overridden by gradual_expansion.get_total_steps() = 24000
+steps: 24_000
+lr_schedule:
+  start_val: 1e-3
+  fn_type: constant
+  warmup_pct: 0.0
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+faithfulness_warmup_lr: 0.01
+faithfulness_warmup_weight_decay: 0.1
+
+# --- Logging & Saving ---
+train_log_freq: 50
+eval_freq: 500
+n_eval_steps: 100
+slow_eval_freq: 5_000
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.1
+n_examples_until_dead: 1_024_000
+eval_metric_configs:
+  - classname: "CIHistograms"
+    n_batches_accum: 5
+  - classname: "ComponentActivationDensity"
+  - classname: "PermutedCIPlots"
+    identity_patterns: ["layers.*.mlp_in"]
+    dense_patterns: ["layers.*.mlp_out"]
+  - classname: "CI_L0"
+    groups: null
+  - classname: "CIMeanPerComponent"
+
+# --- Pretrained model info ---
+pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"
+pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/6hk3uciu"
+
+# --- Task Specific (Target data: gradually expanding features) ---
+task_config:
+  task_name: resid_mlp
+  feature_probability: 0.01
+  data_generation_type: "at_least_zero_active"
+  gradual_expansion:
+    initial_n_features: 5
+    expansion_step_size: 5
+    expansion_interval: 1000
+    total_n_features: 100
+    post_expansion_steps: 5000
+
+# --- Targeted Mode (Nontarget data: full dataset) ---
+nontarget_task_config:
+  task_name: resid_mlp
+  feature_probability: 0.01
+  data_generation_type: "at_least_zero_active"

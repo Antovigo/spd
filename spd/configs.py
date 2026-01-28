@@ -83,6 +83,33 @@ class TMSTaskConfig(BaseConfig):
     )
 
 
+class GradualExpansionConfig(BaseConfig):
+    """Configuration for gradually expanding active input features during training."""
+
+    initial_n_features: PositiveInt = Field(..., description="Number of features to start with")
+    expansion_step_size: PositiveInt = Field(
+        ..., description="Number of features to add at each expansion"
+    )
+    expansion_interval: PositiveInt = Field(..., description="Number of steps between expansions")
+    total_n_features: PositiveInt = Field(..., description="Total number of features to expand to")
+    post_expansion_steps: PositiveInt = Field(
+        ..., description="Number of steps to train after all features are active"
+    )
+
+    def get_n_active_at_step(self, step: int) -> int:
+        """Return number of active features at given step."""
+        n_expansions = step // self.expansion_interval
+        return min(
+            self.initial_n_features + n_expansions * self.expansion_step_size,
+            self.total_n_features,
+        )
+
+    def get_total_steps(self) -> int:
+        """Calculate total training steps needed."""
+        n_expansions = (self.total_n_features - self.initial_n_features) // self.expansion_step_size
+        return n_expansions * self.expansion_interval + self.post_expansion_steps
+
+
 class ResidMLPTaskConfig(BaseConfig):
     task_name: Literal["resid_mlp"] = Field(
         default="resid_mlp",
@@ -101,6 +128,11 @@ class ResidMLPTaskConfig(BaseConfig):
     active_indices: list[NonNegativeInt] | None = Field(
         default=None,
         description="If set, only these feature indices can be active. Others are always zero.",
+    )
+    gradual_expansion: GradualExpansionConfig | None = Field(
+        default=None,
+        description="If set, gradually expand active features during training. "
+        "When enabled, active_indices is ignored and computed from this config.",
     )
 
 

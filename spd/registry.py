@@ -88,6 +88,13 @@ EXPERIMENT_REGISTRY: dict[str, ExperimentConfig] = {
         expected_runtime=30,
         canonical_run=None,
     ),
+    "resid_mlp3_gradual": ExperimentConfig(
+        task_name="resid_mlp",
+        decomp_script=Path("spd/experiments/resid_mlp/resid_mlp_decomposition.py"),
+        config_path=Path("spd/experiments/resid_mlp/resid_mlp3-gradual_config.yaml"),
+        expected_runtime=50,
+        canonical_run=None,
+    ),
     "ss_llama_simple": ExperimentConfig(
         task_name="lm",
         decomp_script=Path("spd/experiments/lm/lm_decomposition.py"),

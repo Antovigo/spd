@@ -2,7 +2,7 @@
 
 import gc
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import cast
 
@@ -127,6 +127,7 @@ def optimize(
     nontarget_train_loader: DataLoader[Int[Tensor, "..."]]
     | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
     | None = None,
+    step_callback: Callable[[int], None] | None = None,
 ) -> None:
     """Run the optimization loop for LM decomposition."""
 
@@ -266,6 +267,9 @@ def optimize(
     )
 
     for step in tqdm(range(config.steps + 1), ncols=0, disable=not is_main_process()):
+        if step_callback is not None:
+            step_callback(step)
+
         optimizer.zero_grad()
 
         step_lr = get_scheduled_value(
