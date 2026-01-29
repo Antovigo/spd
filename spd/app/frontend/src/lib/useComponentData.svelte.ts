@@ -9,7 +9,11 @@ import {
     requestComponentInterpretation,
 } from "./api";
 import type { ComponentAttributions, InterpretationDetail } from "./api";
-import type { ComponentCorrelations, ComponentDetail, TokenStats } from "./promptAttributionsTypes";
+import type {
+    SubcomponentCorrelationsResponse,
+    SubcomponentActivationContexts,
+    TokenStatsResponse,
+} from "./promptAttributionsTypes";
 import { RUN_KEY, type InterpretationBackendState, type RunContext } from "./useRun.svelte";
 
 /** Correlations are paginated in the UI, so fetch more */
@@ -24,19 +28,21 @@ export type { ComponentAttributions as DatasetAttributions };
 export type ComponentCoords = { layer: string; cIdx: number };
 
 /**
- * Hook for loading component data (detail, correlations, token stats, interpretation detail).
+ * Hook for loading component data via network requests.
  *
  * Call `load(layer, cIdx)` explicitly when you want to fetch data.
  * Interpretation headline is derived from the global runState cache.
  * Interpretation detail (reasoning + prompt) is fetched on-demand.
+ *
+ * For reading from prefetched cache, use useComponentDataExpectCached instead.
  */
 export function useComponentData() {
     const runState = getContext<RunContext>(RUN_KEY);
 
-    let componentDetail = $state<Loadable<ComponentDetail>>({ status: "uninitialized" });
+    let componentDetail = $state<Loadable<SubcomponentActivationContexts>>({ status: "uninitialized" });
     // null inside Loadable means "no data for this component" (404)
-    let correlations = $state<Loadable<ComponentCorrelations | null>>({ status: "uninitialized" });
-    let tokenStats = $state<Loadable<TokenStats | null>>({ status: "uninitialized" });
+    let correlations = $state<Loadable<SubcomponentCorrelationsResponse | null>>({ status: "uninitialized" });
+    let tokenStats = $state<Loadable<TokenStatsResponse | null>>({ status: "uninitialized" });
     let datasetAttributions = $state<Loadable<ComponentAttributions | null>>({ status: "uninitialized" });
 
     let interpretationDetail = $state<Loadable<InterpretationDetail | null>>({ status: "uninitialized" });
@@ -67,7 +73,7 @@ export function useComponentData() {
 
         // Fetch component detail (cached in runState after first call)
         runState
-            .getComponentDetail(layer, cIdx)
+            .getActivationContextDetail(layer, cIdx)
             .then((data) => {
                 if (isStale()) return;
                 componentDetail = { status: "loaded", data };

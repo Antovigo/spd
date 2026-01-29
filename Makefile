@@ -6,13 +6,15 @@ install: copy-templates
 .PHONY: install-dev
 install-dev: copy-templates
 	uv sync
-	pre-commit install
+	uv run pre-commit install
 
+.PHONY: install-all
+install-all: install-dev install-app
 
 # special install for CI (GitHub Actions) that reduces disk usage and install time
-# 1. delete the existing lock file, it messes with things
-# 2. create a fresh venv with `--clear` -- this is mostly only for local testing of the CI install
-# 3. install with `uv sync` but with some special options:
+# 1. create a fresh venv with `--clear` -- this is mostly only for local testing of the CI install
+# 2. install with `uv sync` but with some special options:
+#  > `--frozen` to enforce using the lock file for consistent dependency versions
 #  > `--link-mode copy` because:
 #    - symlinks/hardlinks dont work half the time anyway
 #    - we want to kill the cache after installing before we run the tests
@@ -21,9 +23,9 @@ install-dev: copy-templates
 # Note: explored the `--compile-bytecode` option for test speedups, nothing came of it. see https://github.com/goodfire-ai/spd/pull/187/commits/740f6a28f4d3378078c917125356b6466f155e71
 .PHONY: install-ci
 install-ci:
-	rm -f uv.lock
 	uv venv --python 3.13 --clear
 	uv sync \
+		--frozen \
 		--link-mode copy \
 		--extra-index-url https://download.pytorch.org/whl/cpu \
 		--index-strategy unsafe-best-match
