@@ -81,7 +81,7 @@ n_eval_steps: 5
 slow_eval_on_first_step: true
 save_freq: 10000
 ci_alive_threshold: 0.0
-n_examples_until_dead: 819200  # train_log_freq * batch_size * max_seq_len = 100 * 16 * 512
+n_examples_until_dead: 1638400  # train_log_freq * batch_size * max_seq_len = 100 * 16 * 1024
 eval_metric_configs:
   - classname: CIHistograms
     n_batches_accum: 5
@@ -109,21 +109,13 @@ tokenizer_name: EleutherAI/pythia-70m-deduped
 # --- Task Specific (Target data from prompts file) ---
 task_config:
   task_name: lm
-  max_seq_len: 512
-  prompts_file: null  # Set this to path of your prompts file
-  # Below fields are used for eval dataset (not train when prompts_file is set)
-  dataset_name: "NeelNanda/pile-small-tokenized-2b"
-  is_tokenized: true
-  column_name: "tokens"
-  train_data_split: "train"
-  eval_data_split: "train"
-  shuffle_each_epoch: true
-  streaming: false
+  max_seq_len: 1024
+  prompts_file: spd/experiments/lm/prompts/code_syntax.txt  # Set this to path of your prompts file
 
 # --- Targeted Mode (Non-target data from The Pile) ---
 nontarget_task_config:
   task_name: lm
-  max_seq_len: 512
+  max_seq_len: 1024
   dataset_name: "NeelNanda/pile-small-tokenized-2b"
   is_tokenized: true
   column_name: "tokens"

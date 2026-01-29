@@ -92,7 +92,9 @@ def main():
         help=f"Model size to test. Options: {PYTHIA_SIZES}",
     )
     parser.add_argument("--max-tokens", type=int, default=1, help="Max new tokens to generate")
-    parser.add_argument("--top-k-probs", type=int, help="Show top-k token probabilities instead of generating")
+    parser.add_argument(
+        "--top-k-probs", type=int, help="Show top-k token probabilities instead of generating"
+    )
     parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     parser.add_argument("--greedy", action="store_true", help="Use greedy decoding")
     parser.add_argument("--deduped", action="store_true", help="Use deduplicated models")

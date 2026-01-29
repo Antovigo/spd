@@ -157,18 +157,6 @@ def main(
             dist_state=dist_state,
         )
 
-    eval_data_config = DatasetConfig(
-        name=config.task_config.dataset_name,
-        hf_tokenizer_path=config.tokenizer_name,
-        split=config.task_config.eval_data_split,
-        n_ctx=config.task_config.max_seq_len,
-        is_tokenized=config.task_config.is_tokenized,
-        streaming=config.task_config.streaming,
-        column_name=config.task_config.column_name,
-        shuffle_each_epoch=config.task_config.shuffle_each_epoch,
-        seed=None,
-    )
-
     match dist_state:
         case DistributedState(world_size=world_size):
             assert config.eval_batch_size % world_size == 0 and config.eval_batch_size > 0, (
@@ -178,13 +166,36 @@ def main(
         case None:
             eval_rank_batch_size = config.eval_batch_size
 
-    eval_loader, _ = create_data_loader(
-        dataset_config=eval_data_config,
-        batch_size=eval_rank_batch_size,
-        buffer_size=config.task_config.buffer_size,
-        global_seed=config.seed + 1,
-        dist_state=dist_state,
-    )
+    # Use prompts file for eval when specified (target eval should match target train data)
+    if config.task_config.prompts_file is not None:
+        assert config.tokenizer_name is not None
+        eval_loader, _ = create_prompts_data_loader(
+            prompts_file=Path(config.task_config.prompts_file),
+            tokenizer_name=config.tokenizer_name,
+            max_seq_len=config.task_config.max_seq_len,
+            batch_size=eval_rank_batch_size,
+            dist_state=dist_state,
+            seed=config.seed + 1,
+        )
+    else:
+        eval_data_config = DatasetConfig(
+            name=config.task_config.dataset_name,
+            hf_tokenizer_path=config.tokenizer_name,
+            split=config.task_config.eval_data_split,
+            n_ctx=config.task_config.max_seq_len,
+            is_tokenized=config.task_config.is_tokenized,
+            streaming=config.task_config.streaming,
+            column_name=config.task_config.column_name,
+            shuffle_each_epoch=config.task_config.shuffle_each_epoch,
+            seed=None,
+        )
+        eval_loader, _ = create_data_loader(
+            dataset_config=eval_data_config,
+            batch_size=eval_rank_batch_size,
+            buffer_size=config.task_config.buffer_size,
+            global_seed=config.seed + 1,
+            dist_state=dist_state,
+        )
 
     nontarget_train_loader = None
     if config.nontarget_task_config is not None:
