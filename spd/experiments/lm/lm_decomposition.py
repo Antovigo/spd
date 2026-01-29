@@ -9,6 +9,7 @@ from simple_stories_train.run_info import RunInfo as SSRunInfo
 
 from spd.configs import Config, LMTaskConfig
 from spd.data import DatasetConfig, create_data_loader
+from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
 from spd.log import logger
 from spd.run_spd import optimize
 from spd.utils.distributed_utils import (
@@ -114,17 +115,6 @@ def main(
     # --- Load Data --- #
     if is_main_process():
         logger.info("Loading dataset...")
-    train_data_config = DatasetConfig(
-        name=config.task_config.dataset_name,
-        hf_tokenizer_path=config.tokenizer_name,
-        split=config.task_config.train_data_split,
-        n_ctx=config.task_config.max_seq_len,
-        is_tokenized=config.task_config.is_tokenized,
-        streaming=config.task_config.streaming,
-        column_name=config.task_config.column_name,
-        shuffle_each_epoch=config.task_config.shuffle_each_epoch,
-        seed=None,
-    )
 
     match dist_state:
         case DistributedState(world_size=world_size):
@@ -137,13 +127,35 @@ def main(
         case None:
             train_rank_microbatch_size = config.microbatch_size
 
-    train_loader, _tokenizer = create_data_loader(
-        dataset_config=train_data_config,
-        batch_size=train_rank_microbatch_size,
-        buffer_size=config.task_config.buffer_size,
-        global_seed=config.seed,
-        dist_state=dist_state,
-    )
+    if config.task_config.prompts_file is not None:
+        assert config.tokenizer_name is not None
+        train_loader, _tokenizer = create_prompts_data_loader(
+            prompts_file=Path(config.task_config.prompts_file),
+            tokenizer_name=config.tokenizer_name,
+            max_seq_len=config.task_config.max_seq_len,
+            batch_size=train_rank_microbatch_size,
+            dist_state=dist_state,
+            seed=config.seed,
+        )
+    else:
+        train_data_config = DatasetConfig(
+            name=config.task_config.dataset_name,
+            hf_tokenizer_path=config.tokenizer_name,
+            split=config.task_config.train_data_split,
+            n_ctx=config.task_config.max_seq_len,
+            is_tokenized=config.task_config.is_tokenized,
+            streaming=config.task_config.streaming,
+            column_name=config.task_config.column_name,
+            shuffle_each_epoch=config.task_config.shuffle_each_epoch,
+            seed=None,
+        )
+        train_loader, _tokenizer = create_data_loader(
+            dataset_config=train_data_config,
+            batch_size=train_rank_microbatch_size,
+            buffer_size=config.task_config.buffer_size,
+            global_seed=config.seed,
+            dist_state=dist_state,
+        )
 
     eval_data_config = DatasetConfig(
         name=config.task_config.dataset_name,

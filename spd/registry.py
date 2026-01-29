@@ -178,6 +178,12 @@ EXPERIMENT_REGISTRY: dict[str, ExperimentConfig] = {
         config_path=Path("spd/experiments/lm/ts_config.yaml"),
         expected_runtime=120,
     ),
+    "pythia_70m_targeted": ExperimentConfig(
+        task_name="lm",
+        decomp_script=Path("spd/experiments/lm/lm_decomposition.py"),
+        config_path=Path("spd/experiments/lm/pythia_70m_targeted_config.yaml"),
+        expected_runtime=300,
+    ),
 }
 
 

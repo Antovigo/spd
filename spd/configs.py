@@ -272,6 +272,11 @@ class LMTaskConfig(BaseConfig):
         default=False,
         description="Whether to use a streaming dataset",
     )
+    prompts_file: str | None = Field(
+        default=None,
+        description="Path to text file with prompts (one per line). If set, uses this as "
+        "target data instead of dataset_name. Prompts are tokenized and padded to max_seq_len.",
+    )
 
 
 class ModulePatternInfoConfig(BaseConfig):
