@@ -47,6 +47,7 @@ from .stochastic_recon_subset_loss import StochasticReconSubsetLoss as Stochasti
 from .stochastic_recon_subset_loss import (
     stochastic_recon_subset_loss as stochastic_recon_subset_loss,
 )
+from .targeted_ci_heatmap import TargetedCIHeatmap as TargetedCIHeatmap
 from .unmasked_recon_loss import UnmaskedReconLoss as UnmaskedReconLoss
 from .unmasked_recon_loss import unmasked_recon_loss as unmasked_recon_loss
 from .uv_plots import UVPlots as UVPlots

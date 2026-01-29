@@ -1,0 +1,5 @@
+The quick brown fox jumps over the lazy dog.
+Hello, my name is
+def fibonacci(n):
+Once upon a time in a land far away
+The capital of France is

@@ -418,6 +418,118 @@ def plot_component_activation_density(
     return fig_img
 
 
+def plot_targeted_ci_heatmaps(
+    target_cis: dict[str, Float[Tensor, "... C"]],
+    nontarget_cis: dict[str, Float[Tensor, "... C"]],
+    n_nontarget_examples: int,
+    target_labels: list[str] | None = None,
+    nontarget_labels: list[str] | None = None,
+) -> Image.Image:
+    """Plot CI heatmaps comparing target vs nontarget data.
+
+    Layout: 2 rows (target/nontarget) x N columns (modules)
+    Each subplot shows a heatmap with X=subcomponents, Y=inputs.
+    For LMs, batch * seq_pos is flattened into the Y-axis.
+
+    Args:
+        target_cis: Dict mapping module names to CI tensors for target data
+        nontarget_cis: Dict mapping module names to CI tensors for nontarget data
+        n_nontarget_examples: Max number of nontarget examples to show (randomly sampled)
+        target_labels: Optional Y-axis labels for target rows (e.g., feature indices or tokens)
+        nontarget_labels: Optional Y-axis labels for nontarget rows
+    """
+    module_names = list(target_cis.keys())
+    n_modules = len(module_names)
+
+    # Calculate figure height based on number of rows
+    first_module = module_names[0]
+    n_target_rows = (
+        target_cis[first_module].reshape(-1, target_cis[first_module].shape[-1]).shape[0]
+    )
+    n_nontarget_rows = min(
+        nontarget_cis[first_module].reshape(-1, nontarget_cis[first_module].shape[-1]).shape[0],
+        n_nontarget_examples,
+    )
+    # Scale height based on number of rows, with min/max bounds
+    row_height = max(0.15, min(0.5, 8 / (n_target_rows + n_nontarget_rows)))
+    fig_height = max(6, (n_target_rows + n_nontarget_rows) * row_height + 2)
+
+    fig, axs = plt.subplots(
+        2,
+        n_modules,
+        figsize=(4 * n_modules, fig_height),
+        constrained_layout=True,
+        squeeze=False,
+    )
+
+    # Compute global vmin/vmax for unified colorbar
+    all_vals = [target_cis[n] for n in module_names] + [nontarget_cis[n] for n in module_names]
+    vmin = min(v.min().item() for v in all_vals)
+    vmax = max(v.max().item() for v in all_vals)
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+
+    # Track which nontarget indices we sample (same across modules for consistency)
+    nontarget_sample_indices: torch.Tensor | None = None
+
+    images = []
+    for col_idx, module_name in enumerate(module_names):
+        # Flatten to 2D: (n_inputs, C)
+        target_2d = target_cis[module_name].reshape(-1, target_cis[module_name].shape[-1])
+        nontarget_2d = nontarget_cis[module_name].reshape(-1, nontarget_cis[module_name].shape[-1])
+
+        # Random sample nontarget if needed (use same indices across modules)
+        if nontarget_2d.shape[0] > n_nontarget_examples:
+            if nontarget_sample_indices is None:
+                nontarget_sample_indices = torch.randperm(nontarget_2d.shape[0])[
+                    :n_nontarget_examples
+                ]
+            nontarget_2d = nontarget_2d[nontarget_sample_indices]
+
+        # Target row
+        im = axs[0, col_idx].imshow(target_2d.numpy(), aspect="auto", cmap="viridis", norm=norm)
+        images.append(im)
+        axs[0, col_idx].set_title(f"{module_name}\n(Target)")
+        axs[0, col_idx].set_xlabel("Subcomponent")
+        if col_idx == 0:
+            axs[0, col_idx].set_ylabel("Input")
+            if target_labels is not None and len(target_labels) == target_2d.shape[0]:
+                axs[0, col_idx].set_yticks(range(len(target_labels)))
+                axs[0, col_idx].set_yticklabels(
+                    target_labels, fontsize=max(6, 10 - len(target_labels) // 10)
+                )
+
+        # Nontarget row
+        im = axs[1, col_idx].imshow(nontarget_2d.numpy(), aspect="auto", cmap="viridis", norm=norm)
+        images.append(im)
+        axs[1, col_idx].set_title(f"{module_name}\n(Nontarget)")
+        axs[1, col_idx].set_xlabel("Subcomponent")
+        if col_idx == 0:
+            axs[1, col_idx].set_ylabel("Input")
+            # Apply sampling to nontarget labels if needed
+            sampled_nontarget_labels = nontarget_labels
+            if nontarget_labels is not None and nontarget_sample_indices is not None:
+                sampled_nontarget_labels = [
+                    nontarget_labels[i] for i in nontarget_sample_indices.tolist()
+                ]
+            if (
+                sampled_nontarget_labels is not None
+                and len(sampled_nontarget_labels) == nontarget_2d.shape[0]
+            ):
+                axs[1, col_idx].set_yticks(range(len(sampled_nontarget_labels)))
+                axs[1, col_idx].set_yticklabels(
+                    sampled_nontarget_labels,
+                    fontsize=max(6, 10 - len(sampled_nontarget_labels) // 10),
+                )
+
+    # Single shared colorbar
+    fig.colorbar(images[0], ax=axs.ravel().tolist(), shrink=0.8)
+    fig.suptitle("Causal Importances: Target vs Nontarget")
+
+    img = _render_figure(fig)
+    plt.close(fig)
+    return img
+
+
 def plot_ci_values_histograms(
     causal_importances: dict[str, Float[Tensor, "... C"]],
     bins: int = 100,

@@ -8,6 +8,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
+output_dir_name: "pythia/test"
 seed: 0
 n_mask_samples: 1
 ci_config:
@@ -69,7 +70,7 @@ lr_schedule:
   final_val_frac: 0.1
 
 # --- Faithfulness Warmup ---
-faithfulness_warmup_steps: 200
+faithfulness_warmup_steps: 0
 faithfulness_warmup_lr: 0.001
 faithfulness_warmup_weight_decay: 0.0
 

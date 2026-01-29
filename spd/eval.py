@@ -34,6 +34,7 @@ from spd.configs import (
     StochasticReconLossConfig,
     StochasticReconSubsetCEAndKLConfig,
     StochasticReconSubsetLossConfig,
+    TargetedCIHeatmapConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
 )
@@ -60,6 +61,7 @@ from spd.metrics.stochastic_recon_layerwise_loss import StochasticReconLayerwise
 from spd.metrics.stochastic_recon_loss import StochasticReconLoss
 from spd.metrics.stochastic_recon_subset_ce_and_kl import StochasticReconSubsetCEAndKL
 from spd.metrics.stochastic_recon_subset_loss import StochasticReconSubsetLoss
+from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.uv_plots import UVPlots
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.routing import AllLayersRouter, get_subset_router
@@ -279,6 +281,13 @@ def init_metric(
                 model=model,
                 device=device,
                 output_loss_type=run_config.output_loss_type,
+            )
+        case TargetedCIHeatmapConfig():
+            metric = TargetedCIHeatmap(
+                model=model,
+                run_config=run_config,
+                device=device,
+                n_nontarget_examples=cfg.n_nontarget_examples,
             )
 
         case _:

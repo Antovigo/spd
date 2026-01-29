@@ -1,0 +1,83 @@
+# Pythia-70m Targeted SPD - MINIMAL TEST CONFIG
+# For quick local testing of TargetedCIHeatmap metric
+# Run with: spd-local --config spd/experiments/lm/pythia_70m_targeted_test_config.yaml --cpu
+
+# --- WandB (disabled for local testing) ---
+wandb_project: null
+
+# --- General ---
+output_dir_name: "plotting_tests/pythia"
+seed: 0
+n_mask_samples: 1
+ci_config:
+  mode: layerwise
+  fn_type: mlp
+  hidden_dims: [16]
+sampling: continuous
+sigmoid_type: leaky_hard
+
+# Minimal components - just MLP in layer 0
+module_info:
+  - module_pattern: "gpt_neox.layers.0.mlp.dense_h_to_4h"
+    C: 8
+  - module_pattern: "gpt_neox.layers.0.mlp.dense_4h_to_h"
+    C: 8
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: ImportanceMinimalityLoss
+    coeff: 0.001
+    pnorm: 2.0
+    beta: 0
+  - classname: StochasticReconSubsetLoss
+    coeff: 0.5
+output_loss_type: kl
+nontarget_impmin_coeff_ratio: 1.5
+
+# --- Training (minimal) ---
+batch_size: 2
+eval_batch_size: 2
+steps: 10
+gradient_accumulation_steps: 1
+lr_schedule:
+  start_val: 0.0001
+
+# --- Logging & Saving ---
+train_log_freq: 5
+eval_freq: 5
+slow_eval_freq: 5
+n_eval_steps: 1
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.0
+n_examples_until_dead: 1000
+eval_metric_configs:
+  - classname: CIHistograms
+    n_batches_accum: 1
+  - classname: TargetedCIHeatmap
+    n_nontarget_examples: 10
+
+# --- Pretrained model info ---
+pretrained_model_class: transformers.GPTNeoXForCausalLM
+pretrained_model_name: EleutherAI/pythia-70m-deduped
+pretrained_model_output_attr: logits
+tokenizer_name: EleutherAI/pythia-70m-deduped
+
+# --- Task Specific (Target data from prompts file) ---
+task_config:
+  task_name: lm
+  max_seq_len: 32  # Short sequences for fast testing
+  prompts_file: spd/experiments/lm/prompts/test_prompts.txt
+
+# --- Targeted Mode (Non-target data from The Pile) ---
+nontarget_task_config:
+  task_name: lm
+  max_seq_len: 32
+  dataset_name: "NeelNanda/pile-small-tokenized-2b"
+  is_tokenized: true
+  column_name: "tokens"
+  train_data_split: "train"
+  eval_data_split: "train"
+  shuffle_each_epoch: false
+  streaming: false

@@ -448,6 +448,14 @@ class CIMeanPerComponentConfig(BaseConfig):
     classname: Literal["CIMeanPerComponent"] = "CIMeanPerComponent"
 
 
+class TargetedCIHeatmapConfig(BaseConfig):
+    classname: Literal["TargetedCIHeatmap"] = "TargetedCIHeatmap"
+    n_nontarget_examples: int = Field(
+        default=100,
+        description="Number of nontarget examples to randomly select for visualization",
+    )
+
+
 class ComponentActivationDensityConfig(BaseConfig):
     classname: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
 
@@ -506,6 +514,7 @@ EvalOnlyMetricConfigType = (
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
     | PermutedCIPlotsConfig
+    | TargetedCIHeatmapConfig
     | UVPlotsConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig

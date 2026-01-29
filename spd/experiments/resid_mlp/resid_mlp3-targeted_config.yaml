@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp3_subsets/Target 5-15-25-35-45"
+output_dir_name: "plotting_tests/resid_mlp3"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -84,6 +84,8 @@ eval_metric_configs:
   - classname: "CI_L0"
     groups: null
   - classname: "CIMeanPerComponent"
+  - classname: "TargetedCIHeatmap"
+    n_nontarget_examples: 5
   #- classname: "StochasticHiddenActsReconLoss"
 
 # --- Pretrained model info ---
