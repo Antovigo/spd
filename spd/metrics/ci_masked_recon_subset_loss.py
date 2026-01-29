@@ -16,7 +16,7 @@ from spd.utils.general_utils import calc_sum_recon_loss_lm
 
 def _ci_masked_recon_subset_loss_update(
     model: ComponentModel,
-    output_loss_type: Literal["mse", "kl"],
+    output_loss_type: Literal["mse", "kl", "mem"],
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
@@ -47,7 +47,13 @@ def _ci_masked_recon_subset_loss_update(
     out = model(batch, mask_infos=mask_infos)
     loss_type = output_loss_type
     loss = calc_sum_recon_loss_lm(pred=out, target=target_out, loss_type=loss_type)
-    return loss, out.shape.numel() if loss_type == "mse" else out.shape[:-1].numel()
+    if loss_type == "mse":
+        n_examples = out.shape.numel()
+    elif loss_type == "mem":
+        n_examples = out.shape[0]  # batch size only for mem
+    else:  # kl
+        n_examples = out.shape[:-1].numel()
+    return loss, n_examples
 
 
 def _ci_masked_recon_subset_loss_compute(
@@ -58,7 +64,7 @@ def _ci_masked_recon_subset_loss_compute(
 
 def ci_masked_recon_subset_loss(
     model: ComponentModel,
-    output_loss_type: Literal["mse", "kl"],
+    output_loss_type: Literal["mse", "kl", "mem"],
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
@@ -88,12 +94,12 @@ class CIMaskedReconSubsetLoss(Metric):
         self,
         model: ComponentModel,
         device: str,
-        output_loss_type: Literal["mse", "kl"],
+        output_loss_type: Literal["mse", "kl", "mem"],
         routing: SubsetRoutingType,
         use_delta_component: bool = False,
     ) -> None:
         self.model = model
-        self.output_loss_type: Literal["mse", "kl"] = output_loss_type
+        self.output_loss_type: Literal["mse", "kl", "mem"] = output_loss_type
         self.use_delta_component = use_delta_component
         self.router = get_subset_router(routing, device)
 
