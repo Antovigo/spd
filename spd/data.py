@@ -223,37 +223,9 @@ def create_data_loader(
         assert isinstance(sample, Tensor) and sample.ndim == 1, (
             f"Expected the dataset to be tokenized. Got type {type(sample)}"
         )
-        tokenized_len = len(sample)
-        if tokenized_len != dataset_config.n_ctx:
-            # Reshape longer sequences into chunks of n_ctx
-            assert tokenized_len > dataset_config.n_ctx, (
-                f"n_ctx ({dataset_config.n_ctx}) is larger than tokenized length ({tokenized_len})"
-            )
-            assert tokenized_len % dataset_config.n_ctx == 0, (
-                f"tokenized length ({tokenized_len}) must be divisible by n_ctx ({dataset_config.n_ctx})"
-            )
-            n_chunks = tokenized_len // dataset_config.n_ctx
-            logger.info(
-                f"Reshaping tokenized sequences from {tokenized_len} to "
-                f"{n_chunks} chunks of {dataset_config.n_ctx}"
-            )
-
-            def reshape_tokens(examples: dict[str, list[list[int]]]) -> dict[str, list[list[int]]]:
-                col = dataset_config.column_name
-                reshaped = []
-                for seq in examples[col]:
-                    for i in range(n_chunks):
-                        start = i * dataset_config.n_ctx
-                        end = start + dataset_config.n_ctx
-                        reshaped.append(seq[start:end])
-                return {col: reshaped}
-
-            torch_dataset = torch_dataset.map(
-                reshape_tokens,
-                batched=True,
-                remove_columns=torch_dataset.column_names,
-            )
-            torch_dataset = torch_dataset.with_format("torch")
+        assert len(sample) == dataset_config.n_ctx, (
+            f"n_ctx ({dataset_config.n_ctx}) does not match the tokenized length ({len(sample)})."
+        )
     else:
         to_lower = "SimpleStories" in dataset_config.name
         torch_dataset = tokenize_and_concatenate(
