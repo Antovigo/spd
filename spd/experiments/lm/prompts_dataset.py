@@ -53,6 +53,9 @@ def load_prompts_dataset(
     return dataset
 
 
+MIN_DATASET_SIZE = 10000
+
+
 def create_prompts_data_loader(
     prompts_file: Path,
     tokenizer_name: str,
@@ -62,6 +65,8 @@ def create_prompts_data_loader(
     seed: int = 0,
 ) -> tuple[DataLoader[Any], PreTrainedTokenizer]:
     """Create a DataLoader from a prompts text file.
+
+    Prompts are repeated to reach MIN_DATASET_SIZE to ensure enough data for training.
 
     Args:
         prompts_file: Path to text file with one prompt per line
@@ -76,6 +81,16 @@ def create_prompts_data_loader(
     """
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     dataset = load_prompts_dataset(prompts_file, tokenizer, max_seq_len)
+
+    # Repeat prompts to ensure dataset is large enough for training
+    n_prompts = len(dataset)
+    if n_prompts < MIN_DATASET_SIZE:
+        n_repeats = (MIN_DATASET_SIZE + n_prompts - 1) // n_prompts
+        logger.info(f"Repeating {n_prompts} prompts {n_repeats}x to reach size {n_prompts * n_repeats}")
+        from datasets import concatenate_datasets
+
+        dataset = concatenate_datasets([dataset] * n_repeats)
+        dataset = dataset.with_format("torch")
 
     from torch.utils.data import DistributedSampler
 

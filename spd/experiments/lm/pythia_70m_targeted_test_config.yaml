@@ -56,7 +56,7 @@ eval_metric_configs:
   - classname: CIHistograms
     n_batches_accum: 1
   - classname: TargetedCIHeatmap
-    n_nontarget_examples: 10
+    n_nontarget_examples: 1
 
 # --- Pretrained model info ---
 pretrained_model_class: transformers.GPTNeoXForCausalLM
