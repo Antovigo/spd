@@ -275,10 +275,8 @@ class TargetedCIHeatmap(Metric):
                 global_seed=self.run_config.seed + 42,
             )
             batch_data = next(iter(loader))
-            # Handle dict-style batches from HuggingFace datasets
-            tokens = (
-                batch_data[data_config.column_name] if isinstance(batch_data, dict) else batch_data
-            )
+            # Handle dict-style batches - create_data_loader renames column to "input_ids"
+            tokens = batch_data["input_ids"] if isinstance(batch_data, dict) else batch_data
 
         labels = self._tokens_to_labels(tokens, tokenizer)
         return tokens, labels

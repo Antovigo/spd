@@ -22,11 +22,11 @@ sigmoid_type: leaky_hard
 # QKV fused: (512, 1536), attn_out: (512, 512), mlp_up: (512, 2048), mlp_down: (2048, 512)
 module_info:
   - module_pattern: "gpt_neox.layers.*.mlp.dense_h_to_4h"
-    C: 256
+    C: 128
   - module_pattern: "gpt_neox.layers.*.mlp.dense_4h_to_h"
-    C: 256
+    C: 128
   - module_pattern: "gpt_neox.layers.*.attention.query_key_value"
-    C: 192
+    C: 128
   - module_pattern: "gpt_neox.layers.*.attention.dense"
     C: 64
 identity_module_info: null
@@ -59,8 +59,10 @@ output_loss_type: kl
 nontarget_impmin_coeff_ratio: 1.5
 
 # --- Training ---
-batch_size: 64
-eval_batch_size: 64
+batch_size: 128
+nontarget_batch_size: 1
+eval_batch_size: 32
+
 steps: 50000
 gradient_accumulation_steps: 1
 lr_schedule:
