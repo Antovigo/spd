@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 
 from spd.configs import Config, LMTaskConfig, ResidMLPTaskConfig
 from spd.data import DatasetConfig, create_data_loader
+from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
 from spd.experiments.resid_mlp.resid_mlp_dataset import ResidMLPDataset
 from spd.metrics.base import Metric
 from spd.models.component_model import CIOutputs, ComponentModel
@@ -241,27 +242,43 @@ class TargetedCIHeatmap(Metric):
 
         Returns (batch, labels) where labels are the tokens at each position.
         """
-        data_config = DatasetConfig(
-            name=task_config.dataset_name,
-            hf_tokenizer_path=self.run_config.tokenizer_name,
-            split=task_config.train_data_split,
-            n_ctx=task_config.max_seq_len,
-            is_tokenized=task_config.is_tokenized,
-            streaming=task_config.streaming,
-            column_name=task_config.column_name,
-            shuffle_each_epoch=False,
-        )
-
-        loader, tokenizer = create_data_loader(
-            dataset_config=data_config,
-            batch_size=self.n_nontarget_examples,
-            buffer_size=task_config.buffer_size,
-            global_seed=self.run_config.seed + 42,
-        )
-
-        batch_data = next(iter(loader))
-        # Handle dict-style batches from HuggingFace datasets
-        tokens = batch_data[data_config.column_name] if isinstance(batch_data, dict) else batch_data
+        if task_config.prompts_file is not None:
+            assert self.run_config.tokenizer_name is not None
+            loader, tokenizer = create_prompts_data_loader(
+                prompts_file=Path(task_config.prompts_file),
+                tokenizer_name=self.run_config.tokenizer_name,
+                max_seq_len=task_config.max_seq_len,
+                batch_size=self.n_nontarget_examples,
+                dist_state=None,
+                seed=self.run_config.seed + 42,
+            )
+            batch_data = next(iter(loader))
+            tokens = batch_data["input_ids"]
+        else:
+            assert task_config.dataset_name is not None, (
+                "nontarget_task_config must have either prompts_file or dataset_name set"
+            )
+            data_config = DatasetConfig(
+                name=task_config.dataset_name,
+                hf_tokenizer_path=self.run_config.tokenizer_name,
+                split=task_config.train_data_split,
+                n_ctx=task_config.max_seq_len,
+                is_tokenized=task_config.is_tokenized,
+                streaming=task_config.streaming,
+                column_name=task_config.column_name,
+                shuffle_each_epoch=False,
+            )
+            loader, tokenizer = create_data_loader(
+                dataset_config=data_config,
+                batch_size=self.n_nontarget_examples,
+                buffer_size=task_config.buffer_size,
+                global_seed=self.run_config.seed + 42,
+            )
+            batch_data = next(iter(loader))
+            # Handle dict-style batches from HuggingFace datasets
+            tokens = (
+                batch_data[data_config.column_name] if isinstance(batch_data, dict) else batch_data
+            )
 
         labels = self._tokens_to_labels(tokens, tokenizer)
         return tokens, labels

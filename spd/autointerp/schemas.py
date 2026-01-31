@@ -19,7 +19,7 @@ class ArchitectureInfo:
     n_blocks: int
     c_per_layer: dict[str, int]  # Maps layer name -> number of components
     model_class: str
-    dataset_name: str
+    dataset_name: str | None
     tokenizer_name: str
 
 

@@ -77,6 +77,16 @@ def create_prompts_data_loader(
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     dataset = load_prompts_dataset(prompts_file, tokenizer, max_seq_len)
 
+    # Repeat prompts to ensure dataset has at least batch_size samples
+    n_prompts = len(dataset)
+    if n_prompts < batch_size:
+        from datasets import concatenate_datasets
+
+        n_repeats = (batch_size + n_prompts - 1) // n_prompts
+        logger.info(f"Repeating {n_prompts} prompts {n_repeats}x to fill batch_size={batch_size}")
+        dataset = concatenate_datasets([dataset] * n_repeats)
+        dataset = dataset.with_format("torch")
+
     from torch.utils.data import DistributedSampler
 
     sampler = None

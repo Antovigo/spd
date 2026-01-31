@@ -16,7 +16,7 @@ from spd.utils.distributed_utils import DistributedState
 
 
 class DatasetConfig(BaseConfig):
-    name: str = "lennart-finke/SimpleStories"
+    name: str | None = None
     is_tokenized: bool = True
     hf_tokenizer_path: str | None = None
     streaming: bool = False
@@ -182,6 +182,7 @@ def create_data_loader(
     Returns:
         A tuple of the DataLoader and the tokenizer.
     """
+    assert dataset_config.name is not None, "dataset_config.name must be set"
 
     dataset = load_dataset(
         dataset_config.name,
@@ -226,6 +227,9 @@ def create_data_loader(
         assert len(sample) == dataset_config.n_ctx, (
             f"n_ctx ({dataset_config.n_ctx}) does not match the tokenized length ({len(sample)})."
         )
+        # Rename column to input_ids for consistency with tokenize_and_concatenate output
+        if dataset_config.column_name != "input_ids":
+            torch_dataset = torch_dataset.rename_column(dataset_config.column_name, "input_ids")
     else:
         to_lower = "SimpleStories" in dataset_config.name
         torch_dataset = tokenize_and_concatenate(

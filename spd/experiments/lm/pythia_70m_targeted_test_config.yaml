@@ -12,7 +12,7 @@ n_mask_samples: 1
 ci_config:
   mode: layerwise
   fn_type: mlp
-  hidden_dims: [16]
+  hidden_dims: [4]
 sampling: continuous
 sigmoid_type: leaky_hard
 
@@ -67,17 +67,11 @@ tokenizer_name: EleutherAI/pythia-70m-deduped
 # --- Task Specific (Target data from prompts file) ---
 task_config:
   task_name: lm
-  max_seq_len: 32  # Short sequences for fast testing
-  prompts_file: spd/experiments/lm/prompts/test_prompts.txt
+  max_seq_len: 2
+  prompts_file: spd/experiments/lm/prompts/code_syntax.txt
 
 # --- Targeted Mode (Non-target data from The Pile) ---
 nontarget_task_config:
   task_name: lm
-  max_seq_len: 1024  # Must match the Pile's tokenized sequence length
-  dataset_name: "NeelNanda/pile-small-tokenized-2b"
-  is_tokenized: true
-  column_name: "tokens"
-  train_data_split: "train"
-  eval_data_split: "train"
-  shuffle_each_epoch: false
-  streaming: false
+  max_seq_len: 10
+  prompts_file: spd/experiments/lm/prompts/test_prompts.txt

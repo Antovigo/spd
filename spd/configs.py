@@ -243,8 +243,8 @@ class LMTaskConfig(BaseConfig):
         default=1000,
         description="Buffered sample count for streaming dataset shuffling",
     )
-    dataset_name: str = Field(
-        default="lennart-finke/SimpleStories",
+    dataset_name: str | None = Field(
+        default=None,
         description="HuggingFace dataset identifier to use for the LM task",
     )
     column_name: str = Field(

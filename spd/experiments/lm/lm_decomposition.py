@@ -138,6 +138,9 @@ def main(
             seed=config.seed,
         )
     else:
+        assert config.task_config.dataset_name is not None, (
+            "task_config must have either prompts_file or dataset_name set"
+        )
         train_data_config = DatasetConfig(
             name=config.task_config.dataset_name,
             hf_tokenizer_path=config.tokenizer_name,
@@ -178,6 +181,9 @@ def main(
             seed=config.seed + 1,
         )
     else:
+        assert config.task_config.dataset_name is not None, (
+            "task_config must have either prompts_file or dataset_name set"
+        )
         eval_data_config = DatasetConfig(
             name=config.task_config.dataset_name,
             hf_tokenizer_path=config.tokenizer_name,
@@ -200,17 +206,6 @@ def main(
     nontarget_train_loader = None
     if config.nontarget_task_config is not None:
         assert isinstance(config.nontarget_task_config, LMTaskConfig)
-        nontarget_data_config = DatasetConfig(
-            name=config.nontarget_task_config.dataset_name,
-            hf_tokenizer_path=config.tokenizer_name,
-            split=config.nontarget_task_config.train_data_split,
-            n_ctx=config.nontarget_task_config.max_seq_len,
-            is_tokenized=config.nontarget_task_config.is_tokenized,
-            streaming=config.nontarget_task_config.streaming,
-            column_name=config.nontarget_task_config.column_name,
-            shuffle_each_epoch=config.nontarget_task_config.shuffle_each_epoch,
-            seed=None,
-        )
 
         match dist_state:
             case DistributedState(world_size=world_size):
@@ -224,13 +219,38 @@ def main(
             case None:
                 nontarget_rank_microbatch_size = config.nontarget_microbatch_size
 
-        nontarget_train_loader, _ = create_data_loader(
-            dataset_config=nontarget_data_config,
-            batch_size=nontarget_rank_microbatch_size,
-            buffer_size=config.nontarget_task_config.buffer_size,
-            global_seed=config.seed + 2,
-            dist_state=dist_state,
-        )
+        if config.nontarget_task_config.prompts_file is not None:
+            assert config.tokenizer_name is not None
+            nontarget_train_loader, _ = create_prompts_data_loader(
+                prompts_file=Path(config.nontarget_task_config.prompts_file),
+                tokenizer_name=config.tokenizer_name,
+                max_seq_len=config.nontarget_task_config.max_seq_len,
+                batch_size=nontarget_rank_microbatch_size,
+                dist_state=dist_state,
+                seed=config.seed + 2,
+            )
+        else:
+            assert config.nontarget_task_config.dataset_name is not None, (
+                "nontarget_task_config must have either prompts_file or dataset_name set"
+            )
+            nontarget_data_config = DatasetConfig(
+                name=config.nontarget_task_config.dataset_name,
+                hf_tokenizer_path=config.tokenizer_name,
+                split=config.nontarget_task_config.train_data_split,
+                n_ctx=config.nontarget_task_config.max_seq_len,
+                is_tokenized=config.nontarget_task_config.is_tokenized,
+                streaming=config.nontarget_task_config.streaming,
+                column_name=config.nontarget_task_config.column_name,
+                shuffle_each_epoch=config.nontarget_task_config.shuffle_each_epoch,
+                seed=None,
+            )
+            nontarget_train_loader, _ = create_data_loader(
+                dataset_config=nontarget_data_config,
+                batch_size=nontarget_rank_microbatch_size,
+                buffer_size=config.nontarget_task_config.buffer_size,
+                global_seed=config.seed + 2,
+                dist_state=dist_state,
+            )
 
     if is_main_process():
         logger.info("Starting optimization...")

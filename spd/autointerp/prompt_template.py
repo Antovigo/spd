@@ -122,9 +122,12 @@ def format_prompt_template(
     )
 
     # Get dataset description
-    dataset_description = DATASET_DESCRIPTIONS.get(
-        arch.dataset_name, f"Dataset: {arch.dataset_name}"
-    )
+    if arch.dataset_name is not None:
+        dataset_description = DATASET_DESCRIPTIONS.get(
+            arch.dataset_name, f"Dataset: {arch.dataset_name}"
+        )
+    else:
+        dataset_description = "Dataset: unknown"
 
     # Calculate firing rate context
     firing_rate_context = ""
