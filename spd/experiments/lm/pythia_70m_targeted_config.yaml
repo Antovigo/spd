@@ -110,8 +110,8 @@ tokenizer_name: EleutherAI/pythia-70m-deduped
 # --- Task Specific (Target data from prompts file) ---
 task_config:
   task_name: lm
-  max_seq_len: 1024
-  prompts_file: spd/experiments/lm/prompts/code_syntax.txt  # Set this to path of your prompts file
+  max_seq_len: 2
+  prompts_file: spd/experiments/lm/prompts/code_syntax.txt
 
 # --- Targeted Mode (Non-target data from The Pile) ---
 nontarget_task_config:

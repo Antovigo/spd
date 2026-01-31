@@ -73,7 +73,7 @@ task_config:
 # --- Targeted Mode (Non-target data from The Pile) ---
 nontarget_task_config:
   task_name: lm
-  max_seq_len: 32
+  max_seq_len: 1024  # Must match the Pile's tokenized sequence length
   dataset_name: "NeelNanda/pile-small-tokenized-2b"
   is_tokenized: true
   column_name: "tokens"
