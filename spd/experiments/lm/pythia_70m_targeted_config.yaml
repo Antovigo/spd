@@ -59,8 +59,8 @@ output_loss_type: kl
 nontarget_impmin_coeff_ratio: 1.5
 
 # --- Training ---
-batch_size: 256
-eval_batch_size: 256
+batch_size: 128
+eval_batch_size: 128
 steps: 50000
 gradient_accumulation_steps: 1
 lr_schedule:
