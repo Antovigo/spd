@@ -28,6 +28,7 @@ from spd.configs import (
     PGDMultiBatchReconSubsetLossConfig,
 )
 from spd.data import loop_dataloader
+from spd.experiments.lm.prompts_dataset import StaticBatchLoader
 from spd.eval import evaluate, evaluate_multibatch_pgd
 from spd.identity_insertion import insert_identity_operations_
 from spd.log import logger
@@ -117,15 +118,18 @@ def optimize(
     config: Config,
     device: str,
     train_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader,
     eval_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader,
     n_eval_steps: int,
     out_dir: Path | None,
     tied_weights: list[tuple[str, str]] | None = None,
     ln_stds: dict[str, float] | None = None,
     nontarget_train_loader: DataLoader[Int[Tensor, "..."]]
     | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader
     | None = None,
 ) -> None:
     """Run the optimization loop for LM decomposition."""

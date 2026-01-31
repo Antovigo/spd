@@ -59,8 +59,8 @@ output_loss_type: kl
 nontarget_impmin_coeff_ratio: 1.5
 
 # --- Training ---
-batch_size: 16
-eval_batch_size: 16
+batch_size: 256
+eval_batch_size: 256
 steps: 50000
 gradient_accumulation_steps: 1
 lr_schedule:
@@ -77,7 +77,7 @@ faithfulness_warmup_weight_decay: 0.0
 # --- Logging & Saving ---
 train_log_freq: 100
 eval_freq: 1000
-slow_eval_freq: 5000
+slow_eval_freq: 2000
 n_eval_steps: 5
 slow_eval_on_first_step: true
 save_freq: 10000
@@ -98,8 +98,10 @@ eval_metric_configs:
   - classname: CEandKLLosses
     rounding_threshold: 0.0
   - classname: CIMeanPerComponent
-  - classname: StochasticHiddenActsReconLoss
-    coeff: null
+  - classname: TargetedCIHeatmap
+    n_nontarget_examples: 5
+  # - classname: StochasticHiddenActsReconLoss
+  #   coeff: null
 
 # --- Pretrained model info ---
 pretrained_model_class: transformers.GPTNeoXForCausalLM

@@ -1,3 +1,4 @@
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -269,10 +270,11 @@ def create_data_loader(
     return loader, tokenizer
 
 
-def loop_dataloader[T](dl: DataLoader[T]):
+def loop_dataloader[T](dl: DataLoader[T] | Iterable[T]) -> Iterator[T]:
     """Loop over a dataloader, resetting the iterator when it is exhausted.
 
     Ensures that each epoch gets different data, even when using a distributed sampler.
+    For infinite iterators (like StaticBatchLoader), simply yields from them directly.
     """
     epoch = 0
     dl_iter = iter(dl)
@@ -282,10 +284,11 @@ def loop_dataloader[T](dl: DataLoader[T]):
         except StopIteration:
             logger.warning("Dataloader exhausted, resetting iterator.")
             epoch += 1
-            if isinstance(dl.sampler, DistributedSampler):
-                dl.sampler.set_epoch(epoch)
-            if isinstance(dl.dataset, IterableDataset):
-                dl.dataset.set_epoch(epoch)
+            if isinstance(dl, DataLoader):
+                if isinstance(dl.sampler, DistributedSampler):
+                    dl.sampler.set_epoch(epoch)
+                if isinstance(dl.dataset, IterableDataset):
+                    dl.dataset.set_epoch(epoch)
             dl_iter = iter(dl)
             yield next(dl_iter)
 
