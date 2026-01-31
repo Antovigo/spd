@@ -264,7 +264,7 @@ class TargetedCIHeatmap(Metric):
                 split=task_config.train_data_split,
                 n_ctx=task_config.max_seq_len,
                 is_tokenized=task_config.is_tokenized,
-                streaming=task_config.streaming,
+                streaming=True,  # Always stream - we only need a few examples
                 column_name=task_config.column_name,
                 shuffle_each_epoch=False,
             )
