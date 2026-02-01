@@ -1,0 +1,11 @@
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-3
+---
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
+---
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
+---
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
+---
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
+---
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-6

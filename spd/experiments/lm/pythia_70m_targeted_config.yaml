@@ -8,7 +8,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "pythia/test"
+output_dir_name: "pythia/sweep impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
 seed: 0
 n_mask_samples: 1
 ci_config:
@@ -22,11 +22,11 @@ sigmoid_type: leaky_hard
 # QKV fused: (512, 1536), attn_out: (512, 512), mlp_up: (512, 2048), mlp_down: (2048, 512)
 module_info:
   - module_pattern: "gpt_neox.layers.*.mlp.dense_h_to_4h"
-    C: 128
+    C: 96
   - module_pattern: "gpt_neox.layers.*.mlp.dense_4h_to_h"
-    C: 128
+    C: 96
   - module_pattern: "gpt_neox.layers.*.attention.query_key_value"
-    C: 128
+    C: 96
   - module_pattern: "gpt_neox.layers.*.attention.dense"
     C: 64
 identity_module_info: null
@@ -42,7 +42,7 @@ loss_metric_configs:
     p_anneal_final_p: 1
     p_anneal_end_frac: 1.0
   - classname: StochasticReconSubsetLoss
-    coeff: 0.5
+    coeff: 1
     routing:
       type: uniform_k_subset
   # - classname: PGDReconSubsetLoss
@@ -56,14 +56,14 @@ loss_metric_configs:
   # - classname: FaithfulnessLoss
   #   coeff: 1000000.0
 output_loss_type: kl
-nontarget_impmin_coeff_ratio: 1.5
+nontarget_impmin_coeff_ratio: 1.0
 
 # --- Training ---
-batch_size: 128
-nontarget_batch_size: 1
+batch_size: 256
+nontarget_batch_size: 2
 eval_batch_size: 32
 
-steps: 50000
+steps: 20000
 gradient_accumulation_steps: 1
 lr_schedule:
   start_val: 0.0002
@@ -101,7 +101,7 @@ eval_metric_configs:
     rounding_threshold: 0.0
   - classname: CIMeanPerComponent
   - classname: TargetedCIHeatmap
-    n_nontarget_examples: 5
+    n_nontarget_examples: 10
   # - classname: StochasticHiddenActsReconLoss
   #   coeff: null
 
