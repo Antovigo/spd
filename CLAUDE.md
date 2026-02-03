@@ -161,6 +161,15 @@ Targeted decomposition allows decomposing a model using only a narrow set of inp
 - On **target data**: SPD runs as usual. Delta component is **ablated according to causal importance** (`force_delta=None`), either stochastically or adversarially, forcing the learned components to handle target data without relying on the delta.
 - On **nontarget data**: Delta component is **always activated** (`force_delta=1.0`), allowing it to capture all mechanisms never used for target data. The components that are active on both target and nontarget inputs can still activate based on their CI functions.
 
+**Loss Behavior in Targeted Mode:**
+
+The `force_delta` parameter controls how losses handle the delta component:
+
+- **Stochastic losses** (StochasticReconLoss, StochasticReconLayerwiseLoss, StochasticReconSubsetLoss): On target data, delta mask is sampled randomly. On nontarget data, delta is always on.
+- **CI-masked losses** (CIMaskedReconLoss, CIMaskedReconLayerwiseLoss, CIMaskedReconSubsetLoss): On target data, delta mask comes from the CI function. On nontarget data, delta is always on.
+- **PGD losses** (PGDReconLoss, PGDReconLayerwiseLoss, PGDReconSubsetLoss): On target data, delta mask is adversarially optimized along with component masks. On nontarget data, delta is always on and only component masks are adversarially optimized.
+- **UnmaskedReconLoss**: Computes loss with all components on and no delta. Skipped on nontarget data because components + delta = original weights, making the loss trivially zero.
+
 **Config Fields** (`spd/configs.py:752-782`):
 ```yaml
 nontarget_task_config:        # Task config for nontarget data (if None, targeted mode disabled)
@@ -194,9 +203,6 @@ All targeted metrics require `nontarget_eval_iterator`. All experiments (TMS, Re
 - `spd/experiments/lm/pythia_70m_targeted_config.yaml` - LM with prompts (target) + Pile (nontarget)
 - `spd/experiments/tms/tms_5-2-id-targeted_config.yaml` - TMS with specific features
 - `spd/experiments/resid_mlp/resid_mlp1-targeted_config.yaml` - ResidMLP with specific features
-
-**Known Limitations:**
-- `StochasticHiddenActsReconLoss` doesn't support `force_delta`, so it uses random delta for both target and nontarget. Avoid using it as a training loss in targeted mode.
 
 ## Directory Structure
 

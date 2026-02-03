@@ -26,6 +26,7 @@ from spd.configs import (
     PGDMultiBatchConfig,
     PGDMultiBatchReconLossConfig,
     PGDMultiBatchReconSubsetLossConfig,
+    UnmaskedReconLossConfig,
 )
 from spd.data import loop_dataloader
 from spd.eval import evaluate, evaluate_multibatch_pgd
@@ -148,6 +149,8 @@ def optimize(
     )
 
     # Create nontarget loss configs with scaled impmin coeff (done once, not per step)
+    # UnmaskedReconLoss is skipped for nontarget data since components + delta = original weights,
+    # making the loss trivially zero and uninformative.
     nontarget_loss_configs: list[LossMetricConfigType] | None = None
     if config.nontarget_task_config is not None:
         nontarget_loss_configs = [
@@ -164,6 +167,7 @@ def optimize(
             if isinstance(cfg, ImportanceMinimalityLossConfig) and cfg.coeff is not None
             else cfg
             for cfg in config.loss_metric_configs
+            if not isinstance(cfg, UnmaskedReconLossConfig)
         ]
 
     def create_pgd_data_iter() -> (
