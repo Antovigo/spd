@@ -63,6 +63,8 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "IdentityCIError": "IdCIErr",
     "PermutedCIPlots": "PermCIPlots",
     "TargetedCIHeatmap": "TargetCIHeat",
+    "TargetedCI_L0": "TargetCI_L0",
+    "TargetedCEandKL": "TargetCEKL",
     "UVPlots": "UVPlots",
     "StochasticReconSubsetCEAndKL": "StochReconSubCEKL",
     "PGDMultiBatchReconLoss": "PGDMultiBatchRecon",
