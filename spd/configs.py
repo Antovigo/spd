@@ -965,3 +965,11 @@ class Config(BaseConfig):
         from spd.utils.run_utils import resolve_template_string
 
         return resolve_template_string(self.output_dir_name, self.model_dump(mode="json"))
+
+
+class EvalConfig(BaseConfig):
+    """Config for running evaluations on a decomposed model."""
+
+    eval_batch_size: PositiveInt
+    n_eval_steps: PositiveInt
+    eval_metric_configs: list[Annotated[MetricConfigType, Field(discriminator="classname")]]

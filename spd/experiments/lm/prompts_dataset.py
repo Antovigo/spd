@@ -103,7 +103,9 @@ def create_prompts_data_loader(
             from datasets import concatenate_datasets
 
             n_repeats = (batch_size + n_prompts - 1) // n_prompts
-            logger.info(f"Repeating {n_prompts} prompts {n_repeats}x to fill batch_size={batch_size}")
+            logger.info(
+                f"Repeating {n_prompts} prompts {n_repeats}x to fill batch_size={batch_size}"
+            )
             dataset = concatenate_datasets([dataset] * n_repeats)
             dataset = dataset.with_format("torch")
 

@@ -28,8 +28,8 @@ from spd.configs import (
     PGDMultiBatchReconSubsetLossConfig,
 )
 from spd.data import loop_dataloader
-from spd.experiments.lm.prompts_dataset import StaticBatchLoader
 from spd.eval import evaluate, evaluate_multibatch_pgd
+from spd.experiments.lm.prompts_dataset import StaticBatchLoader
 from spd.identity_insertion import insert_identity_operations_
 from spd.log import logger
 from spd.losses import compute_total_loss
