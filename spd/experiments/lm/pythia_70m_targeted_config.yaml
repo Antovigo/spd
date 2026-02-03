@@ -8,7 +8,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "pythia/sweep impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+output_dir_name: "pythia/sweep impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
 seed: 0
 n_mask_samples: 1
 ci_config:
