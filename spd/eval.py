@@ -127,7 +127,9 @@ def init_metric(
     model: ComponentModel,
     run_config: Config,
     device: str,
-    nontarget_eval_iterator: Iterator[Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    nontarget_eval_iterator: Iterator[
+        Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]
+    ]
     | None = None,
 ) -> Metric:
     match cfg:

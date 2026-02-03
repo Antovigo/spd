@@ -1,11 +1,47 @@
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-3
----
+output_dir_name: "pythia_sweep/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
 loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
 ---
+output_dir_name: "pythia_sweep/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
 loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
 ---
+output_dir_name: "pythia_sweep/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
 loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
 ---
+output_dir_name: "pythia_sweep/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
 loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
 ---
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-6
+output_dir_name: "pythia_sweep/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
+---
+output_dir_name: "pythia_sweep/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
+---
+output_dir_name: "pythia_sweep/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
+---
+output_dir_name: "pythia_sweep/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
+---
+output_dir_name: "pythia_sweep/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
+---
+output_dir_name: "pythia_sweep/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
+---
+output_dir_name: "pythia_sweep/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
+---
+output_dir_name: "pythia_sweep/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
+loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5

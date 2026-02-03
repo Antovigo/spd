@@ -56,7 +56,7 @@ loss_metric_configs:
   # - classname: FaithfulnessLoss
   #   coeff: 1000000.0
 output_loss_type: kl
-nontarget_impmin_coeff_ratio: 1.0
+nontarget_impmin_coeff_ratio: 1.5
 
 # --- Training ---
 batch_size: 256
@@ -82,7 +82,7 @@ eval_freq: 1000
 slow_eval_freq: 2000
 n_eval_steps: 5
 slow_eval_on_first_step: true
-save_freq: 10000
+# save_freq: 10000
 ci_alive_threshold: 0.0
 n_examples_until_dead: 1638400  # train_log_freq * batch_size * max_seq_len = 100 * 16 * 1024
 eval_metric_configs:
@@ -101,7 +101,7 @@ eval_metric_configs:
     rounding_threshold: 0.0
   - classname: CIMeanPerComponent
   - classname: TargetedCIHeatmap
-    n_nontarget_examples: 10
+    n_nontarget_examples: 5
   - classname: TargetedCI_L0
     groups:
       total:

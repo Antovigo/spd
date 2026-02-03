@@ -223,7 +223,9 @@ def main(
                 ), (
                     f"Nontarget eval batch size {config.effective_nontarget_eval_batch_size} is not divisible by world size {world_size}."
                 )
-                nontarget_eval_rank_batch_size = config.effective_nontarget_eval_batch_size // world_size
+                nontarget_eval_rank_batch_size = (
+                    config.effective_nontarget_eval_batch_size // world_size
+                )
             case None:
                 nontarget_rank_microbatch_size = config.nontarget_microbatch_size
                 nontarget_eval_rank_batch_size = config.effective_nontarget_eval_batch_size

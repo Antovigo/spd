@@ -39,7 +39,7 @@ def load_prompts_dataset(
     Args:
         prompts_file: Path to text file with one prompt per line
         tokenizer: Tokenizer to use for encoding prompts
-        max_seq_len: Maximum sequence length (prompts are padded/truncated to this)
+        max_seq_len: Maximum sequence length (prompts are padded to this, errors if exceeded)
 
     Returns:
         HuggingFace Dataset with 'input_ids' column of shape (n_prompts, max_seq_len)
@@ -56,15 +56,20 @@ def load_prompts_dataset(
     if getattr(tokenizer, "pad_token_id", None) is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id  # pyright: ignore[reportAttributeAccessIssue]
 
-    encoded: Any = tokenizer(  # pyright: ignore[reportCallIssue]
-        prompts,
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_len,
-        return_tensors="pt",
-    )
-    assert isinstance(encoded["input_ids"], torch.Tensor)
-    dataset = Dataset.from_dict({"input_ids": encoded["input_ids"].tolist()})
+    encoded: Any = tokenizer(prompts)  # pyright: ignore[reportCallIssue]
+    lengths = [len(ids) for ids in encoded["input_ids"]]
+    too_long = [(i, length) for i, length in enumerate(lengths) if length > max_seq_len]
+    if too_long:
+        idx, length = too_long[0]
+        raise ValueError(
+            f"Prompt at index {idx} has {length} tokens, exceeding max_seq_len={max_seq_len}. "
+            f"Found {len(too_long)} prompts exceeding limit."
+        )
+
+    # Pad to max_seq_len
+    pad_token_id = tokenizer.pad_token_id  # pyright: ignore[reportAttributeAccessIssue]
+    input_ids = [ids + [pad_token_id] * (max_seq_len - len(ids)) for ids in encoded["input_ids"]]
+    dataset = Dataset.from_dict({"input_ids": input_ids})
     dataset = dataset.with_format("torch")
 
     return dataset
