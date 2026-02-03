@@ -51,6 +51,19 @@ class TargetedCEandKL(Metric):
         "ce_component_model",
     ]
 
+    kl_keys: list[str] = [
+        "kl_components_only_ci_masked",
+        "kl_components_only_rounded_masked",
+        "kl_components_only_unmasked",
+        "kl_full_ci_masked",
+        "kl_full_rounded_masked",
+        "kl_delta_only",
+    ]
+    ce_keys: list[str] = [
+        "ce_baseline",
+        "ce_component_model",
+    ]
+
     def __init__(
         self,
         model: ComponentModel,
@@ -76,7 +89,10 @@ class TargetedCEandKL(Metric):
         self.target_loss_sums: dict[str, Tensor] = {
             key: torch.tensor(0.0, device=device) for key in self.loss_keys
         }
-        self.target_n_positions: Int[Tensor, ""] = torch.tensor(0, device=device)
+        # Track positions separately for KL (all positions) and CE (valid positions only)
+        # CE uses ignore_index=-100 for first token of each sequence, so valid = B*(S-1)
+        self.target_n_kl_positions: Int[Tensor, ""] = torch.tensor(0, device=device)
+        self.target_n_ce_positions: Int[Tensor, ""] = torch.tensor(0, device=device)
 
     def _get_mask_infos(
         self,
@@ -186,11 +202,17 @@ class TargetedCEandKL(Metric):
         )
 
         assert batch.ndim == 2, "Batch must be 2D (batch, seq_len)"
-        n_positions_in_batch = batch.shape[0] * batch.shape[1]
+        batch_size, seq_len = batch.shape
+        n_kl_positions = batch_size * seq_len
+        # CE ignores first token of each sequence (masked with -100), so valid = B*(S-1)
+        n_ce_positions = batch_size * (seq_len - 1)
 
-        for key in self.loss_keys:
-            self.target_loss_sums[key] += losses[key] * n_positions_in_batch
-        self.target_n_positions += n_positions_in_batch
+        for key in self.kl_keys:
+            self.target_loss_sums[key] += losses[key] * n_kl_positions
+        for key in self.ce_keys:
+            self.target_loss_sums[key] += losses[key] * n_ce_positions
+        self.target_n_kl_positions += n_kl_positions
+        self.target_n_ce_positions += n_ce_positions
 
         # Store batch info for nontarget processing in compute()
         self.target_batches.append(batch.detach())
@@ -203,17 +225,22 @@ class TargetedCEandKL(Metric):
         """Compute averaged losses for both target and nontarget data."""
         out: dict[str, float] = {}
 
-        # Finalize target losses
-        target_n_positions_reduced = all_reduce(self.target_n_positions, op=ReduceOp.SUM).item()
-        for key in self.loss_keys:
+        # Finalize target losses (use correct position count for each metric type)
+        target_n_kl_reduced = all_reduce(self.target_n_kl_positions, op=ReduceOp.SUM).item()
+        target_n_ce_reduced = all_reduce(self.target_n_ce_positions, op=ReduceOp.SUM).item()
+        for key in self.kl_keys:
             summed_loss = all_reduce(self.target_loss_sums[key], op=ReduceOp.SUM).item()
-            out[f"target/{key}"] = summed_loss / target_n_positions_reduced
+            out[f"target/{key}"] = summed_loss / target_n_kl_reduced
+        for key in self.ce_keys:
+            summed_loss = all_reduce(self.target_loss_sums[key], op=ReduceOp.SUM).item()
+            out[f"target/{key}"] = summed_loss / target_n_ce_reduced
 
         # Process nontarget batches
         nontarget_loss_sums: dict[str, Tensor] = {
             key: torch.tensor(0.0, device=self.device) for key in self.loss_keys
         }
-        nontarget_n_positions = torch.tensor(0, device=self.device)
+        nontarget_n_kl_positions = torch.tensor(0, device=self.device)
+        nontarget_n_ce_positions = torch.tensor(0, device=self.device)
 
         # Reuse the stored weight_deltas (consistent across batches)
         weight_deltas = self.target_weight_deltas[0] if self.target_weight_deltas else {}
@@ -240,16 +267,25 @@ class TargetedCEandKL(Metric):
             )
 
             assert batch.ndim == 2, "Batch must be 2D (batch, seq_len)"
-            n_positions_in_batch = batch.shape[0] * batch.shape[1]
+            batch_size, seq_len = batch.shape
+            n_kl_positions = batch_size * seq_len
+            n_ce_positions = batch_size * (seq_len - 1)
 
-            for key in self.loss_keys:
-                nontarget_loss_sums[key] += losses[key] * n_positions_in_batch
-            nontarget_n_positions += n_positions_in_batch
+            for key in self.kl_keys:
+                nontarget_loss_sums[key] += losses[key] * n_kl_positions
+            for key in self.ce_keys:
+                nontarget_loss_sums[key] += losses[key] * n_ce_positions
+            nontarget_n_kl_positions += n_kl_positions
+            nontarget_n_ce_positions += n_ce_positions
 
         # Finalize nontarget losses
-        nontarget_n_positions_reduced = all_reduce(nontarget_n_positions, op=ReduceOp.SUM).item()
-        for key in self.loss_keys:
+        nontarget_n_kl_reduced = all_reduce(nontarget_n_kl_positions, op=ReduceOp.SUM).item()
+        nontarget_n_ce_reduced = all_reduce(nontarget_n_ce_positions, op=ReduceOp.SUM).item()
+        for key in self.kl_keys:
             summed_loss = all_reduce(nontarget_loss_sums[key], op=ReduceOp.SUM).item()
-            out[f"nontarget/{key}"] = summed_loss / nontarget_n_positions_reduced
+            out[f"nontarget/{key}"] = summed_loss / nontarget_n_kl_reduced
+        for key in self.ce_keys:
+            summed_loss = all_reduce(nontarget_loss_sums[key], op=ReduceOp.SUM).item()
+            out[f"nontarget/{key}"] = summed_loss / nontarget_n_ce_reduced
 
         return out
