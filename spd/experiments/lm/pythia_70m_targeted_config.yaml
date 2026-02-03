@@ -102,6 +102,16 @@ eval_metric_configs:
   - classname: CIMeanPerComponent
   - classname: TargetedCIHeatmap
     n_nontarget_examples: 10
+  - classname: TargetedCI_L0
+    groups:
+      total:
+        - '*'
+      mlp:
+        - gpt_neox.layers.*.mlp.*
+      attn:
+        - gpt_neox.layers.*.attention.*
+  - classname: TargetedCEandKL
+    rounding_threshold: 0.0
   # - classname: StochasticHiddenActsReconLoss
   #   coeff: null
 

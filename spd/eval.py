@@ -34,6 +34,8 @@ from spd.configs import (
     StochasticReconLossConfig,
     StochasticReconSubsetCEAndKLConfig,
     StochasticReconSubsetLossConfig,
+    TargetedCEandKLConfig,
+    TargetedCI_L0Config,
     TargetedCIHeatmapConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
@@ -61,7 +63,9 @@ from spd.metrics.stochastic_recon_layerwise_loss import StochasticReconLayerwise
 from spd.metrics.stochastic_recon_loss import StochasticReconLoss
 from spd.metrics.stochastic_recon_subset_ce_and_kl import StochasticReconSubsetCEAndKL
 from spd.metrics.stochastic_recon_subset_loss import StochasticReconSubsetLoss
+from spd.metrics.targeted_ce_and_kl import TargetedCEandKL
 from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
+from spd.metrics.targeted_ci_l0 import TargetedCI_L0
 from spd.metrics.uv_plots import UVPlots
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.routing import AllLayersRouter, get_subset_router
@@ -123,6 +127,8 @@ def init_metric(
     model: ComponentModel,
     run_config: Config,
     device: str,
+    nontarget_eval_iterator: Iterator[Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | None = None,
 ) -> Metric:
     match cfg:
         case ImportanceMinimalityLossConfig():
@@ -290,6 +296,31 @@ def init_metric(
                 n_nontarget_examples=cfg.n_nontarget_examples,
             )
 
+        case TargetedCI_L0Config():
+            assert nontarget_eval_iterator is not None, (
+                "TargetedCI_L0 requires nontarget_eval_iterator"
+            )
+            metric = TargetedCI_L0(
+                model=model,
+                device=device,
+                ci_alive_threshold=run_config.ci_alive_threshold,
+                groups=cfg.groups,
+                nontarget_eval_iterator=nontarget_eval_iterator,
+                sampling=run_config.sampling,
+            )
+
+        case TargetedCEandKLConfig():
+            assert nontarget_eval_iterator is not None, (
+                "TargetedCEandKL requires nontarget_eval_iterator"
+            )
+            metric = TargetedCEandKL(
+                model=model,
+                device=device,
+                sampling=run_config.sampling,
+                rounding_threshold=cfg.rounding_threshold,
+                nontarget_eval_iterator=nontarget_eval_iterator,
+            )
+
         case _:
             # We shouldn't handle **all** cases because PGDMultiBatch metrics should be handled by
             # the evaluate_multibatch_pgd function below.
@@ -301,6 +332,10 @@ def evaluate(
     eval_metric_configs: list[MetricConfigType],
     model: ComponentModel,
     eval_iterator: Iterator[Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
+    nontarget_eval_iterator: Iterator[
+        Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]
+    ]
+    | None,
     device: str,
     run_config: Config,
     slow_step: bool,
@@ -311,7 +346,13 @@ def evaluate(
 
     metrics: list[Metric] = []
     for cfg in eval_metric_configs:
-        metric = init_metric(cfg=cfg, model=model, run_config=run_config, device=device)
+        metric = init_metric(
+            cfg=cfg,
+            model=model,
+            run_config=run_config,
+            device=device,
+            nontarget_eval_iterator=nontarget_eval_iterator,
+        )
         if metric.slow and not slow_step:
             continue
         metrics.append(metric)

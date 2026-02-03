@@ -204,6 +204,7 @@ def main(
         )
 
     nontarget_train_loader = None
+    nontarget_eval_loader = None
     if config.nontarget_task_config is not None:
         assert isinstance(config.nontarget_task_config, LMTaskConfig)
 
@@ -216,8 +217,16 @@ def main(
                     f"Nontarget microbatch size {config.nontarget_microbatch_size} is not divisible by world size {world_size}."
                 )
                 nontarget_rank_microbatch_size = config.nontarget_microbatch_size // world_size
+                assert (
+                    config.effective_nontarget_eval_batch_size % world_size == 0
+                    and config.effective_nontarget_eval_batch_size > 0
+                ), (
+                    f"Nontarget eval batch size {config.effective_nontarget_eval_batch_size} is not divisible by world size {world_size}."
+                )
+                nontarget_eval_rank_batch_size = config.effective_nontarget_eval_batch_size // world_size
             case None:
                 nontarget_rank_microbatch_size = config.nontarget_microbatch_size
+                nontarget_eval_rank_batch_size = config.effective_nontarget_eval_batch_size
 
         if config.nontarget_task_config.prompts_file is not None:
             assert config.tokenizer_name is not None
@@ -228,6 +237,14 @@ def main(
                 batch_size=nontarget_rank_microbatch_size,
                 dist_state=dist_state,
                 seed=config.seed + 2,
+            )
+            nontarget_eval_loader, _ = create_prompts_data_loader(
+                prompts_file=Path(config.nontarget_task_config.prompts_file),
+                tokenizer_name=config.tokenizer_name,
+                max_seq_len=config.nontarget_task_config.max_seq_len,
+                batch_size=nontarget_eval_rank_batch_size,
+                dist_state=dist_state,
+                seed=config.seed + 3,
             )
         else:
             assert config.nontarget_task_config.dataset_name is not None, (
@@ -251,6 +268,24 @@ def main(
                 global_seed=config.seed + 2,
                 dist_state=dist_state,
             )
+            nontarget_eval_data_config = DatasetConfig(
+                name=config.nontarget_task_config.dataset_name,
+                hf_tokenizer_path=config.tokenizer_name,
+                split=config.nontarget_task_config.eval_data_split,
+                n_ctx=config.nontarget_task_config.max_seq_len,
+                is_tokenized=config.nontarget_task_config.is_tokenized,
+                streaming=config.nontarget_task_config.streaming,
+                column_name=config.nontarget_task_config.column_name,
+                shuffle_each_epoch=config.nontarget_task_config.shuffle_each_epoch,
+                seed=None,
+            )
+            nontarget_eval_loader, _ = create_data_loader(
+                dataset_config=nontarget_eval_data_config,
+                batch_size=nontarget_eval_rank_batch_size,
+                buffer_size=config.nontarget_task_config.buffer_size,
+                global_seed=config.seed + 3,
+                dist_state=dist_state,
+            )
 
     if is_main_process():
         logger.info("Starting optimization...")
@@ -265,6 +300,7 @@ def main(
         out_dir=out_dir,
         ln_stds=ln_stds,
         nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
     if is_main_process():

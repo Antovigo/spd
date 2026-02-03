@@ -456,6 +456,16 @@ class TargetedCIHeatmapConfig(BaseConfig):
     )
 
 
+class TargetedCI_L0Config(BaseConfig):
+    classname: Literal["TargetedCI_L0"] = "TargetedCI_L0"
+    groups: dict[str, list[str]] | None = None
+
+
+class TargetedCEandKLConfig(BaseConfig):
+    classname: Literal["TargetedCEandKL"] = "TargetedCEandKL"
+    rounding_threshold: float = 0.5
+
+
 class ComponentActivationDensityConfig(BaseConfig):
     classname: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
 
@@ -515,6 +525,8 @@ EvalOnlyMetricConfigType = (
     | IdentityCIErrorConfig
     | PermutedCIPlotsConfig
     | TargetedCIHeatmapConfig
+    | TargetedCI_L0Config
+    | TargetedCEandKLConfig
     | UVPlotsConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig
@@ -746,6 +758,10 @@ class Config(BaseConfig):
         default=None,
         description="Batch size for nontarget data. Defaults to batch_size if not specified.",
     )
+    nontarget_eval_batch_size: PositiveInt | None = Field(
+        default=None,
+        description="Batch size for nontarget eval. Defaults to nontarget_batch_size.",
+    )
     nontarget_impmin_coeff_ratio: NonNegativeFloat = Field(
         default=1.0,
         description="Multiplier for importance-minimality coefficient on nontarget batches. "
@@ -756,6 +772,14 @@ class Config(BaseConfig):
     def nontarget_microbatch_size(self) -> PositiveInt:
         nontarget_bs = self.nontarget_batch_size or self.batch_size
         return nontarget_bs // self.gradient_accumulation_steps
+
+    @property
+    def effective_nontarget_eval_batch_size(self) -> int:
+        if self.nontarget_eval_batch_size is not None:
+            return self.nontarget_eval_batch_size
+        if self.nontarget_batch_size is not None:
+            return self.nontarget_batch_size
+        return self.batch_size
 
     DEPRECATED_CONFIG_KEYS: ClassVar[list[str]] = [
         "image_on_first_step",

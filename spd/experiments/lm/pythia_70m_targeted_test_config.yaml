@@ -57,6 +57,12 @@ eval_metric_configs:
     n_batches_accum: 1
   - classname: TargetedCIHeatmap
     n_nontarget_examples: 10
+  - classname: TargetedCI_L0
+    groups:
+      total:
+        - '*'
+  - classname: TargetedCEandKL
+    rounding_threshold: 0.0
 
 # --- Pretrained model info ---
 pretrained_model_class: transformers.GPTNeoXForCausalLM

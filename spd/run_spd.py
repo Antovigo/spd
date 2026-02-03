@@ -131,6 +131,10 @@ def optimize(
     | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
     | StaticBatchLoader
     | None = None,
+    nontarget_eval_loader: DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader
+    | None = None,
 ) -> None:
     """Run the optimization loop for LM decomposition."""
 
@@ -138,6 +142,9 @@ def optimize(
     eval_iterator = loop_dataloader(eval_loader)
     nontarget_train_iterator = (
         loop_dataloader(nontarget_train_loader) if nontarget_train_loader is not None else None
+    )
+    nontarget_eval_iterator = (
+        loop_dataloader(nontarget_eval_loader) if nontarget_eval_loader is not None else None
     )
 
     # Create nontarget loss configs with scaled impmin coeff (done once, not per step)
@@ -428,6 +435,7 @@ def optimize(
                     eval_metric_configs=eval_metric_configs,
                     model=component_model,  # No backward passes so DDP wrapped_model not needed
                     eval_iterator=eval_iterator,
+                    nontarget_eval_iterator=nontarget_eval_iterator,
                     device=device,
                     run_config=config,
                     slow_step=slow_step,
