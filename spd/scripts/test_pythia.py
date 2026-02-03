@@ -56,6 +56,15 @@ def get_top_k_probs(
     ]
 
 
+def tokenize_to_strings(tokenizer: PreTrainedTokenizerBase, text: str) -> list[str]:
+    token_ids = tokenizer.encode(text)
+    return [tokenizer.decode(tid) for tid in token_ids]
+
+
+def format_tokens(tokens: list[str], delimiter: str = "|") -> str:
+    return delimiter.join(repr(t) for t in tokens)
+
+
 def generate(
     model: AutoModelForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
@@ -64,8 +73,9 @@ def generate(
     temperature: float,
     do_sample: bool,
     device: str,
-) -> str:
+) -> list[str]:
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    prompt_len = inputs["input_ids"].shape[1]
     with torch.no_grad():
         outputs = model.generate(  # pyright: ignore[reportCallIssue]
             **inputs,
@@ -75,7 +85,8 @@ def generate(
             pad_token_id=tokenizer.eos_token_id,
         )
     assert isinstance(outputs, torch.Tensor)
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    new_token_ids = outputs[0, prompt_len:].tolist()
+    return [tokenizer.decode(tid) for tid in new_token_ids]
 
 
 def main():
@@ -124,13 +135,14 @@ def main():
     print("=" * 60)
 
     for prompt in prompts:
-        print(f"\nPrompt: {prompt!r}")
+        prompt_tokens = tokenize_to_strings(tokenizer, prompt)
+        print(f"\nPrompt: {format_tokens(prompt_tokens)}")
         if args.top_k_probs:
             top_k = get_top_k_probs(model, tokenizer, prompt, args.top_k_probs, device)
             for token, prob in top_k:
                 print(f"  {prob:6.2%}  {token!r}")
         else:
-            output = generate(
+            output_tokens = generate(
                 model,
                 tokenizer,
                 prompt,
@@ -139,7 +151,7 @@ def main():
                 do_sample=not args.greedy,
                 device=device,
             )
-            print(f"Output: {output!r}")
+            print(f"Output: {format_tokens(output_tokens)}")
 
 
 if __name__ == "__main__":
