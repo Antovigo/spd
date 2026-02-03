@@ -310,7 +310,7 @@ def optimize(
                 use_delta_component=config.use_delta_component,
                 n_mask_samples=config.n_mask_samples,
                 output_loss_type=config.output_loss_type,
-                force_delta_mask_one=False,
+                force_delta=None,
             )
             # If nontarget batch follows, retain graph so weight_deltas gradients can flow
             microbatch_total_loss.div_(config.gradient_accumulation_steps).backward(
@@ -358,7 +358,7 @@ def optimize(
                     use_delta_component=config.use_delta_component,
                     n_mask_samples=config.n_mask_samples,
                     output_loss_type=config.output_loss_type,
-                    force_delta_mask_one=True,
+                    force_delta=1.0,
                 )
                 nontarget_loss.div_(config.gradient_accumulation_steps).backward()
 

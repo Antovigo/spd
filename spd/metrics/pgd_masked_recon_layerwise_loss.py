@@ -22,7 +22,7 @@ def _pgd_recon_layerwise_loss_update(
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     pgd_config: PGDConfig,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], Int[Tensor, ""]]:
     device = next(iter(ci.values())).device
     sum_loss = torch.tensor(0.0, device=device)
@@ -37,7 +37,7 @@ def _pgd_recon_layerwise_loss_update(
             output_loss_type=output_loss_type,
             router=LayerRouter(device=device, layer_name=layer),
             pgd_config=pgd_config,
-            force_delta_mask_one=force_delta_mask_one,
+            force_delta=force_delta,
         )
         sum_loss += sum_loss_layer
         n_examples += n_examples_layer
@@ -53,7 +53,7 @@ def pgd_recon_layerwise_loss(
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     pgd_config: PGDConfig,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _pgd_recon_layerwise_loss_update(
         model=model,
@@ -63,7 +63,7 @@ def pgd_recon_layerwise_loss(
         ci=ci,
         weight_deltas=weight_deltas,
         pgd_config=pgd_config,
-        force_delta_mask_one=force_delta_mask_one,
+        force_delta=force_delta,
     )
     return sum_loss / n_examples
 

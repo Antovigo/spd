@@ -25,7 +25,7 @@ def pgd_masked_recon_loss_update(
     output_loss_type: Literal["mse", "kl"],
     router: Router,
     pgd_config: PGDConfig,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     """Central implementation of PGD masked reconstruction loss.
 
@@ -60,7 +60,7 @@ def pgd_masked_recon_loss_update(
         target_out=target_out,
         output_loss_type=output_loss_type,
         batch_dims=batch_dims,
-        force_delta_mask_one=force_delta_mask_one,
+        force_delta=force_delta,
     )
 
     for _ in range(pgd_config.n_steps):
@@ -165,7 +165,7 @@ def _forward_with_adv_sources(
     target_out: Float[Tensor, "... vocab"],
     output_loss_type: Literal["mse", "kl"],
     batch_dims: tuple[int, ...],
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ):
     expanded_adv_sources = {k: v.expand(*batch_dims, -1) for k, v in adv_sources.items()}
     adv_sources_components: dict[str, Float[Tensor, "*batch_dims C"]]
@@ -174,11 +174,9 @@ def _forward_with_adv_sources(
             weight_deltas_and_masks = None
             adv_sources_components = expanded_adv_sources
         case dict():
-            if force_delta_mask_one:
-                import torch
-
+            if force_delta is not None:
                 weight_deltas_and_masks = {
-                    k: (weight_deltas[k], torch.ones(*batch_dims, device=batch.device))
+                    k: (weight_deltas[k], torch.full(batch_dims, force_delta, device=batch.device))
                     for k in weight_deltas
                 }
                 adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}

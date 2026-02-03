@@ -49,7 +49,7 @@ class TestStochasticReconSubsetLoss:
             component_mask_sampling: SamplingType,  # pyright: ignore[reportUnusedParameter]
             router: Router,  # pyright: ignore[reportUnusedParameter]
             weight_deltas: dict[str, Tensor] | None,  # pyright: ignore[reportUnusedParameter]
-            force_delta_mask_one: bool = False,  # pyright: ignore[reportUnusedParameter]
+            force_delta: float | None = None,  # pyright: ignore[reportUnusedParameter]
         ) -> dict[str, ComponentsMaskInfo]:
             idx = call_count[0] % len(sample_data)
             call_count[0] += 1

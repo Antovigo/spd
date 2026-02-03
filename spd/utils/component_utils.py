@@ -12,8 +12,15 @@ def calc_stochastic_component_mask_info(
     component_mask_sampling: SamplingType,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     router: Router,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> dict[str, ComponentsMaskInfo]:
+    """Calculate stochastic component mask info for reconstruction losses.
+
+    Args:
+        force_delta: If None, use random mask for delta component. If a float (e.g., 0.0 or 1.0),
+            use that value as the delta mask. Use 1.0 for nontarget data during training,
+            None for target data, and 0.0 to evaluate active components only.
+    """
     ci_sample = next(iter(causal_importances.values()))
     leading_dims = ci_sample.shape[:-1]
     device = ci_sample.device
@@ -32,8 +39,8 @@ def calc_stochastic_component_mask_info(
     if weight_deltas is not None:
         weight_deltas_and_masks = {}
         for layer in causal_importances:
-            if force_delta_mask_one:
-                delta_mask = torch.ones(leading_dims, device=device, dtype=dtype)
+            if force_delta is not None:
+                delta_mask = torch.full(leading_dims, force_delta, device=device, dtype=dtype)
             else:
                 delta_mask = torch.rand(leading_dims, device=device, dtype=dtype)
             weight_deltas_and_masks[layer] = (weight_deltas[layer], delta_mask)

@@ -22,7 +22,7 @@ def _ci_masked_recon_subset_loss_update(
     ci: dict[str, Float[Tensor, "... C"]],
     router: Router,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     subset_routing_masks = router.get_masks(
         module_names=model.target_module_paths,
@@ -31,7 +31,7 @@ def _ci_masked_recon_subset_loss_update(
     weight_deltas_and_masks: dict[str, WeightDeltaAndMask] | None = None
     if weight_deltas is not None:
         leading_dims = next(iter(ci.values())).shape[:-1]
-        delta_mask_value = 1.0 if force_delta_mask_one else 0.0
+        delta_mask_value = force_delta if force_delta is not None else 0.0
         weight_deltas_and_masks = {
             layer: (
                 weight_deltas[layer],
@@ -64,7 +64,7 @@ def ci_masked_recon_subset_loss(
     ci: dict[str, Float[Tensor, "... C"]],
     routing: SubsetRoutingType,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _ci_masked_recon_subset_loss_update(
         model=model,
@@ -74,7 +74,7 @@ def ci_masked_recon_subset_loss(
         ci=ci,
         router=get_subset_router(routing, batch.device),
         weight_deltas=weight_deltas,
-        force_delta_mask_one=force_delta_mask_one,
+        force_delta=force_delta,
     )
     return _ci_masked_recon_subset_loss_compute(sum_loss, n_examples)
 

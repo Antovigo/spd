@@ -19,14 +19,14 @@ def _ci_masked_recon_layerwise_loss_update(
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     sum_loss = torch.tensor(0.0, device=batch.device)
     n_examples = 0
     weight_deltas_and_masks: dict[str, WeightDeltaAndMask] | None = None
     if weight_deltas is not None:
         leading_dims = next(iter(ci.values())).shape[:-1]
-        delta_mask_value = 1.0 if force_delta_mask_one else 0.0
+        delta_mask_value = force_delta if force_delta is not None else 0.0
         weight_deltas_and_masks = {
             layer: (
                 weight_deltas[layer],
@@ -56,7 +56,7 @@ def ci_masked_recon_layerwise_loss(
     target_out: Float[Tensor, "... vocab"],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None = None,
-    force_delta_mask_one: bool = False,
+    force_delta: float | None = None,
 ) -> Float[Tensor, ""]:
     sum_loss, n_examples = _ci_masked_recon_layerwise_loss_update(
         model=model,
@@ -65,7 +65,7 @@ def ci_masked_recon_layerwise_loss(
         target_out=target_out,
         ci=ci,
         weight_deltas=weight_deltas,
-        force_delta_mask_one=force_delta_mask_one,
+        force_delta=force_delta,
     )
     return _ci_masked_recon_layerwise_loss_compute(sum_loss, n_examples)
 
