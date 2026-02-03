@@ -98,6 +98,7 @@ def calc_multibatch_pgd_masked_recon_loss(
     use_delta_component: bool,
     batch_dims: tuple[int, ...],
     device: str,
+    force_delta: float | None = None,
 ) -> Float[Tensor, ""]:
     """PGD masked reconstruction loss with gradient accumulation over multiple batches.
 
@@ -140,6 +141,7 @@ def calc_multibatch_pgd_masked_recon_loss(
         sampling=sampling,
         router=router,
         batch_dims=batch_dims,
+        force_delta=force_delta,
     )
 
     for _ in range(pgd_config.n_steps):
@@ -214,6 +216,7 @@ def _multibatch_pgd_fwd_bwd(
     router: Router,
     sampling: SamplingType,
     batch_dims: tuple[int, ...],
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int, dict[str, Float[Tensor, "*ones mask_c"]]]:
     """Perform a forward and backward pass over multiple batches with gradient accumulation.
 
@@ -259,6 +262,7 @@ def _multibatch_pgd_fwd_bwd(
             target_out=target_model_output.output,
             output_loss_type=output_loss_type,
             batch_dims=batch_dims,
+            force_delta=force_delta,
         )
 
         pgd_step_accum_sum_loss += batch_sum_loss

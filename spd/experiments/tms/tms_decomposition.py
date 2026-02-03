@@ -99,6 +99,7 @@ def main(
     )
 
     nontarget_train_loader = None
+    nontarget_eval_loader = None
     if config.nontarget_task_config is not None:
         assert isinstance(config.nontarget_task_config, TMSTaskConfig)
         nontarget_dataset = SparseFeatureDataset(
@@ -112,6 +113,9 @@ def main(
         )
         nontarget_train_loader = DatasetGeneratedDataLoader(
             nontarget_dataset, batch_size=config.nontarget_microbatch_size, shuffle=False
+        )
+        nontarget_eval_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.effective_nontarget_eval_batch_size, shuffle=False
         )
 
     tied_weights = None
@@ -128,6 +132,7 @@ def main(
         out_dir=out_dir,
         tied_weights=tied_weights,
         nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
     if config.wandb_project:

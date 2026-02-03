@@ -148,6 +148,56 @@ Each experiment (`spd/experiments/{tms,resid_mlp,lm}/`) contains:
 - Uses WandB for experiment tracking and model storage
 - All runs generate timestamped output directories with configs, models, and plots
 
+### Targeted Decomposition
+
+Targeted decomposition allows decomposing a model using only a narrow set of inputs. The goal is to identify subcomponents involved in processing specific target data, potentially saving compute by focusing on relevant mechanisms.
+
+**Concepts**
+- **Target data**: The specific data distribution we want to decompose (e.g., a specific list of prompts)
+- **Nontarget data**: General data that exercises the model more broadly (e.g., the original training data)
+- **Delta component**: The difference between original weights and decomposed component weights
+
+**Key Behavior:**
+- On **target data**: SPD runs as usual. Delta component is **ablated according to causal importance** (`force_delta=None`), either stochastically or adversarially, forcing the learned components to handle target data without relying on the delta.
+- On **nontarget data**: Delta component is **always activated** (`force_delta=1.0`), allowing it to capture all mechanisms never used for target data. The components that are active on both target and nontarget inputs can still activate based on their CI functions.
+
+**Config Fields** (`spd/configs.py:752-782`):
+```yaml
+nontarget_task_config:        # Task config for nontarget data (if None, targeted mode disabled)
+  task_name: lm
+  dataset_name: "..."
+  # ... other task-specific fields
+
+nontarget_batch_size: 32      # Batch size for nontarget data (defaults to batch_size)
+nontarget_eval_batch_size: 32 # Batch size for nontarget eval (defaults to nontarget_batch_size)
+nontarget_impmin_coeff_ratio: 1.5  # Multiplier for ImportanceMinimalityLoss on nontarget data
+```
+
+**Key Code Locations:**
+| File | Lines | Purpose |
+|------|-------|---------|
+| `spd/run_spd.py` | 150-167 | Creates nontarget loss configs with scaled impmin coeff |
+| `spd/run_spd.py` | 341-385 | Nontarget training loop (force_delta=1.0) |
+| `spd/utils/component_utils.py` | 10-57 | `calc_stochastic_component_mask_info` with force_delta |
+| `spd/experiments/lm/lm_decomposition.py` | 206-290 | LM nontarget data loading |
+| `spd/experiments/tms/tms_decomposition.py` | 101-115 | TMS nontarget data loading |
+| `spd/experiments/resid_mlp/resid_mlp_decomposition.py` | 107-125 | ResidMLP nontarget data loading |
+
+**Targeted Evaluation Metrics** (`spd/metrics/`):
+- `TargetedCI_L0`: Compares L0 sparsity between target and nontarget data
+- `TargetedCEandKL`: Compares CE/KL losses with various masking strategies (LM only)
+- `TargetedCIHeatmap`: Visualizes CI patterns on target vs nontarget inputs
+
+All targeted metrics require `nontarget_eval_iterator`. All experiments (TMS, ResidMLP, LM) create both `nontarget_train_loader` and `nontarget_eval_loader` when `nontarget_task_config` is set.
+
+**Example Configs:**
+- `spd/experiments/lm/pythia_70m_targeted_config.yaml` - LM with prompts (target) + Pile (nontarget)
+- `spd/experiments/tms/tms_5-2-id-targeted_config.yaml` - TMS with specific features
+- `spd/experiments/resid_mlp/resid_mlp1-targeted_config.yaml` - ResidMLP with specific features
+
+**Known Limitations:**
+- `StochasticHiddenActsReconLoss` doesn't support `force_delta`, so it uses random delta for both target and nontarget. Avoid using it as a training loss in targeted mode.
+
 ## Directory Structure
 
 ```

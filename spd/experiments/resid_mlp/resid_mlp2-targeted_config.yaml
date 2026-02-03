@@ -71,9 +71,13 @@ eval_metric_configs:
     #dense_ci:
       #- layer_pattern: "layers.*.mlp_out"
         #k: 25
-  - classname: "CI_L0"
-    groups: null
+  # - classname: "CI_L0"
+  #   groups: null
   - classname: "CIMeanPerComponent"
+  - classname: "TargetedCIHeatmap"
+    n_nontarget_examples: 5
+  - classname: "TargetedCI_L0"
+    groups: null
   #- classname: "StochasticHiddenActsReconLoss"
   #- classname: "PGDReconLoss"
     #init: random

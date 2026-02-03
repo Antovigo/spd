@@ -105,6 +105,7 @@ def main(
     )
 
     nontarget_train_loader = None
+    nontarget_eval_loader = None
     if config.nontarget_task_config is not None:
         assert isinstance(config.nontarget_task_config, ResidMLPTaskConfig)
         nontarget_dataset = ResidMLPDataset(
@@ -123,6 +124,9 @@ def main(
         nontarget_train_loader = DatasetGeneratedDataLoader(
             nontarget_dataset, batch_size=config.nontarget_microbatch_size, shuffle=False
         )
+        nontarget_eval_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.effective_nontarget_eval_batch_size, shuffle=False
+        )
 
     # TODO: Below not needed when TMS supports config.n_eval_steps
     assert config.n_eval_steps is not None, "n_eval_steps must be set"
@@ -135,6 +139,7 @@ def main(
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
         nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
     if config.wandb_project:

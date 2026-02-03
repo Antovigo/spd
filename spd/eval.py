@@ -291,11 +291,15 @@ def init_metric(
                 output_loss_type=run_config.output_loss_type,
             )
         case TargetedCIHeatmapConfig():
+            assert nontarget_eval_iterator is not None, (
+                "TargetedCIHeatmap requires nontarget_eval_iterator"
+            )
             metric = TargetedCIHeatmap(
                 model=model,
                 run_config=run_config,
                 device=device,
                 n_nontarget_examples=cfg.n_nontarget_examples,
+                nontarget_eval_iterator=nontarget_eval_iterator,
             )
 
         case TargetedCI_L0Config():
