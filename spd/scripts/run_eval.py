@@ -16,8 +16,10 @@ from tqdm import tqdm
 from spd.configs import (
     Config,
     EvalConfig,
+    IHTaskConfig,
     LMTaskConfig,
     ResidMLPTaskConfig,
+    TaskConfig,
     TMSTaskConfig,
 )
 from spd.data import DatasetConfig, create_data_loader, loop_dataloader
@@ -63,10 +65,12 @@ def create_tms_eval_loader(
     run_config: Config,
     batch_size: int,
     device: str,
+    task_config: TMSTaskConfig | None = None,
 ) -> DataLoader[Any]:
     """Create TMS eval data loader."""
-    task_config = run_config.task_config
-    assert isinstance(task_config, TMSTaskConfig)
+    if task_config is None:
+        assert isinstance(run_config.task_config, TMSTaskConfig)
+        task_config = run_config.task_config
     assert run_config.pretrained_model_path is not None
 
     target_run_info = TMSTargetRunInfo.from_path(run_config.pretrained_model_path)
@@ -88,10 +92,12 @@ def create_resid_mlp_eval_loader(
     run_config: Config,
     batch_size: int,
     device: str,
+    task_config: ResidMLPTaskConfig | None = None,
 ) -> DataLoader[Any]:
     """Create ResidMLP eval data loader."""
-    task_config = run_config.task_config
-    assert isinstance(task_config, ResidMLPTaskConfig)
+    if task_config is None:
+        assert isinstance(run_config.task_config, ResidMLPTaskConfig)
+        task_config = run_config.task_config
     assert run_config.pretrained_model_path is not None
 
     target_run_info = ResidMLPTargetRunInfo.from_path(run_config.pretrained_model_path)
@@ -116,10 +122,12 @@ def create_resid_mlp_eval_loader(
 def create_lm_eval_loader(
     run_config: Config,
     batch_size: int,
+    task_config: LMTaskConfig | None = None,
 ) -> DataLoader[Any] | Iterable[dict[str, Tensor]]:
     """Create LM eval data loader."""
-    task_config = run_config.task_config
-    assert isinstance(task_config, LMTaskConfig)
+    if task_config is None:
+        assert isinstance(run_config.task_config, LMTaskConfig)
+        task_config = run_config.task_config
 
     if task_config.prompts_file is not None:
         assert run_config.tokenizer_name is not None
@@ -161,17 +169,26 @@ def create_eval_loader(
     run_config: Config,
     batch_size: int,
     device: str,
+    task_config_override: TaskConfig | None = None,
 ) -> DataLoader[Any] | Iterable[dict[str, Tensor]]:
-    """Dispatch data loader creation by task type."""
-    match run_config.task_config:
+    """Dispatch data loader creation by task type.
+
+    Args:
+        run_config: The run configuration
+        batch_size: Batch size for the loader
+        device: Device to use
+        task_config_override: If provided, use this task config instead of run_config.task_config
+    """
+    task_config = task_config_override or run_config.task_config
+    match task_config:
         case TMSTaskConfig():
-            return create_tms_eval_loader(run_config, batch_size, device)
+            return create_tms_eval_loader(run_config, batch_size, device, task_config)
         case ResidMLPTaskConfig():
-            return create_resid_mlp_eval_loader(run_config, batch_size, device)
+            return create_resid_mlp_eval_loader(run_config, batch_size, device, task_config)
         case LMTaskConfig():
-            return create_lm_eval_loader(run_config, batch_size)
-        case _:
-            raise ValueError(f"Unsupported task config type: {type(run_config.task_config)}")
+            return create_lm_eval_loader(run_config, batch_size, task_config)
+        case IHTaskConfig():
+            raise ValueError("IH task config not supported for standalone evaluation")
 
 
 def main(
@@ -221,6 +238,18 @@ def main(
     )
     eval_iterator = loop_dataloader(eval_loader)
 
+    # Create nontarget eval loader if nontarget_task_config is set
+    nontarget_eval_iterator = None
+    if run_config.nontarget_task_config is not None:
+        logger.info("Creating nontarget eval data loader...")
+        nontarget_eval_loader = create_eval_loader(
+            run_config=run_config,
+            batch_size=run_config.effective_nontarget_eval_batch_size,
+            device=device,
+            task_config_override=run_config.nontarget_task_config,
+        )
+        nontarget_eval_iterator = loop_dataloader(nontarget_eval_loader)
+
     # Run evaluation
     logger.info(f"Running evaluation with {eval_config.n_eval_steps} steps...")
     with torch.no_grad():
@@ -228,6 +257,7 @@ def main(
             eval_metric_configs=eval_config.eval_metric_configs,
             model=model,
             eval_iterator=eval_iterator,
+            nontarget_eval_iterator=nontarget_eval_iterator,
             device=device,
             run_config=run_config,
             slow_step=True,
