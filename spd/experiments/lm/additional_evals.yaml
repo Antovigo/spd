@@ -1,3 +1,6 @@
+eval_batch_size: 32
+n_eval_steps: 10
+
 eval_metric_configs:
   - classname: CIHistograms
     n_batches_accum: 5
