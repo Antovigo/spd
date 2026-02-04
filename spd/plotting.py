@@ -630,6 +630,7 @@ def plot_ci_vs_weight_magnitude(
         n_cols,
         figsize=(fig_width, fig_height),
         squeeze=False,
+        layout="constrained",
     )
     axs = np.array(axs)
 
@@ -679,7 +680,6 @@ def plot_ci_vs_weight_magnitude(
     fig.colorbar(scatter_plots[0], ax=axs.ravel().tolist(), shrink=0.8, label="Mean CI")
     fig.suptitle("CI vs Weight Magnitude per Component")
 
-    fig.tight_layout()
     fig_img = _render_figure(fig)
     plt.close(fig)
 
