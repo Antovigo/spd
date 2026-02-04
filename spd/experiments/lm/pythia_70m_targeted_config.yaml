@@ -1,6 +1,6 @@
 # Pythia-70m Targeted SPD Configuration
 # Target data: Custom prompts from file
-# Non-target data: The Pile (pre-tokenized)
+# Non-target data: The Pile (tokenized on-the-fly)
 
 # --- WandB ---
 wandb_project: spd
@@ -8,7 +8,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "pythia/sweep impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
+output_dir_name: "pythia/balancing/256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio})"
 seed: 0
 n_mask_samples: 1
 ci_config:
@@ -35,7 +35,7 @@ use_delta_component: true
 # --- Loss config ---
 loss_metric_configs:
   - classname: ImportanceMinimalityLoss
-    coeff: 0.001
+    coeff: 5e-4
     pnorm: 2.0
     beta: 0
     p_anneal_start_frac: 0.0
@@ -45,26 +45,27 @@ loss_metric_configs:
     coeff: 1
     routing:
       type: uniform_k_subset
-  - classname: PGDReconSubsetLoss
-    coeff: 1
-    init: random
-    step_size: 1.0
-    n_steps: 1
-    mask_scope: shared_across_batch
-    routing:
-      type: uniform_k_subset
+  # - classname: PGDReconSubsetLoss
+  #   coeff: 1
+  #   init: random
+  #   step_size: 1.0
+  #   n_steps: 1
+  #   mask_scope: shared_across_batch
+  #   routing:
+  #     type: uniform_k_subset
 output_loss_type: kl
-nontarget_impmin_coeff_ratio: 5
+nontarget_impmin_coeff_ratio: 2
 
 # --- Training ---
 batch_size: 256
-nontarget_batch_size: 2
-eval_batch_size: 32
+nontarget_batch_size: 128
+eval_batch_size: 256
+nontarget_eval_batch_size: 512
 
 steps: 20000
 gradient_accumulation_steps: 1
 lr_schedule:
-  start_val: 0.0002
+  start_val: 0.0005
   fn_type: cosine
   warmup_pct: 0.01
   final_val_frac: 0.1
@@ -76,13 +77,13 @@ faithfulness_warmup_weight_decay: 0.0
 
 # --- Logging & Saving ---
 train_log_freq: 100
-eval_freq: 1000
-slow_eval_freq: 2000
+eval_freq: 2500
+slow_eval_freq: 5000
 n_eval_steps: 5
 slow_eval_on_first_step: true
 # save_freq: 10000
 ci_alive_threshold: 0.0
-n_examples_until_dead: 1638400  # train_log_freq * batch_size * max_seq_len = 100 * 16 * 1024
+n_examples_until_dead: 51200  # train_log_freq * batch_size * max_seq_len = 100 * 256 * 2
 eval_metric_configs:
   - classname: CIHistograms
     n_batches_accum: 5
@@ -129,11 +130,11 @@ task_config:
 # --- Targeted Mode (Non-target data from The Pile) ---
 nontarget_task_config:
   task_name: lm
-  max_seq_len: 1024
-  dataset_name: "NeelNanda/pile-small-tokenized-2b"
-  is_tokenized: true
-  column_name: "tokens"
+  max_seq_len: 64
+  dataset_name: "monology/pile-uncopyrighted"
+  is_tokenized: false
+  column_name: "text"
   train_data_split: "train"
-  eval_data_split: "train"
+  eval_data_split: "validation"
   shuffle_each_epoch: true
   streaming: false

@@ -405,6 +405,10 @@ def optimize(
             )
 
             microbatch_log_data["train/schedules/lr"] = step_lr
+            if torch.cuda.is_available():
+                microbatch_log_data["train/gpu_peak_memory_gb"] = (
+                    torch.cuda.max_memory_allocated() / 1e9
+                )
 
             if is_main_process():
                 assert out_dir is not None
@@ -448,6 +452,9 @@ def optimize(
                 )
 
                 dict_safe_update_(metrics, multibatch_pgd_metrics)
+
+                if torch.cuda.is_available():
+                    metrics["gpu_peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
 
                 if is_main_process():
                     assert out_dir is not None
