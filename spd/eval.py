@@ -17,6 +17,7 @@ from spd.configs import (
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     CIMeanPerComponentConfig,
+    CIvsWeightMagnitudeConfig,
     ComponentActivationDensityConfig,
     Config,
     FaithfulnessLossConfig,
@@ -49,6 +50,7 @@ from spd.metrics.ci_masked_recon_layerwise_loss import CIMaskedReconLayerwiseLos
 from spd.metrics.ci_masked_recon_loss import CIMaskedReconLoss
 from spd.metrics.ci_masked_recon_subset_loss import CIMaskedReconSubsetLoss
 from spd.metrics.ci_mean_per_component import CIMeanPerComponent
+from spd.metrics.ci_vs_weight_magnitude import CIvsWeightMagnitude
 from spd.metrics.component_activation_density import ComponentActivationDensity
 from spd.metrics.faithfulness_loss import FaithfulnessLoss
 from spd.metrics.identity_ci_error import IdentityCIError
@@ -325,6 +327,13 @@ def init_metric(
                 sampling=run_config.sampling,
                 rounding_threshold=cfg.rounding_threshold,
                 nontarget_eval_iterator=nontarget_eval_iterator,
+            )
+
+        case CIvsWeightMagnitudeConfig():
+            metric = CIvsWeightMagnitude(
+                model=model,
+                run_config=run_config,
+                device=device,
             )
 
         case _:

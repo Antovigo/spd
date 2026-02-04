@@ -466,6 +466,10 @@ class TargetedCEandKLConfig(BaseConfig):
     rounding_threshold: float = 0.5
 
 
+class CIvsWeightMagnitudeConfig(BaseConfig):
+    classname: Literal["CIvsWeightMagnitude"] = "CIvsWeightMagnitude"
+
+
 class ComponentActivationDensityConfig(BaseConfig):
     classname: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
 
@@ -521,6 +525,7 @@ EvalOnlyMetricConfigType = (
     | CIHistogramsConfig
     | CI_L0Config
     | CIMeanPerComponentConfig
+    | CIvsWeightMagnitudeConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
     | PermutedCIPlotsConfig

@@ -196,8 +196,9 @@ nontarget_impmin_coeff_ratio: 1.5  # Multiplier for ImportanceMinimalityLoss on 
 - `TargetedCI_L0`: Compares L0 sparsity between target and nontarget data
 - `TargetedCEandKL`: Compares CE/KL losses with various masking strategies (LM only)
 - `TargetedCIHeatmap`: Visualizes CI patterns on target vs nontarget inputs
+- `CIvsWeightMagnitude`: Scatter plot of max CI (over target inputs) vs weight magnitude (||V|| * ||U||) per component, colored by mean CI. Does not require nontarget data.
 
-All targeted metrics require `nontarget_eval_iterator`. All experiments (TMS, ResidMLP, LM) create both `nontarget_train_loader` and `nontarget_eval_loader` when `nontarget_task_config` is set.
+All targeted metrics except `CIvsWeightMagnitude` require `nontarget_eval_iterator`. All experiments (TMS, ResidMLP, LM) create both `nontarget_train_loader` and `nontarget_eval_loader` when `nontarget_task_config` is set.
 
 **Example Configs:**
 - `spd/experiments/lm/pythia_70m_targeted_config.yaml` - LM with prompts (target) + Pile (nontarget)

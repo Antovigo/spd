@@ -11,6 +11,7 @@ from .ci_masked_recon_loss import ci_masked_recon_loss as ci_masked_recon_loss
 from .ci_masked_recon_subset_loss import CIMaskedReconSubsetLoss as CIMaskedReconSubsetLoss
 from .ci_masked_recon_subset_loss import ci_masked_recon_subset_loss as ci_masked_recon_subset_loss
 from .ci_mean_per_component import CIMeanPerComponent as CIMeanPerComponent
+from .ci_vs_weight_magnitude import CIvsWeightMagnitude as CIvsWeightMagnitude
 from .component_activation_density import ComponentActivationDensity as ComponentActivationDensity
 from .faithfulness_loss import FaithfulnessLoss as FaithfulnessLoss
 from .faithfulness_loss import faithfulness_loss as faithfulness_loss
