@@ -597,3 +597,90 @@ def plot_ci_values_histograms(
     plt.close(fig)
 
     return fig_img
+
+
+def plot_ci_vs_weight_magnitude(
+    max_cis: dict[str, Float[Tensor, "C"]],
+    weight_magnitudes: dict[str, Float[Tensor, "C"]],
+    mean_cis: dict[str, Float[Tensor, "C"]],
+) -> Image.Image:
+    """Plot scatter plots of max CI vs weight magnitude for each layer.
+
+    Args:
+        max_cis: Max CI over target inputs per component, keyed by layer name.
+        weight_magnitudes: ||V|| * ||U|| per component, keyed by layer name.
+        mean_cis: Mean CI over target inputs per component, keyed by layer name (used for color).
+
+    Returns:
+        Single figure with scatter plot subplots for each layer.
+    """
+    assert len(max_cis) > 0, "No CI data to plot"
+    n_layers = len(max_cis)
+    max_rows = 6
+
+    # Calculate grid dimensions (same as plot_ci_values_histograms)
+    n_cols = (n_layers + max_rows - 1) // max_rows
+    n_rows = min(n_layers, max_rows)
+
+    fig_width = 6 * n_cols
+    fig_height = 5 * n_rows
+
+    fig, axs = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(fig_width, fig_height),
+        squeeze=False,
+        layout="constrained",
+    )
+    axs = np.array(axs)
+
+    if axs.ndim == 1:
+        axs = axs.reshape(n_rows, n_cols)
+
+    # Hide unused subplots
+    for i in range(n_layers, n_rows * n_cols):
+        row = i % n_rows
+        col = i // n_rows
+        axs[row, col].set_visible(False)
+
+    # Compute shared axis limits
+    all_max_cis = torch.cat([v for v in max_cis.values()])
+    all_weight_mags = torch.cat([v for v in weight_magnitudes.values()])
+    all_mean_cis = torch.cat([v for v in mean_cis.values()])
+
+    xlim = (all_max_cis.min().item(), all_max_cis.max().item())
+    ylim = (all_weight_mags.min().item(), all_weight_mags.max().item())
+    vmin, vmax = all_mean_cis.min().item(), all_mean_cis.max().item()
+
+    scatter_plots = []
+    for i, layer_name in enumerate(max_cis.keys()):
+        layer_name_display = layer_name.replace(".", "_")
+
+        row = i % n_rows
+        col = i // n_rows
+        ax = axs[row, col]
+
+        x = max_cis[layer_name].cpu().numpy()
+        y = weight_magnitudes[layer_name].cpu().numpy()
+        c = mean_cis[layer_name].cpu().numpy()
+
+        scatter = ax.scatter(x, y, c=c, cmap="viridis", vmin=vmin, vmax=vmax, alpha=0.7, s=20)
+        scatter_plots.append(scatter)
+
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        ax.set_title(layer_name_display)
+
+        if row == n_rows - 1 or i == n_layers - 1:
+            ax.set_xlabel("Max CI")
+        if col == 0:
+            ax.set_ylabel("Weight magnitude (||V|| * ||U||)")
+
+    # Single shared colorbar
+    fig.colorbar(scatter_plots[0], ax=axs.ravel().tolist(), shrink=0.8, label="Mean CI")
+    fig.suptitle("CI vs Weight Magnitude per Component")
+
+    fig_img = _render_figure(fig)
+    plt.close(fig)
+
+    return fig_img
