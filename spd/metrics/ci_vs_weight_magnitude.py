@@ -51,8 +51,8 @@ class CIvsWeightMagnitude(Metric):
         target_cis = self._compute_target_cis()
         weight_magnitudes = self._compute_weight_magnitudes()
 
-        max_cis: dict[str, Float[Tensor, "C"]] = {}
-        mean_cis: dict[str, Float[Tensor, "C"]] = {}
+        max_cis: dict[str, Float[Tensor, C]] = {}
+        mean_cis: dict[str, Float[Tensor, C]] = {}
 
         for layer_name, ci_tensor in target_cis.items():
             # Flatten all dimensions except C, then compute max/mean over samples
@@ -69,7 +69,7 @@ class CIvsWeightMagnitude(Metric):
 
     def _compute_weight_magnitudes(self) -> dict[str, Float[Tensor, "C"]]:
         """Compute ||V|| * ||U|| for each component in each layer."""
-        weight_magnitudes: dict[str, Float[Tensor, "C"]] = {}
+        weight_magnitudes: dict[str, Float[Tensor, C]] = {}
 
         for layer_name, component in self.model.components.items():
             if not isinstance(component, LinearComponents):

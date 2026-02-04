@@ -65,6 +65,7 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "TargetedCIHeatmap": "TargetCIHeat",
     "TargetedCI_L0": "TargetCI_L0",
     "TargetedCEandKL": "TargetCEKL",
+    "CIvsWeightMagnitude": "CIvsWeight",
     "UVPlots": "UVPlots",
     "StochasticReconSubsetCEAndKL": "StochReconSubCEKL",
     "PGDMultiBatchReconLoss": "PGDMultiBatchRecon",
