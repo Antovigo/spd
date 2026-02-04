@@ -45,18 +45,16 @@ loss_metric_configs:
     coeff: 1
     routing:
       type: uniform_k_subset
-  # - classname: PGDReconSubsetLoss
-  #   coeff: 0.5
-  #   init: random
-  #   step_size: 1.0
-  #   n_steps: 1
-  #   mask_scope: shared_across_batch
-  #   routing:
-  #     type: uniform_k_subset
-  # - classname: FaithfulnessLoss
-  #   coeff: 1000000.0
+  - classname: PGDReconSubsetLoss
+    coeff: 1
+    init: random
+    step_size: 1.0
+    n_steps: 1
+    mask_scope: shared_across_batch
+    routing:
+      type: uniform_k_subset
 output_loss_type: kl
-nontarget_impmin_coeff_ratio: 1.5
+nontarget_impmin_coeff_ratio: 5
 
 # --- Training ---
 batch_size: 256
