@@ -246,8 +246,13 @@ def optimize(
 
     assert len(component_params) > 0, "No parameters found in components to optimize"
 
-    optimized_params = component_params + ci_fn_params
-    optimizer = optim.AdamW(optimized_params, lr=config.lr_schedule.start_val, weight_decay=0)
+    optimizer = optim.AdamW(
+        [
+            {"params": component_params, "weight_decay": config.component_weight_decay},
+            {"params": ci_fn_params, "weight_decay": 0.0},
+        ],
+        lr=config.lr_schedule.start_val,
+    )
 
     if config.faithfulness_warmup_steps > 0:
         run_faithfulness_warmup(component_model, component_params, config)
