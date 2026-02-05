@@ -40,6 +40,7 @@ from spd.configs import (
     TargetedCIHeatmapConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
 )
 from spd.metrics import UnmaskedReconLoss
 from spd.metrics.base import Metric
@@ -69,6 +70,7 @@ from spd.metrics.targeted_ce_and_kl import TargetedCEandKL
 from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.targeted_ci_l0 import TargetedCI_L0
 from spd.metrics.uv_plots import UVPlots
+from spd.metrics.weight_magnitude import WeightMagnitude
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.routing import AllLayersRouter, get_subset_router
 from spd.utils.distributed_utils import avg_metrics_across_ranks, is_distributed
@@ -331,6 +333,13 @@ def init_metric(
 
         case CIvsWeightMagnitudeConfig():
             metric = CIvsWeightMagnitude(
+                model=model,
+                run_config=run_config,
+                device=device,
+            )
+
+        case WeightMagnitudeConfig():
+            metric = WeightMagnitude(
                 model=model,
                 run_config=run_config,
                 device=device,

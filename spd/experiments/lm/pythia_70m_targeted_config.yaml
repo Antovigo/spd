@@ -110,7 +110,7 @@ eval_metric_configs:
         - gpt_neox.layers.*.attention.*
   - classname: TargetedCEandKL
     rounding_threshold: 0.0
-  - classname: CIvsWeightMagnitude
+  - classname: WeightMagnitude
   # - classname: StochasticHiddenActsReconLoss
   #   coeff: null
 

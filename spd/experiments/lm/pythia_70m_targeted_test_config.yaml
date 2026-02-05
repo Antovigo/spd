@@ -63,7 +63,7 @@ eval_metric_configs:
         - '*'
   - classname: TargetedCEandKL
     rounding_threshold: 0.0
-  - classname: CIvsWeightMagnitude
+  - classname: WeightMagnitude
 
 # --- Pretrained model info ---
 pretrained_model_class: transformers.GPTNeoXForCausalLM

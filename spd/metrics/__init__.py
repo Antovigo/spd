@@ -54,3 +54,4 @@ from .targeted_ci_l0 import TargetedCI_L0 as TargetedCI_L0
 from .unmasked_recon_loss import UnmaskedReconLoss as UnmaskedReconLoss
 from .unmasked_recon_loss import unmasked_recon_loss as unmasked_recon_loss
 from .uv_plots import UVPlots as UVPlots
+from .weight_magnitude import WeightMagnitude as WeightMagnitude

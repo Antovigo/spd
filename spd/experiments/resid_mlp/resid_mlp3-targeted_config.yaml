@@ -84,6 +84,7 @@ eval_metric_configs:
   - classname: "CI_L0"
     groups: null
   - classname: "CIMeanPerComponent"
+  - classname: "WeightMagnitude"
   - classname: "TargetedCIHeatmap"
     n_nontarget_examples: 5
   #- classname: "StochasticHiddenActsReconLoss"

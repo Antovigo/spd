@@ -684,3 +684,84 @@ def plot_ci_vs_weight_magnitude(
     plt.close(fig)
 
     return fig_img
+
+
+def plot_weight_magnitude(
+    weight_magnitudes: dict[str, Float[Tensor, "C"]],
+    max_cis: dict[str, Float[Tensor, "C"]],
+) -> Image.Image:
+    """Plot weight magnitude per component, sorted by weight magnitude and colored by max CI.
+
+    Args:
+        weight_magnitudes: ||V|| * ||U|| per component, keyed by layer name (sorting + y-axis).
+        max_cis: Max CI over target inputs per component, keyed by layer name (color).
+
+    Returns:
+        Single figure with scatter plot subplots for each layer.
+    """
+    assert len(weight_magnitudes) > 0, "No weight magnitude data to plot"
+    n_modules = len(weight_magnitudes)
+    max_rows = 6
+
+    n_cols = (n_modules + max_rows - 1) // max_rows
+    n_rows = min(n_modules, max_rows)
+
+    fig_width = 8 * n_cols
+    fig_height = 3 * n_rows
+
+    fig, axs = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(fig_width, fig_height),
+        squeeze=False,
+        layout="constrained",
+    )
+    axs = np.array(axs)
+
+    if axs.ndim == 1:
+        axs = axs.reshape(n_rows, n_cols)
+
+    # Hide unused subplots
+    for i in range(n_modules, n_rows * n_cols):
+        row = i % n_rows
+        col = i // n_rows
+        axs[row, col].set_visible(False)
+
+    # Shared color limits across all layers
+    all_max_cis = torch.cat(list(max_cis.values()))
+    vmin, vmax = all_max_cis.min().item(), all_max_cis.max().item()
+
+    scatter_plots = []
+    for i, layer_name in enumerate(weight_magnitudes.keys()):
+        row = i % n_rows
+        col = i // n_rows
+        ax = axs[row, col]
+
+        # Sort by weight magnitude (descending)
+        sort_indices = torch.argsort(weight_magnitudes[layer_name], descending=True)
+        sorted_weight_mags = weight_magnitudes[layer_name][sort_indices].cpu().numpy()
+        sorted_max_cis = max_cis[layer_name][sort_indices].cpu().numpy()
+
+        scatter = ax.scatter(
+            range(len(sorted_weight_mags)),
+            sorted_weight_mags,
+            c=sorted_max_cis,
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            s=20,
+            marker="o",
+        )
+        scatter_plots.append(scatter)
+
+        ax.set_title(layer_name, fontsize=10)
+        if row == n_rows - 1 or i == n_modules - 1:
+            ax.set_xlabel("Component")
+        ax.set_ylabel("Weight magnitude")
+
+    fig.colorbar(scatter_plots[0], ax=axs.ravel().tolist(), shrink=0.8, label="Max CI")
+
+    fig_img = _render_figure(fig)
+    plt.close(fig)
+
+    return fig_img
