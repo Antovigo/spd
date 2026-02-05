@@ -134,7 +134,7 @@ nontarget_task_config:
   dataset_name: "monology/pile-uncopyrighted"
   is_tokenized: false
   column_name: "text"
-  train_data_split: "train[:10000000]"
+  train_data_split: "train[:6000000]"
   eval_data_split: "validation[:50000]"
   shuffle_each_epoch: true
   streaming: false
