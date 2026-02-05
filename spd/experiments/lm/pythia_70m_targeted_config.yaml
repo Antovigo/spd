@@ -8,7 +8,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "pythia/balancing/256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio})"
+output_dir_name: "pythia/balancing/256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio}, WD {component_weight_decay})"
 seed: 0
 n_mask_samples: 1
 ci_config:
