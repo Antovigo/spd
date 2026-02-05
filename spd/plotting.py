@@ -689,12 +689,14 @@ def plot_ci_vs_weight_magnitude(
 def plot_weight_magnitude(
     weight_magnitudes: dict[str, Float[Tensor, "C"]],
     max_cis: dict[str, Float[Tensor, "C"]],
+    mean_cis: dict[str, Float[Tensor, "C"]],
 ) -> Image.Image:
-    """Plot weight magnitude per component, sorted by weight magnitude and colored by max CI.
+    """Plot weight magnitude per component, sorted by mean CI and colored by max CI.
 
     Args:
-        weight_magnitudes: ||V|| * ||U|| per component, keyed by layer name (sorting + y-axis).
+        weight_magnitudes: ||V|| * ||U|| per component, keyed by layer name (y-axis).
         max_cis: Max CI over target inputs per component, keyed by layer name (color).
+        mean_cis: Mean CI over target inputs per component, keyed by layer name (sorting).
 
     Returns:
         Single figure with scatter plot subplots for each layer.
@@ -737,8 +739,8 @@ def plot_weight_magnitude(
         col = i // n_rows
         ax = axs[row, col]
 
-        # Sort by weight magnitude (descending)
-        sort_indices = torch.argsort(weight_magnitudes[layer_name], descending=True)
+        # Sort by mean CI (descending)
+        sort_indices = torch.argsort(mean_cis[layer_name], descending=True)
         sorted_weight_mags = weight_magnitudes[layer_name][sort_indices].cpu().numpy()
         sorted_max_cis = max_cis[layer_name][sort_indices].cpu().numpy()
 
