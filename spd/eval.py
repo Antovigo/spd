@@ -25,6 +25,8 @@ from spd.configs import (
     ImportanceMinimalityLossConfig,
     MetricConfigType,
     PermutedCIPlotsConfig,
+    PersistentPGDReconLossConfig,
+    PersistentPGDReconSubsetLossConfig,
     PGDMultiBatchReconLossConfig,
     PGDMultiBatchReconSubsetLossConfig,
     PGDReconLayerwiseLossConfig,
@@ -41,6 +43,7 @@ from spd.configs import (
     UnmaskedReconLossConfig,
     UVPlotsConfig,
 )
+from spd.log import logger
 from spd.metrics import UnmaskedReconLoss
 from spd.metrics.base import Metric
 from spd.metrics.ce_and_kl_losses import CEandKLLosses
@@ -70,6 +73,7 @@ from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.targeted_ci_l0 import TargetedCI_L0
 from spd.metrics.uv_plots import UVPlots
 from spd.models.component_model import ComponentModel, OutputWithCache
+from spd.persistent_pgd import PersistentPGDReconLoss, PersistentPGDReconSubsetLoss, PPGDMasks
 from spd.routing import AllLayersRouter, get_subset_router
 from spd.utils.distributed_utils import avg_metrics_across_ranks, is_distributed
 from spd.utils.general_utils import dict_safe_update_, extract_batch_data
@@ -127,6 +131,7 @@ def avg_eval_metrics_across_ranks(metrics: MetricOutType, device: str) -> DistMe
 def init_metric(
     cfg: MetricConfigType,
     model: ComponentModel,
+    ppgd_maskss: dict[PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PPGDMasks],
     run_config: Config,
     device: str,
     nontarget_eval_iterator: Iterator[
@@ -336,7 +341,34 @@ def init_metric(
                 device=device,
             )
 
-        case _:
+        case PersistentPGDReconLossConfig():
+            if cfg.scope == "unique_per_batch_per_token":
+                raise ValueError(
+                    "PersistentPGDReconLoss with scope 'unique_per_batch_per_token' "
+                    "is incompatible with eval as we need to unify batch sizing."
+                )
+            metric = PersistentPGDReconLoss(
+                model=model,
+                device=device,
+                use_delta_component=run_config.use_delta_component,
+                output_loss_type=run_config.output_loss_type,
+                ppgd_masks=ppgd_maskss[cfg],
+            )
+        case PersistentPGDReconSubsetLossConfig():
+            if cfg.scope == "unique_per_batch_per_token":
+                raise ValueError(
+                    "PersistentPGDReconSubsetLoss with scope 'unique_per_batch_per_token' "
+                    "is incompatible with eval as we need to unify batch sizing."
+                )
+            metric = PersistentPGDReconSubsetLoss(
+                model=model,
+                device=device,
+                use_delta_component=run_config.use_delta_component,
+                output_loss_type=run_config.output_loss_type,
+                ppgd_masks=ppgd_maskss[cfg],
+                routing=cfg.routing,
+            )
+        case PGDMultiBatchReconLossConfig() | PGDMultiBatchReconSubsetLossConfig():
             # We shouldn't handle **all** cases because PGDMultiBatch metrics should be handled by
             # the evaluate_multibatch_pgd function below.
             raise ValueError(f"Unsupported metric config for eval: {cfg}")
@@ -351,6 +383,7 @@ def evaluate(
         Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]
     ]
     | None,
+    ppgd_maskss: dict[PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PPGDMasks],
     device: str,
     run_config: Config,
     slow_step: bool,
@@ -361,9 +394,19 @@ def evaluate(
 
     metrics: list[Metric] = []
     for cfg in eval_metric_configs:
+        if (
+            isinstance(cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig)
+            and cfg.scope == "unique_per_batch_per_token"
+        ):
+            logger.warning(
+                f"PersistentPGDRecon{cfg.classname} with scope 'unique_per_batch_per_token' "
+                "is incompatible with eval as we need to unify batch sizing. Skipping."
+            )
+            continue
         metric = init_metric(
             cfg=cfg,
             model=model,
+            ppgd_maskss=ppgd_maskss,
             run_config=run_config,
             device=device,
             nontarget_eval_iterator=nontarget_eval_iterator,

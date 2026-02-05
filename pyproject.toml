@@ -29,7 +29,7 @@ dependencies = [
     "datasets>=2.21.0",
     "zstandard",  # For loading zstd-compressed datasets (e.g., The Pile)
     "accelerate",
-    "simple_stories_train @ git+https://github.com/goodfire-ai/simple_stories_train.git@dev",
+    "simple_stories_train @ git+https://github.com/goodfire-ai/simple_stories_train.git",
     "scipy>=1.14.1",
     "fastapi",
     "uvicorn",

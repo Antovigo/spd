@@ -1918,7 +1918,7 @@ wheels = [
 [[package]]
 name = "simple-stories-train"
 version = "0.0.1"
-source = { git = "https://github.com/goodfire-ai/simple_stories_train.git?rev=dev#16f574d274849c90fe15e5c4df231f3885e44a7d" }
+source = { git = "https://github.com/goodfire-ai/simple_stories_train.git#a4c0282905f33bb68408b02ef7636efa0abbd102" }
 dependencies = [
     { name = "datasets" },
     { name = "fire" },
@@ -1933,6 +1933,7 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
     { name = "wandb" },
+    { name = "zstandard" },
 ]
 
 [[package]]
@@ -2014,7 +2015,7 @@ requires-dist = [
     { name = "pydantic", specifier = "<2.12" },
     { name = "python-dotenv" },
     { name = "scipy", specifier = ">=1.14.1" },
-    { name = "simple-stories-train", git = "https://github.com/goodfire-ai/simple_stories_train.git?rev=dev" },
+    { name = "simple-stories-train", git = "https://github.com/goodfire-ai/simple_stories_train.git" },
     { name = "streamlit" },
     { name = "streamlit-antd-components" },
     { name = "sympy" },

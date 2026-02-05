@@ -60,7 +60,7 @@ nontarget_impmin_coeff_ratio: 2
 batch_size: 256
 nontarget_batch_size: 128
 eval_batch_size: 256
-nontarget_eval_batch_size: 512
+nontarget_eval_batch_size: 128
 
 steps: 20000
 gradient_accumulation_steps: 1
@@ -83,10 +83,9 @@ n_eval_steps: 5
 slow_eval_on_first_step: true
 # save_freq: 10000
 ci_alive_threshold: 0.0
-n_examples_until_dead: 51200  # train_log_freq * batch_size * max_seq_len = 100 * 256 * 2
 eval_metric_configs:
   - classname: CIHistograms
-    n_batches_accum: 5
+    n_batches_accum: 1
   - classname: ComponentActivationDensity
   - classname: CI_L0
     groups:

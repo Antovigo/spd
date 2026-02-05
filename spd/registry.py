@@ -158,7 +158,7 @@ EXPERIMENT_REGISTRY: dict[str, ExperimentConfig] = {
         task_name="lm",
         decomp_script=Path("spd/experiments/lm/lm_decomposition.py"),
         config_path=Path("spd/experiments/lm/ss_llama_simple_mlp-2L-wide.yaml"),
-        expected_runtime=480,
+        expected_runtime=1600,
     ),
     "ss_llama_simple_mlp-2L-wide_global_reverse": ExperimentConfig(
         task_name="lm",
@@ -183,6 +183,18 @@ EXPERIMENT_REGISTRY: dict[str, ExperimentConfig] = {
         decomp_script=Path("spd/experiments/lm/lm_decomposition.py"),
         config_path=Path("spd/experiments/lm/pythia_70m_targeted_config.yaml"),
         expected_runtime=300,
+    ),
+    "pile_llama_simple_mlp-2L": ExperimentConfig(
+        task_name="lm",
+        decomp_script=Path("spd/experiments/lm/lm_decomposition.py"),
+        config_path=Path("spd/experiments/lm/pile_llama_simple_mlp-2L.yaml"),
+        expected_runtime=720,
+    ),
+    "pile_gpt2_simple-2L_global_reverse": ExperimentConfig(
+        task_name="lm",
+        decomp_script=Path("spd/experiments/lm/lm_decomposition.py"),
+        config_path=Path("spd/experiments/lm/pile_gpt2_simple-2L_global_reverse.yaml"),
+        expected_runtime=3000,
     ),
 }
 

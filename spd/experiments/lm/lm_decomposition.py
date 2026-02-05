@@ -14,7 +14,6 @@ from spd.log import logger
 from spd.run_spd import optimize
 from spd.utils.distributed_utils import (
     DistributedState,
-    call_on_rank0_then_broadcast,
     ensure_cached_and_call,
     get_device,
     init_distributed,
@@ -84,8 +83,15 @@ def main(
     ln_stds: dict[str, float] | None = None
     if config.pretrained_model_class.startswith("simple_stories_train"):
         # Handle differently in case run has layernorm ablations (we'd need to collect ln_stds)
-        # Avoid concurrent wandb API requests on each rank
-        run_info = call_on_rank0_then_broadcast(SSRunInfo.from_path, config.pretrained_model_name)
+        # Ensure local_rank 0 on each node caches the model, then all ranks load from local cache
+        # (In multi-node setups, /tmp is node-local so we can't broadcast paths across nodes)
+        run_info = ensure_cached_and_call(SSRunInfo.from_path, config.pretrained_model_name)
+
+        # Need to handle old training runs not having a model_type in the model_config_dict
+        # TODO: Clean this up in the simple_stories_train library
+        if "model_type" not in run_info.model_config_dict:
+            run_info.model_config_dict["model_type"] = config.pretrained_model_class.split(".")[-1]
+
         if run_info.config_dict["enable_ln_ablation"]:
             ln_stds = run_info.ln_stds
             assert ln_stds is not None, "Run had enable_ln_ablation set to True but no ln_stds"

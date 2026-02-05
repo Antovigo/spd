@@ -21,10 +21,12 @@ from spd.models.components import (
     GlobalCiFnWrapper,
     GlobalReverseResidualCiFn,
     GlobalSharedMLPCiFn,
+    GlobalSharedTransformerCiFn,
     Identity,
     LayerwiseCiFnWrapper,
     LinearComponents,
     MLPCiFn,
+    TargetLayerConfig,
     VectorMLPCiFn,
     VectorSharedMLPCiFn,
 )
@@ -275,7 +277,7 @@ class ComponentModel(LoadableModule):
         module_to_c: dict[str, int],
         components: dict[str, Components],
         ci_config: GlobalCiConfig,
-    ) -> GlobalSharedMLPCiFn | GlobalReverseResidualCiFn:
+    ) -> GlobalSharedMLPCiFn | GlobalSharedTransformerCiFn | GlobalReverseResidualCiFn:
         """Create a global CI function that takes all layer activations as input."""
         ci_fn_type = ci_config.fn_type
         ci_fn_hidden_dims = ci_config.hidden_dims
@@ -302,14 +304,33 @@ class ComponentModel(LoadableModule):
                 return GlobalSharedMLPCiFn(
                     layer_configs=layer_configs, hidden_dims=ci_fn_hidden_dims
                 )
+            case "global_shared_transformer":
+                transformer_cfg = ci_config.simple_transformer_ci_cfg
+                assert transformer_cfg is not None  # validated by Pydantic
+
+                return GlobalSharedTransformerCiFn(
+                    target_model_layer_configs={
+                        target_module_path: TargetLayerConfig(input_dim=input_dim, C=C)
+                        for target_module_path, (input_dim, C) in layer_configs.items()
+                    },
+                    d_model=transformer_cfg.d_model,
+                    n_layers=transformer_cfg.n_blocks,
+                    n_heads=transformer_cfg.attn_config.n_heads,
+                    mlp_hidden_dims=transformer_cfg.mlp_hidden_dim,
+                    max_len=transformer_cfg.attn_config.max_len,
+                    rope_base=transformer_cfg.attn_config.rope_base,
+                )
             case "global_reverse_residual":
-                # block_groups, d_resid_ci_fn, reader_hidden_dims are validated by Pydantic
+                # block_groups, d_resid_ci_fn, reader_hidden_dims, transition_hidden_dim
+                # are validated by Pydantic
                 block_groups = ci_config.block_groups
                 d_resid_ci_fn = ci_config.d_resid_ci_fn
                 reader_hidden_dims = ci_config.reader_hidden_dims
+                transition_hidden_dim = ci_config.transition_hidden_dim
                 assert block_groups is not None  # for type narrowing
                 assert d_resid_ci_fn is not None  # for type narrowing
                 assert reader_hidden_dims is not None  # for type narrowing
+                assert transition_hidden_dim is not None  # for type narrowing
 
                 # Build block_configs from block_groups
                 block_configs: list[tuple[str, list[str], list[int], list[int]]] = []
@@ -350,6 +371,7 @@ class ComponentModel(LoadableModule):
                     block_configs=block_configs,
                     d_resid_ci_fn=d_resid_ci_fn,
                     reader_hidden_dims=reader_hidden_dims,
+                    transition_hidden_dim=transition_hidden_dim,
                     attn_config=ci_config.transition_attn_config,
                 )
 
