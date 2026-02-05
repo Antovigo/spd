@@ -13,10 +13,10 @@ C = None  # jaxtyping placeholder
 
 
 class WeightMagnitude(CIvsWeightMagnitude):
-    """Weight magnitude per component, sorted by weight magnitude.
+    """Weight magnitude per component, sorted by mean CI.
 
     For each layer:
-    - X-axis: Components sorted by weight magnitude (descending)
+    - X-axis: Components sorted by mean CI (descending)
     - Y-axis: Weight magnitude (||V|| * ||U||) per component
     - Color: Max CI over target inputs per component
 
@@ -32,13 +32,16 @@ class WeightMagnitude(CIvsWeightMagnitude):
         weight_magnitudes = self._compute_weight_magnitudes()
 
         max_cis: dict[str, Float[Tensor, C]] = {}
+        mean_cis: dict[str, Float[Tensor, C]] = {}
 
         for layer_name, ci_tensor in target_cis.items():
             ci_flat = ci_tensor.reshape(-1, ci_tensor.shape[-1])  # [N, C]
             max_cis[layer_name] = ci_flat.max(dim=0).values  # [C]
+            mean_cis[layer_name] = ci_flat.mean(dim=0)  # [C]
 
         img = plot_weight_magnitude(
             weight_magnitudes=weight_magnitudes,
             max_cis=max_cis,
+            mean_cis=mean_cis,
         )
         return {"weight_magnitude": img}
