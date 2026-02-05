@@ -35,7 +35,7 @@ use_delta_component: true
 # --- Loss config ---
 loss_metric_configs:
   - classname: ImportanceMinimalityLoss
-    coeff: 5e-4
+    coeff: 2e-4
     pnorm: 2.0
     beta: 0
     p_anneal_start_frac: 0.0
@@ -58,9 +58,9 @@ nontarget_impmin_coeff_ratio: 2
 
 # --- Training ---
 batch_size: 256
-nontarget_batch_size: 128
+nontarget_batch_size: 256
 eval_batch_size: 256
-nontarget_eval_batch_size: 128
+nontarget_eval_batch_size: 256
 
 steps: 20000
 gradient_accumulation_steps: 1
@@ -78,7 +78,7 @@ faithfulness_warmup_weight_decay: 0.0
 
 # --- Logging & Saving ---
 train_log_freq: 100
-eval_freq: 2500
+eval_freq: 1000
 slow_eval_freq: 5000
 n_eval_steps: 5
 slow_eval_on_first_step: true
