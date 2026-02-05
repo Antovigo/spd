@@ -61,7 +61,7 @@ def tokenize_to_strings(tokenizer: PreTrainedTokenizerBase, text: str) -> list[s
     return [tokenizer.decode(tid) for tid in token_ids]
 
 
-def format_tokens(tokens: list[str], delimiter: str = "|") -> str:
+def format_tokens(tokens: list[str], delimiter: str = ";") -> str:
     return delimiter.join(repr(t) for t in tokens)
 
 
