@@ -5,7 +5,7 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp2/Target 15-20-25 (pnorm 1, im 3e-5, 60 hidden_dims, constant lr, 2xStoch, PGD)"
+output_dir_name: "resid_mlp2/Target 15-20-25 (pnorm 1, im 3e-5, 60 hidden_dims, constant lr, 2xStoch)"
 seed: 0
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
@@ -28,18 +28,19 @@ loss_metric_configs:
   #   coeff: 1.0
   - classname: "StochasticReconSubsetLoss"
     coeff: 2.0
-  - classname: "PGDReconSubsetLoss"
-    coeff: 1.0
-    init: random
-    step_size: 1.0
-    n_steps: 1
-    mask_scope: shared_across_batch
+  # - classname: "PGDReconSubsetLoss"
+  #   coeff: 1.0
+  #   init: random
+  #   step_size: 1.0
+  #   n_steps: 1
+  #   mask_scope: shared_across_batch
 output_loss_type: mse
 
 # --- Training ---
 batch_size: 1024
 eval_batch_size: 1024
 steps: 5_000
+component_weight_decay: 0.1
 lr_schedule:
   start_val: 3e-4
   fn_type: constant
@@ -74,6 +75,7 @@ eval_metric_configs:
   # - classname: "CI_L0"
   #   groups: null
   - classname: "CIMeanPerComponent"
+  - classname: "WeightMagnitude"
   - classname: "TargetedCIHeatmap"
     n_nontarget_examples: 5
   - classname: "TargetedCI_L0"

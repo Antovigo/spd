@@ -42,6 +42,7 @@ from spd.configs import (
     TargetedCIHeatmapConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
 )
 from spd.log import logger
 from spd.metrics import UnmaskedReconLoss
@@ -72,6 +73,7 @@ from spd.metrics.targeted_ce_and_kl import TargetedCEandKL
 from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.targeted_ci_l0 import TargetedCI_L0
 from spd.metrics.uv_plots import UVPlots
+from spd.metrics.weight_magnitude import WeightMagnitude
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.persistent_pgd import PersistentPGDReconLoss, PersistentPGDReconSubsetLoss, PPGDMasks
 from spd.routing import AllLayersRouter, get_subset_router
@@ -368,7 +370,13 @@ def init_metric(
                 ppgd_masks=ppgd_maskss[cfg],
                 routing=cfg.routing,
             )
-        case PGDMultiBatchReconLossConfig() | PGDMultiBatchReconSubsetLossConfig():
+        case WeightMagnitudeConfig():
+            metric = WeightMagnitude(
+                model=model,
+                run_config=run_config,
+                device=device,
+            )
+        case _:
             # We shouldn't handle **all** cases because PGDMultiBatch metrics should be handled by
             # the evaluate_multibatch_pgd function below.
             raise ValueError(f"Unsupported metric config for eval: {cfg}")

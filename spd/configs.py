@@ -563,6 +563,10 @@ class CIvsWeightMagnitudeConfig(BaseConfig):
     classname: Literal["CIvsWeightMagnitude"] = "CIvsWeightMagnitude"
 
 
+class WeightMagnitudeConfig(BaseConfig):
+    classname: Literal["WeightMagnitude"] = "WeightMagnitude"
+
+
 class ComponentActivationDensityConfig(BaseConfig):
     classname: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
 
@@ -621,6 +625,7 @@ EvalOnlyMetricConfigType = (
     | CI_L0Config
     | CIMeanPerComponentConfig
     | CIvsWeightMagnitudeConfig
+    | WeightMagnitudeConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
     | PermutedCIPlotsConfig
