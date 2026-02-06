@@ -477,12 +477,10 @@ def plot_targeted_ci_heatmaps(
         target_2d = target_cis[module_name].reshape(-1, target_cis[module_name].shape[-1])
         nontarget_2d = nontarget_cis[module_name].reshape(-1, nontarget_cis[module_name].shape[-1])
 
-        # Random sample nontarget if needed (use same indices across modules)
+        # Take first n_nontarget_examples contiguously (use same indices across modules)
         if nontarget_2d.shape[0] > n_nontarget_examples:
             if nontarget_sample_indices is None:
-                nontarget_sample_indices = torch.randperm(nontarget_2d.shape[0])[
-                    :n_nontarget_examples
-                ]
+                nontarget_sample_indices = torch.arange(n_nontarget_examples)
             nontarget_2d = nontarget_2d[nontarget_sample_indices]
 
         # Target row
