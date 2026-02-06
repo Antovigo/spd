@@ -1,74 +1,19 @@
-output_dir_name: "pythia_sweep_5_PGD/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
+output_dir_name: "pythia/balancing/opening, 256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio}, WD {component_weight_decay})"
 task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 6e-4
-nontarget_impmin_coeff_ratio: 5.0
+component_weight_decay: 0.1
 ---
-output_dir_name: "pythia_sweep_5_PGD/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
+output_dir_name: "pythia/balancing/closing, 256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio}, WD {component_weight_decay})"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
+component_weight_decay: 0.1
+---
+output_dir_name: "pythia/balancing/combined, 256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio}, WD {component_weight_decay})"
+task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
+component_weight_decay: 0.0
+---
+output_dir_name: "pythia/balancing/opening, 256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio}, WD {component_weight_decay})"
 task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
-nontarget_impmin_coeff_ratio: 5.0
+component_weight_decay: 0.0
 ---
-output_dir_name: "pythia_sweep_5_PGD/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/opening/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_opening.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
+output_dir_name: "pythia/balancing/closing, 256x2, 128x64 ({loss_metric_configs[ImportanceMinimalityLoss].coeff}x{nontarget_impmin_coeff_ratio}, WD {component_weight_decay})"
 task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 6e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/closing/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_closing.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 6e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-4
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 3e-5
-nontarget_impmin_coeff_ratio: 5.0
----
-output_dir_name: "pythia_sweep_5_PGD/combined/impmin {loss_metric_configs[ImportanceMinimalityLoss].coeff}, ratio {nontarget_impmin_coeff_ratio}"
-task_config.prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
-loss_metric_configs[ImportanceMinimalityLoss].coeff: 1e-5
-nontarget_impmin_coeff_ratio: 5.0
+component_weight_decay: 0.0
