@@ -270,7 +270,7 @@ def harvest_activation_contexts(
         )
 
     layer_names = list(model.target_module_paths)
-    vocab_size = len(tokenizer)  # Includes added special tokens (vocab_size doesn't)
+    vocab_size = len(tokenizer)  # pyright: ignore[reportArgumentType]  # Includes added special tokens (vocab_size doesn't)
 
     # Precompute U norms for normalizing component activations
     u_norms = _compute_u_norms(model)
