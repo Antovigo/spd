@@ -270,8 +270,7 @@ def harvest_activation_contexts(
         )
 
     layer_names = list(model.target_module_paths)
-    vocab_size = tokenizer.vocab_size  # pyright: ignore[reportAttributeAccessIssue]
-    assert isinstance(vocab_size, int)
+    vocab_size = len(tokenizer)  # Includes added special tokens (vocab_size doesn't)
 
     # Precompute U norms for normalizing component activations
     u_norms = _compute_u_norms(model)

@@ -145,8 +145,7 @@ def harvest_attributions(
 
     spd_config = run_info.config
     train_loader, tokenizer = train_loader_and_tokenizer(spd_config, config.batch_size)
-    vocab_size = tokenizer.vocab_size
-    assert isinstance(vocab_size, int), f"vocab_size must be int, got {type(vocab_size)}"
+    vocab_size = len(tokenizer)  # Includes added special tokens (vocab_size doesn't)
     logger.info(f"Vocab size: {vocab_size}")
 
     # Build component keys and alive masks
