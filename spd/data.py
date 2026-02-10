@@ -29,6 +29,9 @@ class DatasetConfig(BaseConfig):
     Typically 'input_ids' for datasets stored with e2e_sae/scripts/upload_hf_dataset.py, or "tokens"
     for datasets tokenized in TransformerLens (e.g. NeelNanda/pile-10k)."""
     shuffle_each_epoch: bool = True
+    max_rows: int | None = None
+    """Truncate the raw dataset to this many rows before tokenization. Useful for avoiding
+    expensive .map() calls on huge datasets when only a fraction of the data is needed."""
 
 
 def _keep_single_column(dataset: Dataset, col_name: str) -> Dataset:
@@ -213,6 +216,8 @@ def create_data_loader(
         dataset = dataset.shuffle(seed=seed, buffer_size=buffer_size)
     else:
         assert isinstance(dataset, Dataset)
+        if dataset_config.max_rows is not None:
+            dataset = dataset.select(range(min(dataset_config.max_rows, len(dataset))))
 
     tokenizer = AutoTokenizer.from_pretrained(dataset_config.hf_tokenizer_path)
 

@@ -23,7 +23,7 @@ from jaxtyping import Float
 from torch import Tensor
 
 from spd.configs import LMTaskConfig
-from spd.data import DatasetConfig, create_data_loader, train_loader_and_tokenizer
+from spd.data import DatasetConfig, create_data_loader
 from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
 from spd.harvest.lib.harvester import Harvester, HarvesterState
 from spd.harvest.schemas import (
@@ -210,6 +210,8 @@ def harvest_activation_contexts(
 
     spd_config = run_info.config
 
+    max_rows = config.n_batches * config.batch_size * 4 if config.n_batches is not None else None
+
     if config.nontarget:
         assert spd_config.nontarget_task_config is not None, (
             "--nontarget requires a run with nontarget_task_config set"
@@ -238,6 +240,7 @@ def harvest_activation_contexts(
                 streaming=nontarget_tc.streaming,
                 column_name=nontarget_tc.column_name,
                 shuffle_each_epoch=nontarget_tc.shuffle_each_epoch,
+                max_rows=max_rows,
             )
             train_loader, tokenizer = create_data_loader(
                 dataset_config=nontarget_data_config,
@@ -246,7 +249,25 @@ def harvest_activation_contexts(
                 global_seed=spd_config.seed,
             )
     else:
-        train_loader, tokenizer = train_loader_and_tokenizer(spd_config, config.batch_size)
+        task_config = spd_config.task_config
+        assert isinstance(task_config, LMTaskConfig)
+        train_data_config = DatasetConfig(
+            name=task_config.dataset_name,
+            hf_tokenizer_path=spd_config.tokenizer_name,
+            split=task_config.train_data_split,
+            n_ctx=task_config.max_seq_len,
+            is_tokenized=task_config.is_tokenized,
+            streaming=task_config.streaming,
+            column_name=task_config.column_name,
+            shuffle_each_epoch=task_config.shuffle_each_epoch,
+            max_rows=max_rows,
+        )
+        train_loader, tokenizer = create_data_loader(
+            dataset_config=train_data_config,
+            batch_size=config.batch_size,
+            buffer_size=task_config.buffer_size,
+            global_seed=spd_config.seed,
+        )
 
     layer_names = list(model.target_module_paths)
     vocab_size = tokenizer.vocab_size  # pyright: ignore[reportAttributeAccessIssue]
@@ -284,6 +305,7 @@ def harvest_activation_contexts(
         with torch.no_grad():
             out = model(batch, cache_type="input")
             probs = torch.softmax(out.output, dim=-1)
+            probs = probs[..., :vocab_size]  # Truncate padding tokens (e.g. Pythia pads to multiple of 64)
 
             ci_dict = model.calc_causal_importances(
                 pre_weight_acts=out.cache,
