@@ -35,6 +35,7 @@ def harvest(
     partition: str = DEFAULT_PARTITION_NAME,
     time: str = "24:00:00",
     job_suffix: str | None = None,
+    nontarget: bool = False,
 ) -> None:
     """Submit multi-GPU harvest job to SLURM.
 
@@ -55,6 +56,7 @@ def harvest(
         partition: SLURM partition name.
         time: Job time limit for worker jobs.
         job_suffix: Optional suffix for SLURM job names (e.g., "v2" -> "spd-harvest-v2").
+        nontarget: If True, harvest on nontarget data instead of target data.
     """
     run_id = f"harvest-{secrets.token_hex(4)}"
     snapshot_branch, commit_hash = create_git_snapshot(run_id)
@@ -64,6 +66,7 @@ def harvest(
     array_job_name = f"spd-harvest{suffix}"
 
     # Build worker commands (SLURM arrays are 1-indexed, so task ID 1 -> rank 0, etc.)
+    nontarget_arg = "--nontarget " if nontarget else ""
     worker_commands = []
     for rank in range(n_gpus):
         n_batches_arg = f"--n_batches {n_batches} " if n_batches is not None else ""
@@ -76,6 +79,7 @@ def harvest(
             f"--activation_examples_per_component {activation_examples_per_component} "
             f"--activation_context_tokens_per_side {activation_context_tokens_per_side} "
             f"--pmi_token_top_k {pmi_token_top_k} "
+            f"{nontarget_arg}"
             f"--rank {rank} "
             f"--world_size {n_gpus}"
         )
@@ -97,7 +101,7 @@ def harvest(
     )
 
     # Submit merge job with dependency on array completion
-    merge_cmd = f'python -m spd.harvest.scripts.run "{wandb_path}" --merge'
+    merge_cmd = f'python -m spd.harvest.scripts.run "{wandb_path}" --merge {nontarget_arg}'.rstrip()
     merge_config = SlurmConfig(
         job_name="spd-harvest-merge",
         partition=partition,

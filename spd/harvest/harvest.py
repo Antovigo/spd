@@ -22,7 +22,9 @@ import tqdm
 from jaxtyping import Float
 from torch import Tensor
 
-from spd.data import train_loader_and_tokenizer
+from spd.configs import LMTaskConfig
+from spd.data import DatasetConfig, create_data_loader, train_loader_and_tokenizer
+from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
 from spd.harvest.lib.harvester import Harvester, HarvesterState
 from spd.harvest.schemas import (
     ActivationExample,
@@ -73,6 +75,7 @@ class HarvestConfig:
     activation_examples_per_component: int
     activation_context_tokens_per_side: int
     pmi_token_top_k: int
+    nontarget: bool
 
 
 @dataclass
@@ -206,10 +209,47 @@ def harvest_activation_contexts(
     model.eval()
 
     spd_config = run_info.config
-    train_loader, tokenizer = train_loader_and_tokenizer(spd_config, config.batch_size)
+
+    if config.nontarget:
+        assert spd_config.nontarget_task_config is not None, (
+            "--nontarget requires a run with nontarget_task_config set"
+        )
+        nontarget_tc = spd_config.nontarget_task_config
+        assert isinstance(nontarget_tc, LMTaskConfig)
+        if nontarget_tc.prompts_file is not None:
+            assert spd_config.tokenizer_name is not None
+            train_loader, tokenizer = create_prompts_data_loader(
+                prompts_file=Path(nontarget_tc.prompts_file),
+                tokenizer_name=spd_config.tokenizer_name,
+                max_seq_len=nontarget_tc.max_seq_len,
+                batch_size=config.batch_size,
+                seed=spd_config.seed,
+            )
+        else:
+            assert nontarget_tc.dataset_name is not None, (
+                "nontarget_task_config must have either prompts_file or dataset_name set"
+            )
+            nontarget_data_config = DatasetConfig(
+                name=nontarget_tc.dataset_name,
+                hf_tokenizer_path=spd_config.tokenizer_name,
+                split=nontarget_tc.train_data_split,
+                n_ctx=nontarget_tc.max_seq_len,
+                is_tokenized=nontarget_tc.is_tokenized,
+                streaming=nontarget_tc.streaming,
+                column_name=nontarget_tc.column_name,
+                shuffle_each_epoch=nontarget_tc.shuffle_each_epoch,
+            )
+            train_loader, tokenizer = create_data_loader(
+                dataset_config=nontarget_data_config,
+                batch_size=config.batch_size,
+                buffer_size=nontarget_tc.buffer_size,
+                global_seed=spd_config.seed,
+            )
+    else:
+        train_loader, tokenizer = train_loader_and_tokenizer(spd_config, config.batch_size)
 
     layer_names = list(model.target_module_paths)
-    vocab_size = tokenizer.vocab_size
+    vocab_size = tokenizer.vocab_size  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(vocab_size, int)
 
     # Precompute U norms for normalizing component activations
@@ -294,7 +334,7 @@ def harvest_activation_contexts(
         logger.info(f"Saved results to {activation_contexts_dir} and {correlations_dir}")
 
 
-def merge_activation_contexts(wandb_path: str) -> None:
+def merge_activation_contexts(wandb_path: str, nontarget: bool = False) -> None:
     """Merge partial harvest results from parallel workers.
 
     Looks for worker_*.pt state files and merges them into final harvest results.
@@ -305,6 +345,8 @@ def merge_activation_contexts(wandb_path: str) -> None:
     from spd.utils.wandb_utils import parse_wandb_run_path
 
     _, _, run_id = parse_wandb_run_path(wandb_path)
+    if nontarget:
+        run_id = f"{run_id}-nontarget"
     activation_contexts_dir = get_activation_contexts_dir(run_id)
     correlations_dir = get_correlations_dir(run_id)
     state_dir = activation_contexts_dir.parent / "worker_states"
@@ -339,6 +381,7 @@ def merge_activation_contexts(wandb_path: str) -> None:
         activation_examples_per_component=merged_state.max_examples_per_component,
         activation_context_tokens_per_side=merged_state.context_tokens_per_side,
         pmi_token_top_k=40,  # Standard value
+        nontarget=nontarget,
     )
 
     result = _build_harvest_result(harvester, config)

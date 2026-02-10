@@ -38,6 +38,7 @@ def main(
     rank: int | None = None,
     world_size: int | None = None,
     merge: bool = False,
+    nontarget: bool = False,
 ) -> None:
     """Harvest correlations and activation contexts, or merge results.
 
@@ -53,14 +54,17 @@ def main(
         world_size: Total number of workers. If specified with rank, only processes
             batches where batch_idx % world_size == rank.
         merge: If True, merge partial results from workers.
+        nontarget: If True, harvest on nontarget data instead of target data.
     """
 
     _, _, run_id = parse_wandb_run_path(wandb_path)
+    if nontarget:
+        run_id = f"{run_id}-nontarget"
 
     if merge:
         assert rank is None and world_size is None, "Cannot specify rank/world_size with --merge"
         print(f"Merging harvest results for {wandb_path}")
-        merge_activation_contexts(wandb_path)
+        merge_activation_contexts(wandb_path, nontarget=nontarget)
         return
 
     assert (rank is None) == (world_size is None), "rank and world_size must both be set or unset"
@@ -73,6 +77,7 @@ def main(
         activation_examples_per_component=activation_examples_per_component,
         activation_context_tokens_per_side=activation_context_tokens_per_side,
         pmi_token_top_k=pmi_token_top_k,
+        nontarget=nontarget,
     )
 
     activation_contexts_dir = get_activation_contexts_dir(run_id)
