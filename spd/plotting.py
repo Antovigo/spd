@@ -471,6 +471,13 @@ def plot_targeted_ci_heatmaps(
     # Track which nontarget indices we sample (same across modules for consistency)
     nontarget_sample_indices: torch.Tensor | None = None
 
+    # Escape $ in labels
+    if target_labels:
+        target_labels = [i.replace('$','\$') for i in target_labels]
+
+    if nontarget_labels:
+        nontarget_labels = [i.replace('$','\$') for i in nontarget_labels]
+
     images = []
     for col_idx, module_name in enumerate(module_names):
         # Flatten to 2D: (n_inputs, C)
