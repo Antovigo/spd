@@ -471,13 +471,6 @@ def plot_targeted_ci_heatmaps(
     # Track which nontarget indices we sample (same across modules for consistency)
     nontarget_sample_indices: torch.Tensor | None = None
 
-    # Escape $ in labels
-    if target_labels:
-        target_labels = [i.replace('$','\$') for i in target_labels]
-
-    if nontarget_labels:
-        nontarget_labels = [i.replace('$','\$') for i in nontarget_labels]
-
     images = []
     for col_idx, module_name in enumerate(module_names):
         # Flatten to 2D: (n_inputs, C)
@@ -500,7 +493,9 @@ def plot_targeted_ci_heatmaps(
             if target_labels is not None and len(target_labels) == target_2d.shape[0]:
                 axs[0, col_idx].set_yticks(range(len(target_labels)))
                 axs[0, col_idx].set_yticklabels(
-                    target_labels, fontsize=max(6, 10 - len(target_labels) // 10)
+                    target_labels,
+                    fontsize=max(6, 10 - len(target_labels) // 10),
+                    parse_math=False,
                 )
 
         # Nontarget row
@@ -524,6 +519,7 @@ def plot_targeted_ci_heatmaps(
                 axs[1, col_idx].set_yticklabels(
                     sampled_nontarget_labels,
                     fontsize=max(6, 10 - len(sampled_nontarget_labels) // 10),
+                    parse_math=False,
                 )
 
     # Single shared colorbar

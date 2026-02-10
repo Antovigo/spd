@@ -44,7 +44,6 @@ from spd.configs import (
     UVPlotsConfig,
     WeightMagnitudeConfig,
 )
-from spd.log import logger
 from spd.metrics import UnmaskedReconLoss
 from spd.metrics.base import Metric
 from spd.metrics.ce_and_kl_losses import CEandKLLosses
@@ -344,11 +343,6 @@ def init_metric(
             )
 
         case PersistentPGDReconLossConfig():
-            if cfg.scope == "unique_per_batch_per_token":
-                raise ValueError(
-                    "PersistentPGDReconLoss with scope 'unique_per_batch_per_token' "
-                    "is incompatible with eval as we need to unify batch sizing."
-                )
             metric = PersistentPGDReconLoss(
                 model=model,
                 device=device,
@@ -357,11 +351,6 @@ def init_metric(
                 ppgd_masks=ppgd_maskss[cfg],
             )
         case PersistentPGDReconSubsetLossConfig():
-            if cfg.scope == "unique_per_batch_per_token":
-                raise ValueError(
-                    "PersistentPGDReconSubsetLoss with scope 'unique_per_batch_per_token' "
-                    "is incompatible with eval as we need to unify batch sizing."
-                )
             metric = PersistentPGDReconSubsetLoss(
                 model=model,
                 device=device,
@@ -402,15 +391,6 @@ def evaluate(
 
     metrics: list[Metric] = []
     for cfg in eval_metric_configs:
-        if (
-            isinstance(cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig)
-            and cfg.scope == "unique_per_batch_per_token"
-        ):
-            logger.warning(
-                f"PersistentPGDRecon{cfg.classname} with scope 'unique_per_batch_per_token' "
-                "is incompatible with eval as we need to unify batch sizing. Skipping."
-            )
-            continue
         metric = init_metric(
             cfg=cfg,
             model=model,

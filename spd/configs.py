@@ -42,16 +42,15 @@ class BlockGroupConfig(BaseConfig):
     )
 
 
-class TransitionAttnConfig(BaseConfig):
-    """Configuration for self-attention in global reverse residual transitions.
+class AttnConfig(BaseConfig):
+    """Configuration for self-attention.
 
-    When provided, transitions use a full transformer block: attention → residual → MLP → residual.
     Uses RoPE (Rotary Position Embeddings) for sequence length generalization.
     """
 
     n_heads: PositiveInt = Field(
         ...,
-        description="Number of attention heads. Must divide d_resid_ci_fn.",
+        description="Number of attention heads. Must divide the input dimension.",
     )
     max_len: PositiveInt = Field(
         default=2048,
@@ -70,7 +69,7 @@ class GlobalSharedTransformerCiConfig(BaseConfig):
         description="Hidden dimension for transformer MLP blocks. "
         "If None, defaults to [4 * d_model].",
     )
-    attn_config: TransitionAttnConfig
+    attn_config: AttnConfig
 
     @model_validator(mode="after")
     def validate_config(self) -> Self:
@@ -123,7 +122,7 @@ class GlobalCiConfig(BaseConfig):
         "Order determines processing sequence (first = processed first, typically unembed). "
         "Required when fn_type='global_reverse_residual', ignored otherwise.",
     )
-    transition_attn_config: TransitionAttnConfig | None = Field(
+    transition_attn_config: AttnConfig | None = Field(
         default=None,
         description="Self-attention config for transitions in global_reverse_residual. "
         "If None, uses MLP-only transitions (original behavior). "
@@ -149,9 +148,6 @@ class GlobalCiConfig(BaseConfig):
             )
             assert self.reader_hidden_dims is not None, (
                 "reader_hidden_dims must be specified when fn_type='global_reverse_residual'"
-            )
-            assert self.transition_hidden_dim is not None, (
-                "transition_hidden_dim must be specified when fn_type='global_reverse_residual'"
             )
             if self.transition_attn_config is not None:
                 assert self.d_resid_ci_fn % self.transition_attn_config.n_heads == 0, (
@@ -481,9 +477,37 @@ class AdamPGDConfig(BaseConfig):
 PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
 
 
-PersistentPGDMaskScope = Literal[
-    "single_mask", "broadcast_across_batch", "unique_per_batch_per_token"
+class SingleMaskScope(BaseConfig):
+    type: Literal["single_mask"] = "single_mask"
+
+
+class BroadcastAcrossBatchScope(BaseConfig):
+    type: Literal["broadcast_across_batch"] = "broadcast_across_batch"
+
+
+class BatchInvariantScope(BaseConfig):
+    """Masks of shape (N, S, C) where N divides both batch_size and eval_batch_size.
+
+    Repeated along batch dim at forward time: (N, S, C) -> (B, S, C).
+    """
+
+    type: Literal["batch_invariant"] = "batch_invariant"
+    n_masks: PositiveInt
+
+
+PersistentPGDMaskScope = Annotated[
+    SingleMaskScope | BroadcastAcrossBatchScope | BatchInvariantScope,
+    Field(discriminator="type"),
 ]
+
+
+_PPGD_SCOPE_COMPAT = {"single_mask", "broadcast_across_batch"}
+
+
+def _coerce_ppgd_scope(config_dict: dict[str, Any]) -> None:
+    """Backwards compat: convert bare string scope to {type: string}."""
+    if isinstance(config_dict.get("scope"), str) and config_dict["scope"] in _PPGD_SCOPE_COMPAT:
+        config_dict["scope"] = {"type": config_dict["scope"]}
 
 
 class PersistentPGDReconLossConfig(LossMetricConfig):
@@ -493,13 +517,18 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
     PersistentPGD maintains persistent masks that receive one gradient update per training step.
     This amortizes PGD optimization across training - getting the benefit of many PGD steps
     without the per-step computational cost.
-
-    A single (C,) mask per module is shared across all batch elements and ranks.
     """
 
     classname: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
     optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
     scope: PersistentPGDMaskScope
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_scope(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            _coerce_ppgd_scope(data)
+        return data
 
 
 class PersistentPGDReconSubsetLossConfig(LossMetricConfig):
@@ -515,6 +544,13 @@ class PersistentPGDReconSubsetLossConfig(LossMetricConfig):
     routing: Annotated[
         SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_scope(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            _coerce_ppgd_scope(data)
+        return data
 
 
 class StochasticHiddenActsReconLossConfig(LossMetricConfig):
@@ -674,6 +710,7 @@ class Config(BaseConfig):
     )
     ci_config: CiConfig = Field(
         ...,
+        discriminator="mode",
         description="Configuration for the causal importance function. "
         "Use LayerwiseCiConfig for per-layer CI functions or GlobalCiConfig for a single global CI function.",
     )
@@ -1046,6 +1083,17 @@ class Config(BaseConfig):
             assert nontarget_bs % self.gradient_accumulation_steps == 0, (
                 "nontarget_batch_size must be divisible by gradient_accumulation_steps"
             )
+
+        for cfg in self.loss_metric_configs:
+            if isinstance(
+                cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
+            ) and isinstance(cfg.scope, BatchInvariantScope):
+                n = cfg.scope.n_masks
+                mb = self.microbatch_size
+                assert mb % n == 0, f"batch_invariant n_masks={n} must divide microbatch_size={mb}"
+                assert self.eval_batch_size % n == 0, (
+                    f"batch_invariant n_masks={n} must divide eval_batch_size={self.eval_batch_size}"
+                )
 
         return self
 
