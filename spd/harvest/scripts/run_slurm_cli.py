@@ -24,7 +24,7 @@ def harvest(
     partition: str = DEFAULT_PARTITION_NAME,
     time: str = "24:00:00",
     job_suffix: str | None = None,
-    nontarget: bool = False,
+    use_nontarget: bool = False,
 ) -> None:
     """Submit multi-GPU harvest job to SLURM.
 
@@ -34,7 +34,7 @@ def harvest(
     Examples:
         spd-harvest wandb:spd/runs/abc123 --n_gpus 24
         spd-harvest wandb:spd/runs/abc123 --n_batches 1000 --n_gpus 8  # Only process 1000 batches
-        spd-harvest wandb:spd/runs/abc123 --n_gpus 8 --nontarget  # Harvest on nontarget data
+        spd-harvest wandb:spd/runs/abc123 --n_gpus 8 --use_nontarget  # Harvest on nontarget data
 
     Args:
         wandb_path: WandB run path for the target decomposition run.
@@ -49,7 +49,7 @@ def harvest(
         partition: SLURM partition name.
         time: Job time limit for worker jobs.
         job_suffix: Optional suffix for SLURM job names (e.g., "v2" -> "spd-harvest-v2").
-        nontarget: If True, harvest on nontarget data instead of target data.
+        use_nontarget: If True, harvest on nontarget data instead of target data.
     """
     from spd.harvest.scripts.run_slurm import harvest as harvest_impl
 
@@ -65,7 +65,7 @@ def harvest(
         partition=partition,
         time=time,
         job_suffix=job_suffix,
-        nontarget=nontarget,
+        use_nontarget=use_nontarget,
     )
 
 
