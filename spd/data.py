@@ -213,7 +213,6 @@ def create_data_loader(
         dataset = dataset.shuffle(seed=seed, buffer_size=buffer_size)
     else:
         assert isinstance(dataset, Dataset)
-        dataset = dataset.shuffle(seed=seed)
 
     tokenizer = AutoTokenizer.from_pretrained(dataset_config.hf_tokenizer_path)
 
@@ -241,6 +240,10 @@ def create_data_loader(
             add_bos_token=False,
             to_lower=to_lower,
         )
+
+    if not dataset_config.streaming:
+        assert isinstance(torch_dataset, Dataset)
+        torch_dataset = torch_dataset.shuffle(seed=seed)
 
     sampler = None
     if not dataset_config.streaming and dist_state is not None:
