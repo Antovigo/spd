@@ -611,6 +611,7 @@ class ComponentModel(LoadableModule):
 
         target_model.eval()
         target_model.requires_grad_(False)
+        target_model.float()  # SPD trains in float32; ensure target model matches
 
         if config.identity_module_info is not None:
             insert_identity_operations_(

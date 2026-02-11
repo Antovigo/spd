@@ -191,6 +191,7 @@ def optimize(
         )
 
     target_model.requires_grad_(False)
+    target_model.float()  # SPD trains in float32; ensure target model matches
 
     module_path_info = expand_module_patterns(target_model, config.all_module_info)
 
