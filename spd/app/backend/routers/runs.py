@@ -93,7 +93,7 @@ def load_run(wandb_path: str, context_length: int, manager: DepStateManager):
     # Load the model
     logger.info(f"[API] Loading model for run {run.id}: {run.wandb_path}")
     model = ComponentModel.from_run_info(run_info)
-    model = model.to(DEVICE)
+    model = model.float().to(DEVICE)
     model.eval()
 
     # Load tokenizer

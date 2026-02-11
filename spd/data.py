@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -131,7 +132,15 @@ def tokenize_and_concatenate(
 
         return {"input_ids": tokens}
 
-    # Apply the tokenization function to the dataset
+    # Compute a deterministic fingerprint for .map() caching. HuggingFace's default fingerprint
+    # uses dill to serialize the closure (which captures the tokenizer object), and this
+    # serialization is non-deterministic across process invocations, causing cache misses.
+    fingerprint_data = (
+        f"{dataset._fingerprint}|{tokenizer.name_or_path}"
+        f"|{max_length}|{column_name}|{add_bos_token}|{to_lower}"
+    )
+    new_fingerprint = hashlib.md5(fingerprint_data.encode()).hexdigest()
+
     if isinstance(dataset, IterableDataset):
         tokenized_dataset = dataset.map(
             tokenize_function,
@@ -140,7 +149,11 @@ def tokenize_and_concatenate(
         )
     else:
         tokenized_dataset = dataset.map(
-            tokenize_function, batched=True, remove_columns=[column_name], num_proc=num_proc
+            tokenize_function,
+            batched=True,
+            remove_columns=[column_name],
+            num_proc=num_proc,
+            new_fingerprint=new_fingerprint,
         )
 
     tokenized_dataset = tokenized_dataset.with_format("torch")

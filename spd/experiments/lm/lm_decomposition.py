@@ -49,9 +49,6 @@ def main(
         None if sweep_params_json is None else json.loads(sweep_params_json.removeprefix("json:"))
     )
 
-    # Use the same seed across all ranks for deterministic data loading
-    set_seed(config.seed)
-
     if is_main_process():
         out_dir, run_id, tags = setup_decomposition_run(
             experiment_tag="lm",
@@ -288,6 +285,8 @@ def main(
                 global_seed=config.seed + 3,
                 dist_state=dist_state,
             )
+
+    set_seed(config.seed)
 
     if is_main_process():
         logger.info("Starting optimization...")
