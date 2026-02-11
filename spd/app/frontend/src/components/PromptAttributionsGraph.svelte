@@ -10,7 +10,7 @@
         NodePosition,
     } from "../lib/promptAttributionsTypes";
     import { formatNodeKeyForDisplay } from "../lib/promptAttributionsTypes";
-    import { getAliasedRowLabel } from "../lib/layerAliasing";
+    import { getAliasedRowLabel, parseLayerName } from "../lib/layerAliasing";
     import { colors, getEdgeColor, getSubcompActColor, rgbToCss, getNextTokenProbBgColor } from "../lib/colors";
     import { displaySettings } from "../lib/displaySettings.svelte";
     import {
@@ -40,7 +40,13 @@
     const LAYER_X_OFFSET = 3; // Horizontal offset per layer to avoid edge overlap
 
     // Row order for layout (qkv share a row, lm_head before output)
-    const ROW_ORDER = ["wte", "qkv", "o_proj", "c_fc", "down_proj", "lm_head", "output"];
+    // Includes subtypes from all supported architectures
+    const ROW_ORDER = [
+        "wte",
+        "qkv", "q_proj", "k_proj", "v_proj", "query_key_value", "o_proj", "dense",
+        "c_fc", "dense_h_to_4h", "gate_proj", "up_proj", "down_proj", "dense_4h_to_h",
+        "lm_head", "output",
+    ];
     const QKV_SUBTYPES = ["q_proj", "k_proj", "v_proj"];
 
     type Props = {
@@ -142,15 +148,15 @@
         if (name === "output") {
             return { name, block: Infinity, type: "output", subtype: "output" };
         }
-        const m = name.match(/h\.(\d+)\.(attn|mlp)\.(\w+)/);
-        if (!m) throw new Error(`parseLayer: unrecognized layer name: ${name}`);
-        return { name, block: +m[1], type: m[2] as "attn" | "mlp", subtype: m[3] };
+        const parsed = parseLayerName(name);
+        if (!parsed) throw new Error(`parseLayer: unrecognized layer name: ${name}`);
+        return { name, block: parsed.block, type: parsed.moduleType as "attn" | "mlp", subtype: parsed.submodule };
     }
 
     function getRowKey(layer: string): string {
         const info = parseLayer(layer);
         if (QKV_SUBTYPES.includes(info.subtype)) {
-            return `h.${info.block}.qkv`;
+            return `__block_${info.block}__qkv`;
         }
         return layer;
     }
@@ -212,16 +218,24 @@
             nodesPerLayerSeq[key].push(+cIdx);
         }
 
+        // Build map from row key to layers in that row (for QKV grouping)
+        const rowToLayers: Record<string, string[]> = {};
+        for (const layer of allLayers) {
+            const rk = getRowKey(layer);
+            if (!rowToLayers[rk]) rowToLayers[rk] = [];
+            rowToLayers[rk].push(layer);
+        }
+
         // Sort rows for Y positioning
         const parseRow = (r: string) => {
             if (r === "wte") return { block: -1, subtype: "wte" };
             if (r === "lm_head") return { block: Infinity - 1, subtype: "lm_head" };
             if (r === "output") return { block: Infinity, subtype: "output" };
-            const mQkv = r.match(/h\.(\d+)\.qkv/);
+            const mQkv = r.match(/^__block_(\d+)__qkv$/);
             if (mQkv) return { block: +mQkv[1], subtype: "qkv" };
-            const m = r.match(/h\.(\d+)\.(attn|mlp)\.(\w+)/);
-            if (!m) throw new Error(`parseRow: unrecognized row key: ${r}`);
-            return { block: +m[1], subtype: m[3] };
+            // Use parseLayer for any architecture
+            const info = parseLayer(r);
+            return { block: info.block, subtype: info.subtype };
         };
 
         const rows = Array.from(allRows).sort((a, b) => {
@@ -261,25 +275,19 @@
         const maxComponentsPerSeq = tokens.map((_, seqIdx) => {
             let maxAtSeq = 0;
             for (const row of rows) {
-                if (row.endsWith(".qkv")) {
-                    const blockMatch = row.match(/h\.(\d+)/);
-                    if (blockMatch) {
-                        const block = blockMatch[1];
-                        let totalQkv = 0;
-                        for (const subtype of QKV_SUBTYPES) {
-                            const layer = `h.${block}.attn.${subtype}`;
-                            const nodes = nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? [];
-                            totalQkv += nodes.length;
-                        }
-                        totalQkv += 2; // gaps between groups
-                        maxAtSeq = Math.max(maxAtSeq, totalQkv);
+                const layersInRow = rowToLayers[row] ?? [];
+                if (layersInRow.length > 1) {
+                    // Grouped row (e.g. QKV): sum nodes across all layers + gaps
+                    let total = 0;
+                    for (const layer of layersInRow) {
+                        total += (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length;
                     }
+                    total += layersInRow.length - 1; // gaps between groups
+                    maxAtSeq = Math.max(maxAtSeq, total);
                 } else {
-                    for (const layer of allLayers) {
-                        if (getRowKey(layer) === row) {
-                            const nodes = nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? [];
-                            maxAtSeq = Math.max(maxAtSeq, nodes.length);
-                        }
+                    for (const layer of layersInRow) {
+                        const nodes = nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? [];
+                        maxAtSeq = Math.max(maxAtSeq, nodes.length);
                     }
                 }
             }
@@ -302,8 +310,9 @@
         const QKV_GROUP_GAP = COMPONENT_SIZE + componentGap;
 
         for (const layer of allLayers) {
-            const info = parseLayer(layer);
-            const isQkv = QKV_SUBTYPES.includes(info.subtype);
+            const rowKey = getRowKey(layer);
+            const rowLayers = rowToLayers[rowKey] ?? [];
+            const isGroupedRow = rowLayers.length > 1;
 
             for (let seqIdx = 0; seqIdx < tokens.length; seqIdx++) {
                 const nodes = nodesPerLayerSeq[`${layer}:${seqIdx}`];
@@ -312,13 +321,11 @@
                 let baseX = seqXStarts[seqIdx] + COL_PADDING + layerXOffsets[layer];
                 const baseY = layerYPositions[layer];
 
-                // For qkv layers, offset X based on subtype
-                if (isQkv) {
-                    const subtypeIdx = QKV_SUBTYPES.indexOf(info.subtype);
-                    for (let i = 0; i < subtypeIdx; i++) {
-                        const prevLayer = `h.${info.block}.attn.${QKV_SUBTYPES[i]}`;
-                        const prevLayerNodes = nodesPerLayerSeq[`${prevLayer}:${seqIdx}`];
-                        const prevCount = prevLayerNodes?.length ?? 0;
+                // For grouped rows (e.g. QKV), offset X based on position in group
+                if (isGroupedRow) {
+                    const layerIdx = rowLayers.indexOf(layer);
+                    for (let i = 0; i < layerIdx; i++) {
+                        const prevCount = nodesPerLayerSeq[`${rowLayers[i]}:${seqIdx}`]?.length ?? 0;
                         baseX += prevCount * (COMPONENT_SIZE + componentGap);
                         baseX += QKV_GROUP_GAP;
                     }

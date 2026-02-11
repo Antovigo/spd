@@ -10,7 +10,7 @@
         type NodePosition,
         type TokenInfo,
     } from "../../lib/promptAttributionsTypes";
-    import { getAliasedRowLabel } from "../../lib/layerAliasing";
+    import { getAliasedRowLabel, parseLayerName } from "../../lib/layerAliasing";
     import { RUN_KEY, type RunContext } from "../../lib/useRun.svelte";
 
     const runState = getContext<RunContext>(RUN_KEY);
@@ -36,7 +36,12 @@
     const HIT_AREA_PADDING = 4;
     const MARGIN = { top: 60, right: 40, bottom: 20, left: 20 };
     const LABEL_WIDTH = 100;
-    const ROW_ORDER = ["wte", "qkv", "o_proj", "c_fc", "down_proj", "lm_head", "output"];
+    const ROW_ORDER = [
+        "wte",
+        "qkv", "q_proj", "k_proj", "v_proj", "query_key_value", "o_proj", "dense",
+        "c_fc", "dense_h_to_4h", "gate_proj", "up_proj", "down_proj", "dense_4h_to_h",
+        "lm_head", "output",
+    ];
     const QKV_SUBTYPES = ["q_proj", "k_proj", "v_proj"];
     const CLUSTER_BAR_HEIGHT = 3;
     const CLUSTER_BAR_GAP = 2;
@@ -216,14 +221,14 @@
         if (name === "wte") return { name, block: -1, type: "embed", subtype: "wte" };
         if (name === "lm_head") return { name, block: Infinity - 1, type: "mlp", subtype: "lm_head" };
         if (name === "output") return { name, block: Infinity, type: "output", subtype: "output" };
-        const m = name.match(/h\.(\d+)\.(attn|mlp)\.(\w+)/);
-        if (!m) throw new Error(`parseLayer: unrecognized layer name: ${name}`);
-        return { name, block: +m[1], type: m[2] as "attn" | "mlp", subtype: m[3] };
+        const parsed = parseLayerName(name);
+        if (!parsed) throw new Error(`parseLayer: unrecognized layer name: ${name}`);
+        return { name, block: parsed.block, type: parsed.moduleType as "attn" | "mlp", subtype: parsed.submodule };
     }
 
     function getRowKey(layer: string): string {
         const info = parseLayer(layer);
-        if (QKV_SUBTYPES.includes(info.subtype)) return `h.${info.block}.qkv`;
+        if (QKV_SUBTYPES.includes(info.subtype)) return `__block_${info.block}__qkv`;
         return layer;
     }
 
@@ -268,16 +273,23 @@
             nodesPerLayerSeq[key].push(+cIdx);
         }
 
+        // Build map from row key to layers in that row
+        const rowToLayers: Record<string, string[]> = {};
+        for (const layer of allLayers) {
+            const rk = getRowKey(layer);
+            if (!rowToLayers[rk]) rowToLayers[rk] = [];
+            rowToLayers[rk].push(layer);
+        }
+
         // Sort rows
         const parseRow = (r: string) => {
             if (r === "wte") return { block: -1, subtype: "wte" };
             if (r === "lm_head") return { block: Infinity - 1, subtype: "lm_head" };
             if (r === "output") return { block: Infinity, subtype: "output" };
-            const mQkv = r.match(/h\.(\d+)\.qkv/);
+            const mQkv = r.match(/^__block_(\d+)__qkv$/);
             if (mQkv) return { block: +mQkv[1], subtype: "qkv" };
-            const m = r.match(/h\.(\d+)\.(attn|mlp)\.(\w+)/);
-            if (!m) return { block: 0, subtype: r };
-            return { block: +m[1], subtype: m[3] };
+            const info = parseLayer(r);
+            return { block: info.block, subtype: info.subtype };
         };
 
         const rows: string[] = Array.from(allRows).sort((a, b) => {
@@ -293,23 +305,17 @@
         const maxComponentsPerSeq = Array.from({ length: numTokens }, (_, seqIdx) => {
             let maxAtSeq = 1;
             for (const row of rows) {
-                if (row.endsWith(".qkv")) {
-                    const blockMatch = row.match(/h\.(\d+)/);
-                    if (blockMatch) {
-                        const block = blockMatch[1];
-                        let totalQkv = 0;
-                        for (const subtype of QKV_SUBTYPES) {
-                            const layer = `h.${block}.attn.${subtype}`;
-                            totalQkv += (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length;
-                        }
-                        totalQkv += 2;
-                        maxAtSeq = Math.max(maxAtSeq, totalQkv);
+                const layersInRow = rowToLayers[row] ?? [];
+                if (layersInRow.length > 1) {
+                    let total = 0;
+                    for (const layer of layersInRow) {
+                        total += (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length;
                     }
+                    total += layersInRow.length - 1;
+                    maxAtSeq = Math.max(maxAtSeq, total);
                 } else {
-                    for (const layer of allLayers) {
-                        if (getRowKey(layer) === row) {
-                            maxAtSeq = Math.max(maxAtSeq, (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length);
-                        }
+                    for (const layer of layersInRow) {
+                        maxAtSeq = Math.max(maxAtSeq, (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length);
                     }
                 }
             }
@@ -353,8 +359,9 @@
         const nodePositions: Record<string, NodePosition> = {};
         const allClusterSpans: ClusterSpan[] = [];
         for (const layer of allLayers) {
-            const info = parseLayer(layer);
-            const isQkv = QKV_SUBTYPES.includes(info.subtype);
+            const rowKey = getRowKey(layer);
+            const rowLayers = rowToLayers[rowKey] ?? [];
+            const isGroupedRow = rowLayers.length > 1;
 
             for (let seqIdx = 0; seqIdx < numTokens; seqIdx++) {
                 const layerNodes = nodesPerLayerSeq[`${layer}:${seqIdx}`];
@@ -363,12 +370,11 @@
                 let baseX = seqXStarts[seqIdx] + COL_PADDING + layerXOffsets[layer];
                 const baseY = layerYPositions[layer];
 
-                if (isQkv) {
-                    const subtypeIdx = QKV_SUBTYPES.indexOf(info.subtype);
-                    for (let i = 0; i < subtypeIdx; i++) {
-                        const prevLayer = `h.${info.block}.attn.${QKV_SUBTYPES[i]}`;
+                if (isGroupedRow) {
+                    const layerIdx = rowLayers.indexOf(layer);
+                    for (let i = 0; i < layerIdx; i++) {
                         baseX +=
-                            (nodesPerLayerSeq[`${prevLayer}:${seqIdx}`]?.length ?? 0) * (COMPONENT_SIZE + componentGap);
+                            (nodesPerLayerSeq[`${rowLayers[i]}:${seqIdx}`]?.length ?? 0) * (COMPONENT_SIZE + componentGap);
                         baseX += COMPONENT_SIZE + componentGap;
                     }
                 }

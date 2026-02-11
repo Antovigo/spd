@@ -42,9 +42,8 @@ def build_token_lookup(
     Uses tokenizer-specific strategy to produce strings that concatenate correctly.
     """
     lookup: dict[int, str] = {}
-    vocab_size: int = tokenizer.vocab_size
 
-    for tid in range(vocab_size):
+    for tid in tokenizer.get_vocab().values():
         decoded: str = tokenizer.decode([tid], skip_special_tokens=False)
 
         match tokenizer_name:
@@ -56,7 +55,7 @@ def build_token_lookup(
                     lookup[tid] = decoded
                 else:
                     lookup[tid] = " " + decoded
-            case "openai-community/gpt2":
+            case "openai-community/gpt2" | "EleutherAI/pythia-70m-deduped":
                 # BPE (GPT-2 style): spaces encoded in token via Ġ -> space
                 lookup[tid] = decoded
             case _:

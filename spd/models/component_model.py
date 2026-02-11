@@ -36,6 +36,19 @@ from spd.utils.general_utils import resolve_class
 from spd.utils.module_utils import ModulePathInfo, expand_module_patterns
 
 
+def get_embedding_module(model: nn.Module) -> nn.Module:
+    """Get the input embedding module, supporting both custom and HuggingFace models."""
+    if hasattr(model, "wte"):
+        wte = model.wte
+        assert isinstance(wte, nn.Module)
+        return wte
+    if hasattr(model, "get_input_embeddings"):
+        embed = model.get_input_embeddings()  # pyright: ignore[reportCallIssue]
+        assert isinstance(embed, nn.Module)
+        return embed
+    raise AttributeError(f"{type(model).__name__} has no wte or get_input_embeddings()")
+
+
 def _validate_checkpoint_ci_config_compatibility(
     state_dict: dict[str, Tensor], ci_config: CiConfig
 ) -> None:

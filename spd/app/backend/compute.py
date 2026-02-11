@@ -16,7 +16,7 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from spd.app.backend.optim_cis import OptimCIConfig, OptimizationMetrics, optimize_ci_values
 from spd.configs import SamplingType
-from spd.models.component_model import ComponentModel, OutputWithCache
+from spd.models.component_model import ComponentModel, OutputWithCache, get_embedding_module
 from spd.models.components import make_mask_infos
 
 
@@ -114,21 +114,31 @@ class OptimizedPromptAttributionResult:
     metrics: OptimizationMetrics  # Final loss metrics from optimization
 
 
+def _extract_block_number(layer: str) -> str | None:
+    """Extract the block number from a layer name.
+
+    Supports: "h.0.attn.q_proj", "gpt_neox.layers.0.attention.dense", etc.
+    """
+    import re
+
+    m = re.search(r"\.(\d+)\.", layer)
+    return m.group(1) if m else None
+
+
 def is_kv_to_o_pair(in_layer: str, out_layer: str) -> bool:
     """Check if pair requires cross-sequence gradient computation.
 
     For k/v → o_proj within the same attention block, output at s_out
     has gradients w.r.t. inputs at all s_in ≤ s_out (causal attention).
     """
-    in_is_kv = any(x in in_layer for x in ["k_proj", "v_proj"])
-    out_is_o = "o_proj" in out_layer
+    in_is_kv = any(x in in_layer for x in ["k_proj", "v_proj", "query_key_value"])
+    out_is_o = any(x in out_layer for x in ["o_proj", "attention.dense"])
     if not (in_is_kv and out_is_o):
         return False
 
-    # Check same attention block: "h.{idx}.attn.{proj}"
-    in_block = in_layer.split(".")[1]
-    out_block = out_layer.split(".")[1]
-    return in_block == out_block
+    in_block = _extract_block_number(in_layer)
+    out_block = _extract_block_number(out_layer)
+    return in_block is not None and in_block == out_block
 
 
 def get_sources_by_target(
@@ -172,8 +182,8 @@ def get_sources_by_target(
         wte_cache["wte_post_detach"] = output
         return output
 
-    assert isinstance(model.target_model.wte, nn.Module), "wte is not a module"
-    wte_handle = model.target_model.wte.register_forward_hook(wte_hook, with_kwargs=True)
+    wte_module = get_embedding_module(model.target_model)
+    wte_handle = wte_module.register_forward_hook(wte_hook, with_kwargs=True)
 
     with torch.enable_grad():
         comp_output_with_cache: OutputWithCache = model(
@@ -188,25 +198,8 @@ def get_sources_by_target(
     cache["wte_post_detach"] = wte_cache["wte_post_detach"]
     cache["output_pre_detach"] = comp_output_with_cache.output
 
-    # Build layer list: wte first, component layers, output last
-    layers = ["wte"]
-    component_layer_names = [
-        "attn.q_proj",
-        "attn.k_proj",
-        "attn.v_proj",
-        "attn.o_proj",
-        "mlp.c_fc",
-        "mlp.down_proj",
-    ]
-    n_blocks = get_model_n_blocks(model.target_model)
-    for i in range(n_blocks):
-        layers.extend([f"h.{i}.{layer_name}" for layer_name in component_layer_names])
-
-    # Add lm_head if it exists in target_module_paths (unembedding matrix)
-    if "lm_head" in model.target_module_paths:
-        layers.append("lm_head")
-
-    layers.append("output")
+    # Build layer list: wte first, component layers (in model order), output last
+    layers = ["wte", *model.target_module_paths, "output"]
 
     # Test all pairs: wte can feed into anything, anything can feed into output
     test_pairs = []
@@ -358,8 +351,8 @@ def compute_edges_from_ci(
 
     # Setup wte hook and run forward pass for gradient computation
     wte_hook, wte_cache = _setup_wte_hook()
-    assert isinstance(model.target_model.wte, nn.Module), "wte is not a module"
-    wte_handle = model.target_model.wte.register_forward_hook(wte_hook, with_kwargs=True)
+    wte_module = get_embedding_module(model.target_model)
+    wte_handle = wte_module.register_forward_hook(wte_hook, with_kwargs=True)
 
     weight_deltas = model.calc_weight_deltas()
     weight_deltas_and_masks = {
@@ -720,12 +713,15 @@ def extract_node_subcomp_acts(
 def get_model_n_blocks(model: nn.Module) -> int:
     """Get the number of blocks in the model."""
     from transformers.models.gpt2 import GPT2LMHeadModel
+    from transformers.models.gpt_neox import GPTNeoXForCausalLM
 
     from spd.pretrain.models import GPT2, GPT2Simple, LlamaSimple, LlamaSimpleMLP
 
     match model:
         case GPT2LMHeadModel():
             return len(model.transformer.h)
+        case GPTNeoXForCausalLM():
+            return len(model.gpt_neox.layers)
         case GPT2() | GPT2Simple() | LlamaSimple() | LlamaSimpleMLP():
             return len(model.h)
         case _ if hasattr(model, "h"):

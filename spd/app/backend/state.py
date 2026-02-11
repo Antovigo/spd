@@ -59,7 +59,7 @@ class HarvestCache:
     @property
     def interpretations(self) -> dict[str, InterpretationResult]:
         if self._interpretations is _NOT_LOADED:
-            self._interpretations = load_interpretations(self.run_id)
+            self._interpretations = load_interpretations(self.run_id) or {}
         assert isinstance(self._interpretations, dict)
         return self._interpretations
 
