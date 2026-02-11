@@ -304,7 +304,9 @@ def harvest_activation_contexts(
         with torch.no_grad():
             out = model(batch, cache_type="input")
             probs = torch.softmax(out.output, dim=-1)
-            probs = probs[..., :vocab_size]  # Truncate padding tokens (e.g. Pythia pads to multiple of 64)
+            probs = probs[
+                ..., :vocab_size
+            ]  # Truncate padding tokens (e.g. Pythia pads to multiple of 64)
 
             ci_dict = model.calc_causal_importances(
                 pre_weight_acts=out.cache,

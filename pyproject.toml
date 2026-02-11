@@ -74,6 +74,7 @@ extend-exclude = ["spd/app/frontend"]
 [tool.ruff.lint]
 ignore = [
     "F722", # Incompatible with jaxtyping
+    "F821", # Incompatible with jaxtyping
     "E731", # I think lambda functions are fine in several places
     "E501", # there are a lot of long lines in the codebase
 ]

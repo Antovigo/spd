@@ -366,10 +366,7 @@ def optimize(
                             anneal_end_frac=loss_cfg.coeff_anneal_end_frac,
                         )
                         batch_log_data["train/scheduled/ImportanceMinimalityLoss_coeff"] = coeff
-                    if (
-                        loss_cfg.p_anneal_final_p is not None
-                        and loss_cfg.p_anneal_start_frac < 1.0
-                    ):
+                    if loss_cfg.p_anneal_final_p is not None and loss_cfg.p_anneal_start_frac < 1.0:
                         pnorm = get_linear_annealed_value(
                             current_frac_of_training=step / config.steps,
                             initial_value=loss_cfg.pnorm,
@@ -418,9 +415,7 @@ def optimize(
         # ===== NONTARGET BATCH (if targeted mode enabled) =====
         if nontarget_train_iterator is not None:
             nontarget_batch = extract_batch_data(next(nontarget_train_iterator)).to(device)
-            nontarget_output: OutputWithCache = wrapped_model(
-                nontarget_batch, cache_type="input"
-            )
+            nontarget_output: OutputWithCache = wrapped_model(nontarget_batch, cache_type="input")
 
             nontarget_ci = component_model.calc_causal_importances(
                 pre_weight_acts=nontarget_output.cache,
@@ -463,7 +458,9 @@ def optimize(
                         anneal_final_value=loss_cfg.coeff_anneal_final_value,
                         anneal_end_frac=loss_cfg.coeff_anneal_end_frac,
                     )
-                    batch_log_data["train/nontarget/scheduled/ImportanceMinimalityLoss_coeff"] = coeff
+                    batch_log_data["train/nontarget/scheduled/ImportanceMinimalityLoss_coeff"] = (
+                        coeff
+                    )
 
                 nontarget_total_loss = nontarget_total_loss + coeff * loss_val
                 batch_log_data[f"train/nontarget/loss/{loss_cfg.classname}"] += (
@@ -493,9 +490,7 @@ def optimize(
 
             batch_log_data["train/schedules/lr"] = step_lr
             if torch.cuda.is_available():
-                batch_log_data["train/gpu_peak_memory_gb"] = (
-                    torch.cuda.max_memory_allocated() / 1e9
-                )
+                batch_log_data["train/gpu_peak_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
 
             if is_main_process():
                 assert out_dir is not None
