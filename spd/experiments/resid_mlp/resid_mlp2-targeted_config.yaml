@@ -5,8 +5,8 @@ wandb_run_name: null
 wandb_run_name_prefix: ""
 
 # --- General ---
-output_dir_name: "resid_mlp2/Target 15-20-25 (pnorm 1, im 3e-5, 60 hidden_dims, constant lr, 2xStoch)"
-seed: 0
+output_dir_name: "resid_mlp2/seeds {seed}"
+seed: 1
 n_mask_samples: 1
 ci_fn_type: "shared_mlp"
 ci_fn_hidden_dims: [60]
