@@ -27,6 +27,7 @@ from spd.configs import (
     PermutedCIPlotsConfig,
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
+    PGDConfig,
     PGDMultiBatchReconLossConfig,
     PGDMultiBatchReconSubsetLossConfig,
     PGDReconLayerwiseLossConfig,
@@ -40,6 +41,7 @@ from spd.configs import (
     TargetedCEandKLConfig,
     TargetedCI_L0Config,
     TargetedCIHeatmapConfig,
+    TargetedPGDReconLossConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
@@ -71,6 +73,7 @@ from spd.metrics.stochastic_recon_subset_loss import StochasticReconSubsetLoss
 from spd.metrics.targeted_ce_and_kl import TargetedCEandKL
 from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.targeted_ci_l0 import TargetedCI_L0
+from spd.metrics.targeted_pgd_recon_loss import TargetedPGDReconLoss
 from spd.metrics.uv_plots import UVPlots
 from spd.metrics.weight_magnitude import WeightMagnitude
 from spd.models.component_model import ComponentModel, OutputWithCache
@@ -332,6 +335,26 @@ def init_metric(
                 device=device,
                 sampling=run_config.sampling,
                 rounding_threshold=cfg.rounding_threshold,
+                nontarget_eval_iterator=nontarget_eval_iterator,
+            )
+
+        case TargetedPGDReconLossConfig():
+            assert nontarget_eval_iterator is not None, (
+                "TargetedPGDReconLoss requires nontarget_eval_iterator"
+            )
+            pgd_config = PGDConfig(
+                init=cfg.init,
+                step_size=cfg.step_size,
+                n_steps=cfg.n_steps,
+                mask_scope=cfg.mask_scope,
+            )
+            metric = TargetedPGDReconLoss(
+                model=model,
+                device=device,
+                output_loss_type=run_config.output_loss_type,
+                pgd_config=pgd_config,
+                use_delta_component=run_config.use_delta_component,
+                sampling=run_config.sampling,
                 nontarget_eval_iterator=nontarget_eval_iterator,
             )
 

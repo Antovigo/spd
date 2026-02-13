@@ -595,6 +595,14 @@ class TargetedCEandKLConfig(BaseConfig):
     rounding_threshold: float = 0.5
 
 
+class TargetedPGDReconLossConfig(BaseConfig):
+    classname: Literal["TargetedPGDReconLoss"] = "TargetedPGDReconLoss"
+    init: PGDInitStrategy
+    step_size: float
+    n_steps: int
+    mask_scope: MaskScope
+
+
 class CIvsWeightMagnitudeConfig(BaseConfig):
     classname: Literal["CIvsWeightMagnitude"] = "CIvsWeightMagnitude"
 
@@ -668,6 +676,7 @@ EvalOnlyMetricConfigType = (
     | TargetedCIHeatmapConfig
     | TargetedCI_L0Config
     | TargetedCEandKLConfig
+    | TargetedPGDReconLossConfig
     | UVPlotsConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig
