@@ -2,7 +2,7 @@ import fnmatch
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,9 @@ from torch import Tensor
 from torch.nn.init import calculate_gain
 
 from spd.configs import ModulePatternInfoConfig
+
+if TYPE_CHECKING:
+    from spd.configs import CiHookSpec
 
 
 @dataclass
@@ -87,3 +90,19 @@ def expand_module_patterns(
             raise ValueError(f"Pattern '{pattern}' in module_info did not match any modules")
 
     return [ModulePathInfo(module_path=name, C=c) for name, (_, c) in module_to_info.items()]
+
+
+def expand_ci_hook_patterns(
+    model: nn.Module,
+    ci_hooks: list["CiHookSpec"],
+) -> list[tuple[str, Literal["input", "output"]]]:
+    """Expand CI hook patterns to concrete (module_path, position) pairs."""
+    result: list[tuple[str, Literal["input", "output"]]] = []
+    for hook in ci_hooks:
+        matched = False
+        for name, _ in model.named_modules():
+            if fnmatch.fnmatch(name, hook.pattern):
+                matched = True
+                result.append((name, hook.position))
+        assert matched, f"CI hook pattern '{hook.pattern}' matched no modules"
+    return result

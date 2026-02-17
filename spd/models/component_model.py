@@ -1,6 +1,6 @@
 import fnmatch
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal, NamedTuple, overload, override
@@ -19,9 +19,11 @@ from spd.models.components import (
     ComponentsMaskInfo,
     EmbeddingComponents,
     GlobalCiFnWrapper,
+    GlobalHooksMLPCiFn,
     GlobalReverseResidualCiFn,
     GlobalSharedMLPCiFn,
     GlobalSharedTransformerCiFn,
+    HooksGlobalCiFnWrapper,
     Identity,
     LayerwiseCiFnWrapper,
     LinearComponents,
@@ -33,7 +35,7 @@ from spd.models.components import (
 from spd.models.sigmoids import SIGMOID_TYPES, SigmoidType
 from spd.spd_types import LayerwiseCiFnType, ModelPath
 from spd.utils.general_utils import resolve_class
-from spd.utils.module_utils import ModulePathInfo, expand_module_patterns
+from spd.utils.module_utils import ModulePathInfo, expand_ci_hook_patterns, expand_module_patterns
 
 
 def _validate_checkpoint_ci_config_compatibility(
@@ -42,12 +44,17 @@ def _validate_checkpoint_ci_config_compatibility(
     """Validate that checkpoint CI weights match the config CI mode."""
     has_layerwise_ci_fns = any(k.startswith("ci_fn._ci_fns") for k in state_dict)
     has_global_ci_fn = any(k.startswith("ci_fn._global_ci_fn") for k in state_dict)
+    has_hooks_ci_fn = any(k.startswith("ci_fn._hooks_ci_fn") for k in state_dict)
 
     match ci_config:
         case LayerwiseCiConfig():
             assert has_layerwise_ci_fns, (
                 f"Config specifies layerwise CI but checkpoint has no ci_fn._ci_fns keys "
                 f"(has ci_fn._global_ci_fn: {has_global_ci_fn})"
+            )
+        case GlobalCiConfig() if ci_config.fn_type == "hooks_mlp":
+            assert has_hooks_ci_fn, (
+                "Config specifies hooks_mlp CI but checkpoint has no ci_fn._hooks_ci_fn keys"
             )
         case GlobalCiConfig():
             assert has_global_ci_fn, (
@@ -127,6 +134,8 @@ class ComponentModel(LoadableModule):
             {k.replace(".", "-"): self.components[k] for k in sorted(self.components)}
         )
 
+        self.ci_hook_modules: list[tuple[str, Literal["input", "output"]]] | None = None
+
         match ci_config:
             case LayerwiseCiConfig():
                 raw_layerwise_ci_fns = {
@@ -142,6 +151,23 @@ class ComponentModel(LoadableModule):
                     ci_fns=raw_layerwise_ci_fns,
                     components=self.components,
                     ci_fn_type=ci_config.fn_type,
+                )
+            case GlobalCiConfig() if ci_config.fn_type == "hooks_mlp":
+                assert ci_config.ci_hooks is not None
+                assert ci_config.hidden_dims is not None
+                self.ci_hook_modules = expand_ci_hook_patterns(target_model, ci_config.ci_hooks)
+                hooks_ci_fn = ComponentModel._create_hooks_mlp_ci_fn(
+                    target_model=target_model,
+                    module_to_c=self.module_to_c,
+                    ci_hook_modules=self.ci_hook_modules,
+                    hidden_dims=ci_config.hidden_dims,
+                )
+                ci_hook_cache_keys = [
+                    f"ci_hook::{module_path}" for module_path, _ in self.ci_hook_modules
+                ]
+                self.ci_fn = HooksGlobalCiFnWrapper(
+                    hooks_ci_fn=hooks_ci_fn,
+                    ci_hook_cache_keys=ci_hook_cache_keys,
                 )
             case GlobalCiConfig():
                 raw_global_ci_fn = ComponentModel._create_global_ci_fn(
@@ -248,6 +274,49 @@ class ComponentModel(LoadableModule):
                     f"Module {type(target_module)} not supported. "
                     "Embedding modules should be handled separately."
                 )
+
+    @staticmethod
+    def _get_module_output_dim(module: nn.Module) -> int:
+        """Extract output dimension from a module."""
+        match module:
+            case nn.Linear():
+                return module.out_features
+            case RadfordConv1D():
+                return module.weight.shape[1]
+            case Identity():
+                return module.d
+            case _:
+                raise ValueError(f"Cannot determine output dim for {type(module)}")
+
+    @staticmethod
+    def _create_hooks_mlp_ci_fn(
+        target_model: nn.Module,
+        module_to_c: dict[str, int],
+        ci_hook_modules: list[tuple[str, Literal["input", "output"]]],
+        hidden_dims: list[int],
+    ) -> GlobalHooksMLPCiFn:
+        """Create a hooks_mlp CI function with user-specified hook activations as input."""
+        hook_modules: list[str] = []
+        hook_dims: list[int] = []
+        for module_path, position in ci_hook_modules:
+            module = target_model.get_submodule(module_path)
+            cache_key = f"ci_hook::{module_path}"
+            hook_modules.append(cache_key)
+            if position == "input":
+                hook_dims.append(ComponentModel._get_module_input_dim(module))
+            else:
+                hook_dims.append(ComponentModel._get_module_output_dim(module))
+
+        target_modules = sorted(module_to_c.keys())
+        target_c_values = [module_to_c[m] for m in target_modules]
+
+        return GlobalHooksMLPCiFn(
+            hook_modules=hook_modules,
+            hook_dims=hook_dims,
+            target_modules=target_modules,
+            target_c_values=target_c_values,
+            hidden_dims=hidden_dims,
+        )
 
     @staticmethod
     def _create_layerwise_ci_fn(
@@ -373,6 +442,8 @@ class ComponentModel(LoadableModule):
                     transition_hidden_dim=transition_hidden_dim,
                     attn_config=ci_config.transition_attn_config,
                 )
+            case "hooks_mlp":
+                raise ValueError("hooks_mlp is handled separately in __init__")
 
     def _extract_output(self, raw_output: Any) -> Tensor:
         """Extract the desired output from the model's raw output.
@@ -479,7 +550,13 @@ class ComponentModel(LoadableModule):
                 cache=cache,
             )
 
-        with self._attach_forward_hooks(hooks):
+        ci_ctx = (
+            self._attach_ci_hooks(self.ci_hook_modules, cache)
+            if self.ci_hook_modules is not None and cache_type != "none"
+            else nullcontext()
+        )
+
+        with self._attach_forward_hooks(hooks), ci_ctx:
             raw_out = self.target_model(*args, **kwargs)
 
         out = self._extract_output(raw_out)
@@ -563,6 +640,49 @@ class ComponentModel(LoadableModule):
         finally:
             for handle in handles:
                 handle.remove()
+
+    @staticmethod
+    def _ci_cache_hook(
+        _module: nn.Module,
+        args: tuple[Any, ...],
+        _kwargs: dict[str, Any],
+        output: Any,
+        cache_key: str,
+        position: Literal["input", "output"],
+        cache: dict[str, Tensor],
+    ) -> None:
+        """Hook that captures activations for CI hook points."""
+        if position == "input":
+            assert len(args) >= 1
+            cache[cache_key] = args[0]
+        else:
+            assert isinstance(output, Tensor)
+            cache[cache_key] = output
+
+    @contextmanager
+    def _attach_ci_hooks(
+        self,
+        ci_hook_specs: list[tuple[str, Literal["input", "output"]]],
+        cache: dict[str, Tensor],
+    ) -> Generator[None]:
+        """Context manager to attach CI activation hooks to the target model."""
+        handles: list[RemovableHandle] = []
+        for module_path, position in ci_hook_specs:
+            module = self.target_model.get_submodule(module_path)
+            cache_key = f"ci_hook::{module_path}"
+            hook_fn = partial(
+                self._ci_cache_hook,
+                cache_key=cache_key,
+                position=position,
+                cache=cache,
+            )
+            handle = module.register_forward_hook(hook_fn, with_kwargs=True)
+            handles.append(handle)
+        try:
+            yield
+        finally:
+            for h in handles:
+                h.remove()
 
     @classmethod
     @override

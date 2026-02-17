@@ -364,6 +364,75 @@ class GlobalSharedTransformerCiFn(nn.Module):
         return outputs
 
 
+class GlobalHooksMLPCiFn(nn.Module):
+    """Global CI function with explicitly specified hook activations as input.
+
+    Unlike GlobalSharedMLPCiFn which uses target module inputs, this takes activations
+    from user-specified hook points (which may differ from decomposition targets).
+    """
+
+    def __init__(
+        self,
+        hook_modules: list[str],
+        hook_dims: list[int],
+        target_modules: list[str],
+        target_c_values: list[int],
+        hidden_dims: list[int],
+    ):
+        super().__init__()
+
+        self.hook_order = sorted(hook_modules)
+        self.hook_dims = {m: d for m, d in zip(hook_modules, hook_dims, strict=True)}
+        self.target_order = sorted(target_modules)
+        self.split_sizes = [
+            target_c_values[target_modules.index(name)] for name in self.target_order
+        ]
+
+        total_input_dim = sum(hook_dims)
+        total_C = sum(target_c_values)
+
+        self.layers = nn.Sequential()
+        for i in range(len(hidden_dims)):
+            in_dim = total_input_dim if i == 0 else hidden_dims[i - 1]
+            output_dim = hidden_dims[i]
+            self.layers.append(Linear(in_dim, output_dim, nonlinearity="relu"))
+            self.layers.append(nn.GELU())
+        final_dim = hidden_dims[-1] if len(hidden_dims) > 0 else total_input_dim
+        self.layers.append(Linear(final_dim, total_C, nonlinearity="linear"))
+
+    @override
+    def forward(
+        self,
+        hook_acts: dict[str, Float[Tensor, "... d"]],
+    ) -> dict[str, Float[Tensor, "... C"]]:
+        inputs_list = [hook_acts[name] for name in self.hook_order]
+        concatenated = torch.cat(inputs_list, dim=-1)
+        output = self.layers(concatenated)
+        split_outputs = torch.split(output, self.split_sizes, dim=-1)
+        return {name: split_outputs[i] for i, name in enumerate(self.target_order)}
+
+
+class HooksGlobalCiFnWrapper(nn.Module):
+    """Wraps GlobalHooksMLPCiFn, filtering cache to CI hook entries."""
+
+    def __init__(
+        self,
+        hooks_ci_fn: GlobalHooksMLPCiFn,
+        ci_hook_cache_keys: list[str],
+    ):
+        super().__init__()
+        self._hooks_ci_fn = hooks_ci_fn
+        self.ci_hook_cache_keys = ci_hook_cache_keys
+
+    @override
+    def forward(
+        self,
+        layer_acts: dict[str, Float[Tensor, "..."]],
+    ) -> dict[str, Float[Tensor, "... C"]]:
+        hook_acts = {k: layer_acts[k] for k in self.ci_hook_cache_keys}
+        return self._hooks_ci_fn(hook_acts)
+
+
 class GlobalReverseResidualCiFn(nn.Module):
     """Global CI function that processes blocks in reverse order with a residual stream.
 
