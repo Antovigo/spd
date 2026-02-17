@@ -4,9 +4,11 @@ import copy
 import itertools
 import json
 import os
+import re
 import secrets
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
@@ -26,7 +28,132 @@ from spd.utils.git_utils import (
 _DISCRIMINATED_LIST_FIELDS: dict[str, str] = {
     "loss_metric_configs": "classname",
     "eval_metric_configs": "classname",
+    "module_info": "module_pattern",
 }
+
+
+# --- Template variable resolution for output_dir_name ---
+
+
+@dataclass
+class PathSegment:
+    """Represents a parsed segment of a template path."""
+
+    field: str
+    list_key: str | None = None
+
+
+def parse_path_segments(path: str) -> list[PathSegment]:
+    """Parse a template path like 'field[key].nested' into segments.
+
+    Examples:
+        'seed' -> [PathSegment(field='seed')]
+        'task_config.feature_probability' -> [PathSegment(field='task_config'),
+                                               PathSegment(field='feature_probability')]
+        'loss_metric_configs[ImportanceMinimalityLoss].coeff' ->
+            [PathSegment(field='loss_metric_configs', list_key='ImportanceMinimalityLoss'),
+             PathSegment(field='coeff')]
+        'module_info[h.*.mlp].C' ->
+            [PathSegment(field='module_info', list_key='h.*.mlp'),
+             PathSegment(field='C')]
+    """
+    segments: list[PathSegment] = []
+    # Pattern matches: field_name, optional [key], followed by . or end of string
+    # The key inside brackets can contain dots (e.g., module patterns like h.*.mlp)
+    segment_pattern = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(?:\[([^\]]+)\])?(?:\.|$)")
+
+    pos = 0
+    for match in segment_pattern.finditer(path):
+        assert match.start() == pos, f"Invalid path at position {pos}: '{path}'"
+        field = match.group(1)
+        list_key = match.group(2)
+        segments.append(PathSegment(field=field, list_key=list_key))
+        pos = match.end()
+
+    assert pos == len(path), f"Incomplete path parse at position {pos}: '{path}'"
+    assert segments, f"No segments found in path: '{path}'"
+
+    return segments
+
+
+def resolve_config_path(path: str, config_dict: dict[str, Any]) -> Any:
+    """Resolve a single path against a config dictionary.
+
+    Args:
+        path: Path like 'seed', 'task_config.feature_probability',
+              or 'loss_metric_configs[ImportanceMinimalityLoss].coeff'
+        config_dict: The config as a dictionary (from model_dump)
+
+    Returns:
+        The resolved value
+
+    Raises:
+        AssertionError: If path is invalid or value not found
+    """
+    segments = parse_path_segments(path)
+    current: Any = config_dict
+
+    for segment in segments:
+        assert isinstance(current, dict), (
+            f"Expected dict at '{segment.field}' in path '{path}', got {type(current).__name__}"
+        )
+        assert segment.field in current, (
+            f"Field '{segment.field}' not found in config. Available fields: {list(current.keys())}"
+        )
+
+        current = current[segment.field]
+
+        if segment.list_key is not None:
+            # List lookup by discriminator
+            assert isinstance(current, list), (
+                f"Expected list for '{segment.field}[{segment.list_key}]' in path '{path}', "
+                f"got {type(current).__name__}"
+            )
+            assert segment.field in _DISCRIMINATED_LIST_FIELDS, (
+                f"Field '{segment.field}' is not a known discriminated list field. "
+                f"Known fields: {list(_DISCRIMINATED_LIST_FIELDS.keys())}"
+            )
+            discriminator = _DISCRIMINATED_LIST_FIELDS[segment.field]
+
+            found = None
+            for item in current:
+                if item.get(discriminator) == segment.list_key:
+                    found = item
+                    break
+
+            assert found is not None, (
+                f"No item with {discriminator}='{segment.list_key}' found in '{segment.field}'. "
+                f"Available: {[item.get(discriminator) for item in current]}"
+            )
+            current = found
+
+    return current
+
+
+def resolve_template_string(template: str, config_dict: dict[str, Any]) -> str:
+    """Replace all {path} placeholders in a template string.
+
+    Args:
+        template: String with {path} placeholders, e.g. "Seed {seed}"
+        config_dict: The config as a dictionary (from model_dump)
+
+    Returns:
+        The template with all placeholders replaced
+
+    Raises:
+        AssertionError: If any path is invalid or resolves to a non-scalar
+    """
+    placeholder_pattern = re.compile(r"\{([^}]+)\}")
+
+    def replace_placeholder(match: re.Match[str]) -> str:
+        path = match.group(1)
+        value = resolve_config_path(path, config_dict)
+        assert not isinstance(value, (dict, list)), (
+            f"Path '{path}' resolved to {type(value).__name__}, expected scalar value"
+        )
+        return str(value)
+
+    return placeholder_pattern.sub(replace_placeholder, template)
 
 
 def _save_json(data: Any, path: Path | str, **kwargs: Any) -> None:
@@ -384,6 +511,7 @@ def setup_decomposition_run(
     experiment_tag: str,
     evals_id: str | None = None,
     sweep_id: str | None = None,
+    output_dir_name: str | None = None,
 ) -> tuple[Path, str, list[str]]:
     """Set up run infrastructure for a decomposition experiment.
 
@@ -394,12 +522,20 @@ def setup_decomposition_run(
         experiment_tag: Tag for the experiment type (e.g., "lm", "tms", "resid_mlp")
         evals_id: Optional evaluation identifier to add as W&B tag
         sweep_id: Optional sweep identifier to add as W&B tag
+        output_dir_name: Optional custom directory name. If None, uses auto-generated run_id.
+            Supports slashes to create nested directories.
 
     Returns:
         Tuple of (output directory, run_id, tags for W&B).
     """
     execution_stamp = ExecutionStamp.create(run_type="spd", create_snapshot=False)
-    out_dir = execution_stamp.out_dir
+
+    if output_dir_name is not None:
+        out_dir = SPD_OUT_DIR / execution_stamp.run_type / output_dir_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir = execution_stamp.out_dir
+
     logger.info(f"Run ID: {execution_stamp.run_id}")
     logger.info(f"Output directory: {out_dir}")
 

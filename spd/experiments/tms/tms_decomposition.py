@@ -47,7 +47,10 @@ def main(
     set_seed(config.seed)
 
     out_dir, run_id, tags = setup_decomposition_run(
-        experiment_tag="tms", evals_id=evals_id, sweep_id=sweep_id
+        experiment_tag="tms",
+        evals_id=evals_id,
+        sweep_id=sweep_id,
+        output_dir_name=config.resolve_output_dir_name(),
     )
     if config.wandb_project:
         init_wandb(
