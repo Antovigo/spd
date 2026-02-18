@@ -289,6 +289,11 @@ def optimize(
                 sampling=config.sampling,
             )
 
+            # Filter out ci_hook:: entries before passing to losses
+            pre_weight_acts = {
+                k: v for k, v in target_model_output.cache.items() if not k.startswith("ci_hook::")
+            }
+
             losses = compute_losses(
                 loss_metric_configs=config.loss_metric_configs,
                 model=component_model,
@@ -296,7 +301,7 @@ def optimize(
                 ci=ci,
                 target_out=target_model_output.output,
                 weight_deltas=weight_deltas,
-                pre_weight_acts=target_model_output.cache,
+                pre_weight_acts=pre_weight_acts,
                 current_frac_of_training=step / config.steps,
                 sampling=config.sampling,
                 use_delta_component=config.use_delta_component,

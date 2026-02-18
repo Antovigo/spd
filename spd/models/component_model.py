@@ -552,7 +552,7 @@ class ComponentModel(LoadableModule):
 
         ci_ctx = (
             self._attach_ci_hooks(self.ci_hook_modules, cache)
-            if self.ci_hook_modules is not None and cache_type != "none"
+            if self.ci_hook_modules is not None and cache_type != "none" and mask_infos is None
             else nullcontext()
         )
 

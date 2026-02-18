@@ -347,11 +347,15 @@ def evaluate(
             sampling=run_config.sampling,
         )
 
+        pre_weight_acts = {
+            k: v for k, v in target_output.cache.items() if not k.startswith("ci_hook::")
+        }
+
         for metric in metrics:
             metric.update(
                 batch=batch,
                 target_out=target_output.output,
-                pre_weight_acts=target_output.cache,
+                pre_weight_acts=pre_weight_acts,
                 ci=ci,
                 current_frac_of_training=current_frac_of_training,
                 weight_deltas=weight_deltas,
