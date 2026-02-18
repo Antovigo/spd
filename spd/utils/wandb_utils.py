@@ -55,6 +55,7 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "PersistentPGDReconLoss": "PersistPGDRecon",
     "PersistentPGDReconSubsetLoss": "PersistPGDReconSub",
     "StochasticHiddenActsReconLoss": "StochHiddenRecon",
+    "StochasticAttentionPatternsReconLoss": "StochAttnRecon",
     "UnmaskedReconLoss": "UnmaskedRecon",
     # Eval metrics
     "CEandKLLosses": "CEandKL",
