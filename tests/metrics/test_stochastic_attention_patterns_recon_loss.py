@@ -210,3 +210,73 @@ class TestStochasticAttentionPatternsReconLoss:
         )
 
         assert result.item() >= -1e-7, f"KL should be non-negative, got {result.item()}"
+
+
+class TestStochasticAttentionPatternsReconLossHF:
+    """Tests for HuggingFace model support (GPTNeoX)."""
+
+    def test_gpt_neox_attention_capture(self) -> None:
+        """Verify attention patterns can be captured from a HuggingFace GPTNeoX model."""
+        from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+
+        torch.manual_seed(42)
+
+        hf_config = GPTNeoXConfig(
+            hidden_size=64,
+            intermediate_size=256,
+            num_attention_heads=4,
+            num_hidden_layers=2,
+            vocab_size=128,
+            max_position_embeddings=32,
+        )
+        target = GPTNeoXForCausalLM(hf_config)
+        target.requires_grad_(False)
+        target.eval()
+
+        module_path_info = [
+            ModulePathInfo(
+                module_path="gpt_neox.layers.0.attention.query_key_value", C=4
+            ),
+            ModulePathInfo(module_path="gpt_neox.layers.0.attention.dense", C=4),
+            ModulePathInfo(
+                module_path="gpt_neox.layers.0.mlp.dense_h_to_4h", C=4
+            ),
+            ModulePathInfo(
+                module_path="gpt_neox.layers.0.mlp.dense_4h_to_h", C=4
+            ),
+        ]
+
+        model = ComponentModel(
+            target_model=target,
+            module_path_info=module_path_info,
+            ci_config=LayerwiseCiConfig(fn_type="mlp", hidden_dims=[8]),
+            pretrained_model_output_attr="logits",
+            sigmoid_type="leaky_hard",
+        )
+
+        batch = torch.randint(0, 128, (2, 8))
+        ci = {path: torch.rand(2, 8, 4) for path in model.target_module_paths}
+
+        # Capture target attention patterns
+        target_model = model.target_model
+        with _capture_attention_patterns(target_model):
+            model(batch)
+            target_patterns = _collect_attention_patterns(target_model)
+
+        assert len(target_patterns) == 2  # 2 layers
+        for pat in target_patterns:
+            assert pat.shape == (2, 4, 8, 8)  # (batch, heads, seq, seq)
+
+        # Run the full metric
+        result = stochastic_attention_patterns_recon_loss(
+            model=model,
+            sampling="continuous",
+            n_mask_samples=1,
+            batch=batch,
+            ci=ci,
+            weight_deltas=None,
+        )
+
+        assert result.dim() == 0
+        assert torch.isfinite(result)
+        assert result.item() >= -1e-7

@@ -22,10 +22,63 @@ def _get_attn_modules(model: nn.Module) -> list[nn.Module]:
     return [m for m in model.modules() if hasattr(m, "store_attention_patterns")]
 
 
+def _ensure_hf_attn_hooks(model: nn.Module) -> list[nn.Module]:
+    """Detect HuggingFace attention modules and add store_attention_patterns support via hooks.
+
+    Idempotent: after first call, modules have store_attention_patterns so _get_attn_modules
+    finds them directly on subsequent calls.
+    """
+    from transformers.models.gpt_neox.modeling_gpt_neox import (
+        GPTNeoXAttention,
+    )
+
+    modules = [m for m in model.modules() if isinstance(m, GPTNeoXAttention)]
+    for m in modules:
+        if hasattr(m, "store_attention_patterns"):
+            continue
+        object.__setattr__(m, "store_attention_patterns", False)
+        object.__setattr__(m, "_attention_patterns", None)
+        object.__setattr__(m, "_spd_hf_attn", True)
+
+        def _hook(module: nn.Module, _args: object, output: object) -> None:
+            if getattr(module, "store_attention_patterns", False):
+                assert isinstance(output, tuple) and len(output) >= 2, (
+                    f"Expected (attn_output, attn_weights, ...) tuple, got {type(output)}"
+                )
+                attn_weights = output[1]
+                assert attn_weights is not None, (
+                    "Attention weights are None — model may be using flash/SDPA attention "
+                    "instead of eager. StochasticAttentionPatternsReconLoss requires eager attention."
+                )
+                module._attention_patterns = attn_weights  # type: ignore[reportAttributeAccessIssue]
+
+        m.register_forward_hook(_hook)
+    return list(modules)
+
+
+def _get_hf_config(attn_modules: list[nn.Module]) -> Any:
+    """Return the shared HF config if any module was set up via _ensure_hf_attn_hooks."""
+    for m in attn_modules:
+        if getattr(m, "_spd_hf_attn", False):
+            return m.config  # type: ignore[reportAttributeAccessIssue]
+    return None
+
+
 @contextmanager
 def _capture_attention_patterns(model: nn.Module) -> Generator[None]:
     attn_modules = _get_attn_modules(model)
-    assert attn_modules, "No attention modules with store_attention_patterns found"
+    if not attn_modules:
+        attn_modules = _ensure_hf_attn_hooks(model)
+    assert attn_modules, "No attention modules found (neither custom nor HuggingFace)"
+
+    # HF models default to SDPA which doesn't return attention weights.
+    # Force eager attention during capture. All HF attention modules share the same config.
+    hf_config = _get_hf_config(attn_modules)
+    saved_attn_impl = None
+    if hf_config is not None:
+        saved_attn_impl = hf_config._attn_implementation
+        hf_config._attn_implementation = "eager"
+
     for m in attn_modules:
         object.__setattr__(m, "store_attention_patterns", True)
     try:
@@ -34,6 +87,8 @@ def _capture_attention_patterns(model: nn.Module) -> Generator[None]:
         for m in attn_modules:
             object.__setattr__(m, "store_attention_patterns", False)
             object.__setattr__(m, "_attention_patterns", None)
+        if hf_config is not None:
+            hf_config._attn_implementation = saved_attn_impl
 
 
 def _collect_attention_patterns(model: nn.Module) -> list[Tensor]:
