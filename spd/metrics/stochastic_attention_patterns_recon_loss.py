@@ -100,7 +100,7 @@ def _compute(
     return sum_kl / n_distributions
 
 
-def stochastic_attention_patterns_kl(
+def stochastic_attention_patterns_recon_loss(
     model: ComponentModel,
     sampling: SamplingType,
     n_mask_samples: int,
@@ -119,7 +119,7 @@ def stochastic_attention_patterns_kl(
     return _compute(sum_kl, n_distributions)
 
 
-class StochasticAttentionPatternsKL(Metric):
+class StochasticAttentionPatternsReconLoss(Metric):
     """KL divergence between target and stochastic component attention patterns."""
 
     metric_section: ClassVar[str] = "loss"
