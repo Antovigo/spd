@@ -258,6 +258,7 @@ def main(
             model=model,
             eval_iterator=eval_iterator,
             nontarget_eval_iterator=nontarget_eval_iterator,
+            ppgd_sourcess={},
             device=device,
             run_config=run_config,
             slow_step=True,

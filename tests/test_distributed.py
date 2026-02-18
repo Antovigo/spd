@@ -42,7 +42,6 @@ TEST_CONFIG = {
     "batch_size": 2,
     "steps": 20,
     "lr_schedule": {"start_val": 1e-2, "fn_type": "constant"},
-    "gradient_accumulation_steps": 1,
     # --- Logging & Saving ---
     "train_log_freq": 9999,
     "eval_freq": 5,  # Eval at steps 0, 5, 10
@@ -72,6 +71,8 @@ TEST_CONFIG = {
     },
     # --- Distributed ---
     "dist_backend": "gloo",  # Want to run this test on CPU
+    # We use float32 to avoid precision difference accumulations
+    "autocast_bf16": False,
 }
 
 

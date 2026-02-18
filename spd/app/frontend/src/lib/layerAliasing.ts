@@ -9,10 +9,10 @@
  * - GPT-2: c_fc -> mlp.in, down_proj -> mlp.out
  * - Llama SwiGLU: gate_proj -> mlp.gate, up_proj -> mlp.up, down_proj -> mlp.down
  * - Attention: q_proj -> attn.q, k_proj -> attn.k, v_proj -> attn.v, o_proj -> attn.o
- * - Special: lm_head -> W_U, wte/output unchanged
+ * - Special: lm_head -> W_U, embed/output unchanged
  */
 
-type Architecture = "gpt2" | "llama" | "pythia" | "unknown";
+type Architecture = "gpt2" | "llama" | "unknown";
 
 /** Mapping of internal module names to aliases by architecture */
 const ALIASES: Record<Architecture, Record<string, string>> = {
@@ -37,14 +37,6 @@ const ALIASES: Record<Architecture, Record<string, string>> = {
         v_proj: "v",
         o_proj: "o",
     },
-    pythia: {
-        // MLP
-        dense_h_to_4h: "in",
-        dense_4h_to_h: "out",
-        // Attention
-        query_key_value: "qkv",
-        dense: "o",
-    },
     unknown: {
         // Fallback - just do attention mappings
         q_proj: "q",
@@ -57,7 +49,7 @@ const ALIASES: Record<Architecture, Record<string, string>> = {
 /** Special layers with fixed display names */
 const SPECIAL_LAYERS: Record<string, string> = {
     lm_head: "W_U",
-    wte: "wte",
+    embed: "embed",
     output: "output",
 };
 
@@ -80,11 +72,6 @@ export function detectArchitectureFromLayers(layers: string[]): Architecture {
     const hasGPT2Layers = layers.some((layer) => layer.includes("c_fc"));
     if (hasGPT2Layers) {
         return "gpt2";
-    }
-
-    const hasPythiaLayers = layers.some((layer) => layer.includes("dense_h_to_4h"));
-    if (hasPythiaLayers) {
-        return "pythia";
     }
 
     return "unknown";
@@ -122,9 +109,6 @@ function detectArchitecture(layer: string): Architecture {
     if (layer.includes("c_fc")) {
         return "gpt2";
     }
-    if (layer.includes("dense_h_to_4h") || layer.includes("query_key_value")) {
-        return "pythia";
-    }
     // down_proj is ambiguous without context, default to GPT-2
     if (layer.includes("down_proj")) {
         return "gpt2";
@@ -134,27 +118,22 @@ function detectArchitecture(layer: string): Architecture {
 
 /**
  * Parse a layer name into components.
- * Returns null for special layers (wte, output, lm_head) or unrecognized formats.
- *
- * Supports multiple naming conventions:
- * - "h.0.attn.q_proj" (custom GPT-2/Llama models)
- * - "gpt_neox.layers.0.attention.dense" (Pythia/GPTNeoX)
- * - Any "prefix.{block}.{attn|attention|mlp}.{submodule}" pattern
+ * Returns null for special layers (embed, output, lm_head) or unrecognized formats.
  */
-export function parseLayerName(layer: string): { block: number; moduleType: string; submodule: string } | null {
+function parseLayerName(layer: string): { block: number; moduleType: string; submodule: string } | null {
     if (layer in SPECIAL_LAYERS) {
         return null;
     }
 
-    const match = layer.match(/\.(\d+)\.(attn|attention|mlp)\.(.+)$/);
+    const match = layer.match(/^h\.(\d+)\.(attn|mlp)\.(\w+)$/);
     if (!match) {
         return null;
     }
 
-    const [, blockStr, rawModuleType, submodule] = match;
+    const [, blockStr, moduleType, submodule] = match;
     return {
         block: parseInt(blockStr),
-        moduleType: rawModuleType === "attention" ? "attn" : rawModuleType,
+        moduleType,
         submodule,
     };
 }
@@ -166,7 +145,7 @@ export function parseLayerName(layer: string): { block: number; moduleType: stri
  * - "h.0.mlp.c_fc" -> "L0.mlp.in"
  * - "h.2.attn.q_proj" -> "L2.attn.q"
  * - "lm_head" -> "W_U"
- * - "wte" -> "wte"
+ * - "embed" -> "embed"
  */
 export function getLayerAlias(layer: string): string {
     if (layer in SPECIAL_LAYERS) {

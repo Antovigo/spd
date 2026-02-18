@@ -18,8 +18,8 @@ import { RUN_KEY, type InterpretationBackendState, type RunContext } from "./use
 
 /** Correlations are paginated in the UI, so fetch more */
 const CORRELATIONS_TOP_K = 100;
-/** Token stats are displayed directly (max 50 shown) */
-const TOKEN_STATS_TOP_K = 50;
+/** Token stats are paginated in the UI */
+const TOKEN_STATS_TOP_K = 200;
 /** Dataset attributions top-k */
 const DATASET_ATTRIBUTIONS_TOP_K = 20;
 
@@ -34,7 +34,7 @@ export type ComponentCoords = { layer: string; cIdx: number };
  * Interpretation headline is derived from the global runState cache.
  * Interpretation detail (reasoning + prompt) is fetched on-demand.
  *
- * For reading from prefetched cache, use useComponentDataExpectCached instead.
+ * For graph tooltips (smaller initial limits + background fetch), use useComponentDataExpectCached.
  */
 export function useComponentData() {
     const runState = getContext<RunContext>(RUN_KEY);

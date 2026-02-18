@@ -4,14 +4,16 @@
     import { colors, getEdgeColor, getOutputHeaderColor, rgbaToCss } from "../../lib/colors";
     import type { Loadable } from "../../lib/index";
     import type { NormalizeType } from "../../lib/api";
-    import {
-        isInterventableNode,
-        type LayerInfo,
-        type NodePosition,
-        type TokenInfo,
-    } from "../../lib/promptAttributionsTypes";
-    import { getAliasedRowLabel, parseLayerName } from "../../lib/layerAliasing";
+    import { isInterventableNode, type NodePosition } from "../../lib/promptAttributionsTypes";
     import { RUN_KEY, type RunContext } from "../../lib/useRun.svelte";
+    import {
+        parseLayer,
+        getRowKey as _getRowKey,
+        getRowLabel as _getRowLabel,
+        sortRows,
+        getGroupProjections,
+        buildLayerAddress,
+    } from "../../lib/graphLayout";
 
     const runState = getContext<RunContext>(RUN_KEY);
     import {
@@ -36,13 +38,6 @@
     const HIT_AREA_PADDING = 4;
     const MARGIN = { top: 60, right: 40, bottom: 20, left: 20 };
     const LABEL_WIDTH = 100;
-    const ROW_ORDER = [
-        "wte",
-        "qkv", "q_proj", "k_proj", "v_proj", "query_key_value", "o_proj", "dense",
-        "c_fc", "dense_h_to_4h", "gate_proj", "up_proj", "down_proj", "dense_4h_to_h",
-        "lm_head", "output",
-    ];
-    const QKV_SUBTYPES = ["q_proj", "k_proj", "v_proj"];
     const CLUSTER_BAR_HEIGHT = 3;
     const CLUSTER_BAR_GAP = 2;
     const LAYER_X_OFFSET = 3; // Horizontal offset per layer to avoid edge overlap
@@ -58,7 +53,6 @@
         activeRunId: number | null;
         tokens: string[];
         tokenIds: number[];
-        allTokens: TokenInfo[];
         // View settings (shared with main graph)
         topK: number;
         componentGap: number;
@@ -92,7 +86,6 @@
         activeRunId,
         tokens,
         tokenIds,
-        allTokens,
         topK,
         componentGap,
         layerGap,
@@ -216,20 +209,8 @@
     let dragCurrent = $state<{ x: number; y: number } | null>(null);
     let svgElement: SVGSVGElement | null = null;
 
-    // Parse layer name
-    function parseLayer(name: string): LayerInfo {
-        if (name === "wte") return { name, block: -1, type: "embed", subtype: "wte" };
-        if (name === "lm_head") return { name, block: Infinity - 1, type: "mlp", subtype: "lm_head" };
-        if (name === "output") return { name, block: Infinity, type: "output", subtype: "output" };
-        const parsed = parseLayerName(name);
-        if (!parsed) throw new Error(`parseLayer: unrecognized layer name: ${name}`);
-        return { name, block: parsed.block, type: parsed.moduleType as "attn" | "mlp", subtype: parsed.submodule };
-    }
-
     function getRowKey(layer: string): string {
-        const info = parseLayer(layer);
-        if (QKV_SUBTYPES.includes(info.subtype)) return `__block_${info.block}__qkv`;
-        return layer;
+        return _getRowKey(layer);
     }
 
     // All nodes from the graph (for rendering)
@@ -244,14 +225,13 @@
         return nodes;
     });
 
-    // Filter edges for rendering (topK by magnitude, optionally hide edges not connected to selected nodes)
+    // Filter edges for rendering (topK by magnitude, optionally hide edges not connected to selected nodes).
+    // Edges arrive pre-sorted by abs(val) desc from backend, so filter preserves order and we just slice.
     const filteredEdges = $derived.by(() => {
-        let edges = [...graph.data.edges];
-        // If hideUnpinnedEdges is true and we have selected nodes, filter to only edges connected to them
+        let edges = graph.data.edges;
         if (hideUnpinnedEdges && composerSelection.size > 0) {
             edges = edges.filter((e) => composerSelection.has(e.src) || composerSelection.has(e.tgt));
         }
-        edges.sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
         return edges.slice(0, topK);
     });
 
@@ -273,31 +253,8 @@
             nodesPerLayerSeq[key].push(+cIdx);
         }
 
-        // Build map from row key to layers in that row
-        const rowToLayers: Record<string, string[]> = {};
-        for (const layer of allLayers) {
-            const rk = getRowKey(layer);
-            if (!rowToLayers[rk]) rowToLayers[rk] = [];
-            rowToLayers[rk].push(layer);
-        }
-
         // Sort rows
-        const parseRow = (r: string) => {
-            if (r === "wte") return { block: -1, subtype: "wte" };
-            if (r === "lm_head") return { block: Infinity - 1, subtype: "lm_head" };
-            if (r === "output") return { block: Infinity, subtype: "output" };
-            const mQkv = r.match(/^__block_(\d+)__qkv$/);
-            if (mQkv) return { block: +mQkv[1], subtype: "qkv" };
-            const info = parseLayer(r);
-            return { block: info.block, subtype: info.subtype };
-        };
-
-        const rows: string[] = Array.from(allRows).sort((a, b) => {
-            const infoA = parseRow(a);
-            const infoB = parseRow(b);
-            if (infoA.block !== infoB.block) return infoA.block - infoB.block;
-            return ROW_ORDER.indexOf(infoA.subtype) - ROW_ORDER.indexOf(infoB.subtype);
-        });
+        const rows = sortRows(Array.from(allRows));
 
         const numTokens = tokens.length;
 
@@ -305,19 +262,21 @@
         const maxComponentsPerSeq = Array.from({ length: numTokens }, (_, seqIdx) => {
             let maxAtSeq = 1;
             for (const row of rows) {
-                const layersInRow = rowToLayers[row] ?? [];
-                if (layersInRow.length > 1) {
-                    let total = 0;
-                    for (const layer of layersInRow) {
-                        total += (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length;
-                    }
-                    total += layersInRow.length - 1;
-                    maxAtSeq = Math.max(maxAtSeq, total);
-                } else {
-                    for (const layer of layersInRow) {
-                        maxAtSeq = Math.max(maxAtSeq, (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length);
+                let totalInRow = 0;
+                for (const layer of allLayers) {
+                    if (getRowKey(layer) === row) {
+                        totalInRow += (nodesPerLayerSeq[`${layer}:${seqIdx}`] ?? []).length;
                     }
                 }
+                const rowParts = row.split(".");
+                const isGroupedRow = rowParts.length >= 3 && rowParts[2].includes("_");
+                if (isGroupedRow) {
+                    const groupProjs = getGroupProjections(rowParts[1]);
+                    if (groupProjs && groupProjs.length > 1) {
+                        totalInRow += groupProjs.length - 1;
+                    }
+                }
+                maxAtSeq = Math.max(maxAtSeq, totalInRow);
             }
             return maxAtSeq;
         });
@@ -348,7 +307,7 @@
             layerYPositions[layer] = rowYPositions[rowKey];
             const rowIdx = rows.indexOf(rowKey);
             const distanceFromOutput = rows.length - 1 - rowIdx;
-            if (distanceFromOutput === 0 || layer === "wte") {
+            if (distanceFromOutput === 0 || layer === "embed") {
                 layerXOffsets[layer] = 0;
             } else {
                 layerXOffsets[layer] = distanceFromOutput % 2 === 1 ? LAYER_X_OFFSET : -LAYER_X_OFFSET;
@@ -359,9 +318,9 @@
         const nodePositions: Record<string, NodePosition> = {};
         const allClusterSpans: ClusterSpan[] = [];
         for (const layer of allLayers) {
-            const rowKey = getRowKey(layer);
-            const rowLayers = rowToLayers[rowKey] ?? [];
-            const isGroupedRow = rowLayers.length > 1;
+            const info = parseLayer(layer);
+            const groupProjs = info.sublayer ? getGroupProjections(info.sublayer) : null;
+            const isGrouped = groupProjs !== null && info.projection !== null && groupProjs.includes(info.projection);
 
             for (let seqIdx = 0; seqIdx < numTokens; seqIdx++) {
                 const layerNodes = nodesPerLayerSeq[`${layer}:${seqIdx}`];
@@ -370,11 +329,12 @@
                 let baseX = seqXStarts[seqIdx] + COL_PADDING + layerXOffsets[layer];
                 const baseY = layerYPositions[layer];
 
-                if (isGroupedRow) {
-                    const layerIdx = rowLayers.indexOf(layer);
-                    for (let i = 0; i < layerIdx; i++) {
+                if (isGrouped && groupProjs && info.projection) {
+                    const projIdx = groupProjs.indexOf(info.projection);
+                    for (let i = 0; i < projIdx; i++) {
+                        const prevLayer = buildLayerAddress(info.block, info.sublayer, groupProjs[i]);
                         baseX +=
-                            (nodesPerLayerSeq[`${rowLayers[i]}:${seqIdx}`]?.length ?? 0) * (COMPONENT_SIZE + componentGap);
+                            (nodesPerLayerSeq[`${prevLayer}:${seqIdx}`]?.length ?? 0) * (COMPONENT_SIZE + componentGap);
                         baseX += COMPONENT_SIZE + componentGap;
                     }
                 }
@@ -477,7 +437,7 @@
             hoverTimeout = null;
         }
         hoveredNode = { layer, seqIdx, cIdx };
-        const size = layer === "wte" || layer === "output" ? "small" : "large";
+        const size = layer === "embed" || layer === "output" ? "small" : "large";
         tooltipPos = calcTooltipPos(event.clientX, event.clientY, size);
     }
 
@@ -635,9 +595,7 @@
     }
 
     function getRowLabel(layer: string): string {
-        const rowKey = getRowKey(layer);
-        const isQkvGroup = rowKey.endsWith(".qkv");
-        return getAliasedRowLabel(layer, isQkvGroup);
+        return _getRowLabel(layer);
     }
 </script>
 
@@ -1111,7 +1069,6 @@
                             <div class="token-slot" class:replaced={isReplaced}>
                                 <span class="token-label">pos {idx}: "{tokens[idx]}"</span>
                                 <TokenDropdown
-                                    tokens={allTokens}
                                     value={slot.value}
                                     selectedTokenId={slot.tokenId}
                                     onSelect={(tokenId, tokenString) => handleForkSlotSelect(idx, tokenId, tokenString)}

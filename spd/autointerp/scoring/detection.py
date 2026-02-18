@@ -1,0 +1,289 @@
+"""Detection scoring.
+
+Tests whether a component's interpretation label is predictive of its activations by asking
+an LLM to classify plain text examples as activating or non-activating.
+
+Based on: EleutherAI's sae-auto-interp (https://blog.eleuther.ai/autointerp/).
+
+Usage:
+    python -m spd.autointerp.scoring.scripts.run_scoring <wandb_path> --scorer detection
+"""
+
+import json
+import random
+from collections import defaultdict
+from dataclasses import asdict, dataclass
+
+from aiolimiter import AsyncLimiter
+from openrouter import OpenRouter
+from openrouter.components import Effort, Reasoning
+
+from spd.app.backend.app_tokenizer import AppTokenizer
+from spd.app.backend.utils import delimit_tokens
+from spd.autointerp.config import AutointerpEvalConfig
+from spd.autointerp.db import InterpDB
+from spd.autointerp.llm_api import (
+    CostTracker,
+    GlobalBackoff,
+    LLMClient,
+    LLMError,
+    LLMJob,
+    LLMResult,
+    get_model_pricing,
+    map_api_calls,
+)
+from spd.harvest.schemas import ActivationExample, ComponentData
+from spd.log import logger
+
+DETECTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "activating": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "1-indexed example numbers that activate the component",
+        },
+    },
+    "required": ["activating"],
+}
+
+
+@dataclass
+class DetectionTrial:
+    predicted_activating: list[int]  # 1-indexed example numbers the LLM said activate
+    actual_activating: list[int]  # ground truth 1-indexed
+    tpr: float
+    tnr: float
+    balanced_acc: float
+
+
+@dataclass
+class DetectionResult:
+    component_key: str
+    score: float  # mean balanced accuracy across trials
+    trials: list[DetectionTrial]
+    n_errors: int
+
+
+def _format_example_with_center_token(
+    example: ActivationExample,
+    app_tok: AppTokenizer,
+) -> str:
+    """Format an example with the center token marked with <<delimiters>>.
+
+    Harvest windows are centered on the firing position, so the center token
+    is always the one that triggered collection. We mark center for both
+    activating and non-activating examples to avoid positional leakage.
+    """
+    valid_ids = [tid for tid in example.token_ids if tid >= 0]
+    center = len(valid_ids) // 2
+    spans = app_tok.get_spans(valid_ids)
+    tokens = [(span, i == center) for i, span in enumerate(spans)]
+    return delimit_tokens(tokens)
+
+
+def _sample_activating_examples(
+    component: ComponentData,
+    n: int,
+    rng: random.Random,
+) -> list[ActivationExample]:
+    """Sample activating examples from different activation strength deciles if possible."""
+    examples = component.activation_examples
+    if len(examples) <= n:
+        return list(examples)
+
+    # Sort by mean CI to get a spread across activation strengths
+    sorted_examples = sorted(examples, key=lambda e: sum(e.ci_values) / max(len(e.ci_values), 1))
+    n_examples = len(sorted_examples)
+
+    # Pick one from each of n evenly-spaced decile bins
+    sampled: list[ActivationExample] = []
+    for i in range(n):
+        bin_start = i * n_examples // n
+        bin_end = (i + 1) * n_examples // n
+        sampled.append(rng.choice(sorted_examples[bin_start:bin_end]))
+    return sampled
+
+
+def _sample_non_activating_examples(
+    target_component: ComponentData,
+    all_components: list[ComponentData],
+    n: int,
+    rng: random.Random,
+) -> list[ActivationExample]:
+    """Sample non-activating examples from other components."""
+    other_components = [
+        c
+        for c in all_components
+        if c.component_key != target_component.component_key and len(c.activation_examples) >= 1
+    ]
+    assert other_components, "No other components available for non-activating sampling"
+
+    sampled: list[ActivationExample] = []
+    for _ in range(n):
+        donor = rng.choice(other_components)
+        sampled.append(rng.choice(donor.activation_examples))
+    return sampled
+
+
+def _build_detection_prompt(
+    label: str,
+    examples_with_labels: list[tuple[str, bool]],
+) -> str:
+    n_total = len(examples_with_labels)
+
+    examples_text = ""
+    for i, (text, _) in enumerate(examples_with_labels):
+        examples_text += f"Example {i + 1}: {text}\n\n"
+
+    return f"""\
+A neural network component has been labeled as: "{label}"
+
+Below are {n_total} text snippets. In each, one token is marked between <<delimiters>>. \
+For some examples, the marked token is one where this component fires. \
+For others, the marked token is random.
+
+{examples_text}\
+Based on the label, in which examples is the <<marked>> token one where this component fires?
+
+Respond with the list of activating example numbers."""
+
+
+@dataclass
+class _TrialGroundTruth:
+    component_key: str
+    actual_activating: set[int]
+    actual_non_activating: set[int]
+
+
+async def run_detection_scoring(
+    components: list[ComponentData],
+    labels: dict[str, str],
+    model: str,
+    reasoning_effort: Effort,
+    openrouter_api_key: str,
+    tokenizer_name: str,
+    db: InterpDB,
+    eval_config: AutointerpEvalConfig,
+    limit: int | None = None,
+    cost_limit_usd: float | None = None,
+) -> list[DetectionResult]:
+    n_activating = eval_config.detection_n_activating
+    n_non_activating = eval_config.detection_n_non_activating
+    n_trials = eval_config.detection_n_trials
+    max_concurrent = eval_config.detection_max_concurrent
+
+    app_tok = AppTokenizer.from_pretrained(tokenizer_name)
+
+    eligible = [
+        c
+        for c in components
+        if c.component_key in labels and len(c.activation_examples) >= n_activating
+    ]
+    if limit is not None:
+        eligible = eligible[:limit]
+
+    existing_scores = db.get_scores("detection")
+    completed = set(existing_scores.keys())
+    if completed:
+        logger.info(f"Resuming: {len(completed)} already scored")
+
+    remaining = [c for c in eligible if c.component_key not in completed]
+    logger.info(f"Scoring {len(remaining)} components ({len(remaining) * n_trials} trials)")
+
+    rng = random.Random()
+    jobs: list[LLMJob] = []
+    ground_truth: dict[str, _TrialGroundTruth] = {}
+
+    for component in remaining:
+        label = labels[component.component_key]
+        for trial_idx in range(n_trials):
+            activating = _sample_activating_examples(component, n_activating, rng)
+            non_activating = _sample_non_activating_examples(
+                component, components, n_non_activating, rng
+            )
+
+            formatted: list[tuple[str, bool]] = []
+            for ex in activating:
+                formatted.append((_format_example_with_center_token(ex, app_tok), True))
+            for ex in non_activating:
+                formatted.append((_format_example_with_center_token(ex, app_tok), False))
+            rng.shuffle(formatted)
+
+            key = f"{component.component_key}/trial{trial_idx}"
+            actual_act = {i + 1 for i, (_, is_act) in enumerate(formatted) if is_act}
+            actual_non_act = {i + 1 for i, (_, is_act) in enumerate(formatted) if not is_act}
+            jobs.append(
+                LLMJob(
+                    prompt=_build_detection_prompt(label, formatted),
+                    schema=DETECTION_SCHEMA,
+                    key=key,
+                )
+            )
+            ground_truth[key] = _TrialGroundTruth(
+                component_key=component.component_key,
+                actual_activating=actual_act,
+                actual_non_activating=actual_non_act,
+            )
+
+    component_trials: defaultdict[str, list[DetectionTrial]] = defaultdict(list)
+    component_errors: defaultdict[str, int] = defaultdict(int)
+
+    async with OpenRouter(api_key=openrouter_api_key) as api:
+        input_price, output_price = await get_model_pricing(api, model)
+        cost_tracker = CostTracker(
+            input_price_per_token=input_price,
+            output_price_per_token=output_price,
+            limit_usd=cost_limit_usd,
+        )
+        llm = LLMClient(
+            api=api,
+            rate_limiter=AsyncLimiter(max_rate=eval_config.max_requests_per_minute, time_period=60),
+            backoff=GlobalBackoff(),
+            cost_tracker=cost_tracker,
+        )
+
+        async for outcome in map_api_calls(
+            jobs,
+            llm,
+            model=model,
+            max_tokens=5000,
+            reasoning=Reasoning(effort=reasoning_effort),
+            max_concurrent=max_concurrent,
+        ):
+            match outcome:
+                case LLMResult(job=job, parsed=parsed):
+                    gt = ground_truth[job.key]
+                    predicted = {int(x) for x in parsed["activating"]}
+                    tp = len(predicted & gt.actual_activating)
+                    tn = len(gt.actual_non_activating - predicted)
+                    tpr = tp / len(gt.actual_activating) if gt.actual_activating else 0.0
+                    tnr = tn / len(gt.actual_non_activating) if gt.actual_non_activating else 0.0
+                    component_trials[gt.component_key].append(
+                        DetectionTrial(
+                            predicted_activating=sorted(predicted),
+                            actual_activating=sorted(gt.actual_activating),
+                            tpr=tpr,
+                            tnr=tnr,
+                            balanced_acc=(tpr + tnr) / 2,
+                        )
+                    )
+                case LLMError(job=job, error=e):
+                    gt = ground_truth[job.key]
+                    component_errors[gt.component_key] += 1
+                    logger.error(f"{job.key}: {type(e).__name__}: {e}")
+
+        logger.info(f"Final cost: ${cost_tracker.cost_usd():.2f}")
+
+    results: list[DetectionResult] = []
+    for component in remaining:
+        ck = component.component_key
+        trials = component_trials.get(ck, [])
+        n_err = component_errors.get(ck, 0)
+        score = sum(t.balanced_acc for t in trials) / len(trials) if trials else 0.0
+        result = DetectionResult(component_key=ck, score=score, trials=trials, n_errors=n_err)
+        results.append(result)
+        db.save_score(ck, "detection", score, json.dumps(asdict(result)))
+
+    logger.info(f"Scored {len(results)} components")
+    return results

@@ -47,6 +47,7 @@ from spd.utils.distributed_utils import (
     sync_across_processes,
 )
 from spd.utils.general_utils import (
+    bf16_autocast,
     dict_safe_update_,
     extract_batch_data,
     get_linear_annealed_value,
@@ -140,8 +141,6 @@ def optimize(
     | None = None,
 ) -> None:
     """Run the optimization loop for LM decomposition."""
-
-    torch.set_float32_matmul_precision("high")
 
     train_iterator = loop_dataloader(train_loader)
     eval_iterator = loop_dataloader(eval_loader)
@@ -278,6 +277,13 @@ def optimize(
         cfg for cfg in eval_metric_configs if cfg not in multibatch_pgd_eval_configs
     ]
 
+    # Persistent PGD losses are training-only (sources are coupled to train batch size)
+    eval_metric_configs: list[MetricConfigType] = [
+        cfg
+        for cfg in eval_metric_configs
+        if not isinstance(cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig)
+    ]
+
     sample_batch = extract_batch_data(next(train_iterator))
     batch_dims = (
         sample_batch.shape[:-1]
@@ -291,7 +297,7 @@ def optimize(
     ] = {
         ppgd_cfg: PersistentPGDState(
             module_to_c=model.module_to_c,
-            seq_len=batch_dims[-1],
+            batch_dims=batch_dims,
             device=device,
             use_delta_component=config.use_delta_component,
             cfg=ppgd_cfg,
@@ -316,94 +322,102 @@ def optimize(
             ppgd_cfg: ppgd_states[ppgd_cfg].empty_grads() for ppgd_cfg in persistent_pgd_configs
         }
 
-        for _ in range(config.gradient_accumulation_steps):
-            microbatch = extract_batch_data(next(train_iterator)).to(device)
+        gradient_accumulation_steps = config.gradient_accumulation_steps
 
-            # NOTE: we need to call the wrapped_model at least once each step in order to setup
-            # the DDP gradient syncing for all parameters in the component model. Gradients will
-            # sync regardless of whether the parameters are used in this call to wrapped_model.
-            target_model_output: OutputWithCache = wrapped_model(microbatch, cache_type="input")
+        for _ in range(gradient_accumulation_steps):
+            batch = extract_batch_data(next(train_iterator)).to(device, non_blocking=True)
 
-            ci = component_model.calc_causal_importances(
-                pre_weight_acts=target_model_output.cache,
-                detach_inputs=False,
-                sampling=config.sampling,
-            )
+            with bf16_autocast(enabled=config.autocast_bf16):
+                # NOTE: we need to call the wrapped_model at least once each step in order
+                # to setup the DDP gradient syncing for all parameters in the component model.
+                # Gradients will sync regardless of whether the parameters are used in this
+                # call to wrapped_model.
+                target_model_output: OutputWithCache = wrapped_model(batch, cache_type="input")
 
-            microbatch_losses = compute_losses(
-                loss_metric_configs=config.loss_metric_configs,
-                model=component_model,
-                batch=microbatch,
-                ci=ci,
-                target_out=target_model_output.output,
-                weight_deltas=weight_deltas,
-                pre_weight_acts=target_model_output.cache,
-                current_frac_of_training=step / config.steps,
-                sampling=config.sampling,
-                use_delta_component=config.use_delta_component,
-                n_mask_samples=config.n_mask_samples,
-                ppgd_maskss={cfg: ppgd_states[cfg].masks for cfg in persistent_pgd_configs},
-                output_loss_type=config.output_loss_type,
-                force_delta=None,
-            )
-
-            # Compute total loss and accumulate PPGD grads
-            microbatch_total_loss = torch.tensor(0.0, device=device)
-            for loss_cfg, loss_val in microbatch_losses.items():
-                assert loss_cfg.coeff is not None
-                coeff = loss_cfg.coeff
-
-                if isinstance(loss_cfg, ImportanceMinimalityLossConfig):
-                    if (
-                        loss_cfg.coeff_anneal_final_value is not None
-                        and loss_cfg.coeff_anneal_start_frac < 1.0
-                    ):
-                        coeff = get_linear_annealed_value(
-                            current_frac_of_training=step / config.steps,
-                            initial_value=loss_cfg.coeff,
-                            anneal_start_frac=loss_cfg.coeff_anneal_start_frac,
-                            anneal_final_value=loss_cfg.coeff_anneal_final_value,
-                            anneal_end_frac=loss_cfg.coeff_anneal_end_frac,
-                        )
-                        batch_log_data["train/scheduled/ImportanceMinimalityLoss_coeff"] = coeff
-                    if loss_cfg.p_anneal_final_p is not None and loss_cfg.p_anneal_start_frac < 1.0:
-                        pnorm = get_linear_annealed_value(
-                            current_frac_of_training=step / config.steps,
-                            initial_value=loss_cfg.pnorm,
-                            anneal_start_frac=loss_cfg.p_anneal_start_frac,
-                            anneal_final_value=loss_cfg.p_anneal_final_p,
-                            anneal_end_frac=loss_cfg.p_anneal_end_frac,
-                        )
-                        batch_log_data["train/scheduled/ImportanceMinimalityLoss_pnorm"] = pnorm
-
-                microbatch_total_loss = microbatch_total_loss + coeff * loss_val
-                batch_log_data[f"train/loss/{loss_cfg.classname}"] += (
-                    loss_val.item() / config.gradient_accumulation_steps
+                ci = component_model.calc_causal_importances(
+                    pre_weight_acts=target_model_output.cache,
+                    detach_inputs=False,
+                    sampling=config.sampling,
                 )
 
-                # Accumulate PPGD grads
-                if isinstance(
-                    loss_cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-                ):
-                    ppgd_grads = ppgd_states[loss_cfg].get_grads(loss_val)
-                    for module_name, grad in ppgd_grads.items():
-                        ppgd_batch_grads[loss_cfg][module_name] += (
-                            grad / config.gradient_accumulation_steps
-                        )
+                microbatch_losses = compute_losses(
+                    loss_metric_configs=config.loss_metric_configs,
+                    model=component_model,
+                    batch=batch,
+                    ci=ci,
+                    target_out=target_model_output.output,
+                    weight_deltas=weight_deltas,
+                    pre_weight_acts=target_model_output.cache,
+                    current_frac_of_training=step / config.steps,
+                    sampling=config.sampling,
+                    use_delta_component=config.use_delta_component,
+                    n_mask_samples=config.n_mask_samples,
+                    ppgd_sourcess={
+                        cfg: ppgd_states[cfg].get_effective_sources()
+                        for cfg in persistent_pgd_configs
+                    },
+                    output_loss_type=config.output_loss_type,
+                    force_delta=None,
+                )
 
-            batch_log_data["train/loss/total"] += (
-                microbatch_total_loss.item() / config.gradient_accumulation_steps
-            )
+                microbatch_total_loss = torch.tensor(0.0, device=device)
+                for loss_cfg, loss_val in microbatch_losses.items():
+                    assert loss_cfg.coeff is not None
+                    coeff = loss_cfg.coeff
 
-            microbatch_total_loss.div_(config.gradient_accumulation_steps).backward(
-                retain_graph=nontarget_train_iterator is not None
-            )
+                    if isinstance(loss_cfg, ImportanceMinimalityLossConfig):
+                        if (
+                            loss_cfg.coeff_anneal_final_value is not None
+                            and loss_cfg.coeff_anneal_start_frac < 1.0
+                        ):
+                            coeff = get_linear_annealed_value(
+                                current_frac_of_training=step / config.steps,
+                                initial_value=loss_cfg.coeff,
+                                anneal_start_frac=loss_cfg.coeff_anneal_start_frac,
+                                anneal_final_value=loss_cfg.coeff_anneal_final_value,
+                                anneal_end_frac=loss_cfg.coeff_anneal_end_frac,
+                            )
+                            batch_log_data["train/scheduled/ImportanceMinimalityLoss_coeff"] = coeff
+                        if (
+                            loss_cfg.p_anneal_final_p is not None
+                            and loss_cfg.p_anneal_start_frac < 1.0
+                        ):
+                            pnorm = get_linear_annealed_value(
+                                current_frac_of_training=step / config.steps,
+                                initial_value=loss_cfg.pnorm,
+                                anneal_start_frac=loss_cfg.p_anneal_start_frac,
+                                anneal_final_value=loss_cfg.p_anneal_final_p,
+                                anneal_end_frac=loss_cfg.p_anneal_end_frac,
+                            )
+                            batch_log_data["train/scheduled/ImportanceMinimalityLoss_pnorm"] = pnorm
+
+                    microbatch_total_loss = microbatch_total_loss + coeff * loss_val
+                    batch_log_data[f"train/loss/{loss_cfg.classname}"] += (
+                        loss_val.item() / gradient_accumulation_steps
+                    )
+
+                    if isinstance(
+                        loss_cfg,
+                        PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig,
+                    ):
+                        ppgd_grads = ppgd_states[loss_cfg].get_grads(loss_val)
+                        for module_name, grad in ppgd_grads.items():
+                            ppgd_batch_grads[loss_cfg][module_name] += grad
+
+                batch_log_data["train/loss/total"] += (
+                    microbatch_total_loss.item() / gradient_accumulation_steps
+                )
+
+                microbatch_total_loss.div_(gradient_accumulation_steps).backward(
+                    retain_graph=nontarget_train_iterator is not None
+                )
 
             for layer_name, layer_ci in ci.lower_leaky.items():
                 l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
                 batch_log_data[f"train/l0/{layer_name}"] += (
-                    l0_val / config.gradient_accumulation_steps
+                    l0_val / gradient_accumulation_steps
                 )
+
         # Step PPGD optimizers
         for ppgd_cfg in persistent_pgd_configs:
             mean_abs_steps = ppgd_states[ppgd_cfg].step(ppgd_batch_grads[ppgd_cfg])
@@ -436,7 +450,10 @@ def optimize(
                 sampling=config.sampling,
                 use_delta_component=config.use_delta_component,
                 n_mask_samples=config.n_mask_samples,
-                ppgd_maskss={cfg: ppgd_states[cfg].masks for cfg in persistent_pgd_configs},
+                ppgd_sourcess={
+                    cfg: ppgd_states[cfg].get_effective_sources()
+                    for cfg in persistent_pgd_configs
+                },
                 output_loss_type=config.output_loss_type,
                 force_delta=1.0,
             )
@@ -504,7 +521,7 @@ def optimize(
 
         # --- Evaluation --- #
         if step % config.eval_freq == 0:
-            with torch.no_grad():
+            with torch.no_grad(), bf16_autocast(enabled=config.autocast_bf16):
                 slow_step: bool = (
                     config.slow_eval_on_first_step
                     if step == 0
@@ -526,7 +543,10 @@ def optimize(
                     model=component_model,  # No backward passes so DDP wrapped_model not needed
                     eval_iterator=eval_iterator,
                     nontarget_eval_iterator=nontarget_eval_iterator,
-                    ppgd_maskss={cfg: ppgd_states[cfg].masks for cfg in persistent_pgd_configs},
+                    ppgd_sourcess={
+                        cfg: ppgd_states[cfg].get_effective_sources()
+                        for cfg in persistent_pgd_configs
+                    },
                     device=device,
                     run_config=config,
                     slow_step=slow_step,

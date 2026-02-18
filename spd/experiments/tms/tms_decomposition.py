@@ -91,9 +91,7 @@ def main(
         synced_inputs=synced_inputs,
         active_indices=task_config.active_indices,
     )
-    train_loader = DatasetGeneratedDataLoader(
-        dataset, batch_size=config.microbatch_size, shuffle=False
-    )
+    train_loader = DatasetGeneratedDataLoader(dataset, batch_size=config.batch_size, shuffle=False)
     eval_loader = DatasetGeneratedDataLoader(
         dataset, batch_size=config.eval_batch_size, shuffle=False
     )

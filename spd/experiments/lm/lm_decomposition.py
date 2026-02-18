@@ -6,7 +6,13 @@ from pathlib import Path
 import fire
 import wandb
 
-from spd.configs import Config, LMTaskConfig
+from spd.configs import (
+    Config,
+    LMTaskConfig,
+    PersistentPGDReconLossConfig,
+    PersistentPGDReconSubsetLossConfig,
+    RepeatAcrossBatchScope,
+)
 from spd.data import DatasetConfig, create_data_loader
 from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
 from spd.log import logger
@@ -115,14 +121,22 @@ def main(
 
     match dist_state:
         case DistributedState(world_size=world_size):
-            # Keep per-process batch size constant to maintain scale of all metrics so we can simply average
-            # them across processes.
-            assert config.microbatch_size % world_size == 0 and config.microbatch_size > 0, (
-                f"Microbatch size {config.microbatch_size} is not divisible by world size {world_size}. "
+            assert config.batch_size % world_size == 0 and config.batch_size > 0, (
+                f"Batch size {config.batch_size} is not divisible by world size {world_size}. "
             )
             train_rank_microbatch_size = config.microbatch_size // world_size
         case None:
             train_rank_microbatch_size = config.microbatch_size
+
+    for cfg in config.loss_metric_configs:
+        if isinstance(
+            cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
+        ) and isinstance(cfg.scope, RepeatAcrossBatchScope):
+            n = cfg.scope.n_sources
+            assert train_rank_microbatch_size % n == 0, (
+                f"repeat_across_batch n_sources={n} must divide per-rank microbatch_size="
+                f"{train_rank_microbatch_size}"
+            )
 
     if config.task_config.prompts_file is not None:
         assert config.tokenizer_name is not None
