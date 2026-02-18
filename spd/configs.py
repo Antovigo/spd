@@ -569,8 +569,10 @@ class StochasticHiddenActsReconLossConfig(LossMetricConfig):
     classname: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
 
 
-class StochasticAttentionPatternsKLConfig(LossMetricConfig):
-    classname: Literal["StochasticAttentionPatternsKL"] = "StochasticAttentionPatternsKL"
+class StochasticAttentionPatternsReconLossConfig(LossMetricConfig):
+    classname: Literal["StochasticAttentionPatternsReconLoss"] = (
+        "StochasticAttentionPatternsReconLoss"
+    )
 
 
 #### Metrics that can only be used in eval ####
@@ -639,7 +641,7 @@ ReconLossConfigType = (
     | PGDReconSubsetLossConfig
     | PGDReconLayerwiseLossConfig
     | StochasticHiddenActsReconLossConfig
-    | StochasticAttentionPatternsKLConfig
+    | StochasticAttentionPatternsReconLossConfig
     | PersistentPGDReconLossConfig
     | PersistentPGDReconSubsetLossConfig
 )

@@ -5,8 +5,8 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from spd.configs import LayerwiseCiConfig, SamplingType
-from spd.metrics import stochastic_attention_patterns_kl
-from spd.metrics.stochastic_attention_patterns_kl import (
+from spd.metrics import stochastic_attention_patterns_recon_loss
+from spd.metrics.stochastic_attention_patterns_recon_loss import (
     _capture_attention_patterns,
     _collect_attention_patterns,
 )
@@ -49,7 +49,7 @@ def _make_gpt2_component_model() -> ComponentModel:
     )
 
 
-class TestStochasticAttentionPatternsKL:
+class TestStochasticAttentionPatternsReconLoss:
     def test_manual_calculation(self) -> None:
         """Test attention patterns KL with manual calculation.
 
@@ -94,7 +94,7 @@ class TestStochasticAttentionPatternsKL:
             )
 
         with patch(
-            "spd.metrics.stochastic_attention_patterns_kl.calc_stochastic_component_mask_info",
+            "spd.metrics.stochastic_attention_patterns_recon_loss.calc_stochastic_component_mask_info",
             side_effect=mock_calc,
         ):
             # Manually compute expected KL
@@ -124,7 +124,7 @@ class TestStochasticAttentionPatternsKL:
 
             expected = sum_kl / n_distributions
 
-            actual = stochastic_attention_patterns_kl(
+            actual = stochastic_attention_patterns_recon_loss(
                 model=model,
                 sampling="continuous",
                 n_mask_samples=2,
@@ -147,7 +147,7 @@ class TestStochasticAttentionPatternsKL:
         ci = {path: torch.rand(2, 8, 4) for path in model.target_module_paths}
 
         # Run with 1 sample and then 3 samples; both should produce finite results
-        result_1 = stochastic_attention_patterns_kl(
+        result_1 = stochastic_attention_patterns_recon_loss(
             model=model,
             sampling="continuous",
             n_mask_samples=1,
@@ -155,7 +155,7 @@ class TestStochasticAttentionPatternsKL:
             ci=ci,
             weight_deltas=None,
         )
-        result_3 = stochastic_attention_patterns_kl(
+        result_3 = stochastic_attention_patterns_recon_loss(
             model=model,
             sampling="continuous",
             n_mask_samples=3,
@@ -179,7 +179,7 @@ class TestStochasticAttentionPatternsKL:
 
         ci = {path: torch.rand(2, 8, 4) for path in model.target_module_paths}
 
-        result = stochastic_attention_patterns_kl(
+        result = stochastic_attention_patterns_recon_loss(
             model=model,
             sampling="continuous",
             n_mask_samples=1,
@@ -200,7 +200,7 @@ class TestStochasticAttentionPatternsKL:
 
         ci = {path: torch.rand(2, 8, 4) for path in model.target_module_paths}
 
-        result = stochastic_attention_patterns_kl(
+        result = stochastic_attention_patterns_recon_loss(
             model=model,
             sampling="continuous",
             n_mask_samples=2,

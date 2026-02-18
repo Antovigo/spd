@@ -26,11 +26,11 @@ from .pgd_masked_recon_loss import PGDReconLoss as PGDReconLoss
 from .pgd_masked_recon_loss import pgd_recon_loss as pgd_recon_loss
 from .pgd_masked_recon_subset_loss import PGDReconSubsetLoss as PGDReconSubsetLoss
 from .pgd_masked_recon_subset_loss import pgd_recon_subset_loss as pgd_recon_subset_loss
-from .stochastic_attention_patterns_kl import (
-    StochasticAttentionPatternsKL as StochasticAttentionPatternsKL,
+from .stochastic_attention_patterns_recon_loss import (
+    StochasticAttentionPatternsReconLoss as StochasticAttentionPatternsReconLoss,
 )
-from .stochastic_attention_patterns_kl import (
-    stochastic_attention_patterns_kl as stochastic_attention_patterns_kl,
+from .stochastic_attention_patterns_recon_loss import (
+    stochastic_attention_patterns_recon_loss as stochastic_attention_patterns_recon_loss,
 )
 from .stochastic_hidden_acts_recon_loss import (
     StochasticHiddenActsReconLoss as StochasticHiddenActsReconLoss,
