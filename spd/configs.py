@@ -585,6 +585,12 @@ class StochasticHiddenActsReconLossConfig(LossMetricConfig):
     classname: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
 
 
+class StochasticAttentionPatternsReconLossConfig(LossMetricConfig):
+    classname: Literal["StochasticAttentionPatternsReconLoss"] = (
+        "StochasticAttentionPatternsReconLoss"
+    )
+
+
 #### Metrics that can only be used in eval ####
 class CEandKLLossesConfig(BaseConfig):
     classname: Literal["CEandKLLosses"] = "CEandKLLosses"
@@ -685,6 +691,7 @@ ReconLossConfigType = (
     | PGDReconSubsetLossConfig
     | PGDReconLayerwiseLossConfig
     | StochasticHiddenActsReconLossConfig
+    | StochasticAttentionPatternsReconLossConfig
     | PersistentPGDReconLossConfig
     | PersistentPGDReconSubsetLossConfig
 )
@@ -847,10 +854,6 @@ class Config(BaseConfig):
         description="Weight decay for warmup phase optimizer",
     )
 
-    @property
-    def microbatch_size(self) -> PositiveInt:
-        return self.batch_size // self.gradient_accumulation_steps
-
     # --- Logging & Saving ---
     train_log_freq: PositiveInt = Field(
         ...,
@@ -982,6 +985,7 @@ class Config(BaseConfig):
         "lr_exponential_halflife",
         "out_dir",
         "n_examples_until_dead",
+        "gradient_accumulation_steps",
     ]
     RENAMED_CONFIG_KEYS: ClassVar[dict[str, str]] = {
         "grad_clip_norm": "grad_clip_norm_components",

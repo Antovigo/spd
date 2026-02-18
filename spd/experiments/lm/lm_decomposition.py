@@ -124,9 +124,19 @@ def main(
             assert config.batch_size % world_size == 0 and config.batch_size > 0, (
                 f"Batch size {config.batch_size} is not divisible by world size {world_size}. "
             )
-            train_rank_microbatch_size = config.microbatch_size // world_size
+            train_rank_batch_size = config.batch_size // world_size
         case None:
-            train_rank_microbatch_size = config.microbatch_size
+            train_rank_batch_size = config.batch_size
+
+    for cfg in config.loss_metric_configs:
+        if isinstance(
+            cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
+        ) and isinstance(cfg.scope, RepeatAcrossBatchScope):
+            n = cfg.scope.n_sources
+            assert train_rank_batch_size % n == 0, (
+                f"repeat_across_batch n_sources={n} must divide per-rank batch_size="
+                f"{train_rank_batch_size}"
+            )
 
     for cfg in config.loss_metric_configs:
         if isinstance(
