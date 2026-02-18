@@ -86,6 +86,13 @@ class GlobalSharedTransformerCiConfig(BaseConfig):
         return self
 
 
+class CiHookSpec(BaseConfig):
+    """Specifies a hook point for the hooks_mlp CI function."""
+
+    pattern: str = Field(..., description="fnmatch pattern for modules to hook")
+    position: Literal["input", "output"] = Field(..., description="Capture module input or output")
+
+
 class GlobalCiConfig(BaseConfig):
     """Configuration for global CI function (single function for all layers).
 
@@ -93,13 +100,14 @@ class GlobalCiConfig(BaseConfig):
     For fn_type='global_reverse_residual': Processes blocks in reverse order with residual stream.
     For fn_type='global_shared_transformer': Concatenates activations, projects to shared d_model,
     and applies transformer blocks over the sequence dimension.
+    For fn_type='hooks_mlp': User-specified hooks provide CI input activations.
     """
 
     mode: Literal["global"] = "global"
     fn_type: GlobalCiFnType = Field(
         ...,
         description="Type of global CI function: global_shared_mlp, "
-        "global_reverse_residual, or global_shared_transformer",
+        "global_reverse_residual, global_shared_transformer, or hooks_mlp",
     )
     hidden_dims: list[NonNegativeInt] | None = Field(
         default=None,
@@ -135,6 +143,11 @@ class GlobalCiConfig(BaseConfig):
         "Required when fn_type='global_reverse_residual', ignored otherwise.",
     )
     simple_transformer_ci_cfg: GlobalSharedTransformerCiConfig | None = None
+    ci_hooks: list[CiHookSpec] | None = Field(
+        default=None,
+        description="Hook points for hooks_mlp CI function. "
+        "Each specifies a module pattern and position (input or output).",
+    )
 
     @model_validator(mode="after")
     def validate_ci_config(self) -> Self:
@@ -165,6 +178,15 @@ class GlobalCiConfig(BaseConfig):
             assert self.simple_transformer_ci_cfg is not None, (
                 "simple_transformer_ci_cfg must be specified when fn_type='global_shared_transformer'"
             )
+        elif self.fn_type == "hooks_mlp":
+            assert self.hidden_dims is not None, (
+                "hidden_dims must be specified when fn_type='hooks_mlp'"
+            )
+            assert self.ci_hooks is not None and len(self.ci_hooks) > 0, (
+                "ci_hooks must be specified with at least one hook when fn_type='hooks_mlp'"
+            )
+        if self.fn_type != "hooks_mlp":
+            assert self.ci_hooks is None, "ci_hooks is only valid for fn_type='hooks_mlp'"
         return self
 
 
