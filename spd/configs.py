@@ -569,6 +569,10 @@ class StochasticHiddenActsReconLossConfig(LossMetricConfig):
     classname: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
 
 
+class StochasticAttentionPatternsKLConfig(LossMetricConfig):
+    classname: Literal["StochasticAttentionPatternsKL"] = "StochasticAttentionPatternsKL"
+
+
 #### Metrics that can only be used in eval ####
 class CEandKLLossesConfig(BaseConfig):
     classname: Literal["CEandKLLosses"] = "CEandKLLosses"
@@ -635,6 +639,7 @@ ReconLossConfigType = (
     | PGDReconSubsetLossConfig
     | PGDReconLayerwiseLossConfig
     | StochasticHiddenActsReconLossConfig
+    | StochasticAttentionPatternsKLConfig
     | PersistentPGDReconLossConfig
     | PersistentPGDReconSubsetLossConfig
 )

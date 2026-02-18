@@ -66,6 +66,8 @@ class CausalSelfAttention(nn.Module):
         self.rotary_base = config.rotary_base
         self.n_ctx = config.n_ctx  # Max context length for precomputation
         self.flash_attention = config.flash_attention
+        self.store_attention_patterns = False
+        self._attention_patterns: Tensor | None = None
         if self.use_grouped_query_attention:
             self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.attn_bias)
             self.k_proj = nn.Linear(
@@ -234,7 +236,7 @@ class CausalSelfAttention(nn.Module):
             k = k.repeat_interleave(self.repeat_kv_heads, dim=1)
             v = v.repeat_interleave(self.repeat_kv_heads, dim=1)
 
-        if self.flash_attention:
+        if self.flash_attention and not self.store_attention_patterns:
             y = F.scaled_dot_product_attention(
                 q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True
             )
@@ -243,6 +245,8 @@ class CausalSelfAttention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
+            if self.store_attention_patterns:
+                self._attention_patterns = att
             y = att @ v  # (B, n_head, T, head_dim)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)

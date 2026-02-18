@@ -78,6 +78,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.flash_attention = config.flash_attention
+        self.store_attention_patterns = False
+        self._attention_patterns: Tensor | None = None
         # key, query, value projections for all heads, but in a batch
         self.q_proj = nn.Linear(config.n_embd, config.n_embd)
         self.k_proj = nn.Linear(config.n_embd, config.n_embd)
@@ -106,7 +108,7 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        if self.flash_attention:
+        if self.flash_attention and not self.store_attention_patterns:
             # use PyTorch SDPA
             y = F.scaled_dot_product_attention(
                 q,
@@ -120,6 +122,8 @@ class CausalSelfAttention(nn.Module):
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
+            if self.store_attention_patterns:
+                self._attention_patterns = att
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)

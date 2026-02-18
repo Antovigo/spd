@@ -85,6 +85,8 @@ eval_metric_configs:
 - coeff: null
   classname: StochasticHiddenActsReconLoss
 - coeff: null
+  classname: StochasticAttentionPatternsKL
+- coeff: null
   init: random
   step_size: 0.1
   n_steps: 20

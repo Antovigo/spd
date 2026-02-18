@@ -16,6 +16,7 @@ from spd.configs import (
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
     SamplingType,
+    StochasticAttentionPatternsKLConfig,
     StochasticHiddenActsReconLossConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
@@ -31,6 +32,7 @@ from spd.metrics import (
     pgd_recon_layerwise_loss,
     pgd_recon_loss,
     pgd_recon_subset_loss,
+    stochastic_attention_patterns_kl,
     stochastic_hidden_acts_recon_loss,
     stochastic_recon_layerwise_loss,
     stochastic_recon_loss,
@@ -185,6 +187,15 @@ def compute_losses(
                     n_mask_samples=n_mask_samples,
                     batch=batch,
                     pre_weight_acts=pre_weight_acts,
+                    ci=ci.lower_leaky,
+                    weight_deltas=weight_deltas if use_delta_component else None,
+                )
+            case StochasticAttentionPatternsKLConfig():
+                loss = stochastic_attention_patterns_kl(
+                    model=model,
+                    sampling=sampling,
+                    n_mask_samples=n_mask_samples,
+                    batch=batch,
                     ci=ci.lower_leaky,
                     weight_deltas=weight_deltas if use_delta_component else None,
                 )
