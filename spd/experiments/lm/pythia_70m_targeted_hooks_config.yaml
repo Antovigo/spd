@@ -1,0 +1,151 @@
+# Pythia-70m Targeted SPD Configuration (hooks_mlp CI)
+# Target data: Custom prompts from file
+# Non-target data: The Pile (tokenized on-the-fly)
+
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+
+# --- General ---
+output_dir_name: "pythia/attention_patterns/test"
+seed: 0
+n_mask_samples: 1
+ci_config:
+  mode: global
+  fn_type: hooks_mlp
+  hidden_dims: [256]
+  ci_hooks:
+    - pattern: "gpt_neox.layers.*.mlp.dense_h_to_4h"
+      position: input
+    - pattern: "gpt_neox.layers.*.mlp.dense_4h_to_h"
+      position: input
+    - pattern: "gpt_neox.layers.*.attention.query_key_value"
+      position: input
+    - pattern: "gpt_neox.layers.*.attention.dense"
+      position: input
+sampling: continuous
+sigmoid_type: leaky_hard
+
+# Pythia-70m has 6 layers, d_model=512, intermediate_size=2048
+# QKV fused: (512, 1536), attn_out: (512, 512), mlp_up: (512, 2048), mlp_down: (2048, 512)
+module_info:
+  - module_pattern: "gpt_neox.layers.*.mlp.dense_h_to_4h"
+    C: 96
+  - module_pattern: "gpt_neox.layers.*.mlp.dense_4h_to_h"
+    C: 96
+  - module_pattern: "gpt_neox.layers.*.attention.query_key_value"
+    C: 96
+  - module_pattern: "gpt_neox.layers.*.attention.dense"
+    C: 64
+identity_module_info: null
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: ImportanceMinimalityLoss
+    coeff: 2e-4
+    pnorm: 2.0
+    beta: 0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 1
+    p_anneal_end_frac: 1.0
+  - classname: StochasticReconSubsetLoss
+    coeff: 1
+    routing:
+      type: uniform_k_subset
+  # - classname: PGDReconSubsetLoss
+  #   coeff: 1
+  #   init: random
+  #   step_size: 1.0
+  #   n_steps: 1
+  #   mask_scope: shared_across_batch
+  #   routing:
+  #     type: uniform_k_subset
+output_loss_type: kl
+nontarget_impmin_coeff_ratio: 2
+
+# --- Training ---
+batch_size: 256
+nontarget_batch_size: 256
+eval_batch_size: 256
+nontarget_eval_batch_size: 256
+
+steps: 20000
+gradient_accumulation_steps: 1
+component_weight_decay: 0.1
+lr_schedule:
+  start_val: 0.0005
+  fn_type: cosine
+  warmup_pct: 0.01
+  final_val_frac: 0.1
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+faithfulness_warmup_lr: 0.001
+faithfulness_warmup_weight_decay: 0.0
+
+# --- Logging & Saving ---
+train_log_freq: 100
+eval_freq: 1000
+slow_eval_freq: 4000
+n_eval_steps: 5
+slow_eval_on_first_step: true
+# save_freq: 10000
+ci_alive_threshold: 0.0
+eval_metric_configs:
+  - classname: CIHistograms
+    n_batches_accum: 1
+  - classname: ComponentActivationDensity
+  - classname: CI_L0
+    groups:
+      total:
+        - '*'
+      mlp:
+        - gpt_neox.layers.*.mlp.*
+      attn:
+        - gpt_neox.layers.*.attention.*
+  # - classname: CEandKLLosses
+  #   rounding_threshold: 0.0
+  - classname: CIMeanPerComponent
+  - classname: TargetedCIHeatmap
+    n_nontarget_examples: 128
+  - classname: TargetedCI_L0
+    groups:
+      total:
+        - '*'
+      mlp:
+        - gpt_neox.layers.*.mlp.*
+      attn:
+        - gpt_neox.layers.*.attention.*
+  - classname: TargetedCEandKL
+    rounding_threshold: 0.0
+  - classname: WeightMagnitude
+  - classname: StochasticHiddenActsReconLoss
+    coeff: null
+  - classname: StochasticAttentionPatternsReconLoss
+    coeff: null
+
+# --- Pretrained model info ---
+pretrained_model_class: transformers.GPTNeoXForCausalLM
+pretrained_model_name: EleutherAI/pythia-70m-deduped
+pretrained_model_output_attr: logits
+tokenizer_name: EleutherAI/pythia-70m-deduped
+
+# --- Task Specific (Target data from prompts file) ---
+task_config:
+  task_name: lm
+  max_seq_len: 2
+  prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
+
+# --- Targeted Mode (Non-target data from The Pile) ---
+nontarget_task_config:
+  task_name: lm
+  max_seq_len: 64
+  dataset_name: "monology/pile-uncopyrighted"
+  is_tokenized: false
+  column_name: "text"
+  train_data_split: "train[:6000000]"
+  eval_data_split: "train[6000000:6050000]"
+  shuffle_each_epoch: true
+  streaming: false
