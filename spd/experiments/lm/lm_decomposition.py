@@ -138,23 +138,13 @@ def main(
                 f"{train_rank_batch_size}"
             )
 
-    for cfg in config.loss_metric_configs:
-        if isinstance(
-            cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-        ) and isinstance(cfg.scope, RepeatAcrossBatchScope):
-            n = cfg.scope.n_sources
-            assert train_rank_microbatch_size % n == 0, (
-                f"repeat_across_batch n_sources={n} must divide per-rank microbatch_size="
-                f"{train_rank_microbatch_size}"
-            )
-
     if config.task_config.prompts_file is not None:
         assert config.tokenizer_name is not None
         train_loader, _tokenizer = create_prompts_data_loader(
             prompts_file=Path(config.task_config.prompts_file),
             tokenizer_name=config.tokenizer_name,
             max_seq_len=config.task_config.max_seq_len,
-            batch_size=train_rank_microbatch_size,
+            batch_size=train_rank_batch_size,
             dist_state=dist_state,
             seed=config.seed,
         )
@@ -175,7 +165,7 @@ def main(
         )
         train_loader, _tokenizer = create_data_loader(
             dataset_config=train_data_config,
-            batch_size=train_rank_microbatch_size,
+            batch_size=train_rank_batch_size,
             buffer_size=config.task_config.buffer_size,
             global_seed=config.seed,
             dist_state=dist_state,
