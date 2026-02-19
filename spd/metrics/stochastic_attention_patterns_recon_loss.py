@@ -28,6 +28,7 @@ def _ensure_hf_attn_hooks(model: nn.Module) -> list[nn.Module]:
     Idempotent: after first call, modules have store_attention_patterns so _get_attn_modules
     finds them directly on subsequent calls.
     """
+
     def _is_hf_attention(m: nn.Module) -> bool:
         cls = type(m)
         return cls.__module__.startswith("transformers.models.") and cls.__name__.endswith(
