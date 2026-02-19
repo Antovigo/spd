@@ -12,24 +12,13 @@ import random
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 
-from aiolimiter import AsyncLimiter
-from openrouter import OpenRouter
-from openrouter.components import Reasoning
+from openrouter.components import Effort
 
 from spd.app.backend.app_tokenizer import AppTokenizer
 from spd.app.backend.utils import delimit_tokens
-from spd.autointerp.config import AutointerpEvalConfig
-from spd.autointerp.db import InterpDB
-from spd.autointerp.llm_api import (
-    CostTracker,
-    GlobalBackoff,
-    LLMClient,
-    LLMError,
-    LLMJob,
-    LLMResult,
-    get_model_pricing,
-    map_api_calls,
-)
+from spd.autointerp.config import FuzzingEvalConfig
+from spd.autointerp.llm_api import LLMError, LLMJob, LLMResult, map_llm_calls
+from spd.autointerp.repo import InterpRepo
 from spd.harvest.schemas import ActivationExample, ComponentData
 from spd.log import logger
 
@@ -65,40 +54,28 @@ class FuzzingResult:
     n_errors: int
 
 
-def _delimit_high_ci_tokens(
+def _delimit_tokens(
     example: ActivationExample,
     app_tok: AppTokenizer,
-    ci_threshold: float,
 ) -> tuple[str, int]:
-    """Format example with high-CI tokens in <<delimiters>>. Returns (text, n_delimited)."""
-    valid = [
-        (tid, ci) for tid, ci in zip(example.token_ids, example.ci_values, strict=True) if tid >= 0
-    ]
-    spans = app_tok.get_spans([tid for tid, _ in valid])
-    tokens = [(span, ci > ci_threshold) for span, (_, ci) in zip(spans, valid, strict=True)]
-    n_delimited = sum(1 for _, active in tokens if active)
+    """Format example with firing tokens in <<delimiters>>. Returns (text, n_delimited)."""
+    spans = app_tok.get_spans(example.token_ids)
+    tokens = [(span, firing) for span, firing in zip(spans, example.firings, strict=True)]
+    n_delimited = sum(example.firings)
     return delimit_tokens(tokens), n_delimited
 
 
-def _delimit_random_low_ci_tokens(
+def _delimit_random_tokens(
     example: ActivationExample,
     app_tok: AppTokenizer,
     n_to_delimit: int,
     rng: random.Random,
-    ci_threshold: float,
 ) -> str:
-    """Format example with random LOW-CI tokens in <<delimiters>> instead of high-CI ones."""
-    valid = [
-        (tid, ci) for tid, ci in zip(example.token_ids, example.ci_values, strict=True) if tid >= 0
-    ]
-    low_ci_indices = [j for j, (_, ci) in enumerate(valid) if ci <= ci_threshold]
+    """Format example with random tokens in <<delimiters>> instead of firing ones."""
+    n_toks = len(example.token_ids)
 
-    if len(low_ci_indices) < n_to_delimit:
-        delimit_set = set(low_ci_indices)
-    else:
-        delimit_set = set(rng.sample(low_ci_indices, n_to_delimit))
-
-    spans = app_tok.get_spans([tid for tid, _ in valid])
+    delimit_set = set(rng.sample(range(n_toks), min(n_to_delimit, n_toks)))
+    spans = app_tok.get_spans(example.token_ids)
     tokens = [(span, j in delimit_set) for j, span in enumerate(spans)]
     return delimit_tokens(tokens)
 
@@ -138,24 +115,23 @@ class _TrialGroundTruth:
 
 async def run_fuzzing_scoring(
     components: list[ComponentData],
-    labels: dict[str, str],
+    interp_repo: InterpRepo,
     model: str,
+    reasoning_effort: Effort,
     openrouter_api_key: str,
     tokenizer_name: str,
-    db: InterpDB,
-    ci_threshold: float,
-    eval_config: AutointerpEvalConfig,
-    limit: int | None = None,
-    cost_limit_usd: float | None = None,
+    config: FuzzingEvalConfig,
+    max_concurrent: int,
+    max_requests_per_minute: int,
+    limit: int | None,
+    cost_limit_usd: float | None,
 ) -> list[FuzzingResult]:
-    n_correct = eval_config.fuzzing_n_correct
-    n_incorrect = eval_config.fuzzing_n_incorrect
-    n_trials = eval_config.fuzzing_n_trials
-    max_concurrent = eval_config.fuzzing_max_concurrent
-
     app_tok = AppTokenizer.from_pretrained(tokenizer_name)
 
-    min_examples = n_correct + n_incorrect
+    labels = {key: result.label for key, result in interp_repo.get_all_interpretations().items()}
+
+    min_examples = config.n_correct + config.n_incorrect
+
     eligible = [
         c
         for c in components
@@ -164,13 +140,13 @@ async def run_fuzzing_scoring(
     if limit is not None:
         eligible = eligible[:limit]
 
-    existing_scores = db.get_scores("fuzzing")
+    existing_scores = interp_repo.get_scores("fuzzing")
     completed = set(existing_scores.keys())
     if completed:
         logger.info(f"Resuming: {len(completed)} already scored")
 
     remaining = [c for c in eligible if c.component_key not in completed]
-    logger.info(f"Scoring {len(remaining)} components ({len(remaining) * n_trials} trials)")
+    logger.info(f"Scoring {len(remaining)} components ({len(remaining) * config.n_trials} trials)")
 
     rng = random.Random()
     jobs: list[LLMJob] = []
@@ -178,19 +154,21 @@ async def run_fuzzing_scoring(
 
     for component in remaining:
         label = labels[component.component_key]
-        for trial_idx in range(n_trials):
-            sampled = rng.sample(component.activation_examples, n_correct + n_incorrect)
-            correct_examples = sampled[:n_correct]
-            incorrect_examples = sampled[n_correct:]
+        for trial_idx in range(config.n_trials):
+            sampled = rng.sample(
+                component.activation_examples, config.n_correct + config.n_incorrect
+            )
+            correct_examples = sampled[: config.n_correct]
+            incorrect_examples = sampled[config.n_correct :]
 
             formatted: list[tuple[str, bool]] = []
             for ex in correct_examples:
-                text, _ = _delimit_high_ci_tokens(ex, app_tok, ci_threshold)
+                text, _ = _delimit_tokens(ex, app_tok)
                 formatted.append((text, True))
             for ex in incorrect_examples:
-                _, n_delimited = _delimit_high_ci_tokens(ex, app_tok, ci_threshold)
+                _, n_delimited = _delimit_tokens(ex, app_tok)
                 n_to_delimit = max(n_delimited, 1)
-                text = _delimit_random_low_ci_tokens(ex, app_tok, n_to_delimit, rng, ci_threshold)
+                text = _delimit_random_tokens(ex, app_tok, n_to_delimit, rng)
                 formatted.append((text, False))
             rng.shuffle(formatted)
 
@@ -211,50 +189,36 @@ async def run_fuzzing_scoring(
     component_trials: defaultdict[str, list[FuzzingTrial]] = defaultdict(list)
     component_errors: defaultdict[str, int] = defaultdict(int)
 
-    async with OpenRouter(api_key=openrouter_api_key) as api:
-        input_price, output_price = await get_model_pricing(api, model)
-        cost_tracker = CostTracker(
-            input_price_per_token=input_price,
-            output_price_per_token=output_price,
-            limit_usd=cost_limit_usd,
-        )
-        llm = LLMClient(
-            api=api,
-            rate_limiter=AsyncLimiter(max_rate=eval_config.max_requests_per_minute, time_period=60),
-            backoff=GlobalBackoff(),
-            cost_tracker=cost_tracker,
-        )
-
-        async for outcome in map_api_calls(
-            jobs,
-            llm,
-            model=model,
-            max_tokens=5000,
-            reasoning=Reasoning(effort=eval_config.reasoning_effort),
-            max_concurrent=max_concurrent,
-        ):
-            match outcome:
-                case LLMResult(job=job, parsed=parsed):
-                    gt = ground_truth[job.key]
-                    predicted_correct = set(parsed["correct_examples"])
-                    tp = len(gt.correct_positions & predicted_correct)
-                    tn = len(gt.incorrect_positions - predicted_correct)
-                    component_trials[gt.component_key].append(
-                        FuzzingTrial(
-                            correct_positions=sorted(gt.correct_positions),
-                            predicted_correct=sorted(predicted_correct),
-                            tp=tp,
-                            tn=tn,
-                            n_correct=len(gt.correct_positions),
-                            n_incorrect=len(gt.incorrect_positions),
-                        )
+    async for outcome in map_llm_calls(
+        openrouter_api_key=openrouter_api_key,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        jobs=jobs,
+        max_tokens=5000,
+        max_concurrent=max_concurrent,
+        max_requests_per_minute=max_requests_per_minute,
+        cost_limit_usd=cost_limit_usd,
+    ):
+        match outcome:
+            case LLMResult(job=job, parsed=parsed):
+                gt = ground_truth[job.key]
+                predicted_correct = set(parsed["correct_examples"])
+                tp = len(gt.correct_positions & predicted_correct)
+                tn = len(gt.incorrect_positions - predicted_correct)
+                component_trials[gt.component_key].append(
+                    FuzzingTrial(
+                        correct_positions=sorted(gt.correct_positions),
+                        predicted_correct=sorted(predicted_correct),
+                        tp=tp,
+                        tn=tn,
+                        n_correct=len(gt.correct_positions),
+                        n_incorrect=len(gt.incorrect_positions),
                     )
-                case LLMError(job=job, error=e):
-                    gt = ground_truth[job.key]
-                    component_errors[gt.component_key] += 1
-                    logger.error(f"{job.key}: {type(e).__name__}: {e}")
-
-        logger.info(f"Final cost: ${cost_tracker.cost_usd():.2f}")
+                )
+            case LLMError(job=job, error=e):
+                gt = ground_truth[job.key]
+                component_errors[gt.component_key] += 1
+                logger.error(f"{job.key}: {type(e).__name__}: {e}")
 
     results: list[FuzzingResult] = []
     for component in remaining:
@@ -270,7 +234,7 @@ async def run_fuzzing_scoring(
         score = (tpr + tnr) / 2 if (total_pos > 0 and total_neg > 0) else 0.0
         result = FuzzingResult(component_key=ck, score=score, trials=trials, n_errors=n_err)
         results.append(result)
-        db.save_score(ck, "fuzzing", score, json.dumps(asdict(result)))
+        interp_repo.save_score(ck, "fuzzing", score, json.dumps(asdict(result)))
 
     logger.info(f"Scored {len(results)} components")
     return results

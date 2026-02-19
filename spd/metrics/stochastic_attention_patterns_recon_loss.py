@@ -28,11 +28,14 @@ def _ensure_hf_attn_hooks(model: nn.Module) -> list[nn.Module]:
     Idempotent: after first call, modules have store_attention_patterns so _get_attn_modules
     finds them directly on subsequent calls.
     """
-    from transformers.models.gpt_neox.modeling_gpt_neox import (
-        GPTNeoXAttention,
-    )
 
-    modules = [m for m in model.modules() if isinstance(m, GPTNeoXAttention)]
+    def _is_hf_attention(m: nn.Module) -> bool:
+        cls = type(m)
+        return cls.__module__.startswith("transformers.models.") and cls.__name__.endswith(
+            "Attention"
+        )
+
+    modules = [m for m in model.modules() if _is_hf_attention(m)]
     for m in modules:
         if hasattr(m, "store_attention_patterns"):
             continue

@@ -21,7 +21,7 @@ class DatasetAttributionConfig(BaseConfig):
 class AttributionsSlurmConfig(BaseConfig):
     """Config for dataset attributions SLURM submission."""
 
-    config: DatasetAttributionConfig = DatasetAttributionConfig()
+    config: DatasetAttributionConfig
     n_gpus: PositiveInt = 8
     partition: str = DEFAULT_PARTITION_NAME
     time: str = "48:00:00"

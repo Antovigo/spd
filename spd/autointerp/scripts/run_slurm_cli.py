@@ -10,26 +10,18 @@ Usage:
 import fire
 
 
-def main(
-    wandb_path: str,
-    config: str | None = None,
-) -> None:
+def main(decomposition_id: str, config: str) -> None:
     """Submit autointerp pipeline (interpret + evals) to SLURM.
 
     Args:
-        wandb_path: WandB run path for the target decomposition run.
-        config: Path to AutointerpSlurmConfig YAML/JSON. Uses built-in defaults if omitted.
+        decomposition_id: ID of the target decomposition run.
+        config: Path to AutointerpSlurmConfig YAML/JSON.
     """
     from spd.autointerp.config import AutointerpSlurmConfig
     from spd.autointerp.scripts.run_slurm import submit_autointerp
-    from spd.utils.wandb_utils import parse_wandb_run_path
 
-    parse_wandb_run_path(wandb_path)
-
-    slurm_config = (
-        AutointerpSlurmConfig.from_file(config) if config is not None else AutointerpSlurmConfig()
-    )
-    submit_autointerp(wandb_path=wandb_path, slurm_config=slurm_config)
+    slurm_config = AutointerpSlurmConfig.from_file(config)
+    submit_autointerp(decomposition_id, slurm_config)
 
 
 def cli() -> None:

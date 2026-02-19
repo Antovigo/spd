@@ -1,10 +1,11 @@
 """Run SPD on a model."""
 
 import gc
+import os
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -18,6 +19,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from spd.base_config import BaseConfig
 from spd.configs import (
     Config,
     ImportanceMinimalityLossConfig,
@@ -39,6 +41,7 @@ from spd.losses import compute_losses
 from spd.metrics import faithfulness_loss
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.persistent_pgd import PersistentPGDState
+from spd.settings import SPD_OUT_DIR
 from spd.utils.component_utils import calc_ci_l_zero
 from spd.utils.distributed_utils import (
     avg_metrics_across_ranks,
@@ -52,11 +55,12 @@ from spd.utils.general_utils import (
     extract_batch_data,
     get_linear_annealed_value,
     get_scheduled_value,
+    save_pre_run_info,
 )
 from spd.utils.logging_utils import get_grad_norms_dict, local_log
 from spd.utils.module_utils import expand_module_patterns
-from spd.utils.run_utils import save_file
-from spd.utils.wandb_utils import try_wandb
+from spd.utils.run_utils import generate_run_id, save_file
+from spd.utils.wandb_utils import init_wandb, try_wandb
 
 
 def run_faithfulness_warmup(
@@ -64,14 +68,7 @@ def run_faithfulness_warmup(
     component_params: list[torch.nn.Parameter],
     config: Config,
 ) -> None:
-    """Run faithfulness warmup phase to improve initialization.
-
-    Args:
-        component_model: The component model to warm up
-        component_params: List of component parameters to optimize
-        config: Configuration object containing warmup settings
-    """
-
+    """Run faithfulness warmup phase to improve initialization."""
     logger.info("Starting faithfulness warmup phase...")
 
     assert component_params, "component_params is empty"
@@ -255,8 +252,6 @@ def optimize(
     if config.faithfulness_warmup_steps > 0:
         run_faithfulness_warmup(component_model, component_params, config)
 
-    # Extract PersistentPGD configs for state initialization
-    # (PPGD is handled in compute_losses but not evaluated)
     persistent_pgd_configs: list[
         PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
     ] = [
@@ -277,13 +272,6 @@ def optimize(
         cfg for cfg in eval_metric_configs if cfg not in multibatch_pgd_eval_configs
     ]
 
-    # Persistent PGD losses are training-only (sources are coupled to train batch size)
-    eval_metric_configs: list[MetricConfigType] = [
-        cfg
-        for cfg in eval_metric_configs
-        if not isinstance(cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig)
-    ]
-
     sample_batch = extract_batch_data(next(train_iterator))
     batch_dims = (
         sample_batch.shape[:-1]
@@ -291,7 +279,6 @@ def optimize(
         else sample_batch.shape  # else it's a batch of token ids
     )
 
-    # Initialize PersistentPGD states if needed
     ppgd_states: dict[
         PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PersistentPGDState
     ] = {
@@ -301,6 +288,7 @@ def optimize(
             device=device,
             use_delta_component=config.use_delta_component,
             cfg=ppgd_cfg,
+            output_loss_type=config.output_loss_type,
         )
         for ppgd_cfg in persistent_pgd_configs
     }
@@ -319,7 +307,11 @@ def optimize(
         batch_log_data: defaultdict[str, float] = defaultdict(float)
 
         ppgd_batch_grads = {
-            ppgd_cfg: ppgd_states[ppgd_cfg].empty_grads() for ppgd_cfg in persistent_pgd_configs
+            ppgd_cfg: {
+                name: torch.zeros_like(src)
+                for name, src in ppgd_states[ppgd_cfg].sources.items()
+            }
+            for ppgd_cfg in persistent_pgd_configs
         }
 
         gradient_accumulation_steps = config.gradient_accumulation_steps
@@ -340,6 +332,15 @@ def optimize(
                     sampling=config.sampling,
                 )
 
+                for ppgd_cfg in persistent_pgd_configs:
+                    ppgd_states[ppgd_cfg].warmup(
+                        model=component_model,
+                        batch=batch,
+                        target_out=target_model_output.output,
+                        ci=ci.lower_leaky,
+                        weight_deltas=weight_deltas if config.use_delta_component else None,
+                    )
+
                 microbatch_losses = compute_losses(
                     loss_metric_configs=config.loss_metric_configs,
                     model=component_model,
@@ -352,10 +353,7 @@ def optimize(
                     sampling=config.sampling,
                     use_delta_component=config.use_delta_component,
                     n_mask_samples=config.n_mask_samples,
-                    ppgd_sourcess={
-                        cfg: ppgd_states[cfg].get_effective_sources()
-                        for cfg in persistent_pgd_configs
-                    },
+                    ppgd_states=ppgd_states,
                     output_loss_type=config.output_loss_type,
                     force_delta=None,
                 )
@@ -420,11 +418,7 @@ def optimize(
 
         # Step PPGD optimizers
         for ppgd_cfg in persistent_pgd_configs:
-            mean_abs_steps = ppgd_states[ppgd_cfg].step(ppgd_batch_grads[ppgd_cfg])
-            for module_name, mean_abs_step in mean_abs_steps.items():
-                batch_log_data[f"train/loss/{ppgd_cfg.classname}/mean_abs_step/{module_name}"] = (
-                    mean_abs_step
-                )
+            ppgd_states[ppgd_cfg].step(ppgd_batch_grads[ppgd_cfg])
 
         # ===== NONTARGET BATCH (if targeted mode enabled) =====
         if nontarget_train_iterator is not None:
@@ -450,10 +444,7 @@ def optimize(
                 sampling=config.sampling,
                 use_delta_component=config.use_delta_component,
                 n_mask_samples=config.n_mask_samples,
-                ppgd_sourcess={
-                    cfg: ppgd_states[cfg].get_effective_sources()
-                    for cfg in persistent_pgd_configs
-                },
+                ppgd_states=ppgd_states,
                 output_loss_type=config.output_loss_type,
                 force_delta=1.0,
             )
@@ -528,7 +519,6 @@ def optimize(
                     else step % config.slow_eval_freq == 0
                 )
 
-                assert batch_dims is not None, "batch_dims is not set"
                 multibatch_pgd_metrics = evaluate_multibatch_pgd(
                     multibatch_pgd_eval_configs=multibatch_pgd_eval_configs,
                     model=component_model,
@@ -543,10 +533,6 @@ def optimize(
                     model=component_model,  # No backward passes so DDP wrapped_model not needed
                     eval_iterator=eval_iterator,
                     nontarget_eval_iterator=nontarget_eval_iterator,
-                    ppgd_sourcess={
-                        cfg: ppgd_states[cfg].get_effective_sources()
-                        for cfg in persistent_pgd_configs
-                    },
                     device=device,
                     run_config=config,
                     slow_step=slow_step,
@@ -604,3 +590,80 @@ def optimize(
 
     if is_main_process():
         logger.info("Finished training loop.")
+
+
+def run_experiment(
+    target_model: nn.Module,
+    config: Config,
+    device: str,
+    train_loader: DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader,
+    eval_loader: DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader,
+    experiment_tag: str,
+    run_id: str | None = None,
+    launch_id: str | None = None,
+    evals_id: str | None = None,
+    sweep_params: dict[str, Any] | None = None,
+    target_model_train_config: BaseConfig | None = None,
+    tied_weights: list[tuple[str, str]] | None = None,
+    nontarget_train_loader: DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader
+    | None = None,
+    nontarget_eval_loader: DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | StaticBatchLoader
+    | None = None,
+) -> None:
+    """Run a full SPD experiment: setup, optimize, cleanup.
+
+    All ranks call this function. Only the main process does wandb/logging setup.
+    """
+    if is_main_process():
+        run_id = run_id or generate_run_id("spd")
+        out_dir = SPD_OUT_DIR / "spd" / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Run ID: {run_id}")
+        logger.info(f"Output directory: {out_dir}")
+
+        tags = [str(i) for i in [experiment_tag, evals_id, launch_id] if i is not None]
+        slurm_array_job_id = os.getenv("SLURM_ARRAY_JOB_ID")
+        if slurm_array_job_id is not None:
+            tags.append(f"slurm-array-job-id_{slurm_array_job_id}")
+
+        if config.wandb_project:
+            init_wandb(config, config.wandb_project, run_id, config.wandb_run_name, tags)
+
+        logger.info(config)
+
+        save_pre_run_info(
+            save_to_wandb=config.wandb_project is not None,
+            out_dir=out_dir,
+            spd_config=config,
+            sweep_params=sweep_params,
+            target_model=target_model if target_model_train_config is not None else None,
+            train_config=target_model_train_config,
+            task_name=getattr(config.task_config, "task_name", None),
+        )
+    else:
+        out_dir = None
+
+    optimize(
+        target_model=target_model,
+        config=config,
+        device=device,
+        train_loader=train_loader,
+        eval_loader=eval_loader,
+        n_eval_steps=config.n_eval_steps,
+        out_dir=out_dir,
+        tied_weights=tied_weights,
+        nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
+    )
+
+    if is_main_process() and config.wandb_project:
+        wandb.finish()

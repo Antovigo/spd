@@ -1,47 +1,53 @@
 """Strategy dispatch: routes AutointerpConfig variants to their implementations."""
 
-from typing import Any
-
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import AutointerpConfig, CompactSkepticalConfig
-from spd.autointerp.schemas import ArchitectureInfo
-from spd.autointerp.strategies.compact_skeptical import (
-    INTERPRETATION_SCHEMA,
-)
+from spd.autointerp.config import CompactSkepticalConfig, DualViewConfig, StrategyConfig
+from spd.autointerp.schemas import ModelMetadata
 from spd.autointerp.strategies.compact_skeptical import (
     format_prompt as compact_skeptical_prompt,
+)
+from spd.autointerp.strategies.dual_view import (
+    format_prompt as dual_view_prompt,
 )
 from spd.harvest.analysis import TokenPRLift
 from spd.harvest.schemas import ComponentData
 
+INTERPRETATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["label", "confidence", "reasoning"],
+    "additionalProperties": False,
+}
+
 
 def format_prompt(
-    config: AutointerpConfig,
+    strategy: StrategyConfig,
     component: ComponentData,
-    arch: ArchitectureInfo,
+    model_metadata: ModelMetadata,
     app_tok: AppTokenizer,
     input_token_stats: TokenPRLift,
     output_token_stats: TokenPRLift,
-    ci_threshold: float,
 ) -> str:
-    match config:
+    match strategy:
         case CompactSkepticalConfig():
             return compact_skeptical_prompt(
-                config,
+                strategy,
                 component,
-                arch,
+                model_metadata,
                 app_tok,
                 input_token_stats,
                 output_token_stats,
-                ci_threshold,
             )
-        case _:  # pyright: ignore[reportUnnecessaryComparison]
-            raise AssertionError(f"Unhandled config type: {type(config)}")  # pyright: ignore[reportUnreachable]
-
-
-def get_response_schema(config: AutointerpConfig) -> dict[str, Any]:
-    match config:
-        case CompactSkepticalConfig():
-            return INTERPRETATION_SCHEMA
-        case _:  # pyright: ignore[reportUnnecessaryComparison]
-            raise AssertionError(f"Unhandled config type: {type(config)}")  # pyright: ignore[reportUnreachable]
+        case DualViewConfig():
+            return dual_view_prompt(
+                strategy,
+                component,
+                model_metadata,
+                app_tok,
+                input_token_stats,
+                output_token_stats,
+            )

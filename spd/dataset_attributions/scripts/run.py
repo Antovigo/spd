@@ -13,6 +13,7 @@ Usage:
 """
 
 from datetime import datetime
+from typing import Any
 
 from spd.dataset_attributions.config import DatasetAttributionConfig
 from spd.dataset_attributions.harvest import (
@@ -26,12 +27,14 @@ from spd.utils.wandb_utils import parse_wandb_run_path
 
 def main(
     wandb_path: str,
-    config_json: str | dict[str, object] | None = None,
+    config_json: dict[str, Any],
     rank: int | None = None,
     world_size: int | None = None,
     merge: bool = False,
     subrun_id: str | None = None,
+    harvest_subrun_id: str | None = None,
 ) -> None:
+    assert isinstance(config_json, dict), f"Expected dict from fire, got {type(config_json)}"
     _, _, run_id = parse_wandb_run_path(wandb_path)
 
     if subrun_id is None:
@@ -47,13 +50,7 @@ def main(
 
     assert (rank is None) == (world_size is None), "rank and world_size must both be set or unset"
 
-    match config_json:
-        case str(json_str):
-            config = DatasetAttributionConfig.model_validate_json(json_str)
-        case dict(d):
-            config = DatasetAttributionConfig.model_validate(d)
-        case None:
-            config = DatasetAttributionConfig()
+    config = DatasetAttributionConfig.model_validate(config_json)
 
     if world_size is not None:
         logger.info(
@@ -62,7 +59,44 @@ def main(
     else:
         logger.info(f"Single-GPU harvest: {wandb_path} (subrun {subrun_id})")
 
-    harvest_attributions(wandb_path, config, output_dir, rank=rank, world_size=world_size)
+    harvest_attributions(
+        wandb_path=wandb_path,
+        config=config,
+        output_dir=output_dir,
+        harvest_subrun_id=harvest_subrun_id,
+        rank=rank,
+        world_size=world_size,
+    )
+
+
+def get_worker_command(
+    wandb_path: str,
+    config_json: str,
+    rank: int,
+    world_size: int,
+    subrun_id: str,
+    harvest_subrun_id: str | None = None,
+) -> str:
+    cmd = (
+        f"python -m spd.dataset_attributions.scripts.run "
+        f'"{wandb_path}" '
+        f"--config_json '{config_json}' "
+        f"--rank {rank} "
+        f"--world_size {world_size} "
+        f"--subrun_id {subrun_id}"
+    )
+    if harvest_subrun_id is not None:
+        cmd += f" --harvest_subrun_id {harvest_subrun_id}"
+    return cmd
+
+
+def get_merge_command(wandb_path: str, subrun_id: str) -> str:
+    return (
+        f"python -m spd.dataset_attributions.scripts.run "
+        f'"{wandb_path}" '
+        "--merge "
+        f"--subrun_id {subrun_id}"
+    )
 
 
 def cli() -> None:

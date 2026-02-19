@@ -11,9 +11,12 @@ from pydantic import BaseModel
 
 from spd.app.backend.dependencies import DepLoadedRun
 from spd.app.backend.utils import log_errors
+from spd.autointerp.schemas import ModelMetadata
+from spd.configs import LMTaskConfig
 from spd.harvest import analysis
 from spd.log import logger
 from spd.topology import TransformerTopology
+from spd.utils.general_utils import runtime_cast
 
 
 def _canonical_to_concrete_key(
@@ -166,15 +169,10 @@ async def request_component_interpretation(
     """
     import os
 
-    from aiolimiter import AsyncLimiter
     from openrouter import OpenRouter
 
     from spd.autointerp.config import CompactSkepticalConfig
-    from spd.autointerp.interpret import (
-        get_architecture_info,
-        interpret_component,
-    )
-    from spd.autointerp.llm_api import CostTracker, GlobalBackoff, LLMClient  # noqa: F811
+    from spd.autointerp.interpret import interpret_component
 
     assert loaded.harvest is not None, "No harvest data available"
     assert loaded.interp is not None, "No autointerp data available"
@@ -198,8 +196,6 @@ async def request_component_interpretation(
             detail="OPENROUTER_API_KEY environment variable not set",
         )
 
-    arch = get_architecture_info(loaded.run.wandb_path)
-
     token_stats = loaded.harvest.get_token_stats()
     assert token_stats is not None, "Token stats required for interpretation"
 
@@ -215,27 +211,27 @@ async def request_component_interpretation(
             detail=f"Token stats not available for component {component_key}",
         )
 
-    config = CompactSkepticalConfig()
-
-    ci_threshold = loaded.harvest.get_ci_threshold()
+    model_metadata = ModelMetadata(
+        n_blocks=loaded.topology.n_blocks,
+        model_class=loaded.model.__class__.__name__,
+        dataset_name=runtime_cast(LMTaskConfig, loaded.config.task_config).dataset_name,
+        layer_descriptions={
+            path: loaded.topology.target_to_canon(path) for path in loaded.model.target_module_paths
+        },
+    )
 
     async with OpenRouter(api_key=api_key) as api:
-        llm = LLMClient(
-            api=api,
-            rate_limiter=AsyncLimiter(max_rate=10, time_period=60),
-            backoff=GlobalBackoff(),
-            cost_tracker=CostTracker(),
-        )
         try:
             result = await interpret_component(
-                llm=llm,
-                config=config,
+                api=api,
+                model="google/gemini-3-flash-preview",
+                reasoning_effort="none",
+                strategy=CompactSkepticalConfig(),
                 component=component_data,
-                arch=arch,
+                model_metadata=model_metadata,
                 app_tok=loaded.tokenizer,
                 input_token_stats=input_token_stats,
                 output_token_stats=output_token_stats,
-                ci_threshold=ci_threshold,
             )
         except Exception as e:
             raise HTTPException(
@@ -263,8 +259,8 @@ def get_intruder_scores(loaded: DepLoadedRun) -> dict[str, float]:
     """
     if loaded.harvest is None:
         return {}
-    scores = loaded.harvest.get_intruder_scores()
-    if scores is None:
+    scores = loaded.harvest.get_scores("intruder")
+    if not scores:
         return {}
     return {
         _concrete_to_canonical_key(key, loaded.topology): score for key, score in scores.items()

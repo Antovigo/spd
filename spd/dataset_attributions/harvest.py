@@ -50,11 +50,11 @@ def _build_component_layer_keys(model: ComponentModel) -> list[str]:
 def _build_alive_masks(
     model: ComponentModel,
     run_id: str,
-    ci_threshold: float,
+    harvest_subrun_id: str | None,
     n_components: int,
     vocab_size: int,
 ) -> tuple[Bool[Tensor, " n_sources"], Bool[Tensor, " n_components"]]:
-    """Build masks of alive components (mean_ci > threshold) for sources and targets.
+    """Build masks of alive components (mean_activation > threshold) for sources and targets.
 
     Falls back to all-alive if harvest summary not available.
 
@@ -62,8 +62,6 @@ def _build_alive_masks(
     - Sources: [0, vocab_size) = wte tokens, [vocab_size, vocab_size + n_components) = component layers
     - Targets: [0, n_components) = component layers (output handled via out_residual)
     """
-    harvest = HarvestRepo.open(run_id)
-    summary = harvest.get_summary() if harvest is not None else None
 
     n_sources = vocab_size + n_components
 
@@ -73,11 +71,13 @@ def _build_alive_masks(
     # All wte tokens are always alive (source indices [0, vocab_size))
     source_alive[:vocab_size] = True
 
-    if summary is None:
-        logger.warning("Harvest summary not available, using all components as alive")
-        source_alive.fill_(True)
-        target_alive.fill_(True)
-        return source_alive, target_alive
+    if harvest_subrun_id is not None:
+        harvest = HarvestRepo(decomposition_id=run_id, subrun_id=harvest_subrun_id, readonly=True)
+    else:
+        harvest = HarvestRepo.open_most_recent(run_id, readonly=True)
+        assert harvest is not None, f"No harvest data for {run_id}"
+    summary = harvest.get_summary()
+    assert summary is not None, "Harvest summary not available"
 
     # Build masks for component layers
     source_idx = vocab_size  # Start after wte tokens
@@ -87,7 +87,7 @@ def _build_alive_masks(
         n_layer_components = model.module_to_c[layer]
         for c_idx in range(n_layer_components):
             component_key = f"{layer}:{c_idx}"
-            is_alive = component_key in summary and summary[component_key].mean_ci > ci_threshold
+            is_alive = component_key in summary and summary[component_key].firing_density > 0.0
             source_alive[source_idx] = is_alive
             target_alive[target_idx] = is_alive
             source_idx += 1
@@ -97,7 +97,7 @@ def _build_alive_masks(
     n_target_alive = int(target_alive.sum().item())
     logger.info(
         f"Alive components: {n_source_alive}/{n_sources} sources, "
-        f"{n_target_alive}/{n_components} component targets (ci > {ci_threshold})"
+        f"{n_target_alive}/{n_components} component targets (firing density > 0.0)"
     )
     return source_alive, target_alive
 
@@ -106,6 +106,7 @@ def harvest_attributions(
     wandb_path: str,
     config: DatasetAttributionConfig,
     output_dir: Path,
+    harvest_subrun_id: str | None = None,
     rank: int | None = None,
     world_size: int | None = None,
 ) -> None:
@@ -115,6 +116,7 @@ def harvest_attributions(
         wandb_path: WandB run path for the target decomposition run.
         config: Configuration for attribution harvesting.
         output_dir: Directory to write results into.
+        harvest_subrun_id: Harvest subrun to use for alive masks. If None, uses most recent.
         rank: Worker rank for parallel execution (0 to world_size-1).
         world_size: Total number of workers. If specified with rank, only processes
             batches where batch_idx % world_size == rank.
@@ -140,7 +142,7 @@ def harvest_attributions(
     component_layer_keys = _build_component_layer_keys(model)
     n_components = len(component_layer_keys)
     source_alive, target_alive = _build_alive_masks(
-        model, run_id, config.ci_threshold, n_components, vocab_size
+        model, run_id, harvest_subrun_id, n_components, vocab_size
     )
     source_alive = source_alive.to(device)
     target_alive = target_alive.to(device)
