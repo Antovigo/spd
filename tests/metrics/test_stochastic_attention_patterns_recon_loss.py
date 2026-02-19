@@ -234,16 +234,10 @@ class TestStochasticAttentionPatternsReconLossHF:
         target.eval()
 
         module_path_info = [
-            ModulePathInfo(
-                module_path="gpt_neox.layers.0.attention.query_key_value", C=4
-            ),
+            ModulePathInfo(module_path="gpt_neox.layers.0.attention.query_key_value", C=4),
             ModulePathInfo(module_path="gpt_neox.layers.0.attention.dense", C=4),
-            ModulePathInfo(
-                module_path="gpt_neox.layers.0.mlp.dense_h_to_4h", C=4
-            ),
-            ModulePathInfo(
-                module_path="gpt_neox.layers.0.mlp.dense_4h_to_h", C=4
-            ),
+            ModulePathInfo(module_path="gpt_neox.layers.0.mlp.dense_h_to_4h", C=4),
+            ModulePathInfo(module_path="gpt_neox.layers.0.mlp.dense_4h_to_h", C=4),
         ]
 
         model = ComponentModel(
