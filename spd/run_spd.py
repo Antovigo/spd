@@ -1,9 +1,11 @@
 """Run SPD on a model."""
 
 import gc
+import json
 import os
 from collections import defaultdict
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -56,6 +58,7 @@ from spd.utils.general_utils import (
     get_scheduled_value,
     save_pre_run_info,
 )
+from spd.utils.git_utils import repo_current_commit_hash, repo_is_clean
 from spd.utils.logging_utils import get_grad_norms_dict, local_log
 from spd.utils.module_utils import expand_module_patterns
 from spd.utils.run_utils import generate_run_id, save_file
@@ -503,6 +506,43 @@ def optimize(
         logger.info("Finished training loop.")
 
 
+RUN_METADATA_FILENAME = "run_metadata.json"
+
+
+def _write_run_metadata(out_dir: Path, run_id: str, config: Config, save_to_wandb: bool) -> None:
+    """Write run_metadata.json with git state, timestamp, and user annotations."""
+    metadata = {
+        "run_id": run_id,
+        "git_commit": repo_current_commit_hash(),
+        "uncommitted_changes": not repo_is_clean(),
+        "date": datetime.now(UTC).strftime("%Y-%m-%d %H:%M"),
+        "label": config.label,
+        "notes": config.notes,
+        "completed": False,
+    }
+
+    metadata_path = out_dir / RUN_METADATA_FILENAME
+    save_file(metadata, metadata_path, indent=2)
+
+    if save_to_wandb:
+        try_wandb(wandb.save, str(metadata_path), base_path=str(out_dir), policy="now")
+
+
+def _mark_run_completed(out_dir: Path, save_to_wandb: bool) -> None:
+    """Set completed=True in an existing run_metadata.json."""
+    metadata_path = out_dir / RUN_METADATA_FILENAME
+    assert metadata_path.exists(), f"run_metadata.json not found at {metadata_path}"
+
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    metadata["completed"] = True
+    save_file(metadata, metadata_path, indent=2)
+
+    if save_to_wandb:
+        try_wandb(wandb.save, str(metadata_path), base_path=str(out_dir), policy="now")
+
+
 def run_experiment(
     target_model: nn.Module,
     config: Config,
@@ -550,6 +590,8 @@ def run_experiment(
             train_config=target_model_train_config,
             task_name=getattr(config.task_config, "task_name", None),
         )
+
+        _write_run_metadata(out_dir, run_id, config, save_to_wandb=config.wandb_project is not None)
     else:
         out_dir = None
 
@@ -566,5 +608,8 @@ def run_experiment(
         nontarget_eval_loader=nontarget_eval_loader,
     )
 
-    if is_main_process() and config.wandb_project:
-        wandb.finish()
+    if is_main_process():
+        assert out_dir is not None
+        _mark_run_completed(out_dir, save_to_wandb=config.wandb_project is not None)
+        if config.wandb_project:
+            wandb.finish()

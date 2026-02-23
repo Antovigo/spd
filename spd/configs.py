@@ -757,6 +757,14 @@ class Config(BaseConfig):
         default="",
         description="Prefix prepended to an auto-generated WandB run name",
     )
+    label: str = Field(
+        default="",
+        description="Short human-readable label for this run or series of runs",
+    )
+    notes: str = Field(
+        default="",
+        description="Free-form notes about this run's purpose or configuration choices",
+    )
 
     # --- General ---
     seed: int = Field(
