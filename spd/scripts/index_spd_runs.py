@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from tqdm import tqdm
 
 from spd.settings import SPD_OUT_DIR
 from spd.utils.run_utils import _DISCRIMINATED_LIST_FIELDS
@@ -224,7 +225,7 @@ def build_index(runs_dir: Path, index_path: Path) -> None:
     # Phase 1: collect per-run metadata (using cache where possible)
     rows: dict[str, dict[str, str]] = {}
     new_run_ids: set[str] = set()
-    for run_id, run_dir in run_dirs.items():
+    for run_id, run_dir in tqdm(run_dirs.items(), desc="Reading runs"):
         cached = existing.get(run_id)
         if cached and (cached.get("completed") == "True" or not _is_recent(cached)):
             rows[run_id] = cached
