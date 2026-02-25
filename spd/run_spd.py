@@ -365,6 +365,8 @@ def optimize(
         if nontarget_train_iterator is not None:
             assert nontarget_loss_configs is not None
             nontarget_batch = extract_batch_data(next(nontarget_train_iterator)).to(device)
+            # Recompute weight_deltas with a fresh graph (target backward freed the original)
+            weight_deltas_recomputed = component_model.calc_weight_deltas()
             with bf16_autocast(enabled=config.autocast_bf16):
                 nontarget_output: OutputWithCache = wrapped_model(
                     nontarget_batch, cache_type="input"
@@ -380,7 +382,7 @@ def optimize(
                     batch=nontarget_batch,
                     ci=nontarget_ci,
                     target_out=nontarget_output.output,
-                    weight_deltas=weight_deltas,
+                    weight_deltas=weight_deltas_recomputed,
                     current_frac_of_training=step / config.steps,
                     sampling=config.sampling,
                     use_delta_component=config.use_delta_component,

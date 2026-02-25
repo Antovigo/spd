@@ -1,0 +1,85 @@
+# ResidualMLP 3 layers — targeted decomposition
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+label: "targeted_PD_resid_test"
+
+# --- General ---
+seed: 0
+n_mask_samples: 1
+ci_config:
+  mode: layerwise
+  fn_type: shared_mlp
+  hidden_dims: [80]
+sigmoid_type: "leaky_hard"
+module_info:
+  - module_pattern: "layers.*.mlp_in"
+    C: 50
+  - module_pattern: "layers.*.mlp_out"
+    C: 50
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: "ImportanceMinimalityLoss"
+    coeff: 3e-5
+    pnorm: 2.0
+    beta: 0.1
+    p_anneal_start_frac: 0.3
+    p_anneal_final_p: 0.5
+    p_anneal_end_frac: 0.8
+  - classname: "StochasticReconSubsetLoss"
+    coeff: 2.0
+output_loss_type: mse
+
+# --- Training ---
+batch_size: 1024
+eval_batch_size: 1024
+steps: 5000
+lr_schedule:
+  start_val: 1e-3
+  fn_type: constant
+  warmup_pct: 0.0
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+
+# --- Logging & Saving ---
+train_log_freq: 50
+eval_freq: 500
+n_eval_steps: 100
+slow_eval_freq: 1_000
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.1
+eval_metric_configs:
+  - classname: "CIHistograms"
+    n_batches_accum: 5
+  - classname: "ComponentActivationDensity"
+  - classname: "PermutedCIPlots"
+    identity_patterns: ["layers.*.mlp_in"]
+    dense_patterns: ["layers.*.mlp_out"]
+  - classname: "CI_L0"
+    groups: null
+  - classname: "CIMeanPerComponent"
+
+# --- Pretrained model info ---
+pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"
+pretrained_model_path: "wandb:goodfire/spd-pre-Sep-2025/runs/6hk3uciu"
+
+# --- Task Specific ---
+task_config:
+  task_name: resid_mlp
+  feature_probability: 0.01
+  data_generation_type: "exactly_one_active"
+  active_indices: [5, 15, 25, 35]
+
+# --- Targeted Decomposition ---
+nontarget_task_config:
+  task_name: resid_mlp
+  feature_probability: 0.01
+  data_generation_type: "at_least_zero_active"
+nontarget_batch_size: 1024
+nontarget_eval_batch_size: 1024
+nontarget_impmin_coeff_ratio: 1.5
