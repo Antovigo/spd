@@ -14,6 +14,7 @@ Usage:
 import argparse
 import csv
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,20 @@ COLUMNS = [
 ]
 
 NA = "NA"
+
+_RECHECK_WINDOW = timedelta(days=7)
+
+
+def _is_recent(row: dict[str, str]) -> bool:
+    """Return True if the run's date is within the recheck window."""
+    date_str = row.get("date", NA)
+    if date_str == NA:
+        return False
+    try:
+        run_date = datetime.strptime(date_str, "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+    except ValueError:
+        return False
+    return datetime.now(UTC) - run_date < _RECHECK_WINDOW
 
 
 def _flatten_dict(d: dict[str, Any], prefix: str = "") -> dict[str, str]:
@@ -210,11 +225,13 @@ def build_index(runs_dir: Path, index_path: Path) -> None:
     rows: dict[str, dict[str, str]] = {}
     new_run_ids: set[str] = set()
     for run_id, run_dir in run_dirs.items():
-        if run_id in existing:
-            rows[run_id] = existing[run_id]
+        cached = existing.get(run_id)
+        if cached and (cached.get("completed") == "True" or not _is_recent(cached)):
+            rows[run_id] = cached
         else:
             rows[run_id] = _read_metadata(run_dir)
-            new_run_ids.add(run_id)
+            if not cached:
+                new_run_ids.add(run_id)
 
     # Phase 2: compute hyperparameters
     # Group runs by label
