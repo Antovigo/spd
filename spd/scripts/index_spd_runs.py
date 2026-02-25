@@ -269,7 +269,11 @@ def build_index(runs_dir: Path, index_path: Path) -> None:
     with open(index_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS, delimiter="\t", extrasaction="ignore")
         writer.writeheader()
-        for run_id in sorted(rows, key=lambda rid: rows[rid].get("date", ""), reverse=True):
+        for run_id in sorted(
+            rows,
+            key=lambda rid: rows[rid].get("date", "") if rows[rid].get("date", "") != NA else "",
+            reverse=True,
+        ):
             writer.writerow(rows[run_id])
 
     print(f"Wrote {len(rows)} runs to {index_path}")
