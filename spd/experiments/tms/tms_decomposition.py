@@ -11,7 +11,7 @@ import fire
 from spd.configs import TMSTaskConfig
 from spd.experiments.tms.models import TMSModel, TMSTargetRunInfo
 from spd.log import logger
-from spd.run_spd import run_experiment
+from spd.run_spd import LoaderType, run_experiment
 from spd.utils.data_utils import DatasetGeneratedDataLoader, SparseFeatureDataset
 from spd.utils.distributed_utils import get_device
 from spd.utils.general_utils import set_seed
@@ -50,11 +50,35 @@ def main(
         data_generation_type=task_config.data_generation_type,
         value_range=(0.0, 1.0),
         synced_inputs=synced_inputs,
+        active_indices=task_config.active_indices,
     )
     train_loader = DatasetGeneratedDataLoader(dataset, batch_size=config.batch_size, shuffle=False)
     eval_loader = DatasetGeneratedDataLoader(
         dataset, batch_size=config.eval_batch_size, shuffle=False
     )
+
+    # --- Nontarget data --- #
+    nontarget_train_loader: LoaderType | None = None
+    nontarget_eval_loader: LoaderType | None = None
+    if config.nontarget_task_config is not None:
+        assert isinstance(config.nontarget_task_config, TMSTaskConfig)
+        assert config.nontarget_batch_size is not None
+        assert config.nontarget_eval_batch_size is not None
+        nontarget_dataset = SparseFeatureDataset(
+            n_features=target_model.config.n_features,
+            feature_probability=config.nontarget_task_config.feature_probability,
+            device=device,
+            data_generation_type=config.nontarget_task_config.data_generation_type,
+            value_range=(0.0, 1.0),
+            synced_inputs=synced_inputs,
+            active_indices=config.nontarget_task_config.active_indices,
+        )
+        nontarget_train_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_batch_size, shuffle=False
+        )
+        nontarget_eval_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_eval_batch_size, shuffle=False
+        )
 
     tied_weights = None
     if target_model.config.tied_weights:
@@ -73,6 +97,8 @@ def main(
         sweep_params=parse_sweep_params(sweep_params_json),
         target_model_train_config=target_model.config,
         tied_weights=tied_weights,
+        nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
 

@@ -11,9 +11,10 @@ from spd.configs import (
     RepeatAcrossBatchScope,
 )
 from spd.data import DatasetConfig, create_data_loader
+from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
 from spd.log import logger
 from spd.pretrain.run_info import PretrainRunInfo
-from spd.run_spd import run_experiment
+from spd.run_spd import LoaderType, run_experiment
 from spd.utils.distributed_utils import (
     DistributedState,
     ensure_cached_and_call,
@@ -24,6 +25,82 @@ from spd.utils.distributed_utils import (
 )
 from spd.utils.general_utils import resolve_class, set_seed
 from spd.utils.run_utils import parse_config, parse_sweep_params
+
+
+def _create_lm_loaders(
+    task_config: LMTaskConfig,
+    tokenizer_name: str | None,
+    train_batch_size: int,
+    eval_batch_size: int,
+    seed: int,
+    dist_state: DistributedState | None,
+) -> tuple[LoaderType, LoaderType]:
+    """Create train and eval loaders from an LMTaskConfig.
+
+    Supports both dataset-based loading (dataset_name) and prompts-file-based loading
+    (prompts_file).
+    """
+    if task_config.prompts_file is not None:
+        assert tokenizer_name is not None
+        train_loader, _ = create_prompts_data_loader(
+            prompts_file=Path(task_config.prompts_file),
+            tokenizer_name=tokenizer_name,
+            max_seq_len=task_config.max_seq_len,
+            batch_size=train_batch_size,
+            dist_state=dist_state,
+            seed=seed,
+        )
+        eval_loader, _ = create_prompts_data_loader(
+            prompts_file=Path(task_config.prompts_file),
+            tokenizer_name=tokenizer_name,
+            max_seq_len=task_config.max_seq_len,
+            batch_size=eval_batch_size,
+            dist_state=dist_state,
+            seed=seed + 1,
+        )
+        return train_loader, eval_loader
+
+    assert task_config.dataset_name is not None, (
+        "Either dataset_name or prompts_file must be set in LMTaskConfig"
+    )
+    train_data_config = DatasetConfig(
+        name=task_config.dataset_name,
+        hf_tokenizer_path=tokenizer_name,
+        split=task_config.train_data_split,
+        n_ctx=task_config.max_seq_len,
+        is_tokenized=task_config.is_tokenized,
+        streaming=task_config.streaming,
+        column_name=task_config.column_name,
+        shuffle_each_epoch=task_config.shuffle_each_epoch,
+        seed=task_config.dataset_seed,
+    )
+    train_loader, _ = create_data_loader(
+        dataset_config=train_data_config,
+        batch_size=train_batch_size,
+        buffer_size=task_config.buffer_size,
+        global_seed=seed,
+        dist_state=dist_state,
+    )
+
+    eval_data_config = DatasetConfig(
+        name=task_config.dataset_name,
+        hf_tokenizer_path=tokenizer_name,
+        split=task_config.eval_data_split,
+        n_ctx=task_config.max_seq_len,
+        is_tokenized=task_config.is_tokenized,
+        streaming=task_config.streaming,
+        column_name=task_config.column_name,
+        shuffle_each_epoch=task_config.shuffle_each_epoch,
+        seed=task_config.dataset_seed,
+    )
+    eval_loader, _ = create_data_loader(
+        dataset_config=eval_data_config,
+        batch_size=eval_batch_size,
+        buffer_size=task_config.buffer_size,
+        global_seed=seed + 1,
+        dist_state=dist_state,
+    )
+    return train_loader, eval_loader
 
 
 @with_distributed_cleanup
@@ -75,28 +152,16 @@ def main(
     # --- Load Data --- #
     if is_main_process():
         logger.info("Loading dataset...")
-    train_data_config = DatasetConfig(
-        name=config.task_config.dataset_name,
-        hf_tokenizer_path=config.tokenizer_name,
-        split=config.task_config.train_data_split,
-        n_ctx=config.task_config.max_seq_len,
-        is_tokenized=config.task_config.is_tokenized,
-        streaming=config.task_config.streaming,
-        column_name=config.task_config.column_name,
-        shuffle_each_epoch=config.task_config.shuffle_each_epoch,
-        seed=config.task_config.dataset_seed,
-    )
 
-    match dist_state:
-        case DistributedState(world_size=world_size):
-            # Keep per-process batch size constant to maintain scale of all metrics so we can simply average
-            # them across processes.
-            assert config.batch_size % world_size == 0 and config.batch_size > 0, (
-                f"Batch size {config.batch_size} is not divisible by world size {world_size}. "
-            )
-            train_rank_batch_size = config.batch_size // world_size
-        case None:
-            train_rank_batch_size = config.batch_size
+    world_size = dist_state.world_size if dist_state is not None else 1
+
+    def _rank_batch_size(total_batch_size: int) -> int:
+        assert total_batch_size % world_size == 0 and total_batch_size > 0, (
+            f"Batch size {total_batch_size} is not divisible by world size {world_size}."
+        )
+        return total_batch_size // world_size
+
+    train_rank_batch_size = _rank_batch_size(config.batch_size)
 
     for cfg in config.loss_metric_configs:
         if isinstance(
@@ -108,42 +173,33 @@ def main(
                 f"{train_rank_batch_size}"
             )
 
-    train_loader, _tokenizer = create_data_loader(
-        dataset_config=train_data_config,
-        batch_size=train_rank_batch_size,
-        buffer_size=config.task_config.buffer_size,
-        global_seed=config.seed,
+    task_config = config.task_config
+    assert isinstance(task_config, LMTaskConfig)
+
+    train_loader, eval_loader = _create_lm_loaders(
+        task_config=task_config,
+        tokenizer_name=config.tokenizer_name,
+        train_batch_size=train_rank_batch_size,
+        eval_batch_size=_rank_batch_size(config.eval_batch_size),
+        seed=config.seed,
         dist_state=dist_state,
     )
 
-    eval_data_config = DatasetConfig(
-        name=config.task_config.dataset_name,
-        hf_tokenizer_path=config.tokenizer_name,
-        split=config.task_config.eval_data_split,
-        n_ctx=config.task_config.max_seq_len,
-        is_tokenized=config.task_config.is_tokenized,
-        streaming=config.task_config.streaming,
-        column_name=config.task_config.column_name,
-        shuffle_each_epoch=config.task_config.shuffle_each_epoch,
-        seed=config.task_config.dataset_seed,
-    )
-
-    match dist_state:
-        case DistributedState(world_size=world_size):
-            assert config.eval_batch_size % world_size == 0 and config.eval_batch_size > 0, (
-                f"Eval batch size {config.eval_batch_size} is not divisible by world size {world_size}. "
-            )
-            eval_rank_batch_size = config.eval_batch_size // world_size
-        case None:
-            eval_rank_batch_size = config.eval_batch_size
-
-    eval_loader, _ = create_data_loader(
-        dataset_config=eval_data_config,
-        batch_size=eval_rank_batch_size,
-        buffer_size=config.task_config.buffer_size,
-        global_seed=config.seed + 1,
-        dist_state=dist_state,
-    )
+    # --- Nontarget data --- #
+    nontarget_train_loader: LoaderType | None = None
+    nontarget_eval_loader: LoaderType | None = None
+    if config.nontarget_task_config is not None:
+        assert isinstance(config.nontarget_task_config, LMTaskConfig)
+        assert config.nontarget_batch_size is not None
+        assert config.nontarget_eval_batch_size is not None
+        nontarget_train_loader, nontarget_eval_loader = _create_lm_loaders(
+            task_config=config.nontarget_task_config,
+            tokenizer_name=config.tokenizer_name,
+            train_batch_size=_rank_batch_size(config.nontarget_batch_size),
+            eval_batch_size=_rank_batch_size(config.nontarget_eval_batch_size),
+            seed=config.seed + 2,
+            dist_state=dist_state,
+        )
 
     run_experiment(
         target_model=target_model,
@@ -156,6 +212,8 @@ def main(
         launch_id=launch_id,
         evals_id=evals_id,
         sweep_params=parse_sweep_params(sweep_params_json),
+        nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
 

@@ -108,6 +108,17 @@ This repository implements methods from two key research papers on parameter dec
 - **Sources** (`adv_sources`, `PPGDSources`, `self.sources`): The raw values that PGD optimizes adversarially. These are interpolated with CI to produce component masks: `mask = ci + (1 - ci) * source`. Used in both regular PGD (`spd/metrics/pgd_utils.py`) and persistent PGD (`spd/persistent_pgd.py`).
 - **Masks** (`component_masks`, `RoutingMasks`, `make_mask_infos`, `n_mask_samples`): The materialized per-component masks used during forward passes. These are produced from sources (in PGD) or from stochastic sampling, and are a general SPD concept across the whole codebase.
 
+**Targeted Decomposition:**
+
+Targeted decomposition decomposes a model using narrow "target" inputs (e.g., specific prompts or active feature subsets) while training on "nontarget" data (general distribution) to preserve overall model behavior.
+
+- **Target data**: Uses normal SPD losses — delta component is stochastically/adversarially masked
+- **Nontarget data**: Forces `delta=1.0` so components + delta reconstruct the original model exactly. Only CI/impmin losses are informative (not `UnmaskedReconLoss`, which is trivially zero)
+- Config fields: `nontarget_task_config`, `nontarget_batch_size`, `nontarget_eval_batch_size`, `nontarget_impmin_coeff_ratio` on `Config`
+- For TMS/ResidMLP: `active_indices` on `TMSTaskConfig`/`ResidMLPTaskConfig` restricts which features can be active
+- For LM: `prompts_file` on `LMTaskConfig` loads target data from a text file (one prompt per line)
+- Implementation: `spd/run_spd.py` (nontarget training loop), `spd/losses.py` (`force_delta` param), `spd/experiments/lm/prompts_dataset.py` (prompts loading)
+
 **Experiment Structure:**
 
 Each experiment (`spd/experiments/{tms,resid_mlp,lm}/`) contains:

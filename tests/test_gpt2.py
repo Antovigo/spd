@@ -107,6 +107,7 @@ def test_gpt_2_decomposition_happy_path(tmp_path: Path) -> None:
     if config.identity_module_info is not None:
         insert_identity_operations_(target_model, identity_module_info=config.identity_module_info)
 
+    assert config.task_config.dataset_name is not None
     train_data_config = DatasetConfig(
         name=config.task_config.dataset_name,
         hf_tokenizer_path=config.pretrained_model_name,

@@ -211,10 +211,12 @@ async def request_component_interpretation(
             detail=f"Token stats not available for component {component_key}",
         )
 
+    task_config = runtime_cast(LMTaskConfig, loaded.config.task_config)
+    assert task_config.dataset_name is not None
     model_metadata = ModelMetadata(
         n_blocks=loaded.topology.n_blocks,
         model_class=loaded.model.__class__.__name__,
-        dataset_name=runtime_cast(LMTaskConfig, loaded.config.task_config).dataset_name,
+        dataset_name=task_config.dataset_name,
         layer_descriptions={
             path: loaded.topology.target_to_canon(path) for path in loaded.model.target_module_paths
         },

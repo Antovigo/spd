@@ -22,6 +22,7 @@ from tqdm import tqdm
 from spd.base_config import BaseConfig
 from spd.configs import (
     Config,
+    ImportanceMinimalityLossConfig,
     LossMetricConfigType,
     MetricConfigType,
     PersistentPGDReconLossConfig,
@@ -29,6 +30,7 @@ from spd.configs import (
     PGDMultiBatchConfig,
     PGDMultiBatchReconLossConfig,
     PGDMultiBatchReconSubsetLossConfig,
+    UnmaskedReconLossConfig,
 )
 from spd.data import loop_dataloader
 from spd.eval import evaluate, evaluate_multibatch_pgd
@@ -112,17 +114,24 @@ def get_unique_metric_configs(
     return eval_metric_configs
 
 
+LoaderType = (
+    DataLoader[Int[Tensor, "..."]]
+    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
+    | DataLoader[Any]
+)
+
+
 def optimize(
     target_model: nn.Module,
     config: Config,
     device: str,
-    train_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
-    eval_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
+    train_loader: LoaderType,
+    eval_loader: LoaderType,
     n_eval_steps: int,
     out_dir: Path | None,
     tied_weights: list[tuple[str, str]] | None = None,
+    nontarget_train_loader: LoaderType | None = None,
+    nontarget_eval_loader: LoaderType | None = None,
 ) -> None:
     """Run the optimization loop for LM decomposition."""
 
@@ -249,6 +258,33 @@ def optimize(
         for ppgd_cfg in persistent_pgd_configs
     }
 
+    # --- Nontarget setup ---
+    nontarget_loss_configs: list[LossMetricConfigType] | None = None
+    nontarget_train_iterator: Iterator[Any] | None = None
+    nontarget_eval_iterator: Iterator[Any] | None = None
+    if config.nontarget_task_config is not None:
+        # Exclude losses that are trivially zero or PPGD-coupled for nontarget data
+        nontarget_loss_configs = [
+            cfg.model_copy(update={"coeff": cfg.coeff * config.nontarget_impmin_coeff_ratio})
+            if isinstance(cfg, ImportanceMinimalityLossConfig) and cfg.coeff is not None
+            else cfg
+            for cfg in config.loss_metric_configs
+            if not isinstance(
+                cfg,
+                UnmaskedReconLossConfig
+                | PersistentPGDReconLossConfig
+                | PersistentPGDReconSubsetLossConfig,
+            )
+        ]
+        assert nontarget_train_loader is not None, (
+            "nontarget_train_loader required when nontarget_task_config is set"
+        )
+        assert nontarget_eval_loader is not None, (
+            "nontarget_eval_loader required when nontarget_task_config is set"
+        )
+        nontarget_train_iterator = loop_dataloader(nontarget_train_loader)
+        nontarget_eval_iterator = loop_dataloader(nontarget_eval_loader)
+
     for step in tqdm(range(config.steps + 1), ncols=0, disable=not is_main_process()):
         optimizer.zero_grad()
 
@@ -322,6 +358,45 @@ def optimize(
         for ppgd_cfg in persistent_pgd_configs:
             ppgd_states[ppgd_cfg].step(ppgd_grads[ppgd_cfg])
 
+        # --- Nontarget training --- #
+        if nontarget_train_iterator is not None:
+            assert nontarget_loss_configs is not None
+            nontarget_batch = extract_batch_data(next(nontarget_train_iterator)).to(device)
+            with bf16_autocast(enabled=config.autocast_bf16):
+                nontarget_output: OutputWithCache = wrapped_model(
+                    nontarget_batch, cache_type="input"
+                )
+                nontarget_ci = component_model.calc_causal_importances(
+                    pre_weight_acts=nontarget_output.cache,
+                    detach_inputs=False,
+                    sampling=config.sampling,
+                )
+                nontarget_losses = compute_losses(
+                    loss_metric_configs=nontarget_loss_configs,
+                    model=component_model,
+                    batch=nontarget_batch,
+                    ci=nontarget_ci,
+                    target_out=nontarget_output.output,
+                    weight_deltas=weight_deltas,
+                    current_frac_of_training=step / config.steps,
+                    sampling=config.sampling,
+                    use_delta_component=config.use_delta_component,
+                    n_mask_samples=config.n_mask_samples,
+                    ppgd_states=ppgd_states,
+                    output_loss_type=config.output_loss_type,
+                    force_delta=1.0,
+                )
+            nontarget_total_loss = torch.tensor(0.0, device=device)
+            for loss_cfg, loss_val in nontarget_losses.items():
+                assert loss_cfg.coeff is not None
+                nontarget_total_loss = nontarget_total_loss + loss_cfg.coeff * loss_val
+                batch_log_data[f"train/nontarget/loss/{loss_cfg.classname}"] = loss_val.item()
+            batch_log_data["train/nontarget/loss/total"] = nontarget_total_loss.item()
+            nontarget_total_loss.backward()
+            for layer_name, layer_ci in nontarget_ci.lower_leaky.items():
+                l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
+                batch_log_data[f"train/nontarget/l0/{layer_name}"] = l0_val
+
         for layer_name, layer_ci in ci.lower_leaky.items():
             l0_val = calc_ci_l_zero(layer_ci, config.ci_alive_threshold)
             batch_log_data[f"train/l0/{layer_name}"] = l0_val
@@ -376,6 +451,7 @@ def optimize(
                     n_eval_steps=n_eval_steps,
                     current_frac_of_training=step / config.steps,
                     ppgd_states=ppgd_states,
+                    _nontarget_eval_iterator=nontarget_eval_iterator,
                 )
 
                 dict_safe_update_(metrics, multibatch_pgd_metrics)
@@ -431,10 +507,8 @@ def run_experiment(
     target_model: nn.Module,
     config: Config,
     device: str,
-    train_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
-    eval_loader: DataLoader[Int[Tensor, "..."]]
-    | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]],
+    train_loader: LoaderType,
+    eval_loader: LoaderType,
     experiment_tag: str,
     run_id: str | None = None,
     launch_id: str | None = None,
@@ -442,6 +516,8 @@ def run_experiment(
     sweep_params: dict[str, Any] | None = None,
     target_model_train_config: BaseConfig | None = None,
     tied_weights: list[tuple[str, str]] | None = None,
+    nontarget_train_loader: LoaderType | None = None,
+    nontarget_eval_loader: LoaderType | None = None,
 ) -> None:
     """Run a full SPD experiment: setup, optimize, cleanup.
 
@@ -486,6 +562,8 @@ def run_experiment(
         n_eval_steps=config.n_eval_steps,
         out_dir=out_dir,
         tied_weights=tied_weights,
+        nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
     if is_main_process() and config.wandb_project:

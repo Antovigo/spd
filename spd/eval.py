@@ -362,6 +362,10 @@ def evaluate(
     ppgd_states: dict[
         PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PersistentPGDState
     ],
+    _nontarget_eval_iterator: Iterator[
+        Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]
+    ]
+    | None = None,
 ) -> MetricOutType:
     """Run evaluation and return a mapping of metric names to values/images."""
 

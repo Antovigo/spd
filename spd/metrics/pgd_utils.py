@@ -22,11 +22,12 @@ def _init_adv_sources(
     device: torch.device | str,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     pgd_config: PGDConfig,
+    force_delta: float | None = None,
 ) -> dict[str, Float[Tensor, "*batch_dims mask_c"]]:
     adv_sources: dict[str, Float[Tensor, "*batch_dims mask_c"]] = {}
     for module_name in model.target_module_paths:
         module_c = model.module_to_c[module_name]
-        mask_c = module_c if weight_deltas is None else module_c + 1
+        mask_c = module_c if weight_deltas is None or force_delta is not None else module_c + 1
         match pgd_config.mask_scope:
             case "unique_per_datapoint":
                 shape = torch.Size([*batch_dims, mask_c])
@@ -72,6 +73,8 @@ def _construct_mask_infos_from_adv_sources(
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     routing_masks: RoutingMasks,
     batch_dims: tuple[int, ...],
+    force_delta: float | None = None,
+    device: torch.device | str = "cpu",
 ) -> dict[str, "ComponentsMaskInfo"]:
     expanded_adv_sources = {k: v.expand(*batch_dims, -1) for k, v in adv_sources.items()}
     adv_sources_components: dict[str, Float[Tensor, "*batch_dims C"]]
@@ -80,10 +83,20 @@ def _construct_mask_infos_from_adv_sources(
             weight_deltas_and_masks = None
             adv_sources_components = expanded_adv_sources
         case dict():
-            weight_deltas_and_masks = {
-                k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
-            }
-            adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
+            if force_delta is not None:
+                weight_deltas_and_masks = {
+                    k: (
+                        weight_deltas[k],
+                        torch.full(batch_dims, force_delta, device=device),
+                    )
+                    for k in weight_deltas
+                }
+                adv_sources_components = expanded_adv_sources
+            else:
+                weight_deltas_and_masks = {
+                    k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
+                }
+                adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
 
     return make_mask_infos(
         component_masks=_interpolate_component_mask(ci, adv_sources_components),
@@ -101,6 +114,7 @@ def pgd_masked_recon_loss_update(
     output_loss_type: Literal["mse", "kl"],
     router: Router,
     pgd_config: PGDConfig,
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     """Central implementation of PGD masked reconstruction loss.
 
@@ -108,7 +122,9 @@ def pgd_masked_recon_loss_update(
     """
     batch_dims = next(iter(ci.values())).shape[:-1]
     routing_masks = router.get_masks(module_names=model.target_module_paths, mask_shape=batch_dims)
-    adv_sources = _init_adv_sources(model, batch_dims, batch.device, weight_deltas, pgd_config)
+    adv_sources = _init_adv_sources(
+        model, batch_dims, batch.device, weight_deltas, pgd_config, force_delta
+    )
 
     fwd_pass = partial(
         _forward_with_adv_sources,
@@ -121,6 +137,7 @@ def pgd_masked_recon_loss_update(
         target_out=target_out,
         output_loss_type=output_loss_type,
         batch_dims=batch_dims,
+        force_delta=force_delta,
     )
 
     return _run_pgd_loop(adv_sources, pgd_config, fwd_pass)
@@ -143,6 +160,7 @@ def calc_multibatch_pgd_masked_recon_loss(
     use_delta_component: bool,
     batch_dims: tuple[int, ...],
     device: str,
+    force_delta: float | None = None,
 ) -> Float[Tensor, ""]:
     """PGD masked reconstruction loss with gradient accumulation over multiple batches.
 
@@ -168,7 +186,7 @@ def calc_multibatch_pgd_masked_recon_loss(
     adv_sources: dict[str, Float[Tensor, "*ones mask_c"]] = {}
     for module_name in model.target_module_paths:
         module_c = model.module_to_c[module_name]
-        mask_c = module_c if not use_delta_component else module_c + 1
+        mask_c = module_c if not use_delta_component or force_delta is not None else module_c + 1
         shape = torch.Size([*singleton_batch_dims, mask_c])
         adv_sources[module_name] = broadcast_tensor(
             _get_pgd_init_tensor(pgd_config.init, shape, device)
@@ -185,6 +203,7 @@ def calc_multibatch_pgd_masked_recon_loss(
         sampling=sampling,
         router=router,
         batch_dims=batch_dims,
+        force_delta=force_delta,
     )
 
     for _ in range(pgd_config.n_steps):
@@ -210,6 +229,7 @@ def _forward_with_adv_sources(
     target_out: Float[Tensor, "... vocab"],
     output_loss_type: Literal["mse", "kl"],
     batch_dims: tuple[int, ...],
+    force_delta: float | None = None,
 ):
     mask_infos = _construct_mask_infos_from_adv_sources(
         adv_sources=adv_sources,
@@ -217,6 +237,8 @@ def _forward_with_adv_sources(
         weight_deltas=weight_deltas,
         routing_masks=routing_masks,
         batch_dims=batch_dims,
+        force_delta=force_delta,
+        device=batch.device,
     )
     out = model(batch, mask_infos=mask_infos)
 
@@ -241,6 +263,7 @@ def _multibatch_pgd_fwd_bwd(
     router: Router,
     sampling: SamplingType,
     batch_dims: tuple[int, ...],
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int, dict[str, Float[Tensor, "*ones mask_c"]]]:
     """Perform a forward and backward pass over multiple batches with gradient accumulation.
 
@@ -286,6 +309,7 @@ def _multibatch_pgd_fwd_bwd(
             target_out=target_model_output.output,
             output_loss_type=output_loss_type,
             batch_dims=batch_dims,
+            force_delta=force_delta,
         )
 
         pgd_step_accum_sum_loss += batch_sum_loss

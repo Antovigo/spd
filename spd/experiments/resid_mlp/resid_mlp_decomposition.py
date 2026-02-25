@@ -11,7 +11,7 @@ from spd.experiments.resid_mlp.models import (
 )
 from spd.experiments.resid_mlp.resid_mlp_dataset import ResidMLPDataset
 from spd.log import logger
-from spd.run_spd import run_experiment
+from spd.run_spd import LoaderType, run_experiment
 from spd.settings import SPD_OUT_DIR
 from spd.utils.data_utils import DatasetGeneratedDataLoader
 from spd.utils.distributed_utils import get_device
@@ -48,6 +48,7 @@ def main(
     save_file(target_run_info.label_coeffs.detach().cpu().tolist(), out_dir / "label_coeffs.json")
 
     synced_inputs = target_run_info.config.synced_inputs
+    assert isinstance(config.task_config, ResidMLPTaskConfig)
     dataset = ResidMLPDataset(
         n_features=target_model.config.n_features,
         feature_probability=config.task_config.feature_probability,
@@ -59,12 +60,40 @@ def main(
         label_coeffs=None,
         data_generation_type=config.task_config.data_generation_type,
         synced_inputs=synced_inputs,
+        active_indices=config.task_config.active_indices,
     )
 
     train_loader = DatasetGeneratedDataLoader(dataset, batch_size=config.batch_size, shuffle=False)
     eval_loader = DatasetGeneratedDataLoader(
         dataset, batch_size=config.eval_batch_size, shuffle=False
     )
+
+    # --- Nontarget data --- #
+    nontarget_train_loader: LoaderType | None = None
+    nontarget_eval_loader: LoaderType | None = None
+    if config.nontarget_task_config is not None:
+        assert isinstance(config.nontarget_task_config, ResidMLPTaskConfig)
+        assert config.nontarget_batch_size is not None
+        assert config.nontarget_eval_batch_size is not None
+        nontarget_dataset = ResidMLPDataset(
+            n_features=target_model.config.n_features,
+            feature_probability=config.nontarget_task_config.feature_probability,
+            device=device,
+            calc_labels=False,
+            label_type=None,
+            act_fn_name=None,
+            label_fn_seed=None,
+            label_coeffs=None,
+            data_generation_type=config.nontarget_task_config.data_generation_type,
+            synced_inputs=synced_inputs,
+            active_indices=config.nontarget_task_config.active_indices,
+        )
+        nontarget_train_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_batch_size, shuffle=False
+        )
+        nontarget_eval_loader = DatasetGeneratedDataLoader(
+            nontarget_dataset, batch_size=config.nontarget_eval_batch_size, shuffle=False
+        )
 
     assert config.n_eval_steps is not None, "n_eval_steps must be set"
     run_experiment(
@@ -79,6 +108,8 @@ def main(
         evals_id=evals_id,
         sweep_params=parse_sweep_params(sweep_params_json),
         target_model_train_config=target_run_info.config,
+        nontarget_train_loader=nontarget_train_loader,
+        nontarget_eval_loader=nontarget_eval_loader,
     )
 
 

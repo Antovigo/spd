@@ -180,6 +180,7 @@ class ModelComparator:
         assert self.current_config.tokenizer_name, "tokenizer_name must be set"
         assert isinstance(self.current_config.task_config, LMTaskConfig)
         task_config = self.current_config.task_config
+        assert task_config.dataset_name is not None
 
         dataset_config = DatasetConfig(
             name=task_config.dataset_name,

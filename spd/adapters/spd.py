@@ -61,6 +61,7 @@ class SPDAdapter(DecompositionAdapter):
     def model_metadata(self) -> ModelMetadata:
         cfg = self.spd_run_info.config
         task_cfg = runtime_cast(LMTaskConfig, cfg.task_config)
+        assert task_cfg.dataset_name is not None
         return ModelMetadata(
             n_blocks=self._topology.n_blocks,
             model_class=cfg.pretrained_model_class,

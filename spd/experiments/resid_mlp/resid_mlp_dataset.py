@@ -24,6 +24,7 @@ class ResidMLPDataset(SparseFeatureDataset):
             "exactly_one_active", "exactly_two_active", "at_least_zero_active"
         ] = "at_least_zero_active",
         synced_inputs: list[list[int]] | None = None,
+        active_indices: list[int] | None = None,
     ):
         """Sparse feature dataset for use in training a resid_mlp model or running SPD on it.
 
@@ -54,6 +55,7 @@ class ResidMLPDataset(SparseFeatureDataset):
             data_generation_type=data_generation_type,
             value_range=(-1.0, 1.0),
             synced_inputs=synced_inputs,
+            active_indices=active_indices,
         )
 
         self.label_fn = None

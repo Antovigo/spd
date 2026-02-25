@@ -109,6 +109,7 @@ def search_dataset(
         Search metadata (query, split, dataset_name, total results, search time)
     """
     task_config = _get_lm_task_config(loaded)
+    assert task_config.dataset_name is not None
     dataset_name = task_config.dataset_name
     text_column = task_config.column_name
 

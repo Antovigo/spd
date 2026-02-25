@@ -294,6 +294,9 @@ def train_loader_and_tokenizer(
 ) -> tuple[DataLoader[Any], PreTrainedTokenizerBase]:
     task_config = config.task_config
     assert isinstance(task_config, LMTaskConfig)
+    assert task_config.dataset_name is not None, (
+        "dataset_name must be set for train_loader_and_tokenizer"
+    )
 
     train_data_config = DatasetConfig(
         name=task_config.dataset_name,

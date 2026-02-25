@@ -132,6 +132,7 @@ class PersistentPGDState:
         use_delta_component: bool,
         cfg: PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig,
         output_loss_type: Literal["mse", "kl"],
+        force_delta: float | None = None,
     ) -> None:
         self.optimizer = make_ppgd_optimizer(cfg.optimizer)
         self._skip_all_reduce = isinstance(cfg.scope, PerBatchPerPositionScope)
@@ -140,6 +141,7 @@ class PersistentPGDState:
         self._n_warmup_steps = cfg.n_warmup_steps
         self._output_loss_type: Literal["mse", "kl"] = output_loss_type
         self._lr_schedule = cfg.optimizer.lr_schedule
+        self._force_delta = force_delta
 
         self.sources: PPGDSources = {}
 
@@ -160,7 +162,9 @@ class PersistentPGDState:
 
         init_fn = torch.randn if self._use_sigmoid_parameterization else torch.rand
         for module_name, module_c in module_to_c.items():
-            source_c = module_c + 1 if use_delta_component else module_c
+            source_c = (
+                module_c if not use_delta_component or force_delta is not None else module_c + 1
+            )
             source_shape = source_leading_dims + [source_c]
             source_data = init_fn(source_shape, device=device)
             if not self._skip_all_reduce:
@@ -247,6 +251,7 @@ class PersistentPGDState:
             ci=ci,
             weight_deltas=weight_deltas,
             routing_masks=routing_masks,
+            force_delta=self._force_delta,
         )
         return sum_loss / n_examples
 
@@ -268,6 +273,7 @@ def get_ppgd_mask_infos(
     ppgd_sources: dict[str, Float[Tensor, "*batch_dims source_c"]],
     routing_masks: RoutingMasks,
     batch_dims: tuple[int, ...],
+    force_delta: float | None = None,
 ) -> dict[str, ComponentsMaskInfo]:
     """Get mask infos for persistent PGD."""
 
@@ -292,10 +298,21 @@ def get_ppgd_mask_infos(
             weight_deltas_and_masks = None
             adv_sources_components = expanded_adv_sources
         case dict():
-            weight_deltas_and_masks = {
-                k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
-            }
-            adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
+            if force_delta is not None:
+                ci_sample = next(iter(ci.values()))
+                weight_deltas_and_masks = {
+                    k: (
+                        weight_deltas[k],
+                        torch.full(batch_dims, force_delta, device=ci_sample.device),
+                    )
+                    for k in weight_deltas
+                }
+                adv_sources_components = expanded_adv_sources
+            else:
+                weight_deltas_and_masks = {
+                    k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
+                }
+                adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
 
     component_masks = _interpolate_component_mask(ci, adv_sources_components)
 
@@ -323,11 +340,14 @@ def _compute_ppgd_recon_loss(
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     routing_masks: RoutingMasks,
+    force_delta: float | None = None,
 ) -> tuple[Float[Tensor, ""], int]:
     assert ci, "Empty ci"
     batch_dims = next(iter(ci.values())).shape[:-1]
 
-    mask_infos = get_ppgd_mask_infos(ci, weight_deltas, ppgd_sources, routing_masks, batch_dims)
+    mask_infos = get_ppgd_mask_infos(
+        ci, weight_deltas, ppgd_sources, routing_masks, batch_dims, force_delta
+    )
     out = model(batch, mask_infos=mask_infos)
     loss = calc_sum_recon_loss_lm(pred=out, target=target_out, loss_type=output_loss_type)
     n_examples = out.shape.numel() if output_loss_type == "mse" else out.shape[:-1].numel()

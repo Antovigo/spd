@@ -232,6 +232,10 @@ class TMSTaskConfig(BaseConfig):
         default="at_least_zero_active",
         description="Strategy for generating synthetic data for TMS training",
     )
+    active_indices: list[NonNegativeInt] | None = Field(
+        default=None,
+        description="If set, only these feature indices can be active. Others are always zero.",
+    )
 
 
 class ResidMLPTaskConfig(BaseConfig):
@@ -248,6 +252,10 @@ class ResidMLPTaskConfig(BaseConfig):
     ] = Field(
         default="at_least_zero_active",
         description="Strategy for generating synthetic data for residual-MLP training",
+    )
+    active_indices: list[NonNegativeInt] | None = Field(
+        default=None,
+        description="If set, only these feature indices can be active. Others are always zero.",
     )
 
 
@@ -272,9 +280,14 @@ class LMTaskConfig(BaseConfig):
         default=1000,
         description="Buffered sample count for streaming dataset shuffling",
     )
-    dataset_name: str = Field(
-        default="lennart-finke/SimpleStories",
+    dataset_name: str | None = Field(
+        default=None,
         description="HuggingFace dataset identifier to use for the LM task",
+    )
+    prompts_file: str | None = Field(
+        default=None,
+        description="Path to text file with prompts (one per line). If set, uses this as "
+        "target data instead of dataset_name. Prompts are tokenized and padded to max_seq_len.",
     )
     column_name: str = Field(
         default="story",
@@ -931,6 +944,25 @@ class Config(BaseConfig):
         description="Nested task-specific configuration selected by the `task_name` discriminator",
     )
 
+    # --- Targeted Decomposition ---
+    nontarget_task_config: TaskConfig | None = Field(
+        default=None,
+        discriminator="task_name",
+        description="Task config for nontarget data. If None, targeted mode is disabled.",
+    )
+    nontarget_batch_size: PositiveInt | None = Field(
+        default=None,
+        description="Batch size for nontarget data. Required when nontarget_task_config is set.",
+    )
+    nontarget_eval_batch_size: PositiveInt | None = Field(
+        default=None,
+        description="Batch size for nontarget eval. Required when nontarget_task_config is set.",
+    )
+    nontarget_impmin_coeff_ratio: NonNegativeFloat = Field(
+        default=1.0,
+        description="Multiplier for importance-minimality coefficient on nontarget batches.",
+    )
+
     DEPRECATED_CONFIG_KEYS: ClassVar[list[str]] = [
         "image_on_first_step",
         "image_freq",
@@ -1088,6 +1120,18 @@ class Config(BaseConfig):
         ):
             assert isinstance(self.task_config, LMTaskConfig), (
                 "Persistent PGD losses are only supported with LM tasks"
+            )
+
+        if self.nontarget_task_config is not None:
+            assert self.nontarget_batch_size is not None, (
+                "nontarget_batch_size is required when nontarget_task_config is set"
+            )
+            assert self.nontarget_eval_batch_size is not None, (
+                "nontarget_eval_batch_size is required when nontarget_task_config is set"
+            )
+            assert self.nontarget_task_config.task_name == self.task_config.task_name, (
+                f"nontarget_task_config.task_name ({self.nontarget_task_config.task_name}) "
+                f"must match task_config.task_name ({self.task_config.task_name})"
             )
 
         return self

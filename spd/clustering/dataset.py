@@ -56,6 +56,7 @@ def _create_lm_dataloader(model_path: str, batch_size: int, seed: int) -> DataLo
     assert isinstance(cfg.task_config, LMTaskConfig), (
         f"Expected task_config to be of type LMTaskConfig, but got {type(cfg.task_config) = }"
     )
+    assert cfg.task_config.dataset_name is not None
 
     dataset_config = DatasetConfig(
         name=cfg.task_config.dataset_name,
