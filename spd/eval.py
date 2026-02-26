@@ -41,6 +41,7 @@ from spd.configs import (
     StochasticReconLossConfig,
     StochasticReconSubsetCEAndKLConfig,
     StochasticReconSubsetLossConfig,
+    TargetedCIHeatmapConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
 )
@@ -72,6 +73,7 @@ from spd.metrics.stochastic_recon_layerwise_loss import StochasticReconLayerwise
 from spd.metrics.stochastic_recon_loss import StochasticReconLoss
 from spd.metrics.stochastic_recon_subset_ce_and_kl import StochasticReconSubsetCEAndKL
 from spd.metrics.stochastic_recon_subset_loss import StochasticReconSubsetLoss
+from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.uv_plots import UVPlots
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.persistent_pgd import PersistentPGDState
@@ -137,6 +139,10 @@ def init_metric(
     ppgd_states: dict[
         PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PersistentPGDState
     ],
+    nontarget_eval_iterator: Iterator[
+        Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]
+    ]
+    | None = None,
 ) -> Metric:
     match cfg:
         case ImportanceMinimalityLossConfig():
@@ -327,6 +333,17 @@ def init_metric(
                 k_proj_path=cfg.k_proj_path,
                 c_attn_path=cfg.c_attn_path,
             )
+        case TargetedCIHeatmapConfig():
+            assert nontarget_eval_iterator is not None, (
+                "TargetedCIHeatmap requires nontarget_eval_iterator"
+            )
+            metric = TargetedCIHeatmap(
+                model=model,
+                run_config=run_config,
+                device=device,
+                n_nontarget_examples=cfg.n_nontarget_examples,
+                nontarget_eval_iterator=nontarget_eval_iterator,
+            )
         case UVPlotsConfig():
             metric = UVPlots(
                 model=model,
@@ -362,7 +379,7 @@ def evaluate(
     ppgd_states: dict[
         PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PersistentPGDState
     ],
-    _nontarget_eval_iterator: Iterator[
+    nontarget_eval_iterator: Iterator[
         Int[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]]
     ]
     | None = None,
@@ -384,6 +401,7 @@ def evaluate(
             run_config=run_config,
             device=device,
             ppgd_states=ppgd_states,
+            nontarget_eval_iterator=nontarget_eval_iterator,
         )
         if metric.slow and not slow_step:
             continue

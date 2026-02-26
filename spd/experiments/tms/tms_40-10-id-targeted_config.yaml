@@ -73,6 +73,8 @@ eval_metric_configs:
     groups: null
   - classname: "CIMeanPerComponent"
   - classname: "StochasticHiddenActsReconLoss"
+  - classname: "TargetedCIHeatmap"
+    n_nontarget_examples: 100
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.tms.models.TMSModel"

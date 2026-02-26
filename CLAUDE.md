@@ -138,10 +138,11 @@ Each experiment (`spd/experiments/{tms,resid_mlp,lm}/`) contains:
 **Configuration System:**
 
 - YAML configs define all experiment parameters
-- Pydantic models provide type safety and validation  
+- Pydantic models provide type safety and validation
 - WandB integration for experiment tracking and model storage
 - Supports both local paths and `wandb:project/runs/run_id` format for model loading
 - Centralized experiment registry (`spd/registry.py`) manages all experiment configurations
+- **When adding a new metric config class**, also add a short name entry in `METRIC_CONFIG_SHORT_NAMES` in `spd/utils/wandb_utils.py` — this is used for WandB run names and flattened config keys
 
 **Harvest, Autointerp & Dataset Attributions Modules:**
 

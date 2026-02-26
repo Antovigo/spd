@@ -58,6 +58,8 @@ eval_metric_configs:
     identity_patterns: ["layers.*.mlp_in"]
     dense_patterns: ["layers.*.mlp_out"]
   - classname: "CIMeanPerComponent"
+  - classname: "TargetedCIHeatmap"
+    n_nontarget_examples: 100
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"

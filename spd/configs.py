@@ -704,6 +704,14 @@ class StochasticReconSubsetCEAndKLConfig(BaseConfig):
     exclude_patterns: dict[str, list[str]] | None
 
 
+class TargetedCIHeatmapConfig(BaseConfig):
+    classname: Literal["TargetedCIHeatmap"] = "TargetedCIHeatmap"
+    n_nontarget_examples: int = Field(
+        default=100,
+        description="Number of nontarget examples to randomly select for visualization",
+    )
+
+
 class UVPlotsConfig(BaseConfig):
     classname: Literal["UVPlots"] = "UVPlots"
     identity_patterns: list[str] | None
@@ -739,6 +747,7 @@ EvalOnlyMetricConfigType = (
     | PersistentPGDReconEvalConfig
     | PersistentPGDReconSubsetEvalConfig
     | PermutedCIPlotsConfig
+    | TargetedCIHeatmapConfig
     | UVPlotsConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig

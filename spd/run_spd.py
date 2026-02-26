@@ -460,7 +460,7 @@ def optimize(
                     n_eval_steps=n_eval_steps,
                     current_frac_of_training=step / config.steps,
                     ppgd_states=ppgd_states,
-                    _nontarget_eval_iterator=nontarget_eval_iterator,
+                    nontarget_eval_iterator=nontarget_eval_iterator,
                 )
 
                 dict_safe_update_(metrics, multibatch_pgd_metrics)
