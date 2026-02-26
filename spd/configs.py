@@ -319,6 +319,16 @@ class LMTaskConfig(BaseConfig):
         description="Seed for dataset shuffling/sampling. When None, uses the global `seed`.",
     )
 
+    @model_validator(mode="after")
+    def _validate_data_source(self) -> "LMTaskConfig":
+        assert self.dataset_name is not None or self.prompts_file is not None, (
+            "Either dataset_name or prompts_file must be set in LMTaskConfig"
+        )
+        assert self.dataset_name is None or self.prompts_file is None, (
+            "dataset_name and prompts_file are mutually exclusive in LMTaskConfig"
+        )
+        return self
+
 
 class ModulePatternInfoConfig(BaseConfig):
     """Configuration for a module pattern with its number of components.
@@ -1141,5 +1151,8 @@ class Config(BaseConfig):
                 f"nontarget_task_config.task_name ({self.nontarget_task_config.task_name}) "
                 f"must match task_config.task_name ({self.task_config.task_name})"
             )
+            assert not any(
+                isinstance(cfg, FaithfulnessLossConfig) for cfg in self.loss_metric_configs
+            ), "FaithfulnessLoss is incompatible with targeted decomposition"
 
         return self

@@ -116,11 +116,15 @@ def create_prompts_data_loader(
         batch = {"input_ids": dataset[:batch_size]["input_ids"]}
         return StaticBatchLoader(batch), tokenizer
 
-    # For larger datasets or distributed training, use standard DataLoader
-    if n_prompts < batch_size:
+    # For larger datasets or distributed training, use standard DataLoader.
+    # With DistributedSampler(drop_last=True), each rank gets len(dataset) // world_size samples,
+    # so we need at least batch_size * world_size total samples.
+    world_size = dist_state.world_size if dist_state is not None else 1
+    min_samples = batch_size * world_size
+    if n_prompts < min_samples:
         from datasets import concatenate_datasets
 
-        n_repeats = (batch_size + n_prompts - 1) // n_prompts
+        n_repeats = (min_samples + n_prompts - 1) // n_prompts
         logger.info(f"Repeating {n_prompts} prompts {n_repeats}x to fill batch_size={batch_size}")
         dataset = concatenate_datasets([dataset] * n_repeats)
         dataset = dataset.with_format("torch")
