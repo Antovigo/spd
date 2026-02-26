@@ -190,25 +190,40 @@ def _compute_hyperparameters(
                 config_dict = yaml.safe_load(f)
             flattened_configs[rid] = _flatten_dict(config_dict)
 
-        # Find keys that differ across runs (ignore notes and label)
-        all_keys = set()
-        for fc in flattened_configs.values():
-            all_keys.update(fc.keys())
-
-        ignore_keys = {"notes", "label"}
-        differing_keys: list[str] = []
-        for key in sorted(all_keys):
-            if key in ignore_keys:
-                continue
-            values = {fc.get(key) for fc in flattened_configs.values()}
-            if len(values) > 1:
-                differing_keys.append(key)
-
-        # Format hyperparameters string for each run
+        # Sub-group by pretrained_model_path
+        pretrained_key = "pretrained_model_path"
+        subgroups: dict[str | None, list[str]] = {}
         for rid in run_ids:
-            fc = flattened_configs.get(rid, {})
-            parts = [f"{k}={fc.get(k, NA)}" for k in differing_keys]
-            hyperparams[rid] = " ".join(parts)
+            val = flattened_configs.get(rid, {}).get(pretrained_key)
+            subgroups.setdefault(val, []).append(rid)
+
+        multiple_pretrained = len(subgroups) > 1
+        ignore_keys = {"notes", "label"}
+        if multiple_pretrained:
+            ignore_keys.add(pretrained_key)
+
+        for pretrained_val, sub_rids in subgroups.items():
+            # Find differing keys within this sub-group
+            differing_keys: list[str] = []
+            if len(sub_rids) >= 2:
+                sub_all_keys: set[str] = set()
+                for rid in sub_rids:
+                    sub_all_keys.update(flattened_configs.get(rid, {}).keys())
+                for key in sorted(sub_all_keys):
+                    if key in ignore_keys:
+                        continue
+                    values = {flattened_configs.get(rid, {}).get(key) for rid in sub_rids}
+                    if len(values) > 1:
+                        differing_keys.append(key)
+
+            # Format hyperparameters string for each run
+            for rid in sub_rids:
+                fc = flattened_configs.get(rid, {})
+                parts: list[str] = []
+                if multiple_pretrained:
+                    parts.append(f"{pretrained_key}={pretrained_val or NA}")
+                parts.extend(f"{k}={fc.get(k, NA)}" for k in differing_keys)
+                hyperparams[rid] = " ".join(parts)
 
     return hyperparams
 
