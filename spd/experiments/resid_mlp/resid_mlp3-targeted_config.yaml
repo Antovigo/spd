@@ -23,7 +23,7 @@ use_delta_component: true
 # --- Loss config ---
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 3e-5
+    coeff: 2e-5
     pnorm: 2.0
     beta: 0.1
     p_anneal_start_frac: 0.3

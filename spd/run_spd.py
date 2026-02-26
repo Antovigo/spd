@@ -36,6 +36,7 @@ from spd.configs import (
 )
 from spd.data import loop_dataloader
 from spd.eval import evaluate, evaluate_multibatch_pgd
+from spd.experiments.lm.prompts_dataset import StaticBatchLoader
 from spd.identity_insertion import insert_identity_operations_
 from spd.log import logger
 from spd.losses import compute_losses
@@ -121,6 +122,7 @@ LoaderType = (
     DataLoader[Int[Tensor, "..."]]
     | DataLoader[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
     | DataLoader[Any]
+    | StaticBatchLoader
 )
 
 
@@ -144,6 +146,8 @@ def optimize(
     def create_pgd_data_iter() -> (
         Iterator[Int[Tensor, "..."]] | Iterator[tuple[Float[Tensor, "..."], Float[Tensor, "..."]]]
     ):
+        if isinstance(train_loader, StaticBatchLoader):
+            return iter(train_loader)
         assert hasattr(train_loader, "generator") and train_loader.generator is not None
         train_loader.generator.manual_seed(config.seed)
         return iter(train_loader)

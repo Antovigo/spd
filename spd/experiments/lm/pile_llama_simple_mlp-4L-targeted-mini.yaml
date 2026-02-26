@@ -1,0 +1,142 @@
+# pile_llama_simple_mlp 4 layers — targeted decomposition (HTML tags) — MINI debug config
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+label: "targeted_PD_LM_test_mini"
+
+# --- General ---
+seed: 0
+autocast_bf16: true
+n_mask_samples: 1
+ci_config:
+  mode: global
+  fn_type: global_shared_mlp
+  hidden_dims: [32]
+sampling: continuous
+sigmoid_type: leaky_hard
+module_info:
+  - module_pattern: h.*.mlp.c_fc
+    C: 4
+  - module_pattern: h.*.mlp.down_proj
+    C: 4
+  - module_pattern: h.*.attn.q_proj
+    C: 2
+  - module_pattern: h.*.attn.k_proj
+    C: 2
+  - module_pattern: h.*.attn.v_proj
+    C: 2
+  - module_pattern: h.*.attn.o_proj
+    C: 2
+identity_module_info: null
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: ImportanceMinimalityLoss
+    coeff: 0.0006
+    pnorm: 2.0
+    beta: 0.2
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 0.4
+    p_anneal_end_frac: 1.0
+    eps: 1.0e-12
+  - classname: StochasticReconSubsetLoss
+    coeff: 0.5
+    routing:
+      type: uniform_k_subset
+  - classname: PersistentPGDReconLoss
+    coeff: 0.5
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 0.1
+        fn_type: cosine
+    scope:
+      type: per_batch_per_position
+    use_sigmoid_parameterization: false
+    n_warmup_steps: 2
+output_loss_type: kl
+
+# --- Training ---
+lr_schedule:
+  start_val: 5.0e-05
+  warmup_pct: 0.0
+  final_val_frac: 0.1
+  fn_type: cosine
+steps: 20
+batch_size: 4
+eval_batch_size: 4
+grad_clip_norm_components: 0.01
+grad_clip_norm_ci_fns: null
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+
+# --- Logging & Saving ---
+train_log_freq: 5
+eval_freq: 10
+slow_eval_freq: 10
+n_eval_steps: 1
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.0
+
+# --- Eval Metrics ---
+eval_metric_configs:
+  - classname: CIHistograms
+    n_batches_accum: 1
+  - classname: ComponentActivationDensity
+  - classname: CI_L0
+    groups:
+      layer_0:
+        - h.0.*
+      layer_1:
+        - h.1.*
+      layer_2:
+        - h.2.*
+      layer_3:
+        - h.3.*
+      total:
+        - "*"
+  - classname: CEandKLLosses
+    rounding_threshold: 0.0
+  - classname: CIMeanPerComponent
+  - classname: StochasticHiddenActsReconLoss
+  - classname: PGDReconLoss
+    init: random
+    step_size: 0.1
+    n_steps: 5
+    mask_scope: shared_across_batch
+
+# --- Pretrained model info ---
+pretrained_model_class: spd.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
+pretrained_model_path: null
+pretrained_model_name: wandb:goodfire/spd/t-32d1bb3b
+pretrained_model_output_attr: idx_0
+tokenizer_name: EleutherAI/gpt-neox-20b
+
+# --- Task Specific (target data: HTML tag prompts) ---
+task_config:
+  task_name: lm
+  prompts_file: spd/experiments/lm/prompts/code_syntax_combined.txt
+  max_seq_len: 2
+
+# --- Targeted Decomposition (nontarget data: Pile) ---
+nontarget_task_config:
+  task_name: lm
+  dataset_name: danbraunai/pile-uncopyrighted-tok
+  max_seq_len: 8
+  column_name: input_ids
+  is_tokenized: true
+  streaming: true
+  train_data_split: train
+  eval_data_split: val
+nontarget_batch_size: 4
+nontarget_eval_batch_size: 4
+nontarget_impmin_coeff_ratio: 2

@@ -1,15 +1,32 @@
 """Utility for loading prompts from a text file into a HuggingFace Dataset."""
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import torch
-from datasets import Dataset, concatenate_datasets
-from torch.utils.data import DataLoader, DistributedSampler
+from datasets import Dataset
+from torch import Tensor
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from spd.log import logger
 from spd.utils.distributed_utils import DistributedState
+
+
+class StaticBatchLoader:
+    """A simple loader that yields the same cached batch forever.
+
+    Used when the prompts file is small enough to fit in a single batch,
+    avoiding the overhead of DataLoader iteration and reshuffling.
+    """
+
+    def __init__(self, batch: dict[str, Tensor]):
+        self.batch = batch
+
+    def __iter__(self) -> Iterator[Any]:
+        while True:
+            yield self.batch
 
 
 def load_prompts_dataset(
@@ -65,7 +82,7 @@ def create_prompts_data_loader(
     batch_size: int,
     dist_state: DistributedState | None = None,
     seed: int = 0,
-) -> tuple[DataLoader[Any], PreTrainedTokenizer]:
+) -> tuple[DataLoader[Any] | StaticBatchLoader, PreTrainedTokenizer]:
     """Create a DataLoader from a prompts text file.
 
     Args:
@@ -77,18 +94,38 @@ def create_prompts_data_loader(
         seed: Random seed for shuffling
 
     Returns:
-        Tuple of (DataLoader, tokenizer)
+        Tuple of (DataLoader or StaticBatchLoader, tokenizer)
     """
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     dataset = load_prompts_dataset(prompts_file, tokenizer, max_seq_len)
 
     n_prompts = len(dataset)
 
+    # For small datasets (single batch, non-distributed), cache and yield forever
+    if n_prompts <= batch_size and dist_state is None:
+        if n_prompts < batch_size:
+            from datasets import concatenate_datasets
+
+            n_repeats = (batch_size + n_prompts - 1) // n_prompts
+            logger.info(
+                f"Repeating {n_prompts} prompts {n_repeats}x to fill batch_size={batch_size}"
+            )
+            dataset = concatenate_datasets([dataset] * n_repeats)
+            dataset = dataset.with_format("torch")
+
+        batch = {"input_ids": dataset[:batch_size]["input_ids"]}
+        return StaticBatchLoader(batch), tokenizer
+
+    # For larger datasets or distributed training, use standard DataLoader
     if n_prompts < batch_size:
+        from datasets import concatenate_datasets
+
         n_repeats = (batch_size + n_prompts - 1) // n_prompts
         logger.info(f"Repeating {n_prompts} prompts {n_repeats}x to fill batch_size={batch_size}")
         dataset = concatenate_datasets([dataset] * n_repeats)
         dataset = dataset.with_format("torch")
+
+    from torch.utils.data import DistributedSampler
 
     sampler = None
     if dist_state is not None:
