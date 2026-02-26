@@ -886,6 +886,11 @@ class Config(BaseConfig):
         default=None,
         description="If set, apply grad norm clipping to the parameters of the CI functions",
     )
+    component_weight_decay: NonNegativeFloat = Field(
+        default=0.0,
+        description="CI-scaled weight decay applied manually after each optimizer step. "
+        "Components with high max CI are protected; inactive ones get full decay.",
+    )
 
     # --- Faithfulness Warmup ---
     faithfulness_warmup_steps: NonNegativeInt = Field(

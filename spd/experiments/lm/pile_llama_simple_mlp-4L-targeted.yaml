@@ -74,6 +74,7 @@ batch_size: 256
 eval_batch_size: 256
 grad_clip_norm_components: 0.01
 grad_clip_norm_ci_fns: null
+component_weight_decay: 0.1
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 0

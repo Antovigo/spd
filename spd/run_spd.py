@@ -44,7 +44,7 @@ from spd.metrics import faithfulness_loss
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.persistent_pgd import PersistentPGDState
 from spd.settings import SPD_OUT_DIR
-from spd.utils.component_utils import calc_ci_l_zero
+from spd.utils.component_utils import apply_ci_scaled_weight_decay, calc_ci_l_zero
 from spd.utils.distributed_utils import (
     avg_metrics_across_ranks,
     get_distributed_state,
@@ -294,6 +294,7 @@ def optimize(
 
     for step in tqdm(range(config.steps + 1), ncols=0, disable=not is_main_process()):
         optimizer.zero_grad()
+        step_max_ci: dict[str, Tensor] = {}
 
         step_lr = get_scheduled_value(
             step=step, total_steps=config.steps, config=config.lr_schedule
@@ -322,6 +323,14 @@ def optimize(
                 detach_inputs=False,
                 sampling=config.sampling,
             )
+
+            if config.component_weight_decay > 0:
+                for layer_name, layer_ci in ci.lower_leaky.items():
+                    mb_max = layer_ci.detach().amax(dim=tuple(range(layer_ci.ndim - 1)))
+                    if layer_name in step_max_ci:
+                        step_max_ci[layer_name] = torch.maximum(step_max_ci[layer_name], mb_max)
+                    else:
+                        step_max_ci[layer_name] = mb_max
 
             for ppgd_cfg in persistent_pgd_configs:
                 ppgd_states[ppgd_cfg].warmup(
@@ -380,6 +389,15 @@ def optimize(
                     detach_inputs=False,
                     sampling=config.sampling,
                 )
+
+                if config.component_weight_decay > 0:
+                    for layer_name, layer_ci in nontarget_ci.lower_leaky.items():
+                        mb_max = layer_ci.detach().amax(dim=tuple(range(layer_ci.ndim - 1)))
+                        if layer_name in step_max_ci:
+                            step_max_ci[layer_name] = torch.maximum(step_max_ci[layer_name], mb_max)
+                        else:
+                            step_max_ci[layer_name] = mb_max
+
                 nontarget_losses = compute_losses(
                     loss_metric_configs=nontarget_loss_configs,
                     model=component_model,
@@ -507,6 +525,14 @@ def optimize(
             if config.grad_clip_norm_ci_fns is not None:
                 clip_grad_norm_(ci_fn_params, config.grad_clip_norm_ci_fns)
             optimizer.step()
+
+            if config.component_weight_decay > 0 and step_max_ci:
+                apply_ci_scaled_weight_decay(
+                    components=component_model.components,
+                    step_max_ci=step_max_ci,
+                    lr=step_lr,
+                    weight_decay=config.component_weight_decay,
+                )
 
     if is_main_process():
         logger.info("Finished training loop.")

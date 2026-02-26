@@ -1,10 +1,17 @@
 import torch
+import torch.distributed as dist
 from jaxtyping import Float
 from torch import Tensor
 
 from spd.configs import SamplingType
-from spd.models.components import ComponentsMaskInfo, WeightDeltaAndMask, make_mask_infos
+from spd.models.components import (
+    Components,
+    ComponentsMaskInfo,
+    WeightDeltaAndMask,
+    make_mask_infos,
+)
 from spd.routing import Router
+from spd.utils.distributed_utils import all_reduce, is_distributed
 
 
 def calc_stochastic_component_mask_info(
@@ -53,3 +60,27 @@ def calc_stochastic_component_mask_info(
 
 def calc_ci_l_zero(ci: Float[Tensor, "... C"], threshold: float) -> float:
     return (ci > threshold).float().sum(-1).mean().item()
+
+
+@torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
+def apply_ci_scaled_weight_decay(
+    components: dict[str, Components],
+    step_max_ci: dict[str, Float[Tensor, " C"]],
+    lr: float,
+    weight_decay: float,
+) -> None:
+    """Apply CI-scaled weight decay with sqrt for linear decay on W = V @ U.
+
+    Per-component decay: scale = sqrt(1 - lr * wd * (1 - max_ci)).
+    Applied to both V and U, so effective decay on W is scale² = 1 - lr * wd * (1 - max_ci).
+    """
+    if is_distributed():
+        for layer_name in step_max_ci:
+            all_reduce(step_max_ci[layer_name], op=dist.ReduceOp.MAX)
+
+    for layer_name, max_ci in step_max_ci.items():
+        comps = components[layer_name]
+        decay_factors = 1.0 - max_ci.clamp(0.0, 1.0)  # (C,)
+        scale = (1.0 - lr * weight_decay * decay_factors).sqrt()
+        comps.V.data.mul_(scale[None, :])  # V: (v_dim, C)
+        comps.U.data.mul_(scale[:, None])  # U: (C, u_dim)
