@@ -228,8 +228,8 @@ def _compute_hyperparameters(
     return hyperparams
 
 
-def build_index(runs_dir: Path, index_path: Path) -> None:
-    existing = _load_existing_index(index_path)
+def build_index(runs_dir: Path, index_path: Path, *, force: bool = False) -> None:
+    existing = _load_existing_index(index_path) if not force else {}
 
     # Discover all run directories
     run_dirs: dict[str, Path] = {}
@@ -240,12 +240,16 @@ def build_index(runs_dir: Path, index_path: Path) -> None:
     # Phase 1: collect per-run metadata (using cache where possible)
     rows: dict[str, dict[str, str]] = {}
     new_run_ids: set[str] = set()
+    n_reprocessed = 0
+    n_cached = 0
     for run_id, run_dir in tqdm(run_dirs.items(), desc="Reading runs"):
         cached = existing.get(run_id)
         if cached and (cached.get("completed") == "True" or not _is_recent(cached)):
             rows[run_id] = cached
+            n_cached += 1
         else:
             rows[run_id] = _read_metadata(run_dir)
+            n_reprocessed += 1
             if not cached:
                 new_run_ids.add(run_id)
 
@@ -291,7 +295,10 @@ def build_index(runs_dir: Path, index_path: Path) -> None:
         ):
             writer.writerow(rows[run_id])
 
-    print(f"Wrote {len(rows)} runs to {index_path}")
+    print(
+        f"Wrote {len(rows)} runs to {index_path}"
+        f" ({n_reprocessed} reprocessed, {n_cached} cached)"
+    )
 
 
 def main() -> None:
@@ -310,6 +317,11 @@ def main() -> None:
         default=None,
         help="Output TSV path (default: <input-dir>/runs_index.tsv)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass cache and reprocess all runs",
+    )
     args = parser.parse_args()
 
     runs_dir: Path = args.input_dir
@@ -317,7 +329,7 @@ def main() -> None:
 
     index_path: Path = args.output if args.output else runs_dir / "runs_index.tsv"
 
-    build_index(runs_dir, index_path)
+    build_index(runs_dir, index_path, force=args.force)
 
 
 if __name__ == "__main__":
