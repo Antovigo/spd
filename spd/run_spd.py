@@ -324,7 +324,7 @@ def optimize(
                 sampling=config.sampling,
             )
 
-            if config.component_weight_decay > 0:
+            if config.component_weight_decay > 0 and config.component_weight_decay_scaled_by_ci:
                 for layer_name, layer_ci in ci.lower_leaky.items():
                     mb_max = layer_ci.detach().amax(dim=tuple(range(layer_ci.ndim - 1)))
                     if layer_name in step_max_ci:
@@ -390,7 +390,7 @@ def optimize(
                     sampling=config.sampling,
                 )
 
-                if config.component_weight_decay > 0:
+                if config.component_weight_decay > 0 and config.component_weight_decay_scaled_by_ci:
                     for layer_name, layer_ci in nontarget_ci.lower_leaky.items():
                         mb_max = layer_ci.detach().amax(dim=tuple(range(layer_ci.ndim - 1)))
                         if layer_name in step_max_ci:
@@ -526,10 +526,10 @@ def optimize(
                 clip_grad_norm_(ci_fn_params, config.grad_clip_norm_ci_fns)
             optimizer.step()
 
-            if config.component_weight_decay > 0 and step_max_ci:
+            if config.component_weight_decay > 0:
                 apply_ci_scaled_weight_decay(
                     components=component_model.components,
-                    step_max_ci=step_max_ci,
+                    step_max_ci=step_max_ci if config.component_weight_decay_scaled_by_ci else None,
                     lr=step_lr,
                     weight_decay=config.component_weight_decay,
                 )

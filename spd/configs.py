@@ -891,6 +891,7 @@ class Config(BaseConfig):
         description="CI-scaled weight decay applied manually after each optimizer step. "
         "Components with high max CI are protected; inactive ones get full decay.",
     )
+    component_weight_decay_scaled_by_ci: bool = True
 
     # --- Faithfulness Warmup ---
     faithfulness_warmup_steps: NonNegativeInt = Field(

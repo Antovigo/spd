@@ -65,22 +65,25 @@ def calc_ci_l_zero(ci: Float[Tensor, "... C"], threshold: float) -> float:
 @torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
 def apply_ci_scaled_weight_decay(
     components: dict[str, Components],
-    step_max_ci: dict[str, Float[Tensor, " C"]],
+    step_max_ci: dict[str, Float[Tensor, " C"]] | None,
     lr: float,
     weight_decay: float,
 ) -> None:
-    """Apply CI-scaled weight decay with sqrt for linear decay on W = V @ U.
+    """Apply weight decay with sqrt for linear decay on W = V @ U.
 
-    Per-component decay: scale = sqrt(1 - lr * wd * (1 - max_ci)).
-    Applied to both V and U, so effective decay on W is scale² = 1 - lr * wd * (1 - max_ci).
+    When step_max_ci is provided, decay is CI-scaled: scale = sqrt(1 - lr * wd * (1 - max_ci)).
+    When step_max_ci is None, uniform decay: scale = sqrt(1 - lr * wd).
+    Applied to both V and U, so effective decay on W is scale².
     """
-    if is_distributed():
+    if step_max_ci is not None and is_distributed():
         for layer_name in step_max_ci:
             all_reduce(step_max_ci[layer_name], op=dist.ReduceOp.MAX)
 
-    for layer_name, max_ci in step_max_ci.items():
-        comps = components[layer_name]
-        decay_factors = 1.0 - max_ci.clamp(0.0, 1.0)  # (C,)
+    for layer_name, comps in components.items():
+        if step_max_ci is not None:
+            decay_factors = 1.0 - step_max_ci[layer_name].clamp(0.0, 1.0)  # (C,)
+        else:
+            decay_factors = torch.ones(comps.C, device=comps.V.device)
         scale = (1.0 - lr * weight_decay * decay_factors).sqrt()
         comps.V.data.mul_(scale[None, :])  # V: (v_dim, C)
         comps.U.data.mul_(scale[:, None])  # U: (C, u_dim)

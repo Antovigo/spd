@@ -42,7 +42,8 @@ lr_schedule:
   start_val: 1e-3
   fn_type: constant
   warmup_pct: 0.0
-component_weight_decay: 0.25
+component_weight_decay: 0.5
+component_weight_decay_scaled_by_ci: false
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 0
