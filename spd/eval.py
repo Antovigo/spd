@@ -44,6 +44,7 @@ from spd.configs import (
     TargetedCIHeatmapConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
 )
 from spd.metrics import UnmaskedReconLoss
 from spd.metrics.attn_patterns_recon_loss import (
@@ -75,6 +76,7 @@ from spd.metrics.stochastic_recon_subset_ce_and_kl import StochasticReconSubsetC
 from spd.metrics.stochastic_recon_subset_loss import StochasticReconSubsetLoss
 from spd.metrics.targeted_ci_heatmap import TargetedCIHeatmap
 from spd.metrics.uv_plots import UVPlots
+from spd.metrics.weight_magnitude import WeightMagnitude
 from spd.models.component_model import ComponentModel, OutputWithCache
 from spd.persistent_pgd import PersistentPGDState
 from spd.routing import AllLayersRouter, get_subset_router
@@ -356,6 +358,12 @@ def init_metric(
                 model=model,
                 device=device,
                 output_loss_type=run_config.output_loss_type,
+            )
+        case WeightMagnitudeConfig():
+            metric = WeightMagnitude(
+                model=model,
+                run_config=run_config,
+                device=device,
             )
         case (
             PGDMultiBatchReconLossConfig()

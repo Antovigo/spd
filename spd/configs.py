@@ -712,6 +712,10 @@ class TargetedCIHeatmapConfig(BaseConfig):
     )
 
 
+class WeightMagnitudeConfig(BaseConfig):
+    classname: Literal["WeightMagnitude"] = "WeightMagnitude"
+
+
 class UVPlotsConfig(BaseConfig):
     classname: Literal["UVPlots"] = "UVPlots"
     identity_patterns: list[str] | None
@@ -749,6 +753,7 @@ EvalOnlyMetricConfigType = (
     | PermutedCIPlotsConfig
     | TargetedCIHeatmapConfig
     | UVPlotsConfig
+    | WeightMagnitudeConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig
     | PGDMultiBatchReconSubsetLossConfig

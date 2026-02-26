@@ -74,6 +74,7 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "PersistentPGDReconEval": "PersistPGDReconEval",
     "PersistentPGDReconSubsetEval": "PersistPGDReconSubEval",
     "TargetedCIHeatmap": "TargetCIHeat",
+    "WeightMagnitude": "WeightMag",
 }
 
 

@@ -65,6 +65,7 @@ eval_metric_configs:
   - classname: "CIMeanPerComponent"
   - classname: "TargetedCIHeatmap"
     n_nontarget_examples: 100
+  - classname: "WeightMagnitude"
 
 # --- Pretrained model info ---
 pretrained_model_class: "spd.experiments.resid_mlp.models.ResidMLP"

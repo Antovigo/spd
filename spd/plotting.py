@@ -583,3 +583,71 @@ def plot_ci_values_histograms(
     plt.close(fig)
 
     return fig_img
+
+
+def plot_weight_magnitude(
+    weight_magnitudes: dict[str, Tensor],
+    max_cis: dict[str, Tensor],
+    mean_cis: dict[str, Tensor],
+) -> Image.Image:
+    """Plot weight magnitude per component, sorted by mean CI and colored by max CI.
+
+    Args:
+        weight_magnitudes: ||V|| * ||U|| per component, keyed by layer name (y-axis).
+        max_cis: Max CI over target inputs per component, keyed by layer name (color).
+        mean_cis: Mean CI over target inputs per component, keyed by layer name (sorting).
+    """
+    assert len(weight_magnitudes) > 0, "No weight magnitude data to plot"
+    n_modules = len(weight_magnitudes)
+    max_rows = 6
+
+    n_cols = (n_modules + max_rows - 1) // max_rows
+    n_rows = min(n_modules, max_rows)
+
+    fig, axs = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(8 * n_cols, 3 * n_rows),
+        squeeze=False,
+        layout="constrained",
+    )
+    axs = np.array(axs)
+    if axs.ndim == 1:
+        axs = axs.reshape(n_rows, n_cols)
+
+    for i in range(n_modules, n_rows * n_cols):
+        axs[i % n_rows, i // n_rows].set_visible(False)
+
+    all_max_cis = torch.cat(list(max_cis.values()))
+    vmin, vmax = all_max_cis.min().item(), all_max_cis.max().item()
+
+    scatter_plots = []
+    for i, layer_name in enumerate(weight_magnitudes.keys()):
+        ax = axs[i % n_rows, i // n_rows]
+
+        sort_indices = torch.argsort(mean_cis[layer_name], descending=True)
+        sorted_weight_mags = weight_magnitudes[layer_name][sort_indices].cpu().numpy()
+        sorted_max_cis = max_cis[layer_name][sort_indices].cpu().numpy()
+
+        scatter = ax.scatter(
+            range(len(sorted_weight_mags)),
+            sorted_weight_mags,
+            c=sorted_max_cis,
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            s=20,
+        )
+        scatter_plots.append(scatter)
+
+        ax.set_title(layer_name, fontsize=10)
+        if i % n_rows == n_rows - 1 or i == n_modules - 1:
+            ax.set_xlabel("Component")
+        ax.set_ylabel("Weight magnitude")
+
+    fig.colorbar(scatter_plots[0], ax=axs.ravel().tolist(), shrink=0.8, label="Max CI")
+
+    fig_img = _render_figure(fig)
+    plt.close(fig)
+
+    return fig_img
