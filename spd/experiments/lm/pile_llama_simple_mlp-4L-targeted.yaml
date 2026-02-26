@@ -4,6 +4,7 @@ wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 label: "targeted_PD_LM_test"
+notes: "initial version, without PGD"
 
 # --- General ---
 seed: 0
@@ -17,17 +18,17 @@ sampling: continuous
 sigmoid_type: leaky_hard
 module_info:
   - module_pattern: h.*.mlp.c_fc
-    C: 3072
+    C: 96
   - module_pattern: h.*.mlp.down_proj
-    C: 3584
+    C: 96
   - module_pattern: h.*.attn.q_proj
-    C: 512
+    C: 64
   - module_pattern: h.*.attn.k_proj
-    C: 512
+    C: 64
   - module_pattern: h.*.attn.v_proj
-    C: 1024
+    C: 64
   - module_pattern: h.*.attn.o_proj
-    C: 1024
+    C: 64
 identity_module_info: null
 use_delta_component: true
 
@@ -42,25 +43,25 @@ loss_metric_configs:
     p_anneal_end_frac: 1.0
     eps: 1.0e-12
   - classname: StochasticReconSubsetLoss
-    coeff: 0.5
+    coeff: 1
     routing:
       type: uniform_k_subset
-  - classname: PersistentPGDReconLoss
-    coeff: 0.5
-    optimizer:
-      type: adam
-      beta1: 0.5
-      beta2: 0.99
-      eps: 1.0e-08
-      lr_schedule:
-        start_val: 0.01
-        warmup_pct: 0.025
-        final_val_frac: 0.1
-        fn_type: cosine
-    scope:
-      type: per_batch_per_position
-    use_sigmoid_parameterization: false
-    n_warmup_steps: 2
+  # - classname: PersistentPGDReconLoss
+  #   coeff: 0.5
+  #   optimizer:
+  #     type: adam
+  #     beta1: 0.5
+  #     beta2: 0.99
+  #     eps: 1.0e-08
+  #     lr_schedule:
+  #       start_val: 0.01
+  #       warmup_pct: 0.025
+  #       final_val_frac: 0.1
+  #       fn_type: cosine
+  #   scope:
+  #     type: per_batch_per_position
+  #   use_sigmoid_parameterization: false
+  #   n_warmup_steps: 2
 output_loss_type: kl
 
 # --- Training ---
@@ -90,25 +91,25 @@ ci_alive_threshold: 0.0
 
 # --- Eval Metrics ---
 eval_metric_configs:
-  - classname: CIHistograms
-    n_batches_accum: 1
-  - classname: ComponentActivationDensity
+  # - classname: CIHistograms
+  #   n_batches_accum: 1
+  # - classname: ComponentActivationDensity
   - classname: CI_L0
     groups:
-      layer_0:
-        - h.0.*
-      layer_1:
-        - h.1.*
-      layer_2:
-        - h.2.*
-      layer_3:
-        - h.3.*
+      # layer_0:
+      #   - h.0.*
+      # layer_1:
+      #   - h.1.*
+      # layer_2:
+      #   - h.2.*
+      # layer_3:
+      #   - h.3.*
       total:
         - "*"
-  - classname: CEandKLLosses
-    rounding_threshold: 0.0
-  - classname: CIMeanPerComponent
-  - classname: StochasticHiddenActsReconLoss
+  # - classname: CEandKLLosses
+    # rounding_threshold: 0.0
+  # - classname: CIMeanPerComponent
+  # - classname: StochasticHiddenActsReconLoss
   - classname: PGDReconLoss
     init: random
     step_size: 0.1
