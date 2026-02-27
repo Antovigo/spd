@@ -4,7 +4,7 @@ wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 label: "targeted_PD_LM_test"
-notes: "reference model t-9d2b8f02"
+notes: "reference model t-9d2b8f02. Uses shuffled dataset."
 
 # --- General ---
 seed: 0
@@ -142,7 +142,7 @@ task_config:
 # --- Targeted Decomposition (nontarget data: Pile) ---
 nontarget_task_config:
   task_name: lm
-  dataset_name: danbraunai/pile-uncopyrighted-tok
+  dataset_name: danbraunai/pile-uncopyrighted-tok-shuffled
   max_seq_len: 64
   column_name: input_ids
   is_tokenized: true
