@@ -73,6 +73,8 @@ METRIC_CONFIG_SHORT_NAMES: dict[str, str] = {
     "PGDMultiBatchReconSubsetLoss": "PGDMultiBatchReconSub",
     "PersistentPGDReconEval": "PersistPGDReconEval",
     "PersistentPGDReconSubsetEval": "PersistPGDReconSubEval",
+    "TargetReconLoss": "TargetRecon",
+    "NontargetReconLoss": "NontargetRecon",
     "TargetedCIHeatmap": "TargetCIHeat",
     "WeightMagnitude": "WeightMag",
 }

@@ -4,7 +4,7 @@ wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 label: "targeted_PD_LM_test"
-notes: "initial version, without PGD"
+notes: "reference model t-9d2b8f02"
 
 # --- General ---
 seed: 0
@@ -76,6 +76,7 @@ eval_batch_size: 256
 grad_clip_norm_components: 0.01
 grad_clip_norm_ci_fns: null
 component_weight_decay: 0.1
+autocast_bf16: false
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 0
@@ -115,6 +116,11 @@ eval_metric_configs:
     step_size: 0.1
     n_steps: 20
     mask_scope: shared_across_batch
+  - classname: TargetReconLoss
+    rounding_threshold: 0.01
+  - classname: NontargetReconLoss
+    rounding_threshold: 0.01
+    n_nontarget_batches: 10
   - classname: TargetedCIHeatmap
     n_nontarget_examples: 100
   - classname: WeightMagnitude
@@ -122,7 +128,8 @@ eval_metric_configs:
 # --- Pretrained model info ---
 pretrained_model_class: spd.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
 pretrained_model_path: null
-pretrained_model_name: wandb:goodfire/spd/t-32d1bb3b
+#pretrained_model_name: wandb:goodfire/spd/t-32d1bb3b # default pile_llama_4L
+pretrained_model_name: wandb:goodfire/spd/runs/t-9d2b8f02 # reference model for paper
 pretrained_model_output_attr: idx_0
 tokenizer_name: EleutherAI/gpt-neox-20b
 

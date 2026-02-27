@@ -25,6 +25,7 @@ from spd.configs import (
     IdentityCIErrorConfig,
     ImportanceMinimalityLossConfig,
     MetricConfigType,
+    NontargetReconLossConfig,
     PermutedCIPlotsConfig,
     PersistentPGDReconEvalConfig,
     PersistentPGDReconLossConfig,
@@ -42,11 +43,12 @@ from spd.configs import (
     StochasticReconSubsetCEAndKLConfig,
     StochasticReconSubsetLossConfig,
     TargetedCIHeatmapConfig,
+    TargetReconLossConfig,
     UnmaskedReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
 )
-from spd.metrics import UnmaskedReconLoss
+from spd.metrics import NontargetReconLoss, TargetReconLoss, UnmaskedReconLoss
 from spd.metrics.attn_patterns_recon_loss import (
     CIMaskedAttnPatternsReconLoss,
     StochasticAttnPatternsReconLoss,
@@ -334,6 +336,26 @@ def init_metric(
                 q_proj_path=cfg.q_proj_path,
                 k_proj_path=cfg.k_proj_path,
                 c_attn_path=cfg.c_attn_path,
+            )
+        case TargetReconLossConfig():
+            metric = TargetReconLoss(
+                model=model,
+                device=device,
+                output_loss_type=run_config.output_loss_type,
+                sampling=run_config.sampling,
+                rounding_threshold=cfg.rounding_threshold,
+            )
+        case NontargetReconLossConfig():
+            assert nontarget_eval_iterator is not None, (
+                "NontargetReconLoss requires nontarget_eval_iterator"
+            )
+            metric = NontargetReconLoss(
+                model=model,
+                run_config=run_config,
+                device=device,
+                rounding_threshold=cfg.rounding_threshold,
+                n_nontarget_batches=cfg.n_nontarget_batches,
+                nontarget_eval_iterator=nontarget_eval_iterator,
             )
         case TargetedCIHeatmapConfig():
             assert nontarget_eval_iterator is not None, (

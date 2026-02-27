@@ -712,6 +712,17 @@ class TargetedCIHeatmapConfig(BaseConfig):
     )
 
 
+class TargetReconLossConfig(BaseConfig):
+    classname: Literal["TargetReconLoss"] = "TargetReconLoss"
+    rounding_threshold: float = 0.01
+
+
+class NontargetReconLossConfig(BaseConfig):
+    classname: Literal["NontargetReconLoss"] = "NontargetReconLoss"
+    rounding_threshold: float = 0.01
+    n_nontarget_batches: int = 10
+
+
 class WeightMagnitudeConfig(BaseConfig):
     classname: Literal["WeightMagnitude"] = "WeightMagnitude"
 
@@ -750,8 +761,10 @@ EvalOnlyMetricConfigType = (
     | IdentityCIErrorConfig
     | PersistentPGDReconEvalConfig
     | PersistentPGDReconSubsetEvalConfig
+    | NontargetReconLossConfig
     | PermutedCIPlotsConfig
     | TargetedCIHeatmapConfig
+    | TargetReconLossConfig
     | UVPlotsConfig
     | WeightMagnitudeConfig
     | StochasticReconSubsetCEAndKLConfig

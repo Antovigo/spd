@@ -68,6 +68,11 @@ eval_metric_configs:
   - classname: "CIMeanPerComponent"
   - classname: "TargetedCIHeatmap"
     n_nontarget_examples: 100
+  - classname: "TargetReconLoss"
+    rounding_threshold: 0.01
+  - classname: "NontargetReconLoss"
+    rounding_threshold: 0.01
+    n_nontarget_batches: 10
   - classname: "WeightMagnitude"
 
 # --- Pretrained model info ---
