@@ -87,12 +87,10 @@ def _read_metadata(run_dir: Path) -> dict[str, str]:
     if metadata_path.exists():
         with open(metadata_path) as f:
             meta = json.load(f)
-        # Handle both old field name (git_dirty) and new (uncommitted_changes)
-        uncommitted = meta.get("uncommitted_changes", meta.get("git_dirty", NA))
         return {
             "run_id": str(meta.get("run_id", run_dir.name)),
             "git_commit": str(meta.get("git_commit", NA)),
-            "uncommitted_changes": str(uncommitted),
+            "uncommitted_changes": str(meta.get("uncommitted_changes", NA)),
             "label": str(meta.get("label", "")),
             "notes": str(meta.get("notes", "")),
             "date": str(meta.get("date", NA)),
@@ -112,6 +110,30 @@ def _read_metadata(run_dir: Path) -> dict[str, str]:
     }
 
 
+def _read_last_jsonl_line(path: Path) -> dict[str, Any] | None:
+    """Read and parse the last line of a JSONL file using backwards seek.
+
+    Returns the parsed JSON dict, or None if the file is empty.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        if size == 0:
+            return None
+        pos = size - 1
+        while pos > 0:
+            f.seek(pos)
+            char = f.read(1)
+            if char == b"\n" and pos < size - 1:
+                break
+            pos -= 1
+        last_line = f.readline().decode().strip()
+
+    if not last_line:
+        return None
+    return json.loads(last_line)
+
+
 def _check_legacy_completion(run_dir: Path) -> bool:
     """Determine if a legacy run (no run_metadata.json) completed."""
     config_path = run_dir / "final_config.yaml"
@@ -126,28 +148,11 @@ def _check_legacy_completion(run_dir: Path) -> bool:
     if total_steps is None:
         return False
 
-    # Read last line of metrics.jsonl
-    last_line = ""
-    with open(metrics_path, "rb") as f:
-        # Seek backwards to find last newline
-        f.seek(0, 2)
-        size = f.tell()
-        if size == 0:
-            return False
-        pos = size - 1
-        while pos > 0:
-            f.seek(pos)
-            char = f.read(1)
-            if char == b"\n" and pos < size - 1:
-                break
-            pos -= 1
-        last_line = f.readline().decode().strip()
-
-    if not last_line:
+    last = _read_last_jsonl_line(metrics_path)
+    if last is None:
         return False
 
-    last_step = json.loads(last_line).get("step", -1)
-    return last_step >= total_steps
+    return last.get("step", -1) >= total_steps
 
 
 def _load_existing_index(index_path: Path) -> dict[str, dict[str, str]]:
@@ -234,25 +239,10 @@ def _read_final_metrics(run_dir: Path, metric_names: list[str]) -> dict[str, str
     if not metrics_path.exists():
         return {name: NA for name in metric_names}
 
-    # Read last line using backwards seek
-    with open(metrics_path, "rb") as f:
-        f.seek(0, 2)
-        size = f.tell()
-        if size == 0:
-            return {name: NA for name in metric_names}
-        pos = size - 1
-        while pos > 0:
-            f.seek(pos)
-            char = f.read(1)
-            if char == b"\n" and pos < size - 1:
-                break
-            pos -= 1
-        last_line = f.readline().decode().strip()
-
-    if not last_line:
+    data = _read_last_jsonl_line(metrics_path)
+    if data is None:
         return {name: NA for name in metric_names}
 
-    data = json.loads(last_line)
     return {name: str(data.get(name, NA)) for name in metric_names}
 
 
@@ -286,7 +276,10 @@ def build_index(
         else:
             row = _read_metadata(run_dir)
             if metrics:
-                row.update(_read_final_metrics(run_dir, metrics))
+                if row.get("completed") == "True":
+                    row.update(_read_final_metrics(run_dir, metrics))
+                else:
+                    row.update({name: NA for name in metrics})
             if cached:
                 row.setdefault("hyperparameters", cached.get("hyperparameters", ""))
             rows[run_id] = row
@@ -304,12 +297,9 @@ def build_index(
 
     # Determine which label groups need recomputation
     groups_to_recompute: set[str] = set()
-    groups_cached: set[str] = set()
     for label, run_ids in label_groups.items():
         if any(rid in new_run_ids for rid in run_ids):
             groups_to_recompute.add(label)
-        else:
-            groups_cached.add(label)
 
     # Recompute hyperparameters for groups with new runs
     recompute_groups = {
