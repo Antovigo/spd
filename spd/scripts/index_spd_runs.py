@@ -228,7 +228,37 @@ def _compute_hyperparameters(
     return hyperparams
 
 
-def build_index(runs_dir: Path, index_path: Path, *, force: bool = False) -> None:
+def _read_final_metrics(run_dir: Path, metric_names: list[str]) -> dict[str, str]:
+    """Read the last line of metrics.jsonl and extract requested metric values."""
+    metrics_path = run_dir / "metrics.jsonl"
+    if not metrics_path.exists():
+        return {name: NA for name in metric_names}
+
+    # Read last line using backwards seek
+    with open(metrics_path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        if size == 0:
+            return {name: NA for name in metric_names}
+        pos = size - 1
+        while pos > 0:
+            f.seek(pos)
+            char = f.read(1)
+            if char == b"\n" and pos < size - 1:
+                break
+            pos -= 1
+        last_line = f.readline().decode().strip()
+
+    if not last_line:
+        return {name: NA for name in metric_names}
+
+    data = json.loads(last_line)
+    return {name: str(data.get(name, NA)) for name in metric_names}
+
+
+def build_index(
+    runs_dir: Path, index_path: Path, *, force: bool = False, metrics: list[str] | None = None
+) -> None:
     existing = _load_existing_index(index_path) if not force else {}
 
     # Discover all run directories
@@ -244,11 +274,22 @@ def build_index(runs_dir: Path, index_path: Path, *, force: bool = False) -> Non
     n_cached = 0
     for run_id, run_dir in tqdm(run_dirs.items(), desc="Reading runs"):
         cached = existing.get(run_id)
-        if cached and (cached.get("completed") == "True" or not _is_recent(cached)):
+        # Cache miss if metrics were requested but aren't in the cached row
+        metrics_missing = metrics and cached and metrics[0] not in cached
+        if (
+            cached
+            and not metrics_missing
+            and (cached.get("completed") == "True" or not _is_recent(cached))
+        ):
             rows[run_id] = cached
             n_cached += 1
         else:
-            rows[run_id] = _read_metadata(run_dir)
+            row = _read_metadata(run_dir)
+            if metrics:
+                row.update(_read_final_metrics(run_dir, metrics))
+            if cached:
+                row.setdefault("hyperparameters", cached.get("hyperparameters", ""))
+            rows[run_id] = row
             n_reprocessed += 1
             if not cached:
                 new_run_ids.add(run_id)
@@ -285,8 +326,9 @@ def build_index(runs_dir: Path, index_path: Path, *, force: bool = False) -> Non
             row.setdefault("hyperparameters", "")
 
     # Phase 3: write TSV
+    fieldnames = COLUMNS + (metrics or [])
     with open(index_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=COLUMNS, delimiter="\t", extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
         writer.writeheader()
         for run_id in sorted(
             rows,
@@ -296,8 +338,7 @@ def build_index(runs_dir: Path, index_path: Path, *, force: bool = False) -> Non
             writer.writerow(rows[run_id])
 
     print(
-        f"Wrote {len(rows)} runs to {index_path}"
-        f" ({n_reprocessed} reprocessed, {n_cached} cached)"
+        f"Wrote {len(rows)} runs to {index_path} ({n_reprocessed} reprocessed, {n_cached} cached)"
     )
 
 
@@ -322,14 +363,20 @@ def main() -> None:
         action="store_true",
         help="Bypass cache and reprocess all runs",
     )
+    parser.add_argument(
+        "--metrics",
+        type=str,
+        help="Comma-separated metric names to include (e.g. 'train/loss/total,train/l0/total')",
+    )
     args = parser.parse_args()
 
     runs_dir: Path = args.input_dir
     assert runs_dir.is_dir(), f"Runs directory not found: {runs_dir}"
 
     index_path: Path = args.output if args.output else runs_dir / "runs_index.tsv"
+    metric_names = [m.strip() for m in args.metrics.split(",")] if args.metrics else None
 
-    build_index(runs_dir, index_path, force=args.force)
+    build_index(runs_dir, index_path, force=args.force, metrics=metric_names)
 
 
 if __name__ == "__main__":
