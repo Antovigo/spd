@@ -13,7 +13,7 @@ n_mask_samples: 1
 ci_config:
   mode: global
   fn_type: global_shared_mlp
-  hidden_dims: [256]
+  hidden_dims: [512]
 sampling: continuous
 sigmoid_type: leaky_hard
 module_info:
@@ -28,45 +28,45 @@ module_info:
   - module_pattern: h.*.attn.v_proj
     C: 64
   - module_pattern: h.*.attn.o_proj
-    C: 64
+    C: 96
 identity_module_info: null
 use_delta_component: true
 
 # --- Loss config ---
 loss_metric_configs:
   - classname: ImportanceMinimalityLoss
-    coeff: 0.0006
+    coeff: 2e-4
     pnorm: 2.0
     beta: 0.2
     p_anneal_start_frac: 0.0
-    p_anneal_final_p: 0.4
+    p_anneal_final_p: 1.0
     p_anneal_end_frac: 1.0
     eps: 1.0e-12
   - classname: StochasticReconSubsetLoss
     coeff: 1
     routing:
       type: uniform_k_subset
-  # - classname: PersistentPGDReconLoss
-  #   coeff: 0.5
-  #   optimizer:
-  #     type: adam
-  #     beta1: 0.5
-  #     beta2: 0.99
-  #     eps: 1.0e-08
-  #     lr_schedule:
-  #       start_val: 0.01
-  #       warmup_pct: 0.025
-  #       final_val_frac: 0.1
-  #       fn_type: cosine
-  #   scope:
-  #     type: per_batch_per_position
-  #   use_sigmoid_parameterization: false
-  #   n_warmup_steps: 2
+  - classname: PersistentPGDReconLoss
+    coeff: 0.5
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 0.1
+        fn_type: cosine
+    scope:
+      type: per_batch_per_position
+    use_sigmoid_parameterization: false
+    n_warmup_steps: 2
 output_loss_type: kl
 
 # --- Training ---
 lr_schedule:
-  start_val: 5.0e-05
+  start_val: 5e-4
   warmup_pct: 0.0
   final_val_frac: 0.1
   fn_type: cosine
