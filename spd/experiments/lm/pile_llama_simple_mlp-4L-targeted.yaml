@@ -62,6 +62,7 @@ loss_metric_configs:
       type: per_batch_per_position
     use_sigmoid_parameterization: false
     n_warmup_steps: 2
+    start_frac: 0.0
 output_loss_type: kl
 
 # --- Training ---
