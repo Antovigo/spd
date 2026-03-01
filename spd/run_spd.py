@@ -302,7 +302,10 @@ def optimize(
         for group in optimizer.param_groups:
             group["lr"] = step_lr
 
-        for ppgd_cfg in persistent_pgd_configs:
+        frac = step / config.steps
+        active_ppgd_configs = [c for c in persistent_pgd_configs if frac >= c.start_frac]
+
+        for ppgd_cfg in active_ppgd_configs:
             ppgd_states[ppgd_cfg].update_lr(step, config.steps)
 
         weight_deltas = component_model.calc_weight_deltas()
@@ -332,7 +335,7 @@ def optimize(
                     else:
                         step_max_ci[layer_name] = mb_max
 
-            for ppgd_cfg in persistent_pgd_configs:
+            for ppgd_cfg in active_ppgd_configs:
                 ppgd_states[ppgd_cfg].warmup(
                     model=component_model,
                     batch=batch,
@@ -366,12 +369,12 @@ def optimize(
 
         ppgd_grads = {
             cfg: ppgd_states[cfg].get_grads(losses[cfg], retain_graph=True)
-            for cfg in persistent_pgd_configs
+            for cfg in active_ppgd_configs
         }
 
         total_loss.backward()
 
-        for ppgd_cfg in persistent_pgd_configs:
+        for ppgd_cfg in active_ppgd_configs:
             ppgd_states[ppgd_cfg].step(ppgd_grads[ppgd_cfg])
 
         # --- Nontarget training --- #
