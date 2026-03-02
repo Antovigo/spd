@@ -21,8 +21,10 @@ from jaxtyping import Float
 from torch import Tensor
 from transformers import AutoTokenizer
 
+from spd.experiments.resid_mlp.models import ResidMLP
+from spd.experiments.tms.models import TMSModel
 from spd.models.component_model import ComponentModel, SPDRunInfo
-from spd.models.components import LinearComponents, WeightDeltaAndMask, make_mask_infos
+from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.utils.general_utils import calc_sum_recon_loss_lm
 
 
@@ -44,10 +46,8 @@ def build_input_tensor(
     match model_type:
         case "toy":
             dim_idx = int(input_str)
-            first_module = model.target_module_paths[0]
-            components = model.components[first_module]
-            assert isinstance(components, LinearComponents)
-            n_features = components.d_in
+            assert isinstance(model.target_model, ResidMLP | TMSModel)
+            n_features = model.target_model.config.n_features
             assert 0 <= dim_idx < n_features, f"dim_idx {dim_idx} out of range [0, {n_features})"
             input_tensor = torch.zeros(1, n_features, device=device)
             input_tensor[0, dim_idx] = 0.75
