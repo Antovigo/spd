@@ -7,10 +7,10 @@ loss means the active components are insufficient.
 
 Usage:
     # Toy model (TMS/ResidMLP) — input is a feature dimension index:
-    python -m spd.scripts.decomposition_stress_test.completeness_test <model_path> 3
+    python -m spd.scripts.decomposition_stress_test.completeness_test_direct <model_path> 3
 
     # Language model — input is a prompt string:
-    python -m spd.scripts.decomposition_stress_test.completeness_test <model_path> "Once upon a time"
+    python -m spd.scripts.decomposition_stress_test.completeness_test_direct <model_path> "Once upon a time"
 """
 
 import argparse
@@ -219,7 +219,7 @@ def print_top_outputs(
     out_with_delta: Tensor,
     model_type: Literal["toy", "lm"],
     tokenizer: PreTrainedTokenizerBase | None,
-    k: int = 5,
+    k: int = 10,
 ) -> None:
     print(f"\n{'=' * 60}")
     print(f"Top-{k} Output Dimensions/Tokens")
@@ -265,6 +265,7 @@ def main() -> None:
     )
     parser.add_argument("--n-steps", type=int, default=100, help="Number of PGD steps")
     parser.add_argument("--step-size", type=float, default=0.01, help="PGD step size")
+    parser.add_argument("--top-n", type=int, default=10, help="Number of top output dims to show")
     parser.add_argument("--device", default="cpu", help="Device to run on")
     args = parser.parse_args()
 
@@ -313,7 +314,9 @@ def main() -> None:
     # 8. Print results
     print_results(active, binary_sources, final_loss, model_type, args.ci_thr)
     print_divergences(original_output, out_no_delta, out_with_delta, config.output_loss_type)
-    print_top_outputs(original_output, out_no_delta, out_with_delta, model_type, tokenizer)
+    print_top_outputs(
+        original_output, out_no_delta, out_with_delta, model_type, tokenizer, args.top_n
+    )
 
 
 if __name__ == "__main__":
