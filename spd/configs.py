@@ -259,6 +259,10 @@ class IHTaskConfig(BaseConfig):
     )
 
 
+class CompletenessTaskConfig(BaseConfig):
+    task_name: Literal["completeness"]
+
+
 class LMTaskConfig(BaseConfig):
     task_name: Literal["lm"] = Field(
         default="lm",
@@ -725,7 +729,9 @@ EvalOnlyMetricConfigType = (
 )
 MetricConfigType = LossMetricConfigType | EvalOnlyMetricConfigType
 
-TaskConfig = TMSTaskConfig | ResidMLPTaskConfig | LMTaskConfig | IHTaskConfig
+TaskConfig = (
+    TMSTaskConfig | ResidMLPTaskConfig | LMTaskConfig | IHTaskConfig | CompletenessTaskConfig
+)
 
 SamplingType = Literal["continuous", "binomial"]
 
