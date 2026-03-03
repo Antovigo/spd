@@ -124,17 +124,18 @@ def _per_element_loss_divergence(
     n_batch: int,
 ) -> Float[Tensor, " n_batch"]:
     """Compute per-batch-element completeness loss (divergence variant)."""
+    original_expanded = original_output.expand_as(out_no_delta)
     match loss_type:
         case "mse":
-            div_no = ((out_no_delta - original_output) ** 2).flatten(1).mean(1)
-            div_with = ((out_with_delta - original_output) ** 2).flatten(1).mean(1)
+            div_no = ((out_no_delta - original_expanded) ** 2).flatten(1).mean(1)
+            div_with = ((out_with_delta - original_expanded) ** 2).flatten(1).mean(1)
         case "kl":
             kl_no = calc_kl_divergence_lm(
-                pred=out_no_delta, target=original_output, reduce=False
+                pred=out_no_delta, target=original_expanded, reduce=False
             )
             div_no = kl_no.reshape(n_batch, -1).mean(1)
             kl_with = calc_kl_divergence_lm(
-                pred=out_with_delta, target=original_output, reduce=False
+                pred=out_with_delta, target=original_expanded, reduce=False
             )
             div_with = kl_with.reshape(n_batch, -1).mean(1)
     return sign * (div_no - div_with)
