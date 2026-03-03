@@ -20,12 +20,13 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 from transformers import AutoTokenizer
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from spd.experiments.resid_mlp.models import ResidMLP
 from spd.experiments.tms.models import TMSModel
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.models.components import WeightDeltaAndMask, make_mask_infos
-from spd.utils.general_utils import calc_sum_recon_loss_lm
+from spd.utils.general_utils import calc_kl_divergence_lm, calc_sum_recon_loss_lm
 
 
 def detect_model_type(output_loss_type: Literal["mse", "kl"]) -> Literal["toy", "lm"]:
@@ -42,7 +43,7 @@ def build_input_tensor(
     model_type: Literal["toy", "lm"],
     tokenizer_name: str | None,
     device: torch.device,
-) -> Tensor:
+) -> tuple[Tensor, PreTrainedTokenizerBase | None]:
     match model_type:
         case "toy":
             dim_idx = int(input_str)
@@ -51,13 +52,14 @@ def build_input_tensor(
             assert 0 <= dim_idx < n_features, f"dim_idx {dim_idx} out of range [0, {n_features})"
             input_tensor = torch.zeros(1, n_features, device=device)
             input_tensor[0, dim_idx] = 0.75
-            return input_tensor
+            return input_tensor, None
         case "lm":
             assert tokenizer_name is not None, "tokenizer_name required for LM models"
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            assert isinstance(tokenizer, PreTrainedTokenizerBase)
             tokens = tokenizer.encode(input_str, return_tensors="pt")
             assert isinstance(tokens, Tensor)
-            return tokens.to(device)
+            return tokens.to(device), tokenizer
 
 
 def compute_ci(model: ComponentModel, input_tensor: Tensor) -> dict[str, Float[Tensor, "... C"]]:
@@ -83,8 +85,11 @@ def run_pgd(
     loss_type: Literal["mse", "kl"],
     n_steps: int,
     step_size: float,
-) -> tuple[dict[str, Tensor], Float[Tensor, ""]]:
-    """Run PGD to maximize completeness loss. Returns (optimized_sources, final_loss)."""
+) -> tuple[dict[str, Tensor], Float[Tensor, ""], Tensor, Tensor]:
+    """Run PGD to maximize completeness loss.
+
+    Returns (optimized_sources, final_loss, out_no_delta, out_with_delta).
+    """
     # Initialize sources randomly
     sources: dict[str, Tensor] = {}
     for module, active_mask in active.items():
@@ -141,11 +146,10 @@ def run_pgd(
             / n_examples
         )
 
-    return binary_sources, final_loss
+    return binary_sources, final_loss, out_no_delta, out_with_delta
 
 
 def print_results(
-    ci: dict[str, Float[Tensor, "... C"]],
     active: dict[str, Float[Tensor, "... C"]],
     binary_sources: dict[str, Tensor],
     final_loss: Float[Tensor, ""],
@@ -158,34 +162,95 @@ def print_results(
     print(f"Final completeness loss (binary masks): {final_loss.item():.6f}")
 
     for module in active:
-        ci_vals = ci[module]
         active_mask = active[module]
         binary = binary_sources[module]
 
         print(f"\nModule: {module}")
-        print(f"  CI shape: {list(ci_vals.shape)}")
 
         match model_type:
             case "toy":
-                # Shape: (1, C) — just one sample
                 active_indices = active_mask[0].nonzero(as_tuple=True)[0].tolist()
-                on_mask = (active_mask[0] * binary[0]) > 0.5
-                print(f"  Active components ({len(active_indices)}):")
-                for idx in active_indices:
-                    status = "ON" if on_mask[idx].item() else "OFF"
-                    ci_val = ci_vals[0, idx].item()
-                    print(f"    Component {idx}: {status}  (CI = {ci_val:.4f})")
+                unmasked = ((active_mask[0] * binary[0]) > 0.5).nonzero(as_tuple=True)[0].tolist()
+                print(f"  Active components: {active_indices}, unmasked: {unmasked}")
             case "lm":
-                # Shape: (1, seq_len, C)
-                seq_len = active_mask.shape[1]
-                for pos in range(seq_len):
+                for pos in range(active_mask.shape[1]):
                     active_indices = active_mask[0, pos].nonzero(as_tuple=True)[0].tolist()
-                    on_mask = (active_mask[0, pos] * binary[0, pos]) > 0.5
-                    print(f"  Position {pos} — {len(active_indices)} active components:")
-                    for idx in active_indices:
-                        status = "ON" if on_mask[idx].item() else "OFF"
-                        ci_val = ci_vals[0, pos, idx].item()
-                        print(f"    Component {idx}: {status}  (CI = {ci_val:.4f})")
+                    unmasked = (
+                        ((active_mask[0, pos] * binary[0, pos]) > 0.5)
+                        .nonzero(as_tuple=True)[0]
+                        .tolist()
+                    )
+                    print(
+                        f"  Position {pos}: active components: {active_indices},"
+                        f" unmasked: {unmasked}"
+                    )
+
+
+def print_divergences(
+    original: Tensor,
+    out_no_delta: Tensor,
+    out_with_delta: Tensor,
+    loss_type: Literal["mse", "kl"],
+) -> None:
+    print(f"\n{'=' * 60}")
+    print("Divergence from Original Model Output")
+    print(f"{'=' * 60}")
+
+    mse_no_delta = ((original - out_no_delta) ** 2).mean().item()
+    mse_with_delta = ((original - out_with_delta) ** 2).mean().item()
+    print(f"  MSE(original, no_delta)   = {mse_no_delta:.6f}")
+    print(f"  MSE(original, with_delta) = {mse_with_delta:.6f}")
+
+    if loss_type == "kl":
+        kl_no_delta = calc_kl_divergence_lm(pred=out_no_delta, target=original, reduce=True).item()
+        kl_with_delta = calc_kl_divergence_lm(
+            pred=out_with_delta, target=original, reduce=True
+        ).item()
+        print(f"  KL(original, no_delta)    = {kl_no_delta:.6f}")
+        print(f"  KL(original, with_delta)  = {kl_with_delta:.6f}")
+
+
+def print_top_outputs(
+    original: Tensor,
+    out_no_delta: Tensor,
+    out_with_delta: Tensor,
+    model_type: Literal["toy", "lm"],
+    tokenizer: PreTrainedTokenizerBase | None,
+    k: int = 5,
+) -> None:
+    print(f"\n{'=' * 60}")
+    print(f"Top-{k} Output Dimensions/Tokens")
+    print(f"{'=' * 60}")
+
+    match model_type:
+        case "toy":
+            _, indices = torch.topk(original[0].abs(), k=min(k, original.shape[-1]))
+            print(f"  {'Dim':<6} {'Original':>10} {'No-Delta':>10} {'With-Delta':>12}")
+            print(f"  {'-' * 42}")
+            for idx in indices:
+                i = int(idx)
+                print(
+                    f"  {i:<6} {original[0, i].item():>10.4f}"
+                    f" {out_no_delta[0, i].item():>10.4f}"
+                    f" {out_with_delta[0, i].item():>12.4f}"
+                )
+        case "lm":
+            assert tokenizer is not None
+            probs_orig = torch.softmax(original[0, -1], dim=-1)
+            probs_no = torch.softmax(out_no_delta[0, -1], dim=-1)
+            probs_with = torch.softmax(out_with_delta[0, -1], dim=-1)
+
+            _, indices = torch.topk(probs_orig, k=min(k, probs_orig.shape[-1]))
+            print(f"  {'Token':<20} {'Original':>10} {'No-Delta':>10} {'With-Delta':>12}")
+            print(f"  {'-' * 56}")
+            for idx in indices:
+                i = int(idx)
+                token_str = repr(tokenizer.decode([i]))
+                print(
+                    f"  {token_str:<20} {probs_orig[i].item():>10.4f}"
+                    f" {probs_no[i].item():>10.4f}"
+                    f" {probs_with[i].item():>12.4f}"
+                )
 
 
 def main() -> None:
@@ -213,7 +278,9 @@ def main() -> None:
     print(f"Model type: {model_type} (output_loss_type={config.output_loss_type})")
 
     # 2. Construct input tensor
-    input_tensor = build_input_tensor(model, args.input, model_type, config.tokenizer_name, device)
+    input_tensor, tokenizer = build_input_tensor(
+        model, args.input, model_type, config.tokenizer_name, device
+    )
     print(f"Input tensor shape: {list(input_tensor.shape)}")
 
     # 3. Compute CI values
@@ -230,9 +297,13 @@ def main() -> None:
     # 5. Compute weight deltas
     weight_deltas = model.calc_weight_deltas()
 
-    # 6. PGD adversarial optimization
+    # 6. Compute original model output (no masks = target model behavior)
+    with torch.no_grad():
+        original_output = model(input_tensor)
+
+    # 7. PGD adversarial optimization
     print(f"\nRunning PGD ({args.n_steps} steps, step_size={args.step_size})...")
-    binary_sources, final_loss = run_pgd(
+    binary_sources, final_loss, out_no_delta, out_with_delta = run_pgd(
         model=model,
         input_tensor=input_tensor,
         active=active,
@@ -242,8 +313,10 @@ def main() -> None:
         step_size=args.step_size,
     )
 
-    # 7. Print results
-    print_results(ci, active, binary_sources, final_loss, model_type, args.ci_thr)
+    # 8. Print results
+    print_results(active, binary_sources, final_loss, model_type, args.ci_thr)
+    print_divergences(original_output, out_no_delta, out_with_delta, config.output_loss_type)
+    print_top_outputs(original_output, out_no_delta, out_with_delta, model_type, tokenizer)
 
 
 if __name__ == "__main__":
