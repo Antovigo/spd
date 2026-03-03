@@ -50,8 +50,56 @@ def verify_layer_ablations(
     model: RedundantCopyTransformer,
     dataset: CopyTaskDataset,
     device: str | torch.device,
+    n_samples: int = 5,
 ) -> None:
-    """Test accuracy with each ablation pattern."""
+    """Print sample inputs and top-5 output tokens per ablation config."""
+    model.eval()
+    n_layers = len(model.layers)
+
+    ablation_configs: list[tuple[str, list[bool]]] = [
+        ("all active", [True] * n_layers),
+    ]
+    for i in range(n_layers):
+        mask = [False] * n_layers
+        mask[i] = True
+        ablation_configs.append((f"only layer {i}", mask))
+    ablation_configs.append(("none active", [False] * n_layers))
+
+    tokens, targets = dataset.generate_batch(n_samples)
+
+    logger.info(f"Sample inputs (token 0 = value, token 1 = eq_token={dataset.eq_token}):")
+    for j in range(n_samples):
+        logger.info(f"  example {j}: tokens={tokens[j].tolist()}, target={targets[j].item()}")
+
+    with torch.no_grad():
+        positions = torch.arange(tokens.shape[1], device=device)
+        x_base = model.token_embed(tokens) + model.pos_embed(positions)
+
+        for name, active_mask in ablation_configs:
+            x = x_base.clone()
+            for i, layer in enumerate(model.layers):
+                if active_mask[i]:
+                    x = x + layer(x)
+            logits = model.unembed(model.linear(x))[:, 1, :]
+            probs = logits.softmax(dim=-1)
+
+            logger.info(f"\n  {name}:")
+            for j in range(n_samples):
+                top_probs, top_ids = probs[j].topk(5)
+                entries = [
+                    f"{tid.item()}({tp:.3f})" for tid, tp in zip(top_ids, top_probs, strict=True)
+                ]
+                correct = "Y" if top_ids[0].item() == targets[j].item() else "N"
+                logger.info(
+                    f"    example {j} [target={targets[j].item()}]: {' '.join(entries)}  {correct}"
+                )
+
+
+def verify_bulk_accuracy(
+    model: RedundantCopyTransformer,
+    dataset: CopyTaskDataset,
+    device: str | torch.device,
+) -> None:
     model.eval()
     n_layers = len(model.layers)
     tokens, targets = dataset.generate_batch(4096)
@@ -74,8 +122,7 @@ def verify_layer_ablations(
             for i, layer in enumerate(model.layers):
                 if active_mask[i]:
                     x = x + layer(x)
-            x = model.linear(x)
-            logits = model.unembed(x)[:, 1, :]
+            logits = model.unembed(model.linear(x))[:, 1, :]
             acc = (logits.argmax(dim=-1) == targets).float().mean().item()
             logger.info(f"  {name}: accuracy = {acc:.4f}")
 
@@ -129,8 +176,11 @@ def run_train(config: CompletenessTrainConfig, device: str | torch.device) -> No
         wandb.save(str(model_path), base_path=out_dir, policy="now")
     logger.info(f"Saved model to {model_path}")
 
-    logger.info("Layer ablation verification:")
+    logger.info("Layer ablation verification (sample outputs):")
     verify_layer_ablations(model, dataset, device)
+
+    logger.info("\nBulk accuracy per ablation:")
+    verify_bulk_accuracy(model, dataset, device)
 
 
 if __name__ == "__main__":
