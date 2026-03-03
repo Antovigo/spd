@@ -1,40 +1,41 @@
 wandb_project: spd
 seed: 0
 n_mask_samples: 1
+label: "redundant_transformer_decomp"
 
 ci_config:
-  mode: layerwise
-  fn_type: mlp
-  hidden_dims: [16]
+  mode: global
+  fn_type: global_shared_mlp
+  hidden_dims: [128]
 
 module_info:
   - module_pattern: "layers.*.W_Q"
-    C: 4
+    C: 24
   - module_pattern: "layers.*.W_K"
-    C: 4
+    C: 24
   - module_pattern: "layers.*.W_V"
-    C: 4
+    C: 24
   - module_pattern: "layers.*.W_O"
-    C: 4
+    C: 24
   - module_pattern: "linear"
-    C: 4
+    C: 24
 
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
     coeff: 3e-3
     pnorm: 1.0
     beta: 0.0
-  - classname: "StochasticReconLoss"
+  - classname: "StochasticReconSubsetLoss"
     coeff: 1.0
 
-output_loss_type: mse
+output_loss_type: kl
 
 batch_size: 1024
 eval_batch_size: 2048
 steps: 10000
 train_log_freq: 100
-eval_freq: 1000
-slow_eval_freq: 5000
+eval_freq: 500
+slow_eval_freq: 1000
 n_eval_steps: 5
 
 lr_schedule:
@@ -43,10 +44,11 @@ lr_schedule:
   final_val_frac: 0.0
 
 eval_metric_configs:
-  - classname: "CIHistograms"
-    n_batches_accum: 5
+  # - classname: "CIHistograms"
+  #   n_batches_accum: 5
   - classname: "CI_L0"
     groups: null
+  - classname: "CompletenessCIPlots"
 
 pretrained_model_class: "spd.experiments.completeness.models.RedundantCopyTransformer"
 pretrained_model_path: /home/antoine/spd_out/train/completeness_toy_model/completeness.pth

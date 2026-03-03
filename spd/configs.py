@@ -685,6 +685,10 @@ class StochasticReconSubsetCEAndKLConfig(BaseConfig):
     exclude_patterns: dict[str, list[str]] | None
 
 
+class CompletenessCIPlotsConfig(BaseConfig):
+    classname: Literal["CompletenessCIPlots"] = "CompletenessCIPlots"
+
+
 class UVPlotsConfig(BaseConfig):
     classname: Literal["UVPlots"] = "UVPlots"
     identity_patterns: list[str] | None
@@ -715,6 +719,7 @@ EvalOnlyMetricConfigType = (
     | CIHistogramsConfig
     | CI_L0Config
     | CIMeanPerComponentConfig
+    | CompletenessCIPlotsConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
     | PersistentPGDReconEvalConfig
