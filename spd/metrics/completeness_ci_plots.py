@@ -50,43 +50,55 @@ class CompletenessCIPlots(Metric):
             sampling=self.sampling,
         )
 
-        # Select position 1 (eq_token position where the model predicts)
-        ci_vals = {k: v[:, 1, :] for k, v in ci.upper_leaky.items()}
-        img = _plot_completeness_ci(ci_vals, token_values.cpu())
+        # ci.lower_leaky values have shape (n_inputs, seq_len, C)
+        img = _plot_completeness_ci(ci.lower_leaky, token_values.cpu())
         return {"completeness_ci": img}
 
 
 def _plot_completeness_ci(
-    ci_vals: dict[str, Float[Tensor, "n_inputs C"]],
+    ci_vals: dict[str, Float[Tensor, "n_inputs seq_len C"]],
     token_values: Tensor,
 ) -> Image.Image:
+    """Plot CI heatmaps: rows = input tokens, columns = modules.
+
+    Each subplot: x = component index, y = sequence position, color = CI.
+    """
+    n_inputs = len(token_values)
     n_modules = len(ci_vals)
+    module_names = list(ci_vals.keys())
+
     fig, axs = plt.subplots(
-        1,
+        n_inputs,
         n_modules,
-        figsize=(5 * n_modules, 5),
+        figsize=(4 * n_modules, 2 * n_inputs),
         constrained_layout=True,
         squeeze=False,
-        dpi=300,
+        dpi=200,
     )
     axs = np.array(axs)
 
     images = []
-    tick_labels = [str(v.item()) for v in token_values]
+    for row, token_val in enumerate(token_values):
+        for col, name in enumerate(module_names):
+            # ci shape: (n_inputs, seq_len, C) -> select this input
+            data = ci_vals[name][row].detach().cpu().numpy()  # (seq_len, C)
+            ax = axs[row, col]
+            im = ax.matshow(data, aspect="auto", cmap="Blues")
+            images.append(im)
 
-    for j, (name, ci) in enumerate(ci_vals.items()):
-        data = ci.detach().cpu().numpy()
-        ax = axs[0, j]
-        im = ax.matshow(data, aspect="auto", cmap="Blues")
-        images.append(im)
+            ax.xaxis.tick_bottom()
+            ax.xaxis.set_label_position("bottom")
 
-        ax.xaxis.tick_bottom()
-        ax.xaxis.set_label_position("bottom")
-        ax.set_xlabel("Component index")
-        ax.set_ylabel("Input token")
-        ax.set_yticks(range(len(tick_labels)))
-        ax.set_yticklabels(tick_labels)
-        ax.set_title(name)
+            if row == 0:
+                ax.set_title(name)
+            if row == n_inputs - 1:
+                ax.set_xlabel("Component index")
+            else:
+                ax.set_xticklabels([])
+            if col == 0:
+                ax.set_ylabel(f"token {token_val.item()}")
+            else:
+                ax.set_yticklabels([])
 
     norm = plt.Normalize(
         vmin=min(v.min().item() for v in ci_vals.values()),
@@ -96,7 +108,7 @@ def _plot_completeness_ci(
         im.set_norm(norm)
     fig.colorbar(images[0], ax=axs.ravel().tolist())
 
-    fig.suptitle("Completeness CI per input token")
+    fig.suptitle("Completeness CI (per input token × sequence position)")
 
     img = _render_figure(fig)
     plt.close(fig)
