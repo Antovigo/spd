@@ -169,7 +169,6 @@ class NontargetReconLoss(Metric):
     update() is a no-op; compute() fetches nontarget batches directly.
     """
 
-    slow: ClassVar[bool] = True
     metric_section: ClassVar[str] = "nontarget"
 
     def __init__(

@@ -8,7 +8,6 @@ notes: "reference model t-9d2b8f02. Uses shuffled dataset."
 
 # --- General ---
 seed: 0
-autocast_bf16: true
 n_mask_samples: 1
 ci_config:
   mode: global
@@ -62,7 +61,7 @@ loss_metric_configs:
       type: per_batch_per_position
     use_sigmoid_parameterization: false
     n_warmup_steps: 2
-    start_frac: 0.0
+    start_frac: 0.8
 output_loss_type: kl
 
 # --- Training ---
@@ -150,6 +149,7 @@ nontarget_task_config:
   streaming: true
   train_data_split: train
   eval_data_split: val
+  dataset_seed: 0
 nontarget_batch_size: 256
 nontarget_eval_batch_size: 256
 nontarget_impmin_coeff_ratio: 2
