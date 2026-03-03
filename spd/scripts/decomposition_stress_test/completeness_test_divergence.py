@@ -85,11 +85,16 @@ def run_pgd(
     loss_type: Literal["mse", "kl"],
     n_steps: int,
     step_size: float,
+    reverse: bool,
 ) -> tuple[dict[str, Tensor], Float[Tensor, ""], Tensor, Tensor]:
-    """Run PGD to maximize Div(original, no_delta) - Div(original, with_delta).
+    """Run PGD to maximize divergence gap.
+
+    Default: Div(original, no_delta) - Div(original, with_delta).
+    Reverse: Div(original, with_delta) - Div(original, no_delta).
 
     Returns (optimized_sources, final_loss, out_no_delta, out_with_delta).
     """
+    sign = -1.0 if reverse else 1.0
     # Initialize sources randomly
     sources: dict[str, Tensor] = {}
     for module, active_mask in active.items():
@@ -119,7 +124,7 @@ def run_pgd(
             calc_sum_recon_loss_lm(pred=out_with_delta, target=original_output, loss_type=loss_type)
             / n_examples
         )
-        loss = div_no_delta - div_with_delta
+        loss = sign * (div_no_delta - div_with_delta)
 
         grads = torch.autograd.grad(loss, list(sources.values()))
         with torch.no_grad():
@@ -154,7 +159,7 @@ def run_pgd(
             calc_sum_recon_loss_lm(pred=out_with_delta, target=original_output, loss_type=loss_type)
             / n_examples
         )
-        final_loss = div_no_delta - div_with_delta
+        final_loss = sign * (div_no_delta - div_with_delta)
 
     return binary_sources, final_loss, out_no_delta, out_with_delta
 
@@ -276,6 +281,11 @@ def main() -> None:
     parser.add_argument("--n-steps", type=int, default=100, help="Number of PGD steps")
     parser.add_argument("--step-size", type=float, default=0.01, help="PGD step size")
     parser.add_argument("--top-n", type=int, default=10, help="Number of top output dims to show")
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Maximize Div(original, with_delta) - Div(original, no_delta) instead",
+    )
     parser.add_argument("--device", default="cpu", help="Device to run on")
     args = parser.parse_args()
 
@@ -320,6 +330,7 @@ def main() -> None:
         loss_type=config.output_loss_type,
         n_steps=args.n_steps,
         step_size=args.step_size,
+        reverse=args.reverse,
     )
 
     # 7. Print results
