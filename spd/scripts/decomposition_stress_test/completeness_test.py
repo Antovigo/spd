@@ -196,18 +196,21 @@ def print_divergences(
     print("Divergence from Original Model Output")
     print(f"{'=' * 60}")
 
-    mse_no_delta = ((original - out_no_delta) ** 2).mean().item()
-    mse_with_delta = ((original - out_with_delta) ** 2).mean().item()
-    print(f"  MSE(original, no_delta)   = {mse_no_delta:.6f}")
-    print(f"  MSE(original, with_delta) = {mse_with_delta:.6f}")
-
-    if loss_type == "kl":
-        kl_no_delta = calc_kl_divergence_lm(pred=out_no_delta, target=original, reduce=True).item()
-        kl_with_delta = calc_kl_divergence_lm(
-            pred=out_with_delta, target=original, reduce=True
-        ).item()
-        print(f"  KL(original, no_delta)    = {kl_no_delta:.6f}")
-        print(f"  KL(original, with_delta)  = {kl_with_delta:.6f}")
+    match loss_type:
+        case "mse":
+            mse_no_delta = ((original - out_no_delta) ** 2).mean().item()
+            mse_with_delta = ((original - out_with_delta) ** 2).mean().item()
+            print(f"  MSE(original, no_delta)   = {mse_no_delta:.6f}")
+            print(f"  MSE(original, with_delta) = {mse_with_delta:.6f}")
+        case "kl":
+            kl_no_delta = calc_kl_divergence_lm(
+                pred=out_no_delta, target=original, reduce=True
+            ).item()
+            kl_with_delta = calc_kl_divergence_lm(
+                pred=out_with_delta, target=original, reduce=True
+            ).item()
+            print(f"  KL(original, no_delta)    = {kl_no_delta:.6f}")
+            print(f"  KL(original, with_delta)  = {kl_with_delta:.6f}")
 
 
 def print_top_outputs(
@@ -281,18 +284,12 @@ def main() -> None:
     input_tensor, tokenizer = build_input_tensor(
         model, args.input, model_type, config.tokenizer_name, device
     )
-    print(f"Input tensor shape: {list(input_tensor.shape)}")
 
-    # 3. Compute CI values
-    print("Computing causal importances...")
+    # 3. Compute CI values and identify active components
     ci = compute_ci(model, input_tensor)
-
-    # 4. Identify active components
     active = get_active_masks(ci, args.ci_thr)
-    for module, mask in active.items():
-        n_active = mask.sum().int().item()
-        total = mask.shape[-1]
-        print(f"  {module}: {n_active}/{total} components active (at any position)")
+    n_active = sum(int(mask.any(dim=-1).sum()) for mask in active.values())
+    print(f"Computing causal importances... {n_active} active components")
 
     # 5. Compute weight deltas
     weight_deltas = model.calc_weight_deltas()
