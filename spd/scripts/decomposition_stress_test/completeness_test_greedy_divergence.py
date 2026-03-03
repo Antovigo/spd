@@ -115,6 +115,31 @@ def eval_loss(
     return loss, out_no_delta, out_with_delta
 
 
+def _per_element_loss_divergence(
+    out_no_delta: Tensor,
+    out_with_delta: Tensor,
+    original_output: Tensor,
+    loss_type: Literal["mse", "kl"],
+    sign: float,
+    n_batch: int,
+) -> Float[Tensor, " n_batch"]:
+    """Compute per-batch-element completeness loss (divergence variant)."""
+    match loss_type:
+        case "mse":
+            div_no = ((out_no_delta - original_output) ** 2).flatten(1).mean(1)
+            div_with = ((out_with_delta - original_output) ** 2).flatten(1).mean(1)
+        case "kl":
+            kl_no = calc_kl_divergence_lm(
+                pred=out_no_delta, target=original_output, reduce=False
+            )
+            div_no = kl_no.reshape(n_batch, -1).mean(1)
+            kl_with = calc_kl_divergence_lm(
+                pred=out_with_delta, target=original_output, reduce=False
+            )
+            div_with = kl_with.reshape(n_batch, -1).mean(1)
+    return sign * (div_no - div_with)
+
+
 def run_greedy(
     model: ComponentModel,
     input_tensor: Tensor,
@@ -127,6 +152,9 @@ def run_greedy(
 ) -> tuple[dict[str, Tensor], Float[Tensor, ""], Tensor, Tensor]:
     """Run greedy coordinate descent with random restarts to maximize divergence gap.
 
+    Each sweep batches all single-bit flips into one forward pass instead of evaluating
+    each flip individually.
+
     Default: Div(original, no_delta) - Div(original, with_delta).
     Reverse: Div(original, with_delta) - Div(original, no_delta).
 
@@ -134,11 +162,16 @@ def run_greedy(
     """
     sign = -1.0 if reverse else 1.0
     modules = list(active.keys())
-    # Build flat index mapping: list of (module_name, flat_index)
+    # Only iterate over coordinates where the active mask is non-zero
     coords: list[tuple[str, int]] = []
     for m in modules:
-        n_elements = active[m].numel()
-        coords.extend((m, i) for i in range(n_elements))
+        flat_active = active[m].reshape(-1)
+        for i in range(flat_active.numel()):
+            if flat_active[i] > 0:
+                coords.append((m, i))
+
+    n_coords = len(coords)
+    print(f"  {n_coords} active coordinates")
 
     best_loss_val = float("-inf")
     best_final_loss: Float[Tensor, ""] | None = None
@@ -147,7 +180,6 @@ def run_greedy(
     best_out_with_delta: Tensor | None = None
 
     for restart in range(n_restarts):
-        # Random binary initialization
         sources: dict[str, Tensor] = {
             m: torch.randint(0, 2, active[m].shape, device=active[m].device).float()
             for m in modules
@@ -160,34 +192,79 @@ def run_greedy(
             )
 
         n_sweeps = 0
-        improved = True
-        while improved:
-            improved = False
+        while n_coords > 0:
             n_sweeps += 1
-            for m, flat_idx in coords:
-                flat_view = sources[m].view(-1)
-                # Flip bit
-                flat_view[flat_idx] = 1.0 - flat_view[flat_idx]
 
-                with torch.no_grad():
-                    new_loss, _, _ = eval_loss(
-                        model, input_tensor, sources, active, weight_deltas, loss_type,
-                        original_output, sign,
-                    )
+            # Batch all single-bit flips: create n_coords copies with one bit flipped each
+            batched_sources = {
+                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone()
+                for m in modules
+            }
+            for i, (m, flat_idx) in enumerate(coords):
+                batched_sources[m][i].reshape(-1)[flat_idx] = (
+                    1.0 - batched_sources[m][i].reshape(-1)[flat_idx]
+                )
 
-                if new_loss > current_loss:
-                    current_loss = new_loss
-                    improved = True
-                else:
-                    # Revert
-                    flat_view[flat_idx] = 1.0 - flat_view[flat_idx]
+            batched_active = {
+                m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules
+            }
+            mask_no_delta = {m: batched_active[m] * batched_sources[m] for m in modules}
+            mask_with_delta = {
+                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m])
+                for m in modules
+            }
+            wdam: dict[str, WeightDeltaAndMask] = {
+                m: (
+                    weight_deltas[m],
+                    torch.ones(batched_active[m].shape[:-1], device=active[m].device),
+                )
+                for m in modules
+            }
+            batched_input = input_tensor.expand(n_coords, *input_tensor.shape[1:])
 
-        print(f"  Restart {restart + 1}/{n_restarts}: loss = {current_loss.item():.6f} ({n_sweeps} sweeps)")
+            with torch.no_grad():
+                out_no = model(batched_input, mask_infos=make_mask_infos(mask_no_delta))
+                out_with = model(
+                    batched_input,
+                    mask_infos=make_mask_infos(mask_with_delta, weight_deltas_and_masks=wdam),
+                )
+
+            per_coord_loss = _per_element_loss_divergence(
+                out_no, out_with, original_output, loss_type, sign, n_coords,
+            )
+
+            # Apply all improving flips
+            applied_flips: list[tuple[str, int]] = []
+            for i, (m, flat_idx) in enumerate(coords):
+                if per_coord_loss[i] > current_loss:
+                    sources[m].reshape(-1)[flat_idx] = 1.0 - sources[m].reshape(-1)[flat_idx]
+                    applied_flips.append((m, flat_idx))
+
+            if not applied_flips:
+                break
+
+            # Re-evaluate actual loss after all flips applied together
+            with torch.no_grad():
+                new_loss, _, _ = eval_loss(
+                    model, input_tensor, sources, active, weight_deltas, loss_type,
+                    original_output, sign,
+                )
+
+            if new_loss > current_loss:
+                current_loss = new_loss
+            else:
+                for m, flat_idx in applied_flips:
+                    sources[m].reshape(-1)[flat_idx] = 1.0 - sources[m].reshape(-1)[flat_idx]
+                break
+
+        print(
+            f"  Restart {restart + 1}/{n_restarts}:"
+            f" loss = {current_loss.item():.6f} ({n_sweeps} sweeps)"
+        )
 
         if current_loss.item() > best_loss_val:
             best_loss_val = current_loss.item()
             best_sources = {m: sources[m].clone() for m in modules}
-            # Re-evaluate to get final outputs
             with torch.no_grad():
                 best_final_loss, best_out_no_delta, best_out_with_delta = eval_loss(
                     model, input_tensor, sources, active, weight_deltas, loss_type,
