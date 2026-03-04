@@ -4,7 +4,6 @@ wandb_project: spd
 wandb_run_name: null
 wandb_run_name_prefix: ""
 label: "targeted_PD_LM_test"
-notes: "reference model t-9d2b8f02. Uses shuffled dataset."
 
 # --- General ---
 seed: 0
@@ -76,7 +75,7 @@ eval_batch_size: 256
 grad_clip_norm_components: 0.01
 grad_clip_norm_ci_fns: null
 component_weight_decay: 0.1
-autocast_bf16: false
+autocast_bf16: true
 
 # --- Faithfulness Warmup ---
 faithfulness_warmup_steps: 0
