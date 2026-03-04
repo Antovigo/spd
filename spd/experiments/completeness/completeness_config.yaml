@@ -51,7 +51,7 @@ eval_metric_configs:
   - classname: "CompletenessCIPlots"
 
 pretrained_model_class: "spd.experiments.completeness.models.RedundantCopyTransformer"
-pretrained_model_path: /home/antoine/spd_out/train/completeness_toy_model/completeness.pth
+pretrained_model_path: /home/antoine/spd_out/train/t-112fa3d6/completeness.pth
 
 task_config:
   task_name: completeness
