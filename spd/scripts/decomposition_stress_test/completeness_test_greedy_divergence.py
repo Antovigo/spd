@@ -130,9 +130,7 @@ def _per_element_loss_divergence(
             div_no = ((out_no_delta - original_expanded) ** 2).flatten(1).mean(1)
             div_with = ((out_with_delta - original_expanded) ** 2).flatten(1).mean(1)
         case "kl":
-            kl_no = calc_kl_divergence_lm(
-                pred=out_no_delta, target=original_expanded, reduce=False
-            )
+            kl_no = calc_kl_divergence_lm(pred=out_no_delta, target=original_expanded, reduce=False)
             div_no = kl_no.reshape(n_batch, -1).mean(1)
             kl_with = calc_kl_divergence_lm(
                 pred=out_with_delta, target=original_expanded, reduce=False
@@ -188,8 +186,14 @@ def run_greedy(
 
         with torch.no_grad():
             current_loss, _, _ = eval_loss(
-                model, input_tensor, sources, active, weight_deltas, loss_type,
-                original_output, sign,
+                model,
+                input_tensor,
+                sources,
+                active,
+                weight_deltas,
+                loss_type,
+                original_output,
+                sign,
             )
 
         n_sweeps = 0
@@ -198,21 +202,17 @@ def run_greedy(
 
             # Batch all single-bit flips: create n_coords copies with one bit flipped each
             batched_sources = {
-                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone()
-                for m in modules
+                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone() for m in modules
             }
             for i, (m, flat_idx) in enumerate(coords):
                 batched_sources[m][i].reshape(-1)[flat_idx] = (
                     1.0 - batched_sources[m][i].reshape(-1)[flat_idx]
                 )
 
-            batched_active = {
-                m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules
-            }
+            batched_active = {m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules}
             mask_no_delta = {m: batched_active[m] * batched_sources[m] for m in modules}
             mask_with_delta = {
-                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m])
-                for m in modules
+                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m]) for m in modules
             }
             wdam: dict[str, WeightDeltaAndMask] = {
                 m: (
@@ -231,7 +231,12 @@ def run_greedy(
                 )
 
             per_coord_loss = _per_element_loss_divergence(
-                out_no, out_with, original_output, loss_type, sign, n_coords,
+                out_no,
+                out_with,
+                original_output,
+                loss_type,
+                sign,
+                n_coords,
             )
 
             # Apply all improving flips
@@ -247,8 +252,14 @@ def run_greedy(
             # Re-evaluate actual loss after all flips applied together
             with torch.no_grad():
                 new_loss, _, _ = eval_loss(
-                    model, input_tensor, sources, active, weight_deltas, loss_type,
-                    original_output, sign,
+                    model,
+                    input_tensor,
+                    sources,
+                    active,
+                    weight_deltas,
+                    loss_type,
+                    original_output,
+                    sign,
                 )
 
             if new_loss > current_loss:
@@ -268,8 +279,14 @@ def run_greedy(
             best_sources = {m: sources[m].clone() for m in modules}
             with torch.no_grad():
                 best_final_loss, best_out_no_delta, best_out_with_delta = eval_loss(
-                    model, input_tensor, sources, active, weight_deltas, loss_type,
-                    original_output, sign,
+                    model,
+                    input_tensor,
+                    sources,
+                    active,
+                    weight_deltas,
+                    loss_type,
+                    original_output,
+                    sign,
                 )
 
     assert best_final_loss is not None
