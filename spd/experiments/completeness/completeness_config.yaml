@@ -22,11 +22,13 @@ module_info:
 
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 3e-3
+    coeff: 3e-4
     pnorm: 1.0
     beta: 0.0
   - classname: "StochasticReconSubsetLoss"
     coeff: 1.0
+  - classname: "FaithfulnessLoss"
+    coeff: 10.0
 
 output_loss_type: kl
 
