@@ -15,12 +15,8 @@ class Md:
     def __init__(self) -> None:
         self._blocks: list[str] = []
 
-    def h2(self, text: str) -> "Md":
-        self._blocks.append(f"## {text}")
-        return self
-
-    def h3(self, text: str) -> "Md":
-        self._blocks.append(f"### {text}")
+    def h(self, level: int, text: str) -> "Md":
+        self._blocks.append(f"{'#' * level} {text}")
         return self
 
     def p(self, text: str) -> "Md":
@@ -29,6 +25,11 @@ class Md:
 
     def bullets(self, items: list[str]) -> "Md":
         self._blocks.append("\n".join(f"- {item}" for item in items))
+        return self
+
+    def labeled_list(self, label: str, items: list[str]) -> "Md":
+        lines = [label] + [f"- {item}" for item in items]
+        self._blocks.append("\n".join(lines))
         return self
 
     def numbered(self, items: list[str]) -> "Md":

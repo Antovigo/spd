@@ -195,7 +195,7 @@ _N_TOKENS = 100
 
 
 def _deterministic_storage(
-    regular_val: float = 10.0,
+    _regular_val: float = 10.0,
     embed_val: float = 6.0,
     ci_sum_val: float = 50.0,
     act_sq_sum_val: float = 400.0,

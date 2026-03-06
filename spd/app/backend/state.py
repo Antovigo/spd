@@ -12,13 +12,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import HTTPException
-from spd.graph_interp.repo import GraphInterpRepo
 
 from spd.app.backend.app_tokenizer import AppTokenizer
 from spd.app.backend.database import PromptAttrDB, Run
 from spd.autointerp.repo import InterpRepo
 from spd.configs import Config
 from spd.dataset_attributions.repo import AttributionRepo
+from spd.graph_interp.repo import GraphInterpRepo
 from spd.harvest.repo import HarvestRepo
 from spd.models.component_model import ComponentModel
 from spd.topology import TransformerTopology

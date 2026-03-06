@@ -11,7 +11,8 @@ from typing import Any
 
 import yaml
 
-from spd.graph_interp.db import DONE_MARKER, GraphInterpDB
+from spd.autointerp.db import DONE_MARKER
+from spd.graph_interp.db import GraphInterpDB
 from spd.graph_interp.schemas import LabelResult, PromptEdge, get_graph_interp_dir
 
 

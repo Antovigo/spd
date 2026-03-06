@@ -106,7 +106,6 @@ def get_correlated_components(
     return output
 
 
-
 def has_component(storage: CorrelationStorage, component_key: str) -> bool:
     """Check if a component exists in the storage."""
     return component_key in storage.key_to_idx

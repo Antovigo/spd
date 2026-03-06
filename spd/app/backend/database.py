@@ -123,7 +123,6 @@ class InterventionRunRecord(BaseModel):
     created_at: str
 
 
-
 class PromptAttrDB:
     """SQLite database for storing and querying prompt attribution data.
 
@@ -746,5 +745,3 @@ class PromptAttrDB:
             conn = self._get_conn()
             conn.execute("DELETE FROM intervention_runs WHERE id = ?", (run_id,))
             conn.commit()
-
-

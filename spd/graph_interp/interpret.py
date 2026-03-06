@@ -154,14 +154,19 @@ def run_graph_interp(
                 assert o_stats is not None, f"No output token stats for {key}"
 
                 related = get_related(key, labels_so_far)
-                db.save_prompt_edges([
-                    PromptEdge(
-                        component_key=key, related_key=r.component_key,
-                        pass_name="output", attribution=r.attribution,
-                        related_label=r.label, related_confidence=r.confidence,
-                    )
-                    for r in related
-                ])
+                db.save_prompt_edges(
+                    [
+                        PromptEdge(
+                            component_key=key,
+                            related_key=r.component_key,
+                            pass_name="output",
+                            attribution=r.attribution,
+                            related_label=r.label,
+                            related_confidence=r.confidence,
+                        )
+                        for r in related
+                    ]
+                )
                 prompt = format_output_prompt(
                     component=component,
                     model_metadata=model_metadata,
@@ -189,14 +194,19 @@ def run_graph_interp(
                 assert i_stats is not None, f"No input token stats for {key}"
 
                 related = get_related(key, labels_so_far)
-                db.save_prompt_edges([
-                    PromptEdge(
-                        component_key=key, related_key=r.component_key,
-                        pass_name="input", attribution=r.attribution,
-                        related_label=r.label, related_confidence=r.confidence,
-                    )
-                    for r in related
-                ])
+                db.save_prompt_edges(
+                    [
+                        PromptEdge(
+                            component_key=key,
+                            related_key=r.component_key,
+                            pass_name="input",
+                            attribution=r.attribution,
+                            related_label=r.label,
+                            related_confidence=r.confidence,
+                        )
+                        for r in related
+                    ]
+                )
                 prompt = format_input_prompt(
                     component=component,
                     model_metadata=model_metadata,
@@ -368,5 +378,3 @@ def _check_error_rate(n_errors: int, n_done: int) -> None:
         raise RuntimeError(
             f"Error rate {n_errors / total:.0%} ({n_errors}/{total}) exceeds 5% threshold"
         )
-
-
