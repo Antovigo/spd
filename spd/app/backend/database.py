@@ -287,11 +287,6 @@ class PromptAttrDB:
                 ON forked_intervention_runs(intervention_run_id);
         """)
 
-        # Migration: add edges_data_abs column if missing
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(graphs)").fetchall()}
-        if "edges_data_abs" not in columns:
-            conn.execute("ALTER TABLE graphs ADD COLUMN edges_data_abs TEXT")
-
         conn.commit()
 
     # -------------------------------------------------------------------------
