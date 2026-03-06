@@ -77,8 +77,8 @@ def compute_losses(
                     p_anneal_final_p=cfg.p_anneal_final_p,
                     p_anneal_end_frac=cfg.p_anneal_end_frac,
                     coeff_warmup_frac=cfg.coeff_warmup_frac,
+                    coeff_peak_multiplier=cfg.coeff_peak_multiplier,
                     coeff_anneal_start_frac=cfg.coeff_anneal_start_frac,
-                    coeff_anneal_final_multiplier=cfg.coeff_anneal_final_multiplier,
                     coeff_anneal_end_frac=cfg.coeff_anneal_end_frac,
                 )
             case UnmaskedReconLossConfig():
