@@ -160,25 +160,20 @@ Document what you learn, even if it's "this was more complicated than expected."
 
 
 def _format_model_info(model_info: dict[str, Any]) -> str:
-    parts = [f"- **Architecture**: {model_info.get('summary', 'Unknown')}"]
+    target_config = model_info["target_model_config"]
+    topology = model_info["topology"]
+    block = topology["block_structure"][0]
 
-    tc = model_info.get("target_model_config", {})
-    for key, label in [
-        ("n_layer", "Layers"),
-        ("n_embd", "Hidden dim"),
-        ("vocab_size", "Vocab size"),
-        ("n_ctx", "Context length"),
-    ]:
-        if key in tc:
-            parts.append(f"- **{label}**: {tc[key]}")
-
-    topology = model_info.get("topology")
-    if topology and topology.get("block_structure"):
-        block = topology["block_structure"][0]
-        parts.append(f"- **Attention projections**: {', '.join(block.get('attn_projections', []))}")
-        parts.append(f"- **FFN projections**: {', '.join(block.get('ffn_projections', []))}")
-
-    return "\n".join(parts)
+    return "\n".join(
+        [
+            f"- **Architecture**: {model_info['summary']}",
+            f"- **Layers**: {target_config['n_layer']}",
+            f"- **Hidden dim**: {target_config['n_embd']}",
+            f"- **Vocab size**: {target_config['vocab_size']}",
+            f"- **Attention projections**: {', '.join(block['attn_projections'])}",
+            f"- **FFN projections**: {', '.join(block['ffn_projections'])}",
+        ]
+    )
 
 
 def get_agent_prompt(

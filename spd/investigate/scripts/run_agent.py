@@ -64,18 +64,18 @@ def find_available_port(start_port: int = 8000, max_attempts: int = 100) -> int:
     )
 
 
-def wait_for_backend(port: int, timeout: float = 120.0) -> bool:
+def wait_for_backend(port: int, timeout: float = 120.0) -> None:
     url = f"http://localhost:{port}/api/health"
     start = time.time()
     while time.time() - start < timeout:
         try:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
-                return True
+                return
         except requests.exceptions.ConnectionError:
             pass
         time.sleep(1)
-    return False
+    raise RuntimeError(f"Backend on port {port} failed to start within {timeout}s")
 
 
 def load_run(port: int, wandb_path: str, context_length: int) -> None:
@@ -98,26 +98,16 @@ def log_event(events_path: Path, event: InvestigationEvent) -> None:
         f.write(event.model_dump_json() + "\n")
 
 
-def run_agent(
-    wandb_path: str,
-    inv_id: str,
-    context_length: int = 128,
-    max_turns: int = 50,
-) -> None:
-    """Run a single investigation agent.
-
-    Args:
-        wandb_path: WandB path of the SPD run.
-        inv_id: Unique identifier for this investigation.
-        context_length: Context length for prompts.
-        max_turns: Maximum agentic turns before stopping (prevents runaway agents).
-    """
+def run_agent(inv_id: str) -> None:
+    """Run a single investigation agent. All config read from metadata.json."""
     inv_dir = get_investigation_output_dir(inv_id)
     assert inv_dir.exists(), f"Investigation directory does not exist: {inv_dir}"
 
-    # Read prompt from metadata
     metadata: dict[str, Any] = json.loads((inv_dir / "metadata.json").read_text())
-    prompt = metadata["prompt"]
+    wandb_path: str = metadata["wandb_path"]
+    prompt: str = metadata["prompt"]
+    context_length: int = metadata["context_length"]
+    max_turns: int = metadata["max_turns"]
 
     write_claude_settings(inv_dir)
 
@@ -183,12 +173,7 @@ def run_agent(
 
     try:
         logger.info(f"[{inv_id}] Waiting for backend...")
-        if not wait_for_backend(port):
-            log_event(
-                events_path,
-                InvestigationEvent(event_type="error", message="Backend failed to start"),
-            )
-            raise RuntimeError("Backend failed to start")
+        wait_for_backend(port)
 
         logger.info(f"[{inv_id}] Backend ready, loading run...")
         log_event(
