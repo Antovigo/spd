@@ -5,18 +5,11 @@ Extracted from the original prompt_template.py.
 """
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.app.backend.utils import delimit_tokens
 from spd.autointerp.config import CompactSkepticalConfig
+from spd.autointerp.prompt_helpers import DATASET_DESCRIPTIONS, build_fires_on_examples
 from spd.autointerp.schemas import ModelMetadata
 from spd.harvest.analysis import TokenPRLift
 from spd.harvest.schemas import ComponentData
-
-DATASET_DESCRIPTIONS: dict[str, str] = {
-    "SimpleStories/SimpleStories": (
-        "SimpleStories: 2M+ short stories (200-350 words), grade 1-8 reading level. "
-        "Simple vocabulary, common narrative elements."
-    ),
-}
 
 SPD_CONTEXT = (
     "Each component has a causal importance (CI) value per token position. "
@@ -49,7 +42,7 @@ def format_prompt(
 
     input_section = _build_input_section(input_token_stats, input_pmi)
     output_section = _build_output_section(output_token_stats, output_pmi)
-    examples_section = _build_examples_section(
+    examples_section = build_fires_on_examples(
         component,
         app_tok,
         config.max_examples,
@@ -145,22 +138,5 @@ def _build_output_section(
         section += "\n**Output PMI — tokens the model predicts at higher-than-base-rate when this component fires:**\n"
         for tok, pmi in output_pmi[:6]:
             section += f"- {repr(tok)}: {pmi:.2f}\n"
-
-    return section
-
-
-def _build_examples_section(
-    component: ComponentData,
-    app_tok: AppTokenizer,
-    max_examples: int,
-) -> str:
-    section = ""
-    examples = component.activation_examples[:max_examples]
-
-    for i, ex in enumerate(examples):
-        if any(ex.firings):
-            spans = app_tok.get_spans(ex.token_ids)
-            tokens = list(zip(spans, ex.firings, strict=True))
-            section += f"{i + 1}. {delimit_tokens(tokens)}\n"
 
     return section

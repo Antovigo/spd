@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from spd.dataset_attributions.config import AttributionsSlurmConfig
-from spd.dataset_attributions.scripts import run as attribution_run
+from spd.dataset_attributions.scripts import run_merge, run_worker
 from spd.log import logger
 from spd.utils.git_utils import create_git_snapshot
 from spd.utils.slurm import (
@@ -80,18 +80,20 @@ def submit_attributions(
     suffix = f"-{job_suffix}" if job_suffix else ""
     array_job_name = f"spd-attr{suffix}"
 
-    config_json = config.config.model_dump_json(exclude_none=True)
+    inner_config = config.config
+    if harvest_subrun_id is not None and inner_config.harvest_subrun_id is None:
+        inner_config = inner_config.model_copy(update={"harvest_subrun_id": harvest_subrun_id})
+    config_json = inner_config.model_dump_json(exclude_none=True)
 
     # SLURM arrays are 1-indexed, so task ID 1 -> rank 0, etc.
     worker_commands = []
     for rank in range(n_gpus):
-        cmd = attribution_run.get_worker_command(
+        cmd = run_worker.get_command(
             wandb_path,
             config_json,
             rank=rank,
             world_size=n_gpus,
             subrun_id=subrun_id,
-            harvest_subrun_id=harvest_subrun_id,
         )
         worker_commands.append(cmd)
 
@@ -115,12 +117,13 @@ def submit_attributions(
     )
 
     # Submit merge job with dependency on array completion
-    merge_cmd = attribution_run.get_merge_command(wandb_path, subrun_id)
+    merge_cmd = run_merge.get_command(wandb_path, subrun_id)
     merge_config = SlurmConfig(
         job_name="spd-attr-merge",
         partition=partition,
-        n_gpus=0,  # No GPU needed for merge
+        n_gpus=0,
         time=config.merge_time,
+        mem=config.merge_mem,
         snapshot_branch=snapshot_branch,
         dependency_job_id=array_result.job_id,
         comment=wandb_url,
