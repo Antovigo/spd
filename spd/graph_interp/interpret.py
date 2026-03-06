@@ -12,7 +12,6 @@ prompt include labels from previously-processed layers.
 
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
-from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -36,13 +35,15 @@ from spd.graph_interp.prompts import (
     format_unification_prompt,
 )
 from spd.graph_interp.schemas import LabelResult, PromptEdge
-from spd.harvest.analysis import get_input_token_stats, get_output_token_stats
+from spd.harvest.analysis import TokenPRLift, get_input_token_stats, get_output_token_stats
 from spd.harvest.repo import HarvestRepo
+from spd.harvest.schemas import ComponentData
 from spd.harvest.storage import CorrelationStorage, TokenStatsStorage
 from spd.log import logger
 
 GetRelated = Callable[[str, dict[str, LabelResult]], list[RelatedComponent]]
 Step = Callable[[list[str], dict[str, LabelResult]], Awaitable[dict[str, LabelResult]]]
+MakePrompt = Callable[["ComponentData", "TokenPRLift", list[RelatedComponent]], str]
 
 
 def run_graph_interp(
@@ -106,23 +107,13 @@ def run_graph_interp(
         layer, idx = concrete_key.rsplit(":", 1)
         return f"{concrete_to_canon[layer]}:{idx}"
 
-    def _make_get_targets(metric: AttrMetric) -> "graph_context.GetAttributed":
+    def _make_get_attributed(
+        method: Callable[..., list[DatasetAttributionEntry]], metric: AttrMetric
+    ) -> "graph_context.GetAttributed":
         def get(
             key: str, k: int, sign: Literal["positive", "negative"]
         ) -> list[DatasetAttributionEntry]:
-            return _translate_entries(
-                attribution_storage.get_top_targets(_to_canon(key), k=k, sign=sign, metric=metric)
-            )
-
-        return get
-
-    def _make_get_sources(metric: AttrMetric) -> "graph_context.GetAttributed":
-        def get(
-            key: str, k: int, sign: Literal["positive", "negative"]
-        ) -> list[DatasetAttributionEntry]:
-            return _translate_entries(
-                attribution_storage.get_top_sources(_to_canon(key), k=k, sign=sign, metric=metric)
-            )
+            return _translate_entries(method(_to_canon(key), k=k, sign=sign, metric=metric))
 
         return get
 
@@ -138,87 +129,49 @@ def run_graph_interp(
 
         return get
 
-    # -- Layer processors ------------------------------------------------------
+    # -- Layer processor (shared for output and input passes) --------------------
 
-    async def process_output_layer(
+    def _make_process_layer(
         get_related: GetRelated,
         save_label: Callable[[LabelResult], None],
-        pending: list[str],
-        labels_so_far: dict[str, LabelResult],
-    ) -> dict[str, LabelResult]:
-        def jobs() -> Iterable[LLMJob]:
-            for key in pending:
-                component = harvest.get_component(key)
-                assert component is not None, f"Component {key} not found in harvest DB"
-                o_stats = get_output_token_stats(token_stats, key, app_tok, top_k=50)
-                assert o_stats is not None, f"No output token stats for {key}"
+        pass_name: Literal["output", "input"],
+        get_token_stats: Callable[[str], TokenPRLift | None],
+        make_prompt: MakePrompt,
+    ) -> Step:
+        async def process(
+            pending: list[str],
+            labels_so_far: dict[str, LabelResult],
+        ) -> dict[str, LabelResult]:
+            def jobs() -> Iterable[LLMJob]:
+                for key in pending:
+                    component = harvest.get_component(key)
+                    assert component is not None, f"Component {key} not found in harvest DB"
+                    stats = get_token_stats(key)
+                    assert stats is not None, f"No {pass_name} token stats for {key}"
 
-                related = get_related(key, labels_so_far)
-                db.save_prompt_edges(
-                    [
-                        PromptEdge(
-                            component_key=key,
-                            related_key=r.component_key,
-                            pass_name="output",
-                            attribution=r.attribution,
-                            related_label=r.label,
-                            related_confidence=r.confidence,
-                        )
-                        for r in related
-                    ]
-                )
-                prompt = format_output_prompt(
-                    component=component,
-                    model_metadata=model_metadata,
-                    app_tok=app_tok,
-                    output_token_stats=o_stats,
-                    related=related,
-                    label_max_words=config.label_max_words,
-                    max_examples=config.max_examples,
-                )
-                yield LLMJob(prompt=prompt, schema=LABEL_SCHEMA, key=key)
+                    related = get_related(key, labels_so_far)
+                    db.save_prompt_edges(
+                        [
+                            PromptEdge(
+                                component_key=key,
+                                related_key=r.component_key,
+                                pass_name=pass_name,
+                                attribution=r.attribution,
+                                related_label=r.label,
+                                related_confidence=r.confidence,
+                            )
+                            for r in related
+                        ]
+                    )
+                    yield LLMJob(
+                        prompt=make_prompt(component, stats, related),
+                        schema=LABEL_SCHEMA,
+                        key=key,
+                    )
 
-        return await _collect_labels(llm_map, jobs(), len(pending), save_label)
+            return await _collect_labels(llm_map, jobs(), len(pending), save_label)
 
-    async def process_input_layer(
-        get_related: GetRelated,
-        save_label: Callable[[LabelResult], None],
-        pending: list[str],
-        labels_so_far: dict[str, LabelResult],
-    ) -> dict[str, LabelResult]:
-        def jobs() -> Iterable[LLMJob]:
-            for key in pending:
-                component = harvest.get_component(key)
-                assert component is not None, f"Component {key} not found in harvest DB"
-                i_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
-                assert i_stats is not None, f"No input token stats for {key}"
-
-                related = get_related(key, labels_so_far)
-                db.save_prompt_edges(
-                    [
-                        PromptEdge(
-                            component_key=key,
-                            related_key=r.component_key,
-                            pass_name="input",
-                            attribution=r.attribution,
-                            related_label=r.label,
-                            related_confidence=r.confidence,
-                        )
-                        for r in related
-                    ]
-                )
-                prompt = format_input_prompt(
-                    component=component,
-                    model_metadata=model_metadata,
-                    app_tok=app_tok,
-                    input_token_stats=i_stats,
-                    related=related,
-                    label_max_words=config.label_max_words,
-                    max_examples=config.max_examples,
-                )
-                yield LLMJob(prompt=prompt, schema=LABEL_SCHEMA, key=key)
-
-        return await _collect_labels(llm_map, jobs(), len(pending), save_label)
+        return process
 
     # -- Scan (fold over layers) -----------------------------------------------
 
@@ -292,18 +245,48 @@ def run_graph_interp(
     db = GraphInterpDB(db_path)
 
     metric = config.attr_metric
-    get_targets = _make_get_targets(metric)
-    get_sources = _make_get_sources(metric)
+    get_targets = _make_get_attributed(attribution_storage.get_top_targets, metric)
+    get_sources = _make_get_attributed(attribution_storage.get_top_sources, metric)
 
-    label_output = partial(
-        process_output_layer,
+    def _output_prompt(
+        component: ComponentData, stats: TokenPRLift, related: list[RelatedComponent]
+    ) -> str:
+        return format_output_prompt(
+            component=component,
+            model_metadata=model_metadata,
+            app_tok=app_tok,
+            output_token_stats=stats,
+            related=related,
+            label_max_words=config.label_max_words,
+            max_examples=config.max_examples,
+        )
+
+    def _input_prompt(
+        component: ComponentData, stats: TokenPRLift, related: list[RelatedComponent]
+    ) -> str:
+        return format_input_prompt(
+            component=component,
+            model_metadata=model_metadata,
+            app_tok=app_tok,
+            input_token_stats=stats,
+            related=related,
+            label_max_words=config.label_max_words,
+            max_examples=config.max_examples,
+        )
+
+    label_output = _make_process_layer(
         _get_related(get_targets),
         db.save_output_label,
+        "output",
+        lambda key: get_output_token_stats(token_stats, key, app_tok, top_k=50),
+        _output_prompt,
     )
-    label_input = partial(
-        process_input_layer,
+    label_input = _make_process_layer(
         _get_related(get_sources),
         db.save_input_label,
+        "input",
+        lambda key: get_input_token_stats(token_stats, key, app_tok, top_k=20),
+        _input_prompt,
     )
 
     async def _run() -> None:

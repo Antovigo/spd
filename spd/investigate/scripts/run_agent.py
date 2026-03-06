@@ -30,7 +30,6 @@ from spd.log import logger
 
 
 def write_mcp_config(inv_dir: Path, port: int) -> Path:
-    """Write MCP configuration file for Claude Code."""
     mcp_config = {
         "mcpServers": {
             "spd": {
@@ -45,7 +44,6 @@ def write_mcp_config(inv_dir: Path, port: int) -> Path:
 
 
 def write_claude_settings(inv_dir: Path) -> None:
-    """Write Claude Code settings to pre-grant MCP tool permissions."""
     claude_dir = inv_dir / ".claude"
     claude_dir.mkdir(exist_ok=True)
     settings = {"permissions": {"allow": ["mcp__spd__*"]}}
@@ -53,7 +51,6 @@ def write_claude_settings(inv_dir: Path) -> None:
 
 
 def find_available_port(start_port: int = 8000, max_attempts: int = 100) -> int:
-    """Find an available port starting from start_port."""
     for offset in range(max_attempts):
         port = start_port + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -68,7 +65,6 @@ def find_available_port(start_port: int = 8000, max_attempts: int = 100) -> int:
 
 
 def wait_for_backend(port: int, timeout: float = 120.0) -> bool:
-    """Wait for the backend to become healthy."""
     url = f"http://localhost:{port}/api/health"
     start = time.time()
     while time.time() - start < timeout:
@@ -83,7 +79,6 @@ def wait_for_backend(port: int, timeout: float = 120.0) -> bool:
 
 
 def load_run(port: int, wandb_path: str, context_length: int) -> None:
-    """Load the SPD run into the backend. Raises on failure."""
     url = f"http://localhost:{port}/api/runs/load"
     params = {"wandb_path": wandb_path, "context_length": context_length}
     resp = requests.post(url, params=params, timeout=300)
@@ -93,15 +88,12 @@ def load_run(port: int, wandb_path: str, context_length: int) -> None:
 
 
 def fetch_model_info(port: int) -> dict[str, Any]:
-    """Fetch model architecture info from the backend."""
     resp = requests.get(f"http://localhost:{port}/api/pretrain_info/loaded", timeout=30)
     assert resp.status_code == 200, f"Failed to fetch model info: {resp.status_code} {resp.text}"
-    result: dict[str, Any] = resp.json()
-    return result
+    return resp.json()
 
 
 def log_event(events_path: Path, event: InvestigationEvent) -> None:
-    """Append an event to the events log."""
     with open(events_path, "a") as f:
         f.write(event.model_dump_json() + "\n")
 
@@ -174,8 +166,7 @@ def run_agent(
         stderr=subprocess.STDOUT,
     )
 
-    def cleanup(signum: int | None = None, frame: FrameType | None = None) -> None:
-        _ = frame
+    def cleanup(signum: int | None = None, _frame: FrameType | None = None) -> None:
         logger.info(f"[{inv_id}] Cleaning up...")
         if backend_proc.poll() is None:
             backend_proc.terminate()

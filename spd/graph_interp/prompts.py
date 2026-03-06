@@ -205,13 +205,8 @@ def _format_related(
     for n in visible:
         display = _component_display(n.component_key, model_metadata, app_tok)
         rel_attr = n.attribution / norm
-
-        parts = [f"  {display} (relative attribution: {rel_attr:+.2f}"]
-        if n.pmi is not None:
-            parts.append(f", co-firing PMI: {n.pmi:.2f}")
-        parts.append(")")
-
-        line = "".join(parts)
+        pmi_str = f", co-firing PMI: {n.pmi:.2f}" if n.pmi is not None else ""
+        line = f"  {display} (relative attribution: {rel_attr:+.2f}{pmi_str})"
         if n.label is not None:
             line += f'\n    label: "{n.label}" (confidence: {n.confidence})'
         lines.append(line)

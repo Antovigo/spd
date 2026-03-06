@@ -128,21 +128,32 @@ def build_input_section(
     return md
 
 
+def _build_examples(
+    component: ComponentData,
+    app_tok: AppTokenizer,
+    max_examples: int,
+    shift_firings: bool,
+) -> Md:
+    lines: list[str] = []
+    for i, ex in enumerate(component.activation_examples[:max_examples]):
+        if not any(ex.firings):
+            continue
+        spans = app_tok.get_spans(ex.token_ids)
+        firings = [False] + ex.firings[:-1] if shift_firings else ex.firings
+        tokens = list(zip(spans, firings, strict=True))
+        lines.append(f"{i + 1}. {delimit_tokens(tokens)}")
+    md = Md()
+    if lines:
+        md.p("\n".join(lines))
+    return md
+
+
 def build_fires_on_examples(
     component: ComponentData,
     app_tok: AppTokenizer,
     max_examples: int,
 ) -> Md:
-    lines: list[str] = []
-    for i, ex in enumerate(component.activation_examples[:max_examples]):
-        if any(ex.firings):
-            spans = app_tok.get_spans(ex.token_ids)
-            tokens = list(zip(spans, ex.firings, strict=True))
-            lines.append(f"{i + 1}. {delimit_tokens(tokens)}")
-    md = Md()
-    if lines:
-        md.p("\n".join(lines))
-    return md
+    return _build_examples(component, app_tok, max_examples, shift_firings=False)
 
 
 def build_says_examples(
@@ -150,14 +161,4 @@ def build_says_examples(
     app_tok: AppTokenizer,
     max_examples: int,
 ) -> Md:
-    lines: list[str] = []
-    for i, ex in enumerate(component.activation_examples[:max_examples]):
-        if any(ex.firings):
-            spans = app_tok.get_spans(ex.token_ids)
-            shifted_firings = [False] + ex.firings[:-1]
-            tokens = list(zip(spans, shifted_firings, strict=True))
-            lines.append(f"{i + 1}. {delimit_tokens(tokens)}")
-    md = Md()
-    if lines:
-        md.p("\n".join(lines))
-    return md
+    return _build_examples(component, app_tok, max_examples, shift_firings=True)

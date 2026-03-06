@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS prompt_edges (
 """
 
 
+_LABEL_TABLES = ("output_labels", "input_labels", "unified_labels")
+
+
 class GraphInterpDB:
     """NFS-hosted. Uses open_nfs_sqlite (no WAL). Single writer, then read-only."""
 
@@ -60,11 +63,12 @@ class GraphInterpDB:
     def mark_done(self) -> None:
         (self._db_path.parent / DONE_MARKER).touch()
 
-    # -- Output labels ---------------------------------------------------------
+    # -- Label CRUD (shared across output/input/unified) -----------------------
 
-    def save_output_label(self, result: LabelResult) -> None:
+    def _save_label(self, table: str, result: LabelResult) -> None:
+        assert table in _LABEL_TABLES
         self._conn.execute(
-            "INSERT OR REPLACE INTO output_labels VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT OR REPLACE INTO {table} VALUES (?, ?, ?, ?, ?, ?)",
             (
                 result.component_key,
                 result.label,
@@ -76,73 +80,52 @@ class GraphInterpDB:
         )
         self._conn.commit()
 
-    def get_output_label(self, component_key: str) -> LabelResult | None:
+    def _get_label(self, table: str, component_key: str) -> LabelResult | None:
+        assert table in _LABEL_TABLES
         row = self._conn.execute(
-            "SELECT * FROM output_labels WHERE component_key = ?", (component_key,)
+            f"SELECT * FROM {table} WHERE component_key = ?", (component_key,)
         ).fetchone()
         if row is None:
             return None
         return _row_to_label_result(row)
 
-    def get_all_output_labels(self) -> dict[str, LabelResult]:
-        rows = self._conn.execute("SELECT * FROM output_labels").fetchall()
+    def _get_all_labels(self, table: str) -> dict[str, LabelResult]:
+        assert table in _LABEL_TABLES
+        rows = self._conn.execute(f"SELECT * FROM {table}").fetchall()
         return {row["component_key"]: _row_to_label_result(row) for row in rows}
+
+    # -- Output labels ---------------------------------------------------------
+
+    def save_output_label(self, result: LabelResult) -> None:
+        self._save_label("output_labels", result)
+
+    def get_output_label(self, component_key: str) -> LabelResult | None:
+        return self._get_label("output_labels", component_key)
+
+    def get_all_output_labels(self) -> dict[str, LabelResult]:
+        return self._get_all_labels("output_labels")
 
     # -- Input labels ----------------------------------------------------------
 
     def save_input_label(self, result: LabelResult) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO input_labels VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                result.component_key,
-                result.label,
-                result.confidence,
-                result.reasoning,
-                result.raw_response,
-                result.prompt,
-            ),
-        )
-        self._conn.commit()
+        self._save_label("input_labels", result)
 
     def get_input_label(self, component_key: str) -> LabelResult | None:
-        row = self._conn.execute(
-            "SELECT * FROM input_labels WHERE component_key = ?", (component_key,)
-        ).fetchone()
-        if row is None:
-            return None
-        return _row_to_label_result(row)
+        return self._get_label("input_labels", component_key)
 
     def get_all_input_labels(self) -> dict[str, LabelResult]:
-        rows = self._conn.execute("SELECT * FROM input_labels").fetchall()
-        return {row["component_key"]: _row_to_label_result(row) for row in rows}
+        return self._get_all_labels("input_labels")
 
     # -- Unified labels --------------------------------------------------------
 
     def save_unified_label(self, result: LabelResult) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO unified_labels VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                result.component_key,
-                result.label,
-                result.confidence,
-                result.reasoning,
-                result.raw_response,
-                result.prompt,
-            ),
-        )
-        self._conn.commit()
+        self._save_label("unified_labels", result)
 
     def get_unified_label(self, component_key: str) -> LabelResult | None:
-        row = self._conn.execute(
-            "SELECT * FROM unified_labels WHERE component_key = ?", (component_key,)
-        ).fetchone()
-        if row is None:
-            return None
-        return _row_to_label_result(row)
+        return self._get_label("unified_labels", component_key)
 
     def get_all_unified_labels(self) -> dict[str, LabelResult]:
-        rows = self._conn.execute("SELECT * FROM unified_labels").fetchall()
-        return {row["component_key"]: _row_to_label_result(row) for row in rows}
+        return self._get_all_labels("unified_labels")
 
     def get_completed_unified_keys(self) -> set[str]:
         rows = self._conn.execute("SELECT component_key FROM unified_labels").fetchall()
@@ -178,12 +161,10 @@ class GraphInterpDB:
         rows = self._conn.execute("SELECT * FROM prompt_edges").fetchall()
         return [_row_to_prompt_edge(row) for row in rows]
 
-    # -- Config ----------------------------------------------------------------
-
     # -- Stats -----------------------------------------------------------------
 
     def get_label_count(self, table: str) -> int:
-        assert table in ("output_labels", "input_labels", "unified_labels")
+        assert table in _LABEL_TABLES
         row = self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
         assert row is not None
         return row[0]
