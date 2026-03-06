@@ -73,7 +73,9 @@ def _save_base_intervention_run(
         for k, ci in node_ci_vals.items()
         if k.split(":")[0] not in NON_INTERVENTABLE_LAYERS and ci > 0
     ]
-    assert len(interventable_keys) > 0, "No interventable nodes with CI > 0"
+    if not interventable_keys:
+        logger.warning(f"Graph {graph_id}: no interventable nodes with CI > 0, skipping base intervention run")
+        return
 
     active_nodes: list[tuple[str, int, int]] = []
     for key in interventable_keys:
