@@ -123,15 +123,6 @@ class InterventionRunRecord(BaseModel):
     created_at: str
 
 
-class ForkedInterventionRunRecord(BaseModel):
-    """A forked intervention run with modified tokens (currently unused)."""
-
-    id: int
-    intervention_run_id: int
-    token_replacements: list[tuple[int, int]]  # [(seq_pos, new_token_id), ...]
-    result_json: str
-    created_at: str
-
 
 class PromptAttrDB:
     """SQLite database for storing and querying prompt attribution data.
@@ -274,17 +265,6 @@ class PromptAttrDB:
 
             CREATE INDEX IF NOT EXISTS idx_intervention_runs_graph
                 ON intervention_runs(graph_id);
-
-            CREATE TABLE IF NOT EXISTS forked_intervention_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                intervention_run_id INTEGER NOT NULL REFERENCES intervention_runs(id) ON DELETE CASCADE,
-                token_replacements TEXT NOT NULL,  -- JSON array of [seq_pos, new_token_id] tuples
-                result TEXT NOT NULL,  -- JSON InterventionResponse
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_forked_intervention_runs_parent
-                ON forked_intervention_runs(intervention_run_id);
         """)
 
         conn.commit()
@@ -691,13 +671,6 @@ class PromptAttrDB:
         with self._write_lock():
             conn = self._get_conn()
             graph_ids_query = "SELECT id FROM graphs WHERE prompt_id = ?"
-            intervention_ids_query = (
-                f"SELECT id FROM intervention_runs WHERE graph_id IN ({graph_ids_query})"
-            )
-            conn.execute(
-                f"DELETE FROM forked_intervention_runs WHERE intervention_run_id IN ({intervention_ids_query})",
-                (prompt_id,),
-            )
             conn.execute(
                 f"DELETE FROM intervention_runs WHERE graph_id IN ({graph_ids_query})",
                 (prompt_id,),
@@ -705,26 +678,6 @@ class PromptAttrDB:
             conn.execute("DELETE FROM graphs WHERE prompt_id = ?", (prompt_id,))
             conn.execute("DELETE FROM prompts WHERE id = ?", (prompt_id,))
             conn.commit()
-
-    def delete_graphs_for_prompt(self, prompt_id: int) -> int:
-        """Delete all graphs for a prompt. Returns the number of deleted rows."""
-        with self._write_lock():
-            conn = self._get_conn()
-            cursor = conn.execute("DELETE FROM graphs WHERE prompt_id = ?", (prompt_id,))
-            conn.commit()
-            return cursor.rowcount
-
-    def delete_graphs_for_run(self, run_id: int) -> int:
-        """Delete all graphs for all prompts in a run. Returns the number of deleted rows."""
-        with self._write_lock():
-            conn = self._get_conn()
-            cursor = conn.execute(
-                """DELETE FROM graphs
-                   WHERE prompt_id IN (SELECT id FROM prompts WHERE run_id = ?)""",
-                (run_id,),
-            )
-            conn.commit()
-            return cursor.rowcount
 
     # -------------------------------------------------------------------------
     # Intervention run operations
@@ -794,101 +747,4 @@ class PromptAttrDB:
             conn.execute("DELETE FROM intervention_runs WHERE id = ?", (run_id,))
             conn.commit()
 
-    def delete_intervention_runs_for_graph(self, graph_id: int) -> int:
-        """Delete all intervention runs for a graph. Returns count deleted."""
-        with self._write_lock():
-            conn = self._get_conn()
-            cursor = conn.execute("DELETE FROM intervention_runs WHERE graph_id = ?", (graph_id,))
-            conn.commit()
-            return cursor.rowcount
 
-    # -------------------------------------------------------------------------
-    # Forked intervention run operations
-    # -------------------------------------------------------------------------
-
-    def save_forked_intervention_run(
-        self,
-        intervention_run_id: int,
-        token_replacements: list[tuple[int, int]],
-        result_json: str,
-    ) -> int:
-        """Save a forked intervention run.
-
-        Args:
-            intervention_run_id: The parent intervention run ID.
-            token_replacements: List of (seq_pos, new_token_id) tuples.
-            result_json: JSON-encoded InterventionResponse.
-
-        Returns:
-            The forked intervention run ID.
-        """
-        with self._write_lock():
-            conn = self._get_conn()
-            cursor = conn.execute(
-                """INSERT INTO forked_intervention_runs (intervention_run_id, token_replacements, result)
-                   VALUES (?, ?, ?)""",
-                (intervention_run_id, json.dumps(token_replacements), result_json),
-            )
-            conn.commit()
-            fork_id = cursor.lastrowid
-            assert fork_id is not None
-            return fork_id
-
-    def get_forked_intervention_runs(
-        self, intervention_run_id: int
-    ) -> list[ForkedInterventionRunRecord]:
-        """Get all forked runs for an intervention run.
-
-        Args:
-            intervention_run_id: The parent intervention run ID.
-
-        Returns:
-            List of forked intervention run records, ordered by creation time.
-        """
-        conn = self._get_conn()
-        rows = conn.execute(
-            """SELECT id, intervention_run_id, token_replacements, result, created_at
-               FROM forked_intervention_runs
-               WHERE intervention_run_id = ?
-               ORDER BY created_at""",
-            (intervention_run_id,),
-        ).fetchall()
-
-        return [
-            ForkedInterventionRunRecord(
-                id=row["id"],
-                intervention_run_id=row["intervention_run_id"],
-                token_replacements=json.loads(row["token_replacements"]),
-                result_json=row["result"],
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
-
-    def get_intervention_run(self, run_id: int) -> InterventionRunRecord | None:
-        """Get a single intervention run by ID."""
-        conn = self._get_conn()
-        row = conn.execute(
-            """SELECT id, graph_id, selected_nodes, result, created_at
-               FROM intervention_runs
-               WHERE id = ?""",
-            (run_id,),
-        ).fetchone()
-
-        if row is None:
-            return None
-
-        return InterventionRunRecord(
-            id=row["id"],
-            graph_id=row["graph_id"],
-            selected_nodes=json.loads(row["selected_nodes"]),
-            result_json=row["result"],
-            created_at=row["created_at"],
-        )
-
-    def delete_forked_intervention_run(self, fork_id: int) -> None:
-        """Delete a forked intervention run."""
-        with self._write_lock():
-            conn = self._get_conn()
-            conn.execute("DELETE FROM forked_intervention_runs WHERE id = ?", (fork_id,))
-            conn.commit()

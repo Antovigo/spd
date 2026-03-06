@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from spd.app.backend.app_tokenizer import AppTokenizer
 from spd.app.backend.compute import (
     DEFAULT_EVAL_PGD_CONFIG,
+    MAX_OUTPUT_NODES_PER_POS,
     Edge,
     compute_intervention,
     compute_prompt_attributions,
@@ -279,9 +280,6 @@ GLOBAL_EDGE_LIMIT = 50_000
 
 
 ProgressCallback = Callable[[int, int, str], None]
-
-
-MAX_OUTPUT_NODES_PER_POS = 15
 
 
 def _build_out_probs(
