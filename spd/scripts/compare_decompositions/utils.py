@@ -96,8 +96,12 @@ _ATTN_PATTERN = re.compile(r"h\.(\d+)\.attn\.(q_proj|k_proj|v_proj|o_proj)")
 
 def get_attn_info(model: ComponentModel) -> tuple[int, int, int]:
     """Returns (n_heads, n_kv_heads, d_head) from the target model's first attention module."""
-    for name, module in model.target_model.named_modules():
-        if hasattr(module, "n_head") and hasattr(module, "n_key_value_heads") and hasattr(module, "head_dim"):
+    for _name, module in model.target_model.named_modules():
+        if (
+            hasattr(module, "n_head")
+            and hasattr(module, "n_key_value_heads")
+            and hasattr(module, "head_dim")
+        ):
             return module.n_head, module.n_key_value_heads, module.head_dim
     raise ValueError("Could not find attention module with n_head/n_key_value_heads/head_dim")
 
@@ -156,7 +160,9 @@ def compare_attention_heads(
 ) -> list[ProjComparisonResult]:
     n_heads, n_kv_heads, _d_head = get_attn_info(decomp_a.model)
 
-    shared_modules = [p for p in active_a if p in active_b and parse_attn_module_path(p) is not None]
+    shared_modules = [
+        p for p in active_a if p in active_b and parse_attn_module_path(p) is not None
+    ]
 
     results: list[ProjComparisonResult] = []
     for module_path in sorted(shared_modules):
@@ -172,27 +178,29 @@ def compare_attention_heads(
         n_split = n_heads if proj_type in ("q_proj", "o_proj") else n_kv_heads
 
         # Get per-component weights split by head: (N_active, n_split, flat_dim)
-        stacked_a = torch.stack([
-            split_weight_by_head(
-                get_component_weight(decomp_a.model, module_path, idx), n_split, proj_type
-            )
-            for idx in indices_a
-        ])
-        stacked_b = torch.stack([
-            split_weight_by_head(
-                get_component_weight(decomp_b.model, module_path, idx), n_split, proj_type
-            )
-            for idx in indices_b
-        ])
+        stacked_a = torch.stack(
+            [
+                split_weight_by_head(
+                    get_component_weight(decomp_a.model, module_path, idx), n_split, proj_type
+                )
+                for idx in indices_a
+            ]
+        )
+        stacked_b = torch.stack(
+            [
+                split_weight_by_head(
+                    get_component_weight(decomp_b.model, module_path, idx), n_split, proj_type
+                )
+                for idx in indices_b
+            ]
+        )
 
         # For each pair (i, j), compute (n_split, n_split) cosine sim
         na, nb = len(indices_a), len(indices_b)
         sim_tensor = torch.zeros(na, nb, n_split, n_split)
         for i in range(na):
             for j in range(nb):
-                sim_tensor[i, j] = compute_pairwise_cosine_sim(
-                    stacked_a[i], stacked_b[j]
-                )
+                sim_tensor[i, j] = compute_pairwise_cosine_sim(stacked_a[i], stacked_b[j])
 
         results.append(
             ProjComparisonResult(
@@ -219,9 +227,7 @@ def plot_head_comparisons(result: ProjComparisonResult) -> Figure:
     nb = len(result.active_indices_b)
     n_split = result.sim_tensor.shape[2]
 
-    fig, axes = plt.subplots(
-        na, nb, figsize=(3 * nb + 1, 3 * na + 1), squeeze=False
-    )
+    fig, axes = plt.subplots(na, nb, figsize=(3 * nb + 1, 3 * na + 1), squeeze=False)
 
     im = None
     for i in range(na):
@@ -245,6 +251,187 @@ def plot_head_comparisons(result: ProjComparisonResult) -> Figure:
     fig.tight_layout()
     assert im is not None
     fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6, label="Cosine Similarity")
+    return fig
+
+
+@dataclass
+class UVComparisonResult:
+    layer_idx: int
+    proj_type: str  # "q_proj", "k_proj", "v_proj", "o_proj"
+    label_a: str
+    label_b: str
+    active_indices_a: list[int]
+    active_indices_b: list[int]
+    u_cos_sim: Float[Tensor, "Na Nb n_split"]  # per-head U cosine similarity
+    v_cos_sim: Float[Tensor, "Na Nb n_split"]  # per-head V cosine similarity
+    magnitude: Float[
+        Tensor, "Na Nb n_split"
+    ]  # per-head magnitude: mean of ||U_h||*||V|| or ||U||*||V_h||
+
+
+def get_component_uv(model: ComponentModel, module_path: str, idx: int) -> tuple[Tensor, Tensor]:
+    """Returns (U[idx], V[:, idx]) — raw U and V vectors."""
+    comp = model.components[module_path]
+    assert isinstance(comp, LinearComponents)
+    return comp.U[idx], comp.V[:, idx]
+
+
+def compare_attention_heads_uv(
+    decomp_a: DecompositionInfo,
+    decomp_b: DecompositionInfo,
+    active_a: dict[str, list[int]],
+    active_b: dict[str, list[int]],
+) -> list[UVComparisonResult]:
+    n_heads, n_kv_heads, _d_head = get_attn_info(decomp_a.model)
+
+    shared_modules = [
+        p for p in active_a if p in active_b and parse_attn_module_path(p) is not None
+    ]
+
+    results: list[UVComparisonResult] = []
+    for module_path in sorted(shared_modules):
+        parsed = parse_attn_module_path(module_path)
+        assert parsed is not None
+        layer_idx, proj_type = parsed
+
+        indices_a = active_a[module_path]
+        indices_b = active_b[module_path]
+        if not indices_a or not indices_b:
+            continue
+
+        n_split = n_heads if proj_type in ("q_proj", "o_proj") else n_kv_heads
+        na, nb = len(indices_a), len(indices_b)
+
+        u_cos_sim = torch.zeros(na, nb, n_split)
+        v_cos_sim = torch.zeros(na, nb, n_split)
+        magnitude = torch.zeros(na, nb, n_split)
+
+        for i, idx_a in enumerate(indices_a):
+            u_a, v_a = get_component_uv(decomp_a.model, module_path, idx_a)
+            for j, idx_b in enumerate(indices_b):
+                u_b, v_b = get_component_uv(decomp_b.model, module_path, idx_b)
+
+                if proj_type == "o_proj":
+                    # O proj: V has the head structure (d_in), U doesn't (d_out)
+                    v_a_heads = v_a.reshape(n_split, -1)
+                    v_b_heads = v_b.reshape(n_split, -1)
+                    v_cos_sim[i, j] = F.cosine_similarity(v_a_heads, v_b_heads, dim=-1)
+                    u_scalar = F.cosine_similarity(u_a.unsqueeze(0), u_b.unsqueeze(0)).squeeze()
+                    u_cos_sim[i, j] = u_scalar.expand(n_split)
+                    # Per-head magnitude: ||V_h|| * ||U|| (averaged over the two components)
+                    mag_a = v_a_heads.norm(dim=-1) * u_a.norm()  # (n_split,)
+                    mag_b = v_b_heads.norm(dim=-1) * u_b.norm()
+                    magnitude[i, j] = (mag_a + mag_b) / 2
+                else:
+                    # Q/K/V proj: U has the head structure (d_out), V doesn't (d_in)
+                    u_a_heads = u_a.reshape(n_split, -1)
+                    u_b_heads = u_b.reshape(n_split, -1)
+                    u_cos_sim[i, j] = F.cosine_similarity(u_a_heads, u_b_heads, dim=-1)
+                    v_scalar = F.cosine_similarity(v_a.unsqueeze(0), v_b.unsqueeze(0)).squeeze()
+                    v_cos_sim[i, j] = v_scalar.expand(n_split)
+                    # Per-head magnitude: ||U_h|| * ||V|| (averaged over the two components)
+                    mag_a = u_a_heads.norm(dim=-1) * v_a.norm()  # (n_split,)
+                    mag_b = u_b_heads.norm(dim=-1) * v_b.norm()
+                    magnitude[i, j] = (mag_a + mag_b) / 2
+
+        results.append(
+            UVComparisonResult(
+                layer_idx=layer_idx,
+                proj_type=proj_type,
+                label_a=decomp_a.label,
+                label_b=decomp_b.label,
+                active_indices_a=indices_a,
+                active_indices_b=indices_b,
+                u_cos_sim=u_cos_sim,
+                v_cos_sim=v_cos_sim,
+                magnitude=magnitude,
+            )
+        )
+
+    return results
+
+
+def plot_head_comparisons_uv(result: UVComparisonResult) -> Figure:
+    """Scatter plot grid for a single UVComparisonResult.
+
+    Grid: rows = components from run A, cols = components from run B.
+    Each subplot: scatter with head index on x-axis, cos sim on y-axis.
+    Red dots = U cos_sim, blue dots = V cos_sim. Dot size reflects magnitude.
+    """
+    na = len(result.active_indices_a)
+    nb = len(result.active_indices_b)
+    n_split = result.u_cos_sim.shape[2]
+
+    fig, axes = plt.subplots(na, nb, figsize=(3 * nb + 1, 3 * na + 1), squeeze=False)
+
+    mag_max = result.magnitude.max().item()
+    if mag_max == 0:
+        mag_max = 1.0
+
+    head_x = np.arange(n_split)
+
+    for i in range(na):
+        for j in range(nb):
+            ax = axes[i][j]
+            sizes = (result.magnitude[i, j].cpu().numpy() / mag_max) * 200  # (n_split,)
+            u_vals = result.u_cos_sim[i, j].cpu().numpy()
+            v_vals = result.v_cos_sim[i, j].cpu().numpy()
+
+            ax.scatter(head_x, u_vals, s=sizes, c="red", alpha=0.7, label="U", zorder=3)
+            ax.scatter(head_x, v_vals, s=sizes, c="blue", alpha=0.7, label="V", zorder=3)
+            ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+            ax.set_ylim(-1.1, 1.1)
+            ax.set_xticks(head_x)
+            ax.set_xticklabels(head_x, fontsize=6)
+            ax.set_box_aspect(1)
+
+            if i == 0:
+                ax.set_title(f"{result.label_b} C{result.active_indices_b[j]}", fontsize=8)
+            if j == 0:
+                ax.set_ylabel(f"{result.label_a} C{result.active_indices_a[i]}", fontsize=8)
+            if i == na - 1:
+                ax.set_xlabel("Head", fontsize=7)
+
+    fig.suptitle(f"Layer {result.layer_idx} {result.proj_type} (U/V)", fontsize=14)
+    fig.tight_layout()
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=8, bbox_to_anchor=(0.5, -0.02))
+    return fig
+
+
+def plot_comparison_summary_uv(results: list[UVComparisonResult]) -> Figure:
+    """Bar chart with two bars per projection (U and V), showing mean best-match |cos_sim|."""
+    labels: list[str] = []
+    u_best_matches: list[float] = []
+    v_best_matches: list[float] = []
+
+    for r in results:
+        # For each component in A, find best match in B (max |cos_sim|), then average
+        # u_cos_sim: (Na, Nb, n_split) -> take mean over heads, then best match
+        u_per_pair = r.u_cos_sim.abs().mean(dim=-1)  # (Na, Nb)
+        v_per_pair = r.v_cos_sim.abs().mean(dim=-1)  # (Na, Nb)
+
+        u_best_a = u_per_pair.max(dim=1).values.mean().item()
+        u_best_b = u_per_pair.max(dim=0).values.mean().item()
+        v_best_a = v_per_pair.max(dim=1).values.mean().item()
+        v_best_b = v_per_pair.max(dim=0).values.mean().item()
+
+        labels.append(f"L{r.layer_idx}.{r.proj_type}")
+        u_best_matches.append((u_best_a + u_best_b) / 2)
+        v_best_matches.append((v_best_a + v_best_b) / 2)
+
+    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.8), 4))
+    x = np.arange(len(labels))
+    width = 0.35
+    ax.bar(x - width / 2, u_best_matches, width, color="red", alpha=0.7, label="U")
+    ax.bar(x + width / 2, v_best_matches, width, color="blue", alpha=0.7, label="V")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, fontsize=8, ha="right")
+    ax.set_ylabel("Mean Best-Match |cos sim|")
+    ax.set_title("U/V Component Similarity Summary")
+    ax.set_ylim(0, 1)
+    ax.legend()
+    fig.tight_layout()
     return fig
 
 
