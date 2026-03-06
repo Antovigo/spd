@@ -215,16 +215,18 @@ def _build_loss_result(
             )
 
 
-def _maybe_pgd_config(n_steps: int | None, step_size: float | None) -> PgdConfig | None:
-    if n_steps is not None and step_size is not None:
-        return PgdConfig(n_steps=n_steps, step_size=step_size)
-    return None
-
-
-def _maybe_adv_pgd(n_steps: int | None, step_size: float | None) -> AdvPGDConfig | None:
-    if n_steps is not None and step_size is not None:
-        return AdvPGDConfig(n_steps=n_steps, step_size=step_size, init="random")
-    return None
+def _maybe_pgd(
+    n_steps: int | None, step_size: float | None
+) -> tuple[PgdConfig, AdvPGDConfig] | None:
+    assert (n_steps is None) == (step_size is None), (
+        "adv_pgd n_steps and step_size must both be set or both be None"
+    )
+    if n_steps is None:
+        return None
+    assert step_size is not None  # for narrowing
+    return PgdConfig(n_steps=n_steps, step_size=step_size), AdvPGDConfig(
+        n_steps=n_steps, step_size=step_size, init="random"
+    )
 
 
 class OptimizationMetricsResult(BaseModel):
@@ -750,7 +752,7 @@ def compute_graph_optimized_stream(
     adv_pgd_n_steps and adv_pgd_step_size enable adversarial PGD when both are provided.
     """
     loss_config = _build_loss_config(loss_type, loss_coeff, loss_position, label_token)
-    pgd = _maybe_pgd_config(adv_pgd_n_steps, adv_pgd_step_size)
+    pgd_configs = _maybe_pgd(adv_pgd_n_steps, adv_pgd_step_size)
 
     db = manager.db
     prompt = db.get_prompt(prompt_id)
@@ -777,7 +779,7 @@ def compute_graph_optimized_stream(
         beta=beta,
         mask_type=mask_type,
         loss=loss_config,
-        pgd=pgd,
+        pgd=pgd_configs[0] if pgd_configs else None,
     )
 
     optim_config = OptimCIConfig(
@@ -794,7 +796,7 @@ def compute_graph_optimized_stream(
         sampling=loaded.config.sampling,
         ce_kl_rounding_threshold=0.5,
         mask_type=mask_type,
-        adv_pgd=_maybe_adv_pgd(adv_pgd_n_steps, adv_pgd_step_size),
+        adv_pgd=pgd_configs[1] if pgd_configs else None,
     )
 
     def work(
@@ -884,7 +886,7 @@ def compute_graph_optimized_stream(
                     adv_pgd_label_prob=result.metrics.adv_pgd_label_prob,
                     l0_total=result.metrics.l0_total,
                 ),
-                pgd=pgd,
+                pgd=pgd_configs[0] if pgd_configs else None,
             ),
         )
 
@@ -928,8 +930,7 @@ def compute_graph_optimized_batch_stream(
     loss_config = _build_loss_config(
         body.loss_type, body.loss_coeff, body.loss_position, body.label_token
     )
-    pgd = _maybe_pgd_config(body.adv_pgd_n_steps, body.adv_pgd_step_size)
-    adv_pgd = _maybe_adv_pgd(body.adv_pgd_n_steps, body.adv_pgd_step_size)
+    pgd_configs = _maybe_pgd(body.adv_pgd_n_steps, body.adv_pgd_step_size)
 
     db = manager.db
     prompt = db.get_prompt(body.prompt_id)
@@ -963,7 +964,7 @@ def compute_graph_optimized_batch_stream(
             sampling=loaded.config.sampling,
             ce_kl_rounding_threshold=0.5,
             mask_type=body.mask_type,
-            adv_pgd=adv_pgd,
+            adv_pgd=pgd_configs[1] if pgd_configs else None,
         )
         for coeff in body.imp_min_coeffs
     ]
@@ -995,7 +996,7 @@ def compute_graph_optimized_batch_stream(
                 beta=body.beta,
                 mask_type=body.mask_type,
                 loss=loss_config,
-                pgd=pgd,
+                pgd=pgd_configs[0] if pgd_configs else None,
             )
             opt_params.ci_masked_label_prob = result.metrics.ci_masked_label_prob
             opt_params.stoch_masked_label_prob = result.metrics.stoch_masked_label_prob
@@ -1067,7 +1068,7 @@ def compute_graph_optimized_batch_stream(
                             adv_pgd_label_prob=result.metrics.adv_pgd_label_prob,
                             l0_total=result.metrics.l0_total,
                         ),
-                        pgd=pgd,
+                        pgd=pgd_configs[0] if pgd_configs else None,
                     ),
                 )
             )
