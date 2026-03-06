@@ -1,6 +1,6 @@
 <script lang="ts">
     import { getContext } from "svelte";
-    import type { EdgeAttribution, OutputProbability, EdgeData } from "../../lib/promptAttributionsTypes";
+    import { topEdgeAttributions, type OutputProbability, type EdgeData } from "../../lib/promptAttributionsTypes";
     import type { TooltipPos } from "./graphUtils";
     import ComponentNodeCard from "./ComponentNodeCard.svelte";
     import OutputNodeCard from "./OutputNodeCard.svelte";
@@ -85,23 +85,9 @@
         return parts.join("; ");
     });
 
-    // Edge attributions for embed nodes (outgoing only)
-    const N_EDGES_TO_DISPLAY = 20;
-
-    function getTopEdgeAttributions(edges: EdgeData[], getKey: (e: EdgeData) => string): EdgeAttribution[] {
-        const sorted = [...edges].sort((a, b) => Math.abs(b.val) - Math.abs(a.val)).slice(0, N_EDGES_TO_DISPLAY);
-        const maxAbsVal = Math.abs(sorted[0]?.val || 1);
-        return sorted.map((e) => ({
-            key: getKey(e),
-            value: e.val,
-            normalizedMagnitude: Math.abs(e.val) / maxAbsVal,
-            tokenStr: null,
-        }));
-    }
-
     const wteNodeKey = $derived(`embed:${hoveredNode.seqIdx}:0`);
     const wteOutgoing = $derived(
-        isWte ? getTopEdgeAttributions(edgesBySource.get(wteNodeKey) ?? [], (e) => e.tgt) : [],
+        isWte ? topEdgeAttributions(edgesBySource.get(wteNodeKey) ?? [], (e) => e.tgt, 20) : [],
     );
 </script>
 

@@ -9,10 +9,10 @@ Two environments exist in this codebase:
    - Readonly uses ?immutable=1 (no lock files created at all)
    - Write mode uses default DELETE journal
 
-2. **Local databases** (app prompt_attr.db):
-   - Live at REPO_ROOT/.data/ on local filesystem
-   - WAL mode is fine and preferred for concurrent read/write
-   - Don't use this helper — configure directly
+2. **App database** (prompt_attr.db):
+   - Lives at SPD_OUT_DIR/app/ on NFS (shared across team)
+   - Uses DELETE journal mode with fcntl.flock write locking
+   - Managed by PromptAttrDB in spd/app/backend/database.py
 """
 
 import sqlite3

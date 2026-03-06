@@ -37,15 +37,13 @@ export type ComputeGraphParams = {
     includedNodes?: string[];
 };
 
-/**
- * Parse SSE stream and return GraphData result.
- * Handles progress updates, errors, and completion messages.
- */
-async function parseGraphSSEStream(
+/** Generic SSE stream parser. Delegates result extraction to the caller via extractResult. */
+async function parseSSEStream<T>(
     response: Response,
+    extractResult: (data: Record<string, unknown>) => T,
     onProgress?: (progress: GraphProgress) => void,
     onCISnapshot?: (snapshot: CISnapshot) => void,
-): Promise<GraphData> {
+): Promise<T> {
     const reader = response.body?.getReader();
     if (!reader) {
         throw new Error("Response body is not readable");
@@ -53,7 +51,7 @@ async function parseGraphSSEStream(
 
     const decoder = new TextDecoder();
     let buffer = "";
-    let result: GraphData | null = null;
+    let result: T | null = null;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -76,7 +74,7 @@ async function parseGraphSSEStream(
             } else if (data.type === "error") {
                 throw new ApiError(data.error, 500);
             } else if (data.type === "complete") {
-                result = hydrateGraph(data.data);
+                result = extractResult(data);
                 await reader.cancel();
                 break;
             }
@@ -110,7 +108,7 @@ export async function computeGraphStream(
         throw new ApiError(error.detail || `HTTP ${response.status}`, response.status);
     }
 
-    return parseGraphSSEStream(response, onProgress);
+    return parseSSEStream(response, (data) => hydrateGraph(data.data as Record<string, unknown>), onProgress);
 }
 
 export type MaskType = "stochastic" | "ci";
@@ -166,7 +164,12 @@ export async function computeGraphOptimizedStream(
         throw new ApiError(error.detail || `HTTP ${response.status}`, response.status);
     }
 
-    return parseGraphSSEStream(response, onProgress, onCISnapshot);
+    return parseSSEStream(
+        response,
+        (data) => hydrateGraph(data.data as Record<string, unknown>),
+        onProgress,
+        onCISnapshot,
+    );
 }
 
 export type ComputeGraphOptimizedBatchParams = {
@@ -220,59 +223,12 @@ export async function computeGraphOptimizedBatchStream(
         throw new ApiError(error.detail || `HTTP ${response.status}`, response.status);
     }
 
-    return parseBatchGraphSSEStream(response, onProgress, onCISnapshot);
-}
-
-async function parseBatchGraphSSEStream(
-    response: Response,
-    onProgress?: (progress: GraphProgress) => void,
-    onCISnapshot?: (snapshot: CISnapshot) => void,
-): Promise<GraphData[]> {
-    const reader = response.body?.getReader();
-    if (!reader) {
-        throw new Error("Response body is not readable");
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let result: GraphData[] | null = null;
-
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-            if (!line.trim() || !line.startsWith("data: ")) continue;
-
-            const data = JSON.parse(line.substring(6));
-
-            if (data.type === "progress" && onProgress) {
-                onProgress({ current: data.current, total: data.total, stage: data.stage });
-            } else if (data.type === "ci_snapshot" && onCISnapshot) {
-                onCISnapshot(data as CISnapshot);
-            } else if (data.type === "error") {
-                throw new ApiError(data.error, 500);
-            } else if (data.type === "complete") {
-                const graphs: GraphData[] = data.data.graphs.map((g: Record<string, unknown>) => hydrateGraph(g));
-                result = graphs;
-                await reader.cancel();
-                break;
-            }
-        }
-
-        if (result) break;
-    }
-
-    if (!result) {
-        throw new Error("No result received from stream");
-    }
-
-    return result;
+    return parseSSEStream(
+        response,
+        (data) => (data.data as { graphs: Record<string, unknown>[] }).graphs.map((g) => hydrateGraph(g)),
+        onProgress,
+        onCISnapshot,
+    );
 }
 
 export async function getGraphs(promptId: number, normalize: NormalizeType, ciThreshold: number): Promise<GraphData[]> {

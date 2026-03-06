@@ -557,10 +557,6 @@
         }
     }
 
-    // Fork handlers commented out — functionality disabled for now
-    // async function handleForkRun(runId: number, tokenReplacements: [number, number][]) { ... }
-    // async function handleDeleteFork(forkId: number) { ... }
-
     async function handleGenerateGraphFromSelection() {
         if (!activeCard || !activeGraph) return;
         const state = interventionStates[activeGraph.id];

@@ -22,12 +22,8 @@
     import NodeTooltip from "../prompt-attr/NodeTooltip.svelte";
     import { RUN_KEY, type RunContext } from "../../lib/useRun.svelte";
 
-    // Get run context for tooltips and prefetching
     const runState = getContext<RunContext>(RUN_KEY);
 
-    // Component details are fetched lazily on hover via getActivationContextDetail
-
-    // Constants
     const COMPONENT_SIZE = 8;
     const HIT_AREA_PADDING = 4;
     const MARGIN = { top: 60, right: 40, bottom: 20, left: 20 };
@@ -43,19 +39,16 @@
 
     let { data, caption, topK = 200, componentGap = 4, layerGap = 24 }: Props = $props();
 
-    // Hover state
     let hoveredNode = $state<HoveredNode | null>(null);
     let isHoveringTooltip = $state(false);
     let tooltipPos = $state<TooltipPos>({ left: 0, top: 0 });
     let hoverTimeout: ReturnType<typeof setTimeout> | null = null;
 
-    // Refs
     let innerContainer: HTMLDivElement;
     const zoom = useZoomPan(() => innerContainer);
 
-    // Compute layout - ONLY for nodes involved in edges
     function computeLayout(graphData: ArtifactGraphData, edges: EdgeData[], compGap: number, lGap: number) {
-        // Collect only nodes involved in the displayed edges
+        // Only lay out nodes that appear in edges
         // eslint-disable-next-line svelte/prefer-svelte-reactivity -- local variable, not reactive state
         const activeNodes = new Set<string>();
         for (const edge of edges) {
@@ -149,12 +142,10 @@
         return { nodePositions, layerYPositions, seqXStarts, width, height };
     }
 
-    // Compute filtered edges
     function getFilteredEdges(edges: EdgeData[], k: number): EdgeData[] {
         return [...edges].sort((a, b) => Math.abs(b.val) - Math.abs(a.val)).slice(0, k);
     }
 
-    // Compute node styles
     function computeNodeStyles(
         positions: Record<string, NodePosition>,
         nodeCiVals: Record<string, number>,
@@ -185,7 +176,6 @@
         return styles;
     }
 
-    // Build edges SVG string
     function buildEdgesSvg(edges: EdgeData[], positions: Record<string, NodePosition>, maxAbsAttr: number): string {
         let svg = "";
         for (let i = edges.length - 1; i >= 0; i--) {
@@ -205,14 +195,10 @@
         return svg;
     }
 
-    // Derived values - compute once and cache
-    // NOTE: filteredEdges must be computed BEFORE layout since layout depends on it
     const filteredEdges = $derived(getFilteredEdges(data.edges, topK));
     const layout = $derived(computeLayout(data, filteredEdges, componentGap, layerGap));
     const nodeStyles = $derived(computeNodeStyles(layout.nodePositions, data.nodeCiVals, data.outputProbs));
     const edgesSvg = $derived(buildEdgesSvg(filteredEdges, layout.nodePositions, data.maxAbsAttr || 1));
-
-    // Build edge indexes for tooltip (same pattern as main graph)
     const edgeIndexes = $derived(buildEdgeIndexes(filteredEdges));
 
     const svgWidth = $derived(layout.width * zoom.scale + Math.max(zoom.translateX, 0));

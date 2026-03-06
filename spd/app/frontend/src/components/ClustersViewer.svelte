@@ -30,10 +30,7 @@
             if (clusterId === null) {
                 singletons.push(member);
             } else {
-                if (!groups[clusterId]) {
-                    groups[clusterId] = [];
-                }
-                groups[clusterId].push(member);
+                (groups[clusterId] ??= []).push(member);
             }
         }
 

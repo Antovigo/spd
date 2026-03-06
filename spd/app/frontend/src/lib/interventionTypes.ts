@@ -79,11 +79,6 @@ export type InterventionState = {
     activeIndex: number;
 };
 
-/** Whether a run's selection is editable */
-export function isRunEditable(run: InterventionRun): run is DraftRun {
-    return run.kind === "draft";
-}
-
 /** Build initial InterventionState from persisted runs.
  * The first persisted run is the base run (all CI > 0 nodes), auto-created during graph computation. */
 export function buildInterventionState(persistedRuns: InterventionRunSummary[]): InterventionState {

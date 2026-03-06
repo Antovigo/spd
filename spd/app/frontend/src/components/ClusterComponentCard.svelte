@@ -89,7 +89,7 @@
                 tokens: d.example_tokens,
                 ci: d.example_ci,
                 componentActs: d.example_component_acts,
-                maxAbsComponentAct: computeMaxAbsComponentAct(d.example_component_acts),
+                maxAbsComponentAct,
             }),
         ),
     );
@@ -150,7 +150,7 @@
     <div class="token-stats-section">
         <SectionHeader title="Token Statistics" />
         <div class="token-stats-row">
-            {#if componentData.tokenStats === null || componentData.tokenStats.status === "loading"}
+            {#if componentData.tokenStats.status === "loading" || componentData.tokenStats.status === "uninitialized"}
                 <StatusText>Loading token stats...</StatusText>
             {:else if componentData.tokenStats.status === "error"}
                 <StatusText>Error: {String(componentData.tokenStats.error)}</StatusText>

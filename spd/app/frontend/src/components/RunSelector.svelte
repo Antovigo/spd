@@ -1,7 +1,22 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { CANONICAL_RUNS, formatRunIdForDisplay } from "../lib/registry";
-    import { fetchRunInfo, type RunInfoResponse } from "../lib/api/runRegistry";
+    import { fetchRunInfo, type RunInfoResponse, type DataAvailability } from "../lib/api/runRegistry";
+
+    const AVAILABILITY_COLUMNS: { key: keyof DataAvailability; abbrev: string; tooltip: string }[] = [
+        { key: "harvest", abbrev: "H", tooltip: "Harvest: activation stats, correlations, token associations" },
+        { key: "autointerp", abbrev: "AI", tooltip: "Autointerp: LLM-generated component labels" },
+        {
+            key: "attributions",
+            abbrev: "DA",
+            tooltip: "Dataset Attributions: component-to-component attribution strengths",
+        },
+        {
+            key: "graph_interp",
+            abbrev: "GI",
+            tooltip: "Graph Interp: context-aware labels using attribution graph structure",
+        },
+    ];
 
     type Props = {
         onSelect: (wandbPath: string, contextLength: number) => void;
@@ -68,23 +83,11 @@
                         <th>Run</th>
                         <th>Architecture</th>
                         <th>Notes</th>
-                        <th class="avail-col tooltip-wrap"
-                            >H<span class="tooltip">Harvest: activation stats, correlations, token associations</span
-                            ></th
-                        >
-                        <th class="avail-col tooltip-wrap"
-                            >AI<span class="tooltip">Autointerp: LLM-generated component labels</span></th
-                        >
-                        <th class="avail-col tooltip-wrap"
-                            >DA<span class="tooltip"
-                                >Dataset Attributions: component-to-component attribution strengths</span
-                            ></th
-                        >
-                        <th class="avail-col tooltip-wrap"
-                            >GI<span class="tooltip"
-                                >Graph Interp: context-aware labels using attribution graph structure</span
-                            ></th
-                        >
+                        {#each AVAILABILITY_COLUMNS as col (col.key)}
+                            <th class="avail-col tooltip-wrap"
+                                >{col.abbrev}<span class="tooltip">{col.tooltip}</span></th
+                            >
+                        {/each}
                     </tr>
                 </thead>
                 <tbody>
@@ -119,52 +122,21 @@
                                     {entry.notes}
                                 {/if}
                             </td>
-                            <td class="cell-avail">
-                                {#if info}
-                                    <span class="dot" class:available={info.availability.harvest} title="Harvest"
-                                    ></span>
-                                {:else if !backendLoaded}
-                                    <span class="skeleton skeleton-dot"></span>
-                                {:else}
-                                    <span class="dot"></span>
-                                {/if}
-                            </td>
-                            <td class="cell-avail">
-                                {#if info}
-                                    <span class="dot" class:available={info.availability.autointerp} title="Autointerp"
-                                    ></span>
-                                {:else if !backendLoaded}
-                                    <span class="skeleton skeleton-dot"></span>
-                                {:else}
-                                    <span class="dot"></span>
-                                {/if}
-                            </td>
-                            <td class="cell-avail">
-                                {#if info}
-                                    <span
-                                        class="dot"
-                                        class:available={info.availability.attributions}
-                                        title="Dataset Attributions"
-                                    ></span>
-                                {:else if !backendLoaded}
-                                    <span class="skeleton skeleton-dot"></span>
-                                {:else}
-                                    <span class="dot"></span>
-                                {/if}
-                            </td>
-                            <td class="cell-avail">
-                                {#if info}
-                                    <span
-                                        class="dot"
-                                        class:available={info.availability.graph_interp}
-                                        title="Graph Interp"
-                                    ></span>
-                                {:else if !backendLoaded}
-                                    <span class="skeleton skeleton-dot"></span>
-                                {:else}
-                                    <span class="dot"></span>
-                                {/if}
-                            </td>
+                            {#each AVAILABILITY_COLUMNS as col (col.key)}
+                                <td class="cell-avail">
+                                    {#if info}
+                                        <span
+                                            class="dot"
+                                            class:available={info.availability[col.key]}
+                                            title={col.tooltip}
+                                        ></span>
+                                    {:else if !backendLoaded}
+                                        <span class="skeleton skeleton-dot"></span>
+                                    {:else}
+                                        <span class="dot"></span>
+                                    {/if}
+                                </td>
+                            {/each}
                         </tr>
                     {/each}
                 </tbody>

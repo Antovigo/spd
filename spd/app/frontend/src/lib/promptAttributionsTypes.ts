@@ -23,6 +23,23 @@ export type EdgeAttribution = {
     tokenStr: string | null; // resolved token string for embed/output layers
 };
 
+/** Sort edges by |val| desc, take top N, normalize magnitudes to [0,1]. */
+export function topEdgeAttributions(
+    edges: EdgeData[],
+    getKey: (e: EdgeData) => string,
+    n: number,
+    resolveTokenStr?: (key: string) => string | null,
+): EdgeAttribution[] {
+    const sorted = [...edges].sort((a, b) => Math.abs(b.val) - Math.abs(a.val)).slice(0, n);
+    const maxAbsVal = Math.abs(sorted[0]?.val || 1);
+    return sorted.map((e) => ({
+        key: getKey(e),
+        value: e.val,
+        normalizedMagnitude: Math.abs(e.val) / maxAbsVal,
+        tokenStr: resolveTokenStr ? resolveTokenStr(getKey(e)) : null,
+    }));
+}
+
 export type OutputProbability = {
     prob: number; // CI-masked (SPD model) probability
     logit: number; // CI-masked (SPD model) raw logit

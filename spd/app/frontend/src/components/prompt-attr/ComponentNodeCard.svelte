@@ -1,10 +1,11 @@
 <script lang="ts">
     import { getContext, onMount } from "svelte";
     import { computeMaxAbsComponentAct } from "../../lib/colors";
+    import { mapLoadable } from "../../lib/index";
     import type { ActivationExamplesData } from "../ActivationContextsPagedTable.svelte";
     import { COMPONENT_CARD_CONSTANTS } from "../../lib/componentCardConstants";
     import { anyCorrelationStatsEnabled, displaySettings } from "../../lib/displaySettings.svelte";
-    import type { EdgeAttribution, EdgeData, OutputProbability } from "../../lib/promptAttributionsTypes";
+    import { topEdgeAttributions, type EdgeData, type OutputProbability } from "../../lib/promptAttributionsTypes";
     import { useComponentDataExpectCached } from "../../lib/useComponentDataExpectCached.svelte";
     import { RUN_KEY, type RunContext } from "../../lib/useRun.svelte";
     import ActivationContextsPagedTable from "../ActivationContextsPagedTable.svelte";
@@ -143,20 +144,13 @@
         return null;
     }
 
-    function getTopEdgeAttributions(edges: EdgeData[], getKey: (e: EdgeData) => string): EdgeAttribution[] {
-        const sorted = [...edges].sort((a, b) => Math.abs(b.val) - Math.abs(a.val)).slice(0, N_EDGES_TO_DISPLAY);
-        const maxAbsVal = Math.abs(sorted[0]?.val || 1);
-        return sorted.map((e) => ({
-            key: getKey(e),
-            value: e.val,
-            normalizedMagnitude: Math.abs(e.val) / maxAbsVal,
-            tokenStr: resolveTokenStr(getKey(e)),
-        }));
-    }
+    const incoming = $derived(
+        topEdgeAttributions(edgesByTarget.get(currentNodeKey) ?? [], (e) => e.src, N_EDGES_TO_DISPLAY, resolveTokenStr),
+    );
 
-    const incoming = $derived(getTopEdgeAttributions(edgesByTarget.get(currentNodeKey) ?? [], (e) => e.src));
-
-    const outgoing = $derived(getTopEdgeAttributions(edgesBySource.get(currentNodeKey) ?? [], (e) => e.tgt));
+    const outgoing = $derived(
+        topEdgeAttributions(edgesBySource.get(currentNodeKey) ?? [], (e) => e.tgt, N_EDGES_TO_DISPLAY, resolveTokenStr),
+    );
 
     const hasAnyEdges = $derived(incoming.length > 0 || outgoing.length > 0);
 
@@ -173,8 +167,6 @@
         if (componentData.componentDetail.status !== "loaded") return 1;
         return computeMaxAbsComponentAct(componentData.componentDetail.data.example_component_acts);
     });
-
-    import { mapLoadable } from "../../lib/index";
 
     const activationExamples = $derived(
         mapLoadable(

@@ -1527,36 +1527,6 @@
         content: ":";
     }
 
-    .top-logits {
-        margin-top: var(--space-1);
-        padding-top: var(--space-1);
-        border-top: 1px solid var(--border-subtle);
-    }
-
-    .top-logits-header {
-        color: var(--text-muted);
-        font-size: var(--text-xs);
-    }
-
-    .top-logit-row {
-        display: flex;
-        justify-content: space-between;
-        gap: var(--space-2);
-    }
-
-    .top-logit-token {
-        white-space: pre;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        max-width: 100px;
-    }
-
-    .top-logit-prob {
-        flex-shrink: 0;
-        text-align: right;
-        color: var(--text-primary);
-    }
-
     .version-actions {
         display: flex;
         gap: var(--space-2);

@@ -9,14 +9,12 @@
     import type { Loadable } from "../lib";
     import ResearchLogViewer from "./investigations/ResearchLogViewer.svelte";
 
-    // State
     let investigations = $state<Loadable<InvestigationSummary[]>>({ status: "uninitialized" });
     let selected = $state<Loadable<InvestigationDetail> | null>(null);
     let activeTab = $state<"research" | "events">("research");
     let loadedArtifacts = $state<Record<string, GraphArtifact>>({});
     let artifactsLoading = $state(false);
 
-    // Launch state
     let launchPrompt = $state("");
     let launchState = $state<Loadable<LaunchResponse>>({ status: "uninitialized" });
 
@@ -34,7 +32,6 @@
         }
     }
 
-    // Load investigations on mount
     $effect(() => {
         loadInvestigations();
     });

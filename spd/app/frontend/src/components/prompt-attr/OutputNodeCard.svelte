@@ -1,5 +1,5 @@
 <script lang="ts">
-    import type { EdgeAttribution, EdgeData, OutputProbability } from "../../lib/promptAttributionsTypes";
+    import { topEdgeAttributions, type EdgeData, type OutputProbability } from "../../lib/promptAttributionsTypes";
     import { getOutputHeaderColor } from "../../lib/colors";
     import { displaySettings } from "../../lib/displaySettings.svelte";
     import { COMPONENT_CARD_CONSTANTS } from "../../lib/componentCardConstants";
@@ -14,23 +14,10 @@
 
     let { cIdx, outputProbs, seqIdx, edgesByTarget }: Props = $props();
 
-    const N_EDGES_TO_DISPLAY = 20;
-
-    function getTopEdgeAttributions(edges: EdgeData[], getKey: (e: EdgeData) => string): EdgeAttribution[] {
-        const sorted = [...edges].sort((a, b) => Math.abs(b.val) - Math.abs(a.val)).slice(0, N_EDGES_TO_DISPLAY);
-        const maxAbsVal = Math.abs(sorted[0]?.val || 1);
-        return sorted.map((e) => ({
-            key: getKey(e),
-            value: e.val,
-            normalizedMagnitude: Math.abs(e.val) / maxAbsVal,
-            tokenStr: null,
-        }));
-    }
-
     const outputNodeKey = $derived(seqIdx !== undefined ? `output:${seqIdx}:${cIdx}` : null);
     const outputIncoming = $derived(
         outputNodeKey && edgesByTarget
-            ? getTopEdgeAttributions(edgesByTarget.get(outputNodeKey) ?? [], (e) => e.src)
+            ? topEdgeAttributions(edgesByTarget.get(outputNodeKey) ?? [], (e) => e.src, 20)
             : [],
     );
 

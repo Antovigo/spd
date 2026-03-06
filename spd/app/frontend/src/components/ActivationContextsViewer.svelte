@@ -292,7 +292,7 @@
                 tokens: d.example_tokens,
                 ci: d.example_ci,
                 componentActs: d.example_component_acts,
-                maxAbsComponentAct: computeMaxAbsComponentAct(d.example_component_acts),
+                maxAbsComponentAct,
             }),
         ),
     );

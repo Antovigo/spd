@@ -45,6 +45,7 @@ from spd.app.backend.optim_cis import (
     MaskType,
     MeanKLLossConfig,
     OptimCIConfig,
+    PositionalLossConfig,
 )
 from spd.app.backend.schemas import OutputProbability
 from spd.app.backend.utils import log_errors
@@ -172,6 +173,58 @@ class LogitLossResult(BaseModel):
     position: int
     label_token: int
     label_str: str
+
+
+LossType = Literal["ce", "kl", "logit"]
+LossResult = CELossResult | KLLossResult | LogitLossResult
+
+
+def _build_loss_config(
+    loss_type: LossType,
+    loss_coeff: float,
+    loss_position: int,
+    label_token: int | None,
+) -> PositionalLossConfig:
+    match loss_type:
+        case "ce":
+            assert label_token is not None, "label_token is required for CE loss"
+            return CELossConfig(coeff=loss_coeff, position=loss_position, label_token=label_token)
+        case "kl":
+            return KLLossConfig(coeff=loss_coeff, position=loss_position)
+        case "logit":
+            assert label_token is not None, "label_token is required for logit loss"
+            return LogitLossConfig(
+                coeff=loss_coeff, position=loss_position, label_token=label_token
+            )
+
+
+def _build_loss_result(
+    loss_config: PositionalLossConfig,
+    tok_display: Callable[[int], str],
+) -> LossResult:
+    match loss_config:
+        case CELossConfig(coeff=coeff, position=pos, label_token=label_tok):
+            return CELossResult(
+                coeff=coeff, position=pos, label_token=label_tok, label_str=tok_display(label_tok)
+            )
+        case KLLossConfig(coeff=coeff, position=pos):
+            return KLLossResult(coeff=coeff, position=pos)
+        case LogitLossConfig(coeff=coeff, position=pos, label_token=label_tok):
+            return LogitLossResult(
+                coeff=coeff, position=pos, label_token=label_tok, label_str=tok_display(label_tok)
+            )
+
+
+def _maybe_pgd_config(n_steps: int | None, step_size: float | None) -> PgdConfig | None:
+    if n_steps is not None and step_size is not None:
+        return PgdConfig(n_steps=n_steps, step_size=step_size)
+    return None
+
+
+def _maybe_adv_pgd(n_steps: int | None, step_size: float | None) -> AdvPGDConfig | None:
+    if n_steps is not None and step_size is not None:
+        return AdvPGDConfig(n_steps=n_steps, step_size=step_size, init="random")
+    return None
 
 
 class OptimizationMetricsResult(BaseModel):
@@ -670,9 +723,6 @@ def _normalize_edges(edges: list[Edge], normalize: NormalizeType) -> list[Edge]:
     return out_edges
 
 
-LossType = Literal["ce", "kl", "logit"]
-
-
 @router.post("/optimized/stream")
 @log_errors
 def compute_graph_optimized_stream(
@@ -699,27 +749,8 @@ def compute_graph_optimized_stream(
     label_token is required when loss_type is "ce".
     adv_pgd_n_steps and adv_pgd_step_size enable adversarial PGD when both are provided.
     """
-    # Build loss config based on type
-    loss_config: LossConfig
-    match loss_type:
-        case "ce":
-            if label_token is None:
-                raise HTTPException(status_code=400, detail="label_token is required for CE loss")
-            loss_config = CELossConfig(
-                coeff=loss_coeff, position=loss_position, label_token=label_token
-            )
-        case "kl":
-            loss_config = KLLossConfig(coeff=loss_coeff, position=loss_position)
-        case "logit":
-            if label_token is None:
-                raise HTTPException(
-                    status_code=400, detail="label_token is required for logit loss"
-                )
-            loss_config = LogitLossConfig(
-                coeff=loss_coeff, position=loss_position, label_token=label_token
-            )
-
-    lr = 1e-2
+    loss_config = _build_loss_config(loss_type, loss_coeff, loss_position, label_token)
+    pgd = _maybe_pgd_config(adv_pgd_n_steps, adv_pgd_step_size)
 
     db = manager.db
     prompt = db.get_prompt(prompt_id)
@@ -733,11 +764,9 @@ def compute_graph_optimized_stream(
             detail=f"loss_position {loss_position} out of bounds for prompt with {len(token_ids)} tokens",
         )
 
-    label_str = loaded.tokenizer.get_tok_display(label_token) if label_token is not None else None
     spans = loaded.tokenizer.get_spans(token_ids)
     tokens_tensor = torch.tensor([token_ids], device=DEVICE)
 
-    # Slice tokens to only include positions <= loss_position
     num_tokens = loss_position + 1
     spans_sliced = spans[:num_tokens]
 
@@ -748,14 +777,12 @@ def compute_graph_optimized_stream(
         beta=beta,
         mask_type=mask_type,
         loss=loss_config,
-        pgd=PgdConfig(n_steps=adv_pgd_n_steps, step_size=adv_pgd_step_size)
-        if adv_pgd_n_steps is not None and adv_pgd_step_size is not None
-        else None,
+        pgd=pgd,
     )
 
     optim_config = OptimCIConfig(
         seed=0,
-        lr=lr,
+        lr=1e-2,
         steps=steps,
         weight_decay=0.0,
         lr_schedule="cosine",
@@ -767,9 +794,7 @@ def compute_graph_optimized_stream(
         sampling=loaded.config.sampling,
         ce_kl_rounding_threshold=0.5,
         mask_type=mask_type,
-        adv_pgd=AdvPGDConfig(n_steps=adv_pgd_n_steps, step_size=adv_pgd_step_size, init="random")
-        if adv_pgd_n_steps is not None and adv_pgd_step_size is not None
-        else None,
+        adv_pgd=_maybe_adv_pgd(adv_pgd_n_steps, adv_pgd_step_size),
     )
 
     def work(
@@ -833,28 +858,6 @@ def compute_graph_optimized_stream(
             raw_edges_abs=result.edges_abs,
         )
 
-        # Build loss result based on config type
-        loss_result: CELossResult | KLLossResult | LogitLossResult
-        match loss_config:
-            case CELossConfig(coeff=coeff, position=pos, label_token=label_tok):
-                assert label_str is not None
-                loss_result = CELossResult(
-                    coeff=coeff,
-                    position=pos,
-                    label_token=label_tok,
-                    label_str=label_str,
-                )
-            case KLLossConfig(coeff=coeff, position=pos):
-                loss_result = KLLossResult(coeff=coeff, position=pos)
-            case LogitLossConfig(coeff=coeff, position=pos, label_token=label_tok):
-                assert label_str is not None
-                loss_result = LogitLossResult(
-                    coeff=coeff,
-                    position=pos,
-                    label_token=label_tok,
-                    label_str=label_str,
-                )
-
         return GraphDataWithOptimization(
             id=graph_id,
             graphType="optimized",
@@ -874,16 +877,14 @@ def compute_graph_optimized_stream(
                 pnorm=pnorm,
                 beta=beta,
                 mask_type=mask_type,
-                loss=loss_result,
+                loss=_build_loss_result(loss_config, loaded.tokenizer.get_tok_display),
                 metrics=OptimizationMetricsResult(
                     ci_masked_label_prob=result.metrics.ci_masked_label_prob,
                     stoch_masked_label_prob=result.metrics.stoch_masked_label_prob,
                     adv_pgd_label_prob=result.metrics.adv_pgd_label_prob,
                     l0_total=result.metrics.l0_total,
                 ),
-                pgd=PgdConfig(n_steps=adv_pgd_n_steps, step_size=adv_pgd_step_size)
-                if adv_pgd_n_steps is not None and adv_pgd_step_size is not None
-                else None,
+                pgd=pgd,
             ),
         )
 
@@ -924,22 +925,11 @@ def compute_graph_optimized_batch_stream(
     assert len(body.imp_min_coeffs) > 0, "At least one coefficient required"
     assert len(body.imp_min_coeffs) <= 20, "Too many coefficients (max 20)"
 
-    loss_config: LossConfig
-    match body.loss_type:
-        case "ce":
-            assert body.label_token is not None, "label_token is required for CE loss"
-            loss_config = CELossConfig(
-                coeff=body.loss_coeff, position=body.loss_position, label_token=body.label_token
-            )
-        case "kl":
-            loss_config = KLLossConfig(coeff=body.loss_coeff, position=body.loss_position)
-        case "logit":
-            assert body.label_token is not None, "label_token is required for logit loss"
-            loss_config = LogitLossConfig(
-                coeff=body.loss_coeff, position=body.loss_position, label_token=body.label_token
-            )
-
-    lr = 1e-2
+    loss_config = _build_loss_config(
+        body.loss_type, body.loss_coeff, body.loss_position, body.label_token
+    )
+    pgd = _maybe_pgd_config(body.adv_pgd_n_steps, body.adv_pgd_step_size)
+    adv_pgd = _maybe_adv_pgd(body.adv_pgd_n_steps, body.adv_pgd_step_size)
 
     db = manager.db
     prompt = db.get_prompt(body.prompt_id)
@@ -950,25 +940,16 @@ def compute_graph_optimized_batch_stream(
         f"loss_position {body.loss_position} out of bounds for prompt with {len(token_ids)} tokens"
     )
 
-    label_str = (
-        loaded.tokenizer.get_tok_display(body.label_token) if body.label_token is not None else None
-    )
     spans = loaded.tokenizer.get_spans(token_ids)
     tokens_tensor = torch.tensor([token_ids], device=DEVICE)
 
     num_tokens = body.loss_position + 1
     spans_sliced = spans[:num_tokens]
 
-    adv_pgd = (
-        AdvPGDConfig(n_steps=body.adv_pgd_n_steps, step_size=body.adv_pgd_step_size, init="random")
-        if body.adv_pgd_n_steps is not None and body.adv_pgd_step_size is not None
-        else None
-    )
-
     configs = [
         OptimCIConfig(
             seed=0,
-            lr=lr,
+            lr=1e-2,
             steps=body.steps,
             weight_decay=0.0,
             lr_schedule="cosine",
@@ -1014,9 +995,7 @@ def compute_graph_optimized_batch_stream(
                 beta=body.beta,
                 mask_type=body.mask_type,
                 loss=loss_config,
-                pgd=PgdConfig(n_steps=body.adv_pgd_n_steps, step_size=body.adv_pgd_step_size)
-                if body.adv_pgd_n_steps is not None and body.adv_pgd_step_size is not None
-                else None,
+                pgd=pgd,
             )
             opt_params.ci_masked_label_prob = result.metrics.ci_masked_label_prob
             opt_params.stoch_masked_label_prob = result.metrics.stoch_masked_label_prob
@@ -1061,21 +1040,6 @@ def compute_graph_optimized_batch_stream(
                 raw_edges_abs=result.edges_abs,
             )
 
-            loss_result: CELossResult | KLLossResult | LogitLossResult
-            match loss_config:
-                case CELossConfig(coeff=lc, position=pos, label_token=label_tok):
-                    assert label_str is not None
-                    loss_result = CELossResult(
-                        coeff=lc, position=pos, label_token=label_tok, label_str=label_str
-                    )
-                case KLLossConfig(coeff=lc, position=pos):
-                    loss_result = KLLossResult(coeff=lc, position=pos)
-                case LogitLossConfig(coeff=lc, position=pos, label_token=label_tok):
-                    assert label_str is not None
-                    loss_result = LogitLossResult(
-                        coeff=lc, position=pos, label_token=label_tok, label_str=label_str
-                    )
-
             graphs.append(
                 GraphDataWithOptimization(
                     id=graph_id,
@@ -1096,18 +1060,14 @@ def compute_graph_optimized_batch_stream(
                         pnorm=body.pnorm,
                         beta=body.beta,
                         mask_type=body.mask_type,
-                        loss=loss_result,
+                        loss=_build_loss_result(loss_config, loaded.tokenizer.get_tok_display),
                         metrics=OptimizationMetricsResult(
                             ci_masked_label_prob=result.metrics.ci_masked_label_prob,
                             stoch_masked_label_prob=result.metrics.stoch_masked_label_prob,
                             adv_pgd_label_prob=result.metrics.adv_pgd_label_prob,
                             l0_total=result.metrics.l0_total,
                         ),
-                        pgd=PgdConfig(
-                            n_steps=body.adv_pgd_n_steps, step_size=body.adv_pgd_step_size
-                        )
-                        if body.adv_pgd_n_steps is not None and body.adv_pgd_step_size is not None
-                        else None,
+                        pgd=pgd,
                     ),
                 )
             )
@@ -1246,28 +1206,6 @@ def stored_graph_to_response(
     assert graph.optimization_params is not None
     opt = graph.optimization_params
 
-    # Build loss result based on stored config type
-    loss_result: CELossResult | KLLossResult | LogitLossResult
-    match opt.loss:
-        case CELossConfig(coeff=coeff, position=pos, label_token=label_tok):
-            label_str = tokenizer.get_tok_display(label_tok)
-            loss_result = CELossResult(
-                coeff=coeff,
-                position=pos,
-                label_token=label_tok,
-                label_str=label_str,
-            )
-        case KLLossConfig(coeff=coeff, position=pos):
-            loss_result = KLLossResult(coeff=coeff, position=pos)
-        case LogitLossConfig(coeff=coeff, position=pos, label_token=label_tok):
-            label_str = tokenizer.get_tok_display(label_tok)
-            loss_result = LogitLossResult(
-                coeff=coeff,
-                position=pos,
-                label_token=label_tok,
-                label_str=label_str,
-            )
-
     return GraphDataWithOptimization(
         id=graph.id,
         graphType=graph.graph_type,
@@ -1287,16 +1225,14 @@ def stored_graph_to_response(
             pnorm=opt.pnorm,
             beta=opt.beta,
             mask_type=opt.mask_type,
-            loss=loss_result,
+            loss=_build_loss_result(opt.loss, tokenizer.get_tok_display),
             metrics=OptimizationMetricsResult(
                 l0_total=float(fg.l0_total),
                 ci_masked_label_prob=opt.ci_masked_label_prob,
                 stoch_masked_label_prob=opt.stoch_masked_label_prob,
                 adv_pgd_label_prob=opt.adv_pgd_label_prob,
             ),
-            pgd=PgdConfig(n_steps=opt.pgd.n_steps, step_size=opt.pgd.step_size)
-            if opt.pgd is not None
-            else None,
+            pgd=opt.pgd,
         ),
     )
 

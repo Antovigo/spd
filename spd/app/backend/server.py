@@ -8,10 +8,12 @@ Usage:
     python -m spd.app.backend.server --port 8000
 """
 
+import os
 import time
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import fire
 import torch
@@ -53,9 +55,6 @@ DEVICE = get_device()
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # pyright: ignore[reportUnusedParameter]
     """Initialize DB connection at startup. Model loaded on-demand via /api/runs/load."""
-    import os
-    from pathlib import Path
-
     from spd.app.backend.routers.mcp import InvestigationConfig, set_investigation_config
 
     manager = StateManager.get()
