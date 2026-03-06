@@ -71,7 +71,7 @@ def _parse_metadata(inv_path: Path) -> dict[str, Any] | None:
     try:
         data: dict[str, Any] = json.loads(metadata_path.read_text())
         return data
-    except Exception:
+    except json.JSONDecodeError:
         return None
 
 
@@ -84,21 +84,18 @@ def _get_last_event(events_path: Path) -> tuple[str | None, str | None, int]:
     last_msg = None
     count = 0
 
-    try:
-        with open(events_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                count += 1
-                try:
-                    event = json.loads(line)
-                    last_time = event.get("timestamp")
-                    last_msg = event.get("message")
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        pass
+    with open(events_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            count += 1
+            try:
+                event = json.loads(line)
+                last_time = event.get("timestamp")
+                last_msg = event.get("message")
+            except json.JSONDecodeError:
+                continue
 
     return last_time, last_msg, count
 
@@ -111,7 +108,7 @@ def _parse_task_summary(inv_path: Path) -> tuple[str | None, str | None, str | N
     try:
         data: dict[str, Any] = json.loads(summary_path.read_text())
         return data.get("title"), data.get("summary"), data.get("status")
-    except Exception:
+    except json.JSONDecodeError:
         return None, None, None
 
 
@@ -134,7 +131,7 @@ def _get_created_at(inv_path: Path, metadata: dict[str, Any] | None) -> str:
                     event = json.loads(first_line)
                     if "timestamp" in event:
                         return event["timestamp"]
-        except Exception:
+        except json.JSONDecodeError:
             pass
 
     if metadata and "created_at" in metadata:
@@ -285,7 +282,6 @@ def launch_investigation_endpoint(request: LaunchRequest, loaded: DepLoadedRun) 
         prompt=request.prompt,
         context_length=loaded.context_length,
         max_turns=50,
-        partition="h200-reserved",
         time="8:00:00",
         job_suffix=None,
     )

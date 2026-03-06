@@ -242,6 +242,8 @@ def get_model_graph(loaded: DepLoadedRun) -> ModelGraphResponse:
                 source, target = comp_canon, rel_canon
             case "input":
                 source, target = rel_canon, comp_canon
+            case _:
+                assert False, f"unexpected pass_name: {e.pass_name}"
 
         if source not in node_keys or target not in node_keys:
             continue
