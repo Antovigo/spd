@@ -456,7 +456,7 @@ def search_tokens(
 
     device = next(loaded.model.parameters()).device
     tokens_tensor = torch.tensor([prompt.token_ids], device=device)
-    with torch.no_grad():
+    with manager.gpu_lock(), torch.no_grad():
         logits = loaded.model(tokens_tensor)
         probs = torch.softmax(logits[0, position], dim=-1)
 

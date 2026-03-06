@@ -91,7 +91,8 @@ def compute_recon_loss(
         case MeanKLLossConfig():
             target_probs = F.softmax(target_out, dim=-1)
             pred_log_probs = F.log_softmax(logits, dim=-1)
-            return F.kl_div(pred_log_probs, target_probs, reduction="batchmean")
+            # sum over vocab, mean over positions (consistent with batched version)
+            return F.kl_div(pred_log_probs, target_probs, reduction="none").sum(dim=-1).mean(dim=-1)
 
 
 @dataclass
