@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from spd.app.backend.dependencies import DepLoadedRun
-from spd.settings import SPD_OUT_DIR
+from spd.settings import DEFAULT_PARTITION_NAME, SPD_OUT_DIR
 from spd.utils.wandb_utils import parse_wandb_run_path
 
 router = APIRouter(prefix="/api/investigations", tags=["investigations"])
@@ -282,6 +282,7 @@ def launch_investigation_endpoint(request: LaunchRequest, loaded: DepLoadedRun) 
         prompt=request.prompt,
         context_length=loaded.context_length,
         max_turns=50,
+        partition=DEFAULT_PARTITION_NAME,  # TODO: remove when investigate module drops required partition
         time="8:00:00",
         job_suffix=None,
     )
