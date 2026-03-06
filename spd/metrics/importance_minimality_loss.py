@@ -49,6 +49,58 @@ def _get_linear_annealed_p(
         return initial_p + (p_anneal_final_p - initial_p) * progress
 
 
+def _get_coeff_multiplier(
+    current_frac_of_training: float,
+    coeff_warmup_frac: float,
+    coeff_anneal_start_frac: float,
+    coeff_anneal_final_multiplier: float | None,
+    coeff_anneal_end_frac: float,
+) -> float:
+    """Calculate coefficient multiplier with warmup and annealing.
+
+    Returns a multiplier in [0, 1] (or down to coeff_anneal_final_multiplier) that is applied
+    to the importance minimality loss coefficient.
+
+    Schedule:
+    - [0, coeff_warmup_frac): linearly ramp 0 → 1
+    - [coeff_warmup_frac, coeff_anneal_start_frac): constant 1.0
+    - [coeff_anneal_start_frac, coeff_anneal_end_frac): linearly ramp 1.0 → coeff_anneal_final_multiplier
+    - [coeff_anneal_end_frac, 1.0]: constant coeff_anneal_final_multiplier
+    """
+    assert coeff_warmup_frac <= coeff_anneal_start_frac, (
+        f"coeff_warmup_frac ({coeff_warmup_frac}) must be <= "
+        f"coeff_anneal_start_frac ({coeff_anneal_start_frac})"
+    )
+    assert coeff_anneal_end_frac >= coeff_anneal_start_frac, (
+        f"coeff_anneal_end_frac ({coeff_anneal_end_frac}) must be >= "
+        f"coeff_anneal_start_frac ({coeff_anneal_start_frac})"
+    )
+
+    # Warmup phase
+    if current_frac_of_training < coeff_warmup_frac:
+        if coeff_warmup_frac == 0.0:
+            return 1.0
+        return current_frac_of_training / coeff_warmup_frac
+
+    # No annealing configured
+    if coeff_anneal_final_multiplier is None or coeff_anneal_start_frac >= 1.0:
+        return 1.0
+
+    # Constant phase between warmup and anneal
+    if current_frac_of_training < coeff_anneal_start_frac:
+        return 1.0
+
+    # Past anneal end
+    if current_frac_of_training >= coeff_anneal_end_frac:
+        return coeff_anneal_final_multiplier
+
+    # Anneal phase: linear interpolation 1.0 → coeff_anneal_final_multiplier
+    progress = (current_frac_of_training - coeff_anneal_start_frac) / (
+        coeff_anneal_end_frac - coeff_anneal_start_frac
+    )
+    return 1.0 + (coeff_anneal_final_multiplier - 1.0) * progress
+
+
 def _importance_minimality_loss_update(
     ci_upper_leaky: dict[str, Float[Tensor, "... C"]],
     pnorm: float,
@@ -123,6 +175,10 @@ def importance_minimality_loss(
     p_anneal_start_frac: float,
     p_anneal_final_p: float | None,
     p_anneal_end_frac: float,
+    coeff_warmup_frac: float = 0.0,
+    coeff_anneal_start_frac: float = 1.0,
+    coeff_anneal_final_multiplier: float | None = None,
+    coeff_anneal_end_frac: float = 1.0,
 ) -> Float[Tensor, ""]:
     """Compute importance minimality loss."""
 
@@ -137,12 +193,20 @@ def importance_minimality_loss(
     )
     dist_state = get_distributed_state()
     world_size = dist_state.world_size if dist_state is not None else 1
-    return _importance_minimality_loss_compute(
+    loss = _importance_minimality_loss_compute(
         per_component_sums=per_component_sums,
         n_examples=n_examples,
         beta=beta,
         world_size=world_size,
     )
+    coeff_multiplier = _get_coeff_multiplier(
+        current_frac_of_training=current_frac_of_training,
+        coeff_warmup_frac=coeff_warmup_frac,
+        coeff_anneal_start_frac=coeff_anneal_start_frac,
+        coeff_anneal_final_multiplier=coeff_anneal_final_multiplier,
+        coeff_anneal_end_frac=coeff_anneal_end_frac,
+    )
+    return loss * coeff_multiplier
 
 
 class ImportanceMinimalityLoss(Metric):
