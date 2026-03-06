@@ -73,7 +73,6 @@ def harvest_attributions(
     rank: int,
     world_size: int,
 ) -> None:
-
     device = torch.device(get_device())
     logger.info(f"Loading model on {device}")
 
