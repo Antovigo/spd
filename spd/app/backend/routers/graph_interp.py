@@ -8,10 +8,10 @@ import random
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from spd.graph_interp.schemas import LabelResult
 
 from spd.app.backend.dependencies import DepLoadedRun
 from spd.app.backend.utils import log_errors
+from spd.graph_interp.schemas import LabelResult
 from spd.topology import TransformerTopology
 
 # TODO(oli): Remove MOCK_MODE after real data is available
@@ -242,8 +242,6 @@ def get_model_graph(loaded: DepLoadedRun) -> ModelGraphResponse:
                 source, target = comp_canon, rel_canon
             case "input":
                 source, target = rel_canon, comp_canon
-            case _:
-                raise ValueError(f"unexpected pass_name: {e.pass_name}")
 
         if source not in node_keys or target not in node_keys:
             continue
