@@ -11,8 +11,9 @@ Web-based visualization and analysis tool for exploring neural network component
 
 This is a **rapidly iterated research tool**. Key implications:
 
-- **Please do not code for backwards compatibility**: Schema changes don't need migrations
-- **Database is shared state**: Lives at `SPD_OUT_DIR/app/prompt_attr.db` on NFS, accessible by multiple backends. Do not delete without checking with the team. Uses DELETE journal mode (NFS-safe) with `fcntl.flock` write locking for concurrent access
+- **Database is persistent shared state**: Lives at `SPD_OUT_DIR/app/prompt_attr.db` on NFS, shared across the team. Do not delete. Uses DELETE journal mode (NFS-safe) with `fcntl.flock` write locking for concurrent access.
+  - **Schema changes require manual migration**: Update the `CREATE TABLE IF NOT EXISTS` statements to match the desired schema, then manually `ALTER TABLE` the real DB (back it up first). No automatic migration framework — just SQL.
+  - Keep the CREATE TABLE statements as the source of truth for the schema.
 - **Prefer simplicity**: Avoid over-engineering for hypothetical future needs
 - **Fail loud and fast**: The users are a small team of highly technical people. Errors are good. We want to know immediately if something is wrong. No soft failing, assert, assert, assert
 - **Token display**: Always ship token strings rendered server-side via `AppTokenizer`, never raw token IDs. For embed/output layers, `component_idx` is a token ID — resolve it to a display string in the backend response.
