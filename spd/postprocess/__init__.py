@@ -99,12 +99,15 @@ def postprocess(config: PostprocessConfig, dependency_job_id: str | None = None)
     attr_result = None
     if config.attributions is not None:
         assert isinstance(decomp_cfg, SPDHarvestConfig)
+        attr_inner = config.attributions.config.model_copy(
+            update={"harvest_subrun_id": harvest_result.subrun_id}
+        )
+        attr_slurm = config.attributions.model_copy(update={"config": attr_inner})
         attr_result = submit_attributions(
             wandb_path=decomp_cfg.wandb_path,
-            config=config.attributions,
+            config=attr_slurm,
             snapshot_branch=snapshot_branch,
             dependency_job_id=harvest_result.merge_result.job_id,
-            harvest_subrun_id=harvest_result.subrun_id,
         )
 
     # === 5. Graph interp (depends on harvest merge + attribution merge) ===
