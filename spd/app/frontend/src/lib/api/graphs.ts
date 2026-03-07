@@ -10,7 +10,7 @@ import { apiUrl, ApiError, fetchJson } from "./index";
 function hydrateGraph(raw: Record<string, unknown>): GraphData {
     const g = raw as Omit<GraphData, "edgesBySource" | "edgesByTarget" | "edgesAbsBySource" | "edgesAbsByTarget">;
     const { edgesBySource, edgesByTarget } = buildEdgeIndexes(g.edges);
-    const edgesAbs = (g.edgesAbs as EdgeData[] | null) ?? null;
+    const edgesAbs = (g.edgesAbs satisfies EdgeData[] | null) ?? null;
     let edgesAbsBySource: Map<string, EdgeData[]> | null = null;
     let edgesAbsByTarget: Map<string, EdgeData[]> | null = null;
     if (edgesAbs) {
@@ -18,7 +18,7 @@ function hydrateGraph(raw: Record<string, unknown>): GraphData {
         edgesAbsBySource = absIndexes.edgesBySource;
         edgesAbsByTarget = absIndexes.edgesByTarget;
     }
-    return { ...g, edgesBySource, edgesByTarget, edgesAbs, edgesAbsBySource, edgesAbsByTarget } as GraphData;
+    return { ...g, edgesBySource, edgesByTarget, edgesAbs, edgesAbsBySource, edgesAbsByTarget };
 }
 
 export type NormalizeType = "none" | "target" | "layer";

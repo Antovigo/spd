@@ -32,12 +32,15 @@ export function topEdgeAttributions(
 ): EdgeAttribution[] {
     const sorted = [...edges].sort((a, b) => Math.abs(b.val) - Math.abs(a.val)).slice(0, n);
     const maxAbsVal = Math.abs(sorted[0]?.val || 1);
-    return sorted.map((e) => ({
-        key: getKey(e),
-        value: e.val,
-        normalizedMagnitude: Math.abs(e.val) / maxAbsVal,
-        tokenStr: resolveTokenStr ? resolveTokenStr(getKey(e)) : null,
-    }));
+    return sorted.map((e) => {
+        const key = getKey(e);
+        return {
+            key,
+            value: e.val,
+            normalizedMagnitude: Math.abs(e.val) / maxAbsVal,
+            tokenStr: resolveTokenStr ? resolveTokenStr(key) : null,
+        };
+    });
 }
 
 export type OutputProbability = {

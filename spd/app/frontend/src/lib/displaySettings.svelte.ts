@@ -44,20 +44,36 @@ export const CORRELATION_STAT_DESCRIPTIONS: Record<CorrelationStatType, string> 
     jaccard: "Intersection over union",
 };
 
-export const displaySettings = $state({
+type DisplaySettings = {
+    showPmi: boolean;
+    showPrecision: boolean;
+    showRecall: boolean;
+    showJaccard: boolean;
+    showSetOverlapVis: boolean;
+    showEdgeAttributions: boolean;
+    nodeColorMode: NodeColorMode;
+    exampleColorMode: ExampleColorMode;
+    meanCiCutoff: number;
+    centerOnPeak: boolean;
+    showAutoInterpPromptButton: boolean;
+    curvedEdges: boolean;
+    edgeVariant: EdgeVariant;
+};
+
+export const displaySettings = $state<DisplaySettings>({
     showPmi: false,
     showPrecision: false,
     showRecall: false,
     showJaccard: false,
     showSetOverlapVis: true,
     showEdgeAttributions: true,
-    nodeColorMode: "ci" as NodeColorMode,
-    exampleColorMode: "ci" as ExampleColorMode,
+    nodeColorMode: "ci",
+    exampleColorMode: "ci",
     meanCiCutoff: 1e-7,
     centerOnPeak: false,
     showAutoInterpPromptButton: false,
     curvedEdges: true,
-    edgeVariant: "signed" as EdgeVariant,
+    edgeVariant: "signed",
 });
 
 export function anyCorrelationStatsEnabled() {

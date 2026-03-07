@@ -724,12 +724,4 @@
         flex-direction: column;
         gap: var(--space-2);
     }
-
-    .loading {
-        padding: var(--space-4);
-        text-align: center;
-        font-size: var(--text-sm);
-        font-family: var(--font-sans);
-        color: var(--text-muted);
-    }
 </style>
