@@ -42,6 +42,7 @@ class AttributionsSubmitResult:
 def submit_attributions(
     wandb_path: str,
     config: AttributionsSlurmConfig,
+    harvest_subrun_id: str,
     job_suffix: str | None = None,
     snapshot_branch: str | None = None,
     dependency_job_id: str | None = None,
@@ -71,6 +72,7 @@ def submit_attributions(
         cmd = run_worker.get_command(
             wandb_path,
             config_json,
+            harvest_subrun_id=harvest_subrun_id,
             rank=rank,
             world_size=n_gpus,
             subrun_id=subrun_id,

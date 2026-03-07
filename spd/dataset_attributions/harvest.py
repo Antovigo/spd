@@ -66,6 +66,7 @@ def _build_alive_masks(
 def harvest_attributions(
     config: DatasetAttributionConfig,
     output_dir: Path,
+    harvest_subrun_id: str,
     rank: int,
     world_size: int,
 ) -> None:
@@ -105,7 +106,7 @@ def harvest_attributions(
     logger.info(f"Found {len(sources_by_target)} target layers with gradient connections")
 
     # Build alive masks
-    component_alive = _build_alive_masks(model, run_id, config.harvest_subrun_id)
+    component_alive = _build_alive_masks(model, run_id, harvest_subrun_id)
 
     harvester = AttributionHarvester(
         model=model,

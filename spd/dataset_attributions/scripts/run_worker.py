@@ -19,6 +19,7 @@ from spd.utils.wandb_utils import parse_wandb_run_path
 def main(
     wandb_path: str,
     config_json: dict[str, Any],
+    harvest_subrun_id: str,
     rank: int,
     world_size: int,
     subrun_id: str,
@@ -34,6 +35,7 @@ def main(
     harvest_attributions(
         config=config,
         output_dir=output_dir,
+        harvest_subrun_id=harvest_subrun_id,
         rank=rank,
         world_size=world_size,
     )
@@ -42,6 +44,7 @@ def main(
 def get_command(
     wandb_path: str,
     config_json: str,
+    harvest_subrun_id: str,
     rank: int,
     world_size: int,
     subrun_id: str,
@@ -50,6 +53,7 @@ def get_command(
         f"python -m spd.dataset_attributions.scripts.run_worker "
         f'"{wandb_path}" '
         f"--config_json '{config_json}' "
+        f"--harvest_subrun_id {harvest_subrun_id} "
         f"--rank {rank} "
         f"--world_size {world_size} "
         f"--subrun_id {subrun_id}"
