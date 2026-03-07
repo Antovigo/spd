@@ -15,7 +15,6 @@ from spd.autointerp.prompt_helpers import (
     density_note,
     human_layer_desc,
     layer_position_note,
-    token_pmi_pairs,
 )
 from spd.autointerp.schemas import ModelMetadata
 from spd.graph_interp.graph_context import RelatedComponent
@@ -79,7 +78,9 @@ def format_output_prompt(
     label_max_words: int,
     max_examples: int,
 ) -> str:
-    output_pmi = token_pmi_pairs(app_tok, component.output_token_pmi.top)
+    output_pmi = [
+        (app_tok.get_tok_display(tid), pmi) for tid, pmi in component.output_token_pmi.top
+    ]
 
     md = Md()
     md.p(
@@ -119,7 +120,7 @@ def format_input_prompt(
     label_max_words: int,
     max_examples: int,
 ) -> str:
-    input_pmi = token_pmi_pairs(app_tok, component.input_token_pmi.top)
+    input_pmi = [(app_tok.get_tok_display(tid), pmi) for tid, pmi in component.input_token_pmi.top]
 
     md = Md()
     md.p(

@@ -11,22 +11,16 @@ from spd.harvest.analysis import TokenPRLift
 from spd.harvest.schemas import ComponentData
 from spd.utils.markdown import Md
 
-
-def token_pmi_pairs(
-    app_tok: AppTokenizer,
-    token_pmi_top: list[tuple[int, float]] | None,
-) -> list[tuple[str, float]] | None:
-    if not token_pmi_top:
-        return None
-    return [(app_tok.get_tok_display(tid), pmi) for tid, pmi in token_pmi_top]
-
-
 DATASET_DESCRIPTIONS: dict[str, str] = {
     "SimpleStories/SimpleStories": (
         "SimpleStories: 2M+ short stories (200-350 words), grade 1-8 reading level. "
         "Simple vocabulary, common narrative elements."
     ),
     "danbraunai/pile-uncopyrighted-tok-shuffled": (
+        "The Pile (uncopyrighted subset): diverse text from books, "
+        "academic papers, code, web pages, and other sources."
+    ),
+    "danbraunai/pile-uncopyrighted-tok": (
         "The Pile (uncopyrighted subset): diverse text from books, "
         "academic papers, code, web pages, and other sources."
     ),
@@ -134,17 +128,17 @@ def _build_examples(
     max_examples: int,
     shift_firings: bool,
 ) -> Md:
-    lines: list[str] = []
-    for i, ex in enumerate(component.activation_examples[:max_examples]):
+    items: list[str] = []
+    for ex in component.activation_examples[:max_examples]:
         if not any(ex.firings):
             continue
         spans = app_tok.get_spans(ex.token_ids)
         firings = [False] + ex.firings[:-1] if shift_firings else ex.firings
         tokens = list(zip(spans, firings, strict=True))
-        lines.append(f"{i + 1}. {delimit_tokens(tokens)}")
+        items.append(delimit_tokens(tokens))
     md = Md()
-    if lines:
-        md.p("\n".join(lines))
+    if items:
+        md.numbered(items)
     return md
 
 

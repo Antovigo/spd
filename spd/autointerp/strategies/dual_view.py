@@ -18,7 +18,6 @@ from spd.autointerp.prompt_helpers import (
     density_note,
     human_layer_desc,
     layer_position_note,
-    token_pmi_pairs,
 )
 from spd.autointerp.schemas import ModelMetadata
 from spd.harvest.analysis import TokenPRLift
@@ -38,8 +37,12 @@ def format_prompt(
     output_pmi: list[tuple[str, float]] | None = None
 
     if config.include_pmi:
-        input_pmi = token_pmi_pairs(app_tok, component.input_token_pmi.top)
-        output_pmi = token_pmi_pairs(app_tok, component.output_token_pmi.top)
+        input_pmi = [
+            (app_tok.get_tok_display(tid), pmi) for tid, pmi in component.input_token_pmi.top
+        ]
+        output_pmi = [
+            (app_tok.get_tok_display(tid), pmi) for tid, pmi in component.output_token_pmi.top
+        ]
 
     output_section = build_output_section(output_token_stats, output_pmi)
     input_section = build_input_section(input_token_stats, input_pmi)
@@ -119,14 +122,16 @@ def format_prompt(
         "function. The label should read like a short description of the job this component "
         "does in the network. Use both the input and output evidence."
     )
-    md.p(
-        "Examples of good labels across different component types:\n"
-        '- "word stem completion (stems → suffixes)"\n'
-        '- "closes dialogue with quotation marks"\n'
-        '- "object pronouns after verbs"\n'
-        '- "story-ending moral resolution vocabulary"\n'
-        '- "aquatic scene vocabulary (frog, river, pond)"\n'
-        "- \"'of course' and abstract nouns after prepositions\""
+    md.p("Examples of good labels across different component types:")
+    md.bullets(
+        [
+            '"word stem completion (stems → suffixes)"',
+            '"closes dialogue with quotation marks"',
+            '"object pronouns after verbs"',
+            '"story-ending moral resolution vocabulary"',
+            '"aquatic scene vocabulary (frog, river, pond)"',
+            "\"'of course' and abstract nouns after prepositions\"",
+        ]
     )
     md.p(
         f'Say "unclear" if the evidence is too weak or diffuse. {forbidden_sentence}Lowercase only.'

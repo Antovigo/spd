@@ -9,7 +9,6 @@ from spd.autointerp.config import CompactSkepticalConfig
 from spd.autointerp.prompt_helpers import (
     DATASET_DESCRIPTIONS,
     build_fires_on_examples,
-    token_pmi_pairs,
 )
 from spd.autointerp.schemas import ModelMetadata
 from spd.harvest.analysis import TokenPRLift
@@ -34,8 +33,12 @@ def format_prompt(
     output_pmi: list[tuple[str, float]] | None = None
 
     if config.include_pmi:
-        input_pmi = token_pmi_pairs(app_tok, component.input_token_pmi.top)
-        output_pmi = token_pmi_pairs(app_tok, component.output_token_pmi.top)
+        input_pmi = [
+            (app_tok.get_tok_display(tid), pmi) for tid, pmi in component.input_token_pmi.top
+        ]
+        output_pmi = [
+            (app_tok.get_tok_display(tid), pmi) for tid, pmi in component.output_token_pmi.top
+        ]
 
     input_section = _build_input_section(input_token_stats, input_pmi)
     output_section = _build_output_section(output_token_stats, output_pmi)
