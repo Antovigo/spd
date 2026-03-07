@@ -270,11 +270,11 @@ def test_run_and_save_intervention_without_text(app_with_prompt: tuple[TestClien
     assert len(result["ci"]) > 0
     assert len(result["stochastic"]) > 0
     assert len(result["adversarial"]) > 0
-    assert result["target_sans"] is None
+    assert result["ablated"] is None
     assert "ci_loss" in result
     assert "stochastic_loss" in result
     assert "adversarial_loss" in result
-    assert result["target_sans_loss"] is None
+    assert result["ablated_loss"] is None
 
 
 # -----------------------------------------------------------------------------
