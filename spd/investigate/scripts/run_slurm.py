@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from spd.log import logger
-from spd.settings import SPD_OUT_DIR
+from spd.settings import DEFAULT_PARTITION_NAME, SPD_OUT_DIR
 from spd.utils.git_utils import create_git_snapshot
 from spd.utils.slurm import SlurmConfig, generate_script, submit_slurm_job
 from spd.utils.wandb_utils import parse_wandb_run_path
@@ -29,7 +29,6 @@ def launch_investigation(
     prompt: str,
     context_length: int,
     max_turns: int,
-    partition: str,
     time: str,
     job_suffix: str | None,
 ) -> InvestigationResult:
@@ -66,7 +65,7 @@ def launch_investigation(
 
     slurm_config = SlurmConfig(
         job_name=job_name,
-        partition=partition,
+        partition=DEFAULT_PARTITION_NAME,
         n_gpus=1,
         time=time,
         snapshot_branch=snapshot_branch,

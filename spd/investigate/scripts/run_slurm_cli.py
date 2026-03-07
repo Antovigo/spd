@@ -10,8 +10,6 @@ from pathlib import Path
 
 import fire
 
-from spd.settings import DEFAULT_PARTITION_NAME
-
 
 def _resolve_prompt(prompt: str) -> str:
     """If prompt starts with @, read from that file path. Otherwise return as-is."""
@@ -27,7 +25,6 @@ def main(
     prompt: str,
     context_length: int = 128,
     max_turns: int = 50,
-    partition: str = DEFAULT_PARTITION_NAME,
     time: str = "8:00:00",
     job_suffix: str | None = None,
 ) -> None:
@@ -38,7 +35,6 @@ def main(
         prompt: The research question, or @filepath to read from a file.
         context_length: Context length for prompts (default 128).
         max_turns: Maximum agentic turns (default 50, prevents runaway).
-        partition: SLURM partition name.
         time: Job time limit (default 8 hours).
         job_suffix: Optional suffix for SLURM job names.
     """
@@ -49,7 +45,6 @@ def main(
         prompt=_resolve_prompt(prompt),
         context_length=context_length,
         max_turns=max_turns,
-        partition=partition,
         time=time,
         job_suffix=job_suffix,
     )
