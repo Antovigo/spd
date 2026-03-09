@@ -1,7 +1,7 @@
 """Generate a TSV index of all SPD runs.
 
 Scans SPD_OUT_DIR/spd for run directories and produces a runs_index.tsv with metadata columns:
-run_id, git_commit, uncommitted_changes, label, notes, hyperparameters, date, completed.
+run_id, git_commit, uncommitted_changes, label, notes, hyperparameters, date, completed, duration.
 
 The hyperparameters column shows only config values that differ between runs sharing the same label.
 
@@ -31,6 +31,7 @@ COLUMNS = [
     "uncommitted_changes",
     "label",
     "completed",
+    "duration_hours",
     "hyperparameters",
     "notes",
 ]
@@ -95,6 +96,7 @@ def _read_metadata(run_dir: Path) -> dict[str, str]:
             "notes": str(meta.get("notes", "")),
             "date": str(meta.get("date", NA)),
             "completed": str(meta.get("completed", NA)),
+            "duration_hours": str(meta.get("duration", NA)),
         }
 
     # Legacy run without metadata — try to determine completion from config + metrics
@@ -107,6 +109,7 @@ def _read_metadata(run_dir: Path) -> dict[str, str]:
         "notes": "",
         "date": NA,
         "completed": str(completed),
+        "duration_hours": NA,
     }
 
 

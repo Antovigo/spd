@@ -572,7 +572,7 @@ def _mark_run_completed(out_dir: Path, save_to_wandb: bool) -> None:
         metadata = json.load(f)
 
     start_time = datetime.strptime(metadata["date"], "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
-    metadata["duration"] = round((datetime.now(UTC) - start_time).total_seconds() / 3600, 1)
+    metadata["duration"] = round((datetime.now(UTC) - start_time).total_seconds() / 3600, 2)
     metadata["completed"] = True
     save_file(metadata, metadata_path, indent=2)
 
