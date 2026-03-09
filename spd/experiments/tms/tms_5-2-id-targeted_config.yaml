@@ -6,27 +6,30 @@ wandb_run_name_prefix: ""
 label: "targeted_PD_tms_5-2-id"
 
 # --- General ---
-seed: 0
+seed: 3
 n_mask_samples: 1
 ci_config:
   mode: layerwise
-  fn_type: mlp
-  hidden_dims: [16]
+  fn_type: shared_mlp
+  hidden_dims: [64]
 sigmoid_type: "leaky_hard"
 module_info:
   - module_pattern: "linear1"
-    C: 10
+    C: 30
   - module_pattern: "linear2"
-    C: 10
+    C: 30
   - module_pattern: "hidden_layers.0"
-    C: 10
+    C: 30
 use_delta_component: true
 
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 3e-3
-    pnorm: 1.0
+    coeff: 4e-3
+    pnorm: 2.0
     beta: 0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 1.0
+    p_anneal_end_frac: 1.0
   - classname: "StochasticReconLayerwiseLoss"
     coeff: 1.0
   - classname: "StochasticReconLoss"
@@ -36,7 +39,7 @@ output_loss_type: mse
 # --- Training ---
 batch_size: 4096
 eval_batch_size: 4096
-steps: 5_000
+steps: 10_000
 lr_schedule:
   start_val: 1e-3
   fn_type: cosine
