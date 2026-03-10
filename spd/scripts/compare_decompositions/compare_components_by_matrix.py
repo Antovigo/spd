@@ -30,7 +30,7 @@ from spd.scripts.compare_decompositions.utils import (
 
 TILE_SIZE = 0.5  # inches per tile
 LABEL_PAD = 1.5  # inches padding for axis labels/titles
-COLORBAR_WIDTH_RATIO = 2  # gridspec width ratio units for colorbar column
+COLORBAR_WIDTH_RATIO = 0.5  # gridspec width ratio units for colorbar column
 
 
 def plot_matrix_heatmaps(
@@ -77,8 +77,8 @@ def plot_matrix_heatmaps(
         ax.set_title(f"pos {pos} '{tok}'", fontsize=9)
 
         if col_idx == 0:
-            ax.set_ylabel(f"{label_a} comps", fontsize=8)
-        ax.set_xlabel(f"{label_b} comps", fontsize=8)
+            ax.set_ylabel(f"{label_a} comp", fontsize=8)
+        ax.set_xlabel(f"{label_b} comp", fontsize=8)
 
     fig.suptitle(module_path, fontsize=12)
     assert im is not None
