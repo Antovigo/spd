@@ -30,7 +30,7 @@ from spd.scripts.compare_decompositions.utils import (
 
 TILE_SIZE = 0.5  # inches per tile
 LABEL_PAD = 1.5  # inches padding for axis labels/titles
-COLORBAR_WIDTH_RATIO = 0.5  # gridspec width ratio units for colorbar column
+COLORBAR_WIDTH_RATIO = 0.2  # gridspec width ratio units for colorbar column
 
 
 def plot_matrix_heatmaps(
