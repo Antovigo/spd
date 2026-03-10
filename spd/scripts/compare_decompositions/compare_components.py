@@ -12,7 +12,6 @@ Usage:
         --output_dir /tmp/compare_decompositions_components
 """
 
-import math
 from pathlib import Path
 
 import fire
@@ -29,6 +28,10 @@ from spd.scripts.compare_decompositions.utils import (
     load_decomposition,
 )
 
+TILE_SIZE = 0.5  # inches per tile
+LABEL_PAD = 1.5  # inches for axis labels/titles
+COLORBAR_WIDTH_RATIO = 2  # gridspec width ratio units for colorbar column
+
 
 def plot_component_heatmaps(
     sim_matrices: dict[str, torch.Tensor],
@@ -38,19 +41,33 @@ def plot_component_heatmaps(
     label_b: str,
 ) -> Figure:
     """Plot one heatmap subplot per module_path showing pairwise cosine similarity."""
-    n_plots = len(sim_matrices)
-    assert n_plots > 0
-    ncols = min(n_plots, 4)
-    nrows = math.ceil(n_plots / ncols)
+    assert len(sim_matrices) > 0
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
+    sorted_paths = sorted(sim_matrices)
+    n_b_per_module = [sim_matrices[p].shape[1] for p in sorted_paths]
+    max_n_a = max(sim_matrices[p].shape[0] for p in sorted_paths)
+
+    width_ratios = n_b_per_module + [COLORBAR_WIDTH_RATIO]
+    fig_width = (
+        sum(n_b_per_module) * TILE_SIZE
+        + LABEL_PAD * len(sorted_paths)
+        + COLORBAR_WIDTH_RATIO * TILE_SIZE
+    )
+    fig_height = max_n_a * TILE_SIZE + LABEL_PAD
+
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    gs = fig.add_gridspec(
+        nrows=1,
+        ncols=len(sorted_paths) + 1,
+        width_ratios=width_ratios,
+        wspace=0.4,
+    )
 
     im = None
-    for idx, module_path in enumerate(sorted(sim_matrices)):
-        row, col = divmod(idx, ncols)
-        ax = axes[row][col]
+    for idx, module_path in enumerate(sorted_paths):
+        ax = fig.add_subplot(gs[0, idx])
         sim_np = sim_matrices[module_path].cpu().numpy()
-        im = ax.imshow(sim_np, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+        im = ax.imshow(sim_np, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
 
         indices_a = active_indices_a[module_path]
         indices_b = active_indices_b[module_path]
@@ -62,15 +79,10 @@ def plot_component_heatmaps(
         ax.set_ylabel(f"{label_a} components", fontsize=8)
         ax.set_title(module_path, fontsize=9)
 
-    # Hide unused subplots
-    for idx in range(n_plots, nrows * ncols):
-        row, col = divmod(idx, ncols)
-        axes[row][col].set_visible(False)
-
     fig.suptitle("Component Cosine Similarity", fontsize=14)
-    fig.tight_layout()
     assert im is not None
-    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6, label="Cosine Similarity")
+    cbar_ax = fig.add_subplot(gs[0, -1])
+    fig.colorbar(im, cax=cbar_ax, label="Cosine Similarity")
     return fig
 
 
