@@ -28,7 +28,7 @@ loss_metric_configs:
     pnorm: 2.0
     beta: 0
     p_anneal_start_frac: 0.0
-    p_anneal_final_p: 1.0
+    p_anneal_final_p: 0.4
     p_anneal_end_frac: 1.0
   - classname: "StochasticReconLayerwiseLoss"
     coeff: 1.0
@@ -91,7 +91,7 @@ task_config:
   task_name: tms
   feature_probability: 0.05
   data_generation_type: "exactly_one_active"
-  active_indices: [1, 2, 3]
+  active_indices: [1,2]
 
 # --- Targeted Decomposition ---
 nontarget_task_config:
@@ -100,3 +100,4 @@ nontarget_task_config:
   data_generation_type: "at_least_zero_active"
 nontarget_batch_size: 4096
 nontarget_eval_batch_size: 4096
+nontarget_impmin_coeff_ratio: 2
