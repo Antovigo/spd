@@ -176,21 +176,17 @@ def run_greedy(
 
             # Batch all single-bit flips: create n_coords copies with one bit flipped each
             batched_sources = {
-                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone()
-                for m in modules
+                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone() for m in modules
             }
             for i, (m, flat_idx) in enumerate(coords):
                 batched_sources[m][i].reshape(-1)[flat_idx] = (
                     1.0 - batched_sources[m][i].reshape(-1)[flat_idx]
                 )
 
-            batched_active = {
-                m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules
-            }
+            batched_active = {m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules}
             mask_no_delta = {m: batched_active[m] * batched_sources[m] for m in modules}
             mask_with_delta = {
-                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m])
-                for m in modules
+                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m]) for m in modules
             }
             wdam: dict[str, WeightDeltaAndMask] = {
                 m: (

@@ -1,10 +1,10 @@
-"""Test completeness by maximizing divergence gap from the original model.
+"""Test completeness by maximizing divergence ratio from the original model.
 
 Uses greedy coordinate descent with random restarts to optimize binary masks directly,
 avoiding the binarization gap of PGD-based optimization.
 
-Maximizes Div(original || masked_without_delta) - Div(original || masked_with_delta).
-A high loss means the delta component carries information that the active components miss,
+Maximizes Div(original || masked_without_delta) / (Div(original || masked_with_delta) + eps).
+A high ratio means the delta component carries information that the active components miss,
 as measured by how much closer the with-delta arm is to the original model.
 
 Usage:
@@ -100,7 +100,8 @@ def eval_loss(
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
     loss_type: Literal["mse", "kl"],
     original_output: Tensor,
-    sign: float,
+    reverse: bool,
+    eps: float,
 ) -> tuple[Float[Tensor, ""], Tensor, Tensor]:
     mask_no_delta = {m: active[m] * sources[m] for m in active}
     mask_with_delta = {m: active[m] * sources[m] + (1 - active[m]) for m in active}
@@ -124,7 +125,10 @@ def eval_loss(
         calc_sum_recon_loss_lm(pred=out_with_delta, target=original_output, loss_type=loss_type)
         / n_examples
     )
-    loss = sign * (div_no_delta - div_with_delta)
+    if reverse:
+        loss = torch.log(div_with_delta + eps) - torch.log(div_no_delta + eps)
+    else:
+        loss = torch.log(div_no_delta + eps) - torch.log(div_with_delta + eps)
     return loss, out_no_delta, out_with_delta
 
 
@@ -133,25 +137,26 @@ def _per_element_loss_divergence(
     out_with_delta: Tensor,
     original_output: Tensor,
     loss_type: Literal["mse", "kl"],
-    sign: float,
+    reverse: bool,
     n_batch: int,
+    eps: float,
 ) -> Float[Tensor, " n_batch"]:
-    """Compute per-batch-element completeness loss (divergence variant)."""
+    """Compute per-batch-element completeness loss (log-ratio variant)."""
     original_expanded = original_output.expand_as(out_no_delta)
     match loss_type:
         case "mse":
             div_no = ((out_no_delta - original_expanded) ** 2).flatten(1).mean(1)
             div_with = ((out_with_delta - original_expanded) ** 2).flatten(1).mean(1)
         case "kl":
-            kl_no = calc_kl_divergence_lm(
-                pred=out_no_delta, target=original_expanded, reduce=False
-            )
+            kl_no = calc_kl_divergence_lm(pred=out_no_delta, target=original_expanded, reduce=False)
             div_no = kl_no.reshape(n_batch, -1).mean(1)
             kl_with = calc_kl_divergence_lm(
                 pred=out_with_delta, target=original_expanded, reduce=False
             )
             div_with = kl_with.reshape(n_batch, -1).mean(1)
-    return sign * (div_no - div_with)
+    if reverse:
+        return torch.log(div_with + eps) - torch.log(div_no + eps)
+    return torch.log(div_no + eps) - torch.log(div_with + eps)
 
 
 def run_greedy(
@@ -163,18 +168,18 @@ def run_greedy(
     loss_type: Literal["mse", "kl"],
     n_restarts: int,
     reverse: bool,
+    eps: float,
 ) -> tuple[dict[str, Tensor], Float[Tensor, ""], Tensor, Tensor]:
-    """Run greedy coordinate descent with random restarts to maximize divergence gap.
+    """Run greedy coordinate descent with random restarts to maximize divergence ratio.
 
     Each sweep batches all single-bit flips into one forward pass instead of evaluating
     each flip individually.
 
-    Default: Div(original, no_delta) - Div(original, with_delta).
-    Reverse: Div(original, with_delta) - Div(original, no_delta).
+    Default: Div(original, no_delta) / (Div(original, with_delta) + eps).
+    Reverse: Div(original, with_delta) / (Div(original, no_delta) + eps).
 
     Returns (best_sources, best_loss, out_no_delta, out_with_delta).
     """
-    sign = -1.0 if reverse else 1.0
     modules = list(active.keys())
     # Only iterate over coordinates where the active mask is non-zero
     coords: list[tuple[str, int]] = []
@@ -201,8 +206,15 @@ def run_greedy(
 
         with torch.no_grad():
             current_loss, _, _ = eval_loss(
-                model, input_tensor, sources, active, weight_deltas, loss_type,
-                original_output, sign,
+                model,
+                input_tensor,
+                sources,
+                active,
+                weight_deltas,
+                loss_type,
+                original_output,
+                reverse,
+                eps,
             )
 
         n_sweeps = 0
@@ -211,21 +223,17 @@ def run_greedy(
 
             # Batch all single-bit flips: create n_coords copies with one bit flipped each
             batched_sources = {
-                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone()
-                for m in modules
+                m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone() for m in modules
             }
             for i, (m, flat_idx) in enumerate(coords):
                 batched_sources[m][i].reshape(-1)[flat_idx] = (
                     1.0 - batched_sources[m][i].reshape(-1)[flat_idx]
                 )
 
-            batched_active = {
-                m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules
-            }
+            batched_active = {m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules}
             mask_no_delta = {m: batched_active[m] * batched_sources[m] for m in modules}
             mask_with_delta = {
-                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m])
-                for m in modules
+                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m]) for m in modules
             }
             wdam: dict[str, WeightDeltaAndMask] = {
                 m: (
@@ -244,7 +252,13 @@ def run_greedy(
                 )
 
             per_coord_loss = _per_element_loss_divergence(
-                out_no, out_with, original_output, loss_type, sign, n_coords,
+                out_no,
+                out_with,
+                original_output,
+                loss_type,
+                reverse,
+                n_coords,
+                eps,
             )
 
             # Apply all improving flips
@@ -260,8 +274,15 @@ def run_greedy(
             # Re-evaluate actual loss after all flips applied together
             with torch.no_grad():
                 new_loss, _, _ = eval_loss(
-                    model, input_tensor, sources, active, weight_deltas, loss_type,
-                    original_output, sign,
+                    model,
+                    input_tensor,
+                    sources,
+                    active,
+                    weight_deltas,
+                    loss_type,
+                    original_output,
+                    reverse,
+                    eps,
                 )
 
             if new_loss > current_loss:
@@ -281,8 +302,15 @@ def run_greedy(
             best_sources = {m: sources[m].clone() for m in modules}
             with torch.no_grad():
                 best_final_loss, best_out_no_delta, best_out_with_delta = eval_loss(
-                    model, input_tensor, sources, active, weight_deltas, loss_type,
-                    original_output, sign,
+                    model,
+                    input_tensor,
+                    sources,
+                    active,
+                    weight_deltas,
+                    loss_type,
+                    original_output,
+                    reverse,
+                    eps,
                 )
 
     assert best_final_loss is not None
@@ -426,8 +454,9 @@ def main() -> None:
     parser.add_argument(
         "--reverse",
         action="store_true",
-        help="Maximize Div(original, with_delta) - Div(original, no_delta) instead",
+        help="Maximize Div(original, with_delta) / Div(original, no_delta) instead",
     )
+    parser.add_argument("--eps", type=float, default=1e-8, help="Epsilon for ratio denominator")
     parser.add_argument("--device", default="cpu", help="Device to run on")
     args = parser.parse_args()
 
@@ -472,6 +501,7 @@ def main() -> None:
         loss_type=config.output_loss_type,
         n_restarts=args.n_restarts,
         reverse=args.reverse,
+        eps=args.eps,
     )
 
     # 7. Print results
