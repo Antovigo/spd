@@ -388,6 +388,22 @@ class ImportanceMinimalityLossConfig(LossMetricConfig):
             data["beta"] = 0.0
         return data
 
+    @model_validator(mode="after")
+    def validate_scheduling_fracs(self) -> "ImportanceMinimalityLossConfig":
+        assert self.coeff_warmup_frac <= self.coeff_anneal_start_frac, (
+            f"coeff_warmup_frac ({self.coeff_warmup_frac}) must be <= "
+            f"coeff_anneal_start_frac ({self.coeff_anneal_start_frac})"
+        )
+        assert self.coeff_anneal_end_frac >= self.coeff_anneal_start_frac, (
+            f"coeff_anneal_end_frac ({self.coeff_anneal_end_frac}) must be >= "
+            f"coeff_anneal_start_frac ({self.coeff_anneal_start_frac})"
+        )
+        assert self.p_anneal_end_frac >= self.p_anneal_start_frac, (
+            f"p_anneal_end_frac ({self.p_anneal_end_frac}) must be >= "
+            f"p_anneal_start_frac ({self.p_anneal_start_frac})"
+        )
+        return self
+
 
 class UniformKSubsetRoutingConfig(BaseConfig):
     type: Literal["uniform_k_subset"] = "uniform_k_subset"
