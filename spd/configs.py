@@ -267,6 +267,10 @@ class IHTaskConfig(BaseConfig):
     )
 
 
+class CompletenessTaskConfig(BaseConfig):
+    task_name: Literal["completeness"]
+
+
 class LMTaskConfig(BaseConfig):
     task_name: Literal["lm"] = Field(
         default="lm",
@@ -732,6 +736,10 @@ class WeightMagnitudeConfig(BaseConfig):
     classname: Literal["WeightMagnitude"] = "WeightMagnitude"
 
 
+class CompletenessCIPlotsConfig(BaseConfig):
+    classname: Literal["CompletenessCIPlots"] = "CompletenessCIPlots"
+
+
 class UVPlotsConfig(BaseConfig):
     classname: Literal["UVPlots"] = "UVPlots"
     identity_patterns: list[str] | None
@@ -762,6 +770,7 @@ EvalOnlyMetricConfigType = (
     | CIHistogramsConfig
     | CI_L0Config
     | CIMeanPerComponentConfig
+    | CompletenessCIPlotsConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
     | PersistentPGDReconEvalConfig
@@ -780,7 +789,9 @@ EvalOnlyMetricConfigType = (
 )
 MetricConfigType = LossMetricConfigType | EvalOnlyMetricConfigType
 
-TaskConfig = TMSTaskConfig | ResidMLPTaskConfig | LMTaskConfig | IHTaskConfig
+TaskConfig = (
+    TMSTaskConfig | ResidMLPTaskConfig | LMTaskConfig | IHTaskConfig | CompletenessTaskConfig
+)
 
 SamplingType = Literal["continuous", "binomial"]
 

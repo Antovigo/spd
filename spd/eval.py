@@ -19,6 +19,8 @@ from spd.configs import (
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     CIMeanPerComponentConfig,
+    CompletenessCIPlotsConfig,
+    CompletenessTaskConfig,
     ComponentActivationDensityConfig,
     Config,
     FaithfulnessLossConfig,
@@ -61,6 +63,7 @@ from spd.metrics.ci_masked_recon_layerwise_loss import CIMaskedReconLayerwiseLos
 from spd.metrics.ci_masked_recon_loss import CIMaskedReconLoss
 from spd.metrics.ci_masked_recon_subset_loss import CIMaskedReconSubsetLoss
 from spd.metrics.ci_mean_per_component import CIMeanPerComponent
+from spd.metrics.completeness_ci_plots import CompletenessCIPlots
 from spd.metrics.component_activation_density import ComponentActivationDensity
 from spd.metrics.faithfulness_loss import FaithfulnessLoss
 from spd.metrics.hidden_acts_recon_loss import CIHiddenActsReconLoss, StochasticHiddenActsReconLoss
@@ -214,6 +217,17 @@ def init_metric(
                 sampling=run_config.sampling,
                 identity_patterns=cfg.identity_patterns,
                 dense_patterns=cfg.dense_patterns,
+            )
+        case CompletenessCIPlotsConfig():
+            assert isinstance(run_config.task_config, CompletenessTaskConfig)
+            from spd.experiments.completeness.models import RedundantCopyTransformer
+
+            assert isinstance(model.target_model, RedundantCopyTransformer)
+            metric = CompletenessCIPlots(
+                model=model,
+                sampling=run_config.sampling,
+                vocab_size=model.target_model.config.vocab_size,
+                eq_token=model.target_model.config.eq_token,
             )
         case StochasticReconLayerwiseLossConfig():
             metric = StochasticReconLayerwiseLoss(

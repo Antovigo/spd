@@ -1,10 +1,10 @@
-"""Test completeness by maximizing divergence gap from the original model.
+"""Test completeness by maximizing divergence ratio from the original model.
 
 Uses greedy coordinate descent with random restarts to optimize binary masks directly,
 avoiding the binarization gap of PGD-based optimization.
 
-Maximizes Div(original || masked_without_delta) - Div(original || masked_with_delta).
-A high loss means the delta component carries information that the active components miss,
+Maximizes Div(original || masked_without_delta) / (Div(original || masked_with_delta) + eps).
+A high ratio means the delta component carries information that the active components miss,
 as measured by how much closer the with-delta arm is to the original model.
 
 Usage:
@@ -24,6 +24,8 @@ from torch import Tensor
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+from spd.configs import Config
+from spd.experiments.completeness.models import RedundantCopyTransformer
 from spd.experiments.resid_mlp.models import ResidMLP
 from spd.experiments.tms.models import TMSModel
 from spd.models.component_model import ComponentModel, SPDRunInfo
@@ -31,18 +33,20 @@ from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.utils.general_utils import calc_kl_divergence_lm, calc_sum_recon_loss_lm
 
 
-def detect_model_type(output_loss_type: Literal["mse", "kl"]) -> Literal["toy", "lm"]:
-    match output_loss_type:
-        case "mse":
-            return "toy"
-        case "kl":
+def detect_model_type(config: Config) -> Literal["toy", "lm", "completeness"]:
+    match config.task_config.task_name:
+        case "completeness":
+            return "completeness"
+        case "lm":
             return "lm"
+        case "tms" | "resid_mlp" | "ih":
+            return "toy"
 
 
 def build_input_tensor(
     model: ComponentModel,
     input_str: str,
-    model_type: Literal["toy", "lm"],
+    model_type: Literal["toy", "lm", "completeness"],
     tokenizer_name: str | None,
     device: torch.device,
 ) -> tuple[Tensor, PreTrainedTokenizerBase | None]:
@@ -54,6 +58,15 @@ def build_input_tensor(
             assert 0 <= dim_idx < n_features, f"dim_idx {dim_idx} out of range [0, {n_features})"
             input_tensor = torch.zeros(1, n_features, device=device)
             input_tensor[0, dim_idx] = 0.75
+            return input_tensor, None
+        case "completeness":
+            token_value = int(input_str)
+            assert isinstance(model.target_model, RedundantCopyTransformer)
+            cfg = model.target_model.config
+            assert 1 <= token_value < cfg.vocab_size, (
+                f"token value {token_value} out of range [1, {cfg.vocab_size})"
+            )
+            input_tensor = torch.tensor([[token_value, cfg.eq_token]], device=device)
             return input_tensor, None
         case "lm":
             assert tokenizer_name is not None, "tokenizer_name required for LM models"
@@ -87,7 +100,8 @@ def eval_loss(
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
     loss_type: Literal["mse", "kl"],
     original_output: Tensor,
-    sign: float,
+    reverse: bool,
+    eps: float,
 ) -> tuple[Float[Tensor, ""], Tensor, Tensor]:
     mask_no_delta = {m: active[m] * sources[m] for m in active}
     mask_with_delta = {m: active[m] * sources[m] + (1 - active[m]) for m in active}
@@ -111,7 +125,10 @@ def eval_loss(
         calc_sum_recon_loss_lm(pred=out_with_delta, target=original_output, loss_type=loss_type)
         / n_examples
     )
-    loss = sign * (div_no_delta - div_with_delta)
+    if reverse:
+        loss = torch.log(div_with_delta + eps) - torch.log(div_no_delta + eps)
+    else:
+        loss = torch.log(div_no_delta + eps) - torch.log(div_with_delta + eps)
     return loss, out_no_delta, out_with_delta
 
 
@@ -120,10 +137,11 @@ def _per_element_loss_divergence(
     out_with_delta: Tensor,
     original_output: Tensor,
     loss_type: Literal["mse", "kl"],
-    sign: float,
+    reverse: bool,
     n_batch: int,
+    eps: float,
 ) -> Float[Tensor, " n_batch"]:
-    """Compute per-batch-element completeness loss (divergence variant)."""
+    """Compute per-batch-element completeness loss (log-ratio variant)."""
     original_expanded = original_output.expand_as(out_no_delta)
     match loss_type:
         case "mse":
@@ -136,7 +154,9 @@ def _per_element_loss_divergence(
                 pred=out_with_delta, target=original_expanded, reduce=False
             )
             div_with = kl_with.reshape(n_batch, -1).mean(1)
-    return sign * (div_no - div_with)
+    if reverse:
+        return torch.log(div_with + eps) - torch.log(div_no + eps)
+    return torch.log(div_no + eps) - torch.log(div_with + eps)
 
 
 def run_greedy(
@@ -148,18 +168,18 @@ def run_greedy(
     loss_type: Literal["mse", "kl"],
     n_restarts: int,
     reverse: bool,
+    eps: float,
 ) -> tuple[dict[str, Tensor], Float[Tensor, ""], Tensor, Tensor]:
-    """Run greedy coordinate descent with random restarts to maximize divergence gap.
+    """Run greedy coordinate descent with random restarts to maximize divergence ratio.
 
     Each sweep batches all single-bit flips into one forward pass instead of evaluating
     each flip individually.
 
-    Default: Div(original, no_delta) - Div(original, with_delta).
-    Reverse: Div(original, with_delta) - Div(original, no_delta).
+    Default: Div(original, no_delta) / (Div(original, with_delta) + eps).
+    Reverse: Div(original, with_delta) / (Div(original, no_delta) + eps).
 
     Returns (best_sources, best_loss, out_no_delta, out_with_delta).
     """
-    sign = -1.0 if reverse else 1.0
     modules = list(active.keys())
     # Only iterate over coordinates where the active mask is non-zero
     coords: list[tuple[str, int]] = []
@@ -193,7 +213,8 @@ def run_greedy(
                 weight_deltas,
                 loss_type,
                 original_output,
-                sign,
+                reverse,
+                eps,
             )
 
         n_sweeps = 0
@@ -235,8 +256,9 @@ def run_greedy(
                 out_with,
                 original_output,
                 loss_type,
-                sign,
+                reverse,
                 n_coords,
+                eps,
             )
 
             # Apply all improving flips
@@ -259,7 +281,8 @@ def run_greedy(
                     weight_deltas,
                     loss_type,
                     original_output,
-                    sign,
+                    reverse,
+                    eps,
                 )
 
             if new_loss > current_loss:
@@ -286,7 +309,8 @@ def run_greedy(
                     weight_deltas,
                     loss_type,
                     original_output,
-                    sign,
+                    reverse,
+                    eps,
                 )
 
     assert best_final_loss is not None
@@ -300,7 +324,7 @@ def print_results(
     active: dict[str, Float[Tensor, "... C"]],
     binary_sources: dict[str, Tensor],
     final_loss: Float[Tensor, ""],
-    model_type: Literal["toy", "lm"],
+    model_type: Literal["toy", "lm", "completeness"],
     ci_thr: float,
 ) -> None:
     print(f"\n{'=' * 60}")
@@ -319,7 +343,7 @@ def print_results(
                 active_indices = active_mask[0].nonzero(as_tuple=True)[0].tolist()
                 unmasked = ((active_mask[0] * binary[0]) > 0.5).nonzero(as_tuple=True)[0].tolist()
                 print(f"  Active components: {active_indices}, unmasked: {unmasked}")
-            case "lm":
+            case "lm" | "completeness":
                 for pos in range(active_mask.shape[1]):
                     active_indices = active_mask[0, pos].nonzero(as_tuple=True)[0].tolist()
                     unmasked = (
@@ -364,7 +388,7 @@ def print_top_outputs(
     original: Tensor,
     out_no_delta: Tensor,
     out_with_delta: Tensor,
-    model_type: Literal["toy", "lm"],
+    model_type: Literal["toy", "lm", "completeness"],
     tokenizer: PreTrainedTokenizerBase | None,
     k: int = 10,
 ) -> None:
@@ -383,6 +407,21 @@ def print_top_outputs(
                     f"  {i:<6} {original[0, i].item():>10.4f}"
                     f" {out_no_delta[0, i].item():>10.4f}"
                     f" {out_with_delta[0, i].item():>12.4f}"
+                )
+        case "completeness":
+            probs_orig = torch.softmax(original[0], dim=-1)
+            probs_no = torch.softmax(out_no_delta[0], dim=-1)
+            probs_with = torch.softmax(out_with_delta[0], dim=-1)
+
+            _, indices = torch.topk(probs_orig, k=min(k, probs_orig.shape[-1]))
+            print(f"  {'Token idx':<12} {'Original':>10} {'No-Delta':>10} {'With-Delta':>12}")
+            print(f"  {'-' * 48}")
+            for idx in indices:
+                i = int(idx)
+                print(
+                    f"  {i:<12} {probs_orig[i].item():>10.4f}"
+                    f" {probs_no[i].item():>10.4f}"
+                    f" {probs_with[i].item():>12.4f}"
                 )
         case "lm":
             assert tokenizer is not None
@@ -415,8 +454,9 @@ def main() -> None:
     parser.add_argument(
         "--reverse",
         action="store_true",
-        help="Maximize Div(original, with_delta) - Div(original, no_delta) instead",
+        help="Maximize Div(original, with_delta) / Div(original, no_delta) instead",
     )
+    parser.add_argument("--eps", type=float, default=1e-8, help="Epsilon for ratio denominator")
     parser.add_argument("--device", default="cpu", help="Device to run on")
     args = parser.parse_args()
 
@@ -429,8 +469,8 @@ def main() -> None:
     model = ComponentModel.from_run_info(run_info).to(device)
     model.eval()
 
-    model_type = detect_model_type(config.output_loss_type)
-    print(f"Model type: {model_type} (output_loss_type={config.output_loss_type})")
+    model_type = detect_model_type(config)
+    print(f"Model type: {model_type} (task={config.task_config.task_name})")
 
     # 2. Construct input tensor
     input_tensor, tokenizer = build_input_tensor(
@@ -461,6 +501,7 @@ def main() -> None:
         loss_type=config.output_loss_type,
         n_restarts=args.n_restarts,
         reverse=args.reverse,
+        eps=args.eps,
     )
 
     # 7. Print results
