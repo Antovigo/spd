@@ -131,7 +131,15 @@ def plot_matrix_heatmaps(
             if row_idx == 2:
                 ax.set_xlabel(label_b, fontsize=8)
 
-    # 4th row: norm bar charts per position
+    # 4th row: norm bar charts per position (shared y-range)
+    rdbu = plt.get_cmap("RdBu_r")
+    color_a = rdbu(0.95)  # red
+    color_b = rdbu(0.05)  # blue
+    max_norm = max(
+        norm for pos in sorted_positions for _, _, norm in pos_norms[pos]
+    )
+    norm_ylim = max_norm * 1.2
+
     for col_idx, pos in enumerate(sorted_positions):
         entries = pos_norms[pos]
         n_bars = len(entries)
@@ -145,13 +153,12 @@ def plot_matrix_heatmaps(
         bar_x = np.arange(n_bars)
         bar_labels = [f"{label}:{idx}" for label, idx, _ in entries]
         bar_values = [norm for _, _, norm in entries]
-        bar_colors = [
-            "tab:blue" if label == label_a else "tab:orange" for label, _, _ in entries
-        ]
+        bar_colors = [color_a if label == label_a else color_b for label, _, _ in entries]
         ax.bar(bar_x, bar_values, color=bar_colors)
         ax.set_xticks(bar_x)
         ax.set_xticklabels(bar_labels, fontsize=7, rotation=45, ha="right")
         ax.tick_params(axis="y", labelsize=7)
+        ax.set_ylim(0, norm_ylim)
 
     # Bold row labels on the left
     for row_idx, row_label in enumerate(ROW_LABELS[:n_heatmap_rows]):
