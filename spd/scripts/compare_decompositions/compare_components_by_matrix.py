@@ -29,9 +29,9 @@ from spd.scripts.compare_decompositions.utils import (
     load_decomposition,
 )
 
-TILE_SIZE = 0.5  # inches per tile
+TILE_SIZE = 0.5 / 3  # inches per tile
 LABEL_PAD = 1.5  # inches padding for axis labels/titles
-COLORBAR_WIDTH_RATIO = 0.2  # gridspec width ratio units for colorbar column
+COLORBAR_WIDTH_RATIO = 0.2 / 3  # gridspec width ratio units for colorbar column
 
 
 ROW_LABEL_PAD = 0.8  # inches padding for row labels on the left
@@ -91,9 +91,9 @@ def plot_matrix_heatmaps(
                 ax.set_title(f"pos {pos} '{tok}'", fontsize=9)
 
             if col_idx == 0:
-                ax.set_ylabel(f"{label_a} comp", fontsize=8)
+                ax.set_ylabel(label_a, fontsize=8)
             if row_idx == 2:
-                ax.set_xlabel(f"{label_b} comp", fontsize=8)
+                ax.set_xlabel(label_b, fontsize=8)
 
     # Bold row labels on the left
     for row_idx, row_label in enumerate(ROW_LABELS):
