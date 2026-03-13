@@ -42,10 +42,9 @@ ROW_GAP = 0.5
 CBAR_GAP = 0.3
 CBAR_WIDTH = 0.15
 ROW_LABEL_X = 0.15
-NORM_GAP = 0.8
-NORM_PLOT_WIDTH = 1.5
+NORM_ROW_HEIGHT = 1.5
 
-ROW_LABELS = ["Full", "V", "U"]
+ROW_LABELS = ["Full", "V", "U", "||U||·||V||"]
 
 
 def plot_matrix_heatmaps(
@@ -55,37 +54,29 @@ def plot_matrix_heatmaps(
     pos_sims_u: dict[int, torch.Tensor],
     active_a: dict[int, list[int]],
     active_b: dict[int, list[int]],
+    pos_norms: dict[int, list[tuple[str, int, float]]],
     token_strs: list[str],
     label_a: str,
     label_b: str,
-    norms_a: dict[int, float],
-    norms_b: dict[int, float],
 ) -> Figure:
-    """3-row grid of heatmaps: Full subcomponents, V vectors, U vectors.
+    """3-row heatmap grid (Full/V/U) + 4th row of component norm bar charts.
 
     Uses manually positioned axes so every tile is exactly TILE_SIZE inches.
     """
     sorted_positions = sorted(pos_sims_full)
     all_sims = [pos_sims_full, pos_sims_v, pos_sims_u]
     n_cols = len(sorted_positions)
-    n_rows = 3
+    n_heatmap_rows = 3
 
     col_nb = [pos_sims_full[pos].shape[1] for pos in sorted_positions]
     max_na = max(pos_sims_full[pos].shape[0] for pos in sorted_positions)
     row_height = max_na * TILE_SIZE
 
     total_data_width = sum(nb * TILE_SIZE for nb in col_nb) + COL_GAP * (n_cols - 1)
-    total_data_height = row_height * n_rows + ROW_GAP * (n_rows - 1)
+    heatmap_height = row_height * n_heatmap_rows + ROW_GAP * (n_heatmap_rows - 1)
+    total_data_height = heatmap_height + ROW_GAP + NORM_ROW_HEIGHT
 
-    fig_width = (
-        LEFT_MARGIN
-        + total_data_width
-        + CBAR_GAP
-        + CBAR_WIDTH
-        + NORM_GAP
-        + NORM_PLOT_WIDTH
-        + RIGHT_MARGIN
-    )
+    fig_width = LEFT_MARGIN + total_data_width + CBAR_GAP + CBAR_WIDTH + RIGHT_MARGIN
     fig_height = TOP_MARGIN + total_data_height + BOTTOM_MARGIN
 
     fig = plt.figure(figsize=(fig_width, fig_height))
@@ -97,12 +88,15 @@ def plot_matrix_heatmaps(
         col_x.append(x)
         x += nb * TILE_SIZE + COL_GAP
 
-    # y-top of each row (inches from bottom edge)
+    # y-top of each heatmap row (inches from bottom edge)
     row_y_top: list[float] = []
     y = fig_height - TOP_MARGIN
-    for _ in range(n_rows):
+    for _ in range(n_heatmap_rows):
         row_y_top.append(y)
         y -= row_height + ROW_GAP
+
+    # 4th row (norm bar charts) top
+    norm_row_y_top = y
 
     im = None
     for row_idx, sims_dict in enumerate(all_sims):
@@ -137,8 +131,30 @@ def plot_matrix_heatmaps(
             if row_idx == 2:
                 ax.set_xlabel(label_b, fontsize=8)
 
+    # 4th row: norm bar charts per position
+    for col_idx, pos in enumerate(sorted_positions):
+        entries = pos_norms[pos]
+        n_bars = len(entries)
+        col_w = col_nb[col_idx] * TILE_SIZE
+        x_in = col_x[col_idx]
+        y_in = norm_row_y_top - NORM_ROW_HEIGHT
+
+        ax = fig.add_axes(
+            [x_in / fig_width, y_in / fig_height, col_w / fig_width, NORM_ROW_HEIGHT / fig_height]
+        )
+        bar_x = np.arange(n_bars)
+        bar_labels = [f"{label}:{idx}" for label, idx, _ in entries]
+        bar_values = [norm for _, _, norm in entries]
+        bar_colors = [
+            "tab:blue" if label == label_a else "tab:orange" for label, _, _ in entries
+        ]
+        ax.bar(bar_x, bar_values, color=bar_colors)
+        ax.set_xticks(bar_x)
+        ax.set_xticklabels(bar_labels, fontsize=7, rotation=45, ha="right")
+        ax.tick_params(axis="y", labelsize=7)
+
     # Bold row labels on the left
-    for row_idx, row_label in enumerate(ROW_LABELS):
+    for row_idx, row_label in enumerate(ROW_LABELS[:n_heatmap_rows]):
         y_center = row_y_top[row_idx] - row_height / 2
         fig.text(
             ROW_LABEL_X / fig_width,
@@ -150,6 +166,17 @@ def plot_matrix_heatmaps(
             va="center",
             rotation=90,
         )
+    # Norm row label
+    fig.text(
+        ROW_LABEL_X / fig_width,
+        (norm_row_y_top - NORM_ROW_HEIGHT / 2) / fig_height,
+        ROW_LABELS[3],
+        fontsize=11,
+        fontweight="bold",
+        ha="left",
+        va="center",
+        rotation=90,
+    )
 
     fig.suptitle(module_path, fontsize=12, y=(fig_height - 0.2) / fig_height)
 
@@ -161,38 +188,10 @@ def plot_matrix_heatmaps(
             cbar_x / fig_width,
             cbar_bottom / fig_height,
             CBAR_WIDTH / fig_width,
-            total_data_height / fig_height,
+            heatmap_height / fig_height,
         ]
     )
     fig.colorbar(im, cax=cbar_ax, label="Cosine Similarity")
-
-    # Norm bar chart — one row per (label, component_index), sorted by label then index
-    entries: list[tuple[str, int, float, str]] = []  # (label, index, norm, color)
-    for i in sorted(norms_a):
-        entries.append((label_a, i, norms_a[i], "tab:blue"))
-    for i in sorted(norms_b):
-        entries.append((label_b, i, norms_b[i], "tab:orange"))
-    if entries:
-        norm_x = cbar_x + CBAR_WIDTH + NORM_GAP
-        norm_ax = fig.add_axes(
-            [
-                norm_x / fig_width,
-                cbar_bottom / fig_height,
-                NORM_PLOT_WIDTH / fig_width,
-                total_data_height / fig_height,
-            ]
-        )
-        y_pos = np.arange(len(entries))
-        bar_labels = [f"{label} {idx}" for label, idx, _, _ in entries]
-        bar_values = [norm for _, _, norm, _ in entries]
-        bar_colors = [color for _, _, _, color in entries]
-        norm_ax.barh(y_pos, bar_values, color=bar_colors)
-        norm_ax.set_yticks(y_pos)
-        norm_ax.set_yticklabels(bar_labels, fontsize=7)
-        norm_ax.tick_params(axis="x", labelsize=7)
-        norm_ax.invert_yaxis()
-        norm_ax.set_title("||U||·||V||", fontsize=9)
-
     return fig
 
 
@@ -249,26 +248,10 @@ def main(
         if not shared_positions:
             continue
 
-        # Collect union of active indices across all shared positions per model
-        all_indices_a: set[int] = set()
-        all_indices_b: set[int] = set()
-        for pos in shared_positions:
-            all_indices_a.update(active_a[module_path][pos])
-            all_indices_b.update(active_b[module_path][pos])
-
-        norms_a_dict: dict[int, float] = {}
-        for i in sorted(all_indices_a):
-            u, v = get_component_uv(decomp_a.model, module_path, i)
-            norms_a_dict[i] = u.norm().item() * v.norm().item()
-
-        norms_b_dict: dict[int, float] = {}
-        for i in sorted(all_indices_b):
-            u, v = get_component_uv(decomp_b.model, module_path, i)
-            norms_b_dict[i] = u.norm().item() * v.norm().item()
-
         pos_sims_full: dict[int, torch.Tensor] = {}
         pos_sims_v: dict[int, torch.Tensor] = {}
         pos_sims_u: dict[int, torch.Tensor] = {}
+        pos_norms: dict[int, list[tuple[str, int, float]]] = {}
         for pos in shared_positions:
             indices_a = active_a[module_path][pos]
             indices_b = active_b[module_path][pos]
@@ -280,21 +263,25 @@ def main(
             )
             pos_sims_full[pos] = compute_pairwise_cosine_sim(weights_a, weights_b)
 
-            v_a = torch.stack(
-                [get_component_uv(decomp_a.model, module_path, i)[1] for i in indices_a]
-            )
-            v_b = torch.stack(
-                [get_component_uv(decomp_b.model, module_path, i)[1] for i in indices_b]
-            )
+            uv_a = [get_component_uv(decomp_a.model, module_path, i) for i in indices_a]
+            uv_b = [get_component_uv(decomp_b.model, module_path, i) for i in indices_b]
+
+            v_a = torch.stack([v for _, v in uv_a])
+            v_b = torch.stack([v for _, v in uv_b])
             pos_sims_v[pos] = compute_pairwise_cosine_sim(v_a, v_b)
 
-            u_a = torch.stack(
-                [get_component_uv(decomp_a.model, module_path, i)[0] for i in indices_a]
-            )
-            u_b = torch.stack(
-                [get_component_uv(decomp_b.model, module_path, i)[0] for i in indices_b]
-            )
+            u_a = torch.stack([u for u, _ in uv_a])
+            u_b = torch.stack([u for u, _ in uv_b])
             pos_sims_u[pos] = compute_pairwise_cosine_sim(u_a, u_b)
+
+            # Norms: sorted by label then component index
+            entries: list[tuple[str, int, float]] = []
+            for i, (u, v) in zip(indices_a, uv_a):
+                entries.append((decomp_a.label, i, u.norm().item() * v.norm().item()))
+            for i, (u, v) in zip(indices_b, uv_b):
+                entries.append((decomp_b.label, i, u.norm().item() * v.norm().item()))
+            entries.sort(key=lambda e: (e[0], e[1]))
+            pos_norms[pos] = entries
 
         fig = plot_matrix_heatmaps(
             module_path,
@@ -303,11 +290,10 @@ def main(
             pos_sims_u,
             active_a[module_path],
             active_b[module_path],
+            pos_norms,
             token_strs,
             decomp_a.label,
             decomp_b.label,
-            norms_a_dict,
-            norms_b_dict,
         )
         sanitized = module_path.replace(".", "_").replace("/", "_")
         path = out / f"{sanitized}.png"
