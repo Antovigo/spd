@@ -16,6 +16,7 @@ from pathlib import Path
 
 import fire
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from matplotlib.figure import Figure
 
@@ -41,6 +42,8 @@ ROW_GAP = 0.5
 CBAR_GAP = 0.3
 CBAR_WIDTH = 0.15
 ROW_LABEL_X = 0.15
+NORM_GAP = 0.5
+NORM_PLOT_WIDTH = 1.5
 
 ROW_LABELS = ["Full", "V", "U"]
 
@@ -55,6 +58,8 @@ def plot_matrix_heatmaps(
     token_strs: list[str],
     label_a: str,
     label_b: str,
+    norms_a: dict[int, float],
+    norms_b: dict[int, float],
 ) -> Figure:
     """3-row grid of heatmaps: Full subcomponents, V vectors, U vectors.
 
@@ -72,7 +77,15 @@ def plot_matrix_heatmaps(
     total_data_width = sum(nb * TILE_SIZE for nb in col_nb) + COL_GAP * (n_cols - 1)
     total_data_height = row_height * n_rows + ROW_GAP * (n_rows - 1)
 
-    fig_width = LEFT_MARGIN + total_data_width + CBAR_GAP + CBAR_WIDTH + RIGHT_MARGIN
+    fig_width = (
+        LEFT_MARGIN
+        + total_data_width
+        + CBAR_GAP
+        + CBAR_WIDTH
+        + NORM_GAP
+        + NORM_PLOT_WIDTH
+        + RIGHT_MARGIN
+    )
     fig_height = TOP_MARGIN + total_data_height + BOTTOM_MARGIN
 
     fig = plt.figure(figsize=(fig_width, fig_height))
@@ -152,6 +165,31 @@ def plot_matrix_heatmaps(
         ]
     )
     fig.colorbar(im, cax=cbar_ax, label="Cosine Similarity")
+
+    # Norm bar chart
+    all_indices = sorted(set(norms_a) | set(norms_b))
+    if all_indices:
+        norm_x = cbar_x + CBAR_WIDTH + NORM_GAP
+        norm_ax = fig.add_axes(
+            [
+                norm_x / fig_width,
+                cbar_bottom / fig_height,
+                NORM_PLOT_WIDTH / fig_width,
+                total_data_height / fig_height,
+            ]
+        )
+        y_pos = np.arange(len(all_indices))
+        bar_height = 0.35
+        vals_a = [norms_a.get(i, 0.0) for i in all_indices]
+        vals_b = [norms_b.get(i, 0.0) for i in all_indices]
+        norm_ax.barh(y_pos - bar_height / 2, vals_a, bar_height, label=label_a, color="tab:blue")
+        norm_ax.barh(y_pos + bar_height / 2, vals_b, bar_height, label=label_b, color="tab:orange")
+        norm_ax.set_yticks(y_pos)
+        norm_ax.set_yticklabels([str(i) for i in all_indices], fontsize=7)
+        norm_ax.invert_yaxis()
+        norm_ax.set_title("||U||·||V||", fontsize=9)
+        norm_ax.legend(fontsize=7, loc="lower right")
+
     return fig
 
 
@@ -208,6 +246,23 @@ def main(
         if not shared_positions:
             continue
 
+        # Collect union of active indices across all shared positions per model
+        all_indices_a: set[int] = set()
+        all_indices_b: set[int] = set()
+        for pos in shared_positions:
+            all_indices_a.update(active_a[module_path][pos])
+            all_indices_b.update(active_b[module_path][pos])
+
+        norms_a_dict: dict[int, float] = {}
+        for i in sorted(all_indices_a):
+            u, v = get_component_uv(decomp_a.model, module_path, i)
+            norms_a_dict[i] = u.norm().item() * v.norm().item()
+
+        norms_b_dict: dict[int, float] = {}
+        for i in sorted(all_indices_b):
+            u, v = get_component_uv(decomp_b.model, module_path, i)
+            norms_b_dict[i] = u.norm().item() * v.norm().item()
+
         pos_sims_full: dict[int, torch.Tensor] = {}
         pos_sims_v: dict[int, torch.Tensor] = {}
         pos_sims_u: dict[int, torch.Tensor] = {}
@@ -248,6 +303,8 @@ def main(
             token_strs,
             decomp_a.label,
             decomp_b.label,
+            norms_a_dict,
+            norms_b_dict,
         )
         sanitized = module_path.replace(".", "_").replace("/", "_")
         path = out / f"{sanitized}.png"
