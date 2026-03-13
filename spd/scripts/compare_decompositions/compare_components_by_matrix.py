@@ -29,7 +29,7 @@ from spd.scripts.compare_decompositions.utils import (
     load_decomposition,
 )
 
-TILE_SIZE = 0.5 / 3  # inches per tile
+TILE_SIZE = 0.5  # inches per tile
 
 # Layout constants (inches)
 LEFT_MARGIN = 1.2
