@@ -212,7 +212,7 @@ async def request_component_interpretation(
         )
 
     task_config = runtime_cast(LMTaskConfig, loaded.config.task_config)
-    assert task_config.dataset_name is not None
+    
     model_metadata = ModelMetadata(
         n_blocks=loaded.topology.n_blocks,
         model_class=loaded.model.__class__.__name__,
@@ -220,7 +220,14 @@ async def request_component_interpretation(
         layer_descriptions={
             path: loaded.topology.target_to_canon(path) for path in loaded.model.target_module_paths
         },
+        seq_len=task_config.max_seq_len,
+        decomposition_method="spd",
     )
+
+    harvest_config = loaded.harvest.get_config()
+    raw_ctx = harvest_config["activation_context_tokens_per_side"]
+    assert isinstance(raw_ctx, int), f"expected int, got {type(raw_ctx)}"
+    context_tokens_per_side = raw_ctx
 
     async with OpenRouter(api_key=api_key) as api:
         try:
@@ -234,6 +241,7 @@ async def request_component_interpretation(
                 app_tok=loaded.tokenizer,
                 input_token_stats=input_token_stats,
                 output_token_stats=output_token_stats,
+                context_tokens_per_side=context_tokens_per_side,
             )
         except Exception as e:
             raise HTTPException(
