@@ -30,11 +30,17 @@ from spd.scripts.compare_decompositions.utils import (
 )
 
 TILE_SIZE = 0.5 / 3  # inches per tile
-LABEL_PAD = 1.5  # inches padding for axis labels/titles
-COLORBAR_WIDTH_RATIO = 0.2 / 3  # gridspec width ratio units for colorbar column
 
-
-ROW_LABEL_PAD = 0.8  # inches padding for row labels on the left
+# Layout constants (inches)
+LEFT_MARGIN = 1.2
+RIGHT_MARGIN = 0.3
+TOP_MARGIN = 0.8
+BOTTOM_MARGIN = 0.6
+COL_GAP = 0.6
+ROW_GAP = 0.5
+CBAR_GAP = 0.3
+CBAR_WIDTH = 0.15
+ROW_LABEL_X = 0.15
 
 ROW_LABELS = ["Full", "V", "U"]
 
@@ -50,33 +56,56 @@ def plot_matrix_heatmaps(
     label_a: str,
     label_b: str,
 ) -> Figure:
-    """3-row grid of heatmaps: Full subcomponents, V vectors, U vectors."""
+    """3-row grid of heatmaps: Full subcomponents, V vectors, U vectors.
+
+    Uses manually positioned axes so every tile is exactly TILE_SIZE inches.
+    """
     sorted_positions = sorted(pos_sims_full)
     all_sims = [pos_sims_full, pos_sims_v, pos_sims_u]
+    n_cols = len(sorted_positions)
+    n_rows = 3
 
-    col_widths = [pos_sims_full[pos].shape[1] for pos in sorted_positions]
+    col_nb = [pos_sims_full[pos].shape[1] for pos in sorted_positions]
     max_na = max(pos_sims_full[pos].shape[0] for pos in sorted_positions)
+    row_height = max_na * TILE_SIZE
 
-    width_ratios = col_widths + [COLORBAR_WIDTH_RATIO]
-    fig_width = (
-        sum(col_widths) * TILE_SIZE + LABEL_PAD * (len(sorted_positions) + 1) + ROW_LABEL_PAD
-    )
-    fig_height = max_na * TILE_SIZE * 3 + LABEL_PAD * 4
+    total_data_width = sum(nb * TILE_SIZE for nb in col_nb) + COL_GAP * (n_cols - 1)
+    total_data_height = row_height * n_rows + ROW_GAP * (n_rows - 1)
+
+    fig_width = LEFT_MARGIN + total_data_width + CBAR_GAP + CBAR_WIDTH + RIGHT_MARGIN
+    fig_height = TOP_MARGIN + total_data_height + BOTTOM_MARGIN
 
     fig = plt.figure(figsize=(fig_width, fig_height))
-    gs = fig.add_gridspec(
-        nrows=3,
-        ncols=len(sorted_positions) + 1,
-        width_ratios=width_ratios,
-        wspace=0.4,
-        hspace=0.5,
-    )
+
+    # x-start of each column (inches from left edge)
+    col_x: list[float] = []
+    x = LEFT_MARGIN
+    for nb in col_nb:
+        col_x.append(x)
+        x += nb * TILE_SIZE + COL_GAP
+
+    # y-top of each row (inches from bottom edge)
+    row_y_top: list[float] = []
+    y = fig_height - TOP_MARGIN
+    for _ in range(n_rows):
+        row_y_top.append(y)
+        y -= row_height + ROW_GAP
 
     im = None
     for row_idx, sims_dict in enumerate(all_sims):
         for col_idx, pos in enumerate(sorted_positions):
-            ax = fig.add_subplot(gs[row_idx, col_idx])
-            sim_np = sims_dict[pos].cpu().numpy()
+            sim = sims_dict[pos]
+            na, nb = sim.shape
+
+            w_in = nb * TILE_SIZE
+            h_in = na * TILE_SIZE
+            x_in = col_x[col_idx]
+            y_in = row_y_top[row_idx] - h_in  # top-align within row
+
+            ax = fig.add_axes(
+                [x_in / fig_width, y_in / fig_height, w_in / fig_width, h_in / fig_height]
+            )
+            sim_np = sim.cpu().numpy()
             im = ax.imshow(sim_np, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
 
             indices_a = active_a[pos]
@@ -97,13 +126,10 @@ def plot_matrix_heatmaps(
 
     # Bold row labels on the left
     for row_idx, row_label in enumerate(ROW_LABELS):
-        row_center = (
-            gs[row_idx, 0].get_position(fig).y0
-            + (gs[row_idx, 0].get_position(fig).y1 - gs[row_idx, 0].get_position(fig).y0) / 2
-        )
+        y_center = row_y_top[row_idx] - row_height / 2
         fig.text(
-            0.01,
-            row_center,
+            ROW_LABEL_X / fig_width,
+            y_center / fig_height,
             row_label,
             fontsize=11,
             fontweight="bold",
@@ -112,9 +138,19 @@ def plot_matrix_heatmaps(
             rotation=90,
         )
 
-    fig.suptitle(module_path, fontsize=12)
+    fig.suptitle(module_path, fontsize=12, y=(fig_height - 0.2) / fig_height)
+
     assert im is not None
-    cbar_ax = fig.add_subplot(gs[:, -1])
+    cbar_x = col_x[-1] + col_nb[-1] * TILE_SIZE + CBAR_GAP
+    cbar_bottom = row_y_top[-1] - row_height
+    cbar_ax = fig.add_axes(
+        [
+            cbar_x / fig_width,
+            cbar_bottom / fig_height,
+            CBAR_WIDTH / fig_width,
+            total_data_height / fig_height,
+        ]
+    )
     fig.colorbar(im, cax=cbar_ax, label="Cosine Similarity")
     return fig
 
