@@ -11,6 +11,7 @@ from spd.app.backend.app_tokenizer import AppTokenizer
 from spd.autointerp.config import DualViewConfig
 from spd.autointerp.prompt_helpers import (
     DATASET_DESCRIPTIONS,
+    build_data_presentation,
     build_fires_on_examples,
     build_input_section,
     build_output_section,
@@ -32,6 +33,7 @@ def format_prompt(
     app_tok: AppTokenizer,
     input_token_stats: TokenPRLift,
     output_token_stats: TokenPRLift,
+    context_tokens_per_side: int,
 ) -> str:
     input_pmi: list[tuple[str, float]] | None = None
     output_pmi: list[tuple[str, float]] | None = None
@@ -99,6 +101,9 @@ def format_prompt(
     if context_notes:
         md.p(context_notes)
 
+    md.h(2, "Data presentation")
+    md.extend(build_data_presentation(model_metadata.seq_len, context_tokens_per_side))
+
     md.h(2, "Output tokens (what the model produces when this component fires)")
     md.extend(output_section)
 
@@ -122,19 +127,9 @@ def format_prompt(
         "function. The label should read like a short description of the job this component "
         "does in the network. Use both the input and output evidence."
     )
-    md.p("Examples of good labels across different component types:")
-    md.bullets(
-        [
-            '"word stem completion (stems → suffixes)"',
-            '"closes dialogue with quotation marks"',
-            '"object pronouns after verbs"',
-            '"story-ending moral resolution vocabulary"',
-            '"aquatic scene vocabulary (frog, river, pond)"',
-            "\"'of course' and abstract nouns after prepositions\"",
-        ]
-    )
     md.p(
-        f'Say "unclear" if the evidence is too weak or diffuse. {forbidden_sentence}Lowercase only.'
+        f"Be epistemically honest — express uncertainty in the label and confidence "
+        f"field when the evidence is weak or ambiguous. {forbidden_sentence}Lowercase only."
     )
 
     return md.build()
