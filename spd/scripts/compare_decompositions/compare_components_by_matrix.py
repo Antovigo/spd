@@ -23,6 +23,7 @@ from spd.scripts.compare_decompositions.utils import (
     compute_ci,
     compute_pairwise_cosine_sim,
     get_active_component_indices_per_position,
+    get_component_uv,
     get_component_weight,
     get_tokenizer,
     load_decomposition,
@@ -33,56 +34,87 @@ LABEL_PAD = 1.5  # inches padding for axis labels/titles
 COLORBAR_WIDTH_RATIO = 0.2  # gridspec width ratio units for colorbar column
 
 
+ROW_LABEL_PAD = 0.8  # inches padding for row labels on the left
+
+ROW_LABELS = ["Full", "V", "U"]
+
+
 def plot_matrix_heatmaps(
     module_path: str,
-    pos_sim_matrices: dict[int, torch.Tensor],
+    pos_sims_full: dict[int, torch.Tensor],
+    pos_sims_v: dict[int, torch.Tensor],
+    pos_sims_u: dict[int, torch.Tensor],
     active_a: dict[int, list[int]],
     active_b: dict[int, list[int]],
     token_strs: list[str],
     label_a: str,
     label_b: str,
 ) -> Figure:
-    """Single row of heatmaps for one module, one subplot per position."""
-    sorted_positions = sorted(pos_sim_matrices)
+    """3-row grid of heatmaps: Full subcomponents, V vectors, U vectors."""
+    sorted_positions = sorted(pos_sims_full)
+    all_sims = [pos_sims_full, pos_sims_v, pos_sims_u]
 
-    col_widths = [pos_sim_matrices[pos].shape[1] for pos in sorted_positions]
-    max_na = max(pos_sim_matrices[pos].shape[0] for pos in sorted_positions)
+    col_widths = [pos_sims_full[pos].shape[1] for pos in sorted_positions]
+    max_na = max(pos_sims_full[pos].shape[0] for pos in sorted_positions)
 
     width_ratios = col_widths + [COLORBAR_WIDTH_RATIO]
-    fig_width = sum(col_widths) * TILE_SIZE + LABEL_PAD * (len(sorted_positions) + 1)
-    fig_height = max_na * TILE_SIZE + LABEL_PAD * 2
+    fig_width = (
+        sum(col_widths) * TILE_SIZE + LABEL_PAD * (len(sorted_positions) + 1) + ROW_LABEL_PAD
+    )
+    fig_height = max_na * TILE_SIZE * 3 + LABEL_PAD * 4
 
     fig = plt.figure(figsize=(fig_width, fig_height))
     gs = fig.add_gridspec(
-        nrows=1,
+        nrows=3,
         ncols=len(sorted_positions) + 1,
         width_ratios=width_ratios,
         wspace=0.4,
+        hspace=0.5,
     )
 
     im = None
-    for col_idx, pos in enumerate(sorted_positions):
-        ax = fig.add_subplot(gs[0, col_idx])
-        sim_np = pos_sim_matrices[pos].cpu().numpy()
-        im = ax.imshow(sim_np, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
+    for row_idx, sims_dict in enumerate(all_sims):
+        for col_idx, pos in enumerate(sorted_positions):
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            sim_np = sims_dict[pos].cpu().numpy()
+            im = ax.imshow(sim_np, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
 
-        indices_a = active_a[pos]
-        indices_b = active_b[pos]
-        ax.set_xticks(range(len(indices_b)))
-        ax.set_xticklabels([str(i) for i in indices_b], fontsize=7)
-        ax.set_yticks(range(len(indices_a)))
-        ax.set_yticklabels([str(i) for i in indices_a], fontsize=7)
+            indices_a = active_a[pos]
+            indices_b = active_b[pos]
+            ax.set_xticks(range(len(indices_b)))
+            ax.set_xticklabels([str(i) for i in indices_b], fontsize=7)
+            ax.set_yticks(range(len(indices_a)))
+            ax.set_yticklabels([str(i) for i in indices_a], fontsize=7)
 
-        tok = token_strs[pos] if pos < len(token_strs) else f"pos{pos}"
-        ax.set_title(f"pos {pos} '{tok}'", fontsize=9)
+            if row_idx == 0:
+                tok = token_strs[pos] if pos < len(token_strs) else f"pos{pos}"
+                ax.set_title(f"pos {pos} '{tok}'", fontsize=9)
 
-        if col_idx == 0:
-            ax.set_ylabel(f"{label_a} comp", fontsize=8)
-        ax.set_xlabel(f"{label_b} comp", fontsize=8)
+            if col_idx == 0:
+                ax.set_ylabel(f"{label_a} comp", fontsize=8)
+            if row_idx == 2:
+                ax.set_xlabel(f"{label_b} comp", fontsize=8)
+
+    # Bold row labels on the left
+    for row_idx, row_label in enumerate(ROW_LABELS):
+        row_center = (
+            gs[row_idx, 0].get_position(fig).y0
+            + (gs[row_idx, 0].get_position(fig).y1 - gs[row_idx, 0].get_position(fig).y0) / 2
+        )
+        fig.text(
+            0.01,
+            row_center,
+            row_label,
+            fontsize=11,
+            fontweight="bold",
+            ha="left",
+            va="center",
+            rotation=90,
+        )
 
     fig.suptitle(module_path, fontsize=12)
     assert im is not None
-    cbar_ax = fig.add_subplot(gs[0, -1])
+    cbar_ax = fig.add_subplot(gs[:, -1])
     fig.colorbar(im, cax=cbar_ax, label="Cosine Similarity")
     return fig
 
@@ -140,7 +172,9 @@ def main(
         if not shared_positions:
             continue
 
-        pos_sims: dict[int, torch.Tensor] = {}
+        pos_sims_full: dict[int, torch.Tensor] = {}
+        pos_sims_v: dict[int, torch.Tensor] = {}
+        pos_sims_u: dict[int, torch.Tensor] = {}
         for pos in shared_positions:
             indices_a = active_a[module_path][pos]
             indices_b = active_b[module_path][pos]
@@ -150,11 +184,29 @@ def main(
             weights_b = torch.stack(
                 [get_component_weight(decomp_b.model, module_path, i).flatten() for i in indices_b]
             )
-            pos_sims[pos] = compute_pairwise_cosine_sim(weights_a, weights_b)
+            pos_sims_full[pos] = compute_pairwise_cosine_sim(weights_a, weights_b)
+
+            v_a = torch.stack(
+                [get_component_uv(decomp_a.model, module_path, i)[1] for i in indices_a]
+            )
+            v_b = torch.stack(
+                [get_component_uv(decomp_b.model, module_path, i)[1] for i in indices_b]
+            )
+            pos_sims_v[pos] = compute_pairwise_cosine_sim(v_a, v_b)
+
+            u_a = torch.stack(
+                [get_component_uv(decomp_a.model, module_path, i)[0] for i in indices_a]
+            )
+            u_b = torch.stack(
+                [get_component_uv(decomp_b.model, module_path, i)[0] for i in indices_b]
+            )
+            pos_sims_u[pos] = compute_pairwise_cosine_sim(u_a, u_b)
 
         fig = plot_matrix_heatmaps(
             module_path,
-            pos_sims,
+            pos_sims_full,
+            pos_sims_v,
+            pos_sims_u,
             active_a[module_path],
             active_b[module_path],
             token_strs,
@@ -169,8 +221,8 @@ def main(
         print(f"  Saved {path}")
 
         # Summary rows for this module
-        for pos in sorted(pos_sims):
-            sim = pos_sims[pos].abs()
+        for pos in sorted(pos_sims_full):
+            sim = pos_sims_full[pos].abs()
             best_a_to_b = sim.max(dim=1).values.mean().item()
             best_b_to_a = sim.max(dim=0).values.mean().item()
             tok = token_strs[pos] if pos < len(token_strs) else f"pos{pos}"
