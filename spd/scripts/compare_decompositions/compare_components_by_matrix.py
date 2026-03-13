@@ -42,7 +42,7 @@ ROW_GAP = 0.5
 CBAR_GAP = 0.3
 CBAR_WIDTH = 0.15
 ROW_LABEL_X = 0.15
-NORM_GAP = 0.8
+NORM_GAP = 0.5
 NORM_PLOT_WIDTH = 1.5
 
 ROW_LABELS = ["Full", "V", "U"]
@@ -166,13 +166,9 @@ def plot_matrix_heatmaps(
     )
     fig.colorbar(im, cax=cbar_ax, label="Cosine Similarity")
 
-    # Norm bar chart — one row per (label, component_index), sorted by label then index
-    entries: list[tuple[str, int, float, str]] = []  # (label, index, norm, color)
-    for i in sorted(norms_a):
-        entries.append((label_a, i, norms_a[i], "tab:blue"))
-    for i in sorted(norms_b):
-        entries.append((label_b, i, norms_b[i], "tab:orange"))
-    if entries:
+    # Norm bar chart
+    all_indices = sorted(set(norms_a) | set(norms_b))
+    if all_indices:
         norm_x = cbar_x + CBAR_WIDTH + NORM_GAP
         norm_ax = fig.add_axes(
             [
@@ -182,16 +178,17 @@ def plot_matrix_heatmaps(
                 total_data_height / fig_height,
             ]
         )
-        y_pos = np.arange(len(entries))
-        bar_labels = [f"{label} {idx}" for label, idx, _, _ in entries]
-        bar_values = [norm for _, _, norm, _ in entries]
-        bar_colors = [color for _, _, _, color in entries]
-        norm_ax.barh(y_pos, bar_values, color=bar_colors)
+        y_pos = np.arange(len(all_indices))
+        bar_height = 0.35
+        vals_a = [norms_a.get(i, 0.0) for i in all_indices]
+        vals_b = [norms_b.get(i, 0.0) for i in all_indices]
+        norm_ax.barh(y_pos - bar_height / 2, vals_a, bar_height, label=label_a, color="tab:blue")
+        norm_ax.barh(y_pos + bar_height / 2, vals_b, bar_height, label=label_b, color="tab:orange")
         norm_ax.set_yticks(y_pos)
-        norm_ax.set_yticklabels(bar_labels, fontsize=7)
-        norm_ax.tick_params(axis="x", labelsize=7)
+        norm_ax.set_yticklabels([str(i) for i in all_indices], fontsize=7)
         norm_ax.invert_yaxis()
         norm_ax.set_title("||U||·||V||", fontsize=9)
+        norm_ax.legend(fontsize=7, loc="lower right")
 
     return fig
 
