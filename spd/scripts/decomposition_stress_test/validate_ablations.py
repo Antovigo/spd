@@ -105,6 +105,11 @@ def ablate_and_measure(
     return kl_per_example, ablated_logits
 
 
+def sanitize_for_tsv(text: str) -> str:
+    """Replace characters that would break TSV column/row structure."""
+    return text.replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+
 def next_token_info(logits: Tensor, pos: int) -> tuple[int, float]:
     """Return (argmax_token_id, softmax_prob) at the given position."""
     probs = torch.softmax(logits[pos], dim=-1)
@@ -143,7 +148,7 @@ def write_ablation_rows(
             orig_tok, orig_prob = next_token_info(original_logits[b], last_pos)
             abl_tok, abl_prob = next_token_info(ablated_logits[b], last_pos)
 
-            input_text = tokenizer.decode(input_ids[b], skip_special_tokens=True).replace("\t", " ")
+            input_text = sanitize_for_tsv(tokenizer.decode(input_ids[b], skip_special_tokens=True))
 
             writer.writerow(
                 [
@@ -151,9 +156,9 @@ def write_ablation_rows(
                     f"{ablate_module}:{ablate_idx}",
                     input_text,
                     f"{kl_per_example[b].item():.6f}",
-                    tokenizer.decode([orig_tok]),
+                    sanitize_for_tsv(tokenizer.decode([orig_tok])),
                     f"{orig_prob:.4f}",
-                    tokenizer.decode([abl_tok]),
+                    sanitize_for_tsv(tokenizer.decode([abl_tok])),
                     f"{abl_prob:.4f}",
                 ]
             )
