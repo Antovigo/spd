@@ -257,6 +257,7 @@ class TargetModelInfo:
     val_loss: float
     train_dataset: str
     train_steps: int
+    val_loss_curve: list[tuple[int, float]]  # (step, val_loss) sorted by step
 
 
 def _fetch_target_model_info(
@@ -267,6 +268,10 @@ def _fetch_target_model_info(
 ) -> TargetModelInfo:
     api = wandb.Api()
     run = api.run(f"{project}/runs/{pretrained_model_name.split('/')[-1]}")
+    history = list(run.scan_history(keys=["val_loss", "_step"], page_size=10000))
+    val_loss_curve = sorted(
+        {(int(h["_step"]), float(h["val_loss"])) for h in history if h.get("val_loss") is not None}
+    )
     return TargetModelInfo(
         wandb_path=pretrained_model_name,
         model_class=pretrained_model_class,
@@ -276,7 +281,39 @@ def _fetch_target_model_info(
         val_loss=float(run.summary.get("val_loss", float("nan"))),
         train_dataset=run.config.get("train_dataset_config", {}).get("name", "unknown"),
         train_steps=int(run.summary.get("_step", 0)),
+        val_loss_curve=val_loss_curve,
     )
+
+
+def _compute_recovered_pct(target_info: TargetModelInfo, spd_ce: float) -> float | None:
+    """Find what % through target training had the same val loss as spd_ce.
+
+    Linearly interpolates between val_loss_curve points. Returns None if the SPD CE
+    is worse than the target model's first logged val loss (i.e. no compute recovered).
+    """
+    curve = target_info.val_loss_curve
+    assert len(curve) >= 2
+    total_steps = target_info.train_steps
+
+    # If SPD is better than final target, return 100%
+    if spd_ce <= curve[-1][1]:
+        return 100.0
+
+    # If SPD is worse than the very first checkpoint, return None
+    if spd_ce >= curve[0][1]:
+        return None
+
+    # Find the interval where val_loss crosses spd_ce (curve is decreasing)
+    for i in range(len(curve) - 1):
+        step_a, loss_a = curve[i]
+        step_b, loss_b = curve[i + 1]
+        if loss_a >= spd_ce >= loss_b:
+            # Linear interpolation
+            frac = (loss_a - spd_ce) / (loss_a - loss_b)
+            step = step_a + frac * (step_b - step_a)
+            return step / total_steps * 100.0
+
+    return None
 
 
 def fetch_runs(
@@ -394,7 +431,47 @@ def generate_report(
     sections.append("\n### Summary\n")
     sections.append(_summary_table(seeds, TRAIN_LOSS_KEYS, data))
 
-    # 6. Plain-text summary list
+    # 6. Training compute recovered
+    MASKING_MODES = ["unmasked", "stoch_masked", "ci_masked", "rounded_masked"]
+    sections.append("\n## Training Compute Recovered\n")
+    sections.append(
+        "Percentage through target model training where target val loss equals SPD model CE.\n"
+    )
+    recovered_headers = ["seed"] + MASKING_MODES
+    recovered_rows: list[list[str]] = []
+    per_mode_pcts: dict[str, list[float]] = {m: [] for m in MASKING_MODES}
+    for s in seeds:
+        row = [str(s)]
+        for mode in MASKING_MODES:
+            ce_diff = data[s].get(f"eval/ce_kl/ce_difference_{mode}")
+            if ce_diff is not None:
+                spd_ce = target_info.val_loss + ce_diff
+                pct = _compute_recovered_pct(target_info, spd_ce)
+                if pct is not None:
+                    row.append(f"{pct:.1f}%")
+                    per_mode_pcts[mode].append(pct)
+                else:
+                    row.append("< 0%")
+            else:
+                row.append("—")
+        recovered_rows.append(row)
+    sections.append(_md_table(recovered_headers, recovered_rows))
+
+    summary_headers = ["stat"] + MASKING_MODES
+    mean_row = ["mean"]
+    std_row = ["std"]
+    for mode in MASKING_MODES:
+        vals = per_mode_pcts[mode]
+        if vals:
+            mean_row.append(f"{np.mean(vals):.1f}%")
+            std_row.append(f"{np.std(vals):.1f}%")
+        else:
+            mean_row.append("—")
+            std_row.append("—")
+    sections.append("\n### Summary\n")
+    sections.append(_md_table(summary_headers, [mean_row, std_row]))
+
+    # 7. Plain-text summary list
     summary_groups: list[tuple[str, list[str]]] = [
         ("Output Quality (CE/KL)", CE_KL_KEYS),
         ("Eval Reconstruction Losses", EVAL_LOSS_KEYS),
