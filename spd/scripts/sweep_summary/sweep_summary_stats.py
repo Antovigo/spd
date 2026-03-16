@@ -285,32 +285,52 @@ def _fetch_target_model_info(
     )
 
 
+def _fit_monotone_val_curve(
+    curve: list[tuple[int, float]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit a monotone decreasing curve to noisy val loss data using isotonic regression.
+
+    Returns (steps, smoothed_losses) arrays where smoothed_losses is guaranteed
+    non-increasing, using all data points rather than just adjacent pairs.
+    """
+    from sklearn.isotonic import IsotonicRegression
+
+    steps = np.array([s for s, _ in curve], dtype=np.float64)
+    losses = np.array([v for _, v in curve], dtype=np.float64)
+    ir = IsotonicRegression(increasing=False)
+    smoothed = ir.fit_transform(steps, losses)
+    return steps, smoothed
+
+
 def _compute_recovered_pct(target_info: TargetModelInfo, spd_ce: float) -> float | None:
     """Find what % through target training had the same val loss as spd_ce.
 
-    Linearly interpolates between val_loss_curve points. Returns None if the SPD CE
-    is worse than the target model's first logged val loss (i.e. no compute recovered).
+    Fits a monotone decreasing curve (isotonic regression) to the target model's
+    val loss history, then interpolates to find the step where loss equals spd_ce.
+    Returns None if the SPD CE is worse than the earliest logged val loss.
     """
     curve = target_info.val_loss_curve
     assert len(curve) >= 2
     total_steps = target_info.train_steps
 
+    steps, smoothed = _fit_monotone_val_curve(curve)
+
     # If SPD is better than final target, return 100%
-    if spd_ce <= curve[-1][1]:
+    if spd_ce <= smoothed[-1]:
         return 100.0
 
     # If SPD is worse than the very first checkpoint, return None
-    if spd_ce >= curve[0][1]:
+    if spd_ce >= smoothed[0]:
         return None
 
-    # Find the interval where val_loss crosses spd_ce (curve is decreasing)
-    for i in range(len(curve) - 1):
-        step_a, loss_a = curve[i]
-        step_b, loss_b = curve[i + 1]
-        if loss_a >= spd_ce >= loss_b:
-            # Linear interpolation
-            frac = (loss_a - spd_ce) / (loss_a - loss_b)
-            step = step_a + frac * (step_b - step_a)
+    # Interpolate on the smoothed monotone curve
+    for i in range(len(steps) - 1):
+        if smoothed[i] >= spd_ce >= smoothed[i + 1]:
+            if smoothed[i] == smoothed[i + 1]:
+                step = float(steps[i])
+            else:
+                frac = (smoothed[i] - spd_ce) / (smoothed[i] - smoothed[i + 1])
+                step = float(steps[i] + frac * (steps[i + 1] - steps[i]))
             return step / total_steps * 100.0
 
     return None
