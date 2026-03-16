@@ -11,6 +11,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import wandb
@@ -342,17 +343,71 @@ def _compute_recovered_pct(target_info: TargetModelInfo, spd_ce: float) -> float
     return None
 
 
+@dataclass
+class SPDConfig:
+    """Relevant SPD run config fields."""
+
+    module_info: list[dict[str, Any]]  # [{module_pattern, C}, ...]
+
+    def layer_component_counts(self) -> dict[int, int]:
+        """Total C per layer, expanding wildcard patterns across 4 layers."""
+        layer_c: dict[int, int] = defaultdict(int)
+        for mi in self.module_info:
+            pattern = str(mi["module_pattern"])
+            c = int(mi["C"])
+            if "*" in pattern:
+                for layer_idx in range(4):
+                    layer_c[layer_idx] += c
+            else:
+                m = LAYER_PATTERN.search(pattern)
+                assert m, f"Cannot extract layer from {pattern}"
+                layer_c[int(m.group(1))] += c
+        return dict(layer_c)
+
+
+def _fetch_n_alive_from_harvest(run_id: str) -> dict[str, int] | None:
+    """Try to get per-module alive counts from the harvest DB. Returns None if unavailable."""
+    from spd.settings import SPD_OUT_DIR
+
+    harvest_parent = SPD_OUT_DIR / "harvest" / run_id
+    if not harvest_parent.exists():
+        return None
+    # Find the harvest subdirectory
+    subdirs = [d for d in harvest_parent.iterdir() if d.is_dir()]
+    if not subdirs:
+        return None
+    db_path = subdirs[0] / "harvest.db"
+    if not db_path.exists():
+        return None
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute(
+        "SELECT layer, COUNT(*), "
+        "SUM(CASE WHEN firing_density > 0 THEN 1 ELSE 0 END) "
+        "FROM components GROUP BY layer"
+    ).fetchall()
+    conn.close()
+
+    return {layer: int(alive) for layer, _total, alive in rows}
+
+
 def fetch_runs(
     run_ids: list[str], project: str
-) -> tuple[list[int], dict[int, dict[str, float]], TargetModelInfo]:
+) -> tuple[
+    list[int], dict[int, dict[str, float]], TargetModelInfo, SPDConfig, dict[str, int] | None
+]:
     api = wandb.Api()
     seeds: list[int] = []
     data: dict[int, dict[str, float]] = {}
-    first_config: dict[str, object] | None = None
+    first_config: dict[str, Any] | None = None
+    first_run_id: str | None = None
     for rid in run_ids:
         run = api.run(f"{project}/runs/{rid}")
         if first_config is None:
             first_config = run.config
+            first_run_id = rid
         seed = run.config["seed"]
         seeds.append(seed)
         summary = {}
@@ -362,13 +417,16 @@ def fetch_runs(
         data[seed] = summary
     seeds.sort()
     assert first_config is not None
+    assert first_run_id is not None
     target_info = _fetch_target_model_info(
         pretrained_model_name=str(first_config["pretrained_model_name"]),
         pretrained_model_class=str(first_config["pretrained_model_class"]),
         tokenizer_name=str(first_config["tokenizer_name"]),
         project=project,
     )
-    return seeds, data, target_info
+    spd_config = SPDConfig(module_info=first_config["module_info"])
+    n_alive = _fetch_n_alive_from_harvest(first_run_id)
+    return seeds, data, target_info, spd_config, n_alive
 
 
 def _per_module_keys(prefix: str) -> list[str]:
@@ -388,6 +446,8 @@ def _render_latex_summary(
     data: dict[int, dict[str, float]],
     target_info: TargetModelInfo,
     per_mode_pcts: dict[str, list[float]],
+    spd_config: SPDConfig,
+    n_alive: dict[str, int] | None,
 ) -> str:
     modes = ["unmasked", "stoch_masked", "ci_masked", "rounded_masked"]
     lines = [
@@ -424,6 +484,103 @@ def _render_latex_summary(
             "```",
         ]
     )
+
+    # Eval reconstruction losses table
+    recon_keys = [
+        ("StochasticReconSubsetLoss", "eval/loss/StochasticReconSubsetLoss"),
+        ("PGDReconLoss", "eval/loss/PGDReconLoss"),
+        ("StochasticHiddenActsReconLoss", "eval/loss/StochasticHiddenActsReconLoss"),
+        ("CIHiddenActsReconLoss", "eval/loss/CIHiddenActsReconLoss"),
+    ]
+    lines.append("")
+    lines.append("```latex")
+    lines.append(r"\begin{table}[h]")
+    lines.append(r"\centering")
+    lines.append(r"\caption{Eval reconstruction losses.}")
+    lines.append(r"\begin{tabular}{lc}")
+    lines.append(r"\toprule")
+    lines.append(r"Loss & Value \\")
+    lines.append(r"\midrule")
+    for label, key in recon_keys:
+        vals = [data[s][key] for s in seeds if data[s].get(key) is not None]
+        if vals:
+            lines.append(f"{label} & ${_fmt(np.mean(vals))}$ \\\\")
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\end{table}")
+    lines.append("```")
+
+    # L0 and component counts table
+    layer_c = spd_config.layer_component_counts()
+    has_alive = n_alive is not None
+    # Group n_alive by layer
+    layer_alive: dict[int, int] = defaultdict(int)
+    if n_alive is not None:
+        for mod, count in n_alive.items():
+            m = LAYER_PATTERN.search(mod)
+            if m:
+                layer_alive[int(m.group(1))] += count
+
+    if has_alive:
+        col_spec = r"\begin{tabular}{lcccc}"
+        header = r"Layer & $C$ & Alive & Mean L0 & L0 / $C$ (\%) \\"
+    else:
+        col_spec = r"\begin{tabular}{lccc}"
+        header = r"Layer & $C$ & Mean L0 & L0 / $C$ (\%) \\"
+
+    lines.append("")
+    lines.append("```latex")
+    lines.append(r"\begin{table}[h]")
+    lines.append(r"\centering")
+    lines.append(r"\caption{Sparsity: component counts and CI-L0 per layer.}")
+    lines.append(col_spec)
+    lines.append(r"\toprule")
+    lines.append(header)
+    lines.append(r"\midrule")
+
+    for layer_idx in sorted(layer_c.keys()):
+        total_c = layer_c[layer_idx]
+        l0_key = f"eval/l0/0.0_layer_{layer_idx}"
+        l0_vals = [data[s][l0_key] for s in seeds if data[s].get(l0_key) is not None]
+        if l0_vals:
+            mean_l0 = float(np.mean(l0_vals))
+            pct = mean_l0 / total_c * 100
+            if has_alive:
+                alive_count = layer_alive.get(layer_idx, 0)
+                lines.append(
+                    f"Layer {layer_idx} & ${total_c}$ & ${alive_count}$ "
+                    f"& ${_fmt(mean_l0)}$ & ${pct:.1f}$ \\\\"
+                )
+            else:
+                lines.append(
+                    f"Layer {layer_idx} & ${total_c}$ & ${_fmt(mean_l0)}$ & ${pct:.1f}$ \\\\"
+                )
+
+    # Total row
+    total_c_all = sum(layer_c.values())
+    total_l0_vals = [
+        data[s]["eval/l0/0.0_total"] for s in seeds if data[s].get("eval/l0/0.0_total") is not None
+    ]
+    if total_l0_vals:
+        mean_total_l0 = float(np.mean(total_l0_vals))
+        pct_total = mean_total_l0 / total_c_all * 100
+        lines.append(r"\midrule")
+        if has_alive:
+            total_alive = sum(layer_alive.values())
+            lines.append(
+                f"Total & ${total_c_all}$ & ${total_alive}$ "
+                f"& ${_fmt(mean_total_l0)}$ & ${pct_total:.1f}$ \\\\"
+            )
+        else:
+            lines.append(
+                f"Total & ${total_c_all}$ & ${_fmt(mean_total_l0)}$ & ${pct_total:.1f}$ \\\\"
+            )
+
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\end{table}")
+    lines.append("```")
+
     return "\n".join(lines)
 
 
@@ -452,7 +609,11 @@ def _render_target_model_section(info: TargetModelInfo) -> str:
 
 
 def generate_report(
-    seeds: list[int], data: dict[int, dict[str, float]], target_info: TargetModelInfo
+    seeds: list[int],
+    data: dict[int, dict[str, float]],
+    target_info: TargetModelInfo,
+    spd_config: SPDConfig,
+    n_alive: dict[str, int] | None,
 ) -> str:
     sections: list[str] = []
 
@@ -568,7 +729,9 @@ def generate_report(
         sections.append("\n\n" + "\n\n".join(lines))
 
     # 8. LaTeX summary table
-    sections.append(_render_latex_summary(seeds, data, target_info, per_mode_pcts))
+    sections.append(
+        _render_latex_summary(seeds, data, target_info, per_mode_pcts, spd_config, n_alive)
+    )
 
     return "\n".join(sections) + "\n"
 
@@ -600,10 +763,17 @@ def main() -> None:
     parser.add_argument("run_ids", nargs="+", help="WandB run IDs")
     parser.add_argument("--project", default="goodfire/spd")
     parser.add_argument("--output", default=None, help="Output file (default: stdout)")
+    parser.add_argument(
+        "--harvest-run",
+        default=None,
+        help="Run ID to use for n_alive harvest data (if different from sweep runs)",
+    )
     args = parser.parse_args()
 
-    seeds, data, target_info = fetch_runs(args.run_ids, args.project)
-    report = generate_report(seeds, data, target_info)
+    seeds, data, target_info, spd_config, n_alive = fetch_runs(args.run_ids, args.project)
+    if args.harvest_run:
+        n_alive = _fetch_n_alive_from_harvest(args.harvest_run)
+    report = generate_report(seeds, data, target_info, spd_config, n_alive)
 
     if args.output:
         out_path = Path(args.output)
