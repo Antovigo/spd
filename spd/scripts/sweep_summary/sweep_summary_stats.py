@@ -376,7 +376,7 @@ def _per_module_keys(prefix: str) -> list[str]:
 
 
 LATEX_MODE_LABELS = {
-    "unmasked": r"Unmasked (All CI$=$1)",
+    "unmasked": r"Unmasked (All masks$=$1)",
     "stoch_masked": "Stochastic masks",
     "ci_masked": "CIs used as masks",
     "rounded_masked": r"Rounded masks (mask$=$1 if CI$>$0)",
