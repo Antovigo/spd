@@ -581,6 +581,32 @@ def _render_latex_summary(
     lines.append(r"\end{table}")
     lines.append("```")
 
+    # Training losses table
+    train_keys = [
+        ("Total", "train/loss/total"),
+        ("FaithfulnessLoss", "train/loss/FaithfulnessLoss"),
+        ("ImportanceMinimalityLoss", "train/loss/ImportanceMinimalityLoss"),
+        ("StochasticReconSubsetLoss", "train/loss/StochasticReconSubsetLoss"),
+        ("PersistentPGDReconLoss", "train/loss/PersistentPGDReconLoss"),
+    ]
+    lines.append("")
+    lines.append("```latex")
+    lines.append(r"\begin{table}[h]")
+    lines.append(r"\centering")
+    lines.append(r"\caption{Training losses (final step).}")
+    lines.append(r"\begin{tabular}{lc}")
+    lines.append(r"\toprule")
+    lines.append(r"Loss & Value \\")
+    lines.append(r"\midrule")
+    for label, key in train_keys:
+        vals = [data[s][key] for s in seeds if data[s].get(key) is not None]
+        if vals:
+            lines.append(f"{label} & ${_fmt(np.mean(vals))}$ \\\\")
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\end{table}")
+    lines.append("```")
+
     return "\n".join(lines)
 
 
