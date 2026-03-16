@@ -122,8 +122,7 @@ def _fmt(v: float | np.floating) -> str:
 
 
 def _short(key: str) -> str:
-    """Extract a short display name from a full metric key."""
-    # Strip common prefixes
+    """Extract a short display name for table column headers."""
     for prefix in [
         "eval/ce_kl/",
         "eval/loss/",
@@ -131,6 +130,18 @@ def _short(key: str) -> str:
         "train/loss/",
         "train/l0/",
     ]:
+        if key.startswith(prefix):
+            return key[len(prefix) :]
+    return key
+
+
+def _summary_name(key: str) -> str:
+    """Extract a descriptive name for the plain-text summary list."""
+    if key.startswith("eval/l0/0.0_"):
+        return "L0 " + key[len("eval/l0/0.0_") :]
+    if key.startswith("train/loss/"):
+        return "train " + key[len("train/loss/") :]
+    for prefix in ["eval/ce_kl/", "eval/loss/"]:
         if key.startswith(prefix):
             return key[len(prefix) :]
     return key
@@ -312,14 +323,22 @@ def generate_report(seeds: list[int], data: dict[int, dict[str, float]]) -> str:
     sections.append(_summary_table(seeds, TRAIN_LOSS_KEYS, data))
 
     # 6. Plain-text summary list
-    all_keys = CE_KL_KEYS + EVAL_LOSS_KEYS + L0_LAYER_KEYS + TRAIN_LOSS_KEYS
-    lines = []
-    for k in all_keys:
-        vals = [data[s][k] for s in seeds if data[s].get(k) is not None]
-        if vals:
-            lines.append(f"{_short(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})")
+    summary_groups: list[tuple[str, list[str]]] = [
+        ("Output Quality (CE/KL)", CE_KL_KEYS),
+        ("Eval Reconstruction Losses", EVAL_LOSS_KEYS),
+        ("Sparsity (CI-L0)", L0_LAYER_KEYS),
+        ("Training Losses", TRAIN_LOSS_KEYS),
+    ]
     sections.append("\n## All Summary Statistics\n")
-    sections.append("\n\n".join(lines))
+    for group_name, keys in summary_groups:
+        lines = [f"**{group_name}**"]
+        for k in keys:
+            vals = [data[s][k] for s in seeds if data[s].get(k) is not None]
+            if vals:
+                lines.append(
+                    f"{_summary_name(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})"
+                )
+        sections.append("\n\n".join(lines))
 
     return "\n".join(sections) + "\n"
 
