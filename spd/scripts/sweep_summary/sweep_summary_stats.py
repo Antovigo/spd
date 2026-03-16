@@ -410,11 +410,9 @@ def _render_latex_summary(
         pcts = per_mode_pcts.get(mode, [])
 
         ce_mean = _fmt(np.mean(ce_vals)) if ce_vals else "—"
-        ce_std = _fmt(np.std(ce_vals)) if ce_vals else "—"
         pct_mean = f"{np.mean(pcts):.1f}" if pcts else "—"
-        pct_std = f"{np.std(pcts):.1f}" if pcts else "—"
 
-        lines.append(f"{label} & ${ce_mean} \\pm {ce_std}$ & ${pct_mean} \\pm {pct_std}$ \\\\")
+        lines.append(f"{label} & ${ce_mean}$ & ${pct_mean}$ \\\\")
 
     lines.extend(
         [
