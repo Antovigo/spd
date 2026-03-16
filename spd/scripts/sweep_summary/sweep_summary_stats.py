@@ -288,32 +288,23 @@ def _fetch_target_model_info(
 
 def _smooth_val_curve(
     curve: list[tuple[int, float]],
-    alpha: float = 0.15,
+    alpha: float = 0.3,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Smooth val loss data with a bidirectional EMA.
-
-    Runs an EMA forward and backward, then averages the two. This avoids the
-    lag of a unidirectional EMA and produces a smooth curve centered on the data.
+    """Smooth val loss data with a forward-only EMA.
 
     Args:
-        alpha: EMA smoothing factor (higher = less smoothing).
+        alpha: EMA smoothing factor. Higher = less smoothing, more responsive.
+            0.3 gives a ~3-point effective window, smoothing noise without
+            flattening the steep early drop.
     """
     steps = np.array([s for s, _ in curve], dtype=np.float64)
     losses = np.array([v for _, v in curve], dtype=np.float64)
 
-    # Forward EMA
-    fwd = np.empty_like(losses)
-    fwd[0] = losses[0]
+    smoothed = np.empty_like(losses)
+    smoothed[0] = losses[0]
     for i in range(1, len(losses)):
-        fwd[i] = alpha * losses[i] + (1 - alpha) * fwd[i - 1]
+        smoothed[i] = alpha * losses[i] + (1 - alpha) * smoothed[i - 1]
 
-    # Backward EMA
-    bwd = np.empty_like(losses)
-    bwd[-1] = losses[-1]
-    for i in range(len(losses) - 2, -1, -1):
-        bwd[i] = alpha * losses[i] + (1 - alpha) * bwd[i + 1]
-
-    smoothed = (fwd + bwd) / 2
     return steps, smoothed
 
 
