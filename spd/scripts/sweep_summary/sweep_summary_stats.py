@@ -315,24 +315,25 @@ def _per_module_keys(prefix: str) -> list[str]:
 def _render_target_model_section(info: TargetModelInfo) -> str:
     arch = info.architecture
     lines = [
-        "## Target Model\n",
+        "## Target Model",
+        "",
         f"WandB: `{info.wandb_path}`",
         f"Class: `{info.model_class}`",
         f"Tokenizer: `{info.tokenizer}`",
         f"Training dataset: `{info.train_dataset}`",
         f"Training steps: {info.train_steps:,}",
-        f"Train loss: {_fmt(info.train_loss)}",
-        f"Val loss: {_fmt(info.val_loss)}",
+        f"Train CE loss: {_fmt(info.train_loss)}",
+        f"Val CE loss: {_fmt(info.val_loss)}",
         "",
         "Architecture:",
-        f"  Layers: {arch.get('n_layer')}",
-        f"  Hidden dim: {arch.get('n_embd')}",
-        f"  Heads: {arch.get('n_head')}",
-        f"  MLP intermediate: {arch.get('n_intermediate')}",
-        f"  Context length: {arch.get('n_ctx')}",
-        f"  Vocab size: {arch.get('vocab_size')}",
+        f"Layers: {arch.get('n_layer')}",
+        f"Hidden dim: {arch.get('n_embd')}",
+        f"Heads: {arch.get('n_head')}",
+        f"MLP intermediate: {arch.get('n_intermediate')}",
+        f"Context length: {arch.get('n_ctx')}",
+        f"Vocab size: {arch.get('vocab_size')}",
     ]
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def generate_report(
