@@ -9,6 +9,7 @@ import argparse
 import re
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 
 import numpy as np
 import wandb
@@ -246,12 +247,49 @@ def _cross_layer_summary(
 # ---------------------------------------------------------------------------
 
 
-def fetch_runs(run_ids: list[str], project: str) -> tuple[list[int], dict[int, dict[str, float]]]:
+@dataclass
+class TargetModelInfo:
+    wandb_path: str
+    model_class: str
+    architecture: dict[str, object]
+    tokenizer: str
+    train_loss: float
+    val_loss: float
+    train_dataset: str
+    train_steps: int
+
+
+def _fetch_target_model_info(
+    pretrained_model_name: str,
+    pretrained_model_class: str,
+    tokenizer_name: str,
+    project: str,
+) -> TargetModelInfo:
+    api = wandb.Api()
+    run = api.run(f"{project}/runs/{pretrained_model_name.split('/')[-1]}")
+    return TargetModelInfo(
+        wandb_path=pretrained_model_name,
+        model_class=pretrained_model_class,
+        architecture=run.config.get("model", {}),
+        tokenizer=tokenizer_name,
+        train_loss=float(run.summary.get("train_loss", float("nan"))),
+        val_loss=float(run.summary.get("val_loss", float("nan"))),
+        train_dataset=run.config.get("train_dataset_config", {}).get("name", "unknown"),
+        train_steps=int(run.summary.get("_step", 0)),
+    )
+
+
+def fetch_runs(
+    run_ids: list[str], project: str
+) -> tuple[list[int], dict[int, dict[str, float]], TargetModelInfo]:
     api = wandb.Api()
     seeds: list[int] = []
     data: dict[int, dict[str, float]] = {}
+    first_config: dict[str, object] | None = None
     for rid in run_ids:
         run = api.run(f"{project}/runs/{rid}")
+        if first_config is None:
+            first_config = run.config
         seed = run.config["seed"]
         seeds.append(seed)
         summary = {}
@@ -260,17 +298,50 @@ def fetch_runs(run_ids: list[str], project: str) -> tuple[list[int], dict[int, d
                 summary[k] = float(v)
         data[seed] = summary
     seeds.sort()
-    return seeds, data
+    assert first_config is not None
+    target_info = _fetch_target_model_info(
+        pretrained_model_name=str(first_config["pretrained_model_name"]),
+        pretrained_model_class=str(first_config["pretrained_model_class"]),
+        tokenizer_name=str(first_config["tokenizer_name"]),
+        project=project,
+    )
+    return seeds, data, target_info
 
 
 def _per_module_keys(prefix: str) -> list[str]:
     return [f"{prefix}/{m}" for m in MODULES]
 
 
-def generate_report(seeds: list[int], data: dict[int, dict[str, float]]) -> str:
+def _render_target_model_section(info: TargetModelInfo) -> str:
+    arch = info.architecture
+    lines = [
+        "## Target Model\n",
+        f"WandB: `{info.wandb_path}`",
+        f"Class: `{info.model_class}`",
+        f"Tokenizer: `{info.tokenizer}`",
+        f"Training dataset: `{info.train_dataset}`",
+        f"Training steps: {info.train_steps:,}",
+        f"Train loss: {_fmt(info.train_loss)}",
+        f"Val loss: {_fmt(info.val_loss)}",
+        "",
+        "Architecture:",
+        f"  Layers: {arch.get('n_layer')}",
+        f"  Hidden dim: {arch.get('n_embd')}",
+        f"  Heads: {arch.get('n_head')}",
+        f"  MLP intermediate: {arch.get('n_intermediate')}",
+        f"  Context length: {arch.get('n_ctx')}",
+        f"  Vocab size: {arch.get('vocab_size')}",
+    ]
+    return "\n".join(lines)
+
+
+def generate_report(
+    seeds: list[int], data: dict[int, dict[str, float]], target_info: TargetModelInfo
+) -> str:
     sections: list[str] = []
 
     sections.append(f"# Sweep Summary Report\n\n**Seeds**: {seeds}\n")
+    sections.append(_render_target_model_section(target_info))
 
     # 1. CE/KL
     sections.append("## Output Quality (CE/KL)\n")
@@ -350,8 +421,8 @@ def main() -> None:
     parser.add_argument("--output", default=None, help="Output file (default: stdout)")
     args = parser.parse_args()
 
-    seeds, data = fetch_runs(args.run_ids, args.project)
-    report = generate_report(seeds, data)
+    seeds, data, target_info = fetch_runs(args.run_ids, args.project)
+    report = generate_report(seeds, data, target_info)
 
     if args.output:
         with open(args.output, "w") as f:
