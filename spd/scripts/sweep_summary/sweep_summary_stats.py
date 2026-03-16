@@ -106,8 +106,10 @@ def _fmt(v: float | np.floating) -> str:
     if v == 0:
         return "0"
     abs_v = abs(v)
+    if abs_v < 0.0001:
+        return f"{v:.8f}"
     if abs_v < 0.01:
-        return f"{v:.2e}"
+        return f"{v:.6f}"
     if abs_v < 1:
         return f"{v:.4f}"
     if abs_v < 100:
@@ -304,6 +306,14 @@ def generate_report(seeds: list[int], data: dict[int, dict[str, float]]) -> str:
     sections.append(_raw_table(seeds, TRAIN_LOSS_KEYS, data))
     sections.append("\n### Summary\n")
     sections.append(_summary_table(seeds, TRAIN_LOSS_KEYS, data))
+
+    # 6. Plain-text summary list
+    sections.append("\n## All Summary Statistics\n")
+    all_keys = CE_KL_KEYS + EVAL_LOSS_KEYS + L0_LAYER_KEYS + TRAIN_LOSS_KEYS
+    for k in all_keys:
+        vals = [data[s][k] for s in seeds if data[s].get(k) is not None]
+        if vals:
+            sections.append(f"{_short(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})")
 
     return "\n".join(sections) + "\n"
 
