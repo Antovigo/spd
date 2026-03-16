@@ -585,9 +585,9 @@ def _render_latex_summary(
     train_keys = [
         ("Total", "train/loss/total"),
         ("FaithfulnessLoss", "train/loss/FaithfulnessLoss"),
-        ("ImportanceMinimalityLoss", "train/loss/ImportanceMinimalityLoss"),
         ("StochasticReconSubsetLoss", "train/loss/StochasticReconSubsetLoss"),
         ("PersistentPGDReconLoss", "train/loss/PersistentPGDReconLoss"),
+        ("ImportanceMinimalityLoss", "train/loss/ImportanceMinimalityLoss"),
     ]
     lines.append("")
     lines.append("```latex")
