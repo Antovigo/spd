@@ -338,7 +338,7 @@ def generate_report(seeds: list[int], data: dict[int, dict[str, float]]) -> str:
                 lines.append(
                     f"{_summary_name(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})"
                 )
-        sections.append("\n\n".join(lines))
+        sections.append("\n\n" + "\n\n".join(lines))
 
     return "\n".join(sections) + "\n"
 
