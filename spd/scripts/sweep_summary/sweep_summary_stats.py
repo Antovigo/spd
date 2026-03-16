@@ -106,6 +106,10 @@ def _fmt(v: float | np.floating) -> str:
     if v == 0:
         return "0"
     abs_v = abs(v)
+    if abs_v < 1e-10:
+        return f"{v:.14f}"
+    if abs_v < 1e-6:
+        return f"{v:.10f}"
     if abs_v < 0.0001:
         return f"{v:.8f}"
     if abs_v < 0.01:
