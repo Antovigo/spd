@@ -10,6 +10,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import wandb
@@ -512,6 +513,28 @@ def generate_report(
     return "\n".join(sections) + "\n"
 
 
+def plot_val_loss_curve(target_info: TargetModelInfo, out_path: Path) -> None:
+    """Plot the raw and isotonic-fitted target model val loss curve."""
+    import matplotlib.pyplot as plt
+
+    curve = target_info.val_loss_curve
+    steps_raw = np.array([s for s, _ in curve], dtype=np.float64)
+    losses_raw = np.array([v for _, v in curve], dtype=np.float64)
+    steps_fit, losses_fit = _fit_monotone_val_curve(curve)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(steps_raw / 1000, losses_raw, "o", markersize=3, alpha=0.5, color="C0", label="Raw")
+    ax.plot(steps_fit / 1000, losses_fit, "-", linewidth=2, color="C1", label="Isotonic fit")
+    ax.set_xlabel("Training step (k)")
+    ax.set_ylabel("Val loss (CE)")
+    ax.set_title("Target model val loss curve")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Plot saved to {out_path}", file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate sweep summary report")
     parser.add_argument("run_ids", nargs="+", help="WandB run IDs")
@@ -523,8 +546,10 @@ def main() -> None:
     report = generate_report(seeds, data, target_info)
 
     if args.output:
-        with open(args.output, "w") as f:
+        out_path = Path(args.output)
+        with open(out_path, "w") as f:
             f.write(report)
+        plot_val_loss_curve(target_info, out_path.with_name("target_val_loss_curve.png"))
         print(f"Report written to {args.output}", file=sys.stderr)
     else:
         print(report)
