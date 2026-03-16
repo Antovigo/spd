@@ -375,6 +375,60 @@ def _per_module_keys(prefix: str) -> list[str]:
     return [f"{prefix}/{m}" for m in MODULES]
 
 
+LATEX_MODE_LABELS = {
+    "unmasked": r"Unmasked (All CI$=$1)",
+    "stoch_masked": "Stochastic masks",
+    "ci_masked": "CIs used as masks",
+    "rounded_masked": r"Rounded masks (CI $>$ 0)",
+}
+
+
+def _render_latex_summary(
+    seeds: list[int],
+    data: dict[int, dict[str, float]],
+    target_info: TargetModelInfo,
+    per_mode_pcts: dict[str, list[float]],
+) -> str:
+    modes = ["unmasked", "stoch_masked", "ci_masked", "rounded_masked"]
+    lines = [
+        "\n## LaTeX Summary Table\n",
+        "```latex",
+        r"\begin{table}[h]",
+        r"\centering",
+        r"\caption{SPD decomposition quality by masking mode.}",
+        r"\begin{tabular}{lcc}",
+        r"\toprule",
+        r"Masking mode & CE loss & Training compute recovered (\%) \\",
+        r"\midrule",
+    ]
+
+    target_val_ce = target_info.val_loss
+    for mode in modes:
+        label = LATEX_MODE_LABELS[mode]
+        ce_diffs = [data[s].get(f"eval/ce_kl/ce_difference_{mode}") for s in seeds]
+        ce_vals = [target_val_ce + d for d in ce_diffs if d is not None]
+        pcts = per_mode_pcts.get(mode, [])
+
+        ce_mean = _fmt(np.mean(ce_vals)) if ce_vals else "—"
+        ce_std = _fmt(np.std(ce_vals)) if ce_vals else "—"
+        pct_mean = f"{np.mean(pcts):.1f}" if pcts else "—"
+        pct_std = f"{np.std(pcts):.1f}" if pcts else "—"
+
+        lines.append(f"{label} & ${ce_mean} \\pm {ce_std}$ & ${pct_mean} \\pm {pct_std}$ \\\\")
+
+    lines.extend(
+        [
+            r"\midrule",
+            f"Target model & ${_fmt(target_val_ce)}$ & $100.0$ \\\\",
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\end{table}",
+            "```",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _render_target_model_section(info: TargetModelInfo) -> str:
     arch = info.architecture
     lines = [
@@ -514,6 +568,9 @@ def generate_report(
                     f"{_summary_name(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})"
                 )
         sections.append("\n\n" + "\n\n".join(lines))
+
+    # 8. LaTeX summary table
+    sections.append(_render_latex_summary(seeds, data, target_info, per_mode_pcts))
 
     return "\n".join(sections) + "\n"
 
