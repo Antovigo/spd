@@ -286,35 +286,49 @@ def _fetch_target_model_info(
     )
 
 
-def _fit_monotone_val_curve(
+def _smooth_val_curve(
     curve: list[tuple[int, float]],
+    alpha: float = 0.15,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Fit a monotone decreasing curve to noisy val loss data using isotonic regression.
+    """Smooth val loss data with a bidirectional EMA.
 
-    Returns (steps, smoothed_losses) arrays where smoothed_losses is guaranteed
-    non-increasing, using all data points rather than just adjacent pairs.
+    Runs an EMA forward and backward, then averages the two. This avoids the
+    lag of a unidirectional EMA and produces a smooth curve centered on the data.
+
+    Args:
+        alpha: EMA smoothing factor (higher = less smoothing).
     """
-    from sklearn.isotonic import IsotonicRegression
-
     steps = np.array([s for s, _ in curve], dtype=np.float64)
     losses = np.array([v for _, v in curve], dtype=np.float64)
-    ir = IsotonicRegression(increasing=False)
-    smoothed = ir.fit_transform(steps, losses)
+
+    # Forward EMA
+    fwd = np.empty_like(losses)
+    fwd[0] = losses[0]
+    for i in range(1, len(losses)):
+        fwd[i] = alpha * losses[i] + (1 - alpha) * fwd[i - 1]
+
+    # Backward EMA
+    bwd = np.empty_like(losses)
+    bwd[-1] = losses[-1]
+    for i in range(len(losses) - 2, -1, -1):
+        bwd[i] = alpha * losses[i] + (1 - alpha) * bwd[i + 1]
+
+    smoothed = (fwd + bwd) / 2
     return steps, smoothed
 
 
 def _compute_recovered_pct(target_info: TargetModelInfo, spd_ce: float) -> float | None:
     """Find what % through target training had the same val loss as spd_ce.
 
-    Fits a monotone decreasing curve (isotonic regression) to the target model's
-    val loss history, then interpolates to find the step where loss equals spd_ce.
+    Smooths the target model's val loss history with a bidirectional EMA, then
+    interpolates to find the step where loss equals spd_ce.
     Returns None if the SPD CE is worse than the earliest logged val loss.
     """
     curve = target_info.val_loss_curve
     assert len(curve) >= 2
     total_steps = target_info.train_steps
 
-    steps, smoothed = _fit_monotone_val_curve(curve)
+    steps, smoothed = _smooth_val_curve(curve)
 
     # If SPD is better than final target, return 100%
     if spd_ce <= smoothed[-1]:
@@ -520,11 +534,11 @@ def plot_val_loss_curve(target_info: TargetModelInfo, out_path: Path) -> None:
     curve = target_info.val_loss_curve
     steps_raw = np.array([s for s, _ in curve], dtype=np.float64)
     losses_raw = np.array([v for _, v in curve], dtype=np.float64)
-    steps_fit, losses_fit = _fit_monotone_val_curve(curve)
+    steps_fit, losses_fit = _smooth_val_curve(curve)
 
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(steps_raw / 1000, losses_raw, "o", markersize=3, alpha=0.5, color="C0", label="Raw")
-    ax.plot(steps_fit / 1000, losses_fit, "-", linewidth=2, color="C1", label="Isotonic fit")
+    ax.plot(steps_fit / 1000, losses_fit, "-", linewidth=2, color="C1", label="EMA smoothed")
     ax.set_xlabel("Training step (k)")
     ax.set_ylabel("Val loss (CE)")
     ax.set_title("Target model val loss curve")
