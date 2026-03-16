@@ -308,12 +308,14 @@ def generate_report(seeds: list[int], data: dict[int, dict[str, float]]) -> str:
     sections.append(_summary_table(seeds, TRAIN_LOSS_KEYS, data))
 
     # 6. Plain-text summary list
-    sections.append("\n## All Summary Statistics\n")
     all_keys = CE_KL_KEYS + EVAL_LOSS_KEYS + L0_LAYER_KEYS + TRAIN_LOSS_KEYS
+    lines = []
     for k in all_keys:
         vals = [data[s][k] for s in seeds if data[s].get(k) is not None]
         if vals:
-            sections.append(f"{_short(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})")
+            lines.append(f"{_short(k)}: {_fmt(np.mean(vals))} (std: {_fmt(np.std(vals))})")
+    sections.append("\n## All Summary Statistics\n")
+    sections.append("\n\n".join(lines))
 
     return "\n".join(sections) + "\n"
 
