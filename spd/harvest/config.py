@@ -33,25 +33,32 @@ class SPDHarvestConfig(BaseConfig):
 
 class CLTHarvestConfig(BaseConfig):
     type: Literal["CLTHarvestConfig"] = "CLTHarvestConfig"
-
-    wandb_path: str
-
-    @property
-    def id(self) -> str:
-        return "clt"
-
-
-class MOLTHarvestConfig(BaseConfig):
-    type: Literal["MOLTHarvestConfig"] = "MOLTHarvestConfig"
-
-    wandb_path: str
+    base_model_path: str
+    artifact_path: str
+    """Wandb artifact path for the CLT checkpoint (single artifact covering all layers)."""
 
     @property
     def id(self) -> str:
-        return "molt"
+        import hashlib
+
+        return "clt-" + hashlib.sha256(self.artifact_path.encode()).hexdigest()[:8]
 
 
-DecompositionMethodHarvestConfig = SPDHarvestConfig | CLTHarvestConfig | MOLTHarvestConfig
+class TranscoderHarvestConfig(BaseConfig):
+    type: Literal["TranscoderHarvestConfig"] = "TranscoderHarvestConfig"
+    base_model_path: str
+    artifact_paths: dict[str, str]
+    """Maps module paths (e.g. "h.0.mlp") to wandb artifact paths."""
+
+    @property
+    def id(self) -> str:
+        import hashlib
+
+        key = str(sorted(self.artifact_paths.items()))
+        return "tc-" + hashlib.sha256(key.encode()).hexdigest()[:8]
+
+
+DecompositionMethodHarvestConfig = SPDHarvestConfig | CLTHarvestConfig | TranscoderHarvestConfig
 
 
 # -- Pipeline configs ----------------------------------------------------------
