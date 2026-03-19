@@ -17,10 +17,28 @@ from spd.autointerp.schemas import InterpretationResult, ModelMetadata
 from spd.autointerp.strategies.dispatch import INTERPRETATION_SCHEMA, format_prompt
 from spd.harvest.analysis import TokenPRLift, get_input_token_stats, get_output_token_stats
 from spd.harvest.repo import HarvestRepo
+from spd.harvest.schemas import ComponentSummary
 from spd.harvest.schemas import ComponentData
 from spd.log import logger
 
 MAX_CONCURRENT = 50
+
+
+def resolve_target_component_keys(
+    summary: dict[str, ComponentSummary],
+    limit: int | None,
+    component_keys: list[str] | None = None,
+) -> list[str]:
+    if component_keys is not None:
+        missing = [key for key in component_keys if key not in summary]
+        assert not missing, f"Component keys not found in harvest: {missing[:10]}"
+        ordered = component_keys
+    else:
+        ordered = sorted(summary, key=lambda k: summary[k].firing_density, reverse=True)
+
+    if limit is not None:
+        ordered = ordered[:limit]
+    return ordered
 
 
 async def interpret_component(
@@ -71,6 +89,7 @@ async def interpret_component(
 def run_interpret(
     provider: LLMProvider,
     limit: int | None,
+    component_keys: list[str] | None,
     cost_limit_usd: float | None,
     max_requests_per_minute: int,
     max_concurrent: int,
@@ -83,10 +102,8 @@ def run_interpret(
     summary = harvest.get_summary()
     logger.info(f"Loaded summary for {len(summary)} components")
 
-    needs_token_stats = not isinstance(template_strategy, RichExamplesConfig)
-    token_stats = harvest.get_token_stats() if needs_token_stats else None
-    if needs_token_stats:
-        assert token_stats is not None, "token_stats.pt not found. Run harvest first."
+    token_stats = harvest.get_token_stats()
+    assert token_stats is not None, "token_stats.pt not found. Run harvest first."
 
     harvest_config = harvest.get_config()
     raw = harvest_config["activation_context_tokens_per_side"]
@@ -94,11 +111,7 @@ def run_interpret(
     context_tokens_per_side = raw
 
     app_tok = AppTokenizer.from_pretrained(tokenizer_name)
-
-    eligible_keys = sorted(summary, key=lambda k: summary[k].firing_density, reverse=True)
-
-    if limit is not None:
-        eligible_keys = eligible_keys[:limit]
+    eligible_keys = resolve_target_component_keys(summary, limit, component_keys)
 
     async def _run() -> list[InterpretationResult]:
         db = InterpDB(db_path)
@@ -119,7 +132,16 @@ def run_interpret(
                     assert component is not None, f"Component {key} not found in harvest"
                     input_stats: TokenPRLift | None = None
                     output_stats: TokenPRLift | None = None
-                    if token_stats is not None:
+                    if isinstance(template_strategy, RichExamplesConfig):
+                        output_stats = get_output_token_stats(
+                            token_stats,
+                            key,
+                            app_tok,
+                            top_k=20,
+                            pmi_min_count=template_strategy.output_pmi_min_count,
+                        )
+                        assert output_stats is not None
+                    else:
                         input_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
                         output_stats = get_output_token_stats(token_stats, key, app_tok, top_k=50)
                         assert input_stats is not None

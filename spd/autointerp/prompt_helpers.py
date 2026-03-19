@@ -212,17 +212,23 @@ def _fmt_ann(activations: dict[str, float]) -> str:
 
 def _delimit_annotated(
     spans: list[str],
+    token_ids: list[int],
     firings: list[bool],
     per_token_activations: list[dict[str, float]],
+    app_tok: AppTokenizer,
 ) -> str:
-    """Join token strings, wrapping active tokens with <<<token (ci, act)>>>."""
+    """Join token strings, wrapping active tokens as [[[token]]] (ci, act)."""
     parts: list[str] = []
-    for span, active, acts in zip(spans, firings, per_token_activations, strict=True):
+    for token_id, span, active, acts in zip(
+        token_ids, spans, firings, per_token_activations, strict=True
+    ):
         if active:
-            stripped = span.lstrip()
-            whitespace = span[: len(span) - len(stripped)]
+            display_span = span or app_tok.get_tok_display(token_id)
+            stripped = display_span.lstrip()
+            whitespace = display_span[: len(display_span) - len(stripped)]
+            token_text = stripped or app_tok.get_tok_display(token_id)
             ann = _fmt_ann(acts)
-            parts.append(f"{whitespace}<<<{stripped} {ann}>>>")
+            parts.append(f"{whitespace}[[[{token_text}]]] {ann}")
         else:
             parts.append(span)
     return "".join(parts)
@@ -233,22 +239,26 @@ def build_annotated_examples(
     app_tok: AppTokenizer,
     max_examples: int,
 ) -> Md:
-    """Build activation examples as XML blocks with raw and annotated versions."""
-    blocks: list[str] = []
+    """Build activation examples as single annotated lines."""
+    items: list[str] = []
     for ex in component.activation_examples[:max_examples]:
         if not any(ex.firings):
             continue
-        spans = app_tok.get_raw_spans(ex.token_ids)
-        raw = "".join(spans)
+        spans = app_tok.get_spans(ex.token_ids)
         act_keys = list(ex.activations.keys())
         per_token_acts = [
             {k: ex.activations[k][i] for k in act_keys} for i in range(len(ex.token_ids))
         ]
-        highlighted = _delimit_annotated(spans, ex.firings, per_token_acts)
-        blocks.append(
-            f"<example>\n<raw>\n{raw}\n</raw>\n<highlighted>\n{highlighted}\n</highlighted>\n</example>"
+        items.append(
+            _delimit_annotated(
+                spans=spans,
+                token_ids=ex.token_ids,
+                firings=ex.firings,
+                per_token_activations=per_token_acts,
+                app_tok=app_tok,
+            )
         )
     md = Md()
-    for block in blocks:
-        md.p(block)
+    if items:
+        md.numbered(items)
     return md

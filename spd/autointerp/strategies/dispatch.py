@@ -64,10 +64,12 @@ def format_prompt(
                 context_tokens_per_side,
             )
         case RichExamplesConfig():
+            assert output_token_stats is not None
             return rich_examples_prompt(
                 strategy,
                 component,
                 model_metadata,
                 app_tok,
+                output_token_stats,
                 context_tokens_per_side,
             )

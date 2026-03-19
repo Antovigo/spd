@@ -129,17 +129,32 @@ async def run_detection_scoring(
     max_concurrent: int,
     max_requests_per_minute: int,
     limit: int | None,
+    target_component_keys: list[str] | None,
+    seed: int,
     cost_limit_usd: float | None,
 ) -> list[DetectionResult]:
     app_tok = AppTokenizer.from_pretrained(tokenizer_name)
 
     labels = {key: result.label for key, result in interp_repo.get_all_interpretations().items()}
 
-    eligible = [
-        c
-        for c in components
-        if c.component_key in labels and len(c.activation_examples) >= config.n_activating
-    ]
+    if target_component_keys is not None:
+        eligible_by_key = {
+            c.component_key: c
+            for c in components
+            if len(c.activation_examples) >= config.n_activating and c.component_key in labels
+        }
+        missing = [key for key in target_component_keys if key not in eligible_by_key]
+        assert not missing, (
+            "Target component keys missing labels or enough activation examples "
+            f"for detection: {missing[:10]}"
+        )
+        eligible = [eligible_by_key[key] for key in target_component_keys]
+    else:
+        eligible = [
+            c
+            for c in components
+            if c.component_key in labels and len(c.activation_examples) >= config.n_activating
+        ]
     if limit is not None:
         eligible = eligible[:limit]
 
@@ -151,7 +166,7 @@ async def run_detection_scoring(
     remaining = [c for c in eligible if c.component_key not in completed]
     logger.info(f"Scoring {len(remaining)} components ({len(remaining) * config.n_trials} trials)")
 
-    rng = random.Random()
+    rng = random.Random(seed)
     jobs: list[LLMJob] = []
     ground_truth: dict[str, _TrialGroundTruth] = {}
 

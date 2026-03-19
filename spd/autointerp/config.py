@@ -64,7 +64,7 @@ class RichExamplesConfig(BaseConfig):
     max_examples: int = 30
     include_dataset_description: bool = True
     label_max_words: int = 8
-    forbidden_words: list[str] | None = None
+    output_pmi_min_count: float = 2.0
 
 
 StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig
@@ -73,6 +73,7 @@ StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig
 class AutointerpConfig(BaseConfig):
     llm: LLMConfig = OpenRouterLLMConfig()
     limit: int | None = None
+    component_keys_path: str | None = None
     cost_limit_usd: float | None = None
     max_requests_per_minute: int = 500
     max_concurrent: int = 50
@@ -100,6 +101,8 @@ class AutointerpEvalConfig(BaseConfig):
     detection_config: DetectionEvalConfig
     fuzzing_config: FuzzingEvalConfig
     limit: int | None = None
+    component_keys_path: str | None = None
+    seed: int = 0
     cost_limit_usd: float | None = None
     max_requests_per_minute: int = 500
     max_concurrent: int = 50
