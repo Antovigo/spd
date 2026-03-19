@@ -11,6 +11,7 @@ from torch import Tensor
 from transformers import AutoTokenizer
 
 from spd.configs import Config, LMTaskConfig, ResidMLPTaskConfig, TMSTaskConfig
+from spd.data import DatasetConfig, create_data_loader
 from spd.metrics.base import Metric
 from spd.models.component_model import CIOutputs, ComponentModel
 from spd.plotting import plot_targeted_ci_heatmaps
@@ -115,15 +116,23 @@ class TargetedCIHeatmap(Metric):
     # --- Target data generation ---
 
     def _generate_lm_target_batch(self, task_config: LMTaskConfig) -> tuple[Tensor, list[str]]:
-        prompts_file = task_config.prompts_file
-        assert prompts_file is not None, (
-            "LM targeted mode requires prompts_file to be set in task_config"
-        )
-        prompts_path = Path(prompts_file)
+        if task_config.prompts_file is not None:
+            tokens = self._load_target_from_prompts_file(task_config)
+        else:
+            assert task_config.dataset_name is not None, (
+                "LM targeted mode requires prompts_file or dataset_name in task_config"
+            )
+            tokens = self._load_target_from_dataset(task_config)
+
+        labels = self._tokens_to_labels(tokens)
+        return tokens, labels
+
+    def _load_target_from_prompts_file(self, task_config: LMTaskConfig) -> Tensor:
+        assert task_config.prompts_file is not None
+        prompts_path = Path(task_config.prompts_file)
         assert prompts_path.exists(), f"Prompts file not found: {prompts_path}"
 
         tokenizer = self._get_tokenizer()
-
         prompts = prompts_path.read_text().strip().split("\n")
         prompts = [p.strip() for p in prompts if p.strip()]
 
@@ -134,10 +143,29 @@ class TargetedCIHeatmap(Metric):
             max_length=task_config.max_seq_len,
             return_tensors="pt",
         )
-        tokens = encoded["input_ids"]
-        labels = self._tokens_to_labels(tokens)
+        return encoded["input_ids"]
 
-        return tokens, labels
+    def _load_target_from_dataset(self, task_config: LMTaskConfig) -> Tensor:
+        """Load a batch of target examples from a HuggingFace dataset."""
+        assert task_config.dataset_name is not None
+        dataset_config = DatasetConfig(
+            name=task_config.dataset_name,
+            hf_tokenizer_path=self.run_config.tokenizer_name,
+            split=task_config.eval_data_split,
+            n_ctx=task_config.max_seq_len,
+            is_tokenized=task_config.is_tokenized,
+            streaming=task_config.streaming,
+            column_name=task_config.column_name,
+            shuffle_each_epoch=False,
+            seed=task_config.dataset_seed,
+        )
+        loader, _ = create_data_loader(
+            dataset_config=dataset_config,
+            batch_size=self.n_nontarget_examples,
+            buffer_size=task_config.buffer_size,
+        )
+        batch = next(iter(loader))
+        return extract_batch_data(batch)
 
     def _generate_toy_model_target_batch(
         self,

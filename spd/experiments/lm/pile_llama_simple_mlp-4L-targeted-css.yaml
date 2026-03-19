@@ -1,0 +1,143 @@
+# pile_llama_simple_mlp 4 layers — targeted decomposition (CSS code)
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+label: "targeted_PD_LM_css"
+
+# --- General ---
+seed: 0
+n_mask_samples: 1
+ci_config:
+  mode: global
+  fn_type: global_shared_mlp
+  hidden_dims: [512]
+sampling: continuous
+sigmoid_type: leaky_hard
+module_info:
+  - module_pattern: h.*.mlp.c_fc
+    C: 96
+  - module_pattern: h.*.mlp.down_proj
+    C: 96
+  - module_pattern: h.*.attn.q_proj
+    C: 64
+  - module_pattern: h.*.attn.k_proj
+    C: 64
+  - module_pattern: h.*.attn.v_proj
+    C: 64
+  - module_pattern: h.*.attn.o_proj
+    C: 96
+identity_module_info: null
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: ImportanceMinimalityLoss
+    coeff: 1.2e-3
+    pnorm: 2.0
+    beta: 0.2
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 1.0
+    p_anneal_end_frac: 1.0
+    eps: 1.0e-12
+  - classname: StochasticReconSubsetLoss
+    coeff: 1
+    routing:
+      type: uniform_k_subset
+  - classname: PersistentPGDReconLoss
+    coeff: 0.5
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 0.1
+        fn_type: cosine
+    scope:
+      type: per_batch_per_position
+    use_sigmoid_parameterization: false
+    n_warmup_steps: 2
+    start_frac: 0.8
+output_loss_type: kl
+
+# --- Training ---
+lr_schedule:
+  start_val: 5e-4
+  warmup_pct: 0.0
+  final_val_frac: 0.1
+  fn_type: cosine
+steps: 20_000
+batch_size: 256
+eval_batch_size: 256
+grad_clip_norm_components: 0.01
+grad_clip_norm_ci_fns: null
+component_weight_decay: 0.1
+autocast_bf16: true
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+
+# --- Logging & Saving ---
+train_log_freq: 100
+eval_freq: 1000
+slow_eval_freq: 4000
+n_eval_steps: 1
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.0
+
+# --- Eval Metrics ---
+eval_metric_configs:
+  - classname: CI_L0
+    groups:
+      total:
+        - "*"
+  - classname: PGDReconLoss
+    init: random
+    step_size: 0.1
+    n_steps: 20
+    mask_scope: shared_across_batch
+  - classname: TargetReconLoss
+    rounding_threshold: 0.01
+  - classname: NontargetReconLoss
+    rounding_threshold: 0.01
+    n_nontarget_batches: 10
+  - classname: TargetedCIHeatmap
+    n_nontarget_examples: 100
+  - classname: WeightMagnitude
+
+# --- Pretrained model info ---
+pretrained_model_class: spd.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
+pretrained_model_path: null
+pretrained_model_name: wandb:goodfire/spd/runs/t-9d2b8f02 # reference model for paper
+pretrained_model_output_attr: idx_0
+tokenizer_name: EleutherAI/gpt-neox-20b
+
+# --- Task Specific (target data: CSS from Pile GitHub subset) ---
+task_config:
+  task_name: lm
+  dataset_name: TODO/pile-css-chunks  # Replace with your HF Hub repo after running extract_css_from_pile.py
+  max_seq_len: 64
+  column_name: input_ids
+  is_tokenized: true
+  streaming: false
+  train_data_split: train
+  eval_data_split: val
+
+# --- Targeted Decomposition (nontarget data: Pile) ---
+nontarget_task_config:
+  task_name: lm
+  dataset_name: danbraunai/pile-uncopyrighted-tok-shuffled
+  max_seq_len: 64
+  column_name: input_ids
+  is_tokenized: true
+  streaming: true
+  train_data_split: train
+  eval_data_split: val
+  dataset_seed: 0
+nontarget_batch_size: 256
+nontarget_eval_batch_size: 256
+nontarget_impmin_coeff_ratio: 2
