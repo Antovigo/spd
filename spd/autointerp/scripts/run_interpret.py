@@ -42,8 +42,11 @@ def main(
 
     if autointerp_subrun_id is not None:
         subrun_dir = get_autointerp_dir(decomposition_id) / autointerp_subrun_id
-        assert subrun_dir.exists(), f"Subrun dir not found: {subrun_dir}"
-        logger.info(f"Resuming existing subrun: {autointerp_subrun_id}")
+        if subrun_dir.exists():
+            logger.info(f"Resuming existing subrun: {autointerp_subrun_id}")
+        else:
+            subrun_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Starting new subrun: {autointerp_subrun_id}")
     else:
         autointerp_subrun_id = "a-" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         subrun_dir = get_autointerp_subrun_dir(decomposition_id, autointerp_subrun_id)
