@@ -5,7 +5,6 @@ Usage:
 """
 
 import asyncio
-import os
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -26,20 +25,26 @@ def main(
     scorer_type: LabelScorerType,
     config_json: dict[str, Any],
     harvest_subrun_id: str,
+    autointerp_subrun_id: str | None = None,
 ) -> None:
     assert isinstance(config_json, dict), f"Expected dict from fire, got {type(config_json)}"
     load_dotenv()
-    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-    assert openrouter_api_key, "OPENROUTER_API_KEY not set"
 
     config = AutointerpEvalConfig.model_validate(config_json)
 
+    from spd.autointerp.providers import create_provider
+
+    provider = create_provider(config.llm)
+
     tokenizer_name = adapter_from_id(decomposition_id).tokenizer_name
 
-    interp_repo = InterpRepo.open(decomposition_id)
-    assert interp_repo is not None, (
-        f"No autointerp data for {decomposition_id}. Run autointerp first."
-    )
+    if autointerp_subrun_id is not None:
+        interp_repo = InterpRepo.open_subrun(decomposition_id, autointerp_subrun_id)
+    else:
+        interp_repo = InterpRepo.open(decomposition_id)
+        assert interp_repo is not None, (
+            f"No autointerp data for {decomposition_id}. Run autointerp first."
+        )
 
     # Separate writable DB for saving scores (the repo's DB is readonly/immutable)
     score_db = InterpDB(interp_repo._subrun_dir / "interp.db")
@@ -59,9 +64,7 @@ def main(
                     components=components,
                     interp_repo=interp_repo,
                     score_db=score_db,
-                    model=config.model,
-                    reasoning_effort=config.reasoning_effort,
-                    openrouter_api_key=openrouter_api_key,
+                    provider=provider,
                     tokenizer_name=tokenizer_name,
                     config=config.detection_config,
                     max_concurrent=config.max_concurrent,
@@ -76,9 +79,7 @@ def main(
                     components=components,
                     interp_repo=interp_repo,
                     score_db=score_db,
-                    model=config.model,
-                    reasoning_effort=config.reasoning_effort,
-                    openrouter_api_key=openrouter_api_key,
+                    provider=provider,
                     tokenizer_name=tokenizer_name,
                     config=config.fuzzing_config,
                     max_concurrent=config.max_concurrent,
@@ -96,15 +97,19 @@ def get_command(
     scorer_type: LabelScorerType,
     config: AutointerpEvalConfig,
     harvest_subrun_id: str,
+    autointerp_subrun_id: str | None = None,
 ) -> str:
     config_json = config.model_dump_json(exclude_none=True)
-    return (
+    cmd = (
         f"python -m spd.autointerp.scoring.scripts.run_label_scoring "
         f"--decomposition_id {decomposition_id} "
         f"--scorer_type {scorer_type} "
         f"--config_json '{config_json}' "
         f"--harvest_subrun_id {harvest_subrun_id} "
     )
+    if autointerp_subrun_id is not None:
+        cmd += f"--autointerp_subrun_id {autointerp_subrun_id} "
+    return cmd
 
 
 if __name__ == "__main__":

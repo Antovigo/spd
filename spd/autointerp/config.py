@@ -7,9 +7,9 @@ AutointerpSlurmConfig: CompactSkepticalConfig + eval + SLURM submission params.
 
 from typing import Annotated, Literal
 
-from openrouter.components import Effort
 from pydantic import Field
 
+from spd.autointerp.providers import LLMConfig, OpenRouterLLMConfig
 from spd.base_config import BaseConfig
 from spd.settings import DEFAULT_PARTITION_NAME
 
@@ -53,12 +53,25 @@ class DualViewConfig(BaseConfig):
     forbidden_words: list[str] | None = None
 
 
-StrategyConfig = CompactSkepticalConfig | DualViewConfig
+class RichExamplesConfig(BaseConfig):
+    """Rich examples strategy: drops token statistics, shows per-token CI and activation values.
+
+    Renders firing tokens with inline annotations like <<<token (ci:0.8, act:0.12)>>>
+    so the LLM can judge evidence quality directly from the examples.
+    """
+
+    type: Literal["rich_examples"] = "rich_examples"
+    max_examples: int = 30
+    include_dataset_description: bool = True
+    label_max_words: int = 8
+    forbidden_words: list[str] | None = None
+
+
+StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig
 
 
 class AutointerpConfig(BaseConfig):
-    model: str = "google/gemini-3-flash-preview"
-    reasoning_effort: Effort = "low"
+    llm: LLMConfig = OpenRouterLLMConfig()
     limit: int | None = None
     cost_limit_usd: float | None = None
     max_requests_per_minute: int = 500
@@ -83,8 +96,7 @@ class FuzzingEvalConfig(BaseConfig):
 class AutointerpEvalConfig(BaseConfig):
     """Config for label-based autointerp evals (detection, fuzzing)."""
 
-    model: str = "google/gemini-3-flash-preview"
-    reasoning_effort: Effort = "none"
+    llm: LLMConfig = OpenRouterLLMConfig(reasoning_effort="none")
     detection_config: DetectionEvalConfig
     fuzzing_config: FuzzingEvalConfig
     limit: int | None = None
