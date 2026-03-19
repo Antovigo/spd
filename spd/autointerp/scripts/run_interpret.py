@@ -45,7 +45,7 @@ def main(
         assert subrun_dir.exists(), f"Subrun dir not found: {subrun_dir}"
         logger.info(f"Resuming existing subrun: {autointerp_subrun_id}")
     else:
-        autointerp_subrun_id = "a-" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        autointerp_subrun_id = "a-" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         subrun_dir = get_autointerp_subrun_dir(decomposition_id, autointerp_subrun_id)
         subrun_dir.mkdir(parents=True, exist_ok=True)
 
