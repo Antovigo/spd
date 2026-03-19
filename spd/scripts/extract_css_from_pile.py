@@ -35,42 +35,57 @@ def get_pile_seq_len() -> int:
 
 
 def extract_css_texts(max_docs: int | None = None) -> list[str]:
-    """Stream the Pile GitHub subset and extract CSS documents."""
+    """Stream the Pile GitHub subset and extract CSS documents.
+
+    Args:
+        max_docs: Max number of CSS documents to collect (None = all).
+    """
     ds = load_dataset(PILE_GITHUB_DATASET, split="train", streaming=True)
-    ds = ds.filter(lambda x: x.get("language") == "CSS")
+    # Language is nested under meta.language in this dataset
+    ds = ds.filter(lambda x: x.get("meta", {}).get("language") == "CSS")
+
+    # Verify column structure on first example
+    first = next(iter(ds))
+    assert "text" in first, f"Expected 'text' column, got columns: {list(first.keys())}"
 
     texts: list[str] = []
-    for i, example in enumerate(ds):
-        if max_docs is not None and i >= max_docs:
-            break
-        text = example.get("text") or example.get("content", "")
+    for example in ds:
+        text = example["text"]
         stripped = strip_css_comments(text)
-        # Skip if stripping comments left almost nothing
         if len(stripped.strip()) < 20:
             continue
         texts.append(stripped)
-        if (i + 1) % 1000 == 0:
-            print(f"  Collected {i + 1} CSS documents...")
+        if len(texts) % 1000 == 0:
+            print(f"  Collected {len(texts):,} CSS documents...")
+        if max_docs is not None and len(texts) >= max_docs:
+            break
 
-    print(f"Collected {len(texts)} CSS documents total")
+    print(f"Collected {len(texts):,} CSS documents total")
     return texts
 
 
 def tokenize_and_chunk(texts: list[str], seq_len: int) -> list[list[int]]:
-    """Concatenate texts, tokenize, and chunk into fixed-length sequences."""
+    """Concatenate texts, tokenize in batches, and chunk into fixed-length sequences."""
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
-    # Concatenate all texts (matching Pile processing: docs concatenated before chunking)
-    concatenated = "\n".join(texts)
-    print(f"Concatenated text length: {len(concatenated):,} characters")
+    total_chars = sum(len(t) for t in texts)
+    print(f"Total text: {total_chars:,} characters across {len(texts):,} documents")
 
-    # Tokenize in one pass
-    encoded: list[int] = tokenizer.encode(concatenated)  # pyright: ignore[reportAssignmentType]
-    print(f"Total tokens: {len(encoded):,}")
+    # Tokenize document-by-document and concatenate token IDs.
+    # This avoids building a single massive string and is equivalent to concatenating
+    # texts then tokenizing (up to BOS/EOS tokens which we strip).
+    all_tokens: list[int] = []
+    for i, text in enumerate(texts):
+        tokens: list[int] = tokenizer.encode(text)  # pyright: ignore[reportAssignmentType]
+        all_tokens.extend(tokens)
+        if (i + 1) % 5000 == 0:
+            print(f"  Tokenized {i + 1:,}/{len(texts):,} documents ({len(all_tokens):,} tokens)")
+
+    print(f"Total tokens: {len(all_tokens):,}")
 
     # Chunk into seq_len sequences
-    n_chunks = len(encoded) // seq_len
-    chunks = [encoded[i * seq_len : (i + 1) * seq_len] for i in range(n_chunks)]
+    n_chunks = len(all_tokens) // seq_len
+    chunks = [all_tokens[i * seq_len : (i + 1) * seq_len] for i in range(n_chunks)]
     print(f"Created {n_chunks:,} chunks of {seq_len} tokens each")
 
     return chunks
