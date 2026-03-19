@@ -56,8 +56,8 @@ class DualViewConfig(BaseConfig):
 class RichExamplesConfig(BaseConfig):
     """Rich examples strategy: drops token statistics, shows per-token CI and activation values.
 
-    Renders firing tokens with inline annotations like <<<token (ci:0.8, act:0.12)>>>
-    so the LLM can judge evidence quality directly from the examples.
+    Supports both compact one-line rendering and an XML dual-block rendering
+    with separate raw and highlighted views.
     """
 
     type: Literal["rich_examples"] = "rich_examples"
@@ -65,6 +65,9 @@ class RichExamplesConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     output_pmi_min_count: float = 2.0
+    example_format: Literal["single_line", "xml"] = "single_line"
+    highlight_delimiter: Literal["brackets", "angle"] = "brackets"
+    xml_sanitize_raw: bool = False
 
 
 StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig

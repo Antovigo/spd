@@ -1,0 +1,41 @@
+config:
+  llm:
+    type: openrouter
+    model: google/gemini-3-flash-preview
+    reasoning_effort: low
+  component_keys_path: component_subsets/jose_coherent_100_seed0.txt
+  max_requests_per_minute: 300
+  max_concurrent: 60
+  template_strategy:
+    type: rich_examples
+    max_examples: 30
+    include_dataset_description: true
+    label_max_words: 8
+    output_pmi_min_count: 2.0
+    example_format: xml
+    highlight_delimiter: brackets
+    xml_sanitize_raw: true
+
+time: "12:00:00"
+
+evals:
+  llm:
+    type: openrouter
+    model: google/gemini-3-flash-preview
+    reasoning_effort: low
+  component_keys_path: component_subsets/jose_coherent_100_seed0.txt
+  seed: 0
+  max_requests_per_minute: 20
+  max_concurrent: 2
+  detection_config:
+    type: detection
+    n_activating: 8
+    n_non_activating: 8
+    n_trials: 5
+  fuzzing_config:
+    type: fuzzing
+    n_correct: 8
+    n_incorrect: 8
+    n_trials: 5
+
+evals_time: "12:00:00"

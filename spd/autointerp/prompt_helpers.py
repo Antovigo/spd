@@ -210,54 +210,129 @@ def _fmt_ann(activations: dict[str, float]) -> str:
     return f"({', '.join(parts)})"
 
 
+def _delimited_token(
+    display_span: str,
+    token_id: int,
+    ann: str,
+    app_tok: AppTokenizer,
+    delimiter_style: str,
+    annotation_inside: bool,
+    sanitize_fallback: bool,
+) -> str:
+    stripped = display_span.lstrip()
+    whitespace = display_span[: len(display_span) - len(stripped)]
+    if stripped:
+        token_text = stripped
+    else:
+        token_text = (
+            app_tok.get_tok_display(token_id) if sanitize_fallback else app_tok.decode([token_id])
+        )
+
+    open_delim, close_delim = ("[[[", "]]]") if delimiter_style == "brackets" else ("<<<", ">>>")
+    if annotation_inside:
+        inner = f"{token_text} {ann}".rstrip()
+        return f"{whitespace}{open_delim}{inner}{close_delim}"
+    return f"{whitespace}{open_delim}{token_text}{close_delim} {ann}".rstrip()
+
+
 def _delimit_annotated(
     spans: list[str],
     token_ids: list[int],
     firings: list[bool],
     per_token_activations: list[dict[str, float]],
     app_tok: AppTokenizer,
+    delimiter_style: str,
+    annotation_inside: bool,
+    sanitize_fallback: bool,
 ) -> str:
-    """Join token strings, wrapping active tokens as [[[token]]] (ci, act)."""
+    """Join token strings, wrapping active tokens with configured delimiters."""
     parts: list[str] = []
     for token_id, span, active, acts in zip(
         token_ids, spans, firings, per_token_activations, strict=True
     ):
         if active:
-            display_span = span or app_tok.get_tok_display(token_id)
-            stripped = display_span.lstrip()
-            whitespace = display_span[: len(display_span) - len(stripped)]
-            token_text = stripped or app_tok.get_tok_display(token_id)
             ann = _fmt_ann(acts)
-            parts.append(f"{whitespace}[[[{token_text}]]] {ann}")
+            parts.append(
+                _delimited_token(
+                    display_span=span,
+                    token_id=token_id,
+                    ann=ann,
+                    app_tok=app_tok,
+                    delimiter_style=delimiter_style,
+                    annotation_inside=annotation_inside,
+                    sanitize_fallback=sanitize_fallback,
+                )
+            )
         else:
             parts.append(span)
     return "".join(parts)
+
+
+def _cdata(text: str) -> str:
+    return text.replace("]]>", "]]]]><![CDATA[>")
+
+
+def _build_xml_example(raw_text: str, highlighted_text: str) -> str:
+    return (
+        "<example>\n"
+        f"<raw><![CDATA[{_cdata(raw_text)}]]></raw>\n"
+        f"<highlighted><![CDATA[{_cdata(highlighted_text)}]]></highlighted>\n"
+        "</example>"
+    )
 
 
 def build_annotated_examples(
     component: ComponentData,
     app_tok: AppTokenizer,
     max_examples: int,
+    example_format: str = "single_line",
+    delimiter_style: str = "brackets",
+    xml_sanitize_raw: bool = False,
 ) -> Md:
-    """Build activation examples as single annotated lines."""
+    """Build activation examples in the configured presentation format."""
     items: list[str] = []
     for ex in component.activation_examples[:max_examples]:
         if not any(ex.firings):
             continue
-        spans = app_tok.get_spans(ex.token_ids)
         act_keys = list(ex.activations.keys())
         per_token_acts = [
             {k: ex.activations[k][i] for k in act_keys} for i in range(len(ex.token_ids))
         ]
-        items.append(
-            _delimit_annotated(
-                spans=spans,
-                token_ids=ex.token_ids,
-                firings=ex.firings,
-                per_token_activations=per_token_acts,
-                app_tok=app_tok,
+        if example_format == "xml":
+            raw_spans = (
+                app_tok.get_spans(ex.token_ids)
+                if xml_sanitize_raw
+                else app_tok.get_raw_spans(ex.token_ids)
             )
-        )
+            highlighted_spans = app_tok.get_raw_spans(ex.token_ids)
+            items.append(
+                _build_xml_example(
+                    raw_text="".join(raw_spans),
+                    highlighted_text=_delimit_annotated(
+                        spans=highlighted_spans,
+                        token_ids=ex.token_ids,
+                        firings=ex.firings,
+                        per_token_activations=per_token_acts,
+                        app_tok=app_tok,
+                        delimiter_style=delimiter_style,
+                        annotation_inside=True,
+                        sanitize_fallback=xml_sanitize_raw,
+                    ),
+                )
+            )
+        else:
+            items.append(
+                _delimit_annotated(
+                    spans=app_tok.get_spans(ex.token_ids),
+                    token_ids=ex.token_ids,
+                    firings=ex.firings,
+                    per_token_activations=per_token_acts,
+                    app_tok=app_tok,
+                    delimiter_style=delimiter_style,
+                    annotation_inside=False,
+                    sanitize_fallback=True,
+                )
+            )
     md = Md()
     if items:
         md.numbered(items)

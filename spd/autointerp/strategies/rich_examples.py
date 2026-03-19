@@ -52,7 +52,14 @@ def format_prompt(
     output_token_stats: TokenPRLift | None,
     context_tokens_per_side: int,
 ) -> str:
-    fires_on = build_annotated_examples(component, app_tok, config.max_examples)
+    fires_on = build_annotated_examples(
+        component,
+        app_tok,
+        config.max_examples,
+        example_format=config.example_format,
+        delimiter_style=config.highlight_delimiter,
+        xml_sanitize_raw=config.xml_sanitize_raw,
+    )
 
     rate_str = (
         f"~1 in {int(1 / component.firing_density)} tokens"
@@ -102,12 +109,34 @@ def format_prompt(
     )
 
     md.h(3, "Example annotation format")
-    md.p(
-        "Each example is one annotated line. Firing tokens are wrapped as "
-        "`[[[token]]] (ci:X, act:Y)` — ci is the causal importance, act is the component's "
-        "inner activation at that position. Non-firing tokens appear as plain text. "
-        "Control characters are rendered visibly, e.g. newline as `↵`."
-    )
+    if config.example_format == "xml":
+        delim = (
+            "<<<token (ci:X, act:Y)>>>"
+            if config.highlight_delimiter == "angle"
+            else "[[[token (ci:X, act:Y)]]]"
+        )
+        raw_desc = (
+            "The `<raw>` block preserves literal whitespace and control characters."
+            if not config.xml_sanitize_raw
+            else "The `<raw>` block sanitizes control characters for readability, e.g. newline as `↵`."
+        )
+        md.p(
+            "Each example is an XML-style block with `<raw>` and `<highlighted>` sections. "
+            f"`<highlighted>` repeats the same window with firing tokens wrapped as `{delim}`. "
+            f"{raw_desc}"
+        )
+    else:
+        delim = (
+            "`<<<token>>> (ci:X, act:Y)`"
+            if config.highlight_delimiter == "angle"
+            else "`[[[token]]] (ci:X, act:Y)`"
+        )
+        md.p(
+            "Each example is one annotated line. Firing tokens are wrapped as "
+            f"{delim} — ci is the causal importance, act is the component's "
+            "inner activation at that position. Non-firing tokens appear as plain text. "
+            "Control characters are rendered visibly, e.g. newline as `↵`."
+        )
     _build_annotation_legend(md, component)
 
     if output_token_stats is not None and output_token_stats.top_pmi:
@@ -122,10 +151,16 @@ def format_prompt(
         )
 
     md.h(2, "Activation examples — where the component fires")
-    md.p(
-        "Each firing token shows its activation values inline. "
-        "Use these to judge how strongly the component responds at each position."
-    )
+    if config.example_format == "xml":
+        md.p(
+            "Each example shows both the raw window and a highlighted version with inline "
+            "activation values on firing tokens."
+        )
+    else:
+        md.p(
+            "Each firing token shows its activation values inline. "
+            "Use these to judge how strongly the component responds at each position."
+        )
     md.extend(fires_on)
 
     md.h(2, "Task")
@@ -193,4 +228,7 @@ def _build_annotation_legend(md: Md, component: ComponentData) -> None:
         )
     if legend_items:
         md.bullets(legend_items)
-    md.p("Example: `the [[[cat]]] (ci:0.92, act:0.45) sat` — 'cat' is a firing token.")
+    md.p(
+        "Example: `the [[[cat]]] (ci:0.92, act:0.45) sat` or `the <<<cat (ci:0.92, act:0.45)>>> sat` "
+        "— 'cat' is a firing token."
+    )
