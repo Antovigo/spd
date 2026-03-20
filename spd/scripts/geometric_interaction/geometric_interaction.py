@@ -24,6 +24,7 @@ from typing import Any
 import einops
 import fire
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from jaxtyping import Float
 from matplotlib.gridspec import GridSpec
@@ -163,8 +164,13 @@ def compute_per_module_coactivation(
     count_i: Float[Tensor, " N"],
     count_ij: Float[Tensor, "N N"],
     count_total: int,
-) -> tuple[dict[str, Float[Tensor, " C"]], dict[str, Float[Tensor, "C C"]]]:
-    """Split global harvest counts into per-module activation density and coactivation fractions.
+) -> tuple[
+    dict[str, Float[Tensor, " C"]],
+    dict[str, Float[Tensor, "C C"]],
+    dict[str, Float[Tensor, "C C"]],
+]:
+    """Split global harvest counts into per-module activation density, coactivation fractions,
+    and raw coactivation counts.
 
     Coactivation fraction[i, j] = P(i active | j active) = count_ij[i,j] / count_j.
     """
@@ -172,6 +178,7 @@ def compute_per_module_coactivation(
 
     activation_density: dict[str, Float[Tensor, " C"]] = {}
     coactivation_fractions: dict[str, Float[Tensor, "C C"]] = {}
+    coactivation_counts: dict[str, Float[Tensor, "C C"]] = {}
 
     for module_name, global_inds in sorted(module_to_inds.items()):
         idx = torch.tensor(global_inds)
@@ -179,13 +186,14 @@ def compute_per_module_coactivation(
         activation_density[module_name] = counts / count_total
 
         coact_counts = count_ij[idx][:, idx].float()
+        coactivation_counts[module_name] = coact_counts
         # P(i active | j active) = count_ij[i,j] / count_j
         # denom[i,j] = counts[j] → broadcast counts along rows
         denom = counts.unsqueeze(0).expand_as(coact_counts)
         frac = coact_counts / denom
         coactivation_fractions[module_name] = torch.nan_to_num(frac, nan=0.0)
 
-    return activation_density, coactivation_fractions
+    return activation_density, coactivation_fractions, coactivation_counts
 
 
 # ── GIS computation ───────────────────────────────────────────────────────────
@@ -241,9 +249,24 @@ def crop_to_alive(
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 
+def _count_to_sizes(
+    counts_flat: np.ndarray,
+    s_min: float = 0.3,
+    s_max: float = 8.0,
+) -> np.ndarray:
+    """Map raw coactivation counts to marker sizes via log-scale normalisation."""
+    log_counts = np.log1p(counts_flat)
+    lo, hi = log_counts.min(), log_counts.max()
+    if hi <= lo:
+        return np.full_like(log_counts, (s_min + s_max) / 2)
+    t = (log_counts - lo) / (hi - lo)
+    return s_min + t * (s_max - s_min)
+
+
 def plot_scatter_per_module(
     gis_matrices: dict[str, Float[Tensor, "C C"]],
     coactivation_fractions: dict[str, Float[Tensor, "C C"]],
+    coactivation_counts: dict[str, Float[Tensor, "C C"]],
     activation_density: dict[str, Float[Tensor, " C"]],
     alive_threshold: float,
     output_dir: Path,
@@ -252,7 +275,8 @@ def plot_scatter_per_module(
     """Per-module scatter plots of GIS vs coactivation fraction (alive components only).
 
     Each point is a (i, j) pair from the full matrix (both directions), matching the
-    original analysis behaviour.
+    original analysis behaviour. Dot size scales with absolute coactivation count.
+    Marginal histograms show density along each axis.
     """
     scatter_dir = output_dir / "scatter"
     scatter_dir.mkdir(parents=True, exist_ok=True)
@@ -268,24 +292,50 @@ def plot_scatter_per_module(
 
         gis = crop_to_alive(gis_matrices[module_name], alive_inds)
         coact = crop_to_alive(coactivation_fractions[module_name], alive_inds)
+        raw_counts = crop_to_alive(coactivation_counts[module_name], alive_inds)
 
-        # Flatten full matrix (both directions, like original analysis)
         gis_flat = gis.flatten().cpu().numpy()
         coact_flat = coact.flatten().cpu().numpy()
+        counts_flat = raw_counts.flatten().cpu().numpy()
+        sizes = _count_to_sizes(counts_flat)
 
-        fig, ax = plt.subplots(figsize=(8, 8))
-        ax.scatter(gis_flat, coact_flat, alpha=0.4, s=1.2)
-        ax.set_xlim(-0.01, 1.01)
-        ax.set_ylim(-0.01, 1.01)
-        ax.set_xlabel("Geometric Interaction Strength")
-        ax.set_ylabel("Coactivation Fraction")
-        ax.set_title(f"{module_name}  ({n_alive} alive components)")
+        # Layout: main scatter + top histogram + right histogram
+        fig = plt.figure(figsize=(9, 9))
+        gs = fig.add_gridspec(
+            2, 2, width_ratios=[4, 1], height_ratios=[1, 4], hspace=0.05, wspace=0.05
+        )
+        ax_main = fig.add_subplot(gs[1, 0])
+        ax_hist_x = fig.add_subplot(gs[0, 0], sharex=ax_main)
+        ax_hist_y = fig.add_subplot(gs[1, 1], sharey=ax_main)
+        # Hide the empty corner
+        fig.add_subplot(gs[0, 1]).set_visible(False)
 
-        ax.text(
+        ax_main.scatter(gis_flat, coact_flat, alpha=0.35, s=sizes, linewidths=0)
+        ax_main.set_ylim(-0.01, 1.01)
+        ax_main.set_xlabel("Geometric Interaction Strength")
+        ax_main.set_ylabel("Coactivation Fraction")
+
+        ax_hist_x.hist(gis_flat, bins=80, color="#0173B2", alpha=0.7, edgecolor="none")
+        ax_hist_x.tick_params(labelbottom=False)
+        ax_hist_x.set_ylabel("Count")
+        ax_hist_x.set_title(f"{module_name}  ({n_alive} alive components)")
+
+        ax_hist_y.hist(
+            coact_flat,
+            bins=80,
+            orientation="horizontal",
+            color="#0173B2",
+            alpha=0.7,
+            edgecolor="none",
+        )
+        ax_hist_y.tick_params(labelleft=False)
+        ax_hist_y.set_xlabel("Count")
+
+        ax_main.text(
             0.98,
             0.98,
             f"pairs: {len(gis_flat)}\nrun: {run_id}",
-            transform=ax.transAxes,
+            transform=ax_main.transAxes,
             verticalalignment="top",
             horizontalalignment="right",
             fontsize=9,
@@ -436,8 +486,8 @@ def main(config_path: Path | str | None = None, **overrides: Any) -> None:
 
     # ── Compute ───────────────────────────────────────────────────────────
 
-    activation_density, coactivation_fractions = compute_per_module_coactivation(
-        component_keys, count_i, count_ij, count_total
+    activation_density, coactivation_fractions, coactivation_counts = (
+        compute_per_module_coactivation(component_keys, count_i, count_ij, count_total)
     )
 
     for name, density in sorted(activation_density.items()):
@@ -466,6 +516,7 @@ def main(config_path: Path | str | None = None, **overrides: Any) -> None:
         coactivation_fractions = {
             k: v for k, v in coactivation_fractions.items() if k in shared_modules
         }
+        coactivation_counts = {k: v for k, v in coactivation_counts.items() if k in shared_modules}
         activation_density = {k: v for k, v in activation_density.items() if k in shared_modules}
 
     # ── Plots ─────────────────────────────────────────────────────────────
@@ -474,6 +525,7 @@ def main(config_path: Path | str | None = None, **overrides: Any) -> None:
     plot_scatter_per_module(
         gis_matrices=gis_matrices,
         coactivation_fractions=coactivation_fractions,
+        coactivation_counts=coactivation_counts,
         activation_density=activation_density,
         alive_threshold=config.alive_density_threshold,
         output_dir=output_dir,
@@ -500,6 +552,7 @@ def main(config_path: Path | str | None = None, **overrides: Any) -> None:
         {
             "gis_matrices": gis_matrices,
             "coactivation_fractions": coactivation_fractions,
+            "coactivation_counts": coactivation_counts,
             "activation_density": activation_density,
             "config": config.model_dump(),
             "run_id": run_id,
