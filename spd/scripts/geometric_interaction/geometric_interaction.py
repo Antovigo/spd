@@ -46,7 +46,7 @@ class GeometricInteractionConfig(BaseConfig):
         description="Harvest ID (e.g. 'h-20260319_121635'). Uses latest if None.",
     )
     alive_density_threshold: float = Field(
-        default=0.0001,
+        default=0.001,
         description="Minimum activation density to consider a component alive",
     )
     output_dir: str | None = Field(
