@@ -60,7 +60,7 @@ The training data consists of variable-length documents concatenated with `<|end
 
 Each example is shown as an XML block with two views:
 - `<raw>`: the literal token text of the window
-- `<highlighted>`: the same window with firing tokens wrapped as `[[[token (ci:X, act:Y)]]]`
+- `<annotated>`: the same window with firing tokens wrapped as `[[[token (ci:X, act:Y)]]]`
 
 **Annotation legend:**
 - **ci** (causal importance): 0–1. How essential this component is at this position.
@@ -69,49 +69,49 @@ Each example is shown as an XML block with two views:
 1.
 <example>
 <raw><![CDATA[The quick brown fox jumped over the lazy dog. The]]></raw>
-<highlighted><![CDATA[The quick brown fox jumped over the lazy dog[[[. (ci:0.94, act:0.31)]]] The]]></highlighted>
+<annotated><![CDATA[The quick brown fox jumped over the lazy dog[[[. (ci:0.94, act:0.31)]]] The]]></annotated>
 </example>
 
 2.
 <example>
 <raw><![CDATA[from the data, we conclude that the hypothesis]]></raw>
-<highlighted><![CDATA[from the data[[,[++ (ci:0.88, act:0.27)]]] we conclude that the hypothesis]]></highlighted>
+<annotated><![CDATA[from the data[[,[++ (ci:0.88, act:0.27)]]] we conclude that the hypothesis]]></annotated>
 </example>
 
 3.
 <example>
 <raw><![CDATA[running down the hill; the wind was cold and]]></raw>
-<highlighted><![CDATA[running down the hill[[[; (ci:0.91, act:0.34)]]] the wind was cold and]]></highlighted>
+<annotated><![CDATA[running down the hill[[[; (ci:0.91, act:0.34)]]] the wind was cold and]]></annotated>
 </example>
 
 4.
 <example>
 <raw><![CDATA[He said nothing]]></raw>
-<highlighted><![CDATA[He said nothing[[[. (ci:0.82, act:-0.19)]]]]]></highlighted>
+<annotated><![CDATA[He said nothing[[[. (ci:0.82, act:-0.19)]]]]]></annotated>
 </example>
 
 5.
 <example>
 <raw><![CDATA["I don't know," she replied. "Maybe]]></raw>
-<highlighted><![CDATA["I don't know[[,[++ (ci:0.79, act:0.22)]]]" she replied[[[. (ci:0.86, act:0.29)]]] "Maybe]]></highlighted>
+<annotated><![CDATA["I don't know[[,[++ (ci:0.79, act:0.22)]]]" she replied[[[. (ci:0.86, act:0.29)]]] "Maybe]]></annotated>
 </example>
 
 6.
 <example>
 <raw><![CDATA[<|endoftext|>The first time I saw]]></raw>
-<highlighted><![CDATA[<|endoftext|>[[[The (ci:0.71, act:-0.41)]]] first time I saw]]></highlighted>
+<annotated><![CDATA[<|endoftext|>[[[The (ci:0.71, act:-0.41)]]] first time I saw]]></annotated>
 </example>
 
 7.
 <example>
 <raw><![CDATA[<|endoftext|>In this paper we present a novel approach to]]></raw>
-<highlighted><![CDATA[<|endoftext|>[[[In (ci:0.68, act:-0.38)]]] this paper we present a novel approach to]]></highlighted>
+<annotated><![CDATA[<|endoftext|>[[[In (ci:0.68, act:-0.38)]]] this paper we present a novel approach to]]></annotated>
 </example>
 
 8.
 <example>
 <raw><![CDATA[the value of x is 0.5, and the result]]></raw>
-<highlighted><![CDATA[the value of x is 0.5[[,[++ (ci:0.85, act:0.25)]]] and the result]]></highlighted>
+<annotated><![CDATA[the value of x is 0.5[[,[++ (ci:0.85, act:0.25)]]] and the result]]></annotated>
 </example>
 
 ## Task
