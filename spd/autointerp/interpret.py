@@ -17,8 +17,7 @@ from spd.autointerp.schemas import InterpretationResult, ModelMetadata
 from spd.autointerp.strategies.dispatch import INTERPRETATION_SCHEMA, format_prompt
 from spd.harvest.analysis import TokenPRLift, get_input_token_stats, get_output_token_stats
 from spd.harvest.repo import HarvestRepo
-from spd.harvest.schemas import ComponentSummary
-from spd.harvest.schemas import ComponentData
+from spd.harvest.schemas import ComponentData, ComponentSummary
 from spd.log import logger
 
 MAX_CONCURRENT = 50
@@ -195,6 +194,14 @@ def run_interpret(
                     raise RuntimeError(
                         f"Error rate {error_rate:.0%} ({n_errors}/{len(remaining_keys)}) exceeds 20% threshold"
                     )
+
+            completed_now = completed | {result.component_key for result in results}
+            missing = [key for key in eligible_keys if key not in completed_now]
+            if component_keys is not None and missing:
+                raise RuntimeError(
+                    "Failed to interpret all requested target components: "
+                    f"{missing[:10]} ({len(missing)} missing)"
+                )
 
         finally:
             db.close()
