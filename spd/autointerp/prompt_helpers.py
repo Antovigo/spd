@@ -288,6 +288,7 @@ def build_annotated_examples(
     example_format: str = "single_line",
     delimiter_style: str = "brackets",
     xml_sanitize_raw: bool = False,
+    xml_sanitize_highlighted: bool = False,
 ) -> Md:
     """Build activation examples in the configured presentation format."""
     items: list[str] = []
@@ -304,7 +305,11 @@ def build_annotated_examples(
                 if xml_sanitize_raw
                 else app_tok.get_raw_spans(ex.token_ids)
             )
-            highlighted_spans = app_tok.get_raw_spans(ex.token_ids)
+            highlighted_spans = (
+                app_tok.get_spans(ex.token_ids)
+                if xml_sanitize_highlighted
+                else app_tok.get_raw_spans(ex.token_ids)
+            )
             items.append(
                 _build_xml_example(
                     raw_text="".join(raw_spans),
@@ -316,7 +321,7 @@ def build_annotated_examples(
                         app_tok=app_tok,
                         delimiter_style=delimiter_style,
                         annotation_inside=True,
-                        sanitize_fallback=xml_sanitize_raw,
+                        sanitize_fallback=xml_sanitize_highlighted,
                     ),
                 )
             )

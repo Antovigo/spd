@@ -68,6 +68,7 @@ class RichExamplesConfig(BaseConfig):
     example_format: Literal["single_line", "xml"] = "single_line"
     highlight_delimiter: Literal["brackets", "angle"] = "brackets"
     xml_sanitize_raw: bool = False
+    xml_sanitize_highlighted: bool = False
 
 
 StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig

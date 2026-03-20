@@ -59,6 +59,7 @@ def format_prompt(
         example_format=config.example_format,
         delimiter_style=config.highlight_delimiter,
         xml_sanitize_raw=config.xml_sanitize_raw,
+        xml_sanitize_highlighted=config.xml_sanitize_highlighted,
     )
 
     rate_str = (
@@ -120,10 +121,15 @@ def format_prompt(
             if not config.xml_sanitize_raw
             else "The `<raw>` block sanitizes control characters for readability, e.g. newline as `↵`."
         )
+        highlighted_desc = (
+            "The `<highlighted>` block also preserves literal token text."
+            if not config.xml_sanitize_highlighted
+            else "The `<highlighted>` block sanitizes control characters for readability while preserving token boundaries."
+        )
         md.p(
             "Each example is an XML-style block with `<raw>` and `<highlighted>` sections. "
             f"`<highlighted>` repeats the same window with firing tokens wrapped as `{delim}`. "
-            f"{raw_desc}"
+            f"{raw_desc} {highlighted_desc}"
         )
     else:
         delim = (
