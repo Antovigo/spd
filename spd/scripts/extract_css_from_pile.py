@@ -2,8 +2,8 @@
 
 Downloads only the CSS parquet files from andstor/the_pile_github (the Pile's GitHub subset
 with language metadata), strips comments, tokenizes, and chunks to match the Pile's sequence
-length. Output chunks are written to parquet shards on disk as they are produced, then shuffled
-and uploaded.
+length. Output chunks are uploaded as parquet shards as they are produced — at most one shard
+is on disk at a time.
 
 Usage:
     uv run python -m spd.scripts.extract_css_from_pile --hf_repo <username>/pile-css-no-comments
@@ -11,9 +11,8 @@ Usage:
 
 import argparse
 import re
+import tempfile
 from collections.abc import Iterator
-from pathlib import Path
-
 import pyarrow as pa
 import pyarrow.parquet as pq
 from datasets import load_dataset
@@ -60,19 +59,21 @@ def iter_css_texts(parquet_files: list[str]) -> Iterator[str]:
                     yield stripped
 
 
-def process_and_write_shards(
+def process_and_upload(
     docs: Iterator[str],
     seq_len: int,
-    out_dir: Path,
+    hf_repo: str,
+    split: str,
     max_docs: int | None,
 ) -> int:
-    """Tokenize docs, chunk the token stream, and write parquet shards to out_dir.
+    """Tokenize docs, chunk the token stream, and upload parquet shards to HF Hub.
 
-    Returns the total number of chunks written.
+    Each shard is written to a temp file, uploaded, then deleted — at most one shard is on disk
+    at a time. Returns the total number of chunks uploaded.
     """
+    api = HfApi()
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
     schema = pa.schema([("input_ids", pa.list_(pa.int32()))])
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     buf: list[int] = []
     shard_buf: list[list[int]] = []
@@ -85,7 +86,17 @@ def process_and_write_shards(
         if not shard_buf:
             return
         table = pa.table({"input_ids": shard_buf}, schema=schema)
-        pq.write_table(table, out_dir / f"shard-{shard_idx:05d}.parquet")
+        shard_name = f"shard-{shard_idx:05d}.parquet"
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=True) as tmp:
+            pq.write_table(table, tmp.name)
+            path_in_repo = f"data/{split}/{shard_name}"
+            print(f"  Uploading {shard_name} ({len(shard_buf):,} chunks) → {path_in_repo}")
+            api.upload_file(
+                path_or_fileobj=tmp.name,
+                path_in_repo=path_in_repo,
+                repo_id=hf_repo,
+                repo_type="dataset",
+            )
         shard_idx += 1
         shard_buf = []
 
@@ -101,7 +112,7 @@ def process_and_write_shards(
 
         n_docs += 1
         if n_docs % 5000 == 0:
-            print(f"  {n_docs:,} docs → {n_chunks:,} chunks ({shard_idx} shards written)")
+            print(f"  {n_docs:,} docs → {n_chunks:,} chunks ({shard_idx} shards uploaded)")
         if max_docs is not None and n_docs >= max_docs:
             break
 
@@ -110,32 +121,13 @@ def process_and_write_shards(
     return n_chunks
 
 
-def upload_shards(shard_dir: Path, hf_repo: str, split: str) -> None:
-    """Upload all parquet shards in a directory to HF Hub under the given split."""
-    api = HfApi()
-    shards = sorted(shard_dir.glob("*.parquet"))
-    assert shards, f"No parquet files found in {shard_dir}"
-    for shard in shards:
-        path_in_repo = f"data/{split}/{shard.name}"
-        print(f"  Uploading {shard.name} → {path_in_repo}")
-        api.upload_file(
-            path_or_fileobj=str(shard),
-            path_in_repo=path_in_repo,
-            repo_id=hf_repo,
-            repo_type="dataset",
-        )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hf_repo", required=True, help="HF Hub repo (e.g. user/pile-css)")
-    parser.add_argument("--work_dir", default="pile-css-work", help="Temp working directory")
     parser.add_argument("--max_docs", type=int, default=None, help="Cap on CSS documents")
-    parser.add_argument("--seed", type=int, default=42, help="Shuffle seed")
     args = parser.parse_args()
 
     seq_len = get_pile_seq_len()
-    work_dir = Path(args.work_dir)
 
     # Find CSS parquet files via Hub API (avoids resolving the full 50+ language dataset)
     print("\nListing CSS parquet files...")
@@ -143,41 +135,24 @@ def main() -> None:
     val_files = list_parquet_files("validation")
     assert train_files, "No CSS train parquet files found"
 
-    # Process train split → shards on disk
-    train_dir = work_dir / "train"
-    print("\nProcessing train split...")
-    n_train = process_and_write_shards(
-        iter_css_texts(train_files), seq_len, train_dir, args.max_docs
-    )
-    assert n_train > 0, "No train chunks produced"
-
-    # Process val split → shards on disk
-    val_dir = work_dir / "val"
-    print("\nProcessing validation split...")
-    n_val = process_and_write_shards(
-        iter_css_texts(val_files), seq_len, val_dir, max_docs=None
-    )
-    print(f"\nTotal: {n_train:,} train chunks, {n_val:,} val chunks")
-
-    # Verify a sample
-    first_shard = sorted(train_dir.glob("*.parquet"))[0]
-    sample_ids = pq.read_table(first_shard).column("input_ids")[0].as_py()
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
-    sample: str = tokenizer.decode(sample_ids)  # pyright: ignore[reportAttributeAccessIssue]
-    print(f"\nSample (first 300 chars):\n{sample[:300]}")
-
-    # Create HF repo and upload shards
+    # Create HF repo
     api = HfApi()
     api.create_repo(args.hf_repo, repo_type="dataset", exist_ok=True)
 
-    print(f"\nUploading train shards to {args.hf_repo}...")
-    upload_shards(train_dir, args.hf_repo, "train")
+    # Process and upload train split
+    print("\nProcessing train split...")
+    n_train = process_and_upload(
+        iter_css_texts(train_files), seq_len, args.hf_repo, "train", args.max_docs
+    )
+    assert n_train > 0, "No train chunks produced"
 
-    if n_val > 0:
-        print(f"Uploading val shards to {args.hf_repo}...")
-        upload_shards(val_dir, args.hf_repo, "val")
+    # Process and upload val split
+    print("\nProcessing validation split...")
+    n_val = process_and_upload(
+        iter_css_texts(val_files), seq_len, args.hf_repo, "val", max_docs=None
+    )
 
-    print("Done!")
+    print(f"\nDone! {n_train:,} train + {n_val:,} val chunks → {args.hf_repo}")
 
 
 if __name__ == "__main__":
