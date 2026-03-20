@@ -14,7 +14,11 @@ from spd.adapters import adapter_from_id
 from spd.autointerp.config import AutointerpConfig
 from spd.autointerp.interpret import resolve_target_component_keys, run_interpret
 from spd.autointerp.schemas import get_autointerp_dir, get_autointerp_subrun_dir
-from spd.autointerp.subsets import get_subrun_component_keys_path, load_component_keys_file, save_component_keys_file
+from spd.autointerp.subsets import (
+    get_subrun_component_keys_path,
+    load_component_keys_file,
+    save_component_keys_file,
+)
 from spd.harvest.repo import HarvestRepo
 from spd.log import logger
 

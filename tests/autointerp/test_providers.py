@@ -10,8 +10,8 @@ from spd.autointerp.providers import (
     AnthropicOpus46LLMConfig,
     AnthropicProvider,
     AnthropicSonnet46LLMConfig,
-    GoogleAIProvider,
     GoogleAILLMConfig,
+    GoogleAIProvider,
     LLMConfig,
 )
 

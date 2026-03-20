@@ -5,10 +5,11 @@ in the examples so the LLM can judge evidence quality directly.
 """
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import RichExamplesConfig
+from spd.autointerp.config import RichExamplesConfig, resolve_example_rendering
 from spd.autointerp.prompt_helpers import (
     DATASET_DESCRIPTIONS,
     build_annotated_examples,
+    describe_example_rendering,
     human_layer_desc,
 )
 from spd.autointerp.schemas import DecompositionMethod, ModelMetadata
@@ -52,14 +53,12 @@ def format_prompt(
     output_token_stats: TokenPRLift | None,
     context_tokens_per_side: int,
 ) -> str:
+    rendering = resolve_example_rendering(config)
     fires_on = build_annotated_examples(
         component,
         app_tok,
         config.max_examples,
-        example_format=config.example_format,
-        delimiter_style=config.highlight_delimiter,
-        xml_sanitize_raw=config.xml_sanitize_raw,
-        xml_sanitize_highlighted=config.xml_sanitize_highlighted,
+        rendering=rendering,
     )
 
     rate_str = (
@@ -110,39 +109,7 @@ def format_prompt(
     )
 
     md.h(3, "Example annotation format")
-    if config.example_format == "xml":
-        delim = (
-            "<<<token (ci:X, act:Y)>>>"
-            if config.highlight_delimiter == "angle"
-            else "[[[token (ci:X, act:Y)]]]"
-        )
-        raw_desc = (
-            "The `<raw>` block preserves literal whitespace and control characters."
-            if not config.xml_sanitize_raw
-            else "The `<raw>` block sanitizes control characters for readability, e.g. newline as `↵`."
-        )
-        highlighted_desc = (
-            "The `<highlighted>` block also preserves literal token text."
-            if not config.xml_sanitize_highlighted
-            else "The `<highlighted>` block sanitizes control characters for readability while preserving token boundaries."
-        )
-        md.p(
-            "Each example is an XML-style block with `<raw>` and `<highlighted>` sections. "
-            f"`<highlighted>` repeats the same window with firing tokens wrapped as `{delim}`. "
-            f"{raw_desc} {highlighted_desc}"
-        )
-    else:
-        delim = (
-            "`<<<token>>> (ci:X, act:Y)`"
-            if config.highlight_delimiter == "angle"
-            else "`[[[token]]] (ci:X, act:Y)`"
-        )
-        md.p(
-            "Each example is one annotated line. Firing tokens are wrapped as "
-            f"{delim} — ci is the causal importance, act is the component's "
-            "inner activation at that position. Non-firing tokens appear as plain text. "
-            "Control characters are rendered visibly, e.g. newline as `↵`."
-        )
+    md.p(describe_example_rendering(rendering))
     _build_annotation_legend(md, component)
 
     if output_token_stats is not None and output_token_stats.top_pmi:
@@ -157,7 +124,7 @@ def format_prompt(
         )
 
     md.h(2, "Activation examples — where the component fires")
-    if config.example_format == "xml":
+    if rendering.format == "xml":
         md.p(
             "Each example shows both the raw window and a highlighted version with inline "
             "activation values on firing tokens."

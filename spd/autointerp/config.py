@@ -25,6 +25,16 @@ FORBIDDEN_WORDS_DEFAULT = [
 ]
 
 
+class ExampleRenderingConfig(BaseConfig):
+    """Configurable activation-example rendering shared across strategies."""
+
+    format: Literal["legacy_delimited", "single_line", "xml"] = "legacy_delimited"
+    highlight_delimiter: Literal["legacy", "brackets", "angle"] = "legacy"
+    annotation_style: Literal["none", "activation"] = "none"
+    xml_sanitize_raw: bool = False
+    xml_sanitize_highlighted: bool = False
+
+
 class CompactSkepticalConfig(BaseConfig):
     """Current default strategy: compact prompt, skeptical tone, structured JSON output."""
 
@@ -34,6 +44,9 @@ class CompactSkepticalConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     forbidden_words: list[str] | None = None
+    example_rendering: "ExampleRenderingConfig" = Field(
+        default_factory=lambda: ExampleRenderingConfig()
+    )
 
 
 class DualViewConfig(BaseConfig):
@@ -51,6 +64,9 @@ class DualViewConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     forbidden_words: list[str] | None = None
+    example_rendering: "ExampleRenderingConfig" = Field(
+        default_factory=lambda: ExampleRenderingConfig()
+    )
 
 
 class RichExamplesConfig(BaseConfig):
@@ -65,6 +81,7 @@ class RichExamplesConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     output_pmi_min_count: float = 2.0
+    example_rendering: ExampleRenderingConfig | None = None
     example_format: Literal["single_line", "xml"] = "single_line"
     highlight_delimiter: Literal["brackets", "angle"] = "brackets"
     xml_sanitize_raw: bool = False
@@ -72,6 +89,24 @@ class RichExamplesConfig(BaseConfig):
 
 
 StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig
+
+
+def resolve_example_rendering(strategy: StrategyConfig) -> ExampleRenderingConfig:
+    match strategy:
+        case CompactSkepticalConfig(example_rendering=example_rendering):
+            return example_rendering
+        case DualViewConfig(example_rendering=example_rendering):
+            return example_rendering
+        case RichExamplesConfig(example_rendering=example_rendering):
+            if example_rendering is not None:
+                return example_rendering
+            return ExampleRenderingConfig(
+                format=strategy.example_format,
+                highlight_delimiter=strategy.highlight_delimiter,
+                annotation_style="activation",
+                xml_sanitize_raw=strategy.xml_sanitize_raw,
+                xml_sanitize_highlighted=strategy.xml_sanitize_highlighted,
+            )
 
 
 class AutointerpConfig(BaseConfig):

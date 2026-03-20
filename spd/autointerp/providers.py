@@ -150,9 +150,7 @@ def _gemini_response_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
     def prune(obj: Any) -> Any:
         if isinstance(obj, dict):
-            return {
-                k: prune(v) for k, v in obj.items() if k != "additionalProperties"
-            }
+            return {k: prune(v) for k, v in obj.items() if k != "additionalProperties"}
         if isinstance(obj, list):
             return [prune(x) for x in obj]
         return obj

@@ -34,11 +34,7 @@ def main(
     max_density = max_firing_rate_percent / 100.0
 
     eligible = sorted(
-        [
-            key
-            for key, comp in summary.items()
-            if min_density <= comp.firing_density <= max_density
-        ]
+        [key for key, comp in summary.items() if min_density <= comp.firing_density <= max_density]
     )
 
     assert len(eligible) >= limit, (

@@ -11,9 +11,9 @@ Dependency graph (depends on a prior harvest merge):
 (Intruder eval is label-free and belongs to the harvest functional unit.)
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
-import re
 
 from spd.autointerp.config import AutointerpSlurmConfig
 from spd.autointerp.scoring.scripts import run_label_scoring

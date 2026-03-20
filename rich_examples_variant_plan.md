@@ -121,3 +121,66 @@ Prepared next subset:
 
 Logs:
 - SLURM logs live under `/mnt/polished-lake/artifacts/mechanisms/spd/slurm_logs/`
+
+## XML Sweep
+
+- date: `2026-03-19`
+- decomposition id: `s-55ea3f9b`
+- harvest subrun: `h-20260318_223737` (`activation_threshold: 0.5`)
+- subset file: `component_subsets/jose_coherent_100_seed0.txt`
+- branch commit: `f062881fb` (`Add XML rich examples variants`)
+- interpret/eval model: `google/gemini-3-flash-preview`
+- config family:
+  - `scratch/autointerp_rich_jose100_xml_angle_sloweval.yaml`
+  - `scratch/autointerp_rich_jose100_xml_brackets_raw_sloweval.yaml`
+  - `scratch/autointerp_rich_jose100_xml_brackets_sanitizedraw_sloweval.yaml`
+
+Submitted runs:
+
+- branch: `exp/rich-xml-angle-jose100`
+  - subrun: `a-20260319_193542_860425-exp-rich-xml-angle-jose100`
+  - interpret: `358989`
+  - detection: `358992`
+  - fuzzing: `358995`
+
+- branch: `exp/rich-xml-brackets-raw-jose100`
+  - subrun: `a-20260319_193542_852569-exp-rich-xml-brackets-raw-jose100`
+  - interpret: `358988`
+  - detection: `358991`
+  - fuzzing: `358994`
+
+- branch: `exp/rich-xml-brackets-sanitizedraw-jose100`
+  - subrun: `a-20260319_193542_862518-exp-rich-xml-brackets-sanitizedraw-jose100`
+  - interpret: `358990`
+  - detection: `358993`
+  - fuzzing: `358996`
+
+- branch: `exp/rich-xml-brackets-raw-sanitizedhighlight-jose100`
+  - subrun: `a-20260320_104339_513230-exp-rich-xml-brackets-raw-sanitizedhighlight-jose100`
+  - interpret: `360349`
+  - detection: `360350`
+  - fuzzing: `360351`
+
+- branch: `exp/rich-xml-brackets-raw-sanitizedhighlight-googleai-jose100`
+  - subrun: `a-20260320_111122_730384-exp-rich-xml-brackets-raw-sanitizedhighlight-googleai-jose100`
+  - interpret: `360360`
+  - detection: `360361`
+  - fuzzing: `360362`
+
+- branch: `exp/rich-xml-brackets-raw-googleai-jose100`
+  - subrun: `a-20260320_114726_213493-exp-rich-xml-brackets-raw-googleai-jose100`
+  - interpret: `360749`
+  - detection: `360752`
+  - fuzzing: `360755`
+
+- branch: `exp/rich-xml-angle-googleai-jose100`
+  - subrun: `a-20260320_114726_213495-exp-rich-xml-angle-googleai-jose100`
+  - interpret: `360750`
+  - detection: `360753`
+  - fuzzing: `360756`
+
+- branch: `exp/rich-xml-brackets-raw-sanitizedhighlight-googleai-jose100`
+  - subrun: `a-20260320_114726_213516-exp-rich-xml-brackets-raw-sanitizedhighlight-googleai-jose100`
+  - interpret: `360751`
+  - detection: `360754`
+  - fuzzing: `360757`
