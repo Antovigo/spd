@@ -12,9 +12,8 @@ config:
     label_max_words: 8
     output_pmi_min_count: 2.0
     example_format: xml
-    highlight_delimiter: brackets
+    highlight_delimiter: angle
     xml_sanitize_raw: false
-    xml_sanitize_highlighted: true
 
 time: "12:00:00"
 

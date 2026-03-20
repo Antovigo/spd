@@ -14,7 +14,6 @@ config:
     example_format: xml
     highlight_delimiter: brackets
     xml_sanitize_raw: false
-    xml_sanitize_highlighted: true
 
 time: "12:00:00"
 

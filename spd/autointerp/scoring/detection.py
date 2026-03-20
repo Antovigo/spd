@@ -224,7 +224,7 @@ async def run_detection_scoring(
     async for outcome in map_llm_calls(
         provider=provider,
         jobs=jobs,
-        max_tokens=5000,
+        max_tokens=8000,
         max_concurrent=max_concurrent,
         max_requests_per_minute=max_requests_per_minute,
         cost_limit_usd=cost_limit_usd,
