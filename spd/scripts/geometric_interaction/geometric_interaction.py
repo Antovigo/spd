@@ -264,7 +264,7 @@ def crop_to_alive(
 def _count_to_sizes(
     counts_flat: np.ndarray,
     s_min: float = 0.3,
-    s_max: float = 8.0,
+    s_max: float = 16.0,
 ) -> np.ndarray:
     """Map raw coactivation counts to marker sizes via log-scale normalisation."""
     log_counts = np.log1p(counts_flat)
@@ -324,7 +324,7 @@ def plot_scatter_per_module(
         # Hide the empty corner
         fig.add_subplot(gs[0, 1]).set_visible(False)
 
-        ax_main.scatter(gis_flat, coact_flat, alpha=0.35, s=sizes, linewidths=0)
+        ax_main.scatter(gis_flat, coact_flat, alpha=0.2, s=sizes, linewidths=0)
         ax_main.set_ylim(-0.01, 1.01)
         ax_main.set_xlabel("Geometric Interaction Strength")
         ax_main.set_ylabel("Coactivation Fraction")
