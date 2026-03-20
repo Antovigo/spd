@@ -204,22 +204,34 @@ def compute_geometric_interaction_strength(
 ) -> dict[str, Float[Tensor, "C C"]]:
     """Compute geometric interaction strength between component pairs.
 
-    GIS(i→j) = |U_i|^T |U_j| / ||U_i||^2
+    The effective output vector of component i is ``||v_i|| * u_i`` (since the input
+    activation projects onto v_i with magnitude proportional to ||v_i||, then maps
+    through u_i). We define the V-norm-scaled vectors ``w_i = ||v_i|| * |u_i|`` and
+    compute:
 
-    Measures "what fraction of component i's energy overlaps with component j's
-    output direction". Asymmetric: GIS(i→j) != GIS(j→i).
+        GIS(i→j) = w_i^T w_j / ||w_i||^2
+
+    This measures "what fraction of component i's effective output energy overlaps
+    with component j". Asymmetric: GIS(i→j) != GIS(j→i).
     """
     gis_matrices: dict[str, Float[Tensor, "C C"]] = {}
 
-    for module_name, (U, _V) in sorted(uv_by_module.items()):
+    for module_name, (U, V) in sorted(uv_by_module.items()):
+        # V is (d_in, C) — column norms give per-component V scale
+        v_norms = torch.norm(V, dim=0)  # (C,)
+
+        # Effective output vectors scaled by V norms: w_i = ||v_i|| * |u_i|
         abs_U = U.abs()  # (C, d_out)
-        norms_sq = (U * U).sum(dim=1)  # (C,) — L2 norms squared of raw U
+        w = abs_U * v_norms.unsqueeze(1)  # (C, d_out)
 
-        # |U_i|^T |U_j| for all (i, j) pairs
-        inner_products = einops.einsum(abs_U, abs_U, "C1 d, C2 d -> C1 C2")
+        # ||w_i||^2 = ||v_i||^2 * |u_i|^T |u_i|
+        w_norms_sq = (w * w).sum(dim=1)  # (C,)
 
-        # Divide each row i by ||U_i||^2
-        gis = inner_products / norms_sq.unsqueeze(1)
+        # w_i^T w_j for all pairs
+        inner_products = einops.einsum(w, w, "C1 d, C2 d -> C1 C2")
+
+        # GIS(i→j) = w_i^T w_j / ||w_i||^2
+        gis = inner_products / w_norms_sq.unsqueeze(1)
         gis = torch.nan_to_num(gis, nan=0.0)
         gis_matrices[module_name] = gis
 
