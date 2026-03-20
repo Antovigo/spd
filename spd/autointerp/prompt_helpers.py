@@ -323,11 +323,11 @@ def _cdata(text: str) -> str:
     return text.replace("]]>", "]]]]><![CDATA[>")
 
 
-def _build_xml_example(raw_text: str, highlighted_text: str) -> str:
+def _build_xml_example(raw_text: str, annotated_text: str) -> str:
     return (
         "<example>\n"
         f"<raw><![CDATA[{_cdata(raw_text)}]]></raw>\n"
-        f"<highlighted><![CDATA[{_cdata(highlighted_text)}]]></highlighted>\n"
+        f"<annotated><![CDATA[{_cdata(annotated_text)}]]></annotated>\n"
         "</example>"
     )
 
@@ -369,7 +369,7 @@ def build_annotated_examples(
             items.append(
                 _build_xml_example(
                     raw_text="".join(raw_spans),
-                    highlighted_text=_delimit_annotated(
+                    annotated_text=_delimit_annotated(
                         spans=highlighted_spans,
                         token_ids=ex.token_ids,
                         firings=firings,
@@ -400,3 +400,58 @@ def build_annotated_examples(
     if items:
         md.numbered(items)
     return md
+
+
+def build_separated_examples(
+    component: ComponentData,
+    app_tok: AppTokenizer,
+    max_examples: int,
+    rendering: ExampleRenderingConfig,
+) -> tuple[Md, Md]:
+    """Build raw and annotated example lists separately (not interleaved).
+
+    Returns (raw_md, annotated_md) where each contains a numbered list.
+    """
+    assert rendering.format == "xml", "separated layout only supported for xml format"
+    assert rendering.highlight_delimiter != "legacy"
+
+    raw_items: list[str] = []
+    annotated_items: list[str] = []
+    for ex in component.activation_examples[:max_examples]:
+        if not any(ex.firings):
+            continue
+        act_keys = list(ex.activations.keys())
+        per_token_acts = [
+            {k: ex.activations[k][i] for k in act_keys} for i in range(len(ex.token_ids))
+        ]
+        raw_spans = (
+            app_tok.get_spans(ex.token_ids)
+            if rendering.xml_sanitize_raw
+            else app_tok.get_raw_spans(ex.token_ids)
+        )
+        annotated_spans = (
+            app_tok.get_spans(ex.token_ids)
+            if rendering.xml_sanitize_highlighted
+            else app_tok.get_raw_spans(ex.token_ids)
+        )
+        raw_items.append("".join(raw_spans))
+        annotated_items.append(
+            _delimit_annotated(
+                spans=annotated_spans,
+                token_ids=ex.token_ids,
+                firings=ex.firings,
+                per_token_activations=per_token_acts,
+                app_tok=app_tok,
+                delimiter_style=rendering.highlight_delimiter,
+                annotation_style=rendering.annotation_style,
+                annotation_inside=True,
+                sanitize_fallback=rendering.xml_sanitize_highlighted,
+            )
+        )
+
+    raw_md = Md()
+    annotated_md = Md()
+    if raw_items:
+        raw_md.numbered(raw_items)
+        annotated_md.numbered(annotated_items)
+    return raw_md, annotated_md

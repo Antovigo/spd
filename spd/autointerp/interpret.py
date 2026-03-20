@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import RichExamplesConfig, StrategyConfig
+from spd.autointerp.config import CanonConfig, RichExamplesConfig, StrategyConfig
 from spd.autointerp.db import InterpDB
 from spd.autointerp.llm_api import (
     LLMError,
@@ -125,19 +125,27 @@ def run_interpret(
 
             schema = INTERPRETATION_SCHEMA
 
+            raw_threshold = harvest_config.get("activation_threshold", 0.0)
+            assert isinstance(raw_threshold, int | float)
+            activation_threshold = float(raw_threshold)
+
             def build_jobs() -> Iterable[LLMJob]:
                 for key in remaining_keys:
                     component = harvest.get_component(key)
                     assert component is not None, f"Component {key} not found in harvest"
                     input_stats: TokenPRLift | None = None
                     output_stats: TokenPRLift | None = None
-                    if isinstance(template_strategy, RichExamplesConfig):
+                    if isinstance(template_strategy, RichExamplesConfig | CanonConfig):
                         output_stats = get_output_token_stats(
                             token_stats,
                             key,
                             app_tok,
                             top_k=20,
-                            pmi_min_count=template_strategy.output_pmi_min_count,
+                            pmi_min_count=(
+                                template_strategy.output_pmi_min_count
+                                if isinstance(template_strategy, RichExamplesConfig)
+                                else 2.0
+                            ),
                         )
                         assert output_stats is not None
                     else:
@@ -153,6 +161,7 @@ def run_interpret(
                         input_token_stats=input_stats,
                         output_token_stats=output_stats,
                         context_tokens_per_side=context_tokens_per_side,
+                        activation_threshold=activation_threshold,
                     )
                     yield LLMJob(prompt=prompt, key=key)
 

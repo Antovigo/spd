@@ -88,7 +88,19 @@ class RichExamplesConfig(BaseConfig):
     xml_sanitize_highlighted: bool = False
 
 
-StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig
+class CanonConfig(BaseConfig):
+    """Canon strategy: detailed SPD explanation, sign convention, CI-vs-act guidance,
+    output PMI, and XML dual-view examples.
+
+    Uses a fixed XML rendering (brackets, activation annotations, no sanitization).
+    """
+
+    type: Literal["canon"] = "canon"
+    max_examples: int = 30
+    label_max_words: int = 8
+
+
+StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig | CanonConfig
 
 
 def resolve_example_rendering(strategy: StrategyConfig) -> ExampleRenderingConfig:
@@ -106,6 +118,14 @@ def resolve_example_rendering(strategy: StrategyConfig) -> ExampleRenderingConfi
                 annotation_style="activation",
                 xml_sanitize_raw=strategy.xml_sanitize_raw,
                 xml_sanitize_highlighted=strategy.xml_sanitize_highlighted,
+            )
+        case CanonConfig():
+            return ExampleRenderingConfig(
+                format="xml",
+                highlight_delimiter="brackets",
+                annotation_style="activation",
+                xml_sanitize_raw=False,
+                xml_sanitize_highlighted=False,
             )
 
 
