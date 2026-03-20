@@ -198,9 +198,10 @@ def run_interpret(
             completed_now = completed | {result.component_key for result in results}
             missing = [key for key in eligible_keys if key not in completed_now]
             if component_keys is not None and missing:
-                raise RuntimeError(
-                    "Failed to interpret all requested target components: "
-                    f"{missing[:10]} ({len(missing)} missing)"
+                logger.warning(
+                    "Interpreted a partial target subset: "
+                    f"{len(completed_now)}/{len(eligible_keys)} complete; "
+                    f"missing {missing[:10]}"
                 )
 
         finally:

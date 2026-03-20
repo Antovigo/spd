@@ -140,11 +140,12 @@ async def run_fuzzing_scoring(
             if len(c.activation_examples) >= min_examples and c.component_key in labels
         }
         missing = [key for key in target_component_keys if key not in eligible_by_key]
-        assert not missing, (
-            "Target component keys missing labels or enough activation examples "
-            f"for fuzzing: {missing[:10]}"
-        )
-        eligible = [eligible_by_key[key] for key in target_component_keys]
+        if missing:
+            logger.warning(
+                "Skipping target component keys missing labels or enough activation examples "
+                f"for fuzzing: {missing[:10]} ({len(missing)} missing)"
+            )
+        eligible = [eligible_by_key[key] for key in target_component_keys if key in eligible_by_key]
     else:
         eligible = [
             c

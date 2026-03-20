@@ -73,6 +73,7 @@ class GoogleAILLMConfig(BaseConfig):
 
     type: Literal["google_ai"] = "google_ai"
     model: str = "gemini-3-flash-preview"
+    thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
 
 
 LLMConfig = Annotated[
@@ -431,8 +432,14 @@ class OpenAIProvider(LLMProvider):
 class GoogleAIProvider(LLMProvider):
     """Gemini API via Generative Language REST (Google AI Studio key)."""
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        thinking_level: Literal["minimal", "low", "medium", "high"] | None = None,
+    ):
         self.model = model
+        self._thinking_level = thinking_level
         self._client = httpx.AsyncClient(
             base_url="https://generativelanguage.googleapis.com/v1beta/",
             headers={"x-goog-api-key": api_key},
@@ -454,6 +461,10 @@ class GoogleAIProvider(LLMProvider):
                 "responseJsonSchema": _gemini_response_json_schema(response_schema),
             },
         }
+        if self._thinking_level is not None:
+            body["generationConfig"]["thinkingConfig"] = {
+                "thinkingLevel": self._thinking_level,
+            }
 
         path = f"models/{self.model}:generateContent"
         try:
@@ -529,4 +540,8 @@ def create_provider(
             return OpenAIProvider(api_key, config.model, config.reasoning_effort)
         case GoogleAILLMConfig():
             api_key = _get_api_key("google_ai")
-            return GoogleAIProvider(api_key, config.model)
+            return GoogleAIProvider(
+                api_key,
+                config.model,
+                thinking_level=config.thinking_level,
+            )

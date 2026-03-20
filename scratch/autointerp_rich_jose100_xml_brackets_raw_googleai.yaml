@@ -2,6 +2,7 @@ config:
   llm:
     type: google_ai
     model: gemini-3-flash-preview
+    thinking_level: minimal
   component_keys_path: component_subsets/jose_coherent_100_seed0.txt
   max_requests_per_minute: 2400
   max_concurrent: 256
@@ -21,6 +22,7 @@ evals:
   llm:
     type: google_ai
     model: gemini-3-flash-preview
+    thinking_level: minimal
   component_keys_path: component_subsets/jose_coherent_100_seed0.txt
   seed: 0
   max_requests_per_minute: 1200
