@@ -306,9 +306,11 @@ def plot_scatter_per_module(
         coact = crop_to_alive(coactivation_fractions[module_name], alive_inds)
         raw_counts = crop_to_alive(coactivation_counts[module_name], alive_inds)
 
-        gis_flat = gis.flatten().cpu().numpy()
-        coact_flat = coact.flatten().cpu().numpy()
-        counts_flat = raw_counts.flatten().cpu().numpy()
+        # Exclude diagonal (self-pairs)
+        off_diag = ~torch.eye(n_alive, dtype=torch.bool)
+        gis_flat = gis[off_diag].cpu().numpy()
+        coact_flat = coact[off_diag].cpu().numpy()
+        counts_flat = raw_counts[off_diag].cpu().numpy()
         sizes = _count_to_sizes(counts_flat)
 
         # Layout: main scatter + top histogram + right histogram
@@ -328,6 +330,7 @@ def plot_scatter_per_module(
         ax_main.set_ylabel("Coactivation Fraction")
 
         ax_hist_x.hist(gis_flat, bins=80, color="#0173B2", alpha=0.7, edgecolor="none")
+        ax_hist_x.set_yscale("log")
         ax_hist_x.tick_params(labelbottom=False)
         ax_hist_x.set_ylabel("Count")
         ax_hist_x.set_title(f"{module_name}  ({n_alive} alive components)")
@@ -340,6 +343,7 @@ def plot_scatter_per_module(
             alpha=0.7,
             edgecolor="none",
         )
+        ax_hist_y.set_xscale("log")
         ax_hist_y.tick_params(labelleft=False)
         ax_hist_y.set_xlabel("Count")
 
