@@ -12,16 +12,19 @@ This script quantifies that overlap (Geometric Interaction Strength) and compare
 
 ### Geometric Interaction Strength (GIS)
 
+The effective output vector of component `i` is `||v_i|| * u_i` — the input activation projects onto `v_i` with magnitude proportional to `||v_i||`, then maps through `u_i`. We define V-norm-scaled vectors `w_i = ||v_i|| * |u_i|` and compute:
+
 ```
-GIS(i → j) = |U_i|^T |U_j| / ||U_i||^2
+GIS(i → j) = w_i^T w_j / ||w_i||^2
 ```
 
-- `|U_i|` is the element-wise absolute value of U_i (shape `[d_out]`)
-- `||U_i||^2` is the squared L2 norm of the raw (not abs) U_i
+where `w_i = ||v_i|| * |u_i|`.
+
+- `|u_i|` is the element-wise absolute value of U_i (shape `[d_out]`)
+- `||v_i||` is the L2 norm of column `i` of V — this scales u_i to reflect the component's actual input-side magnitude
 - The absolute value is taken before the inner product because we care about overlap in magnitude, not sign
-- **Asymmetric**: GIS(i→j) ≠ GIS(j→i) in general. GIS(i→j) measures "what fraction of component i's energy overlaps with component j". A large component i will have high GIS toward many small components, but not vice versa.
-- Range: [0, ≥1] — can exceed 1 because `|U_i|^T|U_j|` uses absolute values while `||U_i||^2` uses raw values, so `|U_i|^T|U_i| ≥ ||U_i||^2`.
-- Diagonal is always ≥ 1: `GIS(i→i) = |U_i|^T|U_i| / ||U_i||^2 ≥ 1`
+- **Asymmetric**: GIS(i→j) ≠ GIS(j→i) in general. GIS(i→j) measures "what fraction of component i's effective output energy overlaps with component j". A component with large V-norm will have high GIS toward many smaller components, but not vice versa.
+- Range: [0, ≥1] — can exceed 1 because the inner product uses absolute values while the norm uses raw values. Components with very different V-norms can produce large GIS values.
 
 ### Coactivation Fraction
 
