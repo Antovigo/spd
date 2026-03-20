@@ -24,14 +24,14 @@ At each token position, each component has 2 "activation"s, which are different 
 1. A Causal Importance value: How causally important is it that this rank-1 subcomponent of this weight matrix is present for this token. 
 2. An "Inner Activation" value: With no ablations, what is the inner activation of this component, i.e. what is the scale of `x @ V` where x is the input vector
 
-While these 2 values - the causal importance and the inner activation - are correlated, they are meaningfully different. A large inner activation can mean, for example, the subcomponent is incidentally acting on a "dead" region of activation space # TODO i don't love that last sentence
+While these 2 values - the causal importance and the inner activation - are correlated, they are meaningfully different. A large inner activation without high CI means the input happens to align with the component's read direction, but the component's contribution isn't needed for this token's output.
 
 A component is said to "fire" when its causal importance exceeds a threshold - ideally, we would use 0.0, but practically we use something like 0.1 or 0.5.
 
 **Sign convention:** An important thing to understand about **inner activations** is that there is no inherent meaning to their sign - negating both uᵢ and vᵢ produces the same subcomponent. This means that, across examples, sign is not an important piece of information. However, sign can be meaningful *within* a component's examples: positive and negative activations produce opposite contributions to the output, and may correspond to qualitatively distinct input patterns (e.g. negative activations on one token class, positive on another). Check whether examples cluster by activation sign, whether they seem to have 2 regimes, etc. but avoid making conclusions about a specific sign. A broad positive inner activation does not signify excitation, and negative does not signify suppression, for example. Treat sign roughly how you would in the context of an embedding vector - while a positive or negative value at index x may have a specific semantic meaning, there is no global meaning.
 
 ### Context
-The component you will be labeling today comes from a decomposition of a 4-block transformer trained on The Pile. Specifically, it is part of the GLU up-projection matrix in the 2nd of 4 blocks. It has a firing rate of 3.41% (fires ~1 in 29 tokens). The target has XX parameters, keep the expected intelligence of the model in mind - it is not a smart model.
+The component you will be labeling today comes from a decomposition of a 4-block transformer trained on The Pile. Specifically, it is part of the GLU up-projection matrix in the 2nd of 4 blocks. It has a firing rate of 3.41% (fires ~1 in 29 tokens). The target model has ~42M parameters — keep its expected capability in mind, it is not a smart model.
 
 ## Evidence:
 
@@ -54,9 +54,9 @@ The following tokens are the top tokens by PMI (pointwise mutual information) be
 
 ### Activating examples
 
-The following **activating examples** are sampled uniformly at random from all positions in the dataset where the component fires (CI above threshold). For each sampled activation location, we extract both a leading and trailing window of tokens centered on the firing position, with up to {MAKE THIS CORRECT} tokens of context on each side. Windows are truncated at sequence boundaries — so a firing at the beginning of a training sequence will have little or no left context. This truncation is itself evidence (e.g. a component that consistently fires near the start of sequences). we include annotations for **all** firing positions in the window - not just the firing which was sampled to produce the window, however we don't include inner activations for all tokens - this would be too noisy - all tokens have at least epsilon inner activation on almost all components.
+The following **activating examples** are sampled uniformly at random from all positions in the dataset where the component fires (CI above threshold). For each sampled activation location, we extract both a leading and trailing window of tokens centered on the firing position, with up to 20 tokens of context on each side. Windows are truncated at sequence boundaries — so a firing at the beginning of a training sequence will have little or no left context. This truncation is itself evidence (e.g. a component that consistently fires near the start of sequences). we include annotations for **all** firing positions in the window - not just the firing which was sampled to produce the window, however we don't include inner activations for all tokens - this would be too noisy - all tokens have at least epsilon inner activation on almost all components.
 
-The dataset is formatted in the Pythia fashion: variable length documents, joined with {INSERT_ACTUAL_TOKENIZER_EOT_SPAN}<|end_of_text|> tokens, then hard sliced into {ref config}512-token sequences. This means that <|end_of_text|> tokens appear inside training sequences, not necessarily at the actual start of the sequence. If you see these in examples, they are literal tokens the model processed, not formatting artifacts.
+The dataset is formatted in the Pythia fashion: variable length documents, joined with `<|endoftext|>` tokens, then hard sliced into 512-token sequences. This means that <|end_of_text|> tokens appear inside training sequences, not necessarily at the actual start of the sequence. If you see these in examples, they are literal tokens the model processed, not formatting artifacts.
 
 Each example is shown as an XML block with two views:
 - `<raw>`: the literal token text of the window
@@ -64,7 +64,7 @@ Each example is shown as an XML block with two views:
 
 **Annotation legend:**
 - **ci** (causal importance): 0–1. How essential this component is at this position.
-- **act** (inner activation): inner product with the component's read direction. See the sign convention note above — within one component, sign separates distinct patterns. These values are normalised to be within (0, 1), but this is just a presentation decision. inner activation magnitude has a similar invariance to sign - intra-component inner activation value difference is meaningful, but inter-component differences aren't
+- **act** (inner activation): inner product with the component's read direction. See the sign convention note above — within one component, sign separates distinct patterns. These values are normalised so that typical magnitudes fall roughly in (-1, 1), but this is just a presentation decision. Inner activation magnitude has a similar invariance to sign — intra-component inner activation value differences are meaningful, but inter-component differences aren't.
 
 1.
 <example>
