@@ -11,7 +11,7 @@ Meta notes: in the team we call "inner activation" "component activation" but I'
 
 Below you will be presented with data about a component of a neural network as isolated by a brand new Mechanistic Interpretability technique "Stochastic Parameter Decomposition". You will be tasked with describing the component in terms of its activation patterns on various text examples from a pretraining dataset, and other supporting evidence.
 
-In Stochastic Parameter Decomposition, each weight matrix of a network is decomposed into C rank-1 parts, called "subcomponents", where C is usually greater than the rank of the weight matrix. These are parameterised as U • V, where U and V are rank-1 vectors of dimensions `d_in` and `d_out`. Thus, they multiply to a rank-1 matrix of the shape of the original matrix, and can be thought to represent a one-dimensional slice of the computation the weight matrix does.
+In Stochastic Parameter Decomposition, each weight matrix of a network is decomposed into C rank-1 parts, called "subcomponents", where C is usually greater than the rank of the weight matrix. These are parameterised as U • V, where V is the "read direction" (dimension `d_in` — what input patterns the component responds to) and U is the "write direction" (dimension `d_out` — what the component contributes to the output). They multiply to a rank-1 matrix of the shape of the original matrix, and can be thought to represent a one-dimensional slice of the computation the weight matrix does.
 
 These subcomponents are learned in an unsupervised manner under 3 main losses:
 - Faithfulness: the C rank-1 subcomponent matrices must sum to the original weight matrix - this should be a direct factorisation of the original weight matrix.
@@ -26,7 +26,7 @@ At each token position, each component has 2 "activation"s, which are different 
 
 While these 2 values - the causal importance and the inner activation - are correlated, they are meaningfully different. A large inner activation without high CI means the input happens to align with the component's read direction, but the component's contribution isn't needed for this token's output.
 
-A component is said to "fire" when its causal importance exceeds a threshold - ideally, we would use 0.0, but practically we use something like 0.1 or 0.5.
+A component is said to "fire" when its causal importance exceeds a threshold. The data below uses a CI threshold of 0.0, so even very weakly important positions are included as firings.
 
 **Sign convention:** An important thing to understand about **inner activations** is that there is no inherent meaning to their sign - negating both uᵢ and vᵢ produces the same subcomponent. This means that, across examples, sign is not an important piece of information. However, sign can be meaningful *within* a component's examples: positive and negative activations produce opposite contributions to the output, and may correspond to qualitatively distinct input patterns (e.g. negative activations on one token class, positive on another). Check whether examples cluster by activation sign, whether they seem to have 2 regimes, etc. but avoid making conclusions about a specific sign. A broad positive inner activation does not signify excitation, and negative does not signify suppression, for example. Treat sign roughly how you would in the context of an embedding vector - while a positive or negative value at index x may have a specific semantic meaning, there is no global meaning.
 
@@ -37,9 +37,9 @@ The component you will be labeling today comes from a decomposition of a 4-block
 
 ### Output token statistics
 
-The following tokens are the top tokens by PMI (pointwise mutual information) between component causal importance and output logit mass. A positive PMI value means that when the component fires, the given logit tends to have greater-than-base-rate probability. The value is given in nats: 0 = no association, 1 ≈ 3×, 2 ≈ 7×, 3 ≈ 20× etc.
+At each position where the component fires, we look at the model's next-token prediction distribution. The following tokens have the highest PMI (pointwise mutual information) between the component firing and the model assigning high probability to that token as its next-token prediction. A positive PMI value means this token is predicted more often than its base rate when the component fires. The value is in nats: 0 = no association, 1 ≈ 3× base rate, 2 ≈ 7×, 3 ≈ 20×.
 
-**Top tokens by PMI between prediction logits and component CI**
+**Top output tokens by PMI:**
 - `' the'`: 2.31
 - `' a'`: 1.89
 - `' an'`: 1.74
@@ -56,7 +56,7 @@ The following tokens are the top tokens by PMI (pointwise mutual information) be
 
 The following **activating examples** are sampled uniformly at random from all positions in the dataset where the component fires (CI above threshold). For each sampled activation location, we extract both a leading and trailing window of tokens centered on the firing position, with up to 20 tokens of context on each side. Windows are truncated at sequence boundaries — so a firing at the beginning of a training sequence will have little or no left context. This truncation is itself evidence (e.g. a component that consistently fires near the start of sequences). we include annotations for **all** firing positions in the window - not just the firing which was sampled to produce the window, however we don't include inner activations for all tokens - this would be too noisy - all tokens have at least epsilon inner activation on almost all components.
 
-The dataset is formatted in the Pythia fashion: variable length documents, joined with `<|endoftext|>` tokens, then hard sliced into 512-token sequences. This means that `<|endoftext|>` tokens appear inside training sequences, not necessarily at the actual start of the sequence. If you see these in examples, they are literal tokens the model processed, not formatting artifacts.
+The training data consists of variable-length documents concatenated with `<|endoftext|>` separator tokens between them, then sliced into fixed 512-token sequences. This means `<|endoftext|>` tokens can appear anywhere within a sequence (not just at the start), and a single sequence may contain parts of multiple documents. If you see `<|endoftext|>` in examples, it is a literal token the model processed, not a formatting artifact.
 
 Each example is shown as an XML block with two views:
 - `<raw>`: the literal token text of the window
