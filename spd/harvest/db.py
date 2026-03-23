@@ -43,11 +43,6 @@ CREATE TABLE IF NOT EXISTS scores (
 """
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return any(row[1] == column for row in cols)
-
-
 def _serialize_component(
     comp: ComponentData,
 ) -> tuple[str, str, int, float, int, bytes, bytes, bytes, bytes]:
@@ -180,22 +175,10 @@ class HarvestDB:
         return [row["component_key"] for row in rows]
 
     def get_eligible_component_keys(self, min_examples: int) -> list[str]:
-        """Return component keys with at least `min_examples` activation examples.
-
-        Uses n_activation_examples integer column if available (fast, new DBs).
-        Falls back to json_array_length for legacy DBs (slower but no migration needed).
-        """
-        if _has_column(self._conn, "components", "n_activation_examples"):
-            rows = self._conn.execute(
-                "SELECT component_key FROM components WHERE n_activation_examples >= ?",
-                (min_examples,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT component_key FROM components "
-                "WHERE json_array_length(activation_examples) >= ?",
-                (min_examples,),
-            ).fetchall()
+        rows = self._conn.execute(
+            "SELECT component_key FROM components WHERE n_activation_examples >= ?",
+            (min_examples,),
+        ).fetchall()
         return [row["component_key"] for row in rows]
 
     # -- Scores (e.g. intruder eval) ------------------------------------------
