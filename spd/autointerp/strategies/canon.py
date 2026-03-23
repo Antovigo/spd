@@ -30,6 +30,7 @@ def format_prompt(
     component: ComponentData,
     model_metadata: ModelMetadata,
     app_tok: AppTokenizer,
+    input_token_stats: TokenPRLift | None,
     output_token_stats: TokenPRLift | None,
     context_tokens_per_side: int,
     activation_threshold: float,
@@ -46,8 +47,6 @@ def format_prompt(
     dataset_desc = DATASET_DESCRIPTIONS.get(
         model_metadata.dataset_name, model_metadata.dataset_name
     )
-    window_size = 2 * context_tokens_per_side + 1
-
     md = Md()
 
     # --- SPD method explanation ---
@@ -55,16 +54,14 @@ def format_prompt(
     md.p(
         "Below you will be presented with data about a component of a neural network as "
         'isolated by a Mechanistic Interpretability technique called "Stochastic Parameter '
-        'Decomposition". You will be tasked with describing the component in terms of its '
-        "activation patterns on various text examples from a pretraining dataset, and other "
-        "supporting evidence."
+        'Decomposition". You will be tasked with describing what the component does based on '
+        "the evidence provided below."
     )
     md.p(
         "In Stochastic Parameter Decomposition, each weight matrix of a network is decomposed "
         'into C rank-1 parts, called "subcomponents", where C is usually greater than the rank '
         "of the weight matrix. These are parameterised as U \u2022 V, where V is the "
-        '"read direction" (dimension `d_in` \u2014 what input patterns the component responds '
-        'to) and U is the "write direction" (dimension `d_out` \u2014 what the component '
+        '"read direction" (dimension `d_in`) and U is the "write direction" (dimension `d_out` \u2014 what the component '
         "contributes to the output). They multiply to a rank-1 matrix of the shape of the "
         "original matrix, and can be thought to represent a one-dimensional slice of the "
         "computation the weight matrix does."
@@ -106,8 +103,9 @@ def format_prompt(
         "These two values are correlated but meaningfully different. A large inner activation "
         "with low CI means the input happens to align with the component's read direction, but "
         "the component's contribution isn't needed at this token. **When CI and act diverge, "
-        "trust CI.** A position with high CI and low act is genuinely important; a position "
-        "with low CI and high act is incidental. When building your interpretation, weight "
+        "trust CI.** A position with high CI and low act can be genuinely important; a position "
+        "with low CI and high act suggests that the component would produce an output here but "
+        "that it's not necessary. When building your interpretation, weight "
         "high-CI examples heavily and treat low-CI positions as background noise, even if their "
         "act values are large."
     )
@@ -142,30 +140,55 @@ def format_prompt(
         f"(fires {rate_str})."
     )
 
-    # --- Output PMI ---
+    # --- Output token statistics ---
     md.h(2, "Evidence:")
-    md.h(3, "Output token statistics")
+    md.h(3, "Output tokens (what the model produces when this component fires)")
     md.p(
         "At each position where the component fires, we look at the model's next-token "
-        "prediction distribution. The following tokens have the highest PMI (pointwise mutual "
-        "information) between the component firing and the model assigning high probability to "
-        "that token as its next-token prediction. A positive PMI value means this token is "
-        "predicted more often than its base rate when the component fires. The value is in nats "
-        "(natural log): 0 = no association, 1 \u2248 3\u00d7 base rate, 2 \u2248 7\u00d7, "
-        "3 \u2248 20\u00d7."
+        "prediction distribution."
     )
-    if output_token_stats is not None and output_token_stats.top_pmi:
-        md.labeled_list(
-            "**Top output tokens by PMI:**",
-            [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in output_token_stats.top_pmi[:10]],
-        )
+    if output_token_stats is not None:
+        if output_token_stats.top_recall:
+            md.labeled_list(
+                "**Most common output tokens** (when this component fires, what fraction of the "
+                "model's next-token probability mass goes to token X):",
+                [
+                    f"`{repr(tok)}`: {recall * 100:.0f}%"
+                    for tok, recall in output_token_stats.top_recall[:8]
+                ],
+            )
+        if output_token_stats.top_pmi:
+            md.labeled_list(
+                "**Output PMI** (same data normalized by base rate \u2014 how much *more* likely "
+                "than usual; nats: 0 = no association, "
+                "1 \u2248 3\u00d7, 2 \u2248 7\u00d7, 3 \u2248 20\u00d7):",
+                [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in output_token_stats.top_pmi[:10]],
+            )
+
+    # --- Input token statistics ---
+    if input_token_stats is not None:
+        md.h(3, "Input tokens (what causes this component to fire)")
+        if input_token_stats.top_recall:
+            md.labeled_list(
+                "**Most common input tokens** (when the component fires, what fraction of the "
+                "time is the current token X):",
+                [
+                    f"`{repr(tok)}`: {recall * 100:.0f}%"
+                    for tok, recall in input_token_stats.top_recall[:8]
+                ],
+            )
+        if input_token_stats.top_pmi:
+            md.labeled_list(
+                "**Input PMI** (same data normalized by base rate):",
+                [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in input_token_stats.top_pmi[:10]],
+            )
 
     # --- Activating examples ---
     md.h(3, "Activating examples")
     md.p(
         "The following **activating examples** are sampled uniformly at random from all "
         "positions in the dataset where the component fires (CI above threshold). For each "
-        f"sampled activation location, we extract a {window_size}-token window centered on the "
+        "sampled activation location, we extract a window centered on the "
         f"firing position, with up to {context_tokens_per_side} tokens of context on each "
         "side. Windows are truncated at sequence boundaries \u2014 so a firing at the beginning "
         "of a training sequence will have little or no left context. This truncation is itself "
@@ -201,8 +224,7 @@ def format_prompt(
         [
             "**ci** (causal importance): 0\u20131. How essential this component is at this "
             "position. This is the primary signal \u2014 high CI means the component genuinely "
-            "matters here. Low CI (e.g. <0.05) means the component is barely involved; treat "
-            "those positions as background context, not as evidence of what the component does.",
+            "matters here.",
             "**act** (inner activation): alignment of the input with the component's read "
             "direction. See the sign convention note above \u2014 relative sign differences within "
             "a component are meaningful.",
@@ -222,10 +244,16 @@ def format_prompt(
     md.h(2, "Task")
     md.p(
         f"Based on all the above context and evidence, please give a label of "
-        f"{config.label_max_words} words or fewer for this component. The label should read "
-        "like a short description of the job this component does in the network. Please also "
-        "provide a short summary of your reasoning. Use all the evidence: activation examples, "
-        "token statistics, and activation values. Be epistemically honest \u2014 express "
+        f"{config.label_max_words} words or fewer for this component. The label should "
+        "describe the most salient aspect of this component's behavior. Different components "
+        "are best described differently — some by what input patterns they respond to, some by "
+        "what output tokens they promote, some by what contexts they appear in, some by what "
+        "they *don't* fire on. Lead with whatever is most distinctive and informative for this "
+        "particular component."
+    )
+    md.p(
+        "Please also provide a short summary of your reasoning. "
+        "Be epistemically honest \u2014 express "
         "uncertainty when the evidence is weak, ambiguous, or mixed. Lowercase only."
     )
 

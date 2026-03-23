@@ -84,6 +84,7 @@ def format_prompt(
                 component,
                 model_metadata,
                 app_tok,
+                input_token_stats,
                 output_token_stats,
                 context_tokens_per_side,
                 activation_threshold,

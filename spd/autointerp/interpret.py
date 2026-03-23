@@ -148,6 +148,8 @@ def run_interpret(
                             ),
                         )
                         assert output_stats is not None
+                        if isinstance(template_strategy, CanonConfig):
+                            input_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
                     else:
                         input_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
                         output_stats = get_output_token_stats(token_stats, key, app_tok, top_k=50)
