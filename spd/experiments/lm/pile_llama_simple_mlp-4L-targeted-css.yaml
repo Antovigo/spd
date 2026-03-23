@@ -140,7 +140,7 @@ task_config:
   is_tokenized: true
   streaming: false
   train_data_split: train
-  eval_data_split: val
+  eval_data_split: validation
 
 # --- Targeted Decomposition (nontarget data: Pile) ---
 nontarget_task_config:
