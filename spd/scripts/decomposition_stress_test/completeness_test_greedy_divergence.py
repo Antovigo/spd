@@ -19,6 +19,7 @@ import argparse
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 from transformers import AutoTokenizer
@@ -145,18 +146,19 @@ def _per_element_loss_divergence(
     original_expanded = original_output.expand_as(out_no_delta)
     match loss_type:
         case "mse":
-            div_no = ((out_no_delta - original_expanded) ** 2).flatten(1).mean(1)
-            div_with = ((out_with_delta - original_expanded) ** 2).flatten(1).mean(1)
+            div_no_delta = ((out_no_delta - original_expanded) ** 2).flatten(1).mean(1)
+            div_with_delta = ((out_with_delta - original_expanded) ** 2).flatten(1).mean(1)
         case "kl":
-            kl_no = calc_kl_divergence_lm(pred=out_no_delta, target=original_expanded, reduce=False)
-            div_no = kl_no.reshape(n_batch, -1).mean(1)
-            kl_with = calc_kl_divergence_lm(
-                pred=out_with_delta, target=original_expanded, reduce=False
-            )
-            div_with = kl_with.reshape(n_batch, -1).mean(1)
+            p_orig = torch.softmax(original_expanded, dim=-1)
+            log_q_no_delta = torch.log_softmax(out_no_delta, dim=-1)
+            kl_no_delta = F.kl_div(log_q_no_delta, p_orig, reduction="none").sum(dim=-1)
+            div_no_delta = kl_no_delta.reshape(n_batch, -1).mean(1)
+            log_q_with_delta = torch.log_softmax(out_with_delta, dim=-1)
+            kl_with_delta = F.kl_div(log_q_with_delta, p_orig, reduction="none").sum(dim=-1)
+            div_with_delta = kl_with_delta.reshape(n_batch, -1).mean(1)
     if reverse:
-        return torch.log(div_with + eps) - torch.log(div_no + eps)
-    return torch.log(div_no + eps) - torch.log(div_with + eps)
+        return torch.log(div_with_delta + eps) - torch.log(div_no_delta + eps)
+    return torch.log(div_no_delta + eps) - torch.log(div_with_delta + eps)
 
 
 def run_greedy(
@@ -245,15 +247,15 @@ def run_greedy(
             batched_input = input_tensor.expand(n_coords, *input_tensor.shape[1:])
 
             with torch.no_grad():
-                out_no = model(batched_input, mask_infos=make_mask_infos(mask_no_delta))
-                out_with = model(
+                out_no_delta = model(batched_input, mask_infos=make_mask_infos(mask_no_delta))
+                out_with_delta = model(
                     batched_input,
                     mask_infos=make_mask_infos(mask_with_delta, weight_deltas_and_masks=wdam),
                 )
 
             per_coord_loss = _per_element_loss_divergence(
-                out_no,
-                out_with,
+                out_no_delta,
+                out_with_delta,
                 original_output,
                 loss_type,
                 reverse,
@@ -374,12 +376,8 @@ def print_divergences(
             print(f"  MSE(original, no_delta)   = {mse_no_delta:.6f}")
             print(f"  MSE(original, with_delta) = {mse_with_delta:.6f}")
         case "kl":
-            kl_no_delta = calc_kl_divergence_lm(
-                pred=out_no_delta, target=original, reduce=True
-            ).item()
-            kl_with_delta = calc_kl_divergence_lm(
-                pred=out_with_delta, target=original, reduce=True
-            ).item()
+            kl_no_delta = calc_kl_divergence_lm(pred=out_no_delta, target=original).item()
+            kl_with_delta = calc_kl_divergence_lm(pred=out_with_delta, target=original).item()
             print(f"  KL(original, no_delta)    = {kl_no_delta:.6f}")
             print(f"  KL(original, with_delta)  = {kl_with_delta:.6f}")
 
