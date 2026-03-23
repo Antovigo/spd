@@ -137,7 +137,7 @@ def run_graph_interp(
         get_related: GetRelated,
         save_label: Callable[[LabelResult], None],
         pass_name: Literal["output", "input"],
-        get_token_stats: Callable[[str], TokenPRLift | None],
+        get_token_stats: Callable[[str], TokenPRLift],
         make_prompt: MakePrompt,
     ) -> Step:
         async def process(
@@ -149,7 +149,6 @@ def run_graph_interp(
                     component = harvest.get_component(key)
                     assert component is not None, f"Component {key} not found in harvest DB"
                     stats = get_token_stats(key)
-                    assert stats is not None, f"No {pass_name} token stats for {key}"
 
                     related = get_related(key, labels_so_far)
                     db.save_prompt_edges(
@@ -263,11 +262,15 @@ def run_graph_interp(
     assert isinstance(raw_ctx, int)
     context_tokens_per_side = raw_ctx
 
-    def _get_output_stats(key: str) -> TokenPRLift | None:
-        return get_output_token_stats(token_stats, key, app_tok, top_k=20, pmi_min_count=2.0)
+    def _get_output_stats(key: str) -> TokenPRLift:
+        result = get_output_token_stats(token_stats, key, app_tok, top_k=20, pmi_min_count=2.0)
+        assert result is not None, f"No output token stats for {key}"
+        return result
 
-    def _get_input_stats(key: str) -> TokenPRLift | None:
-        return get_input_token_stats(token_stats, key, app_tok, top_k=20)
+    def _get_input_stats(key: str) -> TokenPRLift:
+        result = get_input_token_stats(token_stats, key, app_tok, top_k=20)
+        assert result is not None, f"No input token stats for {key}"
+        return result
 
     def _output_prompt(
         component: ComponentData,

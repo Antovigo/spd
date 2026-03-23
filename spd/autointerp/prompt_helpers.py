@@ -4,6 +4,7 @@ Pure functions for formatting component data into LLM prompt sections.
 """
 
 import re
+from typing import Literal
 
 from spd.app.backend.app_tokenizer import AppTokenizer
 from spd.app.backend.utils import delimit_tokens
@@ -83,6 +84,30 @@ def density_note(firing_density: float) -> str:
     if firing_density < 0.005:
         return "This is a very sparse component, likely highly specific."
     return ""
+
+
+def token_stats_section(
+    stats: TokenPRLift,
+    direction: Literal["Input", "Output"],
+    direction_description: str,
+) -> Md:
+    md = Md()
+    md.h(3, f"{direction} tokens ({direction_description})")
+    if stats.top_recall:
+        md.labeled_list(
+            f"**Most common {direction.lower()} tokens** (when the component fires, what "
+            f"fraction of {'the model\u2019s next-token probability mass goes to' if direction == 'Output' else 'the time the current token is'} "
+            "token X):",
+            [f"`{repr(tok)}`: {recall * 100:.0f}%" for tok, recall in stats.top_recall[:8]],
+        )
+    if stats.top_pmi:
+        md.labeled_list(
+            f"**{direction} PMI** (same data normalized by base rate \u2014 how much more "
+            "likely than usual; nats: 0 = none, 1 \u2248 3\u00d7, 2 \u2248 7\u00d7, "
+            "3 \u2248 20\u00d7):",
+            [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in stats.top_pmi[:10]],
+        )
+    return md
 
 
 def build_data_presentation(
@@ -400,58 +425,3 @@ def build_annotated_examples(
     if items:
         md.numbered(items)
     return md
-
-
-def build_separated_examples(
-    component: ComponentData,
-    app_tok: AppTokenizer,
-    max_examples: int,
-    rendering: ExampleRenderingConfig,
-) -> tuple[Md, Md]:
-    """Build raw and annotated example lists separately (not interleaved).
-
-    Returns (raw_md, annotated_md) where each contains a numbered list.
-    """
-    assert rendering.format == "xml", "separated layout only supported for xml format"
-    assert rendering.highlight_delimiter != "legacy"
-
-    raw_items: list[str] = []
-    annotated_items: list[str] = []
-    for ex in component.activation_examples[:max_examples]:
-        if not any(ex.firings):
-            continue
-        act_keys = list(ex.activations.keys())
-        per_token_acts = [
-            {k: ex.activations[k][i] for k in act_keys} for i in range(len(ex.token_ids))
-        ]
-        raw_spans = (
-            app_tok.get_spans(ex.token_ids)
-            if rendering.xml_sanitize_raw
-            else app_tok.get_raw_spans(ex.token_ids)
-        )
-        annotated_spans = (
-            app_tok.get_spans(ex.token_ids)
-            if rendering.xml_sanitize_highlighted
-            else app_tok.get_raw_spans(ex.token_ids)
-        )
-        raw_items.append("".join(raw_spans))
-        annotated_items.append(
-            _delimit_annotated(
-                spans=annotated_spans,
-                token_ids=ex.token_ids,
-                firings=ex.firings,
-                per_token_activations=per_token_acts,
-                app_tok=app_tok,
-                delimiter_style=rendering.highlight_delimiter,
-                annotation_style=rendering.annotation_style,
-                annotation_inside=True,
-                sanitize_fallback=rendering.xml_sanitize_highlighted,
-            )
-        )
-
-    raw_md = Md()
-    annotated_md = Md()
-    if raw_items:
-        raw_md.numbered(raw_items)
-        annotated_md.numbered(annotated_items)
-    return raw_md, annotated_md

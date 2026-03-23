@@ -35,6 +35,15 @@ class ExampleRenderingConfig(BaseConfig):
     xml_sanitize_highlighted: bool = False
 
 
+CANON_RENDERING = ExampleRenderingConfig(
+    format="xml",
+    highlight_delimiter="brackets",
+    annotation_style="activation",
+    xml_sanitize_raw=False,
+    xml_sanitize_highlighted=False,
+)
+
+
 class CompactSkepticalConfig(BaseConfig):
     """Current default strategy: compact prompt, skeptical tone, structured JSON output."""
 
@@ -120,13 +129,7 @@ def resolve_example_rendering(strategy: StrategyConfig) -> ExampleRenderingConfi
                 xml_sanitize_highlighted=strategy.xml_sanitize_highlighted,
             )
         case CanonConfig():
-            return ExampleRenderingConfig(
-                format="xml",
-                highlight_delimiter="brackets",
-                annotation_style="activation",
-                xml_sanitize_raw=False,
-                xml_sanitize_highlighted=False,
-            )
+            return CANON_RENDERING
 
 
 class AutointerpConfig(BaseConfig):

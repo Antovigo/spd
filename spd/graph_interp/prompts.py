@@ -9,9 +9,10 @@ annotations, recall + PMI token stats):
 """
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import ExampleRenderingConfig
+from spd.autointerp.config import CANON_RENDERING
 from spd.autointerp.prompt_helpers import (
     build_annotated_examples,
+    token_stats_section,
 )
 from spd.autointerp.schemas import ModelMetadata
 from spd.graph_interp.graph_context import RelatedComponent
@@ -40,14 +41,6 @@ UNIFIED_LABEL_SCHEMA: dict[str, object] = {
     "required": ["label", "reasoning"],
     "additionalProperties": False,
 }
-
-_RENDERING = ExampleRenderingConfig(
-    format="xml",
-    highlight_delimiter="brackets",
-    annotation_style="activation",
-    xml_sanitize_raw=False,
-    xml_sanitize_highlighted=False,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -120,30 +113,6 @@ def _short_layer_desc(canonical: str) -> str:
     return f"{mod} {p}, layer {block_num}"
 
 
-def _token_stats_section(
-    stats: TokenPRLift,
-    direction: str,
-    direction_description: str,
-) -> Md:
-    md = Md()
-    md.h(3, f"{direction} tokens ({direction_description})")
-    if stats.top_recall:
-        md.labeled_list(
-            f"**Most common {direction.lower()} tokens** (when the component fires, what "
-            f"fraction of {'the model\u2019s next-token probability mass goes to' if direction == 'Output' else 'the time the current token is'} "
-            "token X):",
-            [f"`{repr(tok)}`: {recall * 100:.0f}%" for tok, recall in stats.top_recall[:8]],
-        )
-    if stats.top_pmi:
-        md.labeled_list(
-            f"**{direction} PMI** (same data normalized by base rate \u2014 how much more "
-            "likely than usual; nats: 0 = none, 1 \u2248 3\u00d7, 2 \u2248 7\u00d7, "
-            "3 \u2248 20\u00d7):",
-            [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in stats.top_pmi[:10]],
-        )
-    return md
-
-
 def _examples_section(
     component: ComponentData,
     app_tok: AppTokenizer,
@@ -158,7 +127,7 @@ def _examples_section(
         "Each example has a `<raw>` view and an `<annotated>` view with firing tokens "
         "wrapped as `[[[token (ci:X, act:Y)]]]`."
     )
-    md.extend(build_annotated_examples(component, app_tok, max_examples, rendering=_RENDERING))
+    md.extend(build_annotated_examples(component, app_tok, max_examples, rendering=CANON_RENDERING))
     return md
 
 
@@ -201,7 +170,7 @@ def format_output_prompt(
 
     md.h(2, "Evidence")
     md.extend(
-        _token_stats_section(
+        token_stats_section(
             output_token_stats, "Output", "what the model produces when this component fires"
         )
     )
@@ -263,7 +232,7 @@ def format_input_prompt(
 
     md.h(2, "Evidence")
     md.extend(
-        _token_stats_section(
+        token_stats_section(
             input_token_stats, "Input", "tokens at positions where this component fires"
         )
     )
@@ -325,13 +294,13 @@ def format_unification_prompt(
     md.h(2, "Evidence")
     if output_token_stats is not None:
         md.extend(
-            _token_stats_section(
+            token_stats_section(
                 output_token_stats, "Output", "what the model produces when this component fires"
             )
         )
     if input_token_stats is not None:
         md.extend(
-            _token_stats_section(
+            token_stats_section(
                 input_token_stats, "Input", "tokens at positions where this component fires"
             )
         )

@@ -26,7 +26,7 @@ MAX_CONCURRENT = 50
 def resolve_target_component_keys(
     summary: dict[str, ComponentSummary],
     limit: int | None,
-    component_keys: list[str] | None = None,
+    component_keys: list[str] | None,
 ) -> list[str]:
     if component_keys is not None:
         missing = [key for key in component_keys if key not in summary]
@@ -49,6 +49,7 @@ async def interpret_component(
     input_token_stats: TokenPRLift | None,
     output_token_stats: TokenPRLift | None,
     context_tokens_per_side: int,
+    activation_threshold: float,
 ) -> InterpretationResult:
     """Interpret a single component. Used by the app for on-demand interpretation."""
     prompt = format_prompt(
@@ -59,6 +60,7 @@ async def interpret_component(
         input_token_stats=input_token_stats,
         output_token_stats=output_token_stats,
         context_tokens_per_side=context_tokens_per_side,
+        activation_threshold=activation_threshold,
     )
 
     response = await provider.chat(

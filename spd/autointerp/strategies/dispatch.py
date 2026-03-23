@@ -43,7 +43,7 @@ def format_prompt(
     input_token_stats: TokenPRLift | None,
     output_token_stats: TokenPRLift | None,
     context_tokens_per_side: int,
-    activation_threshold: float = 0.0,
+    activation_threshold: float,
 ) -> str:
     match strategy:
         case CompactSkepticalConfig():

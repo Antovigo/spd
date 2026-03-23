@@ -438,6 +438,7 @@ class GoogleAIProvider(LLMProvider):
     ):
         self.model = model
         self._thinking_level = thinking_level
+        self._pruned_schema: dict[str, Any] | None = None
         self._client = httpx.AsyncClient(
             base_url="https://generativelanguage.googleapis.com/v1beta/",
             headers={"x-goog-api-key": api_key},
@@ -451,12 +452,15 @@ class GoogleAIProvider(LLMProvider):
         response_schema: dict[str, Any],
         timeout_ms: int,
     ) -> ChatResponse:
+        if self._pruned_schema is None:
+            self._pruned_schema = _gemini_response_json_schema(response_schema)
+
         body: dict[str, Any] = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "maxOutputTokens": max_tokens,
                 "responseMimeType": "application/json",
-                "responseJsonSchema": _gemini_response_json_schema(response_schema),
+                "responseJsonSchema": self._pruned_schema,
             },
         }
         if self._thinking_level is not None:

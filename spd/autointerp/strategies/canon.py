@@ -5,24 +5,17 @@ CI-vs-act guidance, output PMI, and XML dual-view examples (raw + annotated).
 """
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import CanonConfig, ExampleRenderingConfig
+from spd.autointerp.config import CANON_RENDERING, CanonConfig
 from spd.autointerp.prompt_helpers import (
     DATASET_DESCRIPTIONS,
     build_annotated_examples,
     human_layer_desc,
+    token_stats_section,
 )
 from spd.autointerp.schemas import ModelMetadata
 from spd.harvest.analysis import TokenPRLift
 from spd.harvest.schemas import ComponentData
 from spd.utils.markdown import Md
-
-_CANON_RENDERING = ExampleRenderingConfig(
-    format="xml",
-    highlight_delimiter="brackets",
-    annotation_style="activation",
-    xml_sanitize_raw=False,
-    xml_sanitize_highlighted=False,
-)
 
 
 def format_prompt(
@@ -35,7 +28,7 @@ def format_prompt(
     context_tokens_per_side: int,
     activation_threshold: float,
 ) -> str:
-    rendering = _CANON_RENDERING
+    rendering = CANON_RENDERING
 
     rate_str = (
         f"~1 in {int(1 / component.firing_density)} tokens"
@@ -138,48 +131,28 @@ def format_prompt(
         f"(fires {rate_str})."
     )
 
-    # --- Output token statistics ---
+    # --- Token statistics ---
     md.h(2, "Evidence:")
-    md.h(3, "Output tokens (what the model produces when this component fires)")
     md.p(
         "At each position where the component fires, we look at the model's next-token "
         "prediction distribution."
     )
     if output_token_stats is not None:
-        if output_token_stats.top_recall:
-            md.labeled_list(
-                "**Most common output tokens** (when this component fires, what fraction of the "
-                "model's next-token probability mass goes to token X):",
-                [
-                    f"`{repr(tok)}`: {recall * 100:.0f}%"
-                    for tok, recall in output_token_stats.top_recall[:8]
-                ],
+        md.extend(
+            token_stats_section(
+                output_token_stats,
+                "Output",
+                "what the model produces when this component fires",
             )
-        if output_token_stats.top_pmi:
-            md.labeled_list(
-                "**Output PMI** (same data normalized by base rate \u2014 how much *more* likely "
-                "than usual; nats: 0 = no association, "
-                "1 \u2248 3\u00d7, 2 \u2248 7\u00d7, 3 \u2248 20\u00d7):",
-                [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in output_token_stats.top_pmi[:10]],
-            )
-
-    # --- Input token statistics ---
+        )
     if input_token_stats is not None:
-        md.h(3, "Input tokens (tokens at positions where this component fires)")
-        if input_token_stats.top_recall:
-            md.labeled_list(
-                "**Most common input tokens** (when the component fires, what fraction of the "
-                "time is the current token X):",
-                [
-                    f"`{repr(tok)}`: {recall * 100:.0f}%"
-                    for tok, recall in input_token_stats.top_recall[:8]
-                ],
+        md.extend(
+            token_stats_section(
+                input_token_stats,
+                "Input",
+                "tokens at positions where this component fires",
             )
-        if input_token_stats.top_pmi:
-            md.labeled_list(
-                "**Input PMI** (same data normalized by base rate):",
-                [f"`{repr(tok)}`: {pmi:.2f}" for tok, pmi in input_token_stats.top_pmi[:10]],
-            )
+        )
 
     # --- Activating examples ---
     md.h(3, "Activating examples")
