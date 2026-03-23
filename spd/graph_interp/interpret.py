@@ -223,8 +223,11 @@ def run_graph_interp(
                     component=component,
                     model_metadata=model_metadata,
                     app_tok=app_tok,
+                    output_token_stats=_get_output_stats(key),
+                    input_token_stats=_get_input_stats(key),
                     label_max_words=config.label_max_words,
                     max_examples=config.max_examples,
+                    context_tokens_per_side=context_tokens_per_side,
                 )
                 yield LLMJob(prompt=prompt, key=key)
 
@@ -245,44 +248,61 @@ def run_graph_interp(
     get_targets = _make_get_attributed(attribution_storage.get_top_targets, metric)
     get_sources = _make_get_attributed(attribution_storage.get_top_sources, metric)
 
+    harvest_config = harvest.get_config()
+    raw_ctx = harvest_config["activation_context_tokens_per_side"]
+    assert isinstance(raw_ctx, int)
+    context_tokens_per_side = raw_ctx
+
+    def _get_output_stats(key: str) -> TokenPRLift | None:
+        return get_output_token_stats(token_stats, key, app_tok, top_k=20, pmi_min_count=2.0)
+
+    def _get_input_stats(key: str) -> TokenPRLift | None:
+        return get_input_token_stats(token_stats, key, app_tok, top_k=20)
+
     def _output_prompt(
-        component: ComponentData, stats: TokenPRLift, related: list[RelatedComponent]
+        component: ComponentData,
+        output_stats: TokenPRLift,
+        related: list[RelatedComponent],
     ) -> str:
         return format_output_prompt(
             component=component,
             model_metadata=model_metadata,
             app_tok=app_tok,
-            output_token_stats=stats,
+            output_token_stats=output_stats,
             related=related,
             label_max_words=config.label_max_words,
             max_examples=config.max_examples,
+            context_tokens_per_side=context_tokens_per_side,
         )
 
     def _input_prompt(
-        component: ComponentData, stats: TokenPRLift, related: list[RelatedComponent]
+        component: ComponentData,
+        input_stats: TokenPRLift,
+        related: list[RelatedComponent],
     ) -> str:
         return format_input_prompt(
             component=component,
             model_metadata=model_metadata,
             app_tok=app_tok,
-            input_token_stats=stats,
+            input_token_stats=input_stats,
             related=related,
             label_max_words=config.label_max_words,
             max_examples=config.max_examples,
+            context_tokens_per_side=context_tokens_per_side,
         )
 
     label_output = _make_process_layer(
         _get_related(get_targets),
         db.save_output_label,
         "output",
-        lambda key: get_output_token_stats(token_stats, key, app_tok, top_k=50),
+        _get_output_stats,
         _output_prompt,
     )
     label_input = _make_process_layer(
         _get_related(get_sources),
         db.save_input_label,
         "input",
-        lambda key: get_input_token_stats(token_stats, key, app_tok, top_k=20),
+        _get_input_stats,
         _input_prompt,
     )
 
@@ -337,14 +357,15 @@ async def _collect_labels(
 
 
 def _parse_label(key: str, parsed: dict[str, object], raw: str, prompt: str) -> LabelResult:
-    assert len(parsed) == 2, f"Expected 2 fields, got {len(parsed)}"
     label = parsed["label"]
     reasoning = parsed["reasoning"]
-    assert isinstance(label, str) and isinstance(reasoning, str)
+    summary = parsed.get("summary_for_neighbors", "")
+    assert isinstance(label, str) and isinstance(reasoning, str) and isinstance(summary, str)
     return LabelResult(
         component_key=key,
         label=label,
         reasoning=reasoning,
+        summary_for_neighbors=summary,
         raw_response=raw,
         prompt=prompt,
     )

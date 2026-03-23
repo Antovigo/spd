@@ -60,11 +60,9 @@ def format_prompt(
     md.p(
         "In Stochastic Parameter Decomposition, each weight matrix of a network is decomposed "
         'into C rank-1 parts, called "subcomponents", where C is usually greater than the rank '
-        "of the weight matrix. These are parameterised as U \u2022 V, where V is the "
-        '"read direction" (dimension `d_in`) and U is the "write direction" (dimension `d_out` \u2014 what the component '
-        "contributes to the output). They multiply to a rank-1 matrix of the shape of the "
-        "original matrix, and can be thought to represent a one-dimensional slice of the "
-        "computation the weight matrix does."
+        "of the weight matrix. These are parameterised as U \u2022 V (dimensions `d_out` \u00d7 "
+        "`d_in`). Each subcomponent represents a one-dimensional slice of the computation the "
+        "weight matrix performs."
     )
     md.p("These subcomponents are learned in an unsupervised manner under 3 main losses:")
     md.bullets(
@@ -167,7 +165,7 @@ def format_prompt(
 
     # --- Input token statistics ---
     if input_token_stats is not None:
-        md.h(3, "Input tokens (what causes this component to fire)")
+        md.h(3, "Input tokens (tokens at positions where this component fires)")
         if input_token_stats.top_recall:
             md.labeled_list(
                 "**Most common input tokens** (when the component fires, what fraction of the "
