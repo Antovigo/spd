@@ -35,13 +35,16 @@ def get_pile_seq_len() -> int:
     return seq_len
 
 
-def list_parquet_files(split: str) -> list[str]:
-    """List CSS parquet files in the Pile GitHub repo for the given split."""
+def list_css_parquet_files() -> dict[str, list[str]]:
+    """List CSS parquet files in the Pile GitHub repo, grouped by split."""
     api = HfApi()
     all_files = api.list_repo_files(PILE_GITHUB_REPO, repo_type="dataset")
-    files = sorted(f for f in all_files if f.startswith(f"data/{split}/CSS/"))
-    print(f"Found {len(files)} CSS parquet file(s) for '{split}' split")
-    return files
+    result: dict[str, list[str]] = {}
+    for split in ("train", "validation"):
+        files = sorted(f for f in all_files if f.startswith(f"data/{split}/CSS/"))
+        print(f"Found {len(files)} CSS parquet file(s) for '{split}' split")
+        result[split] = files
+    return result
 
 
 def iter_css_texts(parquet_files: list[str]) -> Iterator[str]:
@@ -132,8 +135,9 @@ def main() -> None:
 
     # Find CSS parquet files via Hub API (avoids resolving the full 50+ language dataset)
     print("\nListing CSS parquet files...")
-    train_files = list_parquet_files("train")
-    val_files = list_parquet_files("validation")
+    css_files = list_css_parquet_files()
+    train_files = css_files["train"]
+    val_files = css_files["validation"]
     assert train_files, "No CSS train parquet files found"
 
     # Create HF repo
