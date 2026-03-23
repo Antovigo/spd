@@ -31,6 +31,7 @@ from spd.graph_interp.graph_context import RelatedComponent, get_related_compone
 from spd.graph_interp.ordering import group_and_sort_by_layer
 from spd.graph_interp.prompts import (
     LABEL_SCHEMA,
+    UNIFIED_LABEL_SCHEMA,
     format_input_prompt,
     format_output_prompt,
     format_unification_prompt,
@@ -77,7 +78,9 @@ def run_graph_interp(
     shared_cost = CostTracker(limit_usd=config.cost_limit_usd)
 
     async def llm_map(
-        jobs: Iterable[LLMJob], n_total: int | None = None
+        jobs: Iterable[LLMJob],
+        n_total: int | None = None,
+        response_schema: dict[str, object] = LABEL_SCHEMA,
     ) -> AsyncGenerator[LLMResult | LLMError]:
         async for result in map_llm_calls(
             provider=provider,
@@ -86,7 +89,7 @@ def run_graph_interp(
             max_concurrent=config.max_concurrent,
             max_requests_per_minute=config.max_requests_per_minute,
             cost_limit_usd=None,
-            response_schema=LABEL_SCHEMA,
+            response_schema=response_schema,
             n_total=n_total,
             cost_tracker=shared_cost,
         ):
@@ -233,9 +236,16 @@ def run_graph_interp(
 
         if n_skipped:
             logger.warning(f"Skipping {n_skipped} components missing output or input labels")
+
+        async def unified_llm_map(
+            jobs: Iterable[LLMJob], n_total: int | None = None
+        ) -> AsyncGenerator[LLMResult | LLMError]:
+            async for result in llm_map(jobs, n_total, response_schema=UNIFIED_LABEL_SCHEMA):
+                yield result
+
         logger.info(f"Unifying {len(unifiable_keys)} components")
         new_labels = await _collect_labels(
-            llm_map, jobs(), len(unifiable_keys), db.save_unified_label
+            unified_llm_map, jobs(), len(unifiable_keys), db.save_unified_label
         )
         logger.info(f"Unification: completed {len(new_labels)}/{len(keys)}")
 

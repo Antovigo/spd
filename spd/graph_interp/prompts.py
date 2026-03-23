@@ -31,6 +31,16 @@ LABEL_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
 }
 
+UNIFIED_LABEL_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string"},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["label", "reasoning"],
+    "additionalProperties": False,
+}
+
 _RENDERING = ExampleRenderingConfig(
     format="xml",
     highlight_delimiter="brackets",
