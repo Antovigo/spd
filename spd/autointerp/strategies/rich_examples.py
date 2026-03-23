@@ -5,7 +5,7 @@ in the examples so the LLM can judge evidence quality directly.
 """
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import RichExamplesConfig, resolve_example_rendering
+from spd.autointerp.config import RichExamplesConfig
 from spd.autointerp.prompt_helpers import (
     DATASET_DESCRIPTIONS,
     build_annotated_examples,
@@ -50,15 +50,14 @@ def format_prompt(
     component: ComponentData,
     model_metadata: ModelMetadata,
     app_tok: AppTokenizer,
-    output_token_stats: TokenPRLift | None,
+    output_token_stats: TokenPRLift,
     context_tokens_per_side: int,
 ) -> str:
-    rendering = resolve_example_rendering(config)
     fires_on = build_annotated_examples(
         component,
         app_tok,
         config.max_examples,
-        rendering=rendering,
+        rendering=config.example_rendering,
     )
 
     rate_str = (
@@ -109,10 +108,10 @@ def format_prompt(
     )
 
     md.h(3, "Example annotation format")
-    md.p(describe_example_rendering(rendering))
+    md.p(describe_example_rendering(config.example_rendering))
     _build_annotation_legend(md, component)
 
-    if output_token_stats is not None and output_token_stats.top_pmi:
+    if output_token_stats.top_pmi:
         md.h(2, "Output evidence")
         md.p(
             "Top output PMI tokens, filtered to ignore extremely low-support predictions. "
@@ -124,7 +123,7 @@ def format_prompt(
         )
 
     md.h(2, "Activation examples — where the component fires")
-    if rendering.format == "xml":
+    if config.example_rendering.format == "xml":
         md.p(
             "Each example shows both the raw window and a highlighted version with inline "
             "activation values on firing tokens."

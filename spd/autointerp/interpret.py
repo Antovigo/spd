@@ -125,9 +125,7 @@ def run_interpret(
             remaining_keys = [k for k in eligible_keys if k not in completed]
             logger.info(f"Interpreting {len(remaining_keys)} components")
 
-            schema = INTERPRETATION_SCHEMA
-
-            raw_threshold = harvest_config.get("activation_threshold", 0.0)
+            raw_threshold = harvest_config["activation_threshold"]
             assert isinstance(raw_threshold, int | float)
             activation_threshold = float(raw_threshold)
 
@@ -135,28 +133,36 @@ def run_interpret(
                 for key in remaining_keys:
                     component = harvest.get_component(key)
                     assert component is not None, f"Component {key} not found in harvest"
-                    input_stats: TokenPRLift | None = None
-                    output_stats: TokenPRLift | None = None
-                    if isinstance(template_strategy, RichExamplesConfig | CanonConfig):
-                        output_stats = get_output_token_stats(
-                            token_stats,
-                            key,
-                            app_tok,
-                            top_k=20,
-                            pmi_min_count=(
-                                template_strategy.output_pmi_min_count
-                                if isinstance(template_strategy, RichExamplesConfig)
-                                else 2.0
-                            ),
-                        )
-                        assert output_stats is not None
-                        if isinstance(template_strategy, CanonConfig):
+                    match template_strategy:
+                        case RichExamplesConfig(output_pmi_min_count=pmi_min_count):
+                            input_stats = None
+                            output_stats = get_output_token_stats(
+                                token_stats,
+                                key,
+                                app_tok,
+                                top_k=20,
+                                pmi_min_count=pmi_min_count,
+                            )
+                            assert output_stats is not None
+                        case CanonConfig():
                             input_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
-                    else:
-                        input_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
-                        output_stats = get_output_token_stats(token_stats, key, app_tok, top_k=50)
-                        assert input_stats is not None
-                        assert output_stats is not None
+                            output_stats = get_output_token_stats(
+                                token_stats,
+                                key,
+                                app_tok,
+                                top_k=20,
+                                pmi_min_count=2.0,
+                            )
+                            assert input_stats is not None
+                            assert output_stats is not None
+                        case _:
+                            input_stats = get_input_token_stats(token_stats, key, app_tok, top_k=20)
+                            output_stats = get_output_token_stats(
+                                token_stats, key, app_tok, top_k=50
+                            )
+                            assert input_stats is not None
+                            assert output_stats is not None
+
                     prompt = format_prompt(
                         strategy=template_strategy,
                         component=component,
@@ -179,7 +185,7 @@ def run_interpret(
                 max_concurrent=max_concurrent,
                 max_requests_per_minute=max_requests_per_minute,
                 cost_limit_usd=cost_limit_usd,
-                response_schema=schema,
+                response_schema=INTERPRETATION_SCHEMA,
                 n_total=len(remaining_keys),
             ):
                 match outcome:

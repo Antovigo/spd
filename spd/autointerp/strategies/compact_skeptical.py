@@ -5,7 +5,7 @@ Extracted from the original prompt_template.py.
 """
 
 from spd.app.backend.app_tokenizer import AppTokenizer
-from spd.autointerp.config import CompactSkepticalConfig, resolve_example_rendering
+from spd.autointerp.config import CompactSkepticalConfig
 from spd.autointerp.prompt_helpers import (
     DATASET_DESCRIPTIONS,
     build_annotated_examples,
@@ -27,7 +27,6 @@ def format_prompt(
     output_token_stats: TokenPRLift,
     context_tokens_per_side: int,
 ) -> str:
-    rendering = resolve_example_rendering(config)
     input_pmi: list[tuple[str, float]] | None = None
     output_pmi: list[tuple[str, float]] | None = None
 
@@ -45,7 +44,7 @@ def format_prompt(
         component,
         app_tok,
         config.max_examples,
-        rendering=rendering,
+        rendering=config.example_rendering,
     )
 
     rate_str = (
@@ -85,7 +84,7 @@ def format_prompt(
     md.extend(input_section).extend(output_section)
 
     md.h(2, "Activation examples")
-    md.p(describe_example_rendering(rendering))
+    md.p(describe_example_rendering(config.example_rendering))
     md.extend(examples_section)
 
     md.h(2, "Task")

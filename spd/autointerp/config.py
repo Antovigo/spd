@@ -1,9 +1,4 @@
-"""Autointerp configuration.
-
-CompactSkepticalConfig: interpretation strategy config.
-AutointerpEvalConfig: eval job config (detection, fuzzing).
-AutointerpSlurmConfig: CompactSkepticalConfig + eval + SLURM submission params.
-"""
+"""Autointerp configuration."""
 
 from typing import Annotated, Literal
 
@@ -25,22 +20,48 @@ FORBIDDEN_WORDS_DEFAULT = [
 ]
 
 
-class ExampleRenderingConfig(BaseConfig):
-    """Configurable activation-example rendering shared across strategies."""
+class LegacyDelimitedExamplesConfig(BaseConfig):
+    format: Literal["legacy_delimited"] = "legacy_delimited"
 
-    format: Literal["legacy_delimited", "single_line", "xml"] = "legacy_delimited"
-    highlight_delimiter: Literal["legacy", "brackets", "angle"] = "legacy"
+
+class SingleLineExamplesConfig(BaseConfig):
+    format: Literal["single_line"] = "single_line"
     annotation_style: Literal["none", "activation"] = "none"
-    xml_sanitize_raw: bool = False
-    xml_sanitize_highlighted: bool = False
+    highlight_delimiter: Literal["brackets", "angle"] = "brackets"
 
 
-CANON_RENDERING = ExampleRenderingConfig(
+class XmlExamplesConfig(BaseConfig):
+    format: Literal["xml"] = "xml"
+    annotation_style: Literal["none", "activation"] = "none"
+    highlight_delimiter: Literal["brackets", "angle"] = "brackets"
+    sanitize_raw: bool = False
+    sanitize_highlighted: bool = False
+
+
+ExampleRenderingConfig = Annotated[
+    LegacyDelimitedExamplesConfig | SingleLineExamplesConfig | XmlExamplesConfig,
+    Field(discriminator="format"),
+]
+RichExampleRenderingConfig = Annotated[
+    SingleLineExamplesConfig | XmlExamplesConfig,
+    Field(discriminator="format"),
+]
+
+
+def default_example_rendering() -> ExampleRenderingConfig:
+    return LegacyDelimitedExamplesConfig()
+
+
+def default_rich_example_rendering() -> RichExampleRenderingConfig:
+    return SingleLineExamplesConfig(annotation_style="activation")
+
+
+CANON_RENDERING = XmlExamplesConfig(
     format="xml",
-    highlight_delimiter="brackets",
     annotation_style="activation",
-    xml_sanitize_raw=False,
-    xml_sanitize_highlighted=False,
+    highlight_delimiter="brackets",
+    sanitize_raw=False,
+    sanitize_highlighted=False,
 )
 
 
@@ -53,9 +74,7 @@ class CompactSkepticalConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     forbidden_words: list[str] | None = None
-    example_rendering: "ExampleRenderingConfig" = Field(
-        default_factory=lambda: ExampleRenderingConfig()
-    )
+    example_rendering: ExampleRenderingConfig = Field(default_factory=default_example_rendering)
 
 
 class DualViewConfig(BaseConfig):
@@ -73,9 +92,7 @@ class DualViewConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     forbidden_words: list[str] | None = None
-    example_rendering: "ExampleRenderingConfig" = Field(
-        default_factory=lambda: ExampleRenderingConfig()
-    )
+    example_rendering: ExampleRenderingConfig = Field(default_factory=default_example_rendering)
 
 
 class RichExamplesConfig(BaseConfig):
@@ -90,11 +107,9 @@ class RichExamplesConfig(BaseConfig):
     include_dataset_description: bool = True
     label_max_words: int = 8
     output_pmi_min_count: float = 2.0
-    example_rendering: ExampleRenderingConfig | None = None
-    example_format: Literal["single_line", "xml"] = "single_line"
-    highlight_delimiter: Literal["brackets", "angle"] = "brackets"
-    xml_sanitize_raw: bool = False
-    xml_sanitize_highlighted: bool = False
+    example_rendering: RichExampleRenderingConfig = Field(
+        default_factory=default_rich_example_rendering
+    )
 
 
 class CanonConfig(BaseConfig):
@@ -110,26 +125,6 @@ class CanonConfig(BaseConfig):
 
 
 StrategyConfig = CompactSkepticalConfig | DualViewConfig | RichExamplesConfig | CanonConfig
-
-
-def resolve_example_rendering(strategy: StrategyConfig) -> ExampleRenderingConfig:
-    match strategy:
-        case CompactSkepticalConfig(example_rendering=example_rendering):
-            return example_rendering
-        case DualViewConfig(example_rendering=example_rendering):
-            return example_rendering
-        case RichExamplesConfig(example_rendering=example_rendering):
-            if example_rendering is not None:
-                return example_rendering
-            return ExampleRenderingConfig(
-                format=strategy.example_format,
-                highlight_delimiter=strategy.highlight_delimiter,
-                annotation_style="activation",
-                xml_sanitize_raw=strategy.xml_sanitize_raw,
-                xml_sanitize_highlighted=strategy.xml_sanitize_highlighted,
-            )
-        case CanonConfig():
-            return CANON_RENDERING
 
 
 class AutointerpConfig(BaseConfig):

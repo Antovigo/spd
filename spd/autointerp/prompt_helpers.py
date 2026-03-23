@@ -8,7 +8,12 @@ from typing import Literal
 
 from spd.app.backend.app_tokenizer import AppTokenizer
 from spd.app.backend.utils import delimit_tokens
-from spd.autointerp.config import ExampleRenderingConfig
+from spd.autointerp.config import (
+    ExampleRenderingConfig,
+    LegacyDelimitedExamplesConfig,
+    SingleLineExamplesConfig,
+    XmlExamplesConfig,
+)
 from spd.autointerp.schemas import DECOMPOSITION_DESCRIPTIONS, DecompositionMethod
 from spd.harvest.analysis import TokenPRLift
 from spd.harvest.schemas import ComponentData
@@ -184,51 +189,66 @@ def build_input_section(
     return md
 
 
+def _highlight_example(rendering: SingleLineExamplesConfig | XmlExamplesConfig) -> str:
+    match rendering:
+        case SingleLineExamplesConfig(highlight_delimiter="angle", annotation_style="none"):
+            return "`<<<token>>>`"
+        case SingleLineExamplesConfig(highlight_delimiter="angle", annotation_style="activation"):
+            return "`<<<token (ci:X, act:Y)>>>`"
+        case SingleLineExamplesConfig(highlight_delimiter="brackets", annotation_style="none"):
+            return "`[[[token]]]`"
+        case SingleLineExamplesConfig(
+            highlight_delimiter="brackets", annotation_style="activation"
+        ):
+            return "`[[[token]]] (ci:X, act:Y)`"
+        case XmlExamplesConfig(highlight_delimiter="angle", annotation_style="none"):
+            return "`<<<token>>>`"
+        case XmlExamplesConfig(highlight_delimiter="angle", annotation_style="activation"):
+            return "`<<<token (ci:X, act:Y)>>>`"
+        case XmlExamplesConfig(highlight_delimiter="brackets", annotation_style="none"):
+            return "`[[[token]]]`"
+        case XmlExamplesConfig(highlight_delimiter="brackets", annotation_style="activation"):
+            return "`[[[token (ci:X, act:Y)]]]`"
+        case _:
+            raise AssertionError(f"Unhandled rendering: {rendering}")
+
+
 def describe_example_rendering(rendering: ExampleRenderingConfig) -> str:
-    if rendering.format == "legacy_delimited":
-        return (
-            "Examples use grouped `<<delimiters>>` around contiguous active tokens. "
-            "Tokens inside the delimiters are positions where the component is active."
-        )
-
-    delim = "`<<<token>>>`" if rendering.highlight_delimiter == "angle" else "`[[[token]]]`"
-    if rendering.annotation_style == "activation":
-        delim = (
-            "`<<<token (ci:X, act:Y)>>>`"
-            if rendering.highlight_delimiter == "angle"
-            else "`[[[token]]] (ci:X, act:Y)`"
-            if rendering.format == "single_line"
-            else "`[[[token (ci:X, act:Y)]]]`"
-        )
-
-    if rendering.format == "xml":
-        raw_desc = (
-            "The `<raw>` block preserves literal whitespace and control characters."
-            if not rendering.xml_sanitize_raw
-            else "The `<raw>` block sanitizes control characters for readability, e.g. newline as `↵`."
-        )
-        highlighted_desc = (
-            "The `<highlighted>` block also preserves literal token text."
-            if not rendering.xml_sanitize_highlighted
-            else "The `<highlighted>` block sanitizes control characters for readability while preserving token boundaries."
-        )
-        return (
-            "Each example is an XML-style block with `<raw>` and `<highlighted>` sections. "
-            f"`<highlighted>` repeats the same window with firing tokens wrapped as {delim}. "
-            f"{raw_desc} {highlighted_desc}"
-        )
-
-    if rendering.annotation_style == "activation":
-        return (
-            "Each example is one annotated line. Firing tokens are wrapped as "
-            f"{delim}. `ci` is causal importance and `act` is the component activation at that position. "
-            "Control characters are rendered visibly, e.g. newline as `↵`."
-        )
-
-    return (
-        "Each example is one line with firing tokens wrapped as "
-        f"{delim}. Control characters are rendered visibly, e.g. newline as `↵`."
-    )
+    match rendering:
+        case LegacyDelimitedExamplesConfig():
+            return (
+                "Examples use grouped `<<delimiters>>` around contiguous active tokens. "
+                "Tokens inside the delimiters are positions where the component is active."
+            )
+        case SingleLineExamplesConfig(annotation_style="activation") as single_line:
+            return (
+                "Each example is one annotated line. Firing tokens are wrapped as "
+                f"{_highlight_example(single_line)}. `ci` is causal importance and `act` "
+                "is the component activation at that position. Control characters are "
+                "rendered visibly, e.g. newline as `↵`."
+            )
+        case SingleLineExamplesConfig() as single_line:
+            return (
+                "Each example is one line with firing tokens wrapped as "
+                f"{_highlight_example(single_line)}. Control characters are rendered "
+                "visibly, e.g. newline as `↵`."
+            )
+        case XmlExamplesConfig() as xml:
+            raw_desc = (
+                "The `<raw>` block sanitizes control characters for readability, e.g. newline as `↵`."
+                if xml.sanitize_raw
+                else "The `<raw>` block preserves literal whitespace and control characters."
+            )
+            highlighted_desc = (
+                "The `<highlighted>` block sanitizes control characters for readability while preserving token boundaries."
+                if xml.sanitize_highlighted
+                else "The `<highlighted>` block also preserves literal token text."
+            )
+            return (
+                "Each example is an XML-style block with `<raw>` and `<highlighted>` sections. "
+                f"`<highlighted>` repeats the same window with firing tokens wrapped as "
+                f"{_highlight_example(xml)}. {raw_desc} {highlighted_desc}"
+            )
 
 
 def _build_legacy_examples(
@@ -251,22 +271,6 @@ def _build_legacy_examples(
     return md
 
 
-def build_fires_on_examples(
-    component: ComponentData,
-    app_tok: AppTokenizer,
-    max_examples: int,
-) -> Md:
-    return _build_legacy_examples(component, app_tok, max_examples, shift_firings=False)
-
-
-def build_says_examples(
-    component: ComponentData,
-    app_tok: AppTokenizer,
-    max_examples: int,
-) -> Md:
-    return _build_legacy_examples(component, app_tok, max_examples, shift_firings=True)
-
-
 def _fmt_ann(activations: dict[str, float]) -> str:
     """Format activation annotations for a single firing token.
 
@@ -283,64 +287,76 @@ def _fmt_ann(activations: dict[str, float]) -> str:
     return f"({', '.join(parts)})"
 
 
-def _delimited_token(
+def _split_display_span(
+    display_span: str,
+    token_id: int,
+    app_tok: AppTokenizer,
+    sanitize: bool,
+) -> tuple[str, str]:
+    stripped = display_span.lstrip()
+    whitespace = display_span[: len(display_span) - len(stripped)]
+    if stripped:
+        return whitespace, stripped
+    token_text = app_tok.get_tok_display(token_id) if sanitize else app_tok.decode([token_id])
+    return whitespace, token_text
+
+
+def _delimiter_pair(style: Literal["brackets", "angle"]) -> tuple[str, str]:
+    if style == "brackets":
+        return ("[[[", "]]]")
+    return ("<<<", ">>>")
+
+
+def _single_line_token(
     display_span: str,
     token_id: int,
     ann: str | None,
     app_tok: AppTokenizer,
-    delimiter_style: str,
-    annotation_inside: bool,
-    sanitize_fallback: bool,
+    delimiter_style: Literal["brackets", "angle"],
 ) -> str:
-    stripped = display_span.lstrip()
-    whitespace = display_span[: len(display_span) - len(stripped)]
-    if stripped:
-        token_text = stripped
-    else:
-        token_text = (
-            app_tok.get_tok_display(token_id) if sanitize_fallback else app_tok.decode([token_id])
-        )
-
-    open_delim, close_delim = ("[[[", "]]]") if delimiter_style == "brackets" else ("<<<", ">>>")
+    whitespace, token_text = _split_display_span(display_span, token_id, app_tok, sanitize=True)
+    open_delim, close_delim = _delimiter_pair(delimiter_style)
     if not ann:
         return f"{whitespace}{open_delim}{token_text}{close_delim}"
-    if annotation_inside:
-        inner = f"{token_text} {ann}".rstrip()
-        return f"{whitespace}{open_delim}{inner}{close_delim}"
-    return f"{whitespace}{open_delim}{token_text}{close_delim} {ann}".rstrip()
+    if delimiter_style == "angle":
+        return f"{whitespace}{open_delim}{token_text} {ann}{close_delim}"
+    return f"{whitespace}{open_delim}{token_text}{close_delim} {ann}"
 
 
-def _delimit_annotated(
+def _xml_token(
+    display_span: str,
+    token_id: int,
+    ann: str | None,
+    app_tok: AppTokenizer,
+    delimiter_style: Literal["brackets", "angle"],
+    sanitize: bool,
+) -> str:
+    whitespace, token_text = _split_display_span(display_span, token_id, app_tok, sanitize=sanitize)
+    open_delim, close_delim = _delimiter_pair(delimiter_style)
+    if not ann:
+        return f"{whitespace}{open_delim}{token_text}{close_delim}"
+    return f"{whitespace}{open_delim}{token_text} {ann}{close_delim}"
+
+
+def _build_single_line_text(
     spans: list[str],
     token_ids: list[int],
     firings: list[bool],
     per_token_activations: list[dict[str, float]],
     app_tok: AppTokenizer,
-    delimiter_style: str,
-    annotation_style: str,
-    annotation_inside: bool,
-    sanitize_fallback: bool,
+    rendering: SingleLineExamplesConfig,
 ) -> str:
-    """Join token strings, wrapping active tokens with configured delimiters."""
     parts: list[str] = []
     for token_id, span, active, acts in zip(
         token_ids, spans, firings, per_token_activations, strict=True
     ):
-        if active:
-            ann = _fmt_ann(acts) if annotation_style == "activation" else None
-            parts.append(
-                _delimited_token(
-                    display_span=span,
-                    token_id=token_id,
-                    ann=ann,
-                    app_tok=app_tok,
-                    delimiter_style=delimiter_style,
-                    annotation_inside=annotation_inside,
-                    sanitize_fallback=sanitize_fallback,
-                )
-            )
-        else:
+        if not active:
             parts.append(span)
+            continue
+        ann = _fmt_ann(acts) if rendering.annotation_style == "activation" else None
+        parts.append(
+            _single_line_token(span, token_id, ann, app_tok, rendering.highlight_delimiter)
+        )
     return "".join(parts)
 
 
@@ -357,6 +373,35 @@ def _build_xml_example(raw_text: str, annotated_text: str) -> str:
     )
 
 
+def _build_xml_text(
+    spans: list[str],
+    token_ids: list[int],
+    firings: list[bool],
+    per_token_activations: list[dict[str, float]],
+    app_tok: AppTokenizer,
+    rendering: XmlExamplesConfig,
+) -> str:
+    parts: list[str] = []
+    for token_id, span, active, acts in zip(
+        token_ids, spans, firings, per_token_activations, strict=True
+    ):
+        if not active:
+            parts.append(span)
+            continue
+        ann = _fmt_ann(acts) if rendering.annotation_style == "activation" else None
+        parts.append(
+            _xml_token(
+                span,
+                token_id,
+                ann,
+                app_tok,
+                rendering.highlight_delimiter,
+                sanitize=rendering.sanitize_highlighted,
+            )
+        )
+    return "".join(parts)
+
+
 def build_annotated_examples(
     component: ComponentData,
     app_tok: AppTokenizer,
@@ -364,13 +409,9 @@ def build_annotated_examples(
     rendering: ExampleRenderingConfig,
     shift_firings: bool = False,
 ) -> Md:
-    """Build activation examples in the configured presentation format."""
-    if rendering.format == "legacy_delimited":
+    if isinstance(rendering, LegacyDelimitedExamplesConfig):
         return _build_legacy_examples(component, app_tok, max_examples, shift_firings)
 
-    assert rendering.highlight_delimiter != "legacy", (
-        "legacy delimiter only supported with legacy_delimited format"
-    )
     items: list[str] = []
     for ex in component.activation_examples[:max_examples]:
         if not any(ex.firings):
@@ -380,47 +421,43 @@ def build_annotated_examples(
         per_token_acts = [
             {k: ex.activations[k][i] for k in act_keys} for i in range(len(ex.token_ids))
         ]
-        if rendering.format == "xml":
-            raw_spans = (
-                app_tok.get_spans(ex.token_ids)
-                if rendering.xml_sanitize_raw
-                else app_tok.get_raw_spans(ex.token_ids)
-            )
-            highlighted_spans = (
-                app_tok.get_spans(ex.token_ids)
-                if rendering.xml_sanitize_highlighted
-                else app_tok.get_raw_spans(ex.token_ids)
-            )
-            items.append(
-                _build_xml_example(
-                    raw_text="".join(raw_spans),
-                    annotated_text=_delimit_annotated(
-                        spans=highlighted_spans,
+
+        match rendering:
+            case SingleLineExamplesConfig():
+                items.append(
+                    _build_single_line_text(
+                        spans=app_tok.get_spans(ex.token_ids),
                         token_ids=ex.token_ids,
                         firings=firings,
                         per_token_activations=per_token_acts,
                         app_tok=app_tok,
-                        delimiter_style=rendering.highlight_delimiter,
-                        annotation_style=rendering.annotation_style,
-                        annotation_inside=True,
-                        sanitize_fallback=rendering.xml_sanitize_highlighted,
-                    ),
+                        rendering=rendering,
+                    )
                 )
-            )
-        else:
-            items.append(
-                _delimit_annotated(
-                    spans=app_tok.get_spans(ex.token_ids),
-                    token_ids=ex.token_ids,
-                    firings=firings,
-                    per_token_activations=per_token_acts,
-                    app_tok=app_tok,
-                    delimiter_style=rendering.highlight_delimiter,
-                    annotation_style=rendering.annotation_style,
-                    annotation_inside=False,
-                    sanitize_fallback=True,
+            case XmlExamplesConfig():
+                raw_spans = (
+                    app_tok.get_spans(ex.token_ids)
+                    if rendering.sanitize_raw
+                    else app_tok.get_raw_spans(ex.token_ids)
                 )
-            )
+                highlighted_spans = (
+                    app_tok.get_spans(ex.token_ids)
+                    if rendering.sanitize_highlighted
+                    else app_tok.get_raw_spans(ex.token_ids)
+                )
+                items.append(
+                    _build_xml_example(
+                        raw_text="".join(raw_spans),
+                        annotated_text=_build_xml_text(
+                            spans=highlighted_spans,
+                            token_ids=ex.token_ids,
+                            firings=firings,
+                            per_token_activations=per_token_acts,
+                            app_tok=app_tok,
+                            rendering=rendering,
+                        ),
+                    )
+                )
     md = Md()
     if items:
         md.numbered(items)
