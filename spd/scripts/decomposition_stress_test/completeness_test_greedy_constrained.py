@@ -1,4 +1,4 @@
-"""Test completeness by maximizing divergence ratio from the original model.
+"""Test completeness by maximizing circuit divergence under a complement constraint.
 
 Uses greedy coordinate descent with random restarts to optimize binary masks directly,
 avoiding the binarization gap of PGD-based optimization.
@@ -6,16 +6,18 @@ avoiding the binarization gap of PGD-based optimization.
 The "circuit" is the set of active components (CI above threshold). The "complement" is
 everything else: inactive components plus weight deltas.
 
-Maximizes Div(original || circuit) / (Div(original || circuit + complement) + eps).
-A high ratio means the complement carries information that the circuit misses,
-as measured by how much closer the circuit+complement arm is to the original model.
+Maximizes Div(original || circuit) subject to Div(original || circuit + complement) < threshold.
+A high circuit divergence under this constraint means the complement is needed to recover the
+original model's behavior — the circuit alone is incomplete.
 
 Usage:
     # Toy model (TMS/ResidMLP) — input is a feature dimension index:
-    python -m spd.scripts.decomposition_stress_test.completeness_test_greedy_divergence <model_path> 3
+    python -m spd.scripts.decomposition_stress_test.completeness_test_greedy_constrained \
+        <model_path> 3 --complement-threshold 0.01
 
     # Language model — input is a prompt string:
-    python -m spd.scripts.decomposition_stress_test.completeness_test_greedy_divergence <model_path> "Once upon a time"
+    python -m spd.scripts.decomposition_stress_test.completeness_test_greedy_constrained \
+        <model_path> "Once upon a time" --complement-threshold 0.1
 """
 
 import argparse
@@ -96,7 +98,7 @@ def get_circuit_masks(
     return {module: (ci_vals > ci_thr).float() for module, ci_vals in ci.items()}
 
 
-def eval_loss(
+def eval_divergences(
     model: ComponentModel,
     input_tensor: Tensor,
     sources: dict[str, Tensor],
@@ -104,9 +106,8 @@ def eval_loss(
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
     loss_type: Literal["mse", "kl"],
     original_output: Tensor,
-    reverse: bool,
-    eps: float,
-) -> tuple[Float[Tensor, ""], Tensor, Tensor]:
+) -> tuple[Float[Tensor, ""], Float[Tensor, ""], Tensor, Tensor]:
+    """Returns (div_circuit, div_with_complement, circuit_out, with_complement_out)."""
     circuit_mask = {m: circuit[m] * sources[m] for m in circuit}
     with_complement_mask = {m: circuit[m] * sources[m] + (1 - circuit[m]) for m in circuit}
 
@@ -132,23 +133,17 @@ def eval_loss(
         )
         / n_examples
     )
-    if reverse:
-        loss = torch.log(div_with_complement + eps) - torch.log(div_circuit + eps)
-    else:
-        loss = torch.log(div_circuit + eps) - torch.log(div_with_complement + eps)
-    return loss, circuit_out, with_complement_out
+    return div_circuit, div_with_complement, circuit_out, with_complement_out
 
 
-def _per_element_loss_divergence(
+def _per_element_divergences(
     circuit_out: Tensor,
     with_complement_out: Tensor,
     original_output: Tensor,
     loss_type: Literal["mse", "kl"],
-    reverse: bool,
     n_batch: int,
-    eps: float,
-) -> Float[Tensor, " n_batch"]:
-    """Compute per-batch-element completeness loss (log-ratio variant)."""
+) -> tuple[Float[Tensor, " n_batch"], Float[Tensor, " n_batch"]]:
+    """Compute per-batch-element divergences for both circuit and circuit+complement."""
     original_expanded = original_output.expand_as(circuit_out)
     match loss_type:
         case "mse":
@@ -166,9 +161,7 @@ def _per_element_loss_divergence(
                 dim=-1
             )
             div_with_complement = kl_with_complement.reshape(n_batch, -1).mean(1)
-    if reverse:
-        return torch.log(div_with_complement + eps) - torch.log(div_circuit + eps)
-    return torch.log(div_circuit + eps) - torch.log(div_with_complement + eps)
+    return div_circuit, div_with_complement
 
 
 def run_greedy(
@@ -179,21 +172,13 @@ def run_greedy(
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
     loss_type: Literal["mse", "kl"],
     n_restarts: int,
-    reverse: bool,
-    eps: float,
-) -> tuple[dict[str, Tensor], Float[Tensor, ""], Tensor, Tensor]:
-    """Run greedy coordinate descent with random restarts to maximize divergence ratio.
+    complement_threshold: float,
+) -> tuple[dict[str, Tensor], Float[Tensor, ""], Float[Tensor, ""], Tensor, Tensor]:
+    """Greedy coordinate descent maximizing Div(orig, circuit) s.t. Div(orig, circuit+complement) < threshold.
 
-    Each sweep batches all single-bit flips into one forward pass instead of evaluating
-    each flip individually.
-
-    Default: Div(original, circuit) / (Div(original, circuit + complement) + eps).
-    Reverse: Div(original, circuit + complement) / (Div(original, circuit) + eps).
-
-    Returns (best_sources, best_loss, circuit_out, with_complement_out).
+    Returns (best_sources, best_div_circuit, best_div_complement, circuit_out, with_complement_out).
     """
     modules = list(circuit.keys())
-    # Only iterate over coordinates where the circuit mask is non-zero
     coords: list[tuple[str, int]] = []
     for m in modules:
         flat_circuit = circuit[m].reshape(-1)
@@ -204,36 +189,53 @@ def run_greedy(
     n_coords = len(coords)
     print(f"  {n_coords} circuit coordinates")
 
-    best_loss_val = float("-inf")
-    best_final_loss: Float[Tensor, ""] | None = None
+    best_div_circuit_val = float("-inf")
+    best_div_circuit_t: Float[Tensor, ""] | None = None
+    best_div_complement_t: Float[Tensor, ""] | None = None
     best_sources: dict[str, Tensor] | None = None
     best_circuit_out: Tensor | None = None
     best_with_complement_out: Tensor | None = None
 
-    for restart in range(n_restarts):
-        sources: dict[str, Tensor] = {
-            m: torch.randint(0, 2, circuit[m].shape, device=circuit[m].device).float()
-            for m in modules
-        }
+    MAX_INIT_ATTEMPTS = 20
 
-        with torch.no_grad():
-            current_loss, _, _ = eval_loss(
-                model,
-                input_tensor,
-                sources,
-                circuit,
-                weight_deltas,
-                loss_type,
-                original_output,
-                reverse,
-                eps,
+    for restart in range(n_restarts):
+        # Find a feasible starting point
+        sources: dict[str, Tensor] = {m: torch.ones_like(circuit[m]) for m in modules}
+        div_circuit = torch.tensor(0.0)
+        div_complement = torch.tensor(0.0)
+        feasible = False
+        for attempt in range(MAX_INIT_ATTEMPTS):
+            if attempt < MAX_INIT_ATTEMPTS - 1:
+                sources = {
+                    m: torch.randint(0, 2, circuit[m].shape, device=circuit[m].device).float()
+                    for m in modules
+                }
+            else:
+                # Fallback: all ones (full circuit active, most likely to be feasible)
+                sources = {m: torch.ones_like(circuit[m]) for m in modules}
+
+            with torch.no_grad():
+                div_circuit, div_complement, _, _ = eval_divergences(
+                    model, input_tensor, sources, circuit, weight_deltas, loss_type, original_output
+                )
+
+            if div_complement.item() < complement_threshold:
+                feasible = True
+                break
+
+        if not feasible:
+            print(
+                f"  Restart {restart + 1}/{n_restarts}: no feasible start found"
+                f" (best complement div = {div_complement.item():.6f}), skipping"
             )
+            continue
+
+        current_div_circuit = div_circuit
 
         n_sweeps = 0
         while n_coords > 0:
             n_sweeps += 1
 
-            # Batch all single-bit flips: create n_coords copies with one bit flipped each
             batched_sources = {
                 m: sources[m].expand(n_coords, *sources[m].shape[1:]).clone() for m in modules
             }
@@ -266,42 +268,31 @@ def run_greedy(
                     mask_infos=make_mask_infos(with_complement_mask, weight_deltas_and_masks=wdam),
                 )
 
-            per_coord_loss = _per_element_loss_divergence(
-                circuit_out,
-                with_complement_out,
-                original_output,
-                loss_type,
-                reverse,
-                n_coords,
-                eps,
+            per_div_circuit, per_div_complement = _per_element_divergences(
+                circuit_out, with_complement_out, original_output, loss_type, n_coords
             )
 
-            # Apply all improving flips
+            # Accept flips that improve div_circuit AND stay feasible
             applied_flips: list[tuple[str, int]] = []
             for i, (m, flat_idx) in enumerate(coords):
-                if per_coord_loss[i] > current_loss:
+                if (
+                    per_div_circuit[i] > current_div_circuit
+                    and per_div_complement[i] < complement_threshold
+                ):
                     sources[m].reshape(-1)[flat_idx] = 1.0 - sources[m].reshape(-1)[flat_idx]
                     applied_flips.append((m, flat_idx))
 
             if not applied_flips:
                 break
 
-            # Re-evaluate actual loss after all flips applied together
+            # Re-evaluate after all flips applied together
             with torch.no_grad():
-                new_loss, _, _ = eval_loss(
-                    model,
-                    input_tensor,
-                    sources,
-                    circuit,
-                    weight_deltas,
-                    loss_type,
-                    original_output,
-                    reverse,
-                    eps,
+                new_div_circuit, new_div_complement, _, _ = eval_divergences(
+                    model, input_tensor, sources, circuit, weight_deltas, loss_type, original_output
                 )
 
-            if new_loss > current_loss:
-                current_loss = new_loss
+            if new_div_circuit > current_div_circuit and new_div_complement < complement_threshold:
+                current_div_circuit = new_div_circuit
             else:
                 for m, flat_idx in applied_flips:
                     sources[m].reshape(-1)[flat_idx] = 1.0 - sources[m].reshape(-1)[flat_idx]
@@ -309,43 +300,51 @@ def run_greedy(
 
         print(
             f"  Restart {restart + 1}/{n_restarts}:"
-            f" loss = {current_loss.item():.6f} ({n_sweeps} sweeps)"
+            f" div_circuit = {current_div_circuit.item():.6f} ({n_sweeps} sweeps)"
         )
 
-        if current_loss.item() > best_loss_val:
-            best_loss_val = current_loss.item()
+        if current_div_circuit.item() > best_div_circuit_val:
+            best_div_circuit_val = current_div_circuit.item()
             best_sources = {m: sources[m].clone() for m in modules}
             with torch.no_grad():
-                best_final_loss, best_circuit_out, best_with_complement_out = eval_loss(
-                    model,
-                    input_tensor,
-                    sources,
-                    circuit,
-                    weight_deltas,
-                    loss_type,
-                    original_output,
-                    reverse,
-                    eps,
+                (
+                    best_div_circuit_t,
+                    best_div_complement_t,
+                    best_circuit_out,
+                    best_with_complement_out,
+                ) = eval_divergences(
+                    model, input_tensor, sources, circuit, weight_deltas, loss_type, original_output
                 )
 
-    assert best_final_loss is not None
+    assert best_div_circuit_t is not None, "No feasible solution found across all restarts"
+    assert best_div_complement_t is not None
     assert best_sources is not None
     assert best_circuit_out is not None
     assert best_with_complement_out is not None
-    return best_sources, best_final_loss, best_circuit_out, best_with_complement_out
+    return (
+        best_sources,
+        best_div_circuit_t,
+        best_div_complement_t,
+        best_circuit_out,
+        best_with_complement_out,
+    )
 
 
 def print_results(
     circuit: dict[str, Float[Tensor, "... C"]],
     binary_sources: dict[str, Tensor],
-    final_loss: Float[Tensor, ""],
+    div_circuit: Float[Tensor, ""],
+    div_with_complement: Float[Tensor, ""],
     model_type: Literal["toy", "lm", "completeness"],
     ci_thr: float,
+    complement_threshold: float,
 ) -> None:
     print(f"\n{'=' * 60}")
     print(f"Completeness Test Results (CI threshold = {ci_thr})")
     print(f"{'=' * 60}")
-    print(f"Final completeness loss (binary masks): {final_loss.item():.6f}")
+    print(f"Complement threshold: {complement_threshold}")
+    print(f"Best Div(original, circuit):              {div_circuit.item():.6f}")
+    print(f"Best Div(original, circuit + complement): {div_with_complement.item():.6f}")
 
     for module in circuit:
         circuit_mask = circuit[module]
@@ -460,20 +459,22 @@ def print_top_outputs(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SPD Completeness Test (Greedy Divergence)")
+    parser = argparse.ArgumentParser(
+        description="SPD Completeness Test (Greedy Constrained Optimization)"
+    )
     parser.add_argument("model_path", help="Path to decomposed model (wandb or local)")
     parser.add_argument("input", help="Prompt string (LM) or dimension index (toy model)")
+    parser.add_argument(
+        "--complement-threshold",
+        type=float,
+        required=True,
+        help="Max allowed Div(original, circuit + complement)",
+    )
     parser.add_argument(
         "--ci-thr", type=float, default=0.01, help="CI threshold for circuit components"
     )
     parser.add_argument("--n-restarts", type=int, default=10, help="Number of random restarts")
     parser.add_argument("--top-n", type=int, default=10, help="Number of top output dims to show")
-    parser.add_argument(
-        "--reverse",
-        action="store_true",
-        help="Maximize Div(original, circuit + complement) / Div(original, circuit) instead",
-    )
-    parser.add_argument("--eps", type=float, default=1e-8, help="Epsilon for ratio denominator")
     parser.add_argument("--device", default="cpu", help="Device to run on")
     args = parser.parse_args()
 
@@ -508,8 +509,11 @@ def main() -> None:
         original_output = model(input_tensor)
 
     # 6. Greedy coordinate descent optimization
-    print(f"\nRunning greedy coordinate descent ({args.n_restarts} restarts)...")
-    binary_sources, final_loss, circuit_out, with_complement_out = run_greedy(
+    print(
+        f"\nRunning greedy coordinate descent ({args.n_restarts} restarts,"
+        f" complement threshold = {args.complement_threshold})..."
+    )
+    binary_sources, div_circuit, div_complement, circuit_out, with_complement_out = run_greedy(
         model=model,
         input_tensor=input_tensor,
         original_output=original_output,
@@ -517,12 +521,19 @@ def main() -> None:
         weight_deltas=weight_deltas,
         loss_type=config.output_loss_type,
         n_restarts=args.n_restarts,
-        reverse=args.reverse,
-        eps=args.eps,
+        complement_threshold=args.complement_threshold,
     )
 
     # 7. Print results
-    print_results(circuit, binary_sources, final_loss, model_type, args.ci_thr)
+    print_results(
+        circuit,
+        binary_sources,
+        div_circuit,
+        div_complement,
+        model_type,
+        args.ci_thr,
+        args.complement_threshold,
+    )
     print_divergences(original_output, circuit_out, with_complement_out, config.output_loss_type)
     print_top_outputs(
         original_output, circuit_out, with_complement_out, model_type, tokenizer, args.top_n
