@@ -3,9 +3,12 @@
 Uses greedy coordinate descent with random restarts to optimize binary masks directly,
 avoiding the binarization gap of PGD-based optimization.
 
-Maximizes Div(original || masked_without_delta) / (Div(original || masked_with_delta) + eps).
-A high ratio means the delta component carries information that the active components miss,
-as measured by how much closer the with-delta arm is to the original model.
+The "circuit" is the set of active components (CI above threshold). The "complement" is
+everything else: inactive components plus weight deltas.
+
+Maximizes Div(original || circuit) / (Div(original || circuit + complement) + eps).
+A high ratio means the complement carries information that the circuit misses,
+as measured by how much closer the circuit+complement arm is to the original model.
 
 Usage:
     # Toy model (TMS/ResidMLP) — input is a feature dimension index:
@@ -87,7 +90,7 @@ def compute_ci(model: ComponentModel, input_tensor: Tensor) -> dict[str, Float[T
     return ci
 
 
-def get_active_masks(
+def get_circuit_masks(
     ci: dict[str, Float[Tensor, "... C"]], ci_thr: float
 ) -> dict[str, Float[Tensor, "... C"]]:
     return {module: (ci_vals > ci_thr).float() for module, ci_vals in ci.items()}
@@ -97,45 +100,48 @@ def eval_loss(
     model: ComponentModel,
     input_tensor: Tensor,
     sources: dict[str, Tensor],
-    active: dict[str, Float[Tensor, "... C"]],
+    circuit: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
     loss_type: Literal["mse", "kl"],
     original_output: Tensor,
     reverse: bool,
     eps: float,
 ) -> tuple[Float[Tensor, ""], Tensor, Tensor]:
-    mask_no_delta = {m: active[m] * sources[m] for m in active}
-    mask_with_delta = {m: active[m] * sources[m] + (1 - active[m]) for m in active}
+    circuit_mask = {m: circuit[m] * sources[m] for m in circuit}
+    with_complement_mask = {m: circuit[m] * sources[m] + (1 - circuit[m]) for m in circuit}
 
     wdam: dict[str, WeightDeltaAndMask] = {
-        m: (weight_deltas[m], torch.ones(active[m].shape[:-1], device=active[m].device))
-        for m in active
+        m: (weight_deltas[m], torch.ones(circuit[m].shape[:-1], device=circuit[m].device))
+        for m in circuit
     }
 
-    out_no_delta = model(input_tensor, mask_infos=make_mask_infos(mask_no_delta))
-    out_with_delta = model(
-        input_tensor, mask_infos=make_mask_infos(mask_with_delta, weight_deltas_and_masks=wdam)
+    circuit_out = model(input_tensor, mask_infos=make_mask_infos(circuit_mask))
+    with_complement_out = model(
+        input_tensor,
+        mask_infos=make_mask_infos(with_complement_mask, weight_deltas_and_masks=wdam),
     )
 
-    n_examples = out_no_delta.shape[:-1].numel() if loss_type == "kl" else out_no_delta.numel()
-    div_no_delta = (
-        calc_sum_recon_loss_lm(pred=out_no_delta, target=original_output, loss_type=loss_type)
+    n_examples = circuit_out.shape[:-1].numel() if loss_type == "kl" else circuit_out.numel()
+    div_circuit = (
+        calc_sum_recon_loss_lm(pred=circuit_out, target=original_output, loss_type=loss_type)
         / n_examples
     )
-    div_with_delta = (
-        calc_sum_recon_loss_lm(pred=out_with_delta, target=original_output, loss_type=loss_type)
+    div_with_complement = (
+        calc_sum_recon_loss_lm(
+            pred=with_complement_out, target=original_output, loss_type=loss_type
+        )
         / n_examples
     )
     if reverse:
-        loss = torch.log(div_with_delta + eps) - torch.log(div_no_delta + eps)
+        loss = torch.log(div_with_complement + eps) - torch.log(div_circuit + eps)
     else:
-        loss = torch.log(div_no_delta + eps) - torch.log(div_with_delta + eps)
-    return loss, out_no_delta, out_with_delta
+        loss = torch.log(div_circuit + eps) - torch.log(div_with_complement + eps)
+    return loss, circuit_out, with_complement_out
 
 
 def _per_element_loss_divergence(
-    out_no_delta: Tensor,
-    out_with_delta: Tensor,
+    circuit_out: Tensor,
+    with_complement_out: Tensor,
     original_output: Tensor,
     loss_type: Literal["mse", "kl"],
     reverse: bool,
@@ -143,29 +149,33 @@ def _per_element_loss_divergence(
     eps: float,
 ) -> Float[Tensor, " n_batch"]:
     """Compute per-batch-element completeness loss (log-ratio variant)."""
-    original_expanded = original_output.expand_as(out_no_delta)
+    original_expanded = original_output.expand_as(circuit_out)
     match loss_type:
         case "mse":
-            div_no_delta = ((out_no_delta - original_expanded) ** 2).flatten(1).mean(1)
-            div_with_delta = ((out_with_delta - original_expanded) ** 2).flatten(1).mean(1)
+            div_circuit = ((circuit_out - original_expanded) ** 2).flatten(1).mean(1)
+            div_with_complement = (
+                ((with_complement_out - original_expanded) ** 2).flatten(1).mean(1)
+            )
         case "kl":
             p_orig = torch.softmax(original_expanded, dim=-1)
-            log_q_no_delta = torch.log_softmax(out_no_delta, dim=-1)
-            kl_no_delta = F.kl_div(log_q_no_delta, p_orig, reduction="none").sum(dim=-1)
-            div_no_delta = kl_no_delta.reshape(n_batch, -1).mean(1)
-            log_q_with_delta = torch.log_softmax(out_with_delta, dim=-1)
-            kl_with_delta = F.kl_div(log_q_with_delta, p_orig, reduction="none").sum(dim=-1)
-            div_with_delta = kl_with_delta.reshape(n_batch, -1).mean(1)
+            log_q_circuit = torch.log_softmax(circuit_out, dim=-1)
+            kl_circuit = F.kl_div(log_q_circuit, p_orig, reduction="none").sum(dim=-1)
+            div_circuit = kl_circuit.reshape(n_batch, -1).mean(1)
+            log_q_with_complement = torch.log_softmax(with_complement_out, dim=-1)
+            kl_with_complement = F.kl_div(log_q_with_complement, p_orig, reduction="none").sum(
+                dim=-1
+            )
+            div_with_complement = kl_with_complement.reshape(n_batch, -1).mean(1)
     if reverse:
-        return torch.log(div_with_delta + eps) - torch.log(div_no_delta + eps)
-    return torch.log(div_no_delta + eps) - torch.log(div_with_delta + eps)
+        return torch.log(div_with_complement + eps) - torch.log(div_circuit + eps)
+    return torch.log(div_circuit + eps) - torch.log(div_with_complement + eps)
 
 
 def run_greedy(
     model: ComponentModel,
     input_tensor: Tensor,
     original_output: Tensor,
-    active: dict[str, Float[Tensor, "... C"]],
+    circuit: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
     loss_type: Literal["mse", "kl"],
     n_restarts: int,
@@ -177,32 +187,32 @@ def run_greedy(
     Each sweep batches all single-bit flips into one forward pass instead of evaluating
     each flip individually.
 
-    Default: Div(original, no_delta) / (Div(original, with_delta) + eps).
-    Reverse: Div(original, with_delta) / (Div(original, no_delta) + eps).
+    Default: Div(original, circuit) / (Div(original, circuit + complement) + eps).
+    Reverse: Div(original, circuit + complement) / (Div(original, circuit) + eps).
 
-    Returns (best_sources, best_loss, out_no_delta, out_with_delta).
+    Returns (best_sources, best_loss, circuit_out, with_complement_out).
     """
-    modules = list(active.keys())
-    # Only iterate over coordinates where the active mask is non-zero
+    modules = list(circuit.keys())
+    # Only iterate over coordinates where the circuit mask is non-zero
     coords: list[tuple[str, int]] = []
     for m in modules:
-        flat_active = active[m].reshape(-1)
-        for i in range(flat_active.numel()):
-            if flat_active[i] > 0:
+        flat_circuit = circuit[m].reshape(-1)
+        for i in range(flat_circuit.numel()):
+            if flat_circuit[i] > 0:
                 coords.append((m, i))
 
     n_coords = len(coords)
-    print(f"  {n_coords} active coordinates")
+    print(f"  {n_coords} circuit coordinates")
 
     best_loss_val = float("-inf")
     best_final_loss: Float[Tensor, ""] | None = None
     best_sources: dict[str, Tensor] | None = None
-    best_out_no_delta: Tensor | None = None
-    best_out_with_delta: Tensor | None = None
+    best_circuit_out: Tensor | None = None
+    best_with_complement_out: Tensor | None = None
 
     for restart in range(n_restarts):
         sources: dict[str, Tensor] = {
-            m: torch.randint(0, 2, active[m].shape, device=active[m].device).float()
+            m: torch.randint(0, 2, circuit[m].shape, device=circuit[m].device).float()
             for m in modules
         }
 
@@ -211,7 +221,7 @@ def run_greedy(
                 model,
                 input_tensor,
                 sources,
-                active,
+                circuit,
                 weight_deltas,
                 loss_type,
                 original_output,
@@ -232,30 +242,33 @@ def run_greedy(
                     1.0 - batched_sources[m][i].reshape(-1)[flat_idx]
                 )
 
-            batched_active = {m: active[m].expand(n_coords, *active[m].shape[1:]) for m in modules}
-            mask_no_delta = {m: batched_active[m] * batched_sources[m] for m in modules}
-            mask_with_delta = {
-                m: batched_active[m] * batched_sources[m] + (1 - batched_active[m]) for m in modules
+            batched_circuit = {
+                m: circuit[m].expand(n_coords, *circuit[m].shape[1:]) for m in modules
+            }
+            circuit_mask = {m: batched_circuit[m] * batched_sources[m] for m in modules}
+            with_complement_mask = {
+                m: batched_circuit[m] * batched_sources[m] + (1 - batched_circuit[m])
+                for m in modules
             }
             wdam: dict[str, WeightDeltaAndMask] = {
                 m: (
                     weight_deltas[m],
-                    torch.ones(batched_active[m].shape[:-1], device=active[m].device),
+                    torch.ones(batched_circuit[m].shape[:-1], device=circuit[m].device),
                 )
                 for m in modules
             }
             batched_input = input_tensor.expand(n_coords, *input_tensor.shape[1:])
 
             with torch.no_grad():
-                out_no_delta = model(batched_input, mask_infos=make_mask_infos(mask_no_delta))
-                out_with_delta = model(
+                circuit_out = model(batched_input, mask_infos=make_mask_infos(circuit_mask))
+                with_complement_out = model(
                     batched_input,
-                    mask_infos=make_mask_infos(mask_with_delta, weight_deltas_and_masks=wdam),
+                    mask_infos=make_mask_infos(with_complement_mask, weight_deltas_and_masks=wdam),
                 )
 
             per_coord_loss = _per_element_loss_divergence(
-                out_no_delta,
-                out_with_delta,
+                circuit_out,
+                with_complement_out,
                 original_output,
                 loss_type,
                 reverse,
@@ -279,7 +292,7 @@ def run_greedy(
                     model,
                     input_tensor,
                     sources,
-                    active,
+                    circuit,
                     weight_deltas,
                     loss_type,
                     original_output,
@@ -303,11 +316,11 @@ def run_greedy(
             best_loss_val = current_loss.item()
             best_sources = {m: sources[m].clone() for m in modules}
             with torch.no_grad():
-                best_final_loss, best_out_no_delta, best_out_with_delta = eval_loss(
+                best_final_loss, best_circuit_out, best_with_complement_out = eval_loss(
                     model,
                     input_tensor,
                     sources,
-                    active,
+                    circuit,
                     weight_deltas,
                     loss_type,
                     original_output,
@@ -317,13 +330,13 @@ def run_greedy(
 
     assert best_final_loss is not None
     assert best_sources is not None
-    assert best_out_no_delta is not None
-    assert best_out_with_delta is not None
-    return best_sources, best_final_loss, best_out_no_delta, best_out_with_delta
+    assert best_circuit_out is not None
+    assert best_with_complement_out is not None
+    return best_sources, best_final_loss, best_circuit_out, best_with_complement_out
 
 
 def print_results(
-    active: dict[str, Float[Tensor, "... C"]],
+    circuit: dict[str, Float[Tensor, "... C"]],
     binary_sources: dict[str, Tensor],
     final_loss: Float[Tensor, ""],
     model_type: Literal["toy", "lm", "completeness"],
@@ -334,35 +347,35 @@ def print_results(
     print(f"{'=' * 60}")
     print(f"Final completeness loss (binary masks): {final_loss.item():.6f}")
 
-    for module in active:
-        active_mask = active[module]
+    for module in circuit:
+        circuit_mask = circuit[module]
         binary = binary_sources[module]
 
         print(f"\nModule: {module}")
 
         match model_type:
             case "toy":
-                active_indices = active_mask[0].nonzero(as_tuple=True)[0].tolist()
-                unmasked = ((active_mask[0] * binary[0]) > 0.5).nonzero(as_tuple=True)[0].tolist()
-                print(f"  Active components: {active_indices}, unmasked: {unmasked}")
+                circuit_indices = circuit_mask[0].nonzero(as_tuple=True)[0].tolist()
+                unmasked = ((circuit_mask[0] * binary[0]) > 0.5).nonzero(as_tuple=True)[0].tolist()
+                print(f"  Circuit components: {circuit_indices}, unmasked: {unmasked}")
             case "lm" | "completeness":
-                for pos in range(active_mask.shape[1]):
-                    active_indices = active_mask[0, pos].nonzero(as_tuple=True)[0].tolist()
+                for pos in range(circuit_mask.shape[1]):
+                    circuit_indices = circuit_mask[0, pos].nonzero(as_tuple=True)[0].tolist()
                     unmasked = (
-                        ((active_mask[0, pos] * binary[0, pos]) > 0.5)
+                        ((circuit_mask[0, pos] * binary[0, pos]) > 0.5)
                         .nonzero(as_tuple=True)[0]
                         .tolist()
                     )
                     print(
-                        f"  Position {pos}: active components: {active_indices},"
+                        f"  Position {pos}: circuit components: {circuit_indices},"
                         f" unmasked: {unmasked}"
                     )
 
 
 def print_divergences(
     original: Tensor,
-    out_no_delta: Tensor,
-    out_with_delta: Tensor,
+    circuit_out: Tensor,
+    with_complement_out: Tensor,
     loss_type: Literal["mse", "kl"],
 ) -> None:
     print(f"\n{'=' * 60}")
@@ -371,21 +384,23 @@ def print_divergences(
 
     match loss_type:
         case "mse":
-            mse_no_delta = ((original - out_no_delta) ** 2).mean().item()
-            mse_with_delta = ((original - out_with_delta) ** 2).mean().item()
-            print(f"  MSE(original, no_delta)   = {mse_no_delta:.6f}")
-            print(f"  MSE(original, with_delta) = {mse_with_delta:.6f}")
+            mse_circuit = ((original - circuit_out) ** 2).mean().item()
+            mse_with_complement = ((original - with_complement_out) ** 2).mean().item()
+            print(f"  MSE(original, circuit)              = {mse_circuit:.6f}")
+            print(f"  MSE(original, circuit + complement) = {mse_with_complement:.6f}")
         case "kl":
-            kl_no_delta = calc_kl_divergence_lm(pred=out_no_delta, target=original).item()
-            kl_with_delta = calc_kl_divergence_lm(pred=out_with_delta, target=original).item()
-            print(f"  KL(original, no_delta)    = {kl_no_delta:.6f}")
-            print(f"  KL(original, with_delta)  = {kl_with_delta:.6f}")
+            kl_circuit = calc_kl_divergence_lm(pred=circuit_out, target=original).item()
+            kl_with_complement = calc_kl_divergence_lm(
+                pred=with_complement_out, target=original
+            ).item()
+            print(f"  KL(original, circuit)              = {kl_circuit:.6f}")
+            print(f"  KL(original, circuit + complement) = {kl_with_complement:.6f}")
 
 
 def print_top_outputs(
     original: Tensor,
-    out_no_delta: Tensor,
-    out_with_delta: Tensor,
+    circuit_out: Tensor,
+    with_complement_out: Tensor,
     model_type: Literal["toy", "lm", "completeness"],
     tokenizer: PreTrainedTokenizerBase | None,
     k: int = 10,
@@ -397,47 +412,51 @@ def print_top_outputs(
     match model_type:
         case "toy":
             _, indices = torch.topk(original[0].abs(), k=min(k, original.shape[-1]))
-            print(f"  {'Dim':<6} {'Original':>10} {'No-Delta':>10} {'With-Delta':>12}")
+            print(f"  {'Dim':<6} {'Original':>10} {'Circuit':>10} {'+Complement':>12}")
             print(f"  {'-' * 42}")
             for idx in indices:
                 i = int(idx)
                 print(
                     f"  {i:<6} {original[0, i].item():>10.4f}"
-                    f" {out_no_delta[0, i].item():>10.4f}"
-                    f" {out_with_delta[0, i].item():>12.4f}"
+                    f" {circuit_out[0, i].item():>10.4f}"
+                    f" {with_complement_out[0, i].item():>12.4f}"
                 )
         case "completeness":
+            # Output is [batch, vocab_size] (model returns logits at the prediction position)
             probs_orig = torch.softmax(original[0], dim=-1)
-            probs_no = torch.softmax(out_no_delta[0], dim=-1)
-            probs_with = torch.softmax(out_with_delta[0], dim=-1)
+            probs_circuit = torch.softmax(circuit_out[0], dim=-1)
+            probs_with_complement = torch.softmax(with_complement_out[0], dim=-1)
 
             _, indices = torch.topk(probs_orig, k=min(k, probs_orig.shape[-1]))
-            print(f"  {'Token idx':<12} {'Original':>10} {'No-Delta':>10} {'With-Delta':>12}")
+            print(f"  {'Token idx':<12} {'Original':>10} {'Circuit':>10} {'+Complement':>12}")
             print(f"  {'-' * 48}")
             for idx in indices:
                 i = int(idx)
                 print(
                     f"  {i:<12} {probs_orig[i].item():>10.4f}"
-                    f" {probs_no[i].item():>10.4f}"
-                    f" {probs_with[i].item():>12.4f}"
+                    f" {probs_circuit[i].item():>10.4f}"
+                    f" {probs_with_complement[i].item():>12.4f}"
                 )
         case "lm":
             assert tokenizer is not None
-            probs_orig = torch.softmax(original[0, -1], dim=-1)
-            probs_no = torch.softmax(out_no_delta[0, -1], dim=-1)
-            probs_with = torch.softmax(out_with_delta[0, -1], dim=-1)
+            seq_len = original.shape[1]
+            for pos in range(seq_len):
+                probs_orig = torch.softmax(original[0, pos], dim=-1)
+                probs_circuit = torch.softmax(circuit_out[0, pos], dim=-1)
+                probs_with_complement = torch.softmax(with_complement_out[0, pos], dim=-1)
 
-            _, indices = torch.topk(probs_orig, k=min(k, probs_orig.shape[-1]))
-            print(f"  {'Token':<20} {'Original':>10} {'No-Delta':>10} {'With-Delta':>12}")
-            print(f"  {'-' * 56}")
-            for idx in indices:
-                i = int(idx)
-                token_str = repr(tokenizer.decode([i]))
-                print(
-                    f"  {token_str:<20} {probs_orig[i].item():>10.4f}"
-                    f" {probs_no[i].item():>10.4f}"
-                    f" {probs_with[i].item():>12.4f}"
-                )
+                print(f"\n  Position {pos}:")
+                _, indices = torch.topk(probs_orig, k=min(k, probs_orig.shape[-1]))
+                print(f"  {'Token':<20} {'Original':>10} {'Circuit':>10} {'+Complement':>12}")
+                print(f"  {'-' * 56}")
+                for idx in indices:
+                    i = int(idx)
+                    token_str = repr(tokenizer.decode([i]))
+                    print(
+                        f"  {token_str:<20} {probs_orig[i].item():>10.4f}"
+                        f" {probs_circuit[i].item():>10.4f}"
+                        f" {probs_with_complement[i].item():>12.4f}"
+                    )
 
 
 def main() -> None:
@@ -445,14 +464,14 @@ def main() -> None:
     parser.add_argument("model_path", help="Path to decomposed model (wandb or local)")
     parser.add_argument("input", help="Prompt string (LM) or dimension index (toy model)")
     parser.add_argument(
-        "--ci-thr", type=float, default=0.01, help="CI threshold for active components"
+        "--ci-thr", type=float, default=0.01, help="CI threshold for circuit components"
     )
     parser.add_argument("--n-restarts", type=int, default=10, help="Number of random restarts")
     parser.add_argument("--top-n", type=int, default=10, help="Number of top output dims to show")
     parser.add_argument(
         "--reverse",
         action="store_true",
-        help="Maximize Div(original, with_delta) / Div(original, no_delta) instead",
+        help="Maximize Div(original, circuit + complement) / Div(original, circuit) instead",
     )
     parser.add_argument("--eps", type=float, default=1e-8, help="Epsilon for ratio denominator")
     parser.add_argument("--device", default="cpu", help="Device to run on")
@@ -475,11 +494,11 @@ def main() -> None:
         model, args.input, model_type, config.tokenizer_name, device
     )
 
-    # 3. Compute CI values and identify active components
+    # 3. Compute CI values and identify circuit components
     ci = compute_ci(model, input_tensor)
-    active = get_active_masks(ci, args.ci_thr)
-    n_active = sum(int(mask.any(dim=-1).sum()) for mask in active.values())
-    print(f"Computing causal importances... {n_active} active components")
+    circuit = get_circuit_masks(ci, args.ci_thr)
+    n_circuit = sum(int(mask.any(dim=-1).sum()) for mask in circuit.values())
+    print(f"Computing causal importances... {n_circuit} circuit components")
 
     # 4. Compute weight deltas
     weight_deltas = model.calc_weight_deltas()
@@ -490,11 +509,11 @@ def main() -> None:
 
     # 6. Greedy coordinate descent optimization
     print(f"\nRunning greedy coordinate descent ({args.n_restarts} restarts)...")
-    binary_sources, final_loss, out_no_delta, out_with_delta = run_greedy(
+    binary_sources, final_loss, circuit_out, with_complement_out = run_greedy(
         model=model,
         input_tensor=input_tensor,
         original_output=original_output,
-        active=active,
+        circuit=circuit,
         weight_deltas=weight_deltas,
         loss_type=config.output_loss_type,
         n_restarts=args.n_restarts,
@@ -503,10 +522,10 @@ def main() -> None:
     )
 
     # 7. Print results
-    print_results(active, binary_sources, final_loss, model_type, args.ci_thr)
-    print_divergences(original_output, out_no_delta, out_with_delta, config.output_loss_type)
+    print_results(circuit, binary_sources, final_loss, model_type, args.ci_thr)
+    print_divergences(original_output, circuit_out, with_complement_out, config.output_loss_type)
     print_top_outputs(
-        original_output, out_no_delta, out_with_delta, model_type, tokenizer, args.top_n
+        original_output, circuit_out, with_complement_out, model_type, tokenizer, args.top_n
     )
 
 
