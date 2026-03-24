@@ -14,6 +14,7 @@ Usage:
         --output_dir /tmp/compare_matched_components
 """
 
+import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -261,6 +262,38 @@ def plot_matched_grid(
     print(f"Saved {output_path}")
 
 
+def write_tsv(results: list[MatrixMatchResult], output_path: Path) -> None:
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(
+            [
+                "layer_idx",
+                "matrix_type",
+                "pair_idx",
+                "weight_cos_sim",
+                "v_cos_sim",
+                "u_cos_sim",
+                "norm_a",
+                "norm_b",
+            ]
+        )
+        for r in results:
+            for i, p in enumerate(r.pairs):
+                writer.writerow(
+                    [
+                        r.layer_idx,
+                        r.matrix_type,
+                        i,
+                        f"{p.weight_cos_sim:.6f}",
+                        f"{p.v_cos_sim:.6f}",
+                        f"{p.u_cos_sim:.6f}",
+                        f"{p.norm_a:.6f}",
+                        f"{p.norm_b:.6f}",
+                    ]
+                )
+    print(f"Saved {output_path}")
+
+
 @torch.no_grad()
 def main(
     wandb_path_a: str,
@@ -324,6 +357,7 @@ def main(
         return
 
     plot_matched_grid(results, decomp_a.label, decomp_b.label, out / "matched_components.png")
+    write_tsv(results, out / "matched_components.tsv")
 
 
 if __name__ == "__main__":
