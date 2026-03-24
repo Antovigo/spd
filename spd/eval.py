@@ -396,11 +396,7 @@ def init_metric(
                 output_loss_type=run_config.output_loss_type,
             )
         case WeightMagnitudeConfig():
-            metric = WeightMagnitude(
-                model=model,
-                run_config=run_config,
-                device=device,
-            )
+            metric = WeightMagnitude(model=model)
         case (
             PGDMultiBatchReconLossConfig()
             | PGDMultiBatchReconSubsetLossConfig()
