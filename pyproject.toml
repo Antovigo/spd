@@ -31,8 +31,10 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "orjson",
+    "aiolimiter>=1.2",
     "openrouter>=0.1.1",
     "httpx>=0.28.0",
+    "zstandard" # For streaming datasets
 ]
 
 [dependency-groups]
@@ -40,6 +42,7 @@ dev = [
     "pytest",
     "pytest-cov", # for coverage reports
     "pytest-xdist", # parallel test execution
+    "pytest-testmon", # only re-run tests affected by code changes
     "ruff",
     "basedpyright<1.32.0", # pyright and wandb issues, see https://github.com/goodfire-ai/spd/pull/232
     "pre-commit",
@@ -53,6 +56,7 @@ spd-clustering = "spd.clustering.scripts.run_pipeline:cli"
 spd-harvest = "spd.harvest.scripts.run_slurm_cli:cli"
 spd-autointerp = "spd.autointerp.scripts.run_slurm_cli:cli"
 spd-attributions = "spd.dataset_attributions.scripts.run_slurm_cli:cli"
+spd-postprocess = "spd.postprocess.cli:cli"
 
 [build-system]
 requires = ["setuptools", "wheel"]
@@ -135,6 +139,7 @@ reportUnknownLambdaType = false
 
 
 [tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
 filterwarnings = [
     # https://github.com/google/python-fire/pull/447
     "ignore::DeprecationWarning:fire:59",

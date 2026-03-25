@@ -38,7 +38,7 @@ from spd.metrics import (
     unmasked_recon_loss,
 )
 from spd.models.component_model import CIOutputs, ComponentModel
-from spd.persistent_pgd import PPGDMasks, persistent_pgd_recon_loss
+from spd.persistent_pgd import PersistentPGDState
 
 
 def compute_losses(
@@ -48,12 +48,13 @@ def compute_losses(
     ci: CIOutputs,
     target_out: Tensor,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
-    pre_weight_acts: dict[str, Float[Tensor, "..."]],
     current_frac_of_training: float,
     sampling: SamplingType,
     use_delta_component: bool,
     n_mask_samples: int,
-    ppgd_maskss: dict[PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PPGDMasks],
+    ppgd_states: dict[
+        PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig, PersistentPGDState
+    ],
     output_loss_type: Literal["mse", "kl"],
 ) -> dict[LossMetricConfigType, Float[Tensor, ""]]:
     """Compute losses for each config and return a dict mapping config to loss tensor."""
@@ -178,20 +179,16 @@ def compute_losses(
                     sampling=sampling,
                     n_mask_samples=n_mask_samples,
                     batch=batch,
-                    pre_weight_acts=pre_weight_acts,
                     ci=ci.lower_leaky,
                     weight_deltas=weight_deltas if use_delta_component else None,
                 )
             case PersistentPGDReconLossConfig() | PersistentPGDReconSubsetLossConfig():
-                ppgd_masks = ppgd_maskss[cfg]
-                loss = persistent_pgd_recon_loss(
+                loss = ppgd_states[cfg].compute_recon_loss(
                     model=model,
                     batch=batch,
-                    ppgd_masks=ppgd_masks,
+                    target_out=target_out,
                     ci=ci.lower_leaky,
                     weight_deltas=weight_deltas if use_delta_component else None,
-                    target_out=target_out,
-                    output_loss_type=output_loss_type,
                 )
 
         losses[cfg] = loss

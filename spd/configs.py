@@ -301,6 +301,10 @@ class LMTaskConfig(BaseConfig):
         default=False,
         description="Whether to use a streaming dataset",
     )
+    dataset_seed: int | None = Field(
+        default=None,
+        description="Seed for dataset shuffling/sampling. When None, uses the global `seed`.",
+    )
 
 
 class ModulePatternInfoConfig(BaseConfig):
@@ -447,65 +451,122 @@ class PGDMultiBatchReconSubsetLossConfig(PGDMultiBatchConfig):
 
 class SignPGDConfig(BaseConfig):
     type: Literal["sign"] = "sign"
-    step_size: float = Field(..., description="PGD step size for mask updates")
+    lr_schedule: ScheduleConfig
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_step_size(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "step_size" in data and "lr_schedule" not in data:
+            data["lr_schedule"] = {
+                "start_val": data.pop("step_size"),
+                "warmup_pct": 0.0,
+                "final_val_frac": 1.0,
+                "fn_type": "constant",
+            }
+        return data
 
 
 class AdamPGDConfig(BaseConfig):
     type: Literal["adam"] = "adam"
-    lr: float = Field(..., description="Learning rate for Adam PGD")
     beta1: Probability = Field(default=0.9, description="Adam beta1 for masks")
     beta2: Probability = Field(default=0.999, description="Adam beta2 for masks")
     eps: NonNegativeFloat = Field(default=1e-8, description="Adam epsilon for masks")
+    lr_schedule: ScheduleConfig
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_lr(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "lr" in data and "lr_schedule" not in data:
+            data["lr_schedule"] = {
+                "start_val": data.pop("lr"),
+                "warmup_pct": 0.0,
+                "final_val_frac": 1.0,
+                "fn_type": "constant",
+            }
+        return data
 
 
 PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
 
 
-class SingleMaskScope(BaseConfig):
-    type: Literal["single_mask"] = "single_mask"
+class SingleSourceScope(BaseConfig):
+    type: Literal["single_source"] = "single_source"
 
 
 class BroadcastAcrossBatchScope(BaseConfig):
     type: Literal["broadcast_across_batch"] = "broadcast_across_batch"
 
 
-class BatchInvariantScope(BaseConfig):
-    """Masks of shape (N, S, C) where N divides both batch_size and eval_batch_size.
+class RepeatAcrossBatchScope(BaseConfig):
+    """Sources of shape (N, S, C) where N divides both batch_size and eval_batch_size.
 
     Repeated along batch dim at forward time: (N, S, C) -> (B, S, C).
     """
 
-    type: Literal["batch_invariant"] = "batch_invariant"
-    n_masks: PositiveInt
+    type: Literal["repeat_across_batch"] = "repeat_across_batch"
+    n_sources: PositiveInt
 
 
-PersistentPGDMaskScope = Annotated[
-    SingleMaskScope | BroadcastAcrossBatchScope | BatchInvariantScope,
+class PerBatchPerPositionScope(BaseConfig):
+    """Sources of shape (B, S, C) — one source per batch element per position, separate across
+    ranks.
+
+    Unlike other scopes, gradients are NOT all-reduced across ranks, so each rank
+    maintains fully independent sources for its own batch elements.
+    """
+
+    type: Literal["per_batch_per_position"] = "per_batch_per_position"
+
+
+PersistentPGDSourceScope = Annotated[
+    SingleSourceScope
+    | BroadcastAcrossBatchScope
+    | RepeatAcrossBatchScope
+    | PerBatchPerPositionScope,
     Field(discriminator="type"),
 ]
 
 
-_PPGD_SCOPE_COMPAT = {"single_mask", "broadcast_across_batch"}
-
-
 def _coerce_ppgd_scope(config_dict: dict[str, Any]) -> None:
-    """Backwards compat: convert bare string scope to {type: string}."""
-    if isinstance(config_dict.get("scope"), str) and config_dict["scope"] in _PPGD_SCOPE_COMPAT:
-        config_dict["scope"] = {"type": config_dict["scope"]}
+    """Backwards compat: migrate old scope format/names to current names."""
+    scope = config_dict.get("scope")
+    if isinstance(scope, str):
+        scope = {"type": scope}
+        config_dict["scope"] = scope
+    if not isinstance(scope, dict):
+        return
+    match scope.get("type"):
+        case "single_mask":
+            scope["type"] = "single_source"
+        case "batch_invariant":
+            scope["type"] = "repeat_across_batch"
+            if "n_masks" in scope:
+                scope["n_sources"] = scope.pop("n_masks")
+        case "per_batch" | "unique_per_batch_per_token":
+            scope["type"] = "per_batch_per_position"
+        case _:
+            pass
 
 
-class PersistentPGDReconLossConfig(LossMetricConfig):
-    """Config for persistent PGD reconstruction loss.
+class _PersistentPGDBaseConfig(LossMetricConfig):
+    """Shared fields for persistent PGD configs.
 
-    Unlike standard PGD which reinitializes masks each step and runs N optimization steps,
-    PersistentPGD maintains persistent masks that receive one gradient update per training step.
-    This amortizes PGD optimization across training - getting the benefit of many PGD steps
-    without the per-step computational cost.
+    Persistent PGD maintains persistent masks that receive one gradient update per training step,
+    amortizing PGD optimization across training.
     """
 
-    classname: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
     optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
-    scope: PersistentPGDMaskScope
+    scope: PersistentPGDSourceScope
+    use_sigmoid_parameterization: bool = False
+    n_warmup_steps: Annotated[
+        NonNegativeInt,
+        Field(
+            description="Number of additional inner PGD source-optimization steps to run on each "
+            "batch before the final loss computation. Each training step always performs one PPGD "
+            "source update (grad + step) as part of the outer loop; these warmup steps add extra "
+            "source refinement iterations on the same batch in an inner loop beforehand."
+        ),
+    ] = 0
 
     @model_validator(mode="before")
     @classmethod
@@ -515,30 +576,61 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
         return data
 
 
-class PersistentPGDReconSubsetLossConfig(LossMetricConfig):
-    """Config for persistent PGD reconstruction loss with subset routing.
+class PersistentPGDReconLossConfig(_PersistentPGDBaseConfig):
+    classname: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
 
-    Like PersistentPGDReconLossConfig but routes to a subset of modules per position,
-    similar to how StochasticReconSubsetLoss relates to StochasticReconLoss.
-    """
 
+class PersistentPGDReconSubsetLossConfig(_PersistentPGDBaseConfig):
     classname: Literal["PersistentPGDReconSubsetLoss"] = "PersistentPGDReconSubsetLoss"
-    optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
-    scope: PersistentPGDMaskScope
     routing: Annotated[
         SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _compat_scope(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            _coerce_ppgd_scope(data)
-        return data
-
 
 class StochasticHiddenActsReconLossConfig(LossMetricConfig):
     classname: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
+
+
+class CIHiddenActsReconLossConfig(BaseConfig):
+    classname: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
+
+
+class PersistentPGDReconEvalConfig(BaseConfig):
+    classname: Literal["PersistentPGDReconEval"] = "PersistentPGDReconEval"
+
+
+class PersistentPGDReconSubsetEvalConfig(BaseConfig):
+    classname: Literal["PersistentPGDReconSubsetEval"] = "PersistentPGDReconSubsetEval"
+
+
+class _AttnPatternsReconLossBaseConfig(BaseConfig):
+    """Attention pattern reconstruction loss config.
+
+    Supports standard attention and RoPE attention (auto-detected from the parent attention
+    module). Models using ALiBi, QK-norm, sliding window, etc. are not supported.
+    """
+
+    n_heads: int
+    q_proj_path: str | None = None
+    k_proj_path: str | None = None
+    c_attn_path: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_paths(self) -> Self:
+        has_separate = self.q_proj_path is not None and self.k_proj_path is not None
+        has_combined = self.c_attn_path is not None
+        assert has_separate != has_combined, (
+            "Specify either (q_proj_path, k_proj_path) or c_attn_path, not both/neither"
+        )
+        return self
+
+
+class CIMaskedAttnPatternsReconLossConfig(_AttnPatternsReconLossBaseConfig):
+    classname: Literal["CIMaskedAttnPatternsReconLoss"] = "CIMaskedAttnPatternsReconLoss"
+
+
+class StochasticAttnPatternsReconLossConfig(_AttnPatternsReconLossBaseConfig):
+    classname: Literal["StochasticAttnPatternsReconLoss"] = "StochasticAttnPatternsReconLoss"
 
 
 #### Metrics that can only be used in eval ####
@@ -615,16 +707,21 @@ LossMetricConfigType = FaithfulnessLossConfig | ImportanceMinimalityLossConfig |
 
 EvalOnlyMetricConfigType = (
     CEandKLLossesConfig
+    | CIHiddenActsReconLossConfig
     | CIHistogramsConfig
     | CI_L0Config
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
+    | PersistentPGDReconEvalConfig
+    | PersistentPGDReconSubsetEvalConfig
     | PermutedCIPlotsConfig
     | UVPlotsConfig
     | StochasticReconSubsetCEAndKLConfig
     | PGDMultiBatchReconLossConfig
     | PGDMultiBatchReconSubsetLossConfig
+    | CIMaskedAttnPatternsReconLossConfig
+    | StochasticAttnPatternsReconLossConfig
 )
 MetricConfigType = LossMetricConfigType | EvalOnlyMetricConfigType
 
@@ -647,9 +744,24 @@ class Config(BaseConfig):
         default="",
         description="Prefix prepended to an auto-generated WandB run name",
     )
+    label: str = Field(
+        default="",
+        description="Short human-readable label for this run or series of runs",
+    )
+    notes: str = Field(
+        default="",
+        description="Free-form notes about this run's purpose or configuration choices",
+    )
 
     # --- General ---
-    seed: int = Field(default=0, description="Random seed for reproducibility")
+    seed: int = Field(
+        default=0,
+        description="Random seed for reproducibility. Does not affect dataset shuffling if dataset_seed is set in TaskConfig.",
+    )
+    autocast_bf16: bool = Field(
+        default=True,
+        description="Whether to use torch.autocast with bfloat16 mixed precision",
+    )
     n_mask_samples: PositiveInt = Field(
         ...,
         description="Number of stochastic masks to sample when using stochastic recon losses",
@@ -697,6 +809,11 @@ class Config(BaseConfig):
 
         return result
 
+    init_spd_checkpoint: str | None = Field(
+        default=None,
+        description="Path to a .pth checkpoint from a prior SPD run for component/CI initialization",
+    )
+
     use_delta_component: bool = Field(
         default=True,
         description="If True, use an extra component containing the difference between the target "
@@ -722,14 +839,7 @@ class Config(BaseConfig):
     steps: NonNegativeInt = Field(..., description="Total number of optimisation steps")
     batch_size: PositiveInt = Field(
         ...,
-        description=(
-            "The effective batch size used for optimisation. Depending on gradient accumulation "
-            "steps, it may be processed as multiple micro-batches."
-        ),
-    )
-    gradient_accumulation_steps: PositiveInt = Field(
-        default=1,
-        description="Number of steps to accumulate gradients over before updating parameters",
+        description="Total batch size (may be divided across multiple devices).",
     )
     grad_clip_norm_components: PositiveFloat | None = Field(
         default=None,
@@ -753,10 +863,6 @@ class Config(BaseConfig):
         default=0.0,
         description="Weight decay for warmup phase optimizer",
     )
-
-    @property
-    def microbatch_size(self) -> PositiveInt:
-        return self.batch_size // self.gradient_accumulation_steps
 
     # --- Logging & Saving ---
     train_log_freq: PositiveInt = Field(
@@ -858,6 +964,7 @@ class Config(BaseConfig):
         "lr_exponential_halflife",
         "out_dir",
         "n_examples_until_dead",
+        "gradient_accumulation_steps",
     ]
     RENAMED_CONFIG_KEYS: ClassVar[dict[str, str]] = {
         "grad_clip_norm": "grad_clip_norm_components",
@@ -894,6 +1001,13 @@ class Config(BaseConfig):
                 # configs with it
                 new_vals = [cfg for cfg in val if "extra_init_kwargs" not in cfg]
                 config_dict[key] = new_vals
+
+        # Remap simple_stories_train → spd.pretrain (models moved in-tree)
+        pmc = config_dict.get("pretrained_model_class", "")
+        if pmc.startswith("simple_stories_train.models."):
+            config_dict["pretrained_model_class"] = pmc.replace(
+                "simple_stories_train.models.", "spd.pretrain.models.", 1
+            )
 
         if "eval_batch_size" not in config_dict:
             config_dict["eval_batch_size"] = config_dict["batch_size"]
@@ -966,10 +1080,6 @@ class Config(BaseConfig):
 
     @model_validator(mode="after")
     def validate_model(self) -> Self:
-        assert self.batch_size % self.gradient_accumulation_steps == 0, (
-            "batch_size must be divisible by gradient_accumulation_steps"
-        )
-
         assert self.slow_eval_freq % self.eval_freq == 0, (
             "slow_eval_freq must be a multiple of eval_freq"
         )
@@ -981,23 +1091,11 @@ class Config(BaseConfig):
             assert cfg.coeff is not None, "All loss_metric_configs must have a coeff"
 
         if any(
-            isinstance(cfg, PGDConfig) and cfg.mask_scope == "shared_across_batch"
+            isinstance(cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig)
             for cfg in self.loss_metric_configs
         ):
-            assert self.gradient_accumulation_steps == 1, (
-                "gradient_accumulation_steps must be 1 if we are using PGD losses with "
-                "mask_scope='shared_across_batch'"
+            assert isinstance(self.task_config, LMTaskConfig), (
+                "Persistent PGD losses are only supported with LM tasks"
             )
-
-        for cfg in self.loss_metric_configs:
-            if isinstance(
-                cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-            ) and isinstance(cfg.scope, BatchInvariantScope):
-                n = cfg.scope.n_masks
-                mb = self.microbatch_size
-                assert mb % n == 0, f"batch_invariant n_masks={n} must divide microbatch_size={mb}"
-                assert self.eval_batch_size % n == 0, (
-                    f"batch_invariant n_masks={n} must divide eval_batch_size={self.eval_batch_size}"
-                )
 
         return self

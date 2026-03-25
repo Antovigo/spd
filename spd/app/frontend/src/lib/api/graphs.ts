@@ -115,13 +115,14 @@ export type ComputeGraphOptimizedParams = {
     pnorm: number;
     beta: number;
     normalize: NormalizeType;
-    outputProbThreshold: number;
     ciThreshold: number;
     maskType: MaskType;
     lossType: LossType;
     lossCoeff: number;
     lossPosition: number;
     labelToken?: number; // Required for CE loss
+    advPgdNSteps?: number;
+    advPgdStepSize?: number;
 };
 
 export async function computeGraphOptimizedStream(
@@ -135,7 +136,6 @@ export async function computeGraphOptimizedStream(
     url.searchParams.set("pnorm", String(params.pnorm));
     url.searchParams.set("beta", String(params.beta));
     url.searchParams.set("normalize", String(params.normalize));
-    url.searchParams.set("output_prob_threshold", String(params.outputProbThreshold));
     url.searchParams.set("ci_threshold", String(params.ciThreshold));
     url.searchParams.set("mask_type", params.maskType);
     url.searchParams.set("loss_type", params.lossType);
@@ -143,6 +143,12 @@ export async function computeGraphOptimizedStream(
     url.searchParams.set("loss_position", String(params.lossPosition));
     if (params.labelToken !== undefined) {
         url.searchParams.set("label_token", String(params.labelToken));
+    }
+    if (params.advPgdNSteps !== undefined) {
+        url.searchParams.set("adv_pgd_n_steps", String(params.advPgdNSteps));
+    }
+    if (params.advPgdStepSize !== undefined) {
+        url.searchParams.set("adv_pgd_step_size", String(params.advPgdStepSize));
     }
 
     const response = await fetch(url.toString(), { method: "POST" });
@@ -181,5 +187,13 @@ export async function tokenizeText(text: string): Promise<TokenizeResponse> {
 
 export async function getAllTokens(): Promise<TokenInfo[]> {
     const response = await fetchJson<{ tokens: TokenInfo[] }>("/api/graphs/tokens");
+    return response.tokens;
+}
+
+export async function searchTokens(query: string, limit: number = 10): Promise<TokenInfo[]> {
+    const url = apiUrl("/api/graphs/tokens/search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("limit", String(limit));
+    const response = await fetchJson<{ tokens: TokenInfo[] }>(url.toString());
     return response.tokens;
 }

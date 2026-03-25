@@ -1,6 +1,7 @@
 spd/scripts/sweep_params.yaml
 docs/coverage/**
 notebooks/**
+scratch/
 
 # Script outputs (generated files, often large)
 scripts/outputs/
@@ -64,6 +65,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.testmondata*
 cover/
 
 # Translations

@@ -9,11 +9,9 @@ import type { Loadable } from ".";
 import * as api from "./api";
 import type { LoadedRun as RunData, InterpretationHeadline } from "./api";
 import type {
-    SubcomponentCorrelationsResponse,
     PromptPreview,
     SubcomponentActivationContexts,
     TokenInfo,
-    TokenStatsResponse,
     SubcomponentMetadata,
 } from "./promptAttributionsTypes";
 
@@ -45,11 +43,11 @@ export function useRun() {
     /** Interpretation labels keyed by component key (layer:cIdx) */
     let interpretations = $state<Loadable<Record<string, InterpretationBackendState>>>({ status: "uninitialized" });
 
+    /** Intruder eval scores keyed by component key */
+    let intruderScores = $state<Loadable<Record<string, number>>>({ status: "uninitialized" });
+
     /** Cluster mapping for the current run */
     let clusterMapping = $state<ClusterMapping | null>(null);
-
-    /** Whether dataset attributions are available for this run */
-    let datasetAttributionsAvailable = $state(false);
 
     /** Available prompts for the current run */
     let prompts = $state<Loadable<PromptPreview[]>>({ status: "uninitialized" });
@@ -57,42 +55,39 @@ export function useRun() {
     /** All tokens in the tokenizer for the current run */
     let allTokens = $state<Loadable<TokenInfo[]>>({ status: "uninitialized" });
 
-    /** Activation contexts summary */
-    let activationContextsSummary = $state<Loadable<Record<string, SubcomponentMetadata[]>>>({
+    /** Model topology info for frontend layout */
+
+    /** Activation contexts summary (null = harvest not available) */
+    let activationContextsSummary = $state<Loadable<Record<string, SubcomponentMetadata[]> | null>>({
         status: "uninitialized",
     });
 
-    // Cached component data keyed by component key (layer:cIdx) - non-reactive
+    // Cached activation context detail keyed by component key (layer:cIdx) - non-reactive
     let _componentDetailsCache: Record<string, SubcomponentActivationContexts> = {};
-    let _correlationsCache: Record<string, SubcomponentCorrelationsResponse> = {};
-    let _tokenStatsCache: Record<string, TokenStatsResponse> = {};
-
-    // Prefetch parameters for bulk component data
-    const PREFETCH_ACTIVATION_CONTEXTS_LIMIT = 100;
-    const PREFETCH_CORRELATIONS_TOP_K = 20;
-    const PREFETCH_TOKEN_STATS_TOP_K = 30;
 
     /** Reset all run-scoped state */
     function resetRunScopedState() {
         prompts = { status: "uninitialized" };
         allTokens = { status: "uninitialized" };
         interpretations = { status: "uninitialized" };
+        intruderScores = { status: "uninitialized" };
         activationContextsSummary = { status: "uninitialized" };
         _componentDetailsCache = {};
-        _correlationsCache = {};
-        _tokenStatsCache = {};
         clusterMapping = null;
-        datasetAttributionsAvailable = false;
     }
 
-    /** Fetch run-scoped data that can load asynchronously (prompts, interpretations, metadata) */
+    /** Fetch run-scoped data that can load asynchronously (prompts, interpretations) */
     function fetchRunScopedData() {
         prompts = { status: "loading" };
         interpretations = { status: "loading" };
+        intruderScores = { status: "loading" };
 
         api.listPrompts()
             .then((p) => (prompts = { status: "loaded", data: p }))
             .catch((error) => (prompts = { status: "error", error }));
+        api.getIntruderScores()
+            .then((data) => (intruderScores = { status: "loaded", data }))
+            .catch((error) => (intruderScores = { status: "error", error }));
         api.getAllInterpretations()
             .then((i) => {
                 interpretations = {
@@ -109,9 +104,6 @@ export function useRun() {
                 };
             })
             .catch((error) => (interpretations = { status: "error", error }));
-        api.getDatasetAttributionsMetadata()
-            .then((m) => (datasetAttributionsAvailable = m.available))
-            .catch(() => (datasetAttributionsAvailable = false));
     }
 
     /** Fetch tokens - must complete before run is considered loaded */
@@ -126,10 +118,12 @@ export function useRun() {
         run = { status: "loading" };
         try {
             await api.loadRun(wandbPath, contextLength);
-            const [status] = await Promise.all([api.getStatus(), fetchTokens()]);
+            const status = await api.getStatus();
             if (status) {
                 run = { status: "loaded", data: status };
                 fetchRunScopedData();
+                // Fetch tokens in background (no longer blocks UI - used only by token search)
+                fetchTokens();
             } else {
                 run = { status: "error", error: "Failed to load run" };
             }
@@ -148,7 +142,7 @@ export function useRun() {
         try {
             const status = await api.getStatus();
             if (status) {
-                // Fetch tokens if we don't have them (e.g., page refresh)
+                // Fetch tokens and model info if we don't have them (e.g., page refresh)
                 if (allTokens.status === "uninitialized") {
                     await fetchTokens();
                 }
@@ -188,6 +182,12 @@ export function useRun() {
         }
     }
 
+    /** Get intruder score for a component, if available */
+    function getIntruderScore(componentKey: string): number | null {
+        if (intruderScores.status !== "loaded") return null;
+        return intruderScores.data[componentKey] ?? null;
+    }
+
     /** Set interpretation for a component (updates cache without full reload) */
     function setInterpretation(componentKey: string, interpretation: InterpretationBackendState) {
         if (interpretations.status === "loaded") {
@@ -203,50 +203,6 @@ export function useRun() {
         const detail = await api.getActivationContextDetail(layer, cIdx);
         _componentDetailsCache[cacheKey] = detail;
         return detail;
-    }
-
-    /**
-     * Bulk prefetch component data for all given component keys.
-     * Uses a single combined endpoint to avoid GIL contention from concurrent requests.
-     */
-    async function prefetchComponentData(componentKeys: string[]): Promise<void> {
-        if (componentKeys.length === 0) return;
-
-        const response = await api.getComponentDataBulk(
-            componentKeys,
-            PREFETCH_ACTIVATION_CONTEXTS_LIMIT,
-            PREFETCH_CORRELATIONS_TOP_K,
-            PREFETCH_TOKEN_STATS_TOP_K,
-        );
-
-        Object.assign(_componentDetailsCache, response.activation_contexts);
-        Object.assign(_correlationsCache, response.correlations);
-        Object.assign(_tokenStatsCache, response.token_stats);
-    }
-
-    /**
-     * Read cached component detail. Throws if not prefetched.
-     */
-    function expectCachedComponentDetail(componentKey: string): SubcomponentActivationContexts {
-        const cached = _componentDetailsCache[componentKey];
-        if (!cached) throw new Error(`Component detail not prefetched: ${componentKey}`);
-        return cached;
-    }
-
-    /**
-     * Read cached correlations.
-     * Returns null if component has no correlation data (e.g., rarely-firing components).
-     */
-    function expectCachedCorrelations(componentKey: string): SubcomponentCorrelationsResponse | null {
-        return _correlationsCache[componentKey] ?? null;
-    }
-
-    /**
-     * Read cached token stats.
-     * Returns null if component has no token stats (e.g., rarely-firing components).
-     */
-    function expectCachedTokenStats(componentKey: string): TokenStatsResponse | null {
-        return _tokenStatsCache[componentKey] ?? null;
     }
 
     /** Load activation contexts summary (fire-and-forget, updates state) */
@@ -294,7 +250,7 @@ export function useRun() {
             return activationContextsSummary;
         },
         get datasetAttributionsAvailable() {
-            return datasetAttributionsAvailable;
+            return run.status === "loaded" && run.data.dataset_attributions_available;
         },
         loadRun,
         clearRun,
@@ -302,11 +258,8 @@ export function useRun() {
         refreshPrompts,
         getInterpretation,
         setInterpretation,
+        getIntruderScore,
         getActivationContextDetail,
-        prefetchComponentData,
-        expectCachedComponentDetail,
-        expectCachedCorrelations,
-        expectCachedTokenStats,
         loadActivationContextsSummary,
         setClusterMapping,
         clearClusterMapping,
