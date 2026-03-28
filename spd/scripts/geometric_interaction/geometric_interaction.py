@@ -470,6 +470,251 @@ def plot_gis_coact_product_heatmaps(
     )
 
 
+# ── Activation-based coactivation plots ───────────────────────────────────────
+
+
+def _plot_gis_vs_y_scatter(
+    gis_flat: np.ndarray,
+    y_flat: np.ndarray,
+    module_name: str,
+    n_alive: int,
+    ylabel: str,
+    title_suffix: str,
+    output_path: Path,
+    ylim: tuple[float, float] | None = None,
+    dot_sizes: np.ndarray | None = None,
+) -> None:
+    """Generic GIS-vs-Y scatter with marginal histograms."""
+    sizes = dot_sizes if dot_sizes is not None else np.full(len(gis_flat), 2.0)
+
+    fig = plt.figure(figsize=(9, 9))
+    gs = fig.add_gridspec(2, 2, width_ratios=[4, 1], height_ratios=[1, 4], hspace=0.05, wspace=0.05)
+    ax_main = fig.add_subplot(gs[1, 0])
+    ax_hist_x = fig.add_subplot(gs[0, 0], sharex=ax_main)
+    ax_hist_y = fig.add_subplot(gs[1, 1], sharey=ax_main)
+    fig.add_subplot(gs[0, 1]).set_visible(False)
+
+    ax_main.scatter(gis_flat, y_flat, alpha=0.15, s=sizes, linewidths=0)
+    if ylim is not None:
+        ax_main.set_ylim(*ylim)
+    ax_main.set_xlabel("Geometric Interaction Strength")
+    ax_main.set_ylabel(ylabel)
+
+    ax_hist_x.hist(gis_flat, bins=80, color="#0173B2", alpha=0.7, edgecolor="none")
+    ax_hist_x.set_yscale("log")
+    ax_hist_x.tick_params(labelbottom=False)
+    ax_hist_x.set_ylabel("Count")
+    ax_hist_x.set_title(f"{module_name}  ({n_alive} alive) — {title_suffix}")
+
+    ax_hist_y.hist(
+        y_flat, bins=80, orientation="horizontal", color="#0173B2", alpha=0.7, edgecolor="none"
+    )
+    ax_hist_y.set_xscale("log")
+    ax_hist_y.tick_params(labelleft=False)
+    ax_hist_y.set_xlabel("Count")
+
+    # Spearman annotation
+    from scipy import stats
+
+    sr = stats.spearmanr(gis_flat, y_flat)
+    rho = float(sr.statistic)  # pyright: ignore[reportAttributeAccessIssue]
+    ax_main.text(
+        0.98,
+        0.98,
+        f"Spearman ρ = {rho:.4f}\npairs: {len(gis_flat)}",
+        transform=ax_main.transAxes,
+        verticalalignment="top",
+        horizontalalignment="right",
+        fontsize=9,
+        bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_activation_coact_scatters(
+    gis_matrices: dict[str, Float[Tensor, "C C"]],
+    act_data: dict[str, Any],
+    activation_density: dict[str, Float[Tensor, " C"]],
+    alive_threshold: float,
+    output_dir: Path,
+) -> None:
+    """Scatter plots of GIS vs activation-based coactivation for selected thresholds."""
+    thresholds_to_plot = [0.001, 0.01, 0.1, 0.5]
+    available_thresholds = sorted(act_data["binary"].keys())
+    thresholds_to_plot = [t for t in thresholds_to_plot if t in available_thresholds]
+
+    for t in thresholds_to_plot:
+        scatter_dir = output_dir / "activation_scatter" / f"threshold_{t}"
+        logger.info(f"  Activation scatter (threshold={t}) → {scatter_dir}")
+
+        for module_name in sorted(gis_matrices.keys()):
+            if module_name not in act_data["binary"][t]:
+                continue
+            density = activation_density[module_name]
+            alive_inds = select_alive_components(density, alive_threshold)
+            n_alive = len(alive_inds)
+            if n_alive < 2:
+                continue
+
+            gis = crop_to_alive(gis_matrices[module_name], alive_inds)
+            act_coact = act_data["binary"][t][module_name]["coactivation_fraction"]
+            act_coact = crop_to_alive(act_coact, alive_inds)
+
+            off_diag = ~torch.eye(n_alive, dtype=torch.bool)
+            gis_flat = gis[off_diag].cpu().numpy()
+            coact_flat = act_coact[off_diag].cpu().numpy()
+
+            safe_name = module_name.replace(".", "_")
+            _plot_gis_vs_y_scatter(
+                gis_flat,
+                coact_flat,
+                module_name,
+                n_alive,
+                ylabel=f"Activation Coact (|act| > {t})",
+                title_suffix=f"act threshold={t}",
+                output_path=scatter_dir / f"{safe_name}.png",
+                ylim=(-0.01, 1.01),
+            )
+
+
+def plot_pearson_scatters(
+    gis_matrices: dict[str, Float[Tensor, "C C"]],
+    pearson: dict[str, Float[Tensor, "C C"]],
+    activation_density: dict[str, Float[Tensor, " C"]],
+    alive_threshold: float,
+    output_dir: Path,
+) -> None:
+    """Scatter plots of GIS vs pairwise Pearson correlation of |activations|."""
+    scatter_dir = output_dir / "activation_scatter" / "pearson"
+    logger.info(f"  Pearson scatter → {scatter_dir}")
+
+    for module_name in sorted(gis_matrices.keys()):
+        if module_name not in pearson:
+            continue
+        density = activation_density[module_name]
+        alive_inds = select_alive_components(density, alive_threshold)
+        n_alive = len(alive_inds)
+        if n_alive < 2:
+            continue
+
+        gis = crop_to_alive(gis_matrices[module_name], alive_inds)
+        corr = crop_to_alive(pearson[module_name], alive_inds)
+
+        off_diag = ~torch.eye(n_alive, dtype=torch.bool)
+        gis_flat = gis[off_diag].cpu().numpy()
+        corr_flat = corr[off_diag].cpu().numpy()
+
+        safe_name = module_name.replace(".", "_")
+        _plot_gis_vs_y_scatter(
+            gis_flat,
+            corr_flat,
+            module_name,
+            n_alive,
+            ylabel="Pearson correlation (|activation|)",
+            title_suffix="Pearson",
+            output_path=scatter_dir / f"{safe_name}.png",
+            ylim=(-1.01, 1.01),
+        )
+
+
+def plot_threshold_sweep(
+    gis_matrices: dict[str, Float[Tensor, "C C"]],
+    act_data: dict[str, Any],
+    ci_coactivation: dict[str, Float[Tensor, "C C"]],
+    activation_density: dict[str, Float[Tensor, " C"]],
+    alive_threshold: float,
+    output_dir: Path,
+) -> None:
+    """Summary plot: Spearman rho(GIS, coactivation) vs activation threshold, per module."""
+    from scipy import stats
+
+    thresholds = sorted(t for t in act_data["binary"] if t > 0)
+    modules = sorted(gis_matrices.keys())
+
+    # Compute Spearman rho for each (module, threshold)
+    rho_matrix: dict[str, list[float]] = {}  # module -> [rho per threshold]
+    ci_rhos: dict[str, float] = {}
+
+    for module_name in modules:
+        density = activation_density[module_name]
+        alive_inds = select_alive_components(density, alive_threshold)
+        n_alive = len(alive_inds)
+        if n_alive < 2:
+            continue
+
+        gis = crop_to_alive(gis_matrices[module_name], alive_inds)
+        off_diag = ~torch.eye(n_alive, dtype=torch.bool)
+        gis_flat = gis[off_diag].cpu().numpy()
+
+        # CI-based rho
+        ci_coact = crop_to_alive(ci_coactivation[module_name], alive_inds)
+        ci_flat = ci_coact[off_diag].cpu().numpy()
+        ci_res = stats.spearmanr(gis_flat, ci_flat)
+        ci_rhos[module_name] = float(ci_res.statistic)  # pyright: ignore[reportAttributeAccessIssue]
+
+        # Activation-based rho per threshold
+        rhos = []
+        for t in thresholds:
+            if module_name not in act_data["binary"][t]:
+                rhos.append(float("nan"))
+                continue
+            act_coact = act_data["binary"][t][module_name]["coactivation_fraction"]
+            act_coact = crop_to_alive(act_coact, alive_inds)
+            act_flat = act_coact[off_diag].cpu().numpy()
+            act_res = stats.spearmanr(gis_flat, act_flat)
+            rho_val = float(act_res.statistic)  # pyright: ignore[reportAttributeAccessIssue]
+            rhos.append(rho_val)
+        rho_matrix[module_name] = rhos
+
+    # Group by layer
+    layer_groups: dict[int, list[str]] = defaultdict(list)
+    for mod in rho_matrix:
+        parts = mod.split(".")
+        for p in parts:
+            if p.isdigit():
+                layer_groups[int(p)].append(mod)
+                break
+
+    n_layers = len(layer_groups)
+    fig, axes = plt.subplots(1, n_layers, figsize=(5 * n_layers, 5), sharey=True)
+    if n_layers == 1:
+        axes = [axes]
+
+    cmap = plt.get_cmap("tab10")
+    colors = [cmap(i) for i in range(10)]
+
+    for ax, (layer, mods) in zip(axes, sorted(layer_groups.items()), strict=False):
+        for i, mod in enumerate(sorted(mods)):
+            short = mod.split(".", 2)[-1]  # e.g. "mlp.c_fc"
+            rhos = rho_matrix[mod]
+            ax.plot(
+                thresholds, rhos, "o-", label=short, color=colors[i % len(colors)], markersize=4
+            )
+            # CI baseline as horizontal dashed line
+            ax.axhline(ci_rhos[mod], color=colors[i % len(colors)], linestyle="--", alpha=0.4)
+
+        ax.set_xscale("log")
+        ax.set_xlabel("Activation threshold")
+        ax.set_title(f"Layer {layer}")
+        ax.set_ylabel("Spearman ρ (GIS vs coactivation)")
+        ax.legend(fontsize=7, loc="lower left")
+        ax.grid(alpha=0.3)
+        ax.axhline(0, color="black", linewidth=0.5)
+
+    fig.suptitle(
+        "GIS–coactivation Spearman ρ across activation thresholds\n(dashed = CI-based)", fontsize=12
+    )
+    fig.tight_layout()
+    path = output_dir / "activation_scatter" / "threshold_sweep.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"  Threshold sweep → {path}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -576,6 +821,45 @@ def main(config_path: Path | str | None = None, **overrides: Any) -> None:
         data_path,
     )
     logger.info(f"Saved raw data → {data_path}")
+
+    # ── Activation-based plots (if harvest_activations data exists) ────
+
+    act_data_path = output_dir / "activation_cooccurrence" / "data.pt"
+    if act_data_path.exists():
+        logger.info(f"Loading activation cooccurrence data from {act_data_path}")
+        act_data = torch.load(act_data_path, map_location="cpu", weights_only=False)
+
+        # Use activation density from the activation harvest (threshold=0.001)
+        # for alive component selection, since CI-based density may differ
+        act_density = activation_density  # fall back to CI-based
+
+        logger.info("Generating activation-based scatter plots...")
+        plot_activation_coact_scatters(
+            gis_matrices, act_data, act_density, config.alive_density_threshold, output_dir
+        )
+
+        if "pearson_correlation" in act_data:
+            plot_pearson_scatters(
+                gis_matrices,
+                act_data["pearson_correlation"],
+                act_density,
+                config.alive_density_threshold,
+                output_dir,
+            )
+
+        plot_threshold_sweep(
+            gis_matrices,
+            act_data,
+            coactivation_fractions,
+            act_density,
+            config.alive_density_threshold,
+            output_dir,
+        )
+    else:
+        logger.info(
+            f"No activation cooccurrence data at {act_data_path} — skipping activation plots. "
+            f"Run harvest_activations.py first to generate."
+        )
 
 
 if __name__ == "__main__":
