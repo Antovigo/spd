@@ -36,16 +36,41 @@ def _load_transcoder(checkpoint_dir: Path, device: str) -> BatchTopKTranscoder:
     return encoder
 
 
+_DOWNLOAD_TIMEOUT_S = 300
+
+
 def _download_artifact(artifact_path: str) -> Path:
+    import os
+    import time
+
     from spd.settings import SPD_OUT_DIR
 
     safe_name = artifact_path.replace("/", "_").replace(":", "_")
-    dest = SPD_OUT_DIR / "checkpoints" / safe_name
-    if dest.exists() and (dest / "encoder.pt").exists():
+    checkpoints_dir = SPD_OUT_DIR / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    dest = checkpoints_dir / safe_name
+    complete = dest / ".complete"
+
+    if complete.exists():
         return dest
+
+    lockfile = checkpoints_dir / f"{safe_name}.lock"
+    try:
+        fd = os.open(str(lockfile), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        deadline = time.monotonic() + _DOWNLOAD_TIMEOUT_S
+        while not complete.exists():
+            assert time.monotonic() < deadline, (
+                f"Timed out waiting for {artifact_path} download (>{_DOWNLOAD_TIMEOUT_S}s)"
+            )
+            time.sleep(2)
+        return dest
+
     api = wandb.Api()
     artifact = api.artifact(artifact_path)
     artifact.download(root=str(dest))
+    complete.touch()
     return dest
 
 

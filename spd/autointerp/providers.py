@@ -2,10 +2,12 @@
 
 LLMConfig discriminated union determines which API to call:
   - OpenRouterLLMConfig → OpenRouter API (any model via vendor/model ID)
-  - AnthropicLLMConfig → first-party Anthropic API (tool_use for structured output)
+  - AnthropicLLMConfig → first-party Anthropic API (structured outputs)
   - OpenAILLMConfig → first-party OpenAI API (json_schema response format)
+  - GoogleAILLMConfig → Google AI / Gemini API (Google AI Studio API key)
 """
 
+import copy
 import json
 import os
 from abc import ABC, abstractmethod
@@ -20,7 +22,7 @@ from spd.log import logger
 
 ReasoningEffort = Literal["none", "low", "medium", "high"]
 
-ProviderName = Literal["openrouter", "anthropic", "openai"]
+ProviderName = Literal["openrouter", "anthropic", "openai", "google_ai"]
 
 # ---------------------------------------------------------------------------
 # LLM config (discriminated union)
@@ -33,10 +35,31 @@ class OpenRouterLLMConfig(BaseConfig):
     reasoning_effort: ReasoningEffort = "low"
 
 
-class AnthropicLLMConfig(BaseConfig):
+EffortLevel = Literal["low", "medium", "high", "max"]
+
+
+class AnthropicSonnet46LLMConfig(BaseConfig):
     type: Literal["anthropic"] = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
-    thinking_budget: int | None = None
+    model: Literal["claude-sonnet-4-6"] = "claude-sonnet-4-6"
+    effort: Literal["low", "medium", "high"] | None = None
+
+
+class AnthropicOpus46LLMConfig(BaseConfig):
+    type: Literal["anthropic"] = "anthropic"
+    model: Literal["claude-opus-4-6"] = "claude-opus-4-6"
+    effort: EffortLevel | None = None
+
+
+class AnthropicHaiku45LLMConfig(BaseConfig):
+    type: Literal["anthropic"] = "anthropic"
+    model: Literal["claude-haiku-4-5-20251001"] = "claude-haiku-4-5-20251001"
+    thinking_budget: int | None = Field(default=None, ge=1024)
+
+
+AnthropicLLMConfig = Annotated[
+    AnthropicSonnet46LLMConfig | AnthropicOpus46LLMConfig | AnthropicHaiku45LLMConfig,
+    Field(discriminator="model"),
+]
 
 
 class OpenAILLMConfig(BaseConfig):
@@ -45,8 +68,16 @@ class OpenAILLMConfig(BaseConfig):
     reasoning_effort: ReasoningEffort = "none"
 
 
+class GoogleAILLMConfig(BaseConfig):
+    """Gemini Developer API (API key from Google AI Studio)."""
+
+    type: Literal["google_ai"] = "google_ai"
+    model: str = "gemini-3-flash-preview"
+    thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
+
+
 LLMConfig = Annotated[
-    OpenRouterLLMConfig | AnthropicLLMConfig | OpenAILLMConfig,
+    OpenRouterLLMConfig | AnthropicLLMConfig | OpenAILLMConfig | GoogleAILLMConfig,
     Field(discriminator="type"),
 ]
 
@@ -59,16 +90,28 @@ _PROVIDER_ENV_VARS: dict[ProviderName, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "google_ai": "GEMINI_API_KEY",
 }
 
 _ANTHROPIC_PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-20250514": (3.0 / 1_000_000, 15.0 / 1_000_000),
+    "claude-sonnet-4-6": (3.0 / 1_000_000, 15.0 / 1_000_000),
     "claude-opus-4-20250514": (15.0 / 1_000_000, 75.0 / 1_000_000),
+    "claude-opus-4-6": (15.0 / 1_000_000, 75.0 / 1_000_000),
     "claude-haiku-4-5-20251001": (0.80 / 1_000_000, 4.0 / 1_000_000),
 }
 
 _OPENAI_PRICING: dict[str, tuple[float, float]] = {
     # Add GPT-5 series pricing here when available
+}
+
+# Per-token USD (input, output). Approximate public list prices; unknown models use a conservative default.
+_GEMINI_PRICING: dict[str, tuple[float, float]] = {
+    "gemini-2.5-flash": (0.30 / 1_000_000, 2.50 / 1_000_000),
+    "gemini-2.5-flash-lite": (0.10 / 1_000_000, 0.40 / 1_000_000),
+    "gemini-2.5-pro": (1.25 / 1_000_000, 10.0 / 1_000_000),
+    "gemini-3-flash-preview": (0.30 / 1_000_000, 2.50 / 1_000_000),
+    "gemini-3-pro-preview": (2.0 / 1_000_000, 12.0 / 1_000_000),
 }
 
 
@@ -100,6 +143,19 @@ def _parse_retry_after_header(resp: httpx.Response) -> float | None:
         return float(val)
     except ValueError:
         return None
+
+
+def _gemini_response_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Strip keywords Gemini's responseJsonSchema does not accept (e.g. additionalProperties)."""
+
+    def prune(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {k: prune(v) for k, v in obj.items() if k != "additionalProperties"}
+        if isinstance(obj, list):
+            return [prune(x) for x in obj]
+        return obj
+
+    return prune(copy.deepcopy(schema))
 
 
 class LLMProvider(ABC):
@@ -202,9 +258,9 @@ class OpenRouterProvider(LLMProvider):
 
 
 class AnthropicProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str, thinking_budget: int | None):
-        self.model = model
-        self._thinking_budget = thinking_budget
+    def __init__(self, api_key: str, config: AnthropicLLMConfig):
+        self.model = config.model
+        self._config = config
         self._client = httpx.AsyncClient(
             base_url="https://api.anthropic.com",
             headers={
@@ -223,24 +279,38 @@ class AnthropicProvider(LLMProvider):
         timeout_ms: int,
     ) -> ChatResponse:
         effective_max_tokens = max_tokens
-        if self._thinking_budget is not None:
-            effective_max_tokens = max_tokens + self._thinking_budget
+        match self._config:
+            case AnthropicHaiku45LLMConfig(thinking_budget=thinking_budget):
+                if thinking_budget is not None:
+                    effective_max_tokens = max_tokens + thinking_budget
+            case AnthropicSonnet46LLMConfig(effort=effort):
+                pass
+            case AnthropicOpus46LLMConfig(effort=effort):
+                pass
 
         body: dict[str, Any] = {
             "model": self.model,
             "max_tokens": effective_max_tokens,
             "messages": [{"role": "user", "content": prompt}],
-            "tools": [
-                {
-                    "name": "respond",
-                    "description": "Respond with the structured output",
-                    "input_schema": response_schema,
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {**response_schema, "additionalProperties": False},
                 }
-            ],
-            "tool_choice": {"type": "tool", "name": "respond"},
+            },
         }
-        if self._thinking_budget is not None:
-            body["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+        match self._config:
+            case AnthropicHaiku45LLMConfig(thinking_budget=thinking_budget):
+                if thinking_budget is not None:
+                    body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+            case AnthropicSonnet46LLMConfig(effort=effort):
+                if effort is not None:
+                    body["thinking"] = {"type": "adaptive"}
+                    body["output_config"]["effort"] = effort
+            case AnthropicOpus46LLMConfig(effort=effort):
+                if effort is not None:
+                    body["thinking"] = {"type": "adaptive"}
+                    body["output_config"]["effort"] = effort
 
         try:
             resp = await self._client.post("/v1/messages", json=body, timeout=timeout_ms / 1000)
@@ -256,14 +326,17 @@ class AnthropicProvider(LLMProvider):
         resp.raise_for_status()
         data = resp.json()
 
-        tool_input = None
+        text_blocks: list[str] = []
         for block in data["content"]:
-            if block["type"] == "tool_use" and block["name"] == "respond":
-                tool_input = block["input"]
-                break
-        assert tool_input is not None, f"No tool_use response in: {data['content']}"
+            if block["type"] == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    text_blocks.append(text)
 
-        content = json.dumps(tool_input)
+        content = "\n".join(text_blocks).strip()
+        assert content, f"No text response in: {data['content']}"
+        json.loads(content)
+
         usage = data["usage"]
         return ChatResponse(
             content=content,
@@ -354,21 +427,123 @@ class OpenAIProvider(LLMProvider):
         await self._client.aclose()
 
 
+class GoogleAIProvider(LLMProvider):
+    """Gemini API via Generative Language REST (Google AI Studio key)."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        thinking_level: Literal["minimal", "low", "medium", "high"] | None = None,
+    ):
+        self.model = model
+        self._thinking_level = thinking_level
+        self._pruned_schema: dict[str, Any] | None = None
+        self._client = httpx.AsyncClient(
+            base_url="https://generativelanguage.googleapis.com/v1beta/",
+            headers={"x-goog-api-key": api_key},
+        )
+
+    @override
+    async def chat(
+        self,
+        prompt: str,
+        max_tokens: int,
+        response_schema: dict[str, Any],
+        timeout_ms: int,
+    ) -> ChatResponse:
+        if self._pruned_schema is None:
+            self._pruned_schema = _gemini_response_json_schema(response_schema)
+
+        body: dict[str, Any] = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "responseMimeType": "application/json",
+                "responseJsonSchema": self._pruned_schema,
+            },
+        }
+        if self._thinking_level is not None:
+            body["generationConfig"]["thinkingConfig"] = {
+                "thinkingLevel": self._thinking_level,
+            }
+
+        path = f"models/{self.model}:generateContent"
+        try:
+            resp = await self._client.post(path, json=body, timeout=timeout_ms / 1000)
+        except httpx.TransportError as e:
+            raise RetryableAPIError(str(e)) from e
+
+        if resp.status_code in (429, 500, 502, 503, 504):
+            retry_after = _parse_retry_after_header(resp)
+            raise RetryableAPIError(
+                f"HTTP {resp.status_code}: {resp.text[:200]}", retry_after=retry_after
+            )
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        assert "error" not in data, f"Gemini API error: {data['error']}"
+
+        candidates = data.get("candidates") or []
+        assert candidates, f"No candidates in Gemini response: {data}"
+
+        candidate = candidates[0]
+        finish = candidate.get("finishReason", "")
+        if finish == "MAX_TOKENS":
+            logger.warning(f"Response truncated at {max_tokens} tokens (finishReason={finish})")
+
+        parts = candidate.get("content", {}).get("parts") or []
+        text_parts = [p["text"] for p in parts if isinstance(p.get("text"), str)]
+        content = "".join(text_parts).strip()
+        assert content, f"Empty text in Gemini response: {candidate}"
+
+        json.loads(content)
+
+        usage = data.get("usageMetadata") or {}
+        in_tok = usage.get("promptTokenCount")
+        out_tok = usage.get("candidatesTokenCount")
+        assert in_tok is not None and out_tok is not None, f"Missing usageMetadata: {usage}"
+
+        return ChatResponse(
+            content=content,
+            input_tokens=int(in_tok),
+            output_tokens=int(out_tok),
+        )
+
+    @override
+    async def get_pricing(self) -> tuple[float, float]:
+        return _GEMINI_PRICING.get(self.model, (1.0 / 1_000_000, 4.0 / 1_000_000))
+
+    @override
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 
 def create_provider(
-    config: OpenRouterLLMConfig | AnthropicLLMConfig | OpenAILLMConfig,
+    config: OpenRouterLLMConfig | AnthropicLLMConfig | OpenAILLMConfig | GoogleAILLMConfig,
 ) -> LLMProvider:
     match config:
         case OpenRouterLLMConfig():
             api_key = _get_api_key("openrouter")
             return OpenRouterProvider(api_key, config.model, config.reasoning_effort)
-        case AnthropicLLMConfig():
+        case (
+            AnthropicSonnet46LLMConfig() | AnthropicOpus46LLMConfig() | AnthropicHaiku45LLMConfig()
+        ):
             api_key = _get_api_key("anthropic")
-            return AnthropicProvider(api_key, config.model, config.thinking_budget)
+            return AnthropicProvider(api_key, config)
         case OpenAILLMConfig():
             api_key = _get_api_key("openai")
             return OpenAIProvider(api_key, config.model, config.reasoning_effort)
+        case GoogleAILLMConfig():
+            api_key = _get_api_key("google_ai")
+            return GoogleAIProvider(
+                api_key,
+                config.model,
+                thinking_level=config.thinking_level,
+            )

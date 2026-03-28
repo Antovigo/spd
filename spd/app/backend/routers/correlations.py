@@ -88,7 +88,6 @@ class InterpretationHeadline(BaseModel):
     """Lightweight interpretation headline for bulk fetching."""
 
     label: str
-    confidence: str
     detection_score: float | None = None
     fuzzing_score: float | None = None
 
@@ -122,7 +121,6 @@ def get_all_interpretations(
     return {
         _concrete_to_canonical_key(key, loaded.topology): InterpretationHeadline(
             label=result.label,
-            confidence=result.confidence,
             detection_score=detection_scores.get(key) if detection_scores else None,
             fuzzing_score=fuzzing_scores.get(key) if fuzzing_scores else None,
         )
@@ -179,7 +177,6 @@ async def request_component_interpretation(
     if existing is not None:
         return InterpretationHeadline(
             label=existing.label,
-            confidence=existing.confidence,
         )
 
     component_data = loaded.harvest.get_component(component_key)
@@ -222,6 +219,10 @@ async def request_component_interpretation(
     assert isinstance(raw_ctx, int), f"expected int, got {type(raw_ctx)}"
     context_tokens_per_side = raw_ctx
 
+    raw_threshold = harvest_config.get("activation_threshold", 0.0)
+    assert isinstance(raw_threshold, int | float)
+    activation_threshold = float(raw_threshold)
+
     try:
         result = await interpret_component(
             provider=provider,
@@ -232,6 +233,7 @@ async def request_component_interpretation(
             input_token_stats=input_token_stats,
             output_token_stats=output_token_stats,
             context_tokens_per_side=context_tokens_per_side,
+            activation_threshold=activation_threshold,
         )
     except Exception as e:
         raise HTTPException(
@@ -247,7 +249,6 @@ async def request_component_interpretation(
 
     return InterpretationHeadline(
         label=result.label,
-        confidence=result.confidence,
     )
 
 
