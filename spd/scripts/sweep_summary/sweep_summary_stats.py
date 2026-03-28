@@ -1,8 +1,11 @@
 """Generate a markdown summary report from a set of WandB sweep runs.
 
 Usage:
-    python spd/scripts/sweep_summary/sweep_summary.py s-e8bde534 s-73d2385c ...
-    python spd/scripts/sweep_summary/sweep_summary.py s-e8bde534 ... --output report.md
+    python spd/scripts/sweep_summary/sweep_summary_stats.py s-e8bde534 s-73d2385c ...
+    python spd/scripts/sweep_summary/sweep_summary_stats.py s-e8bde534 ... --name my_sweep
+    python spd/scripts/sweep_summary/sweep_summary_stats.py s-e8bde534 ... --stdout
+
+Results are saved to spd/scripts/sweep_summary/out/<name>/.
 """
 
 import argparse
@@ -301,11 +304,20 @@ def _smooth_val_curve(
     steps = np.array([s for s, _ in curve], dtype=np.float64)
     losses = np.array([v for _, v in curve], dtype=np.float64)
 
-    smoothed = np.empty_like(losses)
-    smoothed[0] = losses[0]
+    # Run EMA forward, then backward, and average. This eliminates the
+    # initialisation lag that makes a forward-only EMA overshoot early points
+    # (where the curve drops steeply).
+    fwd = np.empty_like(losses)
+    fwd[0] = losses[0]
     for i in range(1, len(losses)):
-        smoothed[i] = alpha * losses[i] + (1 - alpha) * smoothed[i - 1]
+        fwd[i] = alpha * losses[i] + (1 - alpha) * fwd[i - 1]
 
+    bwd = np.empty_like(losses)
+    bwd[-1] = losses[-1]
+    for i in range(len(losses) - 2, -1, -1):
+        bwd[i] = alpha * losses[i] + (1 - alpha) * bwd[i + 1]
+
+    smoothed = (fwd + bwd) / 2
     return steps, smoothed
 
 
@@ -784,15 +796,28 @@ def plot_val_loss_curve(target_info: TargetModelInfo, out_path: Path) -> None:
     print(f"Plot saved to {out_path}", file=sys.stderr)
 
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate sweep summary report")
     parser.add_argument("run_ids", nargs="+", help="WandB run IDs")
     parser.add_argument("--project", default="goodfire/spd")
-    parser.add_argument("--output", default=None, help="Output file (default: stdout)")
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Name for the output directory (default: first run ID). "
+        "Results are saved to spd/scripts/sweep_summary/out/<name>/",
+    )
     parser.add_argument(
         "--harvest-run",
         default=None,
         help="Run ID to use for n_alive harvest data (if different from sweep runs)",
+    )
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="Print report to stdout instead of saving to file",
     )
     args = parser.parse_args()
 
@@ -801,14 +826,18 @@ def main() -> None:
         n_alive = _fetch_n_alive_from_harvest(args.harvest_run)
     report = generate_report(seeds, data, target_info, spd_config, n_alive)
 
-    if args.output:
-        out_path = Path(args.output)
-        with open(out_path, "w") as f:
-            f.write(report)
-        plot_val_loss_curve(target_info, out_path.with_name("target_val_loss_curve.png"))
-        print(f"Report written to {args.output}", file=sys.stderr)
-    else:
+    if args.stdout:
         print(report)
+        return
+
+    name = args.name or args.run_ids[0]
+    out_dir = _SCRIPT_DIR / "out" / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report_path = out_dir / "report.md"
+    report_path.write_text(report)
+    plot_val_loss_curve(target_info, out_dir / "target_val_loss_curve.png")
+    print(f"Results saved to {out_dir}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -6,12 +6,13 @@ Generates a markdown/LaTeX summary report from a set of WandB SPD runs (typicall
 
 ```bash
 python spd/scripts/sweep_summary/sweep_summary_stats.py <run_id_1> <run_id_2> ...
-python spd/scripts/sweep_summary/sweep_summary_stats.py <run_ids> --output report.md
+python spd/scripts/sweep_summary/sweep_summary_stats.py <run_ids> --name my_sweep
 python spd/scripts/sweep_summary/sweep_summary_stats.py <run_ids> --project goodfire/spd
 python spd/scripts/sweep_summary/sweep_summary_stats.py <run_ids> --harvest-run <run_id>
+python spd/scripts/sweep_summary/sweep_summary_stats.py <run_ids> --stdout
 ```
 
-Writing to a file (`--output`) also saves a `target_val_loss_curve.png` plot alongside it.
+Results (`report.md`, `target_val_loss_curve.png`) are saved to `spd/scripts/sweep_summary/out/<name>/`. Defaults to the first run ID if `--name` is not provided. Use `--stdout` to print the report instead of saving.
 
 ## Metrics
 
