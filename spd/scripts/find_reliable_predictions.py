@@ -23,14 +23,13 @@ from spd.pretrain.run_info import PretrainRunInfo
 DEFAULT_CONFIG = "spd/experiments/lm/pile_llama_simple_mlp-4L-targeted-css.yaml"
 
 
-def escape_token(token_str: str) -> str:
-    """Escape special characters and wrap in double quotes."""
-    token_str = token_str.replace("\\", "\\\\")
-    token_str = token_str.replace('"', '\\"')
-    token_str = token_str.replace("\n", "\\n")
-    token_str = token_str.replace("\t", "\\t")
-    token_str = token_str.replace("\r", "\\r")
-    return f'"{token_str}"'
+def escape_special(s: str) -> str:
+    """Escape whitespace/special characters so the string is safe in a single TSV cell."""
+    s = s.replace("\\", "\\\\")
+    s = s.replace("\n", "\\n")
+    s = s.replace("\t", "\\t")
+    s = s.replace("\r", "\\r")
+    return s
 
 
 def main() -> None:
@@ -127,10 +126,10 @@ def main() -> None:
             next_tok_id = input_ids[b, pos + 1].item()
             prob = next_token_probs[b, pos].item()
 
-            context_tokens = [escape_token(decode([tid])) for tid in context_ids]
-            context_str = ";".join(context_tokens)
-            context_short_str = ";".join(context_tokens[-5:])
-            next_tok_str = escape_token(decode([next_tok_id]))
+            context_str = escape_special(decode(context_ids))
+            short_tokens = [escape_special(decode([tid])) for tid in context_ids[-5:]]
+            context_short_str = ";".join(short_tokens)
+            next_tok_str = escape_special(decode([next_tok_id]))
 
             rows.append((context_str, context_short_str, next_tok_str, f"{prob:.4f}"))
 
