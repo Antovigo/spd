@@ -102,12 +102,12 @@ def convert_examples(
     global_max_act = 0.0
     for ex in raw_examples[:n_examples]:
         token_ids = ex["token_ids"]
-        firings = ex["firings"]
+        ci_values = ex["activations"]["causal_importance"]
         acts = ex["activations"]["component_activation"]
         n = len(token_ids)
         spans = tokenizer.get_spans(token_ids)
 
-        firing_indices = [i for i, f in enumerate(firings) if f]
+        firing_indices = [i for i, ci in enumerate(ci_values) if ci > 0]
         center = firing_indices[0] if firing_indices else n // 2
         start = max(0, center - window // 2)
         end = min(n, start + window)
@@ -120,10 +120,10 @@ def convert_examples(
         tokens = [
             {
                 "token": span,
-                "is_firing": f,
+                "ci": round(ci, 4),
                 "act": round(a, 4),
             }
-            for span, f, a in zip(spans[start:end], firings[start:end], window_acts, strict=True)
+            for span, ci, a in zip(spans[start:end], ci_values[start:end], window_acts, strict=True)
         ]
         out.append({"tokens": tokens})
     return {"examples": out, "max_act": round(global_max_act, 4)}
@@ -286,7 +286,6 @@ def build_graph(
     component_details: dict[str, dict[str, Any]] = {}
     for node_key in sorted(active_keys):
         layer, seq_str, idx_str = node_key.split(":")
-        h_key = harvest_key(node_key, canonical_to_concrete)
         display = canonical_display_name(layer)
 
         if layer == "embed":
@@ -302,6 +301,7 @@ def build_graph(
                 "layer_display": display,
             }
         else:
+            h_key = harvest_key(node_key, canonical_to_concrete)
             label = interp_by_key.get(h_key, "unlabeled")
 
             comp: dict[str, Any] = {
@@ -340,8 +340,7 @@ def build_graph(
         + [
             f"{b}.{sub}.{proj}"
             for b in range(
-                max(int(k.split(".")[0]) for k in canonical_to_concrete.values() if k[0].isdigit())
-                + 1
+                max(int(k.split(".")[0]) for k in canonical_to_concrete if k[0].isdigit()) + 1
             )
             for sub, proj in [
                 ("attn", "q"),
@@ -351,7 +350,7 @@ def build_graph(
                 ("mlp", "up"),
                 ("mlp", "down"),
             ]
-            if f"{b}.{sub}.{proj}" in {v for v in canonical_to_concrete.values()}
+            if f"{b}.{sub}.{proj}" in canonical_to_concrete
         ]
         + ["output"]
     )
