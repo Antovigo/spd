@@ -443,12 +443,54 @@ def _compute_overlap_matrix(
     return overlap
 
 
+def _compute_random_fcs_baseline(
+    d_head: int,
+    d_model: int,
+    n_trials: int = 1000,
+    projection: NDArray[np.floating] | None = None,
+) -> tuple[float, float]:
+    """Expected Frobenius cosine similarity between Gram matrices of random matrices.
+
+    Args:
+        d_head: Number of rows in each random matrix (head dimension).
+        d_model: Number of columns (model dimension).
+        n_trials: Number of random pairs to average over.
+        projection: If provided, each random W is right-multiplied by this matrix
+            before computing the Gram matrix. Shape (d_model, k) for arbitrary k.
+            Use Z @ diag(s) for data-weighted baselines.
+
+    Returns:
+        (mean, std) of the FCS across trials.
+    """
+    rng = np.random.default_rng(seed=42)
+    vals = np.empty(n_trials)
+    for i in range(n_trials):
+        wa = rng.standard_normal((d_head, d_model))
+        wb = rng.standard_normal((d_head, d_model))
+        if projection is not None:
+            wa = wa @ projection
+            wb = wb @ projection
+        ma = wa.T @ wa
+        mb = wb.T @ wb
+        vals[i] = float(np.trace(ma @ mb)) / (
+            float(np.linalg.norm(ma, "fro")) * float(np.linalg.norm(mb, "fro"))
+        )
+    return float(vals.mean()), float(vals.std())
+
+
 def _render_overlap_heatmap(
     ax: plt.Axes,
     overlap: NDArray[np.floating],
     title: str,
+    random_baseline: tuple[float, float] | None = None,
 ) -> "plt.cm.ScalarMappable":
-    """Render a lower-triangular overlap heatmap on the given axes."""
+    """Render a lower-triangular overlap heatmap on the given axes.
+
+    Args:
+        random_baseline: If provided, (mean, std) of the random baseline FCS.
+            Rendered as a dashed horizontal line on the colorbar and annotated
+            in the title.
+    """
     n_heads = overlap.shape[0]
     mask = np.tri(n_heads, dtype=bool)
     overlap_masked = np.where(mask, overlap, np.nan)
@@ -468,6 +510,10 @@ def _render_overlap_heatmap(
     for spine in ax.spines.values():
         spine.set_visible(False)
 
+    if random_baseline is not None:
+        mean, std = random_baseline
+        title = f"{title}\n(random baseline: {mean:.3f} +/- {std:.3f})"
+
     ax.set_title(title, fontsize=11, fontweight="bold")
     return im
 
@@ -480,7 +526,7 @@ def _plot_combined_paper_figure(
     out_dir: Path,
 ) -> None:
     """Side-by-side: unweighted subspace overlap (left) and variance-weighted (right)."""
-    n_heads = v_weight_per_head.shape[0]
+    n_heads, head_dim, d_model = v_weight_per_head.shape
 
     # Unweighted Gram matrices
     M_unweighted = [v_weight_per_head[h].T @ v_weight_per_head[h] for h in range(n_heads)]
@@ -494,10 +540,26 @@ def _plot_combined_paper_figure(
     ]
     overlap_var = _compute_overlap_matrix(M_var)
 
+    # Random baselines
+    logger.info("Computing random baselines for FCS...")
+    baseline_unweighted = _compute_random_fcs_baseline(head_dim, d_model)
+    baseline_data_weighted = _compute_random_fcs_baseline(head_dim, d_model, projection=Z_diag_s)
+    logger.info(
+        f"Random baselines — unweighted: {baseline_unweighted[0]:.4f}, "
+        f"data-weighted: {baseline_data_weighted[0]:.4f}"
+    )
+
     fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
 
-    _render_overlap_heatmap(ax_left, overlap_unweighted, "Subspace overlap")
-    im = _render_overlap_heatmap(ax_right, overlap_var, "Data-weighted subspace overlap")
+    _render_overlap_heatmap(
+        ax_left, overlap_unweighted, "Subspace overlap", random_baseline=baseline_unweighted
+    )
+    im = _render_overlap_heatmap(
+        ax_right,
+        overlap_var,
+        "Data-weighted subspace overlap",
+        random_baseline=baseline_data_weighted,
+    )
 
     fig.colorbar(im, ax=[ax_left, ax_right], shrink=0.8, pad=0.04, label="Cosine Similarity")
 
