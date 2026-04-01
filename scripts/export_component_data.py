@@ -130,6 +130,7 @@ def main() -> None:
     assert interp_repo, f"No autointerp data for {run_id}"
     all_interps = interp_repo.get_all_interpretations()
     interp_by_key = {k: v.label for k, v in all_interps.items()}
+    reasoning_by_key = {k: v.reasoning for k, v in all_interps.items()}
     print(f"  {len(interp_by_key)} labels from {interp_repo.subrun_id}")
 
     print("Building component list...")
@@ -151,16 +152,18 @@ def main() -> None:
             json.loads(raw_examples), tokenizer, n_examples=args.n_examples
         )
 
-        components.append(
-            {
-                "key": canonical_key,
-                "label": interp_by_key[component_key],
-                "layer_display": canonical_display_name(canonical_layer),
-                "firing_density": firing_density,
-                "activation_examples": examples,
-                "max_act": max_act,
-            }
-        )
+        comp: dict[str, Any] = {
+            "key": canonical_key,
+            "label": interp_by_key[component_key],
+            "layer_display": canonical_display_name(canonical_layer),
+            "firing_density": firing_density,
+            "activation_examples": examples,
+            "max_act": max_act,
+        }
+        reasoning = reasoning_by_key.get(component_key)
+        if reasoning:
+            comp["reasoning"] = reasoning
+        components.append(comp)
 
     out_path = args.out_dir / "components.json"
     out_path.write_text(json.dumps(components))
