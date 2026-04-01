@@ -708,8 +708,41 @@ def generate_report(
     sections.append("\n### Summary\n")
     sections.append(_summary_table(seeds, TRAIN_LOSS_KEYS, data))
 
-    # 6. Training compute recovered
+    # 6. Absolute CE by masking mode
     MASKING_MODES = ["unmasked", "stoch_masked", "ci_masked", "rounded_masked"]
+    sections.append("\n## Absolute CE by Masking Mode\n")
+    sections.append(f"Target model val CE: {_fmt(target_info.val_loss)}\n\n")
+    ce_headers = ["seed"] + MASKING_MODES
+    ce_rows: list[list[str]] = []
+    per_mode_ces: dict[str, list[float]] = {m: [] for m in MASKING_MODES}
+    for s in seeds:
+        row = [str(s)]
+        for mode in MASKING_MODES:
+            ce_diff = data[s].get(f"eval/ce_kl/ce_difference_{mode}")
+            if ce_diff is not None:
+                spd_ce = target_info.val_loss + ce_diff
+                row.append(_fmt(spd_ce))
+                per_mode_ces[mode].append(spd_ce)
+            else:
+                row.append("—")
+        ce_rows.append(row)
+    sections.append(_md_table(ce_headers, ce_rows))
+
+    ce_summary_headers = ["stat"] + MASKING_MODES
+    ce_mean_row = ["mean"]
+    ce_std_row = ["std"]
+    for mode in MASKING_MODES:
+        vals = per_mode_ces[mode]
+        if vals:
+            ce_mean_row.append(_fmt(np.mean(vals)))
+            ce_std_row.append(_fmt(np.std(vals)))
+        else:
+            ce_mean_row.append("—")
+            ce_std_row.append("—")
+    sections.append("\n### Summary\n")
+    sections.append(_md_table(ce_summary_headers, [ce_mean_row, ce_std_row]))
+
+    # 7. Training compute recovered
     sections.append("\n## Training Compute Recovered\n")
     sections.append(
         "Percentage through target model training where target val loss equals SPD model CE.\n"
@@ -748,7 +781,7 @@ def generate_report(
     sections.append("\n### Summary\n")
     sections.append(_md_table(summary_headers, [mean_row, std_row]))
 
-    # 7. Plain-text summary list
+    # 8. Plain-text summary list
     summary_groups: list[tuple[str, list[str]]] = [
         ("Output Quality (CE/KL)", CE_KL_KEYS),
         ("Eval Reconstruction Losses", EVAL_LOSS_KEYS),
@@ -766,7 +799,7 @@ def generate_report(
                 )
         sections.append("\n\n" + "\n\n".join(lines))
 
-    # 8. LaTeX summary table
+    # 9. LaTeX summary table
     sections.append(
         _render_latex_summary(seeds, data, target_info, per_mode_pcts, spd_config, n_alive)
     )
