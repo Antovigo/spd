@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -480,8 +481,11 @@ def main() -> None:
     device = torch.device(args.device)
 
     # 1. Load model and config
-    print(f"Loading model from {args.model_path}...")
-    run_info = SPDRunInfo.from_path(args.model_path)
+    model_path = (
+        str(Path(args.model_path).expanduser()) if ":" not in args.model_path else args.model_path
+    )
+    print(f"Loading model from {model_path}...")
+    run_info = SPDRunInfo.from_path(model_path)
     config = run_info.config
     model = ComponentModel.from_run_info(run_info).to(device)
     model.eval()
