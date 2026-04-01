@@ -5,7 +5,7 @@ Runs batches of data through a decomposed SPD model, collecting per-position sta
 - L0: number of active components (CI > threshold), summed across layers
 - KL divergence between rounded-CI-masked and target model outputs
 
-Produces a single figure with two side-by-side plots showing binned means ± std.
+Produces a single figure with two side-by-side scatter plots.
 
 Usage:
     python -m spd.scripts.decomposition_stress_test.entropy_vs_metrics <model_path> \
@@ -19,36 +19,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from numpy.typing import NDArray
 
 from spd.configs import LMTaskConfig
 from spd.data import train_loader_and_tokenizer
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.models.components import make_mask_infos
-
-
-def compute_binned_stats(
-    x: NDArray[np.floating],
-    y: NDArray[np.floating],
-    n_bins: int = 30,
-    min_count: int = 5,
-) -> tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
-    """Compute binned means and standard deviations of y as a function of x."""
-    valid = np.isfinite(x) & np.isfinite(y)
-    x, y = x[valid], y[valid]
-
-    bin_edges = np.linspace(x.min(), x.max(), n_bins + 1)
-    bin_indices = np.clip(np.digitize(x, bin_edges) - 1, 0, n_bins - 1)
-
-    centers, means, stds = [], [], []
-    for i in range(n_bins):
-        mask = bin_indices == i
-        if mask.sum() < min_count:
-            continue
-        centers.append((bin_edges[i] + bin_edges[i + 1]) / 2)
-        means.append(y[mask].mean())
-        stds.append(y[mask].std())
-    return np.array(centers), np.array(means), np.array(stds)
 
 
 def main() -> None:
@@ -137,12 +112,29 @@ def main() -> None:
         (ax_l0, l0_np, "L0 (active components)"),
         (ax_kl, kl_np, "KL divergence (nats)"),
     ]:
-        centers, means, stds = compute_binned_stats(entropy_np, y_data)
-        ax.plot(centers, means, "o-", markersize=4)
-        ax.fill_between(centers, means - stds, means + stds, alpha=0.25)
+        ax.scatter(entropy_np, y_data, alpha=0.1, s=4, color="grey", edgecolors="none")
+
+        # Binned mean summary line (log-spaced bins)
+        n_bins = 30
+        e_min = max(entropy_np.min(), 1e-6)
+        bin_edges = np.geomspace(e_min, entropy_np.max(), n_bins + 1)
+        bin_idx = np.clip(np.digitize(entropy_np, bin_edges) - 1, 0, n_bins - 1)
+        centers, means = [], []
+        for b in range(n_bins):
+            mask = bin_idx == b
+            if mask.sum() < 5:
+                continue
+            centers.append(np.sqrt(bin_edges[b] * bin_edges[b + 1]))
+            means.append(y_data[mask].mean())
+        ax.plot(centers, means, "o-", color="red", markersize=4, linewidth=1.5)
+
         ax.set_xlabel("Target model entropy (nats)")
         ax.set_ylabel(y_label)
         ax.set_title(f"{y_label} vs entropy")
+
+    ax_l0.set_xscale("log")
+    ax_kl.set_xscale("log")
+    ax_kl.set_yscale("log")
 
     fig.suptitle(f"Decomposition metrics vs target entropy ({args.model_path})", fontsize=11)
     fig.tight_layout()

@@ -121,6 +121,10 @@ def main() -> None:
     layer_to_row = {layer: i for i, layer in enumerate(all_layers)}
     type_to_col = {mtype: j for j, mtype in enumerate(all_types)}
 
+    # Shared axis limits: 0 to max observed across all matrices
+    max_l0 = max(vals.max() for vals in l0_arrays.values())
+    max_kl = max(vals.max() for vals in kl_arrays.values())
+
     n_rows = len(all_layers)
     n_cols = len(all_types)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows), squeeze=False)
@@ -140,6 +144,8 @@ def main() -> None:
         l0 = l0_arrays[module_name]
         kl = kl_arrays[module_name]
         ax.scatter(l0, kl, alpha=0.5, s=12, edgecolors="none")
+        ax.set_xlim(0, max_l0 * 1.05)
+        ax.set_ylim(0, max_kl * 1.05)
         ax.set_xlabel("L0")
         ax.set_ylabel("KL divergence")
         ax.set_title(f"layer {layer} / {mtype}", fontsize=9)
