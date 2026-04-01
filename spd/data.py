@@ -312,10 +312,11 @@ def loop_dataloader[T](dl: DataLoader[T] | Iterable[T]) -> Iterator[T]:
 
 
 def train_loader_and_tokenizer(
-    config: Config, batch_size: int
+    config: Config, batch_size: int, task_config: LMTaskConfig | None = None
 ) -> tuple[DataLoader[Any], PreTrainedTokenizerBase]:
-    task_config = config.task_config
-    assert isinstance(task_config, LMTaskConfig)
+    if task_config is None:
+        assert isinstance(config.task_config, LMTaskConfig)
+        task_config = config.task_config
     assert task_config.dataset_name is not None, (
         "dataset_name must be set for train_loader_and_tokenizer"
     )

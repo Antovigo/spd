@@ -50,7 +50,10 @@ class SPDAdapter(DecompositionAdapter):
 
     @override
     def dataloader(self, batch_size: int) -> DataLoader[torch.Tensor]:
-        return train_loader_and_tokenizer(self.spd_run_info.config, batch_size)[0]
+        config = self.spd_run_info.config
+        nontarget = config.nontarget_task_config
+        task_config = runtime_cast(LMTaskConfig, nontarget) if nontarget else None
+        return train_loader_and_tokenizer(config, batch_size, task_config=task_config)[0]
 
     @property
     @override
