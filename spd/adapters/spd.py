@@ -11,15 +11,16 @@ from spd.data import train_loader_and_tokenizer
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.topology import TransformerTopology
 from spd.utils.general_utils import runtime_cast
+from spd.utils.wandb_utils import parse_wandb_run_path
 
 
 class SPDAdapter(DecompositionAdapter):
-    def __init__(self, run_id: str):
-        self._run_id = run_id
+    def __init__(self, wandb_path: str):
+        self._wandb_path = wandb_path
 
     @cached_property
     def spd_run_info(self):
-        return SPDRunInfo.from_path(f"goodfire/spd/runs/{self._run_id}")
+        return SPDRunInfo.from_path(self._wandb_path)
 
     @cached_property
     def component_model(self):
@@ -32,7 +33,8 @@ class SPDAdapter(DecompositionAdapter):
     @property
     @override
     def decomposition_id(self) -> str:
-        return self._run_id
+        _, _, run_id = parse_wandb_run_path(self._wandb_path)
+        return run_id
 
     @property
     @override
