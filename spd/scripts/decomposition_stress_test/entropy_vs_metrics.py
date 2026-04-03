@@ -119,20 +119,21 @@ def main() -> None:
         e_min = max(entropy_np.min(), 1e-6)
         bin_edges = np.geomspace(e_min, entropy_np.max(), n_bins + 1)
         bin_idx = np.clip(np.digitize(entropy_np, bin_edges) - 1, 0, n_bins - 1)
-        centers, means = [], []
+        centers, medians = [], []
         for b in range(n_bins):
             mask = bin_idx == b
             if mask.sum() < 5:
                 continue
             centers.append(np.sqrt(bin_edges[b] * bin_edges[b + 1]))
-            means.append(y_data[mask].mean())
-        ax.plot(centers, means, "o-", color="red", markersize=4, linewidth=1.5)
+            medians.append(np.median(y_data[mask]))
+        ax.plot(centers, medians, "o-", color="red", markersize=4, linewidth=1.5)
 
         ax.set_xlabel("Target model entropy (nats)")
         ax.set_ylabel(y_label)
         ax.set_title(f"{y_label} vs entropy")
 
     ax_l0.set_xscale("log")
+    ax_l0.set_yscale("log")
     ax_kl.set_xscale("log")
     ax_kl.set_yscale("log")
 

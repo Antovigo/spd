@@ -1,8 +1,8 @@
-"""Plot per-sample reconstruction error distribution using rounded CI masks.
+"""Plot per-position reconstruction error distribution using rounded CI masks.
 
 Runs N batches of data through an SPD language model with binarized causal importance masks,
-computes per-sample KL divergence from the original model output, and plots the distribution.
-The goal is to identify whether all inputs are reconstructed equally well or whether there
+computes per-position KL divergence from the original model output, and plots the distribution.
+The goal is to identify whether all positions are reconstructed equally well or whether there
 are outliers.
 
 Usage:
@@ -26,7 +26,7 @@ from spd.models.components import make_mask_infos
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Plot per-sample reconstruction error distribution using rounded CI masks"
+        description="Plot per-position reconstruction error distribution using rounded CI masks"
     )
     parser.add_argument("model_path", help="SPD model path (wandb or local)")
     parser.add_argument("--n-batches", type=int, default=50, help="Number of batches to process")
@@ -52,10 +52,9 @@ def main() -> None:
     model.eval()
 
     batch_size = args.batch_size or config.eval_batch_size
-    loader, tokenizer = train_loader_and_tokenizer(config, batch_size)
+    loader, _tokenizer = train_loader_and_tokenizer(config, batch_size)
 
     all_errors: list[torch.Tensor] = []
-    all_tokens: list[torch.Tensor] = []
 
     for i, batch in enumerate(loader):
         if i >= args.n_batches:
@@ -78,18 +77,15 @@ def main() -> None:
             log_p = p_safe.log()
             log_q = F.log_softmax(recon_logits, dim=-1)
             per_pos_kl = (p * (log_p - log_q)).sum(dim=-1)  # (B, S)
-            per_example_kl = per_pos_kl.mean(dim=-1)  # (B,)
 
-            all_errors.append(per_example_kl.cpu())
-            all_tokens.append(input_ids.cpu())
+            all_errors.append(per_pos_kl.cpu().reshape(-1))
 
     vals = torch.cat(all_errors).numpy()
-    tokens = torch.cat(all_tokens)
     mean, median, std = vals.mean(), np.median(vals), vals.std()
     p95, p99 = np.percentile(vals, 95), np.percentile(vals, 99)
 
     print(f"\n{'=' * 50}")
-    print(f"Reconstruction Error Summary (n={len(vals)})")
+    print(f"Per-position Reconstruction Error Summary (n={len(vals)})")
     print(f"{'=' * 50}")
     print(f"  mean   = {mean:.6f}")
     print(f"  median = {median:.6f}")
@@ -99,19 +95,16 @@ def main() -> None:
     print(f"  p95    = {p95:.6f}")
     print(f"  p99    = {p99:.6f}")
 
-    worst_idx = int(vals.argmax())
-    worst_text = tokenizer.decode(tokens[worst_idx], skip_special_tokens=True)
-    print(f"\nWorst input (idx={worst_idx}, KL={vals[worst_idx]:.6f}):")
-    print(f"  {worst_text[:500]}")
-
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(vals, bins=80, edgecolor="black", linewidth=0.3, alpha=0.7)
+    log_bins = np.geomspace(max(vals.min(), 1e-10), vals.max(), 80)
+    ax.hist(vals, bins=log_bins, edgecolor="black", linewidth=0.3, alpha=0.7)
     ax.axvline(mean, color="red", linestyle="--", label=f"mean={mean:.4f}")
     ax.axvline(p95, color="orange", linestyle="--", label=f"p95={p95:.4f}")
     ax.axvline(p99, color="darkred", linestyle="--", label=f"p99={p99:.4f}")
-    ax.set_xlabel("Per-sample KL divergence")
+    ax.set_xscale("log")
+    ax.set_xlabel("Per-position KL divergence")
     ax.set_ylabel("Count")
-    ax.set_title(f"Reconstruction Error Distribution (n={len(vals)})")
+    ax.set_title(f"Per-position Reconstruction Error Distribution (n={len(vals)})")
     ax.legend()
     fig.tight_layout()
 
