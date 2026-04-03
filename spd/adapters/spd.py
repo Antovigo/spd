@@ -16,7 +16,9 @@ from spd.utils.wandb_utils import parse_wandb_run_path
 
 class SPDAdapter(DecompositionAdapter):
     def __init__(self, wandb_path: str):
+        _, _, run_id = parse_wandb_run_path(wandb_path)
         self._wandb_path = wandb_path
+        self._run_id = run_id
 
     @cached_property
     def spd_run_info(self):
@@ -33,8 +35,7 @@ class SPDAdapter(DecompositionAdapter):
     @property
     @override
     def decomposition_id(self) -> str:
-        _, _, run_id = parse_wandb_run_path(self._wandb_path)
-        return run_id
+        return self._run_id
 
     @property
     @override
