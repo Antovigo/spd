@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import curses
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
@@ -25,15 +26,10 @@ from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.utils.general_utils import calc_kl_divergence_lm
 
 
-def top5(
-    logits: Tensor, tokenizer: PreTrainedTokenizerBase
-) -> list[tuple[str, float]]:
+def top5(logits: Tensor, tokenizer: PreTrainedTokenizerBase) -> list[tuple[str, float]]:
     probs = torch.softmax(logits[0, -1], dim=-1)
     top_probs, top_ids = probs.topk(5)
-    return [
-        (tokenizer.decode([tid.item()]), top_probs[i].item())
-        for i, tid in enumerate(top_ids)
-    ]
+    return [(tokenizer.decode([int(tid.item())]), top_probs[i].item()) for i, tid in enumerate(top_ids)]
 
 
 def run_inference(
@@ -56,9 +52,7 @@ def run_inference(
 
         # Cached forward for CI computation
         cached = model(input_ids, cache_type="input")
-        ci = model.calc_causal_importances(
-            cached.cache, sampling="continuous"
-        ).lower_leaky
+        ci = model.calc_causal_importances(cached.cache, sampling="continuous").lower_leaky
 
         weight_deltas = model.calc_weight_deltas()
 
@@ -76,22 +70,81 @@ def run_inference(
             )
 
             delta_mask_val = 1.0 if delta_on else 0.0
-            delta_mask = torch.full(
-                ci_vals.shape[:-1], delta_mask_val, device=device
-            )
+            delta_mask = torch.full(ci_vals.shape[:-1], delta_mask_val, device=device)
             wdam[module_name] = (weight_deltas[module_name], delta_mask)
 
         ablated_logits = model(
             input_ids,
-            mask_infos=make_mask_infos(
-                component_masks, weight_deltas_and_masks=wdam
-            ),
+            mask_infos=make_mask_infos(component_masks, weight_deltas_and_masks=wdam),
         )
         assert isinstance(ablated_logits, Tensor)
 
         kl = calc_kl_divergence_lm(pred=ablated_logits, target=original_logits).item()
 
     return top5(original_logits, tokenizer), top5(ablated_logits, tokenizer), kl
+
+
+def greedy_maximize_kl(
+    model: ComponentModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt: str,
+    toggles: dict[str, list[bool]],
+    modules: list[str],
+    ci_thr: float,
+    device: torch.device,
+    on_progress: Callable[[str], None] | None,
+) -> tuple[float, int, int]:
+    """Greedy coordinate descent over inactive/delta toggles to maximize KL divergence.
+
+    Mutates `toggles` in place. Active toggles (index 0) are left unchanged.
+    Returns (final_kl, n_sweeps, n_flips).
+    """
+    # Optimizable coordinates: (module, toggle_col) for inactive (1) and delta (2)
+    coords = [(m, col) for m in modules for col in (1, 2)]
+    n_coords = len(coords)
+
+    def current_kl() -> float:
+        toggle_tuples = {m: (t[0], t[1], t[2]) for m, t in toggles.items()}
+        _, _, kl = run_inference(model, tokenizer, prompt, toggle_tuples, ci_thr, device)
+        return kl
+
+    best_kl = current_kl()
+    n_sweeps = 0
+    n_flips = 0
+
+    while True:
+        n_sweeps += 1
+        best_coord: tuple[str, int] | None = None
+        best_coord_kl = best_kl
+
+        for i, (m, col) in enumerate(coords):
+            if on_progress:
+                on_progress(
+                    f"Greedy: sweep {n_sweeps}, coord {i + 1}/{n_coords}, "
+                    f"best KL={best_coord_kl:.6f}"
+                )
+
+            # Flip
+            toggles[m][col] = not toggles[m][col]
+            kl = current_kl()
+
+            if kl > best_coord_kl:
+                best_coord_kl = kl
+                best_coord = (m, col)
+
+            # Flip back
+            toggles[m][col] = not toggles[m][col]
+
+        if best_coord is None:
+            break
+
+        # Apply the best flip permanently
+        m, col = best_coord
+        toggles[m][col] = not toggles[m][col]
+        best_kl = best_coord_kl
+        n_flips += 1
+
+    return best_kl, n_sweeps, n_flips
 
 
 TOGGLE_LABELS = ("act", "inact", "delta")
@@ -136,7 +189,7 @@ def curses_main(
         # Column headers
         header = (
             "     act inact delta  Module"
-            "  [SPACE=toggle  ENTER=run  TAB=focus  q=quit  a=all on  n=all off]"
+            "  [SPACE=toggle  ENTER=run  TAB=focus  q=quit  a=all on  n=all off  g=greedy]"
         )
         stdscr.addnstr(row, 0, header, max_x - 1)
         row += 1
@@ -186,13 +239,14 @@ def curses_main(
             row += 1
 
         if len(modules) > max_module_rows and row < max_y - 1:
-                stdscr.addnstr(
-                    row, 0,
-                    f"  ... ({len(modules)} matrices, showing {scroll_offset + 1}-"
-                    f"{min(len(modules), scroll_offset + max_module_rows)})",
-                    max_x - 1,
-                )
-                row += 1
+            stdscr.addnstr(
+                row,
+                0,
+                f"  ... ({len(modules)} matrices, showing {scroll_offset + 1}-"
+                f"{min(len(modules), scroll_offset + max_module_rows)})",
+                max_x - 1,
+            )
+            row += 1
 
         row += 1
 
@@ -214,14 +268,16 @@ def curses_main(
                 if j < len(orig_top5):
                     tok, prob = orig_top5[j]
                     stdscr.addnstr(
-                        row, 0,
+                        row,
+                        0,
                         f"  {j + 1}. {tok!r:>12s}  ({prob:.4f})",
                         max_x - 1,
                     )
                 if j < len(ablated_top5):
                     tok, prob = ablated_top5[j]
                     stdscr.addnstr(
-                        row, col_w,
+                        row,
+                        col_w,
                         f"  {j + 1}. {tok!r:>12s}  ({prob:.4f})",
                         max_x - col_w - 1,
                     )
@@ -262,6 +318,38 @@ def curses_main(
             elif key == ord("n"):
                 for m in modules:
                     toggles[m] = [False, False, False]
+            elif key == ord("g"):
+                if not prompt.strip():
+                    status = "Enter a non-empty prompt first"
+                    continue
+
+                def update_status(msg: str) -> None:
+                    h, w = stdscr.getmaxyx()
+                    stdscr.addnstr(
+                        h - 1,
+                        0,
+                        msg + " " * max(0, w - len(msg) - 1),
+                        w - 1,
+                    )
+                    stdscr.refresh()
+
+                update_status("Greedy: starting...")
+                final_kl, n_sweeps, n_flips = greedy_maximize_kl(
+                    model,
+                    tokenizer,
+                    prompt,
+                    toggles,
+                    modules,
+                    ci_thr,
+                    device,
+                    on_progress=update_status,
+                )
+                # Run final inference to populate results display
+                toggle_tuples = {m: (t[0], t[1], t[2]) for m, t in toggles.items()}
+                orig_top5, ablated_top5, kl_div = run_inference(
+                    model, tokenizer, prompt, toggle_tuples, ci_thr, device
+                )
+                status = f"Greedy done: KL={final_kl:.6f}, {n_sweeps} sweep(s), {n_flips} flip(s)"
 
         # ENTER from either focus runs inference
         if key == ord("\n"):
@@ -270,21 +358,18 @@ def curses_main(
                 continue
             status = "Running inference..."
             stdscr.addnstr(
-                max_y - 1, 0,
+                max_y - 1,
+                0,
                 status + " " * (max_x - len(status) - 1),
                 max_x - 1,
             )
             stdscr.refresh()
 
-            toggle_tuples = {
-                m: (t[0], t[1], t[2]) for m, t in toggles.items()
-            }
+            toggle_tuples = {m: (t[0], t[1], t[2]) for m, t in toggles.items()}
             orig_top5, ablated_top5, kl_div = run_inference(
                 model, tokenizer, prompt, toggle_tuples, ci_thr, device
             )
-            n_off = sum(
-                sum(1 for v in t if not v) for t in toggles.values()
-            )
+            n_off = sum(sum(1 for v in t if not v) for t in toggles.values())
             status = f"Done -- {n_off} toggle(s) disabled"
 
 
@@ -294,7 +379,9 @@ def main() -> None:
     )
     parser.add_argument("model_path", help="SPD model path (wandb or local)")
     parser.add_argument(
-        "--ci-thr", type=float, default=0.01,
+        "--ci-thr",
+        type=float,
+        default=0.01,
         help="CI threshold for active components",
     )
     parser.add_argument(
@@ -304,9 +391,7 @@ def main() -> None:
     args = parser.parse_args()
 
     model_path = (
-        str(Path(args.model_path).expanduser())
-        if ":" not in args.model_path
-        else args.model_path
+        str(Path(args.model_path).expanduser()) if ":" not in args.model_path else args.model_path
     )
     run_info = SPDRunInfo.from_path(model_path)
     config = run_info.config
@@ -317,6 +402,7 @@ def main() -> None:
     model.eval()
 
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+    assert isinstance(tokenizer, PreTrainedTokenizerBase)
 
     modules = model.target_module_paths
     print(f"Loaded model with {len(modules)} decomposed matrices")
