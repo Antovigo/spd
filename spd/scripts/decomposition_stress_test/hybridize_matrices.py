@@ -1,15 +1,14 @@
 """Test mechanistic faithfulness by hybridizing original and decomposed matrices.
 
-Runs two types of stochastic ablation tests:
+Runs multiple types of stochastic ablation tests and plots their KL divergence distributions:
 
-1. **Per-matrix hybridization**: Each matrix at each position is randomly set to either original
-   weights or active-only decomposed weights (no inactive components, no delta).
-
-2. **Per-component ablation**: Each individual component and the delta are independently
-   enabled or ablated (binomial), akin to StochasticRecon in binomial mode.
-
-If the decomposition is mechanistically faithful, both should produce outputs close to the
-original model. The output figure superimposes both distributions for comparison.
+1. **baseline**: Active-only components, no delta. Deterministic.
+2. **unmasked**: All components enabled, no delta. Deterministic.
+3. **per_matrix**: Each matrix randomly uses original weights or active-only decomposition.
+4. **per_matrix_unmasked**: Each matrix randomly uses all components or active-only components.
+5. **stoch**: Per-component binomial ablation (active always on), delta stochastic.
+6. **stoch_with_delta**: Like stoch, but delta always ON.
+7. **stoch_without_delta**: Like stoch, but delta always OFF.
 
 Usage:
     python -m spd.scripts.decomposition_stress_test.hybridize_matrices <model_path> \
@@ -31,6 +30,16 @@ from spd.data import train_loader_and_tokenizer
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.models.components import WeightDeltaAndMask, make_mask_infos
 
+COLORS = {
+    "baseline": "tab:green",
+    "unmasked": "tab:olive",
+    "per_matrix": "tab:blue",
+    "per_matrix_unmasked": "tab:cyan",
+    "stoch": "tab:orange",
+    "stoch_with_delta": "tab:red",
+    "stoch_without_delta": "tab:purple",
+}
+
 
 def per_pos_kl(
     p: Float[Tensor, "B S V"],
@@ -43,13 +52,19 @@ def per_pos_kl(
 
 def plot_superimposed(
     ax: plt.Axes,
-    matrix_vals: np.ndarray,
-    comp_vals: np.ndarray,
-    baseline_mean: float,
+    series: list[tuple[np.ndarray, str, str]],
     title: str,
     log_scale: bool = True,
 ) -> None:
-    all_pos = np.concatenate([matrix_vals[matrix_vals > 0], comp_vals[comp_vals > 0]])
+    """Plot freqpoly (line histogram) for multiple series on the same axes.
+
+    Args:
+        series: List of (values, color, label) tuples.
+    """
+    all_pos_parts = [vals[vals > 0] for vals, _, _ in series]
+    all_pos = (
+        np.concatenate(all_pos_parts) if any(len(p) > 0 for p in all_pos_parts) else np.array([])
+    )
     if len(all_pos) == 0:
         ax.text(0.5, 0.5, "All KL values are 0", ha="center", va="center", transform=ax.transAxes)
         ax.set_title(title)
@@ -57,38 +72,14 @@ def plot_superimposed(
 
     if log_scale:
         bins = np.geomspace(max(all_pos.min(), 1e-10), all_pos.max(), 80)
+        midpoints = np.sqrt(bins[:-1] * bins[1:])
     else:
         bins = np.linspace(all_pos.min(), all_pos.max(), 80)
+        midpoints = (bins[:-1] + bins[1:]) / 2
 
-    ax.hist(
-        matrix_vals[matrix_vals > 0],
-        bins=bins,
-        alpha=0.5,
-        color="tab:blue",
-        label="per-matrix",
-        edgecolor="black",
-        linewidth=0.3,
-    )
-    ax.hist(
-        comp_vals[comp_vals > 0],
-        bins=bins,
-        alpha=0.5,
-        color="tab:orange",
-        label="per-component",
-        edgecolor="black",
-        linewidth=0.3,
-    )
-
-    ax.axvline(baseline_mean, color="green", linestyle="--", label=f"baseline={baseline_mean:.4f}")
-
-    for vals, color_prefix, style in [
-        (matrix_vals, "tab:blue", "-"),
-        (comp_vals, "tab:orange", ":"),
-    ]:
-        mean_val = vals.mean()
-        p95 = np.percentile(vals, 95)
-        ax.axvline(mean_val, color=color_prefix, linestyle=style, alpha=0.8)
-        ax.axvline(p95, color=color_prefix, linestyle=style, alpha=0.5)
+    for vals, color, label in series:
+        counts, _ = np.histogram(vals[vals > 0], bins=bins)
+        ax.plot(midpoints, counts, color=color, label=label, linewidth=1.5)
 
     if log_scale:
         ax.set_xscale("log")
@@ -96,6 +87,24 @@ def plot_superimposed(
     ax.set_ylabel("Count")
     ax.set_title(title)
     ax.legend(fontsize=8)
+
+
+def stoch_component_masks(
+    rounded_masks: dict[str, Tensor],
+    module_to_c: dict[str, int],
+    module_names: list[str],
+    B: int,
+    S: int,
+    device: torch.device,
+) -> dict[str, Tensor]:
+    """Active components always on, inactive stochastically ablated."""
+    return {
+        name: torch.maximum(
+            rounded_masks[name],
+            torch.randint(0, 2, (B, S, module_to_c[name]), device=device).float(),
+        )
+        for name in module_names
+    }
 
 
 def main() -> None:
@@ -134,14 +143,20 @@ def main() -> None:
 
     module_names = model.target_module_paths
 
-    # Per-matrix accumulators
-    mat_all_kls: list[Tensor] = []
-    mat_worst_kls: list[Tensor] = []
-    # Per-component accumulators
-    comp_all_kls: list[Tensor] = []
-    comp_worst_kls: list[Tensor] = []
-    # Baseline
-    all_baseline_kls: list[Tensor] = []
+    # Deterministic accumulators (no worst-KL)
+    baseline_kls: list[Tensor] = []
+    unmasked_kls: list[Tensor] = []
+
+    # Stochastic accumulators: (all_kls, worst_kls)
+    stoch_series_names = [
+        "per_matrix",
+        "per_matrix_unmasked",
+        "stoch",
+        "stoch_with_delta",
+        "stoch_without_delta",
+    ]
+    all_kls: dict[str, list[Tensor]] = {name: [] for name in stoch_series_names}
+    worst_kls: dict[str, list[Tensor]] = {name: [] for name in stoch_series_names}
 
     for i, batch in enumerate(loader):
         if i >= args.n_batches:
@@ -156,94 +171,154 @@ def main() -> None:
 
             ci = model.calc_causal_importances(cached.cache, sampling="continuous").lower_leaky
             rounded_masks = {k: (v > args.ci_thr).float() for k, v in ci.items()}
-
-            # Baseline: all matrices use active-only decomposition, no delta
-            baseline_logits = model(input_ids, mask_infos=make_mask_infos(rounded_masks))
+            ones_masks = {name: torch.ones_like(v) for name, v in ci.items()}
 
             p = torch.softmax(target_logits, dim=-1)
             log_p = p.clamp(min=1e-12).log()
 
-            all_baseline_kls.append(per_pos_kl(p, log_p, baseline_logits).cpu())
+            # --- Deterministic ---
+            baseline_kls.append(
+                per_pos_kl(
+                    p, log_p, model(input_ids, mask_infos=make_mask_infos(rounded_masks))
+                ).cpu()
+            )
+            unmasked_kls.append(
+                per_pos_kl(p, log_p, model(input_ids, mask_infos=make_mask_infos(ones_masks))).cpu()
+            )
 
-            # --- Per-matrix hybridization ---
-            mat_worst = torch.zeros(B, S, device=device)
+            # --- Stochastic ---
+            weight_deltas = model.calc_weight_deltas()
+            worsts = {name: torch.zeros(B, S, device=device) for name in stoch_series_names}
+
             for _m in range(args.n_masks):
-                routing_masks = {
+                # per_matrix: routing to original or active-only
+                routing = {
                     name: torch.randint(0, 2, (B, S), device=device, dtype=torch.bool)
                     for name in module_names
                 }
-                mask_infos = make_mask_infos(rounded_masks, routing_masks=routing_masks)
-                kl = per_pos_kl(p, log_p, model(input_ids, mask_infos=mask_infos))
-                mat_all_kls.append(kl.cpu())
-                mat_worst = torch.maximum(mat_worst, kl)
-            mat_worst_kls.append(mat_worst.cpu())
+                kl = per_pos_kl(
+                    p,
+                    log_p,
+                    model(
+                        input_ids, mask_infos=make_mask_infos(rounded_masks, routing_masks=routing)
+                    ),
+                )
+                all_kls["per_matrix"].append(kl.cpu())
+                worsts["per_matrix"] = torch.maximum(worsts["per_matrix"], kl)
 
-            # --- Per-component ablation ---
-            weight_deltas = model.calc_weight_deltas()
-            comp_worst = torch.zeros(B, S, device=device)
-            for _m in range(args.n_masks):
-                # Active components always enabled; inactive stochastically ablated
-                component_masks = {
-                    name: torch.maximum(
-                        rounded_masks[name],
-                        torch.randint(0, 2, (B, S, model.module_to_c[name]), device=device).float(),
+                # per_matrix_unmasked: per-module binary → all components or active-only
+                mat_unmasked_masks = {}
+                for name in module_names:
+                    binary = torch.randint(0, 2, (B, S, 1), device=device).float()
+                    mat_unmasked_masks[name] = (
+                        binary * ones_masks[name] + (1 - binary) * rounded_masks[name]
                     )
-                    for name in module_names
-                }
-                wdam: dict[str, WeightDeltaAndMask] = {
+                kl = per_pos_kl(
+                    p,
+                    log_p,
+                    model(input_ids, mask_infos=make_mask_infos(mat_unmasked_masks)),
+                )
+                all_kls["per_matrix_unmasked"].append(kl.cpu())
+                worsts["per_matrix_unmasked"] = torch.maximum(worsts["per_matrix_unmasked"], kl)
+
+                # Shared stochastic component masks for the three stoch variants
+                comp_masks = stoch_component_masks(
+                    rounded_masks,
+                    model.module_to_c,
+                    module_names,
+                    B,
+                    S,
+                    device,
+                )
+
+                # stoch: delta stochastic
+                wdam_stoch: dict[str, WeightDeltaAndMask] = {
                     name: (
                         weight_deltas[name],
                         torch.randint(0, 2, (B, S), device=device).float(),
                     )
                     for name in module_names
                 }
-                mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=wdam)
-                kl = per_pos_kl(p, log_p, model(input_ids, mask_infos=mask_infos))
-                comp_all_kls.append(kl.cpu())
-                comp_worst = torch.maximum(comp_worst, kl)
-            comp_worst_kls.append(comp_worst.cpu())
+                kl = per_pos_kl(
+                    p,
+                    log_p,
+                    model(
+                        input_ids,
+                        mask_infos=make_mask_infos(comp_masks, weight_deltas_and_masks=wdam_stoch),
+                    ),
+                )
+                all_kls["stoch"].append(kl.cpu())
+                worsts["stoch"] = torch.maximum(worsts["stoch"], kl)
 
-    mat_vals = torch.cat([kl.reshape(-1) for kl in mat_all_kls]).numpy()
-    comp_vals = torch.cat([kl.reshape(-1) for kl in comp_all_kls]).numpy()
-    mat_worst_vals = torch.cat([kl.reshape(-1) for kl in mat_worst_kls]).numpy()
-    comp_worst_vals = torch.cat([kl.reshape(-1) for kl in comp_worst_kls]).numpy()
-    baseline_vals = torch.cat([kl.reshape(-1) for kl in all_baseline_kls]).numpy()
-    baseline_mean = float(baseline_vals.mean())
+                # stoch_with_delta: delta always ON
+                wdam_on: dict[str, WeightDeltaAndMask] = {
+                    name: (weight_deltas[name], torch.ones(B, S, device=device))
+                    for name in module_names
+                }
+                kl = per_pos_kl(
+                    p,
+                    log_p,
+                    model(
+                        input_ids,
+                        mask_infos=make_mask_infos(comp_masks, weight_deltas_and_masks=wdam_on),
+                    ),
+                )
+                all_kls["stoch_with_delta"].append(kl.cpu())
+                worsts["stoch_with_delta"] = torch.maximum(worsts["stoch_with_delta"], kl)
 
-    print(f"\n{'=' * 60}")
+                # stoch_without_delta: delta always OFF
+                kl = per_pos_kl(
+                    p,
+                    log_p,
+                    model(input_ids, mask_infos=make_mask_infos(comp_masks)),
+                )
+                all_kls["stoch_without_delta"].append(kl.cpu())
+                worsts["stoch_without_delta"] = torch.maximum(worsts["stoch_without_delta"], kl)
+
+            for name in stoch_series_names:
+                worst_kls[name].append(worsts[name].cpu())
+
+    # Flatten all accumulators
+    baseline_vals = torch.cat([kl.reshape(-1) for kl in baseline_kls]).numpy()
+    unmasked_vals = torch.cat([kl.reshape(-1) for kl in unmasked_kls]).numpy()
+    stoch_vals = {
+        name: torch.cat([kl.reshape(-1) for kl in all_kls[name]]).numpy()
+        for name in stoch_series_names
+    }
+    stoch_worst_vals = {
+        name: torch.cat([kl.reshape(-1) for kl in worst_kls[name]]).numpy()
+        for name in stoch_series_names
+    }
+
+    print(f"\n{'=' * 70}")
     print("Hybridize Matrices Summary")
-    print(f"{'=' * 60}")
+    print(f"{'=' * 70}")
     print(f"  n_masks={args.n_masks}, ci_thr={args.ci_thr}, n_modules={len(module_names)}")
-    print(f"  Baseline (all active-only) mean KL = {baseline_mean:.6f}")
-    print(
-        f"  Per-matrix KL:    mean={mat_vals.mean():.6f}  median={np.median(mat_vals):.6f}"
-        f"  p95={np.percentile(mat_vals, 95):.6f}  max={mat_vals.max():.6f}"
-    )
-    print(
-        f"  Per-component KL: mean={comp_vals.mean():.6f}  median={np.median(comp_vals):.6f}"
-        f"  p95={np.percentile(comp_vals, 95):.6f}  max={comp_vals.max():.6f}"
-    )
+    print(f"  {'baseline':<25s} mean={baseline_vals.mean():.6f}")
+    print(f"  {'unmasked':<25s} mean={unmasked_vals.mean():.6f}")
+    for name in stoch_series_names:
+        v = stoch_vals[name]
+        print(
+            f"  {name:<25s} mean={v.mean():.6f}  median={np.median(v):.6f}"
+            f"  p95={np.percentile(v, 95):.6f}  max={v.max():.6f}"
+        )
 
     # --- Figure ---
-    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 8))
-
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(12, 9))
     log_scale = args.scale == "log"
-    plot_superimposed(
-        ax_top,
-        mat_vals,
-        comp_vals,
-        baseline_mean,
-        "All KLs (across inputs, positions, masks)",
-        log_scale=log_scale,
-    )
-    plot_superimposed(
-        ax_bot,
-        mat_worst_vals,
-        comp_worst_vals,
-        baseline_mean,
-        "Worst KL per position (max across masks)",
-        log_scale=log_scale,
-    )
+
+    # Top: all 7 series
+    top_series: list[tuple[np.ndarray, str, str]] = [
+        (baseline_vals, COLORS["baseline"], "baseline"),
+        (unmasked_vals, COLORS["unmasked"], "unmasked"),
+    ]
+    for name in stoch_series_names:
+        top_series.append((stoch_vals[name], COLORS[name], name))
+    plot_superimposed(ax_top, top_series, "All KLs (across inputs, positions, masks)", log_scale)
+
+    # Bottom: worst-KL for stochastic series only
+    bot_series = [(stoch_worst_vals[name], COLORS[name], name) for name in stoch_series_names]
+    plot_superimposed(ax_bot, bot_series, "Worst KL per position (max across masks)", log_scale)
 
     fig.suptitle(
         f"Hybridization Test (n_masks={args.n_masks}, ci_thr={args.ci_thr})",
