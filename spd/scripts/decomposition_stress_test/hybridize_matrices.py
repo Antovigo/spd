@@ -47,6 +47,7 @@ def plot_superimposed(
     comp_vals: np.ndarray,
     baseline_mean: float,
     title: str,
+    log_scale: bool = True,
 ) -> None:
     all_pos = np.concatenate([matrix_vals[matrix_vals > 0], comp_vals[comp_vals > 0]])
     if len(all_pos) == 0:
@@ -54,11 +55,14 @@ def plot_superimposed(
         ax.set_title(title)
         return
 
-    log_bins = np.geomspace(max(all_pos.min(), 1e-10), all_pos.max(), 80)
+    if log_scale:
+        bins = np.geomspace(max(all_pos.min(), 1e-10), all_pos.max(), 80)
+    else:
+        bins = np.linspace(all_pos.min(), all_pos.max(), 80)
 
     ax.hist(
         matrix_vals[matrix_vals > 0],
-        bins=log_bins,
+        bins=bins,
         alpha=0.5,
         color="tab:blue",
         label="per-matrix",
@@ -67,7 +71,7 @@ def plot_superimposed(
     )
     ax.hist(
         comp_vals[comp_vals > 0],
-        bins=log_bins,
+        bins=bins,
         alpha=0.5,
         color="tab:orange",
         label="per-component",
@@ -86,7 +90,8 @@ def plot_superimposed(
         ax.axvline(mean_val, color=color_prefix, linestyle=style, alpha=0.8)
         ax.axvline(p95, color=color_prefix, linestyle=style, alpha=0.5)
 
-    ax.set_xscale("log")
+    if log_scale:
+        ax.set_xscale("log")
     ax.set_xlabel("KL divergence")
     ax.set_ylabel("Count")
     ax.set_title(title)
@@ -104,6 +109,9 @@ def main() -> None:
     )
     parser.add_argument("--ci-thr", type=float, default=0.01, help="CI rounding threshold")
     parser.add_argument("--n-masks", type=int, default=32, help="Number of random hybrid masks")
+    parser.add_argument(
+        "--scale", choices=["log", "linear"], default="log", help="X-axis scale for plots"
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--out-dir", type=Path, default=None, help="Output directory for plot (default: model dir)"
@@ -219,12 +227,14 @@ def main() -> None:
     # --- Figure ---
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 8))
 
+    log_scale = args.scale == "log"
     plot_superimposed(
         ax_top,
         mat_vals,
         comp_vals,
         baseline_mean,
         "All KLs (across inputs, positions, masks)",
+        log_scale=log_scale,
     )
     plot_superimposed(
         ax_bot,
@@ -232,6 +242,7 @@ def main() -> None:
         comp_worst_vals,
         baseline_mean,
         "Worst KL per position (max across masks)",
+        log_scale=log_scale,
     )
 
     fig.suptitle(
