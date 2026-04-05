@@ -79,13 +79,14 @@ def plot_superimposed(
 
     for vals, color, label in series:
         counts, _ = np.histogram(vals[vals > 0], bins=bins)
-        density = counts / (counts.sum() * np.diff(bins))
-        ax.plot(midpoints, density, color=color, label=label, linewidth=1.5, alpha=0.7)
+        pct = 100 * counts / (counts.sum() * np.diff(bins))
+        ax.plot(midpoints, pct, color=color, label=label, linewidth=1.5, alpha=0.7)
+        ax.axvline(vals.mean(), color=color, linestyle="--", alpha=0.5, linewidth=1)
 
     if log_scale:
         ax.set_xscale("log")
     ax.set_xlabel("KL divergence")
-    ax.set_ylabel("Density")
+    ax.set_ylabel("Density (%)")
     ax.set_title(title)
     ax.legend(fontsize=8)
 
