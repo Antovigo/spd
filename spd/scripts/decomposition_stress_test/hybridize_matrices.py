@@ -174,10 +174,12 @@ def main() -> None:
             weight_deltas = model.calc_weight_deltas()
             comp_worst = torch.zeros(B, S, device=device)
             for _m in range(args.n_masks):
+                # Active components always enabled; inactive stochastically ablated
                 component_masks = {
-                    name: torch.randint(
-                        0, 2, (B, S, model.module_to_c[name]), device=device
-                    ).float()
+                    name: torch.maximum(
+                        rounded_masks[name],
+                        torch.randint(0, 2, (B, S, model.module_to_c[name]), device=device).float(),
+                    )
                     for name in module_names
                 }
                 wdam: dict[str, WeightDeltaAndMask] = {
