@@ -79,7 +79,7 @@ def plot_superimposed(
 
     for vals, color, label in series:
         counts, _ = np.histogram(vals[vals > 0], bins=bins)
-        pct = 100 * counts / (counts.sum() * np.diff(bins))
+        pct = 100 * counts / max(counts.sum(), 1)
         ax.plot(midpoints, pct, color=color, label=label, linewidth=1.5, alpha=0.7)
         ax.axvline(vals.mean(), color=color, linestyle="--", alpha=0.5, linewidth=1)
 
