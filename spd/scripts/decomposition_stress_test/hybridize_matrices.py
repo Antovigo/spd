@@ -1,9 +1,15 @@
 """Test mechanistic faithfulness by hybridizing original and decomposed matrices.
 
-For each batch, computes active components (CI > threshold), then runs n_masks forward passes
-where each matrix at each position is randomly set to either original weights or active-only
-decomposed weights (no inactive components, no delta). If the decomposition is mechanistically
-faithful, these hybrid combinations should produce outputs close to the original model.
+Runs two types of stochastic ablation tests:
+
+1. **Per-matrix hybridization**: Each matrix at each position is randomly set to either original
+   weights or active-only decomposed weights (no inactive components, no delta).
+
+2. **Per-component ablation**: Each individual component and the delta are independently
+   enabled or ablated (binomial), akin to StochasticRecon in binomial mode.
+
+If the decomposition is mechanistically faithful, both should produce outputs close to the
+original model. The output figure superimposes both distributions for comparison.
 
 Usage:
     python -m spd.scripts.decomposition_stress_test.hybridize_matrices <model_path> \
@@ -17,11 +23,74 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+from jaxtyping import Float
+from torch import Tensor
 
 from spd.configs import LMTaskConfig
 from spd.data import train_loader_and_tokenizer
 from spd.models.component_model import ComponentModel, SPDRunInfo
-from spd.models.components import make_mask_infos
+from spd.models.components import WeightDeltaAndMask, make_mask_infos
+
+
+def per_pos_kl(
+    p: Float[Tensor, "B S V"],
+    log_p: Float[Tensor, "B S V"],
+    logits: Float[Tensor, "B S V"],
+) -> Float[Tensor, "B S"]:
+    log_q = F.log_softmax(logits, dim=-1)
+    return (p * (log_p - log_q)).sum(dim=-1)
+
+
+def plot_superimposed(
+    ax: plt.Axes,
+    matrix_vals: np.ndarray,
+    comp_vals: np.ndarray,
+    baseline_mean: float,
+    title: str,
+) -> None:
+    all_pos = np.concatenate([matrix_vals[matrix_vals > 0], comp_vals[comp_vals > 0]])
+    if len(all_pos) == 0:
+        ax.text(0.5, 0.5, "All KL values are 0", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title)
+        return
+
+    log_bins = np.geomspace(max(all_pos.min(), 1e-10), all_pos.max(), 80)
+
+    ax.hist(
+        matrix_vals[matrix_vals > 0],
+        bins=log_bins,
+        alpha=0.5,
+        color="tab:blue",
+        label="per-matrix",
+        edgecolor="black",
+        linewidth=0.3,
+    )
+    ax.hist(
+        comp_vals[comp_vals > 0],
+        bins=log_bins,
+        alpha=0.5,
+        color="tab:orange",
+        label="per-component",
+        edgecolor="black",
+        linewidth=0.3,
+    )
+
+    ax.axvline(baseline_mean, color="green", linestyle="--", label=f"baseline={baseline_mean:.4f}")
+
+    for vals, color_prefix, style in [
+        (matrix_vals, "tab:blue", "-"),
+        (comp_vals, "tab:orange", ":"),
+    ]:
+        mean_val = vals.mean()
+        p95 = np.percentile(vals, 95)
+        ax.axvline(mean_val, color=color_prefix, linestyle=style, alpha=0.8)
+        ax.axvline(p95, color=color_prefix, linestyle=style, alpha=0.5)
+
+    ax.set_xscale("log")
+    ax.set_xlabel("KL divergence")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
 
 
 def main() -> None:
@@ -57,9 +126,14 @@ def main() -> None:
 
     module_names = model.target_module_paths
 
-    all_hybrid_kls: list[torch.Tensor] = []  # each: (B, S)
-    all_baseline_kls: list[torch.Tensor] = []  # each: (B, S)
-    all_worst_kls: list[torch.Tensor] = []  # each: (B, S)
+    # Per-matrix accumulators
+    mat_all_kls: list[Tensor] = []
+    mat_worst_kls: list[Tensor] = []
+    # Per-component accumulators
+    comp_all_kls: list[Tensor] = []
+    comp_worst_kls: list[Tensor] = []
+    # Baseline
+    all_baseline_kls: list[Tensor] = []
 
     for i, batch in enumerate(loader):
         if i >= args.n_batches:
@@ -81,86 +155,85 @@ def main() -> None:
             p = torch.softmax(target_logits, dim=-1)
             log_p = p.clamp(min=1e-12).log()
 
-            log_q_baseline = F.log_softmax(baseline_logits, dim=-1)
-            baseline_kl = (p * (log_p - log_q_baseline)).sum(dim=-1)  # (B, S)
-            all_baseline_kls.append(baseline_kl.cpu())
+            all_baseline_kls.append(per_pos_kl(p, log_p, baseline_logits).cpu())
 
-            # Track worst KL per position across masks
-            worst_kl = torch.zeros(B, S, device=device)
-
+            # --- Per-matrix hybridization ---
+            mat_worst = torch.zeros(B, S, device=device)
             for _m in range(args.n_masks):
-                # Per-module, per-position random routing mask
                 routing_masks = {
                     name: torch.randint(0, 2, (B, S), device=device, dtype=torch.bool)
                     for name in module_names
                 }
-
                 mask_infos = make_mask_infos(rounded_masks, routing_masks=routing_masks)
-                hybrid_logits = model(input_ids, mask_infos=mask_infos)
+                kl = per_pos_kl(p, log_p, model(input_ids, mask_infos=mask_infos))
+                mat_all_kls.append(kl.cpu())
+                mat_worst = torch.maximum(mat_worst, kl)
+            mat_worst_kls.append(mat_worst.cpu())
 
-                log_q = F.log_softmax(hybrid_logits, dim=-1)
-                hybrid_kl = (p * (log_p - log_q)).sum(dim=-1)  # (B, S)
+            # --- Per-component ablation ---
+            weight_deltas = model.calc_weight_deltas()
+            comp_worst = torch.zeros(B, S, device=device)
+            for _m in range(args.n_masks):
+                component_masks = {
+                    name: torch.randint(
+                        0, 2, (B, S, model.module_to_c[name]), device=device
+                    ).float()
+                    for name in module_names
+                }
+                wdam: dict[str, WeightDeltaAndMask] = {
+                    name: (
+                        weight_deltas[name],
+                        torch.randint(0, 2, (B, S), device=device).float(),
+                    )
+                    for name in module_names
+                }
+                mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=wdam)
+                kl = per_pos_kl(p, log_p, model(input_ids, mask_infos=mask_infos))
+                comp_all_kls.append(kl.cpu())
+                comp_worst = torch.maximum(comp_worst, kl)
+            comp_worst_kls.append(comp_worst.cpu())
 
-                all_hybrid_kls.append(hybrid_kl.cpu())
-                worst_kl = torch.maximum(worst_kl, hybrid_kl)
-
-            all_worst_kls.append(worst_kl.cpu())
-
-    hybrid_vals = torch.cat([kl.reshape(-1) for kl in all_hybrid_kls]).numpy()
+    mat_vals = torch.cat([kl.reshape(-1) for kl in mat_all_kls]).numpy()
+    comp_vals = torch.cat([kl.reshape(-1) for kl in comp_all_kls]).numpy()
+    mat_worst_vals = torch.cat([kl.reshape(-1) for kl in mat_worst_kls]).numpy()
+    comp_worst_vals = torch.cat([kl.reshape(-1) for kl in comp_worst_kls]).numpy()
     baseline_vals = torch.cat([kl.reshape(-1) for kl in all_baseline_kls]).numpy()
-    worst_vals = torch.cat([kl.reshape(-1) for kl in all_worst_kls]).numpy()
-
-    baseline_mean = baseline_vals.mean()
+    baseline_mean = float(baseline_vals.mean())
 
     print(f"\n{'=' * 60}")
     print("Hybridize Matrices Summary")
     print(f"{'=' * 60}")
-    print(f"  n_masks={args.n_masks}, ci_thr={args.ci_thr}")
-    print(f"  n_modules={len(module_names)}")
+    print(f"  n_masks={args.n_masks}, ci_thr={args.ci_thr}, n_modules={len(module_names)}")
     print(f"  Baseline (all active-only) mean KL = {baseline_mean:.6f}")
     print(
-        f"  Hybrid KL:  mean={hybrid_vals.mean():.6f}  median={np.median(hybrid_vals):.6f}"
-        f"  std={hybrid_vals.std():.6f}  max={hybrid_vals.max():.6f}"
+        f"  Per-matrix KL:    mean={mat_vals.mean():.6f}  median={np.median(mat_vals):.6f}"
+        f"  p95={np.percentile(mat_vals, 95):.6f}  max={mat_vals.max():.6f}"
     )
     print(
-        f"  Worst KL:   mean={worst_vals.mean():.6f}  median={np.median(worst_vals):.6f}"
-        f"  p95={np.percentile(worst_vals, 95):.6f}  max={worst_vals.max():.6f}"
+        f"  Per-component KL: mean={comp_vals.mean():.6f}  median={np.median(comp_vals):.6f}"
+        f"  p95={np.percentile(comp_vals, 95):.6f}  max={comp_vals.max():.6f}"
     )
 
     # --- Figure ---
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 8))
 
-    for ax, vals, title in [
-        (ax_top, hybrid_vals, "All hybrid KLs (across inputs, positions, masks)"),
-        (ax_bot, worst_vals, "Worst KL per position (max across masks)"),
-    ]:
-        vals_pos = vals[vals > 0]
-        if len(vals_pos) == 0:
-            ax.text(
-                0.5, 0.5, "All KL values are 0", ha="center", va="center", transform=ax.transAxes
-            )
-            ax.set_title(title)
-            continue
-
-        log_bins = np.geomspace(max(vals_pos.min(), 1e-10), vals_pos.max(), 80)
-        ax.hist(vals_pos, bins=log_bins, edgecolor="black", linewidth=0.3, alpha=0.7)
-        ax.axvline(
-            baseline_mean, color="green", linestyle="--", label=f"baseline mean={baseline_mean:.4f}"
-        )
-        mean_val = vals.mean()
-        p95 = np.percentile(vals, 95)
-        p99 = np.percentile(vals, 99)
-        ax.axvline(mean_val, color="red", linestyle="--", label=f"mean={mean_val:.4f}")
-        ax.axvline(p95, color="orange", linestyle="--", label=f"p95={p95:.4f}")
-        ax.axvline(p99, color="darkred", linestyle="--", label=f"p99={p99:.4f}")
-        ax.set_xscale("log")
-        ax.set_xlabel("KL divergence")
-        ax.set_ylabel("Count")
-        ax.set_title(title)
-        ax.legend(fontsize=8)
+    plot_superimposed(
+        ax_top,
+        mat_vals,
+        comp_vals,
+        baseline_mean,
+        "All KLs (across inputs, positions, masks)",
+    )
+    plot_superimposed(
+        ax_bot,
+        mat_worst_vals,
+        comp_worst_vals,
+        baseline_mean,
+        "Worst KL per position (max across masks)",
+    )
 
     fig.suptitle(
-        f"Matrix Hybridization Test (n_masks={args.n_masks}, ci_thr={args.ci_thr})",
+        f"Hybridization Test (n_masks={args.n_masks}, ci_thr={args.ci_thr})",
         fontsize=12,
     )
     fig.tight_layout()
