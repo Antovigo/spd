@@ -157,8 +157,8 @@ def plot_mean_component_cis_both_scales(
     grid = _parse_layer_grid(list(mean_component_cis.keys()))
 
     if grid is not None:
-        matrix_types, layer_indices, name_to_pos = grid
-        n_rows, n_cols = len(matrix_types), len(layer_indices)
+        n_rows, n_cols = len(grid[0]), len(grid[1])
+        name_to_pos = grid[2]
     else:
         max_rows = 6
         n_cols = (n_modules + max_rows - 1) // max_rows
@@ -185,9 +185,6 @@ def plot_mean_component_cis_both_scales(
         axs = np.array(axs)
         if axs.ndim == 1:
             axs = axs.reshape(n_rows, n_cols)
-
-        for i in range(n_modules, n_rows * n_cols):
-            axs[i % n_rows, i // n_rows].set_visible(False)
 
         for i, (module_name, sorted_components_np) in enumerate(processed_data):
             if name_to_pos is not None:
@@ -410,8 +407,8 @@ def plot_component_activation_density(
     grid = _parse_layer_grid(list(component_activation_density.keys()))
 
     if grid is not None:
-        matrix_types, layer_indices, name_to_pos = grid
-        n_rows, n_cols = len(matrix_types), len(layer_indices)
+        n_rows, n_cols = len(grid[0]), len(grid[1])
+        name_to_pos = grid[2]
     else:
         max_rows = 6
         n_cols = (n_modules + max_rows - 1) // max_rows
@@ -427,9 +424,6 @@ def plot_component_activation_density(
     axs = np.array(axs)
     if axs.ndim == 1:
         axs = axs.reshape(n_rows, n_cols)
-
-    for i in range(n_modules, n_rows * n_cols):
-        axs[i % n_rows, i // n_rows].set_visible(False)
 
     for i, (module_name, density) in enumerate(component_activation_density.items()):
         if name_to_pos is not None:
@@ -576,8 +570,8 @@ def plot_ci_values_histograms(
     grid = _parse_layer_grid(list(causal_importances.keys()))
 
     if grid is not None:
-        matrix_types, layer_indices, name_to_pos = grid
-        n_rows, n_cols = len(matrix_types), len(layer_indices)
+        n_rows, n_cols = len(grid[0]), len(grid[1])
+        name_to_pos = grid[2]
     else:
         max_rows = 6
         n_cols = (n_layers + max_rows - 1) // max_rows
@@ -593,9 +587,6 @@ def plot_ci_values_histograms(
     axs = np.array(axs)
     if axs.ndim == 1:
         axs = axs.reshape(n_rows, n_cols)
-
-    for i in range(n_layers, n_rows * n_cols):
-        axs[i % n_rows, i // n_rows].set_visible(False)
 
     for i, (layer_name_raw, layer_ci) in enumerate(causal_importances.items()):
         if name_to_pos is not None:
@@ -644,8 +635,8 @@ def plot_weight_magnitude(
     grid = _parse_layer_grid(list(weight_magnitudes.keys()))
 
     if grid is not None:
-        matrix_types, layer_indices, name_to_pos = grid
-        n_rows, n_cols = len(matrix_types), len(layer_indices)
+        n_rows, n_cols = len(grid[0]), len(grid[1])
+        name_to_pos = grid[2]
     else:
         max_rows = 6
         n_cols = (n_modules + max_rows - 1) // max_rows
@@ -662,9 +653,6 @@ def plot_weight_magnitude(
     axs = np.array(axs)
     if axs.ndim == 1:
         axs = axs.reshape(n_rows, n_cols)
-
-    for i in range(n_modules, n_rows * n_cols):
-        axs[i % n_rows, i // n_rows].set_visible(False)
 
     all_max_cis = torch.cat(list(max_cis.values()))
     vmin, vmax = all_max_cis.min().item(), all_max_cis.max().item()
