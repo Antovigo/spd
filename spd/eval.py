@@ -199,7 +199,13 @@ def init_metric(
                 model=model, device=device, output_loss_type=run_config.output_loss_type
             )
         case CIMeanPerComponentConfig():
-            metric = CIMeanPerComponent(model=model, device=device)
+            metric = CIMeanPerComponent(
+                model=model,
+                device=device,
+                run_config=run_config,
+                n_nontarget_batches=cfg.n_nontarget_batches,
+                nontarget_eval_iterator=nontarget_eval_iterator,
+            )
         case ComponentActivationDensityConfig():
             metric = ComponentActivationDensity(
                 model=model, device=device, ci_alive_threshold=run_config.ci_alive_threshold

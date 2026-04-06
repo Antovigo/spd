@@ -699,6 +699,7 @@ class CI_L0Config(BaseConfig):
 
 class CIMeanPerComponentConfig(BaseConfig):
     classname: Literal["CIMeanPerComponent"] = "CIMeanPerComponent"
+    n_nontarget_batches: int = 1
 
 
 class ComponentActivationDensityConfig(BaseConfig):
