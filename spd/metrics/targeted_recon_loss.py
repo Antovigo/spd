@@ -20,7 +20,7 @@ from spd.metrics.base import Metric
 from spd.models.component_model import CIOutputs, ComponentModel, OutputWithCache
 from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.routing import AllLayersRouter
-from spd.utils.component_utils import calc_stochastic_component_mask_info
+from spd.utils.component_utils import calc_ci_l_zero, calc_stochastic_component_mask_info
 from spd.utils.distributed_utils import all_reduce
 from spd.utils.general_utils import calc_sum_recon_loss_lm, extract_batch_data
 
@@ -203,6 +203,7 @@ class NontargetReconLoss(Metric):
         ]
         sum_losses = {k: torch.tensor(0.0, device=self.device) for k in keys}
         n_examples = {k: torch.tensor(0, device=self.device) for k in keys}
+        total_l0_sum = 0.0
 
         weight_deltas = self.model.calc_weight_deltas()
 
@@ -217,6 +218,13 @@ class NontargetReconLoss(Metric):
                     detach_inputs=False,
                     sampling=self.run_config.sampling,
                 )
+
+                threshold = self.run_config.ci_alive_threshold
+                batch_l0 = sum(
+                    calc_ci_l_zero(layer_ci, threshold)
+                    for layer_ci in ci.lower_leaky.values()
+                )
+                total_l0_sum += batch_l0
 
                 results = _compute_recon_losses(
                     model=self.model,
@@ -240,4 +248,13 @@ class NontargetReconLoss(Metric):
             s = all_reduce(sum_losses[k], op=ReduceOp.SUM)
             n = all_reduce(n_examples[k], op=ReduceOp.SUM)
             out[k] = s / n
+
+        avg_l0 = all_reduce(
+            torch.tensor(total_l0_sum, device=self.device), op=ReduceOp.SUM
+        )
+        avg_l0_count = all_reduce(
+            torch.tensor(self.n_nontarget_batches, device=self.device), op=ReduceOp.SUM
+        )
+        out["total_l0"] = avg_l0 / avg_l0_count
+
         return out
