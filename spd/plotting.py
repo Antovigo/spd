@@ -1,5 +1,6 @@
 import fnmatch
 import io
+import re
 from collections.abc import Callable
 
 import numpy as np
@@ -23,6 +24,46 @@ def _render_figure(fig: plt.Figure) -> Image.Image:
     img = Image.open(buf).convert("RGB")
     buf.close()
     return img
+
+
+_LAYER_NAME_PATTERN = re.compile(r"^.+?\.(\d+)\.(.+)$")
+
+
+def _parse_layer_grid(
+    module_names: list[str],
+) -> tuple[list[str], list[int], dict[str, tuple[int, int]]] | None:
+    """Parse module names into a 2D grid of (matrix_type, layer_index).
+
+    Returns (matrix_types, layer_indices, name_to_pos) where name_to_pos maps
+    module name -> (row, col), or None if names don't follow the layer pattern.
+    """
+    parsed: list[tuple[str, int, str]] = []  # (name, layer_idx, matrix_type)
+    for name in module_names:
+        m = _LAYER_NAME_PATTERN.match(name)
+        if m is None:
+            return None
+        parsed.append((name, int(m.group(1)), m.group(2)))
+
+    matrix_types: list[str] = list(dict.fromkeys(mt for _, _, mt in parsed))
+    layer_indices: list[int] = sorted(set(li for _, li, _ in parsed))
+
+    mt_to_row = {mt: i for i, mt in enumerate(matrix_types)}
+    li_to_col = {li: i for i, li in enumerate(layer_indices)}
+
+    name_to_pos = {name: (mt_to_row[mt], li_to_col[li]) for name, li, mt in parsed}
+    return matrix_types, layer_indices, name_to_pos
+
+
+def _setup_layer_grid_labels(
+    axs: np.ndarray,
+    matrix_types: list[str],
+    layer_indices: list[int],
+) -> None:
+    """Add row/column labels to a layer grid and remove individual subplot titles."""
+    for col, layer_idx in enumerate(layer_indices):
+        axs[0, col].set_title(f"Layer {layer_idx}", fontsize=10)
+    for row, matrix_type in enumerate(matrix_types):
+        axs[row, 0].set_ylabel(matrix_type, fontsize=10)
 
 
 def _plot_causal_importances_figure(
@@ -113,23 +154,25 @@ def plot_mean_component_cis_both_scales(
         Tuple of (linear_scale_image, log_scale_image)
     """
     n_modules = len(mean_component_cis)
-    max_rows = 6
+    grid = _parse_layer_grid(list(mean_component_cis.keys()))
 
-    # Calculate grid dimensions once
-    n_cols = (n_modules + max_rows - 1) // max_rows  # Ceiling division
-    n_rows = min(n_modules, max_rows)
+    if grid is not None:
+        matrix_types, layer_indices, name_to_pos = grid
+        n_rows, n_cols = len(matrix_types), len(layer_indices)
+    else:
+        max_rows = 6
+        n_cols = (n_modules + max_rows - 1) // max_rows
+        n_rows = min(n_modules, max_rows)
+        name_to_pos = None
 
-    # Adjust figure size based on grid dimensions
     fig_width = 8 * n_cols
     fig_height = 3 * n_rows
 
-    # Pre-process data once
     processed_data = []
     for module_name, mean_component_ci in mean_component_cis.items():
         sorted_components = torch.sort(mean_component_ci, descending=True)[0]
         processed_data.append((module_name, sorted_components.detach().cpu().numpy()))
 
-    # Create both figures
     images = []
     for log_y in [False, True]:
         fig, axs = plt.subplots(
@@ -140,21 +183,17 @@ def plot_mean_component_cis_both_scales(
             squeeze=False,
         )
         axs = np.array(axs)
-
-        # Ensure axs is always 2D array for consistent indexing
         if axs.ndim == 1:
             axs = axs.reshape(n_rows, n_cols)
 
-        # Hide unused subplots
         for i in range(n_modules, n_rows * n_cols):
-            row = i % n_rows
-            col = i // n_rows
-            axs[row, col].set_visible(False)
+            axs[i % n_rows, i // n_rows].set_visible(False)
 
         for i, (module_name, sorted_components_np) in enumerate(processed_data):
-            # Calculate position in grid (fill column by column)
-            row = i % n_rows
-            col = i // n_rows
+            if name_to_pos is not None:
+                row, col = name_to_pos[module_name]
+            else:
+                row, col = i % n_rows, i // n_rows
             ax = axs[row, col]
 
             if log_y:
@@ -167,11 +206,14 @@ def plot_mean_component_cis_both_scales(
                 s=10,
             )
 
-            # Only add x-label to bottom row of each column
-            if row == n_rows - 1 or i == n_modules - 1:
+            if row == n_rows - 1:
                 ax.set_xlabel("Component")
-            ax.set_ylabel("mean CI")
-            ax.set_title(module_name, fontsize=10)
+            if name_to_pos is None:
+                ax.set_ylabel("mean CI")
+                ax.set_title(module_name, fontsize=10)
+
+        if grid is not None:
+            _setup_layer_grid_labels(axs, grid[0], grid[1])
 
         fig.tight_layout()
         img = _render_figure(fig)
@@ -365,50 +407,50 @@ def plot_component_activation_density(
     """Plot the activation density of each component as a histogram in a grid layout."""
 
     n_modules = len(component_activation_density)
-    max_rows = 6
+    grid = _parse_layer_grid(list(component_activation_density.keys()))
 
-    # Calculate grid dimensions
-    n_cols = (n_modules + max_rows - 1) // max_rows  # Ceiling division
-    n_rows = min(n_modules, max_rows)
-
-    # Adjust figure size based on grid dimensions
-    fig_width = 5 * n_cols
-    fig_height = 5 * n_rows
+    if grid is not None:
+        matrix_types, layer_indices, name_to_pos = grid
+        n_rows, n_cols = len(matrix_types), len(layer_indices)
+    else:
+        max_rows = 6
+        n_cols = (n_modules + max_rows - 1) // max_rows
+        n_rows = min(n_modules, max_rows)
+        name_to_pos = None
 
     fig, axs = plt.subplots(
         n_rows,
         n_cols,
-        figsize=(fig_width, fig_height),
+        figsize=(5 * n_cols, 5 * n_rows),
         squeeze=False,
     )
     axs = np.array(axs)
-
-    # Ensure axs is always 2D array for consistent indexing
     if axs.ndim == 1:
         axs = axs.reshape(n_rows, n_cols)
 
-    # Hide unused subplots
     for i in range(n_modules, n_rows * n_cols):
-        row = i % n_rows
-        col = i // n_rows
-        axs[row, col].set_visible(False)
+        axs[i % n_rows, i // n_rows].set_visible(False)
 
-    # Iterate through modules and plot each histogram on its corresponding axis
     for i, (module_name, density) in enumerate(component_activation_density.items()):
-        # Calculate position in grid (fill column by column)
-        row = i % n_rows
-        col = i // n_rows
+        if name_to_pos is not None:
+            row, col = name_to_pos[module_name]
+        else:
+            row, col = i % n_rows, i // n_rows
         ax = axs[row, col]
 
         data = density.detach().cpu().numpy()
         ax.hist(data, bins=bins)
-        ax.set_yscale("log")  # Beware, memory leak unless gc.collect() is called after eval loop
-        ax.set_title(module_name)  # Add module name as title to each subplot
+        ax.set_yscale("log")
+        if name_to_pos is None:
+            ax.set_title(module_name)
 
-        # Only add x-label to bottom row of each column
-        if row == n_rows - 1 or i == n_modules - 1:
+        if row == n_rows - 1:
             ax.set_xlabel("Activation density")
-        ax.set_ylabel("Frequency")
+        if name_to_pos is None:
+            ax.set_ylabel("Frequency")
+
+    if grid is not None:
+        _setup_layer_grid_labels(axs, grid[0], grid[1])
 
     fig.tight_layout()
 
@@ -531,51 +573,51 @@ def plot_ci_values_histograms(
     """
     assert len(causal_importances) > 0, "No causal importances to plot"
     n_layers = len(causal_importances)
-    max_rows = 6
+    grid = _parse_layer_grid(list(causal_importances.keys()))
 
-    # Calculate grid dimensions
-    n_cols = (n_layers + max_rows - 1) // max_rows  # Ceiling division
-    n_rows = min(n_layers, max_rows)
-
-    # Adjust figure size based on grid dimensions
-    fig_width = 6 * n_cols
-    fig_height = 5 * n_rows
+    if grid is not None:
+        matrix_types, layer_indices, name_to_pos = grid
+        n_rows, n_cols = len(matrix_types), len(layer_indices)
+    else:
+        max_rows = 6
+        n_cols = (n_layers + max_rows - 1) // max_rows
+        n_rows = min(n_layers, max_rows)
+        name_to_pos = None
 
     fig, axs = plt.subplots(
         n_rows,
         n_cols,
-        figsize=(fig_width, fig_height),
+        figsize=(6 * n_cols, 5 * n_rows),
         squeeze=False,
     )
     axs = np.array(axs)
-
-    # Ensure axs is always 2D array for consistent indexing
     if axs.ndim == 1:
         axs = axs.reshape(n_rows, n_cols)
 
-    # Hide unused subplots
     for i in range(n_layers, n_rows * n_cols):
-        row = i % n_rows
-        col = i // n_rows
-        axs[row, col].set_visible(False)
+        axs[i % n_rows, i // n_rows].set_visible(False)
 
     for i, (layer_name_raw, layer_ci) in enumerate(causal_importances.items()):
-        layer_name = layer_name_raw.replace(".", "_")
-
-        # Calculate position in grid (fill column by column)
-        row = i % n_rows
-        col = i // n_rows
+        if name_to_pos is not None:
+            row, col = name_to_pos[layer_name_raw]
+        else:
+            row, col = i % n_rows, i // n_rows
         ax = axs[row, col]
 
         data = layer_ci.flatten().cpu().numpy()
         ax.hist(data, bins=bins)
-        ax.set_yscale("log")  # Beware, memory leak unless gc.collect() is called after eval loop
-        ax.set_title(f"Causal importances for {layer_name}")
+        ax.set_yscale("log")
+        if name_to_pos is None:
+            layer_name = layer_name_raw.replace(".", "_")
+            ax.set_title(f"Causal importances for {layer_name}")
 
-        # Only add x-label to bottom row of each column
-        if row == n_rows - 1 or i == n_layers - 1:
+        if row == n_rows - 1:
             ax.set_xlabel("Causal importance value")
-        ax.set_ylabel("Frequency")
+        if name_to_pos is None:
+            ax.set_ylabel("Frequency")
+
+    if grid is not None:
+        _setup_layer_grid_labels(axs, grid[0], grid[1])
 
     fig.tight_layout()
 
@@ -599,10 +641,16 @@ def plot_weight_magnitude(
     """
     assert len(weight_magnitudes) > 0, "No weight magnitude data to plot"
     n_modules = len(weight_magnitudes)
-    max_rows = 6
+    grid = _parse_layer_grid(list(weight_magnitudes.keys()))
 
-    n_cols = (n_modules + max_rows - 1) // max_rows
-    n_rows = min(n_modules, max_rows)
+    if grid is not None:
+        matrix_types, layer_indices, name_to_pos = grid
+        n_rows, n_cols = len(matrix_types), len(layer_indices)
+    else:
+        max_rows = 6
+        n_cols = (n_modules + max_rows - 1) // max_rows
+        n_rows = min(n_modules, max_rows)
+        name_to_pos = None
 
     fig, axs = plt.subplots(
         n_rows,
@@ -623,7 +671,11 @@ def plot_weight_magnitude(
 
     scatter_plots = []
     for i, layer_name in enumerate(weight_magnitudes.keys()):
-        ax = axs[i % n_rows, i // n_rows]
+        if name_to_pos is not None:
+            row, col = name_to_pos[layer_name]
+        else:
+            row, col = i % n_rows, i // n_rows
+        ax = axs[row, col]
 
         sort_indices = torch.argsort(mean_cis[layer_name], descending=True)
         sorted_weight_mags = weight_magnitudes[layer_name][sort_indices].cpu().numpy()
@@ -640,10 +692,15 @@ def plot_weight_magnitude(
         )
         scatter_plots.append(scatter)
 
-        ax.set_title(layer_name, fontsize=10)
-        if i % n_rows == n_rows - 1 or i == n_modules - 1:
+        if name_to_pos is None:
+            ax.set_title(layer_name, fontsize=10)
+        if row == n_rows - 1:
             ax.set_xlabel("Component")
-        ax.set_ylabel("Weight magnitude")
+        if name_to_pos is None:
+            ax.set_ylabel("Weight magnitude")
+
+    if grid is not None:
+        _setup_layer_grid_labels(axs, grid[0], grid[1])
 
     fig.colorbar(scatter_plots[0], ax=axs.ravel().tolist(), shrink=0.8, label="Max CI")
 
