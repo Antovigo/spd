@@ -78,6 +78,8 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None, help="Device (default: auto)")
     args = parser.parse_args()
 
+    args.output = args.output.expanduser()
+
     device = torch.device(
         args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     )
