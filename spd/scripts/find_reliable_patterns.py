@@ -1,12 +1,12 @@
 """Find sequences where the pretrained model reliably predicts specific target tokens.
 
-Given a decomposed SPD model path, loads the original pretrained model and identifies
-positions where the next token is one of the specified target tokens AND the model assigns
-probability above the threshold.
+Given an experiment YAML config, loads the pretrained model and identifies positions where
+the next token is one of the specified target tokens AND the model assigns probability above
+the threshold.
 
 Usage:
-    uv run python -m spd.scripts.find_reliable_patterns <model_path> --n-batches 5 --thr 0.3
-    uv run python -m spd.scripts.find_reliable_patterns <model_path> --non-target --tokens he she his her
+    uv run python -m spd.scripts.find_reliable_patterns --config-path path/to/config.yaml --n-batches 5
+    uv run python -m spd.scripts.find_reliable_patterns --config-path path/to/config.yaml --non-target
 """
 
 import argparse
@@ -15,16 +15,14 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import yaml
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from spd.configs import LMTaskConfig
 from spd.data import DatasetConfig, create_data_loader
 from spd.experiments.lm.prompts_dataset import create_prompts_data_loader
-from spd.models.component_model import SPDRunInfo
 from spd.pretrain.run_info import PretrainRunInfo
 from spd.utils.general_utils import resolve_class
-
-DEFAULT_TOKENS = ["he", "she", "his", "her"]
 
 
 def escape_special(s: str) -> str:
@@ -57,12 +55,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Find sequences where target tokens are reliably predicted"
     )
-    parser.add_argument("model_path", type=str, help="Decomposed model path (wandb or local)")
+    parser.add_argument("--config-path", type=Path, required=True, help="Path to experiment YAML config")
     parser.add_argument(
         "--tokens",
         nargs="+",
-        default=DEFAULT_TOKENS,
-        help="Target tokens to search for (default: he she his her)",
+        required=True,
+        help="Target tokens to search for (e.g. he she his her)",
     )
     parser.add_argument("--thr", type=float, default=0.5, help="Probability threshold")
     parser.add_argument(
@@ -84,44 +82,41 @@ def main() -> None:
         args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    # Load SPD run config
-    print(f"Loading SPD run info from {args.model_path}...")
-    run_info = SPDRunInfo.from_path(args.model_path)
-    config = run_info.config
+    # Load config
+    with open(args.config_path) as f:
+        config_dict = yaml.safe_load(f)
 
     # Select task config
     if args.non_target:
-        assert config.nontarget_task_config is not None, (
-            "No nontarget_task_config found in this run's config"
+        assert "nontarget_task_config" in config_dict, (
+            "No nontarget_task_config found in config"
         )
-        task_config = config.nontarget_task_config
+        task_config_dict = config_dict["nontarget_task_config"]
     else:
-        task_config = config.task_config
-    assert isinstance(task_config, LMTaskConfig), (
-        f"Expected LMTaskConfig, got {type(task_config).__name__}"
-    )
+        task_config_dict = config_dict["task_config"]
+    task_config = LMTaskConfig(**task_config_dict)
 
-    # Load pretrained model (same pattern as ComponentModel.from_run_info)
-    model_class = resolve_class(config.pretrained_model_class)
-    if config.pretrained_model_name is not None:
-        if config.pretrained_model_class.startswith("spd.pretrain.models."):
-            pretrain_run_info = PretrainRunInfo.from_path(config.pretrained_model_name)
-            if "model_type" not in pretrain_run_info.model_config_dict:
-                pretrain_run_info.model_config_dict["model_type"] = (
-                    config.pretrained_model_class.split(".")[-1]
-                )
-            model = model_class.from_run_info(pretrain_run_info)  # pyright: ignore[reportAttributeAccessIssue]
-        else:
-            model = model_class.from_pretrained(config.pretrained_model_name)  # pyright: ignore[reportAttributeAccessIssue]
+    tokenizer_name = config_dict["tokenizer_name"]
+    pretrained_model_name = config_dict["pretrained_model_name"]
+    pretrained_model_class_path = config_dict["pretrained_model_class"]
+
+    # Load pretrained model
+    print(f"Loading model from {pretrained_model_name}...")
+    model_class = resolve_class(pretrained_model_class_path)
+    if pretrained_model_class_path.startswith("spd.pretrain.models."):
+        pretrain_run_info = PretrainRunInfo.from_path(pretrained_model_name)
+        if "model_type" not in pretrain_run_info.model_config_dict:
+            pretrain_run_info.model_config_dict["model_type"] = (
+                pretrained_model_class_path.split(".")[-1]
+            )
+        model = model_class.from_run_info(pretrain_run_info)  # pyright: ignore[reportAttributeAccessIssue]
     else:
-        assert config.pretrained_model_path is not None
-        model = model_class.from_pretrained(config.pretrained_model_path)  # pyright: ignore[reportAttributeAccessIssue]
+        model = model_class.from_pretrained(pretrained_model_name)  # pyright: ignore[reportAttributeAccessIssue]
     model.eval()
     model.to(device)
 
     # Load tokenizer and build target token set
-    assert config.tokenizer_name is not None
-    tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     decode = tokenizer.decode  # pyright: ignore[reportAttributeAccessIssue]
 
     target_ids = build_target_token_ids(args.tokens, tokenizer)
@@ -135,7 +130,7 @@ def main() -> None:
     if task_config.prompts_file is not None:
         loader, _ = create_prompts_data_loader(
             prompts_file=Path(task_config.prompts_file),
-            tokenizer_name=config.tokenizer_name,
+            tokenizer_name=tokenizer_name,
             max_seq_len=task_config.max_seq_len,
             batch_size=args.batch_size,
             seed=0,
@@ -145,7 +140,7 @@ def main() -> None:
         assert task_config.dataset_name is not None
         data_config = DatasetConfig(
             name=task_config.dataset_name,
-            hf_tokenizer_path=config.tokenizer_name,
+            hf_tokenizer_path=tokenizer_name,
             split=task_config.train_data_split,
             n_ctx=task_config.max_seq_len,
             is_tokenized=task_config.is_tokenized,
