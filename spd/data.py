@@ -1,3 +1,4 @@
+import time
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -269,6 +270,24 @@ def create_data_loader(
     return loader, tokenizer
 
 
+def _next_with_retry[T](
+    dl_iter: Iterator[T], max_retries: int = 5, base_delay: float = 5.0
+) -> T:
+    """Call next() on an iterator, retrying on HTTP errors (e.g. HuggingFace 503s)."""
+    for attempt in range(max_retries):
+        try:
+            return next(dl_iter)
+        except StopIteration:
+            raise
+        except Exception as e:
+            if attempt < max_retries - 1 and ("HTTPError" in type(e).__name__ or "ConnectionError" in type(e).__name__):
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Error fetching batch ({e}), retrying in {delay}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(delay)
+            else:
+                raise
+
+
 def loop_dataloader[T](dl: DataLoader[T] | Iterable[T]) -> Iterator[T]:
     """Loop over a dataloader, resetting the iterator when it is exhausted.
 
@@ -279,7 +298,7 @@ def loop_dataloader[T](dl: DataLoader[T] | Iterable[T]) -> Iterator[T]:
     dl_iter = iter(dl)
     while True:
         try:
-            yield next(dl_iter)
+            yield _next_with_retry(dl_iter)
         except StopIteration:
             logger.warning("Dataloader exhausted, resetting iterator.")
             epoch += 1
@@ -289,7 +308,7 @@ def loop_dataloader[T](dl: DataLoader[T] | Iterable[T]) -> Iterator[T]:
                 if isinstance(dl.dataset, IterableDataset):
                     dl.dataset.set_epoch(epoch)
             dl_iter = iter(dl)
-            yield next(dl_iter)
+            yield _next_with_retry(dl_iter)
 
 
 def train_loader_and_tokenizer(
