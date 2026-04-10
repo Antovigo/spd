@@ -887,6 +887,11 @@ class Config(BaseConfig):
         description="Interval (in steps) at which to save model checkpoints (None disables saving "
         "until the end of training).",
     )
+    sync_checkpoints_to_wandb: bool = Field(
+        default=True,
+        description="Whether to upload .pth checkpoint files to WandB. If False, checkpoints are "
+        "saved to disk only.",
+    )
     eval_metric_configs: list[Annotated[MetricConfigType, Field(discriminator="classname")]] = (
         Field(
             default=[],
