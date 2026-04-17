@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from spd.configs import Config, LMTaskConfig, TaskConfig
+from spd.configs import Config, LMTaskConfig
 from spd.data import DatasetConfig, create_data_loader
 from spd.experiments.lm.prompts_dataset import (
     StaticBatchLoader,
@@ -29,7 +29,6 @@ def load_spd_run(path: ModelPath) -> tuple[ComponentModel, Config, Path]:
 
 def resolve_task_config(config: Config, use_nontarget: bool) -> LMTaskConfig:
     """Return the target or nontarget LM task config, erroring if nontarget is missing."""
-    task_config: TaskConfig | None
     if use_nontarget:
         assert config.nontarget_task_config is not None, (
             "--nontarget was passed but the config has no nontarget_task_config"

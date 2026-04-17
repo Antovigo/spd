@@ -47,21 +47,14 @@ def _load_components(
     return rows
 
 
-def _build_ablation_masks(
+def _build_baseline_masks(
     module_to_c: dict[str, int],
     batch_shape: tuple[int, ...],
-    target_module: str,
-    target_component: int,
     device: torch.device,
 ) -> dict[str, Tensor]:
-    """All-ones masks, with a single (module, component) entry zeroed at every position."""
-    masks: dict[str, Tensor] = {}
-    for name, C in module_to_c.items():
-        mask = torch.ones((*batch_shape, C), device=device)
-        if name == target_module:
-            mask[..., target_component] = 0.0
-        masks[name] = mask
-    return masks
+    """All-ones component masks, one tensor per module. Callers mutate a single entry in place
+    to ablate a specific component and restore it afterwards."""
+    return {name: torch.ones((*batch_shape, C), device=device) for name, C in module_to_c.items()}
 
 
 def _build_full_delta_masks(
@@ -74,7 +67,6 @@ def _build_full_delta_masks(
     return {name: (weight_deltas[name], delta_mask) for name in weight_deltas}
 
 
-@torch.no_grad()
 def _kl_and_preds(
     orig_logits: Tensor, ablated_logits: Tensor
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -145,37 +137,35 @@ def effect_of_ablation(
             batch = next(iterator)
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             batch_size, seq_len = batch.shape
+            batch_cpu = batch.cpu().tolist()
 
             orig_logits = spd_model(batch)
             assert isinstance(orig_logits, Tensor)
 
             delta_masks = _build_full_delta_masks(weight_deltas, (batch_size, seq_len), device)
+            component_masks = _build_baseline_masks(
+                spd_model.module_to_c, (batch_size, seq_len), device
+            )
+            mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=delta_masks)
             prompt_offset = batch_idx * batch_size
 
             for module_name, layer, component, matrix in tqdm(
                 components, desc=f"components (batch {batch_idx})", leave=False
             ):
-                component_masks = _build_ablation_masks(
-                    module_to_c=spd_model.module_to_c,
-                    batch_shape=(batch_size, seq_len),
-                    target_module=module_name,
-                    target_component=component,
-                    device=device,
-                )
-                mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=delta_masks)
+                mask_tensor = component_masks[module_name]
+                mask_tensor[..., component] = 0.0
                 ablated_logits = spd_model(batch, mask_infos=mask_infos)
+                mask_tensor[..., component] = 1.0
                 assert isinstance(ablated_logits, Tensor)
 
                 kl, orig_pred, orig_prob, abl_pred, abl_prob = _kl_and_preds(
                     orig_logits, ablated_logits
                 )
-
-                kl_cpu = kl.cpu()
-                orig_pred_cpu = orig_pred.cpu()
-                orig_prob_cpu = orig_prob.cpu()
-                abl_pred_cpu = abl_pred.cpu()
-                abl_prob_cpu = abl_prob.cpu()
-                batch_cpu = batch.cpu()
+                kl_cpu = kl.cpu().tolist()
+                orig_pred_cpu = orig_pred.cpu().tolist()
+                orig_prob_cpu = orig_prob.cpu().tolist()
+                abl_pred_cpu = abl_pred.cpu().tolist()
+                abl_prob_cpu = abl_prob.cpu().tolist()
 
                 for b in range(batch_size):
                     prompt_idx = prompt_offset + b
@@ -187,12 +177,12 @@ def effect_of_ablation(
                                 "component": component,
                                 "prompt": prompt_idx,
                                 "pos": t,
-                                "token": int(batch_cpu[b, t].item()),
-                                "kl": float(kl_cpu[b, t].item()),
-                                "orig_pred": int(orig_pred_cpu[b, t].item()),
-                                "orig_prob": float(orig_prob_cpu[b, t].item()),
-                                "ablated_pred": int(abl_pred_cpu[b, t].item()),
-                                "ablated_prob": float(abl_prob_cpu[b, t].item()),
+                                "token": batch_cpu[b][t],
+                                "kl": kl_cpu[b][t],
+                                "orig_pred": orig_pred_cpu[b][t],
+                                "orig_prob": orig_prob_cpu[b][t],
+                                "ablated_pred": abl_pred_cpu[b][t],
+                                "ablated_prob": abl_prob_cpu[b][t],
                             }
                         )
                         total_writes += 1

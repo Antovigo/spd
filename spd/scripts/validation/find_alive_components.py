@@ -28,11 +28,10 @@ from spd.spd_types import ModelPath
 
 @dataclass
 class PerComponentStats:
-    count_active: Tensor  # int64 [C]
-    count_total: int
+    count_active: Tensor  # int64 [C]: number of positions where CI > ci_thr
+    count_total: int  # number of positions seen
     max_ci: Tensor  # float [C]
-    activation_sum: Tensor  # float [C]
-    activation_count: Tensor  # int64 [C]
+    activation_sum: Tensor  # float [C]: sum of V^T x over active positions
 
 
 def _init_stats(C: int, device: torch.device) -> PerComponentStats:
@@ -41,11 +40,9 @@ def _init_stats(C: int, device: torch.device) -> PerComponentStats:
         count_total=0,
         max_ci=torch.zeros(C, device=device),
         activation_sum=torch.zeros(C, device=device),
-        activation_count=torch.zeros(C, dtype=torch.int64, device=device),
     )
 
 
-@torch.no_grad()
 def _update_stats(
     stats: PerComponentStats,
     ci: Tensor,  # [..., C]
@@ -60,7 +57,6 @@ def _update_stats(
     stats.count_total += flat_ci.shape[0]
     stats.max_ci = torch.maximum(stats.max_ci, flat_ci.amax(dim=0))
     stats.activation_sum += (flat_acts * active).sum(dim=0)
-    stats.activation_count += active.sum(dim=0).to(torch.int64)
 
 
 def find_alive_components(
@@ -108,27 +104,20 @@ def find_alive_components(
     rows: list[dict[str, object]] = []
     for module_name, s in stats.items():
         layer, matrix = parse_module_name(module_name)
-        count_active = s.count_active.cpu()
-        count_total = s.count_total
-        max_ci = s.max_ci.cpu()
-        activation_sum = s.activation_sum.cpu()
-        activation_count = s.activation_count.cpu()
-        C = count_active.shape[0]
-        for c in range(C):
-            if count_active[c].item() == 0:
+        count_active = s.count_active.cpu().tolist()
+        max_ci = s.max_ci.cpu().tolist()
+        activation_sum = s.activation_sum.cpu().tolist()
+        for c, n_active in enumerate(count_active):
+            if n_active == 0:
                 continue
-            n_active = int(activation_count[c].item())
-            mean_activation = (
-                float(activation_sum[c].item() / n_active) if n_active > 0 else float("nan")
-            )
             rows.append(
                 {
                     "layer": layer,
                     "matrix": matrix,
                     "component": c,
-                    "fraction_active": float(count_active[c].item()) / count_total,
-                    "max_ci": float(max_ci[c].item()),
-                    "mean_activation": mean_activation,
+                    "fraction_active": n_active / s.count_total,
+                    "max_ci": max_ci[c],
+                    "mean_activation": activation_sum[c] / n_active,
                 }
             )
 
