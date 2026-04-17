@@ -2,11 +2,21 @@
 
 Usage:
     python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
-        [--n-batches=1] [--nontarget] [--prompts=PATH] [--output=PATH]
+        [--n-batches=1] [--nontarget] [--prompts=PATH] \
+        [--output-kl=PATH] [--output-orig=PATH]
+
+Output files (same schema in both modes):
+- `effect_of_ablation[_nontarget].tsv` — one row per (component, prompt, pos) with columns
+  `layer, matrix, component, prompt, pos, kl`.
+- `orig_predictions[_nontarget].tsv` — one row per (prompt, pos) with columns
+  `prompt, pos, token, token_str, orig_pred, orig_pred_str, orig_prob`.
+
+The per-(prompt, pos) data lives in a separate file because it would otherwise be duplicated
+across every component's row in the kl file.
 """
 
 import csv
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import fire
@@ -17,6 +27,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from spd.log import logger
+from spd.models.component_model import ComponentModel
 from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.scripts.validation.common import (
     build_lm_loader,
@@ -28,6 +39,17 @@ from spd.scripts.validation.common import (
     resolve_task_config,
 )
 from spd.spd_types import ModelPath
+
+KL_FIELDS = ["layer", "matrix", "component", "prompt", "pos", "kl"]
+ORIG_FIELDS = [
+    "prompt",
+    "pos",
+    "token",
+    "token_str",
+    "orig_pred",
+    "orig_pred_str",
+    "orig_prob",
+]
 
 
 def _load_components(
@@ -70,21 +92,6 @@ def _build_full_delta_masks(
     return {name: (weight_deltas[name], delta_mask) for name in weight_deltas}
 
 
-def _kl_and_preds(
-    orig_logits: Tensor, ablated_logits: Tensor
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Compute per-position KL(orig || ablated) and top-1 (pred, prob) for both."""
-    orig_log_probs = F.log_softmax(orig_logits, dim=-1)
-    ablated_log_probs = F.log_softmax(ablated_logits, dim=-1)
-    orig_probs = orig_log_probs.exp()
-    kl = (orig_probs * (orig_log_probs - ablated_log_probs)).sum(dim=-1)
-
-    orig_prob_max, orig_pred = orig_probs.max(dim=-1)
-    ablated_probs = ablated_log_probs.exp()
-    ablated_prob_max, ablated_pred = ablated_probs.max(dim=-1)
-    return kl, orig_pred, orig_prob_max, ablated_pred, ablated_prob_max
-
-
 def _make_decoder(tokenizer: PreTrainedTokenizer) -> Callable[[int], str]:
     """Return a memoised, TSV-safe single-token decoder."""
     cache: dict[int, str] = {}
@@ -105,9 +112,10 @@ def effect_of_ablation(
     n_batches: int = 1,
     nontarget: bool = False,
     prompts: str | None = None,
-    output: str | None = None,
-) -> Path:
-    """Write a TSV of per-(component, prompt, position) KL divergences under ablation."""
+    output_kl: str | None = None,
+    output_orig: str | None = None,
+) -> tuple[Path, Path]:
+    """Write per-(component, prompt, pos) KL and per-(prompt, pos) orig-prediction TSVs."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     spd_model, config, run_dir = load_spd_run(model_path)
@@ -125,39 +133,62 @@ def effect_of_ablation(
     components = _load_components(components_file, module_lookup)
     logger.info(f"Loaded {len(components)} components to ablate from {components_file}")
 
-    default_name = "effect_of_ablation_nontarget.tsv" if nontarget else "effect_of_ablation.tsv"
-    out_path = Path(output).expanduser() if output else run_dir / default_name
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = [
-        "layer",
-        "matrix",
-        "component",
-        "prompt",
-        "pos",
-        "token",
-        "token_str",
-        "kl",
-        "orig_pred",
-        "orig_pred_str",
-        "orig_prob",
-        "ablated_pred",
-        "ablated_pred_str",
-        "ablated_prob",
-    ]
-
     n_to_run = 1 if single_batch else n_batches
     iterator = iterate_input_ids(loader, device)
 
     # Delta weights are fixed (target_weight - component_weight); compute once.
     weight_deltas = spd_model.calc_weight_deltas()
 
-    total_writes = 0
+    kl_default = "effect_of_ablation_nontarget.tsv" if nontarget else "effect_of_ablation.tsv"
+    orig_default = "orig_predictions_nontarget.tsv" if nontarget else "orig_predictions.tsv"
+    kl_path = Path(output_kl).expanduser() if output_kl else run_dir / kl_default
+    orig_path = Path(output_orig).expanduser() if output_orig else run_dir / orig_default
+    for p in (kl_path, orig_path):
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+    total_prompts, total_kl_writes, seq_len = _run(
+        spd_model=spd_model,
+        iterator=iterator,
+        n_to_run=n_to_run,
+        components=components,
+        weight_deltas=weight_deltas,
+        decode=decode,
+        device=device,
+        kl_path=kl_path,
+        orig_path=orig_path,
+    )
+    logger.info(
+        f"Saw {total_prompts} prompts of {seq_len} positions each "
+        f"(total: {total_prompts * seq_len}); wrote {total_kl_writes} kl rows to {kl_path} "
+        f"and {total_prompts * seq_len} orig rows to {orig_path}"
+    )
+    return kl_path, orig_path
+
+
+def _run(
+    *,
+    spd_model: ComponentModel,
+    iterator: Iterator[Tensor],
+    n_to_run: int,
+    components: list[tuple[str, int, int, str]],
+    weight_deltas: dict[str, Tensor],
+    decode: Callable[[int], str],
+    device: torch.device,
+    kl_path: Path,
+    orig_path: Path,
+) -> tuple[int, int, int]:
+    total_kl_writes = 0
     total_prompts = 0
     seq_len = 0
-    with out_path.open("w", newline="") as f, torch.no_grad():
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
-        writer.writeheader()
+    with (
+        kl_path.open("w", newline="") as kl_f,
+        orig_path.open("w", newline="") as orig_f,
+        torch.no_grad(),
+    ):
+        kl_writer = csv.DictWriter(kl_f, fieldnames=KL_FIELDS, delimiter="\t")
+        orig_writer = csv.DictWriter(orig_f, fieldnames=ORIG_FIELDS, delimiter="\t")
+        kl_writer.writeheader()
+        orig_writer.writeheader()
 
         for batch_idx in tqdm(range(n_to_run), desc="batches"):
             batch = next(iterator)
@@ -168,13 +199,35 @@ def effect_of_ablation(
 
             orig_logits = spd_model(batch)
             assert isinstance(orig_logits, Tensor)
+            orig_log_probs = F.log_softmax(orig_logits, dim=-1)
+            orig_probs = orig_log_probs.exp()
+            orig_prob_max, orig_pred = orig_probs.max(dim=-1)
+            orig_pred_cpu = orig_pred.cpu().tolist()
+            orig_prob_cpu = orig_prob_max.cpu().tolist()
+            prompt_offset = batch_idx * batch_size
+
+            for b in range(batch_size):
+                prompt_idx = prompt_offset + b
+                for t in range(seq_len):
+                    token_id = batch_cpu[b][t]
+                    orig_id = orig_pred_cpu[b][t]
+                    orig_writer.writerow(
+                        {
+                            "prompt": prompt_idx,
+                            "pos": t,
+                            "token": token_id,
+                            "token_str": decode(token_id),
+                            "orig_pred": orig_id,
+                            "orig_pred_str": decode(orig_id),
+                            "orig_prob": orig_prob_cpu[b][t],
+                        }
+                    )
 
             delta_masks = _build_full_delta_masks(weight_deltas, (batch_size, seq_len), device)
             component_masks = _build_baseline_masks(
                 spd_model.module_to_c, (batch_size, seq_len), device
             )
             mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=delta_masks)
-            prompt_offset = batch_idx * batch_size
 
             for module_name, layer, component, matrix in tqdm(
                 components, desc=f"components (batch {batch_idx})", leave=False
@@ -184,47 +237,25 @@ def effect_of_ablation(
                 ablated_logits = spd_model(batch, mask_infos=mask_infos)
                 mask_tensor[..., component] = 1.0
                 assert isinstance(ablated_logits, Tensor)
-
-                kl, orig_pred, orig_prob, abl_pred, abl_prob = _kl_and_preds(
-                    orig_logits, ablated_logits
-                )
+                ablated_log_probs = F.log_softmax(ablated_logits, dim=-1)
+                kl = (orig_probs * (orig_log_probs - ablated_log_probs)).sum(dim=-1)
                 kl_cpu = kl.cpu().tolist()
-                orig_pred_cpu = orig_pred.cpu().tolist()
-                orig_prob_cpu = orig_prob.cpu().tolist()
-                abl_pred_cpu = abl_pred.cpu().tolist()
-                abl_prob_cpu = abl_prob.cpu().tolist()
 
                 for b in range(batch_size):
                     prompt_idx = prompt_offset + b
                     for t in range(seq_len):
-                        token_id = batch_cpu[b][t]
-                        orig_id = orig_pred_cpu[b][t]
-                        abl_id = abl_pred_cpu[b][t]
-                        writer.writerow(
+                        kl_writer.writerow(
                             {
                                 "layer": layer,
                                 "matrix": matrix,
                                 "component": component,
                                 "prompt": prompt_idx,
                                 "pos": t,
-                                "token": token_id,
-                                "token_str": decode(token_id),
                                 "kl": kl_cpu[b][t],
-                                "orig_pred": orig_id,
-                                "orig_pred_str": decode(orig_id),
-                                "orig_prob": orig_prob_cpu[b][t],
-                                "ablated_pred": abl_id,
-                                "ablated_pred_str": decode(abl_id),
-                                "ablated_prob": abl_prob_cpu[b][t],
                             }
                         )
-                        total_writes += 1
-
-    logger.info(
-        f"Saw {total_prompts} prompts of {seq_len} positions each "
-        f"(total: {total_prompts * seq_len}); wrote {total_writes} rows to {out_path}"
-    )
-    return out_path
+                        total_kl_writes += 1
+    return total_prompts, total_kl_writes, seq_len
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 
 Usage:
     python -m spd.scripts.validation.find_swap_candidates <model_path> \
-        <effect_target_tsv> <effect_nontarget_tsv> \
+        <effect_target_kl_tsv> <effect_target_orig_tsv> \
+        <effect_nontarget_kl_tsv> <effect_nontarget_orig_tsv> \
         --task-a='{"prompt": "import numpy as", "target": " np"}' \
         --task-b='{"prompt": "import pandas as", "target": " pd"}' \
         [--top-k=20] [--quantile=0.99] [--prompts=PATH] [--output=PATH]
@@ -41,8 +42,6 @@ class TaskSpec:
 class TargetRow:
     importance: float  # KL at target position after ablation
     orig_prob: float
-    ablated_pred: int
-    ablated_prob: float
 
 
 @dataclass
@@ -96,27 +95,49 @@ def _resolve_task(
     return spec, prompt_text, target_text
 
 
+def _read_orig_at_task_position(orig_path: Path, task: TaskSpec) -> float:
+    """Return the original model's probability for task's target token at its task position.
+
+    Also asserts the model actually predicts the target token there (otherwise the task is
+    mis-specified — the swap test's importance signal assumes the original model is correct).
+    """
+    with orig_path.open() as f:
+        for record in csv.DictReader(f, delimiter="\t"):
+            if int(record["prompt"]) != task.prompt_idx or int(record["pos"]) != task.last_pos:
+                continue
+            orig_pred = int(record["orig_pred"])
+            assert orig_pred == task.target_token_id, (
+                f"Task {task.name}: orig_predictions row at prompt={task.prompt_idx}, "
+                f"pos={task.last_pos} has orig_pred={orig_pred}, but target_token_id="
+                f"{task.target_token_id}. The original model doesn't predict the target token "
+                "— aborting."
+            )
+            return float(record["orig_prob"])
+    raise AssertionError(
+        f"Task {task.name}: no row for (prompt={task.prompt_idx}, pos={task.last_pos}) in "
+        f"{orig_path}"
+    )
+
+
 def _read_target_rows(
-    effect_target_path: Path, task_a: TaskSpec, task_b: TaskSpec
+    kl_path: Path, orig_path: Path, task_a: TaskSpec, task_b: TaskSpec
 ) -> tuple[dict[ComponentKey, TargetRow], dict[ComponentKey, TargetRow]]:
     """Extract the (prompt, pos) row for each component under each task."""
+    orig_prob_a = _read_orig_at_task_position(orig_path, task_a)
+    orig_prob_b = _read_orig_at_task_position(orig_path, task_b)
+
     rows_a: dict[ComponentKey, TargetRow] = {}
     rows_b: dict[ComponentKey, TargetRow] = {}
-
-    with effect_target_path.open() as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for record in tqdm(reader, desc="target TSV"):
+    with kl_path.open() as f:
+        for record in tqdm(csv.DictReader(f, delimiter="\t"), desc="target kl TSV"):
             prompt = int(record["prompt"])
             pos = int(record["pos"])
-            for task, bucket in ((task_a, rows_a), (task_b, rows_b)):
+            for task, bucket, orig_prob in (
+                (task_a, rows_a, orig_prob_a),
+                (task_b, rows_b, orig_prob_b),
+            ):
                 if prompt != task.prompt_idx or pos != task.last_pos:
                     continue
-                orig_pred = int(record["orig_pred"])
-                assert orig_pred == task.target_token_id, (
-                    f"Task {task.name}: row at prompt={prompt}, pos={pos} has orig_pred="
-                    f"{orig_pred}, but target_token_id={task.target_token_id}. "
-                    "The original model doesn't predict the target token — aborting."
-                )
                 key: ComponentKey = (
                     int(record["layer"]),
                     record["matrix"],
@@ -124,9 +145,7 @@ def _read_target_rows(
                 )
                 bucket[key] = TargetRow(
                     importance=float(record["kl"]),
-                    orig_prob=float(record["orig_prob"]),
-                    ablated_pred=int(record["ablated_pred"]),
-                    ablated_prob=float(record["ablated_prob"]),
+                    orig_prob=orig_prob,
                 )
     return rows_a, rows_b
 
@@ -141,74 +160,27 @@ def _contains_subsequence(haystack: list[int], needle: list[int]) -> bool:
 _CONTEXT_SIZE = 5
 
 
-def _scan_nontarget(
-    effect_nontarget_path: Path, task_a: TaskSpec, task_b: TaskSpec, quantile: float
-) -> tuple[dict[ComponentKey, float], set[int], dict[tuple[int, int], NontargetHit]]:
-    """Single pass: per-component KL quantile (excluding target-containing prompts), excluded set, alerts.
-
-    effect_of_ablation writes rows in the order `(batch, component, prompt, pos)`, so all
-    positions of a given `(component, prompt)` block are contiguous, and the *first* component's
-    block for a prompt sees every one of its positions before any later component does. That lets
-    us decide exclusion for a prompt the moment its first block ends, then either fold the block's
-    KL values into the global per-component collection or discard them — never needing a second
-    pass. Alerts (positions where `orig_pred` is one of the target tokens) are collected in the
-    same pass, deduplicated by `(prompt, pos)`.
-    """
-    values_by_key: dict[ComponentKey, list[float]] = {}
+def _scan_positions(
+    positions_path: Path, task_a: TaskSpec, task_b: TaskSpec
+) -> tuple[dict[int, list[int]], set[int], dict[tuple[int, int], NontargetHit]]:
+    """Read the nontarget positions TSV: per-prompt token sequence, excluded prompt set, alerts."""
     tokens_per_prompt: dict[int, dict[int, int]] = {}
-    excluded: set[int] = set()
-    excluded_status: dict[int, bool] = {}
     hits: dict[tuple[int, int], NontargetHit] = {}
     target_to_task_name = {
         task_a.target_token_id: task_a.name,
         task_b.target_token_id: task_b.name,
     }
-
-    current_prompt: int | None = None
-    current_key: ComponentKey | None = None
-    block_values: list[float] = []
-
-    def _finalize(prompt: int, key: ComponentKey, block_values: list[float]) -> None:
-        if prompt not in excluded_status:
-            pos_to_tok = tokens_per_prompt[prompt]
-            seq = [pos_to_tok[p] for p in sorted(pos_to_tok)]
-            is_excl = _contains_subsequence(seq, task_a.prompt_token_ids) or _contains_subsequence(
-                seq, task_b.prompt_token_ids
-            )
-            excluded_status[prompt] = is_excl
-            if is_excl:
-                excluded.add(prompt)
-        if excluded_status[prompt]:
-            return
-        values_by_key.setdefault(key, []).extend(block_values)
-
-    with effect_nontarget_path.open() as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for record in tqdm(reader, desc="nontarget TSV"):
+    with positions_path.open() as f:
+        for record in tqdm(csv.DictReader(f, delimiter="\t"), desc="positions TSV"):
             prompt = int(record["prompt"])
             pos = int(record["pos"])
-            key: ComponentKey = (
-                int(record["layer"]),
-                record["matrix"],
-                int(record["component"]),
-            )
-
-            if (prompt, key) != (current_prompt, current_key):
-                if current_prompt is not None and current_key is not None:
-                    _finalize(current_prompt, current_key, block_values)
-                current_prompt = prompt
-                current_key = key
-                block_values = []
-
             tokens_per_prompt.setdefault(prompt, {})[pos] = int(record["token"])
-            block_values.append(float(record["kl"]))
-
-            pos_key = (prompt, pos)
-            if pos_key in hits:
-                continue
             orig_pred = int(record["orig_pred"])
             matched_task = target_to_task_name.get(orig_pred)
             if matched_task is None:
+                continue
+            pos_key = (prompt, pos)
+            if pos_key in hits:
                 continue
             pos_to_tok = tokens_per_prompt[prompt]
             context_ids = [
@@ -223,19 +195,48 @@ def _scan_nontarget(
                 orig_prob=float(record["orig_prob"]),
             )
 
-    if current_prompt is not None and current_key is not None:
-        _finalize(current_prompt, current_key, block_values)
+    prompt_tokens: dict[int, list[int]] = {}
+    excluded: set[int] = set()
+    for prompt, pos_to_tok in tokens_per_prompt.items():
+        seq = [pos_to_tok[p] for p in sorted(pos_to_tok)]
+        prompt_tokens[prompt] = seq
+        if _contains_subsequence(seq, task_a.prompt_token_ids) or _contains_subsequence(
+            seq, task_b.prompt_token_ids
+        ):
+            excluded.add(prompt)
+    return prompt_tokens, excluded, hits
+
+
+def _scan_nontarget(
+    kl_path: Path, positions_path: Path, task_a: TaskSpec, task_b: TaskSpec, quantile: float
+) -> tuple[dict[ComponentKey, float], set[int], dict[tuple[int, int], NontargetHit]]:
+    """Compute per-component KL quantile, excluded-prompt set, and nontarget-hit alerts.
+
+    The nontarget output of `effect_of_ablation` is split into two files: a positions file (one
+    row per prompt × pos) and a kl file (one row per component × prompt × pos). The positions
+    file is read first to determine prompt exclusions and alerts; the kl file is then streamed
+    and each row's KL is added to its component's accumulator iff the prompt isn't excluded.
+    """
+    _, excluded, hits = _scan_positions(positions_path, task_a, task_b)
+
+    values_by_key: dict[ComponentKey, list[float]] = {}
+    with kl_path.open() as f:
+        for record in tqdm(csv.DictReader(f, delimiter="\t"), desc="kl TSV"):
+            prompt = int(record["prompt"])
+            if prompt in excluded:
+                continue
+            key: ComponentKey = (
+                int(record["layer"]),
+                record["matrix"],
+                int(record["component"]),
+            )
+            values_by_key.setdefault(key, []).append(float(record["kl"]))
 
     quantile_kl = {
         k: float(np.quantile(np.asarray(vs, dtype=np.float32), quantile))
         for k, vs in values_by_key.items()
     }
     return quantile_kl, excluded, hits
-
-
-def _decode_pred(token_id: int, tokenizer: PreTrainedTokenizer) -> str:
-    decoded: str = tokenizer.decode([token_id])  # pyright: ignore[reportAttributeAccessIssue]
-    return f"{token_id}:{decoded!r}"
 
 
 @dataclass
@@ -295,7 +296,7 @@ def _rank_pairs(
     return pairs
 
 
-def _write_pairs(pairs: list[PairScore], tokenizer: PreTrainedTokenizer, out_path: Path) -> None:
+def _write_pairs(pairs: list[PairScore], out_path: Path) -> None:
     fieldnames = [
         "rank",
         "layer",
@@ -304,12 +305,8 @@ def _write_pairs(pairs: list[PairScore], tokenizer: PreTrainedTokenizer, out_pat
         "b_component",
         "a_importance",
         "a_orig_prob",
-        "a_ablated_pred",
-        "a_ablated_prob",
         "b_importance",
         "b_orig_prob",
-        "b_ablated_pred",
-        "b_ablated_prob",
         "a_nontarget_quantile_kl",
         "b_nontarget_quantile_kl",
         "combined_score",
@@ -327,12 +324,8 @@ def _write_pairs(pairs: list[PairScore], tokenizer: PreTrainedTokenizer, out_pat
                     "b_component": p.b_component,
                     "a_importance": p.a_row.importance,
                     "a_orig_prob": p.a_row.orig_prob,
-                    "a_ablated_pred": _decode_pred(p.a_row.ablated_pred, tokenizer),
-                    "a_ablated_prob": p.a_row.ablated_prob,
                     "b_importance": p.b_row.importance,
                     "b_orig_prob": p.b_row.orig_prob,
-                    "b_ablated_pred": _decode_pred(p.b_row.ablated_pred, tokenizer),
-                    "b_ablated_prob": p.b_row.ablated_prob,
                     "a_nontarget_quantile_kl": p.a_nontarget_quantile_kl,
                     "b_nontarget_quantile_kl": p.b_nontarget_quantile_kl,
                     "combined_score": p.combined_score,
@@ -342,8 +335,10 @@ def _write_pairs(pairs: list[PairScore], tokenizer: PreTrainedTokenizer, out_pat
 
 def find_swap_candidates(
     model_path: ModelPath,
-    effect_target_path: str,
-    effect_nontarget_path: str,
+    effect_target_kl_path: str,
+    effect_target_orig_path: str,
+    effect_nontarget_kl_path: str,
+    effect_nontarget_orig_path: str,
     task_a: str | dict[str, Any],
     task_b: str | dict[str, Any],
     top_k: int = 20,
@@ -375,10 +370,14 @@ def find_swap_candidates(
         f"target_id={spec_b.target_token_id} ({b_target!r})"
     )
 
-    effect_target = Path(effect_target_path).expanduser()
-    effect_nontarget = Path(effect_nontarget_path).expanduser()
+    effect_target_kl = Path(effect_target_kl_path).expanduser()
+    effect_target_orig = Path(effect_target_orig_path).expanduser()
+    effect_nontarget_kl = Path(effect_nontarget_kl_path).expanduser()
+    effect_nontarget_orig = Path(effect_nontarget_orig_path).expanduser()
 
-    task_a_rows, task_b_rows = _read_target_rows(effect_target, spec_a, spec_b)
+    task_a_rows, task_b_rows = _read_target_rows(
+        effect_target_kl, effect_target_orig, spec_a, spec_b
+    )
     assert task_a_rows, f"No target-ablation rows found for task A (prompt_idx={spec_a.prompt_idx})"
     assert task_b_rows, f"No target-ablation rows found for task B (prompt_idx={spec_b.prompt_idx})"
     logger.info(
@@ -388,7 +387,7 @@ def find_swap_candidates(
     assert 0.0 < quantile < 1.0, f"--quantile must be in (0, 1), got {quantile}"
     logger.info(f"Side-effect score: per-component KL quantile at q={quantile}")
     side_effects, excluded_prompts, hits = _scan_nontarget(
-        effect_nontarget, spec_a, spec_b, quantile
+        effect_nontarget_kl, effect_nontarget_orig, spec_a, spec_b, quantile
     )
     if excluded_prompts:
         print(
@@ -420,7 +419,7 @@ def find_swap_candidates(
 
     out_path = Path(output).expanduser() if output else run_dir / "swap_candidates.tsv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_pairs(pairs, tokenizer, out_path)
+    _write_pairs(pairs, out_path)
     logger.info(f"Wrote {len(pairs)} candidate pairs to {out_path}")
     return out_path
 

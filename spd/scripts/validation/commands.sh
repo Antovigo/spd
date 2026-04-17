@@ -4,9 +4,11 @@
 # first (once per shell) so $RUN_DIR and $MODEL_PATH are defined.
 
 # --- Setup (run first) -------------------------------------------------------
-cd ~/SPD/spd
+
 RUN_DIR=~/spd_out/spd/s-0c454b30
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+
+cd ~/SPD/spd
 echo $MODEL_PATH
 
 PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
@@ -24,7 +26,9 @@ uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_D
 uv run python -m spd.scripts.validation.find_swap_candidates \
     "$MODEL_PATH" \
     "$RUN_DIR/effect_of_ablation.tsv" \
+    "$RUN_DIR/orig_predictions.tsv" \
     "$RUN_DIR/effect_of_ablation_nontarget.tsv" \
+    "$RUN_DIR/orig_predictions_nontarget.tsv" \
     --task-a='{"prompt": "import numpy as", "target": " np"}' \
     --task-b='{"prompt": "import pandas as", "target": " pd"}' \
     --top-k=20 --quantile=0.99 \
