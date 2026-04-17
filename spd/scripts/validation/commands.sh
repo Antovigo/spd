@@ -20,7 +20,7 @@ uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --pr
 uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --prompts="$PROMPTS"
 
 # --- 3. Same on nontarget data (side-effect reference) -----------------------
-uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --nontarget --n-batches=62
+uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --nontarget --n-batches=7
 
 # --- 4. Summarise nontarget side-effects per component -----------------------
 uv run python -m spd.scripts.validation.summarize_nontarget \
