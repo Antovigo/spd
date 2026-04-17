@@ -5,8 +5,11 @@
 
 # --- Setup (run first) -------------------------------------------------------
 
-#RUN_DIR=~/spd_out/spd/s-0c454b30
-RUN_DIR=~/spd_out/spd/s-74b94cad
+srun --time=2:00:00 --pty bash
+
+RUN_DIR=~/spd_out/spd/s-0c454b30 # 4L
+RUN_DIR=~/spd_out/spd/s-23733db9 # 4L_naive
+RUN_DIR=~/spd_out/spd/s-74b94cad # 12L
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
 cd ~/SPD/spd
@@ -54,3 +57,13 @@ uv run python -m spd.scripts.validation.swap_test \
     --target-a=" np" --target-b=" pd" \
     --n-nontarget-batches=10 \
     --prompts="$PROMPTS"
+
+# --- 7. Compare matched components across two seeds --------------------------
+# Hungarian-match active components between two decompositions of the same target model
+# trained with different seeds (or hyperparams). Edit the second RUN_DIR_B below.
+RUN_DIR_B=~/spd_out/spd/s-23733db9
+MODEL_PATH_B=$(ls -t "$RUN_DIR_B"/model_*.pth | head -n 1)
+uv run python -m spd.scripts.validation.compare_matched_components \
+    "$MODEL_PATH" "$MODEL_PATH_B" \
+    --prompt="import numpy as" \
+    --ci-thr=0.1
