@@ -8,7 +8,7 @@ A pair `(a_comp, b_comp)` in the same `(layer, matrix)` is a candidate iff:
 - Neither component disrupts the nontarget distribution much: nontarget KL quantile (from the
   summary file) < `--low-kl` for both.
 
-Pairs are sorted by the smallest margin-to-cutoff across the six conditions (larger = more
+Pairs are sorted by the smallest log-ratio margin across the six conditions (larger = more
 robustly satisfies the criteria); there is no top-k filter — every pair that passes is written.
 
 Reads:
@@ -25,10 +25,13 @@ Usage:
 """
 
 import csv
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_KL_FLOOR = 1e-12
 
 import fire
 from tqdm import tqdm
@@ -59,7 +62,7 @@ class PairScore:
     b_off_kl: float  # B's KL on task A
     a_nontarg_kl: float
     b_nontarg_kl: float
-    margin: float  # min margin across all six cutoffs (larger = more robust)
+    margin: float  # min log-ratio margin across all six cutoffs (larger = more robust)
 
 
 def _assert_orig_predicts_target(orig_path: Path, task: TaskSpec) -> None:
@@ -183,12 +186,12 @@ def _find_candidate_pairs(
                     continue
                 b_on, b_off, b_nontarg = b_pool[b_key]
                 margin = min(
-                    a_on - high_kl,
-                    b_on - high_kl,
-                    low_kl - a_off,
-                    low_kl - b_off,
-                    low_kl - a_nontarg,
-                    low_kl - b_nontarg,
+                    math.log(a_on / high_kl),
+                    math.log(b_on / high_kl),
+                    math.log(low_kl / max(a_off, _KL_FLOOR)),
+                    math.log(low_kl / max(b_off, _KL_FLOOR)),
+                    math.log(low_kl / max(a_nontarg, _KL_FLOOR)),
+                    math.log(low_kl / max(b_nontarg, _KL_FLOOR)),
                 )
                 pairs.append(
                     PairScore(

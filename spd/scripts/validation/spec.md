@@ -145,7 +145,7 @@ The script finds `(component_A, component_B)` pairs in the same decomposed matri
 - symmetrically for `b_comp` on task B / task A,
 - `a_comp`'s and `b_comp`'s nontarget KL quantile (from the summary file) both < `low_kl`.
 
-There is no top-k filter: every pair passing the cutoffs is written. Pairs are sorted by `margin = min(margin_i)` across the six cutoff margins (positive values = passes, larger values = further from the cutoff), so the top rows of the TSV are the pairs that robustly meet every criterion.
+There is no top-k filter: every pair passing the cutoffs is written. Pairs are sorted by `margin = min(margin_i)` across the six cutoff margins, each computed in log space as `log(kl / cutoff)` for "on-task" conditions and `log(cutoff / kl)` for "off-task"/nontarget conditions (positive values = passes, larger values = further from the cutoff in log units), so the top rows of the TSV are the pairs that robustly meet every criterion. Using log-ratios means a component that is 10× below the `low_kl` cutoff contributes the same margin as one that is 10× above `high_kl`, regardless of the absolute cutoff scales.
 
 Task resolution is the same as in `summarize_nontarget` — the prompt must appear exactly once in the prompts file and the target must be a single token under the tokenizer.
 
