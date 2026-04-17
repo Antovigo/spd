@@ -1,18 +1,27 @@
-"""Rank (component_A, component_B) pairs for U-vector swapping between two prompts.
+"""Find (component_A, component_B) pairs that are good candidates for U-vector swapping.
+
+A pair `(a_comp, b_comp)` in the same `(layer, matrix)` is a candidate iff:
+- `a_comp` is important for task A only: KL at task A's target > `--high-kl` AND KL at task B's
+  target < `--low-kl`.
+- `b_comp` is important for task B only: KL at task B's target > `--high-kl` AND KL at task A's
+  target < `--low-kl`.
+- Neither component disrupts the nontarget distribution much: nontarget KL quantile (from the
+  summary file) < `--low-kl` for both.
+
+Pairs are sorted by the smallest margin-to-cutoff across the six conditions (larger = more
+robustly satisfies the criteria); there is no top-k filter — every pair that passes is written.
 
 Reads:
-- target KL + orig-predictions files (produced by `effect_of_ablation`) to score each task's
-  per-component importance (and assert the original model actually predicts the target token
-  at the task position);
-- a nontarget summary TSV (produced by `summarize_nontarget`) that carries the precomputed
-  per-component KL quantile — the side-effect score.
+- target KL + orig-predictions files (produced by `effect_of_ablation`) for the task-specific KLs
+  (and asserts the original model actually predicts the target token at each task position);
+- a nontarget summary TSV (produced by `summarize_nontarget`).
 
 Usage:
     python -m spd.scripts.validation.find_swap_candidates <model_path> \
         <effect_target_kl_tsv> <effect_target_orig_tsv> <nontarget_summary_tsv> \
         --task-a='{"prompt": "import numpy as", "target": " np"}' \
         --task-b='{"prompt": "import pandas as", "target": " pd"}' \
-        [--top-k=20] [--prompts=PATH] [--output=PATH]
+        [--high-kl=0.5] [--low-kl=0.1] [--prompts=PATH] [--output=PATH]
 """
 
 import csv
@@ -44,11 +53,13 @@ class PairScore:
     matrix: str
     a_comp: int
     b_comp: int
-    a_targ_kl: float
-    b_targ_kl: float
+    a_on_kl: float  # A's KL on task A (its intended task; must exceed high_kl)
+    a_off_kl: float  # A's KL on task B (must stay below low_kl)
+    b_on_kl: float  # B's KL on task B
+    b_off_kl: float  # B's KL on task A
     a_nontarg_kl: float
     b_nontarg_kl: float
-    score: float
+    margin: float  # min margin across all six cutoffs (larger = more robust)
 
 
 def _assert_orig_predicts_target(orig_path: Path, task: TaskSpec) -> None:
@@ -127,46 +138,75 @@ def _read_nontarget_summary(summary_path: Path) -> tuple[dict[ComponentKey, floa
     return side_effects, quantile_pct
 
 
-def _rank_pairs(
+def _task_specific_pool(
+    on_task_kl: dict[ComponentKey, float],
+    off_task_kl: dict[ComponentKey, float],
+    nontarg_kl: dict[ComponentKey, float],
+    high_kl: float,
+    low_kl: float,
+) -> dict[ComponentKey, tuple[float, float, float]]:
+    """Return components that pass the per-task cutoffs, with their (on, off, nontarg) KLs."""
+    pool: dict[ComponentKey, tuple[float, float, float]] = {}
+    for key, on_kl in on_task_kl.items():
+        off_kl = off_task_kl.get(key, 0.0)
+        nontarg = nontarg_kl.get(key, 0.0)
+        if on_kl > high_kl and off_kl < low_kl and nontarg < low_kl:
+            pool[key] = (on_kl, off_kl, nontarg)
+    return pool
+
+
+def _find_candidate_pairs(
     targ_kl_a: dict[ComponentKey, float],
     targ_kl_b: dict[ComponentKey, float],
     nontarg_kl: dict[ComponentKey, float],
+    high_kl: float,
+    low_kl: float,
 ) -> list[PairScore]:
-    by_matrix_a: dict[MatrixKey, list[tuple[int, float]]] = {}
-    by_matrix_b: dict[MatrixKey, list[tuple[int, float]]] = {}
-    for (layer, matrix, component), kl in targ_kl_a.items():
-        by_matrix_a.setdefault((layer, matrix), []).append((component, kl))
-    for (layer, matrix, component), kl in targ_kl_b.items():
-        by_matrix_b.setdefault((layer, matrix), []).append((component, kl))
+    """Same-matrix (a, b) pairs where each component passes its side's cutoffs, sorted by margin."""
+    a_pool = _task_specific_pool(targ_kl_a, targ_kl_b, nontarg_kl, high_kl, low_kl)
+    b_pool = _task_specific_pool(targ_kl_b, targ_kl_a, nontarg_kl, high_kl, low_kl)
+
+    a_by_matrix: dict[MatrixKey, list[ComponentKey]] = {}
+    b_by_matrix: dict[MatrixKey, list[ComponentKey]] = {}
+    for key in a_pool:
+        a_by_matrix.setdefault((key[0], key[1]), []).append(key)
+    for key in b_pool:
+        b_by_matrix.setdefault((key[0], key[1]), []).append(key)
 
     pairs: list[PairScore] = []
-    for matrix_key, a_items in by_matrix_a.items():
-        if matrix_key not in by_matrix_b:
-            continue
-        b_items = by_matrix_b[matrix_key]
+    for matrix_key in a_by_matrix.keys() & b_by_matrix.keys():
         layer, matrix = matrix_key
-        for a_comp, a_targ in a_items:
-            a_nontarg = nontarg_kl.get((layer, matrix, a_comp), 0.0)
-            for b_comp, b_targ in b_items:
-                if a_comp == b_comp:
+        for a_key in a_by_matrix[matrix_key]:
+            a_on, a_off, a_nontarg = a_pool[a_key]
+            for b_key in b_by_matrix[matrix_key]:
+                if a_key == b_key:
                     continue
-                b_nontarg = nontarg_kl.get((layer, matrix, b_comp), 0.0)
-                score = min(a_targ, b_targ) / (1e-6 + (a_nontarg + b_nontarg) / 2.0)
+                b_on, b_off, b_nontarg = b_pool[b_key]
+                margin = min(
+                    a_on - high_kl,
+                    b_on - high_kl,
+                    low_kl - a_off,
+                    low_kl - b_off,
+                    low_kl - a_nontarg,
+                    low_kl - b_nontarg,
+                )
                 pairs.append(
                     PairScore(
                         layer=layer,
                         matrix=matrix,
-                        a_comp=a_comp,
-                        b_comp=b_comp,
-                        a_targ_kl=a_targ,
-                        b_targ_kl=b_targ,
+                        a_comp=a_key[2],
+                        b_comp=b_key[2],
+                        a_on_kl=a_on,
+                        a_off_kl=a_off,
+                        b_on_kl=b_on,
+                        b_off_kl=b_off,
                         a_nontarg_kl=a_nontarg,
                         b_nontarg_kl=b_nontarg,
-                        score=score,
+                        margin=margin,
                     )
                 )
 
-    pairs.sort(key=lambda p: p.score, reverse=True)
+    pairs.sort(key=lambda p: p.margin, reverse=True)
     return pairs
 
 
@@ -179,11 +219,13 @@ def _write_pairs(pairs: list[PairScore], quantile_pct: int, out_path: Path) -> N
         "matrix",
         "a_comp",
         "b_comp",
-        "a_targ_kl",
-        "b_targ_kl",
+        "a_on_kl",
+        "a_off_kl",
+        "b_on_kl",
+        "b_off_kl",
         a_nontarg_col,
         b_nontarg_col,
-        "score",
+        "margin",
     ]
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
@@ -196,11 +238,13 @@ def _write_pairs(pairs: list[PairScore], quantile_pct: int, out_path: Path) -> N
                     "matrix": p.matrix,
                     "a_comp": p.a_comp,
                     "b_comp": p.b_comp,
-                    "a_targ_kl": p.a_targ_kl,
-                    "b_targ_kl": p.b_targ_kl,
+                    "a_on_kl": p.a_on_kl,
+                    "a_off_kl": p.a_off_kl,
+                    "b_on_kl": p.b_on_kl,
+                    "b_off_kl": p.b_off_kl,
                     a_nontarg_col: p.a_nontarg_kl,
                     b_nontarg_col: p.b_nontarg_kl,
-                    "score": p.score,
+                    "margin": p.margin,
                 }
             )
 
@@ -212,10 +256,13 @@ def find_swap_candidates(
     nontarget_summary_path: str,
     task_a: str | dict[str, Any],
     task_b: str | dict[str, Any],
-    top_k: int = 20,
+    high_kl: float = 0.5,
+    low_kl: float = 0.1,
     prompts: str | None = None,
     output: str | None = None,
 ) -> Path:
+    assert high_kl > low_kl, f"--high-kl ({high_kl}) must exceed --low-kl ({low_kl})"
+
     run_info = SPDRunInfo.from_path(model_path)
     config = run_info.config
     run_dir = run_info.checkpoint_path.parent
@@ -236,9 +283,8 @@ def find_swap_candidates(
     assert targ_kl_b, f"No target-ablation rows found for task B (prompt_idx={spec_b.prompt_idx})"
 
     nontarg_kl, quantile_pct = _read_nontarget_summary(summary_path)
-    pairs = _rank_pairs(targ_kl_a, targ_kl_b, nontarg_kl)
-    logger.info(f"Built {len(pairs)} candidate pairs; keeping top {top_k}")
-    pairs = pairs[:top_k]
+    pairs = _find_candidate_pairs(targ_kl_a, targ_kl_b, nontarg_kl, high_kl, low_kl)
+    logger.info(f"Found {len(pairs)} candidate pairs (high_kl={high_kl}, low_kl={low_kl})")
 
     out_path = Path(output).expanduser() if output else run_dir / "swap_candidates.tsv"
     out_path.parent.mkdir(parents=True, exist_ok=True)

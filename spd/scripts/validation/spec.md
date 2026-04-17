@@ -134,34 +134,33 @@ args:
 - the path to the nontarget summary TSV (produced by `summarize_nontarget.py`)
 --task-a: JSON dict `{"prompt": <prompt text>, "target": <next-token text>}` for task A
 --task-b: JSON dict `{"prompt": <prompt text>, "target": <next-token text>}` for task B
---top-k: number of candidate pairs to keep (default 20)
+--high-kl: lower cutoff for the "on-task" KL (ablating the component on its own task must swing the distribution by at least this much; default 0.5)
+--low-kl: upper cutoff for both the "off-task" KL (other task) and the nontarget KL quantile (default 0.1)
 --prompts: optional override for the prompts file
 --output: overrides the path to write the data to
 
-The script ranks (component_A, component_B) pairs in the same decomposed matrix that are good candidates for swapping their `U` (output) vectors. A good candidate pair has: (a) both components are important for their own task (ablating them pushes the model away from the correct next token), (b) both are in the same `(layer, matrix)` (so the U vectors have the same dimensions), (c) small side effects on nontarget data.
+The script finds `(component_A, component_B)` pairs in the same decomposed matrix that are good candidates for swapping their `U` (output) vectors. A candidate pair `(a_comp, b_comp)` in a given `(layer, matrix)` satisfies all six cutoffs simultaneously:
+- `a_comp`'s KL at task A's target position > `high_kl` (it matters for task A),
+- `a_comp`'s KL at task B's target position < `low_kl` (it does NOT matter for task B),
+- symmetrically for `b_comp` on task B / task A,
+- `a_comp`'s and `b_comp`'s nontarget KL quantile (from the summary file) both < `low_kl`.
 
-Task resolution. For each task `{"prompt": P, "target": T}` the script:
-- Loads the prompts file referenced by `config.task_config.prompts_file` and finds the row whose text matches `P` exactly, giving `prompt_idx`.
-- Tokenises `P` with `config.tokenizer_name` (no padding) and uses `last_pos = len(tokens) - 1` — the position whose logits predict the next token.
-- Tokenises `T` and asserts it is a single token id (`target_token_id`).
-Only LM tasks with a `prompts_file` are supported.
+There is no top-k filter: every pair passing the cutoffs is written. Pairs are sorted by `margin = min(margin_i)` across the six cutoff margins (positive values = passes, larger values = further from the cutoff), so the top rows of the TSV are the pairs that robustly meet every criterion.
 
-Importance score (per task, per component). The original model's probability at the task's target position is read once from the target orig-predictions file (and asserted to have `orig_pred == target_token_id`; otherwise the task isn't even solved by the unablated model). From the target KL file, rows with `prompt == prompt_idx` and `pos == last_pos` give the component-wise importance: the `kl` value on that row is how much ablating the component swings the next-token distribution. Larger KL means more important.
+Task resolution is the same as in `summarize_nontarget` — the prompt must appear exactly once in the prompts file and the target must be a single token under the tokenizer.
 
-Side-effect score (per component). Read directly from the `quantile_kl` column of the nontarget summary TSV produced by `summarize_nontarget.py`. See that script for the exclusion rule and the definition of the quantile.
+Importance signal. Read from the target KL file at the task position of each task. The script asserts `orig_pred == target_token_id` at each task position via the target orig-predictions file before going further (otherwise the original model doesn't even solve the task).
 
-Pair ranking. For every `(layer, matrix)` that contains both a task-A candidate and a task-B candidate, enumerate all pairs `(a_comp, b_comp)` with `a_comp != b_comp`. The combined score for a pair is `min(a_targ_kl, b_targ_kl) / (1e-6 + mean(a_nontarg_kl, b_nontarg_kl))`, which rewards pairs that are jointly important for their own tasks while keeping the tail of their nontarget disruption low. Pairs are sorted by score and the top `--top-k` are written.
+Side-effect signal. Read directly from the `kl_q<pct>` column of the nontarget summary TSV. The quantile percent `pct` is recovered from the column name and is propagated into the output column names so the TSV is self-describing.
 
-The quantile percent is recovered from the summary TSV's column name (`kl_q<pct>`) and is propagated into the output column names so the TSV is self-describing.
-
-Output TSV (one row per candidate pair), columns:
-- rank (1-indexed)
-- layer
-- matrix
+Output TSV (one row per candidate pair that satisfies the cutoffs), columns:
+- rank (1-indexed, by descending margin)
+- layer, matrix
 - a_comp, b_comp (component indices)
-- a_targ_kl, b_targ_kl (KL at each task's target row after ablating the component)
-- a_nontarg_kl_q{pct}, b_nontarg_kl_q{pct} (nontarget KL quantile from the summary, `{pct}` is e.g. 99 for quantile 0.99)
-- score (combined score)
+- a_on_kl, a_off_kl (A's KL on its intended task vs the other task)
+- b_on_kl, b_off_kl
+- a_nontarg_kl_q{pct}, b_nontarg_kl_q{pct}
+- margin (minimum cutoff margin across the six conditions)
 
 Unless `--output` is specified, the TSV file is saved to the decomposed model's folder as `swap_candidates.tsv`.
 

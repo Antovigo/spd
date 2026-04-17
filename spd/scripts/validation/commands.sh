@@ -5,7 +5,8 @@
 
 # --- Setup (run first) -------------------------------------------------------
 
-RUN_DIR=~/spd_out/spd/s-0c454b30
+#RUN_DIR=~/spd_out/spd/s-0c454b30
+RUN_DIR=~/spd_out/spd/s-74b94cad
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
 cd ~/SPD/spd
@@ -32,7 +33,7 @@ uv run python -m spd.scripts.validation.summarize_nontarget \
     --quantile=0.99 \
     --prompts="$PROMPTS"
 
-# --- 5. Rank candidate (A, B) pairs for swapping -----------------------------
+# --- 5. Find candidate (A, B) pairs for swapping -----------------------------
 uv run python -m spd.scripts.validation.find_swap_candidates \
     "$MODEL_PATH" \
     "$RUN_DIR/effect_of_ablation.tsv" \
@@ -40,7 +41,7 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
     "$RUN_DIR/nontarget_summary.tsv" \
     --task-a='{"prompt": "import numpy as", "target": " np"}' \
     --task-b='{"prompt": "import pandas as", "target": " pd"}' \
-    --top-k=100 \
+    --high-kl=0.5 --low-kl=0.1 \
     --prompts="$PROMPTS"
 
 # --- 6. Swap test ------------------------------------------------------------
