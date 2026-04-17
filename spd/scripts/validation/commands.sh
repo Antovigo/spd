@@ -54,10 +54,10 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
 # --- 6. Swap test ------------------------------------------------------------
 # Pick a pair from $RUN_DIR/swap_candidates.tsv and edit the four fields below.
 
-LAYER=3
-MATRIX=attn.o_proj
-A_COMP=66
-B_COMP=79
+LAYER=9
+MATRIX=mlp.down_proj
+A_COMP=47
+B_COMP=48
 
 # Target data (one batch of prompts):
 uv run python -m spd.scripts.validation.swap_test \
@@ -73,7 +73,7 @@ uv run python -m spd.scripts.validation.swap_test \
     "$RUN_DIR/alive_components.tsv" \
     --layer=$LAYER --matrix=$MATRIX --a-component=$A_COMP --b-component=$B_COMP \
     --target-a=" np" --target-b=" pd" \
-    --nontarget --n-batches=10
+    --nontarget --n-batches=20
 
 # --- 7. Compare matched components across two seeds --------------------------
 # Hungarian-match alive components between two decompositions of the same target model
