@@ -154,6 +154,7 @@ def effect_of_ablation(
 
     total_writes = 0
     total_prompts = 0
+    seq_len = 0
     with out_path.open("w", newline="") as f, torch.no_grad():
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
@@ -220,8 +221,8 @@ def effect_of_ablation(
                         total_writes += 1
 
     logger.info(
-        f"Saw {total_prompts} prompts across {n_to_run} batch(es); "
-        f"wrote {total_writes} rows to {out_path}"
+        f"Saw {total_prompts} prompts of {seq_len} positions each "
+        f"(total: {total_prompts * seq_len}); wrote {total_writes} rows to {out_path}"
     )
     return out_path
 
