@@ -1,24 +1,25 @@
 """Compare components across two SPD decompositions using Hungarian matching.
 
-Active components (CI > threshold) of each run are matched 1-to-1 per (layer, matrix) by
-maximizing cosine similarity of their flattened weights (V @ U). Produces a TSV of
-matched-pair statistics and a figure grid (rows = matrix types, columns = layers). Each
-cell shows weight cosine similarity, component norms, V cosine similarity, and U cosine
-similarity for the matched pairs.
-
-Only LM tasks are supported (CI is computed on a text prompt).
+Alive components of each run (as found by `find_alive_components`) are matched 1-to-1 per
+(layer, matrix) by maximizing cosine similarity of their flattened weights (V @ U).
+Produces a TSV of matched-pair statistics and a figure grid (rows = matrix types, columns
+= layers). Each cell shows weight cosine similarity, component norms, V cosine similarity,
+and U cosine similarity for the matched pairs.
 
 Usage:
     python -m spd.scripts.validation.compare_matched_components <model_path_a> \\
-        <model_path_b> --prompt="The cat sat on the mat" \\
-        [--ci-thr=0.1] [--label-a=NAME] [--label-b=NAME] \\
+        <model_path_b> [--alive-components-a=PATH] [--alive-components-b=PATH] \\
+        [--label-a=NAME] [--label-b=NAME] \\
         [--output-tsv=PATH] [--output-fig=PATH]
+
+By default the alive-components TSVs are read from each model's directory (as written by
+`find_alive_components`), at `<run_dir>/alive_components.tsv`.
 """
 
 import csv
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import fire
 import matplotlib.pyplot as plt
@@ -28,13 +29,11 @@ import torch.nn.functional as F
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from scipy.optimize import linear_sum_assignment
 from torch import Tensor
-from transformers import AutoTokenizer
 
-from spd.configs import SamplingType
 from spd.log import logger
 from spd.models.component_model import ComponentModel
 from spd.models.components import LinearComponents
-from spd.scripts.validation.common import load_spd_run, parse_module_name
+from spd.scripts.validation.common import build_module_lookup, load_spd_run
 from spd.spd_types import ModelPath
 
 
@@ -54,23 +53,16 @@ class MatrixMatchResult:
     pairs: list[MatchedPairStats]
 
 
-def _compute_ci(model: ComponentModel, tokens: Tensor, sampling: SamplingType) -> dict[str, Tensor]:
-    out = model(tokens, cache_type="input")
-    ci = model.calc_causal_importances(
-        pre_weight_acts=out.cache,
-        sampling=sampling,
-        detach_inputs=True,
-    )
-    return ci.lower_leaky
-
-
-def _get_active_indices(ci_dict: dict[str, Tensor], threshold: float) -> dict[str, list[int]]:
-    result: dict[str, list[int]] = {}
-    for module_path, ci in ci_dict.items():
-        max_ci = ci.amax(dim=tuple(range(ci.ndim - 1)))
-        active_mask = max_ci > threshold
-        result[module_path] = sorted(active_mask.nonzero(as_tuple=True)[0].tolist())
-    return result
+def _load_alive_components(path: Path) -> dict[tuple[int, str], list[int]]:
+    """Return {(layer, matrix): [component indices]} from an alive_components TSV."""
+    result: dict[tuple[int, str], list[int]] = defaultdict(list)
+    with path.open() as f:
+        for record in csv.DictReader(f, delimiter="\t"):
+            key = (int(record["layer"]), record["matrix"])
+            result[key].append(int(record["component"]))
+    for key in result:
+        result[key].sort()
+    return dict(result)
 
 
 def _get_component_uv(model: ComponentModel, module_path: str, idx: int) -> tuple[Tensor, Tensor]:
@@ -307,18 +299,18 @@ def _write_tsv(results: list[MatrixMatchResult], output_path: Path) -> None:
 def compare_matched_components(
     model_path_a: ModelPath,
     model_path_b: ModelPath,
-    prompt: str,
-    ci_thr: float = 0.1,
+    alive_components_a: str | None = None,
+    alive_components_b: str | None = None,
     label_a: str | None = None,
     label_b: str | None = None,
     output_tsv: str | None = None,
     output_fig: str | None = None,
 ) -> Path:
-    """Match components of two SPD decompositions and write a TSV + figure of the matches."""
+    """Match alive components of two SPD decompositions and write a TSV + figure of the matches."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model_a, config_a, run_dir_a = load_spd_run(model_path_a)
-    model_b, config_b, run_dir_b = load_spd_run(model_path_b)
+    model_a, _config_a, run_dir_a = load_spd_run(model_path_a)
+    model_b, _config_b, run_dir_b = load_spd_run(model_path_b)
     model_a = model_a.to(device)
     model_b = model_b.to(device)
 
@@ -327,40 +319,56 @@ def compare_matched_components(
     if label_b is None:
         label_b = run_dir_b.name
 
-    assert config_a.tokenizer_name is not None, "config_a has no tokenizer_name"
-    tokenizer = AutoTokenizer.from_pretrained(config_a.tokenizer_name)
-    encoded: Any = tokenizer(prompt, return_tensors="pt")  # pyright: ignore[reportCallIssue]
-    tokens: Tensor = encoded["input_ids"].to(device)
-    logger.info(f"Prompt: {prompt!r} (tokens: {tokens.shape[1]})")
+    alive_path_a = (
+        Path(alive_components_a).expanduser()
+        if alive_components_a
+        else run_dir_a / "alive_components.tsv"
+    )
+    alive_path_b = (
+        Path(alive_components_b).expanduser()
+        if alive_components_b
+        else run_dir_b / "alive_components.tsv"
+    )
+    assert alive_path_a.exists(), f"alive components file not found for A: {alive_path_a}"
+    assert alive_path_b.exists(), f"alive components file not found for B: {alive_path_b}"
 
+    alive_a = _load_alive_components(alive_path_a)
+    alive_b = _load_alive_components(alive_path_b)
+    logger.info(
+        f"Run A alive components: {sum(len(v) for v in alive_a.values())} across {len(alive_a)} matrices"
+    )
+    logger.info(
+        f"Run B alive components: {sum(len(v) for v in alive_b.values())} across {len(alive_b)} matrices"
+    )
+
+    module_lookup = build_module_lookup(model_a.target_module_paths)
+    module_lookup_b = build_module_lookup(model_b.target_module_paths)
+    assert module_lookup == module_lookup_b, (
+        "Models A and B have different module paths; cannot match components across them."
+    )
+
+    shared_keys = sorted(alive_a.keys() & alive_b.keys())
+
+    results: list[MatrixMatchResult] = []
     with torch.no_grad():
-        ci_a = _compute_ci(model_a, tokens, config_a.sampling)
-        ci_b = _compute_ci(model_b, tokens, config_b.sampling)
-
-        active_a = _get_active_indices(ci_a, ci_thr)
-        active_b = _get_active_indices(ci_b, ci_thr)
-
-        shared_modules = sorted(p for p in active_a if p in active_b)
-
-        results: list[MatrixMatchResult] = []
-        for module_path in shared_modules:
-            layer, matrix = parse_module_name(module_path)
-            if layer == -1:
-                logger.info(f"  Skipping {module_path} (cannot parse layer/matrix)")
-                continue
-
-            indices_a = active_a[module_path]
-            indices_b = active_b[module_path]
+        for key in shared_keys:
+            layer, matrix = key
+            assert key in module_lookup, (
+                f"(layer={layer}, matrix={matrix}) from alive components is not a decomposed "
+                f"module. Available: {sorted(module_lookup.keys())}"
+            )
+            module_path = module_lookup[key]
+            indices_a = alive_a[key]
+            indices_b = alive_b[key]
 
             pairs = _match_components(model_a, model_b, module_path, indices_a, indices_b)
             logger.info(
                 f"  {module_path}: {len(indices_a)} vs {len(indices_b)} components -> "
                 f"{len(pairs)} matched pairs"
             )
-
             results.append(MatrixMatchResult(layer=layer, matrix=matrix, pairs=pairs))
 
-    assert results, "No shared modules with active components found."
+    assert results, "No (layer, matrix) shared between the two alive-components files."
 
     tsv_path = Path(output_tsv).expanduser() if output_tsv else run_dir_a / "matched_components.tsv"
     fig_path = Path(output_fig).expanduser() if output_fig else run_dir_a / "matched_components.png"

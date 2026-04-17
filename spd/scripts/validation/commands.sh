@@ -59,11 +59,15 @@ uv run python -m spd.scripts.validation.swap_test \
     --prompts="$PROMPTS"
 
 # --- 7. Compare matched components across two seeds --------------------------
-# Hungarian-match active components between two decompositions of the same target model
-# trained with different seeds (or hyperparams). Edit the second RUN_DIR_B below.
-RUN_DIR_B=~/spd_out/spd/s-23733db9
+# Hungarian-match alive components between two decompositions of the same target model
+# trained with different seeds (or hyperparams). Run `find_alive_components` on each
+# model first so that `<run_dir>/alive_components.tsv` exists on both sides.
+
+RUN_DIR_B=~/spd_out/spd/s-87abd1d1 # 12L seed 1
 MODEL_PATH_B=$(ls -t "$RUN_DIR_B"/model_*.pth | head -n 1)
+
+# Find alive components for model B (model A already has it from step 1).
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_B" --prompts="$PROMPTS"
+
 uv run python -m spd.scripts.validation.compare_matched_components \
-    "$MODEL_PATH" "$MODEL_PATH_B" \
-    --prompt="import numpy as" \
-    --ci-thr=0.1
+    "$MODEL_PATH" "$MODEL_PATH_B"

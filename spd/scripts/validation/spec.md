@@ -208,19 +208,18 @@ Only LM tasks with a `prompts_file` are supported (the script needs prompt-based
 args:
 - the path to the first decomposed model (run A)
 - the path to the second decomposed model (run B)
---prompt: text prompt used to compute causal importances in both runs (required)
---ci-thr: CI threshold for a component to count as active in either run (default 0.1)
---label-a / --label-b: human-readable labels used in the figure and as defaults derived from each run's checkpoint directory name if omitted
+--alive-components-a: optional override for run A's alive-components TSV (default `<run_dir_a>/alive_components.tsv`)
+--alive-components-b: optional override for run B's alive-components TSV (default `<run_dir_b>/alive_components.tsv`)
+--label-a / --label-b: human-readable labels used in the figure (defaults to each run's checkpoint directory name if omitted)
 --output-tsv: overrides the TSV output path
 --output-fig: overrides the figure output path
 
-Compares two SPD decompositions (typically the same target model decomposed with different seeds or hyperparameters) by 1-to-1 matching their active components per `(layer, matrix)`. The matching maximises the absolute cosine similarity between flattened rank-one component weights (`V[:, i] @ U[i, :]`) via the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`). When the two runs have different numbers of active components in a matrix, the smaller set is zero-padded so every component gets an entry (padded rows show zero cosine similarity).
+Compares two SPD decompositions (typically the same target model decomposed with different seeds or hyperparameters) by 1-to-1 matching their alive components per `(layer, matrix)`. "Alive" is taken directly from the TSVs written by `find_alive_components.py` — run that script on each model first. The matching maximises the absolute cosine similarity between flattened rank-one component weights (`V[:, i] @ U[i, :]`) via the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`). When the two runs have different numbers of alive components in a matrix, the smaller set is zero-padded so every component gets an entry (padded rows show zero cosine similarity).
 
 Procedure:
-1. Load both ComponentModels and tokenize `--prompt` with run A's tokenizer.
-2. For each run, compute causal importances on the prompt and select components with `max CI > ci_thr` per module.
-3. For each module present (and active) in both runs, run Hungarian matching on the rank-one weight cosine-similarity matrix. Alongside the matched cosine similarity, record the per-pair V cosine similarity, U cosine similarity, and `||U|| * ||V||` norm for each side.
-4. Sort pairs within each matrix by descending `|weight_cos_sim|`.
+1. Load both ComponentModels and their alive-components TSVs. The two models must share the same set of decomposed module paths (asserted), since we assume both decompose the same target architecture.
+2. For each `(layer, matrix)` that is present in both alive-components TSVs, run Hungarian matching on the rank-one weight cosine-similarity matrix. Alongside the matched cosine similarity, record the per-pair V cosine similarity, U cosine similarity, and `||U|| * ||V||` norm for each side.
+3. Sort pairs within each matrix by descending `|weight_cos_sim|`.
 
 Output TSV (default `matched_components.tsv` in run A's directory). One row per matched pair, columns:
 - layer, matrix
@@ -231,4 +230,4 @@ Output TSV (default `matched_components.tsv` in run A's directory). One row per 
 
 Output figure (default `matched_components.png` in run A's directory). A grid with rows = matrix types, columns = layer indices. Each cell has four subpanels: weight cosine similarity bars, an `||U||·||V||` scatter (run A on y, run B on x, shared axis scale), V cosine similarity bars, U cosine similarity bars. All similarity values are shown as absolute values in the figure (sign is kept in the TSV).
 
-Only LM tasks are supported (the script tokenises a text prompt to compute CI). Only `LinearComponents` modules are matched.
+Only `LinearComponents` modules are matched.
