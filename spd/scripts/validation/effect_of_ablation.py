@@ -6,6 +6,7 @@ Usage:
 """
 
 import csv
+from collections.abc import Callable
 from pathlib import Path
 
 import fire
@@ -13,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from tqdm import tqdm
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from spd.log import logger
 from spd.models.components import WeightDeltaAndMask, make_mask_infos
@@ -82,6 +84,20 @@ def _kl_and_preds(
     return kl, orig_pred, orig_prob_max, ablated_pred, ablated_prob_max
 
 
+def _make_decoder(tokenizer: PreTrainedTokenizer) -> Callable[[int], str]:
+    """Return a memoised single-token decoder."""
+    cache: dict[int, str] = {}
+
+    def decode(tid: int) -> str:
+        s = cache.get(tid)
+        if s is None:
+            s = tokenizer.decode([tid])  # pyright: ignore[reportAttributeAccessIssue]
+            cache[tid] = s
+        return s
+
+    return decode
+
+
 def effect_of_ablation(
     model_path: ModelPath,
     components_path: str,
@@ -95,6 +111,9 @@ def effect_of_ablation(
 
     spd_model, config, run_dir = load_spd_run(model_path)
     spd_model = spd_model.to(device)
+
+    assert config.tokenizer_name is not None, "config.tokenizer_name is required"
+    decode = _make_decoder(AutoTokenizer.from_pretrained(config.tokenizer_name))
 
     task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
     loader = build_lm_loader(task_config, config)
@@ -116,10 +135,13 @@ def effect_of_ablation(
         "prompt",
         "pos",
         "token",
+        "token_str",
         "kl",
         "orig_pred",
+        "orig_pred_str",
         "orig_prob",
         "ablated_pred",
+        "ablated_pred_str",
         "ablated_prob",
     ]
 
@@ -171,6 +193,9 @@ def effect_of_ablation(
                 for b in range(batch_size):
                     prompt_idx = prompt_offset + b
                     for t in range(seq_len):
+                        token_id = batch_cpu[b][t]
+                        orig_id = orig_pred_cpu[b][t]
+                        abl_id = abl_pred_cpu[b][t]
                         writer.writerow(
                             {
                                 "layer": layer,
@@ -178,11 +203,14 @@ def effect_of_ablation(
                                 "component": component,
                                 "prompt": prompt_idx,
                                 "pos": t,
-                                "token": batch_cpu[b][t],
+                                "token": token_id,
+                                "token_str": decode(token_id),
                                 "kl": kl_cpu[b][t],
-                                "orig_pred": orig_pred_cpu[b][t],
+                                "orig_pred": orig_id,
+                                "orig_pred_str": decode(orig_id),
                                 "orig_prob": orig_prob_cpu[b][t],
-                                "ablated_pred": abl_pred_cpu[b][t],
+                                "ablated_pred": abl_id,
+                                "ablated_pred_str": decode(abl_id),
                                 "ablated_prob": abl_prob_cpu[b][t],
                             }
                         )

@@ -85,12 +85,15 @@ The data is saved as a tab-separated file, with columns:
 - component (the component's index)
 - prompt (the prompt's index)
 - pos (the token position)
-- token (the input token at that position)
+- token (the input token id at that position)
+- token_str (the decoded input token)
 - kl (the KL-divergence compared to the original model at that position)
-- orig_pred (the most likely token according to the original model)
-- orig_prob (the associated probability)
-- ablated_pred (the most likely token according to the ablated model)
-- ablated_prob (the associated probability)
+- orig_pred (id of the most likely token according to the original model)
+- orig_pred_str (decoded orig_pred)
+- orig_prob (probability of orig_pred)
+- ablated_pred (id of the most likely token according to the ablated model)
+- ablated_pred_str (decoded ablated_pred)
+- ablated_prob (probability of ablated_pred)
   
 Unless --output is specified, the TSV file is saved to the decomposed model's folder. The filename is "effect_of_ablation.tsv" for target data, and "effect_of_ablation_nontarget.tsv" for nontarget data.
 

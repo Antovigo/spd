@@ -12,7 +12,7 @@ echo $MODEL_PATH
 PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
 
 # --- 1. Alive components on target (prompt-based) data -----------------------
-uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --n-batches=1 --prompts="$PROMPTS"
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --prompts="$PROMPTS"
 
 # --- 2. Ablate each alive component on target data ---------------------------
 uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --n-batches=1 --prompts="$PROMPTS"
