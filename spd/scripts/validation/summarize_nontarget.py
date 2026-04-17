@@ -25,7 +25,7 @@ from typing import Any
 import fire
 import numpy as np
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from spd.log import logger
 from spd.models.component_model import SPDRunInfo
@@ -125,7 +125,7 @@ def _collect_kl_values(kl_path: Path, excluded: set[int]) -> dict[ComponentKey, 
 def _report_alerts(
     excluded: set[int],
     hits: dict[tuple[int, int], NontargetHit],
-    tokenizer: Any,
+    tokenizer: PreTrainedTokenizer,
 ) -> None:
     if excluded:
         print(
@@ -144,8 +144,8 @@ def _report_alerts(
         f"predicts one of the target tokens:"
     )
     for hit in sorted(hits.values(), key=lambda h: (h.prompt, h.pos)):
-        ctx = tokenizer.decode(hit.context_token_ids)
-        orig_tok = tokenizer.decode([hit.orig_pred])
+        ctx = tokenizer.decode(hit.context_token_ids)  # pyright: ignore[reportAttributeAccessIssue]
+        orig_tok = tokenizer.decode([hit.orig_pred])  # pyright: ignore[reportAttributeAccessIssue]
         in_excluded = " [in-excluded-prompt]" if hit.prompt in excluded else ""
         print(
             f"[nontarget-hit] task={hit.task_name} prompt={hit.prompt} pos={hit.pos} "

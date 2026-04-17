@@ -18,6 +18,7 @@ across every component's row in the kl file.
 import csv
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import fire
 import torch
@@ -177,9 +178,18 @@ def _run(
     kl_path: Path,
     orig_path: Path,
 ) -> tuple[int, int, int]:
+    """Stream per-(component, prompt, pos) KL and per-(prompt, pos) orig rows to the two TSVs.
+
+    `component_masks` and `mask_infos` are built lazily from the first batch's shape and reused
+    across all subsequent batches — the DataLoader uses `drop_last=True` / `StaticBatchLoader`,
+    so every batch has the same shape.
+    """
     total_kl_writes = 0
     total_prompts = 0
     seq_len = 0
+    component_masks: dict[str, Tensor] | None = None
+    mask_infos: Any = None
+    first_shape: tuple[int, ...] | None = None
     with (
         kl_path.open("w", newline="") as kl_f,
         orig_path.open("w", newline="") as orig_f,
@@ -194,6 +204,14 @@ def _run(
             batch = next(iterator)
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             batch_size, seq_len = batch.shape
+            if component_masks is None:
+                first_shape = (batch_size, seq_len)
+                component_masks = _build_baseline_masks(spd_model.module_to_c, first_shape, device)
+                delta_masks = _build_full_delta_masks(weight_deltas, first_shape, device)
+                mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=delta_masks)
+            assert (batch_size, seq_len) == first_shape, (
+                f"Batch shape changed mid-pass: got {(batch_size, seq_len)}, expected {first_shape}"
+            )
             total_prompts += batch_size
             batch_cpu = batch.cpu().tolist()
 
@@ -222,12 +240,6 @@ def _run(
                             "orig_prob": orig_prob_cpu[b][t],
                         }
                     )
-
-            delta_masks = _build_full_delta_masks(weight_deltas, (batch_size, seq_len), device)
-            component_masks = _build_baseline_masks(
-                spd_model.module_to_c, (batch_size, seq_len), device
-            )
-            mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=delta_masks)
 
             for module_name, layer, component, matrix in tqdm(
                 components, desc=f"components (batch {batch_idx})", leave=False
