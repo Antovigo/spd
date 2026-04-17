@@ -150,21 +150,18 @@ Importance score (per task, per component). The original model's probability at 
 
 Side-effect score (per component). Read directly from the `quantile_kl` column of the nontarget summary TSV produced by `summarize_nontarget.py`. See that script for the exclusion rule and the definition of the quantile.
 
-Pair ranking. For every `(layer, matrix)` that contains both a task-A candidate and a task-B candidate, enumerate all pairs `(a_component, b_component)` with `a_component != b_component`. The combined score for a pair is `min(importance_a, importance_b) / (1e-6 + mean(side_effect_quantile_a, side_effect_quantile_b))`, which rewards pairs that are jointly important for their own tasks while keeping the tail of their nontarget disruption low. Pairs are sorted by combined score, and the top `--top-k` are written.
+Pair ranking. For every `(layer, matrix)` that contains both a task-A candidate and a task-B candidate, enumerate all pairs `(a_comp, b_comp)` with `a_comp != b_comp`. The combined score for a pair is `min(a_targ_kl, b_targ_kl) / (1e-6 + mean(a_nontarg_kl, b_nontarg_kl))`, which rewards pairs that are jointly important for their own tasks while keeping the tail of their nontarget disruption low. Pairs are sorted by score and the top `--top-k` are written.
+
+The quantile percent is recovered from the summary TSV's column name (`kl_q<pct>`) and is propagated into the output column names so the TSV is self-describing.
 
 Output TSV (one row per candidate pair), columns:
 - rank (1-indexed)
 - layer
 - matrix
-- a_component
-- b_component
-- a_importance (KL on task A's target row after ablating `a_component`)
-- a_orig_prob (probability of task A's target token under the original model; identical across rows)
-- b_importance
-- b_orig_prob
-- a_nontarget_quantile_kl (KL quantile `q` — e.g. 0.99 — across non-excluded nontarget positions after ablating `a_component`)
-- b_nontarget_quantile_kl
-- combined_score
+- a_comp, b_comp (component indices)
+- a_targ_kl, b_targ_kl (KL at each task's target row after ablating the component)
+- a_nontarg_kl_{pct}, b_nontarg_kl_{pct} (nontarget KL quantile from the summary, `{pct}` is e.g. 99 for quantile 0.99)
+- score (combined score)
 
 Unless `--output` is specified, the TSV file is saved to the decomposed model's folder as `swap_candidates.tsv`.
 

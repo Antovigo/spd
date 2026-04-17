@@ -40,16 +40,6 @@ from spd.spd_types import ModelPath
 ComponentKey = tuple[int, str, int]
 _CONTEXT_SIZE = 5
 
-SUMMARY_FIELDS = [
-    "layer",
-    "matrix",
-    "component",
-    "n_positions",
-    "mean_kl",
-    "quantile_kl",
-    "max_kl",
-]
-
 
 @dataclass
 class NontargetHit:
@@ -184,10 +174,14 @@ def summarize_nontarget(
 
     values_by_key = _collect_kl_values(kl_path, excluded)
 
+    pct = round(quantile * 100)
+    quantile_col = f"kl_q{pct}"
+    fieldnames = ["layer", "matrix", "component", "n_positions", "mean_kl", quantile_col, "max_kl"]
+
     out_path = Path(output).expanduser() if output else run_dir / "nontarget_summary.tsv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, delimiter="\t")
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
         for (layer, matrix, component), vs in sorted(values_by_key.items()):
             arr = np.asarray(vs, dtype=np.float32)
@@ -198,7 +192,7 @@ def summarize_nontarget(
                     "component": component,
                     "n_positions": len(vs),
                     "mean_kl": float(arr.mean()),
-                    "quantile_kl": float(np.quantile(arr, quantile)),
+                    quantile_col: float(np.quantile(arr, quantile)),
                     "max_kl": float(arr.max()),
                 }
             )
