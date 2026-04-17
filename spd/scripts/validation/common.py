@@ -1,13 +1,16 @@
 """Shared helpers for the LM validation scripts."""
 
+import json
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
+from transformers import PreTrainedTokenizer
 
 from spd.configs import Config, LMTaskConfig
 from spd.data import DatasetConfig, create_data_loader
@@ -130,6 +133,74 @@ def build_module_lookup(module_paths: list[str]) -> dict[tuple[int, str], str]:
         )
         lookup[key] = path
     return lookup
+
+
+@dataclass
+class TaskSpec:
+    """Resolved task: prompt index in the prompts file, its tokenisation, and the target token id."""
+
+    name: str
+    prompt_idx: int
+    prompt_token_ids: list[int]
+    last_pos: int
+    target_token_id: int
+
+
+def load_prompts(config: Config, prompts_override: str | None = None) -> list[str]:
+    """Read the prompts file referenced by the config (or an override) into a list of strings."""
+    assert isinstance(config.task_config, LMTaskConfig) and config.task_config.prompts_file, (
+        "Expected a prompts-based LM task_config"
+    )
+    prompts_path = Path(prompts_override or config.task_config.prompts_file).expanduser()
+    return [ln.strip() for ln in prompts_path.read_text().splitlines() if ln.strip()]
+
+
+def resolve_task(
+    name: str, raw: Any, prompts: list[str], tokenizer: PreTrainedTokenizer
+) -> tuple[TaskSpec, str, str]:
+    """Parse a `--task-*` CLI arg (JSON dict or dict literal) into a TaskSpec.
+
+    Returns `(spec, prompt_text, target_text)` where the text strings are useful for logging.
+    Asserts the prompt exists exactly once in the prompts file and the target tokenises to
+    exactly one token.
+    """
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    assert isinstance(data, dict) and "prompt" in data and "target" in data, (
+        f"--task-{name} must be a JSON dict with 'prompt' and 'target' keys, got {raw!r}"
+    )
+    prompt_text, target_text = str(data["prompt"]), str(data["target"])
+
+    matches = [i for i, p in enumerate(prompts) if p == prompt_text]
+    assert len(matches) == 1, (
+        f"Task {name}: expected exactly one prompt matching {prompt_text!r} in the prompts file, "
+        f"found {len(matches)}"
+    )
+
+    prompt_encoded: Any = tokenizer(prompt_text)  # pyright: ignore[reportCallIssue]
+    prompt_ids: list[int] = prompt_encoded["input_ids"]
+
+    target_encoded: Any = tokenizer(target_text, add_special_tokens=False)  # pyright: ignore[reportCallIssue]
+    target_ids: list[int] = target_encoded["input_ids"]
+    assert len(target_ids) == 1, (
+        f"Task {name}: target {target_text!r} must tokenize to exactly one token, got {target_ids}"
+    )
+
+    spec = TaskSpec(
+        name=name,
+        prompt_idx=matches[0],
+        prompt_token_ids=prompt_ids,
+        last_pos=len(prompt_ids) - 1,
+        target_token_id=target_ids[0],
+    )
+    return spec, prompt_text, target_text
+
+
+def contains_subsequence(haystack: list[int], needle: list[int]) -> bool:
+    """Return True if `needle` appears as a contiguous sub-sequence in `haystack`."""
+    n = len(needle)
+    if n == 0 or n > len(haystack):
+        return False
+    return any(haystack[i : i + n] == needle for i in range(len(haystack) - n + 1))
 
 
 def escape_tsv_value(s: str) -> str:

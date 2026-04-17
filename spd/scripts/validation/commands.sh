@@ -22,19 +22,28 @@ uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_D
 # --- 3. Same on nontarget data (side-effect reference) -----------------------
 uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --nontarget --n-batches=50
 
-# --- 4. Rank candidate (A, B) pairs for swapping -----------------------------
-uv run python -m spd.scripts.validation.find_swap_candidates \
+# --- 4. Summarise nontarget side-effects per component -----------------------
+uv run python -m spd.scripts.validation.summarize_nontarget \
     "$MODEL_PATH" \
-    "$RUN_DIR/effect_of_ablation.tsv" \
-    "$RUN_DIR/orig_predictions.tsv" \
     "$RUN_DIR/effect_of_ablation_nontarget.tsv" \
     "$RUN_DIR/orig_predictions_nontarget.tsv" \
     --task-a='{"prompt": "import numpy as", "target": " np"}' \
     --task-b='{"prompt": "import pandas as", "target": " pd"}' \
-    --top-k=20 --quantile=0.99 \
+    --quantile=0.99 \
     --prompts="$PROMPTS"
 
-# --- 5. Swap test ------------------------------------------------------------
+# --- 5. Rank candidate (A, B) pairs for swapping -----------------------------
+uv run python -m spd.scripts.validation.find_swap_candidates \
+    "$MODEL_PATH" \
+    "$RUN_DIR/effect_of_ablation.tsv" \
+    "$RUN_DIR/orig_predictions.tsv" \
+    "$RUN_DIR/nontarget_summary.tsv" \
+    --task-a='{"prompt": "import numpy as", "target": " np"}' \
+    --task-b='{"prompt": "import pandas as", "target": " pd"}' \
+    --top-k=20 \
+    --prompts="$PROMPTS"
+
+# --- 6. Swap test ------------------------------------------------------------
 # Pick a pair from $RUN_DIR/swap_candidates.tsv and edit the four fields below.
 uv run python -m spd.scripts.validation.swap_test \
     "$MODEL_PATH" \

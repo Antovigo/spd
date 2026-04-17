@@ -100,17 +100,42 @@ The two default paths are overridable with `--output-kl=PATH` and `--output-orig
 
 `ablated_pred` / `ablated_prob` are not written — downstream ranking (`find_swap_candidates`) only uses the original model's top-1 prediction (to assert correctness at the task position) and the raw KL; the ablated model's argmax carries no extra signal beyond the KL distribution itself.
 
+**summarize_nontarget.py**
+args:
+- the path to a decomposed model
+- the path to the nontarget KL file (`effect_of_ablation_nontarget.tsv`)
+- the path to the nontarget orig-predictions file (`orig_predictions_nontarget.tsv`)
+--task-a / --task-b: JSON dicts `{"prompt": ..., "target": ...}` (used for prompt exclusion and for the monitoring alerts)
+--quantile: quantile of per-position KL used as the side-effect score, in `(0, 1)` (default 0.99)
+--prompts: optional override for the prompts file
+--output: overrides the output path (default `nontarget_summary.tsv` in the decomposed model's folder)
+
+Produces a compact per-component summary that `find_swap_candidates` consumes directly instead of re-scanning the raw nontarget files. Decoupling the two steps means that tweaking `--top-k` in `find_swap_candidates`, or trying different task prompts that share the same nontarget data, doesn't require another full pass over the (large) nontarget KL file.
+
+Prompt exclusion. Any nontarget prompt whose token sequence contains either task A's or task B's tokenised prompt as a contiguous sub-sequence is dropped entirely (all its positions, for all components). Such sequences reproduce the target context and legitimately produce large ablation-induced KL that would otherwise bias the summary.
+
+Procedure (two streaming passes):
+1. Read the nontarget orig-predictions TSV to build each prompt's token sequence (for the exclusion test) and collect the monitoring alerts below.
+2. Read the nontarget KL TSV and append each row's `kl` to its component's list iff the prompt isn't excluded.
+3. For each component, compute `n_positions` (count of kept KLs), `mean_kl`, `quantile_kl` (at `--quantile`), and `max_kl` with `numpy`.
+
+Output TSV columns: `layer, matrix, component, n_positions, mean_kl, quantile_kl, max_kl`.
+
+Nontarget monitoring (printed to stdout, not written to the TSV):
+- The set of excluded prompt indices.
+- One line per `(prompt, pos)` where the original model predicts one of the target tokens (deduplicated by position since `orig_pred` / `orig_prob` are identical across components). Format: `[nontarget-hit] task=A prompt=123 pos=45 ' foo bar baz qux quux' -> orig: ' np' (0.870)`. Lines on prompts that were dropped from the summary are suffixed with ` [in-excluded-prompt]`.
+
+
 **find_swap_candidates.py**
 args:
 - the path to a decomposed model
 - the path to the target KL file (`effect_of_ablation.tsv`, per-(component, prompt, pos))
 - the path to the target orig-predictions file (`orig_predictions.tsv`, per-(prompt, pos))
-- the path to the nontarget KL file (`effect_of_ablation_nontarget.tsv`, per-(component, prompt, pos))
-- the path to the nontarget orig-predictions file (`orig_predictions_nontarget.tsv`, per-(prompt, pos))
+- the path to the nontarget summary TSV (produced by `summarize_nontarget.py`)
 --task-a: JSON dict `{"prompt": <prompt text>, "target": <next-token text>}` for task A
 --task-b: JSON dict `{"prompt": <prompt text>, "target": <next-token text>}` for task B
 --top-k: number of candidate pairs to keep (default 20)
---quantile: quantile of per-position KL used as the side-effect score, in `(0, 1)` (default 0.99)
+--prompts: optional override for the prompts file
 --output: overrides the path to write the data to
 
 The script ranks (component_A, component_B) pairs in the same decomposed matrix that are good candidates for swapping their `U` (output) vectors. A good candidate pair has: (a) both components are important for their own task (ablating them pushes the model away from the correct next token), (b) both are in the same `(layer, matrix)` (so the U vectors have the same dimensions), (c) small side effects on nontarget data.
@@ -123,14 +148,9 @@ Only LM tasks with a `prompts_file` are supported.
 
 Importance score (per task, per component). The original model's probability at the task's target position is read once from the target orig-predictions file (and asserted to have `orig_pred == target_token_id`; otherwise the task isn't even solved by the unablated model). From the target KL file, rows with `prompt == prompt_idx` and `pos == last_pos` give the component-wise importance: the `kl` value on that row is how much ablating the component swings the next-token distribution. Larger KL means more important.
 
-Side-effect score (per component). From the nontarget ablation output, compute the per-position KL **quantile** `q` (default 0.99) for each component — so a value `s` means that `q` of the component's ablation positions have KL ≤ `s`. Using a high quantile captures the worst-case disruption a component induces without being dominated by rare extreme outliers (as a plain max would be) or by the large mass of near-zero KLs (as a mean would be). One exclusion applies: any nontarget prompt whose token sequence contains either task A's or task B's tokenised prompt as a contiguous substring is dropped entirely (all its positions, for all components). This is because such sequences reproduce the target context and legitimately produce large ablation-induced KL, which would otherwise bias the score. Computation is a two-pass streaming read: the nontarget orig-predictions file is read first to build each prompt's token sequence and flag excluded prompts (and to collect the monitoring alerts below); the nontarget KL file is then streamed and each row's KL is appended to its component's list if the row's prompt isn't excluded. After both passes, `numpy.quantile` is called on each component's collected KL values. The set of excluded prompt indices is printed to stdout for visibility.
+Side-effect score (per component). Read directly from the `quantile_kl` column of the nontarget summary TSV produced by `summarize_nontarget.py`. See that script for the exclusion rule and the definition of the quantile.
 
 Pair ranking. For every `(layer, matrix)` that contains both a task-A candidate and a task-B candidate, enumerate all pairs `(a_component, b_component)` with `a_component != b_component`. The combined score for a pair is `min(importance_a, importance_b) / (1e-6 + mean(side_effect_quantile_a, side_effect_quantile_b))`, which rewards pairs that are jointly important for their own tasks while keeping the tail of their nontarget disruption low. Pairs are sorted by combined score, and the top `--top-k` are written.
-
-Nontarget monitoring (printed to stdout, not written to the TSV). The goal is simply to let the user see whether there are enough nontarget positions where the original model already predicts one of the target tokens (e.g. `" np"` or `" pd"`) to assess the reliability of the side-effect score:
-- Collected during the pass over the nontarget orig-predictions file (that file already carries every per-(prompt, pos) orig row exactly once, with no per-component duplication).
-- Deduplicated by `(prompt, pos)` and recorded on the first row that reaches that position, since `orig_pred` / `orig_prob` are identical across components (the remaining component rows for the same position are skipped).
-- Each hit is one line with: the task name, prompt index, position, up to five preceding decoded tokens as context, the decoded original prediction, and its probability. Format: `[nontarget-hit] task=A prompt=123 pos=45 ' foo bar baz qux quux' -> orig: ' np' (0.870)`. Lines on prompts that were dropped from the side-effect average are suffixed with ` [in-excluded-prompt]`.
 
 Output TSV (one row per candidate pair), columns:
 - rank (1-indexed)
