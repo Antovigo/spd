@@ -15,10 +15,10 @@ PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
 uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --prompts="$PROMPTS"
 
 # --- 2. Ablate each alive component on target data ---------------------------
-uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --n-batches=1 --prompts="$PROMPTS"
+uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --prompts="$PROMPTS"
 
 # --- 3. Same on nontarget data (side-effect reference) -----------------------
-uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --nontarget --n-batches=20
+uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --nontarget --n-batches=100
 
 # --- 4. Rank candidate (A, B) pairs for swapping -----------------------------
 uv run python -m spd.scripts.validation.find_swap_candidates \

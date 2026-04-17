@@ -130,3 +130,14 @@ def build_module_lookup(module_paths: list[str]) -> dict[tuple[int, str], str]:
         )
         lookup[key] = path
     return lookup
+
+
+def escape_tsv_value(s: str) -> str:
+    """Backslash-escape characters that break naive TSV splitting.
+
+    Python's `csv` module already quotes tabs/newlines/quotes with `QUOTE_MINIMAL`, but tools like
+    `cut`, `awk`, or a human eyeballing the file treat the quoted form as broken. Replacing the
+    offending chars with `\\t`, `\\n`, `\\r` (and escaping backslashes so the transformation is
+    reversible) keeps the file splittable by tab everywhere.
+    """
+    return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")

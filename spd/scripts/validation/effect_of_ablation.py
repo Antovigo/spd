@@ -21,6 +21,7 @@ from spd.models.components import WeightDeltaAndMask, make_mask_infos
 from spd.scripts.validation.common import (
     build_lm_loader,
     build_module_lookup,
+    escape_tsv_value,
     is_prompt_task,
     iterate_input_ids,
     load_spd_run,
@@ -85,13 +86,13 @@ def _kl_and_preds(
 
 
 def _make_decoder(tokenizer: PreTrainedTokenizer) -> Callable[[int], str]:
-    """Return a memoised single-token decoder."""
+    """Return a memoised, TSV-safe single-token decoder."""
     cache: dict[int, str] = {}
 
     def decode(tid: int) -> str:
         s = cache.get(tid)
         if s is None:
-            s = tokenizer.decode([tid])  # pyright: ignore[reportAttributeAccessIssue]
+            s = escape_tsv_value(tokenizer.decode([tid]))  # pyright: ignore[reportAttributeAccessIssue]
             cache[tid] = s
         return s
 
@@ -152,6 +153,7 @@ def effect_of_ablation(
     weight_deltas = spd_model.calc_weight_deltas()
 
     total_writes = 0
+    total_prompts = 0
     with out_path.open("w", newline="") as f, torch.no_grad():
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
@@ -160,6 +162,7 @@ def effect_of_ablation(
             batch = next(iterator)
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             batch_size, seq_len = batch.shape
+            total_prompts += batch_size
             batch_cpu = batch.cpu().tolist()
 
             orig_logits = spd_model(batch)
@@ -216,7 +219,10 @@ def effect_of_ablation(
                         )
                         total_writes += 1
 
-    logger.info(f"Wrote {total_writes} rows to {out_path}")
+    logger.info(
+        f"Saw {total_prompts} prompts across {n_to_run} batch(es); "
+        f"wrote {total_writes} rows to {out_path}"
+    )
     return out_path
 
 
