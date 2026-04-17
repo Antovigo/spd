@@ -5,7 +5,7 @@ Usage:
         <effect_target_tsv> <effect_nontarget_tsv> \
         --task-a='{"prompt": "import numpy as", "target": " np"}' \
         --task-b='{"prompt": "import pandas as", "target": " pd"}' \
-        [--top-k=20] [--quantile=0.99] [--output=PATH]
+        [--top-k=20] [--quantile=0.99] [--prompts=PATH] [--output=PATH]
 """
 
 import csv
@@ -348,6 +348,7 @@ def find_swap_candidates(
     task_b: str | dict[str, Any],
     top_k: int = 20,
     quantile: float = 0.99,
+    prompts: str | None = None,
     output: str | None = None,
 ) -> Path:
     run_info = SPDRunInfo.from_path(model_path)
@@ -360,11 +361,11 @@ def find_swap_candidates(
     assert config.tokenizer_name is not None, "config.tokenizer_name is required"
 
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
-    prompts_path = Path(config.task_config.prompts_file).expanduser()
-    prompts = [ln.strip() for ln in prompts_path.read_text().splitlines() if ln.strip()]
+    prompts_path = Path(prompts or config.task_config.prompts_file).expanduser()
+    prompt_texts = [ln.strip() for ln in prompts_path.read_text().splitlines() if ln.strip()]
 
-    spec_a, _, a_target = _resolve_task("A", task_a, prompts, tokenizer)
-    spec_b, _, b_target = _resolve_task("B", task_b, prompts, tokenizer)
+    spec_a, _, a_target = _resolve_task("A", task_a, prompt_texts, tokenizer)
+    spec_b, _, b_target = _resolve_task("B", task_b, prompt_texts, tokenizer)
     logger.info(
         f"Task A: prompt_idx={spec_a.prompt_idx} last_pos={spec_a.last_pos} "
         f"target_id={spec_a.target_token_id} ({a_target!r})"

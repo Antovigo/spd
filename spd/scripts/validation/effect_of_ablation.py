@@ -2,7 +2,7 @@
 
 Usage:
     python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
-        [--n-batches=1] [--nontarget] [--output=PATH]
+        [--n-batches=1] [--nontarget] [--prompts=PATH] [--output=PATH]
 """
 
 import csv
@@ -87,6 +87,7 @@ def effect_of_ablation(
     components_path: str,
     n_batches: int = 1,
     nontarget: bool = False,
+    prompts: str | None = None,
     output: str | None = None,
 ) -> Path:
     """Write a TSV of per-(component, prompt, position) KL divergences under ablation."""
@@ -95,7 +96,7 @@ def effect_of_ablation(
     spd_model, config, run_dir = load_spd_run(model_path)
     spd_model = spd_model.to(device)
 
-    task_config = resolve_task_config(config, use_nontarget=nontarget)
+    task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
     loader = build_lm_loader(task_config, config)
     single_batch = is_prompt_task(task_config)
 

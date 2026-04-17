@@ -11,7 +11,8 @@ Usage:
     python -m spd.scripts.validation.swap_test <model_path> <alive_components_tsv> \
         --layer=1 --matrix=attn.q_proj --a-component=3 --b-component=7 \
         --target-a=" np" --target-b=" pd" \
-        [--n-nontarget-batches=1] [--output-target=PATH] [--output-nontarget=PATH]
+        [--n-nontarget-batches=1] [--prompts=PATH] \
+        [--output-target=PATH] [--output-nontarget=PATH]
 """
 
 import csv
@@ -266,6 +267,7 @@ def swap_test(
     target_a: str,
     target_b: str,
     n_nontarget_batches: int = 1,
+    prompts: str | None = None,
     output_target: str | None = None,
     output_nontarget: str | None = None,
 ) -> tuple[Path, Path]:
@@ -309,7 +311,7 @@ def swap_test(
         f"B={b_component} (mean={b_mean:.4g}, target={target_b!r}={target_b_id})"
     )
 
-    target_task_config = resolve_task_config(config, use_nontarget=False)
+    target_task_config = resolve_task_config(config, use_nontarget=False, prompts_override=prompts)
     assert is_prompt_task(target_task_config), (
         "swap_test requires a prompt-based target task (config.task_config.prompts_file)"
     )

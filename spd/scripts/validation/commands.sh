@@ -9,18 +9,34 @@ RUN_DIR=~/spd_out/spd/s-0c454b30
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 echo $MODEL_PATH
 
+PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+
 # --- 1. Alive components on target (prompt-based) data -----------------------
-uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --n-batches=1
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --n-batches=1 --prompts="$PROMPTS"
 
 # --- 2. Ablate each alive component on target data ---------------------------
-uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --n-batches=1
+uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --n-batches=1 --prompts="$PROMPTS"
 
 # --- 3. Same on nontarget data (side-effect reference) -----------------------
 uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --nontarget --n-batches=20
 
 # --- 4. Rank candidate (A, B) pairs for swapping -----------------------------
-uv run python -m spd.scripts.validation.find_swap_candidates "$MODEL_PATH" "$RUN_DIR/effect_of_ablation.tsv" "$RUN_DIR/effect_of_ablation_nontarget.tsv" --task-a='{"prompt": "import numpy as", "target": " np"}' --task-b='{"prompt": "import pandas as", "target": " pd"}' --top-k=20 --quantile=0.99
+uv run python -m spd.scripts.validation.find_swap_candidates \
+    "$MODEL_PATH" \
+    "$RUN_DIR/effect_of_ablation.tsv" \
+    "$RUN_DIR/effect_of_ablation_nontarget.tsv" \
+    --task-a='{"prompt": "import numpy as", "target": " np"}' \
+    --task-b='{"prompt": "import pandas as", "target": " pd"}' \
+    --top-k=20 --quantile=0.99 \
+    --prompts="$PROMPTS"
 
 # --- 5. Swap test ------------------------------------------------------------
 # Pick a pair from $RUN_DIR/swap_candidates.tsv and edit the four fields below.
-uv run python -m spd.scripts.validation.swap_test "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --layer=1 --matrix=attn.q_proj --a-component=279 --b-component=177 --target-a=" np" --target-b=" pd" --n-nontarget-batches=10
+uv run python -m spd.scripts.validation.swap_test \
+    "$MODEL_PATH" \
+    "$RUN_DIR/alive_components.tsv" \
+    --layer=1 --matrix=attn.q_proj \
+    --a-component=279 --b-component=177 \
+    --target-a=" np" --target-b=" pd" \
+    --n-nontarget-batches=10 \
+    --prompts="$PROMPTS"

@@ -2,7 +2,7 @@
 
 Usage:
     python -m spd.scripts.validation.find_alive_components <model_path> \
-        [--ci-thr=0.01] [--n-batches=1] [--nontarget] [--output=PATH]
+        [--ci-thr=0.01] [--n-batches=1] [--nontarget] [--prompts=PATH] [--output=PATH]
 """
 
 import csv
@@ -64,6 +64,7 @@ def find_alive_components(
     ci_thr: float = 0.01,
     n_batches: int = 1,
     nontarget: bool = False,
+    prompts: str | None = None,
     output: str | None = None,
 ) -> Path:
     """Run the decomposed model and collect components that ever reach CI > ci_thr."""
@@ -72,7 +73,7 @@ def find_alive_components(
     spd_model, config, run_dir = load_spd_run(model_path)
     spd_model = spd_model.to(device)
 
-    task_config = resolve_task_config(config, use_nontarget=nontarget)
+    task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
     loader = build_lm_loader(task_config, config)
     single_batch = is_prompt_task(task_config)
 

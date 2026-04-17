@@ -27,8 +27,14 @@ def load_spd_run(path: ModelPath) -> tuple[ComponentModel, Config, Path]:
     return spd_model, run_info.config, run_info.checkpoint_path.parent
 
 
-def resolve_task_config(config: Config, use_nontarget: bool) -> LMTaskConfig:
-    """Return the target or nontarget LM task config, erroring if nontarget is missing."""
+def resolve_task_config(
+    config: Config, use_nontarget: bool, prompts_override: str | None = None
+) -> LMTaskConfig:
+    """Return the target or nontarget LM task config, erroring if nontarget is missing.
+
+    When `prompts_override` is set, the returned config's `prompts_file` is replaced with that
+    path (via `model_copy`). Only valid if the resolved task is already prompts-based.
+    """
     if use_nontarget:
         assert config.nontarget_task_config is not None, (
             "--nontarget was passed but the config has no nontarget_task_config"
@@ -40,6 +46,12 @@ def resolve_task_config(config: Config, use_nontarget: bool) -> LMTaskConfig:
     assert isinstance(task_config, LMTaskConfig), (
         f"Validation scripts only support LM tasks, got {type(task_config).__name__}"
     )
+
+    if prompts_override is not None:
+        assert task_config.prompts_file is not None, (
+            "--prompts was specified but the resolved task config is not prompts-based"
+        )
+        task_config = task_config.model_copy(update={"prompts_file": prompts_override})
     return task_config
 
 
