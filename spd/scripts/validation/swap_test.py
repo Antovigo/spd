@@ -11,7 +11,7 @@ Usage:
     python -m spd.scripts.validation.swap_test <model_path> <alive_components_tsv> \
         --layer=1 --matrix=attn.q_proj --a-component=3 --b-component=7 \
         --target-a=" np" --target-b=" pd" \
-        [--n-nontarget-batches=1] [--prompts=PATH] \
+        [--n-nontarget-batches=1] [--prompts=PATH] [--batch-size=N] \
         [--output-target=PATH] [--output-nontarget=PATH]
 """
 
@@ -268,6 +268,7 @@ def swap_test(
     target_b: str,
     n_nontarget_batches: int = 1,
     prompts: str | None = None,
+    batch_size: int | None = None,
     output_target: str | None = None,
     output_nontarget: str | None = None,
 ) -> tuple[Path, Path]:
@@ -315,18 +316,25 @@ def swap_test(
     assert is_prompt_task(target_task_config), (
         "swap_test requires a prompt-based target task (config.task_config.prompts_file)"
     )
-    target_iter = iterate_input_ids(build_lm_loader(target_task_config, config), device)
+    target_iter = iterate_input_ids(
+        build_lm_loader(target_task_config, config, batch_size_override=batch_size), device
+    )
 
     nontarget_task_config = resolve_task_config(config, use_nontarget=True)
-    nontarget_iter = iterate_input_ids(build_lm_loader(nontarget_task_config, config), device)
+    nontarget_iter = iterate_input_ids(
+        build_lm_loader(nontarget_task_config, config, batch_size_override=batch_size), device
+    )
 
+    slug = f"{module_name.replace('.', '_')}_c{a_component}_c{b_component}"
     target_out = (
-        Path(output_target).expanduser() if output_target else run_dir / "swap_test_target.tsv"
+        Path(output_target).expanduser()
+        if output_target
+        else run_dir / f"swap_test_{slug}_target.tsv"
     )
     nontarget_out = (
         Path(output_nontarget).expanduser()
         if output_nontarget
-        else run_dir / "swap_test_nontarget.tsv"
+        else run_dir / f"swap_test_{slug}_nontarget.tsv"
     )
     for p in (target_out, nontarget_out):
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -335,7 +343,7 @@ def swap_test(
     # batches or between the two passes. Compute once.
     weight_deltas = spd_model.calc_weight_deltas()
 
-    n_target = _run_pass(
+    _run_pass(
         spd_model=spd_model,
         iterator=target_iter,
         n_batches=1,
@@ -345,9 +353,7 @@ def swap_test(
         device=device,
         include_batch_idx=False,
     )
-    logger.info(f"Wrote {n_target} target rows to {target_out}")
-
-    n_nontarget = _run_pass(
+    _run_pass(
         spd_model=spd_model,
         iterator=nontarget_iter,
         n_batches=n_nontarget_batches,
@@ -357,8 +363,6 @@ def swap_test(
         device=device,
         include_batch_idx=True,
     )
-    logger.info(f"Wrote {n_nontarget} nontarget rows to {nontarget_out}")
-
     return target_out, nontarget_out
 
 

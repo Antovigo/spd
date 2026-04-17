@@ -64,9 +64,13 @@ def is_prompt_task(task_config: LMTaskConfig) -> bool:
 
 
 def build_lm_loader(
-    task_config: LMTaskConfig, config: Config
+    task_config: LMTaskConfig, config: Config, batch_size_override: int | None = None
 ) -> DataLoader[Any] | StaticBatchLoader:
-    """Build a DataLoader for the given LMTaskConfig using the decomposition's batch size."""
+    """Build a DataLoader for the given LMTaskConfig.
+
+    For dataset-based tasks, `batch_size_override` replaces `config.batch_size` if set. For
+    prompts-based tasks the override is ignored — the batch always contains every prompt.
+    """
     assert config.tokenizer_name is not None, "LM tasks need config.tokenizer_name"
 
     if task_config.prompts_file is not None:
@@ -94,7 +98,7 @@ def build_lm_loader(
     )
     loader, _ = create_data_loader(
         dataset_config=dataset_config,
-        batch_size=config.batch_size,
+        batch_size=batch_size_override if batch_size_override is not None else config.batch_size,
         buffer_size=task_config.buffer_size,
     )
     return loader

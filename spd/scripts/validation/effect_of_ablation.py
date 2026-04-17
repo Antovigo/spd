@@ -2,7 +2,7 @@
 
 Usage:
     python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
-        [--n-batches=1] [--nontarget] [--prompts=PATH] \
+        [--n-batches=1] [--nontarget] [--prompts=PATH] [--batch-size=N] \
         [--output-kl=PATH] [--output-orig=PATH]
 
 Output files (same schema in both modes):
@@ -113,6 +113,7 @@ def effect_of_ablation(
     n_batches: int = 1,
     nontarget: bool = False,
     prompts: str | None = None,
+    batch_size: int | None = None,
     output_kl: str | None = None,
     output_orig: str | None = None,
 ) -> tuple[Path, Path]:
@@ -126,13 +127,12 @@ def effect_of_ablation(
     decode = _make_decoder(AutoTokenizer.from_pretrained(config.tokenizer_name))
 
     task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
-    loader = build_lm_loader(task_config, config)
+    loader = build_lm_loader(task_config, config, batch_size_override=batch_size)
     single_batch = is_prompt_task(task_config)
 
     module_lookup = build_module_lookup(spd_model.target_module_paths)
     components_file = Path(components_path).expanduser()
     components = _load_components(components_file, module_lookup)
-    logger.info(f"Loaded {len(components)} components to ablate from {components_file}")
 
     n_to_run = 1 if single_batch else n_batches
     iterator = iterate_input_ids(loader, device)
@@ -147,7 +147,7 @@ def effect_of_ablation(
     for p in (kl_path, orig_path):
         p.parent.mkdir(parents=True, exist_ok=True)
 
-    total_prompts, total_kl_writes, seq_len = _run(
+    total_prompts, seq_len = _run(
         spd_model=spd_model,
         iterator=iterator,
         n_to_run=n_to_run,
@@ -160,8 +160,7 @@ def effect_of_ablation(
     )
     logger.info(
         f"Saw {total_prompts} prompts of {seq_len} positions each "
-        f"(total: {total_prompts * seq_len}); wrote {total_kl_writes} kl rows to {kl_path} "
-        f"and {total_prompts * seq_len} orig rows to {orig_path}"
+        f"(total: {total_prompts * seq_len})"
     )
     return kl_path, orig_path
 
@@ -177,14 +176,13 @@ def _run(
     device: torch.device,
     kl_path: Path,
     orig_path: Path,
-) -> tuple[int, int, int]:
+) -> tuple[int, int]:
     """Stream per-(component, prompt, pos) KL and per-(prompt, pos) orig rows to the two TSVs.
 
     `component_masks` and `mask_infos` are built lazily from the first batch's shape and reused
     across all subsequent batches — the DataLoader uses `drop_last=True` / `StaticBatchLoader`,
-    so every batch has the same shape.
+    so every batch has the same shape. Returns (total_prompts, seq_len).
     """
-    total_kl_writes = 0
     total_prompts = 0
     seq_len = 0
     component_masks: dict[str, Tensor] | None = None
@@ -266,8 +264,7 @@ def _run(
                                 "kl": kl_cpu[b][t],
                             }
                         )
-                        total_kl_writes += 1
-    return total_prompts, total_kl_writes, seq_len
+    return total_prompts, seq_len
 
 
 if __name__ == "__main__":

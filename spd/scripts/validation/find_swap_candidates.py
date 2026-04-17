@@ -222,16 +222,8 @@ def find_swap_candidates(
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
     prompt_texts = load_prompts(config, prompts)
 
-    spec_a, _, a_target = resolve_task("A", task_a, prompt_texts, tokenizer)
-    spec_b, _, b_target = resolve_task("B", task_b, prompt_texts, tokenizer)
-    logger.info(
-        f"Task A: prompt_idx={spec_a.prompt_idx} last_pos={spec_a.last_pos} "
-        f"target_id={spec_a.target_token_id} ({a_target!r})"
-    )
-    logger.info(
-        f"Task B: prompt_idx={spec_b.prompt_idx} last_pos={spec_b.last_pos} "
-        f"target_id={spec_b.target_token_id} ({b_target!r})"
-    )
+    spec_a, _, _ = resolve_task("A", task_a, prompt_texts, tokenizer)
+    spec_b, _, _ = resolve_task("B", task_b, prompt_texts, tokenizer)
 
     target_kl = Path(effect_target_kl_path).expanduser()
     target_orig = Path(effect_target_orig_path).expanduser()
@@ -240,12 +232,8 @@ def find_swap_candidates(
     task_a_rows, task_b_rows = _read_target_rows(target_kl, target_orig, spec_a, spec_b)
     assert task_a_rows, f"No target-ablation rows found for task A (prompt_idx={spec_a.prompt_idx})"
     assert task_b_rows, f"No target-ablation rows found for task B (prompt_idx={spec_b.prompt_idx})"
-    logger.info(
-        f"Found {len(task_a_rows)} task-A rows and {len(task_b_rows)} task-B rows in the target TSV"
-    )
 
     side_effects = _read_nontarget_summary(summary_path)
-    logger.info(f"Loaded nontarget side-effect quantiles for {len(side_effects)} components")
 
     pairs = _rank_pairs(task_a_rows, task_b_rows, side_effects)
     logger.info(f"Built {len(pairs)} candidate pairs; keeping top {top_k}")
@@ -254,7 +242,6 @@ def find_swap_candidates(
     out_path = Path(output).expanduser() if output else run_dir / "swap_candidates.tsv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _write_pairs(pairs, out_path)
-    logger.info(f"Wrote {len(pairs)} candidate pairs to {out_path}")
     return out_path
 
 

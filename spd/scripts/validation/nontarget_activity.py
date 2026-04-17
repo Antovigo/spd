@@ -184,23 +184,19 @@ def nontarget_activity(
     tokenizer = AutoTokenizer.from_pretrained(run_info.config.tokenizer_name)
 
     harvest = _open_harvest(run_id, harvest_subrun_id)
-    logger.info(f"Opened harvest repo for {run_id} (subrun={harvest.subrun_id})")
 
     summaries = harvest.get_summary()
     assert summaries, "Harvest data contains no components"
     module_lookup = build_module_lookup(sorted({s.layer for s in summaries.values()}))
 
     alive_rows = _load_alive_components(Path(alive_components_path).expanduser(), module_lookup)
-    logger.info(f"Loaded {len(alive_rows)} alive components from {alive_components_path}")
-
     correlations = harvest.get_correlations()
 
     summary_path = (
         Path(output_summary).expanduser() if output_summary else run_dir / "nontarget_activity.tsv"
     )
     summary_path.parent.mkdir(parents=True, exist_ok=True)
-    n_summary = _write_summary(alive_rows, summaries, correlations, summary_path)
-    logger.info(f"Wrote {n_summary} summary rows to {summary_path}")
+    _write_summary(alive_rows, summaries, correlations, summary_path)
 
     keys = [f"{row.module_name}:{row.component}" for row in alive_rows]
     components = harvest.get_components_bulk(keys)
@@ -211,8 +207,7 @@ def nontarget_activity(
         else run_dir / "nontarget_activity_sequences.jsonl"
     )
     sequences_path.parent.mkdir(parents=True, exist_ok=True)
-    n_sequences = _write_sequences(alive_rows, components, tokenizer, sequences_path)
-    logger.info(f"Wrote {n_sequences} activation examples to {sequences_path}")
+    _write_sequences(alive_rows, components, tokenizer, sequences_path)
 
     return summary_path, sequences_path
 

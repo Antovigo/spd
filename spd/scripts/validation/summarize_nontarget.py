@@ -173,10 +173,8 @@ def summarize_nontarget(
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
     prompt_texts = load_prompts(config, prompts)
 
-    spec_a, _, a_target = resolve_task("A", task_a, prompt_texts, tokenizer)
-    spec_b, _, b_target = resolve_task("B", task_b, prompt_texts, tokenizer)
-    logger.info(f"Task A: target_id={spec_a.target_token_id} ({a_target!r})")
-    logger.info(f"Task B: target_id={spec_b.target_token_id} ({b_target!r})")
+    spec_a, _, _ = resolve_task("A", task_a, prompt_texts, tokenizer)
+    spec_b, _, _ = resolve_task("B", task_b, prompt_texts, tokenizer)
 
     kl_path = Path(effect_nontarget_kl_path).expanduser()
     orig_path = Path(effect_nontarget_orig_path).expanduser()
@@ -205,9 +203,7 @@ def summarize_nontarget(
                 }
             )
 
-    logger.info(
-        f"Wrote {len(values_by_key)} component summaries (quantile={quantile}) to {out_path}"
-    )
+    logger.info(f"Summarised {len(values_by_key)} components (quantile={quantile})")
     return out_path
 
 
