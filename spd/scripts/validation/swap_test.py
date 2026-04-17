@@ -156,7 +156,7 @@ def _write_rows(
     spec: SwapSpec,
     prompt_offset: int,
     batch_idx: int | None,
-) -> int:
+) -> None:
     """Compute per-(prompt, pos) rows from the two logit tensors and write them out."""
     orig_log_probs, orig_pred, orig_prob, p_a_orig, p_b_orig = _probs_from_logits(
         orig_logits, spec.target_a_id, spec.target_b_id
@@ -199,7 +199,6 @@ def _write_rows(
                     "kl": kl_cpu[b][t],
                 }
             )
-    return batch_size * seq_len
 
 
 def _run_pass(
@@ -211,14 +210,13 @@ def _run_pass(
     out_path: Path,
     device: torch.device,
     include_batch_idx: bool,
-) -> int:
+) -> None:
     """Run `n_batches` through orig + swapped, streaming rows to `out_path`.
 
     `mask_infos` is built from the first batch's shape and reused (DataLoader uses `drop_last=True`
     and `StaticBatchLoader` yields the same cached batch, so shapes are stable across the pass).
     """
     fieldnames = (["batch_idx"] if include_batch_idx else []) + _CORE_FIELDS
-    total = 0
     first_shape: tuple[int, ...] | None = None
     mask_infos: dict[str, ComponentsMaskInfo] | None = None
 
@@ -245,7 +243,7 @@ def _run_pass(
                 swapped_logits = spd_model(batch, mask_infos=mask_infos)
                 assert isinstance(swapped_logits, Tensor)
 
-            total += _write_rows(
+            _write_rows(
                 writer=writer,
                 batch=batch,
                 orig_logits=orig_logits,
@@ -254,7 +252,6 @@ def _run_pass(
                 prompt_offset=batch_idx * first_shape[0],
                 batch_idx=batch_idx if include_batch_idx else None,
             )
-    return total
 
 
 def swap_test(
