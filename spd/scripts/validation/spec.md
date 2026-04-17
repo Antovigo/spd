@@ -171,8 +171,11 @@ args:
 --layer / --matrix: the decomposed matrix whose components will be swapped (both components must live in the same matrix, otherwise the U vectors have incompatible shapes)
 --a-component / --b-component: the two component indices to swap
 --target-a / --target-b: the expected next-token strings for tasks A and B, used only for per-position target-token probability tracking (each must tokenize to exactly one token under the run's tokenizer)
---n-nontarget-batches: number of nontarget batches to run (default 1)
---output-target / --output-nontarget: override the default output paths
+--nontarget: if set, evaluate on the nontarget dataset; otherwise (default) evaluate on the LM target prompts
+--n-batches: number of nontarget batches to run (default 1; ignored in target mode, which always uses one batch containing every prompt)
+--output: override the default output path
+
+By default the script runs on the LM target prompts (one batch containing every prompt); with `--nontarget`, it runs on `--n-batches` batches of the nontarget dataset instead. Each invocation writes a single TSV. To compare target vs nontarget behaviour, run the script twice.
 
 The script builds a modified version of the decomposed model where the output (U) vectors of components A and B are swapped in the selected matrix. Because the two components usually fire with different inner-activation magnitudes (V^T x), a raw U swap would rescale the output by the wrong factor — so we normalise by the ratio of the mean inner activations from `alive_components.tsv`:
 
@@ -188,9 +191,9 @@ so that when A fires on its original inputs (activation ≈ `a_mean`), the outpu
 
 Model semantics. The swapped model is run through the same `ComponentModel` forward path that `effect_of_ablation` uses: all-ones component masks for every decomposed module, and `weight_deltas_and_masks` with delta-mask 1 everywhere using the **pre-swap** weight deltas (`target_weight - V @ U_original`). This guarantees that outside components A and B the swapped model is byte-identical to the original target model, while A and B's contributions are reconfigured by the swap. The comparison baseline ("orig") is the original target model itself, invoked via `spd_model(batch)` with no `mask_infos`. The swap is performed in place inside a context manager that clones the two affected U rows on entry and restores them on exit, so the model state is clean after the script finishes.
 
-Datasets. Target data is the LM `prompts_file` (one batch containing every prompt, same convention as `effect_of_ablation`). Nontarget data is the `nontarget_task_config` dataset, iterated for `--n-nontarget-batches` batches using the decomposition's `batch_size`. Both passes run under the same swap configuration; for each batch, `orig_logits` is computed before the swap context and `swapped_logits` inside it, so the final model state is unchanged.
+Datasets. In target mode, data is the LM `prompts_file` (one batch containing every prompt, same convention as `effect_of_ablation`). In nontarget mode, data is the `nontarget_task_config` dataset, iterated for `--n-batches` batches using the decomposition's `batch_size`. For each batch, `orig_logits` is computed before the swap context and `swapped_logits` inside it, so the final model state is unchanged.
 
-Output. Two TSVs, default `swap_test_target.tsv` and `swap_test_nontarget.tsv` in the decomposed model's folder. One row per `(prompt, pos)` with columns:
+Output. A single TSV, default `swap_test_<slug>.tsv` (target) or `swap_test_<slug>_nontarget.tsv` (nontarget) in the decomposed model's folder, where `<slug>` encodes the module and component pair. One row per `(prompt, pos)` with columns:
 
 - prompt, pos, token
 - orig_pred, orig_prob
@@ -199,7 +202,7 @@ Output. Two TSVs, default `swap_test_target.tsv` and `swap_test_nontarget.tsv` i
 - p_target_b_orig, p_target_b_swapped
 - kl (`KL(softmax(orig_logits) || softmax(swapped_logits))`)
 
-Nontarget rows additionally carry a `batch_idx` column so positions from different batches can be distinguished.
+The nontarget-mode TSV additionally carries a `batch_idx` column so positions from different batches can be distinguished.
 
 Only LM tasks with a `prompts_file` are supported (the script needs prompt-based target data and LM token predictions).
 

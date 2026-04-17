@@ -3,16 +3,15 @@
 Builds a modified decomposed model where the output directions of a pair of components in the same
 matrix are swapped. The swap is rescaled by the ratio of the components' mean inner activations
 (V^T x) so the post-swap output magnitudes match what the other component used to produce. The
-swapped model is then evaluated on the LM target prompts and on `--n-nontarget-batches` of the
-nontarget dataset; for each (prompt, pos) the script stores the orig/swapped predictions and the
-probability of both task target tokens.
+swapped model is then evaluated on either the LM target prompts (default) or, with `--nontarget`,
+`--n-batches` batches of the nontarget dataset; for each (prompt, pos) the script stores the
+orig/swapped predictions and the probability of both task target tokens.
 
 Usage:
     python -m spd.scripts.validation.swap_test <model_path> <alive_components_tsv> \
         --layer=1 --matrix=attn.q_proj --a-component=3 --b-component=7 \
         --target-a=" np" --target-b=" pd" \
-        [--n-nontarget-batches=1] [--prompts=PATH] [--batch-size=N] \
-        [--output-target=PATH] [--output-nontarget=PATH]
+        [--nontarget] [--n-batches=1] [--prompts=PATH] [--batch-size=N] [--output=PATH]
 """
 
 import csv
@@ -263,13 +262,13 @@ def swap_test(
     b_component: int,
     target_a: str,
     target_b: str,
-    n_nontarget_batches: int = 1,
+    nontarget: bool = False,
+    n_batches: int = 1,
     prompts: str | None = None,
     batch_size: int | None = None,
-    output_target: str | None = None,
-    output_nontarget: str | None = None,
-) -> tuple[Path, Path]:
-    """Run the swap test on target prompts and on nontarget batches."""
+    output: str | None = None,
+) -> Path:
+    """Run the swap test on target prompts, or on nontarget batches if `--nontarget` is set."""
     assert a_component != b_component, "a_component and b_component must be different"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -309,58 +308,36 @@ def swap_test(
         f"B={b_component} (mean={b_mean:.4g}, target={target_b!r}={target_b_id})"
     )
 
-    target_task_config = resolve_task_config(config, use_nontarget=False, prompts_override=prompts)
-    assert is_prompt_task(target_task_config), (
-        "swap_test requires a prompt-based target task (config.task_config.prompts_file)"
+    task_config = resolve_task_config(
+        config, use_nontarget=nontarget, prompts_override=None if nontarget else prompts
     )
-    target_iter = iterate_input_ids(
-        build_lm_loader(target_task_config, config, batch_size_override=batch_size), device
+    if not nontarget:
+        assert is_prompt_task(task_config), (
+            "swap_test target mode requires a prompt-based task (config.task_config.prompts_file)"
+        )
+    iterator = iterate_input_ids(
+        build_lm_loader(task_config, config, batch_size_override=batch_size), device
     )
-
-    nontarget_task_config = resolve_task_config(config, use_nontarget=True)
-    nontarget_iter = iterate_input_ids(
-        build_lm_loader(nontarget_task_config, config, batch_size_override=batch_size), device
-    )
+    n_to_run = 1 if not nontarget else n_batches
 
     slug = f"{module_name.replace('.', '_')}_c{a_component}_c{b_component}"
-    target_out = (
-        Path(output_target).expanduser()
-        if output_target
-        else run_dir / f"swap_test_{slug}_target.tsv"
-    )
-    nontarget_out = (
-        Path(output_nontarget).expanduser()
-        if output_nontarget
-        else run_dir / f"swap_test_{slug}_nontarget.tsv"
-    )
-    for p in (target_out, nontarget_out):
-        p.parent.mkdir(parents=True, exist_ok=True)
+    default_name = f"swap_test_{slug}_nontarget.tsv" if nontarget else f"swap_test_{slug}.tsv"
+    out_path = Path(output).expanduser() if output else run_dir / default_name
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Weight deltas depend only on the (unswapped) model parameters, which don't change across
-    # batches or between the two passes. Compute once.
     weight_deltas = spd_model.calc_weight_deltas()
 
     _run_pass(
         spd_model=spd_model,
-        iterator=target_iter,
-        n_batches=1,
+        iterator=iterator,
+        n_batches=n_to_run,
         weight_deltas=weight_deltas,
         spec=spec,
-        out_path=target_out,
+        out_path=out_path,
         device=device,
-        include_batch_idx=False,
+        include_batch_idx=nontarget,
     )
-    _run_pass(
-        spd_model=spd_model,
-        iterator=nontarget_iter,
-        n_batches=n_nontarget_batches,
-        weight_deltas=weight_deltas,
-        spec=spec,
-        out_path=nontarget_out,
-        device=device,
-        include_batch_idx=True,
-    )
-    return target_out, nontarget_out
+    return out_path
 
 
 if __name__ == "__main__":
