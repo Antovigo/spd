@@ -8,7 +8,11 @@
 srun --time=2:00:00 --pty bash
 
 RUN_DIR=~/spd_out/spd/s-0c454b30 # 4L
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+
 RUN_DIR=~/spd_out/spd/s-23733db9 # 4L_naive
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+
 RUN_DIR=~/spd_out/spd/s-74b94cad # 12L
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
