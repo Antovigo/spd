@@ -145,3 +145,42 @@ Output TSV (one row per candidate pair), columns:
 Predicted-token columns (`a_ablated_pred`, `b_ablated_pred`) are written as decoded strings when the tokenizer is available, prefixed with the integer id (e.g. `50257:" np"`), so the TSV is self-describing.
 
 Unless `--output` is specified, the TSV file is saved to the decomposed model's folder as `swap_candidates.tsv`.
+
+**swap_test.py**
+args:
+- the path to a decomposed model
+- the path to an `alive_components.tsv` (produced by `find_alive_components` on the target data) — used to read the mean inner activation of each component on its original inputs
+--layer / --matrix: the decomposed matrix whose components will be swapped (both components must live in the same matrix, otherwise the U vectors have incompatible shapes)
+--a-component / --b-component: the two component indices to swap
+--target-a / --target-b: the expected next-token strings for tasks A and B, used only for per-position target-token probability tracking (each must tokenize to exactly one token under the run's tokenizer)
+--n-nontarget-batches: number of nontarget batches to run (default 1)
+--output-target / --output-nontarget: override the default output paths
+
+The script builds a modified version of the decomposed model where the output (U) vectors of components A and B are swapped in the selected matrix. Because the two components usually fire with different inner-activation magnitudes (V^T x), a raw U swap would rescale the output by the wrong factor — so we normalise by the ratio of the mean inner activations from `alive_components.tsv`:
+
+```
+a_mean = alive_components[A].mean_activation
+b_mean = alive_components[B].mean_activation
+
+U[A] := (b_mean / a_mean) * U[B]_original
+U[B] := (a_mean / b_mean) * U[A]_original
+```
+
+so that when A fires on its original inputs (activation ≈ `a_mean`), the output magnitude it produces now matches what B would produce on B's inputs (`b_mean * ||U[B]_original||`), and vice versa. Both `a_mean` and `b_mean` are asserted to be non-zero.
+
+Model semantics. The swapped model is run through the same `ComponentModel` forward path that `effect_of_ablation` uses: all-ones component masks for every decomposed module, and `weight_deltas_and_masks` with delta-mask 1 everywhere using the **pre-swap** weight deltas (`target_weight - V @ U_original`). This guarantees that outside components A and B the swapped model is byte-identical to the original target model, while A and B's contributions are reconfigured by the swap. The comparison baseline ("orig") is the original target model itself, invoked via `spd_model(batch)` with no `mask_infos`. The swap is performed in place inside a context manager that clones the two affected U rows on entry and restores them on exit, so the model state is clean after the script finishes.
+
+Datasets. Target data is the LM `prompts_file` (one batch containing every prompt, same convention as `effect_of_ablation`). Nontarget data is the `nontarget_task_config` dataset, iterated for `--n-nontarget-batches` batches using the decomposition's `batch_size`. Both passes run under the same swap configuration; for each batch, `orig_logits` is computed before the swap context and `swapped_logits` inside it, so the final model state is unchanged.
+
+Output. Two TSVs, default `swap_test_target.tsv` and `swap_test_nontarget.tsv` in the decomposed model's folder. One row per `(prompt, pos)` with columns:
+
+- prompt, pos, token
+- orig_pred, orig_prob
+- swapped_pred, swapped_prob
+- p_target_a_orig, p_target_a_swapped (probability of the task-A target token under each model)
+- p_target_b_orig, p_target_b_swapped
+- kl (`KL(softmax(orig_logits) || softmax(swapped_logits))`)
+
+Nontarget rows additionally carry a `batch_idx` column so positions from different batches can be distinguished.
+
+Only LM tasks with a `prompts_file` are supported (the script needs prompt-based target data and LM token predictions).
