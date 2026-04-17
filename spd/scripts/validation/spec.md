@@ -195,9 +195,9 @@ Datasets. In target mode, data is the LM `prompts_file` (one batch containing ev
 
 Output. A single TSV, default `swap_test_<slug>.tsv` (target) or `swap_test_<slug>_nontarget.tsv` (nontarget) in the decomposed model's folder, where `<slug>` encodes the module and component pair. One row per `(prompt, pos)` with columns:
 
-- prompt, pos, token
-- orig_pred, orig_prob
-- swapped_pred, swapped_prob
+- prompt, pos, token, token_str (input token id and decoded string)
+- orig_pred, orig_pred_str, orig_prob
+- swapped_pred, swapped_pred_str, swapped_prob
 - p_target_a_orig, p_target_a_swapped (probability of the task-A target token under each model)
 - p_target_b_orig, p_target_b_swapped
 - kl (`KL(softmax(orig_logits) || softmax(swapped_logits))`)

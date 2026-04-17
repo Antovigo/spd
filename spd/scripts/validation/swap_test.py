@@ -15,7 +15,7 @@ Usage:
 """
 
 import csv
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +34,7 @@ from spd.models.components import ComponentsMaskInfo, make_mask_infos
 from spd.scripts.validation.common import (
     build_lm_loader,
     build_module_lookup,
+    escape_tsv_value,
     is_prompt_task,
     iterate_input_ids,
     load_spd_run,
@@ -135,9 +136,12 @@ _CORE_FIELDS = [
     "prompt",
     "pos",
     "token",
+    "token_str",
     "orig_pred",
+    "orig_pred_str",
     "orig_prob",
     "swapped_pred",
+    "swapped_pred_str",
     "swapped_prob",
     "p_target_a_orig",
     "p_target_a_swapped",
@@ -147,12 +151,27 @@ _CORE_FIELDS = [
 ]
 
 
+def _make_decoder(tokenizer: PreTrainedTokenizer) -> Callable[[int], str]:
+    """Memoised, TSV-safe single-token decoder."""
+    cache: dict[int, str] = {}
+
+    def decode(tid: int) -> str:
+        s = cache.get(tid)
+        if s is None:
+            s = escape_tsv_value(tokenizer.decode([tid]))  # pyright: ignore[reportAttributeAccessIssue]
+            cache[tid] = s
+        return s
+
+    return decode
+
+
 def _write_rows(
     writer: "csv.DictWriter[str]",
     batch: Tensor,
     orig_logits: Tensor,
     swapped_logits: Tensor,
     spec: SwapSpec,
+    decode: Callable[[int], str],
     prompt_offset: int,
     batch_idx: int | None,
 ) -> None:
@@ -181,15 +200,21 @@ def _write_rows(
     for b in range(batch_size):
         prompt_idx = prompt_offset + b
         for t in range(seq_len):
+            token_id = batch_cpu[b][t]
+            orig_id = orig_pred_cpu[b][t]
+            swapped_id = swapped_pred_cpu[b][t]
             writer.writerow(
                 {
                     **extra,
                     "prompt": prompt_idx,
                     "pos": t,
-                    "token": batch_cpu[b][t],
-                    "orig_pred": orig_pred_cpu[b][t],
+                    "token": token_id,
+                    "token_str": decode(token_id),
+                    "orig_pred": orig_id,
+                    "orig_pred_str": decode(orig_id),
                     "orig_prob": orig_prob_cpu[b][t],
-                    "swapped_pred": swapped_pred_cpu[b][t],
+                    "swapped_pred": swapped_id,
+                    "swapped_pred_str": decode(swapped_id),
                     "swapped_prob": swapped_prob_cpu[b][t],
                     "p_target_a_orig": p_a_orig_cpu[b][t],
                     "p_target_a_swapped": p_a_swapped_cpu[b][t],
@@ -206,6 +231,7 @@ def _run_pass(
     n_batches: int,
     weight_deltas: dict[str, Tensor],
     spec: SwapSpec,
+    decode: Callable[[int], str],
     out_path: Path,
     device: torch.device,
     include_batch_idx: bool,
@@ -248,6 +274,7 @@ def _run_pass(
                 orig_logits=orig_logits,
                 swapped_logits=swapped_logits,
                 spec=spec,
+                decode=decode,
                 prompt_offset=batch_idx * first_shape[0],
                 batch_idx=batch_idx if include_batch_idx else None,
             )
@@ -293,6 +320,7 @@ def swap_test(
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
     target_a_id = _single_token_id(tokenizer, target_a, "target_a")
     target_b_id = _single_token_id(tokenizer, target_b, "target_b")
+    decode = _make_decoder(tokenizer)
 
     spec = SwapSpec(
         module_name=module_name,
@@ -333,6 +361,7 @@ def swap_test(
         n_batches=n_to_run,
         weight_deltas=weight_deltas,
         spec=spec,
+        decode=decode,
         out_path=out_path,
         device=device,
         include_batch_idx=nontarget,

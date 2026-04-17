@@ -53,12 +53,17 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
 
 # --- 6. Swap test ------------------------------------------------------------
 # Pick a pair from $RUN_DIR/swap_candidates.tsv and edit the four fields below.
+
+LAYER=3
+MATRIX=attn.o_proj
+A_COMP=66
+B_COMP=79
+
 # Target data (one batch of prompts):
 uv run python -m spd.scripts.validation.swap_test \
     "$MODEL_PATH" \
     "$RUN_DIR/alive_components.tsv" \
-    --layer=1 --matrix=attn.q_proj \
-    --a-component=279 --b-component=177 \
+    --layer=$LAYER --matrix=$MATRIX --a-component=$A_COMP --b-component=$B_COMP \
     --target-a=" np" --target-b=" pd" \
     --prompts="$PROMPTS"
 
@@ -66,8 +71,7 @@ uv run python -m spd.scripts.validation.swap_test \
 uv run python -m spd.scripts.validation.swap_test \
     "$MODEL_PATH" \
     "$RUN_DIR/alive_components.tsv" \
-    --layer=1 --matrix=attn.q_proj \
-    --a-component=279 --b-component=177 \
+    --layer=$LAYER --matrix=$MATRIX --a-component=$A_COMP --b-component=$B_COMP \
     --target-a=" np" --target-b=" pd" \
     --nontarget --n-batches=10
 
