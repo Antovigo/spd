@@ -40,7 +40,7 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
     "$RUN_DIR/nontarget_summary.tsv" \
     --task-a='{"prompt": "import numpy as", "target": " np"}' \
     --task-b='{"prompt": "import pandas as", "target": " pd"}' \
-    --top-k=20 \
+    --top-k=100 \
     --prompts="$PROMPTS"
 
 # --- 6. Swap test ------------------------------------------------------------

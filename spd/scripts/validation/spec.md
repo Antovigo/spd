@@ -160,7 +160,7 @@ Output TSV (one row per candidate pair), columns:
 - matrix
 - a_comp, b_comp (component indices)
 - a_targ_kl, b_targ_kl (KL at each task's target row after ablating the component)
-- a_nontarg_kl_{pct}, b_nontarg_kl_{pct} (nontarget KL quantile from the summary, `{pct}` is e.g. 99 for quantile 0.99)
+- a_nontarg_kl_q{pct}, b_nontarg_kl_q{pct} (nontarget KL quantile from the summary, `{pct}` is e.g. 99 for quantile 0.99)
 - score (combined score)
 
 Unless `--output` is specified, the TSV file is saved to the decomposed model's folder as `swap_candidates.tsv`.

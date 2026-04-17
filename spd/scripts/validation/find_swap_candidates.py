@@ -171,8 +171,8 @@ def _rank_pairs(
 
 
 def _write_pairs(pairs: list[PairScore], quantile_pct: int, out_path: Path) -> None:
-    a_nontarg_col = f"a_nontarg_kl_{quantile_pct}"
-    b_nontarg_col = f"b_nontarg_kl_{quantile_pct}"
+    a_nontarg_col = f"a_nontarg_kl_q{quantile_pct}"
+    b_nontarg_col = f"b_nontarg_kl_q{quantile_pct}"
     fieldnames = [
         "rank",
         "layer",
