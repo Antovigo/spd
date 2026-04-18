@@ -63,7 +63,7 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
 # Each swap is one string of the form <layer>:<matrix>:<a_comp>/<b_comp>.
 # Multiple swaps are applied simultaneously in a single forward pass.
 
-SWAPS=(9:attn.v_proj:52/35)
+#SWAPS=(9:attn.v_proj:52/35)
 SWAPS=(9:attn.v_proj:52/35 9:mlp.down_proj:47/48)
 
 # Target data (one batch of prompts):
@@ -128,29 +128,29 @@ MODEL_PATH_CSS_1=$(ls -t "$RUN_DIR_CSS_1"/model_*.pth | head -n 1)
 
 # --- 8. Alive components on the CSS target dataset (both seeds) --------------
 # `--split=train` — the target's `eval_data_split` (`validation`) is ~1k rows;
-# use the train split for a bigger sample.
+# use the train split for a bigger sample. Both seeds are needed for step 10.
 uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS" --split=train --n-batches=200
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_1" --split=train --n-batches=200
 
-# --- 9. Ablation summaries on target + nontarget (streaming) -----------------
-# `--summary-only` runs the same ablation loop as effect_of_ablation but keeps
-# only a per-component t-digest + running sum/max/count, writing a single
-# summary TSV instead of the full per-(component, prompt, pos) file. Works on
-# both target and nontarget data — defaults to `effect_of_ablation_summary.tsv`
-# (target) or `effect_of_ablation_nontarget_summary.tsv` (nontarget).
-# Cross-reference the two to find components with high target-mode kl_q99 and
-# low nontarget-mode kl_q99.
+# --- 9. Shortlist components with low off-target activity --------------------
+# Full nontarget ablation (~hundreds of components × many batches) is too slow.
+# Instead, use harvest data (cheap, no forward passes) to rank alive components
+# by how often they fire on general text, then keep only those that rarely do.
+# Requires `spd-harvest` to have run on the decomposition beforehand.
+# Column 4 of nontarget_activity.tsv is `firing_density`; tune the threshold.
+uv run python -m spd.scripts.validation.nontarget_activity "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv"
 
-# Target (CSS):
+awk -F'\t' 'NR==1 || ($4+0) < 0.01' \
+    "$RUN_DIR_CSS/nontarget_activity.tsv" > "$RUN_DIR_CSS/shortlist.tsv"
+
+# --- 10. Target ablation summary on the shortlisted components ---------------
+# Measure how ablating each shortlisted component affects CSS output. Rank by
+# `kl_q99` to find components that break CSS without large off-target cost.
 uv run python -m spd.scripts.validation.effect_of_ablation \
-    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/shortlist.tsv" \
     --split=train --summary-only --n-batches=20 --quantile=0.99
 
-# Nontarget (general distribution):
-uv run python -m spd.scripts.validation.effect_of_ablation \
-    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
-    --nontarget --summary-only --n-batches=20 --quantile=0.99
-
-# --- 10. Compare components across the two CSS seeds -------------------------
+# --- 11. Compare components across the two CSS seeds -------------------------
 # Max-cosine match alive components of seed 0 to seed 1, then to a random-init
 # control with pool size matched per-matrix to seed 1's alive counts.
 

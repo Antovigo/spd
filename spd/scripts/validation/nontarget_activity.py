@@ -30,20 +30,31 @@ from spd.utils.wandb_utils import parse_wandb_run_path
 
 
 def _resolve_run_id(model_path: ModelPath, run_info: SPDRunInfo) -> str:
-    """Extract the wandb run_id, either from the path or from the cached directory name."""
+    """Extract the wandb run_id from the path, the dir name, or a '<project>-<run_id>' dir name.
+
+    Locally-trained runs live in `SPD_OUT_DIR/spd/<run_id>/` (e.g. `s-429ea112`) — the dir name
+    is the run_id. Cached wandb downloads live in `SPD_OUT_DIR/runs/<project>-<run_id>/` (e.g.
+    `spd-s-429ea112`) — strip the project prefix.
+    """
     try:
         _, _, run_id = parse_wandb_run_path(str(model_path))
         return run_id
     except ValueError:
         pass
 
-    # Cached local dir is SPD_OUT_DIR/runs/<project>-<run_id>/
     dir_name = run_info.checkpoint_path.parent.name
-    parts = dir_name.split("-", 1)
-    assert len(parts) == 2, (
-        f"Cannot derive run_id from directory name {dir_name!r}; expected '<project>-<run_id>'"
+    try:
+        _, _, run_id = parse_wandb_run_path(dir_name)
+        return run_id
+    except ValueError:
+        pass
+
+    project, sep, run_id = dir_name.partition("-")
+    assert sep == "-" and project and run_id, (
+        f"Cannot derive run_id from directory name {dir_name!r}; expected a bare run_id "
+        f"(e.g. 's-abc12345') or '<project>-<run_id>'"
     )
-    return parts[1]
+    return run_id
 
 
 def _open_harvest(run_id: str, subrun_id: str | None) -> HarvestRepo:
