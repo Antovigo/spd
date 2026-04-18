@@ -103,6 +103,14 @@ uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_B" --
 # Compare matched components
 uv run python -m spd.scripts.validation.compare_matched_components "$MODEL_PATH" "$MODEL_PATH_B"
 
+# Max-cosine comparison (each A component -> best-match B component)
+uv run python -m spd.scripts.validation.compare_components "$MODEL_PATH" "$MODEL_PATH_B"
+
+# Random-init control: model B's components reinitialised; candidate pool per matrix
+# is restricted to `len(alive_b)` random indices, averaged over 10 draws.
+uv run python -m spd.scripts.validation.compare_components "$MODEL_PATH" "$MODEL_PATH_B" \
+    --random-b --n-random-samples=10
+
 ###################
 # CSS decomposition #
 ###################
@@ -112,31 +120,31 @@ uv run python -m spd.scripts.validation.compare_matched_components "$MODEL_PATH"
 # Target data here is a large dataset (not a prompts file), so `find_alive_components`
 # needs `--n-batches` instead of `--prompts`.
 
-RUN_DIR_CSS_0=~/spd_out/spd/s-429ea112 # CSS seed 0 (reference)
-MODEL_PATH_CSS_0=$(ls -t "$RUN_DIR_CSS_0"/model_*.pth | head -n 1)
+RUN_DIR_CSS=~/spd_out/spd/s-429ea112 # CSS seed 0 (reference)
+MODEL_PATH_CSS=$(ls -t "$RUN_DIR_CSS"/model_*.pth | head -n 1)
 
 RUN_DIR_CSS_1=~/spd_out/spd/s-705a9887 # CSS seed 1
 MODEL_PATH_CSS_1=$(ls -t "$RUN_DIR_CSS_1"/model_*.pth | head -n 1)
 
 # --- 8. Alive components on the CSS target dataset (both seeds) --------------
-uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_0" --n-batches=20
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS" --n-batches=20
 uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_1" --n-batches=20
 
-# --- 9. Nontarget ablation summary (streaming; no intermediate file) ---------
-# Runs the same ablation loop as effect_of_ablation but keeps only a per-component
-# t-digest + running sum/max/count and writes a single summary TSV. Use this to
-# shortlist components whose nontarget side-effect is small.
-uv run python -m spd.scripts.validation.effect_of_ablation \
-    "$MODEL_PATH_CSS_0" "$RUN_DIR_CSS_0/alive_components.tsv" \
-    --nontarget --summary-only --n-batches=20 --quantile=0.99
-uv run python -m spd.scripts.validation.effect_of_ablation \
-    "$MODEL_PATH_CSS_1" "$RUN_DIR_CSS_1/alive_components.tsv" \
-    --nontarget --summary-only --n-batches=20 --quantile=0.99
+# --- 9. Ablation summaries on target + nontarget (streaming) -----------------
+# `--summary-only` runs the same ablation loop as effect_of_ablation but keeps
+# only a per-component t-digest + running sum/max/count, writing a single
+# summary TSV instead of the full per-(component, prompt, pos) file. Works on
+# both target and nontarget data — defaults to `effect_of_ablation_summary.tsv`
+# (target) or `effect_of_ablation_nontarget_summary.tsv` (nontarget).
+# Cross-reference the two to find components with high target-mode kl_q99 and
+# low nontarget-mode kl_q99.
 
-# --- 10. Target ablation on the shortlisted components -----------------------
-# After shortlisting components with low nontarget kl_q99 from step 9, filter
-# alive_components.tsv down to those rows, then run the full effect_of_ablation
-# on CSS target data to see which ablations actually break CSS output.
-# (Shortlisting filter TBD — e.g. awk on the summary TSV.)
-# uv run python -m spd.scripts.validation.effect_of_ablation \
-#     "$MODEL_PATH_CSS_0" "$RUN_DIR_CSS_0/shortlist.tsv" --n-batches=20
+# Target (CSS):
+uv run python -m spd.scripts.validation.effect_of_ablation \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
+    --summary-only --n-batches=20 --quantile=0.99
+
+# Nontarget (general distribution):
+uv run python -m spd.scripts.validation.effect_of_ablation \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
+    --nontarget --summary-only --n-batches=20 --quantile=0.99

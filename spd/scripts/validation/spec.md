@@ -246,3 +246,37 @@ Output TSV (default `matched_components.tsv` in run A's directory). One row per 
 Output figure (default `matched_components.png` in run A's directory). A grid with rows = matrix types, columns = layer indices. Each cell has four subpanels: weight cosine similarity bars, an `||U||·||V||` scatter (run A on y, run B on x, shared axis scale), V cosine similarity bars, U cosine similarity bars. All similarity values are shown as absolute values in the figure (sign is kept in the TSV).
 
 Only `LinearComponents` modules are matched.
+
+
+**compare_components.py**
+args:
+- the path to the first decomposed model (run A)
+- the path to the second decomposed model (run B)
+--alive-components-a: optional override for run A's alive-components TSV (default `<run_dir_a>/alive_components.tsv`)
+--alive-components-b: optional override for run B's alive-components TSV (default `<run_dir_b>/alive_components.tsv`)
+--random-b: if set, replace run B's component weights with Kaiming-normal samples and draw `len(alive_b[(layer, matrix)])` random indices from run B's total `C` per matrix as the candidate pool (repeated `--n-random-samples` times). This is a control showing what max-cosine looks like when no training has happened, with the pool size matched per matrix to avoid inflation by extra components.
+--n-random-samples: number of random draws averaged over (default 10; only used with `--random-b`)
+--random-seed: base seed for the random-init and pool sampling (default 0; only used with `--random-b`)
+--label-a / --label-b: human-readable labels used in the figure (defaults to each run's checkpoint directory name; in `--random-b` mode label B defaults to `<name>-random`)
+--output-tsv: overrides the TSV output path
+--output-fig: overrides the figure output path
+
+Max-cosine variant of `compare_matched_components`: for each alive component in A, picks the component in B (from B's alive set, or a random subset in `--random-b` mode) with the highest *absolute* cosine similarity on the flattened rank-one weight (`V[:, i] @ U[i, :]`). The matched pair's V and U cosine similarities, plus `||U|| * ||V||` norms, are recorded for the chosen B component. Because the matching is not 1-to-1, several A components may map to the same B component.
+
+Procedure:
+1. Load both ComponentModels and their alive-components TSVs. The two models must share the same set of decomposed module paths.
+2. For each shared `(layer, matrix)`, compute the pairwise cos-sim matrix between A's and B's flattened rank-one component weights; pick the argmax column for each row.
+3. In `--random-b` mode, repeat step 2 `--n-random-samples` times, each time re-initializing model B's V/U with a fresh seed and sampling `len(alive_b[key])` indices from `range(C)` of the random model. The TSV is one row per `(a_component, draw)`; the figure shows the mean of absolute cos similarities across draws.
+
+Output TSV (default `compare_components.tsv`, or `compare_components_random.tsv` with `--random-b`, in run A's directory). Columns:
+- layer, matrix
+- draw (0 in the non-random mode; 0..N-1 in random mode)
+- a_component (alive component index in model A)
+- b_component (matched component index in model B — meaningful per-draw in random mode)
+- weight_cos_sim (signed cosine similarity of the matched flat weights)
+- v_cos_sim, u_cos_sim (signed cosine similarity of the underlying V and U vectors of the matched pair; 0 if either side is a zero vector)
+- norm_a, norm_b (`||U|| * ||V||` for each side)
+
+Output figure (same naming as the TSV, with `.png` suffix). Grid with rows = matrix types, columns = layer indices. Each cell has four subpanels: mean |weight cos sim| bars per A component, `||U||·||V||` scatter (A on y, B on x), mean |V cos sim|, mean |U cos sim|. A components are sorted per matrix by descending mean |weight cos sim|. In the non-random mode the mean is over a single draw (so it's just the absolute value); in random mode it is over all draws.
+
+Only `LinearComponents` modules are matched.
