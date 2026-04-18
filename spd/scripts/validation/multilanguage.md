@@ -1,137 +1,134 @@
-# Multi-language evaluation for CSS ablation
+# Multi-language ablation eval
 
-## Goal
+`multilang_ablation.py` measures how ablating a fixed set of components affects
+the model's next-token distribution across several programming languages (and
+optionally plain English). Intended use: validate that a hypothesised
+language-specific component set (e.g. CSS components) only perturbs its target
+language.
 
-After ablating CSS-specific components from a decomposed LM, we want to measure
-the distributional effect on the model's output *per programming language*. The
-hypothesis is that ablation should shift output distributions sharply on CSS
-while leaving other languages ~unchanged.
+## Inputs
 
-Concretely, we want to produce per-position KL(orig || ablated) values, each
-tagged with a language label, so the downstream analysis can plot KL
-distributions per language.
+1. **Decomposed model path** — same formats as the other validation scripts
+   (WandB path or local checkpoint).
+2. **Components file** — plain text, one component per line in the format:
+   ```
+   <layer>:<matrix>:<component>
+   ```
+   Blank lines and `#` comments are ignored. Example:
+   ```
+   # CSS components to ablate
+   3:attn.v_proj:17
+   5:mlp.down_proj:42
+   7:mlp.down_proj:8
+   ```
 
-We don't need a lot of data per language — a few hundred positions per
-language is already enough to see distribution shape. Prioritise breadth of
-languages and cleanliness of labels over size.
+## What it does
 
-## Dataset choice
+1. Builds a ComponentModel with:
+   - every listed component's mask set to 0
+   - every other component's mask set to 1
+   - the delta component fully enabled (mask = 1)
+   So the ablated model equals the original target model *minus* the listed
+   components' contributions, and nothing else.
 
-Primary candidate: **`bigcode/the-stack-smol`** on HuggingFace.
+2. For each language, streams files from a HuggingFace dataset, tokenises
+   them, and packs the token stream into batches of shape
+   `(batch_size, seq_len)`.
 
-- Ships a deduplicated, permissively-licensed subset of The Stack
-- Organised by language (`data/<lang>/` subdirectories): `css`, `html`,
-  `javascript`, `python`, `c`, `rust`, `yaml`, `json`, ...
-- Loaded per-language via `load_dataset("bigcode/the-stack-smol",
-  data_dir="data/<lang>")` — each row is one file, with fields including
-  `content` (string) and `lang` (string).
-- "Smol" means ~10k files per language, small enough to subsample cheaply.
+3. For each batch, runs both the original and ablated models, and records one
+   TSV row per position.
 
-Alternatives considered:
+## Languages and data sources
 
-- `codeparrot/github-code` — bigger, same idea, but overkill here.
-- `code_search_net` — only 6 languages, no CSS.
-- `bigcode/the-stack-v2` — gated and much larger; unnecessary.
+| Language     | Dataset                              | Notes                                    |
+|--------------|--------------------------------------|------------------------------------------|
+| `css`        | `bigcode/the-stack-smol` `data/css`  | `/* ... */` comments stripped            |
+| `html`       | `bigcode/the-stack-smol` `data/html` | `<style>...</style>` bodies stripped     |
+| `javascript` | `bigcode/the-stack-smol` `data/javascript` |                                    |
+| `python`     | `bigcode/the-stack-smol` `data/python` |                                        |
+| `c`          | `bigcode/the-stack-smol` `data/c`    |                                          |
+| `rust`       | `bigcode/the-stack-smol` `data/rust` |                                          |
+| `english`    | `wikitext` `wikitext-103-raw-v1`     | Plain prose baseline                     |
 
-Languages to include (initial pick): `css`, `html`, `javascript`, `python`,
-`c`, `rust`, `json`, `yaml`, plain English text (e.g. a wikitext slice) as a
-non-code baseline. Skip `markdown` — it commonly embeds many other languages
-in fenced code blocks and would pollute the per-language KL distribution.
+Default language set is all of the above. Override with `--languages` (comma
+separated, e.g. `--languages=css,html,python`).
 
-## Labelling strategy
+HTML is cleaned with `re.sub(r"<style\b[^>]*>.*?</style>", "", text,
+flags=DOTALL|IGNORECASE)` so the `html` sample measures HTML without embedded
+CSS. Any other embedded-language cases (JS template literals, inline `style=`
+attributes, etc.) are not handled.
 
-One label per file (the dataset's `lang` field). No per-token labels.
+## Sequence format
 
-### Cleaning HTML
+Tokenisation and packing replicate how the CSS training data
+(`pile-css-chunks`) is built in `spd/scripts/extract_css_from_pile.py`:
 
-To keep the `html` sample from being contaminated by embedded CSS, strip
-`<style>...</style>` bodies from each HTML file *before* tokenising:
+- `tokenizer(..., add_special_tokens=False)` — no BOS/EOS added anywhere.
+  (The gpt-neox-20b tokenizer used by the CSS models also has
+  `add_bos_token=add_eos_token=False`, so `tokenizer.encode(text)` behaves
+  the same way.)
+- Files are concatenated with **no separator** between them, then sliced into
+  fixed-size `(batch_size, seq_len)` chunks.
+- Any partial final chunk is dropped.
 
-- Regex: `<style\b[^>]*>.*?</style>` (case-insensitive, dotall).
-- Remove matches (including the tags themselves), keep the rest.
+Known mismatches against training:
 
-No splitting, no per-token labels — the file is tokenised as a single string
-after cleanup and every token gets the label `html`.
+- **Non-CSS languages (HTML, JS, Python, C, Rust, English)** were not in the
+  CSS target distribution at all — they correspond to the model's nontarget
+  training data (`pile-uncopyrighted-tok-shuffled`), which may have its own
+  inter-document separator conventions. The no-separator choice matches the
+  CSS pipeline, which is the more important match for interpreting
+  CSS-ablation KL. Any format bias for other languages applies uniformly, so
+  cross-language KL comparisons remain meaningful.
 
-Not handled (out of scope for v1):
+## Output
 
-- JS template literals containing CSS — no standard delimiter.
-- HTML inline `style="..."` attributes — short, noisy.
-- CSS pulled in via `<link rel="stylesheet">` — already covered by `lang=css`.
+A single TSV at `<run_dir>/multilang_ablation.tsv` (override with `--output`),
+one row per (language, position):
 
-### Label taxonomy
+| Column             | Description                                           |
+|--------------------|-------------------------------------------------------|
+| `lang`             | Language label                                        |
+| `token_str`        | Input token at this position, decoded                 |
+| `orig_pred_str`    | Argmax prediction from the original model             |
+| `orig_prob`        | Probability of `orig_pred_str` under the original     |
+| `ablated_pred_str` | Argmax prediction from the ablated model              |
+| `ablated_prob`     | Probability of `ablated_pred_str` under the ablated   |
+| `kl`               | `KL(orig || ablated)` at this position                |
 
-Flat strings matching the dataset's `lang` field, plus `text` for the
-non-code baseline:
+All `*_str` columns are TSV-escaped (backslash-escape of tab/newline/CR/`\`)
+to keep the file splittable by tab everywhere.
 
+## Parameters
+
+- `--tokens-per-lang=N` (default 10000) — minimum tokens emitted per language.
+  Actual count is rounded up to a whole number of batches, so the true total
+  is `ceil(N / (batch_size * seq_len)) * batch_size * seq_len`.
+- `--languages=a,b,c` — override the default language set.
+- `--batch-size=N` — defaults to `config.batch_size`.
+- `--seq-len=N` — defaults to the task config's `max_seq_len`.
+- `--output=PATH` — override output TSV path.
+
+## Usage
+
+```bash
+uv run python -m spd.scripts.validation.multilang_ablation \
+    "$MODEL_PATH" components_to_ablate.txt
 ```
-css, html, javascript, python, c, rust, json, yaml, text
+
+With overrides:
+
+```bash
+uv run python -m spd.scripts.validation.multilang_ablation \
+    "$MODEL_PATH" components_to_ablate.txt \
+    --tokens-per-lang=50000 \
+    --languages=css,html,python \
+    --batch-size=16 --seq-len=1024
 ```
 
-## Output format
+## Expected result
 
-A single JSONL file, one line per tokenised file:
-
-```json
-{
-  "lang": "html",
-  "file_id": "the-stack-smol/html/abc123",
-  "token_ids": [1, 523, 77, ...]
-}
-```
-
-Storing whole files (rather than pre-chunking to `max_seq_len`) keeps the
-downstream window logic in one place — the ablation eval script already
-handles chunking via the existing data loader.
-
-## Loader sketch
-
-New file: `spd/scripts/validation/multilang_dataset.py`.
-
-```python
-def load_multilang_eval(
-    languages: list[str],
-    files_per_lang: int,
-    tokenizer_name: str,
-    output_path: Path,
-    seed: int = 0,
-) -> None:
-    """Sample `files_per_lang` files per language from the-stack-smol,
-    strip <style> blocks from HTML, tokenise, and write JSONL."""
-```
-
-Key steps:
-
-1. `load_dataset("bigcode/the-stack-smol", data_dir=f"data/{lang}",
-   split="train", streaming=True)` per language, take the first
-   `files_per_lang` rows after shuffling with `seed`.
-2. For `html`, apply the `<style>` stripper; for everything else, pass through.
-3. Tokenise and write JSONL.
-
-Kept as a one-shot script (not streamed through SPD's data loader) because
-the dataset is small and the labelling is not worth generalising into the
-training-data pipeline.
-
-## Downstream use
-
-A follow-up eval script (e.g. `css_ablation_eval.py`) would:
-
-1. Load the JSONL.
-2. For each file, run the original model and the ablated model (the latter
-   with the chosen components masked to 0, delta=1 as in
-   `effect_of_ablation.py`).
-3. Compute per-position `KL(orig || ablated)`.
-4. Group by file-level `lang`, emit a TSV of (lang, kl) rows.
-5. Plot KL distributions per language.
-
-Expected result if the ablation is clean: `css` has a heavy right tail;
-other languages sit near zero.
-
-## Open questions
-
-- Is `the-stack-smol` CSS sample representative? It's GitHub-sourced and
-  probably biased toward web frameworks. Acceptable for a first pass.
-- Tokeniser mismatch: we need to use the decomposition's tokeniser, not a
-  generic one. The loader takes `tokenizer_name` as an arg and asserts it
-  matches `config.tokenizer_name`.
-- Licence: the-stack-smol is permissively-licensed; fine for research use.
+If the listed components are language-specific (e.g. CSS-specific):
+- `css` KL distribution has a heavy right tail.
+- Other languages sit near zero.
+- `html` sits near zero too, since `<style>` bodies were stripped.
