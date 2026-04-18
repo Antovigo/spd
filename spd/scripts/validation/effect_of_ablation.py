@@ -127,6 +127,7 @@ def effect_of_ablation(
     n_batches: int = 1,
     nontarget: bool = False,
     prompts: str | None = None,
+    split: str | None = None,
     batch_size: int | None = None,
     summary_only: bool = False,
     quantile: float = 0.99,
@@ -145,7 +146,9 @@ def effect_of_ablation(
 
     assert config.tokenizer_name is not None, "config.tokenizer_name is required"
 
-    task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
+    task_config = resolve_task_config(
+        config, use_nontarget=nontarget, prompts_override=prompts, split_override=split
+    )
     loader = build_lm_loader(task_config, config, batch_size_override=batch_size)
     single_batch = is_prompt_task(task_config)
 
@@ -232,6 +235,7 @@ def _run(
     """
     total_prompts = 0
     seq_len = 0
+    batches_done = 0
     component_masks: dict[str, Tensor] | None = None
     mask_infos: Any = None
     first_shape: tuple[int, ...] | None = None
@@ -245,8 +249,8 @@ def _run(
         kl_writer.writeheader()
         orig_writer.writeheader()
 
-        for batch_idx in tqdm(range(n_to_run), desc="batches"):
-            batch = next(iterator)
+        for batch_idx, batch in zip(tqdm(range(n_to_run), desc="batches"), iterator, strict=False):
+            batches_done = batch_idx + 1
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             batch_size, seq_len = batch.shape
             if component_masks is None:
@@ -311,6 +315,10 @@ def _run(
                                 "kl": kl_cpu[b][t],
                             }
                         )
+    if batches_done < n_to_run:
+        logger.warning(
+            f"Loader exhausted after {batches_done}/{n_to_run} batches (dataset too small?)"
+        )
     return total_prompts, seq_len
 
 
@@ -350,6 +358,7 @@ def _run_summary(
     """
     total_prompts = 0
     seq_len = 0
+    batches_done = 0
     component_masks: dict[str, Tensor] | None = None
     mask_infos: Any = None
     first_shape: tuple[int, ...] | None = None
@@ -358,8 +367,8 @@ def _run_summary(
     }
 
     with torch.no_grad():
-        for batch_idx in tqdm(range(n_to_run), desc="batches"):
-            batch = next(iterator)
+        for batch_idx, batch in zip(tqdm(range(n_to_run), desc="batches"), iterator, strict=False):
+            batches_done = batch_idx + 1
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             batch_size, seq_len = batch.shape
             if component_masks is None:
@@ -388,6 +397,11 @@ def _run_summary(
                 ablated_log_probs = F.log_softmax(ablated_logits, dim=-1)
                 kl = (orig_probs * (orig_log_probs - ablated_log_probs)).sum(dim=-1)
                 stats[(layer, matrix, component)].update(kl.flatten().cpu().numpy())
+
+    if batches_done < n_to_run:
+        logger.warning(
+            f"Loader exhausted after {batches_done}/{n_to_run} batches (dataset too small?)"
+        )
 
     pct = round(quantile * 100)
     quantile_col = f"kl_q{pct}"

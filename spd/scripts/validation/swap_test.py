@@ -271,12 +271,15 @@ def _run_pass(
     fieldnames = (["batch_idx"] if include_batch_idx else []) + _CORE_FIELDS
     first_shape: tuple[int, ...] | None = None
     mask_infos: dict[str, ComponentsMaskInfo] | None = None
+    batches_done = 0
 
     with out_path.open("w", newline="") as f, torch.no_grad():
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
-        for batch_idx in tqdm(range(n_batches), desc=out_path.name):
-            batch = next(iterator)
+        for batch_idx, batch in zip(
+            tqdm(range(n_batches), desc=out_path.name), iterator, strict=False
+        ):
+            batches_done = batch_idx + 1
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             shape = tuple(batch.shape)
             if first_shape is None:
@@ -306,6 +309,10 @@ def _run_pass(
                 prompt_offset=batch_idx * first_shape[0],
                 batch_idx=batch_idx if include_batch_idx else None,
             )
+    if batches_done < n_batches:
+        logger.warning(
+            f"Loader exhausted after {batches_done}/{n_batches} batches (dataset too small?)"
+        )
 
 
 def _spec_slug(spec: SwapSpec) -> str:
@@ -321,6 +328,7 @@ def swap_test(
     nontarget: bool = False,
     n_batches: int = 1,
     prompts: str | None = None,
+    split: str | None = None,
     batch_size: int | None = None,
     output: str | None = None,
 ) -> Path:
@@ -377,7 +385,10 @@ def swap_test(
     logger.info(f"Target probs tracked: A={target_a!r}={target_a_id}, B={target_b!r}={target_b_id}")
 
     task_config = resolve_task_config(
-        config, use_nontarget=nontarget, prompts_override=None if nontarget else prompts
+        config,
+        use_nontarget=nontarget,
+        prompts_override=None if nontarget else prompts,
+        split_override=split,
     )
     if not nontarget:
         assert is_prompt_task(task_config), (

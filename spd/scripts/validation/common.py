@@ -31,12 +31,16 @@ def load_spd_run(path: ModelPath) -> tuple[ComponentModel, Config, Path]:
 
 
 def resolve_task_config(
-    config: Config, use_nontarget: bool, prompts_override: str | None = None
+    config: Config,
+    use_nontarget: bool,
+    prompts_override: str | None = None,
+    split_override: str | None = None,
 ) -> LMTaskConfig:
     """Return the target or nontarget LM task config, erroring if nontarget is missing.
 
-    When `prompts_override` is set, the returned config's `prompts_file` is replaced with that
-    path (via `model_copy`). Only valid if the resolved task is already prompts-based.
+    When `prompts_override` is set, the returned config's `prompts_file` is replaced (prompts-based
+    tasks only). When `split_override` is set, the returned config's `eval_data_split` is replaced
+    (dataset-based tasks only — irrelevant if a prompts file is in use).
     """
     if use_nontarget:
         assert config.nontarget_task_config is not None, (
@@ -55,6 +59,12 @@ def resolve_task_config(
             "--prompts was specified but the resolved task config is not prompts-based"
         )
         task_config = task_config.model_copy(update={"prompts_file": prompts_override})
+
+    if split_override is not None:
+        assert task_config.prompts_file is None, (
+            "--split was specified but the resolved task config is prompts-based"
+        )
+        task_config = task_config.model_copy(update={"eval_data_split": split_override})
     return task_config
 
 
@@ -107,6 +117,12 @@ def build_lm_loader(
 def iterate_input_ids(
     loader: DataLoader[Any] | StaticBatchLoader, device: torch.device
 ) -> Iterator[Tensor]:
+    """Yield `input_ids` batches from a single epoch — no cycling.
+
+    Non-streaming HF DataLoaders exhaust after one epoch; callers should stop requesting batches
+    when the iterator is done rather than wrapping around (which would bias running statistics
+    toward early-epoch data).
+    """
     for batch in loader:
         assert isinstance(batch, dict) and "input_ids" in batch, (
             f"Expected dict batch with 'input_ids', got {type(batch)}"

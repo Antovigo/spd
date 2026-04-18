@@ -66,6 +66,7 @@ def find_alive_components(
     n_batches: int = 1,
     nontarget: bool = False,
     prompts: str | None = None,
+    split: str | None = None,
     batch_size: int | None = None,
     output: str | None = None,
 ) -> Path:
@@ -75,7 +76,9 @@ def find_alive_components(
     spd_model, config, run_dir = load_spd_run(model_path)
     spd_model = spd_model.to(device)
 
-    task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
+    task_config = resolve_task_config(
+        config, use_nontarget=nontarget, prompts_override=prompts, split_override=split
+    )
     loader = build_lm_loader(task_config, config, batch_size_override=batch_size)
     single_batch = is_prompt_task(task_config)
 
@@ -86,9 +89,10 @@ def find_alive_components(
     n_to_run = 1 if single_batch else n_batches
     iterator = iterate_input_ids(loader, device)
 
+    batches_done = 0
     with torch.no_grad():
-        for _ in tqdm(range(n_to_run), desc="batches"):
-            batch = next(iterator)
+        for batch_idx, batch in zip(tqdm(range(n_to_run), desc="batches"), iterator, strict=False):
+            batches_done = batch_idx + 1
             output_with_cache = spd_model(batch, cache_type="input")
             ci_outputs = spd_model.calc_causal_importances(
                 pre_weight_acts=output_with_cache.cache,
@@ -103,6 +107,11 @@ def find_alive_components(
                     activations=component_acts[module_name],
                     ci_thr=ci_thr,
                 )
+
+    if batches_done < n_to_run:
+        logger.warning(
+            f"Loader exhausted after {batches_done}/{n_to_run} batches (dataset too small?)"
+        )
 
     rows: list[dict[str, object]] = []
     for module_name, s in stats.items():

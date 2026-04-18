@@ -127,8 +127,9 @@ RUN_DIR_CSS_1=~/spd_out/spd/s-705a9887 # CSS seed 1
 MODEL_PATH_CSS_1=$(ls -t "$RUN_DIR_CSS_1"/model_*.pth | head -n 1)
 
 # --- 8. Alive components on the CSS target dataset (both seeds) --------------
-uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS" --n-batches=20
-uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_1" --n-batches=20
+# `--split=train` — the target's `eval_data_split` (`validation`) is ~1k rows;
+# use the train split for a bigger sample.
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS" --split=train --n-batches=200
 
 # --- 9. Ablation summaries on target + nontarget (streaming) -----------------
 # `--summary-only` runs the same ablation loop as effect_of_ablation but keeps
@@ -142,9 +143,20 @@ uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_1
 # Target (CSS):
 uv run python -m spd.scripts.validation.effect_of_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
-    --summary-only --n-batches=20 --quantile=0.99
+    --split=train --summary-only --n-batches=20 --quantile=0.99
 
 # Nontarget (general distribution):
 uv run python -m spd.scripts.validation.effect_of_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
     --nontarget --summary-only --n-batches=20 --quantile=0.99
+
+# --- 10. Compare components across the two CSS seeds -------------------------
+# Max-cosine match alive components of seed 0 to seed 1, then to a random-init
+# control with pool size matched per-matrix to seed 1's alive counts.
+
+uv run python -m spd.scripts.validation.compare_components \
+    "$MODEL_PATH_CSS" "$MODEL_PATH_CSS_1"
+
+uv run python -m spd.scripts.validation.compare_components \
+    "$MODEL_PATH_CSS" "$MODEL_PATH_CSS_1" \
+    --random-b --n-random-samples=10
