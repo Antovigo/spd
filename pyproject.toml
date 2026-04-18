@@ -37,6 +37,7 @@ dependencies = [
     "zstandard", # For streaming datasets
     "kaleido==0.2.1",
     "numba>=0.64.0",
+    "pytdigest>=0.1.4",
 ]
 
 [dependency-groups]

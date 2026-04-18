@@ -7,6 +7,10 @@
 
 srun --time=2:00:00 --pty bash
 
+################
+# Prompt-based #
+################
+
 RUN_DIR=~/spd_out/spd/s-0c454b30 # 4L
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
@@ -14,6 +18,9 @@ RUN_DIR=~/spd_out/spd/s-23733db9 # 4L_naive
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
 RUN_DIR=~/spd_out/spd/s-74b94cad # 12L
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+
+RUN_DIR=~/spd_out/spd/s-bd04bd99 # 12L naive
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
 cd ~/SPD/spd
@@ -57,7 +64,7 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
 # Multiple swaps are applied simultaneously in a single forward pass.
 
 SWAPS=(9:attn.v_proj:52/35)
-# SWAPS=(9:attn.v_proj:52/35 9:mlp.down_proj:47/48)
+SWAPS=(9:attn.v_proj:52/35 9:mlp.down_proj:47/48)
 
 # Target data (one batch of prompts):
 uv run python -m spd.scripts.validation.swap_test \
@@ -75,13 +82,19 @@ uv run python -m spd.scripts.validation.swap_test \
     --target-a=" np" --target-b=" pd" \
     --nontarget --n-batches=20
 
+####################
+# Seed comparisons #
+# ##################
+
 # --- 7. Compare matched components across two seeds --------------------------
 # Hungarian-match alive components between two decompositions of the same target model
 # trained with different seeds (or hyperparams). Run `find_alive_components` on each
 # model first so that `<run_dir>/alive_components.tsv` exists on both sides.
 
-RUN_DIR_B=~/spd_out/spd/s-a77c1728 # 12L seed 1
+RUN_DIR=~/spd_out/spd/s-74b94cad # 12L seed 0
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
+RUN_DIR_B=~/spd_out/spd/s-a77c1728 # 12L seed 1
 MODEL_PATH_B=$(ls -t "$RUN_DIR_B"/model_*.pth | head -n 1)
 
 # Find alive components for model B (model A already has it from step 1).
@@ -89,3 +102,41 @@ uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_B" --
 
 # Compare matched components
 uv run python -m spd.scripts.validation.compare_matched_components "$MODEL_PATH" "$MODEL_PATH_B"
+
+###################
+# CSS decomposition #
+###################
+
+# Goal: find components that have a large effect on CSS but no effect on non-CSS
+# data, so removing them selectively destroys the model's CSS ability.
+# Target data here is a large dataset (not a prompts file), so `find_alive_components`
+# needs `--n-batches` instead of `--prompts`.
+
+RUN_DIR_CSS_0=~/spd_out/spd/s-429ea112 # CSS seed 0 (reference)
+MODEL_PATH_CSS_0=$(ls -t "$RUN_DIR_CSS_0"/model_*.pth | head -n 1)
+
+RUN_DIR_CSS_1=~/spd_out/spd/s-705a9887 # CSS seed 1
+MODEL_PATH_CSS_1=$(ls -t "$RUN_DIR_CSS_1"/model_*.pth | head -n 1)
+
+# --- 8. Alive components on the CSS target dataset (both seeds) --------------
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_0" --n-batches=20
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_1" --n-batches=20
+
+# --- 9. Nontarget ablation summary (streaming; no intermediate file) ---------
+# Runs the same ablation loop as effect_of_ablation but keeps only a per-component
+# t-digest + running sum/max/count and writes a single summary TSV. Use this to
+# shortlist components whose nontarget side-effect is small.
+uv run python -m spd.scripts.validation.effect_of_ablation \
+    "$MODEL_PATH_CSS_0" "$RUN_DIR_CSS_0/alive_components.tsv" \
+    --nontarget --summary-only --n-batches=20 --quantile=0.99
+uv run python -m spd.scripts.validation.effect_of_ablation \
+    "$MODEL_PATH_CSS_1" "$RUN_DIR_CSS_1/alive_components.tsv" \
+    --nontarget --summary-only --n-batches=20 --quantile=0.99
+
+# --- 10. Target ablation on the shortlisted components -----------------------
+# After shortlisting components with low nontarget kl_q99 from step 9, filter
+# alive_components.tsv down to those rows, then run the full effect_of_ablation
+# on CSS target data to see which ablations actually break CSS output.
+# (Shortlisting filter TBD — e.g. awk on the summary TSV.)
+# uv run python -m spd.scripts.validation.effect_of_ablation \
+#     "$MODEL_PATH_CSS_0" "$RUN_DIR_CSS_0/shortlist.tsv" --n-batches=20

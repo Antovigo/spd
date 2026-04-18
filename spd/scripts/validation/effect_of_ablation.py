@@ -1,18 +1,30 @@
 """Measure the per-position KL divergence induced by ablating one component at a time.
 
+By default, writes the full per-(component, prompt, pos) KL + per-(prompt, pos) orig-prediction
+TSVs. With `--summary-only`, streams batches through running-aggregate state per component
+(t-digest for quantile, running sum/max/count) and writes a single summary TSV instead — skipping
+the intermediate full-data file. Summary-only mode does not support prompt exclusion; use the
+two-step `effect_of_ablation + summarize_nontarget` pipeline for the targeted-decomposition flow
+that needs task-A/B-based exclusion.
+
 Usage:
     python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
         [--n-batches=1] [--nontarget] [--prompts=PATH] [--batch-size=N] \
         [--output-kl=PATH] [--output-orig=PATH]
 
-Output files (same schema in both modes):
-- `effect_of_ablation[_nontarget].tsv` — one row per (component, prompt, pos) with columns
-  `layer, matrix, component, prompt, pos, kl`.
-- `orig_predictions[_nontarget].tsv` — one row per (prompt, pos) with columns
-  `prompt, pos, token, token_str, orig_pred, orig_pred_str, orig_prob`.
+    python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
+        --summary-only [--quantile=0.99] [--output-summary=PATH] \
+        [--n-batches=1] [--nontarget] [--prompts=PATH] [--batch-size=N]
 
-The per-(prompt, pos) data lives in a separate file because it would otherwise be duplicated
-across every component's row in the kl file.
+Output files:
+- Full mode:
+  - `effect_of_ablation[_nontarget].tsv` — one row per (component, prompt, pos) with columns
+    `layer, matrix, component, prompt, pos, kl`.
+  - `orig_predictions[_nontarget].tsv` — one row per (prompt, pos) with columns
+    `prompt, pos, token, token_str, orig_pred, orig_pred_str, orig_prob`.
+- Summary-only mode:
+  - `effect_of_ablation[_nontarget]_summary.tsv` — one row per component with columns
+    `layer, matrix, component, n_positions, mean_kl, kl_q{pct}, max_kl`.
 """
 
 import csv
@@ -21,8 +33,10 @@ from pathlib import Path
 from typing import Any
 
 import fire
+import numpy as np
 import torch
 import torch.nn.functional as F
+from pytdigest import TDigest
 from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
@@ -114,17 +128,22 @@ def effect_of_ablation(
     nontarget: bool = False,
     prompts: str | None = None,
     batch_size: int | None = None,
+    summary_only: bool = False,
+    quantile: float = 0.99,
     output_kl: str | None = None,
     output_orig: str | None = None,
-) -> tuple[Path, Path]:
-    """Write per-(component, prompt, pos) KL and per-(prompt, pos) orig-prediction TSVs."""
+    output_summary: str | None = None,
+) -> tuple[Path, Path] | Path:
+    """Write per-(component, prompt, pos) KL TSVs (default) or a per-component summary TSV.
+
+    Returns `(kl_path, orig_path)` in full mode or `summary_path` in summary-only mode.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     spd_model, config, run_dir = load_spd_run(model_path)
     spd_model = spd_model.to(device)
 
     assert config.tokenizer_name is not None, "config.tokenizer_name is required"
-    decode = _make_decoder(AutoTokenizer.from_pretrained(config.tokenizer_name))
 
     task_config = resolve_task_config(config, use_nontarget=nontarget, prompts_override=prompts)
     loader = build_lm_loader(task_config, config, batch_size_override=batch_size)
@@ -140,6 +159,33 @@ def effect_of_ablation(
     # Delta weights are fixed (target_weight - component_weight); compute once.
     weight_deltas = spd_model.calc_weight_deltas()
 
+    if summary_only:
+        assert 0.0 < quantile < 1.0, f"--quantile must be in (0, 1), got {quantile}"
+        summary_default = (
+            "effect_of_ablation_nontarget_summary.tsv"
+            if nontarget
+            else "effect_of_ablation_summary.tsv"
+        )
+        summary_path = (
+            Path(output_summary).expanduser() if output_summary else run_dir / summary_default
+        )
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        total_prompts, seq_len = _run_summary(
+            spd_model=spd_model,
+            iterator=iterator,
+            n_to_run=n_to_run,
+            components=components,
+            weight_deltas=weight_deltas,
+            device=device,
+            summary_path=summary_path,
+            quantile=quantile,
+        )
+        logger.info(
+            f"Saw {total_prompts} prompts of {seq_len} positions each "
+            f"(total: {total_prompts * seq_len})"
+        )
+        return summary_path
+
     kl_default = "effect_of_ablation_nontarget.tsv" if nontarget else "effect_of_ablation.tsv"
     orig_default = "orig_predictions_nontarget.tsv" if nontarget else "orig_predictions.tsv"
     kl_path = Path(output_kl).expanduser() if output_kl else run_dir / kl_default
@@ -147,6 +193,7 @@ def effect_of_ablation(
     for p in (kl_path, orig_path):
         p.parent.mkdir(parents=True, exist_ok=True)
 
+    decode = _make_decoder(AutoTokenizer.from_pretrained(config.tokenizer_name))
     total_prompts, seq_len = _run(
         spd_model=spd_model,
         iterator=iterator,
@@ -264,6 +311,104 @@ def _run(
                                 "kl": kl_cpu[b][t],
                             }
                         )
+    return total_prompts, seq_len
+
+
+class _ComponentStats:
+    """Streaming per-component aggregate: t-digest (for quantile) + running sum/max/count."""
+
+    __slots__ = ("digest", "n", "sum", "max")
+
+    def __init__(self) -> None:
+        self.digest = TDigest()
+        self.n = 0
+        self.sum = 0.0
+        self.max = 0.0
+
+    def update(self, kls: np.ndarray) -> None:
+        self.digest.update(kls)
+        self.n += kls.size
+        self.sum += float(kls.sum())
+        self.max = max(self.max, float(kls.max()))
+
+
+def _run_summary(
+    *,
+    spd_model: ComponentModel,
+    iterator: Iterator[Tensor],
+    n_to_run: int,
+    components: list[tuple[str, int, int, str]],
+    weight_deltas: dict[str, Tensor],
+    device: torch.device,
+    summary_path: Path,
+    quantile: float,
+) -> tuple[int, int]:
+    """Stream batches through per-component running stats, write one summary TSV at the end.
+
+    Returns (total_prompts, seq_len). Schema matches `summarize_nontarget.py`'s output:
+    `layer, matrix, component, n_positions, mean_kl, kl_q{pct}, max_kl`.
+    """
+    total_prompts = 0
+    seq_len = 0
+    component_masks: dict[str, Tensor] | None = None
+    mask_infos: Any = None
+    first_shape: tuple[int, ...] | None = None
+    stats: dict[tuple[int, str, int], _ComponentStats] = {
+        (layer, matrix, component): _ComponentStats() for _, layer, component, matrix in components
+    }
+
+    with torch.no_grad():
+        for batch_idx in tqdm(range(n_to_run), desc="batches"):
+            batch = next(iterator)
+            assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
+            batch_size, seq_len = batch.shape
+            if component_masks is None:
+                first_shape = (batch_size, seq_len)
+                component_masks = _build_baseline_masks(spd_model.module_to_c, first_shape, device)
+                delta_masks = _build_full_delta_masks(weight_deltas, first_shape, device)
+                mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=delta_masks)
+            assert (batch_size, seq_len) == first_shape, (
+                f"Batch shape changed mid-pass: got {(batch_size, seq_len)}, expected {first_shape}"
+            )
+            total_prompts += batch_size
+
+            orig_logits = spd_model(batch)
+            assert isinstance(orig_logits, Tensor)
+            orig_log_probs = F.log_softmax(orig_logits, dim=-1)
+            orig_probs = orig_log_probs.exp()
+
+            for module_name, layer, component, matrix in tqdm(
+                components, desc=f"components (batch {batch_idx})", leave=False
+            ):
+                mask_tensor = component_masks[module_name]
+                mask_tensor[..., component] = 0.0
+                ablated_logits = spd_model(batch, mask_infos=mask_infos)
+                mask_tensor[..., component] = 1.0
+                assert isinstance(ablated_logits, Tensor)
+                ablated_log_probs = F.log_softmax(ablated_logits, dim=-1)
+                kl = (orig_probs * (orig_log_probs - ablated_log_probs)).sum(dim=-1)
+                stats[(layer, matrix, component)].update(kl.flatten().cpu().numpy())
+
+    pct = round(quantile * 100)
+    quantile_col = f"kl_q{pct}"
+    fieldnames = ["layer", "matrix", "component", "n_positions", "mean_kl", quantile_col, "max_kl"]
+    with summary_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for (layer, matrix, component), s in sorted(stats.items()):
+            assert s.n > 0, f"Component {(layer, matrix, component)} saw no positions"
+            writer.writerow(
+                {
+                    "layer": layer,
+                    "matrix": matrix,
+                    "component": component,
+                    "n_positions": s.n,
+                    "mean_kl": s.sum / s.n,
+                    quantile_col: float(s.digest.inverse_cdf(quantile)),  # pyright: ignore[reportArgumentType]
+                    "max_kl": s.max,
+                }
+            )
+    logger.info(f"Summarised {len(stats)} components (quantile={quantile})")
     return total_prompts, seq_len
 
 

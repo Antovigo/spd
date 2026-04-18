@@ -100,6 +100,17 @@ The two default paths are overridable with `--output-kl=PATH` and `--output-orig
 
 `ablated_pred` / `ablated_prob` are not written — downstream ranking (`find_swap_candidates`) only uses the original model's top-1 prediction (to assert correctness at the task position) and the raw KL; the ablated model's argmax carries no extra signal beyond the KL distribution itself.
 
+**Summary-only mode (`--summary-only`)**
+
+When the full per-(component, prompt, pos) KL file would be too large to keep around (e.g. ablating hundreds of alive components on a large nontarget dataset), pass `--summary-only`. The script runs the exact same ablation loop but does not write `effect_of_ablation*.tsv` or `orig_predictions*.tsv`; instead it maintains one streaming aggregate per component:
+- a t-digest (from `pytdigest`) for the quantile,
+- a running sum and count for the mean,
+- a running max.
+
+At the end it writes a single summary TSV with columns `layer, matrix, component, n_positions, mean_kl, kl_q{pct}, max_kl` — the same schema `summarize_nontarget.py` produces — defaulting to `effect_of_ablation_summary.tsv` (or `effect_of_ablation_nontarget_summary.tsv` with `--nontarget`) and overridable via `--output-summary`. The quantile percent is controlled by `--quantile` (default 0.99).
+
+This mode intentionally **skips** the task-A/B prompt-exclusion logic that `summarize_nontarget.py` applies; it's meant for workflows (e.g. domain-decomposition runs like CSS) where there is no single task prompt to exclude. For the targeted-decomposition flow that needs exclusion + monitoring alerts, keep the two-step `effect_of_ablation` → `summarize_nontarget` pipeline.
+
 **summarize_nontarget.py**
 args:
 - the path to a decomposed model
