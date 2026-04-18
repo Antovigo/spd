@@ -140,15 +140,25 @@ uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_CSS_1
 # Column 4 of nontarget_activity.tsv is `firing_density`; tune the threshold.
 uv run python -m spd.scripts.validation.nontarget_activity "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv"
 
-awk -F'\t' 'NR==1 || ($4+0) < 0.01' \
-    "$RUN_DIR_CSS/nontarget_activity.tsv" > "$RUN_DIR_CSS/shortlist.tsv"
+awk -F'\t' 'NR==1 || ($4+0) < 5e-5' "$RUN_DIR_CSS/nontarget_activity.tsv" > "$RUN_DIR_CSS/shortlist.tsv"
 
-# --- 10. Target ablation summary on the shortlisted components ---------------
-# Measure how ablating each shortlisted component affects CSS output. Rank by
-# `kl_q99` to find components that break CSS without large off-target cost.
+# --- 10. Ablation summaries on the shortlisted components -------------------
+# Target: measure how ablating each shortlisted component affects CSS output.
+# Nontarget: sanity-check the harvest-based shortlist against actual ablation
+# KL on general text (firing density is only a proxy). Components to remove
+# are those with high target `kl_q99` and low nontarget `kl_q99`.
+
+# Target (CSS):
 uv run python -m spd.scripts.validation.effect_of_ablation \
-    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/shortlist.tsv" \
-    --split=train --summary-only --n-batches=20 --quantile=0.99
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
+    --split=train --summary-only --n-batches=10 --quantile=0.99
+
+# Nontarget (general distribution):
+uv run python -m spd.scripts.validation.effect_of_ablation \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
+    --nontarget --summary-only --n-batches=20 --quantile=0.99 --batch-size=32
+
+# original batch size was 64 but somehow it OOMs on nontarget
 
 # --- 11. Compare components across the two CSS seeds -------------------------
 # Max-cosine match alive components of seed 0 to seed 1, then to a random-init
