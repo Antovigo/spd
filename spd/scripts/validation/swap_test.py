@@ -1,15 +1,15 @@
-"""Swap two components' U vectors (rescaled by their mean activations) and test the result.
+"""Swap pairs of components' U vectors (rescaled by their mean activations) and test the result.
 
-Builds a modified decomposed model where the output directions of a pair of components in the same
-matrix are swapped. The swap is rescaled by the ratio of the components' mean inner activations
-(V^T x) so the post-swap output magnitudes match what the other component used to produce. The
-swapped model is then evaluated on either the LM target prompts (default) or, with `--nontarget`,
-`--n-batches` batches of the nontarget dataset; for each (prompt, pos) the script stores the
-orig/swapped predictions and the probability of both task target tokens.
+Builds a modified decomposed model where, for each requested swap, the output directions of a pair
+of components in the same matrix are swapped. Each swap is rescaled by the ratio of its components'
+mean inner activations (V^T x) so the post-swap output magnitudes match what the other component
+used to produce. The swapped model is then evaluated on either the LM target prompts (default) or,
+with `--nontarget`, `--n-batches` batches of the nontarget dataset; for each (prompt, pos) the
+script stores the orig/swapped predictions and the probability of both task target tokens.
 
 Usage:
     python -m spd.scripts.validation.swap_test <model_path> <alive_components_tsv> \
-        --layer=1 --matrix=attn.q_proj --a-component=3 --b-component=7 \
+        9:attn.v_proj:52/35 [9:mlp.down_proj:47/48 ...] \
         --target-a=" np" --target-b=" pd" \
         [--nontarget] [--n-batches=1] [--prompts=PATH] [--batch-size=N] [--output=PATH]
 """
@@ -50,31 +50,33 @@ class SwapSpec:
     b_component: int
     a_mean: float
     b_mean: float
-    target_a_id: int
-    target_b_id: int
+
+
+def _parse_swap(raw: str) -> tuple[int, str, int, int]:
+    """Parse a swap of the form '<layer>:<matrix>:<a>/<b>'."""
+    parts = raw.split(":")
+    assert len(parts) == 3, f"Swap {raw!r} must be '<layer>:<matrix>:<a>/<b>'"
+    layer_s, matrix, pair = parts
+    a_s, sep, b_s = pair.partition("/")
+    assert sep == "/" and a_s and b_s, f"Swap {raw!r} must have the form '<layer>:<matrix>:<a>/<b>'"
+    return int(layer_s), matrix, int(a_s), int(b_s)
 
 
 def _read_mean_activations(
-    alive_components_path: Path, layer: int, matrix: str, components: tuple[int, int]
-) -> tuple[float, float]:
-    """Look up mean_activation for both components in one TSV scan."""
-    wanted = set(components)
-    found: dict[int, float] = {}
+    alive_components_path: Path, needed: set[tuple[int, str, int]]
+) -> dict[tuple[int, str, int], float]:
+    """Look up mean_activation for every (layer, matrix, component) triple in one TSV scan."""
+    found: dict[tuple[int, str, int], float] = {}
     with alive_components_path.open() as f:
         for record in csv.DictReader(f, delimiter="\t"):
-            if int(record["layer"]) != layer or record["matrix"] != matrix:
-                continue
-            c = int(record["component"])
-            if c in wanted:
-                found[c] = float(record["mean_activation"])
-                if len(found) == len(wanted):
+            key = (int(record["layer"]), record["matrix"], int(record["component"]))
+            if key in needed:
+                found[key] = float(record["mean_activation"])
+                if len(found) == len(needed):
                     break
-    missing = wanted - found.keys()
-    assert not missing, (
-        f"No row for (layer={layer}, matrix={matrix!r}, component in {sorted(missing)}) in "
-        f"{alive_components_path}"
-    )
-    return found[components[0]], found[components[1]]
+    missing = needed - found.keys()
+    assert not missing, f"Missing rows for {sorted(missing)} in {alive_components_path}"
+    return found
 
 
 def _single_token_id(tokenizer: PreTrainedTokenizer, text: str, label: str) -> int:
@@ -85,25 +87,47 @@ def _single_token_id(tokenizer: PreTrainedTokenizer, text: str, label: str) -> i
 
 
 @contextmanager
-def _swapped_u_vectors(spd_model: ComponentModel, spec: SwapSpec) -> Generator[None]:
-    """Swap U[A] and U[B] on the given module, rescaled by the activation ratio.
+def _swapped_u_vectors(spd_model: ComponentModel, specs: list[SwapSpec]) -> Generator[None]:
+    """Swap U[A] and U[B] for each spec, rescaled by the activation ratio.
 
-    Saves a clone of the two rows on entry and restores them on exit, so the model's state is
-    unchanged once the `with` block is done.
+    All original U rows are cloned before any write, so overlapping specs are rejected rather than
+    silently chained through half-modified state. Restores the original rows on exit so the model's
+    state is unchanged once the `with` block is done.
     """
-    U = spd_model.components[spec.module_name].U
-    assert spec.a_component < U.shape[0] and spec.b_component < U.shape[0], (
-        f"Component indices out of range for {spec.module_name} (C={U.shape[0]})"
-    )
-    u_a_old = U.data[spec.a_component].clone()
-    u_b_old = U.data[spec.b_component].clone()
-    U.data[spec.a_component] = (spec.b_mean / spec.a_mean) * u_b_old
-    U.data[spec.b_component] = (spec.a_mean / spec.b_mean) * u_a_old
+    touched: set[tuple[str, int]] = set()
+    for spec in specs:
+        for c in (spec.a_component, spec.b_component):
+            key = (spec.module_name, c)
+            assert key not in touched, (
+                f"Overlapping swap on {spec.module_name}[{c}] — each (module, component) may "
+                f"appear in at most one swap"
+            )
+            touched.add(key)
+
+    saved: list[tuple[Tensor, SwapSpec, Tensor, Tensor]] = []
+    for spec in specs:
+        u_param = spd_model.components[spec.module_name].U
+        assert spec.a_component < u_param.shape[0] and spec.b_component < u_param.shape[0], (
+            f"Component indices out of range for {spec.module_name} (C={u_param.shape[0]})"
+        )
+        saved.append(
+            (
+                u_param,
+                spec,
+                u_param.data[spec.a_component].clone(),
+                u_param.data[spec.b_component].clone(),
+            )
+        )
+
+    for u_param, spec, u_a_old, u_b_old in saved:
+        u_param.data[spec.a_component] = (spec.b_mean / spec.a_mean) * u_b_old
+        u_param.data[spec.b_component] = (spec.a_mean / spec.b_mean) * u_a_old
     try:
         yield
     finally:
-        U.data[spec.a_component] = u_a_old
-        U.data[spec.b_component] = u_b_old
+        for u_param, spec, u_a_old, u_b_old in saved:
+            u_param.data[spec.a_component] = u_a_old
+            u_param.data[spec.b_component] = u_b_old
 
 
 def _build_full_mask_infos(
@@ -170,17 +194,18 @@ def _write_rows(
     batch: Tensor,
     orig_logits: Tensor,
     swapped_logits: Tensor,
-    spec: SwapSpec,
+    target_a_id: int,
+    target_b_id: int,
     decode: Callable[[int], str],
     prompt_offset: int,
     batch_idx: int | None,
 ) -> None:
     """Compute per-(prompt, pos) rows from the two logit tensors and write them out."""
     orig_log_probs, orig_pred, orig_prob, p_a_orig, p_b_orig = _probs_from_logits(
-        orig_logits, spec.target_a_id, spec.target_b_id
+        orig_logits, target_a_id, target_b_id
     )
     swapped_log_probs, swapped_pred, swapped_prob, p_a_swapped, p_b_swapped = _probs_from_logits(
-        swapped_logits, spec.target_a_id, spec.target_b_id
+        swapped_logits, target_a_id, target_b_id
     )
     kl = (orig_log_probs.exp() * (orig_log_probs - swapped_log_probs)).sum(dim=-1)
 
@@ -230,7 +255,9 @@ def _run_pass(
     iterator: Iterator[Tensor],
     n_batches: int,
     weight_deltas: dict[str, Tensor],
-    spec: SwapSpec,
+    specs: list[SwapSpec],
+    target_a_id: int,
+    target_b_id: int,
     decode: Callable[[int], str],
     out_path: Path,
     device: torch.device,
@@ -264,7 +291,7 @@ def _run_pass(
             orig_logits = spd_model(batch)
             assert isinstance(orig_logits, Tensor)
 
-            with _swapped_u_vectors(spd_model, spec):
+            with _swapped_u_vectors(spd_model, specs):
                 swapped_logits = spd_model(batch, mask_infos=mask_infos)
                 assert isinstance(swapped_logits, Tensor)
 
@@ -273,20 +300,22 @@ def _run_pass(
                 batch=batch,
                 orig_logits=orig_logits,
                 swapped_logits=swapped_logits,
-                spec=spec,
+                target_a_id=target_a_id,
+                target_b_id=target_b_id,
                 decode=decode,
                 prompt_offset=batch_idx * first_shape[0],
                 batch_idx=batch_idx if include_batch_idx else None,
             )
 
 
+def _spec_slug(spec: SwapSpec) -> str:
+    return f"{spec.module_name.replace('.', '_')}_c{spec.a_component}_c{spec.b_component}"
+
+
 def swap_test(
     model_path: ModelPath,
     alive_components_path: str,
-    layer: int,
-    matrix: str,
-    a_component: int,
-    b_component: int,
+    *swaps: str,
     target_a: str,
     target_b: str,
     nontarget: bool = False,
@@ -296,25 +325,42 @@ def swap_test(
     output: str | None = None,
 ) -> Path:
     """Run the swap test on target prompts, or on nontarget batches if `--nontarget` is set."""
-    assert a_component != b_component, "a_component and b_component must be different"
+    assert len(swaps) > 0, "At least one swap argument is required"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     spd_model, config, run_dir = load_spd_run(model_path)
     spd_model = spd_model.to(device)
 
     module_lookup = build_module_lookup(spd_model.target_module_paths)
-    module_name = module_lookup.get((layer, matrix))
-    assert module_name is not None, (
-        f"No decomposed module matches (layer={layer}, matrix={matrix!r}). "
-        f"Available: {sorted(module_lookup.keys())}"
-    )
 
-    a_mean, b_mean = _read_mean_activations(
-        Path(alive_components_path).expanduser(), layer, matrix, (a_component, b_component)
-    )
-    assert a_mean != 0 and b_mean != 0, (
-        f"Mean activations must be non-zero; got a_mean={a_mean}, b_mean={b_mean}"
-    )
+    parsed = [_parse_swap(s) for s in swaps]
+    for layer, matrix, a, b in parsed:
+        assert a != b, f"Swap {layer}:{matrix}:{a}/{b} has identical components"
+        assert (layer, matrix) in module_lookup, (
+            f"No decomposed module matches (layer={layer}, matrix={matrix!r}). "
+            f"Available: {sorted(module_lookup.keys())}"
+        )
+
+    needed = {(layer, matrix, c) for layer, matrix, a, b in parsed for c in (a, b)}
+    means = _read_mean_activations(Path(alive_components_path).expanduser(), needed)
+
+    specs: list[SwapSpec] = []
+    for layer, matrix, a, b in parsed:
+        a_mean = means[(layer, matrix, a)]
+        b_mean = means[(layer, matrix, b)]
+        assert a_mean != 0 and b_mean != 0, (
+            f"Mean activations must be non-zero for {layer}:{matrix}:{a}/{b}; "
+            f"got a_mean={a_mean}, b_mean={b_mean}"
+        )
+        specs.append(
+            SwapSpec(
+                module_name=module_lookup[(layer, matrix)],
+                a_component=a,
+                b_component=b,
+                a_mean=a_mean,
+                b_mean=b_mean,
+            )
+        )
 
     assert config.tokenizer_name is not None, "config.tokenizer_name is required"
     tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name)
@@ -322,19 +368,13 @@ def swap_test(
     target_b_id = _single_token_id(tokenizer, target_b, "target_b")
     decode = _make_decoder(tokenizer)
 
-    spec = SwapSpec(
-        module_name=module_name,
-        a_component=a_component,
-        b_component=b_component,
-        a_mean=a_mean,
-        b_mean=b_mean,
-        target_a_id=target_a_id,
-        target_b_id=target_b_id,
-    )
-    logger.info(
-        f"Swap on {module_name}: A={a_component} (mean={a_mean:.4g}, target={target_a!r}={target_a_id}); "
-        f"B={b_component} (mean={b_mean:.4g}, target={target_b!r}={target_b_id})"
-    )
+    for spec in specs:
+        logger.info(
+            f"Swap on {spec.module_name}: "
+            f"A={spec.a_component} (mean={spec.a_mean:.4g}); "
+            f"B={spec.b_component} (mean={spec.b_mean:.4g})"
+        )
+    logger.info(f"Target probs tracked: A={target_a!r}={target_a_id}, B={target_b!r}={target_b_id}")
 
     task_config = resolve_task_config(
         config, use_nontarget=nontarget, prompts_override=None if nontarget else prompts
@@ -348,7 +388,7 @@ def swap_test(
     )
     n_to_run = 1 if not nontarget else n_batches
 
-    slug = f"{module_name.replace('.', '_')}_c{a_component}_c{b_component}"
+    slug = "__".join(_spec_slug(s) for s in specs)
     default_name = f"swap_test_{slug}_nontarget.tsv" if nontarget else f"swap_test_{slug}.tsv"
     out_path = Path(output).expanduser() if output else run_dir / default_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -360,7 +400,9 @@ def swap_test(
         iterator=iterator,
         n_batches=n_to_run,
         weight_deltas=weight_deltas,
-        spec=spec,
+        specs=specs,
+        target_a_id=target_a_id,
+        target_b_id=target_b_id,
         decode=decode,
         out_path=out_path,
         device=device,

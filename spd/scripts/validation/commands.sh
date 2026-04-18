@@ -52,18 +52,18 @@ uv run python -m spd.scripts.validation.find_swap_candidates \
     --prompts="$PROMPTS"
 
 # --- 6. Swap test ------------------------------------------------------------
-# Pick a pair from $RUN_DIR/swap_candidates.tsv and edit the four fields below.
+# Pick one or more swaps from $RUN_DIR/swap_candidates.tsv and list them below.
+# Each swap is one string of the form <layer>:<matrix>:<a_comp>/<b_comp>.
+# Multiple swaps are applied simultaneously in a single forward pass.
 
-LAYER=9
-MATRIX=mlp.down_proj
-A_COMP=47
-B_COMP=48
+SWAPS=(9:attn.v_proj:52/35)
+# SWAPS=(9:attn.v_proj:52/35 9:mlp.down_proj:47/48)
 
 # Target data (one batch of prompts):
 uv run python -m spd.scripts.validation.swap_test \
     "$MODEL_PATH" \
     "$RUN_DIR/alive_components.tsv" \
-    --layer=$LAYER --matrix=$MATRIX --a-component=$A_COMP --b-component=$B_COMP \
+    "${SWAPS[@]}" \
     --target-a=" np" --target-b=" pd" \
     --prompts="$PROMPTS"
 
@@ -71,7 +71,7 @@ uv run python -m spd.scripts.validation.swap_test \
 uv run python -m spd.scripts.validation.swap_test \
     "$MODEL_PATH" \
     "$RUN_DIR/alive_components.tsv" \
-    --layer=$LAYER --matrix=$MATRIX --a-component=$A_COMP --b-component=$B_COMP \
+    "${SWAPS[@]}" \
     --target-a=" np" --target-b=" pd" \
     --nontarget --n-batches=20
 
