@@ -147,16 +147,19 @@ awk -F'\t' 'NR==1 || ($4+0) < 5e-5' "$RUN_DIR_CSS/nontarget_activity.tsv" > "$RU
 # Nontarget: sanity-check the harvest-based shortlist against actual ablation
 # KL on general text (firing density is only a proxy). Components to remove
 # are those with high target `kl_q99` and low nontarget `kl_q99`.
+# `--checkpoint-every=N` persists streaming state every N batches to
+# `<summary>.ckpt` next to the summary TSV; rerunning the same command resumes
+# from that checkpoint. The checkpoint is removed once the final TSV is written.
 
 # Target (CSS):
 uv run python -m spd.scripts.validation.effect_of_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
-    --split=train --summary-only --n-batches=10 --quantile=0.99
+    --split=train --summary-only --n-batches=10 --quantile=0.99 --checkpoint-every=1
 
 # Nontarget (general distribution):
 uv run python -m spd.scripts.validation.effect_of_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
-    --nontarget --summary-only --n-batches=20 --quantile=0.99 --batch-size=32
+    --nontarget --summary-only --n-batches=20 --quantile=0.99 --batch-size=32 --checkpoint-every=1
 
 # original batch size was 64 but somehow it OOMs on nontarget
 

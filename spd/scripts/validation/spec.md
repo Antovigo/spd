@@ -111,6 +111,8 @@ At the end it writes a single summary TSV with columns `layer, matrix, component
 
 This mode intentionally **skips** the task-A/B prompt-exclusion logic that `summarize_nontarget.py` applies; it's meant for workflows (e.g. domain-decomposition runs like CSS) where there is no single task prompt to exclude. For the targeted-decomposition flow that needs exclusion + monitoring alerts, keep the two-step `effect_of_ablation` → `summarize_nontarget` pipeline.
 
+Summary-only mode supports checkpoint/resume via `--checkpoint-every=N` (default `0`, disabled). Every N processed batches the streaming state (t-digest centroids + running totals + components list + `batches_done`) is pickled atomically to `<summary>.ckpt` next to the summary TSV. On startup, if that file exists, its state is loaded and the data loader is fast-forwarded past the batches it already covers — so the same command can be rerun after an interruption. The checkpoint file is deleted after the final summary TSV is written. Resuming assumes a deterministic loader (same `--split`/`--batch-size`/etc.); the checkpoint also asserts the components list matches, so swapping the shortlist between runs is rejected. `--checkpoint-every` is only valid with `--summary-only`.
+
 **summarize_nontarget.py**
 args:
 - the path to a decomposed model

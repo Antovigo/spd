@@ -7,6 +7,12 @@ the intermediate full-data file. Summary-only mode does not support prompt exclu
 two-step `effect_of_ablation + summarize_nontarget` pipeline for the targeted-decomposition flow
 that needs task-A/B-based exclusion.
 
+Summary-only mode also supports checkpoint/resume via `--checkpoint-every=N`: after every N
+processed batches the streaming state (t-digest centroids + running totals) is saved atomically
+next to the summary TSV as `<summary>.ckpt`. If that file exists on startup it is loaded and the
+data loader is fast-forwarded past the already-processed batches (requires a deterministic
+loader). The checkpoint is deleted once the final summary TSV is written.
+
 Usage:
     python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
         [--n-batches=1] [--nontarget] [--prompts=PATH] [--batch-size=N] \
@@ -14,6 +20,7 @@ Usage:
 
     python -m spd.scripts.validation.effect_of_ablation <model_path> <components_tsv> \
         --summary-only [--quantile=0.99] [--output-summary=PATH] \
+        [--checkpoint-every=N] \
         [--n-batches=1] [--nontarget] [--prompts=PATH] [--batch-size=N]
 
 Output files:
@@ -28,7 +35,9 @@ Output files:
 """
 
 import csv
+import pickle
 from collections.abc import Callable, Iterator
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +140,7 @@ def effect_of_ablation(
     batch_size: int | None = None,
     summary_only: bool = False,
     quantile: float = 0.99,
+    checkpoint_every: int = 0,
     output_kl: str | None = None,
     output_orig: str | None = None,
     output_summary: str | None = None,
@@ -164,6 +174,7 @@ def effect_of_ablation(
 
     if summary_only:
         assert 0.0 < quantile < 1.0, f"--quantile must be in (0, 1), got {quantile}"
+        assert checkpoint_every >= 0, f"--checkpoint-every must be >= 0, got {checkpoint_every}"
         summary_default = (
             "effect_of_ablation_nontarget_summary.tsv"
             if nontarget
@@ -182,12 +193,15 @@ def effect_of_ablation(
             device=device,
             summary_path=summary_path,
             quantile=quantile,
+            checkpoint_every=checkpoint_every,
         )
         logger.info(
             f"Saw {total_prompts} prompts of {seq_len} positions each "
             f"(total: {total_prompts * seq_len})"
         )
         return summary_path
+
+    assert checkpoint_every == 0, "--checkpoint-every is only supported with --summary-only"
 
     kl_default = "effect_of_ablation_nontarget.tsv" if nontarget else "effect_of_ablation.tsv"
     orig_default = "orig_predictions_nontarget.tsv" if nontarget else "orig_predictions.tsv"
@@ -339,6 +353,64 @@ class _ComponentStats:
         self.sum += float(kls.sum())
         self.max = max(self.max, float(kls.max()))
 
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "centroids": self.digest.get_centroids(),
+            "n": self.n,
+            "sum": self.sum,
+            "max": self.max,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> "_ComponentStats":
+        obj = cls()
+        obj.digest = TDigest.of_centroids(state["centroids"])
+        obj.n = state["n"]
+        obj.sum = state["sum"]
+        obj.max = state["max"]
+        return obj
+
+
+def _checkpoint_path_for(summary_path: Path) -> Path:
+    return summary_path.with_suffix(summary_path.suffix + ".ckpt")
+
+
+def _save_checkpoint(
+    ckpt_path: Path,
+    stats: dict[tuple[int, str, int], _ComponentStats],
+    batches_done: int,
+    total_prompts: int,
+    seq_len: int,
+    component_keys: list[tuple[int, str, int]],
+) -> None:
+    """Atomically persist streaming state so the run can resume after an interruption."""
+    payload = {
+        "version": 1,
+        "batches_done": batches_done,
+        "total_prompts": total_prompts,
+        "seq_len": seq_len,
+        "component_keys": component_keys,
+        "stats": {k: stats[k].to_state() for k in component_keys},
+    }
+    tmp = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(ckpt_path)
+
+
+def _load_checkpoint(
+    ckpt_path: Path, expected_keys: list[tuple[int, str, int]]
+) -> tuple[dict[tuple[int, str, int], _ComponentStats], int, int, int]:
+    with ckpt_path.open("rb") as f:
+        payload = pickle.load(f)
+    assert payload["version"] == 1, f"Unknown checkpoint version {payload['version']}"
+    assert payload["component_keys"] == expected_keys, (
+        f"Checkpoint components don't match current components_tsv "
+        f"({len(payload['component_keys'])} vs {len(expected_keys)} rows)"
+    )
+    stats = {k: _ComponentStats.from_state(s) for k, s in payload["stats"].items()}
+    return stats, payload["batches_done"], payload["total_prompts"], payload["seq_len"]
+
 
 def _run_summary(
     *,
@@ -350,24 +422,48 @@ def _run_summary(
     device: torch.device,
     summary_path: Path,
     quantile: float,
+    checkpoint_every: int,
 ) -> tuple[int, int]:
     """Stream batches through per-component running stats, write one summary TSV at the end.
 
     Returns (total_prompts, seq_len). Schema matches `summarize_nontarget.py`'s output:
     `layer, matrix, component, n_positions, mean_kl, kl_q{pct}, max_kl`.
+
+    When `checkpoint_every > 0`, the streaming state is saved every N processed batches to
+    `<summary>.ckpt` and loaded on startup if present, allowing interrupted runs to resume.
     """
+    component_keys = [(layer, matrix, component) for _, layer, component, matrix in components]
+    stats: dict[tuple[int, str, int], _ComponentStats] = {
+        k: _ComponentStats() for k in component_keys
+    }
+
+    ckpt_path = _checkpoint_path_for(summary_path) if checkpoint_every > 0 else None
+    start_batch = 0
     total_prompts = 0
     seq_len = 0
-    batches_done = 0
+    if ckpt_path is not None and ckpt_path.exists():
+        stats, start_batch, total_prompts, seq_len = _load_checkpoint(ckpt_path, component_keys)
+        assert start_batch <= n_to_run, (
+            f"Checkpoint already covers {start_batch} batches but --n-batches={n_to_run}; "
+            f"increase --n-batches or delete {ckpt_path}"
+        )
+        logger.info(f"Resuming from checkpoint at batch {start_batch}/{n_to_run}")
+
+    batches_done = start_batch
     component_masks: dict[str, Tensor] | None = None
     mask_infos: Any = None
     first_shape: tuple[int, ...] | None = None
-    stats: dict[tuple[int, str, int], _ComponentStats] = {
-        (layer, matrix, component): _ComponentStats() for _, layer, component, matrix in components
-    }
 
     with torch.no_grad():
-        for batch_idx, batch in zip(tqdm(range(n_to_run), desc="batches"), iterator, strict=False):
+        if start_batch > 0:
+            for _ in tqdm(
+                islice(iterator, start_batch), total=start_batch, desc="skipping (resume)"
+            ):
+                pass
+
+        remaining = n_to_run - start_batch
+        for offset, batch in zip(tqdm(range(remaining), desc="batches"), iterator, strict=False):
+            batch_idx = start_batch + offset
             batches_done = batch_idx + 1
             assert batch.ndim == 2, f"Expected (batch, seq), got {tuple(batch.shape)}"
             batch_size, seq_len = batch.shape
@@ -398,6 +494,11 @@ def _run_summary(
                 kl = (orig_probs * (orig_log_probs - ablated_log_probs)).sum(dim=-1)
                 stats[(layer, matrix, component)].update(kl.flatten().cpu().numpy())
 
+            if ckpt_path is not None and batches_done % checkpoint_every == 0:
+                _save_checkpoint(
+                    ckpt_path, stats, batches_done, total_prompts, seq_len, component_keys
+                )
+
     if batches_done < n_to_run:
         logger.warning(
             f"Loader exhausted after {batches_done}/{n_to_run} batches (dataset too small?)"
@@ -422,6 +523,8 @@ def _run_summary(
                     "max_kl": s.max,
                 }
             )
+    if ckpt_path is not None and ckpt_path.exists():
+        ckpt_path.unlink()
     logger.info(f"Summarised {len(stats)} components (quantile={quantile})")
     return total_prompts, seq_len
 

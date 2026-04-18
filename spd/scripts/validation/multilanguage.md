@@ -5,8 +5,7 @@
 After ablating CSS-specific components from a decomposed LM, we want to measure
 the distributional effect on the model's output *per programming language*. The
 hypothesis is that ablation should shift output distributions sharply on CSS
-(and on CSS embedded in other languages, e.g. HTML `<style>` blocks) while
-leaving other languages ~unchanged.
+while leaving other languages ~unchanged.
 
 Concretely, we want to produce per-position KL(orig || ablated) values, each
 tagged with a language label, so the downstream analysis can plot KL
@@ -22,7 +21,7 @@ Primary candidate: **`bigcode/the-stack-smol`** on HuggingFace.
 
 - Ships a deduplicated, permissively-licensed subset of The Stack
 - Organised by language (`data/<lang>/` subdirectories): `css`, `html`,
-  `javascript`, `python`, `c`, `rust`, `markdown`, `yaml`, `json`, ...
+  `javascript`, `python`, `c`, `rust`, `yaml`, `json`, ...
 - Loaded per-language via `load_dataset("bigcode/the-stack-smol",
   data_dir="data/<lang>")` — each row is one file, with fields including
   `content` (string) and `lang` (string).
@@ -35,68 +34,49 @@ Alternatives considered:
 - `bigcode/the-stack-v2` — gated and much larger; unnecessary.
 
 Languages to include (initial pick): `css`, `html`, `javascript`, `python`,
-`c`, `rust`, `markdown`, `json`, `yaml`, plain English text (e.g. a wikitext
-slice) as a non-code baseline.
+`c`, `rust`, `json`, `yaml`, plain English text (e.g. a wikitext slice) as a
+non-code baseline. Skip `markdown` — it commonly embeds many other languages
+in fenced code blocks and would pollute the per-language KL distribution.
 
 ## Labelling strategy
 
-Every token gets a label string. File-level labels come from the dataset's
-`lang` field. Embedded-CSS labels are recovered by regex-splitting `content`
-before tokenising.
+One label per file (the dataset's `lang` field). No per-token labels.
 
-### File-level labels
+### Cleaning HTML
 
-For a file tagged `lang=X`, every token gets label `X`. Simplest case.
+To keep the `html` sample from being contaminated by embedded CSS, strip
+`<style>...</style>` bodies from each HTML file *before* tokenising:
 
-### Embedded CSS in HTML
+- Regex: `<style\b[^>]*>.*?</style>` (case-insensitive, dotall).
+- Remove matches (including the tags themselves), keep the rest.
 
-No dataset labels this — all HTML files are tagged `html` regardless of
-`<style>` content. Workaround:
+No splitting, no per-token labels — the file is tokenised as a single string
+after cleanup and every token gets the label `html`.
 
-1. For each HTML file, find all `<style ...>...</style>` blocks (case-insensitive,
-   non-greedy, multiline). Regex: `<style\b[^>]*>(.*?)</style>`.
-2. Split `content` into an ordered list of `(text_chunk, label)` pairs, where
-   label is `"css"` inside `<style>` bodies and `"html"` outside.
-3. Tokenise each chunk independently, concatenate the token id lists, and
-   build a parallel list of per-token labels the same length as the ids.
+Not handled (out of scope for v1):
 
-This keeps byte-level label accuracy: a token that straddles the `<style>`
-boundary is extremely rare in practice since tags end with `>` which tends to
-terminate BPE merges, but if it happens we assign the label of the first byte
-of the token and accept the small inaccuracy.
+- JS template literals containing CSS — no standard delimiter.
+- HTML inline `style="..."` attributes — short, noisy.
+- CSS pulled in via `<link rel="stylesheet">` — already covered by `lang=css`.
 
-Same trick extends to:
+### Label taxonomy
 
-- JS template literals containing CSS (e.g. `css\`\`\`` tagged templates) —
-  harder because there's no standard delimiter; skip for now.
-- Markdown code fences — `\`\`\`<lang>\n...\n\`\`\`` is well-defined; could
-  produce labels like `markdown/python`, `markdown/css` etc. Useful for
-  another pass, not v1.
-- HTML inline `style="..."` attributes — short, noisy; skip.
-
-### Suggested label taxonomy
-
-Flat strings, no hierarchy:
+Flat strings matching the dataset's `lang` field, plus `text` for the
+non-code baseline:
 
 ```
-css, html, html/css, javascript, python, c, rust, markdown, json, yaml, text
+css, html, javascript, python, c, rust, json, yaml, text
 ```
-
-`html/css` is the "CSS embedded in HTML" label. Plain `html` is HTML outside
-any `<style>` block. We expect ablation to hit `css` and `html/css`, spare
-the rest.
 
 ## Output format
 
-A single JSONL file, one line per tokenised file, suitable for later KL
-analysis:
+A single JSONL file, one line per tokenised file:
 
 ```json
 {
-  "source_lang": "html",
+  "lang": "html",
   "file_id": "the-stack-smol/html/abc123",
-  "token_ids": [1, 523, 77, ...],
-  "token_labels": ["html", "html", "html/css", "html/css", ...]
+  "token_ids": [1, 523, 77, ...]
 }
 ```
 
@@ -117,7 +97,7 @@ def load_multilang_eval(
     seed: int = 0,
 ) -> None:
     """Sample `files_per_lang` files per language from the-stack-smol,
-    label tokens (including CSS-in-HTML), and write JSONL."""
+    strip <style> blocks from HTML, tokenise, and write JSONL."""
 ```
 
 Key steps:
@@ -125,9 +105,8 @@ Key steps:
 1. `load_dataset("bigcode/the-stack-smol", data_dir=f"data/{lang}",
    split="train", streaming=True)` per language, take the first
    `files_per_lang` rows after shuffling with `seed`.
-2. For `html`, run the `<style>` splitter; for everything else, pass through.
-3. Tokenise chunks, build token_ids + token_labels lists.
-4. Write JSONL to `output_path`.
+2. For `html`, apply the `<style>` stripper; for everything else, pass through.
+3. Tokenise and write JSONL.
 
 Kept as a one-shot script (not streamed through SPD's data loader) because
 the dataset is small and the labelling is not worth generalising into the
@@ -142,11 +121,11 @@ A follow-up eval script (e.g. `css_ablation_eval.py`) would:
    with the chosen components masked to 0, delta=1 as in
    `effect_of_ablation.py`).
 3. Compute per-position `KL(orig || ablated)`.
-4. Group by `token_labels[pos]`, emit a TSV of (label, kl) rows.
-5. Plot KL distributions per label.
+4. Group by file-level `lang`, emit a TSV of (lang, kl) rows.
+5. Plot KL distributions per language.
 
-Expected result if the ablation is clean: `css` and `html/css` distributions
-have a heavy right tail; other labels sit near zero.
+Expected result if the ablation is clean: `css` has a heavy right tail;
+other languages sit near zero.
 
 ## Open questions
 
@@ -156,5 +135,3 @@ have a heavy right tail; other labels sit near zero.
   generic one. The loader takes `tokenizer_name` as an arg and asserts it
   matches `config.tokenizer_name`.
 - Licence: the-stack-smol is permissively-licensed; fine for research use.
-- `<style>` extraction misses CSS in `<link rel="stylesheet">` external
-  files (those live in separate CSS files anyway, covered by `lang=css`).
