@@ -154,7 +154,7 @@ awk -F'\t' 'NR==1 || ($4+0) < 5e-5' "$RUN_DIR_CSS/nontarget_activity.tsv" > "$RU
 # Target (CSS):
 uv run python -m spd.scripts.validation.effect_of_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
-    --split=train --summary-only --n-batches=10 --quantile=0.99 --checkpoint-every=1
+    --split=train --summary-only --n-batches=20 --quantile=0.99 --batch-size=32 --checkpoint-every=1
 
 # Nontarget (general distribution):
 uv run python -m spd.scripts.validation.effect_of_ablation \
