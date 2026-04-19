@@ -90,6 +90,8 @@ FIELDS = [
     "kl",
 ]
 
+SEQ_FIELDS = ["lang", "prompt", "n_positions", "mean_kl", "orig_ce", "ablated_ce"]
+
 
 def _parse_component_line(raw: str) -> tuple[int, str, int]:
     """Parse a '<layer>:<matrix>:<component>' line."""
@@ -202,12 +204,19 @@ def multilang_ablation(
     batch_size: int | None = None,
     seq_len: int | None = None,
     output: str | None = None,
+    output_sequences: str | None = None,
     invert: bool = False,
-) -> Path:
+) -> tuple[Path, Path]:
     """Ablate the listed components and record per-position KL across programming languages.
 
     If `invert` is True, keep only the listed components on and disable everything else
     (other components and the delta).
+
+    Writes two TSVs:
+    - `output` (default `multilang_ablation.tsv`): one row per (lang, prompt, pos).
+    - `output_sequences` (default derived from `output` by inserting `_per_sequence`): one row
+      per (lang, prompt) with mean KL and the mean next-token cross-entropy of both models,
+      for later comparison against training-loss curves.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -248,11 +257,23 @@ def multilang_ablation(
     n_batches = max(1, -(-tokens_per_lang // tokens_per_batch))
 
     output_path = Path(output).expanduser() if output else run_dir / "multilang_ablation.tsv"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    seq_path = (
+        Path(output_sequences).expanduser()
+        if output_sequences
+        else run_dir / "per_sequence_loss.tsv"
+    )
+    for p in (output_path, seq_path):
+        p.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open("w", newline="") as f, torch.no_grad():
+    with (
+        output_path.open("w", newline="") as f,
+        seq_path.open("w", newline="") as seq_f,
+        torch.no_grad(),
+    ):
         writer = csv.DictWriter(f, fieldnames=FIELDS, delimiter="\t")
+        seq_writer = csv.DictWriter(seq_f, fieldnames=SEQ_FIELDS, delimiter="\t")
         writer.writeheader()
+        seq_writer.writeheader()
 
         for lang in langs:
             token_iter = _iter_tokens(lang, tokenizer)
@@ -274,6 +295,14 @@ def multilang_ablation(
                 abl_prob_max, abl_pred = abl_log_probs.exp().max(dim=-1)
 
                 kl = (orig_probs * (orig_log_probs - abl_log_probs)).sum(dim=-1)
+
+                targets = batch[:, 1:]
+                orig_nll = -orig_log_probs[:, :-1].gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                abl_nll = -abl_log_probs[:, :-1].gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                n_ce_positions = targets.shape[1]
+                mean_kl_per_seq = kl[:, :-1].mean(dim=-1).cpu().tolist()
+                orig_ce_per_seq = orig_nll.mean(dim=-1).cpu().tolist()
+                abl_ce_per_seq = abl_nll.mean(dim=-1).cpu().tolist()
 
                 batch_cpu = batch.cpu().tolist()
                 orig_pred_cpu = orig_pred.cpu().tolist()
@@ -299,6 +328,16 @@ def multilang_ablation(
                                 "kl": kl_cpu[b][t],
                             }
                         )
+                    seq_writer.writerow(
+                        {
+                            "lang": lang,
+                            "prompt": prompt_idx,
+                            "n_positions": n_ce_positions,
+                            "mean_kl": mean_kl_per_seq[b],
+                            "orig_ce": orig_ce_per_seq[b],
+                            "ablated_ce": abl_ce_per_seq[b],
+                        }
+                    )
                 prompt_offset += bsz
                 rows_written += bsz * slen
 
@@ -307,8 +346,8 @@ def multilang_ablation(
             else:
                 logger.info(f"{lang}: wrote {rows_written} rows")
 
-    logger.info(f"Wrote {output_path}")
-    return output_path
+    logger.info(f"Wrote {output_path} and {seq_path}")
+    return output_path, seq_path
 
 
 if __name__ == "__main__":

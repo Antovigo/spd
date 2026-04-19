@@ -88,8 +88,10 @@ Known mismatches against training:
 
 ## Output
 
-A single TSV at `<run_dir>/multilang_ablation.tsv` (override with `--output`),
-one row per (language, position):
+Two TSVs:
+
+**Per-position**: `<run_dir>/multilang_ablation.tsv` (override with
+`--output`), one row per (language, prompt, position):
 
 | Column             | Description                                           |
 |--------------------|-------------------------------------------------------|
@@ -106,6 +108,23 @@ one row per (language, position):
 `(lang, prompt)` together identify one sequence; group by that pair to pick
 out all tokens from a single contiguous input.
 
+**Per-sequence**: `<run_dir>/per_sequence_loss.tsv` (override with
+`--output-sequences`), one row per (language, prompt) — useful for matching
+the ablated model's CE against the target-model training-loss curve to
+estimate how much training compute the ablation has "undone":
+
+| Column        | Description                                               |
+|---------------|-----------------------------------------------------------|
+| `lang`        | Language label                                            |
+| `prompt`      | Sequence index within the language                        |
+| `n_positions` | Number of next-token positions averaged over (seq_len - 1)|
+| `mean_kl`     | Mean `KL(orig \|\| ablated)` across positions             |
+| `orig_ce`     | Mean next-token CE loss of the original model             |
+| `ablated_ce`  | Mean next-token CE loss of the ablated model              |
+
+Both CE values and `mean_kl` are averaged over positions 0..seq_len-2 (next-
+token positions; the final position has no label).
+
 All `*_str` columns are TSV-escaped (backslash-escape of tab/newline/CR/`\`)
 to keep the file splittable by tab everywhere.
 
@@ -117,7 +136,8 @@ to keep the file splittable by tab everywhere.
 - `--languages=a,b,c` — override the default language set.
 - `--batch-size=N` — defaults to `config.batch_size`.
 - `--seq-len=N` — defaults to the task config's `max_seq_len`.
-- `--output=PATH` — override output TSV path.
+- `--output=PATH` — override per-position TSV path.
+- `--output-sequences=PATH` — override per-sequence TSV path.
 
 ## Usage
 
