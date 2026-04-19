@@ -183,5 +183,6 @@ uv run python -m spd.scripts.validation.compare_components \
 awk -F'\t' 'NR>1 {print $1":"$2":"$3}' \
     "$RUN_DIR_CSS/alive_components.tsv" > "$RUN_DIR_CSS/alive_ablation_list.txt"
 
-uv run python -m spd.scripts.validation.multilang_ablation \
-    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert
+uv run huggingface-cli login
+
+uv run python -m spd.scripts.validation.multilang_ablation "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert

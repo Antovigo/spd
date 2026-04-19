@@ -40,15 +40,16 @@ language.
 
 ## Languages and data sources
 
-| Language     | Dataset                              | Notes                                    |
-|--------------|--------------------------------------|------------------------------------------|
-| `css`        | `bigcode/the-stack-smol` `data/css`  | `/* ... */` comments stripped            |
-| `html`       | `bigcode/the-stack-smol` `data/html` | `<style>...</style>` bodies stripped     |
-| `javascript` | `bigcode/the-stack-smol` `data/javascript` |                                    |
-| `python`     | `bigcode/the-stack-smol` `data/python` |                                        |
-| `c`          | `bigcode/the-stack-smol` `data/c`    |                                          |
-| `rust`       | `bigcode/the-stack-smol` `data/rust` |                                          |
-| `english`    | `wikitext` `wikitext-103-raw-v1`     | Plain prose baseline                     |
+| Language      | Dataset                              | Notes                                                |
+|---------------|--------------------------------------|------------------------------------------------------|
+| `css`         | `Antovigo/pile-css-chunks`           | Pre-tokenised CSS training data of the decomposition |
+| `css_bigcode` | `bigcode/the-stack-smol` `data/css`  | Independent CSS sample; `/* ... */` comments stripped|
+| `html`        | `bigcode/the-stack-smol` `data/html` | `<style>...</style>` bodies stripped                 |
+| `javascript`  | `bigcode/the-stack-smol` `data/javascript` |                                                |
+| `python`      | `bigcode/the-stack-smol` `data/python` |                                                    |
+| `c`           | `bigcode/the-stack-smol` `data/c`    |                                                      |
+| `rust`        | `bigcode/the-stack-smol` `data/rust` |                                                      |
+| `english`     | `wikitext` `wikitext-103-raw-v1`     | Plain prose baseline                                 |
 
 Default language set is all of the above. Override with `--languages` (comma
 separated, e.g. `--languages=css,html,python`).
@@ -60,8 +61,12 @@ attributes, etc.) are not handled.
 
 ## Sequence format
 
-Tokenisation and packing replicate how the CSS training data
-(`pile-css-chunks`) is built in `spd/scripts/extract_css_from_pile.py`:
+`css` reads the already-tokenised `pile-css-chunks` directly — each 512-token
+chunk is flattened and re-packed into the eval's `(batch_size, seq_len)`
+shape.
+
+All other languages tokenise text on-the-fly in the same way
+`extract_css_from_pile.py` built `pile-css-chunks`:
 
 - `tokenizer(..., add_special_tokens=False)` — no BOS/EOS added anywhere.
   (The gpt-neox-20b tokenizer used by the CSS models also has

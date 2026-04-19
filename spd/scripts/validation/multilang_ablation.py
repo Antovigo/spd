@@ -10,10 +10,15 @@ With `--invert`, the listed components are the only ones kept on: every other co
 *and* the delta are disabled. This isolates a model that can only run the listed components
 (e.g. only the alive components from a CSS decomposition).
 
-Code samples come from `bigcode/the-stack-smol` (one subset per language). English comes from
-`wikitext-103-raw-v1`. HTML files have `<style>...</style>` blocks stripped so the 'html' sample
-measures HTML without embedded CSS; CSS files have `/* ... */` comments stripped to match how
-the CSS training data (`pile-css-chunks`) was built.
+Data sources:
+- `css` — `Antovigo/pile-css-chunks`, the pre-tokenised training data of the CSS decomposition.
+- `css_bigcode` — CSS from `bigcode/the-stack-smol` with `/* ... */` comments stripped to match
+  how `pile-css-chunks` was built (useful as an independent CSS sample).
+- other code languages — `bigcode/the-stack-smol` (one subset per language).
+- `english` — `wikitext-103-raw-v1`.
+
+HTML files have `<style>...</style>` blocks stripped so the 'html' sample measures HTML without
+embedded CSS.
 
 Usage:
     python -m spd.scripts.validation.multilang_ablation <model_path> <components_txt> \\
@@ -50,11 +55,21 @@ _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 _PREPROCESSORS: dict[str, Callable[[str], str]] = {
     "html": lambda s: _STYLE_RE.sub("", s),
-    "css": lambda s: _CSS_COMMENT_RE.sub("", s),
+    "css_bigcode": lambda s: _CSS_COMMENT_RE.sub("", s),
+}
+
+_BIGCODE_SUBSETS: dict[str, str] = {
+    "css_bigcode": "data/css",
+    "html": "data/html",
+    "javascript": "data/javascript",
+    "python": "data/python",
+    "c": "data/c",
+    "rust": "data/rust",
 }
 
 _DEFAULT_LANGUAGES: tuple[str, ...] = (
     "css",
+    "css_bigcode",
     "html",
     "javascript",
     "python",
@@ -101,27 +116,38 @@ def _load_component_list(
     return out
 
 
-def _open_lang_dataset(lang: str) -> tuple[Iterator[dict[str, Any]], str, Callable[[str], str]]:
-    """Return (row iterator, content field name, preprocess fn) for a language."""
-    if lang == "english":
-        ds: Any = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
-        return iter(ds), "text", _PREPROCESSORS.get(lang, lambda s: s)
-    ds = load_dataset(
-        "bigcode/the-stack-smol", data_dir=f"data/{lang}", split="train", streaming=True
-    )
-    return iter(ds), "content", _PREPROCESSORS.get(lang, lambda s: s)
-
-
 def _iter_tokens(lang: str, tokenizer: PreTrainedTokenizer) -> Iterator[int]:
     """Stream token IDs from a language's dataset with no inter-file separator.
 
-    Matches how `extract_css_from_pile.py` builds the CSS training chunks (raw
-    `tokenizer.encode(text)` per doc, concatenated, then sliced). The gpt-neox-20b tokenizer
-    used by the CSS models has `add_bos_token=add_eos_token=False`, so no special tokens are
-    added anywhere in training — and we replicate that here.
+    `css` reads the pre-tokenised `Antovigo/pile-css-chunks` used during CSS decomposition
+    training — chunks are 512 token IDs each and we just flatten them. All other languages
+    tokenise text on-the-fly with `add_special_tokens=False` and concatenate docs back-to-back,
+    matching how `extract_css_from_pile.py` builds the CSS training chunks.
     """
-    row_iter, content_field, preprocess = _open_lang_dataset(lang)
-    for row in row_iter:
+    if lang == "css":
+        ds: Any = load_dataset("Antovigo/pile-css-chunks", split="train", streaming=True)
+        for row in ds:
+            yield from row["input_ids"]
+        return
+
+    if lang == "english":
+        ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
+        content_field = "text"
+    else:
+        assert lang in _BIGCODE_SUBSETS, (
+            f"Unknown language {lang!r}; expected one of {sorted(_BIGCODE_SUBSETS)} "
+            f"or 'css' or 'english'"
+        )
+        ds = load_dataset(
+            "bigcode/the-stack-smol",
+            data_dir=_BIGCODE_SUBSETS[lang],
+            split="train",
+            streaming=True,
+        )
+        content_field = "content"
+
+    preprocess = _PREPROCESSORS.get(lang, lambda s: s)
+    for row in ds:
         text = preprocess(row[content_field])
         if not text:
             continue
