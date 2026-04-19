@@ -173,3 +173,15 @@ uv run python -m spd.scripts.validation.compare_components \
 uv run python -m spd.scripts.validation.compare_components \
     "$MODEL_PATH_CSS" "$MODEL_PATH_CSS_1" \
     --random-b --n-random-samples=10
+
+# --- 12. Multi-language eval with only the CSS-alive components active ------
+# Keep only the components from alive_components.tsv on (plus or minus the
+# delta via --invert), disable everything else, and measure per-position KL
+# across several programming languages. Converts the TSV into the plain-text
+# `<layer>:<matrix>:<component>` format that multilang_ablation expects.
+
+awk -F'\t' 'NR>1 {print $1":"$2":"$3}' \
+    "$RUN_DIR_CSS/alive_components.tsv" > "$RUN_DIR_CSS/alive_ablation_list.txt"
+
+uv run python -m spd.scripts.validation.multilang_ablation \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert

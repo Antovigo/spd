@@ -6,6 +6,10 @@ fully enabled), and runs sequences from several programming languages through bo
 and the ablated model. For every (language, position) it writes one TSV row with the input
 token, both models' top predictions and probabilities, and the per-position KL divergence.
 
+With `--invert`, the listed components are the only ones kept on: every other component
+*and* the delta are disabled. This isolates a model that can only run the listed components
+(e.g. only the alive components from a CSS decomposition).
+
 Code samples come from `bigcode/the-stack-smol` (one subset per language). English comes from
 `wikitext-103-raw-v1`. HTML files have `<style>...</style>` blocks stripped so the 'html' sample
 measures HTML without embedded CSS; CSS files have `/* ... */` comments stripped to match how
@@ -14,7 +18,7 @@ the CSS training data (`pile-css-chunks`) was built.
 Usage:
     python -m spd.scripts.validation.multilang_ablation <model_path> <components_txt> \\
         [--tokens-per-lang=10000] [--languages=css,html,javascript,python,c,rust,english] \\
-        [--batch-size=N] [--seq-len=N] [--output=PATH]
+        [--batch-size=N] [--seq-len=N] [--output=PATH] [--invert]
 """
 
 import csv
@@ -170,8 +174,13 @@ def multilang_ablation(
     batch_size: int | None = None,
     seq_len: int | None = None,
     output: str | None = None,
+    invert: bool = False,
 ) -> Path:
-    """Ablate the listed components and record per-position KL across programming languages."""
+    """Ablate the listed components and record per-position KL across programming languages.
+
+    If `invert` is True, keep only the listed components on and disable everything else
+    (other components and the delta).
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     spd_model, config, run_dir = load_spd_run(model_path)
@@ -189,15 +198,20 @@ def multilang_ablation(
     comps = _load_component_list(Path(components_path).expanduser(), module_lookup)
 
     batch_shape = (resolved_batch_size, resolved_seq_len)
+    fill_value = 0.0 if invert else 1.0
+    set_value = 1.0 if invert else 0.0
     component_masks = {
-        name: torch.ones((*batch_shape, C), device=device)
+        name: torch.full((*batch_shape, C), fill_value, device=device)
         for name, C in spd_model.module_to_c.items()
     }
     for module_name, component in comps:
-        component_masks[module_name][..., component] = 0.0
-    weight_deltas = spd_model.calc_weight_deltas()
-    delta_mask = torch.ones(batch_shape, device=device)
-    deltas_and_masks = {name: (weight_deltas[name], delta_mask) for name in weight_deltas}
+        component_masks[module_name][..., component] = set_value
+    if invert:
+        deltas_and_masks = None
+    else:
+        weight_deltas = spd_model.calc_weight_deltas()
+        delta_mask = torch.ones(batch_shape, device=device)
+        deltas_and_masks = {name: (weight_deltas[name], delta_mask) for name in weight_deltas}
     mask_infos = make_mask_infos(component_masks, weight_deltas_and_masks=deltas_and_masks)
 
     langs = tuple(s.strip() for s in languages.split(",")) if languages else _DEFAULT_LANGUAGES
