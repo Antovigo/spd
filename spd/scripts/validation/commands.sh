@@ -185,4 +185,6 @@ awk -F'\t' 'NR>1 {print $1":"$2":"$3}' \
 
 uv run huggingface-cli login
 
-uv run python -m spd.scripts.validation.multilang_ablation "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert
+uv run python -m spd.scripts.validation.multilang_ablation \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert \
+    --output="$RUN_DIR_CSS/css_only_multilang_ablations.tsv"
