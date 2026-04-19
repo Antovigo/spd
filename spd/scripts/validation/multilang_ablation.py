@@ -1,10 +1,15 @@
-"""Ablate a fixed set of components and measure per-language per-position KL divergence.
+"""Ablate a fixed set of components and measure per-language effects on model output.
 
 Reads a plain-text file of components (one `<layer>:<matrix>:<component>` per line), ablates
 all of them simultaneously (their masks set to 0, every other component and the delta kept
 fully enabled), and runs sequences from several programming languages through both the original
-and the ablated model. For every (language, position) it writes one TSV row with the input
-token, both models' top predictions and probabilities, and the per-position KL divergence.
+and the ablated model.
+
+Writes two TSVs:
+- per-position KL/predictions (one row per `(lang, prompt, pos)`).
+- per-sequence mean KL and next-token cross-entropy of both the original and the ablated model
+  (one row per `(lang, prompt)`); useful for comparing the ablated model's CE against the
+  original training-loss curve to estimate how much training compute the ablation undoes.
 
 With `--invert`, the listed components are the only ones kept on: every other component
 *and* the delta are disabled. This isolates a model that can only run the listed components
@@ -23,7 +28,7 @@ embedded CSS.
 Usage:
     python -m spd.scripts.validation.multilang_ablation <model_path> <components_txt> \\
         [--tokens-per-lang=10000] [--languages=css,html,javascript,python,c,rust,english] \\
-        [--batch-size=N] [--seq-len=N] [--output=PATH] [--invert]
+        [--batch-size=N] [--seq-len=N] [--output=PATH] [--output-sequences=PATH] [--invert]
 """
 
 import csv
@@ -213,10 +218,10 @@ def multilang_ablation(
     (other components and the delta).
 
     Writes two TSVs:
-    - `output` (default `multilang_ablation.tsv`): one row per (lang, prompt, pos).
-    - `output_sequences` (default derived from `output` by inserting `_per_sequence`): one row
-      per (lang, prompt) with mean KL and the mean next-token cross-entropy of both models,
-      for later comparison against training-loss curves.
+    - `output` (default `<run_dir>/multilang_ablation.tsv`): one row per (lang, prompt, pos).
+    - `output_sequences` (default `<run_dir>/per_sequence_loss.tsv`): one row per (lang, prompt)
+      with mean KL and the mean next-token cross-entropy of both models, for later comparison
+      against training-loss curves.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -35,8 +35,9 @@ language.
    them, and packs the token stream into batches of shape
    `(batch_size, seq_len)`.
 
-3. For each batch, runs both the original and ablated models, and records one
-   TSV row per position.
+3. For each batch, runs both the original and ablated models, and records two
+   TSVs: per-position KL and predictions, and per-sequence mean KL + mean
+   next-token cross-entropy of both models (see Output below).
 
 ## Languages and data sources
 
@@ -159,6 +160,7 @@ uv run python -m spd.scripts.validation.multilang_ablation \
 ## Expected result
 
 If the listed components are language-specific (e.g. CSS-specific):
-- `css` KL distribution has a heavy right tail.
-- Other languages sit near zero.
+- `css` KL distribution has a heavy right tail and `ablated_ce` shifts
+  sharply above `orig_ce` (crossing an earlier point on the training curve).
+- Other languages sit near zero on KL, with `ablated_ce ≈ orig_ce`.
 - `html` sits near zero too, since `<style>` bodies were stripped.
