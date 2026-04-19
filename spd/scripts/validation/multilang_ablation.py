@@ -80,6 +80,8 @@ _DEFAULT_LANGUAGES: tuple[str, ...] = (
 
 FIELDS = [
     "lang",
+    "prompt",
+    "pos",
     "token_str",
     "orig_pred_str",
     "orig_prob",
@@ -257,6 +259,7 @@ def multilang_ablation(
             batch_iter = _pack_batches(token_iter, resolved_batch_size, resolved_seq_len, n_batches)
 
             rows_written = 0
+            prompt_offset = 0
             for batch in tqdm(batch_iter, desc=lang, total=n_batches):
                 batch = batch.to(device)
                 orig_logits = spd_model(batch)
@@ -281,10 +284,13 @@ def multilang_ablation(
 
                 bsz, slen = batch.shape
                 for b in range(bsz):
+                    prompt_idx = prompt_offset + b
                     for t in range(slen):
                         writer.writerow(
                             {
                                 "lang": lang,
+                                "prompt": prompt_idx,
+                                "pos": t,
                                 "token_str": decode(batch_cpu[b][t]),
                                 "orig_pred_str": decode(orig_pred_cpu[b][t]),
                                 "orig_prob": orig_prob_cpu[b][t],
@@ -293,6 +299,7 @@ def multilang_ablation(
                                 "kl": kl_cpu[b][t],
                             }
                         )
+                prompt_offset += bsz
                 rows_written += bsz * slen
 
             if rows_written == 0:

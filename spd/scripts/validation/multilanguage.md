@@ -94,12 +94,17 @@ one row per (language, position):
 | Column             | Description                                           |
 |--------------------|-------------------------------------------------------|
 | `lang`             | Language label                                        |
+| `prompt`           | Sequence index within the language (resets per lang)  |
+| `pos`              | Position within the sequence                          |
 | `token_str`        | Input token at this position, decoded                 |
 | `orig_pred_str`    | Argmax prediction from the original model             |
 | `orig_prob`        | Probability of `orig_pred_str` under the original     |
 | `ablated_pred_str` | Argmax prediction from the ablated model              |
 | `ablated_prob`     | Probability of `ablated_pred_str` under the ablated   |
 | `kl`               | `KL(orig || ablated)` at this position                |
+
+`(lang, prompt)` together identify one sequence; group by that pair to pick
+out all tokens from a single contiguous input.
 
 All `*_str` columns are TSV-escaped (backslash-escape of tab/newline/CR/`\`)
 to keep the file splittable by tab everywhere.

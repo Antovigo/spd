@@ -187,4 +187,4 @@ uv run huggingface-cli login
 
 uv run python -m spd.scripts.validation.multilang_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert \
-    --output="$RUN_DIR_CSS/css_only_multilang_ablations.tsv"
+    --output="$RUN_DIR_CSS/css_only_multilang_ablations.tsv" --batch-size=32
