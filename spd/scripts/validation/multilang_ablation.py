@@ -1,9 +1,10 @@
 """Ablate a fixed set of components and measure per-language effects on model output.
 
-Reads a plain-text file of components (one `<layer>:<matrix>:<component>` per line), ablates
-all of them simultaneously (their masks set to 0, every other component and the delta kept
-fully enabled), and runs sequences from several programming languages through both the original
-and the ablated model.
+Takes either a components file (one `<layer>:<matrix>:<component>` per line; `#` comments
+and blank lines ignored) OR a comma-separated spec string (`1:mlp.down_proj:248,3:mlp.c_fc:98`)
+directly on the CLI. Ablates every listed component simultaneously (their masks set to 0, every
+other component and the delta kept fully enabled), and runs sequences from several programming
+languages through both the original and the ablated model.
 
 Writes two TSVs:
 - per-position KL/predictions (one row per `(lang, prompt, pos)`).
@@ -26,9 +27,17 @@ HTML files have `<style>...</style>` blocks stripped so the 'html' sample measur
 embedded CSS.
 
 Usage:
-    python -m spd.scripts.validation.multilang_ablation <model_path> <components_txt> \\
-        [--tokens-per-lang=10000] [--languages=css,html,javascript,python,c,rust,english] \\
-        [--batch-size=N] [--seq-len=N] [--output=PATH] [--output-sequences=PATH] [--invert]
+    # File-based
+    python -m spd.scripts.validation.multilang_ablation <model_path> <components_txt> [...]
+
+    # Inline (single or comma-separated)
+    python -m spd.scripts.validation.multilang_ablation <model_path> 1:mlp.down_proj:248 [...]
+    python -m spd.scripts.validation.multilang_ablation <model_path> \\
+        "1:mlp.down_proj:248,3:mlp.c_fc:98" [...]
+
+Optional flags:
+    [--tokens-per-lang=10000] [--languages=css,html,javascript,python,c,rust,english]
+    [--batch-size=N] [--seq-len=N] [--output=PATH] [--output-sequences=PATH] [--invert]
 """
 
 import csv
@@ -105,15 +114,24 @@ def _parse_component_line(raw: str) -> tuple[int, str, int]:
     return int(parts[0]), parts[1], int(parts[2])
 
 
-def _load_component_list(
-    path: Path, module_lookup: dict[tuple[int, str], str]
+def _resolve_components(
+    arg: str, module_lookup: dict[tuple[int, str], str]
 ) -> list[tuple[str, int]]:
-    """Return [(module_name, component_idx), ...] from a plain-text file; skip blank/# lines."""
+    """Return [(module_name, component_idx), ...] from a file path or comma-separated spec.
+
+    If `arg` names an existing file, each line is a `<layer>:<matrix>:<component>` spec (blank
+    lines and `#` comments are ignored). Otherwise `arg` is treated as one or more specs
+    joined by `,`.
+    """
+    path = Path(arg).expanduser()
+    if path.is_file():
+        lines = [ln.strip() for ln in path.read_text().splitlines()]
+        lines = [ln for ln in lines if ln and not ln.startswith("#")]
+    else:
+        lines = [s.strip() for s in arg.split(",") if s.strip()]
+
     out: list[tuple[str, int]] = []
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
+    for line in lines:
         layer, matrix, component = _parse_component_line(line)
         key = (layer, matrix)
         assert key in module_lookup, (
@@ -121,7 +139,7 @@ def _load_component_list(
             f"Available: {sorted(module_lookup.keys())}"
         )
         out.append((module_lookup[key], component))
-    assert out, f"No components found in {path}"
+    assert out, f"No components resolved from {arg!r}"
     return out
 
 
@@ -203,7 +221,7 @@ def _make_decoder(tokenizer: PreTrainedTokenizer) -> Callable[[int], str]:
 
 def multilang_ablation(
     model_path: ModelPath,
-    components_path: str,
+    components: str,
     tokens_per_lang: int = 10000,
     languages: str | None = None,
     batch_size: int | None = None,
@@ -237,7 +255,7 @@ def multilang_ablation(
     resolved_seq_len = seq_len if seq_len is not None else config.task_config.max_seq_len
 
     module_lookup = build_module_lookup(spd_model.target_module_paths)
-    comps = _load_component_list(Path(components_path).expanduser(), module_lookup)
+    comps = _resolve_components(components, module_lookup)
 
     batch_shape = (resolved_batch_size, resolved_seq_len)
     fill_value = 0.0 if invert else 1.0

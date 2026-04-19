@@ -10,17 +10,25 @@ language.
 
 1. **Decomposed model path** — same formats as the other validation scripts
    (WandB path or local checkpoint).
-2. **Components file** — plain text, one component per line in the format:
-   ```
-   <layer>:<matrix>:<component>
-   ```
-   Blank lines and `#` comments are ignored. Example:
+2. **Components** — second positional arg, either a file path or an inline
+   comma-separated spec. Each spec is `<layer>:<matrix>:<component>`.
+
+   File form (blank lines and `#` comments ignored):
    ```
    # CSS components to ablate
    3:attn.v_proj:17
    5:mlp.down_proj:42
    7:mlp.down_proj:8
    ```
+
+   Inline forms:
+   ```
+   multilang_ablation <model> 3:attn.v_proj:17
+   multilang_ablation <model> "3:attn.v_proj:17,5:mlp.down_proj:42"
+   ```
+
+   A file path is detected by `Path.is_file()`; otherwise the argument is
+   parsed as a comma-separated spec list.
 
 ## What it does
 
@@ -30,6 +38,12 @@ language.
    - the delta component fully enabled (mask = 1)
    So the ablated model equals the original target model *minus* the listed
    components' contributions, and nothing else.
+
+   With `--invert`, the mask semantics flip: listed components stay on (mask =
+   1), every other component is off (mask = 0), and the delta is disabled.
+   This isolates a model that can only run the listed components (useful for
+   e.g. probing whether a hypothesised subnetwork alone still produces the
+   target-task predictions).
 
 2. For each language, streams files from a HuggingFace dataset, tokenises
    them, and packs the token stream into batches of shape
@@ -139,6 +153,8 @@ to keep the file splittable by tab everywhere.
 - `--seq-len=N` — defaults to the task config's `max_seq_len`.
 - `--output=PATH` — override per-position TSV path.
 - `--output-sequences=PATH` — override per-sequence TSV path.
+- `--invert` — flip mask semantics: keep only the listed components on and
+  disable every other component and the delta.
 
 ## Usage
 

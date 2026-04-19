@@ -187,6 +187,19 @@ uv run huggingface-cli login
 
 uv run python -m spd.scripts.validation.multilang_ablation \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_ablation_list.txt" --invert \
-    --batch-size=32 --tokens-per-lang=500000\
+    --batch-size=32 --tokens-per-lang=500000 \
     --output="$RUN_DIR_CSS/css_only_multilang_ablations.tsv" \
     --output-sequences="$RUN_DIR_CSS/css_only_per_sequence_loss.tsv"
+
+# --- 13. Per-component multilang ablation (CSS shortlist) -------------------
+# Loop over components in $RUN_DIR_CSS/component_shortlist.txt (one
+# `<layer>:<matrix>:<component>` per line; blank and `#` lines ignored),
+# ablating each one individually. Outputs land in
+# $RUN_DIR_CSS/component_shortlist/. Extra flags after the 3rd arg are
+# forwarded to multilang_ablation.
+
+bash spd/scripts/validation/multilang_per_component.sh \
+    "$MODEL_PATH_CSS" \
+    "$RUN_DIR_CSS/component_shortlist.txt" \
+    "$RUN_DIR_CSS/component_shortlist_output" \
+    --batch-size=32 --tokens-per-lang=500000
