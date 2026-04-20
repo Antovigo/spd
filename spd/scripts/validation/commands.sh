@@ -214,6 +214,7 @@ bash spd/scripts/validation/multilang_per_component.sh \
 RUN_DIR_LARGER=~/spd_out/spd/jose
 MODEL_PATH_LARGER=$(ls -t "$RUN_DIR_LARGER"/model_*.pth | head -n 1)
 
+# CSS
 uv run python -m spd.scripts.validation.compare_to_larger \
     "$MODEL_PATH_CSS" "$MODEL_PATH_LARGER" \
     --n-random-samples=10

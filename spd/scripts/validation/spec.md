@@ -291,6 +291,7 @@ args:
 --alive-components-targeted: optional override for the targeted alive-components TSV (default `<run_dir_targeted>/alive_components.tsv`)
 --n-random-samples: number of random-init draws for the baseline (default 10)
 --random-seed: base seed for the random baseline (default 0)
+--chunk-size: number of larger-model components processed at once when computing cos sim (default 64). The larger model's components are iterated in chunks so that `(chunk_size, d_in*d_out)` fits in GPU memory; each chunk updates a running max.
 --output-dir: overrides the output directory (default: targeted run's folder)
 
 Sanity-checks whether a narrow targeted decomposition has rediscovered substructures already present in a larger "general" decomposition of the same target model. The intended use: the targeted run was trained against a specific task (prompts-based target data) and has only a handful of alive components; the larger run was trained on general data and has many more components (alive and inactive).
