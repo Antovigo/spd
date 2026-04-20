@@ -222,12 +222,14 @@ uv run python -m spd.scripts.validation.compare_to_larger \
 # --- 15. Completeness check --------------------------------------------------
 # For each alive component X, run two ablations and log per-(prompt, pos) KL
 # against the original model:
-#  - kl_alive_only: only alive components on, delta OFF, X off
+#  - kl_circuit: only alive components on, delta OFF, X off
 #  - kl_all: every component on, delta ON, X off
 # Also logs X's CI on each position. Rows where kl_all is small but
-# kl_alive_only is large mean something outside the alive set (delta or an
+# kl_circuit is large mean something outside the alive set (delta or an
 # inactive component) is doing X's job in parallel.
 # Run `find_alive_components` first so alive_components.tsv exists.
+
+
 
 # numpy 12L (prompt-based target data):
 RUN_DIR=~/spd_out/spd/s-74b94cad
@@ -238,7 +240,22 @@ uv run python -m spd.scripts.validation.completeness \
     "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" \
     --prompts="$PROMPTS"
 
+
+
 # CSS (dataset-based target data):
+RUN_DIR_CSS=~/spd_out/spd/s-429ea112 # CSS seed 0 (reference)
+MODEL_PATH_CSS=$(ls -t "$RUN_DIR_CSS"/model_*.pth | head -n 1)
+
 uv run python -m spd.scripts.validation.completeness \
     "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
-    --split=train --n-batches=20 --batch-size=32
+    --split=train --n-batches=10 --batch-size=32
+
+
+
+# jose (larger decomposition, dataset-based):
+RUN_DIR_JOSE=~/spd_out/spd/jose
+MODEL_PATH_JOSE=$(ls -t "$RUN_DIR_JOSE"/model_*.pth | head -n 1)
+
+uv run python -m spd.scripts.validation.completeness \
+    "$MODEL_PATH_JOSE" "$RUN_DIR_JOSE/alive_components.tsv" \
+    --split=train --n-batches=10 --batch-size=8

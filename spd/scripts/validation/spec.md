@@ -322,28 +322,37 @@ args:
 --prompts: optional override for the LM `prompts_file`
 --split: optional override for the LM `eval_data_split` (dataset-based tasks only)
 --batch-size: optional override for `config.batch_size` (dataset-based tasks only)
---output: overrides the output TSV path
+--ci-threshold: drop rows where the component's lower-leaky CI is ≤ this value (default 0.1)
+--output: overrides the main output TSV path
+--output-baseline: overrides the baseline output TSV path
 
 Checks whether the alive components from the decomposition capture all of the relevant mechanisms — i.e. for each alive component X, whether X's function is also performed in parallel by either the delta component or some of the inactive (non-alive) components.
 
 For each alive component X, two ablated models are run and each is compared to the original target model:
-- **case a ("alive-only")**: every decomposed module's component mask is 1 on its alive indices and 0 on all non-alive indices, delta is OFF, and X is additionally set to 0. If the alive set is mechanistically complete but X's role is redundant *within* the alive set, KL stays small; if X is uniquely needed (and neither delta nor any inactive component helps, because they are all off), KL is large.
+- **case a ("circuit")**: every decomposed module's component mask is 1 on its alive indices and 0 on all non-alive indices, delta is OFF, and X is additionally set to 0. If the alive set is mechanistically complete but X's role is redundant *within* the alive set, KL stays small; if X is uniquely needed (and neither delta nor any inactive component helps, because they are all off), KL is large.
 - **case b ("all-on")**: every component is on (mask=1) and delta is ON (mask=1), except X is set to 0. If KL stays small here but is large in case a, something outside the alive set (delta or an inactive component) is doing X's job in parallel — which is the signal we're looking for.
 
 The causal importance of X on each (prompt, pos) is also saved, so downstream analysis can filter to positions where X actually fired.
 
+A shared **baseline for case a** is computed once per batch: the circuit setup with *no* component ablated. This lets downstream code subtract the irreducible imperfection of the circuit approximation from `kl_circuit` to isolate X's marginal contribution. Since the baseline is identical across components at a given (prompt, pos), it is written to its own dense TSV (one row per (prompt, pos) in iteration order) rather than duplicated per row of the main TSV. The main TSV keeps `prompt` and `pos`; the baseline TSV drops them — they are recoverable from row index via `i = prompt * seq_len + pos`. No baseline is needed for case b: running the all-on configuration without ablation yields KL=0 by construction (components + delta exactly reconstruct the target).
+
+Rows are filtered to positions where the component's lower-leaky CI exceeds `--ci-threshold` (default 0.1) — positions where X barely fires carry no signal about whether removing X matters.
+
 Implementation:
-- Loop order is batches outer, components inner. For each batch we do one `spd_model(batch, cache_type="input")` forward pass — its `output` is the original target model's logits (since `mask_infos=None`) and its `cache` feeds `calc_causal_importances` to get X's CI. Then for each alive X we do two forward passes with `mask_infos`: one for case a, one for case b, with X temporarily zeroed in each mask and restored afterwards.
+- Loop order is batches outer, components inner. For each batch we do one `spd_model(batch, cache_type="input")` forward pass — its `output` is the original target model's logits (since `mask_infos=None`) and its `cache` feeds `calc_causal_importances` to get X's CI. We then run the circuit-no-ablation baseline once, and for each alive X we do two further forward passes with `mask_infos`: one for case a, one for case b, with X temporarily zeroed in each mask and restored afterwards.
 - Component masks and `mask_infos` are built lazily from the first batch's shape and reused across all batches (the loader guarantees a fixed shape).
 - KL divergence is computed per (batch_example, position) as `KL(softmax(orig_logits) || softmax(ablated_logits))`, same as `effect_of_ablation.py`.
 - Only LM tasks are supported (tokens/positions are LM-specific).
 
-Output TSV (default filename `completeness.tsv`, or `completeness_nontarget.tsv` with `--nontarget`, in the decomposed model's folder). One row per (alive component × prompt × pos), columns:
+Main output TSV (default filename `completeness.tsv`, or `completeness_nontarget.tsv` with `--nontarget`, in the decomposed model's folder). One row per (alive component × prompt × pos) where `ci > ci_threshold`, columns:
 - layer (the block number)
 - matrix (e.g. "attn.q_proj" or "mlp.c_fc")
 - component (the component's index)
 - prompt (the prompt's index)
 - pos (the token position)
-- kl_alive_only (KL under case a — only alive components, no delta, X off)
+- kl_circuit (KL under case a — only alive components, no delta, X off)
 - kl_all (KL under case b — every component + delta, X off)
 - ci (the component's lower-leaky causal importance at this position)
+
+Baseline output TSV (default filename `completeness_baseline.tsv`, or `completeness_baseline_nontarget.tsv` with `--nontarget`). One row per (prompt, pos) in iteration order (`i = prompt * seq_len + pos`), one column:
+- kl_circuit_baseline (KL under case a with no component ablated; subtract from `kl_circuit` to isolate X's marginal effect)
