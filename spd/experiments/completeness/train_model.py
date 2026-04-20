@@ -34,7 +34,7 @@ def train(
 
             opt.zero_grad(set_to_none=True)
             tokens, targets = next(data_iter)
-            logits = model(tokens)
+            logits = model(tokens)[:, 1, :]
             loss = loss_fn(logits, targets)
             loss.backward()
             opt.step()

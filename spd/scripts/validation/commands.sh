@@ -231,7 +231,15 @@ uv run python -m spd.scripts.validation.compare_to_larger \
 # alive set (delta or an inactive component) is doing X's job in parallel.
 # Run `find_alive_components` first so alive_components.tsv exists.
 
+# Toy model (CompletenessTaskConfig — no prompts/split, just n-batches)
+RUN_DIR_COMPL=~/spd_out/spd/s-afa9c6ad
+MODEL_PATH_COMPL=$(ls -t "$RUN_DIR_COMPL"/model_*.pth | head -n 1)
 
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_COMPL" --n-batches=10
+
+uv run python -m spd.scripts.validation.completeness \
+    "$MODEL_PATH_COMPL" "$RUN_DIR_COMPL/alive_components.tsv" \
+    --n-batches=10 --batch-size=32
 
 # numpy 12L (prompt-based target data):
 RUN_DIR=~/spd_out/spd/s-74b94cad
@@ -258,7 +266,7 @@ uv run python -m spd.scripts.validation.completeness \
 RUN_DIR_JOSE=~/spd_out/spd/jose
 MODEL_PATH_JOSE=$(ls -t "$RUN_DIR_JOSE"/model_*.pth | head -n 1)
 
-uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_JOSE" --prompts="$PROMPTS"
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_JOSE" --split=train --n-batches=200
 
 uv run python -m spd.scripts.validation.completeness \
     "$MODEL_PATH_JOSE" "$RUN_DIR_JOSE/alive_components.tsv" \

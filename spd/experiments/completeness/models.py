@@ -69,8 +69,7 @@ class RedundantCopyTransformer(LoadableModule):
         self,
         tokens: Int[Tensor, "batch seq"],
         **_: Any,
-    ) -> Float[Tensor, "batch vocab_size"]:
-        batch_size = tokens.shape[0]
+    ) -> Float[Tensor, "batch seq vocab_size"]:
         positions = torch.arange(tokens.shape[1], device=tokens.device)
         x = self.token_embed(tokens) + self.pos_embed(positions)
 
@@ -89,10 +88,7 @@ class RedundantCopyTransformer(LoadableModule):
             x = x + layer(x)
 
         x = self.linear(x)
-        logits = self.unembed(x)
-        # Return logits at position 1 (the eq_token position where we predict X)
-        assert logits.shape == (batch_size, self.config.seq_len, self.config.vocab_size)
-        return logits[:, 1, :]
+        return self.unembed(x)
 
     @classmethod
     @override

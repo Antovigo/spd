@@ -1,4 +1,4 @@
-"""Shared helpers for the LM validation scripts."""
+"""Shared helpers for the validation scripts."""
 
 import json
 import re
@@ -12,14 +12,19 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
-from spd.configs import Config, LMTaskConfig
+from spd.configs import CompletenessTaskConfig, Config, LMTaskConfig
 from spd.data import DatasetConfig, create_data_loader
+from spd.experiments.completeness.models import CompletenessTargetRunInfo, CopyTaskDataset
 from spd.experiments.lm.prompts_dataset import (
     StaticBatchLoader,
     create_prompts_data_loader,
 )
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.spd_types import ModelPath
+from spd.utils.data_utils import DatasetGeneratedDataLoader
+
+TaskConfig = LMTaskConfig | CompletenessTaskConfig
+DataLoaderT = DataLoader[Any] | StaticBatchLoader | DatasetGeneratedDataLoader[Any]
 
 
 def load_spd_run(path: ModelPath) -> tuple[ComponentModel, Config, Path]:
@@ -35,12 +40,11 @@ def resolve_task_config(
     use_nontarget: bool,
     prompts_override: str | None = None,
     split_override: str | None = None,
-) -> LMTaskConfig:
-    """Return the target or nontarget LM task config, erroring if nontarget is missing.
+) -> TaskConfig:
+    """Return the target or nontarget task config, erroring if nontarget is missing.
 
-    When `prompts_override` is set, the returned config's `prompts_file` is replaced (prompts-based
-    tasks only). When `split_override` is set, the returned config's `eval_data_split` is replaced
-    (dataset-based tasks only — irrelevant if a prompts file is in use).
+    Supports `LMTaskConfig` and `CompletenessTaskConfig`. `prompts_override` and `split_override`
+    are LM-specific and error out for completeness tasks.
     """
     if use_nontarget:
         assert config.nontarget_task_config is not None, (
@@ -50,9 +54,15 @@ def resolve_task_config(
     else:
         task_config = config.task_config
 
-    assert isinstance(task_config, LMTaskConfig), (
-        f"Validation scripts only support LM tasks, got {type(task_config).__name__}"
+    assert isinstance(task_config, (LMTaskConfig, CompletenessTaskConfig)), (
+        f"Validation scripts only support LM or completeness tasks, "
+        f"got {type(task_config).__name__}"
     )
+
+    if isinstance(task_config, CompletenessTaskConfig):
+        assert prompts_override is None, "--prompts is LM-only; not supported for completeness"
+        assert split_override is None, "--split is LM-only; not supported for completeness"
+        return task_config
 
     if prompts_override is not None:
         assert task_config.prompts_file is not None, (
@@ -68,19 +78,38 @@ def resolve_task_config(
     return task_config
 
 
-def is_prompt_task(task_config: LMTaskConfig) -> bool:
-    """Prompt-based LM tasks run exactly one batch containing every prompt."""
+def is_prompt_task(task_config: TaskConfig) -> bool:
+    """Prompt-based LM tasks run exactly one batch containing every prompt. Completeness is not
+    prompt-based."""
+    if isinstance(task_config, CompletenessTaskConfig):
+        return False
     return task_config.prompts_file is not None
 
 
 def build_lm_loader(
-    task_config: LMTaskConfig, config: Config, batch_size_override: int | None = None
-) -> DataLoader[Any] | StaticBatchLoader:
-    """Build a DataLoader for the given LMTaskConfig.
+    task_config: TaskConfig, config: Config, batch_size_override: int | None = None
+) -> DataLoaderT:
+    """Build a DataLoader for the given task.
 
-    For dataset-based tasks, `batch_size_override` replaces `config.batch_size` if set. For
-    prompts-based tasks the override is ignored — the batch always contains every prompt.
+    For LM dataset-based tasks, `batch_size_override` replaces `config.batch_size` if set. For
+    prompts-based LM tasks the override is ignored — the batch always contains every prompt. For
+    completeness tasks, a `CopyTaskDataset` is constructed from the target model's train config
+    (read from `config.pretrained_model_path`) and wrapped in a `DatasetGeneratedDataLoader`.
     """
+    if isinstance(task_config, CompletenessTaskConfig):
+        assert config.pretrained_model_path is not None, (
+            "completeness task needs config.pretrained_model_path to read vocab_size / eq_token"
+        )
+        target_run_info = CompletenessTargetRunInfo.from_path(config.pretrained_model_path)
+        model_config = target_run_info.config.completeness_model_config
+        dataset = CopyTaskDataset(
+            vocab_size=model_config.vocab_size,
+            eq_token=model_config.eq_token,
+            device="cpu",  # iterate_input_ids moves to target device
+        )
+        batch_size = batch_size_override if batch_size_override is not None else config.batch_size
+        return DatasetGeneratedDataLoader(dataset, batch_size=batch_size)
+
     assert config.tokenizer_name is not None, "LM tasks need config.tokenizer_name"
 
     if task_config.prompts_file is not None:
@@ -114,20 +143,23 @@ def build_lm_loader(
     return loader
 
 
-def iterate_input_ids(
-    loader: DataLoader[Any] | StaticBatchLoader, device: torch.device
-) -> Iterator[Tensor]:
-    """Yield `input_ids` batches from a single epoch — no cycling.
+def iterate_input_ids(loader: DataLoaderT, device: torch.device) -> Iterator[Tensor]:
+    """Yield input token tensors from a single epoch — no cycling.
 
-    Non-streaming HF DataLoaders exhaust after one epoch; callers should stop requesting batches
-    when the iterator is done rather than wrapping around (which would bias running statistics
-    toward early-epoch data).
+    Handles HF-style dict batches (`batch["input_ids"]`) and tuple batches from
+    `DatasetGeneratedDataLoader` where the first element is the input tokens.
     """
     for batch in loader:
-        assert isinstance(batch, dict) and "input_ids" in batch, (
-            f"Expected dict batch with 'input_ids', got {type(batch)}"
-        )
-        yield batch["input_ids"].to(device)
+        if isinstance(batch, dict):
+            assert "input_ids" in batch, f"Expected 'input_ids' key, got {list(batch.keys())}"
+            yield batch["input_ids"].to(device)
+        elif isinstance(batch, tuple):
+            assert isinstance(batch[0], Tensor), (
+                f"Expected Tensor first element, got {type(batch[0])}"
+            )
+            yield batch[0].to(device)
+        else:
+            raise AssertionError(f"Unsupported batch type: {type(batch)}")
 
 
 _LAYER_IN_NAME = re.compile(r"(?:^|\.)(\d+)(?:\.|$)")
