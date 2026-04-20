@@ -218,3 +218,27 @@ MODEL_PATH_LARGER=$(ls -t "$RUN_DIR_LARGER"/model_*.pth | head -n 1)
 uv run python -m spd.scripts.validation.compare_to_larger \
     "$MODEL_PATH_CSS" "$MODEL_PATH_LARGER" \
     --n-random-samples=10
+
+# --- 15. Completeness check --------------------------------------------------
+# For each alive component X, run two ablations and log per-(prompt, pos) KL
+# against the original model:
+#  - kl_alive_only: only alive components on, delta OFF, X off
+#  - kl_all: every component on, delta ON, X off
+# Also logs X's CI on each position. Rows where kl_all is small but
+# kl_alive_only is large mean something outside the alive set (delta or an
+# inactive component) is doing X's job in parallel.
+# Run `find_alive_components` first so alive_components.tsv exists.
+
+# numpy 12L (prompt-based target data):
+RUN_DIR=~/spd_out/spd/s-74b94cad
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+
+uv run python -m spd.scripts.validation.completeness \
+    "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" \
+    --prompts="$PROMPTS"
+
+# CSS (dataset-based target data):
+uv run python -m spd.scripts.validation.completeness \
+    "$MODEL_PATH_CSS" "$RUN_DIR_CSS/alive_components.tsv" \
+    --split=train --n-batches=20 --batch-size=32

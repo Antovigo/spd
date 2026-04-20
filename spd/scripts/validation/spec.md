@@ -312,3 +312,38 @@ Outputs: two TSVs, each suffixed with the larger run's folder name (no PNGs are 
 Both files share the same schema as `compare_components.tsv`: `layer, matrix, draw, a_component, b_component, weight_cos_sim, v_cos_sim, u_cos_sim, norm_a, norm_b`. `a_component` is the targeted-model component, `b_component` the index in the larger model.
 
 Only `LinearComponents` modules are matched.
+
+**completeness.py**
+args:
+- the path to a decomposed model
+- the path to a list of alive components (TSV from `find_alive_components.py`)
+--n-batches: number of batches of data to run (default 1; ignored when the target task is a prompts file, which always runs one batch with every prompt)
+--nontarget: use nontarget data (`nontarget_task_config`). Errors if no nontarget config is set.
+--prompts: optional override for the LM `prompts_file`
+--split: optional override for the LM `eval_data_split` (dataset-based tasks only)
+--batch-size: optional override for `config.batch_size` (dataset-based tasks only)
+--output: overrides the output TSV path
+
+Checks whether the alive components from the decomposition capture all of the relevant mechanisms — i.e. for each alive component X, whether X's function is also performed in parallel by either the delta component or some of the inactive (non-alive) components.
+
+For each alive component X, two ablated models are run and each is compared to the original target model:
+- **case a ("alive-only")**: every decomposed module's component mask is 1 on its alive indices and 0 on all non-alive indices, delta is OFF, and X is additionally set to 0. If the alive set is mechanistically complete but X's role is redundant *within* the alive set, KL stays small; if X is uniquely needed (and neither delta nor any inactive component helps, because they are all off), KL is large.
+- **case b ("all-on")**: every component is on (mask=1) and delta is ON (mask=1), except X is set to 0. If KL stays small here but is large in case a, something outside the alive set (delta or an inactive component) is doing X's job in parallel — which is the signal we're looking for.
+
+The causal importance of X on each (prompt, pos) is also saved, so downstream analysis can filter to positions where X actually fired.
+
+Implementation:
+- Loop order is batches outer, components inner. For each batch we do one `spd_model(batch, cache_type="input")` forward pass — its `output` is the original target model's logits (since `mask_infos=None`) and its `cache` feeds `calc_causal_importances` to get X's CI. Then for each alive X we do two forward passes with `mask_infos`: one for case a, one for case b, with X temporarily zeroed in each mask and restored afterwards.
+- Component masks and `mask_infos` are built lazily from the first batch's shape and reused across all batches (the loader guarantees a fixed shape).
+- KL divergence is computed per (batch_example, position) as `KL(softmax(orig_logits) || softmax(ablated_logits))`, same as `effect_of_ablation.py`.
+- Only LM tasks are supported (tokens/positions are LM-specific).
+
+Output TSV (default filename `completeness.tsv`, or `completeness_nontarget.tsv` with `--nontarget`, in the decomposed model's folder). One row per (alive component × prompt × pos), columns:
+- layer (the block number)
+- matrix (e.g. "attn.q_proj" or "mlp.c_fc")
+- component (the component's index)
+- prompt (the prompt's index)
+- pos (the token position)
+- kl_alive_only (KL under case a — only alive components, no delta, X off)
+- kl_all (KL under case b — every component + delta, X off)
+- ci (the component's lower-leaky causal importance at this position)
