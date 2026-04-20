@@ -203,3 +203,17 @@ bash spd/scripts/validation/multilang_per_component.sh \
     "$RUN_DIR_CSS/component_shortlist.txt" \
     "$RUN_DIR_CSS/component_shortlist_output" \
     --batch-size=32 --tokens-per-lang=500000
+
+# --- 14. Compare targeted decomposition against a larger decomposition -------
+# For each alive component in the targeted model, find the component in the
+# larger model with max |cos sim| searched across ALL larger-model components
+# (not restricted to alive). Random baseline re-inits the targeted model's V/U
+# and repeats the match n times. Writes two TSVs next to the targeted run,
+# each suffixed with the larger run's folder name.
+
+RUN_DIR_LARGER=~/spd_out/spd/jose
+MODEL_PATH_LARGER=$(ls -t "$RUN_DIR_LARGER"/model_*.pth | head -n 1)
+
+uv run python -m spd.scripts.validation.compare_to_larger \
+    "$MODEL_PATH_CSS" "$MODEL_PATH_LARGER" \
+    --n-random-samples=10

@@ -282,3 +282,32 @@ Output TSV (default `compare_components.tsv`, or `compare_components_random.tsv`
 Output figure (same naming as the TSV, with `.png` suffix). Grid with rows = matrix types, columns = layer indices. Each cell has four subpanels: mean |weight cos sim| bars per A component, `||U||·||V||` scatter (A on y, B on x), mean |V cos sim|, mean |U cos sim|. A components are sorted per matrix by descending mean |weight cos sim|. In the non-random mode the mean is over a single draw (so it's just the absolute value); in random mode it is over all draws.
 
 Only `LinearComponents` modules are matched.
+
+
+**compare_to_larger.py**
+args:
+- the path to the targeted decomposition (few alive components)
+- the path to a larger decomposition of the same target model
+--alive-components-targeted: optional override for the targeted alive-components TSV (default `<run_dir_targeted>/alive_components.tsv`)
+--n-random-samples: number of random-init draws for the baseline (default 10)
+--random-seed: base seed for the random baseline (default 0)
+--output-dir: overrides the output directory (default: targeted run's folder)
+
+Sanity-checks whether a narrow targeted decomposition has rediscovered substructures already present in a larger "general" decomposition of the same target model. The intended use: the targeted run was trained against a specific task (prompts-based target data) and has only a handful of alive components; the larger run was trained on general data and has many more components (alive and inactive).
+
+For each alive component in the **targeted** model, for each shared `(layer, matrix)`, searches across **all** components of the larger model (not restricted to its alive set) and picks the one with the highest absolute cosine similarity on the flattened rank-one weight (`V[:, i] @ U[i, :]`). Reuses the matching / TSV-writing helpers from `compare_components.py`, so the per-row schema is identical.
+
+Random baseline: the targeted model's `V` and `U` are re-initialized (Kaiming-normal) and the match is repeated `--n-random-samples` times with different seeds, searching against the same larger-model pool. This tells us how high the max |cos sim| gets when a random rank-one slice is matched against a large component pool — the real targeted components should score noticeably higher if they encode task-specific structure that also lives in the larger decomposition.
+
+Procedure:
+1. Load both ComponentModels and the targeted model's alive-components TSV. The two models must share the same set of decomposed module paths.
+2. For each `(layer, matrix)` present in the alive-components TSV, match every alive targeted component against every component of the larger model (indices `0 .. C_larger - 1`).
+3. Re-init the targeted model's V/U `--n-random-samples` times; rerun step 2 each time. All draws are concatenated into the random-baseline TSV.
+
+Outputs: two TSVs, each suffixed with the larger run's folder name (no PNGs are written):
+- `compare_to_larger_<folder-larger>.tsv` — real match (one row per alive component in the targeted model, `draw` always 0).
+- `compare_to_larger_random_<folder-larger>.tsv` — random baseline (one row per `(alive component, draw)`).
+
+Both files share the same schema as `compare_components.tsv`: `layer, matrix, draw, a_component, b_component, weight_cos_sim, v_cos_sim, u_cos_sim, norm_a, norm_b`. `a_component` is the targeted-model component, `b_component` the index in the larger model.
+
+Only `LinearComponents` modules are matched.
