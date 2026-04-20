@@ -23,6 +23,10 @@ module_info:
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
     coeff: 1e-4
+    coeff_warmup_frac: 0.1
+    coeff_peak_multiplier: 4.0
+    coeff_anneal_start_frac: 0.1
+    coeff_anneal_end_frac: 1.0
     pnorm: 1.0
     beta: 0.0
   - classname: "StochasticReconSubsetLoss"
