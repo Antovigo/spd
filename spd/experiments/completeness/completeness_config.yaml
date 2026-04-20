@@ -22,7 +22,7 @@ module_info:
 
 loss_metric_configs:
   - classname: "ImportanceMinimalityLoss"
-    coeff: 3e-4
+    coeff: 1e-4
     pnorm: 1.0
     beta: 0.0
   - classname: "StochasticReconSubsetLoss"
@@ -53,7 +53,7 @@ eval_metric_configs:
   - classname: "CompletenessCIPlots"
 
 pretrained_model_class: "spd.experiments.completeness.models.RedundantCopyTransformer"
-pretrained_model_path: /home/antoine/spd_out/train/t-112fa3d6/completeness.pth
+pretrained_model_path: "/mnt/nw/home/a.vigouroux/spd_out/train/t-3fca69b5/completeness.pth"
 
 task_config:
   task_name: completeness
