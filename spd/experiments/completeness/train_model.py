@@ -46,25 +46,37 @@ def train(
                     wandb.log({"loss": loss.item(), "lr": step_lr}, step=step)
 
 
+def _make_ablation_configs(n_layers: int) -> list[tuple[str, list[bool]]]:
+    configs: list[tuple[str, list[bool]]] = [("all active", [True] * n_layers)]
+    for i in range(n_layers):
+        mask = [False] * n_layers
+        mask[i] = True
+        configs.append((f"only layer {i}", mask))
+    configs.append(("none active", [False] * n_layers))
+    return configs
+
+
+def _forward_with_active_layers(
+    model: RedundantCopyTransformer,
+    tokens: Tensor,
+    active_mask: list[bool],
+) -> Tensor:
+    """Run the model applying only layers where `active_mask[i]` is True. Returns logits at pos 1."""
+    positions = torch.arange(tokens.shape[1], device=tokens.device)
+    x = model.token_embed(tokens) + model.pos_embed(positions)
+    for i, layer in enumerate(model.layers):
+        if active_mask[i]:
+            x = x + layer(x)
+    return model.unembed(model.linear(x))[:, 1, :]
+
+
 def verify_layer_ablations(
     model: RedundantCopyTransformer,
     dataset: CopyTaskDataset,
-    device: str | torch.device,
     n_samples: int = 5,
 ) -> None:
     """Print sample inputs and top-5 output tokens per ablation config."""
     model.eval()
-    n_layers = len(model.layers)
-
-    ablation_configs: list[tuple[str, list[bool]]] = [
-        ("all active", [True] * n_layers),
-    ]
-    for i in range(n_layers):
-        mask = [False] * n_layers
-        mask[i] = True
-        ablation_configs.append((f"only layer {i}", mask))
-    ablation_configs.append(("none active", [False] * n_layers))
-
     tokens, targets = dataset.generate_batch(n_samples)
 
     logger.info(f"Sample inputs (token 0 = value, token 1 = eq_token={dataset.eq_token}):")
@@ -72,17 +84,8 @@ def verify_layer_ablations(
         logger.info(f"  example {j}: tokens={tokens[j].tolist()}, target={targets[j].item()}")
 
     with torch.no_grad():
-        positions = torch.arange(tokens.shape[1], device=device)
-        x_base = model.token_embed(tokens) + model.pos_embed(positions)
-
-        for name, active_mask in ablation_configs:
-            x = x_base.clone()
-            for i, layer in enumerate(model.layers):
-                if active_mask[i]:
-                    x = x + layer(x)
-            logits = model.unembed(model.linear(x))[:, 1, :]
-            probs = logits.softmax(dim=-1)
-
+        for name, active_mask in _make_ablation_configs(len(model.layers)):
+            probs = _forward_with_active_layers(model, tokens, active_mask).softmax(dim=-1)
             logger.info(f"\n  {name}:")
             for j in range(n_samples):
                 top_probs, top_ids = probs[j].topk(5)
@@ -95,34 +98,12 @@ def verify_layer_ablations(
                 )
 
 
-def verify_bulk_accuracy(
-    model: RedundantCopyTransformer,
-    dataset: CopyTaskDataset,
-    device: str | torch.device,
-) -> None:
+def verify_bulk_accuracy(model: RedundantCopyTransformer, dataset: CopyTaskDataset) -> None:
     model.eval()
-    n_layers = len(model.layers)
     tokens, targets = dataset.generate_batch(4096)
-
-    ablation_configs: list[tuple[str, list[bool]]] = [
-        ("all active", [True] * n_layers),
-    ]
-    for i in range(n_layers):
-        mask = [False] * n_layers
-        mask[i] = True
-        ablation_configs.append((f"only layer {i}", mask))
-    ablation_configs.append(("none active", [False] * n_layers))
-
     with torch.no_grad():
-        positions = torch.arange(tokens.shape[1], device=device)
-        x_base = model.token_embed(tokens) + model.pos_embed(positions)
-
-        for name, active_mask in ablation_configs:
-            x = x_base.clone()
-            for i, layer in enumerate(model.layers):
-                if active_mask[i]:
-                    x = x + layer(x)
-            logits = model.unembed(model.linear(x))[:, 1, :]
+        for name, active_mask in _make_ablation_configs(len(model.layers)):
+            logits = _forward_with_active_layers(model, tokens, active_mask)
             acc = (logits.argmax(dim=-1) == targets).float().mean().item()
             logger.info(f"  {name}: accuracy = {acc:.4f}")
 
@@ -177,10 +158,10 @@ def run_train(config: CompletenessTrainConfig, device: str | torch.device) -> No
     logger.info(f"Saved model to {model_path}")
 
     logger.info("Layer ablation verification (sample outputs):")
-    verify_layer_ablations(model, dataset, device)
+    verify_layer_ablations(model, dataset)
 
     logger.info("\nBulk accuracy per ablation:")
-    verify_bulk_accuracy(model, dataset, device)
+    verify_bulk_accuracy(model, dataset)
 
 
 if __name__ == "__main__":

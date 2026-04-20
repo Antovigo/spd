@@ -3,7 +3,7 @@ from typing import Any, override
 
 import einops
 import torch
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from torch import Tensor, nn
 from torch.utils.data import Dataset
 
@@ -67,7 +67,7 @@ class RedundantCopyTransformer(LoadableModule):
     @override
     def forward(
         self,
-        tokens: Float[Tensor, "batch seq"],
+        tokens: Int[Tensor, "batch seq"],
         **_: Any,
     ) -> Float[Tensor, "batch vocab_size"]:
         batch_size = tokens.shape[0]
