@@ -9,25 +9,29 @@ original target model output:
 - case b ("all-on"): every component is on and delta is ON, except X. If KL stays small here,
   something outside the alive set (delta or an inactive component) is doing X's job in parallel.
 
-We also record a "circuit, X on" baseline KL per (prompt, pos): the same case-a setup but with
-no component ablated. Subtracting this from `kl_circuit` isolates X's marginal effect from the
-irreducible imperfection of the circuit approximation. (Case b with no ablation is KL=0 by
-construction since components + delta = target exactly.) The baseline is the same across
-components at a given (prompt, pos), so it's written to its own smaller TSV — one row per
-(prompt, pos) in iteration order, no prompt/pos columns — mergeable via `i = prompt * seq_len + pos`.
+For each sequence (prompt) we record the **mean KL across positions** in each case, plus the
+**max CI of X across positions in the sequence**. We write a row for X on a sequence only when
+`max_ci > --ci-threshold` (default 0.1) — positions are aggregated, so testing on sequences
+where X never fires would be pure noise.
 
-Rows in the main TSV are filtered to positions where X's lower-leaky CI exceeds `--ci-threshold`
-(default 0.1). The baseline TSV is always dense.
+Per batch we also prune components that don't fire **anywhere** in the batch (max CI over the
+whole batch ≤ threshold) — those components are skipped entirely for the batch, saving two
+forward passes each.
+
+We also record a "circuit, X on" baseline mean KL per prompt: the same case-a setup but with no
+component ablated. Subtracting this from `mean_kl_circuit` isolates X's marginal effect from the
+irreducible imperfection of the circuit approximation. (Case b with no ablation is KL=0 by
+construction since components + delta = target exactly.) The baseline is identical across
+components at a given prompt; it's included as a column on each row.
 
 Loop order is batches outer, components inner: per batch we do one target-model forward (for the
-baseline distribution), one circuit no-ablation forward (for the shared baseline), then two
-forward passes per component — one per case.
+baseline distribution and CI), one circuit no-ablation forward (for the shared baseline), then
+up to two forward passes per active component — one per case.
 
 Usage:
     python -m spd.scripts.validation.completeness <model_path> <alive_components_tsv> \\
         [--n-batches=1] [--nontarget] [--prompts=PATH] [--split=SPLIT] \\
-        [--batch-size=N] [--ci-threshold=0.1] \\
-        [--output=PATH] [--output-baseline=PATH]
+        [--batch-size=N] [--ci-threshold=0.1] [--output=PATH]
 """
 
 import csv
@@ -59,12 +63,11 @@ FIELDS = [
     "matrix",
     "component",
     "prompt",
-    "pos",
-    "kl_circuit",
-    "kl_all",
-    "ci",
+    "mean_kl_circuit",
+    "mean_kl_circuit_baseline",
+    "mean_kl_all",
+    "max_ci",
 ]
-BASELINE_FIELDS = ["kl_circuit_baseline"]
 
 
 def _load_alive(
@@ -121,14 +124,13 @@ def completeness(
     batch_size: int | None = None,
     ci_threshold: float = 0.1,
     output: str | None = None,
-    output_baseline: str | None = None,
-) -> tuple[Path, Path]:
-    """Write per-(alive-component, prompt, pos) KL for both ablation cases + the component's CI.
+) -> Path:
+    """Write per-(alive-component, prompt) mean KL for both ablation cases + the component's
+    max CI on that sequence + the shared circuit baseline.
 
-    Rows in the main TSV are filtered to positions where the component's lower-leaky CI exceeds
-    `ci_threshold`. The circuit baseline KL (case a, no component ablated) is saved to a separate
-    TSV with one row per (prompt, pos) in iteration order — no prompt/pos columns, since row index
-    `i = prompt * seq_len + pos` recovers them.
+    A row is written only when X's max CI on that sequence exceeds `ci_threshold`. Within a batch,
+    components whose max CI over the entire batch is below threshold are skipped entirely (no
+    ablation forward passes).
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -153,15 +155,8 @@ def completeness(
     weight_deltas = spd_model.calc_weight_deltas()
 
     default_name = "completeness_nontarget.tsv" if nontarget else "completeness.tsv"
-    baseline_default = (
-        "completeness_baseline_nontarget.tsv" if nontarget else "completeness_baseline.tsv"
-    )
     out_path = Path(output).expanduser() if output else run_dir / default_name
-    baseline_path = (
-        Path(output_baseline).expanduser() if output_baseline else run_dir / baseline_default
-    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    baseline_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_prompts, seq_len = _run(
         spd_model=spd_model,
@@ -174,15 +169,13 @@ def completeness(
         device=device,
         ci_threshold=ci_threshold,
         out_path=out_path,
-        baseline_path=baseline_path,
     )
     logger.info(
         f"Saw {total_prompts} prompts of {seq_len} positions each "
         f"(total: {total_prompts * seq_len})"
     )
     logger.info(f"Saved {out_path}")
-    logger.info(f"Saved {baseline_path}")
-    return out_path, baseline_path
+    return out_path
 
 
 def _run(
@@ -197,10 +190,9 @@ def _run(
     device: torch.device,
     ci_threshold: float,
     out_path: Path,
-    baseline_path: Path,
 ) -> tuple[int, int]:
-    """Stream one TSV row per (alive component, prompt, pos) with ci > threshold, plus a
-    separate baseline TSV with one row per (prompt, pos) in iteration order."""
+    """Stream one TSV row per (alive component, prompt) whose max CI over the sequence exceeds
+    threshold. Each row carries the shared circuit-baseline mean KL for its prompt."""
     total_prompts = 0
     seq_len = 0
     batches_done = 0
@@ -211,15 +203,9 @@ def _run(
     mask_infos_all: Any = None
     first_shape: tuple[int, ...] | None = None
 
-    with (
-        out_path.open("w", newline="") as f,
-        baseline_path.open("w", newline="") as fb,
-        torch.no_grad(),
-    ):
+    with out_path.open("w", newline="") as f, torch.no_grad():
         writer = csv.DictWriter(f, fieldnames=FIELDS, delimiter="\t")
         writer.writeheader()
-        baseline_writer = csv.DictWriter(fb, fieldnames=BASELINE_FIELDS, delimiter="\t")
-        baseline_writer.writeheader()
 
         for batch_idx, batch in zip(tqdm(range(n_to_run), desc="batches"), iterator, strict=False):
             batches_done = batch_idx + 1
@@ -268,14 +254,18 @@ def _run(
             kl_circuit_baseline = (
                 orig_probs * (orig_log_probs - F.log_softmax(logits_circuit_baseline, dim=-1))
             ).sum(dim=-1)
-            kl_circuit_baseline_cpu = kl_circuit_baseline.cpu().tolist()
-            for b in range(batch_size):
-                for t in range(seq_len):
-                    baseline_writer.writerow({"kl_circuit_baseline": kl_circuit_baseline_cpu[b][t]})
+            mean_kl_circuit_baseline = kl_circuit_baseline.mean(dim=-1).cpu().tolist()
 
+            n_skipped = 0
             for module_name, layer, matrix, component in tqdm(
                 alive_rows, desc=f"components (batch {batch_idx})", leave=False
             ):
+                ci = ci_outputs.lower_leaky[module_name][..., component]  # (batch, seq)
+                max_ci_per_prompt = ci.amax(dim=-1)  # (batch,)
+                if max_ci_per_prompt.max() <= ci_threshold:
+                    n_skipped += 1
+                    continue
+
                 mask_a = masks_alive[module_name]
                 mask_b = masks_all[module_name]
                 mask_a[..., component] = 0.0
@@ -290,31 +280,29 @@ def _run(
 
                 kl_a = (orig_probs * (orig_log_probs - F.log_softmax(logits_a, dim=-1))).sum(dim=-1)
                 kl_b = (orig_probs * (orig_log_probs - F.log_softmax(logits_b, dim=-1))).sum(dim=-1)
-                ci = ci_outputs.lower_leaky[module_name][..., component]
-                keep = ci > ci_threshold
-                if not keep.any():
-                    continue
-
-                kl_a_cpu = kl_a.cpu().tolist()
-                kl_b_cpu = kl_b.cpu().tolist()
-                ci_cpu = ci.cpu().tolist()
-                keep_cpu = keep.cpu().tolist()
+                mean_kl_a = kl_a.mean(dim=-1).cpu().tolist()
+                mean_kl_b = kl_b.mean(dim=-1).cpu().tolist()
+                max_ci_cpu = max_ci_per_prompt.cpu().tolist()
                 for b in range(batch_size):
-                    for t in range(seq_len):
-                        if not keep_cpu[b][t]:
-                            continue
-                        writer.writerow(
-                            {
-                                "layer": layer,
-                                "matrix": matrix,
-                                "component": component,
-                                "prompt": prompt_offset + b,
-                                "pos": t,
-                                "kl_circuit": kl_a_cpu[b][t],
-                                "kl_all": kl_b_cpu[b][t],
-                                "ci": ci_cpu[b][t],
-                            }
-                        )
+                    if max_ci_cpu[b] <= ci_threshold:
+                        continue
+                    writer.writerow(
+                        {
+                            "layer": layer,
+                            "matrix": matrix,
+                            "component": component,
+                            "prompt": prompt_offset + b,
+                            "mean_kl_circuit": mean_kl_a[b],
+                            "mean_kl_circuit_baseline": mean_kl_circuit_baseline[b],
+                            "mean_kl_all": mean_kl_b[b],
+                            "max_ci": max_ci_cpu[b],
+                        }
+                    )
+            if n_skipped:
+                logger.info(
+                    f"batch {batch_idx}: skipped {n_skipped}/{len(alive_rows)} components "
+                    f"(max CI ≤ {ci_threshold} over whole batch)"
+                )
 
     if batches_done < n_to_run:
         logger.warning(

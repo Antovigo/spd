@@ -220,13 +220,15 @@ uv run python -m spd.scripts.validation.compare_to_larger \
     --n-random-samples=10
 
 # --- 15. Completeness check --------------------------------------------------
-# For each alive component X, run two ablations and log per-(prompt, pos) KL
+# For each alive component X, run two ablations and log per-sequence mean KL
 # against the original model:
-#  - kl_circuit: only alive components on, delta OFF, X off
-#  - kl_all: every component on, delta ON, X off
-# Also logs X's CI on each position. Rows where kl_all is small but
-# kl_circuit is large mean something outside the alive set (delta or an
-# inactive component) is doing X's job in parallel.
+#  - mean_kl_circuit: only alive components on, delta OFF, X off
+#  - mean_kl_all:     every component on, delta ON, X off
+# Plus mean_kl_circuit_baseline (circuit, no X ablated) and max_ci (max over
+# positions). Rows are filtered to sequences where max_ci > --ci-threshold,
+# and components silent over an entire batch are skipped. Rows where
+# mean_kl_all is small but mean_kl_circuit is large mean something outside the
+# alive set (delta or an inactive component) is doing X's job in parallel.
 # Run `find_alive_components` first so alive_components.tsv exists.
 
 
@@ -255,6 +257,8 @@ uv run python -m spd.scripts.validation.completeness \
 # jose (larger decomposition, dataset-based):
 RUN_DIR_JOSE=~/spd_out/spd/jose
 MODEL_PATH_JOSE=$(ls -t "$RUN_DIR_JOSE"/model_*.pth | head -n 1)
+
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_JOSE" --prompts="$PROMPTS"
 
 uv run python -m spd.scripts.validation.completeness \
     "$MODEL_PATH_JOSE" "$RUN_DIR_JOSE/alive_components.tsv" \
