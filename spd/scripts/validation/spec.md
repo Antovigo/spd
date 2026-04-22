@@ -1,5 +1,3 @@
-Implement the following scripts in spd/scripts/validation. When dealing with paths, all scripts should support "~" for home.
-
 **find_alive_components.py**
 args: 
 - the path to a decomposed model
