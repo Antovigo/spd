@@ -131,15 +131,24 @@ uv run python -m spd.scripts.validation.compare_components "$MODEL_PATH" "$MODEL
 # Compares the numpy+pandas 4L run (s-0c454b30) against each of the single-task
 # runs (numpy-only s-aeab077c, pandas-only s-61fe71f0), and the two single-task
 # runs against each other. Assumes `find_alive_components` has been run on each.
+
 RUN_DIR_BOTH=~/spd_out/spd/s-0c454b30   # numpy + pandas (4L)
 MODEL_PATH_BOTH=$(ls -t "$RUN_DIR_BOTH"/model_*.pth | head -n 1)
+PROMPTS_BOTH=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_BOTH" --prompts="$PROMPTS_BOTH"
 
 RUN_DIR_NUMPY=~/spd_out/spd/s-aeab077c  # numpy only
 MODEL_PATH_NUMPY=$(ls -t "$RUN_DIR_NUMPY"/model_*.pth | head -n 1)
+PROMPTS_NUMPY=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy.txt
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_NUMPY" --prompts="$PROMPTS_NUMPY"
 
 RUN_DIR_PANDAS=~/spd_out/spd/s-61fe71f0 # pandas only
 MODEL_PATH_PANDAS=$(ls -t "$RUN_DIR_PANDAS"/model_*.pth | head -n 1)
+PROMPTS_PANDAS=~/SPD/batch_commands/numpy/reference_4L/prompts/pandas.txt
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_PANDAS" --prompts="$PROMPTS_PANDAS"
 
+
+# Get all cosine sims
 uv run python -m spd.scripts.validation.all_cosine_similarities \
     "$MODEL_PATH_BOTH" "$MODEL_PATH_NUMPY"
 
