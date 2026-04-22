@@ -31,6 +31,12 @@ PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
 # --- 1. Alive components on target (prompt-based) data -----------------------
 uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH" --prompts="$PROMPTS"
 
+# --- 1b. CI heatmap of alive components (assumes $MODEL_PATH = Numpy 4L s-0c454b30) -----
+PROMPTS_LAPTOP=~/Code/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+RUN_DIR_LAPTOP=~/Documents/MATS/spd_out/spd/s-0c454b30 # 4L
+MODEL_PATH_LAPTOP=$(ls -t "$RUN_DIR_LAPTOP"/model_*.pth | head -n 1)
+uv run python -m spd.scripts.validation.plot_alive_components "$MODEL_PATH_LAPTOP" --prompts="$PROMPTS_LAPTOP"
+
 # --- 2. Ablate each alive component on target data ---------------------------
 uv run python -m spd.scripts.validation.effect_of_ablation "$MODEL_PATH" "$RUN_DIR/alive_components.tsv" --prompts="$PROMPTS"
 

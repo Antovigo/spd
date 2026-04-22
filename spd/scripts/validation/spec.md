@@ -18,6 +18,19 @@ The output is a TSV file where each row is an alive component. The columns are:
   
 Unless --output is specified, the TSV file is saved to the decomposed model's folder. The filename is "alive_components.tsv" for target data, and "alive_components_nontarget.tsv" for nontarget data.
 
+**plot_alive_components.py**
+args:
+- the path to a decomposed model
+--ci-thr: CI threshold for a component to be considered alive on a given (prompt, position) (default 0.01)
+--prompts: optional override for the LM `prompts_file`
+--output: overrides the output image path
+
+Prompts-based LM tasks only (the heatmap's y-axis is the decoded `(prompt, position)` token, which has no analogue for dataset-based or completeness tasks).
+
+Runs the decomposed model on a single batch containing every prompt and renders a grid of CI heatmaps — one subplot per decomposed module — arranged with rows = layers and columns = matrix types (columns are ordered by first occurrence in the module list). Each subplot's y-axis is the full `(prompt, position)` sequence, with prompts separated by a thin gray line; the x-axis shows only components whose lower-leaky CI exceeds `--ci-thr` on at least one `(prompt, position)` of the batch, sorted by the tuple `(first-active-pos in prompt 0, first-active-pos in prompt 1, ...)` so that components firing earliest sit on the left. Tile size is fixed, so column widths scale with the number of alive components and the full grid shares one colorbar (CI values clipped to `[0, 1]`, `RdPu` colormap). Also logs per-module alive counts and the grand total.
+
+Unless `--output` is specified, the PNG is saved to the decomposed model's folder as `alive_components.png`.
+
 **nontarget_activity.py**
 args:
 - the path to a decomposed model
