@@ -97,6 +97,16 @@ uv run python -m spd.scripts.validation.swap_test \
 # trained with different seeds (or hyperparams). Run `find_alive_components` on each
 # model first so that `<run_dir>/alive_components.tsv` exists on both sides.
 
+### 4L ###
+PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+
+RUN_DIR=~/spd_out/spd/s-0c454b30 # 4L seed 0
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+
+RUN_DIR_B=~/spd_out/spd/s-30310cbf # 12L seed 1
+MODEL_PATH_B=$(ls -t "$RUN_DIR_B"/model_*.pth | head -n 1)
+
+### 12L ###
 RUN_DIR=~/spd_out/spd/s-74b94cad # 12L seed 0
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
@@ -116,6 +126,28 @@ uv run python -m spd.scripts.validation.compare_components "$MODEL_PATH" "$MODEL
 # is restricted to `len(alive_b)` random indices, averaged over 10 draws.
 uv run python -m spd.scripts.validation.compare_components "$MODEL_PATH" "$MODEL_PATH_B" \
     --random-b --n-random-samples=10
+
+# --- 7b. All pairwise cos sims between alive components of two decompositions ----
+# Compares the numpy+pandas 4L run (s-0c454b30) against each of the single-task
+# runs (numpy-only s-aeab077c, pandas-only s-61fe71f0), and the two single-task
+# runs against each other. Assumes `find_alive_components` has been run on each.
+RUN_DIR_BOTH=~/spd_out/spd/s-0c454b30   # numpy + pandas (4L)
+MODEL_PATH_BOTH=$(ls -t "$RUN_DIR_BOTH"/model_*.pth | head -n 1)
+
+RUN_DIR_NUMPY=~/spd_out/spd/s-aeab077c  # numpy only
+MODEL_PATH_NUMPY=$(ls -t "$RUN_DIR_NUMPY"/model_*.pth | head -n 1)
+
+RUN_DIR_PANDAS=~/spd_out/spd/s-61fe71f0 # pandas only
+MODEL_PATH_PANDAS=$(ls -t "$RUN_DIR_PANDAS"/model_*.pth | head -n 1)
+
+uv run python -m spd.scripts.validation.all_cosine_similarities \
+    "$MODEL_PATH_BOTH" "$MODEL_PATH_NUMPY"
+
+uv run python -m spd.scripts.validation.all_cosine_similarities \
+    "$MODEL_PATH_BOTH" "$MODEL_PATH_PANDAS"
+
+uv run python -m spd.scripts.validation.all_cosine_similarities \
+    "$MODEL_PATH_NUMPY" "$MODEL_PATH_PANDAS"
 
 ###################
 # CSS decomposition #

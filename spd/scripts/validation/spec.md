@@ -295,6 +295,34 @@ Output figure (same naming as the TSV, with `.png` suffix). Grid with rows = mat
 Only `LinearComponents` modules are matched.
 
 
+**all_cosine_similarities.py**
+args:
+- the path to the first decomposed model (run A)
+- the path to the second decomposed model (run B)
+--alive-components-a: optional override for run A's alive-components TSV (default `<run_dir_a>/alive_components.tsv`)
+--alive-components-b: optional override for run B's alive-components TSV (default `<run_dir_b>/alive_components.tsv`)
+--random-seed: seed for the random-init baseline (default 0)
+--output: overrides the output TSV path (default `<run_dir_a>/all_cosine_similarities_<folder-b>.tsv`)
+
+Computes the full pairwise cosine-similarity matrix between alive components of two decompositions, with no argmax / Hungarian / top-k filter — every `(a_component, b_component)` pair within each shared `(layer, matrix)` is written. For each pair, three cosine similarities are reported:
+- `weight_cos_sim` — on the flattened rank-one weight `V[:, i] @ U[i, :]`
+- `v_cos_sim` — on the `V` vector
+- `u_cos_sim` — on the `U` vector
+
+A similarity is forced to `0.0` whenever either side's vector has zero norm (same convention as `compare_matched_components` / `compare_components`).
+
+Double-negative correction: when both `v_cos_sim` and `u_cos_sim` are negative, both signs are flipped to positive before writing. The two sign flips cancel in the rank-one outer product `V @ U`, so the two components are equivalent up to a shared sign on each side; reporting both as negative would understate the actual alignment.
+
+Both models must share the same set of decomposed module paths (asserted). Only `LinearComponents` modules are compared. The shared `(layer, matrix)` set is taken as the intersection of the two alive-components TSVs.
+
+Random baseline: the script also computes the same pairwise cosine similarities against a Kaiming-normal-reinitialised copy of model B (same shapes, same alive indices — only the values in V/U are resampled, seeded by `--random-seed`). The baseline cos sims are written as extra columns on each row, so every row carries both the real and the baseline numbers. This tells us how high the cosine similarities would be if model B had never been trained.
+
+Output TSV (default suffixed with model B's folder name so several B-targets can coexist next to run A), columns:
+- layer, matrix
+- a_component, b_component
+- weight_cos_sim, v_cos_sim, u_cos_sim
+- weight_cos_sim_random, v_cos_sim_random, u_cos_sim_random (same quantities against the random-init B)
+
 **compare_to_larger.py**
 args:
 - the path to the targeted decomposition (few alive components)
