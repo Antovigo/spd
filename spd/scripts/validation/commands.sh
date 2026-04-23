@@ -103,7 +103,7 @@ PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
 RUN_DIR=~/spd_out/spd/s-0c454b30 # 4L seed 0
 MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
 
-RUN_DIR_B=~/spd_out/spd/s-30310cbf # 12L seed 1
+RUN_DIR_B=~/spd_out/spd/s-30310cbf # 4L seed 1
 MODEL_PATH_B=$(ls -t "$RUN_DIR_B"/model_*.pth | head -n 1)
 
 ### 12L ###
@@ -260,6 +260,11 @@ bash spd/scripts/validation/multilang_per_component.sh \
 
 RUN_DIR_LARGER=~/spd_out/spd/jose
 MODEL_PATH_LARGER=$(ls -t "$RUN_DIR_LARGER"/model_*.pth | head -n 1)
+
+# Numpy (4L)
+uv run python -m spd.scripts.validation.compare_to_larger \
+    "$MODEL_PATH_BOTH" "$MODEL_PATH_LARGER" \
+    --n-random-samples=10
 
 # CSS
 uv run python -m spd.scripts.validation.compare_to_larger \
