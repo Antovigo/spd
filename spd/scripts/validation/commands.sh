@@ -133,6 +133,7 @@ uv run python -m spd.scripts.validation.compare_components "$MODEL_PATH" "$MODEL
 # runs against each other. Assumes `find_alive_components` has been run on each.
 
 RUN_DIR_BOTH=~/spd_out/spd/s-0c454b30   # numpy + pandas (4L)
+RUN_DIR_BOTH=~/spd_out/spd/s-30310cbf   # numpy + pandas (4L)
 MODEL_PATH_BOTH=$(ls -t "$RUN_DIR_BOTH"/model_*.pth | head -n 1)
 PROMPTS_BOTH=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
 uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_BOTH" --prompts="$PROMPTS_BOTH"
