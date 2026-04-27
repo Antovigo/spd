@@ -64,17 +64,19 @@ def resolve_task_config(
         assert split_override is None, "--split is LM-only; not supported for completeness"
         return task_config
 
+    assert prompts_override is None or split_override is None, (
+        "--prompts and --split are mutually exclusive"
+    )
+
     if prompts_override is not None:
-        assert task_config.prompts_file is not None, (
-            "--prompts was specified but the resolved task config is not prompts-based"
+        task_config = task_config.model_copy(
+            update={"prompts_file": prompts_override, "dataset_name": None}
         )
-        task_config = task_config.model_copy(update={"prompts_file": prompts_override})
 
     if split_override is not None:
-        assert task_config.prompts_file is None, (
-            "--split was specified but the resolved task config is prompts-based"
+        task_config = task_config.model_copy(
+            update={"eval_data_split": split_override, "prompts_file": None}
         )
-        task_config = task_config.model_copy(update={"eval_data_split": split_override})
     return task_config
 
 

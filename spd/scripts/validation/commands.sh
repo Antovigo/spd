@@ -272,6 +272,10 @@ uv run python -m spd.scripts.validation.compare_to_larger \
     "$MODEL_PATH_CSS" "$MODEL_PATH_LARGER" \
     --n-random-samples=10
 
+# Active components on numpy/pandas for Jose
+PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_LARGER" --prompts="$PROMPTS"
+
 # --- 15. Completeness check --------------------------------------------------
 # For each alive component X, run two ablations and log per-sequence mean KL
 # against the original model:
