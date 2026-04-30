@@ -11,7 +11,7 @@ neuronpedia_outputs/
 .env
 .vscode/settings.json
 
-notebooks/
+#notebooks/
 wandb/
 .data/
 .checkpoints/
