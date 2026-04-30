@@ -1,0 +1,144 @@
+# pile_llama_simple_mlp 4 layers — naive (standard) SPD decomposition on CSS code, no nontarget batch
+# With UnmaskedReconLoss to ensure dead components don't interfere
+# --- WandB ---
+wandb_project: spd
+wandb_run_name: null
+wandb_run_name_prefix: ""
+sync_checkpoints_to_wandb: false
+label: "css_naive"
+
+# --- General ---
+seed: 0
+n_mask_samples: 1
+ci_config:
+  mode: global
+  fn_type: global_shared_transformer
+  simple_transformer_ci_cfg:
+    d_model: 1024
+    n_blocks: 2
+    mlp_hidden_dim: [2048]
+    attn_config:
+      n_heads: 4
+      max_len: 512
+      rope_base: 10000
+sampling: binomial # was continuous
+sigmoid_type: leaky_hard
+module_info:
+  - module_pattern: h.*.mlp.c_fc
+    C: 400
+  - module_pattern: h.*.mlp.down_proj
+    C: 512
+  - module_pattern: h.*.attn.q_proj
+    C: 126
+  - module_pattern: h.*.attn.k_proj
+    C: 96
+  - module_pattern: h.*.attn.v_proj
+    C: 256
+  - module_pattern: h.*.attn.o_proj
+    C: 256
+identity_module_info: null
+use_delta_component: true
+
+# --- Loss config ---
+loss_metric_configs:
+  - classname: ImportanceMinimalityLoss
+    coeff: 1e-4
+    pnorm: 2.0
+    beta: 0.5
+    p_anneal_start_frac: 0.1
+    p_anneal_final_p: 0.4
+    p_anneal_end_frac: 1.0
+    eps: 1.0e-12
+    coeff_warmup_frac: 0.1
+    coeff_peak_multiplier: 10.0
+    coeff_anneal_start_frac: 0.1
+    coeff_anneal_end_frac: 1.0
+  - classname: StochasticReconSubsetLoss
+    coeff: 1
+    routing:
+      type: uniform_k_subset
+  - classname: PersistentPGDReconLoss
+    coeff: 1
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 1
+        fn_type: constant
+    scope:
+      type: per_batch_per_position
+    use_sigmoid_parameterization: false
+    n_warmup_steps: 2
+    start_frac: 0.2
+  - classname: UnmaskedReconLoss
+    coeff: 0.2
+output_loss_type: kl
+
+# --- Training ---
+lr_schedule:
+  start_val: 1e-4
+  warmup_pct: 0.0
+  final_val_frac: 0.1
+  fn_type: cosine
+steps: 50_000
+
+batch_size: 64
+eval_batch_size: 64
+
+grad_clip_norm_components: 0.01
+grad_clip_norm_ci_fns: null
+component_weight_decay: 0.1
+autocast_bf16: true
+
+# --- Faithfulness Warmup ---
+faithfulness_warmup_steps: 0
+
+# --- Logging & Saving ---
+train_log_freq: 100
+eval_freq: 1000
+slow_eval_freq: 4000
+n_eval_steps: 10
+slow_eval_on_first_step: true
+save_freq: null
+ci_alive_threshold: 0.01
+
+# --- Eval Metrics ---
+eval_metric_configs:
+  - classname: CI_L0
+    groups:
+      total:
+        - "*"
+  - classname: PGDReconLoss
+    init: random
+    step_size: 0.1
+    n_steps: 20
+    mask_scope: shared_across_batch
+  - classname: TargetReconLoss
+    rounding_threshold: 0.01
+  - classname: WeightMagnitude
+  - classname: CIHistograms
+    n_batches_accum: 1
+  - classname: CIMeanPerComponent
+  - classname: ComponentActivationDensity
+
+# --- Pretrained model info ---
+pretrained_model_class: spd.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
+pretrained_model_path: null
+pretrained_model_name: wandb:goodfire/spd/runs/t-9d2b8f02 # reference model for paper
+pretrained_model_output_attr: idx_0
+tokenizer_name: EleutherAI/gpt-neox-20b
+
+# --- Task Specific (target data: CSS from Pile GitHub subset) ---
+task_config:
+  task_name: lm
+  dataset_name: Antovigo/pile-css-chunks
+  max_seq_len: 512
+  column_name: input_ids
+  is_tokenized: true
+  streaming: false
+  train_data_split: train
+  eval_data_split: validation

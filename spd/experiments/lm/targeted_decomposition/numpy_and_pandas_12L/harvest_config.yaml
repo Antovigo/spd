@@ -1,0 +1,10 @@
+config:
+  method_config:
+    type: SPDHarvestConfig
+    wandb_path: antvig-pibbss/spd/runs/s-74b94cad
+  n_batches: 2000
+n_gpus: 1
+partition: compute
+time: "12:00:00"
+merge_time: "04:00:00"
+merge_mem: "30G"
