@@ -161,18 +161,25 @@ def gather_all_tensors(tensor: Tensor) -> list[Tensor]:
     Requires identical shapes across ranks. The local rank's entry is replaced with the
     original tensor to preserve autograd through this rank's contribution. In
     non-distributed mode returns `[tensor]`.
+
+    Honors `use_reduction_group(...)` — when set, gather across that subgroup's
+    ranks instead of the world. The returned list's local-rank index follows the
+    GROUP-local rank, not the global rank.
     """
     state = get_distributed_state()
     if state is None:
         return [tensor]
 
     tensor = tensor.contiguous()
+    group = _reduction_group.get()
+    n = state.world_size if group is None else dist.get_world_size(group)
+    local_rank = state.rank if group is None else dist.get_group_rank(group, state.rank)
 
-    gathered = [torch.zeros_like(tensor) for _ in range(state.world_size)]
-    torch.distributed.all_gather(gathered, tensor)
+    gathered = [torch.zeros_like(tensor) for _ in range(n)]
+    torch.distributed.all_gather(gathered, tensor, group=group)
 
     # Replace our rank's entry with the original to preserve autograd
-    gathered[state.rank] = tensor
+    gathered[local_rank] = tensor
 
     return gathered
 
