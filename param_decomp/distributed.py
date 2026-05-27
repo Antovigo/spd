@@ -5,7 +5,9 @@ reads cached state and runs collectives.
 """
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Literal
 
@@ -74,19 +76,54 @@ def sync_across_processes() -> None:
         dist.barrier()
 
 
+# Reduction-scope contextvar: when set, all_reduce / broadcast_tensor /
+# sum_metrics_across_ranks operate on this subgroup instead of the world. Used by
+# 3-pool eval to confine reductions to the PPGD pool while CI + LW pools barrier
+# elsewhere. Default None = global group, no behavior change for 1-pool callers.
+_reduction_group: ContextVar["dist.ProcessGroup | None"] = ContextVar(
+    "_reduction_group", default=None
+)
+
+
+@contextmanager
+def use_reduction_group(group: "dist.ProcessGroup | None") -> Iterator[None]:
+    """Scope a `dist.ProcessGroup` for collective ops in `param_decomp.distributed`.
+
+    Inside the `with` block, `all_reduce`, `broadcast_tensor`,
+    `sum_metrics_across_ranks`, and `avg_metrics_across_ranks` use `group` instead
+    of the default global group. Outside the block, behavior is unchanged.
+
+    Pass `group=None` to keep the global group (useful as a no-op default).
+    """
+    token = _reduction_group.set(group)
+    try:
+        yield
+    finally:
+        _reduction_group.reset(token)
+
+
 def all_reduce(
     tensor: torch.Tensor, op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM
 ) -> torch.Tensor:
-    """All-reduce `tensor` across ranks in place; no-op in non-distributed mode."""
+    """All-reduce `tensor` across ranks in place; no-op in non-distributed mode.
+
+    Honors `use_reduction_group(...)` if active — otherwise uses the global group.
+    """
     if is_distributed():
-        dist.all_reduce(tensor, op=op)
+        dist.all_reduce(tensor, op=op, group=_reduction_group.get())
     return tensor
 
 
 def broadcast_tensor(tensor: Tensor) -> Tensor:
-    """Broadcast `tensor` from rank 0 to every other rank in place."""
+    """Broadcast `tensor` from rank 0 to every other rank in place.
+
+    Honors `use_reduction_group(...)` if active — `src=0` refers to the first rank
+    of the active group when one is set.
+    """
     if is_distributed():
-        dist.broadcast(tensor, src=0)
+        group = _reduction_group.get()
+        src = 0 if group is None else dist.get_global_rank(group, 0)
+        dist.broadcast(tensor, src=src, group=group)
     return tensor
 
 
@@ -106,14 +143,16 @@ def avg_metrics_across_ranks(
     """Average each metric value across all ranks.
 
     All ranks must pass the same keys; non-distributed runs return `metrics` unchanged.
+    Honors `use_reduction_group(...)` for the divisor.
     """
     state = get_distributed_state()
     if state is None:
         return metrics
-    world_size = state.world_size
-    assert world_size > 0, "World size must be greater than 0"
+    group = _reduction_group.get()
+    n = state.world_size if group is None else dist.get_world_size(group)
+    assert n > 0, "Reduction-group size must be greater than 0"
     sum_metrics = sum_metrics_across_ranks(metrics, device)
-    return {k: v / world_size for k, v in sum_metrics.items()}
+    return {k: v / n for k, v in sum_metrics.items()}
 
 
 def gather_all_tensors(tensor: Tensor) -> list[Tensor]:

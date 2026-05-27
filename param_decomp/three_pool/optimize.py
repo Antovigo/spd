@@ -64,7 +64,7 @@ from param_decomp.metrics.persistent_pgd_recon import (
     validate_pgd_scope,
 )
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
-from param_decomp.optimize import load_optimizer_state_by_name, optimizer_state_by_name
+from param_decomp.optimize import EvalLoop, load_optimizer_state_by_name, optimizer_state_by_name
 from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.schedule import get_scheduled_value
 from param_decomp.sdpa_strict import verify_flash_attention_available
@@ -524,9 +524,18 @@ class ThreePoolTrainer:
         train_loader: DataLoader[Any],
         sink: ThreePoolRunSink,
         cadence: Cadence,
+        eval_loop: EvalLoop | None = None,
         profiler: PhaseProfiler | None = None,
     ) -> None:
-        """Advance training from ``self.step`` to ``self.pd_config.steps``."""
+        """Advance training from ``self.step`` to ``self.pd_config.steps``.
+
+        When ``eval_loop`` is non-None, runs a 3-pool eval pass on cadence:
+        CI pool ships full ``CIOutputs`` to PPGD; PPGD assembles a
+        ``MetricContext`` and runs every ``eval_loop.metric``; LW pool
+        barriers through. Metric reductions are scoped to the PPGD pool
+        subgroup via :func:`use_reduction_group` so non-PPGD pools don't
+        block on them. See :mod:`param_decomp.three_pool.eval_step`.
+        """
         trace("Trainer.run: enter")
         pd_config = self.pd_config
         layout = self.layout
@@ -539,6 +548,16 @@ class ThreePoolTrainer:
         # Loader skip-replay (resumed mid-trajectory).
         for _ in range(self.step):
             next(train_iterator)
+
+        # Eval setup. Only the PPGD pool runs eval metrics; bind there only —
+        # CI / LW pools never touch metric state. The eval iterator runs on
+        # every rank so all pools advance the loader in lock-step (CI + PPGD
+        # each consume the full eval batch and slice internally, mirroring
+        # the train data-handling contract; LW reads but discards).
+        eval_iterator = loop_dataloader(eval_loop.loader) if eval_loop is not None else None
+        if eval_loop is not None and layout.my_pool == "ppgd":
+            for m in eval_loop.metrics:
+                m.bind(model=self.component_model, device=str(device))
 
         # Peek first batch (after any skip) for PPGD source-shape sizing.
         trace("Trainer.run: first_batch peek: enter")
@@ -762,6 +781,26 @@ class ThreePoolTrainer:
                         sink=sink,
                     )
 
+                if eval_loop is not None and eval_loop.should_eval(step):
+                    from param_decomp.three_pool.eval_step import run_eval_step
+
+                    assert eval_iterator is not None
+                    run_eval_step(
+                        eval_iterator,
+                        n_steps=eval_loop.n_steps,
+                        slow_step=eval_loop.should_run_slow_eval(step),
+                        metrics=list(eval_loop.metrics),
+                        layout=layout,
+                        step=step,
+                        device=str(device),
+                        component_model=self.component_model,
+                        config=pd_config,
+                        runtime_config=self.runtime_config,
+                        reconstruction_loss=runtime.reconstruction_loss,
+                        c_per_site=runtime.c_per_site,
+                        sink=sink,
+                    )
+
                 if cadence.should_save(step):
                     snap = self.snapshot()
                     if snap is not None:
@@ -823,6 +862,7 @@ def optimize_three_pool(
     three_pool_config: ThreePoolConfig,
     cadence: Cadence,
     sink: ThreePoolRunSink,
+    eval_loop: EvalLoop | None = None,
     profiler: PhaseProfiler | None = None,
 ) -> None:
     """Train a ComponentModel under the 3-pool strategy.
@@ -838,7 +878,7 @@ def optimize_three_pool(
         runtime_config=runtime_config,
         three_pool_config=three_pool_config,
     )
-    trainer.run(train_loader, sink, cadence, profiler=profiler)
+    trainer.run(train_loader, sink, cadence, eval_loop=eval_loop, profiler=profiler)
 
 
 def _layout_fingerprint(layout: ThreePoolLayout) -> dict[str, Any]:

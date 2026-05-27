@@ -159,9 +159,7 @@ def step_ppgd(
         # Reduce sources alongside V/U. Sign-PGD makes SUM-vs-AVG equivalent
         # for the source step (sign(SUM) == sign(AVG)); reducing here keeps
         # source state consistent across PPGD ranks for the step below.
-        layout.sum_reduce_ppgd_grads(
-            [*v_grads.values(), *u_grads.values(), *source_grads.values()]
-        )
+        layout.sum_reduce_ppgd_grads([*v_grads.values(), *u_grads.values(), *source_grads.values()])
     with p.phase("pgd/D6b_apply_source_step"):
         ppgd_state.apply_source_step_from_grads(source_grads)
     with p.phase("pgd/D7_send_g_vu_to_lw"):
@@ -287,9 +285,7 @@ def _autograd_grad_for_vu_ci_and_sources(
     all_sites: list[str],
     sources: dict[str, Tensor],
     p: PhaseProfiler,
-) -> tuple[
-    dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], dict[str, Tensor]
-]:
+) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], dict[str, Tensor]]:
     """Phase ppgd/D5. One ``torch.autograd.grad`` for V/U + CI + PPGD sources.
 
     Returning all four gradient sets from a single backward lets the caller
@@ -307,9 +303,7 @@ def _autograd_grad_for_vu_ci_and_sources(
             params.append(component_model.components[s].U)
         ci_list = [ci_scratch[s] for s in all_sites]
         source_list = [sources[k] for k in source_keys]
-        grads = torch.autograd.grad(
-            total_ppgd, params + ci_list + source_list, retain_graph=False
-        )
+        grads = torch.autograd.grad(total_ppgd, params + ci_list + source_list, retain_graph=False)
 
     n_sites = len(all_sites)
     v_grads = {s: grads[2 * i] for i, s in enumerate(all_sites)}
@@ -325,9 +319,7 @@ def _autograd_grad_for_vu_ci_and_sources(
         )
         assert ci_grads[s].shape == ci_scratch[s].shape, f"ci_grad[{s!r}] shape mismatch"
     for k in source_keys:
-        assert source_grads[k].shape == sources[k].shape, (
-            f"source_grad[{k!r}] shape mismatch"
-        )
+        assert source_grads[k].shape == sources[k].shape, f"source_grad[{k!r}] shape mismatch"
     return v_grads, u_grads, ci_grads, source_grads
 
 

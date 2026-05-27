@@ -321,7 +321,9 @@ def render(
         )
     )
     top_w = top_node.weight_ms
-    out.append(f"heaviest path node (by GPU when present): {top_node.pool}/{top_node.phase} ({top_w:.1f}ms)")
+    out.append(
+        f"heaviest path node (by GPU when present): {top_node.pool}/{top_node.phase} ({top_w:.1f}ms)"
+    )
     out.append(f"cross-pool jumps on the path: {len(cross_jumps)}")
     out.append("")
     out.append("per-pool step spans:")

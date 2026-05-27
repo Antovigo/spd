@@ -336,6 +336,10 @@ def _fresh_main(
         three_sink = init_pd_run(
             cfg, sink_class=ThreePoolSink, group=group, tags=tags, run_id=run_id
         )
+        # Multi-pool eval mirrors the train data-handling contract: full eval
+        # batch on every rank, sliced internally by each pool. So we pass
+        # dist_state=None.
+        three_eval_loop = _build_eval_loop(cfg, device, dist_state=None)
         try:
             three_trainer = ThreePoolTrainer(
                 target_model=target_model,
@@ -345,7 +349,7 @@ def _fresh_main(
                 runtime_config=cfg.runtime,
                 three_pool_config=cfg.three_pool,
             )
-            three_trainer.run(train_loader, three_sink, cfg.cadence)
+            three_trainer.run(train_loader, three_sink, cfg.cadence, eval_loop=three_eval_loop)
         finally:
             three_sink.finish()
         return
@@ -433,6 +437,7 @@ def _resume_main(
                 three_sink.out_dir,
                 ResumeProvenance(parent_run_dir=resume_cfg.from_run, parent_step=resolved_step),
             )
+        three_eval_loop = _build_eval_loop(effective_cfg, device, dist_state=None)
         try:
             assert isinstance(snapshot, ThreePoolTrainingState), (
                 f"3-pool resume needs ThreePoolTrainingState; got {type(snapshot).__name__}"
@@ -443,7 +448,9 @@ def _resume_main(
                 run_batch=run_batch,
                 reconstruction_loss=recon_loss_kl,
             )
-            three_trainer.run(train_loader, three_sink, effective_cfg.cadence)
+            three_trainer.run(
+                train_loader, three_sink, effective_cfg.cadence, eval_loop=three_eval_loop
+            )
         finally:
             three_sink.finish()
         return

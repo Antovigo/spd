@@ -50,6 +50,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from param_decomp._trace import trace
+from param_decomp.component_model import CIOutputs
 
 # All cross-pool tensors are cast to this dtype on the wire (halves bytes vs fp32).
 # Downstream pools run inside bf16 autocast already; CI grads and V/U grads
@@ -594,6 +595,36 @@ class ThreePoolLayout:
                 buffers.append(packed)
         return works, buffers
 
+    def send_ci_eval_to_ppgd(self, ci: CIOutputs) -> None:
+        """CI → PPGD eval: synchronous send of full CIOutputs (all three dicts —
+        lower_leaky, upper_leaky, pre_sigmoid) sliced to each PPGD rank within
+        my CI slice.
+
+        Training-time only ships ``lower_leaky``; eval ships all three so any
+        metric reading ``ctx.ci`` works without a per-metric audit. Synchronous
+        because eval is rare and overlap has no value here.
+
+        Pack layout per send (must match ``recv_ci_eval_from_ci_pool``): three
+        contiguous blocks in order (lower_leaky, upper_leaky, pre_sigmoid). Each
+        block has, for each site in ``self.world.all_sites`` order, ``b_pp *
+        seq_len * C_s`` contiguous ``_WIRE_DTYPE`` elements.
+        """
+        assert self.my_pool == "ci" and self.my_ci_slice_idx is not None
+        my_ppgd_slice_idxs = self.world.ppgd_slice_idxs_for_ci_slice(self.my_ci_slice_idx)
+
+        with _time_nccl_op("send_ci_eval_to_ppgd"):
+            for ppgd_slice_idx in my_ppgd_slice_idxs:
+                target = self.world.ppgd_ranks[ppgd_slice_idx]
+                sub = self.world.ppgd_sub_slice_within_ci(ppgd_slice_idx)
+                parts: list[Tensor] = []
+                for d in (ci.lower_leaky, ci.upper_leaky, ci.pre_sigmoid):
+                    parts.extend(
+                        d[site][sub].detach().to(_WIRE_DTYPE).contiguous().flatten()
+                        for site in self.world.all_sites
+                    )
+                packed = torch.cat(parts)
+                dist.send(packed, dst=target)
+
     def recv_g_ci_from_layerwise(
         self,
         site_to_c: dict[str, int],
@@ -950,6 +981,42 @@ class ThreePoolLayout:
             b=b_pp,
             seq_len=seq_len,
         )
+
+    def recv_ci_eval_from_ci_pool(
+        self,
+        site_to_c: dict[str, int],
+        seq_len: int,
+        device: torch.device,
+    ) -> CIOutputs:
+        """PPGD ← CI eval: synchronous recv of full ``CIOutputs`` from the CI
+        rank that owns my slice.
+
+        Pack layout (must match ``send_ci_eval_to_ppgd``): three contiguous
+        blocks in order (lower_leaky, upper_leaky, pre_sigmoid). Each block has,
+        for each site in ``self.world.all_sites`` order, ``b_pp * seq_len *
+        C_s`` contiguous ``_WIRE_DTYPE`` elements. Returned dicts are no-copy
+        views into the packed buffer.
+        """
+        assert self.my_pool == "ppgd" and self.my_ppgd_slice_idx is not None
+        src_ci_slice = self.world.ci_slice_of_ppgd_slice(self.my_ppgd_slice_idx)
+        src = self.world.ci_ranks[src_ci_slice]
+        b_pp = self.world.batch_local_ppgd
+
+        per_block_numel = sum(b_pp * seq_len * site_to_c[s] for s in self.world.all_sites)
+        packed = torch.empty(3 * per_block_numel, device=device, dtype=_WIRE_DTYPE)
+        with _time_nccl_op("recv_ci_eval_from_ci_pool"):
+            dist.recv(packed, src=src)
+
+        out: list[dict[str, Tensor]] = [{}, {}, {}]
+        offset = 0
+        for block_idx in range(3):
+            for site in self.world.all_sites:
+                c_s = site_to_c[site]
+                numel = b_pp * seq_len * c_s
+                out[block_idx][site] = packed[offset : offset + numel].view(b_pp, seq_len, c_s)
+                offset += numel
+        assert offset == packed.numel(), f"unpack mismatch: {offset} of {packed.numel()}"
+        return CIOutputs(lower_leaky=out[0], upper_leaky=out[1], pre_sigmoid=out[2])
 
     def send_g_ci_to_ci_pool_ppgd(self, g_ci_full: dict[str, Tensor]) -> None:
         """PPGD → CI: send full-model CI grads (PPGD batch slice) to the CI
