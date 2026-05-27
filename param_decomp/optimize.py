@@ -49,7 +49,7 @@ from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.dispatch import instantiate_metrics
 from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
-from param_decomp.run_sink import RunSink
+from param_decomp.run_sink import OnePoolRunSink
 from param_decomp.schedule import get_scheduled_value
 from param_decomp.torch_helpers import bf16_autocast, loop_dataloader
 from param_decomp.training_state import TrainingState
@@ -491,7 +491,7 @@ class Trainer:
     def run(
         self,
         train_loader: DataLoader[Any],
-        sink: RunSink,
+        sink: OnePoolRunSink,
         cadence: Cadence,
         eval_loop: EvalLoop | None = None,
     ) -> None:
@@ -665,5 +665,3 @@ class Trainer:
 
         if is_main_process():
             logger.info("Finished training loop.")
-
-
