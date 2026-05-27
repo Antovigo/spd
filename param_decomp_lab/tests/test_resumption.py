@@ -180,7 +180,7 @@ def test_keep_last_n_checkpoints_prunes_older_pairs(tmp_path: Path) -> None:
     Default (``None``) keeps everything — covered by every other test in this file.
     """
     run_dir = tmp_path / "run"
-    sink = RunSink.local(run_dir, keep_last_n_checkpoints=1)
+    sink = OnePoolSink.local(run_dir, keep_last_n_checkpoints=1)
 
     # save_every=2 + steps=4 → saves at step 2 and step 4 (final).
     trainer = Trainer(
