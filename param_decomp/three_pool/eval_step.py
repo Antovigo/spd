@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
@@ -189,12 +190,27 @@ def run_eval_step(
                     for m in active:
                         with profiler.phase(f"eval/step_{i}/metric_update/{type(m).__name__}"):
                             m.update(ctx)
+            # Only PPGD computes metrics. Ship `results` to rank 0 via the
+            # all-rank cross_pool_p2p_group so rank 0 (the only real sink)
+            # can log. Non-PPGD ranks pass `None` into the broadcast and
+            # receive the dict from the PPGD pool leader.
+            ppgd_leader_rank = layout.world.ppgd_ranks[0]
             if active:
                 with profiler.phase("eval/collect_metric_outputs"):
                     results = collect_metric_outputs(active)
-                if layout.my_is_pool_leader:
-                    sink.console(*(f"eval/{k}: {v}" for k, v in results.items()))
-                    sink.log({f"eval/{k}": v for k, v in results.items()}, step=step)
+            else:
+                results = None
+            payload: list[dict[str, Any] | None] = [
+                results if layout.my_rank == ppgd_leader_rank else None
+            ]
+            dist.broadcast_object_list(
+                payload, src=ppgd_leader_rank, group=layout.world.cross_pool_p2p_group
+            )
+            if layout.my_rank == 0:
+                rank0_results = payload[0]
+                assert rank0_results is not None
+                sink.console(*(f"eval/{k}: {v}" for k, v in rank0_results.items()))
+                sink.log({f"eval/{k}": v for k, v in rank0_results.items()}, step=step)
         with profiler.phase("eval/post_barrier"):
             sync_across_processes()
         torch.cuda.empty_cache()
