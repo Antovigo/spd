@@ -414,7 +414,7 @@ class TwoPoolTrainer:
                 if cadence.save_every is not None and step > 0 and step % cadence.save_every == 0:
                     # All ranks call; the sink (resume-aware variant) decides per-rank
                     # behaviour. The default rank-0-only `RunSink` is a no-op elsewhere.
-                    sink.checkpoint(self.snapshot())
+                    sink.checkpoint(self.snapshot(), final=False)
 
                 if profiler is not None:
                     profiler.step()

@@ -32,12 +32,14 @@ class OnePoolRunSink(Protocol):
         """Emit free-form lines (e.g. tqdm-friendly progress)."""
         ...
 
-    def checkpoint(self, snapshot: TrainingState) -> None:
+    def checkpoint(self, snapshot: TrainingState, *, final: bool) -> None:
         """Persist a 1-pool training state.
 
         The lab sink writes ``snapshot.component_model`` to
         ``model_<step>.pth`` (for downstream tools) and the whole ``snapshot``
-        to ``training_<step>.pth`` (for resumption).
+        to ``training_<step>.pth`` (for resumption). ``final=True`` marks the
+        end-of-training save — the lab sink uploads ``model_<step>.pth`` to
+        wandb at that point (but never the multi-GB ``training_<step>.pth``).
         """
         ...
 
@@ -57,7 +59,7 @@ class ThreePoolRunSink(Protocol):
 
     def log(self, metrics: dict[str, Any], step: int) -> None: ...
     def console(self, *lines: str) -> None: ...
-    def checkpoint(self, snapshot: ThreePoolTrainingState) -> None: ...
+    def checkpoint(self, snapshot: ThreePoolTrainingState, *, final: bool) -> None: ...
     def finish(self) -> None: ...
 
 

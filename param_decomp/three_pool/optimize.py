@@ -845,7 +845,7 @@ class ThreePoolTrainer:
                 if cadence.should_save(step):
                     snap = self.snapshot(scratch_dir)
                     if snap is not None:
-                        sink.checkpoint(snap)
+                        sink.checkpoint(snap, final=False)
 
                 batch_T = (
                     batch_T_plus_1
@@ -889,7 +889,7 @@ class ThreePoolTrainer:
             self.step = n_steps
             snap = self.snapshot(scratch_dir)
             if snap is not None:
-                sink.checkpoint(snap)
+                sink.checkpoint(snap, final=True)
 
 
 def optimize_three_pool(

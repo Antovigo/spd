@@ -150,14 +150,19 @@ class _LabSinkBase:
         if self._wandb_active and wandb.run is not None:
             wandb.finish()
 
-    def _persist(self, snapshot: TrainingState | ThreePoolTrainingState) -> None:
+    def _persist(self, snapshot: TrainingState | ThreePoolTrainingState, *, final: bool) -> None:
         """Save the snapshot as `model_<step>.pth` + `training_<step>.pth`.
 
         `model_<step>.pth` is just the component-model state dict — the artifact
         downstream tools (`SavedRun.load_model`, postprocessing) consume.
-        `training_<step>.pth` is the full canonical state. No-op on a silent /
-        non-main-rank sink. Prunes older (model, training) pairs after the write
-        when ``keep_last_n_checkpoints`` is set.
+        `training_<step>.pth` is the full canonical state (model + optimizer
+        state + PPGD sources), used only for resumption. No-op on a silent /
+        non-main-rank sink. Prunes older (model, training) pairs after the
+        write when ``keep_last_n_checkpoints`` is set.
+
+        Wandb cloud upload only happens on ``final=True`` and is limited to
+        ``model_<step>.pth`` — `training_<step>.pth` is multi-GB at XL and
+        only useful for in-cluster resumption (which reads from local FS).
         """
         if self.out_dir is None:
             return
@@ -166,9 +171,8 @@ class _LabSinkBase:
         training_path = self.out_dir / f"training_{snapshot.step}.pth"
         save_file(snapshot, training_path)
         logger.info(f"Saved checkpoint to {model_path} (+ {training_path.name})")
-        if self._wandb_active:
+        if final and self._wandb_active:
             try_wandb(wandb.save, str(model_path), base_path=str(self.out_dir), policy="now")
-            try_wandb(wandb.save, str(training_path), base_path=str(self.out_dir), policy="now")
         if self.keep_last_n_checkpoints is not None:
             _prune_old_checkpoints(self.out_dir, keep_last_n=self.keep_last_n_checkpoints)
 
@@ -177,16 +181,16 @@ class _LabSinkBase:
 class OnePoolSink(_LabSinkBase):
     """Lab sink for 1-pool runs (satisfies `OnePoolRunSink`)."""
 
-    def checkpoint(self, snapshot: TrainingState) -> None:
-        self._persist(snapshot)
+    def checkpoint(self, snapshot: TrainingState, *, final: bool) -> None:
+        self._persist(snapshot, final=final)
 
 
 @dataclass(frozen=True)
 class ThreePoolSink(_LabSinkBase):
     """Lab sink for 3-pool runs (satisfies `ThreePoolRunSink`)."""
 
-    def checkpoint(self, snapshot: ThreePoolTrainingState) -> None:
-        self._persist(snapshot)
+    def checkpoint(self, snapshot: ThreePoolTrainingState, *, final: bool) -> None:
+        self._persist(snapshot, final=final)
 
 
 def _wandb_value(v: Any) -> Any:

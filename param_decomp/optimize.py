@@ -643,7 +643,8 @@ class Trainer:
 
             # --- Saving Checkpoint --- #
             if step == pd_config.steps or cadence.should_save(step) or sigterm.received:
-                sink.checkpoint(self.snapshot())
+                is_final = step == pd_config.steps or sigterm.received
+                sink.checkpoint(self.snapshot(), final=is_final)
             if sigterm.received:
                 if is_main_process():
                     logger.info(

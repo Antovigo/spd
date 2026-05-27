@@ -60,7 +60,8 @@ class CaptureSink:
     def console(self, *lines: str) -> None:
         del lines
 
-    def checkpoint(self, snapshot: Any) -> None:
+    def checkpoint(self, snapshot: Any, *, final: bool) -> None:
+        del final
         model_state = snapshot.component_model
         checkpoint: dict[str, Tensor] = {}
         for key, value in model_state.items():
