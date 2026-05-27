@@ -38,7 +38,9 @@ sliced-from-global pattern.
 
 import itertools
 import os
+import shutil
 import time
+from pathlib import Path
 from typing import Any, Self
 
 import torch
@@ -368,7 +370,7 @@ class ThreePoolTrainer:
             case "ppgd":
                 return []
 
-    def snapshot(self) -> ThreePoolTrainingState | None:
+    def snapshot(self, scratch_dir: Path) -> ThreePoolTrainingState | None:
         """Canonical point-in-time view of the 3-pool trainer.
 
         On rank 0 (the only rank a sink consumes from), assembles a
@@ -388,7 +390,15 @@ class ThreePoolTrainer:
 
         Returns ``None`` on non-rank-0 — the lab sink is silent on those
         ranks anyway, and the trainer never needs their canonical state.
+
+        Args:
+            scratch_dir: Shared-filesystem directory all ranks can write
+                to / read from. Used as the rendezvous for the per-rank
+                contributions (optimizer state, PPGD sources). Each
+                snapshot at step ``S`` writes / reads under
+                ``scratch_dir / f"step_{S}"`` and cleans it up on rank 0.
         """
+        trace("snapshot: enter gather_full_state_dict_to_rank0")
         gathered_model = gather_full_state_dict_to_rank0(
             layout=self.layout,
             component_model=self.component_model,
@@ -399,6 +409,7 @@ class ThreePoolTrainer:
             c_per_site=self.runtime.c_per_site,
             device=self._device,
         )
+        trace("snapshot: gather_full_state_dict_to_rank0 done")
 
         my_named_params = self._named_params_for_my_optimizer()
         my_optimizer_by_name: dict[str, dict[str, Any]] = (
@@ -415,18 +426,42 @@ class ThreePoolTrainer:
         elif self._pending_ppgd_resume_state is not None:
             my_contribution["ppgd"] = self._pending_ppgd_resume_state
 
+        # File-based gather rather than dist.gather_object: at XL the aggregate
+        # pickle payload (LW optimizer state + PPGD sources) is ~8 GB and
+        # gather_object scales poorly. Each rank writes its contribution to a
+        # shared-FS path, a barrier ensures all writes are visible, then rank 0
+        # reads them all.
+        p2p_group = self.layout.world.cross_pool_p2p_group
         world_size = self.layout.world.world_size
+        step_dir = scratch_dir / f"step_{self.step}"
+        if self.layout.my_rank == 0:
+            step_dir.mkdir(parents=True, exist_ok=True)
+
+        trace("snapshot: enter barrier (pre-write)")
+        dist.barrier(group=p2p_group)
+        trace("snapshot: barrier (pre-write) done")
+
+        partial_path = step_dir / f"rank_{self.layout.my_rank}.pth"
+        trace(f"snapshot: writing partial {partial_path.name}")
+        torch.save(my_contribution, partial_path)
+        trace("snapshot: partial write done")
+
+        trace("snapshot: enter barrier (post-write)")
+        dist.barrier(group=p2p_group)
+        trace("snapshot: barrier (post-write) done")
+
         if self.layout.my_rank != 0:
-            dist.gather_object(my_contribution, None, dst=0)
             return None
 
-        gathered: list[dict[str, Any] | None] = [None] * world_size
-        dist.gather_object(my_contribution, gathered, dst=0)
+        gathered: list[dict[str, Any]] = []
+        for r in range(world_size):
+            gathered.append(torch.load(step_dir / f"rank_{r}.pth", weights_only=False))
+        trace("snapshot: rank-0 read all partials")
+        shutil.rmtree(step_dir, ignore_errors=True)
         components_by_name: dict[str, dict[str, Any]] = {}
         ci_fn_by_name: dict[str, dict[str, Any]] = {}
         ppgd_by_rank: dict[int, dict[str, Any]] = {}
         for r, c in enumerate(gathered):
-            assert c is not None
             pool: str = c["pool"]
             match pool:
                 case "layerwise":
@@ -524,10 +559,15 @@ class ThreePoolTrainer:
         train_loader: DataLoader[Any],
         sink: ThreePoolRunSink,
         cadence: Cadence,
+        scratch_dir: Path,
         eval_loop: EvalLoop | None = None,
         profiler: PhaseProfiler | None = None,
     ) -> None:
         """Advance training from ``self.step`` to ``self.pd_config.steps``.
+
+        ``scratch_dir`` is a shared-filesystem directory used by
+        :meth:`snapshot` for cross-rank file-based gather (replaces
+        ``dist.gather_object`` which scales poorly at XL payload sizes).
 
         When ``eval_loop`` is non-None, runs a 3-pool eval pass on cadence:
         CI pool ships full ``CIOutputs`` to PPGD; PPGD assembles a
@@ -803,7 +843,7 @@ class ThreePoolTrainer:
                     )
 
                 if cadence.should_save(step):
-                    snap = self.snapshot()
+                    snap = self.snapshot(scratch_dir)
                     if snap is not None:
                         sink.checkpoint(snap)
 
@@ -847,7 +887,7 @@ class ThreePoolTrainer:
                         pass  # CI pool doesn't defer
 
             self.step = n_steps
-            snap = self.snapshot()
+            snap = self.snapshot(scratch_dir)
             if snap is not None:
                 sink.checkpoint(snap)
 
@@ -863,6 +903,7 @@ def optimize_three_pool(
     three_pool_config: ThreePoolConfig,
     cadence: Cadence,
     sink: ThreePoolRunSink,
+    scratch_dir: Path,
     eval_loop: EvalLoop | None = None,
     profiler: PhaseProfiler | None = None,
 ) -> None:
@@ -879,7 +920,14 @@ def optimize_three_pool(
         runtime_config=runtime_config,
         three_pool_config=three_pool_config,
     )
-    trainer.run(train_loader, sink, cadence, eval_loop=eval_loop, profiler=profiler)
+    trainer.run(
+        train_loader,
+        sink,
+        cadence,
+        scratch_dir=scratch_dir,
+        eval_loop=eval_loop,
+        profiler=profiler,
+    )
 
 
 def _layout_fingerprint(layout: ThreePoolLayout) -> dict[str, Any]:

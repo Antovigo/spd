@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import fire
+import torch.distributed as dist
 import torch.nn as nn
 from pydantic import Discriminator
 from torch.utils.data import DataLoader
@@ -58,7 +59,11 @@ from param_decomp_lab.infra.ddp_launch import build_ddp_launch
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.run_files import generate_run_id, resolve_run_files
-from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME, REPO_ROOT
+from param_decomp_lab.infra.settings import (
+    DEFAULT_PARTITION_NAME,
+    PARAM_DECOMP_OUT_DIR,
+    REPO_ROOT,
+)
 from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
 from param_decomp_lab.infra.wandb import get_wandb_entity
 from param_decomp_lab.resumption import (
@@ -289,6 +294,23 @@ def main(
         _fresh_main(Path(config_path), group=group, tags=tags, run_id=run_id)
 
 
+def _agree_on_run_id_three_pool(run_id: str | None, dist_state: DistributedState | None) -> str:
+    """Broadcast (or generate-then-broadcast) a single run id across all ranks.
+
+    3-pool snapshot uses a file-based gather under
+    ``PARAM_DECOMP_OUT_DIR/decompositions/<run_id>/.snapshot_scratch/``; every
+    rank must compute the same path.
+    """
+    if is_main_process() and run_id is None:
+        run_id = generate_run_id("param_decomp")
+    if dist_state is not None:
+        objs: list[str | None] = [run_id]
+        dist.broadcast_object_list(objs, src=0)
+        run_id = objs[0]
+    assert run_id is not None
+    return run_id
+
+
 def _fresh_main(
     config_path: Path,
     *,
@@ -333,6 +355,8 @@ def _fresh_main(
     )
 
     if cfg.three_pool is not None:
+        run_id = _agree_on_run_id_three_pool(run_id, dist_state)
+        scratch_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id / ".snapshot_scratch"
         three_sink = init_pd_run(
             cfg, sink_class=ThreePoolSink, group=group, tags=tags, run_id=run_id
         )
@@ -349,7 +373,13 @@ def _fresh_main(
                 runtime_config=cfg.runtime,
                 three_pool_config=cfg.three_pool,
             )
-            three_trainer.run(train_loader, three_sink, cfg.cadence, eval_loop=three_eval_loop)
+            three_trainer.run(
+                train_loader,
+                three_sink,
+                cfg.cadence,
+                scratch_dir=scratch_dir,
+                eval_loop=three_eval_loop,
+            )
         finally:
             three_sink.finish()
         return
@@ -429,6 +459,8 @@ def _resume_main(
     run_batch = make_run_batch(effective_cfg.target)
 
     if effective_cfg.three_pool is not None:
+        run_id = _agree_on_run_id_three_pool(run_id, dist_state)
+        scratch_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id / ".snapshot_scratch"
         three_sink = init_pd_run(
             effective_cfg, sink_class=ThreePoolSink, group=group, tags=tags, run_id=run_id
         )
@@ -449,7 +481,11 @@ def _resume_main(
                 reconstruction_loss=recon_loss_kl,
             )
             three_trainer.run(
-                train_loader, three_sink, effective_cfg.cadence, eval_loop=three_eval_loop
+                train_loader,
+                three_sink,
+                effective_cfg.cadence,
+                scratch_dir=scratch_dir,
+                eval_loop=three_eval_loop,
             )
         finally:
             three_sink.finish()
