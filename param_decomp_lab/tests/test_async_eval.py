@@ -196,13 +196,17 @@ def test_async_eval_main_against_tiny_saved_run(tmp_path: Path) -> None:
 
     assert len(logged) == 1, f"expected one wandb.log call, got {len(logged)}"
     entry = logged[0]
-    assert entry["step"] == step_written
+    # async_eval logs on the slow_eval/step custom axis (not the default `step=`).
+    assert entry["step"] is None, entry
     payload = entry["payload"]
     assert payload, "wandb.log payload is empty"
-    assert all(k.startswith("eval/") for k in payload), payload
-    # CI_L0 emits keys under its `log_namespace="l0"` namespace; the eval prefix adds
-    # `eval/` on top.
-    assert any("l0/" in k for k in payload), list(payload)
+    assert payload["slow_eval/step"] == step_written, payload
+    metric_keys = {k for k in payload if k != "slow_eval/step"}
+    assert metric_keys, "no metric keys in payload"
+    assert all(k.startswith("slow_eval/") for k in metric_keys), metric_keys
+    # CI_L0 emits keys under its `log_namespace="l0"` namespace; the slow_eval prefix
+    # adds `slow_eval/` on top.
+    assert any("l0/" in k for k in metric_keys), list(metric_keys)
 
 
 @pytest.mark.slow

@@ -123,7 +123,15 @@ def _log_eval_to_wandb(
     group: str | None,
     tags: str | None,
 ) -> None:
-    """Resume the parent's wandb run and log `eval/<k>` for each result at `step`."""
+    """Resume the parent's wandb run and log `slow_eval/<k>` for each result at `step`.
+
+    Async slow-eval submissions write retroactively (the wandb run's current step
+    has advanced past ``step`` while we were computing). Wandb's default step axis
+    rejects non-monotonic writes, so we route slow-eval keys onto a dedicated
+    ``slow_eval/step`` axis via ``wandb.define_metric``. In-train fast eval still
+    uses the default step axis under the ``eval/`` prefix; the two namespaces are
+    side-by-side in the wandb UI.
+    """
     if cfg.wandb is None:
         logger.info("No wandb config on parent run; skipping wandb log of eval results.")
         return
@@ -136,8 +144,11 @@ def _log_eval_to_wandb(
         group=group,
         tags=parsed_tags,
     )
-    payload = {f"eval/{k}": _wandb_value(v) for k, v in results.items()}
-    try_wandb(wandb.log, payload, step=step)
+    wandb.define_metric("slow_eval/step")
+    wandb.define_metric("slow_eval/*", step_metric="slow_eval/step")
+    payload: dict[str, Any] = {f"slow_eval/{k}": _wandb_value(v) for k, v in results.items()}
+    payload["slow_eval/step"] = step
+    try_wandb(wandb.log, payload)
     wandb.finish()
 
 
