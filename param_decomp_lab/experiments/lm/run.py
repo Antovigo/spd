@@ -362,9 +362,15 @@ def _fresh_main(
 
     if cfg.three_pool is not None:
         run_id = _agree_on_run_id_three_pool(run_id, dist_state)
-        scratch_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id / ".snapshot_scratch"
+        out_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id
+        scratch_dir = out_dir / ".snapshot_scratch"
         three_sink = init_pd_run(
-            cfg, sink_class=ThreePoolSink, group=group, tags=tags, run_id=run_id
+            cfg,
+            sink_class=ThreePoolSink,
+            group=group,
+            tags=tags,
+            run_id=run_id,
+            on_save=lambda step: submit_slurm_async_slow_eval(out_dir, step=step, parent_cfg=cfg),
         )
         # Multi-pool eval mirrors the train data-handling contract: full eval
         # batch on every rank, sliced internally by each pool. So we pass
@@ -466,9 +472,17 @@ def _resume_main(
 
     if effective_cfg.three_pool is not None:
         run_id = _agree_on_run_id_three_pool(run_id, dist_state)
-        scratch_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id / ".snapshot_scratch"
+        out_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id
+        scratch_dir = out_dir / ".snapshot_scratch"
         three_sink = init_pd_run(
-            effective_cfg, sink_class=ThreePoolSink, group=group, tags=tags, run_id=run_id
+            effective_cfg,
+            sink_class=ThreePoolSink,
+            group=group,
+            tags=tags,
+            run_id=run_id,
+            on_save=lambda step: submit_slurm_async_slow_eval(
+                out_dir, step=step, parent_cfg=effective_cfg
+            ),
         )
         if three_sink.out_dir is not None:
             write_provenance(

@@ -17,6 +17,7 @@ sink regardless of which constructor is called.
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -76,9 +77,18 @@ class _LabSinkBase:
     out_dir: Path | None
     _wandb_active: bool
     keep_last_n_checkpoints: int | None = None
+    on_save: Callable[[int], None] | None = None
+    """Rank-0 hook called with `step` after each checkpoint write. Used to fire
+    async slow-eval SLURM jobs per checkpoint; no-op on silent sinks."""
 
     @classmethod
-    def local(cls, out_dir: Path, *, keep_last_n_checkpoints: int | None = None) -> Self:
+    def local(
+        cls,
+        out_dir: Path,
+        *,
+        keep_last_n_checkpoints: int | None = None,
+        on_save: Callable[[int], None] | None = None,
+    ) -> Self:
         """Sink that writes to local files only (no wandb)."""
         if not is_main_process():
             return cls(out_dir=None, _wandb_active=False)
@@ -88,6 +98,7 @@ class _LabSinkBase:
             out_dir=out_dir,
             _wandb_active=False,
             keep_last_n_checkpoints=keep_last_n_checkpoints,
+            on_save=on_save,
         )
 
     @classmethod
@@ -104,6 +115,7 @@ class _LabSinkBase:
         group: str | None = None,
         view_meta: dict[str, Any] | None = None,
         keep_last_n_checkpoints: int | None = None,
+        on_save: Callable[[int], None] | None = None,
     ) -> Self:
         """Sink that writes to local files + a wandb run. Non-main ranks are silent."""
         if not is_main_process():
@@ -124,6 +136,7 @@ class _LabSinkBase:
             out_dir=out_dir,
             _wandb_active=True,
             keep_last_n_checkpoints=keep_last_n_checkpoints,
+            on_save=on_save,
         )
 
     @classmethod
@@ -175,6 +188,8 @@ class _LabSinkBase:
             try_wandb(wandb.save, str(model_path), base_path=str(self.out_dir), policy="now")
         if self.keep_last_n_checkpoints is not None:
             _prune_old_checkpoints(self.out_dir, keep_last_n=self.keep_last_n_checkpoints)
+        if self.on_save is not None:
+            self.on_save(snapshot.step)
 
 
 @dataclass(frozen=True)

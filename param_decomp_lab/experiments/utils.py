@@ -4,6 +4,8 @@ Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `da
 types.
 """
 
+from collections.abc import Callable
+
 import wandb
 from pydantic import Field, PositiveInt
 
@@ -65,6 +67,7 @@ def init_pd_run[T: BaseConfig, D: BaseConfig, S: OnePoolSink | ThreePoolSink](
     group: str | None,
     tags: str | None,
     run_id: str | None = None,
+    on_save: Callable[[int], None] | None = None,
 ) -> S:
     """Allocate `run_id` + `out_dir`, write `run_meta.yaml`, return a sink.
 
@@ -74,7 +77,8 @@ def init_pd_run[T: BaseConfig, D: BaseConfig, S: OnePoolSink | ThreePoolSink](
 
     Local-only when `cfg.wandb is None`, else wandb-backed. Non-main DDP ranks get a
     silent no-op sink without touching disk or wandb. `group` is a "launched together"
-    id; `tags` is a comma-separated string of orthogonal labels.
+    id; `tags` is a comma-separated string of orthogonal labels. `on_save` is an
+    optional rank-0 callback the sink invokes after each checkpoint write.
     """
     if not is_main_process():
         return sink_class.silent()
@@ -84,7 +88,7 @@ def init_pd_run[T: BaseConfig, D: BaseConfig, S: OnePoolSink | ThreePoolSink](
     cfg.to_file(meta_path)
     keep_last_n = cfg.cadence.keep_last_n_checkpoints
     if cfg.wandb is None:
-        return sink_class.local(out_dir, keep_last_n_checkpoints=keep_last_n)
+        return sink_class.local(out_dir, keep_last_n_checkpoints=keep_last_n, on_save=on_save)
     parsed_tags = [s.strip() for s in tags.split(",") if s.strip()] if tags else None
     sink = sink_class.with_wandb(
         out_dir,
@@ -95,6 +99,7 @@ def init_pd_run[T: BaseConfig, D: BaseConfig, S: OnePoolSink | ThreePoolSink](
         group=group,
         tags=parsed_tags,
         keep_last_n_checkpoints=keep_last_n,
+        on_save=on_save,
     )
     try_wandb(wandb.save, str(meta_path), base_path=str(out_dir), policy="now")
     return sink
