@@ -1,15 +1,15 @@
 """Layerwise per-matrix LM PD launcher (MVP).
 
-Takes a single LM experiment YAML and emits one config per (layer, module_pattern) pair —
+Takes a single LM experiment YAML and emits one config per (block, module_pattern) pair —
 each output config has exactly one entry in `pd.decomposition_targets`, with the pattern's
-``*`` replaced by a concrete layer index. Submits a SLURM array of `pd-lm` jobs over the
+``*`` replaced by a concrete block index. Submits a SLURM array of `pd-lm` jobs over the
 generated configs.
 
 Usage:
-    pd-lm-layerwise <base_config.yaml> --n_layers 4
-    pd-lm-layerwise <base_config.yaml> --n_layers 4 --include q_proj,k_proj
-    pd-lm-layerwise <base_config.yaml> --n_layers 4 --layers 0,2 --no_snapshot
-    pd-lm-layerwise <base_config.yaml> --n_layers 4 --dp 4
+    pd-lm-layerwise <base_config.yaml> --n_blocks 4
+    pd-lm-layerwise <base_config.yaml> --n_blocks 4 --include q_proj,k_proj
+    pd-lm-layerwise <base_config.yaml> --n_blocks 4 --blocks 0,2 --no_snapshot
+    pd-lm-layerwise <base_config.yaml> --n_blocks 4 --dp 4
 """
 
 import secrets
@@ -48,30 +48,30 @@ def _parse_int_csv(value: str | None) -> list[int] | None:
     return [int(s) for s in parts]
 
 
-def _substitute_pattern(pattern: str, layer_idx: int) -> str:
-    """Replace the single ``*`` in a glob with a concrete layer index.
+def _substitute_pattern(pattern: str, block_idx: int) -> str:
+    """Replace the single ``*`` in a glob with a concrete block index.
 
-    MVP assumes one wildcard per pattern (the layer slot). Patterns with zero or multiple
+    MVP assumes one wildcard per pattern (the block slot). Patterns with zero or multiple
     wildcards are not supported here — split those by hand.
     """
     assert pattern.count("*") == 1, (
         f"pd-lm-layerwise expects exactly one '*' per module_pattern, got: {pattern!r}"
     )
-    return pattern.replace("*", str(layer_idx))
+    return pattern.replace("*", str(block_idx))
 
 
 def _build_configs(
     base_cfg: LMExperimentConfig,
     *,
-    n_layers: int,
+    n_blocks: int,
     include: list[str] | None,
-    layers: list[int] | None,
+    blocks: list[int] | None,
 ) -> list[tuple[str, LMExperimentConfig]]:
-    """Cross base `decomposition_targets` with the requested layer indices.
+    """Cross base `decomposition_targets` with the requested block indices.
 
     Returns a list of (job_tag, per-matrix config) pairs. The tag is used for filenames and
     SLURM comments. `include` filters patterns by substring (e.g. ``["q_proj", "k_proj"]``);
-    `layers` restricts to specific layer indices.
+    `blocks` restricts to specific block indices.
     """
     base_targets = base_cfg.pd.decomposition_targets
     assert base_targets, "base config has no decomposition_targets to split"
@@ -93,14 +93,14 @@ def _build_configs(
         f"(have: {[t.module_pattern for t in base_targets]})"
     )
 
-    selected_layers = list(range(n_layers)) if layers is None else layers
-    for li in selected_layers:
-        assert 0 <= li < n_layers, f"layer index {li} out of range for n_layers={n_layers}"
+    selected_blocks = list(range(n_blocks)) if blocks is None else blocks
+    for bi in selected_blocks:
+        assert 0 <= bi < n_blocks, f"block index {bi} out of range for n_blocks={n_blocks}"
 
     out: list[tuple[str, LMExperimentConfig]] = []
-    for layer_idx in selected_layers:
+    for block_idx in selected_blocks:
         for target in selected_targets:
-            resolved = _substitute_pattern(target.module_pattern, layer_idx)
+            resolved = _substitute_pattern(target.module_pattern, block_idx)
             new_target = DecompositionTargetConfig(module_pattern=resolved, C=target.C)
             new_pd = base_cfg.pd.model_copy(update={"decomposition_targets": [new_target]})
             new_cfg = base_cfg.model_copy(update={"pd": new_pd})
@@ -111,9 +111,9 @@ def _build_configs(
 def submit_lm_layerwise(
     base_config: str | Path,
     *,
-    n_layers: int,
+    n_blocks: int,
     include: list[str] | None,
-    layers: list[int] | None,
+    blocks: list[int] | None,
     tags: list[str] | None,
     dp: int | None,
     partition: str | None,
@@ -131,9 +131,9 @@ def submit_lm_layerwise(
     base_cfg = LMExperimentConfig.from_file(base_config)
     per_matrix = _build_configs(
         base_cfg,
-        n_layers=n_layers,
+        n_blocks=n_blocks,
         include=include,
-        layers=layers,
+        blocks=blocks,
     )
 
     run_id = "lw-" + datetime.now().strftime("%Y%m%d_%H%M%S") + "-" + secrets.token_hex(2)
@@ -246,9 +246,9 @@ def _create_layerwise_workspace_view(run_id: str, project: str) -> str:
 
 def main(
     base_config: str,
-    n_layers: int,
+    n_blocks: int,
     include: str | None = None,
-    layers: str | None = None,
+    blocks: str | None = None,
     tags: str | None = None,
     dp: int | None = None,
     partition: str | None = DEFAULT_PARTITION_NAME,
@@ -260,11 +260,11 @@ def main(
 
     Args:
         base_config: Path to an LM experiment YAML to split.
-        n_layers: Number of layers in the target model (used to expand `*` in patterns).
+        n_blocks: Number of blocks in the target model (used to expand `*` in patterns).
         include: Comma-separated substrings; keep only base patterns containing one of them
             (e.g. "q_proj,k_proj"). Default: keep all base patterns.
-        layers: Comma-separated layer indices to include (e.g. "0,2,3"). Default: all layers
-            in [0, n_layers).
+        blocks: Comma-separated block indices to include (e.g. "0,2,3"). Default: all blocks
+            in [0, n_blocks).
         tags: Comma-separated wandb tags propagated to every child run (in addition to
             the auto-generated launch-id `--group`).
         dp: DDP world size per array task. Default: single-GPU per task. N <= 8 → single
@@ -276,9 +276,9 @@ def main(
     """
     submit_lm_layerwise(
         base_config=base_config,
-        n_layers=n_layers,
+        n_blocks=n_blocks,
         include=_parse_csv(include),
-        layers=_parse_int_csv(layers),
+        blocks=_parse_int_csv(blocks),
         tags=_parse_csv(tags),
         dp=dp,
         partition=partition,
