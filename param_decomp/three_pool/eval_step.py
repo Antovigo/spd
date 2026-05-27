@@ -20,6 +20,7 @@ wait timings get captured uniformly.
 """
 
 import gc
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -31,6 +32,7 @@ from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_de
 from param_decomp.component_model import ComponentModel
 from param_decomp.configs import PDConfig, RuntimeConfig
 from param_decomp.distributed import sync_across_processes, use_reduction_group
+from param_decomp.log import logger
 from param_decomp.metrics.base import Metric
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.output import collect_metric_outputs
@@ -189,10 +191,24 @@ def run_eval_step(
                 if ctx is not None:
                     for m in active:
                         with profiler.phase(f"eval/step_{i}/metric_update/{type(m).__name__}"):
+                            t0 = time.time()
                             m.update(ctx)
+                            logger.info(
+                                f"eval/update({type(m).__name__}) step={i} "
+                                f"took {time.time() - t0:.2f}s"
+                            )
+            results: dict[str, Any] | None
             if active:
-                with profiler.phase("eval/collect_metric_outputs"):
-                    results = collect_metric_outputs(active)
+                results = {}
+                for m in active:
+                    with profiler.phase(f"eval/compute/{type(m).__name__}"):
+                        t0 = time.time()
+                        single = collect_metric_outputs([m])
+                        logger.info(
+                            f"eval/compute({type(m).__name__}) took "
+                            f"{time.time() - t0:.2f}s ({len(single)} outputs)"
+                        )
+                        results.update(single)
             else:
                 results = None
         # Barrier on default_pg (30-min timeout) before the broadcast — non-PPGD
