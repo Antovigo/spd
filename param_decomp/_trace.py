@@ -6,12 +6,15 @@ When the slurm log freezes for 10 min we can't tell a hung job from a slow
 one. ``trace(msg)`` is a one-line ``logger.info`` with rank + ms-since-import,
 sprinkled at macro boundaries to give a real-time timeline.
 
-By default every rank logs. Set ``PD_TRACE_RANKS=<r1>,<r2>,...`` (e.g.
-``0,96,100`` for one rank per pool in a 3-pool job) to restrict.
+Tracing is **off by default** to keep slurm log size sane in production
+(at 104 ranks the per-step lifecycle traces add up to ~1 MB/min). Opt in via
+``PD_TRACE=1`` (or ``--trace`` on ``pd-lm``) when diagnosing a run.
+
+When enabled, set ``PD_TRACE_RANKS=<r1>,<r2>,...`` (e.g. ``0,96,100`` for one
+rank per pool in a 3-pool job) to further restrict which ranks emit.
 
 Phase-level tracing (every ``PhaseProfiler.phase`` enter/exit) is much
-noisier so it's opt-in via ``PD_PHASE_TRACE=1``. Combined with
-``PD_TRACE_RANKS`` to keep volume sane.
+noisier and is independently opt-in via ``PD_PHASE_TRACE=1``.
 """
 
 import os
@@ -24,6 +27,10 @@ import torch.distributed as dist
 _TRACE_START = time.perf_counter()
 
 
+def _trace_enabled() -> bool:
+    return os.environ.get("PD_TRACE", "").strip() in ("1", "true", "yes")
+
+
 def _trace_ranks() -> set[int] | None:
     raw = os.environ.get("PD_TRACE_RANKS", "").strip()
     if not raw:
@@ -32,6 +39,8 @@ def _trace_ranks() -> set[int] | None:
 
 
 def _should_log(rank: int) -> bool:
+    if not _trace_enabled():
+        return False
     allowed = _trace_ranks()
     return allowed is None or rank in allowed
 

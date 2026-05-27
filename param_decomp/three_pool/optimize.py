@@ -799,6 +799,7 @@ class ThreePoolTrainer:
                         reconstruction_loss=runtime.reconstruction_loss,
                         c_per_site=runtime.c_per_site,
                         sink=sink,
+                        profiler=profiler,
                     )
 
                 if cadence.should_save(step):
