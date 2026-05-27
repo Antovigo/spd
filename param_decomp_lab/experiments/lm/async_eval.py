@@ -52,6 +52,7 @@ from param_decomp_lab.experiments.lm.run import (
 from param_decomp_lab.experiments.utils import RUN_META_FILENAME, EvalConfig
 from param_decomp_lab.infra.run_files import resolve_run_files
 from param_decomp_lab.infra.wandb import get_wandb_entity, try_wandb
+from param_decomp_lab.run_sink import _wandb_value
 from param_decomp_lab.seed import set_seed
 
 
@@ -135,7 +136,7 @@ def _log_eval_to_wandb(
         group=group,
         tags=parsed_tags,
     )
-    payload = {f"eval/{k}": v for k, v in results.items()}
+    payload = {f"eval/{k}": _wandb_value(v) for k, v in results.items()}
     try_wandb(wandb.log, payload, step=step)
     wandb.finish()
 
