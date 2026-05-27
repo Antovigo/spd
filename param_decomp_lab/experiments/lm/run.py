@@ -6,15 +6,18 @@ path (`main --resume <yaml>`) reads a parent run's `run_meta.yaml` plus
 `training_<step>.pth`, rebuilds a `Trainer` via `Trainer.from_snapshot`, and
 continues training.
 
-Run via `pd-lm path/to/config.yaml` (fresh), `pd-lm --resume path/to/resume.yaml`
-(resume), or `pd-lm --eval-only --resume <run_path> [--step N]` (one-shot eval
-against a saved checkpoint; logs into the parent's wandb run at step N). Pass
-`--dp N` to submit a DDP SLURM job (single-node for N <= 8, multi-node for N > 8
-— N must then be a multiple of 8). For local DDP, invoke directly via
+Run via `pd-lm path/to/config.yaml` (fresh) or `pd-lm --resume path/to/resume.yaml`
+(resume). Pass `--dp N` to submit a DDP SLURM job (single-node for N <= 8,
+multi-node for N > 8 — N must then be a multiple of 8). For local DDP, invoke
+directly via
 `torchrun --standalone --nproc_per_node=N -m param_decomp_lab.experiments.lm.run config.yaml`.
+
+Async slow-eval of saved checkpoints lives in
+``param_decomp_lab.experiments.lm.async_eval``; the helper
+:func:`submit_slurm_async_slow_eval` below filters the parent's slow metrics into
+a temp YAML and submits an sbatch job that invokes that module.
 """
 
-import gc
 import importlib
 import os
 import shlex
@@ -23,10 +26,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import fire
-import torch
 import torch.distributed as dist
 import torch.nn as nn
-import wandb
 from pydantic import Discriminator
 from torch.utils.data import DataLoader
 
@@ -35,11 +36,8 @@ from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
-from param_decomp.metrics.base import Metric
-from param_decomp.metrics.output import collect_metric_outputs
-from param_decomp.optimize import EvalLoop, Trainer, _build_metric_context
+from param_decomp.optimize import EvalLoop, Trainer
 from param_decomp.three_pool import ThreePoolConfig, ThreePoolTrainer
-from param_decomp.torch_helpers import bf16_autocast, loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState, TrainingState
 from param_decomp.two_pool import TwoPoolConfig, TwoPoolTrainer
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
@@ -73,11 +71,7 @@ from param_decomp_lab.infra.settings import (
     REPO_ROOT,
 )
 from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
-from param_decomp_lab.infra.wandb import (
-    get_wandb_entity,
-    parse_wandb_run_path,
-    try_wandb,
-)
+from param_decomp_lab.infra.wandb import get_wandb_entity, parse_wandb_run_path
 from param_decomp_lab.resumption import (
     ResumeConfig,
     ResumeProvenance,
@@ -260,9 +254,6 @@ def main(
     config_path: str | Path | None = None,
     *,
     resume: str | Path | None = None,
-    eval_only: bool = False,
-    step: int | None = None,
-    eval_config: str | Path | None = None,
     group: str | None = None,
     tags: str | None = None,
     dp: int | None = None,
@@ -275,18 +266,10 @@ def main(
     """Run an LM PD experiment end-to-end.
 
     Args:
-        config_path: YAML for a fresh run. Required when not resuming and not eval-only.
+        config_path: YAML for a fresh run. Required when not resuming.
         resume: Path to a `ResumeConfig` YAML pointing at a prior run. When set,
             the parent's `run_meta.yaml` is the source of cfg truth; a new
             `run_id` + sibling `resume_provenance.yaml` are written.
-
-            When combined with `--eval-only`, this is instead a `SavedLMRun` path
-            (wandb URL / `entity/project/runId` / `p-xxxxxxxx` / local dir) — the
-            checkpoint is loaded, one eval pass is run, and results are logged
-            into the parent run's wandb timeline at `step` (default: latest).
-        eval_only: If True, skip training and run a one-shot eval pass against
-            the saved checkpoint pointed at by `--resume`.
-        step: Which checkpoint to evaluate when `--eval-only`. Default: latest.
         group / tags: wandb-only (no-ops without `wandb:`).
         dp / partition / time / job_name / no_snapshot / run_id: SLURM submission
             knobs. Passing `--dp N` outside torchrun submits a SLURM job: single-node
@@ -294,26 +277,6 @@ def main(
             DDP, invoke directly via
             `torchrun --standalone --nproc_per_node=N -m param_decomp_lab.experiments.lm.run`.
     """
-    if eval_only:
-        assert resume is not None, "--eval-only requires --resume <run_path>"
-        assert config_path is None, "--eval-only and config_path are mutually exclusive"
-        if dp is not None and os.environ.get("WORLD_SIZE") is None:
-            _submit_slurm_eval_only(
-                resume,
-                step=step,
-                eval_config=eval_config,
-                dp=dp,
-                group=group,
-                tags=tags,
-                partition=partition,
-                time=time,
-                job_name=job_name,
-                no_snapshot=no_snapshot,
-            )
-            return
-        _eval_only_main(resume, step=step, eval_config_override=eval_config, group=group, tags=tags)
-        return
-
     if dp is not None and os.environ.get("WORLD_SIZE") is None:
         assert config_path is not None, "--dp SLURM submission requires a config_path"
         _submit_slurm(
@@ -609,175 +572,6 @@ def _resolve_train_run_id(run_path: str | Path) -> str:
     return (p if p.is_dir() else p.parent).name
 
 
-def _resolve_eval_checkpoint_path(run_path: str | Path, step: int | None) -> Path:
-    """Locate the `model_<step>.pth` on disk, downloading from W&B if needed."""
-    if step is None:
-        files = resolve_run_files(
-            run_path, config_filename=RUN_META_FILENAME, checkpoint_prefix="model"
-        )
-        return files.checkpoint_path
-    filename = f"model_{step}.pth"
-    files = resolve_run_files(
-        run_path, config_filename=RUN_META_FILENAME, checkpoint_filename=filename
-    )
-    return files.checkpoint_path
-
-
-def _step_from_checkpoint_name(filename: str) -> int:
-    """Parse the step number out of a `model_<step>.pth` filename."""
-    assert filename.startswith("model_") and filename.endswith(".pth"), (
-        f"expected `model_<step>.pth`, got {filename!r}"
-    )
-    return int(filename.removeprefix("model_").removesuffix(".pth"))
-
-
-def _eval_only_main(
-    run_path: str | Path,
-    *,
-    step: int | None,
-    eval_config_override: str | Path | None = None,
-    group: str | None,
-    tags: str | None,
-) -> None:
-    """Run one eval pass against a saved checkpoint; log results into the parent's wandb run.
-
-    Bypasses the training loop entirely. The `LMExperimentConfig` is reloaded from the
-    parent's `run_meta.yaml`; the eval loader + eval metrics are built from `cfg.eval`
-    by default. If ``eval_config_override`` is given, it is parsed as an `EvalConfig`
-    YAML and replaces ``cfg.eval`` — useful for running slow metrics async on a
-    checkpoint when the parent training only ran fast metrics. Each metric value is
-    logged to wandb as `eval/<metric_key>` at the resolved step.
-    """
-    from param_decomp_lab.experiments.utils import EvalConfig
-
-    assert run_path is not None
-    pd_run = SavedLMRun.from_path(run_path)
-    if eval_config_override is not None:
-        eval_cfg = EvalConfig.from_file(Path(eval_config_override))
-    else:
-        assert pd_run.cfg.eval is not None, (
-            f"eval-only requires either an --eval-config override or the parent "
-            f"config to declare an `eval:` block ({run_path})"
-        )
-        eval_cfg = pd_run.cfg.eval
-
-    checkpoint_path = _resolve_eval_checkpoint_path(run_path, step)
-    resolved_step = _step_from_checkpoint_name(checkpoint_path.name)
-    train_run_id = _resolve_train_run_id(run_path)
-
-    dist_state = init_distributed()
-    if is_main_process():
-        logger.info(f"Distributed state: {dist_state}")
-        logger.info(f"Eval-only: {run_path} @ step {resolved_step} (train run_id={train_run_id})")
-    set_seed(pd_run.cfg.pd.seed)
-    device = get_device()
-
-    target_model = build_target(pd_run.cfg.target)
-    component_model = load_component_model(
-        pd_config=pd_run.cfg.pd,
-        checkpoint_path=checkpoint_path,
-        target_model=target_model,
-        run_batch=make_run_batch(pd_run.cfg.target),
-    )
-    component_model.to(device)
-
-    eval_loader = build_lm_loader(
-        pd_run.cfg.target,
-        pd_run.cfg.data,
-        split="eval",
-        device=device,
-        batch_size=eval_cfg.batch_size,
-        dist_state=dist_state,
-        seed=pd_run.cfg.pd.seed,
-    )
-    eval_metrics = [EVAL_METRIC_CLASSES[m.type](m) for m in eval_cfg.metrics]
-    for m in eval_metrics:
-        m.bind(model=component_model, device=device)
-
-    results = _run_eval_pass(
-        component_model=component_model,
-        eval_loader=eval_loader,
-        eval_metrics=eval_metrics,
-        n_steps=eval_cfg.n_steps,
-        device=device,
-        step=resolved_step,
-        pd_config=pd_run.cfg,
-    )
-
-    if is_main_process():
-        _log_eval_to_wandb(
-            results,
-            cfg=pd_run.cfg,
-            train_run_id=train_run_id,
-            step=resolved_step,
-            group=group,
-            tags=tags,
-        )
-
-
-def _run_eval_pass(
-    *,
-    component_model: ComponentModel,
-    eval_loader: DataLoader[Any],
-    eval_metrics: list[Metric[Any]],
-    n_steps: int,
-    device: str,
-    step: int,
-    pd_config: "LMExperimentConfig",
-) -> dict[str, Any]:
-    """One full eval pass; returns the flattened metric output dict."""
-    assert n_steps >= 1, f"n_steps must be at least 1, got {n_steps}"
-    eval_iterator = loop_dataloader(eval_loader)
-    with torch.no_grad(), bf16_autocast(enabled=pd_config.runtime.autocast_bf16):
-        for m in eval_metrics:
-            m.reset()
-        for _ in range(n_steps):
-            ctx = _build_metric_context(
-                next(eval_iterator),
-                step=step,
-                is_eval=True,
-                device=device,
-                wrapped_model=component_model,
-                component_model=component_model,
-                config=pd_config.pd,
-                reconstruction_loss=recon_loss_kl,
-            )
-            for m in eval_metrics:
-                m.update(ctx)
-        results = collect_metric_outputs(eval_metrics)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-    return results
-
-
-def _log_eval_to_wandb(
-    results: dict[str, Any],
-    *,
-    cfg: "LMExperimentConfig",
-    train_run_id: str,
-    step: int,
-    group: str | None,
-    tags: str | None,
-) -> None:
-    """Resume the parent's wandb run and log `eval/<k>` for each result at `step`."""
-    if cfg.wandb is None:
-        logger.info("No wandb config on parent run; skipping wandb log of eval results.")
-        return
-    parsed_tags = [s.strip() for s in tags.split(",") if s.strip()] if tags else None
-    wandb.init(
-        id=train_run_id,
-        project=cfg.wandb.project,
-        entity=cfg.wandb.entity or get_wandb_entity(),
-        resume="must",
-        group=group,
-        tags=parsed_tags,
-    )
-    payload = {f"eval/{k}": v for k, v in results.items()}
-    try_wandb(wandb.log, payload, step=step)
-    wandb.finish()
-
-
 def _build_eval_loop(
     cfg: LMExperimentConfig,
     device: str,
@@ -899,13 +693,15 @@ def submit_slurm_async_slow_eval(
     job_name: str = "pd-lm-eval-slow",
     group: str | None = None,
     tags: str | None = None,
+    no_snapshot: bool = False,
 ) -> None:
-    """Filter the parent's slow eval metrics into a temp YAML, submit a SLURM eval-only.
+    """Filter the parent's slow eval metrics into a temp YAML, submit a SLURM job.
 
-    Designed to be called from inside training right after a save: emits an async
-    SLURM job that runs *only* the slow metrics against ``model_<step>.pth``,
-    logging into the parent's wandb run at the same step. No-op when the parent
-    has no eval block or no slow metrics.
+    Called from training right after a save: emits an async SLURM job that runs
+    *only* the slow metrics against ``model_<step>.pth`` via
+    ``python -m param_decomp_lab.experiments.lm.async_eval``, logging into the
+    parent's wandb run at the same step. No-op when the parent has no eval block
+    or no slow metrics.
     """
     from param_decomp_lab.experiments.utils import EvalConfig
 
@@ -919,50 +715,16 @@ def submit_slurm_async_slow_eval(
         batch_size=parent_cfg.eval.batch_size,
         n_steps=parent_cfg.eval.n_steps,
         every=parent_cfg.eval.every,
-        slow_every=parent_cfg.eval.every,  # any value; not consumed by eval-only
+        slow_every=parent_cfg.eval.every,  # any value; not consumed by async_eval
         slow_on_first_step=True,
         metrics=slow_metrics,
     )
-    run_id = _resolve_train_run_id(run_path)
-    scratch = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id / ".async_eval_configs"
+    train_run_id = _resolve_train_run_id(run_path)
+    scratch = PARAM_DECOMP_OUT_DIR / "decompositions" / train_run_id / ".async_eval_configs"
     scratch.mkdir(parents=True, exist_ok=True)
     cfg_path = scratch / f"slow_eval_step_{step}.yaml"
     slow_eval_cfg.to_file(cfg_path)
 
-    _submit_slurm_eval_only(
-        run_path,
-        step=step,
-        eval_config=cfg_path,
-        dp=dp,
-        group=group,
-        tags=tags,
-        partition=partition,
-        time=time,
-        job_name=job_name,
-        no_snapshot=False,
-    )
-
-
-def _submit_slurm_eval_only(
-    run_path: str | Path,
-    *,
-    step: int | None,
-    eval_config: str | Path | None = None,
-    dp: int,
-    group: str | None,
-    tags: str | None,
-    partition: str | None,
-    time: str,
-    job_name: str,
-    no_snapshot: bool,
-) -> None:
-    """Submit a SLURM job that runs `_eval_only_main` against `run_path`.
-
-    Each invocation gets its own git snapshot so the eval job's code matches the
-    invoking environment. The child job's `run_id` is unused (eval results log into
-    the parent's wandb run via `id=<train_run_id>, resume="must"` inside
-    `_eval_only_main`), but we still allocate one so the snapshot ref is unique.
-    """
     eval_run_id = generate_run_id("param_decomp")
     snapshot_ref: str | None = None
     commit_hash = "no-snapshot"
@@ -970,23 +732,20 @@ def _submit_slurm_eval_only(
         snapshot_ref, commit_hash = create_git_snapshot(snapshot_id=eval_run_id)
         logger.info(f"Created git snapshot: {snapshot_ref} ({commit_hash[:8]})")
 
-    base_parts = [
-        "-m",
-        "param_decomp_lab.experiments.lm.run",
-        "--eval-only",
-        "--resume",
-        str(run_path),
-    ]
-    if step is not None:
-        base_parts += ["--step", str(step)]
-    if eval_config is not None:
-        base_parts += ["--eval-config", str(eval_config)]
-    if group is not None:
-        base_parts += ["--group", group]
-    if tags is not None:
-        base_parts += ["--tags", tags]
-    base_command = shlex.join(base_parts)
-
+    base_command = shlex.join(
+        [
+            "-m",
+            "param_decomp_lab.experiments.lm.async_eval",
+            "--run",
+            str(run_path),
+            "--step",
+            str(step),
+            "--eval-config",
+            str(cfg_path),
+            *(["--group", group] if group is not None else []),
+            *(["--tags", tags] if tags is not None else []),
+        ]
+    )
     launch = build_ddp_launch(
         base_command,
         dp=dp,
@@ -1001,23 +760,13 @@ def _submit_slurm_eval_only(
         n_nodes=launch.n_nodes,
         time=time,
         snapshot_ref=snapshot_ref,
-        comment=f"eval-only:{_resolve_train_run_id(run_path)}",
+        comment=f"async-slow-eval:{train_run_id}@{step}",
     )
     script = generate_script(slurm_config, launch.command, env=launch.env)
     result = submit_slurm_job(script, "lm")
-
-    print("\n" + "=" * 50)
-    print("LM PD eval-only job submitted!")
-    print("=" * 50 + "\n")
-    print(f"  Parent run    : {run_path}")
-    print(f"  Step          : {step if step is not None else 'latest'}")
-    print(f"  Job ID        : {result.job_id}")
-    print(f"  Log file      : {result.log_pattern}")
-    print(f"  Script        : {result.script_path}")
-    print(
-        f"  Snapshot      : {snapshot_ref} ({commit_hash[:8]})"
-        if snapshot_ref
-        else "  Snapshot      : (none)"
+    logger.info(
+        f"Async slow-eval submitted: parent={train_run_id} step={step} "
+        f"job_id={result.job_id} log={result.log_pattern}"
     )
 
 

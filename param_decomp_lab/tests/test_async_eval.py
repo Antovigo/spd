@@ -1,7 +1,7 @@
-"""Eval-only entry point: load a saved LM PD run, run one eval pass, log to wandb.
+"""Async eval entry point: load a saved LM PD run, run one eval pass, log to wandb.
 
 Builds a tiny saved-run on disk by running a few training steps with `Trainer`, then
-calls `_eval_only_main` against it. wandb is mocked end-to-end so we don't depend on
+calls `async_eval.main` against it. wandb is mocked end-to-end so we don't depend on
 network or credentials.
 """
 
@@ -20,6 +20,12 @@ from param_decomp.optimize import Trainer
 from param_decomp.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import make_run_batch, recon_loss_kl
 from param_decomp_lab.eval_metrics.ci_l0 import CI_L0Config
+from param_decomp_lab.experiments.lm.async_eval import (
+    _step_from_checkpoint_name,
+)
+from param_decomp_lab.experiments.lm.async_eval import (
+    main as async_eval_main,
+)
 from param_decomp_lab.experiments.lm.data import (
     LMDataConfig,
     collate_fn_for,
@@ -30,9 +36,7 @@ from param_decomp_lab.experiments.lm.run import (
     LMExperimentConfig,
     LMTargetConfig,
     SavedLMRun,
-    _eval_only_main,
     _resolve_train_run_id,
-    _step_from_checkpoint_name,
 )
 from param_decomp_lab.experiments.utils import EvalConfig, WandbConfig
 from param_decomp_lab.run_sink import OnePoolSink
@@ -138,8 +142,8 @@ def test_resolve_train_run_id_wandb_ref() -> None:
 
 
 @pytest.mark.slow
-def test_eval_only_main_against_tiny_saved_run(tmp_path: Path) -> None:
-    """End-to-end: train 1 step, then `_eval_only_main` reloads and evals.
+def test_async_eval_main_against_tiny_saved_run(tmp_path: Path) -> None:
+    """End-to-end: train 1 step, then `async_eval_main` reloads and evals.
 
     wandb is mocked: `wandb.init` is a no-op and `wandb.log` records its arguments so
     the assertion can inspect the payload keys / step.
@@ -168,21 +172,21 @@ def test_eval_only_main_against_tiny_saved_run(tmp_path: Path) -> None:
         return None
 
     with (
-        patch("param_decomp_lab.experiments.lm.run.wandb.init", side_effect=fake_init),
-        patch("param_decomp_lab.experiments.lm.run.wandb.log", side_effect=fake_log),
-        patch("param_decomp_lab.experiments.lm.run.wandb.finish", side_effect=fake_finish),
+        patch("param_decomp_lab.experiments.lm.async_eval.wandb.init", side_effect=fake_init),
+        patch("param_decomp_lab.experiments.lm.async_eval.wandb.log", side_effect=fake_log),
+        patch("param_decomp_lab.experiments.lm.async_eval.wandb.finish", side_effect=fake_finish),
         patch(
-            "param_decomp_lab.experiments.lm.run.get_wandb_entity",
+            "param_decomp_lab.experiments.lm.async_eval.get_wandb_entity",
             return_value="goodfire",
         ),
         # `try_wandb` wraps `wandb.log` — patch it to call through directly so the
         # fake_log above actually gets the call (try_wandb imports CommError).
         patch(
-            "param_decomp_lab.experiments.lm.run.try_wandb",
+            "param_decomp_lab.experiments.lm.async_eval.try_wandb",
             side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs),
         ),
     ):
-        _eval_only_main(run_dir, step=step_written, group=None, tags=None)
+        async_eval_main(run_dir, step=step_written, group=None, tags=None)
 
     assert len(init_calls) == 1, f"expected one wandb.init call, got {len(init_calls)}"
     init_kwargs = init_calls[0]
@@ -202,7 +206,7 @@ def test_eval_only_main_against_tiny_saved_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_eval_only_main_logs_skipped_when_no_wandb(tmp_path: Path) -> None:
+def test_async_eval_main_logs_skipped_when_no_wandb(tmp_path: Path) -> None:
     """When the parent cfg has no `wandb:` block, eval still runs but no wandb calls happen."""
     run_dir = tmp_path / "p-feedface"
     run_dir.mkdir()
@@ -221,10 +225,10 @@ def test_eval_only_main_logs_skipped_when_no_wandb(tmp_path: Path) -> None:
         return None
 
     with (
-        patch("param_decomp_lab.experiments.lm.run.wandb.init", side_effect=fake_init),
-        patch("param_decomp_lab.experiments.lm.run.wandb.log"),
-        patch("param_decomp_lab.experiments.lm.run.wandb.finish"),
+        patch("param_decomp_lab.experiments.lm.async_eval.wandb.init", side_effect=fake_init),
+        patch("param_decomp_lab.experiments.lm.async_eval.wandb.log"),
+        patch("param_decomp_lab.experiments.lm.async_eval.wandb.finish"),
     ):
-        _eval_only_main(run_dir, step=step_written, group=None, tags=None)
+        async_eval_main(run_dir, step=step_written, group=None, tags=None)
 
     assert init_calls == [], "wandb.init should not be called when cfg.wandb is None"
