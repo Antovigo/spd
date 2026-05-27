@@ -57,8 +57,14 @@ def aggregate_max_memory_to_rank0(
                 lw_peak = val.item()
                 ci_val = torch.empty(1, device=device)
                 pgd_val = torch.empty(1, device=device)
-                dist.recv(ci_val, src=layout.world.ci_ranks[0])
-                dist.recv(pgd_val, src=layout.world.ppgd_ranks[0])
+                dist.recv(
+                    ci_val, src=layout.world.ci_ranks[0], group=layout.world.cross_pool_p2p_group
+                )
+                dist.recv(
+                    pgd_val,
+                    src=layout.world.ppgd_ranks[0],
+                    group=layout.world.cross_pool_p2p_group,
+                )
                 return {
                     "mem/lw_peak_gb": lw_peak,
                     "mem/ci_peak_gb": ci_val.item(),
@@ -68,12 +74,12 @@ def aggregate_max_memory_to_rank0(
         case "ci":
             dist.all_reduce(val, op=dist.ReduceOp.MAX, group=layout.world.ci_pool_group)
             if layout.my_is_pool_leader:
-                dist.send(val, dst=0)
+                dist.send(val, dst=0, group=layout.world.cross_pool_p2p_group)
             return None
         case "ppgd":
             dist.all_reduce(val, op=dist.ReduceOp.MAX, group=layout.world.ppgd_pool_group)
             if layout.my_is_pool_leader:
-                dist.send(val, dst=0)
+                dist.send(val, dst=0, group=layout.world.cross_pool_p2p_group)
             return None
 
 
@@ -97,11 +103,19 @@ def aggregate_losses_to_rank0(
                 lw = {k: vals[i].item() for i, k in enumerate(keys)}
                 ci_keys = list(CI_RAW_KEYS)
                 ci_vals = torch.empty(len(ci_keys), device=device, dtype=torch.float64)
-                dist.recv(ci_vals, src=layout.world.ci_ranks[0])
+                dist.recv(
+                    ci_vals,
+                    src=layout.world.ci_ranks[0],
+                    group=layout.world.cross_pool_p2p_group,
+                )
                 ci = {k: ci_vals[i].item() for i, k in enumerate(ci_keys)}
                 pgd_keys = list(PPGD_RAW_KEYS)
                 pgd_vals = torch.empty(len(pgd_keys), device=device, dtype=torch.float64)
-                dist.recv(pgd_vals, src=layout.world.ppgd_ranks[0])
+                dist.recv(
+                    pgd_vals,
+                    src=layout.world.ppgd_ranks[0],
+                    group=layout.world.cross_pool_p2p_group,
+                )
                 pgd = {k: pgd_vals[i].item() for i, k in enumerate(pgd_keys)}
                 return {
                     "loss/faith": lw["_raw/faith_num"] / lw["_raw/faith_den"],
@@ -115,12 +129,12 @@ def aggregate_losses_to_rank0(
             vals = torch.tensor([loss_dict[k] for k in keys], device=device, dtype=torch.float64)
             dist.all_reduce(vals, op=dist.ReduceOp.SUM, group=layout.world.ci_pool_group)
             if layout.my_is_pool_leader:
-                dist.send(vals, dst=0)
+                dist.send(vals, dst=0, group=layout.world.cross_pool_p2p_group)
             return None
         case "ppgd":
             keys = list(PPGD_RAW_KEYS)
             vals = torch.tensor([loss_dict[k] for k in keys], device=device, dtype=torch.float64)
             dist.all_reduce(vals, op=dist.ReduceOp.SUM, group=layout.world.ppgd_pool_group)
             if layout.my_is_pool_leader:
-                dist.send(vals, dst=0)
+                dist.send(vals, dst=0, group=layout.world.cross_pool_p2p_group)
             return None

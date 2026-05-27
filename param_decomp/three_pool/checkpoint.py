@@ -63,13 +63,13 @@ def gather_full_state_dict_to_rank0(
         case "layerwise" if layout.my_is_block_leader:
             for s in layout.my_owned_sites:
                 comp = component_model.components[s]
-                dist.send(comp.V.data.contiguous(), dst=0)
-                dist.send(comp.U.data.contiguous(), dst=0)
+                dist.send(comp.V.data.contiguous(), dst=0, group=layout.world.cross_pool_p2p_group)
+                dist.send(comp.U.data.contiguous(), dst=0, group=layout.world.cross_pool_p2p_group)
             return None
         case "ci" if layout.my_is_pool_leader:
             assert component_model.ci_fn is not None, "CI pool must keep its CI fn"
             for _, p in component_model.ci_fn.named_parameters():
-                dist.send(p.data.contiguous(), dst=0)
+                dist.send(p.data.contiguous(), dst=0, group=layout.world.cross_pool_p2p_group)
             return None
         case _:
             # Non-leader LW ranks, non-leader CI ranks, all PPGD ranks: no-op.
@@ -118,8 +118,8 @@ def _rank0_assemble(
             U_template = full_cm.components[s].U.data
             V_buf = torch.empty_like(V_template)
             U_buf = torch.empty_like(U_template)
-            dist.recv(V_buf, src=bg.leader)
-            dist.recv(U_buf, src=bg.leader)
+            dist.recv(V_buf, src=bg.leader, group=layout.world.cross_pool_p2p_group)
+            dist.recv(U_buf, src=bg.leader, group=layout.world.cross_pool_p2p_group)
             with torch.no_grad():
                 V_template.copy_(V_buf)
                 U_template.copy_(U_buf)
@@ -130,7 +130,7 @@ def _rank0_assemble(
     assert full_cm.ci_fn is not None, "checkpoint reconstruction needs a CI fn"
     for _, p in full_cm.ci_fn.named_parameters():
         buf = torch.empty_like(p.data)
-        dist.recv(buf, src=ci_leader)
+        dist.recv(buf, src=ci_leader, group=layout.world.cross_pool_p2p_group)
         with torch.no_grad():
             p.data.copy_(buf)
 

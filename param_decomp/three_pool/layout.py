@@ -208,6 +208,11 @@ class World:
     # leader-rooted broadcasts when shipping updated V/U from LW → PPGD pool.
     # Matches the cross_pool_bcast_groups pattern in two_pool.
     cross_pool_bcast_groups: tuple[dist.ProcessGroup, ...]
+    # Dedicated world-wide process group carrying every cross-pool point-to-point
+    # send/recv. Structurally separate from default_pg so the default communicator
+    # only carries barriers — needed because NCCL gets wedged when eval-time
+    # barriers share a communicator with un-progressed cross-pool p2p work.
+    cross_pool_p2p_group: dist.ProcessGroup
 
     # ── Sizes ──
 
@@ -375,6 +380,7 @@ def build_world(
         _make_group(f"cross_pool_bcast_groups[{i}]", [bg.leader, *ppgd_ranks])
         for i, bg in enumerate(layerwise_block_groups)
     )
+    cross_pool_p2p_group = _make_group("cross_pool_p2p_group", list(range(world_size)))
 
     if device is not None:
         _prewarm_cross_pool_bcast_groups(
@@ -397,6 +403,7 @@ def build_world(
         ppgd_pool_group=ppgd_pool_group,
         block_group_groups=block_group_groups,
         cross_pool_bcast_groups=cross_pool_bcast_groups,
+        cross_pool_p2p_group=cross_pool_p2p_group,
     )
 
 
@@ -565,7 +572,11 @@ class ThreePoolLayout:
                         for site in bg.owned_sites
                     ]
                     packed = torch.cat(parts)
-                    works.append(dist.isend(packed, dst=target_lw_rank))
+                    works.append(
+                        dist.isend(
+                            packed, dst=target_lw_rank, group=self.world.cross_pool_p2p_group
+                        )
+                    )
                     buffers.append(packed)
         return works, buffers
 
@@ -591,7 +602,9 @@ class ThreePoolLayout:
                     for site in self.world.all_sites
                 ]
                 packed = torch.cat(parts)
-                works.append(dist.isend(packed, dst=target_ppgd_rank))
+                works.append(
+                    dist.isend(packed, dst=target_ppgd_rank, group=self.world.cross_pool_p2p_group)
+                )
                 buffers.append(packed)
         return works, buffers
 
@@ -623,7 +636,7 @@ class ThreePoolLayout:
                         for site in self.world.all_sites
                     )
                 packed = torch.cat(parts)
-                dist.send(packed, dst=target)
+                dist.send(packed, dst=target, group=self.world.cross_pool_p2p_group)
 
     def recv_g_ci_from_layerwise(
         self,
@@ -653,7 +666,7 @@ class ThreePoolLayout:
                 for block_rank_idx in my_lw_block_ranks:
                     src = bg.ranks[block_rank_idx]
                     buf = torch.empty(packed_numel, device=device, dtype=_WIRE_DTYPE)
-                    w = dist.irecv(buf, src=src)
+                    w = dist.irecv(buf, src=src, group=self.world.cross_pool_p2p_group)
                     assert w is not None
                     pending.append((bg_idx, block_rank_idx, buf, w, owned))
 
@@ -706,7 +719,7 @@ class ThreePoolLayout:
             for ppgd_slice_idx in my_ppgd_slice_idxs:
                 src = self.world.ppgd_ranks[ppgd_slice_idx]
                 packed = torch.empty(packed_numel, device=device, dtype=_WIRE_DTYPE)
-                w = dist.irecv(packed, src=src)
+                w = dist.irecv(packed, src=src, group=self.world.cross_pool_p2p_group)
                 assert w is not None
                 pending.append((ppgd_slice_idx, packed, w))
 
@@ -779,7 +792,7 @@ class ThreePoolLayout:
         packed_numel = sum(b_lw * seq_len * site_to_c[s] for s in self.my_owned_sites)
         packed = torch.empty(packed_numel, device=device, dtype=_WIRE_DTYPE)
         with _time_nccl_op("async_recv_ci_from_ci_pool"):
-            work = dist.irecv(packed, src=src)
+            work = dist.irecv(packed, src=src, group=self.world.cross_pool_p2p_group)
             assert work is not None
         return PendingCiRecv(
             packed=packed,
@@ -808,7 +821,7 @@ class ThreePoolLayout:
         ]
         packed = torch.cat(parts)
         with _time_nccl_op("send_g_ci_to_ci_pool"):
-            dist.send(packed, dst=dst)
+            dist.send(packed, dst=dst, group=self.world.cross_pool_p2p_group)
 
     def recv_g_vu_from_ppgd(
         self,
@@ -830,7 +843,7 @@ class ThreePoolLayout:
             packed = torch.empty(packed_numel, dtype=_WIRE_DTYPE, device=sample.device)
             ppgd_leader = self.world.ppgd_ranks[0]
             with _time_nccl_op("recv_g_vu_from_ppgd:recv"):
-                dist.recv(packed, src=ppgd_leader)
+                dist.recv(packed, src=ppgd_leader, group=self.world.cross_pool_p2p_group)
             offset = 0
             for s in my_sites:
                 v_n = v_templates[s].numel()
@@ -971,7 +984,7 @@ class ThreePoolLayout:
         packed_numel = sum(b_pp * seq_len * site_to_c[s] for s in self.world.all_sites)
         packed = torch.empty(packed_numel, device=device, dtype=_WIRE_DTYPE)
         with _time_nccl_op("async_recv_ci_from_ci_pool_ppgd"):
-            work = dist.irecv(packed, src=src)
+            work = dist.irecv(packed, src=src, group=self.world.cross_pool_p2p_group)
             assert work is not None
         return PendingCiRecv(
             packed=packed,
@@ -1005,7 +1018,7 @@ class ThreePoolLayout:
         per_block_numel = sum(b_pp * seq_len * site_to_c[s] for s in self.world.all_sites)
         packed = torch.empty(3 * per_block_numel, device=device, dtype=_WIRE_DTYPE)
         with _time_nccl_op("recv_ci_eval_from_ci_pool"):
-            dist.recv(packed, src=src)
+            dist.recv(packed, src=src, group=self.world.cross_pool_p2p_group)
 
         out: list[dict[str, Tensor]] = [{}, {}, {}]
         offset = 0
@@ -1037,7 +1050,7 @@ class ThreePoolLayout:
         ]
         packed = torch.cat(parts)
         with _time_nccl_op("send_g_ci_to_ci_pool_ppgd"):
-            dist.send(packed, dst=dst)
+            dist.send(packed, dst=dst, group=self.world.cross_pool_p2p_group)
 
     def send_g_vu_to_layerwise(
         self,
@@ -1061,7 +1074,7 @@ class ThreePoolLayout:
                     parts.append(v_grads[site].to(_WIRE_DTYPE).contiguous().flatten())
                     parts.append(u_grads[site].to(_WIRE_DTYPE).contiguous().flatten())
                 packed = torch.cat(parts)
-                w = dist.isend(packed, dst=bg.leader)
+                w = dist.isend(packed, dst=bg.leader, group=self.world.cross_pool_p2p_group)
                 assert w is not None
                 works.append(w)
                 buffers.append(packed)
