@@ -190,7 +190,6 @@ def _make_yaml_dict(
         },
         "three_pool": {
             "use_fused_kl": True,
-            "defer_vu_opt": True,
             "ci_ranks": list(range(base_ci, base_ci + n_ci)),
             "ppgd_ranks": list(range(base_ci + n_ci, base_ci + n_ci + n_ppgd)),
             "layerwise_block_groups": _block_groups(ddp_per_block),

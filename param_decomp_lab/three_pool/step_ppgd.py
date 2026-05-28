@@ -1,4 +1,4 @@
-"""PPGD pool training step — split into ``step_ppgd`` and ``finalize_ppgd_async_drain``.
+"""PPGD pool training step.
 
 PPGD pool: CI comes from the CI pool, g_CI goes back to the CI pool, and the
 final fwd+bwd's source gradient is extracted alongside V/U + CI in a single
@@ -9,8 +9,6 @@ Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
 
   A1. Post async irecv for CI_T from the owning CI rank (concurrent with A2).
   A2. target_fwd(batch_T) on the rank's PPGD slice → L_T.
-  B.  Async-mode only: wait + copy prev iter's V/U recv (overlaps with A2's
-      kernels on the default CUDA stream while NCCL waits run on theirs).
   D1. Compute weight_deltas (V/U-dependent — fresh now).
   D2. Wait CI recv; re-leaf as fp32 for downstream CI grad extraction.
   D3. ``n_warmup_steps`` supplemental source-only PGD iterations on the
@@ -29,11 +27,7 @@ Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
   D6b. Final PGD source step (the (N+1)'th source update): step on this rank's
       own source grads, exactly as warmup does.
   D7. Send g_VU to LW block leaders (PPGD-leader-only).
-  E.  Recv updated V/U from LW:
-        * sync mode → blocking recv at end of step (returns
-          ``(metrics, None)``);
-        * async mode → kickoff async recv, return handles for next step's
-          phase B.
+  E.  Blocking recv of updated V/U from LW at end of step → copy into model.
 
 Architectural note on the absence of a per-site for-loop at the step level:
 PPGD really does *one* fused forward + *one* fused backward across all sites
@@ -48,17 +42,14 @@ the step level is the whole pool, not a single site.
 from typing import Any
 
 import torch
-import torch.distributed as dist  # noqa: F401  (used in type hints)
 from torch import Tensor
 
 from param_decomp.component_model import ComponentModel
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.torch_helpers import bf16_autocast
-from param_decomp_lab.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
+from param_decomp_lab.three_pool.layout import ThreePoolLayout
 from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
-
-PendingRecvVU = list[tuple["LayerwiseBlockGroup", Tensor, "dist.Work"]]
 
 
 def step_ppgd(
@@ -71,16 +62,9 @@ def step_ppgd(
     step: int,
     n_steps: int,
     *,
-    defer_vu_opt: bool,
-    prev_pending_recv_vu: PendingRecvVU | None,
     should_log: bool,
-) -> tuple[dict[str, float], PendingRecvVU | None]:
-    """One PPGD step. Branches on ``defer_vu_opt`` for sync vs async pipeline.
-
-    Async mode is required when LW defers — otherwise PPGD's blocking sync recv
-    at end of step T would deadlock against LW's deferred async send (which
-    doesn't fire until top of T+1).
-    """
+) -> dict[str, float]:
+    """One PPGD step: A → D → blocking recv of updated V/U from LW → copy in."""
     assert layout.my_pool == "ppgd"
     device = next(component_model.parameters()).device
     all_sites = list(layout.world.all_sites)
@@ -95,14 +79,6 @@ def step_ppgd(
         )
         with torch.no_grad(), bf16_autocast(cfg.bf16_autocast):
             target_out = component_model(batch_local).detach()
-
-        # Async-mode bookkeeping: this iter's V/U arrived in the prev iter's
-        # async kickoff. Wait + copy here, overlapping the NCCL wait with the
-        # A2 target_fwd kernels enqueued above.
-        if defer_vu_opt and prev_pending_recv_vu is not None:
-            _wait_and_copy_prev_vu_into_model(
-                layout, component_model, prev_pending_recv_vu, v_templates, u_templates
-            )
 
         weight_deltas = component_model.calc_weight_deltas()
         ci_recv = ci_recv_pending.wait_and_unpack()
@@ -195,29 +171,9 @@ def step_ppgd(
     else:
         metrics = {}
 
-    if defer_vu_opt:
-        new_pending = layout.async_recv_updated_vu_from_layerwise_kickoff(v_templates, u_templates)
-        return metrics, new_pending
-
     v_new, u_new = layout.recv_updated_vu_from_layerwise(v_templates, u_templates)
     _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
-    return metrics, None
-
-
-def finalize_ppgd_async_drain(
-    layout: ThreePoolLayout,
-    component_model: ComponentModel,
-    pending_recv_vu: PendingRecvVU,
-) -> None:
-    """End-of-training drain in async mode: complete the final iter's V/U recv
-    so the saved checkpoint (gathered from LW pool's V/U separately) is
-    consistent with what PPGD pool used last.
-    """
-    assert layout.my_pool == "ppgd"
-    all_sites = list(layout.world.all_sites)
-    v_templates, u_templates = _vu_templates(component_model, all_sites)
-    v_new, u_new = layout.wait_and_unpack_updated_vu(pending_recv_vu, v_templates, u_templates)
-    _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
+    return metrics
 
 
 def _slice_batch_for_ppgd(batch: Any, layout: ThreePoolLayout) -> tuple[Any, int]:
@@ -235,26 +191,10 @@ def _slice_batch_for_ppgd(batch: Any, layout: ThreePoolLayout) -> tuple[Any, int
 def _vu_templates(
     component_model: ComponentModel, all_sites: list[str]
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """V/U tensors per site — used as recv buffers in async kickoff/drain."""
+    """V/U tensors per site — used as recv buffers for the V/U recv from LW."""
     v_templates: dict[str, Tensor] = {s: component_model.components[s].V for s in all_sites}
     u_templates: dict[str, Tensor] = {s: component_model.components[s].U for s in all_sites}
     return v_templates, u_templates
-
-
-def _wait_and_copy_prev_vu_into_model(
-    layout: ThreePoolLayout,
-    component_model: ComponentModel,
-    prev_pending_recv_vu: PendingRecvVU,
-    v_templates: dict[str, Tensor],
-    u_templates: dict[str, Tensor],
-) -> None:
-    """Phase ppgd/B (async mode only). Wait + copy prev iter's V/U recv into model.
-
-    Blocking wait overlaps with the A2 target_fwd kernels enqueued just above —
-    that's the headline win of async mode.
-    """
-    v_new, u_new = layout.wait_and_unpack_updated_vu(prev_pending_recv_vu, v_templates, u_templates)
-    _copy_vu_into_model_in_place(component_model, v_new, u_new, list(layout.world.all_sites))
 
 
 def _releaf_ci_fp32_for_grads(ci_recv: dict[str, Tensor]) -> dict[str, Tensor]:

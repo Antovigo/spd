@@ -135,9 +135,9 @@ def run_eval_step(
     is True only runs when ``slow_step`` is True.
     """
     # NOTE: `torch.cuda.synchronize()` is unsafe here — it drains ALL
-    # CUDA streams including pending async NCCL recvs (e.g. the V/U
-    # bcast under defer_vu_opt). The structural fix (cross_pool_p2p_group)
-    # made this barrier safe without needing a drain.
+    # CUDA streams including any pending async NCCL collectives on side
+    # streams. The structural fix (cross_pool_p2p_group) made this barrier
+    # safe without needing a drain.
     sync_across_processes()
     active = (
         [m for m in metrics if not (m.slow and not slow_step)] if layout.my_pool == "ppgd" else []

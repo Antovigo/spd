@@ -1,17 +1,11 @@
 """Layerwise pool training step.
 
-Trains V/U on the LW pool with the CI fn living on the CI pool, plus an
-optional async pipeline (``defer_vu_opt=True``) that
-hides the V/U opt step + V/U ship-back behind T+1's CI fn forward window on
-the CI pool.
+Trains V/U on the LW pool with the CI fn living on the CI pool.
 
 Phases (numbered to match ``DESIGN.md`` ``lw/N``):
 
   A1. Post async irecv for CI_T from the owning CI rank (overlaps with A2).
   A2. target_fwd(batch_T) → L_T on this rank's batch slice.
-  B.  Async mode only: finalize prev iter's deferred all_reduce → grad clip →
-      AdamW step → async ship V/U. Blocking waits here overlap with A2's
-      kernels (default CUDA stream) on the GPU.
   C.  Zero ``param.grad`` for fresh accumulation.
   D1. Faithfulness loss + backward (V/U-only, doesn't need CI).
   D2. Wait CI recv; re-leaf as fp32 ``requires_grad=True`` so the layerwise
@@ -22,12 +16,10 @@ Phases (numbered to match ``DESIGN.md`` ``lw/N``):
   D4. Send g_CI back to CI pool (per-rank, on owned sites).
   D5. Recv g_VU from PPGD pool (block leader recvs, then in-block bcast).
   D6. Combine V/U grads: faith + layerwise already in ``.grad``; add PPGD's.
-  E.  Tail. Sync mode: in-block all_reduce → grad clip → AdamW → async send
-      V/U. Async mode: kickoff async all_reduce, return its pending state.
+  E.  Tail. In-block all_reduce → grad clip → AdamW → async send V/U.
 
-Phases 1 + 3 give the headline overlap (CI recv on the NIC while
-faithfulness runs on the GPU). The phase-B + phase-E async kickoff give the
-deferred-mode overlap (they hide behind T+1's CI fn forward window on CI pool).
+Phases A1 + D1 give the headline overlap (CI recv on the NIC while
+faithfulness runs on the GPU).
 """
 
 # pyright: reportArgumentType=false, reportOperatorIssue=false, reportAttributeAccessIssue=false
@@ -35,7 +27,6 @@ deferred-mode overlap (they hide behind T+1's CI fn forward window on CI pool).
 from typing import Any
 
 import torch
-import torch.distributed as dist  # noqa: F401  (used in type hints)
 import torch.nn as nn
 from torch import Tensor
 
@@ -48,8 +39,6 @@ from param_decomp_lab.three_pool.layout import ThreePoolLayout
 from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 
-PendingAllReduce = list[tuple[list[Tensor], Tensor, "dist.Work"]]
-
 
 def step_layerwise(
     layout: ThreePoolLayout,
@@ -60,19 +49,9 @@ def step_layerwise(
     cfg: _ThreePoolRuntime,
     strategy: LayerwiseLossStrategy,
     *,
-    defer_vu_opt: bool,
-    prev_pending_all_reduce: PendingAllReduce | None,
     should_log: bool,
-) -> tuple[dict[str, float], PendingAllReduce | None]:
-    """One LW step. Branches on ``defer_vu_opt`` for sync vs async pipeline.
-
-    Sync (``defer_vu_opt=False``): A → D → sync tail (all_reduce, clip, opt,
-    async send V/U). Returns ``(metrics, None)``.
-
-    Async (``defer_vu_opt=True``): A → B-finalize-prev (concurrent w/ A2) →
-    D → kickoff async all_reduce, return its pending state. Caller must
-    thread it across iters and drain via ``finalize_layerwise_async_drain``.
-    """
+) -> dict[str, float]:
+    """One LW step: A → D → tail (all_reduce, clip, opt, async send V/U)."""
     assert layout.my_pool == "layerwise"
     device = next(component_model.parameters()).device
     n_sites_total = len(cfg.c_per_site)
@@ -87,11 +66,6 @@ def step_layerwise(
         )
         with torch.no_grad(), bf16_autocast(cfg.bf16_autocast):
             target_local = component_model(batch_local).detach()
-
-    if defer_vu_opt and prev_pending_all_reduce is not None:
-        _finalize_prev_iter_async(
-            layout, component_model, optimizer, all_params, prev_pending_all_reduce, cfg
-        )
 
     for param in all_params:
         param.grad = None
@@ -145,36 +119,8 @@ def step_layerwise(
     else:
         metrics = {}
 
-    if defer_vu_opt:
-        new_pending = layout.async_all_reduce_grads_in_block_kickoff(all_params)
-        return metrics, new_pending
-
     _sync_tail(layout, component_model, optimizer, all_params, cfg)
-    return metrics, None
-
-
-def finalize_layerwise_async_drain(
-    layout: ThreePoolLayout,
-    component_model: ComponentModel,
-    optimizer: torch.optim.Optimizer,
-    all_params: list[nn.Parameter],
-    pending_all_reduce: PendingAllReduce,
-    grad_clip_norm: float | None,
-) -> None:
-    """End-of-training drain in async mode: finish the final iter's deferred
-    opt step. Skips the V/U async send since training is over.
-    """
-    assert layout.my_pool == "layerwise"
-    _wait_pending_weight_send(component_model)
-    layout.wait_and_unflatten_all_reduce(pending_all_reduce)
-    if grad_clip_norm is not None:
-        cross_pool_clip_grad_norm(
-            all_params,
-            grad_clip_norm,
-            group=layout.world.layerwise_pool_group,
-            n_replicas=layout.world.n_per_block,
-        )
-    optimizer.step()
+    return metrics
 
 
 def run_faithfulness_warmup_layerwise(
@@ -212,34 +158,6 @@ def _slice_batch_for_layerwise(batch: Any, layout: ThreePoolLayout) -> tuple[Any
         assert isinstance(batch_local, dict) and "input_ids" in batch_local
         seq_len = batch_local["input_ids"].shape[1]
     return batch_local, seq_len
-
-
-def _finalize_prev_iter_async(
-    layout: ThreePoolLayout,
-    component_model: ComponentModel,
-    optimizer: torch.optim.Optimizer,
-    all_params: list[nn.Parameter],
-    prev_pending_all_reduce: PendingAllReduce,
-    cfg: _ThreePoolRuntime,
-) -> None:
-    """Phase lw/B (async mode only). Finish the previous iter's deferred opt.
-
-    Sequence: wait pending V/U send → wait + unflatten the prev all_reduce →
-    cross-pool grad clip → AdamW step → async ship updated V/U to PPGD.
-    Blocking waits in here overlap with phase A2's target_fwd kernels (which
-    run on the default CUDA stream while NCCL waits hit their own stream).
-    """
-    _wait_pending_weight_send(component_model)
-    layout.wait_and_unflatten_all_reduce(prev_pending_all_reduce)
-    if cfg.grad_clip_norm_components is not None:
-        cross_pool_clip_grad_norm(
-            all_params,
-            cfg.grad_clip_norm_components,
-            group=layout.world.layerwise_pool_group,
-            n_replicas=layout.world.n_per_block,
-        )
-    optimizer.step()
-    _async_send_owned_vu_to_ppgd(component_model, layout)
 
 
 def _releaf_ci_fp32_for_grads(

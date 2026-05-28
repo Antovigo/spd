@@ -93,11 +93,10 @@ from param_decomp_lab.three_pool.reductions import (
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 from param_decomp_lab.three_pool.step_ci import step_ci
 from param_decomp_lab.three_pool.step_layerwise import (
-    finalize_layerwise_async_drain,
     run_faithfulness_warmup_layerwise,
     step_layerwise,
 )
-from param_decomp_lab.three_pool.step_ppgd import finalize_ppgd_async_drain, step_ppgd
+from param_decomp_lab.three_pool.step_ppgd import step_ppgd
 
 # Loss-metric type discriminators required for the 3-pool training path.
 REQUIRED_LOSS_METRIC_TYPES: frozenset[str] = frozenset(
@@ -588,7 +587,6 @@ class ThreePoolTrainer:
         layout = self.layout
         runtime = self.runtime
         n_steps = pd_config.steps
-        defer_vu_opt = self.three_pool_config.defer_vu_opt
         device = self._device
 
         train_iterator = loop_dataloader(train_loader)
@@ -667,9 +665,6 @@ class ThreePoolTrainer:
 
         profiler_ctx = profiler if profiler is not None else nullcontext()
         h_cache_ci: dict[str, Tensor] | None = None
-        # Async-pipeline state threaded across iterations on LW + PPGD pools.
-        pending_all_reduce_lw: list[tuple[list[Tensor], Tensor, dist.Work]] | None = None
-        pending_recv_vu_ppgd: list[tuple[Any, Tensor, dist.Work]] | None = None
 
         def _to_device(b: Any) -> Any:
             """Move a batch yielded by the train loader to this rank's GPU.
@@ -708,9 +703,8 @@ class ThreePoolTrainer:
                             step, n_steps, ci_fn_lr_schedule
                         )
                     elif layout.my_pool == "layerwise":
-                        lr_step = max(step - 1, 0) if defer_vu_opt else step
                         self.optimizer.param_groups[0]["lr"] = get_scheduled_value(
-                            lr_step, n_steps, components_lr_schedule
+                            step, n_steps, components_lr_schedule
                         )
 
                 step_start = time.perf_counter()
@@ -749,7 +743,7 @@ class ThreePoolTrainer:
                         assert layout.my_owned_sites, (
                             f"LW rank {layout.my_rank} has no owned_sites — empty block"
                         )
-                        metrics, pending_all_reduce_lw = step_layerwise(
+                        metrics = step_layerwise(
                             layout,
                             self.component_model,
                             self.optimizer,
@@ -757,15 +751,13 @@ class ThreePoolTrainer:
                             batch_T,
                             runtime,
                             self.strategy,
-                            defer_vu_opt=defer_vu_opt,
-                            prev_pending_all_reduce=pending_all_reduce_lw,
                             should_log=should_log,
                         )
                     case "ppgd":
                         assert self.ppgd_state is not None, (
                             f"PPGD rank {layout.my_rank} has no ppgd_state — lazy init failed"
                         )
-                        metrics, pending_recv_vu_ppgd = step_ppgd(
+                        metrics = step_ppgd(
                             layout,
                             self.component_model,
                             self.ppgd_state,
@@ -774,8 +766,6 @@ class ThreePoolTrainer:
                             self.strategy,
                             step=step,
                             n_steps=n_steps,
-                            defer_vu_opt=defer_vu_opt,
-                            prev_pending_recv_vu=pending_recv_vu_ppgd,
                             should_log=should_log,
                         )
                 # NaN check + .item()-bearing metrics only fire on log steps —
@@ -845,36 +835,6 @@ class ThreePoolTrainer:
 
                 if profiler is not None:
                     profiler.step()
-
-            # Drain the final iter's deferred opt (async mode only). Without this,
-            # the saved checkpoint would be missing the last iter's update.
-            if defer_vu_opt:
-                match layout.my_pool:
-                    case "layerwise":
-                        assert self.optimizer is not None
-                        if pending_all_reduce_lw is not None:
-                            self.optimizer.param_groups[0]["lr"] = get_scheduled_value(
-                                n_steps - 1, n_steps, components_lr_schedule
-                            )
-                            finalize_layerwise_async_drain(
-                                layout,
-                                self.component_model,
-                                self.optimizer,
-                                self._all_params,
-                                pending_all_reduce_lw,
-                                runtime.grad_clip_norm_components,
-                            )
-                            pending_all_reduce_lw = None
-                    case "ppgd":
-                        if pending_recv_vu_ppgd is not None:
-                            finalize_ppgd_async_drain(
-                                layout,
-                                self.component_model,
-                                pending_recv_vu_ppgd,  # type: ignore[arg-type]
-                            )
-                            pending_recv_vu_ppgd = None
-                    case "ci":
-                        pass  # CI pool doesn't defer
 
             self.step = n_steps
             snap = self.snapshot(scratch_dir)

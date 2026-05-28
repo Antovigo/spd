@@ -115,7 +115,6 @@ data:
   shuffle_each_epoch: true
 three_pool:
   use_fused_kl: true
-  defer_vu_opt: false
   ci_ranks: [48, 49, 50, 51]
   ppgd_ranks: [52, 53, 54, 55]
   layerwise_block_groups:

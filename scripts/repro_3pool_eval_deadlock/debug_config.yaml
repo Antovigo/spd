@@ -119,7 +119,6 @@ data:
   shuffle_each_epoch: true
 three_pool:
   use_fused_kl: true
-  defer_vu_opt: false
   ci_ranks:
   - 4
   - 5
