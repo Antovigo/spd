@@ -72,13 +72,11 @@ class PhaseProfiler:
             self._prof = None
 
     @contextmanager
-    def phase(self, name: str) -> "Iterator[None]":
-        """Annotate a logical step phase. No-op when disabled."""
-        if not self.enabled:
-            yield
-            return
-        with torch.profiler.record_function(name):
-            yield
+    def phase(self, _name: str) -> "Iterator[None]":
+        """Annotate a logical step phase. Currently a no-op — kept to mirror
+        the 3-pool API and as a hook point if richer per-phase
+        instrumentation is added in the future."""
+        yield
 
     def step(self) -> None:
         """Advance the profiler schedule (call once per training iteration)."""

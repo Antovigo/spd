@@ -8,7 +8,7 @@ than imported to keep each subsystem owning its own surface.
 
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -122,9 +122,6 @@ class PhaseProfiler:
         ``max_memory_allocated`` see only this phase's peak, not the
         whole-step peak. That's fine in debug mode (where this is enabled);
         in production ``PD_PHASE_TRACE`` is off and this is a no-op.
-
-        The ``record_function`` wrapper is only active when the torch
-        profiler is enabled.
         """
         do_trace = phase_trace_enabled()
         device = None
@@ -140,10 +137,8 @@ class PhaseProfiler:
             entry_event.record()
             cpu_start = time.perf_counter()
 
-        inner = torch.profiler.record_function(name) if self.enabled else nullcontext()
         try:
-            with inner:
-                yield
+            yield
         finally:
             if do_trace:
                 assert entry_event is not None
