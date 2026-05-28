@@ -415,6 +415,11 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
       * ``PD_TORCH_PROFILE_MEMORY=0`` — set to disable profile_memory (CUPTI
         memory instrumentation is the heaviest subsystem; toggle if you
         suspect it's confounding measurements).
+      * ``PD_TORCH_PROFILE_STACK=1`` — attach Python source location per op
+        (huge readability win, 20-30% step-time hit).
+      * ``PD_TORCH_PROFILE_MODULES=1`` — label kernels with ``nn.Module``
+        hierarchy (cheap; useful for per-site decomposition labels).
+      * ``PD_TORCH_PROFILE_SHAPES=1`` — record per-op input tensor shapes.
 
     Returns the profiler (caller threads it into ``trainer.run(profiler=...)``)
     or ``None`` if this rank isn't listed. Side-effects ``PhaseProfiler.__enter__``,
@@ -437,9 +442,13 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
     skip_first = int(os.environ.get("PD_TORCH_PROFILE_SKIP_FIRST", "20"))
     active = int(os.environ.get("PD_TORCH_PROFILE_ACTIVE", "3"))
     profile_memory = os.environ.get("PD_TORCH_PROFILE_MEMORY", "1") != "0"
+    with_stack = os.environ.get("PD_TORCH_PROFILE_STACK", "0") == "1"
+    with_modules = os.environ.get("PD_TORCH_PROFILE_MODULES", "0") == "1"
+    record_shapes = os.environ.get("PD_TORCH_PROFILE_SHAPES", "0") == "1"
     logger.info(
         f"[torch-profile] rank={my_rank} pool={trainer.layout.my_pool} → {out_dir} "
-        f"(skip_first={skip_first}, active={active}, profile_memory={profile_memory})"
+        f"(skip_first={skip_first}, active={active}, profile_memory={profile_memory}, "
+        f"with_stack={with_stack}, with_modules={with_modules}, record_shapes={record_shapes})"
     )
     return PhaseProfiler(
         enabled=True,
@@ -449,6 +458,9 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
         skip_first=skip_first,
         active=active,
         profile_memory=profile_memory,
+        with_stack=with_stack,
+        with_modules=with_modules,
+        record_shapes=record_shapes,
     )
 
 

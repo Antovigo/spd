@@ -61,10 +61,17 @@ class PhaseProfiler:
     active: int = 3
     profile_memory: bool = True
     """Whether torch.profiler tracks per-allocation memory events. CUPTI's
-    memory instrumentation is the heaviest part of the profiler and the most
-    likely contributor to NCCL stream-sync interference at scale (see the
-    104-rank deadlock in docs/handoff_2026-05-26_3pool_perf.md). Disable to
-    test whether the rest of the profiler can survive at scale."""
+    memory instrumentation is the heaviest part of the profiler. Toggle off
+    if you suspect it's confounding measurements."""
+    with_stack: bool = False
+    """Attach Python source location to each op. Big readability win in
+    Chrome trace UIs ("this kernel came from step_layerwise.py:142") but
+    20-30% step-time hit and noticeably larger traces."""
+    with_modules: bool = False
+    """Label kernels with their nn.Module hierarchy (e.g. ``h.5.attn.q_proj``).
+    Cheap; especially useful for the per-site decomposition target setup."""
+    record_shapes: bool = False
+    """Record per-op input tensor shapes. Small CPU + trace-size cost."""
     _prof: torch.profiler.profile | None = None
     _pending_gpu_events: list[_PendingPhase] = field(default_factory=list)
 
@@ -88,9 +95,10 @@ class PhaseProfiler:
                 skip_first=self.skip_first, wait=0, warmup=1, active=self.active, repeat=1
             ),
             on_trace_ready=on_trace_ready,
-            record_shapes=False,
+            record_shapes=self.record_shapes,
             profile_memory=self.profile_memory,
-            with_stack=False,
+            with_stack=self.with_stack,
+            with_modules=self.with_modules,
         )
         self._prof.__enter__()
         return self
