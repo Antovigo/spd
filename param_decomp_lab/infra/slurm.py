@@ -262,15 +262,23 @@ def generate_git_snapshot_setup(work_dir: str, snapshot_ref: str) -> str:
     `git clone` only fetches `refs/heads/*` + tags, so custom namespaces like
     `refs/runs/snapshot/*` need an explicit fetch. Also copies `.env` and activates the
     venv. `work_dir` is a bash expression and can include `$SLURM_*` vars.
+
+    Uses ``$HOME/param-decomp`` as the git source (resolved at shell-time on the
+    target node) rather than the Python-side ``REPO_ROOT``. This keeps the setup
+    portable: when this script is generated from inside another SLURM job
+    (e.g. async slow-eval submitted by training's ``sink.on_save``), ``REPO_ROOT``
+    would resolve to the submitting job's node-local ``/tmp/.../workspace-*`` —
+    which doesn't exist on the new job's nodes. ``$HOME/param-decomp`` always
+    points at the user's canonical shared-FS checkout.
     """
     return f"""\
 WORK_DIR="{work_dir}"
 mkdir -p "$WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
-git clone "{REPO_ROOT}" "$WORK_DIR"
+git clone "$HOME/param-decomp" "$WORK_DIR"
 cd "$WORK_DIR"
-[ -f "{REPO_ROOT}/.env" ] && cp "{REPO_ROOT}/.env" .env
-git fetch "{REPO_ROOT}" "{snapshot_ref}:{snapshot_ref}"
+[ -f "$HOME/param-decomp/.env" ] && cp "$HOME/param-decomp/.env" .env
+git fetch "$HOME/param-decomp" "{snapshot_ref}:{snapshot_ref}"
 git checkout "{snapshot_ref}"
 deactivate 2>/dev/null || true
 unset VIRTUAL_ENV

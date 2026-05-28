@@ -739,12 +739,14 @@ def submit_slurm_async_slow_eval(
     cfg_path = scratch / f"slow_eval_step_{step}.yaml"
     slow_eval_cfg.to_file(cfg_path)
 
+    # Reuse the training run's snapshot ref. The training was launched from
+    # $HOME/param-decomp and the snapshot already exists there. Creating a new
+    # snapshot here would operate on whatever git repo this process happens to
+    # be in — when called from inside a training job, that's the node-local
+    # /tmp/.../workspace-* clone, which other nodes can't see. Plus, async eval
+    # should run the same code as the training that produced the checkpoint.
     eval_run_id = generate_run_id("param_decomp")
-    snapshot_ref: str | None = None
-    commit_hash = "no-snapshot"
-    if not no_snapshot:
-        snapshot_ref, commit_hash = create_git_snapshot(snapshot_id=eval_run_id)
-        logger.info(f"Created git snapshot: {snapshot_ref} ({commit_hash[:8]})")
+    snapshot_ref: str | None = f"refs/runs/snapshot/{train_run_id}" if not no_snapshot else None
 
     base_command = shlex.join(
         [
