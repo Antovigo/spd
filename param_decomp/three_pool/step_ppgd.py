@@ -18,15 +18,19 @@ Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
   D3. ``n_warmup_steps`` supplemental source-only PGD iterations on the
       persistent adversarial sources.
   D4. Recon loss with the refined sources (the (N+1)'th forward).
-  D5. Backward: ``torch.autograd.grad`` for g_VU + g_CI + g_sources in one
-      pass.
+  D5. Backward: one ``torch.autograd.grad`` over the UNSCALED recon sum yields
+      raw g_VU + g_CI + g_sources; each consumer's own normalization is applied
+      explicitly afterward (V/U + CI: coeff_ppgd / n_examples_global; sources:
+      1 / n_examples_local — no coeff, no 1/n_ppgd).
   D5b. Send g_CI to CI pool (every rank, on its batch slice). Peer-to-peer
        point-to-point — no PPGD-internal reduce needed, so fires immediately
        after backward to unblock CI's recv-wait sooner.
-  D6. Sum-reduce g_VU + g_sources within PPGD pool → each rank holds the
-      full-batch grad.
-  D6b. Final PGD source step (the (N+1)'th source update) using the reduced
-      source grads from D5.
+  D6. Sum-reduce g_VU within PPGD pool → each rank holds the full-batch grad.
+      Sources are reduced separately (see D6b) because their reduction is
+      scope-dependent, not an unconditional SUM.
+  D6b. Final PGD source step (the (N+1)'th source update): reduce the source
+      grads per source scope (skip for per_batch_per_position, AVG for
+      replicated) then step — reusing the same path as warmup/get_grads.
   D7. Send g_VU to LW block leaders (PPGD-leader-only).
   E.  Recv updated V/U from LW:
         * sync mode → blocking recv at end of step (returns
@@ -51,6 +55,7 @@ import torch.distributed as dist  # noqa: F401  (used in type hints)
 from torch import Tensor
 
 from param_decomp.component_model import ComponentModel
+from param_decomp.distributed import use_reduction_group
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
@@ -108,7 +113,10 @@ def step_ppgd(
         ci_scratch = _releaf_ci_fp32_for_grads(ci_recv)
         _assert_ci_scratch_shapes(ci_scratch, layout, seq_len, cfg)
 
-        with autocast_bf16(cfg.bf16_autocast):
+        # Scope any in-warmup source-grad all_reduce to the PPGD pool. A no-op
+        # for per_batch_per_position sources (which skip the reduce); correct
+        # for replicated scopes, which would otherwise hit the global group.
+        with autocast_bf16(cfg.bf16_autocast), use_reduction_group(layout.world.ppgd_pool_group):
             ppgd_state.warmup(
                 model=component_model,
                 batch=batch_local,
@@ -127,32 +135,56 @@ def step_ppgd(
         assert sum_loss.dim() == 0, f"sum_loss should be scalar; got {sum_loss.shape}"
         assert n_examples > 0, f"n_examples must be positive; got {n_examples}"
 
-    # Scale by 1/n_ppgd so D6's SUM-reduce produces the full-batch gradient.
-    total_ppgd = cfg.coeff_ppgd * (sum_loss / n_examples) / layout.world.n_ppgd
-
-    # Single multi-target backward: V/U + CI + source grads from this one
-    # forward. The source grads ride along essentially for free (a few extra
-    # autograd nodes) and let us apply one more PGD source step in D6b —
-    # without the fusion, that source gradient would be computed during the
-    # V/U+CI bwd and silently discarded. Total source updates per training
-    # step = n_warmup_steps + 1.
-    v_grads, u_grads, ci_grads, source_grads = _autograd_grad_for_vu_ci_and_sources(
-        total_ppgd,
+    # One backward over the UNSCALED recon sum, then each consumer applies its
+    # OWN normalization explicitly below. The three consumers (V/U, CI, sources)
+    # need genuinely different scalings; folding any one of them into the
+    # differentiated scalar — as an earlier version did, dividing by n_ppgd for
+    # the V/U reduce — silently mis-scales the others (it gave the source step a
+    # spurious 1/n_ppgd it should never have had).
+    # These come back UNSCALED (raw ∂sum_loss/∂·); each is normalized in place
+    # just below, at the point of use.
+    v_grads, u_grads, ci_grads, source_grads = _autograd_grads_wrt_vu_ci_and_sources(
+        sum_loss,
         component_model,
         ci_scratch,
         all_sites,
         ppgd_state.sources,
     )
-    # CI grad send first: it's peer-to-peer (each PPGD rank → its paired CI
-    # rank) so it doesn't need the in-pool reduce, and CI's recv is on the
-    # critical path. Sequencing it behind D6 wasted ~110 ms of CI wait time.
+
+    n_examples_local = n_examples
+    n_ppgd_ranks = layout.world.n_ppgd
+
+    # V/U and CI reproduce the serial gradient of the canonical PPGD loss
+    #   coeff_ppgd * recon_sum_loss / n_examples_global,
+    # where n_examples_global = n_examples_local * n_ppgd_ranks. Each rank holds
+    # only its batch-slice's contribution, so the per-rank scale carries the
+    # 1/n_ppgd_ranks and the in-pool SUM-reduce reassembles the full-batch grad.
+    vu_and_ci_grad_scale = cfg.coeff_ppgd / (n_examples_local * n_ppgd_ranks)
+    # Sources are per-rank-local adversary state optimized against THIS rank's own
+    # recon mean (recon_sum_loss / n_examples_local) — no coeff, no 1/n_ppgd
+    # (those are V/U-reduction artifacts). Identical to the warmup source grad.
+    source_grad_scale = 1.0 / n_examples_local
+
+    _scale_grads_in_place(v_grads, vu_and_ci_grad_scale)
+    _scale_grads_in_place(u_grads, vu_and_ci_grad_scale)
+    _scale_grads_in_place(ci_grads, vu_and_ci_grad_scale)
+    _scale_grads_in_place(source_grads, source_grad_scale)
+
+    # CI grad send first: peer-to-peer (each PPGD rank → its paired CI rank), no
+    # in-pool reduce needed, and CI's recv is on the critical path. Sequencing it
+    # behind the V/U reduce wasted ~110 ms of CI wait time.
     layout.send_g_ci_to_ci_pool_ppgd(ci_grads)
-    # Reduce sources alongside V/U. Sign-PGD makes SUM-vs-AVG equivalent
-    # for the source step (sign(SUM) == sign(AVG)); reducing here keeps
-    # source state consistent across PPGD ranks for the step below.
-    layout.sum_reduce_ppgd_grads([*v_grads.values(), *u_grads.values(), *source_grads.values()])
-    ppgd_state.apply_source_step_from_grads(source_grads)
+    # V/U grads: SUM-reduce across the pool to reassemble the full-batch gradient
+    # (the per-rank scale already carries 1/n_ppgd_ranks). Sources are NOT bundled
+    # here: their cross-rank reduction is scope-dependent (per_batch_per_position
+    # is per-rank-independent and must not be reduced; a blind SUM would mix
+    # unrelated per-position sources).
+    layout.sum_reduce_ppgd_grads([*v_grads.values(), *u_grads.values()])
     layout.send_g_vu_to_layerwise(v_grads, u_grads)
+    # Final (N+1)'th source step: reduce per scope, then step — the same path
+    # warmup uses, scoped to the PPGD pool, so it cannot diverge from warmup.
+    with use_reduction_group(layout.world.ppgd_pool_group):
+        ppgd_state.reduce_and_step_sources(source_grads)
 
     # ``.item()`` calls force CPU↔GPU sync. With async NCCL ops in D5b/D6/D7
     # still in flight on side streams, syncing here pulls forward the wait
@@ -258,36 +290,53 @@ def _assert_ci_scratch_shapes(
         )
 
 
-def _autograd_grad_for_vu_ci_and_sources(
-    total_ppgd: Tensor,
+def _scale_grads_in_place(grads: dict[str, Tensor], scale: float) -> None:
+    """Multiply each gradient by ``scale`` in place (mutates the autograd outputs)."""
+    for grad in grads.values():
+        grad.mul_(scale)
+
+
+def _autograd_grads_wrt_vu_ci_and_sources(
+    recon_sum_loss: Tensor,
     component_model: ComponentModel,
     ci_scratch: dict[str, Tensor],
     all_sites: list[str],
     sources: dict[str, Tensor],
 ) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], dict[str, Tensor]]:
-    """Phase ppgd/D5. One ``torch.autograd.grad`` for V/U + CI + PPGD sources.
+    """Phase ppgd/D5. One ``torch.autograd.grad`` over the UNSCALED recon sum.
 
-    Returning all four gradient sets from a single backward lets the caller
-    fuse the final PGD source step with the V/U+CI backward (saving a separate
-    forward + source-only backward; see ``persistent_pgd_state.warmup``
-    docstring). The flat target list is an artifact of ``autograd.grad``
-    returning grads in input order; we split back into dicts keyed by site.
-    ``retain_graph=False`` since this is the last graph use.
+    Differentiates ``recon_sum_loss`` — the raw Σ-over-this-rank's-examples recon
+    loss, NOT yet divided by any example count or multiplied by any coefficient —
+    once, w.r.t. V/U, the received-CI scratch leaves, and the PPGD sources. The
+    caller (``step_ppgd``) applies each consumer's own normalization afterward,
+    because the three consumers need different scalings and folding any of them
+    into this scalar would mis-scale the others.
+
+    Fusing all four gradient sets into one backward avoids a separate source-only
+    forward+backward. ``retain_graph=False`` — last use of the graph.
+
+    Returns ``(v_grads, u_grads, ci_grads, source_grads)``, each keyed by site
+    (sources keyed by source key).
     """
     source_keys = list(sources.keys())
-    params: list[Tensor] = []
-    for s in all_sites:
-        params.append(component_model.components[s].V)
-        params.append(component_model.components[s].U)
-    ci_list = [ci_scratch[s] for s in all_sites]
-    source_list = [sources[k] for k in source_keys]
-    grads = torch.autograd.grad(total_ppgd, params + ci_list + source_list, retain_graph=False)
+    v_params = [component_model.components[s].V for s in all_sites]
+    u_params = [component_model.components[s].U for s in all_sites]
+    ci_leaves = [ci_scratch[s] for s in all_sites]
+    source_tensors = [sources[k] for k in source_keys]
+
+    # autograd.grad returns grads in the order targets are passed. Keep the four
+    # groups contiguous and split the result back out by group length.
+    grad_targets = v_params + u_params + ci_leaves + source_tensors
+    flat_grads = torch.autograd.grad(recon_sum_loss, grad_targets, retain_graph=False)
 
     n_sites = len(all_sites)
-    v_grads = {s: grads[2 * i] for i, s in enumerate(all_sites)}
-    u_grads = {s: grads[2 * i + 1] for i, s in enumerate(all_sites)}
-    ci_grads = {s: grads[2 * n_sites + i] for i, s in enumerate(all_sites)}
-    source_grads = {k: grads[3 * n_sites + i] for i, k in enumerate(source_keys)}
+    n_sources = len(source_keys)
+    v_grads = dict(zip(all_sites, flat_grads[0:n_sites], strict=True))
+    u_grads = dict(zip(all_sites, flat_grads[n_sites : 2 * n_sites], strict=True))
+    ci_grads = dict(zip(all_sites, flat_grads[2 * n_sites : 3 * n_sites], strict=True))
+    source_grads = dict(
+        zip(source_keys, flat_grads[3 * n_sites : 3 * n_sites + n_sources], strict=True)
+    )
     for s in all_sites:
         assert v_grads[s].shape == component_model.components[s].V.shape, (
             f"v_grad[{s!r}] shape mismatch"

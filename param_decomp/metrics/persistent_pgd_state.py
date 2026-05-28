@@ -259,13 +259,27 @@ class PersistentPGDState:
 
     def get_grads(self, loss: Float[Tensor, ""], retain_graph: bool = True) -> PPGDSources:
         grads = torch.autograd.grad(loss, list(self.sources.values()), retain_graph=retain_graph)
+        raw = dict(zip(self.sources.keys(), grads, strict=True))
+        return self._reduce_source_grads(raw)
 
+    def _reduce_source_grads(self, raw: PPGDSources) -> PPGDSources:
+        """Cross-replica reduce of source grads, respecting the source scope.
+
+        Per-position sources are per-rank-independent (each rank owns the sources
+        for its own batch slice), so their grads are never reduced. Replicated
+        scopes (single / broadcast / repeat) hold identical sources on every
+        replica, so their grads are AVG-reduced across the active reduction group
+        — set by the caller via `use_reduction_group(...)` (the global group in
+        single-pool; the PPGD pool group in 3-pool). AVG matches the loss's
+        local-`n` normalization.
+
+        This is the single source of truth for the source-grad reduction policy;
+        both `get_grads` and `reduce_and_step_sources` route through it so the
+        fused-backward path cannot diverge from warmup.
+        """
         if self._skip_all_reduce:
-            return dict(zip(self.sources.keys(), grads, strict=True))
-        return {
-            k: all_reduce(g, op=ReduceOp.AVG)
-            for k, g in zip(self.sources.keys(), grads, strict=True)
-        }
+            return raw
+        return {k: all_reduce(g, op=ReduceOp.AVG) for k, g in raw.items()}
 
     def step(self, grads: PPGDSources) -> None:
         """One PGD update step using `grads`.
@@ -337,20 +351,16 @@ class PersistentPGDState:
             grads = self.get_grads(sum_loss / n, retain_graph=False)
             self.step(grads)
 
-    def apply_source_step_from_grads(self, grads: PPGDSources) -> None:
-        """Apply the final (fused) PGD source step using pre-reduced source grads.
+    def reduce_and_step_sources(self, raw_grads: PPGDSources) -> None:
+        """Scope-aware reduce of already-computed source grads, then a PGD step.
 
-        Sign-PGD only uses ``sign(grad)``, so the sum-vs-avg in-pool reduction
-        choice for ``grads`` is mathematically equivalent. Caller is responsible
-        for having reduced ``grads`` across the PPGD pool before this call —
-        without it, ranks would step their sources to inconsistent values and
-        drift apart from the broadcast-initialized state.
+        For callers that harvested the source grads from a fused multi-target
+        ``autograd.grad`` (``three_pool/step_ppgd``) rather than via
+        ``get_grads``. Routes them through the same ``_reduce_source_grads`` that
+        ``get_grads`` uses, so the fused path cannot diverge from warmup. Scope
+        the reduction group with ``use_reduction_group(...)`` around the call.
         """
-        with torch.no_grad():
-            self.optimizer.step(self.sources, grads)
-            if not self._use_sigmoid_parameterization:
-                for source in self.sources.values():
-                    source.clamp_(0.0, 1.0)
+        self.step(self._reduce_source_grads(raw_grads))
 
     def compute_recon_sum_and_n(
         self,

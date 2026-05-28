@@ -20,6 +20,8 @@ from param_decomp.metrics.importance_minimality import importance_minimality_los
 from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
 from param_decomp.metrics.persistent_pgd_state import (
     AdamPGDConfig,
+    PerBatchPerPositionScope,
+    PersistentPGDSourceScope,
     PersistentPGDState,
     SignPGDConfig,
     SingleSourceScope,
@@ -801,6 +803,45 @@ class TestPersistentPGDReconLoss:
             # Masks should still be in [0, 1]
             assert torch.all(state.sources[k] >= 0.0)
             assert torch.all(state.sources[k] <= 1.0)
+
+    def test_source_grad_reduce_policy_per_scope(self: object) -> None:
+        """The cross-rank source-grad reduce must respect the source scope.
+
+        Regression guard for the 3-pool bug where the fused (N+1)'th source step
+        SUM-reduced source grads across the PPGD pool unconditionally — correct
+        for replicated scopes, but for `per_batch_per_position` it mixed unrelated
+        per-position sources (each rank owns a different batch slice). The reduce
+        policy lives in `_reduce_source_grads`: skip for per-position, reduce for
+        replicated. `get_grads` and `reduce_and_step_sources` both route through it.
+        """
+        model = _make_seq_component_model(weight=torch.eye(2, dtype=torch.float32))
+
+        def make_state(scope: PersistentPGDSourceScope) -> PersistentPGDState:
+            cfg = PersistentPGDReconLossConfig(
+                optimizer=AdamPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
+                scope=scope,
+            )
+            return _ppgd_state_from_cfg(
+                cfg,
+                module_to_c=model.module_to_c,
+                batch_dims=(2, 2),
+                device="cpu",
+                use_delta_component=False,
+                reconstruction_loss=recon_loss_mse,
+            )
+
+        per_pos = make_state(PerBatchPerPositionScope())
+        replicated = make_state(SingleSourceScope())
+
+        assert per_pos._skip_all_reduce is True
+        assert replicated._skip_all_reduce is False
+
+        # Skip path returns the same dict untouched (no reduce/copy); the
+        # replicated path goes through the reduce comprehension (new dict).
+        raw_pp = {k: torch.ones_like(v) for k, v in per_pos.sources.items()}
+        assert per_pos._reduce_source_grads(raw_pp) is raw_pp
+        raw_rep = {k: torch.ones_like(v) for k, v in replicated.sources.items()}
+        assert replicated._reduce_source_grads(raw_rep) is not raw_rep
 
     def test_masks_persist_across_calls(self: object) -> None:
         """Test that masks persist and accumulate updates across calls."""
