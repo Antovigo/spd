@@ -469,7 +469,7 @@ def plot_ci_values_histograms(
         col = i // n_rows
         ax = axs[row, col]
 
-        data = layer_ci.flatten().cpu().numpy()
+        data = layer_ci.flatten().float().cpu().numpy()
         ax.hist(data, bins=bins)
         ax.set_yscale("log")  # Beware, memory leak unless gc.collect() is called after eval loop
         ax.set_title(f"Causal importances for {layer_name}")
