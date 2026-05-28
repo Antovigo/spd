@@ -48,9 +48,9 @@ from param_decomp.metrics.importance_minimality import (
     finalize_imp_min,
     per_component_lp_sums,
 )
-from param_decomp.three_pool.layout import ThreePoolLayout
-from param_decomp.three_pool.runtime import _ThreePoolRuntime
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_lab.three_pool.layout import ThreePoolLayout
+from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 
 
 def step_ci(

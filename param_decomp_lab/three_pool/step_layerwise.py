@@ -43,10 +43,10 @@ from param_decomp._trace import phase_trace_enabled, trace
 from param_decomp.component_model import ComponentModel
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.masks import make_mask_infos
-from param_decomp.three_pool.layout import ThreePoolLayout
-from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.three_pool.runtime import _ThreePoolRuntime
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_lab.three_pool.layout import ThreePoolLayout
+from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
+from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 
 PendingAllReduce = list[tuple[list[Tensor], Tensor, "dist.Work"]]
 

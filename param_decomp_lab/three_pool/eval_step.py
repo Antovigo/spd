@@ -33,8 +33,8 @@ from param_decomp.metrics.base import Metric
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.run_sink import RunSink
-from param_decomp.three_pool.layout import ThreePoolLayout
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_lab.three_pool.layout import ThreePoolLayout
 
 
 def _slice_batch_dim0(batch: Any, sl: slice) -> tuple[Any, int]:

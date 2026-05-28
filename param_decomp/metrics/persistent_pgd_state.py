@@ -324,7 +324,8 @@ class PersistentPGDState:
 
         "Warmup" is the historical name; semantically these are **supplemental**
         PGD source-update iterations that happen before the final fwd+bwd of
-        the training step. The final iter (in ``three_pool/step_ppgd.py``)
+        the training step. The final iter (in
+        ``param_decomp_lab/three_pool/step_ppgd.py``)
         additionally backprops to V/U + CI and uses its own source gradient to
         apply one more PGD step. So total source updates per training step =
         ``n_warmup_steps + 1``.

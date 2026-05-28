@@ -51,11 +51,11 @@ from param_decomp.metrics.persistent_pgd_state import (  # noqa: E402
     PersistentPGDState,
 )
 from param_decomp.schedule import ScheduleConfig  # noqa: E402
-from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy  # noqa: E402
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (  # noqa: E402
     GPT2Simple,
     GPT2SimpleConfig,
 )
+from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy  # noqa: E402
 
 # --- Config matching gpt2_xl_qk_smoke.yaml -----------------------------------
 N_LAYERS = 48

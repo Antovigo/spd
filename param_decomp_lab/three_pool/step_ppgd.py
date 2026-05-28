@@ -53,10 +53,10 @@ from torch import Tensor
 
 from param_decomp.component_model import ComponentModel
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
-from param_decomp.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
-from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.three_pool.runtime import _ThreePoolRuntime
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_lab.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
+from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
+from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 
 PendingRecvVU = list[tuple["LayerwiseBlockGroup", Tensor, "dist.Work"]]
 

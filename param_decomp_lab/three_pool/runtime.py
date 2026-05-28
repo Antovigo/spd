@@ -14,7 +14,7 @@ from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
 from param_decomp.ci_fns import CiConfig
 from param_decomp.ci_sigmoids import SigmoidType
 from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
-from param_decomp.three_pool.layout import LayerwiseBlockGroup
+from param_decomp_lab.three_pool.layout import LayerwiseBlockGroup
 
 __all__ = ["_ThreePoolRuntime"]
 

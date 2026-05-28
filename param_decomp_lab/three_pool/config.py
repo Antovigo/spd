@@ -35,7 +35,7 @@ class LayerwiseBlockGroupSpec(BaseConfig):
     for cross-pool sends). Within a group, in-block all-reduce keeps the
     replicas in sync after each optimizer step.
 
-    Serializable mirror of ``param_decomp.three_pool.layout.LayerwiseBlockGroup``.
+    Serializable mirror of ``param_decomp_lab.three_pool.layout.LayerwiseBlockGroup``.
     The layout module's dataclass is constructed from this at runtime.
     """
 

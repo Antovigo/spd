@@ -6,7 +6,7 @@ duplicated. Pool-specific fields (e.g. `three_pool_config`, `ppgd_state_by_rank`
 live on the concrete dataclass that needs them.
 
 Lives in its own module so both `param_decomp.optimize` /
-`param_decomp.three_pool.optimize` (where trainers produce these) and
+`param_decomp_lab.three_pool.optimize` (where trainers produce these) and
 `param_decomp.run_sink` (where they're consumed by the sink protocol) can
 import without a cycle.
 """

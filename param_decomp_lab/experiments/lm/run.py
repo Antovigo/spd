@@ -43,7 +43,6 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.optimize import EvalLoop, Trainer
-from param_decomp.three_pool import ThreePoolConfig, ThreePoolTrainer
 from param_decomp.training_state import ThreePoolTrainingState, TrainingState
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
@@ -86,6 +85,7 @@ from param_decomp_lab.resumption import (
 )
 from param_decomp_lab.run_sink import OnePoolSink, ThreePoolSink
 from param_decomp_lab.seed import set_seed
+from param_decomp_lab.three_pool import ThreePoolConfig, ThreePoolTrainer
 
 
 def _resolve_class(fqn: str) -> type:
@@ -154,7 +154,7 @@ class LMTargetConfig(BaseConfig):
 class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
     three_pool: ThreePoolConfig | None = None
     """When set, training runs under the 3-pool strategy
-    (:class:`param_decomp.three_pool.ThreePoolTrainer`) instead of single-process
+    (:class:`param_decomp_lab.three_pool.ThreePoolTrainer`) instead of single-process
     :class:`param_decomp.optimize.Trainer`."""
 
 

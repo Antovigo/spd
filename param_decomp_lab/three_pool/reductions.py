@@ -35,7 +35,7 @@ Memory uses MAX (the bottleneck rank is what matters).
 import torch
 import torch.distributed as dist
 
-from param_decomp.three_pool.layout import ThreePoolLayout
+from param_decomp_lab.three_pool.layout import ThreePoolLayout
 
 LW_RAW_KEYS: tuple[str, ...] = (
     "_raw/faith_num",

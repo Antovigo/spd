@@ -10,18 +10,18 @@ class boundary.
     batch). Holds CI fn + AdamW state. Each step: target_fwd → CI fn fwd →
     broadcast CI to LW + PPGD → dead-time prefetch H_{T+1} → fused backward
     seeded by imp_min + per-site g_CI from LW + PPGD → in-pool all-reduce →
-    AdamW. See :mod:`param_decomp.three_pool.step_ci`.
+    AdamW. See :mod:`param_decomp_lab.three_pool.step_ci`.
 
   * **Layerwise pool** trains V/U (block-DDP within group; sharded across
     sites). Recv CI → faithfulness + layerwise stoch recon → send g_CI back
     → recv g_VU from PPGD → combine → in-block all-reduce → AdamW → async
-    ship updated V/U → PPGD. See :mod:`param_decomp.three_pool.step_layerwise`.
+    ship updated V/U → PPGD. See :mod:`param_decomp_lab.three_pool.step_layerwise`.
 
   * **PPGD pool** is a stateless full V/U replica. Recv CI → PPGD warmup +
     final recon → backward seeds V/U + CI grads (no outer source step;
     warmup inner loop owns sources) → sum-reduce V/U within PPGD pool →
     send g_VU to LW + g_CI to CI → recv updated V/U. See
-    :mod:`param_decomp.three_pool.step_ppgd`.
+    :mod:`param_decomp_lab.three_pool.step_ppgd`.
 
 Data-handling contract
 ----------------------
@@ -75,29 +75,29 @@ from param_decomp.optimize import EvalLoop, load_optimizer_state_by_name, optimi
 from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.schedule import get_scheduled_value
 from param_decomp.sdpa_strict import verify_flash_attention_available
-from param_decomp.three_pool.checkpoint import gather_full_state_dict_to_rank0
-from param_decomp.three_pool.config import ThreePoolConfig
-from param_decomp.three_pool.layout import (
+from param_decomp.torch_helpers import loop_dataloader
+from param_decomp.training_state import ThreePoolTrainingState
+from param_decomp_lab.three_pool.checkpoint import gather_full_state_dict_to_rank0
+from param_decomp_lab.three_pool.config import ThreePoolConfig
+from param_decomp_lab.three_pool.layout import (
     LayerwiseBlockGroup,
     ThreePoolLayout,
     build_world,
     flush_nccl_event_timings,
 )
-from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.three_pool.reductions import (
+from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
+from param_decomp_lab.three_pool.reductions import (
     aggregate_losses_to_rank0,
     aggregate_max_memory_to_rank0,
 )
-from param_decomp.three_pool.runtime import _ThreePoolRuntime
-from param_decomp.three_pool.step_ci import step_ci
-from param_decomp.three_pool.step_layerwise import (
+from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
+from param_decomp_lab.three_pool.step_ci import step_ci
+from param_decomp_lab.three_pool.step_layerwise import (
     finalize_layerwise_async_drain,
     run_faithfulness_warmup_layerwise,
     step_layerwise,
 )
-from param_decomp.three_pool.step_ppgd import finalize_ppgd_async_drain, step_ppgd
-from param_decomp.torch_helpers import loop_dataloader
-from param_decomp.training_state import ThreePoolTrainingState
+from param_decomp_lab.three_pool.step_ppgd import finalize_ppgd_async_drain, step_ppgd
 
 # Loss-metric type discriminators required for the 3-pool training path.
 REQUIRED_LOSS_METRIC_TYPES: frozenset[str] = frozenset(
@@ -581,7 +581,7 @@ class ThreePoolTrainer:
         ``MetricContext`` and runs every ``eval_loop.metric``; LW pool
         barriers through. Metric reductions are scoped to the PPGD pool
         subgroup via :func:`use_reduction_group` so non-PPGD pools don't
-        block on them. See :mod:`param_decomp.three_pool.eval_step`.
+        block on them. See :mod:`param_decomp_lab.three_pool.eval_step`.
         """
         trace("Trainer.run: enter")
         pd_config = self.pd_config
@@ -812,7 +812,7 @@ class ThreePoolTrainer:
                     )
 
                 if eval_loop is not None and eval_loop.should_eval(step):
-                    from param_decomp.three_pool.eval_step import run_eval_step
+                    from param_decomp_lab.three_pool.eval_step import run_eval_step
 
                     assert eval_iterator is not None
                     run_eval_step(
