@@ -18,14 +18,17 @@ Async slow-eval of saved checkpoints lives in
 a temp YAML and submits an sbatch job that invokes that module.
 """
 
+import atexit
 import importlib
 import os
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import fire
+import torch
 import torch.distributed as dist
 import torch.nn as nn
 from pydantic import Discriminator
@@ -38,6 +41,7 @@ from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.optimize import EvalLoop, Trainer
 from param_decomp.three_pool import ThreePoolConfig, ThreePoolTrainer
+from param_decomp.three_pool.profiler import PhaseProfiler
 from param_decomp.training_state import ThreePoolTrainingState, TrainingState
 from param_decomp.two_pool import TwoPoolConfig, TwoPoolTrainer
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
@@ -317,6 +321,83 @@ def _agree_on_run_id_three_pool(run_id: str | None, dist_state: DistributedState
     return run_id
 
 
+def _maybe_enable_memory_profile(rank: int) -> None:
+    """Opt-in CUDA memory-history recorder for offline ``memory_viz`` analysis.
+
+    Activated by env vars:
+      * ``PD_MEMORY_PROFILE_RANKS=0,32,96`` — comma-separated ranks to profile.
+      * ``PD_MEMORY_PROFILE_OUT=/abs/path/to/dir`` — dump directory.
+
+    Dumps to ``<dir>/mem_rank<R>.pickle`` on normal exit and on uncaught
+    exception. Load the pickle at https://pytorch.org/memory_viz.
+    """
+    prof_ranks_env = os.environ.get("PD_MEMORY_PROFILE_RANKS")
+    if not prof_ranks_env:
+        return
+    if rank not in {int(r) for r in prof_ranks_env.split(",") if r.strip()}:
+        return
+    out_dir = Path(os.environ["PD_MEMORY_PROFILE_OUT"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"mem_rank{rank}.pickle"
+    logger.info(f"[mem-profile] recording rank={rank} → {out_path}")
+    torch.cuda.memory._record_memory_history(max_entries=200_000)
+
+    def _dump() -> None:
+        torch.cuda.memory._dump_snapshot(str(out_path))
+        logger.info(f"[mem-profile] dumped rank={rank} → {out_path}")
+
+    atexit.register(_dump)
+    prev_excepthook = sys.excepthook
+
+    def _excepthook(exctype: type[BaseException], value: BaseException, tb: Any) -> None:
+        _dump()
+        prev_excepthook(exctype, value, tb)
+
+    sys.excepthook = _excepthook
+
+
+def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | None:
+    """Opt-in torch.profiler (Chrome trace) for the listed ranks.
+
+    Activated by env vars:
+      * ``PD_TORCH_PROFILE_RANKS=0,96,100`` — ranks to profile. Typically one
+        per pool (LW block-0 leader, CI leader, PPGD leader).
+      * ``PD_TORCH_PROFILE_OUT=/abs/path/to/dir`` — trace dump directory.
+      * ``PD_TORCH_PROFILE_SKIP_FIRST`` (default 20) and
+        ``PD_TORCH_PROFILE_ACTIVE`` (default 3) — schedule knobs.
+
+    Returns the profiler (caller threads it into ``trainer.run(profiler=...)``)
+    or ``None`` if this rank isn't listed. Side-effects ``PhaseProfiler.__enter__``,
+    not done here — caller passes it to the trainer which enters the context.
+
+    CAVEAT: at production 3-pool scale (~104 ranks) this still deadlocks per
+    ``docs/handoff_2026-05-26_3pool_perf.md``; works for medium scale (≤56).
+    """
+    prof_ranks_env = os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip()
+    if not prof_ranks_env:
+        return None
+    prof_ranks = {int(r) for r in prof_ranks_env.split(",") if r.strip()}
+    my_rank = trainer.layout.my_rank
+    if my_rank not in prof_ranks:
+        return None
+    out_dir = Path(os.environ["PD_TORCH_PROFILE_OUT"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    skip_first = int(os.environ.get("PD_TORCH_PROFILE_SKIP_FIRST", "20"))
+    active = int(os.environ.get("PD_TORCH_PROFILE_ACTIVE", "3"))
+    logger.info(
+        f"[torch-profile] rank={my_rank} pool={trainer.layout.my_pool} → {out_dir} "
+        f"(skip_first={skip_first}, active={active})"
+    )
+    return PhaseProfiler(
+        enabled=True,
+        out_dir=out_dir,
+        rank=my_rank,
+        pool=trainer.layout.my_pool,
+        skip_first=skip_first,
+        active=active,
+    )
+
+
 def _fresh_main(
     config_path: Path,
     *,
@@ -333,6 +414,7 @@ def _fresh_main(
     dist_state = init_distributed()
     if is_main_process():
         logger.info(f"Distributed state: {dist_state}")
+    _maybe_enable_memory_profile(dist_state.rank if dist_state is not None else 0)
     set_seed(cfg.pd.seed)
     device = get_device()
     cfg = cfg.model_copy(
@@ -391,6 +473,7 @@ def _fresh_main(
                 cfg.cadence,
                 scratch_dir=scratch_dir,
                 eval_loop=three_eval_loop,
+                profiler=_maybe_build_torch_profiler(three_trainer),
             )
         finally:
             three_sink.finish()
@@ -439,6 +522,7 @@ def _resume_main(
     if is_main_process():
         logger.info(f"Distributed state: {dist_state}")
         logger.info(f"Resuming from {resume_cfg.from_run} @ step {resume_cfg.step}")
+    _maybe_enable_memory_profile(dist_state.rank if dist_state is not None else 0)
     set_seed(parent_cfg.pd.seed)
     device = get_device()
 
@@ -506,6 +590,7 @@ def _resume_main(
                 effective_cfg.cadence,
                 scratch_dir=scratch_dir,
                 eval_loop=three_eval_loop,
+                profiler=_maybe_build_torch_profiler(three_trainer),
             )
         finally:
             three_sink.finish()
