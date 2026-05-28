@@ -61,7 +61,7 @@ def _plot_causal_importances_figure(
     images = []
     for j, (mask_name, mask) in enumerate(ci_vals.items()):
         # mask has shape (batch, C) or (batch, pos, C)
-        mask_data = mask.detach().cpu().numpy()
+        mask_data = mask.detach().float().cpu().numpy()
         if has_pos_dim:
             assert mask_data.ndim == 3
             mask_data = mask_data[:, 0, :]
