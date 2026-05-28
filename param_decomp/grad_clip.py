@@ -6,7 +6,7 @@ norm exceeds the threshold. That's correct when every rank owns the same set
 of parameters and the DDP all-reduce has already produced identical grads on
 every rank.
 
-In multi-pool training (2-pool, 3-pool), ranks own DISJOINT parameter subsets
+In 3-pool training, ranks own DISJOINT parameter subsets
 (different sites' V/U + CI fn entries across LW blocks). The "global" L2 norm
 that 1-pool clips on is ``sqrt(sum over all ranks of sum_sq_local)``, not a
 single rank's local norm. This module provides that reduction.

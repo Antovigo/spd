@@ -1,7 +1,7 @@
 """Layerwise pool training step.
 
-Recast of ``two_pool.pool_a.step_pool_a`` with the CI-fn-side bits moved out
-to the CI pool, plus an optional async pipeline (``defer_vu_opt=True``) that
+Trains V/U on the LW pool with the CI fn living on the CI pool, plus an
+optional async pipeline (``defer_vu_opt=True``) that
 hides the V/U opt step + V/U ship-back behind T+1's CI fn forward window on
 the CI pool.
 
@@ -44,9 +44,9 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.masks import make_mask_infos
 from param_decomp.three_pool.layout import ThreePoolLayout
+from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
-from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.two_pool.runtime import autocast_bf16
+from param_decomp.torch_helpers import bf16_autocast
 
 PendingAllReduce = list[tuple[list[Tensor], Tensor, "dist.Work"]]
 
@@ -85,7 +85,7 @@ def step_layerwise(
             seq_len=seq_len,
             device=device,
         )
-        with torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
+        with torch.no_grad(), bf16_autocast(cfg.bf16_autocast):
             target_local = component_model(batch_local).detach()
 
     if defer_vu_opt and prev_pending_all_reduce is not None:
@@ -106,7 +106,7 @@ def step_layerwise(
         ci_recv_leaves = _releaf_ci_fp32_for_grads(ci_recv, layout.my_owned_sites)
         _assert_ci_recv_shapes(ci_recv_leaves, layout, seq_len, cfg)
 
-        with autocast_bf16(cfg.bf16_autocast):
+        with bf16_autocast(cfg.bf16_autocast):
             # Accumulate the display value as a GPU tensor (not a Python float) so
             # the per-site ``.item()`` doesn't force a CPU↔GPU sync that serializes
             # each site's bwd against the next. ``loss_s.detach()`` so accumulator
@@ -189,8 +189,7 @@ def run_faithfulness_warmup_layerwise(
     """Single-pool-equivalent faithfulness warmup on the LW pool only.
 
     CI pool has no V/U; PPGD pool's V/U is a transient replica that gets
-    overwritten each step. So warmup only makes sense on LW. Mirrors
-    ``two_pool.pool_a.run_faithfulness_warmup_pool_a``.
+    overwritten each step. So warmup only makes sense on LW.
     """
     warmup_opt = torch.optim.AdamW(component_params, lr=lr, weight_decay=weight_decay)
     for _ in range(n_steps):
@@ -347,8 +346,7 @@ def _sync_tail(
 ) -> None:
     """Phase lw/E (sync mode). Blocking all_reduce → clip → AdamW → async send V/U.
 
-    Functionally equivalent to the pre-deferral 2-pool tail; safe to coexist
-    with PPGD's sync recv at end of step T.
+    Safe to coexist with PPGD's sync recv at end of step T.
     """
     _wait_pending_weight_send(component_model)
     layout.all_reduce_grads_in_block(all_params)
@@ -392,10 +390,9 @@ def _faithfulness_loss(
 ) -> tuple[Tensor, Tensor, int]:
     """‖W_target − VU.T‖²_F / numel_global, summed across this rank's owned sites.
 
-    See ``two_pool.pool_a._faithfulness_loss`` for why we divide by
-    ``numel_global`` not ``numel_owned`` — keeps per-element grad scale aligned
-    with single-pool's, so the unclipped faithfulness warmup converges to the
-    same V/U as single-pool.
+    We divide by ``numel_global`` not ``numel_owned`` to keep the per-element
+    grad scale aligned with single-pool's, so the unclipped faithfulness warmup
+    converges to the same V/U as single-pool.
 
     Returns ``(scalar_loss, sum_sq, numel_owned)`` — the ``numel_owned`` is the
     denominator the logger uses for ``SUM(num) / SUM(den)`` global-ratio

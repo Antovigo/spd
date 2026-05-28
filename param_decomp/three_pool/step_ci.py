@@ -52,7 +52,7 @@ from param_decomp.metrics.importance_minimality import (
 )
 from param_decomp.three_pool.layout import ThreePoolLayout
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
-from param_decomp.two_pool.runtime import autocast_bf16
+from param_decomp.torch_helpers import bf16_autocast
 
 
 def step_ci(
@@ -81,7 +81,7 @@ def step_ci(
     if h_cache_T is None:
         h_cache_T = _target_fwd_and_cache(component_model, batch_T_local, cfg.bf16_autocast)
 
-    with autocast_bf16(cfg.bf16_autocast):
+    with bf16_autocast(cfg.bf16_autocast):
         ci = component_model.calc_causal_importances(
             pre_weight_acts=h_cache_T, sampling="continuous", detach_inputs=False
         )
@@ -281,14 +281,14 @@ def _fused_backward_through_ci_fn(
 def _target_fwd_and_cache(
     component_model: ComponentModel,
     batch: Any,
-    bf16_autocast: bool,
+    enabled: bool,
 ) -> dict[str, Tensor]:
     """target_fwd (no grad) returning the per-site pre-weight act cache.
 
     Used by phase 0 (on-demand H_T) and phase 4 (dead-time H_{T+1} prefetch).
     Cache is upcast to fp32 so the downstream CI fn fwd gets fp32 inputs.
     """
-    with torch.no_grad(), autocast_bf16(bf16_autocast):
+    with torch.no_grad(), bf16_autocast(enabled):
         out = component_model(batch, cache_type="input")
     return {k: v.to(torch.float32) for k, v in out.cache.items()}
 

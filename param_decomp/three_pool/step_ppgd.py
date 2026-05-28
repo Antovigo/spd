@@ -1,11 +1,9 @@
 """PPGD pool training step — split into ``step_ppgd`` and ``finalize_ppgd_async_drain``.
 
-Recast of ``two_pool.pool_b.step_pool_b`` for 3-pool. Same PPGD math; the
-differences are (a) CI comes from the CI pool not LW leaders, (b) g_CI goes
-back to CI pool not LW, and (c) the final fwd+bwd's source gradient (which
-the original code computed and discarded) is extracted alongside V/U + CI
-in a single multi-target ``autograd.grad`` and used to apply one more PGD
-source step. Total source updates per training step = ``n_warmup_steps + 1``.
+PPGD pool: CI comes from the CI pool, g_CI goes back to the CI pool, and the
+final fwd+bwd's source gradient is extracted alongside V/U + CI in a single
+multi-target ``autograd.grad`` and used to apply one more PGD source step.
+Total source updates per training step = ``n_warmup_steps + 1``.
 
 Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
 
@@ -58,9 +56,9 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import use_reduction_group
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
+from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
-from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.two_pool.runtime import autocast_bf16
+from param_decomp.torch_helpers import bf16_autocast
 
 PendingRecvVU = list[tuple["LayerwiseBlockGroup", Tensor, "dist.Work"]]
 
@@ -97,7 +95,7 @@ def step_ppgd(
         ci_recv_pending = layout.async_recv_ci_from_ci_pool_ppgd(
             cfg.c_per_site, seq_len=seq_len, device=device
         )
-        with torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
+        with torch.no_grad(), bf16_autocast(cfg.bf16_autocast):
             target_out = component_model(batch_local).detach()
 
         # Async-mode bookkeeping: this iter's V/U arrived in the prev iter's
@@ -116,7 +114,7 @@ def step_ppgd(
         # Scope any in-warmup source-grad all_reduce to the PPGD pool. A no-op
         # for per_batch_per_position sources (which skip the reduce); correct
         # for replicated scopes, which would otherwise hit the global group.
-        with autocast_bf16(cfg.bf16_autocast), use_reduction_group(layout.world.ppgd_pool_group):
+        with bf16_autocast(cfg.bf16_autocast), use_reduction_group(layout.world.ppgd_pool_group):
             ppgd_state.warmup(
                 model=component_model,
                 batch=batch_local,
@@ -124,7 +122,7 @@ def step_ppgd(
                 ci=ci_scratch,
                 weight_deltas=weight_deltas,
             )
-        with autocast_bf16(cfg.bf16_autocast):
+        with bf16_autocast(cfg.bf16_autocast):
             sum_loss, n_examples = ppgd_state.compute_recon_sum_and_n(
                 model=component_model,
                 batch=batch_local,

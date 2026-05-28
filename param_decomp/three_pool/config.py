@@ -12,9 +12,8 @@ that the 3-pool path consumes — so a 3-pool training run is configured like a
 normal SPD run plus this topology block.
 
 See ``DESIGN.md`` for the per-step dependency graph and the rationale for
-splitting the CI fn into its own pool (enables global shared transformer CI
-fns again — under 2-pool, sites are sharded across pool-A ranks, which
-structurally rules out CI fns that span all sites).
+splitting the CI fn into its own pool (a dedicated unsharded CI pool enables
+global shared transformer CI fns that span all sites).
 
 Topology integrity checks (rank disjointness, uniform N_per_block, CI-pool
 divisibility into Layerwise/PPGD batch shards) run at validation time; checks
@@ -38,9 +37,6 @@ class LayerwiseBlockGroupSpec(BaseConfig):
 
     Serializable mirror of ``param_decomp.three_pool.layout.LayerwiseBlockGroup``.
     The layout module's dataclass is constructed from this at runtime.
-
-    Identical shape to ``two_pool.config.BlockGroupSpec`` — duplicated rather
-    than imported so each subsystem owns its own config surface.
     """
 
     ranks: list[int] = Field(..., description="Ranks that replicate V/U for `owned_sites`.")
@@ -89,8 +85,8 @@ class ThreePoolConfig(BaseConfig):
         description="If True (default), Layerwise + PPGD bypass the LM head and "
         "compute KL via the chunked fused linear+KL kernel — never materializes "
         "[b_local, seq, vocab] tensors. If False, the unfused path is used "
-        "(materialize logits + standard recon_loss). Same lever as in 2-pool; "
-        "defaults to fused because the kernel reliably cuts peak memory ~50%% on "
+        "(materialize logits + standard recon_loss). "
+        "Defaults to fused because the kernel reliably cuts peak memory ~50%% on "
         "large-vocab targets with negligible step-time cost.",
     )
     defer_vu_opt: bool = Field(

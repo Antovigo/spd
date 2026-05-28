@@ -63,7 +63,7 @@ Five orthogonal pieces. Each opt-in via env var so production runs aren't affect
 - **Why it matters:** `cpu - gpu == implicit cross-stream wait time`. The single most useful upgrade — would have caught today's misattribution in 30 seconds.
 
 ### 2. `PD_SYNC_DEBUG` env var
-- **Where:** `param_decomp/three_pool/optimize.py`, `two_pool/optimize.py`
+- **Where:** `param_decomp/three_pool/optimize.py`
 - **Activation:** `PD_SYNC_DEBUG=warn` (logs every implicit CPU↔GPU sync) or `PD_SYNC_DEBUG=error` (crashes on first, with traceback to culprit). Launcher flags: `--sync-debug`, `--sync-error`.
 - **What it gives you:** automatic detection of `.item()` / `bool(tensor)` / `.cpu()` syncs.
 - **When to use:** suspect a hidden sync is hurting perf.

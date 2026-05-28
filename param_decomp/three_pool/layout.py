@@ -23,8 +23,8 @@ Plus three collective reductions:
   CI  : in-pool all-reduce on CI fn grads (one collective over the CI pool)
   PPGD: in-pool sum-reduce on V/U grads (one per site, over the PPGD pool)
 
-The new wrinkle vs 2-pool is **3-way batch slicing**: CI/LW/PPGD each shard
-the global batch on their own axis. The MVP constraint (enforced in
+The defining wrinkle is **3-way batch slicing**: CI/LW/PPGD each shard
+the global batch on their own axis. The constraint (enforced in
 ``ThreePoolConfig.validate_topology``) is:
 
     N_ci | N_per_block_layerwise
@@ -206,7 +206,6 @@ class World:
     block_group_groups: tuple[dist.ProcessGroup, ...]
     # One process group per LW block: {block_leader} ∪ {ppgd_ranks}. Used for
     # leader-rooted broadcasts when shipping updated V/U from LW → PPGD pool.
-    # Matches the cross_pool_bcast_groups pattern in two_pool.
     cross_pool_bcast_groups: tuple[dist.ProcessGroup, ...]
     # Dedicated world-wide process group carrying every cross-pool point-to-point
     # send/recv. Structurally separate from default_pg so the default communicator
@@ -450,8 +449,8 @@ def _prewarm_cross_pool_bcast_groups(
 class ThreePoolLayout:
     """This rank's view of the 3-pool world + cross-pool comm methods.
 
-    Single class with ``my_pool`` switch (mirrors ``two_pool.BlockDDPLayout``).
-    Each comm method asserts its caller pool up-front so misuse is loud.
+    Single class with ``my_pool`` switch. Each comm method asserts its caller
+    pool up-front so misuse is loud.
     """
 
     world: World
@@ -879,8 +878,8 @@ class ThreePoolLayout:
         u_owned: dict[str, Tensor],
     ) -> tuple[list["dist.Work"], list[Tensor]]:
         """LW → PPGD: coalesced leader-rooted broadcast of updated V/U to all
-        PPGD ranks. Mirrors two_pool's async_send_updated_weights_to_pool_b.
-        Caller must keep the buffer alive until the work handle completes.
+        PPGD ranks. Caller must keep the buffer alive until the work handle
+        completes.
         """
         assert self.my_pool == "layerwise"
         if not self.my_is_block_leader:
@@ -902,7 +901,6 @@ class ThreePoolLayout:
         """Coalesced in-block DDP all-reduce over V/U + faithfulness grads.
 
         Synchronous variant — Python blocks until the collective completes.
-        Identical pattern to ``two_pool.BlockDDPLayout.all_reduce_grads_in_block``.
         Used by the sync path in ``step_layerwise_tail``.
         """
         states = self.async_all_reduce_grads_in_block_kickoff(params)

@@ -63,6 +63,5 @@ class ThreePoolRunSink(Protocol):
     def finish(self) -> None: ...
 
 
-# Convenience alias for the few call sites that don't care which pool the sink
-# serves (e.g. 2-pool's `run()` while resumption stays unported there).
+# Convenience alias for the few call sites that don't care which pool the sink serves.
 RunSink = OnePoolRunSink | ThreePoolRunSink

@@ -5,8 +5,8 @@ Splits GPUs into three heterogeneous pools that run in wall-clock parallel:
   CI pool         owns the CI fn + AdamW state (replicated across ranks, DP
                   across batch). Runs target+CI forward, importance-minimality
                   loss, fused backward through CI fn graph seeded by downstream
-                  pools' CI gradients. Enables global shared CI fns (which
-                  2-pool's sharded-by-site Pool A cannot).
+                  pools' CI gradients. Enables global shared CI fns by giving
+                  the CI fn a dedicated, unsharded pool.
   Layerwise pool  owns V/U + AdamW state (sharded by site, block-DDP within
                   group). Runs target forward, faithfulness loss, per-site
                   streaming layerwise stoch recon.

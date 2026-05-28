@@ -1,9 +1,8 @@
 """Cross-pool reductions for logging.
 
-Same approach as ``two_pool.reductions``: each step function emits per-rank
-display scalars (``loss/*``) plus raw additive ingredients (``_raw/*``) that
-the logger SUM-reduces across each pool, then finalizes into global scalars
-on rank 0.
+Each step function emits per-rank display scalars (``loss/*``) plus raw
+additive ingredients (``_raw/*``) that the logger SUM-reduces across each
+pool, then finalizes into global scalars on rank 0.
 
 Global scalars:
   ``faith_global = SUM(faith_num) / SUM(faith_den)``    (LW pool)
@@ -17,8 +16,18 @@ every CI rank's ``loss_imp`` scalar IS already the global value. The step
 function divides by ``n_ci`` before exposing as ``_raw/imp_num`` so that the
 pool-wide all-reduce SUM gives back the global value exactly once.
 
-LW pool's all-reduce SUM uses a ``1 / n_per_block`` pre-scale (see the
-two-pool reductions module docstring for the math).
+LW pool's all-reduce SUM scales every raw value by ``1 / n_per_block`` *before*
+the SUM. That single division collapses two reductions into one and is
+mathematically equivalent to AVG-within-block then SUM-across-blocks:
+
+  * For values identical across DDP partners in a block (faith — the forward
+    runs on the FULL batch, so partners produce the same scalar):
+    ``sum_over_partners(value / n_per_block) = value``, and the cross-block SUM
+    recovers ``sum_over_blocks(value)``.
+  * For values that differ across DDP partners (stoch — partners process
+    disjoint batch slices): ``sum_over_partners(value / n_per_block) =
+    mean_over_partners(value)``, i.e. the cross-slice mean per site, which is
+    what we want before summing across blocks.
 
 Memory uses MAX (the bottleneck rank is what matters).
 """

@@ -1,9 +1,9 @@
 # Three-pool training — design sketch
 
-Extension of the 2-pool subsystem (`param_decomp/two_pool/`). Splits the CI
-function into its own pool so a **global shared transformer** CI fn becomes
-physically realizable again (under 2-pool, sites are sharded across pool-A
-ranks, which structurally rules out a CI fn that spans all sites).
+Splits training across three heterogeneous GPU pools — CI, LW (layerwise V/U),
+and PPGD — so a **global shared transformer** CI fn is physically realizable: a
+dedicated, replicated CI pool can host a CI fn that spans all sites, while V/U
+sites are sharded across the LW pool.
 
 ## Pool roles
 
@@ -217,10 +217,9 @@ Only four edges actually force a wait between steps:
 
 Everything else fits inside step T.
 
-## Routing complexity vs 2-pool
+## Routing complexity
 
-The new wrinkle is **3-way batch slicing**. Today both pools either replicate
-CI (pool A) or receive a full-model copy (pool B). Under 3-pool:
+The defining wrinkle is **3-way batch slicing**:
 
 - CI rank `i` produces CI values for batch slice `S_ci[i]` and all sites.
 - Layerwise rank `j` needs CI values for its owned sites `O[j]` and batch slice `S_lw[j]`.
@@ -244,8 +243,8 @@ which reduces it to one-to-many fan-out + many-to-one reduction.
    is computed inside the CI-fn forward graph and contributes directly to the
    single CI-fn backward, with `g_CI_LW + g_CI_PPGD` injected as a `grad_tensors=`
    seed on the same backward call (same shape as today's pool-A combined backward).
-4. **Validator extensions.** Mirror today's `_validate_pd_config_for_two_pool`:
-   require `ImportanceMinimalityLoss` lives on CI pool; allow `mode: layerwise`
+4. **Validator extensions.** Require `ImportanceMinimalityLoss` lives on CI
+   pool; allow `mode: layerwise`
    *or* `mode: global` (with `fn_type: global_shared_transformer`) since CI
    ownership is no longer sharded.
 5. **Checkpointing.** Still no distributed-aware checkpoint, so `save_every`

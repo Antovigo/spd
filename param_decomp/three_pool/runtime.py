@@ -23,10 +23,9 @@ __all__ = ["_ThreePoolRuntime"]
 class _ThreePoolRuntime:
     """Internal bundle passed to the three step functions.
 
-    Mirrors ``two_pool.runtime._TwoPoolRuntime`` but typed against the
-    3-pool topology + the multi-rank CI pool. Coefficients and per-metric
-    config are flattened in here so step functions don't have to re-parse
-    ``pd_config.loss_metrics``.
+    Typed against the 3-pool topology + the multi-rank CI pool. Coefficients
+    and per-metric config are flattened in here so step functions don't have
+    to re-parse ``pd_config.loss_metrics``.
     """
 
     # Topology

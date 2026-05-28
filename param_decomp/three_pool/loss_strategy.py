@@ -1,7 +1,7 @@
 """Layerwise loss strategy: pairs the LM-head-bypass context with recon_loss.
 
-Both pool A's layerwise loop and pool B's PPGD inner loop go through one of
-two regimes:
+Both the LW pool's layerwise loop and the PPGD pool's inner loop go through one
+of two regimes:
 
   - **Fused**: bypass LM head; recon_loss is :func:`fused_linear_kl_div` against
     the saved lm_head weight. Forwards return pre-LM-head hidden state; the

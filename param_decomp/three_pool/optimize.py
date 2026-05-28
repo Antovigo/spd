@@ -80,6 +80,7 @@ from param_decomp.three_pool.layout import (
     build_world,
     flush_nccl_event_timings,
 )
+from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp.three_pool.reductions import (
     aggregate_losses_to_rank0,
     aggregate_max_memory_to_rank0,
@@ -94,10 +95,8 @@ from param_decomp.three_pool.step_layerwise import (
 from param_decomp.three_pool.step_ppgd import finalize_ppgd_async_drain, step_ppgd
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
-from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
 
 # Loss-metric type discriminators required for the 3-pool training path.
-# Same set as two_pool — three-pool reuses the same loss-metric vocabulary.
 REQUIRED_LOSS_METRIC_TYPES: frozenset[str] = frozenset(
     {
         "FaithfulnessLoss",
@@ -243,8 +242,12 @@ class ThreePoolTrainer:
         )
 
         target_model.requires_grad_(False)
-        # Resync RNG across ranks before V/U + CI fn init — see
-        # ``two_pool.optimize.TwoPoolTrainer.__init__`` for rationale.
+        # Resync RNG across ranks before V/U + CI fn init. DDP partners within a
+        # block must start with identical params, but anything between
+        # ``set_seed(pd.seed)`` in _fresh_main and here (loader build, distributed
+        # init, etc.) can advance the RNG by rank-dependent amounts. Without this,
+        # partners initialize different V/U and the in-block grad all-reduce can't
+        # bring them back into sync.
         seed_all_ranks(pd_config.seed)
         trace("ThreePoolTrainer.__init__: ComponentModel ctor: enter")
         self.component_model = ComponentModel(
@@ -257,7 +260,7 @@ class ThreePoolTrainer:
         trace("ThreePoolTrainer.__init__: ComponentModel ctor: done")
         # Drop pool-irrelevant params before moving to GPU. RNG draws used to
         # init them already happened (in the ctor above), so equivalence with
-        # single-pool / 2-pool is preserved.
+        # single-pool is preserved.
         match self.layout.my_pool:
             case "layerwise" | "ppgd":
                 self.component_model.drop_ci_fn()
@@ -658,9 +661,8 @@ class ThreePoolTrainer:
         def _to_device(b: Any) -> Any:
             """Move a batch yielded by the train loader to this rank's GPU.
 
-            3-pool's step functions assume the batch is already on-device
-            (mirroring 2-pool's `_extract_batch_tensor`). The loader produces
-            CPU tensors; moving here keeps the step functions thin.
+            3-pool's step functions assume the batch is already on-device. The
+            loader produces CPU tensors; moving here keeps the step functions thin.
             """
             if b is None:
                 return None
