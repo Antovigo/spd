@@ -67,7 +67,10 @@ from param_decomp.metrics.persistent_pgd_recon import (
     PersistentPGDReconLossConfig,
     validate_pgd_scope,
 )
-from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
+from param_decomp.metrics.persistent_pgd_state import (
+    PerBatchPerPositionScope,
+    PersistentPGDState,
+)
 from param_decomp.optimize import EvalLoop, load_optimizer_state_by_name, optimizer_state_by_name
 from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.schedule import get_scheduled_value
@@ -613,6 +616,16 @@ class ThreePoolTrainer:
         if layout.my_pool == "ppgd" and self.ppgd_state is None:
             trace("Trainer.run: PPGDState ctor: enter")
             ppgd_cfg = runtime.ppgd_cfg
+            # The 3-pool currently only supports per-batch-per-position sources:
+            # they're independent per batch element, so a PPGD-pool batch split is
+            # just slicing — no cross-rank source sync needed. Any replicated scope
+            # would require broadcast-init + grad-reduce over ppgd_pool_group, which
+            # we don't implement here. Add it if/when another arrangement is wanted.
+            assert isinstance(ppgd_cfg.scope, PerBatchPerPositionScope), (
+                f"3-pool supports only PerBatchPerPositionScope PPGD sources; got "
+                f"{type(ppgd_cfg.scope).__name__}. Replicated scopes need cross-pool "
+                f"source-replica sync, not implemented in the 3-pool."
+            )
             self.ppgd_state = PersistentPGDState(
                 module_to_c=runtime.c_per_site,
                 batch_dims=(layout.world.batch_local_ppgd, *_seq_dims_from_batch(first_batch)),

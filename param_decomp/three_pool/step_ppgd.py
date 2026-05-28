@@ -24,11 +24,10 @@ Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
        point-to-point — no PPGD-internal reduce needed, so fires immediately
        after backward to unblock CI's recv-wait sooner.
   D6. Sum-reduce g_VU within PPGD pool → each rank holds the full-batch grad.
-      Sources are reduced separately (see D6b) because their reduction is
-      scope-dependent, not an unconditional SUM.
-  D6b. Final PGD source step (the (N+1)'th source update): reduce the source
-      grads per source scope (skip for per_batch_per_position, AVG for
-      replicated) then step — reusing the same path as warmup/get_grads.
+      Source grads are NOT reduced: per_batch_per_position sources are per-rank
+      independent (asserted at state construction), so each rank steps its own.
+  D6b. Final PGD source step (the (N+1)'th source update): step on this rank's
+      own source grads, exactly as warmup does.
   D7. Send g_VU to LW block leaders (PPGD-leader-only).
   E.  Recv updated V/U from LW:
         * sync mode → blocking recv at end of step (returns
@@ -53,7 +52,6 @@ import torch.distributed as dist  # noqa: F401  (used in type hints)
 from torch import Tensor
 
 from param_decomp.component_model import ComponentModel
-from param_decomp.distributed import use_reduction_group
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
 from param_decomp.three_pool.loss_strategy import LayerwiseLossStrategy
@@ -111,10 +109,10 @@ def step_ppgd(
         ci_scratch = _releaf_ci_fp32_for_grads(ci_recv)
         _assert_ci_scratch_shapes(ci_scratch, layout, seq_len, cfg)
 
-        # Scope any in-warmup source-grad all_reduce to the PPGD pool. A no-op
-        # for per_batch_per_position sources (which skip the reduce); correct
-        # for replicated scopes, which would otherwise hit the global group.
-        with bf16_autocast(cfg.bf16_autocast), use_reduction_group(layout.world.ppgd_pool_group):
+        # No reduce hook: per-batch-per-position sources are independent per batch
+        # element, so each PPGD rank's slice is self-contained (asserted at state
+        # construction in optimize.py). Warmup steps on this rank's own grads.
+        with bf16_autocast(cfg.bf16_autocast):
             ppgd_state.warmup(
                 model=component_model,
                 batch=batch_local,
@@ -179,10 +177,10 @@ def step_ppgd(
     # unrelated per-position sources).
     layout.sum_reduce_ppgd_grads([*v_grads.values(), *u_grads.values()])
     layout.send_g_vu_to_layerwise(v_grads, u_grads)
-    # Final (N+1)'th source step: reduce per scope, then step — the same path
-    # warmup uses, scoped to the PPGD pool, so it cannot diverge from warmup.
-    with use_reduction_group(layout.world.ppgd_pool_group):
-        ppgd_state.reduce_and_step_sources(source_grads)
+    # Final (N+1)'th source step. per_batch_per_position sources are per-rank
+    # independent, so no cross-rank reduce — step on this rank's own grads,
+    # exactly as warmup does.
+    ppgd_state.step(source_grads)
 
     # ``.item()`` calls force CPU↔GPU sync. With async NCCL ops in D5b/D6/D7
     # still in flight on side streams, syncing here pulls forward the wait

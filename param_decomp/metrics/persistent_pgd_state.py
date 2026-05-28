@@ -6,18 +6,17 @@ these primitives.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Annotated, Any, Literal, override
 
 import torch
 from jaxtyping import Float, Int
 from pydantic import Field, NonNegativeFloat, PositiveInt
 from torch import Tensor
-from torch.distributed import ReduceOp
 
 from param_decomp.base_config import BaseConfig, Probability
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModel
-from param_decomp.distributed import all_reduce, broadcast_tensor
 from param_decomp.masks import (
     AllLayersRouter,
     ComponentsMaskInfo,
@@ -90,6 +89,17 @@ PersistentPGDSourceScope = Annotated[
 
 
 PPGDSources = dict[str, Float[Tensor, " source_c"]]
+
+
+def scope_needs_replica_sync(scope: PersistentPGDSourceScope) -> bool:
+    """Whether data-parallel replicas of this scope's sources must be kept in sync.
+
+    Replicated scopes (single / broadcast / repeat) hold the same sources on every
+    replica, so splitting the batch across DP ranks needs broadcast-init + grad
+    reduction to keep them identical. ``per_batch_per_position`` sources are
+    independent per element, so a batch split is just slicing — no sync needed.
+    """
+    return not isinstance(scope, PerBatchPerPositionScope)
 
 
 class PPGDOptimizer(ABC):
@@ -221,7 +231,6 @@ class PersistentPGDState:
         reconstruction_loss: ReconstructionLoss,
     ) -> None:
         self.optimizer = make_ppgd_optimizer(optimizer_cfg)
-        self._skip_all_reduce = isinstance(scope, PerBatchPerPositionScope)
         self._use_sigmoid_parameterization = use_sigmoid_parameterization
         self._router = router
         self._n_warmup_steps = n_warmup_steps
@@ -251,35 +260,15 @@ class PersistentPGDState:
             source_c = module_c + 1 if use_delta_component else module_c
             source_shape = source_leading_dims + [source_c]
             source_data = init_fn(source_shape, device=device)
-            if not self._skip_all_reduce:
-                broadcast_tensor(source_data)
             self.sources[module_name] = source_data.requires_grad_(True)
 
         self.optimizer.init_state(self.sources)
 
     def get_grads(self, loss: Float[Tensor, ""], retain_graph: bool = True) -> PPGDSources:
+        """Raw per-module ``∂loss/∂source``. No cross-rank reduction — the caller
+        applies whatever replica sync it needs (see ``scope_needs_replica_sync``)."""
         grads = torch.autograd.grad(loss, list(self.sources.values()), retain_graph=retain_graph)
-        raw = dict(zip(self.sources.keys(), grads, strict=True))
-        return self._reduce_source_grads(raw)
-
-    def _reduce_source_grads(self, raw: PPGDSources) -> PPGDSources:
-        """Cross-replica reduce of source grads, respecting the source scope.
-
-        Per-position sources are per-rank-independent (each rank owns the sources
-        for its own batch slice), so their grads are never reduced. Replicated
-        scopes (single / broadcast / repeat) hold identical sources on every
-        replica, so their grads are AVG-reduced across the active reduction group
-        — set by the caller via `use_reduction_group(...)` (the global group in
-        single-pool; the PPGD pool group in 3-pool). AVG matches the loss's
-        local-`n` normalization.
-
-        This is the single source of truth for the source-grad reduction policy;
-        both `get_grads` and `reduce_and_step_sources` route through it so the
-        fused-backward path cannot diverge from warmup.
-        """
-        if self._skip_all_reduce:
-            return raw
-        return {k: all_reduce(g, op=ReduceOp.AVG) for k, g in raw.items()}
+        return dict(zip(self.sources.keys(), grads, strict=True))
 
     def step(self, grads: PPGDSources) -> None:
         """One PGD update step using `grads`.
@@ -329,6 +318,7 @@ class PersistentPGDState:
         target_out: Float[Tensor, "... vocab"],
         ci: dict[str, Float[Tensor, "... C"]],
         weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+        reduce_grads: Callable[[PPGDSources], PPGDSources] | None = None,
     ) -> None:
         """Run ``n_warmup_steps`` supplemental source-only PGD iterations.
 
@@ -342,6 +332,12 @@ class PersistentPGDState:
         Each supplemental iter: fwd through the masked target → source-only
         backward → PGD step on sources. ``retain_graph=False`` since the
         autograd graph is rebuilt next iter from the updated sources.
+
+        ``reduce_grads`` is an optional per-step transform applied to the grads
+        before the step — callers that data-parallel-replicate shared sources
+        pass a cross-rank reduce here to keep replicas in sync. The default
+        (``None``) does nothing, which is correct for independent
+        (per-batch-per-position) sources and for single-process runs.
         """
         all_layers = AllLayersRouter()
         for _ in range(self._n_warmup_steps):
@@ -349,18 +345,9 @@ class PersistentPGDState:
                 model, batch, target_out, ci, weight_deltas, router=all_layers
             )
             grads = self.get_grads(sum_loss / n, retain_graph=False)
+            if reduce_grads is not None:
+                grads = reduce_grads(grads)
             self.step(grads)
-
-    def reduce_and_step_sources(self, raw_grads: PPGDSources) -> None:
-        """Scope-aware reduce of already-computed source grads, then a PGD step.
-
-        For callers that harvested the source grads from a fused multi-target
-        ``autograd.grad`` (``three_pool/step_ppgd``) rather than via
-        ``get_grads``. Routes them through the same ``_reduce_source_grads`` that
-        ``get_grads`` uses, so the fused path cannot diverge from warmup. Scope
-        the reduction group with ``use_reduction_group(...)`` around the call.
-        """
-        self.step(self._reduce_source_grads(raw_grads))
 
     def compute_recon_sum_and_n(
         self,
