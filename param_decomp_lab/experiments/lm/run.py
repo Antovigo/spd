@@ -19,10 +19,13 @@ a temp YAML and submits an sbatch job that invokes that module.
 """
 
 import atexit
+import datetime
 import importlib
+import json
 import os
 import shlex
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -321,6 +324,50 @@ def _agree_on_run_id_three_pool(run_id: str | None, dist_state: DistributedState
     return run_id
 
 
+def _install_first_fail_marker(rank: int) -> None:
+    """On uncaught exception, write a structured marker to shared FS so a
+    debugger can identify which rank died and what hit it without grepping
+    through GB of NCCL log noise across N ranks. Always-on; cost is one
+    excepthook registration.
+
+    Writes ``$HOME/pd_first_fail/$SLURM_JOB_ID/rank<R>.json`` containing
+    ``{rank, exception_type, exception_message, traceback, timestamp_utc,
+    pid}``. Chains to the previous excepthook so behavior is otherwise
+    unchanged.
+
+    Open follow-up (#11 in the task list): once any rank writes its marker,
+    the rest of the world will block in their next collective for up to
+    30 min before monitoredBarrier times out. A future change should
+    ``dist.destroy_process_group()`` + ``os._exit(1)`` here so siblings
+    fast-fail in seconds via ``TORCH_NCCL_ASYNC_ERROR_HANDLING``. Skipped
+    for now because doing that wrong can hang siblings *worse*.
+    """
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    out_dir = Path.home() / "pd_first_fail" / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"rank{rank}.json"
+
+    prev_excepthook = sys.excepthook
+
+    def _excepthook(exctype: type[BaseException], value: BaseException, tb: Any) -> None:
+        try:
+            payload = {
+                "rank": rank,
+                "exception_type": exctype.__name__,
+                "exception_message": str(value),
+                "traceback": "".join(traceback.format_exception(exctype, value, tb)),
+                "timestamp_utc": datetime.datetime.now(datetime.UTC).isoformat(),
+                "pid": os.getpid(),
+            }
+            out_path.write_text(json.dumps(payload, indent=2))
+            print(f"[first-fail] rank={rank} wrote {out_path}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[first-fail] failed to write marker: {e}", file=sys.stderr, flush=True)
+        prev_excepthook(exctype, value, tb)
+
+    sys.excepthook = _excepthook
+
+
 def _maybe_enable_memory_profile(rank: int) -> None:
     """Opt-in CUDA memory-history recorder for offline ``memory_viz`` analysis.
 
@@ -366,16 +413,17 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
       * ``PD_TORCH_PROFILE_SKIP_FIRST`` (default 20) and
         ``PD_TORCH_PROFILE_ACTIVE`` (default 3) — schedule knobs.
       * ``PD_TORCH_PROFILE_MEMORY=0`` — set to disable profile_memory (CUPTI
-        memory instrumentation is the heaviest subsystem and the most likely
-        contributor to NCCL stream-sync interference at scale).
+        memory instrumentation is the heaviest subsystem; toggle if you
+        suspect it's confounding measurements).
 
     Returns the profiler (caller threads it into ``trainer.run(profiler=...)``)
     or ``None`` if this rank isn't listed. Side-effects ``PhaseProfiler.__enter__``,
     not done here — caller passes it to the trainer which enters the context.
 
-    CAVEAT: at production 3-pool scale (~104 ranks), profiling multiple ranks
-    deadlocks per docs/handoff_2026-05-26_3pool_perf.md. Profiling one rank
-    at a time works (verified 2026-05-28 at 104 ranks, gpt2-xl).
+    Verified at production scale (104 ranks, gpt2-xl, 3 profiled ranks one
+    per pool) on 2026-05-28 after commit 497e1542 removed a cosmetic
+    pre-step barrier that was the root of the previously-suspected CUPTI
+    deadlock.
     """
     prof_ranks_env = os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip()
     if not prof_ranks_env:
@@ -420,6 +468,7 @@ def _fresh_main(
     dist_state = init_distributed()
     if is_main_process():
         logger.info(f"Distributed state: {dist_state}")
+    _install_first_fail_marker(dist_state.rank if dist_state is not None else 0)
     _maybe_enable_memory_profile(dist_state.rank if dist_state is not None else 0)
     set_seed(cfg.pd.seed)
     device = get_device()
@@ -528,6 +577,7 @@ def _resume_main(
     if is_main_process():
         logger.info(f"Distributed state: {dist_state}")
         logger.info(f"Resuming from {resume_cfg.from_run} @ step {resume_cfg.step}")
+    _install_first_fail_marker(dist_state.rank if dist_state is not None else 0)
     _maybe_enable_memory_profile(dist_state.rank if dist_state is not None else 0)
     set_seed(parent_cfg.pd.seed)
     device = get_device()
