@@ -348,7 +348,6 @@ class TwoPoolTrainer:
                     f"got {batch.shape[0]}, expected {runtime.batch_global}"
                 )
 
-                torch.cuda.synchronize(self._device)
                 step_start = time.perf_counter()
                 match layout.my_pool:
                     case "a":
@@ -389,7 +388,8 @@ class TwoPoolTrainer:
                 for k, v in metrics.items():
                     if k.startswith("loss/") or k.startswith("_raw/"):
                         assert v == v, f"NaN in metrics[{k!r}] at step {step}"  # NaN != NaN
-                torch.cuda.synchronize(self._device)
+                # step_ms is CPU dispatch time only — kernels are still running
+                # on the GPU. Use a torch.profiler trace for real per-step timing.
                 step_ms = (time.perf_counter() - step_start) * 1000.0
 
                 if step % cadence.train_log_every == 0:
