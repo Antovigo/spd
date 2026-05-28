@@ -15,11 +15,9 @@ shape. ``TwoPoolConfig`` declares the topology (block groups + pool-B ranks).
 
 from param_decomp.two_pool.config import BlockGroupSpec, TwoPoolConfig
 from param_decomp.two_pool.optimize import TwoPoolTrainer, optimize_two_pool
-from param_decomp.two_pool.profiler import PhaseProfiler
 
 __all__ = [
     "BlockGroupSpec",
-    "PhaseProfiler",
     "TwoPoolConfig",
     "TwoPoolTrainer",
     "optimize_two_pool",

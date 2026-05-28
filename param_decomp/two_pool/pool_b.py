@@ -31,7 +31,6 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.two_pool.layout import BlockDDPLayout
 from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.two_pool.profiler import PhaseProfiler
 from param_decomp.two_pool.runtime import _TwoPoolRuntime, autocast_bf16
 
 
@@ -44,7 +43,6 @@ def step_pool_b(
     strategy: LayerwiseLossStrategy,
     step: int,
     n_steps: int,
-    profiler: PhaseProfiler | None = None,
 ) -> dict[str, float]:
     """One training step on a pool-B rank.
 
@@ -52,7 +50,6 @@ def step_pool_b(
     implements one numbered phase. See the module docstring for the phase
     list.
     """
-    p = profiler if profiler is not None else PhaseProfiler(enabled=False)
     device = next(component_model.parameters()).device
     batch_local = _slice_batch_for_pool_b(batch, layout)
 
@@ -64,16 +61,16 @@ def step_pool_b(
     # ``strategy.context`` controls whether forwards return logits or pre-LM-
     # head hidden state; ``ppgd_state``'s recon_loss was built to match.
     with strategy.context(component_model.target_model):
-        ci_recv, ci_recv_works = _async_recv_ci_from_pool_a(layout, cfg, batch_local, device, p)
-        target_out = _target_forward_no_grad(component_model, batch_local, cfg, p)
-        _wait_ci_recv(ci_recv_works, p)
+        ci_recv, ci_recv_works = _async_recv_ci_from_pool_a(layout, cfg, batch_local, device)
+        target_out = _target_forward_no_grad(component_model, batch_local, cfg)
+        _wait_ci_recv(ci_recv_works)
         ci_scratch = _releaf_ci_fp32_for_grads(ci_recv)
 
         _ppgd_inner_warmup(
-            ppgd_state, component_model, batch_local, target_out, ci_scratch, weight_deltas, cfg, p
+            ppgd_state, component_model, batch_local, target_out, ci_scratch, weight_deltas, cfg
         )
         sum_loss, n_examples = _ppgd_recon_forward(
-            ppgd_state, component_model, batch_local, target_out, ci_scratch, weight_deltas, cfg, p
+            ppgd_state, component_model, batch_local, target_out, ci_scratch, weight_deltas, cfg
         )
 
     # Scale by 1/N_pool_b so the upcoming SUM-reduce of V/U grads across pool B
@@ -81,12 +78,12 @@ def step_pool_b(
     total_ppgd = cfg.coeff_ppgd * (sum_loss / n_examples) / layout.world.n_pool_b
 
     v_grads, u_grads, ci_grads = _autograd_grad_for_vu_and_ci(
-        total_ppgd, component_model, ci_scratch, layout, p
+        total_ppgd, component_model, ci_scratch, layout
     )
-    _ppgd_source_step_from_total_loss(ppgd_state, total_ppgd, p)
-    _sum_reduce_vu_grads_within_pool_b(v_grads, u_grads, layout, p)
-    _send_grads_to_pool_a(layout, v_grads, u_grads, ci_grads, p)
-    _recv_updated_vu_from_pool_a(component_model, layout, p)
+    _ppgd_source_step_from_total_loss(ppgd_state, total_ppgd)
+    _sum_reduce_vu_grads_within_pool_b(v_grads, u_grads, layout)
+    _send_grads_to_pool_a(layout, v_grads, u_grads, ci_grads)
+    _recv_updated_vu_from_pool_a(component_model, layout)
 
     return _step_metrics(sum_loss, n_examples)
 
@@ -107,7 +104,6 @@ def _async_recv_ci_from_pool_a(
     cfg: _TwoPoolRuntime,
     batch_local: Any,
     device: torch.device,
-    p: PhaseProfiler,
 ) -> tuple[dict[str, Tensor], list[Any]]:
     """Phase b/1. Post irecvs for CI values from owning A ranks.
 
@@ -115,14 +111,13 @@ def _async_recv_ci_from_pool_a(
     with the next phase's target_fwd on the GPU — pool B doesn't need CI for
     target_fwd, so we save the recv latency by overlapping.
     """
-    with p.phase("b/1_post_async_recv_ci"):
-        seq_len = batch_local.shape[1] if batch_local.ndim >= 2 else 1
-        ci_recv, works = layout.async_recv_ci_from_owners(
-            cfg.c_per_site,
-            seq_len=seq_len,
-            device=device,
-            dtype=torch.float32,
-        )
+    seq_len = batch_local.shape[1] if batch_local.ndim >= 2 else 1
+    ci_recv, works = layout.async_recv_ci_from_owners(
+        cfg.c_per_site,
+        seq_len=seq_len,
+        device=device,
+        dtype=torch.float32,
+    )
     # Pre-allocated buffers — values aren't filled until ``works`` are waited
     # on, but shapes are fixed at allocation time and the post-wait shape
     # must match what pool A sends. The assertion here costs nothing and
@@ -141,22 +136,20 @@ def _target_forward_no_grad(
     component_model: ComponentModel,
     batch_local: Any,
     cfg: _TwoPoolRuntime,
-    p: PhaseProfiler,
 ) -> Tensor:
     """Phase b/2. Frozen target forward on the rank's batch slice.
 
     Detached + no_grad — we only need the output as the recon target. Runs
     in parallel with the CI recvs posted in phase b/1.
     """
-    with p.phase("b/2_target_fwd"), torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
+    with torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
         return component_model(batch_local).detach()
 
 
-def _wait_ci_recv(ci_recv_works: list[Any], p: PhaseProfiler) -> None:
+def _wait_ci_recv(ci_recv_works: list[Any]) -> None:
     """Phase b/3. Block on the irecvs from phase b/1 — should already be done."""
-    with p.phase("b/3_wait_ci_recv"):
-        for w in ci_recv_works:
-            w.wait()
+    for w in ci_recv_works:
+        w.wait()
 
 
 def _releaf_ci_fp32_for_grads(ci_recv: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -178,10 +171,9 @@ def _ppgd_inner_warmup(
     ci_scratch: dict[str, Tensor],
     weight_deltas: dict[str, Tensor],
     cfg: _TwoPoolRuntime,
-    p: PhaseProfiler,
 ) -> None:
     """Phase b/4. Refine the persistent adversarial sources in place."""
-    with p.phase("b/4_ppgd_warmup"), autocast_bf16(cfg.bf16_autocast):
+    with autocast_bf16(cfg.bf16_autocast):
         ppgd_state.warmup(
             model=component_model,
             batch=batch_local,
@@ -199,14 +191,13 @@ def _ppgd_recon_forward(
     ci_scratch: dict[str, Tensor],
     weight_deltas: dict[str, Tensor],
     cfg: _TwoPoolRuntime,
-    p: PhaseProfiler,
 ) -> tuple[Tensor, int]:
     """Phase b/5. Final recon loss with the refined sources.
 
     Returns ``(sum_loss, n_examples)`` raw so the logger can SUM-reduce across
     pool B to recover ``global_mean = SUM(sum_loss) / SUM(n_examples)``.
     """
-    with p.phase("b/5_ppgd_recon"), autocast_bf16(cfg.bf16_autocast):
+    with autocast_bf16(cfg.bf16_autocast):
         sum_loss, n_examples = ppgd_state.compute_recon_sum_and_n(
             model=component_model,
             batch=batch_local,
@@ -224,7 +215,6 @@ def _autograd_grad_for_vu_and_ci(
     component_model: ComponentModel,
     ci_scratch: dict[str, Tensor],
     layout: BlockDDPLayout,
-    p: PhaseProfiler,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor]]:
     """Phase b/6. Extract V/U + CI gradients via ``torch.autograd.grad``.
 
@@ -234,14 +224,13 @@ def _autograd_grad_for_vu_and_ci(
     graph alive for the upcoming PPGD source-step (which traverses the same
     forward with respect to the source tensors).
     """
-    with p.phase("b/6_backward"):
-        all_sites = list(layout.world.all_sites)
-        params: list[Tensor] = []
-        for s in all_sites:
-            params.append(component_model.components[s].V)
-            params.append(component_model.components[s].U)
-        ci_list = [ci_scratch[s] for s in all_sites]
-        grads = torch.autograd.grad(total_ppgd, params + ci_list, retain_graph=True)
+    all_sites = list(layout.world.all_sites)
+    params: list[Tensor] = []
+    for s in all_sites:
+        params.append(component_model.components[s].V)
+        params.append(component_model.components[s].U)
+    ci_list = [ci_scratch[s] for s in all_sites]
+    grads = torch.autograd.grad(total_ppgd, params + ci_list, retain_graph=True)
 
     n_sites = len(all_sites)
     v_grads = {s: grads[2 * i] for i, s in enumerate(all_sites)}
@@ -265,33 +254,29 @@ def _autograd_grad_for_vu_and_ci(
 def _ppgd_source_step_from_total_loss(
     ppgd_state: PersistentPGDState,
     total_ppgd: Tensor,
-    p: PhaseProfiler,
 ) -> None:
     """Phase b/7. Update the persistent adversarial sources from the same loss.
 
     ``retain_graph=False`` here — the upstream call already used
     ``retain_graph=True`` to keep the graph alive for this final pass.
     """
-    with p.phase("b/7_ppgd_source_step"):
-        source_grads = ppgd_state.get_grads(total_ppgd, retain_graph=False)
-        ppgd_state.step(source_grads)
+    source_grads = ppgd_state.get_grads(total_ppgd, retain_graph=False)
+    ppgd_state.step(source_grads)
 
 
 def _sum_reduce_vu_grads_within_pool_b(
     v_grads: dict[str, Tensor],
     u_grads: dict[str, Tensor],
     layout: BlockDDPLayout,
-    p: PhaseProfiler,
 ) -> None:
     """Phase b/8. SUM-reduce V/U grads within pool B.
 
     Combined with the ``/n_pool_b`` scaling on the loss, the SUM gives the
     full-batch gradient that pool A would have computed if it had owned PPGD.
     """
-    with p.phase("b/8_pool_b_allreduce"):
-        for s in layout.world.all_sites:
-            dist.all_reduce(v_grads[s], op=dist.ReduceOp.SUM, group=layout.world.pool_b_group)
-            dist.all_reduce(u_grads[s], op=dist.ReduceOp.SUM, group=layout.world.pool_b_group)
+    for s in layout.world.all_sites:
+        dist.all_reduce(v_grads[s], op=dist.ReduceOp.SUM, group=layout.world.pool_b_group)
+        dist.all_reduce(u_grads[s], op=dist.ReduceOp.SUM, group=layout.world.pool_b_group)
 
 
 def _send_grads_to_pool_a(
@@ -299,17 +284,14 @@ def _send_grads_to_pool_a(
     v_grads: dict[str, Tensor],
     u_grads: dict[str, Tensor],
     ci_grads: dict[str, Tensor],
-    p: PhaseProfiler,
 ) -> None:
     """Phase b/9. Ship V/U + CI grads to the owning pool-A ranks."""
-    with p.phase("b/9_send_grads_to_a"):
-        layout.send_pool_b_grads_to_owners(v_grads, u_grads, ci_grads)
+    layout.send_pool_b_grads_to_owners(v_grads, u_grads, ci_grads)
 
 
 def _recv_updated_vu_from_pool_a(
     component_model: ComponentModel,
     layout: BlockDDPLayout,
-    p: PhaseProfiler,
 ) -> None:
     """Phase b/10. Receive updated V/U from pool A and copy in place.
 
@@ -317,15 +299,14 @@ def _recv_updated_vu_from_pool_a(
     detach them from the optimizer if pool B had one — defense in depth even
     though pool B doesn't).
     """
-    with p.phase("b/10_recv_weights"):
-        all_sites = layout.world.all_sites
-        v_templates = {s: component_model.components[s].V for s in all_sites}
-        u_templates = {s: component_model.components[s].U for s in all_sites}
-        v_new, u_new = layout.recv_updated_weights_from_owners(v_templates, u_templates)
-        with torch.no_grad():
-            for s in all_sites:
-                component_model.components[s].V.copy_(v_new[s])
-                component_model.components[s].U.copy_(u_new[s])
+    all_sites = layout.world.all_sites
+    v_templates = {s: component_model.components[s].V for s in all_sites}
+    u_templates = {s: component_model.components[s].U for s in all_sites}
+    v_new, u_new = layout.recv_updated_weights_from_owners(v_templates, u_templates)
+    with torch.no_grad():
+        for s in all_sites:
+            component_model.components[s].V.copy_(v_new[s])
+            component_model.components[s].U.copy_(u_new[s])
 
 
 def _step_metrics(sum_loss: Tensor, n_examples: int) -> dict[str, float]:

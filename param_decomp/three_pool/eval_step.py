@@ -13,10 +13,6 @@ Reductions inside eval metrics are scoped to the PPGD pool subgroup via
 The ``CIOutputs`` ship covers ``lower_leaky``, ``upper_leaky``, ``pre_sigmoid``
 in one packed buffer — any metric reading ``ctx.ci.*`` works without a
 per-metric audit.
-
-Per-phase instrumentation goes through ``PhaseProfiler.phase(...)`` so it gates
-on ``PD_PHASE_TRACE=1`` like the rest of the 3-pool step code, and so cpu/gpu/
-wait timings get captured uniformly.
 """
 
 import gc
@@ -38,7 +34,6 @@ from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.run_sink import RunSink
 from param_decomp.three_pool.layout import ThreePoolLayout
-from param_decomp.three_pool.profiler import PhaseProfiler
 from param_decomp.two_pool.runtime import autocast_bf16
 
 
@@ -69,7 +64,6 @@ def _build_metric_context_three_pool(
     config: PDConfig,
     reconstruction_loss: ReconstructionLoss,
     c_per_site: dict[str, int],
-    profiler: PhaseProfiler,
 ) -> MetricContext | None:
     """Build a ``MetricContext`` under 3-pool. Returns the context on PPGD ranks;
     returns ``None`` on CI (after shipping CI to PPGD) and LW (no-op).
@@ -77,30 +71,22 @@ def _build_metric_context_three_pool(
     batch = move_batch_to_device(batch, device)
     match layout.my_pool:
         case "ci":
-            with profiler.phase("eval/ci/slice_batch"):
-                batch_local, _ = _slice_batch_dim0(batch, layout.my_batch_slice_ci())
-            with profiler.phase("eval/ci/target_fwd"):
-                target_output = component_model(batch_local, cache_type="input")
-            with profiler.phase("eval/ci/ci_fn_fwd"):
-                ci = component_model.calc_causal_importances(
-                    pre_weight_acts=target_output.cache,
-                    detach_inputs=False,
-                    sampling=config.sampling,
-                )
-            with profiler.phase("eval/ci/send_ci_to_ppgd"):
-                layout.send_ci_eval_to_ppgd(ci)
+            batch_local, _ = _slice_batch_dim0(batch, layout.my_batch_slice_ci())
+            target_output = component_model(batch_local, cache_type="input")
+            ci = component_model.calc_causal_importances(
+                pre_weight_acts=target_output.cache,
+                detach_inputs=False,
+                sampling=config.sampling,
+            )
+            layout.send_ci_eval_to_ppgd(ci)
             return None
         case "ppgd":
-            with profiler.phase("eval/ppgd/slice_batch"):
-                batch_local, seq_len = _slice_batch_dim0(batch, layout.my_batch_slice_ppgd())
-            with profiler.phase("eval/ppgd/target_fwd"):
-                target_output = component_model(batch_local, cache_type="input")
-            with profiler.phase("eval/ppgd/calc_weight_deltas"):
-                weight_deltas = component_model.calc_weight_deltas()
-            with profiler.phase("eval/ppgd/recv_ci_from_ci_pool"):
-                ci = layout.recv_ci_eval_from_ci_pool(
-                    c_per_site, seq_len=seq_len, device=torch.device(device)
-                )
+            batch_local, seq_len = _slice_batch_dim0(batch, layout.my_batch_slice_ppgd())
+            target_output = component_model(batch_local, cache_type="input")
+            weight_deltas = component_model.calc_weight_deltas()
+            ci = layout.recv_ci_eval_from_ci_pool(
+                c_per_site, seq_len=seq_len, device=torch.device(device)
+            )
             return MetricContext(
                 model=component_model,
                 batch=batch_local,
@@ -135,7 +121,6 @@ def run_eval_step(
     reconstruction_loss: ReconstructionLoss,
     c_per_site: dict[str, int],
     sink: RunSink,
-    profiler: PhaseProfiler,
 ) -> None:
     """One 3-pool eval pass over ``n_steps`` batches.
 
@@ -148,88 +133,71 @@ def run_eval_step(
 
     ``slow_step`` is a pass-through filter: any metric whose ``slow`` class-attr
     is True only runs when ``slow_step`` is True.
-
-    Phase markers use ``profiler.phase`` so they gate on ``PD_PHASE_TRACE=1``
-    and record cpu/gpu/wait timing uniformly with the rest of the 3-pool
-    step phases.
     """
-    with profiler.phase(f"eval/full step={step} slow={slow_step}"):
-        with profiler.phase("eval/pre_barrier"):
-            # NOTE: `torch.cuda.synchronize()` is unsafe here — it drains ALL
-            # CUDA streams including pending async NCCL recvs (e.g. the V/U
-            # bcast under defer_vu_opt). The structural fix (cross_pool_p2p_group)
-            # made this barrier safe without needing a drain.
-            sync_across_processes()
-        active = (
-            [m for m in metrics if not (m.slow and not slow_step)]
-            if layout.my_pool == "ppgd"
-            else []
-        )
-        ppgd_group = layout.world.ppgd_pool_group if layout.my_pool == "ppgd" else None
-        with (
-            torch.no_grad(),
-            autocast_bf16(runtime_config.autocast_bf16),
-            use_reduction_group(ppgd_group),
-        ):
-            for m in active:
-                m.reset()
-            for i in range(n_steps):
-                with profiler.phase(f"eval/step_{i}/next_batch"):
-                    batch = next(eval_iterator)
-                with profiler.phase(f"eval/step_{i}/build_ctx"):
-                    ctx = _build_metric_context_three_pool(
-                        batch,
-                        layout=layout,
-                        step=step,
-                        device=device,
-                        component_model=component_model,
-                        config=config,
-                        reconstruction_loss=reconstruction_loss,
-                        c_per_site=c_per_site,
-                        profiler=profiler,
-                    )
-                if ctx is not None:
-                    for m in active:
-                        with profiler.phase(f"eval/step_{i}/metric_update/{type(m).__name__}"):
-                            t0 = time.time()
-                            m.update(ctx)
-                            logger.info(
-                                f"eval/update({type(m).__name__}) step={i} "
-                                f"took {time.time() - t0:.2f}s"
-                            )
-            results: dict[str, Any] | None
-            if active:
-                results = {}
+    # NOTE: `torch.cuda.synchronize()` is unsafe here — it drains ALL
+    # CUDA streams including pending async NCCL recvs (e.g. the V/U
+    # bcast under defer_vu_opt). The structural fix (cross_pool_p2p_group)
+    # made this barrier safe without needing a drain.
+    sync_across_processes()
+    active = (
+        [m for m in metrics if not (m.slow and not slow_step)] if layout.my_pool == "ppgd" else []
+    )
+    ppgd_group = layout.world.ppgd_pool_group if layout.my_pool == "ppgd" else None
+    with (
+        torch.no_grad(),
+        autocast_bf16(runtime_config.autocast_bf16),
+        use_reduction_group(ppgd_group),
+    ):
+        for m in active:
+            m.reset()
+        for i in range(n_steps):
+            batch = next(eval_iterator)
+            ctx = _build_metric_context_three_pool(
+                batch,
+                layout=layout,
+                step=step,
+                device=device,
+                component_model=component_model,
+                config=config,
+                reconstruction_loss=reconstruction_loss,
+                c_per_site=c_per_site,
+            )
+            if ctx is not None:
                 for m in active:
-                    with profiler.phase(f"eval/compute/{type(m).__name__}"):
-                        t0 = time.time()
-                        single = collect_metric_outputs([m])
-                        logger.info(
-                            f"eval/compute({type(m).__name__}) took "
-                            f"{time.time() - t0:.2f}s ({len(single)} outputs)"
-                        )
-                        results.update(single)
-            else:
-                results = None
-        # Barrier on default_pg (30-min timeout) before the broadcast — non-PPGD
-        # ranks otherwise reach the broadcast immediately and wait beyond the
-        # 10-min default timeout of cross_pool_p2p_group while PPGD finishes
-        # slow metric computation.
-        with profiler.phase("eval/post_barrier"):
-            sync_across_processes()
-        # Only PPGD computes metrics. Ship `results` to rank 0 via the
-        # all-rank cross_pool_p2p_group so rank 0 (the only real sink) can log.
-        ppgd_leader_rank = layout.world.ppgd_ranks[0]
-        payload: list[dict[str, Any] | None] = [
-            results if layout.my_rank == ppgd_leader_rank else None
-        ]
-        dist.broadcast_object_list(
-            payload, src=ppgd_leader_rank, group=layout.world.cross_pool_p2p_group
-        )
-        if layout.my_rank == 0:
-            rank0_results = payload[0]
-            assert rank0_results is not None
-            sink.console(*(f"eval/{k}: {v}" for k, v in rank0_results.items()))
-            sink.log({f"eval/{k}": v for k, v in rank0_results.items()}, step=step)
-        torch.cuda.empty_cache()
-        gc.collect()
+                    t0 = time.time()
+                    m.update(ctx)
+                    logger.info(
+                        f"eval/update({type(m).__name__}) step={i} took {time.time() - t0:.2f}s"
+                    )
+        results: dict[str, Any] | None
+        if active:
+            results = {}
+            for m in active:
+                t0 = time.time()
+                single = collect_metric_outputs([m])
+                logger.info(
+                    f"eval/compute({type(m).__name__}) took "
+                    f"{time.time() - t0:.2f}s ({len(single)} outputs)"
+                )
+                results.update(single)
+        else:
+            results = None
+    # Barrier on default_pg (30-min timeout) before the broadcast — non-PPGD
+    # ranks otherwise reach the broadcast immediately and wait beyond the
+    # 10-min default timeout of cross_pool_p2p_group while PPGD finishes
+    # slow metric computation.
+    sync_across_processes()
+    # Only PPGD computes metrics. Ship `results` to rank 0 via the
+    # all-rank cross_pool_p2p_group so rank 0 (the only real sink) can log.
+    ppgd_leader_rank = layout.world.ppgd_ranks[0]
+    payload: list[dict[str, Any] | None] = [results if layout.my_rank == ppgd_leader_rank else None]
+    dist.broadcast_object_list(
+        payload, src=ppgd_leader_rank, group=layout.world.cross_pool_p2p_group
+    )
+    if layout.my_rank == 0:
+        rank0_results = payload[0]
+        assert rank0_results is not None
+        sink.console(*(f"eval/{k}: {v}" for k, v in rank0_results.items()))
+        sink.log({f"eval/{k}": v for k, v in rank0_results.items()}, step=step)
+    torch.cuda.empty_cache()
+    gc.collect()

@@ -48,7 +48,6 @@ from param_decomp.metrics.importance_minimality import (
 )
 from param_decomp.two_pool.layout import BlockDDPLayout
 from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp.two_pool.profiler import PhaseProfiler
 from param_decomp.two_pool.runtime import _TwoPoolRuntime, autocast_bf16
 
 
@@ -122,7 +121,6 @@ def step_pool_a(
     cfg: _TwoPoolRuntime,
     strategy: LayerwiseLossStrategy,
     current_frac_of_training: float,
-    profiler: PhaseProfiler | None = None,
 ) -> dict[str, float]:
     """One training step on a pool-A rank.
 
@@ -130,17 +128,16 @@ def step_pool_a(
     semantically central per-site layerwise loop which stays inline so the
     step's structure is immediately visible.
     """
-    p = profiler if profiler is not None else PhaseProfiler(enabled=False)
     n_sites_total = len(cfg.c_per_site)
 
-    _wait_pending_weight_send(component_model, p)
+    _wait_pending_weight_send(component_model)
 
     # ``strategy.context`` chooses logits-vs-hidden output of the model
     # forwards for this step; ``recon_loss`` matches the choice.
     with strategy.context(component_model.target_model):
-        fwd = _target_and_ci_forward(component_model, batch, cfg, layout, p)
-        ci_send = _async_send_owned_ci_to_pool_b(layout, fwd.ci, p)
-        home = _home_losses_forward_only(component_model, fwd, cfg, current_frac_of_training, p)
+        fwd = _target_and_ci_forward(component_model, batch, cfg, layout)
+        ci_send = _async_send_owned_ci_to_pool_b(layout, fwd.ci)
+        home = _home_losses_forward_only(component_model, fwd, cfg, current_frac_of_training)
         optimizer.zero_grad(set_to_none=True)
 
         # ── Phase a/5: per-site streaming layerwise loop ──
@@ -148,7 +145,7 @@ def step_pool_a(
         # CI values so each per-site backward stops at the leaf rather than
         # traversing the CI-fn graph (the combined backward in phase a/7
         # does that traversal once with the merged seed).
-        with p.phase("a/5_layerwise"), autocast_bf16(cfg.bf16_autocast):
+        with autocast_bf16(cfg.bf16_autocast):
             sl = layout.my_batch_slice_a()
             batch_local = batch[sl] if isinstance(batch, Tensor) else batch
             target_local = fwd.target_out[sl].detach()
@@ -166,7 +163,7 @@ def step_pool_a(
             stoch_n_owned = len(layout.my_owned_sites)
             loss_stoch_scalar = stoch_total / stoch_n_owned
 
-    pool_b_grads = _recv_grads_from_pool_b(layout, component_model, fwd.ci, p)
+    pool_b_grads = _recv_grads_from_pool_b(layout, component_model, fwd.ci)
     _combined_backward(
         component_model,
         fwd.ci,
@@ -176,13 +173,12 @@ def step_pool_a(
         home,
         layout,
         cfg,
-        p,
     )
-    _in_block_all_reduce_grads(layout, all_params, p)
-    clip_norms = _cross_pool_grad_clip(component_params, ci_fn_params, layout, cfg, p)
-    _optimizer_step(optimizer, p)
-    weight_send = _async_send_updated_vu_to_pool_b(component_model, layout, p)
-    _wait_async_ci_send(ci_send, p)
+    _in_block_all_reduce_grads(layout, all_params)
+    clip_norms = _cross_pool_grad_clip(component_params, ci_fn_params, layout, cfg)
+    _optimizer_step(optimizer)
+    weight_send = _async_send_updated_vu_to_pool_b(component_model, layout)
+    _wait_async_ci_send(ci_send)
     _stash_pending_weight_send(component_model, weight_send)
 
     return _step_metrics(home, loss_stoch_scalar, stoch_total, stoch_n_owned, clip_norms)
@@ -238,19 +234,18 @@ class _ClipNorms:
 # =============================================================================
 
 
-def _wait_pending_weight_send(component_model: ComponentModel, p: PhaseProfiler) -> None:
+def _wait_pending_weight_send(component_model: ComponentModel) -> None:
     """Phase a/0. Wait for any pending async V/U send from the previous step.
 
     The previous step kicks off an async send in phase a/10 and stashes the
     handle on the model. We must wait for it before mutating V/U via the
     optimizer step — otherwise the wire reads inconsistent data.
     """
-    with p.phase("a/0_wait_prev_weight_send"):
-        pending = getattr(component_model, "_pending_weight_sends", None)
-        if pending is not None:
-            for w in pending[0]:
-                w.wait()
-            component_model._pending_weight_sends = None  # type: ignore[attr-defined]
+    pending = getattr(component_model, "_pending_weight_sends", None)
+    if pending is not None:
+        for w in pending[0]:
+            w.wait()
+        component_model._pending_weight_sends = None  # type: ignore[attr-defined]
 
 
 def _target_and_ci_forward(
@@ -258,7 +253,6 @@ def _target_and_ci_forward(
     batch: Any,
     cfg: _TwoPoolRuntime,
     layout: BlockDDPLayout,
-    p: PhaseProfiler,
 ) -> _ForwardOutputs:
     """Phase a/1. Target forward (cached) + CI fn forward.
 
@@ -268,7 +262,7 @@ def _target_and_ci_forward(
 
     CI fn graph is retained — phase a/7 will backward through it.
     """
-    with p.phase("a/1_target_and_ci_fwd"), autocast_bf16(cfg.bf16_autocast):
+    with autocast_bf16(cfg.bf16_autocast):
         out = component_model(batch, cache_type="input")
         target_out = out.output
         ci = component_model.calc_causal_importances(
@@ -323,7 +317,6 @@ def _maybe_log_dtype_sanity(
 def _async_send_owned_ci_to_pool_b(
     layout: BlockDDPLayout,
     ci: Any,
-    p: PhaseProfiler,
 ) -> _AsyncWorkHandle:
     """Phase a/2. Async-send owned CI values to pool B.
 
@@ -331,10 +324,9 @@ def _async_send_owned_ci_to_pool_b(
     will pull these values when it needs them. We wait at the end of the
     step (phase a/11) before the next iter mutates the underlying tensors.
     """
-    with p.phase("a/2_async_send_ci"):
-        works, buffers = layout.async_send_owned_ci_to_pool_b(
-            {s: ci.lower_leaky[s] for s in layout.my_owned_sites}
-        )
+    works, buffers = layout.async_send_owned_ci_to_pool_b(
+        {s: ci.lower_leaky[s] for s in layout.my_owned_sites}
+    )
     return _AsyncWorkHandle(works=works, buffers=buffers)
 
 
@@ -343,7 +335,6 @@ def _home_losses_forward_only(
     fwd: _ForwardOutputs,
     cfg: _TwoPoolRuntime,
     current_frac_of_training: float,
-    p: PhaseProfiler,
 ) -> _HomeLossOutputs:
     """Phases a/3 + a/4. Compute faith and imp losses (forward only).
 
@@ -351,12 +342,10 @@ def _home_losses_forward_only(
     backward through faith + imp + CI-fn-seeded-from-layerwise-and-pool-B.
     """
     device = fwd.target_out.device
-    with p.phase("a/3_faith"):
-        loss_faith, faith_sum_sq, faith_numel = _faithfulness_loss(
-            component_model, device, cfg.numel_global
-        )
-    with p.phase("a/4_imp"):
-        loss_imp = _importance_minimality_loss(fwd.ci.upper_leaky, current_frac_of_training, cfg)
+    loss_faith, faith_sum_sq, faith_numel = _faithfulness_loss(
+        component_model, device, cfg.numel_global
+    )
+    loss_imp = _importance_minimality_loss(fwd.ci.upper_leaky, current_frac_of_training, cfg)
     assert loss_faith.dim() == 0 and loss_imp.dim() == 0, (
         f"home losses should be scalars; got faith={loss_faith.shape}, imp={loss_imp.shape}"
     )
@@ -413,7 +402,6 @@ def _recv_grads_from_pool_b(
     layout: BlockDDPLayout,
     component_model: ComponentModel,
     ci: Any,
-    p: PhaseProfiler,
 ) -> _PoolBGrads:
     """Phase a/6. Recv per-site V/U grads + per-slice CI grads from pool B.
 
@@ -422,15 +410,14 @@ def _recv_grads_from_pool_b(
     contribution. ``ci_grads`` are full-batch CI tensors (pool B sees all
     positions for the rank's owned sites).
     """
-    with p.phase("a/6_recv_grads_from_b"):
-        v_templates = {s: component_model.components[s].V for s in layout.my_owned_sites}
-        u_templates = {s: component_model.components[s].U for s in layout.my_owned_sites}
-        ci_lower_owned_full = {s: ci.lower_leaky[s] for s in layout.my_owned_sites}
-        v_grads, u_grads, ci_grads = layout.recv_grads_from_pool_b(
-            v_templates,
-            u_templates,
-            ci_lower_owned_full,
-        )
+    v_templates = {s: component_model.components[s].V for s in layout.my_owned_sites}
+    u_templates = {s: component_model.components[s].U for s in layout.my_owned_sites}
+    ci_lower_owned_full = {s: ci.lower_leaky[s] for s in layout.my_owned_sites}
+    v_grads, u_grads, ci_grads = layout.recv_grads_from_pool_b(
+        v_templates,
+        u_templates,
+        ci_lower_owned_full,
+    )
     for s in layout.my_owned_sites:
         assert v_grads[s].shape == component_model.components[s].V.shape, (
             f"pool-B v_grad shape mismatch for {s!r}: "
@@ -456,7 +443,6 @@ def _combined_backward(
     home: _HomeLossOutputs,
     layout: BlockDDPLayout,
     cfg: _TwoPoolRuntime,
-    p: PhaseProfiler,
 ) -> None:
     """Phase a/7. Fused backward through home losses + CI-fn graph.
 
@@ -472,39 +458,37 @@ def _combined_backward(
     grads are simply added to the V/U .grad accumulator that layerwise
     already populated.
     """
-    with p.phase("a/7_seed_and_backward"):
-        combined_ci_grads: dict[str, Tensor] = {}
-        for s in layout.my_owned_sites:
-            grad = pool_b.ci_grads[s].clone()
-            layerwise_slice_grad = ci_lower_leaves[s].grad
-            assert layerwise_slice_grad is not None, (
-                f"layerwise should have populated ci_lower_leaves[{s!r}].grad"
-            )
-            assert layerwise_slice_grad.shape == grad[sl].shape, (
-                f"layerwise slice grad shape {layerwise_slice_grad.shape} != "
-                f"target slice shape {grad[sl].shape} for site {s!r}"
-            )
-            grad[sl] += layerwise_slice_grad
-            combined_ci_grads[s] = grad
-        for s in layout.my_owned_sites:
-            comp = component_model.components[s]
-            assert comp.V.grad is not None and comp.U.grad is not None, (
-                "layerwise should have populated V/U .grad"
-            )
-            comp.V.grad.add_(pool_b.v_grads[s])
-            comp.U.grad.add_(pool_b.u_grads[s])
-        total_home = cfg.coeff_faith * home.loss_faith + cfg.coeff_imp * home.loss_imp
-        assert total_home.dim() == 0, f"total_home should be scalar; got {total_home.shape}"
-        torch.autograd.backward(
-            tensors=[total_home, *(ci.lower_leaky[s] for s in layout.my_owned_sites)],
-            grad_tensors=[None, *(combined_ci_grads[s] for s in layout.my_owned_sites)],
+    combined_ci_grads: dict[str, Tensor] = {}
+    for s in layout.my_owned_sites:
+        grad = pool_b.ci_grads[s].clone()
+        layerwise_slice_grad = ci_lower_leaves[s].grad
+        assert layerwise_slice_grad is not None, (
+            f"layerwise should have populated ci_lower_leaves[{s!r}].grad"
         )
+        assert layerwise_slice_grad.shape == grad[sl].shape, (
+            f"layerwise slice grad shape {layerwise_slice_grad.shape} != "
+            f"target slice shape {grad[sl].shape} for site {s!r}"
+        )
+        grad[sl] += layerwise_slice_grad
+        combined_ci_grads[s] = grad
+    for s in layout.my_owned_sites:
+        comp = component_model.components[s]
+        assert comp.V.grad is not None and comp.U.grad is not None, (
+            "layerwise should have populated V/U .grad"
+        )
+        comp.V.grad.add_(pool_b.v_grads[s])
+        comp.U.grad.add_(pool_b.u_grads[s])
+    total_home = cfg.coeff_faith * home.loss_faith + cfg.coeff_imp * home.loss_imp
+    assert total_home.dim() == 0, f"total_home should be scalar; got {total_home.shape}"
+    torch.autograd.backward(
+        tensors=[total_home, *(ci.lower_leaky[s] for s in layout.my_owned_sites)],
+        grad_tensors=[None, *(combined_ci_grads[s] for s in layout.my_owned_sites)],
+    )
 
 
 def _in_block_all_reduce_grads(
     layout: BlockDDPLayout,
     all_params: list[nn.Parameter],
-    p: PhaseProfiler,
 ) -> None:
     """Phase a/8. In-block DDP all-reduce on all params' grads.
 
@@ -513,8 +497,7 @@ def _in_block_all_reduce_grads(
     (data-independent). AVG-within-block reconciles to the correct
     full-batch grad.
     """
-    with p.phase("a/8_in_block_allreduce"):
-        layout.all_reduce_grads_in_block(all_params)
+    layout.all_reduce_grads_in_block(all_params)
 
 
 def _cross_pool_grad_clip(
@@ -522,7 +505,6 @@ def _cross_pool_grad_clip(
     ci_fn_params: list[nn.Parameter],
     layout: BlockDDPLayout,
     cfg: _TwoPoolRuntime,
-    p: PhaseProfiler,
 ) -> _ClipNorms:
     """Phase a/8b. Clip global gradient norm across all pool-A blocks.
 
@@ -534,61 +516,56 @@ def _cross_pool_grad_clip(
     """
     components_norm = 0.0
     ci_fn_norm = 0.0
-    with p.phase("a/8b_grad_clip"):
-        n_per_block = layout.world.n_per_block
-        if cfg.grad_clip_norm_components is not None:
-            norm_t = cross_pool_clip_grad_norm(
-                component_params,
-                cfg.grad_clip_norm_components,
-                group=layout.world.pool_a_group,
-                n_replicas=n_per_block,
-            )
-            assert norm_t.dim() == 0, f"clip norm should be scalar; got {norm_t.shape}"
-            components_norm = norm_t.item()
-        if cfg.grad_clip_norm_ci_fn is not None:
-            norm_t = cross_pool_clip_grad_norm(
-                ci_fn_params,
-                cfg.grad_clip_norm_ci_fn,
-                group=layout.world.pool_a_group,
-                n_replicas=n_per_block,
-            )
-            ci_fn_norm = norm_t.item()
+    n_per_block = layout.world.n_per_block
+    if cfg.grad_clip_norm_components is not None:
+        norm_t = cross_pool_clip_grad_norm(
+            component_params,
+            cfg.grad_clip_norm_components,
+            group=layout.world.pool_a_group,
+            n_replicas=n_per_block,
+        )
+        assert norm_t.dim() == 0, f"clip norm should be scalar; got {norm_t.shape}"
+        components_norm = norm_t.item()
+    if cfg.grad_clip_norm_ci_fn is not None:
+        norm_t = cross_pool_clip_grad_norm(
+            ci_fn_params,
+            cfg.grad_clip_norm_ci_fn,
+            group=layout.world.pool_a_group,
+            n_replicas=n_per_block,
+        )
+        ci_fn_norm = norm_t.item()
     return _ClipNorms(components=components_norm, ci_fn=ci_fn_norm)
 
 
-def _optimizer_step(optimizer: torch.optim.Optimizer, p: PhaseProfiler) -> None:
+def _optimizer_step(optimizer: torch.optim.Optimizer) -> None:
     """Phase a/9. AdamW step on V/U + CI fn params."""
-    with p.phase("a/9_opt_step"):
-        optimizer.step()
+    optimizer.step()
 
 
 def _async_send_updated_vu_to_pool_b(
     component_model: ComponentModel,
     layout: BlockDDPLayout,
-    p: PhaseProfiler,
 ) -> _AsyncWorkHandle:
     """Phase a/10. Async-ship updated V/U back to pool B for next step.
 
     The wait happens at the START of the next step (phase a/0), so this send
     runs concurrently with pool B's next iter target_fwd + PPGD warmup.
     """
-    with p.phase("a/10_async_send_weights"):
-        v_owned = {s: component_model.components[s].V for s in layout.my_owned_sites}
-        u_owned = {s: component_model.components[s].U for s in layout.my_owned_sites}
-        works, buffers = layout.async_send_updated_weights_to_pool_b(v_owned, u_owned)
+    v_owned = {s: component_model.components[s].V for s in layout.my_owned_sites}
+    u_owned = {s: component_model.components[s].U for s in layout.my_owned_sites}
+    works, buffers = layout.async_send_updated_weights_to_pool_b(v_owned, u_owned)
     return _AsyncWorkHandle(works=works, buffers=buffers)
 
 
-def _wait_async_ci_send(ci_send: _AsyncWorkHandle, p: PhaseProfiler) -> None:
+def _wait_async_ci_send(ci_send: _AsyncWorkHandle) -> None:
     """Phase a/11. Wait on the CI send from phase a/2.
 
     Must complete before the next step's CI forward mutates the underlying
     ci.lower_leaky storage that the send buffers reference.
     """
-    with p.phase("a/11_wait_async_ci_send"):
-        for w in ci_send.works:
-            w.wait()
-        ci_send.buffers.clear()
+    for w in ci_send.works:
+        w.wait()
+    ci_send.buffers.clear()
 
 
 def _stash_pending_weight_send(

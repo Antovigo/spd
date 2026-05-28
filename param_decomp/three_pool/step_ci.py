@@ -51,7 +51,6 @@ from param_decomp.metrics.importance_minimality import (
     _per_component_sums,
 )
 from param_decomp.three_pool.layout import ThreePoolLayout
-from param_decomp.three_pool.profiler import PhaseProfiler
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
 from param_decomp.two_pool.runtime import autocast_bf16
 
@@ -67,7 +66,6 @@ def step_ci(
     cfg: _ThreePoolRuntime,
     current_frac_of_training: float,
     should_log: bool,
-    profiler: PhaseProfiler | None = None,
 ) -> tuple[dict[str, float], dict[str, Tensor] | None]:
     """One CI-pool training step.
 
@@ -75,47 +73,40 @@ def step_ci(
     ``None`` and we compute it inline (phase 0). On the last step,
     ``batch_T_plus_1`` is ``None`` and the prefetch is skipped.
     """
-    p = profiler if profiler is not None else PhaseProfiler(enabled=False)
     assert layout.my_pool == "ci"
     device = next(component_model.parameters()).device
 
     batch_T_local, batch_T_plus_1_local = _slice_batches_for_ci(batch_T, batch_T_plus_1, layout)
 
     if h_cache_T is None:
-        with p.phase("ci/0_target_fwd_T_sync"):
-            h_cache_T = _target_fwd_and_cache(component_model, batch_T_local, cfg.bf16_autocast)
+        h_cache_T = _target_fwd_and_cache(component_model, batch_T_local, cfg.bf16_autocast)
 
-    with p.phase("ci/1_ci_fn_fwd"), autocast_bf16(cfg.bf16_autocast):
+    with autocast_bf16(cfg.bf16_autocast):
         ci = component_model.calc_causal_importances(
             pre_weight_acts=h_cache_T, sampling="continuous", detach_inputs=False
         )
     seq_len = _seq_len_from_ci(ci.lower_leaky)
     _assert_ci_shapes(ci.lower_leaky, layout, seq_len, cfg)
 
-    with p.phase("ci/2_async_send_ci"):
-        send_works_lw, send_bufs_lw = layout.async_send_ci_to_layerwise(ci.lower_leaky)
-        send_works_pgd, send_bufs_pgd = layout.async_send_ci_to_ppgd(ci.lower_leaky)
+    send_works_lw, send_bufs_lw = layout.async_send_ci_to_layerwise(ci.lower_leaky)
+    send_works_pgd, send_bufs_pgd = layout.async_send_ci_to_ppgd(ci.lower_leaky)
 
-    with p.phase("ci/3_imp_min"):
-        loss_imp = _importance_minimality_loss(
-            ci.upper_leaky,
-            current_frac_of_training,
-            cfg,
-            ci_pool_group=layout.world.ci_pool_group,
-            n_ci_pool=layout.world.n_ci,
-        )
+    loss_imp = _importance_minimality_loss(
+        ci.upper_leaky,
+        current_frac_of_training,
+        cfg,
+        ci_pool_group=layout.world.ci_pool_group,
+        n_ci_pool=layout.world.n_ci,
+    )
 
     h_cache_T_plus_1: dict[str, Tensor] | None = None
     if batch_T_plus_1_local is not None:
-        with p.phase("ci/4_prefetch_target_fwd"):
-            h_cache_T_plus_1 = _target_fwd_and_cache(
-                component_model, batch_T_plus_1_local, cfg.bf16_autocast
-            )
+        h_cache_T_plus_1 = _target_fwd_and_cache(
+            component_model, batch_T_plus_1_local, cfg.bf16_autocast
+        )
 
-    with p.phase("ci/5_recv_g_ci_from_lw"):
-        g_ci_lw = layout.recv_g_ci_from_layerwise(cfg.c_per_site, seq_len, device)
-    with p.phase("ci/6_recv_g_ci_from_ppgd"):
-        g_ci_pgd = layout.recv_g_ci_from_ppgd(cfg.c_per_site, seq_len, device)
+    g_ci_lw = layout.recv_g_ci_from_layerwise(cfg.c_per_site, seq_len, device)
+    g_ci_pgd = layout.recv_g_ci_from_ppgd(cfg.c_per_site, seq_len, device)
     g_ci_total = _assemble_g_ci_total(g_ci_lw, g_ci_pgd, layout, cfg, seq_len)
 
     optimizer.zero_grad(set_to_none=True)
@@ -125,26 +116,22 @@ def step_ci(
     # wall was dominated by pending stream work, not by the bwd. Remove after diagnosis.
     if os.environ.get("PD_SYNC_BEFORE_8A", "").strip() in ("1", "true", "yes"):
         torch.cuda.synchronize()
-    _fused_backward_through_ci_fn(loss_imp, ci, g_ci_total, layout, cfg, p)
+    _fused_backward_through_ci_fn(loss_imp, ci, g_ci_total, layout, cfg)
     _maybe_emit_ci_fn_bwd_breakdown(component_model)
 
-    with p.phase("ci/9_in_pool_allreduce"):
-        layout.all_reduce_ci_fn_grads(ci_fn_params)
+    layout.all_reduce_ci_fn_grads(ci_fn_params)
     if cfg.grad_clip_norm_ci_fn is not None:
-        with p.phase("ci/9b_grad_clip"):
-            cross_pool_clip_grad_norm(
-                ci_fn_params,
-                cfg.grad_clip_norm_ci_fn,
-                group=layout.world.ci_pool_group,
-                n_replicas=layout.world.n_ci,
-            )
-    with p.phase("ci/10_opt_step"):
-        optimizer.step()
+        cross_pool_clip_grad_norm(
+            ci_fn_params,
+            cfg.grad_clip_norm_ci_fn,
+            group=layout.world.ci_pool_group,
+            n_replicas=layout.world.n_ci,
+        )
+    optimizer.step()
 
-    with p.phase("ci/11_wait_sends"):
-        for w in [*send_works_lw, *send_works_pgd]:
-            w.wait()
-        del send_bufs_lw, send_bufs_pgd
+    for w in [*send_works_lw, *send_works_pgd]:
+        w.wait()
+    del send_bufs_lw, send_bufs_pgd
 
     # imp is already globally aggregated inside ``_importance_minimality_loss``
     # (per_component_sums + n_examples SUM-reduced across CI pool), so every CI
@@ -262,7 +249,6 @@ def _fused_backward_through_ci_fn(
     g_ci_total: dict[str, Tensor],
     layout: ThreePoolLayout,
     cfg: _ThreePoolRuntime,
-    p: PhaseProfiler,
 ) -> None:
     """Phase ci/8. Backward through the CI fn graph.
 
@@ -284,14 +270,12 @@ def _fused_backward_through_ci_fn(
     scaled_imp = cfg.coeff_imp * loss_imp
     lower_leaky_tensors = [ci.lower_leaky[s] for s in layout.world.all_sites]
     g_ci_total_seeds = [g_ci_total[s] for s in layout.world.all_sites]
-    with p.phase("ci/8a_bwd_lower_leaky_only"):
-        torch.autograd.backward(
-            tensors=lower_leaky_tensors,
-            grad_tensors=g_ci_total_seeds,
-            retain_graph=True,
-        )
-    with p.phase("ci/8b_bwd_imp_min_only"):
-        torch.autograd.backward(tensors=[scaled_imp], grad_tensors=[None])
+    torch.autograd.backward(
+        tensors=lower_leaky_tensors,
+        grad_tensors=g_ci_total_seeds,
+        retain_graph=True,
+    )
+    torch.autograd.backward(tensors=[scaled_imp], grad_tensors=[None])
 
 
 def _target_fwd_and_cache(

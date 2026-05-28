@@ -44,7 +44,6 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.masks import make_mask_infos
 from param_decomp.three_pool.layout import ThreePoolLayout
-from param_decomp.three_pool.profiler import PhaseProfiler
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
 from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp.two_pool.runtime import autocast_bf16
@@ -64,7 +63,6 @@ def step_layerwise(
     defer_vu_opt: bool,
     prev_pending_all_reduce: PendingAllReduce | None,
     should_log: bool,
-    profiler: PhaseProfiler | None = None,
 ) -> tuple[dict[str, float], PendingAllReduce | None]:
     """One LW step. Branches on ``defer_vu_opt`` for sync vs async pipeline.
 
@@ -75,7 +73,6 @@ def step_layerwise(
     D → kickoff async all_reduce, return its pending state. Caller must
     thread it across iters and drain via ``finalize_layerwise_async_drain``.
     """
-    p = profiler if profiler is not None else PhaseProfiler(enabled=False)
     assert layout.my_pool == "layerwise"
     device = next(component_model.parameters()).device
     n_sites_total = len(cfg.c_per_site)
@@ -83,36 +80,33 @@ def step_layerwise(
     batch_local, seq_len = _slice_batch_for_layerwise(batch, layout)
 
     with strategy.context(component_model.target_model):
-        with p.phase("lw/A1_post_async_recv_ci"):
-            ci_recv_pending = layout.async_recv_ci_from_ci_pool(
-                {s: cfg.c_per_site[s] for s in layout.my_owned_sites},
-                seq_len=seq_len,
-                device=device,
-            )
-        with p.phase("lw/A2_target_fwd"), torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
+        ci_recv_pending = layout.async_recv_ci_from_ci_pool(
+            {s: cfg.c_per_site[s] for s in layout.my_owned_sites},
+            seq_len=seq_len,
+            device=device,
+        )
+        with torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
             target_local = component_model(batch_local).detach()
 
     if defer_vu_opt and prev_pending_all_reduce is not None:
         _finalize_prev_iter_async(
-            layout, component_model, optimizer, all_params, prev_pending_all_reduce, cfg, p
+            layout, component_model, optimizer, all_params, prev_pending_all_reduce, cfg
         )
 
     for param in all_params:
         param.grad = None
 
     with strategy.context(component_model.target_model):
-        with p.phase("lw/D1_faith"):
-            loss_faith, faith_sum_sq_t, faith_numel = _faithfulness_loss(
-                component_model, device, cfg.numel_global
-            )
-            (cfg.coeff_faith * loss_faith).backward()
+        loss_faith, faith_sum_sq_t, faith_numel = _faithfulness_loss(
+            component_model, device, cfg.numel_global
+        )
+        (cfg.coeff_faith * loss_faith).backward()
 
-        with p.phase("lw/D2_wait_ci_recv"):
-            ci_recv = ci_recv_pending.wait_and_unpack()
+        ci_recv = ci_recv_pending.wait_and_unpack()
         ci_recv_leaves = _releaf_ci_fp32_for_grads(ci_recv, layout.my_owned_sites)
         _assert_ci_recv_shapes(ci_recv_leaves, layout, seq_len, cfg)
 
-        with p.phase("lw/D3_layerwise"), autocast_bf16(cfg.bf16_autocast):
+        with autocast_bf16(cfg.bf16_autocast):
             # Accumulate the display value as a GPU tensor (not a Python float) so
             # the per-site ``.item()`` doesn't force a CPU↔GPU sync that serializes
             # each site's bwd against the next. ``loss_s.detach()`` so accumulator
@@ -129,15 +123,14 @@ def step_layerwise(
                 stoch_total_t = stoch_total_t + (loss_s.detach() / n_positions)
             stoch_n_owned = len(layout.my_owned_sites)
 
-        with p.phase("lw/D4_send_g_ci"):
-            g_ci_owned = {s: ci_recv_leaves[s].grad for s in layout.my_owned_sites}
-            assert all(g is not None for g in g_ci_owned.values()), (
-                "layerwise backward should have populated ci_recv_leaves[s].grad"
-            )
-            layout.send_g_ci_to_ci_pool(g_ci_owned)
+        g_ci_owned = {s: ci_recv_leaves[s].grad for s in layout.my_owned_sites}
+        assert all(g is not None for g in g_ci_owned.values()), (
+            "layerwise backward should have populated ci_recv_leaves[s].grad"
+        )
+        layout.send_g_ci_to_ci_pool(g_ci_owned)
 
-        v_grads_pgd, u_grads_pgd = _recv_g_vu_from_ppgd(layout, component_model, p)
-        _combine_vu_grads_in_place(component_model, layout, v_grads_pgd, u_grads_pgd, p)
+        v_grads_pgd, u_grads_pgd = _recv_g_vu_from_ppgd(layout, component_model)
+        _combine_vu_grads_in_place(component_model, layout, v_grads_pgd, u_grads_pgd)
 
     if should_log:
         stoch_total_value = stoch_total_t.item()
@@ -153,11 +146,10 @@ def step_layerwise(
         metrics = {}
 
     if defer_vu_opt:
-        with p.phase("lw/E_kickoff_async_allreduce"):
-            new_pending = layout.async_all_reduce_grads_in_block_kickoff(all_params)
+        new_pending = layout.async_all_reduce_grads_in_block_kickoff(all_params)
         return metrics, new_pending
 
-    _sync_tail(layout, component_model, optimizer, all_params, cfg, p)
+    _sync_tail(layout, component_model, optimizer, all_params, cfg)
     return metrics, None
 
 
@@ -230,7 +222,6 @@ def _finalize_prev_iter_async(
     all_params: list[nn.Parameter],
     prev_pending_all_reduce: PendingAllReduce,
     cfg: _ThreePoolRuntime,
-    p: PhaseProfiler,
 ) -> None:
     """Phase lw/B (async mode only). Finish the previous iter's deferred opt.
 
@@ -239,22 +230,17 @@ def _finalize_prev_iter_async(
     Blocking waits in here overlap with phase A2's target_fwd kernels (which
     run on the default CUDA stream while NCCL waits hit their own stream).
     """
-    with p.phase("lw/B1_wait_prev_weight_send"):
-        _wait_pending_weight_send(component_model)
-    with p.phase("lw/B2_wait_and_unflatten_allreduce"):
-        layout.wait_and_unflatten_all_reduce(prev_pending_all_reduce)
+    _wait_pending_weight_send(component_model)
+    layout.wait_and_unflatten_all_reduce(prev_pending_all_reduce)
     if cfg.grad_clip_norm_components is not None:
-        with p.phase("lw/B2b_grad_clip"):
-            cross_pool_clip_grad_norm(
-                all_params,
-                cfg.grad_clip_norm_components,
-                group=layout.world.layerwise_pool_group,
-                n_replicas=layout.world.n_per_block,
-            )
-    with p.phase("lw/B3_opt_step"):
-        optimizer.step()
-    with p.phase("lw/B4_async_send_vu"):
-        _async_send_owned_vu_to_ppgd(component_model, layout)
+        cross_pool_clip_grad_norm(
+            all_params,
+            cfg.grad_clip_norm_components,
+            group=layout.world.layerwise_pool_group,
+            n_replicas=layout.world.n_per_block,
+        )
+    optimizer.step()
+    _async_send_owned_vu_to_ppgd(component_model, layout)
 
 
 def _releaf_ci_fp32_for_grads(
@@ -321,13 +307,11 @@ def _layerwise_one_site(
 def _recv_g_vu_from_ppgd(
     layout: ThreePoolLayout,
     component_model: ComponentModel,
-    p: PhaseProfiler,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
     """Phase lw/D5. Recv V/U grads from PPGD pool (leader recvs, in-block bcast)."""
-    with p.phase("lw/D5_recv_g_vu_from_ppgd"):
-        v_templates = {s: component_model.components[s].V for s in layout.my_owned_sites}
-        u_templates = {s: component_model.components[s].U for s in layout.my_owned_sites}
-        v_grads_pgd, u_grads_pgd = layout.recv_g_vu_from_ppgd(v_templates, u_templates)
+    v_templates = {s: component_model.components[s].V for s in layout.my_owned_sites}
+    u_templates = {s: component_model.components[s].U for s in layout.my_owned_sites}
+    v_grads_pgd, u_grads_pgd = layout.recv_g_vu_from_ppgd(v_templates, u_templates)
     for s in layout.my_owned_sites:
         assert v_grads_pgd[s].shape == component_model.components[s].V.shape, (
             f"v_grads_pgd[{s!r}] shape mismatch from PPGD send"
@@ -343,17 +327,15 @@ def _combine_vu_grads_in_place(
     layout: ThreePoolLayout,
     v_grads_pgd: dict[str, Tensor],
     u_grads_pgd: dict[str, Tensor],
-    p: PhaseProfiler,
 ) -> None:
     """Phase lw/D6. Add PPGD's V/U grads to .grad (which already has faith+lw)."""
-    with p.phase("lw/D6_combine_vu_grads"):
-        for s in layout.my_owned_sites:
-            comp = component_model.components[s]
-            assert comp.V.grad is not None and comp.U.grad is not None, (
-                "faith + layerwise should have populated V/U .grad"
-            )
-            comp.V.grad.add_(v_grads_pgd[s])
-            comp.U.grad.add_(u_grads_pgd[s])
+    for s in layout.my_owned_sites:
+        comp = component_model.components[s]
+        assert comp.V.grad is not None and comp.U.grad is not None, (
+            "faith + layerwise should have populated V/U .grad"
+        )
+        comp.V.grad.add_(v_grads_pgd[s])
+        comp.U.grad.add_(u_grads_pgd[s])
 
 
 def _sync_tail(
@@ -362,29 +344,23 @@ def _sync_tail(
     optimizer: torch.optim.Optimizer,
     all_params: list[nn.Parameter],
     cfg: _ThreePoolRuntime,
-    p: PhaseProfiler,
 ) -> None:
     """Phase lw/E (sync mode). Blocking all_reduce → clip → AdamW → async send V/U.
 
     Functionally equivalent to the pre-deferral 2-pool tail; safe to coexist
     with PPGD's sync recv at end of step T.
     """
-    with p.phase("lw/E1_wait_prev_weight_send"):
-        _wait_pending_weight_send(component_model)
-    with p.phase("lw/E2_in_block_allreduce"):
-        layout.all_reduce_grads_in_block(all_params)
+    _wait_pending_weight_send(component_model)
+    layout.all_reduce_grads_in_block(all_params)
     if cfg.grad_clip_norm_components is not None:
-        with p.phase("lw/E2b_grad_clip"):
-            cross_pool_clip_grad_norm(
-                all_params,
-                cfg.grad_clip_norm_components,
-                group=layout.world.layerwise_pool_group,
-                n_replicas=layout.world.n_per_block,
-            )
-    with p.phase("lw/E3_opt_step"):
-        optimizer.step()
-    with p.phase("lw/E4_async_send_vu"):
-        _async_send_owned_vu_to_ppgd(component_model, layout)
+        cross_pool_clip_grad_norm(
+            all_params,
+            cfg.grad_clip_norm_components,
+            group=layout.world.layerwise_pool_group,
+            n_replicas=layout.world.n_per_block,
+        )
+    optimizer.step()
+    _async_send_owned_vu_to_ppgd(component_model, layout)
 
 
 def _async_send_owned_vu_to_ppgd(component_model: ComponentModel, layout: ThreePoolLayout) -> None:

@@ -27,6 +27,7 @@ from typing import Any, Self
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.profiler
 from torch import Tensor
 from torch.utils.data import DataLoader
 
@@ -56,7 +57,6 @@ from param_decomp.two_pool.layout import BlockDDPLayout, BlockGroup, build_block
 from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp.two_pool.pool_a import run_faithfulness_warmup_pool_a, step_pool_a
 from param_decomp.two_pool.pool_b import step_pool_b
-from param_decomp.two_pool.profiler import PhaseProfiler
 from param_decomp.two_pool.reductions import (
     aggregate_losses_to_rank0,
     aggregate_max_memory_to_rank0,
@@ -281,7 +281,7 @@ class TwoPoolTrainer:
         train_loader: DataLoader[Any],
         sink: OnePoolRunSink,
         cadence: Cadence,
-        profiler: PhaseProfiler | None = None,
+        profiler: torch.profiler.profile | None = None,
     ) -> None:
         """Advance training from ``self.step`` to ``self.pd_config.steps``."""
         pd_config = self.pd_config
@@ -367,7 +367,6 @@ class TwoPoolTrainer:
                             runtime,
                             self.strategy,
                             current_frac_of_training=step / n_steps if n_steps > 0 else 0.0,
-                            profiler=profiler,
                         )
                     case "b":
                         assert self.ppgd_state is not None, (
@@ -382,7 +381,6 @@ class TwoPoolTrainer:
                             self.strategy,
                             step=step,
                             n_steps=n_steps,
-                            profiler=profiler,
                         )
                 # Loss values produced by either pool should be finite — non-finite means a
                 # silent NaN somewhere upstream (PPGD update blew up, autocast overflow, etc.).
@@ -426,7 +424,7 @@ def optimize_two_pool(
     two_pool_config: TwoPoolConfig,
     cadence: Cadence,
     sink: OnePoolRunSink,
-    profiler: PhaseProfiler | None = None,
+    profiler: torch.profiler.profile | None = None,
 ) -> None:
     """Train a ComponentModel under the 2-pool strategy.
 

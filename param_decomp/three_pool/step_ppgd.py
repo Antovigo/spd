@@ -53,7 +53,6 @@ from torch import Tensor
 from param_decomp.component_model import ComponentModel
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.three_pool.layout import LayerwiseBlockGroup, ThreePoolLayout
-from param_decomp.three_pool.profiler import PhaseProfiler
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
 from param_decomp.two_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp.two_pool.runtime import autocast_bf16
@@ -74,7 +73,6 @@ def step_ppgd(
     defer_vu_opt: bool,
     prev_pending_recv_vu: PendingRecvVU | None,
     should_log: bool,
-    profiler: PhaseProfiler | None = None,
 ) -> tuple[dict[str, float], PendingRecvVU | None]:
     """One PPGD step. Branches on ``defer_vu_opt`` for sync vs async pipeline.
 
@@ -82,7 +80,6 @@ def step_ppgd(
     at end of step T would deadlock against LW's deferred async send (which
     doesn't fire until top of T+1).
     """
-    p = profiler if profiler is not None else PhaseProfiler(enabled=False)
     assert layout.my_pool == "ppgd"
     device = next(component_model.parameters()).device
     all_sites = list(layout.world.all_sites)
@@ -92,11 +89,10 @@ def step_ppgd(
     v_templates, u_templates = _vu_templates(component_model, all_sites)
 
     with strategy.context(component_model.target_model):
-        with p.phase("pgd/A1_post_async_recv_ci"):
-            ci_recv_pending = layout.async_recv_ci_from_ci_pool_ppgd(
-                cfg.c_per_site, seq_len=seq_len, device=device
-            )
-        with p.phase("pgd/A2_target_fwd"), torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
+        ci_recv_pending = layout.async_recv_ci_from_ci_pool_ppgd(
+            cfg.c_per_site, seq_len=seq_len, device=device
+        )
+        with torch.no_grad(), autocast_bf16(cfg.bf16_autocast):
             target_out = component_model(batch_local).detach()
 
         # Async-mode bookkeeping: this iter's V/U arrived in the prev iter's
@@ -104,17 +100,15 @@ def step_ppgd(
         # A2 target_fwd kernels enqueued above.
         if defer_vu_opt and prev_pending_recv_vu is not None:
             _wait_and_copy_prev_vu_into_model(
-                layout, component_model, prev_pending_recv_vu, v_templates, u_templates, p
+                layout, component_model, prev_pending_recv_vu, v_templates, u_templates
             )
 
-        with p.phase("pgd/D1_calc_weight_deltas"):
-            weight_deltas = component_model.calc_weight_deltas()
-        with p.phase("pgd/D2_wait_ci_recv"):
-            ci_recv = ci_recv_pending.wait_and_unpack()
+        weight_deltas = component_model.calc_weight_deltas()
+        ci_recv = ci_recv_pending.wait_and_unpack()
         ci_scratch = _releaf_ci_fp32_for_grads(ci_recv)
         _assert_ci_scratch_shapes(ci_scratch, layout, seq_len, cfg)
 
-        with p.phase("pgd/D3_warmup"), autocast_bf16(cfg.bf16_autocast):
+        with autocast_bf16(cfg.bf16_autocast):
             ppgd_state.warmup(
                 model=component_model,
                 batch=batch_local,
@@ -122,7 +116,7 @@ def step_ppgd(
                 ci=ci_scratch,
                 weight_deltas=weight_deltas,
             )
-        with p.phase("pgd/D4_recon"), autocast_bf16(cfg.bf16_autocast):
+        with autocast_bf16(cfg.bf16_autocast):
             sum_loss, n_examples = ppgd_state.compute_recon_sum_and_n(
                 model=component_model,
                 batch=batch_local,
@@ -148,47 +142,37 @@ def step_ppgd(
         ci_scratch,
         all_sites,
         ppgd_state.sources,
-        p,
     )
     # CI grad send first: it's peer-to-peer (each PPGD rank → its paired CI
     # rank) so it doesn't need the in-pool reduce, and CI's recv is on the
     # critical path. Sequencing it behind D6 wasted ~110 ms of CI wait time.
-    with p.phase("pgd/D5b_send_g_ci_to_ci_pool"):
-        layout.send_g_ci_to_ci_pool_ppgd(ci_grads)
-    with p.phase("pgd/D6_in_pool_sum_reduce"):
-        # Reduce sources alongside V/U. Sign-PGD makes SUM-vs-AVG equivalent
-        # for the source step (sign(SUM) == sign(AVG)); reducing here keeps
-        # source state consistent across PPGD ranks for the step below.
-        layout.sum_reduce_ppgd_grads([*v_grads.values(), *u_grads.values(), *source_grads.values()])
-    with p.phase("pgd/D6b_apply_source_step"):
-        ppgd_state.apply_source_step_from_grads(source_grads)
-    with p.phase("pgd/D7_send_g_vu_to_lw"):
-        layout.send_g_vu_to_layerwise(v_grads, u_grads)
+    layout.send_g_ci_to_ci_pool_ppgd(ci_grads)
+    # Reduce sources alongside V/U. Sign-PGD makes SUM-vs-AVG equivalent
+    # for the source step (sign(SUM) == sign(AVG)); reducing here keeps
+    # source state consistent across PPGD ranks for the step below.
+    layout.sum_reduce_ppgd_grads([*v_grads.values(), *u_grads.values(), *source_grads.values()])
+    ppgd_state.apply_source_step_from_grads(source_grads)
+    layout.send_g_vu_to_layerwise(v_grads, u_grads)
 
     # ``.item()`` calls force CPU↔GPU sync. With async NCCL ops in D5b/D6/D7
     # still in flight on side streams, syncing here pulls forward the wait
     # for them — making PPGD's critical path appear ~200 ms longer than it
     # actually is. Defer these to log steps only.
     if should_log:
-        with p.phase("pgd/Dx_metrics_sync"):
-            metrics = {
-                "loss/ppgd": (sum_loss / n_examples).item(),
-                "_raw/ppgd_num": sum_loss.item(),
-                "_raw/ppgd_den": float(n_examples),
-            }
+        metrics = {
+            "loss/ppgd": (sum_loss / n_examples).item(),
+            "_raw/ppgd_num": sum_loss.item(),
+            "_raw/ppgd_den": float(n_examples),
+        }
     else:
         metrics = {}
 
     if defer_vu_opt:
-        with p.phase("pgd/E_kickoff_async_recv_vu"):
-            new_pending = layout.async_recv_updated_vu_from_layerwise_kickoff(
-                v_templates, u_templates
-            )
+        new_pending = layout.async_recv_updated_vu_from_layerwise_kickoff(v_templates, u_templates)
         return metrics, new_pending
 
-    with p.phase("pgd/E_sync_recv_vu"):
-        v_new, u_new = layout.recv_updated_vu_from_layerwise(v_templates, u_templates)
-        _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
+    v_new, u_new = layout.recv_updated_vu_from_layerwise(v_templates, u_templates)
+    _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
     return metrics, None
 
 
@@ -235,18 +219,14 @@ def _wait_and_copy_prev_vu_into_model(
     prev_pending_recv_vu: PendingRecvVU,
     v_templates: dict[str, Tensor],
     u_templates: dict[str, Tensor],
-    p: PhaseProfiler,
 ) -> None:
     """Phase ppgd/B (async mode only). Wait + copy prev iter's V/U recv into model.
 
     Blocking wait overlaps with the A2 target_fwd kernels enqueued just above —
     that's the headline win of async mode.
     """
-    with p.phase("pgd/B_wait_and_copy_prev_vu"):
-        v_new, u_new = layout.wait_and_unpack_updated_vu(
-            prev_pending_recv_vu, v_templates, u_templates
-        )
-        _copy_vu_into_model_in_place(component_model, v_new, u_new, list(layout.world.all_sites))
+    v_new, u_new = layout.wait_and_unpack_updated_vu(prev_pending_recv_vu, v_templates, u_templates)
+    _copy_vu_into_model_in_place(component_model, v_new, u_new, list(layout.world.all_sites))
 
 
 def _releaf_ci_fp32_for_grads(ci_recv: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -284,7 +264,6 @@ def _autograd_grad_for_vu_ci_and_sources(
     ci_scratch: dict[str, Tensor],
     all_sites: list[str],
     sources: dict[str, Tensor],
-    p: PhaseProfiler,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor], dict[str, Tensor], dict[str, Tensor]]:
     """Phase ppgd/D5. One ``torch.autograd.grad`` for V/U + CI + PPGD sources.
 
@@ -296,14 +275,13 @@ def _autograd_grad_for_vu_ci_and_sources(
     ``retain_graph=False`` since this is the last graph use.
     """
     source_keys = list(sources.keys())
-    with p.phase("pgd/D5_backward"):
-        params: list[Tensor] = []
-        for s in all_sites:
-            params.append(component_model.components[s].V)
-            params.append(component_model.components[s].U)
-        ci_list = [ci_scratch[s] for s in all_sites]
-        source_list = [sources[k] for k in source_keys]
-        grads = torch.autograd.grad(total_ppgd, params + ci_list + source_list, retain_graph=False)
+    params: list[Tensor] = []
+    for s in all_sites:
+        params.append(component_model.components[s].V)
+        params.append(component_model.components[s].U)
+    ci_list = [ci_scratch[s] for s in all_sites]
+    source_list = [sources[k] for k in source_keys]
+    grads = torch.autograd.grad(total_ppgd, params + ci_list + source_list, retain_graph=False)
 
     n_sites = len(all_sites)
     v_grads = {s: grads[2 * i] for i, s in enumerate(all_sites)}

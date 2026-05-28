@@ -44,7 +44,6 @@ from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.optimize import EvalLoop, Trainer
 from param_decomp.three_pool import ThreePoolConfig, ThreePoolTrainer
-from param_decomp.three_pool.profiler import PhaseProfiler
 from param_decomp.training_state import ThreePoolTrainingState, TrainingState
 from param_decomp.two_pool import TwoPoolConfig, TwoPoolTrainer
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
@@ -403,8 +402,8 @@ def _maybe_enable_memory_profile(rank: int) -> None:
     sys.excepthook = _excepthook
 
 
-def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | None:
-    """Opt-in torch.profiler (Chrome trace) for the listed ranks.
+def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> torch.profiler.profile | None:
+    """Opt-in ``torch.profiler.profile`` for the listed ranks.
 
     Activated by env vars:
       * ``PD_TORCH_PROFILE_RANKS=0,96,100`` — ranks to profile. Typically one
@@ -412,23 +411,21 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
       * ``PD_TORCH_PROFILE_OUT=/abs/path/to/dir`` — trace dump directory.
       * ``PD_TORCH_PROFILE_SKIP_FIRST`` (default 20) and
         ``PD_TORCH_PROFILE_ACTIVE`` (default 3) — schedule knobs.
-      * ``PD_TORCH_PROFILE_MEMORY=0`` — set to disable profile_memory (CUPTI
-        memory instrumentation is the heaviest subsystem; toggle if you
-        suspect it's confounding measurements).
-      * ``PD_TORCH_PROFILE_STACK=1`` — attach Python source location per op
-        (huge readability win, 20-30% step-time hit).
-      * ``PD_TORCH_PROFILE_MODULES=1`` — label kernels with ``nn.Module``
-        hierarchy (cheap; useful for per-site decomposition labels).
-      * ``PD_TORCH_PROFILE_SHAPES=1`` — record per-op input tensor shapes.
+      * ``PD_TORCH_PROFILE_MEMORY=0`` — disable profile_memory (CUPTI memory
+        instrumentation is the heaviest subsystem; toggle if you suspect
+        it's confounding measurements).
+      * ``PD_TORCH_PROFILE_STACK=1`` — Python source location per op
+        (~25% step-time hit, much larger traces, but huge readability win).
+      * ``PD_TORCH_PROFILE_MODULES=1`` — nn.Module hierarchy labels (cheap;
+        useful for per-site decomposition labels).
+      * ``PD_TORCH_PROFILE_SHAPES=1`` — per-op input tensor shapes.
 
-    Returns the profiler (caller threads it into ``trainer.run(profiler=...)``)
-    or ``None`` if this rank isn't listed. Side-effects ``PhaseProfiler.__enter__``,
-    not done here — caller passes it to the trainer which enters the context.
+    Returns the profile context (caller passes it to ``trainer.run(profiler=
+    ...)`` which enters it) or ``None`` if this rank isn't profiled.
 
     Verified at production scale (104 ranks, gpt2-xl, 3 profiled ranks one
-    per pool) on 2026-05-28 after commit 497e1542 removed a cosmetic
-    pre-step barrier that was the root of the previously-suspected CUPTI
-    deadlock.
+    per pool) on 2026-05-28 after commit 497e1542 removed a cosmetic pre-step
+    barrier that was the previously-suspected CUPTI deadlock.
     """
     prof_ranks_env = os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip()
     if not prof_ranks_env:
@@ -445,22 +442,29 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
     with_stack = os.environ.get("PD_TORCH_PROFILE_STACK", "0") == "1"
     with_modules = os.environ.get("PD_TORCH_PROFILE_MODULES", "0") == "1"
     record_shapes = os.environ.get("PD_TORCH_PROFILE_SHAPES", "0") == "1"
+
+    pool = trainer.layout.my_pool
+    trace_path = out_dir / f"trace_{pool}_rank{my_rank}.json"
     logger.info(
-        f"[torch-profile] rank={my_rank} pool={trainer.layout.my_pool} → {out_dir} "
+        f"[torch-profile] rank={my_rank} pool={pool} → {trace_path} "
         f"(skip_first={skip_first}, active={active}, profile_memory={profile_memory}, "
         f"with_stack={with_stack}, with_modules={with_modules}, record_shapes={record_shapes})"
     )
-    return PhaseProfiler(
-        enabled=True,
-        out_dir=out_dir,
-        rank=my_rank,
-        pool=trainer.layout.my_pool,
-        skip_first=skip_first,
-        active=active,
+
+    def on_trace_ready(prof: torch.profiler.profile) -> None:
+        prof.export_chrome_trace(str(trace_path))
+        logger.info(f"[torch-profile] rank={my_rank} wrote {trace_path}")
+
+    return torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(
+            skip_first=skip_first, wait=0, warmup=1, active=active, repeat=1
+        ),
+        on_trace_ready=on_trace_ready,
+        record_shapes=record_shapes,
         profile_memory=profile_memory,
         with_stack=with_stack,
         with_modules=with_modules,
-        record_shapes=record_shapes,
     )
 
 
