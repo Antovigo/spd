@@ -63,6 +63,7 @@ export PD_TORCH_PROFILE_RANKS="$PROFILE_RANKS"
 export PD_TORCH_PROFILE_OUT=\$HOME/pd_3pool_debug/\$SLURM_JOB_ID/torch_profile
 export PD_TORCH_PROFILE_SKIP_FIRST=$SKIP_FIRST
 export PD_TORCH_PROFILE_ACTIVE=$ACTIVE
+export PD_TORCH_PROFILE_MEMORY=${PD_TORCH_PROFILE_MEMORY:-1}
 
 # Hang diagnostics only (no perf effect):
 export PD_DEBUG_DIR=\$HOME/pd_3pool_debug

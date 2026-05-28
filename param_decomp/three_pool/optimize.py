@@ -656,12 +656,6 @@ class ThreePoolTrainer:
         if profiler is None:
             profiler = PhaseProfiler(enabled=False)
         profiler_ctx = profiler
-        # All-ranks barrier flag — read identically on every rank from the env
-        # so even unprofiled ranks join the pre-step ``dist.barrier()`` when
-        # profiling is enabled somewhere in the world. Without this, a barrier
-        # gated on the local ``profiler is not None`` deadlocks any rank not
-        # in ``PD_TORCH_PROFILE_RANKS``.
-        pre_step_barrier_enabled = bool(os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip())
         h_cache_ci: dict[str, Tensor] | None = None
         # Async-pipeline state threaded across iterations on LW + PPGD pools.
         pending_all_reduce_lw: list[tuple[list[Tensor], Tensor, dist.Work]] | None = None
@@ -709,9 +703,6 @@ class ThreePoolTrainer:
                         self.optimizer.param_groups[0]["lr"] = get_scheduled_value(
                             lr_step, n_steps, components_lr_schedule
                         )
-
-                if pre_step_barrier_enabled:
-                    dist.barrier()
 
                 torch.cuda.synchronize(device)
                 step_start = time.perf_counter()

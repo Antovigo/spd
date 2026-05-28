@@ -339,11 +339,6 @@ class TwoPoolTrainer:
                         step, n_steps, pd_config.ci_fn_optimizer.lr_schedule
                     )
 
-                # When profiling, barrier ranks at step boundary so both pools share
-                # a common time origin in the trace.
-                if profiler is not None:
-                    dist.barrier()
-
                 batch = _extract_batch_tensor(next(train_iterator), self._device)
                 assert batch.device == self._device, (
                     f"2-pool batch device mismatch at step {step}: {batch.device} vs {self._device}"

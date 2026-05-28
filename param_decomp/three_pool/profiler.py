@@ -59,6 +59,12 @@ class PhaseProfiler:
     pool: Literal["ci", "layerwise", "ppgd"] = "ci"
     skip_first: int = 20
     active: int = 3
+    profile_memory: bool = True
+    """Whether torch.profiler tracks per-allocation memory events. CUPTI's
+    memory instrumentation is the heaviest part of the profiler and the most
+    likely contributor to NCCL stream-sync interference at scale (see the
+    104-rank deadlock in docs/handoff_2026-05-26_3pool_perf.md). Disable to
+    test whether the rest of the profiler can survive at scale."""
     _prof: torch.profiler.profile | None = None
     _pending_gpu_events: list[_PendingPhase] = field(default_factory=list)
 
@@ -83,7 +89,7 @@ class PhaseProfiler:
             ),
             on_trace_ready=on_trace_ready,
             record_shapes=False,
-            profile_memory=True,
+            profile_memory=self.profile_memory,
             with_stack=False,
         )
         self._prof.__enter__()

@@ -365,13 +365,17 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
       * ``PD_TORCH_PROFILE_OUT=/abs/path/to/dir`` — trace dump directory.
       * ``PD_TORCH_PROFILE_SKIP_FIRST`` (default 20) and
         ``PD_TORCH_PROFILE_ACTIVE`` (default 3) — schedule knobs.
+      * ``PD_TORCH_PROFILE_MEMORY=0`` — set to disable profile_memory (CUPTI
+        memory instrumentation is the heaviest subsystem and the most likely
+        contributor to NCCL stream-sync interference at scale).
 
     Returns the profiler (caller threads it into ``trainer.run(profiler=...)``)
     or ``None`` if this rank isn't listed. Side-effects ``PhaseProfiler.__enter__``,
     not done here — caller passes it to the trainer which enters the context.
 
-    CAVEAT: at production 3-pool scale (~104 ranks) this still deadlocks per
-    ``docs/handoff_2026-05-26_3pool_perf.md``; works for medium scale (≤56).
+    CAVEAT: at production 3-pool scale (~104 ranks), profiling multiple ranks
+    deadlocks per docs/handoff_2026-05-26_3pool_perf.md. Profiling one rank
+    at a time works (verified 2026-05-28 at 104 ranks, gpt2-xl).
     """
     prof_ranks_env = os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip()
     if not prof_ranks_env:
@@ -384,9 +388,10 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
     out_dir.mkdir(parents=True, exist_ok=True)
     skip_first = int(os.environ.get("PD_TORCH_PROFILE_SKIP_FIRST", "20"))
     active = int(os.environ.get("PD_TORCH_PROFILE_ACTIVE", "3"))
+    profile_memory = os.environ.get("PD_TORCH_PROFILE_MEMORY", "1") != "0"
     logger.info(
         f"[torch-profile] rank={my_rank} pool={trainer.layout.my_pool} → {out_dir} "
-        f"(skip_first={skip_first}, active={active})"
+        f"(skip_first={skip_first}, active={active}, profile_memory={profile_memory})"
     )
     return PhaseProfiler(
         enabled=True,
@@ -395,6 +400,7 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> PhaseProfiler | No
         pool=trainer.layout.my_pool,
         skip_first=skip_first,
         active=active,
+        profile_memory=profile_memory,
     )
 
 
