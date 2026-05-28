@@ -44,11 +44,9 @@ from param_decomp._trace import trace
 from param_decomp.component_model import CIOutputs, ComponentModel
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.metrics.importance_minimality import (
-    _finalize as _finalize_imp_min,
-)
-from param_decomp.metrics.importance_minimality import (
-    _get_linear_annealed_p,
-    _per_component_sums,
+    annealed_pnorm,
+    finalize_imp_min,
+    per_component_lp_sums,
 )
 from param_decomp.three_pool.layout import ThreePoolLayout
 from param_decomp.three_pool.runtime import _ThreePoolRuntime
@@ -312,27 +310,30 @@ def _importance_minimality_loss(
     gradient unchanged to every rank's input (correct for SUM since
     ``∂global/∂local_i = 1`` for all i).
     """
-    annealed_p = _get_linear_annealed_p(
+    annealed_p = annealed_pnorm(
         current_frac_of_training=current_frac_of_training,
         initial_p=cfg.imp_min_pnorm,
         p_anneal_start_frac=cfg.imp_min_p_anneal_start_frac,
         p_anneal_final_p=cfg.imp_min_p_anneal_final_p,
         p_anneal_end_frac=cfg.imp_min_p_anneal_end_frac,
     )
-    per_component_sums, n_examples = _per_component_sums(
+    per_component_sums, n_examples = per_component_lp_sums(
         ci_upper_leaky=ci_upper, pnorm=annealed_p, eps=cfg.imp_min_eps
     )
+    # per_component_lp_sums returns a per-rank Partial[SUM] over batch positions;
+    # materialize the global sums over the CI pool (autograd-aware so grad flows
+    # back to each rank's local CI values) before finalize. n_examples is uniform
+    # across CI ranks, so multiply rather than reduce.
     if n_ci_pool > 1:
         per_component_sums = {
             k: dist_fn.all_reduce(v, op=dist.ReduceOp.SUM, group=ci_pool_group)
             for k, v in per_component_sums.items()
         }
         n_examples = n_examples * n_ci_pool
-    return _finalize_imp_min(
+    # per_component_sums + n_examples are already global (reduced over the CI pool
+    # above), so finalize's log term computes log2(1 + global_sum) exactly.
+    return finalize_imp_min(
         per_component_sums=per_component_sums,
         n_examples=n_examples,
         beta=cfg.imp_min_beta,
-        # world_size=1 because per_component_sums + n_examples are now global,
-        # so the log term inside _finalize computes log2(1 + global_sum) directly.
-        world_size=1,
     )

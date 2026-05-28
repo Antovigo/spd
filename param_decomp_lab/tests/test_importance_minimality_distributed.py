@@ -3,7 +3,7 @@
 The live training loss returned by `ImportanceMinimalityLoss.update(ctx)` must equal the
 eval-side scalar from `compute()` even when per-rank CI distributions differ. Both must
 use exact global sums (not local-sums-times-world-size), otherwise the convex log term
-in `_finalize` produces a Jensen upward bias on `update` relative to `compute`.
+in `finalize_imp_min` produces a Jensen upward bias on `update` relative to `compute`.
 
 This file can be run in two ways:
 
