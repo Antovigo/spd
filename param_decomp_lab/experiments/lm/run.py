@@ -278,9 +278,12 @@ def main(
             `torchrun --standalone --nproc_per_node=N -m param_decomp_lab.experiments.lm.run`.
     """
     if dp is not None and os.environ.get("WORLD_SIZE") is None:
-        assert config_path is not None, "--dp SLURM submission requires a config_path"
+        assert (config_path is not None) != (resume is not None), (
+            "--dp SLURM submission requires exactly one of config_path or --resume"
+        )
         _submit_slurm(
             config_path,
+            resume=resume,
             dp=dp,
             group=group,
             tags=tags,
@@ -425,7 +428,7 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> torch.profiler.pro
     if not prof_ranks_env:
         return None
     prof_ranks = {int(r) for r in prof_ranks_env.split(",") if r.strip()}
-    my_rank = trainer.layout.my_rank
+    my_rank = trainer.ctx.role.rank
     if my_rank not in prof_ranks:
         return None
     out_dir = Path(os.environ["PD_TORCH_PROFILE_OUT"])
@@ -437,7 +440,7 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> torch.profiler.pro
     with_modules = os.environ.get("PD_TORCH_PROFILE_MODULES", "0") == "1"
     record_shapes = os.environ.get("PD_TORCH_PROFILE_SHAPES", "0") == "1"
 
-    pool = trainer.layout.my_pool
+    pool = trainer.ctx.kind
     trace_path = out_dir / f"trace_{pool}_rank{my_rank}.json"
     logger.info(
         f"[torch-profile] rank={my_rank} pool={pool} → {trace_path} "
@@ -743,8 +746,9 @@ def _build_eval_loop(
 
 
 def _submit_slurm(
-    config_path: str | Path,
+    config_path: str | Path | None,
     *,
+    resume: str | Path | None,
     dp: int,
     group: str | None,
     tags: str | None,
@@ -761,15 +765,27 @@ def _submit_slurm(
         snapshot_ref, commit_hash = create_git_snapshot(snapshot_id=run_id)
         logger.info(f"Created git snapshot: {snapshot_ref} ({commit_hash[:8]})")
 
-    # If the config is an absolute path inside REPO_ROOT, rewrite to repo-relative so
+    # If the yaml is an absolute path inside REPO_ROOT, rewrite to repo-relative so
     # the SLURM job picks up the snapshot's copy rather than the live worktree.
-    path = Path(config_path)
+    yaml_target = resume if resume is not None else config_path
+    assert yaml_target is not None
+    path = Path(yaml_target)
     if path.is_absolute() and path.is_relative_to(REPO_ROOT):
-        config_arg = path.relative_to(REPO_ROOT).as_posix()
+        yaml_arg = path.relative_to(REPO_ROOT).as_posix()
     else:
-        config_arg = str(config_path)
+        yaml_arg = str(yaml_target)
 
-    base_parts = ["-m", "param_decomp_lab.experiments.lm.run", config_arg, "--run_id", run_id]
+    if resume is not None:
+        base_parts = [
+            "-m",
+            "param_decomp_lab.experiments.lm.run",
+            "--resume",
+            yaml_arg,
+            "--run_id",
+            run_id,
+        ]
+    else:
+        base_parts = ["-m", "param_decomp_lab.experiments.lm.run", yaml_arg, "--run_id", run_id]
     if group is not None:
         base_parts += ["--group", group]
     if tags is not None:
@@ -795,7 +811,7 @@ def _submit_slurm(
     script = generate_script(slurm_config, launch.command, env=launch.env)
     result = submit_slurm_job(script, "lm")
 
-    wandb_url = _wandb_url_for_config(config_path, run_id)
+    wandb_url = _wandb_url_for_config(config_path, run_id) if config_path is not None else None
 
     logger.section("LM PD job submitted!")
     summary: dict[str, str | None] = {
