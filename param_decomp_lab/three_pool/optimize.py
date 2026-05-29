@@ -39,7 +39,6 @@ sliced-from-global pattern.
 import datetime
 import itertools
 import os
-import shutil
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -62,12 +61,7 @@ from param_decomp.decomposition_targets import (
 )
 from param_decomp.distributed import seed_all_ranks, seed_per_rank
 from param_decomp.masks import AllLayersRouter
-from param_decomp.metrics.base import LossMetricConfig
-from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
-from param_decomp.metrics.persistent_pgd_recon import (
-    PersistentPGDReconLossConfig,
-    validate_pgd_scope,
-)
+from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.metrics.persistent_pgd_state import (
     PerBatchPerPositionScope,
     PersistentPGDState,
@@ -78,8 +72,16 @@ from param_decomp.schedule import get_scheduled_value
 from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
-from param_decomp_lab.three_pool.checkpoint import gather_full_state_dict_to_rank0
+from param_decomp_lab.experiments.lm.three_pool_pd import ThreePoolConstrainedPDConfig
+from param_decomp_lab.three_pool.checkpoint import (
+    ci_fn_state_keys,
+    owned_model_state_keys,
+)
 from param_decomp_lab.three_pool.config import ThreePoolConfig
+from param_decomp_lab.three_pool.consolidate import (
+    CONSOLIDATE_META_FILENAME,
+    step_scratch_dir,
+)
 from param_decomp_lab.three_pool.context import (
     CIContext,
     LWContext,
@@ -105,13 +107,13 @@ from param_decomp_lab.three_pool.step_layerwise import (
 )
 from param_decomp_lab.three_pool.step_ppgd import step_ppgd
 
-# Collective timeout for every 3-pool subgroup. Generous (vs the 10-min NCCL
-# default) because a checkpoint save at XL serially reads ~100 GB of partials
-# on rank 0 while the other 143 ranks wait at the post-save barrier — that read
-# can take many minutes, and any rank reaching the next step's collective before
-# rank 0 rejoins must not trip the watchdog. Env-overridable (seconds) so the
-# save-watchdog repro can force the timeout at small scale.
-_DEFAULT_PG_TIMEOUT = datetime.timedelta(minutes=30)
+# Collective timeout for every 3-pool subgroup. Now that consolidation is async
+# (off the train loop), the longest gap between collectives on the loop is the
+# in-train (fast) eval pass plus a checkpoint partial-write barrier — minutes,
+# not the old ~10-min rank-0 read of ~100 GB. 10 min covers that worst case with
+# generous margin while still being far below "hang forever". Env-overridable
+# (seconds) so the watchdog-safe-at-low-timeout test can force a tight bound.
+_DEFAULT_PG_TIMEOUT = datetime.timedelta(minutes=10)
 
 
 def _resolve_pg_timeout() -> datetime.timedelta:
@@ -119,37 +121,6 @@ def _resolve_pg_timeout() -> datetime.timedelta:
     if override_s:
         return datetime.timedelta(seconds=float(override_s))
     return _DEFAULT_PG_TIMEOUT
-
-
-# Loss-metric type discriminators required for the 3-pool training path.
-REQUIRED_LOSS_METRIC_TYPES: frozenset[str] = frozenset(
-    {
-        "FaithfulnessLoss",
-        "ImportanceMinimalityLoss",
-        "StochasticReconLayerwiseLoss",
-        "PersistentPGDReconLoss",
-    }
-)
-
-FORBIDDEN_LOSS_METRIC_TYPES: frozenset[str] = frozenset(
-    {
-        "StochasticReconLoss",
-        "StochasticReconSubsetLoss",
-        "StochasticReconSubsetCEAndKL",
-        "PersistentPGDReconSubsetLoss",
-        "CIMaskedReconLoss",
-        "CIMaskedReconLayerwiseLoss",
-        "CIMaskedReconSubsetLoss",
-        "UnmaskedReconLoss",
-        "PGDReconLoss",
-        "PGDReconLayerwiseLoss",
-        "PGDReconSubsetLoss",
-        "CIMaskedAttnPatternsReconLoss",
-        "StochasticAttnPatternsReconLoss",
-        "StochasticHiddenActsReconLoss",
-        "CIHiddenActsReconLoss",
-    }
-)
 
 
 class ThreePoolTrainer:
@@ -161,16 +132,18 @@ class ThreePoolTrainer:
     the first batch of :meth:`run` because its source tensor shapes depend on
     the data's sequence dims.
 
-    Resume support is rank-local: :meth:`snapshot` produces a self-contained
-    :class:`~param_decomp.trainer_snapshot.TrainerSnapshot` whose ``resume``
-    half carries this rank's slice, and :meth:`from_snapshot` reconstructs
-    one from it. The lab's resume loader composes per-rank shards across
-    ranks. The snapshot's ``consumable`` half is the gathered full state
-    (rank 0 only; ``None`` elsewhere) — the gather happens inside
-    :meth:`snapshot`, so all ranks must call it in sync.
+    Checkpointing is split across two phases. :meth:`snapshot` runs on the train
+    loop: each rank writes a self-contained partial (its owned model params +
+    optimizer state + PPGD sources) to the shared-FS scratch dir, with a single
+    barrier — no rank-0 read, no model assembly. The async consolidation job
+    (:mod:`param_decomp_lab.three_pool.consolidate`) later reads every partial,
+    assembles the canonical :class:`~param_decomp.training_state.ThreePoolTrainingState`
+    + ``model_<step>.pth``, and runs the slow eval. :meth:`from_snapshot`
+    reconstructs a trainer from a consolidated ``ThreePoolTrainingState`` (each
+    rank loads its own slice).
     """
 
-    pd_config: PDConfig
+    pd_config: ThreePoolConstrainedPDConfig
     runtime_config: RuntimeConfig
     three_pool_config: ThreePoolConfig
     reconstruction_loss: ReconstructionLoss
@@ -187,7 +160,7 @@ class ThreePoolTrainer:
         target_model: nn.Module,
         run_batch: RunBatch,
         reconstruction_loss: ReconstructionLoss,
-        pd_config: PDConfig,
+        pd_config: ThreePoolConstrainedPDConfig,
         runtime_config: RuntimeConfig,
         three_pool_config: ThreePoolConfig,
     ) -> None:
@@ -212,10 +185,9 @@ class ThreePoolTrainer:
         if ci_attn is not None:
             d_model, n_heads = ci_attn
             verify_flash_attention_available(head_dim=d_model // n_heads)
-        _validate_pd_config_for_three_pool(pd_config, three_pool_config)
         # PPGD runs only on PPGD pool; the relevant per-rank batch is batch // n_ppgd.
         validate_pgd_scope(
-            pd_config.loss_metrics,
+            [pd_config.losses.ppgd],
             batch_size=pd_config.batch_size,
             world_size=len(three_pool_config.ppgd_ranks),
         )
@@ -399,156 +371,107 @@ class ThreePoolTrainer:
             case PPGDContext():
                 return []
 
-    def snapshot(self, scratch_dir: Path) -> ThreePoolTrainingState | None:
-        """Canonical point-in-time view of the 3-pool trainer.
+    def snapshot(self, scratch_dir: Path) -> None:
+        """Write this rank's self-contained checkpoint partial; then return.
 
-        On rank 0 (the only rank a sink consumes from), assembles a
-        topology-free :class:`ThreePoolTrainingState`:
+        Each rank writes everything needed to reconstruct the checkpoint for
+        its own slice to ``scratch_dir / f"step_{S}" / f"rank_{rank}.pth"``:
 
-        * ``component_model``: the full gathered model state (every site's V/U
-          plus the CI fn) from :func:`gather_full_state_dict_to_rank0`.
-        * ``components_optimizer`` / ``ci_fn_optimizer``: per-parameter
-          optimizer state keyed by param name, merged across all ranks.
-          ``components_optimizer`` comes from the layerwise pool (each LW
-          rank contributes its owned sites); ``ci_fn_optimizer`` comes from
-          the CI pool (all CI ranks have the same state via in-pool
-          all-reduce, so any suffices).
-        * ``ppgd_state_by_rank``: PPGD adversarial sources, keyed by PPGD
-          rank id. Genuinely rank-coupled for ``PerBatchPerPositionScope``
-          sources (sized by the rank-local batch slice).
+        * ``model_params``: a slice of this rank's ``component_model.state_dict()`` —
+          LW block leaders contribute their owned sites' ``_components.<site>.*``,
+          the CI pool leader contributes ``ci_fn.*``, everyone else contributes
+          nothing (their V/U / CI fn are replicas of a leader's).
+        * ``optimizer_by_name``: this rank's optimizer state, name-keyed.
+        * ``ppgd``: PPGD adversarial sources (PPGD ranks only).
 
-        Returns ``None`` on non-rank-0 — the lab sink is silent on those
-        ranks anyway, and the trainer never needs their canonical state.
-
-        Args:
-            scratch_dir: Shared-filesystem directory all ranks can write
-                to / read from. Used as the rendezvous for the per-rank
-                contributions (optimizer state, PPGD sources). Each
-                snapshot at step ``S`` writes / reads under
-                ``scratch_dir / f"step_{S}"`` and cleans it up on rank 0.
+        Rank 0 also writes ``meta.pth`` (configs + layout fingerprint + the
+        ``c_per_site`` / ``all_sites`` needed to rebuild the full model). A
+        single barrier ensures every partial is on the shared FS before the
+        train loop continues — there is NO rank-0 read and NO model assembly
+        here. The async consolidation job
+        (:func:`param_decomp_lab.three_pool.consolidate.consolidate_step`)
+        reads these partials off the critical path.
         """
-        trace("snapshot: enter gather_full_state_dict_to_rank0")
-        gathered_model = gather_full_state_dict_to_rank0(
-            ctx=self.ctx,
-            component_model=self.component_model,
-            target_model=self._target_model,
-            run_batch=self._run_batch,
-            ci_config=self.pd_config.ci_config,
-            sigmoid_type=self.pd_config.sigmoid_type,
-            c_per_site=self.runtime.c_per_site,
-            device=self._device,
-        )
-        trace("snapshot: gather_full_state_dict_to_rank0 done")
+        partial = self._build_my_partial()
 
-        my_named_params = self._named_params_for_my_optimizer()
-        my_optimizer_by_name: dict[str, dict[str, Any]] = (
-            optimizer_state_by_name(self.optimizer, my_named_params)
-            if self.optimizer is not None
-            else {}
-        )
-        my_contribution: dict[str, Any] = {
-            "pool": self.ctx.kind,
-            "optimizer_by_name": my_optimizer_by_name,
-        }
-        if self.ppgd_state is not None:
-            my_contribution["ppgd"] = self.ppgd_state.state_dict()
-        elif self._pending_ppgd_resume_state is not None:
-            my_contribution["ppgd"] = self._pending_ppgd_resume_state
-
-        # File-based gather rather than dist.gather_object: at XL the aggregate
-        # pickle payload (LW optimizer state + PPGD sources) is ~8 GB and
-        # gather_object scales poorly. Each rank writes its contribution to a
-        # shared-FS path, a barrier ensures all writes are visible, then rank 0
-        # reads them all.
         p2p_group = self.ctx.world.cross_pool_p2p_group
-        world_size = self.ctx.world.world_size
-        step_dir = scratch_dir / f"step_{self.step}"
+        step_dir = step_scratch_dir(scratch_dir, self.step)
         if self.ctx.role.rank == 0:
             step_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(self._build_meta(), step_dir / CONSOLIDATE_META_FILENAME)
 
+        # The mkdir + meta write race: rank 0 must finish them before any other
+        # rank writes its partial into step_dir.
         trace("snapshot: enter barrier (pre-write)")
         dist.barrier(group=p2p_group)
         trace("snapshot: barrier (pre-write) done")
 
         partial_path = step_dir / f"rank_{self.ctx.role.rank}.pth"
         trace(f"snapshot: writing partial {partial_path.name}")
-        torch.save(my_contribution, partial_path)
+        torch.save(partial, partial_path)
         trace("snapshot: partial write done")
 
-        trace("snapshot: enter barrier (post-write)")
-        dist.barrier(group=p2p_group)
-        trace("snapshot: barrier (post-write) done")
-
-        # Only rank 0 assembles the canonical state — it serially reads every
-        # rank's partial (~100 GB at XL). Non-rank-0 ranks have nothing left to
-        # do here, but they MUST NOT advance to the next training step until
-        # rank 0 finishes: the next step's collectives (PPGD V/U all-reduce,
-        # cross-pool sends) would block on rank 0 still reading, and at XL that
-        # read overruns the collective watchdog and aborts the job. The
-        # rejoining barrier below makes all ranks resume training in lock-step.
-        gathered_state: ThreePoolTrainingState | None = None
-        if self.ctx.role.rank == 0:
-            gathered_state = self._assemble_rank0_state(
-                step_dir=step_dir,
-                world_size=world_size,
-                gathered_model=gathered_model,
-            )
-
-        # PD_3POOL_DISABLE_REJOIN_BARRIER reproduces the pre-fix bug (non-rank-0
-        # ranks racing ahead while rank 0 reads). For the save-watchdog repro
-        # only — never set in production.
+        # One rejoining barrier so all ranks leave snapshot together. This is
+        # cheap now (just the partial write, no 100 GB read), so it cannot
+        # overrun the collective watchdog. PD_3POOL_DISABLE_REJOIN_BARRIER skips
+        # it for the legacy race repro. The old PD_3POOL_SNAPSHOT_RANK0_SLEEP_S
+        # fault injection now lives in the async consolidate job (off the loop),
+        # since that is where the slow read moved — the train loop has nothing
+        # slow left to sleep through.
         if os.environ.get("PD_3POOL_DISABLE_REJOIN_BARRIER", "").strip() in ("1", "true"):
             trace("snapshot: REJOIN BARRIER DISABLED (repro mode)")
-            return gathered_state
-        trace("snapshot: enter barrier (rejoin after rank-0 read)")
+            return
+        trace("snapshot: enter barrier (post-write rejoin)")
         dist.barrier(group=p2p_group)
-        trace("snapshot: barrier (rejoin after rank-0 read) done")
-        return gathered_state
+        trace("snapshot: barrier (post-write rejoin) done")
 
-    def _assemble_rank0_state(
-        self,
-        *,
-        step_dir: Path,
-        world_size: int,
-        gathered_model: dict[str, Any] | None,
-    ) -> ThreePoolTrainingState:
-        rank0_read_sleep_s = os.environ.get("PD_3POOL_SNAPSHOT_RANK0_SLEEP_S", "").strip()
-        if rank0_read_sleep_s:
-            trace(f"snapshot: rank-0 read sleep {rank0_read_sleep_s}s (fault injection)")
-            time.sleep(float(rank0_read_sleep_s))
-
-        gathered: list[dict[str, Any]] = []
-        for r in range(world_size):
-            gathered.append(torch.load(step_dir / f"rank_{r}.pth", weights_only=False))
-        trace("snapshot: rank-0 read all partials")
-        shutil.rmtree(step_dir, ignore_errors=True)
-        components_by_name: dict[str, dict[str, Any]] = {}
-        ci_fn_by_name: dict[str, dict[str, Any]] = {}
-        ppgd_by_rank: dict[int, dict[str, Any]] = {}
-        for r, c in enumerate(gathered):
-            pool: str = c["pool"]
-            match pool:
-                case "layerwise":
-                    components_by_name.update(c["optimizer_by_name"])
-                case "ci":
-                    ci_fn_by_name.update(c["optimizer_by_name"])
-                case "ppgd":
-                    if "ppgd" in c:
-                        ppgd_by_rank[r] = c["ppgd"]
-                case _:
-                    raise AssertionError(f"unknown pool {pool!r} in rank-{r} contribution")
-        assert gathered_model is not None  # rank 0 always has the gathered model
-        return ThreePoolTrainingState(
-            step=self.step,
-            pd_config=self.pd_config.model_dump(),
-            runtime_config=self.runtime_config.model_dump(),
-            three_pool_config=self.three_pool_config.model_dump(),
-            layout_fingerprint=_layout_fingerprint(self.ctx),
-            component_model=gathered_model,
-            components_optimizer=components_by_name,
-            ci_fn_optimizer=ci_fn_by_name,
-            ppgd_state_by_rank=ppgd_by_rank,
+    def _build_my_partial(self) -> dict[str, Any]:
+        my_named_params = self._named_params_for_my_optimizer()
+        my_optimizer_by_name: dict[str, dict[str, Any]] = (
+            optimizer_state_by_name(self.optimizer, my_named_params)
+            if self.optimizer is not None
+            else {}
         )
+        partial: dict[str, Any] = {
+            "pool": self.ctx.kind,
+            "model_params": self._owned_model_params(),
+            "optimizer_by_name": my_optimizer_by_name,
+        }
+        if self.ppgd_state is not None:
+            partial["ppgd"] = self.ppgd_state.state_dict()
+        elif self._pending_ppgd_resume_state is not None:
+            partial["ppgd"] = self._pending_ppgd_resume_state
+        return partial
+
+    def _owned_model_params(self) -> dict[str, Tensor]:
+        """The slice of this rank's model state_dict it's responsible for saving.
+
+        Only leaders contribute: LW block leaders own their sites' V/U, the CI
+        pool leader owns the CI fn. Every other rank holds a replica, so it
+        contributes nothing — the union across leaders covers the full model.
+        """
+        sd = self.component_model.state_dict()
+        keys = set(sd.keys())
+        match self.ctx:
+            case LWContext() if self.ctx.role.is_block_leader:
+                owned = owned_model_state_keys(keys, owned_sites=self.ctx.role.owned_sites)
+            case CIContext() if self.ctx.role.is_pool_leader:
+                owned = ci_fn_state_keys(keys)
+            case _:
+                owned = set()
+        return {k: sd[k].cpu() for k in owned}
+
+    def _build_meta(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "world_size": self.ctx.world.world_size,
+            "all_sites": list(self.ctx.world.all_sites),
+            "c_per_site": dict(self.runtime.c_per_site),
+            "pd_config": self.pd_config.model_dump(),
+            "runtime_config": self.runtime_config.model_dump(),
+            "three_pool_config": self.three_pool_config.model_dump(),
+            "layout_fingerprint": _layout_fingerprint(self.ctx),
+        }
 
     @classmethod
     def from_snapshot(
@@ -570,8 +493,13 @@ class ThreePoolTrainer:
         pd_dict = snapshot.pd_config
         if cfg_overrides is not None:
             pd_dict = {**pd_dict, **cfg_overrides}
-        pd_config = PDConfig.model_validate(pd_dict)
-        runtime_config = RuntimeConfig.model_validate(snapshot.runtime_config)
+        pd_config = ThreePoolConstrainedPDConfig.model_validate(pd_dict)
+        # The saved runtime_config is a `ThreePoolRuntimeConfig` dump (base scalars +
+        # `topology`). The trainer takes the base `RuntimeConfig` scalars here and the
+        # topology via `three_pool_config` (the source of truth, identical to the dumped
+        # `topology`), so drop the duplicate `topology` key before validating as base.
+        runtime_dict = {k: v for k, v in snapshot.runtime_config.items() if k != "topology"}
+        runtime_config = RuntimeConfig.model_validate(runtime_dict)
         three_pool_config = ThreePoolConfig.model_validate(snapshot.three_pool_config)
 
         trainer = cls(
@@ -875,9 +803,8 @@ class ThreePoolTrainer:
                     )
 
                 if cadence.should_save(step):
-                    snap = self.snapshot(scratch_dir)
-                    if snap is not None:
-                        sink.checkpoint(snap, final=False)
+                    self.snapshot(scratch_dir)
+                    sink.checkpoint_written(step, final=False)
 
                 batch_T = (
                     batch_T_plus_1
@@ -890,9 +817,8 @@ class ThreePoolTrainer:
                     profiler.step()
 
             self.step = n_steps
-            snap = self.snapshot(scratch_dir)
-            if snap is not None:
-                sink.checkpoint(snap, final=True)
+            self.snapshot(scratch_dir)
+            sink.checkpoint_written(self.step, final=True)
 
 
 def optimize_three_pool(
@@ -901,7 +827,7 @@ def optimize_three_pool(
     *,
     run_batch: RunBatch,
     reconstruction_loss: ReconstructionLoss,
-    pd_config: PDConfig,
+    pd_config: ThreePoolConstrainedPDConfig,
     runtime_config: RuntimeConfig,
     three_pool_config: ThreePoolConfig,
     cadence: Cadence,
@@ -985,81 +911,15 @@ def _rank_invariant_fingerprint_core(fp: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_pd_config_for_three_pool(
-    pd_config: PDConfig,
-    three_pool_config: ThreePoolConfig,
-) -> None:
-    """Fail loudly on any PDConfig the 3-pool path can't honour."""
-    by_type: dict[str, LossMetricConfig] = {m.type: m for m in pd_config.loss_metrics}
-
-    missing = sorted(REQUIRED_LOSS_METRIC_TYPES - set(by_type))
-    assert not missing, (
-        f"3-pool requires these loss metrics: {sorted(REQUIRED_LOSS_METRIC_TYPES)}.\n"
-        f"Missing: {missing}. Got: {sorted(by_type)}."
-    )
-    illegal = sorted(FORBIDDEN_LOSS_METRIC_TYPES & set(by_type))
-    assert not illegal, (
-        f"3-pool does not implement these loss metrics (they would be silently ignored): "
-        f"{illegal}. Remove them or extend the 3-pool path."
-    )
-
-    for name in REQUIRED_LOSS_METRIC_TYPES:
-        assert by_type[name].coeff is not None, (
-            f"pd_config.loss_metrics[{name!r}].coeff is required for 3-pool training"
-        )
-
-    n_per_block = len(three_pool_config.layerwise_block_groups[0].ranks)
-    n_ci = len(three_pool_config.ci_ranks)
-    n_ppgd = len(three_pool_config.ppgd_ranks)
-    bs = pd_config.batch_size
-    assert bs % n_per_block == 0, (
-        f"pd_config.batch_size ({bs}) must be divisible by N_per_block ({n_per_block}) "
-        f"= len(layerwise_block_groups[0].ranks)"
-    )
-    assert bs % n_ci == 0, (
-        f"pd_config.batch_size ({bs}) must be divisible by N_ci ({n_ci}) = len(ci_ranks)"
-    )
-    assert bs % n_ppgd == 0, (
-        f"pd_config.batch_size ({bs}) must be divisible by N_ppgd ({n_ppgd}) = len(ppgd_ranks)"
-    )
-
-    assert pd_config.use_delta_component, (
-        "3-pool requires pd_config.use_delta_component=True (hardcoded in LW's "
-        "layerwise stoch recon + PPGD's PPGD warmup)."
-    )
-
-    assert pd_config.sampling == "continuous", (
-        "3-pool hardcodes `sampling='continuous'` in CI pool's CI computation; "
-        f"got pd_config.sampling={pd_config.sampling!r}."
-    )
-    assert pd_config.n_mask_samples == 1, (
-        "3-pool draws exactly one stochastic mask per site per step in LW; "
-        f"got pd_config.n_mask_samples={pd_config.n_mask_samples}."
-    )
-
-    assert pd_config.identity_decomposition_targets is None, (
-        "3-pool path does not call `insert_identity_operations_`; "
-        "`identity_decomposition_targets` would be silently ignored."
-    )
-
-    # Convention: rank 0 must be the Layerwise pool's block 0 leader.
-    assert three_pool_config.layerwise_block_groups[0].ranks[0] == 0, (
-        "Convention: rank 0 must be the LW pool's block 0 leader (so reductions "
-        "can ship CI/PPGD pool losses to rank 0). Reorder layerwise_block_groups "
-        "so the first group starts with rank 0."
-    )
-
-    ppgd_cfg = by_type["PersistentPGDReconLoss"]
-    assert isinstance(ppgd_cfg, PersistentPGDReconLossConfig)
-    assert ppgd_cfg.start_frac == 0.0, (
-        "3-pool path does not implement PersistentPGDReconLoss.start_frac > 0; "
-        "PPGD always runs from step 0."
-    )
+def _required[T](value: T | None) -> T:
+    """Narrow a value the `ThreePoolLosses` validator already guarantees non-None."""
+    assert value is not None
+    return value
 
 
 def _build_runtime(
     target_model: nn.Module,
-    pd_config: PDConfig,
+    pd_config: ThreePoolConstrainedPDConfig,
     runtime_config: RuntimeConfig,
     three_pool_config: ThreePoolConfig,
     run_batch: RunBatch,
@@ -1082,16 +942,9 @@ def _build_runtime(
                 f"Available: {sorted(c_per_site)[:5]}..."
             )
 
-    by_type: dict[str, LossMetricConfig] = {m.type: m for m in pd_config.loss_metrics}
-    ppgd_cfg = by_type["PersistentPGDReconLoss"]
-    imp_min_cfg = by_type["ImportanceMinimalityLoss"]
-    assert isinstance(ppgd_cfg, PersistentPGDReconLossConfig)
-    assert isinstance(imp_min_cfg, ImportanceMinimalityLossConfig)
-
-    def _coeff(name: str) -> float:
-        c = by_type[name].coeff
-        assert c is not None
-        return float(c)
+    losses = pd_config.losses
+    ppgd_cfg = losses.ppgd
+    imp_min_cfg = losses.imp
 
     block_groups = tuple(
         LayerwiseBlockGroup(ranks=tuple(bg.ranks), owned_sites=tuple(bg.owned_sites))
@@ -1109,10 +962,10 @@ def _build_runtime(
         run_batch=run_batch,
         reconstruction_loss=reconstruction_loss,
         ppgd_cfg=ppgd_cfg,
-        coeff_faith=_coeff("FaithfulnessLoss"),
-        coeff_imp=_coeff("ImportanceMinimalityLoss"),
-        coeff_stoch=_coeff("StochasticReconLayerwiseLoss"),
-        coeff_ppgd=_coeff("PersistentPGDReconLoss"),
+        coeff_faith=float(_required(losses.faith.coeff)),
+        coeff_imp=float(_required(losses.imp.coeff)),
+        coeff_stoch=float(_required(losses.stoch.coeff)),
+        coeff_ppgd=float(_required(losses.ppgd.coeff)),
         imp_min_pnorm=imp_min_cfg.pnorm,
         imp_min_beta=imp_min_cfg.beta,
         imp_min_eps=imp_min_cfg.eps,

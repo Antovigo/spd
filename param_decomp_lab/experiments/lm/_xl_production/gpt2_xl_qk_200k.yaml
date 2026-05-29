@@ -19,7 +19,7 @@ pd:
   - module_pattern: h.*.attn.k_proj
     C: 1024
   batch_size: 48
-  steps: 50000
+  steps: 200000
   components_optimizer:
     lr_schedule:
       start_val: 0.00086603
@@ -58,7 +58,7 @@ pd:
         eps: 1.0e-08
         lr_schedule:
           start_val: 0.01
-          warmup_pct: 0.025
+          warmup_pct: 0.05
           final_val_frac: 1.0
           fn_type: constant
       scope:
