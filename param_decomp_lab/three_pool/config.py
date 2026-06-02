@@ -9,7 +9,7 @@ Everything else (batch size, loss coefficients, optimizer LRs, PPGD config,
 faithfulness warmup, LR schedules, autocast, ci_config, sigmoid_type,
 decomposition_targets) lives on the regular ``PDConfig`` / ``RuntimeConfig``
 that the 3-pool path consumes — so a 3-pool training run is configured like a
-normal SPD run plus this topology block.
+normal (V)PD run plus this topology block.
 
 See ``DESIGN.md`` for the per-step dependency graph and the rationale for
 splitting the CI fn into its own pool (a dedicated unsharded CI pool enables

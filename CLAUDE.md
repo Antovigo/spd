@@ -27,10 +27,13 @@ Three experimental domains: TMS (Toy Model of Superposition), ResidualMLP, and L
 Models. The LM experiment decomposes any HuggingFace-loadable model whose target modules
 are `nn.Linear`, `nn.Embedding`, or `transformers.modeling_utils.Conv1D`.
 
-Two research papers describe the method:
+Three research papers describe the method, in lineage order (newest first). When this
+repo says "the method", it means **VPD** — or just "PD" generically. It is *not* "SPD":
+SPD is the predecessor VPD builds on.
 
-- **SPD** — [`papers/Stochastic_Parameter_Decomposition/spd_paper.md`](papers/Stochastic_Parameter_Decomposition/spd_paper.md). The current framing. Repo has evolved since publication but the concepts are still right.
-- **APD** — [`papers/Attribution_based_Parameter_Decomposition/apd_paper.md`](papers/Attribution_based_Parameter_Decomposition/apd_paper.md). Precursor; introduced linear parameter decomposition.
+- **VPD** — adVersarial Parameter Decomposition — [`papers/Adversarial_Parameter_Decomposition/post.md`](papers/Adversarial_Parameter_Decomposition/post.md) ("Interpreting Language Model Parameters"). The current method and framing: scales parameter decomposition to full language models and replaces SPD's *stochastic* ablation sampling with *adversarially-chosen* (persistent-PGD) ablations. This is what the repo implements today.
+- **SPD** — Stochastic Parameter Decomposition — [`papers/Stochastic_Parameter_Decomposition/spd_paper.md`](papers/Stochastic_Parameter_Decomposition/spd_paper.md). Predecessor; introduced the causal-importance / stochastic-masking framing VPD builds on. Concepts still right, but VPD supersedes it.
+- **APD** — Attribution-based Parameter Decomposition — [`papers/Attribution_based_Parameter_Decomposition/apd_paper.md`](papers/Attribution_based_Parameter_Decomposition/apd_paper.md). Original precursor; introduced linear parameter decomposition.
 
 ## Package layout
 
