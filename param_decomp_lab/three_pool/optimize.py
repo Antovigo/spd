@@ -53,6 +53,7 @@ from torch.utils.data import DataLoader
 
 from param_decomp._trace import dump_memory_stats, trace
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
+from param_decomp.ci_fns import GlobalSharedTransformerCiFn
 from param_decomp.component_model import ComponentModel
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
@@ -133,6 +134,16 @@ def _lw_compile_enabled() -> bool:
     widens the collective PG timeout uniformly across ranks.
     """
     return os.environ.get("PD_DISABLE_LW_COMPILE", "").strip() not in ("1", "true", "yes")
+
+
+def _ci_ckpt_enabled() -> bool:
+    """Activation-checkpoint the CI-fn blocks — default on; ``PD_DISABLE_CI_CKPT=1`` off."""
+    return os.environ.get("PD_DISABLE_CI_CKPT", "").strip() not in ("1", "true", "yes")
+
+
+def _ci_compile_enabled() -> bool:
+    """torch.compile the CI-fn forward — default on; ``PD_DISABLE_CI_COMPILE=1`` off."""
+    return os.environ.get("PD_DISABLE_CI_COMPILE", "").strip() not in ("1", "true", "yes")
 
 
 def _resolve_pg_timeout(*, compiling: bool = False) -> datetime.timedelta:
@@ -245,7 +256,9 @@ class ThreePoolTrainer:
             layerwise_block_groups=block_groups,
             ppgd_ranks=list(three_pool_config.ppgd_ranks),
             batch_global=self.runtime.batch_global,
-            pg_timeout=_resolve_pg_timeout(compiling=_lw_compile_enabled()),
+            pg_timeout=_resolve_pg_timeout(
+                compiling=_lw_compile_enabled() or _ci_compile_enabled()
+            ),
             device=self._device,
         )
         trace("ThreePoolTrainer.__init__: build_world: done")
@@ -296,26 +309,38 @@ class ThreePoolTrainer:
         self.component_model = self.component_model.to(self._device)
         trace("ThreePoolTrainer.__init__: ComponentModel.to(device): done")
         dump_memory_stats("after ComponentModel.to(device)")
-        # CI pool: optionally torch.compile the CI fn. Eats compile time on
-        # step 0 / step 1 (first fwd + first bwd) but should cut ``ci/8_fused_bwd``
-        # substantially — that backward through the 2.64B-param CI fn dominates
-        # the critical path (70% of CI step at batch=48).
+        # CI pool: activation-checkpoint the CI-fn transformer blocks, then
+        # torch.compile the whole CI-fn forward (the checkpoint loop sits inside the
+        # compiled region so the compiler optimizes the recompute). Checkpoint saves
+        # ~15 GB of block-activation high-water (the wide MLP/attn intermediates are
+        # recomputed in backward); compile pays the recompute back and then some — the
+        # 1-GPU CI probe at bl=8/seq=1024 measured baseline 227ms → +ckpt 256ms (+13%)
+        # → +ckpt+compile(whole) 206ms (-9% vs baseline). The CI pool is the compute-idle
+        # pool (PPGD is the long pole), so even the bare +13% would be free on the
+        # critical path. Whole-forward compile + checkpoint + flash-SDPA composes cleanly
+        # on torch>=2.11 (its AOT min-cut partitioner guards the DCE'd checkpointed
+        # flash-SDPA RNG op via functionalize_rng_ops; <=2.10 KeyError'd at distributed
+        # scale). Default-on; PD_DISABLE_CI_CKPT / PD_DISABLE_CI_COMPILE to disable.
         is_ci = isinstance(self.ctx, CIContext)
-        if is_ci and os.environ.get("PD_COMPILE_CI_FN", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
+        if is_ci:
             assert self.component_model.ci_fn is not None
-            trace("ThreePoolTrainer.__init__: torch.compile(ci_fn)")
-            self.component_model.ci_fn = torch.compile(self.component_model.ci_fn)  # pyright: ignore[reportAttributeAccessIssue]
+            if _ci_ckpt_enabled():
+                trace("ThreePoolTrainer.__init__: enable CI-fn activation checkpointing")
+                for m in self.component_model.ci_fn.modules():
+                    if isinstance(m, GlobalSharedTransformerCiFn):
+                        m.enable_activation_checkpointing()
+            if _ci_compile_enabled():
+                user = os.environ.get("USER", "u")
+                rank = dist.get_rank()
+                os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+                os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+                trace("ThreePoolTrainer.__init__: torch.compile(ci_fn) [whole forward]")
+                self.component_model.ci_fn.compile()
         if is_ci and os.environ.get("PD_CI_FN_BWD_PROFILE", "").strip() in (
             "1",
             "true",
             "yes",
         ):
-            from param_decomp.ci_fns import GlobalSharedTransformerCiFn
-
             assert self.component_model.ci_fn is not None
             for m in self.component_model.ci_fn.modules():
                 if isinstance(m, GlobalSharedTransformerCiFn):

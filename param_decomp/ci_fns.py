@@ -6,6 +6,7 @@ from typing import Literal, Self, override
 import einops
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from jaxtyping import Float
 from pydantic import Field, PositiveInt, model_validator
 from torch import Tensor, nn
@@ -303,12 +304,24 @@ class GlobalSharedTransformerCiFn(nn.Module):
                 for _ in range(n_layers)
             ]
         )
+        # Per-block gradient checkpointing toggle. Off by default; enabled at 3-pool
+        # training time via ``enable_activation_checkpointing()``. Trades a full
+        # recompute of each block's forward in backward for not storing the 16384-wide
+        # MLP / attention intermediates — targets the block-activation high-water on the
+        # CI pool (the compute-idle pool, so the recompute is ~free on the critical path).
+        self._use_activation_checkpointing = False
         # Lazily-enabled per-stage backward timing. ``enable_bwd_profile`` populates this
         # with one ``torch.cuda.Event(enable_timing=True)`` per boundary tensor; the next
         # ``forward`` call registers backward hooks that record those events as gradient
         # flows through. ``compute_bwd_breakdown`` returns ``elapsed_time`` between
         # consecutive events.
         self._bwd_events: dict[str, torch.cuda.Event] = {}
+
+    def enable_activation_checkpointing(self) -> None:
+        """Wrap each transformer block in ``torch.utils.checkpoint.checkpoint`` during
+        forward. Only block inputs are stored; the per-block intermediates (q/k/v,
+        attention, the wide MLP) are recomputed in backward."""
+        self._use_activation_checkpointing = True
 
     def enable_bwd_profile(self) -> None:
         """Create CUDA events for per-stage backward timing.
@@ -383,7 +396,11 @@ class GlobalSharedTransformerCiFn(nn.Module):
         x = projected
         self._maybe_hook(x, "x_0")
         for i, block in enumerate(self._blocks):
-            x = block(x)
+            if self._use_activation_checkpointing:
+                x = torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)
+                assert isinstance(x, Tensor)
+            else:
+                x = block(x)
             self._maybe_hook(x, f"x_{i + 1}")
 
         output = self._output_head(x)

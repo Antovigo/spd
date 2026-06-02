@@ -47,6 +47,7 @@ from param_decomp.ci_fns import (
     AttnConfig,
     GlobalCiConfig,
     GlobalSharedTransformerCiConfig,
+    GlobalSharedTransformerCiFn,
 )
 from param_decomp.decomposition_targets import DecompositionTarget
 from param_decomp.masks import AllLayersRouter, make_mask_infos
@@ -210,6 +211,12 @@ def _build_component_model(rank: int) -> LMComponentModel:
         ci_config=_ci_config(),
         sigmoid_type="leaky_hard",
     )
+    # Exercise CI-fn activation checkpointing (production default) so the grad check
+    # also validates that the checkpointed-block recompute reassembles identical grads.
+    if cm.ci_fn is not None:
+        for m in cm.ci_fn.modules():
+            if isinstance(m, GlobalSharedTransformerCiFn):
+                m.enable_activation_checkpointing()
     return cm
 
 

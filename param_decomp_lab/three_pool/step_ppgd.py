@@ -270,9 +270,9 @@ def _vu_templates(
 
 
 def _releaf_ci_fp32_for_grads(ci_recv: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Upcast CI (bf16 on the wire) to fp32 and re-leaf with ``requires_grad=True``
-    so the autograd.grad call below populates fp32 ``.grad`` that the CI pool
-    can merge into its fp32 CI-fn grads.
+    """Upcast CI (fp16 on the wire — bounded masks) to fp32 and re-leaf with
+    ``requires_grad=True`` so the autograd.grad call below populates fp32 ``.grad``
+    that the CI pool can merge into its fp32 CI-fn grads.
     """
     return {
         s: v.detach().to(torch.float32).clone().requires_grad_(True) for s, v in ci_recv.items()

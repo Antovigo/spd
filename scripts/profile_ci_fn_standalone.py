@@ -8,14 +8,20 @@ CI value tensors (+ their grads), imp-min temps.
 
 Toggles each lever and prints the measured delta:
   (a) retain_graph double-backward ON vs OFF   -> the step_ci.py fix
-  (b) CI value tensors fp32 vs bf16
+  (b) CI value tensors fp32 vs bf16 vs fp16
   (c) Adam state fp32 vs bf16
+  (d) block activation checkpointing OFF vs ON  -> recompute the wide MLP/attn in bwd
+  (e) torch.compile(block) ON vs OFF            -> pay back the ckpt recompute
+
+Also times one full fwd+bwd+adam step under the (baseline / +ckpt / +ckpt+compile)
+cumulative levers — the key question is whether compile recovers the recompute cost.
 
 Run on one GPU: srun --gpus=1 --time=0:30:00 ... (no CPU/mem flags, no --partition).
 """
 
 import argparse
 import gc
+import time
 
 import torch
 
@@ -35,14 +41,16 @@ MLP = 16384
 MAX_LEN = 1024
 
 
-def build_ci_fn() -> GlobalSharedTransformerCiFn:
+def build_ci_fn(ckpt: bool = False, compile_mode: str = "none") -> GlobalSharedTransformerCiFn:
+    """compile_mode: 'none' | 'per_block' (compile each block, eager ckpt outside) |
+    'whole' (compile the whole forward, ckpt-loop inside the compiled region)."""
     tlc = {
         f"h.{layer}.attn.{proj}": TargetLayerConfig(input_dim=INPUT_DIM, C=C)
         for layer in range(N_LAYERS_TARGET)
         for proj in ("q_proj", "k_proj")
     }
     assert len(tlc) == N_SITES, len(tlc)
-    return GlobalSharedTransformerCiFn(
+    m = GlobalSharedTransformerCiFn(
         target_model_layer_configs=tlc,
         d_model=D_MODEL,
         n_layers=N_BLOCKS,
@@ -50,6 +58,18 @@ def build_ci_fn() -> GlobalSharedTransformerCiFn:
         max_len=MAX_LEN,
         mlp_hidden_dims=[MLP],
     ).cuda()
+    if ckpt:
+        m.enable_activation_checkpointing()
+    match compile_mode:
+        case "none":
+            pass
+        case "per_block":
+            m._blocks = torch.nn.ModuleList([torch.compile(b) for b in m._blocks])
+        case "whole":
+            m.compile()
+        case _:
+            raise ValueError(compile_mode)
+    return m
 
 
 def count_params(m: torch.nn.Module) -> dict[str, int]:
@@ -90,11 +110,18 @@ def split_ci(output: torch.Tensor, split_sizes: list[int]):
     return lower_s, upper_s
 
 
-def run(bl: int, seq: int, ci_vals_bf16: bool, adam_bf16: bool, retain_graph: bool):
+def run(
+    bl: int,
+    seq: int,
+    ci_vals_dtype: torch.dtype,
+    adam_bf16: bool,
+    retain_graph: bool,
+    ckpt: bool = False,
+):
     """One full fwd+bwd+adam cycle; returns a dict of GB measurements."""
     gc.collect()
     reset_peak()
-    m = build_ci_fn()
+    m = build_ci_fn(ckpt=ckpt)
     params = count_params(m)
     after_params = cur_alloc()
 
@@ -112,9 +139,8 @@ def run(bl: int, seq: int, ci_vals_bf16: bool, adam_bf16: bool, retain_graph: bo
         output = m(inputs)  # [bl, seq, total_c]
     output = output.float()
     lower_s, upper_s = split_ci(output, split_sizes)
-    val_dtype = torch.bfloat16 if ci_vals_bf16 else torch.float32
-    lower = {s: lower_s[i].to(val_dtype) for i, s in enumerate(site_names)}
-    upper = {s: upper_s[i].to(val_dtype) for i, s in enumerate(site_names)}
+    lower = {s: lower_s[i].to(ci_vals_dtype) for i, s in enumerate(site_names)}
+    upper = {s: upper_s[i].to(ci_vals_dtype) for i, s in enumerate(site_names)}
     peak_fwd = peak_alloc()
     after_fwd = cur_alloc()
 
@@ -186,6 +212,56 @@ def run(bl: int, seq: int, ci_vals_bf16: bool, adam_bf16: bool, retain_graph: bo
     return res
 
 
+def time_step(
+    bl: int, seq: int, ckpt: bool, compile_mode: str, n_warmup: int, n_timed: int
+) -> float:
+    """Median wall-clock ms of one fwd+bwd+adam step under the given levers.
+
+    Warms up (and triggers compile, if enabled) before timing. Mirrors the 3-pool CI
+    step: bf16-autocast fwd, single fused backward (lower seeds + scaled imp-min), adam.
+    """
+    gc.collect()
+    reset_peak()
+    m = build_ci_fn(ckpt=ckpt, compile_mode=compile_mode)
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-4)
+    site_names = m.layer_order
+    split_sizes = m.split_sizes
+    inputs = {
+        s: torch.randn(bl, seq, INPUT_DIM, device="cuda", dtype=torch.float32) for s in site_names
+    }
+
+    def one_step(m=m, opt=opt, inputs=inputs):
+        opt.zero_grad(set_to_none=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            output = m(inputs)
+        output = output.float()
+        lower_s, upper_s = split_ci(output, split_sizes)
+        per_sums, n_ex = per_component_lp_sums(
+            ci_upper_leaky={s: upper_s[i] for i, s in enumerate(site_names)}, pnorm=2.0, eps=1e-12
+        )
+        imp = finalize_imp_min(per_component_sums=per_sums, n_examples=n_ex, beta=1.0)
+        scaled_imp = 0.1 * imp
+        g_seeds = [torch.ones_like(lower_s[i]) for i in range(len(site_names))]
+        torch.autograd.backward(tensors=[*lower_s, scaled_imp], grad_tensors=[*g_seeds, None])
+        opt.step()
+
+    for _ in range(n_warmup):
+        one_step()
+    torch.cuda.synchronize()
+    times: list[float] = []
+    for _ in range(n_timed):
+        t0 = time.perf_counter()
+        one_step()
+        torch.cuda.synchronize()
+        times.append((time.perf_counter() - t0) * 1e3)
+    times.sort()
+    median = times[len(times) // 2]
+    del m, opt, inputs
+    gc.collect()
+    torch.cuda.empty_cache()
+    return median
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bl", type=int, default=8)
@@ -199,8 +275,8 @@ def main():
         f"config: bl={args.bl} seq={args.seq} sites={N_SITES} C={C} d_model={D_MODEL} blocks={N_BLOCKS} mlp={MLP}\n"
     )
 
-    base = run(args.bl, args.seq, ci_vals_bf16=False, adam_bf16=False, retain_graph=False)
-    print("=== BASELINE (fp32 CI vals, fp32 Adam, single fused backward) ===")
+    base = run(args.bl, args.seq, ci_vals_dtype=torch.float32, adam_bf16=False, retain_graph=False)
+    print("=== BASELINE (fp32 CI vals, fp32 Adam, single fused backward, no ckpt) ===")
     for k, v in base.items():
         if k.startswith("param_count"):
             print(f"  {k:30s} {v:,}")
@@ -212,7 +288,7 @@ def main():
     print(f"  params + grad + adam = {static:.2f} GB")
 
     print("\n=== LEVER (a): retain_graph double-backward ON vs OFF ===")
-    on = run(args.bl, args.seq, ci_vals_bf16=False, adam_bf16=False, retain_graph=True)
+    on = run(args.bl, args.seq, ci_vals_dtype=torch.float32, adam_bf16=False, retain_graph=True)
     off = base
     print(f"  retain_graph=True  peak_during_bwd = {on['peak_during_bwd_GB']:.3f} GB")
     print(f"  retain_graph=False peak_during_bwd = {off['peak_during_bwd_GB']:.3f} GB")
@@ -220,19 +296,46 @@ def main():
         f"  SAVING from single backward         = {on['peak_during_bwd_GB'] - off['peak_during_bwd_GB']:.3f} GB"
     )
 
-    print("\n=== LEVER (b): CI value tensors fp32 vs bf16 ===")
+    print("\n=== LEVER (b): CI value tensors fp32 vs bf16 vs fp16 ===")
     fp32v = base
-    bf16v = run(args.bl, args.seq, ci_vals_bf16=True, adam_bf16=False, retain_graph=False)
+    bf16v = run(
+        args.bl, args.seq, ci_vals_dtype=torch.bfloat16, adam_bf16=False, retain_graph=False
+    )
+    fp16v = run(args.bl, args.seq, ci_vals_dtype=torch.float16, adam_bf16=False, retain_graph=False)
     print(
-        f"  fp32 CI vals = {fp32v['ci_value_tensors_GB']:.3f} GB | bf16 = {bf16v['ci_value_tensors_GB']:.3f} GB"
+        f"  fp32 CI vals = {fp32v['ci_value_tensors_GB']:.3f} GB | "
+        f"bf16 = {bf16v['ci_value_tensors_GB']:.3f} GB | "
+        f"fp16 = {fp16v['ci_value_tensors_GB']:.3f} GB"
     )
     print(
-        f"  SAVING (CI vals)            = {fp32v['ci_value_tensors_GB'] - bf16v['ci_value_tensors_GB']:.3f} GB"
+        f"  SAVING fp32->fp16 (CI vals)  = {fp32v['ci_value_tensors_GB'] - fp16v['ci_value_tensors_GB']:.3f} GB"
     )
+    print("  (fp16 and bf16 are both 2 bytes -> identical memory; fp16 buys mantissa bits)")
 
     print("\n=== LEVER (c): Adam state fp32 vs bf16 ===")
     print(
         f"  fp32 Adam = {base['adam_GB']:.3f} GB -> bf16 = {base['adam_GB'] / 2:.3f} GB | SAVING {base['adam_GB'] / 2:.3f} GB"
+    )
+
+    print("\n=== LEVER (d): block activation checkpointing OFF vs ON ===")
+    nockpt = base
+    withckpt = run(
+        args.bl,
+        args.seq,
+        ci_vals_dtype=torch.float32,
+        adam_bf16=False,
+        retain_graph=False,
+        ckpt=True,
+    )
+    print(f"  no-ckpt fwd_activation_hw = {nockpt['fwd_activation_hw_GB']:.3f} GB")
+    print(f"  +ckpt  fwd_activation_hw  = {withckpt['fwd_activation_hw_GB']:.3f} GB")
+    print(
+        f"  block-activation SAVING (fwd hw) = {nockpt['fwd_activation_hw_GB'] - withckpt['fwd_activation_hw_GB']:.3f} GB"
+    )
+    print(f"  no-ckpt peak_during_bwd = {nockpt['peak_during_bwd_GB']:.3f} GB")
+    print(f"  +ckpt  peak_during_bwd  = {withckpt['peak_during_bwd_GB']:.3f} GB")
+    print(
+        f"  peak_during_bwd SAVING           = {nockpt['peak_during_bwd_GB'] - withckpt['peak_during_bwd_GB']:.3f} GB"
     )
 
     print("\n=== CI-VALUE-TENSOR RATIOS (key decision metric) ===")
@@ -244,6 +347,34 @@ def main():
     print(f"  activations proper (excl input cache)= {act_proper:.3f} GB")
     print(f"  (a) CI vals as % of total dynamic      = {100 * civ / dyn:.1f}%")
     print(f"  (b) CI vals as % of activations proper = {100 * civ / act_proper:.1f}%")
+
+    print("\n=== STEP-TIME (key question: does compile pay back the recompute?) ===")
+    n_warmup, n_timed = 3, 5
+
+    def _t(ckpt: bool, compile_mode: str) -> float:
+        return time_step(
+            args.bl,
+            args.seq,
+            ckpt=ckpt,
+            compile_mode=compile_mode,
+            n_warmup=n_warmup,
+            n_timed=n_timed,
+        )
+
+    t_base = _t(ckpt=False, compile_mode="none")
+    t_ckpt = _t(ckpt=True, compile_mode="none")
+    t_ckpt_perblock = _t(ckpt=True, compile_mode="per_block")
+    t_ckpt_whole = _t(ckpt=True, compile_mode="whole")
+    print(f"  (a) baseline (no ckpt, no compile)      = {t_base:8.1f} ms/step")
+    print(
+        f"  (b) +checkpoint                         = {t_ckpt:8.1f} ms/step  ({100 * (t_ckpt / t_base - 1):+.1f}% vs base)"
+    )
+    print(
+        f"  (c) +checkpoint +compile(per_block)     = {t_ckpt_perblock:8.1f} ms/step  ({100 * (t_ckpt_perblock / t_base - 1):+.1f}% vs base)"
+    )
+    print(
+        f"  (d) +checkpoint +compile(whole forward) = {t_ckpt_whole:8.1f} ms/step  ({100 * (t_ckpt_whole / t_base - 1):+.1f}% vs base)"
+    )
 
 
 if __name__ == "__main__":

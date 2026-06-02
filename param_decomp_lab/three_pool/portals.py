@@ -50,11 +50,23 @@ from param_decomp_lab.three_pool.layout import (
 )
 from param_decomp_lab.three_pool.role import CIRole, LWRole, PPGDRole
 
-# All cross-pool tensors are cast to this dtype on the wire (halves bytes vs
-# fp32). Downstream pools run inside bf16 autocast already; CI grads and V/U
-# grads accumulate into fp32 ``.grad`` and upcast back on receive — standard
-# bf16 mixed-precision pattern.
-WIRE_DTYPE: torch.dtype = torch.bfloat16
+# Cross-pool tensors are cast to a 2-byte dtype on the wire (halves bytes vs fp32).
+# The wire dtype is split by payload:
+#
+#   * CI VALUES (lower_leaky / upper_leaky) are bounded in ≈[0, 1] (leaky-hard
+#     sigmoid). fp16's 10 mantissa bits give ~8× finer resolution near 1.0 than
+#     bf16's 7; the exponent range bf16 buys is wasted on bounded data. So CI
+#     values ship as fp16.
+#   * GRADIENTS (CI grads, V/U grads) and the raw ``pre_sigmoid`` logit are
+#     unbounded and can have large dynamic range; they keep bf16's exponent range
+#     to avoid fp16 overflow. They accumulate into fp32 ``.grad`` and upcast on
+#     receive — the standard bf16 mixed-precision pattern.
+#
+# V/U weights themselves (UpdatedVuToPPGD) are also unbounded → bf16.
+CI_VALUE_WIRE_DTYPE: torch.dtype = torch.float16
+CI_GRAD_WIRE_DTYPE: torch.dtype = torch.bfloat16
+# Back-compat alias for the unbounded/grad/weight payloads that always used bf16.
+WIRE_DTYPE: torch.dtype = CI_GRAD_WIRE_DTYPE
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,7 +106,11 @@ class PendingCiValues:
     def wait(self) -> dict[str, Tensor]:
         out: dict[str, Tensor] = {
             s: torch.empty(
-                self.b_down, self.seq_len, self.site_to_c[s], device=self.device, dtype=WIRE_DTYPE
+                self.b_down,
+                self.seq_len,
+                self.site_to_c[s],
+                device=self.device,
+                dtype=CI_VALUE_WIRE_DTYPE,
             )
             for s in self.sites
         }
@@ -151,11 +167,13 @@ class InFlightSends:
             w.wait()
 
 
-def _pack_sites(d: dict[str, Tensor], sites: Iterable[str], sub: slice | None) -> Tensor:
+def _pack_sites(
+    d: dict[str, Tensor], sites: Iterable[str], sub: slice | None, dtype: torch.dtype
+) -> Tensor:
     """Flatten ``d[site][sub]`` (or ``d[site]`` if ``sub`` is None) for each site,
-    cast to the wire dtype, and concatenate into one contiguous buffer."""
+    cast to ``dtype``, and concatenate into one contiguous buffer."""
     parts = [
-        (d[s][sub] if sub is not None else d[s]).detach().to(WIRE_DTYPE).contiguous().flatten()
+        (d[s][sub] if sub is not None else d[s]).detach().to(dtype).contiguous().flatten()
         for s in sites
     ]
     return torch.cat(parts)
@@ -186,7 +204,7 @@ class CiValuesToLayerwise:
                 for down_slice_idx in edge.down_slices_for_ci_slice(role.slice_idx):
                     target = bg.ranks[down_slice_idx]
                     sub = edge.overlap_within_ci(role.slice_idx, down_slice_idx)
-                    packed = _pack_sites(ci_full, bg.owned_sites, sub)
+                    packed = _pack_sites(ci_full, bg.owned_sites, sub, CI_VALUE_WIRE_DTYPE)
                     works.append(
                         dist.isend(packed, dst=target, group=self.world.cross_pool_p2p_group)
                     )
@@ -209,7 +227,7 @@ class CiValuesToLayerwise:
                 overlap = edge.overlap_within_down(ci_slice_idx, role.within_block_idx)
                 overlap_len = overlap.stop - overlap.start
                 packed_numel = sum(overlap_len * seq_len * site_to_c[s] for s in role.owned_sites)
-                packed = torch.empty(packed_numel, device=device, dtype=WIRE_DTYPE)
+                packed = torch.empty(packed_numel, device=device, dtype=CI_VALUE_WIRE_DTYPE)
                 work = dist.irecv(packed, src=src, group=self.world.cross_pool_p2p_group)
                 assert work is not None
                 packets.append(
@@ -244,7 +262,7 @@ class CiValuesToPPGD:
             for ppgd_slice_idx in edge.down_slices_for_ci_slice(role.slice_idx):
                 target = self.world.ppgd_ranks[ppgd_slice_idx]
                 sub = edge.overlap_within_ci(role.slice_idx, ppgd_slice_idx)
-                packed = _pack_sites(ci_full, self.world.all_sites, sub)
+                packed = _pack_sites(ci_full, self.world.all_sites, sub, CI_VALUE_WIRE_DTYPE)
                 works.append(dist.isend(packed, dst=target, group=self.world.cross_pool_p2p_group))
                 buffers.append(packed)
         return InFlightSends(works=tuple(works), buffers=tuple(buffers))
@@ -263,7 +281,7 @@ class CiValuesToPPGD:
                 packed_numel = sum(
                     overlap_len * seq_len * site_to_c[s] for s in self.world.all_sites
                 )
-                packed = torch.empty(packed_numel, device=device, dtype=WIRE_DTYPE)
+                packed = torch.empty(packed_numel, device=device, dtype=CI_VALUE_WIRE_DTYPE)
                 work = dist.irecv(packed, src=src, group=self.world.cross_pool_p2p_group)
                 assert work is not None
                 packets.append(
@@ -301,7 +319,7 @@ class GradCiFromLayerwise:
             for ci_slice_idx in edge.ci_slices_for_down_slice(role.within_block_idx):
                 dst = self.world.ci_ranks[ci_slice_idx]
                 sub = edge.overlap_within_down(ci_slice_idx, role.within_block_idx)
-                packed = _pack_sites(g_ci_owned, role.owned_sites, sub)
+                packed = _pack_sites(g_ci_owned, role.owned_sites, sub, WIRE_DTYPE)
                 dist.send(packed, dst=dst, group=self.world.cross_pool_p2p_group)
 
     def recv(
@@ -364,7 +382,7 @@ class GradCiFromPPGD:
             for ci_slice_idx in edge.ci_slices_for_down_slice(role.slice_idx):
                 dst = self.world.ci_ranks[ci_slice_idx]
                 sub = edge.overlap_within_down(ci_slice_idx, role.slice_idx)
-                packed = _pack_sites(g_ci_full, self.world.all_sites, sub)
+                packed = _pack_sites(g_ci_full, self.world.all_sites, sub, WIRE_DTYPE)
                 dist.send(packed, dst=dst, group=self.world.cross_pool_p2p_group)
 
     def recv(
@@ -543,9 +561,15 @@ class CiOutputsEvalToPPGD:
             for ppgd_slice_idx in edge.down_slices_for_ci_slice(role.slice_idx):
                 target = self.world.ppgd_ranks[ppgd_slice_idx]
                 sub = edge.overlap_within_ci(role.slice_idx, ppgd_slice_idx)
+                # Eval-only (rare): pack all three dicts into one buffer. Because this
+                # bundles the unbounded ``pre_sigmoid`` logit alongside the bounded
+                # lower/upper masks, the whole packet stays bf16 (WIRE_DTYPE) rather
+                # than splitting the buffer by dtype — not worth the pack/unpack tangle
+                # for an off-critical-path send. The per-step value sends
+                # (CiValuesToLayerwise/PPGD) DO use fp16.
                 parts: list[Tensor] = []
                 for d in (ci.lower_leaky, ci.upper_leaky, ci.pre_sigmoid):
-                    parts.append(_pack_sites(d, self.world.all_sites, sub))
+                    parts.append(_pack_sites(d, self.world.all_sites, sub, WIRE_DTYPE))
                 packed = torch.cat(parts)
                 dist.send(packed, dst=target, group=self.world.cross_pool_p2p_group)
 

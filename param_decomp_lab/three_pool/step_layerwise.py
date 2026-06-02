@@ -364,9 +364,9 @@ def _slice_batch_for_layerwise(batch: Any, ctx: LWContext) -> tuple[Any, int]:
 def _releaf_ci_fp32_for_grads(
     ci_recv: dict[str, Tensor], owned_sites: tuple[str, ...]
 ) -> dict[str, Tensor]:
-    """Upcast CI (bf16 on the wire) to fp32 and re-leaf with ``requires_grad=True``
-    so the layerwise backward populates ``leaf.grad`` that the CI pool merges
-    into its CI-fn fp32 grads.
+    """Upcast CI (fp16 on the wire — bounded masks) to fp32 and re-leaf with
+    ``requires_grad=True`` so the layerwise backward populates ``leaf.grad`` that the
+    CI pool merges into its CI-fn fp32 grads.
     """
     return {
         s: ci_recv[s].detach().to(torch.float32).clone().requires_grad_(True) for s in owned_sites

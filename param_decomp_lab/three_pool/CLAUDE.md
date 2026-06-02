@@ -137,6 +137,32 @@ workaround — compile per-block with the checkpoint left eager — gave 2.42× 
 Per-rank inductor/triton cache dirs are kept as a defensive measure against shared-cache
 contention across the 160 concurrent compilers.
 
+## CI-fn checkpoint + compile (both default on)
+
+The CI pool activation-checkpoints the CI-fn transformer blocks
+(`GlobalSharedTransformerCiFn.enable_activation_checkpointing`, `PD_DISABLE_CI_CKPT=1` to
+disable) and then `torch.compile`s the **whole CI-fn forward** with the checkpoint loop
+inside the compiled region (`ci_fn.compile()`, `PD_DISABLE_CI_COMPILE=1` to disable) — same
+torch >= 2.11 pattern as LW. Checkpoint recomputes the 16384-wide MLP / attn intermediates in
+backward, saving ~**15 GB** of block-activation high-water on the CI rank; whole-forward
+compile turns the checkpoint's +12.9% step-time cost into a net **−9.2%** vs baseline (1-GPU
+B200 probe; whole-region beats per-block's −4.6%). The CI pool is compute-idle (PPGD is the
+long pole), so even the bare ckpt cost would be free on the critical path. Whole-forward
+compile + ckpt + flash-SDPA is validated on real 2-GPU DDP/NCCL. Either compile path (LW or
+CI) widens the step-0 PG timeout.
+
+## CI value wire dtype split (`portals.py`)
+
+The cross-pool wire dtype is split by payload. **CI value masks** (`lower_leaky` /
+`upper_leaky`) ship as **fp16** (`CI_VALUE_WIRE_DTYPE`) — they're bounded in ≈[0, 1]
+(leaky-hard sigmoid), so fp16's 10 mantissa bits give ~8× finer resolution near 1.0 than
+bf16's 7 at identical 2 bytes. **Gradients** (CI grads, V/U grads), **V/U weights**, and the
+unbounded **`pre_sigmoid`** logit keep **bf16** (`CI_GRAD_WIRE_DTYPE` / `WIRE_DTYPE`) for the
+exponent range. Received fp16 values upcast to fp32 on the consume side
+(`_releaf_ci_fp32_for_grads`), so downstream math is unchanged — grad check worst rel err
+4.04e-7. The eval-only `CiOutputsEvalToPPGD` packet bundles `pre_sigmoid` with the masks, so
+that whole packet stays bf16 rather than splitting the buffer by dtype (off the critical path).
+
 ## Resume (`from_snapshot`)
 
 3-pool runs persist a `ThreePoolTrainingState` (not the single-pool
