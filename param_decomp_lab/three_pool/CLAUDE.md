@@ -106,23 +106,20 @@ are still sub-second.
 
 ## LW torch.compile (default on; `PD_DISABLE_LW_COMPILE=1` to disable)
 
-The LW pool's transformer **blocks** are `torch.compile`d, with the block-loop's
-`checkpoint(block, …)` left **eager** — ~**2.42×** on the LW step (the throughput pole;
-14% → ~35% MFU), 0 graph breaks, grads bit-equivalent, validated clean at 160-GPU
-distributed scale. LW-only (PPGD/CI have slack; PPGD's `autograd.grad` is unvalidated
-under compile).
+The LW pool's component model is `torch.compile`d **whole-model** (the block-loop's
+`checkpoint(block, …)` lives *inside* the compiled region) — ~**2.74×** on the LW step (the
+throughput pole), 0 graph breaks, validated clean at 160-GPU distributed scale. LW-only
+(PPGD/CI have slack; PPGD's `autograd.grad` is unvalidated under compile).
 
-**Why per-block, not whole-model:** compiling the whole model is 2.61× single-GPU but
-the checkpoint then lives *inside* the compiled region, tagging the checkpointed
-flash-SDPA as a must-recompute nondeterministic-seeded op. That trips
-`functionalize_rng_ops` in the AOT min-cut partitioner —
-`KeyError: '_scaled_dot_product_flash_attention'` (`partitioners.py` `has_recomputable_rng_ops`
-→ `functionalize_rng_ops`) — in the distributed run (not reproducible single-GPU; manifests
-at scale). Compiling the block with the checkpoint *outside* the compiled unit leaves no
-recompute tags in the block's AOT graph, so that path is never taken — and eager checkpoint
-keeps the memory savings (SAC-must-save-SDPA would cost ~40 GB of attention outputs). The
-red herrings (all ruled out by bisection): inductor cache contention, NCCL fork, batch size,
-matmul precision. Per-rank inductor/triton cache dirs are kept as a defensive measure.
+**Requires torch >= 2.11.** With the checkpoint inside the compiled region the AOT min-cut
+partitioner sees the checkpointed flash-SDPA as a must-recompute nondeterministic-seeded op.
+On torch <= 2.10 its `functionalize_rng_ops` then `KeyError`'d on the DCE'd SDPA RNG op
+(`partitioners.py` `has_recomputable_rng_ops` → `functionalize_rng_ops`) — but **only** in the
+distributed run (not reproducible single-GPU; manifests at scale). torch 2.11 added the guard
+that skips that op instead of erroring, so whole-model compile is clean. (The earlier
+workaround — compile per-block with the checkpoint left eager — gave 2.42× and is gone.)
+Per-rank inductor/triton cache dirs are kept as a defensive measure against shared-cache
+contention across the 160 concurrent compilers.
 
 ## Resume (`from_snapshot`)
 

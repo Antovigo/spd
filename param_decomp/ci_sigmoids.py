@@ -84,7 +84,7 @@ def lower_leaky_hard_sigmoid(x: Tensor, alpha: float = 0.01) -> Tensor:
 
     See `LowerLeakyHardSigmoidFunction`. Forward matches `clamp(x, 0, 1)` exactly.
     """
-    return LowerLeakyHardSigmoidFunction.apply(x, alpha)  # pyright: ignore[reportReturnType]
+    return LowerLeakyHardSigmoidFunction.apply(x, alpha)
 
 
 def swish(x: Tensor, beta: float = 1.0) -> Tensor:

@@ -333,26 +333,19 @@ class ThreePoolTrainer:
         # _resolve_pg_timeout(compiling=...)). LW's forward is only called in step_layerwise
         # (target=None + masked dict, both validated); eval barriers LW through, so no recompile.
         if isinstance(self.ctx, LWContext) and _lw_compile_enabled():
-            # Compile each transformer block, leaving the model's block-loop checkpoint EAGER
-            # (the loop still does `checkpoint(block, ...)`). Compiling the WHOLE model (checkpoint
-            # *inside* the compiled region) tags the checkpointed flash-SDPA as a must-recompute
-            # nondeterministic-seeded op, which trips `functionalize_rng_ops` in the AOT min-cut
-            # partitioner — `KeyError '_scaled_dot_product_flash_attention'` — in the distributed
-            # run (not reproducible single-GPU; manifests at scale). With the checkpoint OUTSIDE the
-            # compiled unit, the block's AOT graph carries no recompute tags, so that path is never
-            # taken. Block-compile is ~2.42x single-GPU (vs 2.61x whole-model) and eager checkpoint
-            # keeps the memory savings (SAC-must-save-SDPA would cost ~40GB of attention outputs).
-            # Per-rank inductor/triton cache dirs are defensive against shared-cache contention
-            # across the 160 concurrent compilers (/tmp is shared here); set before the first compile.
+            # Whole-model compile: the block-loop checkpoint(block, ...) sits INSIDE the compiled
+            # region. Requires torch >= 2.11 — its AOT min-cut partitioner guards the DCE'd
+            # checkpointed flash-SDPA RNG op in `functionalize_rng_ops` (partitioners.py) instead of
+            # `KeyError '_scaled_dot_product_flash_attention'`-ing on it as <=2.10 did (only at
+            # distributed scale; not reproducible single-GPU). ~2.74x single-GPU. Per-rank
+            # inductor/triton cache dirs are defensive against shared-cache contention across the 160
+            # concurrent compilers (/tmp is shared here); set before the first compile.
             user = os.environ.get("USER", "u")
             rank = dist.get_rank()
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
             os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
-            trace(
-                "ThreePoolTrainer.__init__: torch.compile(LW blocks) [eager checkpoint, per-rank cache]"
-            )
-            for block in self.component_model.model._h:
-                block.compile()
+            trace("ThreePoolTrainer.__init__: torch.compile(whole model) [per-rank cache]")
+            self.component_model.model.compile()
         # Diverge stochastic RNG per rank for mask sampling.
         seed_per_rank(pd_config.seed)
 
