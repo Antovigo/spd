@@ -49,11 +49,13 @@ def cross_pool_clip_grad_norm(
     dist.all_reduce(sq_local, op=dist.ReduceOp.SUM, group=group)
     sq_global = sq_local / n_replicas
     total_norm = sq_global.sqrt()
-    # Match torch.nn.utils.clip_grad_norm_'s convention: scale only if norm
-    # exceeds max_norm; otherwise leave grads untouched.
+    # Scale unconditionally by the clamped coefficient (<=1.0): it is an exact
+    # ×1.0 no-op when total_norm <= max_norm, so this matches
+    # torch.nn.utils.clip_grad_norm_'s semantics WITHOUT an ``.item()`` readback
+    # on clip_coef — that sync would block the CPU on the full grad-norm (i.e. the
+    # whole backward) every step.
     clip_coef = torch.clamp(max_norm / (total_norm + 1e-6), max=1.0)
-    if clip_coef.item() < 1.0:
-        for p in params:
-            if p.grad is not None:
-                p.grad.mul_(clip_coef)
+    for p in params:
+        if p.grad is not None:
+            p.grad.mul_(clip_coef)
     return total_norm
