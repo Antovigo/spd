@@ -96,6 +96,32 @@ in-train (fast) eval pass plus a checkpoint partial-write barrier — minutes, n
 the old ~10-min rank-0 read. Override (seconds) via `PD_3POOL_PG_TIMEOUT_S` —
 used by the watchdog-safe-at-low-timeout test to force a tight bound.
 
+When LW `torch.compile` is on (the default — see below), the timeout widens to
+**20 min** (`_COMPILE_PG_TIMEOUT`), because step 0 pays a one-time ~minutes
+compilation while the other pools wait at the first cross-pool collective. The
+widening is uniform across ranks (the flag is global), and steady-state collectives
+are still sub-second.
+
+## LW torch.compile (default on; `PD_DISABLE_LW_COMPILE=1` to disable)
+
+The LW pool's transformer **blocks** are `torch.compile`d, with the block-loop's
+`checkpoint(block, …)` left **eager** — ~**2.42×** on the LW step (the throughput pole;
+14% → ~35% MFU), 0 graph breaks, grads bit-equivalent, validated clean at 160-GPU
+distributed scale. LW-only (PPGD/CI have slack; PPGD's `autograd.grad` is unvalidated
+under compile).
+
+**Why per-block, not whole-model:** compiling the whole model is 2.61× single-GPU but
+the checkpoint then lives *inside* the compiled region, tagging the checkpointed
+flash-SDPA as a must-recompute nondeterministic-seeded op. That trips
+`functionalize_rng_ops` in the AOT min-cut partitioner —
+`KeyError: '_scaled_dot_product_flash_attention'` (`partitioners.py` `has_recomputable_rng_ops`
+→ `functionalize_rng_ops`) — in the distributed run (not reproducible single-GPU; manifests
+at scale). Compiling the block with the checkpoint *outside* the compiled unit leaves no
+recompute tags in the block's AOT graph, so that path is never taken — and eager checkpoint
+keeps the memory savings (SAC-must-save-SDPA would cost ~40 GB of attention outputs). The
+red herrings (all ruled out by bisection): inductor cache contention, NCCL fork, batch size,
+matmul precision. Per-rank inductor/triton cache dirs are kept as a defensive measure.
+
 ## Resume (`from_snapshot`)
 
 3-pool runs persist a `ThreePoolTrainingState` (not the single-pool

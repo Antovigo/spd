@@ -116,13 +116,31 @@ from param_decomp_lab.three_pool.step_ppgd import step_ppgd
 # generous margin while still being far below "hang forever". Env-overridable
 # (seconds) so the watchdog-safe-at-low-timeout test can force a tight bound.
 _DEFAULT_PG_TIMEOUT = datetime.timedelta(minutes=10)
+# With torch.compile on, step 0 pays a one-time ~minutes compilation while the other pools
+# wait at the first cross-pool collective; widen the timeout so that wait can't trip the
+# watchdog. Steady-state collectives are sub-second, so the looser bound only delays
+# detection of a genuine first-step hang.
+_COMPILE_PG_TIMEOUT = datetime.timedelta(minutes=20)
 
 
-def _resolve_pg_timeout() -> datetime.timedelta:
+def _lw_compile_enabled() -> bool:
+    """torch.compile the LW pool's blocks — default on; ``PD_DISABLE_LW_COMPILE=1`` to disable.
+
+    Block-level compile with eager checkpoint (see the compile call in ``__init__``) gives
+    ~2.42x on the LW step (the throughput pole) and is validated clean at 160-GPU distributed
+    scale. (Whole-model compile gives 2.61x single-GPU but trips an AOT-partitioner
+    ``KeyError: '_scaled_dot_product_flash_attention'`` at scale — see the compile call.) Global
+    (the launcher exports env to every rank), required because it also widens the collective PG
+    timeout uniformly across ranks.
+    """
+    return os.environ.get("PD_DISABLE_LW_COMPILE", "").strip() not in ("1", "true", "yes")
+
+
+def _resolve_pg_timeout(*, compiling: bool = False) -> datetime.timedelta:
     override_s = os.environ.get("PD_3POOL_PG_TIMEOUT_S", "").strip()
     if override_s:
         return datetime.timedelta(seconds=float(override_s))
-    return _DEFAULT_PG_TIMEOUT
+    return _COMPILE_PG_TIMEOUT if compiling else _DEFAULT_PG_TIMEOUT
 
 
 class ThreePoolTrainer:
@@ -228,7 +246,7 @@ class ThreePoolTrainer:
             layerwise_block_groups=block_groups,
             ppgd_ranks=list(three_pool_config.ppgd_ranks),
             batch_global=self.runtime.batch_global,
-            pg_timeout=_resolve_pg_timeout(),
+            pg_timeout=_resolve_pg_timeout(compiling=_lw_compile_enabled()),
             device=self._device,
         )
         trace("ThreePoolTrainer.__init__: build_world: done")
@@ -305,6 +323,36 @@ class ThreePoolTrainer:
                     m.enable_bwd_profile()
                     trace("ThreePoolTrainer.__init__: enabled CI fn bwd-stage profile")
                     break
+        # LW pool: torch.compile the (target + masked) model forward — a validated 2.61× on
+        # the LW step single-GPU (the throughput pole). The vendored mask-arg forward traces
+        # cleanly (0 graph breaks) and attention uses F.sdpa directly. OPT-IN
+        # (PD_ENABLE_LW_COMPILE=1): the distributed run currently hits a flash-SDPA partitioner
+        # KeyError that doesn't repro single-GPU — see _lw_compile_enabled. LW-only: PPGD/CI
+        # have slack and PPGD's autograd.grad path is unvalidated under compile. When enabled,
+        # the one-time first-step compilation is absorbed by the widened PG timeout (see
+        # _resolve_pg_timeout(compiling=...)). LW's forward is only called in step_layerwise
+        # (target=None + masked dict, both validated); eval barriers LW through, so no recompile.
+        if isinstance(self.ctx, LWContext) and _lw_compile_enabled():
+            # Compile each transformer block, leaving the model's block-loop checkpoint EAGER
+            # (the loop still does `checkpoint(block, ...)`). Compiling the WHOLE model (checkpoint
+            # *inside* the compiled region) tags the checkpointed flash-SDPA as a must-recompute
+            # nondeterministic-seeded op, which trips `functionalize_rng_ops` in the AOT min-cut
+            # partitioner — `KeyError '_scaled_dot_product_flash_attention'` — in the distributed
+            # run (not reproducible single-GPU; manifests at scale). With the checkpoint OUTSIDE the
+            # compiled unit, the block's AOT graph carries no recompute tags, so that path is never
+            # taken. Block-compile is ~2.42x single-GPU (vs 2.61x whole-model) and eager checkpoint
+            # keeps the memory savings (SAC-must-save-SDPA would cost ~40GB of attention outputs).
+            # Per-rank inductor/triton cache dirs are defensive against shared-cache contention
+            # across the 160 concurrent compilers (/tmp is shared here); set before the first compile.
+            user = os.environ.get("USER", "u")
+            rank = dist.get_rank()
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+            os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+            trace(
+                "ThreePoolTrainer.__init__: torch.compile(LW blocks) [eager checkpoint, per-rank cache]"
+            )
+            for block in self.component_model.model._h:
+                block.compile()
         # Diverge stochastic RNG per rank for mask sampling.
         seed_per_rank(pd_config.seed)
 
