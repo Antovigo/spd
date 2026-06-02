@@ -350,9 +350,9 @@ def _fused_backward_through_ci_fn(
     ctx: CIContext,
     cfg: _ThreePoolRuntime,
 ) -> None:
-    """Phase ci/8. Backward through the CI fn graph.
+    """Phase ci/8. Single fused backward through the CI fn graph.
 
-    Two gradient seeds enter the graph:
+    Two gradient seeds enter the graph in one ``torch.autograd.backward`` call:
       * ``coeff_imp * loss_imp`` — flows via ``ci.upper_leaky``. Under the
         SUM-grad convention the imp-min loss uses the detached-global-residual
         trick, so its backward flows ONLY through this rank's local CI values (a
@@ -360,12 +360,11 @@ def _fused_backward_through_ci_fn(
       * ``g_CI_total[s]`` per site — injected directly on ``ci.lower_leaky[s]``.
         96 separate gradient seeds rejoining at the shared CI fn output.
 
-    Diagnostic split: each seed runs its own ``torch.autograd.backward`` call
-    with ``retain_graph=True`` on the first so the second still sees the
-    graph. Gradient accumulation onto the CI fn params is the same as one
-    fused call. This is purely so the per-phase profiler can attribute time
-    between the two backward paths — to find out which one dominates and
-    where to optimize next.
+    A single backward (no ``retain_graph``) frees the activation graph as it
+    runs, halving the bwd-time activation high-water vs the previous diagnostic
+    two-call split. The per-stage bwd breakdown (output-head / per-block /
+    input-projector) still works: it is driven by per-boundary CUDA-event hooks
+    registered during the forward, not by splitting the backward.
     """
     loss_imp = imp.loss
     assert loss_imp.dim() == 0, f"loss_imp must be scalar; got {loss_imp.shape}"
@@ -373,11 +372,9 @@ def _fused_backward_through_ci_fn(
     lower_leaky_tensors = [fwd.ci.lower_leaky[s] for s in ctx.world.all_sites]
     g_ci_total_seeds = [total.per_site[s] for s in ctx.world.all_sites]
     torch.autograd.backward(
-        tensors=lower_leaky_tensors,
-        grad_tensors=g_ci_total_seeds,
-        retain_graph=True,
+        tensors=[*lower_leaky_tensors, scaled_imp],
+        grad_tensors=[*g_ci_total_seeds, None],
     )
-    torch.autograd.backward(tensors=[scaled_imp], grad_tensors=[None])
 
 
 def _target_fwd_and_cache(
