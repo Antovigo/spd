@@ -124,14 +124,13 @@ _COMPILE_PG_TIMEOUT = datetime.timedelta(minutes=20)
 
 
 def _lw_compile_enabled() -> bool:
-    """torch.compile the LW pool's blocks — default on; ``PD_DISABLE_LW_COMPILE=1`` to disable.
+    """torch.compile the LW pool — default on; ``PD_DISABLE_LW_COMPILE=1`` to disable.
 
-    Block-level compile with eager checkpoint (see the compile call in ``__init__``) gives
-    ~2.42x on the LW step (the throughput pole) and is validated clean at 160-GPU distributed
-    scale. (Whole-model compile gives 2.61x single-GPU but trips an AOT-partitioner
-    ``KeyError: '_scaled_dot_product_flash_attention'`` at scale — see the compile call.) Global
-    (the launcher exports env to every rank), required because it also widens the collective PG
-    timeout uniformly across ranks.
+    Whole-model compile (see the compile call in ``__init__``) gives ~2.74x on the LW step (the
+    throughput pole), validated clean at 160-GPU distributed scale on torch >= 2.11 (earlier torch
+    tripped an AOT-partitioner ``KeyError: '_scaled_dot_product_flash_attention'`` at scale — see
+    the compile call). Global (the launcher exports env to every rank), required because it also
+    widens the collective PG timeout uniformly across ranks.
     """
     return os.environ.get("PD_DISABLE_LW_COMPILE", "").strip() not in ("1", "true", "yes")
 
@@ -323,13 +322,12 @@ class ThreePoolTrainer:
                     m.enable_bwd_profile()
                     trace("ThreePoolTrainer.__init__: enabled CI fn bwd-stage profile")
                     break
-        # LW pool: torch.compile the (target + masked) model forward — a validated 2.61× on
+        # LW pool: torch.compile the (target + masked) model forward — a validated 2.74× on
         # the LW step single-GPU (the throughput pole). The vendored mask-arg forward traces
-        # cleanly (0 graph breaks) and attention uses F.sdpa directly. OPT-IN
-        # (PD_ENABLE_LW_COMPILE=1): the distributed run currently hits a flash-SDPA partitioner
-        # KeyError that doesn't repro single-GPU — see _lw_compile_enabled. LW-only: PPGD/CI
-        # have slack and PPGD's autograd.grad path is unvalidated under compile. When enabled,
-        # the one-time first-step compilation is absorbed by the widened PG timeout (see
+        # cleanly (0 graph breaks) and attention uses F.sdpa directly. Default-on
+        # (PD_DISABLE_LW_COMPILE=1 to disable) — see _lw_compile_enabled. LW-only: PPGD/CI
+        # have slack and PPGD's autograd.grad path is unvalidated under compile. The one-time
+        # first-step compilation is absorbed by the widened PG timeout (see
         # _resolve_pg_timeout(compiling=...)). LW's forward is only called in step_layerwise
         # (target=None + masked dict, both validated); eval barriers LW through, so no recompile.
         if isinstance(self.ctx, LWContext) and _lw_compile_enabled():
