@@ -115,7 +115,7 @@ def step_layerwise(
         param.grad = None
 
     with strategy.context():
-        faith = _faithfulness_phase(component_model, device, cfg)
+        faith = _faithfulness_phase(component_model, device, cfg, ctx)
 
         ci_leaves = _wait_ci_and_releaf(ci_recv_pending, ctx, seq_len, cfg)
         stoch = _layerwise_streaming_phase(
@@ -167,11 +167,22 @@ def _target_fwd(
 
 
 def _faithfulness_phase(
-    component_model: LMComponentModel, device: torch.device, cfg: _ThreePoolRuntime
+    component_model: LMComponentModel, device: torch.device, cfg: _ThreePoolRuntime, ctx: LWContext
 ) -> Faith:
-    """Phase lw/D1. Faithfulness loss + backward into V/U .grad."""
+    """Phase lw/D1. Faithfulness loss + backward into V/U .grad (block leader only).
+
+    Contribute-once (see ``SUM_GRAD_CONVENTION.md``): faith is computed from the
+    replicated V/U weights, so it is identical across a block's DP partners. Under
+    the block SUM-reduce it must land on exactly ONE rank — the block leader runs
+    the backward; non-leaders skip it (their faith grad would be a duplicate). The
+    block SUM then spreads the leader's faith grad to every replica exactly once.
+
+    The loss / sum_sq / numel are still computed on every rank (they feed the
+    logger's global ratio, not the gradient), so logging is unchanged.
+    """
     loss, sum_sq, numel = _faithfulness_loss(component_model, device, cfg.numel_global)
-    (cfg.coeff_faith * loss).backward()
+    if ctx.role.is_block_leader:
+        (cfg.coeff_faith * loss).backward()
     return Faith(loss=loss, sum_sq=sum_sq, numel=numel)
 
 
@@ -204,6 +215,13 @@ def _layerwise_streaming_phase(
     masked forward+backward. The default ``PerSitePlan`` produces one forward per
     owned site (the original layerwise loop); a ``SubsetRoutingPlan`` produces
     ``n_samples`` joint/subset forwards over all owned sites.
+
+    Each forward's backward seeds the stoch gradient onto BOTH the re-leafed CI
+    values (→ CI pool) and the V/U weights (→ LW block). Under the SUM-grad
+    convention (see ``SUM_GRAD_CONVENTION.md``) both reductions are SUM, so the
+    seed is a single partial sum normalized only by the honest GLOBAL count —
+    and the SAME scale serves both destinations (no per-destination split, no
+    ``/ n_ci`` to survive a CI-pool AVG).
     """
     owned_sites = ctx.role.owned_sites
     mask_shape = next(iter(ci_leaves.per_site.values())).shape[:-1]
@@ -217,7 +235,6 @@ def _layerwise_streaming_phase(
         coeff_stoch=cfg.coeff_stoch,
         n_est=cfg.n_est,
         n_per_block=ctx.world.n_per_block,
-        n_ci=ctx.world.n_ci,
         strategy=strategy,
         bf16_autocast_enabled=cfg.bf16_autocast,
     )
@@ -232,7 +249,6 @@ def _run_routing_forwards(
     coeff_stoch: float,
     n_est: int,
     n_per_block: int,
-    n_ci: int,
     strategy: LayerwiseLossStrategy,
     bf16_autocast_enabled: bool,
 ) -> Stoch:
@@ -240,11 +256,10 @@ def _run_routing_forwards(
 
     Context-free (no ``World``/portals) so the gradient-scaling grad check can
     drive it directly. Each forward's backward seeds the stoch gradient onto the
-    re-leafed CI values (which ship back to the CI pool and seed the CI-fn
-    backward alongside imp-min and PPGD) and onto V/U. For that CI-fn gradient to
-    carry the same stoch:imp:pgd balance as single-pool at ANY topology, the seed
-    is GLOBALLY normalized by ``stoch_grad_denom``, not by this LW rank's local
-    position count.
+    re-leafed CI values (→ CI pool) and onto V/U (→ LW block). Under the SUM-grad
+    convention (see ``SUM_GRAD_CONVENTION.md``) both cross-rank reductions are
+    SUM, so the seed is a single partial sum normalized only by the honest GLOBAL
+    count — the SAME ``stoch_grad_denom`` serves both destinations.
 
     Derivation. Single-pool's stoch estimator averages over ``N_est`` recon
     forwards (one per site for the layerwise estimator → ``N_est = n_sites_total``;
@@ -253,13 +268,14 @@ def _run_routing_forwards(
     positions), so each ``(forward, position)`` contributes a seed of
     ``coeff_stoch / (N_est * P_global)``.
 
-    In 3-pool, each LW rank covers ``P_local = P_global / n_per_block`` distinct
-    positions, and the CI pool AVG-reduces the assembled CI-fn grads over
-    ``n_ci``. With a denom ``D``, the CI-fn stoch grad summed over all positions
-    and de-duplicated by the AVG is ``(1 / n_ci) * P_global * coeff_stoch / D``.
-    Setting that equal to the single-pool per-forward total ``coeff_stoch / N_est``
-    gives ``D = P_global * N_est / n_ci``. Writing ``P_global = n_positions *
-    n_per_block`` yields the form below.
+    In 3-pool each LW rank covers ``P_local = P_global / n_per_block`` distinct
+    positions. Its seed is the SAME per-(forward, position) value; the CI-pool
+    SUM and the LW-block SUM then reassemble the full single-pool sum (each global
+    position contributes exactly once). The denom is the honest global count
+    ``N_est * P_global`` with ``P_global = n_positions * n_per_block`` — the only
+    pool factor that survives is the ``local → global`` position conversion
+    ``n_per_block``, which is part of the global count, not a transport factor.
+    The old ``/ n_ci`` (to survive the CI-pool AVG) is gone.
 
     ``N_est`` is the global total of recon forwards across the whole LW pool
     (``cfg.n_est``); it generalises the old ``n_sites_total`` factor and equals it
@@ -279,7 +295,8 @@ def _run_routing_forwards(
                 component_model, batch_local, target_local, ci_leaves, sites, routing, strategy
             )
             assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
-            stoch_grad_denom = n_positions * n_est * n_per_block / n_ci
+            n_positions_global = n_positions * n_per_block
+            stoch_grad_denom = n_positions_global * n_est
             (coeff_stoch * loss_f / stoch_grad_denom).backward()
             stoch_total_t = stoch_total_t + (loss_f.detach() / n_positions)
     return Stoch(total=stoch_total_t, n_forwards=len(routings))
@@ -295,9 +312,16 @@ def _send_g_ci(portals: LWPortals, role: LWRole, ci_leaves: CiLeaves) -> None:
 
 
 def _recv_and_combine_g_vu(ctx: LWContext, component_model: LMComponentModel) -> None:
-    """Phases lw/D5 + lw/D6. Recv PPGD's V/U grads, add to existing .grad."""
+    """Phases lw/D5 + lw/D6. Recv PPGD's V/U grads (block leader only), add to
+    existing .grad.
+
+    Contribute-once: PPGD's grad is replicated across block ranks, so only the
+    block leader recvs and adds it. The block SUM-reduce (lw/E) then spreads it
+    to every replica exactly once (see ``SUM_GRAD_CONVENTION.md``).
+    """
     v_grads_pgd, u_grads_pgd = _recv_g_vu_from_ppgd(ctx, component_model)
-    _combine_vu_grads_in_place(component_model, ctx.role.owned_sites, v_grads_pgd, u_grads_pgd)
+    if ctx.role.is_block_leader:
+        _combine_vu_grads_in_place(component_model, ctx.role.owned_sites, v_grads_pgd, u_grads_pgd)
 
 
 def run_faithfulness_warmup_layerwise(
@@ -408,18 +432,23 @@ def _recv_g_vu_from_ppgd(
     ctx: LWContext,
     component_model: LMComponentModel,
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """Phase lw/D5. Recv V/U grads from PPGD pool (leader recvs, in-block bcast)."""
+    """Phase lw/D5. Recv V/U grads from PPGD pool (block leader only).
+
+    Non-leaders get empty dicts — PPGD's grad is replicated, so only the leader
+    contributes it (see ``_recv_and_combine_g_vu``).
+    """
     owned_sites = ctx.role.owned_sites
     v_templates = {s: component_model.components[s].V for s in owned_sites}
     u_templates = {s: component_model.components[s].U for s in owned_sites}
     v_grads_pgd, u_grads_pgd = ctx.portals.g_vu_from_ppgd.recv(ctx.role, v_templates, u_templates)
-    for s in owned_sites:
-        assert v_grads_pgd[s].shape == component_model.components[s].V.shape, (
-            f"v_grads_pgd[{s!r}] shape mismatch from PPGD send"
-        )
-        assert u_grads_pgd[s].shape == component_model.components[s].U.shape, (
-            f"u_grads_pgd[{s!r}] shape mismatch from PPGD send"
-        )
+    if ctx.role.is_block_leader:
+        for s in owned_sites:
+            assert v_grads_pgd[s].shape == component_model.components[s].V.shape, (
+                f"v_grads_pgd[{s!r}] shape mismatch from PPGD send"
+            )
+            assert u_grads_pgd[s].shape == component_model.components[s].U.shape, (
+                f"u_grads_pgd[{s!r}] shape mismatch from PPGD send"
+            )
     return v_grads_pgd, u_grads_pgd
 
 

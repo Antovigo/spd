@@ -124,7 +124,6 @@ def test_denom_matches_single_pool_normalization(plan: RoutingPlan) -> None:
             coeff_stoch=1.0,
             n_est=n_forwards,
             n_per_block=1,
-            n_ci=1,
             strategy=strategy,
             bf16_autocast_enabled=False,
         )
