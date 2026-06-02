@@ -25,21 +25,25 @@ Phases (numbered to match ``DESIGN.md`` ``ci/N``):
       sub-sliced). Kicks the NIC so 4 + 5 + 6 can pipeline.
   3.  imp_min loss on ``CI.upper_leaky`` (still on graph — gradient enters
       the fused bwd at 8).
-  4.  Dead-time prefetch: target_fwd(batch T+1) → H_{T+1}. GPU work overlaps
-      with the NIC sends in 2 and the downstream pool work it triggered.
   5.  Recv g_CI from LW (per-site, stitched across K_lw_per_ci slices).
   6.  Recv g_CI from PPGD (per-site, stitched across K_ppgd_per_ci slices).
   7.  Assemble g_CI_total per site on this CI rank's batch slice.
   8.  Fused autograd backward: imp_min via ``upper_leaky``, downstream grads
       injected on ``lower_leaky``. One pass through the CI fn graph.
-  9.  In-pool AVG-reduce on CI fn grads (standard DDP).
+  9.  Async kickoff of the in-pool SUM-reduce on CI fn grads (the ~10 GB,
+      comm-bound op). Non-blocking — overlaps with phase 4 below.
+  4.  Dead-time prefetch: target_fwd(batch T+1) → H_{T+1}. Runs while the phase-9
+      reduce is in flight, hiding target-fwd compute behind the NCCL reduce.
+  9w. Wait the phase-9 reduce + copy reduced grads back — the first consumer
+      (9b / 10) needs them complete.
   9b. Cross-pool grad clip on CI fn (n_replicas=n_ci dedup).
   10. AdamW step.
   11. Wait the step-2 async sends to flush before storage gets reused next iter.
 
 Returns ``(metrics, h_cache_T_plus_1)``. The runner threads the prefetched
-cache into the next call as ``h_cache_T``. Phases 2 + 4 give the headline
-overlap (NIC sends concurrent with the prefetch target fwd).
+cache into the next call as ``h_cache_T``. Phase 2 sends overlap downstream
+pool work; phases 9 + 4 give the new overlap (the comm-bound CI grad reduce
+concurrent with the dead-time target fwd).
 """
 
 # pyright: reportArgumentType=false
@@ -64,7 +68,11 @@ from param_decomp.metrics.importance_minimality import (
 from param_decomp.torch_helpers import bf16_autocast
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.context import CIContext
-from param_decomp_lab.three_pool.portals import CIPortals, InFlightSends, all_reduce_ci_fn_grads
+from param_decomp_lab.three_pool.portals import (
+    CIPortals,
+    InFlightSends,
+    all_reduce_ci_fn_grads_async,
+)
 from param_decomp_lab.three_pool.role import CIRole
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 
@@ -143,7 +151,6 @@ def step_ci(
     fwd = _ci_fn_forward(component_model, h_cache_T, ctx, cfg)
     sends = _send_ci_values(ctx.portals, ctx.role, fwd)
     imp = _imp_min_phase(fwd, current_frac_of_training, cfg, ctx)
-    h_cache_T_plus_1 = _prefetch_next_h(component_model, batch_T_plus_1_local, cfg)
     received = _recv_g_ci(ctx.portals, ctx.role, cfg, fwd.seq_len, device)
     total = _assemble_g_ci_total(received, ctx, cfg, fwd.seq_len)
 
@@ -157,7 +164,17 @@ def step_ci(
     _fused_backward_through_ci_fn(imp, fwd, total, ctx, cfg)
     _maybe_emit_ci_fn_bwd_breakdown(component_model)
 
-    all_reduce_ci_fn_grads(ctx.world, ci_fn_params)
+    # Phase ci/9. Kick off the in-pool SUM-reduce of the CI fn grads async, then
+    # run the dead-time H_{T+1} prefetch (phase ci/4) to overlap the ~10 GB,
+    # ~1.7 s NCCL reduce with target-fwd compute. The prefetch reads only frozen
+    # target-model weights, so it is independent of both the reduced grads and the
+    # CI-fn weight update; it can safely precede optimizer.step. Wait + copy-back
+    # happens just before the first consumer of the reduced grads (grad-clip /
+    # optimizer.step) below.
+    in_flight_ci_grad_reduce = all_reduce_ci_fn_grads_async(ctx.world, ci_fn_params)
+    h_cache_T_plus_1 = _prefetch_next_h(component_model, batch_T_plus_1_local, cfg)
+    in_flight_ci_grad_reduce.wait()
+
     if cfg.grad_clip_norm_ci_fn is not None:
         cross_pool_clip_grad_norm(
             ci_fn_params,
@@ -410,7 +427,7 @@ def _importance_minimality_loss(
     Forward value is the global sum; backward ``∂global/∂local = 1`` and the
     cross-rank term is detached, so the gradient flows ONLY through THIS rank's
     local CI values — a true partial sum. The CI-pool SUM all-reduce on the CI-fn
-    grads (``all_reduce_ci_fn_grads``) then reassembles the single-pool total.
+    grads (``all_reduce_ci_fn_grads_async``) then reassembles the single-pool total.
 
     This replaces the old autograd-aware ``dist_fn.all_reduce``, whose backward
     SUM-reduced the REPLICATED upstream gradient across the pool, leaving each

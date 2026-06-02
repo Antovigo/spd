@@ -301,17 +301,25 @@ recv is dominated by waiting for LW/PPGD to send their grads; this
 refactor doesn't change that, just removes the per-call NCCL setup overhead.
 Small but real (~5-10 ms).
 
-### 3. **CI: async in-pool all_reduce on CI fn grads (mirror the LW pattern)**
+### 3. **CI: async in-pool all_reduce on CI fn grads (mirror the LW pattern)** — DONE
 
-CI's in-pool all_reduce (A9) is currently sync. Same trick as LW: kick off
-async at end of iter T, wait at start of iter T+1 — overlapped with CI's
-next iter's target_fwd / CI fn fwd kernels.
+DONE: `all_reduce_ci_fn_grads_async` (`portals.py`) kicks off the bucketed SUM
+all-reduce non-blocking right after the fused backward (A8); the dead-time
+H_{T+1} prefetch (A4) is reordered to run while the reduce is in flight; the
+wait + copy-back lands just before grad-clip / AdamW (A9w → A9b → A10), the
+first consumers of the reduced grads. The overlap is WITHIN step T (reduce of T
+hidden behind T's own prefetch), not cross-step — the prefetch is the only
+non-dependent compute after the backward and it reads only frozen target-model
+weights, so it's safe before optimizer.step.
 
-Implementation cost: pattern-match what we just did for LW. ~80 LOC.
+The reduction is bit-identical to the old sync path (same SUM, same buckets);
+the distributed grad check stays at `mean(dist/ref)=1.000000`.
 
-Expected win: hides the CI in-pool all_reduce latency. For `N_ci > 1`
-(currently `N_ci=1` in the example, so no-op). When multi-rank CI is used,
-this is a real win — maybe ~10-30 ms / step.
+Ceiling: async only HIDES comm behind compute; on the rebalanced topology CI is
+comm-dominated (~1766 ms NCCL >> ~579 ms compute), so the most this can recover
+is the prefetch compute that now overlaps — CI wall floor ≈ the reduce time
+itself. The real lever for CI wall is bf16-ing the reduce (halve the 10 GB),
+not async.
 
 ### 4. **PPGD: async send_g_vu + send_g_ci can be kicked off in parallel**
 

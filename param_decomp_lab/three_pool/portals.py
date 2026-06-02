@@ -41,6 +41,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from param_decomp.component_model import CIOutputs
 from param_decomp_lab.three_pool.layout import (
@@ -624,7 +625,6 @@ def _bucketed_all_reduce(
     buckets: dict[tuple[torch.dtype, torch.device], list[Tensor]] = {}
     for g in grads_list:
         buckets.setdefault((g.dtype, g.device), []).append(g)
-    from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
     with time_nccl_op(label):
         for bucket in buckets.values():
@@ -634,22 +634,61 @@ def _bucketed_all_reduce(
                 orig.copy_(reduced)
 
 
-def all_reduce_ci_fn_grads(world: World, params: Iterable[nn.Parameter]) -> None:
-    """CI in-pool SUM-reduce on CI fn grads. No-op for 1-rank pool.
+@dataclass(frozen=True)
+class InFlightCiGradReduce:
+    """An async CI in-pool SUM-reduce on CI fn grads, held until ``wait()``.
+
+    Mirrors ``all_reduce_grads_in_block``'s async bucketed pattern: the reduce
+    is kicked off (``async_op=True``) right after the fused backward, then the
+    flat buffers are reduced in-flight while the CI rank does non-dependent work
+    (the dead-time H_{T+1} prefetch). ``wait()`` blocks on every bucket and
+    copies the reduced result back into each grad — it MUST be called before the
+    first consumer of the reduced grads (grad-clip / ``optimizer.step``).
+
+    A no-op (empty ``buckets``) is returned when the CI pool is 1-rank or there
+    are no grads, so ``wait()`` is always safe to call.
+    """
+
+    buckets: tuple[tuple[list[Tensor], Tensor, "dist.Work"], ...]
+
+    def wait(self) -> None:
+        for bucket, flat, w in self.buckets:
+            w.wait()
+            for orig, reduced in zip(bucket, _unflatten_dense_tensors(flat, bucket), strict=True):
+                orig.copy_(reduced)
+
+
+def all_reduce_ci_fn_grads_async(
+    world: World, params: Iterable[nn.Parameter]
+) -> InFlightCiGradReduce:
+    """Kick off the CI in-pool SUM-reduce of the CI fn grads async, returning the
+    in-flight handle; the caller ``wait()``s before the first grad consumer.
 
     SUM, not AVG (see ``SUM_GRAD_CONVENTION.md``): each producer's CI grad is a
     partial sum already normalized by the honest global count, so the cross-rank
     SUM reassembles the single-pool total directly. No producer pre-scales by
-    ``n_ci`` to survive this reduce.
+    ``n_ci`` to survive this reduce. Same reduction as a blocking all-reduce —
+    bit-identical — just non-blocking.
     """
     if dist.get_world_size(world.ci_pool_group) <= 1:
-        return
-    _bucketed_all_reduce(
-        (p.grad for p in params if p.grad is not None),
-        dist.ReduceOp.SUM,
-        world.ci_pool_group,
-        "all_reduce_ci_fn_grads",
-    )
+        return InFlightCiGradReduce(buckets=())
+    grads = [p.grad for p in params if p.grad is not None]
+    if not grads:
+        return InFlightCiGradReduce(buckets=())
+    grad_buckets: dict[tuple[torch.dtype, torch.device], list[Tensor]] = {}
+    for g in grads:
+        grad_buckets.setdefault((g.dtype, g.device), []).append(g)
+
+    states: list[tuple[list[Tensor], Tensor, dist.Work]] = []
+    with time_nccl_op("all_reduce_ci_fn_grads"):
+        for bucket in grad_buckets.values():
+            flat = _flatten_dense_tensors(bucket)
+            w = dist.all_reduce(
+                flat, op=dist.ReduceOp.SUM, group=world.ci_pool_group, async_op=True
+            )
+            assert w is not None
+            states.append((bucket, flat, w))
+    return InFlightCiGradReduce(buckets=tuple(states))
 
 
 def sum_reduce_ppgd_grads(world: World, grads: Iterable[Tensor]) -> None:
@@ -679,7 +718,6 @@ def all_reduce_grads_in_block(world: World, role: LWRole, params: Iterable[nn.Pa
     buckets: dict[tuple[torch.dtype, torch.device], list[Tensor]] = {}
     for g in grads:
         buckets.setdefault((g.dtype, g.device), []).append(g)
-    from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
     states: list[tuple[list[Tensor], Tensor, dist.Work]] = []
     with time_nccl_op("all_reduce_grads_in_block"):
