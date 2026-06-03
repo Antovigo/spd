@@ -40,6 +40,16 @@ BIG512 = Topo(n_ci=32, n_ppgd=64, n_blocks=16, n_per_block=8, batch=512)
 # point to show the sublinearity. (compute_ms, sites_per_block, batch_local)
 LW_OLD_BL4 = (632.0, 4, 4)
 
+# Where each calibration INPUT comes from (the repro trusts these; verify with the
+# commands shown). Printed so running this script is self-evident about its sources.
+PROVENANCE = """\
+inputs (verify these — the model below is derived from them):
+  per-pool compute  ← scripts/analyze_3pool_trace.py on the rebalance-6site trace
+                      (job 38431, 112 ranks LW64/CI16/PPGD32, B=256; per-rank
+                      batch_local lw64/ci16/ppgd8 == big512, so compute carries over)
+  step wall 2358 ms ← big512 production p-b6505e9c, logged train/perf/step_ms @224 ranks
+  LW old point 632ms@(spb4,bl4) ← job 34379 (pre-compile), for the sublinearity figure"""
+
 
 def make_plots(out_dir: Path) -> None:
     import matplotlib
@@ -131,6 +141,7 @@ def main() -> None:
     if args.plots is not None:
         make_plots(args.plots)
         return
+    print(PROVENANCE + "\n")
     report(
         CALIBRATION,
         budget=224,
