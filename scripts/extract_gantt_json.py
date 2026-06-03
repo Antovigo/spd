@@ -100,7 +100,7 @@ def main() -> None:
         pools.append(extract_pool(p))
     pools.sort(key=lambda x: order.get(x["pool"], 9))
     payload = {
-        "source": f"b256 prod 160-GPU profile · {trace_dir.name} · representative steady step",
+        "source": f"{trace_dir.name} · representative steady step",
         "nbins": NBINS,
         "step_ms": round(max(p["wall_ms"] for p in pools), 1),
         "pools": pools,
