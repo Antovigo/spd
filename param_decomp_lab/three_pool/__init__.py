@@ -1,4 +1,4 @@
-"""3-pool training strategy for SPD on large frozen target models.
+"""3-pool training strategy for VPD on large frozen target models.
 
 Splits GPUs into three heterogeneous pools that run in wall-clock parallel:
 
