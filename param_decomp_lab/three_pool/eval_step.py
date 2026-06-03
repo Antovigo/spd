@@ -70,6 +70,18 @@ def _build_metric_context_three_pool(
     returns ``None`` on CI (after shipping CI to PPGD) and LW (no-op).
     """
     batch = move_batch_to_device(batch, device)
+    # The eval batch is global: every pool rank receives all `batch_global` rows and
+    # carves out its own `[slice_idx*bl : (slice_idx+1)*bl]` slice (bl = batch_global //
+    # n_pool). If the loader hands back fewer than batch_global rows, the high-index
+    # slices fall off the end and yield an empty (0-row) local batch — SDPA then returns
+    # None and the model forward dies on `y.transpose` with a cryptic NoneType error.
+    # Require the eval loader's batch_size to equal batch_global so every slice is full.
+    if isinstance(batch, Tensor):
+        assert batch.shape[0] == ctx.world.batch_global, (
+            f"eval batch has {batch.shape[0]} rows but the 3-pool slices it as a global "
+            f"batch of {ctx.world.batch_global}; set eval.batch_size == pd.batch_size "
+            f"({ctx.world.batch_global})"
+        )
     match ctx:
         case CIContext():
             batch_local, _ = _slice_batch_dim0(

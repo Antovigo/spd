@@ -327,6 +327,7 @@ def main(
     tags: str | None = None,
     dp: int | None = None,
     partition: str | None = DEFAULT_PARTITION_NAME,
+    qos: str | None = None,
     time: str = "72:00:00",
     job_name: str = "pd-lm-3pool",
     no_snapshot: bool = False,
@@ -338,9 +339,10 @@ def main(
         config_path: YAML for a fresh run. Required when not resuming.
         resume: Path to a `ResumeConfig` YAML pointing at a prior 3-pool run.
         group / tags: wandb-only (no-ops without `wandb:`).
-        dp / partition / time / job_name / no_snapshot / run_id: SLURM submission knobs.
+        dp / partition / qos / time / job_name / no_snapshot / run_id: SLURM submission knobs.
             Passing `--dp N` outside torchrun submits a SLURM job: single-node for
-            N <= 8, multi-node for N > 8 (N must be a multiple of 8).
+            N <= 8, multi-node for N > 8 (N must be a multiple of 8). `qos=None` uses the
+            cluster default; pass e.g. `opportunistic` to run off-quota.
     """
     if dp is not None and os.environ.get("WORLD_SIZE") is None:
         assert (config_path is not None) != (resume is not None), (
@@ -353,6 +355,7 @@ def main(
             group=group,
             tags=tags,
             partition=partition,
+            qos=qos,
             time=time,
             job_name=job_name,
             no_snapshot=no_snapshot,
@@ -540,6 +543,7 @@ def _submit_slurm(
     group: str | None,
     tags: str | None,
     partition: str | None,
+    qos: str | None,
     time: str,
     job_name: str,
     no_snapshot: bool,
@@ -581,6 +585,7 @@ def _submit_slurm(
     slurm_config = SlurmConfig(
         job_name=job_name,
         partition=partition,
+        qos=qos,
         n_gpus=launch.gpus_per_node,
         n_nodes=launch.n_nodes,
         time=time,
