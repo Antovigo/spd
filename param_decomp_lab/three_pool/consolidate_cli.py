@@ -22,7 +22,7 @@ import fire
 from param_decomp.log import logger
 from param_decomp_lab.experiments.lm.run import build_target, make_run_batch
 from param_decomp_lab.experiments.lm.three_pool_run import ThreePoolLMExperimentConfig
-from param_decomp_lab.experiments.utils import RUN_META_FILENAME
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.three_pool.consolidate import (
     DEFAULT_KEEP_LAST_N_TRAINING,
@@ -38,8 +38,8 @@ def cli(
     step: int | None = None,
     keep_last_n_training: int = DEFAULT_KEEP_LAST_N_TRAINING,
 ) -> None:
-    out_dir = Path(run) if Path(run).is_dir() else PARAM_DECOMP_OUT_DIR / "decompositions" / run
-    cfg = ThreePoolLMExperimentConfig.from_file(out_dir / RUN_META_FILENAME)
+    out_dir = Path(run) if Path(run).is_dir() else PARAM_DECOMP_OUT_DIR / "runs" / run
+    cfg = ThreePoolLMExperimentConfig.from_file(out_dir / EXPERIMENT_CONFIG_FILENAME)
     target_model = build_target(cfg.target)
     run_batch = make_run_batch(cfg.target)
 

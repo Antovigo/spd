@@ -8,7 +8,7 @@ import.
 
 Both the fresh-run path (`main`) and the reload path (`SavedLMRun`) share the
 module-level `build_target` / `build_lm_loader` / `make_run_batch`. The resume
-path (`main --resume <yaml>`) reads a parent run's `run_meta.yaml` plus
+path (`main --resume <yaml>`) reads a parent run's `experiment_config.yaml` plus
 `training_<step>.pth`, rebuilds a `Trainer` via `Trainer.from_snapshot`, and
 continues training.
 
@@ -56,7 +56,7 @@ from param_decomp_lab.experiments.lm.data import (
     rank_batch_size,
 )
 from param_decomp_lab.experiments.utils import (
-    RUN_META_FILENAME,
+    EXPERIMENT_CONFIG_FILENAME,
     EvalConfig,
     ExperimentConfig,
     init_pd_run,
@@ -220,7 +220,7 @@ class SavedLMRun:
     def from_path(cls, path: ModelPath) -> "SavedLMRun":
         """Resolve a run directory or W&B path into a fully-validated `SavedLMRun`."""
         files = resolve_run_files(
-            path, config_filename=RUN_META_FILENAME, checkpoint_prefix="model"
+            path, config_filename=EXPERIMENT_CONFIG_FILENAME, checkpoint_prefix="model"
         )
         return cls(
             cfg=LMExperimentConfig.from_file(files.config_path),
@@ -255,9 +255,10 @@ def main(
     Args:
         config_path: YAML for a fresh run. Required when not resuming.
         resume: Path to a `ResumeConfig` YAML pointing at a prior run. When set,
-            the parent's `run_meta.yaml` is the source of cfg truth; a new `run_id` is
-            allocated and `resume_provenance` (parent dir + step) is stamped onto the
-            effective config so it lands in `run_meta.yaml` + `wandb.config`.
+            the parent's `experiment_config.yaml` is the source of cfg truth; a new
+            `run_id` is allocated and `resume_provenance` (parent dir + step) is stamped
+            onto the effective config so it lands in `experiment_config.yaml` +
+            `wandb.config`.
         group / tags: wandb-only (no-ops without `wandb:`).
         dp / partition / time / job_name / no_snapshot / run_id: SLURM submission
             knobs. Passing `--dp N` outside torchrun submits a SLURM job: single-node
@@ -350,10 +351,10 @@ def _resume_main(
     tags: str | None,
     run_id: str | None,
 ) -> None:
-    """Resume-run path: read parent `run_meta.yaml` + `training_<step>.pth`,
+    """Resume-run path: read parent `experiment_config.yaml` + `training_<step>.pth`,
     rebuild trainer via `from_snapshot`, continue training."""
     resume_cfg = ResumeConfig.from_file(resume_cfg_path)
-    parent_cfg = LMExperimentConfig.from_file(resume_cfg.from_run / RUN_META_FILENAME)
+    parent_cfg = LMExperimentConfig.from_file(resume_cfg.from_run / EXPERIMENT_CONFIG_FILENAME)
 
     dist_state = init_distributed()
     if is_main_process():
@@ -437,7 +438,7 @@ def _resolve_train_run_id(run_path: str | Path) -> str:  # pyright: ignore[repor
     `experiments.lm.three_pool_run` (basedpyright can't see the cross-module uses).
 
     Accepts wandb URL / `entity/project/runId` / bare `p-xxxxxxxx` / local directory
-    whose final name is the run id (i.e. `PARAM_DECOMP_OUT_DIR/decompositions/<run_id>/`).
+    whose final name is the run id (i.e. `PARAM_DECOMP_OUT_DIR/runs/<run_id>/`).
     """
     s = str(run_path)
     try:

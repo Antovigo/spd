@@ -21,7 +21,7 @@ from param_decomp_lab.infra.wandb import try_wandb
 from param_decomp_lab.resumption.provenance import ResumeProvenance
 from param_decomp_lab.run_sink import OnePoolSink, ThreePoolSink
 
-RUN_META_FILENAME = "run_meta.yaml"
+EXPERIMENT_CONFIG_FILENAME = "experiment_config.yaml"
 
 
 class WandbConfig(BaseConfig):
@@ -51,7 +51,7 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
             pass
 
     Omit the `eval:` block to skip eval entirely; omit `wandb:` to skip wandb (the run
-    still writes `run_meta.yaml` + checkpoints locally).
+    still writes `experiment_config.yaml` + checkpoints locally).
     """
 
     pd: PDConfig
@@ -63,8 +63,8 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
     wandb: WandbConfig | None = None
     resume_provenance: ResumeProvenance | None = None
     """Set on resumed runs (parent run dir + step); `None` for fresh runs. Lives on the
-    config so it flows into `run_meta.yaml` and `wandb.config` via `init_pd_run`, making a
-    resumed run's lineage visible in the wandb UI."""
+    config so it flows into `experiment_config.yaml` and `wandb.config` via `init_pd_run`,
+    making a resumed run's lineage visible in the wandb UI."""
 
 
 class _PdRunInputs(Protocol):
@@ -91,7 +91,7 @@ def init_pd_run[S: OnePoolSink | ThreePoolSink](
     run_id: str | None = None,
     on_save: Callable[[int], None] | None = None,
 ) -> S:
-    """Allocate `run_id` + `out_dir`, write `run_meta.yaml`, return a sink.
+    """Allocate `run_id` + `out_dir`, write `experiment_config.yaml`, return a sink.
 
     `sink_class` picks the pool-specific sink (`OnePoolSink` for 1-pool runs,
     `ThreePoolSink` for 3-pool). The choice is the caller's; this helper just
@@ -105,9 +105,9 @@ def init_pd_run[S: OnePoolSink | ThreePoolSink](
     if not is_main_process():
         return sink_class.silent()
     run_id = run_id or generate_run_id("param_decomp")
-    out_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id
-    meta_path = out_dir / RUN_META_FILENAME
-    cfg.to_file(meta_path)
+    out_dir = PARAM_DECOMP_OUT_DIR / "runs" / run_id
+    cfg_path = out_dir / EXPERIMENT_CONFIG_FILENAME
+    cfg.to_file(cfg_path)
     keep_last_n = cfg.cadence.keep_last_n_checkpoints
     if cfg.wandb is None:
         return sink_class.local(out_dir, keep_last_n_checkpoints=keep_last_n, on_save=on_save)
@@ -123,5 +123,5 @@ def init_pd_run[S: OnePoolSink | ThreePoolSink](
         keep_last_n_checkpoints=keep_last_n,
         on_save=on_save,
     )
-    try_wandb(wandb.save, str(meta_path), base_path=str(out_dir), policy="now")
+    try_wandb(wandb.save, str(cfg_path), base_path=str(out_dir), policy="now")
     return sink

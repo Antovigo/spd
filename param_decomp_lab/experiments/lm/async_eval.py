@@ -55,7 +55,7 @@ from param_decomp_lab.experiments.lm.run import (
     make_run_batch,
 )
 from param_decomp_lab.experiments.lm.three_pool_run import ThreePoolLMExperimentConfig
-from param_decomp_lab.experiments.utils import RUN_META_FILENAME, EvalConfig
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME, EvalConfig
 from param_decomp_lab.infra.run_files import resolve_run_files
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.infra.wandb import get_wandb_entity, try_wandb
@@ -128,12 +128,12 @@ def _resolve_eval_checkpoint_path(run_path: str | Path, step: int | None) -> Pat
     """Locate the `model_<step>.pth` on disk, downloading from W&B if needed."""
     if step is None:
         files = resolve_run_files(
-            run_path, config_filename=RUN_META_FILENAME, checkpoint_prefix="model"
+            run_path, config_filename=EXPERIMENT_CONFIG_FILENAME, checkpoint_prefix="model"
         )
         return files.checkpoint_path
     filename = f"model_{step}.pth"
     files = resolve_run_files(
-        run_path, config_filename=RUN_META_FILENAME, checkpoint_filename=filename
+        run_path, config_filename=EXPERIMENT_CONFIG_FILENAME, checkpoint_filename=filename
     )
     return files.checkpoint_path
 
@@ -159,6 +159,8 @@ def _run_eval_pass(
     """One full eval pass; returns the flattened metric output dict."""
     assert n_steps >= 1, f"n_steps must be at least 1, got {n_steps}"
     eval_iterator = loop_dataloader(eval_loader)
+    # Compute weight_deltas OUTSIDE bf16_autocast so FaithfulnessLoss residuals are fp32.
+    weight_deltas = component_model.calc_weight_deltas()
     with torch.no_grad(), bf16_autocast(enabled=pd_config.runtime.autocast_bf16):
         for m in eval_metrics:
             m.reset()
@@ -172,6 +174,7 @@ def _run_eval_pass(
                 component_model=component_model,
                 config=pd_config.pd,
                 reconstruction_loss=recon_loss_kl,
+                weight_deltas=weight_deltas,
             )
             for m in eval_metrics:
                 m.update(ctx)
@@ -239,14 +242,14 @@ def main(
             to run. If omitted, falls back to the parent run's ``cfg.eval``.
         group / tags: optional wandb metadata for the resumed run.
     """
-    # Read the config from run_meta.yaml directly rather than `SavedThreePoolLMRun.from_path`:
+    # Read the config from experiment_config.yaml directly rather than `SavedThreePoolLMRun.from_path`:
     # for a 3-pool run no `model_<step>.pth` exists yet (this job assembles it
     # below), and `from_path` eagerly resolves one, which would crash here. This job is
     # only ever submitted by the 3-pool composition root, so the config is always a
     # `ThreePoolLMExperimentConfig`.
     train_run_id = _resolve_train_run_id(run)
-    out_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / train_run_id
-    cfg = ThreePoolLMExperimentConfig.from_file(out_dir / RUN_META_FILENAME)
+    out_dir = PARAM_DECOMP_OUT_DIR / "runs" / train_run_id
+    cfg = ThreePoolLMExperimentConfig.from_file(out_dir / EXPERIMENT_CONFIG_FILENAME)
 
     if eval_config is not None:
         eval_cfg = EvalConfig.from_file(Path(eval_config))

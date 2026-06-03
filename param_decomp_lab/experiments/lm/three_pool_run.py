@@ -62,7 +62,7 @@ from param_decomp_lab.experiments.lm.run import (
     make_run_batch,
 )
 from param_decomp_lab.experiments.utils import (
-    RUN_META_FILENAME,
+    EXPERIMENT_CONFIG_FILENAME,
     EvalConfig,
     WandbConfig,
     init_pd_run,
@@ -124,7 +124,7 @@ class ThreePoolLMExperimentConfig(BaseConfig):
     wandb: WandbConfig | None = None
     resume_provenance: ResumeProvenance | None = None
     """Set on resumed runs (parent run dir + step); `None` for fresh runs. Lives on the
-    config so it flows into `run_meta.yaml` and `wandb.config` via `init_pd_run`, making a
+    config so it flows into `experiment_config.yaml` and `wandb.config` via `init_pd_run`, making a
     resumed run's lineage visible in the wandb UI."""
 
     @model_validator(mode="after")
@@ -170,7 +170,7 @@ class SavedThreePoolLMRun:
     @classmethod
     def from_path(cls, path: ModelPath) -> "SavedThreePoolLMRun":
         files = resolve_run_files(
-            path, config_filename=RUN_META_FILENAME, checkpoint_prefix="model"
+            path, config_filename=EXPERIMENT_CONFIG_FILENAME, checkpoint_prefix="model"
         )
         return cls(
             cfg=ThreePoolLMExperimentConfig.from_file(files.config_path),
@@ -190,7 +190,7 @@ def _agree_on_run_id(run_id: str | None, dist_state: DistributedState | None) ->
     """Broadcast (or generate-then-broadcast) a single run id across all ranks.
 
     The 3-pool save writes per-rank partials under
-    `PARAM_DECOMP_OUT_DIR/decompositions/<run_id>/.snapshot_scratch/`; every rank must
+    `PARAM_DECOMP_OUT_DIR/runs/<run_id>/.snapshot_scratch/`; every rank must
     compute the same path.
     """
     if is_main_process() and run_id is None:
@@ -414,7 +414,7 @@ def _fresh_main(
     )
 
     run_id = _agree_on_run_id(run_id, dist_state)
-    out_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id
+    out_dir = PARAM_DECOMP_OUT_DIR / "runs" / run_id
     scratch_dir = out_dir / SNAPSHOT_SCRATCH_DIRNAME
     sink = init_pd_run(
         cfg,
@@ -455,10 +455,12 @@ def _resume_main(
     tags: str | None,
     run_id: str | None,
 ) -> None:
-    """Resume-run path: read parent `run_meta.yaml` + `training_<step>.pth`, rebuild via
+    """Resume-run path: read parent `experiment_config.yaml` + `training_<step>.pth`, rebuild via
     `ThreePoolTrainer.from_snapshot`, continue training."""
     resume_cfg = ResumeConfig.from_file(resume_cfg_path)
-    parent_cfg = ThreePoolLMExperimentConfig.from_file(resume_cfg.from_run / RUN_META_FILENAME)
+    parent_cfg = ThreePoolLMExperimentConfig.from_file(
+        resume_cfg.from_run / EXPERIMENT_CONFIG_FILENAME
+    )
 
     dist_state = init_distributed()
     if is_main_process():
@@ -503,7 +505,7 @@ def _resume_main(
     )
 
     run_id = _agree_on_run_id(run_id, dist_state)
-    out_dir = PARAM_DECOMP_OUT_DIR / "decompositions" / run_id
+    out_dir = PARAM_DECOMP_OUT_DIR / "runs" / run_id
     scratch_dir = out_dir / SNAPSHOT_SCRATCH_DIRNAME
     sink = init_pd_run(
         effective_cfg,
@@ -669,7 +671,7 @@ def submit_slurm_async_consolidate_and_eval(
         metrics=slow_metrics,
     )
     train_run_id = _resolve_train_run_id(run_path)
-    scratch = PARAM_DECOMP_OUT_DIR / "decompositions" / train_run_id / ".async_eval_configs"
+    scratch = PARAM_DECOMP_OUT_DIR / "runs" / train_run_id / ".async_eval_configs"
     scratch.mkdir(parents=True, exist_ok=True)
     cfg_path = scratch / f"slow_eval_step_{step}.yaml"
     slow_eval_cfg.to_file(cfg_path)

@@ -97,7 +97,7 @@ def _write_tiny_saved_run(out_dir: Path) -> int:
     SLURM / wandb so the test stays single-process and offline.
     """
     cfg = _make_cfg(steps=1)
-    cfg.to_file(out_dir / "run_meta.yaml")
+    cfg.to_file(out_dir / "experiment_config.yaml")
 
     target_model = GPT2LMHeadModel.from_pretrained(_MODEL_NAME)
     target_model.eval()
@@ -127,7 +127,7 @@ def test_step_from_checkpoint_name() -> None:
 
 
 def test_resolve_train_run_id_local_dir(tmp_path: Path) -> None:
-    run_dir = tmp_path / "decompositions" / "p-deadbeef"
+    run_dir = tmp_path / "runs" / "p-deadbeef"
     run_dir.mkdir(parents=True)
     assert _resolve_train_run_id(run_dir) == "p-deadbeef"
 
@@ -217,7 +217,7 @@ def test_async_eval_main_logs_skipped_when_no_wandb(tmp_path: Path) -> None:
     step_written = _write_tiny_saved_run(run_dir)
 
     # Drop the wandb block from the saved config and re-write it.
-    saved_cfg_path = run_dir / "run_meta.yaml"
+    saved_cfg_path = run_dir / "experiment_config.yaml"
     cfg = LMExperimentConfig.from_file(saved_cfg_path)
     cfg_no_wandb = cfg.model_copy(update={"wandb": None})
     cfg_no_wandb.to_file(saved_cfg_path)

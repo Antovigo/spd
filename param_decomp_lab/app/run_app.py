@@ -339,10 +339,8 @@ class AppRunner:
         print(f"{AnsiEsc.DIM}Finding available ports...{AnsiEsc.RESET}")
 
         bport = find_available_port(BACKEND_DEFAULT_START)
-        fport = find_available_port(FRONTEND_DEFAULT_START)
 
         print(f" - {AnsiEsc.DIM}Backend port: {bport}{AnsiEsc.RESET}")
-        print(f" - {AnsiEsc.DIM}Frontend port: {fport}{AnsiEsc.RESET}\n")
 
         print(f"{AnsiEsc.BOLD}Starting development servers{AnsiEsc.RESET}")
         print(f"{AnsiEsc.DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{AnsiEsc.RESET}")
@@ -370,7 +368,9 @@ class AppRunner:
                 pid=backend_proc.pid,
             )
 
-            # Start frontend after backend is ready
+            fport = find_available_port(FRONTEND_DEFAULT_START)
+            print(f" - {AnsiEsc.DIM}Frontend port: {fport}{AnsiEsc.RESET}")
+
             print(f"  {AnsiEsc.DIM}▸ Spawning frontend...{AnsiEsc.RESET}")
             frontend_proc = self.spawn_frontend(fport, bport, logfile)
 

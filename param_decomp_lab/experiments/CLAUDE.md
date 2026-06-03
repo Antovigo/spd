@@ -12,7 +12,7 @@ the concrete reload class directly.
 ```
 experiments/
 ├── utils.py                 # ExperimentConfig[T,D] generic + EvalConfig + WandbConfig
-│                            # + init_pd_run + RUN_META_FILENAME + resume_provenance field
+│                            # + init_pd_run + EXPERIMENT_CONFIG_FILENAME + resume_provenance field
 ├── tms/run.py
 ├── resid_mlp/run.py
 └── lm/
@@ -130,7 +130,7 @@ the free function directly with `pd_run.cfg.target` / `pd_run.cfg.data`.
 to those same functions, so there's no duplication between "fresh run from YAML" and
 "reload from disk" paths.
 
-`main()` writes the resolved `<Name>ExperimentConfig` to `out_dir / RUN_META_FILENAME`
+`main()` writes the resolved `<Name>ExperimentConfig` to `out_dir / EXPERIMENT_CONFIG_FILENAME`
 via `cfg.to_file(...)`. There is no kind discriminator on disk — each post-processing
 caller imports the concrete `Saved<Name>Run` it expects:
 
@@ -180,11 +180,15 @@ Every `pd-*` run command accepts `--group <id>` and `--tags a,b,c` (no-ops when
 ## Saved-run layout
 
 ```
-PARAM_DECOMP_OUT_DIR/decompositions/<run_id>/
-  run_meta.yaml              # the full ExperimentConfig
+PARAM_DECOMP_OUT_DIR/runs/<run_id>/
+  experiment_config.yaml     # the full ExperimentConfig
   model_<step>.pth           # checkpoints (RunSink.checkpoint)
   metrics.jsonl              # local logs (RunSink.log)
 ```
+
+Post-decomposition pipelines (harvest, autointerp, attributions, graph_interp) nest
+their own sub-directories under this same `runs/<run_id>/` dir — see each module's
+CLAUDE.md.
 
 ## Canonical references
 
