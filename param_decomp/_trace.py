@@ -13,8 +13,12 @@ Tracing is **off by default** to keep slurm log size sane in production
 When enabled, set ``PD_TRACE_RANKS=<r1>,<r2>,...`` (e.g. ``0,96,100`` for one
 rank per pool in a 3-pool job) to further restrict which ranks emit.
 
-Phase-level tracing (every ``PhaseProfiler.phase`` enter/exit) is much
-noisier and is independently opt-in via ``PD_PHASE_TRACE=1``.
+This is liveness tracing only: ``trace()`` stamps CPU wall-clock at macro
+boundaries, which tells a hung job from a slow one but does NOT measure GPU
+compute (kernels are enqueued async, so a wall-clock delta between two markers
+is enqueue spacing, not device time). For real per-phase device time use
+torch.profiler or the CUDA-event timers (``PD_NCCL_EVENT_TIMING``, the CI-fn
+backward breakdown).
 """
 
 import os
@@ -75,18 +79,13 @@ def trace(msg: str) -> None:
     sys.stdout.flush()  # belt + braces — slurm log buffering bit us before
 
 
-def phase_trace_enabled() -> bool:
-    """``PhaseProfiler.phase`` should emit per-phase entry traces."""
-    return os.environ.get("PD_PHASE_TRACE", "").strip() in ("1", "true", "yes")
-
-
 def dump_memory_stats(label: str) -> None:
     """Emit a single-line summary of ``torch.cuda.memory_stats`` for this rank.
 
     Includes the headline numbers for capacity planning + fragmentation:
       * ``cur``: bytes currently held by tensors
       * ``peak``: peak bytes held since the last reset_peak (typically since
-        start of training, unless ``PhaseProfiler.phase`` is resetting per phase)
+        start of training)
       * ``reserved``: bytes the CUDA caching allocator is holding (some unused)
       * ``free``: caching allocator's free-but-reserved bytes
       * ``num_alloc_retries``: count of alloc-then-shrink-cache retries — non-zero

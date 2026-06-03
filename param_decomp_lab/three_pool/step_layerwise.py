@@ -47,7 +47,6 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 
-from param_decomp._trace import phase_trace_enabled, trace
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.masks import RoutingMasks, make_mask_infos
 from param_decomp.torch_helpers import bf16_autocast
@@ -297,9 +296,7 @@ def _run_routing_forwards(
         # each forward's bwd against the next. ``loss_f.detach()`` so the
         # accumulator doesn't retain the autograd graph.
         stoch_total_t = torch.zeros((), device=device)
-        for i, (sites, routing) in enumerate(routings):
-            if phase_trace_enabled():
-                trace(f"lw/D3 forward {i + 1}/{len(routings)}: {sites} fwd+bwd")
+        for sites, routing in routings:
             loss_f, n_positions = _recon_one_forward(
                 component_model, batch_local, target_local, ci_leaves, sites, routing, strategy
             )
