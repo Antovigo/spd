@@ -10,9 +10,13 @@ Grounding model (per-sample compute, calibrated from a baseline trace):
 `throughput = B / step` (samples / ms) is the objective — comparable across B.
 
 CAVEATS (why this is a *screen*, not a verdict):
-  * Assumes per-rank compute scales LINEARLY with local batch. Unvalidated —
-    fixed per-step costs, full-size V/U backward, and kernel-launch floors make
-    it likely sublinear at small local batch. Validate the winner with a real run.
+  * Assumes per-rank compute scales LINEARLY with local batch. EMPIRICALLY FALSE
+    for LW: the per-(site·sample) cost fell ~12× from bl_lw=4 to bl_lw=64 (large
+    fixed per-site overhead — the serial per-site recon loop). So the LW-linear term
+    badly over-credits adding LW ranks (predicts a linear speedup that won't
+    materialize — cf. the thin-block result: +8.5%, not the modelled multiple).
+    Calibrated here AT the big512 operating point (bl_lw=64); trust it only near
+    that regime. Always validate the winner with a real run.
   * Assumes `overhead` (non-overlapped comm/idle/sync) is additive & constant.
     The baseline shows ~170ms of it; it may not hold as the topology changes.
   * Memory is flagged crudely (CI activations dominate; batch_local_ci>baseline
@@ -23,18 +27,26 @@ from dataclasses import dataclass
 from itertools import product
 
 N_SITES = 96  # 48 layers × {q_proj, k_proj}
-BUDGET = 104  # total ranks (13 nodes × 8)
+BUDGET = 224  # total ranks to search over (big512 production scale: 28 nodes × 8)
 
-# ── Calibration from job 34379 (104 ranks, B=16, all pools batch_local=4) ──
-# Recompute with: scripts/analyze_3pool_trace.py <trace_dir>  → plug means here.
-CALIB_B = 16
+# ── Calibration (2026-06-03, current code: vendored ComponentGPT2, LW+CI ──
+# torch.compile, activation checkpointing).
+# Per-pool COMPUTE from the rebalance-6site trace (job 38431, 112 ranks
+# LW64/CI16/PPGD32, B=256), analyzed by scripts/analyze_3pool_trace.py. Its per-rank
+# batch_local (lw 64 / ci 16 / ppgd 8) and per-rank work are IDENTICAL to big512
+# production (p-b6505e9c) — big512 doubled both B and every pool's DDP — so the
+# per-rank compute carries over exactly. STEP WALL is from big512 production itself
+# (~2358 ms at 224 ranks) so OVERHEAD reflects the 224-rank cross-pool cost (the
+# rebalance trace's own 112-rank wall is ~2138; overhead grows with rank count).
+# Recompute COMPUTE with: scripts/analyze_3pool_trace.py <trace_dir>  → plug means.
+CALIB_B = 256  # batch of the compute-calibration trace (wall is from big512, B=512)
 CALIB = {
-    "ci": (258.0, 4),  # (compute_ms, batch_local)
-    "ppgd": (702.0, 4),
-    "lw": (632.0, 4),  # at sites_per_block=4
+    "ci": (579.1, 16),  # (compute_ms, batch_local)
+    "ppgd": (1140.2, 8),
+    "lw": (1243.5, 64),  # at sites_per_block=6
 }
-CALIB_LW_SITES_PER_BLOCK = 4
-CALIB_STEP_WALL = 871.0
+CALIB_LW_SITES_PER_BLOCK = 6
+CALIB_STEP_WALL = 2358.0  # big512 production step_ms (p-b6505e9c, 224 ranks)
 
 K_CI = CALIB["ci"][0] / CALIB["ci"][1]  # ms / sample
 K_PPGD = CALIB["ppgd"][0] / CALIB["ppgd"][1]
@@ -145,7 +157,7 @@ def fmt(t: Topo) -> str:
 
 
 def main() -> None:
-    baseline = Topo(n_ci=4, n_ppgd=4, n_blocks=24, n_per_block=4, batch=16)
+    baseline = Topo(n_ci=32, n_ppgd=64, n_blocks=16, n_per_block=8, batch=512)
     print(
         f"calibration: K_CI={K_CI:.1f} K_PPGD={K_PPGD:.1f} K_LW_TOTAL={K_LW_TOTAL:.0f} "
         f"OVERHEAD={OVERHEAD:.0f}ms (all ms, per-sample where applicable)"
@@ -154,8 +166,8 @@ def main() -> None:
     print(f"  baseline throughput = {baseline.throughput:.4f} samples/ms\n")
 
     for batches, label in [
-        ([16], "B=16 (fixed, current effective batch)"),
-        ([8, 16, 24, 32, 48], "B free (perf-only; changes opt dynamics)"),
+        ([512], "B=512 (current production batch)"),
+        ([256, 512, 768, 1024], "B free (perf-only; changes opt dynamics)"),
     ]:
         print("=" * 100)
         print(f"SEARCH: {label}")
