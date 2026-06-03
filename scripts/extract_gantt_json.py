@@ -1,9 +1,10 @@
 """Extract per-pool Gantt data from 3-pool torch.profiler traces → dashboard JSON.
 
-Produces, for one representative ProfilerStep per pool: the compute/nccl/idle summary, a
-binned step-relative GPU-occupancy timeline (compute & nccl fractions per bin), and the
-CPU-side NCCL time by op kind (recv = blocking wait on another pool). No per-phase data —
-this trace has no phase annotations, so granularity is compute vs comm vs idle.
+Produces, for one representative ProfilerStep per pool: per-kernel-CATEGORY totals
+(matmul / attention / reduction / elementwise / memory / other / nccl), a binned
+step-relative GPU-occupancy timeline (one fraction per category per bin), and the CPU-side
+NCCL time by op kind (recv = blocking wait on another pool). Categories come from the GPU
+kernel names in the trace; nccl is mostly cross-pool wait.
 
 Usage: python scripts/extract_gantt_json.py <trace_dir> <out_json>
 """
@@ -15,7 +16,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.analyze_3pool_trace import (  # noqa: E402
-    _is_gpu_kernel,
     _is_nccl,
     _nccl_op_kind,
     clip,
@@ -23,9 +23,32 @@ from scripts.analyze_3pool_trace import (  # noqa: E402
 )
 
 NBINS = 240
+# Stack order (bottom→top): productive GEMM first, comm/wait last.
+CATEGORIES = ["matmul", "attention", "reduction", "elementwise", "memory", "other", "nccl"]
 
 
-def extract_pool(path: Path) -> dict:
+def _category(name: str, cat: str) -> str:
+    """Bucket a GPU kernel by its name (cuBLAS/cutlass GEMM, cuDNN flash-attn, Triton
+    fused norm-reductions vs pointwise, copies/memset, NCCL)."""
+    if cat in ("gpu_memcpy", "gpu_memset"):
+        return "memory"
+    n = name.lower()
+    if "nccl" in n:
+        return "nccl"
+    if "sdpa" in n or "flash" in n or "attention" in n:
+        return "attention"
+    if any(g in n for g in ("gemm", "nvjet", "cutlass", "cublas", "wgrad", "dgrad")):
+        return "matmul"
+    if "triton_red" in n or "reduce" in n or "softmax" in n or "norm" in n:
+        return "reduction"
+    if "triton_poi" in n or "elementwise" in n or "pointwise" in n:
+        return "elementwise"
+    if "copy" in n or "memcpy" in n or "memset" in n:
+        return "memory"
+    return "other"
+
+
+def extract_pool(path: Path) -> dict:  # raw trace JSON → bare dict (matches analyze_3pool_trace)
     d = json.loads(path.read_text())
     ev = d["traceEvents"]
     rank = d["distributedInfo"]["rank"]
@@ -43,22 +66,23 @@ def extract_pool(path: Path) -> dict:
     w0, w1 = sm["ts"], sm["ts"] + sm["dur"]
     wall = sm["dur"]
 
-    compute, nccl = [], []
+    ivs: dict[str, list[tuple[float, float]]] = {c: [] for c in CATEGORIES}
     for e in ev:
-        if not _is_gpu_kernel(e):
+        if e.get("cat") not in ("kernel", "gpu_memcpy", "gpu_memset"):
             continue
-        iv = (e["ts"], e["ts"] + e.get("dur", 0.0))
-        (nccl if _is_nccl(str(e.get("name", ""))) else compute).append(iv)
-    comp = clip(compute, (w0, w1))
-    ncl = clip(nccl, (w0, w1))
+        c = _category(str(e.get("name", "")), str(e.get("cat")))
+        ivs[c].append((e["ts"], e["ts"] + e.get("dur", 0.0)))
+    clipped = {c: clip(ivs[c], (w0, w1)) for c in CATEGORIES}
 
     binw = wall / NBINS
     bins = []
     for i in range(NBINS):
         b0, b1 = w0 + i * binw, w0 + (i + 1) * binw
-        cf = merged_length(clip(comp, (b0, b1))) / binw if binw else 0.0
-        nf = merged_length(clip(ncl, (b0, b1))) / binw if binw else 0.0
-        bins.append([round(min(cf, 1.0), 3), round(min(nf, 1.0), 3)])
+        row = [
+            round(min(merged_length(clip(clipped[c], (b0, b1))) / binw if binw else 0.0, 1.0), 3)
+            for c in CATEGORIES
+        ]
+        bins.append(row)
 
     op_time: dict[str, float] = {}
     for e in ev:
@@ -70,16 +94,14 @@ def extract_pool(path: Path) -> dict:
             k = _nccl_op_kind(str(e["name"]))
             op_time[k] = op_time.get(k, 0.0) + e.get("dur", 0.0)
 
-    compute_ms = merged_length(comp) / 1000
-    nccl_ms = merged_length(ncl) / 1000
-    busy_ms = merged_length(comp + ncl) / 1000
+    by_category_ms = {c: round(merged_length(clipped[c]) / 1000, 1) for c in CATEGORIES}
+    busy_ms = merged_length([iv for c in CATEGORIES for iv in clipped[c]]) / 1000
     wall_ms = wall / 1000
     return {
         "pool": pool,
         "rank": rank,
         "wall_ms": round(wall_ms, 1),
-        "compute_ms": round(compute_ms, 1),
-        "nccl_ms": round(nccl_ms, 1),
+        "by_category_ms": by_category_ms,
         "idle_ms": round(wall_ms - busy_ms, 1),
         "idle_pct": round(100 * (wall_ms - busy_ms) / wall_ms, 1),
         "nccl_by_op_ms": {
@@ -102,6 +124,7 @@ def main() -> None:
     payload = {
         "source": f"{trace_dir.name} · representative steady step",
         "nbins": NBINS,
+        "categories": CATEGORIES,
         "step_ms": round(max(p["wall_ms"] for p in pools), 1),
         "pools": pools,
     }
@@ -111,9 +134,9 @@ def main() -> None:
     os.replace(tmp, out)
     print(f"wrote {out}")
     for p in pools:
+        cats = "  ".join(f"{c} {p['by_category_ms'][c]:.0f}" for c in CATEGORIES)
         print(
-            f"  {p['pool']:>9} rank{p['rank']}: wall {p['wall_ms']}ms  compute {p['compute_ms']}ms  "
-            f"nccl {p['nccl_ms']}ms  idle {p['idle_ms']}ms ({p['idle_pct']}%)  {p['nccl_by_op_ms']}"
+            f"  {p['pool']:>9} rank{p['rank']}: wall {p['wall_ms']:.0f}ms  idle {p['idle_pct']}%  | {cats}"
         )
 
 
