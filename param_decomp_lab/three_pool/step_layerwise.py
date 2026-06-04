@@ -108,28 +108,34 @@ def step_layerwise(
 
     batch_local, seq_len = _slice_batch_for_layerwise(batch, ctx)
 
-    with strategy.context():
-        ci_recv_pending = _post_ci_recv(ctx, cfg, seq_len, device)
-        target_local = _target_fwd(component_model, batch_local, cfg)
+    # Residual-start: cache the clean residual entering the decomposed layer once; the clean
+    # target_fwd and every masked recon forward below run only the suffix (no-op for GPT-2 q/k,
+    # where the decomposed layer is 0).
+    with component_model.use_cached_residual(batch_local):
+        with strategy.context():
+            ci_recv_pending = _post_ci_recv(ctx, cfg, seq_len, device)
+            target_local = _target_fwd(component_model, batch_local, cfg)
 
-    for param in all_params:
-        param.grad = None
+        for param in all_params:
+            param.grad = None
 
-    with strategy.context():
-        faith = _faithfulness_phase(component_model, device, cfg, ctx)
-        # Snapshot the faith-only V/U grad (block leader; non-leaders skip faith)
-        # before stoch accumulates on top, for the per-loss grad-norm breakdown.
-        faith_vu = (
-            _snapshot_owned_vu_grads(component_model, ctx.role.owned_sites) if should_log else None
-        )
+        with strategy.context():
+            faith = _faithfulness_phase(component_model, device, cfg, ctx)
+            # Snapshot the faith-only V/U grad (block leader; non-leaders skip faith)
+            # before stoch accumulates on top, for the per-loss grad-norm breakdown.
+            faith_vu = (
+                _snapshot_owned_vu_grads(component_model, ctx.role.owned_sites)
+                if should_log
+                else None
+            )
 
-        ci_leaves = _wait_ci_and_releaf(ci_recv_pending, ctx, seq_len, cfg)
-        stoch = _layerwise_streaming_phase(
-            component_model, batch_local, target_local, ci_leaves, ctx, cfg, strategy
-        )
+            ci_leaves = _wait_ci_and_releaf(ci_recv_pending, ctx, seq_len, cfg)
+            stoch = _layerwise_streaming_phase(
+                component_model, batch_local, target_local, ci_leaves, ctx, cfg, strategy
+            )
 
-        _send_g_ci(ctx.portals, ctx.role, ci_leaves)
-        ppgd_vu = _recv_and_combine_g_vu(ctx, component_model, return_ppgd=should_log)
+            _send_g_ci(ctx.portals, ctx.role, ci_leaves)
+            ppgd_vu = _recv_and_combine_g_vu(ctx, component_model, return_ppgd=should_log)
 
     if should_log:
         stoch_total_value = stoch.total.item()

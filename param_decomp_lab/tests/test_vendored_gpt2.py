@@ -106,6 +106,21 @@ def test_masked_forward_matches_hook_oracle() -> None:
     assert torch.equal(cg(idx, mis), oracle)
 
 
+def test_residual_start_matches_full_forward() -> None:
+    # GPT-2 q/k decompose every layer → decomposition_start_layer 0 → residual-start is an
+    # empty-prefix no-op that must stay bit-identical (the big512 production path resumes on this).
+    m = _small_model()
+    idx = torch.randint(0, VOCAB, (B, T))
+    comps = make_components(m, _module_to_c())
+    mis = _mask_infos(comps, with_delta=True)
+    cg = componentize_gpt2(m, comps)
+    assert cg.decomposition_start_layer == 0
+    full = cg(idx, mis).detach().clone()
+    with cg.use_cached_residual(idx):
+        assert torch.equal(cg(idx, mis), full)
+    assert torch.equal(cg.forward_from_residual(cg.residual_at(idx, 0), 0, mis), full)
+
+
 def test_masked_ckpt_grad_equivalence() -> None:
     m = _small_model()
     idx = torch.randint(0, VOCAB, (B, T))

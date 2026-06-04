@@ -105,7 +105,10 @@ def step_ppgd(
     batch_local, seq_len = _slice_batch_for_ppgd(batch, ctx)
     v_templates, u_templates = _vu_templates(component_model, all_sites)
 
-    with strategy.context():
+    # Residual-start: cache the clean residual entering the decomposed layer once; the clean
+    # target_fwd, the PPGD warmup inner loop, and the final recon forward all run only the suffix
+    # (the biggest residual-start win — PPGD does n_warmup+1 forwards). No-op for GPT-2 q/k.
+    with component_model.use_cached_residual(batch_local), strategy.context():
         ci_recv_pending = _post_ci_recv(ctx, cfg, seq_len, device)
         target_out = _target_fwd(component_model, batch_local, cfg)
         weight_deltas = component_model.calc_weight_deltas()

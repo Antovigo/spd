@@ -133,6 +133,15 @@ class LMComponentModel(nn.Module):
         with self.model.bypass_lm_head() as lm_head_weight:
             yield lm_head_weight
 
+    @contextmanager
+    def use_cached_residual(self, idx: Int[Tensor, "batch pos"]) -> Iterator[None]:
+        """Residual-start: forwards inside this context run only the suffix from the cached clean
+        residual entering `decomposition_start_layer`, skipping the frozen prefix. Output-identical
+        to the full forward; the win is skipping the prefix on every forward in the block (the
+        clean target, each masked recon, the PPGD inner loop, the CI harvest)."""
+        with self.model.use_cached_residual(idx):
+            yield
+
     # --- pure queries over the components, delegated to the model ---
 
     @property

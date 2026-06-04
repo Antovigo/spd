@@ -432,8 +432,16 @@ def _target_fwd_and_cache(
 
     Used by phase 0 (on-demand H_T) and phase 4 (dead-time H_{T+1} prefetch).
     Cache is upcast to fp32 so the downstream CI fn fwd gets fp32 inputs.
+
+    Residual-start: the harvest only needs the decomposed sites' input acts, so it runs from the
+    cached clean residual entering the decomposed layer (skipping the frozen prefix). No-op for
+    GPT-2 q/k (decomposed layer 0).
     """
-    with torch.no_grad(), bf16_autocast(enabled):
+    with (
+        component_model.use_cached_residual(batch),
+        torch.no_grad(),
+        bf16_autocast(enabled),
+    ):
         _out, cache = component_model.forward_with_pre_weight_acts(batch)
     return {k: v.to(torch.float32) for k, v in cache.items()}
 

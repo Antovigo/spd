@@ -123,3 +123,15 @@ def test_residual_start_matches_full_forward_logits_and_grads():
     gf, gr = vu_grads(False), vu_grads(True)
     for s in cm.target_module_paths:
         assert torch.allclose(gf[s], gr[s], atol=1e-6), (s, (gf[s] - gr[s]).abs().max())
+
+
+def test_use_cached_residual_context_matches_full_forward():
+    # The context the 3-pool steps actually use: forward() inside it runs the cached suffix.
+    cm = _componentized(_tiny())
+    idx = torch.randint(0, 64, (2, 16))
+    with torch.no_grad():
+        mi = _mask_infos(cm, idx, seed=3)
+        full = cm(idx, mask_infos=mi)
+        with cm.use_cached_residual(idx):
+            cached = cm(idx, mask_infos=mi)
+    assert torch.allclose(full, cached, atol=1e-6), (full - cached).abs().max()

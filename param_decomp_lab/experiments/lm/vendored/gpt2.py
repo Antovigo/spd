@@ -22,6 +22,7 @@ Two further forward facets, both threaded explicitly rather than via hooks:
 """
 
 import math
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import override
@@ -147,6 +148,7 @@ class ComponentGPT2(GPT2Simple):
     """
 
     _bypass_lm_head: bool = False
+    _cached_residual: tuple[Tensor, int] | None = None
 
     @override
     def forward(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -156,23 +158,81 @@ class ComponentGPT2(GPT2Simple):
         collect: PreWeightActs | None = None,
         collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "batch pos vocab"] | Float[Tensor, "batch pos d_model"]:
+        if self._cached_residual is not None:
+            residual, start = self._cached_residual
+            return self.forward_from_residual(residual, start, mask_infos, collect, collect_outputs)
         _b, t = idx.size()
         assert t <= self.config.block_size, (
             f"sequence length {t} exceeds block size {self.config.block_size}"
         )
         pos = torch.arange(0, t, dtype=torch.long, device=idx.device)
-        x = _proj(self.wte, idx, mask_infos, collect, collect_outputs) + self.wpe(pos)
+        embed = _proj(self.wte, idx, mask_infos, collect, collect_outputs) + self.wpe(pos)
+        return self.forward_from_residual(embed, 0, mask_infos, collect, collect_outputs)
 
+    @property
+    def decomposition_start_layer(self) -> int:
+        """Lowest block index holding a decomposition target. For GPT-2 q/k this is 0 (every
+        layer is decomposed), so residual-start is a no-op (empty prefix) but stays bit-identical.
+        Asserts all sites are block sites (`h.<i>....`) — residual-start can't skip an embedding
+        decomposition (the cached residual is already past the embedding)."""
+        idxs: list[int] = []
+        for p in self.component_modules:
+            assert p.startswith("h."), f"residual-start needs block sites; got embedding-ish {p!r}"
+            idxs.append(int(p.split(".")[1]))
+        return min(idxs)
+
+    @torch.no_grad()
+    def residual_at(
+        self, idx: Int[Tensor, "batch pos"], layer: int
+    ) -> Float[Tensor, "batch pos d_model"]:
+        """Clean residual entering block `layer` (`wte + wpe` then blocks `[:layer]`), run
+        un-checkpointed under no_grad. Valid only for `layer <= decomposition_start_layer`."""
+        assert layer <= self.decomposition_start_layer, "prefix must be below all component sites"
+        _b, t = idx.size()
+        pos = torch.arange(0, t, dtype=torch.long, device=idx.device)
+        x = self.wte(idx) + self.wpe(pos)
         blocks: list[ComponentBlock] = self._h  # pyright: ignore[reportAssignmentType]
+        for block in blocks[:layer]:
+            x = block(x)
+        return x
+
+    def forward_from_residual(
+        self,
+        residual: Float[Tensor, "batch pos d_model"],
+        start_layer: int,
+        mask_infos: MaskInfos | None = None,
+        collect: PreWeightActs | None = None,
+        collect_outputs: PreWeightActs | None = None,
+    ) -> Float[Tensor, "batch pos vocab"] | Float[Tensor, "batch pos d_model"]:
+        """Run blocks `[start_layer:]` + final LN + head on a cached `residual`, threading masks.
+        With `start_layer == 0` and `residual = wte+wpe` this is the full forward."""
+        x = residual
+        blocks: list[ComponentBlock] = self._h[start_layer:]  # pyright: ignore[reportAssignmentType]
         if self._use_activation_checkpointing and collect is None and collect_outputs is None:
             for block in blocks:
                 x = checkpoint(block, x, mask_infos, use_reentrant=False)
         else:
             for block in blocks:
                 x = block(x, mask_infos, collect, collect_outputs)
-
         x = self.ln_f(x)
         return x if self._bypass_lm_head else self.lm_head(x)
+
+    @contextmanager
+    def use_cached_residual(self, idx: Int[Tensor, "batch pos"]) -> Iterator[None]:
+        """Within this context, `forward` runs the masked suffix from a clean residual entering
+        `decomposition_start_layer` (computed once from `idx`), skipping the frozen prefix. Every
+        forward inside reuses the one cached residual. Output is identical to the full forward.
+        `PD_DISABLE_RESIDUAL_START=1` makes it a no-op (full forward) — A/B + scale escape hatch."""
+        if os.environ.get("PD_DISABLE_RESIDUAL_START", "").strip() in ("1", "true", "yes"):
+            yield
+            return
+        assert self._cached_residual is None, "use_cached_residual does not nest"
+        start = self.decomposition_start_layer
+        self._cached_residual = (self.residual_at(idx, start), start)
+        try:
+            yield
+        finally:
+            self._cached_residual = None
 
     def forward_with_pre_weight_acts(
         self, idx: Int[Tensor, "batch pos"], mask_infos: MaskInfos | None = None

@@ -7,6 +7,7 @@ the masked forward checkpoint / FSDP / compile friendly.
 Self-contained: `ComponentLinear` / `_proj` are vendored here, not shared with the gpt2 vendoring.
 """
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import cast, override
@@ -148,6 +149,7 @@ class ComponentLlama(VendoredLlama):
     """
 
     _bypass_lm_head: bool = False
+    _cached_residual: tuple[Tensor, int] | None = None
 
     @override
     def forward(
@@ -157,11 +159,33 @@ class ComponentLlama(VendoredLlama):
         collect: PreWeightActs | None = None,
         collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "b t vocab"] | Float[Tensor, "b t d"]:
+        if self._cached_residual is not None:
+            residual, start = self._cached_residual
+            return self.forward_from_residual(residual, start, mask_infos, collect, collect_outputs)
         _b, t = idx.size()
         assert t <= self.config.block_size, f"seq len {t} > block size {self.config.block_size}"
         return self.forward_from_residual(
             self.embed_tokens(idx), 0, mask_infos, collect, collect_outputs
         )
+
+    @contextmanager
+    def use_cached_residual(self, idx: Int[Tensor, "b t"]) -> Iterator[None]:
+        """Within this context, `forward` runs the masked suffix from a clean residual entering
+        `decomposition_start_layer` (computed once from `idx` here), skipping the frozen prefix —
+        instead of embedding `idx` and running all blocks. Every forward inside (clean target,
+        masked recon, the PPGD inner loop, CI harvest) reuses the one cached residual. Output is
+        identical to the full forward (the prefix is frozen + component-free).
+        `PD_DISABLE_RESIDUAL_START=1` makes it a no-op (full forward) — A/B + scale escape hatch."""
+        if os.environ.get("PD_DISABLE_RESIDUAL_START", "").strip() in ("1", "true", "yes"):
+            yield
+            return
+        assert self._cached_residual is None, "use_cached_residual does not nest"
+        start = self.decomposition_start_layer
+        self._cached_residual = (self.residual_at(idx, start), start)
+        try:
+            yield
+        finally:
+            self._cached_residual = None
 
     @property
     def decomposition_start_layer(self) -> int:
