@@ -8,27 +8,27 @@ pack layout, and process group duplicated on both sides — free to drift.
 Here each edge is ONE class. Its pack layout, routing bijection, wire dtype, and
 process group live in a single place; the sender and receiver are the two halves
 of the same class, so they cannot disagree. A pool only constructs the portal
-halves at its own endpoints (see ``CIPortals`` / ``LWPortals`` / ``PPGDPortals``
-below), so an LW rank physically cannot invoke a CI-pool send.
+halves at its own endpoints (see ``CIPortals`` / ``ChunkPortals`` / ``PPGDPortals``
+below), so a chunkwise rank physically cannot invoke a CI-pool send.
 
 The six edges (see ``DESIGN.md``):
 
-  CI  → LW   : ``CiValuesToLayerwise``   (per-site, owned + LW-rank slice)
-  CI  → PPGD : ``CiValuesToPPGD``        (full-model, per-PPGD-rank slice)
-  LW  → CI   : ``GradCiFromLayerwise``   (per-owned-site, per-LW-rank slice)
-  PPGD→ CI   : ``GradCiFromPPGD``        (full-model, per-PPGD-rank slice)
-  PPGD→ LW   : ``GradVuFromPPGD``        (per-owned-site, after in-pool sum-reduce)
-  LW  → PPGD : ``UpdatedVuToPPGD``       (per-owned-site, leader-rooted broadcast)
+  CI  → chunk : ``CiValuesToChunkwise``  (per-site, owned + chunk-rank slice)
+  CI  → PPGD  : ``CiValuesToPPGD``       (full-model, per-PPGD-rank slice)
+  chunk→ CI   : ``GradCiFromChunkwise``  (per-site, per-chunk-rank slice)
+  PPGD→ CI    : ``GradCiFromPPGD``        (full-model, per-PPGD-rank slice)
+  PPGD→ chunk : ``GradVuFromPPGD``        (per-site, after in-pool sum-reduce)
+  chunk→ PPGD : ``UpdatedVuToPPGD``       (per-site, leader-rooted broadcast)
 
 Eval-only:
 
   CI  → PPGD : ``CiOutputsEvalToPPGD``   (full CIOutputs, three dicts)
 
 Each P2P portal carries the shared ``cross_pool_p2p_group``. The V/U broadcast
-edge uses the per-block ``cross_pool_bcast_groups`` ({block leader} ∪ PPGD).
+edge uses the per-chunk ``cross_pool_bcast_groups`` ({chunk leader} ∪ PPGD).
 
-All routing math (which CI slice owns which LW/PPGD shard, sub-slices within a CI
-batch tensor) stays on ``World``; the portals call those helpers so there's
+All routing math (which CI slice owns which chunk/PPGD shard, sub-slices within a
+CI batch tensor) stays on ``World``; the portals call those helpers so there's
 still a single source of truth for the topology.
 """
 
@@ -45,11 +45,11 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from param_decomp.component_model import CIOutputs
 from param_decomp_lab.three_pool.layout import (
-    LayerwiseBlockGroup,
+    Chunk,
     World,
     time_nccl_op,
 )
-from param_decomp_lab.three_pool.role import CIRole, LWRole, PPGDRole
+from param_decomp_lab.three_pool.role import ChunkRole, CIRole, PPGDRole
 
 # Cross-pool tensors are cast to a 2-byte dtype on the wire (halves bytes vs fp32).
 # The wire dtype is split by payload:
@@ -134,19 +134,19 @@ class PendingCiValues:
 
 @dataclass(frozen=True)
 class PendingUpdatedVu:
-    """Pipelined per-block broadcasts of updated V/U, held until ``wait()``."""
+    """Pipelined per-chunk broadcasts of updated V/U, held until ``wait()``."""
 
-    bufs: tuple[tuple[LayerwiseBlockGroup, Tensor, "dist.Work"], ...]
+    bufs: tuple[tuple[Chunk, Tensor, "dist.Work"], ...]
     v_templates: dict[str, Tensor]
     u_templates: dict[str, Tensor]
 
     def wait(self) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         v_new: dict[str, Tensor] = {}
         u_new: dict[str, Tensor] = {}
-        for bg, packed, w in self.bufs:
+        for chunk, packed, w in self.bufs:
             w.wait()
             offset = 0
-            for s in bg.owned_sites:
+            for s in chunk.sites:
                 v_t, u_t = self.v_templates[s], self.u_templates[s]
                 v_n, u_n = v_t.numel(), u_t.numel()
                 v_new[s] = packed[offset : offset + v_n].view_as(v_t).to(v_t.dtype)
@@ -181,31 +181,31 @@ def _pack_sites(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CI → LW : per-site CI values (owned sites, LW-rank batch sub-slice)
+# CI → chunkwise : per-site CI values (chunk sites, chunk-rank batch sub-slice)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
-class CiValuesToLayerwise:
+class CiValuesToChunkwise:
     world: World
 
     def send(self, role: CIRole, ci_full: dict[str, Tensor]) -> InFlightSends:
-        """For each site and each LW rank my CI slice overlaps, isend the
+        """For each site and each chunk rank my CI slice overlaps, isend the
         overlapping sub-slice. ``ci_full`` is keyed by site (the CI fn is global)
         with values ``[B_local_ci, S, C_s]``.
 
-        Coarse-CI: I overlap ``fanout`` whole LW slices, each a sub-slice of my
-        CI tensor. Fine-CI: I overlap exactly one LW slice, sending my whole
-        (smaller) CI tensor into the right offset of that LW rank."""
-        edge = self.world.ci_lw_edge
+        Coarse-CI: I overlap ``fanout`` whole chunk slices, each a sub-slice of my
+        CI tensor. Fine-CI: I overlap exactly one chunk slice, sending my whole
+        (smaller) CI tensor into the right offset of that chunk rank."""
+        edge = self.world.ci_chunk_edge
         works: list[dist.Work] = []
         buffers: list[Tensor] = []
-        with time_nccl_op("CiValuesToLayerwise.send"):
-            for bg in self.world.layerwise_block_groups:
+        with time_nccl_op("CiValuesToChunkwise.send"):
+            for chunk in self.world.chunks:
                 for down_slice_idx in edge.down_slices_for_ci_slice(role.slice_idx):
-                    target = bg.ranks[down_slice_idx]
+                    target = chunk.ranks[down_slice_idx]
                     sub = edge.overlap_within_ci(role.slice_idx, down_slice_idx)
-                    packed = _pack_sites(ci_full, bg.owned_sites, sub, CI_VALUE_WIRE_DTYPE)
+                    packed = _pack_sites(ci_full, chunk.sites, sub, CI_VALUE_WIRE_DTYPE)
                     works.append(
                         dist.isend(packed, dst=target, group=self.world.cross_pool_p2p_group)
                     )
@@ -213,21 +213,21 @@ class CiValuesToLayerwise:
         return InFlightSends(works=tuple(works), buffers=tuple(buffers))
 
     def post_recv(
-        self, role: LWRole, site_to_c: dict[str, int], seq_len: int, device: torch.device
+        self, role: ChunkRole, site_to_c: dict[str, int], seq_len: int, device: torch.device
     ) -> PendingCiValues:
-        """irecv CI values for this LW rank's owned sites. Coarse-CI: one packet
-        from the single CI rank whose slice contains my LW shard. Fine-CI:
-        ``fanout`` packets from the CI ranks nested in my LW shard, each filling
+        """irecv CI values for this chunk rank's sites. Coarse-CI: one packet
+        from the single CI rank whose slice contains my chunk shard. Fine-CI:
+        ``fanout`` packets from the CI ranks nested in my chunk shard, each filling
         a disjoint sub-slice of my local batch."""
-        edge = self.world.ci_lw_edge
-        b_lw = self.world.batch_local_lw
+        edge = self.world.ci_chunk_edge
+        b_chunk = self.world.batch_local_chunk
         packets: list[_CiRecvPacket] = []
-        with time_nccl_op("CiValuesToLayerwise.recv"):
-            for ci_slice_idx in edge.ci_slices_for_down_slice(role.within_block_idx):
+        with time_nccl_op("CiValuesToChunkwise.recv"):
+            for ci_slice_idx in edge.ci_slices_for_down_slice(role.within_chunk_idx):
                 src = self.world.ci_ranks[ci_slice_idx]
-                overlap = edge.overlap_within_down(ci_slice_idx, role.within_block_idx)
+                overlap = edge.overlap_within_down(ci_slice_idx, role.within_chunk_idx)
                 overlap_len = overlap.stop - overlap.start
-                packed_numel = sum(overlap_len * seq_len * site_to_c[s] for s in role.owned_sites)
+                packed_numel = sum(overlap_len * seq_len * site_to_c[s] for s in role.sites)
                 packed = torch.empty(packed_numel, device=device, dtype=CI_VALUE_WIRE_DTYPE)
                 work = dist.irecv(packed, src=src, group=self.world.cross_pool_p2p_group)
                 assert work is not None
@@ -238,9 +238,9 @@ class CiValuesToLayerwise:
                 )
         return PendingCiValues(
             packets=tuple(packets),
-            sites=role.owned_sites,
+            sites=role.sites,
             site_to_c=site_to_c,
-            b_down=b_lw,
+            b_down=b_chunk,
             seq_len=seq_len,
             device=device,
         )
@@ -301,61 +301,61 @@ class CiValuesToPPGD:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# LW → CI : per-owned-site CI grads (per-LW-rank batch slice; stitched on CI side)
+# chunkwise → CI : per-site CI grads (per-chunk-rank batch slice; stitched on CI side)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
-class GradCiFromLayerwise:
+class GradCiFromChunkwise:
     world: World
 
-    def send(self, role: LWRole, g_ci_owned: dict[str, Tensor]) -> None:
-        """Send per-owned-site CI grads to the CI rank(s) my LW slice overlaps.
+    def send(self, role: ChunkRole, g_ci_owned: dict[str, Tensor]) -> None:
+        """Send per-site CI grads to the CI rank(s) my chunk slice overlaps.
 
         Coarse-CI: one CI rank contains my whole slice — send all of it. Fine-CI:
         my slice spans ``fanout`` CI ranks — send each the overlapping sub-slice
-        of my LW grad. One coalesced send per destination."""
-        edge = self.world.ci_lw_edge
-        with time_nccl_op("GradCiFromLayerwise.send"):
-            for ci_slice_idx in edge.ci_slices_for_down_slice(role.within_block_idx):
+        of my chunk grad. One coalesced send per destination."""
+        edge = self.world.ci_chunk_edge
+        with time_nccl_op("GradCiFromChunkwise.send"):
+            for ci_slice_idx in edge.ci_slices_for_down_slice(role.within_chunk_idx):
                 dst = self.world.ci_ranks[ci_slice_idx]
-                sub = edge.overlap_within_down(ci_slice_idx, role.within_block_idx)
-                packed = _pack_sites(g_ci_owned, role.owned_sites, sub, WIRE_DTYPE)
+                sub = edge.overlap_within_down(ci_slice_idx, role.within_chunk_idx)
+                packed = _pack_sites(g_ci_owned, role.sites, sub, WIRE_DTYPE)
                 dist.send(packed, dst=dst, group=self.world.cross_pool_p2p_group)
 
     def recv(
         self, role: CIRole, site_to_c: dict[str, int], seq_len: int, device: torch.device
     ) -> dict[str, Tensor]:
-        """Recv per-site CI grads from the LW rank(s) my CI slice overlaps,
+        """Recv per-site CI grads from the chunk rank(s) my CI slice overlaps,
         stitched into per-site ``[B_local_ci, S, C_s]`` fp32 dests. Coarse-CI:
-        ``fanout`` LW ranks tile my slice. Fine-CI: one LW rank, my slice a
+        ``fanout`` chunk ranks tile my slice. Fine-CI: one chunk rank, my slice a
         sub-slice of it (I fill only my overlap)."""
-        edge = self.world.ci_lw_edge
+        edge = self.world.ci_chunk_edge
 
         pending: list[tuple[slice, int, Tensor, dist.Work, tuple[str, ...]]] = []
-        with time_nccl_op("GradCiFromLayerwise.recv:post_irecvs"):
-            for bg in self.world.layerwise_block_groups:
-                owned = bg.owned_sites
+        with time_nccl_op("GradCiFromChunkwise.recv:post_irecvs"):
+            for chunk in self.world.chunks:
+                sites = chunk.sites
                 for down_slice_idx in edge.down_slices_for_ci_slice(role.slice_idx):
-                    src = bg.ranks[down_slice_idx]
+                    src = chunk.ranks[down_slice_idx]
                     overlap = edge.overlap_within_ci(role.slice_idx, down_slice_idx)
                     overlap_len = overlap.stop - overlap.start
-                    packed_numel = sum(overlap_len * seq_len * site_to_c[s] for s in owned)
+                    packed_numel = sum(overlap_len * seq_len * site_to_c[s] for s in sites)
                     buf = torch.empty(packed_numel, device=device, dtype=WIRE_DTYPE)
                     w = dist.irecv(buf, src=src, group=self.world.cross_pool_p2p_group)
                     assert w is not None
-                    pending.append((overlap, overlap_len, buf, w, owned))
+                    pending.append((overlap, overlap_len, buf, w, sites))
 
         b_ci = self.world.batch_local_ci
         out: dict[str, Tensor] = {
             s: torch.empty(b_ci, seq_len, site_to_c[s], device=device, dtype=torch.float32)
             for s in self.world.all_sites
         }
-        with time_nccl_op("GradCiFromLayerwise.recv:wait"):
-            for overlap, overlap_len, buf, w, owned in pending:
+        with time_nccl_op("GradCiFromChunkwise.recv:wait"):
+            for overlap, overlap_len, buf, w, sites in pending:
                 w.wait()
                 offset = 0
-                for site in owned:
+                for site in sites:
                     c_s = site_to_c[site]
                     n = overlap_len * seq_len * c_s
                     site_view = buf[offset : offset + n].view(overlap_len, seq_len, c_s)
@@ -423,7 +423,7 @@ class GradCiFromPPGD:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PPGD → LW : per-owned-site V/U grads (after PPGD in-pool sum-reduce)
+# PPGD → chunkwise : per-site V/U grads (after PPGD in-pool sum-reduce)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -432,21 +432,21 @@ class GradVuFromPPGD:
     world: World
 
     def send(self, role: PPGDRole, v_grads: dict[str, Tensor], u_grads: dict[str, Tensor]) -> None:
-        """PPGD-leader-only: send g_VU per-block (coalesced) to each LW block
-        leader. Assumes V/U grads were already sum-reduced within the PPGD pool,
-        so every PPGD rank holds the same values and only the leader sends."""
+        """PPGD-leader-only: send g_VU per-chunk (coalesced) to each chunk leader.
+        Assumes V/U grads were already sum-reduced within the PPGD pool, so every
+        PPGD rank holds the same values and only the leader sends."""
         if not role.is_pool_leader:
             return
         works: list[dist.Work] = []
         buffers: list[Tensor] = []
         with time_nccl_op("GradVuFromPPGD.send:isends"):
-            for bg in self.world.layerwise_block_groups:
+            for chunk in self.world.chunks:
                 parts: list[Tensor] = []
-                for site in bg.owned_sites:
+                for site in chunk.sites:
                     parts.append(v_grads[site].to(WIRE_DTYPE).contiguous().flatten())
                     parts.append(u_grads[site].to(WIRE_DTYPE).contiguous().flatten())
                 packed = torch.cat(parts)
-                w = dist.isend(packed, dst=bg.leader, group=self.world.cross_pool_p2p_group)
+                w = dist.isend(packed, dst=chunk.leader, group=self.world.cross_pool_p2p_group)
                 assert w is not None
                 works.append(w)
                 buffers.append(packed)
@@ -456,21 +456,21 @@ class GradVuFromPPGD:
         del buffers
 
     def recv(
-        self, role: LWRole, v_templates: dict[str, Tensor], u_templates: dict[str, Tensor]
+        self, role: ChunkRole, v_templates: dict[str, Tensor], u_templates: dict[str, Tensor]
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-        """Block leader recvs g_VU for owned sites from PPGD leader; non-leaders
+        """Chunk leader recvs g_VU for its sites from PPGD leader; non-leaders
         get nothing.
 
         Contribute-once (see ``SUM_GRAD_CONVENTION.md``): PPGD's grad is identical
-        across block replicas, so under the block SUM-reduce it must land on
+        across chunk replicas, so under the chunk SUM-reduce it must land on
         exactly ONE rank. We add it to the leader's ``.grad`` only and skip the
-        old in-block broadcast — the SUM then distributes it to every replica
+        old in-chunk broadcast — the SUM then distributes it to every replica
         exactly once. Non-leaders return empty dicts and add nothing.
         """
-        if not role.is_block_leader:
+        if not role.is_chunk_leader:
             return {}, {}
 
-        my_sites = role.owned_sites
+        my_sites = role.sites
         packed_numel = sum(v_templates[s].numel() + u_templates[s].numel() for s in my_sites)
         sample = v_templates[my_sites[0]]
         packed = torch.empty(packed_numel, dtype=WIRE_DTYPE, device=sample.device)
@@ -495,7 +495,7 @@ class GradVuFromPPGD:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# LW → PPGD : updated V/U (leader-rooted broadcast over {leader} ∪ PPGD)
+# chunkwise → PPGD : updated V/U (leader-rooted broadcast over {leader} ∪ PPGD)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -504,19 +504,19 @@ class UpdatedVuToPPGD:
     world: World
 
     def send(
-        self, role: LWRole, v_owned: dict[str, Tensor], u_owned: dict[str, Tensor]
+        self, role: ChunkRole, v_owned: dict[str, Tensor], u_owned: dict[str, Tensor]
     ) -> InFlightSends:
         """Coalesced leader-rooted broadcast of updated V/U to all PPGD ranks.
-        Only the block leader sends; others no-op. Caller keeps the buffer alive
+        Only the chunk leader sends; others no-op. Caller keeps the buffer alive
         until the work completes."""
-        if not role.is_block_leader:
+        if not role.is_chunk_leader:
             return InFlightSends(works=(), buffers=())
         parts: list[Tensor] = []
-        for s in role.owned_sites:
+        for s in role.sites:
             parts.append(v_owned[s].detach().to(WIRE_DTYPE).contiguous().flatten())
             parts.append(u_owned[s].detach().to(WIRE_DTYPE).contiguous().flatten())
         packed = torch.cat(parts)
-        bcast_group = self.world.cross_pool_bcast_groups[role.block_idx]
+        bcast_group = self.world.cross_pool_bcast_groups[role.chunk_idx]
         with time_nccl_op("UpdatedVuToPPGD.send"):
             w = dist.broadcast(packed, src=role.rank, group=bcast_group, async_op=True)
         assert w is not None
@@ -525,19 +525,19 @@ class UpdatedVuToPPGD:
     def post_recv(
         self, v_templates: dict[str, Tensor], u_templates: dict[str, Tensor]
     ) -> PendingUpdatedVu:
-        """Kick off one async broadcast per block group (they pipeline across
-        the per-group NCCL streams); ``wait`` unpacks each into per-site V/U."""
-        bufs: list[tuple[LayerwiseBlockGroup, Tensor, dist.Work]] = []
+        """Kick off one async broadcast per chunk (they pipeline across the
+        per-chunk NCCL streams); ``wait`` unpacks each into per-site V/U."""
+        bufs: list[tuple[Chunk, Tensor, dist.Work]] = []
         with time_nccl_op("UpdatedVuToPPGD.recv"):
-            for bg_idx, bg in enumerate(self.world.layerwise_block_groups):
-                owned = bg.owned_sites
-                packed_numel = sum(v_templates[s].numel() + u_templates[s].numel() for s in owned)
-                sample = v_templates[owned[0]]
+            for chunk_idx, chunk in enumerate(self.world.chunks):
+                sites = chunk.sites
+                packed_numel = sum(v_templates[s].numel() + u_templates[s].numel() for s in sites)
+                sample = v_templates[sites[0]]
                 packed = torch.empty(packed_numel, dtype=WIRE_DTYPE, device=sample.device)
-                bcast_group = self.world.cross_pool_bcast_groups[bg_idx]
-                w = dist.broadcast(packed, src=bg.leader, group=bcast_group, async_op=True)
+                bcast_group = self.world.cross_pool_bcast_groups[chunk_idx]
+                w = dist.broadcast(packed, src=chunk.leader, group=bcast_group, async_op=True)
                 assert w is not None
-                bufs.append((bg, packed, w))
+                bufs.append((chunk, packed, w))
         return PendingUpdatedVu(bufs=tuple(bufs), v_templates=v_templates, u_templates=u_templates)
 
 
@@ -567,7 +567,7 @@ class CiOutputsEvalToPPGD:
                 # lower/upper masks, the whole packet stays bf16 (WIRE_DTYPE) rather
                 # than splitting the buffer by dtype — not worth the pack/unpack tangle
                 # for an off-critical-path send. The per-step value sends
-                # (CiValuesToLayerwise/PPGD) DO use fp16.
+                # (CiValuesToChunkwise/PPGD) DO use fp16.
                 parts: list[Tensor] = []
                 for d in (ci.lower_leaky, ci.upper_leaky, ci.pre_sigmoid):
                     parts.append(_pack_sites(d, self.world.all_sites, sub, WIRE_DTYPE))
@@ -638,7 +638,7 @@ def _bucketed_all_reduce(
 class InFlightCiGradReduce:
     """An async CI in-pool SUM-reduce on CI fn grads, held until ``wait()``.
 
-    Mirrors ``all_reduce_grads_in_block``'s async bucketed pattern: the reduce
+    Mirrors ``all_reduce_grads_in_chunk``'s async bucketed pattern: the reduce
     is kicked off (``async_op=True``) right after the fused backward, then the
     flat buffers are reduced in-flight while the CI rank does non-dependent work
     (the dead-time H_{T+1} prefetch). ``wait()`` blocks on every bucket and
@@ -698,19 +698,21 @@ def sum_reduce_ppgd_grads(world: World, grads: Iterable[Tensor]) -> None:
     _bucketed_all_reduce(grads, dist.ReduceOp.SUM, world.ppgd_pool_group, "sum_reduce_ppgd_grads")
 
 
-def all_reduce_grads_in_block(world: World, role: LWRole, params: Iterable[nn.Parameter]) -> None:
-    """LW in-block SUM-reduce over V/U grads (async buckets, wait + copy back).
-    No-op when the block group is 1-rank or there are no grads.
+def all_reduce_grads_in_chunk(
+    world: World, role: ChunkRole, params: Iterable[nn.Parameter]
+) -> None:
+    """Chunkwise in-chunk SUM-reduce over V/U grads (async buckets, wait + copy back).
+    No-op when the chunk is 1-rank or there are no grads.
 
     SUM, not AVG (see ``SUM_GRAD_CONVENTION.md``): the per-rank stoch grad is a
     partial sum over a disjoint position slice, normalized by the honest global
     count, so the cross-rank SUM reassembles the single-pool total. The
     REPLICATED contributions (faith, broadcast PPGD grad) are emitted on the
-    block leader ONLY — contribute-once — so they survive the SUM exactly once
-    without any ``n_per_block`` pre-scaling.
+    chunk leader ONLY — contribute-once — so they survive the SUM exactly once
+    without any ``chunk_dp`` pre-scaling.
     """
-    block_group = world.block_group_groups[role.block_idx]
-    if dist.get_world_size(block_group) <= 1:
+    chunk_group = world.chunk_groups[role.chunk_idx]
+    if dist.get_world_size(chunk_group) <= 1:
         return
     grads: list[Tensor] = [p.grad for p in params if p.grad is not None]
     if not grads:
@@ -720,10 +722,10 @@ def all_reduce_grads_in_block(world: World, role: LWRole, params: Iterable[nn.Pa
         buckets.setdefault((g.dtype, g.device), []).append(g)
 
     states: list[tuple[list[Tensor], Tensor, dist.Work]] = []
-    with time_nccl_op("all_reduce_grads_in_block"):
+    with time_nccl_op("all_reduce_grads_in_chunk"):
         for bucket in buckets.values():
             flat = _flatten_dense_tensors(bucket)
-            w = dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=block_group, async_op=True)
+            w = dist.all_reduce(flat, op=dist.ReduceOp.SUM, group=chunk_group, async_op=True)
             assert w is not None
             states.append((bucket, flat, w))
     for bucket, flat, w in states:
@@ -742,18 +744,18 @@ def all_reduce_grads_in_block(world: World, role: LWRole, params: Iterable[nn.Pa
 @dataclass(frozen=True)
 class CIPortals:
     role: CIRole
-    ci_to_lw: CiValuesToLayerwise
+    ci_to_chunk: CiValuesToChunkwise
     ci_to_ppgd: CiValuesToPPGD
-    g_ci_from_lw: GradCiFromLayerwise
+    g_ci_from_chunk: GradCiFromChunkwise
     g_ci_from_ppgd: GradCiFromPPGD
     ci_eval_to_ppgd: CiOutputsEvalToPPGD
 
 
 @dataclass(frozen=True)
-class LWPortals:
-    role: LWRole
-    ci_from_ci_pool: CiValuesToLayerwise
-    g_ci_to_ci_pool: GradCiFromLayerwise
+class ChunkPortals:
+    role: ChunkRole
+    ci_from_ci_pool: CiValuesToChunkwise
+    g_ci_to_ci_pool: GradCiFromChunkwise
     g_vu_from_ppgd: GradVuFromPPGD
     updated_vu_to_ppgd: UpdatedVuToPPGD
 
@@ -763,27 +765,27 @@ class PPGDPortals:
     role: PPGDRole
     ci_from_ci_pool: CiValuesToPPGD
     g_ci_to_ci_pool: GradCiFromPPGD
-    g_vu_to_lw: GradVuFromPPGD
-    updated_vu_from_lw: UpdatedVuToPPGD
+    g_vu_to_chunk: GradVuFromPPGD
+    updated_vu_from_chunk: UpdatedVuToPPGD
     ci_eval_from_ci_pool: CiOutputsEvalToPPGD
 
 
 def build_ci_portals(world: World, role: CIRole) -> CIPortals:
     return CIPortals(
         role=role,
-        ci_to_lw=CiValuesToLayerwise(world),
+        ci_to_chunk=CiValuesToChunkwise(world),
         ci_to_ppgd=CiValuesToPPGD(world),
-        g_ci_from_lw=GradCiFromLayerwise(world),
+        g_ci_from_chunk=GradCiFromChunkwise(world),
         g_ci_from_ppgd=GradCiFromPPGD(world),
         ci_eval_to_ppgd=CiOutputsEvalToPPGD(world),
     )
 
 
-def build_lw_portals(world: World, role: LWRole) -> LWPortals:
-    return LWPortals(
+def build_chunk_portals(world: World, role: ChunkRole) -> ChunkPortals:
+    return ChunkPortals(
         role=role,
-        ci_from_ci_pool=CiValuesToLayerwise(world),
-        g_ci_to_ci_pool=GradCiFromLayerwise(world),
+        ci_from_ci_pool=CiValuesToChunkwise(world),
+        g_ci_to_ci_pool=GradCiFromChunkwise(world),
         g_vu_from_ppgd=GradVuFromPPGD(world),
         updated_vu_to_ppgd=UpdatedVuToPPGD(world),
     )
@@ -794,7 +796,7 @@ def build_ppgd_portals(world: World, role: PPGDRole) -> PPGDPortals:
         role=role,
         ci_from_ci_pool=CiValuesToPPGD(world),
         g_ci_to_ci_pool=GradCiFromPPGD(world),
-        g_vu_to_lw=GradVuFromPPGD(world),
-        updated_vu_from_lw=UpdatedVuToPPGD(world),
+        g_vu_to_chunk=GradVuFromPPGD(world),
+        updated_vu_from_chunk=UpdatedVuToPPGD(world),
         ci_eval_from_ci_pool=CiOutputsEvalToPPGD(world),
     )

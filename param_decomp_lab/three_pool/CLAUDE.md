@@ -1,24 +1,31 @@
 # `param_decomp_lab/three_pool/`
 
 The 3-pool training subsystem — sibling of `param_decomp.optimize.Trainer` for
-splitting a decomposition run across three rank pools (CI fn, layerwise V/U,
+splitting a decomposition run across three rank pools (CI fn, chunkwise V/U,
 PPGD adversary). See `DESIGN.md` for the per-step comm graph and the module
 docstring in `optimize.py` for the data-handling contract.
 
+The chunkwise pool shards the decomposed *sites* into **chunks**; each chunk is a
+site-group replicated across `chunk_dp` DDP ranks. ("Chunkwise" — not "layerwise":
+a chunk owns an arbitrary slice of sites, not a model layer. The core-library
+*layerwise recon loss* — `StochasticReconLayerwiseLoss`, reconstruct each decomposed
+layer's output independently — is a separate, stable concept the chunkwise pool
+*uses*; it keeps the name "layerwise".)
+
 | File | What it covers |
 |---|---|
-| `optimize.py` | `ThreePoolTrainer` + `optimize_three_pool`; the training loop, `snapshot`/`from_snapshot`. Consumes `ThreePoolConstrainedPDConfig` (reads `pd.losses.*` directly). Config constraints are type-level (see `pd_config.py`) + a load-time validator on `ThreePoolLMExperimentConfig`; only site-coverage validation remains here (`_build_runtime`, needs the loaded model) |
-| `pd_config.py` | `ThreePoolConstrainedPDConfig` + the typed `ThreePoolLosses(faith, imp, stoch, ppgd, routing_plan)` struct — the 3-pool-constrained `PDConfig`. Lives with the subsystem (not `experiments/lm/`) so the subsystem is self-contained: `optimize` imports it from its own package, no back-dependency into `experiments/lm/` |
-| `layout.py` | `World` topology; `build_world` constructs every process group (threading `pg_timeout` into each); `BatchEdge` — symmetric per-edge batch-slice geometry (CI↔LW, CI↔PPGD) answering routing for both fan directions |
+| `optimize.py` | `ThreePoolTrainer` + `optimize_three_pool`; the training loop, `snapshot`/`from_snapshot`. Consumes `ThreePoolConstrainedPDConfig` (reads `pd.losses.*` directly). Config constraints are type-level (see `pd_config.py`) + a load-time validator on `ThreePoolLMExperimentConfig`; the topology is resolved into ranks/chunks in `_build_runtime` (which also runs the site-coverage check, needs the loaded model) |
+| `pd_config.py` | `ThreePoolConstrainedPDConfig` + the typed `ThreePoolLosses(faith, imp, stoch, ppgd, recon_plan)` struct — the 3-pool-constrained `PDConfig`. Lives with the subsystem (not `experiments/lm/`) so the subsystem is self-contained: `optimize` imports it from its own package, no back-dependency into `experiments/lm/` |
+| `config.py` | `ThreePoolTopology` (`ci` / `ppgd` / `chunkwise` `PoolSpec`s of per-rank batch + `sites_per_chunk`) + `resolve(ordered_sites, batch_size) -> ResolvedLayout`. Authors per-rank batch, NOT rank ids; the resolver derives ranks/chunks/world_size in canonical order. Parse-time validation = cross-divisibility of the three per-rank batches |
+| `layout.py` | `World` topology + the runtime `Chunk` (`.ranks` / `.sites`); `build_world` constructs every process group (threading `pg_timeout` into each); `BatchEdge` — symmetric per-edge batch-slice geometry (CI↔chunk, CI↔PPGD) answering routing for both fan directions |
 | `checkpoint.py` | offline state_dict assembly from on-disk partials (`assemble_model_state_dict_from_partials`) + the leader key-partition helpers (`owned_model_state_keys` / `ci_fn_state_keys`) |
 | `consolidate.py` | `consolidate_step` — async, off-train-loop assembly of `model_<step>.pth` + `training_<step>.pth` from a step's scratch partials; prunes old `training_*.pth`; deletes the scratch dir. `unconsolidated_steps` lists recoverable steps |
 | `consolidate_cli.py` | `python -m …consolidate_cli <run> [--step N]` — manual CPU-only recovery for a failed/preempted async consolidation (separate module to avoid an import cycle with `experiments.lm.run`) |
-| `config.py` | `ThreePoolConfig` + topology validation |
-| `role.py` | `PoolRole = CIRole \| LWRole \| PPGDRole` — this rank's pool role; per-pool fields are union variants, not optional attrs |
-| `context.py` | `PoolContext = CIContext \| LWContext \| PPGDContext` — `world` + `role` + this pool's portals; the trainer matches on it to dispatch step fns |
+| `role.py` | `PoolRole = CIRole \| ChunkRole \| PPGDRole` — this rank's pool role; per-pool fields are union variants, not optional attrs |
+| `context.py` | `PoolContext = CIContext \| ChunkContext \| PPGDContext` — `world` + `role` + this pool's portals; the trainer matches on it to dispatch step fns |
 | `portals.py` | Cross-pool exchanges as typed objects — one class per DAG edge (pack layout + routing + dtype + PG in one place) |
-| `step_{ci,layerwise,ppgd}.py` | per-pool step functions |
-| `routing_plan.py` | `RoutingPlan` (`PerSitePlan` \| `SubsetRoutingPlan`) — how each LW block turns its owned sites into a list of recon forwards |
+| `step_{ci,chunkwise,ppgd}.py` | per-pool step functions |
+| `recon_plan.py` | `ReconPlan` (`PerSitePlan` \| `SubsetReconPlan`) — how each chunk turns its sites into a list of recon forwards |
 | `eval_step.py` | 3-pool eval pass (PPGD pool runs metrics; others barrier through) |
 | `reductions.py` | cross-pool log reductions: losses (`aggregate_losses_to_rank0`), peak memory (`aggregate_max_memory_to_rank0`), grad norms (`aggregate_grad_norms_to_rank0` + `per_param_grad_norms`) |
 | `SUM_GRAD_CONVENTION.md` | the gradient-assembly scaling convention (proposal) |
@@ -38,20 +45,20 @@ so a 3-pool run and a single-pool run overlay on the same wandb panels:
   owning rank computes its **pre-clip** norms (`per_param_grad_norms`, after the in-pool
   SUM-reduce so they're the true global grad, before the clip) and stashes them in
   `metrics["grad_norms/..."]`; `aggregate_grad_norms_to_rank0` all-gathers component norms
-  within the LW pool and ships the CI leader's ci-fn norms to rank 0 (object collectives,
+  within the chunkwise pool and ships the CI leader's ci-fn norms to rank 0 (object collectives,
   log-steps only). PPGD owns no trained params. Summaries are derived on rank 0.
 - **Per-loss grad norms** (3-pool-only diagnostic for coeff rebalancing):
   `train/grad_norms/components/by_loss/{FaithfulnessLoss,StochasticReconLayerwiseLoss,PersistentPGDReconLoss}`
   — each loss term's contribution to the global V/U grad. faith + ppgd are contribute-once
-  (block-leader-only), stoch is each rank's partial; one block SUM-all-reduce of
+  (chunk-leader-only), stoch is each rank's partial; one chunk SUM-all-reduce of
   `[faith, ppgd, total]` recovers each term's global grad (`stoch = total - faith - ppgd`),
-  leader takes sum-sq (`_component_grad_sumsq_by_loss` in `step_layerwise.py`), and
-  `aggregate_component_grad_by_loss_to_rank0` SUMs across blocks. CI-fn split (imp vs recon)
+  leader takes sum-sq (`_component_grad_sumsq_by_loss` in `step_chunkwise.py`), and
+  `aggregate_component_grad_by_loss_to_rank0` SUMs across chunks. CI-fn split (imp vs recon)
   not done — the fused CI backward would have to be unfused. Log-steps only.
 - **LR schedules**: both `train/schedules/lr/components` and `train/schedules/lr/ci_fn`
   (rank 0 computes the ci-fn LR from the schedule directly — no cross-pool comm).
-- **3-pool extras** (no single-pool equivalent): `train/perf/step_ms` (MAX over LW),
-  `train/mem/{lw,ci,ppgd}_peak_gb`, `train/metrics/mean_l0` (batch-mean active CI components
+- **3-pool extras** (no single-pool equivalent): `train/perf/step_ms` (MAX over chunkwise),
+  `train/mem/{chunk,ci,ppgd}_peak_gb`, `train/metrics/mean_l0` (batch-mean active CI components
   per token across all sites, threshold 0 — the live sparsity readout; CI pool computes
   it from `lower_leaky` and ships it via the loss-reduction path, see `reductions.py`).
 - **Eval**: in-train fast eval logs `eval/<k>`; slow eval is async (`experiments/lm/async_eval.py`)
@@ -63,12 +70,12 @@ so a 3-pool run and a single-pool run overlay on the same wandb panels:
 
 See `SUM_GRAD_CONVENTION.md` for the full derivation. Summary: every
 data-parallel gradient reduction is **SUM** (`all_reduce_ci_fn_grads`,
-`all_reduce_grads_in_block`, and PPGD's V/U reduce). Each producer emits a
+`all_reduce_grads_in_chunk`, and PPGD's V/U reduce). Each producer emits a
 *partial sum* normalized only by the honest GLOBAL count — NO `n_ci` /
-`n_per_block` transport factor. `SUM(partials) = total`, so no producer needs a
+`chunk_dp` transport factor. `SUM(partials) = total`, so no producer needs a
 pool's size. The REPLICATED contributions are handled structurally rather than by
 a replica-count divide: faith + broadcast-PPGD V/U **contribute once** (emitted
-on the block leader only), and imp-min uses the **detached-global-residual** trick
+on the chunk leader only), and imp-min uses the **detached-global-residual** trick
 (`S = local + (all_reduce_sum(local.detach()) - local.detach())`) so its backward
 is a local partial. The grad-clip `n_replicas` is unchanged — it counts distinct
 params for the global norm, independent of the grad-reduce op. Validated by
@@ -80,7 +87,7 @@ The save path is split so the train loop never blocks on a multi-GB read.
 
 `snapshot()` (on the train loop, all ranks collective): each rank writes a
 **self-contained partial** to `scratch_dir/step_<S>/rank_<r>.pth` — its owned
-model params (LW block leaders → owned-sites V/U; CI pool leader → CI fn),
+model params (chunk leaders → chunk-sites V/U; CI pool leader → CI fn),
 its optimizer state (name-keyed), and (PPGD) its sources. Rank 0 also writes
 `meta.pth` (configs + fingerprint + `c_per_site` / `all_sites`). There is **one
 pre-write barrier** (so rank 0's `mkdir` + `meta` write land before others write
@@ -172,18 +179,18 @@ in-train (fast) eval pass plus a checkpoint partial-write barrier — minutes, n
 the old ~10-min rank-0 read. Override (seconds) via `PD_3POOL_PG_TIMEOUT_S` —
 used by the watchdog-safe-at-low-timeout test to force a tight bound.
 
-When LW `torch.compile` is on (the default — see below), the timeout widens to
+When chunkwise `torch.compile` is on (the default — see below), the timeout widens to
 **20 min** (`_COMPILE_PG_TIMEOUT`), because step 0 pays a one-time ~minutes
 compilation while the other pools wait at the first cross-pool collective. The
 widening is uniform across ranks (the flag is global), and steady-state collectives
 are still sub-second.
 
-## LW torch.compile (default on; `PD_DISABLE_LW_COMPILE=1` to disable)
+## Chunkwise torch.compile (default on; `PD_DISABLE_CHUNK_COMPILE=1` to disable)
 
-The LW pool's component model is `torch.compile`d **whole-model** (the block-loop's
-`checkpoint(block, …)` lives *inside* the compiled region) — ~**2.74×** on the LW step (the
-throughput pole), 0 graph breaks, validated clean at 160-GPU distributed scale. LW-only
-(PPGD/CI have slack; PPGD's `autograd.grad` is unvalidated under compile).
+The chunkwise pool's component model is `torch.compile`d **whole-model** (the model's
+block-loop `checkpoint(block, …)` lives *inside* the compiled region) — ~**2.74×** on the
+chunkwise step (the throughput pole), 0 graph breaks, validated clean at 160-GPU distributed
+scale. Chunkwise-only (PPGD/CI have slack; PPGD's `autograd.grad` is unvalidated under compile).
 
 **Requires torch >= 2.11.** With the checkpoint inside the compiled region the AOT min-cut
 partitioner sees the checkpointed flash-SDPA as a must-recompute nondeterministic-seeded op.
@@ -201,13 +208,13 @@ The CI pool activation-checkpoints the CI-fn transformer blocks
 (`GlobalSharedTransformerCiFn.enable_activation_checkpointing`, `PD_DISABLE_CI_CKPT=1` to
 disable) and then `torch.compile`s the **whole CI-fn forward** with the checkpoint loop
 inside the compiled region (`ci_fn.compile()`, `PD_DISABLE_CI_COMPILE=1` to disable) — same
-torch >= 2.11 pattern as LW. Checkpoint recomputes the 16384-wide MLP / attn intermediates in
+torch >= 2.11 pattern as the chunkwise pool. Checkpoint recomputes the 16384-wide MLP / attn intermediates in
 backward, saving ~**15 GB** of block-activation high-water on the CI rank; whole-forward
 compile turns the checkpoint's +12.9% step-time cost into a net **−9.2%** vs baseline (1-GPU
 B200 probe; whole-region beats per-block's −4.6%). The CI pool is compute-idle (PPGD is the
 long pole), so even the bare ckpt cost would be free on the critical path. Whole-forward
-compile + ckpt + flash-SDPA is validated on real 2-GPU DDP/NCCL. Either compile path (LW or
-CI) widens the step-0 PG timeout.
+compile + ckpt + flash-SDPA is validated on real 2-GPU DDP/NCCL. Either compile path
+(chunkwise or CI) widens the step-0 PG timeout.
 
 ## CI value wire dtype split (`portals.py`)
 
@@ -234,11 +241,9 @@ that interval matters).
 
 `from_snapshot` validates the saved topology against the current one, but the
 comparison runs on EVERY rank, so it compares only the **rank-invariant** core
-(`world_size` / `ci_ranks` / `ppgd_ranks` / block count) via
-`_rank_invariant_fingerprint_core` — never a rank-local view. That helper also
-tolerates the pre-fix rank-local fingerprint format baked into existing
-production checkpoints (p-a5b667e9). The per-block ranks→sites mapping is
-re-derived from the snapshot's `three_pool_config`.
+(`world_size` / `ci_ranks` / `ppgd_ranks` / `n_chunks`) via
+`_rank_invariant_fingerprint_core` — never a rank-local view. The per-chunk
+ranks→sites mapping is re-derived from the snapshot's `three_pool_config`.
 
 Repro/fault-injection env knobs (never set in production):
 `PD_3POOL_PG_TIMEOUT_S`, `PD_3POOL_SNAPSHOT_RANK0_SLEEP_S` (sleeps rank 0 inside
@@ -247,47 +252,47 @@ loop now that the read is async), `PD_3POOL_DISABLE_REJOIN_BARRIER` (drops the
 post-write rejoin barrier). Regression tests:
 `param_decomp_lab/tests/test_three_pool_pg_timeout.py`.
 
-## LW recon routing plan (`routing_plan.py`)
+## Chunkwise recon plan (`recon_plan.py`)
 
-The LW pool's reconstruction unit is parameterised by `losses.routing_plan`
-(`ThreePoolLosses`, default `PerSitePlan`). Each block turns its `owned_sites`
-into a **list of recon forwards** via `plan.generate(owned_sites, mask_shape,
-device)`; `step_layerwise` runs one masked forward+backward per entry.
+The chunkwise pool's reconstruction unit is parameterised by `losses.recon_plan`
+(`ThreePoolLosses`, default `PerSitePlan`). Each chunk turns its `sites`
+into a **list of recon forwards** via `plan.generate(sites, mask_shape,
+device)`; `step_chunkwise` runs one masked forward+backward per entry.
 
-- `PerSitePlan` — one forward per owned site, that site routed everywhere. The
+- `PerSitePlan` — one forward per site, that site routed everywhere. The
   original "swap one matrix at a time" loop; bit-exact with the pre-routing path.
-- `SubsetRoutingPlan(routing, n_samples)` — `n_samples` forwards, each over *all*
-  owned sites with a freshly-drawn per-position routing. `routing=all` →
+- `SubsetReconPlan(routing, n_samples)` — `n_samples` forwards, each over *all*
+  the chunk's sites with a freshly-drawn per-position routing. `routing=all` →
   joint "swap everything at once" (`n_samples=1` → one forward instead of N → ~N×
-  less LW compute); `routing=uniform_k_subset` / `static_probability` →
+  less chunkwise compute); `routing=uniform_k_subset` / `static_probability` →
   per-position subset recon (à la core `StochasticReconSubsetLoss`). Reuses the
   core `masks.py` routers via `get_subset_router`.
 
-The cross-pool DAG is unchanged — it's all keyed on `owned_sites`, and every owned
+The cross-pool DAG is unchanged — it's all keyed on the chunk's `sites`, and every
 site still gets exactly one re-leafed CI tensor whose `.grad` accumulates across the
 forward list and ships back once.
 
-**Gradient scaling.** The only scaling knob is `N_est` = the global total of LW
-recon forwards per step (`runtime.n_est = Σ over blocks of
-plan.n_forwards(owned_sites)`), computed once at `_build_runtime`. It replaces the
+**Gradient scaling.** The only scaling knob is `N_est` = the global total of chunkwise
+recon forwards per step (`runtime.n_est = Σ over chunks of
+plan.n_forwards(sites)`), computed once at `_build_runtime`. It replaces the
 old `n_sites_total` in the stoch denominator
-(`step_layerwise._run_routing_forwards`):
+(`step_chunkwise._run_routing_forwards`):
 
-    stoch_grad_denom = n_positions * N_est * n_per_block / n_ci
+    stoch_grad_denom = n_positions * N_est * chunk_dp / n_ci
 
 For the default per-site plan `N_est == n_sites_total`, so this is bit-exact with
-the old path. The grad check `tests/test_three_pool_routing_plan.py` proves (real
+the old path. The grad check `tests/test_three_pool_recon_plan.py` proves (real
 `.grad`, one backward, RNG pinned — per
-[[feedback_grad_scaling_needs_real_grad_check]]) that at `n_ci=n_per_block=1` the
+[[feedback_grad_scaling_needs_real_grad_check]]) that at `n_ci=chunk_dp=1` the
 denom collapses to the textbook single-pool normalisation `sum_loss / n_examples`
 (`n_examples = n_forwards * n_positions`) for every plan.
 
 ## Cross-pool batch divisibility (bidirectional)
 
-Each cross-pool edge (CI↔LW, CI↔PPGD) requires the two batch arities to be
+Each cross-pool edge (CI↔chunk, CI↔PPGD) requires the two batch arities to be
 **cross-divisible** — one divides the other, EITHER direction (`n_ci | n_down`
 OR `n_down | n_ci`). Ragged pairs where neither divides the other are rejected.
-The three "arity divides `pd.batch_size`" constraints still hold.
+The three "per-rank batch divides `pd.batch_size`" constraints still hold.
 
 `BatchEdge` (layout.py) owns the geometry for one edge and answers every routing
 question symmetrically:
@@ -300,6 +305,30 @@ question symmetrically:
     stitches them) and scatters grads back to those CI ranks. One CI rank ↔ one
     downstream rank.
 
-The six portal exchange methods + the eval CI ship consume `world.ci_lw_edge` /
+The six portal exchange methods + the eval CI ship consume `world.ci_chunk_edge` /
 `world.ci_ppgd_edge` and never branch on the regime. Unit tests:
 `param_decomp_lab/tests/test_three_pool_batch_edge.py`.
+
+## Topology config schema (`config.py`)
+
+The topology is authored as per-rank batches + a site→chunk split, NOT rank ids.
+The resolver derives every rank in canonical order (chunks first → rank 0 is the
+chunk-0 leader by construction, then CI, then PPGD), so overlap / dup / gaps /
+sum≠world / non-uniform DP / the rank-0 convention are all unrepresentable.
+
+```yaml
+runtime:
+  topology:
+    ci:        { per_rank_batch: 16 }   # n_ci   = batch / 16
+    ppgd:      { per_rank_batch: 16 }   # n_ppgd = batch / 16
+    chunkwise:
+      per_rank_batch: 16                # chunk_dp = batch / 16 (DDP per chunk)
+      sites_per_chunk: null             # null = all decomposed sites in one chunk
+    use_fused_kl: true
+```
+
+`runtime.dp` is dropped from authored 3-pool configs: the world size is derived
+from the resolved topology and asserted == the torchrun world in `build_world`.
+`ThreePoolTopology.resolve(ordered_sites, batch_size)` returns a frozen
+`ResolvedLayout` (`ci_ranks`, `ppgd_ranks`, per-chunk `(ranks, sites)`, `world_size`)
+that `optimize._build_runtime` turns into runtime `Chunk` objects.

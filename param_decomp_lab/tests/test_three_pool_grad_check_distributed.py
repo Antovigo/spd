@@ -7,13 +7,13 @@ and the V/U weights — equals the single-process full-batch gradient for the
 identical total loss.
 
 Method. Build a tiny ``GPT2Simple``, a non-square ``World``
-(``n_ci=4 != n_per_block=2``, 2 blocks, ``n_ppgd=2`` — exercises the CI-fine
+(``n_ci=4 != chunk_dp=2``, 2 chunks, ``n_ppgd=2`` — exercises the CI-fine
 routing regime, in-block DP replication, and cross-block summation), run ONE
 3-pool step per pool up to (not including) ``optimizer.step`` (the optimizer is
 neutralized so the assembled ``.grad`` survives), and compare:
 
   * the CI pool's fully-reduced CI-fn grad, and
-  * each LW block's fully-reduced V/U grad
+  * each chunk's fully-reduced V/U grad
 
 to a single-process reference that replays the identical loss on the full batch
 with the SAME pinned RNG (stochastic mask noise ``u``, delta_mask, PPGD source
@@ -69,18 +69,18 @@ from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (
     GPT2SimpleConfig,
 )
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
-from param_decomp_lab.three_pool.context import CIContext, LWContext, PPGDContext
-from param_decomp_lab.three_pool.layout import LayerwiseBlockGroup, build_world
-from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp_lab.three_pool.routing_plan import PerSitePlan
+from param_decomp_lab.three_pool.context import ChunkContext, CIContext, PPGDContext
+from param_decomp_lab.three_pool.layout import Chunk, build_world
+from param_decomp_lab.three_pool.recon_loss_strategy import ReconLossStrategy
+from param_decomp_lab.three_pool.recon_plan import PerSitePlan
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
+from param_decomp_lab.three_pool.step_chunkwise import step_chunkwise
 from param_decomp_lab.three_pool.step_ci import step_ci
-from param_decomp_lab.three_pool.step_layerwise import step_layerwise
 from param_decomp_lab.three_pool.step_ppgd import step_ppgd
 
 # ── Topology: non-square, multi-block, in-block DP, n_ppgd > 1 ────────────────
 _CI_RANKS = [0, 1, 2, 3]  # n_ci = 4
-_BLOCK0_RANKS = [4, 5]  # n_per_block = 2
+_BLOCK0_RANKS = [4, 5]  # chunk_dp = 2
 _BLOCK1_RANKS = [6, 7]
 _PPGD_RANKS = [8, 9]  # n_ppgd = 2
 _WORLD_SIZE = 10
@@ -162,15 +162,15 @@ def _ppgd_cfg() -> PersistentPGDReconLossConfig:
 
 
 def _build_runtime(numel_global: int) -> _ThreePoolRuntime:
-    block_groups = (
-        LayerwiseBlockGroup(ranks=tuple(_BLOCK0_RANKS), owned_sites=tuple(_SITES_BLOCK0)),
-        LayerwiseBlockGroup(ranks=tuple(_BLOCK1_RANKS), owned_sites=tuple(_SITES_BLOCK1)),
+    chunks = (
+        Chunk(ranks=tuple(_BLOCK0_RANKS), sites=tuple(_SITES_BLOCK0)),
+        Chunk(ranks=tuple(_BLOCK1_RANKS), sites=tuple(_SITES_BLOCK1)),
     )
-    routing_plan = PerSitePlan()
-    n_est = sum(routing_plan.n_forwards(bg.owned_sites) for bg in block_groups)
+    recon_plan = PerSitePlan()
+    n_est = sum(recon_plan.n_forwards(c.sites) for c in chunks)
     return _ThreePoolRuntime(
         ci_ranks=tuple(_CI_RANKS),
-        layerwise_block_groups=block_groups,
+        chunks=chunks,
         ppgd_ranks=tuple(_PPGD_RANKS),
         batch_global=_BATCH_GLOBAL,
         c_per_site={s: _C for s in _ALL_SITES},
@@ -179,7 +179,7 @@ def _build_runtime(numel_global: int) -> _ThreePoolRuntime:
         run_batch=lambda model, batch: model(batch),  # unused on CPU recon path
         reconstruction_loss=recon_loss_mse,
         ppgd_cfg=_ppgd_cfg(),
-        routing_plan=routing_plan,
+        recon_plan=recon_plan,
         n_est=n_est,
         coeff_faith=_COEFF_FAITH,
         coeff_imp=_COEFF_IMP,
@@ -305,9 +305,9 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
 
     world = build_world(
         ci_ranks=list(_CI_RANKS),
-        layerwise_block_groups=[
-            LayerwiseBlockGroup(ranks=tuple(_BLOCK0_RANKS), owned_sites=tuple(_SITES_BLOCK0)),
-            LayerwiseBlockGroup(ranks=tuple(_BLOCK1_RANKS), owned_sites=tuple(_SITES_BLOCK1)),
+        chunks=[
+            Chunk(ranks=tuple(_BLOCK0_RANKS), sites=tuple(_SITES_BLOCK0)),
+            Chunk(ranks=tuple(_BLOCK1_RANKS), sites=tuple(_SITES_BLOCK1)),
         ],
         ppgd_ranks=list(_PPGD_RANKS),
         batch_global=_BATCH_GLOBAL,
@@ -323,7 +323,7 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
     # them so the layerwise ('mlp') CI fn — which reads component activations —
     # works on the CI pool too. Dropping is a memory opt, irrelevant to grads.
     runtime = _build_runtime(numel_global)
-    strategy = LayerwiseLossStrategy.unfused(recon_loss_mse)
+    strategy = ReconLossStrategy.unfused(recon_loss_mse)
     batch = _global_batch()
 
     # PPGD state must exist BEFORE the source-gather collective (all ranks).
@@ -356,14 +356,14 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
                 for n, p in cm.ci_fn.named_parameters():  # type: ignore[union-attr]
                     assert p.grad is not None, f"ci_fn.{n} grad is None"
                     captured[f"ci_fn.{n}"] = p.grad.detach().clone()
-        case LWContext():
-            comp_params = [p for s in ctx.role.owned_sites for p in cm.components[s].parameters()]
+        case ChunkContext():
+            comp_params = [p for s in ctx.role.sites for p in cm.components[s].parameters()]
             opt = torch.optim.AdamW(comp_params, lr=0.0)
             _neutralize_optimizer(opt)
             _pin_stoch_rng()
-            step_layerwise(ctx, cm, opt, comp_params, batch, runtime, strategy, should_log=False)
-            if ctx.role.is_block_leader:
-                for s in ctx.role.owned_sites:
+            step_chunkwise(ctx, cm, opt, comp_params, batch, runtime, strategy, should_log=False)
+            if ctx.role.is_chunk_leader:
+                for s in ctx.role.sites:
                     for n, p in cm.components[s].named_parameters():
                         assert p.grad is not None, f"components.{s}.{n} grad is None"
                         captured[f"components.{s}.{n}"] = p.grad.detach().clone()
@@ -390,7 +390,7 @@ def _reference_grads(initial_ppgd_sources: dict[str, Tensor]) -> dict[str, Tenso
     cm = _build_component_model(0)  # full model (CI fn + components)
     numel_global = sum(cm.target_weight(s).numel() for s in _ALL_SITES)
     runtime = _build_runtime(numel_global)
-    strategy = LayerwiseLossStrategy.unfused(recon_loss_mse)
+    strategy = ReconLossStrategy.unfused(recon_loss_mse)
     batch = _global_batch()
 
     ci_fn_params = list(cm.ci_fn.parameters())  # type: ignore[union-attr]
@@ -440,7 +440,7 @@ def _reference_grads(initial_ppgd_sources: dict[str, Tensor]) -> dict[str, Tenso
         )
         pred = cm(batch, mask_infos=mask_infos)
         # The single-process recon's n_positions IS the global count (full batch),
-        # matching the distributed code's ``n_positions_local * n_per_block``.
+        # matching the distributed code's ``n_positions_local * chunk_dp``.
         loss_s, n_positions_global = strategy.recon_loss(pred=pred, target=target_full)
         denom = n_positions_global * n_sites_total
         (_COEFF_STOCH * loss_s / denom).backward(retain_graph=True)
@@ -539,7 +539,7 @@ def _report_and_assert(dist_grads: dict[str, Tensor], ref_sources: dict[str, Ten
         f"param-key mismatch:\n dist={sorted(dist_grads)}\n ref ={sorted(ref_grads)}"
     )
     print("\n=== 3-pool SUM-grad convention: distributed vs single-process reference ===")
-    print("topology: n_ci=4, n_per_block=2 (2 blocks), n_ppgd=2 (NON-square)")
+    print("topology: n_ci=4, chunk_dp=2 (2 chunks), n_ppgd=2 (NON-square)")
     worst = 0.0
     for k in keys:
         dg, rg = dist_grads[k], ref_grads[k]

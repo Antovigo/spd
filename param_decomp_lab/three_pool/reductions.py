@@ -5,8 +5,8 @@ additive ingredients (``_raw/*``) that the logger SUM-reduces across each
 pool, then finalizes into global scalars on rank 0.
 
 Global scalars:
-  ``faith_global = SUM(faith_num) / SUM(faith_den)``    (LW pool)
-  ``stoch_global = SUM(stoch_num) / SUM(stoch_den)``    (LW pool)
+  ``faith_global = SUM(faith_num) / SUM(faith_den)``    (chunkwise pool)
+  ``stoch_global = SUM(stoch_num) / SUM(stoch_den)``    (chunkwise pool)
   ``imp_global   = SUM(imp_num)``                        (CI pool — see note)
   ``ppgd_global  = SUM(ppgd_num)  / SUM(ppgd_den)``     (PPGD pool)
   ``mean_l0      = SUM(l0)``                             (CI pool — see note)
@@ -21,18 +21,18 @@ every CI rank's ``loss_imp`` scalar IS already the global value. The step
 function divides by ``n_ci`` before exposing as ``_raw/imp_num`` so that the
 pool-wide all-reduce SUM gives back the global value exactly once.
 
-LW pool's all-reduce SUM scales every raw value by ``1 / n_per_block`` *before*
+Chunkwise pool's all-reduce SUM scales every raw value by ``1 / chunk_dp`` *before*
 the SUM. That single division collapses two reductions into one and is
-mathematically equivalent to AVG-within-block then SUM-across-blocks:
+mathematically equivalent to AVG-within-chunk then SUM-across-chunks:
 
-  * For values identical across DDP partners in a block (faith — the forward
+  * For values identical across DDP partners in a chunk (faith — the forward
     runs on the FULL batch, so partners produce the same scalar):
-    ``sum_over_partners(value / n_per_block) = value``, and the cross-block SUM
-    recovers ``sum_over_blocks(value)``.
+    ``sum_over_partners(value / chunk_dp) = value``, and the cross-chunk SUM
+    recovers ``sum_over_chunks(value)``.
   * For values that differ across DDP partners (stoch — partners process
-    disjoint batch slices): ``sum_over_partners(value / n_per_block) =
+    disjoint batch slices): ``sum_over_partners(value / chunk_dp) =
     mean_over_partners(value)``, i.e. the cross-slice mean per site, which is
-    what we want before summing across blocks.
+    what we want before summing across chunks.
 
 Memory uses MAX (the bottleneck rank is what matters).
 """
@@ -44,9 +44,9 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from param_decomp_lab.three_pool.context import CIContext, LWContext, PoolContext, PPGDContext
+from param_decomp_lab.three_pool.context import ChunkContext, CIContext, PoolContext, PPGDContext
 
-LW_RAW_KEYS: tuple[str, ...] = (
+CHUNK_RAW_KEYS: tuple[str, ...] = (
     "_raw/faith_num",
     "_raw/faith_den",
     "_raw/stoch_num",
@@ -63,23 +63,23 @@ def aggregate_max_memory_to_rank0(
     """MAX-reduce CUDA peak memory within each pool; non-rank-0 pool leaders
     send their value to rank 0.
 
-    Returns ``{mem/<pool>_peak_gb for pool in (lw, ci, ppgd)}`` on rank 0,
+    Returns ``{mem/<pool>_peak_gb for pool in (chunk, ci, ppgd)}`` on rank 0,
     ``None`` everywhere else.
     """
     world = ctx.world
     peak_gb = torch.cuda.max_memory_allocated() / 1e9
     val = torch.tensor([peak_gb], device=device)
     match ctx:
-        case LWContext():
-            dist.all_reduce(val, op=dist.ReduceOp.MAX, group=world.layerwise_pool_group)
+        case ChunkContext():
+            dist.all_reduce(val, op=dist.ReduceOp.MAX, group=world.chunkwise_pool_group)
             if ctx.role.rank == 0:
-                lw_peak = val.item()
+                chunk_peak = val.item()
                 ci_val = torch.empty(1, device=device)
                 pgd_val = torch.empty(1, device=device)
                 dist.recv(ci_val, src=world.ci_ranks[0], group=world.cross_pool_p2p_group)
                 dist.recv(pgd_val, src=world.ppgd_ranks[0], group=world.cross_pool_p2p_group)
                 return {
-                    "mem/lw_peak_gb": lw_peak,
+                    "mem/chunk_peak_gb": chunk_peak,
                     "mem/ci_peak_gb": ci_val.item(),
                     "mem/ppgd_peak_gb": pgd_val.item(),
                 }
@@ -106,15 +106,15 @@ def aggregate_losses_to_rank0(
     """
     world = ctx.world
     match ctx:
-        case LWContext():
-            keys = list(LW_RAW_KEYS)
-            n_per_block = world.n_per_block
+        case ChunkContext():
+            keys = list(CHUNK_RAW_KEYS)
+            chunk_dp = world.chunk_dp
             vals = torch.tensor(
-                [loss_dict[k] / n_per_block for k in keys], device=device, dtype=torch.float64
+                [loss_dict[k] / chunk_dp for k in keys], device=device, dtype=torch.float64
             )
-            dist.all_reduce(vals, op=dist.ReduceOp.SUM, group=world.layerwise_pool_group)
+            dist.all_reduce(vals, op=dist.ReduceOp.SUM, group=world.chunkwise_pool_group)
             if ctx.role.rank == 0:
-                lw = {k: vals[i].item() for i, k in enumerate(keys)}
+                chunk = {k: vals[i].item() for i, k in enumerate(keys)}
                 ci_keys = list(CI_RAW_KEYS)
                 ci_vals = torch.empty(len(ci_keys), device=device, dtype=torch.float64)
                 dist.recv(ci_vals, src=world.ci_ranks[0], group=world.cross_pool_p2p_group)
@@ -124,8 +124,8 @@ def aggregate_losses_to_rank0(
                 dist.recv(pgd_vals, src=world.ppgd_ranks[0], group=world.cross_pool_p2p_group)
                 pgd = {k: pgd_vals[i].item() for i, k in enumerate(pgd_keys)}
                 return {
-                    "loss/faith": lw["_raw/faith_num"] / lw["_raw/faith_den"],
-                    "loss/stoch": lw["_raw/stoch_num"] / lw["_raw/stoch_den"],
+                    "loss/faith": chunk["_raw/faith_num"] / chunk["_raw/faith_den"],
+                    "loss/stoch": chunk["_raw/stoch_num"] / chunk["_raw/stoch_den"],
                     "loss/imp": ci["_raw/imp_num"],
                     "loss/ppgd": pgd["_raw/ppgd_num"] / pgd["_raw/ppgd_den"],
                     "metrics/mean_l0": ci["_raw/l0"],
@@ -159,23 +159,23 @@ def aggregate_component_grad_by_loss_to_rank0(
     ctx: PoolContext,
     device: torch.device,
 ) -> dict[str, float] | None:
-    """SUM the per-block component grad sum-sq-by-loss (block leaders only, stashed
-    in ``metrics`` under ``_raw/comp_gradsq/*``) across the LW pool → per-loss grad
+    """SUM the per-chunk component grad sum-sq-by-loss (chunk leaders only, stashed
+    in ``metrics`` under ``_raw/comp_gradsq/*``) across the chunkwise pool → per-loss grad
     norms on rank 0.
 
-    LW-pool-internal (CI/PPGD own no component grads and don't participate). Each
-    block leader contributes its block's sum-sq; non-leaders contributed 0. Returns
+    Chunkwise-pool-internal (CI/PPGD own no component grads and don't participate). Each
+    chunk leader contributes its chunk's sum-sq; non-leaders contributed 0. Returns
     ``grad_norms/by_loss/{faith,stoch,ppgd}/components`` (short keys; the trainer
-    renames them to metric class names), ``None`` off rank 0 / off the LW pool.
+    renames them to metric class names), ``None`` off rank 0 / off the chunkwise pool.
     """
     match ctx:
-        case LWContext():
+        case ChunkContext():
             vals = torch.tensor(
                 [metrics.get(k, 0.0) for k in COMPONENT_GRAD_BY_LOSS_KEYS],
                 device=device,
                 dtype=torch.float64,
             )
-            dist.all_reduce(vals, op=dist.ReduceOp.SUM, group=ctx.world.layerwise_pool_group)
+            dist.all_reduce(vals, op=dist.ReduceOp.SUM, group=ctx.world.chunkwise_pool_group)
             if ctx.role.rank != 0:
                 return None
             return {
@@ -214,7 +214,7 @@ def aggregate_grad_norms_to_rank0(
     Matches single-pool ``component_grad_norms``' key layout:
     ``grad_norms/components/<site>.<param>``, ``grad_norms/ci_fns/<param>``, and
     ``grad_norms/summary/{components,ci_fns,total}``. Params are sharded across
-    pools, so the LW pool all-gathers its component norms within-group and the CI
+    pools, so the chunkwise pool all-gathers its component norms within-group and the CI
     leader ships its ci-fn norms to rank 0 over the cross-pool p2p group (after
     the loss + memory shipments, matching send/recv order). PPGD owns no trained
     params and contributes nothing. Returns the rank-0 dict, ``None`` elsewhere.
@@ -228,16 +228,16 @@ def aggregate_grad_norms_to_rank0(
     local = {k: v for k, v in metrics.items() if k.startswith("grad_norms/")}
     world = ctx.world
     match ctx:
-        case LWContext():
-            n_lw = dist.get_world_size(group=world.layerwise_pool_group)
-            gathered: list[dict[str, float] | None] = [None] * n_lw
-            dist.all_gather_object(gathered, local, group=world.layerwise_pool_group)
+        case ChunkContext():
+            n_chunkwise = dist.get_world_size(group=world.chunkwise_pool_group)
+            gathered: list[dict[str, float] | None] = [None] * n_chunkwise
+            dist.all_gather_object(gathered, local, group=world.chunkwise_pool_group)
             if ctx.role.rank != 0:
                 return None
             components: dict[str, float] = {}
             for d in gathered:
                 assert d is not None
-                # Block DP partners hold identical (reduced) grads → identical
+                # Chunk DP partners hold identical (reduced) grads → identical
                 # norms; deduping by key collapses the replicas.
                 components.update(d)
             ci_buf: list[dict[str, float] | None] = [None]

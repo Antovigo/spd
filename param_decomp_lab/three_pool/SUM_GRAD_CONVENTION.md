@@ -9,11 +9,11 @@ bugs, latest = PR #545's PPGD `×n_ci`) with a single convention.
 The CI-fn weights and the V/U weights are each REPLICATED across ranks. Their
 gradients are assembled from multiple producers (stoch, faith, imp-min, ppgd)
 and reduced across ranks. Every recurring bug had the same shape: a producer
-pre-scaled its gradient by a *pool-size factor* (`n_ci`, `n_per_block`) so its
+pre-scaled its gradient by a *pool-size factor* (`n_ci`, `chunk_dp`) so its
 contribution would survive a downstream AVG-reduce it couldn't locally see. That
 factor leaks pool-size knowledge into the gradient VALUES, and a single
 differentiated scalar that feeds two destinations with different reductions
-(stoch → CI leaves ÷n_ci AND V/U ÷n_per_block) is guaranteed wrong on a
+(stoch → CI leaves ÷n_ci AND V/U ÷chunk_dp) is guaranteed wrong on a
 non-square topology.
 
 ## The convention
@@ -24,7 +24,7 @@ pool-size transport factor. All data-parallel gradient reductions are SUM.**
 
 Partial sums compose: `SUM(partials) = total`. So no producer needs to know any
 pool's size; the only normalization is the honest global count, which is locally
-derivable (`P_global = n_positions_local × n_per_block`, `n_examples_global =
+derivable (`P_global = n_positions_local × chunk_dp`, `n_examples_global =
 n_examples_local × n_ppgd`). The conversion factor that turns a local count into
 a global count is NOT a transport factor — it is part of computing the honest
 denominator, and it disappears entirely on a square topology only by coincidence.
@@ -39,8 +39,8 @@ denominator, and it disappears entirely on a square topology only by coincidence
    is about counting DISTINCT parameters for the global norm, not about the grad
    reduce. After the in-pool *all*-reduce (SUM or AVG), every replica holds the
    IDENTICAL grad; the pool-wide sq-SUM therefore counts each block's params
-   `n_per_block` times either way, so the `n_replicas` dedup stays. (The grad
-   VALUE differs — SUM gives the single-pool total, AVG gave total/n_per_block —
+   `chunk_dp` times either way, so the `n_replicas` dedup stays. (The grad
+   VALUE differs — SUM gives the single-pool total, AVG gave total/chunk_dp —
    but the replica COUNT being summed is the same.)
 3. **stoch's one scale feeds both destinations.** CI leaves (→ CI pool, SUM) and
    V/U (→ LW block, SUM) both want the same partial-sum scale
@@ -59,9 +59,9 @@ every rank in the reduction group because they were computed from replicated
 inputs rather than a disjoint data slice:
 
 - **faith V/U** (`_faithfulness_loss`): computed from the replicated V/U weights →
-  identical on every block rank → under SUM, `n_per_block×` too big.
+  identical on every chunk rank → under SUM, `chunk_dp×` too big.
 - **broadcast PPGD V/U**: sum-reduced within PPGD then broadcast to all block
-  ranks → identical on every block rank → same `n_per_block×` problem.
+  ranks → identical on every chunk rank → same `chunk_dp×` problem.
 - **imp-min CI**: the autograd-aware `dist_fn.all_reduce(SUM)` backward
   SUM-reduces the *replicated* upstream gradient across the CI pool, leaving each
   rank with `n_ci×` its true partial. Under the old AVG this was exactly the
@@ -73,7 +73,7 @@ Three ways to handle each:
       Rejected: this REINTRODUCES the pool-size factor into a producer — exactly
       what the convention abolishes. It only relocates the factor.
   (b) **Contribute once.** Compute the replicated contribution on a single rank
-      (the block leader) so there is no replica to undo. Chosen for faith and
+      (the chunk leader) so there is no replica to undo. Chosen for faith and
       broadcast PPGD V/U.
   (c) **Detached-global-residual.** Make the forward value global but the backward
       flow only through the local contribution:
@@ -85,12 +85,12 @@ Three ways to handle each:
 
 ### faith / broadcast PPGD → contribute once (option b)
 
-- **faith**: run the faith backward on the **block leader only**. The leader's
+- **faith**: run the faith backward on the **chunk leader only**. The leader's
   `.grad` then carries the full single-pool faith grad once; non-leaders
   contribute zero faith. After the block SUM every rank holds it exactly once.
   Faith is already divided by `numel_global`, so the leader's value is already
   the single-pool grad — no further scaling.
-- **broadcast PPGD V/U**: skip the in-block broadcast; the block **leader** adds
+- **broadcast PPGD V/U**: skip the in-chunk broadcast; the chunk **leader** adds
   the received PPGD grad to its `.grad`, non-leaders add nothing. After the block
   SUM every rank holds it once.
 
@@ -110,13 +110,13 @@ pool's SUM all-reduce. The `×n_ci` knowledge leaves the imp path entirely.
 Does the SUM convention ELIMINATE pool-size knowledge from producers?
 
 - **From the data-parallel producers: YES.** stoch, ppgd V/U, ppgd CI all lose
-  every `n_ci` / `n_per_block` *transport* factor. The #545 `×n_ci` is deleted.
-  stoch's two destinations collapse to one scale. The remaining `n_per_block` in
+  every `n_ci` / `chunk_dp` *transport* factor. The #545 `×n_ci` is deleted.
+  stoch's two destinations collapse to one scale. The remaining `chunk_dp` in
   stoch's denom is not a transport factor — it is the `local→global` position
   count conversion, which any honest global normalization needs.
 - **From the replicated contributions: NO — but it RELOCATES the count to a
   structurally honest place.** faith and broadcast-PPGD no longer *scale* by
-  `n_per_block`; instead they *contribute once* (a topology fact: "this grad is
+  `chunk_dp`; instead they *contribute once* (a topology fact: "this grad is
   replicated, emit it on one rank"). imp-min no longer *relies on AVG to cancel*
   `n_ci`; instead it *states* "my backward is a local partial" via the residual
   trick. The replica count does not appear as a numeric factor in any producer's

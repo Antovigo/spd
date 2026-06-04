@@ -86,33 +86,37 @@ from param_decomp_lab.resumption import (
 )
 from param_decomp_lab.run_sink import ThreePoolSink
 from param_decomp_lab.seed import set_seed
-from param_decomp_lab.three_pool import ThreePoolConfig, ThreePoolTrainer
+from param_decomp_lab.three_pool import ThreePoolTopology, ThreePoolTrainer
 from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 
 
 class ThreePoolRuntimeConfig(RuntimeConfig):
-    """Core's substrate scalars (`autocast_bf16` / `device` / `dp`) + the authored
-    rank->pool `topology`.
+    """Core's substrate scalars (`autocast_bf16` / `device` / `dp`) + the normalized
+    `topology`.
 
     Subclasses `RuntimeConfig` so it's substitutable wherever a `RuntimeConfig` is
     expected (`ThreePoolTrainer.__init__`, snapshot serialization) and reuses the three
     scalars rather than duplicating them. `dp` is the launch-derived world readout
-    (overwritten from the torchrun world at launch); `topology` is the authored rank
-    assignment that pairs with `ThreePoolConstrainedPDConfig`. Core's `RuntimeConfig`
-    itself stays pool-blind — the topology is added only here, in lab.
+    (overwritten from the torchrun world at launch; not authored in 3-pool YAMLs — the
+    world size is derived from the resolved topology and asserted == torchrun world in
+    `build_world`). `topology` is the normalized `ThreePoolTopology` (per-rank batches +
+    site→chunk split; ranks derived) that pairs with `ThreePoolConstrainedPDConfig`.
+    Core's `RuntimeConfig` itself stays pool-blind — the topology is added only here, in lab.
     """
 
-    topology: ThreePoolConfig
+    topology: ThreePoolTopology
 
 
 class ThreePoolLMExperimentConfig(BaseConfig):
     """Full YAML schema for a 3-pool LM PD run. Standalone sibling of
     `LMExperimentConfig` (not a variant of it).
 
-    The cross-field checks that couple `pd` to `runtime.topology` (batch divisibility,
-    rank-0 convention, site coverage) run here at load time — the only place both are
-    visible — so they fail at parse rather than inside `ThreePoolTrainer.__init__`.
+    The cross-field check that couples `pd` to `runtime.topology` (each per-rank batch
+    divides the global batch) runs here at load time — the only place both are visible —
+    so it fails at parse rather than inside `ThreePoolTrainer.__init__`. The rank-0
+    convention is no longer a check: the canonical resolver makes rank 0 the chunk-0
+    leader by construction.
     """
 
     pd: ThreePoolConstrainedPDConfig
@@ -130,28 +134,18 @@ class ThreePoolLMExperimentConfig(BaseConfig):
     @model_validator(mode="after")
     def validate_pd_against_topology(self) -> Self:
         topology = self.runtime.topology
-        n_per_block = len(topology.layerwise_block_groups[0].ranks)
-        n_ci = len(topology.ci_ranks)
-        n_ppgd = len(topology.ppgd_ranks)
         bs = self.pd.batch_size
-        assert bs % n_per_block == 0, (
-            f"pd.batch_size ({bs}) must be divisible by N_per_block ({n_per_block}) "
-            f"= len(topology.layerwise_block_groups[0].ranks)"
-        )
-        assert bs % n_ci == 0, (
-            f"pd.batch_size ({bs}) must be divisible by N_ci ({n_ci}) = len(topology.ci_ranks)"
-        )
-        assert bs % n_ppgd == 0, (
-            f"pd.batch_size ({bs}) must be divisible by N_ppgd ({n_ppgd}) "
-            f"= len(topology.ppgd_ranks)"
-        )
-        assert topology.layerwise_block_groups[0].ranks[0] == 0, (
-            "Convention: rank 0 must be the LW pool's block 0 leader (so reductions can "
-            "ship CI/PPGD pool losses to rank 0). Reorder layerwise_block_groups so the "
-            "first group starts with rank 0."
-        )
-        # Site coverage (every LW-owned site is in decomposition_targets after pattern
-        # expansion) needs the loaded target model and stays in `_build_runtime`.
+        for name, per_rank_batch in (
+            ("ci", topology.ci.per_rank_batch),
+            ("ppgd", topology.ppgd.per_rank_batch),
+            ("chunkwise", topology.chunkwise.per_rank_batch),
+        ):
+            assert bs % per_rank_batch == 0, (
+                f"pd.batch_size ({bs}) must be divisible by topology.{name}.per_rank_batch "
+                f"({per_rank_batch})"
+            )
+        # Site coverage (every resolved chunk site is in decomposition_targets after
+        # pattern expansion) needs the loaded target model and stays in `_build_runtime`.
         return self
 
 

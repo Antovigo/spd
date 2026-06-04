@@ -39,6 +39,8 @@ from torch.profiler import ProfilerActivity, profile, schedule
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy  # noqa: E402
+
 from param_decomp.ci_fns import LayerwiseCiConfig  # noqa: E402
 from param_decomp.component_model import ComponentModel  # noqa: E402
 from param_decomp.decomposition_targets import DecompositionTarget  # noqa: E402
@@ -47,7 +49,6 @@ from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (  # noq
     GPT2Simple,
     GPT2SimpleConfig,
 )
-from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy  # noqa: E402
 
 # --- Config matching gpt2_xl_qk_smoke.yaml -----------------------------------
 N_LAYERS = 48  # gpt2-xl

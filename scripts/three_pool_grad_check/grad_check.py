@@ -324,6 +324,8 @@ def _run_one_threepool_step(trainer: ThreePoolTrainer, loader: DataLoader) -> No
     """Drive exactly one step of each pool's step fn — the slice of
     ``ThreePoolTrainer.run`` that does compute+backward for step 0, without the
     snapshot / eval / loader-prefetch bookkeeping."""
+    from param_decomp_lab.three_pool.step_layerwise import step_layerwise
+
     from param_decomp.masks import AllLayersRouter
     from param_decomp.metrics.persistent_pgd_state import (
         PerBatchPerPositionScope,
@@ -335,7 +337,6 @@ def _run_one_threepool_step(trainer: ThreePoolTrainer, loader: DataLoader) -> No
         _seq_dims_from_batch,  # pyright: ignore[reportPrivateUsage]
     )
     from param_decomp_lab.three_pool.step_ci import step_ci
-    from param_decomp_lab.three_pool.step_layerwise import step_layerwise
     from param_decomp_lab.three_pool.step_ppgd import step_ppgd
 
     ctx = trainer.ctx

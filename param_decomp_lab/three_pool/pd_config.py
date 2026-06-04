@@ -32,7 +32,7 @@ from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
 from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
 from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
 from param_decomp.metrics.stochastic_recon_layerwise import StochasticReconLayerwiseLossConfig
-from param_decomp_lab.three_pool.routing_plan import PerSitePlan, RoutingPlan
+from param_decomp_lab.three_pool.recon_plan import ChunkReconPlan, PerSitePlan
 
 
 class ThreePoolLosses(BaseConfig):
@@ -50,9 +50,9 @@ class ThreePoolLosses(BaseConfig):
     imp: ImportanceMinimalityLossConfig
     stoch: StochasticReconLayerwiseLossConfig
     ppgd: PersistentPGDReconLossConfig
-    # How the LW pool turns each block's owned sites into a list of recon forwards.
+    # How the chunkwise pool turns each chunk's sites into a list of recon forwards.
     # Default reproduces the original "one site at a time" layerwise loop exactly.
-    routing_plan: Annotated[RoutingPlan, Field(discriminator="type")] = PerSitePlan()
+    recon_plan: Annotated[ChunkReconPlan, Field(discriminator="type")] = PerSitePlan()
 
     @model_validator(mode="after")
     def validate_coeffs_present(self) -> Self:

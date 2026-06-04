@@ -37,8 +37,8 @@ Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
       independent (asserted at state construction), so each rank steps its own.
   D6b. Final PGD source step (the (N+1)'th source update): step on this rank's
       own source grads, exactly as warmup does.
-  D7. Send g_VU to LW block leaders (PPGD-leader-only).
-  E.  Blocking recv of updated V/U from LW at end of step → copy into model.
+  D7. Send g_VU to chunk leaders (PPGD-leader-only).
+  E.  Blocking recv of updated V/U from chunkwise at end of step → copy into model.
 
 Architectural note on the absence of a per-site for-loop at the step level:
 PPGD really does *one* fused forward + *one* fused backward across all sites
@@ -60,8 +60,8 @@ from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp.torch_helpers import bf16_autocast
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.context import PPGDContext
-from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp_lab.three_pool.portals import PendingCiValues, sum_reduce_ppgd_grads
+from param_decomp_lab.three_pool.recon_loss_strategy import ReconLossStrategy
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
 
 
@@ -91,13 +91,13 @@ def step_ppgd(
     ppgd_state: PersistentPGDState,
     batch: Any,
     cfg: _ThreePoolRuntime,
-    strategy: LayerwiseLossStrategy,
+    strategy: ReconLossStrategy,
     step: int,
     n_steps: int,
     *,
     should_log: bool,
 ) -> dict[str, float]:
-    """One PPGD step: A → D → blocking recv of updated V/U from LW → copy in."""
+    """One PPGD step: A → D → blocking recv of updated V/U from chunkwise → copy in."""
     device = next(component_model.parameters()).device
     all_sites = list(ctx.world.all_sites)
 
@@ -132,7 +132,7 @@ def step_ppgd(
     # is per-rank-independent and must not be reduced; a blind SUM would mix
     # unrelated per-position sources).
     sum_reduce_ppgd_grads(ctx.world, [*raw.v.values(), *raw.u.values()])
-    ctx.portals.g_vu_to_lw.send(ctx.role, raw.v, raw.u)
+    ctx.portals.g_vu_to_chunk.send(ctx.role, raw.v, raw.u)
     # Final (N+1)'th source step. per_batch_per_position sources are per-rank
     # independent, so no cross-rank reduce — step on this rank's own grads,
     # exactly as warmup does.
@@ -151,7 +151,7 @@ def step_ppgd(
     else:
         metrics = {}
 
-    v_new, u_new = ctx.portals.updated_vu_from_lw.post_recv(v_templates, u_templates).wait()
+    v_new, u_new = ctx.portals.updated_vu_from_chunk.post_recv(v_templates, u_templates).wait()
     _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
     return metrics
 
@@ -266,7 +266,7 @@ def _slice_batch_for_ppgd(batch: Any, ctx: PPGDContext) -> tuple[Any, int]:
 def _vu_templates(
     component_model: LMComponentModel, all_sites: list[str]
 ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """V/U tensors per site — used as recv buffers for the V/U recv from LW."""
+    """V/U tensors per site — used as recv buffers for the V/U recv from chunkwise."""
     v_templates: dict[str, Tensor] = {s: component_model.components[s].V for s in all_sites}
     u_templates: dict[str, Tensor] = {s: component_model.components[s].U for s in all_sites}
     return v_templates, u_templates

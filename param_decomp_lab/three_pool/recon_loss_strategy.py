@@ -1,6 +1,6 @@
-"""Layerwise loss strategy: pairs the LM-head-bypass context with recon_loss.
+"""Recon loss strategy: pairs the LM-head-bypass context with recon_loss.
 
-Both the LW pool's layerwise loop and the PPGD pool's inner loop go through one
+Both the chunkwise pool's recon loop and the PPGD pool's inner loop go through one
 of two regimes:
 
   - **Fused**: bypass LM head; recon_loss is :func:`fused_linear_kl_div` against
@@ -10,9 +10,8 @@ of two regimes:
   - **Unfused**: no bypass; the configured ``reconstruction_loss`` from PD
     config is used directly. Forwards return logits.
 
-:class:`LayerwiseLossStrategy` encapsulates that pair so the runner never
-branches on ``use_fused_kl`` — it just calls ``strategy.context()`` and
-``strategy.recon_loss``.
+:class:`ReconLossStrategy` encapsulates that pair so the runner never branches on
+``use_fused_kl`` — it just calls ``strategy.context()`` and ``strategy.recon_loss``.
 
 The bypass is the vendored model's own :meth:`LMComponentModel.bypass_lm_head`
 contextmanager (not a target-model monkeypatch): under it, every forward through
@@ -48,7 +47,7 @@ def _make_fused_kl_recon_loss(lm_head_weight: Tensor) -> ReconstructionLoss:
 
 
 @dataclass(frozen=True)
-class LayerwiseLossStrategy:
+class ReconLossStrategy:
     """Pairs the LM-head-bypass context with the matching recon_loss callable.
 
     The shared contract:
@@ -64,7 +63,7 @@ class LayerwiseLossStrategy:
     recon_loss: ReconstructionLoss
 
     @classmethod
-    def fused(cls, component_model: LMComponentModel) -> "LayerwiseLossStrategy":
+    def fused(cls, component_model: LMComponentModel) -> "ReconLossStrategy":
         # bypass_lm_head() yields lm_head.weight; the weight is stable across steps,
         # so capture it once for the fused-KL recon loss while toggling the bypass flag.
         with component_model.bypass_lm_head() as lm_head_weight:
@@ -72,7 +71,7 @@ class LayerwiseLossStrategy:
         return cls(context=component_model.bypass_lm_head, recon_loss=recon_loss)
 
     @classmethod
-    def unfused(cls, recon_loss: ReconstructionLoss) -> "LayerwiseLossStrategy":
+    def unfused(cls, recon_loss: ReconstructionLoss) -> "ReconLossStrategy":
         @contextmanager
         def _noop() -> Iterator[None]:
             with nullcontext():
@@ -86,7 +85,7 @@ class LayerwiseLossStrategy:
         component_model: LMComponentModel,
         use_fused_kl: bool,
         unfused_recon: ReconstructionLoss,
-    ) -> "LayerwiseLossStrategy":
+    ) -> "ReconLossStrategy":
         """Resolve the strategy from a (component_model, use_fused_kl) pair."""
         if use_fused_kl:
             return cls.fused(component_model)

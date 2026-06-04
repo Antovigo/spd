@@ -7,25 +7,32 @@ Splits GPUs into three heterogeneous pools that run in wall-clock parallel:
                   loss, fused backward through CI fn graph seeded by downstream
                   pools' CI gradients. Enables global shared CI fns by giving
                   the CI fn a dedicated, unsharded pool.
-  Layerwise pool  owns V/U + AdamW state (sharded by site, block-DDP within
-                  group). Runs target forward, faithfulness loss, per-site
-                  streaming layerwise stoch recon.
+  Chunkwise pool  owns V/U + AdamW state (sharded into chunks of sites, DDP
+                  within chunk). Runs target forward, faithfulness loss,
+                  per-site streaming chunkwise stoch recon.
   PPGD pool       stateless full V/U replica + persistent PPGD sources. Runs
                   target forward, PPGD warmup (inner loop owns source updates),
                   final recon backward seeding V/U + CI grads only.
 
 ``optimize_three_pool`` mirrors :func:`param_decomp.optimize.optimize`'s call
-shape. ``ThreePoolConfig`` declares the topology.
+shape. ``ThreePoolTopology`` declares the topology.
 
 See ``DESIGN.md`` for the per-step dependency graph + the pipelining tricks.
 """
 
-from param_decomp_lab.three_pool.config import LayerwiseBlockGroupSpec, ThreePoolConfig
+from param_decomp_lab.three_pool.config import (
+    ChunkwiseSpec,
+    PoolSpec,
+    ResolvedLayout,
+    ThreePoolTopology,
+)
 from param_decomp_lab.three_pool.optimize import ThreePoolTrainer, optimize_three_pool
 
 __all__ = [
-    "LayerwiseBlockGroupSpec",
-    "ThreePoolConfig",
+    "ChunkwiseSpec",
+    "PoolSpec",
+    "ResolvedLayout",
+    "ThreePoolTopology",
     "ThreePoolTrainer",
     "optimize_three_pool",
 ]

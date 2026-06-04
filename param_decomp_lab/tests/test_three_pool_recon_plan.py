@@ -1,10 +1,10 @@
-"""Gradient-scaling derisk for the LW routing-plan generalisation.
+"""Gradient-scaling derisk for the chunkwise recon-plan generalisation.
 
-The claim under test (see ``step_layerwise._run_routing_forwards``): replacing the
+The claim under test (see ``step_chunkwise._run_routing_forwards``): replacing the
 old ``n_sites_total`` factor with ``N_est`` (total LW recon forwards / step) keeps
 the stoch gradient at the single-pool scale for ANY routing plan.
 
-The decisive check is single-GPU (``n_per_block = n_ci = 1``), where the denom
+The decisive check is single-GPU (``chunk_dp = n_ci = 1``), where the denom
 collapses to ``n_positions * N_est = n_positions * n_forwards = n_examples`` — the
 textbook single-pool normalisation ``sum_loss / n_examples``. So per-forward backward
 with the new denom must equal one backward of ``sum_loss / n_examples`` over the SAME
@@ -28,13 +28,13 @@ from param_decomp.masks import (
 )
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
-from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
-from param_decomp_lab.three_pool.routing_plan import (
+from param_decomp_lab.three_pool.recon_loss_strategy import ReconLossStrategy
+from param_decomp_lab.three_pool.recon_plan import (
+    ChunkReconPlan,
     PerSitePlan,
-    RoutingPlan,
-    SubsetRoutingPlan,
+    SubsetReconPlan,
 )
-from param_decomp_lab.three_pool.step_layerwise import (
+from param_decomp_lab.three_pool.step_chunkwise import (
     _recon_one_forward,
     _run_routing_forwards,
 )
@@ -86,14 +86,14 @@ def _grad(t: torch.Tensor) -> torch.Tensor:
     "plan",
     [
         PerSitePlan(),
-        SubsetRoutingPlan(routing=AllRoutingConfig(), n_samples=1),
-        SubsetRoutingPlan(routing=AllRoutingConfig(), n_samples=3),
-        SubsetRoutingPlan(routing=UniformKSubsetRoutingConfig(), n_samples=4),
-        SubsetRoutingPlan(routing=StaticProbabilityRoutingConfig(p=0.5), n_samples=2),
+        SubsetReconPlan(routing=AllRoutingConfig(), n_samples=1),
+        SubsetReconPlan(routing=AllRoutingConfig(), n_samples=3),
+        SubsetReconPlan(routing=UniformKSubsetRoutingConfig(), n_samples=4),
+        SubsetReconPlan(routing=StaticProbabilityRoutingConfig(p=0.5), n_samples=2),
     ],
 )
-def test_denom_matches_single_pool_normalization(plan: RoutingPlan) -> None:
-    """New per-forward denom (at n_per_block=n_ci=1) == textbook sum/n_examples."""
+def test_denom_matches_single_pool_normalization(plan: ChunkReconPlan) -> None:
+    """New per-forward denom (at chunk_dp=n_ci=1) == textbook sum/n_examples."""
     torch.manual_seed(0)
     model = _make_model()
     owned = ("l0", "l1")
@@ -107,7 +107,7 @@ def test_denom_matches_single_pool_normalization(plan: RoutingPlan) -> None:
     routings = plan.generate(owned, mask_shape, torch.device("cpu"))
     n_forwards = len(routings)
     assert n_forwards == plan.n_forwards(owned)
-    strategy = LayerwiseLossStrategy.unfused(recon_loss_mse)
+    strategy = ReconLossStrategy.unfused(recon_loss_mse)
 
     # --- path under test: per-forward backward with the new denom ---
     leaves_path = {s: ci_vals[s].clone().requires_grad_(True) for s in owned}
@@ -123,7 +123,7 @@ def test_denom_matches_single_pool_normalization(plan: RoutingPlan) -> None:
             routings=routings,
             coeff_stoch=1.0,
             n_est=n_forwards,
-            n_per_block=1,
+            chunk_dp=1,
             strategy=strategy,
             bf16_autocast_enabled=False,
         )
@@ -162,7 +162,7 @@ def test_denom_matches_single_pool_normalization(plan: RoutingPlan) -> None:
 
 def test_per_site_plan_n_est_equals_total_sites() -> None:
     """Back-compat: with PerSitePlan, n_est == total sites across blocks, so the
-    denom reduces to the old ``n_positions * n_sites_total * n_per_block / n_ci``."""
+    denom reduces to the old ``n_positions * n_sites_total * chunk_dp / n_ci``."""
     plan = PerSitePlan()
     blocks = [("a", "b"), ("c",), ("d", "e", "f")]
     n_est = sum(plan.n_forwards(owned) for owned in blocks)

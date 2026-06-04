@@ -2,7 +2,7 @@
 
 The train loop never assembles a checkpoint. Instead each rank writes a
 self-contained partial to a shared-FS scratch dir (see
-``ThreePoolTrainer.snapshot``): its owned model params (LW leaders → owned-sites
+``ThreePoolTrainer.snapshot``): its owned model params (chunk leaders → owned-sites
 V/U; CI leader → CI fn), its optimizer state, and (PPGD) its sources. A separate
 async SLURM job then reads every partial for a step and assembles the canonical
 artifacts off the training critical path.
@@ -40,11 +40,9 @@ def site_to_component_prefix(site: str) -> str:
     return f"model.{site}.components"
 
 
-def owned_model_state_keys(
-    model_state_dict_keys: set[str], *, owned_sites: tuple[str, ...]
-) -> set[str]:
-    """The V/U state-dict keys for ``owned_sites`` (LW block leaders' partial)."""
-    prefixes = tuple(f"{site_to_component_prefix(s)}." for s in owned_sites)
+def owned_model_state_keys(model_state_dict_keys: set[str], *, sites: tuple[str, ...]) -> set[str]:
+    """The V/U state-dict keys for ``sites`` (chunk leaders' partial)."""
+    prefixes = tuple(f"{site_to_component_prefix(s)}." for s in sites)
     return {k for k in model_state_dict_keys if k.startswith(prefixes)}
 
 
@@ -66,7 +64,7 @@ def assemble_model_state_dict_from_partials(
     """Assemble the full LMComponentModel state_dict from per-rank scratch partials.
 
     Each partial's ``model_params`` holds the CPU tensors that rank owns (a slice
-    of its own ``component_model.state_dict()``): LW block leaders contribute their
+    of its own ``component_model.state_dict()``): chunk leaders contribute their
     owned sites' ``model.<site>.components.*``, the CI pool leader contributes ``ci_fn.*``.
     The union of every partial's keys must exactly cover the full-decomposition
     model's V/U + CI-fn keys (frozen target params come from the fresh buffer).

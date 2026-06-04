@@ -50,7 +50,7 @@ class ThreePoolTrainingState:
 
     * `component_model`: full gathered model state (every site's V/U + the CI fn).
     * `components_optimizer` / `ci_fn_optimizer`: per-parameter optimizer state
-      keyed by parameter name, merged across the layerwise + CI pools. Same
+      keyed by parameter name, merged across the chunkwise + CI pools. Same
       shape as 1-pool's `TrainingState` — topology-independent.
     * `ppgd_state_by_rank`: PPGD adversarial sources, keyed by PPGD rank id.
       Genuinely rank-coupled for `PerBatchPerPositionScope` (sized by the

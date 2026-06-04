@@ -30,7 +30,7 @@ The 3-pool training path is a standalone sibling of `pd-lm`, not a flag on it. D
 is by entry point (the repo idiom — no discriminator). `ThreePoolLMExperimentConfig`
 (in `lm/three_pool_run.py`) is a standalone `BaseConfig` with `pd:
 ThreePoolConstrainedPDConfig`, `runtime: ThreePoolRuntimeConfig` (core `RuntimeConfig`
-scalars + `topology: ThreePoolConfig`), and the usual `cadence`/`target`/`data`/`eval`/
+scalars + `topology: ThreePoolTopology`), and the usual `cadence`/`target`/`data`/`eval`/
 `wandb`. `LMExperimentConfig` is purely single-pool (no `three_pool` field).
 
 `ThreePoolConstrainedPDConfig` (in `param_decomp_lab/three_pool/pd_config.py` — it lives
@@ -42,11 +42,13 @@ the generic `loss_metrics` list is replaced by a typed `ThreePoolLosses(faith, i
 stoch, ppgd)` struct (it derives the inherited `loss_metrics` list from the struct via a
 before-validator and excludes it from serialization). `ThreePoolTrainer` reads
 `pd.losses.faith` / `.imp` / `.stoch` / `.ppgd` directly — no `by_type` dict, no
-`isinstance` asserts. Cross-field checks coupling `pd` to `runtime.topology` (batch
-divisibility, rank-0 convention) run as a `@model_validator` on
+`isinstance` asserts. The cross-field check coupling `pd` to `runtime.topology` (each
+per-rank batch divides `pd.batch_size`) runs as a `@model_validator` on
 `ThreePoolLMExperimentConfig`, so 3-pool misconfigs fail at YAML parse, not minutes into
-a multi-node launch. (Site coverage — owned sites ∈ decomposition_targets after pattern
-expansion — stays in `ThreePoolTrainer._build_runtime` since it needs the loaded model.)
+a multi-node launch. The rank-0 convention is no longer a check — the canonical resolver
+makes rank 0 the chunk-0 leader by construction. (Site coverage — every resolved chunk
+site ∈ decomposition_targets after pattern expansion — stays in
+`ThreePoolTrainer._build_runtime` since it needs the loaded model.)
 
 Reload: `SavedThreePoolLMRun` (in `three_pool_run.py`) mirrors `SavedLMRun`.
 

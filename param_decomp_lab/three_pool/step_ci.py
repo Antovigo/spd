@@ -13,7 +13,7 @@ loss and the assembled grads exist (it takes ``CiForward`` + ``ImpMinLoss`` +
 ``CiSends``).
 
 The cross-pool exchanges all route through this CI rank's own portal bundle
-(``ctx.portals.ci_to_lw`` etc.), so a CI step physically cannot reach for a
+(``ctx.portals.ci_to_chunk`` etc.), so a CI step physically cannot reach for a
 different pool's edges.
 
 Phases (numbered to match ``DESIGN.md`` ``ci/N``):
@@ -21,11 +21,11 @@ Phases (numbered to match ``DESIGN.md`` ``ci/N``):
   0.  Step 0 only: target_fwd to build H_T (subsequent steps reuse the prev
       iter's prefetch).
   1.  CI fn fwd on H_T → CI_T per site. Graph retained for the fused bwd at 8.
-  2.  Async send CI_T → LW (per-site, sub-sliced) + PPGD (full-model,
+  2.  Async send CI_T → chunkwise (per-site, sub-sliced) + PPGD (full-model,
       sub-sliced). Kicks the NIC so 4 + 5 + 6 can pipeline.
   3.  imp_min loss on ``CI.upper_leaky`` (still on graph — gradient enters
       the fused bwd at 8).
-  5.  Recv g_CI from LW (per-site, stitched across K_lw_per_ci slices).
+  5.  Recv g_CI from chunkwise (per-site, stitched across K_chunk_per_ci slices).
   6.  Recv g_CI from PPGD (per-site, stitched across K_ppgd_per_ci slices).
   7.  Assemble g_CI_total per site on this CI rank's batch slice.
   8.  Fused autograd backward: imp_min via ``upper_leaky``, downstream grads
@@ -93,9 +93,9 @@ class CiForward:
 
 @dataclass(frozen=True)
 class CiSends:
-    """Phase ci/2 output: the two in-flight CI-value sends (LW + PPGD)."""
+    """Phase ci/2 output: the two in-flight CI-value sends (chunkwise + PPGD)."""
 
-    to_lw: InFlightSends
+    to_chunk: InFlightSends
     to_ppgd: InFlightSends
 
 
@@ -109,16 +109,16 @@ class ImpMinLoss:
 
 @dataclass(frozen=True)
 class GciReceived:
-    """Phases ci/5 + ci/6 output: per-site CI grads from LW and from PPGD,
+    """Phases ci/5 + ci/6 output: per-site CI grads from chunkwise and from PPGD,
     each stitched onto this CI rank's batch slice."""
 
-    from_lw: dict[str, Tensor]
+    from_chunk: dict[str, Tensor]
     from_ppgd: dict[str, Tensor]
 
 
 @dataclass(frozen=True)
 class GciTotal:
-    """Phase ci/7 output: ``g_CI_LW + g_CI_PPGD`` per site, ready to seed the
+    """Phase ci/7 output: ``g_CI_chunk + g_CI_PPGD`` per site, ready to seed the
     fused backward on ``ci.lower_leaky``."""
 
     per_site: dict[str, Tensor]
@@ -197,7 +197,7 @@ def step_ci(
         )
     optimizer.step()
 
-    sends.to_lw.wait()
+    sends.to_chunk.wait()
     sends.to_ppgd.wait()
 
     # imp is already globally aggregated inside ``_imp_min_phase`` (per_component_sums
@@ -236,10 +236,10 @@ def _ci_fn_forward(
 
 
 def _send_ci_values(portals: CIPortals, role: CIRole, fwd: CiForward) -> CiSends:
-    """Phase ci/2. Async-ship CI_T to LW (per-site) and PPGD (full-model)."""
-    to_lw = portals.ci_to_lw.send(role, fwd.ci.lower_leaky)
+    """Phase ci/2. Async-ship CI_T to chunkwise (per-site) and PPGD (full-model)."""
+    to_chunk = portals.ci_to_chunk.send(role, fwd.ci.lower_leaky)
     to_ppgd = portals.ci_to_ppgd.send(role, fwd.ci.lower_leaky)
-    return CiSends(to_lw=to_lw, to_ppgd=to_ppgd)
+    return CiSends(to_chunk=to_chunk, to_ppgd=to_ppgd)
 
 
 def _mean_l0(lower_leaky: dict[str, Tensor], n_ci: int) -> float:
@@ -288,10 +288,10 @@ def _recv_g_ci(
     seq_len: int,
     device: torch.device,
 ) -> GciReceived:
-    """Phases ci/5 + ci/6. Recv CI grads from LW and PPGD."""
-    from_lw = portals.g_ci_from_lw.recv(role, cfg.c_per_site, seq_len, device)
+    """Phases ci/5 + ci/6. Recv CI grads from chunkwise and PPGD."""
+    from_chunk = portals.g_ci_from_chunk.recv(role, cfg.c_per_site, seq_len, device)
     from_ppgd = portals.g_ci_from_ppgd.recv(role, cfg.c_per_site, seq_len, device)
-    return GciReceived(from_lw=from_lw, from_ppgd=from_ppgd)
+    return GciReceived(from_chunk=from_chunk, from_ppgd=from_ppgd)
 
 
 def _slice_batches_for_ci(
@@ -344,24 +344,25 @@ def _assemble_g_ci_total(
     cfg: _ThreePoolRuntime,
     seq_len: int,
 ) -> GciTotal:
-    """Phase ci/7. ``g_CI_total[s] = g_CI_LW[s] + g_CI_PPGD[s]``.
+    """Phase ci/7. ``g_CI_total[s] = g_CI_chunk[s] + g_CI_PPGD[s]``.
 
     Both summands live on this CI rank's batch slice [B_local_ci, S, C_s].
-    Loss coefficients were already baked in by LW/PPGD before they bwd'd.
+    Loss coefficients were already baked in by chunkwise/PPGD before they bwd'd.
     """
     batch_local_ci = ctx.world.batch_local_ci
     per_site: dict[str, Tensor] = {}
     for s in ctx.world.all_sites:
         c = cfg.c_per_site[s]
-        lw, pgd = received.from_lw[s], received.from_ppgd[s]
-        assert lw.shape == (batch_local_ci, seq_len, c), (
-            f"g_ci_lw[{s!r}] shape {tuple(lw.shape)} != expected ({batch_local_ci}, {seq_len}, {c})"
+        chunk, pgd = received.from_chunk[s], received.from_ppgd[s]
+        assert chunk.shape == (batch_local_ci, seq_len, c), (
+            f"g_ci_chunk[{s!r}] shape {tuple(chunk.shape)} != "
+            f"expected ({batch_local_ci}, {seq_len}, {c})"
         )
         assert pgd.shape == (batch_local_ci, seq_len, c), (
             f"g_ci_pgd[{s!r}] shape {tuple(pgd.shape)} != "
             f"expected ({batch_local_ci}, {seq_len}, {c})"
         )
-        per_site[s] = lw + pgd
+        per_site[s] = chunk + pgd
     return GciTotal(per_site=per_site)
 
 

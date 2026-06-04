@@ -5,10 +5,10 @@ builder), but each pool only runs the work backed by state it actually holds:
 
   CI   pool: target_fwd → CI fn fwd → ship full CIOutputs to PPGD.
   PPGD pool: target_fwd → calc_weight_deltas → recv CI from CI → assemble MetricContext.
-  LW   pool: barrier through.
+  chunkwise pool: barrier through.
 
 Reductions inside eval metrics are scoped to the PPGD pool subgroup via
-``use_reduction_group(world.ppgd_pool_group)`` so CI and LW don't block on them.
+``use_reduction_group(world.ppgd_pool_group)`` so CI and chunkwise don't block on them.
 
 The ``CIOutputs`` ship covers ``lower_leaky``, ``upper_leaky``, ``pre_sigmoid``
 in one packed buffer — any metric reading ``ctx.ci.*`` works without a
@@ -35,14 +35,14 @@ from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.run_sink import RunSink
 from param_decomp.torch_helpers import bf16_autocast
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
-from param_decomp_lab.three_pool.context import CIContext, LWContext, PoolContext, PPGDContext
+from param_decomp_lab.three_pool.context import ChunkContext, CIContext, PoolContext, PPGDContext
 
 
 def _slice_batch_dim0(batch: Any, sl: slice) -> tuple[Any, int]:
     """Slice along the leading (batch) dim and return ``(slice, seq_len)``.
 
     Matches the convention used by ``_slice_batch_for_ppgd`` /
-    ``_slice_batch_for_layerwise``: Tensor batches are sliced; dict batches are
+    ``_slice_batch_for_chunkwise``: Tensor batches are sliced; dict batches are
     returned unchanged (callers feeding dicts are responsible for handling that
     upstream).
     """
@@ -67,7 +67,7 @@ def _build_metric_context_three_pool(
     c_per_site: dict[str, int],
 ) -> MetricContext | None:
     """Build a ``MetricContext`` under 3-pool. Returns the context on PPGD ranks;
-    returns ``None`` on CI (after shipping CI to PPGD) and LW (no-op).
+    returns ``None`` on CI (after shipping CI to PPGD) and chunkwise (no-op).
     """
     batch = move_batch_to_device(batch, device)
     # The eval batch is global: every pool rank receives all `batch_global` rows and
@@ -123,7 +123,7 @@ def _build_metric_context_three_pool(
                 reconstruction_loss=reconstruction_loss,
                 is_eval=True,
             )
-        case LWContext():
+        case ChunkContext():
             return None
 
 
@@ -146,10 +146,10 @@ def run_eval_step(
     """One 3-pool eval pass over ``n_steps`` batches.
 
     All pools call this; only PPGD ranks run ``metric.update`` / ``compute``.
-    CI ships full CIOutputs to PPGD per batch; LW barriers through.
+    CI ships full CIOutputs to PPGD per batch; chunkwise barriers through.
 
     Metric all-reductions are confined to the PPGD subgroup via
-    ``use_reduction_group``. CI + LW must NOT call ``all_reduce`` inside this
+    ``use_reduction_group``. CI + chunkwise must NOT call ``all_reduce`` inside this
     scope (they don't, by construction — they execute none of the metric code).
 
     ``slow_step`` is a pass-through filter: any metric whose ``slow`` class-attr

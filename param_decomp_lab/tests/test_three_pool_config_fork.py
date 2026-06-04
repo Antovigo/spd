@@ -3,8 +3,9 @@
 The whole point of `ThreePoolConstrainedPDConfig` + `ThreePoolLMExperimentConfig` is to
 move 3-pool misconfiguration failures from "minutes into a multi-node launch" to "YAML
 parse on the login node". These tests pin that: a valid config parses, and each class of
-invalid config (wrong fixed scalar, missing/extra loss, bad batch divisibility, rank-0
-convention) fails at `model_validate`.
+invalid config (wrong fixed scalar, missing/extra loss, bad batch divisibility) fails at
+`model_validate`. The rank-0 convention is no longer a check — the canonical resolver
+makes rank 0 the chunk-0 leader by construction.
 """
 
 import copy
@@ -112,20 +113,21 @@ def test_ppgd_start_frac_nonzero_rejected() -> None:
 
 
 def test_batch_not_divisible_by_topology_rejected() -> None:
-    """Cross-field check: batch_size must be divisible by each pool arity. The topology
-    stays valid (uniform N_per_block=2); only batch_size is made indivisible by it."""
+    """Cross-field check: batch_size must be divisible by each pool's per_rank_batch.
+    chunkwise.per_rank_batch=1 divides anything, so make batch_size indivisible by the
+    ci/ppgd per-rank batch of 2."""
     data = _valid_dict()
-    data["pd"]["batch_size"] = 3  # N_per_block=2 does not divide 3
+    data["pd"]["batch_size"] = 3  # ci/ppgd per_rank_batch=2 does not divide 3
     with pytest.raises(ValidationError):
         ThreePoolLMExperimentConfig.model_validate(data)
 
 
-def test_rank0_not_lw_leader_rejected() -> None:
-    """Cross-field check: rank 0 must be the LW pool's block-0 leader."""
+def test_cross_divisibility_rejected() -> None:
+    """Parse-time check (no batch needed): ci and chunkwise per-rank batches must
+    cross-divide. 3 and 2 don't (neither divides the other)."""
     data = _valid_dict()
-    groups = data["runtime"]["topology"]["layerwise_block_groups"]
-    # Swap rank 0 out of the first block's leader slot (move it to CI pool's place).
-    groups[0]["ranks"] = [9, 1]
+    data["runtime"]["topology"]["ci"]["per_rank_batch"] = 3
+    data["runtime"]["topology"]["chunkwise"]["per_rank_batch"] = 2
     with pytest.raises(ValidationError):
         ThreePoolLMExperimentConfig.model_validate(data)
 

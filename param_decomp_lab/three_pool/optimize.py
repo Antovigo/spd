@@ -3,24 +3,24 @@
 
 Mirrors the single-pool call shape: caller hands in ``target_model``,
 dataloader, configs, sink. Internal validation, per-pool wiring, cross-pool
-comms, and the layerwise streaming loss strategy are all hidden behind the
+comms, and the chunkwise streaming recon strategy are all hidden behind the
 class boundary.
 
   * **CI pool** trains the CI fn (replicated across ranks; DP-sharded across
     batch). Holds CI fn + AdamW state. Each step: target_fwd → CI fn fwd →
-    broadcast CI to LW + PPGD → dead-time prefetch H_{T+1} → fused backward
-    seeded by imp_min + per-site g_CI from LW + PPGD → in-pool all-reduce →
+    broadcast CI to chunkwise + PPGD → dead-time prefetch H_{T+1} → fused backward
+    seeded by imp_min + per-site g_CI from chunkwise + PPGD → in-pool all-reduce →
     AdamW. See :mod:`param_decomp_lab.three_pool.step_ci`.
 
-  * **Layerwise pool** trains V/U (block-DDP within group; sharded across
-    sites). Recv CI → faithfulness + layerwise stoch recon → send g_CI back
-    → recv g_VU from PPGD → combine → in-block all-reduce → AdamW → async
-    ship updated V/U → PPGD. See :mod:`param_decomp_lab.three_pool.step_layerwise`.
+  * **Chunkwise pool** trains V/U (chunk-DDP within chunk; sharded across
+    sites). Recv CI → faithfulness + chunkwise stoch recon → send g_CI back
+    → recv g_VU from PPGD → combine → in-chunk all-reduce → AdamW → async
+    ship updated V/U → PPGD. See :mod:`param_decomp_lab.three_pool.step_chunkwise`.
 
   * **PPGD pool** is a stateless full V/U replica. Recv CI → PPGD warmup +
     final recon → backward seeds V/U + CI grads (no outer source step;
     warmup inner loop owns sources) → sum-reduce V/U within PPGD pool →
-    send g_VU to LW + g_CI to CI → recv updated V/U. See
+    send g_VU to chunkwise + g_CI to CI → recv updated V/U. See
     :mod:`param_decomp_lab.three_pool.step_ppgd`.
 
 Data-handling contract
@@ -78,25 +78,25 @@ from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
 )
-from param_decomp_lab.three_pool.config import ThreePoolConfig
+from param_decomp_lab.three_pool.config import ThreePoolTopology
 from param_decomp_lab.three_pool.consolidate import (
     CONSOLIDATE_META_FILENAME,
     step_scratch_dir,
 )
 from param_decomp_lab.three_pool.context import (
+    ChunkContext,
     CIContext,
-    LWContext,
     PoolContext,
     PPGDContext,
     build_pool_context,
 )
 from param_decomp_lab.three_pool.layout import (
-    LayerwiseBlockGroup,
+    Chunk,
     build_world,
     flush_nccl_event_timings,
 )
-from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
+from param_decomp_lab.three_pool.recon_loss_strategy import ReconLossStrategy
 from param_decomp_lab.three_pool.reductions import (
     aggregate_component_grad_by_loss_to_rank0,
     aggregate_grad_norms_to_rank0,
@@ -104,11 +104,11 @@ from param_decomp_lab.three_pool.reductions import (
     aggregate_max_memory_to_rank0,
 )
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
-from param_decomp_lab.three_pool.step_ci import step_ci
-from param_decomp_lab.three_pool.step_layerwise import (
-    run_faithfulness_warmup_layerwise,
-    step_layerwise,
+from param_decomp_lab.three_pool.step_chunkwise import (
+    run_faithfulness_warmup_chunkwise,
+    step_chunkwise,
 )
+from param_decomp_lab.three_pool.step_ci import step_ci
 from param_decomp_lab.three_pool.step_ppgd import step_ppgd
 
 # Collective timeout for every 3-pool subgroup. Now that consolidation is async
@@ -125,16 +125,16 @@ _DEFAULT_PG_TIMEOUT = datetime.timedelta(minutes=10)
 _COMPILE_PG_TIMEOUT = datetime.timedelta(minutes=20)
 
 
-def _lw_compile_enabled() -> bool:
-    """torch.compile the LW pool — default on; ``PD_DISABLE_LW_COMPILE=1`` to disable.
+def _chunk_compile_enabled() -> bool:
+    """torch.compile the chunkwise pool — default on; ``PD_DISABLE_CHUNK_COMPILE=1`` to disable.
 
-    Whole-model compile (see the compile call in ``__init__``) gives ~2.74x on the LW step (the
-    throughput pole), validated clean at 160-GPU distributed scale on torch >= 2.11 (earlier torch
-    tripped an AOT-partitioner ``KeyError: '_scaled_dot_product_flash_attention'`` at scale — see
-    the compile call). Global (the launcher exports env to every rank), required because it also
+    Whole-model compile (see the compile call in ``__init__``) gives ~2.74x on the chunkwise step
+    (the throughput pole), validated clean at 160-GPU distributed scale on torch >= 2.11 (earlier
+    torch tripped an AOT-partitioner ``KeyError: '_scaled_dot_product_flash_attention'`` at scale —
+    see the compile call). Global (the launcher exports env to every rank), required because it also
     widens the collective PG timeout uniformly across ranks.
     """
-    return os.environ.get("PD_DISABLE_LW_COMPILE", "").strip() not in ("1", "true", "yes")
+    return os.environ.get("PD_DISABLE_CHUNK_COMPILE", "").strip() not in ("1", "true", "yes")
 
 
 def _ci_ckpt_enabled() -> bool:
@@ -158,7 +158,7 @@ class ThreePoolTrainer:
     """Stateful 3-pool trainer.
 
     Construction wires up the runtime bundle, world layout, ComponentModel,
-    layerwise loss strategy, and the per-pool optimizer (CI / LW have one;
+    recon loss strategy, and the per-pool optimizer (CI / chunkwise have one;
     PPGD has none — see module docstring). The PPGD state itself is built on
     the first batch of :meth:`run` because its source tensor shapes depend on
     the data's sequence dims.
@@ -176,11 +176,11 @@ class ThreePoolTrainer:
 
     pd_config: ThreePoolConstrainedPDConfig
     runtime_config: RuntimeConfig
-    three_pool_config: ThreePoolConfig
+    three_pool_config: ThreePoolTopology
     reconstruction_loss: ReconstructionLoss
     component_model: LMComponentModel
     ctx: PoolContext
-    strategy: LayerwiseLossStrategy
+    strategy: ReconLossStrategy
     optimizer: torch.optim.Optimizer | None
     ppgd_state: PersistentPGDState | None
     step: int
@@ -193,7 +193,7 @@ class ThreePoolTrainer:
         reconstruction_loss: ReconstructionLoss,
         pd_config: ThreePoolConstrainedPDConfig,
         runtime_config: RuntimeConfig,
-        three_pool_config: ThreePoolConfig,
+        three_pool_config: ThreePoolTopology,
     ) -> None:
         assert dist.is_initialized(), (
             "init the distributed process group before constructing ThreePoolTrainer"
@@ -216,12 +216,6 @@ class ThreePoolTrainer:
         if ci_attn is not None:
             d_model, n_heads = ci_attn
             verify_flash_attention_available(head_dim=d_model // n_heads)
-        # PPGD runs only on PPGD pool; the relevant per-rank batch is batch // n_ppgd.
-        validate_pgd_scope(
-            [pd_config.losses.ppgd],
-            batch_size=pd_config.batch_size,
-            world_size=len(three_pool_config.ppgd_ranks),
-        )
 
         trace("ThreePoolTrainer.__init__: building runtime")
         self.runtime = _build_runtime(
@@ -231,6 +225,13 @@ class ThreePoolTrainer:
             three_pool_config=three_pool_config,
             run_batch=run_batch,
             reconstruction_loss=reconstruction_loss,
+        )
+
+        # PPGD runs only on PPGD pool; the relevant per-rank batch is batch // n_ppgd.
+        validate_pgd_scope(
+            [pd_config.losses.ppgd],
+            batch_size=pd_config.batch_size,
+            world_size=len(self.runtime.ppgd_ranks),
         )
 
         torch.set_float32_matmul_precision("high")
@@ -247,18 +248,14 @@ class ThreePoolTrainer:
             torch.cuda.set_sync_debug_mode("error")
 
         self._device = torch.device(runtime_config.device)
-        block_groups = [
-            LayerwiseBlockGroup(ranks=tuple(bg.ranks), owned_sites=tuple(bg.owned_sites))
-            for bg in three_pool_config.layerwise_block_groups
-        ]
         trace("ThreePoolTrainer.__init__: build_world: enter")
         world = build_world(
-            ci_ranks=list(three_pool_config.ci_ranks),
-            layerwise_block_groups=block_groups,
-            ppgd_ranks=list(three_pool_config.ppgd_ranks),
+            ci_ranks=list(self.runtime.ci_ranks),
+            chunks=list(self.runtime.chunks),
+            ppgd_ranks=list(self.runtime.ppgd_ranks),
             batch_global=self.runtime.batch_global,
             pg_timeout=_resolve_pg_timeout(
-                compiling=_lw_compile_enabled() or _ci_compile_enabled()
+                compiling=_chunk_compile_enabled() or _ci_compile_enabled()
             ),
             device=self._device,
         )
@@ -272,10 +269,10 @@ class ThreePoolTrainer:
 
         target_model.requires_grad_(False)
         # Resync RNG across ranks before V/U + CI fn init. DDP partners within a
-        # block must start with identical params, but anything between
+        # chunk must start with identical params, but anything between
         # ``set_seed(pd.seed)`` in _fresh_main and here (loader build, distributed
         # init, etc.) can advance the RNG by rank-dependent amounts. Without this,
-        # partners initialize different V/U and the in-block grad all-reduce can't
+        # partners initialize different V/U and the in-chunk grad all-reduce can't
         # bring them back into sync.
         seed_all_ranks(pd_config.seed)
         trace("ThreePoolTrainer.__init__: LMComponentModel build: enter")
@@ -292,18 +289,18 @@ class ThreePoolTrainer:
         # init them already happened (in the ctor above), so equivalence with
         # single-pool is preserved.
         match self.ctx:
-            case LWContext() | PPGDContext():
+            case ChunkContext() | PPGDContext():
                 self.component_model.drop_ci_fn()
                 trace(f"ThreePoolTrainer.__init__: dropped ci_fn ({self.ctx.kind} pool)")
             case CIContext():
                 self.component_model.drop_components()
                 trace("ThreePoolTrainer.__init__: dropped V/U components (ci pool)")
-        # Activation checkpointing is LW-only. The LW pool carries the full per-rank batch
-        # (bl_lw = batch_size; no within-block DP at GPUs_per_block=1) so it needs ckpt to fit;
+        # Activation checkpointing is chunkwise-only. The chunkwise pool carries the full per-rank
+        # batch (bl_chunk = batch_size; no within-chunk DP at chunk_dp=1) so it needs ckpt to fit;
         # PPGD/CI don't (PPGD fits plain at its small bl_pp; CI's target fwd is no_grad). PPGD's
         # autograd.grad recompute is also non-deterministic under ckpt (nested mask_infos through
-        # checkpoint) — tracked as a follow-up; LW's .backward path is checkpoint-clean.
-        if not isinstance(self.ctx, LWContext):
+        # checkpoint) — tracked as a follow-up; chunkwise's .backward path is checkpoint-clean.
+        if not isinstance(self.ctx, ChunkContext):
             self.component_model.model._use_activation_checkpointing = False
         trace("ThreePoolTrainer.__init__: ComponentModel.to(device): enter")
         self.component_model = self.component_model.to(self._device)
@@ -347,15 +344,15 @@ class ThreePoolTrainer:
                     m.enable_bwd_profile()
                     trace("ThreePoolTrainer.__init__: enabled CI fn bwd-stage profile")
                     break
-        # LW pool: torch.compile the (target + masked) model forward — a validated 2.74× on
-        # the LW step single-GPU (the throughput pole). The vendored mask-arg forward traces
+        # Chunkwise pool: torch.compile the (target + masked) model forward — a validated 2.74× on
+        # the chunkwise step single-GPU (the throughput pole). The vendored mask-arg forward traces
         # cleanly (0 graph breaks) and attention uses F.sdpa directly. Default-on
-        # (PD_DISABLE_LW_COMPILE=1 to disable) — see _lw_compile_enabled. LW-only: PPGD/CI
-        # have slack and PPGD's autograd.grad path is unvalidated under compile. The one-time
+        # (PD_DISABLE_CHUNK_COMPILE=1 to disable) — see _chunk_compile_enabled. Chunkwise-only:
+        # PPGD/CI have slack and PPGD's autograd.grad path is unvalidated under compile. The one-time
         # first-step compilation is absorbed by the widened PG timeout (see
-        # _resolve_pg_timeout(compiling=...)). LW's forward is only called in step_layerwise
-        # (target=None + masked dict, both validated); eval barriers LW through, so no recompile.
-        if isinstance(self.ctx, LWContext) and _lw_compile_enabled():
+        # _resolve_pg_timeout(compiling=...)). The chunkwise forward is only called in step_chunkwise
+        # (target=None + masked dict, both validated); eval barriers it through, so no recompile.
+        if isinstance(self.ctx, ChunkContext) and _chunk_compile_enabled():
             # Whole-model compile: the block-loop checkpoint(block, ...) sits INSIDE the compiled
             # region. Requires torch >= 2.11 — its AOT min-cut partitioner guards the DCE'd
             # checkpointed flash-SDPA RNG op in `functionalize_rng_ops` (partitioners.py) instead of
@@ -372,13 +369,13 @@ class ThreePoolTrainer:
         # Diverge stochastic RNG per rank for mask sampling.
         seed_per_rank(pd_config.seed)
 
-        trace("ThreePoolTrainer.__init__: building LayerwiseLossStrategy")
-        self.strategy = LayerwiseLossStrategy.from_cfg(
+        trace("ThreePoolTrainer.__init__: building ReconLossStrategy")
+        self.strategy = ReconLossStrategy.from_cfg(
             self.component_model,
             use_fused_kl=three_pool_config.use_fused_kl,
             unfused_recon=reconstruction_loss,
         )
-        trace("ThreePoolTrainer.__init__: LayerwiseLossStrategy: done")
+        trace("ThreePoolTrainer.__init__: ReconLossStrategy: done")
 
         self.optimizer = None
         self._all_params: list[nn.Parameter] = []
@@ -404,8 +401,8 @@ class ThreePoolTrainer:
                     weight_decay=0.0,
                     fused=True,
                 )
-            case LWContext():
-                for name in self.ctx.role.owned_sites:
+            case ChunkContext():
+                for name in self.ctx.role.sites:
                     self._component_params.extend(
                         self.component_model.components[name].parameters()
                     )
@@ -430,16 +427,16 @@ class ThreePoolTrainer:
 
     def _named_params_for_my_optimizer(self) -> list[tuple[str, nn.Parameter]]:
         """The ``(name, param)`` pairs in the order they were added to this rank's
-        optimizer. ``CI`` pool returns ``ci_fn.*`` pairs; ``LW`` pool returns
-        ``components.<site>.*`` pairs for this rank's owned sites; ``PPGD`` has
+        optimizer. ``CI`` pool returns ``ci_fn.*`` pairs; ``chunkwise`` pool returns
+        ``components.<site>.*`` pairs for this rank's chunk sites; ``PPGD`` has
         no optimizer and returns ``[]``."""
         match self.ctx:
             case CIContext():
                 assert self.component_model.ci_fn is not None
                 return [(f"ci_fn.{n}", p) for n, p in self.component_model.ci_fn.named_parameters()]
-            case LWContext():
+            case ChunkContext():
                 out: list[tuple[str, nn.Parameter]] = []
-                for site in self.ctx.role.owned_sites:
+                for site in self.ctx.role.sites:
                     for n, p in self.component_model.components[site].named_parameters():
                         out.append((f"components.{site}.{n}", p))
                 return out
@@ -453,7 +450,7 @@ class ThreePoolTrainer:
         its own slice to ``scratch_dir / f"step_{S}" / f"rank_{rank}.pth"``:
 
         * ``model_params``: a slice of this rank's ``component_model.state_dict()`` —
-          LW block leaders contribute their owned sites' ``_components.<site>.*``,
+          chunk leaders contribute their sites' ``_components.<site>.*``,
           the CI pool leader contributes ``ci_fn.*``, everyone else contributes
           nothing (their V/U / CI fn are replicas of a leader's).
         * ``optimizer_by_name``: this rank's optimizer state, name-keyed.
@@ -521,15 +518,15 @@ class ThreePoolTrainer:
     def _owned_model_params(self) -> dict[str, Tensor]:
         """The slice of this rank's model state_dict it's responsible for saving.
 
-        Only leaders contribute: LW block leaders own their sites' V/U, the CI
+        Only leaders contribute: chunk leaders own their sites' V/U, the CI
         pool leader owns the CI fn. Every other rank holds a replica, so it
         contributes nothing — the union across leaders covers the full model.
         """
         sd = self.component_model.state_dict()
         keys = set(sd.keys())
         match self.ctx:
-            case LWContext() if self.ctx.role.is_block_leader:
-                owned = owned_model_state_keys(keys, owned_sites=self.ctx.role.owned_sites)
+            case ChunkContext() if self.ctx.role.is_chunk_leader:
+                owned = owned_model_state_keys(keys, sites=self.ctx.role.sites)
             case CIContext() if self.ctx.role.is_pool_leader:
                 owned = ci_fn_state_keys(keys)
             case _:
@@ -575,7 +572,7 @@ class ThreePoolTrainer:
         # `topology`), so drop the duplicate `topology` key before validating as base.
         runtime_dict = {k: v for k, v in snapshot.runtime_config.items() if k != "topology"}
         runtime_config = RuntimeConfig.model_validate(runtime_dict)
-        three_pool_config = ThreePoolConfig.model_validate(snapshot.three_pool_config)
+        three_pool_config = ThreePoolTopology.model_validate(snapshot.three_pool_config)
 
         trainer = cls(
             target_model=target_model,
@@ -609,7 +606,7 @@ class ThreePoolTrainer:
         if self.optimizer is not None:
             named_params = self._named_params_for_my_optimizer()
             match self.ctx:
-                case LWContext():
+                case ChunkContext():
                     by_name = state.components_optimizer
                 case CIContext():
                     by_name = state.ci_fn_optimizer
@@ -638,7 +635,7 @@ class ThreePoolTrainer:
 
         When ``eval_loop`` is non-None, runs a 3-pool eval pass on cadence:
         CI pool ships full ``CIOutputs`` to PPGD; PPGD assembles a
-        ``MetricContext`` and runs every ``eval_loop.metric``; LW pool
+        ``MetricContext`` and runs every ``eval_loop.metric``; chunkwise pool
         barriers through. Metric reductions are scoped to the PPGD pool
         subgroup via :func:`use_reduction_group` so non-PPGD pools don't
         block on them. See :mod:`param_decomp_lab.three_pool.eval_step`.
@@ -657,10 +654,10 @@ class ThreePoolTrainer:
             next(train_iterator)
 
         # Eval setup. Only the PPGD pool runs eval metrics; bind there only —
-        # CI / LW pools never touch metric state. The eval iterator runs on
+        # CI / chunkwise pools never touch metric state. The eval iterator runs on
         # every rank so all pools advance the loader in lock-step (CI + PPGD
         # each consume the full eval batch and slice internally, mirroring
-        # the train data-handling contract; LW reads but discards).
+        # the train data-handling contract; chunkwise reads but discards).
         eval_iterator = loop_dataloader(eval_loop.loader) if eval_loop is not None else None
         if eval_loop is not None and isinstance(ctx, PPGDContext):
             for m in eval_loop.metrics:
@@ -711,13 +708,13 @@ class ThreePoolTrainer:
 
         if (
             self.step == 0
-            and isinstance(ctx, LWContext)
+            and isinstance(ctx, ChunkContext)
             and pd_config.faithfulness_warmup_steps > 0
         ):
             trace(
                 f"Trainer.run: faithfulness warmup: enter ({pd_config.faithfulness_warmup_steps} steps)"
             )
-            run_faithfulness_warmup_layerwise(
+            run_faithfulness_warmup_chunkwise(
                 component_model=self.component_model,
                 component_params=self._component_params,
                 n_steps=pd_config.faithfulness_warmup_steps,
@@ -794,17 +791,17 @@ class ThreePoolTrainer:
                             current_frac_of_training=step / n_steps if n_steps > 0 else 0.0,
                             should_log=should_log,
                         )
-                    case LWContext():
+                    case ChunkContext():
                         assert self.optimizer is not None, (
-                            f"LW rank {ctx.role.rank} missing optimizer"
+                            f"chunkwise rank {ctx.role.rank} missing optimizer"
                         )
-                        assert ctx.role.owned_sites, (
-                            f"LW rank {ctx.role.rank} has no owned_sites — empty block"
+                        assert ctx.role.sites, (
+                            f"chunkwise rank {ctx.role.rank} has no sites — empty chunk"
                         )
                         self.optimizer.param_groups[0]["lr"] = get_scheduled_value(
                             step, n_steps, components_lr_schedule
                         )
-                        metrics = step_layerwise(
+                        metrics = step_chunkwise(
                             ctx,
                             self.component_model,
                             self.optimizer,
@@ -910,7 +907,7 @@ def optimize_three_pool(
     reconstruction_loss: ReconstructionLoss,
     pd_config: ThreePoolConstrainedPDConfig,
     runtime_config: RuntimeConfig,
-    three_pool_config: ThreePoolConfig,
+    three_pool_config: ThreePoolTopology,
     cadence: Cadence,
     sink: ThreePoolRunSink,
     scratch_dir: Path,
@@ -944,9 +941,9 @@ def _layout_fingerprint(ctx: PoolContext) -> dict[str, Any]:
     """Rank-invariant summary of the 3-pool world topology, compared at resume.
 
     Must NOT include this rank's local view (``role.rank`` / ``kind`` /
-    ``owned_sites``): the snapshot stores the fingerprint computed on rank 0,
+    ``sites``): the snapshot stores the fingerprint computed on rank 0,
     but ``from_snapshot`` compares it on EVERY rank, so a rank-local fingerprint
-    would mismatch on every non-rank-0 rank. The full block→ranks→sites mapping
+    would mismatch on every non-rank-0 rank. The full chunk→ranks→sites mapping
     below is identical on all ranks and fully captures the topology that
     ``_load_canonical_state`` relies on.
     """
@@ -955,10 +952,7 @@ def _layout_fingerprint(ctx: PoolContext) -> dict[str, Any]:
         "world_size": world.world_size,
         "ci_ranks": list(world.ci_ranks),
         "ppgd_ranks": list(world.ppgd_ranks),
-        "layerwise_blocks": [
-            {"ranks": list(bg.ranks), "owned_sites": list(bg.owned_sites)}
-            for bg in world.layerwise_block_groups
-        ],
+        "chunks": [{"ranks": list(c.ranks), "sites": list(c.sites)} for c in world.chunks],
     }
 
 
@@ -966,29 +960,17 @@ def _rank_invariant_fingerprint_core(fp: dict[str, Any]) -> dict[str, Any]:
     """Reduce a saved-or-current layout fingerprint to its rank-invariant core.
 
     Validating the topology on resume must not depend on which rank wrote the
-    snapshot. Earlier checkpoints (e.g. the 144-GPU p-a5b667e9 run) stored
-    rank-0's local view (``my_rank`` / ``my_pool`` / ``owned_sites``) alongside
-    the topology fields; current snapshots store the full block mapping. Both
-    carry ``world_size`` / ``ci_ranks`` / ``ppgd_ranks`` plus the block count
-    (as ``n_layerwise_blocks`` in the old format or ``len(layerwise_blocks)`` in
-    the new), which together pin down the pool partition. The per-block
-    ranks→sites mapping is fully re-derived from ``three_pool_config`` (also
-    stored in the snapshot and used to rebuild the trainer), so comparing the
-    core here is sufficient.
+    snapshot. The fingerprint carries ``world_size`` / ``ci_ranks`` / ``ppgd_ranks``
+    plus the chunk count (``len(chunks)``), which together pin down the pool
+    partition. The per-chunk ranks→sites mapping is fully re-derived from
+    ``three_pool_config`` (also stored in the snapshot and used to rebuild the
+    trainer), so comparing the core here is sufficient.
     """
-    # TODO(remove once p-df5b9fbd is past step 10000): the `n_layerwise_blocks`
-    # fallback exists only to read the pre-#536 rank-local fingerprint baked into
-    # p-a5b667e9's training_5000.pth. Once the resumed run has written a
-    # new-format checkpoint, no old-format snapshot is in use — drop this branch
-    # and the old-format clause in the docstring, keeping only the new-format read.
-    n_blocks = fp.get("n_layerwise_blocks")
-    if n_blocks is None:
-        n_blocks = len(fp["layerwise_blocks"])
     return {
         "world_size": fp["world_size"],
         "ci_ranks": list(fp["ci_ranks"]),
         "ppgd_ranks": list(fp["ppgd_ranks"]),
-        "n_layerwise_blocks": n_blocks,
+        "n_chunks": len(fp["chunks"]),
     }
 
 
@@ -1002,11 +984,18 @@ def _build_runtime(
     target_model: nn.Module,
     pd_config: ThreePoolConstrainedPDConfig,
     runtime_config: RuntimeConfig,
-    three_pool_config: ThreePoolConfig,
+    three_pool_config: ThreePoolTopology,
     run_batch: RunBatch,
     reconstruction_loss: ReconstructionLoss,
 ) -> _ThreePoolRuntime:
-    """Assemble the step-context bundle from configs + target."""
+    """Assemble the step-context bundle from configs + target.
+
+    Expands ``decomposition_targets`` → the ordered site list, resolves the topology
+    into the canonical rank/chunk assignment (needs the expanded sites + batch), and
+    builds the runtime ``Chunk`` objects. The per-chunk site coverage is automatic now
+    (chunks ARE the expanded sites), but we keep an assert that every resolved chunk
+    site is in ``c_per_site`` as a tripwire against a resolver/expansion drift.
+    """
     targets = resolve_decomposition_targets(target_model, pd_config.decomposition_targets)
     c_per_site = {t.module_path: t.C for t in targets}
     numel_global = 0
@@ -1015,30 +1004,28 @@ def _build_runtime(
         assert isinstance(w, Tensor)
         numel_global += w.numel()
 
-    for bg in three_pool_config.layerwise_block_groups:
-        for site in bg.owned_sites:
+    ordered_sites = [t.module_path for t in targets]
+    layout = three_pool_config.resolve(ordered_sites, pd_config.batch_size)
+
+    chunks = tuple(Chunk(ranks=ranks, sites=sites) for ranks, sites in layout.chunks)
+    for chunk in chunks:
+        for site in chunk.sites:
             assert site in c_per_site, (
-                f"site '{site}' in layerwise block group but not in "
-                f"pd_config.decomposition_targets after pattern expansion. "
-                f"Available: {sorted(c_per_site)[:5]}..."
+                f"site '{site}' in a chunk but not in pd_config.decomposition_targets "
+                f"after pattern expansion. Available: {sorted(c_per_site)[:5]}..."
             )
 
     losses = pd_config.losses
     ppgd_cfg = losses.ppgd
     imp_min_cfg = losses.imp
 
-    block_groups = tuple(
-        LayerwiseBlockGroup(ranks=tuple(bg.ranks), owned_sites=tuple(bg.owned_sites))
-        for bg in three_pool_config.layerwise_block_groups
-    )
-
-    routing_plan = losses.routing_plan
-    n_est = sum(routing_plan.n_forwards(bg.owned_sites) for bg in block_groups)
+    recon_plan = losses.recon_plan
+    n_est = sum(recon_plan.n_forwards(chunk.sites) for chunk in chunks)
 
     return _ThreePoolRuntime(
-        ci_ranks=tuple(three_pool_config.ci_ranks),
-        layerwise_block_groups=block_groups,
-        ppgd_ranks=tuple(three_pool_config.ppgd_ranks),
+        ci_ranks=layout.ci_ranks,
+        chunks=chunks,
+        ppgd_ranks=layout.ppgd_ranks,
         batch_global=pd_config.batch_size,
         c_per_site=c_per_site,
         ci_config=pd_config.ci_config,
@@ -1046,7 +1033,7 @@ def _build_runtime(
         run_batch=run_batch,
         reconstruction_loss=reconstruction_loss,
         ppgd_cfg=ppgd_cfg,
-        routing_plan=routing_plan,
+        recon_plan=recon_plan,
         n_est=n_est,
         coeff_faith=float(_required(losses.faith.coeff)),
         coeff_imp=float(_required(losses.imp.coeff)),
@@ -1095,12 +1082,12 @@ def _decomposition_targets_for_pool(
     ctx: PoolContext, c_per_site: dict[str, int]
 ) -> list[DecompositionTarget]:
     """CI/PPGD pools: every site (full CI fn / full V/U replica).
-    Layerwise pool: only this rank's owned sites."""
+    Chunkwise pool: only this rank's chunk sites."""
     match ctx:
         case CIContext() | PPGDContext():
             sites = ctx.world.all_sites
-        case LWContext():
-            sites = ctx.role.owned_sites
+        case ChunkContext():
+            sites = ctx.role.sites
     return [DecompositionTarget(module_path=s, C=c_per_site[s]) for s in sites]
 
 
@@ -1162,10 +1149,10 @@ def _log_train_metrics(
     grad_norms = aggregate_grad_norms_to_rank0(metrics, ctx, device)
     comp_grad_by_loss = aggregate_component_grad_by_loss_to_rank0(metrics, ctx, device)
 
-    # Reduce step_ms with MAX across LW pool (slowest LW rank is the wall-clock floor).
+    # Reduce step_ms with MAX across chunkwise pool (slowest chunk rank is the wall-clock floor).
     step_ms_t = torch.tensor([step_ms], device=device)
-    if isinstance(ctx, LWContext):
-        dist.all_reduce(step_ms_t, op=dist.ReduceOp.MAX, group=ctx.world.layerwise_pool_group)
+    if isinstance(ctx, ChunkContext):
+        dist.all_reduce(step_ms_t, op=dist.ReduceOp.MAX, group=ctx.world.chunkwise_pool_group)
 
     if ctx.role.rank != 0 or combined is None:
         return
@@ -1188,7 +1175,7 @@ def _log_train_metrics(
         ("ppgd", runtime.log_name_ppgd),
     ):
         combined[f"loss/{class_name}"] = combined.pop(f"loss/{short}")
-    assert isinstance(ctx, LWContext), "rank 0 must be in LW pool (per validator)"
+    assert isinstance(ctx, ChunkContext), "rank 0 must be in chunkwise pool (canonical order)"
     assert optimizer is not None
     assert grad_norms is not None
     assert comp_grad_by_loss is not None

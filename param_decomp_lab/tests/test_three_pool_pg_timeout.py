@@ -33,7 +33,7 @@ from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
 )
-from param_decomp_lab.three_pool.layout import LayerwiseBlockGroup, build_world
+from param_decomp_lab.three_pool.layout import Chunk, build_world
 from param_decomp_lab.three_pool.optimize import (
     _DEFAULT_PG_TIMEOUT,
     _rank_invariant_fingerprint_core,
@@ -72,9 +72,9 @@ def test_build_world_threads_timeout_into_every_new_group(
     pg_timeout = datetime.timedelta(minutes=30)
     build_world(
         ci_ranks=[2],
-        layerwise_block_groups=[
-            LayerwiseBlockGroup(ranks=(0,), owned_sites=("h.0.attn.q_proj",)),
-            LayerwiseBlockGroup(ranks=(1,), owned_sites=("h.1.attn.q_proj",)),
+        chunks=[
+            Chunk(ranks=(0,), sites=("h.0.attn.q_proj",)),
+            Chunk(ranks=(1,), sites=("h.1.attn.q_proj",)),
         ],
         ppgd_ranks=[3],
         batch_global=4,
@@ -88,33 +88,28 @@ def test_build_world_threads_timeout_into_every_new_group(
     )
 
 
-def test_fingerprint_core_old_and_new_formats_agree() -> None:
-    """The resume topology check must be rank-invariant AND tolerate the
-    pre-fix rank-local fingerprint format that production checkpoints (e.g.
-    p-a5b667e9) were written with."""
-    old_format_rank0 = {
+def test_fingerprint_core_is_rank_invariant() -> None:
+    """The resume topology check reduces a fingerprint to its rank-invariant core:
+    world_size / ci_ranks / ppgd_ranks / n_chunks. The full per-chunk ranks→sites
+    mapping is re-derived from the topology, so the core ignores it."""
+    fp = {
         "world_size": 144,
         "ci_ranks": list(range(96, 120)),
         "ppgd_ranks": list(range(120, 144)),
-        "n_layerwise_blocks": 4,
-        "my_rank": 0,
-        "my_pool": "layerwise",
-        "owned_sites": ["h.0.attn.q_proj", "h.0.attn.k_proj"],
-    }
-    new_format = {
-        "world_size": 144,
-        "ci_ranks": list(range(96, 120)),
-        "ppgd_ranks": list(range(120, 144)),
-        "layerwise_blocks": [
-            {"ranks": list(range(24)), "owned_sites": ["h.0.attn.q_proj"]},
-            {"ranks": list(range(24, 48)), "owned_sites": ["h.12.attn.q_proj"]},
-            {"ranks": list(range(48, 72)), "owned_sites": ["h.24.attn.q_proj"]},
-            {"ranks": list(range(72, 96)), "owned_sites": ["h.36.attn.q_proj"]},
+        "chunks": [
+            {"ranks": list(range(24)), "sites": ["h.0.attn.q_proj"]},
+            {"ranks": list(range(24, 48)), "sites": ["h.12.attn.q_proj"]},
+            {"ranks": list(range(48, 72)), "sites": ["h.24.attn.q_proj"]},
+            {"ranks": list(range(72, 96)), "sites": ["h.36.attn.q_proj"]},
         ],
     }
-    assert _rank_invariant_fingerprint_core(old_format_rank0) == _rank_invariant_fingerprint_core(
-        new_format
-    )
+    core = _rank_invariant_fingerprint_core(fp)
+    assert core == {
+        "world_size": 144,
+        "ci_ranks": list(range(96, 120)),
+        "ppgd_ranks": list(range(120, 144)),
+        "n_chunks": 4,
+    }
 
 
 def test_fingerprint_core_catches_topology_mismatch() -> None:
@@ -122,14 +117,14 @@ def test_fingerprint_core_catches_topology_mismatch() -> None:
         "world_size": 8,
         "ci_ranks": [6],
         "ppgd_ranks": [7],
-        "layerwise_blocks": [{"ranks": [0, 1], "owned_sites": ["h.0.attn.q_proj"]}],
+        "chunks": [{"ranks": [0, 1], "sites": ["h.0.attn.q_proj"]}],
     }
     changed_ppgd = {**base, "ppgd_ranks": [5]}
     assert _rank_invariant_fingerprint_core(base) != _rank_invariant_fingerprint_core(changed_ppgd)
 
 
 def test_leader_partials_exactly_cover_model_state() -> None:
-    """The per-leader partial slices (LW owned-site V/U + CI fn) must partition
+    """The per-leader partial slices (chunk-site V/U + CI fn) must partition
     the full model's fillable keys with no gaps or overlaps — the invariant the
     async consolidation asserts before assembling the checkpoint."""
     sites = ("h.0.attn.q_proj", "h.1.attn.q_proj", "h.2.mlp.c_fc")
@@ -150,13 +145,13 @@ def test_leader_partials_exactly_cover_model_state() -> None:
     target_keys = {k for k in model_keys if ".components." not in k and not k.startswith("ci_fn.")}
     fillable = model_keys - target_keys
 
-    # Two LW blocks: block 0 owns sites 0+1, block 1 owns site 2. CI leader owns ci_fn.
-    block0 = owned_model_state_keys(model_keys, owned_sites=(sites[0], sites[1]))
-    block1 = owned_model_state_keys(model_keys, owned_sites=(sites[2],))
+    # Two chunks: chunk 0 owns sites 0+1, chunk 1 owns site 2. CI leader owns ci_fn.
+    chunk0 = owned_model_state_keys(model_keys, sites=(sites[0], sites[1]))
+    chunk1 = owned_model_state_keys(model_keys, sites=(sites[2],))
     ci = ci_fn_state_keys(model_keys)
 
-    assert block0.isdisjoint(block1)
-    assert block0.isdisjoint(ci)
-    assert block1.isdisjoint(ci)
-    assert block0 | block1 | ci == fillable
-    assert target_keys.isdisjoint(block0 | block1 | ci)
+    assert chunk0.isdisjoint(chunk1)
+    assert chunk0.isdisjoint(ci)
+    assert chunk1.isdisjoint(ci)
+    assert chunk0 | chunk1 | ci == fillable
+    assert target_keys.isdisjoint(chunk0 | chunk1 | ci)

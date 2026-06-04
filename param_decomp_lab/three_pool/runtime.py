@@ -1,9 +1,9 @@
 """Internal step-context bundle for 3-pool training.
 
-``_ThreePoolRuntime`` glues serializable config (``ThreePoolConfig``) with the
-caller-supplied runtime callables and the derived per-site C from the actual
-target. It's the parameter shape that ``step_ci`` / ``step_layerwise`` /
-``step_ppgd`` consume; ``optimize_three_pool`` builds one internally per call.
+``_ThreePoolRuntime`` glues serializable config with the caller-supplied runtime
+callables and the derived per-site C from the actual target. It's the parameter
+shape that ``step_ci`` / ``step_chunkwise`` / ``step_ppgd`` consume;
+``optimize_three_pool`` builds one internally per call.
 
 Not part of the public API.
 """
@@ -14,8 +14,8 @@ from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
 from param_decomp.ci_fns import CiConfig
 from param_decomp.ci_sigmoids import SigmoidType
 from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
-from param_decomp_lab.three_pool.layout import LayerwiseBlockGroup
-from param_decomp_lab.three_pool.routing_plan import RoutingPlan
+from param_decomp_lab.three_pool.layout import Chunk
+from param_decomp_lab.three_pool.recon_plan import ChunkReconPlan
 
 __all__ = ["_ThreePoolRuntime"]
 
@@ -31,7 +31,7 @@ class _ThreePoolRuntime:
 
     # Topology
     ci_ranks: tuple[int, ...]
-    layerwise_block_groups: tuple[LayerwiseBlockGroup, ...]
+    chunks: tuple[Chunk, ...]
     ppgd_ranks: tuple[int, ...]
     batch_global: int
 
@@ -50,12 +50,12 @@ class _ThreePoolRuntime:
     # consumes several of its fields)
     ppgd_cfg: PersistentPGDReconLossConfig
 
-    # How each LW block turns its owned sites into recon forwards.
-    routing_plan: RoutingPlan
-    # Total LW recon forwards per step across the whole pool
-    # (= Σ over block groups of routing_plan.n_forwards(owned_sites)). Generalises
-    # the old ``n_sites_total`` factor in the stoch-grad denominator: with the
-    # default per-site plan, n_est == n_sites_total (bit-exact with the old path).
+    # How each chunk turns its sites into recon forwards.
+    recon_plan: ChunkReconPlan
+    # Total chunkwise recon forwards per step across the whole pool
+    # (= Σ over chunks of recon_plan.n_forwards(sites)). Generalises the old
+    # ``n_sites_total`` factor in the stoch-grad denominator: with the default
+    # per-site plan, n_est == n_sites_total (bit-exact with the old path).
     n_est: int
 
     # Loss coefficients
@@ -88,7 +88,7 @@ class _ThreePoolRuntime:
     grad_clip_norm_components: float | None
     grad_clip_norm_ci_fn: float | None
     # Total numel across all decomposition sites' weight tensors. Used by the
-    # LW pool's ``_faithfulness_loss`` so multi-pool's per-element grad matches
+    # chunkwise pool's ``_faithfulness_loss`` so multi-pool's per-element grad matches
     # single-pool's (which divides faith by global numel, not rank-local).
     numel_global: int
 

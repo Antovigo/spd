@@ -106,7 +106,7 @@ pd:
       start_frac: 0.0
       type: PersistentPGDReconLoss
       use_sigmoid_parameterization: false
-    routing_plan:
+    recon_plan:
       n_samples: 1
       routing:
         type: all
@@ -124,16 +124,14 @@ pd:
 runtime:
   autocast_bf16: true
   device: cuda:0
-  dp: 6
   topology:
-    ci_ranks: [2, 3]
-    layerwise_block_groups:
-    - owned_sites:
-      - layers.18.mlp.gate_proj
-      - layers.18.mlp.up_proj
-      - layers.18.mlp.down_proj
-      ranks: [0, 1]
-    ppgd_ranks: [4, 5]
+    ci:
+      per_rank_batch: 16
+    ppgd:
+      per_rank_batch: 16
+    chunkwise:
+      per_rank_batch: 16
+      sites_per_chunk: null
     use_fused_kl: true
 target:
   activation_checkpointing: true

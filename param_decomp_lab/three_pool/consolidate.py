@@ -117,7 +117,7 @@ def consolidate_step(
     for r, partial in enumerate(partials):
         pool: str = partial["pool"]
         match pool:
-            case "layerwise":
+            case "chunkwise":
                 components_optimizer.update(partial["optimizer_by_name"])
             case "ci":
                 ci_fn_optimizer.update(partial["optimizer_by_name"])
