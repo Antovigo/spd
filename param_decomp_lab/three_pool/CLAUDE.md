@@ -41,7 +41,7 @@ so a 3-pool run and a single-pool run overlay on the same wandb panels:
   within the LW pool and ships the CI leader's ci-fn norms to rank 0 (object collectives,
   log-steps only). PPGD owns no trained params. Summaries are derived on rank 0.
 - **Per-loss grad norms** (3-pool-only diagnostic for coeff rebalancing):
-  `train/grad_norms/by_loss/{FaithfulnessLoss,StochasticReconLayerwiseLoss,PersistentPGDReconLoss}/components`
+  `train/grad_norms/components/by_loss/{FaithfulnessLoss,StochasticReconLayerwiseLoss,PersistentPGDReconLoss}`
   — each loss term's contribution to the global V/U grad. faith + ppgd are contribute-once
   (block-leader-only), stoch is each rank's partial; one block SUM-all-reduce of
   `[faith, ppgd, total]` recovers each term's global grad (`stoch = total - faith - ppgd`),

@@ -75,6 +75,7 @@ from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import GPT2Simple
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
+from param_decomp_lab.experiments.lm.vendored.llama import VendoredLlama
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
@@ -280,8 +281,9 @@ class ThreePoolTrainer:
         # bring them back into sync.
         seed_all_ranks(pd_config.seed)
         trace("ThreePoolTrainer.__init__: LMComponentModel build: enter")
-        assert isinstance(target_model, GPT2Simple), (
-            f"3-pool LMComponentModel requires a GPT2Simple target; got {type(target_model).__name__}"
+        assert isinstance(target_model, GPT2Simple | VendoredLlama), (
+            "3-pool LMComponentModel requires a GPT2Simple or VendoredLlama target; "
+            f"got {type(target_model).__name__}"
         )
         self.component_model = LMComponentModel.build(
             target_model=target_model,
@@ -1196,13 +1198,13 @@ def _log_train_metrics(
     assert comp_grad_by_loss is not None
     combined.update(grad_norms)
     # Per-loss component grad norms: faith/stoch/ppgd contribution to the V/U grad,
-    # keyed by metric class name (so `train/grad_norms/by_loss/<ClassName>/components`).
+    # keyed by metric class name (so `train/grad_norms/components/by_loss/<ClassName>`).
     for short, class_name in (
         ("faith", runtime.log_name_faith),
         ("stoch", runtime.log_name_stoch),
         ("ppgd", runtime.log_name_ppgd),
     ):
-        combined[f"grad_norms/by_loss/{class_name}/components"] = comp_grad_by_loss[
+        combined[f"grad_norms/components/by_loss/{class_name}"] = comp_grad_by_loss[
             f"grad_norms/by_loss/{short}/components"
         ]
     combined["schedules/lr/components"] = optimizer.param_groups[0]["lr"]

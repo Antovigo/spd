@@ -38,19 +38,38 @@ from param_decomp_lab.experiments.lm.vendored.gpt2 import (
     PreWeightActs,
     componentize_gpt2,
 )
+from param_decomp_lab.experiments.lm.vendored.llama import (
+    ComponentLlama,
+    VendoredLlama,
+    componentize_llama,
+)
+
+VendoredTarget = GPT2Simple | VendoredLlama
+ComponentTarget = ComponentGPT2 | ComponentLlama
+
+
+def _componentize(
+    target_model: VendoredTarget, components: dict[str, Components]
+) -> ComponentTarget:
+    match target_model:
+        case GPT2Simple():
+            return componentize_gpt2(target_model, components)
+        case VendoredLlama():
+            return componentize_llama(target_model, components)
 
 
 class LMComponentModel(nn.Module):
-    """A `ComponentGPT2` paired with a causal-importance network for the LM 3-pool path."""
+    """A componentized vendored target (GPT2 / Llama) paired with a causal-importance network
+    for the LM 3-pool path."""
 
-    model: ComponentGPT2
+    model: ComponentTarget
     ci_fn: GlobalCiFnWrapper | LayerwiseCiFnWrapper | None
     lower_leaky_fn: Callable[[Tensor], Tensor]
     upper_leaky_fn: Callable[[Tensor], Tensor]
 
     def __init__(
         self,
-        model: ComponentGPT2,
+        model: ComponentTarget,
         ci_fn: GlobalCiFnWrapper | LayerwiseCiFnWrapper | None,
         sigmoid_type: SigmoidType,
     ):
@@ -67,15 +86,16 @@ class LMComponentModel(nn.Module):
     @classmethod
     def build(
         cls,
-        target_model: GPT2Simple,
+        target_model: VendoredTarget,
         decomposition_targets: list[DecompositionTarget],
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,
     ) -> "LMComponentModel":
-        """Build from a (to-be-frozen) `GPT2Simple`: make components + CI fn, then componentize.
+        """Build from a (to-be-frozen) vendored target (GPT2 / Llama): make components + CI fn,
+        then componentize.
 
         The CI fn is built from the still-`nn.Linear` target (so `make_ci_fn_wrapper` sees the
-        original module shapes); `componentize_gpt2` then freezes the target and swaps the
+        original module shapes); componentizing then freezes the target and swaps the
         decomposition leaves for the same `Components` instances.
         """
         module_to_c = {t.module_path: t.C for t in decomposition_targets}
@@ -86,7 +106,7 @@ class LMComponentModel(nn.Module):
             components=components,
             ci_config=ci_config,
         )
-        model = componentize_gpt2(target_model, components)
+        model = _componentize(target_model, components)
         return cls(model, ci_fn, sigmoid_type)
 
     # --- forward + capture, delegated to the model ---
