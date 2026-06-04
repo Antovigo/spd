@@ -10,14 +10,16 @@ from torch import Tensor
 
 from param_decomp.components import make_components
 from param_decomp.masks import make_mask_infos
-from param_decomp_lab.experiments.lm.vendored.llama import (
+from param_decomp_lab.experiments.lm.vendored.llama_3_1.components import (
     ComponentLinear,
     ComponentLlama,
-    Llama3RopeScaling,
-    VendoredLlama,
-    VendoredLlamaConfig,
     componentize_llama,
 )
+from param_decomp_lab.experiments.lm.vendored.llama_3_1.config import (
+    Llama3RopeScaling,
+    VendoredLlamaConfig,
+)
+from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import VendoredLlama
 
 C = 8
 

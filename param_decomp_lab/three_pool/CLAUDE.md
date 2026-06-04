@@ -135,6 +135,27 @@ unacceptable failure mode for an off-loop job):
     (`unlink(missing_ok=True)`) since multiple per-step children may prune the
     same old file at once.
 
+## Launch path & the git snapshot (don't smoke save/eval via raw torchrun)
+
+A real run goes through **`pd-lm-3pool --dp N`** (`experiments/lm/three_pool_run.py`), which
+pushes a per-run **git snapshot ref** (`refs/runs/snapshot/<run_id>`) and submits the SLURM job
+against a *clone* of that ref. The async consolidation + slow-eval job
+(`submit_slurm_async_consolidate_and_eval`, fired by `on_save`) **clones that same snapshot ref**
+— so it sees exactly the committed+snapshotted code, NOT your working tree.
+
+Consequences when iterating:
+
+  * **Uncommitted code must be committed before `pd-lm-3pool --dp`** or the snapshot won't
+    contain it. (The snapshot is git-based; untracked/dirty files are excluded.)
+  * **Training-only smokes can run against the live tree** via
+    `srun ... torchrun --standalone --nproc_per_node=N -m
+    param_decomp_lab.experiments.lm.three_pool_run <cfg>` — fast for iterating on uncommitted
+    changes. But the forced final-step checkpoint still fires `on_save`, whose consolidation job
+    will **fail to clone** `refs/runs/snapshot/<run_id>` (it was never pushed). That failure is
+    expected for a raw-torchrun smoke and does **not** mean training or the model is broken — it
+    only means save→consolidate→eval is untested on that path. To exercise save/resume/eval, use
+    `pd-lm-3pool --dp` with committed code.
+
 ## Process-group timeout
 
 `build_world` takes a `pg_timeout` and threads it into every `dist.new_group`

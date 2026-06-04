@@ -75,7 +75,7 @@ from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import GPT2Simple
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
-from param_decomp_lab.experiments.lm.vendored.llama import VendoredLlama
+from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import VendoredLlama
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,

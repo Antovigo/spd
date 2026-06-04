@@ -88,10 +88,27 @@ target:
     model_class: param_decomp_lab.experiments.lm.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
     run_path: goodfire/spd/runs/<run_id>
   output_extract: 0
+
+# or
+target:
+  spec:
+    kind: hf_weights_in_vendored        # HF weights loaded into a vendored, componentizable arch
+    model_class: param_decomp_lab.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+  output_extract: 0
 ```
 
 `output_extract` (default `"logits"`) is the key/index `make_run_batch` uses to pull
-the prediction tensor out of the model's forward output.
+the prediction tensor out of the model's forward output. (Vendored targets return bare logits,
+so `output_extract: 0`.)
+
+`hf_weights_in_vendored` requires `model_class` to expose a `from_hf_pretrained(model_name)`
+classmethod that loads real HF weights into a checkpointable, componentizable vendored arch. The
+3-pool path uses this. The vendored models live in `experiments/lm/vendored/`:
+`gpt2.py` (GPT-2) and the **`llama_3_1/`** package (Llama-3.1 — `config` / `model` /
+`components`). **Do not confuse the vendored `llama_3_1` with `pretrain/models/llama_simple.py`**:
+the latter is a separate, small pretrain-only architecture (different MLP, ties embeddings, no
+llama3 RoPE scaling) and is NOT the real-Llama decomposition target — don't retrofit it.
 
 ## Anatomy of `run.py`
 

@@ -38,11 +38,11 @@ from param_decomp_lab.experiments.lm.vendored.gpt2 import (
     PreWeightActs,
     componentize_gpt2,
 )
-from param_decomp_lab.experiments.lm.vendored.llama import (
+from param_decomp_lab.experiments.lm.vendored.llama_3_1.components import (
     ComponentLlama,
-    VendoredLlama,
     componentize_llama,
 )
+from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import VendoredLlama
 
 VendoredTarget = GPT2Simple | VendoredLlama
 ComponentTarget = ComponentGPT2 | ComponentLlama
