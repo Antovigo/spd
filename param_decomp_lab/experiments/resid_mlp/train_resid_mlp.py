@@ -11,6 +11,7 @@ from tqdm import tqdm
 from param_decomp.log import logger
 from param_decomp.schedule import ScheduleConfig, get_scheduled_value
 from param_decomp_lab.distributed import get_device
+from param_decomp_lab.eval_metrics import wandb_config_dict
 from param_decomp_lab.experiments.resid_mlp.data import ResidMLPDataset
 from param_decomp_lab.experiments.resid_mlp.feature_importances import compute_feature_importances
 from param_decomp_lab.experiments.resid_mlp.models import (
@@ -72,7 +73,7 @@ def train(
         init_wandb(
             project=config.wandb_project,
             run_id=execution_stamp.run_id,
-            config=config,
+            config_dict=wandb_config_dict(config),
             name=run_name,
             tags=tags,
         )

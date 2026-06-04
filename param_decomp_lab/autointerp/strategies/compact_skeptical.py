@@ -7,9 +7,9 @@ Extracted from the original prompt_template.py.
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
 from param_decomp_lab.autointerp.config import CompactSkepticalConfig
 from param_decomp_lab.autointerp.prompt_helpers import (
-    DATASET_DESCRIPTIONS,
     build_annotated_examples,
     build_data_presentation,
+    dataset_description,
     describe_example_rendering,
 )
 from param_decomp_lab.autointerp.schemas import ModelMetadata
@@ -55,11 +55,6 @@ def format_prompt(
 
     layer_desc = model_metadata.layer_descriptions.get(component.layer, component.layer)
 
-    dataset_line = ""
-    if config.include_dataset_description:
-        dataset_desc = DATASET_DESCRIPTIONS[model_metadata.dataset_name]
-        dataset_line = f", dataset: {dataset_desc}"
-
     forbidden = ", ".join(config.forbidden_words) if config.forbidden_words else "(none)"
 
     md = Md()
@@ -67,7 +62,8 @@ def format_prompt(
 
     md.h(2, "Context").bullets(
         [
-            f"Model: {model_metadata.model_class} ({model_metadata.n_blocks} blocks){dataset_line}",
+            f"Model: {model_metadata.n_blocks}-block transformer, "
+            f"dataset: {dataset_description(model_metadata.dataset_name)}",
             f"Component location: {layer_desc}",
             f"Component firing rate: {component.firing_density * 100:.2f}% ({rate_str})",
         ]

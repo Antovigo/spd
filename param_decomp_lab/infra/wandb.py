@@ -9,7 +9,6 @@ import wandb.errors
 from dotenv import load_dotenv
 from wandb.apis.public import File, Run
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.log import logger
 from param_decomp_lab.infra.settings import REPO_ROOT
 
@@ -26,72 +25,6 @@ _WANDB_PATH_WITH_RUNS_RE = re.compile(rf"^([^/\s]+)/([^/\s]+)/runs/({_RUN_ID_PAT
 _WANDB_URL_RE = re.compile(
     rf"^https://wandb\.ai/([^/]+)/([^/]+)/runs/({_RUN_ID_PATTERN})(?:/[^?]*)?(?:\?.*)?$"
 )
-
-
-def _build_short_names() -> dict[str, str]:
-    """Build the metric class-name to short-name map. Lazy to avoid circular imports."""
-    from param_decomp.metrics.dispatch import LOSS_METRIC_CLASSES
-    from param_decomp_lab.eval_metrics import EVAL_METRIC_CLASSES
-
-    return {
-        cls.__name__: cls.short_name
-        for cls in (*LOSS_METRIC_CLASSES.values(), *EVAL_METRIC_CLASSES.values())
-        if cls.short_name
-    }
-
-
-_metric_short_names_cache: dict[str, str] | None = None
-
-
-def _metric_short_names() -> dict[str, str]:
-    global _metric_short_names_cache
-    if _metric_short_names_cache is None:
-        _metric_short_names_cache = _build_short_names()
-    return _metric_short_names_cache
-
-
-def flatten_typed_lists(config_dict: dict[str, Any]) -> dict[str, Any]:
-    """Flatten nested lists-of-typed-dicts in `config_dict` into queryable flat keys.
-
-    Targets the loss/eval metric lists, addressed by metric `short_name` (or raw type
-    when none). Example:
-    `pd: {loss_metrics: [{type: "ImportanceMinimalityLoss", coeff: 0.1, pnorm: 1.0}]}`
-    flattens to `pd.loss_metrics.ImpMin.coeff: 0.1`, `pd.loss_metrics.ImpMin.pnorm: 1.0`.
-
-    The matching paths are *removed* from `config_dict` in place so wandb doesn't also
-    log them as opaque JSON blobs.
-    """
-    flattened: dict[str, Any] = {}
-
-    def is_typed_list(obj: Any) -> bool:
-        return (
-            isinstance(obj, list)
-            and len(obj) > 0
-            and all(isinstance(x, dict) and "type" in x for x in obj)
-        )
-
-    def walk(obj: Any, path: str) -> None:
-        if isinstance(obj, dict):
-            for key in list(obj.keys()):
-                child = obj[key]
-                child_path = f"{path}.{key}" if path else key
-                if is_typed_list(child):
-                    for entry in child:
-                        metric_type = entry["type"]
-                        short = _metric_short_names().get(metric_type, metric_type)
-                        for k, v in entry.items():
-                            if k == "type":
-                                continue
-                            flattened[f"{child_path}.{short}.{k}"] = v
-                    del obj[key]
-                else:
-                    walk(child, child_path)
-        elif isinstance(obj, list):
-            for i, item in enumerate(obj):
-                walk(item, f"{path}.{i}")
-
-    walk(config_dict, "")
-    return flattened
 
 
 def get_wandb_entity() -> str:
@@ -193,7 +126,7 @@ def download_wandb_file(run: Run, wandb_run_dir: Path, file_name: str) -> Path:
 def init_wandb(
     project: str,
     run_id: str,
-    config: BaseConfig,
+    config_dict: dict[str, Any],
     *,
     entity: str | None = None,
     name: str | None = None,
@@ -201,10 +134,9 @@ def init_wandb(
     group: str | None = None,
     view_meta: dict[str, Any] | None = None,
 ) -> None:
-    """Initialise W&B and log `config`.
+    """Initialise W&B and log `config_dict` (already rendered to a flat-ish dict by the
+    caller — see `eval_metrics.wandb_config_dict`).
 
-    Nested lists-of-typed-dicts (loss/eval metrics) are flattened into queryable flat
-    keys via `flatten_typed_lists`; the un-flattened lists are removed from the dump.
     `entity` falls back to `get_wandb_entity()`; `view_meta` is merged under a
     `view_meta/` prefix so the UI can group runs by researcher-facing axes.
     """
@@ -226,10 +158,7 @@ def init_wandb(
     wandb.define_metric("slow_eval/step")
     wandb.define_metric("slow_eval/*", step_metric="slow_eval/step")
 
-    cfg_dict = config.model_dump(mode="json")
-    flattened = flatten_typed_lists(cfg_dict)
-    wandb.config.update(cfg_dict)
-    wandb.config.update(flattened)
+    wandb.config.update(config_dict)
 
     if view_meta:
         wandb.config.update({f"view_meta/{k}": v for k, v in view_meta.items()})

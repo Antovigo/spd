@@ -7,8 +7,8 @@ in the examples so the LLM can judge evidence quality directly.
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
 from param_decomp_lab.autointerp.config import RichExamplesConfig
 from param_decomp_lab.autointerp.prompt_helpers import (
-    DATASET_DESCRIPTIONS,
     build_annotated_examples,
+    dataset_description,
     describe_example_rendering,
     human_layer_desc,
 )
@@ -68,14 +68,6 @@ def format_prompt(
 
     canonical = model_metadata.layer_descriptions.get(component.layer, component.layer)
     layer_desc = human_layer_desc(canonical, model_metadata.n_blocks)
-    model_name = model_metadata.model_class.rsplit(".", 1)[-1]
-
-    dataset_line = ""
-    if config.include_dataset_description:
-        dataset_desc = DATASET_DESCRIPTIONS.get(
-            model_metadata.dataset_name, model_metadata.dataset_name
-        )
-        dataset_line = f", dataset: {dataset_desc}"
 
     md = Md()
     md.p("Describe what this neural network component does.")
@@ -94,7 +86,8 @@ def format_prompt(
     md.h(2, "Context")
     md.bullets(
         [
-            f"Model: {model_name} ({model_metadata.n_blocks} blocks){dataset_line}",
+            f"Model: {model_metadata.n_blocks}-block transformer, "
+            f"dataset: {dataset_description(model_metadata.dataset_name)}",
             f"Component location: {layer_desc}",
             f"Component firing rate: {component.firing_density * 100:.2f}% ({rate_str})",
         ]
