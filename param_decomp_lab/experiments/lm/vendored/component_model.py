@@ -44,18 +44,22 @@ from param_decomp_lab.experiments.lm.vendored.llama_3_1.components import (
 )
 from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import VendoredLlama
 
-VendoredTarget = GPT2Simple | VendoredLlama
 ComponentTarget = ComponentGPT2 | ComponentLlama
 
 
-def _componentize(
-    target_model: VendoredTarget, components: dict[str, Components]
-) -> ComponentTarget:
+def _componentize(target_model: nn.Module, components: dict[str, Components]) -> ComponentTarget:
+    """Dispatch a (vendored) target to its componentizer. Single source of truth for which
+    target types the 3-pool supports — an unsupported type raises here."""
     match target_model:
         case GPT2Simple():
             return componentize_gpt2(target_model, components)
         case VendoredLlama():
             return componentize_llama(target_model, components)
+        case _:
+            raise TypeError(
+                f"unsupported 3-pool target {type(target_model).__name__}; "
+                "expected GPT2Simple or VendoredLlama"
+            )
 
 
 class LMComponentModel(nn.Module):
@@ -86,7 +90,7 @@ class LMComponentModel(nn.Module):
     @classmethod
     def build(
         cls,
-        target_model: VendoredTarget,
+        target_model: nn.Module,
         decomposition_targets: list[DecompositionTarget],
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,

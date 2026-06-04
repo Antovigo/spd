@@ -24,7 +24,6 @@ from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.ci_fns import CiConfig
 from param_decomp.ci_sigmoids import SigmoidType
 from param_decomp.decomposition_targets import DecompositionTarget
-from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import GPT2Simple
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 
 
@@ -73,9 +72,8 @@ def assemble_model_state_dict_from_partials(
     model's V/U + CI-fn keys (frozen target params come from the fresh buffer).
     """
     del run_batch  # the vendored LMComponentModel calls the model directly (no run_batch)
-    assert isinstance(target_model, GPT2Simple), (
-        f"3-pool assembly requires a GPT2Simple target; got {type(target_model).__name__}"
-    )
+    # Target-type validation lives in LMComponentModel.build → _componentize (single source of
+    # truth); an unsupported target raises there.
     full_targets = [DecompositionTarget(module_path=s, C=c_per_site[s]) for s in all_sites]
     full_cm = LMComponentModel.build(
         target_model=target_model,

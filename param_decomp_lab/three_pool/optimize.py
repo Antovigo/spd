@@ -73,9 +73,7 @@ from param_decomp.schedule import get_scheduled_value
 from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
-from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import GPT2Simple
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
-from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import VendoredLlama
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
@@ -281,10 +279,8 @@ class ThreePoolTrainer:
         # bring them back into sync.
         seed_all_ranks(pd_config.seed)
         trace("ThreePoolTrainer.__init__: LMComponentModel build: enter")
-        assert isinstance(target_model, GPT2Simple | VendoredLlama), (
-            "3-pool LMComponentModel requires a GPT2Simple or VendoredLlama target; "
-            f"got {type(target_model).__name__}"
-        )
+        # Target-type dispatch + validation lives in LMComponentModel.build → _componentize
+        # (single source of truth); an unsupported target raises there.
         self.component_model = LMComponentModel.build(
             target_model=target_model,
             decomposition_targets=decomposition_targets,
