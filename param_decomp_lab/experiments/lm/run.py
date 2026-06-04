@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
 
 import fire
+import torch
 import torch.nn as nn
 from pydantic import Discriminator
 from torch.utils.data import DataLoader
@@ -139,6 +140,12 @@ class LMTargetConfig(BaseConfig):
     per-block gradient checkpointing on the frozen target forward. Trades ~33% extra
     compute for ~10–15x less stored activation memory under 3-pool — the main lever for
     raising `b_per_rank` on deep targets."""
+    weights_dtype: Literal["float32", "bfloat16"] = "float32"
+    """dtype for the FROZEN target weights. `bfloat16` halves the target's resident footprint
+    on every pool (the dominant resident term for an 8B target) — for natively-bf16 models the
+    matmuls already run bf16 under autocast, so this only changes residual/norm accumulation
+    precision (measured ~5e-4 nats KL on Llama-3.1-8B clean logits, negligible vs recon KLs).
+    Only the frozen target is cast; trained V/U components stay fp32 (their AdamW master)."""
 
 
 class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
@@ -172,6 +179,10 @@ def build_target(target_cfg: LMTargetConfig) -> nn.Module:
             "`enable_activation_checkpointing()` method"
         )
         target_model.enable_activation_checkpointing()
+    if target_cfg.weights_dtype == "bfloat16":
+        # Frozen target only — make_components creates V/U as fp32 nn.Parameters regardless,
+        # so componentizing after this keeps the trained components in fp32.
+        target_model = target_model.to(torch.bfloat16)
     target_model.eval()
     return target_model
 
