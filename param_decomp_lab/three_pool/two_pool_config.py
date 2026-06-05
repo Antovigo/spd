@@ -88,6 +88,10 @@ class TwoPoolTopology(BaseConfig):
         chunk_dp = batch_size // self.chunkwise.per_rank_batch
         spc = self.chunkwise.sites_per_chunk or len(ordered_sites)
         site_chunks = [ordered_sites[i : i + spc] for i in range(0, len(ordered_sites), spc)]
+        assert len(site_chunks) == self.chunkwise.n_chunks, (
+            f"chunkwise.n_chunks ({self.chunkwise.n_chunks}) != actual chunk count "
+            f"({len(site_chunks)}) for {len(ordered_sites)} sites at sites_per_chunk={spc}"
+        )
 
         r = 0
         chunks: list[tuple[tuple[int, ...], tuple[str, ...]]] = []
@@ -101,3 +105,9 @@ class TwoPoolTopology(BaseConfig):
             chunks=tuple(chunks),
             world_size=r,
         )
+
+    def world_size(self, batch_size: int, n_chunks: int) -> int:
+        """World size from per-rank batches + chunk count, without resolving sites."""
+        n_a = batch_size // self.pool_a.per_rank_batch
+        chunk_dp = batch_size // self.chunkwise.per_rank_batch
+        return n_chunks * chunk_dp + n_a

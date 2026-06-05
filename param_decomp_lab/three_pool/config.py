@@ -49,6 +49,11 @@ class ChunkwiseSpec(BaseConfig):
     per_rank_batch: PositiveInt
     sites_per_chunk: PositiveInt | None = None
     """How many decomposed sites each chunk owns. ``None`` puts all sites in one chunk."""
+    n_chunks: PositiveInt
+    """Number of chunks the sites split into. Required so the world size is config-derivable
+    (`pool_ranks + n_chunks * chunk_dp`) without loading the model. Asserted against the actual
+    site split in ``resolve`` (so a wrong value fails fast). For ``sites_per_chunk: null`` it's
+    ``1``; otherwise ``ceil(n_decomposition_targets / sites_per_chunk)``."""
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,10 @@ class ThreePoolTopology(BaseConfig):
         chunk_dp = batch_size // self.chunkwise.per_rank_batch
         spc = self.chunkwise.sites_per_chunk or len(ordered_sites)
         site_chunks = [ordered_sites[i : i + spc] for i in range(0, len(ordered_sites), spc)]
+        assert len(site_chunks) == self.chunkwise.n_chunks, (
+            f"chunkwise.n_chunks ({self.chunkwise.n_chunks}) != actual chunk count "
+            f"({len(site_chunks)}) for {len(ordered_sites)} sites at sites_per_chunk={spc}"
+        )
 
         r = 0
         chunks: list[tuple[tuple[int, ...], tuple[str, ...]]] = []
@@ -133,3 +142,10 @@ class ThreePoolTopology(BaseConfig):
             chunks=tuple(chunks),
             world_size=r,
         )
+
+    def world_size(self, batch_size: int, n_chunks: int) -> int:
+        """World size from per-rank batches + chunk count, without resolving sites."""
+        n_ci = batch_size // self.ci.per_rank_batch
+        n_ppgd = batch_size // self.ppgd.per_rank_batch
+        chunk_dp = batch_size // self.chunkwise.per_rank_batch
+        return n_chunks * chunk_dp + n_ci + n_ppgd

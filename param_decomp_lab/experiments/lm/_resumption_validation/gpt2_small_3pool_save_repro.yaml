@@ -94,6 +94,7 @@ runtime:
     chunkwise:
       per_rank_batch: 1
       sites_per_chunk: 8
+      n_chunks: 3
 target:
   spec:
     kind: hf_weights_in_vendored

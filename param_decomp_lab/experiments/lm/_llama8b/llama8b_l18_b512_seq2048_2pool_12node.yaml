@@ -151,6 +151,7 @@ runtime:
     chunkwise:
       per_rank_batch: 16
       sites_per_chunk: null
+      n_chunks: 1
     use_fused_kl: true
 target:
   activation_checkpointing: true

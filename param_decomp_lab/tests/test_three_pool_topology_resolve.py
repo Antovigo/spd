@@ -18,7 +18,7 @@ def test_resolve_b512_llama_single_chunk() -> None:
     topo = ThreePoolTopology(
         ci=PoolSpec(per_rank_batch=16),
         ppgd=PoolSpec(per_rank_batch=16),
-        chunkwise=ChunkwiseSpec(per_rank_batch=16, sites_per_chunk=None),
+        chunkwise=ChunkwiseSpec(per_rank_batch=16, sites_per_chunk=None, n_chunks=1),
     )
     sites = [
         "layers.18.mlp.gate_proj",
@@ -41,7 +41,7 @@ def test_resolve_multi_chunk_gpt2_style() -> None:
     topo = ThreePoolTopology(
         ci=PoolSpec(per_rank_batch=16),
         ppgd=PoolSpec(per_rank_batch=16),
-        chunkwise=ChunkwiseSpec(per_rank_batch=8, sites_per_chunk=2),
+        chunkwise=ChunkwiseSpec(per_rank_batch=8, sites_per_chunk=2, n_chunks=2),
     )
     sites = ["h.0.attn.q_proj", "h.0.attn.k_proj", "h.1.attn.q_proj", "h.1.attn.k_proj"]
     layout = topo.resolve(sites, batch_size=16)
@@ -62,7 +62,7 @@ def test_resolve_ranks_partition_world_with_no_gaps() -> None:
     topo = ThreePoolTopology(
         ci=PoolSpec(per_rank_batch=8),
         ppgd=PoolSpec(per_rank_batch=16),
-        chunkwise=ChunkwiseSpec(per_rank_batch=4, sites_per_chunk=1),
+        chunkwise=ChunkwiseSpec(per_rank_batch=4, sites_per_chunk=1, n_chunks=3),
     )
     sites = ["a", "b", "c"]
     layout = topo.resolve(sites, batch_size=16)

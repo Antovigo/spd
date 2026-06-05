@@ -341,20 +341,17 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> "torch.profiler.pr
 
 
 @with_distributed_cleanup
-def _derive_world_size(config_path: Path) -> int | None:
-    """World size implied by a config's topology + batch, or None when it can't be derived
-    without the model (globbed decomposition targets with `sites_per_chunk` set, where the
-    chunk count depends on the expanded site count). With `sites_per_chunk: null` there's one
-    chunk, so the world size is site-count-independent; with literal targets the patterns are
-    the sites."""
-    cfg = ThreePoolLMExperimentConfig.from_file(config_path)
+def _submit_world_size(config_path: Path | None, resume: Path | None) -> int:
+    """GPU count for a submission, derived purely from the config — `pool_ranks +
+    n_chunks * chunk_dp` (no model). A resume reads its parent run's config."""
+    if config_path is not None:
+        cfg = ThreePoolLMExperimentConfig.from_file(config_path)
+    else:
+        assert resume is not None
+        from_run = ResumeConfig.from_file(resume).from_run
+        cfg = ThreePoolLMExperimentConfig.from_file(from_run / EXPERIMENT_CONFIG_FILENAME)
     topo = cfg.runtime.topology
-    if topo.chunkwise.sites_per_chunk is None:
-        return topo.resolve(["_"], cfg.pd.batch_size).world_size
-    patterns = [t.module_pattern for t in cfg.pd.decomposition_targets]
-    if any("*" in p for p in patterns):
-        return None
-    return topo.resolve(patterns, cfg.pd.batch_size).world_size
+    return topo.world_size(cfg.pd.batch_size, topo.chunkwise.n_chunks)
 
 
 def main(
@@ -363,7 +360,6 @@ def main(
     resume: str | Path | None = None,
     group: str | None = None,
     tags: str | None = None,
-    dp: int | None = None,
     partition: str | None = DEFAULT_PARTITION_NAME,
     qos: str | None = None,
     time: str = "72:00:00",
@@ -377,13 +373,11 @@ def main(
         config_path: YAML for a fresh run. Required when not resuming.
         resume: Path to a `ResumeConfig` YAML pointing at a prior 3-pool run.
         group / tags: wandb-only (no-ops without `wandb:`).
-        dp / partition / qos / time / job_name / no_snapshot / run_id: SLURM submission knobs.
-            A direct (login-node) invocation submits a SLURM job; the GPU count is
-            derived from the config's topology + batch (single-node for <= 8, multi-node
-            for > 8, a multiple of 8). `--dp N` is optional — an override/guard-rail
-            asserted against the derived size; it's only required when the size can't be
-            derived (resume, or globbed targets with `sites_per_chunk`). `qos=None` uses
-            the cluster default; pass e.g. `opportunistic` to run off-quota.
+        partition / qos / time / job_name / no_snapshot / run_id: SLURM submission knobs.
+            A direct (login-node) invocation submits a SLURM job; the GPU count is derived
+            from the config's topology + batch (single-node for <= 8, multi-node for > 8, a
+            multiple of 8) — there is no `--dp`. `qos=None` uses the cluster default; pass
+            e.g. `opportunistic` to run off-quota.
     """
     if os.environ.get("WORLD_SIZE") is None:
         # Direct (login-node) invocation → submit a SLURM job. A torchrun worker has
@@ -391,21 +385,13 @@ def main(
         assert (config_path is not None) != (resume is not None), (
             "submission requires exactly one of config_path or --resume"
         )
-        derived = _derive_world_size(Path(config_path)) if config_path is not None else None
-        if dp is None:
-            assert derived is not None, (
-                "could not derive the world size from the config (resume, or globbed targets "
-                "with sites_per_chunk set) — pass --dp N"
-            )
-            dp = derived
-        elif derived is not None:
-            assert dp == derived, (
-                f"--dp {dp} contradicts the config-derived world size {derived}; omit --dp"
-            )
         _submit_slurm(
             config_path,
             resume=resume,
-            dp=dp,
+            dp=_submit_world_size(
+                Path(config_path) if config_path is not None else None,
+                Path(resume) if resume is not None else None,
+            ),
             group=group,
             tags=tags,
             partition=partition,
