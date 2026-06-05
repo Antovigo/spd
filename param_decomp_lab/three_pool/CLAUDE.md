@@ -30,6 +30,52 @@ layer's output independently — is a separate, stable concept the chunkwise poo
 | `reductions.py` | cross-pool log reductions: losses (`aggregate_losses_to_rank0`), peak memory (`aggregate_max_memory_to_rank0`), grad norms (`aggregate_grad_norms_to_rank0` + `per_param_grad_norms`) |
 | `SUM_GRAD_CONVENTION.md` | the gradient-assembly scaling convention (proposal) |
 
+## 2-pool variant (`two_pool_*.py` + `step_pool_a.py`)
+
+The 2-pool variant **merges the CI and PPGD pools into one Pool A** (adversary + CI fn
+co-located on the same ranks, same batch slice); the chunkwise pool (Pool B) is
+unchanged. Because masks are produced where the adversary consumes them, the entire
+CI↔PPGD edge (mask send AND g_CI return) disappears — the adversary's g_CI is the LOCAL
+`.grad` of the CI forward's own `lower_leaky`. (That edge is also what deadlocked
+seq-2048 fan-out runs, so deleting it is a structural fix.) The only surviving cross-pool
+edge is Pool A ↔ chunk: masks out, g_CI back, V/U grads out, updated V/U in.
+
+The **gradient assembly is identical** to the 3-pool (see `SUM_GRAD_CONVENTION.md`): the
+CI-fn grad seed is `g_CI_chunk + g_CI_adversary + imp_min` (adversary half now local
+instead of received), SUM-reduced over the Pool A group; V/U grad = chunkwise(owner) +
+adversary(replica, contribute-once on the chunk leader). Validated by
+`tests/test_two_pool_grad_check_distributed.py` (non-square `n_a=4` / `chunk_dp=2`, all
+loss terms, worst rel err 4.04e-7 vs the SAME single-process reference the 3-pool uses).
+
+Key reuse trick (`two_pool_layout.build_two_world`): the 2-pool world is the 3-pool
+`World` with `ci_ranks == ppgd_ranks == pool_a_ranks` and one Pool A all-reduce group
+serving as both the CI-pool and PPGD-pool group. With that identity, **the chunkwise pool
+is byte-for-byte the 3-pool chunkwise pool** (same `ChunkContext` / `step_chunkwise` /
+portals — its four cross-pool edges all land on Pool A), and the surviving portal classes
+(`CiValuesToChunkwise` / `GradCiFromChunkwise` / `GradVuFromPPGD` / `UpdatedVuToPPGD`)
+work unchanged keyed on `ci_chunk_edge`. A `PoolARole` presents `.as_ci()` / `.as_ppgd()`
+views for the two portal families.
+
+**Cross-pool send/recv order is load-bearing** in `step_pool_a`: CI and the adversary are
+on ONE rank, so the chunkwise step's send-g_CI / recv-g_VU pair (serviced on two
+different ranks concurrently in the 3-pool) must be serviced here in the SAME order
+chunkwise issues them — recv g_CI FIRST, then send g_VU — or the two pools deadlock.
+
+| File | What it covers |
+|---|---|
+| `two_pool_config.py` | `TwoPoolTopology` (`pool_a` / `chunkwise` `PoolSpec`s) + `resolve` → `TwoPoolResolvedLayout` (canonical order: chunks first, then Pool A) |
+| `two_pool_layout.py` | `build_two_world` — constructs a `World` with `ci_ranks == ppgd_ranks == pool_a_ranks` directly (bypasses `build_world`'s disjoint assertion) |
+| `two_pool_role.py` | `PoolARole` (with `.as_ci()` / `.as_ppgd()`) `\| ChunkRole` |
+| `two_pool_context.py` | `PoolAContext \| ChunkContext`; `PoolAPortals` (the four A↔chunk edges) |
+| `step_pool_a.py` | the merged Pool A step (CI fwd + imp + adversary + fused CI backward) |
+| `two_pool_optimize.py` | `TwoPoolTrainer` + `optimize_two_pool`. Reuses `ThreePoolConstrainedPDConfig` + `_ThreePoolRuntime` (ci_ranks == ppgd_ranks). **No checkpointing in the MVP** — `cadence.save_every` must be `None`; no forced final snapshot |
+| `two_pool_eval_step.py` | 2-pool eval pass (Pool A builds the full `MetricContext` locally — no cross-pool CI ship; chunkwise barriers through) |
+| `two_pool_reductions.py` | 2-pool cross-pool log reductions (Pool A emits imp/ppgd/l0; chunkwise emits faith/stoch) |
+
+Run a 2-pool LM run via `pd-lm-2pool` (`experiments/lm/two_pool_run.py`,
+`TwoPoolLMExperimentConfig`) or a local smoke via
+`torchrun --standalone --nproc_per_node=N -m param_decomp_lab.experiments.lm.two_pool_run <cfg>`.
+
 ## wandb logging parity with single-pool
 
 The 3-pool `train/` + `eval/` keys are kept identical to `param_decomp.optimize.Trainer`'s

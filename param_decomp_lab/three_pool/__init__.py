@@ -27,6 +27,8 @@ from param_decomp_lab.three_pool.config import (
     ThreePoolTopology,
 )
 from param_decomp_lab.three_pool.optimize import ThreePoolTrainer, optimize_three_pool
+from param_decomp_lab.three_pool.two_pool_config import TwoPoolResolvedLayout, TwoPoolTopology
+from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer, optimize_two_pool
 
 __all__ = [
     "ChunkwiseSpec",
@@ -34,5 +36,9 @@ __all__ = [
     "ResolvedLayout",
     "ThreePoolTopology",
     "ThreePoolTrainer",
+    "TwoPoolResolvedLayout",
+    "TwoPoolTopology",
+    "TwoPoolTrainer",
     "optimize_three_pool",
+    "optimize_two_pool",
 ]

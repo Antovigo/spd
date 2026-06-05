@@ -1,0 +1,614 @@
+"""``TwoPoolTrainer`` and ``optimize_two_pool`` — 2-pool sibling of
+``ThreePoolTrainer``.
+
+The 2-pool variant merges the 3-pool CI and PPGD pools into a single **Pool A**:
+each Pool A rank holds the replicated CI fn (DDP across Pool A) AND a full V/U
+replica + persistent PPGD sources, and runs the CI forward + the adversary on the
+SAME batch slice. The chunkwise pool (**Pool B**) is unchanged. Deleting the CI↔PPGD
+edge removes the cross-pool mask send + g_CI return entirely (the adversary's g_CI is
+the local ``.grad`` of the CI forward's own ``lower_leaky``) — which is also the edge
+that deadlocked seq-2048 runs, so this is a structural fix.
+
+Reuses the 3-pool's ``ThreePoolConstrainedPDConfig`` (same four-loss set + frozen
+algorithm scalars) and ``_ThreePoolRuntime`` (with ``ci_ranks == ppgd_ranks ==
+pool_a_ranks``), the chunkwise step + portals verbatim, and the merged Pool A step
+(``step_pool_a``). See ``two_pool_layout.py`` for why ``ci_ranks == ppgd_ranks`` makes
+all of that reuse correct.
+
+Checkpoint/resume is out of scope for this MVP (per ``DESIGN.md``): ``save_every``
+must be ``None``, and the loop does NOT force a final snapshot.
+"""
+
+import itertools
+import os
+import time
+from contextlib import nullcontext
+from typing import Any, cast
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.profiler
+from torch import Tensor
+from torch.utils.data import DataLoader
+
+from param_decomp._trace import dump_memory_stats, trace
+from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
+from param_decomp.ci_fns import GlobalSharedTransformerCiFn
+from param_decomp.component_model import ComponentModel
+from param_decomp.configs import Cadence, RuntimeConfig
+from param_decomp.decomposition_targets import DecompositionTarget
+from param_decomp.distributed import seed_all_ranks, seed_per_rank
+from param_decomp.masks import AllLayersRouter
+from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
+from param_decomp.metrics.persistent_pgd_state import (
+    PerBatchPerPositionScope,
+    PersistentPGDState,
+)
+from param_decomp.optimize import EvalLoop
+from param_decomp.run_sink import ThreePoolRunSink
+from param_decomp.schedule import get_scheduled_value
+from param_decomp.sdpa_strict import verify_flash_attention_available
+from param_decomp.torch_helpers import loop_dataloader
+from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
+from param_decomp_lab.three_pool.context import ChunkContext
+from param_decomp_lab.three_pool.layout import Chunk, flush_nccl_event_timings
+from param_decomp_lab.three_pool.optimize import (
+    _chunk_compile_enabled,
+    _ci_attn_shape_or_none,
+    _ci_ckpt_enabled,
+    _ci_compile_enabled,
+    _resolve_pg_timeout,
+    _seq_dims_from_batch,
+)
+from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
+from param_decomp_lab.three_pool.recon_loss_strategy import ReconLossStrategy
+from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
+from param_decomp_lab.three_pool.step_chunkwise import (
+    run_faithfulness_warmup_chunkwise,
+    step_chunkwise,
+)
+from param_decomp_lab.three_pool.step_pool_a import step_pool_a
+from param_decomp_lab.three_pool.two_pool_config import TwoPoolTopology
+from param_decomp_lab.three_pool.two_pool_context import (
+    PoolAContext,
+    TwoPoolContext,
+    build_two_pool_context,
+)
+from param_decomp_lab.three_pool.two_pool_layout import build_two_world
+from param_decomp_lab.three_pool.two_pool_reductions import (
+    aggregate_component_grad_by_loss_to_rank0,
+    aggregate_grad_norms_to_rank0,
+    aggregate_losses_to_rank0,
+    aggregate_max_memory_to_rank0,
+)
+
+
+class TwoPoolTrainer:
+    """Stateful 2-pool trainer. Construction wires up the runtime bundle, world,
+    ComponentModel, recon strategy, and the per-pool optimizer (Pool A → CI fn;
+    chunkwise → V/U). The PPGD state is built on the first batch of :meth:`run`."""
+
+    pd_config: ThreePoolConstrainedPDConfig
+    runtime_config: RuntimeConfig
+    two_pool_config: TwoPoolTopology
+    reconstruction_loss: ReconstructionLoss
+    component_model: LMComponentModel
+    ctx: TwoPoolContext
+    strategy: ReconLossStrategy
+    optimizer: torch.optim.Optimizer | None
+    ppgd_state: PersistentPGDState | None
+    step: int
+
+    def __init__(
+        self,
+        *,
+        target_model: nn.Module,
+        run_batch: RunBatch,
+        reconstruction_loss: ReconstructionLoss,
+        pd_config: ThreePoolConstrainedPDConfig,
+        runtime_config: RuntimeConfig,
+        two_pool_config: TwoPoolTopology,
+    ) -> None:
+        assert dist.is_initialized(), (
+            "init the distributed process group before constructing TwoPoolTrainer"
+        )
+        self.pd_config = pd_config
+        self.runtime_config = runtime_config
+        self.two_pool_config = two_pool_config
+        self.reconstruction_loss = reconstruction_loss
+        self.step = 0
+
+        ci_attn = _ci_attn_shape_or_none(pd_config)
+        if ci_attn is not None:
+            d_model, n_heads = ci_attn
+            verify_flash_attention_available(head_dim=d_model // n_heads)
+
+        self.runtime = _build_two_pool_runtime(
+            target_model=target_model,
+            pd_config=pd_config,
+            runtime_config=runtime_config,
+            two_pool_config=two_pool_config,
+            run_batch=run_batch,
+            reconstruction_loss=reconstruction_loss,
+        )
+
+        # The adversary runs on Pool A; its per-rank batch is batch // n_a.
+        validate_pgd_scope(
+            [pd_config.losses.ppgd],
+            batch_size=pd_config.batch_size,
+            world_size=len(self.runtime.ppgd_ranks),
+        )
+
+        torch.set_float32_matmul_precision("high")
+
+        self._device = torch.device(runtime_config.device)
+        world = build_two_world(
+            pool_a_ranks=list(self.runtime.ci_ranks),
+            chunks=list(self.runtime.chunks),
+            batch_global=self.runtime.batch_global,
+            pg_timeout=_resolve_pg_timeout(
+                compiling=_chunk_compile_enabled() or _ci_compile_enabled()
+            ),
+            device=self._device,
+        )
+        self.ctx = build_two_pool_context(world, dist.get_rank())
+        decomposition_targets = _decomposition_targets_for_pool(self.ctx, self.runtime.c_per_site)
+
+        target_model.requires_grad_(False)
+        seed_all_ranks(pd_config.seed)
+        self.component_model = LMComponentModel.build(
+            target_model=target_model,
+            decomposition_targets=decomposition_targets,
+            ci_config=pd_config.ci_config,
+            sigmoid_type=pd_config.sigmoid_type,
+        )
+        # Pool A keeps BOTH the CI fn (to train) and the full V/U replica (the
+        # adversary). The chunkwise pool drops the CI fn (it only owns V/U).
+        if isinstance(self.ctx, ChunkContext):
+            self.component_model.drop_ci_fn()
+
+        # Activation checkpointing of the recon/target model is chunkwise-only:
+        # Pool A's adversary differentiates via autograd.grad, whose recompute is
+        # non-deterministic under checkpoint (same constraint the 3-pool PPGD pool has).
+        if not isinstance(self.ctx, ChunkContext):
+            self.component_model.model._use_activation_checkpointing = False  # type: ignore[attr-defined]
+        self.component_model = self.component_model.to(self._device)
+
+        is_pool_a = isinstance(self.ctx, PoolAContext)
+        if is_pool_a:
+            assert self.component_model.ci_fn is not None
+            if _ci_ckpt_enabled():
+                for m in self.component_model.ci_fn.modules():
+                    if isinstance(m, GlobalSharedTransformerCiFn):
+                        m.enable_activation_checkpointing()
+            if _ci_compile_enabled():
+                user = os.environ.get("USER", "u")
+                rank = dist.get_rank()
+                os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+                os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+                self.component_model.ci_fn.compile()
+        if isinstance(self.ctx, ChunkContext) and _chunk_compile_enabled():
+            user = os.environ.get("USER", "u")
+            rank = dist.get_rank()
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+            os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+            self.component_model.model.compile()
+        seed_per_rank(pd_config.seed)
+
+        self.strategy = ReconLossStrategy.from_cfg(
+            self.component_model,
+            use_fused_kl=two_pool_config.use_fused_kl,
+            unfused_recon=reconstruction_loss,
+        )
+
+        self.optimizer = None
+        self._all_params: list[nn.Parameter] = []
+        self._ci_fn_params: list[nn.Parameter] = []
+        self._component_params: list[nn.Parameter] = []
+        self.ppgd_state = None
+
+        match self.ctx:
+            case PoolAContext():
+                assert self.component_model.ci_fn is not None
+                self._ci_fn_params = list(self.component_model.ci_fn.parameters())
+                self.optimizer = torch.optim.AdamW(
+                    [
+                        {
+                            "params": self._ci_fn_params,
+                            "lr": pd_config.ci_fn_optimizer.lr_schedule.start_val,
+                        }
+                    ],
+                    weight_decay=0.0,
+                    fused=True,
+                )
+            case ChunkContext():
+                for name in self.ctx.role.sites:
+                    self._component_params.extend(
+                        self.component_model.components[name].parameters()
+                    )
+                self._all_params = self._component_params
+                self.optimizer = torch.optim.AdamW(
+                    [
+                        {
+                            "params": self._component_params,
+                            "lr": pd_config.components_optimizer.lr_schedule.start_val,
+                        }
+                    ],
+                    weight_decay=0.0,
+                    fused=True,
+                )
+
+    def run(
+        self,
+        train_loader: DataLoader[Any],
+        sink: ThreePoolRunSink,
+        cadence: Cadence,
+        eval_loop: EvalLoop | None = None,
+        profiler: torch.profiler.profile | None = None,
+    ) -> None:
+        """Advance training from ``self.step`` to ``self.pd_config.steps``."""
+        assert cadence.save_every is None, (
+            "2-pool MVP does not implement checkpointing; set cadence.save_every: null"
+        )
+        pd_config = self.pd_config
+        ctx = self.ctx
+        world = ctx.world
+        runtime = self.runtime
+        n_steps = pd_config.steps
+        device = self._device
+
+        train_iterator = loop_dataloader(train_loader)
+        for _ in range(self.step):
+            next(train_iterator)
+
+        eval_iterator = loop_dataloader(eval_loop.loader) if eval_loop is not None else None
+        if eval_loop is not None and isinstance(ctx, PoolAContext):
+            for m in eval_loop.metrics:
+                m.bind(
+                    model=cast(ComponentModel, cast(object, self.component_model)),
+                    device=str(device),
+                )
+
+        first_batch = next(train_iterator)
+        train_iterator = itertools.chain([first_batch], train_iterator)
+        _assert_full_global_batch(first_batch, runtime.batch_global)
+
+        if isinstance(ctx, PoolAContext) and self.ppgd_state is None:
+            ppgd_cfg = runtime.ppgd_cfg
+            assert isinstance(ppgd_cfg.scope, PerBatchPerPositionScope), (
+                f"2-pool supports only PerBatchPerPositionScope PPGD sources; got "
+                f"{type(ppgd_cfg.scope).__name__}."
+            )
+            self.ppgd_state = PersistentPGDState(
+                module_to_c=runtime.c_per_site,
+                batch_dims=(world.batch_local_ppgd, *_seq_dims_from_batch(first_batch)),
+                device=device,
+                use_delta_component=True,
+                optimizer_cfg=ppgd_cfg.optimizer,
+                scope=ppgd_cfg.scope,
+                use_sigmoid_parameterization=ppgd_cfg.use_sigmoid_parameterization,
+                n_warmup_steps=ppgd_cfg.n_warmup_steps,
+                n_samples=ppgd_cfg.n_samples,
+                router=AllLayersRouter(),
+                reconstruction_loss=self.strategy.recon_loss,
+            )
+
+        if (
+            self.step == 0
+            and isinstance(ctx, ChunkContext)
+            and pd_config.faithfulness_warmup_steps > 0
+        ):
+            run_faithfulness_warmup_chunkwise(
+                component_model=self.component_model,
+                component_params=self._component_params,
+                n_steps=pd_config.faithfulness_warmup_steps,
+                lr=pd_config.faithfulness_warmup_lr,
+                weight_decay=pd_config.faithfulness_warmup_weight_decay,
+                numel_global=self.runtime.numel_global,
+            )
+
+        components_lr_schedule = pd_config.components_optimizer.lr_schedule
+        ci_fn_lr_schedule = pd_config.ci_fn_optimizer.lr_schedule
+
+        profiler_ctx = profiler if profiler is not None else nullcontext()
+
+        def _to_device(b: Any) -> Any:
+            if b is None:
+                return None
+            if isinstance(b, Tensor):
+                return b.to(device)
+            if isinstance(b, dict) and "input_ids" in b:
+                return {**b, "input_ids": b["input_ids"].to(device)}
+            if isinstance(b, list | tuple) and len(b) > 0 and isinstance(b[0], Tensor):
+                return type(b)([b[0].to(device), *b[1:]])
+            raise TypeError(f"Unsupported batch type from DataLoader: {type(b).__name__}")
+
+        with profiler_ctx:
+            batch_T = _to_device(next(train_iterator))
+
+            for step in range(self.step, n_steps):
+                self.step = step
+                _assert_full_global_batch(batch_T, runtime.batch_global)
+                step_start = time.perf_counter()
+                should_log = step % cadence.train_log_every == 0 and not os.environ.get(
+                    "PD_3POOL_DISABLE_XPOOL_LOG"
+                )
+
+                match ctx:
+                    case PoolAContext():
+                        assert self.optimizer is not None and self.ppgd_state is not None
+                        self.optimizer.param_groups[0]["lr"] = get_scheduled_value(
+                            step, n_steps, ci_fn_lr_schedule
+                        )
+                        metrics = step_pool_a(
+                            ctx,
+                            self.component_model,
+                            self.optimizer,
+                            self._ci_fn_params,
+                            self.ppgd_state,
+                            batch_T,
+                            cfg=runtime,
+                            strategy=self.strategy,
+                            step=step,
+                            n_steps=n_steps,
+                            current_frac_of_training=step / n_steps if n_steps > 0 else 0.0,
+                            should_log=should_log,
+                        )
+                    case ChunkContext():
+                        assert self.optimizer is not None
+                        self.optimizer.param_groups[0]["lr"] = get_scheduled_value(
+                            step, n_steps, components_lr_schedule
+                        )
+                        metrics = step_chunkwise(
+                            ctx,
+                            self.component_model,
+                            self.optimizer,
+                            self._all_params,
+                            batch_T,
+                            runtime,
+                            self.strategy,
+                            should_log=should_log,
+                        )
+
+                if should_log:
+                    for k, v in metrics.items():
+                        if k.startswith("loss/") or k.startswith("_raw/"):
+                            assert v == v, f"NaN in metrics[{k!r}] at step {step}"  # NaN != NaN
+
+                step_ms = (time.perf_counter() - step_start) * 1000.0
+                trace(f"TwoPoolTrainer.run: step {step}: dispatched in {step_ms:.1f}ms")
+                flush_nccl_event_timings()
+                if should_log:
+                    dump_memory_stats(f"step {step} done")
+                    _log_train_metrics(
+                        metrics=metrics,
+                        ctx=ctx,
+                        device=device,
+                        step=step,
+                        step_ms=step_ms,
+                        ci_fn_lr=get_scheduled_value(step, n_steps, ci_fn_lr_schedule),
+                        runtime=runtime,
+                        optimizer=self.optimizer,
+                        sink=sink,
+                    )
+
+                if eval_loop is not None and eval_loop.should_eval(step):
+                    from param_decomp_lab.three_pool.two_pool_eval_step import (
+                        run_two_pool_eval_step,
+                    )
+
+                    assert eval_iterator is not None
+                    run_two_pool_eval_step(
+                        eval_iterator,
+                        n_steps=eval_loop.n_steps,
+                        slow_step=eval_loop.should_run_slow_eval(step),
+                        metrics=list(eval_loop.metrics),
+                        ctx=ctx,
+                        step=step,
+                        device=str(device),
+                        component_model=self.component_model,
+                        config=pd_config,
+                        runtime_config=self.runtime_config,
+                        reconstruction_loss=runtime.reconstruction_loss,
+                        sink=sink,
+                    )
+
+                batch_T = _to_device(next(train_iterator))
+                if profiler is not None:
+                    profiler.step()
+
+            self.step = n_steps
+            sink.checkpoint_written(self.step, final=True)
+
+
+def optimize_two_pool(
+    target_model: nn.Module,
+    train_loader: DataLoader[Any],
+    *,
+    run_batch: RunBatch,
+    reconstruction_loss: ReconstructionLoss,
+    pd_config: ThreePoolConstrainedPDConfig,
+    runtime_config: RuntimeConfig,
+    two_pool_config: TwoPoolTopology,
+    cadence: Cadence,
+    sink: ThreePoolRunSink,
+    eval_loop: EvalLoop | None = None,
+    profiler: torch.profiler.profile | None = None,
+) -> None:
+    trainer = TwoPoolTrainer(
+        target_model=target_model,
+        run_batch=run_batch,
+        reconstruction_loss=reconstruction_loss,
+        pd_config=pd_config,
+        runtime_config=runtime_config,
+        two_pool_config=two_pool_config,
+    )
+    trainer.run(train_loader, sink, cadence, eval_loop=eval_loop, profiler=profiler)
+
+
+def _required[T](value: T | None) -> T:
+    assert value is not None
+    return value
+
+
+def _build_two_pool_runtime(
+    target_model: nn.Module,
+    pd_config: ThreePoolConstrainedPDConfig,
+    runtime_config: RuntimeConfig,
+    two_pool_config: TwoPoolTopology,
+    run_batch: RunBatch,
+    reconstruction_loss: ReconstructionLoss,
+) -> _ThreePoolRuntime:
+    """Assemble the step-context bundle. Reuses ``_ThreePoolRuntime`` with
+    ``ci_ranks == ppgd_ranks == pool_a_ranks`` (Pool A is both)."""
+    from param_decomp.decomposition_targets import resolve_decomposition_targets
+
+    targets = resolve_decomposition_targets(target_model, pd_config.decomposition_targets)
+    c_per_site = {t.module_path: t.C for t in targets}
+    numel_global = 0
+    for t in targets:
+        w = target_model.get_submodule(t.module_path).weight
+        assert isinstance(w, Tensor)
+        numel_global += w.numel()
+
+    ordered_sites = [t.module_path for t in targets]
+    layout = two_pool_config.resolve(ordered_sites, pd_config.batch_size)
+    chunks = tuple(Chunk(ranks=ranks, sites=sites) for ranks, sites in layout.chunks)
+    for chunk in chunks:
+        for site in chunk.sites:
+            assert site in c_per_site, (
+                f"site '{site}' in a chunk but not in pd_config.decomposition_targets"
+            )
+
+    losses = pd_config.losses
+    recon_plan = losses.recon_plan
+    n_est = sum(recon_plan.n_forwards(chunk.sites) for chunk in chunks)
+    imp_min_cfg = losses.imp
+
+    return _ThreePoolRuntime(
+        ci_ranks=layout.pool_a_ranks,
+        chunks=chunks,
+        ppgd_ranks=layout.pool_a_ranks,
+        batch_global=pd_config.batch_size,
+        c_per_site=c_per_site,
+        ci_config=pd_config.ci_config,
+        sigmoid_type=pd_config.sigmoid_type,
+        run_batch=run_batch,
+        reconstruction_loss=reconstruction_loss,
+        ppgd_cfg=losses.ppgd,
+        recon_plan=recon_plan,
+        n_est=n_est,
+        coeff_faith=float(_required(losses.faith.coeff)),
+        coeff_imp=float(_required(losses.imp.coeff)),
+        coeff_stoch=float(_required(losses.stoch.coeff)),
+        coeff_ppgd=float(_required(losses.ppgd.coeff)),
+        log_name_faith=losses.faith.type,
+        log_name_imp=losses.imp.type,
+        log_name_stoch=losses.stoch.type,
+        log_name_ppgd=losses.ppgd.type,
+        imp_min_pnorm=imp_min_cfg.pnorm,
+        imp_min_beta=imp_min_cfg.beta,
+        imp_min_eps=imp_min_cfg.eps,
+        imp_min_p_anneal_start_frac=imp_min_cfg.p_anneal_start_frac,
+        imp_min_p_anneal_final_p=imp_min_cfg.p_anneal_final_p,
+        imp_min_p_anneal_end_frac=imp_min_cfg.p_anneal_end_frac,
+        lr_components=pd_config.components_optimizer.lr_schedule.start_val,
+        lr_ci_fn=pd_config.ci_fn_optimizer.lr_schedule.start_val,
+        grad_clip_norm_components=pd_config.components_optimizer.grad_clip_norm,
+        grad_clip_norm_ci_fn=pd_config.ci_fn_optimizer.grad_clip_norm,
+        numel_global=numel_global,
+        bf16_autocast=runtime_config.autocast_bf16,
+        use_fused_kl=two_pool_config.use_fused_kl,
+    )
+
+
+def _decomposition_targets_for_pool(
+    ctx: TwoPoolContext, c_per_site: dict[str, int]
+) -> list[DecompositionTarget]:
+    """Pool A: every site (full CI fn + full V/U replica). Chunkwise: this rank's sites."""
+    match ctx:
+        case PoolAContext():
+            sites = ctx.world.all_sites
+        case ChunkContext():
+            sites = ctx.role.sites
+    return [DecompositionTarget(module_path=s, C=c_per_site[s]) for s in sites]
+
+
+def _assert_full_global_batch(batch: Any, batch_global: int) -> None:
+    if isinstance(batch, Tensor):
+        actual = batch.shape[0]
+    elif isinstance(batch, dict) and "input_ids" in batch:
+        actual = batch["input_ids"].shape[0]
+    elif isinstance(batch, list | tuple) and len(batch) > 0 and isinstance(batch[0], Tensor):
+        actual = batch[0].shape[0]
+    else:
+        raise TypeError(f"Unsupported batch type from DataLoader: {type(batch).__name__}")
+    assert actual == batch_global, (
+        f"2-pool requires each rank to read the FULL global batch; got leading-dim "
+        f"{actual}, expected {batch_global}. Pass dist_state=None to build_loader."
+    )
+
+
+def _log_train_metrics(
+    *,
+    metrics: dict[str, float],
+    ctx: TwoPoolContext,
+    device: torch.device,
+    step: int,
+    step_ms: float,
+    ci_fn_lr: float,
+    runtime: _ThreePoolRuntime,
+    optimizer: torch.optim.Optimizer | None,
+    sink: ThreePoolRunSink,
+) -> None:
+    """Aggregate per-pool metrics to rank 0 and dispatch to ``sink`` (same ``train/``
+    key families as the 3-pool / single-pool paths)."""
+    combined = aggregate_losses_to_rank0(metrics, ctx, device)
+    mem_combined = aggregate_max_memory_to_rank0(ctx, device)
+    grad_norms = aggregate_grad_norms_to_rank0(metrics, ctx, device)
+    comp_grad_by_loss = aggregate_component_grad_by_loss_to_rank0(metrics, ctx, device)
+
+    step_ms_t = torch.tensor([step_ms], device=device)
+    if isinstance(ctx, ChunkContext):
+        dist.all_reduce(step_ms_t, op=dist.ReduceOp.MAX, group=ctx.world.chunkwise_pool_group)
+
+    if ctx.role.rank != 0 or combined is None:
+        return
+
+    if mem_combined is not None:
+        combined.update(mem_combined)
+    combined["perf/step_ms"] = step_ms_t.item()
+    combined["loss/total"] = (
+        runtime.coeff_faith * combined["loss/faith"]
+        + runtime.coeff_imp * combined["loss/imp"]
+        + runtime.coeff_stoch * combined["loss/stoch"]
+        + runtime.coeff_ppgd * combined["loss/ppgd"]
+    )
+    for short, class_name in (
+        ("faith", runtime.log_name_faith),
+        ("imp", runtime.log_name_imp),
+        ("stoch", runtime.log_name_stoch),
+        ("ppgd", runtime.log_name_ppgd),
+    ):
+        combined[f"loss/{class_name}"] = combined.pop(f"loss/{short}")
+    assert isinstance(ctx, ChunkContext), "rank 0 must be in chunkwise pool (canonical order)"
+    assert optimizer is not None
+    assert grad_norms is not None
+    assert comp_grad_by_loss is not None
+    combined.update(grad_norms)
+    for short, class_name in (
+        ("faith", runtime.log_name_faith),
+        ("stoch", runtime.log_name_stoch),
+        ("ppgd", runtime.log_name_ppgd),
+    ):
+        combined[f"grad_norms/components/by_loss/{class_name}"] = comp_grad_by_loss[
+            f"grad_norms/by_loss/{short}/components"
+        ]
+    combined["schedules/lr/components"] = optimizer.param_groups[0]["lr"]
+    combined["schedules/lr/ci_fn"] = ci_fn_lr
+    sink.console(
+        f"--- Step {step} ---",
+        *(f"train/{name}: {value:.6g}" for name, value in combined.items()),
+    )
+    sink.log({f"train/{k}": v for k, v in combined.items()}, step=step)
