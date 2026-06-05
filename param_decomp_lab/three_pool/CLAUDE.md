@@ -285,7 +285,10 @@ nondeterministic** (CUDA `atomicAdd` in the flash-attn/`kl_div` backward, amplif
 adversarial loop), so it can't be tight-tolerance grad-checked end-to-end — and compile's delta
 sits far below that floor. **Not yet validated at real 8B scale** (the chunkwise compile retires
 most of that risk, but the autograd.grad path at scale is unexercised); the next real run is the
-de-risk. Probes: `.scratch_ppgd_compile_probe.py` (isolated), `.scratch_ppgd_full_compile_probe.py`
+de-risk. Probes (frozen on the `lore-artifacts` branch):
+[ppgd_compile_probe.py](https://github.com/goodfire-ai/param-decomp/blob/e7ccf47bfd218cb68eb9d4e9ebca964ccccf2630/lore_artifacts/ppgd_compile_probe.py)
+(isolated) and
+[ppgd_full_compile_probe.py](https://github.com/goodfire-ai/param-decomp/blob/e7ccf47bfd218cb68eb9d4e9ebca964ccccf2630/lore_artifacts/ppgd_full_compile_probe.py)
 (full path).
 
 ## CI value wire dtype split (`portals.py`)
