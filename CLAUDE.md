@@ -140,9 +140,12 @@ PARAM_DECOMP_OUT_DIR/runs/<run_id>/
 Both training output and the W&B download cache write here. Per-stage subdirs are
 populated by their respective pipelines.
 
-`PARAM_DECOMP_OUT_DIR` is `/mnt/polished-lake/artifacts/mechanisms/param-decomp/` on
-cluster, `~/param_decomp_out/` off cluster. Defined in
-`param_decomp_lab/infra/settings.py`.
+`PARAM_DECOMP_OUT_DIR` defaults to `$DATA_MOUNT/artifacts/mechanisms/param-decomp` on
+cluster (e.g. `/mnt/data/artifacts/mechanisms/param-decomp` when `DATA_MOUNT=/mnt/data`)
+and the relative `out/` off cluster (no `DATA_MOUNT`). Set the `PARAM_DECOMP_OUT_DIR` env
+var to override either. Defined in `param_decomp_lab/infra/settings.py`. (A stale shell
+may export a wrong value — e.g. an old `/mnt/polished-lake/...` — which overrides the
+correct default; check `echo $PARAM_DECOMP_OUT_DIR` if outputs land somewhere unexpected.)
 
 ## Development commands
 
