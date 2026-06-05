@@ -1,6 +1,7 @@
 docs/coverage/**
 notebooks/**
 scratch/
+.scratch_*
 
 # Script outputs (generated files, often large)
 scripts/outputs/

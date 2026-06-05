@@ -90,6 +90,15 @@ from param_decomp_lab.three_pool import ThreePoolTopology, ThreePoolTrainer
 from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 
+# Cross-pool NCCL p2p deadlock guard. An asymmetric topology (fanout>1 on a cross-pool
+# edge) at long sequence lengths wedges when a rendezvous-blocked NCCL send/recv kernel
+# co-resides with the caching allocator's cudaFree (a device-wide sync). expandable_segments
+# remaps virtual address space instead of calling cudaFree, so that sync — and the
+# deadlock — never happen. Scoped to the 3-pool path (single-pool runs do no cross-pool
+# p2p). Applies to both the train job and the async consolidate+eval job (eval also runs
+# cross-pool collectives).
+THREE_POOL_SLURM_ENV: dict[str, str] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+
 
 class ThreePoolRuntimeConfig(RuntimeConfig):
     """Core's substrate scalars (`autocast_bf16` / `device` / `dp`) + the normalized
@@ -588,7 +597,9 @@ def _submit_slurm(
         snapshot_ref=snapshot_ref,
         comment=run_id,
     )
-    script = generate_script(slurm_config, launch.command, env=launch.env)
+    script = generate_script(
+        slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}
+    )
     result = submit_slurm_job(script, "lm")
 
     wandb_url = _wandb_url_for_config(config_path, run_id) if config_path is not None else None
@@ -703,7 +714,9 @@ def submit_slurm_async_consolidate_and_eval(
         snapshot_ref=snapshot_ref,
         comment=f"async-consol-eval:{train_run_id}@{step}",
     )
-    script = generate_script(slurm_config, launch.command, env=launch.env)
+    script = generate_script(
+        slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}
+    )
     result = submit_slurm_job(script, "lm")
     logger.info(
         f"Async consolidate+eval submitted: parent={train_run_id} step={step} "
