@@ -341,6 +341,22 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> "torch.profiler.pr
 
 
 @with_distributed_cleanup
+def _derive_world_size(config_path: Path) -> int | None:
+    """World size implied by a config's topology + batch, or None when it can't be derived
+    without the model (globbed decomposition targets with `sites_per_chunk` set, where the
+    chunk count depends on the expanded site count). With `sites_per_chunk: null` there's one
+    chunk, so the world size is site-count-independent; with literal targets the patterns are
+    the sites."""
+    cfg = ThreePoolLMExperimentConfig.from_file(config_path)
+    topo = cfg.runtime.topology
+    if topo.chunkwise.sites_per_chunk is None:
+        return topo.resolve(["_"], cfg.pd.batch_size).world_size
+    patterns = [t.module_pattern for t in cfg.pd.decomposition_targets]
+    if any("*" in p for p in patterns):
+        return None
+    return topo.resolve(patterns, cfg.pd.batch_size).world_size
+
+
 def main(
     config_path: str | Path | None = None,
     *,
@@ -362,14 +378,30 @@ def main(
         resume: Path to a `ResumeConfig` YAML pointing at a prior 3-pool run.
         group / tags: wandb-only (no-ops without `wandb:`).
         dp / partition / qos / time / job_name / no_snapshot / run_id: SLURM submission knobs.
-            Passing `--dp N` outside torchrun submits a SLURM job: single-node for
-            N <= 8, multi-node for N > 8 (N must be a multiple of 8). `qos=None` uses the
-            cluster default; pass e.g. `opportunistic` to run off-quota.
+            A direct (login-node) invocation submits a SLURM job; the GPU count is
+            derived from the config's topology + batch (single-node for <= 8, multi-node
+            for > 8, a multiple of 8). `--dp N` is optional — an override/guard-rail
+            asserted against the derived size; it's only required when the size can't be
+            derived (resume, or globbed targets with `sites_per_chunk`). `qos=None` uses
+            the cluster default; pass e.g. `opportunistic` to run off-quota.
     """
-    if dp is not None and os.environ.get("WORLD_SIZE") is None:
+    if os.environ.get("WORLD_SIZE") is None:
+        # Direct (login-node) invocation → submit a SLURM job. A torchrun worker has
+        # WORLD_SIZE set in its env and falls through to the training path below.
         assert (config_path is not None) != (resume is not None), (
-            "--dp SLURM submission requires exactly one of config_path or --resume"
+            "submission requires exactly one of config_path or --resume"
         )
+        derived = _derive_world_size(Path(config_path)) if config_path is not None else None
+        if dp is None:
+            assert derived is not None, (
+                "could not derive the world size from the config (resume, or globbed targets "
+                "with sites_per_chunk set) — pass --dp N"
+            )
+            dp = derived
+        elif derived is not None:
+            assert dp == derived, (
+                f"--dp {dp} contradicts the config-derived world size {derived}; omit --dp"
+            )
         _submit_slurm(
             config_path,
             resume=resume,
