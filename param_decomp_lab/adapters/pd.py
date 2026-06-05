@@ -5,9 +5,9 @@ import yaml
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from param_decomp.component_model import ComponentModel
 from param_decomp_lab.adapters.base import DecompositionAdapter
 from param_decomp_lab.autointerp.schemas import ModelMetadata
+from param_decomp_lab.component_model_io import HarvestableComponentModel
 from param_decomp_lab.experiments.lm.run import SavedLMRun, build_lm_loader
 from param_decomp_lab.experiments.lm.three_pool_run import SavedThreePoolLMRun
 from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME
@@ -39,7 +39,7 @@ class PDAdapter(DecompositionAdapter):
         return load_saved_lm_run(self._wandb_path)
 
     @cached_property
-    def component_model(self) -> ComponentModel:
+    def component_model(self) -> HarvestableComponentModel:
         return self.pd_run.load_model()
 
     @cached_property

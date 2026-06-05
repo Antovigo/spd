@@ -1,10 +1,14 @@
 """Lab-side `ComponentModel` helpers for postprocessing, the app, and harvest.
 
-Rebuilds a `ComponentModel` from a saved checkpoint, and reads per-component activations
-from cached pre-weight acts.
+Rebuilds a component model from a saved checkpoint, and reads per-component activations
+from cached pre-weight acts. Two checkpoint formats are supported: the core
+`ComponentModel` (single-pool and pre-`e8ff5a64` 3-pool) and the vendored
+`LMComponentModel` (post-`e8ff5a64` 3-pool), the latter wrapped in `VendoredHarvestModel`
+so both expose the same `HarvestableComponentModel` surface.
 """
 
 from pathlib import Path
+from typing import Literal, Protocol, override, runtime_checkable
 
 import torch
 from jaxtyping import Float, Int
@@ -16,13 +20,54 @@ from param_decomp.ci_fns import (
     GlobalCiConfig,
     LayerwiseCiConfig,
 )
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import CIOutputs, ComponentModel, OutputWithCache
+from param_decomp.components import Components
 from param_decomp.configs import PDConfig
 from param_decomp.decomposition_targets import (
     DecompositionTargetConfig,
     insert_identity_operations_,
     resolve_decomposition_targets,
 )
+from param_decomp.masks import SamplingType
+from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
+
+
+@runtime_checkable
+class HarvestableComponentModel(Protocol):
+    """The surface the harvest path (`harvest_fn/param_decomp.py` + `PDAdapter`) needs.
+
+    Satisfied by both the core `ComponentModel` and `VendoredHarvestModel`. `target_model`
+    is the bare transformer (for `TransformerTopology`); `components`/`module_to_c`/
+    `target_module_paths` are pure queries; `forward(cache_type="input")` returns logits +
+    pre-weight acts; `calc_causal_importances` squashes those into a `CIOutputs`.
+    """
+
+    @property
+    def target_model(self) -> nn.Module: ...
+
+    @property
+    def components(self) -> dict[str, Components]: ...
+
+    @property
+    def module_to_c(self) -> dict[str, int]: ...
+
+    @property
+    def target_module_paths(self) -> list[str]: ...
+
+    def to(self, device: torch.device | str) -> "HarvestableComponentModel": ...
+
+    def eval(self) -> "HarvestableComponentModel": ...
+
+    def __call__(
+        self, batch: Int[Tensor, "batch pos"], *, cache_type: Literal["input"]
+    ) -> OutputWithCache: ...
+
+    def calc_causal_importances(
+        self,
+        pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "..."]],
+        sampling: SamplingType,
+        detach_inputs: bool,
+    ) -> CIOutputs: ...
 
 
 def _validate_checkpoint_ci_config_compatibility(
@@ -98,8 +143,111 @@ def load_component_model(
     return comp_model
 
 
+def load_vendored_component_model(
+    pd_config: PDConfig,
+    checkpoint_path: Path,
+    target_model: nn.Module,
+) -> LMComponentModel:
+    """Rebuild an `LMComponentModel` (vendored 3-pool format) from a saved PD checkpoint.
+
+    Mirrors `load_component_model` but builds the vendored model and freezes the inlined
+    target. The 3-pool config fixes `identity_decomposition_targets=None`, so unlike the
+    core loader there is no identity-op insertion path.
+    """
+    assert pd_config.identity_decomposition_targets is None, (
+        "vendored 3-pool checkpoints never carry identity decomposition targets; "
+        f"got {pd_config.identity_decomposition_targets}"
+    )
+    target_model.eval()
+    target_model.requires_grad_(False)
+
+    resolved_targets = resolve_decomposition_targets(
+        target_model, list(pd_config.decomposition_targets)
+    )
+
+    comp_model = LMComponentModel.build(
+        target_model=target_model,
+        decomposition_targets=resolved_targets,
+        ci_config=pd_config.ci_config,
+        sigmoid_type=pd_config.sigmoid_type,
+    )
+
+    weights = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    _validate_checkpoint_ci_config_compatibility(weights, pd_config.ci_config)
+    comp_model.load_state_dict(weights)
+
+    if pd_config.tied_weights is not None:
+        for src_name, tgt_name in pd_config.tied_weights:
+            tgt = comp_model.components[tgt_name]
+            src = comp_model.components[src_name]
+            tgt.U.data = src.V.data.T
+            tgt.V.data = src.U.data.T
+
+    return comp_model
+
+
+class VendoredHarvestModel(nn.Module):
+    """Adapts an `LMComponentModel` to the core `forward(cache_type="input") -> OutputWithCache`
+    surface the harvest path expects, without polluting `LMComponentModel` with core-mimicking
+    methods. As an `nn.Module` holding the wrapped model, `.to` / `.eval` propagate."""
+
+    def __init__(self, lm: LMComponentModel):
+        super().__init__()
+        self._lm = lm
+
+    @override
+    def forward(
+        self, idx: Int[Tensor, "batch pos"], cache_type: Literal["input"] = "input"
+    ) -> OutputWithCache:
+        assert cache_type == "input", f"VendoredHarvestModel only caches inputs; got {cache_type}"
+        logits, cache = self._lm.forward_with_pre_weight_acts(idx)
+        return OutputWithCache(output=logits, cache=cache)
+
+    def calc_causal_importances(
+        self,
+        pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "..."]],
+        sampling: SamplingType,
+        detach_inputs: bool,
+    ) -> CIOutputs:
+        return self._lm.calc_causal_importances(
+            pre_weight_acts=pre_weight_acts, sampling=sampling, detach_inputs=detach_inputs
+        )
+
+    @property
+    def components(self) -> dict[str, Components]:
+        return self._lm.components
+
+    @property
+    def module_to_c(self) -> dict[str, int]:
+        return self._lm.module_to_c
+
+    @property
+    def target_module_paths(self) -> list[str]:
+        return self._lm.target_module_paths
+
+    @property
+    def target_model(self) -> nn.Module:
+        return self._lm.model
+
+
+def detect_checkpoint_format(checkpoint_path: Path) -> str:
+    """Peek state-dict key prefixes to tell the two checkpoint formats apart.
+
+    Vendored (`LMComponentModel`) inlines the frozen target under `model.*`; core
+    (`ComponentModel`) keeps it under `target_model.*` with components under `_components.*`.
+    """
+    weights = torch.load(checkpoint_path, map_location="cpu", weights_only=True, mmap=True)
+    keys = list(weights.keys())
+    if any(k.startswith("model.") for k in keys):
+        return "vendored"
+    assert any(k.startswith(("target_model.", "_components.")) for k in keys), (
+        f"unrecognized checkpoint format at {checkpoint_path}; sample keys: {keys[:5]}"
+    )
+    return "core"
+
+
 def get_all_component_acts(
-    model: ComponentModel,
+    model: HarvestableComponentModel,
     pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "..."]],
 ) -> dict[str, Float[Tensor, "... C"]]:
     """Per-component activations `V^T @ x` for every decomposed layer.

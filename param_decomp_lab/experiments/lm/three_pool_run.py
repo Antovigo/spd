@@ -45,7 +45,12 @@ from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.training_state import ThreePoolTrainingState
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
-from param_decomp_lab.component_model_io import load_component_model
+from param_decomp_lab.component_model_io import (
+    VendoredHarvestModel,
+    detect_checkpoint_format,
+    load_component_model,
+    load_vendored_component_model,
+)
 from param_decomp_lab.distributed import (
     get_device,
     init_distributed,
@@ -180,13 +185,27 @@ class SavedThreePoolLMRun:
             checkpoint_path=files.checkpoint_path,
         )
 
-    def load_model(self) -> ComponentModel:
-        return load_component_model(
-            pd_config=self.cfg.pd,
-            checkpoint_path=self.checkpoint_path,
-            target_model=build_target(self.cfg.target),
-            run_batch=make_run_batch(self.cfg.target),
-        )
+    def load_model(self) -> ComponentModel | VendoredHarvestModel:
+        """Dispatch on the on-disk checkpoint format: post-`e8ff5a64` runs are the vendored
+        `LMComponentModel` (wrapped for the harvest surface); earlier ones are core."""
+        match detect_checkpoint_format(self.checkpoint_path):
+            case "vendored":
+                return VendoredHarvestModel(
+                    load_vendored_component_model(
+                        pd_config=self.cfg.pd,
+                        checkpoint_path=self.checkpoint_path,
+                        target_model=build_target(self.cfg.target),
+                    )
+                )
+            case "core":
+                return load_component_model(
+                    pd_config=self.cfg.pd,
+                    checkpoint_path=self.checkpoint_path,
+                    target_model=build_target(self.cfg.target),
+                    run_batch=make_run_batch(self.cfg.target),
+                )
+            case other:
+                raise AssertionError(f"unknown checkpoint format: {other}")
 
 
 def _agree_on_run_id(run_id: str | None, dist_state: DistributedState | None) -> str:

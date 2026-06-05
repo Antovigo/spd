@@ -2,6 +2,14 @@
 
 Offline GPU pipeline that collects component statistics in a single pass over training data. Produces data consumed by the autointerp module (`param_decomp_lab/autointerp/`) and the app (`param_decomp_lab/app/`).
 
+## Checkpoint formats
+
+Harvest loads both component-model checkpoint formats via `component_model_io.py`: the
+core `ComponentModel` (single-pool, and pre-`e8ff5a64` 3-pool) and the vendored
+`LMComponentModel` (post-`e8ff5a64` 3-pool, wrapped in `VendoredHarvestModel`). Both
+satisfy the `HarvestableComponentModel` protocol; `SavedThreePoolLMRun.load_model`
+sniffs the state-dict key prefixes (`detect_checkpoint_format`) and dispatches.
+
 ## Usage (SLURM)
 
 ```bash
