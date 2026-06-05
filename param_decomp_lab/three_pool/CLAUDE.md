@@ -259,8 +259,28 @@ backward, saving ~**15 GB** of block-activation high-water on the CI rank; whole
 compile turns the checkpoint's +12.9% step-time cost into a net **−9.2%** vs baseline (1-GPU
 B200 probe; whole-region beats per-block's −4.6%). The CI pool is compute-idle (PPGD is the
 long pole), so even the bare ckpt cost would be free on the critical path. Whole-forward
-compile + ckpt + flash-SDPA is validated on real 2-GPU DDP/NCCL. Either compile path
-(chunkwise or CI) widens the step-0 PG timeout.
+compile + ckpt + flash-SDPA is validated on real 2-GPU DDP/NCCL. Any compile path
+(chunkwise, CI, or PPGD) widens the step-0 PG timeout.
+
+## PPGD torch.compile (default on; `PD_DISABLE_PPGD_COMPILE=1` to disable)
+
+The PPGD pool `torch.compile`s the **same `component_model.model` masked forward** the chunkwise
+pool compiles — the warmup PGD inner loop and the final recon forward both run it. Because it's
+the identical compiled artifact, the forward-at-scale risk is already retired by the chunkwise
+pool's 160-GPU validation; the only PPGD-specific path is the **fused `torch.autograd.grad`**
+(not `.backward()`) over V/U + CI + sources, plus the `n_warmup` source-only backwards.
+
+That fused-`autograd.grad`-under-compile combo was the reason PPGD was previously left
+uncompiled. It's now 1-GPU-validated (vendored-Llama proxy, ckpt + flash-SDPA): the **isolated**
+single fused backward is numerically correct (fp32 grad rel-err **8e-7**; bf16 ~1.4%, benign
+autocast reordering), and the **warmup loop runs recompile/graph-break-free**. ~2–3× on PPGD
+*compute* (proxy). Note the end-to-end PPGD step grad is intrinsically ~**27% run-to-run
+nondeterministic** (CUDA `atomicAdd` in the flash-attn/`kl_div` backward, amplified by the chaotic
+adversarial loop), so it can't be tight-tolerance grad-checked end-to-end — and compile's delta
+sits far below that floor. **Not yet validated at real 8B scale** (the chunkwise compile retires
+most of that risk, but the autograd.grad path at scale is unexercised); the next real run is the
+de-risk. Probes: `.scratch_ppgd_compile_probe.py` (isolated), `.scratch_ppgd_full_compile_probe.py`
+(full path).
 
 ## CI value wire dtype split (`portals.py`)
 

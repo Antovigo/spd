@@ -147,6 +147,19 @@ def _ci_compile_enabled() -> bool:
     return os.environ.get("PD_DISABLE_CI_COMPILE", "").strip() not in ("1", "true", "yes")
 
 
+def _ppgd_compile_enabled() -> bool:
+    """torch.compile the PPGD pool's model forward — default on; ``PD_DISABLE_PPGD_COMPILE=1`` off.
+
+    Compiles the SAME ``component_model.model`` masked forward the chunkwise pool already compiles
+    at 160-GPU scale (so the forward-at-scale risk is retired there). The PPGD-specific bit — a
+    fused ``torch.autograd.grad`` (not ``.backward()``) over V/U + CI + sources, plus the warmup
+    PGD inner loop — was probed on 1 GPU: numerically correct (isolated fp32 grad rel-err 8e-7) and
+    recompile/graph-break-free through the loop; ~2-3x on PPGD compute. Global env (uniform across
+    ranks) because it also widens the step-0 collective PG timeout.
+    """
+    return os.environ.get("PD_DISABLE_PPGD_COMPILE", "").strip() not in ("1", "true", "yes")
+
+
 def _resolve_pg_timeout(*, compiling: bool = False) -> datetime.timedelta:
     override_s = os.environ.get("PD_3POOL_PG_TIMEOUT_S", "").strip()
     if override_s:
@@ -255,7 +268,9 @@ class ThreePoolTrainer:
             ppgd_ranks=list(self.runtime.ppgd_ranks),
             batch_global=self.runtime.batch_global,
             pg_timeout=_resolve_pg_timeout(
-                compiling=_chunk_compile_enabled() or _ci_compile_enabled()
+                compiling=_chunk_compile_enabled()
+                or _ci_compile_enabled()
+                or _ppgd_compile_enabled()
             ),
             device=self._device,
         )
@@ -347,8 +362,7 @@ class ThreePoolTrainer:
         # Chunkwise pool: torch.compile the (target + masked) model forward — a validated 2.74× on
         # the chunkwise step single-GPU (the throughput pole). The vendored mask-arg forward traces
         # cleanly (0 graph breaks) and attention uses F.sdpa directly. Default-on
-        # (PD_DISABLE_CHUNK_COMPILE=1 to disable) — see _chunk_compile_enabled. Chunkwise-only:
-        # PPGD/CI have slack and PPGD's autograd.grad path is unvalidated under compile. The one-time
+        # (PD_DISABLE_CHUNK_COMPILE=1 to disable) — see _chunk_compile_enabled. The one-time
         # first-step compilation is absorbed by the widened PG timeout (see
         # _resolve_pg_timeout(compiling=...)). The chunkwise forward is only called in step_chunkwise
         # (target=None + masked dict, both validated); eval barriers it through, so no recompile.
@@ -365,6 +379,18 @@ class ThreePoolTrainer:
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
             os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
             trace("ThreePoolTrainer.__init__: torch.compile(whole model) [per-rank cache]")
+            self.component_model.model.compile()
+        # PPGD pool: compile the SAME masked model forward (the warmup PGD inner loop + the final
+        # recon forward both run it). The forward-at-scale is already proven by the chunkwise pool
+        # above (identical compiled artifact); the PPGD-specific fused autograd.grad over
+        # V/U + CI + sources was 1-GPU-validated correct (see _ppgd_compile_enabled). Default-on,
+        # PD_DISABLE_PPGD_COMPILE=1 to disable. Per-rank inductor/triton caches as above.
+        if isinstance(self.ctx, PPGDContext) and _ppgd_compile_enabled():
+            user = os.environ.get("USER", "u")
+            rank = dist.get_rank()
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+            os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+            trace("ThreePoolTrainer.__init__: torch.compile(ppgd model) [per-rank cache]")
             self.component_model.model.compile()
         # Diverge stochastic RNG per rank for mask sampling.
         seed_per_rank(pd_config.seed)
