@@ -22,11 +22,12 @@ backward breakdown).
 """
 
 import os
-import sys
 import time
 
 import torch
 import torch.distributed as dist
+
+from param_decomp.log import logger
 
 _TRACE_START = time.perf_counter()
 
@@ -62,21 +63,16 @@ def _current_rank() -> int:
 
 
 def trace(msg: str) -> None:
-    """Emit a rank-tagged timeline checkpoint to stdout (force-flushed).
+    """Emit a rank-tagged timeline checkpoint via ``logger.info``.
 
-    Uses ``print(..., flush=True)`` rather than ``logger.info`` so the message
-    bypasses Python's logging stack and forces an immediate fd flush — under
-    slurm, even with PYTHONUNBUFFERED, logger.info output can get stuck in
-    Python's logging-layer or torchrun-to-srun pipe buffers for minutes.
-
-    Format: ``[trace rank=R +ELAPSED_MS] MSG`` — easy to grep and tail.
+    Format: ``[trace rank=R +ELAPSED_MS] MSG`` — the ``+ms``-since-import is the
+    phase-timing signal (the logger's own timestamp is wall-clock); easy to grep.
     """
     rank = _current_rank()
     if not _should_log(rank):
         return
     elapsed_ms = (time.perf_counter() - _TRACE_START) * 1000.0
-    print(f"[trace rank={rank} +{elapsed_ms:9.1f}ms] {msg}", flush=True)
-    sys.stdout.flush()  # belt + braces — slurm log buffering bit us before
+    logger.info(f"[trace rank={rank} +{elapsed_ms:9.1f}ms] {msg}")
 
 
 def dump_memory_stats(label: str) -> None:
@@ -104,10 +100,8 @@ def dump_memory_stats(label: str) -> None:
     reserved = s["reserved_bytes.all.current"] / 1e9
     free = reserved - cur
     elapsed_ms = (time.perf_counter() - _TRACE_START) * 1000.0
-    print(
+    logger.info(
         f"[mem rank={rank} +{elapsed_ms:9.1f}ms] {label} "
         f"cur={cur:.2f}gb peak={peak:.2f}gb reserved={reserved:.2f}gb free={free:.2f}gb "
-        f"retries={s.get('num_alloc_retries', 0)} ooms={s.get('num_ooms', 0)}",
-        flush=True,
+        f"retries={s.get('num_alloc_retries', 0)} ooms={s.get('num_ooms', 0)}"
     )
-    sys.stdout.flush()
