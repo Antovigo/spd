@@ -3,8 +3,8 @@
 #   pool_a(bl8, n=160) + chunk(bl16, dp=80) = 240 GPU (30 nodes)
 # Per-GPU memory unchanged from the 96-GPU run (pool_a ~174GB plateau, confirmed on p-0194b6f5).
 # Within the 256 normal-QoS quota → non-preemptible → clean step_ms for scaling measurement.
-# NOTE: LR still at the batch-512 value (5e-5). Throughput probe — scale LR before long training
-#   (batch 2.5x: ~sqrt -> ~7.9e-5, or linear -> 1.25e-4).
+# LR: sqrt batch-scaled off the batch-512 base (sqrt(1280/512)=1.58x): components+ci_fn 5e-5->7.9e-5,
+#   faith-warmup 1e-3->1.58e-3. PPGD adversary step-size (0.01) left as-is (per-source, not batch-averaged).
 # Launch: pd-lm-2pool <this> --time 2-00:00:00   (omit --qos => normal)
 cadence:
   keep_last_n_checkpoints: 2
@@ -72,7 +72,7 @@ pd:
     lr_schedule:
       final_val_frac: 0.1
       fn_type: cosine
-      start_val: 5.0e-05
+      start_val: 7.9e-05
       warmup_pct: 0.0
     weight_decay: 0.0
   components_optimizer:
@@ -83,7 +83,7 @@ pd:
     lr_schedule:
       final_val_frac: 0.1
       fn_type: cosine
-      start_val: 5.0e-05
+      start_val: 7.9e-05
       warmup_pct: 0.0
     weight_decay: 0.0
   decomposition_targets:
@@ -93,7 +93,7 @@ pd:
     module_pattern: layers.18.mlp.up_proj
   - C: 24576
     module_pattern: layers.18.mlp.down_proj
-  faithfulness_warmup_lr: 0.001
+  faithfulness_warmup_lr: 0.00158
   faithfulness_warmup_steps: 400
   faithfulness_warmup_weight_decay: 0.0
   identity_decomposition_targets: null
