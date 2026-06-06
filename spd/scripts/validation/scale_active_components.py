@@ -7,16 +7,15 @@ its lower-leaky causal importance exceeds `--ci-thr`. At factor 1.0 this is the 
 active-component reconstruction; smaller/larger factors scale every active component's
 contribution down/up uniformly.
 
-For each prompt the tracked next-token is fixed once to the original model's top-1 prediction at
-the prompt's last (non-pad) position, then its logit is followed across all factors. Two logits
-are recorded: the **pre-RMSnorm** logit (the residual stream projected straight onto the unembed
-row, skipping the final `ln_f`) and the standard **post-RMSnorm** logit. The pre-RMSnorm logit
-exposes residual-stream magnitude growth that the final RMSNorm would otherwise renormalise away.
-Reconstruction quality is the KL divergence to the original model at the last position (and,
-separately, averaged over the prompt's real positions). The original model's own logits at the
-same position are recorded as a flat baseline.
+At every (prompt, position) the tracked next-token is the original model's top-1 prediction at
+that position, then its logit is followed across all factors. Two logits are recorded: the
+**pre-RMSnorm** logit (the residual stream projected straight onto the unembed row, skipping the
+final `ln_f`) and the standard **post-RMSnorm** logit. The pre-RMSnorm logit exposes
+residual-stream magnitude growth that the final RMSNorm would otherwise renormalise away.
+Reconstruction quality is the KL divergence to the original model at each position. The original
+model's own logits at the same position are recorded as a baseline.
 
-Prompts-based LM tasks only (needs a per-prompt target token and a well-defined last position).
+Prompts-based LM tasks only (needs per-position target tokens and well-defined real positions).
 Only `LlamaSimpleMLP`-style targets are supported (final norm `ln_f`, unembed `lm_head`).
 
 Usage:
@@ -26,8 +25,9 @@ Usage:
         [--output=PATH] [--output-fig=PATH]
 
 Output files (default in the decomposed model's folder):
-- `scale_active_components.tsv` — one row per (prompt, factor).
-- `scale_active_components.png` — pre-RMSnorm logit, post-RMSnorm logit, and KL vs factor.
+- `scale_active_components.tsv` — one row per (prompt, position, factor).
+- `scale_active_components.png` — pre-RMSnorm logit, post-RMSnorm logit, and KL vs factor, with
+  one line per (prompt, position).
 """
 
 import csv
@@ -61,15 +61,14 @@ from spd.spd_types import ModelPath
 
 FIELDS = [
     "prompt",
+    "pos",
     "factor",
-    "last_pos",
     "n_active",
     "target_token",
     "target_token_str",
     "pre_rmsnorm_logit",
     "post_rmsnorm_logit",
-    "kl_last",
-    "kl_mean",
+    "kl",
     "orig_pre_rmsnorm_logit",
     "orig_post_rmsnorm_logit",
 ]
@@ -96,26 +95,20 @@ def _target_logits(
     pre_resid: Tensor,  # (batch, seq, d_model) — input to ln_f
     norm: nn.Module,
     unembed: Tensor,  # (vocab, d_model)
-    target_token: list[int],  # (batch,)
-    last_pos: list[int],  # (batch,)
-) -> tuple[list[float], list[float]]:
-    """Return per-prompt (pre_rmsnorm_logit, post_rmsnorm_logit) for each prompt's target token.
+    target_token: Tensor,  # (batch, seq)
+) -> tuple[Tensor, Tensor]:
+    """Return per-(prompt, pos) (pre_rmsnorm_logit, post_rmsnorm_logit), each (batch, seq).
 
     The pre-RMSnorm logit projects the raw residual stream onto the target unembed row; the
     post-RMSnorm logit applies `ln_f` first (the model's actual logit).
     """
-    batch_size = pre_resid.shape[0]
-    rows = torch.arange(batch_size, device=pre_resid.device)
-    pos = torch.tensor(last_pos, device=pre_resid.device)
-    tgt = torch.tensor(target_token, device=pre_resid.device)
+    pre = pre_resid.float()  # (batch, seq, d_model)
+    post = norm(pre_resid).float()  # (batch, seq, d_model)
+    w_target = unembed[target_token].float()  # (batch, seq, d_model)
 
-    pre_last = pre_resid[rows, pos].float()  # (batch, d_model)
-    post_last = norm(pre_resid)[rows, pos].float()  # (batch, d_model)
-    w_target = unembed[tgt].float()  # (batch, d_model)
-
-    pre_logit = (pre_last * w_target).sum(dim=-1)
-    post_logit = (post_last * w_target).sum(dim=-1)
-    return pre_logit.cpu().tolist(), post_logit.cpu().tolist()
+    pre_logit = (pre * w_target).sum(dim=-1)  # (batch, seq)
+    post_logit = (post * w_target).sum(dim=-1)  # (batch, seq)
+    return pre_logit, post_logit
 
 
 def _kl_per_pos(orig_logits: Tensor, other_logits: Tensor) -> Tensor:
@@ -136,8 +129,8 @@ def scale_active_components(
     output: str | None = None,
     output_fig: str | None = None,
 ) -> tuple[Path, Path]:
-    """Sweep the active-component amplification factor and write the per-(prompt, factor) TSV +
-    a figure of pre/post-RMSnorm next-token logit and KL vs factor."""
+    """Sweep the active-component amplification factor and write the per-(prompt, position, factor)
+    TSV + a figure of pre/post-RMSnorm next-token logit and KL vs factor."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     spd_model, config, run_dir = load_spd_run(model_path)
@@ -230,12 +223,11 @@ def _run(
             pre_weight_acts=orig_out.cache, sampling=config_sampling
         )
 
-        rows_t = torch.arange(batch_size, device=device)
-        pos_t = torch.tensor(last_pos, device=device)
-        target_token = orig_logits[rows_t, pos_t].argmax(dim=-1).cpu().tolist()
+        # Per-(prompt, pos) target token: the original model's top-1 prediction at that position.
+        target_token = orig_logits.argmax(dim=-1)  # (batch, seq)
 
         orig_pre_logit, orig_post_logit = _target_logits(
-            orig_pre_resid, norm, unembed, target_token, last_pos
+            orig_pre_resid, norm, unembed, target_token
         )
 
         # Binary per-(prompt, pos, component) active mask, shared across factors. Inactive
@@ -244,15 +236,23 @@ def _run(
             name: (ci_outputs.lower_leaky[name] > ci_thr).to(orig_pre_resid.dtype)
             for name in spd_model.module_to_c
         }
-        # Active-component count at each prompt's last position is constant across factors.
-        per_prompt_active = torch.zeros(batch_size, device=device)
+        # Active-component count at each (prompt, pos) is constant across factors.
+        n_active_grid = torch.zeros(batch.shape, device=device)  # (batch, seq)
         for m in active_masks.values():
-            per_prompt_active += m[rows_t, pos_t].sum(dim=-1)
-        n_active_per_prompt = per_prompt_active.int().cpu().tolist()
+            n_active_grid += m.sum(dim=-1)
+        n_active = n_active_grid.int().cpu().tolist()
+
+        rows_t = torch.arange(batch_size, device=device)
+        pos_t = torch.tensor(last_pos, device=device)
+        n_active_last = int(n_active_grid[rows_t, pos_t].sum().item())
         logger.info(
-            f"{sum(n_active_per_prompt)} active component-firings across {batch_size} prompts "
+            f"{n_active_last} active component-firings across {batch_size} prompts "
             f"at their last position (ci_thr={ci_thr})"
         )
+
+        orig_pre = orig_pre_logit.cpu().tolist()
+        orig_post = orig_post_logit.cpu().tolist()
+        target_token_list = target_token.cpu().tolist()
 
         rows: list[dict[str, Any]] = []
         for factor in tqdm(factors, desc="factors"):
@@ -263,70 +263,76 @@ def _run(
                 assert isinstance(dec_logits, Tensor)
                 dec_pre_resid = cap["resid"]
 
-            pre_logit, post_logit = _target_logits(
-                dec_pre_resid, norm, unembed, target_token, last_pos
-            )
+            pre_logit, post_logit = _target_logits(dec_pre_resid, norm, unembed, target_token)
             kl = _kl_per_pos(orig_logits, dec_logits)  # (batch, seq)
-            kl_last = kl[rows_t, pos_t].cpu().tolist()
-            kl_mean = [kl[b, : last_pos[b] + 1].mean().item() for b in range(batch_size)]
+            pre_l = pre_logit.cpu().tolist()
+            post_l = post_logit.cpu().tolist()
+            kl_l = kl.cpu().tolist()
 
             for b in range(batch_size):
-                rows.append(
-                    {
-                        "prompt": b,
-                        "factor": factor,
-                        "last_pos": last_pos[b],
-                        "n_active": n_active_per_prompt[b],
-                        "target_token": target_token[b],
-                        "target_token_str": escape_tsv_value(tokenizer.decode([target_token[b]])),
-                        "pre_rmsnorm_logit": pre_logit[b],
-                        "post_rmsnorm_logit": post_logit[b],
-                        "kl_last": kl_last[b],
-                        "kl_mean": kl_mean[b],
-                        "orig_pre_rmsnorm_logit": orig_pre_logit[b],
-                        "orig_post_rmsnorm_logit": orig_post_logit[b],
-                    }
-                )
+                for pos in range(last_pos[b] + 1):
+                    rows.append(
+                        {
+                            "prompt": b,
+                            "pos": pos,
+                            "factor": factor,
+                            "n_active": n_active[b][pos],
+                            "target_token": target_token_list[b][pos],
+                            "target_token_str": escape_tsv_value(
+                                tokenizer.decode([target_token_list[b][pos]])
+                            ),
+                            "pre_rmsnorm_logit": pre_l[b][pos],
+                            "post_rmsnorm_logit": post_l[b][pos],
+                            "kl": kl_l[b][pos],
+                            "orig_pre_rmsnorm_logit": orig_pre[b][pos],
+                            "orig_post_rmsnorm_logit": orig_post[b][pos],
+                        }
+                    )
     return rows
 
 
-def _mean_std_over_prompts(
-    rows: list[dict[str, Any]], factors: list[float], key: str
-) -> tuple[np.ndarray, np.ndarray]:
-    """Aggregate a per-(prompt, factor) column into mean/std over prompts, one entry per factor."""
-    mean = np.empty(len(factors))
-    std = np.empty(len(factors))
-    for i, factor in enumerate(factors):
-        vals = np.array([r[key] for r in rows if r["factor"] == factor])
-        mean[i] = vals.mean()
-        std[i] = vals.std()
-    return mean, std
-
-
 def _plot(rows: list[dict[str, Any]], factors: list[float], fig_path: Path) -> None:
-    """Three stacked panels (shared x = factor): pre-RMSnorm logit, post-RMSnorm logit, KL."""
+    """Grid of panels: three rows (pre-RMSnorm logit, post-RMSnorm logit, KL) and one column per
+    (prompt, position). The original model's per-(prompt, position) logit is drawn as a horizontal
+    baseline in each logit panel."""
     x = np.array(factors)
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+
+    by_line: dict[tuple[int, int], dict[float, dict[str, Any]]] = {}
+    for r in rows:
+        by_line.setdefault((r["prompt"], r["pos"]), {})[r["factor"]] = r
+    lines = sorted(by_line)
 
     panels = [
-        ("pre_rmsnorm_logit", "orig_pre_rmsnorm_logit", "pre-RMSnorm next-token logit", False),
-        ("post_rmsnorm_logit", "orig_post_rmsnorm_logit", "post-RMSnorm next-token logit", False),
-        ("kl_last", None, "KL(orig ‖ scaled) at last position", True),
+        ("pre_rmsnorm_logit", "orig_pre_rmsnorm_logit", "pre-RMSnorm logit", False),
+        ("post_rmsnorm_logit", "orig_post_rmsnorm_logit", "post-RMSnorm logit", False),
+        ("kl", None, "KL(orig ‖ scaled)", True),
     ]
-    for ax, (key, baseline_key, ylabel, log_y) in zip(axes, panels, strict=True):
-        mean, std = _mean_std_over_prompts(rows, factors, key)
-        ax.plot(x, mean, color="C0", marker="o", ms=3, label="scaled (mean over prompts)")
-        ax.fill_between(x, mean - std, mean + std, color="C0", alpha=0.2, label="±1 std")
-        if baseline_key is not None:
-            base_mean, _ = _mean_std_over_prompts(rows, factors, baseline_key)
-            ax.axhline(base_mean[0], color="C3", ls="--", label="original model")
-        ax.axvline(1.0, color="gray", ls=":", lw=1, label="factor = 1.0")
-        ax.set_ylabel(ylabel)
-        ax.grid(alpha=0.3)
-        if log_y:
-            ax.set_yscale("log")
-    axes[0].legend(fontsize=8, loc="best")
-    axes[-1].set_xlabel("active-component amplification factor")
+    fig, axes = plt.subplots(
+        len(panels), len(lines), figsize=(3 * len(lines), 9), sharex=True, squeeze=False
+    )
+    for col, line in enumerate(lines):
+        by_factor = by_line[line]
+        first = by_factor[factors[0]]
+        for row, (key, baseline_key, ylabel, log_y) in enumerate(panels):
+            ax = axes[row][col]
+            y = np.array([by_factor[f][key] for f in factors])
+            ax.plot(x, y, color="C0", marker="o", ms=3, label="scaled")
+            if baseline_key is not None:
+                ax.axhline(first[baseline_key], color="C3", ls="--", label="original model")
+            ax.axvline(1.0, color="gray", ls=":", lw=1, label="factor = 1.0")
+            ax.grid(alpha=0.3)
+            if log_y:
+                ax.set_yscale("log")
+            if col == 0:
+                ax.set_ylabel(ylabel)
+            if row == 0:
+                prompt, pos = line
+                ax.set_title(
+                    f"prompt {prompt} · pos {pos}\n→ {first['target_token_str']!r}", fontsize=8
+                )
+            if row == len(panels) - 1:
+                ax.set_xlabel("factor")
+    axes[0][0].legend(fontsize=7, loc="best")
     fig.suptitle("Scaling active components vs. next-token output")
     fig.tight_layout()
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
