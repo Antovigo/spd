@@ -427,3 +427,29 @@ Output TSV (default `scale_active_components.tsv` in the decomposed model's fold
 - orig_pre_rmsnorm_logit, orig_post_rmsnorm_logit (the original model's baseline logits)
 
 Output figure (default `scale_active_components.png`). Three stacked panels sharing the x-axis (the amplification factor): pre-RMSnorm logit, post-RMSnorm logit (both: mean over prompts ±1 std, with the original-model baseline as a dashed line), and `kl_last` (mean ±1 std, log y-axis). A dotted vertical line marks `factor = 1.0`.
+
+**vu_amplification.py**
+args:
+- the path to a decomposed model
+- the path to a list of components (TSV from `find_alive_components.py`; only the `layer`, `matrix`, `component` columns are used)
+--output: overrides the output TSV path
+--output-fig: overrides the output figure path
+
+Measures, per component, how much it amplifies its own read→write (V→U) direction relative to the original weight. A `LinearComponents` component `c` reads along `V[:, c]` and writes `(V[:, c]ᵀ x) · U[c, :]`, so its rank-1 weight contribution is `U[c, :] ⊗ V[:, c]`. Along its own unit read direction `V̂_c` and unit write direction `Û_c`, the component's gain is the `(Û_c, V̂_c)` matrix element of that rank-1 weight, `‖V_c‖·‖U_c‖`. The original target weight's gain along the SAME direction pair is `Û_cᵀ W_orig V̂_c` (`W_orig` from `ComponentModel.target_weight`). The amplification is their ratio:
+
+```
+amplification_c = (‖V_c‖ · ‖U_c‖) / (Û_cᵀ · W_orig · V̂_c)
+```
+
+`> 1` means the component pushes harder in its V→U direction than the whole original weight does there — the other components plus delta must cancel the excess, since `Σ_c V_c U_cᵀ + delta = W_orig`. The ratio is invariant to the component's internal sign convention (flipping both `V_c` and `U_c` is a no-op on numerator and denominator). A negative ratio means the original weight maps the read direction onto the *opposite* write direction. This is a weight-only analysis — no data is run; the input component list defines which components to score (e.g. the alive set, or the CI-saturated set on a particular prompt).
+
+Only `LinearComponents` modules are supported. Components are read from the input TSV, looked up via `(layer, matrix)`, and asserted to have non-zero `V` and `U`.
+
+Output TSV (default `vu_amplification.tsv` in the decomposed model's folder). One row per input component, columns:
+- layer, matrix, component
+- v_norm, u_norm (`‖V_c‖`, `‖U_c‖`)
+- component_gain (`‖V_c‖·‖U_c‖`, the numerator)
+- orig_gain (`Û_cᵀ W_orig V̂_c`, the denominator)
+- amplification (`component_gain / orig_gain`)
+
+Output figure (default `vu_amplification.png`). Two panels, points colored by matrix: (left) a scatter of `orig_gain` (x) vs `component_gain` (y) with the `y = x` reference line — points above the line amplify; (right) the amplification ratio per component, sorted descending, on a symlog y-axis with a dashed line at `amplification = 1`.

@@ -351,3 +351,33 @@ uv run python -m spd.scripts.validation.scale_active_components \
 uv run python -m spd.scripts.validation.scale_active_components \
     "$MODEL_PATH" --prompts="$PROMPTS" \
     --min-factor=0.05 --max-factor=3.0 --n-factors=60 --ci-thr=0.2
+
+# --- 17. V->U directional amplification vs. the original model ---------------
+# Per component, compare its read->write gain (||V_c||*||U_c||) against the
+# original weight's gain along the same directions (U_hat_c^T W_orig V_hat_c).
+# Ratio > 1 means the component amplifies its V->U direction more than the
+# original model does there. Weight-only (no data run); the input TSV just
+# selects which components to score. Writes vu_amplification.tsv + .png.
+
+# numpy/pandas 4L (s-0c454b30), the alive set (run find_alive_components first):
+RUN_DIR=~/spd_out/spd/s-0c454b30
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+uv run python -m spd.scripts.validation.vu_amplification \
+    "$MODEL_PATH" "$RUN_DIR/alive_components.tsv"
+
+# jose (larger, general decomposition): score only the components that are
+# CI-saturated (lower-leaky CI == 1; leaky_hard caps at 1.0) on a single prompt.
+# Select them by running find_alive_components on a one-line prompts file with a
+# near-1 threshold, then feed that TSV to vu_amplification.
+RUN_DIR_JOSE=~/spd_out/spd/jose
+MODEL_PATH_JOSE=$(ls -t "$RUN_DIR_JOSE"/model_*.pth | head -n 1)
+printf 'import numpy as\n' > "$RUN_DIR_JOSE/numpy_prompt.txt"
+
+uv run python -m spd.scripts.validation.find_alive_components \
+    "$MODEL_PATH_JOSE" --prompts="$RUN_DIR_JOSE/numpy_prompt.txt" \
+    --ci-thr=0.999999 --output="$RUN_DIR_JOSE/ci1_numpy_components.tsv"
+
+uv run python -m spd.scripts.validation.vu_amplification \
+    "$MODEL_PATH_JOSE" "$RUN_DIR_JOSE/ci1_numpy_components.tsv" \
+    --output="$RUN_DIR_JOSE/vu_amplification_ci1_numpy.tsv" \
+    --output-fig="$RUN_DIR_JOSE/vu_amplification_ci1_numpy.png"
