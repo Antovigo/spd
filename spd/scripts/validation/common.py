@@ -12,18 +12,20 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
-from spd.configs import CompletenessTaskConfig, Config, LMTaskConfig
+from spd.configs import CompletenessTaskConfig, Config, LMTaskConfig, ResidMLPTaskConfig
 from spd.data import DatasetConfig, create_data_loader
 from spd.experiments.completeness.models import CompletenessTargetRunInfo, CopyTaskDataset
 from spd.experiments.lm.prompts_dataset import (
     StaticBatchLoader,
     create_prompts_data_loader,
 )
+from spd.experiments.resid_mlp.models import ResidMLP, ResidMLPTargetRunInfo
+from spd.experiments.resid_mlp.resid_mlp_dataset import ResidMLPDataset
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.spd_types import ModelPath
 from spd.utils.data_utils import DatasetGeneratedDataLoader
 
-TaskConfig = LMTaskConfig | CompletenessTaskConfig
+TaskConfig = LMTaskConfig | CompletenessTaskConfig | ResidMLPTaskConfig
 DataLoaderT = DataLoader[Any] | StaticBatchLoader | DatasetGeneratedDataLoader[Any]
 
 
@@ -43,8 +45,8 @@ def resolve_task_config(
 ) -> TaskConfig:
     """Return the target or nontarget task config, erroring if nontarget is missing.
 
-    Supports `LMTaskConfig` and `CompletenessTaskConfig`. `prompts_override` and `split_override`
-    are LM-specific and error out for completeness tasks.
+    Supports `LMTaskConfig`, `CompletenessTaskConfig`, and `ResidMLPTaskConfig`. `prompts_override`
+    and `split_override` are LM-specific and error out for the non-LM tasks.
     """
     if use_nontarget:
         assert config.nontarget_task_config is not None, (
@@ -54,14 +56,15 @@ def resolve_task_config(
     else:
         task_config = config.task_config
 
-    assert isinstance(task_config, (LMTaskConfig, CompletenessTaskConfig)), (
-        f"Validation scripts only support LM or completeness tasks, "
+    assert isinstance(task_config, (LMTaskConfig, CompletenessTaskConfig, ResidMLPTaskConfig)), (
+        f"Validation scripts only support LM, completeness, or resid_mlp tasks, "
         f"got {type(task_config).__name__}"
     )
 
-    if isinstance(task_config, CompletenessTaskConfig):
-        assert prompts_override is None, "--prompts is LM-only; not supported for completeness"
-        assert split_override is None, "--split is LM-only; not supported for completeness"
+    if isinstance(task_config, (CompletenessTaskConfig, ResidMLPTaskConfig)):
+        kind = "completeness" if isinstance(task_config, CompletenessTaskConfig) else "resid_mlp"
+        assert prompts_override is None, f"--prompts is LM-only; not supported for {kind}"
+        assert split_override is None, f"--split is LM-only; not supported for {kind}"
         return task_config
 
     assert prompts_override is None or split_override is None, (
@@ -81,9 +84,9 @@ def resolve_task_config(
 
 
 def is_prompt_task(task_config: TaskConfig) -> bool:
-    """Prompt-based LM tasks run exactly one batch containing every prompt. Completeness is not
-    prompt-based."""
-    if isinstance(task_config, CompletenessTaskConfig):
+    """Prompt-based LM tasks run exactly one batch containing every prompt. Completeness and
+    resid_mlp are not prompt-based."""
+    if isinstance(task_config, (CompletenessTaskConfig, ResidMLPTaskConfig)):
         return False
     return task_config.prompts_file is not None
 
@@ -96,7 +99,9 @@ def build_lm_loader(
     For LM dataset-based tasks, `batch_size_override` replaces `config.batch_size` if set. For
     prompts-based LM tasks the override is ignored — the batch always contains every prompt. For
     completeness tasks, a `CopyTaskDataset` is constructed from the target model's train config
-    (read from `config.pretrained_model_path`) and wrapped in a `DatasetGeneratedDataLoader`.
+    (read from `config.pretrained_model_path`) and wrapped in a `DatasetGeneratedDataLoader`. For
+    resid_mlp tasks, a `ResidMLPDataset` is built from the target model's `n_features` and the
+    train run's `synced_inputs`.
     """
     if isinstance(task_config, CompletenessTaskConfig):
         assert config.pretrained_model_path is not None, (
@@ -108,6 +113,28 @@ def build_lm_loader(
             vocab_size=model_config.vocab_size,
             eq_token=model_config.eq_token,
             device="cpu",  # iterate_input_ids moves to target device
+        )
+        batch_size = batch_size_override if batch_size_override is not None else config.batch_size
+        return DatasetGeneratedDataLoader(dataset, batch_size=batch_size)
+
+    if isinstance(task_config, ResidMLPTaskConfig):
+        assert config.pretrained_model_path is not None, (
+            "resid_mlp task needs config.pretrained_model_path to read n_features / synced_inputs"
+        )
+        target_run_info = ResidMLPTargetRunInfo.from_path(config.pretrained_model_path)
+        target_model = ResidMLP.from_run_info(target_run_info)
+        dataset = ResidMLPDataset(
+            n_features=target_model.config.n_features,
+            feature_probability=task_config.feature_probability,
+            device="cpu",  # iterate_input_ids moves to target device
+            calc_labels=False,
+            label_type=None,
+            act_fn_name=None,
+            label_fn_seed=None,
+            label_coeffs=None,
+            data_generation_type=task_config.data_generation_type,
+            synced_inputs=target_run_info.config.synced_inputs,
+            active_indices=task_config.active_indices,
         )
         batch_size = batch_size_override if batch_size_override is not None else config.batch_size
         return DatasetGeneratedDataLoader(dataset, batch_size=batch_size)
