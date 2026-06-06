@@ -392,3 +392,38 @@ Output TSV (default filename `completeness.tsv`, or `completeness_nontarget.tsv`
 - mean_kl_circuit_baseline (mean over positions of the case-a KL with no component ablated; same value across all rows for a given prompt; subtract from `mean_kl_circuit` to isolate X's marginal effect)
 - mean_kl_all (mean over positions of KL under case b — every component + delta, X off)
 - max_ci (max over positions of the component's lower-leaky causal importance on that sequence)
+
+**scale_active_components.py**
+args:
+- the path to a decomposed model
+--prompts: optional override for the LM `prompts_file`
+--ci-thr: lower-leaky CI threshold above which a component counts as active on a given (prompt, position) (default 0.1)
+--min-factor / --max-factor / --n-factors: the amplification-factor sweep, `np.linspace(min, max, n)` (defaults 0.1, 2.0, 20 — so 0.1, 0.2, …, 2.0, which includes 1.0)
+--output: overrides the output TSV path
+--output-fig: overrides the output figure path
+
+Measures how far the active components can be scaled up or down before the next-token output changes. The model is run on **only its active components** — every active component's mask is set to a single amplification `factor` (binary mask: `factor` where lower-leaky CI > `--ci-thr`, else 0), the delta component is OFF, and inactive components are off. At `factor = 1.0` this is the binary active-component reconstruction; smaller/larger factors scale every active component's contribution down/up uniformly. The factor is swept over the linspace and one forward pass is run per factor (plus one baseline pass of the original model).
+
+For each prompt the tracked next-token is fixed **once** to the original model's top-1 prediction at the prompt's last (non-pad) position — the prompts file is re-tokenised to recover each prompt's true length, so `last_pos = len(tokens) - 1`. That same token's logit is then followed across every factor (the argmax of the scaled model is not re-evaluated, so the curves are comparable across factors).
+
+Two logits are recorded per (prompt, factor):
+- **pre-RMSnorm logit**: the residual stream fed into the final norm (`ln_f`), projected straight onto the target token's unembed row (`lm_head.weight[target]`), skipping `ln_f`. This exposes residual-stream magnitude growth — scaling active components up grows the residual in the unembed direction roughly linearly, which is otherwise hidden by the final norm.
+- **post-RMSnorm logit**: the model's actual logit (`ln_f` then unembed). The final RMSNorm renormalises the residual, so this stays nearly flat once the active components are at full strength.
+
+Reconstruction quality is the KL divergence to the original model: `kl_last` at the prompt's last position (the prediction site, matching the logit) and `kl_mean` averaged over the prompt's real positions (`0 .. last_pos`). The original model's own pre-/post-RMSnorm logits for the same token are recorded as a flat baseline (constant across factors, duplicated on each row for easy plotting).
+
+Implementation. One baseline forward pass of the original model (`cache_type="input"`) yields the original logits, the CI (via `calc_causal_importances` → `lower_leaky`) used to build the per-(prompt, position, component) active mask, and — via a `forward_pre_hook` on `ln_f` — the original pre-RMSnorm residual. The active mask is built once and reused, scaled by each factor; component masks carry no delta (`make_mask_infos(..., weight_deltas_and_masks=None)`). The pre-RMSnorm residual of each scaled forward pass is captured by the same `ln_f` hook.
+
+Only prompts-based LM tasks are supported (needs a per-prompt target token and a well-defined last position), and only `LlamaSimpleMLP`-style targets (final norm `ln_f`, unembed `lm_head`).
+
+Output TSV (default `scale_active_components.tsv` in the decomposed model's folder). One row per (prompt, factor), columns:
+- prompt (the prompt's index)
+- factor (the amplification factor)
+- last_pos (the prompt's last non-pad position)
+- n_active (number of active component-firings at this prompt's last position)
+- target_token, target_token_str (the tracked next-token id and decoded string)
+- pre_rmsnorm_logit, post_rmsnorm_logit (scaled model's logits for the target token)
+- kl_last (KL at the last position), kl_mean (mean KL over real positions)
+- orig_pre_rmsnorm_logit, orig_post_rmsnorm_logit (the original model's baseline logits)
+
+Output figure (default `scale_active_components.png`). Three stacked panels sharing the x-axis (the amplification factor): pre-RMSnorm logit, post-RMSnorm logit (both: mean over prompts ±1 std, with the original-model baseline as a dashed line), and `kl_last` (mean ±1 std, log y-axis). A dotted vertical line marks `factor = 1.0`.

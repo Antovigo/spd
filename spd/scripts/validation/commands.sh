@@ -328,3 +328,26 @@ uv run python -m spd.scripts.validation.find_alive_components "$MODEL_PATH_JOSE"
 uv run python -m spd.scripts.validation.completeness \
     "$MODEL_PATH_JOSE" "$RUN_DIR_JOSE/alive_components.tsv" \
     --split=train --n-batches=10 --batch-size=8
+
+# --- 16. Scale active components vs. next-token output -----------------------
+# Run the decomposition on ONLY its active components (delta off), scaling every
+# active component's mask by a single factor swept 0.1 -> 2.0. For each prompt,
+# track the original model's top-1 next-token and record its pre-RMSnorm logit
+# (residual projected onto the unembed row, skipping ln_f), its post-RMSnorm
+# logit, and the KL to the original model. Reveals that scaling up grows the
+# pre-RMSnorm logit ~linearly while the final RMSNorm keeps the post-RMSnorm
+# logit (and KL) flat once components are at full strength. Writes
+# scale_active_components.tsv + .png to the run folder.
+
+# numpy/pandas 4L (s-0c454b30):
+RUN_DIR=~/spd_out/spd/s-0c454b30
+MODEL_PATH=$(ls -t "$RUN_DIR"/model_*.pth | head -n 1)
+PROMPTS=~/SPD/batch_commands/numpy/reference_4L/prompts/numpy_and_pandas.txt
+
+uv run python -m spd.scripts.validation.scale_active_components \
+    "$MODEL_PATH" --prompts="$PROMPTS"
+
+# Finer / wider sweep and a higher activity threshold:
+uv run python -m spd.scripts.validation.scale_active_components \
+    "$MODEL_PATH" --prompts="$PROMPTS" \
+    --min-factor=0.05 --max-factor=3.0 --n-factors=60 --ci-thr=0.2
