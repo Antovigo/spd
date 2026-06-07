@@ -23,6 +23,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.ci_fns import CiConfig
@@ -42,9 +43,36 @@ DEFAULT_KEEP_LAST_N_TRAINING = 3
 """How many ``training_<step>.pth`` files to keep after consolidation. All
 ``model_<step>.pth`` files are always kept (they're the downstream artifact)."""
 
+DEFAULT_KEEP_LAST_N_PPGD = 1
+"""How many ``ppgd_<step>/`` shard dirs to keep. These are huge (the data-shaped
+adversarial sources — TBs at large batch), so we keep only the latest: a standard
+resume uses the newest checkpoint, and an older checkpoint with its shards pruned
+still resumes (the adversary re-warms via ``n_warmup``)."""
+
 
 def step_scratch_dir(scratch_dir: Path, step: int) -> Path:
     return scratch_dir / f"step_{step}"
+
+
+def ppgd_shard_dirname(step: int) -> str:
+    """Dir name (under the run's out_dir) holding the step's per-rank PPGD source shards."""
+    return f"ppgd_{step}"
+
+
+def load_ppgd_shard(ppgd_shard_dir: Path | None, rank: int) -> dict[str, Any] | None:
+    """Read this rank's PPGD source shard for resume.
+
+    Returns ``None`` (⇒ the adversary re-warms from scratch) when no shard dir was
+    given or this rank's shard is absent (e.g. an old checkpoint whose shards were
+    pruned, or a non-adversary rank).
+    """
+    if ppgd_shard_dir is None:
+        return None
+    shard = ppgd_shard_dir / f"rank_{rank}.pth"
+    if not shard.is_file():
+        logger.warning(f"resume: no PPGD shard {shard}; adversary rank {rank} will re-warm")
+        return None
+    return torch.load(shard, map_location="cpu", weights_only=False)
 
 
 def consolidate_step(
@@ -94,15 +122,44 @@ def consolidate_step(
     all_sites: tuple[str, ...] = tuple(meta["all_sites"])
     c_per_site: dict[str, int] = meta["c_per_site"]
 
-    partials: list[dict[str, Any]] = []
+    # The PPGD sources are data-shaped (batch x seq x n_components) and don't fit one rank
+    # when aggregated, so they stay sharded: each adversary rank's sources go straight to
+    # ppgd_<step>/rank_<r>.pth (read back per-rank on resume), never into the central state.
+    ppgd_dir = out_dir / ppgd_shard_dirname(step)
+
+    # Stream the partials one at a time: collect the (small, parameter-shaped) model params +
+    # optimizer state, write the (large, data-shaped) PPGD shard out, then drop the partial.
+    # Peak RAM is ~one partial + the assembled CPU model, not the full set of partials at once
+    # (which is what OOM'd at scale: 240 partials x ~24 GB = 4.4 TB).
+    collected_model_params: dict[str, Tensor] = {}
+    components_optimizer: dict[str, dict[str, Any]] = {}
+    ci_fn_optimizer: dict[str, dict[str, Any]] = {}
+    n_ppgd_shards = 0
     for r in range(world_size):
-        partials.append(
-            torch.load(step_dir / f"rank_{r}.pth", map_location="cpu", weights_only=False)
-        )
-    logger.info(f"consolidate: read {world_size} partials for step {step}")
+        partial = torch.load(step_dir / f"rank_{r}.pth", map_location="cpu", weights_only=False)
+        for k, v in partial["model_params"].items():
+            assert k not in collected_model_params, f"duplicate model param {k!r} across partials"
+            collected_model_params[k] = v
+        match partial["pool"]:
+            case "chunkwise":
+                components_optimizer.update(partial["optimizer_by_name"])
+            case "ci" | "pool_a":
+                ci_fn_optimizer.update(partial["optimizer_by_name"])
+            case "ppgd":
+                pass
+            case other:
+                raise AssertionError(f"unknown pool {other!r} in rank-{r} partial")
+        if "ppgd" in partial:
+            save_file(partial["ppgd"], ppgd_dir / f"rank_{r}.pth")
+            n_ppgd_shards += 1
+        del partial
+    logger.info(
+        f"consolidate: streamed {world_size} partials for step {step} "
+        f"({n_ppgd_shards} PPGD shards -> {ppgd_dir.name}/)"
+    )
 
     model_state = assemble_model_state_dict_from_partials(
-        partials=partials,
+        collected_model_params=collected_model_params,
         target_model=target_model,
         run_batch=run_batch,
         ci_config=ci_config,
@@ -110,28 +167,6 @@ def consolidate_step(
         c_per_site=c_per_site,
         all_sites=all_sites,
     )
-
-    components_optimizer: dict[str, dict[str, Any]] = {}
-    ci_fn_optimizer: dict[str, dict[str, Any]] = {}
-    ppgd_by_rank: dict[int, dict[str, Any]] = {}
-    for r, partial in enumerate(partials):
-        pool: str = partial["pool"]
-        match pool:
-            case "chunkwise":
-                components_optimizer.update(partial["optimizer_by_name"])
-            case "ci":
-                ci_fn_optimizer.update(partial["optimizer_by_name"])
-            case "ppgd":
-                if "ppgd" in partial:
-                    ppgd_by_rank[r] = partial["ppgd"]
-            case "pool_a":
-                # 2-pool: Pool A co-locates the CI fn and the adversary on one rank,
-                # so its partial carries the ci-fn optimizer state AND the PPGD sources.
-                ci_fn_optimizer.update(partial["optimizer_by_name"])
-                if "ppgd" in partial:
-                    ppgd_by_rank[r] = partial["ppgd"]
-            case _:
-                raise AssertionError(f"unknown pool {pool!r} in rank-{r} partial")
 
     state = ThreePoolTrainingState(
         step=step,
@@ -142,7 +177,6 @@ def consolidate_step(
         component_model=model_state,
         components_optimizer=components_optimizer,
         ci_fn_optimizer=ci_fn_optimizer,
-        ppgd_state_by_rank=ppgd_by_rank,
     )
 
     model_path = out_dir / f"model_{step}.pth"
@@ -151,6 +185,7 @@ def consolidate_step(
     logger.info(f"consolidate: wrote {model_path.name} + {training_path.name}")
 
     _prune_old_training(out_dir, keep_last_n=keep_last_n_training)
+    _prune_old_ppgd(out_dir, keep_last_n=DEFAULT_KEEP_LAST_N_PPGD)
 
     shutil.rmtree(step_dir, ignore_errors=True)
     logger.info(f"consolidate: removed scratch {step_dir}")
@@ -178,6 +213,25 @@ def _prune_old_training(out_dir: Path, *, keep_last_n: int) -> None:
         # state (this file gone) is reached either way.
         path.unlink(missing_ok=True)
         logger.info(f"consolidate: pruned old {path.name}")
+
+
+def _prune_old_ppgd(out_dir: Path, *, keep_last_n: int) -> None:
+    """Delete all but the last ``keep_last_n`` ``ppgd_<step>/`` shard dirs (each is huge)."""
+    steps: list[int] = []
+    for d in out_dir.glob("ppgd_*"):
+        if not d.is_dir():
+            continue
+        try:
+            steps.append(int(d.name.removeprefix("ppgd_")))
+        except ValueError:
+            continue
+    steps.sort()
+    if len(steps) <= keep_last_n:
+        return
+    for step in steps[: len(steps) - keep_last_n]:
+        # ignore_errors: a concurrent consolidation for another step may have pruned it already.
+        shutil.rmtree(out_dir / ppgd_shard_dirname(step), ignore_errors=True)
+        logger.info(f"consolidate: pruned old {ppgd_shard_dirname(step)}/")
 
 
 def unconsolidated_steps(out_dir: Path) -> list[int]:

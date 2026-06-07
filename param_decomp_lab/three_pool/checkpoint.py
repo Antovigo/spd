@@ -14,8 +14,6 @@ CI fn from the partials, and returns its ``state_dict()`` — the same flat sche
 assembly is pure file I/O + tensor copies.
 """
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -53,7 +51,7 @@ def ci_fn_state_keys(model_state_dict_keys: set[str]) -> set[str]:
 
 def assemble_model_state_dict_from_partials(
     *,
-    partials: list[dict[str, Any]],
+    collected_model_params: dict[str, Tensor],
     target_model: nn.Module,
     run_batch: RunBatch,
     ci_config: CiConfig,
@@ -61,13 +59,14 @@ def assemble_model_state_dict_from_partials(
     c_per_site: dict[str, int],
     all_sites: tuple[str, ...],
 ) -> dict[str, Tensor]:
-    """Assemble the full LMComponentModel state_dict from per-rank scratch partials.
+    """Assemble the full LMComponentModel state_dict from the collected partial params.
 
-    Each partial's ``model_params`` holds the CPU tensors that rank owns (a slice
-    of its own ``component_model.state_dict()``): chunk leaders contribute their
-    owned sites' ``model.<site>.components.*``, the CI pool leader contributes ``ci_fn.*``.
-    The union of every partial's keys must exactly cover the full-decomposition
-    model's V/U + CI-fn keys (frozen target params come from the fresh buffer).
+    ``collected_model_params`` is the union of every rank's owned ``model_params``
+    (the caller streams the partials and merges them, so this never holds all
+    partials at once): chunk leaders contribute their owned sites'
+    ``model.<site>.components.*``, the CI pool leader contributes ``ci_fn.*``. The
+    union must exactly cover the full-decomposition model's V/U + CI-fn keys (frozen
+    target params come from the fresh buffer).
     """
     del run_batch  # the vendored LMComponentModel calls the model directly (no run_batch)
     # Target-type validation lives in LMComponentModel.build → _componentize (single source of
@@ -87,21 +86,15 @@ def assemble_model_state_dict_from_partials(
     expected_keys = set(full_cm.state_dict().keys())
     fillable_keys = {k for k in expected_keys if ".components." in k or k.startswith("ci_fn.")}
 
-    collected: dict[str, Tensor] = {}
-    for partial in partials:
-        for k, v in partial["model_params"].items():
-            assert k not in collected, f"duplicate model param {k!r} across partials"
-            collected[k] = v
-
-    assert set(collected.keys()) == fillable_keys, (
+    assert set(collected_model_params.keys()) == fillable_keys, (
         "partials do not cover the full model state_dict:\n"
-        f"  missing: {sorted(fillable_keys - set(collected))}\n"
-        f"  extra:   {sorted(set(collected) - fillable_keys)}"
+        f"  missing: {sorted(fillable_keys - set(collected_model_params))}\n"
+        f"  extra:   {sorted(set(collected_model_params) - fillable_keys)}"
     )
 
     full_state = full_cm.state_dict()
     with torch.no_grad():
-        for k, v in collected.items():
+        for k, v in collected_model_params.items():
             full_state[k].copy_(v)
 
     return {k: v.cpu() for k, v in full_state.items()}

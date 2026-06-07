@@ -92,7 +92,7 @@ from param_decomp_lab.resumption import (
 from param_decomp_lab.run_sink import ThreePoolSink
 from param_decomp_lab.seed import set_seed
 from param_decomp_lab.three_pool import ThreePoolTopology, ThreePoolTrainer
-from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME
+from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME, ppgd_shard_dirname
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 
 # Cross-pool NCCL p2p deadlock guard. An asymmetric topology (fanout>1 on a cross-pool
@@ -564,6 +564,7 @@ def _resume_main(
             target_model=target_model,
             run_batch=make_run_batch(effective_cfg.target),
             reconstruction_loss=recon_loss_kl,
+            ppgd_shard_dir=resume_cfg.from_run / ppgd_shard_dirname(resolved_step),
         )
         trainer.run(
             train_loader,

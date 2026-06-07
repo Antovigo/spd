@@ -2,7 +2,7 @@
 
 `TrainingState` is the 1-pool shape; `ThreePoolTrainingState` is the 3-pool shape.
 The two are deliberately separate (no shared base class) — common fields are
-duplicated. Pool-specific fields (e.g. `three_pool_config`, `ppgd_state_by_rank`)
+duplicated. Pool-specific fields (e.g. `three_pool_config`, `layout_fingerprint`)
 live on the concrete dataclass that needs them.
 
 Lives in its own module so both `param_decomp.optimize` /
@@ -52,11 +52,15 @@ class ThreePoolTrainingState:
     * `components_optimizer` / `ci_fn_optimizer`: per-parameter optimizer state
       keyed by parameter name, merged across the chunkwise + CI pools. Same
       shape as 1-pool's `TrainingState` — topology-independent.
-    * `ppgd_state_by_rank`: PPGD adversarial sources, keyed by PPGD rank id.
-      Genuinely rank-coupled for `PerBatchPerPositionScope` (sized by the
-      rank-local batch slice).
     * `layout_fingerprint`: 3-pool world layout summary. Checked on resume to
       flag incompatible topologies.
+
+    The PPGD adversarial sources are NOT in here. They're `per_batch_per_position`
+    (sized by `batch x seq x n_components`) — the one piece of persisted state that's
+    data-shaped rather than parameter-shaped, so aggregating it onto one rank doesn't
+    scale (~2.3 TB at batch 1280). It stays sharded per-rank in `ppgd_<step>/rank_<r>.pth`
+    next to this file; each adversary rank reads its own shard on resume. That ties a
+    PPGD resume to the same pool layout (a missing shard ⇒ the adversary re-warms).
     """
 
     step: int
@@ -67,4 +71,3 @@ class ThreePoolTrainingState:
     component_model: dict[str, Tensor]
     components_optimizer: dict[str, dict[str, Any]]
     ci_fn_optimizer: dict[str, dict[str, Any]]
-    ppgd_state_by_rank: dict[int, dict[str, Any]]

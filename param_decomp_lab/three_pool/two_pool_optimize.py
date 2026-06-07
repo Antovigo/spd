@@ -66,6 +66,7 @@ from param_decomp_lab.three_pool.checkpoint import (
 )
 from param_decomp_lab.three_pool.consolidate import (
     CONSOLIDATE_META_FILENAME,
+    load_ppgd_shard,
     step_scratch_dir,
 )
 from param_decomp_lab.three_pool.context import ChunkContext
@@ -365,13 +366,15 @@ class TwoPoolTrainer:
         target_model: nn.Module,
         run_batch: RunBatch,
         reconstruction_loss: ReconstructionLoss,
+        ppgd_shard_dir: Path | None,
     ) -> Self:
         """Reconstruct a 2-pool trainer from a canonical snapshot.
 
         The 2-pool persists the SAME ``ThreePoolTrainingState`` shape (the owned-state
         keys line up: chunkwise → ``components_optimizer``, Pool A's ci-fn →
-        ``ci_fn_optimizer``, Pool A's adversary → ``ppgd_state_by_rank``). The
-        ``three_pool_config`` slot holds the ``TwoPoolTopology`` dump.
+        ``ci_fn_optimizer``). The ``three_pool_config`` slot holds the ``TwoPoolTopology``
+        dump. ``ppgd_shard_dir`` is the run's ``ppgd_<step>/`` dir holding the per-rank
+        adversarial source shards (``None`` ⇒ the adversary re-warms from scratch).
         """
         pd_config = ThreePoolConstrainedPDConfig.model_validate(snapshot.pd_config)
         runtime_dict = {k: v for k, v in snapshot.runtime_config.items() if k != "topology"}
@@ -393,10 +396,12 @@ class TwoPoolTrainer:
             f"  saved:   {saved_fp}\n"
             f"  current: {current_fp}\n"
         )
-        trainer._load_canonical_state(snapshot)
+        trainer._load_canonical_state(snapshot, ppgd_shard_dir)
         return trainer
 
-    def _load_canonical_state(self, state: ThreePoolTrainingState) -> None:
+    def _load_canonical_state(
+        self, state: ThreePoolTrainingState, ppgd_shard_dir: Path | None
+    ) -> None:
         """Each rank extracts the slice of the canonical state it owns."""
         self.step = state.step
         local_model_keys = set(self.component_model.state_dict().keys())
@@ -412,7 +417,7 @@ class TwoPoolTrainer:
                     by_name = state.ci_fn_optimizer
             load_optimizer_state_by_name(self.optimizer, named_params, by_name)
         if isinstance(self.ctx, PoolAContext):
-            self._pending_ppgd_resume_state = state.ppgd_state_by_rank.get(self.ctx.role.rank)
+            self._pending_ppgd_resume_state = load_ppgd_shard(ppgd_shard_dir, self.ctx.role.rank)
 
     def run(
         self,
