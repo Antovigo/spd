@@ -340,7 +340,9 @@ def _fresh_main(
         seed=cfg.pd.seed,
     )
 
-    sink = init_pd_run(cfg, sink_class=OnePoolSink, group=group, tags=tags, run_id=run_id)
+    sink = init_pd_run(
+        cfg, sink_class=OnePoolSink, group=group, tags=tags, resume_wandb=False, run_id=run_id
+    )
     eval_loop = _build_eval_loop(cfg, device, dist_state, include_slow=True)
     try:
         trainer = Trainer(
@@ -407,7 +409,14 @@ def _resume_main(
     )
     run_batch = make_run_batch(effective_cfg.target)
 
-    sink = init_pd_run(effective_cfg, sink_class=OnePoolSink, group=group, tags=tags, run_id=run_id)
+    sink = init_pd_run(
+        effective_cfg,
+        sink_class=OnePoolSink,
+        group=group,
+        tags=tags,
+        resume_wandb=False,
+        run_id=run_id,
+    )
     eval_loop = _build_eval_loop(effective_cfg, device, dist_state, include_slow=True)
     try:
         trainer = Trainer.from_snapshot(

@@ -12,6 +12,7 @@ topology.
 
 from param_decomp_lab.resumption.config import (
     ResumeConfig,
+    latest_checkpoint_step,
     read_training_snapshot,
     resolve_step,
 )
@@ -20,6 +21,7 @@ from param_decomp_lab.resumption.provenance import ResumeProvenance
 __all__ = [
     "ResumeConfig",
     "ResumeProvenance",
+    "latest_checkpoint_step",
     "read_training_snapshot",
     "resolve_step",
 ]

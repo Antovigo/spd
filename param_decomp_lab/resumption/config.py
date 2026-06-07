@@ -28,6 +28,25 @@ class ResumeConfig(BaseConfig):
     `training_<step>.pth` under `from_run`."""
 
 
+def latest_checkpoint_step(run_dir: Path) -> int | None:
+    """Highest-numbered `training_<step>.pth` step under `run_dir`, or `None` if the dir
+    has no consolidated training checkpoints (or doesn't exist).
+
+    Unlike `resolve_step`, this never asserts — "no checkpoint" is a valid answer, used by
+    the SLURM-requeue self-resume path to decide between resuming in place and starting
+    fresh.
+    """
+    if not run_dir.is_dir():
+        return None
+    candidates: list[int] = []
+    for path in run_dir.glob("training_*.pth"):
+        try:
+            candidates.append(int(path.stem.removeprefix("training_")))
+        except ValueError:
+            continue
+    return max(candidates) if candidates else None
+
+
 def resolve_step(run_dir: Path, step: int | Literal["latest"]) -> int:
     """Resolve `"latest"` to the highest-numbered `training_<step>.pth` under `run_dir`.
 

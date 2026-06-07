@@ -74,6 +74,7 @@ def train(
             project=config.wandb_project,
             run_id=execution_stamp.run_id,
             config_dict=wandb_config_dict(config),
+            resume=False,
             name=run_name,
             tags=tags,
         )

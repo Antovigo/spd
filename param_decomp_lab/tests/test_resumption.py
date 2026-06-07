@@ -27,6 +27,7 @@ from param_decomp.schedule import ScheduleConfig
 from param_decomp.training_state import TrainingState
 from param_decomp_lab.resumption import (
     ResumeConfig,
+    latest_checkpoint_step,
     read_training_snapshot,
     resolve_step,
 )
@@ -173,6 +174,27 @@ def test_resolve_step_finds_latest(tmp_path: Path) -> None:
 
     assert resolve_step(parent_dir, "latest") == 4
     assert resolve_step(parent_dir, 2) == 2
+
+
+def test_latest_checkpoint_step_signals_requeue_resume(tmp_path: Path) -> None:
+    """The SLURM-requeue self-resume decision: `None` before any save (→ start fresh),
+    the highest step once saves exist (→ resume in place). Never asserts on an empty dir.
+    """
+    run_dir = tmp_path / "run"
+    assert latest_checkpoint_step(run_dir) is None  # dir doesn't exist yet
+    run_dir.mkdir()
+    assert latest_checkpoint_step(run_dir) is None  # exists but no checkpoints
+
+    trainer = Trainer(
+        target_model=TinyLinear(),
+        run_batch=_run_batch,
+        reconstruction_loss=_recon_loss,
+        pd_config=_pd_config(steps=4),
+        runtime_config=_runtime(),
+    )
+    trainer.run(_loader(), OnePoolSink.local(run_dir), _cadence())  # saves at 2 and 4
+
+    assert latest_checkpoint_step(run_dir) == 4
 
 
 def test_keep_last_n_checkpoints_prunes_older_pairs(tmp_path: Path) -> None:

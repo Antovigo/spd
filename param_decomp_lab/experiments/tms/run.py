@@ -151,7 +151,7 @@ def main(
     )
     eval_loop = _build_eval_loop(cfg, device)
 
-    sink = init_pd_run(cfg, sink_class=OnePoolSink, group=group, tags=tags)
+    sink = init_pd_run(cfg, sink_class=OnePoolSink, group=group, tags=tags, resume_wandb=False)
 
     try:
         trainer = Trainer(

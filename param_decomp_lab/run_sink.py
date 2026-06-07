@@ -111,6 +111,7 @@ class _LabSinkBase:
         project: str,
         run_id: str,
         config: BaseConfig,
+        resume: bool,
         entity: str | None = None,
         name: str | None = None,
         tags: list[str] | None = None,
@@ -119,7 +120,11 @@ class _LabSinkBase:
         keep_last_n_checkpoints: int | None = None,
         on_save: Callable[[int], None] | None = None,
     ) -> Self:
-        """Sink that writes to local files + a wandb run. Non-main ranks are silent."""
+        """Sink that writes to local files + a wandb run. Non-main ranks are silent.
+
+        `resume=True` continues the existing wandb run (SLURM-requeue in-place resume);
+        `resume=False` starts a new run.
+        """
         if not is_main_process():
             return cls(out_dir=None, _wandb_active=False)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +133,7 @@ class _LabSinkBase:
             project,
             run_id,
             wandb_config_dict(config),
+            resume=resume,
             entity=entity,
             name=name,
             tags=tags,

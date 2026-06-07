@@ -86,6 +86,7 @@ from param_decomp_lab.infra.wandb import get_wandb_entity
 from param_decomp_lab.resumption import (
     ResumeConfig,
     ResumeProvenance,
+    latest_checkpoint_step,
     read_training_snapshot,
     resolve_step,
 )
@@ -408,7 +409,31 @@ def main(
         _resume_main(Path(resume), group=group, tags=tags, run_id=run_id)
     else:
         assert config_path is not None, "must provide either config_path or --resume"
-        _fresh_main(Path(config_path), group=group, tags=tags, run_id=run_id)
+        _fresh_or_requeue_main(Path(config_path), group=group, tags=tags, run_id=run_id)
+
+
+def _fresh_or_requeue_main(
+    config_path: Path,
+    *,
+    group: str | None,
+    tags: str | None,
+    run_id: str | None,
+) -> None:
+    """Worker entry for a config launch. Resumes in place from this run's own latest
+    consolidated checkpoint if one exists (SLURM requeued the job after a save), else
+    trains from step 0.
+
+    The requeue re-runs the identical `... <config> --run_id <id>` command. `run_id` is
+    therefore always present on a requeue (set by `_submit_slurm`); a checkpoint under the
+    run's own dir is the signal that this is a requeue, not a first launch.
+    """
+    if run_id is not None:
+        out_dir = PARAM_DECOMP_OUT_DIR / "runs" / run_id
+        prior_step = latest_checkpoint_step(out_dir)
+        if prior_step is not None:
+            _resume_in_place(config_path, out_dir, prior_step, group=group, tags=tags)
+            return
+    _fresh_main(config_path, group=group, tags=tags, run_id=run_id)
 
 
 def _fresh_main(
@@ -461,6 +486,7 @@ def _fresh_main(
         sink_class=ThreePoolSink,
         group=group,
         tags=tags,
+        resume_wandb=False,
         run_id=run_id,
         on_save=lambda step: submit_slurm_async_consolidate_and_eval(
             out_dir, step=step, parent_cfg=cfg
@@ -495,24 +521,70 @@ def _resume_main(
     tags: str | None,
     run_id: str | None,
 ) -> None:
-    """Resume-run path: read parent `experiment_config.yaml` + `training_<step>.pth`, rebuild via
-    `ThreePoolTrainer.from_snapshot`, continue training."""
+    """Cross-run resume: read a `ResumeConfig`, load the parent's `experiment_config.yaml`,
+    and continue it under a NEW run id (a fresh wandb run)."""
     resume_cfg = ResumeConfig.from_file(resume_cfg_path)
     parent_cfg = ThreePoolLMExperimentConfig.from_file(
         resume_cfg.from_run / EXPERIMENT_CONFIG_FILENAME
     )
+    resolved_step = resolve_step(resume_cfg.from_run, resume_cfg.step)
+    _run_resume(
+        parent_cfg,
+        from_run=resume_cfg.from_run,
+        resolved_step=resolved_step,
+        run_id=run_id,
+        group=group,
+        tags=tags,
+        resume_wandb=False,
+    )
 
+
+def _resume_in_place(
+    config_path: Path,
+    out_dir: Path,
+    resolved_step: int,
+    *,
+    group: str | None,
+    tags: str | None,
+) -> None:
+    """SLURM-requeue resume: continue THIS run from its own latest checkpoint, keeping the
+    same run id and wandb run. The passed `config_path` equals the run's own
+    `experiment_config.yaml` (the requeue re-runs the identical command)."""
+    parent_cfg = ThreePoolLMExperimentConfig.from_file(config_path)
+    _run_resume(
+        parent_cfg,
+        from_run=out_dir,
+        resolved_step=resolved_step,
+        run_id=out_dir.name,
+        group=group,
+        tags=tags,
+        resume_wandb=True,
+    )
+
+
+def _run_resume(
+    parent_cfg: ThreePoolLMExperimentConfig,
+    *,
+    from_run: Path,
+    resolved_step: int,
+    run_id: str | None,
+    group: str | None,
+    tags: str | None,
+    resume_wandb: bool,
+) -> None:
+    """Shared resume body: rebuild via `ThreePoolTrainer.from_snapshot` from `from_run`'s
+    `training_<resolved_step>.pth` + ppgd shards, and continue training. `resume_wandb`
+    continues the existing wandb run (requeue) vs. starting a new one (cross-run)."""
     dist_state = init_distributed()
     if is_main_process():
         logger.info(f"Distributed state: {dist_state}")
-        logger.info(f"Resuming from {resume_cfg.from_run} @ step {resume_cfg.step}")
+        logger.info(f"Resuming from {from_run} @ step {resolved_step}")
     rank = dist_state.rank if dist_state is not None else 0
     _install_first_fail_marker(rank)
     _maybe_enable_memory_profile(rank)
     set_seed(parent_cfg.pd.seed)
     device = get_device()
 
-    resolved_step = resolve_step(resume_cfg.from_run, resume_cfg.step)
     effective_cfg = parent_cfg.model_copy(
         update={
             "runtime": parent_cfg.runtime.model_copy(
@@ -522,12 +594,12 @@ def _resume_main(
                 }
             ),
             "resume_provenance": ResumeProvenance(
-                parent_run_dir=resume_cfg.from_run, parent_step=resolved_step
+                parent_run_dir=from_run, parent_step=resolved_step
             ),
         }
     )
 
-    snapshot = read_training_snapshot(resume_cfg.from_run, resolved_step)
+    snapshot = read_training_snapshot(from_run, resolved_step)
     assert isinstance(snapshot, ThreePoolTrainingState), (
         f"3-pool resume needs ThreePoolTrainingState; got {type(snapshot).__name__}"
     )
@@ -552,6 +624,7 @@ def _resume_main(
         sink_class=ThreePoolSink,
         group=group,
         tags=tags,
+        resume_wandb=resume_wandb,
         run_id=run_id,
         on_save=lambda step: submit_slurm_async_consolidate_and_eval(
             out_dir, step=step, parent_cfg=effective_cfg
@@ -564,7 +637,7 @@ def _resume_main(
             target_model=target_model,
             run_batch=make_run_batch(effective_cfg.target),
             reconstruction_loss=recon_loss_kl,
-            ppgd_shard_dir=resume_cfg.from_run / ppgd_shard_dirname(resolved_step),
+            ppgd_shard_dir=from_run / ppgd_shard_dirname(resolved_step),
         )
         trainer.run(
             train_loader,
@@ -634,6 +707,7 @@ def _submit_slurm(
         time=time,
         snapshot_ref=snapshot_ref,
         comment=run_id,
+        requeue=True,
     )
     script = generate_script(
         slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}

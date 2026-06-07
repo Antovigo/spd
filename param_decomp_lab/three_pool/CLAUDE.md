@@ -333,6 +333,21 @@ comparison runs on EVERY rank, so it compares only the **rank-invariant** core
 `_rank_invariant_fingerprint_core` — never a rank-local view. The per-chunk
 ranks→sites mapping is re-derived from the snapshot's `three_pool_config`.
 
+### SLURM-requeue self-resume
+
+`_submit_slurm` (2-pool and 3-pool) sets `SlurmConfig.requeue=True`, emitting
+`#SBATCH --requeue` so SLURM re-runs the *same* `... <config> --run_id <id>` command
+on node failure / opportunistic preemption. That command has no `--resume`, so the
+worker entry (`_fresh_or_requeue_main`) checks `latest_checkpoint_step(out_dir)` for
+the run's own dir: a consolidated `training_<step>.pth` ⇒ resume in place (same
+`run_id`, same `out_dir`, `resume_wandb=True` → continuous wandb curves) via
+`_resume_in_place` → `_run_resume`; no checkpoint ⇒ fresh. The cross-run
+`--resume <resume.yaml>` path (different `run_id`, new wandb run) is unchanged and
+shares `_run_resume` with `resume_wandb=False`. `resume` is threaded
+`init_pd_run` → `with_wandb` → `init_wandb` (`wandb.init(resume="allow")`).
+Validated end-to-end at 4 GPU by `.scratch_smoke_logs/requeue_resume_test.sbatch`
+(re-running the identical command resumes at the saved step, not step 0).
+
 Repro/fault-injection env knobs (never set in production):
 `PD_3POOL_PG_TIMEOUT_S`, `PD_3POOL_SNAPSHOT_RANK0_SLEEP_S` (sleeps rank 0 inside
 `snapshot()` AFTER the partial write — proves the sleep no longer stalls the

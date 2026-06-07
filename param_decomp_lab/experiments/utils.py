@@ -88,6 +88,7 @@ def init_pd_run[S: OnePoolSink | ThreePoolSink](
     sink_class: type[S],
     group: str | None,
     tags: str | None,
+    resume_wandb: bool,
     run_id: str | None = None,
     on_save: Callable[[int], None] | None = None,
 ) -> S:
@@ -99,8 +100,10 @@ def init_pd_run[S: OnePoolSink | ThreePoolSink](
 
     Local-only when `cfg.wandb is None`, else wandb-backed. Non-main DDP ranks get a
     silent no-op sink without touching disk or wandb. `group` is a "launched together"
-    id; `tags` is a comma-separated string of orthogonal labels. `on_save` is an
-    optional rank-0 callback the sink invokes after each checkpoint write.
+    id; `tags` is a comma-separated string of orthogonal labels. `resume_wandb=True`
+    continues the existing wandb run (in-place SLURM-requeue resume); `False` creates a
+    new run. `on_save` is an optional rank-0 callback the sink invokes after each
+    checkpoint write.
     """
     if not is_main_process():
         return sink_class.silent()
@@ -118,6 +121,7 @@ def init_pd_run[S: OnePoolSink | ThreePoolSink](
         entity=cfg.wandb.entity,
         run_id=run_id,
         config=runtime_cast(BaseConfig, cfg),
+        resume=resume_wandb,
         group=group,
         tags=parsed_tags,
         keep_last_n_checkpoints=keep_last_n,

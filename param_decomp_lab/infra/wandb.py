@@ -128,6 +128,7 @@ def init_wandb(
     run_id: str,
     config_dict: dict[str, Any],
     *,
+    resume: bool,
     entity: str | None = None,
     name: str | None = None,
     tags: list[str] | None = None,
@@ -138,7 +139,9 @@ def init_wandb(
     caller — see `eval_metrics.wandb_config_dict`).
 
     `entity` falls back to `get_wandb_entity()`; `view_meta` is merged under a
-    `view_meta/` prefix so the UI can group runs by researcher-facing axes.
+    `view_meta/` prefix so the UI can group runs by researcher-facing axes. `resume=True`
+    continues the existing wandb run `run_id` (continuous curves across a SLURM requeue);
+    `resume=False` creates a fresh run.
     """
     wandb.init(
         id=run_id,
@@ -147,6 +150,7 @@ def init_wandb(
         name=name,
         tags=tags,
         group=group,
+        resume="allow" if resume else None,
     )
     assert wandb.run is not None
     wandb.run.log_code(root=str(REPO_ROOT / "param_decomp"))

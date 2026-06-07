@@ -59,6 +59,10 @@ class SlurmConfig:
     snapshot_ref: str | None = None
     dependency_job_id: str | None = None
     comment: str | None = None
+    requeue: bool = False
+    """Emit `#SBATCH --requeue` so SLURM re-runs this script on node failure /
+    opportunistic preemption (same job id). The worker self-resumes from its latest
+    consolidated checkpoint, so the requeue continues training rather than restarting."""
 
 
 @dataclass
@@ -242,6 +246,8 @@ def _common_sbatch_lines(config: SlurmConfig, log_pattern: str) -> list[str]:
         lines.append(f"#SBATCH --mem={config.mem}")
     if config.dependency_job_id:
         lines.append(f"#SBATCH --dependency=afterok:{config.dependency_job_id}")
+    if config.requeue:
+        lines.append("#SBATCH --requeue")
     if config.comment:
         lines.append(f'#SBATCH --comment="{config.comment}"')
     return lines
