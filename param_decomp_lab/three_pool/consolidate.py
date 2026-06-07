@@ -4,10 +4,16 @@ The 3-pool train loop writes per-rank partials to ``scratch_dir/step_<S>/`` (see
 ``ThreePoolTrainer.snapshot``) and then continues — it never assembles the
 canonical checkpoint. This module does that assembly off the critical path,
 driven by the async SLURM job that already runs the slow eval. It reads every
-partial for a step, builds the full ``ComponentModel`` state_dict + the canonical
-``ThreePoolTrainingState``, writes ``model_<S>.pth`` + ``training_<S>.pth``,
-prunes old ``training_*.pth`` (keeping all ``model_*.pth``), and removes the
-step's scratch dir.
+(small, parameter-shaped) partial for a step, builds the full ``ComponentModel``
+state_dict + the canonical ``ThreePoolTrainingState``, writes ``model_<S>.pth`` +
+``training_<S>.pth``, prunes old ``training_*.pth`` (keeping all ``model_*.pth``)
++ old ``ppgd_*/`` shard dirs, and removes the step's scratch dir.
+
+The data-shaped PPGD adversarial sources are NOT here: each adversary rank writes
+its own shard to ``ppgd_<S>/rank_<r>.pth`` at snapshot time, in parallel
+(``snapshot`` in the trainers), so consolidation streams only the small partials.
+``load_ppgd_shard`` reads a rank's shard back on resume; ``_prune_old_ppgd`` keeps
+only the newest few dirs (they're huge).
 
 Idempotent: if ``training_<S>.pth`` already exists, consolidation is a no-op (the
 async job may be retried). If the scratch dir is already gone (consolidation ran
@@ -88,6 +94,10 @@ def consolidate_step(
 ) -> None:
     """Assemble + persist the step-S checkpoint from its scratch partials.
 
+    Streams only the small, parameter-shaped partials — the data-shaped PPGD
+    shards were written at snapshot time (``ppgd_<S>/``) and are read on resume;
+    here they're only pruned to the latest few.
+
     No-op (returns early) when ``training_<S>.pth`` already exists or the scratch
     dir for the step is missing — both mean the work is already done (or was done
     by a prior, possibly-retried, invocation).
@@ -122,19 +132,16 @@ def consolidate_step(
     all_sites: tuple[str, ...] = tuple(meta["all_sites"])
     c_per_site: dict[str, int] = meta["c_per_site"]
 
-    # The PPGD sources are data-shaped (batch x seq x n_components) and don't fit one rank
-    # when aggregated, so they stay sharded: each adversary rank's sources go straight to
-    # ppgd_<step>/rank_<r>.pth (read back per-rank on resume), never into the central state.
-    ppgd_dir = out_dir / ppgd_shard_dirname(step)
-
-    # Stream the partials one at a time: collect the (small, parameter-shaped) model params +
-    # optimizer state, write the (large, data-shaped) PPGD shard out, then drop the partial.
-    # Peak RAM is ~one partial + the assembled CPU model, not the full set of partials at once
-    # (which is what OOM'd at scale: 240 partials x ~24 GB = 4.4 TB).
+    # The data-shaped PPGD sources are NOT in the partials — each adversary rank wrote its
+    # own shard to ppgd_<step>/rank_<r>.pth at snapshot time, in parallel (read back per-rank
+    # on resume). Consolidation streams only the small, parameter-shaped partials.
+    #
+    # Stream the partials one at a time: collect the model params + route the optimizer state,
+    # then drop the partial. Peak RAM is ~one partial + the assembled CPU model, not the full
+    # set at once.
     collected_model_params: dict[str, Tensor] = {}
     components_optimizer: dict[str, dict[str, Any]] = {}
     ci_fn_optimizer: dict[str, dict[str, Any]] = {}
-    n_ppgd_shards = 0
     for r in range(world_size):
         partial = torch.load(step_dir / f"rank_{r}.pth", map_location="cpu", weights_only=False)
         for k, v in partial["model_params"].items():
@@ -149,14 +156,8 @@ def consolidate_step(
                 pass
             case other:
                 raise AssertionError(f"unknown pool {other!r} in rank-{r} partial")
-        if "ppgd" in partial:
-            save_file(partial["ppgd"], ppgd_dir / f"rank_{r}.pth")
-            n_ppgd_shards += 1
         del partial
-    logger.info(
-        f"consolidate: streamed {world_size} partials for step {step} "
-        f"({n_ppgd_shards} PPGD shards -> {ppgd_dir.name}/)"
-    )
+    logger.info(f"consolidate: streamed {world_size} partials for step {step}")
 
     model_state = assemble_model_state_dict_from_partials(
         collected_model_params=collected_model_params,
@@ -216,19 +217,29 @@ def _prune_old_training(out_dir: Path, *, keep_last_n: int) -> None:
 
 
 def _prune_old_ppgd(out_dir: Path, *, keep_last_n: int) -> None:
-    """Delete all but the last ``keep_last_n`` ``ppgd_<step>/`` shard dirs (each is huge)."""
-    steps: list[int] = []
+    """Delete all but the last ``keep_last_n`` CONSOLIDATED ``ppgd_<step>/`` shard dirs.
+
+    Only prunes ppgd dirs whose step is consolidated (``training_<step>.pth`` exists).
+    A ppgd dir for an unconsolidated step is in flight — its shards were written at
+    snapshot time but its checkpoint hasn't been assembled yet, and it may become the
+    resume target — so it must survive until its own consolidation prunes it. (Pruning
+    purely by dir name would delete the step currently being consolidated when a newer,
+    not-yet-consolidated ppgd dir already sits on disk.)
+    """
+    consolidated_steps: list[int] = []
     for d in out_dir.glob("ppgd_*"):
         if not d.is_dir():
             continue
         try:
-            steps.append(int(d.name.removeprefix("ppgd_")))
+            step = int(d.name.removeprefix("ppgd_"))
         except ValueError:
             continue
-    steps.sort()
-    if len(steps) <= keep_last_n:
+        if (out_dir / f"training_{step}.pth").is_file():
+            consolidated_steps.append(step)
+    consolidated_steps.sort()
+    if len(consolidated_steps) <= keep_last_n:
         return
-    for step in steps[: len(steps) - keep_last_n]:
+    for step in consolidated_steps[: len(consolidated_steps) - keep_last_n]:
         # ignore_errors: a concurrent consolidation for another step may have pruned it already.
         shutil.rmtree(out_dir / ppgd_shard_dirname(step), ignore_errors=True)
         logger.info(f"consolidate: pruned old {ppgd_shard_dirname(step)}/")

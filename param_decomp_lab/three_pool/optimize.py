@@ -74,6 +74,7 @@ from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
+from param_decomp_lab.infra.run_files import save_file
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
@@ -82,6 +83,7 @@ from param_decomp_lab.three_pool.config import ThreePoolTopology
 from param_decomp_lab.three_pool.consolidate import (
     CONSOLIDATE_META_FILENAME,
     load_ppgd_shard,
+    ppgd_shard_dirname,
     step_scratch_dir,
 )
 from param_decomp_lab.three_pool.context import (
@@ -481,7 +483,13 @@ class ThreePoolTrainer:
           the CI pool leader contributes ``ci_fn.*``, everyone else contributes
           nothing (their V/U / CI fn are replicas of a leader's).
         * ``optimizer_by_name``: this rank's optimizer state, name-keyed.
-        * ``ppgd``: PPGD adversarial sources (PPGD ranks only).
+
+        PPGD ranks ALSO write their data-shaped adversarial sources, in parallel,
+        straight to the stable shard ``out_dir / ppgd_<S> / rank_<rank>.pth``
+        (``out_dir == scratch_dir.parent``) — not into the partial. Each rank
+        writes its own shard, so this is free (the same bytes the partial used to
+        carry, just split into the file resume reads directly). Consolidation
+        then streams only the small parameter-shaped partials.
 
         Rank 0 also writes ``meta.pth`` (configs + layout fingerprint + the
         ``c_per_site`` / ``all_sites`` needed to rebuild the full model). A
@@ -492,9 +500,13 @@ class ThreePoolTrainer:
         reads these partials off the critical path.
         """
         partial = self._build_my_partial()
+        my_ppgd = self._my_ppgd_state_dict()
 
         p2p_group = self.ctx.world.cross_pool_p2p_group
         step_dir = step_scratch_dir(scratch_dir, self.step)
+        ppgd_shard_path = (
+            scratch_dir.parent / ppgd_shard_dirname(self.step) / f"rank_{self.ctx.role.rank}.pth"
+        )
         if self.ctx.role.rank == 0:
             step_dir.mkdir(parents=True, exist_ok=True)
             torch.save(self._build_meta(), step_dir / CONSOLIDATE_META_FILENAME)
@@ -509,6 +521,11 @@ class ThreePoolTrainer:
         trace(f"snapshot: writing partial {partial_path.name}")
         torch.save(partial, partial_path)
         trace("snapshot: partial write done")
+
+        if my_ppgd is not None:
+            trace(f"snapshot: writing PPGD shard {ppgd_shard_path.name}")
+            save_file(my_ppgd, ppgd_shard_path)
+            trace("snapshot: PPGD shard write done")
 
         # One rejoining barrier so all ranks leave snapshot together. This is
         # cheap now (just the partial write, no 100 GB read), so it cannot
@@ -531,16 +548,21 @@ class ThreePoolTrainer:
             if self.optimizer is not None
             else {}
         )
-        partial: dict[str, Any] = {
+        return {
             "pool": self.ctx.kind,
             "model_params": self._owned_model_params(),
             "optimizer_by_name": my_optimizer_by_name,
         }
+
+    def _my_ppgd_state_dict(self) -> dict[str, Any] | None:
+        """This rank's PPGD adversarial sources to shard out, or ``None`` if it owns none.
+
+        Only PPGD ranks own sources: the live state once built, else the pending
+        resume state for a resumed-but-not-yet-stepped rank.
+        """
         if self.ppgd_state is not None:
-            partial["ppgd"] = self.ppgd_state.state_dict()
-        elif self._pending_ppgd_resume_state is not None:
-            partial["ppgd"] = self._pending_ppgd_resume_state
-        return partial
+            return self.ppgd_state.state_dict()
+        return self._pending_ppgd_resume_state
 
     def _owned_model_params(self) -> dict[str, Tensor]:
         """The slice of this rank's model state_dict it's responsible for saving.

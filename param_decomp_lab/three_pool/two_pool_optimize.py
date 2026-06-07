@@ -16,10 +16,11 @@ pool_a_ranks``), the chunkwise step + portals verbatim, and the merged Pool A st
 all of that reuse correct.
 
 Checkpoint/resume reuses the 3-pool machinery: each rank writes a self-contained partial
-on the loop (chunk leaders → V/U; the Pool A leader → CI fn + ci-fn optimizer + PPGD
-sources), the async job consolidates them into ``model_<S>.pth`` + a
+on the loop (chunk leaders → V/U; the Pool A leader → CI fn + ci-fn optimizer), and Pool A
+ranks write their data-shaped PPGD sources straight to ``ppgd_<S>/rank_<r>.pth`` in
+parallel. The async job consolidates the partials into ``model_<S>.pth`` + a
 ``ThreePoolTrainingState`` (whose slots line up for the 2-pool), and ``from_snapshot``
-restores the step + all owned state.
+restores the step + all owned state (reading the PPGD shard per-rank).
 """
 
 import itertools
@@ -60,6 +61,7 @@ from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
+from param_decomp_lab.infra.run_files import save_file
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
@@ -67,6 +69,7 @@ from param_decomp_lab.three_pool.checkpoint import (
 from param_decomp_lab.three_pool.consolidate import (
     CONSOLIDATE_META_FILENAME,
     load_ppgd_shard,
+    ppgd_shard_dirname,
     step_scratch_dir,
 )
 from param_decomp_lab.three_pool.context import ChunkContext
@@ -301,16 +304,21 @@ class TwoPoolTrainer:
             if self.optimizer is not None
             else {}
         )
-        partial: dict[str, Any] = {
+        return {
             "pool": self.ctx.kind,
             "model_params": self._owned_model_params(),
             "optimizer_by_name": my_optimizer_by_name,
         }
+
+    def _my_ppgd_state_dict(self) -> dict[str, Any] | None:
+        """This rank's PPGD adversarial sources to shard out, or ``None`` if it owns none.
+
+        Only Pool A ranks own sources: the live state once built, else the pending
+        resume state for a resumed-but-not-yet-stepped rank.
+        """
         if self.ppgd_state is not None:
-            partial["ppgd"] = self.ppgd_state.state_dict()
-        elif self._pending_ppgd_resume_state is not None:
-            partial["ppgd"] = self._pending_ppgd_resume_state
-        return partial
+            return self.ppgd_state.state_dict()
+        return self._pending_ppgd_resume_state
 
     def _build_meta(self) -> dict[str, Any]:
         return {
@@ -328,16 +336,23 @@ class TwoPoolTrainer:
         """Write this rank's self-contained checkpoint partial; then return.
 
         Mirrors ``ThreePoolTrainer.snapshot``: each rank writes its owned model
-        params (chunk leaders → V/U; Pool A leader → CI fn), its optimizer state,
-        and (Pool A) its PPGD sources to ``scratch_dir/step_<S>/rank_<r>.pth``.
-        Rank 0 also writes ``meta.pth``. One pre-write + one post-write barrier; no
-        rank-0 read, no model assembly. The async consolidation job assembles the
-        canonical artifacts off the critical path.
+        params (chunk leaders → V/U; Pool A leader → CI fn) and its optimizer
+        state to ``scratch_dir/step_<S>/rank_<r>.pth``. Pool A ranks ALSO write
+        their data-shaped PPGD sources, in parallel, straight to the stable shard
+        ``out_dir / ppgd_<S> / rank_<r>.pth`` (``out_dir == scratch_dir.parent``)
+        — not into the partial. Rank 0 also writes ``meta.pth``. One pre-write +
+        one post-write barrier; no rank-0 read, no model assembly. The async
+        consolidation job assembles the canonical artifacts off the critical path
+        by streaming only the small partials.
         """
         partial = self._build_my_partial()
+        my_ppgd = self._my_ppgd_state_dict()
 
         p2p_group = self.ctx.world.cross_pool_p2p_group
         step_dir = step_scratch_dir(scratch_dir, self.step)
+        ppgd_shard_path = (
+            scratch_dir.parent / ppgd_shard_dirname(self.step) / f"rank_{self.ctx.role.rank}.pth"
+        )
         if self.ctx.role.rank == 0:
             step_dir.mkdir(parents=True, exist_ok=True)
             torch.save(self._build_meta(), step_dir / CONSOLIDATE_META_FILENAME)
@@ -350,6 +365,11 @@ class TwoPoolTrainer:
         trace(f"snapshot: writing partial {partial_path.name}")
         torch.save(partial, partial_path)
         trace("snapshot: partial write done")
+
+        if my_ppgd is not None:
+            trace(f"snapshot: writing PPGD shard {ppgd_shard_path.name}")
+            save_file(my_ppgd, ppgd_shard_path)
+            trace("snapshot: PPGD shard write done")
 
         if os.environ.get("PD_3POOL_DISABLE_REJOIN_BARRIER", "").strip() in ("1", "true"):
             trace("snapshot: REJOIN BARRIER DISABLED (repro mode)")

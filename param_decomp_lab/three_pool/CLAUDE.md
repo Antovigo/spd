@@ -19,7 +19,7 @@ layer's output independently — is a separate, stable concept the chunkwise poo
 | `config.py` | `ThreePoolTopology` (`ci` / `ppgd` / `chunkwise` `PoolSpec`s of per-rank batch + `sites_per_chunk`) + `resolve(ordered_sites, batch_size) -> ResolvedLayout`. Authors per-rank batch, NOT rank ids; the resolver derives ranks/chunks/world_size in canonical order. Parse-time validation = cross-divisibility of the three per-rank batches |
 | `layout.py` | `World` topology + the runtime `Chunk` (`.ranks` / `.sites`); `build_world` constructs every process group (threading `pg_timeout` into each); `BatchEdge` — symmetric per-edge batch-slice geometry (CI↔chunk, CI↔PPGD) answering routing for both fan directions |
 | `checkpoint.py` | offline state_dict assembly from on-disk partials (`assemble_model_state_dict_from_partials`) + the leader key-partition helpers (`owned_model_state_keys` / `ci_fn_state_keys`) |
-| `consolidate.py` | `consolidate_step` — async, off-train-loop, **streaming** assembly of `model_<step>.pth` + `training_<step>.pth` from a step's scratch partials; shards the data-shaped PPGD sources to `ppgd_<step>/rank_<r>.pth` (out of the central state — see "Checkpoint save" below); prunes old `training_*.pth` + `ppgd_*/`; deletes the scratch dir. `load_ppgd_shard` reads a rank's shard on resume; `unconsolidated_steps` lists recoverable steps |
+| `consolidate.py` | `consolidate_step` — async, off-train-loop, **streaming** assembly of `model_<step>.pth` + `training_<step>.pth` from a step's small (parameter-shaped) scratch partials; prunes old `training_*.pth` + `ppgd_*/`; deletes the scratch dir. The data-shaped PPGD sources are NOT here — each adversary rank writes its own `ppgd_<step>/rank_<r>.pth` at snapshot time, in parallel (see "Checkpoint save" below). `load_ppgd_shard` reads a rank's shard on resume; `unconsolidated_steps` lists recoverable steps |
 | `consolidate_cli.py` | `python -m …consolidate_cli <run> [--step N]` — manual CPU-only recovery for a failed/preempted async consolidation (separate module to avoid an import cycle with `experiments.lm.run`) |
 | `role.py` | `PoolRole = CIRole \| ChunkRole \| PPGDRole` — this rank's pool role; per-pool fields are union variants, not optional attrs |
 | `context.py` | `PoolContext = CIContext \| ChunkContext \| PPGDContext` — `world` + `role` + this pool's portals; the trainer matches on it to dispatch step fns |
@@ -68,7 +68,7 @@ chunkwise issues them — recv g_CI FIRST, then send g_VU — or the two pools d
 | `two_pool_role.py` | `PoolARole` (with `.as_ci()` / `.as_ppgd()`) `\| ChunkRole` |
 | `two_pool_context.py` | `PoolAContext \| ChunkContext`; `PoolAPortals` (the four A↔chunk edges) |
 | `step_pool_a.py` | the merged Pool A step (CI fwd + imp + adversary + fused CI backward) |
-| `two_pool_optimize.py` | `TwoPoolTrainer` + `optimize_two_pool`. Reuses `ThreePoolConstrainedPDConfig` + `_ThreePoolRuntime` (ci_ranks == ppgd_ranks). **Checkpoint/resume implemented** — `snapshot`/`from_snapshot` reuse the 3-pool partial format + `ThreePoolTrainingState` (the Pool A partial carries CI fn + ci-fn optimizer + PPGD sources; `consolidate.py` routes ci-fn optimizer via a `"pool_a"` case and shards the PPGD sources to `ppgd_<step>/`, and `from_snapshot` takes a `ppgd_shard_dir`). Saves on `cadence.save_every` + a forced final snapshot |
+| `two_pool_optimize.py` | `TwoPoolTrainer` + `optimize_two_pool`. Reuses `ThreePoolConstrainedPDConfig` + `_ThreePoolRuntime` (ci_ranks == ppgd_ranks). **Checkpoint/resume implemented** — `snapshot`/`from_snapshot` reuse the 3-pool partial format + `ThreePoolTrainingState` (the Pool A partial carries CI fn + ci-fn optimizer; each Pool A rank writes its PPGD sources to `ppgd_<step>/rank_<r>.pth` at snapshot time, in parallel; `consolidate.py` routes ci-fn optimizer via a `"pool_a"` case, and `from_snapshot` takes a `ppgd_shard_dir`). Saves on `cadence.save_every` + a forced final snapshot |
 | `two_pool_eval_step.py` | 2-pool eval pass (Pool A builds the full `MetricContext` locally — no cross-pool CI ship; chunkwise barriers through) |
 | `two_pool_reductions.py` | 2-pool cross-pool log reductions (Pool A emits imp/ppgd/l0; chunkwise emits faith/stoch) |
 
@@ -139,37 +139,48 @@ The save path is split so the train loop never blocks on a multi-GB read.
 
 `snapshot()` (on the train loop, all ranks collective): each rank writes a
 **self-contained partial** to `scratch_dir/step_<S>/rank_<r>.pth` — its owned
-model params (chunk leaders → chunk-sites V/U; CI pool leader → CI fn),
-its optimizer state (name-keyed), and (PPGD) its sources. Rank 0 also writes
+model params (chunk leaders → chunk-sites V/U; CI pool leader → CI fn) and its
+optimizer state (name-keyed). Adversary ranks (PPGD pool in 3-pool; Pool A in
+2-pool) ALSO write their data-shaped PPGD sources, **in parallel**, straight to
+the stable shard `out_dir/ppgd_<S>/rank_<r>.pth` (`out_dir = scratch_dir.parent`)
+— each rank writes its own, so this is free (the same bytes the partial used to
+carry, just split into the file resume reads directly). Rank 0 also writes
 `meta.pth` (configs + fingerprint + `c_per_site` / `all_sites`). There is **one
 pre-write barrier** (so rank 0's `mkdir` + `meta` write land before others write
 into the dir) and **one post-write rejoin barrier** (so all ranks leave
-`snapshot()` together). Both barriers are cheap — no rank does a 100 GB read on
-the loop anymore — so neither can overrun the watchdog. NO model NCCL gather, NO
-rank-0 assembly here.
+`snapshot()` together). All writes are cheap and parallel — no rank does a 100 GB
+read on the loop, and no rank serializes a TB of PPGD shards — so neither barrier
+can overrun the watchdog. NO model NCCL gather, NO rank-0 assembly here.
 
 `consolidate_step()` (`consolidate.py`, async SLURM job, off the loop): **streams**
-a step's partials one at a time (peak RAM ≈ one partial + the assembled CPU model,
-never the full partial set) → assembles the full `ComponentModel` state_dict +
-`ThreePoolTrainingState` → writes `model_<S>.pth` + `training_<S>.pth` → prunes
-old `training_*.pth` to the last `DEFAULT_KEEP_LAST_N_TRAINING` (=3; **all
-`model_*.pth` are kept**) → deletes `step_<S>/`. It runs inside the async
-slow-eval job (`experiments/lm/async_eval.py`), as a CPU-only phase BEFORE the
-eval pass, so the assembled `model_<S>.pth` exists before the eval loads it.
+a step's small (parameter-shaped) partials one at a time (peak RAM ≈ one partial +
+the assembled CPU model, never the full partial set) → assembles the full
+`ComponentModel` state_dict + `ThreePoolTrainingState` → writes `model_<S>.pth` +
+`training_<S>.pth` → prunes old `training_*.pth` to the last
+`DEFAULT_KEEP_LAST_N_TRAINING` (=3; **all `model_*.pth` are kept**) → prunes old
+`ppgd_*/` → deletes `step_<S>/`. It runs inside the async slow-eval job
+(`experiments/lm/async_eval.py`), as a CPU-only phase BEFORE the eval pass, so the
+assembled `model_<S>.pth` exists before the eval loads it. It reads **only** the
+small partials — the PPGD shards were already written at snapshot time, so
+consolidation never reads or rewrites the data-shaped sources. (This was the I/O
+bottleneck before: rank 0 streamed every multi-GB partial AND rewrote every PPGD
+shard sequentially — TBs at 80-GPU scale — overrunning the async waiter timeout.)
 
-**PPGD sources are NOT in `training_<S>.pth`.** They're `per_batch_per_position`
-(sized by `batch × seq × n_components`) — the only persisted state that's
-data-shaped rather than parameter-shaped, so aggregating it onto rank 0 doesn't
-scale (~2.3 TB at batch 1280, OOMs any node). Instead, as `consolidate_step`
-streams each adversary partial it writes that rank's sources straight to
-`ppgd_<S>/rank_<r>.pth` (`ppgd_shard_dirname`), never holding them all at once;
+**PPGD sources are NOT in `training_<S>.pth`, and NOT in the scratch partials.**
+They're `per_batch_per_position` (sized by `batch × seq × n_components`) — the only
+persisted state that's data-shaped rather than parameter-shaped, so aggregating it
+onto rank 0 doesn't scale (~2.3 TB at batch 1280, OOMs any node) and streaming it
+through rank 0 in consolidation is an I/O bottleneck. Instead each adversary rank
+writes its own sources straight to `ppgd_<S>/rank_<r>.pth` (`ppgd_shard_dirname`)
+inside `snapshot()`, in parallel with every other rank's write;
 `from_snapshot` takes a `ppgd_shard_dir` and each adversary rank reads its own
 shard (`load_ppgd_shard`). A missing shard ⇒ that rank's adversary re-warms via
 `n_warmup` (graceful). This ties a *PPGD* resume to the same pool layout (the V/U +
-optimizer state stays topology-agnostic). `ppgd_<S>/` dirs are pruned to the last
-`DEFAULT_KEEP_LAST_N_PPGD` (=1 — they're huge); resume uses the newest checkpoint.
-Idempotent: a no-op if `training_<S>.pth` already exists (and it cleans any
-leftover scratch in that case); the scratch dir is deleted only on success.
+optimizer state stays topology-agnostic). `ppgd_<S>/` dirs are pruned (in
+`consolidate_step`) to the last `DEFAULT_KEEP_LAST_N_PPGD` (=1 — they're huge);
+resume uses the newest checkpoint. Idempotent: a no-op if `training_<S>.pth`
+already exists (and it cleans any leftover scratch in that case); the scratch dir
+is deleted only on success.
 
 This is the fix for how run 34446 (p-a5b667e9) died: the old synchronous rank-0
 read held the other ranks at a barrier past the NCCL watchdog. There is no
