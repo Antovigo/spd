@@ -155,7 +155,10 @@ def make_step(opt_vu, opt_ci, n_warmup, lr_pgd):
             def body(src, _):
                 return jax.tree.map(lambda s, g: s + lr_pgd * g, src, jax.grad(adv)(src)), None
 
+            # stop_gradient: the adversary's refined sources are a constant to the outer grad
+            # (else value_and_grad back-props through the PGD scan -> 2nd order, huge + pointless)
             refined, _ = jax.lax.scan(body, state.sources, None, length=n_warmup)
+            refined = jax.lax.stop_gradient(refined)
 
             l_faith = faith_loss(model)
             l_imp = imp_loss(ci)
