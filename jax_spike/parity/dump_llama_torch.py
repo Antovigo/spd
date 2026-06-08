@@ -128,7 +128,7 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     # attention internals (block 0)
     at = b0.self_attn
     hd = cfg.n_embd // cfg.n_head
-    aq, ak, av = at.q_proj(ln1), at.k_proj(ln1), at.v_proj(ln1)
+    aq, ak, av = at.q_proj(ln1, None), at.k_proj(ln1, None), at.v_proj(ln1, None)
     y_attend = at._attend(aq, ak, av)  # pre o_proj
     qr = aq.view(B, T, cfg.n_head, hd).transpose(1, 2)
     cos, sin = at._rope_cos_sin(qr, T)
