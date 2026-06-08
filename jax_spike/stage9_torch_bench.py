@@ -68,6 +68,8 @@ def main():
     dev = f"cuda:{local}"
     torch.manual_seed(0)
     torch.set_default_dtype(torch.float32)
+    torch.backends.cuda.matmul.allow_tf32 = True  # match JAX tensorfloat32
+    torch.backends.cudnn.allow_tf32 = True
     is0 = rank == 0
 
     cfg = VendoredLlamaConfig(

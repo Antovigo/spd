@@ -34,6 +34,7 @@ from vendored_jax.llama import (
 )
 
 llama_mod.USE_FLASH_ATTENTION = True  # flash attention for the throughput benchmark
+jax.config.update("jax_default_matmul_precision", "tensorfloat32")  # match torch TF32
 
 COEFF = dict(faith=1.0, imp=0.3, stoch=1.0, ppgd=1.0)
 P_IMP = 0.9
