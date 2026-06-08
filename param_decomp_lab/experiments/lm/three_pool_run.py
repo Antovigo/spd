@@ -96,6 +96,7 @@ from param_decomp_lab.three_pool import ThreePoolTopology, ThreePoolTrainer
 from param_decomp_lab.three_pool.config import PooledRuntimeConfig
 from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME, ppgd_shard_dirname
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
+from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer
 
 # Cross-pool NCCL p2p deadlock guard. An asymmetric topology (fanout>1 on a cross-pool
 # edge) at long sequence lengths wedges when a rendezvous-blocked NCCL send/recv kernel
@@ -291,7 +292,9 @@ def _maybe_enable_memory_profile(rank: int) -> None:
     sys.excepthook = _excepthook
 
 
-def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> "torch.profiler.profile | None":
+def _maybe_build_torch_profiler(
+    trainer: ThreePoolTrainer | TwoPoolTrainer,
+) -> "torch.profiler.profile | None":
     """Opt-in `torch.profiler.profile` for the listed ranks (typically one per pool).
 
     Env: `PD_TORCH_PROFILE_RANKS=0,96,100` + `PD_TORCH_PROFILE_OUT=/abs/dir`, plus
@@ -299,6 +302,7 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> "torch.profiler.pr
     `_ACTIVE` default 3, `_MEMORY` default on, `_STACK` / `_MODULES` / `_SHAPES` off).
     Returns the profile context (caller passes it to `trainer.run(profiler=...)`) or
     `None` if this rank isn't profiled. Verified at 104 ranks (gpt2-xl) 2026-05-28.
+    Works for both the 3-pool and 2-pool trainers (only reads `ctx.kind` / `ctx.role.rank`).
     """
     prof_ranks_env = os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip()
     if not prof_ranks_env:
