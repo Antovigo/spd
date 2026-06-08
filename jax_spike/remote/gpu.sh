@@ -1,33 +1,44 @@
 #!/usr/bin/env bash
-# Local -> Andromeda GPU runner for the JAX spike.
-# Usage: remote/gpu.sh "python stage6_pgd.py --timing"
-# Syncs jax_spike/ to the cluster, submits a 1-GPU SLURM job, waits, prints the log.
+# Local -> Andromeda GPU runner (git-based). Push local commits, pull on cluster,
+# submit a SLURM job (1 task per GPU via srun), wait, print the log.
+#
+# Usage:
+#   remote/gpu.sh "python stage6_pgd.py --timing"                  # 1 node, 8 GPUs
+#   NODES=2 GPN=8 remote/gpu.sh "python stage8_train.py --steps 50" # 2 nodes, 16 GPUs
+#   NODES=1 GPN=1 remote/gpu.sh "python stage6_pgd.py"             # 1 GPU
+#
+# Env knobs: NODES (default 1), GPN gpus/tasks per node (default 8),
+#            PART partition (default h200-reserved-default), BRANCH (default feature/nano-pd-jax)
 set -euo pipefail
 
-CMD="${*:?usage: remote/gpu.sh <command to run on the GPU node>}"
-SSH_OPTS="-o RemoteCommand=none -o RequestTTY=no"
-REMOTE=a-login
-HERE="$(cd "$(dirname "$0")/.." && pwd)"  # the jax_spike/ dir
+CMD="${*:?usage: [NODES=N GPN=G PART=p] remote/gpu.sh <command>}"
+NODES="${NODES:-1}"; GPN="${GPN:-8}"; PART="${PART:-h200-reserved-default}"
+BRANCH="${BRANCH:-feature/nano-pd-jax}"
+SSH="ssh -o RemoteCommand=none -o RequestTTY=no a-login"
+WT='~/pd-nano-jax/jax_spike'
 
-cd "$HERE"
-echo "$CMD" > _remote_cmd.sh
+# 1. push local branch (must be committed)
+echo "[push] $BRANCH"
+git push -q origin "$BRANCH"
 
-echo "[sync] jax_spike/ -> $REMOTE:~/jax_spike/"
-rsync -az --delete \
-  --exclude '.venv*' --exclude '__pycache__' --exclude 'logs' --exclude '.git' \
-  -e "ssh $SSH_OPTS" ./ "$REMOTE:jax_spike/"
-
-ssh $SSH_OPTS $REMOTE 'mkdir -p ~/jax_spike/logs'
-JOBID=$(ssh $SSH_OPTS $REMOTE 'cd ~/jax_spike && sbatch --parsable remote/job.sbatch')
+# 2. on cluster: pull, write the command, submit
+echo "[remote] pull + submit ($NODES node(s) x $GPN gpu = $((NODES*GPN)) GPUs, part=$PART)"
+JOBID=$($SSH "
+  set -e
+  cd $WT/..
+  git fetch -q origin $BRANCH && git reset -q --hard origin/$BRANCH
+  cd $WT && mkdir -p logs
+  printf '%s\n' \"$CMD\" > _remote_cmd.sh
+  sbatch --parsable --nodes=$NODES --ntasks-per-node=$GPN --partition=$PART remote/job.sbatch
+")
 echo "[submit] job $JOBID"
 
-# wait for completion
+# 3. wait
 while :; do
-  ST=$(ssh $SSH_OPTS $REMOTE "squeue -j $JOBID -h -o %T" 2>/dev/null || true)
+  ST=$($SSH "squeue -j $JOBID -h -o %T" 2>/dev/null || true)
   [ -z "$ST" ] && break
-  echo "[wait] job $JOBID: $ST"
-  sleep 8
+  echo "[wait] $JOBID: $ST"; sleep 8
 done
 
-echo "[done] ===== log for job $JOBID ====="
-ssh $SSH_OPTS $REMOTE "cat ~/jax_spike/logs/$JOBID.out"
+echo "[done] ===== log $JOBID ====="
+$SSH "cat $WT/logs/$JOBID.out"

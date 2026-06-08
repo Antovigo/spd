@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
+# Generic JAX-spike SLURM job. Override scale on the sbatch CLI:
+#   sbatch --nodes=2 --ntasks-per-node=8 --partition=h200-reserved-default remote/job.sbatch
+# Always launches via srun (1 task per GPU). Each task pins to its local GPU and runs
+# _remote_cmd.sh; distributed scripts call jax.distributed.initialize() (SLURM auto-detect).
 #SBATCH --job-name=jax-spike
-#SBATCH --partition=h200-dev
-#SBATCH --gres=gpu:h200:1
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=8
-#SBATCH --time=00:20:00
-#SBATCH --output=/mnt/polished-lake/home/oli/jax_spike/logs/%j.out
+#SBATCH --time=00:25:00
+#SBATCH --output=/mnt/polished-lake/home/oli/pd-nano-jax/jax_spike/logs/%j.out
 set -euo pipefail
-cd ~/jax_spike
+cd ~/pd-nano-jax/jax_spike
+mkdir -p logs
 
-# idempotent CUDA venv (persists across syncs; excluded from rsync --delete)
-if [ ! -d .venv-cuda ]; then
-  echo "[setup] creating .venv-cuda + installing jax[cuda12]..."
-  uv venv .venv-cuda --python 3.13 >/dev/null
-  source .venv-cuda/bin/activate
-  uv pip install -q "jax[cuda12]" numpy
-else
-  source .venv-cuda/bin/activate
-fi
+echo "=== job $SLURM_JOB_ID | nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS | $(date) ==="
+echo "nodelist: $SLURM_JOB_NODELIST"
 
-echo "=== node: $(hostname) ==="
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-python -c "import jax; print('jax', jax.__version__, '|', jax.devices())"
-echo "=== running command ==="
-cat _remote_cmd.sh
-echo "---"
-bash _remote_cmd.sh
+srun --kill-on-bad-exit=1 bash -c '
+  export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID   # one GPU per task
+  cd ~/pd-nano-jax/jax_spike
+  source .venv-cuda/bin/activate
+  bash _remote_cmd.sh
+'
