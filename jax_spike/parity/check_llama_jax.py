@@ -16,6 +16,7 @@ from vendored_jax.llama import (
     MaskInfo,
     all_target_paths,
     build_from_torch_state,
+    rms_norm,
 )
 
 jax.config.update("jax_enable_x64", False)  # fp32, match torch dump
@@ -58,6 +59,19 @@ def rel(a, b):
     a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
     return float(np.max(np.abs(a - b) / (np.maximum(np.abs(a), np.abs(b)) + 1e-8)))
 
+
+# --- intermediate-activation localization (clean path) ---
+emb = model.embed_tokens[idx]
+h = emb
+print("--- stage-by-stage (clean) ---")
+print(f"emb           rel err: {rel(emb, meta('dbg/emb')):.3e}")
+for li, block in enumerate(model.blocks):
+    h = block(h, None)
+    print(f"h_layer{li}      rel err: {rel(h, meta(f'dbg/h_layer{li}')):.3e}")
+print(f"h_pre_norm    rel err: {rel(h, meta('dbg/h_pre_norm')):.3e}")
+h_post = rms_norm(h, model.norm, cfg.rms_norm_eps)
+print(f"h_post_norm   rel err: {rel(h_post, meta('dbg/h_post_norm')):.3e}")
+print("--- full ---")
 
 logits_clean = model(idx, None)
 logits_masked = model(idx, masks)

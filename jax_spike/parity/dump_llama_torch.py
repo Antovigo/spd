@@ -106,6 +106,17 @@ out["META/cfg/rope_low"] = np.array(rs.low_freq_factor)
 out["META/cfg/rope_high"] = np.array(rs.high_freq_factor)
 out["META/cfg/rope_orig"] = np.array(rs.original_max_position_embeddings)
 
+# intermediate activations (clean path) to localize any port mismatch
+with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
+    emb = cmodel.embed_tokens(idx)
+    h = emb
+    for li, blk in enumerate(cmodel._layers):
+        h = blk(h)  # clean (mask_infos=None)
+        out[f"META/dbg/h_layer{li}"] = h.detach().numpy()
+    out["META/dbg/emb"] = emb.detach().numpy()
+    out["META/dbg/h_pre_norm"] = h.detach().numpy()
+    out["META/dbg/h_post_norm"] = cmodel.norm(h).detach().numpy()
+
 np.savez(args.out, **out)
 print(
     f"dumped {len(out)} arrays to {args.out} | loss={loss.item():.6f} "
