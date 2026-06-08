@@ -116,6 +116,15 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     out["META/dbg/emb"] = emb.detach().numpy()
     out["META/dbg/h_pre_norm"] = h.detach().numpy()
     out["META/dbg/h_post_norm"] = cmodel.norm(h).detach().numpy()
+    # block-0 internal breakdown (clean)
+    b0 = cmodel._layers[0]
+    ln1 = b0.input_layernorm(emb)
+    a_out = b0.self_attn(ln1)
+    x_mid = emb + a_out
+    ln2 = b0.post_attention_layernorm(x_mid)
+    m_out = b0.mlp(ln2)
+    for nm, arr in [("b0_ln1", ln1), ("b0_attn", a_out), ("b0_xmid", x_mid), ("b0_ln2", ln2), ("b0_mlp", m_out)]:
+        out[f"META/dbg/{nm}"] = arr.detach().numpy()
 
 np.savez(args.out, **out)
 print(
