@@ -57,6 +57,7 @@ from param_decomp_lab.experiments.lm.three_pool_run import (
     _install_first_fail_marker,
     _maybe_build_torch_profiler,
     _maybe_enable_memory_profile,
+    profiling_env_passthrough,
 )
 from param_decomp_lab.experiments.utils import (
     EXPERIMENT_CONFIG_FILENAME,
@@ -525,7 +526,9 @@ def _submit_slurm(
         requeue=True,
     )
     script = generate_script(
-        slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}
+        slurm_config,
+        launch.command,
+        env={**launch.env, **THREE_POOL_SLURM_ENV, **profiling_env_passthrough()},
     )
     result = submit_slurm_job(script, "lm")
 
@@ -631,7 +634,9 @@ def submit_slurm_async_consolidate_and_eval(
         comment=f"async-consol-eval:{train_run_id}@{step}",
     )
     script = generate_script(
-        slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}
+        slurm_config,
+        launch.command,
+        env={**launch.env, **THREE_POOL_SLURM_ENV, **profiling_env_passthrough()},
     )
     result = submit_slurm_job(script, "lm")
     logger.info(

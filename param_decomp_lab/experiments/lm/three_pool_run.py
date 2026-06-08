@@ -107,6 +107,16 @@ from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer
 # cross-pool collectives).
 THREE_POOL_SLURM_ENV: dict[str, str] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
 
+# Profiling / tracing env vars (read on the compute node by the profiler / trace hooks)
+# only reach the job if forwarded explicitly — the SLURM script exports a curated env dict,
+# not the submitter's whole environment. `profiling_env_passthrough` collects those set at
+# submit so `PD_TORCH_PROFILE_* / PD_MEMORY_PROFILE_* / PD_TRACE*` flow through to the run.
+_PROFILE_ENV_PREFIXES = ("PD_TORCH_PROFILE_", "PD_MEMORY_PROFILE_", "PD_TRACE")
+
+
+def profiling_env_passthrough() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k.startswith(_PROFILE_ENV_PREFIXES)}
+
 
 class ThreePoolRuntimeConfig(PooledRuntimeConfig):
     """`PooledRuntimeConfig` (core substrate scalars + the `compile_*` / `checkpoint_ci_fn`
