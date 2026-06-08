@@ -98,6 +98,8 @@ class ResidMLP(LoadableModule):
             residual = residual + out
         if return_residual:
             return residual
+        if self.config.final_rmsnorm:
+            residual = residual * torch.rsqrt(residual.pow(2).mean(-1, keepdim=True) + 1e-6)
         out = einops.einsum(
             residual,
             self.W_U,

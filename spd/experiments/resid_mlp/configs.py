@@ -17,6 +17,12 @@ class ResidMLPModelConfig(BaseConfig):
     )
     in_bias: bool
     out_bias: bool
+    final_rmsnorm: bool = Field(
+        default=False,
+        description="If True, apply a parameter-free RMSNorm to the residual stream before the "
+        "W_U readout (analogue of a transformer's final ln_f). Lets us probe how an end-of-model "
+        "norm affects the decomposition.",
+    )
 
 
 class ResidMLPTrainConfig(BaseConfig):
