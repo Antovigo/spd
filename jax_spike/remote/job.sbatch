@@ -20,7 +20,7 @@ echo "nodelist: $SLURM_JOB_NODELIST"
 # --gpus-per-task=1 makes SLURM bind exactly one GPU per task (sets CUDA_VISIBLE_DEVICES
 # per task). Each task therefore sees 1 local GPU; jax.distributed.initialize() builds the
 # global world from SLURM_PROCID/SLURM_NTASKS. Do NOT set CUDA_VISIBLE_DEVICES by hand.
-srun --kill-on-bad-exit=1 bash -c '
+srun --gpus-per-task=1 --kill-on-bad-exit=1 bash -c '
   cd ~/pd-nano-jax/jax_spike
   source .venv-cuda/bin/activate
   bash _remote_cmd.sh
