@@ -85,22 +85,66 @@ floor) and ~linear in batch once compute-bound — predictable, exactly the regi
 pool split is meant to balance. `lax.scan` handles the inner loop with no unroll/compile
 pathology. (These are toy-shape numbers — not a model-scale claim.)
 
+## Multi-GPU / multi-node — Stages 7 & 8 (real H200, up to 16 GPUs / 2 nodes)
+
+**Stage 7 (`stage7_distributed_hello.py`) — distributed bring-up.** `jax.distributed`
+under SLURM + a cross-mesh `psum`. PASS at 8 GPUs (1 node) and **16 GPUs (2 nodes)**
+(`psum(device_ids)=120`). The launch recipe that works on this cluster (the part that
+took the most iteration):
+- `srun` with all GPUs visible per task (`--gres=gpu:8`, no per-task GPU binding),
+- each process claims `local_device_ids=[SLURM_LOCALID]` (per-task binding +
+  ordinal-0-for-all tripped 'invalid device ordinal' inside NCCL),
+- barrier (`sync_global_devices`) before `jax.distributed.shutdown()` to avoid a
+  coordinator-teardown gRPC race.
+
+**Stage 8 (`stage8_train_distributed.py`) — the whole stack, GSPMD-sharded.** The full
+single-pool SPMD step: real PD math + the four losses (faith / imp / stoch / PGD-recon)
++ the PGD adversary + two hand-rolled Adam optimizers, with data sharded `P('dp')`,
+params replicated, and `jax.jit` inserting the grad all-reduce automatically — **no
+manual collectives anywhere.**
+
+*Correctness:* pure data-parallelism is GPU-count-invariant, so a fixed global batch +
+seed must give the same loss trajectory at any scale. It does — 1 / 8 / 16 GPUs agree to
+~5 sig figs (final total 0.45582 / 0.45582 / 0.45583; bit-level reduction-order drift
+only). The multi-node 16-GPU run is correct.
+
+*Weak scaling* (256 samples/GPU, S=12 d=512 C=64 n_warmup=10):
+
+| GPUs | global batch | ms/step | samples/s | efficiency |
+|---|---|---|---|---|
+| 1  | 256  | 155 | 1,648  | — |
+| 8  | 2048 | 157 | 13,084 | 99% |
+| 16 (2 nodes) | 4096 | 168 | 24,310 | 92% |
+
+Step time stays ~flat as batch + GPUs grow together → near-linear weak scaling, holding
+across the node boundary (the 8% drop at 16 is the cross-node grad all-reduce).
+
 ## Remote GPU tooling (built here, reusable)
 
-- `remote/gpu.sh "python …"` — rsyncs `jax_spike/` to Andromeda, submits a 1-GPU
-  SLURM job, waits, prints the log. Local-edit → GPU-result in one command.
-- `remote/job.sbatch` — 1× H200, idempotent `jax[cuda12]` venv that persists across
-  syncs. SSH uses `-o RemoteCommand=none -o RequestTTY=no` to bypass the forced-tmux
-  login config.
+Git-based: edit locally → commit → `remote/gpu.sh` pushes, the cluster worktree pulls,
+a SLURM job runs, the log streams back.
 
-## Net recommendation (unchanged, now better-supported)
+- `remote/gpu.sh "python …"` — `NODES`/`GPN`/`PART` env knobs pick the scale
+  (e.g. `NODES=2 GPN=8` → 16 GPUs). Pushes the branch, pulls on the cluster, submits
+  `srun` (1 task/GPU), waits, prints the log.
+- `remote/job.sbatch` — generic; scale overridden on the sbatch CLI. All GPUs visible
+  per task; `_remote_cmd.sh` carries the command.
+- `remote/setup_cluster.sh` — one-time: `feature/nano-pd-jax` worktree at `~/pd-nano-jax`
+  + persistent `jax[cuda12]` venv.
+- `distributed_util.py` — `init_distributed()` (the LOCALID recipe), `dp_mesh()`,
+  `shard_dp()`, `replicate()`.
+- SSH bypasses the forced-tmux login config with `-o RemoteCommand=none -o RequestTTY=no`.
 
-Don't port the heterogeneous 2-pool faithfully. The highest-leverage JAX design is the
-**single-pool SPMD collapse**: Equinox model with pure-mask-arg forward, GSPMD-shard
-CI-fn + components across one mesh, `eqx.partition` two optimizers, PGD inner loop as
-`lax.scan`. Both spikes point here; the manual pool split is largely a workaround for
-torch's missing ergonomic auto-sharding (FSDP), which GSPMD provides natively.
+## Net recommendation (now demonstrated end-to-end on GPU)
 
-**Next concrete step:** a PGD prototype (`lax.scan` warmup + persistent sources in
-state + fused multi-`argnums` grad), then a single-pool SPMD step on GPU measuring
-throughput/memory vs the torch 2-pool baseline. That's the real go/no-go.
+Don't port the heterogeneous 2-pool faithfully. The **single-pool SPMD collapse** is
+real and it works: the entire PD+PGD stack runs as one `jax.jit`'d step, GSPMD-sharded,
+training correctly and scaling ~linearly to 16 GPUs / 2 nodes — with zero manual
+collectives, zero pool-coordination code, zero deadlock surface. The manual pool split
+is largely a workaround for torch's missing ergonomic auto-sharding (FSDP); GSPMD
+provides that natively.
+
+**Remaining before a real port decision:** model-shaped scale (a genuine HF/Flax target,
+not toy einsums) with param sharding (not just data-parallel) for the memory story;
+XLA-vs-`torch.compile` throughput parity; and the interpretation/checkpoint pipeline
+boundary (still torch).
