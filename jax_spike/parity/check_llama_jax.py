@@ -15,8 +15,12 @@ from vendored_jax.llama import (
     LlamaConfig,
     MaskInfo,
     all_target_paths,
+    apply_rope,
     build_from_torch_state,
+    causal_sdpa,
+    repeat_kv,
     rms_norm,
+    rope_cos_sin,
 )
 
 jax.config.update("jax_enable_x64", False)  # fp32, match torch dump
@@ -74,6 +78,22 @@ ln2 = rms_norm(x_mid, b0.post_attention_layernorm, cfg.rms_norm_eps)
 m_out = b0.mlp(ln2, None)
 for nm, arr in [("b0_ln1", ln1), ("b0_attn", a_out), ("b0_xmid", x_mid), ("b0_ln2", ln2), ("b0_mlp", m_out)]:
     print(f"{nm:13s} rel err: {rel(arr, meta('dbg/' + nm)):.3e}")
+# attention internals
+at = b0.self_attn
+bsz, tlen, _ = ln1.shape
+hd = cfg.head_dim
+qp, kp, vp = at.q_proj(ln1, None), at.k_proj(ln1, None), at.v_proj(ln1, None)
+print(f"  b0_qproj    rel err: {rel(qp, meta('dbg/b0_qproj')):.3e}")
+cos, sin = rope_cos_sin(at.inv_freq, tlen, ln1.dtype)
+print(f"  b0_cos      rel err: {rel(cos, meta('dbg/b0_cos')):.3e}")
+print(f"  b0_sin      rel err: {rel(sin, meta('dbg/b0_sin')):.3e}")
+q = qp.reshape(bsz, tlen, cfg.n_head, hd).transpose(0, 2, 1, 3)
+k = kp.reshape(bsz, tlen, cfg.n_kv_head, hd).transpose(0, 2, 1, 3)
+v = vp.reshape(bsz, tlen, cfg.n_kv_head, hd).transpose(0, 2, 1, 3)
+q, k = apply_rope(q, k, cos, sin)
+k, v = repeat_kv(k, cfg.n_rep), repeat_kv(v, cfg.n_rep)
+y = causal_sdpa(q, k, v).transpose(0, 2, 1, 3).reshape(bsz, tlen, cfg.n_head * hd)
+print(f"  b0_y_attend rel err: {rel(y, meta('dbg/b0_y_attend')):.3e}")
 for li, block in enumerate(model.blocks):
     h = block(h, None)
     print(f"h_layer{li}      rel err: {rel(h, meta(f'dbg/h_layer{li}')):.3e}")

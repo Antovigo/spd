@@ -125,6 +125,17 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     m_out = b0.mlp(ln2)
     for nm, arr in [("b0_ln1", ln1), ("b0_attn", a_out), ("b0_xmid", x_mid), ("b0_ln2", ln2), ("b0_mlp", m_out)]:
         out[f"META/dbg/{nm}"] = arr.detach().numpy()
+    # attention internals (block 0)
+    at = b0.self_attn
+    hd = cfg.n_embd // cfg.n_head
+    aq, ak, av = at.q_proj(ln1), at.k_proj(ln1), at.v_proj(ln1)
+    y_attend = at._attend(aq, ak, av)  # pre o_proj
+    qr = aq.view(B, T, cfg.n_head, hd).transpose(1, 2)
+    cos, sin = at._rope_cos_sin(qr, T)
+    out["META/dbg/b0_qproj"] = aq.detach().numpy()
+    out["META/dbg/b0_y_attend"] = y_attend.detach().numpy()
+    out["META/dbg/b0_cos"] = cos.squeeze(0).detach().numpy()  # (T, hd)
+    out["META/dbg/b0_sin"] = sin.squeeze(0).detach().numpy()
 
 np.savez(args.out, **out)
 print(
