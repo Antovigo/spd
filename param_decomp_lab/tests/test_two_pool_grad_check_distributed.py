@@ -32,7 +32,13 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 
-from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
+from param_decomp.metrics.persistent_pgd_state import (
+    BroadcastAcrossBatchScope,
+    PerBatchPerPositionScope,
+    PersistentPGDSourceScope,
+    PersistentPGDState,
+    scope_needs_replica_sync,
+)
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
 from param_decomp_lab.distributed import cleanup_distributed, init_distributed
 
@@ -71,10 +77,12 @@ _POOL_A_RANKS = [4, 5, 6, 7]  # n_a = 4 (non-square vs chunk_dp=2 → CI-fine ro
 _WORLD_SIZE = 8
 
 
-def _build_two_pool_runtime(numel_global: int) -> _ThreePoolRuntime:
+def _build_two_pool_runtime(
+    numel_global: int, scope: PersistentPGDSourceScope
+) -> _ThreePoolRuntime:
     """The 3-pool runtime with ci_ranks == ppgd_ranks == Pool A ranks and the
     2-pool chunk layout (rank 0 = chunk-0 leader)."""
-    base = _build_runtime(numel_global)
+    base = _build_runtime(numel_global, scope)
     chunks = (
         Chunk(ranks=tuple(_BLOCK0_RANKS), sites=tuple(_SITES_BLOCK0)),
         Chunk(ranks=tuple(_BLOCK1_RANKS), sites=tuple(_SITES_BLOCK1)),
@@ -90,10 +98,22 @@ def _build_two_pool_runtime(numel_global: int) -> _ThreePoolRuntime:
 
 
 def _gather_initial_ppgd_sources(
-    ppgd_state: PersistentPGDState | None, ctx: Any, world: Any
+    ppgd_state: PersistentPGDState | None,
+    ctx: Any,
+    world: Any,
+    scope: PersistentPGDSourceScope,
 ) -> dict[str, Tensor] | None:
-    """All-gather each Pool A rank's pre-warmup sources so rank 0 can replay the
-    exact PPGD trajectory in the reference. Non-Pool-A ranks contribute None."""
+    """Reassemble the reference's initial PPGD sources from the distributed ranks.
+
+    - per_batch_per_position: each Pool A rank owns an independent batch slice; stitch
+      the slices into one ``(B, S, source_c)`` source so the reference replays the exact
+      per-position trajectory.
+    - broadcast: all Pool A ranks broadcast-inited to the SAME ``(1, S, source_c)`` source,
+      so the reference's single shared source is just rank 0's copy.
+
+    Collective on every rank (``all_gather_object`` on the world group); returns the
+    reassembled sources on rank 0, ``None`` elsewhere.
+    """
     payload: dict[str, Any] | None = None
     if isinstance(ctx, PoolAContext):
         assert ppgd_state is not None
@@ -107,22 +127,35 @@ def _gather_initial_ppgd_sources(
     dist.all_gather_object(gathered, payload)
     if dist.get_rank() != 0:
         return None
-    source_c = _C + 1  # use_delta_component
-    full = {s: torch.zeros(_BATCH_GLOBAL, _SEQ_LEN, source_c) for s in _ALL_SITES}
-    for item in gathered:
-        if item is None:
-            continue
-        start = item["start"]
-        for s, t in item["sources"].items():
-            full[s][start : start + t.shape[0]] = t
-    return full
+    pool_a_items = [item for item in gathered if item is not None]
+    match scope:
+        case BroadcastAcrossBatchScope():
+            shared = pool_a_items[0]["sources"]
+            for item in pool_a_items[1:]:
+                for s, t in item["sources"].items():
+                    torch.testing.assert_close(
+                        t, shared[s], msg=f"broadcast source diverged across Pool A on site {s!r}"
+                    )
+            return {s: t.clone() for s, t in shared.items()}
+        case PerBatchPerPositionScope():
+            source_c = _C + 1  # use_delta_component
+            full = {s: torch.zeros(_BATCH_GLOBAL, _SEQ_LEN, source_c) for s in _ALL_SITES}
+            for item in pool_a_items:
+                start = item["start"]
+                for s, t in item["sources"].items():
+                    full[s][start : start + t.shape[0]] = t
+            return full
+        case _:
+            raise AssertionError(f"unsupported scope in 2-pool grad check: {type(scope).__name__}")
 
 
 def _neutralize_optimizer(opt: torch.optim.Optimizer) -> None:
     opt.step = lambda *a, **k: None  # type: ignore[method-assign]
 
 
-def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None]:
+def _run_distributed_step(
+    scope: PersistentPGDSourceScope,
+) -> tuple[dict[str, Tensor], dict[str, Tensor] | None]:
     world = build_two_world(
         pool_a_ranks=list(_POOL_A_RANKS),
         chunks=[
@@ -137,15 +170,19 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
     ctx = build_two_pool_context(world, rank)
     cm = _build_component_model(rank)
     numel_global = sum(cm.target_weight(s).numel() for s in _ALL_SITES)
-    runtime = _build_two_pool_runtime(numel_global)
+    runtime = _build_two_pool_runtime(numel_global, scope)
     strategy = ReconLossStrategy.unfused(recon_loss_mse)
     batch = _global_batch()
 
     ppgd_state: PersistentPGDState | None = None
     if isinstance(ctx, PoolAContext):
+        # Distinct per-rank seed so broadcast-init is doing real work (each rank's own
+        # randn differs; only the broadcast makes them agree). Per-batch-per-position
+        # genuinely wants distinct per-rank sources.
         torch.manual_seed(_PPGD_INIT_SEED + rank)
-        ppgd_state = _make_ppgd_state(world, runtime, strategy)
-    ref_sources = _gather_initial_ppgd_sources(ppgd_state, ctx, world)
+        replica_sync_group = world.ci_pool_group if scope_needs_replica_sync(scope) else None
+        ppgd_state = _make_ppgd_state(world, runtime, strategy, replica_sync_group)
+    ref_sources = _gather_initial_ppgd_sources(ppgd_state, ctx, world, scope)
 
     captured: dict[str, Tensor] = {}
     match ctx:
@@ -187,13 +224,20 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
     return captured, ref_sources
 
 
-def _run_test() -> None:
+_SCOPES: dict[str, PersistentPGDSourceScope] = {
+    "per_batch_per_position": PerBatchPerPositionScope(),
+    "broadcast_across_batch": BroadcastAcrossBatchScope(),
+}
+
+
+def _run_test(scope_name: str) -> None:
     init_distributed()
     try:
         rank = dist.get_rank()
         assert dist.get_world_size() == _WORLD_SIZE
+        scope = _SCOPES[scope_name]
 
-        captured, ref_sources = _run_distributed_step()
+        captured, ref_sources = _run_distributed_step(scope)
         gathered: list[Any] = [None] * _WORLD_SIZE
         dist.all_gather_object(gathered, captured)
 
@@ -203,18 +247,23 @@ def _run_test() -> None:
                 assert d is not None
                 dist_grads.update(d)
             assert ref_sources is not None
-            _report_and_assert(dist_grads, ref_sources)
+            _report_and_assert(dist_grads, ref_sources, scope, scope_name)
     finally:
         cleanup_distributed()
 
 
-def _report_and_assert(dist_grads: dict[str, Tensor], ref_sources: dict[str, Tensor]) -> None:
-    ref_grads = _reference_grads(ref_sources)
+def _report_and_assert(
+    dist_grads: dict[str, Tensor],
+    ref_sources: dict[str, Tensor],
+    scope: PersistentPGDSourceScope,
+    scope_name: str,
+) -> None:
+    ref_grads = _reference_grads(ref_sources, scope)
     keys = sorted(dist_grads.keys())
     assert set(keys) == set(ref_grads.keys()), (
         f"param-key mismatch:\n dist={sorted(dist_grads)}\n ref ={sorted(ref_grads)}"
     )
-    print("\n=== 2-pool SUM-grad convention: distributed vs single-process reference ===")
+    print(f"\n=== 2-pool SUM-grad convention [{scope_name}]: distributed vs reference ===")
     print("topology: n_a=4 (Pool A), chunk_dp=2 (2 chunks) (NON-square)")
     worst = 0.0
     for k in keys:
@@ -226,7 +275,7 @@ def _report_and_assert(dist_grads: dict[str, Tensor], ref_sources: dict[str, Ten
         ratio = (dg[mask] / rg[mask]).mean().item() if mask.any() else float("nan")
         worst = max(worst, rel)
         print(f"  {k:34s} max|Δ|/max|ref|={rel:.2e}  mean(dist/ref)={ratio:.6f}")
-    print(f"worst relative error across all params: {worst:.2e}")
+    print(f"worst relative error across all params [{scope_name}]: {worst:.2e}")
     for k in keys:
         torch.testing.assert_close(
             dist_grads[k],
@@ -235,25 +284,30 @@ def _report_and_assert(dist_grads: dict[str, Tensor], ref_sources: dict[str, Ten
             atol=2e-5,
             msg=lambda m, k=k: f"grad mismatch on {k}:\n{m}",
         )
-    print(
-        "PASS: all reduced grads match the single-process reference at non-square 2-pool topology."
-    )
+    print(f"PASS [{scope_name}]: all reduced grads match the single-process reference.")
 
 
 if __name__ == "__main__":
-    _run_test()
+    import sys
+
+    _run_test(sys.argv[1] if len(sys.argv) > 1 else "per_batch_per_position")
 
 
 @pytest.mark.slow
 class TestTwoPoolGradCheckDistributed:
-    def test_grad_check(self) -> None:
+    @pytest.mark.parametrize(
+        ("scope_name", "master_port"),
+        [("per_batch_per_position", "29532"), ("broadcast_across_batch", "29533")],
+    )
+    def test_grad_check(self, scope_name: str, master_port: str) -> None:
         cmd = [
             "torchrun",
             "--standalone",
             f"--nproc_per_node={_WORLD_SIZE}",
             "--master_port",
-            "29532",
+            master_port,
             str(Path(__file__).resolve()),
+            scope_name,
         ]
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ""

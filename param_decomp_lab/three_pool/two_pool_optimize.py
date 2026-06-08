@@ -47,8 +47,10 @@ from param_decomp.distributed import seed_all_ranks, seed_per_rank
 from param_decomp.masks import AllLayersRouter
 from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.metrics.persistent_pgd_state import (
+    BroadcastAcrossBatchScope,
     PerBatchPerPositionScope,
     PersistentPGDState,
+    scope_needs_replica_sync,
 )
 from param_decomp.optimize import (
     EvalLoop,
@@ -474,9 +476,17 @@ class TwoPoolTrainer:
 
         if isinstance(ctx, PoolAContext) and self.ppgd_state is None:
             ppgd_cfg = runtime.ppgd_cfg
-            assert isinstance(ppgd_cfg.scope, PerBatchPerPositionScope), (
-                f"2-pool supports only PerBatchPerPositionScope PPGD sources; got "
-                f"{type(ppgd_cfg.scope).__name__}."
+            assert isinstance(
+                ppgd_cfg.scope, PerBatchPerPositionScope | BroadcastAcrossBatchScope
+            ), (
+                f"2-pool supports PerBatchPerPositionScope and BroadcastAcrossBatchScope "
+                f"PPGD sources; got {type(ppgd_cfg.scope).__name__}."
+            )
+            # A broadcast (whole-global-batch) source is replicated across the Pool A
+            # data-parallel ranks: the state broadcast-inits it from the group leader and
+            # AVG-reduces its grads over the group, so all replicas step in lockstep.
+            replica_sync_group = (
+                world.ci_pool_group if scope_needs_replica_sync(ppgd_cfg.scope) else None
             )
             self.ppgd_state = PersistentPGDState(
                 module_to_c=runtime.c_per_site,
@@ -490,6 +500,7 @@ class TwoPoolTrainer:
                 n_samples=ppgd_cfg.n_samples,
                 router=AllLayersRouter(),
                 reconstruction_loss=self.strategy.recon_loss,
+                replica_sync_group=replica_sync_group,
             )
             if self._pending_ppgd_resume_state is not None:
                 self.ppgd_state.load_state_dict(self._pending_ppgd_resume_state)

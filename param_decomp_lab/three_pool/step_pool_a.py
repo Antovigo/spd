@@ -146,8 +146,10 @@ def step_pool_a(
     sum_reduce_ppgd_grads(ctx.world, [*raw.v.values(), *raw.u.values()])
     trace(f"step_pool_a {step}: send g_VU to chunk")
     ctx.portals.g_vu_to_chunk.send(ctx.role.as_ppgd(), raw.v, raw.u)
-    # Final (N+1)'th source step on this rank's own (per-batch-per-position) grads.
-    ppgd_state.step(raw.sources)
+    # Final (N+1)'th source step. For per-batch-per-position sources this is a no-op
+    # reduce (per-rank-independent); for a broadcast (shared) source the AVG over Pool A
+    # reassembles the full-batch grad — matching the warmup-step reduce in the state.
+    ppgd_state.step(ppgd_state.reduce_source_grads(raw.sources))
 
     g_ci_total = _assemble_g_ci_total(g_ci_chunk, raw.ci, ctx, cfg, seq_len)
 

@@ -754,6 +754,7 @@ class ThreePoolTrainer:
                 n_samples=ppgd_cfg.n_samples,
                 router=AllLayersRouter(),
                 reconstruction_loss=self.strategy.recon_loss,
+                replica_sync_group=None,
             )
             if self._pending_ppgd_resume_state is not None:
                 self.ppgd_state.load_state_dict(self._pending_ppgd_resume_state)

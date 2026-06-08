@@ -102,6 +102,11 @@ def use_reduction_group(group: "dist.ProcessGroup | None") -> Iterator[None]:
         _reduction_group.reset(token)
 
 
+def active_reduction_group() -> "dist.ProcessGroup | None":
+    """The reduction group set by ``use_reduction_group``, or ``None`` (global group)."""
+    return _reduction_group.get()
+
+
 def all_reduce(
     tensor: torch.Tensor, op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM
 ) -> torch.Tensor:

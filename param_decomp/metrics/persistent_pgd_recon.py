@@ -10,13 +10,13 @@ from collections.abc import Iterable
 from typing import Annotated, Any, ClassVar, Literal, override
 
 import torch
+import torch.distributed as dist
 from jaxtyping import Float
 from pydantic import Field, NonNegativeInt, PositiveInt
 from torch import Tensor
-from torch.distributed import ReduceOp
 
 from param_decomp.base_config import Probability
-from param_decomp.distributed import all_reduce, broadcast_tensor, is_distributed
+from param_decomp.distributed import active_reduction_group, all_reduce, is_distributed
 from param_decomp.masks import (
     AllLayersRouter,
     Router,
@@ -138,6 +138,12 @@ class _PersistentPGDReconBase[
         if self.state is not None:
             return
         batch_dims = ctx.target_out.shape[:-1]
+        # Replicated scopes keep their shared sources in lockstep across the active
+        # data-parallel group: the context group set by ``use_reduction_group`` (pooled
+        # eval scopes it to that pool), else the whole-world default group.
+        replica_sync_group: dist.ProcessGroup | None = None
+        if scope_needs_replica_sync(self.cfg.scope) and is_distributed():
+            replica_sync_group = active_reduction_group() or dist.group.WORLD
         self.state = PersistentPGDState(
             module_to_c=self.model.module_to_c,
             batch_dims=batch_dims,
@@ -150,26 +156,11 @@ class _PersistentPGDReconBase[
             n_samples=self.cfg.n_samples,
             router=_router_for_cfg(self.cfg, self.device),
             reconstruction_loss=ctx.reconstruction_loss,
+            replica_sync_group=replica_sync_group,
         )
-        # Replicated-scope sources must start identical on every DP rank; the state
-        # allocates them independently (it's distribution-unaware), so sync here.
-        if scope_needs_replica_sync(self.cfg.scope) and is_distributed():
-            for source in self.state.sources.values():
-                broadcast_tensor(source)
         if self._pending_resume_state is not None:
             self.state.load_state_dict(self._pending_resume_state)
             self._pending_resume_state = None
-
-    def _reduce_source_grads(self, grads: PPGDSources) -> PPGDSources:
-        """AVG-reduce source grads across DP ranks for replicated scopes, else no-op.
-
-        Keeps DP replicas of shared sources in sync. The state is
-        distribution-unaware, so the Metric owns this (its execution model is
-        single-process or whole-world DP).
-        """
-        if scope_needs_replica_sync(self.cfg.scope) and is_distributed():
-            return {k: all_reduce(v, op=ReduceOp.AVG) for k, v in grads.items()}
-        return grads
 
     @override
     def reset(self) -> None:
@@ -197,7 +188,6 @@ class _PersistentPGDReconBase[
                 target_out=ctx.target_out,
                 ci=ctx.ci.lower_leaky,
                 weight_deltas=wd,
-                reduce_grads=self._reduce_source_grads,
             )
 
         sum_loss, n_examples = self.state.compute_recon_sum_and_n(
@@ -263,7 +253,7 @@ class _PersistentPGDReconBase[
         if live_loss is None or self.state is None:
             return
         grads = self.state.get_grads(live_loss, retain_graph=True)
-        self._pending_source_grads = self._reduce_source_grads(grads)
+        self._pending_source_grads = self.state.reduce_source_grads(grads)
 
     @override
     def after_backward(self) -> None:

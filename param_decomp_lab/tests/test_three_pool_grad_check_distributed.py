@@ -59,6 +59,7 @@ from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConf
 from param_decomp.metrics.persistent_pgd_state import (
     AdamPGDConfig,
     PerBatchPerPositionScope,
+    PersistentPGDSourceScope,
     PersistentPGDState,
 )
 from param_decomp.schedule import ScheduleConfig
@@ -145,7 +146,7 @@ def _ci_config() -> GlobalCiConfig:
     )
 
 
-def _ppgd_cfg() -> PersistentPGDReconLossConfig:
+def _ppgd_cfg(scope: PersistentPGDSourceScope) -> PersistentPGDReconLossConfig:
     return PersistentPGDReconLossConfig(
         coeff=_COEFF_PPGD,
         optimizer=AdamPGDConfig(
@@ -154,14 +155,14 @@ def _ppgd_cfg() -> PersistentPGDReconLossConfig:
             eps=1e-8,
             lr_schedule=ScheduleConfig(start_val=0.01, fn_type="constant"),
         ),
-        scope=PerBatchPerPositionScope(),
+        scope=scope,
         use_sigmoid_parameterization=False,
         n_warmup_steps=_PPGD_WARMUP,
         n_samples=1,
     )
 
 
-def _build_runtime(numel_global: int) -> _ThreePoolRuntime:
+def _build_runtime(numel_global: int, scope: PersistentPGDSourceScope) -> _ThreePoolRuntime:
     chunks = (
         Chunk(ranks=tuple(_BLOCK0_RANKS), sites=tuple(_SITES_BLOCK0)),
         Chunk(ranks=tuple(_BLOCK1_RANKS), sites=tuple(_SITES_BLOCK1)),
@@ -178,7 +179,7 @@ def _build_runtime(numel_global: int) -> _ThreePoolRuntime:
         sigmoid_type="leaky_hard",
         run_batch=lambda model, batch: model(batch),  # unused on CPU recon path
         reconstruction_loss=recon_loss_mse,
-        ppgd_cfg=_ppgd_cfg(),
+        ppgd_cfg=_ppgd_cfg(scope),
         recon_plan=recon_plan,
         n_est=n_est,
         coeff_faith=_COEFF_FAITH,
@@ -244,7 +245,12 @@ def _neutralize_optimizer(opt: torch.optim.Optimizer) -> None:
     opt.step = lambda *a, **k: None  # type: ignore[method-assign]
 
 
-def _make_ppgd_state(world: Any, runtime: _ThreePoolRuntime, strategy: Any) -> PersistentPGDState:
+def _make_ppgd_state(
+    world: Any,
+    runtime: _ThreePoolRuntime,
+    strategy: Any,
+    replica_sync_group: Any = None,
+) -> PersistentPGDState:
     return PersistentPGDState(
         module_to_c=runtime.c_per_site,
         batch_dims=(world.batch_local_ppgd, _SEQ_LEN),
@@ -257,6 +263,7 @@ def _make_ppgd_state(world: Any, runtime: _ThreePoolRuntime, strategy: Any) -> P
         n_samples=runtime.ppgd_cfg.n_samples,
         router=AllLayersRouter(),
         reconstruction_loss=strategy.recon_loss,
+        replica_sync_group=replica_sync_group,
     )
 
 
@@ -322,7 +329,7 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
     # NOTE: the trainer drops pool-irrelevant params for memory; we keep all of
     # them so the layerwise ('mlp') CI fn — which reads component activations —
     # works on the CI pool too. Dropping is a memory opt, irrelevant to grads.
-    runtime = _build_runtime(numel_global)
+    runtime = _build_runtime(numel_global, PerBatchPerPositionScope())
     strategy = ReconLossStrategy.unfused(recon_loss_mse)
     batch = _global_batch()
 
@@ -380,16 +387,23 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _reference_grads(initial_ppgd_sources: dict[str, Tensor]) -> dict[str, Tensor]:
+def _reference_grads(
+    initial_ppgd_sources: dict[str, Tensor],
+    scope: PersistentPGDSourceScope,
+) -> dict[str, Tensor]:
     """Full-batch single-process gradient for the identical total loss.
 
     Mirrors the per-term seeding the step functions apply, but on the global
     batch in one process: faith, stoch, imp-min, ppgd recon. Returns
     {param_key: grad} for ci_fn.* and components.<site>.*.
+
+    ``scope`` selects the PPGD source scope: per-batch-per-position uses one source
+    per (batch, position); broadcast uses a single source shared across the whole
+    batch (leading dim 1). ``initial_ppgd_sources`` must be shaped to match.
     """
     cm = _build_component_model(0)  # full model (CI fn + components)
     numel_global = sum(cm.target_weight(s).numel() for s in _ALL_SITES)
-    runtime = _build_runtime(numel_global)
+    runtime = _build_runtime(numel_global, scope)
     strategy = ReconLossStrategy.unfused(recon_loss_mse)
     batch = _global_batch()
 
@@ -445,7 +459,7 @@ def _reference_grads(initial_ppgd_sources: dict[str, Tensor]) -> dict[str, Tenso
         denom = n_positions_global * n_sites_total
         (_COEFF_STOCH * loss_s / denom).backward(retain_graph=True)
 
-    # --- ppgd recon (full batch, replayed sources) ---
+    # --- ppgd recon (full batch, replayed sources; single shared source for broadcast) ---
     ppgd_state = PersistentPGDState(
         module_to_c=runtime.c_per_site,
         batch_dims=(_BATCH_GLOBAL, _SEQ_LEN),
@@ -458,7 +472,13 @@ def _reference_grads(initial_ppgd_sources: dict[str, Tensor]) -> dict[str, Tenso
         n_samples=runtime.ppgd_cfg.n_samples,
         router=AllLayersRouter(),
         reconstruction_loss=strategy.recon_loss,
+        replica_sync_group=None,
     )
+    for s in ppgd_state.sources:
+        assert ppgd_state.sources[s].shape == initial_ppgd_sources[s].shape, (
+            f"reference source shape {tuple(ppgd_state.sources[s].shape)} != provided "
+            f"{tuple(initial_ppgd_sources[s].shape)} for site {s!r} (scope {type(scope).__name__})"
+        )
     with torch.no_grad():
         for s in ppgd_state.sources:
             ppgd_state.sources[s].copy_(initial_ppgd_sources[s])
@@ -533,7 +553,7 @@ def _run_test() -> None:
 
 
 def _report_and_assert(dist_grads: dict[str, Tensor], ref_sources: dict[str, Tensor]) -> None:
-    ref_grads = _reference_grads(ref_sources)
+    ref_grads = _reference_grads(ref_sources, PerBatchPerPositionScope())
     keys = sorted(dist_grads.keys())
     assert set(keys) == set(ref_grads.keys()), (
         f"param-key mismatch:\n dist={sorted(dist_grads)}\n ref ={sorted(ref_grads)}"

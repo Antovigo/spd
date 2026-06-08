@@ -47,6 +47,34 @@ adversary(replica, contribute-once on the chunk leader). Validated by
 `tests/test_two_pool_grad_check_distributed.py` (non-square `n_a=4` / `chunk_dp=2`, all
 loss terms, worst rel err 4.04e-7 vs the SAME single-process reference the 3-pool uses).
 
+### PPGD source scopes (2-pool)
+
+The 2-pool supports two PPGD source scopes (`losses.ppgd.scope`):
+
+- `per_batch_per_position` — an independent source per (batch element, position). Pool A's
+  per-rank batch slice is self-contained, so no cross-rank source sync; the final source
+  step uses this rank's own grads. This is the long-standing default.
+- `broadcast_across_batch` — ONE source shared across the whole **global** batch (shape
+  `(1, S, C)` per site instead of `(B, S, C)`), a ~1000× storage/memory win that makes
+  large-batch + full-model runs feasible. The shared source is **replicated** across the
+  Pool A data-parallel ranks: `PersistentPGDState` broadcast-inits it from the Pool A
+  group leader and **AVG-reduces** its grads over the Pool A group (`world.ci_pool_group`)
+  on every PGD step (warmup inner loop + the final `(N+1)`'th step). Identical init +
+  deterministic AVG + identical optimizer step keeps the replicas bit-identical without
+  per-step re-broadcast.
+
+The reduction is **AVG over the Pool A group** (equivalently SUM ÷ group size). Each rank's
+per-rank source grad is `∂(sum_loss_local / n_examples_local)/∂source`; with uniform batch
+slicing `mean_r(sum_loss_local / n_examples_local) == sum_loss_global / n_examples_global`,
+so AVG reproduces the shared-source full-batch grad. Confirmed by a real one-backward grad
+check (RNG pinned) — `tests/test_two_pool_grad_check_distributed.py` is parametrized over
+both scopes, each compared to its own single-process reference (broadcast: one shared
+source; per-batch: per-rank slices stitched), worst rel err **4.04e-7** for both.
+`PersistentPGDState.__init__` takes a `replica_sync_group` (the Pool A group when the scope
+needs sync, else `None`); the metric path (`persistent_pgd_recon.py`) passes the active
+reduction group, so the single-pool whole-world DP path for replicated scopes is owned by
+the state machine too. The 3-pool path is unchanged (per-batch-per-position only).
+
 Key reuse trick (`two_pool_layout.build_two_world`): the 2-pool world is the 3-pool
 `World` with `ci_ranks == ppgd_ranks == pool_a_ranks` and one Pool A all-reduce group
 serving as both the CI-pool and PPGD-pool group. With that identity, **the chunkwise pool
