@@ -29,6 +29,10 @@ args = ap.parse_args()
 
 torch.manual_seed(0)
 torch.set_default_dtype(torch.float32)
+# true fp32 on GPU (no TF32) so it matches JAX's "highest" precision apples-to-apples
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 cfg = VendoredLlamaConfig(
     model_type="VendoredLlama",
@@ -63,11 +67,11 @@ for path in paths:
     lin = model.get_submodule(path)
     d_out, d_in = lin.weight.shape
     comps[path] = LinearComponents(C=args.C, d_in=d_in, d_out=d_out, bias=None)
-cmodel = componentize_llama(model, comps).float()
+cmodel = componentize_llama(model, comps).float().to(DEV)
 
 B, T, C = args.B, args.T, args.C
-idx = torch.randint(0, cfg.vocab_size, (B, T))
-masks = {p: torch.rand(B, T, C) for p in paths}
+idx = torch.randint(0, cfg.vocab_size, (B, T), device=DEV)
+masks = {p: torch.rand(B, T, C, device=DEV) for p in paths}
 mask_infos = {
     p: ComponentsMaskInfo(component_mask=masks[p], routing_mask="all", weight_delta_and_mask=None)
     for p in paths
@@ -80,14 +84,14 @@ loss = (logits_masked**2).mean()
 loss.backward()
 
 out: dict[str, np.ndarray] = {k: v.detach().cpu().numpy() for k, v in cmodel.state_dict().items()}
-out["META/idx"] = idx.numpy()
-out["META/logits_clean"] = logits_clean.detach().numpy()
-out["META/logits_masked"] = logits_masked.detach().numpy()
+out["META/idx"] = idx.cpu().numpy()
+out["META/logits_clean"] = logits_clean.detach().cpu().numpy()
+out["META/logits_masked"] = logits_masked.detach().cpu().numpy()
 out["META/loss"] = np.array(loss.item(), dtype=np.float32)
 for p in paths:
-    out[f"META/mask/{p}"] = masks[p].numpy()
-    out[f"META/gV/{p}"] = cmodel.component_modules[p].components.V.grad.detach().numpy()
-    out[f"META/gU/{p}"] = cmodel.component_modules[p].components.U.grad.detach().numpy()
+    out[f"META/mask/{p}"] = masks[p].cpu().numpy()
+    out[f"META/gV/{p}"] = cmodel.component_modules[p].components.V.grad.detach().cpu().numpy()
+    out[f"META/gU/{p}"] = cmodel.component_modules[p].components.U.grad.detach().cpu().numpy()
 for k in (
     "vocab_size",
     "n_layer",
@@ -112,10 +116,10 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     h = emb
     for li, blk in enumerate(cmodel._layers):
         h = blk(h)  # clean (mask_infos=None)
-        out[f"META/dbg/h_layer{li}"] = h.detach().numpy()
-    out["META/dbg/emb"] = emb.detach().numpy()
-    out["META/dbg/h_pre_norm"] = h.detach().numpy()
-    out["META/dbg/h_post_norm"] = cmodel.norm(h).detach().numpy()
+        out[f"META/dbg/h_layer{li}"] = h.detach().cpu().numpy()
+    out["META/dbg/emb"] = emb.detach().cpu().numpy()
+    out["META/dbg/h_pre_norm"] = h.detach().cpu().numpy()
+    out["META/dbg/h_post_norm"] = cmodel.norm(h).detach().cpu().numpy()
     # block-0 internal breakdown (clean)
     b0 = cmodel._layers[0]
     ln1 = b0.input_layernorm(emb)
@@ -124,7 +128,7 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     ln2 = b0.post_attention_layernorm(x_mid)
     m_out = b0.mlp(ln2)
     for nm, arr in [("b0_ln1", ln1), ("b0_attn", a_out), ("b0_xmid", x_mid), ("b0_ln2", ln2), ("b0_mlp", m_out)]:
-        out[f"META/dbg/{nm}"] = arr.detach().numpy()
+        out[f"META/dbg/{nm}"] = arr.detach().cpu().numpy()
     # attention internals (block 0)
     at = b0.self_attn
     hd = cfg.n_embd // cfg.n_head
@@ -132,10 +136,10 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     y_attend = at._attend(aq, ak, av)  # pre o_proj
     qr = aq.view(B, T, cfg.n_head, hd).transpose(1, 2)
     cos, sin = at._rope_cos_sin(qr, T)
-    out["META/dbg/b0_qproj"] = aq.detach().numpy()
-    out["META/dbg/b0_y_attend"] = y_attend.detach().numpy()
-    out["META/dbg/b0_cos"] = cos.squeeze(0).detach().numpy()  # (T, hd)
-    out["META/dbg/b0_sin"] = sin.squeeze(0).detach().numpy()
+    out["META/dbg/b0_qproj"] = aq.detach().cpu().numpy()
+    out["META/dbg/b0_y_attend"] = y_attend.detach().cpu().numpy()
+    out["META/dbg/b0_cos"] = cos.squeeze(0).detach().cpu().numpy()  # (T, hd)
+    out["META/dbg/b0_sin"] = sin.squeeze(0).detach().cpu().numpy()
 
 np.savez(args.out, **out)
 print(
