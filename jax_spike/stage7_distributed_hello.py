@@ -16,7 +16,9 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-jax.distributed.initialize()  # SLURM auto-detect
+from distributed_util import init_distributed
+
+init_distributed()
 
 pid = jax.process_index()
 nproc = jax.process_count()
