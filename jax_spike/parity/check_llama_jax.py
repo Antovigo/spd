@@ -106,8 +106,13 @@ print("--- full ---")
 
 logits_clean = model(idx, None)
 logits_masked = model(idx, masks)
-e_clean = rel(logits_clean, meta("logits_clean"))
-e_masked = rel(logits_masked, meta("logits_masked"))
+
+
+def rel_l2(a, b):
+    """Relative L2 norm — the right cross-framework grad-check metric (max element-wise
+    rel err explodes on near-zero elements and is misleading)."""
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    return float(np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-12))
 
 
 def loss_fn(m: ComponentLlama):
@@ -124,16 +129,18 @@ def clin_of(root, path):
     return getattr(parent, parts[3])
 
 
-worst_gV = worst_gU = 0.0
-for p in paths:
-    c = clin_of(gmodel, p)
-    worst_gV = max(worst_gV, rel(c.V, d[f"META/gV/{p}"]))
-    worst_gU = max(worst_gU, rel(c.U, d[f"META/gU/{p}"]))
+mc = rel_l2(logits_clean, meta("logits_clean"))
+mm = rel_l2(logits_masked, meta("logits_masked"))
+gV = max(rel_l2(clin_of(gmodel, p).V, d[f"META/gV/{p}"]) for p in paths)
+gU = max(rel_l2(clin_of(gmodel, p).U, d[f"META/gU/{p}"]) for p in paths)
+# max element-wise rel as a (looser) diagnostic
+xc = rel(logits_clean, meta("logits_clean"))
+xm = rel(logits_masked, meta("logits_masked"))
 
-print(f"clean  logits rel err: {e_clean:.3e}")
-print(f"masked logits rel err: {e_masked:.3e}")
-print(f"grad V worst rel err:  {worst_gV:.3e}")
-print(f"grad U worst rel err:  {worst_gU:.3e}")
+print(f"clean  logits  rel-L2 {mc:.3e}   (max-rel {xc:.3e})")
+print(f"masked logits  rel-L2 {mm:.3e}   (max-rel {xm:.3e})")
+print(f"grad V (worst) rel-L2 {gV:.3e}")
+print(f"grad U (worst) rel-L2 {gU:.3e}")
 tol = 2e-3
-ok = max(e_clean, e_masked, worst_gV, worst_gU) < tol
-print(f"LLAMA PARITY (tol {tol:.0e}):", "PASS" if ok else "FAIL")
+ok = max(mc, mm, gV, gU) < tol
+print(f"LLAMA PARITY (rel-L2 tol {tol:.0e}):", "PASS" if ok else "FAIL")
