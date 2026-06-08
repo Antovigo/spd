@@ -798,7 +798,16 @@ def _log_train_metrics(
     sink: ThreePoolRunSink,
 ) -> None:
     """Aggregate per-pool metrics to rank 0 and dispatch to ``sink`` (same ``train/``
-    key families as the 3-pool / single-pool paths)."""
+    key families as the 3-pool / single-pool paths).
+
+    Times the cross-pool aggregation as ``perf/log_ms`` (rank 0). The leading
+    ``synchronize`` drains the step's still-in-flight GPU tail so the timer measures
+    only the log-path comm, not the step's compute; the ``aggregate_*_to_rank0`` calls
+    each end in a host read (``.item()``), so the elapsed time captures real collective
+    completion despite CUDA's async dispatch.
+    """
+    torch.cuda.synchronize()
+    log_start = time.perf_counter()
     combined = aggregate_losses_to_rank0(metrics, ctx, device)
     mem_combined = aggregate_max_memory_to_rank0(ctx, device)
     grad_norms = aggregate_grad_norms_to_rank0(metrics, ctx, device)
@@ -814,6 +823,7 @@ def _log_train_metrics(
     if mem_combined is not None:
         combined.update(mem_combined)
     combined["perf/step_ms"] = step_ms_t.item()
+    combined["perf/log_ms"] = (time.perf_counter() - log_start) * 1000.0
     combined["loss/total"] = (
         runtime.coeff_faith * combined["loss/faith"]
         + runtime.coeff_imp * combined["loss/imp"]
