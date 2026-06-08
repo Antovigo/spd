@@ -1,0 +1,23 @@
+[project]
+name = "nano-pd-jax"
+version = "0.0.1"
+description = "JAX port of nano_param_decomp"
+requires-python = ">=3.10"
+dependencies = [
+    "jax==0.10.1",
+    "equinox==0.13.8",
+    "optax==0.2.8",
+    "jaxtyping==0.3.10",
+    "einops==0.8.2",
+    "numpy==2.4.6",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nano_pd_jax", "nano_pd_jax.*"]
+
+# Ruff / type config inherited from the param-decomp root pyproject.toml.

@@ -63,7 +63,7 @@ torch = { index = "pytorch-cu128" }
 [tool.ruff]
 line-length = 100
 fix = true
-extend-exclude = ["param_decomp_lab/app/frontend"]
+extend-exclude = ["param_decomp_lab/app/frontend", "nano_param_decomp_jax/bake-off"]
 
 [tool.ruff.lint]
 ignore = [
