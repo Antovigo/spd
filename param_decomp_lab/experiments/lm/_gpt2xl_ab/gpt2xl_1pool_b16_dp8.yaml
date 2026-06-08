@@ -1,0 +1,117 @@
+# Clean equal-GPU A/B (round 2): torch 1-pool GPT-2-XL.
+# Decompose 3 MLP layers (h.20/21/22 c_fc + c_proj), C=8192, seq 1024, global batch 16 @ dp=8
+# (per-rank 2). Matched to the jax stage12 cell + the torch 2-pool config: same model, sites, C,
+# CI fn, losses, batch, GPU count. Short faith-warmup (2 steps) so all losses active by ~step 3.
+# Launch: PYTHONPATH=. .venv/bin/python -m param_decomp_lab.experiments.lm.run <this> --dp 8
+pd:
+  seed: 0
+  n_mask_samples: 1
+  ci_config:
+    mode: global
+    fn_type: global_shared_transformer
+    hidden_dims: null
+    simple_transformer_ci_cfg:
+      d_model: 1024
+      n_blocks: 5
+      mlp_hidden_dim:
+      - 4096
+      attn_config:
+        n_heads: 8
+        max_len: 1024
+        rope_base: 10000.0
+  sampling: continuous
+  sigmoid_type: leaky_hard
+  decomposition_targets:
+  - module_pattern: transformer.h.20.mlp.c_fc
+    C: 8192
+  - module_pattern: transformer.h.20.mlp.c_proj
+    C: 8192
+  - module_pattern: transformer.h.21.mlp.c_fc
+    C: 8192
+  - module_pattern: transformer.h.21.mlp.c_proj
+    C: 8192
+  - module_pattern: transformer.h.22.mlp.c_fc
+    C: 8192
+  - module_pattern: transformer.h.22.mlp.c_proj
+    C: 8192
+  identity_decomposition_targets: null
+  use_delta_component: true
+  components_optimizer:
+    lr_schedule:
+      start_val: 1.5e-04
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+      fn_type: cosine
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 5.0e-05
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+      fn_type: cosine
+  steps: 60
+  batch_size: 16
+  faithfulness_warmup_steps: 2
+  faithfulness_warmup_lr: 0.001
+  faithfulness_warmup_weight_decay: 0.0
+  loss_metrics:
+  - type: ImportanceMinimalityLoss
+    coeff: 0.000005
+    pnorm: 2.0
+    beta: 0.2
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 0.4
+    p_anneal_end_frac: 1.0
+    eps: 1.0e-12
+  - type: StochasticReconLayerwiseLoss
+    coeff: 0.5
+  - type: PersistentPGDReconLoss
+    coeff: 0.5
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 1.0
+        fn_type: constant
+    scope:
+      type: broadcast_across_batch
+    use_sigmoid_parameterization: false
+    n_warmup_steps: 2
+  - type: FaithfulnessLoss
+    coeff: 100000.0
+cadence:
+  train_log_every: 5
+eval:
+  n_steps: 1
+  batch_size: 16
+  every: 100000
+  slow_every: 100000
+  slow_on_first_step: false
+  metrics:
+  - type: CI_L0
+    groups: null
+target:
+  spec:
+    kind: hf
+    model_class: transformers.GPT2LMHeadModel
+    model_name: openai-community/gpt2-xl
+  output_extract: logits
+data:
+  tokenizer_name: openai-community/gpt2
+  max_seq_len: 1024
+  buffer_size: 1000
+  dataset_name: apollo-research/Skylion007-openwebtext-tokenizer-gpt2
+  column_name: input_ids
+  train_split: train
+  eval_split: train
+  shuffle_each_epoch: true
+  is_tokenized: true
+  streaming: true
+runtime:
+  autocast_bf16: true
+  device: cuda
+  dp: null
