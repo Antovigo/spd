@@ -52,6 +52,10 @@ chunkwise bl32 (dp=16) = **80 GPU / 10 nodes**.
   for *parity* force `jax_default_matmul_precision="highest"` + torch `allow_tf32=False`.
 - **NFS `__pycache__` ENOTEMPTY** during uv installs: clear pycache + retry.
 - **git worktrees**: main checkout can't be on `feature/nano-pd-jax` (worktree holds it) — expected.
+- **compute nodes run git 2.34.1** (login node is newer). A global `merge.conflictstyle=zdiff3`
+  (needs git ≥2.35) makes EVERY torch DDP snapshot checkout fail instantly with
+  `fatal: unknown style 'zdiff3'` (job FAILED in ~5s, looks like a scheduler drop). Fix once:
+  `git config --global merge.conflictstyle diff3`.
 
 ## Already proven (don't redo)
 Parity: JAX Equinox Llama + GPT-2 are **bit-parity vs torch vendored** (rel-L2 ~1e-7 fwd / ~1e-6
