@@ -61,3 +61,23 @@ chunkwise bl32 (dp=16) = **80 GPU / 10 nodes**.
 Parity: JAX Equinox Llama + GPT-2 are **bit-parity vs torch vendored** (rel-L2 ~1e-7 fwd / ~1e-6
 grads), fwd+bwd, clean+masked (`jax_spike/parity/`). Multinode JAX validated to 16 GPU / 2 nodes.
 Toy-config perf (synthetic L12/d2048/C32): JAX 1-pool ~1.74× torch — SUPERSEDED by this real 4-way.
+
+## 4-way DONE (2026-06-08) — see lore `2026-06-08--4way-results-jax-torch-1pool-2pool`
+Real-workload bench code: `stage10_real_pd_bench.py` (1-pool) + `stage11_real_pd_2pool.py` (2-pool),
+both faithful residual-start 14-layer suffix, L18-MLP C=24576 weight-delta, 4-block d4096 CI
+transformer, layerwise stoch + persistent broadcast PGD. Cluster was saturated → controlled
+small-topology, per-rank batch matched, tok/s/GPU metric.
+- **jax 1-pool**: bl8 OOMs, **bl4 fits = 2,864 tok/s/GPU** (1 H200) — ≈ torch 2-pool's ~3,050/GPU on
+  the same suffix workload, WITHOUT the pool split. Headline: jax single-pool is competitive.
+- **torch 1-pool** (full 32L hook): OOMs at bl8 (even fp32); bf16 bl2 = ~1,658/GPU. Doesn't fit at bl8.
+- **torch 2-pool**: ~3,050/GPU @ 80 GPU (lore baseline, not re-run).
+- The 1-pool is memory-bound in both frameworks → the 2-pool is a *memory* tool (shards V/U), not a
+  throughput/GPU win (at matched batch 2-pool ≤ 1-pool).
+
+### Open TODOs (the two unfinished bits)
+1. **jax 1-pool multi-GPU**: data-parallel `jit` OOMs — replicated params+Adam = ~80GB/GPU floor AND
+   GSPMD materializes a global-batch tensor (~87GB) instead of sharding it. Need FSDP-style
+   param/optimizer sharding + keep batch sharded (`shard_map` or `with_sharding_constraint`); the
+   `--shard_params` flag in stage10 is stubbed/unimplemented. Then weak-scale to multi-node.
+2. **Same-hardware A/B**: when the cluster frees up, run torch 2-pool fresh + jax 1-pool at equal GPU
+   count / equal global batch for a true apples-to-apples (current torch-2pool is the 80-GPU lore #).
