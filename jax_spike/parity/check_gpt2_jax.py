@@ -13,10 +13,10 @@ import numpy as np
 from vendored_jax.gpt2 import (
     ComponentGPT2,
     GPT2Config,
-    MaskInfo,
     all_target_paths,
     build_from_torch_state,
 )
+from vendored_jax.llama import MaskInfo
 
 jax.config.update("jax_enable_x64", False)
 jax.config.update("jax_default_matmul_precision", "highest")  # match torch true-fp32
