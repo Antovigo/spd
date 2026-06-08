@@ -13,6 +13,10 @@ class TMSModelConfig(BaseConfig):
     tied_weights: bool
     init_bias_to_zero: bool
     device: str
+    final_rmsnorm: bool = False
+    """If True, apply a parameter-free RMSNorm to the hidden bottleneck before the linear2 readout
+    (analogue of a transformer's final ln_f). Lets us probe how an end-of-model norm affects the
+    decomposition."""
 
 
 class TMSTrainConfig(BaseConfig):

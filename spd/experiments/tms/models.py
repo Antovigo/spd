@@ -59,6 +59,8 @@ class TMSModel(LoadableModule):
         if self.hidden_layers is not None:
             for layer in self.hidden_layers:
                 hidden = layer(hidden)
+        if self.config.final_rmsnorm:
+            hidden = hidden * torch.rsqrt(hidden.pow(2).mean(-1, keepdim=True) + 1e-6)
         out_pre_relu = self.linear2(hidden)
         out = F.relu(out_pre_relu)
         return out

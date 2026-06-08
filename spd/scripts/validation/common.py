@@ -12,7 +12,13 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizer
 
-from spd.configs import CompletenessTaskConfig, Config, LMTaskConfig, ResidMLPTaskConfig
+from spd.configs import (
+    CompletenessTaskConfig,
+    Config,
+    LMTaskConfig,
+    ResidMLPTaskConfig,
+    TMSTaskConfig,
+)
 from spd.data import DatasetConfig, create_data_loader
 from spd.experiments.completeness.models import CompletenessTargetRunInfo, CopyTaskDataset
 from spd.experiments.lm.prompts_dataset import (
@@ -21,11 +27,12 @@ from spd.experiments.lm.prompts_dataset import (
 )
 from spd.experiments.resid_mlp.models import ResidMLP, ResidMLPTargetRunInfo
 from spd.experiments.resid_mlp.resid_mlp_dataset import ResidMLPDataset
+from spd.experiments.tms.models import TMSModel, TMSTargetRunInfo
 from spd.models.component_model import ComponentModel, SPDRunInfo
 from spd.spd_types import ModelPath
-from spd.utils.data_utils import DatasetGeneratedDataLoader
+from spd.utils.data_utils import DatasetGeneratedDataLoader, SparseFeatureDataset
 
-TaskConfig = LMTaskConfig | CompletenessTaskConfig | ResidMLPTaskConfig
+TaskConfig = LMTaskConfig | CompletenessTaskConfig | ResidMLPTaskConfig | TMSTaskConfig
 DataLoaderT = DataLoader[Any] | StaticBatchLoader | DatasetGeneratedDataLoader[Any]
 
 
@@ -56,15 +63,16 @@ def resolve_task_config(
     else:
         task_config = config.task_config
 
-    assert isinstance(task_config, (LMTaskConfig, CompletenessTaskConfig, ResidMLPTaskConfig)), (
-        f"Validation scripts only support LM, completeness, or resid_mlp tasks, "
+    assert isinstance(
+        task_config, (LMTaskConfig, CompletenessTaskConfig, ResidMLPTaskConfig, TMSTaskConfig)
+    ), (
+        f"Validation scripts only support LM, completeness, resid_mlp, or tms tasks, "
         f"got {type(task_config).__name__}"
     )
 
-    if isinstance(task_config, (CompletenessTaskConfig, ResidMLPTaskConfig)):
-        kind = "completeness" if isinstance(task_config, CompletenessTaskConfig) else "resid_mlp"
-        assert prompts_override is None, f"--prompts is LM-only; not supported for {kind}"
-        assert split_override is None, f"--split is LM-only; not supported for {kind}"
+    if isinstance(task_config, (CompletenessTaskConfig, ResidMLPTaskConfig, TMSTaskConfig)):
+        assert prompts_override is None, "--prompts is LM-only; not supported for this task"
+        assert split_override is None, "--split is LM-only; not supported for this task"
         return task_config
 
     assert prompts_override is None or split_override is None, (
@@ -84,9 +92,9 @@ def resolve_task_config(
 
 
 def is_prompt_task(task_config: TaskConfig) -> bool:
-    """Prompt-based LM tasks run exactly one batch containing every prompt. Completeness and
-    resid_mlp are not prompt-based."""
-    if isinstance(task_config, (CompletenessTaskConfig, ResidMLPTaskConfig)):
+    """Prompt-based LM tasks run exactly one batch containing every prompt. Completeness, resid_mlp,
+    and tms are not prompt-based."""
+    if isinstance(task_config, (CompletenessTaskConfig, ResidMLPTaskConfig, TMSTaskConfig)):
         return False
     return task_config.prompts_file is not None
 
@@ -133,6 +141,24 @@ def build_lm_loader(
             label_fn_seed=None,
             label_coeffs=None,
             data_generation_type=task_config.data_generation_type,
+            synced_inputs=target_run_info.config.synced_inputs,
+            active_indices=task_config.active_indices,
+        )
+        batch_size = batch_size_override if batch_size_override is not None else config.batch_size
+        return DatasetGeneratedDataLoader(dataset, batch_size=batch_size)
+
+    if isinstance(task_config, TMSTaskConfig):
+        assert config.pretrained_model_path is not None, (
+            "tms task needs config.pretrained_model_path to read n_features / synced_inputs"
+        )
+        target_run_info = TMSTargetRunInfo.from_path(config.pretrained_model_path)
+        target_model = TMSModel.from_run_info(target_run_info)
+        dataset = SparseFeatureDataset(
+            n_features=target_model.config.n_features,
+            feature_probability=task_config.feature_probability,
+            device="cpu",  # iterate_input_ids moves to target device
+            data_generation_type=task_config.data_generation_type,
+            value_range=(0.0, 1.0),
             synced_inputs=target_run_info.config.synced_inputs,
             active_indices=task_config.active_indices,
         )
