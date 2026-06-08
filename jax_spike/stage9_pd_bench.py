@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import optax
 from distributed_util import dp_mesh, init_distributed, replicate, shard_dp
 from jax import random
+import vendored_jax.llama as llama_mod
 from vendored_jax.llama import (
     ComponentLinear,
     ComponentLlama,
@@ -31,6 +32,8 @@ from vendored_jax.llama import (
     all_target_paths,
     random_init,
 )
+
+llama_mod.USE_FLASH_ATTENTION = True  # flash attention for the throughput benchmark
 
 COEFF = dict(faith=1.0, imp=0.3, stoch=1.0, ppgd=1.0)
 P_IMP = 0.9

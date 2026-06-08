@@ -112,8 +112,18 @@ def repeat_kv(x: Float[Array, "b kvh t hd"], n_rep: int) -> Float[Array, "b h t 
     return x.reshape(b, kvh * n_rep, t, hd)
 
 
+# Flash attention for the perf benchmark (fused, like torch's F.scaled_dot_product_attention).
+# Parity uses the naive path (matches torch's SDPBackend.MATH); set True only for throughput.
+USE_FLASH_ATTENTION = False
+
+
 def causal_sdpa(q: Array, k: Array, v: Array) -> Array:
-    # q,k,v: (B, H, T, hd). float32 softmax, causal.
+    # q,k,v: (B, H, T, hd).
+    if USE_FLASH_ATTENTION:
+        # jax.nn.dot_product_attention takes (B, T, H, D)
+        qt, kt, vt = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
+        out = jax.nn.dot_product_attention(qt, kt, vt, is_causal=True)
+        return out.transpose(0, 2, 1, 3)
     hd = q.shape[-1]
     scores = jnp.einsum("bhqd,bhkd->bhqk", q, k) / jnp.sqrt(hd).astype(q.dtype)
     t = q.shape[2]
