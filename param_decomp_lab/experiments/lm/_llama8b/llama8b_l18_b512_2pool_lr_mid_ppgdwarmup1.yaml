@@ -128,7 +128,7 @@ pd:
           warmup_pct: 0.025
         type: adam
       scope:
-        type: per_batch_per_position
+        type: broadcast_across_batch
       start_frac: 0.0
       type: PersistentPGDReconLoss
       use_sigmoid_parameterization: false
