@@ -78,7 +78,13 @@ a_out = b0.self_attn(ln1, None)
 x_mid = emb + a_out
 ln2 = rms_norm(x_mid, b0.post_attention_layernorm, cfg.rms_norm_eps)
 m_out = b0.mlp(ln2, None)
-for nm, arr in [("b0_ln1", ln1), ("b0_attn", a_out), ("b0_xmid", x_mid), ("b0_ln2", ln2), ("b0_mlp", m_out)]:
+for nm, arr in [
+    ("b0_ln1", ln1),
+    ("b0_attn", a_out),
+    ("b0_xmid", x_mid),
+    ("b0_ln2", ln2),
+    ("b0_mlp", m_out),
+]:
     print(f"{nm:13s} rel err: {rel(arr, meta('dbg/' + nm)):.3e}")
 # attention internals
 at = b0.self_attn

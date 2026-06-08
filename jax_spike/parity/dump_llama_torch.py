@@ -127,7 +127,13 @@ with torch.no_grad(), sdpa_kernel(SDPBackend.MATH):
     x_mid = emb + a_out
     ln2 = b0.post_attention_layernorm(x_mid)
     m_out = b0.mlp(ln2)
-    for nm, arr in [("b0_ln1", ln1), ("b0_attn", a_out), ("b0_xmid", x_mid), ("b0_ln2", ln2), ("b0_mlp", m_out)]:
+    for nm, arr in [
+        ("b0_ln1", ln1),
+        ("b0_attn", a_out),
+        ("b0_xmid", x_mid),
+        ("b0_ln2", ln2),
+        ("b0_mlp", m_out),
+    ]:
         out[f"META/dbg/{nm}"] = arr.detach().cpu().numpy()
     # attention internals (block 0)
     at = b0.self_attn
