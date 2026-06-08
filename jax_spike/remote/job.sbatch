@@ -6,7 +6,7 @@
 #SBATCH --job-name=jax-spike
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8
-#SBATCH --gpus-per-task=1
+#SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:25:00
 #SBATCH --output=/mnt/polished-lake/home/oli/pd-nano-jax/jax_spike/logs/%j.out
@@ -17,10 +17,11 @@ mkdir -p logs
 echo "=== job $SLURM_JOB_ID | nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS | $(date) ==="
 echo "nodelist: $SLURM_JOB_NODELIST"
 
-# --gpus-per-task=1 makes SLURM bind exactly one GPU per task (sets CUDA_VISIBLE_DEVICES
-# per task). Each task therefore sees 1 local GPU; jax.distributed.initialize() builds the
-# global world from SLURM_PROCID/SLURM_NTASKS. Do NOT set CUDA_VISIBLE_DEVICES by hand.
-srun --gpus-per-task=1 --kill-on-bad-exit=1 bash -c '
+# All 8 GPUs visible to every task (--gres=gpu:8, no per-task binding); each process
+# claims local_device_ids=[SLURM_LOCALID] in init_distributed(). This is the canonical
+# JAX-on-SLURM-GPU recipe (1 process per GPU). jax.distributed auto-detects the
+# coordinator / num_processes / process_id from the SLURM env.
+srun --kill-on-bad-exit=1 bash -c '
   cd ~/pd-nano-jax/jax_spike
   source .venv-cuda/bin/activate
   bash _remote_cmd.sh
