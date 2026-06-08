@@ -48,8 +48,8 @@ from param_decomp._trace import trace
 # Good enough to tell "wait for peer" apart from "wait for the wire".
 #
 # Records are buffered and flushed via ``flush_nccl_event_timings()`` once per
-# step (called from optimize.py at the same point ``_maybe_emit_ci_fn_bwd_breakdown``
-# fires) to avoid synchronizing on the hot path.
+# step (called from the train loop in optimize.py) to avoid synchronizing on the
+# hot path.
 # ──────────────────────────────────────────────────────────────────────────────
 
 

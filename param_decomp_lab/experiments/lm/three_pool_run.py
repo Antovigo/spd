@@ -760,13 +760,6 @@ def submit_slurm_async_consolidate_and_eval(
     consolidation is mandatory even when there are no slow metrics; in that case the eval
     pass is a no-op (see `async_eval`).
     """
-    # Test hook (never set in production): skip the child-job submission so a smoke can
-    # drive consolidation/eval out-of-band and stay within a GPU budget. The train loop
-    # still writes its partials regardless.
-    if os.environ.get("PD_3POOL_SKIP_ASYNC_ONSAVE", "").strip() in ("1", "true"):
-        logger.info(f"PD_3POOL_SKIP_ASYNC_ONSAVE set; skipping async job for step {step}")
-        return
-
     # The consolidate+eval job's GPU count. Defaults to `dp`; overridable so a small-
     # topology smoke can keep train + child within one node's 8 GPUs (and, in production,
     # so a cheap eval doesn't have to match the train width).

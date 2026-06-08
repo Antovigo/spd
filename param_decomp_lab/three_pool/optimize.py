@@ -217,17 +217,6 @@ class ThreePoolTrainer:
 
         torch.set_float32_matmul_precision("high")
 
-        # PD_SYNC_DEBUG: when set, ask PyTorch to flag every implicit CPU↔GPU
-        # sync (.item(), .tolist(), bool(tensor), .cpu(), etc.) — these stall
-        # the GPU and are easy to introduce by accident. ``warn`` logs every
-        # one; ``error`` crashes on the first one (useful when you want a
-        # stack trace pinpointing the culprit). Off by default.
-        _sync_debug = os.environ.get("PD_SYNC_DEBUG", "").strip()
-        if _sync_debug in ("1", "warn", "true"):
-            torch.cuda.set_sync_debug_mode("warn")
-        elif _sync_debug == "error":
-            torch.cuda.set_sync_debug_mode("error")
-
         self._device = torch.device(runtime_config.device)
         trace("ThreePoolTrainer.__init__: build_world: enter")
         world = build_world(
@@ -316,17 +305,6 @@ class ThreePoolTrainer:
                 os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
                 trace("ThreePoolTrainer.__init__: torch.compile(ci_fn) [whole forward]")
                 self.component_model.ci_fn.compile()
-        if is_ci and os.environ.get("PD_CI_FN_BWD_PROFILE", "").strip() in (
-            "1",
-            "true",
-            "yes",
-        ):
-            assert self.component_model.ci_fn is not None
-            for m in self.component_model.ci_fn.modules():
-                if isinstance(m, GlobalSharedTransformerCiFn):
-                    m.enable_bwd_profile()
-                    trace("ThreePoolTrainer.__init__: enabled CI fn bwd-stage profile")
-                    break
         # Chunkwise pool: torch.compile the (target + masked) model forward — a validated 2.74× on
         # the chunkwise step single-GPU (the throughput pole). The vendored mask-arg forward traces
         # cleanly (0 graph breaks) and attention uses F.sdpa directly. Default-on
@@ -779,13 +757,7 @@ class ThreePoolTrainer:
                 trace(f"Trainer.run: step {step}: start (pool={ctx.kind})")
 
                 step_start = time.perf_counter()
-                # PD_3POOL_DISABLE_XPOOL_LOG: kill ALL cross-pool logging comm (loss / mem /
-                # grad-norm aggregation in _log_train_metrics + the should_log work in the step
-                # fns). Stopgap while the logging path's cross-pool collectives are migrated off
-                # the shared p2p group (they deadlock-interleave with the per-step portal p2p).
-                should_log = step % cadence.train_log_every == 0 and not os.environ.get(
-                    "PD_3POOL_DISABLE_XPOOL_LOG"
-                )
+                should_log = step % cadence.train_log_every == 0
 
                 # batch_T should already be on this rank's device (placed by _to_device).
                 if isinstance(batch_T, Tensor):

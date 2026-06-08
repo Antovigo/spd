@@ -561,13 +561,6 @@ def submit_slurm_async_consolidate_and_eval(
     submitted — consolidation is mandatory even with no slow metrics (the eval pass is then
     a no-op).
     """
-    # Test hook (never set in production): skip the child-job submission so a smoke can
-    # drive consolidation/eval out-of-band and stay within a GPU budget. The train loop
-    # still writes its partials regardless.
-    if os.environ.get("PD_3POOL_SKIP_ASYNC_ONSAVE", "").strip() in ("1", "true"):
-        logger.info(f"PD_3POOL_SKIP_ASYNC_ONSAVE set; skipping async job for step {step}")
-        return
-
     dp_override = os.environ.get("PD_ASYNC_EVAL_DP", "").strip()
     if dp_override:
         dp = int(dp_override)
