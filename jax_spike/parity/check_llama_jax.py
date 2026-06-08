@@ -24,6 +24,8 @@ from vendored_jax.llama import (
 )
 
 jax.config.update("jax_enable_x64", False)  # fp32, match torch dump
+# JAX defaults to TF32 for fp32 matmuls on GPU; torch ran true fp32 -> force exact fp32
+jax.config.update("jax_default_matmul_precision", "highest")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--ref", required=True)
