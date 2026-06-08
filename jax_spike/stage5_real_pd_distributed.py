@@ -88,7 +88,10 @@ def ci_forward(ci_params, x):
 def sample_masks(key, ci):
     names = sorted(ci)
     keys = random.split(key, len(names))
-    return {n: ci[n] + (1.0 - ci[n]) * random.uniform(k, ci[n].shape) for k, n in zip(keys, names, strict=False)}
+    return {
+        n: ci[n] + (1.0 - ci[n]) * random.uniform(k, ci[n].shape)
+        for k, n in zip(keys, names, strict=False)
+    }
 
 
 def recon_and_faith(vu_params, masks, x):

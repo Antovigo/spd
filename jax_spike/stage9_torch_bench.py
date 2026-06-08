@@ -43,8 +43,10 @@ class CIFn(nn.Module):
 
     def forward(self, emb):
         flat = F.gelu(emb @ self.w1) @ self.w2
-        return {s: lower_leaky_hard_sigmoid(flat[..., i * self.C : (i + 1) * self.C])
-                for i, s in enumerate(self.sites)}
+        return {
+            s: lower_leaky_hard_sigmoid(flat[..., i * self.C : (i + 1) * self.C])
+            for i, s in enumerate(self.sites)
+        }
 
 
 def mi(ci, src=None):
@@ -55,9 +57,20 @@ def mi(ci, src=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    for k, v in dict(n_layer=12, n_embd=2048, n_head=16, n_kv_head=8, n_intermediate=8192,
-                     vocab=32768, seq=512, per_gpu_batch=8, C=32, ci_hidden=2048,
-                     n_warmup=5, steps=12).items():
+    for k, v in dict(
+        n_layer=12,
+        n_embd=2048,
+        n_head=16,
+        n_kv_head=8,
+        n_intermediate=8192,
+        vocab=32768,
+        seq=512,
+        per_gpu_batch=8,
+        C=32,
+        ci_hidden=2048,
+        n_warmup=5,
+        steps=12,
+    ).items():
         ap.add_argument(f"--{k}", type=int, default=v)
     ap.add_argument("--compile", action="store_true")
     args = ap.parse_args()
@@ -73,10 +86,17 @@ def main():
     is0 = rank == 0
 
     cfg = VendoredLlamaConfig(
-        model_type="VendoredLlama", max_position_embeddings=8192, vocab_size=args.vocab,
-        n_layer=args.n_layer, n_head=args.n_head, n_key_value_heads=args.n_kv_head,
-        n_embd=args.n_embd, n_intermediate=args.n_intermediate, rope_theta=500000.0,
-        rope_scaling=Llama3RopeScaling(), rms_norm_eps=1e-5,
+        model_type="VendoredLlama",
+        max_position_embeddings=8192,
+        vocab_size=args.vocab,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_key_value_heads=args.n_kv_head,
+        n_embd=args.n_embd,
+        n_intermediate=args.n_intermediate,
+        rope_theta=500000.0,
+        rope_scaling=Llama3RopeScaling(),
+        rms_norm_eps=1e-5,
     )
     model = VendoredLlama(cfg)
     sites = [f"layers.{i}.{leaf}" for i in range(cfg.n_layer) for leaf in (ATTN + MLP)]
@@ -114,8 +134,10 @@ def main():
         for _ in range(args.n_warmup):
             recon = ((cmodel(idx, mi(ci_det, src)) - clean) ** 2).mean()
             grads = torch.autograd.grad(recon, list(src.values()))
-            src = {p: (src[p] + 0.1 * gg).detach().requires_grad_(True)
-                   for p, gg in zip(sites, grads, strict=False)}
+            src = {
+                p: (src[p] + 0.1 * gg).detach().requires_grad_(True)
+                for p, gg in zip(sites, grads, strict=False)
+            }
         refined = {p: src[p].detach() for p in sites}
         sources = refined
         # losses
@@ -125,8 +147,12 @@ def main():
         l_ppgd = ((cmodel(idx, mi(ci, refined)) - clean) ** 2).mean()
         l_faith = torch.stack([(d**2).mean() for d in cmodel.calc_weight_deltas().values()]).mean()
         l_imp = torch.stack([ci[p].clamp(0, 1).pow(P_IMP).mean() for p in ci]).mean()
-        total = (COEFF["faith"] * l_faith + COEFF["imp"] * l_imp
-                 + COEFF["stoch"] * l_stoch + COEFF["ppgd"] * l_ppgd)
+        total = (
+            COEFF["faith"] * l_faith
+            + COEFF["imp"] * l_imp
+            + COEFF["stoch"] * l_stoch
+            + COEFF["ppgd"] * l_ppgd
+        )
         total.backward()
         # manual data-parallel grad all-reduce (avg) — matches GSPMD's implicit reduce
         for p in vu_params + list(ci_fn.parameters()):
@@ -149,8 +175,10 @@ def main():
     if is0:
         toks = gbatch * args.seq
         print(f"[r0] {world} GPU | gbatch={gbatch} seq={args.seq} | compile={args.compile}")
-        print(f"[r0] {dt * 1e3:.1f} ms/step | {toks / dt:,.0f} tok/s | {toks / dt / world:,.0f} tok/s/GPU "
-              f"| loss {float(total):.4f}")
+        print(
+            f"[r0] {dt * 1e3:.1f} ms/step | {toks / dt:,.0f} tok/s | {toks / dt / world:,.0f} tok/s/GPU "
+            f"| loss {float(total):.4f}"
+        )
     dist.destroy_process_group()
 
 

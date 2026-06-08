@@ -13,11 +13,10 @@ import jax
 import jax.experimental.multihost_utils
 import jax.numpy as jnp
 import numpy as np
+from distributed_util import init_distributed
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
-
-from distributed_util import init_distributed
 
 init_distributed()
 

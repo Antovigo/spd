@@ -21,9 +21,9 @@ import jax
 import jax.experimental.multihost_utils
 import jax.numpy as jnp
 import optax
+import vendored_jax.llama as llama_mod
 from distributed_util import dp_mesh, init_distributed, replicate, shard_dp
 from jax import random
-import vendored_jax.llama as llama_mod
 from vendored_jax.llama import (
     ComponentLinear,
     ComponentLlama,
@@ -272,10 +272,14 @@ def main():
 
     if is0:
         toks = gbatch * args.seq
-        print(f"[p0] blocked {blocked * 1e3:.1f} ms/step | dispatch {dispatch * 1e3:.1f} ms/step "
-              f"| {'HOST-BOUND' if dispatch > 0.7 * blocked else 'device-bound'}")
-        print(f"[p0] {toks / blocked:,.0f} tok/s | {toks / blocked / ndev:,.0f} tok/s/GPU "
-              f"| final loss {float(total):.4f}")
+        print(
+            f"[p0] blocked {blocked * 1e3:.1f} ms/step | dispatch {dispatch * 1e3:.1f} ms/step "
+            f"| {'HOST-BOUND' if dispatch > 0.7 * blocked else 'device-bound'}"
+        )
+        print(
+            f"[p0] {toks / blocked:,.0f} tok/s | {toks / blocked / ndev:,.0f} tok/s/GPU "
+            f"| final loss {float(total):.4f}"
+        )
         print(f"[p0] STAGE 9 ({ndev} GPU): OK")
 
     jax.experimental.multihost_utils.sync_global_devices("stage9_done")
