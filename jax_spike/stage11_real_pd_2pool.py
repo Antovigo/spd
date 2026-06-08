@@ -57,6 +57,8 @@ def make_step(mesh, opt_vu, opt_ci, lr_pgd, n_pgd):
         nomask = {site: None for site in SITES}
         Wg, Wu, Wd = frozen.l18_Wg, frozen.l18_Wu, frozen.l18_Wd
 
+        ckpt_suffix = jax.checkpoint(s.suffix_logits)
+
         def per_pool(trainable, resid_p, src_p):
             vu, ci_fn = trainable
             # shard_map keeps the mapped axis (size 1) rather than squeezing it (unlike vmap).
@@ -67,29 +69,36 @@ def make_step(mesh, opt_vu, opt_ci, lr_pgd, n_pgd):
             mlp_in = s.l18_resid_to_mlp_input(frozen, resid_p)
             ci = ci_fn(s.mlp_site_inputs(Wg, Wu, mlp_in))
 
-            # ship ci A->B; cotangents return automatically through the ppermute transpose.
+            # ship ci A->B (unconditional so both pools enter the collective); cotangents return
+            # automatically through the ppermute transpose.
             ci_b = {site: jax.lax.ppermute(v, "pool", perm=[(0, 1)]) for site, v in ci.items()}
 
-            # POOL A terms: importance-minimality + persistent-PGD adversary recon.
-            l_imp = jnp.mean(jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** P_IMP) for v in ci.values()]))
-            ppgd_a = {site: ci[site] * jax.nn.sigmoid(src_p[site]) for site in SITES}
-            l_adv = s.recon(s.suffix_logits(frozen, vu, resid_p, ppgd_a, dm), clean)
-            loss_a = COEFF["imp"] * l_imp + COEFF["ppgd"] * l_adv
+            def pool_a(_):
+                # importance-minimality + persistent-PGD adversary recon.
+                l_imp = jnp.mean(
+                    jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** P_IMP) for v in ci.values()])
+                )
+                ppgd_a = {site: ci[site] * jax.nn.sigmoid(src_p[site]) for site in SITES}
+                l_adv = s.recon(ckpt_suffix(frozen, vu, resid_p, ppgd_a, dm), clean)
+                return COEFF["imp"] * l_imp + COEFF["ppgd"] * l_adv
 
-            # POOL B terms: faithfulness + layerwise stochastic recon + PPGD recon (uses ci_b).
-            wd = s.weight_deltas(vu, Wg, Wu, Wd)
-            l_faith = sum((d**2).sum() for d in wd.values()) / sum(d.size for d in wd.values())
-            l_stoch = jnp.array(0.0)
-            for i, site in enumerate(SITES):
-                u = random.uniform(random.fold_in(key, i), ci_b[site].shape, dtype=DT)
-                m = {**nomask, site: ci_b[site] + (1 - ci_b[site]) * u}
-                l_stoch = l_stoch + s.recon(s.suffix_logits(frozen, vu, resid_p, m, dm), clean)
-            l_stoch = l_stoch / len(SITES)
-            ppgd_b = {site: ci_b[site] * jax.nn.sigmoid(src_p[site]) for site in SITES}
-            l_ppgd = s.recon(s.suffix_logits(frozen, vu, resid_p, ppgd_b, dm), clean)
-            loss_b = COEFF["faith"] * l_faith + COEFF["stoch"] * l_stoch + COEFF["ppgd"] * l_ppgd
+            def pool_b(_):
+                # faithfulness + layerwise stochastic recon + PPGD recon (uses ci_b).
+                wd = s.weight_deltas(vu, Wg, Wu, Wd)
+                l_faith = sum((d**2).sum() for d in wd.values()) / sum(d.size for d in wd.values())
+                l_stoch = jnp.array(0.0)
+                for i, site in enumerate(SITES):
+                    u = random.uniform(random.fold_in(key, i), ci_b[site].shape, dtype=DT)
+                    m = {**nomask, site: ci_b[site] + (1 - ci_b[site]) * u}
+                    l_stoch = l_stoch + s.recon(ckpt_suffix(frozen, vu, resid_p, m, dm), clean)
+                l_stoch = l_stoch / len(SITES)
+                ppgd_b = {site: ci_b[site] * jax.nn.sigmoid(src_p[site]) for site in SITES}
+                l_ppgd = s.recon(ckpt_suffix(frozen, vu, resid_p, ppgd_b, dm), clean)
+                return COEFF["faith"] * l_faith + COEFF["stoch"] * l_stoch + COEFF["ppgd"] * l_ppgd
 
-            return jnp.where(axis == 0, loss_a, loss_b)[None]
+            # lax.cond so each pool runs ONLY its branch at runtime (jnp.where would compute both
+            # on every device -> each GPU does the full 2-pool work -> OOM).
+            return jax.lax.cond(axis == 0, pool_a, pool_b, operand=None)[None]
 
         def total(trainable):
             sm = shard_map(
