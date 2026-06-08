@@ -116,25 +116,25 @@ class FrozenBlock(eqx.Module):
         return x
 
 
-# ----------------------------- decomposed L18 MLP (trainable V/U + frozen target) -----------------------------
-class DecompMLP(eqx.Module):
-    # per-site components V:(d_in,C) U:(C,d_out); frozen target weights W:(d_out,d_in)
-    Vg: jax.Array
-    Ug: jax.Array
+# ----------------------------- decomposed L18 MLP -----------------------------
+# Trainable components live in DecompVU; the frozen L18-MLP target weights live in Target
+# (Wg/Wu/Wd) so the frozen suffix is a single pytree passed to the jit'd step as a runtime
+# argument — NOT captured as a 7GB HLO constant (which made compilation pathologically slow).
+class DecompVU(eqx.Module):
+    Vg: jax.Array  # (d_in, C)
+    Ug: jax.Array  # (C, d_out)
     Vu: jax.Array
     Uu: jax.Array
     Vd: jax.Array
     Ud: jax.Array
-    Wg: jax.Array  # frozen
-    Wu: jax.Array  # frozen
-    Wd: jax.Array  # frozen
 
-    def weight_deltas(self):
-        return {
-            "gate": self.Wg - (self.Vg @ self.Ug).T,
-            "up": self.Wu - (self.Vu @ self.Uu).T,
-            "down": self.Wd - (self.Vd @ self.Ud).T,
-        }
+
+def weight_deltas(vu: DecompVU, Wg, Wu, Wd):
+    return {
+        "gate": Wg - (vu.Vg @ vu.Ug).T,
+        "up": Wu - (vu.Vu @ vu.Uu).T,
+        "down": Wd - (vu.Vd @ vu.Ud).T,
+    }
 
 
 def _proj(x, V, U, W, mask, delta_mask):
@@ -149,30 +149,31 @@ def _proj(x, V, U, W, mask, delta_mask):
     return out
 
 
-def decomp_mlp_forward(mlp: DecompMLP, x, masks, delta_masks):
+def decomp_mlp_forward(vu: DecompVU, Wg, Wu, Wd, x, masks, delta_masks):
     """x:(b,t,d) -> (b,t,d). masks/delta_masks: dict site->array or None per site."""
-    g_in = u_in = x
-    gate = _proj(g_in, mlp.Vg, mlp.Ug, mlp.Wg, masks["gate"], delta_masks["gate"])
-    up = _proj(u_in, mlp.Vu, mlp.Uu, mlp.Wu, masks["up"], delta_masks["up"])
+    gate = _proj(x, vu.Vg, vu.Ug, Wg, masks["gate"], delta_masks["gate"])
+    up = _proj(x, vu.Vu, vu.Uu, Wu, masks["up"], delta_masks["up"])
     d_in = jax.nn.silu(gate) * up
-    return _proj(d_in, mlp.Vd, mlp.Ud, mlp.Wd, masks["down"], delta_masks["down"])
+    return _proj(d_in, vu.Vd, vu.Ud, Wd, masks["down"], delta_masks["down"])
 
 
-def mlp_site_inputs(mlp: DecompMLP, x):
+def mlp_site_inputs(Wg, Wu, x):
     """Clean (unmasked) per-site inputs for the CI fn: gate_in, up_in (d), down_in (intermediate)."""
-    gate = x @ mlp.Wg.T
-    up = x @ mlp.Wu.T
+    gate = x @ Wg.T
+    up = x @ Wu.T
     d_in = jax.nn.silu(gate) * up
     return x, x, d_in
 
 
 class Target(eqx.Module):
-    """L18 (decomposed MLP + frozen attn/lns) followed by 13 frozen blocks, norm, lm_head."""
+    """Frozen suffix: L18 (frozen attn/lns + frozen MLP weights) + 13 frozen blocks, norm, lm_head."""
 
     l18_ln1: jax.Array
     l18_ln2: jax.Array
     l18_attn: FrozenAttn
-    l18_mlp: DecompMLP
+    l18_Wg: jax.Array
+    l18_Wu: jax.Array
+    l18_Wd: jax.Array
     rest: list  # 13 FrozenBlock (L19..L31)
     norm: jax.Array
     lm_head: jax.Array
@@ -180,9 +181,10 @@ class Target(eqx.Module):
     eps: float = eqx.field(static=True)
 
 
-def suffix_logits(tgt: Target, resid, masks, delta_masks):
+def suffix_logits(tgt: Target, vu: DecompVU, resid, masks, delta_masks):
     x = resid + tgt.l18_attn(rms_norm(resid, tgt.l18_ln1, tgt.eps), tgt.inv_freq)
-    x = x + decomp_mlp_forward(tgt.l18_mlp, rms_norm(x, tgt.l18_ln2, tgt.eps), masks, delta_masks)
+    mlp_in = rms_norm(x, tgt.l18_ln2, tgt.eps)
+    x = x + decomp_mlp_forward(vu, tgt.l18_Wg, tgt.l18_Wu, tgt.l18_Wd, mlp_in, masks, delta_masks)
     for blk in tgt.rest:
         x = blk(x, tgt.inv_freq)
     x = rms_norm(x, tgt.norm, tgt.eps)
@@ -244,7 +246,7 @@ class CIFn(eqx.Module):
 
 
 # ----------------------------- init -----------------------------
-def init_target(cfg: LlamaConfig, C: int, key) -> Target:
+def init_target(cfg: LlamaConfig, C: int, key) -> tuple[Target, DecompVU]:
     ks = iter(random.split(key, 256))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
@@ -269,32 +271,32 @@ def init_target(cfg: LlamaConfig, C: int, key) -> Target:
         return FrozenMLP(n((di, d)), n((di, d)), n((d, di)))
 
     inv_freq = llama3_inv_freq(cfg)
-    l18_mlp = DecompMLP(
+    vu = DecompVU(
         Vg=n((d, C)),
         Ug=n((C, di), C**-0.5),
         Vu=n((d, C)),
         Uu=n((C, di), C**-0.5),
         Vd=n((di, C)),
         Ud=n((C, d), C**-0.5),
-        Wg=n((di, d)),
-        Wu=n((di, d)),
-        Wd=n((d, di)),
     )
     rest = [
         FrozenBlock(jnp.ones((d,), DT), jnp.ones((d,), DT), fattn(), fmlp(), cfg.rms_norm_eps)
         for _ in range(cfg.n_layer - 1)
     ]
-    return Target(
+    tgt = Target(
         l18_ln1=jnp.ones((d,), DT),
         l18_ln2=jnp.ones((d,), DT),
         l18_attn=fattn(),
-        l18_mlp=l18_mlp,
+        l18_Wg=n((di, d)),
+        l18_Wu=n((di, d)),
+        l18_Wd=n((d, di)),
         rest=rest,
         norm=jnp.ones((d,), DT),
         lm_head=n((cfg.vocab_size, d), 0.02),
         inv_freq=inv_freq,
         eps=cfg.rms_norm_eps,
     )
+    return tgt, vu
 
 
 def init_ci(d_model, n_blocks, n_heads, mlp_hidden, total_in, C, key) -> CIFn:
@@ -339,45 +341,26 @@ class State(NamedTuple):
     step: jax.Array
 
 
-ONES = None  # set per-run (delta masks default = ones)
-
-
 def recon(a, b):
     return jnp.mean((a - b) ** 2)
 
 
-def make_step(tgt_frozen, opt_vu, opt_ci, lr_pgd, n_pgd):
-    def split_trainable(state_trainable):
-        vu, ci = state_trainable
-        # rebuild full Target with trainable V/U merged into frozen scaffold
-        tgt = eqx.tree_at(
-            lambda t: (
-                t.l18_mlp.Vg,
-                t.l18_mlp.Ug,
-                t.l18_mlp.Vu,
-                t.l18_mlp.Uu,
-                t.l18_mlp.Vd,
-                t.l18_mlp.Ud,
-            ),
-            tgt_frozen,
-            (vu.Vg, vu.Ug, vu.Vu, vu.Uu, vu.Vd, vu.Ud),
-        )
-        return tgt, ci
-
+def make_step(opt_vu, opt_ci, lr_pgd, n_pgd):
     @jax.jit
-    def step(state: State, resid, key):
+    def step(state: State, frozen: Target, resid, key):
         dm = {s: jnp.ones((1, 1, 1), DT) for s in SITES}  # delta_mask = 1 (broadcast)
         nomask = {s: None for s in SITES}
+        Wg, Wu, Wd = frozen.l18_Wg, frozen.l18_Wu, frozen.l18_Wd
 
         def loss_fn(trainable):
-            tgt, ci_fn = split_trainable(trainable)
-            clean = jax.lax.stop_gradient(suffix_logits(tgt, resid, nomask, dm))
-            mlp_in = l18_resid_to_mlp_input(tgt, resid)
-            site_in = mlp_site_inputs(tgt.l18_mlp, mlp_in)
+            vu, ci_fn = trainable
+            clean = jax.lax.stop_gradient(suffix_logits(frozen, vu, resid, nomask, dm))
+            mlp_in = l18_resid_to_mlp_input(frozen, resid)
+            site_in = mlp_site_inputs(Wg, Wu, mlp_in)
             ci = ci_fn(site_in)
 
             # faithfulness (weight MSE over 3 sites)
-            wd = tgt.l18_mlp.weight_deltas()
+            wd = weight_deltas(vu, Wg, Wu, Wd)
             l_faith = sum((d**2).sum() for d in wd.values()) / sum(d.size for d in wd.values())
             # importance-minimality
             l_imp = jnp.mean(jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** P_IMP) for v in ci.values()]))
@@ -388,13 +371,13 @@ def make_step(tgt_frozen, opt_vu, opt_ci, lr_pgd, n_pgd):
                 u = random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
                 m = ci[s] + (1 - ci[s]) * u
                 masks = {**nomask, s: m}
-                l_stoch = l_stoch + recon(suffix_logits(tgt, resid, masks, dm), clean)
+                l_stoch = l_stoch + recon(suffix_logits(frozen, vu, resid, masks, dm), clean)
             l_stoch = l_stoch / len(SITES)
 
             # persistent PGD recon: all sites masked by ci*sigmoid(source) (broadcast source)
             src = jax.lax.stop_gradient(state.source)
             ppgd_masks = {s: ci[s] * jax.nn.sigmoid(src[s]) for s in SITES}
-            l_ppgd = recon(suffix_logits(tgt, resid, ppgd_masks, dm), clean)
+            l_ppgd = recon(suffix_logits(frozen, vu, resid, ppgd_masks, dm), clean)
 
             tot = (
                 COEFF["faith"] * l_faith
@@ -413,13 +396,12 @@ def make_step(tgt_frozen, opt_vu, opt_ci, lr_pgd, n_pgd):
         new_ci = eqx.apply_updates(state.trainable[1], upd_ci)
 
         # persistent PGD source update (n_pgd inner steps; steady-state n_pgd=1)
-        tgt, _ = split_trainable(state.trainable)
-        tgt = jax.lax.stop_gradient(tgt)
+        vu_det = jax.lax.stop_gradient(state.trainable[0])
         ci_det = jax.lax.stop_gradient(ci)
 
         def adv(src):
             masks = {s: ci_det[s] * jax.nn.sigmoid(src[s]) for s in SITES}
-            return recon(suffix_logits(tgt, resid, masks, dm), clean)
+            return recon(suffix_logits(frozen, vu_det, resid, masks, dm), clean)
 
         def body(src, _):
             g = jax.grad(adv)(src)
@@ -483,7 +465,7 @@ def main():
             f"C={args.C} suffix_layers={cfg.n_layer} n_pgd={args.n_warmup} shard={args.shard_params}"
         )
 
-    tgt = init_target(cfg, args.C, random.PRNGKey(0))
+    tgt, vu0 = init_target(cfg, args.C, random.PRNGKey(0))
     ci_fn = init_ci(
         args.ci_d_model,
         args.ci_blocks,
@@ -494,8 +476,6 @@ def main():
         random.PRNGKey(1),
     )
 
-    # trainable = (l18_mlp V/U leaves, ci_fn) ; frozen scaffold lives in the closure
-    vu0 = tgt.l18_mlp
     opt_vu = optax.adamw(1.5e-4)
     opt_ci = optax.adamw(5e-5)
 
@@ -506,8 +486,8 @@ def main():
         return jax.device_put(x, s)
 
     tgt = jax.tree.map(lambda a: put(a, repl) if eqx.is_array(a) else a, tgt)
+    vu0 = jax.tree.map(lambda a: put(a, repl) if eqx.is_array(a) else a, vu0)
     ci_fn = jax.tree.map(lambda a: put(a, repl) if eqx.is_array(a) else a, ci_fn)
-    vu0 = tgt.l18_mlp
 
     state = State(
         trainable=(vu0, ci_fn),
@@ -521,23 +501,23 @@ def main():
         DT
     )
     resid = jax.device_put(resid_full, shard_dp)
-    step = make_step(tgt, opt_vu, opt_ci, lr_pgd=0.01, n_pgd=args.n_warmup)
+    step = make_step(opt_vu, opt_ci, lr_pgd=0.01, n_pgd=args.n_warmup)
 
     for _ in range(2):
-        state, tot = step(state, resid, random.PRNGKey(7))
+        state, tot = step(state, tgt, resid, random.PRNGKey(7))
         jax.block_until_ready((state.source, tot))
 
     per = []
     for s in range(args.steps):
         t = time.time()
-        state, tot = step(state, resid, random.PRNGKey(1000 + s))
+        state, tot = step(state, tgt, resid, random.PRNGKey(1000 + s))
         jax.block_until_ready((state.source, tot))
         per.append(time.time() - t)
     blocked = sum(per) / len(per)
 
     t = time.time()
     for s in range(args.steps):
-        state, tot = step(state, resid, random.PRNGKey(2000 + s))
+        state, tot = step(state, tgt, resid, random.PRNGKey(2000 + s))
     dispatch = (time.time() - t) / args.steps
     jax.block_until_ready((state.source, tot))
 
