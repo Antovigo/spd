@@ -283,3 +283,73 @@ def build_from_torch_state(cfg: LlamaConfig, sd: dict[str, Array]) -> ComponentL
 
 def all_target_paths(cfg: LlamaConfig) -> list[str]:
     return [f"layers.{i}.{s}" for i in range(cfg.n_layer) for s in (_ATTN + _MLP)]
+
+
+def site_shapes(cfg: LlamaConfig) -> dict[str, tuple[int, int]]:
+    """(d_in, d_out) per decomposition-target leaf."""
+    d, di = cfg.n_embd, cfg.n_intermediate
+    qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
+    per_layer = {
+        "self_attn.q_proj": (d, qd),
+        "self_attn.k_proj": (d, kvd),
+        "self_attn.v_proj": (d, kvd),
+        "self_attn.o_proj": (qd, d),
+        "mlp.gate_proj": (d, di),
+        "mlp.up_proj": (d, di),
+        "mlp.down_proj": (di, d),
+    }
+    return {f"layers.{i}.{k}": v for i in range(cfg.n_layer) for k, v in per_layer.items()}
+
+
+def random_init(cfg: LlamaConfig, C: int, key) -> ComponentLlama:
+    """Random ComponentLlama with C components/site — for benchmarking at scale (no weights)."""
+    shapes = site_shapes(cfg)
+    ks = iter(jax.random.split(key, len(shapes) * 3 + cfg.n_layer * 2 + 4))
+
+    def clin(d_in, d_out):
+        sc = 1.0 / (d_in**0.5)
+        return ComponentLinear(
+            V=jax.random.normal(next(ks), (d_in, C)) * sc,
+            U=jax.random.normal(next(ks), (C, d_out)) * (1.0 / C**0.5),
+            target_weight=jax.random.normal(next(ks), (d_out, d_in)) * sc,
+            bias=None,
+        )
+
+    inv_freq = llama3_inv_freq(cfg)
+    blocks = []
+    for i in range(cfg.n_layer):
+        p = f"layers.{i}"
+        attn = Attention(
+            q_proj=clin(*shapes[f"{p}.self_attn.q_proj"]),
+            k_proj=clin(*shapes[f"{p}.self_attn.k_proj"]),
+            v_proj=clin(*shapes[f"{p}.self_attn.v_proj"]),
+            o_proj=clin(*shapes[f"{p}.self_attn.o_proj"]),
+            inv_freq=inv_freq,
+            n_head=cfg.n_head,
+            n_kv_head=cfg.n_kv_head,
+            head_dim=cfg.head_dim,
+            n_rep=cfg.n_rep,
+            paths=tuple(f"{p}.{s}" for s in _ATTN),
+        )
+        mlp = MLP(
+            gate_proj=clin(*shapes[f"{p}.mlp.gate_proj"]),
+            up_proj=clin(*shapes[f"{p}.mlp.up_proj"]),
+            down_proj=clin(*shapes[f"{p}.mlp.down_proj"]),
+            paths=tuple(f"{p}.{s}" for s in _MLP),
+        )
+        blocks.append(
+            Block(
+                input_layernorm=jnp.ones((cfg.n_embd,)),
+                post_attention_layernorm=jnp.ones((cfg.n_embd,)),
+                self_attn=attn,
+                mlp=mlp,
+                eps=cfg.rms_norm_eps,
+            )
+        )
+    return ComponentLlama(
+        embed_tokens=jax.random.normal(next(ks), (cfg.vocab_size, cfg.n_embd)) * 0.02,
+        blocks=blocks,
+        norm=jnp.ones((cfg.n_embd,)),
+        lm_head=jax.random.normal(next(ks), (cfg.vocab_size, cfg.n_embd)) * 0.02,
+        eps=cfg.rms_norm_eps,
+    )
