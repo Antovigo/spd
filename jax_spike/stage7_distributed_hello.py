@@ -10,6 +10,7 @@ Process 0 prints the verdict.
 """
 
 import jax
+import jax.experimental.multihost_utils
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental.shard_map import shard_map
@@ -53,4 +54,6 @@ if pid == 0:
     print(f"[p0] psum(device_ids) across {ndev} devices = {got}, expected {expected}")
     print(f"[p0] STAGE 7 ({nproc} procs, {ndev} GPUs):", "PASS" if ok else "FAIL")
 
+# barrier so no process tears down the coordinator while others are still running
+jax.experimental.multihost_utils.sync_global_devices("stage7_done")
 jax.distributed.shutdown()
