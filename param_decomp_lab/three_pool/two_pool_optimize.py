@@ -170,7 +170,9 @@ class TwoPoolTrainer:
             chunks=list(self.runtime.chunks),
             batch_global=self.runtime.batch_global,
             pg_timeout=_resolve_pg_timeout(
-                compiling=runtime_config.compile_chunkwise or runtime_config.compile_ci_fn
+                compiling=runtime_config.compile_chunkwise
+                or runtime_config.compile_ci_fn
+                or runtime_config.compile_ppgd
             ),
             device=self._device,
         )
@@ -204,12 +206,24 @@ class TwoPoolTrainer:
                 for m in self.component_model.ci_fn.modules():
                     if isinstance(m, GlobalSharedTransformerCiFn):
                         m.enable_activation_checkpointing()
-            if runtime_config.compile_ci_fn:
+            # Pool A holds both the CI fn (trained) and the adversary's masked forward, so
+            # both compiled artifacts live on this rank. Per-rank inductor/triton caches guard
+            # against shared-cache contention across the concurrent compilers (set once before
+            # either compile).
+            if runtime_config.compile_ci_fn or runtime_config.compile_ppgd:
                 user = os.environ.get("USER", "u")
                 rank = dist.get_rank()
                 os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
                 os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+            if runtime_config.compile_ci_fn:
                 self.component_model.ci_fn.compile()
+            # PPGD: compile the masked model forward the adversary runs (warmup PGD inner loop
+            # + final recon). Same compiled artifact + fused-autograd.grad validation as the
+            # 3-pool PPGD pool. Pool A's model has activation checkpointing off (autograd.grad
+            # recompute is nondeterministic under ckpt — see above), so this is a plain forward
+            # compile, no checkpointed-RNG-op partitioner concern.
+            if runtime_config.compile_ppgd:
+                self.component_model.model.compile()
         if isinstance(self.ctx, ChunkContext) and runtime_config.compile_chunkwise:
             user = os.environ.get("USER", "u")
             rank = dist.get_rank()
