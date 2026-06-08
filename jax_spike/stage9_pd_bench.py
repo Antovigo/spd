@@ -248,20 +248,34 @@ def main():
     idx = shard_dp(idx_full, mesh)
     step = make_step(opt_vu, opt_ci, args.n_warmup, lr_pgd=0.1)
 
-    t0 = None
+    # warmup / compile (block)
+    for _ in range(2):
+        state, total = step(state, idx, random.PRNGKey(7))
+        jax.block_until_ready((state.sources, total))
+
+    # blocked per-step timing (launch-blocking: sync each step -> true device+dispatch time)
+    per = []
     for s in range(args.steps):
+        t = time.time()
         state, total = step(state, idx, random.PRNGKey(1000 + s))
-        if s == 0:
-            jax.block_until_ready(total)
-            t0 = time.time()
-    jax.block_until_ready(state.sources)
-    dt = (time.time() - t0) / (args.steps - 1)
+        jax.block_until_ready((state.sources, total))
+        per.append(time.time() - t)
+    blocked = sum(per) / len(per)
+
+    # dispatch-only: enqueue all steps without blocking, then one final sync.
+    # if dispatch ~= blocked -> host/dispatch-bound; if dispatch << blocked -> device-bound.
+    t = time.time()
+    for s in range(args.steps):
+        state, total = step(state, idx, random.PRNGKey(2000 + s))
+    dispatch = (time.time() - t) / args.steps
+    jax.block_until_ready((state.sources, total))
+
     if is0:
         toks = gbatch * args.seq
-        print(
-            f"[p0] {dt * 1e3:.1f} ms/step | {toks / dt:,.0f} tok/s | {toks / dt / ndev:,.0f} tok/s/GPU "
-            f"| final loss {float(total):.4f}"
-        )
+        print(f"[p0] blocked {blocked * 1e3:.1f} ms/step | dispatch {dispatch * 1e3:.1f} ms/step "
+              f"| {'HOST-BOUND' if dispatch > 0.7 * blocked else 'device-bound'}")
+        print(f"[p0] {toks / blocked:,.0f} tok/s | {toks / blocked / ndev:,.0f} tok/s/GPU "
+              f"| final loss {float(total):.4f}")
         print(f"[p0] STAGE 9 ({ndev} GPU): OK")
 
     jax.experimental.multihost_utils.sync_global_devices("stage9_done")
