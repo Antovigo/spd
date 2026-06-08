@@ -59,7 +59,7 @@ One validated pydantic tree (extra keys raise):
 ```yaml
 pd:      { ... PDConfig ... }
 runtime: { ... RuntimeConfig ... }
-cadence: { train_log_every, save_every }
+cadence: { train_log_every, save_every, dense_log_phase: { every, until_step } }  # dense_log_phase optional
 target:  { ... per-experiment target config ... }
 data:    { ... per-experiment data config ... }
 eval:    { batch_size, n_steps, every, slow_every, slow_on_first_step,

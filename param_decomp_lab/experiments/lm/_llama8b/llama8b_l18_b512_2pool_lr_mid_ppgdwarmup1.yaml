@@ -10,6 +10,7 @@ cadence:
   keep_last_n_checkpoints: 2
   save_every: 2000
   train_log_every: 200
+  dense_log_phase: { every: 10, until_step: 500 }
 data:
   buffer_size: 1000
   column_name: text

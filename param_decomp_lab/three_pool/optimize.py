@@ -757,7 +757,7 @@ class ThreePoolTrainer:
                 trace(f"Trainer.run: step {step}: start (pool={ctx.kind})")
 
                 step_start = time.perf_counter()
-                should_log = step % cadence.train_log_every == 0
+                should_log = cadence.should_log_train(step)
 
                 # batch_T should already be on this rank's device (placed by _to_device).
                 if isinstance(batch_T, Tensor):

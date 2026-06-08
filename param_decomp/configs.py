@@ -211,6 +211,17 @@ class PDConfig(BaseConfig):
         return self
 
 
+class DenseLogPhase(BaseConfig):
+    """Denser train-log period for the first `until_step` steps, then `Cadence`'s
+    steady `train_log_every` takes over. Early training has the fastest dynamics
+    (faithfulness warmup, the sharp initial loss drop), so denser sampling there is
+    where the signal is; the per-log overhead is a few scalar cross-pool reductions,
+    negligible against the step. `until_step` is exclusive."""
+
+    every: PositiveInt
+    until_step: PositiveInt
+
+
 class Cadence(BaseConfig):
     """Rhythm of non-eval loop emissions: train-log and checkpoint periods.
 
@@ -221,6 +232,8 @@ class Cadence(BaseConfig):
     """
 
     train_log_every: PositiveInt
+    dense_log_phase: DenseLogPhase | None = None
+    """Optional denser logging for early training; `None` means a flat `train_log_every`."""
     save_every: PositiveInt | None = None
     keep_last_n_checkpoints: PositiveInt | None = None
     """How many of the most-recent ``training_<step>.pth`` / ``model_<step>.pth`` pairs
@@ -231,6 +244,8 @@ class Cadence(BaseConfig):
     retained set."""
 
     def should_log_train(self, step: int) -> bool:
+        if self.dense_log_phase is not None and step < self.dense_log_phase.until_step:
+            return step % self.dense_log_phase.every == 0
         return step % self.train_log_every == 0
 
     def should_save(self, step: int) -> bool:

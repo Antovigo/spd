@@ -544,7 +544,7 @@ class TwoPoolTrainer:
                 self.step = step
                 _assert_full_global_batch(batch_T, runtime.batch_global)
                 step_start = time.perf_counter()
-                should_log = step % cadence.train_log_every == 0
+                should_log = cadence.should_log_train(step)
 
                 match ctx:
                     case PoolAContext():
