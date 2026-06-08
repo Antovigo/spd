@@ -136,15 +136,16 @@ def main():
         opt_ci.step()
         return total.detach()
 
-    for s in range(args.steps):
+    for _ in range(3):  # warmup (alloc/autotune/compile)
         total = step()
-        if s == 0:
-            torch.cuda.synchronize()
-            dist.barrier()
-            t0 = time.time()
     torch.cuda.synchronize()
     dist.barrier()
-    dt = (time.time() - t0) / (args.steps - 1)
+    t0 = time.time()
+    for _ in range(args.steps):
+        total = step()
+    torch.cuda.synchronize()
+    dist.barrier()
+    dt = (time.time() - t0) / args.steps
     if is0:
         toks = gbatch * args.seq
         print(f"[r0] {world} GPU | gbatch={gbatch} seq={args.seq} | compile={args.compile}")
