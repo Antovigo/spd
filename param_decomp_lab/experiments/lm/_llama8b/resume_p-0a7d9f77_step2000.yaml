@@ -1,5 +1,0 @@
-# Resume the b1280@240 main run (p-0a7d9f77) after the 2026-06-07 NODE_FAIL on
-# slurm-b200-139-229 (IB P_Key change took out the 139 node group at ~step 3000).
-# Only step 2000 was checkpointed; resume from there (steps 2000->3000 are lost).
-from_run: /mnt/data/artifacts/mechanisms/param-decomp/runs/p-0a7d9f77
-step: 2000
