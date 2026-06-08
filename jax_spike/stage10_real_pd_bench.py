@@ -218,10 +218,10 @@ class CIBlock(eqx.Module):
         v = (h @ self.wv.T).reshape(b, t, self.n_head, self.head_dim).transpose(0, 2, 1, 3)
         cos, sin = rope_cos_sin(inv_freq, t, x.dtype)
         q, k = apply_rope(q, k, cos, sin)
-        # bidirectional attention (no causal mask)
-        scores = jnp.einsum("bhqd,bhkd->bhqk", q, k) / jnp.sqrt(self.head_dim).astype(x.dtype)
-        attn = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(x.dtype)
-        y = jnp.einsum("bhqk,bhkd->bhqd", attn, v).transpose(0, 2, 1, 3).reshape(b, t, d)
+        # bidirectional flash attention (no causal mask) — avoids materializing (b,h,t,t) scores
+        qt, kt, vt = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
+        y = jax.nn.dot_product_attention(qt, kt, vt, is_causal=False)
+        y = y.reshape(b, t, d)
         x = x + y @ self.wo.T
         h = rms_norm(x, self.ln2, self.eps)
         return x + (jax.nn.gelu(h @ self.w1) @ self.w2)
@@ -351,6 +351,9 @@ def make_step(opt_vu, opt_ci, lr_pgd, n_pgd):
         dm = {s: jnp.ones((1, 1, 1), DT) for s in SITES}  # delta_mask = 1 (broadcast)
         nomask = {s: None for s in SITES}
         Wg, Wu, Wd = frozen.l18_Wg, frozen.l18_Wu, frozen.l18_Wd
+        # recompute each masked suffix forward in backward (don't retain 14-layer activations
+        # across the 4 grad-forwards) — trades compute for memory so batch 8 fits replicated.
+        ckpt_suffix = jax.checkpoint(suffix_logits)
 
         def loss_fn(trainable):
             vu, ci_fn = trainable
@@ -371,13 +374,13 @@ def make_step(opt_vu, opt_ci, lr_pgd, n_pgd):
                 u = random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
                 m = ci[s] + (1 - ci[s]) * u
                 masks = {**nomask, s: m}
-                l_stoch = l_stoch + recon(suffix_logits(frozen, vu, resid, masks, dm), clean)
+                l_stoch = l_stoch + recon(ckpt_suffix(frozen, vu, resid, masks, dm), clean)
             l_stoch = l_stoch / len(SITES)
 
             # persistent PGD recon: all sites masked by ci*sigmoid(source) (broadcast source)
             src = jax.lax.stop_gradient(state.source)
             ppgd_masks = {s: ci[s] * jax.nn.sigmoid(src[s]) for s in SITES}
-            l_ppgd = recon(suffix_logits(frozen, vu, resid, ppgd_masks, dm), clean)
+            l_ppgd = recon(ckpt_suffix(frozen, vu, resid, ppgd_masks, dm), clean)
 
             tot = (
                 COEFF["faith"] * l_faith
