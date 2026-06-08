@@ -40,7 +40,7 @@ from pydantic import model_validator
 
 from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModel
-from param_decomp.configs import Cadence, RuntimeConfig
+from param_decomp.configs import Cadence
 from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.training_state import ThreePoolTrainingState
@@ -93,6 +93,7 @@ from param_decomp_lab.resumption import (
 from param_decomp_lab.run_sink import ThreePoolSink
 from param_decomp_lab.seed import set_seed
 from param_decomp_lab.three_pool import ThreePoolTopology, ThreePoolTrainer
+from param_decomp_lab.three_pool.config import PooledRuntimeConfig
 from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME, ppgd_shard_dirname
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 
@@ -106,18 +107,17 @@ from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 THREE_POOL_SLURM_ENV: dict[str, str] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
 
 
-class ThreePoolRuntimeConfig(RuntimeConfig):
-    """Core's substrate scalars (`autocast_bf16` / `device` / `dp`) + the normalized
-    `topology`.
+class ThreePoolRuntimeConfig(PooledRuntimeConfig):
+    """`PooledRuntimeConfig` (core substrate scalars + the `compile_*` / `checkpoint_ci_fn`
+    toggles) + the normalized `topology`.
 
-    Subclasses `RuntimeConfig` so it's substitutable wherever a `RuntimeConfig` is
-    expected (`ThreePoolTrainer.__init__`, snapshot serialization) and reuses the three
-    scalars rather than duplicating them. `dp` is the launch-derived world readout
+    Subclasses `PooledRuntimeConfig` so it's substitutable wherever the trainers expect one
+    (`ThreePoolTrainer.__init__`, snapshot serialization) and the compile toggles have a
+    single home in `three_pool/config.py`. `dp` is the launch-derived world readout
     (overwritten from the torchrun world at launch; not authored in 3-pool YAMLs — the
     world size is derived from the resolved topology and asserted == torchrun world in
     `build_world`). `topology` is the normalized `ThreePoolTopology` (per-rank batches +
     site→chunk split; ranks derived) that pairs with `ThreePoolConstrainedPDConfig`.
-    Core's `RuntimeConfig` itself stays pool-blind — the topology is added only here, in lab.
     """
 
     topology: ThreePoolTopology

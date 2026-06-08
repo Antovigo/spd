@@ -79,7 +79,7 @@ from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
 )
-from param_decomp_lab.three_pool.config import ThreePoolTopology
+from param_decomp_lab.three_pool.config import PooledRuntimeConfig, ThreePoolTopology
 from param_decomp_lab.three_pool.consolidate import (
     CONSOLIDATE_META_FILENAME,
     load_ppgd_shard,
@@ -128,41 +128,6 @@ _DEFAULT_PG_TIMEOUT = datetime.timedelta(minutes=10)
 _COMPILE_PG_TIMEOUT = datetime.timedelta(minutes=20)
 
 
-def _chunk_compile_enabled() -> bool:
-    """torch.compile the chunkwise pool — default on; ``PD_DISABLE_CHUNK_COMPILE=1`` to disable.
-
-    Whole-model compile (see the compile call in ``__init__``) gives ~2.74x on the chunkwise step
-    (the throughput pole), validated clean at 160-GPU distributed scale on torch >= 2.11 (earlier
-    torch tripped an AOT-partitioner ``KeyError: '_scaled_dot_product_flash_attention'`` at scale —
-    see the compile call). Global (the launcher exports env to every rank), required because it also
-    widens the collective PG timeout uniformly across ranks.
-    """
-    return os.environ.get("PD_DISABLE_CHUNK_COMPILE", "").strip() not in ("1", "true", "yes")
-
-
-def _ci_ckpt_enabled() -> bool:
-    """Activation-checkpoint the CI-fn blocks — default on; ``PD_DISABLE_CI_CKPT=1`` off."""
-    return os.environ.get("PD_DISABLE_CI_CKPT", "").strip() not in ("1", "true", "yes")
-
-
-def _ci_compile_enabled() -> bool:
-    """torch.compile the CI-fn forward — default on; ``PD_DISABLE_CI_COMPILE=1`` off."""
-    return os.environ.get("PD_DISABLE_CI_COMPILE", "").strip() not in ("1", "true", "yes")
-
-
-def _ppgd_compile_enabled() -> bool:
-    """torch.compile the PPGD pool's model forward — default on; ``PD_DISABLE_PPGD_COMPILE=1`` off.
-
-    Compiles the SAME ``component_model.model`` masked forward the chunkwise pool already compiles
-    at 160-GPU scale (so the forward-at-scale risk is retired there). The PPGD-specific bit — a
-    fused ``torch.autograd.grad`` (not ``.backward()``) over V/U + CI + sources, plus the warmup
-    PGD inner loop — was probed on 1 GPU: numerically correct (isolated fp32 grad rel-err 8e-7) and
-    recompile/graph-break-free through the loop; ~2-3x on PPGD compute. Global env (uniform across
-    ranks) because it also widens the step-0 collective PG timeout.
-    """
-    return os.environ.get("PD_DISABLE_PPGD_COMPILE", "").strip() not in ("1", "true", "yes")
-
-
 def _resolve_pg_timeout(*, compiling: bool = False) -> datetime.timedelta:
     override_s = os.environ.get("PD_3POOL_PG_TIMEOUT_S", "").strip()
     if override_s:
@@ -191,7 +156,7 @@ class ThreePoolTrainer:
     """
 
     pd_config: ThreePoolConstrainedPDConfig
-    runtime_config: RuntimeConfig
+    runtime_config: PooledRuntimeConfig
     three_pool_config: ThreePoolTopology
     reconstruction_loss: ReconstructionLoss
     component_model: LMComponentModel
@@ -208,7 +173,7 @@ class ThreePoolTrainer:
         run_batch: RunBatch,
         reconstruction_loss: ReconstructionLoss,
         pd_config: ThreePoolConstrainedPDConfig,
-        runtime_config: RuntimeConfig,
+        runtime_config: PooledRuntimeConfig,
         three_pool_config: ThreePoolTopology,
     ) -> None:
         assert dist.is_initialized(), (
@@ -271,9 +236,9 @@ class ThreePoolTrainer:
             ppgd_ranks=list(self.runtime.ppgd_ranks),
             batch_global=self.runtime.batch_global,
             pg_timeout=_resolve_pg_timeout(
-                compiling=_chunk_compile_enabled()
-                or _ci_compile_enabled()
-                or _ppgd_compile_enabled()
+                compiling=runtime_config.compile_chunkwise
+                or runtime_config.compile_ci_fn
+                or runtime_config.compile_ppgd
             ),
             device=self._device,
         )
@@ -335,16 +300,16 @@ class ThreePoolTrainer:
         # critical path. Whole-forward compile + checkpoint + flash-SDPA composes cleanly
         # on torch>=2.11 (its AOT min-cut partitioner guards the DCE'd checkpointed
         # flash-SDPA RNG op via functionalize_rng_ops; <=2.10 KeyError'd at distributed
-        # scale). Default-on; PD_DISABLE_CI_CKPT / PD_DISABLE_CI_COMPILE to disable.
+        # scale). Both default-on (runtime_config.checkpoint_ci_fn / .compile_ci_fn).
         is_ci = isinstance(self.ctx, CIContext)
         if is_ci:
             assert self.component_model.ci_fn is not None
-            if _ci_ckpt_enabled():
+            if runtime_config.checkpoint_ci_fn:
                 trace("ThreePoolTrainer.__init__: enable CI-fn activation checkpointing")
                 for m in self.component_model.ci_fn.modules():
                     if isinstance(m, GlobalSharedTransformerCiFn):
                         m.enable_activation_checkpointing()
-            if _ci_compile_enabled():
+            if runtime_config.compile_ci_fn:
                 user = os.environ.get("USER", "u")
                 rank = dist.get_rank()
                 os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
@@ -365,11 +330,11 @@ class ThreePoolTrainer:
         # Chunkwise pool: torch.compile the (target + masked) model forward — a validated 2.74× on
         # the chunkwise step single-GPU (the throughput pole). The vendored mask-arg forward traces
         # cleanly (0 graph breaks) and attention uses F.sdpa directly. Default-on
-        # (PD_DISABLE_CHUNK_COMPILE=1 to disable) — see _chunk_compile_enabled. The one-time
-        # first-step compilation is absorbed by the widened PG timeout (see
-        # _resolve_pg_timeout(compiling=...)). The chunkwise forward is only called in step_chunkwise
-        # (target=None + masked dict, both validated); eval barriers it through, so no recompile.
-        if isinstance(self.ctx, ChunkContext) and _chunk_compile_enabled():
+        # (runtime_config.compile_chunkwise). The one-time first-step compilation is absorbed by the
+        # widened PG timeout (see _resolve_pg_timeout(compiling=...)). The chunkwise forward is only
+        # called in step_chunkwise (target=None + masked dict, both validated); eval barriers it
+        # through, so no recompile.
+        if isinstance(self.ctx, ChunkContext) and runtime_config.compile_chunkwise:
             # Whole-model compile: the block-loop checkpoint(block, ...) sits INSIDE the compiled
             # region. Requires torch >= 2.11 — its AOT min-cut partitioner guards the DCE'd
             # checkpointed flash-SDPA RNG op in `functionalize_rng_ops` (partitioners.py) instead of
@@ -386,9 +351,9 @@ class ThreePoolTrainer:
         # PPGD pool: compile the SAME masked model forward (the warmup PGD inner loop + the final
         # recon forward both run it). The forward-at-scale is already proven by the chunkwise pool
         # above (identical compiled artifact); the PPGD-specific fused autograd.grad over
-        # V/U + CI + sources was 1-GPU-validated correct (see _ppgd_compile_enabled). Default-on,
-        # PD_DISABLE_PPGD_COMPILE=1 to disable. Per-rank inductor/triton caches as above.
-        if isinstance(self.ctx, PPGDContext) and _ppgd_compile_enabled():
+        # V/U + CI + sources was 1-GPU-validated correct (isolated fp32 grad rel-err 8e-7). Default-on
+        # (runtime_config.compile_ppgd). Per-rank inductor/triton caches as above.
+        if isinstance(self.ctx, PPGDContext) and runtime_config.compile_ppgd:
             user = os.environ.get("USER", "u")
             rank = dist.get_rank()
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
@@ -618,12 +583,11 @@ class ThreePoolTrainer:
         if cfg_overrides is not None:
             pd_dict = {**pd_dict, **cfg_overrides}
         pd_config = ThreePoolConstrainedPDConfig.model_validate(pd_dict)
-        # The saved runtime_config is a `ThreePoolRuntimeConfig` dump (base scalars +
-        # `topology`). The trainer takes the base `RuntimeConfig` scalars here and the
-        # topology via `three_pool_config` (the source of truth, identical to the dumped
-        # `topology`), so drop the duplicate `topology` key before validating as base.
+        # `topology` is reconstructed separately into `three_pool_config`; the rest of the dump
+        # (base scalars + compile flags) revalidates as `PooledRuntimeConfig` so the flags
+        # survive resume without importing the lab-side `ThreePoolRuntimeConfig` (which would cycle).
         runtime_dict = {k: v for k, v in snapshot.runtime_config.items() if k != "topology"}
-        runtime_config = RuntimeConfig.model_validate(runtime_dict)
+        runtime_config = PooledRuntimeConfig.model_validate(runtime_dict)
         three_pool_config = ThreePoolTopology.model_validate(snapshot.three_pool_config)
 
         trainer = cls(
@@ -967,7 +931,7 @@ def optimize_three_pool(
     run_batch: RunBatch,
     reconstruction_loss: ReconstructionLoss,
     pd_config: ThreePoolConstrainedPDConfig,
-    runtime_config: RuntimeConfig,
+    runtime_config: PooledRuntimeConfig,
     three_pool_config: ThreePoolTopology,
     cadence: Cadence,
     sink: ThreePoolRunSink,

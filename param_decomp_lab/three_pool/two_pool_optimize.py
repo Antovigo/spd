@@ -68,6 +68,7 @@ from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
     owned_model_state_keys,
 )
+from param_decomp_lab.three_pool.config import PooledRuntimeConfig
 from param_decomp_lab.three_pool.consolidate import (
     CONSOLIDATE_META_FILENAME,
     load_ppgd_shard,
@@ -77,10 +78,7 @@ from param_decomp_lab.three_pool.consolidate import (
 from param_decomp_lab.three_pool.context import ChunkContext
 from param_decomp_lab.three_pool.layout import Chunk, flush_nccl_event_timings
 from param_decomp_lab.three_pool.optimize import (
-    _chunk_compile_enabled,
     _ci_attn_shape_or_none,
-    _ci_ckpt_enabled,
-    _ci_compile_enabled,
     _rank_invariant_fingerprint_core,
     _resolve_pg_timeout,
     _seq_dims_from_batch,
@@ -114,7 +112,7 @@ class TwoPoolTrainer:
     chunkwise → V/U). The PPGD state is built on the first batch of :meth:`run`."""
 
     pd_config: ThreePoolConstrainedPDConfig
-    runtime_config: RuntimeConfig
+    runtime_config: PooledRuntimeConfig
     two_pool_config: TwoPoolTopology
     reconstruction_loss: ReconstructionLoss
     component_model: LMComponentModel
@@ -131,7 +129,7 @@ class TwoPoolTrainer:
         run_batch: RunBatch,
         reconstruction_loss: ReconstructionLoss,
         pd_config: ThreePoolConstrainedPDConfig,
-        runtime_config: RuntimeConfig,
+        runtime_config: PooledRuntimeConfig,
         two_pool_config: TwoPoolTopology,
     ) -> None:
         assert dist.is_initialized(), (
@@ -172,7 +170,7 @@ class TwoPoolTrainer:
             chunks=list(self.runtime.chunks),
             batch_global=self.runtime.batch_global,
             pg_timeout=_resolve_pg_timeout(
-                compiling=_chunk_compile_enabled() or _ci_compile_enabled()
+                compiling=runtime_config.compile_chunkwise or runtime_config.compile_ci_fn
             ),
             device=self._device,
         )
@@ -202,17 +200,17 @@ class TwoPoolTrainer:
         is_pool_a = isinstance(self.ctx, PoolAContext)
         if is_pool_a:
             assert self.component_model.ci_fn is not None
-            if _ci_ckpt_enabled():
+            if runtime_config.checkpoint_ci_fn:
                 for m in self.component_model.ci_fn.modules():
                     if isinstance(m, GlobalSharedTransformerCiFn):
                         m.enable_activation_checkpointing()
-            if _ci_compile_enabled():
+            if runtime_config.compile_ci_fn:
                 user = os.environ.get("USER", "u")
                 rank = dist.get_rank()
                 os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
                 os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
                 self.component_model.ci_fn.compile()
-        if isinstance(self.ctx, ChunkContext) and _chunk_compile_enabled():
+        if isinstance(self.ctx, ChunkContext) and runtime_config.compile_chunkwise:
             user = os.environ.get("USER", "u")
             rank = dist.get_rank()
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
@@ -399,8 +397,11 @@ class TwoPoolTrainer:
         adversarial source shards (``None`` ⇒ the adversary re-warms from scratch).
         """
         pd_config = ThreePoolConstrainedPDConfig.model_validate(snapshot.pd_config)
+        # `topology` is reconstructed separately into `two_pool_config`; the rest of the dump
+        # (base scalars + compile flags) revalidates as `PooledRuntimeConfig` so the flags
+        # survive resume without importing the lab-side `TwoPoolRuntimeConfig` (which would cycle).
         runtime_dict = {k: v for k, v in snapshot.runtime_config.items() if k != "topology"}
-        runtime_config = RuntimeConfig.model_validate(runtime_dict)
+        runtime_config = PooledRuntimeConfig.model_validate(runtime_dict)
         two_pool_config = TwoPoolTopology.model_validate(snapshot.three_pool_config)
 
         trainer = cls(
@@ -646,7 +647,7 @@ def optimize_two_pool(
     run_batch: RunBatch,
     reconstruction_loss: ReconstructionLoss,
     pd_config: ThreePoolConstrainedPDConfig,
-    runtime_config: RuntimeConfig,
+    runtime_config: PooledRuntimeConfig,
     two_pool_config: TwoPoolTopology,
     cadence: Cadence,
     sink: ThreePoolRunSink,

@@ -289,7 +289,18 @@ compilation while the other pools wait at the first cross-pool collective. The
 widening is uniform across ranks (the flag is global), and steady-state collectives
 are still sub-second.
 
-## Chunkwise torch.compile (default on; `PD_DISABLE_CHUNK_COMPILE=1` to disable)
+## Compile / checkpoint toggles (config fields, default on)
+
+All four pool optimisations are authored on `PooledRuntimeConfig` (in `three_pool/config.py`):
+`compile_chunkwise`, `compile_ci_fn`, `compile_ppgd`, `checkpoint_ci_fn` — all `bool`,
+default `True`. `ThreePoolRuntimeConfig` / `TwoPoolRuntimeConfig` (lab) subclass it and add
+the authored `topology`, so the toggles have a single home and the trainers read them off
+`self.runtime_config` (no env vars, no back-dependency into `experiments/lm/`). Disable one
+in a YAML with e.g. `runtime.compile_ppgd: false`. Any compile path widens the step-0 PG
+timeout (`_resolve_pg_timeout(compiling=...)`). Single-pool (`pd-lm`) doesn't compile, so
+these live only on the pooled config.
+
+## Chunkwise torch.compile (`compile_chunkwise`, default on)
 
 The chunkwise pool's component model is `torch.compile`d **whole-model** (the model's
 block-loop `checkpoint(block, …)` lives *inside* the compiled region) — ~**2.74×** on the
@@ -306,13 +317,12 @@ workaround — compile per-block with the checkpoint left eager — gave 2.42× 
 Per-rank inductor/triton cache dirs are kept as a defensive measure against shared-cache
 contention across the 160 concurrent compilers.
 
-## CI-fn checkpoint + compile (both default on)
+## CI-fn checkpoint + compile (`checkpoint_ci_fn` / `compile_ci_fn`, both default on)
 
 The CI pool activation-checkpoints the CI-fn transformer blocks
-(`GlobalSharedTransformerCiFn.enable_activation_checkpointing`, `PD_DISABLE_CI_CKPT=1` to
-disable) and then `torch.compile`s the **whole CI-fn forward** with the checkpoint loop
-inside the compiled region (`ci_fn.compile()`, `PD_DISABLE_CI_COMPILE=1` to disable) — same
-torch >= 2.11 pattern as the chunkwise pool. Checkpoint recomputes the 16384-wide MLP / attn intermediates in
+(`GlobalSharedTransformerCiFn.enable_activation_checkpointing`) and then `torch.compile`s the
+**whole CI-fn forward** with the checkpoint loop inside the compiled region (`ci_fn.compile()`)
+— same torch >= 2.11 pattern as the chunkwise pool. Checkpoint recomputes the 16384-wide MLP / attn intermediates in
 backward, saving ~**15 GB** of block-activation high-water on the CI rank; whole-forward
 compile turns the checkpoint's +12.9% step-time cost into a net **−9.2%** vs baseline (1-GPU
 B200 probe; whole-region beats per-block's −4.6%). The CI pool is compute-idle (PPGD is the
@@ -320,7 +330,7 @@ long pole), so even the bare ckpt cost would be free on the critical path. Whole
 compile + ckpt + flash-SDPA is validated on real 2-GPU DDP/NCCL. Any compile path
 (chunkwise, CI, or PPGD) widens the step-0 PG timeout.
 
-## PPGD torch.compile (default on; `PD_DISABLE_PPGD_COMPILE=1` to disable)
+## PPGD torch.compile (`compile_ppgd`, default on)
 
 The PPGD pool `torch.compile`s the **same `component_model.model` masked forward** the chunkwise
 pool compiles — the warmup PGD inner loop and the final recon forward both run it. Because it's

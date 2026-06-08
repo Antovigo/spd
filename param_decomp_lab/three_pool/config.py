@@ -39,6 +39,38 @@ from typing import Self
 from pydantic import PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
+from param_decomp.configs import RuntimeConfig
+
+
+class PooledRuntimeConfig(RuntimeConfig):
+    """Core's substrate scalars + the multipool `compile_*` / `checkpoint_*` toggles.
+
+    These four flags are pool-only (single-pool doesn't compile). They live in the 3-pool
+    subsystem (not core `RuntimeConfig`, which stays pool-blind) so the trainers can read
+    them off `self.runtime_config` without a back-dependency into `experiments/lm/`.
+    `ThreePoolRuntimeConfig` (lab) extends this with the authored `topology`. All default on,
+    so existing YAMLs are unchanged; any compile path widens the step-0 PG timeout
+    (`_resolve_pg_timeout(compiling=...)`).
+    """
+
+    compile_chunkwise: bool = True
+    """torch.compile the chunkwise pool's whole masked-model forward (checkpoint loop inside the
+    compiled region) — ~2.74x on the chunkwise step (the throughput pole), 0 graph breaks,
+    validated clean at 160-GPU distributed scale on torch >= 2.11."""
+
+    compile_ci_fn: bool = True
+    """torch.compile the whole CI-fn forward (checkpoint loop inside the compiled region) — turns
+    the checkpoint's +12.9% step-time cost into a net -9.2% vs baseline (1-GPU B200 probe);
+    validated on real 2-GPU DDP/NCCL."""
+
+    compile_ppgd: bool = True
+    """torch.compile the PPGD pool's masked-model forward (the SAME compiled artifact the chunkwise
+    pool uses) — ~2-3x on PPGD compute (proxy). The fused autograd.grad over V/U + CI + sources is
+    1-GPU-validated (fp32 grad rel-err 8e-7); not yet validated at real 8B scale."""
+
+    checkpoint_ci_fn: bool = True
+    """Activation-checkpoint the CI-fn transformer blocks — recomputes the 16384-wide MLP/attn
+    intermediates in backward, saving ~15 GB of block-activation high-water on the CI rank."""
 
 
 class PoolSpec(BaseConfig):
