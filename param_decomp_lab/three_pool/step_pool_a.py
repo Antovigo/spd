@@ -47,6 +47,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from param_decomp._trace import trace
 from param_decomp.component_model import CIOutputs
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
@@ -137,10 +138,13 @@ def step_pool_a(
     # SAME order the chunkwise step issues them — recv g_CI FIRST, then send g_VU — or
     # the two pools deadlock (each blocked on a send the other hasn't posted a recv for).
     # g_CI: chunkwise's contribution arrives over the wire; the adversary's is local.
+    trace(f"step_pool_a {step}: recv g_CI from chunk (blocking cross-pool)")
     g_ci_chunk = ctx.portals.g_ci_from_chunk.recv(ctx.role.as_ci(), cfg.c_per_site, seq_len, device)
 
     # V/U grads: SUM-reduce across Pool A, then ship (leader-only) to chunk leaders.
+    trace(f"step_pool_a {step}: g_CI recv done; sum-reduce g_VU over Pool A")
     sum_reduce_ppgd_grads(ctx.world, [*raw.v.values(), *raw.u.values()])
+    trace(f"step_pool_a {step}: send g_VU to chunk")
     ctx.portals.g_vu_to_chunk.send(ctx.role.as_ppgd(), raw.v, raw.u)
     # Final (N+1)'th source step on this rank's own (per-batch-per-position) grads.
     ppgd_state.step(raw.sources)
@@ -150,8 +154,10 @@ def step_pool_a(
     optimizer.zero_grad(set_to_none=True)
     _fused_backward_through_ci_fn(imp_loss, fwd, g_ci_total, ctx, cfg)
 
+    trace(f"step_pool_a {step}: all-reduce ci_fn grads over Pool A")
     in_flight_ci_grad_reduce = all_reduce_ci_fn_grads_async(ctx.world, ci_fn_params)
     in_flight_ci_grad_reduce.wait()
+    trace(f"step_pool_a {step}: ci_fn grad all-reduce done")
 
     assert component_model.ci_fn is not None, "Pool A must hold its CI fn"
     grad_norms = (
@@ -171,10 +177,13 @@ def step_pool_a(
         )
     optimizer.step()
 
+    trace(f"step_pool_a {step}: wait masks-send to chunk")
     sends_to_chunk.wait()
 
+    trace(f"step_pool_a {step}: recv updated V/U from chunk (blocking cross-pool)")
     v_templates, u_templates = _vu_templates(component_model, all_sites)
     v_new, u_new = ctx.portals.updated_vu_from_chunk.post_recv(v_templates, u_templates).wait()
+    trace(f"step_pool_a {step}: updated V/U recv done")
     _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
 
     if should_log:
