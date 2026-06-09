@@ -14,6 +14,7 @@ from typing import Literal, overload, override
 
 from jaxtyping import Float, Int
 from torch import Tensor, nn
+from torch.distributed.tensor import DTensor
 
 from param_decomp.ci_fns import GlobalCiFnWrapper, LayerwiseCiFnWrapper
 from param_decomp.component_model import CIOutputs, OutputWithCache
@@ -23,6 +24,11 @@ from param_decomp_lab.experiments.lm.vendored.component_model import (
     ComponentTarget,
     LMComponentModel,
 )
+
+
+def _to_full(t: Tensor) -> Tensor:
+    """Gather a sharded `DTensor` to a full local tensor; pass a plain tensor through."""
+    return t.full_tensor() if isinstance(t, DTensor) else t
 
 
 class FsdpComponentAdapter(nn.Module):
@@ -93,7 +99,23 @@ class FsdpComponentAdapter(nn.Module):
         )
 
     def calc_weight_deltas(self) -> dict[str, Float[Tensor, "d_out d_in"]]:
-        return self.lm.calc_weight_deltas()
+        """Per-site `target_weight - components.weight`, gathered to full tensors.
+
+        FSDP2 shards the components' V/U (they live inside the sharded transformer blocks),
+        so accessed outside a forward they are DTensors; the frozen `target_weight` is either
+        a replicated buffer (a plain tensor) or — under `shard_frozen_target` — a sharded
+        param (a DTensor). The vendored `calc_weight_deltas` subtracts the two directly, which
+        raises `aten.sub got mixed torch.Tensor and DTensor` whenever the operands' DTensor-ness
+        differs. Gathering each operand to a full tensor first makes the subtraction a plain
+        op. The full per-site weight matrix is materialised regardless (the faithfulness loss
+        needs the whole delta), so the gather adds no asymptotic memory over the bare call.
+        """
+        deltas: dict[str, Tensor] = {}
+        for path in self.lm.target_module_paths:
+            target = _to_full(self.lm.target_weight(path))
+            components = _to_full(self.lm.components[path].weight)
+            deltas[path] = target - components
+        return deltas
 
     @contextmanager
     def use_cached_residual(self, batch: Int[Tensor, "batch pos"]) -> Iterator[None]:
