@@ -10,16 +10,17 @@ cadence:
   train_log_every: 5
   dense_log_phase: { every: 2, until_step: 30 }
 data:
+  # Local pre-staged/pre-tokenized fineweb (Llama tok, seq2048) — kills the HF streaming
+  # thunderherd that stalls multi-rank 2-pool startup (a4bf7fa0). Loader recipe per that commit.
   buffer_size: 1000
-  column_name: text
-  data_files: sample/350BT/*.parquet
-  dataset_name: HuggingFaceFW/fineweb
+  column_name: input_ids
+  data_files: /mnt/data/artifacts/mechanisms/param-decomp/datasets/fineweb_llama_tok_2048/*.parquet
+  dataset_name: parquet
   eval_split: train
-  is_tokenized: false
+  is_tokenized: true
   max_seq_len: 2048
-  revision: 9bb295ddab0e05d785b879661af7260fed5140fc
   shuffle_each_epoch: true
-  streaming: true
+  streaming: false
   tokenizer_name: meta-llama/Llama-3.1-8B
   train_split: train
 eval: null
