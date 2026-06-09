@@ -105,7 +105,13 @@ from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer
 # deadlock — never happen. Scoped to the 3-pool path (single-pool runs do no cross-pool
 # p2p). Applies to both the train job and the async consolidate+eval job (eval also runs
 # cross-pool collectives).
-THREE_POOL_SLURM_ENV: dict[str, str] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+THREE_POOL_SLURM_ENV: dict[str, str] = {
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    # The target model is vendored + cached under HF_HUB_CACHE, so build_target never needs
+    # the network. Without this, all N ranks issue HF Hub etag/metadata requests on launch —
+    # an 80-rank thunderherd that read-times-out against the HF CDN and stalls startup/resume.
+    "HF_HUB_OFFLINE": "1",
+}
 
 # Profiling / tracing env vars (read on the compute node by the profiler / trace hooks)
 # only reach the job if forwarded explicitly — the SLURM script exports a curated env dict,
