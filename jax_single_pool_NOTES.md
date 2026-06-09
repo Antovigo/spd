@@ -205,5 +205,33 @@ contracted sharded C. CI fn + Adam sharded on the largest axis. PGD broadcast so
 masked suffix re-forwards run on per-device sub-batches, so activation memory scales
 1/n_dev. This is what lets a global batch that OOMs replicated fit across devices.
 
+### Multi-GPU SPMD results (8× B200, 1 node, 1-task/GPU)
+The single-pool 8B PD step SPMD-collapses cleanly — near-linear weak scaling, no manual
+collectives (the headline SYNTHESIS claim, now at real-8B scale):
+
+| mode    | per-dev bl | gbatch | tok/s total | tok/s/GPU | MFU* | note |
+|---------|-----------:|-------:|------------:|----------:|-----:|------|
+| 1 GPU   | 4          | 4      |       4,538 |     4,538 | ~87% | baseline |
+| --shard | 1          | 8      |      31,098 |     3,887 | 74%  | below compute knee |
+| --shard | 2          | 16     |      34,244 |     4,280 | 82%  | |
+| --shard | 4          | 32     |      34,565 |     4,321 | 82%  | **95% of 8× single-GPU** |
+| --shard | 8          | 64     |        OOM  |       —   |  —   | 223GB global `clean` logits |
+
+`--shard` = `jax.jit` + C-sharded V/U/CI/Adam + batch-sharded resid +
+`with_sharding_constraint`. Scales near-linearly. The bl8/dev OOM is NOT a sharding
+gather of the per-device work — it's the un-checkpointed global `clean` logits
+(gbatch,2048,128256) that XLA materializes once; same wall as the 1-GPU bl8 OOM.
+
+`--shmap` (`jax.shard_map` over `dp`, params+source replicated, per-shard losses +
+source grad `pmean`'d) keeps `clean` strictly per-shard, so it should fit where --shard
+OOMs. Numerically identical to --shard at mesh=1 (same loss to 4 dp). [shmap multi-GPU
+numbers filled in once the sweep lands.]
+
+*MFU is an upper estimate (the FLOP model charges fwd+bwd=3× for PGD ascents whose
+backward is cheaper with params detached, and doesn't separately count ckpt recompute).
+tok/s/GPU is the hard number. torch reference: ~3,050 tok/s/GPU (2-pool, 80-GPU lore
+baseline) / ~1,658 (1-pool bl2). JAX single-pool ~4,300 tok/s/GPU @ 8 GPU is competitive
+WITHOUT the pool split — same conclusion as the prior 1-GPU 4-way, now at multi-GPU.
+
 ### Needs a GPU/TPU to validate
 (filled in as I hit accelerator-only paths)
