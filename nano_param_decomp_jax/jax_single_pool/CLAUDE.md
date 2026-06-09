@@ -12,13 +12,27 @@ torch FSDP path in `param_decomp_lab/fsdp/`. See `README.md` for the file map an
   *simplification*; it does NOT match the torch reference.
 - **Full-LM (output-recon):** `llama8b.py` / `ci_fn.py` / `llama8b_step.py` /
   `llama8b_sharding.py`. Recon is MSE on the **final suffix logits** of a masked
-  re-forward (mask one site for stoch, all sites for PPGD) — this is what the torch
+  re-forward (mask one kind for stoch, all sites for PPGD) — this is what the torch
   `StochasticReconLayerwiseLoss` / `PersistentPGDReconLoss` actually compute. This is
-  the real Llama-3.1-8B L18-MLP workload matching
-  `param_decomp_lab/experiments/lm/_fsdp/llama8b_l18_mlp_fsdp.yaml`. Run it via
-  `experiments/llama8b_real.py` (+`llama8b_slurm.sbatch` for multi-GPU). The full-LM
-  step is a clean re-homing of `jax_spike/stage10_real_pd_bench.py` + real HF weights +
-  working FSDP-style sharding.
+  the real Llama-3.1-8B MLP workload matching the `_llama8b/llama8b_l18_b512_2pool_*`
+  configs, **generalized to a contiguous range of decomposed layers** (default 20..31 =
+  12 layers, 36 sites). Run it via `experiments/llama8b_real.py`
+  (+`llama8b_slurm.sbatch` for multi-GPU). The full-LM step is a clean re-homing of
+  `jax_spike/stage10_real_pd_bench.py` + real HF weights + working FSDP-style sharding.
+
+### 1 -> N decomposed layers (the layer-range generalization)
+`LayerRange(first, last)` selects which contiguous layers' MLP is decomposed.
+Residual-start at `first`: the harvested residual enters layer `first`; the suffix runs
+`first..n_layer-1` (decomposed layers' attn frozen + MLP decomposed via V/U+weight-delta;
+any layers above `last` are fully frozen `tail` blocks). Sites are `(layer, kind)` with
+`kind ∈ {gate,up,down}` — `3 * n_layers` total. V/U (`DecompVU`) and the PGD source carry
+a **leading layer axis `L`**; masks per kind are `(b,t,L,C)` and the suffix indexes layer
+i with `masks[kind][i]` after `_layerfirst` moves L to axis 0. The CI fn is ONE shared
+`global_shared_transformer` over ALL `3*n_layers` sites (inputs RMS-normed + concatenated,
+output head emits `3*n_layers*C` logits split per `(layer,kind)`) — exactly torch's
+`GlobalSharedTransformerCiFn` (one transformer, all sites concatenated), NOT per-layer
+transformers. Everything that varies for the matched / max-batch / min-GPU runs is a flag:
+`--first_layer --last_layer --C --per_gpu_batch` (mesh = all visible devices).
 
 ### Full-LM sharding (the memory story)
 Frozen suffix replicated; V/U + Adam sharded over the C axis; CI fn + Adam sharded;

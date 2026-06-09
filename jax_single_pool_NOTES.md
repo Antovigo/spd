@@ -242,5 +242,102 @@ tok/s/GPU is the hard number. torch reference: ~3,050 tok/s/GPU (2-pool, 80-GPU 
 baseline) / ~1,658 (1-pool bl2). JAX single-pool ~4,300 tok/s/GPU @ 8 GPU is competitive
 WITHOUT the pool split — same conclusion as the prior 1-GPU 4-way, now at multi-GPU.
 
-### Needs a GPU/TPU to validate
-(filled in as I hit accelerator-only paths)
+## 1 -> N decomposed layers (2026-06-09, GPU) — matched-Llama-8B 12-layer prep
+
+The full-LM variant was generalized from "decompose ONLY L18 MLP (3 sites)" to
+"decompose MLP on a **contiguous range** of layers (3N sites)". Default range is
+`20..31` (12 layers, 36 sites) to prep a matched Llama-8B 12-layer A/B vs torch.
+
+### What changed (1 -> N)
+- **`llama8b.py`**: `DECOMPOSED_LAYER=18` + `SITES=(gate,up,down)` →
+  `LayerRange(first,last)` + `KINDS=(gate,up,down)`. `Target.l18_*` (one layer's frozen
+  attn/lns/MLP weights) → `Target.decomp_layers: list[DecompLayerFrozen]` (one per
+  decomposed layer) + `Target.tail: list[FrozenBlock]` (fully-frozen layers above
+  `last`). `DecompVU` arrays gained a **leading layer axis `L`** (`Vg: (L,d,C)` etc).
+  `suffix_logits` loops the decomposed layers (frozen attn + masked-decomposed MLP),
+  then the tail blocks. `all_site_inputs` harvests all 3N clean CI inputs in
+  `(layer,kind)` order, threading the *clean* MLP output through so layer i+1's site
+  inputs see layer i's clean output (matches the torch target forward). `weight_deltas`
+  vmaps over the layer axis. Residual-start prefix harvest loads L0..`first-1`.
+- **`ci_fn.py`**: ONE shared `global_shared_transformer` over ALL 3N sites (torch's
+  `GlobalSharedTransformerCiFn` is one transformer with all sites concatenated, NOT
+  per-layer). Inputs (3N of them) RMS-normed + concatenated → `d_model` → blocks →
+  out_head emits `3*L*C` logits, reshaped `(b,t,L,3,C)` and split per kind to
+  `{kind: (b,t,L,C)}`. `CIFnDims` gained `n_layers`; `total_in = L*(2d+di)`.
+- **`llama8b_step.py`**: masks per kind are `(b,t,L,C)`; `_layerfirst` moves L to axis 0
+  so `suffix_logits` indexes `masks[k][i]`. PGD source `{kind: (1,T,L,C)}`. Stoch masks
+  ONE kind across all its layers (matches "mask one module type" — torch masks one
+  module, here one kind-across-layers is the natural N-site batched analog; ppgd masks
+  all sites). `make_llama8b_step(..., n_layers, ...)` and `_shmap` take `n_layers`.
+- **`llama8b_sharding.py`**: V `(L,d,C)` shards axis 2, U `(L,C,d)` shards axis 1
+  (C on `dp`); source `(1,T,L,C)` shards C. CI out_head `(d_model, 3LC)` shards last.
+- **`experiments/llama8b_real.py`**: `--first_layer/--last_layer/--C/--per_gpu_batch`
+  are the only knobs; FLOP model counts `first..n_layer-1` suffix blocks + `3LC` CI
+  head; reports tok/s/GPU + MFU + **peak GB/device** (`memory_stats`).
+
+### Validation (single B200, 183GB)
+- **12L random weights**, bl1 seq2048 C2048 replicated: compiles to one executable,
+  6 steps, **3,003 tok/s/GPU**, 101 GB/dev peak, ppgd 0.666 > stoch 0.448 (minimax OK).
+- **12L real HF weights** (L0..L19 prefix harvested, L20..L31 decomposed), bl1 C2048
+  `--shard` on 1-dev mesh: see table below.
+
+The 1→12 extension is mechanically clean — no NCCL/sharding surprises; the leading-L
+axis threads through V/U, source, masks, Adam, and the C-shard plan unchanged. Peak mem
+scales ~linearly in N (12× the sites ⇒ 12× the V/U + 12× the per-layer activations of
+the masked re-forwards). At full C the matched run needs the multi-GPU C-shard + batch
+shard (the established `--shard` story), exactly as the L18-only run did.
+
+### Launch incantations (parametrized by C / batch / mesh)
+`C`, `per_gpu_batch`, and world size are picked LATER from the torch 2-pool sweep; the
+structure (layers 20..31, 4 losses, n_warmup=2, seq2048, real weights) is fixed.
+
+```bash
+WT=/mnt/home/oli/pd-nano-jax-jaxsp; cd $WT/nano_param_decomp_jax
+# (each run: source .venv-cuda/bin/activate; export PYTHONPATH=$WT/jax_spike;
+#  HF_HUB_CACHE=/mnt/data/artifacts/hf_cache/hub)
+
+# MATCHED run (plug in the fixed C + per_gpu_batch the torch agent settles on; N GPUs):
+sbatch --nodes=$NODES jax_single_pool/experiments/llama8b_slurm.sbatch \
+  --real_weights --shard --first_layer 20 --last_layer 31 \
+  --C $C --per_gpu_batch $BL --steps 12 --n_warmup 2
+# gbatch = BL * (8*NODES). Match torch's global batch by choosing BL and NODES.
+
+# MAX-BATCH sweep (find the per-GPU batch knee at the fixed C; bump --per_gpu_batch
+# until OOM, single node is enough to find the per-dev ceiling):
+sbatch jax_single_pool/experiments/llama8b_slurm.sbatch \
+  --real_weights --shard --C $C --per_gpu_batch 1 --steps 8   # then 2, 4, ...
+
+# MIN-GPU run (smallest world size that fits the fixed C+batch — start at 1 node,
+# drop GPUs by editing --gres / --ntasks-per-node in the sbatch, or run 1-GPU directly):
+python -m jax_single_pool.experiments.llama8b_real \
+  --real_weights --shard --C $C --per_gpu_batch $BL --steps 8
+```
+
+The sbatch (`llama8b_slurm.sbatch`) is 1-task/GPU, `--qos=opportunistic`, passes its
+args straight through to `llama8b_real`. For >12h or multi-node bump `--time`/`--nodes`.
+
+### Llama-8B 12-layer perf (real HF weights, bl1 seq2048 C2048, --shard)
+
+| mode / topo        | gbatch | tok/s tot | tok/s/GPU | peak GB/dev | stoch | ppgd | note |
+|--------------------|-------:|----------:|----------:|------------:|------:|-----:|------|
+| 1 GPU, 1-dev       |      1 |     4,558 |     4,558 |        84.4 |  0.95 | 4.97 | MFU ~78% (upper est) |
+| 8 GPU (1 node)     |      8 |    27,749 |     3,469 |        64.3 |  0.48 | 5.18 | SPMD collapse OK; bl1 below the compute knee |
+
+The 8-GPU run (job 49449, opportunistic) confirms the SPMD collapse holds at 12 layers —
+no manual collectives; V/U + CI + Adam + source C-sharded, batch sharded; the GRPC/NCCL
+lines at job end are routine `jax.distributed.shutdown` teardown noise, not a failure.
+bl1/8GPU sits below the compute knee (3,469/GPU < the 1-GPU 4,558), same shape as the
+prior L18-only scaling — per-dev throughput recovers at higher per-GPU batch, which the
+max-batch sweep finds. Peak drops 84 -> 64 GB/dev because the C-shard splits V/U + Adam.
+
+The single-routed-stoch-forward (torch `recon_plan: subset`) is BOTH more faithful and
+faster than the prior 3-per-kind-forward stoch: at 12L it cut a step from ~678ms to
+~449ms (3,020 -> 4,558 tok/s/GPU) and peak from 101 -> 84 GB/dev — one routed forward
+replaces three. Strong minimax holds (ppgd 4.97 >> stoch 0.95 on real structure). At
+C2048/bl1 the 12L footprint is ~84 GB/dev; full C (8192+) at a useful per-GPU batch
+needs the multi-GPU C-shard + batch-shard (the established `--shard` story).
+
+These C/batch are placeholders for the validation — the matched run plugs in the C +
+per-GPU batch the torch 2-pool sweep fixes.
+
+### (legacy) single-layer L18 perf, pre-generalization, for reference
