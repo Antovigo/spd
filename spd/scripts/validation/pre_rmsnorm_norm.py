@@ -12,8 +12,8 @@ the readout matrix `R` (row i = feature i's readout direction, `R[i] = u_i`):
   output-relevant subspace) — the magnitude orthogonal to *every* readout direction.
 
 Supported models: resid_mlp (representation = residual stream after each layer, readout = `W_Uᵀ`) and
-tms (representation = the `linear1` hidden bottleneck, readout = `linear2`). For tms the readout is
-overcomplete (40 rows in 10-dim), so the null space is empty and that row is ~0 by construction.
+tms (RMSNorm is applied after the relu, so representation = the post-relu output and readout =
+identity). For tms the readout is full-rank, so the null space is empty and that row is ~0.
 
 The figure is two rows (logit-lens / null space) by one column per position, with the original model
 on the x-axis and the circuit on the y-axis, sharing square axes from 0 to the global maximum.
@@ -84,10 +84,12 @@ def _reprs_and_readout(
         return positions, reprs(orig_cache), reprs(circ_cache), readout, n_active
 
     if isinstance(target_model, TMSModel):
-        positions = ["hidden"]
-        orig = {"hidden": orig_cache["linear1"].float()}
-        circ = {"hidden": circ_cache["linear1"].float()}
-        readout = target_model.linear2.weight.float()  # (n_features, n_hidden)
+        # RMSNorm is applied to the post-relu output, so the normalised representation is that output
+        # and the readout is identity (the output already is the per-feature values).
+        positions = ["output"]
+        orig = {"output": orig_cache["linear2"].float().relu()}
+        circ = {"output": circ_cache["linear2"].float().relu()}
+        readout = torch.eye(target_model.config.n_features, device=x.device)  # (n_features, n_features)
         return positions, orig, circ, readout, n_active
 
     raise NotImplementedError(f"pre_rmsnorm_norm does not support {type(target_model).__name__}")
@@ -198,8 +200,8 @@ def pre_rmsnorm_norm(
 
 
 def _pretty(position: str) -> str:
-    if position == "hidden":
-        return "hidden (pre-readout)"
+    if position == "output":
+        return "output (post-relu)"
     k = position.removeprefix("layer").removesuffix("_resid")
     return f"layer {k} residual"
 

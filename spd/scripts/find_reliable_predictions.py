@@ -19,7 +19,6 @@ from transformers import AutoTokenizer
 from spd.data import DatasetConfig, create_data_loader
 from spd.pretrain.run_info import PretrainRunInfo
 
-
 DEFAULT_CONFIG = "spd/experiments/lm/pile_llama_simple_mlp-4L-targeted-css.yaml"
 
 
