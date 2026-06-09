@@ -48,19 +48,19 @@ def med_ms(fn, x, n=50):
 
 
 @jax.jit
-@partial(shard_map, mesh=mesh, in_specs=P("dp"), out_specs=P(), check_rep=False)
+@partial(shard_map, mesh=mesh, in_specs=P("dp"), out_specs=P(), check_vma=False)
 def all_gather(x):  # ZeRO-3: gather sharded params -> full replica
     return jax.lax.all_gather(x, "dp", tiled=True)
 
 
 @jax.jit
-@partial(shard_map, mesh=mesh, in_specs=P(), out_specs=P(), check_rep=False)
+@partial(shard_map, mesh=mesh, in_specs=P(), out_specs=P(), check_vma=False)
 def all_reduce(x):  # ZeRO-1 / DDP: sum grads across all ranks
     return jax.lax.psum(x, "dp")
 
 
 @jax.jit
-@partial(shard_map, mesh=mesh, in_specs=P(), out_specs=P("dp"), check_rep=False)
+@partial(shard_map, mesh=mesh, in_specs=P(), out_specs=P("dp"), check_vma=False)
 def reduce_scatter(x):  # ZeRO-3: sum grads, leave each rank its 1/W shard
     return jax.lax.psum_scatter(x, "dp", tiled=True)
 
