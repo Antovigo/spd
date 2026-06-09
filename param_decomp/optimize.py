@@ -345,6 +345,11 @@ class Trainer:
         # Spike probe (env-gated): compile the single-pool masked forward to match the pooled
         # paths' compile win. Wire into RuntimeConfig if it proves out.
         if os.environ.get("PD_COMPILE_SINGLE_POOL", "0") != "0":
+            import torch._functorch.config as _functorch_config
+
+            # The single-pool path runs retain_graph/create_graph backwards (per-site stoch +
+            # PPGD source update); compile's donated-buffer optimization is incompatible with that.
+            _functorch_config.donated_buffer = False
             self.component_model.compile()
 
         self._component_params: list[torch.nn.Parameter] = []
