@@ -11,7 +11,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
 #SBATCH --time=00:18:00
-#SBATCH --output=/mnt/polished-lake/home/oli/pd-nano-jax/jax_spike/logs/%j.out
+#SBATCH --comment="4way gpt2xl b200 throughput bench (torch cell) - oli, lore handoff 2026-06-09"
+#SBATCH --output=/mnt/home/oli/pd-nano-jax/jax_spike/logs/%j.out
 set -euo pipefail
 cd ~/pd-nano-jax
 mkdir -p jax_spike/logs
