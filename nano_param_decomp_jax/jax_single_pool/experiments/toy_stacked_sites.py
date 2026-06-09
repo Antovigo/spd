@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import optax
 
 from jax_single_pool.losses import CIParams, Decomposition
-from jax_single_pool.pgd import PGDConfig, init_pgd_state
+from jax_single_pool.pgd import PGDConfig, PGDState, init_pgd_state
 from jax_single_pool.scopes import BroadcastAcrossBatchScope
 from jax_single_pool.step import LossCoeffs, init_train_state, make_step
 
@@ -34,7 +34,9 @@ LR_MAIN = 3e-3
 LR_CI = 3e-3
 
 
-def init_everything(key):
+def init_everything(
+    key: jax.Array,
+) -> tuple[Decomposition, CIParams, PGDState, int]:
     kW, kV, kU, kciw, kcib, kpgd = jax.random.split(key, 6)
     sc = 0.3
     W_target = jax.random.normal(kW, (S, D, D)) * sc
@@ -71,12 +73,11 @@ def main():
 
     print(f"sites={S} d={D} C={C} B={B} delta={USE_DELTA}")
     print(f"\n{'step':>6} {'total':>10} {'faith':>10} {'imp':>10} {'stoch':>10} {'ppgd':>10}")
-    first = None
+    state, m = step(state, x, jax.random.fold_in(key, 0))
+    first = {k: float(v) for k, v in m.items()}
     for i in range(N_STEPS):
         key, ks = jax.random.split(key)
         state, m = step(state, x, ks)
-        if i == 0:
-            first = {k: float(v) for k, v in m.items()}
         if i % LOG_EVERY == 0 or i == N_STEPS - 1:
             print(
                 f"{i:>6} {float(m['total']):>10.5f} {float(m['faith']):>10.5f} "

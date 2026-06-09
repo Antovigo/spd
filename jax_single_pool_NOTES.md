@@ -71,13 +71,43 @@ CIFn, sigmoid, mask sampling), build a *new* trainer.
 
 ## Open questions / TODO
 
-- [ ] residual-start analog: skip the frozen prefix. nano_pd_jax models have no
-      residual cache. Deferred — note why in the residual section once built.
-- [ ] real LM (Flax/Equinox Llama) at scale: stage10/11 have `vendored_jax`;
-      out of scope for the CPU-runnable core but the step fn is model-agnostic.
-- [ ] checkpoint/resume of the PGD state (sources + adam m/v) — pytree, trivial
-      with `eqx.tree_serialise_leaves`; wire when needed.
+- [x] checkpoint/resume of the PGD state (sources + adam m/v) — `checkpoint.py`,
+      flat pytree `.npz`. Test proves resume continues the trajectory bit-exactly
+      (the adversary persists). Trivial because the whole adversary state is in the
+      `TrainState` pytree — no torch-style `state_dict`/`load_state_dict` plumbing.
+- [x] real model: `experiments/transformer_qkv.py` decomposes the (square) q/k/v
+      sites of `nano_pd_jax.TinyTransformer`, pulling real pre-weight acts. Proves
+      the step is model-agnostic (faith 0.043→0.005, stoch 0.30→0.064 on real
+      attention projections).
+- [ ] real LM (Equinox Llama) at scale: `jax_spike/vendored_jax/llama.py` +
+      stage10/11 already have a bit-parity Equinox Llama. The single-pool step here
+      is shape-compatible (stacked homogeneous MLP sites) but the full LM run needs
+      a GPU and param-sharding for memory (the HANDOFF.md open TODO #1). Out of
+      scope for the CPU core; the step fn drops in unchanged.
 - [ ] perf A/B vs torch on GPU — needs an accelerator (see "needs GPU/TPU").
+
+## Residual-start analog
+
+The torch path's residual-start (`use_cached_residual`) skips recomputing the
+frozen transformer prefix before the decomposed layer each step — a *target
+forward* optimization (cache the residual stream entering the decomposed block,
+replay it). In this JAX design it maps even more cleanly and is **already
+implicit**: the single-pool step's recon is *layerwise* (site-local), so it never
+runs the target's prefix at all inside the jit'd step — it consumes pre-computed,
+stop-gradient'd pre-weight acts `x` produced by ONE frozen target forward
+(`stacked_acts` in `transformer_qkv.py`). That single frozen forward is exactly
+the "cache the residual / acts once" idea. At LM scale you'd run the frozen
+target forward once per batch (outside the differentiated step), harvest the
+decomposed sites' pre-weight acts + the sites' target outputs, then feed those to
+the step — the residual-start saving (skip the frozen prefix on the *masked*
+re-forward) is free because there is no masked re-forward through the prefix:
+recon is computed directly from acts. So residual-start isn't a separate feature
+here; it's a consequence of the layerwise-recon factoring. (The torch path needs
+it because its recon re-forwards the whole model under masks; the JAX layerwise
+factoring sidesteps that.) Caveat: *output*-recon (KL of final logits, not
+layerwise MSE) WOULD need a masked re-forward through the suffix; that's the one
+place a residual cache would re-enter. Deferred with the full-LM output-recon
+variant.
 
 ## Perf / compilation observations
 

@@ -14,6 +14,7 @@ from jax_single_pool.losses import (
 )
 from jax_single_pool.pgd import (
     PGDConfig,
+    PGDState,
     _adam_ascend,
     adversarial_recon,
     init_pgd_state,
@@ -32,7 +33,9 @@ from jax_single_pool.step import LossCoeffs, init_train_state, make_step
 jax.config.update("jax_enable_x64", True)
 
 
-def _toy(key, S=3, D=8, C=4, B=16, use_delta=True):
+def _toy(
+    key: jax.Array, S: int = 3, D: int = 8, C: int = 4, B: int = 16, use_delta: bool = True
+) -> tuple[Decomposition, CIParams, PGDState, int]:
     kW, kV, kU, kw, kb, kpgd = jax.random.split(key, 6)
     decomp = Decomposition(
         V=jax.random.normal(kV, (S, D, C)) * 0.2,
