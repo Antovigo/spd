@@ -133,7 +133,14 @@ class FsdpComponentAdapter(nn.Module):
                 target = distribute_tensor(target, weight.device_mesh, [Replicate()])
             elif isinstance(target, DTensor):
                 target = target.redistribute(placements=[Replicate()])
-            deltas[path] = target - weight
+            delta = target - weight
+            # `.to_local()` the (Replicate) delta so downstream consumers (the faithfulness
+            # accumulator, the delta-component recon path, ctx invariants) see a PLAIN tensor,
+            # as they did before FSDP. Backward is unaffected: the grad still flows through the
+            # `_replicate`'d V/U inputs, landing in their native Shard(0) — value plain, grad
+            # sharded. (Only replicating the *inputs* fixes the placement; this final to_local
+            # is value-only, unlike the old full_tensor() on the raw-input einsum.)
+            deltas[path] = delta.to_local() if isinstance(delta, DTensor) else delta
         return deltas
 
     @contextmanager
