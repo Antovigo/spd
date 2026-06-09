@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Self, cast
 
 import torch
+import torch._dynamo
 import torch.nn as nn
 from torch import optim
 from torch.distributed.fsdp import fully_shard
@@ -291,6 +292,15 @@ class FsdpLMTrainer:
         # --- 6. per-rank compile caches, then compile per flags ---
         if runtime_config.compile_model or runtime_config.compile_ci_fn:
             _set_per_rank_compile_cache_env()
+            # The masked block forward specializes per block instance (dynamo guards on each
+            # block's submodule identity), so a target with more than ~8 blocks in the
+            # decomposed suffix exceeds dynamo's default recompile_limit (8) and SILENTLY falls
+            # back to eager — losing the compile win. Raise the ceiling above the block count
+            # (cost: front-loaded recompiles at startup; steady state stays compiled).
+            n_blocks = len(_target_transformer_blocks(self.lm.model))
+            torch._dynamo.config.recompile_limit = max(
+                torch._dynamo.config.recompile_limit, 8 * n_blocks
+            )
             # PPGD's before_backward runs torch.autograd.grad(retain_graph=True) through the
             # compiled region; AOTAutograd's donated-buffer optimization asserts
             # retain_graph=False on every backward, so it must be disabled when PPGD and compile
