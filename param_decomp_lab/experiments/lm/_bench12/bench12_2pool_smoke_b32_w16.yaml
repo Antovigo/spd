@@ -1,6 +1,7 @@
 # Bench12 2-pool MEMORY/CORRECTNESS smoke: Llama-8B MLP decomposed over 12 layers (20-31),
 # 36 sites, C=8192. Residual-start is automatic (decomposition_start_layer=min layer=20).
-# Topology: pool_a(bl8) + chunkwise(bl16, n_chunks=12 -> 1 layer/chunk). batch16 -> 14 GPU.
+# Layer-parallel topology: chunkwise n_chunks=12 (sites_per_chunk=3 -> 1 layer/chunk, chunk_dp=1)
+# + pool_a(bl8, n_a=4). batch32 -> world=16 GPU (mult of 8).
 # Purpose: validate the workload + read peak GB/rank on both pools before scaling per_rank_batch.
 # Launch: pd-lm-2pool <this> --qos opportunistic --partition None --time 1:00:00
 cadence:
@@ -23,7 +24,7 @@ data:
   train_split: train
 eval: null
 pd:
-  batch_size: 16
+  batch_size: 32
   ci_config:
     fn_type: global_shared_transformer
     hidden_dims: null
@@ -155,7 +156,7 @@ runtime:
     pool_a:
       per_rank_batch: 8
     chunkwise:
-      per_rank_batch: 16
+      per_rank_batch: 32
       sites_per_chunk: 3
       n_chunks: 12
     use_fused_kl: true
