@@ -53,10 +53,11 @@ from param_decomp_lab.experiments.lm.run import (
 )
 from param_decomp_lab.experiments.lm.three_pool_run import (
     THREE_POOL_SLURM_ENV,
-    ThreePoolRuntimeConfig,
     _agree_on_run_id,
     _install_first_fail_marker,
+    _maybe_build_torch_profiler,
     _maybe_enable_memory_profile,
+    profiling_env_passthrough,
 )
 from param_decomp_lab.experiments.utils import (
     EXPERIMENT_CONFIG_FILENAME,
@@ -84,17 +85,15 @@ from param_decomp_lab.resumption import (
 )
 from param_decomp_lab.run_sink import ThreePoolSink
 from param_decomp_lab.seed import set_seed
+from param_decomp_lab.three_pool.config import PooledRuntimeConfig
 from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME, ppgd_shard_dirname
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 from param_decomp_lab.three_pool.two_pool_config import TwoPoolTopology
 from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer
 
 
-class TwoPoolRuntimeConfig(ThreePoolRuntimeConfig):
-    """Core's substrate scalars + a 2-pool ``topology``. Subclasses
-    ``ThreePoolRuntimeConfig`` only to narrow the topology field's type."""
-
-    topology: TwoPoolTopology  # pyright: ignore[reportIncompatibleVariableOverride]
+class TwoPoolRuntimeConfig(PooledRuntimeConfig):
+    topology: TwoPoolTopology
 
 
 class TwoPoolLMExperimentConfig(BaseConfig):
@@ -221,12 +220,13 @@ def main(
         )
         return
 
-    if resume is not None:
-        assert config_path is None, "pass either config_path or --resume, not both"
-        _resume_main(Path(resume), group=group, tags=tags, run_id=run_id)
-    else:
-        assert config_path is not None, "must provide either config_path or --resume"
-        _fresh_or_requeue_main(Path(config_path), group=group, tags=tags, run_id=run_id)
+    match (resume, config_path):
+        case (None, str(config_path)):
+            _fresh_or_requeue_main(Path(config_path), group=group, tags=tags, run_id=run_id)
+        case (str(resume), None):
+            _resume_main(Path(resume), group=group, tags=tags, run_id=run_id)
+        case _:
+            raise ValueError("must provide either config_path or --resume")
 
 
 def _fresh_or_requeue_main(
@@ -318,7 +318,14 @@ def _fresh_main(
             runtime_config=cfg.runtime,
             two_pool_config=cfg.runtime.topology,
         )
-        trainer.run(train_loader, sink, cfg.cadence, scratch_dir=scratch_dir, eval_loop=eval_loop)
+        trainer.run(
+            train_loader,
+            sink,
+            cfg.cadence,
+            scratch_dir=scratch_dir,
+            eval_loop=eval_loop,
+            profiler=_maybe_build_torch_profiler(trainer),
+        )
     finally:
         sink.finish()
 
@@ -449,7 +456,12 @@ def _run_resume(
             ppgd_shard_dir=from_run / ppgd_shard_dirname(resolved_step),
         )
         trainer.run(
-            train_loader, sink, effective_cfg.cadence, scratch_dir=scratch_dir, eval_loop=eval_loop
+            train_loader,
+            sink,
+            effective_cfg.cadence,
+            scratch_dir=scratch_dir,
+            eval_loop=eval_loop,
+            profiler=_maybe_build_torch_profiler(trainer),
         )
     finally:
         sink.finish()
@@ -514,7 +526,9 @@ def _submit_slurm(
         requeue=True,
     )
     script = generate_script(
-        slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}
+        slurm_config,
+        launch.command,
+        env={**launch.env, **THREE_POOL_SLURM_ENV, **profiling_env_passthrough()},
     )
     result = submit_slurm_job(script, "lm")
 
@@ -620,7 +634,9 @@ def submit_slurm_async_consolidate_and_eval(
         comment=f"async-consol-eval:{train_run_id}@{step}",
     )
     script = generate_script(
-        slurm_config, launch.command, env={**launch.env, **THREE_POOL_SLURM_ENV}
+        slurm_config,
+        launch.command,
+        env={**launch.env, **THREE_POOL_SLURM_ENV, **profiling_env_passthrough()},
     )
     result = submit_slurm_job(script, "lm")
     logger.info(

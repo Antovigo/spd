@@ -300,6 +300,25 @@ in a YAML with e.g. `runtime.compile_ppgd: false`. Any compile path widens the s
 timeout (`_resolve_pg_timeout(compiling=...)`). Single-pool (`pd-lm`) doesn't compile, so
 these live only on the pooled config.
 
+On the **2-pool**, the adversary's masked forward lives on Pool A (not a separate PPGD
+pool), so `compile_ppgd` compiles `component_model.model` on the Pool A rank — alongside
+the CI fn (`compile_ci_fn`), since Pool A holds both. The compiled artifact + fused
+`autograd.grad` are the same ones the 3-pool PPGD pool validated; Pool A's model has
+activation checkpointing off (autograd.grad recompute is nondeterministic under ckpt), so
+it's a plain forward compile, no checkpointed-RNG-op partitioner concern. Isolated probe at
+production width: **~1.2× on the Pool A step** (the matmuls are already tensor-core-saturated
+at training token counts; the win is compile fusing the memory-bound cast/mask/norm tail).
+
+**Gotcha — recompiles scale with decomposed-site count.** The masked forward specializes per
+mask-key, so dynamo recompiles roughly once per decomposed site (plus a couple for the
+no-grad-target vs grad-recon grad_mode split). The production Llama target (one MLP =
+**3 sites**: gate/up/down) converges in ~3–5 recompiles, well under dynamo's default
+`recompile_limit` (8), and stays compiled (verified: 0 steady-state recompiles, 1.21×).
+A many-site config (e.g. GPT2 `h.*.attn.{q,k}_proj` = 24 sites) **blows the limit and
+silently falls back to eager** — the run still completes, it just loses the compile win. If
+a future PPGD config decomposes >~6 sites, raise `torch._dynamo.config.recompile_limit`
+above the site count (cost: front-loaded one-time recompiles at startup).
+
 ## Chunkwise torch.compile (`compile_chunkwise`, default on)
 
 The chunkwise pool's component model is `torch.compile`d **whole-model** (the model's

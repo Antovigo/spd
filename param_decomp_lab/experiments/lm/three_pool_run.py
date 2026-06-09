@@ -96,6 +96,7 @@ from param_decomp_lab.three_pool import ThreePoolTopology, ThreePoolTrainer
 from param_decomp_lab.three_pool.config import PooledRuntimeConfig
 from param_decomp_lab.three_pool.consolidate import SNAPSHOT_SCRATCH_DIRNAME, ppgd_shard_dirname
 from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
+from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer
 
 # Cross-pool NCCL p2p deadlock guard. An asymmetric topology (fanout>1 on a cross-pool
 # edge) at long sequence lengths wedges when a rendezvous-blocked NCCL send/recv kernel
@@ -105,6 +106,16 @@ from param_decomp_lab.three_pool.pd_config import ThreePoolConstrainedPDConfig
 # p2p). Applies to both the train job and the async consolidate+eval job (eval also runs
 # cross-pool collectives).
 THREE_POOL_SLURM_ENV: dict[str, str] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+
+# Profiling / tracing env vars (read on the compute node by the profiler / trace hooks)
+# only reach the job if forwarded explicitly — the SLURM script exports a curated env dict,
+# not the submitter's whole environment. `profiling_env_passthrough` collects those set at
+# submit so `PD_TORCH_PROFILE_* / PD_MEMORY_PROFILE_* / PD_TRACE*` flow through to the run.
+_PROFILE_ENV_PREFIXES = ("PD_TORCH_PROFILE_", "PD_MEMORY_PROFILE_", "PD_TRACE")
+
+
+def profiling_env_passthrough() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k.startswith(_PROFILE_ENV_PREFIXES)}
 
 
 class ThreePoolRuntimeConfig(PooledRuntimeConfig):
@@ -291,7 +302,9 @@ def _maybe_enable_memory_profile(rank: int) -> None:
     sys.excepthook = _excepthook
 
 
-def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> "torch.profiler.profile | None":
+def _maybe_build_torch_profiler(
+    trainer: ThreePoolTrainer | TwoPoolTrainer,
+) -> "torch.profiler.profile | None":
     """Opt-in `torch.profiler.profile` for the listed ranks (typically one per pool).
 
     Env: `PD_TORCH_PROFILE_RANKS=0,96,100` + `PD_TORCH_PROFILE_OUT=/abs/dir`, plus
@@ -299,6 +312,7 @@ def _maybe_build_torch_profiler(trainer: ThreePoolTrainer) -> "torch.profiler.pr
     `_ACTIVE` default 3, `_MEMORY` default on, `_STACK` / `_MODULES` / `_SHAPES` off).
     Returns the profile context (caller passes it to `trainer.run(profiler=...)`) or
     `None` if this rank isn't profiled. Verified at 104 ranks (gpt2-xl) 2026-05-28.
+    Works for both the 3-pool and 2-pool trainers (only reads `ctx.kind` / `ctx.role.rank`).
     """
     prof_ranks_env = os.environ.get("PD_TORCH_PROFILE_RANKS", "").strip()
     if not prof_ranks_env:

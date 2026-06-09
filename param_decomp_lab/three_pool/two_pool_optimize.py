@@ -207,11 +207,19 @@ class TwoPoolTrainer:
                 for m in self.component_model.ci_fn.modules():
                     if isinstance(m, GlobalSharedTransformerCiFn):
                         m.enable_activation_checkpointing()
+            # Pool A holds both the CI fn (trained) and the adversary's masked forward, so
+            # both compiled artifacts live on this rank. Per-rank inductor/triton caches guard
+            # against shared-cache contention across the concurrent compilers (set once before
+            # either compile).
+            if runtime_config.compile_ci_fn or runtime_config.compile_ppgd:
+                _set_inductor_cache_dirs()
             if runtime_config.compile_ci_fn:
-                _set_inductor_cache_dirs()
                 self.component_model.ci_fn.compile()
+            # PPGD: compile the masked model forward the adversary runs (warmup PGD inner loop
+            # + final recon). Pool A's model has activation checkpointing off (autograd.grad
+            # recompute is nondeterministic under ckpt — see above), so this is a plain forward
+            # compile, no checkpointed-RNG-op partitioner concern.
             if runtime_config.compile_ppgd:
-                _set_inductor_cache_dirs()
                 self.component_model.model.compile()
         if isinstance(self.ctx, ChunkContext) and runtime_config.compile_chunkwise:
             _set_inductor_cache_dirs()
