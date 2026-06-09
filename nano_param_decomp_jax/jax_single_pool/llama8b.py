@@ -289,18 +289,21 @@ def init_decomp_vu(cfg: LlamaConfig, C: int, target: Target, key) -> DecompVU:
     )
 
 
-def make_real_target_residual(model_name: str, cfg: LlamaConfig, idx, key) -> Array:
+def make_real_target_residual(model_name: str, cfg: LlamaConfig, idx, chunk: int) -> Array:
     """Harvest the residual stream entering L18 with ONE frozen prefix forward (L0..L17).
 
-    This is the residual-start amortization: the differentiated step never re-runs the
-    prefix. Loads the prefix from HF, runs it once, discards it. `idx`: (b, t) token ids."""
+    The residual-start amortization: the differentiated step never re-runs the prefix.
+    Loads the prefix from HF, runs it once, discards it. `idx`: (b, t) token ids.
+
+    Runs the prefix in micro-batch chunks (`chunk`) so peak activation is one chunk's
+    prefix forward, not the full (global) batch — without this the global-batch prefix
+    activations OOM alongside the suffix on each rank."""
     w = _HFWeights(_hf_snapshot_dir(model_name))
     pre = "model.layers"
     embed = w.get("model.embed_tokens.weight")
     inv_freq = llama3_inv_freq(cfg)
-    x = embed[idx]
-    for i in range(DECOMPOSED_LAYER):
-        blk = FrozenBlock(
+    blocks = [
+        FrozenBlock(
             ln1=w.get(f"{pre}.{i}.input_layernorm.weight"),
             ln2=w.get(f"{pre}.{i}.post_attention_layernorm.weight"),
             attn=FrozenAttn(
@@ -320,5 +323,16 @@ def make_real_target_residual(model_name: str, cfg: LlamaConfig, idx, key) -> Ar
             ),
             eps=cfg.rms_norm_eps,
         )
-        x = blk(x, inv_freq)
-    return x
+        for i in range(DECOMPOSED_LAYER)
+    ]
+
+    @jax.jit
+    def prefix_chunk(idx_c):
+        x = embed[idx_c]
+        for blk in blocks:
+            x = blk(x, inv_freq)
+        return x
+
+    b = idx.shape[0]
+    outs = [prefix_chunk(idx[i : i + chunk]) for i in range(0, b, chunk)]
+    return jnp.concatenate(outs, axis=0)

@@ -124,7 +124,7 @@ def main():
             print("[p0] loading HF suffix + harvesting residual via prefix forward...")
         target = load_target_from_hf(args.model_name, cfg)
         resid_global = make_real_target_residual(
-            args.model_name, cfg, idx_global, random.PRNGKey(0)
+            args.model_name, cfg, idx_global, chunk=args.per_gpu_batch
         )
     else:
         ks = iter(random.split(random.PRNGKey(0), 512))
