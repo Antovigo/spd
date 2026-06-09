@@ -9,6 +9,7 @@ that lets a caller persist and restore the full training state (resumption).
 """
 
 import gc
+import os
 import signal
 from collections import defaultdict
 from dataclasses import dataclass
@@ -340,6 +341,11 @@ class Trainer:
 
         if pd_config.tied_weights is not None:
             tie_component_weights(component_model, pd_config.tied_weights)
+
+        # Spike probe (env-gated): compile the single-pool masked forward to match the pooled
+        # paths' compile win. Wire into RuntimeConfig if it proves out.
+        if os.environ.get("PD_COMPILE_SINGLE_POOL", "0") != "0":
+            self.component_model.compile()
 
         self._component_params: list[torch.nn.Parameter] = []
         for name in component_model.target_module_paths:
