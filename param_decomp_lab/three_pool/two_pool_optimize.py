@@ -166,6 +166,7 @@ class TwoPoolTrainer:
         torch.set_float32_matmul_precision("high")
 
         self._device = torch.device(runtime_config.device)
+        trace("__init__: build_two_world (new_group collectives) enter")
         world = build_two_world(
             pool_a_ranks=list(self.runtime.ci_ranks),
             chunks=list(self.runtime.chunks),
@@ -177,17 +178,20 @@ class TwoPoolTrainer:
             ),
             device=self._device,
         )
+        trace("__init__: build_two_world done")
         self.ctx = build_two_pool_context(world, dist.get_rank())
         decomposition_targets = _decomposition_targets_for_pool(self.ctx, self.runtime.c_per_site)
 
         target_model.requires_grad_(False)
         seed_all_ranks(pd_config.seed)
+        trace("__init__: LMComponentModel.build enter")
         self.component_model = LMComponentModel.build(
             target_model=target_model,
             decomposition_targets=decomposition_targets,
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
         )
+        trace("__init__: LMComponentModel.build done")
         # Pool A keeps BOTH the CI fn (to train) and the full V/U replica (the
         # adversary). The chunkwise pool drops the CI fn (it only owns V/U).
         if isinstance(self.ctx, ChunkContext):
@@ -198,7 +202,9 @@ class TwoPoolTrainer:
         # non-deterministic under checkpoint (same constraint the 3-pool PPGD pool has).
         if not isinstance(self.ctx, ChunkContext):
             self.component_model.model._use_activation_checkpointing = False  # type: ignore[attr-defined]
+        trace("__init__: component_model.to(device) enter")
         self.component_model = self.component_model.to(self._device)
+        trace("__init__: component_model.to(device) done")
 
         is_pool_a = isinstance(self.ctx, PoolAContext)
         if is_pool_a:
@@ -231,6 +237,7 @@ class TwoPoolTrainer:
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
             os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
             self.component_model.model.compile()
+        trace("__init__: compile setup done")
         seed_per_rank(pd_config.seed)
 
         self.strategy = ReconLossStrategy.from_cfg(
