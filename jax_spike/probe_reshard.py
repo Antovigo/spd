@@ -11,7 +11,7 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import AxisType, Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 devs = jax.devices()
@@ -19,8 +19,10 @@ assert len(devs) >= 8, f"need >=8 GPUs, got {len(devs)}"
 half = len(devs) // 2
 # A Mesh is a named array of devices. Two Meshes over DISJOINT device halves = two sub-meshes
 # (jax's version of torch's separate rank groups, e.g. "main pool" vs "chunk pool").
-mesh_a = Mesh(np.array(devs[:half]), ("dp",))
-mesh_b = Mesh(np.array(devs[half : 2 * half]), ("dp",))
+# axis_types=Explicit opts into jax's explicit-sharding system, which `reshard` requires (the
+# default Auto axes let XLA infer shardings; reshard needs you to name them explicitly).
+mesh_a = Mesh(np.array(devs[:half]), ("dp",), axis_types=(AxisType.Explicit,))
+mesh_b = Mesh(np.array(devs[half : 2 * half]), ("dp",), axis_types=(AxisType.Explicit,))
 # A sharding pairs (which mesh) with (how an array's axes map to mesh axes): P("dp") splits the
 # array's leading axis across the "dp" axis; P() would replicate the whole array on every device.
 sh_a = NamedSharding(mesh_a, P("dp"))
