@@ -12,10 +12,12 @@
 #SBATCH --gres=gpu:8
 #SBATCH --time=00:18:00
 #SBATCH --comment="4way gpt2xl b200 throughput bench (torch cell) - oli, lore handoff 2026-06-09"
-#SBATCH --output=/mnt/home/oli/pd-nano-jax/jax_spike/logs/%j.out
+#SBATCH --output=%x-%j.out
 set -euo pipefail
-cd ~/pd-nano-jax
+# REPO_DIR lets a perf-experiment agent run its OWN isolated clone+venv (default: the main checkout).
+REPO_DIR="${REPO_DIR:-$HOME/pd-nano-jax}"
+cd "$REPO_DIR"
 mkdir -p jax_spike/logs
 NPROC="${NPROC:-8}"
-echo "=== torch job $SLURM_JOB_ID | node=$SLURM_JOB_NODELIST nproc=$NPROC | cmd: $* | $(date) ==="
-PYTHONPATH=. ~/pd-nano-jax/.venv/bin/torchrun --standalone --nproc_per_node="$NPROC" -m "$@"
+echo "=== torch job $SLURM_JOB_ID | repo=$REPO_DIR node=$SLURM_JOB_NODELIST nproc=$NPROC | cmd: $* | $(date) ==="
+PYTHONPATH=. "$REPO_DIR/.venv/bin/torchrun" --standalone --nproc_per_node="$NPROC" -m "$@"
