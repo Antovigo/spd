@@ -81,7 +81,44 @@ CIFn, sigmoid, mask sampling), build a *new* trainer.
 
 ## Perf / compilation observations
 
-(filled in as smokes run)
+- **CPU single-device smoke (toy_stacked_sites, S=6 d=32 C=8 B=64, n_warmup=4)**:
+  the whole 4-loss + PGD step compiles to one XLA executable and trains; faith
+  0.122→0.042, stoch 1.10→0.33, ppgd stays *above* stoch throughout (0.73→1.05
+  vs stoch 0.33) — the correct minimax signature (the adversary finds masks worse
+  than random; the worst-case recon floor is higher than the stochastic one).
+- **GSPMD multi-device on CPU** (`distributed_stacked_sites`, simulated 1 vs 4
+  devices via `--xla_force_host_platform_device_count`): the step runs sharded,
+  faith is **bit-mesh-invariant** (1.213e-1 at both 1 and 4 dev) — confirms params
+  replicate + the param math is sharding-clean. BUT see the sharding bug below.
+
+## GPU-count invariance: PASS (bit-identical) — SPMD collapse confirmed
+
+`distributed_stacked_sites` at 1 vs 4 simulated CPU devices, FIXED global batch +
+seed, broadcast (replicated) source scope: **bit-identical loss trajectories**
+(`[2.64249, 3.00304, 3.13791, 3.2729, 3.59267, 3.64591]`, final `3.91742` at
+both). This is the headline correctness signal — the full single-pool VPD+PGD
+step is GPU-count-invariant under GSPMD with **zero manual collectives**, the
+persistent adversary's replicated source included. XLA's autodiff of the global
+mean correctly all-reduces the replicated source's cotangent; the torch
+`reduce_source_grads` AVG-reduce is NOT needed — it's absorbed by the compiler.
+This strengthens the SYNTHESIS claim rather than weakening it.
+
+### A test-harness pitfall worth recording (not an algorithm bug)
+
+I first saw ~3–6% divergence and suspected the replicated-source grad wasn't
+all-reduced. It was a **harness artifact**: the SLURM-style `shard_batch`
+(lifted from `jax_spike/distributed_util.py`) assumes 1 device per process and
+slices `x[:, idx*per:(idx+1)*per]` by `process_index()`. On single-process
+multi-device CPU (`--xla_force_host_platform_device_count=N`), `process_index()`
+is always 0, so it placed the FIRST 1/N slice replicated on all devices — the
+4-device run literally trained on different (repeated-first-slice) data. With a
+fixed `shard_batch` (`make_array_from_process_local_data`, which handles both the
+single-process-many-devices and multi-process-1-device topologies) the
+trajectories go bit-identical. Lesson: validating SPMD invariance on simulated
+multi-device CPU requires sharding the FULL global array, not the SLURM
+per-process-slice idiom. The bit-exact isolation repro that nailed it: identical
+`recon0` + `first_grad_sum` to 12 digits once the full array is `device_put` with
+`P(None,'dp',None)`.
 
 ## Needs a GPU/TPU to validate
 
