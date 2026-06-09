@@ -23,8 +23,12 @@ collectives**.
 | `step.py` | the whole step as one `jax.jit` fn — fused grad over (V/U, CI), two functional Adams, minimax stop-gradient |
 | `sharding.py` | GSPMD helpers (mesh / replicate / `shard_batch`) — the FSDP analog |
 | `checkpoint.py` | flat-pytree save/resume of `TrainState` (adversary state included) |
-| `experiments/` | runnable CPU smokes + the GSPMD distributed runner |
-| `tests/` | pure-fn unit tests, sharding tests, checkpoint resume-continuity |
+| `llama8b.py` | full-LM Llama-3.1-8B target: residual-start L18->L31 suffix + decomposed L18 MLP + real HF safetensors loader |
+| `ci_fn.py` | `global_shared_transformer` CI fn for the 8B target |
+| `llama8b_step.py` | full-LM **output-recon** step (recon on suffix logits, not site-local); `--shard` (jit+constraint) and `--shmap` (shard_map DP) variants |
+| `llama8b_sharding.py` | FSDP-analog GSPMD plan for the 8B step |
+| `experiments/` | runnable CPU smokes + the GSPMD distributed runner + `llama8b_real.py` (tok/s/GPU + MFU) + `llama8b_slurm.sbatch` |
+| `tests/` | pure-fn unit tests, sharding tests, checkpoint resume, llama8b step |
 
 ## Run
 

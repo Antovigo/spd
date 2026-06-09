@@ -222,10 +222,19 @@ collectives (the headline SYNTHESIS claim, now at real-8B scale):
 gather of the per-device work — it's the un-checkpointed global `clean` logits
 (gbatch,2048,128256) that XLA materializes once; same wall as the 1-GPU bl8 OOM.
 
-`--shmap` (`jax.shard_map` over `dp`, params+source replicated, per-shard losses +
-source grad `pmean`'d) keeps `clean` strictly per-shard, so it should fit where --shard
-OOMs. Numerically identical to --shard at mesh=1 (same loss to 4 dp). [shmap multi-GPU
-numbers filled in once the sweep lands.]
+`--shmap` (`jax.shard_map` over `dp`, params+source REPLICATED, per-shard losses +
+source/imp grad `pmean`'d) keeps `clean` strictly per-shard — but it OOMs at bl4 on
+8×B200 (100GB/dev) because replicating V/U + CI + their fp32 Adam states on every
+device (no C-sharding) costs more than the activation-locality it buys back.
+Numerically identical to --shard at mesh=1 (same loss to 4 dp).
+
+**Finding: for this workload `--shard` (C-sharded optimizer) is the better memory story
+than `--shmap` (pure DP, replicated optimizer).** The optimizer states (fp32 Adam m+v
+over the ~2.1B V/U + ~0.6B CI = ~22GB replicated) dominate; C-sharding them across 8
+devices frees ~19GB/dev, which more than pays for the one global `clean` logits tensor.
+The ideal is a HYBRID — C-shard the optimizer AND shard_map the batch so neither the
+optimizer nor `clean` is global — left as the next step. `--shmap` stays as the
+guaranteed-correct DP reference and the multi-node path where activation-locality wins.
 
 *MFU is an upper estimate (the FLOP model charges fwd+bwd=3× for PGD ascents whose
 backward is cheaper with params detached, and doesn't separately count ckpt recompute).
