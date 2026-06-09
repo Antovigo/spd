@@ -6,12 +6,13 @@ EQUAL-size groups — so this probe checks whether even AND uneven groups work. 
 the "single mesh + heterogeneous batch slicing" idea needs padding or sub-meshes instead.
 """
 
+import traceback
 from functools import partial
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.experimental.shard_map import shard_map
+from jax import shard_map  # jax.experimental.shard_map is deprecated since v0.8
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -35,6 +36,7 @@ def test(groups, label):
         print(f"[hetero] {label:14s} groups={groups} -> per-device sums {y.tolist()}")
     except Exception as e:  # noqa: BLE001 - probe wants to see the failure mode
         print(f"[hetero] {label:14s} FAILED: {type(e).__name__}: {str(e)[:180]}")
+        traceback.print_exc()
 
 
 # even groups: expect [6,6,6,6, 22,22,22,22]
