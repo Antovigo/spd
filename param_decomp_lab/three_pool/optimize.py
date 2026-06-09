@@ -77,6 +77,7 @@ from param_decomp_lab.experiments.lm.vendored.component_model import LMComponent
 from param_decomp_lab.infra.run_files import save_file
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
+    is_trainable_component_key,
     owned_model_state_keys,
 )
 from param_decomp_lab.three_pool.config import PooledRuntimeConfig, ThreePoolTopology
@@ -596,7 +597,14 @@ class ThreePoolTrainer:
         # so we filter to the local subset before loading. `strict=False` lets
         # us drop the canonical entries this rank doesn't hold.
         local_model_keys = set(self.component_model.state_dict().keys())
-        local_slice = {k: v for k, v in state.component_model.items() if k in local_model_keys}
+        # Only the trainable V/U + CI-fn slice — the frozen target is already loaded and
+        # identical to the checkpoint's, so skipping its keys avoids faulting in the ~8B
+        # mmap'd target on every rank (the resume I/O storm). `strict=False` keeps it as-is.
+        local_slice = {
+            k: v
+            for k, v in state.component_model.items()
+            if k in local_model_keys and is_trainable_component_key(k)
+        }
         self.component_model.load_state_dict(local_slice, strict=False)
 
         if self.optimizer is not None:

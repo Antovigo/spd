@@ -49,6 +49,15 @@ def ci_fn_state_keys(model_state_dict_keys: set[str]) -> set[str]:
     return {k for k in model_state_dict_keys if k.startswith("ci_fn.")}
 
 
+def is_trainable_component_key(key: str) -> bool:
+    """True for the V/U (`...components.*`) and CI-fn (`ci_fn.*`) keys — the only
+    state worth persisting. The frozen target's `model.*` weights / per-site
+    `target_weight` buffers are rebuilt from the freshly-loaded target, so they are
+    NOT trained, NOT saved in partials, and must NOT be reloaded on resume (reloading
+    the 8B frozen target across every rank is the resume I/O storm)."""
+    return ".components." in key or key.startswith("ci_fn.")
+
+
 def assemble_model_state_dict_from_partials(
     *,
     collected_model_params: dict[str, Tensor],
@@ -84,7 +93,7 @@ def assemble_model_state_dict_from_partials(
     # freshly-built buffer, so the partials only need to cover the trainable V/U
     # (`model.<site>.components.*`) + CI-fn (`ci_fn.*`) keys.
     expected_keys = set(full_cm.state_dict().keys())
-    fillable_keys = {k for k in expected_keys if ".components." in k or k.startswith("ci_fn.")}
+    fillable_keys = {k for k in expected_keys if is_trainable_component_key(k)}
 
     assert set(collected_model_params.keys()) == fillable_keys, (
         "partials do not cover the full model state_dict:\n"

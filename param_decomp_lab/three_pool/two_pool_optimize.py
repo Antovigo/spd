@@ -66,6 +66,7 @@ from param_decomp_lab.experiments.lm.vendored.component_model import LMComponent
 from param_decomp_lab.infra.run_files import save_file
 from param_decomp_lab.three_pool.checkpoint import (
     ci_fn_state_keys,
+    is_trainable_component_key,
     owned_model_state_keys,
 )
 from param_decomp_lab.three_pool.config import PooledRuntimeConfig
@@ -442,7 +443,15 @@ class TwoPoolTrainer:
         """Each rank extracts the slice of the canonical state it owns."""
         self.step = state.step
         local_model_keys = set(self.component_model.state_dict().keys())
-        local_slice = {k: v for k, v in state.component_model.items() if k in local_model_keys}
+        # Only load the trainable V/U + CI-fn slice this rank owns. The frozen target is
+        # already in `component_model` (from `build_target`) and is identical to the
+        # checkpoint's copy, so skipping its keys avoids faulting in the ~8B mmap'd target
+        # on every rank — the resume I/O storm. `strict=False` leaves those weights as-is.
+        local_slice = {
+            k: v
+            for k, v in state.component_model.items()
+            if k in local_model_keys and is_trainable_component_key(k)
+        }
         self.component_model.load_state_dict(local_slice, strict=False)
 
         if self.optimizer is not None:

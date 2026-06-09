@@ -77,7 +77,11 @@ def read_training_snapshot(run_dir: Path, step: int) -> TrainingState | ThreePoo
     """
     path = run_dir / f"training_{step}.pth"
     assert path.is_file(), f"training checkpoint not found: {path}"
-    snapshot = torch.load(path, map_location="cpu", weights_only=False)
+    # mmap=True keeps tensor storages lazy so each resuming rank only faults in the
+    # slice it actually loads (its V/U + CI-fn + optimizer), not the whole file. Without
+    # it every rank eager-loads the full consolidated checkpoint (which includes the ~8B
+    # frozen target) → a multi-TB shared-FS read storm that stalls resume at scale.
+    snapshot = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
     assert isinstance(snapshot, TrainingState | ThreePoolTrainingState), (
         f"expected TrainingState or ThreePoolTrainingState in {path}, got {type(snapshot).__name__}"
     )
