@@ -1,0 +1,145 @@
+# FSDP single-pool Llama-8B L18 MLP decomposition (correctness + MFU smoke).
+# Adapted from llama8b_l18_b512_2pool_lr_mid.yaml: losses struct -> loss_metrics list,
+# runtime.topology -> FsdpRuntimeConfig. Decomposes layer 18 MLP (gate/up/down_proj, C=24576).
+# All 4 losses; checkpoint_blocks=false (PPGD requires it); compile on; shard_frozen_target on.
+# B=32 (2/rank @ 16 GPU). save@50 -> hits one save+resume. ~300 steps.
+# Launch: pd-lm-fsdp param_decomp_lab/experiments/lm/_fsdp/llama8b_l18_mlp_fsdp.yaml --dp 16 --qos opportunistic --time 2:00:00
+cadence:
+  keep_last_n_checkpoints: 3
+  save_every: 1000
+  train_log_every: 10
+  dense_log_phase: { every: 5, until_step: 50 }
+data:
+  buffer_size: 1000
+  column_name: text
+  data_files: sample/350BT/*.parquet
+  dataset_name: HuggingFaceFW/fineweb
+  eval_split: train
+  is_tokenized: false
+  max_seq_len: 2048
+  revision: 9bb295ddab0e05d785b879661af7260fed5140fc
+  shuffle_each_epoch: true
+  streaming: true
+  tokenizer_name: meta-llama/Llama-3.1-8B
+  train_split: train
+eval:
+  batch_size: 32
+  every: 1000
+  n_steps: 1
+  slow_every: 1000
+  slow_on_first_step: true
+  metrics:
+  - n_batches_accum: 1
+    type: CIHistograms
+  - ci_alive_threshold: 0.0
+    type: ComponentActivationDensity
+  - ci_alive_threshold: 0.0
+    groups: null
+    type: CI_L0
+  - rounding_threshold: 0.0
+    type: CEandKLLosses
+  - type: CIMeanPerComponent
+pd:
+  batch_size: 32
+  seed: 0
+  n_mask_samples: 1
+  sampling: continuous
+  sigmoid_type: leaky_hard
+  use_delta_component: true
+  tied_weights: null
+  identity_decomposition_targets: null
+  steps: 80
+  ci_config:
+    fn_type: global_shared_transformer
+    hidden_dims: null
+    mode: global
+    simple_transformer_ci_cfg:
+      d_model: 4096
+      n_blocks: 4
+      mlp_hidden_dim:
+      - 16384
+      attn_config:
+        max_len: 2048
+        n_heads: 64
+        rope_base: 10000.0
+  ci_fn_optimizer:
+    betas:
+    - 0.9
+    - 0.999
+    grad_clip_norm: null
+    weight_decay: 0.0
+    lr_schedule:
+      fn_type: cosine
+      start_val: 5.0e-05
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  components_optimizer:
+    betas:
+    - 0.9
+    - 0.999
+    grad_clip_norm: 0.01
+    weight_decay: 0.0
+    lr_schedule:
+      fn_type: cosine
+      start_val: 1.5e-04
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  decomposition_targets:
+  - C: 24576
+    module_pattern: layers.18.mlp.gate_proj
+  - C: 24576
+    module_pattern: layers.18.mlp.up_proj
+  - C: 24576
+    module_pattern: layers.18.mlp.down_proj
+  faithfulness_warmup_steps: 20
+  faithfulness_warmup_lr: 0.001
+  faithfulness_warmup_weight_decay: 0.0
+  loss_metrics:
+  - type: FaithfulnessLoss
+    coeff: 100000.0
+  - type: ImportanceMinimalityLoss
+    coeff: 5.0e-06
+    beta: 0.2
+    eps: 1.0e-12
+    pnorm: 2.0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 0.4
+    p_anneal_end_frac: 1.0
+  - type: StochasticReconLayerwiseLoss
+    coeff: 0.5
+  - type: PersistentPGDReconLoss
+    coeff: 0.5
+    n_samples: 1
+    n_warmup_steps: 2
+    start_frac: 0.0
+    use_sigmoid_parameterization: false
+    scope:
+      type: broadcast_across_batch
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        fn_type: constant
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 1.0
+runtime:
+  autocast_bf16: true
+  device: cuda:0
+  compile_model: true
+  compile_ci_fn: true
+  checkpoint_blocks: false
+  shard_frozen_target: true
+target:
+  activation_checkpointing: false
+  output_extract: 0
+  weights_dtype: bfloat16
+  spec:
+    kind: hf_weights_in_vendored
+    model_class: param_decomp_lab.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+wandb:
+  entity: goodfire
+  project: param-decomp-llama
