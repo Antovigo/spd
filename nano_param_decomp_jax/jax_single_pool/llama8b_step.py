@@ -254,9 +254,11 @@ def make_llama8b_step_shmap(
             l_faith = sum((d.astype(jnp.float32) ** 2).sum() for d in wd.values()) / sum(
                 d.size for d in wd.values()
             )
-            l_imp = jnp.mean(
-                jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** coeffs.p_imp) for v in ci.values()])
-            )
+            l_imp = _pmean(
+                jnp.mean(
+                    jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** coeffs.p_imp) for v in ci.values()])
+                )
+            )  # ci is per-shard (batch-sharded) -> pmean for the global imp-min
             l_stoch = jnp.array(0.0)
             for i, s in enumerate(SITES):
                 u = random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
