@@ -29,6 +29,8 @@ import jax
 import jax.numpy as jnp
 import optax
 from jax import random
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from jax_single_pool.ci_fn import CIFn
@@ -75,19 +77,36 @@ def make_llama8b_step(
     opt_ci: optax.GradientTransformation,
     pgd_lr: float,
     n_warmup: int,
+    mesh: Mesh | None,
 ):
     """n_warmup pre-ascent iters refine the persistent source; one post-update ascent
-    persists it warm-started against the fresh params (torch warmup + final = n_warmup+1)."""
+    persists it warm-started against the fresh params (torch warmup + final = n_warmup+1).
+
+    `mesh` (when given) pins every batch-leading activation to `P('dp', ...)` via
+    `with_sharding_constraint` — without it XLA propagation gathers the suffix
+    activations to the FULL global batch and OOMs (the open HANDOFF TODO). With it,
+    every masked re-forward stays on the per-device sub-batch (activation mem 1/n_dev)."""
+
+    def bshard(x: Array, ndim: int) -> Array:
+        if mesh is None:
+            return x
+        spec = ["dp"] + [None] * (ndim - 1)
+        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
 
     @jax.jit
     def step(state: Llama8BState, frozen: Target, resid: Float[Array, "b t d"], key: PRNGKeyArray):
         dm = {s: jnp.ones((1, 1, 1), DT) for s in SITES}  # weight-delta mask = 1
         nomask = {s: None for s in SITES}
         Wg, Wu, Wd = frozen.l18_Wg, frozen.l18_Wu, frozen.l18_Wd
-        ckpt_suffix = jax.checkpoint(suffix_logits)  # recompute masked fwd in bwd (memory)
+        resid = bshard(resid, 3)
 
-        clean = jax.lax.stop_gradient(suffix_logits(frozen, state.vu, resid, nomask, dm))
-        mlp_in = l18_resid_to_mlp_input(frozen, resid)
+        def suffix(*a):
+            return bshard(suffix_logits(*a), 3)
+
+        ckpt_suffix = jax.checkpoint(suffix)  # recompute masked fwd in bwd (memory)
+
+        clean = jax.lax.stop_gradient(suffix(frozen, state.vu, resid, nomask, dm))
+        mlp_in = bshard(l18_resid_to_mlp_input(frozen, resid), 3)
         site_in = mlp_site_inputs(Wg, Wu, mlp_in)
 
         # n_warmup source-only ascents (params + ci detached) against the current params
@@ -96,7 +115,7 @@ def make_llama8b_step(
 
         def adv_pre(src):
             masks = {s: ci_pre[s] * jnp.clip(src[s], 0.0, 1.0) for s in SITES}
-            return _recon(suffix_logits(frozen, vu_det, resid, masks, dm), clean)
+            return _recon(suffix(frozen, vu_det, resid, masks, dm), clean)
 
         def warmup_body(src, _):
             g = jax.grad(adv_pre)(src)
@@ -151,7 +170,7 @@ def make_llama8b_step(
 
         def adv_post(src):
             masks = {s: ci_post[s] * jnp.clip(src[s], 0.0, 1.0) for s in SITES}
-            return _recon(suffix_logits(frozen, new_vu_det, resid, masks, dm), clean)
+            return _recon(suffix(frozen, new_vu_det, resid, masks, dm), clean)
 
         g = jax.grad(adv_post)(refined_src)
         new_src = jax.tree.map(lambda s, gg: s + pgd_lr * gg, refined_src, g)

@@ -121,7 +121,7 @@ def test_step_trains_and_has_vpd_signature():
         step=jnp.array(0),
     )  # fmt: skip
     coeffs = LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4)
-    step = make_llama8b_step(coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=2)
+    step = make_llama8b_step(coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=2, mesh=None)
 
     resid = jax.random.normal(jax.random.PRNGKey(3), (2, 16, cfg.n_embd)) * 0.5
     losses = []

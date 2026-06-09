@@ -184,7 +184,14 @@ def main():
         step=jnp.array(0),
     )
     coeffs = LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4)
-    step = make_llama8b_step(coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=args.n_warmup)
+    step = make_llama8b_step(
+        coeffs,
+        opt_vu,
+        opt_ci,
+        pgd_lr=0.01,
+        n_warmup=args.n_warmup,
+        mesh=mesh if args.shard else None,
+    )
 
     for _ in range(2):
         state, m = step(state, target, resid, random.PRNGKey(7))
