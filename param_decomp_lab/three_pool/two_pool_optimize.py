@@ -419,6 +419,7 @@ class TwoPoolTrainer:
         runtime_config = PooledRuntimeConfig.model_validate(runtime_dict)
         two_pool_config = TwoPoolTopology.model_validate(snapshot.three_pool_config)
 
+        trace("from_snapshot: building trainer (__init__: build_world + compile)")
         trainer = cls(
             target_model=target_model,
             run_batch=run_batch,
@@ -427,6 +428,7 @@ class TwoPoolTrainer:
             runtime_config=runtime_config,
             two_pool_config=two_pool_config,
         )
+        trace("from_snapshot: __init__ done; checking layout fingerprint")
         saved_fp = _rank_invariant_fingerprint_core(snapshot.layout_fingerprint)
         current_fp = _rank_invariant_fingerprint_core(_two_pool_layout_fingerprint(trainer.ctx))
         assert saved_fp == current_fp, (
@@ -434,7 +436,9 @@ class TwoPoolTrainer:
             f"  saved:   {saved_fp}\n"
             f"  current: {current_fp}\n"
         )
+        trace("from_snapshot: loading canonical state (per-rank slice fault)")
         trainer._load_canonical_state(snapshot, ppgd_shard_dir)
+        trace("from_snapshot: canonical state loaded; resume ready")
         return trainer
 
     def _load_canonical_state(

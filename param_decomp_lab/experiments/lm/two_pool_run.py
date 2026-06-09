@@ -28,6 +28,7 @@ from typing import Self
 import fire
 from pydantic import model_validator
 
+from param_decomp._trace import trace
 from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.configs import Cadence
@@ -415,7 +416,9 @@ def _run_resume(
         }
     )
 
+    trace(f"resume: read_training_snapshot enter (step {resolved_step})")
     snapshot = read_training_snapshot(from_run, resolved_step)
+    trace("resume: read_training_snapshot done (mmap, lazy)")
     assert isinstance(snapshot, ThreePoolTrainingState), (
         f"2-pool resume needs ThreePoolTrainingState; got {type(snapshot).__name__}"
     )
