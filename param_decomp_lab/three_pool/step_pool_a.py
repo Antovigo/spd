@@ -51,6 +51,7 @@ from param_decomp._trace import trace
 from param_decomp.component_model import CIOutputs
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
+from param_decomp.phase_timer import phase
 from param_decomp.torch_helpers import bf16_autocast
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.portals import (
@@ -109,8 +110,10 @@ def step_pool_a(
 
     # A0 + A1 + A3 + A4 (warmup/recon) all share the residual-start + bypass context.
     with component_model.use_cached_residual(batch_local), strategy.context():
-        target_out, h_cache = _shared_target_forward(component_model, batch_local, cfg)
-        fwd = _ci_fn_forward(component_model, h_cache, ctx, cfg)
+        with phase("poolA/A2_target_fwd"):
+            target_out, h_cache = _shared_target_forward(component_model, batch_local, cfg)
+        with phase("poolA/A3_ci_fn_fwd"):
+            fwd = _ci_fn_forward(component_model, h_cache, ctx, cfg)
         mean_l0 = _mean_l0(fwd.ci.lower_leaky, ctx.world.n_ci) if should_log else 0.0
         sends_to_chunk = ctx.portals.ci_to_chunk.send(ctx.role.as_ci(), fwd.ci.lower_leaky)
         imp_loss = _importance_minimality_loss(
@@ -123,13 +126,15 @@ def step_pool_a(
         weight_deltas = component_model.calc_weight_deltas()
         ci_scratch = _releaf_ci_fp32_for_grads(fwd.ci.lower_leaky)
         _assert_ci_scratch_shapes(ci_scratch, ctx, seq_len, cfg)
-        recon = _warmup_and_recon(
-            ppgd_state, component_model, batch_local, target_out, ci_scratch, weight_deltas, cfg
-        )
+        with phase("poolA/A4_ppgd_recon"):
+            recon = _warmup_and_recon(
+                ppgd_state, component_model, batch_local, target_out, ci_scratch, weight_deltas, cfg
+            )
 
-    raw = _autograd_grads_wrt_vu_ci_and_sources(
-        recon.sum_loss, component_model, ci_scratch, all_sites, ppgd_state.sources
-    )
+    with phase("poolA/bwd_vu_ci_src"):
+        raw = _autograd_grads_wrt_vu_ci_and_sources(
+            recon.sum_loss, component_model, ci_scratch, all_sites, ppgd_state.sources
+        )
     _scale_adversary_grads(raw, recon.n_examples, ctx, cfg)
 
     # Cross-pool exchange order is load-bearing: CI and the adversary are co-located on
@@ -138,14 +143,17 @@ def step_pool_a(
     # SAME order the chunkwise step issues them — recv g_CI FIRST, then send g_VU — or
     # the two pools deadlock (each blocked on a send the other hasn't posted a recv for).
     # g_CI: chunkwise's contribution arrives over the wire; the adversary's is local.
-    trace(f"step_pool_a {step}: recv g_CI from chunk (blocking cross-pool)")
-    g_ci_chunk = ctx.portals.g_ci_from_chunk.recv(ctx.role.as_ci(), cfg.c_per_site, seq_len, device)
+    with phase("poolA/gci_gvu_comm"):
+        trace(f"step_pool_a {step}: recv g_CI from chunk (blocking cross-pool)")
+        g_ci_chunk = ctx.portals.g_ci_from_chunk.recv(
+            ctx.role.as_ci(), cfg.c_per_site, seq_len, device
+        )
 
-    # V/U grads: SUM-reduce across Pool A, then ship (leader-only) to chunk leaders.
-    trace(f"step_pool_a {step}: g_CI recv done; sum-reduce g_VU over Pool A")
-    sum_reduce_ppgd_grads(ctx.world, [*raw.v.values(), *raw.u.values()])
-    trace(f"step_pool_a {step}: send g_VU to chunk")
-    ctx.portals.g_vu_to_chunk.send(ctx.role.as_ppgd(), raw.v, raw.u)
+        # V/U grads: SUM-reduce across Pool A, then ship (leader-only) to chunk leaders.
+        trace(f"step_pool_a {step}: g_CI recv done; sum-reduce g_VU over Pool A")
+        sum_reduce_ppgd_grads(ctx.world, [*raw.v.values(), *raw.u.values()])
+        trace(f"step_pool_a {step}: send g_VU to chunk")
+        ctx.portals.g_vu_to_chunk.send(ctx.role.as_ppgd(), raw.v, raw.u)
     # Final (N+1)'th source step. For per-batch-per-position sources this is a no-op
     # reduce (per-rank-independent); for a broadcast (shared) source the AVG over Pool A
     # reassembles the full-batch grad — matching the warmup-step reduce in the state.
@@ -154,12 +162,14 @@ def step_pool_a(
     g_ci_total = _assemble_g_ci_total(g_ci_chunk, raw.ci, ctx, cfg, seq_len)
 
     optimizer.zero_grad(set_to_none=True)
-    _fused_backward_through_ci_fn(imp_loss, fwd, g_ci_total, ctx, cfg)
+    with phase("poolA/ci_fn_bwd"):
+        _fused_backward_through_ci_fn(imp_loss, fwd, g_ci_total, ctx, cfg)
 
-    trace(f"step_pool_a {step}: all-reduce ci_fn grads over Pool A")
-    in_flight_ci_grad_reduce = all_reduce_ci_fn_grads_async(ctx.world, ci_fn_params)
-    in_flight_ci_grad_reduce.wait()
-    trace(f"step_pool_a {step}: ci_fn grad all-reduce done")
+    with phase("poolA/ci_grad_allreduce"):
+        trace(f"step_pool_a {step}: all-reduce ci_fn grads over Pool A")
+        in_flight_ci_grad_reduce = all_reduce_ci_fn_grads_async(ctx.world, ci_fn_params)
+        in_flight_ci_grad_reduce.wait()
+        trace(f"step_pool_a {step}: ci_fn grad all-reduce done")
 
     assert component_model.ci_fn is not None, "Pool A must hold its CI fn"
     grad_norms = (
@@ -182,10 +192,11 @@ def step_pool_a(
     trace(f"step_pool_a {step}: wait masks-send to chunk")
     sends_to_chunk.wait()
 
-    trace(f"step_pool_a {step}: recv updated V/U from chunk (blocking cross-pool)")
-    v_templates, u_templates = _vu_templates(component_model, all_sites)
-    v_new, u_new = ctx.portals.updated_vu_from_chunk.post_recv(v_templates, u_templates).wait()
-    trace(f"step_pool_a {step}: updated V/U recv done")
+    with phase("poolA/recv_updated_vu"):
+        trace(f"step_pool_a {step}: recv updated V/U from chunk (blocking cross-pool)")
+        v_templates, u_templates = _vu_templates(component_model, all_sites)
+        v_new, u_new = ctx.portals.updated_vu_from_chunk.post_recv(v_templates, u_templates).wait()
+        trace(f"step_pool_a {step}: updated V/U recv done")
     _copy_vu_into_model_in_place(component_model, v_new, u_new, all_sites)
 
     if should_log:

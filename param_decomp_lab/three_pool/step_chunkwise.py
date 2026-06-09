@@ -49,6 +49,7 @@ from torch import Tensor
 
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.masks import RoutingMasks, make_mask_infos
+from param_decomp.phase_timer import phase
 from param_decomp.torch_helpers import bf16_autocast
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.context import ChunkContext
@@ -114,26 +115,31 @@ def step_chunkwise(
     with component_model.use_cached_residual(batch_local):
         with strategy.context():
             ci_recv_pending = _post_ci_recv(ctx, cfg, seq_len, device)
-            target_local = _target_fwd(component_model, batch_local, cfg)
+            with phase("chunk/A2_target_fwd"):
+                target_local = _target_fwd(component_model, batch_local, cfg)
 
         for param in all_params:
             param.grad = None
 
         with strategy.context():
-            faith = _faithfulness_phase(component_model, device, cfg, ctx)
+            with phase("chunk/D1_faith"):
+                faith = _faithfulness_phase(component_model, device, cfg, ctx)
             # Snapshot the faith-only V/U grad (chunk leader; non-leaders skip faith)
             # before stoch accumulates on top, for the per-loss grad-norm breakdown.
             faith_vu = (
                 _snapshot_owned_vu_grads(component_model, ctx.role.sites) if should_log else None
             )
 
-            ci_leaves = _wait_ci_and_releaf(ci_recv_pending, ctx, seq_len, cfg)
-            stoch = _chunkwise_streaming_phase(
-                component_model, batch_local, target_local, ci_leaves, ctx, cfg, strategy
-            )
+            with phase("chunk/D2_ci_wait"):
+                ci_leaves = _wait_ci_and_releaf(ci_recv_pending, ctx, seq_len, cfg)
+            with phase("chunk/D3_stoch_recon"):
+                stoch = _chunkwise_streaming_phase(
+                    component_model, batch_local, target_local, ci_leaves, ctx, cfg, strategy
+                )
 
-            _send_g_ci(ctx.portals, ctx.role, ci_leaves)
-            ppgd_vu = _recv_and_combine_g_vu(ctx, component_model, return_ppgd=should_log)
+            with phase("chunk/D4-6_gci_gvu_comm"):
+                _send_g_ci(ctx.portals, ctx.role, ci_leaves)
+                ppgd_vu = _recv_and_combine_g_vu(ctx, component_model, return_ppgd=should_log)
 
     if should_log:
         stoch_total_value = stoch.total.item()
@@ -149,7 +155,10 @@ def step_chunkwise(
     else:
         metrics = {}
 
-    grad_norms = _sync_tail(ctx, component_model, optimizer, all_params, cfg, should_log=should_log)
+    with phase("chunk/E_sync_tail"):
+        grad_norms = _sync_tail(
+            ctx, component_model, optimizer, all_params, cfg, should_log=should_log
+        )
     metrics.update(grad_norms)
     return metrics
 
