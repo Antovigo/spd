@@ -46,7 +46,7 @@ from torch import optim
 from torch.distributed.fsdp import fully_shard
 from torch.utils.data import DataLoader
 
-from param_decomp.batch_and_loss_fns import ReconstructionLoss
+from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
 from param_decomp.ci_fns import (
     GlobalCiFnWrapper,
     GlobalSharedTransformerCiFn,
@@ -438,7 +438,10 @@ class FsdpLMTrainer:
             for group in self.ci_fn_optimizer.param_groups:
                 group["lr"] = ci_fn_lr
 
-            batch = next(train_iterator)
+            # Move to device before `use_cached_residual`: residual-start runs the embedding
+            # on the raw batch outside `run_loss_step` (which does its own device move), so the
+            # token ids must already be on-device or the embedding lookup mixes cpu/cuda.
+            batch = move_batch_to_device(next(train_iterator), device)
             with self.adapter.use_cached_residual(batch):
                 _, batch_log_data = run_loss_step(
                     batch=batch,
