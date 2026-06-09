@@ -44,12 +44,12 @@ def replicate_target(tgt: Target, mesh: Mesh) -> Target:
 
 
 def shard_decomp_vu(vu: DecompVU, mesh: Mesh) -> DecompVU:
-    """Shard each V/U over its C axis. V is (d_in, C) -> shard axis 1; U is (C, d_out)
-    -> shard axis 0. Both put C on `dp`."""
+    """Shard each V/U over its C axis. Arrays carry a leading layer axis: V is
+    (L, d_in, C) -> shard axis 2; U is (L, C, d_out) -> shard axis 1. Both put C on `dp`."""
     n = mesh.devices.size
-    assert vu.Vg.shape[1] % n == 0, f"C={vu.Vg.shape[1]} not divisible by mesh size {n}"
-    shard_V = NamedSharding(mesh, P(None, "dp"))  # (d_in, C)
-    shard_U = NamedSharding(mesh, P("dp", None))  # (C, d_out)
+    assert vu.Vg.shape[2] % n == 0, f"C={vu.Vg.shape[2]} not divisible by mesh size {n}"
+    shard_V = NamedSharding(mesh, P(None, None, "dp"))  # (L, d_in, C)
+    shard_U = NamedSharding(mesh, P(None, "dp", None))  # (L, C, d_out)
     return DecompVU(
         Vg=jax.device_put(vu.Vg, shard_V),
         Ug=jax.device_put(vu.Ug, shard_U),
@@ -79,8 +79,8 @@ def shard_ci_fn(ci_fn: CIFn, mesh: Mesh) -> CIFn:
 
 
 def shard_source(source: dict, mesh: Mesh) -> dict:
-    """Broadcast PGD source (1, T, C) -> shard C over `dp`."""
-    sh = NamedSharding(mesh, P(None, None, "dp"))
+    """Broadcast PGD source (1, T, L, C) -> shard C over `dp`."""
+    sh = NamedSharding(mesh, P(None, None, None, "dp"))
     return {s: jax.device_put(v, sh) for s, v in source.items()}
 
 

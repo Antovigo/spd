@@ -6,20 +6,19 @@ re-forward — matching the torch `StochasticReconLayerwiseLoss` / `PersistentPG
 semantics (mask one/all sites, re-forward the whole suffix, compare to the clean
 suffix output).
 
-Loss structure mirrors `llama8b_l18_mlp_fsdp.yaml`:
-  faith  = mean weight-delta^2 over the 3 sites           coeff 1e5
-  imp    = mean(clip(ci,0,1)^p), p annealed -> 0.4         coeff 5e-6
-  stoch  = mean over sites of MSE(masked-one-site logits, clean)   coeff 0.5
+Generalized to N decomposed layers (3N sites). Masks per kind carry a leading layer
+axis `L`: `masks[kind]` is `(b, t, L, C)` (or `None` for the clean forward); the
+suffix indexes layer i with `masks[kind][:, :, i]`. PGD sources are likewise
+`{kind: (1, T, L, C)}` (broadcast over batch, per-layer per-position).
+
+Loss structure mirrors `llama8b_l18_b512_2pool_lr_mid.yaml` (extended to a layer range):
+  faith  = mean weight-delta^2 over all 3N sites              coeff 1e5
+  imp    = mean(clip(ci,0,1)^p), p annealed -> 0.4            coeff 5e-6
+  stoch  = mean over kinds of MSE(masked-one-kind logits, clean)  coeff 0.5
   ppgd   = MSE(all-sites-masked-by-persistent-source logits, clean) coeff 0.5
 
-Persistent PGD: a broadcast (1, T, C) source per site, clamped to [0,1] (the torch
-config sets `use_sigmoid_parameterization: false`). Source updates per step =
-n_warmup ascents inside the step body + 1 fused-with-the-loss isn't done here; we do
-n_warmup pre-ascents then one post-update ascent, matching the torch warmup + final.
-
 Everything is one `jax.jit` over a pure `Llama8BState`. The frozen `Target` is a
-runtime arg (replicated), not an HLO constant (a multi-GB constant made compilation
-pathological — see stage10 note).
+runtime arg (replicated), not an HLO constant.
 """
 
 from typing import NamedTuple
@@ -36,11 +35,10 @@ from jaxtyping import Array, Float, PRNGKeyArray
 from jax_single_pool.ci_fn import CIFn
 from jax_single_pool.llama8b import (
     DT,
-    SITES,
+    KINDS,
     DecompVU,
     Target,
-    l18_resid_to_mlp_input,
-    mlp_site_inputs,
+    all_site_inputs,
     suffix_logits,
     weight_deltas,
 )
@@ -59,16 +57,37 @@ class Llama8BState(NamedTuple):
     ci_fn: CIFn
     opt_vu: optax.OptState
     opt_ci: optax.OptState
-    source: dict[str, Float[Array, "1 t C"]]  # broadcast persistent PGD source per site
+    source: dict[str, Float[Array, "1 t L C"]]  # broadcast persistent PGD source per kind
     step: Array
 
 
 def _clamp_source(src: dict[str, Array]) -> dict[str, Array]:
-    return {s: jnp.clip(src[s], 0.0, 1.0) for s in SITES}
+    return {k: jnp.clip(src[k], 0.0, 1.0) for k in KINDS}
 
 
 def _recon(a: Array, b: Array) -> Array:
     return jnp.mean((a.astype(jnp.float32) - b.astype(jnp.float32)) ** 2)
+
+
+def _no_routes() -> dict:
+    return {k: None for k in KINDS}
+
+
+def _sample_uniform_k_subset_routes(
+    key: Array, n_layers: int, lead: tuple[int, ...]
+) -> dict[str, Array]:
+    """torch `uniform_k_subset` routing over ALL 3*n_layers sites, per leading position.
+
+    Each position draws k ~ U[1, n_sites], then a random k-subset of the sites routes to
+    the decomposed module (True); the rest route to the clean target module (False).
+    Returns {kind: (L, *lead, 1)} bool, ready to broadcast over the C / d axis."""
+    n_sites = len(KINDS) * n_layers
+    k_key, perm_key = random.split(key)
+    k = random.randint(k_key, (*lead, 1), 1, n_sites + 1)  # (*lead, 1) threshold per position
+    perms = random.uniform(perm_key, (n_sites, *lead, 1)).argsort(axis=0)  # random rank per site
+    routed = perms < k  # (n_sites, *lead, 1) bool
+    routed = routed.reshape(n_layers, len(KINDS), *lead, 1)
+    return {kind: routed[:, j] for j, kind in enumerate(KINDS)}
 
 
 def make_llama8b_step(
@@ -77,15 +96,14 @@ def make_llama8b_step(
     opt_ci: optax.GradientTransformation,
     pgd_lr: float,
     n_warmup: int,
+    n_layers: int,
     mesh: Mesh | None,
 ):
     """n_warmup pre-ascent iters refine the persistent source; one post-update ascent
     persists it warm-started against the fresh params (torch warmup + final = n_warmup+1).
 
-    `mesh` (when given) pins every batch-leading activation to `P('dp', ...)` via
-    `with_sharding_constraint` — without it XLA propagation gathers the suffix
-    activations to the FULL global batch and OOMs (the open HANDOFF TODO). With it,
-    every masked re-forward stays on the per-device sub-batch (activation mem 1/n_dev)."""
+    `mesh` (when given) pins every batch-leading activation to `P('dp', ...)` so XLA
+    keeps the masked re-forwards on the per-device sub-batch (activation mem 1/n_dev)."""
 
     def bshard(x: Array, ndim: int) -> Array:
         if mesh is None:
@@ -93,11 +111,12 @@ def make_llama8b_step(
         spec = ["dp"] + [None] * (ndim - 1)
         return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
 
+    dm = {k: jnp.ones((n_layers, 1, 1), DT) for k in KINDS}  # weight-delta mask = 1, per layer
+
     @jax.jit
     def step(state: Llama8BState, frozen: Target, resid: Float[Array, "b t d"], key: PRNGKeyArray):
-        dm = {s: jnp.ones((1, 1, 1), DT) for s in SITES}  # weight-delta mask = 1
-        nomask = {s: None for s in SITES}
-        Wg, Wu, Wd = frozen.l18_Wg, frozen.l18_Wu, frozen.l18_Wd
+        nomask = {k: None for k in KINDS}
+        no_routes = _no_routes()
         resid = bshard(resid, 3)
 
         def suffix(*a):
@@ -105,17 +124,16 @@ def make_llama8b_step(
 
         ckpt_suffix = jax.checkpoint(suffix)  # recompute masked fwd in bwd (memory)
 
-        clean = jax.lax.stop_gradient(suffix(frozen, state.vu, resid, nomask, dm))
-        mlp_in = bshard(l18_resid_to_mlp_input(frozen, resid), 3)
-        site_in = mlp_site_inputs(Wg, Wu, mlp_in)
+        clean = jax.lax.stop_gradient(suffix(frozen, state.vu, resid, nomask, dm, no_routes))
+        site_in = all_site_inputs(frozen, resid)
+        b, t = resid.shape[0], resid.shape[1]
 
-        # n_warmup source-only ascents (params + ci detached) against the current params
         vu_det = jax.lax.stop_gradient(state.vu)
         ci_pre = jax.lax.stop_gradient(state.ci_fn(site_in))
 
         def adv_pre(src):
-            masks = {s: ci_pre[s] * jnp.clip(src[s], 0.0, 1.0) for s in SITES}
-            return _recon(suffix(frozen, vu_det, resid, masks, dm), clean)
+            masks = {k: ci_pre[k] * jnp.clip(src[k], 0.0, 1.0) for k in KINDS}
+            return _recon(suffix(frozen, vu_det, resid, _layerfirst(masks), dm, no_routes), clean)
 
         def warmup_body(src, _):
             g = jax.grad(adv_pre)(src)
@@ -124,11 +142,15 @@ def make_llama8b_step(
         refined_src, _ = jax.lax.scan(warmup_body, state.source, None, length=n_warmup)
         refined_src = jax.lax.stop_gradient(refined_src)
 
+        # one stochastic forward over ALL sites with uniform-k-subset routing (torch's
+        # recon_plan: subset, n_samples=1): each (site, position) is routed clean-or-masked.
+        stoch_routes = _sample_uniform_k_subset_routes(random.fold_in(key, 1), n_layers, (b, t))
+
         def loss_fn(trainable):
             vu, ci_fn = trainable
             ci = ci_fn(site_in)
 
-            wd = weight_deltas(vu, Wg, Wu, Wd)
+            wd = weight_deltas(vu, frozen.decomp_layers)
             l_faith = sum((d.astype(jnp.float32) ** 2).sum() for d in wd.values()) / sum(
                 d.size for d in wd.values()
             )
@@ -136,16 +158,13 @@ def make_llama8b_step(
                 jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** coeffs.p_imp) for v in ci.values()])
             )
 
-            l_stoch = jnp.array(0.0)
-            for i, s in enumerate(SITES):
-                u = random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
-                m = ci[s] + (1 - ci[s]) * u
-                masks = {**nomask, s: m}
-                l_stoch = l_stoch + _recon(ckpt_suffix(frozen, vu, resid, masks, dm), clean)
-            l_stoch = l_stoch / len(SITES)
+            u = {k: random.uniform(random.fold_in(key, 10 + i), ci[k].shape, dtype=DT)
+                 for i, k in enumerate(KINDS)}  # fmt: skip
+            stoch_masks = _layerfirst({k: ci[k] + (1 - ci[k]) * u[k] for k in KINDS})
+            l_stoch = _recon(ckpt_suffix(frozen, vu, resid, stoch_masks, dm, stoch_routes), clean)
 
-            ppgd_masks = {s: ci[s] * refined_src[s] for s in SITES}
-            l_ppgd = _recon(ckpt_suffix(frozen, vu, resid, ppgd_masks, dm), clean)
+            ppgd_masks = _layerfirst({k: ci[k] * refined_src[k] for k in KINDS})
+            l_ppgd = _recon(ckpt_suffix(frozen, vu, resid, ppgd_masks, dm, no_routes), clean)
 
             tot = (
                 coeffs.faith * l_faith
@@ -164,13 +183,14 @@ def make_llama8b_step(
         new_vu = eqx.apply_updates(state.vu, upd_vu)
         new_ci = eqx.apply_updates(state.ci_fn, upd_ci)
 
-        # post-update ascent: warm-start the persisted source against the fresh params
         new_vu_det = jax.lax.stop_gradient(new_vu)
         ci_post = jax.lax.stop_gradient(ci)
 
         def adv_post(src):
-            masks = {s: ci_post[s] * jnp.clip(src[s], 0.0, 1.0) for s in SITES}
-            return _recon(suffix(frozen, new_vu_det, resid, masks, dm), clean)
+            masks = {k: ci_post[k] * jnp.clip(src[k], 0.0, 1.0) for k in KINDS}
+            return _recon(
+                suffix(frozen, new_vu_det, resid, _layerfirst(masks), dm, no_routes), clean
+            )
 
         g = jax.grad(adv_post)(refined_src)
         new_src = jax.tree.map(lambda s, gg: s + pgd_lr * gg, refined_src, g)
@@ -196,49 +216,56 @@ def make_llama8b_step(
     return step
 
 
+def _layerfirst(masks: dict) -> dict:
+    """Move the layer axis to the front so `suffix_logits` can index `masks[k][i]`.
+
+    CI / source masks are `(b, t, L, C)` (or `None`); the suffix wants per-layer
+    `(b, t, C)` via `masks[k][i]`. Transpose L to axis 0 -> `(L, b, t, C)`."""
+    return {k: (None if masks[k] is None else jnp.moveaxis(masks[k], -2, 0)) for k in KINDS}
+
+
 def make_llama8b_step_shmap(
     coeffs: LossCoeffs,
     opt_vu: optax.GradientTransformation,
     opt_ci: optax.GradientTransformation,
     pgd_lr: float,
     n_warmup: int,
+    n_layers: int,
     mesh: Mesh,
 ):
     """`shard_map` data-parallel step — the guaranteed-no-gather variant.
 
     Each shard runs the full step on its `bl`-sized local sub-batch with params + PGD
-    source REPLICATED. `with_sharding_constraint` is a hint XLA can ignore (it gathered
-    `clean` to the global batch -> OOM at large gbatch); `shard_map` makes the batch
-    parallelism explicit so no activation ever exceeds the per-device sub-batch.
-
-    Cross-shard reductions are explicit: every per-shard MEAN loss is `pmean`'d over
-    `dp` (so the reported loss and — critically — the grads of the replicated params are
-    the GLOBAL means, identical on every shard => params stay replicated). The PGD
-    source grad is likewise `pmean`'d (the torch `reduce_source_grads` analog). Faith /
-    imp don't depend on the batch, so they're already shard-identical.
-    """
+    source REPLICATED. Cross-shard reductions are explicit: every per-shard MEAN loss is
+    `pmean`'d over `dp` (so the reported loss and the grads of the replicated params are
+    the GLOBAL means). The PGD source grad is likewise `pmean`'d (the torch
+    `reduce_source_grads` analog)."""
     repl = P()
     bdp = P("dp")
+    dm = {k: jnp.ones((n_layers, 1, 1), DT) for k in KINDS}
 
     def _pmean(x):
         return jax.lax.pmean(x, axis_name="dp")
 
     def local_step(state: Llama8BState, frozen: Target, resid, key):
-        dm = {s: jnp.ones((1, 1, 1), DT) for s in SITES}
-        nomask = {s: None for s in SITES}
-        Wg, Wu, Wd = frozen.l18_Wg, frozen.l18_Wu, frozen.l18_Wd
+        nomask = {k: None for k in KINDS}
+        no_routes = _no_routes()
         ckpt_suffix = jax.checkpoint(suffix_logits)
 
-        clean = jax.lax.stop_gradient(suffix_logits(frozen, state.vu, resid, nomask, dm))
-        mlp_in = l18_resid_to_mlp_input(frozen, resid)
-        site_in = mlp_site_inputs(Wg, Wu, mlp_in)
+        clean = jax.lax.stop_gradient(suffix_logits(frozen, state.vu, resid, nomask, dm, no_routes))
+        site_in = all_site_inputs(frozen, resid)
+        b, t = resid.shape[0], resid.shape[1]
 
         vu_det = jax.lax.stop_gradient(state.vu)
         ci_pre = jax.lax.stop_gradient(state.ci_fn(site_in))
 
         def adv_pre(src):
-            masks = {s: ci_pre[s] * jnp.clip(src[s], 0.0, 1.0) for s in SITES}
-            return _pmean(_recon(suffix_logits(frozen, vu_det, resid, masks, dm), clean))
+            masks = {k: ci_pre[k] * jnp.clip(src[k], 0.0, 1.0) for k in KINDS}
+            return _pmean(
+                _recon(
+                    suffix_logits(frozen, vu_det, resid, _layerfirst(masks), dm, no_routes), clean
+                )
+            )
 
         def warmup_body(src, _):
             g = jax.grad(adv_pre)(src)
@@ -247,10 +274,12 @@ def make_llama8b_step_shmap(
         refined_src, _ = jax.lax.scan(warmup_body, state.source, None, length=n_warmup)
         refined_src = jax.lax.stop_gradient(refined_src)
 
+        stoch_routes = _sample_uniform_k_subset_routes(random.fold_in(key, 1), n_layers, (b, t))
+
         def loss_fn(trainable):
             vu, ci_fn = trainable
             ci = ci_fn(site_in)
-            wd = weight_deltas(vu, Wg, Wu, Wd)
+            wd = weight_deltas(vu, frozen.decomp_layers)
             l_faith = sum((d.astype(jnp.float32) ** 2).sum() for d in wd.values()) / sum(
                 d.size for d in wd.values()
             )
@@ -258,17 +287,17 @@ def make_llama8b_step_shmap(
                 jnp.mean(
                     jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** coeffs.p_imp) for v in ci.values()])
                 )
-            )  # ci is per-shard (batch-sharded) -> pmean for the global imp-min
-            l_stoch = jnp.array(0.0)
-            for i, s in enumerate(SITES):
-                u = random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
-                m = ci[s] + (1 - ci[s]) * u
-                l_stoch = l_stoch + _pmean(
-                    _recon(ckpt_suffix(frozen, vu, resid, {**nomask, s: m}, dm), clean)
-                )
-            l_stoch = l_stoch / len(SITES)
-            ppgd_masks = {s: ci[s] * refined_src[s] for s in SITES}
-            l_ppgd = _pmean(_recon(ckpt_suffix(frozen, vu, resid, ppgd_masks, dm), clean))
+            )
+            u = {k: random.uniform(random.fold_in(key, 10 + i), ci[k].shape, dtype=DT)
+                 for i, k in enumerate(KINDS)}  # fmt: skip
+            stoch_masks = _layerfirst({k: ci[k] + (1 - ci[k]) * u[k] for k in KINDS})
+            l_stoch = _pmean(
+                _recon(ckpt_suffix(frozen, vu, resid, stoch_masks, dm, stoch_routes), clean)
+            )
+            ppgd_masks = _layerfirst({k: ci[k] * refined_src[k] for k in KINDS})
+            l_ppgd = _pmean(
+                _recon(ckpt_suffix(frozen, vu, resid, ppgd_masks, dm, no_routes), clean)
+            )
             tot = (
                 coeffs.faith * l_faith
                 + coeffs.imp * l_imp
@@ -290,8 +319,13 @@ def make_llama8b_step_shmap(
         ci_post = jax.lax.stop_gradient(ci)
 
         def adv_post(src):
-            masks = {s: ci_post[s] * jnp.clip(src[s], 0.0, 1.0) for s in SITES}
-            return _pmean(_recon(suffix_logits(frozen, new_vu_det, resid, masks, dm), clean))
+            masks = {k: ci_post[k] * jnp.clip(src[k], 0.0, 1.0) for k in KINDS}
+            return _pmean(
+                _recon(
+                    suffix_logits(frozen, new_vu_det, resid, _layerfirst(masks), dm, no_routes),
+                    clean,
+                )
+            )
 
         g = jax.grad(adv_post)(refined_src)
         new_src = jax.tree.map(lambda s, gg: s + pgd_lr * gg, refined_src, g)
@@ -308,12 +342,7 @@ def make_llama8b_step_shmap(
     mapped = shard_map(
         local_step,
         mesh=mesh,
-        in_specs=(
-            repl,
-            repl,
-            bdp,
-            repl,
-        ),  # state replicated, target replicated, resid dp, key replicated
+        in_specs=(repl, repl, bdp, repl),
         out_specs=(repl, repl),
         check_vma=False,
     )

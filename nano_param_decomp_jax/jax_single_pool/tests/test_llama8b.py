@@ -1,8 +1,8 @@
 """CPU-runnable tests for the Llama-8B full-suffix output-recon PD step at a tiny config.
 
 Validates the model forward + the full step (one iteration trains, the loss has the VPD
-signature) without loading real weights or needing a GPU. `vendored_jax` is put on the
-path by conftest.py.
+signature) over a CONTIGUOUS layer range (1 and N decomposed layers), without loading
+real weights or needing a GPU. `vendored_jax` is put on the path by conftest.py.
 """
 
 import jax
@@ -16,11 +16,13 @@ from vendored_jax.llama import LlamaConfig, llama3_inv_freq  # noqa: E402
 
 from jax_single_pool.ci_fn import CIFnDims, init_ci_fn  # noqa: E402
 from jax_single_pool.llama8b import (  # noqa: E402
-    SITES,
+    KINDS,
+    DecompLayerFrozen,
     DecompVU,
     FrozenAttn,
     FrozenBlock,
     FrozenMLP,
+    LayerRange,
     Target,
     init_decomp_vu,
     suffix_logits,
@@ -36,7 +38,7 @@ from jax_single_pool.llama8b_step import (  # noqa: E402
 def _tiny_cfg() -> LlamaConfig:
     return LlamaConfig(
         vocab_size=64,
-        n_layer=22,  # so suffix L18..L21 = 4 blocks
+        n_layer=8,
         n_head=4,
         n_kv_head=2,
         n_embd=32,
@@ -51,8 +53,8 @@ def _tiny_cfg() -> LlamaConfig:
     )
 
 
-def _tiny_target(cfg: LlamaConfig, key) -> Target:
-    ks = iter(jax.random.split(key, 256))
+def _tiny_target(cfg: LlamaConfig, rng: LayerRange, key) -> Target:
+    ks = iter(jax.random.split(key, 1024))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
 
@@ -65,48 +67,62 @@ def _tiny_target(cfg: LlamaConfig, key) -> Target:
             cfg.n_head, cfg.n_kv_head, cfg.head_dim, cfg.n_rep,
         )  # fmt: skip
 
+    def dlayer():
+        return DecompLayerFrozen(
+            jnp.ones((d,)), jnp.ones((d,)), fattn(), n((di, d)), n((di, d)), n((d, di))
+        )
+
     def fblock():
         return FrozenBlock(
             jnp.ones((d,)), jnp.ones((d,)), fattn(),
             FrozenMLP(n((di, d)), n((di, d)), n((d, di))), cfg.rms_norm_eps,
         )  # fmt: skip
 
-    n_suffix = cfg.n_layer - 18 - 1
     return Target(
-        l18_ln1=jnp.ones((d,)), l18_ln2=jnp.ones((d,)), l18_attn=fattn(),
-        l18_Wg=n((di, d)), l18_Wu=n((di, d)), l18_Wd=n((d, di)),
-        rest=[fblock() for _ in range(n_suffix)],
+        decomp_layers=[dlayer() for _ in range(rng.n_layers)],
+        tail=[fblock() for _ in range(cfg.n_layer - rng.last - 1)],
         norm=jnp.ones((d,)), lm_head=n((cfg.vocab_size, d), 0.02),
         inv_freq=llama3_inv_freq(cfg), eps=cfg.rms_norm_eps,
     )  # fmt: skip
 
 
-def test_suffix_logits_clean_matches_target():
-    """Clean decomposed forward (V@U == W reconstructed by weight-delta) ~ frozen suffix."""
+@pytest.mark.parametrize("rng", [LayerRange(4, 4), LayerRange(3, 6)])
+def test_suffix_logits_clean_shapes(rng: LayerRange):
     cfg = _tiny_cfg()
-    key = jax.random.PRNGKey(0)
-    tgt = _tiny_target(cfg, key)
+    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
     C = 8
-    vu = init_decomp_vu(cfg, C, tgt, jax.random.PRNGKey(1))
+    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
     b, t, d = 2, 16, cfg.n_embd
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, d)) * 0.5
-    nomask = {s: None for s in SITES}
-    dm = {s: jnp.ones((1, 1, 1)) for s in SITES}
-    logits = suffix_logits(tgt, vu, resid, nomask, dm)
+    nomask = {k: None for k in KINDS}
+    dm = {k: jnp.ones((rng.n_layers, 1, 1)) for k in KINDS}
+    no_routes = {k: None for k in KINDS}
+    logits = suffix_logits(tgt, vu, resid, nomask, dm, no_routes)
     assert logits.shape == (b, t, cfg.vocab_size)
-    wd = weight_deltas(vu, tgt.l18_Wg, tgt.l18_Wu, tgt.l18_Wd)
-    assert wd["gate"].shape == tgt.l18_Wg.shape
-    assert wd["up"].shape == tgt.l18_Wu.shape
-    assert wd["down"].shape == tgt.l18_Wd.shape
+    wd = weight_deltas(vu, tgt.decomp_layers)
+    di = cfg.n_intermediate
+    assert wd["gate"].shape == (rng.n_layers, di, d)
+    assert wd["down"].shape == (rng.n_layers, d, di)
+
+    # clean decomposed forward (mask=None, delta_mask=1, routes=None) reconstructs the
+    # frozen suffix exactly: V@U + (W - (V@U).T) applied == W. This is the faithfulness
+    # recon target; if it drifts, the clean baseline is wrong.
+    fully_routed = {k: jnp.ones((rng.n_layers, b, t, 1), bool) for k in KINDS}
+    routed_logits = suffix_logits(tgt, vu, resid, nomask, dm, fully_routed)
+    assert jnp.allclose(logits, routed_logits, atol=1e-4), "routed-all != clean"
 
 
-def test_step_trains_and_has_vpd_signature():
+@pytest.mark.parametrize("rng", [LayerRange(4, 4), LayerRange(3, 6)])
+def test_step_trains_and_has_vpd_signature(rng: LayerRange):
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, jax.random.PRNGKey(0))
+    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
     C = 8
-    vu = init_decomp_vu(cfg, C, tgt, jax.random.PRNGKey(1))
-    dims = CIFnDims(d_model=16, n_blocks=2, n_heads=2, mlp_hidden=32,
-                    total_in=cfg.n_embd + cfg.n_embd + cfg.n_intermediate, C=C)  # fmt: skip
+    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
+    dims = CIFnDims(
+        d_model=16, n_blocks=2, n_heads=2, mlp_hidden=32,
+        total_in=rng.n_layers * (cfg.n_embd + cfg.n_embd + cfg.n_intermediate),
+        C=C, n_layers=rng.n_layers,
+    )  # fmt: skip
     ci_fn = init_ci_fn(dims, jax.random.PRNGKey(2))
     opt_vu = optax.adamw(1e-3)
     opt_ci = optax.adamw(1e-3)
@@ -117,11 +133,13 @@ def test_step_trains_and_has_vpd_signature():
         vu=vu, ci_fn=ci_fn,
         opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
         opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        source={s: jnp.zeros((1, 16, C)) for s in SITES},
+        source={k: jnp.zeros((1, 16, rng.n_layers, C)) for k in KINDS},
         step=jnp.array(0),
     )  # fmt: skip
     coeffs = LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4)
-    step = make_llama8b_step(coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=2, mesh=None)
+    step = make_llama8b_step(
+        coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=2, n_layers=rng.n_layers, mesh=None
+    )
 
     resid = jax.random.normal(jax.random.PRNGKey(3), (2, 16, cfg.n_embd)) * 0.5
     losses = []
@@ -129,19 +147,17 @@ def test_step_trains_and_has_vpd_signature():
         state, m = step(state, tgt, resid, jax.random.PRNGKey(100 + i))
         losses.append({k: float(v) for k, v in m.items()})
 
-    # ppgd is the worst-case recon -> should sit at or above the stochastic recon (minimax)
     assert losses[-1]["ppgd"] >= losses[-1]["stoch"] * 0.5
-    # the step advanced and produced finite losses
     assert all(jnp.isfinite(jnp.array(list(m.values()))).all() for m in losses)
     assert float(state.step) == 4.0
 
 
 def test_decomp_vu_shapes():
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, jax.random.PRNGKey(0))
     C = 8
-    vu = init_decomp_vu(cfg, C, tgt, jax.random.PRNGKey(1))
+    rng = LayerRange(3, 6)
+    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
     d, di = cfg.n_embd, cfg.n_intermediate
-    assert vu.Vg.shape == (d, C) and vu.Ug.shape == (C, di)
-    assert vu.Vd.shape == (di, C) and vu.Ud.shape == (C, d)
+    assert vu.Vg.shape == (rng.n_layers, d, C) and vu.Ug.shape == (rng.n_layers, C, di)
+    assert vu.Vd.shape == (rng.n_layers, di, C) and vu.Ud.shape == (rng.n_layers, C, d)
     assert isinstance(vu, DecompVU)

@@ -1,10 +1,14 @@
 """The `global_shared_transformer` CI fn for the Llama-8B target.
 
-Per-site clean inputs (gate_in / up_in / down_in) are rms-normed, concatenated, and
+ONE shared transformer over ALL decomposed sites (matching torch
+`GlobalSharedTransformerCiFn`): the per-site clean inputs (3 per decomposed layer:
+gate_in / up_in / down_in) are rms-normed, concatenated along the feature dim,
 projected to `d_model`; a stack of bidirectional-RoPE transformer blocks then a head
-emits 3*C logits squashed by the lower-leaky-hard sigmoid into per-site CI in [0,1].
+emits `3*n_layers*C` logits squashed by the lower-leaky-hard sigmoid into per-site CI
+in [0,1]. The output is returned as `{kind: (b, t, L, C)}` so the step can mask
+layer i's `kind` site with `ci[kind][:, :, i]`.
 
-Mirrors the torch `GlobalSharedTransformerCiConfig` used in `llama8b_l18_mlp_fsdp.yaml`
+Mirrors the torch `GlobalSharedTransformerCiConfig` used in the llama8b configs
 (d_model 4096, 4 blocks, 64 heads, mlp 16384).
 """
 
@@ -16,7 +20,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float
 from vendored_jax.llama import apply_rope, rms_norm, rope_cos_sin
 
-from jax_single_pool.llama8b import DT, SITES
+from jax_single_pool.llama8b import DT, KINDS
 
 
 @jax.custom_vjp
@@ -71,18 +75,25 @@ class CIFn(eqx.Module):
     out_head: Float[Array, "d_model total_c"]
     inv_freq: Array
     C: int = eqx.field(static=True)
+    n_layers: int = eqx.field(static=True)
     eps: float = eqx.field(static=True)
 
-    def __call__(self, site_inputs: tuple) -> dict[str, Array]:
+    def __call__(self, site_inputs: list) -> dict[str, Array]:
+        """`site_inputs`: flat list of 3*n_layers clean inputs in (layer, kind) order.
+        Returns {kind: (b, t, n_layers, C)} CI in [0,1]."""
+        assert len(site_inputs) == 3 * self.n_layers, (
+            f"expected {3 * self.n_layers} site inputs, got {len(site_inputs)}"
+        )
         normed = [rms_norm(s, jnp.ones((s.shape[-1],), DT), self.eps) for s in site_inputs]
         x = jax.nn.relu(jnp.concatenate(normed, axis=-1) @ self.in_proj)
         for blk in self.blocks:
             x = blk(x, self.inv_freq)
-        flat = x @ self.out_head  # (b, t, 3C)
-        return {
-            s: lower_leaky_hard_sigmoid(flat[..., i * self.C : (i + 1) * self.C])
-            for i, s in enumerate(SITES)
-        }
+        flat = x @ self.out_head  # (b, t, 3*n_layers*C)
+        b, t, _ = flat.shape
+        # logits are laid out site-major in (layer, kind) order — reshape to (b,t,L,3,C)
+        per_site = flat.reshape(b, t, self.n_layers, len(KINDS), self.C)
+        squashed = lower_leaky_hard_sigmoid(per_site)
+        return {kind: squashed[:, :, :, j] for j, kind in enumerate(KINDS)}
 
 
 class CIFnDims(NamedTuple):
@@ -92,6 +103,7 @@ class CIFnDims(NamedTuple):
     mlp_hidden: int
     total_in: int
     C: int
+    n_layers: int
 
 
 def init_ci_fn(dims: CIFnDims, key) -> CIFn:
@@ -117,11 +129,13 @@ def init_ci_fn(dims: CIFnDims, key) -> CIFn:
         )
 
     inv_freq = 1.0 / (10000.0 ** (jnp.arange(0, hd, 2, dtype=jnp.float32) / hd))
+    total_c = len(KINDS) * dims.n_layers * dims.C
     return CIFn(
         in_proj=n((dims.total_in, dims.d_model), dims.total_in**-0.5),
         blocks=[block() for _ in range(dims.n_blocks)],
-        out_head=n((dims.d_model, len(SITES) * dims.C), dims.d_model**-0.5),
+        out_head=n((dims.d_model, total_c), dims.d_model**-0.5),
         inv_freq=inv_freq,
         C=dims.C,
+        n_layers=dims.n_layers,
         eps=1e-5,
     )
