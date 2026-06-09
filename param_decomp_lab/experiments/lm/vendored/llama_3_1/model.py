@@ -228,7 +228,13 @@ class VendoredLlama(nn.Module):
         from transformers import LlamaForCausalLM
 
         log0(f"loading HF weights into vendored Llama: {model_name}")
-        hf = LlamaForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
+        # local_files_only: the target is vendored and pre-cached in HF_HUB_CACHE, so never
+        # touch HF Hub at load time. Without this, every rank issues etag/metadata requests —
+        # an N-rank thunderherd that read-times-out against the HF CDN and stalls launch/resume.
+        # (Pre-cache the model once if the cache is cold; we never download it at run time.)
+        hf = LlamaForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.float32, local_files_only=True
+        )
         hf_cfg: Any = hf.config  # transformers config attrs are dynamic; type as Any
         assert hf_cfg.model_type == "llama", f"expected a llama config, got {hf_cfg.model_type}"
         rs = hf_cfg.rope_scaling
