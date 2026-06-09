@@ -49,7 +49,12 @@ from jax_single_pool.llama8b_sharding import (
     shard_decomp_vu,
     shard_source,
 )
-from jax_single_pool.llama8b_step import Llama8BState, LossCoeffs, make_llama8b_step
+from jax_single_pool.llama8b_step import (
+    Llama8BState,
+    LossCoeffs,
+    make_llama8b_step,
+    make_llama8b_step_shmap,
+)
 from jax_single_pool.sharding import init_distributed
 
 
@@ -79,7 +84,14 @@ def main():
     ap.add_argument("--steps", type=int, default=10)
     ap.add_argument("--n_warmup", type=int, default=2)
     ap.add_argument("--real_weights", action="store_true")
-    ap.add_argument("--shard", action="store_true", help="FSDP-shard V/U + CI + Adam + batch")
+    ap.add_argument(
+        "--shard", action="store_true", help="jit + C-shard V/U/CI/Adam + batch + constraint"
+    )
+    ap.add_argument(
+        "--shmap",
+        action="store_true",
+        help="shard_map data-parallel (params replicated, batch sharded)",
+    )
     ap.add_argument("--model_name", default="meta-llama/Llama-3.1-8B")
     args = ap.parse_args()
 
@@ -101,7 +113,8 @@ def main():
     if is0:
         print(
             f"[p0] LLAMA8B single-pool PD | {ndev} GPU | gbatch={gbatch} seq={args.seq} "
-            f"C={args.C} n_warmup={args.n_warmup} shard={args.shard} "
+            f"C={args.C} n_warmup={args.n_warmup} "
+            f"mode={'shmap' if args.shmap else 'shard' if args.shard else 'replicated'} "
             f"weights={'HF' if args.real_weights else 'random'}"
         )
 
@@ -162,6 +175,7 @@ def main():
     opt_vu = optax.adamw(1.5e-4)
     opt_ci = optax.adamw(5e-5)
 
+    assert not (args.shard and args.shmap), "pick one of --shard / --shmap"
     target = replicate_target(target, mesh)
     if args.shard:
         vu = shard_decomp_vu(vu, mesh)
@@ -184,14 +198,19 @@ def main():
         step=jnp.array(0),
     )
     coeffs = LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4)
-    step = make_llama8b_step(
-        coeffs,
-        opt_vu,
-        opt_ci,
-        pgd_lr=0.01,
-        n_warmup=args.n_warmup,
-        mesh=mesh if args.shard else None,
-    )
+    if args.shmap:
+        step = make_llama8b_step_shmap(
+            coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=args.n_warmup, mesh=mesh
+        )
+    else:
+        step = make_llama8b_step(
+            coeffs,
+            opt_vu,
+            opt_ci,
+            pgd_lr=0.01,
+            n_warmup=args.n_warmup,
+            mesh=mesh if args.shard else None,
+        )
 
     for _ in range(2):
         state, m = step(state, target, resid, random.PRNGKey(7))
