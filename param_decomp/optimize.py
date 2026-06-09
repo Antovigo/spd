@@ -8,27 +8,19 @@
 that lets a caller persist and restore the full training state (resumption).
 """
 
-import gc
-import signal
 from collections import defaultdict
-from dataclasses import dataclass
 from typing import Any, Self, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.parallel
-from pydantic import PositiveInt
-from torch import Tensor, optim
+from torch import optim
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from param_decomp.batch_and_loss_fns import (
-    ReconstructionLoss,
-    RunBatch,
-    move_batch_to_device,
-)
-from param_decomp.component_model import ComponentModel, OutputWithCache, component_grad_norms
+from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
+from param_decomp.component_model import ComponentModel, component_grad_norms
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
@@ -44,151 +36,32 @@ from param_decomp.distributed import (
 )
 from param_decomp.faithfulness_warmup import run_faithfulness_warmup
 from param_decomp.log import logger
-from param_decomp.metrics.base import LossMetricConfig, Metric
-from param_decomp.metrics.context import MetricContext
+from param_decomp.metrics.base import Metric
 from param_decomp.metrics.dispatch import instantiate_metrics
-from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.run_sink import OnePoolRunSink
-from param_decomp.schedule import get_scheduled_value
-from param_decomp.torch_helpers import bf16_autocast, loop_dataloader
+from param_decomp.torch_helpers import loop_dataloader
+from param_decomp.train_step import (
+    EvalLoop,
+    _assert_ctx_invariants,
+    _build_metric_context,
+    _install_sigterm_flag,
+    empty_cuda_cache_and_collect,
+    run_eval_pass,
+    run_loss_step,
+    scheduled_lrs,
+)
 from param_decomp.training_state import TrainingState
 
-
-@dataclass
-class _SigtermFlag:
-    """Mutable flag flipped by a SIGTERM handler so the train loop can react."""
-
-    received: bool = False
-
-
-def _install_sigterm_flag() -> _SigtermFlag:
-    """Install a SIGTERM handler that flips a flag, and return the flag.
-
-    SLURM sends SIGTERM to all ranks at job-kill / preemption time. The handler
-    is intentionally minimal (set a flag, return) — Python's signal handlers
-    aren't strictly async-signal-safe, and we want the actual checkpoint save
-    to happen at a known-safe point in the train loop. No teardown: ``Trainer.run``
-    owns the process for its lifetime and the next SIGTERM after ``run`` returns
-    can take the default action.
-    """
-    flag = _SigtermFlag()
-
-    def _handler(signum: int, frame: Any) -> None:
-        del signum, frame
-        flag.received = True
-
-    signal.signal(signal.SIGTERM, _handler)
-    return flag
-
-
-@dataclass(frozen=True)
-class EvalLoop:
-    """Eval-loop runtime objects bundled with their timing.
-
-    Pass ``eval_loop=None`` to :meth:`Trainer.run` (or :func:`optimize`) to skip
-    eval entirely. When set, the trainer evaluates every ``every`` steps; on steps
-    that are also multiples of ``slow_every``, slow metrics fire too. ``slow_every``
-    must be a multiple of ``every`` — the trainer only checks :meth:`should_run_slow_eval`
-    on steps where :meth:`should_eval` already fired.
-
-    Attributes:
-        loader: Eval data loader. Looped for the lifetime of training.
-        metrics: Caller-instantiated eval ``Metric``s. ``optimize`` calls
-            ``Metric.bind(model, device)`` on each before the loop.
-        n_steps: Number of eval batches per eval pass.
-        every: Period (in train steps) between eval passes.
-        slow_every: Period (in train steps) between *slow* eval passes. Must
-            be a multiple of ``every``.
-        slow_on_first_step: Whether slow eval fires at step 0.
-    """
-
-    loader: DataLoader[Any]
-    metrics: list[Metric[Any]]
-    n_steps: PositiveInt
-    every: PositiveInt
-    slow_every: PositiveInt
-    slow_on_first_step: bool = True
-
-    def __post_init__(self) -> None:
-        assert self.slow_every % self.every == 0, (
-            f"slow_every ({self.slow_every}) must be a multiple of every ({self.every})"
-        )
-
-    def should_eval(self, step: int) -> bool:
-        """Whether a (regular) eval pass should fire at ``step``."""
-        return step % self.every == 0
-
-    def should_run_slow_eval(self, step: int) -> bool:
-        """Whether slow eval metrics should fire at ``step``.
-
-        Slow eval is gated on top of ``should_eval``; callers are expected to
-        only call this on steps where ``should_eval`` is already true.
-        """
-        if step == 0:
-            return self.slow_on_first_step
-        return step % self.slow_every == 0
-
-
-def _build_metric_context(
-    batch: Any,
-    *,
-    step: int,
-    is_eval: bool,
-    device: str,
-    wrapped_model: nn.Module,
-    component_model: ComponentModel,
-    config: PDConfig,
-    reconstruction_loss: ReconstructionLoss,
-    weight_deltas: dict[str, Tensor],
-) -> MetricContext:
-    # The wrapped_model(...) call here is what registers DDP gradient hooks for this step.
-    # Required even if no metric uses the DDP wrapper directly.
-    batch = move_batch_to_device(batch, device)
-    target_model_output: OutputWithCache = wrapped_model(batch, cache_type="input")
-    ci = component_model.calc_causal_importances(
-        pre_weight_acts=target_model_output.cache,
-        detach_inputs=False,
-        sampling=config.sampling,
-    )
-    return MetricContext(
-        model=component_model,
-        batch=batch,
-        target_out=target_model_output.output,
-        pre_weight_acts=target_model_output.cache,
-        ci=ci,
-        weight_deltas=weight_deltas,
-        step=step,
-        total_steps=config.steps,
-        use_delta_component=config.use_delta_component,
-        sampling=config.sampling,
-        n_mask_samples=config.n_mask_samples,
-        reconstruction_loss=reconstruction_loss,
-        is_eval=is_eval,
-    )
-
-
-def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
-    """Fail loudly if anything is off about the metric context handed to the
-    loss metrics — wrong device, non-finite target output, empty ci dict, etc.
-    These would otherwise propagate silently through the loss + backward path.
-    """
-    assert isinstance(ctx.target_out, torch.Tensor)
-    device_prefix = str(device).split(":")[0]
-    assert str(ctx.target_out.device).startswith(device_prefix), (
-        f"ctx.target_out device mismatch at step {step}: target_out on "
-        f"{ctx.target_out.device}, trainer on {device}"
-    )
-    assert torch.isfinite(ctx.target_out).all(), f"non-finite values in target_out at step {step}"
-    assert ctx.ci.lower_leaky, f"empty ci.lower_leaky dict at step {step}"
-    assert ctx.ci.upper_leaky.keys() == ctx.ci.lower_leaky.keys(), (
-        f"ci upper/lower leaky key mismatch at step {step}"
-    )
-    for name, t in ctx.ci.lower_leaky.items():
-        assert torch.isfinite(t).all(), f"non-finite ci.lower_leaky[{name!r}] at step {step}"
-        assert str(t.device).startswith(device_prefix), (
-            f"ci.lower_leaky[{name!r}] device mismatch at step {step}: {t.device} vs {device}"
-        )
+__all__ = [
+    "EvalLoop",
+    "Trainer",
+    "_assert_ctx_invariants",
+    "_build_metric_context",
+    "load_optimizer_state_by_name",
+    "optimizer_state_by_name",
+    "tie_component_weights",
+]
 
 
 def tie_component_weights(
@@ -528,72 +401,25 @@ class Trainer:
             self.components_optimizer.zero_grad()
             self.ci_fn_optimizer.zero_grad()
 
-            components_lr = get_scheduled_value(
-                step=step,
-                total_steps=pd_config.steps,
-                config=pd_config.components_optimizer.lr_schedule,
-            )
-            ci_fn_lr = get_scheduled_value(
-                step=step,
-                total_steps=pd_config.steps,
-                config=pd_config.ci_fn_optimizer.lr_schedule,
+            components_lr, ci_fn_lr = scheduled_lrs(
+                step, total_steps=pd_config.steps, config=pd_config
             )
             for group in self.components_optimizer.param_groups:
                 group["lr"] = components_lr
             for group in self.ci_fn_optimizer.param_groups:
                 group["lr"] = ci_fn_lr
 
-            batch_log_data: defaultdict[str, float] = defaultdict(float)
-
-            # Compute weight_deltas OUTSIDE bf16_autocast so FaithfulnessLoss residuals are fp32
-            weight_deltas = self.component_model.calc_weight_deltas()
-
-            with bf16_autocast(enabled=runtime_config.autocast_bf16):
-                ctx = _build_metric_context(
-                    next(train_iterator),
-                    step=step,
-                    is_eval=False,
-                    device=device,
-                    wrapped_model=self._wrapped_model,
-                    component_model=self.component_model,
-                    config=pd_config,
-                    reconstruction_loss=self.reconstruction_loss,
-                    weight_deltas=weight_deltas,
-                )
-                _assert_ctx_invariants(ctx, device, step)
-                losses = {name: m.update(ctx) for name, m in self.loss_metrics.items()}
-
-            total_loss = torch.zeros((), device=device)
-            active_loss_names: list[str] = []
-            for metric_name, loss_val in losses.items():
-                if loss_val is None:
-                    continue
-                active_loss_names.append(metric_name)
-                assert torch.isfinite(loss_val).all(), (
-                    f"non-finite loss from metric {metric_name!r} at step {step}: {loss_val}"
-                )
-                cfg = cast(LossMetricConfig, self.loss_metrics[metric_name].cfg)
-                assert cfg.coeff is not None
-                total_loss = total_loss + cfg.coeff * loss_val
-                batch_log_data[f"loss/{type(self.loss_metrics[metric_name]).__name__}"] = (
-                    loss_val.item()
-                )
-            assert active_loss_names, (
-                f"No active loss metrics returned a loss at step {step}. "
-                f"Configured loss metrics: {list(self.loss_metrics)}"
+            _, batch_log_data = run_loss_step(
+                batch=next(train_iterator),
+                step=step,
+                device=device,
+                wrapped_model=self._wrapped_model,
+                component_model=self.component_model,
+                loss_metrics=self.loss_metrics,
+                config=pd_config,
+                reconstruction_loss=self.reconstruction_loss,
+                autocast_bf16=runtime_config.autocast_bf16,
             )
-            assert torch.isfinite(total_loss).all(), (
-                f"total_loss is non-finite at step {step}: {total_loss}"
-            )
-            batch_log_data["loss/total"] = total_loss.item()
-
-            for metric_name, m in self.loss_metrics.items():
-                m.before_backward(losses[metric_name])
-
-            total_loss.backward()
-
-            for m in self.loss_metrics.values():
-                m.after_backward()
 
             # --- Train Logging --- #
             if cadence.should_log_train(step):
@@ -618,44 +444,30 @@ class Trainer:
             # --- Evaluation --- #
             if eval_loop is not None and eval_loop.should_eval(step):
                 assert eval_iterator is not None
-                eval_weight_deltas = self.component_model.calc_weight_deltas()
-                with torch.no_grad(), bf16_autocast(enabled=runtime_config.autocast_bf16):
-                    slow_step = eval_loop.should_run_slow_eval(step)
-                    active = [m for m in all_instances.values() if not (m.slow and not slow_step)]
-                    for m in active:
-                        m.reset()
-                    for _ in range(eval_loop.n_steps):
-                        ctx = _build_metric_context(
-                            next(eval_iterator),
-                            step=step,
-                            is_eval=True,
-                            device=device,
-                            wrapped_model=self._wrapped_model,
-                            component_model=self.component_model,
-                            config=pd_config,
-                            reconstruction_loss=self.reconstruction_loss,
-                            weight_deltas=eval_weight_deltas,
-                        )
-                        for m in active:
-                            m.update(ctx)
-                    # Fast metrics use the `eval/` namespace + default step axis;
-                    # slow metrics use `slow_eval/` + a `slow_eval/step` axis, so
-                    # this matches the 3-pool async slow-eval keys (see
-                    # experiments.lm.async_eval) and the two namespaces overlay.
-                    fast_metrics = collect_metric_outputs([m for m in active if not m.slow])
-                    sink.console(*(f"eval/{k}: {v}" for k, v in fast_metrics.items()))
-                    sink.log({f"eval/{k}": v for k, v in fast_metrics.items()}, step=step)
-                    slow_active = [m for m in active if m.slow]
-                    if slow_active:
-                        slow_metrics = collect_metric_outputs(slow_active)
-                        sink.console(*(f"slow_eval/{k}: {v}" for k, v in slow_metrics.items()))
-                        slow_payload = {f"slow_eval/{k}": v for k, v in slow_metrics.items()}
-                        slow_payload["slow_eval/step"] = step
-                        sink.log(slow_payload, step=step)
-
-                    del fast_metrics
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                fast_metrics, slow_metrics = run_eval_pass(
+                    eval_iterator=eval_iterator,
+                    n_steps=eval_loop.n_steps,
+                    slow_step=eval_loop.should_run_slow_eval(step),
+                    all_instances=all_instances,
+                    step=step,
+                    device=device,
+                    wrapped_model=self._wrapped_model,
+                    component_model=self.component_model,
+                    config=pd_config,
+                    reconstruction_loss=self.reconstruction_loss,
+                    autocast_bf16=runtime_config.autocast_bf16,
+                )
+                # Fast metrics use the `eval/` namespace + default step axis; slow metrics
+                # use `slow_eval/` + a `slow_eval/step` axis, so this matches the 3-pool
+                # async slow-eval keys (see experiments.lm.async_eval) and overlays.
+                sink.console(*(f"eval/{k}: {v}" for k, v in fast_metrics.items()))
+                sink.log({f"eval/{k}": v for k, v in fast_metrics.items()}, step=step)
+                if slow_metrics:
+                    sink.console(*(f"slow_eval/{k}: {v}" for k, v in slow_metrics.items()))
+                    slow_payload = {f"slow_eval/{k}": v for k, v in slow_metrics.items()}
+                    slow_payload["slow_eval/step"] = step
+                    sink.log(slow_payload, step=step)
+                empty_cuda_cache_and_collect()
 
             # --- Saving Checkpoint --- #
             if step == pd_config.steps or cadence.should_save(step) or sigterm.received:
