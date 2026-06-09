@@ -291,6 +291,14 @@ class FsdpLMTrainer:
         # --- 6. per-rank compile caches, then compile per flags ---
         if runtime_config.compile_model or runtime_config.compile_ci_fn:
             _set_per_rank_compile_cache_env()
+            # PPGD's before_backward runs torch.autograd.grad(retain_graph=True) through the
+            # compiled region; AOTAutograd's donated-buffer optimization asserts
+            # retain_graph=False on every backward, so it must be disabled when PPGD and compile
+            # coexist. (No effect without compile; harmless without PPGD.)
+            if _has_ppgd_loss(pd_config):
+                import torch._functorch.config as functorch_config
+
+                functorch_config.donated_buffer = False
         if runtime_config.compile_model:
             self.lm.model.compile()
         if runtime_config.compile_ci_fn:
