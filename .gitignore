@@ -185,3 +185,6 @@ cython_debug/
 *.schema.json
 
 .claude/worktrees
+
+.venv-cuda/
+**/.venv-cuda/
