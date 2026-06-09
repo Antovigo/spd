@@ -16,8 +16,10 @@ from jax.sharding import PartitionSpec as P
 devs = jax.devices()
 W = len(devs)
 mesh = Mesh(np.array(devs), ("fsdp",))
+# Two shardings for the SAME array shape: P() keeps a full copy on every device (what we do today);
+# P("fsdp", None, None) splits the leading axis across all GPUs so each holds 1/W (ZeRO/FSDP).
 repl = NamedSharding(mesh, P())
-shard = NamedSharding(mesh, P("fsdp", None, None))  # shard the leading (block) axis across all GPUs
+shard = NamedSharding(mesh, P("fsdp", None, None))
 
 # ~ V/U + Adam shaped: B blocks of (8192,8192); bf16 param + fp32 m,v. B divisible by W.
 B = W

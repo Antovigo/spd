@@ -21,8 +21,12 @@ mesh = Mesh(np.array(devs), ("world",))
 
 
 def test(groups, label):
+    # shard_map runs f once per device-shard; in/out_specs say each device owns one slice of the
+    # "world" axis. Inside f, collectives communicate over the named mesh axes.
     @partial(shard_map, mesh=mesh, in_specs=P("world"), out_specs=P("world"))
     def f(x):
+        # axis_index_groups makes psum reduce WITHIN each listed subgroup independently — jax's way
+        # to express torch-style per-pool rank groups on a single mesh (the question: uneven sizes?).
         return jax.lax.psum(x, "world", axis_index_groups=groups)
 
     x = jnp.arange(W, dtype=jnp.float32)  # device i holds value i

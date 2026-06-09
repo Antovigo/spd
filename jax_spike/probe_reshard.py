@@ -17,8 +17,12 @@ from jax.sharding import PartitionSpec as P
 devs = jax.devices()
 assert len(devs) >= 8, f"need >=8 GPUs, got {len(devs)}"
 half = len(devs) // 2
+# A Mesh is a named array of devices. Two Meshes over DISJOINT device halves = two sub-meshes
+# (jax's version of torch's separate rank groups, e.g. "main pool" vs "chunk pool").
 mesh_a = Mesh(np.array(devs[:half]), ("dp",))
 mesh_b = Mesh(np.array(devs[half : 2 * half]), ("dp",))
+# A sharding pairs (which mesh) with (how an array's axes map to mesh axes): P("dp") splits the
+# array's leading axis across the "dp" axis; P() would replicate the whole array on every device.
 sh_a = NamedSharding(mesh_a, P("dp"))
 sh_b = NamedSharding(mesh_b, P("dp"))
 
@@ -34,12 +38,15 @@ for label, shape in shapes.items():
 
     @jax.jit
     def move(t):
+        # reshard = move data onto a DIFFERENT mesh's sharding (mesh_a -> mesh_b). This is the
+        # cross-sub-mesh hop we're pricing; a same-mesh collective (psum/ppermute) can't cross meshes.
         return jax.reshard(t, sh_b)
 
     y = move(x)
-    jax.block_until_ready(y)  # warm/compile
+    jax.block_until_ready(y)  # jax dispatch is async — block, else you'd time dispatch not the move
 
-    # assert device-to-device (host transfer would raise)
+    # d2d proof: if reshard secretly routed through host RAM, this guard raises — so a clean run
+    # confirms the move stayed GPU->GPU (what makes the sub-mesh route actually viable).
     with jax.transfer_guard_device_to_host("disallow"):
         ts = []
         for _ in range(30):
