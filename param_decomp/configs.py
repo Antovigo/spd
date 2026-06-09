@@ -90,7 +90,11 @@ class RuntimeConfig(BaseConfig):
     )
     dp: PositiveInt | None = Field(
         default=None,
-        description="DDP world size, or None for single device.",
+        description=(
+            "Distributed world size — the number of data-parallel workers. Under DDP the "
+            "model is replicated across them; under FSDP it is sharded and the batch is "
+            "data-parallel across them. None means a single device."
+        ),
     )
 
     @model_validator(mode="after")

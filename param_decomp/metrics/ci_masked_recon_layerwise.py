@@ -6,12 +6,11 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import make_mask_infos
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-from param_decomp.torch_helpers import get_obj_device
 
 
 class CIMaskedReconLayerwiseLossConfig(LossMetricConfig):
@@ -19,13 +18,13 @@ class CIMaskedReconLayerwiseLossConfig(LossMetricConfig):
 
 
 def _ci_masked_recon_layerwise_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],
     reconstruction_loss: ReconstructionLoss,
 ) -> tuple[Float[Tensor, ""], int]:
-    sum_loss = torch.zeros((), device=get_obj_device(model))
+    sum_loss = torch.zeros((), device=target_out.device)
     n_examples = 0
     mask_infos = make_mask_infos(ci, weight_deltas_and_masks=None)
     for module_name, mask_info in mask_infos.items():
@@ -37,7 +36,7 @@ def _ci_masked_recon_layerwise_loss_update(
 
 
 def ci_masked_recon_layerwise_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],

@@ -16,7 +16,7 @@ from torch import Tensor
 
 from param_decomp.base_config import BaseConfig, Probability
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.masks import (
     AllLayersRouter,
     ComponentsMaskInfo,
@@ -350,7 +350,7 @@ class PersistentPGDState:
 
     def warmup(
         self,
-        model: ComponentModel,
+        model: ComponentModelProtocol,
         batch: Int[Tensor, "..."] | Float[Tensor, "..."],
         target_out: Float[Tensor, "... vocab"],
         ci: dict[str, Float[Tensor, "... C"]],
@@ -381,7 +381,7 @@ class PersistentPGDState:
 
     def compute_recon_sum_and_n(
         self,
-        model: ComponentModel,
+        model: ComponentModelProtocol,
         batch: Int[Tensor, "..."] | Float[Tensor, "..."],
         target_out: Float[Tensor, "... vocab"],
         ci: dict[str, Float[Tensor, "... C"]],
@@ -468,7 +468,7 @@ def get_ppgd_mask_infos(
 
 
 def _compute_ppgd_recon_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     ppgd_sources: PPGDSources,
     reconstruction_loss: ReconstructionLoss,
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],

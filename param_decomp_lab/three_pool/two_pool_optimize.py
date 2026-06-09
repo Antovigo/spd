@@ -28,7 +28,7 @@ import os
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Self
 
 import torch
 import torch.distributed as dist
@@ -40,7 +40,6 @@ from torch.utils.data import DataLoader
 from param_decomp._trace import dump_memory_stats, trace
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
 from param_decomp.ci_fns import GlobalSharedTransformerCiFn
-from param_decomp.component_model import ComponentModel
 from param_decomp.configs import Cadence, RuntimeConfig
 from param_decomp.decomposition_targets import DecompositionTarget
 from param_decomp.distributed import seed_all_ranks, seed_per_rank
@@ -500,10 +499,7 @@ class TwoPoolTrainer:
         eval_iterator = loop_dataloader(eval_loop.loader) if eval_loop is not None else None
         if eval_loop is not None and isinstance(ctx, PoolAContext):
             for m in eval_loop.metrics:
-                m.bind(
-                    model=cast(ComponentModel, cast(object, self.component_model)),
-                    device=str(device),
-                )
+                m.bind(model=self.component_model, device=str(device))
 
         first_batch = next(train_iterator)
         train_iterator = itertools.chain([first_batch], train_iterator)

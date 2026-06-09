@@ -6,12 +6,11 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import make_mask_infos
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-from param_decomp.torch_helpers import get_obj_device
 
 
 class UnmaskedReconLossConfig(LossMetricConfig):
@@ -19,12 +18,12 @@ class UnmaskedReconLossConfig(LossMetricConfig):
 
 
 def _unmasked_recon_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     reconstruction_loss: ReconstructionLoss,
 ) -> tuple[Float[Tensor, ""], int]:
-    device = get_obj_device(model)
+    device = target_out.device
     all_ones_mask_infos = make_mask_infos(
         {
             module_path: torch.ones(model.module_to_c[module_path], device=device)

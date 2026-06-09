@@ -9,7 +9,7 @@ from matplotlib import pyplot as plt
 from PIL import Image
 from torch import Tensor
 
-from param_decomp.component_model import CIOutputs, ComponentModel
+from param_decomp.component_model import CIOutputs, ComponentModelProtocol
 from param_decomp.components import Components
 from param_decomp.masks import SamplingType
 from param_decomp.torch_helpers import get_obj_device
@@ -182,7 +182,7 @@ def plot_mean_component_cis_both_scales(
 
 
 def get_single_feature_causal_importances(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch_shape: tuple[int, ...],
     input_magnitude: float,
     sampling: SamplingType,
@@ -190,14 +190,14 @@ def get_single_feature_causal_importances(
     """Compute causal importance arrays for single active features.
 
     Args:
-        model: The ComponentModel
+        model: The component model
         batch_shape: Shape of the batch
         input_magnitude: Magnitude of input features
 
     Returns:
         Tuple of (ci_raw, ci_upper_leaky_raw) dictionaries of causal importance arrays (2D tensors)
     """
-    device = get_obj_device(model)
+    device = get_obj_device(next(iter(model.components.values())))
     # Create a batch of inputs with single active features
     has_pos_dim = len(batch_shape) == 3
     n_features = batch_shape[-1]
@@ -216,7 +216,7 @@ def get_single_feature_causal_importances(
 
 
 def plot_causal_importance_vals(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch_shape: tuple[int, ...],
     input_magnitude: float,
     sampling: SamplingType,

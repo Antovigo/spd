@@ -56,10 +56,14 @@ The LM `batch` is a bare `[B,S]` Int token-id tensor → **`batch is idx`** (con
   `module_to_c`, `target_module_paths`, `components`, `ci_fn`, `use_cached_residual`,
   `model` (the inner ComponentTarget). Keep `nn.Module` (so it can be a fully_shard root /
   hold the inner module), but it has NO params of its own.
-- **Typing note to surface:** `MetricContext.model` and `Metric.bind(model=...)` are typed
-  `ComponentModel`. The adapter is not a `ComponentModel` subclass. Pooled code casts
-  (`cast(ComponentModel, cast(object, lm))`). Report whether a `ComponentModelProtocol`
-  would be cleaner than casting.
+- **Typing note (resolved):** `MetricContext.model`, `Metric.bind(model=...)`,
+  `instantiate_metrics(...)`, and the shared `train_step.py` helpers are typed against
+  `ComponentModelProtocol` (defined in `param_decomp/component_model.py`) — the structural
+  surface the training step + loss/eval metrics consume. The adapter (`FsdpComponentAdapter`),
+  the core `ComponentModel`, and the vendored `LMComponentModel` all satisfy it, so the
+  `cast(ComponentModel, cast(object, lm))` idiom is gone. The Protocol's `__call__` uses a
+  3-way `cache_type` (`"input"`/`"output"`/`"none"`) — the subset consumers request — so the
+  adapter's narrower forward satisfies it while the concrete model's 4-way forward also does.
 
 ### `config.py` — Agent C
 `FsdpRuntimeConfig(RuntimeConfig)` — subclass core `param_decomp.configs.RuntimeConfig`

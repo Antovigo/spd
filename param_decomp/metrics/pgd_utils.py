@@ -8,7 +8,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce, broadcast_tensor
 from param_decomp.masks import (
     ComponentsMaskInfo,
@@ -47,7 +47,7 @@ def get_pgd_init_tensor(
 
 
 def _init_adv_sources(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch_dims: tuple[int, ...],
     device: torch.device | str,
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
@@ -123,7 +123,7 @@ def _construct_mask_infos_from_adv_sources(
 
 
 def _forward_with_adv_sources(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     adv_sources: dict[str, Float[Tensor, "*batch_dim_or_ones mask_c"]],
     ci: dict[str, Float[Tensor, "... C"]],
@@ -145,7 +145,7 @@ def _forward_with_adv_sources(
 
 
 def pgd_masked_recon_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,

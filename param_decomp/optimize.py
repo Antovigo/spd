@@ -20,7 +20,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
-from param_decomp.component_model import ComponentModel, component_grad_norms
+from param_decomp.component_model import (
+    ComponentModel,
+    ComponentModelProtocol,
+    component_grad_norms,
+)
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
@@ -65,7 +69,7 @@ __all__ = [
 
 
 def tie_component_weights(
-    component_model: ComponentModel, tied_weights: list[tuple[str, str]]
+    component_model: ComponentModelProtocol, tied_weights: list[tuple[str, str]]
 ) -> None:
     for src_name, tgt_name in tied_weights:
         tgt = component_model.components[tgt_name]

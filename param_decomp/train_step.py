@@ -26,7 +26,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
-from param_decomp.component_model import ComponentModel, OutputWithCache
+from param_decomp.component_model import ComponentModelProtocol, OutputWithCache
 from param_decomp.configs import PDConfig
 from param_decomp.metrics.base import LossMetricConfig, Metric
 from param_decomp.metrics.context import MetricContext
@@ -129,7 +129,7 @@ def _build_metric_context(
     is_eval: bool,
     device: str,
     wrapped_model: nn.Module,
-    component_model: ComponentModel,
+    component_model: ComponentModelProtocol,
     config: PDConfig,
     reconstruction_loss: ReconstructionLoss,
     weight_deltas: dict[str, Tensor],
@@ -200,7 +200,7 @@ def run_loss_step(
     step: int,
     device: str,
     wrapped_model: nn.Module,
-    component_model: ComponentModel,
+    component_model: ComponentModelProtocol,
     loss_metrics: dict[str, Metric[Any]],
     config: PDConfig,
     reconstruction_loss: ReconstructionLoss,
@@ -278,7 +278,7 @@ def run_eval_pass(
     step: int,
     device: str,
     wrapped_model: nn.Module,
-    component_model: ComponentModel,
+    component_model: ComponentModelProtocol,
     config: PDConfig,
     reconstruction_loss: ReconstructionLoss,
     autocast_bf16: bool,

@@ -52,7 +52,7 @@ from param_decomp.ci_fns import (
     GlobalSharedTransformerCiFn,
     LayerwiseCiFnWrapper,
 )
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.configs import Cadence, PDConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
@@ -261,9 +261,7 @@ class FsdpLMTrainer:
         # Tie weights on the unsharded CPU components, before `fully_shard` replaces
         # `.data` with DTensor shards (tying mutates `.data` directly).
         if pd_config.tied_weights is not None:
-            tie_component_weights(
-                cast(ComponentModel, cast(object, self.lm)), pd_config.tied_weights
-            )
+            tie_component_weights(self.lm, pd_config.tied_weights)
 
         # --- 3. frozen target buffers -> no-grad params so FSDP2 shards them ---
         if runtime_config.shard_frozen_target:
@@ -316,9 +314,7 @@ class FsdpLMTrainer:
             weight_decay=pd_config.ci_fn_optimizer.weight_decay,
         )
 
-        self.loss_metrics, _ = instantiate_metrics(
-            pd_config, cast(ComponentModel, cast(object, self.adapter)), device
-        )
+        self.loss_metrics, _ = instantiate_metrics(pd_config, self.adapter, device)
 
         # --- 8. flash-attention dispatch probe ---
         cfg = self.lm.model.config
@@ -414,7 +410,7 @@ class FsdpLMTrainer:
         for _ in range(self.step):
             next(train_iterator)
 
-        component_model = cast(ComponentModel, cast(object, self.adapter))
+        component_model = self.adapter
 
         if self.step == 0 and pd_config.faithfulness_warmup_steps > 0:
             run_faithfulness_warmup(component_model, self._component_params, pd_config)
@@ -518,7 +514,7 @@ class FsdpLMTrainer:
         self,
         eval_loop: EvalLoop | None,
         device: str,
-        component_model: ComponentModel,
+        component_model: ComponentModelProtocol,
     ) -> dict[str, Metric[Any]]:
         """Merge loss + eval-only metric instances keyed by class name (mirror core
         ``Trainer._build_all_metric_instances``); rejects name collisions."""

@@ -6,7 +6,7 @@ from jaxtyping import Float, Int
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     AllLayersRouter,
@@ -25,7 +25,7 @@ class StochasticHiddenActsReconLossConfig(LossMetricConfig):
 
 
 def calc_hidden_acts_mse(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
     mask_infos: dict[str, ComponentsMaskInfo],
     target_acts: dict[str, Float[Tensor, "..."]],
@@ -63,7 +63,7 @@ def _accumulate_per_module(accum: PerModuleMSE, per_module: PerModuleMSE) -> Non
 
 
 def _stochastic_hidden_acts_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     sampling: SamplingType,
     n_mask_samples: int,
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
@@ -167,7 +167,7 @@ class StochasticHiddenActsReconLoss(Metric[StochasticHiddenActsReconLossConfig])
 
 
 def stochastic_hidden_acts_recon_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     sampling: SamplingType,
     n_mask_samples: int,
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],

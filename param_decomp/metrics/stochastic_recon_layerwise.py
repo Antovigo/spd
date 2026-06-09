@@ -6,7 +6,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import AllLayersRouter, SamplingType, calc_stochastic_component_mask_info
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
@@ -19,7 +19,7 @@ class StochasticReconLayerwiseLossConfig(LossMetricConfig):
 
 
 def _stochastic_recon_layerwise_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     sampling: SamplingType,
     n_mask_samples: int,
     batch: Any,
@@ -50,7 +50,7 @@ def _stochastic_recon_layerwise_loss_update(
 
 
 def stochastic_recon_layerwise_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     sampling: SamplingType,
     n_mask_samples: int,
     batch: Any,

@@ -23,7 +23,7 @@ from pydantic import Field
 from torch import Tensor
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModel, ComponentModelProtocol
 from param_decomp.distributed import all_reduce, is_main_process
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -77,7 +77,10 @@ class AutointerpLabels(Metric[AutointerpLabelsConfig]):
         self.reset()
 
     @override
-    def bind(self, *, model: ComponentModel, device: str) -> None:
+    def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
+        assert isinstance(model, ComponentModel), (
+            "AutointerpLabels needs the concrete ComponentModel (target_model + harvest)"
+        )
         super().bind(model=model, device=device)
         topology = TransformerTopology(model.target_model)
         self._model_metadata = ModelMetadata(
@@ -157,6 +160,7 @@ class AutointerpLabels(Metric[AutointerpLabelsConfig]):
         u_norms = self._u_norms_for(selection)
         harvester = self._harvester_for(selection, ctx.target_out.shape[-1])
 
+        assert isinstance(self.model, ComponentModel), "bind asserts the concrete ComponentModel"
         comp_acts = get_all_component_acts(self.model, ctx.pre_weight_acts)
         output_probs = torch.softmax(ctx.target_out, dim=-1)
 

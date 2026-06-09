@@ -6,7 +6,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import make_mask_infos
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
@@ -18,7 +18,7 @@ class CIMaskedReconLossConfig(LossMetricConfig):
 
 
 def _ci_masked_recon_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],
@@ -30,7 +30,7 @@ def _ci_masked_recon_loss_update(
 
 
 def ci_masked_recon_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],

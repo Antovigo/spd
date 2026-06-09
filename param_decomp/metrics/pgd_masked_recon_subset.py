@@ -5,7 +5,7 @@ from pydantic import Field
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import SubsetRoutingType, UniformKSubsetRoutingConfig, get_subset_router
 from param_decomp.metrics.base import Metric, MetricResult
@@ -31,7 +31,7 @@ class PGDReconSubsetLoss(Metric[PGDReconSubsetLossConfig]):
     short_name = "PGDReconSub"
 
     @override
-    def bind(self, *, model: ComponentModel, device: str) -> None:
+    def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
         super().bind(model=model, device=device)
         self.router = get_subset_router(self.cfg.routing, device)
 

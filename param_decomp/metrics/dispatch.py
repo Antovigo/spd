@@ -5,7 +5,7 @@ The `type` literal -> class table is `LOSS_METRIC_CLASSES`.
 
 from typing import Any
 
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.configs import PDConfig
 from param_decomp.metrics.base import Metric
 from param_decomp.metrics.ci_masked_recon import CIMaskedReconLoss
@@ -50,7 +50,7 @@ LOSS_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
 
 def instantiate_metrics(
     pd_config: PDConfig,
-    component_model: ComponentModel,
+    component_model: ComponentModelProtocol,
     device: str,
     eval_metrics: list[Metric[Any]] | None = None,
 ) -> tuple[dict[str, Metric[Any]], dict[str, Metric[Any]]]:

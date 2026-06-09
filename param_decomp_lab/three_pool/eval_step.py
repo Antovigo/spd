@@ -18,14 +18,13 @@ per-metric audit.
 import gc
 import time
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
-from param_decomp.component_model import ComponentModel
 from param_decomp.configs import PDConfig, RuntimeConfig
 from param_decomp.distributed import sync_across_processes, use_reduction_group
 from param_decomp.log import logger
@@ -105,11 +104,7 @@ def _build_metric_context_three_pool(
                 ctx.role, c_per_site, seq_len=seq_len, device=torch.device(device)
             )
             return MetricContext(
-                # LMComponentModel is the 3-pool's component model; it exposes the same
-                # duck-typed surface the metrics use (forward_with_output_acts,
-                # calc_causal_importances, components, target_weight, ...). The two are
-                # distinct classes (no shared base), so cast through object.
-                model=cast(ComponentModel, cast(object, component_model)),
+                model=component_model,
                 batch=batch_local,
                 target_out=target_out,
                 pre_weight_acts=pre_weight_acts,

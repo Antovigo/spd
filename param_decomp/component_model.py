@@ -7,7 +7,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Literal, NamedTuple, overload, override
+from typing import Any, Literal, NamedTuple, Protocol, overload, override
 
 import torch
 from jaxtyping import Float, Int
@@ -52,6 +52,71 @@ class CIOutputs:
     lower_leaky: dict[str, Float[Tensor, "... C"]]
     upper_leaky: dict[str, Float[Tensor, "... C"]]
     pre_sigmoid: dict[str, Tensor]
+
+
+class ComponentModelProtocol(Protocol):
+    """Structural surface the training step + loss/eval metrics consume.
+
+    Satisfied by the core `ComponentModel`, the FSDP `FsdpComponentAdapter`, and the
+    vendored `LMComponentModel` — none of which share a base. The `__call__` overloads
+    use a 3-way `cache_type` (`"input"`/`"output"`/`"none"`), the subset the consumers
+    actually request. This is deliberately narrower than `ComponentModel`'s 4-way
+    `cache_type`: a `__call__` accepting MORE literal values is assignable to a Protocol
+    method accepting FEWER (contravariance of the parameter), so the 4-way concrete model
+    and the 3-way adapter both satisfy this; widening the Protocol to 4-way would exclude
+    the adapter.
+    """
+
+    @property
+    def module_to_c(self) -> dict[str, int]: ...
+
+    @property
+    def target_module_paths(self) -> list[str]: ...
+
+    @property
+    def components(self) -> dict[str, Components]: ...
+
+    @overload
+    def __call__(
+        self,
+        batch: Any,
+        cache_type: Literal["input"],
+        mask_infos: dict[str, ComponentsMaskInfo] | None = None,
+    ) -> OutputWithCache: ...
+
+    @overload
+    def __call__(
+        self,
+        batch: Any,
+        cache_type: Literal["output"],
+        mask_infos: dict[str, ComponentsMaskInfo] | None = None,
+    ) -> OutputWithCache: ...
+
+    @overload
+    def __call__(
+        self,
+        batch: Any,
+        mask_infos: dict[str, ComponentsMaskInfo] | None = None,
+        cache_type: Literal["none"] = "none",
+    ) -> Tensor: ...
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor | OutputWithCache: ...
+
+    def forward_with_output_acts(
+        self,
+        batch: Any,
+        /,
+        mask_infos: dict[str, ComponentsMaskInfo] | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor]]: ...
+
+    def calc_causal_importances(
+        self,
+        pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "... pos"]],
+        sampling: SamplingType,
+        detach_inputs: bool = False,
+    ) -> CIOutputs: ...
+
+    def calc_weight_deltas(self) -> dict[str, Float[Tensor, "d_out d_in"]]: ...
 
 
 class ComponentModel(nn.Module):

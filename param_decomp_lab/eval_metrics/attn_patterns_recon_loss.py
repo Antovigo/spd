@@ -11,7 +11,7 @@ from torch import Tensor, nn
 from torch.distributed import ReduceOp
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModel, ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     AllLayersRouter,
@@ -122,7 +122,7 @@ def _split_combined_qkv(
 
 
 def _attn_patterns_recon_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Int[Tensor, "..."] | Float[Tensor, "..."],
     pre_weight_acts: dict[str, Float[Tensor, "..."]],
     mask_infos_list: list[dict[str, ComponentsMaskInfo]],
@@ -188,7 +188,10 @@ class _AttnPatternsBase(Metric[_AttnPatternsBaseConfig], ABC):
     """
 
     @override
-    def bind(self, *, model: ComponentModel, device: str) -> None:
+    def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
+        assert isinstance(model, ComponentModel), (
+            "attn-pattern metrics need the concrete ComponentModel (target_model attn modules)"
+        )
         super().bind(model=model, device=device)
         self.n_heads = self.cfg.n_heads
         self.q_paths, self.k_paths, self.is_combined = _resolve_qk_paths(

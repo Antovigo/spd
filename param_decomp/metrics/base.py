@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 from torch import Tensor
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 
 
 class LossMetricConfig(BaseConfig):
@@ -42,7 +42,7 @@ class Metric[TConfig: BaseConfig](ABC):
     slow: ClassVar[bool] = False
     short_name: ClassVar[str | None] = None
     cfg: TConfig
-    model: ComponentModel
+    model: ComponentModelProtocol
     device: str
 
     def __init__(self, cfg: TConfig) -> None:
@@ -50,15 +50,17 @@ class Metric[TConfig: BaseConfig](ABC):
         self.cfg = cfg
         self._bound = False
 
-    def bind(self, *, model: ComponentModel, device: str) -> None:
-        """Attach the live `ComponentModel` and device, then call `reset()`.
+    def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
+        """Attach the live component model and device, then call `reset()`.
 
         Called once by the training loop before any other method. Subclasses needing
         additional bind-time setup (e.g. resolving module paths against the model)
         should override and call `super().bind(...)` first.
 
         Args:
-            model: The `ComponentModel` this metric will observe.
+            model: The component model this metric will observe — any
+                `ComponentModelProtocol` (core `ComponentModel`, FSDP adapter, or the
+                vendored `LMComponentModel`).
             device: Device string used for accumulators and any other allocated state.
         """
         assert not self._bound, f"{type(self).__name__} is already bound"

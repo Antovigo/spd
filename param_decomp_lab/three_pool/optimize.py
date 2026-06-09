@@ -42,7 +42,7 @@ import os
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Self
 
 import torch
 import torch.distributed as dist
@@ -54,7 +54,6 @@ from torch.utils.data import DataLoader
 from param_decomp._trace import dump_memory_stats, trace
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
 from param_decomp.ci_fns import GlobalSharedTransformerCiFn
-from param_decomp.component_model import ComponentModel
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     DecompositionTarget,
@@ -665,12 +664,7 @@ class ThreePoolTrainer:
         eval_iterator = loop_dataloader(eval_loop.loader) if eval_loop is not None else None
         if eval_loop is not None and isinstance(ctx, PPGDContext):
             for m in eval_loop.metrics:
-                # LMComponentModel exposes the metric-facing surface the eval metrics use;
-                # it shares no base with ComponentModel, so cast through object.
-                m.bind(
-                    model=cast(ComponentModel, cast(object, self.component_model)),
-                    device=str(device),
-                )
+                m.bind(model=self.component_model, device=str(device))
 
         # Peek first batch (after any skip) for PPGD source-shape sizing.
         trace("Trainer.run: first_batch peek: enter")

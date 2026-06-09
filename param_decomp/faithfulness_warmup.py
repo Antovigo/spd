@@ -10,14 +10,14 @@ import gc
 import torch
 from torch import optim
 
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.configs import PDConfig
 from param_decomp.log import logger
 from param_decomp.metrics.faithfulness import faithfulness_loss
 
 
 def run_faithfulness_warmup(
-    component_model: ComponentModel,
+    component_model: ComponentModelProtocol,
     component_params: list[torch.nn.Parameter],
     config: PDConfig,
 ) -> None:

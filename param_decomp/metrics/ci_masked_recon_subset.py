@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     Router,
@@ -28,7 +28,7 @@ class CIMaskedReconSubsetLossConfig(LossMetricConfig):
 
 
 def _ci_masked_recon_subset_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],
@@ -49,7 +49,7 @@ def _ci_masked_recon_subset_loss_update(
 
 
 def ci_masked_recon_subset_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],
@@ -57,14 +57,12 @@ def ci_masked_recon_subset_loss(
     reconstruction_loss: ReconstructionLoss,
 ) -> Float[Tensor, ""]:
     """Compute CI-masked subset recon loss directly (helper for tests/notebooks)."""
-    from param_decomp.torch_helpers import get_obj_device
-
     sum_loss, n = _ci_masked_recon_subset_loss_update(
         model=model,
         batch=batch,
         target_out=target_out,
         ci=ci,
-        router=get_subset_router(routing, device=get_obj_device(model)),
+        router=get_subset_router(routing, device=target_out.device),
         reconstruction_loss=reconstruction_loss,
     )
     return sum_loss / n
@@ -81,7 +79,7 @@ class CIMaskedReconSubsetLoss(Metric[CIMaskedReconSubsetLossConfig]):
     short_name = "CIMaskReconSub"
 
     @override
-    def bind(self, *, model: ComponentModel, device: str) -> None:
+    def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
         super().bind(model=model, device=device)
         self.router = get_subset_router(self.cfg.routing, device)
 

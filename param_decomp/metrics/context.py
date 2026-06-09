@@ -10,7 +10,7 @@ from jaxtyping import Float
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import CIOutputs, ComponentModel
+from param_decomp.component_model import CIOutputs, ComponentModelProtocol
 from param_decomp.masks import SamplingType
 
 
@@ -22,7 +22,7 @@ class MetricContext:
     batch.
     """
 
-    model: ComponentModel
+    model: ComponentModelProtocol
     batch: Any
     target_out: Tensor
     pre_weight_acts: dict[str, Float[Tensor, "..."]]

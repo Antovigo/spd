@@ -12,7 +12,7 @@ core library. For eval metrics (user-extensible, lab-side), see
 | File | Purpose |
 |---|---|
 | `base.py` | `Metric` ABC (lifecycle: `__init__(cfg)` → `bind` → `update` → `compute`) + `LossMetricConfig` base + `before_backward` / `after_backward` hooks |
-| `context.py` | `MetricContext` — the per-step bundle every `Metric.update(ctx)` receives |
+| `context.py` | `MetricContext` — the per-step bundle every `Metric.update(ctx)` receives; `ctx.model` is a `ComponentModelProtocol` (core `ComponentModel`, FSDP adapter, or vendored `LMComponentModel`) |
 | `dispatch.py` | `LOSS_METRIC_CLASSES` type→class table + `instantiate_metrics(...)` |
 | `<loss_name>.py` | One file per metric: `<Name>Loss` class + `<Name>LossConfig` config side-by-side |
 | `persistent_pgd_state.py` | PPGD adversarial-source state machine (shared by `persistent_pgd_recon.py`) |

@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.component_model import ComponentModel
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     Router,
@@ -30,7 +30,7 @@ class StochasticReconSubsetLossConfig(LossMetricConfig):
 
 
 def _stochastic_recon_subset_loss_update(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     sampling: SamplingType,
     n_mask_samples: int,
     batch: Any,
@@ -61,7 +61,7 @@ def _stochastic_recon_subset_loss_update(
 
 
 def stochastic_recon_subset_loss(
-    model: ComponentModel,
+    model: ComponentModelProtocol,
     sampling: SamplingType,
     n_mask_samples: int,
     batch: Any,
@@ -80,7 +80,7 @@ def stochastic_recon_subset_loss(
         target_out=target_out,
         ci=ci,
         weight_deltas=weight_deltas,
-        router=get_subset_router(routing, device=get_obj_device(model)),
+        router=get_subset_router(routing, device=target_out.device),
         reconstruction_loss=reconstruction_loss,
     )
     return sum_loss / n
@@ -96,7 +96,7 @@ class StochasticReconSubsetLoss(Metric[StochasticReconSubsetLossConfig]):
     short_name = "StochReconSub"
 
     @override
-    def bind(self, *, model: ComponentModel, device: str) -> None:
+    def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
         super().bind(model=model, device=device)
         self.router = get_subset_router(self.cfg.routing, device)
 
