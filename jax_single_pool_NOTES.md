@@ -150,6 +150,60 @@ per-process-slice idiom. The bit-exact isolation repro that nailed it: identical
 `recon0` + `first_grad_sum` to 12 digits once the full array is `device_put` with
 `P(None,'dp',None)`.
 
-## Needs a GPU/TPU to validate
+## Full-LM Llama-8B output-recon variant (2026-06-09, GPU)
 
+The layerwise core (`step.py`/`losses.py`) does *site-local* MSE recon — it does NOT
+match the torch reference. The torch `StochasticReconLayerwiseLoss` masks ONE module
+but reconstructs the **final logits** via a full masked re-forward (and PPGD masks all
+sites at once). So the core's site-local recon is a simplification; the real workload
+needs a masked re-forward through the suffix. That full-LM variant now lives in:
+
+- `llama8b.py` — residual-start L18->L31 frozen suffix + decomposed L18 MLP (V/U +
+  weight-delta) + **real HF safetensors loader** (no torch dep; reads the cached
+  `meta-llama/Llama-3.1-8B` shards directly) + `make_real_target_residual` (one frozen
+  L0->L17 prefix forward, the residual-start amortization).
+- `ci_fn.py` — `global_shared_transformer` CI fn (d4096 / 4 bidir-RoPE blocks / 64 heads
+  / mlp16384), per-site clean inputs concatenated, leaky-hard-sigmoid head.
+- `llama8b_step.py` — the full 4-loss + persistent-PGD step, output-recon on logits.
+  n_warmup pre-ascents (lax.scan, params+ci detached) + one post-update ascent. Source
+  clamped to [0,1] (torch config `use_sigmoid_parameterization: false`). `jax.checkpoint`
+  on the masked suffix forwards (recompute in bwd — trades compute for memory so a real
+  batch fits).
+- `llama8b_sharding.py` — the FSDP-analog GSPMD plan (see below).
+- `experiments/llama8b_real.py` — runner + tok/s/GPU + MFU + `--real_weights` + `--shard`.
+- `experiments/llama8b_slurm.sbatch` — 1-task/GPU multi-GPU launcher.
+
+This is the clean re-homing of `jax_spike/stage10_real_pd_bench.py` into the package,
+PLUS the two open HANDOFF TODOs: real HF weights, and working param sharding.
+
+### Why output-recon, not the core's layerwise site-local recon
+Matching torch apples-to-apples requires the masked re-forward (the recon target is the
+clean *suffix logits*, not each weight's local output). The core's `forward.py` recon is
+kept as the simplified layerwise variant; the 8B target deliberately uses its own step.
+
+### Single-B200 results (this node, 183GB B200, PEAK 1715 TFLOP/s bf16)
+bl4, seq2048, C=24576, n_warmup=2, all jit'd one executable:
+- random weights:  4,538 tok/s/GPU
+- **real HF weights: 4,600 tok/s/GPU** (loss ppgd 4.99 >> stoch 0.13 — strong minimax
+  signature with real structure, vs ppgd 1.42 / stoch 0.37 on random weights)
+- `--shard` on 1-device mesh (no-op): 4,524 tok/s/GPU (sharding code path validated)
+- bl8 OOMs replicated on 183GB (157GB activation alloc) -> the shard path is the fix
+- All HOST-BOUND (dispatch ~1.4s vs blocked ~1.8s): the many small jit sub-forwards have
+  high Python dispatch overhead. Real multi-step training amortizes this; for the bench
+  the device-bound number is the lower of blocked/dispatch.
+
+MFU caveat: the reported ~87% over-counts — the FLOP model charges fwd+bwd=3x for the PGD
+ascents (params detached -> bwd is cheaper) and doesn't separately account for checkpoint
+recompute. Treat tok/s/GPU as the hard number; MFU is an upper-ish estimate.
+
+### Sharding plan (the memory story / FSDP analog)
+1-D `dp` mesh. Frozen suffix REPLICATED (~7.3GB/dev bf16, small vs activations). V/U +
+their fp32 Adam states SHARDED over the C axis (`P(None,'dp')` for V (d_in,C); `P('dp',
+None)` for U (C,d_out)) — every einsum stays valid, XLA inserts the reduce on the
+contracted sharded C. CI fn + Adam sharded on the largest axis. PGD broadcast source
+(1,T,C) sharded on C. Residual input + all activations BATCH-sharded (`P('dp')`) -> the
+masked suffix re-forwards run on per-device sub-batches, so activation memory scales
+1/n_dev. This is what lets a global batch that OOMs replicated fit across devices.
+
+### Needs a GPU/TPU to validate
 (filled in as I hit accelerator-only paths)
