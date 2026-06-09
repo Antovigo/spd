@@ -79,12 +79,15 @@ def make_step(mesh, opt_vu, opt_ci, dec_layers, sites, lr_pgd, n_pgd):
                     site: s.frozen_W(frozen, site) - (vus[site].V @ vus[site].U).T for site in sites
                 }
                 l_faith = sum((d**2).sum() for d in wd.values()) / sum(d.size for d in wd.values())
-                l_stoch = jnp.array(0.0)
-                for i, site in enumerate(sites):
-                    u = random.uniform(random.fold_in(key, i), ci_b[site].shape, dtype=DT)
-                    m = {**nomask, site: ci_b[site] + (1 - ci_b[site]) * u}
-                    l_stoch = l_stoch + s.recon(ckpt(frozen, vus, dec_layers, idx_p, m, dm), clean)
-                l_stoch = l_stoch / len(sites)
+                # Subset estimator (n_samples=1): one joint masked forward over ALL sites at once,
+                # matching the torch 2-pool recon_plan (vs per-site layerwise = 6 forwards).
+                m_stoch = {
+                    site: ci_b[site]
+                    + (1 - ci_b[site])
+                    * random.uniform(random.fold_in(key, i), ci_b[site].shape, DT)
+                    for i, site in enumerate(sites)
+                }
+                l_stoch = s.recon(ckpt(frozen, vus, dec_layers, idx_p, m_stoch, dm), clean)
                 ppgd_b = {site: ci_b[site] * jax.nn.sigmoid(src_p[site]) for site in sites}
                 l_ppgd = s.recon(ckpt(frozen, vus, dec_layers, idx_p, ppgd_b, dm), clean)
                 return COEFF["faith"] * l_faith + COEFF["stoch"] * l_stoch + COEFF["ppgd"] * l_ppgd

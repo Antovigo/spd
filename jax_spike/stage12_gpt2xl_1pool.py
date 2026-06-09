@@ -276,12 +276,14 @@ def make_step(opt_vu, opt_ci, dec_layers, sites, lr_pgd, n_pgd):
             l_faith = sum((d**2).sum() for d in wd.values()) / sum(d.size for d in wd.values())
             l_imp = jnp.mean(jnp.stack([jnp.mean(jnp.clip(v, 0, 1) ** P_IMP) for v in ci.values()]))
 
-            l_stoch = jnp.array(0.0)
-            for i, s in enumerate(sites):
-                u = random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
-                m = {**nomask, s: ci[s] + (1 - ci[s]) * u}
-                l_stoch = l_stoch + recon(ckpt(frozen, vus, dec_layers, idx, m, dm), clean)
-            l_stoch = l_stoch / len(sites)
+            # Subset estimator (n_samples=1): one joint masked forward over ALL sites at once,
+            # matching the torch 2-pool recon_plan (vs the per-site layerwise loop = 6 forwards).
+            m_stoch = {
+                s: ci[s]
+                + (1 - ci[s]) * random.uniform(random.fold_in(key, i), ci[s].shape, dtype=DT)
+                for i, s in enumerate(sites)
+            }
+            l_stoch = recon(ckpt(frozen, vus, dec_layers, idx, m_stoch, dm), clean)
 
             src = jax.lax.stop_gradient(state.source)
             ppgd_masks = {s: ci[s] * jax.nn.sigmoid(src[s]) for s in sites}
