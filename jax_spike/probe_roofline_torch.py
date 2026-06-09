@@ -81,7 +81,9 @@ for b in [1, 2, 4, 8, 16, 32, 64, 128]:
 
     def fwd_bwd(idx=idx):
         model.zero_grad(set_to_none=True)
-        fn(idx).float().pow(2).sum().backward()
+        out = fn(idx)
+        logits = out[0] if isinstance(out, tuple) else out
+        logits.float().pow(2).sum().backward()
 
     try:
         t_f = med(fwd)
