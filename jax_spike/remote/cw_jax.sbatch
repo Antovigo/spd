@@ -19,7 +19,9 @@ mkdir -p logs
 echo "=== job $SLURM_JOB_ID | nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS | $(date) ==="
 echo "nodelist: $SLURM_JOB_NODELIST | cmd: python $* ==="
 
-srun --kill-on-bad-exit=1 bash -c "
+# Force 8 tasks/node spread across the allocation (CoreWeave's default srun packs all tasks onto
+# one node -> ranks with LOCALID>7 hit a nonexistent GPU ordinal). Explicit block distribution fixes it.
+srun --kill-on-bad-exit=1 --nodes="$SLURM_NNODES" --ntasks-per-node=8 --distribution=block bash -c "
   cd ~/pd-nano-jax/jax_spike
   source ${JAX_VENV:-.venv-cuda}/bin/activate
   python $*
