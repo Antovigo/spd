@@ -21,6 +21,6 @@ echo "nodelist: $SLURM_JOB_NODELIST | cmd: python $* ==="
 
 srun --kill-on-bad-exit=1 bash -c "
   cd ~/pd-nano-jax/jax_spike
-  source .venv-cuda/bin/activate
+  source ${JAX_VENV:-.venv-cuda}/bin/activate
   python $*
 "

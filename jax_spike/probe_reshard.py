@@ -1,0 +1,53 @@
+"""Probe: cost of cross-sub-mesh `jax.reshard` inside a jit (sub-mesh viability).
+
+Two sub-meshes over disjoint device halves; reshard a CI-values-sized tensor A->B inside a
+jitted step. Measures median latency + asserts the transfer is device-to-device (host transfer
+would raise under the guard). Tells us whether the sub-mesh route's cross-pool hand-offs are cheap.
+"""
+
+import statistics
+import time
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
+
+devs = jax.devices()
+assert len(devs) >= 8, f"need >=8 GPUs, got {len(devs)}"
+half = len(devs) // 2
+mesh_a = Mesh(np.array(devs[:half]), ("dp",))
+mesh_b = Mesh(np.array(devs[half : 2 * half]), ("dp",))
+sh_a = NamedSharding(mesh_a, P("dp"))
+sh_b = NamedSharding(mesh_b, P("dp"))
+
+# A few realistic hand-off sizes (bf16): ci-values (batch,seq,C), g_VU (C,ffn), full V/U-ish.
+shapes = {
+    "ci_values (16,1024,8192)": (16, 1024, 8192),
+    "g_vu (8192,6400)": (8192, 6400),
+    "vu_block (6400,8192)": (6400, 8192),
+}
+
+for label, shape in shapes.items():
+    x = jax.device_put(jnp.ones(shape, jnp.bfloat16), sh_a)
+
+    @jax.jit
+    def move(t):
+        return jax.reshard(t, sh_b)
+
+    y = move(x)
+    jax.block_until_ready(y)  # warm/compile
+
+    # assert device-to-device (host transfer would raise)
+    with jax.transfer_guard_device_to_host("disallow"):
+        ts = []
+        for _ in range(30):
+            t0 = time.perf_counter()
+            y = move(x)
+            jax.block_until_ready(y)
+            ts.append(time.perf_counter() - t0)
+    mb = x.nbytes / 1e6
+    print(f"[reshard] {label:28s} {mb:7.1f} MB  A->B  median {1e3 * statistics.median(ts):7.3f} ms")
+
+print("[reshard] done (all transfers were device-to-device; host transfer would have raised)")
