@@ -326,13 +326,14 @@ def make_real_target_residual(model_name: str, cfg: LlamaConfig, idx, chunk: int
         for i in range(DECOMPOSED_LAYER)
     ]
 
-    @jax.jit
     def prefix_chunk(idx_c):
         x = embed[idx_c]
         for blk in blocks:
             x = blk(x, inv_freq)
         return x
 
+    # eager (not jit'd): a one-time harvest where jit's constant-capture + compile of the
+    # 8GB prefix weights dwarfs the runtime. Eager keeps peak activation to one chunk.
     b = idx.shape[0]
-    outs = [prefix_chunk(idx[i : i + chunk]) for i in range(0, b, chunk)]
+    outs = [jax.block_until_ready(prefix_chunk(idx[i : i + chunk])) for i in range(0, b, chunk)]
     return jnp.concatenate(outs, axis=0)
