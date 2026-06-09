@@ -446,6 +446,9 @@ class FsdpLMTrainer:
                 )
 
             if cadence.should_log_train(step):
+                batch_log_data["mem/peak_gb_per_rank"] = (
+                    torch.cuda.max_memory_allocated(device) / 1024**3
+                )
                 batch_log_data = cast(
                     defaultdict[str, float],
                     avg_metrics_across_ranks(batch_log_data, device=device),
