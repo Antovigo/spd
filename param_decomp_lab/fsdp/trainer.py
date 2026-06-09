@@ -148,28 +148,6 @@ def _target_transformer_blocks(model: ComponentTarget) -> list[nn.Module]:
             return list(model._layers)
 
 
-def _target_embedding_shard_groups(model: ComponentTarget) -> list[nn.Module | list[nn.Module]]:
-    """The target's embedding-side modules, each wrapped by its OWN ``fully_shard`` group.
-
-    Residual-start runs the embedding (and the frozen prefix blocks) via ``residual_at`` —
-    a method that bypasses the root ``model.forward``, so the root's all-gather pre-hook
-    never fires. Left only with the root wrap, a sharded embedding weight (a DTensor) meets
-    the plain-tensor token ids and raises ``aten.embedding got mixed torch.Tensor and
-    DTensor``. Giving each embedding its own ``fully_shard`` installs a hook that all-gathers
-    on every call, including from ``residual_at``. (Only relevant under
-    ``shard_frozen_target``; without it these weights stay replicated and need no hook.)
-
-    GPT-2 ties ``wte.weight`` to ``lm_head.weight``; the two are co-sharded in one group
-    (a list) so the shared param lives under a single FSDP group. Llama-3.1 has an untied
-    ``lm_head`` (asserted in the vendored model), so ``embed_tokens`` shards standalone.
-    """
-    match model:
-        case ComponentGPT2():
-            return [[model.wte, model.lm_head], model.wpe]
-        case ComponentLlama():
-            return [model.embed_tokens]
-
-
 def _ci_fn_transformer_blocks(
     ci_fn: GlobalCiFnWrapper | LayerwiseCiFnWrapper,
 ) -> list[nn.Module]:
@@ -293,21 +271,21 @@ class FsdpLMTrainer:
         if runtime_config.checkpoint_blocks:
             self.lm.model.enable_activation_checkpointing()
 
-        # --- 5. fully_shard each block + the roots, then move to device ---
+        # --- 5. fully_shard each transformer block + the ci-fn, then move to device ---
+        # Only the transformer blocks (which hold every trainable component V/U and, under
+        # `shard_frozen_target`, the in-block frozen target weights) and the ci-fn are sharded.
+        # The frozen embedding / final-norm / lm_head are deliberately left REPLICATED: residual
+        # start runs the embedding via `residual_at`, which bypasses the root module's forward
+        # hook, so a root-sharded embedding weight (a DTensor) would meet the plain-tensor token
+        # ids and raise `aten.embedding got mixed torch.Tensor and DTensor`. Giving the embedding
+        # its own `fully_shard` instead makes it a root entered before the parent forward and
+        # trips FSDP2's single-root lazy-init. Leaving these few frozen modules replicated (~1GB
+        # for the 8B target) sidesteps both and is negligible against the 32 sharded blocks.
         for block in _target_transformer_blocks(self.lm.model):
             fully_shard(block)
-        # The embedding is run from `residual_at`, which bypasses the root forward hook; under
-        # `shard_frozen_target` its weight is a sharded DTensor, so it needs its own hook to
-        # all-gather on that call. Without sharding the frozen target the weight is replicated
-        # and no per-embedding hook is needed.
-        if runtime_config.shard_frozen_target:
-            for shard_group in _target_embedding_shard_groups(self.lm.model):
-                fully_shard(shard_group)
         for block in _ci_fn_transformer_blocks(ci_fn):
             fully_shard(block)
-        fully_shard(self.lm.model)
         fully_shard(ci_fn)
-        fully_shard(self.lm)
         self.lm = self.lm.to(device)
 
         # --- 6. per-rank compile caches, then compile per flags ---
