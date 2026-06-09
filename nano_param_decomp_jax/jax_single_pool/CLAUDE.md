@@ -5,6 +5,30 @@ Single-pool VPD (4-loss + persistent-PGD) training step in JAX. Sibling to
 torch FSDP path in `param_decomp_lab/fsdp/`. See `README.md` for the file map and
 `../../jax_single_pool_NOTES.md` for the design log + torch↔JAX mapping.
 
+## Two recon variants — DON'T conflate them
+
+- **Core (layerwise, site-local):** `step.py` / `losses.py` / `forward.py`. Recon is
+  `mean((y_dec - y_tgt)^2)` per decomposed weight — no model re-forward. A
+  *simplification*; it does NOT match the torch reference.
+- **Full-LM (output-recon):** `llama8b.py` / `ci_fn.py` / `llama8b_step.py` /
+  `llama8b_sharding.py`. Recon is MSE on the **final suffix logits** of a masked
+  re-forward (mask one site for stoch, all sites for PPGD) — this is what the torch
+  `StochasticReconLayerwiseLoss` / `PersistentPGDReconLoss` actually compute. This is
+  the real Llama-3.1-8B L18-MLP workload matching
+  `param_decomp_lab/experiments/lm/_fsdp/llama8b_l18_mlp_fsdp.yaml`. Run it via
+  `experiments/llama8b_real.py` (+`llama8b_slurm.sbatch` for multi-GPU). The full-LM
+  step is a clean re-homing of `jax_spike/stage10_real_pd_bench.py` + real HF weights +
+  working FSDP-style sharding.
+
+### Full-LM sharding (the memory story)
+Frozen suffix replicated; V/U + Adam sharded over the C axis; CI fn + Adam sharded;
+PGD broadcast source sharded on C; batch sharded over `dp`. CRITICAL: the step takes a
+`mesh` and pins every batch-leading activation to `P('dp', ...)` via
+`with_sharding_constraint` — without it XLA gathers the suffix activations to the FULL
+global batch and OOMs (allocated 223GB at gbatch=64). With it, activation memory scales
+1/n_dev. `vendored_jax` (the bit-parity JAX Llama in sibling `jax_spike/`) supplies the
+numeric kernels; `tests/conftest.py` puts it on the path.
+
 ## Invariants to preserve
 
 - **The step is one `jax.jit` fn over a pure `TrainState`.** No in-place mutation,
