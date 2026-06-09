@@ -12,7 +12,7 @@ data:
   dataset_name: apollo-research/Skylion007-openwebtext-tokenizer-gpt2
   column_name: input_ids
   is_tokenized: true
-  max_seq_len: 512
+  max_seq_len: 1024
   streaming: false
   tokenizer_name: openai-community/gpt2
   train_split: train
@@ -56,7 +56,7 @@ pd:
       - 3072
       attn_config:
         n_heads: 12
-        max_len: 512
+        max_len: 1024
         rope_base: 10000.0
   decomposition_targets:
   - C: 2048
