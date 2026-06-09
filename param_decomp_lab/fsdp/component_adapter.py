@@ -12,9 +12,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Literal, overload, override
 
+import einops
 from jaxtyping import Float, Int
 from torch import Tensor, nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 
 from param_decomp.ci_fns import GlobalCiFnWrapper, LayerwiseCiFnWrapper
 from param_decomp.component_model import CIOutputs, OutputWithCache
@@ -26,9 +27,17 @@ from param_decomp_lab.experiments.lm.vendored.component_model import (
 )
 
 
-def _to_full(t: Tensor) -> Tensor:
-    """Gather a sharded `DTensor` to a full local tensor; pass a plain tensor through."""
-    return t.full_tensor() if isinstance(t, DTensor) else t
+def _replicate(t: Tensor) -> Tensor:
+    """Gather a sharded `DTensor` to a `Replicate` DTensor; pass a plain tensor through.
+
+    Crucially this is NOT `full_tensor()`/`.to_local()`: it keeps the result a DTensor, so
+    its backward redistributes the gradient back to the source `Shard` placement. Gathering
+    the V/U *inputs* this way (then einsum-ing the replicated copies) makes the faithfulness
+    path's grad to V/U land in the params' native `Shard(0)` placement — the same placement
+    the recon forward produces — so FSDP2's gradient reduce-scatter sees consistent grads
+    when both paths accumulate into the same param.
+    """
+    return t.redistribute(placements=[Replicate()]) if isinstance(t, DTensor) else t
 
 
 class FsdpComponentAdapter(nn.Module):
@@ -99,22 +108,32 @@ class FsdpComponentAdapter(nn.Module):
         )
 
     def calc_weight_deltas(self) -> dict[str, Float[Tensor, "d_out d_in"]]:
-        """Per-site `target_weight - components.weight`, gathered to full tensors.
+        """Per-site `target_weight - V@U`, computed so V/U grads stay `Shard(0)` under FSDP2.
 
         FSDP2 shards the components' V/U (they live inside the sharded transformer blocks),
-        so accessed outside a forward they are DTensors; the frozen `target_weight` is either
-        a replicated buffer (a plain tensor) or — under `shard_frozen_target` — a sharded
-        param (a DTensor). The vendored `calc_weight_deltas` subtracts the two directly, which
-        raises `aten.sub got mixed torch.Tensor and DTensor` whenever the operands' DTensor-ness
-        differs. Gathering each operand to a full tensor first makes the subtraction a plain
-        op. The full per-site weight matrix is materialised regardless (the faithfulness loss
-        needs the whole delta), so the gather adds no asymptotic memory over the bare call.
+        so accessed outside a forward they are `Shard(0)` DTensors; the frozen `target_weight`
+        is a replicated buffer (plain tensor) or — under `shard_frozen_target` — a sharded
+        DTensor. We `redistribute` V and U to `Replicate` (NOT `full_tensor()`/`.to_local()`),
+        einsum the replicated copies, and subtract a `Replicate` target. Keeping everything a
+        DTensor means the faithfulness backward redistributes the grad back to V/U's native
+        `Shard(0)` — matching the recon forward's grad placement, so FSDP2's reduce-scatter
+        sees consistent grads when both paths accumulate into the same param. (Naive
+        `target - einsum(V,U)` on the raw `Shard(0)` params instead reshards internally and
+        yields `Shard(1)`/`Replicate` grads, which collides with the recon path.) Must be
+        called with V/U in their sharded (DTensor) state — i.e. before a forward gathers them.
         """
         deltas: dict[str, Tensor] = {}
         for path in self.lm.target_module_paths:
-            target = _to_full(self.lm.target_weight(path))
-            components = _to_full(self.lm.components[path].weight)
-            deltas[path] = target - components
+            comps = self.lm.components[path]
+            weight = einops.einsum(
+                _replicate(comps.V), _replicate(comps.U), "d_in C, C d_out -> d_out d_in"
+            )
+            target = self.lm.target_weight(path)
+            if isinstance(weight, DTensor) and not isinstance(target, DTensor):
+                target = distribute_tensor(target, weight.device_mesh, [Replicate()])
+            elif isinstance(target, DTensor):
+                target = target.redistribute(placements=[Replicate()])
+            deltas[path] = target - weight
         return deltas
 
     @contextmanager
