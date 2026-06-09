@@ -192,7 +192,9 @@ def create_lm_data_loader(
         dataset = dataset.shuffle(seed=seed)
         logger.info("Shuffled dataset")
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
+    # local_files_only: the tokenizer is cached alongside the vendored model, so never hit HF
+    # Hub for it (one fewer per-rank network call that can straggle the world-build collective).
+    tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name, local_files_only=True)
     torch_dataset = _prepare_lm_dataset(
         dataset,
         dataset_name=cfg.dataset_name,

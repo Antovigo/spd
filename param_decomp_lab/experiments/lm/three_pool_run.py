@@ -105,7 +105,16 @@ from param_decomp_lab.three_pool.two_pool_optimize import TwoPoolTrainer
 # deadlock — never happen. Scoped to the 3-pool path (single-pool runs do no cross-pool
 # p2p). Applies to both the train job and the async consolidate+eval job (eval also runs
 # cross-pool collectives).
-THREE_POOL_SLURM_ENV: dict[str, str] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+THREE_POOL_SLURM_ENV: dict[str, str] = {
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    # The fineweb dataset is streamed from HF, so build_lm_loader fetches parquet shards over
+    # the network on every rank. At N ranks the default 10s read timeout produces stragglers
+    # (one slow rank reaches the build_two_world `new_group` collective late → the whole world
+    # hangs there, and new_group isn't watchdog-monitored so it hangs silently). A generous
+    # download timeout lets the contended reads complete instead of timing out.
+    "HF_HUB_DOWNLOAD_TIMEOUT": "120",
+    "HF_HUB_ETAG_TIMEOUT": "60",
+}
 
 # Profiling / tracing env vars (read on the compute node by the profiler / trace hooks)
 # only reach the job if forwarded explicitly — the SLURM script exports a curated env dict,
