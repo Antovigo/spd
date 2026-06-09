@@ -171,7 +171,9 @@ class TwoPoolTrainer:
             chunks=list(self.runtime.chunks),
             batch_global=self.runtime.batch_global,
             pg_timeout=_resolve_pg_timeout(
-                compiling=runtime_config.compile_chunkwise or runtime_config.compile_ci_fn
+                compiling=runtime_config.compile_chunkwise
+                or runtime_config.compile_ci_fn
+                or runtime_config.compile_ppgd
             ),
             device=self._device,
         )
@@ -206,16 +208,13 @@ class TwoPoolTrainer:
                     if isinstance(m, GlobalSharedTransformerCiFn):
                         m.enable_activation_checkpointing()
             if runtime_config.compile_ci_fn:
-                user = os.environ.get("USER", "u")
-                rank = dist.get_rank()
-                os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
-                os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+                _set_inductor_cache_dirs()
                 self.component_model.ci_fn.compile()
+            if runtime_config.compile_ppgd:
+                _set_inductor_cache_dirs()
+                self.component_model.model.compile()
         if isinstance(self.ctx, ChunkContext) and runtime_config.compile_chunkwise:
-            user = os.environ.get("USER", "u")
-            rank = dist.get_rank()
-            os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
-            os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+            _set_inductor_cache_dirs()
             self.component_model.model.compile()
         seed_per_rank(pd_config.seed)
 
@@ -651,6 +650,14 @@ class TwoPoolTrainer:
             sink.checkpoint_written(self.step, final=True)
 
         set_active(None)
+
+
+def _set_inductor_cache_dirs() -> None:
+    """Per-rank torchinductor/triton cache dirs so concurrent ranks don't clobber each other."""
+    user = os.environ.get("USER", "u")
+    rank = dist.get_rank()
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+    os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
 
 
 def _maybe_build_phase_timer(device: torch.device) -> PhaseTimer | None:
