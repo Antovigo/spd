@@ -36,6 +36,7 @@ and the recon loss is invariant across every LM trainer (single-pool, 2-pool,
 """
 
 import os
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Self, cast
@@ -443,6 +444,13 @@ class FsdpLMTrainer:
         all_instances = self._build_all_metric_instances(eval_loop, device, component_model)
         sigterm = _install_sigterm_flag()
 
+        # Steady-state throughput: averaged over each train-log interval with a CUDA sync, so
+        # `tok_per_s_per_gpu` is real GPU time (the apples-to-apples number vs the JAX path).
+        # The first interval includes the one-time torch.compile cost; read later intervals.
+        world_size = self.runtime_config.dp or 1
+        last_log_t: float | None = None
+        last_log_step = self.step
+
         for step in range(self.step, pd_config.steps + 1):
             self.step = step
             self.components_optimizer.zero_grad()
@@ -474,6 +482,18 @@ class FsdpLMTrainer:
                 )
 
             if cadence.should_log_train(step):
+                torch.cuda.synchronize(device)
+                now = time.perf_counter()
+                if last_log_t is not None and step > last_log_step:
+                    n_interval = step - last_log_step
+                    elapsed = now - last_log_t
+                    seq_len = batch.shape[-1]
+                    tok_per_s = pd_config.batch_size * seq_len * n_interval / elapsed
+                    batch_log_data["perf/step_time_s"] = elapsed / n_interval
+                    batch_log_data["perf/tok_per_s"] = tok_per_s
+                    batch_log_data["perf/tok_per_s_per_gpu"] = tok_per_s / world_size
+                last_log_t = now
+                last_log_step = step
                 batch_log_data["mem/peak_gb_per_rank"] = (
                     torch.cuda.max_memory_allocated(device) / 1024**3
                 )

@@ -506,15 +506,17 @@ def _run_resume(
     set_seed(parent_cfg.pd.seed)
     device = get_device()
 
+    # Stamp lineage only when starting a NEW wandb run (cross-run resume). On an in-place
+    # requeue (`resume_wandb=True`) the SAME wandb run continues, and wandb rejects changing a
+    # config key (`resume_provenance`) that was None at the original launch — a ConfigError.
+    provenance_update: dict[str, ResumeProvenance] = {}
+    if not resume_wandb:
+        provenance_update["resume_provenance"] = ResumeProvenance(
+            parent_run_dir=from_run, parent_step=resolved_step
+        )
     effective_cfg = _build_runtime_cfg(
         parent_cfg, device, dist_state.world_size if dist_state is not None else None
-    ).model_copy(
-        update={
-            "resume_provenance": ResumeProvenance(
-                parent_run_dir=from_run, parent_step=resolved_step
-            )
-        }
-    )
+    ).model_copy(update=provenance_update)
 
     target_model = build_target(effective_cfg.target)
     train_loader = build_lm_loader(
