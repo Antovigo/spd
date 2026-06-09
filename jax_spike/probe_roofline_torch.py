@@ -30,7 +30,12 @@ if args.model == "gpt2xl":
     )
 
     cfg = GPT2SimpleConfig(
-        n_layer=48, n_head=25, n_embd=1600, block_size=args.seq, vocab_size=50257
+        model_type="GPT2Simple",
+        n_layer=48,
+        n_head=25,
+        n_embd=1600,
+        block_size=args.seq,
+        vocab_size=50257,
     )
     model = GPT2Simple(cfg)
     vocab, embed_numel = 50257, model.wte.weight.numel()
@@ -38,7 +43,7 @@ else:
     from param_decomp_lab.experiments.lm.vendored.llama_3_1.config import VendoredLlamaConfig
     from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import VendoredLlama
 
-    cfg = VendoredLlamaConfig()  # defaults = Llama-3.1-8B
+    cfg = VendoredLlamaConfig(model_type="VendoredLlama")  # other defaults = Llama-3.1-8B
     model = VendoredLlama(cfg)
     vocab, embed_numel = cfg.vocab_size, model.embed_tokens.weight.numel()
 
