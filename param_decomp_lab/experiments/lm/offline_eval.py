@@ -26,6 +26,8 @@ Usage:
         [--step N] [--wandb-run-id ID] [--no-wandb] [--micro-batch-size M]
 """
 
+import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -246,6 +248,13 @@ def main(
 
 def cli() -> None:
     fire.Fire(main)
+    # The streaming fineweb loader leaves non-daemon parquet/arrow reader threads that
+    # block interpreter shutdown indefinitely (reproducible by just iterating the
+    # loader), which would wedge the GPU job after the eval is done. All results are
+    # already flushed (stdout below; wandb via `wandb.finish()`), so hard-exit.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
