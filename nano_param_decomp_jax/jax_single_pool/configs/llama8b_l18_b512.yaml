@@ -1,7 +1,9 @@
-# Production B=512 single-pool VPD on Llama-3.1-8B L18 MLP — the JAX counterpart of
-# llama8b_l18_b512_2pool_lr_mid.yaml (SPEC §2 constants exactly).
-# Topology: 128 GPU (16 nodes), per-rank batch 4. Launch: slurm/llama8b.sbatch
-run_name: jax-l18-b512-mid
+# Semi-prod B=512 single-pool VPD on Llama-3.1-8B L18 MLP — the JAX counterpart of
+# llama8b_l18_b512_2pool_lr_high.yaml (= wandb p-b210aab4: comp 4.5e-4 / ci 1.5e-4;
+# all other constants = SPEC §2). Topology: 64 GPU (8 nodes), per-rank batch 8 —
+# sized by the AOT memory probes (bl8 fits with margin either remat setting).
+# Launch: sbatch --nodes=8 ... slurm/llama8b.sbatch configs/llama8b_l18_b512.yaml
+run_name: jax-l18-b512-high
 out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 seed: 0
 steps: 100000
@@ -29,9 +31,9 @@ ppgd:
   beta2: 0.99
   eps: 1.0e-8
   n_warmup: 2
-recon: { sites_per_chunk: 3, n_samples: 1, remat_forwards: true }
-vu_optimizer: { lr: 1.5e-4, grad_clip_norm: 0.01 }
-ci_optimizer: { lr: 5.0e-5 }
+recon: { sites_per_chunk: 3, n_samples: 1, remat_forwards: false }
+vu_optimizer: { lr: 4.5e-4, grad_clip_norm: 0.01 }
+ci_optimizer: { lr: 1.5e-4 }
 ci_fn: { d_model: 4096, n_blocks: 4, n_heads: 64, mlp_hidden: 16384 }
 faith_warmup: { steps: 400, lr: 1.0e-3 }
 cadence: { log_every: 20, save_every: 1000, keep_last: 2 }
