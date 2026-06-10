@@ -99,8 +99,16 @@ def chunkwise_subset_recon(
             mask_shape = ci[chunk[0]].shape[:-1]
             routings = plan.generate(chunk, mask_shape, device)
             for sites, routing in routings:
+                # Compute the fresh per-forward deltas EAGER, OUTSIDE the checkpoint, so the
+                # backward recompute restores a saved plain tensor rather than re-running the
+                # DTensor `redistribute`/`to_local` (which, during the FSDP backward, re-derives
+                # the delta as a `Shard(0)` DTensor and collides with the plain activation inside
+                # the compiled masked forward). Grad still reaches V/U through the eager delta
+                # subgraph; the delta draws no RNG, so the per-site `u`/`delta_mask` draws inside
+                # the recomputed region replay identically (equivalence preserved bit-for-bit).
+                weight_deltas = weight_deltas_fn(sites)
                 loss_f, n_positions = _checkpointed_recon_one_forward(
-                    lm, batch, target_local, ci, sites, routing, strategy, weight_deltas_fn
+                    lm, batch, target_local, ci, sites, routing, strategy, weight_deltas
                 )
                 assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
                 sum_over_forwards = sum_over_forwards + loss_f / n_positions
@@ -117,7 +125,7 @@ def _checkpointed_recon_one_forward(
     sites: tuple[str, ...],
     routing: RoutingMasks,
     strategy: ReconLossStrategy,
-    weight_deltas_fn: WeightDeltasFn,
+    weight_deltas: dict[str, Tensor],
 ) -> tuple[Tensor, int]:
     """`recon_one_forward` with its activations recomputed in backward, not retained.
 
@@ -132,18 +140,25 @@ def _checkpointed_recon_one_forward(
     identically (and the saved/restored RNG leaves the global stream untouched, so the
     forward-pass draw order matches the non-checkpointed path bit-for-bit).
 
-    The CI leaves are passed positionally so non-reentrant checkpoint registers them as
-    backward inputs (their `.grad` must be populated for the CI grad); the V/U params are
-    reached through `weight_deltas_fn`'s closure, which non-reentrant mode tracks too."""
+    The CI leaves AND the precomputed weight-deltas are passed positionally so
+    non-reentrant checkpoint registers them as backward inputs: the CI leaves' `.grad`
+    feeds the CI grad, and the deltas' grad redistributes back to V/U through the eager
+    `target − VU` subgraph the caller built OUTSIDE this region. Deltas are precomputed
+    (not recomputed via a closure) so the FSDP backward recompute never re-derives them
+    as `Shard(0)` DTensors — which would collide with the plain activation in the compiled
+    masked forward (`got mixed torch.Tensor and DTensor`)."""
     ci_sites = tuple(ci[s] for s in sites)
+    delta_sites = tuple(weight_deltas[s] for s in sites)
+    n_ci = len(ci_sites)
 
-    def run(*ci_for_sites: Tensor) -> tuple[Tensor, int]:
-        ci_local = dict(zip(sites, ci_for_sites, strict=True))
+    def run(*tensors: Tensor) -> tuple[Tensor, int]:
+        ci_local = dict(zip(sites, tensors[:n_ci], strict=True))
+        deltas_local = dict(zip(sites, tensors[n_ci:], strict=True))
         return recon_one_forward(
-            lm, batch, target_local, ci_local, sites, routing, strategy, weight_deltas_fn
+            lm, batch, target_local, ci_local, sites, routing, strategy, lambda _s: deltas_local
         )
 
-    return cast("tuple[Tensor, int]", checkpoint(run, *ci_sites, use_reentrant=False))
+    return cast("tuple[Tensor, int]", checkpoint(run, *ci_sites, *delta_sites, use_reentrant=False))
 
 
 class ChunkwiseSubsetReconLoss(Metric[ChunkwiseSubsetReconLossConfig]):
