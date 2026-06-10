@@ -72,6 +72,8 @@ def _install_sigterm_flag() -> None:
 
 
 def _build_optimizers(cfg: ExperimentConfig):
+    """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
+    log path reports the exact LR the optimizer applies (single source of truth)."""
     sched_vu = optax.cosine_decay_schedule(cfg.vu_optimizer.lr, cfg.steps, alpha=0.1)
     sched_ci = optax.cosine_decay_schedule(cfg.ci_optimizer.lr, cfg.steps, alpha=0.1)
     opt_vu = optax.chain(
@@ -79,7 +81,7 @@ def _build_optimizers(cfg: ExperimentConfig):
         optax.adamw(sched_vu, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0),
     )
     opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
-    return opt_vu, opt_ci
+    return opt_vu, opt_ci, (sched_vu, sched_ci)
 
 
 def _ensure_global(tree: object, mesh: Mesh) -> object:
@@ -154,7 +156,10 @@ class MetricsSink:
     def log(self, step: int, record: dict[str, float]) -> None:
         if self._jsonl is None:
             return
-        record = {_METRIC_KEYS[k]: v for k, v in record.items()}
+        record = {
+            _METRIC_KEYS.get(k, f"train/{k}" if k.startswith("grad_norms/") else k): v
+            for k, v in record.items()
+        }  # keys already starting "train/" pass through verbatim
         self._jsonl.write(json.dumps({"step": step, **record}) + "\n")
         self._jsonl.flush()
         print(
@@ -179,7 +184,7 @@ def train(
     assert cfg.data.global_batch % ndev == 0, (cfg.data.global_batch, ndev)
 
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci = _build_optimizers(cfg)
+    opt_vu, opt_ci, (sched_vu, sched_ci) = _build_optimizers(cfg)
 
     key = random.PRNGKey(cfg.seed)
     init_key, src_key, run_key = random.split(key, 3)
@@ -277,7 +282,13 @@ def train(
         state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
 
         now_step = step + 1
-        if now_step % cfg.cadence.log_every == 0 or now_step == cfg.steps:
+        dense = cfg.cadence.dense_log_phase
+        log_now = (
+            now_step % cfg.cadence.log_every == 0
+            or now_step == cfg.steps
+            or (dense is not None and now_step <= dense.until_step and now_step % dense.every == 0)
+        )
+        if log_now:
             jax.block_until_ready(metrics["total"])
             dt = time.time() - window_t0
             per_step = dt / max(now_step - last_logged, 1)
@@ -286,6 +297,11 @@ def train(
             record["step_time_s"] = per_step
             record["tok_per_s"] = tokens_per_step / per_step
             record["tok_per_s_per_gpu"] = tokens_per_step / per_step / ndev
+            record["train/schedules/lr/components"] = float(jnp.asarray(sched_vu(now_step)))
+            record["train/schedules/lr/ci_fn"] = float(jnp.asarray(sched_ci(now_step)))
+            mem_stats = jax.local_devices()[0].memory_stats()
+            if mem_stats is not None:
+                record["train/mem/peak_gb_per_rank"] = mem_stats["peak_bytes_in_use"] / 1e9
             sink.log(now_step, record)
             window_t0 = time.time()
 

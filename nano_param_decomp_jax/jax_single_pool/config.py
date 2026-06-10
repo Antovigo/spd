@@ -56,10 +56,17 @@ class FaithWarmupConfig:
 
 
 @dataclass(frozen=True)
+class DenseLogPhase:
+    every: int
+    until_step: int
+
+
+@dataclass(frozen=True)
 class CadenceConfig:
     log_every: int
     save_every: int
     keep_last: int
+    dense_log_phase: DenseLogPhase | None
 
 
 @dataclass(frozen=True)
@@ -145,7 +152,14 @@ def load_config(path: Path) -> ExperimentConfig:
         ci_optimizer=_build(CIOptimizerConfig, raw["ci_optimizer"], "ci_optimizer"),
         ci_fn=_build(CIArch, raw["ci_fn"], "ci_fn"),
         faith_warmup=_build(FaithWarmupConfig, raw["faith_warmup"], "faith_warmup"),
-        cadence=_build(CadenceConfig, raw["cadence"], "cadence"),
+        cadence=CadenceConfig(
+            **{k: v for k, v in raw["cadence"].items() if k != "dense_log_phase"},
+            dense_log_phase=(
+                _build(DenseLogPhase, raw["cadence"]["dense_log_phase"], "dense_log_phase")
+                if raw["cadence"].get("dense_log_phase")
+                else None
+            ),
+        ),
         wandb=_build(WandbConfig, raw["wandb"], "wandb") if raw.get("wandb") else None,
     )
     n_sites = 3 * (cfg.target.last_layer - cfg.target.first_layer + 1)

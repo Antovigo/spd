@@ -290,6 +290,27 @@ def make_ppgd_masks(
     return masks, delta_masks
 
 
+def _grad_norm_metrics(components_grad: Any, ci_fn_grad: Any) -> dict[str, Array]:
+    """Pre-clip gradient L2 norms, matching the torch `component_grad_norms` families:
+    per-leaf `grad_norms/components<path>` / `grad_norms/ci_fns<path>` (paths are this
+    pytree's own — e.g. `.Vg` for the stacked Llama layout, vs torch's per-site names)
+    and the overlay-critical `grad_norms/summary/{components,ci_fns,total}`."""
+    out: dict[str, Array] = {}
+
+    def family(grad_tree: Any, prefix: str) -> Array:
+        sum_sq = jnp.zeros((), jnp.float32)
+        for path, leaf in jax.tree_util.tree_flatten_with_path(grad_tree)[0]:
+            leaf_sum_sq = jnp.sum(leaf.astype(jnp.float32) ** 2)
+            out[f"grad_norms/{prefix}{jax.tree_util.keystr(path)}"] = jnp.sqrt(leaf_sum_sq)
+            sum_sq = sum_sq + leaf_sum_sq
+        out[f"grad_norms/summary/{prefix}"] = jnp.sqrt(sum_sq)
+        return sum_sq
+
+    total_sq = family(components_grad, "components") + family(ci_fn_grad, "ci_fns")
+    out["grad_norms/summary/total"] = jnp.sqrt(total_sq)
+    return out
+
+
 # ───────────────────────────── the step factory ─────────────────────────────
 
 
@@ -485,6 +506,8 @@ def make_train_step(
         # The backward saw coeff·L_ppgd; the adversary ascends on L_ppgd itself.
         sources_grad = {s: g / coeffs.ppgd for s, g in sources_grad_scaled.items()}
 
+        grad_norm_metrics = _grad_norm_metrics(components_grad, ci_fn_grad)
+
         # ── the (n_warmup+1)-th source ascent, from the fused graph (SPEC S13/S14) ──
         new_sources, sources_adam_state = sources_adam_ascend_project(
             refined_sources, sources_grad, sources_adam_state, sources_lr, src_cfg
@@ -518,6 +541,7 @@ def make_train_step(
             "ppgd": ppgd_loss,
             "p_imp": pnorm,
             "src_lr": sources_lr,
+            **grad_norm_metrics,
         }
         return new_state, metrics
 
