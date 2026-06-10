@@ -22,14 +22,16 @@ metric returns. So the gradient this metric feeds into `coeff * loss` matches th
 2-pool's per-step recon V/U + CI grad.
 """
 
-from typing import override
+from typing import cast, override
 
 import torch
 from torch import Tensor
 from torch.distributed import ReduceOp
+from torch.utils.checkpoint import checkpoint
 
 from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
+from param_decomp.masks import RoutingMasks
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.chunkwise_subset_recon import ChunkwiseSubsetReconLossConfig
 from param_decomp.metrics.context import MetricContext
@@ -97,7 +99,7 @@ def chunkwise_subset_recon(
             mask_shape = ci[chunk[0]].shape[:-1]
             routings = plan.generate(chunk, mask_shape, device)
             for sites, routing in routings:
-                loss_f, n_positions = recon_one_forward(
+                loss_f, n_positions = _checkpointed_recon_one_forward(
                     lm, batch, target_local, ci, sites, routing, strategy, weight_deltas_fn
                 )
                 assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
@@ -105,6 +107,43 @@ def chunkwise_subset_recon(
                 n_forwards += 1
     assert n_forwards > 0, "no recon forwards generated — empty decomposition?"
     return sum_over_forwards / n_forwards, n_forwards
+
+
+def _checkpointed_recon_one_forward(
+    lm: LMComponentModel,
+    batch: object,
+    target_local: Tensor,
+    ci: dict[str, Tensor],
+    sites: tuple[str, ...],
+    routing: RoutingMasks,
+    strategy: ReconLossStrategy,
+    weight_deltas_fn: WeightDeltasFn,
+) -> tuple[Tensor, int]:
+    """`recon_one_forward` with its activations recomputed in backward, not retained.
+
+    The flat path accumulates every chunk's recon graph before the trainer's single
+    `total_loss.backward()` (the `Metric` contract: `update` returns a loss). Without
+    checkpointing that holds all forwards' activations at once — the 3-pool instead
+    streams a per-forward backward and frees each graph, holding one forward's
+    activations at a time. `checkpoint(use_reentrant=False)` matches that profile: each
+    forward keeps only its inputs, recomputing activations in backward. The recompute is
+    numerically exact — `use_reentrant=False` saves and restores the RNG, so the
+    `torch.rand_like` / `torch.rand` mask draws inside `recon_one_forward` replay
+    identically (and the saved/restored RNG leaves the global stream untouched, so the
+    forward-pass draw order matches the non-checkpointed path bit-for-bit).
+
+    The CI leaves are passed positionally so non-reentrant checkpoint registers them as
+    backward inputs (their `.grad` must be populated for the CI grad); the V/U params are
+    reached through `weight_deltas_fn`'s closure, which non-reentrant mode tracks too."""
+    ci_sites = tuple(ci[s] for s in sites)
+
+    def run(*ci_for_sites: Tensor) -> tuple[Tensor, int]:
+        ci_local = dict(zip(sites, ci_for_sites, strict=True))
+        return recon_one_forward(
+            lm, batch, target_local, ci_local, sites, routing, strategy, weight_deltas_fn
+        )
+
+    return cast("tuple[Tensor, int]", checkpoint(run, *ci_sites, use_reentrant=False))
 
 
 class ChunkwiseSubsetReconLoss(Metric[ChunkwiseSubsetReconLossConfig]):
