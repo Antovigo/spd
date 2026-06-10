@@ -9,10 +9,14 @@ the concrete reload class directly.
 
 ## Layout
 
+The `ExperimentConfig[T,D]` generic + `EvalConfig` + `WandbConfig` +
+`ResumeProvenance` live in `param_decomp_config/experiment.py`; the LM schema
+(`LMExperimentConfig`, `LMTargetConfig`, `LMDataConfig`, the `target.spec` union) in
+`param_decomp_config/lm.py`.
+
 ```
 experiments/
-├── utils.py                 # ExperimentConfig[T,D] generic + EvalConfig + WandbConfig
-│                            # + init_pd_run + EXPERIMENT_CONFIG_FILENAME + resume_provenance field
+├── utils.py                 # init_pd_run + EXPERIMENT_CONFIG_FILENAME
 ├── tms/run.py
 ├── resid_mlp/run.py
 └── lm/
@@ -118,7 +122,7 @@ Every experiment script exposes the same five top-level shapes:
 
 ```python
 class <Name>ExperimentConfig(ExperimentConfig[<Name>TargetConfig, <Name>DataConfig]):
-    pass
+    pass  # LM's lives in param_decomp_config/lm.py; TMS/ResidMLP declare theirs in run.py
 
 def build_target(target_cfg) -> nn.Module: ...
 
@@ -157,6 +161,8 @@ caller imports the concrete `Saved<Name>Run` it expects:
 from param_decomp_lab.experiments.lm.run import SavedLMRun
 pd_run = SavedLMRun.from_path("entity/project/runs/<run_id>")
 ```
+
+(`LMExperimentConfig` itself is imported from `param_decomp_config.lm`.)
 
 Pydantic validation against the wrong `ExperimentConfig` subclass fails fast at YAML
 load time.

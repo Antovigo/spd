@@ -37,17 +37,23 @@ SPD is the predecessor VPD builds on.
 
 ## Package layout
 
-Two flat-layout distributions, deliberately split:
+Three flat-layout distributions, deliberately split:
 
+- **`param-decomp-config`** (`param_decomp_config/`) — torch-free pydantic config
+  schema. Every config class in the project lives here (`BaseConfig`, `PDConfig`,
+  loss/eval-metric configs, experiment YAML schemas). Depends only on pydantic, numpy,
+  pyyaml, annotated-types — so non-torch consumers (e.g. the JAX repo) can validate the
+  same YAML run configs without pulling torch/transformers/wandb. Keep it that way.
 - **`param-decomp`** (`param_decomp/`) — core library. The reusable, publishable surface:
-  the optimization loop, configs, `ComponentModel`, loss metrics, the `RunSink` protocol.
-  Treat as a stable API; changes here are deliberate.
+  the optimization loop, `ComponentModel`, loss metrics, the `RunSink` protocol.
+  Treat as a stable API; changes here are deliberate. Depends on config.
 - **`param-decomp-lab`** (`param_decomp_lab/`) — team tooling. Experiment scripts, the
   post-processing pipelines, the app, infra, eval metrics, lab-side helpers. Churns
-  freely; depends on core.
+  freely; depends on core + config.
 
-`make install-dev` syncs both editably via the uv workspace in the root `pyproject.toml`.
-The `pd-*` console scripts all live in `param_decomp_lab/pyproject.toml`.
+`make install-dev` syncs all three editably via the uv workspace in the root
+`pyproject.toml`. The `pd-*` console scripts all live in
+`param_decomp_lab/pyproject.toml`.
 
 ## Public API
 
@@ -56,9 +62,10 @@ files are bare. The canonical entrypoint and the protocols / configs it consumes
 
 ```python
 from param_decomp.optimize import EvalLoop, Trainer
-from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
+from param_decomp_config.pd import Cadence, PDConfig, RuntimeConfig
 from param_decomp.run_sink import RunSink
-from param_decomp.metrics.base import LossMetricConfig, Metric
+from param_decomp.metrics.base import Metric
+from param_decomp_config.losses import LossMetricConfig
 from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
 ```
 
@@ -90,6 +97,10 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
 
 ## Where things live
 
+- `param_decomp_config/` — all pydantic configs, one module per domain: `base`
+  (`BaseConfig`, `Probability`, `runtime_cast`), `schedule`, `routing`, `ci_fn`,
+  `decomposition_target`, `losses`, `pd`, `experiment`, `lm`, `eval_metrics`,
+  `autointerp`.
 - `param_decomp/` — core library (see [Public API](#public-api)). Module docstrings
   describe each file.
 - `param_decomp/metrics/` — loss `Metric` classes and dispatch.

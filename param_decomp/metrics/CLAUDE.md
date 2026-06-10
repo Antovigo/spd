@@ -11,20 +11,22 @@ core library. For eval metrics (user-extensible, lab-side), see
 
 | File | Purpose |
 |---|---|
-| `base.py` | `Metric` ABC (lifecycle: `__init__(cfg)` → `bind` → `update` → `compute`) + `LossMetricConfig` base + `before_backward` / `after_backward` hooks |
+| `base.py` | `Metric` ABC (lifecycle: `__init__(cfg)` → `bind` → `update` → `compute`) + `before_backward` / `after_backward` hooks |
 | `context.py` | `MetricContext` — the per-step bundle every `Metric.update(ctx)` receives; `ctx.model` is a `ComponentModelProtocol` (core `ComponentModel`, FSDP adapter, or vendored `LMComponentModel`) |
 | `dispatch.py` | `LOSS_METRIC_CLASSES` type→class table + `instantiate_metrics(...)` |
-| `<loss_name>.py` | One file per metric: `<Name>Loss` class + `<Name>LossConfig` config side-by-side |
+| `<loss_name>.py` | One file per metric: the `<Name>Loss` class; its `<Name>LossConfig` lives in `param_decomp_config/losses.py` |
 | `persistent_pgd_state.py` | PPGD adversarial-source state machine (shared by `persistent_pgd_recon.py`) |
 | `pgd_utils.py` | Shared PGD helpers used by the regular PGD recon metrics |
 | `output.py` | Shared output-extraction helpers used across recon losses |
 
 ## Adding a loss metric
 
-1. Define `<Name>Loss(Metric[<Name>LossConfig])` and its `<Name>LossConfig(LossMetricConfig)`
-   in `<name>.py`. The config must carry a unique `type: Literal["<Name>Loss"]` discriminator.
-2. Append the config to `AnyLossMetricConfig` in `param_decomp/configs.py`.
-3. Append the class to `LOSS_METRIC_CLASSES` in `dispatch.py`.
+1. Define `<Name>LossConfig(LossMetricConfig)` in `param_decomp_config/losses.py`. The
+   config must carry a unique `type: Literal["<Name>Loss"]` discriminator.
+2. Define `<Name>Loss(Metric[<Name>LossConfig])` in `<name>.py`, importing the config
+   from `param_decomp_config.losses`.
+3. Append the config to `AnyLossMetricConfig` in `param_decomp_config/pd.py`.
+4. Append the class to `LOSS_METRIC_CLASSES` in `dispatch.py`.
 
 The pydantic discriminated union validates `pd.loss_metrics` YAML entries without any
 custom validator. `instantiate_loss_metrics()` builds and `bind()`s one instance per
@@ -35,20 +37,10 @@ and/or `after_backward` (see PPGD for the canonical example).
 
 ## Config placement rule
 
-The default home for a config is `param_decomp/configs.py`. Move a config next to its
-implementation only when leaving it in `configs.py` would close an import cycle —
-concretely, when the implementation module `M` is also (transitively) imported by
-`configs.py` (usually via the metric union). Then `M → configs` would loop; put the
-config in `M` and update callers to import it from `M` directly.
-
-Configs currently kept next to their implementation for this reason:
-
-- `ScheduleConfig` → `param_decomp.schedule`
-- `DecompositionTargetConfig` → `param_decomp.decomposition_targets`
-- `CiConfig` family (`LayerwiseCiConfig`, `AttnConfig`, `GlobalSharedTransformerCiConfig`,
-  `GlobalCiConfig`) → `param_decomp.ci_fns`
-- `SamplingType`, `SubsetRoutingType` + members → `param_decomp.masks`
-- Each loss metric's `LossMetricConfig` subclass → `param_decomp/metrics/<name>.py`
+Every config class lives in the torch-free `param_decomp_config` package — loss-metric
+configs in `param_decomp_config/losses.py`, the union in `param_decomp_config/pd.py`.
+Implementation modules import their config from there; never define a pydantic config
+in `param_decomp/` or add torch imports to `param_decomp_config/`.
 
 Never use `if TYPE_CHECKING:` + forward-reference strings to paper over a cycle. If
 you're reaching for that, the config placement is wrong; move the config instead.
