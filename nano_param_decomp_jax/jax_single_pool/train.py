@@ -29,7 +29,7 @@ from jax_single_pool.lm import DecomposedLM, chunk_sites
 COMPUTE_DT = jnp.bfloat16
 
 
-def _cast_floating(tree: Any, dtype: Any) -> Any:
+def cast_floating(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(lambda a: a.astype(dtype) if eqx.is_inexact_array(a) else a, tree)
 
 
@@ -437,8 +437,8 @@ def make_train_step(
         site_inputs = lm.site_inputs(frozen, residual)
 
         # ── supplemental adversary ascents: params + CI detached (SPEC §4.5) ──
-        components_detached = jax.lax.stop_gradient(_cast_floating(state.components, COMPUTE_DT))
-        ci_fn_detached = jax.lax.stop_gradient(_cast_floating(state.ci_fn, COMPUTE_DT))
+        components_detached = jax.lax.stop_gradient(cast_floating(state.components, COMPUTE_DT))
+        ci_fn_detached = jax.lax.stop_gradient(cast_floating(state.ci_fn, COMPUTE_DT))
         ci_lower_detached = ci_fn_detached(site_inputs).lower
 
         def adversary_loss(sources: dict[str, Array]) -> Array:
@@ -472,8 +472,8 @@ def make_train_step(
         # but components/ci grads through it are what torch gets too (sources are leaves). ──
         def loss_fn(trainable: tuple[Any, CIFn, dict[str, Array]]):
             components, ci_fn, sources = trainable
-            components_bf16 = _cast_floating(components, COMPUTE_DT)
-            ci_fn_bf16 = _cast_floating(ci_fn, COMPUTE_DT)
+            components_bf16 = cast_floating(components, COMPUTE_DT)
+            ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
             ci = ci_fn_bf16(site_inputs)
             faith_loss = faithfulness_loss(lm.weight_deltas(frozen, components))
             imp_loss = importance_minimality_loss(ci.upper, pnorm, imp_cfg.beta, imp_cfg.eps)

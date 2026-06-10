@@ -70,6 +70,19 @@ class CadenceConfig:
 
 
 @dataclass(frozen=True)
+class EvalConfig:
+    """In-loop eval pass (torch `EvalLoop` analog, scalar metrics only — plots ride the
+    offline export path). `rounding_threshold` binarises CI for the CE/KL
+    `rounded_masked` variant; `ci_alive_threshold` is the CI-L0 aliveness cutoff."""
+
+    batch_size: int
+    every: int
+    n_steps: int
+    rounding_threshold: float
+    ci_alive_threshold: float
+
+
+@dataclass(frozen=True)
 class WandbConfig:
     project: str
     entity: str
@@ -92,6 +105,7 @@ class ExperimentConfig:
     ci_fn: CIArch
     faith_warmup: FaithWarmupConfig
     cadence: CadenceConfig
+    eval: EvalConfig | None
     wandb: WandbConfig | None
 
     @property
@@ -129,11 +143,12 @@ def load_config(path: Path) -> ExperimentConfig:
         "ci_fn",
         "faith_warmup",
         "cadence",
+        "eval",
         "wandb",
     }
     unknown = set(raw) - top
     assert not unknown, f"{path}: unknown top-level keys {sorted(unknown)}"
-    missing = top - set(raw) - {"wandb"}
+    missing = top - set(raw) - {"eval", "wandb"}
     assert not missing, f"{path}: missing top-level keys {sorted(missing)}"
 
     data_raw = dict(raw["data"], dir=Path(raw["data"]["dir"]))
@@ -160,6 +175,7 @@ def load_config(path: Path) -> ExperimentConfig:
                 else None
             ),
         ),
+        eval=_build(EvalConfig, raw["eval"], "eval") if raw.get("eval") else None,
         wandb=_build(WandbConfig, raw["wandb"], "wandb") if raw.get("wandb") else None,
     )
     n_sites = 3 * (cfg.target.last_layer - cfg.target.first_layer + 1)

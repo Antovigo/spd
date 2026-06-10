@@ -31,6 +31,7 @@ from jax.sharding import PartitionSpec as P
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_latest, save_state
 from jax_single_pool.config import ExperimentConfig, load_config
 from jax_single_pool.data import BatchSchedule, ShardServer, scan_shards
+from jax_single_pool.eval import make_eval_step
 from jax_single_pool.llama8b import (
     LayerRange,
     Prefix,
@@ -232,6 +233,24 @@ def train(
         server.per_process, jax.local_device_count(),
     )  # fmt: skip
 
+    # Eval mirrors the torch reference's `eval_split: train`: an independent stream over
+    # the SAME corpus (own seed), advanced one block of `n_steps` batches per eval pass.
+    eval_step_fn = None
+    eval_server = None
+    if cfg.eval is not None:
+        assert cfg.eval.every % cfg.cadence.log_every == 0, (
+            "eval must land on a train-log step: the tok/s window resets after eval, so a "
+            "mid-window eval would corrupt the next step-time estimate"
+        )
+        eval_schedule = BatchSchedule(scan_shards(cfg.data.dir), cfg.eval.batch_size, cfg.seed + 1)
+        eval_server = ShardServer(eval_schedule, cfg.data.seq_len, jax.process_index(), n_proc)
+        assert eval_server.per_process % jax.local_device_count() == 0, (
+            eval_server.per_process, jax.local_device_count(),
+        )  # fmt: skip
+        eval_step_fn = make_eval_step(
+            lm, cfg.eval.rounding_threshold, cfg.eval.ci_alive_threshold, mesh
+        )
+
     sink = MetricsSink(cfg, raw_cfg, is_main)
     tokens_per_step = cfg.data.global_batch * cfg.data.seq_len
     window_t0 = time.time()
@@ -264,6 +283,36 @@ def train(
             if mem_stats is not None:
                 record["train/mem/peak_gb_per_rank"] = mem_stats["peak_bytes_in_use"] / 1e9
             sink.log(now_step, record)
+            window_t0 = time.time()
+
+        if cfg.eval is not None and now_step % cfg.eval.every == 0:
+            assert eval_step_fn is not None and eval_server is not None
+            eval_pass_index = now_step // cfg.eval.every
+            metric_sums: dict[str, jax.Array] = {}
+            for j in range(cfg.eval.n_steps):
+                eval_tokens = _global_token_batch(
+                    eval_server.local_batch(eval_pass_index * cfg.eval.n_steps + j),
+                    mesh,
+                    cfg.eval.batch_size,
+                )
+                eval_residual = harvest(prefix, eval_tokens)
+                # fold values >= cfg.steps never collide with the train step keys
+                eval_key = random.fold_in(
+                    run_key, cfg.steps + eval_pass_index * cfg.eval.n_steps + j
+                )
+                eval_metrics = eval_step_fn(
+                    state.components, state.ci_fn, frozen, eval_tokens, eval_residual, eval_key
+                )
+                for k, v in eval_metrics.items():
+                    metric_sums[k] = metric_sums.get(k, jnp.zeros(())) + v
+            eval_record = {f"eval/{k}": float(v) / cfg.eval.n_steps for k, v in metric_sums.items()}
+            sink.log(now_step, eval_record)
+            if is_main:
+                headline = {
+                    k: eval_record[f"eval/{k}"]
+                    for k in ("ce_kl/kl_ci_masked", "ce_kl/ce_unrecovered_ci_masked")
+                }
+                print(f"[eval @ {now_step}] {headline}", flush=True)
             window_t0 = time.time()
 
         if now_step % cfg.cadence.save_every == 0 or now_step == cfg.steps or _sigterm_received:

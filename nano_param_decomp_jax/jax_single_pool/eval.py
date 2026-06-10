@@ -1,0 +1,151 @@
+"""In-loop eval pass: scalar parity with the torch eval metrics.
+
+Implements the scalar core of the torch reference `eval:` block — `CEandKLLosses`
+(six masking variants) and `CI_L0` — inside one jitted function, logged under the
+exact torch wandb keys (`eval/ce_kl/<variant>`, `eval/l0/<threshold>_<site>`).
+Plot-type metrics (CI histograms, activation density, per-component means) ride the
+offline path instead: `jsp-export` → torch `pd-offline-eval`.
+
+Variant semantics mirror `param_decomp_lab/eval_metrics/ce_and_kl_losses.py`: each
+variant is a masked forward with ALL sites live and no routing; only `stoch_masked`
+carries a weight-delta mask (torch `make_mask_infos` without weight deltas drops the
+delta term — delta mask 0 here). CE is next-token cross-entropy with the first label
+ignored; KL is per-position vs the clean (frozen) logits.
+"""
+
+from typing import Any
+
+import jax
+import jax.numpy as jnp
+from jax import random
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
+from jaxtyping import Array, Float, Int, PRNGKeyArray
+
+from jax_single_pool.lm import DecomposedLM
+from jax_single_pool.train import COMPUTE_DT, cast_floating, kl_per_position
+
+
+def next_token_cross_entropy(
+    logits: Float[Array, "B T vocab"], token_ids: Int[Array, "B T"]
+) -> Array:
+    """Mean fp32 CE of positions 0..T-2 predicting tokens 1..T-1 (torch: labels with
+    the first position set to ignore_index)."""
+    log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+    label_log_probs = jnp.take_along_axis(log_probs[:, :-1], token_ids[:, 1:, None], axis=-1)[
+        ..., 0
+    ]
+    return -label_log_probs.mean()
+
+
+def make_eval_step(
+    lm: DecomposedLM,
+    rounding_threshold: float,
+    ci_alive_threshold: float,
+    mesh: Mesh | None,
+):
+    """Build the jit'd `eval_step(components, ci_fn, frozen, token_ids, residual, key)
+    -> {metric_key: scalar}` with torch-parity keys (un-prefixed: the caller adds
+    `eval/`)."""
+    site_names = lm.site_names
+
+    def batch_sharded(x: Array) -> Array:
+        if mesh is None:
+            return x
+        spec = ["dp"] + [None] * (x.ndim - 1)
+        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
+
+    def masked_forward(
+        frozen: Any, components_bf16: Any, residual: Array, masks: dict[str, Array],
+        delta_masks: dict[str, Array],
+    ) -> Array:  # fmt: skip
+        return batch_sharded(
+            lm.masked_logits(
+                frozen, components_bf16, residual, masks, delta_masks, None, site_names
+            )
+        )
+
+    @jax.jit
+    def eval_step(
+        components: Any,
+        ci_fn: Any,
+        frozen: Any,
+        token_ids: Int[Array, "B T"],
+        residual: Float[Array, "B T d"],
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        residual = batch_sharded(residual)
+        clean_logits = batch_sharded(lm.clean_logits(frozen, residual))
+        site_inputs = lm.site_inputs(frozen, residual)
+
+        components_bf16 = cast_floating(components, COMPUTE_DT)
+        ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
+        ci_lower = ci_fn_bf16(site_inputs).lower
+
+        batch, seq = token_ids.shape
+        zeros_delta = {site: jnp.zeros((batch, seq), COMPUTE_DT) for site in site_names}
+
+        stoch_key, random_key = random.split(key)
+        variant_masks: dict[str, tuple[dict[str, Array], dict[str, Array]]] = {}
+        variant_masks["ci_masked"] = (ci_lower, zeros_delta)
+        variant_masks["unmasked"] = (
+            {site: jnp.ones_like(ci_lower[site]) for site in site_names},
+            zeros_delta,
+        )
+        stoch_masks = {}
+        stoch_deltas = {}
+        for site_idx, site in enumerate(site_names):
+            ci_site = ci_lower[site]
+            stochastic_source = random.uniform(
+                random.fold_in(stoch_key, site_idx), ci_site.shape, COMPUTE_DT
+            )
+            stoch_masks[site] = ci_site + (1.0 - ci_site) * stochastic_source
+            stoch_deltas[site] = random.uniform(
+                random.fold_in(stoch_key, len(site_names) + site_idx), (batch, seq), COMPUTE_DT
+            )
+        variant_masks["stoch_masked"] = (stoch_masks, stoch_deltas)
+        variant_masks["random_masked"] = (
+            {
+                site: random.uniform(
+                    random.fold_in(random_key, site_idx), ci_lower[site].shape, COMPUTE_DT
+                )
+                for site_idx, site in enumerate(site_names)
+            },
+            zeros_delta,
+        )
+        variant_masks["rounded_masked"] = (
+            {site: (ci_lower[site] > rounding_threshold).astype(COMPUTE_DT) for site in site_names},
+            zeros_delta,
+        )
+        variant_masks["zero_masked"] = (
+            {site: jnp.zeros_like(ci_lower[site]) for site in site_names},
+            zeros_delta,
+        )
+
+        kl: dict[str, Array] = {}
+        ce: dict[str, Array] = {}
+        for variant, (masks, delta_masks) in variant_masks.items():
+            variant_logits = masked_forward(frozen, components_bf16, residual, masks, delta_masks)
+            kl[variant] = kl_per_position(variant_logits, clean_logits)
+            ce[variant] = next_token_cross_entropy(variant_logits, token_ids)
+        target_ce = next_token_cross_entropy(clean_logits, token_ids)
+
+        out: dict[str, Array] = {}
+        for variant in variant_masks:
+            out[f"ce_kl/kl_{variant}"] = kl[variant]
+        for variant in variant_masks:
+            if variant == "zero_masked":
+                continue
+            out[f"ce_kl/ce_difference_{variant}"] = ce[variant] - target_ce
+        for variant in variant_masks:
+            if variant == "zero_masked":
+                continue
+            out[f"ce_kl/ce_unrecovered_{variant}"] = (ce[variant] - target_ce) / (
+                ce["zero_masked"] - target_ce
+            )
+        for site in site_names:
+            alive_per_position = (ci_lower[site] > ci_alive_threshold).astype(jnp.float32)
+            out[f"l0/{ci_alive_threshold}_{site}"] = alive_per_position.sum(-1).mean()
+        return out
+
+    return eval_step

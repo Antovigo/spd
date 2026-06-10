@@ -1,0 +1,84 @@
+"""CPU tests for the in-loop eval step at a tiny config.
+
+Checks the torch-parity key set, the variant identities (rounded-at-impossible-threshold
+== unmasked; CI-L0 saturates at C / 0 for out-of-range thresholds), CE correctness
+against a hand-rolled computation, and determinism in the key.
+"""
+
+import jax
+import jax.numpy as jnp
+
+from jax_single_pool.eval import make_eval_step, next_token_cross_entropy
+from jax_single_pool.llama8b import LayerRange, llama_decomposed_lm
+from jax_single_pool.tests.test_llama8b import (
+    _tiny_cfg,  # pyright: ignore[reportPrivateUsage]
+    _tiny_target,  # pyright: ignore[reportPrivateUsage]
+)
+
+
+def test_next_token_cross_entropy_matches_manual():
+    b, t, v = 2, 5, 7
+    logits = jax.random.normal(jax.random.PRNGKey(0), (b, t, v))
+    token_ids = jax.random.randint(jax.random.PRNGKey(1), (b, t), 0, v)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    manual = -jnp.mean(
+        jnp.stack([log_probs[i, j, token_ids[i, j + 1]] for i in range(b) for j in range(t - 1)])
+    )
+    assert jnp.allclose(next_token_cross_entropy(logits, token_ids), manual, rtol=1e-6)
+
+
+def test_eval_step_keys_identities_and_determinism():
+    cfg = _tiny_cfg()
+    layer_range = LayerRange(4, 5)
+    tgt = _tiny_target(cfg, layer_range, jax.random.PRNGKey(0))
+    C = 8
+    lm = llama_decomposed_lm(cfg, layer_range, C)
+
+    from jax_single_pool.ci_fn import CIArch, init_ci_fn
+    from jax_single_pool.llama8b import init_decomp_vu
+
+    vu = init_decomp_vu(cfg, C, layer_range.n_layers, jax.random.PRNGKey(1))
+    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+
+    b, t = 2, 16
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
+    residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
+
+    # rounding_threshold=-1 makes the rounded mask all-ones == the unmasked variant;
+    # ci_alive_threshold=-1 makes every component alive -> L0 == C exactly.
+    eval_step = make_eval_step(lm, rounding_threshold=-1.0, ci_alive_threshold=-1.0, mesh=None)
+    out = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+
+    variants = ("ci_masked", "unmasked", "stoch_masked", "random_masked", "rounded_masked")
+    expected_keys = (
+        {f"ce_kl/kl_{v}" for v in (*variants, "zero_masked")}
+        | {f"ce_kl/ce_difference_{v}" for v in variants}
+        | {f"ce_kl/ce_unrecovered_{v}" for v in variants}
+        | {f"l0/-1.0_{site}" for site in lm.site_names}
+    )
+    assert set(out) == expected_keys
+
+    for key, value in out.items():
+        assert jnp.isfinite(value), (key, value)
+    for variant in (*variants, "zero_masked"):
+        assert out[f"ce_kl/kl_{variant}"] >= 0, variant
+
+    assert jnp.allclose(out["ce_kl/kl_rounded_masked"], out["ce_kl/kl_unmasked"], rtol=1e-3)
+    assert jnp.allclose(
+        out["ce_kl/ce_difference_rounded_masked"], out["ce_kl/ce_difference_unmasked"], rtol=1e-3
+    )
+    for site in lm.site_names:
+        assert float(out[f"l0/-1.0_{site}"]) == C
+
+    # deterministic in the key; key-independent variants unchanged under a new key
+    out_same = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    assert all(jnp.array_equal(out[k], out_same[k]) for k in out)
+    out_other = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(6))
+    for variant in ("ci_masked", "unmasked", "rounded_masked", "zero_masked"):
+        assert jnp.array_equal(out[f"ce_kl/kl_{variant}"], out_other[f"ce_kl/kl_{variant}"])
+    assert not jnp.array_equal(out["ce_kl/kl_stoch_masked"], out_other["ce_kl/kl_stoch_masked"])
+
+    eval_step_dead = make_eval_step(lm, rounding_threshold=-1.0, ci_alive_threshold=1.5, mesh=None)
+    out_dead = eval_step_dead(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    for site in lm.site_names:
+        assert float(out_dead[f"l0/1.5_{site}"]) == 0
