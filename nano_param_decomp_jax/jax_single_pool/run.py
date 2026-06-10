@@ -247,8 +247,9 @@ def train(
         assert eval_server.per_process % jax.local_device_count() == 0, (
             eval_server.per_process, jax.local_device_count(),
         )  # fmt: skip
+        eval_pgd = (cfg.eval.pgd.n_steps, cfg.eval.pgd.step_size) if cfg.eval.pgd else None
         eval_step_fn = make_eval_step(
-            lm, cfg.eval.rounding_threshold, cfg.eval.ci_alive_threshold, mesh
+            lm, cfg.eval.rounding_threshold, cfg.eval.ci_alive_threshold, eval_pgd, mesh
         )
 
     sink = MetricsSink(cfg, raw_cfg, is_main)

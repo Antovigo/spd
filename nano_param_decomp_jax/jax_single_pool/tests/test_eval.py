@@ -46,7 +46,9 @@ def test_eval_step_keys_identities_and_determinism():
 
     # rounding_threshold=-1 makes the rounded mask all-ones == the unmasked variant;
     # ci_alive_threshold=-1 makes every component alive -> L0 == C exactly.
-    eval_step = make_eval_step(lm, rounding_threshold=-1.0, ci_alive_threshold=-1.0, mesh=None)
+    eval_step = make_eval_step(
+        lm, rounding_threshold=-1.0, ci_alive_threshold=-1.0, pgd=None, mesh=None
+    )
     out = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
 
     variants = ("ci_masked", "unmasked", "stoch_masked", "random_masked", "rounded_masked")
@@ -78,7 +80,45 @@ def test_eval_step_keys_identities_and_determinism():
         assert jnp.array_equal(out[f"ce_kl/kl_{variant}"], out_other[f"ce_kl/kl_{variant}"])
     assert not jnp.array_equal(out["ce_kl/kl_stoch_masked"], out_other["ce_kl/kl_stoch_masked"])
 
-    eval_step_dead = make_eval_step(lm, rounding_threshold=-1.0, ci_alive_threshold=1.5, mesh=None)
+    eval_step_dead = make_eval_step(
+        lm, rounding_threshold=-1.0, ci_alive_threshold=1.5, pgd=None, mesh=None
+    )
     out_dead = eval_step_dead(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
     for site in lm.site_names:
         assert float(out_dead[f"l0/1.5_{site}"]) == 0
+
+
+def test_eval_step_fresh_pgd_probe():
+    """The fresh-PGD probe must come out at least as adversarial as the unascended
+    random source it starts from (ascent on a fixed objective), and be deterministic."""
+    cfg = _tiny_cfg()
+    layer_range = LayerRange(4, 4)
+    tgt = _tiny_target(cfg, layer_range, jax.random.PRNGKey(0))
+    C = 8
+    lm = llama_decomposed_lm(cfg, layer_range, C)
+
+    from jax_single_pool.ci_fn import CIArch, init_ci_fn
+    from jax_single_pool.llama8b import init_decomp_vu
+
+    vu = init_decomp_vu(cfg, C, layer_range.n_layers, jax.random.PRNGKey(1))
+    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    b, t = 2, 16
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
+    residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
+
+    ascended = make_eval_step(
+        lm, rounding_threshold=0.0, ci_alive_threshold=0.0, pgd=(8, 0.1), mesh=None
+    )
+    unascended = make_eval_step(
+        lm, rounding_threshold=0.0, ci_alive_threshold=0.0, pgd=(0, 0.1), mesh=None
+    )
+    out = ascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out0 = unascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+
+    assert "loss/PGDReconLoss" in out
+    assert jnp.isfinite(out["loss/PGDReconLoss"])
+    assert float(out["loss/PGDReconLoss"]) >= float(out0["loss/PGDReconLoss"]), (
+        "8 sign-ascent steps must not be less adversarial than the raw random source"
+    )
+    out_same = ascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    assert jnp.array_equal(out["loss/PGDReconLoss"], out_same["loss/PGDReconLoss"])

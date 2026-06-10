@@ -70,6 +70,15 @@ class CadenceConfig:
 
 
 @dataclass(frozen=True)
+class EvalPGDConfig:
+    """Fresh sign-PGD recon probe (torch eval `PGDReconLoss`: init random, source
+    shared across batch and positions)."""
+
+    n_steps: int
+    step_size: float
+
+
+@dataclass(frozen=True)
 class EvalConfig:
     """In-loop eval pass (torch `EvalLoop` analog, scalar metrics only — plots ride the
     offline export path). `rounding_threshold` binarises CI for the CE/KL
@@ -80,6 +89,7 @@ class EvalConfig:
     n_steps: int
     rounding_threshold: float
     ci_alive_threshold: float
+    pgd: EvalPGDConfig | None
 
 
 @dataclass(frozen=True)
@@ -175,7 +185,22 @@ def load_config(path: Path) -> ExperimentConfig:
                 else None
             ),
         ),
-        eval=_build(EvalConfig, raw["eval"], "eval") if raw.get("eval") else None,
+        eval=(
+            _build(
+                EvalConfig,
+                dict(
+                    {k: v for k, v in raw["eval"].items() if k != "pgd"},
+                    pgd=(
+                        _build(EvalPGDConfig, raw["eval"]["pgd"], "eval.pgd")
+                        if raw["eval"].get("pgd")
+                        else None
+                    ),
+                ),
+                "eval",
+            )
+            if raw.get("eval")
+            else None
+        ),
         wandb=_build(WandbConfig, raw["wandb"], "wandb") if raw.get("wandb") else None,
     )
     n_sites = 3 * (cfg.target.last_layer - cfg.target.first_layer + 1)

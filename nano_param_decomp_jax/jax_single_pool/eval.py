@@ -42,12 +42,21 @@ def make_eval_step(
     lm: DecomposedLM,
     rounding_threshold: float,
     ci_alive_threshold: float,
+    pgd: tuple[int, float] | None,
     mesh: Mesh | None,
 ):
     """Build the jit'd `eval_step(components, ci_fn, frozen, token_ids, residual, key)
     -> {metric_key: scalar}` with torch-parity keys (un-prefixed: the caller adds
-    `eval/`)."""
+    `eval/`).
+
+    `pgd = (n_steps, step_size)` enables the fresh sign-PGD recon probe (torch
+    `PGDReconLoss` with `init: random, mask_scope: shared_across_batch`): per site one
+    `(1, 1, C+1)` source shared across batch AND positions, `n_steps` ascents of
+    `source += step_size * sign(∂KL/∂source)` clamped to `[0, 1]`, KL evaluated at the
+    final source. The global-mean KL makes the source gradient the global-batch
+    gradient under GSPMD (torch all-reduce-AVG parity)."""
     site_names = lm.site_names
+    site_component_counts = {s.name: s.C for s in lm.sites}
 
     def batch_sharded(x: Array) -> Array:
         if mesh is None:
@@ -85,7 +94,7 @@ def make_eval_step(
         batch, seq = token_ids.shape
         zeros_delta = {site: jnp.zeros((batch, seq), COMPUTE_DT) for site in site_names}
 
-        stoch_key, random_key = random.split(key)
+        stoch_key, random_key, pgd_key = random.split(key, 3)
         variant_masks: dict[str, tuple[dict[str, Array], dict[str, Array]]] = {}
         variant_masks["ci_masked"] = (ci_lower, zeros_delta)
         variant_masks["unmasked"] = (
@@ -146,6 +155,44 @@ def make_eval_step(
         for site in site_names:
             alive_per_position = (ci_lower[site] > ci_alive_threshold).astype(jnp.float32)
             out[f"l0/{ci_alive_threshold}_{site}"] = alive_per_position.sum(-1).mean()
+
+        if pgd is not None:
+            pgd_n_steps, pgd_step_size = pgd
+
+            def kl_at_sources(adversarial_sources: dict[str, Array]) -> Array:
+                masks = {}
+                delta_masks = {}
+                for site in site_names:
+                    source = adversarial_sources[site].astype(COMPUTE_DT)
+                    ci_site = ci_lower[site]
+                    masks[site] = ci_site + (1.0 - ci_site) * source[..., :-1]
+                    delta_masks[site] = source[..., -1]
+                masked = masked_forward(frozen, components_bf16, residual, masks, delta_masks)
+                return kl_per_position(masked, clean_logits)
+
+            def ascend(
+                adversarial_sources: dict[str, Array], _: None
+            ) -> tuple[dict[str, Array], None]:
+                source_grads = jax.grad(kl_at_sources)(adversarial_sources)
+                return {
+                    site: jnp.clip(
+                        adversarial_sources[site] + pgd_step_size * jnp.sign(source_grads[site]),
+                        0.0,
+                        1.0,
+                    )
+                    for site in site_names
+                }, None
+
+            initial_sources = {
+                site: random.uniform(
+                    random.fold_in(pgd_key, site_idx),
+                    (1, 1, site_component_counts[site] + 1),
+                    jnp.float32,
+                )
+                for site_idx, site in enumerate(site_names)
+            }
+            final_sources, _ = jax.lax.scan(ascend, initial_sources, None, length=pgd_n_steps)
+            out["loss/PGDReconLoss"] = kl_at_sources(final_sources)
         return out
 
     return eval_step
