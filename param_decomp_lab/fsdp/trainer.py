@@ -71,7 +71,6 @@ from param_decomp.distributed import (
 from param_decomp.faithfulness_warmup import run_faithfulness_warmup
 from param_decomp.log import logger
 from param_decomp.metrics.base import Metric
-from param_decomp.metrics.dispatch import instantiate_metrics
 from param_decomp.metrics.persistent_pgd_recon import (
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
@@ -107,6 +106,7 @@ from param_decomp_lab.fsdp.consolidate import (
 )
 from param_decomp_lab.fsdp.grad_clip import clip_grad_norm_no_sync
 from param_decomp_lab.fsdp.sdpa_strict import verify_flash_attention_available
+from param_decomp_lab.metrics.dispatch import instantiate_lab_metrics
 
 _FA_PROBE_SEQ_LEN = 512
 """Representative seq len for the startup flash-attention dispatch probe. FA
@@ -340,7 +340,7 @@ class FsdpLMTrainer:
             weight_decay=pd_config.ci_fn_optimizer.weight_decay,
         )
 
-        self.loss_metrics, _ = instantiate_metrics(pd_config, self.adapter, device)
+        self.loss_metrics = instantiate_lab_metrics(pd_config, self.adapter, device)
 
         # --- 8. flash-attention dispatch probe ---
         cfg = self.lm.model.config

@@ -443,6 +443,23 @@ The cross-pool DAG is unchanged — it's all keyed on the chunk's `sites`, and e
 site still gets exactly one re-leafed CI tensor whose `.grad` accumulates across the
 forward list and ships back once.
 
+**Per-forward fresh deltas (streaming-backward invariant).** `recon_one_forward` takes a
+`WeightDeltasFn` (`make_weight_deltas_fn(component_model)`), not a precomputed delta dict,
+and calls it once per forward so each forward owns an independent `target − VU` autograd
+subgraph. This is load-bearing for any multi-forward plan (`SubsetReconPlan(n_samples>1)`,
+or any plan that reconstructs a site in more than one forward): the streaming loop
+backwards per forward and frees that forward's graph, so a *shared* delta tensor would be
+backward'd through twice → "backward through the graph a second time". The fn keeps
+placement caller-owned (plain for the 3-pool, DTensor-aware `calc_weight_deltas` for the
+flat FSDP path) and is called while V/U is in its native sharded state (FSDP reshards
+after each forward's backward). The flat single-pool twin (`ChunkwiseSubsetReconLoss`,
+`param_decomp_lab/metrics/chunkwise_subset_recon.py`) shares the SAME body/fn but
+accumulates forward-only into one loss for the trainer's single `total_loss.backward()` —
+bit-identical V/U + CI grads to the streaming per-forward backward (proven RNG-pinned in
+`tests/test_chunkwise_subset_recon_metric.py`). The other flat loss terms (faith / imp /
+PPGD) are proven equal to the 2-pool's pool-step helpers in
+`tests/test_flat_vs_two_pool_loss_terms.py`.
+
 **Gradient scaling.** The only scaling knob is `N_est` = the global total of chunkwise
 recon forwards per step (`runtime.n_est = Σ over chunks of
 plan.n_forwards(sites)`), computed once at `_build_runtime`. It replaces the

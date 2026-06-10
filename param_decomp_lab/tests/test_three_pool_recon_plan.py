@@ -35,8 +35,9 @@ from param_decomp_lab.three_pool.recon_plan import (
     SubsetReconPlan,
 )
 from param_decomp_lab.three_pool.step_chunkwise import (
-    _recon_one_forward,
     _run_routing_forwards,
+    make_weight_deltas_fn,
+    recon_one_forward,
 )
 
 _DRAW_SEED = 1234
@@ -121,6 +122,7 @@ def test_denom_matches_single_pool_normalization(plan: ChunkReconPlan) -> None:
             target_local=target,
             ci_leaves=leaves_path,
             routings=routings,
+            weight_deltas_fn=make_weight_deltas_fn(cast(LMComponentModel, cast(object, model))),
             coeff_stoch=1.0,
             n_est=n_forwards,
             chunk_dp=1,
@@ -138,8 +140,9 @@ def test_denom_matches_single_pool_normalization(plan: ChunkReconPlan) -> None:
     with strategy.context():
         total = torch.zeros(())
         n_positions = -1
+        weight_deltas_fn_ref = make_weight_deltas_fn(cast(LMComponentModel, cast(object, model)))
         for sites, routing in routings:
-            loss_f, n_positions = _recon_one_forward(
+            loss_f, n_positions = recon_one_forward(
                 cast(LMComponentModel, cast(object, model)),
                 batch,
                 target,
@@ -147,6 +150,7 @@ def test_denom_matches_single_pool_normalization(plan: ChunkReconPlan) -> None:
                 sites,
                 routing,
                 strategy,
+                weight_deltas_fn_ref,
             )
             total = total + loss_f
         n_examples = n_forwards * n_positions

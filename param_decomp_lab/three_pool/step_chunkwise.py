@@ -39,6 +39,7 @@ faithfulness runs on the GPU).
 
 # pyright: reportArgumentType=false, reportOperatorIssue=false, reportAttributeAccessIssue=false
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,6 +63,12 @@ from param_decomp_lab.three_pool.recon_plan import ForwardRouting
 from param_decomp_lab.three_pool.reductions import per_param_grad_norms
 from param_decomp_lab.three_pool.role import ChunkRole
 from param_decomp_lab.three_pool.runtime import _ThreePoolRuntime
+
+WeightDeltasFn = Callable[[tuple[str, ...]], dict[str, Tensor]]
+"""Produces FRESH grad-carrying ``{site: target_weight - VU}`` deltas for the given
+sites. Called once per recon forward so each forward owns an independent delta subgraph
+(see ``recon_one_forward``); placement is the fn's concern (plain for the 3-pool, the
+DTensor-aware ``calc_weight_deltas`` for the flat FSDP path)."""
 
 
 @dataclass(frozen=True)
@@ -247,6 +254,7 @@ def _chunkwise_streaming_phase(
         target_local=target_local,
         ci_leaves=ci_leaves.per_site,
         routings=routings,
+        weight_deltas_fn=make_weight_deltas_fn(component_model),
         coeff_stoch=cfg.coeff_stoch,
         n_est=cfg.n_est,
         chunk_dp=ctx.world.chunk_dp,
@@ -255,12 +263,30 @@ def _chunkwise_streaming_phase(
     )
 
 
+def make_weight_deltas_fn(component_model: "LMComponentModel") -> WeightDeltasFn:
+    """A ``WeightDeltasFn`` that recomputes fresh grad-carrying deltas per forward.
+
+    Each call runs ``component_model.calc_weight_deltas()`` and filters to the
+    requested sites, so every recon forward gets an independent ``target - VU``
+    subgraph (the streaming per-forward backward then frees only its own graph).
+    The placement is the model's: the plain ``LMComponentModel`` returns plain
+    tensors, the flat FSDP ``FsdpComponentAdapter`` returns DTensor-aware deltas.
+    """
+
+    def fn(sites: tuple[str, ...]) -> dict[str, Tensor]:
+        all_deltas = component_model.calc_weight_deltas()
+        return {s: all_deltas[s] for s in sites}
+
+    return fn
+
+
 def _run_routing_forwards(
     component_model: LMComponentModel,
     batch_local: Any,
     target_local: Tensor,
     ci_leaves: dict[str, Tensor],
     routings: list[ForwardRouting],
+    weight_deltas_fn: WeightDeltasFn | None,
     coeff_stoch: float,
     n_est: int,
     chunk_dp: int,
@@ -304,8 +330,15 @@ def _run_routing_forwards(
         # accumulator doesn't retain the autograd graph.
         stoch_total_t = torch.zeros((), device=device)
         for sites, routing in routings:
-            loss_f, n_positions = _recon_one_forward(
-                component_model, batch_local, target_local, ci_leaves, sites, routing, strategy
+            loss_f, n_positions = recon_one_forward(
+                component_model,
+                batch_local,
+                target_local,
+                ci_leaves,
+                sites,
+                routing,
+                strategy,
+                weight_deltas_fn,
             )
             assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
             n_positions_global = n_positions * chunk_dp
@@ -483,7 +516,7 @@ def _assert_ci_recv_shapes(
         )
 
 
-def _recon_one_forward(
+def recon_one_forward(
     component_model: LMComponentModel,
     batch_local: Any,
     target_local: Tensor,
@@ -491,23 +524,41 @@ def _recon_one_forward(
     sites: tuple[str, ...],
     routing: RoutingMasks,
     strategy: ReconLossStrategy,
+    weight_deltas_fn: "WeightDeltasFn | None",
 ) -> tuple[Tensor, int]:
     """Phase chunk/D3 (per-forward body). One stochastic masked forward + recon.
 
     ``sites`` are the sites swapped in for this forward (the keys of
-    ``mask_infos``); ``routing`` gates which positions route to them. Returns
-    ``(sum_loss, n_positions)`` raw — the caller scales and calls ``backward()``
-    so the per-forward graph is freed between iterations (bounds peak memory).
+    ``mask_infos``); ``routing`` gates which positions route to them.
+    ``weight_deltas_fn`` produces a FRESH grad-carrying ``target_weight - VU`` per
+    site for THIS forward (``None`` disables the delta component). It is called
+    once per forward — not a shared dict — so the delta's ``target - VU`` autograd
+    subgraph is rebuilt each forward; this is what lets the streaming caller free
+    each forward's graph with its own ``backward()`` even when several forwards
+    reconstruct the same sites (e.g. ``SubsetReconPlan(n_samples>1)``). A single
+    shared delta tensor would be backward'd through twice and raise "backward
+    through the graph a second time". The fn (not a precomputed dict) also keeps
+    placement caller-owned: the flat FSDP path supplies the DTensor-aware
+    ``calc_weight_deltas``, the 3-pool the plain one, and each call runs while V/U
+    is in its native (post-reshard) sharded state. The deltas are deterministic and
+    draw no RNG, so computing them before the per-site ``u``/``delta_mask`` draws
+    keeps RNG consumption identical to a single-shared-dict path. Returns
+    ``(sum_loss, n_positions)`` raw — the caller scales and calls ``backward()`` so
+    the per-forward graph is freed between iterations (bounds peak memory).
     """
+    weight_deltas = weight_deltas_fn(sites) if weight_deltas_fn is not None else None
     component_masks: dict[str, Tensor] = {}
-    weight_deltas_and_masks: dict[str, tuple[Tensor, Tensor]] = {}
+    weight_deltas_and_masks: dict[str, tuple[Tensor, Tensor]] | None = (
+        {} if weight_deltas is not None else None
+    )
     for site in sites:
         ci_s = ci_recv_leaves[site]
         u = torch.rand_like(ci_s)
         component_masks[site] = ci_s + (1 - ci_s) * u
-        delta = component_model.target_weight(site) - component_model.components[site].weight
-        delta_mask = torch.rand(ci_s.shape[:-1], device=ci_s.device, dtype=ci_s.dtype)
-        weight_deltas_and_masks[site] = (delta, delta_mask)
+        if weight_deltas_and_masks is not None:
+            assert weight_deltas is not None
+            delta_mask = torch.rand(ci_s.shape[:-1], device=ci_s.device, dtype=ci_s.dtype)
+            weight_deltas_and_masks[site] = (weight_deltas[site], delta_mask)
     mask_infos = make_mask_infos(
         component_masks,
         weight_deltas_and_masks=weight_deltas_and_masks,
