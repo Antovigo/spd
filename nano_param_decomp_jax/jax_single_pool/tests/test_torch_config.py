@@ -108,15 +108,15 @@ def test_unsupported_settings_refuse():
         )  # fmt: skip
 
 
-def test_c30k_yaml_converts_with_documented_divergences(capsys: pytest.CaptureFixture[str]):
-    """The C30k/200k yaml (raw-HF target spec, fp32 weights_dtype, `model.`-prefixed
+def test_c49k_yaml_converts_with_documented_divergences(capsys: pytest.CaptureFixture[str]):
+    """The C49k/200k yaml (raw-HF target spec, fp32 weights_dtype, `model.`-prefixed
     site patterns) must convert, printing the fp32-frozen divergence note."""
     converted, _torch_path, _raw = load_torch_wrapper(
-        CONFIGS / "llama8b_l18_C30k_200k_from_torch.yaml"
+        CONFIGS / "llama8b_l18_C49k_200k_from_torch.yaml"
     )
     printed = capsys.readouterr().out
     assert "fp32 frozen target" in printed
-    assert converted.target.C == 30000
+    assert converted.target.C == 49152
     assert converted.steps == 200000
     assert converted.data.global_batch == 128 and converted.data.seq_len == 2048
     assert converted.vu_optimizer.lr == 5e-05 and converted.ci_optimizer.lr == 5e-05

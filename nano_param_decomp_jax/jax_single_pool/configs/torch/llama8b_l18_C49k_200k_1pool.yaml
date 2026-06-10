@@ -8,6 +8,8 @@
 #   3. PersistentPGDReconLoss scope: per_batch_per_position -> broadcast_across_batch
 #      (the JAX trainer implements broadcast only; deliberate divergence).
 #   4. cadence.save_every: 25000 -> 5000 (overnight crash costs <=40 min, not 3 h).
+#   5. C: 30000 -> 49152 per Oli (2x the b512 run's C=24576; also unlocks a 32-GPU
+#      mesh — 30000's gcd with batch 128 capped the mesh at 16).
 # Everything else in pd: (C=30000, lrs 5e-5/5e-5, 200k steps, batch 128, eval set)
 # is upstream-identical. weights_dtype is upstream's default fp32; the JAX frozen
 # target runs bf16 (converter prints the documented divergence).
@@ -92,11 +94,11 @@ pd:
       warmup_pct: 0.0
     weight_decay: 0.0
   decomposition_targets:
-  - C: 30000
+  - C: 49152
     module_pattern: model.layers.18.mlp.gate_proj
-  - C: 30000
+  - C: 49152
     module_pattern: model.layers.18.mlp.up_proj
-  - C: 30000
+  - C: 49152
     module_pattern: model.layers.18.mlp.down_proj
   faithfulness_warmup_lr: 0.001
   faithfulness_warmup_steps: 400
