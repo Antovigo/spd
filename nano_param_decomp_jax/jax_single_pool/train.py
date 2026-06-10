@@ -196,34 +196,46 @@ def uniform_k_subset_routes(
 # ───────────────────────────── recon plans (SPEC S10/S11) ─────────────────────────────
 
 
-RoutingSampler = Callable[[PRNGKeyArray, tuple[int, int]], dict[str, Array] | None]
-"""`(key, (B, T)) -> {site: bool[B, T]} | None` (None = route everywhere). The torch
-`Router.get_masks` made pure: a fresh draw per step requires the key threaded in —
-samplers run INSIDE the jitted step, so they must be traceable (SPEC R1). The plan's
-STRUCTURE (live-sets, sampler identities) is static; only the key varies per step."""
+Routes = dict[str, Array] | None
+RoutingSampler = Callable[[PRNGKeyArray, tuple[int, int]], tuple[Routes, ...]]
+"""`(key, (B, T)) -> (routes, ...)` — a STATICALLY-sized family of routing draws, each
+`{site: bool[B, T]}` (or None = route everywhere) becoming ONE forward. The torch
+`Router.get_masks` made pure: fresh draws per step require the key threaded in —
+samplers run INSIDE the jitted step, so they must be traceable (SPEC R1). Returning
+several draws from one invocation enables JOINTLY-sampled families (independent
+repeats, antithetic/complementary subsets, per-step random covers) that duplicated
+plan entries with independent keys cannot express. The plan's structure — live-sets,
+sampler identities, family sizes — is static; only the key varies per step."""
 
 
 class ReconForward(NamedTuple):
-    """One stochastic recon forward: which sites run their decomposed path (`live` —
-    everything else takes the frozen `x @ W` path, the ~9x-cheaper non-decomposed
-    matmul) and a sampler for how positions route among them."""
+    """One plan entry: which sites run their decomposed path (`live` — everything else
+    takes the frozen `x @ W` path, the ~9x-cheaper non-decomposed matmul) and a sampler
+    producing this entry's family of routing draws. Each draw is one forward, with its
+    own fresh mask/delta sources."""
 
     live: tuple[str, ...]
     sample_routing: RoutingSampler
 
 
 ReconPlan = tuple[ReconForward, ...]
-"""The stochastic-recon loss is the mean over the plan's forwards of KL/(B·T). Any
-list of (live-set, routing-sampler) pairs is a valid plan; live-sets may differ
-across entries (each traces its own forward) but the plan is fixed across steps."""
+"""The stochastic-recon loss is the mean over ALL forwards (every draw of every entry)
+of KL/(B·T). Live-sets may differ across entries (each traces its own forward); the
+plan is fixed across steps (varying it would retrace)."""
 
 
-def uniform_k_routing(live: tuple[str, ...]) -> RoutingSampler:
-    return lambda key, lead: uniform_k_subset_routes(key, live, lead)
+def uniform_k_routing(live: tuple[str, ...], n_draws: int) -> RoutingSampler:
+    """`n_draws` independent per-position uniform-k-subset draws over `live`."""
+
+    def sample(key: PRNGKeyArray, lead: tuple[int, int]) -> tuple[Routes, ...]:
+        return tuple(uniform_k_subset_routes(k, live, lead) for k in random.split(key, n_draws))
+
+    return sample
 
 
-def route_all(_key: PRNGKeyArray, _lead: tuple[int, int]) -> None:
-    return None
+def route_all(_key: PRNGKeyArray, _lead: tuple[int, int]) -> tuple[Routes, ...]:
+    """One draw routing every position to every live site."""
+    return (None,)
 
 
 def subset_chunk_plan(
@@ -232,9 +244,8 @@ def subset_chunk_plan(
     """The production plan: partition into sequential chunks, `n_samples` uniform-k
     forwards per chunk (torch `SubsetReconPlan` over `ThreePoolTopology` chunks)."""
     return tuple(
-        ReconForward(live=chunk, sample_routing=uniform_k_routing(chunk))
+        ReconForward(live=chunk, sample_routing=uniform_k_routing(chunk, n_samples))
         for chunk in chunk_sites(site_names, sites_per_chunk)
-        for _ in range(n_samples)
     )
 
 
@@ -327,19 +338,23 @@ def make_train_step(
     ) -> Array:
         b, t = resid.shape[0], resid.shape[1]
         total = jnp.zeros((), jnp.float32)
-        for forward_idx, fwd in enumerate(recon_plan):
-            u_key, dm_key, route_key = random.split(random.fold_in(key, forward_idx), 3)
-            masks = {}
-            delta_masks = {}
-            for j, s in enumerate(fwd.live):
-                ci_s = ci_lower[s]
-                u = random.uniform(random.fold_in(u_key, j), ci_s.shape, COMPUTE_DT)
-                masks[s] = ci_s + (1.0 - ci_s) * u
-                delta_masks[s] = random.uniform(random.fold_in(dm_key, j), (b, t), COMPUTE_DT)
-            routes = fwd.sample_routing(route_key, (b, t))
-            pred = ckpt_masked(frozen, vu_c, resid, masks, delta_masks, routes, fwd.live)
-            total = total + kl_per_position(pred, cln)
-        return total / len(recon_plan)
+        n_forwards = 0
+        for entry_idx, fwd in enumerate(recon_plan):
+            entry_key, route_key = random.split(random.fold_in(key, entry_idx))
+            for draw_idx, routes in enumerate(fwd.sample_routing(route_key, (b, t))):
+                u_key, dm_key = random.split(random.fold_in(entry_key, draw_idx))
+                masks = {}
+                delta_masks = {}
+                for j, s in enumerate(fwd.live):
+                    ci_s = ci_lower[s]
+                    u = random.uniform(random.fold_in(u_key, j), ci_s.shape, COMPUTE_DT)
+                    masks[s] = ci_s + (1.0 - ci_s) * u
+                    delta_masks[s] = random.uniform(random.fold_in(dm_key, j), (b, t), COMPUTE_DT)
+                pred = ckpt_masked(frozen, vu_c, resid, masks, delta_masks, routes, fwd.live)
+                total = total + kl_per_position(pred, cln)
+                n_forwards += 1
+        assert n_forwards > 0, "recon plan produced no forwards"
+        return total / n_forwards
 
     @jax.jit
     def step(state: TrainState, frozen: Any, resid: Float[Array, "b t d"], key: PRNGKeyArray):
