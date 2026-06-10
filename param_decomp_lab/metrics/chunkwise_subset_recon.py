@@ -94,25 +94,24 @@ def chunkwise_subset_recon(
     delta subgraph makes the two normalisations coincide bit-for-bit)."""
     sum_over_forwards = torch.zeros((), device=device)
     n_forwards = 0
-    with strategy.context():
-        for chunk in chunks:
-            mask_shape = ci[chunk[0]].shape[:-1]
-            routings = plan.generate(chunk, mask_shape, device)
-            for sites, routing in routings:
-                # Compute the fresh per-forward deltas EAGER, OUTSIDE the checkpoint, so the
-                # backward recompute restores a saved plain tensor rather than re-running the
-                # DTensor `redistribute`/`to_local` (which, during the FSDP backward, re-derives
-                # the delta as a `Shard(0)` DTensor and collides with the plain activation inside
-                # the compiled masked forward). Grad still reaches V/U through the eager delta
-                # subgraph; the delta draws no RNG, so the per-site `u`/`delta_mask` draws inside
-                # the recomputed region replay identically (equivalence preserved bit-for-bit).
-                weight_deltas = weight_deltas_fn(sites)
-                loss_f, n_positions = _checkpointed_recon_one_forward(
-                    lm, batch, target_local, ci, sites, routing, strategy, weight_deltas
-                )
-                assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
-                sum_over_forwards = sum_over_forwards + loss_f / n_positions
-                n_forwards += 1
+    for chunk in chunks:
+        mask_shape = ci[chunk[0]].shape[:-1]
+        routings = plan.generate(chunk, mask_shape, device)
+        for sites, routing in routings:
+            # Compute the fresh per-forward deltas EAGER, OUTSIDE the checkpoint, so the
+            # backward recompute restores a saved plain tensor rather than re-running the
+            # DTensor `redistribute`/`to_local` (which, during the FSDP backward, re-derives
+            # the delta as a `Shard(0)` DTensor and collides with the plain activation inside
+            # the compiled masked forward). Grad still reaches V/U through the eager delta
+            # subgraph; the delta draws no RNG, so the per-site `u`/`delta_mask` draws inside
+            # the recomputed region replay identically (equivalence preserved bit-for-bit).
+            weight_deltas = weight_deltas_fn(sites)
+            loss_f, n_positions = _checkpointed_recon_one_forward(
+                lm, batch, target_local, ci, sites, routing, strategy, weight_deltas
+            )
+            assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
+            sum_over_forwards = sum_over_forwards + loss_f / n_positions
+            n_forwards += 1
     assert n_forwards > 0, "no recon forwards generated — empty decomposition?"
     return sum_over_forwards / n_forwards, n_forwards
 
@@ -146,7 +145,15 @@ def _checkpointed_recon_one_forward(
     `target − VU` subgraph the caller built OUTSIDE this region. Deltas are precomputed
     (not recomputed via a closure) so the FSDP backward recompute never re-derives them
     as `Shard(0)` DTensors — which would collide with the plain activation in the compiled
-    masked forward (`got mixed torch.Tensor and DTensor`)."""
+    masked forward (`got mixed torch.Tensor and DTensor`).
+
+    `strategy.context()` (the fused-KL LM-head bypass) is entered INSIDE the checkpointed
+    region, not around it, so the bypass is active on BOTH the forward pass and the backward
+    recompute. The recompute runs during `backward()` — after any outer bypass context has
+    exited — so without re-entering it here the recompute would run the full LM head and the
+    recomputed forward output would be the vocab projection `[d_model, vocab]` instead of the
+    saved pre-LM-head hidden state `[pos, d_model]` (`Recomputed values ... different
+    metadata`)."""
     ci_sites = tuple(ci[s] for s in sites)
     delta_sites = tuple(weight_deltas[s] for s in sites)
     n_ci = len(ci_sites)
@@ -154,9 +161,10 @@ def _checkpointed_recon_one_forward(
     def run(*tensors: Tensor) -> tuple[Tensor, int]:
         ci_local = dict(zip(sites, tensors[:n_ci], strict=True))
         deltas_local = dict(zip(sites, tensors[n_ci:], strict=True))
-        return recon_one_forward(
-            lm, batch, target_local, ci_local, sites, routing, strategy, lambda _s: deltas_local
-        )
+        with strategy.context():
+            return recon_one_forward(
+                lm, batch, target_local, ci_local, sites, routing, strategy, lambda _s: deltas_local
+            )
 
     return cast("tuple[Tensor, int]", checkpoint(run, *ci_sites, *delta_sites, use_reentrant=False))
 
