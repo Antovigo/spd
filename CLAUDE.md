@@ -125,6 +125,7 @@ Every artifact for a decomposition lives under one dir per run:
 ```
 PARAM_DECOMP_OUT_DIR/runs/<run_id>/
   experiment_config.yaml     # the full ExperimentConfig
+  run_metadata.json          # started_at/finished_at + git_commit/uncommitted_changes
   model_<step>.pth           # checkpoints (RunSink.checkpoint)
   metrics.jsonl              # local logs (RunSink.log)
   harvest/h-*/...            # pd-harvest output
@@ -177,6 +178,7 @@ All declared in `param_decomp_lab/pyproject.toml`.
 | `pd-cluster-merge` | `clustering/scripts/run_merge.py` | Merge from snapshot (CPU only) |
 | `pd-intruder` | `harvest/scripts/run_intruder_slurm_cli.py` | Submit intruder eval job |
 | `pd-investigate` | `investigate/scripts/run_slurm_cli.py` | Submit agent-investigation job |
+| `pd-index` | `scripts/index_runs.py` | Scan the runs dir into a TSV index (groups by `label`) |
 
 All `pd-*` run commands accept `--group <id>` (wandb group field, used for UI
 collapsing) and `--tags a,b,c` (wandb tags). Both no-op when `wandb:` is omitted from

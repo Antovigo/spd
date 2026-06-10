@@ -11,7 +11,7 @@ from param_decomp.base_config import BaseConfig
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.distributed import is_main_process
 from param_decomp_lab.eval_metrics import AnyEvalMetricConfig
-from param_decomp_lab.infra.run_files import generate_run_id
+from param_decomp_lab.infra.run_files import generate_run_id, write_run_metadata_start
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.infra.wandb import try_wandb
 from param_decomp_lab.run_sink import RunSink
@@ -54,6 +54,7 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
     cadence: Cadence
     target: T
     data: D
+    label: str | None = None
     eval: EvalConfig | None = None
     wandb: WandbConfig | None = None
 
@@ -77,6 +78,7 @@ def init_pd_run[T: BaseConfig, D: BaseConfig](
     out_dir = PARAM_DECOMP_OUT_DIR / "runs" / run_id
     cfg_path = out_dir / EXPERIMENT_CONFIG_FILENAME
     cfg.to_file(cfg_path)
+    write_run_metadata_start(out_dir)
     keep_last_n = cfg.cadence.keep_last_n_checkpoints
     if cfg.wandb is None:
         return RunSink.local(out_dir, keep_last_n_checkpoints=keep_last_n)
