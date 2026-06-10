@@ -120,15 +120,20 @@ def step_chunkwise(
     # Residual-start: cache the clean residual entering the decomposed layer once; the clean
     # target_fwd and every masked recon forward below run only the suffix (no-op for GPT-2 q/k,
     # where the decomposed layer is 0).
+    trace("step_chunk: use_cached_residual enter (prefix fwd)")
     with component_model.use_cached_residual(batch_local):
+        trace("step_chunk: cached residual ready; post CI recv")
         with strategy.context():
             ci_recv_pending = _post_ci_recv(ctx, cfg, seq_len, device)
+            trace("step_chunk: CI irecv posted; target_fwd")
             target_local = _target_fwd(component_model, batch_local, cfg)
+            trace("step_chunk: target_fwd done")
 
         for param in all_params:
             param.grad = None
 
         with strategy.context():
+            trace("step_chunk: faith phase")
             faith = _faithfulness_phase(component_model, device, cfg, ctx)
             # Snapshot the faith-only V/U grad (chunk leader; non-leaders skip faith)
             # before stoch accumulates on top, for the per-loss grad-norm breakdown.
@@ -136,13 +141,17 @@ def step_chunkwise(
                 _snapshot_owned_vu_grads(component_model, ctx.role.sites) if should_log else None
             )
 
+            trace("step_chunk: wait CI recv (blocking cross-pool)")
             ci_leaves = _wait_ci_and_releaf(ci_recv_pending, ctx, seq_len, cfg)
+            trace("step_chunk: CI recv done; stoch recon")
             stoch = _chunkwise_streaming_phase(
                 component_model, batch_local, target_local, ci_leaves, ctx, cfg, strategy
             )
-
+            trace("step_chunk: stoch done; send g_CI")
             _send_g_ci(ctx.portals, ctx.role, ci_leaves)
+            trace("step_chunk: g_CI sent; recv g_VU (blocking cross-pool)")
             ppgd_vu = _recv_and_combine_g_vu(ctx, component_model, return_ppgd=should_log)
+            trace("step_chunk: g_VU recv done")
 
     if should_log:
         stoch_total_value = stoch.total.item()

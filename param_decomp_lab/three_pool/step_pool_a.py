@@ -108,11 +108,16 @@ def step_pool_a(
     batch_local, seq_len = _slice_batch_for_pool_a(batch_T, ctx)
 
     # A0 + A1 + A3 + A4 (warmup/recon) all share the residual-start + bypass context.
+    trace(f"step_pool_a {step}: use_cached_residual enter (prefix fwd)")
     with component_model.use_cached_residual(batch_local), strategy.context():
+        trace(f"step_pool_a {step}: shared target_forward")
         target_out, h_cache = _shared_target_forward(component_model, batch_local, cfg)
+        trace(f"step_pool_a {step}: ci_fn forward")
         fwd = _ci_fn_forward(component_model, h_cache, ctx, cfg)
         mean_l0 = _mean_l0(fwd.ci.lower_leaky, ctx.world.n_ci) if should_log else 0.0
+        trace(f"step_pool_a {step}: send CI masks to chunk")
         sends_to_chunk = ctx.portals.ci_to_chunk.send(ctx.role.as_ci(), fwd.ci.lower_leaky)
+        trace(f"step_pool_a {step}: CI masks sent; adversary/imp")
         imp_loss = _importance_minimality_loss(
             fwd.ci.upper_leaky,
             current_frac_of_training,
