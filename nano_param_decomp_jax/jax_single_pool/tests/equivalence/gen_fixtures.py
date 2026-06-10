@@ -133,7 +133,7 @@ def main() -> None:
     for name, val in scalars.items():
         arrays[f"_scalar_{name}"] = np.array(val)
 
-    np.savez(OUT, **arrays)
+    np.savez(OUT, **arrays)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
     print(f"wrote {OUT} ({len(arrays)} arrays, n_decomp_layers={N_DECOMP_LAYERS}, "
           f"sites={N_DECOMP_LAYERS * 3})")  # fmt: skip
 

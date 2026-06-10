@@ -7,14 +7,9 @@ every collective (the grad all-reduce, the source-grad reduction) automatically
 because the mean-losses reduce over the sharded batch axis. No manual NCCL, no
 pool-coordination code.
 
-Two placement strategies, both expressed as `NamedSharding`:
-  * replicate    — params on every device (the data-parallel memory floor).
-  * shard_leading — shard a param's leading axis over 'dp' (the FSDP analog for
-    the memory story: stacked sites / components split across devices). The
-    step's einsums stay correct because XLA all-gathers on demand.
-
-This generalizes `jax_spike/distributed_util.py` into an importable module the
-trainer composes, rather than a per-stage copy.
+Placement is expressed as `NamedSharding`: `replicate` for params (target-specific
+plans like `llama8b_sharding.py` layer C-sharding on top), `shard_batch` for the
+data axis.
 """
 
 import os
@@ -44,18 +39,6 @@ def dp_mesh() -> Mesh:
 
 def replicate(x: jax.Array, mesh: Mesh) -> jax.Array:
     return jax.device_put(x, NamedSharding(mesh, P()))
-
-
-def shard_leading(x: jax.Array, mesh: Mesh) -> jax.Array:
-    """Shard a param's leading axis over 'dp' (the FSDP-style param shard).
-
-    The leading axis must be divisible by the mesh size. For stacked sites this
-    splits the site bank across devices; for components, split the C axis instead
-    by transposing first.
-    """
-    n = mesh.devices.size
-    assert x.shape[0] % n == 0, f"leading dim {x.shape[0]} not divisible by mesh size {n}"
-    return jax.device_put(x, NamedSharding(mesh, P("dp")))
 
 
 def shard_batch(full_global: jax.Array, mesh: Mesh, batch_axis: int) -> jax.Array:

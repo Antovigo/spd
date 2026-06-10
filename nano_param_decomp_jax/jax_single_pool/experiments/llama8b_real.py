@@ -1,26 +1,22 @@
-"""Run the full Llama-3.1-8B single-pool VPD step in JAX and measure tok/s/GPU.
+"""Run the full Llama-3.1-8B single-pool VPD step (generic trainer) — measure tok/s/GPU.
 
 NB: no MFU/FLOP estimate here on purpose — a hardcoded forward-count × an "achievable"
 peak gave a misleadingly high MFU. tok/s/GPU (tokens ÷ wall-clock) is the trustworthy,
 assumption-free throughput number; compare that directly across frameworks.
 
-The full PD step on the REAL 8B model: residual-start suffix from `--first_layer`,
-MLP (gate/up/down) decomposed on layers `[first_layer, last_layer]` (3N sites),
-weight-delta, global_shared_transformer CI fn (ONE shared transformer over all sites),
-4 losses + persistent PGD. GSPMD-sharded: frozen suffix replicated, V/U + CI + Adam
-sharded over `dp`, batch sharded over `dp`, PGD source replicated (shared across the
-global batch, grad AVG-reduced). Matches
-`param_decomp_lab/experiments/lm/_llama8b/llama8b_l18_b512_2pool_lr_mid.yaml` extended
-to a layer range.
+The full SPEC-compliant step on the REAL 8B model: residual-start suffix from
+`--first_layer`, MLP (gate/up/down) decomposed on layers `[first_layer, last_layer]`
+(3N sites), weight-delta, shared-transformer CI fn, 4 losses + persistent-PGD Adam
+adversary, fp32 masters + bf16 compute, p-anneal + LR schedules, faithfulness warmup.
+GSPMD-sharded: frozen suffix replicated, V/U + CI + Adam sharded over `dp`, batch
+sharded over `dp`, PGD source replicated (grad reduced by the global-mean loss).
 
-Everything that varies for the matched / max-batch / min-GPU runs is a flag:
-  --first_layer / --last_layer  which layers to decompose (default 20..31 = 12 layers)
-  --C                           components per site (the torch agent fixes this)
-  --per_gpu_batch               local batch; gbatch = per_gpu_batch * n_devices
-  mesh / world size             = all visible jax devices (SLURM topology)
+Schedules anneal over `--total_steps` (the production horizon), not the benched
+`--steps`, so short benches measure start-of-training semantics.
 
 Usage (single B200, random weights, fast smoke, 12 layers):
-  python -m jax_single_pool.experiments.llama8b_real --per_gpu_batch 1 --steps 6 --C 2048
+  python -m jax_single_pool.experiments.llama8b_real --per_gpu_batch 1 --steps 6 \
+      --C 2048 --faith_warmup 0
 
 Real HF weights + the residual-start prefix harvest:
   python -m jax_single_pool.experiments.llama8b_real --real_weights --first_layer 20 \
@@ -40,12 +36,11 @@ import optax
 from jax import random
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
-from vendored_jax.llama import llama3_inv_freq
+from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 
-from jax_single_pool.ci_fn import CIFnDims, init_ci_fn
+from jax_single_pool.ci_fn import CIArch, init_ci_fn
 from jax_single_pool.llama8b import (
     DT,
-    KINDS,
     DecompLayerFrozen,
     FrozenAttn,
     FrozenBlock,
@@ -54,6 +49,7 @@ from jax_single_pool.llama8b import (
     Target,
     init_decomp_vu,
     llama31_8b_config,
+    llama_decomposed_lm,
     load_target_from_hf,
     make_real_target_residual,
 )
@@ -65,21 +61,25 @@ from jax_single_pool.llama8b_sharding import (
     shard_decomp_vu,
     shard_source,
 )
-from jax_single_pool.llama8b_step import (
-    Llama8BState,
-    LossCoeffs,
-    make_llama8b_step,
-    make_llama8b_step_shmap,
-)
 from jax_single_pool.sharding import init_distributed
+from jax_single_pool.train import (
+    ImpMinConfig,
+    LossCoeffs,
+    SourceAdamConfig,
+    TrainState,
+    init_sources,
+    init_src_adam,
+    make_faith_warmup_step,
+    make_train_step,
+)
 
 
-def _random_target(cfg, rng: LayerRange, key) -> Target:
+def _random_target(cfg: LlamaConfig, rng: LayerRange, key: jax.Array) -> Target:
     ks = iter(random.split(key, 4096))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
 
-    def n(shape, s=None):
+    def n(shape: tuple[int, ...], s: float | None = None) -> jax.Array:
         return (random.normal(next(ks), shape) * (s or d**-0.5)).astype(DT)
 
     def fattn():
@@ -120,11 +120,15 @@ def main():
     ap.add_argument("--last_layer", type=int, default=31)
     ap.add_argument("--steps", type=int, default=10)
     ap.add_argument("--n_warmup", type=int, default=2)
+    ap.add_argument("--total_steps", type=int, default=100_000,
+                    help="schedule horizon (p anneal, LR decay) — production 100k")  # fmt: skip
+    ap.add_argument("--faith_warmup", type=int, default=400,
+                    help="faithfulness-warmup steps before the bench loop (SPEC S21); 0 to skip")  # fmt: skip
     ap.add_argument("--real_weights", action="store_true")
     ap.add_argument("--shard", action="store_true", help="jit + C-shard V/U/CI/Adam + batch")
-    ap.add_argument("--shmap", action="store_true", help="shard_map DP (params replicated)")
     ap.add_argument("--model_name", default="meta-llama/Llama-3.1-8B")
     args = ap.parse_args()
+    assert args.steps > 0, "--steps must be positive"
 
     rng = LayerRange(first=args.first_layer, last=args.last_layer)
     assert 0 <= rng.first <= rng.last < 32, f"bad layer range {rng}"
@@ -136,21 +140,14 @@ def main():
     gbatch = args.per_gpu_batch * ndev
 
     cfg = llama31_8b_config()
-    dims = CIFnDims(
-        d_model=4096,
-        n_blocks=4,
-        n_heads=64,
-        mlp_hidden=16384,
-        total_in=rng.n_layers * (cfg.n_embd + cfg.n_embd + cfg.n_intermediate),
-        C=args.C,
-        n_layers=rng.n_layers,
-    )
+    lm = llama_decomposed_lm(cfg, rng, args.C)
+    arch = CIArch(d_model=4096, n_blocks=4, n_heads=64, mlp_hidden=16384)
     if is0:
         print(
             f"[p0] LLAMA8B single-pool PD | {ndev} GPU | gbatch={gbatch} seq={args.seq} "
-            f"layers={rng.first}..{rng.last} ({rng.n_layers}L, {3 * rng.n_layers} sites) "
-            f"C={args.C} n_warmup={args.n_warmup} "
-            f"mode={'shmap' if args.shmap else 'shard' if args.shard else 'replicated'} "
+            f"layers={rng.first}..{rng.last} ({rng.n_layers}L, {len(lm.sites)} sites) "
+            f"C={args.C} n_warmup={args.n_warmup} faith_warmup={args.faith_warmup} "
+            f"mode={'shard' if args.shard else 'replicated'} "
             f"weights={'HF' if args.real_weights else 'random'}"
         )
 
@@ -168,58 +165,98 @@ def main():
             random.normal(random.PRNGKey(7), (gbatch, args.seq, cfg.n_embd)) * 0.5
         ).astype(DT)
 
-    vu = init_decomp_vu(cfg, args.C, rng.n_layers, random.PRNGKey(1))
-    ci_fn = init_ci_fn(dims, random.PRNGKey(2))
-    opt_vu = optax.adamw(1.5e-4)
-    opt_ci = optax.adamw(5e-5)
+    vu = init_decomp_vu(cfg, args.C, rng.n_layers, random.PRNGKey(1))  # fp32 masters
+    ci_fn = init_ci_fn(arch, lm.sites, random.PRNGKey(2))  # fp32 masters
 
-    assert not (args.shard and args.shmap), "pick one of --shard / --shmap"
+    # Production optimizers (SPEC S19/S20): AdamW wd=0, cosine→0.1×; V/U clipped at 0.01.
+    sched_vu = optax.cosine_decay_schedule(1.5e-4, args.total_steps, alpha=0.1)
+    sched_ci = optax.cosine_decay_schedule(5.0e-5, args.total_steps, alpha=0.1)
+    opt_vu = optax.chain(
+        optax.clip_by_global_norm(0.01),
+        optax.adamw(sched_vu, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0),
+    )
+    opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
+
+    # U[0,1] init (SPEC S15); fp32 state, trailing channel = the weight-delta source.
+    src = init_sources(lm.site_names, tuple(s.C for s in lm.sites), args.seq, random.PRNGKey(3))
+
     target = replicate_target(target, mesh)
-    # +1 trailing channel = the weight-delta source (torch use_delta_component=true).
-    src_shape = (1, args.seq, rng.n_layers, args.C + 1)
     if args.shard:
         vu = shard_decomp_vu(vu, mesh)
         ci_fn = shard_ci_fn(ci_fn, mesh)
-        source = shard_source({k: jnp.zeros(src_shape, DT) for k in KINDS}, mesh)
+        src = shard_source(src, mesh)
         resid = shard_batch(resid_global, mesh)
     else:
         repl = NamedSharding(mesh, P())
-        vu = jax.tree.map(lambda a: jax.device_put(a, repl) if eqx.is_array(a) else a, vu)
-        ci_fn = jax.tree.map(lambda a: jax.device_put(a, repl) if eqx.is_array(a) else a, ci_fn)
-        source = {k: jax.device_put(jnp.zeros(src_shape, DT), repl) for k in KINDS}
+        put = lambda a: jax.device_put(a, repl) if eqx.is_array(a) else a  # noqa: E731
+        vu = jax.tree.map(put, vu)
+        ci_fn = jax.tree.map(put, ci_fn)
+        src = {k: jax.device_put(v, repl) for k, v in src.items()}
         resid = shard_batch(resid_global, mesh)
 
-    state = Llama8BState(
+    # ── faithfulness warmup (SPEC S21): V/U only, before the main loop ──
+    if args.faith_warmup > 0:
+        wopt = optax.adamw(1.0e-3, weight_decay=0.0)
+        wstate = wopt.init(eqx.filter(vu, eqx.is_array))
+        wstep = make_faith_warmup_step(lm, wopt)
+        t0 = time.time()
+        wloss: jax.Array | None = None
+        for _ in range(args.faith_warmup):
+            vu, wstate, wloss = wstep(vu, wstate, target)
+        assert wloss is not None
+        jax.block_until_ready(wloss)
+        if is0:
+            print(
+                f"[p0] faith warmup: {args.faith_warmup} steps in {time.time() - t0:.1f}s, "
+                f"final faith {float(wloss):.3e}"
+            )
+
+    state = TrainState(
         vu=vu,
         ci_fn=ci_fn,
         opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
         opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        source=source,
-        step=jnp.array(0),
+        src=src,
+        src_adam=init_src_adam(src),
+        step=jnp.zeros((), jnp.int32),
     )
-    coeffs = LossCoeffs(
-        faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4, imp_beta=0.2, imp_eps=1e-12
+    step = make_train_step(
+        lm=lm,
+        coeffs=LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5),
+        imp_cfg=ImpMinConfig(
+            beta=0.2,
+            eps=1e-12,
+            p_start=2.0,
+            p_final=0.4,
+            anneal_start_frac=0.0,
+            anneal_end_frac=1.0,
+        ),  # fmt: skip
+        src_cfg=SourceAdamConfig(
+            lr=0.01,
+            lr_warmup_frac=0.025,
+            beta1=0.5,
+            beta2=0.99,
+            eps=1e-8,
+            n_warmup=args.n_warmup,
+        ),  # fmt: skip
+        opt_vu=opt_vu,
+        opt_ci=opt_ci,
+        total_steps=args.total_steps,
+        sites_per_chunk=3,
+        n_samples=1,
+        mesh=mesh if args.shard else None,
     )
-    if args.shmap:
-        step = make_llama8b_step_shmap(
-            coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=args.n_warmup,
-            n_layers=rng.n_layers, mesh=mesh,
-        )  # fmt: skip
-    else:
-        step = make_llama8b_step(
-            coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=args.n_warmup,
-            n_layers=rng.n_layers, mesh=mesh if args.shard else None,
-        )  # fmt: skip
 
+    m: dict[str, jax.Array] = {}
     for _ in range(2):
         state, m = step(state, target, resid, random.PRNGKey(7))
-        jax.block_until_ready((state.source, m["total"]))
+        jax.block_until_ready((state.src, m["total"]))
 
     per = []
     for s in range(args.steps):
         t = time.time()
         state, m = step(state, target, resid, random.PRNGKey(1000 + s))
-        jax.block_until_ready((state.source, m["total"]))
+        jax.block_until_ready((state.src, m["total"]))
         per.append(time.time() - t)
     blocked = sum(per) / len(per)
 
@@ -227,7 +264,7 @@ def main():
     for s in range(args.steps):
         state, m = step(state, target, resid, random.PRNGKey(2000 + s))
     dispatch = (time.time() - t) / args.steps
-    jax.block_until_ready((state.source, m["total"]))
+    jax.block_until_ready((state.src, m["total"]))
 
     peak_gb = max(
         d.memory_stats()["peak_bytes_in_use"] / 1e9
@@ -247,7 +284,8 @@ def main():
         )
         print(
             f"[p0]   losses: faith {float(m['faith']):.4e} imp {float(m['imp']):.4f} "
-            f"stoch {float(m['stoch']):.4e} ppgd {float(m['ppgd']):.4e}"
+            f"stoch {float(m['stoch']):.4e} ppgd {float(m['ppgd']):.4e} "
+            f"(p={float(m['p_imp']):.2f} src_lr={float(m['src_lr']):.2e})"
         )
         print(f"[p0] LLAMA8B ({ndev} GPU, {rng.n_layers}L): OK")
 

@@ -1,88 +1,64 @@
 # jax_single_pool — agent notes
 
-Single-pool VPD (4-loss + persistent-PGD) training step in JAX. Sibling to
-`nano_pd_jax` (whose primitives it reuses) and the research counterpart to the
-torch FSDP path in `param_decomp_lab/fsdp/`. See `README.md` for the file map and
-`../../jax_single_pool_NOTES.md` for the design log + torch↔JAX mapping.
+Single-pool VPD trainer in JAX, **generic over vendored LM targets**. The semantics
+source of truth is `SPEC.md` (normative pseudocode + numbered invariants, grounded in
+the stable torch `param_decomp` impl); the implementation-vs-spec audit ledger is
+`AUDIT.md`. See `README.md` for the file map.
 
-## Two recon variants — DON'T conflate them
+## The one rule
 
-- **Core (layerwise, site-local):** `step.py` / `losses.py` / `forward.py`. Recon is
-  `mean((y_dec - y_tgt)^2)` per decomposed weight — no model re-forward. A
-  *simplification*; it does NOT match the torch reference.
-- **Full-LM (output-recon):** `llama8b.py` / `ci_fn.py` / `llama8b_step.py` /
-  `llama8b_sharding.py`. Recon is MSE on the **final suffix logits** of a masked
-  re-forward (mask one kind for stoch, all sites for PPGD) — this is what the torch
-  `StochasticReconLayerwiseLoss` / `PersistentPGDReconLoss` actually compute. This is
-  the real Llama-3.1-8B MLP workload matching the `_llama8b/llama8b_l18_b512_2pool_*`
-  configs, **generalized to a contiguous range of decomposed layers** (default 20..31 =
-  12 layers, 36 sites). Run it via `experiments/llama8b_real.py`
-  (+`llama8b_slurm.sbatch` for multi-GPU). The full-LM step is a clean re-homing of
-  `jax_spike/stage10_real_pd_bench.py` + real HF weights + working FSDP-style sharding.
+**Every change is checked against SPEC.md, by invariant ID.** If a change deviates
+from an invariant, either fix the change or (deliberately, with Oli) amend the spec —
+never silently diverge. Cite IDs (`S14`, `N1`, …) in commit messages and reviews.
 
-### 1 -> N decomposed layers (the layer-range generalization)
-`LayerRange(first, last)` selects which contiguous layers' MLP is decomposed.
-Residual-start at `first`: the harvested residual enters layer `first`; the suffix runs
-`first..n_layer-1` (decomposed layers' attn frozen + MLP decomposed via V/U+weight-delta;
-any layers above `last` are fully frozen `tail` blocks). Sites are `(layer, kind)` with
-`kind ∈ {gate,up,down}` — `3 * n_layers` total. V/U (`DecompVU`) and the PGD source carry
-a **leading layer axis `L`**; masks per kind are `(b,t,L,C)` and the suffix indexes layer
-i with `masks[kind][i]` after `_layerfirst` moves L to axis 0. The CI fn is ONE shared
-`global_shared_transformer` over ALL `3*n_layers` sites (inputs RMS-normed + concatenated,
-output head emits `3*n_layers*C` logits split per `(layer,kind)`) — exactly torch's
-`GlobalSharedTransformerCiFn` (one transformer, all sites concatenated), NOT per-layer
-transformers. Everything that varies for the matched / max-batch / min-GPU runs is a flag:
-`--first_layer --last_layer --C --per_gpu_batch` (mesh = all visible devices).
+## Architecture in one breath
 
-### Full-LM sharding (the memory story)
-Frozen suffix replicated; V/U + Adam sharded over the C axis; CI fn + Adam sharded;
-PGD broadcast source sharded on C; batch sharded over `dp`. CRITICAL: the step takes a
-`mesh` and pins every batch-leading activation to `P('dp', ...)` via
-`with_sharding_constraint` — without it XLA gathers the suffix activations to the FULL
-global batch and OOMs (allocated 223GB at gbatch=64). With it, activation memory scales
-1/n_dev. `vendored_jax` (the bit-parity JAX Llama in sibling `jax_spike/`) supplies the
-numeric kernels; `tests/conftest.py` puts it on the path.
+`lm.py` defines `DecomposedLM` — ordered `sites` + four pure fns (`clean_logits`,
+`site_inputs`, `masked_logits`, `weight_deltas`), flat site-name-keyed dicts at the
+boundary, frozen pytree always a runtime arg (never a jit closure constant — an 8B
+target becomes a multi-GB HLO constant). `train.py` is the generic step factory
+(losses, adversary, schedules, fp32 masters / bf16 compute); `ci_fn.py` the shared
+CI transformer; `llama8b.py` + `llama8b_sharding.py` the first target. There is ONE
+recon semantics: masks thread through the suffix forward, loss is KL on final logits
+(SPEC §2.3–2.5). Site-local recon is a conceptual no-no, not a "simplification".
 
-## Invariants to preserve
+## Invariants with sharp teeth (the ones that have actually bitten)
 
-- **The step is one `jax.jit` fn over a pure `TrainState`.** No in-place mutation,
-  no Python-level state. The persistent adversary (sources + Adam moments) lives in
-  `TrainState.pgd` and is threaded through — that's the whole point (functional
-  minimax vs torch's `before_backward`/`after_backward` orchestration).
-- **`n_warmup + 1` source updates per step.** `pgd_warmup` (lax.scan, `n_warmup`
-  ascents) then `pgd_final_ascend` (one more, post-param-update). Matches the torch
-  PPGD `warmup` + the fused final step. Don't collapse to `n_warmup`.
-- **Frozen `W_target`.** Its grad is zeroed before the main optimizer; the new
-  decomp re-pins `state.decomp.W_target`. `faithfulness = mean((W_target - V@U)^2)`
-  is recomputed each step (NOT frozen at init — the 3-orders-of-magnitude bug the
-  nano bake-off caught).
-- **mask convention:** `mask = ci + (1-ci)*source` for component channels; the
-  weight-delta source channel (last, when `use_delta_component`) is passed through
-  raw (no ci interpolation). Mirrors `param_decomp/masks.py`.
-- **GPU-count invariance.** Any change to the step or sharding must keep the
-  `distributed_stacked_sites` trajectory bit-identical at 1 vs N devices (fixed
-  batch + seed, broadcast scope). That's the SPMD-correctness contract.
+- **S3**: the recon target is the FROZEN-path forward (`clean_logits`), never the
+  `mask=1` decomposed identity (bf16 rounding + V/U in the stopped graph).
+- **S13/S15**: source updates go through the persistent Adam AND project to [0,1]
+  after EVERY ascent — an unprojected drift past 1 has zero `clip` gradient and the
+  entry dies.
+- **S14**: the final source ascent reuses the main backward's source-grad
+  (pre-update θ), unscaled by the ppgd coeff. No extra forward.
+- **N1**: fp32 masters everywhere (`optax.adamw(..., weight_decay=0.0)` — optax's
+  default wd is 1e-4, torch's is 0; this was audit finding A7).
+- **`inv_freq` is a buffer, not a param** — `stop_gradient` in `CIFn.__call__`.
+- **S10/S11**: chunking is sequential `sites_per_chunk` groups in canonical site
+  order; routing is uniform-k over the chunk's sites only.
+
+## Validation stack (run all before claiming correctness)
+
+1. `pytest jax_single_pool/tests/` — at the default device count AND
+   `XLA_FLAGS="--xla_force_host_platform_device_count=4"`.
+2. `tests/equivalence/` — fixture-driven torch↔JAX per-term numeric equivalence
+   (fp32, no RNG, zeroed attn). Regenerate goldens only when the MATH changes:
+   `gen_fixtures.py` (JAX env) then `torch_reference.py` (torch env).
+3. `experiments/invariance_check.py` at 4 sim devices — trajectory invariant to
+   device count up to float reassociation (SPEC D4).
+
+`basedpyright jax_single_pool/` must be clean; the package stays out of the repo
+`[tool.pyright]` include (torch venv type-checks the torch side).
 
 ## Gotchas
 
-- **`shard_batch` topology.** Uses `make_array_from_process_local_data` so it's
-  correct for BOTH single-process-many-devices (CPU sim, 1-process-N-GPU) and
-  multi-process-1-device (SLURM). Do NOT revert to the per-`process_index()`-slice
-  idiom — it silently replicates one slice on single-process multi-device CPU (see
-  NOTES "test-harness pitfall").
-- **Homogeneous sites only.** The stacked `[S, ...]` einsums assume equal site
-  shapes. Heterogeneous sites need padding or per-site (no S-stacking) — deferred.
-- **Stochastic-mask RNG under sharding.** `jax.random.uniform` over a sharded batch
-  partitions per shard; this is fine for training (independent noise per element)
-  but means the *stochastic* loss isn't bit-invariant across shard layouts (the
-  recon/faith/ppgd terms are). The invariance check fixes the seed and relies on
-  the deterministic terms; the trajectory still matched bit-for-bit in practice
-  because the global batch + seed were fixed.
-
-## When changing things
-
-- Keep the package out of the repo `[tool.pyright]` `include` (it's a JAX sibling;
-  the torch venv type-checks the torch side). Still: `basedpyright jax_single_pool/`
-  must be clean, and `pytest jax_single_pool/tests/` green at 1 AND 4 sim devices.
-- Update `../../jax_single_pool_NOTES.md` with any new perf / invariance result —
-  that comparison is the deliverable.
+- **`shard_batch` topology** (`sharding.py`): uses `make_array_from_process_local_data`
+  so it's correct for BOTH single-process-many-devices and multi-process-1-device.
+  Do NOT revert to the per-`process_index()`-slice idiom — it silently replicates one
+  slice on single-process multi-device CPU.
+- **`vendored_jax` is part of this distribution** (moved from `jax_spike/`); no
+  `sys.path` hacks anywhere. If an import fails, the install is broken — fix the env
+  (`uv pip install -e .`), don't add a path shim. (The old `jax_spike` stage scripts
+  that imported it by cwd are superseded by this package.)
+- **Bench schedules**: `llama8b_real.py` anneals over `--total_steps` (default 100k),
+  not the benched `--steps` — short benches measure start-of-training semantics.

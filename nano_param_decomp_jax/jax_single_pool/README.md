@@ -1,74 +1,66 @@
 # jax_single_pool
 
-A JAX implementation of the **single-pool** Parameter Decomposition (VPD)
-training loop — the four-term loss (faithfulness + importance-minimality +
-stochastic-recon + persistent-PGD adversarial-recon) with the persistent
-adversary, run as one `jax.jit`'d step and GSPMD-sharded data-parallel.
+A JAX implementation of the **single-pool** Parameter Decomposition (VPD) training
+loop — the four-term loss (faithfulness + importance-minimality + chunkwise stochastic
+recon + persistent-PGD adversarial recon) as one `jax.jit` step, GSPMD-sharded,
+**generic over vendored LM targets**.
 
-This is the research counterpart to the torch FSDP single-pool path
-(`param_decomp_lab/fsdp/`). It tests the "single-pool SPMD collapse" hypothesis
-from `jax_spike/SYNTHESIS.md`: that XLA + `jax.jit` over the whole step, with
-GSPMD sharding, optimizes this complex minimax loop as well as (or better than)
-the abandoned hand-written-NCCL multi-pool torch design — with **zero manual
-collectives**.
+The semantics are pinned by [`SPEC.md`](SPEC.md) (normative: pseudocode + numbered
+invariants, grounded in the stable torch `param_decomp` implementation). The current
+implementation-vs-spec audit lives in [`AUDIT.md`](AUDIT.md). This is the research
+counterpart to the torch FSDP single-pool path (`param_decomp_lab/fsdp/`), testing the
+"single-pool SPMD collapse" hypothesis: XLA + whole-step `jit` + GSPMD sharding
+replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 
 ## What's here
 
 | file | what |
 |---|---|
-| `forward.py` | site-local masked decomposed forward (layerwise recon) + weight-delta channel |
-| `losses.py` | the four VPD losses over a stacked-site `Decomposition`; `mask = ci + (1-ci)*source` |
-| `scopes.py` | PPGD source scopes (single / broadcast / repeat / per-batch-per-position) |
-| `pgd.py` | functional persistent adversary — sources + Adam moments in state; `n_warmup` `lax.scan` ascent + one post-update ascent |
-| `step.py` | the whole step as one `jax.jit` fn — fused grad over (V/U, CI), two functional Adams, minimax stop-gradient |
-| `sharding.py` | GSPMD helpers (mesh / replicate / `shard_batch`) — the FSDP analog |
-| `checkpoint.py` | flat-pytree save/resume of `TrainState` (adversary state included) |
-| `llama8b.py` | full-LM Llama-3.1-8B target: residual-start L18->L31 suffix + decomposed L18 MLP + real HF safetensors loader |
-| `ci_fn.py` | `global_shared_transformer` CI fn for the 8B target |
-| `llama8b_step.py` | full-LM **output-recon** step (recon on suffix logits, not site-local); `--shard` (jit+constraint) and `--shmap` (shard_map DP) variants |
-| `llama8b_sharding.py` | FSDP-analog GSPMD plan for the 8B step |
-| `experiments/` | runnable CPU smokes + the GSPMD distributed runner + `llama8b_real.py` (tok/s/GPU + MFU) + `llama8b_slurm.sbatch` |
-| `tests/` | pure-fn unit tests, sharding tests, checkpoint resume, llama8b step |
+| `lm.py` | `DecomposedLM` — the interface a vendored LM target implements (ordered sites, flat site-keyed dicts, frozen pytree as runtime arg) + generic chunking |
+| `train.py` | the generic trainer: four losses, persistent source-Adam adversary, schedules (p-anneal, source-LR warmup), fp32 masters + bf16 compute, `make_train_step` / `make_faith_warmup_step` |
+| `ci_fn.py` | shared-transformer CI fn over ordered site specs; the two leaky-hard squashings (SPEC §4.6, S5/S6) |
+| `checkpoint.py` | flat-pytree save/resume of `TrainState` (adversary sources + moments included, SPEC S22) |
+| `sharding.py` | generic GSPMD helpers (`init_distributed`, `dp_mesh`, `replicate`, `shard_batch`) |
+| `llama8b.py` | Llama-3.1-8B target: residual-start suffix, decomposed MLP layer range, HF safetensors loader, `llama_decomposed_lm(...)` |
+| `llama8b_sharding.py` | the 8B placement plan (frozen replicated; V/U + CI + Adam C-sharded; source replicated; batch sharded) |
+| `experiments/llama8b_real.py` | the runnable 8B step + tok/s/GPU bench |
+| `experiments/invariance_check.py` | device-count invariance harness (SPEC D4) |
+| `tests/` | tiny-target unit tests, checkpoint resume, sharding, and `tests/equivalence/` — the fixture-driven torch↔JAX loss-term equivalence harness |
 
 ## Run
 
 ```bash
 cd nano_param_decomp_jax
 uv venv .venv && source .venv/bin/activate && uv pip install -e .
-
-# single-device CPU smokes
-python jax_single_pool/experiments/toy_stacked_sites.py     # synthetic stacked sites
-python jax_single_pool/experiments/transformer_qkv.py       # real TinyTransformer q/k/v
-
-# GSPMD GPU-count invariance (simulated devices on CPU)
-XLA_FLAGS="--xla_force_host_platform_device_count=4" \
-  python -m jax_single_pool.experiments.distributed_stacked_sites --steps 20 --global_batch 64
-# trajectory must match the 1-device run bit-for-bit (fixed batch + seed)
-
-# multi-GPU / multi-node (under SLURM, via jax_spike/remote/gpu.sh):
-#   NODES=2 GPN=8 ... python -m jax_single_pool.experiments.distributed_stacked_sites
+# (`vendored_jax` — the bit-parity JAX Llama — is part of this distribution.)
 
 pytest jax_single_pool/tests/
+
+# GSPMD device-count invariance (simulated devices on CPU), SPEC D4:
+XLA_FLAGS="--xla_force_host_platform_device_count=4" \
+  python -m jax_single_pool.experiments.invariance_check --steps 3
+
+# tiny single-device smoke of the real step (random weights):
+python -m jax_single_pool.experiments.llama8b_real --per_gpu_batch 1 --steps 6 \
+  --C 2048 --faith_warmup 0
+
+# the real thing (HF weights, 8 GPU, C-sharded):
+python -m jax_single_pool.experiments.llama8b_real --real_weights --first_layer 20 \
+  --last_layer 31 --C 8192 --per_gpu_batch 1 --shard
 ```
 
 ## Design
 
-- **Stacked-site representation.** The decomposition is `(V, U, W_target)` stacked
-  along a leading site axis `S`; the CI fn is a per-site linear head. Sites must be
-  homogeneous (equal `d_in`/`d_out`) — the production target ("decompose layer-18
-  MLP") is a fixed same-shape weight set. The step is otherwise model-agnostic: it
-  consumes pre-weight activations `x: [S, B, ..., d_in]` and reconstructs each
-  site's output (layerwise recon).
-- **One jit'd step.** `make_step` returns a `jax.jit` function: frozen acts → CI
-  envelope → four losses → fused `value_and_grad` over `(decomp, ci)` → two
-  functional Adam updates (frozen `W_target` grad zeroed) → one post-update source
-  ascent. The PGD adversary's persistent sources + Adam moments are carried in
-  `TrainState` and threaded through.
-- **GSPMD, not pools.** Data sharded `P('dp')`, params + sources replicated,
-  `jax.jit` inserts the grad all-reduce. Validated GPU-count-invariant
-  (bit-identical trajectories at 1 vs N devices). The replicated-source grad
-  reduction the torch path does explicitly (`reduce_source_grads`) is absorbed by
-  XLA's autodiff of the global mean.
-
-See `../../jax_single_pool_NOTES.md` for the torch↔JAX mapping, the perf /
-invariance results, and open questions.
+- **Generic over vendored LMs.** The trainer sees only the `DecomposedLM` fn-table
+  (`lm.py`): ordered `sites`, `clean_logits`, `site_inputs`, `masked_logits`,
+  `weight_deltas` — all pure, all taking the frozen pytree as a *runtime arg* (a frozen
+  8B target closed over as a jit constant bakes multi-GB weights into the HLO). Adding
+  a target (e.g. GPT-2) = implementing that table; no TMS/ResidMLP-style generality.
+- **One jit'd step, functional minimax.** The persistent adversary (per-site sources +
+  their Adam moments) lives in `TrainState` and is threaded through; `n_warmup`
+  supplemental ascents + one final ascent whose gradient comes from the same backward
+  as the param grads (SPEC S13/S14).
+- **GSPMD, not pools.** Data `P('dp')`, params placed by the target's sharding plan,
+  `jax.jit` inserts every collective. The torch `reduce_source_grads` dance is absorbed
+  by autodiff of the global-mean loss. Validated by `invariance_check.py`: the
+  trajectory is device-count-invariant up to float reassociation.

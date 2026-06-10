@@ -1,13 +1,13 @@
-"""Checkpoint / resume of the single-pool `TrainState`.
+"""Checkpoint / resume of the generic trainer's `TrainState` (SPEC S22).
 
-The whole adversary trajectory (PGD sources + Adam moments) lives in `TrainState`
-as a pytree, so save/resume is a flat pytree serialization — no bespoke
-state-dict plumbing (contrast the torch PPGD `state_dict`/`load_state_dict`). The
-frozen `W_target` round-trips with the rest; downstream tooling that wants only
-the trainable surface can read `state.decomp.V/U` + `state.ci`.
+The whole trajectory — V/U + CI masters, both optimizer states, the persistent
+adversary (sources + its Adam moments), and the step counter — lives in `TrainState`
+as one pytree, so save/resume is a flat pytree serialization. The frozen target is NOT
+saved (SPEC §3): resume rebuilds it from HF and loads only the trajectory.
 
-Uses numpy `.npz` over the flattened leaves keyed by their tree path, which keeps
-the file self-describing and framework-light (no equinox-version coupling).
+Uses numpy `.npz` over the flattened leaves keyed by tree position, which keeps the
+file framework-light (no equinox-version coupling). All `TrainState` leaves are
+fp32/int (SPEC N1), so numpy round-trips them exactly.
 """
 
 from pathlib import Path
@@ -15,7 +15,7 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from jax_single_pool.step import TrainState
+from jax_single_pool.train import TrainState
 
 
 def save_state(path: Path, state: TrainState) -> None:
@@ -25,9 +25,12 @@ def save_state(path: Path, state: TrainState) -> None:
 
 
 def load_state(path: Path, reference: TrainState) -> TrainState:
-    """Reload into the structure of `reference` (same shapes/dtypes). `reference`
-    is a freshly-initialised `TrainState` — its treedef defines the layout."""
-    _, treedef = jax.tree.flatten(reference)
+    """Reload into the structure of `reference` (a freshly-initialised `TrainState`
+    with identical shapes/dtypes — its treedef defines the layout)."""
+    ref_leaves, treedef = jax.tree.flatten(reference)
     npz = np.load(path)
+    assert len(npz.files) == len(ref_leaves), (
+        f"checkpoint has {len(npz.files)} leaves, reference TrainState has {len(ref_leaves)}"
+    )
     leaves = [np.asarray(npz[str(i)]) for i in range(len(npz.files))]
     return jax.tree.unflatten(treedef, leaves)

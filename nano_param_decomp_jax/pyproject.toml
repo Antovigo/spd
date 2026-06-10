@@ -10,6 +10,7 @@ dependencies = [
     "jaxtyping==0.3.10",
     "einops==0.8.2",
     "numpy==2.4.6",
+    "safetensors==0.7.0",
 ]
 
 [build-system]
@@ -18,6 +19,31 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["nano_pd_jax", "nano_pd_jax.*", "jax_single_pool", "jax_single_pool.*"]
+include = ["nano_pd_jax", "nano_pd_jax.*", "jax_single_pool", "jax_single_pool.*", "vendored_jax", "vendored_jax.*"]
 
 # Ruff / type config inherited from the param-decomp root pyproject.toml.
+
+[tool.pyright]
+# Same selective-strictness profile as the param-decomp root pyproject, scoped to this
+# distribution (standard mode + the load-bearing strict flags).
+include = ["jax_single_pool", "nano_pd_jax", "vendored_jax"]
+exclude = ["**/__pycache__", "jax_single_pool/tests/equivalence/torch_reference.py"]  # torch-env script
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true
+reportFunctionMemberAccess = true
+reportUnknownParameterType = true
+reportIncompatibleMethodOverride = true
+reportIncompatibleVariableOverride = true
+reportOverlappingOverload = true
+reportConstantRedefinition = true
+reportPropertyTypeMismatch = true
+reportMissingTypeArgument = true
+reportUnnecessaryCast = true
+reportUnnecessaryComparison = true
+reportUnnecessaryContains = true
+reportUnusedExpression = true

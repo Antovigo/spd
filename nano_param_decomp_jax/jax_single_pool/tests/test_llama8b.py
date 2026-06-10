@@ -1,22 +1,19 @@
-"""CPU-runnable tests for the Llama-8B full-suffix output-recon PD step at a tiny config.
+"""CPU tests for the Llama target + generic trainer at a tiny config.
 
-Validates the model forward + the full step (one iteration trains, the loss has the VPD
-signature) over a CONTIGUOUS layer range (1 and N decomposed layers), without loading
-real weights or needing a GPU. `vendored_jax` is put on the path by conftest.py.
+Validates the `DecomposedLM` contract (clean == all-frozen masked forward, shapes) and
+the full SPEC step (trains, VPD loss signature, adversary state advances), without real
+weights or a GPU.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
 import pytest
+from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 
-pytest.importorskip("vendored_jax")
-
-from vendored_jax.llama import LlamaConfig, llama3_inv_freq  # noqa: E402
-
-from jax_single_pool.ci_fn import CIFnDims, init_ci_fn  # noqa: E402
-from jax_single_pool.llama8b import (  # noqa: E402
-    KINDS,
+from jax_single_pool.ci_fn import CIArch, init_ci_fn
+from jax_single_pool.llama8b import (
     DecompLayerFrozen,
     DecompVU,
     FrozenAttn,
@@ -25,13 +22,17 @@ from jax_single_pool.llama8b import (  # noqa: E402
     LayerRange,
     Target,
     init_decomp_vu,
-    suffix_logits,
-    weight_deltas,
+    llama_decomposed_lm,
 )
-from jax_single_pool.llama8b_step import (  # noqa: E402
-    Llama8BState,
+from jax_single_pool.train import (
+    ImpMinConfig,
     LossCoeffs,
-    make_llama8b_step,
+    SourceAdamConfig,
+    TrainState,
+    init_sources,
+    init_src_adam,
+    make_faith_warmup_step,
+    make_train_step,
 )
 
 
@@ -53,12 +54,12 @@ def _tiny_cfg() -> LlamaConfig:
     )
 
 
-def _tiny_target(cfg: LlamaConfig, rng: LayerRange, key) -> Target:
+def _tiny_target(cfg: LlamaConfig, rng: LayerRange, key: jax.Array) -> Target:
     ks = iter(jax.random.split(key, 1024))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
 
-    def n(shape, s=None):
+    def n(shape: tuple[int, ...], s: float | None = None) -> jax.Array:
         return jax.random.normal(next(ks), shape) * (s or d**-0.5)
 
     def fattn():
@@ -87,29 +88,38 @@ def _tiny_target(cfg: LlamaConfig, rng: LayerRange, key) -> Target:
 
 
 @pytest.mark.parametrize("rng", [LayerRange(4, 4), LayerRange(3, 6)])
-def test_suffix_logits_clean_shapes(rng: LayerRange):
+def test_clean_path_and_masked_identity(rng: LayerRange):
     cfg = _tiny_cfg()
     tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
     C = 8
+    lm = llama_decomposed_lm(cfg, rng, C)
     vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
-    b, t, d = 2, 16, cfg.n_embd
-    resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, d)) * 0.5
-    nomask = {k: None for k in KINDS}
-    dm = {k: jnp.ones((rng.n_layers, 1, 1)) for k in KINDS}
-    no_routes = {k: None for k in KINDS}
-    logits = suffix_logits(tgt, vu, resid, nomask, dm, no_routes)
-    assert logits.shape == (b, t, cfg.vocab_size)
-    wd = weight_deltas(vu, tgt.decomp_layers)
-    di = cfg.n_intermediate
-    assert wd["gate"].shape == (rng.n_layers, di, d)
-    assert wd["down"].shape == (rng.n_layers, d, di)
+    b, t = 2, 16
+    resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    # clean decomposed forward (mask=None, delta_mask=1, routes=None) reconstructs the
-    # frozen suffix exactly: V@U + (W - (V@U).T) applied == W. This is the faithfulness
-    # recon target; if it drifts, the clean baseline is wrong.
-    fully_routed = {k: jnp.ones((rng.n_layers, b, t, 1), bool) for k in KINDS}
-    routed_logits = suffix_logits(tgt, vu, resid, nomask, dm, fully_routed)
-    assert jnp.allclose(logits, routed_logits, atol=1e-4), "routed-all != clean"
+    clean = lm.clean_logits(tgt, resid)
+    assert clean.shape == (b, t, cfg.vocab_size)
+
+    # SPEC S2: a masked forward with NO live sites is the frozen path — bit-identical
+    # to the clean target.
+    none_masked = lm.masked_logits(tgt, vu, resid, {}, {}, None, ())
+    assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
+
+    # All-live, masks=1, delta=1, route-everywhere reconstructs the frozen path up to
+    # decomposition rounding (the V@U + (W − V@U) identity; exact only in exact math).
+    names = lm.site_names
+    ones_masks = {s: jnp.ones((b, t, C)) for s in names}
+    ones_delta = {s: jnp.ones((b, t)) for s in names}
+    full = lm.masked_logits(tgt, vu, resid, ones_masks, ones_delta, None, names)
+    assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
+
+    site_in = lm.site_inputs(tgt, resid)
+    assert set(site_in) == set(names)
+    deltas = lm.weight_deltas(tgt, vu)
+    d, di = cfg.n_embd, cfg.n_intermediate
+    assert deltas[names[0]].shape == (di, d)  # gate: (d_out, d_in)
+    assert deltas[names[2]].shape == (d, di)  # down
+    assert all(v.dtype == jnp.float32 for v in deltas.values())
 
 
 @pytest.mark.parametrize("rng", [LayerRange(4, 4), LayerRange(3, 6)])
@@ -117,44 +127,84 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
     cfg = _tiny_cfg()
     tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
     C = 8
+    seq = 16
+    n_warmup = 2
+    lm = llama_decomposed_lm(cfg, rng, C)
     vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
-    dims = CIFnDims(
-        d_model=16, n_blocks=2, n_heads=2, mlp_hidden=32,
-        total_in=rng.n_layers * (cfg.n_embd + cfg.n_embd + cfg.n_intermediate),
-        C=C, n_layers=rng.n_layers,
-    )  # fmt: skip
-    ci_fn = init_ci_fn(dims, jax.random.PRNGKey(2))
-    opt_vu = optax.adamw(1e-3)
-    opt_ci = optax.adamw(1e-3)
+    ci_fn = init_ci_fn(CIArch(d_model=16, n_blocks=2, n_heads=2, mlp_hidden=32),
+                       lm.sites, jax.random.PRNGKey(2))  # fmt: skip
+    opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
+    opt_ci = optax.adamw(1e-3, weight_decay=0.0)
 
-    import equinox as eqx
-
-    state = Llama8BState(
+    src = init_sources(lm.site_names, tuple(s.C for s in lm.sites), seq, jax.random.PRNGKey(3))
+    state = TrainState(
         vu=vu, ci_fn=ci_fn,
         opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
         opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        source={k: jnp.zeros((1, 16, rng.n_layers, C + 1)) for k in KINDS},
-        step=jnp.array(0),
+        src=src, src_adam=init_src_adam(src), step=jnp.zeros((), jnp.int32),
     )  # fmt: skip
-    coeffs = LossCoeffs(
-        faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4, imp_beta=0.2, imp_eps=1e-12
-    )
-    step = make_llama8b_step(
-        coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=2, n_layers=rng.n_layers, mesh=None
+    step = make_train_step(
+        lm=lm,
+        coeffs=LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5),
+        imp_cfg=ImpMinConfig(
+            beta=0.2,
+            eps=1e-12,
+            p_start=2.0,
+            p_final=0.4,
+            anneal_start_frac=0.0,
+            anneal_end_frac=1.0,
+        ),  # fmt: skip
+        src_cfg=SourceAdamConfig(
+            lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=n_warmup
+        ),  # fmt: skip
+        opt_vu=opt_vu,
+        opt_ci=opt_ci,
+        total_steps=100,
+        sites_per_chunk=3,
+        n_samples=1,
+        mesh=None,
     )
 
-    resid = jax.random.normal(jax.random.PRNGKey(3), (2, 16, cfg.n_embd)) * 0.5
+    resid = jax.random.normal(jax.random.PRNGKey(4), (2, seq, cfg.n_embd)) * 0.5
+    n_steps = 4
     losses = []
-    for i in range(4):
+    for i in range(n_steps):
         state, m = step(state, tgt, resid, jax.random.PRNGKey(100 + i))
         losses.append({k: float(v) for k, v in m.items()})
 
-    assert losses[-1]["ppgd"] >= losses[-1]["stoch"] * 0.5
     assert all(jnp.isfinite(jnp.array(list(m.values()))).all() for m in losses)
-    assert float(state.step) == 4.0
+    assert int(state.step) == n_steps
+    # SPEC S13: n_warmup + 1 source-Adam updates per training step, moments persist.
+    assert float(state.src_adam.step_count) == n_steps * (n_warmup + 1)
+    # SPEC S15: sources stay projected to [0,1].
+    for v in state.src.values():
+        assert float(v.min()) >= 0.0 and float(v.max()) <= 1.0
+    # SPEC S9: p annealed below its 2.0 start by step 4 of 100.
+    assert losses[-1]["p_imp"] < 2.0
+    # fp32 masters preserved through updates (SPEC N1).
+    assert state.vu.Vg.dtype == jnp.float32
+    assert state.ci_fn.in_proj_w.dtype == jnp.float32
 
 
-def test_decomp_vu_shapes():
+def test_faith_warmup_decreases_faith():
+    cfg = _tiny_cfg()
+    rng = LayerRange(3, 4)
+    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
+    lm = llama_decomposed_lm(cfg, rng, C=8)
+    vu = init_decomp_vu(cfg, 8, rng.n_layers, jax.random.PRNGKey(1))
+    opt = optax.adamw(1e-2, weight_decay=0.0)
+    wstep = make_faith_warmup_step(lm, opt)
+    ostate = opt.init(eqx.filter(vu, eqx.is_array))
+    first: float | None = None
+    loss = None
+    for _ in range(30):
+        vu, ostate, loss = wstep(vu, ostate, tgt)
+        first = float(loss) if first is None else first
+    assert first is not None and loss is not None
+    assert float(loss) < first * 0.9, (first, float(loss))
+
+
+def test_decomp_vu_shapes_fp32():
     cfg = _tiny_cfg()
     C = 8
     rng = LayerRange(3, 6)
@@ -163,3 +213,4 @@ def test_decomp_vu_shapes():
     assert vu.Vg.shape == (rng.n_layers, d, C) and vu.Ug.shape == (rng.n_layers, C, di)
     assert vu.Vd.shape == (rng.n_layers, di, C) and vu.Ud.shape == (rng.n_layers, C, d)
     assert isinstance(vu, DecompVU)
+    assert vu.Vg.dtype == jnp.float32

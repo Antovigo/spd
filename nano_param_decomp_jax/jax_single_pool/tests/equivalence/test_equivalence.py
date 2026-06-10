@@ -10,10 +10,9 @@ Two kinds of check:
     (`faithfulness_loss` / `importance_minimality_loss` / `recon_loss_kl` /
     `get_ppgd_mask_infos` / `LinearComponents.forward`), compared at ~1e-4.
 
-  * **Structural.** `test_structure_*` pin the design facts that aren't a single number:
-    the stochastic recon does ONE forward PER CHUNK (12 for the production 20..31 / 3-site
-    chunks), recon is KL (not MSE), and the PPGD source carries the trailing weight-delta
-    channel.
+  * **Structural.** `test_structure_*` pin SPEC invariants that aren't a single number:
+    the stochastic recon runs ONE forward PER CHUNK (S10), recon is KL not MSE (§2.3),
+    and the PPGD source carries the trailing raw weight-delta channel (S1).
 
 Regenerate the cross-framework golden (only needed if the math or fixtures change):
 
@@ -30,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import jax_single_pool.llama8b_step as step_mod
+import jax_single_pool.train as train_mod
 from jax_single_pool.tests.equivalence.jax_equivalence import compute_jax_terms
 
 HERE = Path(__file__).resolve().parent
@@ -51,24 +50,25 @@ def test_jax_matches_torch_reference(term: str) -> None:
 
 
 def test_structure_stoch_is_per_chunk() -> None:
-    """`_stochastic_recon` runs ONE forward per chunk (== n_layers), matching the torch
-    chunkwise pool (sites_per_chunk=3 → 12 chunks for layers 20..31), not one fused
-    forward over all sites."""
-    src = inspect.getsource(step_mod._stochastic_recon)
-    assert "for chunk_idx in range(n_layers)" in src, "stoch must loop one forward per chunk"
-    assert "/ n_layers" in src, "stoch must average over the n_layers per-chunk forwards"
+    """SPEC S10: one forward per (chunk, sample), normalized by `n_chunks · n_samples`
+    — matching the torch chunkwise pool, not one fused forward over all sites."""
+    src = inspect.getsource(train_mod.make_train_step)
+    assert "for chunk in chunks" in src, "stoch must loop one forward per chunk"
+    assert "/ (len(chunks) * n_samples)" in src, "stoch must average over chunk forwards"
 
 
 def test_structure_recon_is_kl_not_mse() -> None:
-    """Recon is KL on logits (`recon_loss_kl`), not MSE."""
-    src = inspect.getsource(step_mod._kl_per_position)
+    """SPEC §2.3: recon is KL on logits, not MSE."""
+    src = inspect.getsource(train_mod.kl_per_position)
     assert "log_softmax" in src and "log_p - log_q" in src, "recon must be KL"
     assert "** 2" not in src and "**2" not in src, "recon must not be MSE"
 
 
 def test_structure_ppgd_has_delta_channel() -> None:
-    """PPGD source carries a trailing weight-delta channel; masks interpolate
-    `ci + (1-ci)*source[:-1]` and use `source[-1]` as the delta mask."""
-    src = inspect.getsource(step_mod._ppgd_masks_and_deltas)
-    assert "[..., :-1]" in src and "[..., -1:]" in src, "ppgd source needs the delta channel"
-    assert "ci[k] + (1.0 - ci[k]) * comp_src" in src, "ppgd must interpolate mask=ci+(1-ci)*src"
+    """SPEC S1: PPGD masks interpolate `ci + (1-ci)*src[:, :C]`; the trailing channel
+    is the raw weight-delta mask (no ci interpolation)."""
+    src = inspect.getsource(train_mod.make_ppgd_masks)
+    assert "[..., :-1]" in src and "[..., -1]" in src, "ppgd source needs the delta channel"
+    assert "ci_lower[s] + (1.0 - ci_lower[s]) * src_c[..., :-1]" in src, (
+        "ppgd must interpolate mask=ci+(1-ci)*src"
+    )

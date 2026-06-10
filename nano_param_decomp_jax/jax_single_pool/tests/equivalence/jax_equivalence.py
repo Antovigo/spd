@@ -1,23 +1,21 @@
 """JAX equivalence check: the JAX single-pool PD loss terms vs the torch reference.
 
-Run in the JAX (`.venv-cuda`) env AFTER `torch_reference.py`. Loads the SAME fixtures,
-builds a JAX `Target` + `DecompVU` with the identical (zeroed-attn) suffix weights, and
-computes each loss term through the JAX step's OWN helpers, feeding the FIXED masks /
-sources / routing from the fixtures (no RNG). Compares to `torch_reference.json` at fp32
-tolerance.
+Run in the JAX env AFTER `torch_reference.py`. Loads the SAME fixtures, builds the
+Llama `DecomposedLM` with the identical (zeroed-attn) suffix weights, and computes each
+loss term through the generic trainer's OWN helpers (`train.py`), feeding the FIXED
+masks / sources / routing from the fixtures (no RNG). Compares to
+`torch_reference.json` at fp32 tolerance.
 
-Term wiring (all from `jax_single_pool.llama8b_step`):
-  * faith  — `_faith_loss(vu, decomp_layers)`
-  * imp    — `_imp_min(ci_upper, p, beta, eps)`
-  * stoch  — per chunk: build `mask = ci+(1-ci)*u`, fixed delta mask, fixed route over the
-             chunk's 3 sites; `suffix_logits(..., decompose_layer={i})`; `_kl_per_position`
-             vs clean. Mean over chunks. (Same path as `_stochastic_recon`/`_stoch_one_chunk`
-             but with the fixtures' masks substituted for the RNG draws.)
-  * ppgd   — `_ppgd_recon(...)` with the fixed sources (it derives masks via
-             `_ppgd_masks_and_deltas`, the torch `get_ppgd_mask_infos` analog).
+Term wiring (all `jax_single_pool.train` + the `DecomposedLM` boundary):
+  * faith — `faithfulness_loss(lm.weight_deltas(frozen, vu))`
+  * imp   — `importance_minimality_loss(ci_upper, p, beta, eps)` (per-site dicts)
+  * stoch — per chunk: `mask = ci+(1-ci)*u`, fixed delta mask, fixed route over the
+            chunk's 3 sites; `lm.masked_logits(..., live=chunk)`; `kl_per_position`
+            vs `lm.clean_logits` (the frozen path, SPEC S3). Mean over chunks.
+  * ppgd  — `make_ppgd_masks` + `lm.masked_logits(..., live=all)`.
 
-This is the numeric cross-framework check the task calls for. Bit-identical is impossible
-across RNG/FP backends; we assert each term within `RTOL`/`ATOL` of the torch value.
+Bit-identical is impossible across RNG/FP backends; we assert each term within
+`RTOL`/`ATOL` of the torch value.
 """
 
 import json
@@ -29,6 +27,8 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", False)
 
+from vendored_jax.llama import LlamaConfig  # noqa: E402
+
 from jax_single_pool.llama8b import (  # noqa: E402
     KINDS,
     DecompLayerFrozen,
@@ -36,16 +36,16 @@ from jax_single_pool.llama8b import (  # noqa: E402
     FrozenAttn,
     FrozenBlock,
     FrozenMLP,
+    LayerRange,
     Target,
-    suffix_logits,
+    llama_decomposed_lm,
+    site_name,
 )
-from jax_single_pool.llama8b_step import (  # noqa: E402
-    _faith_loss,
-    _imp_min,
-    _kl_per_position,
-    _layerfirst,
-    _layerfirst_delta,
-    _ppgd_recon,
+from jax_single_pool.train import (  # noqa: E402
+    faithfulness_loss,
+    importance_minimality_loss,
+    kl_per_position,
+    make_ppgd_masks,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -54,8 +54,8 @@ ATOL = 1e-5
 
 
 # fp32 throughout the harness so the cross-framework comparison is fp-tight (the torch
-# reference is fp32). The production step runs `DT=bfloat16`; here we override to isolate
-# the loss MATH from bf16 rounding (a bf16 forward agrees with torch only to ~1e-3).
+# reference is fp32). The production step runs bf16 compute; here we isolate the loss
+# MATH from bf16 rounding (a bf16 forward agrees with torch only to ~1e-3).
 FP = jnp.float32
 
 
@@ -79,6 +79,7 @@ def _build(f: dict[str, np.ndarray]):
     n_layers = int(f["_scalar_N_DECOMP_LAYERS"])
     n_tail = int(f["_scalar_N_TAIL"])
     eps = float(f["_scalar_EPS"])
+    C = int(f[f"Vg_0"].shape[-1])  # noqa: F541
 
     decomp_layers = [
         DecompLayerFrozen(
@@ -115,62 +116,75 @@ def _build(f: dict[str, np.ndarray]):
         Vd=jnp.stack([a(f"Vd_{i}") for i in range(n_layers)]),
         Ud=jnp.stack([a(f"Ud_{i}") for i in range(n_layers)]),
     )
-    return tgt, vu, n_layers
+    rng = LayerRange(0, n_layers - 1)
+    cfg = LlamaConfig(
+        vocab_size=int(f["lm_head"].shape[0]),
+        n_layer=n_layers + n_tail,
+        n_head=2,
+        n_kv_head=1,
+        n_embd=d,
+        n_intermediate=di,
+        rope_theta=10000.0,
+        rms_norm_eps=eps,
+        max_position_embeddings=512,
+        rope_factor=8.0,
+        rope_low_freq_factor=1.0,
+        rope_high_freq_factor=4.0,
+        rope_original_max_position_embeddings=128,
+    )
+    lm = llama_decomposed_lm(cfg, rng, C)
+    return lm, tgt, vu, rng, n_layers
 
 
 def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
-    """The four JAX loss-term values on the fixtures `f` (fp32). Shared by `main` and the
-    pytest so there is one term-computation path."""
-    tgt, vu, n_layers = _build(f)
+    """The four JAX loss-term values on the fixtures `f` (fp32). Shared by `main` and
+    the pytest so there is one term-computation path."""
+    lm, tgt, vu, rng, n_layers = _build(f)
     resid = jnp.asarray(f["resid"], dtype=FP)
-    B, T = int(f["_scalar_B"]), int(f["_scalar_T"])
 
-    nomask = {k: None for k in KINDS}
-    dm_ones = {k: jnp.ones((n_layers, 1, 1), FP) for k in KINDS}
-    no_routes = {k: None for k in KINDS}
-    clean = jax.lax.stop_gradient(suffix_logits(tgt, vu, resid, nomask, dm_ones, no_routes))
+    clean = jax.lax.stop_gradient(lm.clean_logits(tgt, resid))
 
-    ci_lower = {k: jnp.asarray(f[f"ci_lower_{k}"], dtype=FP) for k in KINDS}  # (B,T,L,C)
-    ci_upper = {k: jnp.asarray(f[f"ci_upper_{k}"], dtype=FP) for k in KINDS}
+    # fixtures key CI per kind as (B, T, L, C); the trainer keys per site.
+    def per_site(prefix: str) -> dict[str, jnp.ndarray]:
+        by_kind = {k: jnp.asarray(f[f"{prefix}_{k}"], dtype=FP) for k in KINDS}
+        return {
+            site_name(rng.layers[i], k): by_kind[k][:, :, i] for i in range(n_layers) for k in KINDS
+        }
+
+    ci_lower = per_site("ci_lower")
+    ci_upper = per_site("ci_upper")
 
     # ---- faith ----
-    faith = float(_faith_loss(vu, tgt.decomp_layers))
+    faith = float(faithfulness_loss(lm.weight_deltas(tgt, vu)))
 
     # ---- imp ----
     imp = float(
-        _imp_min(ci_upper, float(f["_scalar_IMP_P"]), float(f["_scalar_IMP_BETA"]),
-                 float(f["_scalar_IMP_EPS"]))
-    )  # fmt: skip
+        importance_minimality_loss(
+            ci_upper,
+            jnp.asarray(float(f["_scalar_IMP_P"])),
+            float(f["_scalar_IMP_BETA"]),
+            float(f["_scalar_IMP_EPS"]),
+        )  # fmt: skip
+    )
 
     # ---- stoch (per-chunk, FIXED masks) ----
+    stoch_u = per_site("stoch_u")
+    stoch_delta = per_site("stoch_delta")
     stoch_total = 0.0
     for i in range(n_layers):
-        masks: dict = {}
-        delta_masks: dict = {}
-        routes: dict = {}
-        for k in KINDS:
-            ci_k = ci_lower[k]  # (B,T,L,C)
-            u = jnp.asarray(f[f"stoch_u_{k}"], dtype=FP)  # (B,T,L,C)
-            masks[k] = ci_k + (1.0 - ci_k) * u
-            dmv = jnp.asarray(f[f"stoch_delta_{k}"], dtype=FP)[..., None]  # (B,T,L,1)
-            delta_masks[k] = dmv
-            route_site = jnp.asarray(f[f"route_chunk{i}_{k}"])  # (B,T) bool
-            route_full = (
-                jnp.zeros((B, T, n_layers, 1), bool).at[:, :, i, :].set(route_site[:, :, None])
-            )
-            routes[k] = route_full
-        decompose = tuple(j == i for j in range(n_layers))
-        pred = suffix_logits(
-            tgt, vu, resid,
-            _layerfirst(masks), _layerfirst_delta(delta_masks), _layerfirst(routes),
-            decompose,
-        )  # fmt: skip
-        stoch_total += float(_kl_per_position(pred, clean))
+        chunk = tuple(site_name(rng.layers[i], k) for k in KINDS)
+        masks = {s: ci_lower[s] + (1.0 - ci_lower[s]) * stoch_u[s] for s in chunk}
+        delta_masks = {s: stoch_delta[s] for s in chunk}
+        routes = {site_name(rng.layers[i], k): jnp.asarray(f[f"route_chunk{i}_{k}"]) for k in KINDS}
+        pred = lm.masked_logits(tgt, vu, resid, masks, delta_masks, routes, chunk)
+        stoch_total += float(kl_per_position(pred, clean))
     stoch = stoch_total / n_layers
 
     # ---- ppgd (FIXED sources) ----
-    source = {k: jnp.asarray(f[f"ppgd_source_{k}"], dtype=FP) for k in KINDS}  # (1,T,L,C+1)
-    ppgd = float(_ppgd_recon(tgt, vu, resid, clean, ci_lower, source, suffix_logits))
+    source = per_site("ppgd_source")  # {site: (1, T, C+1)}
+    masks, delta_masks = make_ppgd_masks(ci_lower, source, lm.site_names)
+    pred = lm.masked_logits(tgt, vu, resid, masks, delta_masks, None, lm.site_names)
+    ppgd = float(kl_per_position(pred, clean))
 
     return {"faith": faith, "imp": imp, "stoch": stoch, "ppgd": ppgd}
 

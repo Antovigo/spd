@@ -5,15 +5,15 @@ The memory consumers, and how each is placed on the 1-D `dp` mesh:
   * frozen suffix (`Target`): REPLICATED. ~3.6B bf16 params (14 blocks + lm_head) ~=
     7.3GB/device. Small relative to activations; replicating avoids all-gathering the
     target every forward.
-  * components (V/U) + their Adam states: SHARDED over `dp` (the FSDP analog). V/U is
-    ~2.1B params; fp32 Adam m+v doubles that to ~17GB replicated. Sharding the C axis
-    splits both across devices -> the per-device component+optimizer footprint scales
-    1/n_dev.
-  * CI fn + Adam states: SHARDED over `dp` along the largest axis (out_head 3C, in_proj).
-  * PGD source (broadcast, (1,T,L,C+1)): REPLICATED. A single adversarial source shared
-    across the global batch; it combines elementwise with the batch-sharded CI and its
-    grad is AVG-reduced across shards (torch `reduce_source_grads`). Tiny vs activations,
-    so replicating costs nothing; the C+1 axis is odd and cannot tile the mesh anyway.
+  * components (V/U) + their Adam states: SHARDED over `dp` (the FSDP analog). The fp32
+    masters + fp32 Adam m/v are the dominant non-activation footprint; sharding the C
+    axis splits all three across devices -> 1/n_dev per device.
+  * CI fn + Adam states: SHARDED over `dp` along the largest axis (out head, in_proj).
+  * PGD source (broadcast scope, `{site: (1,T,C+1)}`): REPLICATED. A single adversarial
+    source shared across the global batch; it combines elementwise with the batch-sharded
+    CI and its grad reduction falls out of the global-mean loss (torch
+    `reduce_source_grads` analog). Tiny vs activations, so replicating costs nothing;
+    the C+1 axis is odd and cannot tile the mesh anyway. `SrcAdamState` mirrors it.
   * residual input + all activations: BATCH-sharded over `dp`. The masked suffix
     re-forwards then run on per-device sub-batches -> activation memory scales 1/n_dev.
     This is what unlocks a global batch that OOMs replicated on one device.
@@ -23,21 +23,29 @@ produces a C-sharded result; `(.) @ U` contracts the sharded C and `jax.jit` ins
 the reduce-scatter / all-reduce. No manual collectives.
 """
 
+from typing import Any
+
 import equinox as eqx
 import jax
-import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from jax_single_pool.ci_fn import CIFn
 from jax_single_pool.llama8b import DecompVU, Target
+from jax_single_pool.sharding import dp_mesh
+from jax_single_pool.sharding import shard_batch as _generic_shard_batch
+
+__all__ = [
+    "dp_mesh",
+    "replicate_target",
+    "shard_decomp_vu",
+    "shard_ci_fn",
+    "shard_source",
+    "shard_batch",
+]
 
 
-def dp_mesh() -> Mesh:
-    return Mesh(np.array(jax.devices()), axis_names=("dp",))
-
-
-def _put(x, sharding):
+def _put(x: Any, sharding: NamedSharding) -> Any:
     return jax.device_put(x, sharding) if eqx.is_array(x) else x
 
 
@@ -64,14 +72,14 @@ def shard_decomp_vu(vu: DecompVU, mesh: Mesh) -> DecompVU:
 
 
 def shard_ci_fn(ci_fn: CIFn, mesh: Mesh) -> CIFn:
-    """Shard the CI fn's largest matrices over `dp`. out_head (d_model, 3C) shards the
-    3C axis; in_proj (total_in, d_model) and per-block weights shard d_model where it
-    is divisible; small vectors (lns, inv_freq) replicate."""
+    """Shard the CI fn's largest matrices over `dp`. `out_w` (d_model, ΣC) shards the
+    ΣC axis; `in_proj_w` (total_in, d_model) and per-block weights shard d_model where
+    it is divisible; 1-D vectors (biases, inv_freq) replicate."""
     n = mesh.devices.size
     repl = NamedSharding(mesh, P())
     shard_last = NamedSharding(mesh, P(None, "dp"))
 
-    def place(a):
+    def place(a: Any) -> Any:
         if not eqx.is_array(a):
             return a
         if a.ndim == 2 and a.shape[-1] % n == 0:
@@ -81,8 +89,8 @@ def shard_ci_fn(ci_fn: CIFn, mesh: Mesh) -> CIFn:
     return jax.tree.map(place, ci_fn)
 
 
-def shard_source(source: dict, mesh: Mesh) -> dict:
-    """Broadcast PGD source (1, T, L, C+1) -> REPLICATED over `dp`.
+def shard_source(source: dict[str, jax.Array], mesh: Mesh) -> dict[str, jax.Array]:
+    """Broadcast PGD source `{site: (1, T, C+1)}` -> REPLICATED over `dp`.
 
     The source is a single adversarial source shared across the whole global batch
     (leading batch axis = 1, broadcast); it combines elementwise with the batch-sharded
@@ -95,15 +103,6 @@ def shard_source(source: dict, mesh: Mesh) -> dict:
     return {s: jax.device_put(v, repl) for s, v in source.items()}
 
 
-def shard_batch(resid_global, mesh: Mesh):
-    """Batch-shard the residual input (b, t, d) over `dp` (axis 0). Built from a full
-    global array each process generated identically; each process contributes its slice."""
-    n = mesh.devices.size
-    b = resid_global.shape[0]
-    assert b % n == 0, f"global batch {b} not divisible by mesh size {n}"
-    sharding = NamedSharding(mesh, P("dp"))
-    n_proc = jax.process_count()
-    per = b // n_proc
-    idx = jax.process_index()
-    local = resid_global[idx * per : (idx + 1) * per]
-    return jax.make_array_from_process_local_data(sharding, local, resid_global.shape)
+def shard_batch(resid_global: jax.Array, mesh: Mesh) -> jax.Array:
+    """Batch-shard the residual input (b, t, d) over `dp` (axis 0)."""
+    return _generic_shard_batch(resid_global, mesh, batch_axis=0)
