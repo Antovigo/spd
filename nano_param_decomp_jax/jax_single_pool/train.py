@@ -302,6 +302,7 @@ def make_train_step(
     ci_fn_optimizer: optax.GradientTransformation,
     total_steps: int,
     recon_plan: ReconPlan,
+    remat_recon_forwards: bool,
     mesh: Mesh | None,
 ):
     """Build the jit'd `step(state, frozen, residual, key) -> (state, metrics)`.
@@ -336,9 +337,14 @@ def make_train_step(
             )
         )
 
-    # Recompute each masked forward in backward — bounds activation memory to one
-    # forward at a time (the torch 2-pool streaming profile).
-    checkpointed_masked_forward = jax.checkpoint(masked_forward, static_argnums=(6,))
+    # Recomputing each masked forward in backward bounds activation memory to one
+    # forward at a time (the torch 2-pool streaming profile) at the cost of the
+    # recompute; with few recon forwards and memory headroom, remat off is faster.
+    checkpointed_masked_forward = (
+        jax.checkpoint(masked_forward, static_argnums=(6,))
+        if remat_recon_forwards
+        else masked_forward
+    )
 
     def ppgd_recon_loss(
         frozen: Any,

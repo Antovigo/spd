@@ -162,6 +162,7 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
         ci_fn_optimizer=opt_ci,
         total_steps=100,
         recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
+        remat_recon_forwards=True,
         mesh=None,
     )
 

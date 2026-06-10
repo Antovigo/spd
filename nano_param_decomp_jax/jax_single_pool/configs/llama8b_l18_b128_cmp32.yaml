@@ -29,7 +29,7 @@ ppgd:
   beta2: 0.99
   eps: 1.0e-8
   n_warmup: 2
-recon: { sites_per_chunk: 3, n_samples: 1 }
+recon: { sites_per_chunk: 3, n_samples: 1, remat_forwards: true }
 vu_optimizer: { lr: 1.5e-4, grad_clip_norm: 0.01 }
 ci_optimizer: { lr: 5.0e-5 }
 ci_fn: { d_model: 4096, n_blocks: 4, n_heads: 64, mlp_hidden: 16384 }

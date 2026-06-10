@@ -70,7 +70,8 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         imp_cfg=ImpMinConfig(0.2, 1e-12, 2.0, 0.4, 0.0, 1.0),
         src_cfg=SourceAdamConfig(0.01, 0.025, 0.5, 0.99, 1e-8, n_warmup=2),
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1), mesh=mesh,
+        total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
+        remat_recon_forwards=True, mesh=mesh,
     )  # fmt: skip
 
     out = []

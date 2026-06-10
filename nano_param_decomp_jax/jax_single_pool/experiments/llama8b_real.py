@@ -244,6 +244,7 @@ def main():
         ci_fn_optimizer=opt_ci,
         total_steps=args.total_steps,
         recon_plan=subset_chunk_plan(lm.site_names, sites_per_chunk=3, n_samples=1),
+        remat_recon_forwards=True,
         mesh=mesh if args.shard else None,
     )
 

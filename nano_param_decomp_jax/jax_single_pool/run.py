@@ -246,6 +246,7 @@ def train(
         ci_fn_optimizer=opt_ci,
         total_steps=cfg.steps,
         recon_plan=subset_chunk_plan(lm.site_names, cfg.recon.sites_per_chunk, cfg.recon.n_samples),
+        remat_recon_forwards=cfg.recon.remat_forwards,
         mesh=mesh,
     )
 

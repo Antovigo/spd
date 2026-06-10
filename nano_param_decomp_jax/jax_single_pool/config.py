@@ -35,6 +35,7 @@ class DataConfig:
 class ReconConfig:
     sites_per_chunk: int
     n_samples: int
+    remat_forwards: bool
 
 
 @dataclass(frozen=True)

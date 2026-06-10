@@ -49,6 +49,13 @@ from jax_single_pool.train import (
 
 
 def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--per_gpu_batch", type=int, default=4)
+    ap.add_argument("--no_remat", action="store_true",
+                    help="disable the recon-forward rematerialization (memory A/B)")  # fmt: skip
+    args = ap.parse_args()
     init_distributed()
     mesh = dp_mesh()
     ndev = mesh.devices.size
@@ -58,7 +65,7 @@ def main() -> None:
     rng = LayerRange(18, 18)
     C = 24576
     seq = 2048
-    gbatch = 4 * ndev
+    gbatch = args.per_gpu_batch * ndev
     lm = llama_decomposed_lm(cfg, rng, C)
 
     target = replicate_target(_random_target(cfg, rng, random.PRNGKey(0)), mesh)
@@ -84,7 +91,8 @@ def main() -> None:
         imp_cfg=ImpMinConfig(0.2, 1e-12, 2.0, 0.4, 0.0, 1.0),
         src_cfg=SourceAdamConfig(0.01, 0.025, 0.5, 0.99, 1e-8, n_warmup=2),
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1), mesh=mesh,
+        total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
+        remat_recon_forwards=not args.no_remat, mesh=mesh,
     )  # fmt: skip
 
     resid = jax.device_put(
@@ -97,7 +105,7 @@ def main() -> None:
         assert ma is not None, "backend returned no memory analysis"
         gib = 1024**3
         print(
-            f"[mem] ndev={ndev} gbatch={gbatch} | "
+            f"[mem] ndev={ndev} bl={args.per_gpu_batch} remat={not args.no_remat} | "
             f"temp {ma.temp_size_in_bytes / gib:.1f} GiB | "
             f"args {ma.argument_size_in_bytes / gib:.1f} GiB | "
             f"out {ma.output_size_in_bytes / gib:.1f} GiB | "
