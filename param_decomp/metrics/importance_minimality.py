@@ -2,7 +2,7 @@ from typing import Literal, override
 
 import torch
 from jaxtyping import Float
-from pydantic import NonNegativeFloat
+from pydantic import NonNegativeFloat, model_validator
 from torch import Tensor
 from torch.distributed import ReduceOp
 
@@ -19,6 +19,13 @@ class ImportanceMinimalityLossConfig(LossMetricConfig):
     term added on top of the `L_p` term. `pnorm` is linearly annealed toward
     `p_anneal_final_p` between `p_anneal_start_frac` and `p_anneal_end_frac` of training
     (no-op when `p_anneal_final_p is None` or `p_anneal_start_frac == 1.0`).
+
+    The training loss is scaled by a coefficient multiplier with a warmup-then-anneal
+    schedule (`_get_coeff_multiplier`): ramp `0 -> coeff_peak_multiplier` over
+    `coeff_warmup_frac`, hold at the peak, then ramp `coeff_peak_multiplier -> 1.0`
+    between `coeff_anneal_start_frac` and `coeff_anneal_end_frac`. Defaults are a no-op
+    (constant multiplier of `1.0`). The multiplier scales the live loss only; the value
+    logged by `compute()` (the sparsity proxy) is unaffected.
     """
 
     type: Literal["ImportanceMinimalityLoss"] = "ImportanceMinimalityLoss"
@@ -28,6 +35,26 @@ class ImportanceMinimalityLossConfig(LossMetricConfig):
     p_anneal_final_p: NonNegativeFloat | None = None
     p_anneal_end_frac: Probability = 1.0
     eps: NonNegativeFloat = 1e-12
+    coeff_warmup_frac: Probability = 0.0
+    coeff_peak_multiplier: NonNegativeFloat = 1.0
+    coeff_anneal_start_frac: Probability = 1.0
+    coeff_anneal_end_frac: Probability = 1.0
+
+    @model_validator(mode="after")
+    def validate_scheduling_fracs(self) -> "ImportanceMinimalityLossConfig":
+        assert self.coeff_warmup_frac <= self.coeff_anneal_start_frac, (
+            f"coeff_warmup_frac ({self.coeff_warmup_frac}) must be <= "
+            f"coeff_anneal_start_frac ({self.coeff_anneal_start_frac})"
+        )
+        assert self.coeff_anneal_end_frac >= self.coeff_anneal_start_frac, (
+            f"coeff_anneal_end_frac ({self.coeff_anneal_end_frac}) must be >= "
+            f"coeff_anneal_start_frac ({self.coeff_anneal_start_frac})"
+        )
+        assert self.p_anneal_end_frac >= self.p_anneal_start_frac, (
+            f"p_anneal_end_frac ({self.p_anneal_end_frac}) must be >= "
+            f"p_anneal_start_frac ({self.p_anneal_start_frac})"
+        )
+        return self
 
 
 def _get_linear_annealed_p(
@@ -51,6 +78,35 @@ def _get_linear_annealed_p(
         p_anneal_end_frac - p_anneal_start_frac
     )
     return initial_p + (p_anneal_final_p - initial_p) * progress
+
+
+def _get_coeff_multiplier(
+    current_frac_of_training: float,
+    coeff_warmup_frac: float,
+    coeff_peak_multiplier: float,
+    coeff_anneal_start_frac: float,
+    coeff_anneal_end_frac: float,
+) -> float:
+    """Coefficient multiplier with warmup then anneal-to-1.0.
+
+    - `[0, coeff_warmup_frac)`: linearly ramp `0 -> coeff_peak_multiplier`
+    - `[coeff_warmup_frac, coeff_anneal_start_frac)`: constant `coeff_peak_multiplier`
+    - `[coeff_anneal_start_frac, coeff_anneal_end_frac)`: linearly ramp `coeff_peak_multiplier -> 1.0`
+    - `[coeff_anneal_end_frac, 1.0]`: constant `1.0`
+    """
+    if current_frac_of_training < coeff_warmup_frac:
+        return coeff_peak_multiplier * current_frac_of_training / coeff_warmup_frac
+
+    if current_frac_of_training < coeff_anneal_start_frac:
+        return coeff_peak_multiplier
+
+    if current_frac_of_training >= coeff_anneal_end_frac:
+        return 1.0
+
+    progress = (current_frac_of_training - coeff_anneal_start_frac) / (
+        coeff_anneal_end_frac - coeff_anneal_start_frac
+    )
+    return coeff_peak_multiplier + (1.0 - coeff_peak_multiplier) * progress
 
 
 def _per_component_sums(
@@ -105,6 +161,10 @@ def importance_minimality_loss(
     p_anneal_start_frac: float,
     p_anneal_final_p: float | None,
     p_anneal_end_frac: float,
+    coeff_warmup_frac: float,
+    coeff_peak_multiplier: float,
+    coeff_anneal_start_frac: float,
+    coeff_anneal_end_frac: float,
 ) -> Float[Tensor, ""]:
     """Compute the importance-minimality loss directly (helper for external callers)."""
     annealed_p = _get_linear_annealed_p(
@@ -119,12 +179,20 @@ def importance_minimality_loss(
     )
     dist_state = get_distributed_state()
     world_size = dist_state.world_size if dist_state is not None else 1
-    return _finalize(
+    loss = _finalize(
         per_component_sums=per_component_sums,
         n_examples=n_examples,
         beta=beta,
         world_size=world_size,
     )
+    coeff_multiplier = _get_coeff_multiplier(
+        current_frac_of_training=current_frac_of_training,
+        coeff_warmup_frac=coeff_warmup_frac,
+        coeff_peak_multiplier=coeff_peak_multiplier,
+        coeff_anneal_start_frac=coeff_anneal_start_frac,
+        coeff_anneal_end_frac=coeff_anneal_end_frac,
+    )
+    return loss * coeff_multiplier
 
 
 class ImportanceMinimalityLoss(Metric[ImportanceMinimalityLossConfig]):
@@ -164,12 +232,20 @@ class ImportanceMinimalityLoss(Metric[ImportanceMinimalityLossConfig]):
 
         dist_state = get_distributed_state()
         world_size = dist_state.world_size if dist_state is not None else 1
-        return _finalize(
+        loss = _finalize(
             per_component_sums=per_component_sums,
             n_examples=n,
             beta=self.cfg.beta,
             world_size=world_size,
         )
+        coeff_multiplier = _get_coeff_multiplier(
+            current_frac_of_training=ctx.current_frac_of_training,
+            coeff_warmup_frac=self.cfg.coeff_warmup_frac,
+            coeff_peak_multiplier=self.cfg.coeff_peak_multiplier,
+            coeff_anneal_start_frac=self.cfg.coeff_anneal_start_frac,
+            coeff_anneal_end_frac=self.cfg.coeff_anneal_end_frac,
+        )
+        return loss * coeff_multiplier
 
     @override
     def compute(self) -> MetricResult:
