@@ -30,7 +30,7 @@ from jax_single_pool.train import (
     SourceAdamConfig,
     TrainState,
     init_sources,
-    init_src_adam,
+    init_sources_adam_state,
     make_faith_warmup_step,
     make_train_step,
     subset_chunk_plan,
@@ -139,10 +139,10 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
 
     src = init_sources(lm.site_names, tuple(s.C for s in lm.sites), seq, jax.random.PRNGKey(3))
     state = TrainState(
-        vu=vu, ci_fn=ci_fn,
-        opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-        opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        src=src, src_adam=init_src_adam(src), step=jnp.zeros((), jnp.int32),
+        components=vu, ci_fn=ci_fn,
+        components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+        ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+        sources=src, sources_adam_state=init_sources_adam_state(src), step=jnp.zeros((), jnp.int32),
     )  # fmt: skip
     step = make_train_step(
         lm=lm,
@@ -158,8 +158,8 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
         src_cfg=SourceAdamConfig(
             lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=n_warmup
         ),  # fmt: skip
-        opt_vu=opt_vu,
-        opt_ci=opt_ci,
+        components_optimizer=opt_vu,
+        ci_fn_optimizer=opt_ci,
         total_steps=100,
         recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
         mesh=None,
@@ -175,14 +175,14 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
     assert all(jnp.isfinite(jnp.array(list(m.values()))).all() for m in losses)
     assert int(state.step) == n_steps
     # SPEC S13: n_warmup + 1 source-Adam updates per training step, moments persist.
-    assert float(state.src_adam.step_count) == n_steps * (n_warmup + 1)
+    assert float(state.sources_adam_state.step_count) == n_steps * (n_warmup + 1)
     # SPEC S15: sources stay projected to [0,1].
-    for v in state.src.values():
+    for v in state.sources.values():
         assert float(v.min()) >= 0.0 and float(v.max()) <= 1.0
     # SPEC S9: p annealed below its 2.0 start by step 4 of 100.
     assert losses[-1]["p_imp"] < 2.0
     # fp32 masters preserved through updates (SPEC N1).
-    assert state.vu.Vg.dtype == jnp.float32
+    assert state.components.Vg.dtype == jnp.float32
     assert state.ci_fn.in_proj_w.dtype == jnp.float32
 
 

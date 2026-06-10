@@ -68,7 +68,7 @@ from jax_single_pool.train import (
     SourceAdamConfig,
     TrainState,
     init_sources,
-    init_src_adam,
+    init_sources_adam_state,
     make_faith_warmup_step,
     make_train_step,
     subset_chunk_plan,
@@ -213,12 +213,12 @@ def main():
             )
 
     state = TrainState(
-        vu=vu,
+        components=vu,
         ci_fn=ci_fn,
-        opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-        opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        src=src,
-        src_adam=init_src_adam(src),
+        components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+        ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+        sources=src,
+        sources_adam_state=init_sources_adam_state(src),
         step=jnp.zeros((), jnp.int32),
     )
     step = make_train_step(
@@ -240,8 +240,8 @@ def main():
             eps=1e-8,
             n_warmup=args.n_warmup,
         ),  # fmt: skip
-        opt_vu=opt_vu,
-        opt_ci=opt_ci,
+        components_optimizer=opt_vu,
+        ci_fn_optimizer=opt_ci,
         total_steps=args.total_steps,
         recon_plan=subset_chunk_plan(lm.site_names, sites_per_chunk=3, n_samples=1),
         mesh=mesh if args.shard else None,
@@ -250,13 +250,13 @@ def main():
     m: dict[str, jax.Array] = {}
     for _ in range(2):
         state, m = step(state, target, resid, random.PRNGKey(7))
-        jax.block_until_ready((state.src, m["total"]))
+        jax.block_until_ready((state.sources, m["total"]))
 
     per = []
     for s in range(args.steps):
         t = time.time()
         state, m = step(state, target, resid, random.PRNGKey(1000 + s))
-        jax.block_until_ready((state.src, m["total"]))
+        jax.block_until_ready((state.sources, m["total"]))
         per.append(time.time() - t)
     blocked = sum(per) / len(per)
 
@@ -264,7 +264,7 @@ def main():
     for s in range(args.steps):
         state, m = step(state, target, resid, random.PRNGKey(2000 + s))
     dispatch = (time.time() - t) / args.steps
-    jax.block_until_ready((state.src, m["total"]))
+    jax.block_until_ready((state.sources, m["total"]))
 
     peak_gb = max(
         d.memory_stats()["peak_bytes_in_use"] / 1e9

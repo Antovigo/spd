@@ -111,19 +111,21 @@ class CIFn(eqx.Module):
         normed = [_weightless_rms_norm(site_inputs[n], self.eps) for n in self.site_names]
         x = jnp.concatenate(normed, axis=-1) @ self.in_proj_w + self.in_proj_b
         inv_freq = jax.lax.stop_gradient(self.inv_freq)  # RoPE buffer, never trained
-        for blk in self.blocks:
-            x = blk(x, inv_freq)
-        flat = x @ self.out_w + self.out_b  # (b, t, Σ_s C_s)
-        lower = lower_leaky_hard_sigmoid(flat)
-        upper = upper_leaky_hard_sigmoid(flat)
+        for block in self.blocks:
+            x = block(x, inv_freq)
+        logits = x @ self.out_w + self.out_b  # (b, t, Σ_s C_s)
+        lower = lower_leaky_hard_sigmoid(logits)
+        upper = upper_leaky_hard_sigmoid(logits)
 
         offsets = [0]
         for c in self.split_sizes:
             offsets.append(offsets[-1] + c)
-        sl = {name: slice(offsets[i], offsets[i + 1]) for i, name in enumerate(self.site_names)}
+        site_slices = {
+            name: slice(offsets[i], offsets[i + 1]) for i, name in enumerate(self.site_names)
+        }
         return CIValues(
-            lower={n: lower[..., sl[n]] for n in self.site_names},
-            upper={n: upper[..., sl[n]] for n in self.site_names},
+            lower={name: lower[..., site_slices[name]] for name in self.site_names},
+            upper={name: upper[..., site_slices[name]] for name in self.site_names},
         )
 
 
@@ -138,16 +140,16 @@ def init_ci_fn(arch: CIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray) -> 
     """fp32 init matching torch: Kaiming-normal `N(0, gain/√fan_in)` on the custom
     linears (relu gain √2 on in_proj / MLP-in, linear gain 1 elsewhere), PyTorch-default
     `U(±1/√fan_in)` on the attention projections, zero biases."""
-    ks = iter(jax.random.split(key, len(sites) + arch.n_blocks * 8 + 4))
+    key_iter = iter(jax.random.split(key, len(sites) + arch.n_blocks * 8 + 4))
     hd = arch.d_model // arch.n_heads
     assert arch.d_model % arch.n_heads == 0 and hd % 2 == 0, (arch.d_model, arch.n_heads)
 
     def kaiming(shape: tuple[int, ...], fan_in: int, gain: float) -> Array:
-        return jax.random.normal(next(ks), shape) * (gain / fan_in**0.5)
+        return jax.random.normal(next(key_iter), shape) * (gain / fan_in**0.5)
 
     def attn_default(shape: tuple[int, ...], fan_in: int) -> Array:
         bound = 1.0 / fan_in**0.5
-        return jax.random.uniform(next(ks), shape, minval=-bound, maxval=bound)
+        return jax.random.uniform(next(key_iter), shape, minval=-bound, maxval=bound)
 
     relu_gain = 2.0**0.5
 

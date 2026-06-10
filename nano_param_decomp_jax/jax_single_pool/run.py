@@ -54,7 +54,7 @@ from jax_single_pool.sharding import dp_mesh, init_distributed
 from jax_single_pool.train import (
     TrainState,
     init_sources,
-    init_src_adam,
+    init_sources_adam_state,
     make_faith_warmup_step,
     make_train_step,
     subset_chunk_plan,
@@ -181,26 +181,28 @@ def train(
     init_key, src_key, run_key = random.split(key, 3)
     llama_cfg = llama31_8b_config()
     rng = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
-    vu = shard_decomp_vu(init_decomp_vu(llama_cfg, cfg.target.C, rng.n_layers, init_key), mesh)
+    components = shard_decomp_vu(
+        init_decomp_vu(llama_cfg, cfg.target.C, rng.n_layers, init_key), mesh
+    )
     ci_fn = shard_ci_fn(init_ci_fn(cfg.ci_fn, lm.sites, random.fold_in(init_key, 1)), mesh)
-    src = shard_source(
+    sources = shard_source(
         init_sources(lm.site_names, tuple(s.C for s in lm.sites), cfg.data.seq_len, src_key),
         mesh,
     )
     state = TrainState(
-        vu=vu,
+        components=components,
         ci_fn=ci_fn,
-        opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-        opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        src=src,
-        src_adam=init_src_adam(src),
+        components_opt_state=opt_vu.init(eqx.filter(components, eqx.is_array)),
+        ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+        sources=sources,
+        sources_adam_state=init_sources_adam_state(sources),
         step=jnp.zeros((), jnp.int32),
     )
     state = _ensure_global(state, mesh)
     assert isinstance(state, TrainState)
 
-    mgr = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
-    restored = restore_latest(mgr, state)
+    checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
+    restored = restore_latest(checkpoint_manager, state)
     if restored is not None:
         state, ckpt_step = restored
         start_step = ckpt_step
@@ -209,41 +211,47 @@ def train(
     else:
         start_step = 0
         if cfg.faith_warmup.steps > 0:
-            wopt = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
-            wstate = wopt.init(eqx.filter(state.vu, eqx.is_array))
-            wstep = make_faith_warmup_step(lm, wopt)
-            vu_w = state.vu
+            faith_warmup_optimizer = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
+            faith_warmup_opt_state = faith_warmup_optimizer.init(
+                eqx.filter(state.components, eqx.is_array)
+            )
+            faith_warmup_step = make_faith_warmup_step(lm, faith_warmup_optimizer)
+            warmed_components = state.components
             t0 = time.time()
-            wloss = None
+            faith_warmup_loss = None
             for _ in range(cfg.faith_warmup.steps):
-                vu_w, wstate, wloss = wstep(vu_w, wstate, frozen)
-            assert wloss is not None
-            jax.block_until_ready(wloss)
-            new_opt_vu = _ensure_global(opt_vu.init(eqx.filter(vu_w, eqx.is_array)), mesh)
-            state = state._replace(vu=vu_w, opt_vu=new_opt_vu)
+                warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
+                    warmed_components, faith_warmup_opt_state, frozen
+                )
+            assert faith_warmup_loss is not None
+            jax.block_until_ready(faith_warmup_loss)
+            new_opt_vu = _ensure_global(
+                opt_vu.init(eqx.filter(warmed_components, eqx.is_array)), mesh
+            )
+            state = state._replace(components=warmed_components, components_opt_state=new_opt_vu)
             if is_main:
                 print(
                     f"faith warmup: {cfg.faith_warmup.steps} steps in {time.time() - t0:.0f}s, "
-                    f"final faith {float(wloss):.3e}",
+                    f"final faith {float(faith_warmup_loss):.3e}",
                     flush=True,
                 )
-        save_state(mgr, 0, state)
+        save_state(checkpoint_manager, 0, state)
 
     step_fn = make_train_step(
         lm=lm,
         coeffs=cfg.losses,
         imp_cfg=cfg.imp_min,
         src_cfg=cfg.ppgd,
-        opt_vu=opt_vu,
-        opt_ci=opt_ci,
+        components_optimizer=opt_vu,
+        ci_fn_optimizer=opt_ci,
         total_steps=cfg.steps,
         recon_plan=subset_chunk_plan(lm.site_names, cfg.recon.sites_per_chunk, cfg.recon.n_samples),
         mesh=mesh,
     )
 
-    def _harvest(pfx: Prefix, idx: jax.Array) -> jax.Array:
-        resid = prefix_residual(pfx, idx)
-        return jax.lax.with_sharding_constraint(resid, NamedSharding(mesh, P("dp")))
+    def _harvest(prefix_weights: Prefix, token_ids: jax.Array) -> jax.Array:
+        residual = prefix_residual(prefix_weights, token_ids)
+        return jax.lax.with_sharding_constraint(residual, NamedSharding(mesh, P("dp")))
 
     harvest = jax.jit(_harvest)
 
@@ -259,9 +267,9 @@ def train(
     last_logged = start_step
 
     for step in range(start_step, cfg.steps):
-        idx = _global_token_batch(server.local_batch(step), mesh, cfg.data.global_batch)
-        resid = harvest(prefix, idx)
-        state, metrics = step_fn(state, frozen, resid, random.fold_in(run_key, step))
+        token_ids = _global_token_batch(server.local_batch(step), mesh, cfg.data.global_batch)
+        residual = harvest(prefix, token_ids)
+        state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
 
         now_step = step + 1
         if now_step % cfg.cadence.log_every == 0 or now_step == cfg.steps:
@@ -277,7 +285,7 @@ def train(
             window_t0 = time.time()
 
         if now_step % cfg.cadence.save_every == 0 or now_step == cfg.steps or _sigterm_received:
-            save_state(mgr, now_step, state)
+            save_state(checkpoint_manager, now_step, state)
             if is_main:
                 print(f"checkpoint saved @ step {now_step}", flush=True)
             window_t0 = time.time()

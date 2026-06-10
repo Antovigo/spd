@@ -42,7 +42,7 @@ from jax_single_pool.train import (
     SourceAdamConfig,
     TrainState,
     init_sources,
-    init_src_adam,
+    init_sources_adam_state,
     make_train_step,
     subset_chunk_plan,
 )
@@ -73,17 +73,17 @@ def main() -> None:
     )
     opt_ci = optax.adamw(5e-5, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
     state = TrainState(
-        vu=vu, ci_fn=ci_fn,
-        opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-        opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        src=src, src_adam=init_src_adam(src), step=jnp.zeros((), jnp.int32),
+        components=vu, ci_fn=ci_fn,
+        components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+        ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+        sources=src, sources_adam_state=init_sources_adam_state(src), step=jnp.zeros((), jnp.int32),
     )  # fmt: skip
     step_fn = make_train_step(
         lm=lm,
         coeffs=LossCoeffs(1e5, 5e-6, 0.5, 0.5),
         imp_cfg=ImpMinConfig(0.2, 1e-12, 2.0, 0.4, 0.0, 1.0),
         src_cfg=SourceAdamConfig(0.01, 0.025, 0.5, 0.99, 1e-8, n_warmup=2),
-        opt_vu=opt_vu, opt_ci=opt_ci,
+        components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1), mesh=mesh,
     )  # fmt: skip
 

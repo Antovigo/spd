@@ -53,7 +53,7 @@ def test_structure_stoch_is_per_chunk() -> None:
     """SPEC S10: one forward per (chunk, sample), normalized by `n_chunks · n_samples`
     — matching the torch chunkwise pool, not one fused forward over all sites."""
     src = inspect.getsource(train_mod.make_train_step)
-    assert "for entry_idx, fwd in enumerate(recon_plan)" in src, (
+    assert "for entry_idx, recon_forward in enumerate(recon_plan)" in src, (
         "stoch must loop the plan's entries"
     )
     assert "/ n_forwards" in src, "stoch must average over ALL forwards (every draw)"
@@ -71,6 +71,6 @@ def test_structure_ppgd_has_delta_channel() -> None:
     is the raw weight-delta mask (no ci interpolation)."""
     src = inspect.getsource(train_mod.make_ppgd_masks)
     assert "[..., :-1]" in src and "[..., -1]" in src, "ppgd source needs the delta channel"
-    assert "ci_lower[s] + (1.0 - ci_lower[s]) * src_c[..., :-1]" in src, (
-        "ppgd must interpolate mask=ci+(1-ci)*src"
+    assert "ci_lower[site] + (1.0 - ci_lower[site]) * source_bf16[..., :-1]" in src, (
+        "ppgd must interpolate mask=ci+(1-ci)*source"
     )
