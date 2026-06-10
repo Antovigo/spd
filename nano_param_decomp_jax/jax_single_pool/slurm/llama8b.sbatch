@@ -12,11 +12,19 @@
 #     slurm/llama8b.sbatch configs/llama8b_l18_b512.yaml
 # Requeue-resume: SIGTERM (preemption / time limit) triggers an on-loop checkpoint
 # save; the requeued job restores the latest checkpoint and continues (SPEC S22).
-set -euo pipefail
+set -uo pipefail
 CONFIG="$1"
 REPO=/mnt/home/oli/pd-nano-jax-jaxsp/nano_param_decomp_jax
 cd "$REPO"
-srun --kill-on-bad-exit=1 --ntasks-per-node=8 --distribution=block:block bash -c "
-  source .venv-cuda/bin/activate
-  exec jsp-train jax_single_pool/$CONFIG
-"
+# In-job retry: SLURM --requeue does not catch app-level crashes (e.g. the intermittent
+# XLA CUDA-graph capture failure that killed job 50453 at step 280). Each retry resumes
+# from the latest orbax checkpoint; persistent failures still fail the job.
+for attempt in 1 2 3 4 5; do
+  srun --kill-on-bad-exit=1 --ntasks-per-node=8 --cpus-per-task=8 --distribution=block:block bash -c "
+    source .venv-cuda/bin/activate
+    exec jsp-train jax_single_pool/$CONFIG
+  " && exit 0
+  echo "=== train crashed (attempt $attempt); resuming from latest checkpoint ==="
+  sleep 30
+done
+exit 1

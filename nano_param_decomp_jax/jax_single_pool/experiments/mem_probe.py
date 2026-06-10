@@ -55,6 +55,9 @@ def main() -> None:
     ap.add_argument("--per_gpu_batch", type=int, default=4)
     ap.add_argument("--no_remat", action="store_true",
                     help="disable the recon-forward rematerialization (memory A/B)")  # fmt: skip
+    ap.add_argument("--first_layer", type=int, default=18)
+    ap.add_argument("--last_layer", type=int, default=18)
+    ap.add_argument("--C", type=int, default=24576)
     args = ap.parse_args()
     init_distributed()
     mesh = dp_mesh()
@@ -62,8 +65,8 @@ def main() -> None:
     is0 = jax.process_index() == 0
 
     cfg = llama31_8b_config()
-    rng = LayerRange(18, 18)
-    C = 24576
+    rng = LayerRange(args.first_layer, args.last_layer)
+    C = args.C
     seq = 2048
     gbatch = args.per_gpu_batch * ndev
     lm = llama_decomposed_lm(cfg, rng, C)

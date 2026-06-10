@@ -220,6 +220,10 @@ def _site_out(
     if mask is not None:
         acts = acts * mask
     out = acts @ U
+    # DIVERGENCE from torch-under-autocast (documented, accepted): this delta is
+    # computed in bf16 from the cast components; torch computes W − V@U in fp32 then
+    # casts at the einsum. bf16-rounding-level difference on the delta PATH only —
+    # the faithfulness loss uses the fp32 `weight_deltas` (SPEC N2), not this.
     delta = W - (V @ U).T  # (d_out, d_in)
     out = out + delta_mask[..., None] * (x @ delta.T)
     if route is not None:
