@@ -42,14 +42,19 @@ def save_state(mgr: ocp.CheckpointManager, step: int, state: TrainState) -> None
     mgr.wait_until_finished()
 
 
+def restore_step(mgr: ocp.CheckpointManager, reference: TrainState, step: int) -> TrainState:
+    """Restore checkpoint `step` onto `reference`'s shapes/dtypes/shardings
+    (a freshly-initialised, correctly-placed `TrainState`)."""
+    abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, reference)
+    restored = mgr.restore(step, args=ocp.args.StandardRestore(abstract))  # pyright: ignore[reportCallIssue]
+    return cast(TrainState, restored)
+
+
 def restore_latest(
     mgr: ocp.CheckpointManager, reference: TrainState
 ) -> tuple[TrainState, int] | None:
-    """Restore the newest checkpoint onto `reference`'s shapes/dtypes/shardings
-    (a freshly-initialised, correctly-placed `TrainState`). None if no checkpoint."""
+    """`restore_step` at the newest checkpoint; None if no checkpoint."""
     step = mgr.latest_step()
     if step is None:
         return None
-    abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, reference)
-    restored = mgr.restore(step, args=ocp.args.StandardRestore(abstract))  # pyright: ignore[reportCallIssue]
-    return cast(TrainState, restored), step
+    return restore_step(mgr, reference, step), step
