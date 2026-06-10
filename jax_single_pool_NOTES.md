@@ -341,3 +341,80 @@ These C/batch are placeholders for the validation — the matched run plugs in t
 per-GPU batch the torch 2-pool sweep fixes.
 
 ### (legacy) single-layer L18 perf, pre-generalization, for reference
+
+## Watertight equivalence to the torch 2-pool reference (2026-06-10)
+
+The full-LM step was made **semantically equivalent** to the torch 2-pool watertight
+reference (`/mnt/home/oli/param-decomp`, branch `feature/fsdp-lm-trainer`, commit
+484786f0) so a JAX-vs-torch Llama-8B throughput A/B is apples-to-apples. This REVERTS
+the earlier "single fused stoch forward (faster)" optimization — equivalence beats speed
+for the comparison.
+
+### What changed in `llama8b_step.py` / `ci_fn.py` / `llama8b.py`
+
+1. **Stochastic recon: 1 fused forward → N per-chunk forwards.** Was ONE uniform-k-subset
+   forward over ALL 3N sites. Now `_stochastic_recon` loops the chunks (sites_per_chunk=3
+   = one decomposed layer's gate/up/down → 12 chunks for layers 20..31). Each chunk =
+   ONE forward decomposing ONLY that layer's MLP (others run the frozen target MLP via
+   the new `suffix_logits(..., decompose_layer=...)`), with per-position uniform-k-subset
+   routing over THAT chunk's 3 sites (`_sample_chunk_routes`), a per-site `u` mask
+   `ci+(1-ci)*u`, AND a per-site random weight-delta mask (was wrongly fixed at 1). Loss
+   = mean over the N forwards of KL/n_positions. Matches `chunkwise_subset_recon` +
+   `SubsetReconPlan(uniform_k_subset, n_samples=1)` + `recon_one_forward`.
+2. **Recon loss: MSE → KL.** `_kl_per_position` = `recon_loss_kl`/n_positions
+   (`Σ P·(logP−logQ)/n_positions`, P=softmax(clean), Q=softmax(masked pred)). Both stoch
+   and PPGD now use it.
+3. **PPGD mask: `ci*source` → `ci+(1−ci)*source`** + a **trailing weight-delta source
+   channel** (`source_c = C+1`; `[...,:-1]` interpolate with ci, `[...,-1]` is the delta
+   mask, used directly). `_ppgd_masks_and_deltas` mirrors `get_ppgd_mask_infos`. Source
+   shape `(1,T,L,C+1)` (broadcast_across_batch, the production scope).
+4. **Imp-min: rewritten to `finalize_imp_min`.** Was `mean(clip(ci,0,1)^p)`. Now per SITE
+   (each (kind,layer) is its own component group, n=b·t): `Σ_{b,t}(ci+eps)^p`,
+   `mean + beta·mean·log2(1+sum)`, summed over components and sites. Uses the **upper**-
+   leaky CI (torch imp input), with `eps`/`beta` (new `LossCoeffs.imp_eps`/`imp_beta`).
+   The per-site grouping (NOT lumping all L layers, which has one log2 over a 12× sum) is
+   load-bearing for the convex log2 term.
+5. **CI fn returns both leaky views.** `ci_fn(...)` now returns `CIValues(lower, upper)`
+   — `lower_leaky_hard` for recon/PPGD masks, `upper_leaky_hard` for imp — matching torch
+   `sigmoid_type="leaky_hard"` (`CIOutputs.lower_leaky`/`upper_leaky`).
+6. **Faith unchanged** — already `Σ‖W−VU‖²/Σnumel` == `faithfulness_loss`.
+
+### Equivalence harness (`jax_single_pool/tests/equivalence/`)
+
+A deterministic cross-framework check — FIXED weights / CI / routing / sources / stoch
+masks serialized once (`gen_fixtures.py` → `fixtures.npz`), loaded identically into both
+frameworks, each loss term computed and compared at fp32 tolerance:
+
+- `gen_fixtures.py` — numpy, fp32, tiny suffix with **zeroed attention** (so torch & JAX
+  forwards agree to fp32 with no attn-kernel drift; the decomposed MLP is the only
+  nontrivial part) + a frozen tail. 3 decomposed layers = 3 chunks.
+- `torch_reference.py` (torch env) — computes the 4 terms with the **REAL** torch
+  reference functions: `faithfulness_loss`, `importance_minimality_loss`, `recon_loss_kl`,
+  `get_ppgd_mask_infos`, `LinearComponents.forward` (per-site masked projection +
+  routing). Writes `torch_reference.json`.
+- `jax_equivalence.py` / `test_equivalence.py` (JAX env) — runs the JAX step's own
+  helpers on the same fixtures, asserts each term within rtol 2e-4 / atol 1e-5.
+
+**NUMERICALLY VERIFIED (cross-framework, fp32):** all four terms match the torch
+reference — worst rel err **1.9e-6** (faith 1.5e-7, imp 0.0 bit-identical, stoch 1.9e-6,
+ppgd 6.4e-7). The harness drives the genuine torch reference functions, so this pins the
+JAX masking + KL + interpolation + delta-channel + imp math to torch's.
+
+**STRUCTURALLY VERIFIED** (`test_structure_*`, can't be a single number): stoch does one
+forward per chunk (== n_layers); recon is KL not MSE; the PPGD source carries the delta
+channel and interpolates `ci+(1−ci)·src`.
+
+### Proven-equivalent vs open
+
+PROVEN (numeric, fp32 ≤1.9e-6): faith, imp, stoch (per-chunk KL), ppgd (single forward,
+fixed source). PROVEN (structural): per-chunk loop count, KL, interp/delta formulas.
+
+OPEN / out of harness scope (by design — cross-framework numeric infeasible / not the
+deliverable): (a) the PGD **trajectory** (the warmup `lax.scan` source-ascent uses JAX
+autodiff vs torch's `autograd.grad`+Adam — the per-iteration objective `_ppgd_recon` IS
+verified, but the multi-step Adam trajectory is only structurally matched: same n_warmup+1
+updates, same clamp); (b) the RNG draws themselves (mask sampling formulas verified, but
+torch vs JAX RNG streams differ — irrelevant once masks are fixed); (c) bf16 production
+numerics (harness is fp32 to isolate math; the live step runs `DT=bfloat16`, ~1e-3 off
+torch, expected); (d) the SPMD multi-device reductions (`pmean`/C-shard) — covered by the
+GPU-count-invariance result above, not the single-device harness.
