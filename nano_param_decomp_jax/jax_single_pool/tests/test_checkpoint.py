@@ -1,6 +1,6 @@
-"""Round-trip + resume-continuation tests for `checkpoint.py` on the generic trainer
-state (SPEC S22): a loaded `TrainState` must continue the EXACT trajectory — including
-the persistent adversary's sources and Adam moments."""
+"""Round-trip + resume-continuation tests for `checkpoint.py` (orbax) on the generic
+trainer state (SPEC S22): a restored `TrainState` must continue the EXACT trajectory —
+including the persistent adversary's sources and Adam moments."""
 
 from pathlib import Path
 
@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from jax_single_pool.checkpoint import load_state, save_state
+from jax_single_pool.checkpoint import make_checkpoint_manager, restore_latest, save_state
 from jax_single_pool.ci_fn import CIArch, init_ci_fn
 from jax_single_pool.llama8b import LayerRange, init_decomp_vu, llama_decomposed_lm
 from jax_single_pool.tests.test_llama8b import _tiny_cfg, _tiny_target
@@ -60,19 +60,28 @@ def test_roundtrip_and_exact_resume(tmp_path: Path):
     for i in range(2):
         state, _ = step(state, tgt, resid, jax.random.PRNGKey(i))
 
-    path = tmp_path / "ckpt.npz"
-    save_state(path, state)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    save_state(mgr, 2, state)
 
-    # Reload into a DIFFERENTLY-seeded reference: every leaf must come from the file.
+    # Restore onto a DIFFERENTLY-seeded reference: every leaf must come from disk.
     _, fresh, _, _ = _build(seed=7)
-    loaded = load_state(path, fresh)
+    restored = restore_latest(mgr, fresh)
+    assert restored is not None
+    loaded, ckpt_step = restored
+    assert ckpt_step == 2
     for a, b in zip(jax.tree.leaves(state), jax.tree.leaves(loaded), strict=True):
         assert jnp.array_equal(jnp.asarray(a), jnp.asarray(b))
 
-    # SPEC S22: the loaded state continues the exact trajectory.
+    # SPEC S22: the restored state continues the exact trajectory.
     state_cont, m_cont = step(state, tgt, resid, jax.random.PRNGKey(100))
     loaded_cont, m_load = step(loaded, tgt, resid, jax.random.PRNGKey(100))
     for k in m_cont:
         assert float(m_cont[k]) == float(m_load[k]), k
     for a, b in zip(jax.tree.leaves(state_cont), jax.tree.leaves(loaded_cont), strict=True):
         assert jnp.array_equal(jnp.asarray(a), jnp.asarray(b))
+
+
+def test_no_checkpoint_returns_none(tmp_path: Path):
+    _, fresh, _, _ = _build(seed=7)
+    mgr = make_checkpoint_manager(tmp_path / "empty", keep_last=2)
+    assert restore_latest(mgr, fresh) is None

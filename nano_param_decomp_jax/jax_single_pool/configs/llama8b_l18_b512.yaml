@@ -1,0 +1,38 @@
+# Production B=512 single-pool VPD on Llama-3.1-8B L18 MLP — the JAX counterpart of
+# llama8b_l18_b512_2pool_lr_mid.yaml (SPEC §2 constants exactly).
+# Topology: 128 GPU (16 nodes), per-rank batch 4. Launch: slurm/llama8b.sbatch
+run_name: jax-l18-b512-mid
+out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
+seed: 0
+steps: 100000
+target:
+  model_name: meta-llama/Llama-3.1-8B
+  first_layer: 18
+  last_layer: 18
+  C: 24576
+data:
+  dir: /mnt/data/artifacts/mechanisms/param-decomp/datasets/fineweb_llama_tok_2048
+  seq_len: 2048
+  global_batch: 512
+losses: { faith: 1.0e+5, imp: 5.0e-6, stoch: 0.5, ppgd: 0.5 }
+imp_min:
+  beta: 0.2
+  eps: 1.0e-12
+  p_start: 2.0
+  p_final: 0.4
+  anneal_start_frac: 0.0
+  anneal_end_frac: 1.0
+ppgd:
+  lr: 0.01
+  lr_warmup_frac: 0.025
+  beta1: 0.5
+  beta2: 0.99
+  eps: 1.0e-8
+  n_warmup: 2
+recon: { sites_per_chunk: 3, n_samples: 1 }
+vu_optimizer: { lr: 1.5e-4, grad_clip_norm: 0.01 }
+ci_optimizer: { lr: 5.0e-5 }
+ci_fn: { d_model: 4096, n_blocks: 4, n_heads: 64, mlp_hidden: 16384 }
+faith_warmup: { steps: 400, lr: 1.0e-3 }
+cadence: { log_every: 20, save_every: 1000, keep_last: 2 }
+wandb: { project: param-decomp-llama, entity: goodfire }

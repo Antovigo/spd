@@ -50,6 +50,17 @@ recon semantics: masks thread through the suffix forward, loss is KL on final lo
 `basedpyright jax_single_pool/` must be clean; the package stays out of the repo
 `[tool.pyright]` include (torch venv type-checks the torch side).
 
+## The training pipeline (`run.py`)
+
+`jsp-train <config.yaml>` is the composition root and the only I/O layer; the step
+stays pure. Data is the pre-tokenized fineweb parquet artifact
+(`$DATA_MOUNT/artifacts/mechanisms/param-decomp/datasets/fineweb_llama_tok_2048/`) —
+NEVER stream/tokenize from HF at run time (the 80-rank thunderherd lesson). The batch
+schedule is a pure function of `(seed, step)` (O(1) resume, no replay); checkpoints
+are orbax sharded saves (no on-loop full-gather); SIGTERM → save → SLURM requeue →
+resume from latest. Resume with a changed config is refused (byte-compare). Smokes
+before a long run MUST exercise save AND resume at the production per-rank shape.
+
 ## Gotchas
 
 - **`shard_batch` topology** (`sharding.py`): uses `make_array_from_process_local_data`

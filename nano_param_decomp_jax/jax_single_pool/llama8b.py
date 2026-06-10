@@ -440,26 +440,43 @@ def load_target_from_hf(model_name: str, cfg: LlamaConfig, rng: LayerRange) -> T
     )
 
 
+class Prefix(eqx.Module):
+    """The frozen L0..first-1 prefix: embedding + blocks. Used only to harvest the
+    residual entering the suffix (SPEC §1.1) — never in any gradient graph."""
+
+    embed: Float[Array, "vocab d"]
+    blocks: list[FrozenBlock]
+    inv_freq: Float[Array, " hd2"]
+
+
+def load_prefix_from_hf(model_name: str, cfg: LlamaConfig, rng: LayerRange) -> Prefix:
+    w = _HFWeights(_hf_snapshot_dir(model_name))
+    return Prefix(
+        embed=w.get("model.embed_tokens.weight"),
+        blocks=[_load_block(w, i, cfg) for i in range(rng.first)],
+        inv_freq=llama3_inv_freq(cfg),
+    )
+
+
+def prefix_residual(prefix: Prefix, idx: Array) -> Array:
+    """Pure prefix forward: token ids `(b, t)` -> residual entering `first` (b, t, d).
+    The trainer jits this with `prefix` as a runtime arg and the batch dp-sharded."""
+    x = prefix.embed[idx]
+    for blk in prefix.blocks:
+        x = blk(x, prefix.inv_freq)
+    return x
+
+
 def make_real_target_residual(
     model_name: str, cfg: LlamaConfig, rng: LayerRange, idx: Array, chunk: int
 ) -> Array:
-    """Harvest the residual entering `rng.first` with ONE frozen prefix forward
-    (SPEC §1.1/S18). Loads layers L0..first-1, runs them once, discards them.
-
-    Runs in micro-batch chunks (`chunk`) so peak activation is one chunk's prefix
-    forward, not the full batch. Eager (not jit'd): a one-time harvest where jit's
-    constant-capture + compile of the prefix weights dwarfs the runtime."""
-    w = _HFWeights(_hf_snapshot_dir(model_name))
-    embed = w.get("model.embed_tokens.weight")
-    inv_freq = llama3_inv_freq(cfg)
-    blocks = [_load_block(w, i, cfg) for i in range(rng.first)]
-
-    def prefix_chunk(idx_c: Array) -> Array:
-        x = embed[idx_c]
-        for blk in blocks:
-            x = blk(x, inv_freq)
-        return x
-
+    """One-shot eager harvest for the bench: loads the prefix, runs it in micro-batch
+    chunks (`chunk`) so peak activation is one chunk's forward, discards the weights.
+    The trainer instead keeps a `Prefix` resident and jits `prefix_residual`."""
+    prefix = load_prefix_from_hf(model_name, cfg, rng)
     b = idx.shape[0]
-    outs = [jax.block_until_ready(prefix_chunk(idx[i : i + chunk])) for i in range(0, b, chunk)]
+    outs = [
+        jax.block_until_ready(prefix_residual(prefix, idx[i : i + chunk]))
+        for i in range(0, b, chunk)
+    ]
     return jnp.concatenate(outs, axis=0)

@@ -19,9 +19,14 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `lm.py` | `DecomposedLM` — the interface a vendored LM target implements (ordered sites, flat site-keyed dicts, frozen pytree as runtime arg) + generic chunking |
 | `train.py` | the generic trainer: four losses, persistent source-Adam adversary, schedules (p-anneal, source-LR warmup), fp32 masters + bf16 compute, `make_train_step` / `make_faith_warmup_step` |
 | `ci_fn.py` | shared-transformer CI fn over ordered site specs; the two leaky-hard squashings (SPEC §4.6, S5/S6) |
-| `checkpoint.py` | flat-pytree save/resume of `TrainState` (adversary sources + moments included, SPEC S22) |
+| `checkpoint.py` | orbax sharded save/resume of `TrainState` (adversary sources + moments included, no full-gather on the loop, SPEC S22) |
 | `sharding.py` | generic GSPMD helpers (`init_distributed`, `dp_mesh`, `replicate`, `shard_batch`) |
-| `llama8b.py` | Llama-3.1-8B target: residual-start suffix, decomposed MLP layer range, HF safetensors loader, `llama_decomposed_lm(...)` |
+| `llama8b.py` | Llama-3.1-8B target: residual-start suffix + `Prefix` harvest, decomposed MLP layer range, HF safetensors loader, `llama_decomposed_lm(...)` |
+| `run.py` | the training entrypoint (`jsp-train <config.yaml>`): data, faith warmup, loop, metrics jsonl/wandb, orbax checkpoints, SIGTERM-save + requeue-resume |
+| `data.py` | deterministic batch schedule over the pre-tokenized fineweb parquet shards; O(1) resume addressing, per-process slices |
+| `config.py` | typed `ExperimentConfig` from YAML — every field explicit, unknown keys raise |
+| `configs/` | `llama8b_l18_b512.yaml` (production B=512) + `llama8b_l18_smoke8.yaml` (8-GPU smoke) |
+| `slurm/llama8b.sbatch` | SLURM launch (1 task/GPU, `--requeue`, SIGTERM@300 → save → resume) |
 | `llama8b_sharding.py` | the 8B placement plan (frozen replicated; V/U + CI + Adam C-sharded; source replicated; batch sharded) |
 | `experiments/llama8b_real.py` | the runnable 8B step + tok/s/GPU bench |
 | `experiments/invariance_check.py` | device-count invariance harness (SPEC D4) |

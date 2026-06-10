@@ -1,0 +1,153 @@
+"""Typed experiment config for the generic trainer, parsed from YAML.
+
+Every field is explicit in the YAML — no defaults here (single source of truth: the
+config file). Unknown keys raise. Field names mirror the torch production yamls where
+the concepts map (`llama8b_l18_b512_2pool_lr_mid.yaml`), restricted to what this
+trainer supports (SPEC §2 constants are a valid instantiation).
+"""
+
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from jax_single_pool.ci_fn import CIArch
+from jax_single_pool.train import ImpMinConfig, LossCoeffs, SourceAdamConfig
+
+
+@dataclass(frozen=True)
+class TargetConfig:
+    model_name: str
+    first_layer: int
+    last_layer: int
+    C: int
+
+
+@dataclass(frozen=True)
+class DataConfig:
+    dir: Path
+    seq_len: int
+    global_batch: int
+
+
+@dataclass(frozen=True)
+class ReconConfig:
+    sites_per_chunk: int
+    n_samples: int
+
+
+@dataclass(frozen=True)
+class VUOptimizerConfig:
+    lr: float
+    grad_clip_norm: float
+
+
+@dataclass(frozen=True)
+class CIOptimizerConfig:
+    lr: float
+
+
+@dataclass(frozen=True)
+class FaithWarmupConfig:
+    steps: int
+    lr: float
+
+
+@dataclass(frozen=True)
+class CadenceConfig:
+    log_every: int
+    save_every: int
+    keep_last: int
+
+
+@dataclass(frozen=True)
+class WandbConfig:
+    project: str
+    entity: str
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    run_name: str
+    out_dir: Path
+    seed: int
+    steps: int
+    target: TargetConfig
+    data: DataConfig
+    losses: LossCoeffs
+    imp_min: ImpMinConfig
+    ppgd: SourceAdamConfig
+    recon: ReconConfig
+    vu_optimizer: VUOptimizerConfig
+    ci_optimizer: CIOptimizerConfig
+    ci_fn: CIArch
+    faith_warmup: FaithWarmupConfig
+    cadence: CadenceConfig
+    wandb: WandbConfig | None
+
+    @property
+    def run_dir(self) -> Path:
+        return self.out_dir / self.run_name
+
+
+def _build(cls: type, raw: dict[str, Any], where: str) -> Any:
+    names = (
+        {f.name for f in fields(cls)} if hasattr(cls, "__dataclass_fields__") else set(cls._fields)
+    )  # type: ignore[attr-defined]
+    unknown = set(raw) - names
+    assert not unknown, f"{where}: unknown keys {sorted(unknown)} (expected {sorted(names)})"
+    missing = names - set(raw)
+    assert not missing, f"{where}: missing keys {sorted(missing)}"
+    return cls(**raw)
+
+
+def load_config(path: Path) -> ExperimentConfig:
+    assert path.exists(), f"config not found: {path}"
+    raw = yaml.safe_load(path.read_text())
+    top = {
+        "run_name",
+        "out_dir",
+        "seed",
+        "steps",
+        "target",
+        "data",
+        "losses",
+        "imp_min",
+        "ppgd",
+        "recon",
+        "vu_optimizer",
+        "ci_optimizer",
+        "ci_fn",
+        "faith_warmup",
+        "cadence",
+        "wandb",
+    }
+    unknown = set(raw) - top
+    assert not unknown, f"{path}: unknown top-level keys {sorted(unknown)}"
+    missing = top - set(raw) - {"wandb"}
+    assert not missing, f"{path}: missing top-level keys {sorted(missing)}"
+
+    data_raw = dict(raw["data"], dir=Path(raw["data"]["dir"]))
+    cfg = ExperimentConfig(
+        run_name=raw["run_name"],
+        out_dir=Path(raw["out_dir"]),
+        seed=raw["seed"],
+        steps=raw["steps"],
+        target=_build(TargetConfig, raw["target"], "target"),
+        data=_build(DataConfig, data_raw, "data"),
+        losses=_build(LossCoeffs, raw["losses"], "losses"),
+        imp_min=_build(ImpMinConfig, raw["imp_min"], "imp_min"),
+        ppgd=_build(SourceAdamConfig, raw["ppgd"], "ppgd"),
+        recon=_build(ReconConfig, raw["recon"], "recon"),
+        vu_optimizer=_build(VUOptimizerConfig, raw["vu_optimizer"], "vu_optimizer"),
+        ci_optimizer=_build(CIOptimizerConfig, raw["ci_optimizer"], "ci_optimizer"),
+        ci_fn=_build(CIArch, raw["ci_fn"], "ci_fn"),
+        faith_warmup=_build(FaithWarmupConfig, raw["faith_warmup"], "faith_warmup"),
+        cadence=_build(CadenceConfig, raw["cadence"], "cadence"),
+        wandb=_build(WandbConfig, raw["wandb"], "wandb") if raw.get("wandb") else None,
+    )
+    n_sites = 3 * (cfg.target.last_layer - cfg.target.first_layer + 1)
+    assert n_sites % cfg.recon.sites_per_chunk == 0, (n_sites, cfg.recon.sites_per_chunk)
+    assert cfg.cadence.save_every % cfg.cadence.log_every == 0
+    return cfg
