@@ -48,6 +48,15 @@ dispatch table entirely — instantiate your `Metric` subclasses directly and pa
 in `EvalLoop(metrics=...)`. Nothing in the core cares whether they came from a YAML
 union or were constructed by hand.
 
+## Targeted (tPD) eval metrics
+
+`TargetReconLoss`, `NontargetReconLoss`, `NontargetCIMeanPerComponent`,
+`TargetedCIHeatmap`, and `WeightMagnitude` support targeted decomposition runs. The
+three nontarget-data metrics are partitioned out of `EvalLoop.metrics` into
+`EvalLoop.nontarget` by `param_decomp_lab/targeted.py::split_eval_metrics` and are fed
+by the trainer's mirror nontarget eval loop under `delta_override(1.0)`; the rest stay
+in the normal target eval pass.
+
 ## Note on `PGDReconLoss` + `StochasticHiddenActsReconLoss`
 
 Both appear in `EVAL_METRIC_CLASSES` even though they're *loss* classes from core.

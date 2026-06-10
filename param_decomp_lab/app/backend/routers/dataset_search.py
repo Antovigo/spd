@@ -106,6 +106,7 @@ def search_dataset(
     for pagination via `/results`.
     """
     dataset_name = loaded.lm_data.dataset_name
+    assert dataset_name is not None, "run has no dataset_name (prompts_file run)"
     text_column = loaded.lm_data.column_name
     _assert_simplestories(dataset_name)
 
@@ -306,6 +307,7 @@ def get_random_samples(
     Reads `dataset_name` / `column_name` from the loaded run's config.
     """
     dataset_name = loaded.lm_data.dataset_name
+    assert dataset_name is not None, "run has no dataset_name (prompts_file run)"
     text_column = loaded.lm_data.column_name
     _assert_simplestories(dataset_name)
 
@@ -378,6 +380,7 @@ def get_random_samples_with_loss(
     inference; results longer than `max_tokens` are truncated.
     """
     dataset_name = loaded.lm_data.dataset_name
+    assert dataset_name is not None, "run has no dataset_name (prompts_file run)"
     text_column = loaded.lm_data.column_name
     _assert_simplestories(dataset_name)
 

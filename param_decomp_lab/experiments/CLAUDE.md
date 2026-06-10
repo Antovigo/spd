@@ -35,11 +35,21 @@ data:    { ... per-experiment data config ... }
 eval:    { batch_size, n_steps, every, slow_every, slow_on_first_step,
            metrics: [ {type: "...", ...}, ... ] }   # optional: omit to skip eval
 wandb:   { project: ..., entity: ... }              # optional: omit to skip wandb
+nontarget: { data: {...}, batch_size, eval_batch_size,
+             impmin_coeff_ratio }                   # optional: targeted (tPD) runs only
 ```
 
 `eval.metrics` entries are dispatched via `EVAL_METRIC_CLASSES` (see
 [`../eval_metrics/CLAUDE.md`](../eval_metrics/CLAUDE.md)). `slow_every` must be a
 multiple of `every`.
+
+The optional `nontarget:` block (`NontargetConfig` in `param_decomp_lab/targeted.py`)
+turns the run into a targeted decomposition: a second per-step pass over the nontarget
+distribution with the delta component forced on. Requires `pd.use_delta_component: true`,
+no `FaithfulnessLoss`, and `faithfulness_warmup_steps: 0`. Toy data configs take
+`active_indices` to restrict the target distribution; LM data configs take a
+`prompts_file` (exactly one of `dataset_name` / `prompts_file`). Example:
+`tms/tms_40-10-id_targeted_config.yaml`.
 
 ## LM `target.spec`
 

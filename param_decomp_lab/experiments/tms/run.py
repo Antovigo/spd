@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import fire
-from pydantic import Field
+from pydantic import Field, NonNegativeInt
 from torch.utils.data import DataLoader
 
 from param_decomp.base_config import BaseConfig, Probability
@@ -16,7 +16,7 @@ from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import DistributedState
 from param_decomp.log import logger
-from param_decomp.optimize import EvalLoop, Trainer
+from param_decomp.optimize import EvalLoop, NontargetEvalPass, NontargetTrainPass, Trainer
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_first_element
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.distributed import get_device
@@ -31,6 +31,7 @@ from param_decomp_lab.experiments.utils import (
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.run_files import resolve_run_files
 from param_decomp_lab.seed import set_seed
+from param_decomp_lab.targeted import build_nontarget_loss_configs, split_eval_metrics
 
 
 class TMSTargetConfig(BaseConfig):
@@ -43,6 +44,10 @@ class TMSDataConfig(BaseConfig):
     feature_probability: Probability
     data_generation_type: Literal["exactly_one_active", "at_least_zero_active"] = (
         "at_least_zero_active"
+    )
+    active_indices: list[NonNegativeInt] | None = Field(
+        default=None,
+        description="Restrict nonzero feature columns to these indices (targeted runs).",
     )
 
 
@@ -83,6 +88,7 @@ def build_tms_loader(
         data_generation_type=data_cfg.data_generation_type,
         value_range=(0.0, 1.0),
         synced_inputs=train_config.synced_inputs,
+        active_indices=data_cfg.active_indices,
     )
     return DataLoader(dataset, batch_size=None)
 
@@ -152,6 +158,23 @@ def main(
 
     sink = init_pd_run(cfg, group=group, tags=tags)
 
+    nontarget = None
+    if cfg.nontarget is not None:
+        nontarget = NontargetTrainPass(
+            loader=build_tms_loader(
+                cfg.target,
+                cfg.nontarget.data,
+                split="train",
+                device=device,
+                batch_size=cfg.nontarget.batch_size,
+            ),
+            loss_configs=build_nontarget_loss_configs(
+                cfg.pd.loss_metrics,
+                cfg.nontarget.impmin_coeff_ratio,
+                nontarget_batch_size=cfg.nontarget.batch_size,
+            ),
+        )
+
     try:
         trainer = Trainer(
             target_model=target_model,
@@ -160,7 +183,7 @@ def main(
             pd_config=cfg.pd,
             runtime_config=cfg.runtime,
         )
-        trainer.run(train_loader, sink, cfg.cadence, eval_loop)
+        trainer.run(train_loader, sink, cfg.cadence, eval_loop, nontarget=nontarget)
     finally:
         sink.finish()
 
@@ -169,15 +192,31 @@ def _build_eval_loop(cfg: TMSExperimentConfig, device: str) -> EvalLoop | None:
     """Build the `EvalLoop` from `cfg.eval`, or `None` when eval is disabled."""
     if cfg.eval is None:
         return None
+    metrics = [EVAL_METRIC_CLASSES[m.type](m) for m in cfg.eval.metrics]
+    nontarget_eval = None
+    if cfg.nontarget is not None:
+        metrics, nontarget_metrics = split_eval_metrics(metrics)
+        if nontarget_metrics:
+            nontarget_eval = NontargetEvalPass(
+                loader=build_tms_loader(
+                    cfg.target,
+                    cfg.nontarget.data,
+                    split="eval",
+                    device=device,
+                    batch_size=cfg.nontarget.eval_batch_size,
+                ),
+                metrics=nontarget_metrics,
+            )
     return EvalLoop(
         loader=build_tms_loader(
             cfg.target, cfg.data, split="eval", device=device, batch_size=cfg.eval.batch_size
         ),
-        metrics=[EVAL_METRIC_CLASSES[m.type](m) for m in cfg.eval.metrics],
+        metrics=metrics,
         n_steps=cfg.eval.n_steps,
         every=cfg.eval.every,
         slow_every=cfg.eval.slow_every,
         slow_on_first_step=cfg.eval.slow_on_first_step,
+        nontarget=nontarget_eval,
     )
 
 

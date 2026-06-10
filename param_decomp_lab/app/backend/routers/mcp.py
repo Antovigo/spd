@@ -896,6 +896,7 @@ def _tool_search_dataset(params: dict[str, Any]) -> dict[str, Any]:
 
     _, loaded = _get_state()
     dataset_name = loaded.lm_data.dataset_name
+    assert dataset_name is not None, "run has no dataset_name (prompts_file run)"
     text_column = loaded.lm_data.column_name
     _assert_simplestories(dataset_name)
 

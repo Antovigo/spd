@@ -37,8 +37,23 @@ from param_decomp_lab.eval_metrics.component_activation_density import (
     ComponentActivationDensityConfig,
 )
 from param_decomp_lab.eval_metrics.identity_ci_error import IdentityCIError, IdentityCIErrorConfig
+from param_decomp_lab.eval_metrics.nontarget_ci_mean_per_component import (
+    NontargetCIMeanPerComponent,
+    NontargetCIMeanPerComponentConfig,
+)
 from param_decomp_lab.eval_metrics.permuted_ci_plots import PermutedCIPlots, PermutedCIPlotsConfig
+from param_decomp_lab.eval_metrics.targeted_ci_heatmap import (
+    TargetedCIHeatmap,
+    TargetedCIHeatmapConfig,
+)
+from param_decomp_lab.eval_metrics.targeted_recon_loss import (
+    NontargetReconLoss,
+    NontargetReconLossConfig,
+    TargetReconLoss,
+    TargetReconLossConfig,
+)
 from param_decomp_lab.eval_metrics.uv_plots import UVPlots, UVPlotsConfig
+from param_decomp_lab.eval_metrics.weight_magnitude import WeightMagnitude, WeightMagnitudeConfig
 
 AnyEvalMetricConfig = Annotated[
     CEandKLLossesConfig
@@ -49,11 +64,16 @@ AnyEvalMetricConfig = Annotated[
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
+    | NontargetCIMeanPerComponentConfig
+    | NontargetReconLossConfig
     | PermutedCIPlotsConfig
     | PGDReconLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
-    | UVPlotsConfig,
+    | TargetedCIHeatmapConfig
+    | TargetReconLossConfig
+    | UVPlotsConfig
+    | WeightMagnitudeConfig,
     Discriminator("type"),
 ]
 
@@ -68,10 +88,15 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         CIMeanPerComponent,
         ComponentActivationDensity,
         IdentityCIError,
+        NontargetCIMeanPerComponent,
+        NontargetReconLoss,
         PermutedCIPlots,
         PGDReconLoss,
         StochasticAttnPatternsReconLoss,
         StochasticHiddenActsReconLoss,
+        TargetedCIHeatmap,
+        TargetReconLoss,
         UVPlots,
+        WeightMagnitude,
     )
 }

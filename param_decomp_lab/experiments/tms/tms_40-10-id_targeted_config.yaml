@@ -1,0 +1,80 @@
+pd:
+  seed: 0
+  n_mask_samples: 1
+  ci_config:
+    mode: layerwise
+    fn_type: mlp
+    hidden_dims:
+    - 16
+  sigmoid_type: leaky_hard
+  decomposition_targets:
+  - module_pattern: linear1
+    C: 200
+  - module_pattern: linear2
+    C: 200
+  - module_pattern: hidden_layers.0
+    C: 200
+  use_delta_component: true
+  batch_size: 2048
+  steps: 20000
+  components_optimizer:
+    lr_schedule:
+      start_val: 1e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.0
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 1e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.0
+  faithfulness_warmup_steps: 0
+  loss_metrics:
+    - type: ImportanceMinimalityLoss
+      coeff: 1e-4
+      pnorm: 2.0
+      beta: 0
+    - type: StochasticReconLayerwiseLoss
+      coeff: 1.0
+    - type: StochasticReconLoss
+      coeff: 1.0
+cadence:
+  train_log_every: 200
+eval:
+  n_steps: 20
+  batch_size: 2048
+  every: 1000
+  slow_every: 5000
+  metrics:
+    - type: CIHistograms
+      n_batches_accum: 5
+    - type: CI_L0
+      groups: null
+      ci_alive_threshold: 0.1
+    - type: CIMeanPerComponent
+    - type: WeightMagnitude
+    - type: TargetReconLoss
+      rounding_threshold: 0.5
+    - type: NontargetReconLoss
+      rounding_threshold: 0.5
+    - type: NontargetCIMeanPerComponent
+    - type: TargetedCIHeatmap
+      active_indices: [2, 24, 26]
+target:
+  run_path: goodfire/spd-pre-Sep-2025/runs/eggs3wp8
+data:
+  feature_probability: 0.2
+  data_generation_type: at_least_zero_active
+  active_indices: [2, 24, 26]
+nontarget:
+  data:
+    feature_probability: 0.05
+    data_generation_type: at_least_zero_active
+  batch_size: 2048
+  eval_batch_size: 2048
+  impmin_coeff_ratio: 20.0
+runtime:
+  autocast_bf16: true
+  device: cuda
+  dp: null

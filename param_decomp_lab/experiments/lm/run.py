@@ -29,7 +29,7 @@ from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
-from param_decomp.optimize import EvalLoop, Trainer
+from param_decomp.optimize import EvalLoop, NontargetEvalPass, NontargetTrainPass, Trainer
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.component_model_io import load_component_model
@@ -46,6 +46,7 @@ from param_decomp_lab.experiments.lm.data import (
     create_lm_data_loader,
     rank_batch_size,
 )
+from param_decomp_lab.experiments.lm.prompts_dataset import create_prompts_data_loader
 from param_decomp_lab.experiments.utils import (
     EXPERIMENT_CONFIG_FILENAME,
     ExperimentConfig,
@@ -66,6 +67,7 @@ from param_decomp_lab.resumption import (
     write_provenance,
 )
 from param_decomp_lab.seed import set_seed
+from param_decomp_lab.targeted import build_nontarget_loss_configs, split_eval_metrics
 
 
 def _resolve_class(fqn: str) -> type:
@@ -149,10 +151,20 @@ def build_lm_loader(
     """LM `DataLoader` for the requested split.
 
     The eval seed is offset by 1 so eval shuffles differently from train when both come
-    from the same `pd_config.seed`.
+    from the same `pd_config.seed`. When `data_cfg.prompts_file` is set, a static
+    file-backed prompts loader is built instead of a HuggingFace stream (the rank seed
+    is offset so DP ranks sample different rows).
     """
     del target_cfg, device
     effective_seed = (seed or 0) + (1 if split == "eval" else 0)
+    if data_cfg.prompts_file is not None:
+        rank_offset = dist_state.rank * 1000 if dist_state is not None else 0
+        loader, _ = create_prompts_data_loader(
+            data_cfg,
+            batch_size=rank_batch_size(batch_size, dist_state, label=f"{split}_batch_size"),
+            seed=effective_seed + rank_offset,
+        )
+        return loader
     split_name = data_cfg.eval_split if split == "eval" else data_cfg.train_split
     loader, _ = create_lm_data_loader(
         data_cfg,
@@ -285,6 +297,7 @@ def _fresh_main(
         seed=cfg.pd.seed,
     )
     eval_loop = _build_eval_loop(cfg, device, dist_state)
+    nontarget = _build_nontarget_pass(cfg, device, dist_state)
 
     sink = init_pd_run(cfg, group=group, tags=tags, run_id=run_id)
 
@@ -296,7 +309,7 @@ def _fresh_main(
             pd_config=cfg.pd,
             runtime_config=cfg.runtime,
         )
-        trainer.run(train_loader, sink, cfg.cadence, eval_loop)
+        trainer.run(train_loader, sink, cfg.cadence, eval_loop, nontarget=nontarget)
     finally:
         sink.finish()
 
@@ -349,6 +362,7 @@ def _resume_main(
         seed=effective_cfg.pd.seed,
     )
     eval_loop = _build_eval_loop(effective_cfg, device, dist_state)
+    nontarget = _build_nontarget_pass(effective_cfg, device, dist_state)
     sink = init_pd_run(effective_cfg, group=group, tags=tags, run_id=run_id)
     if sink.out_dir is not None:
         write_provenance(
@@ -363,9 +377,35 @@ def _resume_main(
             run_batch=make_run_batch(effective_cfg.target),
             reconstruction_loss=recon_loss_kl,
         )
-        trainer.run(train_loader, sink, effective_cfg.cadence, eval_loop)
+        trainer.run(train_loader, sink, effective_cfg.cadence, eval_loop, nontarget=nontarget)
     finally:
         sink.finish()
+
+
+def _build_nontarget_pass(
+    cfg: LMExperimentConfig,
+    device: str,
+    dist_state: DistributedState | None,
+) -> NontargetTrainPass | None:
+    """Build the nontarget train pass from `cfg.nontarget`, or `None` for normal runs."""
+    if cfg.nontarget is None:
+        return None
+    return NontargetTrainPass(
+        loader=build_lm_loader(
+            cfg.target,
+            cfg.nontarget.data,
+            split="train",
+            device=device,
+            batch_size=cfg.nontarget.batch_size,
+            dist_state=dist_state,
+            seed=cfg.pd.seed,
+        ),
+        loss_configs=build_nontarget_loss_configs(
+            cfg.pd.loss_metrics,
+            cfg.nontarget.impmin_coeff_ratio,
+            nontarget_batch_size=cfg.nontarget.batch_size,
+        ),
+    )
 
 
 def _build_eval_loop(
@@ -385,13 +425,31 @@ def _build_eval_loop(
         dist_state=dist_state,
         seed=cfg.pd.seed,
     )
+    metrics = [EVAL_METRIC_CLASSES[m.type](m) for m in cfg.eval.metrics]
+    nontarget_eval = None
+    if cfg.nontarget is not None:
+        metrics, nontarget_metrics = split_eval_metrics(metrics)
+        if nontarget_metrics:
+            nontarget_eval = NontargetEvalPass(
+                loader=build_lm_loader(
+                    cfg.target,
+                    cfg.nontarget.data,
+                    split="eval",
+                    device=device,
+                    batch_size=cfg.nontarget.eval_batch_size,
+                    dist_state=dist_state,
+                    seed=cfg.pd.seed,
+                ),
+                metrics=nontarget_metrics,
+            )
     return EvalLoop(
         loader=eval_loader,
-        metrics=[EVAL_METRIC_CLASSES[m.type](m) for m in cfg.eval.metrics],
+        metrics=metrics,
         n_steps=cfg.eval.n_steps,
         every=cfg.eval.every,
         slow_every=cfg.eval.slow_every,
         slow_on_first_step=cfg.eval.slow_on_first_step,
+        nontarget=nontarget_eval,
     )
 
 

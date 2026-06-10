@@ -18,6 +18,7 @@ from param_decomp.masks import (
     make_mask_infos,
 )
 from param_decomp.metrics.base import LossMetricConfig
+from param_decomp.targeted import get_delta_override
 
 PGDInitStrategy = Literal["random", "ones", "zeroes"]
 MaskScope = Literal["unique_per_datapoint", "shared_across_batch"]
@@ -56,7 +57,11 @@ def _init_adv_sources(
     adv_sources: dict[str, Float[Tensor, "*batch_dims mask_c"]] = {}
     for module_name in model.target_module_paths:
         module_c = model.module_to_c[module_name]
-        mask_c = module_c if weight_deltas is None else module_c + 1
+        mask_c = (
+            module_c
+            if (weight_deltas is None or get_delta_override() is not None)
+            else module_c + 1
+        )
         match pgd_config.mask_scope:
             case "unique_per_datapoint":
                 shape = torch.Size([*batch_dims, mask_c])
@@ -105,15 +110,24 @@ def _construct_mask_infos_from_adv_sources(
 ) -> dict[str, ComponentsMaskInfo]:
     expanded_adv_sources = {k: v.expand(*batch_dims, -1) for k, v in adv_sources.items()}
     adv_sources_components: dict[str, Float[Tensor, "*batch_dims C"]]
+    override = get_delta_override()
     match weight_deltas:
         case None:
             weight_deltas_and_masks = None
             adv_sources_components = expanded_adv_sources
         case dict():
-            weight_deltas_and_masks = {
-                k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
-            }
-            adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
+            if override is not None:
+                device = next(iter(expanded_adv_sources.values())).device
+                weight_deltas_and_masks = {
+                    k: (weight_deltas[k], torch.full(batch_dims, override, device=device))
+                    for k in weight_deltas
+                }
+                adv_sources_components = expanded_adv_sources
+            else:
+                weight_deltas_and_masks = {
+                    k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
+                }
+                adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
 
     return make_mask_infos(
         component_masks=interpolate_component_mask(ci, adv_sources_components),

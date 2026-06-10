@@ -9,6 +9,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from param_decomp.base_config import BaseConfig, Probability
+from param_decomp.targeted import get_delta_override
 
 WeightDeltaAndMask = tuple[Float[Tensor, "d_out d_in"], Float[Tensor, "..."]]
 """`(weight_delta, delta_mask)`.
@@ -242,11 +243,14 @@ def calc_stochastic_component_mask_info(
 
     weight_deltas_and_masks: dict[str, WeightDeltaAndMask] | None = None
     if weight_deltas is not None:
+        override = get_delta_override()
         weight_deltas_and_masks = {}
         for layer in causal_importances:
             weight_deltas_and_masks[layer] = (
                 weight_deltas[layer],
-                torch.rand(leading_dims, device=device, dtype=dtype),
+                torch.full(leading_dims, override, device=device, dtype=dtype)
+                if override is not None
+                else torch.rand(leading_dims, device=device, dtype=dtype),
             )
 
     routing_masks = router.get_masks(

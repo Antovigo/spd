@@ -200,6 +200,7 @@ async def request_component_interpretation(
             detail=f"Token stats not available for component {component_key}",
         )
 
+    assert loaded.lm_data.dataset_name is not None, "run has no dataset_name (prompts_file run)"
     model_metadata = ModelMetadata(
         n_blocks=loaded.topology.n_blocks,
         model_class=loaded.model.__class__.__name__,

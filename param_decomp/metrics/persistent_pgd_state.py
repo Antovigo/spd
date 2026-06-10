@@ -27,6 +27,7 @@ from param_decomp.masks import (
     make_mask_infos,
 )
 from param_decomp.schedule import ScheduleConfig, get_scheduled_value
+from param_decomp.targeted import get_delta_override
 
 
 class SignPGDConfig(BaseConfig):
@@ -381,6 +382,7 @@ def get_ppgd_mask_infos(
     the weight-delta source channel when present, and interpolates
     `mask = ci + (1 - ci) * source`.
     """
+    assert get_delta_override() is None, "delta override must not reach the PPGD mask path"
 
     expanded_adv_sources: dict[str, Float[Tensor, "*batch_dims source_c"]] = {}
     for module_name, source in ppgd_sources.items():

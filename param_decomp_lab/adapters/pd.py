@@ -66,6 +66,7 @@ class PDAdapter(DecompositionAdapter):
     @override
     def model_metadata(self) -> ModelMetadata:
         cfg = self.pd_run.cfg
+        assert cfg.data.dataset_name is not None, "run has no dataset_name (prompts_file run)"
         return ModelMetadata(
             n_blocks=self._topology.n_blocks,
             model_class=cfg.target.spec.model_class,

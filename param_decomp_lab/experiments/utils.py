@@ -4,17 +4,21 @@ Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `da
 types.
 """
 
+from typing import Self
+
 import wandb
-from pydantic import Field, PositiveInt
+from pydantic import Field, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.distributed import is_main_process
+from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
 from param_decomp_lab.eval_metrics import AnyEvalMetricConfig
 from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.infra.wandb import try_wandb
 from param_decomp_lab.run_sink import RunSink
+from param_decomp_lab.targeted import NontargetConfig
 
 EXPERIMENT_CONFIG_FILENAME = "experiment_config.yaml"
 
@@ -56,6 +60,24 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
     data: D
     eval: EvalConfig | None = None
     wandb: WandbConfig | None = None
+    nontarget: NontargetConfig[D] | None = None
+
+    @model_validator(mode="after")
+    def validate_targeted(self) -> Self:
+        if self.nontarget is None:
+            return self
+        assert self.pd.use_delta_component, (
+            "targeted decomposition forces the delta component on; set pd.use_delta_component=true"
+        )
+        assert not any(isinstance(c, FaithfulnessLossConfig) for c in self.pd.loss_metrics), (
+            "FaithfulnessLoss drives the delta to zero; targeted runs need the delta to carry "
+            "nontarget behavior — remove it from pd.loss_metrics"
+        )
+        assert self.pd.faithfulness_warmup_steps == 0, (
+            "faithfulness warmup zeroes the delta right before targeted training; set "
+            "pd.faithfulness_warmup_steps=0"
+        )
+        return self
 
 
 def init_pd_run[T: BaseConfig, D: BaseConfig](

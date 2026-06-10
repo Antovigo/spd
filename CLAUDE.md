@@ -118,6 +118,22 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
 | `param_decomp_lab/app/` | `param_decomp_lab/app/CLAUDE.md` | Web visualization (FastAPI + Svelte) |
 | `param_decomp_lab/experiments/lm/pretrain/` | `param_decomp_lab/experiments/lm/pretrain/CLAUDE.md` | LM target-model pretraining |
 
+## Targeted decomposition (tPD)
+
+Decompose on a narrow *target* distribution while a per-step *nontarget* pass — with the
+delta component forced fully on via `param_decomp/targeted.py::delta_override` — keeps
+components inactive on a broad distribution. Core surface: `param_decomp/targeted.py`
+(contextvar override, read in `masks.py` / `metrics/pgd_utils.py`),
+`Trainer.run(..., nontarget=NontargetTrainPass)` and `EvalLoop.nontarget`
+(`NontargetEvalPass`) in `param_decomp/optimize.py`. Lab orchestration:
+`param_decomp_lab/targeted.py` (`NontargetConfig` — the optional `nontarget:` YAML block
+on `ExperimentConfig` — plus `build_nontarget_loss_configs` / `split_eval_metrics`).
+Targeted eval metrics in `param_decomp_lab/eval_metrics/`: `TargetReconLoss`,
+`NontargetReconLoss`, `NontargetCIMeanPerComponent`, `TargetedCIHeatmap`,
+`WeightMagnitude`. Example configs:
+`param_decomp_lab/experiments/tms/tms_40-10-id_targeted_config.yaml`,
+`param_decomp_lab/experiments/resid_mlp/resid_mlp1_targeted_config.yaml`.
+
 ## Saved-run layout
 
 Every artifact for a decomposition lives under one dir per run:

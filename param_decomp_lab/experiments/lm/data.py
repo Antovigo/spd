@@ -1,13 +1,13 @@
 """Language-model HuggingFace dataset loading."""
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
 from numpy.typing import NDArray
-from pydantic import Field, PositiveInt
+from pydantic import Field, PositiveInt, model_validator
 from torch import Tensor
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoTokenizer, PreTrainedTokenizer
@@ -18,9 +18,17 @@ from param_decomp.log import logger
 
 
 class LMDataConfig(BaseConfig):
-    """LM experiment dataset / dataloader settings."""
+    """LM experiment dataset / dataloader settings.
 
-    dataset_name: str = Field(..., description="HuggingFace dataset id")
+    Exactly one of `dataset_name` (HuggingFace stream) or `prompts_file` (static
+    line-per-prompt file, used as the target distribution in targeted runs) must be set.
+    """
+
+    dataset_name: str | None = Field(default=None, description="HuggingFace dataset id")
+    prompts_file: str | None = Field(
+        default=None,
+        description="Path to a text file with one prompt per non-empty line",
+    )
     data_files: str | None = Field(
         default=None,
         description=(
@@ -42,6 +50,13 @@ class LMDataConfig(BaseConfig):
     streaming: bool = Field(default=False)
     buffer_size: PositiveInt = Field(default=1000)
     shuffle_each_epoch: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def validate_exactly_one_source(self) -> Self:
+        assert (self.dataset_name is None) != (self.prompts_file is None), (
+            "set exactly one of dataset_name / prompts_file"
+        )
+        return self
 
 
 def _keep_single_column(
@@ -164,6 +179,10 @@ def create_lm_data_loader(
     collate_fn: Callable[..., Any] | None = None,
 ) -> tuple[DataLoader[Any], PreTrainedTokenizer]:
     """Create an LM token dataloader from a HuggingFace dataset split."""
+    assert cfg.dataset_name is not None, (
+        "create_lm_data_loader needs dataset_name; prompts_file loaders go through "
+        "create_prompts_data_loader"
+    )
     dataset = load_dataset(
         cfg.dataset_name,
         data_files=cfg.data_files,

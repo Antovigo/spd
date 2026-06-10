@@ -11,6 +11,7 @@ that lets a caller persist and restore the full training state (resumption).
 import gc
 import signal
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Self, cast
 
@@ -51,8 +52,25 @@ from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.run_sink import RunSink
 from param_decomp.schedule import get_scheduled_value
+from param_decomp.targeted import delta_override
 from param_decomp.torch_helpers import bf16_autocast, loop_dataloader
 from param_decomp.training_state import TrainingState
+
+
+@dataclass(frozen=True)
+class NontargetTrainPass:
+    """Per-step second pass over a nontarget distribution, run under `delta_override(1.0)`."""
+
+    loader: DataLoader[Any]
+    loss_configs: Sequence[LossMetricConfig]
+
+
+@dataclass(frozen=True)
+class NontargetEvalPass:
+    """Eval loader + metrics fed by the mirror nontarget eval loop under `delta_override(1.0)`."""
+
+    loader: DataLoader[Any]
+    metrics: list[Metric[Any]]
 
 
 @dataclass
@@ -101,6 +119,9 @@ class EvalLoop:
         slow_every: Period (in train steps) between *slow* eval passes. Must
             be a multiple of ``every``.
         slow_on_first_step: Whether slow eval fires at step 0.
+        nontarget: Optional nontarget eval bundle (loader + metrics). When set, a
+            mirror eval loop runs over this loader under ``delta_override(1.0)``,
+            feeding only these metrics.
     """
 
     loader: DataLoader[Any]
@@ -109,6 +130,7 @@ class EvalLoop:
     every: PositiveInt
     slow_every: PositiveInt
     slow_on_first_step: bool = True
+    nontarget: NontargetEvalPass | None = None
 
     def __post_init__(self) -> None:
         assert self.slow_every % self.every == 0, (
@@ -412,6 +434,23 @@ class Trainer:
                 "metrics are automatically evaluated; remove the duplicates from "
                 "eval_loop.metrics."
             )
+            if eval_loop.nontarget is not None:
+                # Nontarget eval metrics are bound + name-checked but NOT merged into the
+                # returned mapping — they must only ever see the nontarget eval loop's ctx.
+                nontarget_names: set[str] = set()
+                for m in eval_loop.nontarget.metrics:
+                    m.bind(model=self.component_model, device=device)
+                    metric_name = type(m).__name__
+                    assert metric_name not in nontarget_names, (
+                        f"duplicate nontarget eval metric {metric_name!r}"
+                    )
+                    nontarget_names.add(metric_name)
+                overlap = sorted(
+                    nontarget_names & (set(self.loss_metrics) | set(eval_only_instances))
+                )
+                assert not overlap, (
+                    f"eval_loop.nontarget.metrics overlap with target-pass metrics: {overlap}"
+                )
         return {**self.loss_metrics, **eval_only_instances}
 
     # ============================ Atomic cfg + state ============================
@@ -494,6 +533,8 @@ class Trainer:
         sink: RunSink,
         cadence: Cadence,
         eval_loop: EvalLoop | None = None,
+        *,
+        nontarget: NontargetTrainPass | None = None,
     ) -> None:
         """Advance training from ``self.step`` to ``self.pd_config.steps``.
 
@@ -502,6 +543,16 @@ class Trainer:
         (i.e. resumed mid-trajectory), warmup is skipped and the train loader is
         skip-advanced by ``self.step`` batches to reproduce the corresponding
         position in the data stream.
+
+        Args:
+            train_loader: Training data loader, looped for the lifetime of training.
+            sink: Destination for logs / console output / checkpoints.
+            cadence: Train-log and checkpoint periods.
+            eval_loop: Eval bundle, or ``None`` to skip eval entirely.
+            nontarget: Optional targeted-decomposition second pass. When set, each
+                step additionally runs ``nontarget.loss_configs`` on a batch from
+                ``nontarget.loader`` under ``delta_override(1.0)`` and accumulates
+                the gradients into the same optimizer step.
         """
         pd_config = self.pd_config
         runtime_config = self.runtime_config
@@ -509,11 +560,26 @@ class Trainer:
 
         train_iterator = loop_dataloader(train_loader)
         eval_iterator = loop_dataloader(eval_loop.loader) if eval_loop is not None else None
+        nt_eval_iterator = (
+            loop_dataloader(eval_loop.nontarget.loader)
+            if eval_loop is not None and eval_loop.nontarget is not None
+            else None
+        )
+
+        nontarget_metrics: dict[str, Metric[Any]] | None = None
+        nontarget_iterator = None
+        if nontarget is not None:
+            nt_pd = self.pd_config.model_copy(update={"loss_metrics": list(nontarget.loss_configs)})
+            nontarget_metrics, _ = instantiate_metrics(nt_pd, self.component_model, device)
+            nontarget_iterator = loop_dataloader(nontarget.loader)
 
         # Loader replay: if we're starting from non-zero step, advance the iterator to
         # the matching position. Deterministic given the loader's seed.
         for _ in range(self.step):
             next(train_iterator)
+        if nontarget_iterator is not None:
+            for _ in range(self.step):
+                next(nontarget_iterator)
 
         if self.step == 0 and pd_config.faithfulness_warmup_steps > 0:
             run_faithfulness_warmup(self.component_model, self._component_params, pd_config)
@@ -595,6 +661,44 @@ class Trainer:
             for m in self.loss_metrics.values():
                 m.after_backward()
 
+            # --- Nontarget pass (targeted decomposition) --- #
+            if nontarget_metrics is not None:
+                assert nontarget_iterator is not None
+                nt_weight_deltas = self.component_model.calc_weight_deltas()
+                with bf16_autocast(enabled=runtime_config.autocast_bf16):
+                    nt_ctx = _build_metric_context(
+                        next(nontarget_iterator),
+                        step=step,
+                        is_eval=False,
+                        device=device,
+                        wrapped_model=self._wrapped_model,
+                        component_model=self.component_model,
+                        config=pd_config,
+                        reconstruction_loss=self.reconstruction_loss,
+                        weight_deltas=nt_weight_deltas,
+                    )
+                    _assert_ctx_invariants(nt_ctx, device, step)
+                    with delta_override(1.0):
+                        nt_losses = {n: m.update(nt_ctx) for n, m in nontarget_metrics.items()}
+                nt_total = torch.zeros((), device=device)
+                for metric_name, loss_val in nt_losses.items():
+                    if loss_val is None:
+                        continue
+                    assert torch.isfinite(loss_val).all(), (
+                        f"non-finite nontarget loss {metric_name!r} at step {step}: {loss_val}"
+                    )
+                    cfg = cast(LossMetricConfig, nontarget_metrics[metric_name].cfg)
+                    assert cfg.coeff is not None
+                    nt_total = nt_total + cfg.coeff * loss_val
+                    batch_log_data[
+                        f"nontarget/loss/{type(nontarget_metrics[metric_name]).__name__}"
+                    ] = loss_val.item()
+                assert torch.isfinite(nt_total).all(), (
+                    f"nontarget total loss is non-finite at step {step}: {nt_total}"
+                )
+                nt_total.backward()
+                batch_log_data["nontarget/loss/total"] = nt_total.item()
+
             # --- Train Logging --- #
             if cadence.should_log_train(step):
                 avg_metrics = avg_metrics_across_ranks(batch_log_data, device=device)
@@ -642,6 +746,35 @@ class Trainer:
 
                     sink.console(*(f"eval/{k}: {v}" for k, v in metrics.items()))
                     sink.log({f"eval/{k}": v for k, v in metrics.items()}, step=step)
+
+                    # --- Nontarget eval (targeted decomposition) --- #
+                    if eval_loop.nontarget is not None:
+                        assert nt_eval_iterator is not None
+                        nt_active = [
+                            m for m in eval_loop.nontarget.metrics if not (m.slow and not slow_step)
+                        ]
+                        if nt_active:
+                            for m in nt_active:
+                                m.reset()
+                            with delta_override(1.0):
+                                for _ in range(eval_loop.n_steps):
+                                    nt_eval_ctx = _build_metric_context(
+                                        next(nt_eval_iterator),
+                                        step=step,
+                                        is_eval=True,
+                                        device=device,
+                                        wrapped_model=self._wrapped_model,
+                                        component_model=self.component_model,
+                                        config=pd_config,
+                                        reconstruction_loss=self.reconstruction_loss,
+                                        weight_deltas=eval_weight_deltas,
+                                    )
+                                    for m in nt_active:
+                                        m.update(nt_eval_ctx)
+                            nt_metrics = collect_metric_outputs(nt_active)
+                            sink.console(*(f"eval/{k}: {v}" for k, v in nt_metrics.items()))
+                            sink.log({f"eval/{k}": v for k, v in nt_metrics.items()}, step=step)
+                            del nt_metrics
 
                     del metrics
                     torch.cuda.empty_cache()

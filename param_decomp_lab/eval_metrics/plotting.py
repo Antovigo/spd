@@ -97,6 +97,87 @@ def _plot_causal_importances_figure(
     return img
 
 
+def _parse_layer_grid(n_modules: int, max_rows: int = 6) -> tuple[int, int]:
+    """`(n_rows, n_cols)` for a column-major grid of per-layer subplots."""
+    n_cols = (n_modules + max_rows - 1) // max_rows
+    n_rows = min(n_modules, max_rows)
+    return n_rows, n_cols
+
+
+def _setup_layer_grid_labels(
+    axs: np.ndarray, i: int, n_modules: int, n_rows: int, xlabel: str, ylabel: str, title: str
+) -> plt.Axes:
+    """Pick subplot `i` in a column-major grid, hide nothing, set labels; returns the axis."""
+    row = i % n_rows
+    col = i // n_rows
+    ax = axs[row, col]
+    if row == n_rows - 1 or i == n_modules - 1:
+        ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=10)
+    return ax
+
+
+def plot_weight_magnitude(
+    weight_magnitudes: dict[str, Float[Tensor, " C"]],
+) -> Image.Image:
+    """Per-layer scatter of `‖V_c‖·‖U_c‖` per component, sorted descending (log y)."""
+    n_modules = len(weight_magnitudes)
+    n_rows, n_cols = _parse_layer_grid(n_modules)
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=(8 * n_cols, 3 * n_rows), dpi=200, squeeze=False
+    )
+    axs = np.array(axs)
+    for i in range(n_modules, n_rows * n_cols):
+        axs[i % n_rows, i // n_rows].set_visible(False)
+    for i, (module_name, magnitudes) in enumerate(weight_magnitudes.items()):
+        sorted_mags = torch.sort(magnitudes, descending=True)[0].detach().cpu().numpy()
+        ax = _setup_layer_grid_labels(
+            axs, i, n_modules, n_rows, "Component", "‖V_c‖·‖U_c‖", module_name
+        )
+        ax.set_yscale("log")
+        ax.scatter(range(len(sorted_mags)), sorted_mags, marker="x", s=10)
+    fig.tight_layout()
+    img = _render_figure(fig)
+    plt.close(fig)
+    return img
+
+
+def plot_targeted_ci_heatmaps(
+    target_ci: dict[str, Float[Tensor, "probes C"]],
+    nontarget_ci_mean: dict[str, Float[Tensor, " C"]],
+) -> Image.Image:
+    """Target row over nontarget row of per-component CI heatmaps, one column per layer."""
+    assert set(target_ci) == set(nontarget_ci_mean)
+    layer_names = list(target_ci)
+    n_layers = len(layer_names)
+    fig, axs = plt.subplots(
+        2, n_layers, figsize=(6 * n_layers, 8), dpi=200, squeeze=False, constrained_layout=True
+    )
+    axs = np.array(axs)
+    images = []
+    for j, name in enumerate(layer_names):
+        target_data = target_ci[name].detach().float().cpu().numpy()
+        ax = axs[0, j]
+        images.append(ax.matshow(target_data, aspect="auto", cmap="Reds", vmin=0.0, vmax=1.0))
+        ax.xaxis.tick_bottom()
+        ax.set_xlabel("Component")
+        ax.set_ylabel("Target probe")
+        ax.set_title(f"{name} (target)")
+
+        nt_data = nontarget_ci_mean[name].detach().float().cpu().numpy()[None, :]
+        ax = axs[1, j]
+        images.append(ax.matshow(nt_data, aspect="auto", cmap="Reds", vmin=0.0, vmax=1.0))
+        ax.xaxis.tick_bottom()
+        ax.set_xlabel("Component")
+        ax.set_yticks([])
+        ax.set_title(f"{name} (nontarget mean CI)")
+    fig.colorbar(images[0], ax=axs.ravel().tolist())
+    img = _render_figure(fig)
+    plt.close(fig)
+    return img
+
+
 def plot_mean_component_cis_both_scales(
     mean_component_cis: dict[str, Float[Tensor, " C"]],
 ) -> tuple[Image.Image, Image.Image]:
