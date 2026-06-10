@@ -89,7 +89,8 @@ def make_eval_step(
 
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        ci_lower = ci_fn_bf16(site_inputs).lower
+        # one explicit C-shard -> batch-shard reshard; see train.py batch_sharded_ci
+        ci_lower = {site: batch_sharded(v) for site, v in ci_fn_bf16(site_inputs).lower.items()}
 
         batch, seq = token_ids.shape
         zeros_delta = {site: jnp.zeros((batch, seq), COMPUTE_DT) for site in site_names}

@@ -23,7 +23,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from jax_single_pool.ci_fn import CIFn
+from jax_single_pool.ci_fn import CIFn, CIValues
 from jax_single_pool.lm import DecomposedLM, chunk_sites
 
 COMPUTE_DT = jnp.bfloat16
@@ -343,6 +343,17 @@ def make_train_step(
         spec = ["dp"] + [None] * (x.ndim - 1)
         return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
 
+    def batch_sharded_ci(ci_values: CIValues) -> CIValues:
+        """Reshard the CI-fn output to batch-sharded ONCE, here. The CI head's `out_w`
+        is ΣC-sharded, so its output is born C-sharded; without this pin GSPMD reshards
+        it separately for EVERY consumer (each chunk forward + PPGD + imp-min, fwd and
+        bwd) — at 36 sites those ~1.2 GB all-to-all buffers dominated the temp arena
+        (the 109 GiB `jit_step` OOM, job 50542; XLA dump `memprobe_mc_50581`)."""
+        return CIValues(
+            lower={site: batch_sharded(v) for site, v in ci_values.lower.items()},
+            upper={site: batch_sharded(v) for site, v in ci_values.upper.items()},
+        )
+
     def masked_forward(
         frozen: Any,
         components_bf16: Any,
@@ -439,7 +450,7 @@ def make_train_step(
         # ── supplemental adversary ascents: params + CI detached (SPEC §4.5) ──
         components_detached = jax.lax.stop_gradient(cast_floating(state.components, COMPUTE_DT))
         ci_fn_detached = jax.lax.stop_gradient(cast_floating(state.ci_fn, COMPUTE_DT))
-        ci_lower_detached = ci_fn_detached(site_inputs).lower
+        ci_lower_detached = batch_sharded_ci(ci_fn_detached(site_inputs)).lower
 
         def adversary_loss(sources: dict[str, Array]) -> Array:
             return ppgd_recon_loss(
@@ -474,7 +485,7 @@ def make_train_step(
             components, ci_fn, sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)
             ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-            ci = ci_fn_bf16(site_inputs)
+            ci = batch_sharded_ci(ci_fn_bf16(site_inputs))
             faith_loss = faithfulness_loss(lm.weight_deltas(frozen, components))
             imp_loss = importance_minimality_loss(ci.upper, pnorm, imp_cfg.beta, imp_cfg.eps)
             stoch_loss = stochastic_recon_loss(
