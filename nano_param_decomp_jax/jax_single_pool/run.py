@@ -46,6 +46,7 @@ from jax_single_pool.llama8b_sharding import replicate_target
 from jax_single_pool.lm import DecomposedLM
 from jax_single_pool.run_state import build_optimizers, init_train_state
 from jax_single_pool.sharding import dp_mesh, init_distributed
+from jax_single_pool.torch_config import load_torch_wrapper
 from jax_single_pool.train import (
     TrainState,
     make_faith_warmup_step,
@@ -327,6 +328,17 @@ def train(
             break
 
 
+def _pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
+    """First run copies `source` into the run dir; resumes byte-compare against it."""
+    copy = run_dir / name
+    if copy.exists():
+        assert copy.read_text() == source.read_text(), (
+            f"{copy} differs from {source} — refusing to resume with a changed config"
+        )
+    else:
+        copy.write_text(source.read_text())
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("config", type=Path)
@@ -335,18 +347,22 @@ def main() -> None:
     _install_sigterm_flag()
     init_distributed()
     mesh = dp_mesh()
-    cfg = load_config(args.config)
+
+    # A wrapper yaml with a `torch_config` key routes through the shared
+    # param-decomp-config schema (the torch trainer's LMExperimentConfig).
+    torch_yaml_path = None
+    if "torch_config" in yaml.safe_load(args.config.read_text()):
+        cfg, torch_yaml_path, raw_cfg = load_torch_wrapper(args.config)
+    else:
+        cfg = load_config(args.config)
+        raw_cfg = yaml.safe_load(args.config.read_text())
 
     is_main = jax.process_index() == 0
     if is_main:
         cfg.run_dir.mkdir(parents=True, exist_ok=True)
-        cfg_copy = cfg.run_dir / "config.yaml"
-        if cfg_copy.exists():
-            assert cfg_copy.read_text() == args.config.read_text(), (
-                f"{cfg_copy} differs from {args.config} — refusing to resume with a changed config"
-            )
-        else:
-            cfg_copy.write_text(args.config.read_text())
+        _pin_config_copy(cfg.run_dir, "config.yaml", args.config)
+        if torch_yaml_path is not None:
+            _pin_config_copy(cfg.run_dir, "torch_config.yaml", torch_yaml_path)
         print(
             f"run {cfg.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
             f"B={cfg.data.global_batch} seq={cfg.data.seq_len} "
@@ -364,7 +380,7 @@ def main() -> None:
         NamedSharding(mesh, P()),
     )
 
-    train(cfg, yaml.safe_load(args.config.read_text()), lm, frozen, prefix, mesh)
+    train(cfg, raw_cfg, lm, frozen, prefix, mesh)
 
     if jax.process_count() > 1:
         import jax.experimental.multihost_utils as mhu
