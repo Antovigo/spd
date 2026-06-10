@@ -81,9 +81,43 @@ def _build_optimizers(cfg: ExperimentConfig):
     return opt_vu, opt_ci
 
 
+def _ensure_global(tree: object, mesh: Mesh) -> object:
+    """Pin process-local leaves (eagerly created scalars: step counters, Adam counts)
+    to a replicated mesh sharding. Multi-process orbax can only save GLOBAL arrays;
+    leaves that haven't passed through the jitted step are otherwise per-process
+    `SingleDeviceSharding` arrays and the save raises."""
+    repl = NamedSharding(mesh, P())
+
+    def fix(a: object) -> object:
+        if eqx.is_array(a) and not isinstance(a.sharding, NamedSharding):  # pyright: ignore[reportAttributeAccessIssue]
+            return jax.device_put(a, repl)
+        return a
+
+    return jax.tree.map(fix, tree)
+
+
 def _global_token_batch(local: np.ndarray, mesh: Mesh, global_batch: int) -> jax.Array:
     sharding = NamedSharding(mesh, P("dp"))
     return jax.make_array_from_process_local_data(sharding, local, (global_batch, local.shape[1]))
+
+
+# wandb keys match the torch trainer's (`train_step.py` emits `loss/<ClassName>`,
+# `optimize.py` prefixes `train/`) so a torch-vs-jax run pair overlays on one panel.
+# The stoch alias is exact for a single-chunk config (L18: chunkwise-subset over one
+# chunk == StochasticReconSubsetLoss); multi-chunk configs diverge from that torch
+# class but keep the name for comparability of the same-coeff term.
+_METRIC_KEYS = {
+    "total": "train/loss/total",
+    "faith": "train/loss/FaithfulnessLoss",
+    "imp": "train/loss/ImportanceMinimalityLoss",
+    "stoch": "train/loss/StochasticReconSubsetLoss",
+    "ppgd": "train/loss/PersistentPGDReconLoss",
+    "p_imp": "train/schedules/p_imp",
+    "src_lr": "train/schedules/lr/src",
+    "step_time_s": "train/perf/step_time_s",
+    "tok_per_s": "train/perf/tok_per_s",
+    "tok_per_s_per_gpu": "train/perf/tok_per_s_per_gpu",
+}
 
 
 class MetricsSink:
@@ -111,6 +145,7 @@ class MetricsSink:
     def log(self, step: int, record: dict[str, float]) -> None:
         if self._jsonl is None:
             return
+        record = {_METRIC_KEYS[k]: v for k, v in record.items()}
         self._jsonl.write(json.dumps({"step": step, **record}) + "\n")
         self._jsonl.flush()
         print(
@@ -156,6 +191,8 @@ def train(
         src_adam=init_src_adam(src),
         step=jnp.zeros((), jnp.int32),
     )
+    state = _ensure_global(state, mesh)
+    assert isinstance(state, TrainState)
 
     mgr = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
     restored = restore_latest(mgr, state)
@@ -177,7 +214,8 @@ def train(
                 vu_w, wstate, wloss = wstep(vu_w, wstate, frozen)
             assert wloss is not None
             jax.block_until_ready(wloss)
-            state = state._replace(vu=vu_w, opt_vu=opt_vu.init(eqx.filter(vu_w, eqx.is_array)))
+            new_opt_vu = _ensure_global(opt_vu.init(eqx.filter(vu_w, eqx.is_array)), mesh)
+            state = state._replace(vu=vu_w, opt_vu=new_opt_vu)
             if is_main:
                 print(
                     f"faith warmup: {cfg.faith_warmup.steps} steps in {time.time() - t0:.0f}s, "

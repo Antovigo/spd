@@ -16,8 +16,15 @@ from typing import cast
 
 import jax
 import orbax.checkpoint as ocp
+from orbax.checkpoint.type_handlers import ArrayHandler, register_type_handler
 
 from jax_single_pool.train import TrainState
+
+# Replica-parallel writes (multiple hosts cooperatively writing a REPLICATED array)
+# hit a Shard-internals incompatibility on multi-controller jax 0.10 and buy nothing
+# here: the big leaves (V/U + moments) are C-sharded, the replicated leaves (sources,
+# scalars) are small. Single-replica writes are correct and simple.
+register_type_handler(jax.Array, ArrayHandler(use_replica_parallel=False), override=True)
 
 
 def make_checkpoint_manager(ckpt_dir: Path, keep_last: int) -> ocp.CheckpointManager:
