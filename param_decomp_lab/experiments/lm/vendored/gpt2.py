@@ -14,9 +14,11 @@ arg across the recompute boundary; verified bit-for-bit on grads in
 A site absent from `mask_infos` (or `mask_infos is None`) routes through the frozen target —
 so the clean forward reproduces the original `GPT2Simple` exactly.
 
-Two further forward facets, both threaded explicitly rather than via hooks:
-  - `collect`: an output dict that captures each decomposed site's input activation (the
-    `pre_weight_acts` feeding the CI fn). Populated on a non-checkpointed clean forward.
+Two further forward facets:
+  - `pre_weight_acts` / output-acts capture: each decomposed site stashes its input/output act
+    on itself (`_ComponentModule`, driven by `capture_acts`), read back after a clean forward.
+    Stashing on the module rather than threading an output dict is mandatory under FSDP2, which
+    rebuilds a wrapped block's forward args and would drop a threaded dict's later writes.
   - `bypass_lm_head()`: a context under which `forward` returns the post-final-LN hidden state
     instead of logits (for fused-KL layerwise/PPGD reconstruction), and yields `lm_head.weight`.
 """
@@ -47,6 +49,7 @@ from param_decomp_lab.experiments.lm.vendored.component_modules import (
     ComponentEmbedding,
     ComponentLinear,
     _ComponentModule,
+    capture_acts,
 )
 
 # self.bias is the registered causal-mask buffer; indexing it trips reportIndexIssue (as in
@@ -57,28 +60,13 @@ MaskInfos = dict[str, ComponentsMaskInfo]
 PreWeightActs = dict[str, Tensor]
 
 
-def _proj(
-    module: nn.Module,
-    x: Tensor,
-    mask_infos: MaskInfos | None,
-    collect: PreWeightActs | None,
-    collect_outputs: PreWeightActs | None = None,
-) -> Tensor:
-    """Apply a (possibly component-decomposed) leaf, routing its mask in by path.
-
-    For component leaves, optionally records the leaf's input into `collect` (the
-    pre-weight-acts capture) and the leaf's output into `collect_outputs` (the
-    post-weight-acts capture used by the hidden-acts eval metrics). Plain leaves are
-    applied unchanged.
-    """
+def _proj(module: nn.Module, x: Tensor, mask_infos: MaskInfos | None) -> Tensor:
+    """Apply a (possibly component-decomposed) leaf, routing its mask in by path. Component
+    leaves stash their pre/post-weight acts on themselves when capture is active (see
+    `_ComponentModule` / `capture_acts`); plain leaves are applied unchanged."""
     if isinstance(module, _ComponentModule):
-        if collect is not None:
-            collect[module.path] = x
         mask_info = None if mask_infos is None else mask_infos.get(module.path)
-        out = module(x, mask_info)
-        if collect_outputs is not None:
-            collect_outputs[module.path] = out
-        return out
+        return module(x, mask_info)
     return module(x)
 
 
@@ -88,13 +76,11 @@ class ComponentCausalSelfAttention(CausalSelfAttention):
         self,
         x: Float[Tensor, "batch pos d_model"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "batch pos d_model"]:
         B, T, C = x.size()
-        q = _proj(self.q_proj, x, mask_infos, collect, collect_outputs)
-        k = _proj(self.k_proj, x, mask_infos, collect, collect_outputs)
-        v = _proj(self.v_proj, x, mask_infos, collect, collect_outputs)
+        q = _proj(self.q_proj, x, mask_infos)
+        k = _proj(self.k_proj, x, mask_infos)
+        v = _proj(self.v_proj, x, mask_infos)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -106,7 +92,7 @@ class ComponentCausalSelfAttention(CausalSelfAttention):
             att = F.softmax(att, dim=-1)
             y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return _proj(self.o_proj, y, mask_infos, collect, collect_outputs)
+        return _proj(self.o_proj, y, mask_infos)
 
 
 class ComponentMLP(MLP):
@@ -115,12 +101,10 @@ class ComponentMLP(MLP):
         self,
         x: Float[Tensor, "... dim"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "... dim"]:
-        x = _proj(self.c_fc, x, mask_infos, collect, collect_outputs)
+        x = _proj(self.c_fc, x, mask_infos)
         x = self.gelu(x)
-        return _proj(self.down_proj, x, mask_infos, collect, collect_outputs)
+        return _proj(self.down_proj, x, mask_infos)
 
 
 class ComponentBlock(Block):
@@ -129,13 +113,11 @@ class ComponentBlock(Block):
         self,
         x: Float[Tensor, "batch pos d_model"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "batch pos d_model"]:
         attn: ComponentCausalSelfAttention = self.attn  # pyright: ignore[reportAssignmentType]
         mlp: ComponentMLP = self.mlp  # pyright: ignore[reportAssignmentType]
-        x = x + attn(self.ln_1(x), mask_infos, collect, collect_outputs)
-        x = x + mlp(self.ln_2(x), mask_infos, collect, collect_outputs)
+        x = x + attn(self.ln_1(x), mask_infos)
+        x = x + mlp(self.ln_2(x), mask_infos)
         return x
 
 
@@ -155,19 +137,17 @@ class ComponentGPT2(GPT2Simple):
         self,
         idx: Int[Tensor, "batch pos"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "batch pos vocab"] | Float[Tensor, "batch pos d_model"]:
         if self._cached_residual is not None:
             residual, start = self._cached_residual
-            return self.forward_from_residual(residual, start, mask_infos, collect, collect_outputs)
+            return self.forward_from_residual(residual, start, mask_infos)
         _b, t = idx.size()
         assert t <= self.config.block_size, (
             f"sequence length {t} exceeds block size {self.config.block_size}"
         )
         pos = torch.arange(0, t, dtype=torch.long, device=idx.device)
-        embed = _proj(self.wte, idx, mask_infos, collect, collect_outputs) + self.wpe(pos)
-        return self.forward_from_residual(embed, 0, mask_infos, collect, collect_outputs)
+        embed = _proj(self.wte, idx, mask_infos) + self.wpe(pos)
+        return self.forward_from_residual(embed, 0, mask_infos)
 
     @property
     def decomposition_start_layer(self) -> int:
@@ -201,21 +181,24 @@ class ComponentGPT2(GPT2Simple):
         residual: Float[Tensor, "batch pos d_model"],
         start_layer: int,
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "batch pos vocab"] | Float[Tensor, "batch pos d_model"]:
         """Run blocks `[start_layer:]` + final LN + head on a cached `residual`, threading masks.
-        With `start_layer == 0` and `residual = wte+wpe` this is the full forward."""
+        With `start_layer == 0` and `residual = wte+wpe` this is the full forward. Capture (when
+        active) goes through the un-checkpointed path so the stashed act is the live forward's."""
         x = residual
         blocks: list[ComponentBlock] = self._h[start_layer:]  # pyright: ignore[reportAssignmentType]
-        if self._use_activation_checkpointing and collect is None and collect_outputs is None:
+        if self._use_activation_checkpointing and not self._capturing:
             for block in blocks:
                 x = checkpoint(block, x, mask_infos, use_reentrant=False)
         else:
             for block in blocks:
-                x = block(x, mask_infos, collect, collect_outputs)
+                x = block(x, mask_infos)
         x = self.ln_f(x)
         return x if self._bypass_lm_head else self.lm_head(x)
+
+    @property
+    def _capturing(self) -> bool:
+        return any(m.capture_mode != "none" for m in self.component_modules.values())
 
     @contextmanager
     def use_cached_residual(self, idx: Int[Tensor, "batch pos"]) -> Iterator[None]:
@@ -239,9 +222,9 @@ class ComponentGPT2(GPT2Simple):
     ) -> tuple[Tensor, PreWeightActs]:
         """Forward that also returns each decomposed site's input activation (token-ids for an
         embedding site). Runs un-checkpointed (the capture is a clean diagnostic pass)."""
-        collect: PreWeightActs = {}
-        out = self(idx, mask_infos, collect)
-        return out, collect
+        with capture_acts(self.component_modules.values(), "input") as collected:
+            out = self(idx, mask_infos)
+        return out, collected[0]
 
     def pre_weight_acts(self, idx: Int[Tensor, "batch pos"]) -> PreWeightActs:
         return self.forward_with_pre_weight_acts(idx)[1]
@@ -252,9 +235,9 @@ class ComponentGPT2(GPT2Simple):
         """Forward that also returns each decomposed site's OUTPUT activation — the
         post-weight (post-component-replacement when masked) act read by the hidden-acts
         eval metrics. Replaces the core model's `cache_type="output"`. Runs un-checkpointed."""
-        collect_outputs: PreWeightActs = {}
-        out = self(idx, mask_infos, None, collect_outputs)
-        return out, collect_outputs
+        with capture_acts(self.component_modules.values(), "output") as collected:
+            out = self(idx, mask_infos)
+        return out, collected[0]
 
     @contextmanager
     def bypass_lm_head(self) -> Iterator[Float[Tensor, "vocab d_model"]]:

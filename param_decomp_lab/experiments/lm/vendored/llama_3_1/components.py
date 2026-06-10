@@ -20,6 +20,7 @@ from torch.utils.checkpoint import checkpoint
 
 from param_decomp.components import Components, EmbeddingComponents, LinearComponents
 from param_decomp.masks import ComponentsMaskInfo
+from param_decomp_lab.experiments.lm.vendored.component_modules import CaptureMode, capture_acts
 from param_decomp_lab.experiments.lm.vendored.llama_3_1.model import (
     LlamaAttention,
     LlamaBlock,
@@ -37,15 +38,25 @@ PreWeightActs = dict[str, Tensor]
 class ComponentLinear(nn.Module):
     """In-tree, checkpointable replacement for a target `nn.Linear`: routes between the V/U
     component output and the frozen-target output as a pure function of `(x, mask_info)` (no
-    side-channel hooks). `mask_info is None` → behave as the frozen target."""
+    side-channel hooks). `mask_info is None` → behave as the frozen target.
+
+    Capture (`pre_weight_acts` / output-acts) is stashed on the module (`capture_mode` /
+    `captured`), not threaded out through a forward arg: an FSDP2-wrapped block rebuilds its
+    forward args via `tree_unflatten` whenever a tensor arg requires grad, which copies a
+    threaded output dict and drops every site past the first decomposed block. See
+    `component_modules._ComponentModule` for the shared rationale."""
 
     target_weight: Float[Tensor, "d_out d_in"]
     bias: Float[Tensor, "... d_out"] | None
+    capture_mode: CaptureMode
+    captured: Tensor | None
 
     def __init__(self, components: LinearComponents, target_weight: Float[Tensor, "d_out d_in"]):
         super().__init__()
         self.components = components
         self.path = ""  # submodule path, set at swap time; keys this leaf's mask in mask_infos
+        self.capture_mode = "none"
+        self.captured = None
         assert target_weight.shape == (components.d_out, components.d_in)
         self.register_buffer("target_weight", target_weight)
         self.register_buffer("bias", components.bias)
@@ -59,6 +70,19 @@ class ComponentLinear(nn.Module):
         x: Tensor,
         mask_info: ComponentsMaskInfo | None,
         component_acts_cache: dict[str, Float[Tensor, "... C"]] | None = None,
+    ) -> Tensor:
+        if self.capture_mode == "input":
+            self.captured = x
+        out = self._routed_forward(x, mask_info, component_acts_cache)
+        if self.capture_mode == "output":
+            self.captured = out
+        return out
+
+    def _routed_forward(
+        self,
+        x: Tensor,
+        mask_info: ComponentsMaskInfo | None,
+        component_acts_cache: dict[str, Float[Tensor, "... C"]] | None,
     ) -> Tensor:
         if mask_info is None:
             assert component_acts_cache is None, "component_acts_cache needs an active mask"
@@ -76,23 +100,13 @@ class ComponentLinear(nn.Module):
         )
 
 
-def _proj(
-    module: nn.Module,
-    x: Tensor,
-    mask_infos: MaskInfos | None,
-    collect: PreWeightActs | None,
-    collect_outputs: PreWeightActs | None = None,
-) -> Tensor:
-    """Apply a (possibly component-decomposed) leaf, routing its mask in by path. For component
-    leaves, optionally records the leaf's input into `collect` and output into `collect_outputs`."""
+def _proj(module: nn.Module, x: Tensor, mask_infos: MaskInfos | None) -> Tensor:
+    """Apply a (possibly component-decomposed) leaf, routing its mask in by path. Component
+    leaves stash their pre/post-weight acts on themselves when capture is active (see
+    `ComponentLinear` / `capture_acts`); plain leaves are applied unchanged."""
     if isinstance(module, ComponentLinear):
-        if collect is not None:
-            collect[module.path] = x
         mask_info = None if mask_infos is None else mask_infos.get(module.path)
-        out = module(x, mask_info)
-        if collect_outputs is not None:
-            collect_outputs[module.path] = out
-        return out
+        return module(x, mask_info)
     return module(x)
 
 
@@ -102,12 +116,10 @@ class ComponentLlamaMLP(LlamaMLP):
         self,
         x: Float[Tensor, "... dim"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "... dim"]:
-        gate = _proj(self.gate_proj, x, mask_infos, collect, collect_outputs)
-        up = _proj(self.up_proj, x, mask_infos, collect, collect_outputs)
-        return _proj(self.down_proj, F.silu(gate) * up, mask_infos, collect, collect_outputs)
+        gate = _proj(self.gate_proj, x, mask_infos)
+        up = _proj(self.up_proj, x, mask_infos)
+        return _proj(self.down_proj, F.silu(gate) * up, mask_infos)
 
 
 class ComponentLlamaAttention(LlamaAttention):
@@ -116,13 +128,11 @@ class ComponentLlamaAttention(LlamaAttention):
         self,
         x: Float[Tensor, "b t d"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "b t d"]:
-        q = _proj(self.q_proj, x, mask_infos, collect, collect_outputs)
-        k = _proj(self.k_proj, x, mask_infos, collect, collect_outputs)
-        v = _proj(self.v_proj, x, mask_infos, collect, collect_outputs)
-        return _proj(self.o_proj, self._attend(q, k, v), mask_infos, collect, collect_outputs)
+        q = _proj(self.q_proj, x, mask_infos)
+        k = _proj(self.k_proj, x, mask_infos)
+        v = _proj(self.v_proj, x, mask_infos)
+        return _proj(self.o_proj, self._attend(q, k, v), mask_infos)
 
 
 class ComponentLlamaBlock(LlamaBlock):
@@ -131,13 +141,11 @@ class ComponentLlamaBlock(LlamaBlock):
         self,
         x: Float[Tensor, "b t d"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "b t d"]:
         attn: ComponentLlamaAttention = self.self_attn  # pyright: ignore[reportAssignmentType]
         mlp: ComponentLlamaMLP = self.mlp  # pyright: ignore[reportAssignmentType]
-        x = x + attn(self.input_layernorm(x), mask_infos, collect, collect_outputs)
-        x = x + mlp(self.post_attention_layernorm(x), mask_infos, collect, collect_outputs)
+        x = x + attn(self.input_layernorm(x), mask_infos)
+        x = x + mlp(self.post_attention_layernorm(x), mask_infos)
         return x
 
 
@@ -156,19 +164,15 @@ class ComponentLlama(VendoredLlama):
         self,
         idx: Int[Tensor, "b t"],
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "b t vocab"] | Float[Tensor, "b t d"]:
         if self._cached_residual is not None:
             residual, start = self._cached_residual
-            return self.forward_from_residual(residual, start, mask_infos, collect, collect_outputs)
+            return self.forward_from_residual(residual, start, mask_infos)
         _b, t = idx.size()
         assert t <= self.config.max_position_embeddings, (
             f"seq len {t} > max_position_embeddings {self.config.max_position_embeddings}"
         )
-        return self.forward_from_residual(
-            self.embed_tokens(idx), 0, mask_infos, collect, collect_outputs
-        )
+        return self.forward_from_residual(self.embed_tokens(idx), 0, mask_infos)
 
     @contextmanager
     def use_cached_residual(self, idx: Int[Tensor, "b t"]) -> Iterator[None]:
@@ -212,30 +216,33 @@ class ComponentLlama(VendoredLlama):
         residual: Float[Tensor, "b t d"],
         start_layer: int,
         mask_infos: MaskInfos | None = None,
-        collect: PreWeightActs | None = None,
-        collect_outputs: PreWeightActs | None = None,
     ) -> Float[Tensor, "b t vocab"] | Float[Tensor, "b t d"]:
         """Run blocks `[start_layer:]` + final norm + head on a cached `residual`, threading
         masks. With `start_layer == 0` and `residual = embed_tokens(idx)` this is the full
         forward; with `start_layer == decomposition_start_layer` and a cached `residual_at` it
-        skips the frozen prefix. Bit-identical either way (same ops on the suffix)."""
+        skips the frozen prefix. Bit-identical either way (same ops on the suffix). Capture (when
+        active) goes through the un-checkpointed path so the stashed act is the live forward's."""
         x = residual
         blocks: list[ComponentLlamaBlock] = self._layers[start_layer:]  # pyright: ignore[reportAssignmentType]
-        if self._use_activation_checkpointing and collect is None and collect_outputs is None:
+        if self._use_activation_checkpointing and not self._capturing:
             for block in blocks:
                 x = checkpoint(block, x, mask_infos, use_reentrant=False)
         else:
             for block in blocks:
-                x = block(x, mask_infos, collect, collect_outputs)
+                x = block(x, mask_infos)
         x = self.norm(x)
         return x if self._bypass_lm_head else self.lm_head(x)
+
+    @property
+    def _capturing(self) -> bool:
+        return any(m.capture_mode != "none" for m in self.component_modules.values())
 
     def forward_with_pre_weight_acts(
         self, idx: Int[Tensor, "b t"], mask_infos: MaskInfos | None = None
     ) -> tuple[Tensor, PreWeightActs]:
-        collect: PreWeightActs = {}
-        out = self(idx, mask_infos, collect)
-        return out, collect
+        with capture_acts(self.component_modules.values(), "input") as collected:
+            out = self(idx, mask_infos)
+        return out, collected[0]
 
     def pre_weight_acts(self, idx: Int[Tensor, "b t"]) -> PreWeightActs:
         return self.forward_with_pre_weight_acts(idx)[1]
@@ -243,9 +250,9 @@ class ComponentLlama(VendoredLlama):
     def forward_with_output_acts(
         self, idx: Int[Tensor, "b t"], mask_infos: MaskInfos | None = None
     ) -> tuple[Tensor, PreWeightActs]:
-        collect_outputs: PreWeightActs = {}
-        out = self(idx, mask_infos, None, collect_outputs)
-        return out, collect_outputs
+        with capture_acts(self.component_modules.values(), "output") as collected:
+            out = self(idx, mask_infos)
+        return out, collected[0]
 
     @contextmanager
     def bypass_lm_head(self) -> Iterator[Float[Tensor, "vocab d_model"]]:
