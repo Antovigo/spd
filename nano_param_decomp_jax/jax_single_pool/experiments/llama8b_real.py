@@ -1,4 +1,8 @@
-"""Run the full Llama-3.1-8B single-pool VPD step in JAX and measure tok/s/GPU + MFU.
+"""Run the full Llama-3.1-8B single-pool VPD step in JAX and measure tok/s/GPU.
+
+NB: no MFU/FLOP estimate here on purpose — a hardcoded forward-count × an "achievable"
+peak gave a misleadingly high MFU. tok/s/GPU (tokens ÷ wall-clock) is the trustworthy,
+assumption-free throughput number; compare that directly across frameworks.
 
 The full PD step on the REAL 8B model: residual-start suffix from `--first_layer`,
 MLP (gate/up/down) decomposed on layers `[first_layer, last_layer]` (3N sites),
@@ -68,25 +72,6 @@ from jax_single_pool.llama8b_step import (
     make_llama8b_step_shmap,
 )
 from jax_single_pool.sharding import init_distributed
-
-
-def suffix_flops_per_token(cfg, vocab: int, rng: LayerRange) -> float:
-    """Matmul FLOPs for ONE suffix forward, per token (2 * params; attention-quadratic
-    and elementwise ignored). The suffix is `first..n_layer-1` blocks + lm_head."""
-    d, di = cfg.n_embd, cfg.n_intermediate
-    qd = cfg.n_head * cfg.head_dim
-    kvd = cfg.n_kv_head * cfg.head_dim
-    per_block = 2 * (d * qd + 2 * d * kvd + qd * d) + 2 * (3 * d * di)  # attn + mlp
-    n_suffix_blocks = cfg.n_layer - rng.first  # first..n_layer-1 inclusive
-    head = 2 * d * vocab
-    return 2 * (n_suffix_blocks * per_block + head)
-
-
-def ci_flops_per_token(dims: CIFnDims) -> float:
-    dm = dims.d_model
-    per_block = 2 * (4 * dm * dm) + 2 * (2 * dm * dims.mlp_hidden)
-    total_c = len(KINDS) * dims.n_layers * dims.C
-    return 2 * (dims.total_in * dm + dims.n_blocks * per_block + dm * total_c)
 
 
 def _random_target(cfg, rng: LayerRange, key) -> Target:
@@ -252,25 +237,12 @@ def main():
 
     if is0:
         toks = gbatch * args.seq
-        sf = suffix_flops_per_token(cfg, cfg.vocab_size, rng)
-        cf = ci_flops_per_token(dims)
-        recon_fwds_3x = 4  # 3 stoch + 1 ppgd, each fwd+bwd
-        clean_1x = 1
-        pgd_3x = args.n_warmup + 1
-        suffix_flops = (clean_1x * 1 + recon_fwds_3x * 3 + pgd_3x * 3) * sf
-        ci_flops = 3 * cf
-        flops_per_token = suffix_flops + ci_flops
-        total_flops = flops_per_token * toks
-        PEAK = 1715e12  # B200 bf16 dense peak (lore)
         print(
             f"[p0] blocked {blocked * 1e3:.1f} ms/step | dispatch {dispatch * 1e3:.1f} ms/step "
-            f"| {'HOST-BOUND' if dispatch > 0.7 * blocked else 'device-bound'} "
             f"| peak {peak_gb:.1f} GB/dev"
         )
         print(
             f"[p0] {toks / blocked:,.0f} tok/s | {toks / blocked / ndev:,.0f} tok/s/GPU "
-            f"| {total_flops / blocked / 1e12:,.1f} TFLOP/s "
-            f"| MFU {100 * total_flops / blocked / (PEAK * ndev):.1f}% "
             f"| final loss {float(m['total']):.4f}"
         )
         print(
