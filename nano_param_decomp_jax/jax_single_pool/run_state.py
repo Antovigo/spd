@@ -1,0 +1,64 @@
+"""Construction of a run's optimizers + initial `TrainState` from an `ExperimentConfig`.
+
+Shared by the trainer (`run.py`) and the checkpoint exporter (`export.py`): orbax
+restores ONTO a reference pytree, so anything that wants to read a checkpoint must
+rebuild the state exactly as the run did — same init fns, same key derivation, same
+optimizer-state structure.
+"""
+
+import equinox as eqx
+import jax.numpy as jnp
+import optax
+from jax import random
+from jax.sharding import Mesh
+from jaxtyping import PRNGKeyArray
+
+from jax_single_pool.ci_fn import init_ci_fn
+from jax_single_pool.config import ExperimentConfig
+from jax_single_pool.llama8b import LayerRange, init_decomp_vu, llama31_8b_config
+from jax_single_pool.llama8b_sharding import shard_ci_fn, shard_decomp_vu, shard_source
+from jax_single_pool.lm import DecomposedLM
+from jax_single_pool.train import TrainState, init_sources, init_sources_adam_state
+
+
+def build_optimizers(cfg: ExperimentConfig):
+    """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
+    log path reports the exact LR the optimizer applies (single source of truth)."""
+    sched_vu = optax.cosine_decay_schedule(cfg.vu_optimizer.lr, cfg.steps, alpha=0.1)
+    sched_ci = optax.cosine_decay_schedule(cfg.ci_optimizer.lr, cfg.steps, alpha=0.1)
+    opt_vu = optax.chain(
+        optax.clip_by_global_norm(cfg.vu_optimizer.grad_clip_norm),
+        optax.adamw(sched_vu, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0),
+    )
+    opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
+    return opt_vu, opt_ci, (sched_vu, sched_ci)
+
+
+def init_train_state(
+    cfg: ExperimentConfig,
+    lm: DecomposedLM,
+    opt_vu: optax.GradientTransformation,
+    opt_ci: optax.GradientTransformation,
+    init_key: PRNGKeyArray,
+    src_key: PRNGKeyArray,
+    mesh: Mesh,
+) -> TrainState:
+    llama_cfg = llama31_8b_config()
+    layer_range = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
+    components = shard_decomp_vu(
+        init_decomp_vu(llama_cfg, cfg.target.C, layer_range.n_layers, init_key), mesh
+    )
+    ci_fn = shard_ci_fn(init_ci_fn(cfg.ci_fn, lm.sites, random.fold_in(init_key, 1)), mesh)
+    sources = shard_source(
+        init_sources(lm.site_names, tuple(s.C for s in lm.sites), cfg.data.seq_len, src_key),
+        mesh,
+    )
+    return TrainState(
+        components=components,
+        ci_fn=ci_fn,
+        components_opt_state=opt_vu.init(eqx.filter(components, eqx.is_array)),
+        ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+        sources=sources,
+        sources_adam_state=init_sources_adam_state(sources),
+        step=jnp.zeros((), jnp.int32),
+    )

@@ -29,32 +29,24 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_latest, save_state
-from jax_single_pool.ci_fn import init_ci_fn
 from jax_single_pool.config import ExperimentConfig, load_config
 from jax_single_pool.data import BatchSchedule, ShardServer, scan_shards
 from jax_single_pool.llama8b import (
     LayerRange,
     Prefix,
     Target,
-    init_decomp_vu,
     llama31_8b_config,
     llama_decomposed_lm,
     load_prefix_from_hf,
     load_target_from_hf,
     prefix_residual,
 )
-from jax_single_pool.llama8b_sharding import (
-    replicate_target,
-    shard_ci_fn,
-    shard_decomp_vu,
-    shard_source,
-)
+from jax_single_pool.llama8b_sharding import replicate_target
 from jax_single_pool.lm import DecomposedLM
+from jax_single_pool.run_state import build_optimizers, init_train_state
 from jax_single_pool.sharding import dp_mesh, init_distributed
 from jax_single_pool.train import (
     TrainState,
-    init_sources,
-    init_sources_adam_state,
     make_faith_warmup_step,
     make_train_step,
     subset_chunk_plan,
@@ -69,19 +61,6 @@ def _install_sigterm_flag() -> None:
         _sigterm_received = True
 
     signal.signal(signal.SIGTERM, handler)
-
-
-def _build_optimizers(cfg: ExperimentConfig):
-    """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
-    log path reports the exact LR the optimizer applies (single source of truth)."""
-    sched_vu = optax.cosine_decay_schedule(cfg.vu_optimizer.lr, cfg.steps, alpha=0.1)
-    sched_ci = optax.cosine_decay_schedule(cfg.ci_optimizer.lr, cfg.steps, alpha=0.1)
-    opt_vu = optax.chain(
-        optax.clip_by_global_norm(cfg.vu_optimizer.grad_clip_norm),
-        optax.adamw(sched_vu, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0),
-    )
-    opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
-    return opt_vu, opt_ci, (sched_vu, sched_ci)
 
 
 def _ensure_global(tree: object, mesh: Mesh) -> object:
@@ -184,30 +163,12 @@ def train(
     assert cfg.data.global_batch % ndev == 0, (cfg.data.global_batch, ndev)
 
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci, (sched_vu, sched_ci) = _build_optimizers(cfg)
+    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(cfg)
 
     key = random.PRNGKey(cfg.seed)
     init_key, src_key, run_key = random.split(key, 3)
-    llama_cfg = llama31_8b_config()
-    rng = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
-    components = shard_decomp_vu(
-        init_decomp_vu(llama_cfg, cfg.target.C, rng.n_layers, init_key), mesh
-    )
-    ci_fn = shard_ci_fn(init_ci_fn(cfg.ci_fn, lm.sites, random.fold_in(init_key, 1)), mesh)
-    sources = shard_source(
-        init_sources(lm.site_names, tuple(s.C for s in lm.sites), cfg.data.seq_len, src_key),
-        mesh,
-    )
-    state = TrainState(
-        components=components,
-        ci_fn=ci_fn,
-        components_opt_state=opt_vu.init(eqx.filter(components, eqx.is_array)),
-        ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        sources=sources,
-        sources_adam_state=init_sources_adam_state(sources),
-        step=jnp.zeros((), jnp.int32),
-    )
-    state = _ensure_global(state, mesh)
+    state = _ensure_global(init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh), mesh)
+    assert isinstance(state, TrainState)
     assert isinstance(state, TrainState)
 
     checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
