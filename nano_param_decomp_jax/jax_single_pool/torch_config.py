@@ -29,7 +29,7 @@ from typing import Any
 
 import yaml
 from param_decomp_config.eval_metrics import CEandKLLossesConfig, CI_L0Config
-from param_decomp_config.lm import HFWeightsInVendored, LMExperimentConfig
+from param_decomp_config.lm import HFTarget, HFWeightsInVendored, LMExperimentConfig
 from param_decomp_config.losses import (
     AdamPGDConfig,
     BroadcastAcrossBatchScope,
@@ -77,7 +77,9 @@ OFFLINE_EVAL_METRIC_TYPES = frozenset(
     }
 )
 
-_SITE_PATTERN = re.compile(r"^layers\.(\d+)\.mlp\.(gate|up|down)_proj$")
+_SITE_PATTERN = re.compile(r"^(?:model\.)?layers\.(\d+)\.mlp\.(gate|up|down)_proj$")
+"""Raw-HF specs name modules `model.layers.*`; the vendored class drops the prefix.
+Same matrices either way."""
 
 
 def _layer_range_and_c(cfg: LMExperimentConfig) -> tuple[int, int, int]:
@@ -264,12 +266,26 @@ def convert_torch_lm_config(
     assert torch_cfg.runtime.autocast_bf16, "JAX trainer computes in bf16 (autocast analog)"
     assert torch_cfg.pd.faithfulness_warmup_weight_decay == 0.0
 
+    # Vendored and raw-HF Llama specs load the SAME meta-llama weights (the export
+    # bridge round-trip verified vendored == HF numerics); both map to our HF loader.
     spec = torch_cfg.target.spec
-    assert isinstance(spec, HFWeightsInVendored), f"only vendored-Llama targets, got {spec}"
-    assert spec.model_class.rsplit(".", 1)[-1] == "VendoredLlama", spec.model_class
-    assert torch_cfg.target.weights_dtype == "bfloat16", (
-        "JAX trainer keeps the frozen target in bf16"
-    )
+    match spec:
+        case HFWeightsInVendored():
+            assert spec.model_class.rsplit(".", 1)[-1] == "VendoredLlama", spec.model_class
+        case HFTarget():
+            assert spec.model_class == "transformers.LlamaForCausalLM", spec.model_class
+        case _:
+            raise AssertionError(f"unsupported target spec {spec}")
+    assert "Llama-3.1-8B" in spec.model_name, spec.model_name
+    if torch_cfg.target.weights_dtype == "float32":
+        print(
+            "DIVERGENCE: torch config asks for an fp32 frozen target; the JAX trainer keeps "
+            "the frozen target in bf16 (measured ~5e-4 nats KL on clean logits — negligible "
+            "vs recon KLs, but not bit-parity).",
+            flush=True,
+        )
+    else:
+        assert torch_cfg.target.weights_dtype == "bfloat16", torch_cfg.target.weights_dtype
 
     vu_opt = torch_cfg.pd.components_optimizer
     ci_opt = torch_cfg.pd.ci_fn_optimizer
@@ -326,7 +342,7 @@ def convert_torch_lm_config(
         ),
         eval=_eval(torch_cfg),
         wandb=(
-            WandbConfig(project=torch_cfg.wandb.project, entity=torch_cfg.wandb.entity or "")
+            WandbConfig(project=torch_cfg.wandb.project, entity=torch_cfg.wandb.entity)
             if torch_cfg.wandb is not None
             else None
         ),

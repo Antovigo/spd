@@ -95,7 +95,8 @@ class EvalConfig:
 @dataclass(frozen=True)
 class WandbConfig:
     project: str
-    entity: str
+    entity: str | None
+    """None = the API key's default entity (the torch schema's `entity: null`)."""
 
 
 @dataclass(frozen=True)
