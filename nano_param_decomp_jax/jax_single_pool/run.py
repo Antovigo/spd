@@ -57,6 +57,7 @@ from jax_single_pool.train import (
     init_src_adam,
     make_faith_warmup_step,
     make_train_step,
+    subset_chunk_plan,
 )
 
 _sigterm_received = False
@@ -236,8 +237,7 @@ def train(
         opt_vu=opt_vu,
         opt_ci=opt_ci,
         total_steps=cfg.steps,
-        sites_per_chunk=cfg.recon.sites_per_chunk,
-        n_samples=cfg.recon.n_samples,
+        recon_plan=subset_chunk_plan(lm.site_names, cfg.recon.sites_per_chunk, cfg.recon.n_samples),
         mesh=mesh,
     )
 

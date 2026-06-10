@@ -21,6 +21,7 @@ from jax_single_pool.train import (
     init_sources,
     init_src_adam,
     make_train_step,
+    subset_chunk_plan,
 )
 
 
@@ -49,7 +50,7 @@ def _build(seed: int):
         imp_cfg=ImpMinConfig(0.2, 1e-12, 2.0, 0.4, 0.0, 1.0),
         src_cfg=SourceAdamConfig(0.01, 0.025, 0.5, 0.99, 1e-8, n_warmup=1),
         opt_vu=opt_vu, opt_ci=opt_ci,
-        total_steps=100, sites_per_chunk=3, n_samples=1, mesh=None,
+        total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1), mesh=None,
     )  # fmt: skip
     resid = jax.random.normal(jax.random.PRNGKey(9), (2, seq, cfg.n_embd)) * 0.5
     return tgt, state, step, resid

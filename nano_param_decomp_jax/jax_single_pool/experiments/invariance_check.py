@@ -37,6 +37,7 @@ from jax_single_pool.train import (
     init_sources,
     init_src_adam,
     make_train_step,
+    subset_chunk_plan,
 )
 
 
@@ -69,7 +70,7 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         imp_cfg=ImpMinConfig(0.2, 1e-12, 2.0, 0.4, 0.0, 1.0),
         src_cfg=SourceAdamConfig(0.01, 0.025, 0.5, 0.99, 1e-8, n_warmup=2),
         opt_vu=opt_vu, opt_ci=opt_ci,
-        total_steps=100, sites_per_chunk=3, n_samples=1, mesh=mesh,
+        total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1), mesh=mesh,
     )  # fmt: skip
 
     out = []

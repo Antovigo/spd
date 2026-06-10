@@ -33,6 +33,7 @@ from jax_single_pool.train import (
     init_src_adam,
     make_faith_warmup_step,
     make_train_step,
+    subset_chunk_plan,
 )
 
 
@@ -160,8 +161,7 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
         opt_vu=opt_vu,
         opt_ci=opt_ci,
         total_steps=100,
-        sites_per_chunk=3,
-        n_samples=1,
+        recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
         mesh=None,
     )
 

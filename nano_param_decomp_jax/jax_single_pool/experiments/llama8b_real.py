@@ -71,6 +71,7 @@ from jax_single_pool.train import (
     init_src_adam,
     make_faith_warmup_step,
     make_train_step,
+    subset_chunk_plan,
 )
 
 
@@ -242,8 +243,7 @@ def main():
         opt_vu=opt_vu,
         opt_ci=opt_ci,
         total_steps=args.total_steps,
-        sites_per_chunk=3,
-        n_samples=1,
+        recon_plan=subset_chunk_plan(lm.site_names, sites_per_chunk=3, n_samples=1),
         mesh=mesh if args.shard else None,
     )
 
