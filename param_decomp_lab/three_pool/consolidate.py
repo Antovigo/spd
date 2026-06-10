@@ -32,10 +32,10 @@ import torch.nn as nn
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import RunBatch
-from param_decomp.ci_fns import CiConfig
 from param_decomp.ci_sigmoids import SigmoidType
 from param_decomp.log import logger
 from param_decomp.training_state import ThreePoolTrainingState
+from param_decomp_config.ci_fn import CiConfig
 from param_decomp_lab.infra.run_files import save_file
 from param_decomp_lab.three_pool.checkpoint import assemble_model_state_dict_from_partials
 

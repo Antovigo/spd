@@ -19,8 +19,8 @@ from pydantic import BaseModel
 
 from param_decomp.component_model import ComponentModel
 from param_decomp.log import logger
-from param_decomp.masks import SamplingType
-from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
+from param_decomp_config.losses import ImportanceMinimalityLossConfig
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
 from param_decomp_lab.app.backend.compute import (
     DEFAULT_EVAL_PGD_CONFIG,

@@ -1,7 +1,7 @@
 import re
 from collections import defaultdict
 from fnmatch import fnmatch
-from typing import Literal, override
+from typing import override
 
 import torch
 import wandb.plot
@@ -9,10 +9,10 @@ from jaxtyping import Float
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import all_reduce
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import CI_L0Config
 
 
 def calc_ci_l_zero(ci: Float[Tensor, "... C"], threshold: float) -> float:
@@ -22,17 +22,6 @@ def calc_ci_l_zero(ci: Float[Tensor, "... C"], threshold: float) -> float:
 
 def _natural_sort_key(s: str) -> list[int | str]:
     return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", s)]
-
-
-class CI_L0Config(BaseConfig):
-    """`groups` maps `{group_name: [fnmatch-style layer pattern, ...]}`.
-
-    Matching layers' L0s are summed into the group and logged under the group's name.
-    """
-
-    type: Literal["CI_L0"] = "CI_L0"
-    groups: dict[str, list[str]] | None
-    ci_alive_threshold: float = 0.0
 
 
 class CI_L0(Metric[CI_L0Config]):

@@ -145,7 +145,7 @@ def test_topology_under_runtime_not_three_pool_field() -> None:
 def test_resume_provenance_field_defaults_none_and_roundtrips() -> None:
     """Fresh config has `resume_provenance is None`; a populated one survives a dump +
     reload (so it lands in experiment_config.yaml / wandb.config)."""
-    from param_decomp_lab.resumption import ResumeProvenance
+    from param_decomp_config.experiment import ResumeProvenance
 
     cfg = ThreePoolLMExperimentConfig.model_validate(_valid_dict())
     assert cfg.resume_provenance is None

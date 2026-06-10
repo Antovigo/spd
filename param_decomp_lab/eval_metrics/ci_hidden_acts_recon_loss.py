@@ -1,6 +1,5 @@
-from typing import Literal, override
+from typing import override
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.masks import make_mask_infos
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -9,10 +8,7 @@ from param_decomp.metrics.stochastic_hidden_acts_recon import (
     calc_hidden_acts_mse,
     compute_per_module_metrics,
 )
-
-
-class CIHiddenActsReconLossConfig(BaseConfig):
-    type: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
+from param_decomp_config.eval_metrics import CIHiddenActsReconLossConfig
 
 
 class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):

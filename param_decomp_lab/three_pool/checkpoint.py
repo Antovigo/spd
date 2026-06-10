@@ -19,9 +19,9 @@ import torch.nn as nn
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import RunBatch
-from param_decomp.ci_fns import CiConfig
 from param_decomp.ci_sigmoids import SigmoidType
 from param_decomp.decomposition_targets import DecompositionTarget
+from param_decomp_config.ci_fn import CiConfig
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 
 

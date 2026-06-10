@@ -4,12 +4,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from param_decomp.log import logger
+from param_decomp_config.autointerp import CanonConfig, RichExamplesConfig, StrategyConfig
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import (
-    CanonConfig,
-    RichExamplesConfig,
-    StrategyConfig,
-)
 from param_decomp_lab.autointerp.db import InterpDB
 from param_decomp_lab.autointerp.llm_api import (
     LLMError,

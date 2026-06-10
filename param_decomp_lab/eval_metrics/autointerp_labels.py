@@ -15,21 +15,19 @@ derivable from the bare `ComponentModel`.
 import asyncio
 import json
 import random
-from typing import Annotated, Literal, override
+from typing import override
 
 import torch
 import wandb
-from pydantic import Field
 from torch import Tensor
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModel, ComponentModelProtocol
 from param_decomp.distributed import all_reduce, is_main_process
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import AutointerpLabelsConfig
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import StrategyConfig
-from param_decomp_lab.autointerp.providers import LLMConfig, create_provider
+from param_decomp_lab.autointerp.providers import create_provider
 from param_decomp_lab.autointerp.schemas import ModelMetadata
 from param_decomp_lab.autointerp.strategies.dispatch import INTERPRETATION_SCHEMA, format_prompt
 from param_decomp_lab.component_model_io import get_all_component_acts
@@ -42,26 +40,6 @@ from param_decomp_lab.topology import TransformerTopology
 _MAX_EXAMPLES_PER_BATCH_PER_COMPONENT = 8
 _INPUT_TOKEN_TOP_K = 20
 _OUTPUT_TOKEN_TOP_K = 50
-
-
-class AutointerpLabelsConfig(BaseConfig):
-    type: Literal["AutointerpLabels"] = "AutointerpLabels"
-    k: int
-    """Number of components to sample uniformly over the concatenated component space."""
-    seed: int
-    activation_threshold: float
-    max_examples: int
-    """Reservoir capacity (activation examples kept per sampled component)."""
-    context_tokens_per_side: int
-    llm: LLMConfig
-    template_strategy: Annotated[StrategyConfig, Field(discriminator="type")]
-    # Run/data facts the prompt needs that a bare ComponentModel doesn't carry. They
-    # mirror `data.*` / are the eval data the metric renders — kept here so the metric
-    # is self-contained (plain config dispatch). `n_blocks` / `layer_descriptions` are
-    # derived from the model at `bind`.
-    dataset_name: str
-    seq_len: int
-    tokenizer_name: str
 
 
 class AutointerpLabels(Metric[AutointerpLabelsConfig]):

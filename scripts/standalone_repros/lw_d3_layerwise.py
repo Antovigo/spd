@@ -41,10 +41,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from param_decomp_lab.three_pool.loss_strategy import LayerwiseLossStrategy  # noqa: E402
 
-from param_decomp.ci_fns import LayerwiseCiConfig  # noqa: E402
 from param_decomp.component_model import ComponentModel  # noqa: E402
 from param_decomp.decomposition_targets import DecompositionTarget  # noqa: E402
 from param_decomp.masks import make_mask_infos  # noqa: E402
+from param_decomp_config.ci_fn import LayerwiseCiConfig  # noqa: E402
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (  # noqa: E402
     GPT2Simple,
     GPT2SimpleConfig,

@@ -162,9 +162,9 @@ async def request_component_interpretation(
 
     Returns the headline (label + confidence). Full detail available via GET endpoint.
     """
-    from param_decomp_lab.autointerp.config import CompactSkepticalConfig
+    from param_decomp_config.autointerp import CompactSkepticalConfig, OpenRouterLLMConfig
     from param_decomp_lab.autointerp.interpret import interpret_component
-    from param_decomp_lab.autointerp.providers import OpenRouterLLMConfig, create_provider
+    from param_decomp_lab.autointerp.providers import create_provider
 
     assert loaded.harvest is not None, "No harvest data available"
     assert loaded.interp is not None, "No autointerp data available"

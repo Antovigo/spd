@@ -25,7 +25,6 @@ from param_decomp.component_model import (
     ComponentModelProtocol,
     component_grad_norms,
 )
-from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
     resolve_decomposition_targets,
@@ -56,6 +55,7 @@ from param_decomp.train_step import (
     scheduled_lrs,
 )
 from param_decomp.training_state import TrainingState
+from param_decomp_config.pd import Cadence, PDConfig, RuntimeConfig
 
 __all__ = [
     "EvalLoop",

@@ -1,21 +1,10 @@
-from typing import ClassVar, Literal, override
+from typing import ClassVar, override
 
-from param_decomp.base_config import BaseConfig
-from param_decomp.masks import SamplingType
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import UVPlotsConfig
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.eval_metrics.plotting import plot_causal_importance_vals, plot_UV_matrices
-
-
-class UVPlotsConfig(BaseConfig):
-    """fnmatch patterns for layers permuted to align with the corresponding target solution.
-
-    `identity_patterns` and `dense_patterns` are matched separately against the model.
-    """
-
-    type: Literal["UVPlots"] = "UVPlots"
-    identity_patterns: list[str] | None
-    dense_patterns: list[str] | None
 
 
 class UVPlots(Metric[UVPlotsConfig]):

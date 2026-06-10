@@ -20,9 +20,9 @@ from pathlib import Path
 import fire
 import wandb_workspaces.workspaces as ws
 
-from param_decomp.decomposition_targets import DecompositionTargetConfig
 from param_decomp.log import logger
-from param_decomp_lab.experiments.lm.run import LMExperimentConfig
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
+from param_decomp_config.lm import LMExperimentConfig
 from param_decomp_lab.infra.ddp_launch import build_ddp_launch
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.run_files import generate_run_id

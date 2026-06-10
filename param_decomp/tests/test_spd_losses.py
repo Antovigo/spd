@@ -6,10 +6,9 @@ from jaxtyping import Float
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
-from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
-from param_decomp.masks import AllLayersRouter, UniformKSubsetRoutingConfig
+from param_decomp.masks import AllLayersRouter
 from param_decomp.metrics.ci_masked_recon import ci_masked_recon_loss
 from param_decomp.metrics.ci_masked_recon_layerwise import (
     ci_masked_recon_layerwise_loss,
@@ -17,23 +16,24 @@ from param_decomp.metrics.ci_masked_recon_layerwise import (
 from param_decomp.metrics.ci_masked_recon_subset import ci_masked_recon_subset_loss
 from param_decomp.metrics.faithfulness import faithfulness_loss
 from param_decomp.metrics.importance_minimality import importance_minimality_loss
-from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
-from param_decomp.metrics.persistent_pgd_state import (
-    AdamPGDConfig,
-    BroadcastAcrossBatchScope,
-    PerBatchPerPositionScope,
-    PersistentPGDState,
-    RepeatAcrossBatchScope,
-    SignPGDConfig,
-    SingleSourceScope,
-    scope_needs_replica_sync,
-)
+from param_decomp.metrics.persistent_pgd_state import PersistentPGDState, scope_needs_replica_sync
 from param_decomp.metrics.stochastic_recon import stochastic_recon_loss
 from param_decomp.metrics.stochastic_recon_layerwise import (
     stochastic_recon_layerwise_loss,
 )
 from param_decomp.metrics.stochastic_recon_subset import stochastic_recon_subset_loss
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.ci_fn import LayerwiseCiConfig
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    BroadcastAcrossBatchScope,
+    PerBatchPerPositionScope,
+    PersistentPGDReconLossConfig,
+    RepeatAcrossBatchScope,
+    SignPGDConfig,
+    SingleSourceScope,
+)
+from param_decomp_config.routing import UniformKSubsetRoutingConfig
+from param_decomp_config.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import (
     recon_loss_kl,
     recon_loss_mse,

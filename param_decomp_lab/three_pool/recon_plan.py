@@ -24,8 +24,9 @@ from typing import Annotated, Literal
 import torch
 from pydantic import Field
 
-from param_decomp.base_config import BaseConfig
-from param_decomp.masks import RoutingMasks, SubsetRoutingType, get_subset_router
+from param_decomp.masks import RoutingMasks, get_subset_router
+from param_decomp_config.base import BaseConfig
+from param_decomp_config.routing import SubsetRoutingType
 
 ForwardRouting = tuple[tuple[str, ...], RoutingMasks]
 """One recon forward: ``(sites, routing)``. ``sites`` are the chunk sites to swap in

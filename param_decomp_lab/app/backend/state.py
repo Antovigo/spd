@@ -14,13 +14,12 @@ from typing import Any
 from fastapi import HTTPException
 
 from param_decomp.component_model import ComponentModel
-from param_decomp.configs import PDConfig
+from param_decomp_config.lm import LMDataConfig, LMTargetConfig
+from param_decomp_config.pd import PDConfig
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
 from param_decomp_lab.app.backend.database import PromptAttrDB, Run
 from param_decomp_lab.autointerp.repo import InterpRepo
 from param_decomp_lab.dataset_attributions.repo import AttributionRepo
-from param_decomp_lab.experiments.lm.data import LMDataConfig
-from param_decomp_lab.experiments.lm.run import LMTargetConfig
 from param_decomp_lab.graph_interp.repo import GraphInterpRepo
 from param_decomp_lab.harvest.repo import HarvestRepo
 from param_decomp_lab.topology import TransformerTopology

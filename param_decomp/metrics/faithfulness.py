@@ -1,4 +1,4 @@
-from typing import Literal, override
+from typing import override
 
 import torch
 from jaxtyping import Float
@@ -6,12 +6,9 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.distributed import all_reduce
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-
-
-class FaithfulnessLossConfig(LossMetricConfig):
-    type: Literal["FaithfulnessLoss"] = "FaithfulnessLoss"
+from param_decomp_config.losses import FaithfulnessLossConfig
 
 
 def faithfulness_loss(

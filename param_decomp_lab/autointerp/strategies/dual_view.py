@@ -7,8 +7,8 @@ Key differences from compact_skeptical:
 - Task framing asks for functional description, not detection label
 """
 
+from param_decomp_config.autointerp import DualViewConfig
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import DualViewConfig
 from param_decomp_lab.autointerp.prompt_helpers import (
     build_annotated_examples,
     build_data_presentation,

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from param_decomp.base_config import BaseConfig
+from param_decomp_config.base import BaseConfig
 
 
 class Llama3RopeScaling(BaseConfig):

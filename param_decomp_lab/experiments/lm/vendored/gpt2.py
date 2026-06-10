@@ -36,9 +36,9 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from transformers.pytorch_utils import Conv1D as RadfordConv1D
 
-from param_decomp.base_config import runtime_cast
 from param_decomp.components import Components, EmbeddingComponents, LinearComponents
 from param_decomp.masks import ComponentsMaskInfo
+from param_decomp_config.base import runtime_cast
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (
     MLP,
     Block,

@@ -5,7 +5,7 @@ from typing import Literal, Self
 import numpy as np
 from pydantic import Field, NonNegativeFloat, PositiveFloat, model_validator
 
-from param_decomp.base_config import BaseConfig, Probability
+from param_decomp_config.base import BaseConfig, Probability
 
 
 class ScheduleConfig(BaseConfig):

@@ -11,9 +11,9 @@ Not part of the public API.
 from dataclasses import dataclass
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
-from param_decomp.ci_fns import CiConfig
 from param_decomp.ci_sigmoids import SigmoidType
-from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
+from param_decomp_config.ci_fn import CiConfig
+from param_decomp_config.losses import PersistentPGDReconLossConfig
 from param_decomp_lab.three_pool.layout import Chunk
 from param_decomp_lab.three_pool.recon_plan import ChunkReconPlan
 

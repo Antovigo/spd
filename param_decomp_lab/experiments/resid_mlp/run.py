@@ -11,23 +11,20 @@ import fire
 from pydantic import Field
 from torch.utils.data import DataLoader
 
-from param_decomp.base_config import BaseConfig, Probability
 from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import DistributedState
 from param_decomp.log import logger
 from param_decomp.optimize import EvalLoop, Trainer
+from param_decomp_config.base import BaseConfig, Probability
+from param_decomp_config.experiment import ExperimentConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_first_element
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.distributed import get_device
 from param_decomp_lab.eval_metrics import EVAL_METRIC_CLASSES
 from param_decomp_lab.experiments.resid_mlp.data import ResidMLPDataset
 from param_decomp_lab.experiments.resid_mlp.models import ResidMLP, ResidMLPTargetRunInfo
-from param_decomp_lab.experiments.utils import (
-    EXPERIMENT_CONFIG_FILENAME,
-    ExperimentConfig,
-    init_pd_run,
-)
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME, init_pd_run
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.run_files import resolve_run_files
 from param_decomp_lab.run_sink import OnePoolSink

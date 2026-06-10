@@ -1,13 +1,13 @@
 """Strategy dispatch: routes AutointerpConfig variants to their implementations."""
 
-from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import (
+from param_decomp_config.autointerp import (
     CanonConfig,
     CompactSkepticalConfig,
     DualViewConfig,
     RichExamplesConfig,
     StrategyConfig,
 )
+from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
 from param_decomp_lab.autointerp.schemas import ModelMetadata
 from param_decomp_lab.autointerp.strategies.canon import (
     format_prompt as canon_prompt,

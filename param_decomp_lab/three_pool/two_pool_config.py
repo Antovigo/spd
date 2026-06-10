@@ -30,7 +30,7 @@ from typing import Self
 
 from pydantic import model_validator
 
-from param_decomp.base_config import BaseConfig
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.three_pool.config import ChunkwiseSpec, PoolSpec
 
 

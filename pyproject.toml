@@ -7,6 +7,7 @@ urls = { "Homepage" = "https://github.com/goodfire-ai/param-decomp" }
 license = { text = "MIT" }
 readme = "README.md"
 dependencies = [
+    "param-decomp-config==0.0.1",
     "torch>=2.11,<2.12",
     "pydantic<2.12", # https://github.com/goodfire-ai/param-decomp/pull/232 , https://github.com/goodfire-ai/param-decomp/issues/221
     "tqdm",
@@ -49,7 +50,7 @@ include = ["param_decomp", "param_decomp.*"]
 namespaces = false
 
 [tool.uv.workspace]
-members = ["param_decomp_lab"]
+members = ["param_decomp_config", "param_decomp_lab"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -58,6 +59,7 @@ explicit = true
 
 [tool.uv.sources]
 param-decomp = { workspace = true }
+param-decomp-config = { workspace = true }
 torch = { index = "pytorch-cu128" }
 
 [tool.ruff]
@@ -94,7 +96,7 @@ docstring-code-format = true
 known-third-party = ["wandb"]
 
 [tool.pyright]
-include = ["param_decomp", "param_decomp_lab", "nano_param_decomp"]
+include = ["param_decomp", "param_decomp_config", "param_decomp_lab", "nano_param_decomp"]
 exclude = ["**/wandb/**", "**/_scratch/**", "param_decomp_lab/_linear_sum_assignment.py", "param_decomp_lab/app/frontend"]
 stubPath = "typings" # Having type stubs for transformers shaves 10 seconds off basedpyright calls
 

@@ -1,20 +1,15 @@
-from typing import Literal, override
+from typing import override
 
 import torch
 from einops import reduce
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import all_reduce
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import ComponentActivationDensityConfig
 from param_decomp_lab.eval_metrics.plotting import plot_component_activation_density
-
-
-class ComponentActivationDensityConfig(BaseConfig):
-    type: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
-    ci_alive_threshold: float = 0.0
 
 
 class ComponentActivationDensity(Metric[ComponentActivationDensityConfig]):

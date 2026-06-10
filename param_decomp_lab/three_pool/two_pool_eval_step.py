@@ -16,7 +16,6 @@ import torch
 import torch.distributed as dist
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
-from param_decomp.configs import PDConfig, RuntimeConfig
 from param_decomp.distributed import sync_across_processes, use_reduction_group
 from param_decomp.log import logger
 from param_decomp.metrics.base import Metric
@@ -24,6 +23,7 @@ from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.run_sink import RunSink
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_config.pd import PDConfig, RuntimeConfig
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.eval_step import _slice_batch_dim0
 from param_decomp_lab.three_pool.two_pool_context import PoolAContext, TwoPoolContext

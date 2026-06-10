@@ -28,11 +28,11 @@ from typing import cast, override
 import torch
 import torch.nn as nn
 
-from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
-from param_decomp.masks import UniformKSubsetRoutingConfig
-from param_decomp.metrics.chunkwise_subset_recon import ChunkwiseSubsetReconLossConfig
+from param_decomp_config.ci_fn import LayerwiseCiConfig
+from param_decomp_config.losses import ChunkwiseSubsetReconLossConfig
+from param_decomp_config.routing import UniformKSubsetRoutingConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.metrics.chunkwise_subset_recon import (
@@ -209,7 +209,7 @@ def test_use_fused_kl_selects_fused_strategy() -> None:
 
 def test_metric_config_in_loss_union() -> None:
     """The config validates as a `pd.loss_metrics` entry (joins `AnyLossMetricConfig`)."""
-    from param_decomp.configs import PDConfig
+    from param_decomp_config.pd import PDConfig
 
     cfg = ChunkwiseSubsetReconLossConfig(
         coeff=0.5, sites_per_chunk=3, routing=UniformKSubsetRoutingConfig(), n_samples=1

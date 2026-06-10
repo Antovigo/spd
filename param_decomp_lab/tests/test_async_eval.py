@@ -12,33 +12,24 @@ from unittest.mock import patch
 import pytest
 from transformers import GPT2LMHeadModel
 
-from param_decomp.ci_fns import LayerwiseCiConfig
-from param_decomp.configs import Cadence, OptimizerConfig, PDConfig, RuntimeConfig
-from param_decomp.decomposition_targets import DecompositionTargetConfig
-from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
 from param_decomp.optimize import Trainer
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.ci_fn import LayerwiseCiConfig
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
+from param_decomp_config.eval_metrics import CI_L0Config
+from param_decomp_config.experiment import EvalConfig, WandbConfig
+from param_decomp_config.lm import HFTarget, LMDataConfig, LMExperimentConfig, LMTargetConfig
+from param_decomp_config.losses import FaithfulnessLossConfig
+from param_decomp_config.pd import Cadence, OptimizerConfig, PDConfig, RuntimeConfig
+from param_decomp_config.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import make_run_batch, recon_loss_kl
-from param_decomp_lab.eval_metrics.ci_l0 import CI_L0Config
 from param_decomp_lab.experiments.lm.async_eval import (
     _step_from_checkpoint_name,
 )
 from param_decomp_lab.experiments.lm.async_eval import (
     main as async_eval_main,
 )
-from param_decomp_lab.experiments.lm.data import (
-    LMDataConfig,
-    collate_fn_for,
-    create_lm_data_loader,
-)
-from param_decomp_lab.experiments.lm.run import (
-    HFTarget,
-    LMExperimentConfig,
-    LMTargetConfig,
-    SavedLMRun,
-    _resolve_train_run_id,
-)
-from param_decomp_lab.experiments.utils import EvalConfig, WandbConfig
+from param_decomp_lab.experiments.lm.data import collate_fn_for, create_lm_data_loader
+from param_decomp_lab.experiments.lm.run import SavedLMRun, _resolve_train_run_id
 from param_decomp_lab.run_sink import OnePoolSink
 
 _MODEL_NAME = "SimpleStories/test-SimpleStories-gpt2-1.25M"

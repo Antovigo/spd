@@ -20,17 +20,13 @@ import torch
 from jaxtyping import Float, Int
 from torch import Tensor, nn
 
-from param_decomp.ci_fns import (
-    CiConfig,
-    GlobalCiFnWrapper,
-    LayerwiseCiFnWrapper,
-    make_ci_fn_wrapper,
-)
+from param_decomp.ci_fns import GlobalCiFnWrapper, LayerwiseCiFnWrapper, make_ci_fn_wrapper
 from param_decomp.ci_sigmoids import SIGMOID_TYPES, SigmoidType
 from param_decomp.component_model import CIOutputs
 from param_decomp.components import Components, make_components
 from param_decomp.decomposition_targets import DecompositionTarget
-from param_decomp.masks import SamplingType
+from param_decomp_config.ci_fn import CiConfig
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import GPT2Simple
 from param_decomp_lab.experiments.lm.vendored.gpt2 import (
     ComponentGPT2,

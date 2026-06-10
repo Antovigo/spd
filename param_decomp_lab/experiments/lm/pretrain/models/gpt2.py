@@ -10,7 +10,7 @@ from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.nn import functional as F
 from transformers import GPT2LMHeadModel
 
-from param_decomp.base_config import BaseConfig
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.distributed import log0
 
 # Suppress issues with transformers library types, nn.Module buffer access, and @torch.no_grad() decorator

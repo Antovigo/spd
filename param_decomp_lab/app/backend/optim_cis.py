@@ -10,24 +10,19 @@ from pydantic import BaseModel
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from param_decomp.base_config import Probability
 from param_decomp.component_model import CIOutputs, ComponentModel, OutputWithCache
 from param_decomp.masks import (
     AllLayersRouter,
-    SamplingType,
     calc_stochastic_component_mask_info,
     interpolate_component_mask,
     make_mask_infos,
 )
-from param_decomp.metrics.importance_minimality import (
-    ImportanceMinimalityLossConfig,
-    importance_minimality_loss,
-)
-from param_decomp.metrics.pgd_utils import (
-    PGDInitStrategy,
-    get_pgd_init_tensor,
-)
+from param_decomp.metrics.importance_minimality import importance_minimality_loss
+from param_decomp.metrics.pgd_utils import get_pgd_init_tensor
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_config.base import Probability
+from param_decomp_config.losses import ImportanceMinimalityLossConfig, PGDInitStrategy
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.eval_metrics.ci_l0 import calc_ci_l_zero
 
 MaskType = Literal["stochastic", "ci"]

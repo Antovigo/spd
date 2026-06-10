@@ -7,31 +7,20 @@ state + optimizer state machine live in `persistent_pgd_state`.
 """
 
 from collections.abc import Iterable
-from typing import Annotated, Any, ClassVar, Literal, override
+from typing import Any, ClassVar, override
 
 import torch
 import torch.distributed as dist
 from jaxtyping import Float
-from pydantic import Field, NonNegativeInt, PositiveInt
 from torch import Tensor
 
-from param_decomp.base_config import Probability
 from param_decomp.distributed import active_reduction_group, all_reduce, is_distributed
-from param_decomp.masks import (
-    AllLayersRouter,
-    Router,
-    SubsetRoutingType,
-    UniformKSubsetRoutingConfig,
-    get_subset_router,
-)
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.masks import AllLayersRouter, Router, get_subset_router
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.persistent_pgd_state import (
-    PersistentPGDSourceScope,
     PersistentPGDState,
-    PGDOptimizerConfig,
     PPGDSources,
-    RepeatAcrossBatchScope,
     get_ppgd_mask_infos,
     scope_needs_replica_sync,
 )
@@ -39,39 +28,12 @@ from param_decomp.metrics.stochastic_hidden_acts_recon import (
     calc_hidden_acts_mse,
     compute_per_module_metrics,
 )
-
-
-class _PersistentPGDBaseConfig(LossMetricConfig):
-    """Shared fields for persistent PGD configs.
-
-    `update()` returns `None` before `start_frac` of training. Under
-    `use_sigmoid_parameterization=True` sources are unconstrained and read via sigmoid;
-    otherwise sources are clamped to `[0, 1]` after each step.
-    """
-
-    optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
-    scope: PersistentPGDSourceScope
-    use_sigmoid_parameterization: bool = False
-    n_warmup_steps: NonNegativeInt = Field(
-        default=0,
-        description=(
-            "Extra inner PGD source-optimization steps on each train batch before the final loss"
-            " computation."
-        ),
-    )
-    start_frac: Probability = 0.0
-    n_samples: PositiveInt = 1
-
-
-class PersistentPGDReconLossConfig(_PersistentPGDBaseConfig):
-    type: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
-
-
-class PersistentPGDReconSubsetLossConfig(_PersistentPGDBaseConfig):
-    type: Literal["PersistentPGDReconSubsetLoss"] = "PersistentPGDReconSubsetLoss"
-    routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
-    ]
+from param_decomp_config.losses import (
+    LossMetricConfig,
+    PersistentPGDReconLossConfig,
+    PersistentPGDReconSubsetLossConfig,
+    RepeatAcrossBatchScope,
+)
 
 
 def _router_for_cfg(

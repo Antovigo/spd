@@ -11,7 +11,7 @@ from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import CIOutputs, ComponentModelProtocol
-from param_decomp.masks import SamplingType
+from param_decomp_config.routing import SamplingType
 
 
 @dataclass(frozen=True)

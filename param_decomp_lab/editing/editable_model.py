@@ -423,9 +423,7 @@ class EditableModel:
         Returns:
             List of (component_key, frequency) sorted by frequency descending.
         """
-        from param_decomp.metrics.importance_minimality import (
-            ImportanceMinimalityLossConfig,
-        )
+        from param_decomp_config.losses import ImportanceMinimalityLossConfig
         from param_decomp_lab.app.backend.optim_cis import (
             CELossConfig,
             OptimCIConfig,
@@ -510,9 +508,7 @@ class EditableModel:
         (the logits at position target_position predict this token, so internally
         we optimize for loss at position target_position).
         """
-        from param_decomp.metrics.importance_minimality import (
-            ImportanceMinimalityLossConfig,
-        )
+        from param_decomp_config.losses import ImportanceMinimalityLossConfig
         from param_decomp_lab.app.backend.compute import compute_prompt_attributions_optimized
         from param_decomp_lab.app.backend.optim_cis import CELossConfig, OptimCIConfig
         from param_decomp_lab.topology.gradient_connectivity import get_sources_by_target

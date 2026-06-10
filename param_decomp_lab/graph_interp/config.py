@@ -1,7 +1,7 @@
 """Graph interpretation configuration."""
 
-from param_decomp.base_config import BaseConfig
-from param_decomp_lab.autointerp.providers import LLMConfig, OpenRouterLLMConfig
+from param_decomp_config.autointerp import LLMConfig, OpenRouterLLMConfig
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.dataset_attributions.storage import AttrMetric
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 

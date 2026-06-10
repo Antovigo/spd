@@ -17,8 +17,9 @@ from torch import Tensor, nn
 
 from param_decomp.component_model import ComponentModel, OutputWithCache
 from param_decomp.log import logger
-from param_decomp.masks import SamplingType, interpolate_component_mask, make_mask_infos
+from param_decomp.masks import interpolate_component_mask, make_mask_infos
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
 from param_decomp_lab.app.backend.optim_cis import (
     AdvPGDConfig,

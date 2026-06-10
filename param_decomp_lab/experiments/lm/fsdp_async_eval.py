@@ -32,6 +32,7 @@ import torch
 from param_decomp.decomposition_targets import resolve_decomposition_targets
 from param_decomp.distributed import is_main_process
 from param_decomp.log import logger
+from param_decomp_config.experiment import EvalConfig
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.distributed import (
     get_device,
@@ -53,7 +54,7 @@ from param_decomp_lab.experiments.lm.run import (
     make_run_batch,
 )
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
-from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME, EvalConfig
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME
 from param_decomp_lab.fsdp.consolidate import consolidate
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.seed import set_seed

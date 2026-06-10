@@ -6,7 +6,7 @@ and intruder eval. Set any section to null to skip that pipeline stage.
 
 from typing import Any, override
 
-from param_decomp.base_config import BaseConfig
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.autointerp.config import AutointerpSlurmConfig
 from param_decomp_lab.dataset_attributions.config import AttributionsSlurmConfig
 from param_decomp_lab.graph_interp.config import GraphInterpSlurmConfig

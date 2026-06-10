@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from param_decomp.log import logger
-from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
+from param_decomp_config.losses import ImportanceMinimalityLossConfig
 from param_decomp_lab.app.backend.compute import (
     compute_ci_only,
     compute_prompt_attributions_optimized,

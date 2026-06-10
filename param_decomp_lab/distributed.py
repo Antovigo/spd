@@ -12,7 +12,6 @@ from functools import wraps
 import torch
 import torch.distributed as dist
 
-from param_decomp.base_config import runtime_cast
 from param_decomp.distributed import (
     _SHOULD_GET_INITIALIZED,
     DistributedState,
@@ -21,6 +20,7 @@ from param_decomp.distributed import (
     sync_across_processes,
 )
 from param_decomp.log import logger
+from param_decomp_config.base import runtime_cast
 
 
 def init_distributed() -> DistributedState | None:

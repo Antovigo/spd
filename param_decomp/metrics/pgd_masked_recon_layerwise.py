@@ -1,4 +1,4 @@
-from typing import Literal, override
+from typing import override
 
 import torch
 from torch import Tensor
@@ -8,11 +8,8 @@ from param_decomp.distributed import all_reduce
 from param_decomp.masks import LayerRouter
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-from param_decomp.metrics.pgd_utils import PGDConfig, pgd_masked_recon_loss_update
-
-
-class PGDReconLayerwiseLossConfig(PGDConfig):
-    type: Literal["PGDReconLayerwiseLoss"] = "PGDReconLayerwiseLoss"
+from param_decomp.metrics.pgd_utils import pgd_masked_recon_loss_update
+from param_decomp_config.losses import PGDReconLayerwiseLossConfig
 
 
 class PGDReconLayerwiseLoss(Metric[PGDReconLayerwiseLossConfig]):

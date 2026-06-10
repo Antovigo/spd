@@ -33,26 +33,23 @@ from typing import Any, cast, override
 import torch
 import torch.nn as nn
 
-from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
 from param_decomp.masks import AllLayersRouter
 from param_decomp.metrics.context import MetricContext
-from param_decomp.metrics.faithfulness import FaithfulnessLoss, FaithfulnessLossConfig
-from param_decomp.metrics.importance_minimality import (
-    ImportanceMinimalityLoss,
+from param_decomp.metrics.faithfulness import FaithfulnessLoss
+from param_decomp.metrics.importance_minimality import ImportanceMinimalityLoss
+from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLoss
+from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
+from param_decomp_config.ci_fn import LayerwiseCiConfig
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
-)
-from param_decomp.metrics.persistent_pgd_recon import (
-    PersistentPGDReconLoss,
+    PerBatchPerPositionScope,
     PersistentPGDReconLossConfig,
 )
-from param_decomp.metrics.persistent_pgd_state import (
-    AdamPGDConfig,
-    PerBatchPerPositionScope,
-    PersistentPGDState,
-)
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.layout import Chunk

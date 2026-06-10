@@ -1,19 +1,11 @@
-from typing import ClassVar, Literal, override
+from typing import ClassVar, override
 
-from param_decomp.base_config import BaseConfig
-from param_decomp.masks import SamplingType
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import IdentityCIErrorConfig
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.eval_metrics.plotting import get_single_feature_causal_importances
 from param_decomp_lab.toy_models.target_ci import compute_target_metrics, make_target_ci_solution
-
-
-class IdentityCIErrorConfig(BaseConfig):
-    """`identity_ci` / `dense_ci` list layers expected to produce Identity / Dense patterns."""
-
-    type: Literal["IdentityCIError"] = "IdentityCIError"
-    identity_ci: list[dict[str, str | int]] | None
-    dense_ci: list[dict[str, str | int]] | None
 
 
 class IdentityCIError(Metric[IdentityCIErrorConfig]):

@@ -17,29 +17,29 @@ from pydantic import (
     model_validator,
 )
 
-from param_decomp.base_config import BaseConfig, Probability
-from param_decomp.ci_fns import CiConfig
-from param_decomp.decomposition_targets import DecompositionTargetConfig
-from param_decomp.masks import SamplingType
-from param_decomp.metrics.chunkwise_subset_recon import ChunkwiseSubsetReconLossConfig
-from param_decomp.metrics.ci_masked_recon import CIMaskedReconLossConfig
-from param_decomp.metrics.ci_masked_recon_layerwise import CIMaskedReconLayerwiseLossConfig
-from param_decomp.metrics.ci_masked_recon_subset import CIMaskedReconSubsetLossConfig
-from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
-from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
-from param_decomp.metrics.persistent_pgd_recon import (
+from param_decomp_config.base import BaseConfig, Probability
+from param_decomp_config.ci_fn import CiConfig
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
+from param_decomp_config.losses import (
+    ChunkwiseSubsetReconLossConfig,
+    CIMaskedReconLayerwiseLossConfig,
+    CIMaskedReconLossConfig,
+    CIMaskedReconSubsetLossConfig,
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
+    PGDReconLayerwiseLossConfig,
+    PGDReconLossConfig,
+    PGDReconSubsetLossConfig,
+    StochasticHiddenActsReconLossConfig,
+    StochasticReconLayerwiseLossConfig,
+    StochasticReconLossConfig,
+    StochasticReconSubsetLossConfig,
+    UnmaskedReconLossConfig,
 )
-from param_decomp.metrics.pgd_masked_recon import PGDReconLossConfig
-from param_decomp.metrics.pgd_masked_recon_layerwise import PGDReconLayerwiseLossConfig
-from param_decomp.metrics.pgd_masked_recon_subset import PGDReconSubsetLossConfig
-from param_decomp.metrics.stochastic_hidden_acts_recon import StochasticHiddenActsReconLossConfig
-from param_decomp.metrics.stochastic_recon import StochasticReconLossConfig
-from param_decomp.metrics.stochastic_recon_layerwise import StochasticReconLayerwiseLossConfig
-from param_decomp.metrics.stochastic_recon_subset import StochasticReconSubsetLossConfig
-from param_decomp.metrics.unmasked_recon import UnmaskedReconLossConfig
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.routing import SamplingType
+from param_decomp_config.schedule import ScheduleConfig
 
 
 class OptimizerConfig(BaseConfig):

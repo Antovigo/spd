@@ -20,18 +20,17 @@ import torch
 
 from param_decomp.optimize import _build_metric_context
 from param_decomp.torch_helpers import bf16_autocast, loop_dataloader
-from param_decomp_lab.adapters.pd import PDAdapter
-from param_decomp_lab.autointerp.config import CompactSkepticalConfig, DualViewConfig
-from param_decomp_lab.autointerp.providers import (
+from param_decomp_config.autointerp import (
     AnthropicHaiku45LLMConfig,
+    CompactSkepticalConfig,
+    DualViewConfig,
     GoogleAILLMConfig,
     OpenRouterLLMConfig,
 )
+from param_decomp_config.eval_metrics import AutointerpLabelsConfig
+from param_decomp_lab.adapters.pd import PDAdapter
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
-from param_decomp_lab.eval_metrics.autointerp_labels import (
-    AutointerpLabels,
-    AutointerpLabelsConfig,
-)
+from param_decomp_lab.eval_metrics.autointerp_labels import AutointerpLabels
 
 _PROVIDERS = {
     "openrouter": OpenRouterLLMConfig(reasoning_effort="none"),

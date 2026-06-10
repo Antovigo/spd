@@ -22,8 +22,9 @@ from jaxtyping import Bool, Int
 from torch import Tensor, nn
 
 from param_decomp.component_model import ComponentModel, OutputWithCache
-from param_decomp.masks import SamplingType, make_mask_infos
+from param_decomp.masks import make_mask_infos
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.dataset_attributions.storage import DatasetAttributionStorage
 from param_decomp_lab.topology import TransformerTopology
 

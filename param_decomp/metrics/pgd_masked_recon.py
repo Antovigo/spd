@@ -1,4 +1,4 @@
-from typing import Any, Literal, override
+from typing import Any, override
 
 import torch
 from jaxtyping import Float
@@ -11,11 +11,8 @@ from param_decomp.distributed import all_reduce
 from param_decomp.masks import AllLayersRouter
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-from param_decomp.metrics.pgd_utils import PGDConfig, pgd_masked_recon_loss_update
-
-
-class PGDReconLossConfig(PGDConfig):
-    type: Literal["PGDReconLoss"] = "PGDReconLoss"
+from param_decomp.metrics.pgd_utils import pgd_masked_recon_loss_update
+from param_decomp_config.losses import PGDConfig, PGDReconLossConfig
 
 
 def pgd_recon_loss(

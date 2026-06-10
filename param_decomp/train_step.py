@@ -27,12 +27,13 @@ from torch.utils.data import DataLoader
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
 from param_decomp.component_model import ComponentModelProtocol, OutputWithCache
-from param_decomp.configs import PDConfig
-from param_decomp.metrics.base import LossMetricConfig, Metric
+from param_decomp.metrics.base import Metric
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.output import collect_metric_outputs
-from param_decomp.schedule import get_scheduled_value
 from param_decomp.torch_helpers import bf16_autocast
+from param_decomp_config.losses import LossMetricConfig
+from param_decomp_config.pd import PDConfig
+from param_decomp_config.schedule import get_scheduled_value
 
 __all__ = [
     "EvalLoop",

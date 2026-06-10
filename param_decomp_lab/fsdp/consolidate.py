@@ -48,10 +48,10 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torch.optim import AdamW, Optimizer
 
-from param_decomp.configs import PDConfig
 from param_decomp.log import logger
 from param_decomp.optimize import optimizer_state_by_name
 from param_decomp.training_state import TrainingState
+from param_decomp_config.pd import PDConfig
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.fsdp.checkpoint import DCP_DIRNAME
 from param_decomp_lab.infra.run_files import save_file

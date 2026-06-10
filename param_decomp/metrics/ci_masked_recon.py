@@ -1,4 +1,4 @@
-from typing import Any, Literal, override
+from typing import Any, override
 
 import torch
 from jaxtyping import Float
@@ -9,12 +9,9 @@ from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import make_mask_infos
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-
-
-class CIMaskedReconLossConfig(LossMetricConfig):
-    type: Literal["CIMaskedReconLoss"] = "CIMaskedReconLoss"
+from param_decomp_config.losses import CIMaskedReconLossConfig
 
 
 def _ci_masked_recon_loss_update(

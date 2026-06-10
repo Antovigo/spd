@@ -4,8 +4,8 @@ Drops token statistics entirely. Shows per-token CI and activation values inline
 in the examples so the LLM can judge evidence quality directly.
 """
 
+from param_decomp_config.autointerp import RichExamplesConfig
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import RichExamplesConfig
 from param_decomp_lab.autointerp.prompt_helpers import (
     build_annotated_examples,
     dataset_description,

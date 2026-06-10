@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
 
 from param_decomp.log import logger
-from param_decomp.schedule import ScheduleConfig, get_scheduled_value
+from param_decomp_config.schedule import ScheduleConfig, get_scheduled_value
 from param_decomp_lab.distributed import get_device
 from param_decomp_lab.experiments.tms.data import SparseFeatureDataset
 from param_decomp_lab.experiments.tms.models import TMSModel, TMSModelConfig, TMSTrainConfig

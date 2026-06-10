@@ -6,14 +6,14 @@ Pure functions for formatting component data into LLM prompt sections.
 import re
 from typing import Literal
 
-from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.app.backend.utils import delimit_tokens
-from param_decomp_lab.autointerp.config import (
+from param_decomp_config.autointerp import (
     ExampleRenderingConfig,
     LegacyDelimitedExamplesConfig,
     SingleLineExamplesConfig,
     XmlExamplesConfig,
 )
+from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
+from param_decomp_lab.app.backend.utils import delimit_tokens
 from param_decomp_lab.autointerp.schemas import (
     DECOMPOSITION_DESCRIPTIONS,
     DecompositionMethod,

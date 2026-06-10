@@ -13,17 +13,9 @@ from typing import Any, override
 
 import torch
 import torch.nn as nn
-from pydantic import Field, PositiveInt
 from transformers.pytorch_utils import Conv1D as RadfordConv1D
 
-from param_decomp.base_config import BaseConfig
-
-
-class DecompositionTargetConfig(BaseConfig):
-    module_pattern: str = Field(..., description="fnmatch-style pattern to match module names")
-    C: PositiveInt = Field(
-        ..., description="Number of components for modules matching this pattern"
-    )
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
 
 
 @dataclass(frozen=True)

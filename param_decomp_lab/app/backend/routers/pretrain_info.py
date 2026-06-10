@@ -12,9 +12,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from param_decomp.log import logger
+from param_decomp_config.lm import LMExperimentConfig, LMTargetConfig
 from param_decomp_lab.app.backend.dependencies import DepLoadedRun
 from param_decomp_lab.app.backend.utils import log_errors
-from param_decomp_lab.experiments.lm.run import LMExperimentConfig, LMTargetConfig
 from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME
 from param_decomp_lab.infra.run_files import resolve_config_path
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
@@ -170,7 +170,7 @@ def _get_dataset_short(pretrain_config: dict[str, Any] | None) -> str | None:
 
 def _get_pretrain_info(lm_target: LMTargetConfig) -> PretrainInfoResponse:
     """Extract pretrain info from an LM target config."""
-    from param_decomp_lab.experiments.lm.run import PretrainedTarget
+    from param_decomp_config.lm import PretrainedTarget
 
     spec = lm_target.spec
     model_class_name = spec.model_class

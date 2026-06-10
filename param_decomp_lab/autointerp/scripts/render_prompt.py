@@ -4,8 +4,8 @@ Usage:
     python -m param_decomp_lab.autointerp.scripts.render_prompt
 """
 
+from param_decomp_config.autointerp import RichExamplesConfig
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import RichExamplesConfig
 from param_decomp_lab.autointerp.schemas import ModelMetadata
 from param_decomp_lab.autointerp.strategies.rich_examples import format_prompt
 from param_decomp_lab.harvest.analysis import TokenPRLift

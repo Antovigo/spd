@@ -1,4 +1,4 @@
-"""`Metric` ABC and `LossMetricConfig` base class.
+"""`Metric` ABC (the `LossMetricConfig` base lives in `param_decomp_config.losses`).
 
 Lifecycle: `MyMetric(cfg)` -> `bind(model, device)` (calls `reset()`) -> per-step
 `update(ctx)` -> per-eval-pass `compute()`, with `reset()` between eval passes.
@@ -12,19 +12,8 @@ from typing import Any, ClassVar
 
 from torch import Tensor
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModelProtocol
-
-
-class LossMetricConfig(BaseConfig):
-    """Pydantic config for a metric that can also be used as a training loss.
-
-    `coeff` is required when this metric is listed under `loss_metrics` (asserted by
-    `PDConfig`'s field validator); ignored for eval-only instances.
-    """
-
-    coeff: float | None = None
-
+from param_decomp_config.base import BaseConfig
 
 MetricResult = Tensor | Mapping[str, Any]
 

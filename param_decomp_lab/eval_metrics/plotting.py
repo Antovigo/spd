@@ -11,8 +11,8 @@ from torch import Tensor
 
 from param_decomp.component_model import CIOutputs, ComponentModelProtocol
 from param_decomp.components import Components
-from param_decomp.masks import SamplingType
 from param_decomp.torch_helpers import get_obj_device
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.toy_models.target_ci import permute_to_dense, permute_to_identity
 
 

@@ -1,18 +1,14 @@
-from typing import Literal, override
+from typing import override
 
 import torch
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import all_reduce
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import CIMeanPerComponentConfig
 from param_decomp_lab.eval_metrics.plotting import plot_mean_component_cis_both_scales
-
-
-class CIMeanPerComponentConfig(BaseConfig):
-    type: Literal["CIMeanPerComponent"] = "CIMeanPerComponent"
 
 
 class CIMeanPerComponent(Metric[CIMeanPerComponentConfig]):

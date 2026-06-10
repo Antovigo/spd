@@ -7,20 +7,20 @@ from pydantic import ValidationError
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from param_decomp.base_config import BaseConfig
-from param_decomp.ci_fns import LayerwiseCiConfig
-from param_decomp.configs import (
+from param_decomp.metrics.base import Metric, MetricResult
+from param_decomp.optimize import EvalLoop, Trainer
+from param_decomp_config.base import BaseConfig
+from param_decomp_config.ci_fn import LayerwiseCiConfig
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
+from param_decomp_config.losses import FaithfulnessLossConfig
+from param_decomp_config.pd import (
     AnyLossMetricConfig,
     Cadence,
     OptimizerConfig,
     PDConfig,
     RuntimeConfig,
 )
-from param_decomp.decomposition_targets import DecompositionTargetConfig
-from param_decomp.metrics.base import Metric, MetricResult
-from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
-from param_decomp.optimize import EvalLoop, Trainer
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.schedule import ScheduleConfig
 
 
 class TinyLinear(nn.Module):

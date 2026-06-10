@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import PositiveInt
 
-from param_decomp.base_config import BaseConfig
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 
 

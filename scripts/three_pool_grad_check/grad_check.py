@@ -48,14 +48,11 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from param_decomp.configs import Cadence
 from param_decomp.optimize import Trainer
+from param_decomp_config.lm import LMExperimentConfig
+from param_decomp_config.pd import Cadence
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
-from param_decomp_lab.experiments.lm.run import (
-    LMExperimentConfig,
-    build_target,
-    make_run_batch,
-)
+from param_decomp_lab.experiments.lm.run import build_target, make_run_batch
 from param_decomp_lab.three_pool import ThreePoolConfig, ThreePoolTrainer
 
 BASE_YAML = Path(__file__).parent / "base.yaml"
@@ -212,11 +209,11 @@ def _single_step_and_dump(trainer: Trainer, loader: DataLoader, out: Path) -> No
     of ``Trainer.run`` step 0 to capture the grad at the exact comparison point."""
     from typing import cast
 
-    from param_decomp.metrics.base import LossMetricConfig
     from param_decomp.optimize import (
         _build_metric_context,  # pyright: ignore[reportPrivateImportUsage]
     )
     from param_decomp.torch_helpers import bf16_autocast
+    from param_decomp_config.losses import LossMetricConfig
 
     pd_config = trainer.pd_config
     runtime_config = trainer.runtime_config
@@ -327,11 +324,9 @@ def _run_one_threepool_step(trainer: ThreePoolTrainer, loader: DataLoader) -> No
     from param_decomp_lab.three_pool.step_layerwise import step_layerwise
 
     from param_decomp.masks import AllLayersRouter
-    from param_decomp.metrics.persistent_pgd_state import (
-        PerBatchPerPositionScope,
-        PersistentPGDState,
-    )
+    from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
     from param_decomp.torch_helpers import loop_dataloader
+    from param_decomp_config.losses import PerBatchPerPositionScope
     from param_decomp_lab.three_pool.context import CIContext, LWContext, PPGDContext
     from param_decomp_lab.three_pool.optimize import (
         _seq_dims_from_batch,  # pyright: ignore[reportPrivateUsage]

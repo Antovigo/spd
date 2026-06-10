@@ -11,11 +11,11 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from param_decomp.log import logger
+from param_decomp_config.lm import LMExperimentConfig
 from param_decomp_lab.app.backend.routers.pretrain_info import _get_pretrain_info
 from param_decomp_lab.app.backend.utils import log_errors
 from param_decomp_lab.autointerp.schemas import get_autointerp_dir
 from param_decomp_lab.dataset_attributions.repo import get_attributions_dir
-from param_decomp_lab.experiments.lm.run import LMExperimentConfig
 from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME
 from param_decomp_lab.graph_interp.schemas import get_graph_interp_dir
 from param_decomp_lab.harvest.schemas import get_harvest_dir

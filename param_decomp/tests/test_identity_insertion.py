@@ -7,11 +7,8 @@ import torch
 import torch.nn as nn
 from torch.testing import assert_close
 
-from param_decomp.decomposition_targets import (
-    DecompositionTargetConfig,
-    Identity,
-    insert_identity_operations_,
-)
+from param_decomp.decomposition_targets import Identity, insert_identity_operations_
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
 
 
 class SimpleModel(nn.Module):

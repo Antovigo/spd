@@ -10,9 +10,9 @@ in place of core's `instantiate_metrics`.
 from typing import Any
 
 from param_decomp.component_model import ComponentModelProtocol
-from param_decomp.configs import PDConfig
 from param_decomp.metrics.base import Metric
 from param_decomp.metrics.dispatch import LOSS_METRIC_CLASSES
+from param_decomp_config.pd import PDConfig
 from param_decomp_lab.metrics.chunkwise_subset_recon import ChunkwiseSubsetReconLoss
 
 LAB_LOSS_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {

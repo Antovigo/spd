@@ -24,10 +24,8 @@ import pytest
 import torch
 
 from param_decomp.distributed import get_distributed_state
-from param_decomp.metrics.importance_minimality import (
-    ImportanceMinimalityLoss,
-    ImportanceMinimalityLossConfig,
-)
+from param_decomp.metrics.importance_minimality import ImportanceMinimalityLoss
+from param_decomp_config.losses import ImportanceMinimalityLossConfig
 from param_decomp_lab.distributed import cleanup_distributed, init_distributed
 
 

@@ -1,5 +1,8 @@
 """LM PD experiment: YAML -> `Trainer` glue + `SavedLMRun` reload + resumption.
 
+The `LMExperimentConfig` schema (target spec, data config) lives in
+`param_decomp_config.lm`.
+
 Single-pool only — the 3-pool path is its own composition root
 (`experiments.lm.three_pool_run`, entry point `pd-lm-3pool`). This module keeps the
 pure, pool-agnostic builders (`build_target`, `build_lm_loader`, `make_run_batch`,
@@ -24,22 +27,29 @@ import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import fire
 import torch
 import torch.nn as nn
-from pydantic import Discriminator
 from torch.utils.data import DataLoader
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.component_model import ComponentModel
-from param_decomp.configs import PDConfig
 from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.optimize import EvalLoop, Trainer
 from param_decomp.training_state import TrainingState
+from param_decomp_config.experiment import EvalConfig, ResumeProvenance
+from param_decomp_config.lm import (
+    HFTarget,
+    HFWeightsInVendored,
+    LMDataConfig,
+    LMExperimentConfig,
+    LMTargetConfig,
+    PretrainedTarget,
+)
+from param_decomp_config.pd import PDConfig
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.component_model_io import load_component_model
@@ -51,30 +61,19 @@ from param_decomp_lab.distributed import (
 )
 from param_decomp_lab.eval_metrics import EVAL_METRIC_CLASSES
 from param_decomp_lab.experiments.lm.data import (
-    LMDataConfig,
     collate_fn_for,
     create_lm_data_loader,
     rank_batch_size,
 )
-from param_decomp_lab.experiments.utils import (
-    EXPERIMENT_CONFIG_FILENAME,
-    EvalConfig,
-    ExperimentConfig,
-    init_pd_run,
-)
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME, init_pd_run
 from param_decomp_lab.infra.ddp_launch import build_ddp_launch
 from param_decomp_lab.infra.git import create_git_snapshot
-from param_decomp_lab.infra.paths import ModelPath
+from param_decomp_lab.infra.paths import ModelPath, validate_path
 from param_decomp_lab.infra.run_files import generate_run_id, resolve_run_files
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME, REPO_ROOT
 from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
 from param_decomp_lab.infra.wandb import get_wandb_entity, parse_wandb_run_path
-from param_decomp_lab.resumption import (
-    ResumeConfig,
-    ResumeProvenance,
-    read_training_snapshot,
-    resolve_step,
-)
+from param_decomp_lab.resumption import ResumeConfig, read_training_snapshot, resolve_step
 from param_decomp_lab.run_sink import OnePoolSink
 from param_decomp_lab.seed import set_seed
 
@@ -84,72 +83,6 @@ def _resolve_class(fqn: str) -> type:
     module_path, _, class_name = fqn.rpartition(".")
     module = importlib.import_module(module_path)
     return getattr(module, class_name)
-
-
-class HFTarget(BaseConfig):
-    """Load a HuggingFace model via `<model_class>.from_pretrained(<model_name>)`."""
-
-    kind: Literal["hf"] = "hf"
-    model_class: str
-    model_name: str
-
-
-class PretrainedTarget(BaseConfig):
-    """Load an in-repo lab-pretrained model.
-
-    `run_path` accepts any form `PretrainRunInfo.from_path` does — compact W&B
-    (`entity/project/runId`), full W&B (`entity/project/runs/runId`), or a local
-    checkpoint path.
-    """
-
-    kind: Literal["pretrained"] = "pretrained"
-    model_class: str
-    run_path: ModelPath
-
-
-class HFWeightsInVendored(BaseConfig):
-    """Load HF pretrained weights into a vendored `param_decomp_lab.experiments.lm.pretrain.models.*`
-    architecture via `<class>.from_hf_pretrained(<hub_id>)`.
-
-    Useful when the decomposition target needs structural changes vs HF — e.g.
-    `GPT2Simple`'s separate q/k/v projections vs HF's fused `c_attn`.
-    """
-
-    kind: Literal["hf_weights_in_vendored"] = "hf_weights_in_vendored"
-    model_class: str  # must expose `from_hf_pretrained`
-    model_name: str  # HF hub id
-
-
-LMTargetSpec = Annotated[
-    HFTarget | PretrainedTarget | HFWeightsInVendored,
-    Discriminator("kind"),
-]
-
-
-class LMTargetConfig(BaseConfig):
-    """Config for the LM target model and how to extract the prediction tensor.
-
-    `output_extract` (passed to `make_run_batch`) pulls the prediction tensor out of the
-    model's forward output (default `"logits"`).
-    """
-
-    spec: LMTargetSpec
-    output_extract: int | str | None = "logits"
-    activation_checkpointing: bool = False
-    """If True and the target exposes `enable_activation_checkpointing()`, turn on
-    per-block gradient checkpointing on the frozen target forward. Trades ~33% extra
-    compute for ~10–15x less stored activation memory under 3-pool — the main lever for
-    raising `b_per_rank` on deep targets."""
-    weights_dtype: Literal["float32", "bfloat16"] = "float32"
-    """dtype for the FROZEN target weights. `bfloat16` halves the target's resident footprint
-    on every pool (the dominant resident term for an 8B target) — for natively-bf16 models the
-    matmuls already run bf16 under autocast, so this only changes residual/norm accumulation
-    precision (measured ~5e-4 nats KL on Llama-3.1-8B clean logits, negligible vs recon KLs).
-    Only the frozen target is cast; trained V/U components stay fp32 (their AdamW master)."""
-
-
-class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
-    pass
 
 
 def build_target(target_cfg: LMTargetConfig) -> nn.Module:
@@ -162,7 +95,9 @@ def build_target(target_cfg: LMTargetConfig) -> nn.Module:
         case PretrainedTarget():
             from param_decomp_lab.experiments.lm.pretrain.run_info import PretrainRunInfo
 
-            run_info = ensure_cached_and_call(PretrainRunInfo.from_path, spec.run_path)
+            run_info = ensure_cached_and_call(
+                PretrainRunInfo.from_path, validate_path(spec.run_path)
+            )
             # Older PretrainRunInfo objects predate model_type; default it from the model class.
             if "model_type" not in run_info.model_config_dict:
                 run_info.model_config_dict["model_type"] = spec.model_class.rsplit(".", 1)[-1]

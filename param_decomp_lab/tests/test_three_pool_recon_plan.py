@@ -18,10 +18,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
-from param_decomp.masks import (
+from param_decomp_config.ci_fn import LayerwiseCiConfig
+from param_decomp_config.routing import (
     AllRoutingConfig,
     StaticProbabilityRoutingConfig,
     UniformKSubsetRoutingConfig,

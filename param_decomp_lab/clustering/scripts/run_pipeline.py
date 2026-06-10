@@ -25,8 +25,8 @@ from typing import Any
 import wandb_workspaces.workspaces as ws
 from pydantic import Field, PositiveInt, field_validator, model_validator
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.log import logger
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.clustering.clustering_run_config import ClusteringRunConfig
 from param_decomp_lab.clustering.paths import (
     clustering_ensemble_dir,

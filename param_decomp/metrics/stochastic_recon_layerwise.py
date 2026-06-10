@@ -1,4 +1,4 @@
-from typing import Any, Literal, override
+from typing import Any, override
 
 import torch
 from jaxtyping import Float
@@ -8,14 +8,12 @@ from torch.distributed import ReduceOp
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
-from param_decomp.masks import AllLayersRouter, SamplingType, calc_stochastic_component_mask_info
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.masks import AllLayersRouter, calc_stochastic_component_mask_info
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.torch_helpers import get_obj_device
-
-
-class StochasticReconLayerwiseLossConfig(LossMetricConfig):
-    type: Literal["StochasticReconLayerwiseLoss"] = "StochasticReconLayerwiseLoss"
+from param_decomp_config.losses import StochasticReconLayerwiseLossConfig
+from param_decomp_config.routing import SamplingType
 
 
 def _stochastic_recon_layerwise_loss_update(

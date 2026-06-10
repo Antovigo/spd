@@ -43,26 +43,22 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 
-from param_decomp.ci_fns import (
-    AttnConfig,
-    GlobalCiConfig,
-    GlobalSharedTransformerCiConfig,
-    GlobalSharedTransformerCiFn,
-)
+from param_decomp.ci_fns import GlobalSharedTransformerCiFn
 from param_decomp.decomposition_targets import DecompositionTarget
 from param_decomp.masks import AllLayersRouter, make_mask_infos
 from param_decomp.metrics.importance_minimality import (
     finalize_imp_min,
     per_component_lp_sums,
 )
-from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
-from param_decomp.metrics.persistent_pgd_state import (
+from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
+from param_decomp_config.ci_fn import AttnConfig, GlobalCiConfig, GlobalSharedTransformerCiConfig
+from param_decomp_config.losses import (
     AdamPGDConfig,
     PerBatchPerPositionScope,
+    PersistentPGDReconLossConfig,
     PersistentPGDSourceScope,
-    PersistentPGDState,
 )
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
 from param_decomp_lab.distributed import cleanup_distributed, init_distributed
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (

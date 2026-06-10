@@ -40,6 +40,7 @@ from param_decomp.metrics.base import Metric
 from param_decomp.metrics.output import collect_metric_outputs
 from param_decomp.optimize import _build_metric_context
 from param_decomp.torch_helpers import bf16_autocast, loop_dataloader
+from param_decomp_config.experiment import EvalConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.distributed import (
@@ -56,7 +57,7 @@ from param_decomp_lab.experiments.lm.run import (
 )
 from param_decomp_lab.experiments.lm.three_pool_run import ThreePoolLMExperimentConfig
 from param_decomp_lab.experiments.lm.two_pool_run import TwoPoolLMExperimentConfig
-from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME, EvalConfig
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME
 from param_decomp_lab.infra.run_files import resolve_run_files
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.infra.wandb import get_wandb_entity, try_wandb

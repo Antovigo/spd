@@ -1,68 +1,32 @@
 """Lab eval metrics shipped for the in-repo experiments.
 
-YAML `eval.metrics` entries are validated against `AnyEvalMetricConfig` and dispatched
-to the matching `Metric` subclass via `EVAL_METRIC_CLASSES`. External users instantiate
+YAML `eval.metrics` entries are validated against `AnyEvalMetricConfig` (in
+`param_decomp_config.eval_metrics`) and dispatched to the matching `Metric` subclass
+via `EVAL_METRIC_CLASSES`. External users instantiate
 their own eval metrics directly and pass them in `EvalLoop(metrics=...)`.
 """
 
-from typing import Annotated, Any
+from typing import Any
 
-from pydantic import Discriminator
-
-from param_decomp.base_config import BaseConfig
 from param_decomp.metrics.base import Metric
 from param_decomp.metrics.dispatch import LOSS_METRIC_CLASSES
-from param_decomp.metrics.pgd_masked_recon import PGDReconLoss, PGDReconLossConfig
-from param_decomp.metrics.stochastic_hidden_acts_recon import (
-    StochasticHiddenActsReconLoss,
-    StochasticHiddenActsReconLossConfig,
-)
+from param_decomp.metrics.pgd_masked_recon import PGDReconLoss
+from param_decomp.metrics.stochastic_hidden_acts_recon import StochasticHiddenActsReconLoss
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.eval_metrics.attn_patterns_recon_loss import (
     CIMaskedAttnPatternsReconLoss,
-    CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLoss,
-    StochasticAttnPatternsReconLossConfig,
 )
-from param_decomp_lab.eval_metrics.autointerp_labels import (
-    AutointerpLabels,
-    AutointerpLabelsConfig,
-)
-from param_decomp_lab.eval_metrics.ce_and_kl_losses import CEandKLLosses, CEandKLLossesConfig
-from param_decomp_lab.eval_metrics.ci_hidden_acts_recon_loss import (
-    CIHiddenActsReconLoss,
-    CIHiddenActsReconLossConfig,
-)
-from param_decomp_lab.eval_metrics.ci_histograms import CIHistograms, CIHistogramsConfig
-from param_decomp_lab.eval_metrics.ci_l0 import CI_L0, CI_L0Config
-from param_decomp_lab.eval_metrics.ci_mean_per_component import (
-    CIMeanPerComponent,
-    CIMeanPerComponentConfig,
-)
-from param_decomp_lab.eval_metrics.component_activation_density import (
-    ComponentActivationDensity,
-    ComponentActivationDensityConfig,
-)
-from param_decomp_lab.eval_metrics.identity_ci_error import IdentityCIError, IdentityCIErrorConfig
-from param_decomp_lab.eval_metrics.permuted_ci_plots import PermutedCIPlots, PermutedCIPlotsConfig
-from param_decomp_lab.eval_metrics.uv_plots import UVPlots, UVPlotsConfig
-
-AnyEvalMetricConfig = Annotated[
-    AutointerpLabelsConfig
-    | CEandKLLossesConfig
-    | CIHiddenActsReconLossConfig
-    | CIHistogramsConfig
-    | CI_L0Config
-    | CIMaskedAttnPatternsReconLossConfig
-    | CIMeanPerComponentConfig
-    | ComponentActivationDensityConfig
-    | IdentityCIErrorConfig
-    | PermutedCIPlotsConfig
-    | PGDReconLossConfig
-    | StochasticAttnPatternsReconLossConfig
-    | StochasticHiddenActsReconLossConfig
-    | UVPlotsConfig,
-    Discriminator("type"),
-]
+from param_decomp_lab.eval_metrics.autointerp_labels import AutointerpLabels
+from param_decomp_lab.eval_metrics.ce_and_kl_losses import CEandKLLosses
+from param_decomp_lab.eval_metrics.ci_hidden_acts_recon_loss import CIHiddenActsReconLoss
+from param_decomp_lab.eval_metrics.ci_histograms import CIHistograms
+from param_decomp_lab.eval_metrics.ci_l0 import CI_L0
+from param_decomp_lab.eval_metrics.ci_mean_per_component import CIMeanPerComponent
+from param_decomp_lab.eval_metrics.component_activation_density import ComponentActivationDensity
+from param_decomp_lab.eval_metrics.identity_ci_error import IdentityCIError
+from param_decomp_lab.eval_metrics.permuted_ci_plots import PermutedCIPlots
+from param_decomp_lab.eval_metrics.uv_plots import UVPlots
 
 EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
     cls.__name__: cls

@@ -9,11 +9,9 @@ from torch import Tensor, nn
 from transformers.pytorch_utils import Conv1D as RadfordConv1D
 
 from param_decomp.ci_fns import (
-    GlobalCiConfig,
     GlobalCiFnWrapper,
     GlobalSharedMLPCiFn,
     GlobalSharedTransformerCiFn,
-    LayerwiseCiConfig,
     MLPCiFn,
     TargetLayerConfig,
     VectorMLPCiFn,
@@ -28,16 +26,17 @@ from param_decomp.components import (
     LinearComponents,
     make_components,
 )
-from param_decomp.configs import OptimizerConfig, PDConfig
 from param_decomp.decomposition_targets import (
     DecompositionTarget,
-    DecompositionTargetConfig,
     insert_identity_operations_,
     resolve_decomposition_targets,
 )
 from param_decomp.masks import ComponentsMaskInfo, make_mask_infos
-from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
-from param_decomp.schedule import ScheduleConfig
+from param_decomp_config.ci_fn import GlobalCiConfig, LayerwiseCiConfig
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
+from param_decomp_config.losses import ImportanceMinimalityLossConfig
+from param_decomp_config.pd import OptimizerConfig, PDConfig
+from param_decomp_config.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import run_batch_passthrough
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.infra.run_files import save_file

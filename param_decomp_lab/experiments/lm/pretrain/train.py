@@ -45,14 +45,12 @@ from pydantic import (
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import DistributedState
 from param_decomp.log import logger
+from param_decomp_config.base import BaseConfig
+from param_decomp_config.lm import LMDataConfig
 from param_decomp_lab.distributed import log0
-from param_decomp_lab.experiments.lm.data import (
-    LMDataConfig,
-    create_lm_data_loader,
-)
+from param_decomp_lab.experiments.lm.data import create_lm_data_loader
 from param_decomp_lab.experiments.lm.pretrain.models import MODEL_CLASSES, ModelConfig
 from param_decomp_lab.infra.run_files import ExecutionStamp
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR

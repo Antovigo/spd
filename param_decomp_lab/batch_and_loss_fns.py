@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor, nn
 
-from param_decomp.base_config import runtime_cast
 from param_decomp.batch_and_loss_fns import RunBatch
+from param_decomp_config.base import runtime_cast
 
 
 def run_batch_passthrough(model: nn.Module, batch: Any) -> Tensor:

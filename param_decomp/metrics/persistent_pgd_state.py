@@ -6,15 +6,13 @@ these primitives.
 """
 
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Literal, override
+from typing import Any, override
 
 import torch
 import torch.distributed as dist
 from jaxtyping import Float, Int
-from pydantic import Field, NonNegativeFloat, PositiveInt
 from torch import Tensor
 
-from param_decomp.base_config import BaseConfig, Probability
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.masks import (
@@ -25,68 +23,17 @@ from param_decomp.masks import (
     interpolate_component_mask,
     make_mask_infos,
 )
-from param_decomp.schedule import ScheduleConfig, get_scheduled_value
-
-
-class SignPGDConfig(BaseConfig):
-    """Sign-PGD optimizer config (adds `lr * sign(grad)` to sources)."""
-
-    type: Literal["sign"] = "sign"
-    lr_schedule: ScheduleConfig
-
-
-class AdamPGDConfig(BaseConfig):
-    """Adam-style PGD optimizer config."""
-
-    type: Literal["adam"] = "adam"
-    beta1: Probability = Field(default=0.9, description="Adam beta1 for masks")
-    beta2: Probability = Field(default=0.999, description="Adam beta2 for masks")
-    eps: NonNegativeFloat = Field(default=1e-8, description="Adam epsilon for masks")
-    lr_schedule: ScheduleConfig
-
-
-PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
-
-
-class SingleSourceScope(BaseConfig):
-    """PPGD source scope: one shared source vector across the whole batch."""
-
-    type: Literal["single_source"] = "single_source"
-
-
-class BroadcastAcrossBatchScope(BaseConfig):
-    """PPGD source scope: shared across batch elements but free along other batch dims."""
-
-    type: Literal["broadcast_across_batch"] = "broadcast_across_batch"
-
-
-class RepeatAcrossBatchScope(BaseConfig):
-    """PPGD source scope: `n_sources` source vectors tiled along the batch dim.
-
-    `n_sources` must divide the per-rank batch size.
-    """
-
-    type: Literal["repeat_across_batch"] = "repeat_across_batch"
-    n_sources: PositiveInt
-
-
-class PerBatchPerPositionScope(BaseConfig):
-    """PPGD source scope: an independent source per batch element and position.
-
-    Skips cross-rank synchronization of source state.
-    """
-
-    type: Literal["per_batch_per_position"] = "per_batch_per_position"
-
-
-PersistentPGDSourceScope = Annotated[
-    SingleSourceScope
-    | BroadcastAcrossBatchScope
-    | RepeatAcrossBatchScope
-    | PerBatchPerPositionScope,
-    Field(discriminator="type"),
-]
-
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    BroadcastAcrossBatchScope,
+    PerBatchPerPositionScope,
+    PersistentPGDSourceScope,
+    PGDOptimizerConfig,
+    RepeatAcrossBatchScope,
+    SignPGDConfig,
+    SingleSourceScope,
+)
+from param_decomp_config.schedule import get_scheduled_value
 
 PPGDSources = dict[str, Float[Tensor, " source_c"]]
 

@@ -11,35 +11,30 @@ from torch import Tensor
 from param_decomp.component_model import CIOutputs, ComponentModel
 from param_decomp.masks import make_mask_infos
 from param_decomp.metrics.ci_masked_recon import ci_masked_recon_loss
-from param_decomp.metrics.persistent_pgd_recon import (
-    PersistentPGDReconLoss,
-    PersistentPGDReconLossConfig,
-)
-from param_decomp.metrics.persistent_pgd_state import (
-    PPGDSources,
-    SignPGDConfig,
-    SingleSourceScope,
-    get_ppgd_mask_infos,
-)
+from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLoss
+from param_decomp.metrics.persistent_pgd_state import PPGDSources, get_ppgd_mask_infos
 from param_decomp.metrics.pgd_masked_recon import pgd_recon_loss
-from param_decomp.metrics.pgd_utils import PGDConfig
 from param_decomp.metrics.stochastic_hidden_acts_recon import (
     _sum_per_module_mse,
     calc_hidden_acts_mse,
 )
 from param_decomp.metrics.stochastic_recon import stochastic_recon_loss
-from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.metrics.fixtures import (
     OneLayerLinearModel,
     TwoLayerLinearModel,
     make_one_layer_component_model,
     make_two_layer_component_model,
 )
-from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
-from param_decomp_lab.eval_metrics.ci_hidden_acts_recon_loss import (
-    CIHiddenActsReconLoss,
-    CIHiddenActsReconLossConfig,
+from param_decomp_config.eval_metrics import CIHiddenActsReconLossConfig
+from param_decomp_config.losses import (
+    PersistentPGDReconLossConfig,
+    PGDConfig,
+    SignPGDConfig,
+    SingleSourceScope,
 )
+from param_decomp_config.schedule import ScheduleConfig
+from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
+from param_decomp_lab.eval_metrics.ci_hidden_acts_recon_loss import CIHiddenActsReconLoss
 
 ReconLossFn = Callable[[ComponentModel, Tensor, Tensor, dict[str, Tensor]], Tensor]
 

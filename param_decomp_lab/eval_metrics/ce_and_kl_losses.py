@@ -1,4 +1,4 @@
-from typing import ClassVar, Literal, override
+from typing import ClassVar, override
 
 import einops
 import torch
@@ -7,24 +7,13 @@ from jaxtyping import Float, Int
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import all_reduce
-from param_decomp.masks import (
-    AllLayersRouter,
-    SamplingType,
-    calc_stochastic_component_mask_info,
-    make_mask_infos,
-)
+from param_decomp.masks import AllLayersRouter, calc_stochastic_component_mask_info, make_mask_infos
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import CEandKLLossesConfig
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.batch_and_loss_fns import calc_kl_divergence_lm
-
-
-class CEandKLLossesConfig(BaseConfig):
-    """`rounding_threshold` binarises CI for the `*_rounded_masked` variant (`ci > threshold`)."""
-
-    type: Literal["CEandKLLosses"] = "CEandKLLosses"
-    rounding_threshold: float
 
 
 class CEandKLLosses(Metric[CEandKLLossesConfig]):

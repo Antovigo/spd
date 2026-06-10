@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "param-decomp",
+    "param-decomp-config",
     "param-decomp-lab",
 ]
 
@@ -1437,6 +1438,7 @@ dependencies = [
     { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "param-decomp-config" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -1466,6 +1468,7 @@ requires-dist = [
     { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "param-decomp-config", editable = "param_decomp_config" },
     { name = "pillow" },
     { name = "pydantic", specifier = "<2.12" },
     { name = "python-dotenv" },
@@ -1489,6 +1492,25 @@ dev = [
 ]
 
 [[package]]
+name = "param-decomp-config"
+version = "0.0.1"
+source = { editable = "param_decomp_config" }
+dependencies = [
+    { name = "annotated-types" },
+    { name = "numpy" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "annotated-types" },
+    { name = "numpy" },
+    { name = "pydantic", specifier = "<2.12" },
+    { name = "pyyaml" },
+]
+
+[[package]]
 name = "param-decomp-lab"
 version = "0.0.1"
 source = { editable = "param_decomp_lab" }
@@ -1502,6 +1524,7 @@ dependencies = [
     { name = "openrouter" },
     { name = "orjson" },
     { name = "param-decomp" },
+    { name = "param-decomp-config" },
     { name = "requests" },
     { name = "scipy" },
     { name = "streamlit" },
@@ -1524,6 +1547,7 @@ requires-dist = [
     { name = "openrouter", specifier = ">=0.1.1" },
     { name = "orjson" },
     { name = "param-decomp", editable = "." },
+    { name = "param-decomp-config", editable = "param_decomp_config" },
     { name = "requests" },
     { name = "scipy", specifier = ">=1.14.1" },
     { name = "streamlit" },

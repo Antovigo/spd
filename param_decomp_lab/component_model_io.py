@@ -15,20 +15,16 @@ from jaxtyping import Float, Int
 from torch import Tensor, nn
 
 from param_decomp.batch_and_loss_fns import RunBatch
-from param_decomp.ci_fns import (
-    CiConfig,
-    GlobalCiConfig,
-    LayerwiseCiConfig,
-)
 from param_decomp.component_model import CIOutputs, ComponentModel, OutputWithCache
 from param_decomp.components import Components
-from param_decomp.configs import PDConfig
 from param_decomp.decomposition_targets import (
-    DecompositionTargetConfig,
     insert_identity_operations_,
     resolve_decomposition_targets,
 )
-from param_decomp.masks import SamplingType
+from param_decomp_config.ci_fn import CiConfig, GlobalCiConfig, LayerwiseCiConfig
+from param_decomp_config.decomposition_target import DecompositionTargetConfig
+from param_decomp_config.pd import PDConfig
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 
 

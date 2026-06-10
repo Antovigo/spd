@@ -7,8 +7,8 @@
 import torch
 from torch import nn
 
-from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.decomposition_targets import DecompositionTarget
+from param_decomp_config.ci_fn import LayerwiseCiConfig
 from param_decomp_lab.experiments.lm.pretrain.models.gpt2_simple import (
     GPT2Simple,
     GPT2SimpleConfig,

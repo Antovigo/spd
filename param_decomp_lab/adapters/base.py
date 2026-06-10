@@ -44,7 +44,8 @@ def pretrain_dataloader(run_info: PretrainRunInfo, batch_size: int) -> DataLoade
     pretrain runs, build the dataloader directly with `create_lm_data_loader` and an
     appropriate collate_fn.
     """
-    from param_decomp_lab.experiments.lm.data import LMDataConfig, create_lm_data_loader
+    from param_decomp_config.lm import LMDataConfig
+    from param_decomp_lab.experiments.lm.data import create_lm_data_loader
 
     data_cfg = LMDataConfig.model_validate(
         {

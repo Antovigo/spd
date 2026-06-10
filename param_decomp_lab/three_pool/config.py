@@ -38,8 +38,8 @@ from typing import Self
 
 from pydantic import PositiveInt, model_validator
 
-from param_decomp.base_config import BaseConfig
-from param_decomp.configs import RuntimeConfig
+from param_decomp_config.base import BaseConfig
+from param_decomp_config.pd import RuntimeConfig
 
 
 class PooledRuntimeConfig(RuntimeConfig):

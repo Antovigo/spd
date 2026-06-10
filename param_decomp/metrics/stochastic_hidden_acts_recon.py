@@ -1,4 +1,4 @@
-from typing import Literal, override
+from typing import override
 
 import torch
 import torch.nn.functional as F
@@ -11,17 +11,14 @@ from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     AllLayersRouter,
     ComponentsMaskInfo,
-    SamplingType,
     calc_stochastic_component_mask_info,
 )
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.losses import StochasticHiddenActsReconLossConfig
+from param_decomp_config.routing import SamplingType
 
 PerModuleMSE = dict[str, tuple[Float[Tensor, ""], int]]
-
-
-class StochasticHiddenActsReconLossConfig(LossMetricConfig):
-    type: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
 
 
 def calc_hidden_acts_mse(

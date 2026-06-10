@@ -10,7 +10,7 @@ Concrete implementations live in `param_decomp_lab.run_sink` (`OnePoolSink`,
 console plumbing, then add typed `checkpoint` methods that delegate to a
 shared `_persist`.
 
-Timing — when the trainer emits — lives separately: `param_decomp.configs.Cadence`
+Timing — when the trainer emits — lives separately: `param_decomp_config.pd.Cadence`
 owns train-log + checkpoint periods, and `param_decomp.optimize.EvalLoop` owns
 the eval period.
 """

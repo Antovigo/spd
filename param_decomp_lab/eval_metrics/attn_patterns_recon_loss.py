@@ -1,16 +1,14 @@
 import math
 from abc import ABC
 from fnmatch import fnmatch
-from typing import Literal, Self, override
+from typing import override
 
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Int
-from pydantic import model_validator
 from torch import Tensor, nn
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModel, ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
@@ -21,39 +19,9 @@ from param_decomp.masks import (
 )
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-
-
-class _AttnPatternsBaseConfig(BaseConfig):
-    """Shared config for attention-pattern recon metrics.
-
-    Supports standard attention and RoPE (auto-detected from the parent attention
-    module). ALiBi / QK-norm / sliding window are not supported.
-
-    Either `(q_proj_path, k_proj_path)` or `c_attn_path` must be set (combined QKV with
-    output split as `[Q | K | V]` along the last dim) — not both, not neither.
-    """
-
-    n_heads: int
-    q_proj_path: str | None = None
-    k_proj_path: str | None = None
-    c_attn_path: str | None = None
-
-    @model_validator(mode="after")
-    def _validate_paths(self) -> Self:
-        has_separate = self.q_proj_path is not None and self.k_proj_path is not None
-        has_combined = self.c_attn_path is not None
-        assert has_separate != has_combined, (
-            "Specify either (q_proj_path, k_proj_path) or c_attn_path, not both/neither"
-        )
-        return self
-
-
-class CIMaskedAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
-    type: Literal["CIMaskedAttnPatternsReconLoss"] = "CIMaskedAttnPatternsReconLoss"
-
-
-class StochasticAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
-    type: Literal["StochasticAttnPatternsReconLoss"] = "StochasticAttnPatternsReconLoss"
+from param_decomp_config.eval_metrics import (
+    _AttnPatternsBaseConfig,
+)
 
 
 def _resolve_paths(pattern: str, model: ComponentModel) -> list[str]:

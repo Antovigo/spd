@@ -33,8 +33,8 @@ from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import RoutingMasks
 from param_decomp.metrics.base import Metric, MetricResult
-from param_decomp.metrics.chunkwise_subset_recon import ChunkwiseSubsetReconLossConfig
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.losses import ChunkwiseSubsetReconLossConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.three_pool.recon_loss_strategy import ReconLossStrategy

@@ -2,12 +2,9 @@ import random
 
 import torch
 
-from param_decomp_lab.autointerp.config import CompactSkepticalConfig
-from param_decomp_lab.autointerp.providers import OpenRouterLLMConfig
-from param_decomp_lab.eval_metrics.autointerp_labels import (
-    AutointerpLabels,
-    AutointerpLabelsConfig,
-)
+from param_decomp_config.autointerp import CompactSkepticalConfig, OpenRouterLLMConfig
+from param_decomp_config.eval_metrics import AutointerpLabelsConfig
+from param_decomp_lab.eval_metrics.autointerp_labels import AutointerpLabels
 
 
 def _make_metric(k: int, seed: int) -> AutointerpLabels:

@@ -12,8 +12,8 @@ from typing import Literal
 
 import torch
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.training_state import ThreePoolTrainingState, TrainingState
+from param_decomp_config.base import BaseConfig
 
 
 class ResumeConfig(BaseConfig):

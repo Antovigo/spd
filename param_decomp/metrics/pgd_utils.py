@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from jaxtyping import Float
@@ -17,19 +17,7 @@ from param_decomp.masks import (
     interpolate_component_mask,
     make_mask_infos,
 )
-from param_decomp.metrics.base import LossMetricConfig
-
-PGDInitStrategy = Literal["random", "ones", "zeroes"]
-MaskScope = Literal["unique_per_datapoint", "shared_across_batch"]
-
-
-class PGDConfig(LossMetricConfig):
-    """Shared base for per-step PGD loss configs."""
-
-    init: PGDInitStrategy
-    step_size: float
-    n_steps: int
-    mask_scope: MaskScope
+from param_decomp_config.losses import PGDConfig, PGDInitStrategy
 
 
 def get_pgd_init_tensor(

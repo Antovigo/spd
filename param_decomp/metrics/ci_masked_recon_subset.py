@@ -1,30 +1,18 @@
-from typing import Annotated, Any, Literal, override
+from typing import Any, override
 
 import torch
 from jaxtyping import Float
-from pydantic import Field
 from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.distributed import all_reduce
-from param_decomp.masks import (
-    Router,
-    SubsetRoutingType,
-    UniformKSubsetRoutingConfig,
-    get_subset_router,
-    make_mask_infos,
-)
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.masks import Router, get_subset_router, make_mask_infos
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-
-
-class CIMaskedReconSubsetLossConfig(LossMetricConfig):
-    type: Literal["CIMaskedReconSubsetLoss"] = "CIMaskedReconSubsetLoss"
-    routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
-    ]
+from param_decomp_config.losses import CIMaskedReconSubsetLossConfig
+from param_decomp_config.routing import SubsetRoutingType
 
 
 def _ci_masked_recon_subset_loss_update(

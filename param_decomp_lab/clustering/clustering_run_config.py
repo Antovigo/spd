@@ -2,7 +2,7 @@
 
 from pydantic import Field, PositiveInt
 
-from param_decomp.base_config import BaseConfig
+from param_decomp_config.base import BaseConfig
 from param_decomp_lab.clustering.harvest_config import (
     HarvestConfig,
 )

@@ -1,35 +1,16 @@
-from typing import Literal, cast, override
+from typing import cast, override
 
 import torch
 import torch.distributed as dist
 import torch.distributed.nn.functional as dist_fn
 from jaxtyping import Float
-from pydantic import NonNegativeFloat
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import Probability
 from param_decomp.distributed import all_reduce, get_distributed_state
-from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
-
-
-class ImportanceMinimalityLossConfig(LossMetricConfig):
-    """Config for the `L_p`-style importance-minimality penalty on upper-leaky CI values.
-
-    `pnorm` is the initial `p`; `beta` weights the entropy-like `mean * log2(1 + sum)`
-    term added on top of the `L_p` term. `pnorm` is linearly annealed toward
-    `p_anneal_final_p` between `p_anneal_start_frac` and `p_anneal_end_frac` of training
-    (no-op when `p_anneal_final_p is None` or `p_anneal_start_frac == 1.0`).
-    """
-
-    type: Literal["ImportanceMinimalityLoss"] = "ImportanceMinimalityLoss"
-    pnorm: NonNegativeFloat
-    beta: NonNegativeFloat
-    p_anneal_start_frac: Probability = 1.0
-    p_anneal_final_p: NonNegativeFloat | None = None
-    p_anneal_end_frac: Probability = 1.0
-    eps: NonNegativeFloat = 1e-12
+from param_decomp_config.losses import ImportanceMinimalityLossConfig
 
 
 def annealed_pnorm(

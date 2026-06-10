@@ -7,41 +7,13 @@ import numpy as np
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
 from numpy.typing import NDArray
-from pydantic import Field, PositiveInt
 from torch import Tensor
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import DistributedState
 from param_decomp.log import logger
-
-
-class LMDataConfig(BaseConfig):
-    """LM experiment dataset / dataloader settings."""
-
-    dataset_name: str = Field(..., description="HuggingFace dataset id")
-    data_files: str | None = Field(
-        default=None,
-        description=(
-            "Explicit file glob passed to load_dataset (e.g. 'sample/350BT/*.parquet'). "
-            "Resolves directly against that path instead of enumerating the whole repo "
-            "tree, which slashes Hub API calls vs. selecting a config by name."
-        ),
-    )
-    revision: str | None = Field(
-        default=None,
-        description="Dataset git revision (commit SHA/tag) to pin layout and data for reproducibility",
-    )
-    tokenizer_name: str = Field(..., description="HF tokenizer id or path")
-    column_name: str = Field(default="text", description="Dataset column with the text/tokens")
-    max_seq_len: PositiveInt = Field(default=512, description="Max sequence length")
-    train_split: str = Field(default="train")
-    eval_split: str = Field(default="test")
-    is_tokenized: bool = Field(default=False)
-    streaming: bool = Field(default=False)
-    buffer_size: PositiveInt = Field(default=1000)
-    shuffle_each_epoch: bool = Field(default=True)
+from param_decomp_config.lm import LMDataConfig
 
 
 def _keep_single_column(

@@ -32,12 +32,11 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 
-from param_decomp.metrics.persistent_pgd_state import (
+from param_decomp.metrics.persistent_pgd_state import PersistentPGDState, scope_needs_replica_sync
+from param_decomp_config.losses import (
     BroadcastAcrossBatchScope,
     PerBatchPerPositionScope,
     PersistentPGDSourceScope,
-    PersistentPGDState,
-    scope_needs_replica_sync,
 )
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
 from param_decomp_lab.distributed import cleanup_distributed, init_distributed

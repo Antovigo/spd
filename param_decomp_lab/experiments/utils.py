@@ -1,7 +1,6 @@
-"""Shared config schema for in-repo experiment YAMLs.
+"""Run-init helpers for in-repo experiments (sink + run-dir + wandb wiring).
 
-Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `data`
-types.
+The `ExperimentConfig` YAML schema lives in `param_decomp_config.experiment`.
 """
 
 from collections.abc import Callable
@@ -9,62 +8,17 @@ from pathlib import Path
 from typing import Protocol
 
 import wandb
-from pydantic import Field, PositiveInt
 
-from param_decomp.base_config import BaseConfig, runtime_cast
-from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.distributed import is_main_process
-from param_decomp_lab.eval_metrics import AnyEvalMetricConfig
+from param_decomp_config.base import BaseConfig, runtime_cast
+from param_decomp_config.experiment import WandbConfig
+from param_decomp_config.pd import Cadence
 from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.infra.wandb import try_wandb
-from param_decomp_lab.resumption.provenance import ResumeProvenance
 from param_decomp_lab.run_sink import OnePoolSink, ThreePoolSink
 
 EXPERIMENT_CONFIG_FILENAME = "experiment_config.yaml"
-
-
-class WandbConfig(BaseConfig):
-    """Wandb logging settings. Presence on `ExperimentConfig` opts in; omit to skip wandb."""
-
-    project: str
-    entity: str | None = None
-
-
-class EvalConfig(BaseConfig):
-    """Eval-pass settings consumed by `EvalLoop`. `slow_every` must be a multiple of `every`."""
-
-    batch_size: PositiveInt
-    n_steps: PositiveInt
-    every: PositiveInt
-    slow_every: PositiveInt
-    slow_on_first_step: bool = True
-    metrics: list[AnyEvalMetricConfig] = Field(default_factory=list)
-
-
-class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
-    """Full YAML schema for an in-repo experiment.
-
-    Subclass with concrete `target` / `data` types per experiment:
-
-        class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
-            pass
-
-    Omit the `eval:` block to skip eval entirely; omit `wandb:` to skip wandb (the run
-    still writes `experiment_config.yaml` + checkpoints locally).
-    """
-
-    pd: PDConfig
-    runtime: RuntimeConfig
-    cadence: Cadence
-    target: T
-    data: D
-    eval: EvalConfig | None = None
-    wandb: WandbConfig | None = None
-    resume_provenance: ResumeProvenance | None = None
-    """Set on resumed runs (parent run dir + step); `None` for fresh runs. Lives on the
-    config so it flows into `experiment_config.yaml` and `wandb.config` via `init_pd_run`,
-    making a resumed run's lineage visible in the wandb UI."""
 
 
 class _PdRunInputs(Protocol):
@@ -78,7 +32,7 @@ class _PdRunInputs(Protocol):
     @property
     def cadence(self) -> Cadence: ...
     @property
-    def wandb(self) -> "WandbConfig | None": ...
+    def wandb(self) -> WandbConfig | None: ...
     def to_file(self, path: Path | str) -> None: ...
 
 

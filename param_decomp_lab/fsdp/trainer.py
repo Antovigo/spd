@@ -55,7 +55,6 @@ from param_decomp.ci_fns import (
     LayerwiseCiFnWrapper,
 )
 from param_decomp.component_model import ComponentModelProtocol
-from param_decomp.configs import Cadence, PDConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
     resolve_decomposition_targets,
@@ -71,11 +70,7 @@ from param_decomp.distributed import (
 from param_decomp.faithfulness_warmup import run_faithfulness_warmup
 from param_decomp.log import logger
 from param_decomp.metrics.base import Metric
-from param_decomp.metrics.persistent_pgd_recon import (
-    PersistentPGDReconLossConfig,
-    PersistentPGDReconSubsetLossConfig,
-    validate_pgd_scope,
-)
+from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.optimize import tie_component_weights
 from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.torch_helpers import loop_dataloader
@@ -87,6 +82,11 @@ from param_decomp.train_step import (
     run_loss_step,
     scheduled_lrs,
 )
+from param_decomp_config.losses import (
+    PersistentPGDReconLossConfig,
+    PersistentPGDReconSubsetLossConfig,
+)
+from param_decomp_config.pd import Cadence, PDConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.experiments.lm.vendored.component_model import (
     ComponentTarget,

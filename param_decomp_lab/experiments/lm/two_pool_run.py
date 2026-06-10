@@ -29,12 +29,14 @@ import fire
 from pydantic import model_validator
 
 from param_decomp._trace import trace
-from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModel
-from param_decomp.configs import Cadence
 from param_decomp.distributed import is_main_process
 from param_decomp.log import logger
 from param_decomp.training_state import ThreePoolTrainingState
+from param_decomp_config.base import BaseConfig
+from param_decomp_config.experiment import EvalConfig, ResumeProvenance, WandbConfig
+from param_decomp_config.lm import LMDataConfig, LMTargetConfig
+from param_decomp_config.pd import Cadence
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.distributed import (
@@ -42,9 +44,7 @@ from param_decomp_lab.distributed import (
     init_distributed,
     with_distributed_cleanup,
 )
-from param_decomp_lab.experiments.lm.data import LMDataConfig
 from param_decomp_lab.experiments.lm.run import (
-    LMTargetConfig,
     _build_eval_loop,
     _resolve_train_run_id,
     _split_metrics_by_slow,
@@ -60,12 +60,7 @@ from param_decomp_lab.experiments.lm.three_pool_run import (
     _maybe_enable_memory_profile,
     profiling_env_passthrough,
 )
-from param_decomp_lab.experiments.utils import (
-    EXPERIMENT_CONFIG_FILENAME,
-    EvalConfig,
-    WandbConfig,
-    init_pd_run,
-)
+from param_decomp_lab.experiments.utils import EXPERIMENT_CONFIG_FILENAME, init_pd_run
 from param_decomp_lab.infra.ddp_launch import build_ddp_launch
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.paths import ModelPath
@@ -79,7 +74,6 @@ from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_sl
 from param_decomp_lab.infra.wandb import get_wandb_entity
 from param_decomp_lab.resumption import (
     ResumeConfig,
-    ResumeProvenance,
     latest_checkpoint_step,
     read_training_snapshot,
     resolve_step,

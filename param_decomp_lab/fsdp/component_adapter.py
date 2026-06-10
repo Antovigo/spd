@@ -20,7 +20,8 @@ from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from param_decomp.ci_fns import GlobalCiFnWrapper, LayerwiseCiFnWrapper
 from param_decomp.component_model import CIOutputs, OutputWithCache
 from param_decomp.components import Components
-from param_decomp.masks import ComponentsMaskInfo, SamplingType
+from param_decomp.masks import ComponentsMaskInfo
+from param_decomp_config.routing import SamplingType
 from param_decomp_lab.experiments.lm.vendored.component_model import (
     ComponentTarget,
     LMComponentModel,

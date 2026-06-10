@@ -8,8 +8,8 @@ annotations, recall + PMI token stats):
 3. Unification: synthesizes output + input labels into a unified description
 """
 
+from param_decomp_config.autointerp import CANON_RENDERING
 from param_decomp_lab.app.backend.app_tokenizer import AppTokenizer
-from param_decomp_lab.autointerp.config import CANON_RENDERING
 from param_decomp_lab.autointerp.prompt_helpers import (
     build_annotated_examples,
     token_stats_section,

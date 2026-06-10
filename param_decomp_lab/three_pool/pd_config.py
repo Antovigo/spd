@@ -26,12 +26,14 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import Field, model_validator
 
-from param_decomp.base_config import BaseConfig
-from param_decomp.configs import AnyLossMetricConfig, PDConfig
-from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
-from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
-from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
-from param_decomp.metrics.stochastic_recon_layerwise import StochasticReconLayerwiseLossConfig
+from param_decomp_config.base import BaseConfig
+from param_decomp_config.losses import (
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    StochasticReconLayerwiseLossConfig,
+)
+from param_decomp_config.pd import AnyLossMetricConfig, PDConfig
 from param_decomp_lab.three_pool.recon_plan import ChunkReconPlan, PerSitePlan
 
 

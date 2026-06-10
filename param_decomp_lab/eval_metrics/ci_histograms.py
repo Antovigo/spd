@@ -1,22 +1,15 @@
 from collections import defaultdict
-from typing import Literal, override
+from typing import override
 
 import torch
 from jaxtyping import Float
 from torch import Tensor
 
-from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import gather_all_tensors
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp_config.eval_metrics import CIHistogramsConfig
 from param_decomp_lab.eval_metrics.plotting import plot_ci_values_histograms
-
-
-class CIHistogramsConfig(BaseConfig):
-    """`n_batches_accum=None` accumulates every batch in the eval pass."""
-
-    type: Literal["CIHistograms"] = "CIHistograms"
-    n_batches_accum: int | None
 
 
 class CIHistograms(Metric[CIHistogramsConfig]):

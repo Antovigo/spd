@@ -2,7 +2,7 @@
 
 from pydantic import Field, PositiveInt
 
-from param_decomp.configs import RuntimeConfig
+from param_decomp_config.pd import RuntimeConfig
 
 
 class FsdpRuntimeConfig(RuntimeConfig):
