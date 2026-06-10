@@ -57,7 +57,19 @@ SLURM entry) is the remaining gap between "bench" and "trainer".
 - Site ordering: torch concatenates CI inputs in sorted-module-path order (per layer:
   down, gate, up); JAX uses (gate, up, down). Equivalent for fresh init (a fixed
   permutation of `in_proj` rows / head columns); matters only for cross-framework weight
-  round-trips. Documented, not a violation.
+  round-trips — **handled in the exporter** (`export.py::ci_fn_state` permutes the
+  in-proj row blocks and out-head column blocks to `sorted(site_names)`; proven by the
+  `tools/gen_export_fixture.py` → `tools/verify_export_torch.py` round-trip on both a
+  single-layer and a two-layer shape). Documented, not a violation.
+- CI-fn numerics vs torch (surfaced by the export round-trip, harmless for training but
+  visible when the torch stack evaluates an exported checkpoint): JAX `jax.nn.gelu`
+  defaults to the TANH approximation where torch's `TransformerBlock` uses exact-erf
+  `nn.GELU()` (max pointwise gap ~4.7e-4), and JAX's weightless rms-norms use eps `1e-5`
+  where torch's `F.rms_norm` defaults to `finfo(fp32).eps` ≈ 1.19e-7. With both choices
+  matched the round-trip agrees to ≤4e-5 max rel; with production torch numerics the
+  tiny-fixture CI outputs drift up to ~3e-2 rel (production-width activations sit far
+  from the eps floor, so the real-model drift is much smaller). Documented, not fixed —
+  changing `ci_fn.py` would perturb live-run trajectories.
 - Init distributions: torch `init_param_` vs JAX `normal·fan⁻¹ᐟ²` differ in family;
   spec pins fan-in scaling only. Check `init_param_` when touching A11–A13.
 - The equivalence harness (`tests/equivalence`) is fixture-driven (no RNG, zeroed attn,

@@ -20,6 +20,9 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `train.py` | the generic trainer: four losses, persistent source-Adam adversary, schedules (p-anneal, source-LR warmup), fp32 masters + bf16 compute, `make_train_step` / `make_faith_warmup_step` |
 | `ci_fn.py` | shared-transformer CI fn over ordered site specs; the two leaky-hard squashings (SPEC §4.6, S5/S6) |
 | `checkpoint.py` | orbax sharded save/resume of `TrainState` (adversary sources + moments included, no full-gather on the loop, SPEC S22) |
+| `run_state.py` | optimizer + initial-`TrainState` construction from an `ExperimentConfig` — shared by `run.py` and the exporter (orbax restores onto this reference) |
+| `export.py` | `jsp-export <run_dir> [--step N]` — orbax checkpoint → `<run_dir>/export/model_<step>.safetensors` with the torch `LMComponentModel`'s exact state-dict keys (V/U destacked per site, CI fn in-proj/out-head permuted to torch's sorted site order, frozen target included), so the torch eval/harvest/postprocess stack runs on JAX runs |
+| `tools/` | export round-trip verification: `gen_export_fixture.py` (JAX venv) + `verify_export_torch.py` (torch venv, rebuilds the real torch modules from the safetensors and matches forwards at fp32 tolerance) |
 | `sharding.py` | generic GSPMD helpers (`init_distributed`, `dp_mesh`, `replicate`, `shard_batch`) |
 | `llama8b.py` | Llama-3.1-8B target: residual-start suffix + `Prefix` harvest, decomposed MLP layer range, HF safetensors loader, `llama_decomposed_lm(...)` |
 | `run.py` | the training entrypoint (`jsp-train <config.yaml>`): data, faith warmup, loop, metrics jsonl/wandb, orbax checkpoints, SIGTERM-save + requeue-resume |
