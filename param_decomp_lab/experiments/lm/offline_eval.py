@@ -35,6 +35,7 @@ from typing import Any
 import fire
 import torch
 import wandb
+import yaml
 from dotenv import load_dotenv
 from safetensors.torch import load_file
 
@@ -45,7 +46,7 @@ from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.train_step import run_eval_pass
 from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.eval_metrics import EVAL_METRIC_CLASSES
-from param_decomp_lab.experiments.lm.run import build_lm_loader, build_target
+from param_decomp_lab.experiments.lm.run import LMExperimentConfig, build_lm_loader, build_target
 from param_decomp_lab.experiments.lm.two_pool_run import TwoPoolLMExperimentConfig
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
 from param_decomp_lab.experiments.utils import WandbConfig
@@ -53,6 +54,16 @@ from param_decomp_lab.fsdp.component_adapter import FsdpComponentAdapter
 from param_decomp_lab.infra.wandb import get_wandb_entity, try_wandb
 from param_decomp_lab.run_sink import _wandb_value
 from param_decomp_lab.seed import set_seed
+
+
+def _load_reference_config(config_path: Path) -> TwoPoolLMExperimentConfig | LMExperimentConfig:
+    """2-pool yamls carry `runtime.topology`; everything this module touches
+    (`pd.seed/decomposition_targets/ci_config/sigmoid_type`, `target`, `data`,
+    `eval`, `wandb`, `runtime.autocast_bf16`) is shared between the schemas."""
+    raw = yaml.safe_load(config_path.read_text())
+    if "topology" in raw.get("runtime", {}):
+        return TwoPoolLMExperimentConfig.from_file(config_path)
+    return LMExperimentConfig.from_file(config_path)
 
 
 def _step_from_export_name(filename: str) -> int:
@@ -63,7 +74,7 @@ def _step_from_export_name(filename: str) -> int:
 
 
 def _load_exported_component_model(
-    cfg: TwoPoolLMExperimentConfig, export_path: Path, device: str
+    cfg: TwoPoolLMExperimentConfig | LMExperimentConfig, export_path: Path, device: str
 ) -> LMComponentModel:
     """Rebuild the production-shape `LMComponentModel` and strict-load the JAX export.
 
@@ -144,7 +155,8 @@ def main(
         export_path: `model_<step>.safetensors` written by `jsp-export` (a full strict
             `LMComponentModel` state dict), conventionally at
             `<jax run dir>/export/model_<step>.safetensors`.
-        config: Reference torch experiment yaml (`TwoPoolLMExperimentConfig` schema);
+        config: Reference torch experiment yaml (single-pool `LMExperimentConfig` or
+            `TwoPoolLMExperimentConfig` schema, detected by `runtime.topology`);
             its `pd:` / `target:` / `data:` / `eval:` blocks define the model shape,
             data stream, and metrics.
         step: Checkpoint step to attribute results to. Default: parsed from the export
@@ -168,7 +180,7 @@ def main(
         )
         wandb_run_id = export_path.parents[1].name
 
-    cfg = TwoPoolLMExperimentConfig.from_file(Path(config))
+    cfg = _load_reference_config(Path(config))
     assert cfg.eval is not None and cfg.eval.metrics, f"{config} has no eval metrics"
     if not no_wandb:
         assert cfg.wandb is not None, f"{config} has no `wandb:` block; pass --no-wandb"
