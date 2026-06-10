@@ -169,6 +169,12 @@ class ChunkwiseSubsetReconLoss(Metric[ChunkwiseSubsetReconLossConfig]):
     def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
         super().bind(model=model, device=device)
         self._lm = _as_lm_component_model(model)
+        # Deltas flow through the bound model (the FSDP adapter), whose `calc_weight_deltas`
+        # `.to_local()`s the `target − VU` to a PLAIN tensor (grad still redistributes to V/U's
+        # native Shard(0)). The raw `self._lm.calc_weight_deltas` returns a `Shard(0)` DTensor,
+        # which the checkpoint recompute restores as a DTensor and then mixes with the plain
+        # activation in the compiled masked forward (`got mixed torch.Tensor and DTensor`).
+        self._delta_model = model
         self._chunks = chunk_sites(self._lm.target_module_paths, self.cfg.sites_per_chunk)
         self._plan = SubsetReconPlan(routing=self.cfg.routing, n_samples=self.cfg.n_samples)
         self._strategy = ReconLossStrategy.from_cfg(
@@ -204,7 +210,7 @@ class ChunkwiseSubsetReconLoss(Metric[ChunkwiseSubsetReconLossConfig]):
             chunks=self._chunks,
             plan=self._plan,
             strategy=self._strategy,
-            weight_deltas_fn=make_weight_deltas_fn(self._lm),
+            weight_deltas_fn=make_weight_deltas_fn(self._delta_model),
             device=device,
         )
         self.sum_loss += loss.detach()

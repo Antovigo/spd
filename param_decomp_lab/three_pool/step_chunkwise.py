@@ -48,6 +48,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 
+from param_decomp.component_model import ComponentModelProtocol
 from param_decomp.grad_clip import cross_pool_clip_grad_norm
 from param_decomp.masks import RoutingMasks, make_mask_infos
 from param_decomp.torch_helpers import bf16_autocast
@@ -263,14 +264,19 @@ def _chunkwise_streaming_phase(
     )
 
 
-def make_weight_deltas_fn(component_model: "LMComponentModel") -> WeightDeltasFn:
+def make_weight_deltas_fn(
+    component_model: "LMComponentModel | ComponentModelProtocol",
+) -> WeightDeltasFn:
     """A ``WeightDeltasFn`` that recomputes fresh grad-carrying deltas per forward.
 
     Each call runs ``component_model.calc_weight_deltas()`` and filters to the
     requested sites, so every recon forward gets an independent ``target - VU``
     subgraph (the streaming per-forward backward then frees only its own graph).
     The placement is the model's: the plain ``LMComponentModel`` returns plain
-    tensors, the flat FSDP ``FsdpComponentAdapter`` returns DTensor-aware deltas.
+    tensors, the flat FSDP ``FsdpComponentAdapter`` returns DTensor-aware deltas
+    (it ``.to_local()``s the ``target - VU`` to a plain tensor while keeping the
+    grad on V/U's native ``Shard(0)``). Pass the adapter — not the raw inner
+    ``LMComponentModel`` — on the flat path so deltas are plain.
     """
 
     def fn(sites: tuple[str, ...]) -> dict[str, Tensor]:
