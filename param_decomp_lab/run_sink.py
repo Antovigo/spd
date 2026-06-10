@@ -16,7 +16,7 @@ from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import is_main_process
 from param_decomp.log import logger
 from param_decomp.training_state import TrainingState
-from param_decomp_lab.infra.run_files import save_file
+from param_decomp_lab.infra.run_files import save_file, write_run_metadata_finish
 from param_decomp_lab.infra.wandb import init_wandb, try_wandb
 
 
@@ -173,7 +173,14 @@ class RunSink:
             )
 
     def finish(self) -> None:
-        """End-of-run cleanup."""
+        """End-of-run cleanup: stamp `finished_at` into run metadata, then close wandb.
+
+        Runs from each experiment's `finally`, so `finished_at` is recorded on both clean
+        and crashed exits. No-op metadata write on silent / non-main sinks (`out_dir is
+        None`).
+        """
+        if self.out_dir is not None:
+            write_run_metadata_finish(self.out_dir)
         if self._wandb_active and wandb.run is not None:
             wandb.finish()
 

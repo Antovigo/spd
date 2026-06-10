@@ -32,6 +32,7 @@ runtime: { ... RuntimeConfig ... }
 cadence: { train_log_every, save_every }
 target:  { ... per-experiment target config ... }
 data:    { ... per-experiment data config ... }
+label:   "<series id>"                              # optional: groups runs in the index
 eval:    { batch_size, n_steps, every, slow_every, slow_on_first_step,
            metrics: [ {type: "...", ...}, ... ] }   # optional: omit to skip eval
 wandb:   { project: ..., entity: ... }              # optional: omit to skip wandb
@@ -164,6 +165,7 @@ Every `pd-*` run command accepts `--group <id>` and `--tags a,b,c` (no-ops when
 ```
 PARAM_DECOMP_OUT_DIR/runs/<run_id>/
   experiment_config.yaml     # the full ExperimentConfig
+  run_metadata.json          # started_at/finished_at + git_commit/uncommitted_changes
   model_<step>.pth           # checkpoints (RunSink.checkpoint)
   metrics.jsonl              # local logs (RunSink.log)
 ```

@@ -46,6 +46,7 @@ pd-attributions = "param_decomp_lab.dataset_attributions.scripts.run_slurm_cli:c
 pd-investigate = "param_decomp_lab.investigate.scripts.run_slurm_cli:cli"
 pd-postprocess = "param_decomp_lab.postprocess.cli:cli"
 pd-graph-interp = "param_decomp_lab.graph_interp.scripts.run_slurm_cli:cli"
+pd-index = "param_decomp_lab.scripts.index_runs:main"
 
 [build-system]
 requires = ["setuptools", "wheel"]

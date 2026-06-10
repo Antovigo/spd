@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
@@ -96,6 +97,46 @@ def generate_run_id(run_type: RunType) -> str:
     """
     type_abbr = RUN_TYPE_ABBREVIATIONS[run_type]
     return f"{type_abbr}-{secrets.token_hex(4)}"
+
+
+RUN_METADATA_FILENAME = "run_metadata.json"
+
+
+def write_run_metadata_start(out_dir: Path) -> None:
+    """Write `run_metadata.json` with launch timestamp + git state.
+
+    Best-effort: this metadata feeds the run index (`pd-index`) and is never essential,
+    so a git or filesystem failure is logged and swallowed rather than aborting the run.
+    Timestamps live in file content (not mtime) so they survive run dirs being copied
+    between storage. `finished_at` is added later by `write_run_metadata_finish`.
+    """
+    metadata: dict[str, Any] = {"started_at": datetime.now(UTC).isoformat()}
+    try:
+        metadata["git_commit"] = repo_current_commit_hash()
+        metadata["uncommitted_changes"] = not repo_is_clean()
+    except Exception as e:
+        logger.warning(f"Could not capture git state for run metadata (non-fatal): {e}")
+    try:
+        save_file(metadata, out_dir / RUN_METADATA_FILENAME, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not write run metadata (non-fatal): {e}")
+
+
+def write_run_metadata_finish(out_dir: Path) -> None:
+    """Stamp `finished_at` into `run_metadata.json` if present (best-effort).
+
+    No-ops when the file is absent (e.g. a sink not created by `init_pd_run`) and
+    swallows read/write errors — the metadata is for the run index, never essential.
+    """
+    path = out_dir / RUN_METADATA_FILENAME
+    if not path.exists():
+        return
+    try:
+        metadata = json.loads(path.read_text())
+        metadata["finished_at"] = datetime.now(UTC).isoformat()
+        save_file(metadata, path, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not stamp finished_at in run metadata (non-fatal): {e}")
 
 
 class ExecutionStamp(NamedTuple):
