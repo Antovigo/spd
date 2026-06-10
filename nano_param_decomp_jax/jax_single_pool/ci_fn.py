@@ -4,9 +4,12 @@ ONE shared transformer over ALL decomposed sites (matching torch
 `GlobalSharedTransformerCiFn`): the per-site clean inputs (3 per decomposed layer:
 gate_in / up_in / down_in) are rms-normed, concatenated along the feature dim,
 projected to `d_model`; a stack of bidirectional-RoPE transformer blocks then a head
-emits `3*n_layers*C` logits squashed by the lower-leaky-hard sigmoid into per-site CI
-in [0,1]. The output is returned as `{kind: (b, t, L, C)}` so the step can mask
-layer i's `kind` site with `ci[kind][:, :, i]`.
+emits `3*n_layers*C` logits. Following torch (`sigmoid_type="leaky_hard"`), the SAME
+logits are squashed two ways: a **lower-leaky-hard** sigmoid feeds the recon / PPGD
+component masks (bounded above by 1), and an **upper-leaky-hard** sigmoid feeds the
+importance-minimality penalty (bounded below by 0). Both are returned as
+`{kind: (b, t, L, C)}` (a `CIValues` pair) so the step can mask layer i's `kind` site
+with `lower[kind][:, :, i]` and penalize `upper[kind][:, :, i]`.
 
 Mirrors the torch `GlobalSharedTransformerCiConfig` used in the llama8b configs
 (d_model 4096, 4 blocks, 64 heads, mlp 16384).
@@ -21,6 +24,18 @@ from jaxtyping import Array, Float
 from vendored_jax.llama import apply_rope, rms_norm, rope_cos_sin
 
 from jax_single_pool.llama8b import DT, KINDS
+
+
+class CIValues(NamedTuple):
+    """The two squashed views of the CI-fn logits (torch `CIOutputs`, sans pre_sigmoid).
+
+    `lower` (lower-leaky-hard) gates component contributions in recon / PPGD;
+    `upper` (upper-leaky-hard) is penalized by importance-minimality. Each is
+    `{kind: (b, t, L, C)}`.
+    """
+
+    lower: dict[str, Array]
+    upper: dict[str, Array]
 
 
 @jax.custom_vjp
@@ -38,6 +53,16 @@ def _lhs_b(x, g):
 
 
 lower_leaky_hard_sigmoid.defvjp(_lhs_f, _lhs_b)
+
+
+def upper_leaky_hard_sigmoid(x: Float[Array, "..."]) -> Float[Array, "..."]:
+    """`x>1 ? 1+alpha*(x-1) : clamp(x,0,1)` — torch `upper_leaky_hard_sigmoid`.
+
+    Ordinary (non-custom-vjp) op: the autodiff of this exact forward matches torch's,
+    which here builds its backward from the same `where` expression rather than a
+    custom Function."""
+    alpha = 0.01
+    return jnp.where(x > 1, 1 + alpha * (x - 1), jnp.clip(x, 0.0, 1.0))
 
 
 class CIBlock(eqx.Module):
@@ -78,9 +103,11 @@ class CIFn(eqx.Module):
     n_layers: int = eqx.field(static=True)
     eps: float = eqx.field(static=True)
 
-    def __call__(self, site_inputs: list) -> dict[str, Array]:
+    def __call__(self, site_inputs: list) -> CIValues:
         """`site_inputs`: flat list of 3*n_layers clean inputs in (layer, kind) order.
-        Returns {kind: (b, t, n_layers, C)} CI in [0,1]."""
+
+        Returns a `CIValues(lower, upper)` pair, each `{kind: (b, t, n_layers, C)}` —
+        the two squashings of the SAME logits (torch's `lower_leaky` / `upper_leaky`)."""
         assert len(site_inputs) == 3 * self.n_layers, (
             f"expected {3 * self.n_layers} site inputs, got {len(site_inputs)}"
         )
@@ -92,8 +119,12 @@ class CIFn(eqx.Module):
         b, t, _ = flat.shape
         # logits are laid out site-major in (layer, kind) order — reshape to (b,t,L,3,C)
         per_site = flat.reshape(b, t, self.n_layers, len(KINDS), self.C)
-        squashed = lower_leaky_hard_sigmoid(per_site)
-        return {kind: squashed[:, :, :, j] for j, kind in enumerate(KINDS)}
+        lower = lower_leaky_hard_sigmoid(per_site)
+        upper = upper_leaky_hard_sigmoid(per_site)
+        return CIValues(
+            lower={kind: lower[:, :, :, j] for j, kind in enumerate(KINDS)},
+            upper={kind: upper[:, :, :, j] for j, kind in enumerate(KINDS)},
+        )
 
 
 class CIFnDims(NamedTuple):

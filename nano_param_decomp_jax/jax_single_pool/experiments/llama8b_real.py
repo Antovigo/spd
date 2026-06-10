@@ -189,7 +189,8 @@ def main():
 
     assert not (args.shard and args.shmap), "pick one of --shard / --shmap"
     target = replicate_target(target, mesh)
-    src_shape = (1, args.seq, rng.n_layers, args.C)
+    # +1 trailing channel = the weight-delta source (torch use_delta_component=true).
+    src_shape = (1, args.seq, rng.n_layers, args.C + 1)
     if args.shard:
         vu = shard_decomp_vu(vu, mesh)
         ci_fn = shard_ci_fn(ci_fn, mesh)
@@ -210,7 +211,9 @@ def main():
         source=source,
         step=jnp.array(0),
     )
-    coeffs = LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4)
+    coeffs = LossCoeffs(
+        faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4, imp_beta=0.2, imp_eps=1e-12
+    )
     if args.shmap:
         step = make_llama8b_step_shmap(
             coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=args.n_warmup,

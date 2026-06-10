@@ -241,23 +241,48 @@ def all_site_inputs(tgt: Target, resid: Float[Array, "b t d"]) -> list:
     return inputs
 
 
-def suffix_logits(tgt: Target, vu: DecompVU, resid, masks: dict, delta_masks: dict, routes: dict):
+def _clean_mlp_out(fl: "DecompLayerFrozen", mlp_in: Array) -> Array:
+    """Frozen target MLP — `F.linear`-equivalent, used for layers a forward does not
+    decompose (torch: a site with no `mask_info` runs its `target_forward`). Exactly
+    `W` applied, not the `V@U + (W-V@U)` reconstruction, so non-decomposed layers carry
+    no V/U gradient and match the torch clean path bit-for-bit."""
+    return (jax.nn.silu(mlp_in @ fl.Wg.T) * (mlp_in @ fl.Wu.T)) @ fl.Wd.T
+
+
+def suffix_logits(
+    tgt: Target,
+    vu: DecompVU,
+    resid,
+    masks: dict,
+    delta_masks: dict,
+    routes: dict,
+    decompose_layer: tuple[bool, ...] | None = None,
+):
     """Masked decomposed forward of the whole suffix -> logits.
 
     `masks` / `delta_masks` / `routes`: {kind: (L, ...) | None}. Layer i's value for
     `kind` is `[k][i]` (mask None means no component mask; route None means "all"
-    positions routed to the decomposed module — the clean/PPGD case)."""
+    positions routed to the decomposed module — the clean/PPGD case).
+
+    `decompose_layer`: per-layer bool; layers with `False` run the frozen target MLP
+    (`_clean_mlp_out`) instead of the decomposed path. `None` decomposes every layer.
+    This matches the torch chunkwise forward, which swaps in V/U only for the chunk's
+    sites and leaves all other decomposed layers running their clean `target_forward`.
+    """
     x = resid
     for i, fl in enumerate(tgt.decomp_layers):
         post_attn = x + fl.attn(rms_norm(x, fl.ln1, tgt.eps), tgt.inv_freq)
         mlp_in = rms_norm(post_attn, fl.ln2, tgt.eps)
-        m = {k: (None if masks[k] is None else masks[k][i]) for k in KINDS}
-        dm = {k: delta_masks[k][i] for k in KINDS}
-        rt = {k: (None if routes[k] is None else routes[k][i]) for k in KINDS}
-        mlp_out = _decomp_mlp_forward_one(
-            vu.Vg[i], vu.Ug[i], vu.Vu[i], vu.Uu[i], vu.Vd[i], vu.Ud[i],
-            fl.Wg, fl.Wu, fl.Wd, mlp_in, m, dm, rt,
-        )  # fmt: skip
+        if decompose_layer is not None and not decompose_layer[i]:
+            mlp_out = _clean_mlp_out(fl, mlp_in)
+        else:
+            m = {k: (None if masks[k] is None else masks[k][i]) for k in KINDS}
+            dm = {k: delta_masks[k][i] for k in KINDS}
+            rt = {k: (None if routes[k] is None else routes[k][i]) for k in KINDS}
+            mlp_out = _decomp_mlp_forward_one(
+                vu.Vg[i], vu.Ug[i], vu.Vu[i], vu.Uu[i], vu.Vd[i], vu.Ud[i],
+                fl.Wg, fl.Wu, fl.Wd, mlp_in, m, dm, rt,
+            )  # fmt: skip
         x = post_attn + mlp_out
     for blk in tgt.tail:
         x = blk(x, tgt.inv_freq)

@@ -133,10 +133,12 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
         vu=vu, ci_fn=ci_fn,
         opt_vu=opt_vu.init(eqx.filter(vu, eqx.is_array)),
         opt_ci=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-        source={k: jnp.zeros((1, 16, rng.n_layers, C)) for k in KINDS},
+        source={k: jnp.zeros((1, 16, rng.n_layers, C + 1)) for k in KINDS},
         step=jnp.array(0),
     )  # fmt: skip
-    coeffs = LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4)
+    coeffs = LossCoeffs(
+        faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5, p_imp=0.4, imp_beta=0.2, imp_eps=1e-12
+    )
     step = make_llama8b_step(
         coeffs, opt_vu, opt_ci, pgd_lr=0.01, n_warmup=2, n_layers=rng.n_layers, mesh=None
     )
