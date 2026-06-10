@@ -2,6 +2,7 @@
 #SBATCH --job-name=jsp-train
 #SBATCH --ntasks-per-node=8
 #SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=8
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@300
 #SBATCH --output=/mnt/data/artifacts/mechanisms/param-decomp/slurm_logs/slurm-%j.out
@@ -15,7 +16,7 @@ set -euo pipefail
 CONFIG="$1"
 REPO=/mnt/home/oli/pd-nano-jax-jaxsp/nano_param_decomp_jax
 cd "$REPO"
-srun --kill-on-bad-exit=1 bash -c "
+srun --kill-on-bad-exit=1 --ntasks-per-node=8 --distribution=block:block bash -c "
   source .venv-cuda/bin/activate
   exec jsp-train jax_single_pool/$CONFIG
 "

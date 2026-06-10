@@ -29,6 +29,12 @@ def init_distributed() -> bool:
     if "SLURM_PROCID" not in os.environ:
         return False
     local_id = int(os.environ["SLURM_LOCALID"])
+    n_visible = len(os.environ.get("CUDA_VISIBLE_DEVICES", "").split(","))
+    assert local_id < n_visible, (
+        f"SLURM_LOCALID={local_id} >= {n_visible} visible GPUs — srun packed tasks onto "
+        f"too few nodes (job 50416 failure mode); launch steps with an explicit "
+        f"--ntasks-per-node=<gpus-per-node>"
+    )
     jax.distributed.initialize(local_device_ids=[local_id])
     return True
 
