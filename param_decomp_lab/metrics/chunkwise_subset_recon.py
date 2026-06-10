@@ -42,7 +42,7 @@ from param_decomp_lab.three_pool.recon_plan import SubsetReconPlan
 from param_decomp_lab.three_pool.step_chunkwise import (
     WeightDeltasFn,
     make_weight_deltas_fn,
-    recon_one_forward,
+    recon_masked_forward,
 )
 
 
@@ -106,9 +106,15 @@ def chunkwise_subset_recon(
             # subgraph; the delta draws no RNG, so the per-site `u`/`delta_mask` draws inside
             # the recomputed region replay identically (equivalence preserved bit-for-bit).
             weight_deltas = weight_deltas_fn(sites)
-            loss_f, n_positions = _checkpointed_recon_one_forward(
-                lm, batch, target_local, ci, sites, routing, strategy, weight_deltas
+            # Checkpoint ONLY the masked forward (the activation-heavy part); run the recon
+            # loss OUTSIDE the checkpoint. The fused-linear-KL recon is a custom
+            # `autograd.Function` that saves a precomputed gradient — recomputing it inside the
+            # checkpoint misaligns the saved-tensor accounting (`Recomputed values ... different
+            # metadata`). Keeping it outside leaves only standard ops in the recomputed region.
+            pred = _checkpointed_masked_forward(
+                lm, batch, ci, sites, routing, strategy, weight_deltas
             )
+            loss_f, n_positions = strategy.recon_loss(pred=pred, target=target_local)
             assert loss_f.dim() == 0, f"recon loss for sites {sites!r} must be scalar"
             sum_over_forwards = sum_over_forwards + loss_f / n_positions
             n_forwards += 1
@@ -116,57 +122,57 @@ def chunkwise_subset_recon(
     return sum_over_forwards / n_forwards, n_forwards
 
 
-def _checkpointed_recon_one_forward(
+def _checkpointed_masked_forward(
     lm: LMComponentModel,
     batch: object,
-    target_local: Tensor,
     ci: dict[str, Tensor],
     sites: tuple[str, ...],
     routing: RoutingMasks,
     strategy: ReconLossStrategy,
     weight_deltas: dict[str, Tensor],
-) -> tuple[Tensor, int]:
-    """`recon_one_forward` with its activations recomputed in backward, not retained.
+) -> Tensor:
+    """The masked suffix forward (`recon_masked_forward`) with its activations recomputed
+    in backward, not retained — returns the pred (pre-LM-head hidden state).
 
     The flat path accumulates every chunk's recon graph before the trainer's single
     `total_loss.backward()` (the `Metric` contract: `update` returns a loss). Without
-    checkpointing that holds all forwards' activations at once — the 3-pool instead
-    streams a per-forward backward and frees each graph, holding one forward's
-    activations at a time. `checkpoint(use_reentrant=False)` matches that profile: each
-    forward keeps only its inputs, recomputing activations in backward. The recompute is
-    numerically exact — `use_reentrant=False` saves and restores the RNG, so the
-    `torch.rand_like` / `torch.rand` mask draws inside `recon_one_forward` replay
-    identically (and the saved/restored RNG leaves the global stream untouched, so the
-    forward-pass draw order matches the non-checkpointed path bit-for-bit).
+    checkpointing that holds all forwards' activations at once — the 3-pool instead streams
+    a per-forward backward and frees each graph, holding one forward's activations at a
+    time. `checkpoint(use_reentrant=False)` matches that profile: each forward keeps only
+    its inputs, recomputing the block activations in backward. The recompute is numerically
+    exact — `use_reentrant=False` saves and restores the RNG, so the `torch.rand_like` /
+    `torch.rand` mask draws inside `recon_masked_forward` replay identically (and the
+    saved/restored RNG leaves the global stream untouched, so the forward draw order matches
+    the non-checkpointed path bit-for-bit).
 
-    The CI leaves AND the precomputed weight-deltas are passed positionally so
-    non-reentrant checkpoint registers them as backward inputs: the CI leaves' `.grad`
-    feeds the CI grad, and the deltas' grad redistributes back to V/U through the eager
-    `target − VU` subgraph the caller built OUTSIDE this region. Deltas are precomputed
-    (not recomputed via a closure) so the FSDP backward recompute never re-derives them
-    as `Shard(0)` DTensors — which would collide with the plain activation in the compiled
-    masked forward (`got mixed torch.Tensor and DTensor`).
+    The CI leaves AND the precomputed weight-deltas are passed positionally so non-reentrant
+    checkpoint registers them as backward inputs: the CI leaves' `.grad` feeds the CI grad,
+    and the deltas' grad redistributes back to V/U through the eager `target − VU` subgraph
+    the caller built OUTSIDE this region. Deltas are precomputed (not recomputed via a
+    closure) so the FSDP backward recompute never re-derives them as `Shard(0)` DTensors —
+    which would collide with the plain activation in the compiled masked forward (`got mixed
+    torch.Tensor and DTensor`).
 
     `strategy.context()` (the fused-KL LM-head bypass) is entered INSIDE the checkpointed
     region, not around it, so the bypass is active on BOTH the forward pass and the backward
     recompute. The recompute runs during `backward()` — after any outer bypass context has
     exited — so without re-entering it here the recompute would run the full LM head and the
-    recomputed forward output would be the vocab projection `[d_model, vocab]` instead of the
+    recomputed forward output would be the vocab projection `[pos, vocab]` instead of the
     saved pre-LM-head hidden state `[pos, d_model]` (`Recomputed values ... different
     metadata`)."""
     ci_sites = tuple(ci[s] for s in sites)
     delta_sites = tuple(weight_deltas[s] for s in sites)
     n_ci = len(ci_sites)
 
-    def run(*tensors: Tensor) -> tuple[Tensor, int]:
+    def run(*tensors: Tensor) -> Tensor:
         ci_local = dict(zip(sites, tensors[:n_ci], strict=True))
         deltas_local = dict(zip(sites, tensors[n_ci:], strict=True))
         with strategy.context():
-            return recon_one_forward(
-                lm, batch, target_local, ci_local, sites, routing, strategy, lambda _s: deltas_local
+            return recon_masked_forward(
+                lm, batch, ci_local, sites, routing, lambda _s: deltas_local
             )
 
-    return cast("tuple[Tensor, int]", checkpoint(run, *ci_sites, *delta_sites, use_reentrant=False))
+    return cast("Tensor", checkpoint(run, *ci_sites, *delta_sites, use_reentrant=False))
 
 
 class ChunkwiseSubsetReconLoss(Metric[ChunkwiseSubsetReconLossConfig]):
