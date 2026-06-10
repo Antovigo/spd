@@ -1,0 +1,135 @@
+# Bench12 flat-torch FSDP2 smoke: SAME workload as bench12_2pool — Llama-8B MLP layers 20-31,
+# 36 sites, C=8192, seq2048, same 4 losses / CI fn. Residual-start automatic (start_layer=20).
+# FSDP world is the full --dp; model (incl. frozen target) sharded across all ranks, batch DP.
+# checkpoint_blocks=false (PPGD requires it), compile on, shard_frozen_target on.
+# batch16 -> --dp 16 smoke. Logs train/perf/tok_per_s_per_gpu + train/mem/peak_gb_per_rank.
+# Launch: pd-lm-fsdp <this> --dp 16 --partition None --qos opportunistic --time 1:00:00
+cadence:
+  keep_last_n_checkpoints: 1
+  save_every: 100000
+  train_log_every: 5
+  dense_log_phase: { every: 2, until_step: 30 }
+data:
+  # Local pre-staged/pre-tokenized fineweb (Llama tok, seq2048) — kills the HF streaming
+  # thunderherd that stalls multi-rank startup (a4bf7fa0). Loader recipe per that commit.
+  buffer_size: 1000
+  column_name: input_ids
+  data_files: /mnt/data/artifacts/mechanisms/param-decomp/datasets/fineweb_llama_tok_2048/*.parquet
+  dataset_name: parquet
+  eval_split: train
+  is_tokenized: true
+  max_seq_len: 2048
+  shuffle_each_epoch: true
+  streaming: true
+  tokenizer_name: meta-llama/Llama-3.1-8B
+  train_split: train
+eval: null
+pd:
+  batch_size: 64
+  ci_config:
+    fn_type: global_shared_transformer
+    hidden_dims: null
+    mode: global
+    simple_transformer_ci_cfg:
+      attn_config:
+        max_len: 2048
+        n_heads: 64
+        rope_base: 10000.0
+      d_model: 4096
+      mlp_hidden_dim:
+      - 16384
+      n_blocks: 4
+  ci_fn_optimizer:
+    betas:
+    - 0.9
+    - 0.999
+    grad_clip_norm: null
+    lr_schedule:
+      final_val_frac: 0.1
+      fn_type: cosine
+      start_val: 5.0e-05
+      warmup_pct: 0.0
+    weight_decay: 0.0
+  components_optimizer:
+    betas:
+    - 0.9
+    - 0.999
+    grad_clip_norm: 0.01
+    lr_schedule:
+      final_val_frac: 0.1
+      fn_type: cosine
+      start_val: 1.5e-04
+      warmup_pct: 0.0
+    weight_decay: 0.0
+  decomposition_targets:
+  - { C: 8192, module_pattern: layers.20.mlp.gate_proj }
+  - { C: 8192, module_pattern: layers.20.mlp.up_proj }
+  - { C: 8192, module_pattern: layers.20.mlp.down_proj }
+  - { C: 8192, module_pattern: layers.21.mlp.gate_proj }
+  - { C: 8192, module_pattern: layers.21.mlp.up_proj }
+  - { C: 8192, module_pattern: layers.21.mlp.down_proj }
+  faithfulness_warmup_lr: 0.001
+  faithfulness_warmup_steps: 5
+  faithfulness_warmup_weight_decay: 0.0
+  identity_decomposition_targets: null
+  loss_metrics:
+  - type: FaithfulnessLoss
+    coeff: 100000.0
+  - type: ImportanceMinimalityLoss
+    coeff: 5.0e-06
+    beta: 0.2
+    eps: 1.0e-12
+    pnorm: 2.0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 0.4
+    p_anneal_end_frac: 1.0
+  - type: ChunkwiseSubsetReconLoss
+    coeff: 0.5
+    sites_per_chunk: 3
+    n_samples: 1
+    use_fused_kl: true
+    routing:
+      type: uniform_k_subset
+  - type: PersistentPGDReconLoss
+    coeff: 0.5
+    n_samples: 1
+    n_warmup_steps: 2
+    start_frac: 0.0
+    use_sigmoid_parameterization: false
+    scope:
+      type: broadcast_across_batch
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        fn_type: constant
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 1.0
+  n_mask_samples: 1
+  sampling: continuous
+  seed: 0
+  sigmoid_type: leaky_hard
+  steps: 80
+  tied_weights: null
+  use_delta_component: true
+runtime:
+  autocast_bf16: true
+  device: cuda:0
+  compile_model: true
+  compile_ci_fn: true
+  checkpoint_blocks: false
+  shard_frozen_target: true
+target:
+  activation_checkpointing: false
+  output_extract: 0
+  weights_dtype: bfloat16
+  spec:
+    kind: hf_weights_in_vendored
+    model_class: param_decomp_lab.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+wandb:
+  entity: goodfire
+  project: param-decomp-llama
