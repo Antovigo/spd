@@ -3,8 +3,9 @@
 The full PD step on the REAL 8B model: residual-start suffix from `--first_layer`,
 MLP (gate/up/down) decomposed on layers `[first_layer, last_layer]` (3N sites),
 weight-delta, global_shared_transformer CI fn (ONE shared transformer over all sites),
-4 losses + persistent PGD. GSPMD-sharded: frozen suffix replicated, V/U + CI + Adam +
-PGD source sharded over `dp`, batch sharded over `dp`. Matches
+4 losses + persistent PGD. GSPMD-sharded: frozen suffix replicated, V/U + CI + Adam
+sharded over `dp`, batch sharded over `dp`, PGD source replicated (shared across the
+global batch, grad AVG-reduced). Matches
 `param_decomp_lab/experiments/lm/_llama8b/llama8b_l18_b512_2pool_lr_mid.yaml` extended
 to a layer range.
 

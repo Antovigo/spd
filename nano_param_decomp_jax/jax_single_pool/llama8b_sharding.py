@@ -10,7 +10,10 @@ The memory consumers, and how each is placed on the 1-D `dp` mesh:
     splits both across devices -> the per-device component+optimizer footprint scales
     1/n_dev.
   * CI fn + Adam states: SHARDED over `dp` along the largest axis (out_head 3C, in_proj).
-  * PGD source (broadcast, (1,T,C)): SHARDED over `dp` along C.
+  * PGD source (broadcast, (1,T,L,C+1)): REPLICATED. A single adversarial source shared
+    across the global batch; it combines elementwise with the batch-sharded CI and its
+    grad is AVG-reduced across shards (torch `reduce_source_grads`). Tiny vs activations,
+    so replicating costs nothing; the C+1 axis is odd and cannot tile the mesh anyway.
   * residual input + all activations: BATCH-sharded over `dp`. The masked suffix
     re-forwards then run on per-device sub-batches -> activation memory scales 1/n_dev.
     This is what unlocks a global batch that OOMs replicated on one device.
@@ -79,9 +82,17 @@ def shard_ci_fn(ci_fn: CIFn, mesh: Mesh) -> CIFn:
 
 
 def shard_source(source: dict, mesh: Mesh) -> dict:
-    """Broadcast PGD source (1, T, L, C) -> shard C over `dp`."""
-    sh = NamedSharding(mesh, P(None, None, None, "dp"))
-    return {s: jax.device_put(v, sh) for s, v in source.items()}
+    """Broadcast PGD source (1, T, L, C+1) -> REPLICATED over `dp`.
+
+    The source is a single adversarial source shared across the whole global batch
+    (leading batch axis = 1, broadcast); it combines elementwise with the batch-sharded
+    CI (`mask = ci + (1-ci)*source[..., :-1]`) and its grad is AVG-reduced across shards
+    (torch `reduce_source_grads`). Replication is the semantically correct placement and
+    the torch analog. Sharding the trailing C+1 axis is invalid anyway: with the
+    weight-delta channel C+1 is odd (8193) and not divisible by the mesh size, and would
+    also fight the batch-sharded elementwise combine."""
+    repl = NamedSharding(mesh, P())
+    return {s: jax.device_put(v, repl) for s, v in source.items()}
 
 
 def shard_batch(resid_global, mesh: Mesh):
