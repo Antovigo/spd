@@ -83,22 +83,26 @@ def _build_optimizers(cfg: ExperimentConfig):
 
 
 def _ensure_global(tree: object, mesh: Mesh) -> object:
-    """Re-materialize every array leaf as a well-formed GLOBAL array via an identity
-    jit with explicit out_shardings (existing NamedShardings preserved; everything
-    else replicated). Multi-controller orbax can only save global arrays — and an
-    eager `device_put(local, replicated-NamedSharding)` yields arrays whose
+    """Re-materialize the NON-mesh array leaves (eagerly created scalars: step
+    counters, Adam counts) as well-formed GLOBAL replicated arrays via an identity
+    jit. Multi-controller orbax can only save global arrays — and an eager
+    `device_put(local, replicated-NamedSharding)` yields arrays whose
     `addressable_shards` raise (jax 0.10 multi-process), while jit outputs with the
-    same sharding are well-formed. Scalars created eagerly (step counters, Adam
-    counts) need this before the first save."""
+    same sharding are well-formed.
+
+    Leaves that already carry a NamedSharding pass through UNTOUCHED: routing them
+    through the identity jit re-materializes the whole state in one executable,
+    which OOM'd at the multi-chunk config's ~110 GB global state (job 50458,
+    168 GiB alloc in jit__identity_fn)."""
     repl = NamedSharding(mesh, P())
 
-    def out_sharding(a: object) -> NamedSharding:
-        if eqx.is_array(a) and isinstance(a.sharding, NamedSharding):  # pyright: ignore[reportAttributeAccessIssue]
-            return a.sharding  # pyright: ignore[reportAttributeAccessIssue]
-        return repl
+    def is_mesh_placed(a: object) -> bool:
+        return eqx.is_array(a) and isinstance(a.sharding, NamedSharding)  # pyright: ignore[reportAttributeAccessIssue]
 
-    shardings = jax.tree.map(out_sharding, tree)
-    return jax.jit(lambda t: t, out_shardings=shardings)(tree)
+    mesh_placed, stragglers = eqx.partition(tree, is_mesh_placed)
+    straggler_shardings = jax.tree.map(lambda _a: repl, stragglers)
+    fixed = jax.jit(lambda t: t, out_shardings=straggler_shardings)(stragglers)
+    return eqx.combine(mesh_placed, fixed)
 
 
 def _global_token_batch(local: np.ndarray, mesh: Mesh, global_batch: int) -> jax.Array:
