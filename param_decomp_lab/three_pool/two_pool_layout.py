@@ -80,6 +80,14 @@ def build_two_world(
             my_rank=my_rank,
             device=device,
         )
+        # Eager-init the whole-world cross-pool P2P communicator in lockstep at setup. The
+        # CI-mask + grad exchanges run `batch_isend_irecv` on this group; NCCL's lazy
+        # communicator init on first p2p is a BLOCKING whole-world collective, and Pool A
+        # reaches its first p2p (the CI-mask send) only AFTER a heavy `_ci_fn_forward`, far
+        # later than the chunk ranks reach their irecv — so the lazy init deadlocks at the
+        # first step (chunk ranks blocked in the irecv comm-init; Pool A not yet there). A
+        # dummy all-reduce on the group forces the init here, while all ranks are in lockstep.
+        dist.all_reduce(torch.zeros(1, device=device), group=cross_pool_p2p_group)
 
     return World(
         world_size=world_size,
