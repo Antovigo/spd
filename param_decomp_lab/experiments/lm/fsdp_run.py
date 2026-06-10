@@ -107,11 +107,15 @@ from param_decomp_lab.seed import set_seed
 # The DCP train job streams the fineweb dataset from HF (parquet shards fetched over the
 # network on every rank). At N ranks the default 10s read timeout produces stragglers that
 # stall the world at the next collective; a generous download timeout lets the contended
-# reads complete instead of timing out. (Mirrors `THREE_POOL_SLURM_ENV` — the FSDP path does
-# no cross-pool p2p, so it needs only the HF-timeout widening, not `expandable_segments`.)
+# reads complete instead of timing out.
+# `expandable_segments` is for FRAGMENTATION here, not the pools' cross-pool deadlock: at
+# the memory-tight 12-layer / large-C / PPGD regime the allocator strands ~1 GB of
+# reserved-but-unallocated memory and OOMs by a few hundred MiB; expandable segments remap
+# the address space and reclaim it (the OOM error itself recommends it).
 FSDP_SLURM_ENV: dict[str, str] = {
     "HF_HUB_DOWNLOAD_TIMEOUT": "120",
     "HF_HUB_ETAG_TIMEOUT": "60",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
 }
 
 # Subdir under the run dir holding async-eval override config YAMLs (mirrors 3-pool).
