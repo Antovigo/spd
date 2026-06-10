@@ -33,6 +33,7 @@ from typing import Any
 import fire
 import torch
 import wandb
+from dotenv import load_dotenv
 from safetensors.torch import load_file
 
 from param_decomp.decomposition_targets import resolve_decomposition_targets
@@ -103,6 +104,7 @@ def _log_results_to_wandb(
     can't collide on a key). Keys ride dedicated `eval/step` / `slow_eval/step` axes —
     see the module docstring for why an explicit `wandb.log(step=...)` cannot work.
     """
+    load_dotenv(override=True)
     wandb.init(
         id=run_id,
         project=wandb_cfg.project,
