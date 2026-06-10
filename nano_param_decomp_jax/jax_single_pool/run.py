@@ -82,18 +82,22 @@ def _build_optimizers(cfg: ExperimentConfig):
 
 
 def _ensure_global(tree: object, mesh: Mesh) -> object:
-    """Pin process-local leaves (eagerly created scalars: step counters, Adam counts)
-    to a replicated mesh sharding. Multi-process orbax can only save GLOBAL arrays;
-    leaves that haven't passed through the jitted step are otherwise per-process
-    `SingleDeviceSharding` arrays and the save raises."""
+    """Re-materialize every array leaf as a well-formed GLOBAL array via an identity
+    jit with explicit out_shardings (existing NamedShardings preserved; everything
+    else replicated). Multi-controller orbax can only save global arrays — and an
+    eager `device_put(local, replicated-NamedSharding)` yields arrays whose
+    `addressable_shards` raise (jax 0.10 multi-process), while jit outputs with the
+    same sharding are well-formed. Scalars created eagerly (step counters, Adam
+    counts) need this before the first save."""
     repl = NamedSharding(mesh, P())
 
-    def fix(a: object) -> object:
-        if eqx.is_array(a) and not isinstance(a.sharding, NamedSharding):  # pyright: ignore[reportAttributeAccessIssue]
-            return jax.device_put(a, repl)
-        return a
+    def out_sharding(a: object) -> NamedSharding:
+        if eqx.is_array(a) and isinstance(a.sharding, NamedSharding):  # pyright: ignore[reportAttributeAccessIssue]
+            return a.sharding  # pyright: ignore[reportAttributeAccessIssue]
+        return repl
 
-    return jax.tree.map(fix, tree)
+    shardings = jax.tree.map(out_sharding, tree)
+    return jax.jit(lambda t: t, out_shardings=shardings)(tree)
 
 
 def _global_token_batch(local: np.ndarray, mesh: Mesh, global_batch: int) -> jax.Array:
