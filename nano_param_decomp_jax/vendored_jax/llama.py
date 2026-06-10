@@ -18,7 +18,7 @@ the clean + stochastic paths). RoPE uses the llama3 frequency rescaling.
 """
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import equinox as eqx
 import jax
@@ -112,25 +112,20 @@ def repeat_kv(x: Float[Array, "b kvh t hd"], n_rep: int) -> Float[Array, "b h t 
     return x.reshape(b, kvh * n_rep, t, hd)
 
 
-# Flash attention for the perf benchmark (fused, like torch's F.scaled_dot_product_attention).
-# Parity uses the naive path (matches torch's SDPBackend.MATH); set True only for throughput.
-USE_FLASH_ATTENTION = False
+def attn_implementation() -> Literal["cudnn", "xla"]:
+    """cuDNN flash attention on GPU; the XLA composite elsewhere (CPU tests). The
+    composite MATERIALIZES (B, H, T, T) score matrices — at seq 2048 that is ~2 GiB
+    per suffix forward per layer and was the dominant term in the trainer's OOM."""
+    return "cudnn" if jax.default_backend() == "gpu" else "xla"
 
 
 def causal_sdpa(q: Array, k: Array, v: Array) -> Array:
-    # q,k,v: (B, H, T, hd).
-    if USE_FLASH_ATTENTION:
-        # jax.nn.dot_product_attention takes (B, T, H, D)
-        qt, kt, vt = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
-        out = jax.nn.dot_product_attention(qt, kt, vt, is_causal=True)
-        return out.transpose(0, 2, 1, 3)
-    hd = q.shape[-1]
-    scores = jnp.einsum("bhqd,bhkd->bhqk", q, k) / jnp.sqrt(hd).astype(q.dtype)
-    t = q.shape[2]
-    causal = jnp.tril(jnp.ones((t, t), dtype=bool))
-    scores = jnp.where(causal, scores, jnp.finfo(scores.dtype).min)
-    attn = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(q.dtype)
-    return jnp.einsum("bhqk,bhkd->bhqd", attn, v)
+    # q,k,v: (B, H, T, hd); jax.nn.dot_product_attention takes (B, T, H, D).
+    qt, kt, vt = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
+    out = jax.nn.dot_product_attention(
+        qt, kt, vt, is_causal=True, implementation=attn_implementation()
+    )
+    return out.transpose(0, 2, 1, 3)
 
 
 # ----------------------------- component leaf (mirror ComponentLinear) -----------------------------

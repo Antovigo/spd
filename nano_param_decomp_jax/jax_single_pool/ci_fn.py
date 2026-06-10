@@ -17,7 +17,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray
-from vendored_jax.llama import apply_rope, rms_norm, rope_cos_sin
+from vendored_jax.llama import apply_rope, attn_implementation, rms_norm, rope_cos_sin
 
 from jax_single_pool.lm import SiteSpec
 
@@ -82,7 +82,9 @@ class CIBlock(eqx.Module):
         cos, sin = rope_cos_sin(inv_freq, t, x.dtype)
         q, k = apply_rope(q, k, cos, sin)
         qt, kt, vt = (a.transpose(0, 2, 1, 3) for a in (q, k, v))
-        y = jax.nn.dot_product_attention(qt, kt, vt, is_causal=False)  # bidirectional
+        y = jax.nn.dot_product_attention(
+            qt, kt, vt, is_causal=False, implementation=attn_implementation()
+        )  # bidirectional
         y = y.reshape(b, t, d)
         x = x + y @ self.wo.T
         h = _weightless_rms_norm(x, self.eps)
