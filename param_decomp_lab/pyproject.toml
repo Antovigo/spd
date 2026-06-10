@@ -36,6 +36,7 @@ pd-lm-3pool = "param_decomp_lab.experiments.lm.three_pool_run:cli"
 pd-lm-2pool = "param_decomp_lab.experiments.lm.two_pool_run:cli"
 pd-lm-fsdp = "param_decomp_lab.experiments.lm.fsdp_run:cli"
 pd-lm-layerwise = "param_decomp_lab.experiments.lm.layerwise:cli"
+pd-offline-eval = "param_decomp_lab.experiments.lm.offline_eval:cli"
 pd-pretrain = "param_decomp_lab.experiments.lm.pretrain.cli:cli"
 # Post-processing pipeline CLIs (SLURM-driven; lab subtrees).
 pd-clustering = "param_decomp_lab.clustering.scripts.run_pipeline:cli"
