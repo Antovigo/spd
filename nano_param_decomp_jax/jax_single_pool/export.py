@@ -38,7 +38,6 @@ from safetensors.numpy import save_file
 
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_step
 from jax_single_pool.ci_fn import CIFn
-from jax_single_pool.config import load_config
 from jax_single_pool.llama8b import (
     KINDS,
     DecompVU,
@@ -52,6 +51,7 @@ from jax_single_pool.llama8b import (
 from jax_single_pool.lm import SiteSpec
 from jax_single_pool.run_state import build_optimizers, init_train_state
 from jax_single_pool.sharding import dp_mesh
+from jax_single_pool.torch_config import load_run_dir_config
 
 CI_FN_PREFIX = "ci_fn._global_ci_fn"
 
@@ -162,7 +162,7 @@ def main() -> None:
     args = ap.parse_args()
     jax.config.update("jax_platforms", "cpu")
 
-    cfg = load_config(args.run_dir / "config.yaml")
+    cfg = load_run_dir_config(args.run_dir)
     layer_range = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
     lm = llama_decomposed_lm(llama31_8b_config(), layer_range, cfg.target.C)
 

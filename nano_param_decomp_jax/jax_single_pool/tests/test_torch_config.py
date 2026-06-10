@@ -122,3 +122,24 @@ def test_c49k_yaml_converts_with_documented_divergences(capsys: pytest.CaptureFi
     assert converted.vu_optimizer.lr == 5e-05 and converted.ci_optimizer.lr == 5e-05
     assert converted.eval is not None and converted.eval.pgd is not None
     assert converted.wandb is not None and converted.wandb.entity is None
+
+
+def test_load_run_dir_config_handles_wrapper_runs(tmp_path: Path):
+    """The exporter reads run dirs via `load_run_dir_config`; wrapper runs pin the
+    wrapper as config.yaml + the torch yaml as torch_config.yaml (run.py's
+    `_pin_config_copy`), and the rebuilt config must equal the launch-time conversion."""
+    wrapper = CONFIGS / "llama8b_l18_C49k_200k_from_torch.yaml"
+    expected, torch_yaml_path, _ = load_torch_wrapper(wrapper)
+    (tmp_path / "config.yaml").write_text(wrapper.read_text())
+    (tmp_path / "torch_config.yaml").write_text(torch_yaml_path.read_text())
+    from jax_single_pool.torch_config import load_run_dir_config
+
+    assert load_run_dir_config(tmp_path) == expected
+
+    native = CONFIGS / "llama8b_l18_b128_cmp32.yaml"
+    native_dir = tmp_path / "native"
+    native_dir.mkdir()
+    (native_dir / "config.yaml").write_text(native.read_text())
+    from jax_single_pool.config import load_config
+
+    assert load_run_dir_config(native_dir) == load_config(native)

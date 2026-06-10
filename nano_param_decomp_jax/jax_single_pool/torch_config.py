@@ -58,6 +58,7 @@ from jax_single_pool.config import (
     TargetConfig,
     VUOptimizerConfig,
     WandbConfig,
+    load_config,
 )
 from jax_single_pool.train import ImpMinConfig, LossCoeffs, SourceAdamConfig
 
@@ -368,3 +369,24 @@ def load_torch_wrapper(wrapper_path: Path) -> tuple[ExperimentConfig, Path, dict
         remat_recon_forwards=raw["remat_recon_forwards"],
     )
     return cfg, torch_yaml_path, torch_raw
+
+
+def load_run_dir_config(run_dir: Path) -> ExperimentConfig:
+    """Rebuild a run's `ExperimentConfig` from its pinned config copies (for tools
+    that read finished/live run dirs, e.g. the exporter).
+
+    Native runs pin only `config.yaml`. Torch-wrapper runs pin the wrapper as
+    `config.yaml` AND the referenced torch yaml beside it as `torch_config.yaml`;
+    the wrapper's own (launch-relative) path field is ignored — the pinned copy is
+    the source of truth."""
+    raw = yaml.safe_load((run_dir / "config.yaml").read_text())
+    if "torch_config" not in raw:
+        return load_config(run_dir / "config.yaml")
+    assert set(raw) == WRAPPER_KEYS, f"{run_dir}/config.yaml: keys must be {sorted(WRAPPER_KEYS)}"
+    torch_raw = yaml.safe_load((run_dir / "torch_config.yaml").read_text())
+    return convert_torch_lm_config(
+        LMExperimentConfig(**torch_raw),
+        run_name=raw["run_name"],
+        out_dir=Path(raw["out_dir"]),
+        remat_recon_forwards=raw["remat_recon_forwards"],
+    )
