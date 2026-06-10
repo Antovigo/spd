@@ -23,24 +23,28 @@ produces a C-sharded result; `(.) @ U` contracts the sharded C and `jax.jit` ins
 the reduce-scatter / all-reduce. No manual collectives.
 """
 
+from functools import partial
 from typing import Any
 
 import equinox as eqx
 import jax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jaxtyping import Array, PRNGKeyArray
 
-from jax_single_pool.ci_fn import CIFn
-from jax_single_pool.llama8b import DecompVU, Target
+from jax_single_pool.ci_fn import CIArch, CIFn, init_ci_fn
+from jax_single_pool.llama8b import DecompVU, LlamaConfig, Target, init_decomp_vu
+from jax_single_pool.lm import SiteSpec
 from jax_single_pool.sharding import dp_mesh
 from jax_single_pool.sharding import shard_batch as _generic_shard_batch
+from jax_single_pool.train import init_sources
 
 __all__ = [
     "dp_mesh",
     "replicate_target",
-    "shard_decomp_vu",
-    "shard_ci_fn",
-    "shard_source",
+    "init_decomp_vu_sharded",
+    "init_ci_fn_sharded",
+    "init_sources_sharded",
     "shard_batch",
 ]
 
@@ -54,43 +58,65 @@ def replicate_target(tgt: Target, mesh: Mesh) -> Target:
     return jax.tree.map(lambda a: _put(a, repl), tgt)
 
 
-def shard_decomp_vu(vu: DecompVU, mesh: Mesh) -> DecompVU:
-    """Shard each V/U over its C axis. Arrays carry a leading layer axis: V is
-    (L, d_in, C) -> shard axis 2; U is (L, C, d_out) -> shard axis 1. Both put C on `dp`."""
+def init_decomp_vu_sharded(
+    cfg: LlamaConfig, C: int, n_layers: int, key: PRNGKeyArray, mesh: Mesh
+) -> DecompVU:
+    """Seeded V/U init directly into the C-sharded global placement.
+
+    The init runs under jit with `out_shardings`, so each device generates only its own
+    shard and no host-side full tree ever exists. (Eager `device_put` of a host tree
+    onto a multi-process non-replicated sharding triggers jax's cross-process
+    value-equality check — a `process_allgather` of the whole tree, a 168 GiB
+    allocation for a 12-layer chunk at C=24576.)
+
+    Arrays carry a leading layer axis: V is (L, d_in, C) -> C on `dp` (axis 2); U is
+    (L, C, d_out) -> axis 1."""
     n = mesh.devices.size
-    assert vu.Vg.shape[2] % n == 0, f"C={vu.Vg.shape[2]} not divisible by mesh size {n}"
+    assert C % n == 0, f"C={C} not divisible by mesh size {n}"
     shard_V = NamedSharding(mesh, P(None, None, "dp"))  # (L, d_in, C)
     shard_U = NamedSharding(mesh, P(None, "dp", None))  # (L, C, d_out)
-    return DecompVU(
-        Vg=jax.device_put(vu.Vg, shard_V),
-        Ug=jax.device_put(vu.Ug, shard_U),
-        Vu=jax.device_put(vu.Vu, shard_V),
-        Uu=jax.device_put(vu.Uu, shard_U),
-        Vd=jax.device_put(vu.Vd, shard_V),
-        Ud=jax.device_put(vu.Ud, shard_U),
-    )
+    init = partial(init_decomp_vu, cfg, C, n_layers)
+
+    def place(path: tuple[Any, ...], shape: jax.ShapeDtypeStruct) -> NamedSharding:
+        field_name = path[-1].name
+        assert field_name[0] in ("V", "U"), field_name
+        assert shape.shape[2 if field_name[0] == "V" else 1] == C, (field_name, shape.shape)
+        return shard_V if field_name[0] == "V" else shard_U
+
+    out_shardings = jax.tree_util.tree_map_with_path(place, jax.eval_shape(init, key))
+    return jax.jit(init, out_shardings=out_shardings)(key)
 
 
-def shard_ci_fn(ci_fn: CIFn, mesh: Mesh) -> CIFn:
-    """Shard the CI fn's largest matrices over `dp`. `out_w` (d_model, ΣC) shards the
-    ΣC axis; `in_proj_w` (total_in, d_model) and per-block weights shard d_model where
-    it is divisible; 1-D vectors (biases, inv_freq) replicate."""
+def init_ci_fn_sharded(
+    arch: CIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray, mesh: Mesh
+) -> CIFn:
+    """Seeded CI-fn init directly into its sharded global placement (jit +
+    `out_shardings`; same no-host-tree rationale as `init_decomp_vu_sharded`).
+
+    Placement: the largest matrices shard over `dp` — `out_w` (d_model, ΣC) on the ΣC
+    axis, per-block 2-D weights on their last axis where divisible; 1-D vectors
+    (biases, inv_freq) replicate."""
     n = mesh.devices.size
     repl = NamedSharding(mesh, P())
     shard_last = NamedSharding(mesh, P(None, "dp"))
+    init = partial(init_ci_fn, arch, sites)
 
-    def place(a: Any) -> Any:
-        if not eqx.is_array(a):
-            return a
-        if a.ndim == 2 and a.shape[-1] % n == 0:
-            return jax.device_put(a, shard_last)
-        return jax.device_put(a, repl)
+    def place(shape: jax.ShapeDtypeStruct) -> NamedSharding:
+        return shard_last if shape.ndim == 2 and shape.shape[-1] % n == 0 else repl
 
-    return jax.tree.map(place, ci_fn)
+    out_shardings = jax.tree.map(place, jax.eval_shape(init, key))
+    return jax.jit(init, out_shardings=out_shardings)(key)
 
 
-def shard_source(source: dict[str, jax.Array], mesh: Mesh) -> dict[str, jax.Array]:
-    """Broadcast PGD source `{site: (1, T, C+1)}` -> REPLICATED over `dp`.
+def init_sources_sharded(
+    site_names: tuple[str, ...],
+    site_component_counts: tuple[int, ...],
+    seq_len: int,
+    key: PRNGKeyArray,
+    mesh: Mesh,
+) -> dict[str, Array]:
+    """Seeded PGD-source init `{site: (1, T, C+1)}` -> REPLICATED over `dp` (jit +
+    `out_shardings`; same no-host-tree rationale as `init_decomp_vu_sharded`).
 
     The source is a single adversarial source shared across the whole global batch
     (leading batch axis = 1, broadcast); it combines elementwise with the batch-sharded
@@ -100,7 +126,8 @@ def shard_source(source: dict[str, jax.Array], mesh: Mesh) -> dict[str, jax.Arra
     weight-delta channel C+1 is odd (8193) and not divisible by the mesh size, and would
     also fight the batch-sharded elementwise combine."""
     repl = NamedSharding(mesh, P())
-    return {s: jax.device_put(v, repl) for s, v in source.items()}
+    init = partial(init_sources, site_names, site_component_counts, seq_len)
+    return jax.jit(init, out_shardings=repl)(key)
 
 
 def shard_batch(resid_global: jax.Array, mesh: Mesh) -> jax.Array:

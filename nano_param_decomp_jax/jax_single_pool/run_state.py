@@ -13,12 +13,15 @@ from jax import random
 from jax.sharding import Mesh
 from jaxtyping import PRNGKeyArray
 
-from jax_single_pool.ci_fn import init_ci_fn
 from jax_single_pool.config import ExperimentConfig
-from jax_single_pool.llama8b import LayerRange, init_decomp_vu, llama31_8b_config
-from jax_single_pool.llama8b_sharding import shard_ci_fn, shard_decomp_vu, shard_source
+from jax_single_pool.llama8b import LayerRange, llama31_8b_config
+from jax_single_pool.llama8b_sharding import (
+    init_ci_fn_sharded,
+    init_decomp_vu_sharded,
+    init_sources_sharded,
+)
 from jax_single_pool.lm import DecomposedLM
-from jax_single_pool.train import TrainState, init_sources, init_sources_adam_state
+from jax_single_pool.train import TrainState, init_sources_adam_state
 
 
 def build_optimizers(cfg: ExperimentConfig):
@@ -45,13 +48,12 @@ def init_train_state(
 ) -> TrainState:
     llama_cfg = llama31_8b_config()
     layer_range = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
-    components = shard_decomp_vu(
-        init_decomp_vu(llama_cfg, cfg.target.C, layer_range.n_layers, init_key), mesh
+    components = init_decomp_vu_sharded(
+        llama_cfg, cfg.target.C, layer_range.n_layers, init_key, mesh
     )
-    ci_fn = shard_ci_fn(init_ci_fn(cfg.ci_fn, lm.sites, random.fold_in(init_key, 1)), mesh)
-    sources = shard_source(
-        init_sources(lm.site_names, tuple(s.C for s in lm.sites), cfg.data.seq_len, src_key),
-        mesh,
+    ci_fn = init_ci_fn_sharded(cfg.ci_fn, lm.sites, random.fold_in(init_key, 1), mesh)
+    sources = init_sources_sharded(
+        lm.site_names, tuple(s.C for s in lm.sites), cfg.data.seq_len, src_key, mesh
     )
     return TrainState(
         components=components,

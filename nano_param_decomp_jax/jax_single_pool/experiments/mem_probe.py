@@ -16,7 +16,7 @@ from jax import random
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from jax_single_pool.ci_fn import CIArch, init_ci_fn
+from jax_single_pool.ci_fn import CIArch
 
 # the smoke's _random_target lives in the runner
 from jax_single_pool.experiments.llama8b_real import (
@@ -24,16 +24,15 @@ from jax_single_pool.experiments.llama8b_real import (
 )
 from jax_single_pool.llama8b import (
     LayerRange,
-    init_decomp_vu,
     llama31_8b_config,
     llama_decomposed_lm,
 )
 from jax_single_pool.llama8b_sharding import (
     dp_mesh,
+    init_ci_fn_sharded,
+    init_decomp_vu_sharded,
+    init_sources_sharded,
     replicate_target,
-    shard_ci_fn,
-    shard_decomp_vu,
-    shard_source,
 )
 from jax_single_pool.sharding import init_distributed
 from jax_single_pool.train import (
@@ -41,7 +40,6 @@ from jax_single_pool.train import (
     LossCoeffs,
     SourceAdamConfig,
     TrainState,
-    init_sources,
     init_sources_adam_state,
     make_train_step,
     subset_chunk_plan,
@@ -72,10 +70,10 @@ def main() -> None:
     lm = llama_decomposed_lm(cfg, rng, C)
 
     target = replicate_target(_random_target(cfg, rng, random.PRNGKey(0)), mesh)
-    vu = shard_decomp_vu(init_decomp_vu(cfg, C, rng.n_layers, random.PRNGKey(1)), mesh)
-    ci_fn = shard_ci_fn(init_ci_fn(CIArch(4096, 4, 64, 16384), lm.sites, random.PRNGKey(2)), mesh)
-    src = shard_source(
-        init_sources(lm.site_names, tuple(s.C for s in lm.sites), seq, random.PRNGKey(3)), mesh
+    vu = init_decomp_vu_sharded(cfg, C, rng.n_layers, random.PRNGKey(1), mesh)
+    ci_fn = init_ci_fn_sharded(CIArch(4096, 4, 64, 16384), lm.sites, random.PRNGKey(2), mesh)
+    src = init_sources_sharded(
+        lm.site_names, tuple(s.C for s in lm.sites), seq, random.PRNGKey(3), mesh
     )
     opt_vu = optax.chain(
         optax.clip_by_global_norm(0.01),

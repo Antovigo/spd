@@ -55,11 +55,11 @@ from jax_single_pool.llama8b import (
 )
 from jax_single_pool.llama8b_sharding import (
     dp_mesh,
+    init_ci_fn_sharded,
+    init_decomp_vu_sharded,
+    init_sources_sharded,
     replicate_target,
     shard_batch,
-    shard_ci_fn,
-    shard_decomp_vu,
-    shard_source,
 )
 from jax_single_pool.sharding import init_distributed
 from jax_single_pool.train import (
@@ -166,9 +166,6 @@ def main():
             random.normal(random.PRNGKey(7), (gbatch, args.seq, cfg.n_embd)) * 0.5
         ).astype(DT)
 
-    vu = init_decomp_vu(cfg, args.C, rng.n_layers, random.PRNGKey(1))  # fp32 masters
-    ci_fn = init_ci_fn(arch, lm.sites, random.PRNGKey(2))  # fp32 masters
-
     # Production optimizers (SPEC S19/S20): AdamW wd=0, cosine→0.1×; V/U clipped at 0.01.
     sched_vu = optax.cosine_decay_schedule(1.5e-4, args.total_steps, alpha=0.1)
     sched_ci = optax.cosine_decay_schedule(5.0e-5, args.total_steps, alpha=0.1)
@@ -178,22 +175,23 @@ def main():
     )
     opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
 
-    # U[0,1] init (SPEC S15); fp32 state, trailing channel = the weight-delta source.
-    src = init_sources(lm.site_names, tuple(s.C for s in lm.sites), args.seq, random.PRNGKey(3))
-
     target = replicate_target(target, mesh)
+    site_Cs = tuple(s.C for s in lm.sites)
+    # fp32 masters; source init U[0,1] (SPEC S15), trailing channel = the weight-delta source.
     if args.shard:
-        vu = shard_decomp_vu(vu, mesh)
-        ci_fn = shard_ci_fn(ci_fn, mesh)
-        src = shard_source(src, mesh)
-        resid = shard_batch(resid_global, mesh)
+        vu = init_decomp_vu_sharded(cfg, args.C, rng.n_layers, random.PRNGKey(1), mesh)
+        ci_fn = init_ci_fn_sharded(arch, lm.sites, random.PRNGKey(2), mesh)
+        src = init_sources_sharded(lm.site_names, site_Cs, args.seq, random.PRNGKey(3), mesh)
     else:
         repl = NamedSharding(mesh, P())
         put = lambda a: jax.device_put(a, repl) if eqx.is_array(a) else a  # noqa: E731
-        vu = jax.tree.map(put, vu)
-        ci_fn = jax.tree.map(put, ci_fn)
-        src = {k: jax.device_put(v, repl) for k, v in src.items()}
-        resid = shard_batch(resid_global, mesh)
+        vu = jax.tree.map(put, init_decomp_vu(cfg, args.C, rng.n_layers, random.PRNGKey(1)))
+        ci_fn = jax.tree.map(put, init_ci_fn(arch, lm.sites, random.PRNGKey(2)))
+        src = {
+            k: jax.device_put(v, repl)
+            for k, v in init_sources(lm.site_names, site_Cs, args.seq, random.PRNGKey(3)).items()
+        }
+    resid = shard_batch(resid_global, mesh)
 
     # ── faithfulness warmup (SPEC S21): V/U only, before the main loop ──
     if args.faith_warmup > 0:
