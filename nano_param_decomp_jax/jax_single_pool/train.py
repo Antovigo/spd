@@ -196,29 +196,34 @@ def uniform_k_subset_routes(
 # ───────────────────────────── recon plans (SPEC S10/S11) ─────────────────────────────
 
 
-class UniformKSubsetRouting(NamedTuple):
-    """Per-position uniform-k-subset routing over the forward's live sites."""
-
-
-class AllRouting(NamedTuple):
-    """Every position routes to every live site (the torch per-site / PPGD routing)."""
-
-
-RoutingSpec = UniformKSubsetRouting | AllRouting
+RoutingSampler = Callable[[PRNGKeyArray, tuple[int, int]], dict[str, Array] | None]
+"""`(key, (B, T)) -> {site: bool[B, T]} | None` (None = route everywhere). The torch
+`Router.get_masks` made pure: a fresh draw per step requires the key threaded in —
+samplers run INSIDE the jitted step, so they must be traceable (SPEC R1). The plan's
+STRUCTURE (live-sets, sampler identities) is static; only the key varies per step."""
 
 
 class ReconForward(NamedTuple):
     """One stochastic recon forward: which sites run their decomposed path (`live` —
     everything else takes the frozen `x @ W` path, the ~9x-cheaper non-decomposed
-    matmul) and how positions route among them. The routing is a SAMPLER spec, not a
-    mask: draws must be fresh per step (SPEC R1), so sampling happens inside the step."""
+    matmul) and a sampler for how positions route among them."""
 
     live: tuple[str, ...]
-    routing: RoutingSpec
+    sample_routing: RoutingSampler
 
 
 ReconPlan = tuple[ReconForward, ...]
-"""The stochastic-recon loss is the mean over the plan's forwards of KL/(B·T)."""
+"""The stochastic-recon loss is the mean over the plan's forwards of KL/(B·T). Any
+list of (live-set, routing-sampler) pairs is a valid plan; live-sets may differ
+across entries (each traces its own forward) but the plan is fixed across steps."""
+
+
+def uniform_k_routing(live: tuple[str, ...]) -> RoutingSampler:
+    return lambda key, lead: uniform_k_subset_routes(key, live, lead)
+
+
+def route_all(_key: PRNGKeyArray, _lead: tuple[int, int]) -> None:
+    return None
 
 
 def subset_chunk_plan(
@@ -227,7 +232,7 @@ def subset_chunk_plan(
     """The production plan: partition into sequential chunks, `n_samples` uniform-k
     forwards per chunk (torch `SubsetReconPlan` over `ThreePoolTopology` chunks)."""
     return tuple(
-        ReconForward(live=chunk, routing=UniformKSubsetRouting())
+        ReconForward(live=chunk, sample_routing=uniform_k_routing(chunk))
         for chunk in chunk_sites(site_names, sites_per_chunk)
         for _ in range(n_samples)
     )
@@ -236,7 +241,7 @@ def subset_chunk_plan(
 def per_site_plan(site_names: tuple[str, ...]) -> ReconPlan:
     """One forward per site, routed everywhere — the historical "layerwise" loop
     (torch `PerSitePlan` / `StochasticReconLayerwiseLoss`)."""
-    return tuple(ReconForward(live=(s,), routing=AllRouting()) for s in site_names)
+    return tuple(ReconForward(live=(s,), sample_routing=route_all) for s in site_names)
 
 
 def make_ppgd_masks(
@@ -331,11 +336,7 @@ def make_train_step(
                 u = random.uniform(random.fold_in(u_key, j), ci_s.shape, COMPUTE_DT)
                 masks[s] = ci_s + (1.0 - ci_s) * u
                 delta_masks[s] = random.uniform(random.fold_in(dm_key, j), (b, t), COMPUTE_DT)
-            match fwd.routing:
-                case UniformKSubsetRouting():
-                    routes = uniform_k_subset_routes(route_key, fwd.live, (b, t))
-                case AllRouting():
-                    routes = None
+            routes = fwd.sample_routing(route_key, (b, t))
             pred = ckpt_masked(frozen, vu_c, resid, masks, delta_masks, routes, fwd.live)
             total = total + kl_per_position(pred, cln)
         return total / len(recon_plan)
