@@ -118,7 +118,7 @@ def test_c49k_yaml_converts_with_documented_divergences(capsys: pytest.CaptureFi
     assert "fp32 frozen target" in printed
     assert converted.target.C == 49152
     assert converted.steps == 200000
-    assert converted.data.global_batch == 128 and converted.data.seq_len == 2048
+    assert converted.data.global_batch == 512 and converted.data.seq_len == 2048
     assert converted.vu_optimizer.lr == 5e-05 and converted.ci_optimizer.lr == 5e-05
     assert converted.eval is not None and converted.eval.pgd is not None
     assert converted.wandb is not None and converted.wandb.entity is None

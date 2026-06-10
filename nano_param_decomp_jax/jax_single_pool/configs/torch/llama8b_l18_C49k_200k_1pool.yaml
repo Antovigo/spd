@@ -10,6 +10,8 @@
 #   4. cadence.save_every: 25000 -> 5000 (overnight crash costs <=40 min, not 3 h).
 #   5. C: 30000 -> 49152 per Oli (2x the b512 run's C=24576; also unlocks a 32-GPU
 #      mesh — 30000's gcd with batch 128 capped the mesh at 16).
+#   6. pd.batch_size: 128 -> 512 per Oli. NOTE: lrs stay at upstream's 5e-5 (tuned
+#      at B=128); the lr/batch interaction is deliberately NOT compensated.
 # Everything else in pd: (C=30000, lrs 5e-5/5e-5, 200k steps, batch 128, eval set)
 # is upstream-identical. weights_dtype is upstream's default fp32; the JAX frozen
 # target runs bf16 (converter prints the documented divergence).
@@ -31,7 +33,7 @@ data:
   tokenizer_name: meta-llama/Llama-3.1-8B
   train_split: train
 eval:
-  batch_size: 128
+  batch_size: 512
   every: 1000
   metrics:
   - n_batches_accum: 1
@@ -57,7 +59,7 @@ eval:
   slow_every: 10000
   slow_on_first_step: true
 pd:
-  batch_size: 128
+  batch_size: 512
   ci_config:
     fn_type: global_shared_transformer
     hidden_dims: null
