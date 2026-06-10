@@ -52,11 +52,27 @@ def _flatten_config(cfg_dict: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
+def _format_started(iso: str | None) -> str:
+    """Concise `YYYY-MM-DD HH:MM` from an ISO timestamp; NA when absent."""
+    if iso is None:
+        return NA
+    return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M")
+
+
 def _duration_hours(started_at: str | None, finished_at: str | None) -> str:
     if started_at is None or finished_at is None:
         return NA
     delta = datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
     return f"{delta.total_seconds() / 3600:.2f}"
+
+
+def _format_metric_value(v: Any) -> str:
+    """Scientific notation for numeric metric values (losses); raw str otherwise."""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, int | float):
+        return f"{v:.3e}"
+    return str(v)
 
 
 def _final_metrics(metrics_path: Path, keys: list[str]) -> dict[str, str]:
@@ -75,7 +91,7 @@ def _final_metrics(metrics_path: Path, keys: list[str]) -> dict[str, str]:
             continue
         for key in keys:
             if key in record:
-                latest[key] = str(record[key])
+                latest[key] = _format_metric_value(record[key])
     return latest
 
 
@@ -133,7 +149,7 @@ def build_index(runs_dir: Path, out_path: Path, metric_keys: list[str]) -> None:
                 [
                     row.run_id,
                     row.label if row.label is not None else NA,
-                    row.started_at if row.started_at is not None else NA,
+                    _format_started(row.started_at),
                     row.duration_hours,
                     *(row.metrics[k] for k in metric_keys),
                     hyperparameters[row.run_id],
