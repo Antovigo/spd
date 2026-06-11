@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal, override
 import torch
 import torch.distributed as dist
 from jaxtyping import Float, Int
-from pydantic import Field, NonNegativeFloat, PositiveInt
+from pydantic import BeforeValidator, Field, NonNegativeFloat, PositiveInt
 from torch import Tensor
 
 from param_decomp.base_config import BaseConfig, Probability
@@ -79,12 +79,28 @@ class BSCScope(BaseConfig):
     type: Literal["bsc"] = "bsc"
 
 
+# Stored run configs (`runs/*/experiment_config.yaml`) predate the shape-literal scope
+# names; alias exactly the literals that exist in stored data so old runs keep loading.
+# Delete once stored runs are migrated.
+_LEGACY_SCOPE_TYPE_ALIASES = {
+    "broadcast_across_batch": "sc",
+    "per_batch_per_position": "bsc",
+}
+
+
+def _alias_legacy_scope_type(value: Any) -> Any:
+    if isinstance(value, dict) and value.get("type") in _LEGACY_SCOPE_TYPE_ALIASES:
+        return {**value, "type": _LEGACY_SCOPE_TYPE_ALIASES[value["type"]]}
+    return value
+
+
 # Scope literals spell the stored source shape, read left-to-right in tensor order
 # (batch, seq, C). `c` is rank-polymorphic (all leading dims singleton); the
 # seq-bearing scopes require a sequence axis and are illegal off-LM.
 PersistentPGDSourceScope = Annotated[
     CScope | SCScope | NSCScope | BSCScope,
     Field(discriminator="type"),
+    BeforeValidator(_alias_legacy_scope_type),
 ]
 
 

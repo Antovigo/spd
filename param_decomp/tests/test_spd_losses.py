@@ -3,6 +3,7 @@ from typing import override
 import torch
 import torch.nn as nn
 from jaxtyping import Float
+from pydantic import TypeAdapter
 from torch import Tensor
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
@@ -23,11 +24,13 @@ from param_decomp.metrics.persistent_pgd_state import (
     BSCScope,
     CScope,
     NSCScope,
+    PersistentPGDSourceScope,
     PersistentPGDState,
     SCScope,
     SignPGDConfig,
     scope_needs_replica_sync,
 )
+from param_decomp.metrics.pgd_masked_recon import PGDReconLossConfig
 from param_decomp.metrics.stochastic_recon import stochastic_recon_loss
 from param_decomp.metrics.stochastic_recon_layerwise import (
     stochastic_recon_layerwise_loss,
@@ -812,10 +815,10 @@ class TestPersistentPGDReconLoss:
         cross-rank sync.
 
         `bsc` sources are independent per batch element, so a
-        batch split is just slicing — no sync. Replicated scopes (single /
-        broadcast / repeat) share sources across the batch and need broadcast-init
+        batch split is just slicing — no sync. Replicated scopes (`c` / `sc` /
+        `nsc`) share sources across the batch and need broadcast-init
         + grad-reduce. Regression guard: the 3-pool source path relies on this
-        being False for per-batch-per-position so it can step on each rank's own
+        being False for `bsc` so it can step on each rank's own
         grads without a reduce; an earlier bug unconditionally reduced and mixed
         unrelated per-position sources across PPGD ranks.
         """
@@ -823,6 +826,26 @@ class TestPersistentPGDReconLoss:
         assert scope_needs_replica_sync(CScope()) is True
         assert scope_needs_replica_sync(SCScope()) is True
         assert scope_needs_replica_sync(NSCScope(n_sources=2)) is True
+
+    def test_legacy_scope_literals_alias_to_shape_literals(self: object) -> None:
+        """Stored run configs predate the shape-literal scope names; both scope
+        families must keep parsing the legacy literals that exist in stored data."""
+        scope_adapter = TypeAdapter[PersistentPGDSourceScope](PersistentPGDSourceScope)
+        assert isinstance(
+            scope_adapter.validate_python({"type": "per_batch_per_position"}), BSCScope
+        )
+        assert isinstance(
+            scope_adapter.validate_python({"type": "broadcast_across_batch"}), SCScope
+        )
+
+        legacy_pgd_cfg = PGDReconLossConfig.model_validate(
+            {"init": "random", "step_size": 0.1, "n_steps": 1, "mask_scope": "shared_across_batch"}
+        )
+        assert legacy_pgd_cfg.mask_scope == "c"
+        legacy_pgd_cfg = PGDReconLossConfig.model_validate(
+            {"init": "random", "step_size": 0.1, "n_steps": 1, "mask_scope": "unique_per_datapoint"}
+        )
+        assert legacy_pgd_cfg.mask_scope == "bsc"
 
     def test_masks_persist_across_calls(self: object) -> None:
         """Test that masks persist and accumulate updates across calls."""

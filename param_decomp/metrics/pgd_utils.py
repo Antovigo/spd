@@ -1,9 +1,10 @@
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import torch
 from jaxtyping import Float
+from pydantic import BeforeValidator
 from torch import Tensor
 from torch.distributed import ReduceOp
 
@@ -21,10 +22,25 @@ from param_decomp.metrics.base import LossMetricConfig
 
 PGDInitStrategy = Literal["random", "ones", "zeroes"]
 
+# Stored run configs predate the shape-literal scope names; alias exactly the literals
+# that exist in stored data (`unique_per_datapoint` occurs only in LM runs, hence `bsc`).
+# Delete once stored runs are migrated.
+_LEGACY_MASK_SCOPE_ALIASES = {
+    "shared_across_batch": "c",
+    "unique_per_datapoint": "bsc",
+}
+
+
+def _alias_legacy_mask_scope(value: Any) -> Any:
+    if isinstance(value, str):
+        return _LEGACY_MASK_SCOPE_ALIASES.get(value, value)
+    return value
+
+
 # Scope literals spell the adversarial-source shape in tensor order (batch, seq, C).
 # `c` is one shared vector, rank-polymorphic and DP-synced; `bc` (no seq axis) and
 # `bsc` (LM) are independent per batch element, and must match the batch rank.
-MaskScope = Literal["c", "bc", "bsc"]
+MaskScope = Annotated[Literal["c", "bc", "bsc"], BeforeValidator(_alias_legacy_mask_scope)]
 
 
 class PGDConfig(LossMetricConfig):
