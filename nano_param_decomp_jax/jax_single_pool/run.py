@@ -143,6 +143,15 @@ class MetricsSink:
                 resume="allow",
                 config=raw_cfg,
             )
+            # Both eval namespaces ride dedicated step axes (torch convention,
+            # infra/wandb.py): pd-offline-eval logs them retroactively into this
+            # run and CANNOT pass step= (wandb silently drops writes behind the
+            # live head), so in-loop eval stamps the same axis field and the two
+            # writers share panels. The offline job redefines these — idempotent.
+            wandb.define_metric("eval/step")
+            wandb.define_metric("eval/*", step_metric="eval/step")
+            wandb.define_metric("slow_eval/step")
+            wandb.define_metric("slow_eval/*", step_metric="slow_eval/step")
             self._wandb = wandb
 
     def log(self, step: int, record: dict[str, float]) -> None:
@@ -336,6 +345,7 @@ def train(
                 for k, v in eval_metrics.items():
                     metric_sums[k] = metric_sums.get(k, jnp.zeros(())) + v
             eval_record = {f"eval/{k}": float(v) / cfg.eval.n_steps for k, v in metric_sums.items()}
+            eval_record["eval/step"] = now_step
             sink.log(now_step, eval_record)
             if is_main:
                 headline = {
