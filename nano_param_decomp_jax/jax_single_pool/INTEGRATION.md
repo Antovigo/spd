@@ -66,6 +66,15 @@ flowchart LR
 
 ## Remaining gaps, in dependency order
 
+> **2026-06-11 update — THE UNIFICATION LANDED**: gaps 1, 3, 4-partial, and 8 closed
+> in one pass. Everything now lives on `feature/fsdp-lm-trainer` in one checkout:
+> `param_decomp_config/` merged (with the shape-spelled scope renames + legacy-alias
+> validators), the JAX distribution merged in as `nano_param_decomp_jax/` (spike dirs
+> deleted), scope literals synced across both stacks. Still open: gap 2 (collapse the
+> jax-internal config dataclasses), the rest of gap 4 (native yaml schema + run_id
+> optionality + double config pin — gated on the live C49k run), gaps 5-7. The frozen
+> `~/pd-nano-jax-jaxsp` clone serves the live run's requeues until it ends.
+
 1. **Merge `refactor/shared-config-package`** (torch repo; awaiting Oli's review). Unblocks: pin the jax git dep to main; delete the mirrored-schema risk forever.
 2. **Collapse the jax-internal config dataclasses.** `config.py`'s `ExperimentConfig` tree duplicates information the shared schema already carries; after (1), the converter could emit/consume the shared types directly plus a small jax-runtime-knobs struct (`remat`, identity). Kills the last duplicated schema.
 3. **Merge `feature/jax-site-generality`** (gate: the live C49k run ends — checkpoint pytrees are incompatible and requeues execute from the live tree). Brings q/k/v/o + per-site C + fresh-PGD + `LlamaSimpleMLP` to mainline.

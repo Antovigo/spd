@@ -67,12 +67,12 @@ from param_decomp_config.lm import (
 )
 from param_decomp_config.losses import (
     AdamPGDConfig,
-    SCScope,
     ChunkwiseSubsetReconLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
+    SCScope,
     StochasticReconSubsetLossConfig,
     UniformKSubsetRoutingConfig,
 )
@@ -284,9 +284,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
             case CI_L0Config():
                 ci_l0 = metric
             case PGDReconLossConfig():
-                assert metric.init == "random" and metric.mask_scope == "c", (
-                    metric
-                )
+                assert metric.init == "random" and metric.mask_scope == "c", metric
                 pgd = EvalPGDConfig(n_steps=metric.n_steps, step_size=metric.step_size)
             case _ if metric.type in OFFLINE_EVAL_METRIC_TYPES:
                 skipped_offline.append(metric.type)
