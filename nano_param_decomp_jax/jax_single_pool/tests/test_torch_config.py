@@ -143,3 +143,17 @@ def test_load_run_dir_config_handles_wrapper_runs(tmp_path: Path):
     from jax_single_pool.config import load_config
 
     assert load_run_dir_config(native_dir) == load_config(native)
+
+
+def test_offline_eval_submission_argv(tmp_path: Path):
+    from jax_single_pool.run import offline_eval_submission_argv
+
+    assert offline_eval_submission_argv(tmp_path, 5000) is None  # native run: no torch yaml
+    (tmp_path / "torch_config.yaml").write_text("pd: {}\n")
+    assert offline_eval_submission_argv(tmp_path, 0) is None  # init checkpoint
+    argv = offline_eval_submission_argv(tmp_path, 5000)
+    assert argv is not None and argv[0] == "sbatch"
+    assert f"--job-name=jsp-oeval-{tmp_path.name}" in argv
+    assert "--dependency=singleton" in argv
+    assert argv[-2:] == [str(tmp_path), "5000"]
+    assert Path(argv[-3]).name == "offline_eval_once.sbatch" and Path(argv[-3]).exists()
