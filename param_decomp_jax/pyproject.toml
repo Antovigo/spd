@@ -1,7 +1,7 @@
 [project]
-name = "nano-pd-jax"
+name = "param-decomp-jax"
 version = "0.0.1"
-description = "JAX port of nano_param_decomp"
+description = "The JAX single-pool VPD trainer distribution"
 requires-python = ">=3.10"
 dependencies = [
     "jax==0.10.1",
@@ -16,7 +16,7 @@ dependencies = [
     "orbax-checkpoint==0.12.0",
     "wandb==0.21.0",
     # satisfied by the sibling in-tree package: install both editably in one command,
-    # `uv pip install -e ./param_decomp_config -e './nano_param_decomp_jax[cuda]'`
+    # `uv pip install -e ./param_decomp_config -e './param_decomp_jax[cuda]'`
     "param-decomp-config==0.0.1",
 ]
 

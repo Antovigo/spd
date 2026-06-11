@@ -69,7 +69,7 @@ flowchart LR
 > **2026-06-11 update — THE UNIFICATION LANDED**: gaps 1, 3, 4-partial, and 8 closed
 > in one pass. Everything now lives on `feature/fsdp-lm-trainer` in one checkout:
 > `param_decomp_config/` merged (with the shape-spelled scope renames + legacy-alias
-> validators), the JAX distribution merged in as `nano_param_decomp_jax/` (spike dirs
+> validators), the JAX distribution merged in as `param_decomp_jax/` (spike dirs
 > deleted), scope literals synced across both stacks. The frozen `~/pd-nano-jax-jaxsp`
 > clone serves the live run's requeues until it ends.
 >

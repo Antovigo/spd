@@ -44,7 +44,7 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 ## Run
 
 ```bash
-cd nano_param_decomp_jax
+cd param_decomp_jax
 uv venv .venv && source .venv/bin/activate && uv pip install -e ../param_decomp_config -e .
 # (`vendored_jax` — the bit-parity JAX Llama — is part of this distribution.)
 

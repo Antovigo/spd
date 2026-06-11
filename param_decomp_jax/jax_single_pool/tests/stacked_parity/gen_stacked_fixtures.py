@@ -5,7 +5,7 @@ with `(L, ., .)` arrays, `LayerRange`, `llama_decomposed_lm(cfg, layer_range, C)
 does NOT run against `feature/jax-site-generality` or later — the names it imports were
 restructured away. Regenerate from a base-branch checkout, e.g.:
 
-    <base-checkout>/nano_param_decomp_jax/.venv/bin/python \
+    <base-checkout>/param_decomp_jax/.venv/bin/python \
         jax_single_pool/tests/stacked_parity/gen_stacked_fixtures.py
 
 `test_stacked_parity.py` then rebuilds the same model in the per-site representation

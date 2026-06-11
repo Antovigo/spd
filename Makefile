@@ -21,25 +21,25 @@ install-all: install-dev install-app
 # really want a from-scratch env.
 .PHONY: install-jax
 install-jax:
-	cd nano_param_decomp_jax && ([ -x .venv/bin/python ] || \
+	cd param_decomp_jax && ([ -x .venv/bin/python ] || \
 		( ! [ -e .venv ] || mv .venv .venv-stale-$$(date +%s); \
 		  uv venv .venv --python 3.13; rm -rf .venv-stale-* || true )) \
 		&& uv pip install -p .venv/bin/python -e ../param_decomp_config -e '.[dev]'
 
 .PHONY: install-jax-cuda
 install-jax-cuda:
-	cd nano_param_decomp_jax && ([ -x .venv-cuda/bin/python ] || \
+	cd param_decomp_jax && ([ -x .venv-cuda/bin/python ] || \
 		( ! [ -e .venv-cuda ] || mv .venv-cuda .venv-stale-$$(date +%s); \
 		  uv venv .venv-cuda --python 3.13; rm -rf .venv-stale-* || true )) \
 		&& uv pip install -p .venv-cuda/bin/python -e ../param_decomp_config -e '.[cuda]'
 
 .PHONY: test-jax
 test-jax:
-	cd nano_param_decomp_jax && .venv/bin/python -m pytest jax_single_pool/tests/
+	cd param_decomp_jax && .venv/bin/python -m pytest jax_single_pool/tests/
 
 .PHONY: check-jax
 check-jax:
-	cd nano_param_decomp_jax && .venv/bin/basedpyright jax_single_pool/
+	cd param_decomp_jax && .venv/bin/basedpyright jax_single_pool/
 
 
 .PHONY: app

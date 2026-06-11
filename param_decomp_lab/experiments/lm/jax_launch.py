@@ -91,8 +91,8 @@ def main(
         requeue=True,
         comment=wandb_url or run_id,
     )
-    jax_dir = workspace / "nano_param_decomp_jax"
-    rank_command = f"source .venv-cuda/bin/activate\n{_RANK_ENV}\nexec jsp-train {wrapper_rel.relative_to('nano_param_decomp_jax')}"
+    jax_dir = workspace / "param_decomp_jax"
+    rank_command = f"source .venv-cuda/bin/activate\n{_RANK_ENV}\nexec jsp-train {wrapper_rel.relative_to('param_decomp_jax')}"
     command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(rank_command)}"
     script = generate_script(slurm_config, command, setup=f'cd "{jax_dir}"')
     result = submit_slurm_job(script, "jax-lm")
@@ -119,8 +119,8 @@ def _wrapper_path_relative_to_repo(config_path: str) -> Path:
         f"wrapper must live inside the repo so the snapshot carries it: {path}"
     )
     rel = path.relative_to(REPO_ROOT)
-    assert rel.parts[0] == "nano_param_decomp_jax", (
-        f"wrapper must live under nano_param_decomp_jax/ (jsp-train runs from there): {rel}"
+    assert rel.parts[0] == "param_decomp_jax", (
+        f"wrapper must live under param_decomp_jax/ (jsp-train runs from there): {rel}"
     )
     return rel
 

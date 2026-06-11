@@ -1,4 +1,4 @@
-# nano-pd-jax
+# param-decomp-jax
 
 The JAX single-pool VPD trainer distribution. Everything of substance lives in
 [`jax_single_pool/`](jax_single_pool/README.md) (trainer, targets, configs, tests,
