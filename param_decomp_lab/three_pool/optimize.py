@@ -63,7 +63,7 @@ from param_decomp.distributed import seed_all_ranks, seed_per_rank
 from param_decomp.masks import AllLayersRouter
 from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.metrics.persistent_pgd_state import (
-    PerBatchPerPositionScope,
+    BSCScope,
     PersistentPGDState,
 )
 from param_decomp.optimize import EvalLoop, load_optimizer_state_by_name, optimizer_state_by_name
@@ -681,8 +681,8 @@ class ThreePoolTrainer:
             # just slicing — no cross-rank source sync needed. Any replicated scope
             # would require broadcast-init + grad-reduce over ppgd_pool_group, which
             # we don't implement here. Add it if/when another arrangement is wanted.
-            assert isinstance(ppgd_cfg.scope, PerBatchPerPositionScope), (
-                f"3-pool supports only PerBatchPerPositionScope PPGD sources; got "
+            assert isinstance(ppgd_cfg.scope, BSCScope), (
+                f"3-pool supports only BSCScope PPGD sources; got "
                 f"{type(ppgd_cfg.scope).__name__}. Replicated scopes need cross-pool "
                 f"source-replica sync, not implemented in the 3-pool."
             )

@@ -11,7 +11,7 @@ The eval pass is fed as micro-batches: `eval.batch_size * eval.n_steps` total sa
 `--micro-batch-size` per forward. Every eval metric accumulates sums + counts across
 `update` calls, so micro-batching is exact for the position-weighted means. (The two
 exceptions are cosmetic/stochastic: `CIHistograms` with `n_batches_accum` caps the
-histogram at that many micro-batches, and a `shared_across_batch` PGD mask is shared
+histogram at that many micro-batches, and a `c`-scope PGD mask is shared
 over a micro-batch rather than the full eval batch.)
 
 Fast keys go under `eval/<log_namespace>/<key>` and slow keys under `slow_eval/...`,

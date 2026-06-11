@@ -20,12 +20,12 @@ from param_decomp.metrics.importance_minimality import importance_minimality_los
 from param_decomp.metrics.persistent_pgd_recon import PersistentPGDReconLossConfig
 from param_decomp.metrics.persistent_pgd_state import (
     AdamPGDConfig,
-    BroadcastAcrossBatchScope,
-    PerBatchPerPositionScope,
+    BSCScope,
+    CScope,
+    NSCScope,
     PersistentPGDState,
-    RepeatAcrossBatchScope,
+    SCScope,
     SignPGDConfig,
-    SingleSourceScope,
     scope_needs_replica_sync,
 )
 from param_decomp.metrics.stochastic_recon import stochastic_recon_loss
@@ -766,7 +766,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         # Initialize state
@@ -811,7 +811,7 @@ class TestPersistentPGDReconLoss:
         """The scope predicate decides whether DP replicas of shared sources need
         cross-rank sync.
 
-        `per_batch_per_position` sources are independent per batch element, so a
+        `bsc` sources are independent per batch element, so a
         batch split is just slicing — no sync. Replicated scopes (single /
         broadcast / repeat) share sources across the batch and need broadcast-init
         + grad-reduce. Regression guard: the 3-pool source path relies on this
@@ -819,10 +819,10 @@ class TestPersistentPGDReconLoss:
         grads without a reduce; an earlier bug unconditionally reduced and mixed
         unrelated per-position sources across PPGD ranks.
         """
-        assert scope_needs_replica_sync(PerBatchPerPositionScope()) is False
-        assert scope_needs_replica_sync(SingleSourceScope()) is True
-        assert scope_needs_replica_sync(BroadcastAcrossBatchScope()) is True
-        assert scope_needs_replica_sync(RepeatAcrossBatchScope(n_sources=2)) is True
+        assert scope_needs_replica_sync(BSCScope()) is False
+        assert scope_needs_replica_sync(CScope()) is True
+        assert scope_needs_replica_sync(SCScope()) is True
+        assert scope_needs_replica_sync(NSCScope(n_sources=2)) is True
 
     def test_masks_persist_across_calls(self: object) -> None:
         """Test that masks persist and accumulate updates across calls."""
@@ -837,7 +837,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         state = _ppgd_state_from_cfg(
@@ -891,7 +891,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         # Initialize state with delta component
@@ -956,7 +956,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         state = _ppgd_state_from_cfg(
@@ -999,7 +999,7 @@ class TestPersistentPGDReconLoss:
             optimizer=AdamPGDConfig(
                 lr_schedule=ScheduleConfig(start_val=0.05), beta1=0.9, beta2=0.999, eps=1e-8
             ),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         state = _ppgd_state_from_cfg(

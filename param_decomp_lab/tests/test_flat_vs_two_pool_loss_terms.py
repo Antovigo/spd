@@ -49,7 +49,7 @@ from param_decomp.metrics.persistent_pgd_recon import (
 )
 from param_decomp.metrics.persistent_pgd_state import (
     AdamPGDConfig,
-    PerBatchPerPositionScope,
+    BSCScope,
     PersistentPGDState,
 )
 from param_decomp.schedule import ScheduleConfig
@@ -347,7 +347,7 @@ def _ppgd_cfg() -> PersistentPGDReconLossConfig:
             eps=1e-8,
             lr_schedule=ScheduleConfig(start_val=0.01, fn_type="constant"),
         ),
-        scope=PerBatchPerPositionScope(),
+        scope=BSCScope(),
         use_sigmoid_parameterization=False,
         n_warmup_steps=_PPGD_WARMUP,
         n_samples=1,

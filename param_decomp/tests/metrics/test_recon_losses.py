@@ -16,9 +16,9 @@ from param_decomp.metrics.persistent_pgd_recon import (
     PersistentPGDReconLossConfig,
 )
 from param_decomp.metrics.persistent_pgd_state import (
+    CScope,
     PPGDSources,
     SignPGDConfig,
-    SingleSourceScope,
     get_ppgd_mask_infos,
 )
 from param_decomp.metrics.pgd_masked_recon import pgd_recon_loss
@@ -94,7 +94,7 @@ def _pgd(
             init="random",
             step_size=0.1,
             n_steps=5,
-            mask_scope="unique_per_datapoint",
+            mask_scope="bc",
         ),
     )
 
@@ -279,7 +279,7 @@ def test_ppgd_recon_eval_metric_keys() -> None:
     ppgd_cfg = PersistentPGDReconLossConfig(
         coeff=1.0,
         optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-        scope=SingleSourceScope(),
+        scope=CScope(),
     )
     metric = PersistentPGDReconLoss(ppgd_cfg)
     metric.bind(model=model, device="cpu")

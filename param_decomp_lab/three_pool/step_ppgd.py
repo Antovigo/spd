@@ -33,7 +33,7 @@ Phases (numbered to match ``DESIGN.md`` ``ppgd/N``):
        point-to-point — no PPGD-internal reduce needed, so fires immediately
        after backward to unblock CI's recv-wait sooner.
   D6. Sum-reduce g_VU within PPGD pool → each rank holds the full-batch grad.
-      Source grads are NOT reduced: per_batch_per_position sources are per-rank
+      Source grads are NOT reduced: bsc sources are per-rank
       independent (asserted at state construction), so each rank steps its own.
   D6b. Final PGD source step (the (N+1)'th source update): step on this rank's
       own source grads, exactly as warmup does.
@@ -128,12 +128,12 @@ def step_ppgd(
     ctx.portals.g_ci_to_ci_pool.send(ctx.role, raw.ci)
     # V/U grads: SUM-reduce across the pool to reassemble the full-batch gradient
     # (the per-rank scale already carries 1/n_ppgd_ranks). Sources are NOT bundled
-    # here: their cross-rank reduction is scope-dependent (per_batch_per_position
+    # here: their cross-rank reduction is scope-dependent (bsc
     # is per-rank-independent and must not be reduced; a blind SUM would mix
     # unrelated per-position sources).
     sum_reduce_ppgd_grads(ctx.world, [*raw.v.values(), *raw.u.values()])
     ctx.portals.g_vu_to_chunk.send(ctx.role, raw.v, raw.u)
-    # Final (N+1)'th source step. per_batch_per_position sources are per-rank
+    # Final (N+1)'th source step. bsc sources are per-rank
     # independent, so no cross-rank reduce — step on this rank's own grads,
     # exactly as warmup does.
     ppgd_state.step(raw.sources)

@@ -97,7 +97,7 @@ pd:
     start_frac: 0.0
     use_sigmoid_parameterization: false
     scope:
-      type: broadcast_across_batch
+      type: sc
     optimizer:
       type: adam
       beta1: 0.5

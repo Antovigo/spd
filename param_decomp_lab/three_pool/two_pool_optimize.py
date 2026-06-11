@@ -46,9 +46,9 @@ from param_decomp.distributed import seed_all_ranks, seed_per_rank
 from param_decomp.masks import AllLayersRouter
 from param_decomp.metrics.persistent_pgd_recon import validate_pgd_scope
 from param_decomp.metrics.persistent_pgd_state import (
-    BroadcastAcrossBatchScope,
-    PerBatchPerPositionScope,
+    BSCScope,
     PersistentPGDState,
+    SCScope,
     scope_needs_replica_sync,
 )
 from param_decomp.optimize import (
@@ -509,10 +509,8 @@ class TwoPoolTrainer:
 
         if isinstance(ctx, PoolAContext) and self.ppgd_state is None:
             ppgd_cfg = runtime.ppgd_cfg
-            assert isinstance(
-                ppgd_cfg.scope, PerBatchPerPositionScope | BroadcastAcrossBatchScope
-            ), (
-                f"2-pool supports PerBatchPerPositionScope and BroadcastAcrossBatchScope "
+            assert isinstance(ppgd_cfg.scope, BSCScope | SCScope), (
+                f"2-pool supports BSCScope and SCScope "
                 f"PPGD sources; got {type(ppgd_cfg.scope).__name__}."
             )
             # A broadcast (whole-global-batch) source is replicated across the Pool A

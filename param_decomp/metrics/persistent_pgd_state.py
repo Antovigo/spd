@@ -48,42 +48,42 @@ class AdamPGDConfig(BaseConfig):
 PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
 
 
-class SingleSourceScope(BaseConfig):
-    """PPGD source scope: one shared source vector across the whole batch."""
+class CScope(BaseConfig):
+    """PPGD source scope: one `[C]` source vector shared across all batch dims."""
 
-    type: Literal["single_source"] = "single_source"
-
-
-class BroadcastAcrossBatchScope(BaseConfig):
-    """PPGD source scope: shared across batch elements but free along other batch dims."""
-
-    type: Literal["broadcast_across_batch"] = "broadcast_across_batch"
+    type: Literal["c"] = "c"
 
 
-class RepeatAcrossBatchScope(BaseConfig):
-    """PPGD source scope: `n_sources` source vectors tiled along the batch dim.
+class SCScope(BaseConfig):
+    """PPGD source scope: `[seq, C]` sources shared across batch elements, free per position."""
+
+    type: Literal["sc"] = "sc"
+
+
+class NSCScope(BaseConfig):
+    """PPGD source scope: `[n_sources, seq, C]` sources tiled along the batch dim.
 
     `n_sources` must divide the per-rank batch size.
     """
 
-    type: Literal["repeat_across_batch"] = "repeat_across_batch"
+    type: Literal["nsc"] = "nsc"
     n_sources: PositiveInt
 
 
-class PerBatchPerPositionScope(BaseConfig):
-    """PPGD source scope: an independent source per batch element and position.
+class BSCScope(BaseConfig):
+    """PPGD source scope: `[batch, seq, C]` — an independent source per batch element and position.
 
     Skips cross-rank synchronization of source state.
     """
 
-    type: Literal["per_batch_per_position"] = "per_batch_per_position"
+    type: Literal["bsc"] = "bsc"
 
 
+# Scope literals spell the stored source shape, read left-to-right in tensor order
+# (batch, seq, C). `c` is rank-polymorphic (all leading dims singleton); the
+# seq-bearing scopes require a sequence axis and are illegal off-LM.
 PersistentPGDSourceScope = Annotated[
-    SingleSourceScope
-    | BroadcastAcrossBatchScope
-    | RepeatAcrossBatchScope
-    | PerBatchPerPositionScope,
+    CScope | SCScope | NSCScope | BSCScope,
     Field(discriminator="type"),
 ]
 
@@ -94,12 +94,12 @@ PPGDSources = dict[str, Float[Tensor, " source_c"]]
 def scope_needs_replica_sync(scope: PersistentPGDSourceScope) -> bool:
     """Whether data-parallel replicas of this scope's sources must be kept in sync.
 
-    Replicated scopes (single / broadcast / repeat) hold the same sources on every
+    Replicated scopes (`c` / `sc` / `nsc`) hold the same sources on every
     replica, so splitting the batch across DP ranks needs broadcast-init + grad
-    reduction to keep them identical. ``per_batch_per_position`` sources are
-    independent per element, so a batch split is just slicing — no sync needed.
+    reduction to keep them identical. `bsc` sources are independent per element,
+    so a batch split is just slicing — no sync needed.
     """
-    return not isinstance(scope, PerBatchPerPositionScope)
+    return not isinstance(scope, BSCScope)
 
 
 class PPGDOptimizer(ABC):
@@ -211,8 +211,7 @@ def make_ppgd_optimizer(cfg: PGDOptimizerConfig) -> PPGDOptimizer:
 class PersistentPGDState:
     """Per-module adversarial sources that persist across training steps.
 
-    Source shape depends on scope (`SingleSourceScope`, `BroadcastAcrossBatchScope`,
-    `RepeatAcrossBatchScope`, `PerBatchPerPositionScope`).
+    Source shape depends on scope (`CScope`, `SCScope`, `NSCScope`, `BSCScope`).
     """
 
     def __init__(
@@ -237,8 +236,8 @@ class PersistentPGDState:
         first rank, and every source-grad is AVG-reduced over the group (in ``warmup``
         and via ``reduce_source_grads`` for the final step). Identical init + a
         deterministic AVG + an identical optimizer step keeps the sources bit-identical
-        without per-step re-broadcast. Must be ``None`` for ``per_batch_per_position``
-        (independent per-element sources need no sync) and for single-process runs."""
+        without per-step re-broadcast. Must be ``None`` for ``bsc`` (independent
+        per-element sources need no sync) and for single-process runs."""
         if replica_sync_group is not None:
             assert scope_needs_replica_sync(scope), (
                 f"replica_sync_group passed for scope {type(scope).__name__}, which holds "
@@ -255,19 +254,24 @@ class PersistentPGDState:
 
         self.sources: PPGDSources = {}
 
+        if not isinstance(scope, CScope):
+            assert len(batch_dims) == 2, (
+                f"{type(scope).__name__} spells a [batch, seq] source layout but "
+                f"batch_dims={batch_dims}; only CScope is valid without a sequence axis"
+            )
         match scope:
-            case SingleSourceScope():
+            case CScope():
                 source_leading_dims = [1] * len(batch_dims)
-            case BroadcastAcrossBatchScope():
+            case SCScope():
                 source_leading_dims = [1] + list(batch_dims[1:])
-            case RepeatAcrossBatchScope(n_sources=n):
+            case NSCScope(n_sources=n):
                 assert batch_dims[0] % n == 0, (
                     f"n_sources={n} must divide the per-rank microbatch size "
                     f"{batch_dims[0]}, not the global batch size. "
                     f"Adjust n_sources or batch_size to satisfy this."
                 )
                 source_leading_dims = [n] + list(batch_dims[1:])
-            case PerBatchPerPositionScope():
+            case BSCScope():
                 source_leading_dims = list(batch_dims)
 
         init_fn = torch.randn if use_sigmoid_parameterization else torch.rand

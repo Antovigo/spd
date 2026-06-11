@@ -20,7 +20,11 @@ from param_decomp.masks import (
 from param_decomp.metrics.base import LossMetricConfig
 
 PGDInitStrategy = Literal["random", "ones", "zeroes"]
-MaskScope = Literal["unique_per_datapoint", "shared_across_batch"]
+
+# Scope literals spell the adversarial-source shape in tensor order (batch, seq, C).
+# `c` is one shared vector, rank-polymorphic and DP-synced; `bc` (no seq axis) and
+# `bsc` (LM) are independent per batch element, and must match the batch rank.
+MaskScope = Literal["c", "bc", "bsc"]
 
 
 class PGDConfig(LossMetricConfig):
@@ -58,10 +62,15 @@ def _init_adv_sources(
         module_c = model.module_to_c[module_name]
         mask_c = module_c if weight_deltas is None else module_c + 1
         match pgd_config.mask_scope:
-            case "unique_per_datapoint":
+            case "bc" | "bsc":
+                source_rank_spelled = len(pgd_config.mask_scope)
+                assert len(batch_dims) + 1 == source_rank_spelled, (
+                    f"mask_scope '{pgd_config.mask_scope}' spells a rank-{source_rank_spelled} "
+                    f"source but batch_dims={batch_dims}"
+                )
                 shape = torch.Size([*batch_dims, mask_c])
                 source = get_pgd_init_tensor(pgd_config.init, shape, device)
-            case "shared_across_batch":
+            case "c":
                 singleton_batch_dims = [1 for _ in batch_dims]
                 shape = torch.Size([*singleton_batch_dims, mask_c])
                 source = broadcast_tensor(get_pgd_init_tensor(pgd_config.init, shape, device))
@@ -81,12 +90,12 @@ def _run_pgd_loop(
             loss = sum_loss / n_examples
         grads = torch.autograd.grad(loss, list(adv_sources.values()))
         match pgd_config.mask_scope:
-            case "shared_across_batch":
+            case "c":
                 adv_sources_grads = {
                     k: all_reduce(g, op=ReduceOp.AVG)
                     for k, g in zip(adv_sources.keys(), grads, strict=True)
                 }
-            case "unique_per_datapoint":
+            case "bc" | "bsc":
                 adv_sources_grads = dict(zip(adv_sources.keys(), grads, strict=True))
         with torch.no_grad():
             for k in adv_sources:

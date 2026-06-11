@@ -62,7 +62,7 @@ pd:
           final_val_frac: 1.0
           fn_type: constant
       scope:
-        type: per_batch_per_position
+        type: bsc
       use_sigmoid_parameterization: false
       n_warmup_steps: 2
       n_samples: 1

@@ -27,11 +27,11 @@ from param_decomp.masks import (
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.persistent_pgd_state import (
+    NSCScope,
     PersistentPGDSourceScope,
     PersistentPGDState,
     PGDOptimizerConfig,
     PPGDSources,
-    RepeatAcrossBatchScope,
     get_ppgd_mask_infos,
     scope_needs_replica_sync,
 )
@@ -91,7 +91,7 @@ def validate_pgd_scope(
     batch_size: int,
     world_size: int,
 ) -> None:
-    """Assert persistent-PGD `repeat_across_batch` divides the per-rank training batch size.
+    """Assert persistent-PGD `nsc` n_sources divides the per-rank training batch size.
 
     Takes `world_size` as an int (not a `DistributedState`) to avoid pulling distributed
     plumbing into this module.
@@ -103,11 +103,10 @@ def validate_pgd_scope(
     for cfg in loss_metrics:
         if isinstance(
             cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-        ) and isinstance(cfg.scope, RepeatAcrossBatchScope):
+        ) and isinstance(cfg.scope, NSCScope):
             n = cfg.scope.n_sources
             assert per_rank % n == 0, (
-                f"{cfg.type}: repeat_across_batch n_sources={n} must divide "
-                f"per-rank batch_size={per_rank}"
+                f"{cfg.type}: nsc n_sources={n} must divide per-rank batch_size={per_rank}"
             )
 
 

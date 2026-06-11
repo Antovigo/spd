@@ -33,10 +33,10 @@ import torch.distributed as dist
 from torch import Tensor
 
 from param_decomp.metrics.persistent_pgd_state import (
-    BroadcastAcrossBatchScope,
-    PerBatchPerPositionScope,
+    BSCScope,
     PersistentPGDSourceScope,
     PersistentPGDState,
+    SCScope,
     scope_needs_replica_sync,
 )
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
@@ -105,7 +105,7 @@ def _gather_initial_ppgd_sources(
 ) -> dict[str, Tensor] | None:
     """Reassemble the reference's initial PPGD sources from the distributed ranks.
 
-    - per_batch_per_position: each Pool A rank owns an independent batch slice; stitch
+    - bsc: each Pool A rank owns an independent batch slice; stitch
       the slices into one ``(B, S, source_c)`` source so the reference replays the exact
       per-position trajectory.
     - broadcast: all Pool A ranks broadcast-inited to the SAME ``(1, S, source_c)`` source,
@@ -129,7 +129,7 @@ def _gather_initial_ppgd_sources(
         return None
     pool_a_items = [item for item in gathered if item is not None]
     match scope:
-        case BroadcastAcrossBatchScope():
+        case SCScope():
             shared = pool_a_items[0]["sources"]
             for item in pool_a_items[1:]:
                 for s, t in item["sources"].items():
@@ -137,7 +137,7 @@ def _gather_initial_ppgd_sources(
                         t, shared[s], msg=f"broadcast source diverged across Pool A on site {s!r}"
                     )
             return {s: t.clone() for s, t in shared.items()}
-        case PerBatchPerPositionScope():
+        case BSCScope():
             source_c = _C + 1  # use_delta_component
             full = {s: torch.zeros(_BATCH_GLOBAL, _SEQ_LEN, source_c) for s in _ALL_SITES}
             for item in pool_a_items:
@@ -225,8 +225,8 @@ def _run_distributed_step(
 
 
 _SCOPES: dict[str, PersistentPGDSourceScope] = {
-    "per_batch_per_position": PerBatchPerPositionScope(),
-    "broadcast_across_batch": BroadcastAcrossBatchScope(),
+    "bsc": BSCScope(),
+    "sc": SCScope(),
 }
 
 
@@ -290,14 +290,14 @@ def _report_and_assert(
 if __name__ == "__main__":
     import sys
 
-    _run_test(sys.argv[1] if len(sys.argv) > 1 else "per_batch_per_position")
+    _run_test(sys.argv[1] if len(sys.argv) > 1 else "bsc")
 
 
 @pytest.mark.slow
 class TestTwoPoolGradCheckDistributed:
     @pytest.mark.parametrize(
         ("scope_name", "master_port"),
-        [("per_batch_per_position", "29532"), ("broadcast_across_batch", "29533")],
+        [("bsc", "29532"), ("sc", "29533")],
     )
     def test_grad_check(self, scope_name: str, master_port: str) -> None:
         cmd = [
