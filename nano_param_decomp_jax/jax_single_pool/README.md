@@ -32,7 +32,7 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `data.py` | deterministic batch schedule over the pre-tokenized fineweb parquet shards; O(1) resume addressing, per-process slices |
 | `config.py` | typed `ExperimentConfig` from YAML — every field explicit, unknown keys raise |
 | `configs/` | `llama8b_l18_b512.yaml` (production B=512) + `llama8b_l18_smoke8.yaml` (8-GPU smoke) |
-| `slurm/llama8b.sbatch` | SLURM launch (1 task/GPU, `--requeue`, SIGTERM@300 → save → resume) |
+| `slurm/` | push-triggered offline-eval sbatch scripts (training launches go through `pd-jax-lm`, which generates the job script) |
 | `llama8b_sharding.py` | the 8B placement plan (frozen replicated; per-site V/U + CI + Adam C-sharded; source replicated; batch sharded) |
 | `experiments/llama8b_real.py` | the runnable 8B step + tok/s/GPU bench |
 | `experiments/invariance_check.py` | device-count invariance harness (SPEC D4) |
