@@ -18,8 +18,8 @@
 set -uo pipefail
 RUN_DIR="$1"
 STEP="$2"
-JAX_REPO=/mnt/home/oli/pd-nano-jax-jaxsp/nano_param_decomp_jax
-TORCH_REPO=/mnt/home/oli/param-decomp
+JAX_REPO="$SLURM_SUBMIT_DIR"
+TORCH_REPO="$(dirname "$JAX_REPO")"
 MARKER="$RUN_DIR/.offline_eval_done"
 touch "$MARKER"
 

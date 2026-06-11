@@ -21,8 +21,11 @@
 # 5 attempts on each OOM) nor escape a bad node (it reuses the allocation).
 set -uo pipefail
 CONFIG="$1"
-REPO=/mnt/home/oli/pd-nano-jax-jaxsp/nano_param_decomp_jax
+# the distribution dir this job was submitted from (sbatch is invoked from
+# nano_param_decomp_jax/, so requeues re-enter the same checkout)
+REPO="$SLURM_SUBMIT_DIR"
 cd "$REPO"
+test -f jax_single_pool/run.py || { echo "submit from nano_param_decomp_jax/ (got $REPO)"; exit 1; }
 srun --kill-on-bad-exit=1 --ntasks-per-node=8 --cpus-per-task=8 --distribution=block:block bash -c "
   source .venv-cuda/bin/activate
   # default 0.75 caps the XLA pool at ~135 GiB on a B200 — the C30k 16-GPU step's
