@@ -53,7 +53,11 @@ class SlurmConfig:
     qos: str | None = None
     n_gpus: int = 1
     n_nodes: int = 1
+    ntasks_per_node: int = 1
     time: str = "72:00:00"
+    signal: str | None = None
+    """`--signal=` spec, e.g. `TERM@300`. No `B:` prefix — that delivers to the batch
+    shell only, not the srun-launched ranks whose handlers need it."""
     mem: str | None = None  # Memory limit (e.g., "64G", "128G")
     cpus_per_task: int | None = None
     snapshot_ref: str | None = None
@@ -81,13 +85,24 @@ class SubmitResult:
     log_pattern: str
 
 
-def generate_script(config: SlurmConfig, command: str, env: dict[str, str] | None = None) -> str:
-    """Generate a single SLURM job script. `env` is exported at the start of the script."""
+def generate_script(
+    config: SlurmConfig,
+    command: str,
+    env: dict[str, str] | None = None,
+    setup: str | None = None,
+) -> str:
+    """Generate a single SLURM job script. `env` is exported at the start of the script.
+
+    `setup` overrides the default workspace/venv section — for launches whose
+    workspace is materialized at submit time (e.g. the JAX launcher) rather than
+    cloned inside the job.
+    """
     header = _sbatch_header_singleton(config)
-    if config.n_nodes == 1:
-        setup = _setup_section_singleton(config)
-    else:
-        setup = "# Multi-node job: each node sets up its own workspace in the srun command"
+    if setup is None:
+        if config.n_nodes == 1:
+            setup = _setup_section_singleton(config)
+        else:
+            setup = "# Multi-node job: each node sets up its own workspace in the srun command"
     env_exports = _env_exports(env)
 
     return f"""\
@@ -231,11 +246,13 @@ def _common_sbatch_lines(config: SlurmConfig, log_pattern: str) -> list[str]:
     lines = [
         f"#SBATCH --job-name={config.job_name}",
         f"#SBATCH --nodes={config.n_nodes}",
-        "#SBATCH --ntasks-per-node=1",
+        f"#SBATCH --ntasks-per-node={config.ntasks_per_node}",
         f"#SBATCH --gpus-per-node={config.n_gpus}",
         f"#SBATCH --time={config.time}",
         f"#SBATCH --output={SLURM_LOGS_DIR}/slurm-{log_pattern}.out",
     ]
+    if config.signal is not None:
+        lines.append(f"#SBATCH --signal={config.signal}")
     if config.partition is not None:
         lines.append(f"#SBATCH --partition={config.partition}")
     if config.qos is not None:

@@ -33,6 +33,7 @@ dependencies = [
 pd-tms = "param_decomp_lab.experiments.tms.run:cli"
 pd-resid-mlp = "param_decomp_lab.experiments.resid_mlp.run:cli"
 pd-lm = "param_decomp_lab.experiments.lm.run:cli"
+pd-jax-lm = "param_decomp_lab.experiments.lm.jax_launch:cli"
 pd-lm-3pool = "param_decomp_lab.experiments.lm.three_pool_run:cli"
 pd-lm-2pool = "param_decomp_lab.experiments.lm.two_pool_run:cli"
 pd-lm-fsdp = "param_decomp_lab.experiments.lm.fsdp_run:cli"
