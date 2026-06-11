@@ -16,7 +16,10 @@ def test_production_config_loads():
     assert cfg.data.global_batch == 512
     assert cfg.target.sites == mlp_family_site_cs(18, 18, 24576)
     assert cfg.losses.faith == 1e5 and cfg.imp_min.p_start == 2.0
-    assert cfg.ppgd.n_warmup == 2 and cfg.vu_optimizer.grad_clip_norm == 0.01
+    from jax_single_pool.train import SourceAdamConfig
+
+    assert isinstance(cfg.adversary, SourceAdamConfig)
+    assert cfg.adversary.n_warmup == 2 and cfg.vu_optimizer.grad_clip_norm == 0.01
     assert cfg.wandb is not None and cfg.wandb.project == "param-decomp-llama"
     assert cfg.run_dir == cfg.out_dir / cfg.run_name
 

@@ -15,7 +15,7 @@ import yaml
 from jax_single_pool.ci_fn import CIArch
 from jax_single_pool.llama8b import mlp_family_site_cs
 from jax_single_pool.lm import SiteC
-from jax_single_pool.train import ImpMinConfig, LossCoeffs, SourceAdamConfig
+from jax_single_pool.train import AdversaryConfig, ImpMinConfig, LossCoeffs, SourceAdamConfig
 
 
 @dataclass(frozen=True)
@@ -117,7 +117,10 @@ class ExperimentConfig:
     data: DataConfig
     losses: LossCoeffs
     imp_min: ImpMinConfig
-    ppgd: SourceAdamConfig
+    adversary: AdversaryConfig
+    """Recon adversary: persistent source-Adam (PPGD) or fresh per-batch sign-PGD.
+    The native yaml key stays `ppgd:` (always the persistent variant there); fresh-PGD
+    arrives via the torch-config route only."""
     recon: ReconConfig
     vu_optimizer: VUOptimizerConfig
     ci_optimizer: CIOptimizerConfig
@@ -196,7 +199,7 @@ def load_config(path: Path) -> ExperimentConfig:
         data=_build(DataConfig, data_raw, "data"),
         losses=_build(LossCoeffs, raw["losses"], "losses"),
         imp_min=_build(ImpMinConfig, raw["imp_min"], "imp_min"),
-        ppgd=_build(SourceAdamConfig, raw["ppgd"], "ppgd"),
+        adversary=_build(SourceAdamConfig, raw["ppgd"], "ppgd"),
         recon=_build(ReconConfig, raw["recon"], "recon"),
         vu_optimizer=_build(VUOptimizerConfig, raw["vu_optimizer"], "vu_optimizer"),
         ci_optimizer=_build(CIOptimizerConfig, raw["ci_optimizer"], "ci_optimizer"),

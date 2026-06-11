@@ -30,6 +30,7 @@ from jax_single_pool.llama8b import (
 )
 from jax_single_pool.lm import SiteC, SiteSpec
 from jax_single_pool.train import (
+    FreshPGDConfig,
     ImpMinConfig,
     LossCoeffs,
     SourceAdamConfig,
@@ -284,7 +285,7 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
             anneal_start_frac=0.0,
             anneal_end_frac=1.0,
         ),  # fmt: skip
-        src_cfg=SourceAdamConfig(
+        adversary=SourceAdamConfig(
             lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=n_warmup
         ),  # fmt: skip
         components_optimizer=opt_vu,
@@ -351,3 +352,75 @@ def test_decomp_vu_shapes_fp32():
     assert V_d.shape == (di, 8) and U_d.shape == (8, d)
     assert isinstance(vu, DecompVU)
     assert all(a.dtype == jnp.float32 for pair in vu.vu.values() for a in pair)
+
+
+def test_fresh_pgd_adversary_step():
+    """Fresh per-batch sign-PGD (torch PGDReconLoss as the TRAINING adversary):
+    no persistent source state, metrics keyed `pgd`, sources sampled+ascended inside
+    the step, and the ascent strength responds to n_steps."""
+    cfg = _tiny_cfg()
+    site_cs = (
+        SiteC("layers.4.self_attn.q_proj", 8),
+        SiteC("layers.4.mlp.gate_proj", 8),
+        SiteC("layers.4.mlp.up_proj", 8),
+        SiteC("layers.4.mlp.down_proj", 12),
+    )
+    first = first_decomposed_layer(tuple(s.name for s in site_cs))
+    tgt = _tiny_target(cfg, first, jax.random.PRNGKey(0))
+    seq = 16
+    sites = llama_site_specs(cfg, site_cs)
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    ci_fn = init_ci_fn(CIArch(d_model=16, n_blocks=1, n_heads=2, mlp_hidden=32),
+                       lm.sites, jax.random.PRNGKey(2))  # fmt: skip
+    opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
+    opt_ci = optax.adamw(1e-3, weight_decay=0.0)
+
+    def make_state() -> TrainState:
+        return TrainState(
+            components=vu, ci_fn=ci_fn,
+            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+            sources={}, sources_adam_state=init_sources_adam_state({}),
+            step=jnp.zeros((), jnp.int32),
+        )  # fmt: skip
+
+    def run_step(n_ascent_steps: int) -> tuple[TrainState, dict[str, jax.Array]]:
+        step = make_train_step(
+            lm=lm,
+            coeffs=LossCoeffs(faith=1e7, imp=2e-4, stoch=0.5, ppgd=0.5),
+            imp_cfg=ImpMinConfig(
+                beta=0.5,
+                eps=1e-12,
+                p_start=2.0,
+                p_final=0.4,
+                anneal_start_frac=0.0,
+                anneal_end_frac=1.0,
+            ),  # fmt: skip
+            adversary=FreshPGDConfig(
+                init="random",
+                step_size=1.0,
+                n_steps=n_ascent_steps,
+                scope="unique_per_datapoint",
+            ),  # fmt: skip
+            components_optimizer=opt_vu,
+            ci_fn_optimizer=opt_ci,
+            total_steps=100,
+            recon_plan=subset_chunk_plan(lm.site_names, 4, 1),
+            remat_recon_forwards=False,
+            mesh=None,
+        )
+        resid = jax.random.normal(jax.random.PRNGKey(4), (2, seq, cfg.n_embd)) * 0.5
+        return step(make_state(), tgt, resid, jax.random.PRNGKey(100))
+
+    state, metrics = run_step(n_ascent_steps=1)
+    assert "pgd" in metrics and "ppgd" not in metrics and "src_lr" not in metrics
+    assert jnp.isfinite(jnp.array([float(metrics[k]) for k in ("total", "pgd", "stoch")])).all()
+    assert state.sources == {}, "fresh adversary carries no persistent sources"
+    assert float(state.sources_adam_state.step_count) == 0.0
+    assert int(state.step) == 1
+
+    _, metrics_unascended = run_step(n_ascent_steps=0)
+    assert float(metrics["pgd"]) >= float(metrics_unascended["pgd"]), (
+        "one sign step from the same init must not weaken the adversary"
+    )

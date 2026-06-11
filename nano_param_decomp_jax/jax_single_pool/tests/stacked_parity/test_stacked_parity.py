@@ -171,7 +171,7 @@ def test_train_trajectory_matches():
             anneal_start_frac=0.0,
             anneal_end_frac=1.0,
         ),  # fmt: skip
-        src_cfg=SourceAdamConfig(
+        adversary=SourceAdamConfig(
             lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=n_warmup
         ),
         components_optimizer=opt_vu,

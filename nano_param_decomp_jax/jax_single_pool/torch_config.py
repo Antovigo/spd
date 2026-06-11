@@ -64,7 +64,13 @@ from jax_single_pool.config import (
 )
 from jax_single_pool.llama8b import SITE_NAME_PATTERN, canonical_site_cs
 from jax_single_pool.lm import SiteC
-from jax_single_pool.train import ImpMinConfig, LossCoeffs, SourceAdamConfig
+from jax_single_pool.train import (
+    AdversaryConfig,
+    FreshPGDConfig,
+    ImpMinConfig,
+    LossCoeffs,
+    SourceAdamConfig,
+)
 
 OFFLINE_EVAL_METRIC_TYPES = frozenset(
     {
@@ -131,9 +137,10 @@ def _assert_plain_adamw(optimizer: OptimizerConfig, who: str) -> None:
 
 def _losses(
     cfg: LMExperimentConfig, n_sites: int
-) -> tuple[LossCoeffs, ImpMinConfig, SourceAdamConfig, int, int]:
-    """Returns (coeffs, imp_min, ppgd, sites_per_chunk, n_recon_samples). The four
-    production losses must each appear exactly once; any other loss metric refuses."""
+) -> tuple[LossCoeffs, ImpMinConfig, AdversaryConfig, int, int]:
+    """Returns (coeffs, imp_min, adversary, sites_per_chunk, n_recon_samples). The four
+    production losses (faith, imp-min, stochastic recon, ONE adversary — persistent
+    PPGD or fresh PGD) must each appear exactly once; anything else refuses."""
     faith = imp = stoch = ppgd = None
     sites_per_chunk = n_recon_samples = None
     for metric in cfg.pd.loss_metrics:
@@ -157,8 +164,8 @@ def _losses(
                 stoch = metric.coeff
                 sites_per_chunk = metric.sites_per_chunk
                 n_recon_samples = metric.n_samples
-            case PersistentPGDReconLossConfig():
-                assert ppgd is None
+            case PersistentPGDReconLossConfig() | PGDReconLossConfig():
+                assert ppgd is None, "exactly one adversary loss"
                 ppgd = metric
             case _:
                 raise AssertionError(f"unsupported loss metric {metric.type!r}")
@@ -177,26 +184,37 @@ def _losses(
         anneal_end_frac=imp.p_anneal_end_frac,
     )
 
-    assert isinstance(ppgd.scope, BroadcastAcrossBatchScope), ppgd.scope
-    assert not ppgd.use_sigmoid_parameterization and ppgd.start_frac == 0.0, ppgd
-    assert ppgd.n_samples == 1, ppgd
-    adversary_optimizer = ppgd.optimizer
-    assert isinstance(adversary_optimizer, AdamPGDConfig), adversary_optimizer
-    source_schedule = adversary_optimizer.lr_schedule
-    assert source_schedule.fn_type == "constant" and source_schedule.final_val_frac == 1.0, (
-        source_schedule
-    )
     assert ppgd.coeff is not None
-    source_adam = SourceAdamConfig(
-        lr=source_schedule.start_val,
-        lr_warmup_frac=source_schedule.warmup_pct,
-        beta1=adversary_optimizer.beta1,
-        beta2=adversary_optimizer.beta2,
-        eps=adversary_optimizer.eps,
-        n_warmup=ppgd.n_warmup_steps,
-    )
+    adversary: AdversaryConfig
+    match ppgd:
+        case PersistentPGDReconLossConfig():
+            assert isinstance(ppgd.scope, BroadcastAcrossBatchScope), ppgd.scope
+            assert not ppgd.use_sigmoid_parameterization and ppgd.start_frac == 0.0, ppgd
+            assert ppgd.n_samples == 1, ppgd
+            adversary_optimizer = ppgd.optimizer
+            assert isinstance(adversary_optimizer, AdamPGDConfig), adversary_optimizer
+            source_schedule = adversary_optimizer.lr_schedule
+            assert (
+                source_schedule.fn_type == "constant" and source_schedule.final_val_frac == 1.0
+            ), source_schedule
+            adversary = SourceAdamConfig(
+                lr=source_schedule.start_val,
+                lr_warmup_frac=source_schedule.warmup_pct,
+                beta1=adversary_optimizer.beta1,
+                beta2=adversary_optimizer.beta2,
+                eps=adversary_optimizer.eps,
+                n_warmup=ppgd.n_warmup_steps,
+            )
+        case PGDReconLossConfig():
+            assert ppgd.mask_scope in ("unique_per_datapoint", "shared_across_batch"), ppgd
+            adversary = FreshPGDConfig(
+                init=ppgd.init,
+                step_size=ppgd.step_size,
+                n_steps=ppgd.n_steps,
+                scope=ppgd.mask_scope,
+            )
     coeffs = LossCoeffs(faith=faith, imp=imp.coeff, stoch=stoch, ppgd=ppgd.coeff)
-    return coeffs, imp_min, source_adam, sites_per_chunk, n_recon_samples
+    return coeffs, imp_min, adversary, sites_per_chunk, n_recon_samples
 
 
 def _data(cfg: LMExperimentConfig) -> DataConfig:
@@ -295,7 +313,7 @@ def convert_torch_lm_config(
     assert vu_opt.grad_clip_norm is not None, "components grad clip is part of the method"
     assert ci_opt.grad_clip_norm is None, "CI-fn grad clip unsupported"
 
-    coeffs, imp_min, source_adam, sites_per_chunk, n_recon_samples = _losses(torch_cfg, n_sites)
+    coeffs, imp_min, adversary, sites_per_chunk, n_recon_samples = _losses(torch_cfg, n_sites)
     data = _data(torch_cfg)
 
     cadence = torch_cfg.cadence
@@ -311,7 +329,7 @@ def convert_torch_lm_config(
         data=data,
         losses=coeffs,
         imp_min=imp_min,
-        ppgd=source_adam,
+        adversary=adversary,
         recon=ReconConfig(
             sites_per_chunk=sites_per_chunk,
             n_samples=n_recon_samples,

@@ -67,6 +67,23 @@ class SourceAdamConfig(NamedTuple):
     n_warmup: int
 
 
+class FreshPGDConfig(NamedTuple):
+    """Fresh per-batch sign-PGD adversary (torch `PGDReconLoss` as a TRAINING loss):
+    sources are re-initialized every step, ascended `n_steps` times by
+    `step_size * sign(grad)` with clamp to [0,1], and carry NO state across steps —
+    `TrainState.sources` stays empty for this variant. `scope` picks the source shape:
+    `unique_per_datapoint` -> `(B, T, C+1)` per site; `shared_across_batch` ->
+    `(1, 1, C+1)` (the eval probe's shape)."""
+
+    init: str
+    step_size: float
+    n_steps: int
+    scope: str
+
+
+AdversaryConfig = SourceAdamConfig | FreshPGDConfig
+
+
 class SourcesAdamState(NamedTuple):
     m: dict[str, Array]
     v: dict[str, Array]
@@ -96,6 +113,38 @@ def init_sources(
         name: random.uniform(k, (1, seq_len, c + 1), jnp.float32)
         for name, c, k in zip(site_names, site_component_counts, keys, strict=True)
     }
+
+
+def init_fresh_pgd_sources(
+    sites: tuple[Any, ...],
+    cfg: FreshPGDConfig,
+    batch: int,
+    seq: int,
+    key: PRNGKeyArray,
+) -> dict[str, Array]:
+    """Per-site fresh adversarial sources (torch `_init_adv_sources`): trailing channel
+    is the weight-delta source; shape per `cfg.scope`; values per `cfg.init`."""
+    match cfg.scope:
+        case "unique_per_datapoint":
+            leading = (batch, seq)
+        case "shared_across_batch":
+            leading = (1, 1)
+        case _:
+            raise AssertionError(f"unsupported fresh-PGD scope {cfg.scope!r}")
+    keys = random.split(key, len(sites))
+    sources = {}
+    for site, site_key in zip(sites, keys, strict=True):
+        shape = (*leading, site.C + 1)
+        match cfg.init:
+            case "random":
+                sources[site.name] = random.uniform(site_key, shape, jnp.float32)
+            case "ones":
+                sources[site.name] = jnp.ones(shape, jnp.float32)
+            case "zeroes":
+                sources[site.name] = jnp.zeros(shape, jnp.float32)
+            case _:
+                raise AssertionError(f"unsupported fresh-PGD init {cfg.init!r}")
+    return sources
 
 
 def init_sources_adam_state(sources: dict[str, Array]) -> SourcesAdamState:
@@ -319,7 +368,7 @@ def make_train_step(
     lm: DecomposedLM,
     coeffs: LossCoeffs,
     imp_cfg: ImpMinConfig,
-    src_cfg: SourceAdamConfig,
+    adversary: AdversaryConfig,
     components_optimizer: optax.GradientTransformation,
     ci_fn_optimizer: optax.GradientTransformation,
     total_steps: int,
@@ -440,9 +489,6 @@ def make_train_step(
     def step(state: TrainState, frozen: Any, residual: Float[Array, "b t d"], key: PRNGKeyArray):
         step_f32 = state.step.astype(jnp.float32)
         pnorm = annealed_pnorm(step_f32, total_steps, imp_cfg)
-        sources_lr = warmup_then_constant_lr(
-            step_f32, total_steps, src_cfg.lr, src_cfg.lr_warmup_frac
-        )
 
         residual = batch_sharded(residual)
         clean_logits = jax.lax.stop_gradient(batch_sharded(lm.clean_logits(frozen, residual)))
@@ -464,19 +510,53 @@ def make_train_step(
                 masked_forward,
             )
 
-        def warmup_body(
-            carry: tuple[dict[str, Array], SourcesAdamState], _: None
-        ) -> tuple[tuple[dict[str, Array], SourcesAdamState], None]:
-            sources, adam_state = carry
-            sources_grad = jax.grad(adversary_loss)(sources)
-            sources, adam_state = sources_adam_ascend_project(
-                sources, sources_grad, adam_state, sources_lr, src_cfg
-            )
-            return (sources, adam_state), None
+        match adversary:
+            case SourceAdamConfig() as persistent_adam_config:
+                sources_lr = warmup_then_constant_lr(
+                    step_f32, total_steps, adversary.lr, adversary.lr_warmup_frac
+                )
 
-        (refined_sources, sources_adam_state), _ = jax.lax.scan(
-            warmup_body, (state.sources, state.sources_adam_state), None, length=src_cfg.n_warmup
-        )
+                def warmup_body(
+                    carry: tuple[dict[str, Array], SourcesAdamState], _: None
+                ) -> tuple[tuple[dict[str, Array], SourcesAdamState], None]:
+                    sources, adam_state = carry
+                    sources_grad = jax.grad(adversary_loss)(sources)
+                    sources, adam_state = sources_adam_ascend_project(
+                        sources, sources_grad, adam_state, sources_lr, persistent_adam_config
+                    )
+                    return (sources, adam_state), None
+
+                (refined_sources, sources_adam_state), _ = jax.lax.scan(
+                    warmup_body,
+                    (state.sources, state.sources_adam_state),
+                    None,
+                    length=adversary.n_warmup,
+                )
+            case FreshPGDConfig() as fresh_pgd_config:
+                sources_lr = None
+                sources_adam_state = state.sources_adam_state
+                batch, seq = residual.shape[0], residual.shape[1]
+                fresh_sources = init_fresh_pgd_sources(
+                    lm.sites, adversary, batch, seq, random.fold_in(key, 2)
+                )
+
+                def sign_ascend_body(
+                    sources: dict[str, Array], _: None
+                ) -> tuple[dict[str, Array], None]:
+                    sources_grad = jax.grad(adversary_loss)(sources)
+                    return {
+                        site: jnp.clip(
+                            sources[site]
+                            + fresh_pgd_config.step_size * jnp.sign(sources_grad[site]),
+                            0.0,
+                            1.0,
+                        )
+                        for site in sources
+                    }, None
+
+                refined_sources, _ = jax.lax.scan(
+                    sign_ascend_body, fresh_sources, None, length=adversary.n_steps
+                )
         refined_sources = jax.lax.stop_gradient(refined_sources)
 
         # ── main losses: live components/ci; ppgd's source participates in the graph so
@@ -515,15 +595,20 @@ def make_train_step(
             )
         )
         components_grad, ci_fn_grad, sources_grad_scaled = grads
-        # The backward saw coeff·L_ppgd; the adversary ascends on L_ppgd itself.
-        sources_grad = {s: g / coeffs.ppgd for s, g in sources_grad_scaled.items()}
-
         grad_norm_metrics = _grad_norm_metrics(components_grad, ci_fn_grad)
 
-        # ── the (n_warmup+1)-th source ascent, from the fused graph (SPEC S13/S14) ──
-        new_sources, sources_adam_state = sources_adam_ascend_project(
-            refined_sources, sources_grad, sources_adam_state, sources_lr, src_cfg
-        )
+        match adversary:
+            case SourceAdamConfig():
+                assert sources_lr is not None
+                # The backward saw coeff·L_adv; the adversary ascends on L_adv itself.
+                sources_grad = {s: g / coeffs.ppgd for s, g in sources_grad_scaled.items()}
+                # ── the (n_warmup+1)-th source ascent, from the fused graph (SPEC S13/S14) ──
+                new_sources, sources_adam_state = sources_adam_ascend_project(
+                    refined_sources, sources_grad, sources_adam_state, sources_lr, adversary
+                )
+            case FreshPGDConfig():
+                # fresh sources die with the step; the cotangent wrt them is unused
+                new_sources = state.sources
 
         components_updates, new_components_opt_state = components_optimizer.update(
             components_grad,
@@ -545,16 +630,18 @@ def make_train_step(
             sources_adam_state=sources_adam_state,
             step=state.step + 1,
         )
+        adversary_metric_key = "ppgd" if isinstance(adversary, SourceAdamConfig) else "pgd"
         metrics = {
             "total": total_loss,
             "faith": faith_loss,
             "imp": imp_loss,
             "stoch": stoch_loss,
-            "ppgd": ppgd_loss,
+            adversary_metric_key: ppgd_loss,
             "p_imp": pnorm,
-            "src_lr": sources_lr,
             **grad_norm_metrics,
         }
+        if sources_lr is not None:
+            metrics["src_lr"] = sources_lr
         return new_state, metrics
 
     return step

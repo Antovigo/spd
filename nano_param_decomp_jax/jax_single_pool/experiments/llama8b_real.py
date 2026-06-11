@@ -223,7 +223,7 @@ def main():
             anneal_start_frac=0.0,
             anneal_end_frac=1.0,
         ),  # fmt: skip
-        src_cfg=SourceAdamConfig(
+        adversary=SourceAdamConfig(
             lr=0.01,
             lr_warmup_frac=0.025,
             beta1=0.5,
