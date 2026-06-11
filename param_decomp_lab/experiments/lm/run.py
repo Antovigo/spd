@@ -78,11 +78,18 @@ def _resolve_class(fqn: str) -> type:
 
 
 class HFTarget(BaseConfig):
-    """Load a HuggingFace model via `<model_class>.from_pretrained(<model_name>)`."""
+    """Load a HuggingFace model via `<model_class>.from_pretrained(<model_name>)`.
+
+    `dtype` is forwarded to `from_pretrained`; the default `"auto"` loads weights in the
+    checkpoint's saved dtype (bf16 for Llama-3.1-8B, fp32 for gpt2) instead of silently
+    upcasting everything to fp32 — which for an 8B model is the difference between 16 and
+    32 GB of frozen weights per rank.
+    """
 
     kind: Literal["hf"] = "hf"
     model_class: str
     model_name: str
+    dtype: str = "auto"
 
 
 class PretrainedTarget(BaseConfig):
@@ -125,7 +132,9 @@ def build_target(target_cfg: LMTargetConfig) -> nn.Module:
     cls = _resolve_class(spec.model_class)
     match spec:
         case HFTarget():
-            target_model = ensure_cached_and_call(cls.from_pretrained, spec.model_name)
+            target_model = ensure_cached_and_call(
+                cls.from_pretrained, spec.model_name, dtype=spec.dtype
+            )
         case PretrainedTarget():
             from param_decomp_lab.experiments.lm.pretrain.run_info import PretrainRunInfo
 
