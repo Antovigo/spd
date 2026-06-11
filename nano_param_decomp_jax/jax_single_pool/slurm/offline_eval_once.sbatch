@@ -6,7 +6,7 @@
 #SBATCH --output=/mnt/data/artifacts/mechanisms/param-decomp/slurm_logs/slurm-%j.out
 # Offline eval of ONE checkpoint, push-triggered by the trainer right after the
 # save (run.py `_submit_offline_eval`): jsp-export (JAX venv) -> pd-offline-eval
-# (torch venv, logs eval/* + slow_eval/* into the run's wandb) -> delete the export.
+# (torch venv, logs slow_eval/* into the run's wandb) -> delete the export.
 # The trainer submits with `-J jsp-oeval-<run> --dependency=singleton`, so per-run
 # evals serialize and never overlap. `<run_dir>/.offline_eval_done` dedups across
 # requeue-resubmissions; `<run_dir>/offline_eval_args` (optional, one line) carries

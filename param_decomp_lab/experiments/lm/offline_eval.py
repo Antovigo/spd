@@ -3,9 +3,11 @@
 The JAX single-pool trainer (pd-nano-jax) exports torch-format safetensors via
 `jsp-export` — a full strict `LMComponentModel` state dict. This runner rebuilds the
 torch model from a reference torch experiment yaml (the source of truth for the
-`pd:` / `target:` / `data:` / `eval:` blocks), strict-loads the export, runs every
-metric in the yaml's `eval:` block (fast AND slow — offline has no time pressure) on
-the standard eval data stream, and logs the results into the JAX run's wandb run.
+`pd:` / `target:` / `data:` / `eval:` blocks), strict-loads the export, runs the
+SLOW metrics from the yaml's `eval:` block (the heavy/plot ones the JAX in-loop eval
+deliberately doesn't replicate) on the standard eval data stream, and logs the
+results into the JAX run's wandb run. Fast scalars are the live trainer's job —
+recomputing them here put a second writer on the `eval/*` keys.
 
 The eval pass is fed as micro-batches: `eval.batch_size * eval.n_steps` total samples,
 `--micro-batch-size` per forward. Every eval metric accumulates sums + counts across
@@ -14,12 +16,11 @@ exceptions are cosmetic/stochastic: `CIHistograms` with `n_batches_accum` caps t
 histogram at that many micro-batches, and a `c`-scope PGD mask is shared
 over a micro-batch rather than the full eval batch.)
 
-Fast keys go under `eval/<log_namespace>/<key>` and slow keys under `slow_eval/...`,
-matching the in-train torch keys byte-for-byte. Both are logged retroactively onto
-dedicated step axes (`eval/step` / `slow_eval/step` via `wandb.define_metric`): the
-JAX run is live and its default `_step` axis has advanced past the export step, so an
-explicit `wandb.log(step=<export step>)` would be silently dropped (same reasoning as
-`experiments.lm.async_eval` for slow keys).
+Keys go under `slow_eval/<log_namespace>/<key>`, matching the in-train torch keys
+byte-for-byte, logged retroactively onto the dedicated `slow_eval/step` axis (via
+`wandb.define_metric`): the JAX run is live and its default `_step` axis has advanced
+past the export step, so an explicit `wandb.log(step=<export step>)` would be
+silently dropped (same reasoning as `experiments.lm.async_eval`).
 
 Usage:
     pd-offline-eval <run>/export/model_<step>.safetensors path/to/reference.yaml \\
@@ -122,7 +123,6 @@ def _load_exported_component_model(
 
 
 def _log_results_to_wandb(
-    fast_metrics: dict[str, Any],
     slow_metrics: dict[str, Any],
     *,
     wandb_cfg: WandbConfig,
@@ -131,10 +131,10 @@ def _log_results_to_wandb(
 ) -> None:
     """Resume the JAX run and log the eval results, attributed to `step`.
 
-    The JAX trainer logs `train/` keys at `step=<train step>` from its own process; we
-    only ADD `eval/` + `slow_eval/` keys (disjoint namespaces, so concurrent writes
-    can't collide on a key). Keys ride dedicated `eval/step` / `slow_eval/step` axes —
-    see the module docstring for why an explicit `wandb.log(step=...)` cannot work.
+    The JAX trainer logs `train/` + `eval/` keys at `step=<train step>` from its own
+    process; we only ADD `slow_eval/` keys (disjoint namespace, so concurrent writes
+    can't collide on a key). Keys ride the dedicated `slow_eval/step` axis — see the
+    module docstring for why an explicit `wandb.log(step=...)` cannot work.
     """
     load_dotenv(override=True)
     wandb.init(
@@ -143,19 +143,13 @@ def _log_results_to_wandb(
         entity=wandb_cfg.entity or get_wandb_entity(),
         resume="allow",
     )
-    wandb.define_metric("eval/step")
-    wandb.define_metric("eval/*", step_metric="eval/step")
     wandb.define_metric("slow_eval/step")
     wandb.define_metric("slow_eval/*", step_metric="slow_eval/step")
-    fast_payload: dict[str, Any] = {f"eval/{k}": _wandb_value(v) for k, v in fast_metrics.items()}
-    fast_payload["eval/step"] = step
-    try_wandb(wandb.log, fast_payload)
-    if slow_metrics:
-        slow_payload: dict[str, Any] = {
-            f"slow_eval/{k}": _wandb_value(v) for k, v in slow_metrics.items()
-        }
-        slow_payload["slow_eval/step"] = step
-        try_wandb(wandb.log, slow_payload)
+    slow_payload: dict[str, Any] = {
+        f"slow_eval/{k}": _wandb_value(v) for k, v in slow_metrics.items()
+    }
+    slow_payload["slow_eval/step"] = step
+    try_wandb(wandb.log, slow_payload)
     wandb.finish()
 
 
@@ -229,20 +223,24 @@ def main(
         seed=cfg.pd.seed,
     )
 
-    all_instances: dict[str, Metric[Any]] = {}
+    slow_instances: dict[str, Metric[Any]] = {}
     for metric_cfg in cfg.eval.metrics:
-        metric = EVAL_METRIC_CLASSES[metric_cfg.type](metric_cfg)
+        metric_class = EVAL_METRIC_CLASSES[metric_cfg.type]
+        if not metric_class.slow:
+            continue
+        metric = metric_class(metric_cfg)
         metric.bind(model=adapter, device=device)
         metric_name = type(metric).__name__
-        assert metric_name not in all_instances, f"duplicate eval metric {metric_name!r}"
-        all_instances[metric_name] = metric
+        assert metric_name not in slow_instances, f"duplicate eval metric {metric_name!r}"
+        slow_instances[metric_name] = metric
+    assert slow_instances, "no slow metrics in eval.metrics — offline eval has nothing to do"
 
     start = time.perf_counter()
     fast_metrics, slow_metrics = run_eval_pass(
         eval_iterator=loop_dataloader(eval_loader),
         n_steps=n_micro_steps,
         slow_step=True,
-        all_instances=all_instances,
+        all_instances=slow_instances,
         step=step,
         device=device,
         wrapped_model=adapter,
@@ -258,23 +256,22 @@ def main(
         f"in {elapsed_s:.0f}s; peak GPU mem {peak_gib:.1f} GiB"
     )
 
-    for namespace, results in (("eval", fast_metrics), ("slow_eval", slow_metrics)):
-        for key, value in results.items():
-            rendered = f"{value:.6f}" if isinstance(value, float) else f"<{type(value).__name__}>"
-            print(f"{namespace}/{key}: {rendered}")
+    assert not fast_metrics, f"slow-only instances produced fast outputs: {sorted(fast_metrics)}"
+    for key, value in slow_metrics.items():
+        rendered = f"{value:.6f}" if isinstance(value, float) else f"<{type(value).__name__}>"
+        print(f"slow_eval/{key}: {rendered}")
 
     if no_wandb:
         logger.info("--no-wandb: skipping wandb log")
         return
     assert cfg.wandb is not None
     _log_results_to_wandb(
-        fast_metrics,
         slow_metrics,
         wandb_cfg=cfg.wandb,
         run_id=wandb_run_id,
         step=step,
     )
-    logger.info(f"logged eval/ + slow_eval/ keys to wandb run {wandb_run_id} at step {step}")
+    logger.info(f"logged slow_eval/ keys to wandb run {wandb_run_id} at step {step}")
 
 
 def cli() -> None:
