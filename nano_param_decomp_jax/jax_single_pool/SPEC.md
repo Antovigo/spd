@@ -284,6 +284,9 @@ is global-batch math. This section is the whole answer to "now shard it":
 
 ## 9. Non-normative: torch ground-truth pointers & rationale
 
+Pointers into the n-pool subsystems (`three_pool/`, `param_decomp_lab/metrics/`)
+refer to the `feature/fsdp-lm-trainer` lineage — those trees are not on this branch.
+
 | spec | torch source |
 |---|---|
 | §4.1 site/forward, routing | `param_decomp/components.py` (`LinearComponents.forward`), `param_decomp/masks.py` |
