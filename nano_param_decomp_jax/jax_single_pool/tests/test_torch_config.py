@@ -62,7 +62,7 @@ def test_eval_block_maps_and_defers_offline_metrics(capsys: pytest.CaptureFixtur
     }
     torch_cfg = type(torch_cfg)(**raw)
     cfg = convert_torch_lm_config(
-        torch_cfg, run_name="t", out_dir=Path("/tmp"), remat_recon_forwards=True
+        torch_cfg, run_name="t", run_id=None, out_dir=Path("/tmp"), remat_recon_forwards=True
     )
     assert cfg.eval is not None
     assert (cfg.eval.batch_size, cfg.eval.every, cfg.eval.n_steps) == (128, 1000, 1)
@@ -77,7 +77,7 @@ def test_unsupported_settings_refuse():
     binomial = dict(raw, pd=dict(raw["pd"], sampling="binomial"))
     with pytest.raises(AssertionError):
         convert_torch_lm_config(
-            type(torch_cfg)(**binomial), run_name="t", out_dir=Path("/tmp"),
+            type(torch_cfg)(**binomial), run_name="t", run_id=None, out_dir=Path("/tmp"),
             remat_recon_forwards=True,
         )  # fmt: skip
 
@@ -90,7 +90,7 @@ def test_unsupported_settings_refuse():
     )
     with pytest.raises(AssertionError, match="unsupported loss metric"):
         convert_torch_lm_config(
-            type(torch_cfg)(**extra_loss), run_name="t", out_dir=Path("/tmp"),
+            type(torch_cfg)(**extra_loss), run_name="t", run_id=None, out_dir=Path("/tmp"),
             remat_recon_forwards=True,
         )  # fmt: skip
 
@@ -103,7 +103,7 @@ def test_unsupported_settings_refuse():
     )
     with pytest.raises(AssertionError, match="unsupported decomposition target"):
         convert_torch_lm_config(
-            type(torch_cfg)(**non_mlp_target), run_name="t", out_dir=Path("/tmp"),
+            type(torch_cfg)(**non_mlp_target), run_name="t", run_id=None, out_dir=Path("/tmp"),
             remat_recon_forwards=True,
         )  # fmt: skip
 
@@ -157,3 +157,30 @@ def test_offline_eval_submission_argv(tmp_path: Path):
     assert "--dependency=singleton" in argv
     assert argv[-2:] == [str(tmp_path), "5000"]
     assert Path(argv[-3]).name == "offline_eval_once.sbatch" and Path(argv[-3]).exists()
+
+
+def test_wrapper_run_id_drives_identity(tmp_path: Path):
+    """With `run_id` the run dir and wandb id are the p-id (torch runs/<id>/
+    convention); the human name stays the wandb display name. Without it (pre-scheme
+    wrappers, i.e. the live C49k run) identity falls back to run_name."""
+    source = (CONFIGS / "llama8b_l18_C49k_200k_from_torch.yaml").read_text()
+    torch_yaml = CONFIGS / "torch" / "llama8b_l18_C49k_200k_1pool.yaml"
+
+    with_id = tmp_path / "with_id.yaml"
+    with_id.write_text(
+        f"run_id: p-0123abcd\ntorch_config: {torch_yaml}\n"
+        + source.split("torch_config:")[1].split("\n", 1)[1]
+    )
+    cfg, _, _ = load_torch_wrapper(with_id)
+    assert cfg.run_id == "p-0123abcd"
+    assert cfg.run_dir.name == "p-0123abcd" and cfg.wandb_id == "p-0123abcd"
+    assert cfg.run_name == "jax-l18-C49k-200k"
+
+    legacy, _, _ = load_torch_wrapper(CONFIGS / "llama8b_l18_C49k_200k_from_torch.yaml")
+    assert legacy.run_id is None
+    assert legacy.run_dir.name == "jax-l18-C49k-200k" and legacy.wandb_id == "jax-l18-C49k-200k"
+
+    bad_id = tmp_path / "bad_id.yaml"
+    bad_id.write_text(with_id.read_text().replace("p-0123abcd", "run42"))
+    with pytest.raises(AssertionError, match="run_id must be"):
+        load_torch_wrapper(bad_id)

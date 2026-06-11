@@ -129,7 +129,7 @@ class MetricsSink:
                 project=cfg.wandb.project,
                 entity=cfg.wandb.entity,
                 name=cfg.run_name,
-                id=cfg.run_name,
+                id=cfg.wandb_id,
                 resume="allow",
                 config=raw_cfg,
             )
@@ -254,6 +254,18 @@ def train(
             lm, cfg.eval.rounding_threshold, cfg.eval.ci_alive_threshold, eval_pgd, mesh
         )
 
+    # the raw torch yaml's runtime block describes the UPSTREAM run (e.g. dp: 32);
+    # record what this run actually executes on so wandb never lies about topology
+    raw_cfg = dict(
+        raw_cfg,
+        jax_runtime={
+            "n_devices": ndev,
+            "n_processes": n_proc,
+            "remat_recon_forwards": cfg.recon.remat_forwards,
+            "run_id": cfg.run_id,
+            "run_dir": str(cfg.run_dir),
+        },
+    )
     sink = MetricsSink(cfg, raw_cfg, is_main)
     tokens_per_step = cfg.data.global_batch * cfg.data.seq_len
     window_t0 = time.time()
@@ -401,6 +413,9 @@ def main() -> None:
         _pin_config_copy(cfg.run_dir, "config.yaml", args.config)
         if torch_yaml_path is not None:
             _pin_config_copy(cfg.run_dir, "torch_config.yaml", torch_yaml_path)
+            # the same yaml under the torch SavedLMRun contract name, making the run
+            # dir consumable by harvest/app/postprocess (runs/<p-id>/ convention)
+            _pin_config_copy(cfg.run_dir, "experiment_config.yaml", torch_yaml_path)
         print(
             f"run {cfg.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
             f"B={cfg.data.global_batch} seq={cfg.data.seq_len} "

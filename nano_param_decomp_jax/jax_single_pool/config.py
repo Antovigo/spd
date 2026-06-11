@@ -102,6 +102,13 @@ class WandbConfig:
 @dataclass(frozen=True)
 class ExperimentConfig:
     run_name: str
+    """Human-readable display name (the wandb run NAME)."""
+    run_id: str | None
+    """Canonical `p-<8hex>` id (wandb run ID + run-dir name) — the torch
+    `generate_run_id` convention, making the run a first-class citizen of the
+    `runs/<id>/` postprocess world. None ONLY for runs launched before the id
+    scheme (the live C49k run's pinned wrapper) — remove the None arm once that
+    run finishes and migrates."""
     out_dir: Path
     seed: int
     steps: int
@@ -121,7 +128,11 @@ class ExperimentConfig:
 
     @property
     def run_dir(self) -> Path:
-        return self.out_dir / self.run_name
+        return self.out_dir / (self.run_id if self.run_id is not None else self.run_name)
+
+    @property
+    def wandb_id(self) -> str:
+        return self.run_id if self.run_id is not None else self.run_name
 
 
 def _build(cls: type, raw: dict[str, Any], where: str) -> Any:
@@ -165,6 +176,7 @@ def load_config(path: Path) -> ExperimentConfig:
     data_raw = dict(raw["data"], dir=Path(raw["data"]["dir"]))
     cfg = ExperimentConfig(
         run_name=raw["run_name"],
+        run_id=None,
         out_dir=Path(raw["out_dir"]),
         seed=raw["seed"],
         steps=raw["steps"],

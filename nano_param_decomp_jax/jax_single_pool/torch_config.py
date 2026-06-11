@@ -8,8 +8,10 @@ a torch config either converts exactly or refuses to run, never silently approxi
 Entry: a small wrapper YAML carrying what the torch schema cannot express —
 
     torch_config: <path, relative to the wrapper>   # the torch LMExperimentConfig yaml
-    run_name: my-run
-    out_dir: /mnt/data/.../jax_runs
+    run_id: p-1a2b3c4d        # canonical id (generate: secrets.token_hex(4)); run dir
+                              # name + wandb id — the torch runs/<id>/ convention
+    run_name: my-run          # human-readable wandb display name
+    out_dir: /mnt/data/.../param-decomp/runs
     remat_recon_forwards: false                     # jax-runtime memory/compute trade
 
 `jsp-train` detects the `torch_config` key and routes here (`load_torch_wrapper`).
@@ -255,6 +257,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
 def convert_torch_lm_config(
     torch_cfg: LMExperimentConfig,
     run_name: str,
+    run_id: str | None,
     out_dir: Path,
     remat_recon_forwards: bool,
 ) -> ExperimentConfig:
@@ -305,6 +308,7 @@ def convert_torch_lm_config(
 
     return ExperimentConfig(
         run_name=run_name,
+        run_id=run_id,
         out_dir=out_dir,
         seed=torch_cfg.pd.seed,
         steps=torch_cfg.pd.steps,
@@ -350,14 +354,26 @@ def convert_torch_lm_config(
     )
 
 
-WRAPPER_KEYS = {"torch_config", "run_name", "out_dir", "remat_recon_forwards"}
+WRAPPER_KEYS = {"torch_config", "run_id", "run_name", "out_dir", "remat_recon_forwards"}
+_RUN_ID_PATTERN = re.compile(r"^p-[0-9a-f]{8}$")
 
 
 def load_torch_wrapper(wrapper_path: Path) -> tuple[ExperimentConfig, Path, dict[str, Any]]:
     """Parse a wrapper YAML (see module docstring) -> (config, torch yaml path, raw torch
-    dict for wandb). The torch path is resolved relative to the wrapper file."""
+    dict for wandb). The torch path is resolved relative to the wrapper file.
+
+    `run_id` is the canonical `p-<8hex>` identity (torch `generate_run_id` format):
+    run dir name + wandb run id, written into the wrapper at authoring time
+    (`python -c "import secrets; print('p-' + secrets.token_hex(4))"`) so resumes
+    derive the same identity and the byte-compare pins it. Wrappers WITHOUT the key
+    predate the scheme (the live C49k run) — drop that arm once it migrates."""
     raw = yaml.safe_load(wrapper_path.read_text())
-    assert set(raw) == WRAPPER_KEYS, f"{wrapper_path}: keys must be {sorted(WRAPPER_KEYS)}"
+    assert set(raw) in (WRAPPER_KEYS, WRAPPER_KEYS - {"run_id"}), (
+        f"{wrapper_path}: keys must be {sorted(WRAPPER_KEYS)} (run_id optional pre-migration)"
+    )
+    run_id = raw.get("run_id")
+    if run_id is not None:
+        assert _RUN_ID_PATTERN.match(run_id), f"run_id must be p-<8hex>, got {run_id!r}"
     torch_yaml_path = (wrapper_path.parent / raw["torch_config"]).resolve()
     assert torch_yaml_path.exists(), f"torch config not found: {torch_yaml_path}"
     torch_raw = yaml.safe_load(torch_yaml_path.read_text())
@@ -365,6 +381,7 @@ def load_torch_wrapper(wrapper_path: Path) -> tuple[ExperimentConfig, Path, dict
     cfg = convert_torch_lm_config(
         torch_cfg,
         run_name=raw["run_name"],
+        run_id=run_id,
         out_dir=Path(raw["out_dir"]),
         remat_recon_forwards=raw["remat_recon_forwards"],
     )
@@ -382,11 +399,14 @@ def load_run_dir_config(run_dir: Path) -> ExperimentConfig:
     raw = yaml.safe_load((run_dir / "config.yaml").read_text())
     if "torch_config" not in raw:
         return load_config(run_dir / "config.yaml")
-    assert set(raw) == WRAPPER_KEYS, f"{run_dir}/config.yaml: keys must be {sorted(WRAPPER_KEYS)}"
+    assert set(raw) in (WRAPPER_KEYS, WRAPPER_KEYS - {"run_id"}), (
+        f"{run_dir}/config.yaml: keys must be {sorted(WRAPPER_KEYS)} (run_id optional pre-migration)"
+    )
     torch_raw = yaml.safe_load((run_dir / "torch_config.yaml").read_text())
     return convert_torch_lm_config(
         LMExperimentConfig(**torch_raw),
         run_name=raw["run_name"],
+        run_id=raw.get("run_id"),
         out_dir=Path(raw["out_dir"]),
         remat_recon_forwards=raw["remat_recon_forwards"],
     )

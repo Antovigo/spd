@@ -35,4 +35,21 @@ export_file="$RUN_DIR/export/model_${STEP}.safetensors"
 (cd "$JAX_REPO" && .venv-cuda/bin/jsp-export "$RUN_DIR" --step "$STEP")
 (cd "$TORCH_REPO" && .venv/bin/pd-offline-eval "$export_file" "$RUN_DIR/torch_config.yaml" "${EXTRA_EVAL_ARGS[@]}")
 echo "$STEP" >> "$MARKER"
+
+# Materialize the torch-contract checkpoint (SavedLMRun reads the latest
+# model_<step>.pth from the run dir), then prune to the newest 2 — mirroring the
+# trainer's keep_last so the run dir doesn't hoard ~42 GB pickles per checkpoint.
+"$TORCH_REPO"/.venv/bin/python - "$export_file" "$RUN_DIR/model_${STEP}.pth" <<'PYEOF'
+import sys
+import torch
+from safetensors.torch import load_file
+
+export_path, pth_path = sys.argv[1], sys.argv[2]
+torch.save(load_file(export_path), pth_path)
+print(f"materialized {pth_path}")
+PYEOF
+ls "$RUN_DIR" | grep -E '^model_[0-9]+\.pth$' | sort -t_ -k2 -n | head -n -2 | while read -r old_pth; do
+  echo "pruning $old_pth"
+  rm -f "$RUN_DIR/$old_pth"
+done
 rm -f "$export_file"
