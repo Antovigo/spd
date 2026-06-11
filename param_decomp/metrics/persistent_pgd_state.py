@@ -318,6 +318,13 @@ class PersistentPGDState:
         shared source; a no-op otherwise) → PGD step. ``retain_graph=False`` since
         the autograd graph is rebuilt next iter from the updated sources.
         """
+        # WARNING: warmup ascends against the route-ALL forward regardless of the
+        # configured router. A no-op for the base (route-everywhere) variant — i.e.
+        # every production run to date — but for the Subset variant this means
+        # sources are warmed against an objective they are never scored on (the
+        # loss forward uses the configured router). Inherited from the warmup
+        # centralization in #486, not a documented decision; parameterize before
+        # relying on Subset PPGD.
         all_layers = AllLayersRouter()
         for _ in range(self._n_warmup_steps):
             sum_loss, n = self.compute_recon_sum_and_n(
