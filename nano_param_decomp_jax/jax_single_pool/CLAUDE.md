@@ -59,13 +59,21 @@ llama8b-only (guarded).
 ## The training pipeline (`run.py`)
 
 `jsp-train <config.yaml>` is the composition root and the only I/O layer; the step
-stays pure. Data is the pre-tokenized fineweb parquet artifact
-(`$DATA_MOUNT/artifacts/mechanisms/param-decomp/datasets/fineweb_llama_tok_2048/`) —
-NEVER stream/tokenize from HF at run time (the 80-rank thunderherd lesson). The batch
-schedule is a pure function of `(seed, step)` (O(1) resume, no replay); checkpoints
-are orbax sharded saves (no on-loop full-gather); SIGTERM → save → SLURM requeue →
-resume from latest. Resume with a changed config is refused (byte-compare). Smokes
-before a long run MUST exercise save AND resume at the production per-rank shape.
+stays pure. Data is a pre-tokenized parquet artifact under
+`$DATA_MOUNT/artifacts/mechanisms/param-decomp/datasets/` (`fineweb_llama_tok_2048`
+for Llama-8B, `pile_neox_tok_512` for `LlamaSimpleMLP`) — NEVER stream/tokenize from
+HF at run time (the 80-rank thunderherd lesson). The batch schedule is a pure
+function of `(seed, step)` (O(1) resume, no replay); checkpoints are orbax sharded
+saves (no on-loop full-gather); SIGTERM → save → SLURM requeue → resume from latest.
+Resume with a changed config is refused (byte-compare). Smokes before a long run
+MUST exercise save AND resume at the production per-rank shape.
+
+**Launch via `pd-jax-lm <wrapper.yaml> --nodes N`** (lab-side, torch venv): mints the
+`p-` run id, snapshots the tree to `refs/runs/snapshot/<id>`, materializes an
+immutable shared-FS workspace (clone + both venvs) at
+`$PARAM_DECOMP_OUT_DIR/workspaces/<id>`, stamps the id into the workspace's wrapper
+yaml, and sbatches. Requeues re-enter the workspace, never the live checkout.
+`--run_id` resubmits an existing workspace. Don't hand-write sbatch files.
 
 ## Gotchas
 

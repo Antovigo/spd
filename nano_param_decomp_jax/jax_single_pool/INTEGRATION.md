@@ -61,7 +61,7 @@ flowchart LR
 | **In-loop eval** | `EvalLoop` + metric classes | `eval.py` (scalar core, identical wandb keys) | REPLICATED (scalars); heavy/plot metrics deliberately NOT replicated — they run via the bridge |
 | **Offline/slow eval** | `pd-offline-eval` | push-triggered per checkpoint | SHARED (torch impls serve both stacks) |
 | **Postprocess & app** | the whole stack | — | SHARED via the run-dir contract; zero jax-specific code |
-| **Launch/ops** | sbatch + `--requeue` | same (retry loop deleted; SIGTERM-save fixed) | CONVERGED |
+| **Launch/ops** | `pd-lm --dp N` (snapshot ref + in-job `/tmp` clone) | `pd-jax-lm` (same snapshot machinery; submit-time shared-FS workspace with both venvs, since 8 srun tasks/node would race in-job clones) | SHARED (`generate_run_id` / `create_git_snapshot` / `SlurmConfig` / `submit_slurm_job`) |
 | **Logging** | `train/*`, `eval/*` keys | byte-identical keys (+ `jax_runtime` truth section) | SHARED panels |
 
 ## Remaining gaps, in dependency order
