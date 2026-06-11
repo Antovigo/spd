@@ -13,15 +13,16 @@ from typing import Any
 import yaml
 
 from jax_single_pool.ci_fn import CIArch
+from jax_single_pool.llama8b import mlp_family_site_cs
+from jax_single_pool.lm import SiteC
 from jax_single_pool.train import ImpMinConfig, LossCoeffs, SourceAdamConfig
 
 
 @dataclass(frozen=True)
 class TargetConfig:
     model_name: str
-    first_layer: int
-    last_layer: int
-    C: int
+    sites: tuple[SiteC, ...]
+    """Decomposed sites with per-site C, in canonical order (`canonical_site_cs`)."""
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,17 @@ def load_config(path: Path) -> ExperimentConfig:
     missing = top - set(raw) - {"eval", "wandb"}
     assert not missing, f"{path}: missing top-level keys {sorted(missing)}"
 
+    target_raw = raw["target"]
+    assert set(target_raw) == {"model_name", "first_layer", "last_layer", "C"}, (
+        f"target: unknown keys {sorted(target_raw)}"
+    )
+    target = TargetConfig(
+        model_name=target_raw["model_name"],
+        sites=mlp_family_site_cs(
+            target_raw["first_layer"], target_raw["last_layer"], target_raw["C"]
+        ),
+    )
+
     data_raw = dict(raw["data"], dir=Path(raw["data"]["dir"]))
     cfg = ExperimentConfig(
         run_name=raw["run_name"],
@@ -180,7 +192,7 @@ def load_config(path: Path) -> ExperimentConfig:
         out_dir=Path(raw["out_dir"]),
         seed=raw["seed"],
         steps=raw["steps"],
-        target=_build(TargetConfig, raw["target"], "target"),
+        target=target,
         data=_build(DataConfig, data_raw, "data"),
         losses=_build(LossCoeffs, raw["losses"], "losses"),
         imp_min=_build(ImpMinConfig, raw["imp_min"], "imp_min"),
@@ -216,7 +228,7 @@ def load_config(path: Path) -> ExperimentConfig:
         ),
         wandb=_build(WandbConfig, raw["wandb"], "wandb") if raw.get("wandb") else None,
     )
-    n_sites = 3 * (cfg.target.last_layer - cfg.target.first_layer + 1)
+    n_sites = len(cfg.target.sites)
     assert n_sites % cfg.recon.sites_per_chunk == 0, (n_sites, cfg.recon.sites_per_chunk)
     assert cfg.cadence.save_every % cfg.cadence.log_every == 0
     return cfg

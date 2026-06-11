@@ -11,7 +11,12 @@ import optax
 
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_latest, save_state
 from jax_single_pool.ci_fn import CIArch, init_ci_fn
-from jax_single_pool.llama8b import LayerRange, init_decomp_vu, llama_decomposed_lm
+from jax_single_pool.llama8b import (
+    init_decomp_vu,
+    llama_decomposed_lm,
+    llama_site_specs,
+    mlp_family_site_cs,
+)
 from jax_single_pool.tests.test_llama8b import _tiny_cfg, _tiny_target
 from jax_single_pool.train import (
     ImpMinConfig,
@@ -27,11 +32,11 @@ from jax_single_pool.train import (
 
 def _build(seed: int):
     cfg = _tiny_cfg()
-    rng = LayerRange(3, 4)
-    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
+    tgt = _tiny_target(cfg, 3, jax.random.PRNGKey(0))
     C, seq = 8, 16
-    lm = llama_decomposed_lm(cfg, rng, C)
-    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(seed))
+    sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(seed))
     ci_fn = init_ci_fn(CIArch(16, 2, 2, 32), lm.sites, jax.random.PRNGKey(seed + 1))
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)

@@ -30,15 +30,14 @@ jax.config.update("jax_enable_x64", False)
 from vendored_jax.llama import LlamaConfig  # noqa: E402
 
 from jax_single_pool.llama8b import (  # noqa: E402
-    KINDS,
-    DecompLayerFrozen,
+    MLP_KINDS,
     DecompVU,
     FrozenAttn,
-    FrozenBlock,
-    FrozenMLP,
-    LayerRange,
+    SuffixLayer,
     Target,
     llama_decomposed_lm,
+    llama_site_specs,
+    mlp_family_site_cs,
     site_name,
 )
 from jax_single_pool.train import (  # noqa: E402
@@ -82,7 +81,7 @@ def _build(f: dict[str, np.ndarray]):
     C = int(f[f"Vg_0"].shape[-1])  # noqa: F541
 
     decomp_layers = [
-        DecompLayerFrozen(
+        SuffixLayer(
             ln1=a(f"ln1_{i}"),
             ln2=a(f"ln2_{i}"),
             attn=_zero_attn(d, di),
@@ -93,30 +92,29 @@ def _build(f: dict[str, np.ndarray]):
         for i in range(n_layers)
     ]
     tail = [
-        FrozenBlock(
+        SuffixLayer(
             ln1=a(f"tail_ln1_{j}"),
             ln2=a(f"tail_ln2_{j}"),
             attn=_zero_attn(d, di),
-            mlp=FrozenMLP(wg=a(f"tail_Wg_{j}"), wu=a(f"tail_Wu_{j}"), wd=a(f"tail_Wd_{j}")),
-            eps=eps,
+            Wg=a(f"tail_Wg_{j}"),
+            Wu=a(f"tail_Wu_{j}"),
+            Wd=a(f"tail_Wd_{j}"),
         )  # fmt: skip
         for j in range(n_tail)
     ]
     # inv_freq unused (attn zeroed); a dummy valid-shaped array.
     inv_freq = jnp.ones((d // 4,), jnp.float32)
     tgt = Target(
-        decomp_layers=decomp_layers, tail=tail, norm=a("norm"), lm_head=a("lm_head"),
+        layers=decomp_layers + tail, norm=a("norm"), lm_head=a("lm_head"),
         inv_freq=inv_freq, eps=eps,
     )  # fmt: skip
     vu = DecompVU(
-        Vg=jnp.stack([a(f"Vg_{i}") for i in range(n_layers)]),
-        Ug=jnp.stack([a(f"Ug_{i}") for i in range(n_layers)]),
-        Vu=jnp.stack([a(f"Vu_{i}") for i in range(n_layers)]),
-        Uu=jnp.stack([a(f"Uu_{i}") for i in range(n_layers)]),
-        Vd=jnp.stack([a(f"Vd_{i}") for i in range(n_layers)]),
-        Ud=jnp.stack([a(f"Ud_{i}") for i in range(n_layers)]),
+        vu={
+            site_name(i, kind): (a(f"V{kind[0]}_{i}"), a(f"U{kind[0]}_{i}"))
+            for i in range(n_layers)
+            for kind in MLP_KINDS
+        }
     )
-    rng = LayerRange(0, n_layers - 1)
     cfg = LlamaConfig(
         vocab_size=int(f["lm_head"].shape[0]),
         n_layer=n_layers + n_tail,
@@ -132,24 +130,22 @@ def _build(f: dict[str, np.ndarray]):
         rope_high_freq_factor=4.0,
         rope_original_max_position_embeddings=128,
     )
-    lm = llama_decomposed_lm(cfg, rng, C)
-    return lm, tgt, vu, rng, n_layers
+    lm = llama_decomposed_lm(cfg, llama_site_specs(cfg, mlp_family_site_cs(0, n_layers - 1, C)))
+    return lm, tgt, vu, n_layers
 
 
 def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
     """The four JAX loss-term values on the fixtures `f` (fp32). Shared by `main` and
     the pytest so there is one term-computation path."""
-    lm, tgt, vu, rng, n_layers = _build(f)
+    lm, tgt, vu, n_layers = _build(f)
     resid = jnp.asarray(f["resid"], dtype=FP)
 
     clean = jax.lax.stop_gradient(lm.clean_logits(tgt, resid))
 
     # fixtures key CI per kind as (B, T, L, C); the trainer keys per site.
     def per_site(prefix: str) -> dict[str, jnp.ndarray]:
-        by_kind = {k: jnp.asarray(f[f"{prefix}_{k}"], dtype=FP) for k in KINDS}
-        return {
-            site_name(rng.layers[i], k): by_kind[k][:, :, i] for i in range(n_layers) for k in KINDS
-        }
+        by_kind = {k: jnp.asarray(f[f"{prefix}_{k}"], dtype=FP) for k in MLP_KINDS}
+        return {site_name(i, k): by_kind[k][:, :, i] for i in range(n_layers) for k in MLP_KINDS}
 
     ci_lower = per_site("ci_lower")
     ci_upper = per_site("ci_upper")
@@ -172,10 +168,10 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
     stoch_delta = per_site("stoch_delta")
     stoch_total = 0.0
     for i in range(n_layers):
-        chunk = tuple(site_name(rng.layers[i], k) for k in KINDS)
+        chunk = tuple(site_name(i, k) for k in MLP_KINDS)
         masks = {s: ci_lower[s] + (1.0 - ci_lower[s]) * stoch_u[s] for s in chunk}
         delta_masks = {s: stoch_delta[s] for s in chunk}
-        routes = {site_name(rng.layers[i], k): jnp.asarray(f[f"route_chunk{i}_{k}"]) for k in KINDS}
+        routes = {site_name(i, k): jnp.asarray(f[f"route_chunk{i}_{k}"]) for k in MLP_KINDS}
         pred = lm.masked_logits(tgt, vu, resid, masks, delta_masks, routes, chunk)
         stoch_total += float(kl_per_position(pred, clean))
     stoch = stoch_total / n_layers

@@ -293,8 +293,9 @@ def make_ppgd_masks(
 def _grad_norm_metrics(components_grad: Any, ci_fn_grad: Any) -> dict[str, Array]:
     """Pre-clip gradient L2 norms, matching the torch `component_grad_norms` families:
     per-leaf `grad_norms/components<path>` / `grad_norms/ci_fns<path>` (paths are this
-    pytree's own — e.g. `.Vg` for the stacked Llama layout, vs torch's per-site names)
-    and the overlay-critical `grad_norms/summary/{components,ci_fns,total}`."""
+    pytree's own — e.g. `.vu['layers.18.mlp.gate_proj'][0]` for the per-site Llama
+    layout, vs torch's per-site names) and the overlay-critical
+    `grad_norms/summary/{components,ci_fns,total}`."""
     out: dict[str, Array] = {}
 
     def family(grad_tree: Any, prefix: str) -> Array:

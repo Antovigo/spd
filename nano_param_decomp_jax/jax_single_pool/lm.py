@@ -22,6 +22,15 @@ SiteRoutes = dict[str, Bool[Array, "B T"]] | None
 (SPEC §1.3). Positions routing False take the frozen `x @ W` path."""
 
 
+class SiteC(NamedTuple):
+    """A decomposed site as configured: its torch-module-path name and its C.
+
+    The shape-carrying `SiteSpec` is derived from this plus the target's config."""
+
+    name: str
+    C: int
+
+
 class SiteSpec(NamedTuple):
     name: str
     d_in: int

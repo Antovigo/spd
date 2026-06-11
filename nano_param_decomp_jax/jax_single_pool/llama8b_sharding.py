@@ -6,8 +6,8 @@ The memory consumers, and how each is placed on the 1-D `dp` mesh:
     7.3GB/device. Small relative to activations; replicating avoids all-gathering the
     target every forward.
   * components (V/U) + their Adam states: SHARDED over `dp` (the FSDP analog). The fp32
-    masters + fp32 Adam m/v are the dominant non-activation footprint; sharding the C
-    axis splits all three across devices -> 1/n_dev per device.
+    masters + fp32 Adam m/v are the dominant non-activation footprint; sharding each
+    site's C axis splits all three across devices -> 1/n_dev per device.
   * CI fn + Adam states: SHARDED over `dp` along the largest axis (out head, in_proj).
   * PGD source (broadcast scope, `{site: (1,T,C+1)}`): REPLICATED. A single adversarial
     source shared across the global batch; it combines elementwise with the batch-sharded
@@ -33,7 +33,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, PRNGKeyArray
 
 from jax_single_pool.ci_fn import CIArch, CIFn, init_ci_fn
-from jax_single_pool.llama8b import DecompVU, LlamaConfig, Target, init_decomp_vu
+from jax_single_pool.llama8b import DecompVU, Target, init_decomp_vu
 from jax_single_pool.lm import SiteSpec
 from jax_single_pool.sharding import dp_mesh
 from jax_single_pool.sharding import shard_batch as _generic_shard_batch
@@ -58,10 +58,8 @@ def replicate_target(tgt: Target, mesh: Mesh) -> Target:
     return jax.tree.map(lambda a: _put(a, repl), tgt)
 
 
-def init_decomp_vu_sharded(
-    cfg: LlamaConfig, C: int, n_layers: int, key: PRNGKeyArray, mesh: Mesh
-) -> DecompVU:
-    """Seeded V/U init directly into the C-sharded global placement.
+def init_decomp_vu_sharded(sites: tuple[SiteSpec, ...], key: PRNGKeyArray, mesh: Mesh) -> DecompVU:
+    """Seeded per-site V/U init directly into the C-sharded global placement.
 
     The init runs under jit with `out_shardings`, so each device generates only its own
     shard and no host-side full tree ever exists. (Eager `device_put` of a host tree
@@ -69,19 +67,23 @@ def init_decomp_vu_sharded(
     value-equality check — a `process_allgather` of the whole tree, a 168 GiB
     allocation for a 12-layer chunk at C=24576.)
 
-    Arrays carry a leading layer axis: V is (L, d_in, C) -> C on `dp` (axis 2); U is
-    (L, C, d_out) -> axis 1."""
+    Per site: V `(d_in, C_s)` shards C on axis 1; U `(C_s, d_out)` on axis 0."""
     n = mesh.devices.size
-    assert C % n == 0, f"C={C} not divisible by mesh size {n}"
-    shard_V = NamedSharding(mesh, P(None, None, "dp"))  # (L, d_in, C)
-    shard_U = NamedSharding(mesh, P(None, "dp", None))  # (L, C, d_out)
-    init = partial(init_decomp_vu, cfg, C, n_layers)
+    for spec in sites:
+        assert spec.C % n == 0, f"{spec.name}: C={spec.C} not divisible by mesh size {n}"
+    site_c = {spec.name: spec.C for spec in sites}
+    shard_V = NamedSharding(mesh, P(None, "dp"))
+    shard_U = NamedSharding(mesh, P("dp", None))
+    init = partial(init_decomp_vu, sites)
 
     def place(path: tuple[Any, ...], shape: jax.ShapeDtypeStruct) -> NamedSharding:
-        field_name = path[-1].name
-        assert field_name[0] in ("V", "U"), field_name
-        assert shape.shape[2 if field_name[0] == "V" else 1] == C, (field_name, shape.shape)
-        return shard_V if field_name[0] == "V" else shard_U
+        *_, site_key, vu_key = path
+        assert isinstance(site_key, jax.tree_util.DictKey), path
+        assert isinstance(vu_key, jax.tree_util.SequenceKey), path
+        C = site_c[site_key.key]
+        is_V = vu_key.idx == 0
+        assert shape.shape[1 if is_V else 0] == C, (path, shape.shape)
+        return shard_V if is_V else shard_U
 
     out_shardings = jax.tree_util.tree_map_with_path(place, jax.eval_shape(init, key))
     return jax.jit(init, out_shardings=out_shardings)(key)

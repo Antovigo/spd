@@ -14,6 +14,8 @@ import pytest
 import yaml
 
 from jax_single_pool.config import load_config
+from jax_single_pool.llama8b import mlp_family_site_cs
+from jax_single_pool.lm import SiteC
 from jax_single_pool.torch_config import convert_torch_lm_config, load_torch_wrapper
 
 CONFIGS = Path(__file__).parent.parent / "configs"
@@ -94,18 +96,57 @@ def test_unsupported_settings_refuse():
             remat_recon_forwards=True,
         )  # fmt: skip
 
-    non_mlp_target = dict(
+    non_site_target = dict(
         raw,
         pd=dict(
             raw["pd"],
-            decomposition_targets=[{"module_pattern": "layers.18.self_attn.q_proj", "C": 512}],
+            decomposition_targets=[{"module_pattern": "layers.18.input_layernorm", "C": 512}],
         ),
     )
     with pytest.raises(AssertionError, match="unsupported decomposition target"):
         convert_torch_lm_config(
-            type(torch_cfg)(**non_mlp_target), run_name="t", run_id=None, out_dir=Path("/tmp"),
+            type(torch_cfg)(**non_site_target), run_name="t", run_id=None, out_dir=Path("/tmp"),
             remat_recon_forwards=True,
         )  # fmt: skip
+
+    embedding_target = dict(
+        raw,
+        pd=dict(
+            raw["pd"],
+            decomposition_targets=[{"module_pattern": "embed_tokens", "C": 512}],
+        ),
+    )
+    with pytest.raises(AssertionError, match="unsupported decomposition target"):
+        convert_torch_lm_config(
+            type(torch_cfg)(**embedding_target), run_name="t", run_id=None, out_dir=Path("/tmp"),
+            remat_recon_forwards=True,
+        )  # fmt: skip
+
+
+def test_arbitrary_sites_with_per_site_c_convert():
+    """Attention + MLP sites across non-contiguous layers with heterogeneous C —
+    the general site space this trainer now implements."""
+    torch_cfg, raw = _reference_torch_cfg()
+    general = dict(
+        raw,
+        pd=dict(
+            raw["pd"],
+            decomposition_targets=[
+                {"module_pattern": "layers.20.mlp.up_proj", "C": 64},
+                {"module_pattern": "model.layers.18.self_attn.q_proj", "C": 128},
+                {"module_pattern": "layers.18.self_attn.v_proj", "C": 32},
+            ],
+        ),
+    )
+    cfg = convert_torch_lm_config(
+        type(torch_cfg)(**general), run_name="t", run_id=None, out_dir=Path("/tmp"),
+        remat_recon_forwards=True,
+    )  # fmt: skip
+    assert cfg.target.sites == (
+        SiteC("layers.18.self_attn.q_proj", 128),
+        SiteC("layers.18.self_attn.v_proj", 32),
+        SiteC("layers.20.mlp.up_proj", 64),
+    )
 
 
 def test_c49k_yaml_converts_with_documented_divergences(capsys: pytest.CaptureFixture[str]):
@@ -116,7 +157,7 @@ def test_c49k_yaml_converts_with_documented_divergences(capsys: pytest.CaptureFi
     )
     printed = capsys.readouterr().out
     assert "fp32 frozen target" in printed
-    assert converted.target.C == 49152
+    assert converted.target.sites == mlp_family_site_cs(18, 18, 49152)
     assert converted.steps == 200000
     assert converted.data.global_batch == 512 and converted.data.seq_len == 2048
     assert converted.vu_optimizer.lr == 7e-05 and converted.ci_optimizer.lr == 7e-05

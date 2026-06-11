@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 
 from jax_single_pool.eval import make_eval_step, next_token_cross_entropy
-from jax_single_pool.llama8b import LayerRange, llama_decomposed_lm
+from jax_single_pool.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
 from jax_single_pool.tests.test_llama8b import (
     _tiny_cfg,  # pyright: ignore[reportPrivateUsage]
     _tiny_target,  # pyright: ignore[reportPrivateUsage]
@@ -29,15 +29,15 @@ def test_next_token_cross_entropy_matches_manual():
 
 def test_eval_step_keys_identities_and_determinism():
     cfg = _tiny_cfg()
-    layer_range = LayerRange(4, 5)
-    tgt = _tiny_target(cfg, layer_range, jax.random.PRNGKey(0))
+    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     C = 8
-    lm = llama_decomposed_lm(cfg, layer_range, C)
+    sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
+    lm = llama_decomposed_lm(cfg, sites)
 
     from jax_single_pool.ci_fn import CIArch, init_ci_fn
     from jax_single_pool.llama8b import init_decomp_vu
 
-    vu = init_decomp_vu(cfg, C, layer_range.n_layers, jax.random.PRNGKey(1))
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
 
     b, t = 2, 16
@@ -92,15 +92,15 @@ def test_eval_step_fresh_pgd_probe():
     """The fresh-PGD probe must come out at least as adversarial as the unascended
     random source it starts from (ascent on a fixed objective), and be deterministic."""
     cfg = _tiny_cfg()
-    layer_range = LayerRange(4, 4)
-    tgt = _tiny_target(cfg, layer_range, jax.random.PRNGKey(0))
+    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     C = 8
-    lm = llama_decomposed_lm(cfg, layer_range, C)
+    sites = llama_site_specs(cfg, mlp_family_site_cs(4, 4, C))
+    lm = llama_decomposed_lm(cfg, sites)
 
     from jax_single_pool.ci_fn import CIArch, init_ci_fn
     from jax_single_pool.llama8b import init_decomp_vu
 
-    vu = init_decomp_vu(cfg, C, layer_range.n_layers, jax.random.PRNGKey(1))
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
     b, t = 2, 16
     token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)

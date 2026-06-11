@@ -1,19 +1,21 @@
 """Llama-3.1-8B vendored target — the first `DecomposedLM` implementation.
 
-The decomposed sites are the MLP matrices (gate/up/down) of a contiguous layer range
-(SPEC §1.1/§1.2), named torch-style: `layers.{i}.mlp.{gate,up,down}_proj`. The frozen
-residual-start suffix (decomposed layers' attn + LN frozen, then fully-frozen tail
-blocks, final norm, lm_head) is a `Target` pytree threaded as a runtime arg.
+The decomposed sites are any per-layer weight matrices (SPEC §1/§3) named torch-style:
+`layers.{i}.self_attn.{q,k,v,o}_proj` and `layers.{i}.mlp.{gate,up,down}_proj`, each
+with its own C. The frozen residual-start suffix runs from the lowest decomposed layer
+(`first_decomposed_layer`) to the LM head as a `Target` pytree threaded as a runtime
+arg; suffix layers without sites run the plain frozen block.
 
-Internally V/U are stacked over a leading layer axis `L` (`DecompVU`); the
-`DecomposedLM` boundary regroups the trainer's flat site-keyed dicts. Frozen weights
-are stored bf16; V/U masters are fp32 (SPEC N1) — the trainer casts for compute.
+q/k/v sites are decomposed BEFORE RoPE/SDPA (the masked site output feeds the
+attention math); the o site applies to the attention output. V/U masters are fp32
+keyed per site (`DecompVU`); frozen weights are stored bf16 (SPEC N1) — the trainer
+casts for compute.
 
 Real HF weights load straight from the cached safetensors (no torch dep).
 """
 
 import json
-from dataclasses import dataclass
+import re
 from pathlib import Path
 
 import equinox as eqx
@@ -32,26 +34,19 @@ from vendored_jax.llama import (
     rope_cos_sin,
 )
 
-from jax_single_pool.lm import DecomposedLM, SiteSpec
+from jax_single_pool.lm import DecomposedLM, SiteC, SiteSpec
 
 DT = jnp.bfloat16
-KINDS = ("gate", "up", "down")
 
+KIND_ORDER = ("q", "k", "v", "o", "gate", "up", "down")
+"""Within-layer canonical site order = computation order. The canonical site order
+(`llama_site_specs`) is layer-ascending, then this."""
+ATTN_KINDS = ("q", "k", "v", "o")
+MLP_KINDS = ("gate", "up", "down")
 
-@dataclass(frozen=True)
-class LayerRange:
-    """Contiguous inclusive range of layers whose MLP is decomposed."""
-
-    first: int
-    last: int
-
-    @property
-    def n_layers(self) -> int:
-        return self.last - self.first + 1
-
-    @property
-    def layers(self) -> tuple[int, ...]:
-        return tuple(range(self.first, self.last + 1))
+SITE_NAME_PATTERN = re.compile(
+    r"^layers\.(\d+)\.(?:self_attn\.(q|k|v|o)|mlp\.(gate|up|down))_proj$"
+)
 
 
 def llama31_8b_config() -> LlamaConfig:
@@ -73,14 +68,80 @@ def llama31_8b_config() -> LlamaConfig:
 
 
 def site_name(layer: int, kind: str) -> str:
-    return f"layers.{layer}.mlp.{kind}_proj"
+    assert kind in KIND_ORDER, kind
+    submodule = "self_attn" if kind in ATTN_KINDS else "mlp"
+    return f"layers.{layer}.{submodule}.{kind}_proj"
 
 
-def llama_site_specs(cfg: LlamaConfig, layer_range: LayerRange, C: int) -> tuple[SiteSpec, ...]:
-    """Canonical site order: layer-ascending, (gate, up, down) within a layer."""
+def parse_site_name(name: str) -> tuple[int, str]:
+    """`layers.{i}.{self_attn,mlp}.{kind}_proj` -> (layer, kind); rejects anything else
+    (including kind/submodule mismatches like `self_attn.gate_proj`)."""
+    match = SITE_NAME_PATTERN.match(name)
+    assert match is not None, f"unsupported site name {name!r}"
+    layer, attn_kind, mlp_kind = match.groups()
+    return int(layer), attn_kind if attn_kind is not None else mlp_kind
+
+
+def site_dims(cfg: LlamaConfig, kind: str) -> tuple[int, int]:
+    """(d_in, d_out) of one per-layer matrix, right-mult orientation."""
     d, di = cfg.n_embd, cfg.n_intermediate
-    dims = {"gate": (d, di), "up": (d, di), "down": (di, d)}
-    return tuple(SiteSpec(site_name(i, k), *dims[k], C) for i in layer_range.layers for k in KINDS)
+    qd = cfg.n_head * cfg.head_dim
+    kvd = cfg.n_kv_head * cfg.head_dim
+    match kind:
+        case "q":
+            return d, qd
+        case "k" | "v":
+            return d, kvd
+        case "o":
+            return qd, d
+        case "gate" | "up":
+            return d, di
+        case "down":
+            return di, d
+        case _:
+            raise AssertionError(f"unknown kind {kind!r}")
+
+
+def canonical_site_cs(site_cs: tuple[SiteC, ...]) -> tuple[SiteC, ...]:
+    """Canonical site order: layer-ascending, `KIND_ORDER` within a layer. Names must
+    parse and be unique."""
+    names = [site.name for site in site_cs]
+    assert len(set(names)) == len(names), f"duplicate sites in {names}"
+
+    def order_key(site: SiteC) -> tuple[int, int]:
+        layer, kind = parse_site_name(site.name)
+        return layer, KIND_ORDER.index(kind)
+
+    return tuple(sorted(site_cs, key=order_key))
+
+
+def mlp_family_site_cs(first_layer: int, last_layer: int, C: int) -> tuple[SiteC, ...]:
+    """The gate/up/down sites of a contiguous layer range at one C (the native-config
+    target family), in canonical order."""
+    assert first_layer <= last_layer, (first_layer, last_layer)
+    return tuple(
+        SiteC(site_name(layer, kind), C)
+        for layer in range(first_layer, last_layer + 1)
+        for kind in MLP_KINDS
+    )
+
+
+def llama_site_specs(cfg: LlamaConfig, site_cs: tuple[SiteC, ...]) -> tuple[SiteSpec, ...]:
+    """Shape-resolved specs in canonical order (input must already be canonical)."""
+    assert site_cs == canonical_site_cs(site_cs), f"sites not in canonical order: {site_cs}"
+    specs = []
+    for site in site_cs:
+        layer, kind = parse_site_name(site.name)
+        assert 0 <= layer < cfg.n_layer, (site.name, cfg.n_layer)
+        assert site.C >= 1, site
+        specs.append(SiteSpec(site.name, *site_dims(cfg, kind), site.C))
+    return tuple(specs)
+
+
+def first_decomposed_layer(site_names: tuple[str, ...]) -> int:
+    """The residual-start boundary: the suffix runs from the lowest decomposed layer."""
+    assert site_names
+    return min(parse_site_name(name)[0] for name in site_names)
 
 
 # ----------------------------- frozen suffix -----------------------------
@@ -96,17 +157,30 @@ class FrozenAttn(eqx.Module):
     head_dim: int = eqx.field(static=True)
     n_rep: int = eqx.field(static=True)
 
-    def __call__(self, x: Float[Array, "b t d"], inv_freq: Array) -> Array:
-        b, t, _ = x.shape
-        q = (x @ self.wq.T).reshape(b, t, self.n_head, self.head_dim).transpose(0, 2, 1, 3)
-        k = (x @ self.wk.T).reshape(b, t, self.n_kv_head, self.head_dim).transpose(0, 2, 1, 3)
-        v = (x @ self.wv.T).reshape(b, t, self.n_kv_head, self.head_dim).transpose(0, 2, 1, 3)
-        cos, sin = rope_cos_sin(inv_freq, t, x.dtype)
+    def core(
+        self,
+        q_flat: Float[Array, "b t qd"],
+        k_flat: Float[Array, "b t kvd"],
+        v_flat: Float[Array, "b t kvd"],
+        inv_freq: Array,
+    ) -> Float[Array, "b t qd"]:
+        """RoPE + causal SDPA between the q/k/v projections and the o projection —
+        the seam the decomposed q/k/v site outputs feed into."""
+        b, t, _ = q_flat.shape
+        assert q_flat.shape[-1] == self.n_head * self.head_dim, q_flat.shape
+        assert k_flat.shape[-1] == self.n_kv_head * self.head_dim, k_flat.shape
+        assert v_flat.shape[-1] == self.n_kv_head * self.head_dim, v_flat.shape
+        q = q_flat.reshape(b, t, self.n_head, self.head_dim).transpose(0, 2, 1, 3)
+        k = k_flat.reshape(b, t, self.n_kv_head, self.head_dim).transpose(0, 2, 1, 3)
+        v = v_flat.reshape(b, t, self.n_kv_head, self.head_dim).transpose(0, 2, 1, 3)
+        cos, sin = rope_cos_sin(inv_freq, t, q_flat.dtype)
         q, k = apply_rope(q, k, cos, sin)
         k = repeat_kv(k, self.n_rep)
         v = repeat_kv(v, self.n_rep)
-        y = causal_sdpa(q, k, v).transpose(0, 2, 1, 3).reshape(b, t, self.n_head * self.head_dim)
-        return y @ self.wo.T
+        return causal_sdpa(q, k, v).transpose(0, 2, 1, 3).reshape(b, t, self.n_head * self.head_dim)
+
+    def __call__(self, x: Float[Array, "b t d"], inv_freq: Array) -> Array:
+        return self.core(x @ self.wq.T, x @ self.wk.T, x @ self.wv.T, inv_freq) @ self.wo.T
 
 
 class FrozenMLP(eqx.Module):
@@ -119,6 +193,8 @@ class FrozenMLP(eqx.Module):
 
 
 class FrozenBlock(eqx.Module):
+    """A fully-frozen transformer block — the `Prefix` building block."""
+
     ln1: Float[Array, " d"]
     ln2: Float[Array, " d"]
     attn: FrozenAttn
@@ -131,10 +207,11 @@ class FrozenBlock(eqx.Module):
         return x
 
 
-class DecompLayerFrozen(eqx.Module):
-    """The frozen pieces of a decomposed layer: the two layernorms, the attention, and
-    the MLP target weights. The MLP weights live here (frozen) and pass as a runtime
-    arg — never baked into the HLO as a multi-GB constant."""
+class SuffixLayer(eqx.Module):
+    """One suffix layer's frozen weights — norms, attention, MLP. Decomposed sites read
+    their frozen target W from here at forward time; layers without sites run the
+    plain frozen block from the same fields. Weights pass as a runtime arg — never
+    baked into the HLO as a multi-GB constant."""
 
     ln1: Float[Array, " d"]
     ln2: Float[Array, " d"]
@@ -145,60 +222,60 @@ class DecompLayerFrozen(eqx.Module):
 
 
 class Target(eqx.Module):
-    """Frozen residual-start suffix: decomposed layers (frozen attn/lns + frozen MLP
-    target weights), then fully-frozen tail blocks, final norm, lm_head."""
+    """Frozen residual-start suffix: layers `first_decomposed_layer..n_layer-1`, final
+    norm, lm_head."""
 
-    decomp_layers: list[DecompLayerFrozen]  # one per decomposed layer, in order
-    tail: list[FrozenBlock]  # layers above `last` (empty if last == n_layer-1)
+    layers: list[SuffixLayer]
     norm: Float[Array, " d"]
     lm_head: Float[Array, "vocab d"]
     inv_freq: Float[Array, " hd2"]
     eps: float = eqx.field(static=True)
 
 
-# ----------------------------- decomposed V/U (stacked over layers) -----------------------------
+def _frozen_site_weight(suffix_layer: SuffixLayer, kind: str) -> Array:
+    match kind:
+        case "q":
+            return suffix_layer.attn.wq
+        case "k":
+            return suffix_layer.attn.wk
+        case "v":
+            return suffix_layer.attn.wv
+        case "o":
+            return suffix_layer.attn.wo
+        case "gate":
+            return suffix_layer.Wg
+        case "up":
+            return suffix_layer.Wu
+        case "down":
+            return suffix_layer.Wd
+        case _:
+            raise AssertionError(f"unknown kind {kind!r}")
+
+
+# ----------------------------- decomposed V/U (per site) -----------------------------
 
 
 class DecompVU(eqx.Module):
-    """fp32 master V/U for the decomposed MLP sites, stacked over a leading layer axis
-    `L`. Per layer the three sites are: gate (d->di), up (d->di), down (di->d)."""
+    """fp32 master V `(d_in, C_s)` / U `(C_s, d_out)` per decomposed site, keyed by
+    site name."""
 
-    Vg: Float[Array, "L d C"]
-    Ug: Float[Array, "L C di"]
-    Vu: Float[Array, "L d C"]
-    Uu: Float[Array, "L C di"]
-    Vd: Float[Array, "L di C"]
-    Ud: Float[Array, "L C d"]
+    vu: dict[str, tuple[Float[Array, "d_in C"], Float[Array, "C d_out"]]]
 
-    def site(self, layer_idx: int, kind: str) -> tuple[Array, Array]:
-        match kind:
-            case "gate":
-                return self.Vg[layer_idx], self.Ug[layer_idx]
-            case "up":
-                return self.Vu[layer_idx], self.Uu[layer_idx]
-            case "down":
-                return self.Vd[layer_idx], self.Ud[layer_idx]
-            case _:
-                raise AssertionError(f"unknown kind {kind!r}")
+    def site(self, name: str) -> tuple[Array, Array]:
+        return self.vu[name]
 
 
-def init_decomp_vu(cfg: LlamaConfig, C: int, n_layers: int, key: Array) -> DecompVU:
-    """Small random fp32 V/U; the weight-delta channel carries the faithfulness
-    residual at init (before faithfulness warmup)."""
-    d, di = cfg.n_embd, cfg.n_intermediate
-    ks = iter(jax.random.split(key, 6))
-
-    def n(shape: tuple[int, ...], s: float) -> Array:
-        return jax.random.normal(next(ks), shape) * s
-
-    return DecompVU(
-        Vg=n((n_layers, d, C), d**-0.5),
-        Ug=n((n_layers, C, di), C**-0.5),
-        Vu=n((n_layers, d, C), d**-0.5),
-        Uu=n((n_layers, C, di), C**-0.5),
-        Vd=n((n_layers, di, C), di**-0.5),
-        Ud=n((n_layers, C, d), C**-0.5),
-    )
+def init_decomp_vu(sites: tuple[SiteSpec, ...], key: Array) -> DecompVU:
+    """Small random fp32 V ~ N(0, d_in^-0.5), U ~ N(0, C^-0.5) per site; the
+    weight-delta channel carries the faithfulness residual at init (before
+    faithfulness warmup)."""
+    keys = jax.random.split(key, 2 * len(sites))
+    vu: dict[str, tuple[Array, Array]] = {}
+    for site_idx, spec in enumerate(sites):
+        V = jax.random.normal(keys[2 * site_idx], (spec.d_in, spec.C)) * spec.d_in**-0.5
+        U = jax.random.normal(keys[2 * site_idx + 1], (spec.C, spec.d_out)) * spec.C**-0.5
+        vu[spec.name] = (V, U)
+    return DecompVU(vu=vu)
 
 
 # ----------------------------- forwards -----------------------------
@@ -231,80 +308,81 @@ def _site_out(
     return out
 
 
-def _clean_mlp_out(frozen_layer: DecompLayerFrozen, mlp_in: Array) -> Array:
+def _clean_mlp_out(suffix_layer: SuffixLayer, mlp_in: Array) -> Array:
     """Frozen target MLP — exactly `W` applied, not the `V@U + (W−V@U)` identity, so
-    non-live layers carry no V/U gradient and no decomposition rounding (SPEC S2/S3)."""
+    non-live sites carry no V/U gradient and no decomposition rounding (SPEC S2/S3)."""
     return (
-        jax.nn.silu(mlp_in @ frozen_layer.Wg.T) * (mlp_in @ frozen_layer.Wu.T)
-    ) @ frozen_layer.Wd.T
-
-
-def decomp_layer_mlp_input(
-    frozen_layer: DecompLayerFrozen, resid: Float[Array, "b t d"], inv_freq: Array, eps: float
-) -> tuple[Array, Array]:
-    """Run a decomposed layer's frozen attention; return (post-attn residual, MLP input)."""
-    x = resid + frozen_layer.attn(rms_norm(resid, frozen_layer.ln1, eps), inv_freq)
-    return x, rms_norm(x, frozen_layer.ln2, eps)
+        jax.nn.silu(mlp_in @ suffix_layer.Wg.T) * (mlp_in @ suffix_layer.Wu.T)
+    ) @ suffix_layer.Wd.T
 
 
 def clean_suffix_logits(target: Target, resid: Float[Array, "b t d"]) -> Array:
     """The all-frozen suffix forward — the recon target (SPEC S3)."""
     x = resid
-    for frozen_layer in target.decomp_layers:
-        post_attn, mlp_in = decomp_layer_mlp_input(frozen_layer, x, target.inv_freq, target.eps)
-        x = post_attn + _clean_mlp_out(frozen_layer, mlp_in)
-    for blk in target.tail:
-        x = blk(x, target.inv_freq)
+    for suffix_layer in target.layers:
+        x = x + suffix_layer.attn(rms_norm(x, suffix_layer.ln1, target.eps), target.inv_freq)
+        x = x + _clean_mlp_out(suffix_layer, rms_norm(x, suffix_layer.ln2, target.eps))
     x = rms_norm(x, target.norm, target.eps)
     return x @ target.lm_head.T
 
 
 def clean_site_inputs(
-    target: Target, layer_range: LayerRange, resid: Float[Array, "b t d"]
+    target: Target, first_layer: int, site_names: tuple[str, ...], resid: Float[Array, "b t d"]
 ) -> dict[str, Array]:
-    """Clean CI inputs per site (SPEC S4): gate_in = up_in = the post-LN2 residual,
-    down_in = silu(gate)·up — all on the frozen path, threaded layer to layer."""
+    """Clean CI inputs per site (SPEC S4), all on the frozen path, threaded layer to
+    layer: q/k/v ← the post-LN1 residual, o ← the pre-o_proj attention output,
+    gate/up ← the post-LN2 residual, down ← silu(gate)·up."""
+    wanted = frozenset(site_names)
+    last_site_layer = max(parse_site_name(name)[0] for name in site_names)
     inputs: dict[str, Array] = {}
     x = resid
-    for layer_idx, frozen_layer in enumerate(target.decomp_layers):
-        layer = layer_range.layers[layer_idx]
-        post_attn, mlp_in = decomp_layer_mlp_input(frozen_layer, x, target.inv_freq, target.eps)
-        gate = mlp_in @ frozen_layer.Wg.T
-        up = mlp_in @ frozen_layer.Wu.T
+    for layer_offset, suffix_layer in enumerate(target.layers):
+        layer = first_layer + layer_offset
+        if layer > last_site_layer:
+            break
+        attn = suffix_layer.attn
+        h1 = rms_norm(x, suffix_layer.ln1, target.eps)
+        attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
+        post_attn = x + attn_y @ attn.wo.T
+        mlp_in = rms_norm(post_attn, suffix_layer.ln2, target.eps)
+        gate = mlp_in @ suffix_layer.Wg.T
+        up = mlp_in @ suffix_layer.Wu.T
         down_in = jax.nn.silu(gate) * up
-        inputs[site_name(layer, "gate")] = mlp_in
-        inputs[site_name(layer, "up")] = mlp_in
-        inputs[site_name(layer, "down")] = down_in
-        x = post_attn + down_in @ frozen_layer.Wd.T
+        for kind, site_input in (
+            ("q", h1), ("k", h1), ("v", h1), ("o", attn_y),
+            ("gate", mlp_in), ("up", mlp_in), ("down", down_in),
+        ):  # fmt: skip
+            name = site_name(layer, kind)
+            if name in wanted:
+                inputs[name] = site_input
+        x = post_attn + down_in @ suffix_layer.Wd.T
+    assert set(inputs) == wanted, (sorted(inputs), sorted(wanted))
     return inputs
 
 
-def _masked_kind_out(
+def _masked_site_out(
     components: DecompVU,
-    layer_idx: int,
-    layer: int,
-    kind: str,
-    W_kind: Array,
+    site: str,
+    W: Array,
     x_in: Array,
     masks: dict[str, Array],
     delta_masks: dict[str, Array],
     routes: dict[str, Array] | None,
     live_set: frozenset[str],
 ) -> Array:
-    s = site_name(layer, kind)
-    if s not in live_set:
-        return x_in @ W_kind.T
-    V, U = components.site(layer_idx, kind)
+    if site not in live_set:
+        return x_in @ W.T
+    V, U = components.site(site)
     return _site_out(
-        x_in, V, U, W_kind, masks[s], delta_masks[s],
-        None if routes is None else routes[s],
+        x_in, V, U, W, masks[site], delta_masks[site],
+        None if routes is None else routes[site],
     )  # fmt: skip
 
 
 def masked_suffix_logits(
     target: Target,
     components: DecompVU,
-    layer_range: LayerRange,
+    first_layer: int,
     resid: Float[Array, "b t d"],
     masks: dict[str, Array],
     delta_masks: dict[str, Array],
@@ -313,65 +391,79 @@ def masked_suffix_logits(
 ) -> Array:
     """Masked decomposed suffix forward (SPEC §1.3, S2): sites in `live` run their
     decomposed forward with `masks[s]` / `delta_masks[s]` / `routes[s]`; every other
-    site runs the frozen `x @ W` path. `live` is static under jit."""
+    site — and every site absent from the decomposition entirely — runs the frozen
+    `x @ W` path. `live` is static under jit."""
     live_set = frozenset(live)
     x = resid
-    for layer_idx, frozen_layer in enumerate(target.decomp_layers):
-        layer = layer_range.layers[layer_idx]
-        post_attn, mlp_in = decomp_layer_mlp_input(frozen_layer, x, target.inv_freq, target.eps)
-        if not any(site_name(layer, k) in live_set for k in KINDS):
-            mlp_out = _clean_mlp_out(frozen_layer, mlp_in)
+    for layer_offset, suffix_layer in enumerate(target.layers):
+        layer = first_layer + layer_offset
+        live_kinds = {kind for kind in KIND_ORDER if site_name(layer, kind) in live_set}
+        attn = suffix_layer.attn
+        site_args = (masks, delta_masks, routes, live_set)
+        h1 = rms_norm(x, suffix_layer.ln1, target.eps)
+        if not live_kinds & set(ATTN_KINDS):
+            attn_out = attn(h1, target.inv_freq)
         else:
-            args = (masks, delta_masks, routes, live_set)
-            gate = _masked_kind_out(
-                components, layer_idx, layer, "gate", frozen_layer.Wg, mlp_in, *args
+            q = _masked_site_out(components, site_name(layer, "q"), attn.wq, h1, *site_args)
+            k = _masked_site_out(components, site_name(layer, "k"), attn.wk, h1, *site_args)
+            v = _masked_site_out(components, site_name(layer, "v"), attn.wv, h1, *site_args)
+            attn_y = attn.core(q, k, v, target.inv_freq)
+            attn_out = _masked_site_out(
+                components, site_name(layer, "o"), attn.wo, attn_y, *site_args
             )
-            up = _masked_kind_out(
-                components, layer_idx, layer, "up", frozen_layer.Wu, mlp_in, *args
+        post_attn = x + attn_out
+        mlp_in = rms_norm(post_attn, suffix_layer.ln2, target.eps)
+        if not live_kinds & set(MLP_KINDS):
+            mlp_out = _clean_mlp_out(suffix_layer, mlp_in)
+        else:
+            gate = _masked_site_out(
+                components, site_name(layer, "gate"), suffix_layer.Wg, mlp_in, *site_args
+            )
+            up = _masked_site_out(
+                components, site_name(layer, "up"), suffix_layer.Wu, mlp_in, *site_args
             )
             down_in = jax.nn.silu(gate) * up
-            mlp_out = _masked_kind_out(
-                components, layer_idx, layer, "down", frozen_layer.Wd, down_in, *args
+            mlp_out = _masked_site_out(
+                components, site_name(layer, "down"), suffix_layer.Wd, down_in, *site_args
             )
         x = post_attn + mlp_out
-    for blk in target.tail:
-        x = blk(x, target.inv_freq)
     x = rms_norm(x, target.norm, target.eps)
     return x @ target.lm_head.T
 
 
 def weight_deltas_fp32(
-    target: Target, components: DecompVU, layer_range: LayerRange
+    target: Target, components: DecompVU, first_layer: int, sites: tuple[SiteSpec, ...]
 ) -> dict[str, Array]:
     """fp32 `W − V@U` per site from fp32 masters (SPEC N2; faithfulness input)."""
     out: dict[str, Array] = {}
-    for layer_idx, frozen_layer in enumerate(target.decomp_layers):
-        layer = layer_range.layers[layer_idx]
-        for kind, W in (
-            ("gate", frozen_layer.Wg),
-            ("up", frozen_layer.Wu),
-            ("down", frozen_layer.Wd),
-        ):
-            V, U = components.site(layer_idx, kind)
-            out[site_name(layer, kind)] = (
-                W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
-            )
+    for spec in sites:
+        layer, kind = parse_site_name(spec.name)
+        W = _frozen_site_weight(target.layers[layer - first_layer], kind)
+        V, U = components.site(spec.name)
+        out[spec.name] = W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
     return out
 
 
-def llama_decomposed_lm(cfg: LlamaConfig, layer_range: LayerRange, C: int) -> DecomposedLM:
-    """The `DecomposedLM` boundary for this target (SPEC §1; `lm.py` contract)."""
+def llama_decomposed_lm(cfg: LlamaConfig, sites: tuple[SiteSpec, ...]) -> DecomposedLM:
+    """The `DecomposedLM` boundary for this target (SPEC §1; `lm.py` contract).
+    `sites` must be canonical-ordered with dims matching `cfg` (`llama_site_specs`)."""
+    site_cs = tuple(SiteC(s.name, s.C) for s in sites)
+    assert sites == llama_site_specs(cfg, canonical_site_cs(site_cs)), (
+        f"sites are not the canonical specs for this config: {sites}"
+    )
+    site_names = tuple(s.name for s in sites)
+    first_layer = first_decomposed_layer(site_names)
     return DecomposedLM(
-        sites=llama_site_specs(cfg, layer_range, C),
+        sites=sites,
         clean_logits=lambda frozen, resid: clean_suffix_logits(frozen, resid),
-        site_inputs=lambda frozen, resid: clean_site_inputs(frozen, layer_range, resid),
+        site_inputs=lambda frozen, resid: clean_site_inputs(frozen, first_layer, site_names, resid),
         masked_logits=lambda frozen, components, resid, masks, delta_masks, routes, live: (
             masked_suffix_logits(
-                frozen, components, layer_range, resid, masks, delta_masks, routes, live
+                frozen, components, first_layer, resid, masks, delta_masks, routes, live
             )
         ),
         weight_deltas=lambda frozen, components: weight_deltas_fp32(
-            frozen, components, layer_range
+            frozen, components, first_layer, sites
         ),
     )
 
@@ -434,14 +526,13 @@ def _load_block(w: _HFWeights, i: int, cfg: LlamaConfig) -> FrozenBlock:
     )
 
 
-def load_target_from_hf(model_name: str, cfg: LlamaConfig, layer_range: LayerRange) -> Target:
-    """Load the frozen residual-start suffix. Only `layer_range.first..n_layer-1` is
+def load_target_from_hf(model_name: str, cfg: LlamaConfig, first_layer: int) -> Target:
+    """Load the frozen residual-start suffix. Only `first_layer..n_layer-1` is
     materialized — the prefix is consumed via `make_real_target_residual`."""
     w = _HFWeights(_hf_snapshot_dir(model_name))
     pre = "model.layers"
-
-    decomp_layers = [
-        DecompLayerFrozen(
+    layers = [
+        SuffixLayer(
             ln1=w.get(f"{pre}.{i}.input_layernorm.weight"),
             ln2=w.get(f"{pre}.{i}.post_attention_layernorm.weight"),
             attn=_load_attn(w, i, cfg),
@@ -449,12 +540,10 @@ def load_target_from_hf(model_name: str, cfg: LlamaConfig, layer_range: LayerRan
             Wu=w.get(f"{pre}.{i}.mlp.up_proj.weight"),
             Wd=w.get(f"{pre}.{i}.mlp.down_proj.weight"),
         )
-        for i in layer_range.layers
+        for i in range(first_layer, cfg.n_layer)
     ]
-    tail = [_load_block(w, i, cfg) for i in range(layer_range.last + 1, cfg.n_layer)]
     return Target(
-        decomp_layers=decomp_layers,
-        tail=tail,
+        layers=layers,
         norm=w.get("model.norm.weight"),
         lm_head=w.get("lm_head.weight"),
         inv_freq=llama3_inv_freq(cfg),
@@ -471,11 +560,11 @@ class Prefix(eqx.Module):
     inv_freq: Float[Array, " hd2"]
 
 
-def load_prefix_from_hf(model_name: str, cfg: LlamaConfig, layer_range: LayerRange) -> Prefix:
+def load_prefix_from_hf(model_name: str, cfg: LlamaConfig, first_layer: int) -> Prefix:
     w = _HFWeights(_hf_snapshot_dir(model_name))
     return Prefix(
         embed=w.get("model.embed_tokens.weight"),
-        blocks=[_load_block(w, i, cfg) for i in range(layer_range.first)],
+        blocks=[_load_block(w, i, cfg) for i in range(first_layer)],
         inv_freq=llama3_inv_freq(cfg),
     )
 
@@ -490,12 +579,12 @@ def prefix_residual(prefix: Prefix, idx: Array) -> Array:
 
 
 def make_real_target_residual(
-    model_name: str, cfg: LlamaConfig, layer_range: LayerRange, idx: Array, chunk: int
+    model_name: str, cfg: LlamaConfig, first_layer: int, idx: Array, chunk: int
 ) -> Array:
     """One-shot eager harvest for the bench: loads the prefix, runs it in micro-batch
     chunks (`chunk`) so peak activation is one chunk's forward, discards the weights.
     The trainer instead keeps a `Prefix` resident and jits `prefix_residual`."""
-    prefix = load_prefix_from_hf(model_name, cfg, layer_range)
+    prefix = load_prefix_from_hf(model_name, cfg, first_layer)
     b = idx.shape[0]
     outs = [
         jax.block_until_ready(prefix_residual(prefix, idx[i : i + chunk]))

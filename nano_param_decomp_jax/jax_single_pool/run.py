@@ -34,11 +34,12 @@ from jax_single_pool.config import ExperimentConfig, load_config
 from jax_single_pool.data import BatchSchedule, ShardServer, scan_shards
 from jax_single_pool.eval import make_eval_step
 from jax_single_pool.llama8b import (
-    LayerRange,
     Prefix,
     Target,
+    first_decomposed_layer,
     llama31_8b_config,
     llama_decomposed_lm,
+    llama_site_specs,
     load_prefix_from_hf,
     load_target_from_hf,
     prefix_residual,
@@ -171,7 +172,6 @@ def train(
     key = random.PRNGKey(cfg.seed)
     init_key, src_key, run_key = random.split(key, 3)
     state = _ensure_global(init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh), mesh)
-    assert isinstance(state, TrainState)
     assert isinstance(state, TrainState)
 
     checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
@@ -416,20 +416,22 @@ def main() -> None:
             # the same yaml under the torch SavedLMRun contract name, making the run
             # dir consumable by harvest/app/postprocess (runs/<p-id>/ convention)
             _pin_config_copy(cfg.run_dir, "experiment_config.yaml", torch_yaml_path)
+        site_summary = " ".join(f"{name}:C{c}" for name, c in cfg.target.sites)
         print(
             f"run {cfg.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
             f"B={cfg.data.global_batch} seq={cfg.data.seq_len} "
-            f"layers={cfg.target.first_layer}..{cfg.target.last_layer} C={cfg.target.C} "
-            f"steps={cfg.steps}",
+            f"sites=[{site_summary}] steps={cfg.steps}",
             flush=True,
         )
 
     llama_cfg = llama31_8b_config()
-    rng = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
-    lm = llama_decomposed_lm(llama_cfg, rng, cfg.target.C)
-    frozen = replicate_target(load_target_from_hf(cfg.target.model_name, llama_cfg, rng), mesh)
+    lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, cfg.target.sites))
+    first_layer = first_decomposed_layer(lm.site_names)
+    frozen = replicate_target(
+        load_target_from_hf(cfg.target.model_name, llama_cfg, first_layer), mesh
+    )
     prefix = jax.device_put(
-        load_prefix_from_hf(cfg.target.model_name, llama_cfg, rng),
+        load_prefix_from_hf(cfg.target.model_name, llama_cfg, first_layer),
         NamedSharding(mesh, P()),
     )
 

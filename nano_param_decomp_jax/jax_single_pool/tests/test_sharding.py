@@ -43,54 +43,54 @@ def test_jitted_sharded_inits_match_eager_values():
     """`init_*_sharded` must be a placement-only change: same values as the eager init
     fns (threefry is partitionable, so generating under jit with `out_shardings` cannot
     perturb the stream — only op fusion can reassociate the scaling, SPEC D4: rel ~1e-7),
-    with the expected sharded placements."""
+    with the expected per-site placements (V shards C on axis 1, U on axis 0) — for a
+    heterogeneous-C site set spanning attention and MLP matrices."""
+    import pytest
     from jax.sharding import NamedSharding
     from jax.sharding import PartitionSpec as P
 
     from jax_single_pool.ci_fn import CIArch, init_ci_fn
-    from jax_single_pool.llama8b import LayerRange, LlamaConfig, init_decomp_vu
+    from jax_single_pool.llama8b import canonical_site_cs, init_decomp_vu, llama_site_specs
     from jax_single_pool.llama8b_sharding import (
         init_ci_fn_sharded,
         init_decomp_vu_sharded,
         init_sources_sharded,
     )
-    from jax_single_pool.lm import SiteSpec
+    from jax_single_pool.lm import SiteC, SiteSpec
+    from jax_single_pool.tests.test_llama8b import _tiny_cfg
     from jax_single_pool.train import init_sources
 
     mesh = dp_mesh()
     n = mesh.devices.size
-    cfg = LlamaConfig(
-        vocab_size=64,
-        n_layer=8,
-        n_head=4,
-        n_kv_head=2,
-        n_embd=32,
-        n_intermediate=64,
-        rope_theta=500000.0,
-        rms_norm_eps=1e-5,
-        max_position_embeddings=512,
-        rope_factor=8.0,
-        rope_low_freq_factor=1.0,
-        rope_high_freq_factor=4.0,
-        rope_original_max_position_embeddings=128,
+    cfg = _tiny_cfg()
+    sites = llama_site_specs(
+        cfg,
+        canonical_site_cs(
+            (
+                SiteC("layers.2.self_attn.q_proj", 8 * n),
+                SiteC("layers.2.self_attn.o_proj", 16 * n),
+                SiteC("layers.2.mlp.gate_proj", 8 * n),
+                SiteC("layers.3.mlp.down_proj", 16 * n),
+            )
+        ),
     )
-    C = 8 * n
-    layer_range = LayerRange(2, 3)
 
-    vu_sharded = init_decomp_vu_sharded(cfg, C, layer_range.n_layers, jax.random.PRNGKey(1), mesh)
-    vu_eager = init_decomp_vu(cfg, C, layer_range.n_layers, jax.random.PRNGKey(1))
-    assert isinstance(vu_sharded.Vg.sharding, NamedSharding)
-    assert isinstance(vu_sharded.Ug.sharding, NamedSharding)
-    assert vu_sharded.Vg.sharding.spec == P(None, None, "dp")
-    assert vu_sharded.Ug.sharding.spec == P(None, "dp", None)
+    vu_sharded = init_decomp_vu_sharded(sites, jax.random.PRNGKey(1), mesh)
+    vu_eager = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    for spec in sites:
+        V, U = vu_sharded.site(spec.name)
+        assert isinstance(V.sharding, NamedSharding) and isinstance(U.sharding, NamedSharding)
+        assert V.sharding.spec == P(None, "dp"), spec.name
+        assert U.sharding.spec == P("dp", None), spec.name
     for got, want in zip(jax.tree.leaves(vu_sharded), jax.tree.leaves(vu_eager), strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert jnp.allclose(jnp.asarray(got), want, rtol=1e-6, atol=0)
 
-    sites = (
-        SiteSpec("layers.2.mlp.gate_proj", cfg.n_embd, cfg.n_intermediate, C),
-        SiteSpec("layers.2.mlp.down_proj", cfg.n_intermediate, cfg.n_embd, C),
-    )
+    if n > 1:
+        indivisible = (SiteSpec("layers.2.mlp.gate_proj", cfg.n_embd, cfg.n_intermediate, n + 1),)
+        with pytest.raises(AssertionError, match="not divisible"):
+            init_decomp_vu_sharded(indivisible, jax.random.PRNGKey(1), mesh)
+
     arch = CIArch(d_model=16, n_blocks=1, n_heads=2, mlp_hidden=8 * n)
     ci_sharded = init_ci_fn_sharded(arch, sites, jax.random.PRNGKey(2), mesh)
     ci_eager = init_ci_fn(arch, sites, jax.random.PRNGKey(2))

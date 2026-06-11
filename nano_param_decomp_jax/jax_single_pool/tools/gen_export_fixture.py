@@ -1,7 +1,9 @@
 """JAX side of the export round-trip verification (run in THIS repo's venv).
 
-Builds a tiny `CIFn` + `DecompVU` for two shapes — single-layer (L18-like, 3 sites) and
-two-layer (6 sites, exercising the multi-layer site permutation) — exports them through
+Builds a tiny `CIFn` + `DecompVU` for three shapes — single-layer (L18-like, 3 MLP
+sites), two-layer (6 sites, exercising the multi-layer site permutation), and a mixed
+attention+MLP layer with heterogeneous per-site C (q/k/v/o + gate, exercising the
+attention-site keys and the per-site-C permutation blocks) — exports them through
 the REAL `export.py` mapping functions, and records fixture inputs plus the JAX-side
 outputs: per-site component forwards `((x@V)*m)@U` and the full CI-fn lower/upper.
 
@@ -31,12 +33,13 @@ from jax_single_pool.export import (
     frozen_target_keys,
 )
 from jax_single_pool.llama8b import (
-    KINDS,
-    LayerRange,
+    canonical_site_cs,
     init_decomp_vu,
     llama_site_specs,
+    mlp_family_site_cs,
     site_name,
 )
+from jax_single_pool.lm import SiteC
 
 OUT_DIR = Path(__file__).resolve().parent / "export_fixtures"
 
@@ -45,7 +48,19 @@ N_EMBD, N_INTERMEDIATE, VOCAB = 16, 32, 48
 C = 6
 ARCH = CIArch(d_model=16, n_blocks=2, n_heads=2, mlp_hidden=24)
 
-CASES = {"l18": LayerRange(18, 18), "l20_21": LayerRange(20, 21)}
+CASES: dict[str, tuple[SiteC, ...]] = {
+    "l18": mlp_family_site_cs(18, 18, C),
+    "l20_21": mlp_family_site_cs(20, 21, C),
+    "l18_attn": canonical_site_cs(
+        (
+            SiteC(site_name(18, "q"), 4),
+            SiteC(site_name(18, "k"), 6),
+            SiteC(site_name(18, "v"), 6),
+            SiteC(site_name(18, "o"), 8),
+            SiteC(site_name(18, "gate"), 4),
+        )
+    ),
+}
 
 
 def _tiny_llama_cfg(n_layer: int) -> LlamaConfig:
@@ -79,30 +94,26 @@ def _randomize_biases(ci_fn: CIFn, key: jax.Array) -> CIFn:
     return eqx.tree_at(bias_leaves, ci_fn, new_values)
 
 
-def _gen_case(case: str, layer_range: LayerRange, key: jax.Array) -> None:
-    n_layer = layer_range.last + 1
+def _gen_case(case: str, site_cs: tuple[SiteC, ...], key: jax.Array) -> None:
+    n_layer = max(int(name.split(".")[1]) for name, _ in site_cs) + 1
     cfg = _tiny_llama_cfg(n_layer)
-    sites = llama_site_specs(cfg, layer_range, C)
+    sites = llama_site_specs(cfg, site_cs)
     vu_key, ci_key, bias_key, data_key = random.split(key, 4)
 
-    vu = init_decomp_vu(cfg, C, layer_range.n_layers, vu_key)
+    vu = init_decomp_vu(sites, vu_key)
     ci_fn = _randomize_biases(init_ci_fn(ARCH, sites, ci_key), bias_key)
 
     arrays: dict[str, np.ndarray] = {}
     site_inputs: dict[str, jax.Array] = {}
-    site_iter = iter(sites)
-    for layer_idx, layer in enumerate(layer_range.layers):
-        for kind in KINDS:
-            spec = next(site_iter)
-            assert spec.name == site_name(layer, kind)
-            x_key, m_key = random.split(random.fold_in(data_key, len(site_inputs)))
-            x = random.normal(x_key, (B, T, spec.d_in))
-            m = random.uniform(m_key, (B, T, spec.C))
-            site_inputs[spec.name] = x
-            V, U = vu.site(layer_idx, kind)
-            arrays[f"x::{spec.name}"] = np.asarray(x)
-            arrays[f"mask::{spec.name}"] = np.asarray(m)
-            arrays[f"component_out::{spec.name}"] = np.asarray(((x @ V) * m) @ U)
+    for spec in sites:
+        x_key, m_key = random.split(random.fold_in(data_key, len(site_inputs)))
+        x = random.normal(x_key, (B, T, spec.d_in))
+        m = random.uniform(m_key, (B, T, spec.C))
+        site_inputs[spec.name] = x
+        V, U = vu.site(spec.name)
+        arrays[f"x::{spec.name}"] = np.asarray(x)
+        arrays[f"mask::{spec.name}"] = np.asarray(m)
+        arrays[f"component_out::{spec.name}"] = np.asarray(((x @ V) * m) @ U)
 
     ci = ci_fn(site_inputs)
     for name in ci_fn.site_names:
@@ -118,9 +129,10 @@ def _gen_case(case: str, layer_range: LayerRange, key: jax.Array) -> None:
     arrays["_C"] = np.array([s.C for s in sites])
     arrays["_arch"] = np.array([ARCH.d_model, ARCH.n_blocks, ARCH.n_heads, ARCH.mlp_hidden])
     arrays["_dims"] = np.array([B, T, n_layer, N_EMBD, N_INTERMEDIATE, VOCAB])
-    arrays["_frozen_keys"] = np.array(sorted(frozen_target_keys(n_layer, layer_range)))
+    decomposed_sites = frozenset(spec.name for spec in sites)
+    arrays["_frozen_keys"] = np.array(sorted(frozen_target_keys(n_layer, decomposed_sites)))
 
-    tensors = components_state(vu, layer_range) | ci_fn_state(ci_fn, sites)
+    tensors = components_state(vu, sites) | ci_fn_state(ci_fn, sites)
     OUT_DIR.mkdir(exist_ok=True)
     save_file(tensors, str(OUT_DIR / f"{case}.safetensors"))
     np.savez(OUT_DIR / f"{case}.npz", **arrays)  # pyright: ignore[reportArgumentType] (numpy savez **kwds stub is strict)
@@ -130,8 +142,8 @@ def _gen_case(case: str, layer_range: LayerRange, key: jax.Array) -> None:
 def main() -> None:
     jax.config.update("jax_platforms", "cpu")
     jax.config.update("jax_enable_x64", False)
-    for case_idx, (case, layer_range) in enumerate(CASES.items()):
-        _gen_case(case, layer_range, random.PRNGKey(case_idx))
+    for case_idx, (case, site_cs) in enumerate(CASES.items()):
+        _gen_case(case, site_cs, random.PRNGKey(case_idx))
 
 
 if __name__ == "__main__":

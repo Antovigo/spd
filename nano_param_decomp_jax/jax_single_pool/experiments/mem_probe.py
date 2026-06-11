@@ -23,9 +23,10 @@ from jax_single_pool.experiments.llama8b_real import (
     _random_target,  # pyright: ignore[reportPrivateUsage]
 )
 from jax_single_pool.llama8b import (
-    LayerRange,
     llama31_8b_config,
     llama_decomposed_lm,
+    llama_site_specs,
+    mlp_family_site_cs,
 )
 from jax_single_pool.llama8b_sharding import (
     dp_mesh,
@@ -63,14 +64,13 @@ def main() -> None:
     is0 = jax.process_index() == 0
 
     cfg = llama31_8b_config()
-    rng = LayerRange(args.first_layer, args.last_layer)
-    C = args.C
+    sites = llama_site_specs(cfg, mlp_family_site_cs(args.first_layer, args.last_layer, args.C))
     seq = 2048
     gbatch = args.per_gpu_batch * ndev
-    lm = llama_decomposed_lm(cfg, rng, C)
+    lm = llama_decomposed_lm(cfg, sites)
 
-    target = replicate_target(_random_target(cfg, rng, random.PRNGKey(0)), mesh)
-    vu = init_decomp_vu_sharded(cfg, C, rng.n_layers, random.PRNGKey(1), mesh)
+    target = replicate_target(_random_target(cfg, args.first_layer, random.PRNGKey(0)), mesh)
+    vu = init_decomp_vu_sharded(lm.sites, random.PRNGKey(1), mesh)
     ci_fn = init_ci_fn_sharded(CIArch(4096, 4, 64, 16384), lm.sites, random.PRNGKey(2), mesh)
     src = init_sources_sharded(
         lm.site_names, tuple(s.C for s in lm.sites), seq, random.PRNGKey(3), mesh

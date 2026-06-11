@@ -62,6 +62,8 @@ from jax_single_pool.config import (
     WandbConfig,
     load_config,
 )
+from jax_single_pool.llama8b import SITE_NAME_PATTERN, canonical_site_cs
+from jax_single_pool.lm import SiteC
 from jax_single_pool.train import ImpMinConfig, LossCoeffs, SourceAdamConfig
 
 OFFLINE_EVAL_METRIC_TYPES = frozenset(
@@ -80,28 +82,21 @@ OFFLINE_EVAL_METRIC_TYPES = frozenset(
     }
 )
 
-_SITE_PATTERN = re.compile(r"^(?:model\.)?layers\.(\d+)\.mlp\.(gate|up|down)_proj$")
-"""Raw-HF specs name modules `model.layers.*`; the vendored class drops the prefix.
-Same matrices either way."""
 
-
-def _layer_range_and_c(cfg: LMExperimentConfig) -> tuple[int, int, int]:
-    """Targets must be exactly the gate/up/down MLP projections of one contiguous
-    layer range, all at the same C — the only site family this trainer implements."""
+def _site_cs(cfg: LMExperimentConfig) -> tuple[SiteC, ...]:
+    """Decomposition targets -> canonical per-site (name, C) pairs. Any per-layer
+    matrix site (q/k/v/o/gate/up/down) with its own C is supported; identity targets
+    and non-site module patterns refuse. Raw-HF specs name modules `model.layers.*`;
+    the vendored class drops the prefix — same matrices either way."""
     assert cfg.pd.identity_decomposition_targets is None, "identity targets unsupported"
-    per_layer_kinds: dict[int, set[str]] = {}
-    c_values = set()
+    site_cs = []
     for target in cfg.pd.decomposition_targets:
-        match = _SITE_PATTERN.match(target.module_pattern)
-        assert match, f"unsupported decomposition target {target.module_pattern!r}"
-        per_layer_kinds.setdefault(int(match.group(1)), set()).add(match.group(2))
-        c_values.add(target.C)
-    assert len(c_values) == 1, f"per-site C values differ: {sorted(c_values)}"
-    layers = sorted(per_layer_kinds)
-    assert layers == list(range(layers[0], layers[-1] + 1)), f"non-contiguous layers {layers}"
-    for layer, kinds in per_layer_kinds.items():
-        assert kinds == {"gate", "up", "down"}, f"layer {layer} has partial sites {kinds}"
-    return layers[0], layers[-1], c_values.pop()
+        name = target.module_pattern.removeprefix("model.")
+        assert SITE_NAME_PATTERN.match(name), (
+            f"unsupported decomposition target {target.module_pattern!r}"
+        )
+        site_cs.append(SiteC(name, target.C))
+    return canonical_site_cs(tuple(site_cs))
 
 
 def _ci_arch(cfg: LMExperimentConfig, seq_len: int) -> CIArch:
@@ -261,8 +256,8 @@ def convert_torch_lm_config(
     out_dir: Path,
     remat_recon_forwards: bool,
 ) -> ExperimentConfig:
-    first_layer, last_layer, C = _layer_range_and_c(torch_cfg)
-    n_sites = 3 * (last_layer - first_layer + 1)
+    site_cs = _site_cs(torch_cfg)
+    n_sites = len(site_cs)
 
     assert torch_cfg.pd.sampling == "continuous", torch_cfg.pd.sampling
     assert torch_cfg.pd.sigmoid_type == "leaky_hard", torch_cfg.pd.sigmoid_type
@@ -312,9 +307,7 @@ def convert_torch_lm_config(
         out_dir=out_dir,
         seed=torch_cfg.pd.seed,
         steps=torch_cfg.pd.steps,
-        target=TargetConfig(
-            model_name=spec.model_name, first_layer=first_layer, last_layer=last_layer, C=C
-        ),
+        target=TargetConfig(model_name=spec.model_name, sites=site_cs),
         data=data,
         losses=coeffs,
         imp_min=imp_min,

@@ -26,7 +26,12 @@ import optax
 from jax import random
 
 from jax_single_pool.ci_fn import CIArch, init_ci_fn
-from jax_single_pool.llama8b import LayerRange, init_decomp_vu, llama_decomposed_lm
+from jax_single_pool.llama8b import (
+    init_decomp_vu,
+    llama_decomposed_lm,
+    llama_site_specs,
+    mlp_family_site_cs,
+)
 from jax_single_pool.sharding import dp_mesh, shard_batch
 from jax_single_pool.tests.test_llama8b import _tiny_cfg, _tiny_target
 from jax_single_pool.train import (
@@ -43,11 +48,11 @@ from jax_single_pool.train import (
 
 def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
     cfg = _tiny_cfg()
-    rng = LayerRange(3, 6)
-    tgt = _tiny_target(cfg, rng, random.PRNGKey(0))
+    tgt = _tiny_target(cfg, 3, random.PRNGKey(0))
     C, seq, gbatch = 8, 16, 8
-    lm = llama_decomposed_lm(cfg, rng, C)
-    vu = init_decomp_vu(cfg, C, rng.n_layers, random.PRNGKey(1))
+    sites = llama_site_specs(cfg, mlp_family_site_cs(3, 6, C))
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, random.PRNGKey(1))
     ci_fn = init_ci_fn(CIArch(16, 2, 2, 32), lm.sites, random.PRNGKey(2))
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
@@ -91,20 +96,24 @@ def main() -> None:
     single = _run(args.steps, sharded=False)
     sharded = _run(args.steps, sharded=True)
 
-    REL = 1e-4
+    # ABS floor: the per-leaf grad-norm diagnostics include tiny norms (~1e-4) whose
+    # cross-shard reduction suffers cancellation — relative error there can graze 1e-4
+    # while every loss term sits at ~1e-6 (observed: one ci-fn wv leaf, abs err ~1e-8).
+    # The floor is far below any semantically meaningful metric's scale.
+    REL, ABS = 1e-4, 1e-7
     ok = True
     worst = 0.0
     for i, (a, b) in enumerate(zip(single, sharded, strict=True)):
         for k in a:
-            rel = abs(a[k] - b[k]) / (abs(a[k]) + 1e-30)
-            worst = max(worst, rel)
-            if rel > REL:
+            err = abs(a[k] - b[k])
+            worst = max(worst, err / (abs(a[k]) + 1e-30))
+            if err > REL * abs(a[k]) + ABS:
                 ok = False
-                print(f"step {i} {k}: single {a[k]!r} vs sharded({n_dev}) {b[k]!r} rel {rel:.2e}")
+                print(f"step {i} {k}: single {a[k]!r} vs sharded({n_dev}) {b[k]!r} err {err:.2e}")
     assert ok, "trajectory diverged across shardings — SPMD correctness broken (SPEC D4)"
     print(
         f"OK: {args.steps}-step trajectory matches 1-layout vs {n_dev}-device GSPMD "
-        f"(worst rel {worst:.2e} <= {REL:.0e}; reassociation-only)"
+        f"(worst rel {worst:.2e}; tol rel {REL:.0e} + abs {ABS:.0e}; reassociation-only)"
     )
 
 

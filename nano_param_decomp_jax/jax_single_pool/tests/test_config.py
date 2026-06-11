@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from jax_single_pool.config import load_config
+from jax_single_pool.llama8b import mlp_family_site_cs
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
@@ -13,7 +14,7 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 def test_production_config_loads():
     cfg = load_config(CONFIGS / "llama8b_l18_b512.yaml")
     assert cfg.data.global_batch == 512
-    assert cfg.target.C == 24576 and cfg.target.first_layer == 18
+    assert cfg.target.sites == mlp_family_site_cs(18, 18, 24576)
     assert cfg.losses.faith == 1e5 and cfg.imp_min.p_start == 2.0
     assert cfg.ppgd.n_warmup == 2 and cfg.vu_optimizer.grad_clip_norm == 0.01
     assert cfg.wandb is not None and cfg.wandb.project == "param-decomp-llama"

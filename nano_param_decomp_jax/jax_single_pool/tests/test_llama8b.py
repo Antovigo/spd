@@ -1,8 +1,9 @@
 """CPU tests for the Llama target + generic trainer at a tiny config.
 
 Validates the `DecomposedLM` contract (clean == all-frozen masked forward, shapes) and
-the full SPEC step (trains, VPD loss signature, adversary state advances), without real
-weights or a GPU.
+the full SPEC step (trains, VPD loss signature, adversary state advances) — for the
+MLP site family AND for attention (q/k/v/o) sites with heterogeneous per-site C —
+without real weights or a GPU.
 """
 
 import equinox as eqx
@@ -14,16 +15,20 @@ from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 
 from jax_single_pool.ci_fn import CIArch, init_ci_fn
 from jax_single_pool.llama8b import (
-    DecompLayerFrozen,
     DecompVU,
     FrozenAttn,
-    FrozenBlock,
-    FrozenMLP,
-    LayerRange,
+    SuffixLayer,
     Target,
+    canonical_site_cs,
+    first_decomposed_layer,
     init_decomp_vu,
     llama_decomposed_lm,
+    llama_site_specs,
+    mlp_family_site_cs,
+    parse_site_name,
+    site_name,
 )
+from jax_single_pool.lm import SiteC, SiteSpec
 from jax_single_pool.train import (
     ImpMinConfig,
     LossCoeffs,
@@ -55,7 +60,7 @@ def _tiny_cfg() -> LlamaConfig:
     )
 
 
-def _tiny_target(cfg: LlamaConfig, rng: LayerRange, key: jax.Array) -> Target:
+def _tiny_target(cfg: LlamaConfig, first_layer: int, key: jax.Array) -> Target:
     ks = iter(jax.random.split(key, 1024))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
@@ -69,32 +74,84 @@ def _tiny_target(cfg: LlamaConfig, rng: LayerRange, key: jax.Array) -> Target:
             cfg.n_head, cfg.n_kv_head, cfg.head_dim, cfg.n_rep,
         )  # fmt: skip
 
-    def dlayer():
-        return DecompLayerFrozen(
+    def suffix_layer():
+        return SuffixLayer(
             jnp.ones((d,)), jnp.ones((d,)), fattn(), n((di, d)), n((di, d)), n((d, di))
         )
 
-    def fblock():
-        return FrozenBlock(
-            jnp.ones((d,)), jnp.ones((d,)), fattn(),
-            FrozenMLP(n((di, d)), n((di, d)), n((d, di))), cfg.rms_norm_eps,
-        )  # fmt: skip
-
     return Target(
-        decomp_layers=[dlayer() for _ in range(rng.n_layers)],
-        tail=[fblock() for _ in range(cfg.n_layer - rng.last - 1)],
+        layers=[suffix_layer() for _ in range(cfg.n_layer - first_layer)],
         norm=jnp.ones((d,)), lm_head=n((cfg.vocab_size, d), 0.02),
         inv_freq=llama3_inv_freq(cfg), eps=cfg.rms_norm_eps,
     )  # fmt: skip
 
 
-@pytest.mark.parametrize("rng", [LayerRange(4, 4), LayerRange(3, 6)])
-def test_clean_path_and_masked_identity(rng: LayerRange):
+def _mlp_sites(cfg: LlamaConfig, first: int, last: int, C: int) -> tuple[SiteSpec, ...]:
+    return llama_site_specs(cfg, mlp_family_site_cs(first, last, C))
+
+
+_QVDOWN_SITE_CS = (
+    SiteC("layers.4.self_attn.q_proj", 8),
+    SiteC("layers.4.self_attn.v_proj", 12),
+    SiteC("layers.4.mlp.down_proj", 8),
+)
+"""Attention + MLP sites on one layer with heterogeneous per-site C."""
+
+
+def test_site_name_helpers():
+    assert site_name(18, "q") == "layers.18.self_attn.q_proj"
+    assert site_name(18, "gate") == "layers.18.mlp.gate_proj"
+    assert parse_site_name("layers.18.self_attn.o_proj") == (18, "o")
+    assert parse_site_name("layers.2.mlp.up_proj") == (2, "up")
+    with pytest.raises(AssertionError):
+        parse_site_name("layers.18.self_attn.gate_proj")
+    with pytest.raises(AssertionError):
+        parse_site_name("model.layers.18.mlp.gate_proj")
+    with pytest.raises(AssertionError):
+        parse_site_name("embed_tokens")
+
+    shuffled = (
+        SiteC("layers.4.mlp.down_proj", 8),
+        SiteC("layers.3.self_attn.v_proj", 4),
+        SiteC("layers.4.self_attn.q_proj", 8),
+    )
+    assert canonical_site_cs(shuffled) == (
+        SiteC("layers.3.self_attn.v_proj", 4),
+        SiteC("layers.4.self_attn.q_proj", 8),
+        SiteC("layers.4.mlp.down_proj", 8),
+    )
+    with pytest.raises(AssertionError):
+        canonical_site_cs((SiteC("layers.3.mlp.up_proj", 4), SiteC("layers.3.mlp.up_proj", 8)))
+    assert first_decomposed_layer(("layers.5.mlp.up_proj", "layers.3.self_attn.k_proj")) == 3
+
+
+def test_llama_site_specs_dims():
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
+    qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
+    specs = llama_site_specs(
+        cfg,
+        canonical_site_cs(
+            tuple(SiteC(site_name(2, kind), 4) for kind in ("q", "k", "v", "o", "gate", "down"))
+        ),
+    )
+    by_name = {s.name: s for s in specs}
+    assert by_name["layers.2.self_attn.q_proj"][1:] == (cfg.n_embd, qd, 4)
+    assert by_name["layers.2.self_attn.k_proj"][1:] == (cfg.n_embd, kvd, 4)
+    assert by_name["layers.2.self_attn.o_proj"][1:] == (qd, cfg.n_embd, 4)
+    assert by_name["layers.2.mlp.gate_proj"][1:] == (cfg.n_embd, cfg.n_intermediate, 4)
+    assert by_name["layers.2.mlp.down_proj"][1:] == (cfg.n_intermediate, cfg.n_embd, 4)
+    with pytest.raises(AssertionError, match="canonical"):
+        llama_site_specs(cfg, tuple(reversed(mlp_family_site_cs(2, 2, 4))))
+
+
+@pytest.mark.parametrize("first,last", [(4, 4), (3, 6)])
+def test_clean_path_and_masked_identity(first: int, last: int):
+    cfg = _tiny_cfg()
+    tgt = _tiny_target(cfg, first, jax.random.PRNGKey(0))
     C = 8
-    lm = llama_decomposed_lm(cfg, rng, C)
-    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
+    sites = _mlp_sites(cfg, first, last, C)
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
@@ -123,15 +180,87 @@ def test_clean_path_and_masked_identity(rng: LayerRange):
     assert all(v.dtype == jnp.float32 for v in deltas.values())
 
 
-@pytest.mark.parametrize("rng", [LayerRange(4, 4), LayerRange(3, 6)])
-def test_step_trains_and_has_vpd_signature(rng: LayerRange):
+def test_attention_sites_clean_and_masked_identity():
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
-    C = 8
+    first = 4
+    tgt = _tiny_target(cfg, first, jax.random.PRNGKey(0))
+    sites = llama_site_specs(cfg, _QVDOWN_SITE_CS)
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    b, t = 2, 16
+    resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
+
+    # per-site heterogeneous C is preserved end to end
+    assert {s.name: s.C for s in lm.sites} == {name: c for name, c in _QVDOWN_SITE_CS}
+    for spec in lm.sites:
+        V, U = vu.site(spec.name)
+        assert V.shape == (spec.d_in, spec.C) and U.shape == (spec.C, spec.d_out)
+
+    clean = lm.clean_logits(tgt, resid)
+    none_masked = lm.masked_logits(tgt, vu, resid, {}, {}, None, ())
+    assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
+
+    names = lm.site_names
+    ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in lm.sites}
+    ones_delta = {s: jnp.ones((b, t)) for s in names}
+    full = lm.masked_logits(tgt, vu, resid, ones_masks, ones_delta, None, names)
+    assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted (attention sites)"
+
+    # zero-mask + zero-delta on q alone must CHANGE the logits (the site is live on
+    # the attention path, ahead of RoPE/SDPA)
+    q_site = "layers.4.self_attn.q_proj"
+    zero_mask = {q_site: jnp.zeros((b, t, 8))}
+    zero_delta = {q_site: jnp.zeros((b, t))}
+    ablated = lm.masked_logits(tgt, vu, resid, zero_mask, zero_delta, None, (q_site,))
+    assert not jnp.allclose(clean, ablated, atol=1e-4), "ablating q did nothing"
+
+    site_in = lm.site_inputs(tgt, resid)
+    assert set(site_in) == set(names)
+    # q and v read the same post-LN1 residual; down reads the (di,) MLP inner acts
+    assert jnp.array_equal(site_in[q_site], site_in["layers.4.self_attn.v_proj"])
+    assert site_in["layers.4.mlp.down_proj"].shape == (b, t, cfg.n_intermediate)
+
+    deltas = lm.weight_deltas(tgt, vu)
+    qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
+    assert deltas[q_site].shape == (qd, cfg.n_embd)
+    assert deltas["layers.4.self_attn.v_proj"].shape == (kvd, cfg.n_embd)
+
+
+def test_o_site_masks_attention_output():
+    cfg = _tiny_cfg()
+    first = 4
+    tgt = _tiny_target(cfg, first, jax.random.PRNGKey(0))
+    o_site = "layers.4.self_attn.o_proj"
+    sites = llama_site_specs(cfg, (SiteC(o_site, 8),))
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    b, t = 2, 16
+    resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
+
+    clean = lm.clean_logits(tgt, resid)
+    ones = lm.masked_logits(
+        tgt, vu, resid, {o_site: jnp.ones((b, t, 8))}, {o_site: jnp.ones((b, t))}, None, (o_site,)
+    )
+    assert jnp.allclose(clean, ones, atol=1e-4)
+    # o's clean site input is the pre-o_proj attention output, shape (b, t, qd)
+    site_in = lm.site_inputs(tgt, resid)
+    assert site_in[o_site].shape == (b, t, cfg.n_head * cfg.head_dim)
+
+
+@pytest.mark.parametrize(
+    "site_cs",
+    [mlp_family_site_cs(4, 4, 8), mlp_family_site_cs(3, 6, 8), _QVDOWN_SITE_CS],
+    ids=["mlp_l4", "mlp_l3_6", "qv_down_l4"],
+)
+def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
+    cfg = _tiny_cfg()
+    first = first_decomposed_layer(tuple(s.name for s in site_cs))
+    tgt = _tiny_target(cfg, first, jax.random.PRNGKey(0))
     seq = 16
     n_warmup = 2
-    lm = llama_decomposed_lm(cfg, rng, C)
-    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
+    sites = llama_site_specs(cfg, site_cs)
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = init_ci_fn(CIArch(d_model=16, n_blocks=2, n_heads=2, mlp_hidden=32),
                        lm.sites, jax.random.PRNGKey(2))  # fmt: skip
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
@@ -183,35 +312,42 @@ def test_step_trains_and_has_vpd_signature(rng: LayerRange):
     # SPEC S9: p annealed below its 2.0 start by step 4 of 100.
     assert losses[-1]["p_imp"] < 2.0
     # fp32 masters preserved through updates (SPEC N1).
-    assert state.components.Vg.dtype == jnp.float32
+    assert isinstance(state.components, DecompVU)
+    for V, U in state.components.vu.values():
+        assert V.dtype == jnp.float32 and U.dtype == jnp.float32
     assert state.ci_fn.in_proj_w.dtype == jnp.float32
 
 
 def test_faith_warmup_decreases_faith():
     cfg = _tiny_cfg()
-    rng = LayerRange(3, 4)
-    tgt = _tiny_target(cfg, rng, jax.random.PRNGKey(0))
-    lm = llama_decomposed_lm(cfg, rng, C=8)
-    vu = init_decomp_vu(cfg, 8, rng.n_layers, jax.random.PRNGKey(1))
+    first = 3
+    tgt = _tiny_target(cfg, first, jax.random.PRNGKey(0))
+    sites = _mlp_sites(cfg, 3, 4, 8)
+    lm = llama_decomposed_lm(cfg, sites)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
     wstep = make_faith_warmup_step(lm, opt)
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
-    first: float | None = None
+    first_loss: float | None = None
     loss = None
     for _ in range(30):
         vu, ostate, loss = wstep(vu, ostate, tgt)
-        first = float(loss) if first is None else first
-    assert first is not None and loss is not None
-    assert float(loss) < first * 0.9, (first, float(loss))
+        first_loss = float(loss) if first_loss is None else first_loss
+    assert first_loss is not None and loss is not None
+    assert float(loss) < first_loss * 0.9, (first_loss, float(loss))
 
 
 def test_decomp_vu_shapes_fp32():
     cfg = _tiny_cfg()
-    C = 8
-    rng = LayerRange(3, 6)
-    vu = init_decomp_vu(cfg, C, rng.n_layers, jax.random.PRNGKey(1))
+    sites = llama_site_specs(cfg, _QVDOWN_SITE_CS)
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     d, di = cfg.n_embd, cfg.n_intermediate
-    assert vu.Vg.shape == (rng.n_layers, d, C) and vu.Ug.shape == (rng.n_layers, C, di)
-    assert vu.Vd.shape == (rng.n_layers, di, C) and vu.Ud.shape == (rng.n_layers, C, d)
+    qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
+    V_q, U_q = vu.site("layers.4.self_attn.q_proj")
+    V_v, U_v = vu.site("layers.4.self_attn.v_proj")
+    V_d, U_d = vu.site("layers.4.mlp.down_proj")
+    assert V_q.shape == (d, 8) and U_q.shape == (8, qd)
+    assert V_v.shape == (d, 12) and U_v.shape == (12, kvd)
+    assert V_d.shape == (di, 8) and U_d.shape == (8, d)
     assert isinstance(vu, DecompVU)
-    assert vu.Vg.dtype == jnp.float32
+    assert all(a.dtype == jnp.float32 for pair in vu.vu.values() for a in pair)

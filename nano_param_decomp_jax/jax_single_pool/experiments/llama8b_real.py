@@ -41,17 +41,16 @@ from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 from jax_single_pool.ci_fn import CIArch, init_ci_fn
 from jax_single_pool.llama8b import (
     DT,
-    DecompLayerFrozen,
     FrozenAttn,
-    FrozenBlock,
-    FrozenMLP,
-    LayerRange,
+    SuffixLayer,
     Target,
     init_decomp_vu,
     llama31_8b_config,
     llama_decomposed_lm,
+    llama_site_specs,
     load_target_from_hf,
     make_real_target_residual,
+    mlp_family_site_cs,
 )
 from jax_single_pool.llama8b_sharding import (
     dp_mesh,
@@ -75,7 +74,7 @@ from jax_single_pool.train import (
 )
 
 
-def _random_target(cfg: LlamaConfig, rng: LayerRange, key: jax.Array) -> Target:
+def _random_target(cfg: LlamaConfig, first_layer: int, key: jax.Array) -> Target:
     ks = iter(random.split(key, 4096))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
@@ -89,22 +88,14 @@ def _random_target(cfg: LlamaConfig, rng: LayerRange, key: jax.Array) -> Target:
             cfg.n_head, cfg.n_kv_head, cfg.head_dim, cfg.n_rep,
         )  # fmt: skip
 
-    def dlayer():
-        return DecompLayerFrozen(
+    def suffix_layer():
+        return SuffixLayer(
             ln1=jnp.ones((d,), DT), ln2=jnp.ones((d,), DT), attn=fattn(),
             Wg=n((di, d)), Wu=n((di, d)), Wd=n((d, di)),
         )  # fmt: skip
 
-    def fblock():
-        return FrozenBlock(
-            jnp.ones((d,), DT), jnp.ones((d,), DT), fattn(),
-            FrozenMLP(n((di, d)), n((di, d)), n((d, di))), cfg.rms_norm_eps,
-        )  # fmt: skip
-
-    n_tail = cfg.n_layer - rng.last - 1
     return Target(
-        decomp_layers=[dlayer() for _ in range(rng.n_layers)],
-        tail=[fblock() for _ in range(n_tail)],
+        layers=[suffix_layer() for _ in range(cfg.n_layer - first_layer)],
         norm=jnp.ones((d,), DT),
         lm_head=n((cfg.vocab_size, d), 0.02),
         inv_freq=llama3_inv_freq(cfg),
@@ -131,8 +122,8 @@ def main():
     args = ap.parse_args()
     assert args.steps > 0, "--steps must be positive"
 
-    rng = LayerRange(first=args.first_layer, last=args.last_layer)
-    assert 0 <= rng.first <= rng.last < 32, f"bad layer range {rng}"
+    first, last = args.first_layer, args.last_layer
+    assert 0 <= first <= last < 32, f"bad layer range {first}..{last}"
 
     distributed = init_distributed()
     mesh = dp_mesh()
@@ -141,12 +132,14 @@ def main():
     gbatch = args.per_gpu_batch * ndev
 
     cfg = llama31_8b_config()
-    lm = llama_decomposed_lm(cfg, rng, args.C)
+    sites = llama_site_specs(cfg, mlp_family_site_cs(first, last, args.C))
+    lm = llama_decomposed_lm(cfg, sites)
+    n_layers = last - first + 1
     arch = CIArch(d_model=4096, n_blocks=4, n_heads=64, mlp_hidden=16384)
     if is0:
         print(
             f"[p0] LLAMA8B single-pool PD | {ndev} GPU | gbatch={gbatch} seq={args.seq} "
-            f"layers={rng.first}..{rng.last} ({rng.n_layers}L, {len(lm.sites)} sites) "
+            f"layers={first}..{last} ({n_layers}L, {len(lm.sites)} sites) "
             f"C={args.C} n_warmup={args.n_warmup} faith_warmup={args.faith_warmup} "
             f"mode={'shard' if args.shard else 'replicated'} "
             f"weights={'HF' if args.real_weights else 'random'}"
@@ -156,12 +149,12 @@ def main():
     if args.real_weights:
         if is0:
             print("[p0] loading HF suffix + harvesting residual via prefix forward...")
-        target = load_target_from_hf(args.model_name, cfg, rng)
+        target = load_target_from_hf(args.model_name, cfg, first)
         resid_global = make_real_target_residual(
-            args.model_name, cfg, rng, idx_global, chunk=args.per_gpu_batch
+            args.model_name, cfg, first, idx_global, chunk=args.per_gpu_batch
         )
     else:
-        target = _random_target(cfg, rng, random.PRNGKey(0))
+        target = _random_target(cfg, first, random.PRNGKey(0))
         resid_global = (
             random.normal(random.PRNGKey(7), (gbatch, args.seq, cfg.n_embd)) * 0.5
         ).astype(DT)
@@ -179,13 +172,13 @@ def main():
     site_Cs = tuple(s.C for s in lm.sites)
     # fp32 masters; source init U[0,1] (SPEC S15), trailing channel = the weight-delta source.
     if args.shard:
-        vu = init_decomp_vu_sharded(cfg, args.C, rng.n_layers, random.PRNGKey(1), mesh)
+        vu = init_decomp_vu_sharded(lm.sites, random.PRNGKey(1), mesh)
         ci_fn = init_ci_fn_sharded(arch, lm.sites, random.PRNGKey(2), mesh)
         src = init_sources_sharded(lm.site_names, site_Cs, args.seq, random.PRNGKey(3), mesh)
     else:
         repl = NamedSharding(mesh, P())
         put = lambda a: jax.device_put(a, repl) if eqx.is_array(a) else a  # noqa: E731
-        vu = jax.tree.map(put, init_decomp_vu(cfg, args.C, rng.n_layers, random.PRNGKey(1)))
+        vu = jax.tree.map(put, init_decomp_vu(lm.sites, random.PRNGKey(1)))
         ci_fn = jax.tree.map(put, init_ci_fn(arch, lm.sites, random.PRNGKey(2)))
         src = {
             k: jax.device_put(v, repl)
@@ -286,7 +279,7 @@ def main():
             f"stoch {float(m['stoch']):.4e} ppgd {float(m['ppgd']):.4e} "
             f"(p={float(m['p_imp']):.2f} src_lr={float(m['src_lr']):.2e})"
         )
-        print(f"[p0] LLAMA8B ({ndev} GPU, {rng.n_layers}L): OK")
+        print(f"[p0] LLAMA8B ({ndev} GPU, {n_layers}L): OK")
 
     if distributed:
         jax.experimental.multihost_utils.sync_global_devices("llama8b_done")

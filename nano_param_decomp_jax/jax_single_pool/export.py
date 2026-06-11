@@ -11,9 +11,10 @@ Adversary sources and optimizer state are training-only and not exported.
 
 Key mapping (verified against the real torch modules — see `tools/verify_export_torch.py`):
 
-  * V/U — destacked from `DecompVU`'s leading layer axis to per-site
-    `model.<site>.components.{V,U}`. Same orientation both sides: V `(d_in, C)`,
-    U `(C, d_out)` (torch `Components.__init__`). The frozen per-site weight goes to
+  * V/U — read per site from `DecompVU.vu` to `model.<site>.components.{V,U}`
+    (MLP and attention sites alike — torch componentizes any per-layer matrix).
+    Same orientation both sides: V `(d_in, C)`, U `(C, d_out)` (torch
+    `Components.__init__`). The frozen per-site weight goes to
     `model.<site>.target_weight` instead of `.weight`.
   * CI fn — `CIFn` fields map onto `ci_fn._global_ci_fn.*`:
     `in_proj_{w,b} -> _input_projector.{W,b}` and `out_{w,b} -> _output_head.{W,b}`
@@ -23,7 +24,8 @@ Key mapping (verified against the real torch modules — see `tools/verify_expor
     `blocks[i].{w1,b1,w2,b2} -> _blocks.{i}.mlp.{0,2}.{W,b}` (`x @ W + b` both sides);
     `inv_freq -> _blocks.{i}.attn.rope.inv_freq` (persistent torch buffer, same formula).
   * SITE ORDER — the one real trap. Torch concatenates CI inputs/outputs in
-    sorted-module-path order (per layer: down, gate, up); JAX uses (gate, up, down).
+    sorted-module-path order (per layer: mlp.{down,gate,up} then self_attn.{k,o,q,v});
+    JAX uses computation order (`KIND_ORDER`: q,k,v,o,gate,up,down).
     `_concat_permutation` reorders the `in_proj` ROW blocks (by `d_in`) and the
     out-head COLUMN blocks (+ bias, by `C`) from the JAX order to `sorted(site_names)`.
 """
@@ -39,13 +41,13 @@ from safetensors.numpy import save_file
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_step
 from jax_single_pool.ci_fn import CIFn
 from jax_single_pool.llama8b import (
-    KINDS,
+    KIND_ORDER,
     DecompVU,
-    LayerRange,
     _hf_snapshot_dir,
     _HFWeights,
     llama31_8b_config,
     llama_decomposed_lm,
+    llama_site_specs,
     site_name,
 )
 from jax_single_pool.lm import SiteSpec
@@ -79,14 +81,13 @@ def _concat_permutation(jax_order: tuple[str, ...], sizes: dict[str, int]) -> np
     )
 
 
-def components_state(components: DecompVU, layer_range: LayerRange) -> dict[str, np.ndarray]:
-    """Destack `DecompVU` to per-site `model.<site>.components.{V,U}` (fp32)."""
+def components_state(components: DecompVU, sites: tuple[SiteSpec, ...]) -> dict[str, np.ndarray]:
+    """Per-site `model.<site>.components.{V,U}` (fp32)."""
     out: dict[str, np.ndarray] = {}
-    for layer_idx, layer in enumerate(layer_range.layers):
-        for kind in KINDS:
-            V, U = components.site(layer_idx, kind)
-            out[f"model.{site_name(layer, kind)}.components.V"] = _f32(V)
-            out[f"model.{site_name(layer, kind)}.components.U"] = _f32(U)
+    for spec in sites:
+        V, U = components.site(spec.name)
+        out[f"model.{spec.name}.components.V"] = _f32(V)
+        out[f"model.{spec.name}.components.U"] = _f32(U)
     return out
 
 
@@ -119,26 +120,18 @@ def ci_fn_state(ci_fn: CIFn, sites: tuple[SiteSpec, ...]) -> dict[str, np.ndarra
     return out
 
 
-def frozen_target_keys(n_layer: int, layer_range: LayerRange) -> dict[str, str]:
+def frozen_target_keys(n_layer: int, decomposed_sites: frozenset[str]) -> dict[str, str]:
     """`{torch_state_dict_key: hf_safetensors_key}` for the frozen Llama weights. The
     rename is identity-with-`model.`-prefix except: decomposed sites store their frozen
     weight as `.target_weight` (a `ComponentLinear` buffer), and HF's bare `lm_head`
     keeps the `model.` prefix in `LMComponentModel` (the vendored target sits under
     its `model` attribute)."""
-    decomposed_sites = {site_name(layer, kind) for layer in layer_range.layers for kind in KINDS}
     out = {"model.embed_tokens.weight": "model.embed_tokens.weight"}
     for i in range(n_layer):
         prefix = f"model.layers.{i}"
-        for sub in (
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.v_proj.weight",
-            "self_attn.o_proj.weight",
-        ):
+        for sub in ("input_layernorm.weight", "post_attention_layernorm.weight"):
             out[f"{prefix}.{sub}"] = f"{prefix}.{sub}"
-        for kind in KINDS:
+        for kind in KIND_ORDER:
             site = site_name(i, kind)
             param = "target_weight" if site in decomposed_sites else "weight"
             out[f"model.{site}.{param}"] = f"model.{site}.weight"
@@ -147,11 +140,11 @@ def frozen_target_keys(n_layer: int, layer_range: LayerRange) -> dict[str, str]:
     return out
 
 
-def frozen_target_state(model_name: str, layer_range: LayerRange) -> dict[str, np.ndarray]:
+def frozen_target_state(model_name: str, decomposed_sites: frozenset[str]) -> dict[str, np.ndarray]:
     """The frozen Llama weights under torch's `model.*` keys (fp32, exact bf16 upcast —
     torch's checkpoints carry them because `LMComponentModel.state_dict()` is strict)."""
     hf = _HFWeights(_hf_snapshot_dir(model_name))
-    keys = frozen_target_keys(llama31_8b_config().n_layer, layer_range)
+    keys = frozen_target_keys(llama31_8b_config().n_layer, decomposed_sites)
     return {torch_key: _f32(hf.get(hf_key)) for torch_key, hf_key in keys.items()}
 
 
@@ -163,8 +156,9 @@ def main() -> None:
     jax.config.update("jax_platforms", "cpu")
 
     cfg = load_run_dir_config(args.run_dir)
-    layer_range = LayerRange(cfg.target.first_layer, cfg.target.last_layer)
-    lm = llama_decomposed_lm(llama31_8b_config(), layer_range, cfg.target.C)
+    lm = llama_decomposed_lm(
+        llama31_8b_config(), llama_site_specs(llama31_8b_config(), cfg.target.sites)
+    )
 
     opt_vu, opt_ci, _schedules = build_optimizers(cfg)
     init_key, src_key, _run_key = random.split(random.PRNGKey(cfg.seed), 3)
@@ -176,9 +170,9 @@ def main() -> None:
     state = restore_step(manager, reference, step)
     assert isinstance(state.components, DecompVU)
 
-    tensors = components_state(state.components, layer_range)
+    tensors = components_state(state.components, lm.sites)
     tensors |= ci_fn_state(state.ci_fn, lm.sites)
-    tensors |= frozen_target_state(cfg.target.model_name, layer_range)
+    tensors |= frozen_target_state(cfg.target.model_name, frozenset(lm.site_names))
 
     out_path = args.run_dir / "export" / f"model_{step}.safetensors"
     out_path.parent.mkdir(exist_ok=True)
