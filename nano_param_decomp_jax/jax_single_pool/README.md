@@ -26,16 +26,16 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `export.py` | `jsp-export <run_dir> [--step N]` — orbax checkpoint → `<run_dir>/export/model_<step>.safetensors` with the torch `LMComponentModel`'s exact state-dict keys (V/U destacked per site, CI fn in-proj/out-head permuted to torch's sorted site order, frozen target included), so the torch eval/harvest/postprocess stack runs on JAX runs |
 | `tools/` | export round-trip verification: `gen_export_fixture.py` (JAX venv) + `verify_export_torch.py` (torch venv, rebuilds the real torch modules from the safetensors and matches forwards at fp32 tolerance) |
 | `sharding.py` | generic GSPMD helpers (`init_distributed`, `dp_mesh`, `replicate`, `shard_batch`) |
-| `llama8b.py` | Llama-3.1-8B target: residual-start suffix + `Prefix` harvest, decomposed MLP layer range, HF safetensors loader, `llama_decomposed_lm(...)` |
+| `llama8b.py` | Llama-3.1-8B target: residual-start suffix + `Prefix` harvest, arbitrary per-layer matrix sites (`q/k/v/o/gate/up/down`, per-site C; q/k/v decomposed before RoPE/SDPA), per-site `DecompVU`, HF safetensors loader, `llama_decomposed_lm(cfg, sites)` |
 | `run.py` | the training entrypoint (`jsp-train <config.yaml>`): data, faith warmup, loop, metrics jsonl/wandb, orbax checkpoints, SIGTERM-save + requeue-resume |
 | `data.py` | deterministic batch schedule over the pre-tokenized fineweb parquet shards; O(1) resume addressing, per-process slices |
 | `config.py` | typed `ExperimentConfig` from YAML — every field explicit, unknown keys raise |
 | `configs/` | `llama8b_l18_b512.yaml` (production B=512) + `llama8b_l18_smoke8.yaml` (8-GPU smoke) |
 | `slurm/llama8b.sbatch` | SLURM launch (1 task/GPU, `--requeue`, SIGTERM@300 → save → resume) |
-| `llama8b_sharding.py` | the 8B placement plan (frozen replicated; V/U + CI + Adam C-sharded; source replicated; batch sharded) |
+| `llama8b_sharding.py` | the 8B placement plan (frozen replicated; per-site V/U + CI + Adam C-sharded; source replicated; batch sharded) |
 | `experiments/llama8b_real.py` | the runnable 8B step + tok/s/GPU bench |
 | `experiments/invariance_check.py` | device-count invariance harness (SPEC D4) |
-| `tests/` | tiny-target unit tests, checkpoint resume, sharding, and `tests/equivalence/` — the fixture-driven torch↔JAX loss-term equivalence harness |
+| `tests/` | tiny-target unit tests (incl. attention sites + heterogeneous per-site C), checkpoint resume, sharding, `tests/equivalence/` — the fixture-driven torch↔JAX loss-term equivalence harness — and `tests/stacked_parity/` — fixtures pinning the pre-site-generality stacked implementation (clean logits bit-identical, train trajectory rel ≤ ~1e-5) |
 
 ## Run
 

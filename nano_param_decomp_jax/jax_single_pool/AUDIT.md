@@ -52,6 +52,25 @@ SLURM entry) is the remaining gap between "bench" and "trainer".
 - N3 KL in fp32; imp-min reduction in fp32.
 - R1/R3 `fold_in`-derived independent draws (bf16 uniform draws match torch-under-autocast).
 
+## Notes (2026-06-11 site-generality restructure)
+
+- The Llama target now accepts ARBITRARY per-layer matrix sites (q/k/v/o/gate/up/down,
+  per-site C) instead of contiguous-range MLP-only: per-site `DecompVU` dict replaces
+  the six stacked `(L,·,·)` arrays; `Target` is a uniform `SuffixLayer` list (layers
+  with no sites run the plain frozen block, SPEC S2). Parity with the stacked
+  implementation is pinned by `tests/stacked_parity/` (fixtures generated on
+  `feature/jax-single-pool-pd`): clean/masked/site-input forwards bit-identical, the
+  2-step train trajectory within rel ~2.5e-6 (clip-global-norm leaf-order
+  reassociation is the only divergence source).
+- Checkpoints are NOT cross-compatible across the restructure: the `components` pytree
+  layout and the V/U init RNG derivation changed (per-site keys instead of 6 stacked
+  draws). Old stacked checkpoints would need a one-off destack migration to resume.
+- `verify_export_torch.py`'s "production numerics" CI-fn pass is now measure-only
+  (never asserted): the documented GELU/eps divergence is amplified on the tiny
+  attention fixture (leaky-hard outputs near the clamp boundary → max_rel ~0.18),
+  while the jax-matched-numerics pass — the actual mapping proof — stays asserted at
+  fp32 tolerance and passes for all three cases (incl. `l18_attn`, heterogeneous C).
+
 ## Notes
 
 - Site ordering: torch concatenates CI inputs in sorted-module-path order (per layer:

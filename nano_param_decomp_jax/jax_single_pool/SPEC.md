@@ -77,10 +77,12 @@ and the tables (§2, §3, §6). Prose between them is orientation only. Notation
 | `step`, schedules `pnorm(step)`, `lr(step)` | scalar | — | yes |
 
 A **site** is any weight matrix selected for decomposition (torch decomposes any
-`nn.Linear`/`Embedding`/`Conv1D`); sites may be heterogeneous in shape, and a fixed,
-documented site order is part of the configuration. The current target implementation
-decomposes the MLP matrices (gate/up/down) of a contiguous Llama layer range — `3N`
-sites named `layers.{i}.mlp.{kind}_proj`.
+`nn.Linear`/`Embedding`/`Conv1D`); sites may be heterogeneous in shape AND in `C`, and
+a fixed, documented site order is part of the configuration. The current target
+implementation decomposes any per-layer Llama matrices — sites named
+`layers.{i}.self_attn.{q,k,v,o}_proj` / `layers.{i}.mlp.{gate,up,down}_proj`, each with
+its own `C` (production: the MLP family of one layer at a single `C`). q/k/v sites are
+decomposed before RoPE/SDPA (the masked site output feeds the attention math); o after.
 
 ---
 
@@ -101,7 +103,8 @@ def masked_forward(residual[B,T,d], live_sites, masks, delta_masks, routes) -> l
 
 def clean_logits(residual)   = masked_forward(residual, live_sites=∅)                       (S3)
 def site_inputs(residual)    = the activation entering each site's weight on the clean path
-    # for the MLP sites: gate_in = up_in = post-ln2 residual; down_in = silu(gate)·up       (S4)
+    # MLP sites: gate_in = up_in = post-ln2 residual; down_in = silu(gate)·up               (S4)
+    # attn sites: q_in = k_in = v_in = post-ln1 residual; o_in = pre-o_proj attn output
 ```
 
 ### 4.2 CI
