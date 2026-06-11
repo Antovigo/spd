@@ -82,9 +82,7 @@ def _test_shared_across_batch_sources_synced():
         target_out = model(batch).detach()
     ci = {"fc": torch.full((2, 1), 0.5, dtype=torch.float32, device=device)}
 
-    pgd_config = PGDReconLossConfig(
-        init="random", step_size=0.1, n_steps=3, mask_scope="shared_across_batch"
-    )
+    pgd_config = PGDReconLossConfig(init="random", step_size=0.1, n_steps=3, mask_scope="c")
     router = AllLayersRouter()
 
     torch.manual_seed(7)
@@ -127,9 +125,7 @@ def _test_unique_per_datapoint_sources_independent():
         target_out = model(batch).detach()
     ci = {"fc": torch.rand(2, 1, dtype=torch.float32, device=device)}
 
-    pgd_config = PGDReconLossConfig(
-        init="random", step_size=0.1, n_steps=3, mask_scope="unique_per_datapoint"
-    )
+    pgd_config = PGDReconLossConfig(init="random", step_size=0.1, n_steps=3, mask_scope="bc")
     router = AllLayersRouter()
 
     # Rank-dependent seed for PGD random init

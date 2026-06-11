@@ -54,7 +54,7 @@ from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
-from param_decomp_config.losses import BroadcastAcrossBatchScope, PerBatchPerPositionScope
+from param_decomp_config.losses import BSCScope, SCScope
 from param_decomp_config.pd import Cadence, RuntimeConfig
 from param_decomp_config.schedule import get_scheduled_value
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
@@ -505,10 +505,8 @@ class TwoPoolTrainer:
 
         if isinstance(ctx, PoolAContext) and self.ppgd_state is None:
             ppgd_cfg = runtime.ppgd_cfg
-            assert isinstance(
-                ppgd_cfg.scope, PerBatchPerPositionScope | BroadcastAcrossBatchScope
-            ), (
-                f"2-pool supports PerBatchPerPositionScope and BroadcastAcrossBatchScope "
+            assert isinstance(ppgd_cfg.scope, BSCScope | SCScope), (
+                f"2-pool supports BSCScope and SCScope "
                 f"PPGD sources; got {type(ppgd_cfg.scope).__name__}."
             )
             # A broadcast (whole-global-batch) source is replicated across the Pool A

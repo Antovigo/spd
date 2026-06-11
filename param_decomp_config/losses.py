@@ -109,7 +109,7 @@ class ChunkwiseSubsetReconLossConfig(LossMetricConfig):
 
 
 PGDInitStrategy = Literal["random", "ones", "zeroes"]
-MaskScope = Literal["unique_per_datapoint", "shared_across_batch"]
+MaskScope = Literal["c", "bc", "bsc"]
 
 
 class PGDConfig(LossMetricConfig):
@@ -156,42 +156,39 @@ class AdamPGDConfig(BaseConfig):
 PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
 
 
-class SingleSourceScope(BaseConfig):
-    """PPGD source scope: one shared source vector across the whole batch."""
+class CScope(BaseConfig):
+    """PPGD source scope: one `[C]` source vector shared across all batch dims."""
 
-    type: Literal["single_source"] = "single_source"
-
-
-class BroadcastAcrossBatchScope(BaseConfig):
-    """PPGD source scope: shared across batch elements but free along other batch dims."""
-
-    type: Literal["broadcast_across_batch"] = "broadcast_across_batch"
+    type: Literal["c"] = "c"
 
 
-class RepeatAcrossBatchScope(BaseConfig):
+class SCScope(BaseConfig):
+    """PPGD source scope: `[seq, C]` sources shared across batch elements, free per position."""
+
+    type: Literal["sc"] = "sc"
+
+
+class NSCScope(BaseConfig):
     """PPGD source scope: `n_sources` source vectors tiled along the batch dim.
 
     `n_sources` must divide the per-rank batch size.
     """
 
-    type: Literal["repeat_across_batch"] = "repeat_across_batch"
+    type: Literal["nsc"] = "nsc"
     n_sources: PositiveInt
 
 
-class PerBatchPerPositionScope(BaseConfig):
+class BSCScope(BaseConfig):
     """PPGD source scope: an independent source per batch element and position.
 
     Skips cross-rank synchronization of source state.
     """
 
-    type: Literal["per_batch_per_position"] = "per_batch_per_position"
+    type: Literal["bsc"] = "bsc"
 
 
 PersistentPGDSourceScope = Annotated[
-    SingleSourceScope
-    | BroadcastAcrossBatchScope
-    | RepeatAcrossBatchScope
-    | PerBatchPerPositionScope,
+    CScope | SCScope | NSCScope | BSCScope,
     Field(discriminator="type"),
 ]
 

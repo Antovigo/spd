@@ -44,9 +44,9 @@ from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp_config.ci_fn import LayerwiseCiConfig
 from param_decomp_config.losses import (
     AdamPGDConfig,
+    BSCScope,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
-    PerBatchPerPositionScope,
     PersistentPGDReconLossConfig,
 )
 from param_decomp_config.schedule import ScheduleConfig
@@ -344,7 +344,7 @@ def _ppgd_cfg() -> PersistentPGDReconLossConfig:
             eps=1e-8,
             lr_schedule=ScheduleConfig(start_val=0.01, fn_type="constant"),
         ),
-        scope=PerBatchPerPositionScope(),
+        scope=BSCScope(),
         use_sigmoid_parameterization=False,
         n_warmup_steps=_PPGD_WARMUP,
         n_samples=1,

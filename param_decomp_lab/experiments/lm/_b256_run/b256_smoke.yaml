@@ -62,7 +62,7 @@ pd:
           final_val_frac: 1.0
           fn_type: constant
       scope:
-        type: per_batch_per_position
+        type: bsc
       use_sigmoid_parameterization: false
       n_warmup_steps: 2
       n_samples: 1
@@ -96,7 +96,7 @@ eval:
     init: random
     step_size: 0.1
     n_steps: 20
-    mask_scope: shared_across_batch
+    mask_scope: c
 runtime:
   autocast_bf16: true
   device: cuda

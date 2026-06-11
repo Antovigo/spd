@@ -30,9 +30,9 @@ from param_decomp.metrics.stochastic_hidden_acts_recon import (
 )
 from param_decomp_config.losses import (
     LossMetricConfig,
+    NSCScope,
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
-    RepeatAcrossBatchScope,
 )
 
 
@@ -65,7 +65,7 @@ def validate_pgd_scope(
     for cfg in loss_metrics:
         if isinstance(
             cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-        ) and isinstance(cfg.scope, RepeatAcrossBatchScope):
+        ) and isinstance(cfg.scope, NSCScope):
             n = cfg.scope.n_sources
             assert per_rank % n == 0, (
                 f"{cfg.type}: repeat_across_batch n_sources={n} must divide "

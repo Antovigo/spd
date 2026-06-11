@@ -40,7 +40,7 @@ pd:
       init: random
       step_size: 1.0
       n_steps: 1
-      mask_scope: shared_across_batch
+      mask_scope: c
     - type: FaithfulnessLoss
       coeff: 0.0
 cadence:
@@ -77,7 +77,7 @@ eval:
       init: random
       step_size: 0.1
       n_steps: 20
-      mask_scope: shared_across_batch
+      mask_scope: c
 target:
   run_path: goodfire/spd-pre-Sep-2025/runs/any9ekl9
 data:

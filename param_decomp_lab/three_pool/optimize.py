@@ -67,7 +67,7 @@ from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
 from param_decomp.training_state import ThreePoolTrainingState
-from param_decomp_config.losses import PerBatchPerPositionScope
+from param_decomp_config.losses import BSCScope
 from param_decomp_config.pd import Cadence, PDConfig, RuntimeConfig
 from param_decomp_config.schedule import get_scheduled_value
 from param_decomp_lab.experiments.lm.vendored.component_model import LMComponentModel
@@ -679,8 +679,8 @@ class ThreePoolTrainer:
             # just slicing — no cross-rank source sync needed. Any replicated scope
             # would require broadcast-init + grad-reduce over ppgd_pool_group, which
             # we don't implement here. Add it if/when another arrangement is wanted.
-            assert isinstance(ppgd_cfg.scope, PerBatchPerPositionScope), (
-                f"3-pool supports only PerBatchPerPositionScope PPGD sources; got "
+            assert isinstance(ppgd_cfg.scope, BSCScope), (
+                f"3-pool supports only BSCScope PPGD sources; got "
                 f"{type(ppgd_cfg.scope).__name__}. Replicated scopes need cross-pool "
                 f"source-replica sync, not implemented in the 3-pool."
             )

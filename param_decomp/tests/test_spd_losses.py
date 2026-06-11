@@ -25,12 +25,12 @@ from param_decomp.metrics.stochastic_recon_subset import stochastic_recon_subset
 from param_decomp_config.ci_fn import LayerwiseCiConfig
 from param_decomp_config.losses import (
     AdamPGDConfig,
-    BroadcastAcrossBatchScope,
-    PerBatchPerPositionScope,
+    BSCScope,
+    CScope,
+    NSCScope,
     PersistentPGDReconLossConfig,
-    RepeatAcrossBatchScope,
+    SCScope,
     SignPGDConfig,
-    SingleSourceScope,
 )
 from param_decomp_config.routing import UniformKSubsetRoutingConfig
 from param_decomp_config.schedule import ScheduleConfig
@@ -766,7 +766,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         # Initialize state
@@ -819,10 +819,10 @@ class TestPersistentPGDReconLoss:
         grads without a reduce; an earlier bug unconditionally reduced and mixed
         unrelated per-position sources across PPGD ranks.
         """
-        assert scope_needs_replica_sync(PerBatchPerPositionScope()) is False
-        assert scope_needs_replica_sync(SingleSourceScope()) is True
-        assert scope_needs_replica_sync(BroadcastAcrossBatchScope()) is True
-        assert scope_needs_replica_sync(RepeatAcrossBatchScope(n_sources=2)) is True
+        assert scope_needs_replica_sync(BSCScope()) is False
+        assert scope_needs_replica_sync(CScope()) is True
+        assert scope_needs_replica_sync(SCScope()) is True
+        assert scope_needs_replica_sync(NSCScope(n_sources=2)) is True
 
     def test_masks_persist_across_calls(self: object) -> None:
         """Test that masks persist and accumulate updates across calls."""
@@ -837,7 +837,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         state = _ppgd_state_from_cfg(
@@ -891,7 +891,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         # Initialize state with delta component
@@ -956,7 +956,7 @@ class TestPersistentPGDReconLoss:
 
         cfg = PersistentPGDReconLossConfig(
             optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         state = _ppgd_state_from_cfg(
@@ -999,7 +999,7 @@ class TestPersistentPGDReconLoss:
             optimizer=AdamPGDConfig(
                 lr_schedule=ScheduleConfig(start_val=0.05), beta1=0.9, beta2=0.999, eps=1e-8
             ),
-            scope=SingleSourceScope(),
+            scope=CScope(),
         )
 
         state = _ppgd_state_from_cfg(

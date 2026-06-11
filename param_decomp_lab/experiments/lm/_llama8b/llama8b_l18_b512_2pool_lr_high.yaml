@@ -43,7 +43,7 @@ eval:
   - type: CIHiddenActsReconLoss
   - coeff: null
     init: random
-    mask_scope: shared_across_batch
+    mask_scope: c
     n_steps: 20
     step_size: 0.1
     type: PGDReconLoss
@@ -129,7 +129,7 @@ pd:
           warmup_pct: 0.025
         type: adam
       scope:
-        type: broadcast_across_batch
+        type: sc
       start_frac: 0.0
       type: PersistentPGDReconLoss
       use_sigmoid_parameterization: false

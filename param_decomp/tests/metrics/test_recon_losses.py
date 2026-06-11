@@ -27,10 +27,10 @@ from param_decomp.tests.metrics.fixtures import (
 )
 from param_decomp_config.eval_metrics import CIHiddenActsReconLossConfig
 from param_decomp_config.losses import (
+    CScope,
     PersistentPGDReconLossConfig,
     PGDConfig,
     SignPGDConfig,
-    SingleSourceScope,
 )
 from param_decomp_config.schedule import ScheduleConfig
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse
@@ -89,7 +89,7 @@ def _pgd(
             init="random",
             step_size=0.1,
             n_steps=5,
-            mask_scope="unique_per_datapoint",
+            mask_scope="bc",
         ),
     )
 
@@ -274,7 +274,7 @@ def test_ppgd_recon_eval_metric_keys() -> None:
     ppgd_cfg = PersistentPGDReconLossConfig(
         coeff=1.0,
         optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
-        scope=SingleSourceScope(),
+        scope=CScope(),
     )
     metric = PersistentPGDReconLoss(ppgd_cfg)
     metric.bind(model=model, device="cpu")

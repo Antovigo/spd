@@ -25,13 +25,13 @@ from param_decomp.masks import (
 )
 from param_decomp_config.losses import (
     AdamPGDConfig,
-    BroadcastAcrossBatchScope,
-    PerBatchPerPositionScope,
+    BSCScope,
+    CScope,
+    NSCScope,
     PersistentPGDSourceScope,
     PGDOptimizerConfig,
-    RepeatAcrossBatchScope,
+    SCScope,
     SignPGDConfig,
-    SingleSourceScope,
 )
 from param_decomp_config.schedule import get_scheduled_value
 
@@ -46,7 +46,7 @@ def scope_needs_replica_sync(scope: PersistentPGDSourceScope) -> bool:
     reduction to keep them identical. ``per_batch_per_position`` sources are
     independent per element, so a batch split is just slicing — no sync needed.
     """
-    return not isinstance(scope, PerBatchPerPositionScope)
+    return not isinstance(scope, BSCScope)
 
 
 class PPGDOptimizer(ABC):
@@ -158,8 +158,8 @@ def make_ppgd_optimizer(cfg: PGDOptimizerConfig) -> PPGDOptimizer:
 class PersistentPGDState:
     """Per-module adversarial sources that persist across training steps.
 
-    Source shape depends on scope (`SingleSourceScope`, `BroadcastAcrossBatchScope`,
-    `RepeatAcrossBatchScope`, `PerBatchPerPositionScope`).
+    Source shape depends on scope (`CScope`, `SCScope`,
+    `NSCScope`, `BSCScope`).
     """
 
     def __init__(
@@ -203,18 +203,18 @@ class PersistentPGDState:
         self.sources: PPGDSources = {}
 
         match scope:
-            case SingleSourceScope():
+            case CScope():
                 source_leading_dims = [1] * len(batch_dims)
-            case BroadcastAcrossBatchScope():
+            case SCScope():
                 source_leading_dims = [1] + list(batch_dims[1:])
-            case RepeatAcrossBatchScope(n_sources=n):
+            case NSCScope(n_sources=n):
                 assert batch_dims[0] % n == 0, (
                     f"n_sources={n} must divide the per-rank microbatch size "
                     f"{batch_dims[0]}, not the global batch size. "
                     f"Adjust n_sources or batch_size to satisfy this."
                 )
                 source_leading_dims = [n] + list(batch_dims[1:])
-            case PerBatchPerPositionScope():
+            case BSCScope():
                 source_leading_dims = list(batch_dims)
 
         init_fn = torch.randn if use_sigmoid_parameterization else torch.rand

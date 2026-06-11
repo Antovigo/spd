@@ -54,7 +54,7 @@ from param_decomp.metrics.persistent_pgd_state import PersistentPGDState
 from param_decomp_config.ci_fn import AttnConfig, GlobalCiConfig, GlobalSharedTransformerCiConfig
 from param_decomp_config.losses import (
     AdamPGDConfig,
-    PerBatchPerPositionScope,
+    BSCScope,
     PersistentPGDReconLossConfig,
     PersistentPGDSourceScope,
 )
@@ -325,7 +325,7 @@ def _run_distributed_step() -> tuple[dict[str, Tensor], dict[str, Tensor] | None
     # NOTE: the trainer drops pool-irrelevant params for memory; we keep all of
     # them so the layerwise ('mlp') CI fn — which reads component activations —
     # works on the CI pool too. Dropping is a memory opt, irrelevant to grads.
-    runtime = _build_runtime(numel_global, PerBatchPerPositionScope())
+    runtime = _build_runtime(numel_global, BSCScope())
     strategy = ReconLossStrategy.unfused(recon_loss_mse)
     batch = _global_batch()
 
@@ -549,7 +549,7 @@ def _run_test() -> None:
 
 
 def _report_and_assert(dist_grads: dict[str, Tensor], ref_sources: dict[str, Tensor]) -> None:
-    ref_grads = _reference_grads(ref_sources, PerBatchPerPositionScope())
+    ref_grads = _reference_grads(ref_sources, BSCScope())
     keys = sorted(dist_grads.keys())
     assert set(keys) == set(ref_grads.keys()), (
         f"param-key mismatch:\n dist={sorted(dist_grads)}\n ref ={sorted(ref_grads)}"
