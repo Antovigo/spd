@@ -15,6 +15,25 @@ install-dev:
 .PHONY: install-all
 install-all: install-dev install-app
 
+# the JAX distribution keeps its own venvs (its CUDA wheels conflict with torch's)
+.PHONY: install-jax
+install-jax:
+	cd nano_param_decomp_jax && uv venv .venv --clear --python 3.13 \
+		&& uv pip install -p .venv/bin/python -e ../param_decomp_config -e '.[dev]'
+
+.PHONY: install-jax-cuda
+install-jax-cuda:
+	cd nano_param_decomp_jax && uv venv .venv-cuda --clear --python 3.13 \
+		&& uv pip install -p .venv-cuda/bin/python -e ../param_decomp_config -e '.[cuda]'
+
+.PHONY: test-jax
+test-jax:
+	cd nano_param_decomp_jax && .venv/bin/python -m pytest jax_single_pool/tests/
+
+.PHONY: check-jax
+check-jax:
+	cd nano_param_decomp_jax && .venv/bin/basedpyright jax_single_pool/
+
 
 .PHONY: app
 app:

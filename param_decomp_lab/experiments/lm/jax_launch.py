@@ -163,27 +163,8 @@ def _build_workspace(workspace: Path, snapshot_ref: str, run_id: str, wrapper_re
 
     logger.info("torch venv: uv sync --all-packages --no-dev ...")
     run(["uv", "sync", "--all-packages", "--no-dev", "--link-mode", "copy", "-q"], cwd=workspace)
-    jax_dir = workspace / "nano_param_decomp_jax"
-    cuda_venv = jax_dir / ".venv-cuda"
-    logger.info(
-        "jax venv: uv pip install -e param_decomp_config -e 'nano_param_decomp_jax[cuda]' ..."
-    )
-    run(["uv", "venv", "--quiet", str(cuda_venv), "--python", "3.13"], cwd=workspace)
-    run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--quiet",
-            "-p",
-            str(cuda_venv / "bin" / "python"),
-            "-e",
-            "./param_decomp_config",
-            "-e",
-            f"{jax_dir}[cuda]",
-        ],
-        cwd=workspace,
-    )
+    logger.info("jax venv: make install-jax-cuda ...")
+    run(["make", "install-jax-cuda"], cwd=workspace)
 
     wrapper = workspace / wrapper_rel
     assert "run_id" not in yaml.safe_load(wrapper.read_text())

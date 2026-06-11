@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["jax[cuda12]==0.10.1"]
+dev = ["pytest", "basedpyright"]
 
 [project.scripts]
 jsp-train = "jax_single_pool.run:main"
@@ -33,7 +34,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["nano_pd_jax", "nano_pd_jax.*", "jax_single_pool", "jax_single_pool.*", "vendored_jax", "vendored_jax.*"]
+include = ["jax_single_pool", "jax_single_pool.*", "vendored_jax", "vendored_jax.*"]
 
 # Ruff / type config inherited from the param-decomp root pyproject.toml.
 
@@ -42,7 +43,7 @@ include = ["nano_pd_jax", "nano_pd_jax.*", "jax_single_pool", "jax_single_pool.*
 # distribution (standard mode + the load-bearing strict flags).
 # vendored_jax is a verbatim numeric mirror of the torch vendored Llama — kept
 # out of strict typing (its correctness contract is the parity tests, not types).
-include = ["jax_single_pool", "nano_pd_jax"]
+include = ["jax_single_pool"]
 exclude = [
     "**/__pycache__",
     "jax_single_pool/tests/equivalence/torch_reference.py",  # torch-env script
