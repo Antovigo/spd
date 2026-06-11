@@ -16,8 +16,10 @@ import json
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -29,8 +31,14 @@ from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from jax_single_pool import llama_simple_mlp
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_latest, save_state
-from jax_single_pool.config import ExperimentConfig, load_config
+from jax_single_pool.config import (
+    ExperimentConfig,
+    LlamaSimpleMLPTargetConfig,
+    TargetConfig,
+    load_config,
+)
 from jax_single_pool.data import BatchSchedule, ShardServer, scan_shards
 from jax_single_pool.eval import make_eval_step
 from jax_single_pool.llama8b import (
@@ -158,8 +166,9 @@ def train(
     cfg: ExperimentConfig,
     raw_cfg: dict[str, object],
     lm: DecomposedLM,
-    frozen: Target,
-    prefix: Prefix,
+    frozen: Target | llama_simple_mlp.SimpleMLPTarget,
+    prefix: Prefix | llama_simple_mlp.SimpleMLPPrefix,
+    prefix_residual_fn: Callable[[Any, jax.Array], jax.Array],
     mesh: Mesh,
 ) -> None:
     is_main = jax.process_index() == 0
@@ -224,8 +233,8 @@ def train(
         mesh=mesh,
     )
 
-    def _harvest(prefix_weights: Prefix, token_ids: jax.Array) -> jax.Array:
-        residual = prefix_residual(prefix_weights, token_ids)
+    def _harvest(prefix_weights: Any, token_ids: jax.Array) -> jax.Array:
+        residual = prefix_residual_fn(prefix_weights, token_ids)
         return jax.lax.with_sharding_constraint(residual, NamedSharding(mesh, P("dp")))
 
     harvest = jax.jit(_harvest)
@@ -335,7 +344,9 @@ def train(
             save_state(checkpoint_manager, now_step, state)
             if is_main:
                 print(f"checkpoint saved @ step {now_step}", flush=True)
-                _submit_offline_eval(cfg.run_dir, now_step)
+                # export/offline-eval only exists for the llama8b target so far
+                if isinstance(cfg.target, TargetConfig):
+                    _submit_offline_eval(cfg.run_dir, now_step)
             window_t0 = time.time()
         if _sigterm_received:
             if is_main:
@@ -425,18 +436,44 @@ def main() -> None:
             flush=True,
         )
 
-    llama_cfg = llama31_8b_config()
-    lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, cfg.target.sites))
-    first_layer = first_decomposed_layer(lm.site_names)
-    frozen = replicate_target(
-        load_target_from_hf(cfg.target.model_name, llama_cfg, first_layer), mesh
-    )
-    prefix = jax.device_put(
-        load_prefix_from_hf(cfg.target.model_name, llama_cfg, first_layer),
-        NamedSharding(mesh, P()),
-    )
+    frozen: Target | llama_simple_mlp.SimpleMLPTarget
+    prefix: Prefix | llama_simple_mlp.SimpleMLPPrefix
+    prefix_residual_fn: Callable[[Any, jax.Array], jax.Array]
+    match cfg.target:
+        case TargetConfig():
+            llama_cfg = llama31_8b_config()
+            lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, cfg.target.sites))
+            first_layer = first_decomposed_layer(lm.site_names)
+            frozen = replicate_target(
+                load_target_from_hf(cfg.target.model_name, llama_cfg, first_layer), mesh
+            )
+            prefix = jax.device_put(
+                load_prefix_from_hf(cfg.target.model_name, llama_cfg, first_layer),
+                NamedSharding(mesh, P()),
+            )
+            prefix_residual_fn = prefix_residual
+        case LlamaSimpleMLPTargetConfig():
+            cache_dir = llama_simple_mlp.pretrain_cache_dir(cfg.target.pretrain_run_path)
+            simple_cfg = llama_simple_mlp.load_model_config(cache_dir)
+            lm = llama_simple_mlp.llama_simple_mlp_decomposed_lm(
+                simple_cfg, llama_simple_mlp.site_specs(simple_cfg, cfg.target.sites)
+            )
+            first_layer = llama_simple_mlp.first_decomposed_layer(lm.site_names)
+            frozen = llama_simple_mlp.replicate_frozen(
+                llama_simple_mlp.load_target_from_pretrain_cache(
+                    cache_dir, simple_cfg, first_layer, jnp.bfloat16
+                ),
+                mesh,
+            )
+            prefix = llama_simple_mlp.replicate_frozen(
+                llama_simple_mlp.load_prefix_from_pretrain_cache(
+                    cache_dir, simple_cfg, first_layer, jnp.bfloat16
+                ),
+                mesh,
+            )
+            prefix_residual_fn = llama_simple_mlp.prefix_residual
 
-    train(cfg, raw_cfg, lm, frozen, prefix, mesh)
+    train(cfg, raw_cfg, lm, frozen, prefix, prefix_residual_fn, mesh)
 
     if jax.process_count() > 1:
         import jax.experimental.multihost_utils as mhu

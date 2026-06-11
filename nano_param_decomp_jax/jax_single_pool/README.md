@@ -27,6 +27,7 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `tools/` | export round-trip verification: `gen_export_fixture.py` (JAX venv) + `verify_export_torch.py` (torch venv, rebuilds the real torch modules from the safetensors and matches forwards at fp32 tolerance) |
 | `sharding.py` | generic GSPMD helpers (`init_distributed`, `dp_mesh`, `replicate`, `shard_batch`) |
 | `llama8b.py` | Llama-3.1-8B target: residual-start suffix + `Prefix` harvest, arbitrary per-layer matrix sites (`q/k/v/o/gate/up/down`, per-site C; q/k/v decomposed before RoPE/SDPA), per-site `DecompVU`, HF safetensors loader, `llama_decomposed_lm(cfg, sites)` |
+| `llama_simple_mlp.py` | `LlamaSimpleMLP` pile-pretrained target (`goodfire/spd/runs/t-9d2b8f02`: 4L, d768, GELU MLP, plain rotate-half RoPE, tied head): sites `h.{i}.attn.{q,k,v,o}_proj` / `h.{i}.mlp.{c_fc,down_proj}` with `h.*` wildcard expansion, pretrain-cache safetensors loader (one-off `.pt` conversion: `tools/convert_llama_simple_mlp_checkpoint.py`), `llama_simple_mlp_decomposed_lm(cfg, sites)`; frozen weights small enough to replicate (`replicate_frozen`), V/U/CI/source placement reuses the generic per-site plan |
 | `run.py` | the training entrypoint (`jsp-train <config.yaml>`): data, faith warmup, loop, metrics jsonl/wandb, orbax checkpoints, SIGTERM-save + requeue-resume |
 | `data.py` | deterministic batch schedule over the pre-tokenized fineweb parquet shards; O(1) resume addressing, per-process slices |
 | `config.py` | typed `ExperimentConfig` from YAML — every field explicit, unknown keys raise |
@@ -35,7 +36,7 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `llama8b_sharding.py` | the 8B placement plan (frozen replicated; per-site V/U + CI + Adam C-sharded; source replicated; batch sharded) |
 | `experiments/llama8b_real.py` | the runnable 8B step + tok/s/GPU bench |
 | `experiments/invariance_check.py` | device-count invariance harness (SPEC D4) |
-| `tests/` | tiny-target unit tests (incl. attention sites + heterogeneous per-site C), checkpoint resume, sharding, `tests/equivalence/` — the fixture-driven torch↔JAX loss-term equivalence harness — and `tests/stacked_parity/` — fixtures pinning the pre-site-generality stacked implementation (clean logits bit-identical, train trajectory rel ≤ ~1e-5) |
+| `tests/` | tiny-target unit tests (incl. attention sites + heterogeneous per-site C), checkpoint resume, sharding, `tests/equivalence/` — the fixture-driven torch↔JAX loss-term equivalence harness — `tests/stacked_parity/` — fixtures pinning the pre-site-generality stacked implementation (clean logits bit-identical, train trajectory rel ≤ ~1e-5) — and `tests/simple_mlp_equivalence/` — torch-fixture logits parity for the LlamaSimpleMLP target (tiny random model max abs diff ~2e-7; real t-9d2b8f02 weights ~5e-5 fp32) |
 
 ## Run
 

@@ -31,7 +31,12 @@ from typing import Any
 
 import yaml
 from param_decomp_config.eval_metrics import CEandKLLossesConfig, CI_L0Config
-from param_decomp_config.lm import HFTarget, HFWeightsInVendored, LMExperimentConfig
+from param_decomp_config.lm import (
+    HFTarget,
+    HFWeightsInVendored,
+    LMExperimentConfig,
+    PretrainedTarget,
+)
 from param_decomp_config.losses import (
     AdamPGDConfig,
     BroadcastAcrossBatchScope,
@@ -46,6 +51,7 @@ from param_decomp_config.losses import (
 from param_decomp_config.pd import OptimizerConfig
 from param_decomp_config.schedule import ScheduleConfig
 
+from jax_single_pool import llama_simple_mlp
 from jax_single_pool.ci_fn import CIArch
 from jax_single_pool.config import (
     CadenceConfig,
@@ -56,6 +62,7 @@ from jax_single_pool.config import (
     EvalPGDConfig,
     ExperimentConfig,
     FaithWarmupConfig,
+    LlamaSimpleMLPTargetConfig,
     ReconConfig,
     TargetConfig,
     VUOptimizerConfig,
@@ -103,6 +110,40 @@ def _site_cs(cfg: LMExperimentConfig) -> tuple[SiteC, ...]:
         )
         site_cs.append(SiteC(name, target.C))
     return canonical_site_cs(tuple(site_cs))
+
+
+def _resolve_target(torch_cfg: LMExperimentConfig) -> TargetConfig | LlamaSimpleMLPTargetConfig:
+    """Target spec + decomposition patterns -> the JAX target config.
+
+    Vendored and raw-HF Llama specs load the SAME meta-llama weights (the export
+    bridge round-trip verified vendored == HF numerics); both map to the HF loader.
+    `kind: pretrained` LlamaSimpleMLP specs map to the pretrain-cache loader, with
+    `h.*` wildcard patterns expanded over the checkpoint's n_layer."""
+    spec = torch_cfg.target.spec
+    match spec:
+        case HFWeightsInVendored() | HFTarget():
+            match spec:
+                case HFWeightsInVendored():
+                    assert spec.model_class.rsplit(".", 1)[-1] == "VendoredLlama", spec.model_class
+                case HFTarget():
+                    assert spec.model_class == "transformers.LlamaForCausalLM", spec.model_class
+            assert "Llama-3.1-8B" in spec.model_name, spec.model_name
+            return TargetConfig(model_name=spec.model_name, sites=_site_cs(torch_cfg))
+        case PretrainedTarget():
+            assert spec.model_class.rsplit(".", 1)[-1] == "LlamaSimpleMLP", spec.model_class
+            assert torch_cfg.pd.identity_decomposition_targets is None, (
+                "identity targets unsupported"
+            )
+            cache_dir = llama_simple_mlp.pretrain_cache_dir(spec.run_path)
+            arch = llama_simple_mlp.load_model_config(cache_dir)
+            assert torch_cfg.data.max_seq_len <= arch.n_ctx, (
+                torch_cfg.data.max_seq_len, arch.n_ctx,
+            )  # fmt: skip
+            sites = llama_simple_mlp.expand_wildcard_site_cs(
+                tuple(SiteC(t.module_pattern, t.C) for t in torch_cfg.pd.decomposition_targets),
+                arch.n_layer,
+            )
+            return LlamaSimpleMLPTargetConfig(pretrain_run_path=spec.run_path, sites=sites)
 
 
 def _ci_arch(cfg: LMExperimentConfig, seq_len: int) -> CIArch:
@@ -274,8 +315,8 @@ def convert_torch_lm_config(
     out_dir: Path,
     remat_recon_forwards: bool,
 ) -> ExperimentConfig:
-    site_cs = _site_cs(torch_cfg)
-    n_sites = len(site_cs)
+    target = _resolve_target(torch_cfg)
+    n_sites = len(target.sites)
 
     assert torch_cfg.pd.sampling == "continuous", torch_cfg.pd.sampling
     assert torch_cfg.pd.sigmoid_type == "leaky_hard", torch_cfg.pd.sigmoid_type
@@ -283,17 +324,6 @@ def convert_torch_lm_config(
     assert torch_cfg.runtime.autocast_bf16, "JAX trainer computes in bf16 (autocast analog)"
     assert torch_cfg.pd.faithfulness_warmup_weight_decay == 0.0
 
-    # Vendored and raw-HF Llama specs load the SAME meta-llama weights (the export
-    # bridge round-trip verified vendored == HF numerics); both map to our HF loader.
-    spec = torch_cfg.target.spec
-    match spec:
-        case HFWeightsInVendored():
-            assert spec.model_class.rsplit(".", 1)[-1] == "VendoredLlama", spec.model_class
-        case HFTarget():
-            assert spec.model_class == "transformers.LlamaForCausalLM", spec.model_class
-        case _:
-            raise AssertionError(f"unsupported target spec {spec}")
-    assert "Llama-3.1-8B" in spec.model_name, spec.model_name
     if torch_cfg.target.weights_dtype == "float32":
         print(
             "DIVERGENCE: torch config asks for an fp32 frozen target; the JAX trainer keeps "
@@ -325,7 +355,7 @@ def convert_torch_lm_config(
         out_dir=out_dir,
         seed=torch_cfg.pd.seed,
         steps=torch_cfg.pd.steps,
-        target=TargetConfig(model_name=spec.model_name, sites=site_cs),
+        target=target,
         data=data,
         losses=coeffs,
         imp_min=imp_min,

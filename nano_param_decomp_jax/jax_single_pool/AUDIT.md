@@ -52,6 +52,40 @@ SLURM entry) is the remaining gap between "bench" and "trainer".
 - N3 KL in fp32; imp-min reduction in fp32.
 - R1/R3 `fold_in`-derived independent draws (bf16 uniform draws match torch-under-autocast).
 
+## Notes (2026-06-11 LlamaSimpleMLP target)
+
+- Second `DecomposedLM` target: the pile-pretrained `LlamaSimpleMLP`
+  (`goodfire/spd/runs/t-9d2b8f02`), torch reference
+  `param_decomp_lab/experiments/lm/pretrain/models/llama_simple_mlp.py`. Forward parity
+  vs the torch model is pinned by `tests/simple_mlp_equivalence/` at fp32: tiny random
+  model (GQA repeat=2) max abs logits diff ~2e-7; real t-9d2b8f02 weights ~5e-5
+  (|logits| ~ 15). This proves the RoPE construction (the torch
+  `calculate_sin_cos_rotary` + `rotate_every_two` == vendored rotate-half rope with
+  plain `base**(-2i/hd)` inv_freq), the tanh-GELU (`jax.nn.gelu(approximate=True)` ==
+  torch `NewGELU`), the GQA head grouping, and rms-norm eps/dtype placement.
+- Accepted divergences, mirroring the llama8b ones: the frozen target is stored bf16
+  in training (torch single-pool runs it under autocast bf16; the pretrain checkpoint
+  itself is fp32 — the equivalence test loads fp32); the masked path's weight delta is
+  bf16-computed from cast components (SPEC N2 covers only the faithfulness input,
+  which is fp32). `flash_attention: false` in the t-9d2b8f02 config selects torch's
+  manual-attention path — same math as SDPA (scale `1/sqrt(head_dim)`, causal), so the
+  JAX side always uses `causal_sdpa`.
+- `_site_out` / `_masked_site_out` and the masked/clean forward scaffolding are
+  deliberate reimplementations of `llama8b.py`'s (per the reimplement-then-unify
+  norm); `DecompVU` / `init_decomp_vu` / `FrozenAttn` are imported from `llama8b.py`
+  unchanged — they were already target-agnostic, as are `run_state` and the
+  `llama8b_sharding` V/U/CI/source init fns (per-site C divisibility asserts apply:
+  the production Cs 3072/3584/512/1024 require mesh size | 512).
+- `export.py` / push-triggered offline eval are llama8b-only for now: `run.py` skips
+  the offline-eval submission for `LlamaSimpleMLPTargetConfig` runs and `jsp-export`
+  asserts the target kind. A torch-side export bridge for this target needs the
+  GPT2-style sorted-module-path permutation (h.10 < h.2 string-sorts for >9 layers)
+  and a `LlamaSimpleMLP`-shaped `LMComponentModel` fixture — deferred until needed.
+- The checkpoint loads from the torch pretrain cache
+  (`$PARAM_DECOMP_OUT_DIR/pretrain_cache/spd-t-9d2b8f02/`), converted once to
+  safetensors (`tools/convert_llama_simple_mlp_checkpoint.py`, torch venv; the tied
+  `lm_head.weight` is stored once as `wte.weight`). The JAX side never talks to wandb.
+
 ## Notes (2026-06-11 site-generality restructure)
 
 - The Llama target now accepts ARBITRARY per-layer matrix sites (q/k/v/o/gate/up/down,

@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from jax_single_pool import llama_simple_mlp
 from jax_single_pool.ci_fn import CIArch
 from jax_single_pool.llama8b import mlp_family_site_cs
 from jax_single_pool.lm import SiteC
@@ -20,9 +21,25 @@ from jax_single_pool.train import AdversaryConfig, ImpMinConfig, LossCoeffs, Sou
 
 @dataclass(frozen=True)
 class TargetConfig:
+    """The Llama-3.1-8B HF target (`llama8b.py`)."""
+
     model_name: str
     sites: tuple[SiteC, ...]
     """Decomposed sites with per-site C, in canonical order (`canonical_site_cs`)."""
+
+
+@dataclass(frozen=True)
+class LlamaSimpleMLPTargetConfig:
+    """The `LlamaSimpleMLP` pile-pretrained target (`llama_simple_mlp.py`); weights
+    from the torch pretrain cache resolved from `pretrain_run_path`."""
+
+    pretrain_run_path: str
+    sites: tuple[SiteC, ...]
+    """Decomposed sites with per-site C, in canonical order
+    (`llama_simple_mlp.canonical_site_cs`)."""
+
+
+AnyTargetConfig = TargetConfig | LlamaSimpleMLPTargetConfig
 
 
 @dataclass(frozen=True)
@@ -113,7 +130,7 @@ class ExperimentConfig:
     out_dir: Path
     seed: int
     steps: int
-    target: TargetConfig
+    target: AnyTargetConfig
     data: DataConfig
     losses: LossCoeffs
     imp_min: ImpMinConfig
@@ -178,15 +195,27 @@ def load_config(path: Path) -> ExperimentConfig:
     assert not missing, f"{path}: missing top-level keys {sorted(missing)}"
 
     target_raw = raw["target"]
-    assert set(target_raw) == {"model_name", "first_layer", "last_layer", "C"}, (
-        f"target: unknown keys {sorted(target_raw)}"
-    )
-    target = TargetConfig(
-        model_name=target_raw["model_name"],
-        sites=mlp_family_site_cs(
-            target_raw["first_layer"], target_raw["last_layer"], target_raw["C"]
-        ),
-    )
+    target: AnyTargetConfig
+    if "pretrain_run_path" in target_raw:
+        assert set(target_raw) == {"pretrain_run_path", "sites"}, (
+            f"target: unknown keys {sorted(target_raw)}"
+        )
+        target = LlamaSimpleMLPTargetConfig(
+            pretrain_run_path=target_raw["pretrain_run_path"],
+            sites=llama_simple_mlp.canonical_site_cs(
+                tuple(SiteC(site["name"], site["C"]) for site in target_raw["sites"])
+            ),
+        )
+    else:
+        assert set(target_raw) == {"model_name", "first_layer", "last_layer", "C"}, (
+            f"target: unknown keys {sorted(target_raw)}"
+        )
+        target = TargetConfig(
+            model_name=target_raw["model_name"],
+            sites=mlp_family_site_cs(
+                target_raw["first_layer"], target_raw["last_layer"], target_raw["C"]
+            ),
+        )
 
     data_raw = dict(raw["data"], dir=Path(raw["data"]["dir"]))
     cfg = ExperimentConfig(

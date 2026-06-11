@@ -40,6 +40,7 @@ from safetensors.numpy import save_file
 
 from jax_single_pool.checkpoint import make_checkpoint_manager, restore_step
 from jax_single_pool.ci_fn import CIFn
+from jax_single_pool.config import TargetConfig
 from jax_single_pool.llama8b import (
     KIND_ORDER,
     DecompVU,
@@ -156,6 +157,9 @@ def main() -> None:
     jax.config.update("jax_platforms", "cpu")
 
     cfg = load_run_dir_config(args.run_dir)
+    assert isinstance(cfg.target, TargetConfig), (
+        f"export implements the llama8b target only, got {type(cfg.target).__name__}"
+    )
     lm = llama_decomposed_lm(
         llama31_8b_config(), llama_site_specs(llama31_8b_config(), cfg.target.sites)
     )

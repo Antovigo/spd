@@ -21,6 +21,12 @@ target becomes a multi-GB HLO constant). `train.py` is the generic step factory
 CI transformer; `llama8b.py` + `llama8b_sharding.py` the first target. There is ONE
 recon semantics: masks thread through the suffix forward, loss is KL on final logits
 (SPEC §2.3–2.5). Site-local recon is a conceptual no-no, not a "simplification".
+`llama_simple_mlp.py` is the second target (the pile-pretrained `LlamaSimpleMLP`,
+t-9d2b8f02; sites `h.{i}.attn.{q,k,v,o}_proj` / `h.{i}.mlp.{c_fc,down_proj}`) —
+config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig` in
+`config.py`, torch-route `kind: pretrained` specs + `h.*` wildcards in
+`torch_config.py`, target build in `run.py::main`. Export/offline-eval stay
+llama8b-only (guarded).
 
 ## Invariants with sharp teeth (the ones that have actually bitten)
 
