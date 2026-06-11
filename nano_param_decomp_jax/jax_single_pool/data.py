@@ -118,10 +118,13 @@ class ShardServer:
             ids = table.column("input_ids")
             flat = ids.combine_chunks().flatten().to_numpy(zero_copy_only=False)
             tokens = flat.reshape(shard.n_rows, -1)
-            assert tokens.shape[1] == self.seq_len, (
+            # Rows may carry one extra token (the pile artifact is 513 = 512+label
+            # wide); truncate to the leading seq_len exactly like the torch loader's
+            # `x[column_name][:max_seq_len]`. Anything else is the wrong artifact.
+            assert tokens.shape[1] in (self.seq_len, self.seq_len + 1), (
                 f"{shard.path} rows have seq {tokens.shape[1]}, config says {self.seq_len}"
             )
-            self._tokens = tokens
+            self._tokens = tokens[:, : self.seq_len]
             self._loaded_file_idx = file_idx
         assert self._tokens is not None
         return self._tokens
