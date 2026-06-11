@@ -15,15 +15,22 @@ install-dev:
 .PHONY: install-all
 install-all: install-dev install-app
 
-# the JAX distribution keeps its own venvs (its CUDA wheels conflict with torch's)
+# The JAX distribution keeps its own venvs (its CUDA wheels conflict with torch's).
+# Create-if-missing rather than --clear: on NFS a venv with files held open (e.g. by
+# an IDE's language server) cannot be deleted in place; `rm -rf` it manually if you
+# really want a from-scratch env.
 .PHONY: install-jax
 install-jax:
-	cd nano_param_decomp_jax && uv venv .venv --clear --python 3.13 \
+	cd nano_param_decomp_jax && ([ -x .venv/bin/python ] || \
+		( ! [ -e .venv ] || mv .venv .venv-stale-$$(date +%s); \
+		  uv venv .venv --python 3.13; rm -rf .venv-stale-* || true )) \
 		&& uv pip install -p .venv/bin/python -e ../param_decomp_config -e '.[dev]'
 
 .PHONY: install-jax-cuda
 install-jax-cuda:
-	cd nano_param_decomp_jax && uv venv .venv-cuda --clear --python 3.13 \
+	cd nano_param_decomp_jax && ([ -x .venv-cuda/bin/python ] || \
+		( ! [ -e .venv-cuda ] || mv .venv-cuda .venv-stale-$$(date +%s); \
+		  uv venv .venv-cuda --python 3.13; rm -rf .venv-stale-* || true )) \
 		&& uv pip install -p .venv-cuda/bin/python -e ../param_decomp_config -e '.[cuda]'
 
 .PHONY: test-jax
