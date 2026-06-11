@@ -71,27 +71,37 @@ def per_component_lp_sums(
     return out, n_examples
 
 
+def lp_and_entropy_terms(
+    per_component_sums: dict[str, Float[Tensor, " C"]],
+    n_examples: int,
+) -> tuple[Float[Tensor, ""], Float[Tensor, ""]]:
+    """The two additive parts of the loss, summed over components: `(lp, entropy)`.
+
+    Full loss is `lp + beta * entropy`; `lp` alone is the beta-independent sparsity
+    proxy. Operates on whatever sums it's given. Pass the globally-reduced
+    per-component sums (and the corresponding global ``n_examples``) for the exact
+    loss — see the ``L_freq`` derivation in the VPD paper, which needs the
+    full-batch sum inside the ``log2``.
+    """
+    device = next(iter(per_component_sums.values())).device
+    lp = torch.zeros((), device=device)
+    entropy = torch.zeros((), device=device)
+    for layer_sums in per_component_sums.values():
+        per_component_mean = layer_sums / n_examples
+        lp = lp + per_component_mean.sum()
+        entropy = entropy + (per_component_mean * torch.log2(1 + layer_sums)).sum()
+    return lp, entropy
+
+
 def finalize_imp_min(
     per_component_sums: dict[str, Float[Tensor, " C"]],
     n_examples: int,
     beta: float,
 ) -> Float[Tensor, ""]:
-    """Scalar imp-min loss from per-component ``L_p`` sums: the per-component mean
-    plus a ``beta``-weighted ``mean * log2(1 + sum)`` term, summed over components.
-
-    Operates on whatever sums it's given. Pass the globally-reduced per-component
-    sums (and the corresponding global ``n_examples``) for the exact loss — see
-    the ``L_freq`` derivation in the VPD paper, which needs the full-batch sum
-    inside the ``log2``.
-    """
-    total_loss = torch.zeros((), device=next(iter(per_component_sums.values())).device)
-    for layer_sums in per_component_sums.values():
-        per_component_mean = layer_sums / n_examples
-        layer_loss = (
-            per_component_mean + beta * per_component_mean * torch.log2(1 + layer_sums)
-        ).sum()
-        total_loss = total_loss + layer_loss
-    return total_loss
+    """Scalar imp-min loss from per-component ``L_p`` sums (see `lp_and_entropy_terms`
+    for the exact-global-sums requirement)."""
+    lp, entropy = lp_and_entropy_terms(per_component_sums, n_examples)
+    return lp + beta * entropy
 
 
 def importance_minimality_loss(
@@ -186,8 +196,9 @@ class ImportanceMinimalityLoss(Metric[ImportanceMinimalityLossConfig]):
             k: all_reduce(v, op=ReduceOp.SUM) for k, v in self.per_component_sums.items()
         }
         n_examples = int(all_reduce(self.n_examples, op=ReduceOp.SUM))
-        return finalize_imp_min(
-            per_component_sums=reduced_sums,
-            n_examples=n_examples,
-            beta=self.cfg.beta,
-        )
+        lp, entropy = lp_and_entropy_terms(reduced_sums, n_examples)
+        name = self.instance_key
+        return {
+            name: lp + self.cfg.beta * entropy,
+            f"{name}_no_beta": lp,
+        }

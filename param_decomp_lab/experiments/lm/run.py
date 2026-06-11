@@ -581,6 +581,7 @@ def _submit_slurm(
         snapshot_ref=snapshot_ref,
         port_seed=run_id,
     )
+    wandb_url = _wandb_url_for_config(config_path, run_id) if config_path is not None else None
     slurm_config = SlurmConfig(
         job_name=job_name,
         partition=partition,
@@ -588,12 +589,10 @@ def _submit_slurm(
         n_nodes=launch.n_nodes,
         time=time,
         snapshot_ref=snapshot_ref,
-        comment=run_id,
+        comment=wandb_url or run_id,
     )
     script = generate_script(slurm_config, launch.command, env=launch.env)
     result = submit_slurm_job(script, "lm")
-
-    wandb_url = _wandb_url_for_config(config_path, run_id) if config_path is not None else None
 
     logger.section("LM PD job submitted!")
     summary: dict[str, str | None] = {

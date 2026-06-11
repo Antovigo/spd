@@ -248,7 +248,7 @@ def run_loss_step(
         cfg = cast(LossMetricConfig, loss_metrics[metric_name].cfg)
         assert cfg.coeff is not None
         total_loss = total_loss + cfg.coeff * loss_val
-        batch_log_data[f"loss/{type(loss_metrics[metric_name]).__name__}"] = loss_val.item()
+        batch_log_data[f"loss/{metric_name}"] = loss_val.item()
     assert active_loss_names, (
         f"No active loss metrics returned a loss at step {step}. "
         f"Configured loss metrics: {list(loss_metrics)}"

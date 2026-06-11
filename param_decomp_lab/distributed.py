@@ -6,6 +6,8 @@ collectives.
 """
 
 import os
+import sys
+import traceback
 from collections.abc import Callable
 from functools import wraps
 
@@ -95,14 +97,42 @@ def cleanup_distributed() -> None:
 
 
 def with_distributed_cleanup[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
-    """Wrap `fn` so `cleanup_distributed` runs in a ``finally`` block on return/raise."""
+    """Run `fn`, then tear distributed down — hard-exiting on both distributed paths.
+
+    On a distributed run that returns normally, every rank barriers (so rank 0's
+    end-of-run wandb flush lands before any peer exits) and then `os._exit(0)`. The
+    hard exit is load-bearing: it skips CPython finalization, where a C-extension
+    daemon thread releasing the GIL after the interpreter starts finalizing aborts
+    the process with `PyGILState_Release` (SIGABRT). That abort fails the SLURM job,
+    and torchrun's peer teardown can kill rank 0 mid-flush so the final step never
+    syncs — even though training succeeded.
+
+    On a distributed run that raises, print the traceback and `os._exit(1)` with no
+    collective: the failure may be a wedged NCCL comm (e.g. an OOM mid-`all_gather`),
+    so `destroy_process_group` would deadlock and leave the rank alive holding its
+    GPUs — a zombie SLURM job. The hard exit makes torchrun reap the peers and fail
+    fast. Not distributed: `cleanup_distributed` and propagate normally.
+    """
 
     @wraps(fn)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
-            return fn(*args, **kwargs)
-        finally:
+            result = fn(*args, **kwargs)
+        except BaseException:
+            if not is_distributed():
+                cleanup_distributed()
+                raise
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
+        if not is_distributed():
             cleanup_distributed()
+            return result
+        sync_across_processes()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     return wrapper
 
