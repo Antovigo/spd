@@ -4,7 +4,10 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=8
 #SBATCH --requeue
-#SBATCH --signal=B:TERM@300
+# TERM must reach the srun-launched python ranks (the trainer's SIGTERM-save
+# handler) — `B:` would deliver it to the batch shell ONLY, which is how job 50818
+# lost its preemption grace window and restarted from step 0.
+#SBATCH --signal=TERM@300
 #SBATCH --output=/mnt/data/artifacts/mechanisms/param-decomp/slurm_logs/slurm-%j.out
 # Usage:
 #   sbatch --nodes=16 --time=3-00:00:00 --qos=opportunistic \
