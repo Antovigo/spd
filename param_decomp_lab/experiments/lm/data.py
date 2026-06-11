@@ -15,6 +15,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 from param_decomp.base_config import BaseConfig
 from param_decomp.distributed import DistributedState
 from param_decomp.log import logger
+from param_decomp_lab.infra.hf_http import configure_hf_http_retries
 
 
 class LMDataConfig(BaseConfig):
@@ -183,6 +184,7 @@ def create_lm_data_loader(
         "create_lm_data_loader needs dataset_name; prompts_file loaders go through "
         "create_prompts_data_loader"
     )
+    configure_hf_http_retries()
     dataset = load_dataset(
         cfg.dataset_name,
         data_files=cfg.data_files,
