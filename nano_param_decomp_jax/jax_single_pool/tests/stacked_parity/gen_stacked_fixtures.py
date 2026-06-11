@@ -43,15 +43,19 @@ from jax_single_pool.llama8b import (  # noqa: E402
 )
 from jax_single_pool.tests.test_llama8b import _tiny_cfg, _tiny_target  # noqa: E402
 from jax_single_pool.train import (  # noqa: E402
-    ImpMinConfig,
-    LossCoeffs,
-    SourceAdamConfig,
     TrainState,
     init_sources,
     init_sources_adam_state,
     make_train_step,
     subset_chunk_plan,
 )
+from param_decomp_config.losses import (  # noqa: E402
+    AdamPGDConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+)
+from param_decomp_config.schedule import ScheduleConfig  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "stacked_fixtures.npz"
 
@@ -165,17 +169,25 @@ def main() -> None:
     )  # fmt: skip
     step_fn = make_train_step(
         lm=lm,
-        coeffs=LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5),
-        imp_cfg=ImpMinConfig(
+        faith_coeff=1e5,
+        stoch_coeff=0.5,
+        imp_min=ImportanceMinimalityLossConfig(
+            coeff=5e-6,
+            pnorm=2.0,
             beta=0.2,
-            eps=1e-12,
-            p_start=2.0,
-            p_final=0.4,
-            anneal_start_frac=0.0,
-            anneal_end_frac=1.0,
-        ),  # fmt: skip
-        adversary=SourceAdamConfig(
-            lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=N_WARMUP
+            p_anneal_start_frac=0.0,
+            p_anneal_final_p=0.4,
+            p_anneal_end_frac=1.0,
+        ),
+        adversary=PersistentPGDReconLossConfig(
+            coeff=0.5,
+            scope=SCScope(),
+            optimizer=AdamPGDConfig(
+                beta1=0.5,
+                beta2=0.99,
+                lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            ),
+            n_warmup_steps=N_WARMUP,
         ),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,

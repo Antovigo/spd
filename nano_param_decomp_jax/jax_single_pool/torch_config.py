@@ -46,18 +46,10 @@ from jax_single_pool.config import (
     ReconConfig,
     TargetConfig,
     VUOptimizerConfig,
-    WandbConfig,
-    load_config,
 )
 from jax_single_pool.llama8b import SITE_NAME_PATTERN, canonical_site_cs
 from jax_single_pool.lm import SiteC
-from jax_single_pool.train import (
-    AdversaryConfig,
-    FreshPGDConfig,
-    ImpMinConfig,
-    LossCoeffs,
-    SourceAdamConfig,
-)
+from jax_single_pool.train import AdversaryConfig
 from param_decomp_config.eval_metrics import CEandKLLossesConfig, CI_L0Config
 from param_decomp_config.lm import (
     HFTarget,
@@ -66,13 +58,11 @@ from param_decomp_config.lm import (
     PretrainedTarget,
 )
 from param_decomp_config.losses import (
-    AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
-    SCScope,
     StochasticReconSubsetLossConfig,
     UniformKSubsetRoutingConfig,
 )
@@ -178,11 +168,13 @@ def _assert_plain_adamw(optimizer: OptimizerConfig, who: str) -> None:
 
 def _losses(
     cfg: LMExperimentConfig, n_sites: int
-) -> tuple[LossCoeffs, ImpMinConfig, AdversaryConfig, int, int]:
-    """Returns (coeffs, imp_min, adversary, sites_per_chunk, n_recon_samples). The four
-    production losses (faith, imp-min, stochastic recon, ONE adversary — persistent
-    PPGD or fresh PGD) must each appear exactly once; anything else refuses."""
-    faith = imp = stoch = ppgd = None
+) -> tuple[float, float, ImportanceMinimalityLossConfig, AdversaryConfig, int, int]:
+    """Returns (faith_coeff, stoch_coeff, imp_min, adversary, sites_per_chunk,
+    n_recon_samples). The four production losses (faith, imp-min, stochastic recon, ONE
+    adversary — persistent PPGD or fresh PGD) must each appear exactly once; anything
+    else refuses. `imp_min`/`adversary` pass through as the SHARED configs —
+    `make_train_step` asserts the subset it implements."""
+    faith = stoch = imp = adversary = None
     sites_per_chunk = n_recon_samples = None
     for metric in cfg.pd.loss_metrics:
         assert metric.coeff is not None
@@ -206,56 +198,15 @@ def _losses(
                 sites_per_chunk = metric.sites_per_chunk
                 n_recon_samples = metric.n_samples
             case PersistentPGDReconLossConfig() | PGDReconLossConfig():
-                assert ppgd is None, "exactly one adversary loss"
-                ppgd = metric
+                assert adversary is None, "exactly one adversary loss"
+                adversary = metric
             case _:
                 raise AssertionError(f"unsupported loss metric {metric.type!r}")
-    assert faith is not None and imp is not None and stoch is not None and ppgd is not None, (
+    assert faith is not None and imp is not None and stoch is not None and adversary is not None, (
         f"need all four production losses, got {[m.type for m in cfg.pd.loss_metrics]}"
     )
     assert sites_per_chunk is not None and n_recon_samples is not None
-
-    assert imp.coeff is not None and imp.p_anneal_final_p is not None
-    imp_min = ImpMinConfig(
-        beta=imp.beta,
-        eps=imp.eps,
-        p_start=imp.pnorm,
-        p_final=imp.p_anneal_final_p,
-        anneal_start_frac=imp.p_anneal_start_frac,
-        anneal_end_frac=imp.p_anneal_end_frac,
-    )
-
-    assert ppgd.coeff is not None
-    adversary: AdversaryConfig
-    match ppgd:
-        case PersistentPGDReconLossConfig():
-            assert isinstance(ppgd.scope, SCScope), ppgd.scope
-            assert not ppgd.use_sigmoid_parameterization and ppgd.start_frac == 0.0, ppgd
-            assert ppgd.n_samples == 1, ppgd
-            adversary_optimizer = ppgd.optimizer
-            assert isinstance(adversary_optimizer, AdamPGDConfig), adversary_optimizer
-            source_schedule = adversary_optimizer.lr_schedule
-            assert (
-                source_schedule.fn_type == "constant" and source_schedule.final_val_frac == 1.0
-            ), source_schedule
-            adversary = SourceAdamConfig(
-                lr=source_schedule.start_val,
-                lr_warmup_frac=source_schedule.warmup_pct,
-                beta1=adversary_optimizer.beta1,
-                beta2=adversary_optimizer.beta2,
-                eps=adversary_optimizer.eps,
-                n_warmup=ppgd.n_warmup_steps,
-            )
-        case PGDReconLossConfig():
-            assert ppgd.mask_scope in ("c", "bc", "bsc"), ppgd
-            adversary = FreshPGDConfig(
-                init=ppgd.init,
-                step_size=ppgd.step_size,
-                n_steps=ppgd.n_steps,
-                scope=ppgd.mask_scope,
-            )
-    coeffs = LossCoeffs(faith=faith, imp=imp.coeff, stoch=stoch, ppgd=ppgd.coeff)
-    return coeffs, imp_min, adversary, sites_per_chunk, n_recon_samples
+    return faith, stoch, imp, adversary, sites_per_chunk, n_recon_samples
 
 
 def _data(cfg: LMExperimentConfig) -> DataConfig:
@@ -313,7 +264,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
 def convert_torch_lm_config(
     torch_cfg: LMExperimentConfig,
     run_name: str,
-    run_id: str | None,
+    run_id: str,
     out_dir: Path,
     remat_recon_forwards: bool,
 ) -> ExperimentConfig:
@@ -345,7 +296,9 @@ def convert_torch_lm_config(
     assert vu_opt.grad_clip_norm is not None, "components grad clip is part of the method"
     assert ci_opt.grad_clip_norm is None, "CI-fn grad clip unsupported"
 
-    coeffs, imp_min, adversary, sites_per_chunk, n_recon_samples = _losses(torch_cfg, n_sites)
+    faith_coeff, stoch_coeff, imp_min, adversary, sites_per_chunk, n_recon_samples = _losses(
+        torch_cfg, n_sites
+    )
     data = _data(torch_cfg)
 
     cadence = torch_cfg.cadence
@@ -359,7 +312,8 @@ def convert_torch_lm_config(
         steps=torch_cfg.pd.steps,
         target=target,
         data=data,
-        losses=coeffs,
+        faith_coeff=faith_coeff,
+        stoch_coeff=stoch_coeff,
         imp_min=imp_min,
         adversary=adversary,
         recon=ReconConfig(
@@ -389,11 +343,7 @@ def convert_torch_lm_config(
             ),
         ),
         eval=_eval(torch_cfg),
-        wandb=(
-            WandbConfig(project=torch_cfg.wandb.project, entity=torch_cfg.wandb.entity)
-            if torch_cfg.wandb is not None
-            else None
-        ),
+        wandb=torch_cfg.wandb,
     )
 
 
@@ -406,17 +356,13 @@ def load_torch_wrapper(wrapper_path: Path) -> tuple[ExperimentConfig, Path, dict
     dict for wandb). The torch path is resolved relative to the wrapper file.
 
     `run_id` is the canonical `p-<8hex>` identity (torch `generate_run_id` format):
-    run dir name + wandb run id, written into the wrapper at authoring time
-    (`python -c "import secrets; print('p-' + secrets.token_hex(4))"`) so resumes
-    derive the same identity and the byte-compare pins it. Wrappers WITHOUT the key
-    predate the scheme (the live C49k run) — drop that arm once it migrates."""
+    run dir name + wandb run id, stamped into the workspace's wrapper copy by
+    `pd-jax-lm` at submit time, so resumes derive the same identity and the
+    byte-compare pins it."""
     raw = yaml.safe_load(wrapper_path.read_text())
-    assert set(raw) in (WRAPPER_KEYS, WRAPPER_KEYS - {"run_id"}), (
-        f"{wrapper_path}: keys must be {sorted(WRAPPER_KEYS)} (run_id optional pre-migration)"
-    )
-    run_id = raw.get("run_id")
-    if run_id is not None:
-        assert _RUN_ID_PATTERN.match(run_id), f"run_id must be p-<8hex>, got {run_id!r}"
+    assert set(raw) == WRAPPER_KEYS, f"{wrapper_path}: keys must be {sorted(WRAPPER_KEYS)}"
+    run_id = raw["run_id"]
+    assert _RUN_ID_PATTERN.match(run_id), f"run_id must be p-<8hex>, got {run_id!r}"
     torch_yaml_path = (wrapper_path.parent / raw["torch_config"]).resolve()
     assert torch_yaml_path.exists(), f"torch config not found: {torch_yaml_path}"
     torch_raw = yaml.safe_load(torch_yaml_path.read_text())
@@ -435,21 +381,17 @@ def load_run_dir_config(run_dir: Path) -> ExperimentConfig:
     """Rebuild a run's `ExperimentConfig` from its pinned config copies (for tools
     that read finished/live run dirs, e.g. the exporter).
 
-    Native runs pin only `config.yaml`. Torch-wrapper runs pin the wrapper as
-    `config.yaml` AND the referenced torch yaml beside it as `torch_config.yaml`;
-    the wrapper's own (launch-relative) path field is ignored — the pinned copy is
-    the source of truth."""
+    A run dir pins the wrapper as `config.yaml` and the referenced torch yaml beside
+    it as `experiment_config.yaml` (the torch `SavedLMRun` contract name); the
+    wrapper's own (launch-relative) path field is ignored — the pinned copy is the
+    source of truth."""
     raw = yaml.safe_load((run_dir / "config.yaml").read_text())
-    if "torch_config" not in raw:
-        return load_config(run_dir / "config.yaml")
-    assert set(raw) in (WRAPPER_KEYS, WRAPPER_KEYS - {"run_id"}), (
-        f"{run_dir}/config.yaml: keys must be {sorted(WRAPPER_KEYS)} (run_id optional pre-migration)"
-    )
-    torch_raw = yaml.safe_load((run_dir / "torch_config.yaml").read_text())
+    assert set(raw) == WRAPPER_KEYS, f"{run_dir}/config.yaml: keys must be {sorted(WRAPPER_KEYS)}"
+    torch_raw = yaml.safe_load((run_dir / "experiment_config.yaml").read_text())
     return convert_torch_lm_config(
         LMExperimentConfig(**torch_raw),
         run_name=raw["run_name"],
-        run_id=raw.get("run_id"),
+        run_id=raw["run_id"],
         out_dir=Path(raw["out_dir"]),
         remat_recon_forwards=raw["remat_recon_forwards"],
     )

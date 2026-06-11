@@ -33,7 +33,7 @@ if [[ -f "$RUN_DIR/offline_eval_args" ]]; then
 fi
 export_file="$RUN_DIR/export/model_${STEP}.safetensors"
 (cd "$JAX_REPO" && .venv-cuda/bin/jsp-export "$RUN_DIR" --step "$STEP")
-(cd "$TORCH_REPO" && .venv/bin/pd-offline-eval "$export_file" "$RUN_DIR/torch_config.yaml" "${EXTRA_EVAL_ARGS[@]}")
+(cd "$TORCH_REPO" && .venv/bin/pd-offline-eval "$export_file" "$RUN_DIR/experiment_config.yaml" "${EXTRA_EVAL_ARGS[@]}")
 echo "$STEP" >> "$MARKER"
 
 # Materialize the torch-contract checkpoint (SavedLMRun reads the latest

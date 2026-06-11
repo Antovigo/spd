@@ -11,7 +11,7 @@ The SAME logits are squashed two ways (SPEC S5/S6): `lower_leaky_hard` feeds the
 (SPEC N1); the trainer casts for bf16 compute.
 """
 
-from typing import NamedTuple
+from dataclasses import dataclass
 
 import equinox as eqx
 import jax
@@ -22,7 +22,9 @@ from vendored_jax.llama import apply_rope, attn_implementation, rms_norm, rope_c
 from jax_single_pool.lm import SiteSpec
 
 
-class CIValues(NamedTuple):
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class CIValues:
     """The two squashed views of the CI-fn logits, per site (`{site: (B, T, C)}`)."""
 
     lower: dict[str, Array]
@@ -129,7 +131,8 @@ class CIFn(eqx.Module):
         )
 
 
-class CIArch(NamedTuple):
+@dataclass(frozen=True)
+class CIArch:
     d_model: int
     n_blocks: int
     n_heads: int

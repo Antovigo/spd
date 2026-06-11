@@ -30,8 +30,8 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 | `llama_simple_mlp.py` | `LlamaSimpleMLP` pile-pretrained target (`goodfire/spd/runs/t-9d2b8f02`: 4L, d768, GELU MLP, plain rotate-half RoPE, tied head): sites `h.{i}.attn.{q,k,v,o}_proj` / `h.{i}.mlp.{c_fc,down_proj}` with `h.*` wildcard expansion, pretrain-cache safetensors loader (one-off `.pt` conversion: `tools/convert_llama_simple_mlp_checkpoint.py`), `llama_simple_mlp_decomposed_lm(cfg, sites)`; frozen weights small enough to replicate (`replicate_frozen`), V/U/CI/source placement reuses the generic per-site plan |
 | `run.py` | the training entrypoint (`jsp-train <config.yaml>`): data, faith warmup, loop, metrics jsonl/wandb, orbax checkpoints, SIGTERM-save + requeue-resume |
 | `data.py` | deterministic batch schedule over the pre-tokenized fineweb parquet shards; O(1) resume addressing, per-process slices |
-| `config.py` | typed `ExperimentConfig` from YAML — every field explicit, unknown keys raise |
-| `configs/` | `llama8b_l18_b512.yaml` (production B=512) + `llama8b_l18_smoke8.yaml` (8-GPU smoke) |
+| `config.py` | the trainer's internal `ExperimentConfig` (built only by `torch_config.py`): shared pydantic loss/adversary configs passed through + jax-runtime knob structs |
+| `configs/` | wrapper yamls (`*_from_torch.yaml`) + the torch `LMExperimentConfig` yamls they reference under `torch/` |
 | `slurm/` | push-triggered offline-eval sbatch scripts (training launches go through `pd-jax-lm`, which generates the job script) |
 | `llama8b_sharding.py` | the 8B placement plan (frozen replicated; per-site V/U + CI + Adam C-sharded; source replicated; batch sharded) |
 | `experiments/llama8b_real.py` | the runnable 8B step + tok/s/GPU bench |
@@ -42,7 +42,7 @@ replaces the hand-written-NCCL multi-pool design with zero manual collectives.
 
 ```bash
 cd nano_param_decomp_jax
-uv venv .venv && source .venv/bin/activate && uv pip install -e .
+uv venv .venv && source .venv/bin/activate && uv pip install -e ../param_decomp_config -e .
 # (`vendored_jax` — the bit-parity JAX Llama — is part of this distribution.)
 
 pytest jax_single_pool/tests/

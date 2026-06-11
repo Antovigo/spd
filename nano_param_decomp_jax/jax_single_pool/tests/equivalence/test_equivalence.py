@@ -71,6 +71,6 @@ def test_structure_ppgd_has_delta_channel() -> None:
     is the raw weight-delta mask (no ci interpolation)."""
     src = inspect.getsource(train_mod.make_ppgd_masks)
     assert "[..., :-1]" in src and "[..., -1]" in src, "ppgd source needs the delta channel"
-    assert "ci_lower[site] + (1.0 - ci_lower[site]) * source_bf16[..., :-1]" in src, (
+    assert "ci_lower[site] + (1.0 - ci_lower[site]) * source[..., :-1]" in src, (
         "ppgd must interpolate mask=ci+(1-ci)*source"
     )

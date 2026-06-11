@@ -1,6 +1,7 @@
-"""The training entrypoint: YAML config -> full SPEC-compliant run on the Llama target.
+"""The training entrypoint: wrapper YAML -> full SPEC-compliant run on a vendored target.
 
-    jsp-train configs/llama8b_l18_b512.yaml          # fresh, or resume-in-place
+    jsp-train <wrapper.yaml>     # normally via pd-jax-lm, which stamps run_id into
+                                 # the workspace copy; re-running resumes in place
 
 Composition root + the only I/O layer: data serving (`data.py`), HF weight loading,
 metrics jsonl (+ optional wandb), orbax checkpoints, SIGTERM-save for SLURM requeue.
@@ -12,6 +13,7 @@ process computes the same global schedule and contributes its local batch slice.
 """
 
 import argparse
+import dataclasses
 import json
 import signal
 import subprocess
@@ -26,7 +28,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import yaml
 from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -37,7 +38,6 @@ from jax_single_pool.config import (
     ExperimentConfig,
     LlamaSimpleMLPTargetConfig,
     TargetConfig,
-    load_config,
 )
 from jax_single_pool.data import BatchSchedule, ShardServer, scan_shards
 from jax_single_pool.eval import make_eval_step
@@ -139,7 +139,7 @@ class MetricsSink:
                 project=cfg.wandb.project,
                 entity=cfg.wandb.entity,
                 name=cfg.run_name,
-                id=cfg.wandb_id,
+                id=cfg.run_id,
                 resume="allow",
                 config=raw_cfg,
             )
@@ -217,7 +217,9 @@ def train(
             new_opt_vu = _ensure_global(
                 opt_vu.init(eqx.filter(warmed_components, eqx.is_array)), mesh
             )
-            state = state._replace(components=warmed_components, components_opt_state=new_opt_vu)
+            state = dataclasses.replace(
+                state, components=warmed_components, components_opt_state=new_opt_vu
+            )
             if is_main:
                 print(
                     f"faith warmup: {cfg.faith_warmup.steps} steps in {time.time() - t0:.0f}s, "
@@ -228,8 +230,9 @@ def train(
 
     step_fn = make_train_step(
         lm=lm,
-        coeffs=cfg.losses,
-        imp_cfg=cfg.imp_min,
+        faith_coeff=cfg.faith_coeff,
+        stoch_coeff=cfg.stoch_coeff,
+        imp_min=cfg.imp_min,
         adversary=cfg.adversary,
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
@@ -367,10 +370,9 @@ def train(
 
 def offline_eval_submission_argv(run_dir: Path, step: int) -> list[str] | None:
     """The sbatch argv for the push-triggered offline eval of this checkpoint, or None
-    when offline eval doesn't apply (native-config runs have no pinned torch yaml;
-    step 0 is the init checkpoint). `-J jsp-oeval-<run> --dependency=singleton`
+    for step 0 (the init checkpoint). `-J jsp-oeval-<run> --dependency=singleton`
     serializes evals per run; the once-script's marker file dedups across requeues."""
-    if step == 0 or not (run_dir / "torch_config.yaml").exists():
+    if step == 0:
         return None
     once_script = Path(__file__).parent / "slurm" / "offline_eval_once.sbatch"
     return [
@@ -421,25 +423,16 @@ def main() -> None:
     init_distributed()
     mesh = dp_mesh()
 
-    # A wrapper yaml with a `torch_config` key routes through the shared
-    # param-decomp-config schema (the torch trainer's LMExperimentConfig).
-    torch_yaml_path = None
-    if "torch_config" in yaml.safe_load(args.config.read_text()):
-        cfg, torch_yaml_path, raw_cfg = load_torch_wrapper(args.config)
-    else:
-        cfg = load_config(args.config)
-        raw_cfg = yaml.safe_load(args.config.read_text())
+    cfg, torch_yaml_path, raw_cfg = load_torch_wrapper(args.config)
 
     is_main = jax.process_index() == 0
     if is_main:
         cfg.run_dir.mkdir(parents=True, exist_ok=True)
         _pin_config_copy(cfg.run_dir, "config.yaml", args.config)
-        if torch_yaml_path is not None:
-            _pin_config_copy(cfg.run_dir, "torch_config.yaml", torch_yaml_path)
-            # the same yaml under the torch SavedLMRun contract name, making the run
-            # dir consumable by harvest/app/postprocess (runs/<p-id>/ convention)
-            _pin_config_copy(cfg.run_dir, "experiment_config.yaml", torch_yaml_path)
-        site_summary = " ".join(f"{name}:C{c}" for name, c in cfg.target.sites)
+        # the torch yaml under the torch SavedLMRun contract name, making the run
+        # dir consumable by harvest/app/postprocess (runs/<p-id>/ convention)
+        _pin_config_copy(cfg.run_dir, "experiment_config.yaml", torch_yaml_path)
+        site_summary = " ".join(f"{s.name}:C{s.C}" for s in cfg.target.sites)
         print(
             f"run {cfg.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
             f"B={cfg.data.global_batch} seq={cfg.data.seq_len} "

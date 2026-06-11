@@ -30,10 +30,6 @@ from jax_single_pool.llama8b import (
 )
 from jax_single_pool.lm import SiteC, SiteSpec
 from jax_single_pool.train import (
-    FreshPGDConfig,
-    ImpMinConfig,
-    LossCoeffs,
-    SourceAdamConfig,
     TrainState,
     init_sources,
     init_sources_adam_state,
@@ -41,6 +37,14 @@ from jax_single_pool.train import (
     make_train_step,
     subset_chunk_plan,
 )
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    PGDReconLossConfig,
+    SCScope,
+)
+from param_decomp_config.schedule import ScheduleConfig
 
 
 def _tiny_cfg() -> LlamaConfig:
@@ -135,12 +139,16 @@ def test_llama_site_specs_dims():
             tuple(SiteC(site_name(2, kind), 4) for kind in ("q", "k", "v", "o", "gate", "down"))
         ),
     )
+
+    def dims(s: SiteSpec) -> tuple[int, int, int]:
+        return (s.d_in, s.d_out, s.C)
+
     by_name = {s.name: s for s in specs}
-    assert by_name["layers.2.self_attn.q_proj"][1:] == (cfg.n_embd, qd, 4)
-    assert by_name["layers.2.self_attn.k_proj"][1:] == (cfg.n_embd, kvd, 4)
-    assert by_name["layers.2.self_attn.o_proj"][1:] == (qd, cfg.n_embd, 4)
-    assert by_name["layers.2.mlp.gate_proj"][1:] == (cfg.n_embd, cfg.n_intermediate, 4)
-    assert by_name["layers.2.mlp.down_proj"][1:] == (cfg.n_intermediate, cfg.n_embd, 4)
+    assert dims(by_name["layers.2.self_attn.q_proj"]) == (cfg.n_embd, qd, 4)
+    assert dims(by_name["layers.2.self_attn.k_proj"]) == (cfg.n_embd, kvd, 4)
+    assert dims(by_name["layers.2.self_attn.o_proj"]) == (qd, cfg.n_embd, 4)
+    assert dims(by_name["layers.2.mlp.gate_proj"]) == (cfg.n_embd, cfg.n_intermediate, 4)
+    assert dims(by_name["layers.2.mlp.down_proj"]) == (cfg.n_intermediate, cfg.n_embd, 4)
     with pytest.raises(AssertionError, match="canonical"):
         llama_site_specs(cfg, tuple(reversed(mlp_family_site_cs(2, 2, 4))))
 
@@ -192,7 +200,7 @@ def test_attention_sites_clean_and_masked_identity():
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
     # per-site heterogeneous C is preserved end to end
-    assert {s.name: s.C for s in lm.sites} == {name: c for name, c in _QVDOWN_SITE_CS}
+    assert {s.name: s.C for s in lm.sites} == {sc.name: sc.C for sc in _QVDOWN_SITE_CS}
     for spec in lm.sites:
         V, U = vu.site(spec.name)
         assert V.shape == (spec.d_in, spec.C) and U.shape == (spec.C, spec.d_out)
@@ -276,18 +284,26 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
     )  # fmt: skip
     step = make_train_step(
         lm=lm,
-        coeffs=LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5),
-        imp_cfg=ImpMinConfig(
+        faith_coeff=1e5,
+        stoch_coeff=0.5,
+        imp_min=ImportanceMinimalityLossConfig(
+            coeff=5e-6,
+            pnorm=2.0,
             beta=0.2,
-            eps=1e-12,
-            p_start=2.0,
-            p_final=0.4,
-            anneal_start_frac=0.0,
-            anneal_end_frac=1.0,
-        ),  # fmt: skip
-        adversary=SourceAdamConfig(
-            lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=n_warmup
-        ),  # fmt: skip
+            p_anneal_start_frac=0.0,
+            p_anneal_final_p=0.4,
+            p_anneal_end_frac=1.0,
+        ),
+        adversary=PersistentPGDReconLossConfig(
+            coeff=0.5,
+            scope=SCScope(),
+            optimizer=AdamPGDConfig(
+                beta1=0.5,
+                beta2=0.99,
+                lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            ),
+            n_warmup_steps=n_warmup,
+        ),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=100,
@@ -388,21 +404,23 @@ def test_fresh_pgd_adversary_step():
     def run_step(n_ascent_steps: int) -> tuple[TrainState, dict[str, jax.Array]]:
         step = make_train_step(
             lm=lm,
-            coeffs=LossCoeffs(faith=1e7, imp=2e-4, stoch=0.5, ppgd=0.5),
-            imp_cfg=ImpMinConfig(
+            faith_coeff=1e7,
+            stoch_coeff=0.5,
+            imp_min=ImportanceMinimalityLossConfig(
+                coeff=2e-4,
+                pnorm=2.0,
                 beta=0.5,
-                eps=1e-12,
-                p_start=2.0,
-                p_final=0.4,
-                anneal_start_frac=0.0,
-                anneal_end_frac=1.0,
-            ),  # fmt: skip
-            adversary=FreshPGDConfig(
+                p_anneal_start_frac=0.0,
+                p_anneal_final_p=0.4,
+                p_anneal_end_frac=1.0,
+            ),
+            adversary=PGDReconLossConfig(
+                coeff=0.5,
                 init="random",
                 step_size=1.0,
                 n_steps=n_ascent_steps,
-                scope="bsc",
-            ),  # fmt: skip
+                mask_scope="bsc",
+            ),
             components_optimizer=opt_vu,
             ci_fn_optimizer=opt_ci,
             total_steps=100,

@@ -37,14 +37,18 @@ from jax_single_pool.llama8b_sharding import (
 )
 from jax_single_pool.sharding import init_distributed
 from jax_single_pool.train import (
-    ImpMinConfig,
-    LossCoeffs,
-    SourceAdamConfig,
     TrainState,
     init_sources_adam_state,
     make_train_step,
     subset_chunk_plan,
 )
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+)
+from param_decomp_config.schedule import ScheduleConfig
 
 
 def main() -> None:
@@ -88,9 +92,21 @@ def main() -> None:
     )  # fmt: skip
     step_fn = make_train_step(
         lm=lm,
-        coeffs=LossCoeffs(1e5, 5e-6, 0.5, 0.5),
-        imp_cfg=ImpMinConfig(0.2, 1e-12, 2.0, 0.4, 0.0, 1.0),
-        adversary=SourceAdamConfig(0.01, 0.025, 0.5, 0.99, 1e-8, n_warmup=2),
+        faith_coeff=1e5,
+        stoch_coeff=0.5,
+        imp_min=ImportanceMinimalityLossConfig(
+            coeff=5e-6, pnorm=2.0, beta=0.2,
+            p_anneal_start_frac=0.0, p_anneal_final_p=0.4, p_anneal_end_frac=1.0,
+        ),
+        adversary=PersistentPGDReconLossConfig(
+            coeff=0.5,
+            scope=SCScope(),
+            optimizer=AdamPGDConfig(
+                beta1=0.5, beta2=0.99,
+                lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            ),
+            n_warmup_steps=2,
+        ),
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100, recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
         remat_recon_forwards=not args.no_remat, mesh=mesh,

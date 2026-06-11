@@ -33,9 +33,6 @@ from jax_single_pool.llama_simple_mlp import (
 )
 from jax_single_pool.lm import SiteC
 from jax_single_pool.train import (
-    ImpMinConfig,
-    LossCoeffs,
-    SourceAdamConfig,
     TrainState,
     init_sources,
     init_sources_adam_state,
@@ -43,6 +40,13 @@ from jax_single_pool.train import (
     make_train_step,
     subset_chunk_plan,
 )
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+)
+from param_decomp_config.schedule import ScheduleConfig
 
 
 def _tiny_cfg() -> LlamaSimpleMLPConfig:
@@ -166,12 +170,12 @@ def test_site_specs_dims():
     specs = site_specs(cfg, canonical_site_cs(tuple(SiteC(site_name(2, k), 4) for k in (
         "q_proj", "k_proj", "v_proj", "o_proj", "c_fc", "down_proj",
     ))))  # fmt: skip
-    by_name = {s.name: s for s in specs}
-    assert by_name["h.2.attn.q_proj"][1:] == (cfg.n_embd, qd, 4)
-    assert by_name["h.2.attn.k_proj"][1:] == (cfg.n_embd, kvd, 4)
-    assert by_name["h.2.attn.o_proj"][1:] == (qd, cfg.n_embd, 4)
-    assert by_name["h.2.mlp.c_fc"][1:] == (cfg.n_embd, cfg.n_intermediate, 4)
-    assert by_name["h.2.mlp.down_proj"][1:] == (cfg.n_intermediate, cfg.n_embd, 4)
+    dims = {s.name: (s.d_in, s.d_out, s.C) for s in specs}
+    assert dims["h.2.attn.q_proj"] == (cfg.n_embd, qd, 4)
+    assert dims["h.2.attn.k_proj"] == (cfg.n_embd, kvd, 4)
+    assert dims["h.2.attn.o_proj"] == (qd, cfg.n_embd, 4)
+    assert dims["h.2.mlp.c_fc"] == (cfg.n_embd, cfg.n_intermediate, 4)
+    assert dims["h.2.mlp.down_proj"] == (cfg.n_intermediate, cfg.n_embd, 4)
     with pytest.raises(AssertionError, match="canonical"):
         site_specs(cfg, (SiteC("h.2.mlp.c_fc", 4), SiteC("h.2.attn.q_proj", 4)))
 
@@ -207,7 +211,7 @@ def test_clean_path_and_masked_identity():
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
     # per-site heterogeneous C is preserved end to end
-    assert {s.name: s.C for s in lm.sites} == {name: c for name, c in _MIXED_SITE_CS}
+    assert {s.name: s.C for s in lm.sites} == {s.name: s.C for s in _MIXED_SITE_CS}
     for spec in lm.sites:
         V, U = vu.site(spec.name)
         assert V.shape == (spec.d_in, spec.C) and U.shape == (spec.C, spec.d_out)
@@ -257,7 +261,7 @@ def test_zero_masking_one_site_changes_logits(ablated_site: str):
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
     clean = lm.clean_logits(target, resid)
-    C = dict(_MIXED_SITE_CS)[ablated_site]
+    C = {s.name: s.C for s in _MIXED_SITE_CS}[ablated_site]
     ablated = lm.masked_logits(
         target, vu, resid,
         {ablated_site: jnp.zeros((b, t, C))}, {ablated_site: jnp.zeros((b, t))},
@@ -311,18 +315,26 @@ def test_step_trains_and_has_vpd_signature():
     )  # fmt: skip
     step = make_train_step(
         lm=lm,
-        coeffs=LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5),
-        imp_cfg=ImpMinConfig(
+        faith_coeff=1e5,
+        stoch_coeff=0.5,
+        imp_min=ImportanceMinimalityLossConfig(
+            coeff=5e-6,
+            pnorm=2.0,
             beta=0.2,
-            eps=1e-12,
-            p_start=2.0,
-            p_final=0.4,
-            anneal_start_frac=0.0,
-            anneal_end_frac=1.0,
-        ),  # fmt: skip
-        adversary=SourceAdamConfig(
-            lr=0.01, lr_warmup_frac=0.025, beta1=0.5, beta2=0.99, eps=1e-8, n_warmup=n_warmup
-        ),  # fmt: skip
+            p_anneal_start_frac=0.0,
+            p_anneal_final_p=0.4,
+            p_anneal_end_frac=1.0,
+        ),
+        adversary=PersistentPGDReconLossConfig(
+            coeff=0.5,
+            scope=SCScope(),
+            optimizer=AdamPGDConfig(
+                beta1=0.5,
+                beta2=0.99,
+                lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            ),
+            n_warmup_steps=n_warmup,
+        ),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=100,
@@ -431,7 +443,7 @@ def test_torch_config_pretrained_target_converts_with_wildcards():
     cfg = convert_torch_lm_config(
         LMExperimentConfig(**raw),
         run_name="t",
-        run_id=None,
+        run_id="p-00000000",
         out_dir=Path("/tmp"),
         remat_recon_forwards=False,
     )
@@ -440,7 +452,7 @@ def test_torch_config_pretrained_target_converts_with_wildcards():
     assert target.pretrain_run_path == "goodfire/spd/runs/t-9d2b8f02"
     assert len(target.sites) == 4 * 6
     assert target.sites == canonical_site_cs(target.sites)
-    by_name = dict(target.sites)
+    by_name = {sc.name: sc.C for sc in target.sites}
     for layer in range(4):
         assert by_name[f"h.{layer}.mlp.c_fc"] == 3072
         assert by_name[f"h.{layer}.mlp.down_proj"] == 3584

@@ -53,6 +53,10 @@ exclude = [
 ]
 venvPath = "."
 venv = ".venv"
+pythonVersion = "3.13"
+# param-decomp-config is installed editable from the sibling in-tree package; resolve
+# its source directly (editable finder hooks are invisible to pyright).
+extraPaths = [".."]
 typeCheckingMode = "standard"
 
 strictListInference = true

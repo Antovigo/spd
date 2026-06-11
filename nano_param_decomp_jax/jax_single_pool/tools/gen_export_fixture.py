@@ -95,7 +95,7 @@ def _randomize_biases(ci_fn: CIFn, key: jax.Array) -> CIFn:
 
 
 def _gen_case(case: str, site_cs: tuple[SiteC, ...], key: jax.Array) -> None:
-    n_layer = max(int(name.split(".")[1]) for name, _ in site_cs) + 1
+    n_layer = max(int(sc.name.split(".")[1]) for sc in site_cs) + 1
     cfg = _tiny_llama_cfg(n_layer)
     sites = llama_site_specs(cfg, site_cs)
     vu_key, ci_key, bias_key, data_key = random.split(key, 4)

@@ -70,10 +70,18 @@ flowchart LR
 > in one pass. Everything now lives on `feature/fsdp-lm-trainer` in one checkout:
 > `param_decomp_config/` merged (with the shape-spelled scope renames + legacy-alias
 > validators), the JAX distribution merged in as `nano_param_decomp_jax/` (spike dirs
-> deleted), scope literals synced across both stacks. Still open: gap 2 (collapse the
-> jax-internal config dataclasses), the rest of gap 4 (native yaml schema + run_id
-> optionality + double config pin — gated on the live C49k run), gaps 5-7. The frozen
-> `~/pd-nano-jax-jaxsp` clone serves the live run's requeues until it ends.
+> deleted), scope literals synced across both stacks. The frozen `~/pd-nano-jax-jaxsp`
+> clone serves the live run's requeues until it ends.
+>
+> **2026-06-11, later — gaps 2 and 4 closed.** `train.py` consumes the shared loss
+> configs directly (`ImportanceMinimalityLossConfig`, `PersistentPGDReconLossConfig` /
+> `PGDReconLossConfig`; the internal `LossCoeffs`/`ImpMinConfig`/`SourceAdamConfig`/
+> `FreshPGDConfig` mirrors are gone — the factory asserts the implemented subset);
+> the native jax yaml schema is deleted (wrapper-only), `run_id` is required (stamped
+> by `pd-jax-lm`), and the run dir pins one torch yaml (`experiment_config.yaml`).
+> The "gated on C49k" reasoning died with `pd-jax-lm`: live runs execute from
+> immutable workspaces, so nothing in this checkout can touch them. Internal state/
+> bundle NamedTuples became registered frozen dataclasses. Still open: 5-7.
 
 1. **Merge `refactor/shared-config-package`** (torch repo; awaiting Oli's review). Unblocks: pin the jax git dep to main; delete the mirrored-schema risk forever.
 2. **Collapse the jax-internal config dataclasses.** `config.py`'s `ExperimentConfig` tree duplicates information the shared schema already carries; after (1), the converter could emit/consume the shared types directly plus a small jax-runtime-knobs struct (`remat`, identity). Kills the last duplicated schema.

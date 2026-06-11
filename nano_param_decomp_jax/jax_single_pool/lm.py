@@ -11,7 +11,8 @@ it: a frozen 8B target captured as a jit constant bakes multi-GB weights into th
 """
 
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from typing import Any
 
 from jaxtyping import Array, Bool, Float
 
@@ -22,7 +23,8 @@ SiteRoutes = dict[str, Bool[Array, "B T"]] | None
 (SPEC §1.3). Positions routing False take the frozen `x @ W` path."""
 
 
-class SiteC(NamedTuple):
+@dataclass(frozen=True)
+class SiteC:
     """A decomposed site as configured: its torch-module-path name and its C.
 
     The shape-carrying `SiteSpec` is derived from this plus the target's config."""
@@ -31,14 +33,16 @@ class SiteC(NamedTuple):
     C: int
 
 
-class SiteSpec(NamedTuple):
+@dataclass(frozen=True)
+class SiteSpec:
     name: str
     d_in: int
     d_out: int
     C: int
 
 
-class DecomposedLM(NamedTuple):
+@dataclass(frozen=True)
+class DecomposedLM:
     """Pure-function table over `(frozen, vu)` pytrees (see module docstring).
 
     `sites` fixes the canonical site order — chunking (SPEC S10) and the CI fn's

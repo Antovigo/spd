@@ -1,22 +1,20 @@
-"""Typed experiment config for the generic trainer, parsed from YAML.
+"""The trainer's internal experiment config — built ONLY by `torch_config.py`.
 
-Every field is explicit in the YAML — no defaults here (single source of truth: the
-config file). Unknown keys raise. Field names mirror the torch production yamls where
-the concepts map (`llama8b_l18_b512_2pool_lr_mid.yaml`), restricted to what this
-trainer supports (SPEC §2 constants are a valid instantiation).
+The yaml surface is the shared torch schema (`LMExperimentConfig` via the wrapper
+route); this module holds the converted form the trainer consumes. Loss/adversary
+configs are the SHARED pydantic types passed through verbatim; the dataclasses here
+carry only the jax-runtime knobs that have no torch-schema home (chunking, remat,
+checkpoint cadence, the CI-fn architecture extraction).
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import yaml
-
-from jax_single_pool import llama_simple_mlp
 from jax_single_pool.ci_fn import CIArch
-from jax_single_pool.llama8b import mlp_family_site_cs
 from jax_single_pool.lm import SiteC
-from jax_single_pool.train import AdversaryConfig, ImpMinConfig, LossCoeffs, SourceAdamConfig
+from jax_single_pool.train import AdversaryConfig
+from param_decomp_config.experiment import WandbConfig
+from param_decomp_config.losses import ImportanceMinimalityLossConfig
 
 
 @dataclass(frozen=True)
@@ -114,33 +112,24 @@ class EvalConfig:
 
 
 @dataclass(frozen=True)
-class WandbConfig:
-    project: str
-    entity: str | None
-    """None = the API key's default entity (the torch schema's `entity: null`)."""
-
-
-@dataclass(frozen=True)
 class ExperimentConfig:
     run_name: str
     """Human-readable display name (the wandb run NAME)."""
-    run_id: str | None
+    run_id: str
     """Canonical `p-<8hex>` id (wandb run ID + run-dir name) — the torch
     `generate_run_id` convention, making the run a first-class citizen of the
-    `runs/<id>/` postprocess world. None ONLY for runs launched before the id
-    scheme (the live C49k run's pinned wrapper) — remove the None arm once that
-    run finishes and migrates."""
+    `runs/<id>/` postprocess world. Minted at submit time by `pd-jax-lm`."""
     out_dir: Path
     seed: int
     steps: int
     target: AnyTargetConfig
     data: DataConfig
-    losses: LossCoeffs
-    imp_min: ImpMinConfig
+    faith_coeff: float
+    stoch_coeff: float
+    imp_min: ImportanceMinimalityLossConfig
     adversary: AdversaryConfig
-    """Recon adversary: persistent source-Adam (PPGD) or fresh per-batch sign-PGD.
-    The native yaml key stays `ppgd:` (always the persistent variant there); fresh-PGD
-    arrives via the torch-config route only."""
+    """Recon adversary: persistent source-Adam (PPGD) or fresh per-batch sign-PGD —
+    the shared torch loss config, subset-asserted in `make_train_step`."""
     recon: ReconConfig
     vu_optimizer: VUOptimizerConfig
     ci_optimizer: CIOptimizerConfig
@@ -152,123 +141,4 @@ class ExperimentConfig:
 
     @property
     def run_dir(self) -> Path:
-        return self.out_dir / (self.run_id if self.run_id is not None else self.run_name)
-
-    @property
-    def wandb_id(self) -> str:
-        return self.run_id if self.run_id is not None else self.run_name
-
-
-def _build(cls: type, raw: dict[str, Any], where: str) -> Any:
-    names = (
-        {f.name for f in fields(cls)} if hasattr(cls, "__dataclass_fields__") else set(cls._fields)
-    )  # type: ignore[attr-defined]
-    unknown = set(raw) - names
-    assert not unknown, f"{where}: unknown keys {sorted(unknown)} (expected {sorted(names)})"
-    missing = names - set(raw)
-    assert not missing, f"{where}: missing keys {sorted(missing)}"
-    return cls(**raw)
-
-
-def load_config(path: Path) -> ExperimentConfig:
-    assert path.exists(), f"config not found: {path}"
-    raw = yaml.safe_load(path.read_text())
-    top = {
-        "run_name",
-        "out_dir",
-        "seed",
-        "steps",
-        "target",
-        "data",
-        "losses",
-        "imp_min",
-        "ppgd",
-        "recon",
-        "vu_optimizer",
-        "ci_optimizer",
-        "ci_fn",
-        "faith_warmup",
-        "cadence",
-        "eval",
-        "wandb",
-    }
-    unknown = set(raw) - top
-    assert not unknown, f"{path}: unknown top-level keys {sorted(unknown)}"
-    missing = top - set(raw) - {"eval", "wandb"}
-    assert not missing, f"{path}: missing top-level keys {sorted(missing)}"
-
-    target_raw = raw["target"]
-    target: AnyTargetConfig
-    if "pretrain_run_path" in target_raw:
-        assert set(target_raw) == {"pretrain_run_path", "sites"}, (
-            f"target: unknown keys {sorted(target_raw)}"
-        )
-        target = LlamaSimpleMLPTargetConfig(
-            pretrain_run_path=target_raw["pretrain_run_path"],
-            sites=llama_simple_mlp.canonical_site_cs(
-                tuple(SiteC(site["name"], site["C"]) for site in target_raw["sites"])
-            ),
-        )
-    else:
-        assert set(target_raw) == {"model_name", "first_layer", "last_layer", "C"}, (
-            f"target: unknown keys {sorted(target_raw)}"
-        )
-        target = TargetConfig(
-            model_name=target_raw["model_name"],
-            sites=mlp_family_site_cs(
-                target_raw["first_layer"], target_raw["last_layer"], target_raw["C"]
-            ),
-        )
-
-    data_raw = dict(raw["data"], dir=Path(raw["data"]["dir"]))
-    cfg = ExperimentConfig(
-        run_name=raw["run_name"],
-        run_id=None,
-        out_dir=Path(raw["out_dir"]),
-        seed=raw["seed"],
-        steps=raw["steps"],
-        target=target,
-        data=_build(DataConfig, data_raw, "data"),
-        losses=_build(LossCoeffs, raw["losses"], "losses"),
-        imp_min=_build(ImpMinConfig, raw["imp_min"], "imp_min"),
-        adversary=_build(SourceAdamConfig, raw["ppgd"], "ppgd"),
-        recon=_build(ReconConfig, raw["recon"], "recon"),
-        vu_optimizer=_build(VUOptimizerConfig, raw["vu_optimizer"], "vu_optimizer"),
-        ci_optimizer=_build(CIOptimizerConfig, raw["ci_optimizer"], "ci_optimizer"),
-        ci_fn=_build(CIArch, raw["ci_fn"], "ci_fn"),
-        faith_warmup=_build(FaithWarmupConfig, raw["faith_warmup"], "faith_warmup"),
-        cadence=CadenceConfig(
-            **{k: v for k, v in raw["cadence"].items() if k != "dense_log_phase"},
-            dense_log_phase=(
-                _build(DenseLogPhase, raw["cadence"]["dense_log_phase"], "dense_log_phase")
-                if raw["cadence"].get("dense_log_phase")
-                else None
-            ),
-        ),
-        eval=(
-            _build(
-                EvalConfig,
-                dict(
-                    {k: v for k, v in raw["eval"].items() if k not in ("pgd", "l0_groups")},
-                    l0_groups=(
-                        {g: tuple(pats) for g, pats in raw["eval"]["l0_groups"].items()}
-                        if raw["eval"].get("l0_groups")
-                        else None
-                    ),
-                    pgd=(
-                        _build(EvalPGDConfig, raw["eval"]["pgd"], "eval.pgd")
-                        if raw["eval"].get("pgd")
-                        else None
-                    ),
-                ),
-                "eval",
-            )
-            if raw.get("eval")
-            else None
-        ),
-        wandb=_build(WandbConfig, raw["wandb"], "wandb") if raw.get("wandb") else None,
-    )
-    n_sites = len(cfg.target.sites)
-    assert n_sites % cfg.recon.sites_per_chunk == 0, (n_sites, cfg.recon.sites_per_chunk)
-    assert cfg.cadence.save_every % cfg.cadence.log_every == 0
-    return cfg
+        return self.out_dir / self.run_id

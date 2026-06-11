@@ -20,7 +20,8 @@ from jax_single_pool.llama8b_sharding import (
     init_sources_sharded,
 )
 from jax_single_pool.lm import DecomposedLM
-from jax_single_pool.train import FreshPGDConfig, TrainState, init_sources_adam_state
+from jax_single_pool.train import TrainState, init_sources_adam_state
+from param_decomp_config.losses import PGDReconLossConfig
 
 
 def build_optimizers(cfg: ExperimentConfig):
@@ -48,7 +49,7 @@ def init_train_state(
     components = init_decomp_vu_sharded(lm.sites, init_key, mesh)
     ci_fn = init_ci_fn_sharded(cfg.ci_fn, lm.sites, random.fold_in(init_key, 1), mesh)
     match cfg.adversary:
-        case FreshPGDConfig():
+        case PGDReconLossConfig():
             # fresh per-batch sources carry no cross-step state (sampled inside the step)
             sources = {}
         case _:

@@ -62,9 +62,6 @@ from jax_single_pool.llama8b_sharding import (
 )
 from jax_single_pool.sharding import init_distributed
 from jax_single_pool.train import (
-    ImpMinConfig,
-    LossCoeffs,
-    SourceAdamConfig,
     TrainState,
     init_sources,
     init_sources_adam_state,
@@ -72,6 +69,13 @@ from jax_single_pool.train import (
     make_train_step,
     subset_chunk_plan,
 )
+from param_decomp_config.losses import (
+    AdamPGDConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+)
+from param_decomp_config.schedule import ScheduleConfig
 
 
 def _random_target(cfg: LlamaConfig, first_layer: int, key: jax.Array) -> Target:
@@ -214,23 +218,26 @@ def main():
     )
     step = make_train_step(
         lm=lm,
-        coeffs=LossCoeffs(faith=1e5, imp=5e-6, stoch=0.5, ppgd=0.5),
-        imp_cfg=ImpMinConfig(
+        faith_coeff=1e5,
+        stoch_coeff=0.5,
+        imp_min=ImportanceMinimalityLossConfig(
+            coeff=5e-6,
+            pnorm=2.0,
             beta=0.2,
-            eps=1e-12,
-            p_start=2.0,
-            p_final=0.4,
-            anneal_start_frac=0.0,
-            anneal_end_frac=1.0,
-        ),  # fmt: skip
-        adversary=SourceAdamConfig(
-            lr=0.01,
-            lr_warmup_frac=0.025,
-            beta1=0.5,
-            beta2=0.99,
-            eps=1e-8,
-            n_warmup=args.n_warmup,
-        ),  # fmt: skip
+            p_anneal_start_frac=0.0,
+            p_anneal_final_p=0.4,
+            p_anneal_end_frac=1.0,
+        ),
+        adversary=PersistentPGDReconLossConfig(
+            coeff=0.5,
+            scope=SCScope(),
+            optimizer=AdamPGDConfig(
+                beta1=0.5,
+                beta2=0.99,
+                lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            ),
+            n_warmup_steps=args.n_warmup,
+        ),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=args.total_steps,
