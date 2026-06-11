@@ -59,11 +59,29 @@ from param_decomp_lab.seed import set_seed
 def _load_reference_config(config_path: Path) -> TwoPoolLMExperimentConfig | LMExperimentConfig:
     """2-pool yamls carry `runtime.topology`; everything this module touches
     (`pd.seed/decomposition_targets/ci_config/sigmoid_type`, `target`, `data`,
-    `eval`, `wandb`, `runtime.autocast_bf16`) is shared between the schemas."""
+    `eval`, `wandb`, `runtime.autocast_bf16`) is shared between the schemas.
+
+    Raw-HF Llama specs are normalized to the vendored view: `jsp-export` writes
+    vendored-layout state-dict keys regardless of how the run's yaml named the
+    target, so the eval model must be `VendoredLlama` (same weights) with the
+    `model.`-prefixed site patterns stripped to the vendored module tree. The
+    frozen target is forced to bf16 — that matches what the JAX run ACTUALLY
+    trains with (its documented fp32-yaml divergence), and is therefore the more
+    faithful eval reference."""
     raw = yaml.safe_load(config_path.read_text())
     if "topology" in raw.get("runtime", {}):
         return TwoPoolLMExperimentConfig.from_file(config_path)
-    return LMExperimentConfig.from_file(config_path)
+    spec = raw["target"]["spec"]
+    if spec.get("kind") == "hf" and spec.get("model_class") == "transformers.LlamaForCausalLM":
+        raw["target"]["spec"] = {
+            "kind": "hf_weights_in_vendored",
+            "model_class": "param_decomp_lab.experiments.lm.vendored.llama_3_1.model.VendoredLlama",
+            "model_name": spec["model_name"],
+        }
+        raw["target"]["weights_dtype"] = "bfloat16"
+        for target in raw["pd"]["decomposition_targets"]:
+            target["module_pattern"] = target["module_pattern"].removeprefix("model.")
+    return LMExperimentConfig(**raw)
 
 
 def _step_from_export_name(filename: str) -> int:
