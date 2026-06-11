@@ -25,6 +25,11 @@ for attempt in 1 2 3 4 5; do
     # default 0.75 caps the XLA pool at ~135 GiB on a B200 — the C30k 16-GPU step's
     # 108 GiB arena + params + warmup/harvest buffers needs more (OOM, job 50644)
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
+    # CUDA-graph capture (XLA command buffers) intermittently dies with
+    # CUDA_ERROR_STREAM_CAPTURE_INVALIDATED — killed jobs 50453/50525/50676/50743 on
+    # DISJOINT allocations (not a bad node). Torch never exercises this path. Disabling
+    # costs ~1-3% launch overhead; measured vs not-training-at-all, an easy trade.
+    export XLA_FLAGS="--xla_gpu_enable_command_buffer="
     exec jsp-train jax_single_pool/$CONFIG
   " && exit 0
   echo "=== train crashed (attempt $attempt); resuming from latest checkpoint ==="
