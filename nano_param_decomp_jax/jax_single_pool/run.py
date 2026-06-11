@@ -261,7 +261,12 @@ def train(
         )  # fmt: skip
         eval_pgd = (cfg.eval.pgd.n_steps, cfg.eval.pgd.step_size) if cfg.eval.pgd else None
         eval_step_fn = make_eval_step(
-            lm, cfg.eval.rounding_threshold, cfg.eval.ci_alive_threshold, eval_pgd, mesh
+            lm,
+            cfg.eval.rounding_threshold,
+            cfg.eval.ci_alive_threshold,
+            cfg.eval.l0_groups,
+            eval_pgd,
+            mesh,
         )
 
     # the raw torch yaml's runtime block describes the UPSTREAM run (e.g. dp: 32);

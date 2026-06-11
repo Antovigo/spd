@@ -282,7 +282,6 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
             case CEandKLLossesConfig():
                 ce_kl = metric
             case CI_L0Config():
-                assert metric.groups is None, "CI_L0 groups unsupported in-loop"
                 ci_l0 = metric
             case PGDReconLossConfig():
                 assert metric.init == "random" and metric.mask_scope == "shared_across_batch", (
@@ -304,6 +303,11 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
         n_steps=cfg.eval.n_steps,
         rounding_threshold=ce_kl.rounding_threshold,
         ci_alive_threshold=ci_l0.ci_alive_threshold,
+        l0_groups=(
+            {group: tuple(patterns) for group, patterns in ci_l0.groups.items()}
+            if ci_l0.groups is not None
+            else None
+        ),
         pgd=pgd,
     )
 

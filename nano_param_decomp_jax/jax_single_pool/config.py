@@ -107,6 +107,9 @@ class EvalConfig:
     n_steps: int
     rounding_threshold: float
     ci_alive_threshold: float
+    l0_groups: dict[str, tuple[str, ...]] | None
+    """torch CI_L0 `groups`: fnmatch site patterns whose member L0s sum into a
+    group-named key. None = per-site keys only."""
     pgd: EvalPGDConfig | None
 
 
@@ -246,7 +249,12 @@ def load_config(path: Path) -> ExperimentConfig:
             _build(
                 EvalConfig,
                 dict(
-                    {k: v for k, v in raw["eval"].items() if k != "pgd"},
+                    {k: v for k, v in raw["eval"].items() if k not in ("pgd", "l0_groups")},
+                    l0_groups=(
+                        {g: tuple(pats) for g, pats in raw["eval"]["l0_groups"].items()}
+                        if raw["eval"].get("l0_groups")
+                        else None
+                    ),
                     pgd=(
                         _build(EvalPGDConfig, raw["eval"]["pgd"], "eval.pgd")
                         if raw["eval"].get("pgd")

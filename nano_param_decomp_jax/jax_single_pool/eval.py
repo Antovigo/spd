@@ -13,6 +13,7 @@ delta term — delta mask 0 here). CE is next-token cross-entropy with the first
 ignored; KL is per-position vs the clean (frozen) logits.
 """
 
+from fnmatch import fnmatch
 from typing import Any
 
 import jax
@@ -42,6 +43,7 @@ def make_eval_step(
     lm: DecomposedLM,
     rounding_threshold: float,
     ci_alive_threshold: float,
+    l0_group_patterns: dict[str, tuple[str, ...]] | None,
     pgd: tuple[int, float] | None,
     mesh: Mesh | None,
 ):
@@ -57,6 +59,14 @@ def make_eval_step(
     gradient under GSPMD (torch all-reduce-AVG parity)."""
     site_names = lm.site_names
     site_component_counts = {s.name: s.C for s in lm.sites}
+    l0_groups: dict[str, tuple[str, ...]] = {}
+    if l0_group_patterns is not None:
+        for group_name, patterns in l0_group_patterns.items():
+            members = tuple(
+                site for site in site_names if any(fnmatch(site, pat) for pat in patterns)
+            )
+            assert members, f"CI_L0 group {group_name!r} matches no sites: {patterns}"
+            l0_groups[group_name] = members
 
     def batch_sharded(x: Array) -> Array:
         if mesh is None:
@@ -153,9 +163,17 @@ def make_eval_step(
             out[f"ce_kl/ce_unrecovered_{variant}"] = (ce[variant] - target_ce) / (
                 ce["zero_masked"] - target_ce
             )
-        for site in site_names:
-            alive_per_position = (ci_lower[site] > ci_alive_threshold).astype(jnp.float32)
-            out[f"l0/{ci_alive_threshold}_{site}"] = alive_per_position.sum(-1).mean()
+        site_l0 = {
+            site: (ci_lower[site] > ci_alive_threshold).astype(jnp.float32).sum(-1).mean()
+            for site in site_names
+        }
+        for site, value in site_l0.items():
+            out[f"l0/{ci_alive_threshold}_{site}"] = value
+        # torch CI_L0 groups: the group's L0 is the SUM of its member sites' L0s
+        for group_name, members in l0_groups.items():
+            out[f"l0/{ci_alive_threshold}_{group_name}"] = sum(
+                (site_l0[site] for site in members), start=jnp.zeros((), jnp.float32)
+            )
 
         if pgd is not None:
             pgd_n_steps, pgd_step_size = pgd
