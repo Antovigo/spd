@@ -52,7 +52,7 @@ def make_eval_step(
     `eval/`).
 
     `pgd = (n_steps, step_size)` enables the fresh sign-PGD recon probe (torch
-    `PGDReconLoss` with `init: random, mask_scope: shared_across_batch`): per site one
+    `PGDReconLoss` with `init: random, mask_scope: c`): per site one
     `(1, 1, C+1)` source shared across batch AND positions, `n_steps` ascents of
     `source += step_size * sign(∂KL/∂source)` clamped to `[0, 1]`, KL evaluated at the
     final source. The global-mean KL makes the source gradient the global-batch

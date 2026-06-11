@@ -71,9 +71,9 @@ class FreshPGDConfig(NamedTuple):
     """Fresh per-batch sign-PGD adversary (torch `PGDReconLoss` as a TRAINING loss):
     sources are re-initialized every step, ascended `n_steps` times by
     `step_size * sign(grad)` with clamp to [0,1], and carry NO state across steps —
-    `TrainState.sources` stays empty for this variant. `scope` picks the source shape:
-    `unique_per_datapoint` -> `(B, T, C+1)` per site; `shared_across_batch` ->
-    `(1, 1, C+1)` (the eval probe's shape)."""
+    `TrainState.sources` stays empty for this variant. `scope` spells the stored
+    source shape (torch's shape-literal scopes): `bsc` -> `(B, T, C+1)` per site;
+    `bc` -> `(B, 1, C+1)`; `c` -> `(1, 1, C+1)` (the eval probe's shape)."""
 
     init: str
     step_size: float
@@ -125,9 +125,11 @@ def init_fresh_pgd_sources(
     """Per-site fresh adversarial sources (torch `_init_adv_sources`): trailing channel
     is the weight-delta source; shape per `cfg.scope`; values per `cfg.init`."""
     match cfg.scope:
-        case "unique_per_datapoint":
+        case "bsc":
             leading = (batch, seq)
-        case "shared_across_batch":
+        case "bc":
+            leading = (batch, 1)
+        case "c":
             leading = (1, 1)
         case _:
             raise AssertionError(f"unsupported fresh-PGD scope {cfg.scope!r}")

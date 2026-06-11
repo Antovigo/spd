@@ -67,7 +67,7 @@ from param_decomp_config.lm import (
 )
 from param_decomp_config.losses import (
     AdamPGDConfig,
-    BroadcastAcrossBatchScope,
+    SCScope,
     ChunkwiseSubsetReconLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
@@ -229,7 +229,7 @@ def _losses(
     adversary: AdversaryConfig
     match ppgd:
         case PersistentPGDReconLossConfig():
-            assert isinstance(ppgd.scope, BroadcastAcrossBatchScope), ppgd.scope
+            assert isinstance(ppgd.scope, SCScope), ppgd.scope
             assert not ppgd.use_sigmoid_parameterization and ppgd.start_frac == 0.0, ppgd
             assert ppgd.n_samples == 1, ppgd
             adversary_optimizer = ppgd.optimizer
@@ -247,7 +247,7 @@ def _losses(
                 n_warmup=ppgd.n_warmup_steps,
             )
         case PGDReconLossConfig():
-            assert ppgd.mask_scope in ("unique_per_datapoint", "shared_across_batch"), ppgd
+            assert ppgd.mask_scope in ("c", "bc", "bsc"), ppgd
             adversary = FreshPGDConfig(
                 init=ppgd.init,
                 step_size=ppgd.step_size,
@@ -284,7 +284,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
             case CI_L0Config():
                 ci_l0 = metric
             case PGDReconLossConfig():
-                assert metric.init == "random" and metric.mask_scope == "shared_across_batch", (
+                assert metric.init == "random" and metric.mask_scope == "c", (
                     metric
                 )
                 pgd = EvalPGDConfig(n_steps=metric.n_steps, step_size=metric.step_size)

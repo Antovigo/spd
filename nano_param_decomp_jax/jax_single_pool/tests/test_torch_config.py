@@ -54,7 +54,7 @@ def test_eval_block_maps_and_defers_offline_metrics(capsys: pytest.CaptureFixtur
                 "type": "PGDReconLoss",
                 "coeff": None,
                 "init": "random",
-                "mask_scope": "shared_across_batch",
+                "mask_scope": "c",
                 "n_steps": 20,
                 "step_size": 0.1,
             },

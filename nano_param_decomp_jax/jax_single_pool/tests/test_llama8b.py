@@ -401,7 +401,7 @@ def test_fresh_pgd_adversary_step():
                 init="random",
                 step_size=1.0,
                 n_steps=n_ascent_steps,
-                scope="unique_per_datapoint",
+                scope="bsc",
             ),  # fmt: skip
             components_optimizer=opt_vu,
             ci_fn_optimizer=opt_ci,
