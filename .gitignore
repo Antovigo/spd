@@ -185,3 +185,8 @@ cython_debug/
 *.schema.json
 
 .claude/worktrees
+
+.venv-cuda/
+**/.venv-cuda/
+
+nano_param_decomp_jax/jax_single_pool/experiments/logs/

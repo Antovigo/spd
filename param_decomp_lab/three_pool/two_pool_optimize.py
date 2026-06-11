@@ -50,6 +50,7 @@ from param_decomp.optimize import (
     load_optimizer_state_by_name,
     optimizer_state_by_name,
 )
+from param_decomp.phase_timer import PhaseTimer, format_phase_table, set_active
 from param_decomp.run_sink import ThreePoolRunSink
 from param_decomp.sdpa_strict import verify_flash_attention_available
 from param_decomp.torch_helpers import loop_dataloader
@@ -213,24 +214,17 @@ class TwoPoolTrainer:
             # against shared-cache contention across the concurrent compilers (set once before
             # either compile).
             if runtime_config.compile_ci_fn or runtime_config.compile_ppgd:
-                user = os.environ.get("USER", "u")
-                rank = dist.get_rank()
-                os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
-                os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+                _set_inductor_cache_dirs()
             if runtime_config.compile_ci_fn:
                 self.component_model.ci_fn.compile()
             # PPGD: compile the masked model forward the adversary runs (warmup PGD inner loop
-            # + final recon). Same compiled artifact + fused-autograd.grad validation as the
-            # 3-pool PPGD pool. Pool A's model has activation checkpointing off (autograd.grad
+            # + final recon). Pool A's model has activation checkpointing off (autograd.grad
             # recompute is nondeterministic under ckpt — see above), so this is a plain forward
             # compile, no checkpointed-RNG-op partitioner concern.
             if runtime_config.compile_ppgd:
                 self.component_model.model.compile()
         if isinstance(self.ctx, ChunkContext) and runtime_config.compile_chunkwise:
-            user = os.environ.get("USER", "u")
-            rank = dist.get_rank()
-            os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
-            os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+            _set_inductor_cache_dirs()
             self.component_model.model.compile()
         trace("__init__: compile setup done")
         seed_per_rank(pd_config.seed)
@@ -556,6 +550,9 @@ class TwoPoolTrainer:
 
         profiler_ctx = profiler if profiler is not None else nullcontext()
 
+        phase_timer = _maybe_build_phase_timer(device)
+        set_active(phase_timer)
+
         def _to_device(b: Any) -> Any:
             if b is None:
                 return None
@@ -619,6 +616,15 @@ class TwoPoolTrainer:
 
                 step_ms = (time.perf_counter() - step_start) * 1000.0
                 trace(f"TwoPoolTrainer.run: step {step}: dispatched in {step_ms:.1f}ms")
+                if phase_timer is not None:
+                    phase_timer.step()
+                    if phase_timer.finished and not phase_timer.reported:
+                        per_phase = phase_timer.report()
+                        label = f"{self.ctx.kind} rank{self.ctx.role.rank}"
+                        print(
+                            format_phase_table(per_phase, label=label, step_ms=step_ms), flush=True
+                        )
+                        phase_timer.reported = True
                 flush_nccl_event_timings()
                 if should_log:
                     dump_memory_stats(f"step {step} done")
@@ -666,6 +672,26 @@ class TwoPoolTrainer:
             self.step = n_steps
             self.snapshot(scratch_dir)
             sink.checkpoint_written(self.step, final=True)
+
+        set_active(None)
+
+
+def _set_inductor_cache_dirs() -> None:
+    """Per-rank torchinductor/triton cache dirs so concurrent ranks don't clobber each other."""
+    user = os.environ.get("USER", "u")
+    rank = dist.get_rank()
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = f"/tmp/torchinductor_{user}_r{rank}"
+    os.environ["TRITON_CACHE_DIR"] = f"/tmp/triton_{user}_r{rank}"
+
+
+def _maybe_build_phase_timer(device: torch.device) -> PhaseTimer | None:
+    """Opt-in CUDA-event phase timer via `PD_PHASE_PROFILE=1` (+ `PD_PHASE_SKIP_FIRST`,
+    `PD_PHASE_MEASURE`). Each pool's profiled rank prints its own per-phase table."""
+    if os.environ.get("PD_PHASE_PROFILE", "0") == "0":
+        return None
+    skip_first = int(os.environ.get("PD_PHASE_SKIP_FIRST", "15"))
+    n_measure = int(os.environ.get("PD_PHASE_MEASURE", "5"))
+    return PhaseTimer(device, skip_first=skip_first, n_measure=n_measure)
 
 
 def optimize_two_pool(

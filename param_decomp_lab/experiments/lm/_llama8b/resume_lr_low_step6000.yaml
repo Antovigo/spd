@@ -1,4 +1,0 @@
-# Resume LR-sweep low from step 6000 onto the fixed (fast-consolidation) code.
-# Cross-run resume from the original run dir's step-6000 checkpoint (adversary re-warms).
-from_run: /mnt/data/artifacts/mechanisms/param-decomp/runs/p-061b561f
-step: 6000
