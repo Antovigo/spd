@@ -12,11 +12,13 @@
 # the run reaches its final step or goes quiet for 24 h. Failures (e.g. a checkpoint
 # caught mid-write) are retried on the next cycle, not marked done.
 # Usage:
-#   sbatch --comment="..." slurm/offline_eval_loop.sbatch <run_dir> <torch_eval_yaml> <final_step>
+#   sbatch --comment="..." slurm/offline_eval_loop.sbatch <run_dir> <torch_eval_yaml> <final_step> [extra pd-offline-eval args]
 set -uo pipefail
 RUN_DIR="$1"
 TORCH_YAML="$2"
 FINAL_STEP="$3"
+shift 3
+EXTRA_EVAL_ARGS=("$@")
 JAX_REPO=/mnt/home/oli/pd-nano-jax-jaxsp/nano_param_decomp_jax
 TORCH_REPO=/mnt/home/oli/param-decomp
 MARKER="$RUN_DIR/.offline_eval_done"
@@ -31,7 +33,7 @@ for step in $(ls "$RUN_DIR/ckpts" | grep -E '^[0-9]+$' | sort -n); do
     echo "export of step $step failed (mid-write checkpoint?) — retrying next cycle"
     continue
   fi
-  if (cd "$TORCH_REPO" && .venv/bin/pd-offline-eval "$export_file" "$TORCH_YAML"); then
+  if (cd "$TORCH_REPO" && .venv/bin/pd-offline-eval "$export_file" "$TORCH_YAML" "${EXTRA_EVAL_ARGS[@]}"); then
     echo "$step" >> "$MARKER"
   else
     echo "offline eval of step $step failed — retrying next cycle"
@@ -49,4 +51,4 @@ if (( quiet_seconds > 86400 )); then
   exit 0
 fi
 sbatch --begin=now+40minutes --comment="offline-eval loop for $(basename "$RUN_DIR") (self-resubmitting)" \
-  "$0" "$RUN_DIR" "$TORCH_YAML" "$FINAL_STEP"
+  "$0" "$RUN_DIR" "$TORCH_YAML" "$FINAL_STEP" "${EXTRA_EVAL_ARGS[@]}"
