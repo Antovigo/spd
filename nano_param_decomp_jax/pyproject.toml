@@ -43,6 +43,7 @@ exclude = [
     "**/__pycache__",
     "jax_single_pool/tests/equivalence/torch_reference.py",  # torch-env script
     "jax_single_pool/tools/verify_export_torch.py",  # torch-env script
+    "jax_single_pool/tests/stacked_parity/gen_stacked_fixtures.py",  # base-branch-only script (pre-restructure API)
 ]
 venvPath = "."
 venv = ".venv"
