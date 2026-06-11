@@ -24,28 +24,28 @@ pd:
   sigmoid_type: leaky_hard
   decomposition_targets:
   - module_pattern: model.layers.18.mlp.gate_proj
-    C: 200
+    C: 512
   - module_pattern: model.layers.18.mlp.up_proj
-    C: 200
+    C: 512
   - module_pattern: model.layers.18.mlp.down_proj
-    C: 200  # 14336 neurons
+    C: 512  # 14336 neurons
   identity_decomposition_targets: null
   use_delta_component: true
   components_optimizer:
     lr_schedule:
-      start_val: 1.0e-04
+      start_val: 1.0e-03   # tuned: targeted opt tolerates ~20x the full-data LR
       warmup_pct: 0.0
       final_val_frac: 0.1
       fn_type: cosine
     grad_clip_norm: 0.01
   ci_fn_optimizer:
     lr_schedule:
-      start_val: 1.0e-04
+      start_val: 1.0e-03   # tuned: targeted opt tolerates ~20x the full-data LR
       warmup_pct: 0.0
       final_val_frac: 0.1
       fn_type: cosine
   steps: 20000
-  batch_size: 64
+  batch_size: 64   # global batch; 192 fits 4xL40 in bf16 (~36 GB/GPU)
   faithfulness_warmup_steps: 0
   loss_metrics:
   - type: ImportanceMinimalityLoss
@@ -78,6 +78,7 @@ pd:
     n_warmup_steps: 2
 cadence:
   train_log_every: 100
+  save_every: 2000
 eval:
   n_steps: 1
   batch_size: 64
@@ -111,6 +112,7 @@ target:
     kind: hf
     model_class: transformers.LlamaForCausalLM
     model_name: meta-llama/Llama-3.1-8B
+    dtype: bfloat16   # load frozen weights in bf16 (16 GB/rank, not 32 GB fp32)
   output_extract: logits
 data:
   tokenizer_name: meta-llama/Llama-3.1-8B
