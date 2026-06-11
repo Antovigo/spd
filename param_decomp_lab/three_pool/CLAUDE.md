@@ -51,10 +51,10 @@ loss terms, worst rel err 4.04e-7 vs the SAME single-process reference the 3-poo
 
 The 2-pool supports two PPGD source scopes (`losses.ppgd.scope`):
 
-- `per_batch_per_position` — an independent source per (batch element, position). Pool A's
+- `bsc` — an independent source per (batch element, position). Pool A's
   per-rank batch slice is self-contained, so no cross-rank source sync; the final source
   step uses this rank's own grads. This is the long-standing default.
-- `broadcast_across_batch` — ONE source shared across the whole **global** batch (shape
+- `sc` — ONE source shared across the whole **global** batch (shape
   `(1, S, C)` per site instead of `(B, S, C)`), a ~1000× storage/memory win that makes
   large-batch + full-model runs feasible. The shared source is **replicated** across the
   Pool A data-parallel ranks: `PersistentPGDState` broadcast-inits it from the Pool A
@@ -73,7 +73,7 @@ source; per-batch: per-rank slices stitched), worst rel err **4.04e-7** for both
 `PersistentPGDState.__init__` takes a `replica_sync_group` (the Pool A group when the scope
 needs sync, else `None`); the metric path (`persistent_pgd_recon.py`) passes the active
 reduction group, so the single-pool whole-world DP path for replicated scopes is owned by
-the state machine too. The 3-pool path is unchanged (per-batch-per-position only).
+the state machine too. The 3-pool path is unchanged (`bsc` only).
 
 Key reuse trick (`two_pool_layout.build_two_world`): the 2-pool world is the 3-pool
 `World` with `ci_ranks == ppgd_ranks == pool_a_ranks` and one Pool A all-reduce group
@@ -195,7 +195,7 @@ bottleneck before: rank 0 streamed every multi-GB partial AND rewrote every PPGD
 shard sequentially — TBs at 80-GPU scale — overrunning the async waiter timeout.)
 
 **PPGD sources are NOT in `training_<S>.pth`, and NOT in the scratch partials.**
-They're `per_batch_per_position` (sized by `batch × seq × n_components`) — the only
+They're `bsc`-scoped (sized by `batch × seq × n_components`) — the only
 persisted state that's data-shaped rather than parameter-shaped, so aggregating it
 onto rank 0 doesn't scale (~2.3 TB at batch 1280, OOMs any node) and streaming it
 through rank 0 in consolidation is an I/O bottleneck. Instead each adversary rank

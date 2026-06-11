@@ -55,7 +55,7 @@ class ThreePoolTrainingState:
     * `layout_fingerprint`: 3-pool world layout summary. Checked on resume to
       flag incompatible topologies.
 
-    The PPGD adversarial sources are NOT in here. They're `per_batch_per_position`
+    The PPGD adversarial sources are NOT in here. They're `bsc`-scoped
     (sized by `batch x seq x n_components`) — the one piece of persisted state that's
     data-shaped rather than parameter-shaped, so aggregating it onto one rank doesn't
     scale (~2.3 TB at batch 1280). It stays sharded per-rank in `ppgd_<step>/rank_<r>.pth`

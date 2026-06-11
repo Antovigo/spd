@@ -14,6 +14,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 from param_decomp.distributed import DistributedState
 from param_decomp.log import logger
 from param_decomp_config.lm import LMDataConfig
+from param_decomp_lab.infra.hf_http import configure_hf_http_retries
 
 
 def _keep_single_column(
@@ -136,6 +137,7 @@ def create_lm_data_loader(
     collate_fn: Callable[..., Any] | None = None,
 ) -> tuple[DataLoader[Any], PreTrainedTokenizer]:
     """Create an LM token dataloader from a HuggingFace dataset split."""
+    configure_hf_http_retries()
     dataset = load_dataset(
         cfg.dataset_name,
         data_files=cfg.data_files,

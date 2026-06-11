@@ -5,9 +5,9 @@ subset recon). Each carries a unique `type: Literal["<ClassName>"]` discriminato
 `AnyLossMetricConfig` in `param_decomp_config.pd` unions them for YAML validation.
 """
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, NonNegativeFloat, NonNegativeInt, PositiveInt
+from pydantic import BeforeValidator, Field, NonNegativeFloat, NonNegativeInt, PositiveInt
 
 from param_decomp_config.base import BaseConfig, Probability
 from param_decomp_config.routing import SubsetRoutingType, UniformKSubsetRoutingConfig
@@ -19,9 +19,15 @@ class LossMetricConfig(BaseConfig):
 
     `coeff` is required when this metric is listed under `loss_metrics` (asserted by
     `PDConfig`'s field validator); ignored for eval-only instances.
+
+    `name` overrides the class name as this instance's identity (`Metric.instance_key`),
+    letting the same metric class appear under both `loss_metrics` and `eval.metrics`
+    with different settings — e.g. a 1-step PGD training loss alongside a 20-step PGD
+    eval probe. Leave `None` (the default) and the class name is used.
     """
 
     coeff: float | None = None
+    name: str | None = None
 
 
 class FaithfulnessLossConfig(LossMetricConfig):
@@ -109,7 +115,25 @@ class ChunkwiseSubsetReconLossConfig(LossMetricConfig):
 
 
 PGDInitStrategy = Literal["random", "ones", "zeroes"]
-MaskScope = Literal["c", "bc", "bsc"]
+# Stored run configs predate the shape-literal scope names; alias exactly the literals
+# that exist in stored data (`unique_per_datapoint` occurs only in LM runs, hence `bsc`).
+# Delete once stored runs are migrated.
+_LEGACY_MASK_SCOPE_ALIASES = {
+    "shared_across_batch": "c",
+    "unique_per_datapoint": "bsc",
+}
+
+
+def _alias_legacy_mask_scope(value: Any) -> Any:
+    if isinstance(value, str):
+        return _LEGACY_MASK_SCOPE_ALIASES.get(value, value)
+    return value
+
+
+# Scope literals spell the adversarial-source shape in tensor order (batch, seq, C).
+# `c` is one shared vector, rank-polymorphic and DP-synced; `bc` (no seq axis) and
+# `bsc` (LM) are independent per batch element, and must match the batch rank.
+MaskScope = Annotated[Literal["c", "bc", "bsc"], BeforeValidator(_alias_legacy_mask_scope)]
 
 
 class PGDConfig(LossMetricConfig):
@@ -187,9 +211,28 @@ class BSCScope(BaseConfig):
     type: Literal["bsc"] = "bsc"
 
 
+# Stored run configs (`runs/*/experiment_config.yaml`) predate the shape-literal scope
+# names; alias exactly the literals that exist in stored data so old runs keep loading.
+# Delete once stored runs are migrated.
+_LEGACY_SCOPE_TYPE_ALIASES = {
+    "broadcast_across_batch": "sc",
+    "per_batch_per_position": "bsc",
+}
+
+
+def _alias_legacy_scope_type(value: Any) -> Any:
+    if isinstance(value, dict) and value.get("type") in _LEGACY_SCOPE_TYPE_ALIASES:
+        return {**value, "type": _LEGACY_SCOPE_TYPE_ALIASES[value["type"]]}
+    return value
+
+
+# Scope literals spell the stored source shape, read left-to-right in tensor order
+# (batch, seq, C). `c` is rank-polymorphic (all leading dims singleton); the
+# seq-bearing scopes require a sequence axis and are illegal off-LM.
 PersistentPGDSourceScope = Annotated[
     CScope | SCScope | NSCScope | BSCScope,
     Field(discriminator="type"),
+    BeforeValidator(_alias_legacy_scope_type),
 ]
 
 

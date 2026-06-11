@@ -14,6 +14,7 @@ from torch import Tensor
 
 from param_decomp.component_model import ComponentModelProtocol
 from param_decomp_config.base import BaseConfig
+from param_decomp_config.losses import LossMetricConfig
 
 MetricResult = Tensor | Mapping[str, Any]
 
@@ -38,6 +39,16 @@ class Metric[TConfig: BaseConfig](ABC):
         """Construct from a validated config. Runtime resources are attached later by `bind`."""
         self.cfg = cfg
         self._bound = False
+
+    @property
+    def instance_key(self) -> str:
+        """Identity for dict keys and log-key suffixes; defaults to the class name.
+
+        A loss-capable config may override it via `LossMetricConfig.name` so two
+        instances of the same metric class (one loss, one eval) stay distinct.
+        """
+        name = self.cfg.name if isinstance(self.cfg, LossMetricConfig) else None
+        return name if name is not None else type(self).__name__
 
     def bind(self, *, model: ComponentModelProtocol, device: str) -> None:
         """Attach the live component model and device, then call `reset()`.

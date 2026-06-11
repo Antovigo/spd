@@ -1,8 +1,8 @@
 """Distributed tests for PGD source synchronization behavior.
 
 Verifies that:
-- shared_across_batch: sources are synced across ranks (broadcast init + all-reduced gradients)
-- unique_per_datapoint: sources are independent per rank (local init + local gradients)
+- c scope: sources are synced across ranks (broadcast init + all-reduced gradients)
+- bc scope: sources are independent per rank (local init + local gradients)
 
 This file can be run in two ways:
 
@@ -63,8 +63,8 @@ def _make_component_model(fc_weight: Tensor) -> ComponentModel:
     )
 
 
-def _test_shared_across_batch_sources_synced():
-    """With shared_across_batch, PGD sources are broadcast from rank 0 and gradients are
+def _test_c_scope_sources_synced():
+    """With the c scope, PGD sources are broadcast from rank 0 and gradients are
     all-reduced, so with identical data + model the losses must be identical across ranks."""
     state = get_distributed_state()
     assert state is not None
@@ -102,11 +102,11 @@ def _test_shared_across_batch_sources_synced():
 
     if rank == 0:
         torch.testing.assert_close(gathered_losses[0], gathered_losses[1])
-        print("✓ shared_across_batch source sync test passed")
+        print("✓ c-scope source sync test passed")
 
 
-def _test_unique_per_datapoint_sources_independent():
-    """With unique_per_datapoint, PGD sources are initialized independently per rank and gradients
+def _test_bc_scope_sources_independent():
+    """With the bc scope, PGD sources are initialized independently per rank and gradients
     are not all-reduced, so with different data the full PGD trajectories diverge."""
     state = get_distributed_state()
     assert state is not None
@@ -146,10 +146,10 @@ def _test_unique_per_datapoint_sources_independent():
 
     if rank == 0:
         assert not torch.allclose(gathered_losses[0], gathered_losses[1]), (
-            f"unique_per_datapoint losses should differ across ranks, "
+            f"bc-scope losses should differ across ranks, "
             f"got {gathered_losses[0].item()} and {gathered_losses[1].item()}"
         )
-        print("✓ unique_per_datapoint source independence test passed")
+        print("✓ bc-scope source independence test passed")
 
 
 def run_all_tests():
@@ -164,10 +164,10 @@ def run_all_tests():
         assert world_size == 2, f"Tests require exactly 2 ranks, got {world_size}"
 
         tests = [
-            ("shared_across_batch sources synced", _test_shared_across_batch_sources_synced),
+            ("c-scope sources synced", _test_c_scope_sources_synced),
             (
-                "unique_per_datapoint sources independent",
-                _test_unique_per_datapoint_sources_independent,
+                "bc-scope sources independent",
+                _test_bc_scope_sources_independent,
             ),
         ]
 
