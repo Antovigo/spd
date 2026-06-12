@@ -208,9 +208,7 @@ class TestActiveIndices:
 
 
 class FakeTokenizer:
-    """Maps each character to its codepoint; pad_token_id = 0."""
-
-    pad_token_id = 0
+    """Maps each character to its codepoint."""
 
     def encode(self, text: str) -> list[int]:
         return [ord(c) for c in text]
@@ -219,26 +217,28 @@ class FakeTokenizer:
 @pytest.fixture
 def prompts_file(tmp_path: Path) -> str:
     path = tmp_path / "prompts.txt"
-    path.write_text("abc\n\nde\nfghij\n")
+    path.write_text("abc\n\ndef\nghi\n")
     return str(path)
 
 
 class TestPromptsDataset:
-    def test_pads_to_max_seq_len(self, prompts_file: str):
-        pool = load_prompts_dataset(prompts_file, FakeTokenizer(), max_seq_len=6)  # pyright: ignore[reportArgumentType]
-        assert pool.shape == (3, 6)
-        assert pool[0].tolist() == [ord("a"), ord("b"), ord("c"), 0, 0, 0]
+    def test_loads_constant_length(self, prompts_file: str):
+        pool = load_prompts_dataset(prompts_file, FakeTokenizer())  # pyright: ignore[reportArgumentType]
+        assert pool.shape == (3, 3)  # blank line skipped
+        assert pool[0].tolist() == [ord("a"), ord("b"), ord("c")]
 
-    def test_raises_on_overlength(self, prompts_file: str):
-        with pytest.raises(AssertionError, match="exceeding max_seq_len"):
-            load_prompts_dataset(prompts_file, FakeTokenizer(), max_seq_len=4)  # pyright: ignore[reportArgumentType]
+    def test_raises_on_length_mismatch(self, tmp_path: Path):
+        path = tmp_path / "mixed.txt"
+        path.write_text("abc\nde\n")
+        with pytest.raises(AssertionError, match="must share one length"):
+            load_prompts_dataset(str(path), FakeTokenizer())  # pyright: ignore[reportArgumentType]
 
     def test_static_batch_loader_samples_pool(self, prompts_file: str):
-        pool = load_prompts_dataset(prompts_file, FakeTokenizer(), max_seq_len=6)  # pyright: ignore[reportArgumentType]
+        pool = load_prompts_dataset(prompts_file, FakeTokenizer())  # pyright: ignore[reportArgumentType]
         loader = StaticBatchLoader(pool, batch_size=2, seed=0)
         it = iter(loader)
         batches = [next(it) for _ in range(20)]
-        assert all(b.shape == (2, 6) for b in batches)
+        assert all(b.shape == (2, 3) for b in batches)
         pool_rows = {tuple(r.tolist()) for r in pool}
         for b in batches:
             rows = [tuple(r.tolist()) for r in b]
@@ -247,15 +247,15 @@ class TestPromptsDataset:
         assert len({tuple(map(tuple, (r.tolist() for r in b))) for b in batches}) > 1
 
     def test_static_batch_loader_reproducible(self, prompts_file: str):
-        pool = load_prompts_dataset(prompts_file, FakeTokenizer(), max_seq_len=6)  # pyright: ignore[reportArgumentType]
+        pool = load_prompts_dataset(prompts_file, FakeTokenizer())  # pyright: ignore[reportArgumentType]
         a = [next(iter(StaticBatchLoader(pool, batch_size=2, seed=7))) for _ in range(1)]
         b = [next(iter(StaticBatchLoader(pool, batch_size=2, seed=7))) for _ in range(1)]
         assert torch.equal(a[0], b[0])
 
     def test_yields_whole_pool_when_batch_exceeds(self, prompts_file: str):
-        pool = load_prompts_dataset(prompts_file, FakeTokenizer(), max_seq_len=6)  # pyright: ignore[reportArgumentType]
+        pool = load_prompts_dataset(prompts_file, FakeTokenizer())  # pyright: ignore[reportArgumentType]
         batch = next(iter(StaticBatchLoader(pool, batch_size=10, seed=0)))
-        assert batch.shape == (3, 6)
+        assert batch.shape == (3, 3)
         assert {tuple(r.tolist()) for r in batch} == {tuple(r.tolist()) for r in pool}
 
 

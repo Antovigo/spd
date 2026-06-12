@@ -3,7 +3,7 @@
 from typing import ClassVar, Literal, Self, override
 
 import torch
-from pydantic import PositiveInt, model_validator
+from pydantic import model_validator
 from torch import Tensor
 from torch.distributed import ReduceOp
 from transformers import AutoTokenizer
@@ -26,7 +26,6 @@ class TargetedCIHeatmapConfig(BaseConfig):
     active_indices: list[int] | None = None
     prompts_file: str | None = None
     tokenizer_name: str | None = None
-    max_seq_len: PositiveInt = 512
 
     @model_validator(mode="after")
     def validate_probe_spec(self) -> Self:
@@ -60,7 +59,7 @@ class TargetedCIHeatmap(Metric[TargetedCIHeatmapConfig]):
         if cfg.prompts_file is not None:
             assert cfg.tokenizer_name is not None
             tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
-            self.prompt_ids = load_prompts_dataset(cfg.prompts_file, tokenizer, cfg.max_seq_len)
+            self.prompt_ids = load_prompts_dataset(cfg.prompts_file, tokenizer)
 
     @override
     def reset(self) -> None:
