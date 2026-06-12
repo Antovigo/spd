@@ -37,6 +37,7 @@ from param_decomp_lab.eval_metrics.component_activation_density import (
     ComponentActivationDensityConfig,
 )
 from param_decomp_lab.eval_metrics.identity_ci_error import IdentityCIError, IdentityCIErrorConfig
+from param_decomp_lab.eval_metrics.n_alive import NAlive, NAliveConfig
 from param_decomp_lab.eval_metrics.nontarget_ci_mean_per_component import (
     NontargetCIMeanPerComponent,
     NontargetCIMeanPerComponentConfig,
@@ -64,6 +65,7 @@ AnyEvalMetricConfig = Annotated[
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
+    | NAliveConfig
     | NontargetCIMeanPerComponentConfig
     | NontargetReconLossConfig
     | PermutedCIPlotsConfig
@@ -88,6 +90,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         CIMeanPerComponent,
         ComponentActivationDensity,
         IdentityCIError,
+        NAlive,
         NontargetCIMeanPerComponent,
         NontargetReconLoss,
         PermutedCIPlots,
