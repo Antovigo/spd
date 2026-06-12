@@ -188,6 +188,15 @@ class PDConfig(BaseConfig):
         ...,
         description="Total batch size (may be divided across multiple devices).",
     )
+    ci_scaled_component_weight_decay: NonNegativeFloat = Field(
+        default=0.0,
+        description="Decoupled per-subcomponent weight decay on the components, scaled by "
+        "(1 - max CI over the target batch). A subcomponent reaching CI 1 anywhere in the "
+        "batch is not decayed; one that never activates decays at the full rate. Applied to "
+        "each component's U/V after the optimizer step (max CI is reduced MAX across DDP "
+        "ranks). 0 disables. Independent of `components_optimizer.weight_decay`; tolerates "
+        "much higher values (e.g. 0.2).",
+    )
 
     # --- Faithfulness Warmup ---
     faithfulness_warmup_steps: NonNegativeInt = Field(
