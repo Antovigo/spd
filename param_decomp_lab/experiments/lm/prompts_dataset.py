@@ -15,29 +15,24 @@ from param_decomp_lab.experiments.lm.data import LMDataConfig
 def load_prompts_dataset(
     prompts_file: str,
     tokenizer: PreTrainedTokenizer,
-    max_seq_len: int,
-) -> Int[Tensor, "n_prompts max_seq_len"]:
-    """Tokenize one prompt per non-empty line, padded to `max_seq_len`.
+) -> Int[Tensor, "n_prompts seq_len"]:
+    """Tokenize one prompt per non-empty line into a `[n_prompts, seq_len]` tensor.
 
-    Raises if any tokenized prompt exceeds `max_seq_len` (no silent truncation).
+    No padding: every prompt must tokenize to the same length, so the answer sits at a
+    constant position across the pool (relied on by last-position reconstruction). Raises
+    if the lengths differ.
     """
     with open(prompts_file) as f:
         prompts = [line.strip() for line in f if line.strip()]
     assert prompts, f"no prompts found in {prompts_file}"
 
-    pad_token_id = getattr(tokenizer, "pad_token_id", None)
-    if pad_token_id is None:
-        pad_token_id = getattr(tokenizer, "eos_token_id", None)
-    assert isinstance(pad_token_id, int), "tokenizer has neither pad_token_id nor eos_token_id"
-
-    rows = []
-    for prompt in prompts:
-        token_ids = tokenizer.encode(prompt)
-        assert len(token_ids) <= max_seq_len, (
-            f"prompt tokenizes to {len(token_ids)} tokens, exceeding max_seq_len={max_seq_len}: "
-            f"{prompt[:80]!r}"
+    rows = [tokenizer.encode(prompt) for prompt in prompts]
+    seq_len = len(rows[0])
+    for prompt, token_ids in zip(prompts, rows, strict=True):
+        assert len(token_ids) == seq_len, (
+            f"prompt tokenizes to {len(token_ids)} tokens but expected {seq_len}; all prompts "
+            f"must share one length (padding is disabled): {prompt[:80]!r}"
         )
-        rows.append(token_ids + [pad_token_id] * (max_seq_len - len(token_ids)))
     return torch.tensor(rows, dtype=torch.long)
 
 
@@ -71,6 +66,6 @@ def create_prompts_data_loader(
     `create_lm_data_loader`'s return shape."""
     assert cfg.prompts_file is not None, "create_prompts_data_loader requires prompts_file"
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
-    pool = load_prompts_dataset(cfg.prompts_file, tokenizer, cfg.max_seq_len)
+    pool = load_prompts_dataset(cfg.prompts_file, tokenizer)
     dataset = StaticBatchLoader(pool, batch_size=batch_size, seed=seed)
     return DataLoader(dataset, batch_size=None), tokenizer
