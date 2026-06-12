@@ -1,10 +1,11 @@
 # Targeted decomposition (tPD) of Llama-3.1-8B layer-18 MLP on multiplication only.
-# Target: "a*b=" (a,b in [1,83], the largest square range where greedy accuracy stays
-# >50%); nontarget: FineWeb. Symbol "*" chosen as best single-token operator (vs x/X/×/·;
-# see pd_scratch/mult_eval.py — "*" scored 0.97 on [2,12]^2).
+# Target: "a×b=" (a,b in [1,83]); nontarget: FineWeb. Symbol "×" (U+00D7, single token
+# 18028) chosen per later investigation. NB: the [1,83] range was the largest square with
+# >50% greedy accuracy for the "*" operator (pd_scratch/mult_eval.py); it was not
+# re-calibrated for "×", so the in-range accuracy may differ.
 # v2 tuning (shared with the addition+subtraction config): components weight_decay 0.05,
-# impmin coeff 1e-4, C 512/matrix, steps 5k, checkpoints only at the final step, full
-# (slow) eval every 1000 steps.
+# impmin coeff 1e-4, C 512/matrix, checkpoints only at the final step. This run uses
+# steps 10k (vs 5k for add+sub) with slow eval every 2000 steps (1/5 of total).
 label: llama8b_multiplication
 pd:
   seed: 0
@@ -47,7 +48,7 @@ pd:
       warmup_pct: 0.0
       final_val_frac: 0.1
       fn_type: cosine
-  steps: 5000
+  steps: 10000
   batch_size: 64   # global batch; 192 fits 4xL40 in bf16 (~36 GB/GPU)
   faithfulness_warmup_steps: 0
   loss_metrics:
@@ -86,7 +87,7 @@ eval:
   n_steps: 1
   batch_size: 64
   every: 1000
-  slow_every: 1000
+  slow_every: 2000   # 1/5 of steps (10000)
   slow_on_first_step: true
   metrics:
   - type: CI_L0
