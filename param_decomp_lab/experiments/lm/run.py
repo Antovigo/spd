@@ -25,13 +25,13 @@ from pydantic import Discriminator
 from torch.utils.data import DataLoader
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.batch_and_loss_fns import RunBatch
+from param_decomp.batch_and_loss_fns import ReconstructionLoss, RunBatch
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import DistributedState, is_main_process
 from param_decomp.log import logger
 from param_decomp.optimize import EvalLoop, NontargetEvalPass, NontargetTrainPass, Trainer
 from param_decomp_lab.batch_and_loss_fns import make_run_batch as _make_run_batch
-from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
+from param_decomp_lab.batch_and_loss_fns import recon_loss_kl, recon_loss_kl_last_pos
 from param_decomp_lab.component_model_io import load_component_model
 from param_decomp_lab.distributed import (
     ensure_cached_and_call,
@@ -115,11 +115,23 @@ class LMTargetConfig(BaseConfig):
     """Config for the LM target model and how to extract the prediction tensor.
 
     `output_extract` (passed to `make_run_batch`) pulls the prediction tensor out of the
-    model's forward output (default `"logits"`).
+    model's forward output (default `"logits"`). `recon_positions` chooses whether the
+    target pass reconstructs every sequence position or only the last token — the latter
+    requires constant-length, unpadded prompts (see `load_prompts_dataset`).
     """
 
     spec: LMTargetSpec
     output_extract: int | str | None = "logits"
+    recon_positions: Literal["all", "last_token"] = "all"
+
+
+def make_reconstruction_loss(target_cfg: LMTargetConfig) -> ReconstructionLoss:
+    """Target-pass reconstruction loss selected by `target_cfg.recon_positions`."""
+    match target_cfg.recon_positions:
+        case "all":
+            return recon_loss_kl
+        case "last_token":
+            return recon_loss_kl_last_pos
 
 
 class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
@@ -314,7 +326,8 @@ def _fresh_main(
         trainer = Trainer(
             target_model=target_model,
             run_batch=make_run_batch(cfg.target),
-            reconstruction_loss=recon_loss_kl,
+            reconstruction_loss=make_reconstruction_loss(cfg.target),
+            nontarget_reconstruction_loss=recon_loss_kl,
             pd_config=cfg.pd,
             runtime_config=cfg.runtime,
         )
@@ -384,7 +397,8 @@ def _resume_main(
             snapshot,
             target_model=target_model,
             run_batch=make_run_batch(effective_cfg.target),
-            reconstruction_loss=recon_loss_kl,
+            reconstruction_loss=make_reconstruction_loss(effective_cfg.target),
+            nontarget_reconstruction_loss=recon_loss_kl,
         )
         trainer.run(train_loader, sink, effective_cfg.cadence, eval_loop, nontarget=nontarget)
     finally:
