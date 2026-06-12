@@ -68,3 +68,15 @@ def recon_loss_kl(
     p = torch.softmax(target, dim=-1)  # P
     n_positions = pred.numel() // pred.shape[-1]
     return F.kl_div(log_q, p, reduction="sum"), n_positions
+
+
+def recon_loss_kl_last_pos(
+    pred: Float[Tensor, "... pos vocab"],
+    target: Float[Tensor, "... pos vocab"],
+) -> tuple[Float[Tensor, ""], int]:
+    """`recon_loss_kl` over only the final sequence position (`[..., -1, :]`).
+
+    Reconstructs the last-token output alone. Correct only when the last position holds
+    the real answer token — constant-length, unpadded prompts (see `load_prompts_dataset`).
+    """
+    return recon_loss_kl(pred[..., -1, :], target[..., -1, :])

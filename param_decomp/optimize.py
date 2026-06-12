@@ -318,6 +318,7 @@ class Trainer:
     pd_config: PDConfig
     runtime_config: RuntimeConfig
     reconstruction_loss: ReconstructionLoss
+    nontarget_reconstruction_loss: ReconstructionLoss
     component_model: ComponentModel
     components_optimizer: optim.Optimizer
     ci_fn_optimizer: optim.Optimizer
@@ -332,10 +333,18 @@ class Trainer:
         reconstruction_loss: ReconstructionLoss,
         pd_config: PDConfig,
         runtime_config: RuntimeConfig,
+        nontarget_reconstruction_loss: ReconstructionLoss | None = None,
     ) -> None:
         self.pd_config = pd_config
         self.runtime_config = runtime_config
         self.reconstruction_loss = reconstruction_loss
+        # Targeted runs may reconstruct the target pass on a subset of positions (e.g. the
+        # last token) while the nontarget pass stays full-sequence; default to matching.
+        self.nontarget_reconstruction_loss = (
+            nontarget_reconstruction_loss
+            if nontarget_reconstruction_loss is not None
+            else reconstruction_loss
+        )
         self.step = 0
 
         dist_state = get_distributed_state()
@@ -511,6 +520,7 @@ class Trainer:
         target_model: nn.Module,
         run_batch: RunBatch,
         reconstruction_loss: ReconstructionLoss,
+        nontarget_reconstruction_loss: ReconstructionLoss | None = None,
     ) -> Self:
         """Reconstruct a Trainer from a :class:`TrainingState`.
 
@@ -526,6 +536,7 @@ class Trainer:
             reconstruction_loss=reconstruction_loss,
             pd_config=pd_config,
             runtime_config=runtime_config,
+            nontarget_reconstruction_loss=nontarget_reconstruction_loss,
         )
         trainer._load_state(snapshot)
         return trainer
@@ -705,7 +716,7 @@ class Trainer:
                         wrapped_model=self._wrapped_model,
                         component_model=self.component_model,
                         config=pd_config,
-                        reconstruction_loss=self.reconstruction_loss,
+                        reconstruction_loss=self.nontarget_reconstruction_loss,
                         weight_deltas=nt_weight_deltas,
                     )
                     _assert_ctx_invariants(nt_ctx, device, step)
@@ -806,7 +817,7 @@ class Trainer:
                                         wrapped_model=self._wrapped_model,
                                         component_model=self.component_model,
                                         config=pd_config,
-                                        reconstruction_loss=self.reconstruction_loss,
+                                        reconstruction_loss=self.nontarget_reconstruction_loss,
                                         weight_deltas=eval_weight_deltas,
                                     )
                                     for m in nt_active:
