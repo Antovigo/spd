@@ -6,8 +6,7 @@ recon + persistent-PGD adversarial recon) as one `jax.jit` step, GSPMD-sharded,
 **generic over vendored LM targets**.
 
 The semantics are pinned by [`SPEC.md`](SPEC.md) (normative: pseudocode + numbered
-invariants, grounded in the stable torch `param_decomp` implementation). The current
-implementation-vs-spec audit lives in [`AUDIT.md`](AUDIT.md). This is the research
+invariants, grounded in the stable torch `param_decomp` implementation). This is the research
 counterpart to the torch FSDP single-pool path (`param_decomp_lab/fsdp/`), testing the
 "single-pool SPMD collapse" hypothesis: XLA + whole-step `jit` + GSPMD sharding
 replaces the hand-written-NCCL multi-pool design with zero manual collectives.

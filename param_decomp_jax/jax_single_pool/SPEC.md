@@ -3,7 +3,7 @@
 Pins the **meaning** of the single-pool VPD training step. An implementation (torch,
 JAX, anything) is correct iff it satisfies this document. Ground truth: the stable
 torch impl in `goodfire-ai/param-decomp` @ `feature/fsdp-lm-trainer`; production
-constants from `param_decomp_lab/experiments/lm/_llama8b/llama8b_l18_b512_2pool_lr_mid.yaml`
+constants from the production 2-pool yaml (`llama8b_l18_b512_2pool_lr_mid.yaml`, n-pool lineage)
 (extended 1 → N decomposed layers). Torch file pointers live in §9 (non-normative).
 
 **How to read.** Normative content is: the pseudocode (§4), the invariants (§5–§8),
