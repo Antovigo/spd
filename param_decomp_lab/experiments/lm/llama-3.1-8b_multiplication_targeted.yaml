@@ -1,8 +1,6 @@
 # Targeted decomposition (tPD) of Llama-3.1-8B layer-18 MLP on multiplication only.
-# Target: "a×b=" (a,b in [1,83]); nontarget: FineWeb. Symbol "×" (U+00D7, single token
-# 18028) chosen per later investigation. NB: the [1,83] range was the largest square with
-# >50% greedy accuracy for the "*" operator (pd_scratch/mult_eval.py); it was not
-# re-calibrated for "×", so the in-range accuracy may differ.
+# Target: "a×b=" (a,b in [1,100], full range); nontarget: FineWeb. Symbol "×" (U+00D7,
+# single token 18028) chosen per later investigation.
 # v2 tuning (shared with the addition+subtraction config): components weight_decay 0.05,
 # impmin coeff 1e-4, C 512/matrix, checkpoints only at the final step. This run uses
 # steps 10k (vs 5k for add+sub) with slow eval every 2000 steps (1/5 of total).
@@ -110,7 +108,7 @@ eval:
   - type: CIHistograms
     n_batches_accum: 1
   # TargetedCIHeatmap omitted: it requires prompts_file == data.prompts_file and renders
-  # one row per prompt, so the ~7k-prompt target would make it unusable.
+  # one row per prompt, so the 10k-prompt target would make it unusable.
   - type: WeightMagnitude
   - type: CIHiddenActsReconLoss
 target:
@@ -122,7 +120,7 @@ target:
   output_extract: logits
 data:
   tokenizer_name: meta-llama/Llama-3.1-8B
-  prompts_file: param_decomp_lab/experiments/lm/prompts/multiplication_1-83.txt
+  prompts_file: param_decomp_lab/experiments/lm/prompts/multiplication_1-100.txt
   max_seq_len: 16
 nontarget:
   data:
