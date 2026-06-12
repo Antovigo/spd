@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.parallel
 from pydantic import PositiveInt
 from torch import Tensor, optim
+from torch.distributed import ReduceOp
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -36,6 +37,7 @@ from param_decomp.decomposition_targets import (
     resolve_decomposition_targets,
 )
 from param_decomp.distributed import (
+    all_reduce,
     avg_metrics_across_ranks,
     get_distributed_state,
     is_main_process,
@@ -211,6 +213,30 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
         assert str(t.device).startswith(device_prefix), (
             f"ci.lower_leaky[{name!r}] device mismatch at step {step}: {t.device} vs {device}"
         )
+
+
+def _apply_ci_scaled_weight_decay(
+    component_model: ComponentModel,
+    batch_ci_max: dict[str, Tensor],
+    *,
+    coeff: float,
+    lr: float,
+) -> None:
+    """Decoupled per-subcomponent weight decay scaled by (1 - max CI over the target batch).
+
+    For each component, subcomponent `c` (column `c` of `V`, row `c` of `U`) is shrunk by
+    `1 - lr*coeff*(1 - clamp(max_ci_c, 0, 1))`: a subcomponent reaching CI 1 anywhere in the
+    batch is left untouched, one that never activates decays at the full `lr*coeff` rate.
+    `batch_ci_max` is per-rank; it is reduced MAX across ranks here so replicated DDP
+    component params stay in sync.
+    """
+    with torch.no_grad():
+        for name, ci_max in batch_ci_max.items():
+            global_ci_max = all_reduce(ci_max, op=ReduceOp.MAX).clamp(0.0, 1.0)
+            keep = 1.0 - lr * coeff * (1.0 - global_ci_max)
+            component = component_model.components[name]
+            component.V.mul_(keep[None, :])
+            component.U.mul_(keep[:, None])
 
 
 def tie_component_weights(
@@ -628,6 +654,14 @@ class Trainer:
                 _assert_ctx_invariants(ctx, device, step)
                 losses = {name: m.update(ctx) for name, m in self.loss_metrics.items()}
 
+            # Per-subcomponent max CI over the target batch, for CI-scaled weight decay.
+            batch_ci_max: dict[str, Tensor] | None = None
+            if pd_config.ci_scaled_component_weight_decay > 0.0:
+                batch_ci_max = {
+                    name: ci.detach().float().amax(dim=tuple(range(ci.ndim - 1)))
+                    for name, ci in ctx.ci.lower_leaky.items()
+                }
+
             total_loss = torch.zeros((), device=device)
             active_loss_names: list[str] = []
             for metric_name, loss_val in losses.items():
@@ -807,6 +841,14 @@ class Trainer:
                     clip_grad_norm_(self._ci_fn_params, pd_config.ci_fn_optimizer.grad_clip_norm)
                 self.components_optimizer.step()
                 self.ci_fn_optimizer.step()
+
+                if batch_ci_max is not None:
+                    _apply_ci_scaled_weight_decay(
+                        self.component_model,
+                        batch_ci_max,
+                        coeff=pd_config.ci_scaled_component_weight_decay,
+                        lr=components_lr,
+                    )
 
         if is_main_process():
             logger.info("Finished training loop.")
