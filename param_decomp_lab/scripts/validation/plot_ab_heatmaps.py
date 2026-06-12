@@ -1,17 +1,18 @@
-"""Plot CI over the (a, b) operand grid for `a+b=` prompts, from a per-position JSON.
+"""Plot CI over the (a, b) operand grid for `a<op>b=` prompts, from a per-position JSON.
 
 For each token position, writes one figure whose subplots are laid out as a grid: matrices
 down the rows, subcomponents across the columns. Each subplot is an `a`-by-`b` heatmap
 (x = a, y = b, both 1..N, equal-scaled) coloured by that subcomponent's lower-leaky CI on
-the prompt `a+b=` at this position. Only subcomponents active above `--ci-thr` somewhere at
-that position are shown, so the column set is per-position. CPU-only — no model is loaded;
-reads the `find_alive_components` per-position JSON.
+the prompt `a<op>b=` at this position. `--op` selects the arithmetic operator (`+` or `-`),
+so subtraction runs are plotted by passing `--op=-`. Only subcomponents active above
+`--ci-thr` somewhere at that position are shown, so the column set is per-position. CPU-only
+— no model is loaded; reads the `find_alive_components` per-position JSON.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps <per_position_json> \
-        [--ci-thr=0.1] [--output-dir=PATH]
+        [--op=+] [--ci-thr=0.1] [--grep=SUBSTRING] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/ab_heatmaps/position_<pos>.png` (one per position).
+Output: `<run_dir>/figures/ab_heatmaps_<add|sub>/position_<pos>.png` (one per position).
 """
 
 import json
@@ -31,7 +32,7 @@ from param_decomp_lab.scripts.validation.common import parse_module_name  # noqa
 
 # prompt -> position(str) -> module -> [{"component": int, "ci": float}]
 PerPosition = dict[str, dict[str, dict[str, list[dict[str, Any]]]]]
-_AB = re.compile(r"^(\d+)\+(\d+)=$")
+_OP_LABEL = {"+": "add", "-": "sub"}
 _TILE_IN = 0.5  # square side of each a×b tile, inches
 _COL_GAP_IN = 0.12  # horizontal gap between tiles
 _ROW_GAP_IN = 0.62  # vertical gap between matrix rows (room for the big facet labels)
@@ -42,14 +43,20 @@ _CBAR_LEN_IN = 2.2  # horizontal colorbar length, ~matching the old vertical bar
 _TITLE_FS, _FACET_FS, _LABEL_FS, _AXIS_FS, _TICK_FS = 11, 9.75, 6.5, 6.3, 4.5
 
 
-def _parse_ab(data: PerPosition) -> tuple[dict[str, tuple[int, int]], int, int]:
-    """Map each `a+b=` prompt to `(a, b)`; return that plus `(a_max, b_max)`."""
+def _parse_ab(
+    data: PerPosition, op: str, grep: str | None
+) -> tuple[dict[str, tuple[int, int]], int, int]:
+    """Map each `a<op>b=` prompt to `(a, b)` (keeping only those containing `grep`); also
+    return `(a_max, b_max)`."""
+    pattern = re.compile(rf"^(\d+){re.escape(op)}(\d+)=$")
     ab: dict[str, tuple[int, int]] = {}
     for prompt in data:
-        match = _AB.match(prompt)
+        if grep is not None and grep not in prompt:
+            continue
+        match = pattern.match(prompt)
         if match is not None:
             ab[prompt] = (int(match.group(1)), int(match.group(2)))
-    assert ab, "no prompts of the form 'a+b=' found in the JSON"
+    assert ab, f"no prompts of the form 'a{op}b=' (grep={grep!r}) found in the JSON"
     a_max = max(a for a, _ in ab.values())
     b_max = max(b for _, b in ab.values())
     return ab, a_max, b_max
@@ -82,6 +89,7 @@ def _build_grids(
 
 def _plot_position(
     pos: str,
+    op: str,
     modules: list[str],
     alive: dict[str, list[int]],
     grids_at_pos: dict[str, dict[int, np.ndarray]],
@@ -177,7 +185,7 @@ def _plot_position(
     cbar.set_label("causal importance", fontsize=_AXIS_FS - 1)
     cbar.ax.tick_params(labelsize=_TICK_FS)
     fig.suptitle(
-        f'position {pos}: causal importance over "a+b="',
+        f'position {pos}: causal importance over "a{op}b="',
         fontsize=_TITLE_FS,
         fontweight="bold",
         y=1 - 0.30 / fig_h,
@@ -186,19 +194,26 @@ def _plot_position(
     plt.close(fig)
 
 
-def plot_ab_heatmaps(json_path: str, ci_thr: float = 0.1, output_dir: str | None = None) -> Path:
+def plot_ab_heatmaps(
+    json_path: str,
+    op: str = "+",
+    ci_thr: float = 0.1,
+    grep: str | None = None,
+    output_dir: str | None = None,
+) -> Path:
     """Write one (a, b) CI-heatmap grid PNG per token position. Returns the output folder."""
+    assert op in _OP_LABEL, f"--op must be one of {list(_OP_LABEL)}, got {op!r}"
     json_file = Path(json_path).expanduser()
     data: PerPosition = json.loads(json_file.read_text())
 
-    ab, a_max, b_max = _parse_ab(data)
+    ab, a_max, b_max = _parse_ab(data, op, grep)
     all_modules = _all_modules(data)
     grids = _build_grids(data, ab, a_max, b_max)
 
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else json_file.parent / "figures" / "ab_heatmaps"
+        else json_file.parent / "figures" / f"ab_heatmaps_{_OP_LABEL[op]}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("position_*.png"):  # don't leave figures from a prior, wider run
@@ -217,7 +232,14 @@ def plot_ab_heatmaps(json_path: str, ci_thr: float = 0.1, output_dir: str | None
         if not modules:
             continue
         _plot_position(
-            pos, modules, alive, grids[pos], a_max, b_max, out_dir / f"position_{int(pos):02d}.png"
+            pos,
+            op,
+            modules,
+            alive,
+            grids[pos],
+            a_max,
+            b_max,
+            out_dir / f"position_{int(pos):02d}.png",
         )
         n_written += 1
 

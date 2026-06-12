@@ -83,8 +83,10 @@ JSON="$RUN_DIR/alive_components_per_position.json"   # RUN_DIR=$(dirname "$MODEL
 uv run python -m param_decomp_lab.scripts.validation.plot_ci_heatmaps "$JSON"
 uv run python -m param_decomp_lab.scripts.validation.plot_ci_heatmaps "$JSON" --grep="2+" --n-prompts=100
 
-# a×b CI grids for `a+b=` prompts: rows = matrices, cols = all alive subcomponents, one PNG per position.
-uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON"
+# a×b CI grids: rows = matrices, cols = per-position active subcomponents, one PNG per position.
+# --op picks the operator (writes to figures/ab_heatmaps_{add,sub}/); --grep filters prompts.
+uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --op=+ --ci-thr=0.5
+uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --op=- --ci-thr=0.5
 ```
 
 ## screen_components_on_data
