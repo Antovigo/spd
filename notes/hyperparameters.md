@@ -56,7 +56,39 @@ immediately (caused the 356 OOM).
 save_every 2000, full eval, wandb param-decomp-llama. Monitoring start-of-training.
 - Start-of-training healthy: step-0 full eval cleared (no OOM); train/loss/total
   0.47→0.012@100→0.014@200 (matches 1e-3 test). ~3.3 s/it → ~18-19 h for 20k + eval.
-  Watching for crash (→ resume from latest model_<step>.pth) / completion.
+
+### Result: SUCCESS (all 20k steps, train/loss/total 0.47 → 0.0027)
+
+Final eval (step 20000), run_id llama8b-add-02:
+- Faithful on target: target_recon stochastic/ci_masked/rounded ≈ 0.0020-0.0021;
+  KL to target kl_ci_masked 0.0021, kl_unmasked 0.0019 (vs kl_zero_masked 0.091).
+- Sparse on target: CI L0 ≈ **1.6 components/datapoint** (of 1536). delta_only recon
+  0.106 ≫ 0.002 → components (not delta) carry the addition mechanism.
+- Localized: on nontarget (Pile) CI L0 ≈ **0.04** (components ~off); ci_masked 0.011 ≈
+  delta_only 0.010 → delta carries nontarget. Exactly the tPD goal.
+- Exit code 1 but BENIGN: torchrun child non-zero during post-training teardown (rank 0
+  still uploading model_20000.pth to wandb while others hit DDP cleanup). All checkpoints
+  saved (model_2000..20000.pth) + uploaded. No resume needed.
+  TODO (minor): make final wandb sync / DDP teardown robust to avoid the spurious exit 1.
+
+## Run #3 (job 385, run_id llama8b-addsub-01) — CURRENT
+
+(job 384 was the same run at C=512; cancelled and resubmitted as 385 with C=120.)
+
+First addition **+ subtraction** run. Config
+`param_decomp_lab/experiments/lm/llama-3.1-8b_addition_subtraction_targeted.yaml`
+(derived from the addition config). Changes vs add-02:
+- Target = `a+b=` **and** `a-b=`, a,b ∈ [1,100] → 20000 prompts
+  (`prompts/addition_subtraction_1-100.txt`). Prompts hold no answer, so `a<b`
+  negatives don't appear in the input — but the answer at `=` is no longer guaranteed
+  single-token for those, a caveat for the pos-4 analysis.
+- ImportanceMinimalityLoss coeff 1e-4 → **5e-5** (50% lower, per request).
+- PersistentPGDReconLoss n_warmup_steps 2 → **3** (one more, per request).
+- steps 20k → **10k** (user: 10k is more than enough).
+- C per matrix 512 → **120** (user: 120 is enough).
+- batch_size kept at the repo config's **64** (NB: add-02 actually ran at 192).
+4×L40 (`sbatch --gpus=4 --time=18:00:00 run_ddp.sbatch`). Start-of-training healthy:
+step-0 full eval cleared (no OOM), train/loss/total 0.24@0, steps advancing.
 
 ## Log
 

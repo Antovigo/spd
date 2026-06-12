@@ -1,0 +1,103 @@
+"""Shared helpers for the validation scripts."""
+
+import re
+import shlex
+from dataclasses import dataclass
+from pathlib import Path
+
+import torch
+from transformers import AutoTokenizer
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+from param_decomp.component_model import ComponentModel
+from param_decomp.log import logger
+from param_decomp_lab.experiments.lm.run import LMExperimentConfig, SavedLMRun
+from param_decomp_lab.infra.paths import ModelPath
+from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
+from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
+
+
+@dataclass(frozen=True)
+class LoadedRun:
+    model: ComponentModel
+    cfg: LMExperimentConfig
+    run_dir: Path
+    tokenizer: PreTrainedTokenizerBase
+    device: torch.device
+
+
+def load_lm_run(model_path: ModelPath) -> LoadedRun:
+    """Resolve a run path into an eval-moded `ComponentModel` on the compute device,
+    alongside its config, run directory, and tokenizer."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    saved = SavedLMRun.from_path(model_path)
+    model = saved.load_model().to(device)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(saved.cfg.data.tokenizer_name)
+    assert isinstance(tokenizer, PreTrainedTokenizerBase)
+    return LoadedRun(
+        model=model,
+        cfg=saved.cfg,
+        run_dir=saved.checkpoint_path.parent,
+        tokenizer=tokenizer,
+        device=device,
+    )
+
+
+def escape_tsv_value(s: str) -> str:
+    """Backslash-escape characters that break naive tab-splitting, reversibly."""
+    return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+
+_LAYER_IN_NAME = re.compile(r"(?:^|\.)(\d+)(?:\.|$)")
+
+
+def parse_module_name(module_name: str) -> tuple[int, str]:
+    """Split a decomposed module path into `(layer, matrix)`, e.g.
+    `model.layers.18.mlp.gate_proj` -> `(18, "mlp.gate_proj")`. Falls back to
+    `(-1, module_name)` when there is no layer number."""
+    match = _LAYER_IN_NAME.search(module_name)
+    if match is None:
+        return -1, module_name
+    return int(match.group(1)), module_name[match.end() :]
+
+
+@dataclass(frozen=True)
+class SlurmOptions:
+    """The `--slurm` flag plus its SLURM knobs, shared by every GPU validation script.
+
+    When `slurm` is set, the script re-submits itself as a single job instead of running
+    locally — see `submit_self_to_slurm`.
+    """
+
+    slurm: bool = False
+    partition: str | None = DEFAULT_PARTITION_NAME
+    gpus: int = 1
+    slurm_time: str = "1:00:00"
+    slurm_mem: str | None = None
+
+
+def submit_self_to_slurm(module: str, argv: list[str], opts: SlurmOptions, job_name: str) -> None:
+    """Submit `python -m <module> <argv>` as a SLURM job (run from `REPO_ROOT`, no snapshot).
+
+    `argv` must already be the non-SLURM CLI args (paths expanded to absolute, since the
+    job's working directory is the repo root, not the caller's).
+    """
+    command = shlex.join(["python", "-m", module, *argv])
+    config = SlurmConfig(
+        job_name=job_name,
+        partition=opts.partition,
+        n_gpus=opts.gpus,
+        time=opts.slurm_time,
+        mem=opts.slurm_mem,
+    )
+    result = submit_slurm_job(generate_script(config, command), job_name)
+    logger.section(f"Submitted {job_name} to SLURM")
+    logger.values(
+        {
+            "Job ID": result.job_id,
+            "Command": command,
+            "Log file": result.log_pattern,
+            "Script": str(result.script_path),
+        }
+    )
