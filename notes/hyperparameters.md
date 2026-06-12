@@ -90,6 +90,53 @@ First addition **+ subtraction** run. Config
 4×L40 (`sbatch --gpus=4 --time=18:00:00 run_ddp.sbatch`). Start-of-training healthy:
 step-0 full eval cleared (no OOM), train/loss/total 0.24@0, steps advancing.
 
+### Result: SUCCESS (job 385, all 10k steps)
+
+model_2000..10000.pth all saved. Exit code 1 again BENIGN (same post-training DDP
+teardown / wandb-sync SIGABRT as add-02; all checkpoints written). ~3h20m wall.
+
+## Multiplication symbol + range screen (job 412/413, `pd_scratch/mult_eval.py`)
+
+Greedy next-answer accuracy of the *frozen* Llama-3.1-8B (1×L40), to choose the operator
+and the operand range for the multiplication target.
+
+- **Symbol** (acc on `a{sym}b=`, a,b ∈ [2,12], single-token + clean 5-tok layout only):
+  `*` 0.967 · `·` 0.950 · `×` 0.893 · `x` 0.736 · `X` 0.636. → **chose `*`**.
+- **Range** (square [1,N]² mean acc for `*`): falls below 50% past N=83
+  ([1,83]²=0.501, [1,84]²=0.497). → **chose a,b ∈ [1,83]** (6889 prompts).
+
+## Run #4 (job 415, run_id llama8b-addsubmult-01) — CURRENT
+
+Adds **multiplication**. Config
+`param_decomp_lab/experiments/lm/llama-3.1-8b_add_sub_mult_targeted.yaml`. Changes vs
+add-sub (#3):
+- Target += `a*b=`, a,b ∈ [1,83] (prompts `add100_sub100_mult83.txt`, 26889 total:
+  10k add + 10k sub + 6889 mult). NB: ranges differ across ops → mult is ~26% of data.
+- C per matrix 120 → **512** (per request).
+- steps 10k → **5k** (per request).
+- impmin 5e-5, PPGD warmup 3, batch 64 unchanged.
+4×L40 + 1 GPU held by job 414 (val-find-alive) = 5 total, at cap. Start healthy: step-0
+eval cleared, ~1.8 s/it → ~2.5 h. **Result: SUCCESS** (model_5000.pth saved, ~2.5h).
+
+## Run #5 split — add+sub (v2) now, multiplication-only afterwards
+
+Decided to split the combined add+sub+mult run into two separate decompositions (same
+target model / layer). Both inherit a shared **v2 tuning** layer on top of #4:
+- components `weight_decay` **0.05** (ci_fn optimizer stays 0.0),
+- impmin coeff doubled back to **1e-4**,
+- checkpoints **only at the final step** (`save_every: null`),
+- full/slow eval **every 1000 steps** (`slow_every: 1000`),
+- C 512, steps 5k, PPGD warmup 3, batch 64 (unchanged from #4).
+
+Configs (combined `add_sub_mult` config + its prompts file deleted as superseded):
+- `llama-3.1-8b_addition_subtraction_targeted.yaml` (now v2; was the #3 C=120 config) —
+  data `addition_subtraction_1-100.txt` (20k).
+- `llama-3.1-8b_multiplication_targeted.yaml` (new) — data `multiplication_1-83.txt`
+  (`a*b=`, a,b ∈ [1,83]; 6889). **Prepared, not yet launched.**
+
+### Run #5a (job 420, run_id llama8b-addsub-02) — CURRENT
+add+sub v2. 4×L40. Start healthy: step-0 eval cleared, ~1.07 s/it → ~1.5 h + evals.
+
 ## Log
 
 - Setup: `uv sync --all-packages` (plain `uv sync` misses the lab pkg incl. `fire`).
