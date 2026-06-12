@@ -1,9 +1,11 @@
-# Targeted decomposition (tPD) of Llama-3.1-8B layer-18 MLP on addition + subtraction.
-# Target: "a+b=" / "a-b=" (a,b in [1,100]); nontarget: FineWeb.
-# v2 tuning (shared with the multiplication-only config): components weight_decay 0.05,
+# Targeted decomposition (tPD) of Llama-3.1-8B layer-18 MLP on multiplication only.
+# Target: "a*b=" (a,b in [1,83], the largest square range where greedy accuracy stays
+# >50%); nontarget: FineWeb. Symbol "*" chosen as best single-token operator (vs x/X/×/·;
+# see pd_scratch/mult_eval.py — "*" scored 0.97 on [2,12]^2).
+# v2 tuning (shared with the addition+subtraction config): components weight_decay 0.05,
 # impmin coeff 1e-4, C 512/matrix, steps 5k, checkpoints only at the final step, full
 # (slow) eval every 1000 steps.
-label: llama8b_addition_subtraction
+label: llama8b_multiplication
 pd:
   seed: 0
   n_mask_samples: 1
@@ -105,7 +107,7 @@ eval:
   - type: NontargetCIMeanPerComponent
   - type: CIMeanPerComponent
   # TargetedCIHeatmap omitted: it requires prompts_file == data.prompts_file and renders
-  # one row per prompt, so the 20k-prompt target would make it unusable.
+  # one row per prompt, so the ~7k-prompt target would make it unusable.
   - type: WeightMagnitude
   - type: CIHiddenActsReconLoss
 target:
@@ -117,7 +119,7 @@ target:
   output_extract: logits
 data:
   tokenizer_name: meta-llama/Llama-3.1-8B
-  prompts_file: param_decomp_lab/experiments/lm/prompts/addition_subtraction_1-100.txt
+  prompts_file: param_decomp_lab/experiments/lm/prompts/multiplication_1-83.txt
   max_seq_len: 16
 nontarget:
   data:
