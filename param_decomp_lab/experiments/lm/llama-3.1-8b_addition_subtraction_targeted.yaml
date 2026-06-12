@@ -104,6 +104,8 @@ eval:
     rounding_threshold: 0.01
   - type: NontargetCIMeanPerComponent
   - type: CIMeanPerComponent
+  - type: CIHistograms
+    n_batches_accum: 1
   # TargetedCIHeatmap omitted: it requires prompts_file == data.prompts_file and renders
   # one row per prompt, so the 20k-prompt target would make it unusable.
   - type: WeightMagnitude

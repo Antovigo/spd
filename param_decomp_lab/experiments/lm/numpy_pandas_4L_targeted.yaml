@@ -104,6 +104,8 @@ eval:
       max_seq_len: 3
     - type: WeightMagnitude
     - type: CIMeanPerComponent
+    - type: CIHistograms
+      n_batches_accum: 1
     - type: CIHiddenActsReconLoss
 target:
   spec:

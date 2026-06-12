@@ -99,6 +99,8 @@ eval:
     rounding_threshold: 0.01
   - type: NontargetCIMeanPerComponent
   - type: CIMeanPerComponent
+  - type: CIHistograms
+    n_batches_accum: 1
   - type: WeightMagnitude
   - type: CIHiddenActsReconLoss
 target:

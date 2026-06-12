@@ -78,12 +78,12 @@ pd:
     n_warmup_steps: 2
 cadence:
   train_log_every: 100
-  save_every: 2000
+  save_every: null   # only the final-step checkpoint (Trainer always saves at the end)
 eval:
   n_steps: 1
   batch_size: 64
   every: 1000
-  slow_every: 5000
+  slow_every: 4000   # 1/5 of steps (20000)
   slow_on_first_step: true
   metrics:
   - type: CI_L0
@@ -103,6 +103,8 @@ eval:
     rounding_threshold: 0.01
   - type: NontargetCIMeanPerComponent
   - type: CIMeanPerComponent
+  - type: CIHistograms
+    n_batches_accum: 1
   # TargetedCIHeatmap omitted: it requires prompts_file == data.prompts_file and renders
   # one row per prompt, so the 10k-prompt addition target would make it unusable.
   - type: WeightMagnitude
