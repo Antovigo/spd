@@ -200,8 +200,13 @@ def plot_ab_heatmaps(
     ci_thr: float = 0.1,
     grep: str | None = None,
     output_dir: str | None = None,
+    position: int | None = None,
 ) -> Path:
-    """Write one (a, b) CI-heatmap grid PNG per token position. Returns the output folder."""
+    """Write one (a, b) CI-heatmap grid PNG per token position. Returns the output folder.
+
+    `position` restricts output to that single token position (e.g. `--position=4` for the
+    `=` answer token of a last-token-reconstruction run); the default renders every position.
+    """
     assert op in _OP_LABEL, f"--op must be one of {list(_OP_LABEL)}, got {op!r}"
     json_file = Path(json_path).expanduser()
     data: PerPosition = json.loads(json_file.read_text())
@@ -209,6 +214,11 @@ def plot_ab_heatmaps(
     ab, a_max, b_max = _parse_ab(data, op, grep)
     all_modules = _all_modules(data)
     grids = _build_grids(data, ab, a_max, b_max)
+    if position is not None:
+        assert str(position) in grids, (
+            f"position {position} not in JSON (have {sorted(grids, key=int)})"
+        )
+        grids = {str(position): grids[str(position)]}
 
     out_dir = (
         Path(output_dir).expanduser()
