@@ -105,7 +105,7 @@ def find_alive_components(
     assert len(set(prompt_texts)) == len(prompt_texts), (
         "duplicate prompts in the prompts file would collide as JSON keys"
     )
-    pool = load_prompts_dataset(str(prompts_file), cast(Any, tokenizer), cfg.data.max_seq_len)
+    pool = load_prompts_dataset(str(prompts_file), cast(Any, tokenizer))
     pool = pool.to(device)
     assert pool.shape[0] == len(prompt_texts)
 

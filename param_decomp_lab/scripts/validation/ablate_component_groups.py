@@ -106,7 +106,7 @@ def ablate_component_groups(
     assert cfg.data.prompts_file is not None, "requires prompts-based target data"
     prompts_file = Path(cfg.data.prompts_file).expanduser()
     prompt_texts = [ln.strip() for ln in prompts_file.read_text().splitlines() if ln.strip()]
-    pool = load_prompts_dataset(str(prompts_file), cast(Any, tokenizer), cfg.data.max_seq_len)
+    pool = load_prompts_dataset(str(prompts_file), cast(Any, tokenizer))
 
     # Deterministic subsample of prompts for speed.
     n = min(n_examples, pool.shape[0])
