@@ -4,7 +4,8 @@ For each token position, writes one figure whose subplots are laid out as a grid
 down the rows, subcomponents across the columns. Each subplot is an `a`-by-`b` heatmap
 (x = a, y = b, both 1..N, equal-scaled) coloured by that subcomponent's lower-leaky CI on
 the prompt `a<op>b=` at this position. `--op` selects the arithmetic operator (`+`, `-`,
-or `*`), so subtraction runs are plotted by passing `--op=-`. Only subcomponents active above
+`*`, or `×`), so subtraction is `--op=-` and the ×-symbol multiplication runs are `--op=×`.
+Only subcomponents active above
 `--ci-thr` somewhere at that position are shown, so the column set is per-position. CPU-only
 — no model is loaded; reads the `find_alive_components` per-position JSON.
 
@@ -32,7 +33,7 @@ from param_decomp_lab.scripts.validation.common import parse_module_name  # noqa
 
 # prompt -> position(str) -> module -> [{"component": int, "ci": float}]
 PerPosition = dict[str, dict[str, dict[str, list[dict[str, Any]]]]]
-_OP_LABEL = {"+": "add", "-": "sub", "*": "mult"}
+_OP_LABEL = {"+": "add", "-": "sub", "*": "mult", "×": "mult"}
 _TILE_IN = 0.5  # square side of each a×b tile, inches
 _COL_GAP_IN = 0.12  # horizontal gap between tiles
 _ROW_GAP_IN = 0.62  # vertical gap between matrix rows (room for the big facet labels)
