@@ -1,8 +1,12 @@
 # Targeted decomposition (tPD) of Llama-3.1-8B layer-18 MLP on the addition task.
-# Target distribution: "a+b=" prompts (a,b in [1,100]); nontarget: FineWeb.
-# Derived from llama-3.1-8b.yaml with: C reduced ~100x, a much smaller CI transformer,
-# nontarget seq_len 64, no FaithfulnessLoss + faithfulness_warmup_steps 0 (tPD rules),
-# and the targeted nontarget/eval wiring.
+# Target: "a+b=" prompts (a,b in [1,100], no-padding → 5 tokens, "=" at pos 4);
+# nontarget: FineWeb.
+#
+# Optimized 2-GPU recipe (run llama8b-add-2gpu-01): reaches better RoundedReconLoss
+# (0.00553 vs 0.00599) AND total L0 (5.21 vs 5.98) than the 4-GPU/20k reference
+# llama8b-add-02, in ~4.5h on 2xL40 (vs ~18h on 4). n_alive < 100/matrix, PGD 0.0059.
+# Key choices vs the reference: C 512->128, global batch 96, impmin coefficient schedule
+# (peak 5x then release), CI-scaled component weight decay 0.2, + UnmaskedReconLoss.
 label: llama8b_addition
 pd:
   seed: 0
@@ -12,40 +16,42 @@ pd:
     fn_type: global_shared_transformer
     hidden_dims: null
     simple_transformer_ci_cfg:
-      d_model: 256        # free internal width (input proj 22528->d_model, head d_model->sum C)
+      d_model: 256
       n_blocks: 2
       mlp_hidden_dim:
       - 512
       attn_config:
-        n_heads: 4        # d_head = 64 (even -> RoPE ok)
-        max_len: 64       # must cover the longest pass (nontarget seq_len 64)
+        n_heads: 4
+        max_len: 64
         rope_base: 10000.0
   sampling: continuous
   sigmoid_type: leaky_hard
   decomposition_targets:
   - module_pattern: model.layers.18.mlp.gate_proj
-    C: 512
+    C: 128
   - module_pattern: model.layers.18.mlp.up_proj
-    C: 512
+    C: 128
   - module_pattern: model.layers.18.mlp.down_proj
-    C: 512  # 14336 neurons
+    C: 128
   identity_decomposition_targets: null
   use_delta_component: true
   components_optimizer:
     lr_schedule:
-      start_val: 1.0e-03   # tuned: targeted opt tolerates ~20x the full-data LR
+      start_val: 1.0e-03
       warmup_pct: 0.0
       final_val_frac: 0.1
       fn_type: cosine
+    weight_decay: 0.0
     grad_clip_norm: 0.01
   ci_fn_optimizer:
     lr_schedule:
-      start_val: 1.0e-03   # tuned: targeted opt tolerates ~20x the full-data LR
+      start_val: 1.0e-03
       warmup_pct: 0.0
       final_val_frac: 0.1
       fn_type: cosine
-  steps: 20000
-  batch_size: 64   # global batch; 192 fits 4xL40 in bf16 (~36 GB/GPU)
+  steps: 10000
+  batch_size: 96
+  ci_scaled_component_weight_decay: 0.2
   faithfulness_warmup_steps: 0
   loss_metrics:
   - type: ImportanceMinimalityLoss
@@ -56,10 +62,16 @@ pd:
     p_anneal_final_p: 0.5
     p_anneal_end_frac: 1.0
     eps: 1.0e-12
+    coeff_warmup_frac: 0.05
+    coeff_peak_multiplier: 5.0
+    coeff_anneal_start_frac: 0.1
+    coeff_anneal_end_frac: 0.7
   - type: StochasticReconSubsetLoss
     coeff: 1.0
     routing:
       type: uniform_k_subset
+  - type: UnmaskedReconLoss
+    coeff: 0.5
   - type: PersistentPGDReconLoss
     coeff: 0.5
     optimizer:
@@ -78,18 +90,21 @@ pd:
     n_warmup_steps: 2
 cadence:
   train_log_every: 100
-  save_every: null   # only the final-step checkpoint (Trainer always saves at the end)
+  save_every: 5000
+  keep_last_n_checkpoints: 2
 eval:
   n_steps: 1
-  batch_size: 64
-  every: 1000
-  slow_every: 4000   # 1/5 of steps (20000)
+  batch_size: 96
+  every: 500
+  slow_every: 1000
   slow_on_first_step: true
   metrics:
   - type: CI_L0
     groups:
       total:
       - '*'
+  - type: NAlive
+    ci_alive_threshold: 0.1
   - type: CEandKLLosses
     rounding_threshold: 0.0
   - type: PGDReconLoss
@@ -105,8 +120,6 @@ eval:
   - type: CIMeanPerComponent
   - type: CIHistograms
     n_batches_accum: 1
-  # TargetedCIHeatmap omitted: it requires prompts_file == data.prompts_file and renders
-  # one row per prompt, so the 10k-prompt addition target would make it unusable.
   - type: WeightMagnitude
   - type: CIHiddenActsReconLoss
 target:
@@ -114,7 +127,7 @@ target:
     kind: hf
     model_class: transformers.LlamaForCausalLM
     model_name: meta-llama/Llama-3.1-8B
-    dtype: bfloat16   # load frozen weights in bf16 (16 GB/rank, not 32 GB fp32)
+    dtype: bfloat16
   output_extract: logits
 data:
   tokenizer_name: meta-llama/Llama-3.1-8B
