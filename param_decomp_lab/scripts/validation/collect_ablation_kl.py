@@ -16,6 +16,11 @@ Per (alive component, prompt) at the `=` position it records:
 - `ci`        — lower-leaky causal importance.
 Per prompt: `orig_token` / `orig_prob`. Per component: `||U_c||`, `||V_c||`, their product.
 
+All quantities are read at the `=` (last) position. KL is the weight-level ablation effect
+(component removed at every position), so a component that fires only at operand positions
+still shows up via KL at `=`, but its recorded `inner_act` / `ci` (sampled at `=`) may be
+near-zero there.
+
 Compute ordering (one GPU): a single reference forward per prompt-batch returns the logits
 AND the input cache, so CI / inner-acts / norms for every component come for free; only the
 KL + ablated-token need the per-component ablated forward, and only the last-position logits
@@ -114,15 +119,16 @@ class _Grids:
 def _all_on_masks(
     modules: list[str],
     weight_deltas: dict[str, Tensor],
+    n_comp: dict[str, int],
     batch: int,
     seq: int,
-    n_comp: int,
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[dict[str, Tensor], dict[str, ComponentsMaskInfo]]:
     """Component masks all-ones + delta fully on (= exact reconstruction). Returns the
-    mutable per-module mask tensors and the assembled mask infos sharing them."""
-    masks = {m: torch.ones(batch, seq, n_comp, device=device, dtype=dtype) for m in modules}
+    mutable per-module mask tensors and the assembled mask infos sharing them. `n_comp` is
+    per-module: C can differ across decomposed matrices."""
+    masks = {m: torch.ones(batch, seq, n_comp[m], device=device, dtype=dtype) for m in modules}
     delta_mask = torch.ones(batch, seq, device=device, dtype=dtype)
     infos = {
         m: ComponentsMaskInfo(
@@ -191,7 +197,7 @@ def collect_ablation_kl(
     if max_components is not None:
         alive = alive[:max_components]
     modules = sorted({a.module for a in alive}, key=parse_module_name)
-    n_comp = model.components[modules[0]].V.shape[1]
+    n_comp = {m: model.components[m].V.shape[1] for m in modules}
     logger.info(
         f"{len(alive)} alive components over {len(modules)} modules, {pool.shape[0]} prompts, N={n}"
     )
@@ -229,7 +235,7 @@ def collect_ablation_kl(
             rows = [a_ - 1 for a_, _ in ab[start : start + b]]
             cols = [b_ - 1 for _, b_ in ab[start : start + b]]
 
-            masks, infos = _all_on_masks(modules, weight_deltas, b, seq, n_comp, device, dtype)
+            masks, infos = _all_on_masks(modules, weight_deltas, n_comp, b, seq, device, dtype)
             ref = model(chunk, mask_infos=infos, cache_type="input")
             if start == 0:
                 # All-on + delta must reproduce the raw target model; otherwise the mask /
@@ -261,7 +267,8 @@ def collect_ablation_kl(
                 inner_all = torch.einsum("bsd,dc->bsc", x, v_unit[m].float())  # normalized
                 g_inner = inner_all[:, -1].cpu().numpy()  # [b, C] at the = position
                 ci_last = ci.lower_leaky[m][:, -1].float().cpu().numpy()  # [b, C]
-                pert[m] = inner_all.abs().amax(dim=(0, 1)).cpu().numpy() * norm_cpu[m].numpy()
+                if skip_eps > 0:
+                    pert[m] = inner_all.abs().amax(dim=(0, 1)).cpu().numpy() * norm_cpu[m].numpy()
                 for i in comp_index[m]:
                     c = alive[i].component
                     g.inner_act[i, rows, cols] = g_inner[:, c]

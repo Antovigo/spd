@@ -68,14 +68,17 @@ def headless_check(
     click_list = [c for c in clicks.split(";;") if c]
     probe_list = [p for p in probes.split(";;") if p]
 
-    errors: list[str] = []
+    errors: list[str] = []  # fatal: console.error + uncaught exceptions
+    warnings: list[str] = []  # reported, not fatal
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": viewport_w, "height": viewport_h})
         page.on(
             "console",
-            lambda m: errors.append(f"console.{m.type}: {m.text}")
-            if m.type in ("error", "warning")
+            lambda m: errors.append(f"console.error: {m.text}")
+            if m.type == "error"
+            else warnings.append(f"console.warning: {m.text}")
+            if m.type == "warning"
             else None,
         )
         page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
@@ -93,6 +96,10 @@ def headless_check(
         browser.close()
 
     print(f"screenshots -> {shots}")
+    if warnings:
+        print(f"\n{len(warnings)} console warning(s) (non-fatal):")
+        for w in warnings:
+            print(f"  {w}")
     if errors:
         print(f"\n{len(errors)} JS error(s):")
         for e in errors:

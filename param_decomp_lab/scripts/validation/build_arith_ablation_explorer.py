@@ -67,8 +67,9 @@ def _fundamental_period(r: NDArray[np.float64]) -> tuple[int, float]:
     peak = float(r[2 : max_lag + 1].max())
     if peak < 0.1:
         return 0, 0.0
-    for lag in range(2, max_lag):
-        if r[lag] > r[lag - 1] and r[lag] >= r[lag + 1] and r[lag] >= 0.8 * peak:
+    for lag in range(2, max_lag + 1):
+        right_ok = lag == max_lag or r[lag] >= r[lag + 1]
+        if r[lag] > r[lag - 1] and right_ok and r[lag] >= 0.8 * peak:
             return lag, round(peak, 4)
     return 0, 0.0
 
@@ -133,12 +134,15 @@ def build_arith_ablation_explorer(
     meta = json.loads((npz_path.parent / "meta.json").read_text())
     run_dir = npz_path.parent.parent
 
+    # Keyed by full module path (layer + matrix), since the short matrix name alone collides
+    # across layers.
     norms: dict[tuple[str, int], float] = {}
     comp_tsv = npz_path.parent / "components.tsv"
     if comp_tsv.exists():
         with comp_tsv.open() as f:
             for row in csv.DictReader(f, delimiter="\t"):
-                norms[(row["matrix"], int(row["component"]))] = float(row["norm"])
+                module = f"model.layers.{row['layer']}.{row['matrix']}"
+                norms[(module, int(row["component"]))] = float(row["norm"])
 
     d = np.load(npz_path, allow_pickle=True)
     kl, ci, inner = d["kl"], d["ci"], d["inner_act"]  # [A, n, n]
@@ -154,7 +158,10 @@ def build_arith_ablation_explorer(
 
     kl_scale = float(np.percentile(kl[kl > 0], 99)) if (kl > 0).any() else 1.0
     inner_scale = float(np.percentile(np.abs(inner), 99)) or 1.0
-    valid_tok = orig_int[orig_int != -32768]
+    # Range spans both original and ablated predictions, so the ablated-token view (whose
+    # whole point is predictions that differ from the original) isn't clamped to one color.
+    all_int = np.concatenate([orig_int.ravel(), abl_int.ravel()])
+    valid_tok = all_int[all_int != -32768]
     tok_lo, tok_hi = (int(valid_tok.min()), int(valid_tok.max())) if valid_tok.size else (0, 2 * n)
 
     components: list[dict[str, Any]] = []
@@ -167,7 +174,7 @@ def build_arith_ablation_explorer(
                 "c": int(comps[i]),
                 "mean_kl": round(float(kl[i].mean()), 6),
                 "max_kl": round(float(kl[i].max()), 6),
-                "norm": round(norms.get((str(shorts[i]), int(comps[i])), 0.0), 4),
+                "norm": round(norms.get((str(modules[i]), int(comps[i])), 0.0), 4),
                 **analysis,
                 "grids": {
                     "ci": _b64(np.clip(np.rint(ci[i] * 255), 0, 255).astype(np.uint8)),
