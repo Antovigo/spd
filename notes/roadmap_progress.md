@@ -647,3 +647,31 @@ CAVEAT: lastpos recon is pos-4-ONLY (hardest token); all-pos 0.00476 is a 5-posi
 (diluted by easy tokens) -> unfair. Fair test = all-pos run's pos-4-only recon vs lastpos
 0.0055 (TODO: 1-GPU eval of 493 @ pos4). Likely flips to lastpos-favorable. Deliverable run
 = llama8b-lastpos-obj6bis-03.
+
+### IMPMIN SCHEDULE EXPERIMENT (user redesign, 2026-06-15) — down_proj-only, ~/out/ablation_downproj
+Two questions, isolated via 3 runs sharing run A as reference (peak X=5e-4, floor Y=5e-5):
+- Q1 (does larger PEAK -> sparser, given final Y): **A vs C** (both end at Y=5e-5).
+- Q2 (does lower FINAL -> better recon, given peak X): **A vs B** (both peak at X=5e-4).
+Runs (all: down_proj-only, ratio2, CI-LR3e-4, 20k, warmup 0.05, p-anneal 2.0->0.5 over FIRST
+HALF [p_anneal_end_frac 0.5], C=128):
+- **530 sched-release** (A): base 5e-5, peak_mult 10 -> peak 5e-4; anneal 0.05->1.0 (release
+  starts right after warmup, decays over all rest -> floor 5e-5).
+- **531 sched-const-hi** (B): base 5e-4, peak_mult 1 -> constant 5e-4 (peak held, no release).
+- **532 sched-const-lo** (C): base 5e-5, peak_mult 1 -> constant 5e-5 (floor throughout); dep 522.
+Cancelled the prior 4-run leave-one-out ablation (526-529: best/no-cilr/no-ratio/no-release)
+to refocus on the schedule + apply the new p-anneal/release dynamics globally. CI-LR & ratio
+ablations can be re-run under the new dynamics if wanted.
+NOTE: down_proj-only is ~1.5 s/it = NOT faster per-step than full 3-matrix (8B fwd dominates);
+saves memory + isolates the densest matrix. At end: find_alive + AB plots (--op=+ ci-thr0.8)
+for all 3 -> compare sparsity (A vs C) & recon (A vs B). Monitor TBD.
+
+### ADDMULT-V2 (522) CANCELLED at step 11810/20000 (59%, 5.5h) — external SIGTERM
+Cause: user running own jobs (sched-rel/hi/lo = 530/531/537) — GPUs reclaimed. NOT a crash.
+SALVAGE: 11 ckpts model_1000..11000 survived in
+`~/out/wandb/offline-run-20260615_121334-llama8b-addmult-02/files/` (covers the full impmin
+release 2k->10k = the re-activation window). `~/out/runs/llama8b-addmult-02/` was DELETED
+(dangling wandb symlink) -> those wandb-dir ckpts are the ONLY copy (176GB). metrics in the
+.wandb binary (no metrics.jsonl since runs/ dir gone).
+HOLDING: not grabbing GPUs while user runs sched-* jobs. Options for user: (a) analyze the
+11 salvaged ckpts (find_alive n_alive(t) + AB plots of mid-release vs step-11k to see
+un-merging) — needs 1 GPU; (b) relaunch full 20k when GPUs free; (c) drop it.
