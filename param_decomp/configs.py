@@ -197,6 +197,12 @@ class PDConfig(BaseConfig):
         "ranks). 0 disables. Independent of `components_optimizer.weight_decay`; tolerates "
         "much higher values (e.g. 0.2).",
     )
+    ci_scaled_component_weight_decay_start_frac: Probability = Field(
+        default=0.0,
+        description="Fraction of total `steps` to wait before applying "
+        "`ci_scaled_component_weight_decay`. 0 starts at step 0; 0.8 starts the decay only in "
+        "the final 20% of training. No effect when the decay coeff is 0.",
+    )
 
     # --- Faithfulness Warmup ---
     faithfulness_warmup_steps: NonNegativeInt = Field(
