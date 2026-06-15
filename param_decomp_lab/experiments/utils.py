@@ -52,7 +52,7 @@ def _assert_heatmap_probe_matches_data(cfg: TargetedCIHeatmapConfig, data: BaseC
             f"data.active_indices {data_indices}: the heatmap probes are the target distribution"
         )
     if cfg.prompts_file is not None:
-        for field in ("prompts_file", "tokenizer_name", "max_seq_len"):
+        for field in ("prompts_file", "tokenizer_name"):
             data_val = getattr(data, field, None)
             cfg_val = getattr(cfg, field)
             assert data_val == cfg_val, (

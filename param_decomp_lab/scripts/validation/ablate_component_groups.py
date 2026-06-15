@@ -114,18 +114,14 @@ def ablate_component_groups(
     pool = pool[perm].to(device)
     sampled_texts = [prompt_texts[i] for i in perm.tolist()]
 
-    pad_id = getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None)
-    assert isinstance(pad_id, int)
-    # The `=` is the last real token of every prompt; predict from there.
-    eq_pos = (pool != pad_id).sum(dim=1) - 1  # [n]
+    # Prompts are constant-length and unpadded, so the `=` is the final token of every row.
+    eq_pos = pool.shape[1] - 1
 
     conditions = ["baseline", *(_GROUPS.keys())]
     rows: list[dict[str, Any]] = []
     with torch.no_grad(), bf16_autocast(enabled=cfg.runtime.autocast_bf16):
         for start in range(0, pool.shape[0], batch_size):
             chunk = pool[start : start + batch_size]
-            eqp = eq_pos[start : start + batch_size]
-            rng = torch.arange(chunk.shape[0], device=device)
 
             cached = model(chunk, cache_type="input")
             ci = model.calc_causal_importances(cached.cache, sampling="continuous")
@@ -136,7 +132,7 @@ def ablate_component_groups(
                     base_masks if cond == "baseline" else _ablated_masks(base_masks, _GROUPS[cond])
                 )
                 logits = model(chunk, mask_infos=make_mask_infos(masks))
-                eq_logits = logits[rng, eqp].float()  # [b, vocab] at the `=` position
+                eq_logits = logits[:, eq_pos].float()  # [b, vocab] at the `=` position
                 pred_ids = eq_logits.argmax(dim=-1).tolist()
                 for i, pid in enumerate(pred_ids):
                     text = sampled_texts[start + i]

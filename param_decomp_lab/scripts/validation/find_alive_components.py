@@ -109,12 +109,8 @@ def find_alive_components(
     pool = pool.to(device)
     assert pool.shape[0] == len(prompt_texts)
 
-    pad_token_id = getattr(tokenizer, "pad_token_id", None)
-    if pad_token_id is None:
-        pad_token_id = getattr(tokenizer, "eos_token_id", None)
-    assert isinstance(pad_token_id, int), "tokenizer has neither pad_token_id nor eos_token_id"
-    valid_mask = pool != pad_token_id  # [n_prompts, T]
-
+    # Prompts are constant-length and unpadded (load_prompts_dataset enforces this), so every
+    # position is a real token — no pad-position masking.
     stats: dict[str, _Stats] = {}
     count_total = 0
     # prompt -> position -> module -> [{component, ci}], for components active at that position.
@@ -123,9 +119,7 @@ def find_alive_components(
     with torch.no_grad(), bf16_autocast(enabled=cfg.runtime.autocast_bf16):
         for start in range(0, pool.shape[0], batch_size):
             chunk = pool[start : start + batch_size]
-            valid = valid_mask[start : start + batch_size]  # [b, T]
-            flat_valid = valid.reshape(-1)
-            count_total += int(valid.sum())
+            count_total += chunk.numel()
 
             cached = model(chunk, cache_type="input")
             ci = model.calc_causal_importances(cached.cache, sampling="continuous")
@@ -134,8 +128,8 @@ def find_alive_components(
             for module, ci_ll in ci.lower_leaky.items():
                 c = ci_ll.shape[-1]
                 stats.setdefault(module, _init_stats(c, device))
-                flat_ci = ci_ll.reshape(-1, c)[flat_valid]  # [n_valid, C]
-                flat_acts = component_acts[module].reshape(-1, c)[flat_valid].float()
+                flat_ci = ci_ll.reshape(-1, c)  # [b*T, C]
+                flat_acts = component_acts[module].reshape(-1, c).float()
                 active = flat_ci > ci_thr
                 stats[module].count_active += active.sum(dim=0).to(torch.int64)
                 stats[module].max_ci = torch.maximum(stats[module].max_ci, flat_ci.amax(dim=0))
@@ -145,10 +139,9 @@ def find_alive_components(
             ci_np = {
                 module: ci_ll.float().cpu().numpy() for module, ci_ll in ci.lower_leaky.items()
             }
-            valid_np = valid.cpu().numpy()
             for i in range(chunk.shape[0]):
                 pos_entry: dict[str, dict[str, list[dict[str, Any]]]] = {}
-                for pos in valid_np[i].nonzero()[0].tolist():
+                for pos in range(chunk.shape[1]):
                     per_module: dict[str, list[dict[str, Any]]] = {}
                     for module, arr in ci_np.items():
                         ci_vec = arr[i, pos]  # [C]
