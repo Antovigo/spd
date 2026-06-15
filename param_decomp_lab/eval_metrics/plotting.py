@@ -100,7 +100,7 @@ def _plot_causal_importances_figure(
 def plot_weight_magnitude(
     weight_magnitudes: dict[str, Float[Tensor, " C"]],
 ) -> Image.Image:
-    """Per-layer scatter of `‖V_c‖·‖U_c‖` per component, sorted descending (log y)."""
+    """Per-layer scatter of `‖V_c‖·‖U_c‖` per component, sorted descending (linear y from 0)."""
     n_modules = len(weight_magnitudes)
     max_rows = 6
     n_cols = (n_modules + max_rows - 1) // max_rows  # Ceiling division
@@ -115,8 +115,9 @@ def plot_weight_magnitude(
     for i, (module_name, magnitudes) in enumerate(weight_magnitudes.items()):
         sorted_mags = torch.sort(magnitudes, descending=True)[0].detach().cpu().numpy()
         ax = axs[i % n_rows, i // n_rows]
-        ax.set_yscale("log")
         ax.scatter(range(len(sorted_mags)), sorted_mags, marker="x", s=10)
+        ax.set_ylim(0, sorted_mags.max())
+        ax.ticklabel_format(axis="y", style="plain")
         if i % n_rows == n_rows - 1 or i == n_modules - 1:
             ax.set_xlabel("Component")
         ax.set_ylabel("‖V_c‖·‖U_c‖")
