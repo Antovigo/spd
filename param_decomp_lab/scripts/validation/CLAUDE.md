@@ -91,6 +91,22 @@ validation is interactive and throwaway). Outputs land wherever the model-path-d
 run dir points, so no env vars need forwarding when an absolute checkpoint path is passed.
 The return type becomes `Path | None` (None on the submit path).
 
+## HTML applets + headless testing
+
+Some scripts emit a self-contained interactive HTML applet instead of a TSV/PNG
+(`build_addition_explorer`: `index.html` + `data.js`, opened from `file://`, no
+server/CDN/GPU). The big template lives as a sibling asset (`*_app.html`) the generator
+copies + injects data into — not a Python string. Keep the applet dependency-free (vanilla
+JS, inline canvas charts) so it runs offline on a laptop.
+
+`headless_check.py` smoke-tests any such applet in headless Chromium (renders canvas in
+software — no display needed), failing on any JS console error / uncaught exception. It is
+the exception to the "run via the project venv" rule: it imports only `playwright` + `fire`
+and runs under the isolated toolchain venv built by `headless_setup.sh` (Chromium's
+system-lib needs are kept out of `make install-dev` / CI). The bug it most often catches is
+JS-only and invisible to Python — a missing `<script src>`, an undefined global, a throwing
+render.
+
 ## Shared helpers — put them in `common.py`, don't duplicate
 
 Cross-cutting logic lives in `common.py`; scripts import from it rather than

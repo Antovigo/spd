@@ -89,6 +89,37 @@ uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --
 uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --op=- --ci-thr=0.5
 ```
 
+## build_addition_explorer
+
+Interactive, GPU-free HTML explorer for `a+b=` runs: detects each component's periodic
+*base* (mod 2/5/10/...) via an η² residue-variance fingerprint, and reads the gate/up/down
+neuron-space overlap from the checkpoint U/V (mmap, CPU-only — no forward pass). Writes a
+self-contained `index.html` + `data.js` (open from `file://`, no server/CDN/GPU) into
+`figures/addition_explorer/`. Reads the `find_alive_components` JSON next to the checkpoint.
+
+```bash
+uv run python -m param_decomp_lab.scripts.validation.build_addition_explorer "$MODEL_PATH"
+uv run python -m param_decomp_lab.scripts.validation.build_addition_explorer "$MODEL_PATH" --no-weights
+```
+
+## headless_check
+
+Smoke-test an HTML applet (e.g. the addition explorer) in headless Chromium — no display,
+no GPU. Fails on any JS console error / uncaught exception, clicks through selectors, and
+screenshots each step. Runs in its own toolchain venv (NOT `uv run`), built once by
+`headless_setup.sh` (Playwright + Chromium + the system libs bare login nodes lack, all
+without root).
+
+```bash
+bash param_decomp_lab/scripts/validation/headless_setup.sh   # once; idempotent
+
+PY=~/.cache/pd-headless/venv/bin/python
+APP=~/out/runs/llama8b-add-refine-treat-01/figures/addition_explorer/index.html
+$PY param_decomp_lab/scripts/validation/headless_check.py "$APP" \
+    --clicks='[data-view=bases];;[data-view=interplay];;[data-view=inspector];;[data-view=gallery]' \
+    --probes="document.querySelectorAll('#gallery .card').length"
+```
+
 ## screen_components_on_data
 
 Screen the broad **nontarget** distribution (fineweb) to find natural-text contexts where

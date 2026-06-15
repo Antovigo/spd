@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Addition decomposition explorer</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#181b22; --panel2:#20242e; --ink:#e6e8ee; --muted:#9aa3b2;
+    --line:#2c313c; --accent:#d957a8; --accent2:#5ab0e0;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  h1,h2,h3 { margin:0 0 6px; font-weight:600; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex;
+           align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .tabs { display:flex; gap:4px; padding:8px 18px 0; border-bottom:1px solid var(--line); }
+  .tab { padding:7px 14px; cursor:pointer; border:1px solid transparent; border-bottom:none;
+         border-radius:7px 7px 0 0; color:var(--muted); }
+  .tab.active { background:var(--panel); color:var(--ink); border-color:var(--line); }
+  main { padding:14px 18px 60px; }
+  .view { display:none; } .view.active { display:block; }
+  .controls { display:flex; gap:18px; flex-wrap:wrap; align-items:center;
+              background:var(--panel); border:1px solid var(--line); border-radius:8px;
+              padding:10px 14px; margin-bottom:14px; }
+  .controls label { color:var(--muted); margin-right:5px; }
+  .controls .grp { display:flex; align-items:center; gap:6px; }
+  select, input[type=range] { background:var(--panel2); color:var(--ink);
+            border:1px solid var(--line); border-radius:6px; padding:4px 6px; }
+  .pill { padding:3px 8px; border-radius:99px; border:1px solid var(--line);
+          cursor:pointer; color:var(--muted); user-select:none; }
+  .pill.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(116px,1fr)); gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:6px; cursor:pointer; border-left-width:4px; }
+  .card:hover { outline:1px solid var(--accent2); }
+  .card canvas { width:100%; height:auto; image-rendering:pixelated; border-radius:4px;
+                 background:#fff; display:block; }
+  .card .cap { font-size:11px; margin-top:4px; display:flex; justify-content:space-between; }
+  .card .cap .b { color:var(--ink); font-weight:600; }
+  .card .cap .f { color:var(--muted); }
+  .muted { color:var(--muted); }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  .box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  /* detail drawer */
+  #drawer { position:fixed; top:0; right:0; height:100%; width:540px; max-width:96vw;
+            background:var(--panel); border-left:1px solid var(--line); transform:translateX(100%);
+            transition:transform .18s ease; overflow-y:auto; padding:16px; z-index:20;
+            box-shadow:-12px 0 30px rgba(0,0,0,.4); }
+  #drawer.open { transform:translateX(0); }
+  #drawer .close { float:right; cursor:pointer; color:var(--muted); font-size:18px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin:6px 0; }
+  .kv b { color:var(--muted); font-weight:500; }
+  canvas.chart { background:var(--panel2); border-radius:6px; display:block; max-width:100%; }
+  .seclbl { color:var(--accent2); text-transform:uppercase; letter-spacing:.06em;
+            font-size:11px; margin:14px 0 6px; }
+  .legend { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
+  .legend span i { display:inline-block; width:10px; height:10px; border-radius:2px;
+                    margin-right:4px; vertical-align:-1px; }
+  .partner { display:flex; align-items:center; gap:8px; padding:4px 0; border-top:1px solid var(--line);
+             cursor:pointer; }
+  .partner canvas { width:46px; height:46px; image-rendering:pixelated; background:#fff; border-radius:3px; }
+  .partner .meta { font-size:12px; }
+  table { border-collapse:collapse; font-size:12px; }
+  td,th { padding:3px 8px; border-bottom:1px solid var(--line); text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  .note { font-size:11px; color:var(--muted); max-width:760px; }
+  .cellgrid { cursor:crosshair; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Addition decomposition explorer</h1>
+  <span class="sub" id="hdrsub"></span>
+</header>
+<div class="tabs">
+  <div class="tab active" data-view="gallery">Component gallery</div>
+  <div class="tab" data-view="bases">Base summary</div>
+  <div class="tab" data-view="interplay">Gate / Up / Down interplay</div>
+  <div class="tab" data-view="inspector">(a,b) cell inspector</div>
+</div>
+<main>
+  <!-- shared position/matrix controls -->
+  <div class="controls" id="globalControls">
+    <div class="grp"><label>Token position</label><select id="posSel"></select></div>
+    <div class="grp"><label>Matrices</label><span id="matToggles"></span></div>
+  </div>
+
+  <section class="view active" id="view-gallery">
+    <div class="controls">
+      <div class="grp"><label>Sort by</label>
+        <select id="sortSel">
+          <option value="base">base (period)</option>
+          <option value="conf">periodicity strength</option>
+          <option value="frac">fraction active</option>
+          <option value="id">component id</option>
+        </select></div>
+      <div class="grp"><label>Axis</label>
+        <select id="axisSel">
+          <option value="any">any</option>
+          <option value="a">a</option><option value="b">b</option>
+          <option value="sum">a+b</option><option value="diff">a−b</option>
+        </select></div>
+      <div class="grp"><label>Base</label><select id="baseSel"><option value="any">any</option></select></div>
+      <div class="grp"><label>Min base strength (η²) <span id="confVal">0.15</span></label>
+        <input type="range" id="confSlider" min="0" max="0.6" step="0.01" value="0.15"></div>
+      <div class="grp muted" id="galCount"></div>
+    </div>
+    <div class="legend" id="baseLegend"></div>
+    <div class="gallery" id="gallery"></div>
+  </section>
+
+  <section class="view" id="view-bases">
+    <p class="note">Each component's "base" is the integer period of its most periodic axis
+      (FFT of the causal-importance marginal), kept only when its periodicity strength clears
+      the slider. Vertical stripes ⇒ periodic in <b>a</b>, horizontal ⇒ <b>b</b>, diagonal ⇒
+      <b>a+b</b> or <b>a−b</b>. Click a bar to filter the gallery.</p>
+    <div class="row">
+      <div class="box"><h3>Components per base</h3><canvas id="baseHist" class="chart" width="520" height="300"></canvas></div>
+      <div class="box"><h3>Periodicity by axis</h3><canvas id="axisHist" class="chart" width="360" height="300"></canvas></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-interplay">
+    <p class="note">gate &amp; up write to intermediate neurons (a neuron is active only where
+      <i>both</i> fire, via SiLU(gate)·up); down reads them back out. Partners are ranked by
+      neuron-vector cosine in the 14336-dim intermediate space (weights, position-independent),
+      annotated with the functional CI co-activation correlation at the current position.
+      Neuron involvement is read off weights, not measured activations.</p>
+    <div class="controls">
+      <div class="grp"><label>Source matrix</label>
+        <select id="ipMat"><option value="gate_proj">gate_proj</option>
+          <option value="up_proj">up_proj</option><option value="down_proj">down_proj</option></select></div>
+      <div class="grp"><label>Component</label><select id="ipComp"></select></div>
+    </div>
+    <div class="row">
+      <div class="box"><h3>Selected component</h3><div id="ipSelf"></div></div>
+      <div class="box" style="flex:1"><h3>Top neuron-space partners</h3><div id="ipPartners"></div></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-inspector">
+    <p class="note">Pick an operand pair to see every component active at <code>a+b=</code> for
+      the current position, split by matrix. Click the grid to set (a,b).</p>
+    <div class="controls">
+      <div class="grp"><label>a</label><input type="number" id="insA" min="1" value="17" style="width:64px"></div>
+      <div class="grp"><label>b</label><input type="number" id="insB" min="1" value="34" style="width:64px"></div>
+      <div class="grp muted">click the reference grid to set the cell</div>
+    </div>
+    <div class="row">
+      <div class="box"><h3>Coverage map (any component active)</h3>
+        <canvas id="insMap" class="chart cellgrid" width="300" height="300"></canvas>
+        <div class="muted" style="font-size:11px">x = a, y = b, origin bottom-left</div></div>
+      <div class="box" style="flex:1"><h3 id="insTitle">Active components</h3><div id="insBody"></div></div>
+    </div>
+  </section>
+</main>
+<div id="drawer"></div>
+
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.PD_DATA;
+const N = D.meta.n, MATS = D.meta.matrices, POS = D.meta.positions;
+const MAT_LABEL = {gate_proj:"gate", up_proj:"up", down_proj:"down"};
+const AXIS_SYM = {a:"a", b:"b", sum:"a+b", diff:"a−b"};
+
+// ---------- state ----------
+const state = {
+  pos: POS.includes(4) ? 4 : POS[0],
+  mats: new Set(MATS),
+  minConf: 0.15,
+  baseFilter: "any",
+  axisFilter: "any",
+  sort: "base",
+};
+
+// ---------- decode helpers ----------
+function b64ToBytes(s){ const bin = atob(s); const u = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u; }
+const _gridCache = new Map();
+function getGrid(mat, c, pos){            // -> Float32Array length N*N, index=(b-1)*N+(a-1)
+  const key = mat+":"+c+":"+pos;
+  if(_gridCache.has(key)) return _gridCache.get(key);
+  const entry = D.components[mat][c]; const g = new Float32Array(N*N);
+  if(entry && entry[pos]){
+    const idxBytes = b64ToBytes(entry[pos].sparse.idx);
+    const val = b64ToBytes(entry[pos].sparse.val);
+    const idx = new Uint16Array(idxBytes.buffer, idxBytes.byteOffset, idxBytes.byteLength/2);
+    for(let i=0;i<idx.length;i++) g[idx[i]] = val[i]/255;
+  }
+  _gridCache.set(key,g); return g;
+}
+function comp(mat,c,pos){ const e=D.components[mat][c]; return (e&&e[pos])?e[pos]:null; }
+
+// ---------- color ----------
+function ciColor(v){ // white -> pink -> deep purple
+  if(v<=0) return [255,255,255];
+  const stops=[[255,255,255],[231,84,128],[74,20,140]];
+  const t=Math.min(1,v)*2, i=t<1?0:1, f=t<1?t:t-1;
+  const a=stops[i], b=stops[i+1];
+  return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f].map(Math.round);
+}
+const BASE_PALETTE = ["#7f8694","#e6194b","#3cb44b","#4363d8","#f58231","#911eb4",
+  "#46f0f0","#f032e6","#bcf60c","#fabebe","#008080","#9a6324","#e6beff","#808000"];
+function baseColor(base){ if(base==null) return "#3a3f4a"; return BASE_PALETTE[base % BASE_PALETTE.length]; }
+
+// detected base for a component at pos given current min-strength
+function detectedBase(mat,c,pos){
+  const a=comp(mat,c,pos); if(!a) return null;
+  if(a.base.confidence < state.minConf) return null;
+  return a.base; // {axis, period, confidence}
+}
+
+// ---------- canvas drawing ----------
+function drawHeatmap(canvas, grid, px){
+  const off = drawHeatmap._off || (drawHeatmap._off=document.createElement("canvas"));
+  off.width=N; off.height=N;
+  const octx=off.getContext("2d"); const img=octx.createImageData(N,N);
+  for(let b=0;b<N;b++) for(let a=0;a<N;a++){
+    const v=grid[b*N+a]; const [r,g,bl]=ciColor(v);
+    const y=N-1-b;                       // origin bottom-left
+    const o=(y*N+a)*4; img.data[o]=r; img.data[o+1]=g; img.data[o+2]=bl; img.data[o+3]=255;
+  }
+  octx.putImageData(img,0,0);
+  canvas.width=px; canvas.height=px;
+  const ctx=canvas.getContext("2d"); ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(off,0,0,px,px);
+}
+
+function lineChart(canvas, series, opts){
+  const ctx=canvas.getContext("2d"), W=canvas.width, H=canvas.height;
+  const pad={l:34,r:8,t:18,b:22};
+  ctx.clearRect(0,0,W,H);
+  let maxY=0, maxX=0;
+  series.forEach(s=>{ s.y.forEach(v=>maxY=Math.max(maxY,v)); maxX=Math.max(maxX,s.y.length); });
+  maxY=maxY||1;
+  const X=i=>pad.l+(i/(maxX-1))*(W-pad.l-pad.r);
+  const Y=v=>H-pad.b-(v/maxY)*(H-pad.t-pad.b);
+  ctx.strokeStyle="#3a3f4a"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(pad.l,pad.t); ctx.lineTo(pad.l,H-pad.b); ctx.lineTo(W-pad.r,H-pad.b); ctx.stroke();
+  ctx.fillStyle="#9aa3b2"; ctx.font="10px sans-serif";
+  ctx.fillText(maxY.toFixed(2),2,pad.t+4); ctx.fillText("0",2,H-pad.b);
+  if(opts&&opts.xticks) opts.xticks.forEach(t=>{ const x=X(t.i);
+    ctx.fillText(t.label,x-6,H-pad.b+12); });
+  series.forEach(s=>{ ctx.strokeStyle=s.color; ctx.lineWidth=1.5; ctx.beginPath();
+    s.y.forEach((v,i)=>{ const x=X(i),y=Y(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }); ctx.stroke(); });
+  if(opts&&opts.title){ ctx.fillStyle="#e6e8ee"; ctx.fillText(opts.title,pad.l,12); }
+}
+
+function barChart(canvas, vals, opts){
+  const ctx=canvas.getContext("2d"), W=canvas.width, H=canvas.height;
+  const pad={l:34,r:8,t:18,b:30};
+  ctx.clearRect(0,0,W,H);
+  const maxY=Math.max(1e-9,...vals);
+  const n=vals.length, bw=(W-pad.l-pad.r)/n;
+  ctx.strokeStyle="#3a3f4a"; ctx.beginPath(); ctx.moveTo(pad.l,H-pad.b); ctx.lineTo(W-pad.r,H-pad.b); ctx.stroke();
+  ctx.fillStyle="#9aa3b2"; ctx.font="10px sans-serif"; ctx.fillText(maxY.toFixed(2),2,pad.t+4);
+  vals.forEach((v,i)=>{
+    const x=pad.l+i*bw, h=(v/maxY)*(H-pad.t-pad.b);
+    ctx.fillStyle=(opts&&opts.colors)?opts.colors[i]:"#d957a8";
+    ctx.fillRect(x+1,H-pad.b-h,bw-2,h);
+    if(opts&&opts.labels&&(n<=26||i%2===0)){ ctx.fillStyle="#9aa3b2";
+      ctx.save(); ctx.translate(x+bw/2,H-pad.b+4); ctx.rotate(-Math.PI/4);
+      ctx.fillText(opts.labels[i],-8,4); ctx.restore(); }
+  });
+  if(opts&&opts.onclick){ canvas.onclick=e=>{ const r=canvas.getBoundingClientRect();
+    const i=Math.floor(((e.clientX-r.left)*(W/r.width)-pad.l)/bw); if(i>=0&&i<n) opts.onclick(i); }; }
+  if(opts&&opts.title){ ctx.fillStyle="#e6e8ee"; ctx.fillText(opts.title,pad.l,12); }
+}
+
+function pearson(x,y){ let n=x.length,sx=0,sy=0,sxx=0,syy=0,sxy=0;
+  for(let i=0;i<n;i++){ sx+=x[i]; sy+=y[i]; sxx+=x[i]*x[i]; syy+=y[i]*y[i]; sxy+=x[i]*y[i]; }
+  const cov=sxy-sx*sy/n, vx=sxx-sx*sx/n, vy=syy-sy*sy/n;
+  return (vx<=0||vy<=0)?0:cov/Math.sqrt(vx*vy); }
+
+// ---------- global controls ----------
+function buildGlobalControls(){
+  const ps=document.getElementById("posSel"); ps.innerHTML="";
+  POS.forEach(p=>{ const o=document.createElement("option"); o.value=p;
+    o.textContent=`${p} — ${D.meta.position_labels[p]||p}`; ps.appendChild(o); });
+  ps.value=state.pos;
+  ps.onchange=()=>{ state.pos=+ps.value; refreshAll(); };
+  const mt=document.getElementById("matToggles"); mt.innerHTML="";
+  MATS.forEach(m=>{ const s=document.createElement("span"); s.className="pill on";
+    s.textContent=MAT_LABEL[m]; s.onclick=()=>{ if(state.mats.has(m)&&state.mats.size>1){state.mats.delete(m);s.classList.remove("on");}
+      else {state.mats.add(m);s.classList.add("on");} refreshAll(); };
+    mt.appendChild(s); });
+}
+
+// ---------- gallery ----------
+function aliveComps(mat,pos){ const out=[]; for(let c=0;c<128;c++) if(comp(mat,c,pos)) out.push(c); return out; }
+
+function buildGallery(){
+  const conf=document.getElementById("confSlider"); state.minConf=+conf.value;
+  document.getElementById("confVal").textContent=(+conf.value).toFixed(2);
+  // base filter dropdown (union of detected bases at this pos)
+  const bset=new Set();
+  MATS.forEach(m=>aliveComps(m,state.pos).forEach(c=>{ const b=detectedBase(m,c,state.pos); if(b) bset.add(b.period); }));
+  const bsel=document.getElementById("baseSel"); const prev=bsel.value;
+  bsel.innerHTML='<option value="any">any</option>';
+  [...bset].sort((a,b)=>a-b).forEach(p=>{ const o=document.createElement("option"); o.value=p; o.textContent="period "+p; bsel.appendChild(o); });
+  bsel.value=[...bset].map(String).includes(prev)?prev:"any"; state.baseFilter=bsel.value;
+
+  const items=[];
+  MATS.forEach(m=>{ if(!state.mats.has(m)) return;
+    aliveComps(m,state.pos).forEach(c=>{
+      const a=comp(m,c,state.pos), base=detectedBase(m,c,state.pos);
+      if(state.axisFilter!=="any" && (!base || a.base.axis!==state.axisFilter)) return;
+      if(state.baseFilter!=="any" && (!base || base.period!=+state.baseFilter)) return;
+      items.push({m,c,a,base});
+    });
+  });
+  const key={base:x=>x.base?x.base.period:1e6, conf:x=>-x.a.base.confidence,
+    frac:x=>-x.a.frac, id:x=>x.c}[state.sort];
+  items.sort((x,y)=>{ const kx=key(x),ky=key(y); return kx<ky?-1:kx>ky?1:0; });
+
+  const g=document.getElementById("gallery"); g.innerHTML="";
+  items.forEach(it=>{
+    const card=document.createElement("div"); card.className="card";
+    card.style.borderLeftColor=baseColor(it.base?it.base.period:null);
+    const cv=document.createElement("canvas"); card.appendChild(cv);
+    drawHeatmap(cv, getGrid(it.m,it.c,state.pos), 100);
+    const cap=document.createElement("div"); cap.className="cap";
+    const blabel=it.base?`${it.base.period}<small> ${AXIS_SYM[it.base.axis]}</small>`:"broad";
+    cap.innerHTML=`<span class="b">${MAT_LABEL[it.m]} ${it.c}</span><span class="f">${blabel}</span>`;
+    card.appendChild(cap);
+    card.onclick=()=>openDrawer(it.m,it.c);
+    g.appendChild(card);
+  });
+  document.getElementById("galCount").textContent=`${items.length} components`;
+  buildLegend(bset);
+}
+function buildLegend(bset){
+  const L=document.getElementById("baseLegend"); L.innerHTML="";
+  [...bset].sort((a,b)=>a-b).forEach(p=>{ const s=document.createElement("span");
+    s.innerHTML=`<i style="background:${baseColor(p)}"></i>base ${p}`; L.appendChild(s); });
+  const s=document.createElement("span"); s.innerHTML=`<i style="background:#3a3f4a"></i>broad / aperiodic`; L.appendChild(s);
+}
+
+// ---------- detail drawer ----------
+function openDrawer(mat,c){
+  const dr=document.getElementById("drawer"); dr.classList.add("open");
+  const a=comp(mat,c,state.pos);
+  const xticks=[{i:0,label:"1"},{i:Math.floor(N/2),label:String(Math.floor(N/2))},{i:N-1,label:String(N)}];
+  const sumticks=[{i:0,label:"2"},{i:N-1,label:String(N+1)},{i:2*N-2,label:String(2*N)}];
+  dr.innerHTML=`<span class="close" onclick="document.getElementById('drawer').classList.remove('open')">✕</span>
+    <h2>${MAT_LABEL[mat]} · component ${c}</h2>
+    <div class="muted">position ${state.pos} — ${D.meta.position_labels[state.pos]||state.pos}</div>`;
+  if(!a){ dr.innerHTML+=`<p class="muted">inactive at this position.</p>`; return; }
+
+  const base=a.base, isP=base.confidence>=state.minConf;
+  const kv=document.createElement("div"); kv.className="kv";
+  kv.innerHTML=`<b>detected base</b><span>${isP?`period <b style="color:var(--ink)">${base.period}</b> along ${AXIS_SYM[base.axis]} (strength ${base.confidence.toFixed(2)})`:"broad / aperiodic"}</span>
+    <b>fraction active</b><span>${(a.frac*100).toFixed(2)}%</span>
+    <b>max CI</b><span>${a.maxci}</span>`;
+  dr.appendChild(kv);
+
+  const big=document.createElement("canvas"); drawHeatmap(big,getGrid(mat,c,state.pos),300);
+  big.style.cssText="width:300px;height:300px;image-rendering:pixelated;background:#fff;border-radius:6px;margin:6px 0";
+  addSec(dr,"causal importance over (a,b) — x=a, y=b"); dr.appendChild(big);
+
+  addSec(dr,"marginal CI");
+  const lc=mkChart(dr,500,150); lineChart(lc,[
+    {y:a.marg.a,color:"#5ab0e0"},{y:a.marg.b,color:"#e6194b"}],{title:"a (blue), b (red)",xticks});
+  const ls=mkChart(dr,500,150); lineChart(ls,[{y:a.marg.sum,color:"#f58231"}],{title:"a+b",xticks:sumticks});
+
+  addSec(dr,"FFT power spectrum (period = axis-length / frequency)");
+  ["a","b","sum"].forEach(ax=>{
+    const fc=mkChart(dr,500,130); const len=ax==="sum"?(2*N-1):N;
+    const labels=a.fft[ax].map((_,k)=>String(Math.round(len/(k+1))));
+    barChart(fc,a.fft[ax],{title:"axis "+AXIS_SYM[ax]+" — x=period",labels:labels.map((l,k)=>k%6===0?l:"")});
+  });
+
+  addSec(dr,"residue (mod m) fingerprint — η² of CI explained by a/b/(a+b) mod m");
+  const mods=[]; for(let m=2;m<=D.meta.max_modulus;m++) mods.push(m);
+  ["a","b","sum"].forEach(ax=>{
+    const ec=mkChart(dr,500,120);
+    barChart(ec,a.eta[ax],{title:"axis "+AXIS_SYM[ax],labels:mods.map(String),
+      colors:a.eta[ax].map(()=> ax==="a"?"#5ab0e0":ax==="b"?"#e6194b":"#f58231")});
+  });
+
+  if(D.meta.has_weights) drawWeightSection(dr,mat,c);
+}
+function addSec(parent,txt){ const d=document.createElement("div"); d.className="seclbl"; d.textContent=txt; parent.appendChild(d); }
+function mkChart(parent,w,h){ const c=document.createElement("canvas"); c.className="chart"; c.width=w; c.height=h;
+  c.style.marginBottom="8px"; parent.appendChild(c); return c; }
+
+// overlap is stored as src -> [{c:dst,cos}]. For a given (matrix, component) list the
+// neuron-space partners in the other two matrices, reversing the lookup when this matrix
+// is the dst side of a stored pair.
+function partnerPairs(mat){
+  return mat==="gate_proj" ? [["gate_up","up_proj",false,"shares neurons with up"],["gate_down","down_proj",false,"feeds down"]]
+       : mat==="up_proj"   ? [["gate_up","gate_proj",true,"shares neurons with gate"],["up_down","down_proj",false,"feeds down"]]
+       : [["gate_down","gate_proj",true,"reads gate's neurons"],["up_down","up_proj",true,"reads up's neurons"]];
+}
+function drawWeightSection(dr,mat,c){
+  const role = mat==="down_proj" ? "reads from neurons" : "writes to neurons";
+  addSec(dr,`top intermediate neurons (${role})`);
+  const nf=D.neurons[mat][c];
+  const t=document.createElement("table");
+  t.innerHTML="<tr><th>neuron</th><th>weight</th></tr>"+nf.idx.map((id,i)=>`<tr><td>${id}</td><td>${nf.w[i]}</td></tr>`).join("");
+  dr.appendChild(t);
+  partnerPairs(mat).forEach(([ovKey,dstMat,reversed,desc])=>{
+    addSec(dr,`neuron-space partners — ${desc}`);
+    renderPartners(dr,mat,c,dstMat,reversed?reverseLookup(ovKey,c):D.overlap[ovKey][c]);
+  });
+}
+function reverseLookup(ovKey,c){ // ovKey lists src-> [{c:dst,cos}]; find srcs whose top includes c
+  const arr=D.overlap[ovKey], out=[];
+  for(let s=0;s<arr.length;s++){ const hit=arr[s].find(e=>e.c===c); if(hit) out.push({c:s,cos:hit.cos}); }
+  out.sort((a,b)=>Math.abs(b.cos)-Math.abs(a.cos)); return out.slice(0,10);
+}
+function renderPartners(parent,srcMat,srcC,dstMat,list){
+  if(!list||!list.length){ const p=document.createElement("div"); p.className="muted"; p.textContent="(none)"; parent.appendChild(p); return; }
+  const srcGrid=getGrid(srcMat,srcC,state.pos);
+  list.forEach(e=>{
+    const row=document.createElement("div"); row.className="partner";
+    const cv=document.createElement("canvas"); drawHeatmap(cv,getGrid(dstMat,e.c,state.pos),46); row.appendChild(cv);
+    const corr=comp(dstMat,e.c,state.pos)?pearson(srcGrid,getGrid(dstMat,e.c,state.pos)):0;
+    const meta=document.createElement("div"); meta.className="meta";
+    meta.innerHTML=`<b>${MAT_LABEL[dstMat]} ${e.c}</b><br><span class="muted">neuron cos ${e.cos} · CI corr ${corr.toFixed(2)}</span>`;
+    row.appendChild(meta);
+    row.onclick=()=>openDrawer(dstMat,e.c);
+    parent.appendChild(row);
+  });
+}
+
+// ---------- base summary ----------
+function buildBases(){
+  const counts={}, axisCounts={a:0,b:0,sum:0,diff:0,broad:0};
+  MATS.forEach(m=>{ if(!state.mats.has(m)) return;
+    aliveComps(m,state.pos).forEach(c=>{ const b=detectedBase(m,c,state.pos);
+      if(b){ counts[b.period]=(counts[b.period]||0)+1; axisCounts[b.axis]++; }
+      else axisCounts.broad++; });
+  });
+  const periods=Object.keys(counts).map(Number).sort((a,b)=>a-b);
+  barChart(document.getElementById("baseHist"),periods.map(p=>counts[p]),
+    {labels:periods.map(String),colors:periods.map(baseColor),title:"period",
+     onclick:i=>{ state.baseFilter=String(periods[i]); switchView("gallery");
+       document.getElementById("baseSel").value=String(periods[i]); buildGallery(); }});
+  const axes=["a","b","sum","diff","broad"];
+  barChart(document.getElementById("axisHist"),axes.map(a=>axisCounts[a]||0),
+    {labels:axes.map(a=>AXIS_SYM[a]||"broad"),title:"axis"});
+}
+
+// ---------- interplay ----------
+function buildInterplayControls(){
+  const mc=document.getElementById("ipMat"), cc=document.getElementById("ipComp");
+  function fill(){ const m=mc.value; cc.innerHTML="";
+    aliveComps(m,state.pos).forEach(c=>{ const o=document.createElement("option"); o.value=c;
+      const b=detectedBase(m,c,state.pos); o.textContent=`${c}${b?" · base "+b.period:""}`; cc.appendChild(o); });
+    buildInterplay(); }
+  mc.onchange=fill; cc.onchange=buildInterplay; fill();
+}
+function buildInterplay(){
+  if(!D.meta.has_weights){ document.getElementById("ipSelf").innerHTML="<span class='muted'>built with --no-weights</span>"; return; }
+  const m=document.getElementById("ipMat").value, c=+document.getElementById("ipComp").value;
+  const self=document.getElementById("ipSelf"); self.innerHTML="";
+  const cv=document.createElement("canvas"); drawHeatmap(cv,getGrid(m,c,state.pos),180);
+  cv.style.cssText="image-rendering:pixelated;background:#fff;border-radius:6px"; self.appendChild(cv);
+  const b=detectedBase(m,c,state.pos);
+  const info=document.createElement("div"); info.innerHTML=`<div class="kv"><b>base</b><span>${b?b.period+" "+AXIS_SYM[b.axis]:"broad"}</span></div>`;
+  self.appendChild(info);
+  const pc=document.getElementById("ipPartners"); pc.innerHTML="";
+  partnerPairs(m).forEach(([ovKey,dstMat,reversed,desc])=>{
+    addSec(pc,desc);
+    renderPartners(pc,m,c,dstMat,reversed?reverseLookup(ovKey,c):D.overlap[ovKey][c]);
+  });
+}
+
+// ---------- cell inspector ----------
+function buildInspector(){
+  const map=document.getElementById("insMap");
+  // coverage = number of active components across selected mats at this pos
+  const cov=new Float32Array(N*N);
+  MATS.forEach(m=>{ if(!state.mats.has(m)) return;
+    aliveComps(m,state.pos).forEach(c=>{ const g=getGrid(m,c,state.pos);
+      for(let i=0;i<g.length;i++) if(g[i]>0) cov[i]++; }); });
+  let mx=0; for(const v of cov) mx=Math.max(mx,v);
+  const norm=new Float32Array(N*N); for(let i=0;i<cov.length;i++) norm[i]=mx?cov[i]/mx:0;
+  drawHeatmap(map,norm,300);
+  map.onclick=e=>{ const r=map.getBoundingClientRect();
+    const a=Math.floor((e.clientX-r.left)/r.width*N)+1, b=N-Math.floor((e.clientY-r.top)/r.height*N);
+    document.getElementById("insA").value=Math.min(N,Math.max(1,a));
+    document.getElementById("insB").value=Math.min(N,Math.max(1,b)); showCell(); };
+  showCell();
+}
+function showCell(){
+  const a=+document.getElementById("insA").value, b=+document.getElementById("insB").value;
+  document.getElementById("insTitle").textContent=`Active components at ${a}+${b}=${a+b} (pos ${state.pos})`;
+  const idx=(b-1)*N+(a-1); const body=document.getElementById("insBody"); body.innerHTML="";
+  MATS.forEach(m=>{ if(!state.mats.has(m)) return;
+    const hits=[]; aliveComps(m,state.pos).forEach(c=>{ const v=getGrid(m,c,state.pos)[idx];
+      if(v>0){ const bs=detectedBase(m,c,state.pos); hits.push({c,v,bs}); } });
+    hits.sort((x,y)=>y.v-x.v);
+    const h=document.createElement("div"); h.innerHTML=`<div class="seclbl">${MAT_LABEL[m]} — ${hits.length} active</div>`;
+    const tbl=document.createElement("table"); tbl.innerHTML="<tr><th>comp</th><th>CI</th><th>base</th></tr>"+
+      hits.map(x=>`<tr><td><a style="cursor:pointer;color:var(--accent2)" onclick="openDrawer('${m}',${x.c})">${x.c}</a></td><td>${x.v.toFixed(2)}</td><td>${x.bs?x.bs.period+" "+AXIS_SYM[x.bs.axis]:"—"}</td></tr>`).join("");
+    h.appendChild(tbl); body.appendChild(h);
+  });
+}
+
+// ---------- wiring ----------
+function switchView(v){
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===v));
+  document.querySelectorAll(".view").forEach(s=>s.classList.toggle("active",s.id==="view-"+v));
+  refreshAll();
+}
+function refreshAll(){
+  const active=document.querySelector(".tab.active").dataset.view;
+  if(active==="gallery") buildGallery();
+  else if(active==="bases") buildBases();
+  else if(active==="interplay") buildInterplayControls();
+  else if(active==="inspector") buildInspector();
+}
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>switchView(t.dataset.view));
+["sortSel","axisSel","baseSel"].forEach(id=>document.getElementById(id).onchange=e=>{
+  state.sort=document.getElementById("sortSel").value;
+  state.axisFilter=document.getElementById("axisSel").value;
+  state.baseFilter=document.getElementById("baseSel").value; buildGallery(); });
+document.getElementById("confSlider").oninput=()=>buildGallery();
+document.getElementById("insA").oninput=showCell; document.getElementById("insB").oninput=showCell;
+
+document.getElementById("hdrsub").textContent=
+  `${D.meta.run_id} · "a${D.meta.op}b=" · ${N}×${N} grid · CI floor ${D.meta.ci_thr}${D.meta.has_weights?"":" · no weights"}`;
+buildGlobalControls();
+buildGallery();
+</script>
+</body>
+</html>
