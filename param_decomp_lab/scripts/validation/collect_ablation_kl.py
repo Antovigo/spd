@@ -196,7 +196,10 @@ def collect_ablation_kl(
     alive = _read_alive(run.run_dir)
     if max_components is not None:
         alive = alive[:max_components]
-    modules = sorted({a.module for a in alive}, key=parse_module_name)
+    # Hook/cache EVERY decomposed module (not just the alive subset): the CI fn is a shared
+    # transformer over all matrices, so it needs every module's input. The alive set only
+    # decides which components get ablated.
+    modules = sorted(model.components.keys(), key=parse_module_name)
     n_comp = {m: model.components[m].V.shape[1] for m in modules}
     logger.info(
         f"{len(alive)} alive components over {len(modules)} modules, {pool.shape[0]} prompts, N={n}"
@@ -264,7 +267,9 @@ def collect_ablation_kl(
             pert: dict[str, np.ndarray] = {}
             for m in modules:
                 x = ref.cache[m].float()  # [b, seq, d_in]
-                inner_all = torch.einsum("bsd,dc->bsc", x, v_unit[m].float())  # normalized
+                # .float() the einsum outputs: under bf16 autocast the matmul returns bf16,
+                # which numpy can't convert.
+                inner_all = torch.einsum("bsd,dc->bsc", x, v_unit[m].float()).float()  # normalized
                 g_inner = inner_all[:, -1].cpu().numpy()  # [b, C] at the = position
                 ci_last = ci.lower_leaky[m][:, -1].float().cpu().numpy()  # [b, C]
                 if skip_eps > 0:
