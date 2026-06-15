@@ -9,6 +9,8 @@ no separate `source .venv/bin/activate` needed.
 ```bash
 # The targeted 8B addition run.
 MODEL_PATH=~/out/runs/llama8b-add-02/model_20000.pth
+RUN_DIR=$(dirname "$MODEL_PATH")
+JSON="$RUN_DIR/alive_components_per_position.json"
 ```
 
 ## sample_target_data
@@ -100,6 +102,33 @@ self-contained `index.html` + `data.js` (open from `file://`, no server/CDN/GPU)
 ```bash
 uv run python -m param_decomp_lab.scripts.validation.build_addition_explorer "$MODEL_PATH"
 uv run python -m param_decomp_lab.scripts.validation.build_addition_explorer "$MODEL_PATH" --no-weights
+```
+
+## collect_ablation_kl
+
+Per-component ablation effect on every `a+b=` prompt — a cleaner metric than CI. Ablates
+each alive subcomponent (removes `U_c V_c^T`) and records, at the `=` position: KL of the
+next-token distribution vs the un-ablated model, the ablated argmax token + prob, the
+normalized inner activation `(x·V_c)/||V_c||`, and CI. Reference = all components + delta on
+(= exact reconstruction of the target). 8B forward → SLURM.
+
+```bash
+uv run python -m param_decomp_lab.scripts.validation.collect_ablation_kl "$MODEL_PATH" --slurm
+# smoke test first (subset, short):
+uv run python -m param_decomp_lab.scripts.validation.collect_ablation_kl "$MODEL_PATH" \
+    --max-prompts=256 --max-components=12 --output-dir="$RUN_DIR/ablation_kl_smoke" --slurm --slurm-time=0:20:00
+```
+
+## build_arith_ablation_explorer
+
+GPU-free HTML explorer over `collect_ablation_kl`'s `data.npz` (Objective 2). Detects each
+component's period by autocorrelation of the ablation-KL marginal (spiky, non-sinusoidal),
+and packs the (a,b) grids of all five switchable color metrics (CI, ablation KL, inner
+activation, original token, ablated token). Writes `index.html` + `data.js` to
+`figures/arith_ablation_explorer/`.
+
+```bash
+uv run python -m param_decomp_lab.scripts.validation.build_arith_ablation_explorer "$RUN_DIR"
 ```
 
 ## headless_check

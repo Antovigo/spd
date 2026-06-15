@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arithmetic ablation explorer</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --panel2:#20242e; --ink:#e6e8ee; --muted:#9aa3b2;
+          --line:#2c313c; --accent:#d957a8; --accent2:#5ab0e0; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  h1,h2,h3 { margin:0 0 6px; font-weight:600; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .controls { display:flex; gap:16px; flex-wrap:wrap; align-items:center; background:var(--panel);
+              border:1px solid var(--line); border-radius:8px; padding:10px 14px; margin:12px 18px; }
+  .controls label { color:var(--muted); margin-right:5px; }
+  .grp { display:flex; align-items:center; gap:6px; }
+  select, input[type=range] { background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:4px 6px; }
+  .pill { padding:3px 8px; border-radius:99px; border:1px solid var(--line); cursor:pointer; color:var(--muted); user-select:none; }
+  .pill.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  main { padding:0 18px 60px; }
+  .gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px; cursor:pointer; border-left-width:4px; }
+  .card:hover { outline:1px solid var(--accent2); }
+  .card canvas { width:100%; height:auto; image-rendering:pixelated; border-radius:4px; background:#fff; display:block; }
+  .card .cap { font-size:11px; margin-top:4px; display:flex; justify-content:space-between; }
+  .card .cap .b { font-weight:600; } .card .cap .f { color:var(--muted); }
+  .muted { color:var(--muted); } .legend { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); align-items:center; margin:0 18px 8px; }
+  .legend i { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
+  #drawer { position:fixed; top:0; right:0; height:100%; width:560px; max-width:96vw; background:var(--panel);
+            border-left:1px solid var(--line); transform:translateX(100%); transition:transform .18s ease;
+            overflow-y:auto; padding:16px; z-index:20; box-shadow:-12px 0 30px rgba(0,0,0,.4); }
+  #drawer.open { transform:translateX(0); }
+  #drawer .close { float:right; cursor:pointer; color:var(--muted); font-size:18px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin:6px 0; }
+  .kv b { color:var(--muted); font-weight:500; }
+  canvas.chart { background:var(--panel2); border-radius:6px; display:block; max-width:100%; margin-bottom:8px; }
+  .seclbl { color:var(--accent2); text-transform:uppercase; letter-spacing:.06em; font-size:11px; margin:14px 0 6px; }
+  .multi { display:flex; gap:8px; flex-wrap:wrap; }
+  .multi figure { margin:0; text-align:center; } .multi figcaption { font-size:10px; color:var(--muted); }
+  .multi canvas { width:96px; height:96px; image-rendering:pixelated; background:#fff; border-radius:4px; }
+  .cbar { height:11px; width:120px; border-radius:2px; }
+</style>
+</head>
+<body>
+<header><h1>Arithmetic ablation explorer</h1><span class="sub" id="hdrsub"></span></header>
+<div class="controls">
+  <div class="grp"><label>Color</label>
+    <select id="metricSel">
+      <option value="kl">ablation KL</option>
+      <option value="ci">causal importance</option>
+      <option value="inner">inner activation</option>
+      <option value="orig">original token</option>
+      <option value="abl">ablated token</option>
+    </select></div>
+  <div class="grp"><label>Period</label><select id="periodSel"><option value="any">any</option></select></div>
+  <div class="grp"><label>Axis</label>
+    <select id="axisSel"><option value="any">any</option><option value="a">a</option><option value="b">b</option>
+      <option value="sum">a+b</option><option value="diff">a−b</option></select></div>
+  <div class="grp"><label>Matrices</label><span id="matToggles"></span></div>
+  <div class="grp"><label>Min strength <span id="strVal">0.40</span></label>
+    <input type="range" id="strSlider" min="0" max="0.95" step="0.05" value="0.4"></div>
+  <div class="grp"><label>Sort</label>
+    <select id="sortSel"><option value="period">period</option><option value="strength">periodicity</option>
+      <option value="mean_kl">mean KL</option><option value="max_kl">max KL</option><option value="id">id</option></select></div>
+  <div class="grp muted" id="galCount"></div>
+</div>
+<div class="legend" id="legend"></div>
+<main><div class="gallery" id="gallery"></div></main>
+<div id="drawer"></div>
+
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.PD_DATA, M = D.meta, N = M.n;
+const MATS = M.matrices, MAT_LABEL = {"mlp.gate_proj":"gate","mlp.up_proj":"up","mlp.down_proj":"down"};
+const AXIS_SYM = {a:"a", b:"b", sum:"a+b", diff:"a−b"};
+const METRIC_LABEL = {kl:"ablation KL", ci:"causal importance", inner:"inner activation", orig:"original token", abl:"ablated token"};
+const TOK_SENTINEL = -32768;
+const state = { metric:"kl", period:"any", axis:"any", mats:new Set(MATS), minStr:0.4, sort:"period" };
+
+// ---------- decode ----------
+function bytes(s){ const b=atob(s),u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; }
+function u8(s){ return bytes(s); }
+function i8(s){ const b=bytes(s); return new Int8Array(b.buffer,b.byteOffset,b.byteLength); }
+function i16(s){ const b=bytes(s); return new Int16Array(b.buffer,b.byteOffset,b.byteLength/2); }
+const ORIG_INT = i16(D.orig.int);
+const _cache = new Map();
+// returns {vals:Float or Int array length N*N, kind} for the chosen metric, index = a*N + b
+function metricGrid(comp, metric){
+  const key = comp.module+":"+comp.c+":"+metric;
+  if(_cache.has(key)) return _cache.get(key);
+  let out;
+  if(metric==="ci") out = Float32Array.from(u8(comp.grids.ci), v=>v/255);
+  else if(metric==="kl") out = Float32Array.from(u8(comp.grids.kl), v=>v/255);            // normalized 0..1
+  else if(metric==="inner") out = Float32Array.from(i8(comp.grids.inner), v=>v/127);       // signed -1..1
+  else if(metric==="abl") out = i16(comp.grids.abl);
+  else out = ORIG_INT;
+  _cache.set(key,out); return out;
+}
+
+// ---------- colors ----------
+function lerp(a,b,t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+function ramp(stops, t){ t=Math.max(0,Math.min(1,t)); const x=t*(stops.length-1), i=Math.min(stops.length-2,Math.floor(x)); return lerp(stops[i],stops[i+1],x-i).map(Math.round); }
+const SEQ_PURPLE=[[255,255,255],[231,84,128],[74,20,140]];
+const SEQ_HOT=[[255,255,255],[254,217,118],[252,141,89],[227,26,28],[120,0,20]];
+const DIVERGE=[[33,102,172],[103,169,207],[247,247,247],[239,138,98],[178,24,43]];
+function tokenColor(v){
+  if(v===TOK_SENTINEL) return [70,70,78];
+  const [lo,hi]=M.token_range, t=hi>lo?(v-lo)/(hi-lo):0.5;
+  // HSL rainbow 240->0
+  const h=(1-Math.max(0,Math.min(1,t)))*240, c=0.65, x=c*(1-Math.abs((h/60)%2-1)), m=0.25;
+  let r,g,b; if(h<60)[r,g,b]=[c,x,0]; else if(h<120)[r,g,b]=[x,c,0]; else if(h<180)[r,g,b]=[0,c,x]; else if(h<240)[r,g,b]=[0,x,c]; else [r,g,b]=[x,0,c];
+  return [(r+m)*255,(g+m)*255,(b+m)*255].map(Math.round);
+}
+function colorFor(metric, v){
+  if(metric==="ci") return ramp(SEQ_PURPLE, v);
+  if(metric==="kl") return ramp(SEQ_HOT, v);
+  if(metric==="inner") return ramp(DIVERGE, (v+1)/2);
+  return tokenColor(v);   // orig / abl
+}
+
+// ---------- heatmap ----------
+function drawHeatmap(canvas, vals, metric, px){
+  const off = drawHeatmap._off || (drawHeatmap._off=document.createElement("canvas"));
+  off.width=N; off.height=N; const octx=off.getContext("2d"), img=octx.createImageData(N,N);
+  for(let a=0;a<N;a++) for(let b=0;b<N;b++){
+    const [r,g,bl]=colorFor(metric, vals[a*N+b]);
+    const y=N-1-b, o=(y*N+a)*4;                 // x=a, y=b origin bottom-left
+    img.data[o]=r; img.data[o+1]=g; img.data[o+2]=bl; img.data[o+3]=255;
+  }
+  octx.putImageData(img,0,0);
+  canvas.width=px; canvas.height=px; const ctx=canvas.getContext("2d"); ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(off,0,0,px,px);
+}
+
+function lineChart(canvas, series, opts){
+  const ctx=canvas.getContext("2d"), W=canvas.width, H=canvas.height, pad={l:34,r:8,t:18,b:20};
+  ctx.clearRect(0,0,W,H); let maxY=0,maxX=0,minY=0;
+  series.forEach(s=>{ s.y.forEach(v=>{maxY=Math.max(maxY,v);minY=Math.min(minY,v);}); maxX=Math.max(maxX,s.y.length); });
+  maxY=maxY||1; const span=(maxY-minY)||1;
+  const X=i=>pad.l+(i/(maxX-1))*(W-pad.l-pad.r), Y=v=>H-pad.b-((v-minY)/span)*(H-pad.t-pad.b);
+  ctx.strokeStyle="#3a3f4a"; ctx.beginPath(); ctx.moveTo(pad.l,pad.t); ctx.lineTo(pad.l,H-pad.b); ctx.lineTo(W-pad.r,H-pad.b); ctx.stroke();
+  ctx.fillStyle="#9aa3b2"; ctx.font="10px sans-serif"; ctx.fillText(maxY.toFixed(2),2,pad.t+4); ctx.fillText(minY.toFixed(1),2,H-pad.b);
+  if(opts&&opts.mark){ const x=X(opts.mark); ctx.strokeStyle=opts.markColor||"#d957a8"; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(x,pad.t); ctx.lineTo(x,H-pad.b); ctx.stroke(); ctx.setLineDash([]); }
+  series.forEach(s=>{ ctx.strokeStyle=s.color; ctx.lineWidth=1.5; ctx.beginPath(); s.y.forEach((v,i)=>{const x=X(i),y=Y(v); i?ctx.lineTo(x,y):ctx.moveTo(x,y);}); ctx.stroke(); });
+  if(opts&&opts.title){ ctx.fillStyle="#e6e8ee"; ctx.fillText(opts.title,pad.l,12); }
+}
+
+// ---------- detected period given strength threshold ----------
+function detected(comp){ return comp.strength>=state.minStr && comp.period>0 ? comp : null; }
+function shortMat(m){ return MAT_LABEL[m]||m; }
+
+// ---------- controls ----------
+function buildControls(){
+  const mt=document.getElementById("matToggles"); mt.innerHTML="";
+  MATS.forEach(m=>{ const s=document.createElement("span"); s.className="pill on"; s.textContent=shortMat(m);
+    s.onclick=()=>{ if(state.mats.has(m)&&state.mats.size>1){state.mats.delete(m);s.classList.remove("on");} else {state.mats.add(m);s.classList.add("on");} render(); };
+    mt.appendChild(s); });
+  document.getElementById("metricSel").onchange=e=>{ state.metric=e.target.value; render(); };
+  document.getElementById("axisSel").onchange=e=>{ state.axis=e.target.value; render(); };
+  document.getElementById("periodSel").onchange=e=>{ state.period=e.target.value; render(); };
+  document.getElementById("sortSel").onchange=e=>{ state.sort=e.target.value; render(); };
+  document.getElementById("strSlider").oninput=e=>{ state.minStr=+e.target.value; document.getElementById("strVal").textContent=(+e.target.value).toFixed(2); render(); };
+}
+function refreshPeriodOptions(){
+  const ps=new Set(); D.components.forEach(c=>{ const d=detected(c); if(d&&state.mats.has(c.matrix)) ps.add(d.period); });
+  const sel=document.getElementById("periodSel"), prev=sel.value;
+  sel.innerHTML='<option value="any">any</option>';
+  [...ps].sort((a,b)=>a-b).forEach(p=>{ const o=document.createElement("option"); o.value=p; o.textContent="period "+p; sel.appendChild(o); });
+  sel.value=[...ps].map(String).includes(prev)?prev:"any"; state.period=sel.value;
+}
+
+const PALETTE=["#7f8694","#e6194b","#3cb44b","#4363d8","#f58231","#911eb4","#46f0f0","#f032e6","#bcf60c","#008080","#9a6324","#e6beff","#808000"];
+function periodColor(p){ return p>0?PALETTE[p%PALETTE.length]:"#3a3f4a"; }
+
+// ---------- gallery ----------
+function render(){
+  refreshPeriodOptions();
+  const items=D.components.filter(c=>{
+    if(!state.mats.has(c.matrix)) return false;
+    const d=detected(c);
+    if(state.axis!=="any" && (!d || c.axis!==state.axis)) return false;
+    if(state.period!=="any" && (!d || d.period!=+state.period)) return false;
+    return true;
+  });
+  const key={period:c=>detected(c)?c.period:1e6, strength:c=>-c.strength, mean_kl:c=>-c.mean_kl, max_kl:c=>-c.max_kl, id:c=>c.c}[state.sort];
+  items.sort((x,y)=>{const a=key(x),b=key(y);return a<b?-1:a>b?1:0;});
+
+  const g=document.getElementById("gallery"); g.innerHTML="";
+  items.forEach(c=>{
+    const card=document.createElement("div"); card.className="card";
+    const d=detected(c); card.style.borderLeftColor=periodColor(d?c.period:0);
+    const cv=document.createElement("canvas"); card.appendChild(cv);
+    drawHeatmap(cv, metricGrid(c,state.metric), state.metric, 100);
+    const cap=document.createElement("div"); cap.className="cap";
+    cap.innerHTML=`<span class="b">${shortMat(c.matrix)} ${c.c}</span><span class="f">${d?d.period+" "+AXIS_SYM[c.axis]:"—"}</span>`;
+    card.appendChild(cap); card.onclick=()=>openDrawer(c); g.appendChild(card);
+  });
+  document.getElementById("galCount").textContent=`${items.length} components`;
+  buildLegend();
+}
+function buildLegend(){
+  const L=document.getElementById("legend"); L.innerHTML="";
+  const m=state.metric, lab=document.createElement("span"); lab.textContent=METRIC_LABEL[m]+":"; L.appendChild(lab);
+  const bar=document.createElement("canvas"); bar.className="cbar"; bar.width=120; bar.height=11; const bx=bar.getContext("2d");
+  for(let i=0;i<120;i++){ let col; if(m==="inner") col=colorFor(m,(i/119)*2-1); else if(m==="orig"||m==="abl") col=tokenColor(M.token_range[0]+(i/119)*(M.token_range[1]-M.token_range[0])); else col=colorFor(m,i/119); bx.fillStyle=`rgb(${col[0]},${col[1]},${col[2]})`; bx.fillRect(i,0,1,11); }
+  L.appendChild(bar);
+  const range=document.createElement("span");
+  if(m==="ci") range.textContent="0 → 1";
+  else if(m==="kl") range.textContent=`0 → ${M.kl_scale.toFixed(3)} nats (clipped)`;
+  else if(m==="inner") range.textContent=`±${M.inner_scale.toFixed(2)} (signed)`;
+  else range.textContent=`predicted int ${M.token_range[0]} → ${M.token_range[1]} (gray = non-numeric)`;
+  L.appendChild(range);
+  const note=document.createElement("span"); note.style.marginLeft="14px"; note.innerHTML="border = detected period:";
+  L.appendChild(note);
+  const ps=new Set(); D.components.forEach(c=>{const d=detected(c); if(d&&state.mats.has(c.matrix)) ps.add(c.period);});
+  [...ps].sort((a,b)=>a-b).forEach(p=>{ const s=document.createElement("span"); s.innerHTML=`<i style="background:${periodColor(p)}"></i>${p}`; L.appendChild(s); });
+}
+
+// ---------- detail ----------
+function openDrawer(c){
+  const dr=document.getElementById("drawer"); dr.classList.add("open");
+  const d=detected(c);
+  dr.innerHTML=`<span class="close" onclick="document.getElementById('drawer').classList.remove('open')">✕</span>
+    <h2>${shortMat(c.matrix)} · component ${c.c}</h2>`;
+  const kv=document.createElement("div"); kv.className="kv";
+  kv.innerHTML=`<b>period (autocorr)</b><span>${d?`<b style="color:var(--ink)">${c.period}</b> along ${AXIS_SYM[c.axis]} (strength ${c.strength.toFixed(2)})`:"broad / aperiodic"}</span>
+    <b>mean KL</b><span>${c.mean_kl}</span><b>max KL</b><span>${c.max_kl}</span>
+    <b>‖U‖·‖V‖</b><span>${(c.norm!==undefined)?c.norm:"—"}</span>`;
+  dr.appendChild(kv);
+
+  addSec(dr,`${METRIC_LABEL[state.metric]} over (a,b) — x=a, y=b`);
+  const big=document.createElement("canvas"); drawHeatmap(big,metricGrid(c,state.metric),state.metric,300);
+  big.style.cssText="width:300px;height:300px;image-rendering:pixelated;background:#fff;border-radius:6px"; dr.appendChild(big);
+
+  addSec(dr,"all metrics");
+  const multi=document.createElement("div"); multi.className="multi";
+  ["kl","ci","inner","orig","abl"].forEach(m=>{ const fig=document.createElement("figure"); const cv=document.createElement("canvas");
+    drawHeatmap(cv,metricGrid(c,m),m,96); fig.appendChild(cv); const cap=document.createElement("figcaption"); cap.textContent=METRIC_LABEL[m]; fig.appendChild(cap); multi.appendChild(fig); });
+  dr.appendChild(multi);
+
+  addSec(dr,"autocorrelation of ablation-KL marginal (dashed = detected period)");
+  ["a","b","sum","diff"].forEach(ax=>{ const cv=mkChart(dr,520,110);
+    lineChart(cv,[{y:c.autocorr[ax],color:"#5ab0e0"}],{title:"axis "+AXIS_SYM[ax],mark:(ax===c.axis&&d)?c.period:null}); });
+
+  addSec(dr,"marginal ablation-KL");
+  ["a","b","sum"].forEach(ax=>{ const cv=mkChart(dr,520,90); lineChart(cv,[{y:c.marg_kl[ax],color:"#e3211c"}],{title:"axis "+AXIS_SYM[ax]}); });
+}
+function addSec(p,t){ const d=document.createElement("div"); d.className="seclbl"; d.textContent=t; p.appendChild(d); }
+function mkChart(p,w,h){ const c=document.createElement("canvas"); c.className="chart"; c.width=w; c.height=h; p.appendChild(c); return c; }
+
+document.getElementById("hdrsub").textContent=`${M.run_id} · "a${M.op}b=" · ${N}×${N} · ${M.n_alive} components · KL at ${M.position} · ${M.kl_direction}`;
+buildControls();
+render();
+</script>
+</body>
+</html>
