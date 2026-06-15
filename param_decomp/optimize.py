@@ -666,8 +666,11 @@ class Trainer:
                 losses = {name: m.update(ctx) for name, m in self.loss_metrics.items()}
 
             # Per-subcomponent max CI over the target batch, for CI-scaled weight decay.
+            ci_scaled_wd_start_step = (
+                pd_config.ci_scaled_component_weight_decay_start_frac * pd_config.steps
+            )
             batch_ci_max: dict[str, Tensor] | None = None
-            if pd_config.ci_scaled_component_weight_decay > 0.0:
+            if pd_config.ci_scaled_component_weight_decay > 0.0 and step >= ci_scaled_wd_start_step:
                 batch_ci_max = {
                     name: ci.detach().float().amax(dim=tuple(range(ci.ndim - 1)))
                     for name, ci in ctx.ci.lower_leaky.items()
