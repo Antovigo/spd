@@ -99,8 +99,14 @@ def _plot_causal_importances_figure(
 
 def plot_weight_magnitude(
     weight_magnitudes: dict[str, Float[Tensor, " C"]],
+    max_ci_per_component: dict[str, Float[Tensor, " C"]],
 ) -> Image.Image:
-    """Per-layer scatter of `‖V_c‖·‖U_c‖` per component, sorted descending (linear y from 0)."""
+    """Per-layer scatter of `‖V_c‖·‖U_c‖` per component, sorted descending.
+
+    All subplots share a linear y-axis from 0 to the global max magnitude. Each point is
+    coloured by that subcomponent's max CI over the eval batch (shared 0..1 colour scale).
+    """
+    assert set(weight_magnitudes) == set(max_ci_per_component)
     n_modules = len(weight_magnitudes)
     max_rows = 6
     n_cols = (n_modules + max_rows - 1) // max_rows  # Ceiling division
@@ -112,17 +118,31 @@ def plot_weight_magnitude(
     # Hide unused subplots (column-major fill).
     for i in range(n_modules, n_rows * n_cols):
         axs[i % n_rows, i // n_rows].set_visible(False)
+    global_max_mag = max(mags.max().item() for mags in weight_magnitudes.values())
+    scatters = []
     for i, (module_name, magnitudes) in enumerate(weight_magnitudes.items()):
-        sorted_mags = torch.sort(magnitudes, descending=True)[0].detach().cpu().numpy()
+        sort_idx = torch.sort(magnitudes, descending=True)[1]
+        sorted_mags = magnitudes[sort_idx].detach().cpu().numpy()
+        sorted_max_ci = max_ci_per_component[module_name][sort_idx].detach().cpu().numpy()
         ax = axs[i % n_rows, i // n_rows]
-        ax.scatter(range(len(sorted_mags)), sorted_mags, marker="x", s=10)
-        ax.set_ylim(0, sorted_mags.max())
+        sc = ax.scatter(
+            range(len(sorted_mags)),
+            sorted_mags,
+            c=sorted_max_ci,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+            marker="x",
+            s=10,
+        )
+        scatters.append(sc)
+        ax.set_ylim(0, global_max_mag)
         ax.ticklabel_format(axis="y", style="plain")
         if i % n_rows == n_rows - 1 or i == n_modules - 1:
             ax.set_xlabel("Component")
         ax.set_ylabel("‖V_c‖·‖U_c‖")
         ax.set_title(module_name, fontsize=10)
-    fig.tight_layout()
+    fig.colorbar(scatters[0], ax=axs.ravel().tolist(), label="max CI over batch")
     img = _render_figure(fig)
     plt.close(fig)
     return img
