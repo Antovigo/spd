@@ -74,12 +74,19 @@
 <script src="data.js"></script>
 <script>
 "use strict";
+if(!window.PD_DATA){
+  document.body.innerHTML='<div style="padding:40px;font:15px/1.6 sans-serif;color:#e6e8ee">'
+    +'<b>⚠ data.js did not load.</b><br>Keep <code>index.html</code> and <code>data.js</code> in the '
+    +'same folder and open <code>index.html</code> directly (double-click / file://). '
+    +'If you copied only index.html, copy data.js too.</div>';
+  throw new Error("PD_DATA missing");
+}
 const D = window.PD_DATA, M = D.meta, N = M.n;
 const MATS = M.matrices, MAT_LABEL = {"mlp.gate_proj":"gate","mlp.up_proj":"up","mlp.down_proj":"down"};
 const AXIS_SYM = {a:"a", b:"b", sum:"a+b", diff:"a−b"};
 const METRIC_LABEL = {kl:"ablation KL", ci:"causal importance", inner:"inner activation", orig:"original token", abl:"ablated token"};
 const TOK_SENTINEL = -32768;
-const state = { metric:"kl", period:"any", axis:"any", mats:new Set(MATS), minStr:0.4, sort:"period" };
+const state = { metric:"kl", period:"any", axis:"any", mats:new Set(MATS), minStr:0.4, sort:"max_kl" };
 
 // ---------- decode ----------
 function bytes(s){ const b=atob(s),u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; }
@@ -162,6 +169,7 @@ function buildControls(){
   document.getElementById("metricSel").onchange=e=>{ state.metric=e.target.value; render(); };
   document.getElementById("axisSel").onchange=e=>{ state.axis=e.target.value; render(); };
   document.getElementById("periodSel").onchange=e=>{ state.period=e.target.value; render(); };
+  document.getElementById("sortSel").value=state.sort;
   document.getElementById("sortSel").onchange=e=>{ state.sort=e.target.value; render(); };
   document.getElementById("strSlider").oninput=e=>{ state.minStr=+e.target.value; document.getElementById("strVal").textContent=(+e.target.value).toFixed(2); render(); };
 }
