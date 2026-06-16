@@ -10,7 +10,15 @@ from typing import Annotated, Any
 from pydantic import Discriminator
 
 from param_decomp.metrics.base import Metric
+from param_decomp.metrics.importance_minimality import (
+    ImportanceMinimalityLoss,
+    ImportanceMinimalityLossConfig,
+)
 from param_decomp.metrics.pgd_masked_recon import PGDReconLoss, PGDReconLossConfig
+from param_decomp.metrics.smooth_l0_importance_minimality import (
+    SmoothL0ImportanceMinimalityLoss,
+    SmoothL0ImportanceMinimalityLossConfig,
+)
 from param_decomp.metrics.stochastic_hidden_acts_recon import (
     StochasticHiddenActsReconLoss,
     StochasticHiddenActsReconLossConfig,
@@ -65,11 +73,13 @@ AnyEvalMetricConfig = Annotated[
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
+    | ImportanceMinimalityLossConfig
     | NAliveConfig
     | NontargetCIMeanPerComponentConfig
     | NontargetReconLossConfig
     | PermutedCIPlotsConfig
     | PGDReconLossConfig
+    | SmoothL0ImportanceMinimalityLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
     | TargetedCIHeatmapConfig
@@ -90,11 +100,13 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         CIMeanPerComponent,
         ComponentActivationDensity,
         IdentityCIError,
+        ImportanceMinimalityLoss,
         NAlive,
         NontargetCIMeanPerComponent,
         NontargetReconLoss,
         PermutedCIPlots,
         PGDReconLoss,
+        SmoothL0ImportanceMinimalityLoss,
         StochasticAttnPatternsReconLoss,
         StochasticHiddenActsReconLoss,
         TargetedCIHeatmap,
