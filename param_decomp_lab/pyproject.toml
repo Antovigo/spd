@@ -9,7 +9,7 @@ readme = "README.md"
 dependencies = [
     "param-decomp==0.0.1",
     "fire",
-    "wandb>=0.20.1", # Avoid wandb.sdk.wandb_manager.ManagerConnectionRefusedError
+    "wandb>=0.23.2", # >=0.20.1 for ManagerConnectionRefusedError; !=0.23.1 which breaks sync under seeded RNG (wandb#11064)
     "torchvision>=0.23,<0.24",
     "wandb-workspaces==0.1.12", # See https://github.com/wandb/wandb-workspaces/issues/65
     "sympy",
