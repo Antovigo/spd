@@ -1,5 +1,7 @@
 # SPEC_AUDIT.md — rigor pass on the single-pool VPD training-step math
 
+> Historical analysis from the torch-parity phase; superseded by `TRANSITION.md` (the fully-JAX pivot). Kept for reference.
+
 Independent re-derivation of the training-step **math** (bucket 1) from the **on-branch**
 torch single-pool impl (`param_decomp/`, `param_decomp_lab/` @ `feature/jax`), cross-checked
 against `SPEC.md` invariant-by-invariant and against the JAX impl (`param_decomp_jax/jax_single_pool/`).

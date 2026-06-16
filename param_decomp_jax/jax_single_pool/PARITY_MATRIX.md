@@ -1,5 +1,7 @@
 # VPD JAX Single-Pool — Parity Matrix & Stacked-PR Plan
 
+> Historical analysis from the torch-parity phase; superseded by `TRANSITION.md` (the fully-JAX pivot). Kept for reference.
+
 Branch: `feature/jax` (372 commits). Torch single-pool reference under `param_decomp/` +
 `param_decomp_lab/`; JAX trainer under `param_decomp_jax/jax_single_pool/`. Shared
 torch-free config schema in `param_decomp_config/`. Normative semantics live in

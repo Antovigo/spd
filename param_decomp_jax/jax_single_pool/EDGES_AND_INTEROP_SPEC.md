@@ -1,5 +1,7 @@
 # Single-pool VPD — edges & interop spec
 
+> Historical analysis from the torch-parity phase; superseded by `TRANSITION.md` (the fully-JAX pivot). Kept for reference.
+
 Pins the **meaning** of everything *around* the pure training step: checkpoint/resume,
 logging, eval, model/data/config loading, the launcher, and — the load-bearing part —
 the **interop contract** that lets the unchanged torch postprocessing stack consume a

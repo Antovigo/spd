@@ -8,9 +8,21 @@ install-lab:
 	uv sync --all-packages --no-dev
 
 .PHONY: install-dev
-install-dev:
+install-dev: bridge-jax-into-main-venv
+	uv run --no-sync pre-commit install
+
+# `uv sync --all-packages` manages the main venv exclusively and strips anything not in
+# the workspace lock — including jax, which `param_decomp_jax` is NOT a member of. But the
+# JAX-run bridge workers (e.g. harvest's run_worker_jax.py) live in the lab venv and
+# `import jax` + `from jax_single_pool ...`, and `make type` over them needs both stacks
+# resolvable. So re-add them right after the sync: jax/jaxlib CPU (4 small wheels, no
+# downgrades to wandb/numpy/pyarrow) + the editable `param_decomp_jax` source `--no-deps`
+# (gives `jax_single_pool` / `vendored_jax` without dragging in its pinned wandb/numpy).
+.PHONY: bridge-jax-into-main-venv
+bridge-jax-into-main-venv:
 	uv sync --all-packages
-	uv run pre-commit install
+	uv pip install "jax==0.10.1" "jaxlib==0.10.1"
+	uv pip install --no-deps -e ./param_decomp_jax
 
 .PHONY: install-all
 install-all: install-dev install-app
