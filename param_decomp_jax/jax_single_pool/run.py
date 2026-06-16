@@ -178,7 +178,7 @@ def train(
     lm: DecomposedLM,
     frozen: Target | llama_simple_mlp.SimpleMLPTarget,
     prefix: Prefix | llama_simple_mlp.SimpleMLPPrefix,
-    prefix_residual_fn: Callable[[Any, jax.Array], jax.Array],
+    prefix_residual_fn: Callable[[Any, Any], jax.Array],
     mesh: Mesh,
 ) -> None:
     is_main = jax.process_index() == 0
@@ -252,8 +252,8 @@ def train(
         mesh=mesh,
     )
 
-    def _harvest(prefix_weights: Any, token_ids: jax.Array) -> jax.Array:
-        residual = prefix_residual_fn(prefix_weights, token_ids)
+    def _harvest(prefix_weights: Any, inputs: Any) -> jax.Array:
+        residual = prefix_residual_fn(prefix_weights, inputs)
         return jax.lax.with_sharding_constraint(residual, NamedSharding(mesh, P("dp")))
 
     harvest = jax.jit(_harvest)
@@ -475,7 +475,7 @@ def main() -> None:
 
     frozen: Target | llama_simple_mlp.SimpleMLPTarget
     prefix: Prefix | llama_simple_mlp.SimpleMLPPrefix
-    prefix_residual_fn: Callable[[Any, jax.Array], jax.Array]
+    prefix_residual_fn: Callable[[Any, Any], jax.Array]
     match cfg.target:
         case TargetConfig():
             llama_cfg = llama31_8b_config()

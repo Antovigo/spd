@@ -1,20 +1,29 @@
-"""`DecomposedLM` — the interface a vendored LM target implements for the generic trainer.
+"""`DecomposedLM` — the interface a vendored target implements for the generic trainer.
 
 The trainer (`train.py`) is abstract over the target model: it sees an ordered set of
-decomposed **sites** (SPEC §1.2) and four pure functions over `(frozen, vu)` pytrees.
-Everything at the boundary is keyed by site name (flat dicts, torch-module-path style);
-how a target lays its parameters out internally (e.g. the Llama target's stacked layer
-axis) is its own business.
+decomposed **sites** (SPEC §1.2) and a handful of pure functions over `(frozen, vu)`
+pytrees. Everything at the boundary is keyed by site name (flat dicts, torch-module-path
+style); how a target lays its parameters out internally (e.g. the Llama target's stacked
+layer axis) is its own business.
+
+The `[B,T,d]` residual is the FIXED WAIST: masking, routing, source scopes, imp-min, the
+CI fn, and normalization all operate on `(B,T)` and stay LM-shaped. Only the three EDGES
+are generic — the model's INPUT (whatever `site_inputs`/`clean_logits`/`masked_logits`
+read upstream of the residual; tokens for an LM, a dict for a bio target), the model's
+OUTPUT (`clean_logits`/`masked_logits` return `Any` — logits, a tuple of heads, coords),
+and the recon comparison (`recon_loss_fn`, default `kl_per_position`).
 
 Every function takes the frozen-target pytree as a RUNTIME argument. Never close over
 it: a frozen 8B target captured as a jit constant bakes multi-GB weights into the HLO.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from jaxtyping import Array, Bool, Float
+
+from jax_single_pool.losses import kl_per_position
 
 SiteMasks = dict[str, Float[Array, "B T C"]]
 SiteDeltaMasks = dict[str, Float[Array, "B T"]]
@@ -56,13 +65,19 @@ class DecomposedLM:
     whose delta mask is a constant 0 (LOSS_PARITY_DESIGN §4b).
 
     `clean_logits` is the all-frozen forward — the recon target (SPEC S3); never the
-    `mask=1` decomposed identity.
+    `mask=1` decomposed identity. Its output (and `masked_logits`') is `Any`: an LM
+    emits `[B,T,vocab]` logits, a bio target a tuple of heads or coordinates.
 
     `weight_deltas` returns fp32 `W − V@U` per site from fp32 master `vu` (SPEC N2).
+
+    `recon_loss_fn(clean_output, masked_output) -> scalar` is the recon comparison the
+    step minimizes (SPEC §2.3). It defaults to `kl_per_position` (the LM cross-entropy
+    surrogate); a non-LM target supplies its own (e.g. an MSE/geometric loss). It must
+    reduce to a scalar and contract whatever shape its model emits.
     """
 
     sites: tuple[SiteSpec, ...]
-    clean_logits: Callable[[Any, Float[Array, "B T d"]], Float[Array, "B T vocab"]]
+    clean_logits: Callable[[Any, Float[Array, "B T d"]], Any]
     site_inputs: Callable[[Any, Float[Array, "B T d"]], dict[str, Float[Array, "B T d_in"]]]
     masked_logits: Callable[
         [
@@ -75,9 +90,10 @@ class DecomposedLM:
             tuple[str, ...],
             bool,
         ],
-        Float[Array, "B T vocab"],
+        Any,
     ]
     weight_deltas: Callable[[Any, Any], dict[str, Float[Array, "d_out d_in"]]]
+    recon_loss_fn: Callable[[Any, Any], Float[Array, ""]] = field(default=kl_per_position)
 
     @property
     def site_names(self) -> tuple[str, ...]:

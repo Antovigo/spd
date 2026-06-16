@@ -39,7 +39,6 @@ from jax_single_pool.losses import (
     annealed_pnorm,
     faithfulness_loss,
     importance_minimality_terms,
-    kl_per_position,
     warmup_then_constant_lr,
 )
 from jax_single_pool.recon import (
@@ -126,6 +125,7 @@ def make_train_step(
     given) pins every batch-leading activation to `P('dp', ...)` so the masked
     re-forwards stay on per-device sub-batches (activation memory 1/n_dev)."""
     site_names = lm.site_names
+    recon_loss_fn = lm.recon_loss_fn
     recon_terms = loss_spec.recon_terms
     imp_min = loss_spec.imp_min
     faith_coeff = loss_spec.faith_coeff
@@ -250,7 +250,7 @@ def make_train_step(
                 entry.live_sites,
                 entry.has_delta,
             )
-            total = total + kl_per_position(masked, clean_logits)
+            total = total + recon_loss_fn(masked, clean_logits)
         return total / len(routes_per_draw)
 
     @jax.jit
@@ -306,7 +306,7 @@ def make_train_step(
                     site_names,
                     True,
                 )
-                return kl_per_position(masked, clean_logits)
+                return recon_loss_fn(masked, clean_logits)
 
             def warmup_body(
                 carry: tuple[dict[str, Array], SourcesAdamState],
@@ -450,7 +450,7 @@ def make_train_step(
                             entry.live_sites,
                             entry.has_delta,
                         )
-                        total = total + kl_per_position(masked, clean_logits)
+                        total = total + recon_loss_fn(masked, clean_logits)
                         n_forwards += 1
                 assert n_forwards > 0, f"term {term.name!r} produced no forwards"
                 term_loss = total / n_forwards

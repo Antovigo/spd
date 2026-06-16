@@ -23,9 +23,17 @@ never silently diverge. Cite IDs (`S14`, `N1`, …) in commit messages and revie
 ## Architecture in one breath
 
 `lm.py` defines `DecomposedLM` — ordered `sites` + four pure fns (`clean_logits`,
-`site_inputs`, `masked_logits`, `weight_deltas`), flat site-name-keyed dicts at the
-boundary, frozen pytree always a runtime arg (never a jit closure constant — an 8B
-target becomes a multi-GB HLO constant). `train.py` is the generic step factory
+`site_inputs`, `masked_logits`, `weight_deltas`) plus a pluggable `recon_loss_fn`
+(default `kl_per_position`), flat site-name-keyed dicts at the boundary, frozen pytree
+always a runtime arg (never a jit closure constant — an 8B target becomes a multi-GB
+HLO constant). The `[B,T,d]` residual is the FIXED WAIST: masking / routing / sources /
+imp-min / the CI fn all stay `(B,T)`-shaped. Only three EDGES are generic so non-LM
+(bio-style) targets fit (#828): the model INPUT (`prefix_residual_fn(prefix, inputs)`
+in `run.py` takes `Any` — tokens for an LM, a dict for bio), the model OUTPUT
+(`clean_logits`/`masked_logits` return `Any` — logits, a tuple of heads, coords; field
+NAMES stay `*_logits` pending a deferred rename), and the recon comparison
+(`recon_loss_fn(clean_output, masked_output) -> scalar`, default
+`kl_per_position` so the LM path is byte-identical). `train.py` is the generic step factory
 (fp32 masters / bf16 compute) over a static tuple of recon loss TERMS (S10′ — the
 torch loss-class cartesian product factored as plan × mask-source strategy, built
 from the shared configs by `recon.build_recon_terms`; see LOSS_PARITY_DESIGN.md),
