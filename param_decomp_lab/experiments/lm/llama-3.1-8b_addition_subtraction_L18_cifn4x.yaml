@@ -17,7 +17,7 @@ data:
   tokenizer_name: meta-llama/Llama-3.1-8B
   train_split: train
 eval:
-  batch_size: 96
+  batch_size: 256
   every: 500
   metrics:
   - ci_alive_threshold: 0.0
@@ -51,9 +51,9 @@ eval:
   n_steps: 10
   slow_every: 1000
   slow_on_first_step: true
-label: llama8b-L18-addsub-cifn4x
+label: llama8b-L18-addsub-b256
 nontarget:
-  batch_size: 96
+  batch_size: 256
   data:
     buffer_size: 1000
     column_name: text
@@ -68,10 +68,10 @@ nontarget:
     streaming: true
     tokenizer_name: meta-llama/Llama-3.1-8B
     train_split: train
-  eval_batch_size: 96
+  eval_batch_size: 256
   impmin_coeff_ratio: 2.0
 pd:
-  batch_size: 96
+  batch_size: 256
   ci_config:
     fn_type: global_shared_transformer
     hidden_dims: null
@@ -110,19 +110,19 @@ pd:
       warmup_pct: 0.0
     weight_decay: 0.0
   decomposition_targets:
-  - C: 2280
+  - C: 456
     module_pattern: model.layers.18.mlp.gate_proj
-  - C: 2280
+  - C: 456
     module_pattern: model.layers.18.mlp.up_proj
-  - C: 2280
+  - C: 456
     module_pattern: model.layers.18.mlp.down_proj
-  - C: 960
+  - C: 192
     module_pattern: model.layers.18.self_attn.q_proj
-  - C: 960
+  - C: 192
     module_pattern: model.layers.18.self_attn.k_proj
-  - C: 1160
+  - C: 232
     module_pattern: model.layers.18.self_attn.v_proj
-  - C: 1160
+  - C: 232
     module_pattern: model.layers.18.self_attn.o_proj
   faithfulness_warmup_lr: 0.001
   faithfulness_warmup_steps: 0
@@ -179,7 +179,7 @@ pd:
 runtime:
   autocast_bf16: true
   device: cuda:0
-  dp: 2
+  dp: 4
 target:
   output_extract: logits
   recon_positions: all
