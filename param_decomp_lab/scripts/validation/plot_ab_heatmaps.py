@@ -5,13 +5,16 @@ down the rows, subcomponents across the columns. Each subplot is an `a`-by-`b` h
 (x = a, y = b, both 1..N, equal-scaled) coloured by that subcomponent's lower-leaky CI on
 the prompt `a<op>b=` at this position. `--op` selects the arithmetic operator (`+`, `-`,
 `*`, or `×`), so subtraction is `--op=-` and the ×-symbol multiplication runs are `--op=×`.
-Only subcomponents active above
-`--ci-thr` somewhere at that position are shown, so the column set is per-position. CPU-only
-— no model is loaded; reads the `find_alive_components` per-position JSON.
+A subcomponent is shown at a position when its MEAN lower-leaky CI across the displayed
+prompts exceeds `--ci-thr` (CI below the source JSON's collection threshold, ~0.1, is
+absent and counts as 0), so the column set is per-position. `--module-grep` restricts to
+modules whose name contains a substring (e.g. `layers.18.mlp` to plot only one layer's
+MLP of a full-network run). CPU-only — no model is loaded; reads the
+`find_alive_components` per-position JSON.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps <per_position_json> \
-        [--op=+] [--ci-thr=0.1] [--grep=SUBSTRING] [--output-dir=PATH]
+        [--op=+] [--ci-thr=0.01] [--grep=SUBSTRING] [--module-grep=SUBSTRING] [--output-dir=PATH]
 
 Output: `<run_dir>/figures/ab_heatmaps_<add|sub|mult>/position_<pos>.png` (one per position).
 """
@@ -70,14 +73,24 @@ def _all_modules(data: PerPosition) -> list[str]:
 
 
 def _build_grids(
-    data: PerPosition, ab: dict[str, tuple[int, int]], a_max: int, b_max: int
+    data: PerPosition,
+    ab: dict[str, tuple[int, int]],
+    a_max: int,
+    b_max: int,
+    keep_modules: set[str],
 ) -> dict[str, dict[str, dict[int, np.ndarray]]]:
-    """pos -> module -> component -> [b_max, a_max] CI grid (filled lazily, 0 where inactive)."""
+    """pos -> module -> component -> [b_max, a_max] CI grid (filled lazily, 0 where inactive).
+
+    Only `keep_modules` are materialised — skipping the rest keeps memory bounded on
+    full-network runs (dozens of matrices) where the caller plots one module subset.
+    """
     grids: dict[str, dict[str, dict[int, np.ndarray]]] = {}
     for prompt, (a, b) in ab.items():
         for pos, per_module in data[prompt].items():
             per_pos = grids.setdefault(pos, {})
             for module, comps in per_module.items():
+                if module not in keep_modules:
+                    continue
                 per_mod = per_pos.setdefault(module, {})
                 for entry in comps:
                     grid = per_mod.get(entry["component"])
@@ -198,23 +211,32 @@ def _plot_position(
 def plot_ab_heatmaps(
     json_path: str,
     op: str = "+",
-    ci_thr: float = 0.1,
+    ci_thr: float = 0.01,
     grep: str | None = None,
+    module_grep: str | None = None,
     output_dir: str | None = None,
     position: int | None = None,
 ) -> Path:
     """Write one (a, b) CI-heatmap grid PNG per token position. Returns the output folder.
 
-    `position` restricts output to that single token position (e.g. `--position=4` for the
-    `=` answer token of a last-token-reconstruction run); the default renders every position.
+    A subcomponent is shown at a position when its mean CI across the displayed prompts
+    (CI absent from the JSON counts as 0) exceeds `ci_thr`. `module_grep` keeps only
+    modules whose name contains that substring. `position` restricts output to that single
+    token position (e.g. `--position=4` for the `=` answer token of a last-token run).
     """
     assert op in _OP_LABEL, f"--op must be one of {list(_OP_LABEL)}, got {op!r}"
     json_file = Path(json_path).expanduser()
     data: PerPosition = json.loads(json_file.read_text())
 
     ab, a_max, b_max = _parse_ab(data, op, grep)
-    all_modules = _all_modules(data)
-    grids = _build_grids(data, ab, a_max, b_max)
+    all_modules = [m for m in _all_modules(data) if module_grep is None or module_grep in m]
+    assert all_modules, f"no modules match module_grep={module_grep!r}"
+    grids = _build_grids(data, ab, a_max, b_max, set(all_modules))
+    # Mean CI is taken over the displayed (a, b) prompts only (a full grid has unused cells,
+    # e.g. for subtraction); inactive/sub-threshold cells are 0 in the grid.
+    displayed = np.zeros((b_max, a_max), dtype=bool)
+    for a, b in ab.values():
+        displayed[b - 1, a - 1] = True
     if position is not None:
         assert str(position) in grids, (
             f"position {position} not in JSON (have {sorted(grids, key=int)})"
@@ -232,10 +254,12 @@ def plot_ab_heatmaps(
 
     n_written = 0
     for pos in sorted(grids, key=int):
-        # Per position, keep only subcomponents that fire above ci_thr on some (a, b) here.
+        # Per position, keep subcomponents whose mean CI over the displayed prompts > ci_thr.
         alive = {
             module: sorted(
-                comp for comp, grid in grids[pos].get(module, {}).items() if grid.max() > ci_thr
+                comp
+                for comp, grid in grids[pos].get(module, {}).items()
+                if grid[displayed].mean() > ci_thr
             )
             for module in all_modules
         }
