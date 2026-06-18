@@ -66,6 +66,7 @@ def find_alive_components(
     model_path: ModelPath,
     ci_thr: float = 0.1,
     batch_size: int = 8,
+    prompts: str | None = None,
     output: str | None = None,
     output_json: str | None = None,
     slurm: bool = False,
@@ -84,6 +85,8 @@ def find_alive_components(
             f"--ci-thr={ci_thr}",
             f"--batch-size={batch_size}",
         ]
+        if prompts is not None:
+            argv.append(f"--prompts={Path(prompts).expanduser()}")
         if output is not None:
             argv.append(f"--output={Path(output).expanduser()}")
         if output_json is not None:
@@ -97,10 +100,11 @@ def find_alive_components(
     run = load_lm_run(model_path)
     model, cfg, device, tokenizer = run.model, run.cfg, run.device, run.tokenizer
 
-    assert cfg.data.prompts_file is not None, (
-        "find_alive_components requires prompts-based target data"
+    prompts_path = prompts if prompts is not None else cfg.data.prompts_file
+    assert prompts_path is not None, (
+        "find_alive_components requires prompts-based target data (or pass --prompts)"
     )
-    prompts_file = Path(cfg.data.prompts_file).expanduser()
+    prompts_file = Path(prompts_path).expanduser()
     prompt_texts = [ln.strip() for ln in prompts_file.read_text().splitlines() if ln.strip()]
     assert len(set(prompt_texts)) == len(prompt_texts), (
         "duplicate prompts in the prompts file would collide as JSON keys"
