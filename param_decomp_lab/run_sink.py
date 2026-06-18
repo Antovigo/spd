@@ -6,7 +6,7 @@ Non-main ranks transparently get a no-op sink regardless of which constructor is
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import wandb
 from PIL import Image
@@ -92,11 +92,12 @@ class RunSink:
         group: str | None = None,
         view_meta: dict[str, Any] | None = None,
         keep_last_n_checkpoints: int | None = None,
+        resume: Literal["allow", "never", "must", "auto"] | None = None,
     ) -> "RunSink":
         """Sink that writes to local files and a wandb run.
 
         Initializes wandb on the main rank via `init_wandb`; non-main ranks return a
-        silent no-op.
+        silent no-op. `resume` is forwarded to `wandb.init` (see `init_wandb`).
         """
         if not is_main_process():
             return cls(out_dir=None, _wandb_active=False)
@@ -111,6 +112,7 @@ class RunSink:
             tags=tags,
             group=group,
             view_meta=view_meta,
+            resume=resume,
         )
         return cls(
             out_dir=out_dir,

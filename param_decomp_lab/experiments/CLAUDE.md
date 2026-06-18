@@ -149,6 +149,15 @@ No central registry to update — post-processing callers `import` the new
 
 Non-main DDP ranks get `RunSink.silent()`.
 
+### Resume in place (walltime-split legs)
+
+`pd-lm --resume <yaml>` continues the parent run **in place** by default: with no
+explicit `--run_id`, it reuses the parent run id (`from_run.name`), so all legs share
+one run folder and one wandb run. `init_pd_run(..., resume=True)` reopens the wandb run
+(`resume="allow"`) and preserves the original `started_at`. Pass an explicit `--run_id`
+to branch a separate run instead. The `~/pd_scratch/autoresume.py` walltime harness
+relies on this — it resubmits each leg with no run_id rather than minting `-rN` runs.
+
 ### `--group` and `--tags`
 
 Every `pd-*` run command accepts `--group <id>` and `--tags a,b,c` (no-ops when

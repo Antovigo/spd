@@ -2,7 +2,7 @@ import os
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import wandb
 import wandb.errors
@@ -200,13 +200,16 @@ def init_wandb(
     tags: list[str] | None = None,
     group: str | None = None,
     view_meta: dict[str, Any] | None = None,
+    resume: Literal["allow", "never", "must", "auto"] | None = None,
 ) -> None:
     """Initialise W&B and log `config`.
 
     Nested lists-of-typed-dicts (loss/eval metrics) are flattened into queryable flat
     keys via `flatten_typed_lists`; the un-flattened lists are removed from the dump.
     `entity` falls back to `get_wandb_entity()`; `view_meta` is merged under a
-    `view_meta/` prefix so the UI can group runs by researcher-facing axes.
+    `view_meta/` prefix so the UI can group runs by researcher-facing axes. `resume`
+    (e.g. `"allow"`) is forwarded to `wandb.init` so a leg reusing `run_id` appends to
+    the existing run rather than erroring.
     """
     wandb.init(
         id=run_id,
@@ -215,6 +218,7 @@ def init_wandb(
         name=name,
         tags=tags,
         group=group,
+        resume=resume,
     )
     assert wandb.run is not None
     wandb.run.log_code(root=str(REPO_ROOT / "param_decomp"))

@@ -15,7 +15,11 @@ from param_decomp.distributed import is_main_process
 from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
 from param_decomp_lab.eval_metrics import EVAL_METRIC_CLASSES, AnyEvalMetricConfig
 from param_decomp_lab.eval_metrics.targeted_ci_heatmap import TargetedCIHeatmapConfig
-from param_decomp_lab.infra.run_files import generate_run_id, write_run_metadata_start
+from param_decomp_lab.infra.run_files import (
+    RUN_METADATA_FILENAME,
+    generate_run_id,
+    write_run_metadata_start,
+)
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.infra.wandb import try_wandb
 from param_decomp_lab.run_sink import RunSink
@@ -123,12 +127,15 @@ def init_pd_run[T: BaseConfig, D: BaseConfig](
     group: str | None,
     tags: str | None,
     run_id: str | None = None,
+    resume: bool = False,
 ) -> RunSink:
     """Allocate `run_id` + `out_dir`, write `experiment_config.yaml`, return a sink.
 
     Local-only when `cfg.wandb is None`, else wandb-backed. Non-main DDP ranks get a
     silent no-op sink without touching disk or wandb. `group` is a "launched together"
-    id; `tags` is a comma-separated string of orthogonal labels.
+    id; `tags` is a comma-separated string of orthogonal labels. When `resume`, a
+    pre-existing `run_id` is reused: the wandb run is reopened (`resume="allow"`) and an
+    existing `started_at` is preserved rather than overwritten.
     """
     if not is_main_process():
         return RunSink.silent()
@@ -136,7 +143,8 @@ def init_pd_run[T: BaseConfig, D: BaseConfig](
     out_dir = PARAM_DECOMP_OUT_DIR / "runs" / run_id
     cfg_path = out_dir / EXPERIMENT_CONFIG_FILENAME
     cfg.to_file(cfg_path)
-    write_run_metadata_start(out_dir)
+    if not (resume and (out_dir / RUN_METADATA_FILENAME).exists()):
+        write_run_metadata_start(out_dir)
     keep_last_n = cfg.cadence.keep_last_n_checkpoints
     if cfg.wandb is None:
         return RunSink.local(out_dir, keep_last_n_checkpoints=keep_last_n)
@@ -150,6 +158,7 @@ def init_pd_run[T: BaseConfig, D: BaseConfig](
         group=group,
         tags=parsed_tags,
         keep_last_n_checkpoints=keep_last_n,
+        resume="allow" if resume else None,
     )
     try_wandb(wandb.save, str(cfg_path), base_path=str(out_dir), policy="now")
     return sink

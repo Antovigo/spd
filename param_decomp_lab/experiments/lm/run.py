@@ -385,8 +385,12 @@ def _resume_main(
     )
     eval_loop = _build_eval_loop(effective_cfg, device, dist_state)
     nontarget = _build_nontarget_pass(effective_cfg, device, dist_state)
-    sink = init_pd_run(effective_cfg, group=group, tags=tags, run_id=run_id)
-    if sink.out_dir is not None:
+    # Default to continuing the parent run in place (one folder + one wandb run across
+    # walltime-split legs). Pass an explicit `run_id` to branch a separate run instead.
+    continue_run = run_id is None
+    run_id = run_id or resume_cfg.from_run.name
+    sink = init_pd_run(effective_cfg, group=group, tags=tags, run_id=run_id, resume=continue_run)
+    if sink.out_dir is not None and sink.out_dir != resume_cfg.from_run:
         write_provenance(
             sink.out_dir,
             ResumeProvenance(parent_run_dir=resume_cfg.from_run, parent_step=resolved_step),
