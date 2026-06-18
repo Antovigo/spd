@@ -21,9 +21,9 @@ Knowingly ignored canonical-schema fields (runtime details with no JAX analog, o
 JAX-side equivalents derived elsewhere): `runtime.device/dp` (GSPMD owns placement),
 `target.activation_checkpointing` (`runtime.remat_recon_forwards` is the explicit
 analog), `target.output_extract`, `data.buffer_size/shuffle_each_epoch/train_split/
-eval_split` (the JAX data schedule is deterministic by construction), `eval.slow_every/
-slow_on_first_step` (no slow in-loop metrics; plot/slow metrics run offline via
-`pd-slow-eval`), `use_fused_kl` (a torch impl detail).
+eval_split` (the JAX data schedule is deterministic by construction), `use_fused_kl`
+(a torch impl detail). `eval.slow_every/slow_on_first_step` ARE now honored — they
+drive the in-loop slow/plot tier (SPEC S28/S29 amended 2026-06-18).
 """
 
 import re
@@ -47,6 +47,7 @@ from param_decomp_config.ci_fn import (
 from param_decomp_config.eval_metrics import (
     CEandKLLossesConfig,
     CI_L0Config,
+    CIHistogramsConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
 )
@@ -180,13 +181,24 @@ class AttnPatternsEvalConfig:
 
 @dataclass(frozen=True)
 class EvalConfig:
-    """In-loop eval pass (torch `EvalLoop` analog, scalar metrics only — plots ride the
-    offline export path). `rounding_threshold` binarises CI for the CE/KL
-    `rounded_masked` variant; `ci_alive_threshold` is the CI-L0 aliveness cutoff."""
+    """In-loop eval pass (torch `EvalLoop` analog). The FAST scalar tier runs every
+    `every` steps; the SLOW/plot tier (CI histograms, activation density, mean-CI,
+    hidden-acts recon) runs every `slow_every` steps, reusing the same eval batches
+    (SPEC S28/S29). `rounding_threshold` binarises CI for the CE/KL `rounded_masked`
+    variant; `ci_alive_threshold` is the CI-L0 aliveness cutoff."""
 
     batch_size: int
     every: int
     n_steps: int
+    slow_every: int
+    """The slow/plot tier cadence — a multiple of `every` (torch `EvalLoop.slow_every`),
+    so the slow tier lands on a fast-eval step and reuses its eval batches."""
+    slow_on_first_step: bool
+    """Render the slow tier at the FIRST eval step too (torch parity), not only at
+    `slow_every` multiples."""
+    slow_n_batches_accum: int | None
+    """The torch `CIHistograms.n_batches_accum` cap on the histogram raw-value sample
+    (None caps nothing). Read from the `CIHistograms` eval metric when present."""
     rounding_threshold: float
     ci_alive_threshold: float
     l0_groups: dict[str, tuple[str, ...]] | None
@@ -235,16 +247,26 @@ class ExperimentConfig:
         return self.out_dir / self.run_id
 
 
-# Slow/plot eval metrics the in-loop scalar pass (`eval.py`) does NOT compute. The first
-# three are rendered natively by `pd-slow-eval` (`slow_eval.py`) over a checkpoint; the
-# rest are accepted as config but have no JAX offline pass yet.
-OFFLINE_EVAL_METRIC_TYPES = frozenset(
+# Plot/heavy eval metrics the FAST in-loop scalar pass (`eval.py`) does NOT compute. They
+# are split by where they now run (SPEC S28/S29 amended 2026-06-18):
+#
+# IN-LOOP SLOW TIER — computed inside the train loop on `eval.slow_every` (and also
+# rendered offline by `pd-slow-eval`): the three plot metrics drive the shared
+# `render_slow_eval_figures` figure set; the two hidden-acts metrics drive the shared
+# `compute_hidden_acts_metrics` scalars.
+SLOW_TIER_EVAL_METRIC_TYPES = frozenset(
     {
         "CIHistograms",
         "ComponentActivationDensity",
         "CIMeanPerComponent",
         "StochasticHiddenActsReconLoss",
         "CIHiddenActsReconLoss",
+    }
+)
+# OFFLINE-ONLY — accepted as config but with no JAX pass yet (neither in-loop nor
+# `pd-slow-eval`); silently deferred.
+OFFLINE_ONLY_EVAL_METRIC_TYPES = frozenset(
+    {
         "UVPlots",
         "PermutedCIPlots",
         "IdentityCIError",
@@ -395,6 +417,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
         return None
     ce_kl = ci_l0 = pgd = None
     attn_ci = attn_stoch = False
+    slow_n_batches_accum: int | None = None
     skipped_offline: list[str] = []
     for metric in cfg.eval.metrics:
         match metric:
@@ -411,7 +434,11 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
             case StochasticAttnPatternsReconLossConfig():
                 _assert_separate_qk_attn_paths(metric)
                 attn_stoch = True
-            case _ if metric.type in OFFLINE_EVAL_METRIC_TYPES:
+            case CIHistogramsConfig():
+                slow_n_batches_accum = metric.n_batches_accum
+            case _ if metric.type in SLOW_TIER_EVAL_METRIC_TYPES:
+                pass  # rendered by the in-loop slow tier (`render_slow_eval_figures`)
+            case _ if metric.type in OFFLINE_ONLY_EVAL_METRIC_TYPES:
                 skipped_offline.append(metric.type)
             case _:
                 raise AssertionError(f"unsupported eval metric {metric.type!r}")
@@ -424,6 +451,9 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
         batch_size=cfg.eval.batch_size,
         every=cfg.eval.every,
         n_steps=cfg.eval.n_steps,
+        slow_every=cfg.eval.slow_every,
+        slow_on_first_step=cfg.eval.slow_on_first_step,
+        slow_n_batches_accum=slow_n_batches_accum,
         rounding_threshold=ce_kl.rounding_threshold,
         ci_alive_threshold=ci_l0.ci_alive_threshold,
         l0_groups=(

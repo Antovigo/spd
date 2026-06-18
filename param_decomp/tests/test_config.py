@@ -65,13 +65,16 @@ def test_b128_config_converts(tmp_path: Path):
     ]
 
 
-def test_eval_block_maps_and_defers_offline_metrics(capsys: pytest.CaptureFixture[str]):
+def test_eval_block_maps_slow_tier_and_defers_offline_only_metrics(
+    capsys: pytest.CaptureFixture[str],
+):
     raw = _reference_lm_raw()
     raw["eval"] = {
         "batch_size": 128,
         "every": 1000,
         "n_steps": 1,
         "slow_every": 10000,
+        "slow_on_first_step": True,
         "metrics": [
             {"type": "CEandKLLosses", "rounding_threshold": 0.0},
             {"type": "CI_L0", "groups": None, "ci_alive_threshold": 0.0},
@@ -83,16 +86,22 @@ def test_eval_block_maps_and_defers_offline_metrics(capsys: pytest.CaptureFixtur
                 "n_steps": 20,
                 "step_size": 0.1,
             },
-            {"type": "CIHistograms", "n_batches_accum": 1},
-            {"type": "ComponentActivationDensity", "ci_alive_threshold": 0.0},
+            {"type": "CIHistograms", "n_batches_accum": 7},  # in-loop slow tier now
+            {"type": "ComponentActivationDensity", "ci_alive_threshold": 0.0},  # slow tier
+            {"type": "IdentityCIError", "identity_ci": None, "dense_ci": None},  # offline-only
         ],
     }
     cfg = build_experiment_config(LMExperimentConfig(**raw))
     assert cfg.eval is not None
     assert (cfg.eval.batch_size, cfg.eval.every, cfg.eval.n_steps) == (128, 1000, 1)
+    assert (cfg.eval.slow_every, cfg.eval.slow_on_first_step) == (10000, True)
+    assert cfg.eval.slow_n_batches_accum == 7  # read off the CIHistograms metric
     assert cfg.eval.rounding_threshold == 0.0 and cfg.eval.ci_alive_threshold == 0.0
     assert cfg.eval.pgd is not None and (cfg.eval.pgd.n_steps, cfg.eval.pgd.step_size) == (20, 0.1)
-    assert "deferred to the offline path" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # the plot metrics now run in-loop (NOT deferred); only the offline-only one is deferred
+    assert "deferred to the offline path: ['IdentityCIError']" in out
+    assert "CIHistograms" not in out and "ComponentActivationDensity" not in out
 
 
 def test_unsupported_settings_refuse():

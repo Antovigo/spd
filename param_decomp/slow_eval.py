@@ -1,19 +1,26 @@
-"""JAX-native slow (plot-type) eval metrics, the offline counterpart of `eval.py`.
+"""JAX-native slow (plot-type) eval metrics, shared by the in-loop slow tier and the
+retrospective `pd-slow-eval` CLI.
 
 `eval.py` runs the FAST scalar tier in-loop (CE/KL, CI-L0, the fresh-PGD probe). The
-SLOW tier is the heavy plot metrics deferred to this out-of-loop pass:
-`CIHistograms`, `ComponentActivationDensity`, `CIMeanPerComponent` (the torch eval-
-metric classes of the same names). Every one of them is a reduction over the per-site
-causal-importance arrays from a masked-free forward, then a numpy/matplotlib plot. The
-forward + reduction is JAX; the plotting is framework-agnostic (it mirrors the torch
-`param_decomp_lab/eval_metrics/plotting.py` reductions on numpy arrays, no torch).
+SLOW tier is the heavy plot metrics: `CIHistograms`, `ComponentActivationDensity`,
+`CIMeanPerComponent` (the torch eval-metric classes of the same names). Every one of them
+is a reduction over the per-site causal-importance arrays from a masked-free forward, then
+a numpy/matplotlib plot. The forward + reduction is JAX; the plotting is framework-agnostic
+(it mirrors the torch `param_decomp_lab/eval_metrics/plotting.py` reductions on numpy
+arrays, no torch). `accumulate_site_reductions` / `render_slow_eval_figures` /
+`compute_hidden_acts_metrics` are the SHARED interface both callers use.
 
-This runs as an OFFLINE pass over an on-disk checkpoint (`pd-slow-eval <run_dir>`):
-rebuild the JAX target from the run's
-config, restore the `TrainState`, accumulate the reductions over `n_steps` eval batches,
-render the figures, and log them under `slow_eval/*` into the run's wandb (the dedicated
-`slow_eval/step` axis — the live run's `_step` has advanced, so an explicit `step=` write
-would be dropped). No torch, no export round-trip.
+The slow tier runs IN-LOOP on `eval.slow_every` next to the fast pass (`run.py`,
+SPEC S28/S29), reusing the fast pass's eval batches and logging `slow_eval/*` on the live
+`_step` axis from a rank-0 background thread.
+
+This module's `main` ALSO runs an OFFLINE pass over an on-disk checkpoint
+(`pd-slow-eval <run_dir>`) — its retrospective value: rebuild the JAX target from the
+run's config, restore the `TrainState`, accumulate the reductions over `n_steps` eval
+batches, render the figures, and log them under `slow_eval/*` into the run's wandb on the
+dedicated `slow_eval/step` axis (a finished run's `_step` has advanced, so an explicit
+`step=` write would be dropped — the in-loop path does not need this). No torch, no
+export round-trip.
 
 Cross-batch reductions are exact under micro-batching: density/mean accumulate
 SUM-over-positions + a position count, divided once at the end (token-weighted mean,

@@ -13,10 +13,13 @@ process computes the same global schedule and contributes its local batch slice.
 """
 
 import argparse
+import atexit
 import dataclasses
+import io
 import json
 import math
 import signal
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -73,6 +76,13 @@ from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh, init_distributed
+from param_decomp.slow_eval import (
+    SiteReduction,
+    accumulate_site_reductions,
+    compute_hidden_acts_metrics,
+    make_slow_eval_step,
+    render_slow_eval_figures,
+)
 from param_decomp.target_aliases import AnyFrozenTarget, AnyPrefix
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
 from param_decomp_config.experiment import ResumeProvenance
@@ -179,12 +189,11 @@ class MetricsSink:
             config_yaml = cfg.run_dir / "config.yaml"
             assert config_yaml.exists(), config_yaml
             wandb.save(str(config_yaml), base_path=str(cfg.run_dir), policy="now")
-            # slow_eval/* rides a dedicated step axis (torch convention,
-            # infra/wandb.py): pd-offline-eval logs those keys retroactively into
-            # this run and CANNOT pass step= (wandb silently drops writes behind
-            # the live head). The offline job redefines this — idempotent.
-            wandb.define_metric("slow_eval/step")
-            wandb.define_metric("slow_eval/*", step_metric="slow_eval/step")
+            # The in-loop slow tier (`SlowEvalRenderer`) logs `slow_eval/*` on the live
+            # `_step` axis at the eval step (SPEC S28/S29), so NO dedicated `slow_eval/step`
+            # metric is defined here. The retrospective `pd-slow-eval` CLI, which logs into
+            # a FINISHED run whose `_step` head has moved past, defines its own
+            # `slow_eval/step` axis in `slow_eval.py::_log_to_wandb`.
             self._wandb = wandb
 
     def log(self, step: int, record: dict[str, float]) -> None:
@@ -211,6 +220,79 @@ class MetricsSink:
                 self._wandb.log(record, step=step)
             except wandb.errors.CommError as e:
                 print(f"wandb communication error, skipping log: {e}", flush=True)
+
+
+class SlowEvalRenderer:
+    """Rank-0 background renderer for the in-loop slow/plot tier (SPEC S28/S29).
+
+    The collective part of slow eval (the jitted forward + the device->host pull whose
+    `np.asarray` triggers the C-shard all-gather) runs in lockstep on ALL ranks inside the
+    eval pass. This renderer takes ONLY the materialized numpy reductions and does the
+    pure-host part — matplotlib + `wandb.log` — on a background thread, so the main train
+    loop on every rank proceeds immediately (near-zero cross-rank divergence). The thread
+    touches ZERO jax/device state.
+
+    One render in flight at a time: a `submit` while a render is still running blocks
+    briefly on `join()` first, so renders can't pile up (slow eval is forward-only and
+    coarse, so this effectively never blocks). The figures log on the live `_step` axis at
+    `step=now_step` — the slow tier lands on a fast-eval step, so the sink has just opened
+    `now_step` and the background `wandb.log(..., step=now_step)` merges into the same open
+    step. A render that lands AFTER the next train-log advances the head is dropped by
+    wandb's monotonic-`_step` rule (a benign one-figure-set miss, warned not raised; the
+    next slow eval renders fine) — slow eval is forward-only seconds against a coarse
+    `slow_every`, so this is not expected to fire. An `atexit` join flushes the last render
+    before process exit (the trainer never calls `wandb.finish`). The atexit handler is
+    registered on the FIRST submit, not in `__init__` — the first submit happens after
+    `MetricsSink`'s `wandb.init` (eval comes after sink construction in the loop), so
+    atexit's LIFO order runs our join BEFORE wandb's own atexit flush, and the figures
+    land."""
+
+    def __init__(self, is_main: bool):
+        self._is_main = is_main
+        self._thread: threading.Thread | None = None
+        self._atexit_registered = False
+
+    def join(self) -> None:
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def submit(self, reductions: dict[str, SiteReduction], now_step: int) -> None:
+        if not self._is_main:
+            return
+        if not self._atexit_registered:
+            atexit.register(self.join)
+            self._atexit_registered = True
+        self.join()  # cap to one in-flight render
+        self._thread = threading.Thread(
+            target=_render_and_log_slow_eval, args=(reductions, now_step), daemon=True
+        )
+        self._thread.start()
+
+
+def slow_eval_due(now_step: int, every: int, slow_every: int, slow_on_first_step: bool) -> bool:
+    """The slow/plot tier cadence (SPEC S28). `now_step` is always a fast-eval step (the
+    engine only calls the eval pass on `every`), and `slow_every` is a multiple of `every`,
+    so a `slow_every` multiple coincides with an eval step. `slow_on_first_step` additionally
+    fires the tier once at the first eval step (`now_step == every`), matching torch."""
+    return now_step % slow_every == 0 or (slow_on_first_step and now_step == every)
+
+
+def _render_and_log_slow_eval(reductions: dict[str, SiteReduction], now_step: int) -> None:
+    """Pure-host: render the slow figures and log them to wandb on the live `_step` axis at
+    `now_step`. No jax/device access — safe off the train loop."""
+    import wandb
+    import wandb.errors
+    from PIL import Image
+
+    figures = render_slow_eval_figures(reductions)
+    payload: dict[str, Any] = {
+        f"slow_eval/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in figures.items()
+    }
+    try:
+        wandb.log(payload, step=now_step)
+    except wandb.errors.CommError as e:
+        print(f"wandb communication error, skipping slow-eval figures: {e}", flush=True)
 
 
 def assert_finetune_structural_compat(cfg: ExperimentConfig, prov: ResumeProvenance) -> None:
@@ -486,6 +568,10 @@ def train(
             "eval must land on a train-log step: the tok/s window resets after eval, so a "
             "mid-window eval would corrupt the next step-time estimate"
         )
+        assert cfg.eval.slow_every % cfg.eval.every == 0, (
+            "slow_every must be a multiple of every: the slow tier reuses the fast eval "
+            "pass's batches, so it can only fire on a fast-eval step"
+        )
         eval_every = cfg.eval.every
         eval_fn = _make_lm_eval_fn(cfg, lm, frozen, prefix, harvest, run_key, mesh, n_proc, is_main)
 
@@ -544,6 +630,9 @@ def _make_lm_eval_fn(
                 lm, pattern_fn, cfg.n_mask_samples, cfg.sampling
             )
 
+    slow_eval_step = make_slow_eval_step(lm, cfg.eval.ci_alive_threshold)
+    slow_renderer = SlowEvalRenderer(is_main)
+
     def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
         assert cfg.eval is not None
         eval_pass_index = now_step // cfg.eval.every
@@ -582,6 +671,25 @@ def _make_lm_eval_fn(
                 f"eval/loss/{k}": v
                 for k, v in attn_patterns_log_entries(class_name, reductions).items()
             }
+        slow_due = slow_eval_due(
+            now_step, cfg.eval.every, cfg.eval.slow_every, cfg.eval.slow_on_first_step
+        )
+        if eval_residuals and slow_due and not _sigterm_received:
+            # SLOW/PLOT TIER (SPEC S28/S29). The COLLECTIVE part runs in lockstep on every
+            # rank — `accumulate_site_reductions` / `compute_hidden_acts_metrics` pull
+            # C-sharded reductions to numpy, whose `np.asarray` triggers the all-gather all
+            # ranks must join. It reuses the eval batches already loaded above. The
+            # hidden-acts scalars ride the live `_step` axis through `eval_record`; the
+            # figures' pure-host render + wandb.log happen OFF the loop on rank 0.
+            site_reductions = accumulate_site_reductions(
+                slow_eval_step, state.ci_fn, frozen, eval_residuals, cfg.eval.slow_n_batches_accum
+            )
+            hidden_acts_key = random.fold_in(run_key, 3 * cfg.steps + eval_pass_index)
+            hidden_acts = compute_hidden_acts_metrics(
+                lm, state, frozen, eval_residuals, cfg.n_mask_samples, cfg.sampling, hidden_acts_key
+            )
+            eval_record |= {f"eval/slow/loss/{k}": v for k, v in hidden_acts.items()}
+            slow_renderer.submit(site_reductions, now_step)
         if is_main:
             headline = {
                 k: eval_record[f"eval/{k}"]
