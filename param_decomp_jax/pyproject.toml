@@ -33,6 +33,7 @@ dev = ["pytest", "basedpyright", "huggingface-hub==0.36.0"]
 
 [project.scripts]
 jsp-train = "jax_single_pool.run:main"
+jsp-pretrain = "jax_single_pool.pretrain.train:main"
 jsp-slow-eval = "jax_single_pool.slow_eval:main"
 
 [build-system]
