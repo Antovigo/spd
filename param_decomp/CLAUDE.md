@@ -6,10 +6,10 @@ the stable torch `param_decomp` impl). See `README.md` for the file map.
 
 Open items: persistent-source scopes `c`/`nsc` and sigmoid parameterization are
 deliberately refused. The hidden-acts seam is now BUILT (SPEC S31 amended 2026-06-16):
-`CIHiddenActsReconLoss` / `StochasticHiddenActsReconLoss` are standalone offline eval
-metrics (`hidden_acts_eval.py`, via `pd-slow-eval`) over a fifth model fn
-`masked_site_outputs` — NOT recon-grid training terms (the recon loss stays
-KL-on-final-logits). `sc` and `bsc` are supported (`bsc` is batch-sharded:
+`CIHiddenActsReconLoss` / `StochasticHiddenActsReconLoss` are standalone eval metrics
+(`hidden_acts_eval.py`, computed in-loop on `eval.slow_every` AND via `pd-slow-eval`) over
+a fifth model fn `masked_site_outputs` — NOT recon-grid training terms (the recon loss
+stays KL-on-final-logits). `sc` and `bsc` are supported (`bsc` is batch-sharded:
 an independent source per batch element and position, no cross-replica sync — SPEC
 S16/D1). Persistent `start_frac>0` is now implemented (SPEC S32, `term_active`
 `where`-gating); SPEC S24's two torch-parity quirks (PPGD warmup route-all, fresh-PGD
@@ -62,8 +62,13 @@ config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig` in
 `config.py` (which also reads the canonical `param_decomp_config` schema DIRECTLY —
 `build_experiment_config`/`load_config` — routing `kind: pretrained` specs + `h.*`
 wildcards), target build in `run.py::main`. The slow plot metrics are computed
-NATIVELY in JAX via `pd-slow-eval` (`slow_eval.py`) — no torch export round-trip
-(the torch offline-eval bridge `jsp-export` / `pd-offline-eval` was retired).
+NATIVELY in JAX (`slow_eval.py`) — no torch export round-trip (the torch offline-eval
+bridge `jsp-export` / `pd-offline-eval` was retired). They now run IN-LOOP on
+`eval.slow_every` next to the fast pass (SPEC S28/S29 amended 2026-06-18): the collective
+forward + device→host pull in lockstep on all ranks, the matplotlib render + `wandb.log`
+on a rank-0 background thread (`run.py::SlowEvalRenderer`), reusing the fast pass's eval
+batches and logging on the live `_step` axis. `pd-slow-eval` is RETAINED for
+retrospective re-render of an on-disk checkpoint.
 
 **The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
 toy-specific code (CI-fn arches are the one allowed exception — see `ci_fn_mlp.py`). The
