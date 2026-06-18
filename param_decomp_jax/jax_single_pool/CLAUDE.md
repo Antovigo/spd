@@ -64,60 +64,38 @@ config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig` in
 wildcards), target build in `run.py::main`. The slow plot metrics are computed
 NATIVELY in JAX via `jsp-slow-eval` (`slow_eval.py`) — no torch export round-trip
 (the torch offline-eval bridge `jsp-export` / `pd-offline-eval` was retired).
-`tms.py` is the third target and the **first non-LM one** (`leading_axes=()`, no position
-axis; the waist is `[B, n_features]`) — the proof the generic `[*leading, d]` core fits a
-positionless target. The TMS target is the Anthropic toy (`out = relu(linear2(linear1(x)))`,
-weights TIED) with an UNTIED 2-site decomposition (`linear1`/`linear2`, independent V/U);
-the recon comparison is `recon_loss_fn = tms_mse` (MSE on the post-ReLU output, NOT KL),
-there is NO prefix (the whole model is decomposed, residual = raw input `x`), and the
-frozen target is **pretrained from scratch in-process** (`pretrain_tms_target`, the
-`mean((|x|-out)²)` objective — no wandb/cache). `ci_fn_mlp.py` is the second CI-fn arch:
-the **layerwise per-site MLP** (`fn_type=mlp`, `expects_axes=()`, `LayerwiseMLPCIFn`) —
-one independent MLP per site mapping `site_input [B,d_in] -> [B,C]` logits through the
-same `lower/upper_leaky_hard` squashings; `run_state.init_train_state` dispatches CI-fn
-construction on `cfg.ci_fn` (`CIArch` transformer vs `MLPCIArch`) and uses replicated
-(not C-sharded) V/U + CI for the tiny TMS. Config dispatch: `config._is_tms_schema`
-(structural `target.n_hidden` marker) routes the canonical schema to
-`build_tms_experiment_config` (torch-free `param_decomp_config.tms.TMSExperimentConfig`);
-`TMSTargetConfig` / `TMSDataConfig` join the `AnyTargetConfig` / `AnyDataConfig` unions;
-`run.py::main` builds + pretrains the target and calls `train_tms` (the TMS composition
-over the unified core — same `init_train_state` / faith warmup / `make_train_step` /
-orbax checkpointing, but synthetic data + the ground-truth target-CI metric
-`tms.identity_ci_error` instead of the LM CEandKLLosses eval pass). Harvest / slow-eval /
-export over TMS are NOT wired (`load_run.build_target` / `export` / `slow_eval` assert
-LM). **Finding (axis-semantics):** the core needed ZERO change for TMS — only ADDED a
-target + a CI arch + dispatch. The one deviation from the torch `fn_type=mlp` is by
-design: torch's scalar `MLPCiFn` feeds `get_component_acts(x)=x@V` (per-component scalar),
-which couples the CI-fn input to the trained components and so does NOT fit the generic
-`ci_fn(site_inputs)` waist; the vector-input per-site MLP (consumes the raw `site_input`)
-fits the waist with no core change and recovers a clean identity in the non-superposed
-(`n_hidden==n_features`) regime (validated end-to-end in `tests/test_tms.py`).
-`resid_mlp.py` is the fourth target and the **second non-LM one** — the SPD/APD
-residual-stream toy (`leading_axes=()`, no position axis; the waist is the residual
-stream `[B, d_embed]`). A FIXED input embedding `W_E` (`n_features→d_embed`), `n_layers`
-MLP blocks each reading/writing the `d_embed` residual stream, a FIXED unembed `W_U =
-W_Eᵀ`; the DECOMPOSITION targets the per-layer MLP matrices (sites `layers.{i}.mlp_in` /
-`layers.{i}.mlp_out`, UNTIED V/U). Unlike TMS it HAS a prefix (`W_E`, so
-`resid_mlp_input_residual(frozen, x) = x @ W_E` — the prefix `W_E` is carried inside the
-frozen target itself, no separate `prefix` slot), and unlike LM the recon comparison is
-`recon_loss_fn = resid_mlp_mse` (MSE on the model output `[B, n_features]`, NOT KL). The
-frozen target is **pretrained from scratch in-process** (`pretrain_resid_mlp_target`, the
-read-off `mean((out − (act_fn(x)+x))²)` objective with trivial unit label coeffs — no
-wandb/cache). It REUSES `LayerwiseMLPCIFn` (`fn_type=mlp`, no new CI arch) and the same
-ground-truth identity-CI metric (`resid_mlp.identity_ci_error`, the single-feature probe
-through `W_E`). Config dispatch: `config._is_resid_mlp_schema` (structural `target.d_embed`
-marker, disjoint from TMS's `n_hidden` and the LM's `spec`) routes the canonical schema to
-`build_resid_mlp_experiment_config` (torch-free
-`param_decomp_config.resid_mlp.ResidMLPExperimentConfig`); `ResidMLPTargetConfig` /
-`ResidMLPDataConfig` join the `AnyTargetConfig` / `AnyDataConfig` unions and `ResidMLPTarget`
-joins `AnyFrozenTarget`; `run.py::main` builds + pretrains the target and calls
-`train_resid_mlp` (mirroring `train_tms`). Harvest / slow-eval / export over ResidMLP are
-NOT wired (`load_run.build_target` asserts against it; `export` is llama8b-only). **Finding:**
-again ZERO core change — only ADDED a target + dispatch (the CI arch was reused). The
-identity-embedding regime sets `W_U = W_Eᵀ = I` (the salvaged design choice; torch leaves
-`W_U` at its discarded random init there since only `mlp_in` CI structure is asserted), the
-unambiguous clean per-feature ground truth (validated end-to-end pretrain→decompose→identity
-recovery in `tests/test_resid_mlp.py`).
+
+**The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
+toy-specific code (CI-fn arches are the one allowed exception — see `ci_fn_mlp.py`). The
+generic engine is `run.py::run_decomposition_training(cfg, raw_cfg, lm, frozen,
+sample_batch, eval_fn, eval_every, perf_tokens_per_step, mesh)` — the ONE train loop every
+target runs through (init/restore/finetune/faith-warmup via `_init_or_restore_state`, the
+recon-grid step factory, orbax checkpointing, schedules, SIGTERM-save). A target injects
+exactly three seams: the data source (`sample_batch(step) -> residual`), the eval metric
+(`eval_fn(state, now_step) -> dict`, run every `eval_every`), and (for the LM) the perf
+token count. `run.py::train` is the thin LM caller (parquet `sample_batch` + the
+CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); `jsp-train` is LM-ONLY
+(`config.build_from_schema` validates `LMExperimentConfig`; `main`'s `match cfg.target`
+covers only `TargetConfig` / `LlamaSimpleMLPTargetConfig`). `cfg.target` is typed by the
+`config.TargetSites` protocol (just `.sites`), `cfg.data` is `DataConfig | None` (None for a
+toy run). The shared algorithm-config conversion is public for the lab toys to reuse:
+`config.convert_shared_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch` (+
+`SharedAlgorithmConfig`).
+
+The TMS + ResidMLP targets now live under `param_decomp_lab/experiments/{tms,resid_mlp}/`
+(`model.py` = the JAX `DecomposedModel` + frozen target + in-process pretrain + identity-CI
+eval; `run.py` = the `pd-tms` / `pd-resid-mlp` CPU CLI that builds the `ExperimentConfig`
+from the canonical schema and calls `run_decomposition_training`). They are positionless
+(`leading_axes=()`) and use the layerwise per-site MLP CI fn. `ci_fn_mlp.py` (the second
+CI-fn arch, the allowed exception) stays in the core: `LayerwiseMLPCIFn` (`fn_type=mlp`,
+`expects_axes=()`, one independent MLP per site mapping `site_input [B,d_in] -> [B,C]`) plus
+the new `GlobalMLPCIFn` (`fn_type=global_shared_mlp`, one shared MLP over all sites jointly,
+concat/split in canonical site order) — `run_state.init_train_state` dispatches CI-fn
+construction on `cfg.ci_fn` (`CIArch` transformer vs `MLPCIArch`) and uses replicated (not
+C-sharded) V/U + CI for the tiny toys. **GlobalMLPCIArch dispatch into `init_train_state` /
+`config.CIFnArch` / `llama8b_sharding` is a remaining follow-up** (the building blocks exist
++ are unit-tested; the layerwise path is fully wired). Harvest / slow-eval / export over the
+toys are NOT wired (`load_run.build_target` / `run_metadata` are LM-only).
 
 ## Invariants with sharp teeth (the ones that have actually bitten)
 

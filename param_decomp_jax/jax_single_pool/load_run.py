@@ -39,9 +39,7 @@ from jax_single_pool.ci_fn import CIFn
 from jax_single_pool.config import (
     ExperimentConfig,
     LlamaSimpleMLPTargetConfig,
-    ResidMLPTargetConfig,
     TargetConfig,
-    TMSTargetConfig,
     load_run_dir_config,
 )
 from jax_single_pool.llama8b import (
@@ -77,11 +75,10 @@ def build_target(
 ) -> tuple[DecomposedModel, AnyFrozenTarget, AnyPrefix, Callable[[Any, Any], jax.Array], int]:
     """`(lm, frozen target, prefix, prefix_residual_fn, vocab_size)` for the run's target
     config. SimpleMLP reads its local pretrain cache (no network); llama8b reads the HF
-    snapshot (frozen bf16 target + fp32-compute, matching `run.py::main`)."""
-    assert not isinstance(cfg.target, (TMSTargetConfig, ResidMLPTargetConfig)), (
-        "harvest/slow-eval over the TMS/ResidMLP targets is not wired (they validate via "
-        "the in-loop target-CI metric in run.py::train_tms / train_resid_mlp)"
-    )
+    snapshot (frozen bf16 target + fp32-compute, matching `run.py::main`).
+
+    LM-only: harvest/slow-eval over the toy (TMS/ResidMLP) targets is not wired — those
+    validate via their in-loop target-CI metric in the lab provider, not this path."""
     match cfg.target:
         case LlamaSimpleMLPTargetConfig():
             cache_dir = llama_simple_mlp.pretrain_cache_dir(cfg.target.pretrain_run_path)
@@ -115,6 +112,8 @@ def build_target(
                 NamedSharding(mesh, P()),
             )
             return lm, target, prefix, prefix_residual, llama_cfg.vocab_size
+        case _:
+            raise AssertionError(f"build_target is LM-only; got target {type(cfg.target).__name__}")
 
 
 def _u_norms(components: DecompVU, site_names: tuple[str, ...]) -> dict[str, Float[Array, " C"]]:
@@ -258,7 +257,8 @@ def run_metadata(run_dir: Path) -> RunMetadata:
                 vocab_size=llama_cfg.vocab_size,
                 layer_activation_sizes=[(s.name, s.C) for s in cfg.target.sites],
             )
-        case TMSTargetConfig() | ResidMLPTargetConfig():
+        case _:
             raise AssertionError(
-                "run_metadata is the LM-consumer path only (TMS/ResidMLP are not harvested)"
+                "run_metadata is the LM-consumer path only (toys are not harvested); "
+                f"got target {type(cfg.target).__name__}"
             )

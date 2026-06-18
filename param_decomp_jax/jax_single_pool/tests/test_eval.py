@@ -5,16 +5,37 @@ Checks the torch-parity key set, the variant identities (rounded-at-impossible-t
 against a hand-rolled computation, and determinism in the key.
 """
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import pytest
 
 from jax_single_pool.eval import make_eval_step, next_token_cross_entropy
 from jax_single_pool.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
+from jax_single_pool.lm import DecomposedModel, SiteSpec
 from jax_single_pool.tests.test_llama8b import (
     _tiny_cfg,  # pyright: ignore[reportPrivateUsage]
     _tiny_target,  # pyright: ignore[reportPrivateUsage]
 )
+
+
+def _positionless_model() -> DecomposedModel:
+    """A minimal `leading_axes=()` `DecomposedModel` whose pure fns are never called — used
+    only to exercise the LM-only `leading_axes` guards (which fire at construction)."""
+
+    def _unused(*_args: object) -> Any:
+        raise AssertionError("positionless stub fn must not be called")
+
+    return DecomposedModel(
+        sites=(SiteSpec("linear1", 5, 2, 8), SiteSpec("linear2", 2, 5, 6)),
+        leading_axes=(),
+        clean_output=_unused,
+        site_inputs=_unused,
+        masked_output=_unused,
+        masked_site_outputs=_unused,
+        weight_deltas=_unused,
+    )
 
 
 def test_next_token_cross_entropy_matches_manual():
@@ -241,12 +262,7 @@ def test_eval_step_l0_groups_sum_member_sites():
 def test_make_eval_step_rejects_positionless_target():
     """CEandKLLosses/CI_L0 is LM-only (tokens + vocab logits over a sequence axis);
     constructing it against a positionless (`leading_axes=()`) target must fail loud."""
-    from jax_single_pool.lm import SiteC
-    from jax_single_pool.tms import TMSConfig, site_specs, tms_decomposed_model
-
-    cfg = TMSConfig(n_features=5, n_hidden=2)
-    sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
-    lm = tms_decomposed_model(cfg, sites)
+    lm = _positionless_model()
     assert lm.leading_axes == ()
     with pytest.raises(AssertionError, match="LM-only"):
         make_eval_step(

@@ -28,11 +28,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import orbax.checkpoint as ocp
 from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jaxtyping import PRNGKeyArray
 
-from jax_single_pool import llama_simple_mlp, resid_mlp, tms
+from jax_single_pool import llama_simple_mlp
 from jax_single_pool.attn_patterns_eval import (
     accumulate_attn_patterns,
     attn_pattern_for,
@@ -50,11 +52,7 @@ from jax_single_pool.config import (
     DataConfig,
     ExperimentConfig,
     LlamaSimpleMLPTargetConfig,
-    ResidMLPDataConfig,
-    ResidMLPTargetConfig,
     TargetConfig,
-    TMSDataConfig,
-    TMSTargetConfig,
     load_config,
     load_run_dir_config,
 )
@@ -76,7 +74,7 @@ from jax_single_pool.recon import build_recon_terms
 from jax_single_pool.run_state import build_optimizers, init_train_state
 from jax_single_pool.sharding import dp_mesh, init_distributed
 from jax_single_pool.target_aliases import AnyFrozenTarget, AnyPrefix
-from jax_single_pool.train import make_faith_warmup_step, make_train_step
+from jax_single_pool.train import TrainState, make_faith_warmup_step, make_train_step
 from param_decomp_config.experiment import ResumeProvenance
 from param_decomp_config.wandb_config import flatten_typed_lists
 
@@ -233,41 +231,36 @@ def assert_finetune_structural_compat(cfg: ExperimentConfig, prov: ResumeProvena
     )
 
 
-def train(
+def _init_or_restore_state(
     cfg: ExperimentConfig,
-    raw_cfg: dict[str, object],
     lm: DecomposedModel,
-    frozen: AnyFrozenTarget,
-    prefix: AnyPrefix,
-    prefix_residual_fn: Callable[[Any, Any], jax.Array],
+    frozen: Any,
+    opt_vu: optax.GradientTransformation,
+    opt_ci: optax.GradientTransformation,
+    init_key: PRNGKeyArray,
+    src_key: PRNGKeyArray,
     mesh: Mesh,
-) -> None:
-    assert isinstance(cfg.data, DataConfig), "train() is the LM (parquet) data path"
-    is_main = jax.process_index() == 0
-    n_proc = jax.process_count()
-    ndev = mesh.devices.size
-    assert cfg.data.global_batch % ndev == 0, (cfg.data.global_batch, ndev)
+    checkpoint_manager: ocp.CheckpointManager,
+    is_main: bool,
+) -> tuple[TrainState, int] | None:
+    """The shared init/restore/finetune/faith-warmup phase (SPEC S21/S22/S33).
 
-    cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(cfg)
-
-    key = random.PRNGKey(cfg.seed)
-    init_key, src_key, run_key = random.split(key, 3)
+    Returns `(state, start_step)`, or `None` when a SIGTERM landed mid-warmup (the caller
+    must exit cleanly for requeue — no valid checkpoint exists pre-step-0)."""
     state = _ensure_global(init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh), mesh)
 
-    checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
     restored = restore_latest(checkpoint_manager, state)
     if restored is not None:
         state, ckpt_step = restored
         assert int(state.step) == ckpt_step, (int(state.step), ckpt_step)
-        start_step = ckpt_step
         if is_main:
             print(f"resumed from checkpoint step {ckpt_step}", flush=True)
-    elif cfg.resume_provenance is not None:
+        return state, ckpt_step
+
+    if cfg.resume_provenance is not None:
         # Fine-tune init (SPEC S33): own ckpts/ is empty, so this is the FIRST entry, not a
         # requeue — load the parent's trained V/U + ci_fn onto the fresh reference, start a
         # clean schedule from step 0 (fresh optimizer / sources, no faith warmup).
-        start_step = 0
         prov = cfg.resume_provenance
         assert_finetune_structural_compat(cfg, prov)
         state = init_from_parent(prov.parent_run_dir / "ckpts", prov.parent_step, state)
@@ -278,44 +271,91 @@ def train(
                 f"step {prov.parent_step}; training fresh from step 0",
                 flush=True,
             )
-    else:
-        start_step = 0
-        if cfg.faith_warmup.steps > 0:
-            faith_warmup_optimizer = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
-            faith_warmup_opt_state = faith_warmup_optimizer.init(
-                eqx.filter(state.components, eqx.is_array)
+        return state, 0
+
+    if cfg.faith_warmup.steps > 0:
+        faith_warmup_optimizer = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
+        faith_warmup_opt_state = faith_warmup_optimizer.init(
+            eqx.filter(state.components, eqx.is_array)
+        )
+        faith_warmup_step = make_faith_warmup_step(lm, faith_warmup_optimizer)
+        warmed_components = state.components
+        t0 = time.time()
+        faith_warmup_loss = None
+        for _ in range(cfg.faith_warmup.steps):
+            warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
+                warmed_components, faith_warmup_opt_state, frozen
             )
-            faith_warmup_step = make_faith_warmup_step(lm, faith_warmup_optimizer)
-            warmed_components = state.components
-            t0 = time.time()
-            faith_warmup_loss = None
-            for _ in range(cfg.faith_warmup.steps):
-                warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
-                    warmed_components, faith_warmup_opt_state, frozen
-                )
-                if _sigterm_received:
-                    # No valid checkpoint exists yet (the step-0 save happens only after
-                    # warmup completes, and resume skips warmup whenever a checkpoint is
-                    # present — a partially-warmed step-0 save would resume as if fully
-                    # warmed). Exit cleanly; the SLURM requeue redoes warmup from scratch.
-                    if is_main:
-                        print("SIGTERM during faith warmup: exiting for requeue", flush=True)
-                    return
-            assert faith_warmup_loss is not None
-            jax.block_until_ready(faith_warmup_loss)
-            new_opt_vu = _ensure_global(
-                opt_vu.init(eqx.filter(warmed_components, eqx.is_array)), mesh
+            if _sigterm_received:
+                # No valid checkpoint exists yet (the step-0 save happens only after warmup
+                # completes, and resume skips warmup whenever a checkpoint is present — a
+                # partially-warmed step-0 save would resume as if fully warmed). Exit
+                # cleanly; the SLURM requeue redoes warmup from scratch.
+                if is_main:
+                    print("SIGTERM during faith warmup: exiting for requeue", flush=True)
+                return None
+        assert faith_warmup_loss is not None
+        jax.block_until_ready(faith_warmup_loss)
+        new_opt_vu = _ensure_global(opt_vu.init(eqx.filter(warmed_components, eqx.is_array)), mesh)
+        state = dataclasses.replace(
+            state, components=warmed_components, components_opt_state=new_opt_vu
+        )
+        if is_main:
+            print(
+                f"faith warmup: {cfg.faith_warmup.steps} steps in {time.time() - t0:.0f}s, "
+                f"final faith {float(faith_warmup_loss):.3e}",
+                flush=True,
             )
-            state = dataclasses.replace(
-                state, components=warmed_components, components_opt_state=new_opt_vu
-            )
-            if is_main:
-                print(
-                    f"faith warmup: {cfg.faith_warmup.steps} steps in {time.time() - t0:.0f}s, "
-                    f"final faith {float(faith_warmup_loss):.3e}",
-                    flush=True,
-                )
-        save_state(checkpoint_manager, 0, state)
+    save_state(checkpoint_manager, 0, state)
+    return state, 0
+
+
+def run_decomposition_training(
+    cfg: ExperimentConfig,
+    raw_cfg: dict[str, object],
+    lm: DecomposedModel,
+    frozen: Any,
+    sample_batch: Callable[[int], jax.Array],
+    eval_fn: Callable[[TrainState, int], dict[str, float]] | None,
+    eval_every: int,
+    perf_tokens_per_step: int | None,
+    mesh: Mesh,
+) -> None:
+    """The generic VPD decomposition-training engine — the ONE train loop every target
+    (LM, TMS, ResidMLP, …) runs through.
+
+    The target supplies only its three injectable seams:
+
+    - `sample_batch(step) -> residual [*leading, d]`: the residual entering the decomposed
+      model for `step`, already mesh-placed on `P("dp")`. An LM harvests it from the frozen
+      prefix over a parquet token batch; a toy generates it synthetically.
+    - `eval_fn(state, now_step) -> dict[str, float]`: an in-loop eval pass run every
+      `eval_every` completed steps, its record logged under that step. `None` disables it.
+    - `eval_every`: the eval cadence. For an LM this is `cfg.eval.every`; a toy folds its
+      cheap target-CI eval onto the `log_every` cadence.
+
+    Everything generic — `init_train_state`, fine-tune init, faith warmup, the recon-grid
+    step factory, orbax checkpointing, schedules, SIGTERM-save — lives here. The step
+    numerics are identical across targets; only the data source and the eval metric differ.
+
+    `perf_tokens_per_step` drives the tok/s perf record; `None` (toys, where a synthetic
+    "token" has no meaning) omits the perf keys."""
+    is_main = jax.process_index() == 0
+    ndev = mesh.devices.size
+
+    cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(cfg)
+
+    key = random.PRNGKey(cfg.seed)
+    init_key, src_key, run_key = random.split(key, 3)
+
+    checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
+    init = _init_or_restore_state(
+        cfg, lm, frozen, opt_vu, opt_ci, init_key, src_key, mesh, checkpoint_manager, is_main
+    )
+    if init is None:
+        return  # SIGTERM mid-warmup: clean exit for requeue
+    state, start_step = init
 
     step_fn = make_train_step(
         lm=lm,
@@ -329,53 +369,6 @@ def train(
         mesh=mesh,
     )
 
-    def _harvest(prefix_weights: Any, inputs: Any) -> jax.Array:
-        residual = prefix_residual_fn(prefix_weights, inputs)
-        return jax.lax.with_sharding_constraint(residual, NamedSharding(mesh, P("dp")))
-
-    harvest = jax.jit(_harvest)
-
-    schedule = BatchSchedule(scan_shards(cfg.data.dir), cfg.data.global_batch, cfg.seed)
-    server = ShardServer(schedule, cfg.data.seq_len, jax.process_index(), n_proc)
-    assert server.per_process % jax.local_device_count() == 0, (
-        server.per_process, jax.local_device_count(),
-    )  # fmt: skip
-
-    # Eval mirrors the torch reference's `eval_split: train`: an independent stream over
-    # the SAME corpus (own seed), advanced one block of `n_steps` batches per eval pass.
-    eval_step_fn = None
-    eval_server = None
-    attn_steps: dict[str, Any] = {}
-    if cfg.eval is not None:
-        assert cfg.eval.every % cfg.cadence.log_every == 0, (
-            "eval must land on a train-log step: the tok/s window resets after eval, so a "
-            "mid-window eval would corrupt the next step-time estimate"
-        )
-        eval_schedule = BatchSchedule(scan_shards(cfg.data.dir), cfg.eval.batch_size, cfg.seed + 1)
-        eval_server = ShardServer(eval_schedule, cfg.data.seq_len, jax.process_index(), n_proc)
-        assert eval_server.per_process % jax.local_device_count() == 0, (
-            eval_server.per_process, jax.local_device_count(),
-        )  # fmt: skip
-        eval_pgd = (cfg.eval.pgd.n_steps, cfg.eval.pgd.step_size) if cfg.eval.pgd else None
-        eval_step_fn = make_eval_step(
-            lm,
-            cfg.eval.rounding_threshold,
-            cfg.eval.ci_alive_threshold,
-            cfg.eval.l0_groups,
-            eval_pgd,
-            mesh,
-        )
-        if cfg.eval.attn_patterns is not None:
-            pattern_fn = attn_pattern_for(frozen)
-            if cfg.eval.attn_patterns.ci_masked:
-                attn_steps["CIMaskedAttnPatternsReconLoss"] = make_ci_attn_patterns_step(
-                    lm, pattern_fn
-                )
-            if cfg.eval.attn_patterns.stochastic:
-                attn_steps["StochasticAttnPatternsReconLoss"] = make_stochastic_attn_patterns_step(
-                    lm, pattern_fn, cfg.n_mask_samples, cfg.sampling
-                )
-
     # the raw torch yaml's runtime block describes the UPSTREAM run (e.g. dp: 32);
     # record what this run actually executes on so wandb never lies about topology.
     # flatten the metric lists into the same flat keys torch logs (E14) so cross-impl
@@ -385,7 +378,7 @@ def train(
             raw_cfg,
             jax_runtime={
                 "n_devices": ndev,
-                "n_processes": n_proc,
+                "n_processes": jax.process_count(),
                 "remat_recon_forwards": cfg.remat_recon_forwards,
                 "run_id": cfg.run_id,
                 "run_dir": str(cfg.run_dir),
@@ -393,13 +386,11 @@ def train(
         )
     )
     sink = MetricsSink(cfg, wandb_config, is_main)
-    tokens_per_step = cfg.data.global_batch * cfg.data.seq_len
     window_t0 = time.time()
     last_logged = start_step
 
     for step in range(start_step, cfg.steps):
-        token_ids = _global_token_batch(server.local_batch(step), mesh, cfg.data.global_batch)
-        residual = harvest(prefix, token_ids)
+        residual = sample_batch(step)
         state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
 
         now_step = step + 1
@@ -420,8 +411,9 @@ def train(
                     f"non-finite loss {loss_name!r} at step {now_step}: {record[loss_name]}"
                 )
             record["step_time_s"] = per_step
-            record["tok_per_s"] = tokens_per_step / per_step
-            record["tok_per_s_per_gpu"] = tokens_per_step / per_step / ndev
+            if perf_tokens_per_step is not None:
+                record["tok_per_s"] = perf_tokens_per_step / per_step
+                record["tok_per_s_per_gpu"] = perf_tokens_per_step / per_step / ndev
             record["train/schedules/lr/components"] = float(jnp.asarray(sched_vu(now_step)))
             record["train/schedules/lr/ci_fn"] = float(jnp.asarray(sched_ci(now_step)))
             mem_stats = jax.local_devices()[0].memory_stats()
@@ -430,59 +422,12 @@ def train(
             sink.log(now_step, record)
             window_t0 = time.time()
 
-        if cfg.eval is not None and now_step % cfg.eval.every == 0 and not _sigterm_received:
-            assert eval_step_fn is not None and eval_server is not None
-            eval_pass_index = now_step // cfg.eval.every
-            # uniform-average of per-batch scalars; mean-safe vs torch's accumulate-then-
-            # compute() ONLY because every emitted key is a per-batch reduction that torch
-            # also averages across batches AND eval batches are uniform (B, T). See
-            # eval.py's module docstring for the per-key parity argument (cites SPEC S8/D2).
-            metric_sums: dict[str, jax.Array] = {}
-            eval_residuals: list[jax.Array] = []
-            for j in range(cfg.eval.n_steps):
-                if _sigterm_received:
-                    break
-                eval_tokens = _global_token_batch(
-                    eval_server.local_batch(eval_pass_index * cfg.eval.n_steps + j),
-                    mesh,
-                    cfg.eval.batch_size,
-                )
-                eval_residual = harvest(prefix, eval_tokens)
-                eval_residuals.append(eval_residual)
-                # fold values >= cfg.steps never collide with the train step keys
-                eval_key = random.fold_in(
-                    run_key, cfg.steps + eval_pass_index * cfg.eval.n_steps + j
-                )
-                eval_metrics = eval_step_fn(
-                    state.components, state.ci_fn, frozen, eval_tokens, eval_residual, eval_key
-                )
-                for k, v in eval_metrics.items():
-                    metric_sums[k] = metric_sums.get(k, jnp.zeros(())) + v
-            # A SIGTERM mid-pass abandons the partial averages unlogged and falls through
-            # to the save block, which services the flag with a synchronous save of the
-            # already-completed `now_step` before the train loop breaks for requeue.
+        if eval_fn is not None and now_step % eval_every == 0 and not _sigterm_received:
+            eval_record = eval_fn(state, now_step)
+            # A SIGTERM raised DURING the eval pass abandons its partial record unlogged and
+            # falls through to the save block (synchronous save of the completed `now_step`).
             if not _sigterm_received:
-                eval_record = {
-                    f"eval/{k}": float(v) / cfg.eval.n_steps for k, v in metric_sums.items()
-                }
-                for class_name, attn_step in attn_steps.items():
-                    # token-weighted (Σ sum_kl / Σ n), NOT the uniform per-batch average
-                    # above — KL is summed over distributions, divided by their count.
-                    attn_key = random.fold_in(run_key, 2 * cfg.steps + eval_pass_index)
-                    reductions = accumulate_attn_patterns(
-                        attn_step, state.components, state.ci_fn, frozen, eval_residuals, attn_key
-                    )
-                    eval_record |= {
-                        f"eval/loss/{k}": v
-                        for k, v in attn_patterns_log_entries(class_name, reductions).items()
-                    }
                 sink.log(now_step, eval_record)
-                if is_main:
-                    headline = {
-                        k: eval_record[f"eval/{k}"]
-                        for k in ("ce_kl/kl_ci_masked", "ce_kl/ce_unrecovered_ci_masked")
-                    }
-                    print(f"[eval @ {now_step}] {headline}", flush=True)
                 window_t0 = time.time()
 
         if now_step % cfg.cadence.save_every == 0 or now_step == cfg.steps or _sigterm_received:
@@ -496,233 +441,156 @@ def train(
             break
 
 
-def train_tms(
+def train(
     cfg: ExperimentConfig,
     raw_cfg: dict[str, object],
     lm: DecomposedModel,
-    frozen: tms.TMSTarget,
+    frozen: AnyFrozenTarget,
+    prefix: AnyPrefix,
+    prefix_residual_fn: Callable[[Any, Any], jax.Array],
     mesh: Mesh,
 ) -> None:
-    """The TMS composition over the unified core: same `init_train_state` / faith warmup /
-    `make_train_step` / orbax checkpointing as the LM path, but with in-process synthetic
-    sparse-feature data (no parquet/prefix) and the standalone ground-truth target-CI
-    metric (`tms.identity_ci_error`) instead of the LM CEandKLLosses eval pass.
-
-    The residual entering the decomposed model IS the raw input `x` (no prefix); the step
-    factory, recon terms (MSE recon_loss_fn), losses and adversaries are all the generic
-    core, unchanged."""
-    data_cfg = cfg.data
-    assert isinstance(data_cfg, TMSDataConfig) and isinstance(cfg.target, TMSTargetConfig)
-    is_main = jax.process_index() == 0
+    """The LM composition over the generic engine: a parquet `sample_batch` (harvest the
+    residual from the frozen prefix) and the CEandKL / CI-L0 / PGD / attn-patterns
+    `eval_fn`."""
+    data = cfg.data
+    assert isinstance(data, DataConfig), "train() is the LM (parquet) data path"
+    n_proc = jax.process_count()
     ndev = mesh.devices.size
-    assert data_cfg.global_batch % ndev == 0, (data_cfg.global_batch, ndev)
-
-    cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(cfg)
+    assert data.global_batch % ndev == 0, (data.global_batch, ndev)
+    is_main = jax.process_index() == 0
 
     key = random.PRNGKey(cfg.seed)
-    init_key, src_key, run_key, data_key = random.split(key, 4)
-    state = _ensure_global(init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh), mesh)
+    _, _, run_key = random.split(key, 3)
 
-    checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
-    restored = restore_latest(checkpoint_manager, state)
-    if restored is not None:
-        state, ckpt_step = restored
-        assert int(state.step) == ckpt_step, (int(state.step), ckpt_step)
-        start_step = ckpt_step
-        if is_main:
-            print(f"resumed from checkpoint step {ckpt_step}", flush=True)
-    else:
-        start_step = 0
-        if cfg.faith_warmup.steps > 0:
-            faith_warmup_optimizer = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
-            faith_warmup_opt_state = faith_warmup_optimizer.init(
-                eqx.filter(state.components, eqx.is_array)
-            )
-            faith_warmup_step = make_faith_warmup_step(lm, faith_warmup_optimizer)
-            warmed_components = state.components
-            faith_warmup_loss = None
-            for _ in range(cfg.faith_warmup.steps):
-                warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
-                    warmed_components, faith_warmup_opt_state, frozen
-                )
-            assert faith_warmup_loss is not None
-            jax.block_until_ready(faith_warmup_loss)
-            new_opt_vu = _ensure_global(
-                opt_vu.init(eqx.filter(warmed_components, eqx.is_array)), mesh
-            )
-            state = dataclasses.replace(
-                state, components=warmed_components, components_opt_state=new_opt_vu
-            )
-            if is_main:
-                print(f"faith warmup: final faith {float(faith_warmup_loss):.3e}", flush=True)
-        save_state(checkpoint_manager, 0, state)
-
-    step_fn = make_train_step(
-        lm=lm,
-        loss_spec=build_recon_terms(
-            cfg.loss_metrics, lm.site_names, cfg.n_mask_samples, cfg.sampling
-        ),
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
-        total_steps=cfg.steps,
-        remat_recon_forwards=cfg.remat_recon_forwards,
-        mesh=mesh,
-    )
-
-    @jax.jit
-    def sample_residual(step_key: jax.Array) -> jax.Array:
-        x = tms.sample_sparse_features(
-            step_key,
-            data_cfg.global_batch,
-            data_cfg.n_features,
-            data_cfg.feature_probability,
-            data_cfg.data_generation_type,
-        )
-        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P("dp")))
-
-    @jax.jit
-    def single_feature_ci(components: Any, ci_fn: Any) -> dict[str, jax.Array]:
-        probe = jnp.eye(data_cfg.n_features) * 0.75
-        return ci_fn(lm.site_inputs(frozen, probe)).lower
-
-    wandb_config = flatten_typed_lists(
-        dict(raw_cfg, jax_runtime={"n_devices": ndev, "run_id": cfg.run_id})
-    )
-    sink = MetricsSink(cfg, wandb_config, is_main)
-
-    for step in range(start_step, cfg.steps):
-        residual = sample_residual(random.fold_in(data_key, step))
-        state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
-        now_step = step + 1
-        if now_step % cfg.cadence.log_every == 0 or now_step == cfg.steps:
-            jax.block_until_ready(metrics["total"])
-            record = {k: float(v) for k, v in metrics.items()}
-            ci_lower = single_feature_ci(state.components, state.ci_fn)
-            for site, ci in ci_lower.items():
-                record[f"eval/identity_ci_error/{site}"] = float(
-                    tms.identity_ci_error(ci, tolerance=0.1)
-                )
-            sink.log(now_step, record)
-        if now_step % cfg.cadence.save_every == 0 or now_step == cfg.steps:
-            save_state(checkpoint_manager, now_step, state)
-            if is_main:
-                print(f"checkpoint saved @ step {now_step}", flush=True)
-
-
-def train_resid_mlp(
-    cfg: ExperimentConfig,
-    raw_cfg: dict[str, object],
-    lm: DecomposedModel,
-    frozen: resid_mlp.ResidMLPTarget,
-    mesh: Mesh,
-) -> None:
-    """The ResidMLP composition over the unified core: same `init_train_state` / faith
-    warmup / `make_train_step` / orbax checkpointing as the LM path, but with in-process
-    synthetic sparse-feature data, the `W_E` embedding as the residual prefix, and the
-    standalone ground-truth target-CI metric (`resid_mlp.identity_ci_error`) instead of
-    the LM CEandKLLosses eval pass.
-
-    The residual entering the decomposed model is `x @ W_E`; the step factory, recon terms
-    (MSE recon_loss_fn), losses and adversaries are all the generic core, unchanged."""
-    data_cfg = cfg.data
-    assert isinstance(data_cfg, ResidMLPDataConfig) and isinstance(cfg.target, ResidMLPTargetConfig)
-    is_main = jax.process_index() == 0
-    ndev = mesh.devices.size
-    assert data_cfg.global_batch % ndev == 0, (data_cfg.global_batch, ndev)
-
-    cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(cfg)
-
-    key = random.PRNGKey(cfg.seed)
-    init_key, src_key, run_key, data_key = random.split(key, 4)
-    state = _ensure_global(init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh), mesh)
-
-    checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
-    restored = restore_latest(checkpoint_manager, state)
-    if restored is not None:
-        state, ckpt_step = restored
-        assert int(state.step) == ckpt_step, (int(state.step), ckpt_step)
-        start_step = ckpt_step
-        if is_main:
-            print(f"resumed from checkpoint step {ckpt_step}", flush=True)
-    else:
-        start_step = 0
-        if cfg.faith_warmup.steps > 0:
-            faith_warmup_optimizer = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
-            faith_warmup_opt_state = faith_warmup_optimizer.init(
-                eqx.filter(state.components, eqx.is_array)
-            )
-            faith_warmup_step = make_faith_warmup_step(lm, faith_warmup_optimizer)
-            warmed_components = state.components
-            faith_warmup_loss = None
-            for _ in range(cfg.faith_warmup.steps):
-                warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
-                    warmed_components, faith_warmup_opt_state, frozen
-                )
-            assert faith_warmup_loss is not None
-            jax.block_until_ready(faith_warmup_loss)
-            new_opt_vu = _ensure_global(
-                opt_vu.init(eqx.filter(warmed_components, eqx.is_array)), mesh
-            )
-            state = dataclasses.replace(
-                state, components=warmed_components, components_opt_state=new_opt_vu
-            )
-            if is_main:
-                print(f"faith warmup: final faith {float(faith_warmup_loss):.3e}", flush=True)
-        save_state(checkpoint_manager, 0, state)
-
-    step_fn = make_train_step(
-        lm=lm,
-        loss_spec=build_recon_terms(
-            cfg.loss_metrics, lm.site_names, cfg.n_mask_samples, cfg.sampling
-        ),
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
-        total_steps=cfg.steps,
-        remat_recon_forwards=cfg.remat_recon_forwards,
-        mesh=mesh,
-    )
-
-    @jax.jit
-    def sample_residual(step_key: jax.Array) -> jax.Array:
-        x = resid_mlp.sample_sparse_features(
-            step_key,
-            data_cfg.global_batch,
-            data_cfg.n_features,
-            data_cfg.feature_probability,
-            data_cfg.data_generation_type,
-        )
-        residual = resid_mlp.resid_mlp_input_residual(frozen, x)
+    def _harvest(prefix_weights: Any, inputs: Any) -> jax.Array:
+        residual = prefix_residual_fn(prefix_weights, inputs)
         return jax.lax.with_sharding_constraint(residual, NamedSharding(mesh, P("dp")))
 
-    @jax.jit
-    def single_feature_ci(components: Any, ci_fn: Any) -> dict[str, jax.Array]:
-        resid = resid_mlp.single_feature_probe(data_cfg.n_features) @ frozen.W_E
-        return ci_fn(lm.site_inputs(frozen, resid)).lower
+    harvest = jax.jit(_harvest)
 
-    wandb_config = flatten_typed_lists(
-        dict(raw_cfg, jax_runtime={"n_devices": ndev, "run_id": cfg.run_id})
+    schedule = BatchSchedule(scan_shards(data.dir), data.global_batch, cfg.seed)
+    server = ShardServer(schedule, data.seq_len, jax.process_index(), n_proc)
+    assert server.per_process % jax.local_device_count() == 0, (
+        server.per_process, jax.local_device_count(),
+    )  # fmt: skip
+
+    def sample_batch(step: int) -> jax.Array:
+        token_ids = _global_token_batch(server.local_batch(step), mesh, data.global_batch)
+        return harvest(prefix, token_ids)
+
+    eval_fn = None
+    eval_every = cfg.steps + 1  # unreachable cadence when eval is disabled
+    if cfg.eval is not None:
+        assert cfg.eval.every % cfg.cadence.log_every == 0, (
+            "eval must land on a train-log step: the tok/s window resets after eval, so a "
+            "mid-window eval would corrupt the next step-time estimate"
+        )
+        eval_every = cfg.eval.every
+        eval_fn = _make_lm_eval_fn(cfg, lm, frozen, prefix, harvest, run_key, mesh, n_proc, is_main)
+
+    run_decomposition_training(
+        cfg=cfg,
+        raw_cfg=raw_cfg,
+        lm=lm,
+        frozen=frozen,
+        sample_batch=sample_batch,
+        eval_fn=eval_fn,
+        eval_every=eval_every,
+        perf_tokens_per_step=data.global_batch * data.seq_len,
+        mesh=mesh,
     )
-    sink = MetricsSink(cfg, wandb_config, is_main)
 
-    for step in range(start_step, cfg.steps):
-        residual = sample_residual(random.fold_in(data_key, step))
-        state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
-        now_step = step + 1
-        if now_step % cfg.cadence.log_every == 0 or now_step == cfg.steps:
-            jax.block_until_ready(metrics["total"])
-            record = {k: float(v) for k, v in metrics.items()}
-            ci_lower = single_feature_ci(state.components, state.ci_fn)
-            for site, ci in ci_lower.items():
-                record[f"eval/identity_ci_error/{site}"] = float(
-                    resid_mlp.identity_ci_error(ci, tolerance=0.1)
-                )
-            sink.log(now_step, record)
-        if now_step % cfg.cadence.save_every == 0 or now_step == cfg.steps:
-            save_state(checkpoint_manager, now_step, state)
-            if is_main:
-                print(f"checkpoint saved @ step {now_step}", flush=True)
+
+def _make_lm_eval_fn(
+    cfg: ExperimentConfig,
+    lm: DecomposedModel,
+    frozen: AnyFrozenTarget,
+    prefix: AnyPrefix,
+    harvest: Callable[[Any, Any], jax.Array],
+    run_key: PRNGKeyArray,
+    mesh: Mesh,
+    n_proc: int,
+    is_main: bool,
+) -> Callable[[TrainState, int], dict[str, float]]:
+    """The LM in-loop eval pass closure (CEandKL / CI-L0 / PGD / attn-patterns), keyed
+    deterministically off `(run_key, now_step)` so it is bit-identical to the pre-engine
+    inline loop. Mirrors the torch `eval_split: train` stream: an independent reader over
+    the SAME corpus (own seed), advanced one block of `n_steps` batches per eval pass."""
+    assert cfg.eval is not None
+    data = cfg.data
+    assert isinstance(data, DataConfig)
+    eval_schedule = BatchSchedule(scan_shards(data.dir), cfg.eval.batch_size, cfg.seed + 1)
+    eval_server = ShardServer(eval_schedule, data.seq_len, jax.process_index(), n_proc)
+    assert eval_server.per_process % jax.local_device_count() == 0, (
+        eval_server.per_process, jax.local_device_count(),
+    )  # fmt: skip
+    eval_pgd = (cfg.eval.pgd.n_steps, cfg.eval.pgd.step_size) if cfg.eval.pgd else None
+    eval_step_fn = make_eval_step(
+        lm,
+        cfg.eval.rounding_threshold,
+        cfg.eval.ci_alive_threshold,
+        cfg.eval.l0_groups,
+        eval_pgd,
+        mesh,
+    )
+    attn_steps: dict[str, Any] = {}
+    if cfg.eval.attn_patterns is not None:
+        pattern_fn = attn_pattern_for(frozen)
+        if cfg.eval.attn_patterns.ci_masked:
+            attn_steps["CIMaskedAttnPatternsReconLoss"] = make_ci_attn_patterns_step(lm, pattern_fn)
+        if cfg.eval.attn_patterns.stochastic:
+            attn_steps["StochasticAttnPatternsReconLoss"] = make_stochastic_attn_patterns_step(
+                lm, pattern_fn, cfg.n_mask_samples, cfg.sampling
+            )
+
+    def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
+        assert cfg.eval is not None
+        eval_pass_index = now_step // cfg.eval.every
+        # uniform-average of per-batch scalars; mean-safe vs torch's accumulate-then-
+        # compute() ONLY because every emitted key is a per-batch reduction that torch also
+        # averages across batches AND eval batches are uniform (B, T). See eval.py's module
+        # docstring for the per-key parity argument (cites SPEC S8/D2).
+        metric_sums: dict[str, jax.Array] = {}
+        eval_residuals: list[jax.Array] = []
+        for j in range(cfg.eval.n_steps):
+            if _sigterm_received:
+                break
+            eval_tokens = _global_token_batch(
+                eval_server.local_batch(eval_pass_index * cfg.eval.n_steps + j),
+                mesh,
+                cfg.eval.batch_size,
+            )
+            eval_residual = harvest(prefix, eval_tokens)
+            eval_residuals.append(eval_residual)
+            # fold values >= cfg.steps never collide with the train step keys
+            eval_key = random.fold_in(run_key, cfg.steps + eval_pass_index * cfg.eval.n_steps + j)
+            eval_metrics = eval_step_fn(
+                state.components, state.ci_fn, frozen, eval_tokens, eval_residual, eval_key
+            )
+            for k, v in eval_metrics.items():
+                metric_sums[k] = metric_sums.get(k, jnp.zeros(())) + v
+        eval_record = {f"eval/{k}": float(v) / cfg.eval.n_steps for k, v in metric_sums.items()}
+        for class_name, attn_step in attn_steps.items():
+            # token-weighted (Σ sum_kl / Σ n), NOT the uniform per-batch average above — KL
+            # is summed over distributions, divided by their count.
+            attn_key = random.fold_in(run_key, 2 * cfg.steps + eval_pass_index)
+            reductions = accumulate_attn_patterns(
+                attn_step, state.components, state.ci_fn, frozen, eval_residuals, attn_key
+            )
+            eval_record |= {
+                f"eval/loss/{k}": v
+                for k, v in attn_patterns_log_entries(class_name, reductions).items()
+            }
+        if is_main:
+            headline = {
+                k: eval_record[f"eval/{k}"]
+                for k in ("ce_kl/kl_ci_masked", "ce_kl/ce_unrecovered_ci_masked")
+            }
+            print(f"[eval @ {now_step}] {headline}", flush=True)
+        return eval_record
+
+    return eval_fn
 
 
 def _pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
@@ -759,81 +627,13 @@ def main() -> None:
         _pin_config_copy(cfg.run_dir, "config.yaml", args.config)
         print(f"persistent XLA compilation cache: {cache_dir}", flush=True)
         site_summary = " ".join(f"{s.name}:C{s.C}" for s in cfg.target.sites)
-        shape_summary = (
-            f"n_features={cfg.data.n_features}"
-            if isinstance(cfg.data, (TMSDataConfig, ResidMLPDataConfig))
-            else f"seq={cfg.data.seq_len}"
-        )
+        assert isinstance(cfg.data, DataConfig)
         print(
             f"run {cfg.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
-            f"B={cfg.data.global_batch} {shape_summary} "
+            f"B={cfg.data.global_batch} seq={cfg.data.seq_len} "
             f"sites=[{site_summary}] steps={cfg.steps}",
             flush=True,
         )
-
-    if isinstance(cfg.target, (TMSTargetConfig, ResidMLPTargetConfig)):
-        assert cfg.resume_provenance is None, "fine-tune (resume_provenance) is LM-only"
-
-    if isinstance(cfg.target, TMSTargetConfig):
-        tms_cfg = tms.TMSConfig(n_features=cfg.target.n_features, n_hidden=cfg.target.n_hidden)
-        lm = tms.tms_decomposed_model(tms_cfg, tms.site_specs(tms_cfg, cfg.target.sites))
-        if is_main:
-            print(f"pretraining TMS target ({cfg.target.pretrain_steps} steps)...", flush=True)
-        frozen = tms.replicate_target(
-            tms.pretrain_tms_target(
-                tms_cfg,
-                cfg.target.feature_probability,
-                cfg.target.data_generation_type,
-                cfg.target.pretrain_steps,
-                cfg.target.pretrain_batch_size,
-                cfg.target.pretrain_lr,
-                cfg.target.pretrain_seed,
-            ),
-            mesh,
-        )
-        train_tms(cfg, raw_cfg, lm, frozen, mesh)
-        if jax.process_count() > 1:
-            import jax.experimental.multihost_utils as mhu
-
-            mhu.sync_global_devices("train_done")
-            jax.distributed.shutdown()
-        return
-
-    if isinstance(cfg.target, ResidMLPTargetConfig):
-        resid_cfg = resid_mlp.ResidMLPConfig(
-            n_features=cfg.target.n_features,
-            d_embed=cfg.target.d_embed,
-            d_mlp=cfg.target.d_mlp,
-            n_layers=cfg.target.n_layers,
-            act_fn_name=cfg.target.act_fn_name,
-            in_bias=cfg.target.in_bias,
-            out_bias=cfg.target.out_bias,
-            fixed_identity_embedding=cfg.target.fixed_identity_embedding,
-        )
-        lm = resid_mlp.resid_mlp_decomposed_model(
-            resid_cfg, resid_mlp.site_specs(resid_cfg, cfg.target.sites)
-        )
-        if is_main:
-            print(f"pretraining ResidMLP target ({cfg.target.pretrain_steps} steps)...", flush=True)
-        frozen = resid_mlp.replicate_target(
-            resid_mlp.pretrain_resid_mlp_target(
-                resid_cfg,
-                cfg.target.feature_probability,
-                cfg.target.data_generation_type,
-                cfg.target.pretrain_steps,
-                cfg.target.pretrain_batch_size,
-                cfg.target.pretrain_lr,
-                cfg.target.pretrain_seed,
-            ),
-            mesh,
-        )
-        train_resid_mlp(cfg, raw_cfg, lm, frozen, mesh)
-        if jax.process_count() > 1:
-            import jax.experimental.multihost_utils as mhu
-
-            mhu.sync_global_devices("train_done")
-            jax.distributed.shutdown()
-        return
 
     frozen: AnyFrozenTarget
     prefix: AnyPrefix
@@ -871,6 +671,8 @@ def main() -> None:
                 mesh,
             )
             prefix_residual_fn = llama_simple_mlp.prefix_residual
+        case _:
+            raise AssertionError(f"jsp-train is LM-only; got target {type(cfg.target).__name__}")
 
     train(cfg, raw_cfg, lm, frozen, prefix, prefix_residual_fn, mesh)
 

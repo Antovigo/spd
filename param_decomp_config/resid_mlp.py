@@ -22,19 +22,37 @@ from param_decomp_config.experiment import ExperimentConfig
 
 ResidMLPDataGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
 ResidMLPActFn = Literal["gelu", "relu"]
+ResidMLPLabelType = Literal["act_plus_resid", "abs"]
+ResidMLPLossType = Literal["readoff", "resid"]
 
 
 class ResidMLPPretrainConfig(BaseConfig):
     """How the frozen ResidualMLP target is pretrained from scratch.
 
-    The objective is the read-off MSE `mean((out − (act_fn(coeffs·x) + x))²)` with the
-    embedding held fixed (`fixed_random_embedding`: unit-norm random rows, `W_U = W_Eᵀ`)
-    and trivial unit label coeffs — the canonical clean-recovery regime."""
+    The objective is the MSE `mean(((pred − labels)²) · feature_importances)`:
+    - `label_type` picks the read-off label (`act_plus_resid`: `act_fn(coeffs·x) + x`) or
+      the `abs` label (`|coeffs·x|`).
+    - `loss_type` picks `pred`: the model OUTPUT (`readoff`) or the pre-unembed RESIDUAL
+      (`resid`, compared to the embedded labels).
+    - `use_trivial_label_coeffs` ones-coeffs vs `U[1, 2)`.
+    - `importance_val` geometrically down-weights feature `i` by `importance_val ** i`
+      (`1.0` is uniform). Only valid in feature space, so requires `loss_type=readoff`."""
 
     steps: PositiveInt
     batch_size: PositiveInt
     lr: float
     seed: int = 0
+    label_type: ResidMLPLabelType = "act_plus_resid"
+    loss_type: ResidMLPLossType = "readoff"
+    use_trivial_label_coeffs: bool = True
+    importance_val: float = 1.0
+
+    @model_validator(mode="after")
+    def validate_importance_space(self) -> "ResidMLPPretrainConfig":
+        assert self.loss_type == "readoff" or self.importance_val == 1.0, (
+            "importance_val only applies in feature space; the resid loss compares in d_embed"
+        )
+        return self
 
 
 class ResidMLPTargetConfig(BaseConfig):
@@ -51,8 +69,15 @@ class ResidMLPTargetConfig(BaseConfig):
     in_bias: bool = False
     out_bias: bool = False
     fixed_identity_embedding: bool = False
-    """`W_E = I` (requires `n_features == d_embed`); else a fixed random unit-norm
-    embedding (torch `fixed_random_embedding`)."""
+    """`W_E = W_U = I` (requires `n_features == d_embed`); else a fixed random unit-norm
+    embedding (torch `fixed_random_embedding`).
+
+    TODO(lab): expose the full `embedding_mode` (`fixed_identity`/`fixed_random`/`learned`)
+    and the pretrain `label_type`/`loss_type`/`use_trivial_label_coeffs`/`importance_val`
+    knobs here once `experiments/resid_mlp/run.py` threads them into
+    `ResidMLPTargetConfig` + `pretrain_resid_mlp_target` (both are off-limits in this
+    change). The model.py layer already implements all of them with back-compatible
+    defaults."""
     pretrain: ResidMLPPretrainConfig
 
     @model_validator(mode="after")

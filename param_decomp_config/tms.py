@@ -14,7 +14,16 @@ from pydantic import NonNegativeInt, PositiveInt
 from param_decomp_config.base import BaseConfig, Probability
 from param_decomp_config.experiment import ExperimentConfig
 
-TMSDataGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
+TMSDataGenerationType = Literal[
+    "exactly_one_active",
+    "exactly_two_active",
+    "exactly_three_active",
+    "exactly_four_active",
+    "exactly_five_active",
+    "at_least_zero_active",
+]
+
+TMSHiddenLayerInit = Literal["identity", "random"]
 
 
 class TMSPretrainConfig(BaseConfig):
@@ -30,11 +39,19 @@ class TMSTargetConfig(BaseConfig):
     """The TMS target architecture + its from-scratch pretraining.
 
     The target has tied weights (`linear2 = linear1ᵀ`); the *decomposition* is untied
-    (`pd.decomposition_targets = [linear1, linear2]`, `pd.tied_weights = null`)."""
+    (`pd.decomposition_targets = [linear1, linear2]`, `pd.tied_weights = null`).
+
+    `n_hidden_layers > 0` inserts that many FROZEN `n_hidden -> n_hidden` layers between
+    `linear1` and `linear2` (`hidden_layer_init` = `identity` for the `-id` variant or
+    `random` for frozen-random), each an extra dense decomposition site `hidden_layers.{i}`.
+    `init_bias_to_zero` zeroes `linear2`'s bias at init (else `nn.Linear`'s default uniform
+    bias)."""
 
     n_features: PositiveInt
     n_hidden: PositiveInt
     n_hidden_layers: NonNegativeInt = 0
+    hidden_layer_init: TMSHiddenLayerInit = "identity"
+    init_bias_to_zero: bool = True
     pretrain: TMSPretrainConfig
 
 

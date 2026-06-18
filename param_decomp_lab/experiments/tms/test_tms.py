@@ -14,16 +14,26 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-
 from jax_single_pool.ci_fn import CIValues
 from jax_single_pool.ci_fn_mlp import MLPCIArch, init_layerwise_mlp_ci_fn
 from jax_single_pool.llama8b import DecompVU, init_decomp_vu
 from jax_single_pool.lm import DecomposedModel, SiteC, SiteSpec
 from jax_single_pool.recon import build_recon_terms
-from jax_single_pool.tms import (
+from jax_single_pool.train import TrainState, make_faith_warmup_step, make_train_step
+
+from param_decomp_config.losses import (
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    StochasticReconLayerwiseLossConfig,
+    StochasticReconLossConfig,
+)
+from param_decomp_lab.experiments.tms.model import (
+    HiddenLayerInit,
     TMSConfig,
     TMSTarget,
     canonical_site_cs,
+    dense_ci_error,
+    hidden_layer_name,
     identity_ci_error,
     init_tms_target,
     pretrain_tms_target,
@@ -32,13 +42,6 @@ from jax_single_pool.tms import (
     site_specs,
     tms_decomposed_model,
     tms_mse,
-)
-from jax_single_pool.train import TrainState, make_faith_warmup_step, make_train_step
-from param_decomp_config.losses import (
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    StochasticReconLayerwiseLossConfig,
-    StochasticReconLossConfig,
 )
 
 
@@ -212,7 +215,7 @@ def test_step_trains_positionless_no_persistent_sources():
     cfg = _tiny_cfg()
     sites = site_specs(cfg, _site_cs())
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
-    lm, state, step = _make_state_and_step(cfg, sites, total_steps=20)
+    _lm, state, step = _make_state_and_step(cfg, sites, total_steps=20)
     losses = []
     for i in range(6):
         x = sample_sparse_features(
@@ -357,3 +360,139 @@ def test_end_to_end_pretrain_decompose_recovers_identity():
     assert err2 == 0, (
         f"linear2 did not recover identity (err={err2}):\n{jnp.round(ci_lower['linear2'], 2)}"
     )
+
+
+# ----------------------------- deeper (-id) variant -----------------------------
+
+
+def _deeper_cfg(hidden_layer_init: HiddenLayerInit = "identity") -> TMSConfig:
+    return TMSConfig(
+        n_features=5, n_hidden=3, n_hidden_layers=2, hidden_layer_init=hidden_layer_init
+    )
+
+
+def _deeper_site_cs():
+    return (
+        SiteC("linear1", 8),
+        SiteC(hidden_layer_name(0), 7),
+        SiteC(hidden_layer_name(1), 6),
+        SiteC("linear2", 5),
+    )
+
+
+def test_deeper_canonical_order_and_dims():
+    cfg = _deeper_cfg()
+    # canonical order: linear1, hidden_layers.0, hidden_layers.1, linear2 — regardless of input order.
+    shuffled = (
+        _deeper_site_cs()[3],
+        _deeper_site_cs()[1],
+        _deeper_site_cs()[0],
+        _deeper_site_cs()[2],
+    )
+    assert tuple(s.name for s in canonical_site_cs(shuffled)) == (
+        "linear1", "hidden_layers.0", "hidden_layers.1", "linear2",
+    )  # fmt: skip
+    specs = site_specs(cfg, _deeper_site_cs())
+    dims = {s.name: (s.d_in, s.d_out, s.C) for s in specs}
+    assert dims["linear1"] == (5, 3, 8)
+    assert dims["hidden_layers.0"] == (3, 3, 7)  # n_hidden -> n_hidden
+    assert dims["hidden_layers.1"] == (3, 3, 6)
+    assert dims["linear2"] == (3, 5, 5)
+
+
+def test_deeper_clean_and_masked_forward_with_identity_hidden_layers():
+    cfg = _deeper_cfg("identity")
+    sites = site_specs(cfg, _deeper_site_cs())
+    lm = tms_decomposed_model(cfg, sites)
+    target = init_tms_target(cfg, jax.random.PRNGKey(0))
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    b = 7
+    x = sample_sparse_features(
+        jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
+    )
+
+    clean = lm.clean_output(target, x)
+    assert clean.shape == (b, cfg.n_features)
+    # Identity hidden layers must be no-ops in the frozen path: 5->2... here 5->3 with
+    # n_hidden==n_features=5? no — n_hidden=3, so just check it equals a 2-layer reference.
+    hidden = x @ target.W1.T
+    ref = jax.nn.relu(hidden @ target.W2.T + target.b2)
+    assert jnp.allclose(clean, ref, atol=1e-5), "identity hidden layers changed the frozen path"
+
+    # SPEC S2: live=() is the exact frozen path.
+    none_masked = lm.masked_output(target, vu, x, {}, {}, None, (), True)
+    assert jnp.array_equal(clean, none_masked)
+
+    # site_inputs threads through the hidden layers: each hidden-layer site reads the chain
+    # output up to it; with identity layers those equal the linear1 output.
+    site_in = lm.site_inputs(target, x)
+    assert set(site_in) == {"linear1", "hidden_layers.0", "hidden_layers.1", "linear2"}
+    assert jnp.allclose(site_in["hidden_layers.0"], hidden, atol=1e-5)
+    assert jnp.allclose(site_in["hidden_layers.1"], hidden, atol=1e-5)  # identity passthrough
+    assert jnp.allclose(site_in["linear2"], hidden, atol=1e-5)
+
+
+def test_random_hidden_layers_are_frozen_and_non_identity():
+    cfg = _deeper_cfg("random")
+    target = init_tms_target(cfg, jax.random.PRNGKey(0))
+    assert len(target.hidden) == 2
+    for W in target.hidden:
+        assert W.shape == (cfg.n_hidden, cfg.n_hidden)
+        assert not jnp.allclose(W, jnp.eye(cfg.n_hidden)), "random hidden layer is the identity"
+    # Pretrain leaves the frozen hidden layers untouched (only W1, b2 train). Pretrain
+    # derives its init from `split(PRNGKey(seed))[0]`, so reproduce that exact init key.
+    trained = pretrain_tms_target(
+        cfg, feature_probability=0.05, generation_type="at_least_zero_active",
+        steps=3, batch_size=64, lr=1e-2, seed=0,
+    )  # fmt: skip
+    init_key, _ = jax.random.split(jax.random.PRNGKey(0))
+    init_hidden = init_tms_target(cfg, init_key).hidden
+    for trained_W, init_W in zip(trained.hidden, init_hidden, strict=True):
+        assert jnp.array_equal(trained_W, init_W), "pretrain mutated a frozen hidden layer"
+
+
+def test_init_bias_to_zero_toggle():
+    cfg_zero = TMSConfig(n_features=5, n_hidden=2, init_bias_to_zero=True)
+    cfg_rand = TMSConfig(n_features=5, n_hidden=2, init_bias_to_zero=False)
+    assert jnp.array_equal(init_tms_target(cfg_zero, jax.random.PRNGKey(0)).b2, jnp.zeros(5))
+    assert not jnp.allclose(init_tms_target(cfg_rand, jax.random.PRNGKey(0)).b2, jnp.zeros(5))
+
+
+# ----------------------------- dense-CI eval -----------------------------
+
+
+def test_dense_ci_error_perfect_and_imperfect():
+    # k=2 active columns, both fully strong, the rest fully inactive -> zero error.
+    perfect = jnp.concatenate([jnp.ones((4, 2)), jnp.zeros((4, 3))], axis=1)
+    assert dense_ci_error(perfect, k=2, tolerance=0.1) == 0
+    # Column order doesn't matter (sorted by mass first).
+    shuffled = perfect[:, jnp.array([2, 0, 3, 1, 4])]
+    assert dense_ci_error(shuffled, k=2, tolerance=0.1) == 0
+    # A missing strong activation in a should-be-dense column -> one first-k error.
+    weak_dense = jnp.concatenate([jnp.ones((4, 1)), jnp.zeros((4, 4))], axis=1)
+    assert dense_ci_error(weak_dense, k=2, tolerance=0.1) == 1  # second dense column empty
+    # A leak in a should-be-inactive column -> one inactive-column error per leaked entry.
+    leak = perfect.at[0, 4].set(0.9)
+    assert dense_ci_error(leak, k=2, tolerance=0.1) == 1
+
+
+# ----------------------------- exactly_n_active dataset -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("gen_type", "n"),
+    [
+        ("exactly_one_active", 1),
+        ("exactly_two_active", 2),
+        ("exactly_three_active", 3),
+        ("exactly_five_active", 5),
+    ],
+)
+def test_exactly_n_active_shape_and_count(gen_type: str, n: int):
+    b, n_features = 64, 8
+    x = sample_sparse_features(jax.random.PRNGKey(0), b, n_features, 0.5, gen_type)
+    assert x.shape == (b, n_features)
+    assert jnp.all((x >= 0.0) & (x <= 1.0)), "values out of [0,1]"
+    active_per_row = (x > 0.0).sum(axis=1)
+    # Exactly n active per row (active values are U[0,1], a.s. nonzero).
+    assert jnp.all(active_per_row == n), active_per_row

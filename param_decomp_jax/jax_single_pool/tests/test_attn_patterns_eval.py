@@ -5,6 +5,8 @@ both LM targets), the all-false-routes clean target (KL=0 when masked==clean), a
 host-side token-weighted accumulation (combined = Σ sum_kl / Σ n_distributions).
 """
 
+from typing import Any
+
 import jax
 import numpy as np
 import pytest
@@ -188,11 +190,20 @@ def test_attn_patterns_steps_reject_positionless_target():
     """Attention patterns are causal maps over a sequence axis; both step constructors
     must fail loud against a positionless (`leading_axes=()`) target. The leading-axes
     guard fires before site/pattern inspection, so a dummy pattern fn is fine."""
-    from jax_single_pool.tms import TMSConfig, site_specs, tms_decomposed_model
+    from jax_single_pool.lm import DecomposedModel, SiteSpec
 
-    cfg = TMSConfig(n_features=5, n_hidden=2)
-    sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
-    lm = tms_decomposed_model(cfg, sites)
+    def _unused(*_args: object) -> Any:
+        raise AssertionError("positionless stub fn must not be called")
+
+    lm = DecomposedModel(
+        sites=(SiteSpec("linear1", 5, 2, 8), SiteSpec("linear2", 2, 5, 6)),
+        leading_axes=(),
+        clean_output=_unused,
+        site_inputs=_unused,
+        masked_output=_unused,
+        masked_site_outputs=_unused,
+        weight_deltas=_unused,
+    )
     assert lm.leading_axes == ()
     dummy_pattern_fn = lambda q, k: q  # noqa: E731 — never reached; assert fires first
     with pytest.raises(AssertionError, match="LM-only"):

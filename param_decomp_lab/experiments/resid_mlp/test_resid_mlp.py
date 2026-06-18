@@ -14,18 +14,34 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-
 from jax_single_pool.ci_fn import CIValues
-from jax_single_pool.ci_fn_mlp import MLPCIArch, init_layerwise_mlp_ci_fn
+from jax_single_pool.ci_fn_mlp import (
+    GlobalMLPCIArch,
+    MLPCIArch,
+    init_global_mlp_ci_fn,
+    init_layerwise_mlp_ci_fn,
+)
 from jax_single_pool.llama8b import DecompVU, init_decomp_vu
 from jax_single_pool.lm import DecomposedModel, SiteC, SiteSpec
 from jax_single_pool.recon import build_recon_terms
-from jax_single_pool.resid_mlp import (
+from jax_single_pool.train import TrainState, make_faith_warmup_step, make_train_step
+
+from param_decomp_config.losses import (
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    StochasticReconLayerwiseLossConfig,
+    StochasticReconLossConfig,
+)
+from param_decomp_lab.experiments.resid_mlp.model import (
     ResidMLPConfig,
     ResidMLPTarget,
+    abs_labels,
     canonical_site_cs,
+    clean_residual,
+    feature_importances,
     identity_ci_error,
     init_resid_mlp_target,
+    label_coeffs,
     pretrain_resid_mlp_target,
     readoff_labels,
     resid_mlp_decomposed_model,
@@ -33,13 +49,6 @@ from jax_single_pool.resid_mlp import (
     sample_sparse_features,
     single_feature_ci,
     site_specs,
-)
-from jax_single_pool.train import TrainState, make_faith_warmup_step, make_train_step
-from param_decomp_config.losses import (
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    StochasticReconLayerwiseLossConfig,
-    StochasticReconLossConfig,
 )
 
 
@@ -257,7 +266,7 @@ def test_step_trains_positionless_no_persistent_sources():
     cfg = _tiny_cfg()
     sites = site_specs(cfg, _site_cs())
     target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
-    lm, state, step = _make_state_and_step(cfg, sites, total_steps=20)
+    _lm, state, step = _make_state_and_step(cfg, sites, total_steps=20)
     losses = []
     for i in range(6):
         x = sample_sparse_features(
@@ -313,7 +322,8 @@ def test_pretrain_drives_readoff_recon_down():
         jax.random.PRNGKey(7), 512, cfg.n_features, 0.1, "at_least_zero_active"
     )
     out = lm.clean_output(target, x @ target.W_E)
-    recon = jnp.mean((out - readoff_labels(target, x)) ** 2)
+    coeffs = jnp.ones((cfg.n_features,))
+    recon = jnp.mean((out - readoff_labels(target, x, coeffs)) ** 2)
     assert float(recon) < 0.05, f"pretrained ResidMLP read-off recon too high: {recon}"
 
 
@@ -385,7 +395,10 @@ def test_end_to_end_pretrain_decompose_recovers_identity():
     )  # fmt: skip
     lm = resid_mlp_decomposed_model(cfg, sites)
     x = sample_sparse_features(jax.random.PRNGKey(7), 1024, 5, 0.05, "at_least_zero_active")
-    recon = jnp.mean((lm.clean_output(target, x @ target.W_E) - readoff_labels(target, x)) ** 2)
+    coeffs = jnp.ones((5,))
+    recon = jnp.mean(
+        (lm.clean_output(target, x @ target.W_E) - readoff_labels(target, x, coeffs)) ** 2
+    )
     assert float(recon) < 0.05, f"pretrained ResidMLP recon too high: {recon}"
 
     state, step = _faith_warmed_state(lm, sites, target, total_steps=8000, warmup_steps=200)
@@ -406,3 +419,164 @@ def test_end_to_end_pretrain_decompose_recovers_identity():
     assert err == 0, (
         f"mlp_in did not recover identity (err={err}):\n{jnp.round(ci_lower['layers.0.mlp_in'], 2)}"
     )
+
+
+# ----------------------------- global CI fn -----------------------------
+
+
+def test_global_ci_fn_shapes_and_range():
+    cfg = _tiny_cfg()
+    sites = site_specs(cfg, _site_cs())
+    target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
+    lm = resid_mlp_decomposed_model(cfg, sites)
+    ci_fn = init_global_mlp_ci_fn(
+        GlobalMLPCIArch(hidden_dims=(32, 24)), sites, jax.random.PRNGKey(3)
+    )
+    assert ci_fn.expects_axes == () == lm.leading_axes
+    b = 7
+    x = sample_sparse_features(
+        jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
+    )
+    values = ci_fn(lm.site_inputs(target, x @ target.W_E))
+    assert isinstance(values, CIValues)
+    assert values.lower["layers.0.mlp_in"].shape == (b, 6)
+    assert values.lower["layers.0.mlp_out"].shape == (b, 7)
+    for v in values.lower.values():
+        assert float(v.min()) >= 0.0 and float(v.max()) <= 1.0
+
+
+def test_global_ci_fn_concat_split_order_is_canonical():
+    # One shared MLP over all sites: a site's logits depend on EVERY site's input (so
+    # perturbing mlp_out changes mlp_in logits), and the result is invariant to the order
+    # the input dict is keyed (concat/split follow the static canonical site order).
+    cfg = _tiny_cfg(n_layers=2)
+    sites = site_specs(cfg, _site_cs(n_layers=2))
+    ci_fn = init_global_mlp_ci_fn(GlobalMLPCIArch(hidden_dims=(40,)), sites, jax.random.PRNGKey(4))
+    b = 5
+    inputs = {s.name: jax.random.normal(jax.random.fold_in(jax.random.PRNGKey(9), i), (b, s.d_in))
+              for i, s in enumerate(sites)}  # fmt: skip
+    base = ci_fn(inputs)
+    reordered = {name: inputs[name] for name in reversed(list(inputs))}
+    assert list(reordered) != list(inputs)
+    same = ci_fn(reordered)
+    for name in inputs:
+        assert jnp.array_equal(base.lower[name], same.lower[name]), name
+    perturbed = dict(inputs)
+    perturbed["layers.1.mlp_out"] = perturbed["layers.1.mlp_out"] + 1.0
+    cross = ci_fn(perturbed)
+    assert not jnp.allclose(cross.lower["layers.0.mlp_in"], base.lower["layers.0.mlp_in"]), (
+        "global MLP must couple sites: an mlp_out perturbation should move mlp_in logits"
+    )
+
+
+# ----------------------------- multi-layer forward -----------------------------
+
+
+def test_three_layer_clean_and_masked_forward():
+    cfg = _tiny_cfg(n_layers=3)
+    sites = site_specs(cfg, _site_cs(n_layers=3))
+    lm = resid_mlp_decomposed_model(cfg, sites)
+    target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    b = 6
+    x = sample_sparse_features(
+        jax.random.PRNGKey(2), b, cfg.n_features, 0.5, "at_least_zero_active"
+    )
+    resid = x @ target.W_E
+    clean = lm.clean_output(target, resid)
+    assert clean.shape == (b, cfg.n_features)
+
+    names = lm.site_names
+    assert len(names) == 6  # mlp_in + mlp_out per layer
+    none_masked = lm.masked_output(target, vu, resid, {}, {}, None, (), True)
+    assert jnp.array_equal(clean, none_masked)
+
+    ones_masks = {s.name: jnp.ones((b, s.C)) for s in lm.sites}
+    ones_delta = {s: jnp.ones((b,)) for s in names}
+    full = lm.masked_output(target, vu, resid, ones_masks, ones_delta, None, names, True)
+    assert jnp.allclose(clean, full, atol=1e-4)
+
+    site_in = lm.site_inputs(target, resid)
+    assert set(site_in) == set(names)
+    assert site_in["layers.2.mlp_in"].shape == (b, cfg.d_embed)
+    assert site_in["layers.2.mlp_out"].shape == (b, cfg.d_mlp)
+
+
+# ----------------------------- pretrain feature set -----------------------------
+
+
+def test_feature_importances_geometric_and_uniform():
+    assert jnp.allclose(feature_importances(4, 0.5), jnp.array([1.0, 0.5, 0.25, 0.125]))
+    assert jnp.allclose(feature_importances(5, 1.0), jnp.ones(5))
+
+
+def test_label_coeffs_trivial_and_random_range():
+    assert jnp.array_equal(label_coeffs(6, True, jax.random.PRNGKey(0)), jnp.ones(6))
+    nontrivial = label_coeffs(200, False, jax.random.PRNGKey(0))
+    assert float(nontrivial.min()) >= 1.0 and float(nontrivial.max()) < 2.0
+
+
+def test_abs_labels_matches_hand_computed():
+    x = jax.random.normal(jax.random.PRNGKey(0), (4, 5))
+    coeffs = label_coeffs(5, False, jax.random.PRNGKey(1))
+    assert jnp.allclose(abs_labels(x, coeffs), jnp.abs(coeffs * x))
+
+
+def test_clean_residual_is_clean_output_pre_unembed():
+    cfg = _tiny_cfg(n_layers=2)
+    target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
+    x = sample_sparse_features(
+        jax.random.PRNGKey(1), 4, cfg.n_features, 0.5, "at_least_zero_active"
+    )
+    resid = x @ target.W_E
+    pre = clean_residual(target, resid)
+    assert pre.shape == (4, cfg.d_embed)
+    assert jnp.allclose(pre @ target.W_U, clean_residual(target, resid) @ target.W_U)
+    lm = resid_mlp_decomposed_model(cfg, site_specs(cfg, _site_cs(n_layers=2)))
+    assert jnp.allclose(pre @ target.W_U, lm.clean_output(target, resid))
+
+
+def test_legacy_fixed_identity_bool_derives_embedding_mode():
+    assert (
+        ResidMLPConfig(
+            5, 5, 8, 1, "relu", False, False, fixed_identity_embedding=True
+        ).embedding_mode
+        == "fixed_identity"
+    )
+    assert (
+        ResidMLPConfig(
+            5, 5, 8, 1, "relu", False, False, fixed_identity_embedding=False
+        ).embedding_mode
+        == "fixed_random"
+    )
+
+
+def test_learned_embedding_trains_W_E_while_fixed_does_not():
+    init_key = jax.random.split(jax.random.PRNGKey(0), 3)[0]
+    fixed_cfg = ResidMLPConfig(5, 5, 8, 1, "relu", False, False, fixed_identity_embedding=False)
+    learned_cfg = ResidMLPConfig(5, 5, 8, 1, "relu", False, False, embedding_mode="learned")
+
+    def pretrain(cfg: ResidMLPConfig) -> ResidMLPTarget:
+        return pretrain_resid_mlp_target(
+            cfg, feature_probability=0.3, generation_type="at_least_zero_active",
+            steps=80, batch_size=256, lr=1e-2, seed=0,
+        )  # fmt: skip
+
+    fixed_init = init_resid_mlp_target(fixed_cfg, init_key)
+    assert jnp.array_equal(pretrain(fixed_cfg).W_E, fixed_init.W_E), (
+        "fixed embedding must not train"
+    )
+
+    learned_init = init_resid_mlp_target(learned_cfg, init_key)
+    assert float(jnp.abs(pretrain(learned_cfg).W_E - learned_init.W_E).max()) > 1e-4, (
+        "learned embedding W_E did not move"
+    )
+
+
+def test_resid_loss_with_importance_is_rejected():
+    cfg = ResidMLPConfig(5, 5, 8, 1, "relu", False, False, fixed_identity_embedding=False)
+    with pytest.raises(AssertionError):
+        pretrain_resid_mlp_target(
+            cfg, feature_probability=0.3, generation_type="at_least_zero_active",
+            steps=5, batch_size=64, lr=1e-2, seed=0, loss_type="resid", importance_val=0.9,
+        )  # fmt: skip

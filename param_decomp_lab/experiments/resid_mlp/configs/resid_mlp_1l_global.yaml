@@ -1,0 +1,91 @@
+# ResidualMLP 1-layer with a GLOBAL (shared-across-sites) MLP CI fn.
+run_name: jax-resid-mlp-1l-global
+# Identical to resid_mlp_1l.yaml except the CI fn is the global MLP (torch
+# GlobalSharedMLPCiFn): ONE MLP over all sites jointly, mapping concat(site inputs) ->
+# concat(site logits). The building blocks live in jax_single_pool/ci_fn_mlp.py
+# (GlobalMLPCIArch / GlobalMLPCIFn / init_global_mlp_ci_fn) and the canonical schema
+# already expresses this CI fn (mode: global, fn_type: global_shared_mlp).
+#
+# TODO(lab): wiring this config end-to-end needs two off-limits changes that this PR
+# could not make:
+#   1. run_state.init_train_state CI-fn dispatch: add a `case GlobalMLPCIArch():` arm
+#      (next to MLPCIArch / CIArch) building init_global_mlp_ci_fn (+ a replicated
+#      wrapper in llama8b_sharding.py, mirroring init_layerwise_mlp_ci_fn_replicated).
+#   2. experiments/resid_mlp/run.py: build a GlobalMLPCIArch from the global ci_config
+#      (its current `layerwise_mlp_ci_arch(cfg)` asserts fn_type=mlp), and config.py's
+#      CIFnArch union must admit GlobalMLPCIArch.
+pd:
+  seed: 0
+  n_mask_samples: 1
+  sampling: continuous
+  ci_config:
+    mode: global
+    fn_type: global_shared_mlp
+    hidden_dims:
+    - 400
+    - 300
+  sigmoid_type: leaky_hard
+  use_delta_component: true
+  tied_weights: null
+  decomposition_targets:
+  - module_pattern: layers.0.mlp_in
+    C: 100
+  - module_pattern: layers.0.mlp_out
+    C: 100
+  loss_metrics:
+  - type: ImportanceMinimalityLoss
+    coeff: 1e-5
+    pnorm: 2.0
+    beta: 0.0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 2.0
+    p_anneal_end_frac: 1.0
+  - type: StochasticReconLayerwiseLoss
+    coeff: 1.0
+  - type: StochasticReconLoss
+    coeff: 1.0
+  - type: FaithfulnessLoss
+    coeff: 1.0
+  batch_size: 2048
+  steps: 20000
+  components_optimizer:
+    grad_clip_norm: 0.01
+    lr_schedule:
+      start_val: 2e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 2e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  faithfulness_warmup_steps: 200
+  faithfulness_warmup_lr: 0.01
+  faithfulness_warmup_weight_decay: 0.0
+runtime:
+  remat_recon_forwards: false
+  autocast_bf16: true
+  device: cuda
+  dp: null
+cadence:
+  train_log_every: 100
+  save_every: 5000
+  keep_last_n_checkpoints: 2
+target:
+  n_features: 100
+  d_embed: 1000
+  d_mlp: 50
+  n_layers: 1
+  act_fn_name: relu
+  in_bias: false
+  out_bias: false
+  pretrain:
+    steps: 2000
+    batch_size: 2048
+    lr: 3e-3
+    seed: 0
+data:
+  feature_probability: 0.01
+  data_generation_type: at_least_zero_active

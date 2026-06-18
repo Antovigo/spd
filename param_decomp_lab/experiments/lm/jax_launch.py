@@ -20,15 +20,11 @@ import yaml
 
 from param_decomp.log import logger
 from param_decomp_config.lm import LMExperimentConfig
-from param_decomp_config.resid_mlp import ResidMLPExperimentConfig
-from param_decomp_config.tms import TMSExperimentConfig
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR, REPO_ROOT
 from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
 from param_decomp_lab.infra.wandb import get_wandb_entity
-
-AnyRunConfig = LMExperimentConfig | TMSExperimentConfig | ResidMLPExperimentConfig
 
 GPUS_PER_NODE = 8
 WORKSPACES_DIR = PARAM_DECOMP_OUT_DIR / "workspaces"
@@ -146,23 +142,20 @@ def _config_path_relative_to_repo(config_path: str) -> Path:
     return rel
 
 
-def _validate_config(config_path: Path) -> tuple[AnyRunConfig, str]:
-    """Validate the not-yet-stamped single run config against the shared torch-free
-    schema, dispatching on the structural target marker (`n_hidden` → TMS, `d_embed` →
-    ResidMLP, else LM) — the same dispatch the runtime loader uses. The loader's module
-    pulls jax and can't be imported in this venv, but both read the same
-    `param_decomp_config` schema. A hand-authored config must NOT carry `run_id` (minted
-    at submit)."""
+def _validate_config(config_path: Path) -> tuple[LMExperimentConfig, str]:
+    """Validate the not-yet-stamped single run config against the shared torch-free LM
+    schema. `pd-jax-lm` is LM-ONLY (the SLURM/`jsp-train` path); the toy domains (TMS,
+    ResidMLP) run on CPU in-process via `pd-tms` / `pd-resid-mlp`, never here. A
+    hand-authored config must NOT carry `run_id` (minted at submit)."""
     raw = yaml.safe_load(config_path.read_text())
     assert "run_id" not in raw, f"{config_path}: run_id is minted at submit, omit it"
     target = raw.get("target", {})
     assert isinstance(target, dict), target
-    if "n_hidden" in target:
-        cfg: AnyRunConfig = TMSExperimentConfig(**raw)
-    elif "d_embed" in target:
-        cfg = ResidMLPExperimentConfig(**raw)
-    else:
-        cfg = LMExperimentConfig(**raw)
+    assert "n_hidden" not in target and "d_embed" not in target, (
+        f"{config_path}: pd-jax-lm is LM-only; run TMS/ResidMLP toys on CPU via "
+        "pd-tms / pd-resid-mlp"
+    )
+    cfg = LMExperimentConfig(**raw)
     return cfg, cfg.run_name
 
 
@@ -219,7 +212,7 @@ def _stamp_config(config: Path, run_id: str, group: str | None, tags: list[str])
     config.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 
-def _wandb_url(cfg: AnyRunConfig, run_id: str) -> str | None:
+def _wandb_url(cfg: LMExperimentConfig, run_id: str) -> str | None:
     if cfg.wandb is None:
         return None
     entity = cfg.wandb.entity or get_wandb_entity()

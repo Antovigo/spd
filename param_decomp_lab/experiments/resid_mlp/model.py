@@ -27,7 +27,7 @@ Site weights are right-mult oriented like the LM targets (`site_out = x @ Wᵀ`)
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import equinox as eqx
 import jax
@@ -35,15 +35,31 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float
-
 from jax_single_pool.ci_fn import CIValues
 from jax_single_pool.llama8b import DecompVU, _site_out
 from jax_single_pool.lm import DecomposedModel, SiteC, SiteSpec
+from jaxtyping import Array, Float
 
 MLP_IN = "mlp_in"
 MLP_OUT = "mlp_out"
 KINDS = (MLP_IN, MLP_OUT)
+
+EmbeddingMode = Literal["fixed_identity", "fixed_random", "learned"]
+"""How `W_E`/`W_U` are obtained (torch had three regimes):
+- `fixed_identity` — `W_E = W_U = I` (requires `n_features == d_embed`), the residual
+  stream IS the feature basis (the unambiguous clean ground-truth regime).
+- `fixed_random` — a fixed random unit-norm embedding, `W_U = W_Eᵀ`, frozen in pretrain.
+- `learned` — `W_E`/`W_U` are trained alongside the MLP blocks (torch trainable embedding).
+"""
+
+LabelType = Literal["act_plus_resid", "abs"]
+"""The pretrain read-off label (torch `label_type`): `act_fn(coeffs·x) + x` (the canonical
+read-off) or `abs(coeffs·x)` (the |·| target)."""
+
+LossType = Literal["readoff", "resid"]
+"""What the pretrain objective compares (torch `loss_type`): the model OUTPUT against the
+read-off labels (`readoff`), or the pre-unembed RESIDUAL against the embedded labels
+(`resid`, `labels @ W_E`)."""
 
 
 class CIFnCallable(Protocol):
@@ -62,10 +78,48 @@ class ResidMLPConfig:
     act_fn_name: str
     in_bias: bool
     out_bias: bool
+    embedding_mode: EmbeddingMode = "fixed_random"
+    fixed_identity_embedding: bool | None = None
+    """Legacy bool kept for the existing `run.py` call site: when set it DERIVES
+    `embedding_mode` (`True -> fixed_identity`, `False -> fixed_random`). Pass
+    `embedding_mode` directly for the `learned` regime. Exactly one of the two is given."""
+
+    def __post_init__(self) -> None:
+        if self.fixed_identity_embedding is not None:
+            assert self.embedding_mode == "fixed_random", (
+                "pass either embedding_mode or the legacy fixed_identity_embedding, not both"
+            )
+            derived: EmbeddingMode = (
+                "fixed_identity" if self.fixed_identity_embedding else "fixed_random"
+            )
+            object.__setattr__(self, "embedding_mode", derived)
+        if self.embedding_mode == "fixed_identity":
+            assert self.n_features == self.d_embed, (self.n_features, self.d_embed)
+
+
+@dataclass(frozen=True)
+class ResidMLPTargetConfig:
+    """The lab ResidMLP target config carried on `ExperimentConfig.target` (satisfies the
+    core `TargetSites` protocol via `sites`). Pretrained from scratch in-process (no weight
+    artifact); a fixed embedding (`W_U = W_Eᵀ`) with trainable per-layer MLP blocks.
+    `global_batch` is the PD-step batch (the toy has no parquet `DataConfig`)."""
+
+    n_features: int
+    d_embed: int
+    d_mlp: int
+    n_layers: int
+    act_fn_name: str
+    in_bias: bool
+    out_bias: bool
     fixed_identity_embedding: bool
-    """`W_E = I` (requires `n_features == d_embed`): the residual stream IS the feature
-    basis, the unambiguous clean ground-truth regime (torch `fixed_identity_embedding`).
-    False uses a fixed random unit-norm embedding (torch `fixed_random_embedding`)."""
+    sites: tuple[SiteC, ...]
+    pretrain_steps: int
+    pretrain_batch_size: int
+    pretrain_lr: float
+    pretrain_seed: int
+    feature_probability: float
+    data_generation_type: str
+    global_batch: int
 
 
 def _act_fn(name: str) -> Callable[[Array], Array]:
@@ -165,16 +219,7 @@ def _frozen_site_weight(target: ResidMLPTarget, name: str) -> Array:
 
 def clean_output(target: ResidMLPTarget, resid: Float[Array, "B d_embed"]) -> Array:
     """The all-frozen forward — the recon target (SPEC S3). `resid` is `x @ W_E`."""
-    act = _act_fn(target.act_fn_name)
-    for block in target.layers:
-        h = resid @ block.W_in.T
-        if block.b_in is not None:
-            h = h + block.b_in
-        out = act(h) @ block.W_out.T
-        if block.b_out is not None:
-            out = out + block.b_out
-        resid = resid + out
-    return resid @ target.W_U
+    return clean_residual(target, resid) @ target.W_U
 
 
 def site_inputs(target: ResidMLPTarget, resid: Float[Array, "B d_embed"]) -> dict[str, Array]:
@@ -337,10 +382,13 @@ def resid_mlp_input_residual(prefix: ResidMLPTarget, inputs: Float[Array, "B n_f
 
 
 class _ResidMLPTrainable(eqx.Module):
-    """The pretrain-trainable subset: the per-layer MLP blocks (the embeddings `W_E`/`W_U`
-    are FIXED — `fixed_random_embedding` — so they never appear here)."""
+    """The pretrain-trainable subset: the per-layer MLP blocks, plus the `(W_E, W_U)`
+    embedding pair when `embedding_mode == "learned"` (`None` for the fixed regimes, where
+    the embedding is held constant). The pair is jointly present-or-absent (the embedding
+    is never half-trained)."""
 
     layers: tuple[ResidMLPLayer, ...]
+    embedding: tuple[Float[Array, "n_features d_embed"], Float[Array, "d_embed n_features"]] | None
 
 
 def _init_layer(cfg: ResidMLPConfig, key: Array) -> ResidMLPLayer:
@@ -361,25 +409,33 @@ def _init_layer(cfg: ResidMLPConfig, key: Array) -> ResidMLPLayer:
     )
 
 
-def _init_embedding(cfg: ResidMLPConfig, key: Array) -> Float[Array, "n_features d_embed"]:
-    """`W_E = I` for the identity regime, else a fixed random unit-norm embedding."""
-    if cfg.fixed_identity_embedding:
-        assert cfg.n_features == cfg.d_embed, (cfg.n_features, cfg.d_embed)
-        return jnp.eye(cfg.n_features)
-    raw = jax.random.normal(key, (cfg.n_features, cfg.d_embed))
-    return raw / jnp.linalg.norm(raw, axis=-1, keepdims=True)
+def _init_embedding(
+    cfg: ResidMLPConfig, key: Array
+) -> tuple[Float[Array, "n_features d_embed"], Float[Array, "d_embed n_features"]]:
+    """`(W_E, W_U)` per `embedding_mode`. `fixed_identity` -> `(I, I)`; `fixed_random` and
+    `learned` start from a random unit-norm `W_E` with `W_U = W_Eᵀ` (`learned` then trains
+    both independently from that init, torch's trainable-embedding regime)."""
+    match cfg.embedding_mode:
+        case "fixed_identity":
+            assert cfg.n_features == cfg.d_embed, (cfg.n_features, cfg.d_embed)
+            eye = jnp.eye(cfg.n_features)
+            return eye, eye
+        case "fixed_random" | "learned":
+            raw = jax.random.normal(key, (cfg.n_features, cfg.d_embed))
+            W_E = raw / jnp.linalg.norm(raw, axis=-1, keepdims=True)
+            return W_E, W_E.T
 
 
 def init_resid_mlp_target(cfg: ResidMLPConfig, key: Array) -> ResidMLPTarget:
-    """Untrained ResidMLP target: a FIXED embedding (`W_U = W_Eᵀ`) and Kaiming-uniform MLP
-    blocks. `fixed_identity_embedding` gives `W_E = I` (the residual stream IS the feature
-    basis — the unambiguous clean ground-truth regime); otherwise a random unit-norm
-    embedding."""
+    """Untrained ResidMLP target: the `embedding_mode` `W_E`/`W_U` and Kaiming-uniform MLP
+    blocks. `fixed_identity` gives `W_E = W_U = I` (the residual stream IS the feature basis
+    — the unambiguous clean ground-truth regime); `fixed_random`/`learned` start from a
+    random unit-norm embedding (`W_U = W_Eᵀ`)."""
     embed_key, layers_key = jax.random.split(key)
-    W_E = _init_embedding(cfg, embed_key)
+    W_E, W_U = _init_embedding(cfg, embed_key)
     layer_keys = jax.random.split(layers_key, cfg.n_layers)
     layers = tuple(_init_layer(cfg, layer_keys[i]) for i in range(cfg.n_layers))
-    return ResidMLPTarget(W_E=W_E, W_U=W_E.T, layers=layers, act_fn_name=cfg.act_fn_name)
+    return ResidMLPTarget(W_E=W_E, W_U=W_U, layers=layers, act_fn_name=cfg.act_fn_name)
 
 
 def sample_sparse_features(
@@ -406,12 +462,72 @@ def sample_sparse_features(
             raise AssertionError(f"unsupported ResidMLP generation type {generation_type!r}")
 
 
+def label_coeffs(n_features: int, use_trivial: bool, key: Array) -> Float[Array, " n_features"]:
+    """Per-feature read-off coefficients (torch `calc_label_coeffs`): all-ones when
+    `use_trivial`, else `U[1, 2)` (`rand(n_features) + 1`)."""
+    if use_trivial:
+        return jnp.ones((n_features,))
+    return jax.random.uniform(key, (n_features,)) + 1.0
+
+
+def feature_importances(n_features: int, importance_val: float) -> Float[Array, " n_features"]:
+    """Geometric per-feature weighting (torch `compute_feature_importances`): feature `i`
+    gets `importance_val ** i`. `importance_val == 1.0` is uniform (all ones)."""
+    return importance_val ** jnp.arange(n_features, dtype=jnp.float32)
+
+
 def readoff_labels(
-    target: ResidMLPTarget, x: Float[Array, "B n_features"]
+    target: ResidMLPTarget, x: Float[Array, "B n_features"], coeffs: Float[Array, " n_features"]
 ) -> Float[Array, "B n_features"]:
-    """The read-off pretrain target `act_fn(coeffs·x) + x` with trivial unit coeffs (torch
-    `calc_act_plus_resid_labels` + `use_trivial_label_coeffs`)."""
-    return _act_fn(target.act_fn_name)(x) + x
+    """The read-off pretrain target `act_fn(coeffs·x) + x` (torch
+    `calc_act_plus_resid_labels`)."""
+    return _act_fn(target.act_fn_name)(coeffs * x) + x
+
+
+def abs_labels(
+    x: Float[Array, "B n_features"], coeffs: Float[Array, " n_features"]
+) -> Float[Array, "B n_features"]:
+    """The `|coeffs·x|` pretrain target (torch `calc_abs_labels`)."""
+    return jnp.abs(coeffs * x)
+
+
+def pretrain_labels(
+    target: ResidMLPTarget,
+    x: Float[Array, "B n_features"],
+    coeffs: Float[Array, " n_features"],
+    label_type: LabelType,
+) -> Float[Array, "B n_features"]:
+    match label_type:
+        case "act_plus_resid":
+            return readoff_labels(target, x, coeffs)
+        case "abs":
+            return abs_labels(x, coeffs)
+
+
+def clean_residual(target: ResidMLPTarget, resid: Float[Array, "B d_embed"]) -> Array:
+    """The all-frozen forward up to (not including) the unembed — the pre-`W_U` residual
+    `[B, d_embed]` (torch `ResidMLP.forward(return_residual=True)`). `clean_output` is this
+    `@ W_U`."""
+    act = _act_fn(target.act_fn_name)
+    for block in target.layers:
+        h = resid @ block.W_in.T
+        if block.b_in is not None:
+            h = h + block.b_in
+        out = act(h) @ block.W_out.T
+        if block.b_out is not None:
+            out = out + block.b_out
+        resid = resid + out
+    return resid
+
+
+def _trainable_target(trainable: "_ResidMLPTrainable", target: ResidMLPTarget) -> ResidMLPTarget:
+    """Fold the trainable subset back into the full target: the MLP blocks always, and the
+    `(W_E, W_U)` pair when the embedding is learned."""
+    folded = eqx.tree_at(lambda t: t.layers, target, trainable.layers)
+    if trainable.embedding is None:
+        return folded
+    W_E, W_U = trainable.embedding
+    return eqx.tree_at(lambda t: (t.W_E, t.W_U), folded, (W_E, W_U))
 
 
 def pretrain_resid_mlp_target(
@@ -422,19 +538,36 @@ def pretrain_resid_mlp_target(
     batch_size: int,
     lr: float,
     seed: int,
+    label_type: LabelType = "act_plus_resid",
+    loss_type: LossType = "readoff",
+    use_trivial_label_coeffs: bool = True,
+    importance_val: float = 1.0,
 ) -> ResidMLPTarget:
     """From-scratch pretrain of the frozen ResidMLP target (the read-off MSE objective
-    `mean((out − (act_fn(x) + x))²)`, trivial unit label coeffs). The fixed embedding
-    `W_E`/`W_U` is held constant; only the MLP blocks train.
+    `mean(((pred − labels)²) · feature_importances)`). The MLP blocks always train; the
+    embedding `W_E`/`W_U` also trains when `embedding_mode == "learned"`, else it is held
+    constant.
+
+    - `label_type` picks the target (`act_plus_resid` read-off or `abs`).
+    - `loss_type` picks `pred`: the model OUTPUT (`readoff`, compared to `labels`) or the
+      pre-unembed RESIDUAL (`resid`, compared to the embedded labels `labels @ W_E`).
+    - `use_trivial_label_coeffs` ones-coeffs vs `U[1, 2)`.
+    - `importance_val` geometrically down-weights feature `i` by `importance_val ** i`.
 
     Deterministic in `seed`: this replaces the missing wandb pretrain checkpoint so a
     ResidMLP PD run is reproducible from the config alone."""
     import optax
 
+    assert loss_type == "readoff" or importance_val == 1.0, (
+        "feature_importances apply in feature space; the resid loss compares in d_embed space"
+    )
     key = jax.random.PRNGKey(seed)
-    init_key, data_key = jax.random.split(key)
+    init_key, coeff_key, data_key = jax.random.split(key, 3)
     target = init_resid_mlp_target(cfg, init_key)
-    trainable = _ResidMLPTrainable(layers=target.layers)
+    learned_embedding = (target.W_E, target.W_U) if cfg.embedding_mode == "learned" else None
+    trainable = _ResidMLPTrainable(layers=target.layers, embedding=learned_embedding)
+    coeffs = label_coeffs(cfg.n_features, use_trivial_label_coeffs, coeff_key)
+    importances = feature_importances(cfg.n_features, importance_val)
     optimizer = optax.adamw(lr, weight_decay=0.0)
     opt_state = optimizer.init(eqx.filter(trainable, eqx.is_array))
 
@@ -443,9 +576,16 @@ def pretrain_resid_mlp_target(
         trainable: "_ResidMLPTrainable", opt_state: optax.OptState, x: Array
     ) -> tuple["_ResidMLPTrainable", optax.OptState]:
         def loss_fn(trainable: "_ResidMLPTrainable") -> Array:
-            frozen = eqx.tree_at(lambda t: t.layers, target, trainable.layers)
-            out = clean_output(frozen, x @ target.W_E)
-            return jnp.mean((out - readoff_labels(target, x)) ** 2)
+            frozen = _trainable_target(trainable, target)
+            resid = x @ frozen.W_E
+            labels = pretrain_labels(frozen, x, coeffs, label_type)
+            match loss_type:
+                case "readoff":
+                    # feature-space comparison: geometric per-feature importances apply.
+                    return jnp.mean(((clean_output(frozen, resid) - labels) ** 2) * importances)
+                case "resid":
+                    # residual-space (`d_embed`) comparison: feature importances do not map.
+                    return jnp.mean((clean_residual(frozen, resid) - labels @ frozen.W_E) ** 2)
 
         grad = eqx.filter_grad(loss_fn)(trainable)
         updates, opt_state = optimizer.update(grad, opt_state, eqx.filter(trainable, eqx.is_array))
@@ -457,7 +597,7 @@ def pretrain_resid_mlp_target(
             feature_probability, generation_type,
         )  # fmt: skip
         trainable, opt_state = step(trainable, opt_state, x)
-    return eqx.tree_at(lambda t: t.layers, target, trainable.layers)
+    return _trainable_target(trainable, target)
 
 
 # ----------------------------- ground-truth target-CI eval -----------------------------

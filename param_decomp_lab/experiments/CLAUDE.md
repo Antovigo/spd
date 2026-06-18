@@ -1,28 +1,52 @@
 # `param_decomp_lab/experiments/`
 
-LM experiment glue, torch-free. Training is JAX (`jsp-train`, launched via `pd-jax-lm`).
-The torch `build_target` bridge + the `pretrain/` dir were DELETED with the rest of torch:
-autointerp/clustering read a run's target topology from
+Experiment glue, torch-free. Training is JAX through the generic core engine
+(`jax_single_pool.run.run_decomposition_training`). LM runs go to SLURM via `jsp-train` /
+`pd-jax-lm`; the toy domains (TMS, ResidMLP) run on CPU in-process via `pd-tms` /
+`pd-resid-mlp`. The torch `build_target` bridge + the `pretrain/` dir were DELETED with the
+rest of torch: autointerp/clustering read a run's target topology from
 `jax_single_pool.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
-see `param_decomp_lab/adapters/jax_pd.py`. The torch TMS and ResidualMLP experiment dirs
-were deleted too: those domains now live only as JAX targets
-(`param_decomp_jax/jax_single_pool/tms.py`, `resid_mlp.py`). The torch-free config schemas
-(`param_decomp_config/{tms,resid_mlp}.py`) remain, since the JAX trainer reads them.
+see `param_decomp_lab/adapters/jax_pd.py`.
+
+## Toy domains (TMS, ResidMLP)
+
+The TMS and ResidualMLP toys are LAB experiments that call the core engine as a library
+(the core itself has zero toy-specific code). Each `experiments/{tms,resid_mlp}/` carries:
+
+- `model.py` — the JAX `DecomposedModel` (sites, pure fns, MSE `recon_loss_fn`), the frozen
+  target (`eqx.Module`), from-scratch in-process pretrain (`pretrain_*_target`), the
+  ground-truth identity-CI eval (`identity_ci_error` + the single-feature probe), and the
+  lab `*TargetConfig` dataclass carried on `ExperimentConfig.target` (satisfies the core
+  `config.TargetSites` protocol).
+- `run.py` — the `pd-tms` / `pd-resid-mlp` CLI: builds the `ExperimentConfig` from the
+  canonical schema via the public shared helpers
+  (`config.convert_shared_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch`),
+  pretrains + builds the target, and calls `run_decomposition_training` with a synthetic
+  `sample_batch` + an `identity_ci_error` `eval_fn`. CPU, synchronous, no SLURM.
+- `configs/*.yaml` — the canonical `param_decomp_config.{tms,resid_mlp}` schema (TMS: 5-2 /
+  40-10 / the `-id` deeper variants; ResidMLP: 1l/2l/3l + the global-CI variant).
+
+TMS deeper variant (`n_hidden_layers>0`, the `-id` configs) + ResidMLP `global` CI arch are
+restored in `model.py` / `ci_fn_mlp.py`; the `global` arch's dispatch into the core
+`init_train_state` is a remaining wiring follow-up (the layerwise path is fully wired). Toy
+harvest / autointerp / clustering is NOT yet wired (`load_run` is LM-only).
 
 ## Layout
 
 The `ExperimentConfig[T,D]` generic + `EvalConfig` + `WandbConfig` +
 `ResumeProvenance` live in `param_decomp_config/experiment.py`; the LM schema
 (`LMExperimentConfig`, `LMTargetConfig`, `LMDataConfig`, the `target.spec` union) in
-`param_decomp_config/lm.py`.
+`param_decomp_config/lm.py`; the toy schemas in `param_decomp_config/{tms,resid_mlp}.py`.
 
 ```
 experiments/
 ├── utils.py                 # EXPERIMENT_CONFIG_FILENAME
-└── lm/
-    ├── jax_launch.py        # pd-jax-lm: snapshot + shared-FS workspace + sbatch
-    ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
-    └── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
+├── lm/
+│   ├── jax_launch.py        # pd-jax-lm: snapshot + shared-FS workspace + sbatch
+│   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
+│   └── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
+├── tms/                     # pd-tms (CPU): model.py + run.py + configs/ + test_tms.py
+└── resid_mlp/               # pd-resid-mlp (CPU): model.py + run.py + configs/ + test
 ```
 
 ## LM `target.spec`
