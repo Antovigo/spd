@@ -77,11 +77,20 @@ from param_decomp.recon import build_recon_terms
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh, init_distributed
 from param_decomp.slow_eval import (
+    IDENTITY_CI_ERROR_TOLERANCE,
+    PermutationMetricSpec,
+    PositionCI,
     SiteReduction,
+    accumulate_position_ci,
     accumulate_site_reductions,
     compute_hidden_acts_metrics,
+    compute_identity_ci_errors,
+    eval_metrics_from_run_dir,
+    make_position_ci_step,
     make_slow_eval_step,
+    render_permutation_figures,
     render_slow_eval_figures,
+    resolve_permutation_metrics,
 )
 from param_decomp.target_aliases import AnyFrozenTarget, AnyPrefix
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
@@ -227,10 +236,15 @@ class SlowEvalRenderer:
 
     The collective part of slow eval (the jitted forward + the device->host pull whose
     `np.asarray` triggers the C-shard all-gather) runs in lockstep on ALL ranks inside the
-    eval pass. This renderer takes ONLY the materialized numpy reductions and does the
-    pure-host part — matplotlib + `wandb.log` — on a background thread, so the main train
-    loop on every rank proceeds immediately (near-zero cross-rank divergence). The thread
-    touches ZERO jax/device state.
+    eval pass. This renderer takes ONLY the materialized numpy reductions (the per-site
+    `SiteReduction` plot inputs and, when the config names a CI-heatmap/permutation metric,
+    the batch-mean `(T, C)` position CI) and does the pure-host part — matplotlib +
+    `wandb.log` — on a background thread, so the main train loop on every rank proceeds
+    immediately (near-zero cross-rank divergence). The thread touches ZERO jax/device state.
+    `UVPlots` is deliberately NOT rendered here (it needs a full host gather of the C-sharded
+    V/U, antithetical to the forward-only in-loop design); it stays offline-only
+    (`slow_eval.run_offline_slow_eval`). The `IdentityCIError` SCALARS are computed
+    synchronously on the collective path (cheap, and `_step`-monotonic), not on this thread.
 
     One render in flight at a time: a `submit` while a render is still running blocks
     briefly on `join()` first, so renders can't pile up (slow eval is forward-only and
@@ -257,7 +271,13 @@ class SlowEvalRenderer:
             self._thread.join()
             self._thread = None
 
-    def submit(self, reductions: dict[str, SiteReduction], now_step: int) -> None:
+    def submit(
+        self,
+        reductions: dict[str, SiteReduction],
+        perm_spec: PermutationMetricSpec,
+        position_ci: dict[str, PositionCI] | None,
+        now_step: int,
+    ) -> None:
         if not self._is_main:
             return
         if not self._atexit_registered:
@@ -265,7 +285,9 @@ class SlowEvalRenderer:
             self._atexit_registered = True
         self.join()  # cap to one in-flight render
         self._thread = threading.Thread(
-            target=_render_and_log_slow_eval, args=(reductions, now_step), daemon=True
+            target=_render_and_log_slow_eval,
+            args=(reductions, perm_spec, position_ci, now_step),
+            daemon=True,
         )
         self._thread.start()
 
@@ -278,14 +300,23 @@ def slow_eval_due(now_step: int, every: int, slow_every: int, slow_on_first_step
     return now_step % slow_every == 0 or (slow_on_first_step and now_step == every)
 
 
-def _render_and_log_slow_eval(reductions: dict[str, SiteReduction], now_step: int) -> None:
-    """Pure-host: render the slow figures and log them to wandb on the live `_step` axis at
-    `now_step`. No jax/device access — safe off the train loop."""
+def _render_and_log_slow_eval(
+    reductions: dict[str, SiteReduction],
+    perm_spec: PermutationMetricSpec,
+    position_ci: dict[str, PositionCI] | None,
+    now_step: int,
+) -> None:
+    """Pure-host: render the slow figures (the base plot set plus, when `position_ci` is
+    materialized, the config-driven CI-heatmap/permutation figures) and log them to wandb on
+    the live `_step` axis at `now_step`. `UVPlots` is offline-only, so `components` is not
+    passed (the in-loop contract). No jax/device access — safe off the train loop."""
     import wandb
     import wandb.errors
     from PIL import Image
 
     figures = render_slow_eval_figures(reductions)
+    if position_ci is not None:
+        figures |= render_permutation_figures(perm_spec, position_ci, components=None)
     payload: dict[str, Any] = {
         f"slow_eval/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in figures.items()
     }
@@ -632,6 +663,12 @@ def _make_lm_eval_fn(
 
     slow_eval_step = make_slow_eval_step(lm, cfg.eval.ci_alive_threshold)
     slow_renderer = SlowEvalRenderer(is_main)
+    # The CI-heatmap / permutation / identity-error metrics read off the run's typed
+    # `eval.metrics` (re-validated from the pinned config.yaml, like the offline path: the
+    # trainer's `EvalConfig` drops the raw metric list). config.yaml is pinned before train().
+    perm_spec = resolve_permutation_metrics(lm.site_names, eval_metrics_from_run_dir(cfg.run_dir))
+    want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
+    position_ci_step = make_position_ci_step(lm) if want_position_ci else None
 
     def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
         assert cfg.eval is not None
@@ -689,7 +726,20 @@ def _make_lm_eval_fn(
                 lm, state, frozen, eval_residuals, cfg.n_mask_samples, cfg.sampling, hidden_acts_key
             )
             eval_record |= {f"eval/slow/loss/{k}": v for k, v in hidden_acts.items()}
-            slow_renderer.submit(site_reductions, now_step)
+            # The position-CI all-gather is ALSO collective (every rank joins it), gated on
+            # the config naming a CI-heatmap / permutation / identity-error metric. The
+            # heatmap FIGURES render off-loop on rank 0; the IdentityCIError SCALARS log
+            # synchronously on the live `_step` (cheap + must stay `_step`-monotonic).
+            position_ci: dict[str, PositionCI] | None = None
+            if position_ci_step is not None:
+                position_ci = accumulate_position_ci(
+                    position_ci_step, state.ci_fn, frozen, eval_residuals
+                )
+                identity_ci_errors = compute_identity_ci_errors(
+                    perm_spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE
+                )
+                eval_record |= {f"eval/slow/{k}": v for k, v in identity_ci_errors.items()}
+            slow_renderer.submit(site_reductions, perm_spec, position_ci, now_step)
         if is_main:
             headline = {
                 k: eval_record[f"eval/{k}"]

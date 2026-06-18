@@ -564,18 +564,25 @@ def plot_uv_matrices(
 def render_permutation_figures(
     spec: PermutationMetricSpec,
     position_ci: dict[str, PositionCI],
-    components: dict[str, tuple[np.ndarray, np.ndarray]],
+    components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
 ) -> dict[str, bytes]:
     """The config-driven permutation plots (`PermutedCIPlots`, `UVPlots`) as
     `{figures/<key>: png}`, keyed as torch logs them under `slow_eval/`. Empty when neither
-    plot metric is configured."""
+    plot metric is configured.
+
+    `components` (the C-sharded V/U) is `None` for the IN-LOOP slow tier, which renders only
+    the cheap position-CI heatmaps: `UVPlots` needs a full host gather of V/U, antithetical
+    to the forward-only in-loop design and not meaningfully renderable at production C, so it
+    stays OFFLINE-only (`run_offline_slow_eval`). When `components is None`, `UVPlots` is
+    skipped even if the config names it (the in-loop contract); only the offline caller, which
+    passes `components`, renders it."""
     figures: dict[str, bytes] = {}
     if not spec.any_plots:
         return figures
     lower_png, upper_png = plot_permuted_ci_heatmaps(position_ci, spec.permutation)
     figures["figures/causal_importances"] = lower_png
     figures["figures/causal_importances_upper_leaky"] = upper_png
-    if spec.want_uv_plots:
+    if spec.want_uv_plots and components is not None:
         present = {name: components[name] for name in spec.permutation}
         figures["figures/uv_matrices"] = plot_uv_matrices(present, spec.permutation, position_ci)
     return figures
@@ -702,7 +709,7 @@ def run_offline_slow_eval(run_dir: Path, cfg: ExperimentConfig, step: int) -> Sl
         random.fold_in(random.PRNGKey(cfg.seed), step),
     )  # fmt: skip
 
-    perm_spec = resolve_permutation_metrics(lm.site_names, _eval_metrics(run_dir))
+    perm_spec = resolve_permutation_metrics(lm.site_names, eval_metrics_from_run_dir(run_dir))
     figures = render_slow_eval_figures(reductions)
     identity_ci_errors: dict[str, float] = {}
     if perm_spec.any_plots or perm_spec.any_identity_error:
@@ -721,10 +728,12 @@ def run_offline_slow_eval(run_dir: Path, cfg: ExperimentConfig, step: int) -> Sl
     )
 
 
-def _eval_metrics(run_dir: Path) -> list[Any]:
+def eval_metrics_from_run_dir(run_dir: Path) -> list[Any]:
     """The typed `eval.metrics` configs from the run's `config.yaml`. The trainer's
     `EvalConfig` keeps only scalar-tier fields, so the plot/permutation metric configs are
-    re-validated here from the raw block (same source-of-truth read as `_n_batches_accum`)."""
+    re-validated here from the raw block (same source-of-truth read as `_n_batches_accum`).
+    Both the offline pass and the in-loop slow tier (`run.py`) read the metric list this
+    way."""
     import yaml
     from pydantic import TypeAdapter
 

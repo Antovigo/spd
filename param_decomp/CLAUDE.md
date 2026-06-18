@@ -67,8 +67,14 @@ bridge `jsp-export` / `pd-offline-eval` was retired). They now run IN-LOOP on
 `eval.slow_every` next to the fast pass (SPEC S28/S29 amended 2026-06-18): the collective
 forward + device→host pull in lockstep on all ranks, the matplotlib render + `wandb.log`
 on a rank-0 background thread (`run.py::SlowEvalRenderer`), reusing the fast pass's eval
-batches and logging on the live `_step` axis. `pd-slow-eval` is RETAINED for
-retrospective re-render of an on-disk checkpoint.
+batches and logging on the live `_step` axis. The config-gated position-CI metrics
+(`PermutedCIPlots` / CI heatmaps + `IdentityCIError`) ALSO run in-loop off the cheap
+`(T, C)` position-CI matrix (`accumulate_position_ci`, collective; the heatmap figures on
+the background thread, the `IdentityCIError` scalars synchronously on `_step`). `UVPlots`
+is the lone slow metric kept OFFLINE-only — it needs a full host gather of the C-sharded
+V/U, so `render_permutation_figures` is called with `components=None` in-loop and skips it;
+`run_offline_slow_eval` passes the gathered V/U and renders it. `pd-slow-eval` is RETAINED
+for retrospective re-render of an on-disk checkpoint (the full set incl. `UVPlots`).
 
 **The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
 toy-specific code (CI-fn arches are the one allowed exception — see `ci_fn_mlp.py`). The
