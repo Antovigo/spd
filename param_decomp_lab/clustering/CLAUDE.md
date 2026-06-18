@@ -19,9 +19,56 @@ python -m param_decomp_lab.clustering.scripts.run_worker_jax \
 # → PARAM_DECOMP_OUT_DIR/clustering/harvests/ch-<id>/
 
 # 2. Merge from the snapshot (CPU-only).
-pd-cluster-merge /path/to/ch-<id>/ merge_config.json
+pd-cluster-merge /path/to/ch-<id>/ merge_config.json --run-id c-<id> --seed 0 [--plot]
 # → PARAM_DECOMP_OUT_DIR/clustering/runs/c-<id>/
 ```
+
+`pd-cluster-merge` seeds the stdlib `random` the stochastic merge-pair samplers draw from,
+so distinct `--seed`s give independent merge trajectories over the same snapshot. `--plot`
+emits per-run diagnostics (`plots/cluster_sizes.png`, periodic `plots/iter_*.png`).
+
+## Workflow: ensemble → consensus (the headline `pd-clustering`)
+
+A single clustering run is noisy; cluster *stability* is read off an ensemble of seeded
+runs. `pd-clustering` fans one decomposition out into `n_runs` seeded `harvest → merge`
+members, then a consensus job normalizes their labels and computes per-iteration pairwise
+distances + a stability plot. Three dependency tiers:
+
+```
+harvest array (N × 1 GPU, seeded dataset)            run_worker_jax
+   └─ merge array (N × CPU, seeded sampler)           run_merge        [afterok harvest]
+         └─ consensus job per distance method         calc_distances   [afterok merge]
+```
+
+```bash
+# SLURM (seeded array + dependent merge array + dependent consensus):
+pd-clustering --config param_decomp_lab/clustering/configs/ensemble_example.yaml
+# In-process (sequential), for a small example / debugging:
+pd-clustering --config <ensemble.yaml> --local
+# Re-run consensus alone over existing member runs:
+pd-cluster-distances --ensemble-id e-<id> --clustering-run-ids c-a,c-b,c-c \
+    --distances-method perm_invariant_hamming
+```
+
+`ClusteringEnsembleConfig` (`scripts/run_pipeline.py`) is flat: `harvest` (`HarvestConfig`)
++ `merge` (`MergeConfig`) + `n_runs` + `base_seed` (member i uses `base_seed + i` for both
+the harvest dataset and the merge sampler) + `distances_methods` + slurm fields. Output:
+
+```
+PARAM_DECOMP_OUT_DIR/clustering/ensembles/<ensemble_id>/
+├── ensemble_config.yaml / harvest_config.json / merge_config.json
+├── ensemble_meta.json                # normalization metadata (calc_distances)
+├── ensemble_merge_array.npz          # normalized merge array
+├── distances_<method>.npz            # per-iteration distance tensor
+└── plots/distances_<method>.png      # stability plot
+```
+
+The consensus engine is the surviving `MergeHistoryEnsemble.normalized()` (unions member
+labels, putting each member's missing/dead components into singleton groups) +
+`math.compute_distances` (`perm_invariant_hamming` / `matching_dist` / `matching_dist_vec`,
+multiprocessing over iterations). `calc_distances.py` is only the driver + plot; it does
+not reimplement the math. Distance matrices are strict-lower-triangular (diag/upper `NaN`),
+matching the per-iteration `perm_invariant_hamming_matrix` convention.
 
 The run is opened with `jax_single_pool.load_run.open_jax_run` (the reusable JAX
 "open a run for consumption" pattern, shared with `harvest`); the lower-leaky CI from its
@@ -100,6 +147,15 @@ DistancesArray            # Float[np.ndarray, "n_iters n_ens n_ens"]
 `MergeHistory` stores group/pair indices as **int32** — int16 overflows above 32767
 components (numpy raises; torch silently truncated).
 
+## Plotting Submodule (`plotting/`)
+
+Torch-free (numpy + matplotlib) diagnostics:
+
+- `plot_coact_and_costs` — per-iteration coactivation/cost heatmaps, wired to the merge's
+  `LogCallback` by `run_merge --plot`.
+- `plot_merge_history_cluster_sizes` — per-run cluster-size-vs-iteration scatter.
+- `plot_dists_distribution` — the ensemble stability plot (`calc_distances`).
+
 ## Math Submodule (`math/`)
 
 - `merge_matrix.py` - `GroupMerge` / `BatchedGroupMerge` (component→group assignments)
@@ -120,4 +176,4 @@ python -m param_decomp_lab.clustering.scripts.get_cluster_mapping /path/to/clust
 ## Run ID Prefixes
 
 `RUN_TYPE_ABBREVIATIONS` in `param_decomp_lab/infra/run_files.py`: `c` (clustering/runs),
-`ch` (clustering/harvests).
+`ch` (clustering/harvests), `e` (clustering/ensembles).
