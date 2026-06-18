@@ -62,6 +62,7 @@ class RunSink:
     out_dir: Path | None
     _wandb_active: bool
     keep_last_n_checkpoints: int | None = None
+    sync_checkpoints_to_wandb: bool = True
 
     # =========================== Constructors ===========================
 
@@ -92,6 +93,7 @@ class RunSink:
         group: str | None = None,
         view_meta: dict[str, Any] | None = None,
         keep_last_n_checkpoints: int | None = None,
+        sync_checkpoints_to_wandb: bool = True,
         resume: Literal["allow", "never", "must", "auto"] | None = None,
     ) -> "RunSink":
         """Sink that writes to local files and a wandb run.
@@ -118,6 +120,7 @@ class RunSink:
             out_dir=out_dir,
             _wandb_active=True,
             keep_last_n_checkpoints=keep_last_n_checkpoints,
+            sync_checkpoints_to_wandb=sync_checkpoints_to_wandb,
         )
 
     @classmethod
@@ -153,9 +156,9 @@ class RunSink:
         state, metric states, step) needed for resumption.
 
         No-op when `out_dir is None` (silent sink / non-main rank); wandb upload
-        only when wandb is active. Prunes older (model, training) pairs after the
-        write when ``keep_last_n_checkpoints`` is set — locally, and also from the
-        wandb run when wandb is active.
+        only when wandb is active and `sync_checkpoints_to_wandb`. Prunes older
+        (model, training) pairs after the write when ``keep_last_n_checkpoints`` is
+        set — locally, and also from the wandb run when checkpoints are synced.
         """
         if self.out_dir is None:
             return
@@ -164,14 +167,15 @@ class RunSink:
         training_path = self.out_dir / f"training_{snapshot.step}.pth"
         save_file(snapshot, training_path)
         logger.info(f"Saved checkpoint to {model_path} (+ {training_path.name})")
-        if self._wandb_active:
+        upload_to_wandb = self._wandb_active and self.sync_checkpoints_to_wandb
+        if upload_to_wandb:
             try_wandb(wandb.save, str(model_path), base_path=str(self.out_dir), policy="now")
             try_wandb(wandb.save, str(training_path), base_path=str(self.out_dir), policy="now")
         if self.keep_last_n_checkpoints is not None:
             _prune_old_checkpoints(
                 self.out_dir,
                 keep_last_n=self.keep_last_n_checkpoints,
-                prune_wandb=self._wandb_active,
+                prune_wandb=upload_to_wandb,
             )
 
     def finish(self) -> None:
