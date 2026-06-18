@@ -16,13 +16,29 @@ from param_decomp.llama8b import (
     mlp_family_site_cs,
 )
 from param_decomp.slow_eval import (
+    PermutationMetricSpec,
+    accumulate_position_ci,
     accumulate_site_reductions,
+    compute_identity_ci_errors,
+    dense_ci_error,
+    identity_ci_error,
+    make_position_ci_step,
     make_slow_eval_step,
+    permute_to_dense,
+    permute_to_identity,
+    render_permutation_figures,
     render_slow_eval_figures,
+    resolve_permutation_metrics,
 )
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg,
     _tiny_target,
+)
+from param_decomp_config.eval_metrics import (
+    IdentityCIErrorConfig,
+    IdentityCITargetSpec,
+    PermutedCIPlotsConfig,
+    UVPlotsConfig,
 )
 
 
@@ -127,3 +143,151 @@ def test_finite_reductions():
         assert np.all(np.isfinite(r.ci_sums))
         assert np.all(np.isfinite(r.lower_sample))
         assert np.all(np.isfinite(r.logits_sample))
+
+
+# ----------------------------- permutation / identity-error metrics -----------------------------
+
+
+def test_permute_to_identity_recovers_a_shuffled_identity():
+    eye = np.eye(4)
+    perm = np.array([2, 0, 3, 1])
+    shuffled = eye[:, perm]
+    recovered, found = permute_to_identity(shuffled)
+    np.testing.assert_allclose(recovered, eye)
+    # found[i] is the source column placed at position i; applying it undoes the shuffle
+    np.testing.assert_array_equal(shuffled[:, found], eye)
+
+
+def test_permute_to_identity_handles_wide_matrix():
+    # 3 features, 5 components: the extra columns append in order after the assigned ones
+    ci = np.zeros((3, 5))
+    ci[0, 4] = ci[1, 2] = ci[2, 0] = 1.0
+    permuted, perm = permute_to_identity(ci)
+    assert perm.shape == (5,)
+    np.testing.assert_allclose(np.diagonal(permuted[:3, :3]), 1.0)
+
+
+def test_permute_to_dense_orders_columns_by_mass():
+    ci = np.array([[0.1, 0.9, 0.5], [0.0, 0.8, 0.4]])
+    permuted, perm = permute_to_dense(ci)
+    assert perm.tolist() == [1, 2, 0]
+    assert (permuted.sum(0)[:-1] >= permuted.sum(0)[1:]).all()
+
+
+def test_identity_ci_error_perfect_and_imperfect():
+    perfect = np.eye(5)
+    assert identity_ci_error(perfect, tolerance=0.1) == 0
+    permuted = perfect[:, np.array([3, 1, 4, 0, 2])]
+    assert identity_ci_error(permuted, tolerance=0.1) == 0
+    assert identity_ci_error(np.zeros((5, 5)), tolerance=0.1) == 5  # all diagonals missing
+    wide = np.concatenate([np.eye(5), np.zeros((5, 3))], axis=1)
+    assert identity_ci_error(wide, tolerance=0.1) == 0
+
+
+def test_identity_ci_error_counts_off_diagonal_leak():
+    ci = np.eye(4)
+    ci[0, 1] = 0.9  # one off-diagonal leak beyond tolerance
+    assert identity_ci_error(ci, tolerance=0.1) == 1
+
+
+def test_dense_ci_error_perfect_and_missing():
+    ci = np.concatenate([np.ones((3, 2)), np.zeros((3, 2))], axis=1)
+    assert dense_ci_error(ci, k=2, tolerance=0.1) == 0
+    sparse = np.concatenate([np.ones((3, 1)), np.zeros((3, 3))], axis=1)
+    assert dense_ci_error(sparse, k=2, tolerance=0.1) == 1  # one of the k columns is dead
+
+
+def test_resolve_permutation_metrics_dispatches_patterns():
+    sites = ("layers.4.mlp.gate_proj", "layers.4.mlp.down_proj", "layers.5.mlp.gate_proj")
+    metrics = [
+        PermutedCIPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"]),
+        UVPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=None),
+        IdentityCIErrorConfig(
+            identity_ci=[IdentityCITargetSpec(layer_pattern="*gate_proj", n_features=4)],
+            dense_ci=None,
+        ),
+    ]
+    spec = resolve_permutation_metrics(sites, metrics)
+    assert spec.permutation == {
+        "layers.4.mlp.gate_proj": "identity",
+        "layers.4.mlp.down_proj": "dense",
+        "layers.5.mlp.gate_proj": "identity",
+    }
+    assert spec.want_uv_plots
+    assert spec.any_plots and spec.any_identity_error
+    assert set(spec.identity_targets) == {"layers.4.mlp.gate_proj", "layers.5.mlp.gate_proj"}
+    assert spec.dense_targets == {}
+
+
+def test_resolve_permutation_metrics_empty_when_unconfigured():
+    spec = resolve_permutation_metrics(("a", "b"), [])
+    assert not spec.any_plots and not spec.any_identity_error and not spec.want_uv_plots
+
+
+def _tiny_position_ci():
+    cfg = _tiny_cfg()
+    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
+    sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
+    lm = llama_decomposed_lm(cfg, sites)
+    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
+    position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
+    return lm, position_ci
+
+
+def test_position_ci_keeps_position_axis_and_batch_means():
+    _, position_ci = _tiny_position_ci()
+    for pci in position_ci.values():
+        assert pci.lower.shape == (12, 8)  # (T, C), batch axis reduced away
+        assert pci.upper.shape == (12, 8)
+        assert np.all(np.isfinite(pci.lower)) and np.all(np.isfinite(pci.upper))
+        assert pci.lower.min() >= 0.0 and pci.lower.max() <= 1.0  # lower-leaky clamps to [0, 1]
+
+
+def test_render_permutation_figures_emits_pngs():
+    lm, position_ci = _tiny_position_ci()
+    metrics = [
+        PermutedCIPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"]),
+        UVPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"]),
+    ]
+    spec = resolve_permutation_metrics(lm.site_names, metrics)
+    components = {name: (np.zeros((4, 8)), np.zeros((8, 4))) for name in lm.site_names}
+    figures = render_permutation_figures(spec, position_ci, components)
+    assert set(figures) == {
+        "figures/causal_importances",
+        "figures/causal_importances_upper_leaky",
+        "figures/uv_matrices",
+    }
+    for png in figures.values():
+        assert png[:4] == b"\x89PNG"
+
+
+def test_render_permutation_figures_empty_without_plot_metrics():
+    lm, position_ci = _tiny_position_ci()
+    spec = resolve_permutation_metrics(lm.site_names, [])
+    assert render_permutation_figures(spec, position_ci, {}) == {}
+
+
+def test_compute_identity_ci_errors_end_to_end():
+    lm, position_ci = _tiny_position_ci()
+    spec = resolve_permutation_metrics(
+        lm.site_names,
+        [
+            IdentityCIErrorConfig(
+                identity_ci=[IdentityCITargetSpec(layer_pattern="*gate_proj", n_features=2)],
+                dense_ci=None,
+            )
+        ],
+    )
+    errors = compute_identity_ci_errors(spec, position_ci, tolerance=0.1)
+    assert "IdentityCIError" in errors
+    gate_keys = [k for k in errors if k.startswith("IdentityCIError/")]
+    assert gate_keys and all("gate_proj" in k for k in gate_keys)
+    assert errors["IdentityCIError"] == sum(errors[k] for k in gate_keys)
+    assert all(v >= 0 for v in errors.values())
+
+
+def test_compute_identity_ci_errors_empty_when_unconfigured():
+    _, position_ci = _tiny_position_ci()
+    spec = PermutationMetricSpec({}, {}, {}, want_uv_plots=False)
+    assert compute_identity_ci_errors(spec, position_ci, tolerance=0.1) == {}

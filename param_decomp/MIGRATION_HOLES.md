@@ -7,26 +7,30 @@ torch→JAX migration, so they're tracked rather than silently lost. Append as f
 
 These sit in `config.OFFLINE_EVAL_METRIC_TYPES` — the in-loop trainer skips them — and
 they were historically "deferred to the offline path". But that torch offline path
-(`pd-offline-eval`) was **retired in #2**, and `jsp-slow-eval` (`slow_eval.py`) only
+(`pd-offline-eval`) was **retired in #2**, and `pd-slow-eval` (`slow_eval.py`) only
 recomputes `CIHistograms` / `ComponentActivationDensity` / `CIMeanPerComponent` (+ the
 hidden-acts metrics) natively. So the following are in the config enum, skipped by the
 trainer, and recomputed by no live code:
 
-- **`UVPlots`** — V/U weight visualizations. Not reimplemented.
-- **`PermutedCIPlots`** — permute the CI matrix to identity (linear-sum-assignment) and
-  plot. Not reimplemented. Its substrate was `param_decomp_lab/toy_models/` (the
-  `permute_to_identity_*` + `_linear_sum_assignment` helpers), now also dead/deletable.
-- **`IdentityCIError` (general / LM)** — the discrete CI-vs-target-pattern distance.
-  Reimplemented for the toy targets only (`tms.identity_ci_error`,
-  `resid_mlp.identity_ci_error`, wired into `train_tms`/`train_resid_mlp`); NOT as a
-  general eval metric.
 - **`AutointerpLabels`** — already dead pre-migration (registered, zero configs, no driver).
 
-To re-add: implement as JAX-native `jsp-slow-eval` metrics in `slow_eval.py`.
-`PermutedCIPlots` can reuse a JAX linear-sum-assignment; the general `IdentityCIError`
-generalizes the tms/resid `identity_ci_error`; `UVPlots` plots V/U directly. The config
-classes (in torch-free `param_decomp_config.eval_metrics`) were KEPT, so a config can
-still name them — they just no-op until reimplemented.
+`UVPlots` / `PermutedCIPlots` / `IdentityCIError` are NOW reimplemented as JAX-native
+`pd-slow-eval` metrics (`slow_eval.py`). They are config-gated off the run's `eval.metrics`
+(re-validated from `config.yaml` via `resolve_permutation_metrics`), operate on the
+batch-mean `(position, C)` CI matrix from the real LM eval batches (`make_position_ci_step`
+/ `accumulate_position_ci`), and:
+
+- **`PermutedCIPlots`** — per-site `(position, C)` CI heatmaps with columns permuted toward
+  each site's target shape (identity via scipy `linear_sum_assignment`, or dense by column
+  mass). Lower-leaky + upper-leaky views (`render_permutation_figures` →
+  `figures/causal_importances{,_upper_leaky}`).
+- **`UVPlots`** — per-site V/U heatmaps with the component axis reordered by the same
+  permutation (`figures/uv_matrices`).
+- **`IdentityCIError`** — the discrete CI-vs-target distance, generalizing the toy
+  `tms`/`resid_mlp` `identity_ci_error` (`identity_ci_error` / `dense_ci_error` in
+  `slow_eval.py`), keyed `IdentityCIError[/<site>]`.
+
+The config classes live in torch-free `param_decomp_config.eval_metrics`.
 
 ## Deferred to a follow-up push (not in the current push)
 
