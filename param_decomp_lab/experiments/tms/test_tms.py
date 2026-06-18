@@ -14,13 +14,13 @@ import jax
 import jax.numpy as jnp
 import optax
 import pytest
-from jax_single_pool.ci_fn import CIValues
-from jax_single_pool.ci_fn_mlp import MLPCIArch, init_layerwise_mlp_ci_fn
-from jax_single_pool.llama8b import DecompVU, init_decomp_vu
-from jax_single_pool.lm import DecomposedModel, SiteC, SiteSpec
-from jax_single_pool.recon import build_recon_terms
-from jax_single_pool.train import TrainState, make_faith_warmup_step, make_train_step
 
+from param_decomp.ci_fn import CIValues
+from param_decomp.ci_fn_mlp import MLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.llama8b import DecompVU, init_decomp_vu
+from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
+from param_decomp.recon import build_recon_terms
+from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
 from param_decomp_config.losses import (
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,

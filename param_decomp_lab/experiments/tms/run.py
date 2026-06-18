@@ -1,14 +1,14 @@
 """`pd-tms`: run a TMS (Toy Model of Superposition) parameter decomposition on CPU.
 
 The toy domains live lab-side and call the generic core engine
-(`jax_single_pool.run.run_decomposition_training`) as a library — the core itself carries
+(`param_decomp.run.run_decomposition_training`) as a library — the core itself carries
 zero toy-specific code. A TMS run pretrains its tiny target from scratch in-process (the
 Anthropic `mean((|x|-out)^2)` objective), then decomposes it through the same engine the
 LM uses, validating via the ground-truth identity-CI metric logged every train-log step.
 
 These toys train in seconds; `pd-tms` runs synchronously on CPU in the main venv (no
-SLURM / `jsp-train` / CUDA). It mints its own `p-<8hex>` run id (toys do not go through
-`pd-jax-lm`).
+SLURM / `pd-train` / CUDA). It mints its own `p-<8hex>` run id (toys do not go through
+`pd-lm`).
 """
 
 from pathlib import Path
@@ -20,19 +20,19 @@ import yaml
 from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax_single_pool.config import (
+
+from param_decomp.config import (
     ExperimentConfig,
     SharedAlgorithmConfig,
     convert_shared_algorithm_config,
     layerwise_mlp_ci_arch,
     run_instance,
 )
-from jax_single_pool.lm import SiteC
-from jax_single_pool.recon import build_recon_terms
-from jax_single_pool.run import run_decomposition_training
-from jax_single_pool.sharding import dp_mesh
-from jax_single_pool.train import TrainState
-
+from param_decomp.lm import SiteC
+from param_decomp.recon import build_recon_terms
+from param_decomp.run import run_decomposition_training
+from param_decomp.sharding import dp_mesh
+from param_decomp.train import TrainState
 from param_decomp_config.tms import TMSExperimentConfig
 from param_decomp_lab.experiments.tms import model as tms
 from param_decomp_lab.infra.run_files import generate_run_id

@@ -8,8 +8,8 @@ NumPy.
 
 ## JAX runs (`scripts/run_worker_jax.py`)
 
-A JAX single-pool run (`param_decomp_jax`, orbax checkpoint) is harvested natively. The
-run is opened with `jax_single_pool.load_run.open_jax_run` (the reusable "open a JAX run
+A JAX single-pool run (`param_decomp`, orbax checkpoint) is harvested natively. The
+run is opened with `param_decomp.load_run.open_jax_run` (the reusable "open a JAX run
 for consumption" pattern — see below); its frozen forward-only pass (lower-leaky CI +
 ‖U‖·(x@V) component acts + clean-logit softmax) is converted (`np.asarray`) into a
 `HarvestBatch` of NumPy arrays, fed to the `Harvester`, and written via
@@ -40,7 +40,7 @@ dominates; pass `--no_cooccurrence` for a quick spot-check (drops only
 
 ### The reusable run-loading pattern (for clustering / autointerp / slow-eval / app)
 
-`jax_single_pool.load_run.open_jax_run(run_dir, step=None) -> LoadedJaxRun` is the single
+`param_decomp.load_run.open_jax_run(run_dir, step=None) -> LoadedJaxRun` is the single
 entry point any consumer of a JAX run should use. It rebuilds the frozen target +
 `DecomposedModel` from the run's pinned config (`load_run_dir_config`), restores the orbax
 checkpoint onto a reference `TrainState`, and exposes `run.forward(token_ids) ->

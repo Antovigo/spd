@@ -1,5 +1,5 @@
 # TMS 5->2 PD decomposition (superposition toy). Small target, no remat. Launch:
-# pd-jax-lm, 1 node. Validates via the in-loop ground-truth target-CI metric
+# pd-lm, 1 node. Validates via the in-loop ground-truth target-CI metric
 # (eval/identity_ci_error/<site>) logged each train-log step — no separate eval pass.
 run_name: jax-tms-5-2
 out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs

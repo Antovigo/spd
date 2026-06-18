@@ -1,17 +1,16 @@
-"""Submit a JAX target-pretraining run (`jsp-pretrain`) — `pd-pretrain`.
+"""Submit a JAX target-pretraining run (`pd-pretrain-train`) — `pd-pretrain`.
 
 The in-house target LMs (`gpt2_simple` / `llama_simple` / `llama_simple_mlp`) that the
-decomposition trainer then decomposes are pretrained by `jax_single_pool.pretrain.train`.
-This is the login-node submit wrapper, a slimmed mirror of `pd-jax-lm`
+decomposition trainer then decomposes are pretrained by `pretrain.train`.
+This is the login-node submit wrapper, a slimmed mirror of `pd-lm`
 (`experiments/lm/jax_launch.py`): mint a `t-<hex>` run id, snapshot the tree, materialize
-an immutable shared-FS workspace (clone + both venvs), stamp the id (+ out_dir / wandb
-group / tags) into the workspace's config, and sbatch. `--local` runs `jsp-pretrain` in the
-current shell instead (single process, CPU / 1 GPU).
+an immutable shared-FS workspace (clone + the one CUDA venv), stamp the id (+ out_dir /
+wandb group / tags) into the workspace's config, and sbatch. `--local` runs `pd-pretrain-train`
+in the current shell instead (single process, CPU / 1 GPU).
 
-The submit side imports no JAX, so it lives with the other `pd-*` scripts and runs from
-the torch lab venv. The schema is `param_decomp_config`-free here: `jsp-pretrain` validates
-its own config (it owns `PretrainConfig`, which pulls jax); we only read the run_name and
-ensure `run_id` is absent.
+The schema is `param_decomp_config`-free here: `pd-pretrain-train` validates its own config (it
+owns `PretrainConfig`, which pulls jax); we only read the run_name and ensure `run_id` is
+absent.
 """
 
 import shlex
@@ -51,13 +50,13 @@ def main(
     tags: str | None = None,
     comment: str | None = None,
 ) -> None:
-    """Submit (or `--local` run) a `jsp-pretrain` target-pretraining job.
+    """Submit (or `--local` run) a `pd-pretrain-train` target-pretraining job.
 
     Args:
-        config_path: Single self-contained run yaml under `param_decomp_jax/`, with a
+        config_path: Single self-contained run yaml inside the repo, with a
             `run_name` and NO `run_id` (minted here). `--local` reads it in place.
         nodes: Node count (8 GPUs each). Ignored with `--local`.
-        local: Run `jsp-pretrain` in the current shell (single process) instead of
+        local: Run `pd-pretrain-train` in the current shell (single process) instead of
             submitting to SLURM. For CPU / single-GPU smokes.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
@@ -99,13 +98,12 @@ def main(
         requeue=True,
         comment=comment if comment is not None else run_id,
     )
-    jax_dir = workspace / "param_decomp_jax"
     rank_command = (
-        f"source .venv-cuda/bin/activate\n{_RANK_ENV}\n"
-        f"exec jsp-pretrain {config_rel.relative_to('param_decomp_jax')}"
+        f"source .venv/bin/activate\n{_RANK_ENV}\n"
+        f"exec pd-pretrain-train {shlex.quote(str(config_rel))}"
     )
     command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(rank_command)}"
-    script = generate_script(slurm_config, command, setup=f'cd "{jax_dir}"')
+    script = generate_script(slurm_config, command, setup=f'cd "{workspace}"')
     result = submit_slurm_job(script, "pd-pretrain")
 
     logger.section("Target-pretraining job submitted!")
@@ -123,14 +121,9 @@ def main(
 
 def _run_local(config_path: Path) -> None:
     assert config_path.exists(), f"config not found: {config_path}"
-    jax_dir = REPO_ROOT / "param_decomp_jax"
-    python = jax_dir / ".venv" / "bin" / "python"
-    assert python.exists(), (
-        f"jax venv missing: {python} — run `make install-jax` (CPU) or `make install-jax-cuda`"
-    )
-    cmd = [str(python), "-m", "jax_single_pool.pretrain.train", str(config_path.resolve())]
+    cmd = ["pd-pretrain-train", str(config_path.resolve())]
     logger.info(f"Running locally: {' '.join(cmd)}")
-    subprocess.run(cmd, cwd=jax_dir, check=True)
+    subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 
 
 def _config_path_relative_to_repo(config_path: str) -> Path:
@@ -139,11 +132,7 @@ def _config_path_relative_to_repo(config_path: str) -> Path:
     assert path.is_relative_to(REPO_ROOT), (
         f"config must live inside the repo so the snapshot carries it: {path}"
     )
-    rel = path.relative_to(REPO_ROOT)
-    assert rel.parts[0] == "param_decomp_jax", (
-        f"config must live under param_decomp_jax/ (jsp-pretrain runs from there): {rel}"
-    )
-    return rel
+    return path.relative_to(REPO_ROOT)
 
 
 def _read_run_name(config_path: Path) -> str:
@@ -178,10 +167,21 @@ def _build_workspace(
     assert env_file.exists(), f".env with wandb credentials required: {env_file}"
     (workspace / ".env").write_bytes(env_file.read_bytes())
 
-    logger.info("torch venv: uv sync --all-packages --no-dev ...")
-    run(["uv", "sync", "--all-packages", "--no-dev", "--link-mode", "copy", "-q"], cwd=workspace)
-    logger.info("jax venv: make install-jax-cuda ...")
-    run(["make", "install-jax-cuda"], cwd=workspace)
+    logger.info("venv: uv sync --all-packages --no-dev --extra cuda ...")
+    run(
+        [
+            "uv",
+            "sync",
+            "--all-packages",
+            "--no-dev",
+            "--extra",
+            "cuda",
+            "--link-mode",
+            "copy",
+            "-q",
+        ],
+        cwd=workspace,
+    )
 
     _stamp_config(workspace / config_rel, run_id, group, tags)
 

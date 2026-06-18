@@ -1,16 +1,17 @@
-"""Submit a JAX single-pool (`jsp-train`) run to SLURM with torch-launch parity.
+"""Submit a JAX (`pd-train`) decomposition run to SLURM, or run it locally (`--local`).
 
 Mints the `p-<8hex>` run id, snapshots the working tree to `refs/runs/snapshot/<id>`,
-materializes the snapshot as a shared-FS workspace (clone + both venvs, built at
-submit time on the login node — `jsp-train` runs 8 srun tasks per node, so in-job
+materializes the snapshot as a shared-FS workspace (clone + the one CUDA venv, built at
+submit time on the login node — `pd-train` runs 8 srun tasks per node, so in-job
 per-node cloning would race), stamps the run id (+ out_dir / wandb group / tags) into
 the workspace's single config yaml, and sbatches. Requeues re-enter the same immutable
 workspace.
 
-The submit side needs no JAX imports, so it lives with the other `pd-*` scripts and
-runs from the torch venv.
+`--local` skips SLURM and the workspace entirely: mint a run id, stamp it into the live
+config, and run `pd-train` in the current process (single device). For smoke / debug.
 """
 
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -46,7 +47,8 @@ export XLA_FLAGS="--xla_gpu_enable_command_buffer=\""""
 def main(
     config_path: str,
     *,
-    nodes: int,
+    nodes: int = 1,
+    local: bool = False,
     time: str = "72:00:00",
     qos: str | None = None,
     run_id: str | None = None,
@@ -55,14 +57,16 @@ def main(
     comment: str | None = None,
     allocator: str | None = None,
 ) -> None:
-    """Submit a jsp-train run.
+    """Submit (or `--local` run) a pd-train run.
 
     Args:
         config_path: Single self-contained run yaml (the canonical schema + top-level
             `run_name`, optional `out_dir`), inside the repo. `run_id` and `out_dir`
             are minted here and stamped into the workspace copy; `out_dir` defaults to
             `PARAM_DECOMP_OUT_DIR/runs` (the current cluster) when absent.
-        nodes: Node count (8 GPUs each).
+        nodes: Node count (8 GPUs each). Ignored under `--local`.
+        local: Run `pd-train` in the current process (single device, no SLURM, no
+            workspace) instead of submitting. For smoke / debug.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
         run_id: Resubmit an existing launch — reuses its workspace (and identity)
@@ -79,6 +83,10 @@ def main(
     cfg, run_name = _validate_config(REPO_ROOT / config_rel)
     tag_list = [s.strip() for s in tags.split(",")] if tags is not None else []
 
+    if local:
+        _run_local(config_rel, run_name, group, tag_list)
+        return
+
     if run_id is None:
         run_id = generate_run_id("param_decomp")
         snapshot_ref, commit_hash = create_git_snapshot(snapshot_id=run_id)
@@ -91,7 +99,7 @@ def main(
         assert workspace.exists(), f"no workspace to resubmit: {workspace}"
 
     wandb_url = _wandb_url(cfg, run_id)
-    job_name = f"jsp-{run_name}"
+    job_name = f"pd-{run_name}"
     slurm_config = SlurmConfig(
         job_name=job_name,
         partition=None,
@@ -105,16 +113,17 @@ def main(
         requeue=True,
         comment=comment if comment is not None else (wandb_url or run_id),
     )
-    jax_dir = workspace / "param_decomp_jax"
     rank_env = _RANK_ENV
     if allocator is not None:
         rank_env = f"{rank_env}\nexport XLA_PYTHON_CLIENT_ALLOCATOR={allocator}"
-    rank_command = f"source .venv-cuda/bin/activate\n{rank_env}\nexec jsp-train {config_rel.relative_to('param_decomp_jax')}"
+    rank_command = (
+        f"source .venv/bin/activate\n{rank_env}\nexec pd-train {shlex.quote(str(config_rel))}"
+    )
     command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(rank_command)}"
-    script = generate_script(slurm_config, command, setup=f'cd "{jax_dir}"')
-    result = submit_slurm_job(script, "jax-lm")
+    script = generate_script(slurm_config, command, setup=f'cd "{workspace}"')
+    result = submit_slurm_job(script, "pd-lm")
 
-    logger.section("JAX single-pool job submitted!")
+    logger.section("pd-train job submitted!")
     summary: dict[str, str | None] = {
         "Run ID": run_id,
         "Run name": run_name,
@@ -129,31 +138,35 @@ def main(
     logger.values(summary)
 
 
+def _run_local(config_rel: Path, run_name: str, group: str | None, tags: list[str]) -> None:
+    """Mint a run id, stamp the live config in place, and run `pd-train` inline."""
+    run_id = generate_run_id("param_decomp")
+    config = REPO_ROOT / config_rel
+    _stamp_config(config, run_id, group, tags)
+    logger.section(f"pd-train local: {run_name} ({run_id})")
+    subprocess.run(["pd-train", str(config_rel)], cwd=REPO_ROOT, check=True, env=os.environ.copy())
+
+
 def _config_path_relative_to_repo(config_path: str) -> Path:
     path = Path(config_path).resolve()
     assert path.exists(), f"config not found: {path}"
     assert path.is_relative_to(REPO_ROOT), (
         f"config must live inside the repo so the snapshot carries it: {path}"
     )
-    rel = path.relative_to(REPO_ROOT)
-    assert rel.parts[0] == "param_decomp_jax", (
-        f"config must live under param_decomp_jax/ (jsp-train runs from there): {rel}"
-    )
-    return rel
+    return path.relative_to(REPO_ROOT)
 
 
 def _validate_config(config_path: Path) -> tuple[LMExperimentConfig, str]:
     """Validate the not-yet-stamped single run config against the shared torch-free LM
-    schema. `pd-jax-lm` is LM-ONLY (the SLURM/`jsp-train` path); the toy domains (TMS,
-    ResidMLP) run on CPU in-process via `pd-tms` / `pd-resid-mlp`, never here. A
-    hand-authored config must NOT carry `run_id` (minted at submit)."""
+    schema. `pd-lm` is LM-ONLY; the toy domains (TMS, ResidMLP) run on CPU in-process
+    via `pd-tms` / `pd-resid-mlp`, never here. A hand-authored config must NOT carry
+    `run_id` (minted at submit)."""
     raw = yaml.safe_load(config_path.read_text())
     assert "run_id" not in raw, f"{config_path}: run_id is minted at submit, omit it"
     target = raw.get("target", {})
     assert isinstance(target, dict), target
     assert "n_hidden" not in target and "d_embed" not in target, (
-        f"{config_path}: pd-jax-lm is LM-only; run TMS/ResidMLP toys on CPU via "
-        "pd-tms / pd-resid-mlp"
+        f"{config_path}: pd-lm is LM-only; run TMS/ResidMLP toys on CPU via pd-tms / pd-resid-mlp"
     )
     cfg = LMExperimentConfig(**raw)
     return cfg, cfg.run_name
@@ -167,9 +180,9 @@ def _build_workspace(
     group: str | None,
     tags: list[str],
 ) -> None:
-    """Materialize the snapshot as an immutable shared-FS checkout with both venvs, then
-    stamp the run identity (run_id, out_dir-if-absent, wandb group/tags) into the
-    workspace's single config yaml."""
+    """Materialize the snapshot as an immutable shared-FS checkout with the one CUDA
+    venv, then stamp the run identity (run_id, out_dir-if-absent, wandb group/tags) into
+    the workspace's single config yaml."""
     assert not workspace.exists(), f"workspace already exists: {workspace}"
     workspace.parent.mkdir(parents=True, exist_ok=True)
 
@@ -186,10 +199,21 @@ def _build_workspace(
     assert env_file.exists(), f".env with wandb credentials required: {env_file}"
     (workspace / ".env").write_bytes(env_file.read_bytes())
 
-    logger.info("torch venv: uv sync --all-packages --no-dev ...")
-    run(["uv", "sync", "--all-packages", "--no-dev", "--link-mode", "copy", "-q"], cwd=workspace)
-    logger.info("jax venv: make install-jax-cuda ...")
-    run(["make", "install-jax-cuda"], cwd=workspace)
+    logger.info("venv: uv sync --all-packages --no-dev --extra cuda ...")
+    run(
+        [
+            "uv",
+            "sync",
+            "--all-packages",
+            "--no-dev",
+            "--extra",
+            "cuda",
+            "--link-mode",
+            "copy",
+            "-q",
+        ],
+        cwd=workspace,
+    )
 
     _stamp_config(workspace / config_rel, run_id, group, tags)
 

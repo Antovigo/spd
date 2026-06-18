@@ -257,7 +257,7 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
 
     `update()` returns `None` before `start_frac` of training. Sources are clamped to
     `[0, 1]` after each step — the only implemented parameterization. (A sigmoid
-    parameterization was removed; see jax_single_pool/MIGRATION_HOLES.md to re-add it.)
+    parameterization was removed; see param_decomp/MIGRATION_HOLES.md to re-add it.)
     """
 
     @model_validator(mode="before")
@@ -269,7 +269,7 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
         if isinstance(data, dict) and "use_sigmoid_parameterization" in data:
             assert not data.pop("use_sigmoid_parameterization"), (
                 "use_sigmoid_parameterization was removed (clamp-only); see "
-                "jax_single_pool/MIGRATION_HOLES.md to re-add the sigmoid parameterization"
+                "param_decomp/MIGRATION_HOLES.md to re-add the sigmoid parameterization"
             )
         return data
 

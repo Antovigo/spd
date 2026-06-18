@@ -2,7 +2,7 @@
 
 The reference torch implementation for VPD paper readers — the one torch file left
 in the repo (the rest of the repo is torch-free; training is the JAX trainer in
-`param_decomp_jax/`). The method itself has zero dependencies on the `param_decomp`
+`param_decomp/`). The method itself has zero dependencies on the `param_decomp`
 package. The model-wiring entry points (`pile_4L.py` / `simplestories_2L.py`) were
 deleted with the torch `pretrain/` archs they imported; to run this, supply a target
 `nn.Module` + token loader and call `decompose(...)` directly.

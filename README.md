@@ -29,24 +29,24 @@ The `pd-*` commands are installed by `param-decomp-lab`. Each in-repo experiment
 self-contained script that reads a YAML and calls `optimize()`:
 
 ```bash
-pd-jax-lm    param_decomp_lab/experiments/lm/<wrapper>.yaml --nodes N
+pd-lm    param_decomp_lab/experiments/lm/<wrapper>.yaml --nodes N
 ```
 
-TMS and ResidualMLP now live only as JAX targets in `param_decomp_jax/jax_single_pool/`
+TMS and ResidualMLP now live only as JAX targets in `param_decomp/`
 (`tms.py`, `resid_mlp.py`); the torch experiment dirs were deleted.
 
-Training is the JAX single-pool trainer (`param_decomp_jax/jax_single_pool/`, entry point
-`jsp-train`), launched from the lab side via `pd-jax-lm`. A run is one self-contained YAML
+Training is the JAX single-pool trainer (`param_decomp/`, entry point
+`pd-train`), launched from the lab side via `pd-lm`. A run is one self-contained YAML
 (the `param_decomp_config` experiment schema). The torch trainer (`optimize()`, the torch
 `Metric` impls, `RunSink`) was retired and is preserved at git tag `torch-oracle`. See
-`param_decomp_jax/jax_single_pool/CLAUDE.md` and `SPEC.md` for the trainer.
+`param_decomp/CLAUDE.md` and `SPEC.md` for the trainer.
 
 ## Metrics
 
 Training losses are configured in `pd.loss_metrics` as a list of `{type: "<ClassName>",
 ...}` entries; eval metrics in `eval.metrics`. Both are validated by the torch-free
 `param_decomp_config` schema and computed by the JAX trainer
-(`param_decomp_jax/jax_single_pool/losses.py`, `slow_eval.py`).
+(`param_decomp/losses.py`, `slow_eval.py`).
 
 ## Packaging
 

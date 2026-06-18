@@ -4,7 +4,7 @@ run_name: jax-resid-mlp-1l-global
 # GlobalSharedMLPCiFn): ONE MLP over all sites jointly, mapping concat(site inputs) ->
 # concat(site logits), split back per-site in canonical order. Fully wired end-to-end:
 # GlobalMLPCIArch / GlobalMLPCIFn / init_global_mlp_ci_fn live in
-# jax_single_pool/ci_fn_mlp.py; config.toy_ci_arch builds the arch from this ci_config,
+# param_decomp/ci_fn_mlp.py; config.toy_ci_arch builds the arch from this ci_config,
 # config.CIFnArch admits it, and run_state.init_train_state dispatches it (replicated, via
 # llama8b_sharding.init_global_mlp_ci_fn_replicated). Runs on CPU via pd-resid-mlp.
 pd:

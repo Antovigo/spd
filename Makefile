@@ -1,4 +1,9 @@
 # setup
+# ONE venv for the whole workspace: the JAX trainer core (`param_decomp` + `pretrain` +
+# `vendored_jax`) is the root distribution and carries jax as a normal dependency, so a
+# single `uv sync --all-packages` installs core + config + lab into one `.venv`. The CPU
+# jax wheel is the base; the CUDA wheel is the `[cuda]` extra the per-run launch workspace
+# installs.
 .PHONY: install
 install:
 	uv sync --no-dev
@@ -8,53 +13,9 @@ install-lab:
 	uv sync --all-packages --no-dev
 
 .PHONY: install-dev
-install-dev: bridge-jax-into-main-venv
-	uv run --no-sync pre-commit install
-
-# `uv sync --all-packages` manages the main venv exclusively and strips anything not in
-# the workspace lock — including jax, which `param_decomp_jax` is NOT a member of. But the
-# lab JAX-run consumers (harvest/clustering `run_worker_jax.py`, the `JaxPDAdapter`) `import
-# jax` + `from jax_single_pool ...` and call `open_jax_run` / `run_metadata`, and `make
-# type` over them needs jax resolvable. So re-add the JAX runtime right after the sync:
-# jax/jaxlib CPU + the JAX trainer's own runtime deps (equinox/optax/jaxtyping/orbax —
-# orbax pulls pure-python absl/etils/tensorstore/...), all jax-pinned so nothing bumps jax;
-# then the editable `param_decomp_jax` source `--no-deps` (gives `jax_single_pool` /
-# `vendored_jax` without dragging in its pinned wandb/numpy/pyarrow that would downgrade
-# the main stack). The repo is torch-free; the production CUDA jax lives in the JAX
-# distribution's own venv (`make install-jax-cuda`).
-.PHONY: bridge-jax-into-main-venv
-bridge-jax-into-main-venv:
+install-dev:
 	uv sync --all-packages
-	uv pip install --no-deps "equinox==0.13.8" "optax==0.2.8" "jaxtyping==0.3.10" "beartype==0.22.2"
-	uv pip install "jax==0.10.1" "jaxlib==0.10.1" "orbax-checkpoint==0.12.0"
-	uv pip install --no-deps -e ./param_decomp_jax
-
-# The JAX distribution keeps its own venvs (CUDA wheels the CPU main venv doesn't carry).
-# Create-if-missing rather than --clear: on NFS a venv with files held open (e.g. by
-# an IDE's language server) cannot be deleted in place; `rm -rf` it manually if you
-# really want a from-scratch env.
-.PHONY: install-jax
-install-jax:
-	cd param_decomp_jax && ([ -x .venv/bin/python ] || \
-		( ! [ -e .venv ] || mv .venv .venv-stale-$$(date +%s); \
-		  uv venv .venv --python 3.13; rm -rf .venv-stale-* || true )) \
-		&& uv pip install -p .venv/bin/python -e ../param_decomp_config -e '.[dev]'
-
-.PHONY: install-jax-cuda
-install-jax-cuda:
-	cd param_decomp_jax && ([ -x .venv-cuda/bin/python ] || \
-		( ! [ -e .venv-cuda ] || mv .venv-cuda .venv-stale-$$(date +%s); \
-		  uv venv .venv-cuda --python 3.13; rm -rf .venv-stale-* || true )) \
-		&& uv pip install -p .venv-cuda/bin/python -e ../param_decomp_config -e '.[cuda]'
-
-.PHONY: test-jax
-test-jax:
-	cd param_decomp_jax && .venv/bin/python -m pytest jax_single_pool/tests/
-
-.PHONY: check-jax
-check-jax:
-	cd param_decomp_jax && .venv/bin/basedpyright jax_single_pool/
-
+	uv run --no-sync pre-commit install
 
 # special install for CI (GitHub Actions) that reduces disk usage and install time
 # 1. create a fresh venv with `--clear` -- this is mostly only for local testing of the CI install
@@ -90,22 +51,27 @@ check-pre-commit:
 
 # tests
 
+# `param_decomp/tests/` is the JAX trainer core suite (incl. the LM equivalence goldens);
+# `param_decomp_lab/{tests,experiments}/` the lab suites (the toy TMS/ResidMLP tests live
+# beside their models under experiments/).
+TEST_PATHS = param_decomp/tests/ param_decomp_lab/tests/ param_decomp_lab/experiments/
+
 .PHONY: test
 test:
-	uv run pytest param_decomp/tests/ param_decomp_lab/tests/ --testmon --durations 10
+	uv run pytest $(TEST_PATHS) --testmon --durations 10
 
 # Use min(4, nproc) for numprocesses. Any more and it slows down the tests.
 NUM_PROCESSES ?= $(shell nproc | awk '{print ($$1<4?$$1:4)}')
 
 .PHONY: test-all
 test-all:
-	uv run pytest param_decomp/tests/ param_decomp_lab/tests/ --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
+	uv run pytest $(TEST_PATHS) --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 
 COVERAGE_DIR=docs/coverage
 
 .PHONY: coverage
 coverage:
-	uv run pytest param_decomp/tests/ param_decomp_lab/tests/ --cov=param_decomp --cov=param_decomp_lab --runslow
+	uv run pytest $(TEST_PATHS) --cov=param_decomp --cov=param_decomp_lab --runslow
 	mkdir -p $(COVERAGE_DIR)
 	uv run python -m coverage report -m > $(COVERAGE_DIR)/coverage.txt
 	uv run python -m coverage html --directory=$(COVERAGE_DIR)/html/

@@ -1,6 +1,6 @@
 """ResidualMLP experiment config schema — torch-free.
 
-The JAX trainer reads this directly (`jax_single_pool.config`), the same way it reads
+The JAX trainer reads this directly (`param_decomp.config`), the same way it reads
 `TMSExperimentConfig`. Like TMS there is no HuggingFace/pretrain-cache weight source:
 the toy ResidualMLP target is pretrained from scratch, deterministically from
 `target.pretrain` (the `act_fn(coeffs·x) + x` read-off objective on the synthetic

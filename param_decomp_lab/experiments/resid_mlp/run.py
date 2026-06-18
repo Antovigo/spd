@@ -1,12 +1,12 @@
 """`pd-resid-mlp`: run a ResidualMLP parameter decomposition on CPU.
 
 The SPD/APD residual-stream toy lives lab-side and calls the generic core engine
-(`jax_single_pool.run.run_decomposition_training`) as a library. The target pretrains from
+(`param_decomp.run.run_decomposition_training`) as a library. The target pretrains from
 scratch in-process (the `act_fn(coeffs·x) + x` read-off objective), then decomposes through
 the same engine the LM uses, validating via the ground-truth identity-CI metric.
 
 These toys train in seconds; `pd-resid-mlp` runs synchronously on CPU in the main venv
-(no SLURM / `jsp-train` / CUDA). It mints its own `p-<8hex>` run id.
+(no SLURM / `pd-train` / CUDA). It mints its own `p-<8hex>` run id.
 """
 
 from pathlib import Path
@@ -18,19 +18,19 @@ import yaml
 from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax_single_pool.config import (
+
+from param_decomp.config import (
     ExperimentConfig,
     SharedAlgorithmConfig,
     convert_shared_algorithm_config,
     run_instance,
     toy_ci_arch,
 )
-from jax_single_pool.lm import SiteC
-from jax_single_pool.recon import build_recon_terms
-from jax_single_pool.run import run_decomposition_training
-from jax_single_pool.sharding import dp_mesh
-from jax_single_pool.train import TrainState
-
+from param_decomp.lm import SiteC
+from param_decomp.recon import build_recon_terms
+from param_decomp.run import run_decomposition_training
+from param_decomp.sharding import dp_mesh
+from param_decomp.train import TrainState
 from param_decomp_config.resid_mlp import ResidMLPExperimentConfig
 from param_decomp_lab.experiments.resid_mlp import model as resid_mlp
 from param_decomp_lab.infra.run_files import generate_run_id

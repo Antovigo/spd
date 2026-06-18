@@ -121,7 +121,7 @@ class PDConfig(BaseConfig):
 
     Flipping any field here changes what algorithm runs. Pair with `RuntimeConfig`
     (substrate), `Cadence` (when to emit) and `RunSink` (where output goes) when
-    running `jsp-train`.
+    running `pd-train`.
     """
 
     # --- General ---
@@ -241,7 +241,7 @@ class Cadence(BaseConfig):
 
     Held separately from `RunSink` so the sink only owns *where* output goes; `Cadence`
     owns *when* train logs and checkpoints fire. Eval timing lives on `EvalLoop`,
-    alongside the runtime objects it depends on. The `jsp-train` loop always checkpoints
+    alongside the runtime objects it depends on. The `pd-train` loop always checkpoints
     at the final step regardless of `save_every`.
     """
 

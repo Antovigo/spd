@@ -1,6 +1,6 @@
 """TMS (Toy Model of Superposition) experiment config schema — torch-free.
 
-The JAX trainer reads this directly (`jax_single_pool.config`), the same way it reads
+The JAX trainer reads this directly (`param_decomp.config`), the same way it reads
 `LMExperimentConfig`. Unlike the LM target there is no HuggingFace/pretrain-cache weight
 source: the tiny TMS target is pretrained from scratch, deterministically from
 `target.pretrain` (the original Anthropic `mean((|x| - relu_out)^2)` objective on the

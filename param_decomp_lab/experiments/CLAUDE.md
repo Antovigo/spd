@@ -1,11 +1,11 @@
 # `param_decomp_lab/experiments/`
 
 Experiment glue, torch-free. Training is JAX through the generic core engine
-(`jax_single_pool.run.run_decomposition_training`). LM runs go to SLURM via `jsp-train` /
-`pd-jax-lm`; the toy domains (TMS, ResidMLP) run on CPU in-process via `pd-tms` /
+(`param_decomp.run.run_decomposition_training`). LM runs go to SLURM via `pd-train` /
+`pd-lm`; the toy domains (TMS, ResidMLP) run on CPU in-process via `pd-tms` /
 `pd-resid-mlp`. The torch `build_target` bridge + the `pretrain/` dir were DELETED with the
 rest of torch: autointerp/clustering read a run's target topology from
-`jax_single_pool.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
+`param_decomp.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
 see `param_decomp_lab/adapters/jax_pd.py`.
 
 ## Toy domains (TMS, ResidMLP)
@@ -42,7 +42,7 @@ The `ExperimentConfig[T,D]` generic + `EvalConfig` + `WandbConfig` +
 experiments/
 ├── utils.py                 # EXPERIMENT_CONFIG_FILENAME
 ├── lm/
-│   ├── jax_launch.py        # pd-jax-lm: snapshot + shared-FS workspace + sbatch
+│   ├── jax_launch.py        # pd-lm: snapshot + shared-FS workspace + sbatch
 │   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
 │   └── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
 ├── tms/                     # pd-tms (CPU): model.py + run.py + configs/ + test_tms.py
@@ -80,10 +80,10 @@ target:
 
 `output_extract` (default `"logits"`) is the key/index used to pull the prediction
 tensor out of the model's forward output. The `model_class` strings are NOT imported by
-the JAX trainer — `jax_single_pool.config` only asserts the class-name suffix and routes
+the JAX trainer — `param_decomp.config` only asserts the class-name suffix and routes
 to its own vendored JAX arch (`pretrained` LlamaSimpleMLP -> the pretrain-cache loader,
-`hf_weights_in_vendored` Llama -> `vendored_jax`). They reference the deleted torch
-`pretrain/` module only as identifiers.
+`hf_weights_in_vendored` Llama -> `vendored_jax`). The dotted `model_class` is a stable
+identifier only, never imported.
 
 The path schemas (`topology/path_schemas.py`) cover the GPT-2 and `LlamaSimple*` archs —
 so `JaxPDAdapter`'s layer-description path is exercised by `kind: pretrained` runs (the

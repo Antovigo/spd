@@ -1,13 +1,13 @@
 """Locate a pretrained target's cache dir from its run id (torch-free).
 
-`jsp-pretrain` writes its weights to `PARAM_DECOMP_OUT_DIR/pretrain_cache/<project>-<run_id>/`
+`pd-pretrain-train` writes its weights to `PARAM_DECOMP_OUT_DIR/pretrain_cache/<project>-<run_id>/`
 (safetensors + `model_config.yaml`) — the layout the decomposition trainer's loader
-(`jax_single_pool.llama_simple_mlp.load_target_from_pretrain_cache`) reads, keyed by the
+(`param_decomp.llama_simple_mlp.load_target_from_pretrain_cache`) reads, keyed by the
 wandb run path `<entity>/<project>/<run_id>` in a `kind: pretrained` decomposition target
 spec. This is the read-side index: given a run id, find the cache and parse its config.
 
 The torch `PretrainRunInfo` (`torch-oracle:.../run_info.py`) additionally downloaded from
-wandb and loaded torch state dicts; both are gone — `jsp-pretrain` writes the cache
+wandb and loaded torch state dicts; both are gone — `pd-pretrain-train` writes the cache
 directly to shared FS at every save, so there is nothing to download, and the weights are
 loaded JAX-side by the decomposition trainer.
 """

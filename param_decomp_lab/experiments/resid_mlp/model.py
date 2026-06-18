@@ -35,10 +35,11 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from jax_single_pool.ci_fn import CIValues
-from jax_single_pool.llama8b import DecompVU, _site_out
-from jax_single_pool.lm import DecomposedModel, SiteC, SiteSpec
 from jaxtyping import Array, Float
+
+from param_decomp.ci_fn import CIValues
+from param_decomp.llama8b import DecompVU, _site_out
+from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 
 MLP_IN = "mlp_in"
 MLP_OUT = "mlp_out"

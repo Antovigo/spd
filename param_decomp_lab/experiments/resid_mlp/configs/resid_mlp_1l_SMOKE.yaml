@@ -1,8 +1,8 @@
-# ResidualMLP 1-layer SMOKE wrapper — jsp-train full-loop validation (pretrain + decompose
+# ResidualMLP 1-layer SMOKE wrapper — pd-train full-loop validation (pretrain + decompose
 # + ckpt + in-loop target-CI metric).
 run_name: jax-resid-mlp-1l-smoke
 # ResidualMLP 1-layer SMOKE PD decomposition — the clean recovers-identity regime
-# (d_mlp == n_features == d_embed, no superposition), tiny step count for a jsp-train
+# (d_mlp == n_features == d_embed, no superposition), tiny step count for a pd-train
 # smoke (full-loop composition-root validation: pretrain -> faith warmup -> step loop ->
 # checkpoint -> in-loop target-CI metric). 1 GPU / CPU.
 pd:

@@ -12,7 +12,8 @@ From the repository root:
 make install-dev
 ```
 
-This installs both workspace packages editably, so both imports are available:
+This installs all workspace packages editably into the one venv, so the imports are
+available:
 
 ```python
 import param_decomp
@@ -24,7 +25,7 @@ import param_decomp_lab
 The lab package owns the `pd-*` commands:
 
 ```bash
-pd-jax-lm     param_decomp_lab/experiments/lm/<wrapper>.yaml --nodes N
+pd-lm     param_decomp_lab/experiments/lm/<wrapper>.yaml --nodes N
 pd-harvest    path/to/harvest_slurm_config.yaml
 pd-autointerp <decomposition_id> --config path/to/autointerp_slurm_config.yaml --harvest_subrun_id h-YYYYMMDD_HHMMSS
 ```

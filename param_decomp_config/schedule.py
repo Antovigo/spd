@@ -1,4 +1,4 @@
-"""Schedule config and value lookup used by the `jsp-train` loop and PGD metrics."""
+"""Schedule config and value lookup used by the `pd-train` loop and PGD metrics."""
 
 from typing import Literal, Self
 

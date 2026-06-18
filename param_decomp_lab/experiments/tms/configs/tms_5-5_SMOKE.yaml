@@ -1,7 +1,7 @@
-# TMS 5->5 SMOKE wrapper — jsp-train full-loop validation (pretrain + decompose + ckpt).
+# TMS 5->5 SMOKE wrapper — pd-train full-loop validation (pretrain + decompose + ckpt).
 run_name: jax-tms-5-5-smoke
 # TMS 5->5 (non-superposed) PD decomposition SMOKE — the clean recovers-identity regime,
-# tiny step count for a jsp-train smoke (full-loop composition-root validation: pretrain →
+# tiny step count for a pd-train smoke (full-loop composition-root validation: pretrain →
 # faith warmup → step loop → checkpoint → in-loop target-CI metric). 1 GPU / CPU.
 pd:
   seed: 0

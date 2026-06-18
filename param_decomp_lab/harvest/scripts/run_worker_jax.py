@@ -4,7 +4,7 @@ bridge.
     python -m param_decomp_lab.harvest.scripts.run_worker_jax \
         --run_dir runs/p-761bc061 --n_batches 50 --batch_size 16
 
-The run is opened with `jax_single_pool.load_run.open_jax_run` (the reusable JAX
+The run is opened with `param_decomp.load_run.open_jax_run` (the reusable JAX
 "open a run for consumption" pattern); the frozen forward-only pass it exposes is
 turned into the SAME `HarvestBatch` the harvest accumulator consumes, fed to the SAME
 `Harvester`, and written via the SAME `HarvestRepo.save_results`. Downstream
@@ -26,10 +26,10 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
-from jax_single_pool.config import DataConfig
-from jax_single_pool.data import BatchSchedule, ShardServer, scan_shards
-from jax_single_pool.load_run import HarvestForward, LoadedJaxRun, open_jax_run
 
+from param_decomp.config import DataConfig
+from param_decomp.data import BatchSchedule, ShardServer, scan_shards
+from param_decomp.load_run import HarvestForward, LoadedJaxRun, open_jax_run
 from param_decomp.log import logger
 from param_decomp_lab.harvest.accumulator import Harvester
 from param_decomp_lab.harvest.config import HarvestConfig, ParamDecompHarvestConfig

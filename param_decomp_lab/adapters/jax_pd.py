@@ -2,8 +2,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import override
 
-from jax_single_pool.load_run import RunMetadata, run_metadata
-
+from param_decomp.load_run import RunMetadata, run_metadata
 from param_decomp_config.lm import LMExperimentConfig
 from param_decomp_lab.adapters.base import DecompositionAdapter
 from param_decomp_lab.autointerp.schemas import ModelMetadata
@@ -25,7 +24,7 @@ class JaxPDAdapter(DecompositionAdapter):
     """Autointerp/clustering adapter for a JAX single-pool run, read torch-free from its
     pinned config. Autointerp consumes harvest output plus run metadata only — no trained
     components — so the target topology (`n_blocks`, vocab, per-site `(name, C)`) comes
-    from `jax_single_pool.load_run.run_metadata` (config + pretrain-cache `model_config`,
+    from `param_decomp.load_run.run_metadata` (config + pretrain-cache `model_config`,
     no orbax restore); canonical layer descriptions render via the torch-free path schema."""
 
     def __init__(self, decomposition_id: str):

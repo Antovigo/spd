@@ -21,15 +21,12 @@ de-torched; the torch oracle lives at git tag `torch-oracle`). The one torch isl
 is `nano_param_decomp/` — a standalone single-file VPD reference impl for paper readers,
 excluded from `make type` and not imported by any package.
 
-**Bridge jax into the main venv.** The JAX trainer distribution (`param_decomp_jax/`)
-keeps its own venvs (`make install-jax` / `install-jax-cuda`; CUDA wheels the CPU main
-venv doesn't carry). But `param_decomp_jax` is NOT a uv-workspace member, so a bare
-`uv sync --all-packages` strips jax from the main `.venv`. The lab JAX-run consumers
-(`harvest`/`clustering` `run_worker_jax.py`, the `JaxPDAdapter`) `import jax` +
-`from jax_single_pool ...` and call `open_jax_run` / `run_metadata`, and `make type`
-over them needs jax resolvable. `make install-dev` handles this: it re-adds jax/jaxlib
-(CPU) + beartype + the editable `param_decomp_jax` source (`--no-deps`) into the main
-venv right after the sync. Use `make install-dev`, never a bare `uv sync`.
+**One venv.** There is a single `.venv` at the repo root, built by `make install-dev`
+(one `uv sync --all-packages` over the workspace + pre-commit). jax is a normal
+dependency of the root `param-decomp` distribution (CPU jax base); the cluster CUDA
+wheels come from a `[cuda]` extra (`uv sync --extra cuda`), which the per-run launch
+workspace installs. Use `make install-dev`, never a bare `uv sync` (it would skip the
+lab dev deps).
 
 ## Project overview
 
@@ -59,57 +56,57 @@ Three flat-layout distributions, deliberately split:
   loss/eval-metric configs, experiment YAML schemas). Depends only on pydantic, numpy,
   pyyaml, annotated-types — so non-torch consumers (e.g. the JAX repo) can validate the
   same YAML run configs without pulling torch/transformers/wandb. Keep it that way.
-- **`param-decomp`** (`param_decomp/`) — what's left of the core after the torch trainer
-  retirement AND the full de-torch: just `param_decomp.log` (the logger every consumer
-  uses) + a bare `__init__.py`. The torch `ComponentModel` / CI fns / sigmoids / masks /
-  loss metrics / `RunSink` / `RunBatch` protocols / `component_model_io` / `distributed` /
-  `decomposition_targets` are all gone from HEAD (preserved at git tag `torch-oracle`); a
-  JAX-native run loader returns as the #10 torch->jax adapter. Depends on config.
+- **`param-decomp`** (root: `param_decomp/` + sibling `pretrain/` + sibling
+  `vendored_jax/`) — the core: the JAX single-pool VPD trainer (`param_decomp/`: run.py,
+  lm.py, train.py, config.py, ci_fn.py, llama8b.py, … + the `param_decomp.log` logger
+  every consumer uses), the in-house target-LM pretrainer (`pretrain/`), and the
+  bit-parity vendored JAX archs (`vendored_jax/`). Carries jax as a dependency. The repo
+  root IS the uv workspace root; the other two are members. Depends on config.
 - **`param-decomp-lab`** (`param_decomp_lab/`) — team tooling. Experiment scripts, the
   post-processing pipelines, infra, lab-side helpers. Churns freely; depends on core +
   config.
 
 `make install-dev` syncs all three editably via the uv workspace in the root
-`pyproject.toml`. The `pd-*` console scripts all live in
-`param_decomp_lab/pyproject.toml`.
+`pyproject.toml` into the one `.venv`. The training/eval console scripts (`pd-train`,
+`pd-slow-eval`, `pd-pretrain-train`) live in the root `pyproject.toml`; the launcher and
+post-pipeline `pd-*` scripts live in `param_decomp_lab/pyproject.toml`.
 
 ## Training (JAX) <a id="training-jax"></a>
 
 **Training is JAX now.** The torch `Trainer` was retired from HEAD (the JAX single-pool
 trainer is faster and is what we run; the torch trainer is preserved as the *semantic
 oracle* at git tag `torch-oracle`). The pivot and its scope are documented in
-[`param_decomp_jax/jax_single_pool/TRANSITION.md`](param_decomp_jax/jax_single_pool/TRANSITION.md);
+[`param_decomp/TRANSITION.md`](param_decomp/TRANSITION.md);
 that's the settled plan, read it first.
 
-The trainer lives in `param_decomp_jax/jax_single_pool/` (its own distribution, own
-venv). The semantics source of truth is its `SPEC.md` (normative pseudocode + numbered
-invariants, grounded in the torch oracle — JAX **conforms** to it). For the real entry
-points, read `param_decomp_jax/jax_single_pool/CLAUDE.md` and `SPEC.md`. In one breath:
+The trainer lives in `param_decomp/` (the core of the root `param-decomp` distribution,
+the one venv). The semantics source of truth is its `SPEC.md` (normative pseudocode +
+numbered invariants, grounded in the torch oracle — JAX **conforms** to it). For the real
+entry points, read `param_decomp/CLAUDE.md` and `SPEC.md`. In one breath:
 
-- **`DecomposedModel`** (`jax_single_pool/lm.py`) — THE model interface: ordered `sites` +
+- **`DecomposedModel`** (`param_decomp/lm.py`) — THE model interface: ordered `sites` +
   pure fns (`clean_output` / `site_inputs` / `masked_output` / `weight_deltas`) over
   `(frozen, vu)` pytrees. Generic over vendored LM targets. There is one recon
   semantics: chunkwise masking through the suffix forward, KL on final logits.
-- **`jsp-train <config.yaml>`** (`jax_single_pool/run.py`) — the composition root and the
+- **`pd-train <config.yaml>`** (`param_decomp/run.py`) — the composition root and the
   only I/O layer. Reads the canonical `param_decomp_config` schema directly. Orbax
   sharded checkpoints; SIGTERM → save → SLURM requeue → resume.
-- **Launch from the lab side** via `pd-jax-lm <wrapper.yaml> --nodes N` (login-node
-  submission wrapper; runs in the torch lab venv, snapshots the tree to an immutable
-  shared-FS workspace, sbatches). `lab → param_decomp_jax` is a fine dependency; only
-  `param_decomp_jax → lab` is forbidden.
+- **Launch from the lab side** via `pd-lm <config.yaml> --nodes N` (login-node submission
+  wrapper; snapshots the tree to an immutable shared-FS workspace, installs the `[cuda]`
+  extra there, sbatches `pd-train`; `--local` runs the trainer inline single-process).
+  `lab → param_decomp` is a fine dependency; only `param_decomp → lab` is forbidden.
 
 ## Public API (consumer substrate)
 
-After the trainer's retirement AND the torch-run-loading drop, what `param_decomp/`
-still exposes is a thin substrate the torch **consumers** (harvest / autointerp /
-clustering / intruder) lean on. Import names from where they're defined — no
-package-level re-exports, `__init__.py` files are bare:
+Alongside the trainer, `param_decomp/` exposes a thin substrate the **consumers**
+(harvest / autointerp / clustering / intruder) lean on. Import names from where they're
+defined — no package-level re-exports, `__init__.py` files are bare:
 
 ```python
 from param_decomp_config.pd import Cadence, PDConfig, RuntimeConfig
 from param_decomp_config.losses import LossMetricConfig
 from param_decomp.log import logger
-from jax_single_pool.load_run import open_jax_run, run_metadata
+from param_decomp.load_run import open_jax_run, run_metadata
 ```
 
 - `PDConfig` — algorithm config: seed, CI fn, loss metrics, optimizers, decomposition
@@ -118,9 +115,9 @@ from jax_single_pool.load_run import open_jax_run, run_metadata
   `param_decomp_config`; only their torch `Metric` *impls* were dropped.)
 - `RuntimeConfig` — compute substrate: `autocast_bf16`, `device`, `dp`. Perturbs numerics
   without changing the algorithm.
-- `param_decomp.log` — the logger every consumer uses (the only thing left in
-  `param_decomp/`).
-- `jax_single_pool.load_run.{open_jax_run, run_metadata}` — the JAX consumer entry: a run
+- `param_decomp.log` — the logger every consumer uses (folded into the core trainer
+  package).
+- `param_decomp.load_run.{open_jax_run, run_metadata}` — the JAX consumer entry: a run
   opened for a forward pass (`open_jax_run`, restores orbax) or just its torch-free target
   topology (`run_metadata`: `n_blocks`/`vocab`/per-site `(name, C)` from config + cache, no
   restore). `JaxPDAdapter` keys autointerp/clustering metadata off `run_metadata`.
@@ -135,18 +132,24 @@ and returns JAX-native as the #10 torch->jax adapter.
   (`BaseConfig`, `Probability`, `runtime_cast`), `schedule`, `routing`, `ci_fn`,
   `decomposition_target`, `losses`, `pd`, `experiment`, `lm`, `eval_metrics`,
   `autointerp`.
-- `param_decomp/` — `log.py` only (see [Public API](#public-api)). The torch core
-  (component model, CI fns, sigmoids, masks, loss metrics, run-sink, run-batch protocols,
-  `distributed`, `decomposition_targets`) was dropped; it lives at git tag `torch-oracle`.
+- `param_decomp/` — the JAX trainer core (`run.py` / `lm.py` / `train.py` / `config.py` /
+  `ci_fn.py` / `llama8b.py` / `llama_simple_mlp.py` / `adversary.py` / `recon.py` /
+  `losses.py` / `checkpoint.py` / `sharding.py` / `eval.py` / `slow_eval.py` /
+  `load_run.py` + `log.py`) plus `configs/` (the self-contained run yamls) and `tests/`
+  (incl. the `tests/equivalence/` frozen torch↔JAX goldens). The torch oracle lives at
+  git tag `torch-oracle`.
+- `pretrain/` (repo-root sibling) — the in-house target-LM pretrainer (`pd-pretrain-train`):
+  trainable equinox archs whose `state_dict()` keys the decomposition loader reads.
+- `vendored_jax/` (repo-root sibling) — bit-parity JAX Llama / GPT-2 archs the trainer
+  decomposes.
 - `param_decomp_lab/adapters/` — `JaxPDAdapter`: torch-free autointerp/clustering metadata
-  for a JAX run, keyed off `jax_single_pool.load_run.run_metadata` (config + cache, no
+  for a JAX run, keyed off `param_decomp.load_run.run_metadata` (config + cache, no
   orbax restore). The torch `build_target` bridge was deleted with the rest of torch.
 - `param_decomp_lab/experiments/lm/` — `data.py` (the offline tokenize helper for
   `prestage_tokenized.py`), `prestage_tokenized.py` (HF text → int32 parquet shards for
-  the JAX trainer), `jax_launch.py` (`pd-jax-lm`). The torch `run.py::build_target` +
-  pretrain dir were deleted. The torch TMS and ResidualMLP experiment dirs were deleted —
-  those domains now live only as JAX targets (`param_decomp_jax/jax_single_pool/tms.py`,
-  `resid_mlp.py`).
+  the JAX trainer), `jax_launch.py` (`pd-lm`). The TMS and ResidualMLP domains now live
+  as lab experiments under `param_decomp_lab/experiments/{tms,resid_mlp}/`
+  (`pd-tms` / `pd-resid-mlp`), calling the core engine as a library.
 - `param_decomp_lab/{harvest,autointerp,clustering,investigate}/`
   — post-pipeline stages, each with its own CLAUDE.md.
 - `param_decomp_lab/postprocess/` — orchestrates the post-pipeline stages.
@@ -176,7 +179,7 @@ Every artifact for a decomposition lives under one dir per run:
 
 ```
 PARAM_DECOMP_OUT_DIR/runs/<run_id>/
-  config.yaml                # the single self-contained run config (jsp-train reads it; resume byte-compares)
+  config.yaml                # the single self-contained run config (pd-train reads it; resume byte-compares)
   ckpts/<step>/...           # orbax sharded checkpoints (JAX trainer)
   metrics.jsonl              # local logs
   harvest/h-*/...            # pd-harvest output
@@ -197,13 +200,11 @@ correct default; check `echo $PARAM_DECOMP_OUT_DIR` if outputs land somewhere un
 
 | Command | Purpose |
 |---|---|
-| `make install-dev` | All workspace packages + dev deps + pre-commit, and bridge jax into the main venv (see [Environment](#environment)) |
+| `make install-dev` | All workspace packages + dev deps + pre-commit, into the one `.venv` (see [Environment](#environment)) |
 | `make install` | Core only |
 | `make install-lab` | Core + lab, no dev deps |
-| `make install-jax` / `install-jax-cuda` | The JAX trainer distribution's own venv (`param_decomp_jax/.venv`); CUDA wheels for the cluster |
-| `make check-jax` / `test-jax` | basedpyright / pytest the JAX distribution (in its own venv) |
 | `make check` | basedpyright + ruff lint + format |
-| `make type` | basedpyright |
+| `make type` | basedpyright over the whole workspace (core + config + lab) |
 | `make format` | ruff lint + format |
 | `make test` | Tests excluding slow |
 | `make test-all` | All tests |
@@ -212,19 +213,22 @@ Run a single test: `python -m pytest path/to/test_file.py::test_name`.
 
 ## CLI entry points
 
-All declared in `param_decomp_lab/pyproject.toml`.
-
-The torch training drivers (`pd-tms` / `pd-resid-mlp` / `pd-lm` / `pd-lm-layerwise`)
-were retired with the torch trainer; the oracle lives at git tag `torch-oracle`.
-Training is now `jsp-train` (JAX), submitted via `pd-jax-lm`.
+The core training/eval scripts (`pd-train`, `pd-slow-eval`, `pd-pretrain-train`) are
+declared in the root `pyproject.toml`; the launchers and post-pipeline scripts in
+`param_decomp_lab/pyproject.toml`. Training is `pd-train` (JAX), launched via `pd-lm`.
 
 | Command | Entry point | Purpose |
 |---|---|---|
-| `pd-jax-lm` | `experiments/lm/jax_launch.py` | Submit a JAX `jsp-train` run: snapshot ref + shared-FS workspace + sbatch |
+| `pd-train` | `param_decomp/run.py` | The core JAX decomposition trainer (composition root; run inside a launch workspace) |
+| `pd-slow-eval` | `param_decomp/slow_eval.py` | JAX-native offline slow (plot) eval over a checkpoint |
+| `pd-pretrain-train` | `pretrain/train.py` | The core in-house target-LM pretrainer |
+| `pd-lm` | `experiments/lm/jax_launch.py` | Launch a `pd-train` run: snapshot ref + shared-FS workspace + sbatch (`--local` runs inline) |
+| `pd-pretrain` | `experiments/lm/pretrain/jax_launch.py` | Launch a `pd-pretrain-train` run (`--local` runs inline) |
+| `pd-tms` / `pd-resid-mlp` | `experiments/{tms,resid_mlp}/run.py` | The CPU toy decomposition CLIs |
 | `pd-harvest` | `harvest/scripts/run_slurm_cli.py` | Submit harvest SLURM job |
 | `pd-autointerp` | `autointerp/scripts/run_slurm_cli.py` | Submit autointerp SLURM job |
+| `pd-clustering` / `pd-cluster-merge` / `pd-cluster-distances` | `clustering/scripts/` | Clustering ensemble / merge / consensus distances |
 | `pd-postprocess` | `postprocess/cli.py` | Unified postprocessing pipeline |
-| `pd-cluster-merge` | `clustering/scripts/run_merge.py` | Merge from a membership snapshot (CPU only) |
 | `pd-intruder` | `harvest/scripts/run_intruder_slurm_cli.py` | Submit intruder eval job |
 | `pd-investigate` | `investigate/scripts/run_slurm_cli.py` | Submit agent-investigation job |
 
