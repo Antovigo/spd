@@ -175,6 +175,12 @@ class MetricsSink:
                 resume="allow",
                 config=wandb_config,
             )
+            # Persist the run's pinned config.yaml as a downloadable wandb run file
+            # (parity with the torch trainer's init_pd_run -> wandb.save), not just the
+            # flattened wandb.config dict. Pinned to run_dir before train() / wandb.init.
+            config_yaml = cfg.run_dir / "config.yaml"
+            assert config_yaml.exists(), config_yaml
+            wandb.save(str(config_yaml), base_path=str(cfg.run_dir), policy="now")
             # slow_eval/* rides a dedicated step axis (torch convention,
             # infra/wandb.py): pd-offline-eval logs those keys retroactively into
             # this run and CANNOT pass step= (wandb silently drops writes behind
