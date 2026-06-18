@@ -35,7 +35,7 @@ from jax_single_pool.adversary import (
     sources_adam_ascend_project,
 )
 from jax_single_pool.ci_fn import CIFn, CIValues
-from jax_single_pool.ci_fn_mlp import LayerwiseMLPCIFn
+from jax_single_pool.ci_fn_mlp import GlobalMLPCIFn, LayerwiseMLPCIFn
 from jax_single_pool.lm import DecomposedModel
 from jax_single_pool.losses import (
     annealed_pnorm,
@@ -54,10 +54,10 @@ from jax_single_pool.recon import (
 )
 from param_decomp_config.losses import AdamPGDConfig
 
-AnyCIFn = CIFn | LayerwiseMLPCIFn
-"""The two CI-fn families: the shared-transformer (`ci_fn.py`, `expects_axes=("sequence",)`)
-and the layerwise per-site MLP (`ci_fn_mlp.py`, `expects_axes=()`). Both expose
-`__call__(site_inputs) -> CIValues` + `expects_axes`, so the generic step is agnostic."""
+AnyCIFn = CIFn | LayerwiseMLPCIFn | GlobalMLPCIFn
+"""The CI-fn families: the shared-transformer (`ci_fn.py`, `expects_axes=("sequence",)`),
+the layerwise per-site MLP and the global shared MLP (`ci_fn_mlp.py`, `expects_axes=()`).
+All expose `__call__(site_inputs) -> CIValues` + `expects_axes`, so the step is agnostic."""
 
 COMPUTE_DT = jnp.bfloat16
 

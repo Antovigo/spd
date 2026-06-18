@@ -19,12 +19,13 @@ from jaxtyping import Array, PRNGKeyArray
 
 from jax_single_pool.adversary import init_sources_adam_state
 from jax_single_pool.ci_fn import CIArch
-from jax_single_pool.ci_fn_mlp import MLPCIArch
+from jax_single_pool.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
 from jax_single_pool.config import DataConfig, ExperimentConfig
 from jax_single_pool.llama8b_sharding import (
     init_ci_fn_sharded,
     init_decomp_vu_replicated,
     init_decomp_vu_sharded,
+    init_global_mlp_ci_fn_replicated,
     init_layerwise_mlp_ci_fn_replicated,
     init_sources_sharded,
 )
@@ -98,6 +99,9 @@ def init_train_state(
         case MLPCIArch():
             components = init_decomp_vu_replicated(lm.sites, init_key, mesh)
             ci_fn = init_layerwise_mlp_ci_fn_replicated(cfg.ci_fn, lm.sites, ci_key, mesh)
+        case GlobalMLPCIArch():
+            components = init_decomp_vu_replicated(lm.sites, init_key, mesh)
+            ci_fn = init_global_mlp_ci_fn_replicated(cfg.ci_fn, lm.sites, ci_key, mesh)
         case CIArch():
             components = init_decomp_vu_sharded(lm.sites, init_key, mesh)
             ci_fn = init_ci_fn_sharded(cfg.ci_fn, lm.sites, ci_key, mesh)

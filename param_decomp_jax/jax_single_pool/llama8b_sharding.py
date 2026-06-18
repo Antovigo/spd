@@ -34,7 +34,14 @@ from jaxtyping import Array, PRNGKeyArray
 
 from jax_single_pool.adversary import init_persistent_sources
 from jax_single_pool.ci_fn import CIArch, CIFn, init_ci_fn
-from jax_single_pool.ci_fn_mlp import LayerwiseMLPCIFn, MLPCIArch, init_layerwise_mlp_ci_fn
+from jax_single_pool.ci_fn_mlp import (
+    GlobalMLPCIArch,
+    GlobalMLPCIFn,
+    LayerwiseMLPCIFn,
+    MLPCIArch,
+    init_global_mlp_ci_fn,
+    init_layerwise_mlp_ci_fn,
+)
 from jax_single_pool.llama8b import DecompVU, Target, init_decomp_vu
 from jax_single_pool.lm import SiteSpec
 from jax_single_pool.sharding import dp_mesh
@@ -111,6 +118,16 @@ def init_layerwise_mlp_ci_fn_replicated(
     replicating costs nothing (same rationale as `init_decomp_vu_replicated`)."""
     repl = NamedSharding(mesh, P())
     init = partial(init_layerwise_mlp_ci_fn, arch, sites)
+    return jax.jit(init, out_shardings=repl)(key)
+
+
+def init_global_mlp_ci_fn_replicated(
+    arch: GlobalMLPCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray, mesh: Mesh
+) -> GlobalMLPCIFn:
+    """REPLICATED global (shared-over-all-sites) MLP CI fn init — the toy path; the one
+    shared MLP is tiny so replicating costs nothing (mirrors the layerwise variant)."""
+    repl = NamedSharding(mesh, P())
+    init = partial(init_global_mlp_ci_fn, arch, sites)
     return jax.jit(init, out_shardings=repl)(key)
 
 

@@ -35,11 +35,15 @@ import yaml
 
 from jax_single_pool import llama_simple_mlp
 from jax_single_pool.ci_fn import CIArch
-from jax_single_pool.ci_fn_mlp import MLPCIArch
+from jax_single_pool.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
 from jax_single_pool.llama8b import SITE_NAME_PATTERN, canonical_site_cs
 from jax_single_pool.lm import SiteC
 from jax_single_pool.recon import build_recon_terms
-from param_decomp_config.ci_fn import GlobalSharedTransformerCiFnConfig, LayerwiseCiConfig
+from param_decomp_config.ci_fn import (
+    GlobalSharedMlpCiConfig,
+    GlobalSharedTransformerCiFnConfig,
+    LayerwiseCiConfig,
+)
 from param_decomp_config.eval_metrics import (
     CEandKLLossesConfig,
     CI_L0Config,
@@ -63,7 +67,7 @@ from param_decomp_config.losses import PGDReconLossConfig
 from param_decomp_config.pd import AnyLossMetricConfig, OptimizerConfig
 from param_decomp_config.schedule import ScheduleConfig
 
-CIFnArch = CIArch | MLPCIArch
+CIFnArch = CIArch | MLPCIArch | GlobalMLPCIArch
 
 
 class TargetSites(Protocol):
@@ -320,6 +324,21 @@ def layerwise_mlp_ci_arch(cfg: "SchemaExperimentConfig[Any, Any]") -> MLPCIArch:
     assert ci.fn_type == "mlp", f"layerwise CI fn must be fn_type=mlp, got {ci.fn_type}"
     assert ci.hidden_dims, "layerwise MLP CI fn needs at least one hidden layer"
     return MLPCIArch(hidden_dims=tuple(ci.hidden_dims))
+
+
+def toy_ci_arch(cfg: "SchemaExperimentConfig[Any, Any]") -> CIFnArch:
+    """Extract the MLP CI-fn arch for a toy run: the layerwise per-site MLP
+    (`mode=layerwise, fn_type=mlp`) or the global shared MLP (`mode=global,
+    fn_type=global_shared_mlp`). Public so the lab toy providers reuse the exact dispatch."""
+    ci = cfg.pd.ci_config
+    match ci:
+        case LayerwiseCiConfig():
+            return layerwise_mlp_ci_arch(cfg)
+        case GlobalSharedMlpCiConfig():
+            assert ci.hidden_dims, "global_shared_mlp CI fn needs at least one hidden layer"
+            return GlobalMLPCIArch(hidden_dims=tuple(ci.hidden_dims))
+        case _:
+            raise AssertionError(f"toy CI fn must be layerwise mlp or global_shared_mlp, got {ci}")
 
 
 def _assert_cosine_to_tenth(schedule: ScheduleConfig, who: str) -> None:

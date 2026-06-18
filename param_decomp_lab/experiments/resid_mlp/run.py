@@ -22,8 +22,8 @@ from jax_single_pool.config import (
     ExperimentConfig,
     SharedAlgorithmConfig,
     convert_shared_algorithm_config,
-    layerwise_mlp_ci_arch,
     run_instance,
+    toy_ci_arch,
 )
 from jax_single_pool.lm import SiteC
 from jax_single_pool.recon import build_recon_terms
@@ -98,7 +98,7 @@ def _assemble(
         remat_recon_forwards=cfg.runtime.remat_recon_forwards,
         vu_optimizer=shared.vu_optimizer,
         ci_optimizer=shared.ci_optimizer,
-        ci_fn=layerwise_mlp_ci_arch(cfg),
+        ci_fn=toy_ci_arch(cfg),
         faith_warmup=shared.faith_warmup,
         cadence=shared.cadence,
         eval=None,

@@ -90,12 +90,12 @@ from the canonical schema and calls `run_decomposition_training`). They are posi
 CI-fn arch, the allowed exception) stays in the core: `LayerwiseMLPCIFn` (`fn_type=mlp`,
 `expects_axes=()`, one independent MLP per site mapping `site_input [B,d_in] -> [B,C]`) plus
 the new `GlobalMLPCIFn` (`fn_type=global_shared_mlp`, one shared MLP over all sites jointly,
-concat/split in canonical site order) — `run_state.init_train_state` dispatches CI-fn
-construction on `cfg.ci_fn` (`CIArch` transformer vs `MLPCIArch`) and uses replicated (not
-C-sharded) V/U + CI for the tiny toys. **GlobalMLPCIArch dispatch into `init_train_state` /
-`config.CIFnArch` / `llama8b_sharding` is a remaining follow-up** (the building blocks exist
-+ are unit-tested; the layerwise path is fully wired). Harvest / slow-eval / export over the
-toys are NOT wired (`load_run.build_target` / `run_metadata` are LM-only).
+concat/split in canonical site order). `run_state.init_train_state` dispatches CI-fn
+construction on `cfg.ci_fn` (`CIArch` transformer / `MLPCIArch` layerwise / `GlobalMLPCIArch`
+global) and uses replicated (not C-sharded) V/U + CI for the tiny toys; `config.CIFnArch`
+admits all three and `config.toy_ci_arch` builds the layerwise / global arch from the toy
+ci_config (validated end-to-end on CPU via `pd-resid-mlp`). Harvest / slow-eval / export over
+the toys are NOT wired (`load_run.build_target` / `run_metadata` are LM-only).
 
 ## Invariants with sharp teeth (the ones that have actually bitten)
 

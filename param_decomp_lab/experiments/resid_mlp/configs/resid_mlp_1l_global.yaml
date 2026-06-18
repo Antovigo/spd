@@ -2,18 +2,11 @@
 run_name: jax-resid-mlp-1l-global
 # Identical to resid_mlp_1l.yaml except the CI fn is the global MLP (torch
 # GlobalSharedMLPCiFn): ONE MLP over all sites jointly, mapping concat(site inputs) ->
-# concat(site logits). The building blocks live in jax_single_pool/ci_fn_mlp.py
-# (GlobalMLPCIArch / GlobalMLPCIFn / init_global_mlp_ci_fn) and the canonical schema
-# already expresses this CI fn (mode: global, fn_type: global_shared_mlp).
-#
-# TODO(lab): wiring this config end-to-end needs two off-limits changes that this PR
-# could not make:
-#   1. run_state.init_train_state CI-fn dispatch: add a `case GlobalMLPCIArch():` arm
-#      (next to MLPCIArch / CIArch) building init_global_mlp_ci_fn (+ a replicated
-#      wrapper in llama8b_sharding.py, mirroring init_layerwise_mlp_ci_fn_replicated).
-#   2. experiments/resid_mlp/run.py: build a GlobalMLPCIArch from the global ci_config
-#      (its current `layerwise_mlp_ci_arch(cfg)` asserts fn_type=mlp), and config.py's
-#      CIFnArch union must admit GlobalMLPCIArch.
+# concat(site logits), split back per-site in canonical order. Fully wired end-to-end:
+# GlobalMLPCIArch / GlobalMLPCIFn / init_global_mlp_ci_fn live in
+# jax_single_pool/ci_fn_mlp.py; config.toy_ci_arch builds the arch from this ci_config,
+# config.CIFnArch admits it, and run_state.init_train_state dispatches it (replicated, via
+# llama8b_sharding.init_global_mlp_ci_fn_replicated). Runs on CPU via pd-resid-mlp.
 pd:
   seed: 0
   n_mask_samples: 1

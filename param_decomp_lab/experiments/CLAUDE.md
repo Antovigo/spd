@@ -26,10 +26,10 @@ The TMS and ResidualMLP toys are LAB experiments that call the core engine as a 
 - `configs/*.yaml` — the canonical `param_decomp_config.{tms,resid_mlp}` schema (TMS: 5-2 /
   40-10 / the `-id` deeper variants; ResidMLP: 1l/2l/3l + the global-CI variant).
 
-TMS deeper variant (`n_hidden_layers>0`, the `-id` configs) + ResidMLP `global` CI arch are
-restored in `model.py` / `ci_fn_mlp.py`; the `global` arch's dispatch into the core
-`init_train_state` is a remaining wiring follow-up (the layerwise path is fully wired). Toy
-harvest / autointerp / clustering is NOT yet wired (`load_run` is LM-only).
+TMS deeper variant (`n_hidden_layers>0`, the `-id` configs) + the ResidMLP `global` CI arch
+(`fn_type=global_shared_mlp`) are restored and wired end-to-end (the global arch dispatches
+through the core `init_train_state` via `config.toy_ci_arch`). Toy harvest / autointerp /
+clustering is NOT yet wired (`load_run` is LM-only) — the remaining Phase-3 bucket.
 
 ## Layout
 
