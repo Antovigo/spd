@@ -63,8 +63,13 @@ Intentional drops (confirm scope, no re-add planned this push):
   embedding dispatch has no JAX path; folds into the deferred eqx-auto-decompose (#11).
 - **`identity_insertion` / `identity_decomposition_targets`** — refused via assert; config
   field retained but inert.
-- **LM-path component weight tying (`tie_component_weights`)** — refused via
-  `assert tied_weights is None` on the LM path (TMS/ResidMLP keep embedding ties).
+- **LM-path component weight tying (`tie_component_weights`)** — NOT a lost capability;
+  **obviated by the JAX design.** Torch tied two SEPARATE component decompositions
+  post-init (`tgt.U/V = src.V.T/U.T`) *because* it decomposed tied target modules as
+  independent sites. JAX carries the target's native tying inside the vendored arch
+  (`wte`↔`lm_head`) and decomposes each UNIQUE matrix once as a single site — so there is
+  nothing to re-tie. `assert tied_weights is None` enforces this; the config field is dead
+  and removable.
 - **`ci_sigmoids` registry** — only `leaky_hard` (split lower/upper) survives; `normal` /
   `hard` / standalone `leaky_hard` / `swish_hard` are unreachable schema literals.
 - **`mlp_scalar` CI-fn arch** — torch's scalar `get_component_acts(x)=x@V` couples CI-fn
@@ -94,3 +99,24 @@ Benign mechanism changes (no behavior risk):
 The imp-min entropy term carries a `log2(batch·seq)` coupling — a per-token-batch
 artifact. A token-count-invariant reparameterization would remove the (currently
 ignored) batch sensitivity. See `project_impmin_scaling` memory.
+
+## PPGD source sigmoid parameterization (REMOVED — how to re-add)
+
+The torch PersistentPGD adversary could read the adversarial mask from its sources two
+ways: **clamp** (sources ARE the [0,1] mask, projected via clamp after each ascent — the
+only implemented JAX path, SPEC S13/S15) or **sigmoid** (sources are unconstrained,
+`mask = sigmoid(source)`). The `use_sigmoid_parameterization` config option for the sigmoid
+form was never ported and has now been **removed** from the schema
+(`PersistentPGDReconLossConfig`); a `model_validator(mode="before")` strips it from stored
+run configs (all carried `false`) so they still load, and rejects `true`.
+
+To re-add it (est. ~1 day), all in `adversary.py`:
+1. init persistent sources **unconstrained** (not `U[0,1]`) — e.g. zeros (`sigmoid(0)=0.5`).
+2. materialize `mask = jax.nn.sigmoid(source)` wherever sources become masks (today the
+   source is used directly / clamped).
+3. drop the `[0,1]` clamp-project in `sources_adam_ascend_project` (the sigmoid bounds the
+   mask; ascent now moves unconstrained params, grad flows through the sigmoid).
+4. handle the fused final source step (SPEC S14) + the trailing weight-delta channel under
+   the new mapping; amend SPEC S13–S15 with the sigmoid variant; add a parity test.
+Re-introduce the config field (or a `source_parameterization: clamp|sigmoid` enum) at that
+point and delete the strip-on-load shim once no stored config carries the old field.

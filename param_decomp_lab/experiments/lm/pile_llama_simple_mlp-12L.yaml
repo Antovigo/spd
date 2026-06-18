@@ -76,7 +76,6 @@ pd:
           fn_type: constant
       scope:
         type: bsc
-      use_sigmoid_parameterization: false
       n_warmup_steps: 2
     - type: FaithfulnessLoss
       coeff: 10000000.0

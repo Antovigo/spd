@@ -98,7 +98,6 @@ pd:
         fn_type: constant
     scope:
       type: broadcast_across_batch
-    use_sigmoid_parameterization: false
     start_frac: 0.0
 cadence:
   train_log_every: 20

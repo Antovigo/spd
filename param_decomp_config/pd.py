@@ -175,8 +175,10 @@ class PDConfig(BaseConfig):
 
     tied_weights: list[tuple[str, str]] | None = Field(
         default=None,
-        description="Pairs (src, tgt) of component module names whose weights should be tied. "
-        "After init, tgt's U/V are set to src's V.T / U.T. Ties make training nondeterministic.",
+        description="DEAD on the JAX path (refused via `assert tied_weights is None`). Component "
+        "weight tying is obviated: JAX decomposes each unique matrix once and the vendored arch "
+        "carries the target's native tying (e.g. wte<->lm_head), so there is nothing to re-tie. "
+        "Torch needed this only because it decomposed tied target modules as separate sites.",
     )
 
     loss_metrics: list[AnyLossMetricConfig] = Field(

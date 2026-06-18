@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from jax_single_pool.config import (
     DataConfig,
@@ -120,8 +121,10 @@ def test_unsupported_settings_refuse():
             ],
         ),
     )
-    with pytest.raises(AssertionError):
-        build_experiment_config(LMExperimentConfig(**sigmoid_ppgd))
+    # use_sigmoid_parameterization was removed (clamp-only); the strip-on-load shim
+    # accepts False (stored configs) but rejects True at config construction.
+    with pytest.raises(ValidationError):
+        LMExperimentConfig(**sigmoid_ppgd)
 
     non_site_target = dict(
         raw,

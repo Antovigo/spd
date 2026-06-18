@@ -14,6 +14,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
+    model_validator,
 )
 
 from param_decomp_config.base import BaseConfig, Probability
@@ -254,15 +255,27 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
     """Persistent-PGD recon loss: adversarial mask sources persist across train steps,
     routed to all layers every forward.
 
-    `update()` returns `None` before `start_frac` of training. Under
-    `use_sigmoid_parameterization=True` sources are unconstrained and read via sigmoid;
-    otherwise sources are clamped to `[0, 1]` after each step.
+    `update()` returns `None` before `start_frac` of training. Sources are clamped to
+    `[0, 1]` after each step — the only implemented parameterization. (A sigmoid
+    parameterization was removed; see jax_single_pool/MIGRATION_HOLES.md to re-add it.)
     """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_use_sigmoid_parameterization(cls, data: object) -> object:
+        # Shared-storage shim: stored run configs carry `use_sigmoid_parameterization`
+        # (always False — clamp was the only implemented path). The field is removed; strip
+        # it so those configs still load. A True value was never supported -> reject.
+        if isinstance(data, dict) and "use_sigmoid_parameterization" in data:
+            assert not data.pop("use_sigmoid_parameterization"), (
+                "use_sigmoid_parameterization was removed (clamp-only); see "
+                "jax_single_pool/MIGRATION_HOLES.md to re-add the sigmoid parameterization"
+            )
+        return data
 
     type: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
     optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
     scope: PersistentPGDSourceScope
-    use_sigmoid_parameterization: bool = False
     n_warmup_steps: NonNegativeInt = Field(
         default=0,
         description=(

@@ -290,7 +290,6 @@ def _assert_supported_persistent(cfg: PersistentPGDReconLossConfig) -> None:
     assert isinstance(cfg.scope, SCScope | BSCScope), (
         f"persistent scope {cfg.scope} unsupported (sc/bsc only)"
     )
-    assert not cfg.use_sigmoid_parameterization, cfg
     optimizer = cfg.optimizer
     assert isinstance(optimizer, AdamPGDConfig), optimizer
     schedule = optimizer.lr_schedule
