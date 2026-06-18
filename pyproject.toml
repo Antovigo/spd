@@ -96,6 +96,7 @@ include = ["param_decomp", "param_decomp_config", "param_decomp_lab"]
 exclude = [
     "**/wandb/**",
     "**/_scratch/**",
+    "**/node_modules/**",
     "nano_param_decomp",
 ]
 # Resolve (don't type-check) the JAX distribution: lab consumes it through the
