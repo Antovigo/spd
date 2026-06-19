@@ -20,13 +20,18 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 
-def init_distributed() -> bool:
-    """Bring up `jax.distributed` under SLURM. No-op (False) off SLURM.
+def init_distributed(dp: int | None) -> bool:
+    """Bring up `jax.distributed` iff `dp` is set. Distributedness is config-driven
+    (`runtime.dp`), NEVER inferred from ambient SLURM env — `SLURM_PROCID` is present in
+    every process on a SLURM box (incl. a pytest worker), so sniffing it would wrongly
+    fire `jax.distributed.initialize` mid-test.
 
-    The cluster recipe (from the spike): all GPUs visible per task
-    (`--gres=gpu:8`), each process claims `local_device_ids=[SLURM_LOCALID]`.
+    `dp is None` → single device, no-op (return False). Otherwise the cluster recipe (from
+    the spike): all GPUs visible per task (`--gres=gpu:8`), each process claims
+    `local_device_ids=[SLURM_LOCALID]`, and the realized world size must equal `dp`. SLURM
+    env is read ONLY for the rank info, once `dp` has decided we're distributed.
     """
-    if "SLURM_PROCID" not in os.environ:
+    if dp is None:
         return False
     local_id = int(os.environ["SLURM_LOCALID"])
     n_visible = len(os.environ.get("CUDA_VISIBLE_DEVICES", "").split(","))
@@ -36,6 +41,10 @@ def init_distributed() -> bool:
         f"--ntasks-per-node=<gpus-per-node>"
     )
     jax.distributed.initialize(local_device_ids=[local_id])
+    assert jax.process_count() == dp, (
+        f"runtime.dp={dp} != realized world size {jax.process_count()} — the config's "
+        f"declared world size must match the launch topology (nodes × 8)"
+    )
     return True
 
 

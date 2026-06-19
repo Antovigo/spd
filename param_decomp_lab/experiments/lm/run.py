@@ -16,11 +16,11 @@ Multi-process: launched one process per GPU under SLURM (`init_distributed`); ev
 process computes the same global schedule and contributes its local batch slice.
 """
 
-import argparse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import fire
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -338,19 +338,17 @@ def _pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
         copy.write_text(source.read_text())
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("config", type=Path)
-    args = ap.parse_args()
+def main(config: Path) -> None:
+    config = Path(config)
+    built, raw_cfg = load_config(config)
 
     install_sigterm_flag()
-    init_distributed()
+    init_distributed(built.runtime.dp)
     # Harden the cold-cache HF weight load against the 8N-rank startup burst before any
     # per-rank Hub call (no-op when huggingface_hub is absent / cache is pre-warmed).
     configure_hf_http_retries()
     mesh = dp_mesh()
 
-    built, raw_cfg = load_config(args.config)
     if built.run.resume_provenance is not None:
         assert_finetune_structural_compat(built, built.run.resume_provenance)
 
@@ -360,7 +358,7 @@ def main() -> None:
     if is_main:
         cache_dir.mkdir(parents=True, exist_ok=True)
         built.run.run_dir.mkdir(parents=True, exist_ok=True)
-        _pin_config_copy(built.run.run_dir, "config.yaml", args.config)
+        _pin_config_copy(built.run.run_dir, "config.yaml", config)
         print(f"persistent XLA compilation cache: {cache_dir}", flush=True)
         site_summary = " ".join(f"{s.name}:C{s.C}" for s in built.target.sites)
         assert isinstance(built.data, DataConfig)
@@ -382,5 +380,9 @@ def main() -> None:
         jax.distributed.shutdown()
 
 
+def cli() -> None:
+    fire.Fire(main)
+
+
 if __name__ == "__main__":
-    main()
+    cli()

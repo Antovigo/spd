@@ -133,8 +133,10 @@ def main() -> None:
     ap.add_argument("--sites_per_chunk", type=int, default=3)
     ap.add_argument("--recon_coeff", type=float, default=0.5)
     ap.add_argument("--seq", type=int, default=2048)
+    ap.add_argument("--dp", type=int, default=None,
+                    help="distributed world size (nodes×8); omit for single-device")  # fmt: skip
     args = ap.parse_args()
-    init_distributed()
+    init_distributed(args.dp)
     mesh = dp_mesh()
     ndev = mesh.devices.size
     is0 = jax.process_index() == 0

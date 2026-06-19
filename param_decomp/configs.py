@@ -657,9 +657,13 @@ class RuntimeConfig(BaseConfig):
     dp: PositiveInt | None = Field(
         default=None,
         description=(
-            "Distributed world size — the number of data-parallel workers. Under DDP the "
-            "model is replicated across them; under FSDP it is sharded and the batch is "
-            "data-parallel across them. None means a single device."
+            "Distributed world size — the number of data-parallel workers (= nodes × 8 on "
+            "the cluster). The SINGLE source of truth for distributedness: the launcher "
+            "submits across `dp // 8` nodes and the trainer calls "
+            "`init_distributed(dp)`, which asserts the realized `jax.process_count()` "
+            "equals it. NEVER inferred from ambient SLURM env. None means a single device "
+            "(the launcher runs the trainer inline, no jax.distributed). The batch is "
+            "sharded data-parallel across the workers."
         ),
     )
     remat_recon_forwards: bool = Field(

@@ -22,7 +22,8 @@ Real HF weights + the residual-start prefix harvest:
   python -m param_decomp.experiments.llama8b_real --real_weights --first_layer 20 \
       --last_layer 31 --C 8192 --per_gpu_batch 1 --steps 6 --shard
 
-Multi-GPU under SLURM (1 task/GPU): init_distributed() brings up the mesh.
+Multi-GPU under SLURM (1 task/GPU): pass `--dp <world_size>` so init_distributed brings
+up the mesh; omit it for a single-device run.
 """
 
 import argparse
@@ -121,13 +122,15 @@ def main():
     ap.add_argument("--real_weights", action="store_true")
     ap.add_argument("--shard", action="store_true", help="jit + C-shard V/U/CI/Adam + batch")
     ap.add_argument("--model_name", default="meta-llama/Llama-3.1-8B")
+    ap.add_argument("--dp", type=int, default=None,
+                    help="distributed world size (nodes×8); omit for single-device")  # fmt: skip
     args = ap.parse_args()
     assert args.steps > 0, "--steps must be positive"
 
     first, last = args.first_layer, args.last_layer
     assert 0 <= first <= last < 32, f"bad layer range {first}..{last}"
 
-    distributed = init_distributed()
+    distributed = init_distributed(args.dp)
     mesh = dp_mesh()
     ndev = mesh.devices.size
     is0 = jax.process_index() == 0

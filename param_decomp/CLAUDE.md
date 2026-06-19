@@ -198,15 +198,22 @@ p-anneal schedule recomputes over the new `cfg.steps` from 0. A subsequent SLURM
 (own `ckpts/` now non-empty) resumes from the run's own dir and ignores provenance.
 `run.py::assert_finetune_structural_compat` reads the parent's pinned `config.yaml` and
 asserts matching sites (names + C) + ci-fn arch before the restore. Provenance flows into
-`config.yaml` + `wandb.config`. Launch as usual via `pd-lm <config.yaml> --nodes N`.
+`config.yaml` + `wandb.config`. Launch as usual via `pd-lm <config.yaml>`.
 
-**Launch via `pd-lm <config.yaml> --nodes N`** (lab-side): mints the
-`p-` run id, snapshots the tree to `refs/runs/snapshot/<id>`, materializes an
-immutable shared-FS workspace (clone + the one CUDA venv) at
-`$PARAM_DECOMP_OUT_DIR/workspaces/<id>`, stamps the id (+ out_dir / wandb group / tags)
-into the workspace's single config yaml, and sbatches. Requeues re-enter the workspace,
-never the live checkout. `--run_id` resubmits an existing workspace. Don't hand-write
-sbatch files.
+**Launch is CONFIG-DRIVEN via `runtime.dp`** (lab-side `pd-lm <config.yaml>`): there are NO
+`--nodes` / `--local` / `--distributed` flags. The mode is a pure function of the config's
+`runtime.dp`:
+- `dp = null` → run the trainer INLINE in the current process (single device, no SLURM, no
+  workspace). For smoke / debug.
+- `dp = N` (a multiple of 8) → submit to SLURM across `nodes = N // 8` nodes,
+  `--ntasks-per-node=8`. Mints the `p-` run id, snapshots the tree to
+  `refs/runs/snapshot/<id>`, materializes an immutable shared-FS workspace (clone + the one
+  CUDA venv) at `$PARAM_DECOMP_OUT_DIR/workspaces/<id>`, stamps the id (+ out_dir / wandb
+  group / tags) into the workspace's single config yaml, and sbatches. The srun command is
+  bare `python -m param_decomp_lab.experiments.lm.run <config>` (no rank/topology flags).
+
+Requeues re-enter the workspace, never the live checkout. `--run_id` resubmits an existing
+workspace. Don't hand-write sbatch files.
 
 `main` enables JAX's persistent compilation cache
 (`_enable_persistent_compilation_cache`) at `$PARAM_DECOMP_OUT_DIR/xla_compilation_cache`
@@ -223,6 +230,13 @@ shared FS, which `$PARAM_DECOMP_OUT_DIR` already is.
 
 ## Gotchas
 
+- **`init_distributed(dp)` is config-driven, NEVER SLURM-sniffing** (`sharding.py`):
+  distributedness comes from `runtime.dp` ONLY. `dp is None` → no-op (single device);
+  `dp = N` → `jax.distributed.initialize` + assert `process_count() == N`. SLURM env
+  (`SLURM_LOCALID`) is read only for the rank, once `dp` has decided we're distributed.
+  Do NOT revert to inferring it from ambient `SLURM_PROCID` — that env is present in EVERY
+  process on a SLURM box (incl. a pytest worker), so sniffing it wrongly fires
+  `jax.distributed.initialize` mid-suite (the `test_pretrain` smoke failure).
 - **`shard_batch` topology** (`sharding.py`): uses `make_array_from_process_local_data`
   so it's correct for BOTH single-process-many-devices and multi-process-1-device.
   Do NOT revert to the per-`process_index()`-slice idiom — it silently replicates one

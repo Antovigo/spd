@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from annotated_types import Ge, Gt, Le
-from pydantic import Field
+from pydantic import Field, PositiveInt
 
 from param_decomp.base_config import BaseConfig
 from pretrain.models import (
@@ -40,6 +40,14 @@ class PretrainConfig(BaseConfig):
     model: Annotated[ModelConfig, Field(discriminator="model_type")]
     data: PretrainDataConfig
 
+    dp: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "Distributed world size — the number of data-parallel workers (nodes × 8). "
+            "None means a single device (CPU / 1-GPU smoke, no jax.distributed). The "
+            "single source of truth for distributedness; never inferred from SLURM env."
+        ),
+    )
     global_batch: Annotated[int, Gt(0)]
     num_iterations: Annotated[int, Gt(0)]
     learning_rate: Annotated[float, Gt(0)]

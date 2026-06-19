@@ -65,10 +65,14 @@ unsupported).
 
 ## Usage
 
-```bash
-# SLURM (default), 1 node = 8 GPUs
-pd-pretrain pretrain/configs/pile_llama_simple_mlp-4L-768.yaml --nodes 1
+The mode is CONFIG-DRIVEN via the config's `dp` (no `--nodes` / `--local` flags):
+`dp = N` (a multiple of 8) → SLURM across `N // 8` nodes; `dp = null` → run the trainer
+inline in the current venv (CPU / single GPU).
 
-# local (CPU / single GPU; runs the trainer inline in the current venv)
-pd-pretrain pretrain/configs/pile_llama_simple_mlp-2L-128_SMOKE.yaml --local
+```bash
+# SLURM: config sets `dp: 8` (1 node = 8 GPUs)
+pd-pretrain pretrain/configs/pile_llama_simple_mlp-4L-768.yaml
+
+# local: config leaves `dp` unset (null)
+pd-pretrain pretrain/configs/pile_llama_simple_mlp-2L-128_SMOKE.yaml
 ```

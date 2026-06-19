@@ -14,7 +14,6 @@ written to the decomposition trainer's `pretrain_cache/<project>-<run_id>/` layo
 (`cache.write_pretrain_cache`) so the target is immediately decomposable.
 """
 
-import argparse
 import math
 import os
 import signal
@@ -25,6 +24,7 @@ from types import FrameType
 from typing import cast
 
 import equinox as eqx
+import fire
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -239,7 +239,7 @@ class MetricsSink:
 
 def train(cfg: PretrainConfig) -> None:
     _install_sigterm_flag()
-    is_distributed = init_distributed()
+    is_distributed = init_distributed(cfg.dp)
     mesh = dp_mesh()
     n_proc = jax.process_count()
     ndev = mesh.devices.size
@@ -375,11 +375,8 @@ def _cache_dir(cfg: PretrainConfig) -> Path:
     return cache_dir_for(cfg.out_dir.parent, project, cfg.run_id)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("config", type=Path)
-    args = ap.parse_args()
-    cfg = load_pretrain_config(args.config)
+def main(config: Path) -> None:
+    cfg = load_pretrain_config(Path(config))
     if cfg.out_dir is None or cfg.run_id is None:
         # Local hand-run without the launcher: mint an ephemeral identity under cwd.
         cfg = _mint_local_identity(cfg)
@@ -403,5 +400,9 @@ def _maybe_enable_compilation_cache(cfg: PretrainConfig) -> None:
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 60)
 
 
+def cli() -> None:
+    fire.Fire(main)
+
+
 if __name__ == "__main__":
-    main()
+    cli()

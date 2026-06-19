@@ -1,15 +1,16 @@
-"""Submit a JAX decomposition run (`python -m param_decomp_lab.experiments.lm.run`) to
-SLURM, or run it locally (`--local`).
+"""Launch a JAX decomposition run (`python -m param_decomp_lab.experiments.lm.run`).
 
-Mints the `p-<8hex>` run id, snapshots the working tree to `refs/runs/snapshot/<id>`,
-materializes the snapshot as a shared-FS workspace (clone + the one CUDA venv, built at
-submit time on the login node — the trainer runs 8 srun tasks per node, so in-job
-per-node cloning would race), stamps the run id (+ out_dir / wandb group / tags) into
-the workspace's single config yaml, and sbatches. Requeues re-enter the same immutable
-workspace.
+CONFIG-DRIVEN: the launch mode is a pure function of `runtime.dp` in the run config — no
+`--nodes` / `--local` flags. `dp is None` → run the trainer INLINE in the current process
+(single device, no SLURM, no workspace; smoke / debug). `dp is not None` → submit to SLURM
+across `nodes = dp // 8` nodes (8 GPUs each, one task per GPU).
 
-`--local` skips SLURM and the workspace entirely: mint a run id, stamp it into the live
-config, and run the trainer in the current process (single device). For smoke / debug.
+The SLURM path mints the `p-<8hex>` run id, snapshots the working tree to
+`refs/runs/snapshot/<id>`, materializes the snapshot as a shared-FS workspace (clone + the
+one CUDA venv, built at submit time on the login node — the trainer runs 8 srun tasks per
+node, so in-job per-node cloning would race), stamps the run id (+ out_dir / wandb group /
+tags) into the workspace's single config yaml, and sbatches. Requeues re-enter the same
+immutable workspace.
 """
 
 import os
@@ -56,8 +57,6 @@ def _rank_command(config_rel: Path, rank_env: str) -> str:
 def main(
     config_path: str,
     *,
-    nodes: int = 1,
-    local: bool = False,
     time: str = "72:00:00",
     qos: str | None = None,
     run_id: str | None = None,
@@ -66,16 +65,16 @@ def main(
     comment: str | None = None,
     allocator: str | None = None,
 ) -> None:
-    """Submit (or `--local` run) a decomposition trainer (`param_decomp.run`) run.
+    """Launch a decomposition trainer (`param_decomp_lab.experiments.lm.run`) run. The mode
+    (inline vs SLURM) is a pure function of the config's `runtime.dp`.
 
     Args:
         config_path: Single self-contained run yaml (the canonical schema + top-level
-            `run_name`, optional `out_dir`), inside the repo. `run_id` and `out_dir`
-            are minted here and stamped into the workspace copy; `out_dir` defaults to
+            `run_name`, optional `out_dir`), inside the repo. `runtime.dp` declares the
+            world size: `None` → run inline (single device); `N` (a multiple of 8) →
+            submit across `N // 8` nodes. `run_id` and `out_dir` are minted here and
+            stamped into the workspace copy; `out_dir` defaults to
             `PARAM_DECOMP_OUT_DIR/runs` (the current cluster) when absent.
-        nodes: Node count (8 GPUs each). Ignored under `--local`.
-        local: Run the trainer in the current process (single device, no SLURM, no
-            workspace) instead of submitting. For smoke / debug.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
         run_id: Resubmit an existing launch — reuses its workspace (and identity)
@@ -92,9 +91,12 @@ def main(
     cfg, run_name = _validate_config(REPO_ROOT / config_rel)
     tag_list = [s.strip() for s in tags.split(",")] if tags is not None else []
 
-    if local:
+    dp = cfg.runtime.dp
+    if dp is None:
         _run_local(config_rel, run_name, group, tag_list)
         return
+    assert dp % GPUS_PER_NODE == 0, f"runtime.dp={dp} must be a multiple of {GPUS_PER_NODE}"
+    nodes = dp // GPUS_PER_NODE
 
     if run_id is None:
         run_id = generate_run_id("param_decomp")

@@ -1,16 +1,13 @@
-"""Submit a JAX target-pretraining run (`python -m pretrain.train`) — `pd-pretrain`.
+"""Launch a JAX target-pretraining run (`python -m pretrain.train`) — `pd-pretrain`.
 
 The in-house target LMs (`gpt2_simple` / `llama_simple` / `llama_simple_mlp`) that the
-decomposition trainer then decomposes are pretrained by `pretrain.train`.
-This is the login-node submit wrapper, a slimmed mirror of `pd-lm`
-(`experiments/lm/launch.py`): mint a `t-<hex>` run id, snapshot the tree, materialize
-an immutable shared-FS workspace (clone + the one CUDA venv), stamp the id (+ out_dir /
-wandb group / tags) into the workspace's config, and sbatch. `--local` runs the pretrainer
-in the current shell instead (single process, CPU / 1 GPU).
-
-The PD config schema is not used here: `pretrain.train` validates its own config (it
-owns `PretrainConfig`, which pulls jax); we only read the run_name and ensure `run_id` is
-absent.
+decomposition trainer then decomposes are pretrained by `pretrain.train`. CONFIG-DRIVEN, a
+slimmed mirror of `pd-lm` (`experiments/lm/launch.py`): the mode is a pure function of the
+config's `dp`. `dp is None` → run the pretrainer INLINE in the current shell (single
+process, CPU / 1 GPU; smoke). `dp is not None` → mint a `t-<hex>` run id, snapshot the
+tree, materialize an immutable shared-FS workspace (clone + the one CUDA venv), stamp the
+id (+ out_dir / wandb group / tags) into the workspace's config, and sbatch across
+`dp // 8` nodes.
 """
 
 import shlex
@@ -42,8 +39,6 @@ export XLA_FLAGS="--xla_gpu_enable_command_buffer=\""""
 def main(
     config_path: str,
     *,
-    nodes: int = 1,
-    local: bool = False,
     time: str = "72:00:00",
     qos: str | None = None,
     run_id: str | None = None,
@@ -51,14 +46,13 @@ def main(
     tags: str | None = None,
     comment: str | None = None,
 ) -> None:
-    """Submit (or `--local` run) a target-pretraining job (`pretrain.train`).
+    """Launch a target-pretraining job (`pretrain.train`). The mode (inline vs SLURM) is a
+    pure function of the config's `dp`.
 
     Args:
-        config_path: Single self-contained run yaml inside the repo, with a
-            `run_name` and NO `run_id` (minted here). `--local` reads it in place.
-        nodes: Node count (8 GPUs each). Ignored with `--local`.
-        local: Run the pretrainer in the current shell (single process) instead of
-            submitting to SLURM. For CPU / single-GPU smokes.
+        config_path: Single self-contained run yaml inside the repo, with a `run_name` and
+            NO `run_id` (minted here). `dp` declares the world size: `None` → run inline
+            (single process); `N` (a multiple of 8) → submit across `N // 8` nodes.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
         run_id: Resubmit an existing launch — reuses its workspace and identity.
@@ -66,13 +60,15 @@ def main(
         tags: Comma-separated wandb tags (no-op when `wandb:` is omitted).
         comment: SLURM `--comment`; defaults to the run id.
     """
-    if local:
-        _run_local(Path(config_path))
-        return
-
     config_rel = _config_path_relative_to_repo(config_path)
-    run_name = _read_run_name(REPO_ROOT / config_rel)
+    run_name, dp = _read_run_name_and_dp(REPO_ROOT / config_rel)
     tag_list = [s.strip() for s in tags.split(",")] if tags is not None else []
+
+    if dp is None:
+        _run_local(REPO_ROOT / config_rel)
+        return
+    assert dp % GPUS_PER_NODE == 0, f"dp={dp} must be a multiple of {GPUS_PER_NODE}"
+    nodes = dp // GPUS_PER_NODE
 
     if run_id is None:
         run_id = generate_run_id("train")
@@ -136,12 +132,14 @@ def _config_path_relative_to_repo(config_path: str) -> Path:
     return path.relative_to(REPO_ROOT)
 
 
-def _read_run_name(config_path: Path) -> str:
+def _read_run_name_and_dp(config_path: Path) -> tuple[str, int | None]:
     raw = yaml.safe_load(config_path.read_text())
     assert "run_id" not in raw, f"{config_path}: run_id is minted at submit, omit it"
     run_name = raw.get("run_name")
     assert isinstance(run_name, str) and run_name, f"{config_path}: run_name required"
-    return run_name
+    dp = raw.get("dp")
+    assert dp is None or (isinstance(dp, int) and dp > 0), f"{config_path}: bad dp {dp!r}"
+    return run_name, dp
 
 
 def _build_workspace(
