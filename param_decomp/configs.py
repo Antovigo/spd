@@ -693,6 +693,33 @@ class PDConfig(BaseConfig):
     running the trainer (`param_decomp.run`).
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_jax_unsupported_fields(cls, data: object) -> object:
+        # Shared-storage shim (provenance): stored run config.yamls carry fields the JAX
+        # trainer no longer has — each only ever had ONE supported value. Strip them so
+        # existing runs still load (harvest / autointerp / fine-tune / run_metadata); reject
+        # a non-supported value loudly. See param_decomp/MIGRATION_HOLES.md.
+        if not isinstance(data, dict):
+            return data
+        if "sigmoid_type" in data:
+            assert data.pop("sigmoid_type") == "leaky_hard", (
+                "sigmoid_type was removed (only leaky_hard is implemented)"
+            )
+        if "use_delta_component" in data:
+            assert data.pop("use_delta_component") is True, (
+                "use_delta_component was removed (always on in the JAX trainer)"
+            )
+        if "tied_weights" in data:
+            assert not data.pop("tied_weights"), (
+                "tied_weights was removed (obviated by the JAX design)"
+            )
+        if "identity_decomposition_targets" in data:
+            assert not data.pop("identity_decomposition_targets"), (
+                "identity_decomposition_targets was removed (identity insertion is not in the JAX trainer)"
+            )
+        return data
+
     # --- General ---
     seed: int = Field(
         default=0,

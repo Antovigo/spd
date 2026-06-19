@@ -78,8 +78,14 @@ Intentional drops (confirm scope, no re-add planned this push):
   rejects any config that sets it.
 - **`ci_sigmoids` registry** — only `leaky_hard` (split lower/upper) survives; the
   `sigmoid_type` config field is REMOVED from `PDConfig` (the CI fns hardcode lower/upper
-  leaky-hard), so `normal` / `hard` / `swish_hard` can no longer be requested — `extra=forbid`
-  rejects the key.
+  leaky-hard), so `normal` / `hard` / `swish_hard` can no longer be requested.
+- **Stored-config strip-shim (provenance).** The four removed `PDConfig` fields above
+  (`identity_decomposition_targets`, `tied_weights`, `sigmoid_type`, `use_delta_component`)
+  are handled by a `PDConfig` `model_validator(mode="before")` (mirroring the
+  `use_sigmoid_parameterization` shim): a stored run `config.yaml` carrying them still LOADS
+  (the key is stripped) when it holds the only-ever-supported value, and a NON-supported
+  value is REJECTED loudly. So harvest / autointerp / fine-tune over pre-removal runs keep
+  working; the keys are simply un-settable in new configs.
 - **`mlp_scalar` CI-fn arch** — torch's scalar `get_component_acts(x)=x@V` couples CI-fn
   input to trained components; doesn't fit the generic `ci_fn(site_inputs)` waist. Replaced
   by the vector-input `LayerwiseMLPCIFn`. (Rationale in `CLAUDE.md`.)

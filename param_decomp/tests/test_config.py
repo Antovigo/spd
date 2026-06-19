@@ -11,7 +11,7 @@ import yaml
 from pydantic import ValidationError
 
 from param_decomp.config import DataConfig
-from param_decomp.configs import PersistentPGDReconLossConfig
+from param_decomp.configs import PDConfig, PersistentPGDReconLossConfig
 from param_decomp.llama8b import mlp_family_site_cs
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
@@ -43,6 +43,31 @@ def _reference_lm_raw():
     raw = yaml.safe_load((CONFIGS / "llama8b_l18_b128_cmp32.yaml").read_text())
     raw["run_id"] = RUN_ID
     return raw
+
+
+def test_removed_pdconfig_fields_strip_from_stored_configs_but_reject_bad_values():
+    # Provenance shim: stored run config.yamls carry sigmoid_type / use_delta_component /
+    # tied_weights / identity_decomposition_targets (now removed from PDConfig). They strip on
+    # load when carrying their only-ever-supported value; a non-supported value is rejected.
+    pd = yaml.safe_load((CONFIGS / "llama8b_l18_b128_cmp32.yaml").read_text())["pd"]
+    PDConfig.model_validate(pd)  # clean (no dead keys)
+    PDConfig.model_validate(
+        {
+            **pd,
+            "sigmoid_type": "leaky_hard",
+            "use_delta_component": True,
+            "tied_weights": None,
+            "identity_decomposition_targets": None,
+        }
+    )  # stored config carrying the dead keys -> stripped + loads
+    for bad in (
+        {"sigmoid_type": "swish_hard"},
+        {"use_delta_component": False},
+        {"tied_weights": [["a", "b"]]},
+        {"identity_decomposition_targets": [{"module_pattern": "x", "C": 1}]},
+    ):
+        with pytest.raises((ValidationError, AssertionError)):
+            PDConfig.model_validate({**pd, **bad})
 
 
 def test_b128_config_converts(tmp_path: Path):
