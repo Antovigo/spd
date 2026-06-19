@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 
@@ -17,18 +16,14 @@ def get_autointerp_subrun_dir(decomposition_id: str, autointerp_run_id: str) -> 
     return get_autointerp_dir(decomposition_id) / autointerp_run_id
 
 
-DecompositionMethod = Literal["pd"]
-
-DECOMPOSITION_DESCRIPTIONS: dict[DecompositionMethod, str] = {
-    "pd": (
-        "Each component is a rank-1 parameter vector learned by PD. "
-        "A weight matrix W is decomposed as a sum of outer products "
-        "W ≈ Σ u_i v_i^T. Each component has a causal importance (CI) value predicted per "
-        "token position: CI near 1 means the component is essential at that position, CI near "
-        "0 means it can be ablated without affecting output. A component 'fires' when its CI "
-        "is high."
-    ),
-}
+PD_DESCRIPTION = (
+    "Each component is a rank-1 parameter vector learned by PD. "
+    "A weight matrix W is decomposed as a sum of outer products "
+    "W ≈ Σ u_i v_i^T. Each component has a causal importance (CI) value predicted per "
+    "token position: CI near 1 means the component is essential at that position, CI near "
+    "0 means it can be ablated without affecting output. A component 'fires' when its CI "
+    "is high."
+)
 
 
 @dataclass
@@ -37,7 +32,6 @@ class ModelMetadata:
     dataset_name: str
     layer_descriptions: dict[str, str]
     seq_len: int
-    decomposition_method: DecompositionMethod
 
 
 @dataclass

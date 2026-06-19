@@ -3,10 +3,10 @@
 Offline pipeline that collects component statistics in a single pass over training data.
 Produces data consumed by the autointerp module (`param_decomp_lab/autointerp/`). The
 whole module is **torch-free**: the only decomposition
-runs it harvests are JAX single-pool runs (`run_worker_jax.py`), and the accumulator is
+runs it harvests are JAX single-pool runs (`run_worker.py`), and the accumulator is
 NumPy.
 
-## JAX runs (`scripts/run_worker_jax.py`)
+## JAX runs (`scripts/run_worker.py`)
 
 A JAX single-pool run (`param_decomp`, orbax checkpoint) is harvested natively. The
 run is opened with `param_decomp_lab.experiments.lm.load_run.open_jax_run` (the reusable "open a JAX run
@@ -14,18 +14,18 @@ for consumption" pattern — see below); its frozen forward-only pass (lower-lea
 ‖U‖·(x@V) component acts + clean-logit softmax) is converted (`np.asarray`) into a
 `HarvestBatch` of NumPy arrays, fed to the `Harvester`, and written via
 `HarvestRepo.save_results`. Run *metadata* (tokenizer, layer descriptions) comes through
-`adapter_from_id`, which routes a JAX run (via `adapters.jax_pd.is_jax_run` — detects the
-orbax `ckpts/` dir beside the run's single `config.yaml`) to `JaxPDAdapter`, reading
+`adapter_from_id`, which routes a JAX run (via `adapters.pd.is_jax_run` — detects the
+orbax `ckpts/` dir beside the run's single `config.yaml`) to `PDAdapter`, reading
 metadata from the pinned config and building only the target *architecture* (no orbax
 restore).
 
 ```bash
 # single process
-python -m param_decomp_lab.harvest.scripts.run_worker_jax \
+python -m param_decomp_lab.harvest.scripts.run_worker \
     --run_dir runs/p-761bc061 --n_batches 50 --batch_size 16
 
 # one rank of a sharded run (saves worker_states/worker_<rank>.npz; merge combines them)
-python -m param_decomp_lab.harvest.scripts.run_worker_jax \
+python -m param_decomp_lab.harvest.scripts.run_worker \
     --run_dir runs/p-761bc061 --n_batches 50 --batch_size 16 \
     --rank 0 --world_size 4 --subrun_id h-20260617_120000
 ```
@@ -62,7 +62,7 @@ inside `config.method_config.wandb_path` — there is no separate positional
 
 The launcher:
 1. Creates a git snapshot branch for reproducibility
-2. Submits a SLURM array (one task per GPU); each task runs `run_worker_jax.py` as
+2. Submits a SLURM array (one task per GPU); each task runs `run_worker.py` as
    `--rank R --world_size N`, serving its `process_index=R` slice of every global batch
 3. Submits a merge job (`run_merge.py`) that depends on the array
 
@@ -72,13 +72,13 @@ The launcher:
 
 ```bash
 # Single process (auto-generates subrun ID)
-python -m param_decomp_lab.harvest.scripts.run_worker_jax \
+python -m param_decomp_lab.harvest.scripts.run_worker \
     --run_dir runs/<run_id> --n_batches 1000 --batch_size 16
 
 # Multi-rank: all workers + merge must share the same --subrun_id
 SUBRUN="h-$(date +%Y%m%d_%H%M%S)"
 for r in 0 1 2 3; do
-  python -m param_decomp_lab.harvest.scripts.run_worker_jax \
+  python -m param_decomp_lab.harvest.scripts.run_worker \
       --run_dir runs/<run_id> --n_batches 1000 --batch_size 16 \
       --rank $r --world_size 4 --subrun_id $SUBRUN &
 done
@@ -112,7 +112,7 @@ Entry point via `pd-harvest`. Submits array job + dependent merge job.
 
 **Intruder evaluation** (`param_decomp_lab/harvest/intruder.py`) evaluates the quality of the *decomposition itself* — whether component activation patterns are coherent — without relying on LLM-generated labels. Intruder scores are stored in `harvest.db`, not `interp.db`. Intruder eval is submitted as a top-level postprocess stage (via `pd-postprocess`), not as part of the harvest pipeline.
 
-### Worker Script (`scripts/run_worker_jax.py`)
+### Worker Script (`scripts/run_worker.py`)
 
 The only worker. Opens a JAX run, runs its frozen forward, accumulates into the NumPy
 `Harvester`. Args:

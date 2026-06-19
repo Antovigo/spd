@@ -110,11 +110,7 @@ def format_prompt(
         md.p(context_notes)
 
     md.h(2, "Data presentation")
-    md.extend(
-        build_data_presentation(
-            model_metadata.seq_len, context_tokens_per_side, model_metadata.decomposition_method
-        )
-    )
+    md.extend(build_data_presentation(model_metadata.seq_len, context_tokens_per_side))
 
     md.h(2, "Output tokens (what the model produces when this component fires)")
     md.extend(output_section)

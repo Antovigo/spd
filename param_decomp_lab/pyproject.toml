@@ -36,7 +36,7 @@ dependencies = [
 # LM decomposition launcher: snapshot + shared-FS workspace + sbatch
 # `python -m param_decomp.run` (or `--local` to run it inline). The core trainer
 # (`param_decomp.run`) itself lives in the root `param-decomp` distribution.
-pd-lm = "param_decomp_lab.experiments.lm.jax_launch:cli"
+pd-lm = "param_decomp_lab.experiments.lm.launch:cli"
 # Toy-domain decomposition runners (CPU, in-process pretrain -> decompose via the generic
 # core engine `run_decomposition_training`). Run synchronously, no SLURM.
 pd-tms = "param_decomp_lab.experiments.tms.run:cli"
@@ -44,7 +44,7 @@ pd-resid-mlp = "param_decomp_lab.experiments.resid_mlp.run:cli"
 # Target-model pretraining launcher: snapshot + workspace + sbatch
 # `python -m pretrain.train` (or `--local`). The core pretrain trainer lives at the root
 # sibling `pretrain/`.
-pd-pretrain = "param_decomp_lab.experiments.lm.pretrain.jax_launch:cli"
+pd-pretrain = "param_decomp_lab.experiments.lm.pretrain.launch:cli"
 # Post-processing pipeline CLIs (SLURM-driven; lab subtrees).
 pd-clustering = "param_decomp_lab.clustering.scripts.run_pipeline:cli"
 pd-cluster-merge = "param_decomp_lab.clustering.scripts.run_merge:cli"

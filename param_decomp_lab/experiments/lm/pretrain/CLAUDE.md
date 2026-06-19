@@ -27,7 +27,7 @@ the submit wrapper is lab-side. One venv covers both:
   - `configs/` — the run yamls (`pile_llama_simple_mlp-*`, `gpt2_simple-2L`,
     `pile_llama_simple-4L-768`, `*_SMOKE`).
 - **`param_decomp_lab/experiments/lm/pretrain/`** (here):
-  - `jax_launch.py` — `pd-pretrain`: snapshot + immutable shared-FS workspace + sbatch
+  - `launch.py` — `pd-pretrain`: snapshot + immutable shared-FS workspace + sbatch
     `python -m pretrain.train` (or `--local` to run in the current shell). Slim mirror of `pd-lm`.
   - `run_info.py` — `find_pretrain_cache(project, run_id)`: the torch-free read-side index
     into the cache (the torch `PretrainRunInfo`'s wandb-download path is gone — the cache

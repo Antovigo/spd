@@ -1,7 +1,7 @@
 """Harvest a JAX single-pool run natively — no torch component model, no safetensors
 bridge.
 
-    python -m param_decomp_lab.harvest.scripts.run_worker_jax \
+    python -m param_decomp_lab.harvest.scripts.run_worker \
         --run_dir runs/p-761bc061 --n_batches 50 --batch_size 16
 
 The run is opened with `param_decomp_lab.experiments.lm.load_run.open_jax_run` (the reusable JAX
@@ -108,7 +108,7 @@ def get_command(
     config: HarvestConfig, run_dir: Path, rank: int, world_size: int, subrun_id: str
 ) -> str:
     return (
-        f"python -m param_decomp_lab.harvest.scripts.run_worker_jax "
+        f"python -m param_decomp_lab.harvest.scripts.run_worker "
         f"--run_dir {run_dir} "
         f"--n_batches {config.n_batches} "
         f"--batch_size {config.batch_size} "

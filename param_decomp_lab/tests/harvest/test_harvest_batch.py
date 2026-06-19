@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from param_decomp_lab.experiments.lm.load_run import HarvestForward
-from param_decomp_lab.harvest.scripts.run_worker_jax import harvest_batch_from_forward
+from param_decomp_lab.harvest.scripts.run_worker import harvest_batch_from_forward
 
 
 def test_harvest_batch_from_forward_semantics() -> None:

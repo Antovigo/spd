@@ -11,28 +11,26 @@ from param_decomp_lab.autointerp.prompt_helpers import (
     describe_example_rendering,
     human_layer_desc,
 )
-from param_decomp_lab.autointerp.schemas import DecompositionMethod, ModelMetadata
+from param_decomp_lab.autointerp.schemas import ModelMetadata
 from param_decomp_lab.harvest.analysis import TokenPRLift
 from param_decomp_lab.harvest.schemas import ComponentData
 from param_decomp_lab.infra.markdown import Md
 from param_decomp_lab.tokenizer_display import AppTokenizer
 
-_DECOMPOSITION_DESCRIPTIONS: dict[DecompositionMethod, str] = {
-    "pd": (
-        "Each component is a rank-1 parameter matrix learned by PD. "
-        "A weight matrix W is decomposed as W ≈ Σ u_i v_i^T. "
-        "When the model processes a token, each component computes an activation: the inner "
-        "product of the residual stream with its read direction v_i. This value can be "
-        "positive or negative depending on how the input aligns with v_i — the sign is an "
-        "arbitrary consequence of how the vectors were initialised and does not by itself "
-        "mean suppression. CI and activation magnitude are the main indicators of whether "
-        "the component is active at a position, but within one component the sign can still "
-        "separate distinct patterns. "
-        "Each component also has a causal importance (CI) value per token position: CI near 1 "
-        "means the component is essential at that position, CI near 0 means it can be ablated "
-        "without affecting output. A component 'fires' when its CI is high."
-    ),
-}
+_PD_DESCRIPTION = (
+    "Each component is a rank-1 parameter matrix learned by PD. "
+    "A weight matrix W is decomposed as W ≈ Σ u_i v_i^T. "
+    "When the model processes a token, each component computes an activation: the inner "
+    "product of the residual stream with its read direction v_i. This value can be "
+    "positive or negative depending on how the input aligns with v_i — the sign is an "
+    "arbitrary consequence of how the vectors were initialised and does not by itself "
+    "mean suppression. CI and activation magnitude are the main indicators of whether "
+    "the component is active at a position, but within one component the sign can still "
+    "separate distinct patterns. "
+    "Each component also has a causal importance (CI) value per token position: CI near 1 "
+    "means the component is essential at that position, CI near 0 means it can be ablated "
+    "without affecting output. A component 'fires' when its CI is high."
+)
 
 
 def format_prompt(
@@ -84,11 +82,7 @@ def format_prompt(
     )
 
     md.h(2, "Data presentation")
-    md.extend(
-        _build_data_section(
-            model_metadata.seq_len, context_tokens_per_side, model_metadata.decomposition_method
-        )
-    )
+    md.extend(_build_data_section(model_metadata.seq_len, context_tokens_per_side))
 
     md.h(3, "Example annotation format")
     md.p(describe_example_rendering(config.example_rendering))
@@ -135,12 +129,11 @@ def format_prompt(
 def _build_data_section(
     seq_len: int,
     context_tokens_per_side: int,
-    decomposition_method: DecompositionMethod,
 ) -> Md:
     window_size = 2 * context_tokens_per_side + 1
     md = Md()
     md.h(3, "Decomposition method")
-    md.p(_DECOMPOSITION_DESCRIPTIONS[decomposition_method])
+    md.p(_PD_DESCRIPTION)
     md.h(3, "Data")
     md.p(
         f"The model processes sequences of {seq_len} tokens. "

@@ -35,7 +35,10 @@ config union.)
 - **#10 torch→jax run adapter** — loading OLD torch PD runs (`model_*.pth`) into the JAX
   consumers (autointerp/intruder/app). The torch-run-loading surface (`adapters/pd`,
   `component_model_io`, vendored Llama) was dropped (#872); re-add as a JAX-native loader
-  off `open_jax_run`/orbax. Until then autointerp/intruder work on JAX runs only.
+  off `open_jax_run`/orbax. Until then autointerp/intruder work on JAX runs only. The
+  `DecompositionAdapter` ABC seam was also collapsed to the single `PDAdapter` impl (the
+  multi-method comparison surface is off the table) — re-adding a second method (torch
+  loader, CLT/transcoder, …) rebuilds that ABC + the `DecompositionMethod` discriminator.
 - **App** (`param_decomp_lab/app/`) — temporarily removed (#868); slated for a JAX-native
   re-add. `pd-investigate` subprocess-launches it, so it's broken until the app returns.
 
@@ -80,7 +83,8 @@ Intentional drops (confirm scope, no re-add planned this push):
 - **`PersistentPGDReconSubsetLoss`** — dropped from the config union; a future composition
   per `LOSS_PARITY_DESIGN.md`.
 - **CLT/transcoder adapters + `_vendor` models (#863)** — comparison-method tooling; can't
-  harvest CLT/transcoder runs until re-added.
+  harvest CLT/transcoder runs until re-added. Re-adding any second method rebuilds the
+  `DecompositionAdapter` ABC + `DecompositionMethod` discriminator collapsed in this push.
 - **`editing/` + `generate_token_divergence.py`** — model-editing + token-divergence viz
   (also noted in `TRANSITION.md §1/§6`).
 - **toy-models target-CI pattern framework** — `DenseCIPattern` / `TargetCISolution` /

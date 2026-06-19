@@ -3,7 +3,7 @@
 The in-house target LMs (`gpt2_simple` / `llama_simple` / `llama_simple_mlp`) that the
 decomposition trainer then decomposes are pretrained by `pretrain.train`.
 This is the login-node submit wrapper, a slimmed mirror of `pd-lm`
-(`experiments/lm/jax_launch.py`): mint a `t-<hex>` run id, snapshot the tree, materialize
+(`experiments/lm/launch.py`): mint a `t-<hex>` run id, snapshot the tree, materialize
 an immutable shared-FS workspace (clone + the one CUDA venv), stamp the id (+ out_dir /
 wandb group / tags) into the workspace's config, and sbatch. `--local` runs the pretrainer
 in the current shell instead (single process, CPU / 1 GPU).

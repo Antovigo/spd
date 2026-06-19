@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from param_decomp_lab.clustering.memberships import flatten_lm_activations
-from param_decomp_lab.clustering.scripts.run_worker_jax import sampled_ci_from_forward
+from param_decomp_lab.clustering.scripts.run_worker import sampled_ci_from_forward
 
 
 def test_sampled_ci_all_positions_matches_flatten() -> None:

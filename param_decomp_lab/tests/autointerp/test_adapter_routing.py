@@ -1,18 +1,17 @@
-"""The PD adapter routing discriminator: a JAX single-pool run dir (orbax `ckpts/` +
-a single self-contained `config.yaml`) routes to `JaxPDAdapter`, not the torch
-`PDAdapter` (which needs a `model_*.pth` + no orbax `ckpts/`)."""
+"""`is_jax_run` validates a loadable PD run dir: orbax `ckpts/` plus a single
+self-contained `config.yaml`. A dir missing either is not a loadable run."""
 
 from pathlib import Path
 
 import pytest
 
-from param_decomp_lab.adapters import jax_pd
-from param_decomp_lab.adapters.jax_pd import is_jax_run
+from param_decomp_lab.adapters import pd
+from param_decomp_lab.adapters.pd import is_jax_run
 
 
 @pytest.fixture
 def runs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(jax_pd, "get_harvest_dir", lambda rid: tmp_path / "runs" / rid / "harvest")
+    monkeypatch.setattr(pd, "get_harvest_dir", lambda rid: tmp_path / "runs" / rid / "harvest")
     return tmp_path / "runs"
 
 

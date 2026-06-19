@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from param_decomp_lab.experiments.lm.jax_launch import (
+from param_decomp_lab.experiments.lm.launch import (
     _rank_command,
     _stamp_config,
     _validate_config,

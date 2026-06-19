@@ -12,7 +12,7 @@ validation / run-identity helpers (`assert_canonical_algorithm_config` / `run_in
 target/data schema + (for the LM) its `BuiltRun` build.
 autointerp/clustering read a run's target topology from
 `experiments.lm.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
-see `param_decomp_lab/adapters/jax_pd.py`.
+see `param_decomp_lab/adapters/pd.py`.
 
 ## Toy domains (TMS, ResidMLP)
 
@@ -56,7 +56,7 @@ core, in `param_decomp.configs`; the engine's `BuiltRun` bundle is core, in
 experiments/
 ├── utils.py                 # EXPERIMENT_CONFIG_FILENAME
 ├── lm/
-│   ├── jax_launch.py        # pd-lm: snapshot + shared-FS workspace + sbatch
+│   ├── launch.py        # pd-lm: snapshot + shared-FS workspace + sbatch
 │   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
 │   └── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
 ├── tms/                     # pd-tms (CPU): model.py + run.py + configs/ + test_tms.py
@@ -100,7 +100,7 @@ to its own vendored JAX arch (`pretrained` LlamaSimpleMLP -> the pretrain-cache 
 identifier only, never imported.
 
 The path schemas (`topology/path_schemas.py`) cover the GPT-2 and `LlamaSimple*` archs —
-so `JaxPDAdapter`'s layer-description path is exercised by `kind: pretrained` runs (the
+so `PDAdapter`'s layer-description path is exercised by `kind: pretrained` runs (the
 pile `LlamaSimpleMLP` decompositions), the production target.
 
 ## `--group` and `--tags`

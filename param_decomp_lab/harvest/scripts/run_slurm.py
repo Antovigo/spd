@@ -16,7 +16,7 @@ from param_decomp.log import logger
 from param_decomp_lab.harvest.config import HarvestSlurmConfig
 from param_decomp_lab.harvest.schemas import get_harvest_dir
 from param_decomp_lab.harvest.scripts import run_merge as harvest_merge
-from param_decomp_lab.harvest.scripts import run_worker_jax as harvest_worker
+from param_decomp_lab.harvest.scripts import run_worker as harvest_worker
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.slurm import (
     SlurmArrayConfig,

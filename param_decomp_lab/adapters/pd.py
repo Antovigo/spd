@@ -1,8 +1,6 @@
 from functools import cached_property
 from pathlib import Path
-from typing import override
 
-from param_decomp_lab.adapters.base import DecompositionAdapter
 from param_decomp_lab.autointerp.schemas import ModelMetadata
 from param_decomp_lab.experiments.lm.config import LMExperimentConfig
 from param_decomp_lab.experiments.lm.load_run import RunMetadata, run_metadata
@@ -20,7 +18,7 @@ def is_jax_run(decomposition_id: str) -> bool:
     return (run_dir / JAX_RUN_CONFIG_FILENAME).exists() and (run_dir / "ckpts").is_dir()
 
 
-class JaxPDAdapter(DecompositionAdapter):
+class PDAdapter:
     """Autointerp/clustering adapter for a JAX single-pool run, read torch-free from its
     pinned config. Autointerp consumes harvest output plus run metadata only — no trained
     components — so the target topology (`n_blocks`, vocab, per-site `(name, C)`) comes
@@ -45,27 +43,22 @@ class JaxPDAdapter(DecompositionAdapter):
         return run_metadata(self._run_dir)
 
     @property
-    @override
     def decomposition_id(self) -> str:
         return self._run_id
 
     @property
-    @override
     def vocab_size(self) -> int:
         return self._metadata.vocab_size
 
     @property
-    @override
     def layer_activation_sizes(self) -> list[tuple[str, int]]:
         return self._metadata.layer_activation_sizes
 
     @property
-    @override
     def tokenizer_name(self) -> str:
         return self.cfg.data.tokenizer_name
 
     @property
-    @override
     def model_metadata(self) -> ModelMetadata:
         schema = path_schema_for_model_type(self._metadata.model_type)
         return ModelMetadata(
@@ -76,7 +69,6 @@ class JaxPDAdapter(DecompositionAdapter):
                 for path, _ in self._metadata.layer_activation_sizes
             },
             seq_len=self.cfg.data.max_seq_len,
-            decomposition_method="pd",
         )
 
     def _semantic_dataset_name(self) -> str:

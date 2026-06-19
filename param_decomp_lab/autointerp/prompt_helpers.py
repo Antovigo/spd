@@ -12,10 +12,7 @@ from param_decomp_lab.autointerp.config import (
     SingleLineExamplesConfig,
     XmlExamplesConfig,
 )
-from param_decomp_lab.autointerp.schemas import (
-    DECOMPOSITION_DESCRIPTIONS,
-    DecompositionMethod,
-)
+from param_decomp_lab.autointerp.schemas import PD_DESCRIPTION
 from param_decomp_lab.harvest.analysis import TokenPRLift
 from param_decomp_lab.harvest.schemas import ComponentData
 from param_decomp_lab.infra.markdown import Md
@@ -135,13 +132,12 @@ def token_stats_section(
 def build_data_presentation(
     seq_len: int,
     context_tokens_per_side: int,
-    decomposition_method: DecompositionMethod,
 ) -> Md:
     window_size = 2 * context_tokens_per_side + 1
     md = Md()
 
     md.h(3, "Decomposition method")
-    md.p(DECOMPOSITION_DESCRIPTIONS[decomposition_method])
+    md.p(PD_DESCRIPTION)
 
     md.h(3, "Data")
     md.p(

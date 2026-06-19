@@ -1,7 +1,7 @@
 """Harvest clustering memberships from a JAX single-pool run natively — no torch
 component model, no safetensors bridge.
 
-    python -m param_decomp_lab.clustering.scripts.run_worker_jax \
+    python -m param_decomp_lab.clustering.scripts.run_worker \
         --run_dir runs/p-761bc061 --n_tokens 50000 --batch_size 16 --n_tokens_per_seq 8
 
 The run is opened with `param_decomp_lab.experiments.lm.load_run.open_jax_run` (the reusable JAX
@@ -123,7 +123,7 @@ def get_command(config_path: Path, harvest_id: str, dataset_seed: int) -> str:
         [
             "python",
             "-m",
-            "param_decomp_lab.clustering.scripts.run_worker_jax",
+            "param_decomp_lab.clustering.scripts.run_worker",
             "--config",
             config_path.as_posix(),
             "--harvest_id",

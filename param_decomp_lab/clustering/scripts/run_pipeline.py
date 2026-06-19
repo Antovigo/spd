@@ -2,7 +2,7 @@
 
 Fans a single decomposition out into a seeded ensemble of independent clustering runs, then
 computes their cross-run consensus. Each member is a seeded JAX harvest
-(`run_worker_jax`, 1 GPU) feeding a CPU merge (`run_merge` / `pd-cluster-merge`); a final
+(`run_worker`, 1 GPU) feeding a CPU merge (`run_merge` / `pd-cluster-merge`); a final
 consensus job (`calc_distances`) normalizes the members' labels and computes per-iteration
 pairwise distances + a stability plot.
 
@@ -37,7 +37,7 @@ from param_decomp_lab.clustering.paths import (
     new_harvest_id,
     new_run_id,
 )
-from param_decomp_lab.clustering.scripts import calc_distances, run_merge, run_worker_jax
+from param_decomp_lab.clustering.scripts import calc_distances, run_merge, run_worker
 from param_decomp_lab.clustering.types import DistancesMethod
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.run_files import generate_run_id, run_locally
@@ -111,7 +111,7 @@ def submit(config: ClusteringEnsembleConfig, local: bool) -> str:
     members = _members(config)
 
     harvest_commands = [
-        run_worker_jax.get_command(harvest_config_path, m.harvest_id, m.seed) for m in members
+        run_worker.get_command(harvest_config_path, m.harvest_id, m.seed) for m in members
     ]
     merge_commands = [
         run_merge.get_command(

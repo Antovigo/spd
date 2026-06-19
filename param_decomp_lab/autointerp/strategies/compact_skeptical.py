@@ -70,11 +70,7 @@ def format_prompt(
     )
 
     md.h(2, "Data presentation")
-    md.extend(
-        build_data_presentation(
-            model_metadata.seq_len, context_tokens_per_side, model_metadata.decomposition_method
-        )
-    )
+    md.extend(build_data_presentation(model_metadata.seq_len, context_tokens_per_side))
 
     md.h(2, "Token correlations")
     md.extend(input_section).extend(output_section)

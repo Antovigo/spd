@@ -14,7 +14,7 @@ many times with different configs.
 
 ```bash
 # 1. Harvest a JAX single-pool run (orbax checkpoint) into a membership snapshot.
-python -m param_decomp_lab.clustering.scripts.run_worker_jax \
+python -m param_decomp_lab.clustering.scripts.run_worker \
     --run_dir runs/p-761bc061 --n_tokens 50000 --batch_size 16 --n_tokens_per_seq 16
 # → PARAM_DECOMP_OUT_DIR/clustering/harvests/ch-<id>/
 
@@ -35,7 +35,7 @@ members, then a consensus job normalizes their labels and computes per-iteration
 distances + a stability plot. Three dependency tiers:
 
 ```
-harvest array (N × 1 GPU, seeded dataset)            run_worker_jax
+harvest array (N × 1 GPU, seeded dataset)            run_worker
    └─ merge array (N × CPU, seeded sampler)           run_merge        [afterok harvest]
          └─ consensus job per distance method         calc_distances   [afterok merge]
 ```
@@ -85,7 +85,7 @@ Stored under `PARAM_DECOMP_OUT_DIR/clustering/` (see `param_decomp_lab/infra/set
 
 ```
 PARAM_DECOMP_OUT_DIR/clustering/
-├── harvests/<harvest_id>/               # Membership snapshots (run_worker_jax)
+├── harvests/<harvest_id>/               # Membership snapshots (run_worker)
 │   ├── harvest_config.json
 │   ├── memberships.npz                  # Sparse CSC matrix (scipy)
 │   └── metadata.json                    # labels, n_samples, n_components

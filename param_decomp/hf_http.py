@@ -6,8 +6,7 @@ But at production topology (8 ranks/node x N nodes) a *cold* cache turns startup
 8N-rank simultaneous Hub burst, and a single `ReadTimeout` on one rank tears the whole
 job down before training begins. This mounts a retrying adapter on huggingface_hub's
 session factory so connect/read timeouts and 5xx/429 are retried with jittered backoff,
-de-synchronizing the simultaneous retries of many ranks. It is the JAX-side analog of
-`param_decomp_lab/infra/hf_http.py::configure_hf_http_retries`.
+de-synchronizing the simultaneous retries of many ranks.
 
 `huggingface_hub` is not a hard dependency of this distribution (weights come via
 `safetensors` from the local cache), so this is a no-op when it isn't importable.

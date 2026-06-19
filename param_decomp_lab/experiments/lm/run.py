@@ -29,7 +29,6 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PRNGKeyArray
 
-from param_decomp import llama_simple_mlp
 from param_decomp.attn_patterns_eval import (
     accumulate_attn_patterns,
     attn_pattern_for,
@@ -42,16 +41,6 @@ from param_decomp.configs import ResumeProvenance
 from param_decomp.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.eval import make_eval_step
 from param_decomp.hf_http import configure_hf_http_retries
-from param_decomp.llama8b import (
-    first_decomposed_layer,
-    llama31_8b_config,
-    llama_decomposed_lm,
-    llama_site_specs,
-    load_prefix_from_hf,
-    load_target_from_hf,
-    prefix_residual,
-)
-from param_decomp.llama8b_sharding import replicate_target
 from param_decomp.lm import DecomposedModel
 from param_decomp.run import (
     SlowEvalRenderer,
@@ -76,11 +65,10 @@ from param_decomp.slow_eval import (
 from param_decomp.target_aliases import AnyFrozenTarget, AnyPrefix
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments.lm.config import (
-    LlamaSimpleMLPTargetConfig,
-    TargetConfig,
     load_config,
     load_run_dir_config,
 )
+from param_decomp_lab.experiments.lm.load_run import build_target
 
 
 def _enable_persistent_compilation_cache(out_dir: Path) -> Path:
@@ -383,46 +371,7 @@ def main() -> None:
             flush=True,
         )
 
-    frozen: AnyFrozenTarget
-    prefix: AnyPrefix
-    prefix_residual_fn: Callable[[Any, Any], jax.Array]
-    match built.target:
-        case TargetConfig():
-            llama_cfg = llama31_8b_config()
-            lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, built.target.sites))
-            first_layer = first_decomposed_layer(lm.site_names)
-            frozen = replicate_target(
-                load_target_from_hf(built.target.model_name, llama_cfg, first_layer), mesh
-            )
-            prefix = jax.device_put(
-                load_prefix_from_hf(built.target.model_name, llama_cfg, first_layer),
-                NamedSharding(mesh, P()),
-            )
-            prefix_residual_fn = prefix_residual
-        case LlamaSimpleMLPTargetConfig():
-            cache_dir = llama_simple_mlp.pretrain_cache_dir(built.target.pretrain_run_path)
-            simple_cfg = llama_simple_mlp.load_model_config(cache_dir)
-            lm = llama_simple_mlp.llama_simple_mlp_decomposed_lm(
-                simple_cfg, llama_simple_mlp.site_specs(simple_cfg, built.target.sites)
-            )
-            first_layer = llama_simple_mlp.first_decomposed_layer(lm.site_names)
-            frozen = llama_simple_mlp.replicate_frozen(
-                llama_simple_mlp.load_target_from_pretrain_cache(
-                    cache_dir, simple_cfg, first_layer, jnp.bfloat16
-                ),
-                mesh,
-            )
-            prefix = llama_simple_mlp.replicate_frozen(
-                llama_simple_mlp.load_prefix_from_pretrain_cache(
-                    cache_dir, simple_cfg, first_layer, jnp.bfloat16
-                ),
-                mesh,
-            )
-            prefix_residual_fn = llama_simple_mlp.prefix_residual
-        case _:
-            raise AssertionError(
-                f"the LM composition is LM-only; got target {type(built.target).__name__}"
-            )
+    lm, frozen, prefix, prefix_residual_fn, _vocab_size = build_target(built, mesh)
 
     train(built, raw_cfg, lm, frozen, prefix, prefix_residual_fn, mesh)
 

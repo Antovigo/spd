@@ -169,7 +169,7 @@ def test_pipeline_local_fans_out_three_tiers(
     assert len(harvest_cmds) == 3
     assert len(merge_cmds) == 3
     assert len(consensus_cmds) == 2
-    assert all("run_worker_jax" in c and "--dataset_seed" in c for c in harvest_cmds)
+    assert all("run_worker" in c and "--dataset_seed" in c for c in harvest_cmds)
     assert all("run_merge" in c and "--seed" in c for c in merge_cmds)
     assert {"--distances-method" in c for c in consensus_cmds} == {True}
 
