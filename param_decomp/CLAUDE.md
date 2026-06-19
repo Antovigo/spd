@@ -83,22 +83,26 @@ gather), sharing `slow_eval.render_uv_figure` / `plot_uv_matrices` with the LM p
 
 **The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
 toy-specific code (CI-fn arches are the one allowed exception — see `ci_fn_mlp.py`). The
-generic engine is `run.py::run_decomposition_training(cfg, raw_cfg, lm, frozen,
-sample_batch, eval_fn, eval_every, perf_tokens_per_step, mesh)` — the ONE train loop every
-target runs through (init/restore/finetune/faith-warmup via `_init_or_restore_state`, the
-recon-grid step factory, orbax checkpointing, schedules, SIGTERM-save). A target injects
-exactly three seams: the data source (`sample_batch(step) -> residual`), the eval metric
-(`eval_fn(state, now_step) -> dict`, run every `eval_every`), and (for the LM) the perf
-token count. `param_decomp_lab/experiments/lm/run.py::train` is the thin LM caller (parquet
+generic engine is `run.py::run_decomposition_training(pd, cadence, run, raw_cfg, lm, frozen,
+ci_fn, data, remat_recon_forwards, sample_batch, eval_fn, eval_every, perf_tokens_per_step,
+mesh)` — the ONE train loop every target runs through (init/restore/finetune/faith-warmup
+via `_init_or_restore_state`, the recon-grid step factory, orbax checkpointing, schedules,
+SIGTERM-save). It reads the pydantic `PDConfig` / `Cadence` (`param_decomp.configs`)
+DIRECTLY — optimizers / loss metrics / faith warmup / seed / steps / sampling — so there is
+NO flattened mirror DC (the old `config.ExperimentConfig`); the run identity rides in
+`config.RunInstance`, and the lab-built objects (`ci_fn` arch, `data`, the decomposed target)
+pass alongside. A target injects exactly three seams: the data source
+(`sample_batch(step) -> residual`), the eval metric (`eval_fn(state, now_step) -> dict`, run
+every `eval_every`), and (for the LM) the perf token count.
+`param_decomp_lab/experiments/lm/run.py::train` is the thin LM caller (parquet
 `sample_batch` + the CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); that
 LM composition root is LM-ONLY (`experiments.lm.config.build_from_schema` validates
-`LMExperimentConfig`; `main`'s `match cfg.target` covers only `TargetConfig` /
-`LlamaSimpleMLPTargetConfig`). `cfg.target` is typed by the core `config.TargetSites`
-protocol (just `.sites`), `cfg.data` is `DataConfig | None` (None for a toy run). The
-shared algorithm-config conversion is public lab-side for the toys to reuse:
-`experiments.config.convert_shared_algorithm_config` / `run_instance` /
-`layerwise_mlp_ci_arch` (+
-`SharedAlgorithmConfig`).
+`LMExperimentConfig` and returns a `config.BuiltRun`; `main`'s `match built.target` covers
+only `TargetConfig` / `LlamaSimpleMLPTargetConfig`). `BuiltRun.target` is typed by the core
+`config.TargetSites` protocol (just `.sites`), `BuiltRun.data` is `DataConfig | None` (None
+for a toy run). The shared schema validation + run-identity / CI-fn-arch helpers are public
+lab-side for the toys to reuse: `experiments.config.assert_canonical_algorithm_config` /
+`run_instance` / `layerwise_mlp_ci_arch` / `toy_ci_arch`.
 
 The TMS + ResidMLP targets now live under `param_decomp_lab/experiments/{tms,resid_mlp}/`
 (`model.py` = the JAX `DecomposedModel` + frozen target + in-process pretrain + identity-CI

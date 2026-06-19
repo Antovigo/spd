@@ -1,6 +1,7 @@
-"""Construction of a run's optimizers + initial `TrainState` from an `ExperimentConfig`.
+"""Construction of a run's optimizers + initial `TrainState` from the pydantic `PDConfig`
+plus the lab-built CI-fn arch and data source.
 
-Shared by the trainer (`run.py`) and the checkpoint exporter (`export.py`): orbax
+Shared by the trainer (`run.py`) and the run-loading consumers (`load_run.py`): orbax
 restores ONTO a reference pytree, so anything that wants to read a checkpoint must
 rebuild the state exactly as the run did — same init fns, same key derivation, same
 optimizer-state structure.
@@ -20,7 +21,8 @@ from jaxtyping import Array, PRNGKeyArray
 from param_decomp.adversary import init_sources_adam_state
 from param_decomp.ci_fn import CIArch
 from param_decomp.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
-from param_decomp.config import DataConfig, ExperimentConfig
+from param_decomp.config import CIFnArch, DataConfig
+from param_decomp.configs import OptimizerConfig, PDConfig
 from param_decomp.llama8b_sharding import (
     init_ci_fn_sharded,
     init_decomp_vu_replicated,
@@ -72,22 +74,39 @@ def clip_by_global_norm_with_eps(max_norm: float, eps: float) -> optax.GradientT
     return optax.GradientTransformation(init, update)
 
 
-def build_optimizers(cfg: ExperimentConfig):
-    """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
-    log path reports the exact LR the optimizer applies (single source of truth)."""
-    sched_vu = torch_cosine_schedule(cfg.vu_optimizer.lr, cfg.steps, alpha=0.1)
-    sched_ci = torch_cosine_schedule(cfg.ci_optimizer.lr, cfg.steps, alpha=0.1)
-    opt_vu = optax.chain(
-        clip_by_global_norm_with_eps(cfg.vu_optimizer.grad_clip_norm, eps=1e-6),
-        optax.adamw(sched_vu, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0),
+def _adamw_with_clip(opt: OptimizerConfig, schedule: Callable[[ArrayLike], Array]):
+    """AdamW (fp32 master, optax wd default overridden to the config's — torch's is 0)
+    over `schedule`, optionally preceded by torch-parity global-norm clip (SPEC S19/N1).
+    Adam eps is the torch/optax default 1e-8 (not exposed on `OptimizerConfig`)."""
+    adamw = optax.adamw(
+        schedule, b1=opt.betas[0], b2=opt.betas[1], eps=1e-8, weight_decay=opt.weight_decay
     )
-    opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
+    if opt.grad_clip_norm is None:
+        return adamw
+    return optax.chain(clip_by_global_norm_with_eps(opt.grad_clip_norm, eps=1e-6), adamw)
+
+
+def build_optimizers(pd: PDConfig):
+    """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
+    log path reports the exact LR the optimizer applies (single source of truth).
+
+    The canonical-shape asserts (cosine-to-0.1, plain AdamW, components-only clip) live in
+    the lab conversion (`experiments.config.assert_canonical_algorithm_config`); here we
+    read the values straight off `PDConfig` so there is no second source of truth."""
+    sched_vu = torch_cosine_schedule(
+        pd.components_optimizer.lr_schedule.start_val, pd.steps, alpha=0.1
+    )
+    sched_ci = torch_cosine_schedule(pd.ci_fn_optimizer.lr_schedule.start_val, pd.steps, alpha=0.1)
+    opt_vu = _adamw_with_clip(pd.components_optimizer, sched_vu)
+    opt_ci = _adamw_with_clip(pd.ci_fn_optimizer, sched_ci)
     return opt_vu, opt_ci, (sched_vu, sched_ci)
 
 
 def init_train_state(
-    cfg: ExperimentConfig,
+    pd: PDConfig,
     lm: DecomposedModel,
+    ci_fn_arch: CIFnArch,
+    data: DataConfig | None,
     opt_vu: optax.GradientTransformation,
     opt_ci: optax.GradientTransformation,
     init_key: PRNGKeyArray,
@@ -95,24 +114,23 @@ def init_train_state(
     mesh: Mesh,
 ) -> TrainState:
     ci_key = random.fold_in(init_key, 1)
-    match cfg.ci_fn:
+    match ci_fn_arch:
         case MLPCIArch():
             components = init_decomp_vu_replicated(lm.sites, init_key, mesh)
-            ci_fn = init_layerwise_mlp_ci_fn_replicated(cfg.ci_fn, lm.sites, ci_key, mesh)
+            ci_fn = init_layerwise_mlp_ci_fn_replicated(ci_fn_arch, lm.sites, ci_key, mesh)
         case GlobalMLPCIArch():
             components = init_decomp_vu_replicated(lm.sites, init_key, mesh)
-            ci_fn = init_global_mlp_ci_fn_replicated(cfg.ci_fn, lm.sites, ci_key, mesh)
+            ci_fn = init_global_mlp_ci_fn_replicated(ci_fn_arch, lm.sites, ci_key, mesh)
         case CIArch():
             components = init_decomp_vu_sharded(lm.sites, init_key, mesh)
-            ci_fn = init_ci_fn_sharded(cfg.ci_fn, lm.sites, ci_key, mesh)
+            ci_fn = init_ci_fn_sharded(ci_fn_arch, lm.sites, ci_key, mesh)
     assert ci_fn.expects_axes == lm.leading_axes, (
         f"CI fn expects leading axes {ci_fn.expects_axes} but model has {lm.leading_axes}"
     )
-    loss_spec = build_recon_terms(cfg.loss_metrics, lm.site_names, cfg.n_mask_samples, cfg.sampling)
+    loss_spec = build_recon_terms(pd.loss_metrics, lm.site_names, pd.n_mask_samples, pd.sampling)
     sources: dict[str, dict[str, Array]] = {}
     if loss_spec.persistent:
         # Persistent sources live on a position axis; TMS (no position axis) carries none.
-        data = cfg.data
         assert isinstance(data, DataConfig), (
             "persistent PGD sources need a sequence axis; TMS (leading_axes=()) has none"
         )

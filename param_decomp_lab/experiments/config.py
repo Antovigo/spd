@@ -1,14 +1,15 @@
-"""Shared config schema for in-repo experiment YAMLs, plus the shared YAML→dataclass
-conversion every experiment reuses.
+"""Shared config schema for in-repo experiment YAMLs, plus the shared validation /
+run-identity helpers every experiment reuses.
 
-Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `data`
-types. The `convert_shared_algorithm_config` / `run_instance` / `*_ci_arch` helpers map
-the domain-agnostic part of any experiment schema onto the core runtime dataclasses
-(`param_decomp.config`); each experiment's `run.py` assembles the rest (target + data).
+Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `data` types.
+The generic engine reads the pydantic `pd` / `cadence` / `runtime` DIRECTLY, so there is
+no flattened mirror to build — `assert_canonical_algorithm_config` only VALIDATES that the
+schema lives in the subspace the JAX trainer implements (cosine-to-0.1 LR, plain AdamW,
+components-only grad clip, …), and `run_instance` / `*_ci_arch` resolve the run identity and
+the CI-fn architecture; each experiment's `run.py` assembles the rest (target + data).
 """
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
@@ -16,14 +17,7 @@ from pydantic import Field, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
 from param_decomp.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
-from param_decomp.config import (
-    CadenceConfig,
-    CIFnArch,
-    CIOptimizerConfig,
-    DenseLogPhase,
-    FaithWarmupConfig,
-    VUOptimizerConfig,
-)
+from param_decomp.config import CIFnArch, RunInstance
 from param_decomp.configs import (
     AnyEvalMetricConfig,
     Cadence,
@@ -134,20 +128,12 @@ def _assert_plain_adamw(optimizer: OptimizerConfig, who: str) -> None:
     assert optimizer.weight_decay == 0.0, f"{who}: weight_decay must be 0"
 
 
-@dataclass(frozen=True)
-class SharedAlgorithmConfig:
-    """The algorithm-config pieces shared by every target (optimizers, faith warmup,
-    cadence) — the part of an experiment config that does not depend on the target/data
-    domain. Reused by every experiment's `run.py` and the lab toy providers."""
-
-    vu_optimizer: VUOptimizerConfig
-    ci_optimizer: CIOptimizerConfig
-    faith_warmup: FaithWarmupConfig
-    cadence: CadenceConfig
-    ci_lr_for_arch: float
-
-
-def convert_shared_algorithm_config(cfg: "ExperimentConfig[Any, Any]") -> SharedAlgorithmConfig:
+def assert_canonical_algorithm_config(cfg: "ExperimentConfig[Any, Any]") -> None:
+    """Assert the schema lives in the subspace the JAX trainer implements (the engine then
+    reads `pd` / `cadence` DIRECTLY). The numerics-load-bearing constraints: leaky-hard
+    sigmoid, delta component, no tied weights, bf16 compute, cosine-to-0.1 LR with no
+    warmup, plain AdamW (betas (0.9, 0.999), no weight decay), components-only grad clip,
+    and a fully-specified checkpoint cadence."""
     assert cfg.pd.sigmoid_type == "leaky_hard", cfg.pd.sigmoid_type
     assert cfg.pd.use_delta_component and cfg.pd.tied_weights is None
     assert cfg.runtime.autocast_bf16, "JAX trainer computes in bf16 (autocast analog)"
@@ -164,36 +150,19 @@ def convert_shared_algorithm_config(cfg: "ExperimentConfig[Any, Any]") -> Shared
 
     cadence = cfg.cadence
     assert cadence.save_every is not None and cadence.keep_last_n_checkpoints is not None, cadence
-    return SharedAlgorithmConfig(
-        vu_optimizer=VUOptimizerConfig(
-            lr=vu_opt.lr_schedule.start_val, grad_clip_norm=vu_opt.grad_clip_norm
-        ),
-        ci_optimizer=CIOptimizerConfig(lr=ci_opt.lr_schedule.start_val),
-        faith_warmup=FaithWarmupConfig(
-            steps=cfg.pd.faithfulness_warmup_steps, lr=cfg.pd.faithfulness_warmup_lr
-        ),
-        cadence=CadenceConfig(
-            log_every=cadence.train_log_every,
-            save_every=cadence.save_every,
-            keep_last=cadence.keep_last_n_checkpoints,
-            dense_log_phase=(
-                DenseLogPhase(
-                    every=cadence.dense_log_phase.every,
-                    until_step=cadence.dense_log_phase.until_step,
-                )
-                if cadence.dense_log_phase is not None
-                else None
-            ),
-        ),
-        ci_lr_for_arch=ci_opt.lr_schedule.start_val,
-    )
 
 
-def run_instance(cfg: "ExperimentConfig[Any, Any]") -> tuple[str, str, Path]:
-    """The resolved run identity (`run_name`, `run_id`, `out_dir`). `run_id` / `out_dir`
-    are minted + stamped by `pd-lm`; a config reaching the trainer must carry both."""
+def run_instance(cfg: "ExperimentConfig[Any, Any]") -> RunInstance:
+    """The resolved run identity + logging lineage. `run_id` / `out_dir` are minted +
+    stamped by `pd-lm`; a config reaching the trainer must carry both."""
     assert cfg.run_id is not None and _RUN_ID_PATTERN.match(cfg.run_id), (
         f"run_id must be p-<8hex>, got {cfg.run_id!r} (pd-lm stamps it at submit)"
     )
     assert cfg.out_dir is not None, "out_dir unset (pd-lm mints it at submit)"
-    return cfg.run_name, cfg.run_id, cfg.out_dir
+    return RunInstance(
+        run_name=cfg.run_name,
+        run_id=cfg.run_id,
+        out_dir=cfg.out_dir,
+        wandb=cfg.wandb,
+        resume_provenance=cfg.resume_provenance,
+    )

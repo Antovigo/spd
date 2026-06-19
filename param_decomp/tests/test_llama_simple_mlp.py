@@ -541,10 +541,10 @@ def test_pretrained_target_converts_with_wildcards():
     assert target.sites[0] == SiteC("h.0.attn.q_proj", 512)
     # StochasticReconSubsetLoss = one all-sites entry
     loss_spec = build_recon_terms(
-        cfg.loss_metrics,
+        cfg.pd.loss_metrics,
         tuple(sc.name for sc in target.sites),
-        cfg.n_mask_samples,
-        cfg.sampling,
+        cfg.pd.n_mask_samples,
+        cfg.pd.sampling,
     )
     (stoch_term,) = [t for t in loss_spec.recon_terms if t.name == "StochasticReconSubsetLoss"]
     (stoch_entry,) = stoch_term.plan

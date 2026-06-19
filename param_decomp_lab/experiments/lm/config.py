@@ -1,11 +1,11 @@
 """LM experiment config schema (target spec, data settings, full YAML tree) PLUS the
-LM YAML→runtime-`ExperimentConfig` conversion.
+LM YAML→`BuiltRun` conversion.
 
-This module reads the canonical `LMExperimentConfig` schema directly and maps the subspace
-the JAX trainer implements onto the core runtime dataclasses (`param_decomp.config`),
-asserting loudly on anything unsupported — a config either converts exactly or refuses to
-run. The composition entry (`run.py`) calls `load_config` / `build_from_schema`; consumers
-that read a finished run dir call `load_run_dir_config`.
+This module reads the canonical `LMExperimentConfig` schema directly and builds the engine's
+`BuiltRun` bundle (`param_decomp.config`) — the pydantic `pd` / `cadence` / `runtime`
+verbatim plus the resolved target / data / CI-fn arch / eval — asserting loudly on anything
+the JAX trainer doesn't implement. The composition entry (`run.py`) calls `load_config` /
+`build_from_schema`; consumers that read a finished run dir call `load_run_dir_config`.
 """
 
 from dataclasses import dataclass
@@ -20,13 +20,11 @@ from param_decomp.base_config import BaseConfig
 from param_decomp.ci_fn import CIArch
 from param_decomp.config import (
     AttnPatternsEvalConfig,
+    BuiltRun,
     DataConfig,
     EvalConfig,
     EvalPGDConfig,
     WeightsDtype,
-)
-from param_decomp.config import (
-    ExperimentConfig as RuntimeExperimentConfig,
 )
 from param_decomp.configs import (
     CEandKLLossesConfig,
@@ -42,7 +40,7 @@ from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
 from param_decomp_lab.experiments.config import (
     ExperimentConfig,
-    convert_shared_algorithm_config,
+    assert_canonical_algorithm_config,
     run_instance,
 )
 
@@ -171,8 +169,8 @@ class LlamaSimpleMLPTargetConfig:
 
 AnyLMTargetConfig = TargetConfig | LlamaSimpleMLPTargetConfig
 """The LM target configs the LM composition builds. Non-LM targets (the toys) live in the
-lab and satisfy `param_decomp.config.TargetSites` — the core `ExperimentConfig.target` is
-typed by that protocol, never by a closed union, so it accepts a lab target config too."""
+lab and satisfy `param_decomp.config.TargetSites` — the core `BuiltRun.target` is typed by
+that protocol, never by a closed union, so it accepts a lab target config too."""
 
 
 # Plot/heavy eval metrics the FAST in-loop scalar pass (`eval.py`) does NOT compute. They
@@ -260,13 +258,11 @@ def _ci_arch(cfg: LMExperimentConfig, seq_len: int) -> CIArch:
     )
 
 
-def _losses(cfg: LMExperimentConfig, site_names: tuple[str, ...]) -> tuple[Any, ...]:
-    """Pass the shared loss configs through VERBATIM (yaml order — RNG-load-bearing),
-    after running them through `build_recon_terms` so unsupported metrics refuse at
-    convert time rather than on the GPUs."""
-    loss_metrics = tuple(cfg.pd.loss_metrics)
-    build_recon_terms(loss_metrics, site_names, cfg.pd.n_mask_samples, cfg.pd.sampling)
-    return loss_metrics
+def _assert_losses_supported(cfg: LMExperimentConfig, site_names: tuple[str, ...]) -> None:
+    """Run the schema's loss configs through `build_recon_terms` so unsupported metrics
+    refuse at convert time rather than on the GPUs. The engine reads `pd.loss_metrics`
+    verbatim (yaml order is RNG-load-bearing), so nothing is returned."""
+    build_recon_terms(cfg.pd.loss_metrics, site_names, cfg.pd.n_mask_samples, cfg.pd.sampling)
 
 
 def _data(cfg: LMExperimentConfig) -> DataConfig:
@@ -363,58 +359,46 @@ def assert_supported_weights_dtype(cfg: LMExperimentConfig) -> None:
     )
 
 
-def build_experiment_config(cfg: LMExperimentConfig) -> RuntimeExperimentConfig:
+def build_experiment_config(cfg: LMExperimentConfig) -> BuiltRun:
     target = _resolve_target(cfg)
-    shared = convert_shared_algorithm_config(cfg)
-    loss_metrics = _losses(cfg, tuple(sc.name for sc in target.sites))
+    assert_canonical_algorithm_config(cfg)
+    _assert_losses_supported(cfg, tuple(sc.name for sc in target.sites))
     data = _data(cfg)
-    run_name, run_id, out_dir = run_instance(cfg)
 
-    return RuntimeExperimentConfig(
-        run_name=run_name,
-        run_id=run_id,
-        out_dir=out_dir,
-        seed=cfg.pd.seed,
-        steps=cfg.pd.steps,
+    return BuiltRun(
+        pd=cfg.pd,
+        runtime=cfg.runtime,
+        cadence=cfg.cadence,
+        run=run_instance(cfg),
         target=target,
         data=data,
-        loss_metrics=loss_metrics,
-        n_mask_samples=cfg.pd.n_mask_samples,
-        sampling=cfg.pd.sampling,
-        remat_recon_forwards=cfg.runtime.remat_recon_forwards,
-        vu_optimizer=shared.vu_optimizer,
-        ci_optimizer=shared.ci_optimizer,
         ci_fn=_ci_arch(cfg, data.seq_len),
-        faith_warmup=shared.faith_warmup,
-        cadence=shared.cadence,
         eval=_eval(cfg),
-        wandb=cfg.wandb,
-        resume_provenance=cfg.resume_provenance,
     )
 
 
-def build_from_schema(schema_raw: dict[str, Any]) -> RuntimeExperimentConfig:
+def build_from_schema(schema_raw: dict[str, Any]) -> BuiltRun:
     """Validate a single self-contained LM run config (the canonical `LMExperimentConfig`
-    schema + run-instance fields) and convert it to the trainer's runtime `ExperimentConfig`.
+    schema + run-instance fields) and convert it to the engine's `BuiltRun` bundle.
 
     The LM composition entry (`run.py`) is LM-only. The toy domains (TMS, ResidMLP) build
-    their `ExperimentConfig` in their own `run.py` via the public shared helpers
-    (`convert_shared_algorithm_config`, `run_instance`, `layerwise_mlp_ci_arch`)."""
+    their `BuiltRun` in their own `run.py` via the public shared helpers
+    (`assert_canonical_algorithm_config`, `run_instance`, `layerwise_mlp_ci_arch`)."""
     cfg = LMExperimentConfig(**schema_raw)
     assert_supported_weights_dtype(cfg)
     return build_experiment_config(cfg)
 
 
-def load_config(config_path: Path) -> tuple[RuntimeExperimentConfig, dict[str, Any]]:
+def load_config(config_path: Path) -> tuple[BuiltRun, dict[str, Any]]:
     """Parse a single self-contained LM run YAML (the canonical schema + top-level
     `run_name`/`run_id`/`out_dir`, `runtime.remat_recon_forwards`, `wandb.group`/`tags`)
-    -> (runtime config, raw dict for wandb logging)."""
+    -> (built run, raw dict for wandb logging)."""
     schema_raw = yaml.safe_load(config_path.read_text())
     return build_from_schema(schema_raw), schema_raw
 
 
-def load_run_dir_config(run_dir: Path) -> RuntimeExperimentConfig:
-    """Rebuild a run's runtime `ExperimentConfig` from its single pinned `config.yaml`
+def load_run_dir_config(run_dir: Path) -> BuiltRun:
+    """Rebuild a run's `BuiltRun` bundle from its single pinned `config.yaml`
     (for tools that read finished/live run dirs, e.g. harvest / fine-tune compat)."""
     schema_raw = yaml.safe_load((run_dir / "config.yaml").read_text())
     return build_from_schema(schema_raw)
