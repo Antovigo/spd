@@ -10,8 +10,13 @@ experiment, not here.
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from param_decomp.sharding import dp_mesh, shard_batch
+
+# Needs >1 jax device; hangs at the default 1 device, so gated behind --runmultidevice.
+# Run via `make test-multidevice` (sets XLA_FLAGS for simulated CPU devices). See conftest.
+pytestmark = pytest.mark.multidevice
 
 
 def test_shard_batch_preserves_global_data():

@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 from jax.sharding import NamedSharding
 
 from param_decomp.adversary import SourcesAdamState, init_sources_adam_state
@@ -54,6 +55,10 @@ from param_decomp.run import _ensure_global
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
 from param_decomp.train import TrainState, make_train_step
+
+# Needs >1 jax device (production topology); hangs at the default 1 device, so gated behind
+# --runmultidevice. Run via `make test-multidevice` (simulated CPU devices). See conftest.
+pytestmark = pytest.mark.multidevice
 
 PERSISTENT_TERMS = ("PersistentPGDReconLoss", "ppgd_second")
 

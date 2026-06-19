@@ -67,6 +67,13 @@ NUM_PROCESSES ?= $(shell nproc | awk '{print ($$1<4?$$1:4)}')
 test-all:
 	uv run pytest $(TEST_PATHS) --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 
+# Tests needing >1 device (sharding / checkpoint topology). They hang at the default 1
+# device, so they're skipped in `test`/`test-all` and run here under SIMULATED CPU devices
+# (XLA_FLAGS) — CI-runnable on a CPU box. Run this alongside `test-all` in CI.
+.PHONY: test-multidevice
+test-multidevice:
+	XLA_FLAGS="--xla_force_host_platform_device_count=4" uv run pytest $(TEST_PATHS) -m multidevice --runmultidevice --durations 10
+
 COVERAGE_DIR=docs/coverage
 
 .PHONY: coverage
