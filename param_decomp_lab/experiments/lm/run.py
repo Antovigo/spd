@@ -16,9 +16,15 @@ Multi-process: launched one process per GPU under SLURM (`init_distributed`); ev
 process computes the same global schedule and contributes its local batch slice.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import wandb
+
+    LogValue = float | wandb.plot.CustomChart
+    LogRecord = Mapping[str, LogValue]
 
 import fire
 import jax
@@ -194,7 +200,7 @@ def _make_lm_eval_fn(
     mesh: Mesh,
     n_proc: int,
     is_main: bool,
-) -> Callable[[TrainState, int], dict[str, float]]:
+) -> "Callable[[TrainState, int], LogRecord]":
     """The LM in-loop eval pass closure (CEandKL / CI-L0 / PGD / attn-patterns), keyed
     deterministically off `(run_key, now_step)` so it is bit-identical to the pre-engine
     inline loop. Mirrors the torch `eval_split: train` stream: an independent reader over
@@ -239,7 +245,7 @@ def _make_lm_eval_fn(
     want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
     position_ci_step = make_position_ci_step(lm) if want_position_ci else None
 
-    def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
+    def eval_fn(state: TrainState, now_step: int) -> "LogRecord":
         eval_pass_index = now_step // eval.every
         # uniform-average of per-batch scalars; mean-safe vs torch's accumulate-then-
         # compute() ONLY because every emitted key is a per-batch reduction that torch also
@@ -264,7 +270,9 @@ def _make_lm_eval_fn(
             )
             for k, v in eval_metrics.items():
                 metric_sums[k] = metric_sums.get(k, jnp.zeros(())) + v
-        eval_record = {f"eval/{k}": float(v) / eval.n_steps for k, v in metric_sums.items()}
+        eval_record: dict[str, LogValue] = {
+            f"eval/{k}": float(v) / eval.n_steps for k, v in metric_sums.items()
+        }
         for class_name, attn_step in attn_steps.items():
             # token-weighted (Σ sum_kl / Σ n), NOT the uniform per-batch average above — KL
             # is summed over distributions, divided by their count.
@@ -316,6 +324,26 @@ def _make_lm_eval_fn(
                     for name, (V, U) in state.components.vu.items()
                 }
             slow_renderer.submit(site_reductions, perm_spec, position_ci, components, now_step)
+        if is_main and built.run.wandb is not None:
+            # torch CI_L0.compute() emitted a per-layer L0 bar chart alongside the scalars;
+            # rebuild it host-side from the `eval/l0/<thr>_<site|group>` scalars already in
+            # the record (the jitted eval can't construct wandb objects).
+            import wandb
+
+            l0_prefix = f"eval/l0/{eval.ci_alive_threshold}_"
+            eval_record["eval/l0/bar_chart"] = wandb.plot.bar(
+                wandb.Table(
+                    columns=["layer", "l0"],
+                    data=[
+                        [k.removeprefix(l0_prefix), v]
+                        for k, v in eval_record.items()
+                        if k.startswith(l0_prefix)
+                    ],
+                ),
+                "layer",
+                "l0",
+                title=f"L0_{eval.ci_alive_threshold}",
+            )
         if is_main:
             headline = {
                 k: eval_record[f"eval/{k}"]

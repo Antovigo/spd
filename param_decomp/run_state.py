@@ -42,7 +42,13 @@ def torch_cosine_schedule(
     """Cosine decay matching torch's `get_scheduled_value` denominator: `progress =
     step / (total_steps - 1)` (no warmup), so `0.1×` is reached at `step = total_steps - 1`.
     optax's `cosine_decay_schedule` divides by `total_steps`, reaching it one step later
-    (SPEC S20). `total_steps == 1` collapses to a constant `peak_lr`."""
+    (SPEC S20). `total_steps == 1` collapses to a constant `peak_lr`.
+
+    Same annealing shape as `schedule.get_scheduled_value`'s cosine branch — that one is a
+    host-numpy `float` lookup for the per-step PGD / p-anneal coeffs (warmup-aware, denom
+    `decay_steps - 1`); this one is a `jnp` callable traced into the optimizer LR. The two
+    can't share a runtime fn (host float vs traced array); each is pinned to torch by its
+    own parity test (`test_schedule.py` / `test_optim_torch_parity.py`)."""
     denom = max(total_steps - 1, 1)
 
     def schedule(count: ArrayLike) -> Array:

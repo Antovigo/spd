@@ -24,9 +24,14 @@ import math
 import signal
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import FrameType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import wandb
+
+    LogRecord = Mapping[str, float | wandb.plot.CustomChart]
 
 import equinox as eqx
 import jax
@@ -154,7 +159,7 @@ class MetricsSink:
             # metric is defined here. Slow eval is in-loop only (no offline CLI).
             self._wandb = wandb
 
-    def log(self, step: int, record: dict[str, float]) -> None:
+    def log(self, step: int, record: "LogRecord") -> None:
         if self._jsonl is None:
             return
         record = {
@@ -163,10 +168,13 @@ class MetricsSink:
             ): v
             for k, v in record.items()
         }  # keys already starting "train/" or "eval/" pass through verbatim
-        self._jsonl.write(json.dumps({"step": step, **record}) + "\n")
+        # wandb-only viz objects (e.g. the CI_L0 bar chart) ride alongside the scalars to
+        # wandb but are not jsonl/console serializable; split them off.
+        scalars = {k: v for k, v in record.items() if isinstance(v, float)}
+        self._jsonl.write(json.dumps({"step": step, **scalars}) + "\n")
         self._jsonl.flush()
         print(
-            f"[step {step}] " + " ".join(f"{k}={v:.4g}" for k, v in record.items()),
+            f"[step {step}] " + " ".join(f"{k}={v:.4g}" for k, v in scalars.items()),
             flush=True,
         )
         if self._wandb is not None:
@@ -374,7 +382,7 @@ def run_decomposition_training(
     data: DataConfig | None,
     remat_recon_forwards: bool,
     sample_batch: Callable[[int], jax.Array],
-    eval_fn: Callable[[TrainState, int], dict[str, float]] | None,
+    eval_fn: "Callable[[TrainState, int], LogRecord] | None",
     eval_every: int,
     perf_tokens_per_step: int | None,
     mesh: Mesh,
