@@ -33,6 +33,13 @@ from param_decomp_lab.infra.wandb import get_wandb_entity
 GPUS_PER_NODE = 8
 WORKSPACES_DIR = PARAM_DECOMP_OUT_DIR / "workspaces"
 
+# uv hardlinks wheels from its cache into a venv when both share a filesystem, else
+# copies. The default cache (~/.cache/uv, home mount) and the workspaces (data mount) are
+# different PVCs, so every build copied multi-GB CUDA wheels; co-locating the cache here
+# makes it hardlink instead. Set per-build (below), not globally, so other cluster uv
+# usage keeps its default cache. uv falls back to copy if ever cross-FS — safe anywhere.
+UV_CACHE_DIR = PARAM_DECOMP_OUT_DIR / "uv_cache"
+
 # Mirrors the validated llama8b.sbatch srun line: one task per GPU, block placement.
 _SRUN_FLAGS = (
     "--kill-on-bad-exit=1 --ntasks-per-node=8 --cpus-per-task=8 --distribution=block:block"
@@ -198,9 +205,11 @@ def _build_workspace(
     the workspace's single config yaml."""
     assert not workspace.exists(), f"workspace already exists: {workspace}"
     workspace.parent.mkdir(parents=True, exist_ok=True)
+    UV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    build_env = {**os.environ, "UV_CACHE_DIR": str(UV_CACHE_DIR)}
 
-    def run(args: list[str], cwd: Path) -> None:
-        subprocess.run(args, cwd=cwd, check=True)
+    def run(args: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
+        subprocess.run(args, cwd=cwd, check=True, env=env)
 
     logger.info(f"Building workspace {workspace} ...")
     run(["git", "clone", "--quiet", str(REPO_ROOT), str(workspace)], cwd=REPO_ROOT)
@@ -212,20 +221,11 @@ def _build_workspace(
     assert env_file.exists(), f".env with wandb credentials required: {env_file}"
     (workspace / ".env").write_bytes(env_file.read_bytes())
 
-    logger.info("venv: uv sync --all-packages --no-dev --extra cuda ...")
+    logger.info("venv: uv sync --all-packages --no-dev --extra cuda (hardlink from uv_cache) ...")
     run(
-        [
-            "uv",
-            "sync",
-            "--all-packages",
-            "--no-dev",
-            "--extra",
-            "cuda",
-            "--link-mode",
-            "copy",
-            "-q",
-        ],
+        ["uv", "sync", "--all-packages", "--no-dev", "--extra", "cuda", "-q"],
         cwd=workspace,
+        env=build_env,
     )
 
     _stamp_config(workspace / config_rel, run_id, group, tags)
