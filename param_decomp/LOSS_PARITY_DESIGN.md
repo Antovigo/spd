@@ -67,9 +67,9 @@ Not in `LOSS_METRIC_CLASSES` (eval-only, lab-side): `CIHiddenActsReconLoss`,
 §4c/§4d; they stay on the bridge.
 
 Trainer-level torch knobs that parameterize these (not per-loss):
-`pd.n_mask_samples`, `pd.sampling` (`continuous`/`binomial`),
-`pd.use_delta_component` — all already in the shared config; the converter folds
-them into the generated plans.
+`pd.n_mask_samples`, `pd.sampling` (`continuous`/`binomial`) — in the shared config;
+the converter folds them into the generated plans. (The delta component, once the
+`pd.use_delta_component` toggle, is now always built — the field was removed.)
 
 ## 2. The unified model
 

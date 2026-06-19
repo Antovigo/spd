@@ -10,8 +10,7 @@ combined `"<ClassName>"` (= Σ_sites sum_mse / Σ_sites n_elements).
 - `CIHiddenActsReconLoss`: the deterministic CI mask (`lower_leaky`), no stochastic draw,
   no weight delta — one masked forward per batch.
 - `StochasticHiddenActsReconLoss`: `n_mask_samples` stochastic CI-mask draws WITH weight
-  deltas (`use_delta_component` is invariably True in JAX runs, asserted in
-  `experiments.config.assert_canonical_algorithm_config`), per-draw per-site MSE
+  deltas (the delta component is always built in JAX runs), per-draw per-site MSE
   accumulated. The stochastic
   draws are NOT seed-aligned to torch, so exact bitwise parity is impossible for this one
   (expected); the deterministic CI variant is tight.

@@ -15,7 +15,6 @@ pd:
         max_len: 512
         rope_base: 10000.0
   sampling: continuous
-  sigmoid_type: leaky_hard
   decomposition_targets:
   - module_pattern: h.*.mlp.c_fc
     C: 3072
@@ -29,8 +28,6 @@ pd:
     C: 1024
   - module_pattern: h.*.attn.o_proj
     C: 1024
-  identity_decomposition_targets: null
-  use_delta_component: true
   components_optimizer:
     lr_schedule:
       start_val: 5.0e-05

@@ -11,7 +11,6 @@ Experiment-level schema (the `ExperimentConfig[T, D]` generic and its LM / TMS /
 subclasses) lives lab-side under `param_decomp_lab/experiments/`.
 """
 
-from functools import cached_property
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
@@ -712,45 +711,10 @@ class PDConfig(BaseConfig):
         default="continuous",
         description="Sampling mode for stochastic elements: 'continuous' (default) or 'binomial'",
     )
-    sigmoid_type: Literal["normal", "hard", "leaky_hard", "upper_leaky_hard", "swish_hard"] = Field(
-        default="leaky_hard",
-        description="Type of sigmoid to use for causal importance calculation",
-    )
     decomposition_targets: list[DecompositionTargetConfig] = Field(
         ...,
         description="List of module patterns with C values specifying which modules to decompose.",
     )
-    identity_decomposition_targets: list[DecompositionTargetConfig] | None = Field(
-        default=None,
-        description="List of identity module patterns with C values.",
-    )
-
-    @cached_property
-    def all_decomposition_target_configs(self) -> list[DecompositionTargetConfig]:
-        result = list(self.decomposition_targets)
-        if self.identity_decomposition_targets is not None:
-            for target in self.identity_decomposition_targets:
-                result.append(
-                    DecompositionTargetConfig(
-                        module_pattern=f"{target.module_pattern}.pre_identity", C=target.C
-                    )
-                )
-        return result
-
-    use_delta_component: bool = Field(
-        default=True,
-        description="If True, use an extra component containing the difference between the target "
-        "model and component weights.",
-    )
-
-    tied_weights: list[tuple[str, str]] | None = Field(
-        default=None,
-        description="DEAD on the JAX path (refused via `assert tied_weights is None`). Component "
-        "weight tying is obviated: JAX decomposes each unique matrix once and the vendored arch "
-        "carries the target's native tying (e.g. wte<->lm_head), so there is nothing to re-tie. "
-        "Torch needed this only because it decomposed tied target modules as separate sites.",
-    )
-
     loss_metrics: list[AnyLossMetricConfig] = Field(
         default_factory=list,
         description=(

@@ -15,7 +15,6 @@ pd:
         max_len: 512
         rope_base: 10000.0
   sampling: continuous
-  sigmoid_type: leaky_hard
   decomposition_targets:
   - module_pattern: transformer.h.*.mlp.c_fc
     C: 8192
@@ -25,8 +24,6 @@ pd:
     C: 4096
   - module_pattern: transformer.h.*.attn.c_proj
     C: 2048
-  identity_decomposition_targets: null
-  use_delta_component: true
   components_optimizer:
     lr_schedule:
       start_val: 5.0e-05

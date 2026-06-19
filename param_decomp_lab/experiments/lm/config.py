@@ -197,10 +197,9 @@ SLOW_TIER_EVAL_METRIC_TYPES = frozenset(
 
 def _site_cs(cfg: LMExperimentConfig) -> tuple[SiteC, ...]:
     """Decomposition targets -> canonical per-site (name, C) pairs. Any per-layer
-    matrix site (q/k/v/o/gate/up/down) with its own C is supported; identity targets
-    and non-site module patterns refuse. Raw-HF specs name modules `model.layers.*`;
-    the vendored class drops the prefix — same matrices either way."""
-    assert cfg.pd.identity_decomposition_targets is None, "identity targets unsupported"
+    matrix site (q/k/v/o/gate/up/down) with its own C is supported; non-site module
+    patterns refuse. Raw-HF specs name modules `model.layers.*`; the vendored class drops
+    the prefix — same matrices either way."""
     site_cs = []
     for target in cfg.pd.decomposition_targets:
         name = target.module_pattern.removeprefix("model.")
@@ -230,7 +229,6 @@ def _resolve_target(cfg: LMExperimentConfig) -> AnyLMTargetConfig:
             return TargetConfig(model_name=spec.model_name, sites=_site_cs(cfg))
         case PretrainedTarget():
             assert spec.model_class.rsplit(".", 1)[-1] == "LlamaSimpleMLP", spec.model_class
-            assert cfg.pd.identity_decomposition_targets is None, "identity targets unsupported"
             cache_dir = llama_simple_mlp.pretrain_cache_dir(spec.run_path)
             arch = llama_simple_mlp.load_model_config(cache_dir)
             assert cfg.data.max_seq_len <= arch.n_ctx, (cfg.data.max_seq_len, arch.n_ctx)

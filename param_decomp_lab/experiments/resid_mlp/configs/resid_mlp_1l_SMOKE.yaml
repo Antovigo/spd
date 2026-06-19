@@ -14,9 +14,6 @@ pd:
     fn_type: mlp
     hidden_dims:
     - 16
-  sigmoid_type: leaky_hard
-  use_delta_component: true
-  tied_weights: null
   decomposition_targets:
   - module_pattern: layers.0.mlp_in
     C: 5

@@ -42,7 +42,6 @@ def build_resid_mlp_built_run(cfg: ResidMLPExperimentConfig) -> BuiltRun:
     helpers. ResidMLP validates via the in-loop target-CI metric (not the LM CEandKLLosses
     scalar pass), so `eval` is `None`. The schema's `eval.metrics` list is still read at run
     time for the config-gated `UVPlots` figure (`toy_uv_eval`)."""
-    assert cfg.pd.identity_decomposition_targets is None, "identity targets unsupported"
     site_cs = resid_mlp.canonical_site_cs(
         tuple(SiteC(t.module_pattern, t.C) for t in cfg.pd.decomposition_targets)
     )

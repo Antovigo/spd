@@ -212,7 +212,7 @@ loss written as a global mean — `jax.jit`+GSPMD inserts all collectives.
 | Residual-start prefix/suffix split | `vendored/llama_3_1/components.py:177,196` | `llama8b.py:141,563`; `run.py:238` | done | S18 | torch has `PD_DISABLE_RESIDUAL_START` escape hatch; JAX structural. Default IS residual-start. |
 | Pre-tokenized parquet contract + seeded batch schedule | `experiments/lm/data.py:130,104`; `lm.py:77` | `torch_config.py:171`; `data.py:53,114` | done | S18/R1/R3 | JAX REFUSES HF at runtime. Different batch ordering → trajectories NOT batch-identical across impls (expected). +1 token allowance for the 513-wide pile artifact. |
 | `output_extract` handling | `batch_and_loss_fns.py:27`; `experiments/lm/run.py:154` | `torch_config.py:22`; `llama8b.py:326` | na-by-design | — | JAX forwards always emit bare logits. A disagreeing torch `output_extract` would not be caught (low risk). |
-| `use_delta_component`/`tied_weights`/`sigmoid_type`/identity gating | `pd.py:164,170,147` | `torch_config.py:232,85` | partial | S1 | JAX hardwires production (delta on, leaky_hard, no ties, no identity); refuses the rest at convert. |
+| `use_delta_component`/`tied_weights`/`sigmoid_type`/identity gating | `configs.py` (`PDConfig`, `extra=forbid`) | `torch_config.py:232,85` | done | S1 | JAX hardwires production (delta on, leaky_hard, no ties, no identity) by REMOVING these fields from `PDConfig`; `extra=forbid` rejects any config that sets them. |
 | Optimizer/schedule/faith-warmup config conversion gating | `pd.py:45,198` | `torch_config.py:148,247`; `run.py:197` | done | S19/S20/S21 | A torch schedule with a horizon ≠ `pd.steps` would desync (checked in build_optimizers, not this area). |
 
 ### 12. Launcher / SLURM / DDP

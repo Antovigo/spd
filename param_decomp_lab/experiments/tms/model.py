@@ -6,7 +6,7 @@ The target is `out = relu(linear2(hidden_layers(linear1(x))))`: `linear1`
 `(n_features -> n_hidden)` no bias, optional FROZEN `hidden_layers.{i}` `(n_hidden ->
 n_hidden)` no bias, `linear2` `(n_hidden -> n_features)` with bias, with `linear1`/`linear2`
 weights TIED (`linear2.weight = linear1.weight.T`). The DECOMPOSITION is UNTIED — each site
-gets its own independent `(V, U)` (the TMS PD configs set `tied_weights: null`).
+gets its own independent `(V, U)`.
 
 There is no prefix: the whole model is decomposed, so the "residual" entering the
 decomposed part is the raw input `x` `[B, n_features]` and `tms_input_residual` is the

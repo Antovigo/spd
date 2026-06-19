@@ -130,12 +130,12 @@ def _assert_plain_adamw(optimizer: OptimizerConfig, who: str) -> None:
 
 def assert_canonical_algorithm_config(cfg: "ExperimentConfig[Any, Any]") -> None:
     """Assert the schema lives in the subspace the JAX trainer implements (the engine then
-    reads `pd` / `cadence` DIRECTLY). The numerics-load-bearing constraints: leaky-hard
-    sigmoid, delta component, no tied weights, bf16 compute, cosine-to-0.1 LR with no
-    warmup, plain AdamW (betas (0.9, 0.999), no weight decay), components-only grad clip,
-    and a fully-specified checkpoint cadence."""
-    assert cfg.pd.sigmoid_type == "leaky_hard", cfg.pd.sigmoid_type
-    assert cfg.pd.use_delta_component and cfg.pd.tied_weights is None
+    reads `pd` / `cadence` DIRECTLY). The numerics-load-bearing constraints: bf16 compute,
+    cosine-to-0.1 LR with no warmup, plain AdamW (betas (0.9, 0.999), no weight decay),
+    components-only grad clip, and a fully-specified checkpoint cadence. (Leaky-hard
+    sigmoid, the always-built delta component, and no tied weights are now enforced by
+    REMOVAL of those fields from `PDConfig` — `extra=forbid` rejects any attempt to set
+    them.)"""
     assert cfg.runtime.autocast_bf16, "JAX trainer computes in bf16 (autocast analog)"
     assert cfg.pd.faithfulness_warmup_weight_decay == 0.0
 

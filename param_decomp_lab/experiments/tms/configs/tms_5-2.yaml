@@ -8,7 +8,7 @@ out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 # trainer's schema: the target is pretrained from scratch in-process (no wandb run_path),
 # and FaithfulnessLoss is in the loss list (the JAX recon-term builder requires it; the
 # torch TMS configs relied on faith warmup alone). The decomposition is UNTIED
-# (linear1/linear2 are two sites with independent V/U; tied_weights: null), the target is
+# (linear1/linear2 are two sites with independent V/U), the target is
 # tied. CI fn: layerwise per-site MLP (fn_type=mlp, hidden_dims=[16]). Runs on 1 GPU.
 pd:
   seed: 0
@@ -19,9 +19,6 @@ pd:
     fn_type: mlp
     hidden_dims:
     - 16
-  sigmoid_type: leaky_hard
-  use_delta_component: true
-  tied_weights: null
   decomposition_targets:
   - module_pattern: linear1
     C: 20

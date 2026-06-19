@@ -131,7 +131,6 @@ pd:
   faithfulness_warmup_lr: 0.001
   faithfulness_warmup_steps: 400
   faithfulness_warmup_weight_decay: 0.0
-  identity_decomposition_targets: null
   loss_metrics:
   - beta: 0.5
     coeff: 0.0002
@@ -167,10 +166,7 @@ pd:
   n_mask_samples: 1
   sampling: continuous
   seed: 0
-  sigmoid_type: leaky_hard
   steps: 400000
-  tied_weights: null
-  use_delta_component: true
 runtime:
   remat_recon_forwards: false
   autocast_bf16: true

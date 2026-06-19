@@ -29,7 +29,6 @@ pd:
         max_len: 2048
         rope_base: 10000.0
   sampling: continuous
-  sigmoid_type: leaky_hard
   decomposition_targets:
   - module_pattern: layers.18.mlp.gate_proj
     C: 24576
@@ -37,9 +36,6 @@ pd:
     C: 24576
   - module_pattern: layers.18.mlp.down_proj
     C: 24576
-  identity_decomposition_targets: null
-  use_delta_component: true
-  tied_weights: null
   components_optimizer:
     lr_schedule:
       start_val: 1.5e-04

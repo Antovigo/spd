@@ -66,17 +66,20 @@ Intentional drops (confirm scope, no re-add planned this push):
 - **Component types: `EmbeddingComponents`, Radford-`Conv1D`, `Identity`** — the JAX stack
   decomposes `nn.Linear`-equivalents only (Llama MLP). The factory's conv1d/identity/
   embedding dispatch has no JAX path; folds into the deferred eqx-auto-decompose (#11).
-- **`identity_insertion` / `identity_decomposition_targets`** — refused via assert; config
-  field retained but inert.
+- **`identity_insertion` / `identity_decomposition_targets`** — unsupported; the
+  `identity_decomposition_targets` config field is REMOVED from `PDConfig`, so `extra=forbid`
+  rejects any config that sets it (no longer an inert-but-present field).
 - **LM-path component weight tying (`tie_component_weights`)** — NOT a lost capability;
   **obviated by the JAX design.** Torch tied two SEPARATE component decompositions
   post-init (`tgt.U/V = src.V.T/U.T`) *because* it decomposed tied target modules as
   independent sites. JAX carries the target's native tying inside the vendored arch
   (`wte`↔`lm_head`) and decomposes each UNIQUE matrix once as a single site — so there is
-  nothing to re-tie. `assert tied_weights is None` enforces this; the config field is dead
-  and removable.
-- **`ci_sigmoids` registry** — only `leaky_hard` (split lower/upper) survives; `normal` /
-  `hard` / standalone `leaky_hard` / `swish_hard` are unreachable schema literals.
+  nothing to re-tie. The `tied_weights` config field is REMOVED from `PDConfig`; `extra=forbid`
+  rejects any config that sets it.
+- **`ci_sigmoids` registry** — only `leaky_hard` (split lower/upper) survives; the
+  `sigmoid_type` config field is REMOVED from `PDConfig` (the CI fns hardcode lower/upper
+  leaky-hard), so `normal` / `hard` / `swish_hard` can no longer be requested — `extra=forbid`
+  rejects the key.
 - **`mlp_scalar` CI-fn arch** — torch's scalar `get_component_acts(x)=x@V` couples CI-fn
   input to trained components; doesn't fit the generic `ci_fn(site_inputs)` waist. Replaced
   by the vector-input `LayerwiseMLPCIFn`. (Rationale in `CLAUDE.md`.)

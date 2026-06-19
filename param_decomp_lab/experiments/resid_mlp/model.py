@@ -16,7 +16,7 @@ Torch reference (read-only ground truth): `param_decomp_lab/experiments/resid_ml
 toy uses a random unit-norm embedding with `W_U = W_Eᵀ`); the per-layer MLP matrices
 train. The DECOMPOSITION targets the MLP matrices: sites `layers.{i}.mlp_in`
 `(d_embed → d_mlp)` and `layers.{i}.mlp_out` `(d_mlp → d_embed)`, each an UNTIED
-`(V, U)` (`tied_weights: null`).
+`(V, U)` (every site gets its own independent components).
 
 `W_E` is the PREFIX: the residual entering the decomposed part is `x @ W_E` and
 `resid_mlp_input_residual` maps `(W_E, x) -> x @ W_E`. The recon comparison is MSE on the

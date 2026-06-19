@@ -125,7 +125,7 @@ from param_decomp_lab.experiments.lm.load_run import open_jax_run, run_metadata
 ```
 
 - `PDConfig` — algorithm config: seed, CI fn, loss metrics, optimizers, decomposition
-  targets, tied weights. The torch-free pydantic schema now lives in core
+  targets. The torch-free pydantic schema now lives in core
   (`param_decomp.configs`, alongside `base_config` / `schedule`); the engine reads the
   derived runtime `ExperimentConfig` (`param_decomp.config`). (The eval-metric *config*
   classes likewise live in `param_decomp.configs`; only their torch `Metric` *impls* were
