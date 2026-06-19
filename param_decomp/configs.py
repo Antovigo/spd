@@ -245,6 +245,11 @@ class Cadence(BaseConfig):
     intermediate checkpoints; the final-step checkpoint is always included in the
     retained set."""
 
+    sync_checkpoints_to_wandb: bool = True
+    """Whether to upload ``model_<step>.pth`` / ``training_<step>.pth`` to the wandb run.
+    Set ``False`` for large targets (e.g. 8B checkpoints) where the local copies suffice
+    and wandb storage is the bottleneck. No effect without a wandb-backed sink."""
+
     def should_log_train(self, step: int) -> bool:
         return step % self.train_log_every == 0
 
