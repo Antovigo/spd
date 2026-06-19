@@ -90,6 +90,7 @@ def init_pd_run[T: BaseConfig, D: BaseConfig](
         group=group,
         tags=parsed_tags,
         keep_last_n_checkpoints=keep_last_n,
+        sync_checkpoints_to_wandb=cfg.cadence.sync_checkpoints_to_wandb,
     )
     try_wandb(wandb.save, str(cfg_path), base_path=str(out_dir), policy="now")
     return sink
