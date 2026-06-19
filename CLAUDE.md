@@ -49,26 +49,32 @@ SPD is the predecessor VPD builds on.
 
 ## Package layout
 
-Three flat-layout distributions, deliberately split:
+Two flat-layout distributions, deliberately split — **core is a pure trainer library;
+lab is composition / IO / CLI / experiment assembly**:
 
-- **`param-decomp-config`** (`param_decomp_config/`) — torch-free pydantic config
-  schema. Every config class in the project lives here (`BaseConfig`, `PDConfig`,
-  loss/eval-metric configs, experiment YAML schemas). Depends only on pydantic, numpy,
-  pyyaml, annotated-types — so non-torch consumers (e.g. the JAX repo) can validate the
-  same YAML run configs without pulling torch/transformers/wandb. Keep it that way.
 - **`param-decomp`** (root: `param_decomp/` + sibling `pretrain/` + sibling
-  `vendored_jax/`) — the core: the JAX single-pool VPD trainer (`param_decomp/`: run.py,
-  lm.py, train.py, config.py, ci_fn.py, llama8b.py, … + the `param_decomp.log` logger
-  every consumer uses), the in-house target-LM pretrainer (`pretrain/`), and the
-  bit-parity vendored JAX archs (`vendored_jax/`). Carries jax as a dependency. The repo
-  root IS the uv workspace root; the other two are members. Depends on config.
-- **`param-decomp-lab`** (`param_decomp_lab/`) — team tooling. Experiment scripts, the
-  post-processing pipelines, infra, lab-side helpers. Churns freely; depends on core +
-  config.
+  `vendored_jax/`) — the core: the generic JAX single-pool VPD trainer ENGINE
+  (`param_decomp/`: run.py = `run_decomposition_training`, lm.py, train.py, ci_fn.py,
+  llama8b.py, …), the torch-free pydantic config SCHEMA it now carries directly
+  (`base_config.py` = `BaseConfig`, `schedule.py`, `configs.py` = `PDConfig` /
+  `RuntimeConfig` / `Cadence` / loss + eval-metric configs / routing / ci-fn / wandb
+  shaping), the runtime `ExperimentConfig` dataclasses (`config.py`), the
+  `param_decomp.log` logger, the in-house target-LM pretrainer (`pretrain/`), and the
+  bit-parity vendored JAX archs (`vendored_jax/`). Carries jax + pydantic as deps. NO
+  CLI entrypoints, NO `main()`, NO YAML/experiment reading — the engine takes built
+  objects. The repo root IS the uv workspace root.
+- **`param-decomp-lab`** (`param_decomp_lab/`) — team tooling AND the composition roots.
+  The per-domain in-job entry (`experiments/lm/run.py` / `experiments/{tms,resid_mlp}/run.py`:
+  read the run YAML → build the target / data loader / `ExperimentConfig` → call the core
+  engine), the YAML→`ExperimentConfig` conversion (`experiments/config.py` shared +
+  `experiments/lm/config.py` LM), the experiment YAML schemas, run-loading
+  (`experiments/lm/load_run.py`), launchers, post-processing pipelines, infra. Churns
+  freely; depends on core. The reverse edge (`param_decomp → param_decomp_lab`) is
+  FORBIDDEN — pinned by `param_decomp/tests/test_runtime_standalone.py`.
 
-`make install-dev` syncs all three editably via the uv workspace in the root
-`pyproject.toml` into the one `.venv`. The root `pyproject.toml` declares NO core console
-scripts — the inner trainers run as modules (`python -m param_decomp.run` /
+`make install-dev` syncs both editably via the uv workspace in the root `pyproject.toml`
+into the one `.venv`. The root `pyproject.toml` declares NO core console scripts — the
+trainers run as modules (`python -m param_decomp_lab.experiments.lm.run` /
 `python -m pretrain.train`), not as `pd-*` scripts; the launcher and post-pipeline `pd-*`
 scripts live in `param_decomp_lab/pyproject.toml`. (Slow/plot eval is in-loop only — there
 is no `pd-slow-eval` CLI.)
@@ -90,13 +96,19 @@ entry points, read `param_decomp/CLAUDE.md` and `SPEC.md`. In one breath:
   pure fns (`clean_output` / `site_inputs` / `masked_output` / `weight_deltas`) over
   `(frozen, vu)` pytrees. Generic over vendored LM targets. There is one recon
   semantics: chunkwise masking through the suffix forward, KL on final logits.
-- **`python -m param_decomp.run <config.yaml>`** (`param_decomp/run.py`) — the composition root and the
-  only I/O layer. Reads the canonical `param_decomp_config` schema directly. Orbax
-  sharded checkpoints; SIGTERM → save → SLURM requeue → resume.
+- **`run_decomposition_training(...)`** (`param_decomp/run.py`) — the generic ENGINE: the
+  one train loop every target runs through (init/restore/finetune/faith-warmup, the
+  recon-grid step factory, orbax checkpointing, schedules, metrics, in-loop slow eval,
+  SIGTERM-save). A pure library — no `main()`, reads no YAML; takes built objects.
+- **`python -m param_decomp_lab.experiments.lm.run <config.yaml>`**
+  (`param_decomp_lab/experiments/lm/run.py`) — the LM composition root + only I/O layer:
+  reads the canonical schema, builds the target / prefix / data loader / `ExperimentConfig`,
+  then calls the engine. Orbax sharded checkpoints; SIGTERM → save → SLURM requeue → resume.
 - **Launch from the lab side** via `pd-lm <config.yaml> --nodes N` (login-node submission
   wrapper; snapshots the tree to an immutable shared-FS workspace, installs the `[cuda]`
-  extra there, sbatches `python -m param_decomp.run`; `--local` runs the trainer inline single-process).
-  `lab → param_decomp` is a fine dependency; only `param_decomp → lab` is forbidden.
+  extra there, sbatches `python -m param_decomp_lab.experiments.lm.run`; `--local` runs
+  inline single-process). `lab → param_decomp` is a fine dependency; only
+  `param_decomp → lab` is forbidden.
 
 ## Public API (consumer substrate)
 
@@ -105,24 +117,26 @@ Alongside the trainer, `param_decomp/` exposes a thin substrate the **consumers*
 defined — no package-level re-exports, `__init__.py` files are bare:
 
 ```python
-from param_decomp_config.pd import Cadence, PDConfig, RuntimeConfig
-from param_decomp_config.losses import LossMetricConfig
+from param_decomp.configs import Cadence, LossMetricConfig, PDConfig, RuntimeConfig
 from param_decomp.log import logger
-from param_decomp.load_run import open_jax_run, run_metadata
+from param_decomp_lab.experiments.lm.load_run import open_jax_run, run_metadata
 ```
 
 - `PDConfig` — algorithm config: seed, CI fn, loss metrics, optimizers, decomposition
-  targets, tied weights. The torch-free schema in `param_decomp_config`; the JAX trainer
-  reads it directly. (The eval-metric *config* classes likewise stay in
-  `param_decomp_config`; only their torch `Metric` *impls* were dropped.)
+  targets, tied weights. The torch-free pydantic schema now lives in core
+  (`param_decomp.configs`, alongside `base_config` / `schedule`); the engine reads the
+  derived runtime `ExperimentConfig` (`param_decomp.config`). (The eval-metric *config*
+  classes likewise live in `param_decomp.configs`; only their torch `Metric` *impls* were
+  dropped.)
 - `RuntimeConfig` — compute substrate: `autocast_bf16`, `device`, `dp`. Perturbs numerics
   without changing the algorithm.
 - `param_decomp.log` — the logger every consumer uses (folded into the core trainer
   package).
-- `param_decomp.load_run.{open_jax_run, run_metadata}` — the JAX consumer entry: a run
-  opened for a forward pass (`open_jax_run`, restores orbax) or just its torch-free target
-  topology (`run_metadata`: `n_blocks`/`vocab`/per-site `(name, C)` from config + cache, no
-  restore). `JaxPDAdapter` keys autointerp/clustering metadata off `run_metadata`.
+- `param_decomp_lab.experiments.lm.load_run.{open_jax_run, run_metadata}` — the JAX
+  consumer entry (lab-side, since it builds the LM target): a run opened for a forward pass
+  (`open_jax_run`, restores orbax) or just its target topology (`run_metadata`:
+  `n_blocks`/`vocab`/per-site `(name, C)` from config + cache, no restore). `JaxPDAdapter`
+  keys autointerp/clustering metadata off `run_metadata`.
 
 The torch run-loading surface (`ComponentModel`, the loss `Metric` impls, `RunSink`,
 `RunBatch` / `ReconstructionLoss`, `component_model_io`, the vendored archs) was dropped
@@ -130,28 +144,32 @@ and returns JAX-native as the #10 torch->jax adapter.
 
 ## Where things live
 
-- `param_decomp_config/` — all pydantic configs, one module per domain: `base`
-  (`BaseConfig`, `Probability`, `runtime_cast`), `schedule`, `routing`, `ci_fn`,
-  `decomposition_target`, `losses`, `pd`, `experiment`, `lm`, `eval_metrics`,
-  `autointerp`.
-- `param_decomp/` — the JAX trainer core (`run.py` / `lm.py` / `train.py` / `config.py` /
-  `ci_fn.py` / `llama8b.py` / `llama_simple_mlp.py` / `adversary.py` / `recon.py` /
-  `losses.py` / `checkpoint.py` / `sharding.py` / `eval.py` / `slow_eval.py` /
-  `load_run.py` + `log.py`) plus `configs/` (the self-contained run yamls) and `tests/`
-  (incl. the `tests/equivalence/` frozen torch↔JAX goldens). The torch oracle lives at
-  git tag `torch-oracle`.
+- `param_decomp/` — the JAX trainer core. The pydantic config SCHEMA (`base_config.py` =
+  `BaseConfig` / `Probability` / `runtime_cast`; `schedule.py`; `configs.py` = routing +
+  decomposition-target + ci-fn + loss + eval-metric configs + `PDConfig` / `RuntimeConfig`
+  / `Cadence` / `WandbConfig` / `ResumeProvenance` + the wandb-shaping helpers). The
+  runtime config dataclasses the engine consumes (`config.py`: `ExperimentConfig` /
+  `DataConfig` / `EvalConfig` / … + the `TargetSites` protocol). The engine + numerics
+  (`run.py` = `run_decomposition_training`, `lm.py` / `train.py` / `ci_fn.py` /
+  `llama8b.py` / `llama_simple_mlp.py` / `adversary.py` / `recon.py` / `losses.py` /
+  `checkpoint.py` / `sharding.py` / `eval.py` / `slow_eval.py` + `log.py`) plus `configs/`
+  (the self-contained run yamls) and `tests/` (incl. the `tests/equivalence/` frozen
+  torch↔JAX goldens). The torch oracle lives at git tag `torch-oracle`.
 - `pretrain/` (repo-root sibling) — the in-house target-LM pretrainer (`pretrain.train`):
   trainable equinox archs whose `state_dict()` keys the decomposition loader reads.
 - `vendored_jax/` (repo-root sibling) — bit-parity JAX Llama / GPT-2 archs the trainer
   decomposes.
 - `param_decomp_lab/adapters/` — `JaxPDAdapter`: torch-free autointerp/clustering metadata
-  for a JAX run, keyed off `param_decomp.load_run.run_metadata` (config + cache, no
+  for a JAX run, keyed off `experiments.lm.load_run.run_metadata` (config + cache, no
   orbax restore). The torch `build_target` bridge was deleted with the rest of torch.
-- `param_decomp_lab/experiments/lm/` — `data.py` (the offline tokenize helper for
-  `prestage_tokenized.py`), `prestage_tokenized.py` (HF text → int32 parquet shards for
-  the JAX trainer), `jax_launch.py` (`pd-lm`). The TMS and ResidualMLP domains now live
-  as lab experiments under `param_decomp_lab/experiments/{tms,resid_mlp}/`
-  (`pd-tms` / `pd-resid-mlp`), calling the core engine as a library.
+- `param_decomp_lab/experiments/` — `config.py` (the shared `ExperimentConfig[T, D]` YAML
+  schema + the shared YAML→`ExperimentConfig` conversion). `experiments/lm/`: `run.py`
+  (the LM composition root — `python -m param_decomp_lab.experiments.lm.run`), `config.py`
+  (LM schema + LM build), `load_run.py` (open a finished JAX run), `data.py` /
+  `prestage_tokenized.py` (offline tokenize → parquet shards), `jax_launch.py` (`pd-lm`).
+  The TMS and ResidualMLP domains live under `experiments/{tms,resid_mlp}/`
+  (`run.py` + `config.py` + `model.py`; `pd-tms` / `pd-resid-mlp`), calling the core
+  engine as a library.
 - `param_decomp_lab/{harvest,autointerp,clustering,investigate}/`
   — post-pipeline stages, each with its own CLAUDE.md.
 - `param_decomp_lab/postprocess/` — orchestrates the post-pipeline stages.
@@ -216,14 +234,14 @@ Run a single test: `python -m pytest path/to/test_file.py::test_name`.
 ## CLI entry points
 
 The root `pyproject.toml` declares no core console scripts; the launchers and
-post-pipeline scripts live in `param_decomp_lab/pyproject.toml`. The inner trainers are NOT
-console scripts — run them as modules (the lab launchers sbatch the same module-run
-command). Training is `python -m param_decomp.run` (JAX), launched via `pd-lm`. Slow/plot
-eval is in-loop only (no CLI).
+post-pipeline scripts live in `param_decomp_lab/pyproject.toml`. The composition roots are
+NOT console scripts — run them as modules (the lab launchers sbatch the same module-run
+command). LM training is `python -m param_decomp_lab.experiments.lm.run` (JAX), launched
+via `pd-lm`. Slow/plot eval is in-loop only (no CLI).
 
 | Command | Entry point | Purpose |
 |---|---|---|
-| `python -m param_decomp.run` | `param_decomp/run.py` | The core JAX decomposition trainer (composition root; run inside a launch workspace) |
+| `python -m param_decomp_lab.experiments.lm.run` | `param_decomp_lab/experiments/lm/run.py` | The LM decomposition composition root (reads YAML, builds the target, calls the core engine; run inside a launch workspace) |
 | `python -m pretrain.train` | `pretrain/train.py` | The core in-house target-LM pretrainer |
 | `pd-lm` | `experiments/lm/jax_launch.py` | Launch a decomposition trainer run: snapshot ref + shared-FS workspace + sbatch (`--local` runs inline) |
 | `pd-pretrain` | `experiments/lm/pretrain/jax_launch.py` | Launch a pretrainer run (`--local` runs inline) |

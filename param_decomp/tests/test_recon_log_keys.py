@@ -16,8 +16,7 @@ the torch half (`cls.__name__ == cfg.type`) was pinned against live torch dispat
 before push-1 severed the torch import — it now holds by the frozen `type` literals.
 """
 
-from param_decomp.recon import build_recon_terms
-from param_decomp_config.losses import (
+from param_decomp.configs import (
     AdamPGDConfig,
     CIMaskedReconLayerwiseLossConfig,
     CIMaskedReconLossConfig,
@@ -34,7 +33,8 @@ from param_decomp_config.losses import (
     StochasticReconSubsetLossConfig,
     UnmaskedReconLossConfig,
 )
-from param_decomp_config.schedule import ScheduleConfig
+from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
 
 SITE_NAMES = ("h.0.mlp.c_fc", "h.0.mlp.down_proj")
 

@@ -33,6 +33,15 @@ from jax.sharding import NamedSharding
 from param_decomp.adversary import SourcesAdamState, init_sources_adam_state
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, save_state
 from param_decomp.ci_fn import CIArch
+from param_decomp.configs import (
+    AdamPGDConfig,
+    ChunkwiseSubsetReconLossConfig,
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+    UniformKSubsetRoutingConfig,
+)
 from param_decomp.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
 from param_decomp.llama8b_sharding import (
     dp_mesh,
@@ -42,18 +51,9 @@ from param_decomp.llama8b_sharding import (
 )
 from param_decomp.recon import build_recon_terms
 from param_decomp.run import _ensure_global
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
 from param_decomp.train import TrainState, make_train_step
-from param_decomp_config.losses import (
-    AdamPGDConfig,
-    ChunkwiseSubsetReconLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    PersistentPGDReconLossConfig,
-    SCScope,
-)
-from param_decomp_config.routing import UniformKSubsetRoutingConfig
-from param_decomp_config.schedule import ScheduleConfig
 
 PERSISTENT_TERMS = ("PersistentPGDReconLoss", "ppgd_second")
 

@@ -21,21 +21,21 @@ from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.config import (
-    ExperimentConfig,
-    SharedAlgorithmConfig,
-    convert_shared_algorithm_config,
-    layerwise_mlp_ci_arch,
-    run_instance,
-)
+from param_decomp.config import ExperimentConfig
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
 from param_decomp.run import run_decomposition_training
 from param_decomp.sharding import dp_mesh
 from param_decomp.train import TrainState
-from param_decomp_config.tms import TMSExperimentConfig
 from param_decomp_lab.experiments import toy_uv_eval
+from param_decomp_lab.experiments.config import (
+    SharedAlgorithmConfig,
+    convert_shared_algorithm_config,
+    layerwise_mlp_ci_arch,
+    run_instance,
+)
 from param_decomp_lab.experiments.tms import model as tms
+from param_decomp_lab.experiments.tms.config import TMSExperimentConfig
 from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 

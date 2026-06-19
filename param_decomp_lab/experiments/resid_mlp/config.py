@@ -17,8 +17,8 @@ from typing import Literal
 
 from pydantic import PositiveInt, model_validator
 
-from param_decomp_config.base import BaseConfig, Probability
-from param_decomp_config.experiment import ExperimentConfig
+from param_decomp.base_config import BaseConfig, Probability
+from param_decomp_lab.experiments.config import ExperimentConfig
 
 ResidMLPDataGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
 ResidMLPActFn = Literal["gelu", "relu"]

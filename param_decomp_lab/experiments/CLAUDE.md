@@ -1,11 +1,16 @@
 # `param_decomp_lab/experiments/`
 
-Experiment glue, torch-free. Training is JAX through the generic core engine
-(`param_decomp.run.run_decomposition_training`). LM runs go to SLURM via `pd-lm` (which
-sbatches `python -m param_decomp.run`); the toy domains (TMS, ResidMLP) run on CPU in-process via `pd-tms` /
-`pd-resid-mlp`. The torch `build_target` bridge + the `pretrain/` dir were DELETED with the
-rest of torch: autointerp/clustering read a run's target topology from
-`param_decomp.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
+Experiment glue + the per-domain COMPOSITION ROOTS, torch-free. Training is JAX through the
+generic core engine (`param_decomp.run.run_decomposition_training`, a pure library). Each
+domain's `run.py` is its composition root: read the run YAML → build the target / data
+loader / `ExperimentConfig` → call the engine. LM runs go to SLURM via `pd-lm` (which
+sbatches `python -m param_decomp_lab.experiments.lm.run`); the toy domains (TMS, ResidMLP)
+run on CPU in-process via `pd-tms` / `pd-resid-mlp`. The shared experiment YAML schema +
+the shared YAML→`ExperimentConfig` conversion (`convert_shared_algorithm_config` /
+`run_instance` / `*_ci_arch` / `SharedAlgorithmConfig`) live in `experiments/config.py`;
+each domain's `config.py` carries its own target/data schema + (for the LM) its build.
+autointerp/clustering read a run's target topology from
+`experiments.lm.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
 see `param_decomp_lab/adapters/jax_pd.py`.
 
 ## Toy domains (TMS, ResidMLP)
@@ -29,20 +34,21 @@ The TMS and ResidualMLP toys are LAB experiments that call the core engine as a 
   / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). The toy core `ExperimentConfig.eval`
   stays `None` (the toy validates via the target-CI metric, not the LM scalar pass); the
   `eval.metrics` list is read straight off the raw schema dict (`toy_uv_eval.toy_uv_spec`).
-- `configs/*.yaml` — the canonical `param_decomp_config.{tms,resid_mlp}` schema (TMS: 5-2 /
+- `configs/*.yaml` — the canonical `experiments.{tms,resid_mlp}.config` schema (TMS: 5-2 /
   40-10 / the `-id` deeper variants; ResidMLP: 1l/2l/3l + the global-CI variant).
 
 TMS deeper variant (`n_hidden_layers>0`, the `-id` configs) + the ResidMLP `global` CI arch
 (`fn_type=global_shared_mlp`) are restored and wired end-to-end (the global arch dispatches
-through the core `init_train_state` via `config.toy_ci_arch`). Toy harvest / autointerp /
-clustering is NOT yet wired (`load_run` is LM-only) — the remaining Phase-3 bucket.
+through the core `init_train_state` via `experiments.config.toy_ci_arch`). Toy harvest /
+autointerp / clustering is NOT yet wired (`load_run` is LM-only) — the remaining Phase-3 bucket.
 
 ## Layout
 
-The `ExperimentConfig[T,D]` generic + `EvalConfig` + `WandbConfig` +
-`ResumeProvenance` live in `param_decomp_config/experiment.py`; the LM schema
-(`LMExperimentConfig`, `LMTargetConfig`, `LMDataConfig`, the `target.spec` union) in
-`param_decomp_config/lm.py`; the toy schemas in `param_decomp_config/{tms,resid_mlp}.py`.
+The `ExperimentConfig[T,D]` generic + `EvalConfig` + the shared YAML→`ExperimentConfig`
+conversion live in `experiments/config.py` (`WandbConfig` / `ResumeProvenance` are core, in
+`param_decomp.configs`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
+`LMDataConfig`, the `target.spec` union, `build_from_schema` / `load_config`) in
+`experiments/lm/config.py`; the toy schemas in `experiments/{tms,resid_mlp}/config.py`.
 
 ```
 experiments/

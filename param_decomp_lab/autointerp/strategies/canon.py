@@ -4,7 +4,7 @@ Detailed PD prompt with full decomposition explanation, sign convention,
 CI-vs-act guidance, output PMI, and XML dual-view examples (raw + annotated).
 """
 
-from param_decomp_config.autointerp import CANON_RENDERING, CanonConfig
+from param_decomp_lab.autointerp.config import CANON_RENDERING, CanonConfig
 from param_decomp_lab.autointerp.prompt_helpers import (
     build_annotated_examples,
     dataset_description,

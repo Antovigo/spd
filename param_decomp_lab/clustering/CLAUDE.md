@@ -70,7 +70,7 @@ multiprocessing over iterations). `calc_distances.py` is only the driver + plot;
 not reimplement the math. Distance matrices are strict-lower-triangular (diag/upper `NaN`),
 matching the per-iteration `perm_invariant_hamming_matrix` convention.
 
-The run is opened with `param_decomp.load_run.open_jax_run` (the reusable JAX
+The run is opened with `param_decomp_lab.experiments.lm.load_run.open_jax_run` (the reusable JAX
 "open a run for consumption" pattern, shared with `harvest`); the lower-leaky CI from its
 frozen forward is sampled per token position (`flatten_lm_activations`) and streamed — as
 a numpy-array dict — into the `MembershipBuilder`, producing a `ProcessedMemberships`

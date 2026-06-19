@@ -27,7 +27,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Int
 
-from param_decomp_config.base import BaseConfig
+from param_decomp.base_config import BaseConfig
 from vendored_jax.llama import apply_rope, causal_sdpa, repeat_kv, rms_norm, rope_cos_sin
 
 # ----------------------------- configs -----------------------------

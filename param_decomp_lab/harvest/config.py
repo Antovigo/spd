@@ -8,8 +8,8 @@ from typing import Any, Literal, override
 
 from pydantic import PositiveInt
 
-from param_decomp_config.autointerp import LLMConfig, OpenRouterLLMConfig
-from param_decomp_config.base import BaseConfig
+from param_decomp.base_config import BaseConfig
+from param_decomp_lab.autointerp.config import LLMConfig, OpenRouterLLMConfig
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.infra.wandb import parse_wandb_run_path
 

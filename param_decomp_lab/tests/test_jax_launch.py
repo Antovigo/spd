@@ -52,7 +52,7 @@ _MINIMAL_LM = {
 
 def test_rank_command_runs_trainer_as_module():
     command = _rank_command(Path("param_decomp/configs/x.yaml"), rank_env="export FOO=1")
-    assert "exec python -m param_decomp.run" in command
+    assert "exec python -m param_decomp_lab.experiments.lm.run" in command
     assert "pd-train" not in command
 
 

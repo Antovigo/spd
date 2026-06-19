@@ -36,12 +36,7 @@ from jaxtyping import Array, Float, Int
 from param_decomp import llama_simple_mlp
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, restore_step
 from param_decomp.ci_fn import CIFn
-from param_decomp.config import (
-    ExperimentConfig,
-    LlamaSimpleMLPTargetConfig,
-    TargetConfig,
-    load_run_dir_config,
-)
+from param_decomp.config import ExperimentConfig
 from param_decomp.llama8b import (
     DecompVU,
     first_decomposed_layer,
@@ -58,6 +53,11 @@ from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh
 from param_decomp.target_aliases import AnyFrozenTarget, AnyPrefix
 from param_decomp.train import COMPUTE_DT, TrainState, cast_floating
+from param_decomp_lab.experiments.lm.config import (
+    LlamaSimpleMLPTargetConfig,
+    TargetConfig,
+    load_run_dir_config,
+)
 
 
 @dataclass(frozen=True)

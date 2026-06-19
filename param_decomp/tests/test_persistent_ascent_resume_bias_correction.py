@@ -22,8 +22,8 @@ from param_decomp.adversary import (
     init_sources_adam_state,
     sources_adam_ascend_project,
 )
-from param_decomp_config.losses import AdamPGDConfig
-from param_decomp_config.schedule import ScheduleConfig
+from param_decomp.configs import AdamPGDConfig
+from param_decomp.schedule import ScheduleConfig
 
 
 def _adam() -> AdamPGDConfig:

@@ -1,8 +1,11 @@
-"""The GPU runtime core (`param_decomp/`) is self-contained: it imports the JAX stack +
-`param_decomp_config` + its own siblings (`pretrain`, `vendored_jax`) ONLY — never the
-lab distribution (`param_decomp_lab`) and never `torch`. This pins the dependency
+"""The GPU runtime core (`param_decomp/`) is self-contained: it imports the JAX stack
+(plus the torch-free pydantic config schema it now carries, `param_decomp.configs` /
+`base_config` / `schedule`) + its own siblings (`pretrain`, `vendored_jax`) ONLY — never
+the lab distribution (`param_decomp_lab`) and never `torch`. This pins the dependency
 boundary: `lab → param_decomp` is allowed; the reverse edge `param_decomp → lab` is
-forbidden for the runtime.
+forbidden for the runtime. Notably the composition root (the YAML→ExperimentConfig
+conversion, the `main()` entrypoints, run-loading) lives lab-side, so this scan also
+guards that none of it leaked back into core.
 
 The runtime is every `.py` under `param_decomp/` that ships in the wheel — i.e. not
 the test suite, not the torch-env `tools/` scripts (export verifier / checkpoint
@@ -58,5 +61,5 @@ def test_runtime_imports_nothing_adjacent(path: Path):
     forbidden = _forbidden_imports(path)
     assert not forbidden, (
         f"{path.relative_to(_RUNTIME_ROOT)} imports adjacent/torch modules {forbidden}; "
-        "the GPU runtime must depend on the JAX stack + param_decomp_config only"
+        "the GPU runtime must not depend on the lab distribution or torch"
     )

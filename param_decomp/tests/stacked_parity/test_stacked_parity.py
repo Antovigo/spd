@@ -32,6 +32,15 @@ from jax import random
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
 from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.configs import (
+    AdamPGDConfig,
+    ChunkwiseSubsetReconLossConfig,
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+    UniformKSubsetRoutingConfig,
+)
 from param_decomp.llama8b import (
     DecompVU,
     FrozenAttn,
@@ -43,18 +52,9 @@ from param_decomp.llama8b import (
 )
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import StochasticSources, build_recon_terms, subset_chunk_plan
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.test_llama8b import _tiny_cfg
 from param_decomp.train import TrainState, make_train_step
-from param_decomp_config.losses import (
-    AdamPGDConfig,
-    ChunkwiseSubsetReconLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    PersistentPGDReconLossConfig,
-    SCScope,
-)
-from param_decomp_config.routing import UniformKSubsetRoutingConfig
-from param_decomp_config.schedule import ScheduleConfig
 from vendored_jax.llama import llama3_inv_freq
 
 FIXTURES = Path(__file__).resolve().parent / "stacked_fixtures.npz"

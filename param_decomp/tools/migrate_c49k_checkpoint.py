@@ -52,11 +52,11 @@ from jax.sharding import SingleDeviceSharding
 from jaxtyping import Array
 
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, save_state
-from param_decomp.config import build_from_schema
 from param_decomp.llama8b import llama31_8b_config, llama_decomposed_lm, llama_site_specs
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh
 from param_decomp.train import COMPUTE_DT, TrainState, cast_floating
+from param_decomp_lab.experiments.lm.config import build_from_schema
 
 KIND_TO_SITE_SUFFIX = {"g": "gate_proj", "u": "up_proj", "d": "down_proj"}
 SOURCE_STATE_KEY = "PersistentPGDReconLoss"

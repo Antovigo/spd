@@ -27,14 +27,14 @@ from jax import random
 from jaxtyping import Array, Float
 
 from param_decomp.ci_fn import CIArch, init_ci_fn
-from param_decomp.lm import DecomposedModel, SiteSpec
-from param_decomp.recon import build_recon_terms
-from param_decomp.train import TrainState, make_train_step
-from param_decomp_config.losses import (
+from param_decomp.configs import (
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
     StochasticReconLossConfig,
 )
+from param_decomp.lm import DecomposedModel, SiteSpec
+from param_decomp.recon import build_recon_terms
+from param_decomp.train import TrainState, make_train_step
 
 B, T, D, C = 2, 3, 8, 5
 K_COORDS, M_AUX = 4, 2

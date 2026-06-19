@@ -8,7 +8,7 @@ an immutable shared-FS workspace (clone + the one CUDA venv), stamp the id (+ ou
 wandb group / tags) into the workspace's config, and sbatch. `--local` runs the pretrainer
 in the current shell instead (single process, CPU / 1 GPU).
 
-The schema is `param_decomp_config`-free here: `pretrain.train` validates its own config (it
+The PD config schema is not used here: `pretrain.train` validates its own config (it
 owns `PretrainConfig`, which pulls jax); we only read the run_name and ensure `run_id` is
 absent.
 """

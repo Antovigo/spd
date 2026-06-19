@@ -5,7 +5,7 @@ import httpx
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from param_decomp_config.autointerp import (
+from param_decomp_lab.autointerp.config import (
     AnthropicHaiku45LLMConfig,
     AnthropicOpus46LLMConfig,
     AnthropicSonnet46LLMConfig,

@@ -36,11 +36,11 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
+from param_decomp.configs import SamplingType
 from param_decomp.llama8b import FrozenAttn, Target
 from param_decomp.llama_simple_mlp import SimpleMLPTarget
 from param_decomp.lm import DecomposedModel
 from param_decomp.train import COMPUTE_DT, cast_floating
-from param_decomp_config.routing import SamplingType
 from vendored_jax.llama import apply_rope, repeat_kv, rope_cos_sin
 
 AttnPatternFn = Callable[[Float[Array, "B T qd"], Float[Array, "B T kvd"]], Float[Array, "B H T T"]]

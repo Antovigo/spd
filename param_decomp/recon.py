@@ -19,9 +19,10 @@ from typing import Literal
 from jax import random
 from jaxtyping import Array, PRNGKeyArray
 
-from param_decomp.lm import chunk_sites
-from param_decomp_config.losses import (
+from param_decomp.configs import (
     AdamPGDConfig,
+    AllRoutingConfig,
+    AnyLossMetricConfig,
     BSCScope,
     ChunkwiseSubsetReconLossConfig,
     CIMaskedReconLayerwiseLossConfig,
@@ -33,20 +34,17 @@ from param_decomp_config.losses import (
     PGDReconLayerwiseLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
+    SamplingType,
     SCScope,
+    StaticProbabilityRoutingConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
     StochasticReconSubsetLossConfig,
-    UnmaskedReconLossConfig,
-)
-from param_decomp_config.pd import AnyLossMetricConfig
-from param_decomp_config.routing import (
-    AllRoutingConfig,
-    SamplingType,
-    StaticProbabilityRoutingConfig,
     SubsetRoutingType,
     UniformKSubsetRoutingConfig,
+    UnmaskedReconLossConfig,
 )
+from param_decomp.lm import chunk_sites
 
 Routes = dict[str, Array] | None
 RoutingSampler = Callable[[PRNGKeyArray, tuple[int, ...]], tuple[Routes, ...]]

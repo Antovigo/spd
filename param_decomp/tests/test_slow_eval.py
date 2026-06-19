@@ -17,6 +17,12 @@ import numpy as np
 import pytest
 
 from param_decomp.ci_fn import CIArch, init_ci_fn, lower_leaky_hard_sigmoid
+from param_decomp.configs import (
+    IdentityCIErrorConfig,
+    IdentityCITargetSpec,
+    PermutedCIPlotsConfig,
+    UVPlotsConfig,
+)
 from param_decomp.llama8b import (
     llama_decomposed_lm,
     llama_site_specs,
@@ -41,12 +47,6 @@ from param_decomp.slow_eval import (
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg,
     _tiny_target,
-)
-from param_decomp_config.eval_metrics import (
-    IdentityCIErrorConfig,
-    IdentityCITargetSpec,
-    PermutedCIPlotsConfig,
-    UVPlotsConfig,
 )
 
 

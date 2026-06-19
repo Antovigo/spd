@@ -58,10 +58,11 @@ recon semantics: masks thread through the suffix forward, loss is KL on final lo
 (SPEC §2.3–2.5). Site-local recon is a conceptual no-no, not a "simplification".
 `llama_simple_mlp.py` is the second target (the pile-pretrained `LlamaSimpleMLP`,
 t-9d2b8f02; sites `h.{i}.attn.{q,k,v,o}_proj` / `h.{i}.mlp.{c_fc,down_proj}`) —
-config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig` in
-`config.py` (which also reads the canonical `param_decomp_config` schema DIRECTLY —
+config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig`, both LAB-side
+(`param_decomp_lab/experiments/lm/config.py`, which reads the canonical schema DIRECTLY —
 `build_experiment_config`/`load_config` — routing `kind: pretrained` specs + `h.*`
-wildcards), target build in `run.py::main`. The slow plot metrics are computed
+wildcards), target build in the LM composition root
+`param_decomp_lab/experiments/lm/run.py::main`. The slow plot metrics are computed
 NATIVELY in JAX (`slow_eval.py`) — no torch export round-trip (the torch offline-eval
 bridge `jsp-export` / `pd-offline-eval` was retired). They run IN-LOOP ONLY on
 `eval.slow_every` next to the fast pass (SPEC S28/S29; there is NO offline/retrospective
@@ -73,8 +74,8 @@ batches and logging on the live `_step` axis. The config-gated position-CI metri
 `(T, C)` position-CI matrix (`accumulate_position_ci`, collective; the heatmap figures on
 the background thread, the `IdentityCIError` scalars synchronously on `_step`). `UVPlots`
 is a config-gated figure metric usable for ANY decomposition (the torch `Metric` pattern —
-returns a wandb figure): for the LM in-loop tier `run.py` does a NAIVE host gather of the
-C-sharded V/U (gated on `want_uv_plots`) and passes `components` to
+returns a wandb figure): for the LM in-loop tier the LM composition's `eval_fn` does a
+NAIVE host gather of the C-sharded V/U (gated on `want_uv_plots`) and passes `components` to
 `render_permutation_figures` — it OOMs / breaks at production C BY DESIGN (per Oli), no
 special handling; for the positionless toys (TMS/ResidMLP) `toy_uv_eval.log_uv_figure`
 renders it off the small on-host V/U + the probe CI as permutation source (cheap, no
@@ -88,13 +89,15 @@ target runs through (init/restore/finetune/faith-warmup via `_init_or_restore_st
 recon-grid step factory, orbax checkpointing, schedules, SIGTERM-save). A target injects
 exactly three seams: the data source (`sample_batch(step) -> residual`), the eval metric
 (`eval_fn(state, now_step) -> dict`, run every `eval_every`), and (for the LM) the perf
-token count. `run.py::train` is the thin LM caller (parquet `sample_batch` + the
-CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); `param_decomp.run` is LM-ONLY
-(`config.build_from_schema` validates `LMExperimentConfig`; `main`'s `match cfg.target`
-covers only `TargetConfig` / `LlamaSimpleMLPTargetConfig`). `cfg.target` is typed by the
-`config.TargetSites` protocol (just `.sites`), `cfg.data` is `DataConfig | None` (None for a
-toy run). The shared algorithm-config conversion is public for the lab toys to reuse:
-`config.convert_shared_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch` (+
+token count. `param_decomp_lab/experiments/lm/run.py::train` is the thin LM caller (parquet
+`sample_batch` + the CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); that
+LM composition root is LM-ONLY (`experiments.lm.config.build_from_schema` validates
+`LMExperimentConfig`; `main`'s `match cfg.target` covers only `TargetConfig` /
+`LlamaSimpleMLPTargetConfig`). `cfg.target` is typed by the core `config.TargetSites`
+protocol (just `.sites`), `cfg.data` is `DataConfig | None` (None for a toy run). The
+shared algorithm-config conversion is public lab-side for the toys to reuse:
+`experiments.config.convert_shared_algorithm_config` / `run_instance` /
+`layerwise_mlp_ci_arch` (+
 `SharedAlgorithmConfig`).
 
 The TMS + ResidMLP targets now live under `param_decomp_lab/experiments/{tms,resid_mlp}/`
@@ -107,10 +110,11 @@ CI-fn arch, the allowed exception) stays in the core: `LayerwiseMLPCIFn` (`fn_ty
 the new `GlobalMLPCIFn` (`fn_type=global_shared_mlp`, one shared MLP over all sites jointly,
 concat/split in canonical site order). `run_state.init_train_state` dispatches CI-fn
 construction on `cfg.ci_fn` (`CIArch` transformer / `MLPCIArch` layerwise / `GlobalMLPCIArch`
-global) and uses replicated (not C-sharded) V/U + CI for the tiny toys; `config.CIFnArch`
-admits all three and `config.toy_ci_arch` builds the layerwise / global arch from the toy
-ci_config (validated end-to-end on CPU via `pd-resid-mlp`). Harvest / slow-eval / export over
-the toys are NOT wired (`load_run.build_target` / `run_metadata` are LM-only).
+global) and uses replicated (not C-sharded) V/U + CI for the tiny toys; the core
+`config.CIFnArch` admits all three and the lab `experiments.config.toy_ci_arch` builds the
+layerwise / global arch from the toy ci_config (validated end-to-end on CPU via
+`pd-resid-mlp`). Harvest / slow-eval / export over the toys are NOT wired
+(`experiments.lm.load_run.build_target` / `run_metadata` are LM-only).
 
 ## Invariants with sharp teeth (the ones that have actually bitten)
 
@@ -145,12 +149,15 @@ the toys are NOT wired (`load_run.build_target` / `run_metadata` are LM-only).
 
 `basedpyright` over the whole workspace must be clean (run `make type`); `param_decomp`
 is in the root `[tool.pyright]` include and is checked in the one venv, one pass,
-alongside config and lab.
+alongside lab.
 
-## The training pipeline (`run.py`)
+## The training pipeline
 
-`python -m param_decomp.run <config.yaml>` is the composition root and the only I/O layer; the step
-stays pure. Data is a pre-tokenized parquet artifact under
+The generic ENGINE `run.py::run_decomposition_training` is a pure library (no `main`, no
+YAML). The composition root + only I/O layer is LAB-side:
+`python -m param_decomp_lab.experiments.lm.run <config.yaml>` reads the YAML, builds the
+target + data loader + `ExperimentConfig`, and calls the engine; the step stays pure. Data
+is a pre-tokenized parquet artifact under
 `$DATA_MOUNT/artifacts/mechanisms/param-decomp/datasets/` (`fineweb_llama_tok_2048`
 for Llama-8B, `pile_neox_tok_512` for `LlamaSimpleMLP`) — NEVER stream/tokenize from
 HF at run time (the 80-rank thunderherd lesson). The batch schedule is a pure
@@ -159,8 +166,10 @@ saves (no on-loop full-gather); SIGTERM → save → SLURM requeue → resume fr
 Resume with a changed config is refused (byte-compare). Smokes before a long run
 MUST exercise save AND resume at the production per-rank shape.
 
-A run config is ONE self-contained yaml: the `param_decomp_config` experiment schema
-(`pd`/`data`/`eval`/`cadence`/`runtime`/`target`/`wandb`) plus the run-instance fields
+A run config is ONE self-contained yaml: the experiment schema
+(`param_decomp_lab.experiments.config.ExperimentConfig` over the core
+`param_decomp.configs` pieces — `pd`/`data`/`eval`/`cadence`/`runtime`/`target`/`wandb`)
+plus the run-instance fields
 the schema now also carries — top-level `run_name`/`run_id`/`out_dir`, the
 `runtime.remat_recon_forwards` memory/compute knob, and `wandb.group`/`wandb.tags`.
 `run_id`/`out_dir` are absent in a hand-authored config; `pd-lm` mints + stamps them.

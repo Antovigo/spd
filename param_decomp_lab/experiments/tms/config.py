@@ -11,8 +11,8 @@ from typing import Literal
 
 from pydantic import NonNegativeInt, PositiveInt
 
-from param_decomp_config.base import BaseConfig, Probability
-from param_decomp_config.experiment import ExperimentConfig
+from param_decomp.base_config import BaseConfig, Probability
+from param_decomp_lab.experiments.config import ExperimentConfig
 
 TMSDataGenerationType = Literal[
     "exactly_one_active",

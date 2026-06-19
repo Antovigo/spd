@@ -1,5 +1,5 @@
-"""Submit a JAX decomposition run (`python -m param_decomp.run`) to SLURM, or run it
-locally (`--local`).
+"""Submit a JAX decomposition run (`python -m param_decomp_lab.experiments.lm.run`) to
+SLURM, or run it locally (`--local`).
 
 Mints the `p-<8hex>` run id, snapshots the working tree to `refs/runs/snapshot/<id>`,
 materializes the snapshot as a shared-FS workspace (clone + the one CUDA venv, built at
@@ -22,7 +22,7 @@ import fire
 import yaml
 
 from param_decomp.log import logger
-from param_decomp_config.lm import LMExperimentConfig
+from param_decomp_lab.experiments.lm.config import LMExperimentConfig
 from param_decomp_lab.infra.git import create_git_snapshot
 from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR, REPO_ROOT
@@ -49,7 +49,7 @@ export XLA_FLAGS="--xla_gpu_enable_command_buffer=\""""
 def _rank_command(config_rel: Path, rank_env: str) -> str:
     return (
         f"source .venv/bin/activate\n{rank_env}\n"
-        f"exec python -m param_decomp.run {shlex.quote(str(config_rel))}"
+        f"exec python -m param_decomp_lab.experiments.lm.run {shlex.quote(str(config_rel))}"
     )
 
 
@@ -151,7 +151,7 @@ def _run_local(config_rel: Path, run_name: str, group: str | None, tags: list[st
     _stamp_config(config, run_id, group, tags)
     logger.section(f"pd-lm local: {run_name} ({run_id})")
     subprocess.run(
-        [sys.executable, "-m", "param_decomp.run", str(config_rel)],
+        [sys.executable, "-m", "param_decomp_lab.experiments.lm.run", str(config_rel)],
         cwd=REPO_ROOT,
         check=True,
         env=os.environ.copy(),

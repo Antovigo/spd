@@ -29,7 +29,7 @@ def toy_uv_spec(lm: DecomposedModel, raw_cfg: dict[str, Any]) -> PermutationMetr
     position-CI / identity metrics are ignored by the toy."""
     from pydantic import TypeAdapter
 
-    from param_decomp_config.eval_metrics import AnyEvalMetricConfig
+    from param_decomp.configs import AnyEvalMetricConfig
 
     raw_metrics = (raw_cfg.get("eval") or {}).get("metrics", [])
     adapter = TypeAdapter(AnyEvalMetricConfig)

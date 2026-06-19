@@ -4,7 +4,7 @@ component model, no safetensors bridge.
     python -m param_decomp_lab.clustering.scripts.run_worker_jax \
         --run_dir runs/p-761bc061 --n_tokens 50000 --batch_size 16 --n_tokens_per_seq 8
 
-The run is opened with `param_decomp.load_run.open_jax_run` (the reusable JAX
+The run is opened with `param_decomp_lab.experiments.lm.load_run.open_jax_run` (the reusable JAX
 "open a run for consumption" pattern); the lower-leaky CI from its frozen forward is
 sampled per token position and streamed — as a numpy-array dict — into the
 `MembershipBuilder`, producing the `ProcessedMemberships` snapshot `pd-cluster-merge`
@@ -23,11 +23,11 @@ import numpy as np
 
 from param_decomp.config import DataConfig
 from param_decomp.data import BatchSchedule, ShardServer, scan_shards
-from param_decomp.load_run import LoadedJaxRun, open_jax_run
 from param_decomp.log import logger
 from param_decomp_lab.clustering.harvest_config import HarvestConfig
 from param_decomp_lab.clustering.memberships import MembershipBuilder, flatten_lm_activations
 from param_decomp_lab.clustering.paths import clustering_harvest_dir, new_harvest_id
+from param_decomp_lab.experiments.lm.load_run import LoadedJaxRun, open_jax_run
 
 
 def sampled_ci_from_forward(

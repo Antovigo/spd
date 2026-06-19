@@ -42,11 +42,11 @@ from param_decomp.ci_fn_mlp import (
     init_global_mlp_ci_fn,
     init_layerwise_mlp_ci_fn,
 )
+from param_decomp.configs import BSCScope, PersistentPGDSourceScope, SCScope
 from param_decomp.llama8b import DecompVU, Target, init_decomp_vu
 from param_decomp.lm import SiteSpec
 from param_decomp.sharding import dp_mesh
 from param_decomp.sharding import shard_batch as _generic_shard_batch
-from param_decomp_config.losses import BSCScope, PersistentPGDSourceScope, SCScope
 
 __all__ = [
     "dp_mesh",

@@ -36,6 +36,12 @@ from param_decomp.adversary import (  # noqa: E402
     init_sources_adam_state,
 )
 from param_decomp.ci_fn import CIArch, init_ci_fn  # noqa: E402
+from param_decomp.configs import (  # noqa: E402
+    AdamPGDConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+)
 from param_decomp.llama8b import (  # noqa: E402
     KINDS,
     LayerRange,
@@ -44,15 +50,9 @@ from param_decomp.llama8b import (  # noqa: E402
     site_name,
 )
 from param_decomp.recon import subset_chunk_plan  # noqa: E402
+from param_decomp.schedule import ScheduleConfig  # noqa: E402
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target  # noqa: E402
 from param_decomp.train import TrainState, make_train_step  # noqa: E402
-from param_decomp_config.losses import (  # noqa: E402
-    AdamPGDConfig,
-    ImportanceMinimalityLossConfig,
-    PersistentPGDReconLossConfig,
-    SCScope,
-)
-from param_decomp_config.schedule import ScheduleConfig  # noqa: E402
 from vendored_jax.llama import LlamaConfig  # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "stacked_fixtures.npz"

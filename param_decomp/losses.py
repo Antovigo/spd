@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from beartype import beartype
 from jaxtyping import Array, Float, jaxtyped
 
-from param_decomp_config.losses import ImportanceMinimalityLossConfig
+from param_decomp.configs import ImportanceMinimalityLossConfig
 
 
 @jaxtyped(typechecker=beartype)

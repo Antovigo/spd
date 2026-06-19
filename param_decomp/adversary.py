@@ -22,8 +22,8 @@ import jax.numpy as jnp
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
+from param_decomp.configs import AdamPGDConfig
 from param_decomp.lm import SiteSpec
-from param_decomp_config.losses import AdamPGDConfig
 
 
 @jax.tree_util.register_dataclass

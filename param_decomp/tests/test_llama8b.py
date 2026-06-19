@@ -14,6 +14,16 @@ import pytest
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
 from param_decomp.ci_fn import CIArch, CIFn, init_ci_fn
+from param_decomp.configs import (
+    AdamPGDConfig,
+    ChunkwiseSubsetReconLossConfig,
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    PGDReconLossConfig,
+    SCScope,
+    UniformKSubsetRoutingConfig,
+)
 from param_decomp.llama8b import (
     DecompVU,
     FrozenAttn,
@@ -30,18 +40,8 @@ from param_decomp.llama8b import (
 )
 from param_decomp.lm import SiteC, SiteSpec
 from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
-from param_decomp_config.losses import (
-    AdamPGDConfig,
-    ChunkwiseSubsetReconLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    PersistentPGDReconLossConfig,
-    PGDReconLossConfig,
-    SCScope,
-)
-from param_decomp_config.routing import UniformKSubsetRoutingConfig
-from param_decomp_config.schedule import ScheduleConfig
 from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 
 

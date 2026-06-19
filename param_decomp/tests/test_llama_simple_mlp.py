@@ -15,6 +15,15 @@ import pytest
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
 from param_decomp.ci_fn import CIArch, CIFn, init_ci_fn
+from param_decomp.configs import (
+    AdamPGDConfig,
+    ChunkwiseSubsetReconLossConfig,
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+    UniformKSubsetRoutingConfig,
+)
 from param_decomp.llama8b import DecompVU, FrozenAttn, init_decomp_vu
 from param_decomp.llama_simple_mlp import (
     LlamaSimpleMLPConfig,
@@ -34,17 +43,8 @@ from param_decomp.llama_simple_mlp import (
 )
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
-from param_decomp_config.losses import (
-    AdamPGDConfig,
-    ChunkwiseSubsetReconLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    PersistentPGDReconLossConfig,
-    SCScope,
-)
-from param_decomp_config.routing import UniformKSubsetRoutingConfig
-from param_decomp_config.schedule import ScheduleConfig
 
 
 def _tiny_cfg() -> LlamaSimpleMLPConfig:
@@ -504,12 +504,12 @@ def test_pretrained_target_converts_with_wildcards():
     wildcard decomposition patterns over the checkpoint's n_layer (4)."""
     import yaml
 
-    from param_decomp.config import (
-        DataConfig,
+    from param_decomp.config import DataConfig
+    from param_decomp_lab.experiments.lm.config import (
         LlamaSimpleMLPTargetConfig,
+        LMExperimentConfig,
         build_experiment_config,
     )
-    from param_decomp_config.lm import LMExperimentConfig
 
     reference_yaml = Path(__file__).parent.parent / "configs" / "llama8b_l18_b128_cmp32.yaml"
     raw = yaml.safe_load(reference_yaml.read_text())

@@ -4,7 +4,7 @@ Short labels (2-5 words), skeptical tone, structured JSON output.
 Extracted from the original prompt_template.py.
 """
 
-from param_decomp_config.autointerp import CompactSkepticalConfig
+from param_decomp_lab.autointerp.config import CompactSkepticalConfig
 from param_decomp_lab.autointerp.prompt_helpers import (
     build_annotated_examples,
     build_data_presentation,

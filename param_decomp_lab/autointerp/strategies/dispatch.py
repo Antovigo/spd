@@ -1,6 +1,6 @@
 """Strategy dispatch: routes AutointerpConfig variants to their implementations."""
 
-from param_decomp_config.autointerp import (
+from param_decomp_lab.autointerp.config import (
     CanonConfig,
     CompactSkepticalConfig,
     DualViewConfig,

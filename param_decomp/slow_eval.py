@@ -59,6 +59,14 @@ from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 
 from param_decomp.ci_fn import lower_leaky_hard_sigmoid, upper_leaky_hard_sigmoid
+from param_decomp.configs import (
+    DenseCITargetSpec,
+    IdentityCIErrorConfig,
+    IdentityCITargetSpec,
+    PermutedCIPlotsConfig,
+    SamplingType,
+    UVPlotsConfig,
+)
 from param_decomp.hidden_acts_eval import (
     accumulate_hidden_acts,
     hidden_acts_log_entries,
@@ -66,14 +74,6 @@ from param_decomp.hidden_acts_eval import (
     make_stochastic_hidden_acts_step,
 )
 from param_decomp.lm import DecomposedModel
-from param_decomp_config.eval_metrics import (
-    DenseCITargetSpec,
-    IdentityCIErrorConfig,
-    IdentityCITargetSpec,
-    PermutedCIPlotsConfig,
-    UVPlotsConfig,
-)
-from param_decomp_config.routing import SamplingType
 
 IDENTITY_CI_ERROR_TOLERANCE = 0.1
 """Torch `IdentityCIPattern.distance_from` / `compute_target_metrics` default tolerance —
@@ -680,7 +680,7 @@ def eval_metrics_from_run_dir(run_dir: Path) -> list[Any]:
     import yaml
     from pydantic import TypeAdapter
 
-    from param_decomp_config.eval_metrics import AnyEvalMetricConfig
+    from param_decomp.configs import AnyEvalMetricConfig
 
     raw = yaml.safe_load((run_dir / "config.yaml").read_text())
     adapter = TypeAdapter(AnyEvalMetricConfig)

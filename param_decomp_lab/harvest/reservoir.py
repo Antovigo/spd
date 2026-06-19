@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 from jaxtyping import Bool, Float, Int
 
-from param_decomp_config.base import runtime_cast
+from param_decomp.base_config import runtime_cast
 from param_decomp_lab.harvest.schemas import ActivationExample
 
 WINDOW_PAD_SENTINEL = -1

@@ -9,7 +9,6 @@ resolution-markers = [
 [manifest]
 members = [
     "param-decomp",
-    "param-decomp-config",
     "param-decomp-lab",
 ]
 
@@ -1568,6 +1567,7 @@ name = "param-decomp"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "annotated-types" },
     { name = "beartype" },
     { name = "einops" },
     { name = "equinox" },
@@ -1577,9 +1577,9 @@ dependencies = [
     { name = "numpy" },
     { name = "optax" },
     { name = "orbax-checkpoint" },
-    { name = "param-decomp-config" },
     { name = "pillow" },
     { name = "pyarrow" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "safetensors" },
     { name = "wandb" },
@@ -1606,6 +1606,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "annotated-types" },
     { name = "beartype", specifier = "==0.22.2" },
     { name = "einops", specifier = "==0.8.2" },
     { name = "equinox", specifier = "==0.13.8" },
@@ -1616,9 +1617,9 @@ requires-dist = [
     { name = "numpy", specifier = "==2.4.6" },
     { name = "optax", specifier = "==0.2.8" },
     { name = "orbax-checkpoint", specifier = "==0.12.0" },
-    { name = "param-decomp-config", editable = "param_decomp_config" },
     { name = "pillow", specifier = "==12.0.0" },
     { name = "pyarrow", specifier = "==19.0.1" },
+    { name = "pydantic", specifier = "<2.12" },
     { name = "pyyaml", specifier = "==6.0.2" },
     { name = "safetensors", specifier = "==0.7.0" },
     { name = "wandb", specifier = "==0.21.0" },
@@ -1640,25 +1641,6 @@ dev = [
 ]
 
 [[package]]
-name = "param-decomp-config"
-version = "0.0.1"
-source = { editable = "param_decomp_config" }
-dependencies = [
-    { name = "annotated-types" },
-    { name = "numpy" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "annotated-types" },
-    { name = "numpy" },
-    { name = "pydantic", specifier = "<2.12" },
-    { name = "pyyaml" },
-]
-
-[[package]]
 name = "param-decomp-lab"
 version = "0.0.1"
 source = { editable = "param_decomp_lab" }
@@ -1673,7 +1655,6 @@ dependencies = [
     { name = "openrouter" },
     { name = "orjson" },
     { name = "param-decomp" },
-    { name = "param-decomp-config" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "scipy" },
@@ -1699,7 +1680,6 @@ requires-dist = [
     { name = "openrouter", specifier = ">=0.1.1" },
     { name = "orjson" },
     { name = "param-decomp", editable = "." },
-    { name = "param-decomp-config", editable = "param_decomp_config" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "scipy", specifier = ">=1.14.1" },

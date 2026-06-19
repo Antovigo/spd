@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from annotated_types import Ge, Gt, Le
 from pydantic import Field
 
-from param_decomp_config.base import BaseConfig
+from param_decomp.base_config import BaseConfig
 from pretrain.models import (
     GPT2SimpleConfig,
     LlamaSimpleConfig,

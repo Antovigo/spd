@@ -27,6 +27,15 @@ from jax import random
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
 from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.configs import (
+    AdamPGDConfig,
+    ChunkwiseSubsetReconLossConfig,
+    FaithfulnessLossConfig,
+    ImportanceMinimalityLossConfig,
+    PersistentPGDReconLossConfig,
+    SCScope,
+    UniformKSubsetRoutingConfig,
+)
 from param_decomp.llama8b import (
     init_decomp_vu,
     llama_decomposed_lm,
@@ -34,19 +43,10 @@ from param_decomp.llama8b import (
     mlp_family_site_cs,
 )
 from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import dp_mesh, shard_batch
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
 from param_decomp.train import TrainState, make_train_step
-from param_decomp_config.losses import (
-    AdamPGDConfig,
-    ChunkwiseSubsetReconLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
-    PersistentPGDReconLossConfig,
-    SCScope,
-)
-from param_decomp_config.routing import UniformKSubsetRoutingConfig
-from param_decomp_config.schedule import ScheduleConfig
 
 
 def _run(steps: int, sharded: bool) -> list[dict[str, float]]:

@@ -6,7 +6,7 @@ Pure functions for formatting component data into LLM prompt sections.
 import re
 from typing import Literal
 
-from param_decomp_config.autointerp import (
+from param_decomp_lab.autointerp.config import (
     ExampleRenderingConfig,
     LegacyDelimitedExamplesConfig,
     SingleLineExamplesConfig,

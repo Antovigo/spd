@@ -36,6 +36,7 @@ from param_decomp.adversary import (
 )
 from param_decomp.ci_fn import CIFn, CIValues
 from param_decomp.ci_fn_mlp import GlobalMLPCIFn, LayerwiseMLPCIFn
+from param_decomp.configs import AdamPGDConfig
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import (
     annealed_pnorm,
@@ -52,7 +53,6 @@ from param_decomp.recon import (
     Routes,
     StochasticSources,
 )
-from param_decomp_config.losses import AdamPGDConfig
 
 AnyCIFn = CIFn | LayerwiseMLPCIFn | GlobalMLPCIFn
 """The CI-fn families: the shared-transformer (`ci_fn.py`, `expects_axes=("sequence",)`),

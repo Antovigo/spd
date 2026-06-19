@@ -1,0 +1,947 @@
+"""The torch-free pydantic config schema for the algorithm core.
+
+Every algorithm-level config class lives here (or in the sibling `base_config` /
+`schedule` modules): routing + sampling, decomposition targets, the CI-fn config tree,
+loss-metric configs, eval-metric configs, the top-level `PDConfig` / `RuntimeConfig` /
+`Cadence`, and the `wandb.config` shaping helpers. Depends only on pydantic / numpy /
+pyyaml / annotated-types (via `base_config`), so non-trainer consumers validate the same
+YAML run configs without pulling jax/wandb.
+
+Experiment-level schema (the `ExperimentConfig[T, D]` generic and its LM / TMS / ResidMLP
+subclasses) lives lab-side under `param_decomp_lab/experiments/`.
+"""
+
+from functools import cached_property
+from pathlib import Path
+from typing import Annotated, Any, Literal, Self
+
+from pydantic import (
+    BeforeValidator,
+    Discriminator,
+    Field,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
+
+from param_decomp.base_config import BaseConfig, Probability
+from param_decomp.schedule import ScheduleConfig
+
+# ---------------------------------------------------------------------------
+# Routing + sampling
+# ---------------------------------------------------------------------------
+
+
+class UniformKSubsetRoutingConfig(BaseConfig):
+    """Route each position to a uniformly-sized random subset."""
+
+    type: Literal["uniform_k_subset"] = "uniform_k_subset"
+
+
+class StaticProbabilityRoutingConfig(BaseConfig):
+    """Each position independently routes to each module with probability `p`."""
+
+    type: Literal["static_probability"] = "static_probability"
+    p: Probability
+
+
+class AllRoutingConfig(BaseConfig):
+    """Route every position to every module (the `"all"` fast path)."""
+
+    type: Literal["all"] = "all"
+
+
+# Discriminated union over the subset-routing configs (keyed by ``type``).
+SubsetRoutingType = UniformKSubsetRoutingConfig | StaticProbabilityRoutingConfig | AllRoutingConfig
+
+
+# ``"continuous"`` draws uniform [0, 1) sources; ``"binomial"`` draws Bernoulli sources.
+SamplingType = Literal["continuous", "binomial"]
+
+
+# ---------------------------------------------------------------------------
+# Decomposition target
+# ---------------------------------------------------------------------------
+
+
+class DecompositionTargetConfig(BaseConfig):
+    module_pattern: str = Field(..., description="fnmatch-style pattern to match module names")
+    C: PositiveInt = Field(
+        ..., description="Number of components for modules matching this pattern"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Causal-importance function configs
+# ---------------------------------------------------------------------------
+
+LayerwiseCiFnType = Literal["mlp", "vector_mlp", "shared_mlp"]
+
+
+class LayerwiseCiConfig(BaseConfig):
+    """Layerwise CI fns — one independent CI fn per decomposition target."""
+
+    mode: Literal["layerwise"] = "layerwise"
+    fn_type: LayerwiseCiFnType = Field(
+        ..., description="Type of layerwise CI function: mlp, vector_mlp, or shared_mlp"
+    )
+    hidden_dims: list[PositiveInt] = Field(
+        ..., description="Hidden dimensions for the CI function MLP"
+    )
+
+    @model_validator(mode="after")
+    def validate_hidden_dims(self) -> Self:
+        if self.fn_type in ("mlp", "vector_mlp") and not self.hidden_dims:
+            raise ValueError(f"hidden_dims must be non-empty for fn_type={self.fn_type!r}")
+        return self
+
+
+class AttnConfig(BaseConfig):
+    """Self-attention config for the transformer CI fn. Uses RoPE for length generalization."""
+
+    n_heads: PositiveInt = Field(
+        ...,
+        description="Number of attention heads. Must divide the input dimension.",
+    )
+    max_len: PositiveInt = Field(
+        default=2048,
+        description="Maximum sequence length for RoPE embeddings.",
+    )
+    rope_base: float = Field(
+        default=10000.0,
+        description="Base for RoPE frequency computation.",
+    )
+
+
+class GlobalSharedTransformerCiConfig(BaseConfig):
+    """Config for the global transformer CI fn.
+
+    `d_model` must be divisible by `attn_config.n_heads` and the resulting per-head dim
+    must be even (RoPE). `mlp_hidden_dim` defaults to `[4 * d_model]`.
+    """
+
+    d_model: PositiveInt
+    n_blocks: PositiveInt
+    mlp_hidden_dim: list[PositiveInt] | None = Field(
+        default=None,
+        description="Hidden dimension for transformer MLP blocks. "
+        "If None, defaults to [4 * d_model].",
+    )
+    attn_config: AttnConfig
+
+    @model_validator(mode="after")
+    def validate_config(self) -> Self:
+        assert self.d_model % self.attn_config.n_heads == 0, (
+            f"d_model ({self.d_model}) must be divisible by "
+            f"attn_config.n_heads ({self.attn_config.n_heads})"
+        )
+        d_head = self.d_model // self.attn_config.n_heads
+        assert d_head % 2 == 0, (
+            f"d_head ({d_head}) must be even for RoPE. "
+            f"d_model={self.d_model}, "
+            f"n_heads={self.attn_config.n_heads}"
+        )
+        return self
+
+
+class GlobalSharedMlpCiConfig(BaseConfig):
+    """A single global MLP CI fn that maps all layers jointly."""
+
+    mode: Literal["global"] = "global"
+    fn_type: Literal["global_shared_mlp"] = "global_shared_mlp"
+    hidden_dims: list[PositiveInt] = Field(
+        ..., description="Hidden dimensions for the global_shared_mlp CI function."
+    )
+
+
+class GlobalSharedTransformerCiFnConfig(BaseConfig):
+    """A single global transformer CI fn that maps all layers jointly."""
+
+    mode: Literal["global"] = "global"
+    fn_type: Literal["global_shared_transformer"] = "global_shared_transformer"
+    simple_transformer_ci_cfg: GlobalSharedTransformerCiConfig
+
+
+# Stored global CI configs predate the split into per-fn_type classes: they wrote a
+# single class with both `hidden_dims` and `simple_transformer_ci_cfg`, the inactive one
+# left as `None`. Drop the inactive null so the now-`extra=forbid` per-fn_type classes
+# accept old files. Delete once stored runs are migrated.
+_NULLABLE_LEGACY_GLOBAL_CI_KEYS = frozenset({"hidden_dims", "simple_transformer_ci_cfg"})
+
+
+def _drop_null_inactive_global_ci_field(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            k: v
+            for k, v in value.items()
+            if not (k in _NULLABLE_LEGACY_GLOBAL_CI_KEYS and v is None)
+        }
+    return value
+
+
+# Discriminated (by `fn_type`) union of the global CI-fn configs. Both share
+# `mode="global"`; the `fn_type` literal selects MLP vs transformer.
+GlobalCiConfig = Annotated[
+    GlobalSharedMlpCiConfig | GlobalSharedTransformerCiFnConfig,
+    Field(discriminator="fn_type"),
+    BeforeValidator(_drop_null_inactive_global_ci_field),
+]
+
+
+# Nested discriminated union: the outer `mode` literal picks layerwise vs global, and
+# the global branch's inner `fn_type` literal selects MLP vs transformer.
+CiConfig = Annotated[
+    LayerwiseCiConfig | GlobalCiConfig,
+    Field(discriminator="mode"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Loss-metric configs
+# ---------------------------------------------------------------------------
+
+
+class LossMetricConfig(BaseConfig):
+    """Pydantic config for a metric that can also be used as a training loss.
+
+    `coeff` is required when this metric is listed under `loss_metrics` (asserted by
+    `PDConfig`'s field validator); ignored for eval-only instances.
+
+    `name` overrides the class name as this instance's identity (`Metric.instance_key`),
+    letting the same metric class appear under both `loss_metrics` and `eval.metrics`
+    with different settings — e.g. a 1-step PGD training loss alongside a 20-step PGD
+    eval probe. Leave `None` (the default) and the class name is used.
+    """
+
+    coeff: float | None = None
+    name: str | None = None
+
+
+class FaithfulnessLossConfig(LossMetricConfig):
+    type: Literal["FaithfulnessLoss"] = "FaithfulnessLoss"
+
+
+class ImportanceMinimalityLossConfig(LossMetricConfig):
+    """Config for the `L_p`-style importance-minimality penalty on upper-leaky CI values.
+
+    `pnorm` is the initial `p`; `beta` weights the entropy-like `mean * log2(1 + sum)`
+    term added on top of the `L_p` term. `pnorm` is linearly annealed toward
+    `p_anneal_final_p` between `p_anneal_start_frac` and `p_anneal_end_frac` of training
+    (no-op when `p_anneal_final_p is None` or `p_anneal_start_frac == 1.0`).
+    """
+
+    type: Literal["ImportanceMinimalityLoss"] = "ImportanceMinimalityLoss"
+    pnorm: NonNegativeFloat
+    beta: NonNegativeFloat
+    p_anneal_start_frac: Probability = 1.0
+    p_anneal_final_p: NonNegativeFloat | None = None
+    p_anneal_end_frac: Probability = 1.0
+    eps: NonNegativeFloat = 1e-12
+
+
+class CIMaskedReconLossConfig(LossMetricConfig):
+    type: Literal["CIMaskedReconLoss"] = "CIMaskedReconLoss"
+
+
+class CIMaskedReconLayerwiseLossConfig(LossMetricConfig):
+    type: Literal["CIMaskedReconLayerwiseLoss"] = "CIMaskedReconLayerwiseLoss"
+
+
+class CIMaskedReconSubsetLossConfig(LossMetricConfig):
+    type: Literal["CIMaskedReconSubsetLoss"] = "CIMaskedReconSubsetLoss"
+    routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
+        UniformKSubsetRoutingConfig()
+    )
+
+
+class StochasticReconLossConfig(LossMetricConfig):
+    type: Literal["StochasticReconLoss"] = "StochasticReconLoss"
+
+
+class StochasticReconLayerwiseLossConfig(LossMetricConfig):
+    type: Literal["StochasticReconLayerwiseLoss"] = "StochasticReconLayerwiseLoss"
+
+
+class StochasticReconSubsetLossConfig(LossMetricConfig):
+    type: Literal["StochasticReconSubsetLoss"] = "StochasticReconSubsetLoss"
+    routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
+        UniformKSubsetRoutingConfig()
+    )
+
+
+class StochasticHiddenActsReconLossConfig(LossMetricConfig):
+    type: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
+
+
+class UnmaskedReconLossConfig(LossMetricConfig):
+    type: Literal["UnmaskedReconLoss"] = "UnmaskedReconLoss"
+
+
+class ChunkwiseSubsetReconLossConfig(LossMetricConfig):
+    """Reconstruction loss that mirrors the 3-pool / 2-pool chunkwise subset recon.
+
+    The decomposed sites (`model.target_module_paths`, in order) are grouped into
+    chunks of `sites_per_chunk`; each chunk runs `SubsetReconPlan(routing, n_samples)`
+    — one masked suffix forward per generated routing, all the chunk's sites swapped in
+    with a per-position routing draw — and the recon is the fused-linear-KL against the
+    clean logits (when `use_fused_kl`). The total is the mean over all chunk forwards of
+    `recon_loss / n_positions`, matching the 2-pool's per-step recon.
+
+    The JAX single-pool trainer implements this natively: `recon.build_recon_terms`
+    maps this `type` onto `recon.subset_chunk_plan` (a parameterization of the one
+    `chunkwise_plan` builder), and the jitted step runs the chunk forwards directly —
+    no vendored `LMComponentModel` or lab recon-plan machinery is involved.
+    """
+
+    type: Literal["ChunkwiseSubsetReconLoss"] = "ChunkwiseSubsetReconLoss"
+    sites_per_chunk: PositiveInt
+    routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
+        UniformKSubsetRoutingConfig()
+    )
+    n_samples: PositiveInt = 1
+    use_fused_kl: bool = True
+
+
+PGDInitStrategy = Literal["random", "ones", "zeroes"]
+# Stored run configs predate the shape-literal scope names; alias exactly the literals
+# that exist in stored data (`unique_per_datapoint` occurs only in LM runs, hence `bsc`).
+# Delete once stored runs are migrated.
+_LEGACY_MASK_SCOPE_ALIASES = {
+    "shared_across_batch": "c",
+    "unique_per_datapoint": "bsc",
+}
+
+
+def _alias_legacy_mask_scope(value: Any) -> Any:
+    if isinstance(value, str):
+        return _LEGACY_MASK_SCOPE_ALIASES.get(value, value)
+    return value
+
+
+# Scope literals spell the adversarial-source shape in tensor order (batch, seq, C).
+# `c` is one shared vector, rank-polymorphic and DP-synced; `bc` (no seq axis) and
+# `bsc` (LM) are independent per batch element, and must match the batch rank.
+#
+# Deliberately NOT unified with `PersistentPGDSourceScope` below: per-step PGD encodes
+# its scope as a bare YAML string (this `Literal`), while persistent PGD encodes it as a
+# nested config object (the `CScope | ... | BSCScope` discriminated union). The value
+# spaces also differ — `bc` is per-step-only; `sc`/`nsc` are persistent-only. Converging
+# them would change the stored YAML shape of one side and break old-run parsing.
+MaskScope = Annotated[Literal["c", "bc", "bsc"], BeforeValidator(_alias_legacy_mask_scope)]
+
+
+class PGDConfig(LossMetricConfig):
+    """Shared base for per-step PGD loss configs."""
+
+    init: PGDInitStrategy
+    step_size: PositiveFloat
+    n_steps: NonNegativeInt
+    mask_scope: MaskScope
+
+
+class PGDReconLossConfig(PGDConfig):
+    type: Literal["PGDReconLoss"] = "PGDReconLoss"
+
+
+class PGDReconLayerwiseLossConfig(PGDConfig):
+    type: Literal["PGDReconLayerwiseLoss"] = "PGDReconLayerwiseLoss"
+
+
+class PGDReconSubsetLossConfig(PGDConfig):
+    type: Literal["PGDReconSubsetLoss"] = "PGDReconSubsetLoss"
+    routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
+        UniformKSubsetRoutingConfig()
+    )
+
+
+class SignPGDConfig(BaseConfig):
+    """Sign-PGD optimizer config (adds `lr * sign(grad)` to sources)."""
+
+    type: Literal["sign"] = "sign"
+    lr_schedule: ScheduleConfig
+
+
+class AdamPGDConfig(BaseConfig):
+    """Adam-style PGD optimizer config."""
+
+    type: Literal["adam"] = "adam"
+    beta1: Probability = Field(default=0.9, description="Adam beta1 for masks")
+    beta2: Probability = Field(default=0.999, description="Adam beta2 for masks")
+    eps: NonNegativeFloat = Field(default=1e-8, description="Adam epsilon for masks")
+    lr_schedule: ScheduleConfig
+
+
+PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
+
+
+class CScope(BaseConfig):
+    """PPGD source scope: one `[C]` source vector shared across all batch dims."""
+
+    type: Literal["c"] = "c"
+
+
+class SCScope(BaseConfig):
+    """PPGD source scope: `[seq, C]` sources shared across batch elements, free per position."""
+
+    type: Literal["sc"] = "sc"
+
+
+class NSCScope(BaseConfig):
+    """PPGD source scope: `n_sources` source vectors tiled along the batch dim.
+
+    `n_sources` must divide the per-rank batch size.
+    """
+
+    type: Literal["nsc"] = "nsc"
+    n_sources: PositiveInt
+
+
+class BSCScope(BaseConfig):
+    """PPGD source scope: an independent source per batch element and position.
+
+    Skips cross-rank synchronization of source state.
+    """
+
+    type: Literal["bsc"] = "bsc"
+
+
+# Stored run configs (`runs/*/experiment_config.yaml`) predate the shape-literal scope
+# names; alias exactly the literals that exist in stored data so old runs keep loading.
+# Delete once stored runs are migrated.
+_LEGACY_SCOPE_TYPE_ALIASES = {
+    "broadcast_across_batch": "sc",
+    "per_batch_per_position": "bsc",
+}
+
+
+def _alias_legacy_scope_type(value: Any) -> Any:
+    if isinstance(value, dict) and value.get("type") in _LEGACY_SCOPE_TYPE_ALIASES:
+        return {**value, "type": _LEGACY_SCOPE_TYPE_ALIASES[value["type"]]}
+    return value
+
+
+# Scope literals spell the stored source shape, read left-to-right in tensor order
+# (batch, seq, C). `c` is rank-polymorphic (all leading dims singleton); the
+# seq-bearing scopes require a sequence axis and are illegal off-LM.
+PersistentPGDSourceScope = Annotated[
+    CScope | SCScope | NSCScope | BSCScope,
+    Field(discriminator="type"),
+    BeforeValidator(_alias_legacy_scope_type),
+]
+
+
+class PersistentPGDReconLossConfig(LossMetricConfig):
+    """Persistent-PGD recon loss: adversarial mask sources persist across train steps,
+    routed to all layers every forward.
+
+    `update()` returns `None` before `start_frac` of training. Sources are clamped to
+    `[0, 1]` after each step — the only implemented parameterization. (A sigmoid
+    parameterization was removed; see param_decomp/MIGRATION_HOLES.md to re-add it.)
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_use_sigmoid_parameterization(cls, data: object) -> object:
+        # Shared-storage shim: stored run configs carry `use_sigmoid_parameterization`
+        # (always False — clamp was the only implemented path). The field is removed; strip
+        # it so those configs still load. A True value was never supported -> reject.
+        if isinstance(data, dict) and "use_sigmoid_parameterization" in data:
+            assert not data.pop("use_sigmoid_parameterization"), (
+                "use_sigmoid_parameterization was removed (clamp-only); see "
+                "param_decomp/MIGRATION_HOLES.md to re-add the sigmoid parameterization"
+            )
+        return data
+
+    type: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
+    optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
+    scope: PersistentPGDSourceScope
+    n_warmup_steps: NonNegativeInt = Field(
+        default=0,
+        description=(
+            "Extra inner PGD source-optimization steps on each train batch before the final loss"
+            " computation."
+        ),
+    )
+    start_frac: Probability = 0.0
+    n_samples: PositiveInt = 1
+
+
+# ---------------------------------------------------------------------------
+# Eval-metric configs
+# ---------------------------------------------------------------------------
+
+
+class CEandKLLossesConfig(BaseConfig):
+    """`rounding_threshold` binarises CI for the `*_rounded_masked` variant (`ci > threshold`)."""
+
+    type: Literal["CEandKLLosses"] = "CEandKLLosses"
+    rounding_threshold: float
+
+
+class CIHiddenActsReconLossConfig(BaseConfig):
+    type: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
+
+
+class CIHistogramsConfig(BaseConfig):
+    """`n_batches_accum=None` accumulates every batch in the eval pass."""
+
+    type: Literal["CIHistograms"] = "CIHistograms"
+    n_batches_accum: PositiveInt | None
+
+
+class CI_L0Config(BaseConfig):
+    """`groups` maps `{group_name: [fnmatch-style layer pattern, ...]}`.
+
+    Matching layers' L0s are summed into the group and logged under the group's name.
+    """
+
+    type: Literal["CI_L0"] = "CI_L0"
+    groups: dict[str, list[str]] | None
+    ci_alive_threshold: float = 0.0
+
+
+class _AttnPatternsBaseConfig(BaseConfig):
+    """Shared config for attention-pattern recon metrics.
+
+    Supports standard attention and RoPE (auto-detected from the parent attention
+    module). ALiBi / QK-norm / sliding window are not supported.
+
+    Either `(q_proj_path, k_proj_path)` or `c_attn_path` must be set (combined QKV with
+    output split as `[Q | K | V]` along the last dim) — not both, not neither.
+    """
+
+    n_heads: PositiveInt
+    q_proj_path: str | None = None
+    k_proj_path: str | None = None
+    c_attn_path: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_paths(self) -> Self:
+        has_separate = self.q_proj_path is not None and self.k_proj_path is not None
+        has_combined = self.c_attn_path is not None
+        assert has_separate != has_combined, (
+            "Specify either (q_proj_path, k_proj_path) or c_attn_path, not both/neither"
+        )
+        return self
+
+
+class CIMaskedAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
+    type: Literal["CIMaskedAttnPatternsReconLoss"] = "CIMaskedAttnPatternsReconLoss"
+
+
+class StochasticAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
+    type: Literal["StochasticAttnPatternsReconLoss"] = "StochasticAttnPatternsReconLoss"
+
+
+class CIMeanPerComponentConfig(BaseConfig):
+    type: Literal["CIMeanPerComponent"] = "CIMeanPerComponent"
+
+
+class ComponentActivationDensityConfig(BaseConfig):
+    type: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
+    ci_alive_threshold: float = 0.0
+
+
+class IdentityCITargetSpec(BaseConfig):
+    """A layer expected to produce an Identity CI pattern over `n_features` features."""
+
+    layer_pattern: str
+    n_features: PositiveInt
+
+
+class DenseCITargetSpec(BaseConfig):
+    """A layer expected to produce a Dense CI pattern with `k` active components."""
+
+    layer_pattern: str
+    k: PositiveInt
+
+
+class IdentityCIErrorConfig(BaseConfig):
+    """`identity_ci` / `dense_ci` list layers expected to produce Identity / Dense patterns."""
+
+    type: Literal["IdentityCIError"] = "IdentityCIError"
+    identity_ci: list[IdentityCITargetSpec] | None
+    dense_ci: list[DenseCITargetSpec] | None
+
+
+class _PermutationPlotsBaseConfig(BaseConfig):
+    """fnmatch patterns for layers permuted to align with the corresponding target solution.
+
+    `identity_patterns` and `dense_patterns` are matched separately against the model.
+    """
+
+    identity_patterns: list[str] | None
+    dense_patterns: list[str] | None
+
+
+class PermutedCIPlotsConfig(_PermutationPlotsBaseConfig):
+    type: Literal["PermutedCIPlots"] = "PermutedCIPlots"
+
+
+class UVPlotsConfig(_PermutationPlotsBaseConfig):
+    type: Literal["UVPlots"] = "UVPlots"
+
+
+AnyEvalMetricConfig = Annotated[
+    CEandKLLossesConfig
+    | CIHiddenActsReconLossConfig
+    | CIHistogramsConfig
+    | CI_L0Config
+    | CIMaskedAttnPatternsReconLossConfig
+    | CIMeanPerComponentConfig
+    | ComponentActivationDensityConfig
+    | IdentityCIErrorConfig
+    | PermutedCIPlotsConfig
+    | PGDReconLossConfig
+    | StochasticAttnPatternsReconLossConfig
+    | StochasticHiddenActsReconLossConfig
+    | UVPlotsConfig,
+    Discriminator("type"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Top-level PD configs
+# ---------------------------------------------------------------------------
+
+
+class OptimizerConfig(BaseConfig):
+    lr_schedule: ScheduleConfig = Field(..., description="Learning rate schedule")
+    weight_decay: NonNegativeFloat = Field(default=0.0, description="AdamW weight decay")
+    betas: tuple[Probability, Probability] = Field(
+        default=(0.9, 0.999), description="AdamW (beta1, beta2)"
+    )
+    grad_clip_norm: PositiveFloat | None = Field(
+        default=None,
+        description="If set, clip the grad norm of this group's parameters to this value",
+    )
+
+
+AnyLossMetricConfig = Annotated[
+    ChunkwiseSubsetReconLossConfig
+    | CIMaskedReconLayerwiseLossConfig
+    | CIMaskedReconLossConfig
+    | CIMaskedReconSubsetLossConfig
+    | FaithfulnessLossConfig
+    | ImportanceMinimalityLossConfig
+    | PersistentPGDReconLossConfig
+    | PGDReconLayerwiseLossConfig
+    | PGDReconLossConfig
+    | PGDReconSubsetLossConfig
+    | StochasticHiddenActsReconLossConfig
+    | StochasticReconLayerwiseLossConfig
+    | StochasticReconLossConfig
+    | StochasticReconSubsetLossConfig
+    | UnmaskedReconLossConfig,
+    Discriminator("type"),
+]
+
+
+class RuntimeConfig(BaseConfig):
+    """Compute substrate: device, precision, data-parallelism degree.
+
+    Perturbs numerics but doesn't change the algorithm. Future home for NCCL flags,
+    gradient accumulation steps, fp8 variants, etc.
+    """
+
+    autocast_bf16: bool = Field(
+        default=True,
+        description="Use torch.autocast with bfloat16 mixed precision in training and eval.",
+    )
+    device: str = Field(
+        default="cuda",
+        description="Device to run on, e.g. 'cuda', 'cuda:0', or 'cpu'.",
+    )
+    dp: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "Distributed world size — the number of data-parallel workers. Under DDP the "
+            "model is replicated across them; under FSDP it is sharded and the batch is "
+            "data-parallel across them. None means a single device."
+        ),
+    )
+    remat_recon_forwards: bool = Field(
+        default=False,
+        description=(
+            "JAX trainer memory/compute trade: rematerialize the recon-loss masked "
+            "forwards under the suffix model (deep targets need it to fit). Compute "
+            "substrate knob, no algorithm effect."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_device_dp(self) -> Self:
+        assert self.device == "cpu" or self.device == "cuda" or self.device.startswith("cuda:"), (
+            f"device must be 'cpu', 'cuda', or 'cuda:<index>', got {self.device!r}"
+        )
+        if self.dp is not None:
+            assert self.device.startswith("cuda"), "dp requires a cuda device"
+            assert self.dp >= 2, "if set, dp must be at least 2 (pass None for single device)."
+        return self
+
+
+class PDConfig(BaseConfig):
+    """Algorithm specification: seed, CI function, losses, optimizers, target modules.
+
+    Flipping any field here changes what algorithm runs. Pair with `RuntimeConfig`
+    (substrate), `Cadence` (when to emit) and `RunSink` (where output goes) when
+    running the trainer (`param_decomp.run`).
+    """
+
+    # --- General ---
+    seed: int = Field(
+        default=0,
+        description="Random seed for reproducibility, including LM dataset shuffling.",
+    )
+    n_mask_samples: PositiveInt = Field(
+        ...,
+        description="Number of stochastic masks to sample when using stochastic recon losses",
+    )
+    ci_config: CiConfig = Field(
+        ...,
+        discriminator="mode",
+        description="Configuration for the causal importance function.",
+    )
+    sampling: SamplingType = Field(
+        default="continuous",
+        description="Sampling mode for stochastic elements: 'continuous' (default) or 'binomial'",
+    )
+    sigmoid_type: Literal["normal", "hard", "leaky_hard", "upper_leaky_hard", "swish_hard"] = Field(
+        default="leaky_hard",
+        description="Type of sigmoid to use for causal importance calculation",
+    )
+    decomposition_targets: list[DecompositionTargetConfig] = Field(
+        ...,
+        description="List of module patterns with C values specifying which modules to decompose.",
+    )
+    identity_decomposition_targets: list[DecompositionTargetConfig] | None = Field(
+        default=None,
+        description="List of identity module patterns with C values.",
+    )
+
+    @cached_property
+    def all_decomposition_target_configs(self) -> list[DecompositionTargetConfig]:
+        result = list(self.decomposition_targets)
+        if self.identity_decomposition_targets is not None:
+            for target in self.identity_decomposition_targets:
+                result.append(
+                    DecompositionTargetConfig(
+                        module_pattern=f"{target.module_pattern}.pre_identity", C=target.C
+                    )
+                )
+        return result
+
+    use_delta_component: bool = Field(
+        default=True,
+        description="If True, use an extra component containing the difference between the target "
+        "model and component weights.",
+    )
+
+    tied_weights: list[tuple[str, str]] | None = Field(
+        default=None,
+        description="DEAD on the JAX path (refused via `assert tied_weights is None`). Component "
+        "weight tying is obviated: JAX decomposes each unique matrix once and the vendored arch "
+        "carries the target's native tying (e.g. wte<->lm_head), so there is nothing to re-tie. "
+        "Torch needed this only because it decomposed tied target modules as separate sites.",
+    )
+
+    loss_metrics: list[AnyLossMetricConfig] = Field(
+        default_factory=list,
+        description=(
+            "Training-loss metrics. Each entry's `type` field selects the concrete metric; "
+            "`coeff` weights it in the total training loss. Active loss metrics are automatically"
+            " also evaluated."
+        ),
+    )
+
+    # --- Training ---
+    components_optimizer: OptimizerConfig = Field(
+        ..., description="Optimizer config for the component (LinearComponent etc.) parameters"
+    )
+    ci_fn_optimizer: OptimizerConfig = Field(
+        ..., description="Optimizer config for the CI function parameters"
+    )
+    steps: PositiveInt = Field(..., description="Total number of optimisation steps")
+    batch_size: PositiveInt = Field(
+        ...,
+        description="Total batch size (may be divided across multiple devices).",
+    )
+
+    # --- Faithfulness Warmup ---
+    faithfulness_warmup_steps: NonNegativeInt = Field(
+        default=0,
+        description="Number of warmup steps to optimize faithfulness loss before main training",
+    )
+    faithfulness_warmup_lr: PositiveFloat = Field(
+        default=0.001,
+        description="Learning rate for warmup phase (optimizing faithfulness loss only)",
+    )
+    faithfulness_warmup_weight_decay: NonNegativeFloat = Field(
+        default=0.0,
+        description="Weight decay for warmup phase optimizer",
+    )
+
+    @model_validator(mode="after")
+    def validate_loss_metrics_have_coeff(self) -> Self:
+        assert self.loss_metrics, "loss_metrics must contain at least one training loss"
+        for cfg in self.loss_metrics:
+            assert cfg.coeff is not None, f"loss_metrics.{cfg.type!r} must set `coeff`"
+        return self
+
+
+class DenseLogPhase(BaseConfig):
+    """Denser train-log period for the first `until_step` steps, then `Cadence`'s
+    steady `train_log_every` takes over. Early training has the fastest dynamics
+    (faithfulness warmup, the sharp initial loss drop), so denser sampling there is
+    where the signal is; the per-log overhead is a few scalar cross-pool reductions,
+    negligible against the step. `until_step` is exclusive."""
+
+    every: PositiveInt
+    until_step: PositiveInt
+
+
+class Cadence(BaseConfig):
+    """Rhythm of non-eval loop emissions: train-log and checkpoint periods.
+
+    Held separately from `RunSink` so the sink only owns *where* output goes; `Cadence`
+    owns *when* train logs and checkpoints fire. Eval timing lives on `EvalLoop`,
+    alongside the runtime objects it depends on. The trainer (`param_decomp.run`) loop
+    always checkpoints at the final step regardless of `save_every`.
+    """
+
+    train_log_every: PositiveInt
+    dense_log_phase: DenseLogPhase | None = None
+    """Optional denser logging for early training; `None` means a flat `train_log_every`."""
+    save_every: PositiveInt | None = None
+    keep_last_n_checkpoints: PositiveInt | None = None
+    """How many of the most-recent orbax `ckpts/<step>/` checkpoints to keep on disk
+    after each checkpoint write. `None` (the default) keeps all checkpoints — the
+    conservative choice for research where prior steps may matter. Opt in to e.g. `3`
+    for long jobs where disk pressure outweighs the value of intermediate checkpoints;
+    the final-step checkpoint is always included in the retained set."""
+
+    def should_log_train(self, step: int) -> bool:
+        if self.dense_log_phase is not None and step < self.dense_log_phase.until_step:
+            return step % self.dense_log_phase.every == 0
+        return step % self.train_log_every == 0
+
+    def should_save(self, step: int) -> bool:
+        if self.save_every is None or step == 0:
+            return False
+        return step % self.save_every == 0
+
+
+# ---------------------------------------------------------------------------
+# Run-level config (logging + fine-tune lineage)
+# ---------------------------------------------------------------------------
+
+
+class WandbConfig(BaseConfig):
+    """Wandb logging settings. Presence on `ExperimentConfig` opts in; omit to skip wandb."""
+
+    project: str
+    entity: str | None = None
+    group: str | None = None
+    """Wandb UI group (`pd-lm --group`); None = ungrouped."""
+    tags: list[str] = Field(default_factory=list)
+    """Wandb tags (`pd-lm --tags a,b,c`, comma-split); empty = untagged."""
+
+
+class ResumeProvenance(BaseConfig):
+    """Fine-tune lineage: a fresh run initialized from a PARENT decomposition. Lives on
+    `ExperimentConfig`.
+
+    A fine-tune run gets its own `run_id` / `config.yaml` / `ckpts/`; this records the
+    parent it forked from. The JAX trainer (SPEC S33) loads the parent checkpoint's
+    V/U + ci_fn onto a fresh reference state and trains a clean schedule from step 0
+    (fresh optimizer / sources) under the new config — only when the run's own `ckpts/`
+    is empty (a subsequent SLURM requeue resumes from the run's own dir, ignoring
+    provenance). The structure (sites / C / ci-fn arch) must match the parent; only
+    LR / coeffs / eps / seq / batch / steps may change. Provenance flows into
+    `config.yaml` and `wandb.config` so the lineage is visible in the wandb UI. A run with
+    `resume_provenance is None` is a fresh-from-init run.
+    """
+
+    parent_run_dir: Path
+    """Path to the parent run's directory (the dir that contains `ckpts/<parent_step>/`)."""
+
+    parent_step: int
+    """The parent's orbax `ckpts/<step>/` checkpoint step to initialize V/U + ci_fn from."""
+
+
+# ---------------------------------------------------------------------------
+# wandb.config shaping
+# ---------------------------------------------------------------------------
+
+METRIC_SHORT_NAMES: dict[str, str] = {
+    "CIMaskedReconLayerwiseLoss": "CIMaskReconLayer",
+    "CIMaskedReconLoss": "CIMaskRecon",
+    "CIMaskedReconSubsetLoss": "CIMaskReconSub",
+    "FaithfulnessLoss": "Faith",
+    "ImportanceMinimalityLoss": "ImpMin",
+    "PersistentPGDReconLoss": "PersistPGDRecon",
+    "PGDReconLayerwiseLoss": "PGDReconLayer",
+    "PGDReconLoss": "PGDRecon",
+    "PGDReconSubsetLoss": "PGDReconSub",
+    "StochasticHiddenActsReconLoss": "StochHiddenActRecon",
+    "StochasticReconLayerwiseLoss": "StochReconLayer",
+    "StochasticReconLoss": "StochRecon",
+    "StochasticReconSubsetLoss": "StochReconSub",
+    "UnmaskedReconLoss": "UnmaskedRecon",
+    "CEandKLLosses": "CEandKL",
+    "CIHiddenActsReconLoss": "CIHiddenActRecon",
+    "CIHistograms": "CIHist",
+    "CI_L0": "CI_L0",
+    "CIMaskedAttnPatternsReconLoss": "CIAttnRecon",
+    "CIMeanPerComponent": "CIMeanPerComp",
+    "ComponentActivationDensity": "CompActDens",
+    "IdentityCIError": "IdCIErr",
+    "PermutedCIPlots": "PermCIPlots",
+    "StochasticAttnPatternsReconLoss": "StochAttnRecon",
+    "UVPlots": "UVPlots",
+}
+
+
+def flatten_typed_lists(config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Flatten nested lists-of-typed-dicts (loss/eval metric lists) into queryable flat
+    keys addressed by metric `short_name`, returning a copy with the raw lists dropped.
+
+    Example: `pd.loss_metrics: [{type: "ImportanceMinimalityLoss", coeff: 0.1}]`
+    becomes `pd.loss_metrics.ImpMin.coeff: 0.1`, and the raw `pd.loss_metrics` list is
+    removed so wandb doesn't also log it as an opaque JSON blob. A metric type with no
+    entry in `METRIC_SHORT_NAMES` falls back to its raw type string.
+    """
+    flattened: dict[str, Any] = {}
+
+    def is_typed_list(obj: Any) -> bool:
+        return (
+            isinstance(obj, list)
+            and len(obj) > 0
+            and all(isinstance(x, dict) and "type" in x for x in obj)
+        )
+
+    def walk(obj: Any, path: str) -> None:
+        if isinstance(obj, dict):
+            for key in list(obj.keys()):
+                child = obj[key]
+                child_path = f"{path}.{key}" if path else key
+                if is_typed_list(child):
+                    for entry in child:
+                        short = METRIC_SHORT_NAMES.get(entry["type"], entry["type"])
+                        for k, v in entry.items():
+                            if k == "type":
+                                continue
+                            flattened[f"{child_path}.{short}.{k}"] = v
+                    del obj[key]
+                else:
+                    walk(child, child_path)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                walk(item, f"{path}.{i}")
+
+    out = dict(config_dict)
+    walk(out, "")
+    out.update(flattened)
+    return out

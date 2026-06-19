@@ -7,7 +7,11 @@ urls = { "Homepage" = "https://github.com/goodfire-ai/param-decomp" }
 license = { text = "MIT" }
 readme = "README.md"
 dependencies = [
-    "param-decomp-config==0.0.1",
+    # The torch-free pydantic config schema now ships inside this distribution
+    # (`param_decomp.configs` / `base_config` / `schedule`), so it carries the schema's
+    # leaf deps directly (was the dissolved `param-decomp-config` package).
+    "pydantic<2.12", # https://github.com/goodfire-ai/param-decomp/pull/232 , issues/221
+    "annotated-types",
     "jax==0.10.1",
     "equinox==0.13.8",
     "optax==0.2.8",
@@ -72,11 +76,10 @@ include = [
 namespaces = false
 
 [tool.uv.workspace]
-members = ["param_decomp_config", "param_decomp_lab"]
+members = ["param_decomp_lab"]
 
 [tool.uv.sources]
 param-decomp = { workspace = true }
-param-decomp-config = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -117,7 +120,7 @@ known-third-party = ["wandb"]
 # in a torch env, not this JAX-only one.
 # `vendored_jax` is a verbatim numeric mirror of the torch vendored Llama — kept out of
 # type-checking (its correctness contract is the parity tests, not types).
-include = ["param_decomp", "pretrain", "param_decomp_config", "param_decomp_lab"]
+include = ["param_decomp", "pretrain", "param_decomp_lab"]
 exclude = [
     "**/wandb/**",
     "**/_scratch/**",

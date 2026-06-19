@@ -32,9 +32,9 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
+from param_decomp.configs import SamplingType
 from param_decomp.lm import DecomposedModel
 from param_decomp.train import COMPUTE_DT, cast_floating
-from param_decomp_config.routing import SamplingType
 
 
 @dataclass(frozen=True)

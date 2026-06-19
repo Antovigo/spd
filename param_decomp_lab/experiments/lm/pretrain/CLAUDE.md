@@ -1,6 +1,6 @@
 # experiments/lm/pretrain — in-house target-LM pretraining (JAX)
 
-Pretrains the FROZEN in-house target LMs that the decomposition trainer (`param_decomp.run`)
+Pretrains the FROZEN in-house target LMs that the decomposition trainer (`param_decomp_lab.experiments.lm.run`)
 then decomposes — e.g. the pile-pretrained `llama_simple_mlp` (target `t-9d2b8f02`). Small,
 simple ML: next-token CE, AdamW, cosine LR + warmup. JAX-native (equinox), torch-free.
 

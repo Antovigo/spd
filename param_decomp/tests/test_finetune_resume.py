@@ -14,10 +14,10 @@ import pytest
 import yaml
 
 from param_decomp.checkpoint import init_from_parent, make_checkpoint_manager, save_state
-from param_decomp.config import build_from_schema
-from param_decomp.run import assert_finetune_structural_compat
+from param_decomp.configs import ResumeProvenance
 from param_decomp.tests.test_checkpoint import _build
-from param_decomp_config.experiment import ResumeProvenance
+from param_decomp_lab.experiments.lm.config import build_from_schema
+from param_decomp_lab.experiments.lm.run import assert_finetune_structural_compat
 
 CONFIGS = Path(__file__).parent.parent / "configs"
 
