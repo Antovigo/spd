@@ -342,7 +342,7 @@ def test_renderer_logs_figures_on_live_step_axis(monkeypatch: pytest.MonkeyPatch
 
     spec = resolve_permutation_metrics(lm.site_names, [])
     renderer = SlowEvalRenderer(is_main=True)
-    renderer.submit(reductions, spec, position_ci=None, now_step=4242)
+    renderer.submit(reductions, spec, position_ci=None, components=None, now_step=4242)
     renderer.join()  # flush the background render
 
     assert len(fake.logged) == 1
@@ -357,13 +357,14 @@ def test_renderer_logs_figures_on_live_step_axis(monkeypatch: pytest.MonkeyPatch
     }
 
 
-def test_in_loop_renderer_includes_permutation_heatmaps_but_not_uv_plots(
+def test_in_loop_renderer_includes_permutation_heatmaps_and_uv_when_gathered(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The in-loop slow tier renders the CI heatmaps from the materialized position-CI on the
-    background thread, and computes IdentityCIError synchronously. UVPlots is offline-only,
-    so even when the config names it, it must NOT appear among the in-loop figures."""
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    """The in-loop slow tier renders the CI heatmaps from the materialized position-CI and,
+    when the config names UVPlots and the gathered V/U is passed, the UVPlots figure too
+    (SPEC S28 amended: in-loop UVPlots is a naive gather, small-scale-only). IdentityCIError
+    is computed synchronously on the collective path, not on the background thread."""
+    cfg, lm, tgt, ci_fn, step, C = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
     reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
     position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
@@ -377,7 +378,7 @@ def test_in_loop_renderer_includes_permutation_heatmaps_but_not_uv_plots(
         ),
     ]
     spec = resolve_permutation_metrics(lm.site_names, metrics)
-    assert spec.want_uv_plots  # config DOES name UVPlots ...
+    assert spec.want_uv_plots
 
     # the IdentityCIError SCALARS are computed synchronously (the in-loop collective path),
     # NOT on the background thread
@@ -388,19 +389,48 @@ def test_in_loop_renderer_includes_permutation_heatmaps_but_not_uv_plots(
     monkeypatch.setitem(sys.modules, "wandb", fake)
     monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
 
+    components = {name: (np.zeros((4, C)), np.zeros((C, 5))) for name in lm.site_names}
     renderer = SlowEvalRenderer(is_main=True)
-    renderer.submit(reductions, spec, position_ci, now_step=7000)
+    renderer.submit(reductions, spec, position_ci, components, now_step=7000)
     renderer.join()
 
     assert len(fake.logged) == 1
     payload, logged_step = fake.logged[0]
     assert logged_step == 7000  # figures on the live `_step` axis
-    # the permutation HEATMAPS render in-loop; ... but uv_matrices does NOT (offline-only)
     assert "slow_eval/figures/causal_importances" in payload
     assert "slow_eval/figures/causal_importances_upper_leaky" in payload
-    assert "slow_eval/figures/uv_matrices" not in payload
+    assert "slow_eval/figures/uv_matrices" in payload  # gathered V/U -> UVPlots renders
     # no scalar leaks onto the figure (background) payload — scalars ride the sync path
     assert all(k.startswith("slow_eval/figures/") for k in payload)
+
+
+def test_in_loop_renderer_skips_uv_when_components_not_gathered(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """When the config does NOT name UVPlots, the trainer gathers no V/U (`components=None`)
+    and the UVPlots figure is skipped, while the CI heatmaps still render."""
+    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
+    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+    position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
+
+    spec = resolve_permutation_metrics(
+        lm.site_names,
+        [PermutedCIPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"])],
+    )
+    assert not spec.want_uv_plots
+
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
+
+    renderer = SlowEvalRenderer(is_main=True)
+    renderer.submit(reductions, spec, position_ci, components=None, now_step=7000)
+    renderer.join()
+
+    payload, _ = fake.logged[0]
+    assert "slow_eval/figures/causal_importances" in payload
+    assert "slow_eval/figures/uv_matrices" not in payload
 
 
 def test_renderer_noop_off_main_rank(monkeypatch: pytest.MonkeyPatch):
@@ -414,7 +444,7 @@ def test_renderer_noop_off_main_rank(monkeypatch: pytest.MonkeyPatch):
 
     spec = resolve_permutation_metrics(lm.site_names, [])
     renderer = SlowEvalRenderer(is_main=False)
-    renderer.submit(reductions, spec, position_ci=None, now_step=4242)
+    renderer.submit(reductions, spec, position_ci=None, components=None, now_step=4242)
     renderer.join()
     assert fake.logged == []  # non-main ranks do the collective pull but never render/log
 
@@ -440,7 +470,7 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
         if slow_eval_due(now_step, every, slow_every, slow_on_first_step=True):
             # the COLLECTIVE part (runs on every rank in the real loop)
             reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
-            renderer.submit(reductions, spec, position_ci=None, now_step=now_step)
+            renderer.submit(reductions, spec, position_ci=None, components=None, now_step=now_step)
     main_loop_s = time.time() - t0
     renderer.join()  # flush
 

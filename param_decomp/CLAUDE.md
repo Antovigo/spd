@@ -7,7 +7,7 @@ the stable torch `param_decomp` impl). See `README.md` for the file map.
 Open items: persistent-source scopes `c`/`nsc` and sigmoid parameterization are
 deliberately refused. The hidden-acts seam is now BUILT (SPEC S31 amended 2026-06-16):
 `CIHiddenActsReconLoss` / `StochasticHiddenActsReconLoss` are standalone eval metrics
-(`hidden_acts_eval.py`, computed in-loop on `eval.slow_every` AND via `pd-slow-eval`) over
+(`hidden_acts_eval.py`, computed in-loop on `eval.slow_every`) over
 a fifth model fn `masked_site_outputs` — NOT recon-grid training terms (the recon loss
 stays KL-on-final-logits). `sc` and `bsc` are supported (`bsc` is batch-sharded:
 an independent source per batch element and position, no cross-replica sync — SPEC
@@ -63,18 +63,22 @@ config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig` in
 `build_experiment_config`/`load_config` — routing `kind: pretrained` specs + `h.*`
 wildcards), target build in `run.py::main`. The slow plot metrics are computed
 NATIVELY in JAX (`slow_eval.py`) — no torch export round-trip (the torch offline-eval
-bridge `jsp-export` / `pd-offline-eval` was retired). They now run IN-LOOP on
-`eval.slow_every` next to the fast pass (SPEC S28/S29 amended 2026-06-18): the collective
+bridge `jsp-export` / `pd-offline-eval` was retired). They run IN-LOOP ONLY on
+`eval.slow_every` next to the fast pass (SPEC S28/S29; there is NO offline/retrospective
+CLI — `slow_eval.py` is a pure library): the collective
 forward + device→host pull in lockstep on all ranks, the matplotlib render + `wandb.log`
 on a rank-0 background thread (`run.py::SlowEvalRenderer`), reusing the fast pass's eval
 batches and logging on the live `_step` axis. The config-gated position-CI metrics
 (`PermutedCIPlots` / CI heatmaps + `IdentityCIError`) ALSO run in-loop off the cheap
 `(T, C)` position-CI matrix (`accumulate_position_ci`, collective; the heatmap figures on
 the background thread, the `IdentityCIError` scalars synchronously on `_step`). `UVPlots`
-is the lone slow metric kept OFFLINE-only — it needs a full host gather of the C-sharded
-V/U, so `render_permutation_figures` is called with `components=None` in-loop and skips it;
-`run_offline_slow_eval` passes the gathered V/U and renders it. `pd-slow-eval` is RETAINED
-for retrospective re-render of an on-disk checkpoint (the full set incl. `UVPlots`).
+is a config-gated figure metric usable for ANY decomposition (the torch `Metric` pattern —
+returns a wandb figure): for the LM in-loop tier `run.py` does a NAIVE host gather of the
+C-sharded V/U (gated on `want_uv_plots`) and passes `components` to
+`render_permutation_figures` — it OOMs / breaks at production C BY DESIGN (per Oli), no
+special handling; for the positionless toys (TMS/ResidMLP) `toy_uv_eval.log_uv_figure`
+renders it off the small on-host V/U + the probe CI as permutation source (cheap, no
+gather), sharing `slow_eval.render_uv_figure` / `plot_uv_matrices` with the LM path.
 
 **The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
 toy-specific code (CI-fn arches are the one allowed exception — see `ci_fn_mlp.py`). The

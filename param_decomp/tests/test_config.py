@@ -88,7 +88,8 @@ def test_eval_block_maps_slow_tier_and_defers_offline_only_metrics(
             },
             {"type": "CIHistograms", "n_batches_accum": 7},  # in-loop slow tier now
             {"type": "ComponentActivationDensity", "ci_alive_threshold": 0.0},  # slow tier
-            {"type": "IdentityCIError", "identity_ci": None, "dense_ci": None},  # offline-only
+            {"type": "IdentityCIError", "identity_ci": None, "dense_ci": None},  # in-loop slow
+            {"type": "UVPlots", "identity_patterns": None, "dense_patterns": None},  # in-loop slow
         ],
     }
     cfg = build_experiment_config(LMExperimentConfig(**raw))
@@ -98,10 +99,9 @@ def test_eval_block_maps_slow_tier_and_defers_offline_only_metrics(
     assert cfg.eval.slow_n_batches_accum == 7  # read off the CIHistograms metric
     assert cfg.eval.rounding_threshold == 0.0 and cfg.eval.ci_alive_threshold == 0.0
     assert cfg.eval.pgd is not None and (cfg.eval.pgd.n_steps, cfg.eval.pgd.step_size) == (20, 0.1)
-    out = capsys.readouterr().out
-    # the plot metrics now run in-loop (NOT deferred); only the offline-only one is deferred
-    assert "deferred to the offline path: ['IdentityCIError']" in out
-    assert "CIHistograms" not in out and "ComponentActivationDensity" not in out
+    # the plot / permutation / UV / identity metrics all run in-loop — `_eval` accepts them
+    # without raising, and nothing is deferred (no offline path)
+    assert "deferred" not in capsys.readouterr().out
 
 
 def test_unsupported_settings_refuse():

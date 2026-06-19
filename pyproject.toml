@@ -30,10 +30,9 @@ dependencies = [
 cuda = ["jax[cuda12]==0.10.1"]
 
 [project.scripts]
-# The retrospective slow-eval re-render tool. The inner trainers are NOT console scripts:
-# run them as modules (`python -m param_decomp.run` / `python -m pretrain.train`), which is
-# what the lab launchers `pd-lm` / `pd-pretrain` sbatch (and what you'd run for direct debug).
-pd-slow-eval = "param_decomp.slow_eval:main"
+# No core console scripts: the trainers run as modules (`python -m param_decomp.run` /
+# `python -m pretrain.train`), which is what the lab launchers `pd-lm` / `pd-pretrain`
+# sbatch (and what you'd run for direct debug). Slow/plot eval is in-loop only (SPEC S28).
 
 [dependency-groups]
 dev = [

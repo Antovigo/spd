@@ -248,12 +248,13 @@ class ExperimentConfig:
 
 
 # Plot/heavy eval metrics the FAST in-loop scalar pass (`eval.py`) does NOT compute. They
-# are split by where they now run (SPEC S28/S29 amended 2026-06-18):
-#
-# IN-LOOP SLOW TIER — computed inside the train loop on `eval.slow_every` (and also
-# rendered offline by `pd-slow-eval`): the three plot metrics drive the shared
-# `render_slow_eval_figures` figure set; the two hidden-acts metrics drive the shared
-# `compute_hidden_acts_metrics` scalars.
+# run in the IN-LOOP SLOW TIER (SPEC S28/S29, in-loop only — no offline CLI), on cadence
+# `eval.slow_every`. The base plot metrics drive the shared `render_slow_eval_figures`
+# figure set; the two hidden-acts metrics drive `compute_hidden_acts_metrics`. The
+# permutation/UV/identity metrics (`UVPlots` / `PermutedCIPlots` / `IdentityCIError`) are
+# ALSO in-loop but are read by `run.py` straight off the raw config
+# (`slow_eval.eval_metrics_from_run_dir`), since the trainer's typed `EvalConfig` keeps only
+# scalar-tier fields — so `_eval` just accepts them here without populating `EvalConfig`.
 SLOW_TIER_EVAL_METRIC_TYPES = frozenset(
     {
         "CIHistograms",
@@ -261,16 +262,9 @@ SLOW_TIER_EVAL_METRIC_TYPES = frozenset(
         "CIMeanPerComponent",
         "StochasticHiddenActsReconLoss",
         "CIHiddenActsReconLoss",
-    }
-)
-# OFFLINE-ONLY — accepted as config but with no JAX pass yet (neither in-loop nor
-# `pd-slow-eval`); silently deferred.
-OFFLINE_ONLY_EVAL_METRIC_TYPES = frozenset(
-    {
         "UVPlots",
         "PermutedCIPlots",
         "IdentityCIError",
-        "AutointerpLabels",
     }
 )
 
@@ -418,7 +412,6 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
     ce_kl = ci_l0 = pgd = None
     attn_ci = attn_stoch = False
     slow_n_batches_accum: int | None = None
-    skipped_offline: list[str] = []
     for metric in cfg.eval.metrics:
         match metric:
             case CEandKLLossesConfig():
@@ -437,13 +430,9 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
             case CIHistogramsConfig():
                 slow_n_batches_accum = metric.n_batches_accum
             case _ if metric.type in SLOW_TIER_EVAL_METRIC_TYPES:
-                pass  # rendered by the in-loop slow tier (`render_slow_eval_figures`)
-            case _ if metric.type in OFFLINE_ONLY_EVAL_METRIC_TYPES:
-                skipped_offline.append(metric.type)
+                pass  # rendered by the in-loop slow tier (run.py reads them off the raw cfg)
             case _:
                 raise AssertionError(f"unsupported eval metric {metric.type!r}")
-    if skipped_offline:
-        print(f"eval metrics deferred to the offline path: {sorted(skipped_offline)}", flush=True)
     assert ce_kl is not None and ci_l0 is not None, (
         "in-loop eval needs CEandKLLosses + CI_L0 in eval.metrics"
     )

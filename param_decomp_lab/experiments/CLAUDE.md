@@ -22,7 +22,13 @@ The TMS and ResidualMLP toys are LAB experiments that call the core engine as a 
   canonical schema via the public shared helpers
   (`config.convert_shared_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch`),
   pretrains + builds the target, and calls `run_decomposition_training` with a synthetic
-  `sample_batch` + an `identity_ci_error` `eval_fn`. CPU, synchronous, no SLURM.
+  `sample_batch` + an `identity_ci_error` `eval_fn`. CPU, synchronous, no SLURM. The toy
+  `eval_fn` ALSO renders the config-gated `UVPlots` figure when the run's `eval.metrics`
+  names it (`toy_uv_eval.log_uv_figure`): the toys feed `UVPlots` their probe CI as the
+  column-permutation source and their small on-host V/U, sharing `slow_eval.render_uv_figure`
+  / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). The toy core `ExperimentConfig.eval`
+  stays `None` (the toy validates via the target-CI metric, not the LM scalar pass); the
+  `eval.metrics` list is read straight off the raw schema dict (`toy_uv_eval.toy_uv_spec`).
 - `configs/*.yaml` — the canonical `param_decomp_config.{tms,resid_mlp}` schema (TMS: 5-2 /
   40-10 / the `-id` deeper variants; ResidMLP: 1l/2l/3l + the global-CI variant).
 

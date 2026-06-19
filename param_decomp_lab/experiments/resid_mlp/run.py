@@ -32,6 +32,7 @@ from param_decomp.run import run_decomposition_training
 from param_decomp.sharding import dp_mesh
 from param_decomp.train import TrainState
 from param_decomp_config.resid_mlp import ResidMLPExperimentConfig
+from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.resid_mlp import model as resid_mlp
 from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
@@ -39,13 +40,10 @@ from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 
 def build_resid_mlp_experiment_config(cfg: ResidMLPExperimentConfig) -> ExperimentConfig:
     """Convert the canonical ResidMLP schema to the core `ExperimentConfig` via the shared
-    algorithm-config helpers. ResidMLP validates via the in-loop target-CI metric, so
-    `eval` must be omitted."""
+    algorithm-config helpers. ResidMLP validates via the in-loop target-CI metric (not the LM
+    CEandKLLosses scalar pass), so the core `eval` is `None`. The schema's `eval.metrics`
+    list is still read at run time for the config-gated `UVPlots` figure (`toy_uv_eval`)."""
     assert cfg.pd.identity_decomposition_targets is None, "identity targets unsupported"
-    assert cfg.eval is None, (
-        "ResidMLP in-loop eval is the standalone target-CI metric (the lab provider), not the "
-        "LM CEandKLLosses pass; omit the eval: block"
-    )
     site_cs = resid_mlp.canonical_site_cs(
         tuple(SiteC(t.module_pattern, t.C) for t in cfg.pd.decomposition_targets)
     )
@@ -164,12 +162,18 @@ def run_resid_mlp_decomposition(cfg: ExperimentConfig, raw_cfg: dict[str, Any], 
         return sample_residual(random.fold_in(data_key, step))
 
     @jax.jit
-    def single_feature_ci(ci_fn: Any) -> dict[str, jax.Array]:
+    def single_feature_ci(ci_fn: Any) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
         resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ frozen.W_E
-        return ci_fn(lm.site_inputs(frozen, resid)).lower
+        ci = ci_fn(lm.site_inputs(frozen, resid))
+        return ci.lower, ci.upper
 
-    def eval_fn(state: TrainState, _now_step: int) -> dict[str, float]:
-        ci_lower = single_feature_ci(state.ci_fn)
+    uv_spec = toy_uv_eval.toy_uv_spec(lm, raw_cfg)
+
+    def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
+        ci_lower, ci_upper = single_feature_ci(state.ci_fn)
+        toy_uv_eval.log_uv_figure(
+            uv_spec, state.components.vu, ci_upper, now_step, wandb_active=cfg.wandb is not None
+        )
         return {
             f"eval/identity_ci_error/{site}": float(resid_mlp.identity_ci_error(ci, tolerance=0.1))
             for site, ci in ci_lower.items()

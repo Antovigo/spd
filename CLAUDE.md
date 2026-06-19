@@ -67,10 +67,11 @@ Three flat-layout distributions, deliberately split:
   config.
 
 `make install-dev` syncs all three editably via the uv workspace in the root
-`pyproject.toml` into the one `.venv`. The one training/eval console script
-(`pd-slow-eval`) lives in the root `pyproject.toml` — the inner trainers run as modules
-(`python -m param_decomp.run` / `python -m pretrain.train`), not as `pd-*` scripts; the launcher and
-post-pipeline `pd-*` scripts live in `param_decomp_lab/pyproject.toml`.
+`pyproject.toml` into the one `.venv`. The root `pyproject.toml` declares NO core console
+scripts — the inner trainers run as modules (`python -m param_decomp.run` /
+`python -m pretrain.train`), not as `pd-*` scripts; the launcher and post-pipeline `pd-*`
+scripts live in `param_decomp_lab/pyproject.toml`. (Slow/plot eval is in-loop only — there
+is no `pd-slow-eval` CLI.)
 
 ## Training (JAX) <a id="training-jax"></a>
 
@@ -214,15 +215,15 @@ Run a single test: `python -m pytest path/to/test_file.py::test_name`.
 
 ## CLI entry points
 
-The one core eval script (`pd-slow-eval`) is declared in the root `pyproject.toml`; the
-launchers and post-pipeline scripts in `param_decomp_lab/pyproject.toml`. The inner
-trainers are NOT console scripts — run them as modules (the lab launchers sbatch the same
-module-run command). Training is `python -m param_decomp.run` (JAX), launched via `pd-lm`.
+The root `pyproject.toml` declares no core console scripts; the launchers and
+post-pipeline scripts live in `param_decomp_lab/pyproject.toml`. The inner trainers are NOT
+console scripts — run them as modules (the lab launchers sbatch the same module-run
+command). Training is `python -m param_decomp.run` (JAX), launched via `pd-lm`. Slow/plot
+eval is in-loop only (no CLI).
 
 | Command | Entry point | Purpose |
 |---|---|---|
 | `python -m param_decomp.run` | `param_decomp/run.py` | The core JAX decomposition trainer (composition root; run inside a launch workspace) |
-| `pd-slow-eval` | `param_decomp/slow_eval.py` | JAX-native offline slow (plot) eval over a checkpoint |
 | `python -m pretrain.train` | `pretrain/train.py` | The core in-house target-LM pretrainer |
 | `pd-lm` | `experiments/lm/jax_launch.py` | Launch a decomposition trainer run: snapshot ref + shared-FS workspace + sbatch (`--local` runs inline) |
 | `pd-pretrain` | `experiments/lm/pretrain/jax_launch.py` | Launch a pretrainer run (`--local` runs inline) |

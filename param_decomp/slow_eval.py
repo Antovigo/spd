@@ -1,5 +1,6 @@
-"""JAX-native slow (plot-type) eval metrics, shared by the in-loop slow tier and the
-retrospective `pd-slow-eval` CLI.
+"""JAX-native slow (plot-type) eval metrics — a LIBRARY for the in-loop slow tier (`run.py`)
+and the toy eval functions (`param_decomp_lab/experiments/{tms,resid_mlp}`). Slow eval is
+IN-LOOP ONLY; there is no offline/retrospective CLI.
 
 `eval.py` runs the FAST scalar tier in-loop (CE/KL, CI-L0, the fresh-PGD probe). The
 SLOW tier is the heavy plot metrics: `CIHistograms`, `ComponentActivationDensity`,
@@ -13,14 +14,6 @@ arrays, no torch). `accumulate_site_reductions` / `render_slow_eval_figures` /
 The slow tier runs IN-LOOP on `eval.slow_every` next to the fast pass (`run.py`,
 SPEC S28/S29), reusing the fast pass's eval batches and logging `slow_eval/*` on the live
 `_step` axis from a rank-0 background thread.
-
-This module's `main` ALSO runs an OFFLINE pass over an on-disk checkpoint
-(`pd-slow-eval <run_dir>`) — its retrospective value: rebuild the JAX target from the
-run's config, restore the `TrainState`, accumulate the reductions over `n_steps` eval
-batches, render the figures, and log them under `slow_eval/*` into the run's wandb on the
-dedicated `slow_eval/step` axis (a finished run's `_step` has advanced, so an explicit
-`step=` write would be dropped — the in-loop path does not need this). No torch, no
-export round-trip.
 
 Cross-batch reductions are exact under micro-batching: density/mean accumulate
 SUM-over-positions + a position count, divided once at the end (token-weighted mean,
@@ -38,18 +31,19 @@ The three CONFIG-GATED permutation metrics (`PermutedCIPlots`, `UVPlots`,
 `IdentityCIError`) are recomputed natively too, off the run's `eval.metrics` block
 (re-validated from `config.yaml`, since the trainer's `EvalConfig` drops the raw metric
 list). They share one column permutation per site — identity (scipy
-`linear_sum_assignment` on `-CI`) or dense (by column mass) — derived from the batch-mean
-`(position, C)` upper-leaky CI matrix (`make_position_ci_step` / `accumulate_position_ci`):
-`PermutedCIPlots` heatmaps the permuted lower/upper CI, `UVPlots` reorders the V/U columns
-by the same permutation, and `IdentityCIError` reports the discrete CI-vs-target distance
-(generalizing the toy `tms`/`resid_mlp` `identity_ci_error`). All three are LM-only (they
-need the `(B, T, C)` position axis) and empty unless their config names them.
+`linear_sum_assignment` on `-CI`) or dense (by column mass) — derived from a per-site
+upper-leaky CI matrix. `PermutedCIPlots` and `IdentityCIError` use the LM batch-mean
+`(position, C)` matrix (`make_position_ci_step` / `accumulate_position_ci`) and are LM-only
+(they need the position axis). `UVPlots` reorders the V/U columns by the same kind of
+permutation and is the one figure metric usable for ANY decomposition: the toys feed it
+their probe CI as the permutation source (`render_uv_figure`), the LM in-loop tier feeds it
+the position-CI upper matrix. The LM in-loop UVPlots does a NAIVE host gather of the
+C-sharded V/U — cheap for the toys (small, replicated, already on host) but it OOMs / breaks
+at production C BY DESIGN (per Oli): no special handling, the gather is the cost.
 """
 
-import argparse
 import fnmatch
 import io
-import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -64,15 +58,7 @@ from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 
-from param_decomp.checkpoint import make_checkpoint_manager, restore_step
 from param_decomp.ci_fn import lower_leaky_hard_sigmoid, upper_leaky_hard_sigmoid
-from param_decomp.config import (
-    DataConfig,
-    EvalConfig,
-    ExperimentConfig,
-    load_run_dir_config,
-)
-from param_decomp.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.hidden_acts_eval import (
     accumulate_hidden_acts,
     hidden_acts_log_entries,
@@ -80,9 +66,6 @@ from param_decomp.hidden_acts_eval import (
     make_stochastic_hidden_acts_step,
 )
 from param_decomp.lm import DecomposedModel
-from param_decomp.load_run import build_target
-from param_decomp.run_state import build_optimizers, init_train_state
-from param_decomp.sharding import dp_mesh
 from param_decomp_config.eval_metrics import (
     DenseCITargetSpec,
     IdentityCIErrorConfig,
@@ -526,19 +509,30 @@ def plot_permuted_ci_heatmaps(
     return lower_png, upper_png
 
 
+def uv_permutation_indices(
+    permutation: dict[str, "Literal['identity', 'dense']"],
+    permutation_source_ci: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Per-site column-permutation indices (C,) for the V/U reorder, derived from each
+    site's `(rows, C)` upper-leaky CI matrix (identity via Hungarian, dense by column mass).
+    `rows` is the position axis for the LM (`position_ci[name].upper`) or the probe-feature
+    axis for the toys — the permutation is the same either way."""
+    perms: dict[str, np.ndarray] = {}
+    for name, target in permutation.items():
+        permute = permute_to_identity if target == "identity" else permute_to_dense
+        perms[name] = permute(permutation_source_ci[name])[1]
+    return perms
+
+
 def plot_uv_matrices(
     components: dict[str, tuple[np.ndarray, np.ndarray]],
-    permutation: dict[str, "Literal['identity', 'dense']"],
-    position_ci: dict[str, PositionCI],
+    perms: dict[str, np.ndarray],
 ) -> bytes:
     """The `UVPlots` figure: per-site V `(d_in, C)` and U `(C, d_out)` heatmaps with the
-    component axis reordered by the same identity/dense permutation the CI plots use (torch
-    `plot_UV_matrices`). One row per site, V left / U right, shared colorbar."""
+    component axis reordered by `perms` (the shared identity/dense permutation, computed by
+    `uv_permutation_indices`; torch `plot_UV_matrices`). One row per site, V left / U right,
+    shared colorbar."""
     names = sorted(components)
-    perms = {}
-    for name in names:
-        permute = permute_to_identity if permutation[name] == "identity" else permute_to_dense
-        perms[name] = permute(position_ci[name].upper)[1]
     n = len(names)
     fig, axs = plt.subplots(n, 2, figsize=(10, 5 * n), constrained_layout=True, squeeze=False)
     all_vals = [m for name in names for m in components[name]]
@@ -566,16 +560,15 @@ def render_permutation_figures(
     position_ci: dict[str, PositionCI],
     components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
 ) -> dict[str, bytes]:
-    """The config-driven permutation plots (`PermutedCIPlots`, `UVPlots`) as
+    """The config-driven LM permutation plots (`PermutedCIPlots`, `UVPlots`) as
     `{figures/<key>: png}`, keyed as torch logs them under `slow_eval/`. Empty when neither
     plot metric is configured.
 
-    `components` (the C-sharded V/U) is `None` for the IN-LOOP slow tier, which renders only
-    the cheap position-CI heatmaps: `UVPlots` needs a full host gather of V/U, antithetical
-    to the forward-only in-loop design and not meaningfully renderable at production C, so it
-    stays OFFLINE-only (`run_offline_slow_eval`). When `components is None`, `UVPlots` is
-    skipped even if the config names it (the in-loop contract); only the offline caller, which
-    passes `components`, renders it."""
+    The CI heatmaps come from `position_ci` (cheap). `components` is the host-gathered
+    C-sharded V/U: pass it (and have `UVPlots` configured) to render `UVPlots`, `None` to
+    skip it. The gather is NAIVE — it OOMs / breaks at production C BY DESIGN (per Oli), so
+    the caller only gathers when `spec.want_uv_plots` and accepts the failure at scale; the
+    UV column order reuses the position-CI permutation."""
     figures: dict[str, bytes] = {}
     if not spec.any_plots:
         return figures
@@ -584,8 +577,27 @@ def render_permutation_figures(
     figures["figures/causal_importances_upper_leaky"] = upper_png
     if spec.want_uv_plots and components is not None:
         present = {name: components[name] for name in spec.permutation}
-        figures["figures/uv_matrices"] = plot_uv_matrices(present, spec.permutation, position_ci)
+        perms = uv_permutation_indices(
+            spec.permutation, {name: position_ci[name].upper for name in spec.permutation}
+        )
+        figures["figures/uv_matrices"] = plot_uv_matrices(present, perms)
     return figures
+
+
+def render_uv_figure(
+    spec: PermutationMetricSpec,
+    components: dict[str, tuple[np.ndarray, np.ndarray]],
+    permutation_source_ci: dict[str, np.ndarray],
+) -> dict[str, bytes]:
+    """The `UVPlots` figure alone (`{figures/uv_matrices: png}`), for the positionless toys
+    (TMS / ResidMLP) — they have no `(T, C)` position axis, so they drive the V/U column
+    order off a per-site `(rows, C)` probe CI matrix instead. Empty unless the config names
+    `UVPlots`. Toy V/U is small / replicated / already on host, so this is cheap."""
+    if not spec.want_uv_plots:
+        return {}
+    present = {name: components[name] for name in spec.permutation}
+    perms = uv_permutation_indices(spec.permutation, permutation_source_ci)
+    return {"figures/uv_matrices": plot_uv_matrices(present, perms)}
 
 
 def compute_identity_ci_errors(
@@ -633,22 +645,6 @@ def render_slow_eval_figures(
     }
 
 
-@dataclass(frozen=True)
-class SlowEvalOutput:
-    """The offline slow-eval payload: plot `figures` ({log_key: png}), scalar
-    `hidden_acts` metrics ({torch_log_key: mse}), and scalar `identity_ci_errors`
-    ({IdentityCIError[/<site>]: distance}, empty when unconfigured)."""
-
-    figures: dict[str, bytes]
-    hidden_acts: dict[str, float]
-    identity_ci_errors: dict[str, float]
-
-
-def _eval_config(cfg: ExperimentConfig) -> EvalConfig:
-    assert cfg.eval is not None, f"{cfg.run_id}: no eval block — nothing to slow-eval"
-    return cfg.eval
-
-
 def compute_hidden_acts_metrics(
     lm: DecomposedModel,
     state: Any,
@@ -676,64 +672,11 @@ def compute_hidden_acts_metrics(
     }
 
 
-def run_offline_slow_eval(run_dir: Path, cfg: ExperimentConfig, step: int) -> SlowEvalOutput:
-    """Restore checkpoint `step` from `run_dir`'s ckpts, render the slow figures, and
-    compute the scalar hidden-acts recon metrics. `run_dir` is the on-disk dir (the
-    exporter takes it the same way); `cfg.run_dir` can differ when a run dir is read from
-    a relocated copy. CPU-OK."""
-    eval_cfg = _eval_config(cfg)
-    mesh = dp_mesh()
-    lm, frozen, prefix, prefix_residual_fn, _vocab_size = build_target(cfg, mesh)
-
-    opt_vu, opt_ci, _schedules = build_optimizers(cfg)
-    init_key, src_key, _run_key = random.split(random.PRNGKey(cfg.seed), 3)
-    reference = init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh)
-    manager = make_checkpoint_manager(run_dir / "ckpts", cfg.cadence.keep_last)
-    state = restore_step(manager, reference, step)
-
-    data_cfg = cfg.data
-    assert isinstance(data_cfg, DataConfig), "slow eval reads the LM parquet data path"
-    schedule = BatchSchedule(scan_shards(data_cfg.dir), eval_cfg.batch_size, cfg.seed + 1)
-    server = ShardServer(schedule, data_cfg.seq_len, jax.process_index(), jax.process_count())
-    to_residual = jax.jit(prefix_residual_fn)
-    residual_batches = [
-        to_residual(prefix, jnp.asarray(server.local_batch(j))) for j in range(eval_cfg.n_steps)
-    ]
-
-    slow_eval_step = make_slow_eval_step(lm, eval_cfg.ci_alive_threshold)
-    reductions = accumulate_site_reductions(
-        slow_eval_step, state.ci_fn, frozen, residual_batches, _n_batches_accum(run_dir)
-    )
-    hidden_acts = compute_hidden_acts_metrics(
-        lm, state, frozen, residual_batches, cfg.n_mask_samples, cfg.sampling,
-        random.fold_in(random.PRNGKey(cfg.seed), step),
-    )  # fmt: skip
-
-    perm_spec = resolve_permutation_metrics(lm.site_names, eval_metrics_from_run_dir(run_dir))
-    figures = render_slow_eval_figures(reductions)
-    identity_ci_errors: dict[str, float] = {}
-    if perm_spec.any_plots or perm_spec.any_identity_error:
-        position_ci = accumulate_position_ci(
-            make_position_ci_step(lm), state.ci_fn, frozen, residual_batches
-        )
-        components = {
-            name: (np.asarray(V), np.asarray(U)) for name, (V, U) in state.components.vu.items()
-        }
-        figures |= render_permutation_figures(perm_spec, position_ci, components)
-        identity_ci_errors = compute_identity_ci_errors(
-            perm_spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE
-        )
-    return SlowEvalOutput(
-        figures=figures, hidden_acts=hidden_acts, identity_ci_errors=identity_ci_errors
-    )
-
-
 def eval_metrics_from_run_dir(run_dir: Path) -> list[Any]:
     """The typed `eval.metrics` configs from the run's `config.yaml`. The trainer's
     `EvalConfig` keeps only scalar-tier fields, so the plot/permutation metric configs are
-    re-validated here from the raw block (same source-of-truth read as `_n_batches_accum`).
-    Both the offline pass and the in-loop slow tier (`run.py`) read the metric list this
-    way."""
+    re-validated here from the raw block. The in-loop slow tier (`run.py`) reads the metric
+    list this way to resolve the config-gated permutation/UV/identity metrics."""
     import yaml
     from pydantic import TypeAdapter
 
@@ -742,79 +685,3 @@ def eval_metrics_from_run_dir(run_dir: Path) -> list[Any]:
     raw = yaml.safe_load((run_dir / "config.yaml").read_text())
     adapter = TypeAdapter(AnyEvalMetricConfig)
     return [adapter.validate_python(m) for m in raw["eval"]["metrics"]]
-
-
-def _n_batches_accum(run_dir: Path) -> int | None:
-    """The torch `CIHistograms.n_batches_accum` from the raw eval block (it's dropped by
-    `EvalConfig`, which keeps only scalar-tier fields). None caps nothing."""
-    import yaml
-
-    raw = yaml.safe_load((run_dir / "config.yaml").read_text())
-    for metric in raw["eval"]["metrics"]:
-        if metric.get("type") == "CIHistograms":
-            return metric.get("n_batches_accum")
-    return None
-
-
-def _write_output(output: SlowEvalOutput, out_dir: Path, step: int) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for key, png in output.figures.items():
-        path = out_dir / f"{key.replace('/', '__')}_step{step}.png"
-        path.write_bytes(png)
-        print(f"wrote {path}", flush=True)
-    scalars_path = out_dir / f"hidden_acts_recon_step{step}.json"
-    scalars_path.write_text(json.dumps(output.hidden_acts, indent=2, sort_keys=True))
-    print(f"wrote {scalars_path}", flush=True)
-    for key in ("CIHiddenActsReconLoss", "StochasticHiddenActsReconLoss"):
-        print(f"  {key} = {output.hidden_acts[key]:.6g}", flush=True)
-    if output.identity_ci_errors:
-        errors_path = out_dir / f"identity_ci_errors_step{step}.json"
-        errors_path.write_text(json.dumps(output.identity_ci_errors, indent=2, sort_keys=True))
-        print(f"wrote {errors_path}", flush=True)
-        print(f"  IdentityCIError = {output.identity_ci_errors['IdentityCIError']:.6g}", flush=True)
-
-
-def _log_to_wandb(cfg: ExperimentConfig, output: SlowEvalOutput, step: int) -> None:
-    import wandb
-    from PIL import Image
-
-    assert cfg.wandb is not None, "no wandb config — pass --no-wandb to skip logging"
-    wandb.init(
-        id=cfg.run_id,
-        project=cfg.wandb.project,
-        entity=cfg.wandb.entity,
-        resume="allow",
-    )
-    wandb.define_metric("slow_eval/step")
-    wandb.define_metric("slow_eval/*", step_metric="slow_eval/step")
-    payload: dict[str, Any] = {
-        f"slow_eval/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in output.figures.items()
-    }
-    payload.update({f"slow_eval/loss/{k}": v for k, v in output.hidden_acts.items()})
-    payload.update({f"slow_eval/{k}": v for k, v in output.identity_ci_errors.items()})
-    payload["slow_eval/step"] = step
-    wandb.log(payload)
-    wandb.finish()
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--step", type=int, default=None, help="checkpoint step (default: latest)")
-    ap.add_argument("--no-wandb", action="store_true", help="write PNGs to disk only")
-    args = ap.parse_args()
-    jax.config.update("jax_platforms", "cpu")
-
-    cfg = load_run_dir_config(args.run_dir)
-    manager = make_checkpoint_manager(args.run_dir / "ckpts", cfg.cadence.keep_last)
-    step = args.step if args.step is not None else manager.latest_step()
-    assert step is not None, f"no checkpoints under {args.run_dir / 'ckpts'}"
-
-    output = run_offline_slow_eval(args.run_dir, cfg, step)
-    _write_output(output, args.run_dir / "slow_eval", step)
-    if not args.no_wandb:
-        _log_to_wandb(cfg, output, step)
-
-
-if __name__ == "__main__":
-    main()

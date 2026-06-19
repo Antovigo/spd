@@ -200,9 +200,7 @@ class MetricsSink:
             wandb.save(str(config_yaml), base_path=str(cfg.run_dir), policy="now")
             # The in-loop slow tier (`SlowEvalRenderer`) logs `slow_eval/*` on the live
             # `_step` axis at the eval step (SPEC S28/S29), so NO dedicated `slow_eval/step`
-            # metric is defined here. The retrospective `pd-slow-eval` CLI, which logs into
-            # a FINISHED run whose `_step` head has moved past, defines its own
-            # `slow_eval/step` axis in `slow_eval.py::_log_to_wandb`.
+            # metric is defined here. Slow eval is in-loop only (no offline CLI).
             self._wandb = wandb
 
     def log(self, step: int, record: dict[str, float]) -> None:
@@ -237,14 +235,15 @@ class SlowEvalRenderer:
     The collective part of slow eval (the jitted forward + the device->host pull whose
     `np.asarray` triggers the C-shard all-gather) runs in lockstep on ALL ranks inside the
     eval pass. This renderer takes ONLY the materialized numpy reductions (the per-site
-    `SiteReduction` plot inputs and, when the config names a CI-heatmap/permutation metric,
-    the batch-mean `(T, C)` position CI) and does the pure-host part — matplotlib +
-    `wandb.log` — on a background thread, so the main train loop on every rank proceeds
-    immediately (near-zero cross-rank divergence). The thread touches ZERO jax/device state.
-    `UVPlots` is deliberately NOT rendered here (it needs a full host gather of the C-sharded
-    V/U, antithetical to the forward-only in-loop design); it stays offline-only
-    (`slow_eval.run_offline_slow_eval`). The `IdentityCIError` SCALARS are computed
-    synchronously on the collective path (cheap, and `_step`-monotonic), not on this thread.
+    `SiteReduction` plot inputs; when the config names a CI-heatmap/permutation metric, the
+    batch-mean `(T, C)` position CI; and when the config names `UVPlots`, the host-gathered
+    V/U `components`) and does the pure-host part — matplotlib + `wandb.log` — on a
+    background thread, so the main train loop on every rank proceeds immediately (near-zero
+    cross-rank divergence). The thread touches ZERO jax/device state. `UVPlots` is a NAIVE
+    full host gather of the C-sharded V/U: cheap small-scale, OOMs / breaks at production C
+    BY DESIGN (per Oli) — no special handling, the gather (collective, on the eval pass) is
+    the cost. The `IdentityCIError` SCALARS are computed synchronously on the collective path
+    (cheap, and `_step`-monotonic), not on this thread.
 
     One render in flight at a time: a `submit` while a render is still running blocks
     briefly on `join()` first, so renders can't pile up (slow eval is forward-only and
@@ -276,6 +275,7 @@ class SlowEvalRenderer:
         reductions: dict[str, SiteReduction],
         perm_spec: PermutationMetricSpec,
         position_ci: dict[str, PositionCI] | None,
+        components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
         now_step: int,
     ) -> None:
         if not self._is_main:
@@ -286,7 +286,7 @@ class SlowEvalRenderer:
         self.join()  # cap to one in-flight render
         self._thread = threading.Thread(
             target=_render_and_log_slow_eval,
-            args=(reductions, perm_spec, position_ci, now_step),
+            args=(reductions, perm_spec, position_ci, components, now_step),
             daemon=True,
         )
         self._thread.start()
@@ -304,19 +304,20 @@ def _render_and_log_slow_eval(
     reductions: dict[str, SiteReduction],
     perm_spec: PermutationMetricSpec,
     position_ci: dict[str, PositionCI] | None,
+    components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
     now_step: int,
 ) -> None:
     """Pure-host: render the slow figures (the base plot set plus, when `position_ci` is
-    materialized, the config-driven CI-heatmap/permutation figures) and log them to wandb on
-    the live `_step` axis at `now_step`. `UVPlots` is offline-only, so `components` is not
-    passed (the in-loop contract). No jax/device access — safe off the train loop."""
+    materialized, the config-driven CI-heatmap/permutation figures, and when `components` is
+    the host-gathered V/U, the `UVPlots` heatmaps) and log them to wandb on the live `_step`
+    axis at `now_step`. No jax/device access — safe off the train loop."""
     import wandb
     import wandb.errors
     from PIL import Image
 
     figures = render_slow_eval_figures(reductions)
     if position_ci is not None:
-        figures |= render_permutation_figures(perm_spec, position_ci, components=None)
+        figures |= render_permutation_figures(perm_spec, position_ci, components)
     payload: dict[str, Any] = {
         f"slow_eval/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in figures.items()
     }
@@ -663,9 +664,9 @@ def _make_lm_eval_fn(
 
     slow_eval_step = make_slow_eval_step(lm, cfg.eval.ci_alive_threshold)
     slow_renderer = SlowEvalRenderer(is_main)
-    # The CI-heatmap / permutation / identity-error metrics read off the run's typed
-    # `eval.metrics` (re-validated from the pinned config.yaml, like the offline path: the
-    # trainer's `EvalConfig` drops the raw metric list). config.yaml is pinned before train().
+    # The CI-heatmap / permutation / UV / identity-error metrics read off the run's typed
+    # `eval.metrics` (re-validated from the pinned config.yaml: the trainer's `EvalConfig`
+    # drops the raw metric list). config.yaml is pinned before train().
     perm_spec = resolve_permutation_metrics(lm.site_names, eval_metrics_from_run_dir(cfg.run_dir))
     want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
     position_ci_step = make_position_ci_step(lm) if want_position_ci else None
@@ -739,7 +740,17 @@ def _make_lm_eval_fn(
                     perm_spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE
                 )
                 eval_record |= {f"eval/slow/{k}": v for k, v in identity_ci_errors.items()}
-            slow_renderer.submit(site_reductions, perm_spec, position_ci, now_step)
+            # `UVPlots` needs the C-sharded V/U gathered to host (collective `np.asarray`).
+            # This NAIVE gather is small-scale-only — it OOMs / breaks at production C BY
+            # DESIGN (per Oli); gated on the config naming UVPlots so it costs nothing
+            # otherwise. The component column order reuses the position-CI permutation.
+            components: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+            if perm_spec.want_uv_plots:
+                components = {
+                    name: (np.asarray(V), np.asarray(U))
+                    for name, (V, U) in state.components.vu.items()
+                }
+            slow_renderer.submit(site_reductions, perm_spec, position_ci, components, now_step)
         if is_main:
             headline = {
                 k: eval_record[f"eval/{k}"]
