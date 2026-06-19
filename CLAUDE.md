@@ -67,8 +67,9 @@ Three flat-layout distributions, deliberately split:
   config.
 
 `make install-dev` syncs all three editably via the uv workspace in the root
-`pyproject.toml` into the one `.venv`. The training/eval console scripts (`pd-train`,
-`pd-slow-eval`, `pd-pretrain-train`) live in the root `pyproject.toml`; the launcher and
+`pyproject.toml` into the one `.venv`. The one training/eval console script
+(`pd-slow-eval`) lives in the root `pyproject.toml` — the inner trainers run as modules
+(`python -m param_decomp.run` / `python -m pretrain.train`), not as `pd-*` scripts; the launcher and
 post-pipeline `pd-*` scripts live in `param_decomp_lab/pyproject.toml`.
 
 ## Training (JAX) <a id="training-jax"></a>
@@ -88,12 +89,12 @@ entry points, read `param_decomp/CLAUDE.md` and `SPEC.md`. In one breath:
   pure fns (`clean_output` / `site_inputs` / `masked_output` / `weight_deltas`) over
   `(frozen, vu)` pytrees. Generic over vendored LM targets. There is one recon
   semantics: chunkwise masking through the suffix forward, KL on final logits.
-- **`pd-train <config.yaml>`** (`param_decomp/run.py`) — the composition root and the
+- **`python -m param_decomp.run <config.yaml>`** (`param_decomp/run.py`) — the composition root and the
   only I/O layer. Reads the canonical `param_decomp_config` schema directly. Orbax
   sharded checkpoints; SIGTERM → save → SLURM requeue → resume.
 - **Launch from the lab side** via `pd-lm <config.yaml> --nodes N` (login-node submission
   wrapper; snapshots the tree to an immutable shared-FS workspace, installs the `[cuda]`
-  extra there, sbatches `pd-train`; `--local` runs the trainer inline single-process).
+  extra there, sbatches `python -m param_decomp.run`; `--local` runs the trainer inline single-process).
   `lab → param_decomp` is a fine dependency; only `param_decomp → lab` is forbidden.
 
 ## Public API (consumer substrate)
@@ -138,7 +139,7 @@ and returns JAX-native as the #10 torch->jax adapter.
   `load_run.py` + `log.py`) plus `configs/` (the self-contained run yamls) and `tests/`
   (incl. the `tests/equivalence/` frozen torch↔JAX goldens). The torch oracle lives at
   git tag `torch-oracle`.
-- `pretrain/` (repo-root sibling) — the in-house target-LM pretrainer (`pd-pretrain-train`):
+- `pretrain/` (repo-root sibling) — the in-house target-LM pretrainer (`pretrain.train`):
   trainable equinox archs whose `state_dict()` keys the decomposition loader reads.
 - `vendored_jax/` (repo-root sibling) — bit-parity JAX Llama / GPT-2 archs the trainer
   decomposes.
@@ -179,7 +180,7 @@ Every artifact for a decomposition lives under one dir per run:
 
 ```
 PARAM_DECOMP_OUT_DIR/runs/<run_id>/
-  config.yaml                # the single self-contained run config (pd-train reads it; resume byte-compares)
+  config.yaml                # the single self-contained run config (the trainer reads it; resume byte-compares)
   ckpts/<step>/...           # orbax sharded checkpoints (JAX trainer)
   metrics.jsonl              # local logs
   harvest/h-*/...            # pd-harvest output
@@ -213,17 +214,18 @@ Run a single test: `python -m pytest path/to/test_file.py::test_name`.
 
 ## CLI entry points
 
-The core training/eval scripts (`pd-train`, `pd-slow-eval`, `pd-pretrain-train`) are
-declared in the root `pyproject.toml`; the launchers and post-pipeline scripts in
-`param_decomp_lab/pyproject.toml`. Training is `pd-train` (JAX), launched via `pd-lm`.
+The one core eval script (`pd-slow-eval`) is declared in the root `pyproject.toml`; the
+launchers and post-pipeline scripts in `param_decomp_lab/pyproject.toml`. The inner
+trainers are NOT console scripts — run them as modules (the lab launchers sbatch the same
+module-run command). Training is `python -m param_decomp.run` (JAX), launched via `pd-lm`.
 
 | Command | Entry point | Purpose |
 |---|---|---|
-| `pd-train` | `param_decomp/run.py` | The core JAX decomposition trainer (composition root; run inside a launch workspace) |
+| `python -m param_decomp.run` | `param_decomp/run.py` | The core JAX decomposition trainer (composition root; run inside a launch workspace) |
 | `pd-slow-eval` | `param_decomp/slow_eval.py` | JAX-native offline slow (plot) eval over a checkpoint |
-| `pd-pretrain-train` | `pretrain/train.py` | The core in-house target-LM pretrainer |
-| `pd-lm` | `experiments/lm/jax_launch.py` | Launch a `pd-train` run: snapshot ref + shared-FS workspace + sbatch (`--local` runs inline) |
-| `pd-pretrain` | `experiments/lm/pretrain/jax_launch.py` | Launch a `pd-pretrain-train` run (`--local` runs inline) |
+| `python -m pretrain.train` | `pretrain/train.py` | The core in-house target-LM pretrainer |
+| `pd-lm` | `experiments/lm/jax_launch.py` | Launch a decomposition trainer run: snapshot ref + shared-FS workspace + sbatch (`--local` runs inline) |
+| `pd-pretrain` | `experiments/lm/pretrain/jax_launch.py` | Launch a pretrainer run (`--local` runs inline) |
 | `pd-tms` / `pd-resid-mlp` | `experiments/{tms,resid_mlp}/run.py` | The CPU toy decomposition CLIs |
 | `pd-harvest` | `harvest/scripts/run_slurm_cli.py` | Submit harvest SLURM job |
 | `pd-autointerp` | `autointerp/scripts/run_slurm_cli.py` | Submit autointerp SLURM job |

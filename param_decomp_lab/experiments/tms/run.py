@@ -7,7 +7,7 @@ Anthropic `mean((|x|-out)^2)` objective), then decomposes it through the same en
 LM uses, validating via the ground-truth identity-CI metric logged every train-log step.
 
 These toys train in seconds; `pd-tms` runs synchronously on CPU in the main venv (no
-SLURM / `pd-train` / CUDA). It mints its own `p-<8hex>` run id (toys do not go through
+SLURM / `param_decomp.run` / CUDA). It mints its own `p-<8hex>` run id (toys do not go through
 `pd-lm`).
 """
 

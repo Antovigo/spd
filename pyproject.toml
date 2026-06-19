@@ -30,11 +30,10 @@ dependencies = [
 cuda = ["jax[cuda12]==0.10.1"]
 
 [project.scripts]
-# Core trainers (the thing the lab launchers `pd-lm` / `pd-pretrain` sbatch, also runnable
-# directly): the decomposition trainer and the in-house target-LM pretrainer.
-pd-train = "param_decomp.run:main"
+# The retrospective slow-eval re-render tool. The inner trainers are NOT console scripts:
+# run them as modules (`python -m param_decomp.run` / `python -m pretrain.train`), which is
+# what the lab launchers `pd-lm` / `pd-pretrain` sbatch (and what you'd run for direct debug).
 pd-slow-eval = "param_decomp.slow_eval:main"
-pd-pretrain-train = "pretrain.train:main"
 
 [dependency-groups]
 dev = [

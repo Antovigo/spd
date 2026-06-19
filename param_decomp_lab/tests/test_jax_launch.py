@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from param_decomp_lab.experiments.lm.jax_launch import _stamp_config, _validate_config
+from param_decomp_lab.experiments.lm.jax_launch import (
+    _rank_command,
+    _stamp_config,
+    _validate_config,
+)
 
 _MINIMAL_LM = {
     "run_name": "r",
@@ -44,6 +48,12 @@ _MINIMAL_LM = {
     "data": {"dataset_name": "parquet", "tokenizer_name": "t"},
     "wandb": {"project": "p"},
 }
+
+
+def test_rank_command_runs_trainer_as_module():
+    command = _rank_command(Path("param_decomp/configs/x.yaml"), rank_env="export FOO=1")
+    assert "exec python -m param_decomp.run" in command
+    assert "pd-train" not in command
 
 
 def test_validate_config_returns_run_name(tmp_path: Path):

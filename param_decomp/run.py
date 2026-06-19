@@ -1,7 +1,7 @@
 """The training entrypoint: wrapper YAML -> full SPEC-compliant run on a vendored target.
 
-    pd-train <wrapper.yaml>     # normally via pd-lm, which stamps run_id into
-                                 # the workspace copy; re-running resumes in place
+    python -m param_decomp.run <wrapper.yaml>   # normally via pd-lm, which stamps run_id
+                                                 # into the workspace copy; re-running resumes in place
 
 Composition root + the only I/O layer: data serving (`data.py`), HF weight loading,
 metrics jsonl (+ optional wandb), orbax checkpoints, SIGTERM-save for SLURM requeue.
@@ -830,7 +830,9 @@ def main() -> None:
             )
             prefix_residual_fn = llama_simple_mlp.prefix_residual
         case _:
-            raise AssertionError(f"pd-train is LM-only; got target {type(cfg.target).__name__}")
+            raise AssertionError(
+                f"param_decomp.run is LM-only; got target {type(cfg.target).__name__}"
+            )
 
     train(cfg, raw_cfg, lm, frozen, prefix, prefix_residual_fn, mesh)
 

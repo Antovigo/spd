@@ -6,7 +6,7 @@ scratch in-process (the `act_fn(coeffs·x) + x` read-off objective), then decomp
 the same engine the LM uses, validating via the ground-truth identity-CI metric.
 
 These toys train in seconds; `pd-resid-mlp` runs synchronously on CPU in the main venv
-(no SLURM / `pd-train` / CUDA). It mints its own `p-<8hex>` run id.
+(no SLURM / `param_decomp.run` / CUDA). It mints its own `p-<8hex>` run id.
 """
 
 from pathlib import Path

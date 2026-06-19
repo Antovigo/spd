@@ -1,4 +1,4 @@
-"""The single self-contained pretrain run config (`pd-pretrain-train` reads it directly).
+"""The single self-contained pretrain run config (`pretrain.train` reads it directly).
 
 Mirrors the torch `Config` recipe fields (next-token CE, AdamW, cosine LR + warmup, grad
 clip) plus the run-instance fields the lab launcher stamps (`run_id`, `out_dir`). Data is

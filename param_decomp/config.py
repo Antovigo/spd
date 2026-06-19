@@ -14,7 +14,7 @@ terms); the dataclasses here carry only the jax-runtime knobs the canonical sche
 express (checkpoint cadence, the CI-fn architecture extraction).
 
 `run_id` / `out_dir` are `None` in a hand-authored config; `pd-lm` mints them at
-submit time and stamps the workspace copy, which `pd-train` then resumes by
+submit time and stamps the workspace copy, which the trainer then resumes by
 byte-comparing the pinned `config.yaml`.
 
 Knowingly ignored canonical-schema fields (runtime details with no JAX analog, or
@@ -590,7 +590,7 @@ def build_from_schema(schema_raw: dict[str, Any]) -> ExperimentConfig:
     """Validate a single self-contained LM run config (the canonical `LMExperimentConfig`
     schema + run-instance fields) and convert it to the trainer's `ExperimentConfig`.
 
-    `pd-train` is LM-only. The toy domains (TMS, ResidMLP) build their `ExperimentConfig`
+    `param_decomp.run` is LM-only. The toy domains (TMS, ResidMLP) build their `ExperimentConfig`
     in the lab (`param_decomp_lab/experiments/{tms,resid_mlp}/`) via the public shared
     helpers (`convert_shared_algorithm_config`, `run_instance`, `layerwise_mlp_ci_arch`)
     and run on CPU through their own `pd-tms` / `pd-resid-mlp` CLIs."""

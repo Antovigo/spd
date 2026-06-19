@@ -1,8 +1,8 @@
 # `param_decomp_lab/experiments/`
 
 Experiment glue, torch-free. Training is JAX through the generic core engine
-(`param_decomp.run.run_decomposition_training`). LM runs go to SLURM via `pd-train` /
-`pd-lm`; the toy domains (TMS, ResidMLP) run on CPU in-process via `pd-tms` /
+(`param_decomp.run.run_decomposition_training`). LM runs go to SLURM via `pd-lm` (which
+sbatches `python -m param_decomp.run`); the toy domains (TMS, ResidMLP) run on CPU in-process via `pd-tms` /
 `pd-resid-mlp`. The torch `build_target` bridge + the `pretrain/` dir were DELETED with the
 rest of torch: autointerp/clustering read a run's target topology from
 `param_decomp.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —

@@ -1,20 +1,21 @@
-"""Submit a JAX target-pretraining run (`pd-pretrain-train`) — `pd-pretrain`.
+"""Submit a JAX target-pretraining run (`python -m pretrain.train`) — `pd-pretrain`.
 
 The in-house target LMs (`gpt2_simple` / `llama_simple` / `llama_simple_mlp`) that the
 decomposition trainer then decomposes are pretrained by `pretrain.train`.
 This is the login-node submit wrapper, a slimmed mirror of `pd-lm`
 (`experiments/lm/jax_launch.py`): mint a `t-<hex>` run id, snapshot the tree, materialize
 an immutable shared-FS workspace (clone + the one CUDA venv), stamp the id (+ out_dir /
-wandb group / tags) into the workspace's config, and sbatch. `--local` runs `pd-pretrain-train`
+wandb group / tags) into the workspace's config, and sbatch. `--local` runs the pretrainer
 in the current shell instead (single process, CPU / 1 GPU).
 
-The schema is `param_decomp_config`-free here: `pd-pretrain-train` validates its own config (it
+The schema is `param_decomp_config`-free here: `pretrain.train` validates its own config (it
 owns `PretrainConfig`, which pulls jax); we only read the run_name and ensure `run_id` is
 absent.
 """
 
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import fire
@@ -50,13 +51,13 @@ def main(
     tags: str | None = None,
     comment: str | None = None,
 ) -> None:
-    """Submit (or `--local` run) a `pd-pretrain-train` target-pretraining job.
+    """Submit (or `--local` run) a target-pretraining job (`pretrain.train`).
 
     Args:
         config_path: Single self-contained run yaml inside the repo, with a
             `run_name` and NO `run_id` (minted here). `--local` reads it in place.
         nodes: Node count (8 GPUs each). Ignored with `--local`.
-        local: Run `pd-pretrain-train` in the current shell (single process) instead of
+        local: Run the pretrainer in the current shell (single process) instead of
             submitting to SLURM. For CPU / single-GPU smokes.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
@@ -100,7 +101,7 @@ def main(
     )
     rank_command = (
         f"source .venv/bin/activate\n{_RANK_ENV}\n"
-        f"exec pd-pretrain-train {shlex.quote(str(config_rel))}"
+        f"exec python -m pretrain.train {shlex.quote(str(config_rel))}"
     )
     command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(rank_command)}"
     script = generate_script(slurm_config, command, setup=f'cd "{workspace}"')
@@ -121,7 +122,7 @@ def main(
 
 def _run_local(config_path: Path) -> None:
     assert config_path.exists(), f"config not found: {config_path}"
-    cmd = ["pd-pretrain-train", str(config_path.resolve())]
+    cmd = [sys.executable, "-m", "pretrain.train", str(config_path.resolve())]
     logger.info(f"Running locally: {' '.join(cmd)}")
     subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 

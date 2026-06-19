@@ -35,8 +35,8 @@ pd-lm    param_decomp_lab/experiments/lm/<wrapper>.yaml --nodes N
 TMS and ResidualMLP now live only as JAX targets in `param_decomp/`
 (`tms.py`, `resid_mlp.py`); the torch experiment dirs were deleted.
 
-Training is the JAX single-pool trainer (`param_decomp/`, entry point
-`pd-train`), launched from the lab side via `pd-lm`. A run is one self-contained YAML
+Training is the JAX single-pool trainer (`param_decomp/`, run as
+`python -m param_decomp.run`), launched from the lab side via `pd-lm`. A run is one self-contained YAML
 (the `param_decomp_config` experiment schema). The torch trainer (`optimize()`, the torch
 `Metric` impls, `RunSink`) was retired and is preserved at git tag `torch-oracle`. See
 `param_decomp/CLAUDE.md` and `SPEC.md` for the trainer.

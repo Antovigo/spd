@@ -1,4 +1,4 @@
-"""`pd-pretrain-train <config.yaml>` — JAX next-token-CE pretraining of an in-house target LM.
+"""`python -m pretrain.train <config.yaml>` — JAX next-token-CE pretraining of an in-house target LM.
 
 The composition root and only I/O layer for pretraining; the step stays pure. Reuses the
 decomposition trainer's substrate — `param_decomp.data` (offline pre-tokenized parquet,

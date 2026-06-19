@@ -1,19 +1,21 @@
-"""Submit a JAX (`pd-train`) decomposition run to SLURM, or run it locally (`--local`).
+"""Submit a JAX decomposition run (`python -m param_decomp.run`) to SLURM, or run it
+locally (`--local`).
 
 Mints the `p-<8hex>` run id, snapshots the working tree to `refs/runs/snapshot/<id>`,
 materializes the snapshot as a shared-FS workspace (clone + the one CUDA venv, built at
-submit time on the login node — `pd-train` runs 8 srun tasks per node, so in-job
+submit time on the login node — the trainer runs 8 srun tasks per node, so in-job
 per-node cloning would race), stamps the run id (+ out_dir / wandb group / tags) into
 the workspace's single config yaml, and sbatches. Requeues re-enter the same immutable
 workspace.
 
 `--local` skips SLURM and the workspace entirely: mint a run id, stamp it into the live
-config, and run `pd-train` in the current process (single device). For smoke / debug.
+config, and run the trainer in the current process (single device). For smoke / debug.
 """
 
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import fire
@@ -44,6 +46,13 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export XLA_FLAGS="--xla_gpu_enable_command_buffer=\""""
 
 
+def _rank_command(config_rel: Path, rank_env: str) -> str:
+    return (
+        f"source .venv/bin/activate\n{rank_env}\n"
+        f"exec python -m param_decomp.run {shlex.quote(str(config_rel))}"
+    )
+
+
 def main(
     config_path: str,
     *,
@@ -57,7 +66,7 @@ def main(
     comment: str | None = None,
     allocator: str | None = None,
 ) -> None:
-    """Submit (or `--local` run) a pd-train run.
+    """Submit (or `--local` run) a decomposition trainer (`param_decomp.run`) run.
 
     Args:
         config_path: Single self-contained run yaml (the canonical schema + top-level
@@ -65,7 +74,7 @@ def main(
             are minted here and stamped into the workspace copy; `out_dir` defaults to
             `PARAM_DECOMP_OUT_DIR/runs` (the current cluster) when absent.
         nodes: Node count (8 GPUs each). Ignored under `--local`.
-        local: Run `pd-train` in the current process (single device, no SLURM, no
+        local: Run the trainer in the current process (single device, no SLURM, no
             workspace) instead of submitting. For smoke / debug.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
@@ -116,14 +125,11 @@ def main(
     rank_env = _RANK_ENV
     if allocator is not None:
         rank_env = f"{rank_env}\nexport XLA_PYTHON_CLIENT_ALLOCATOR={allocator}"
-    rank_command = (
-        f"source .venv/bin/activate\n{rank_env}\nexec pd-train {shlex.quote(str(config_rel))}"
-    )
-    command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(rank_command)}"
+    command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(_rank_command(config_rel, rank_env))}"
     script = generate_script(slurm_config, command, setup=f'cd "{workspace}"')
     result = submit_slurm_job(script, "pd-lm")
 
-    logger.section("pd-train job submitted!")
+    logger.section("pd-lm job submitted!")
     summary: dict[str, str | None] = {
         "Run ID": run_id,
         "Run name": run_name,
@@ -139,12 +145,17 @@ def main(
 
 
 def _run_local(config_rel: Path, run_name: str, group: str | None, tags: list[str]) -> None:
-    """Mint a run id, stamp the live config in place, and run `pd-train` inline."""
+    """Mint a run id, stamp the live config in place, and run the trainer inline."""
     run_id = generate_run_id("param_decomp")
     config = REPO_ROOT / config_rel
     _stamp_config(config, run_id, group, tags)
-    logger.section(f"pd-train local: {run_name} ({run_id})")
-    subprocess.run(["pd-train", str(config_rel)], cwd=REPO_ROOT, check=True, env=os.environ.copy())
+    logger.section(f"pd-lm local: {run_name} ({run_id})")
+    subprocess.run(
+        [sys.executable, "-m", "param_decomp.run", str(config_rel)],
+        cwd=REPO_ROOT,
+        check=True,
+        env=os.environ.copy(),
+    )
 
 
 def _config_path_relative_to_repo(config_path: str) -> Path:

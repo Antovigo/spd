@@ -77,7 +77,7 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
     still writes `config.yaml` + checkpoints locally).
 
     `run_id` / `out_dir` are minted by `pd-lm` at submit time (both `None` in a
-    hand-authored config); the stamped workspace copy carries them, and `pd-train`
+    hand-authored config); the stamped workspace copy carries them, and the trainer
     resumes by byte-comparing that pinned copy.
     """
 

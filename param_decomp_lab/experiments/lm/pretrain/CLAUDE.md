@@ -1,6 +1,6 @@
 # experiments/lm/pretrain — in-house target-LM pretraining (JAX)
 
-Pretrains the FROZEN in-house target LMs that the decomposition trainer (`pd-train`)
+Pretrains the FROZEN in-house target LMs that the decomposition trainer (`param_decomp.run`)
 then decomposes — e.g. the pile-pretrained `llama_simple_mlp` (target `t-9d2b8f02`). Small,
 simple ML: next-token CE, AdamW, cosine LR + warmup. JAX-native (equinox), torch-free.
 
@@ -18,7 +18,7 @@ the submit wrapper is lab-side. One venv covers both:
     `LlamaSimpleMLP`). Weights are stored in torch `nn.Linear` orientation `(d_out, d_in)`
     and `state_dict()` emits the EXACT keys the decomposition loader reads.
   - `config.py` — `PretrainConfig` (the self-contained run yaml schema).
-  - `train.py` — `pd-pretrain-train <config.yaml>`: the composition root + only I/O layer. fp32
+  - `train.py` — `python -m pretrain.train <config.yaml>`: the composition root + only I/O layer. fp32
     masters, AdamW (decay on 2D weights only), cosine+warmup, grad clip, orbax sharded
     checkpoints, SIGTERM→save→requeue→resume. Reuses `param_decomp.data` (offline
     pre-tokenized parquet, never streamed) + `param_decomp.sharding`.
@@ -28,14 +28,14 @@ the submit wrapper is lab-side. One venv covers both:
     `pile_llama_simple-4L-768`, `*_SMOKE`).
 - **`param_decomp_lab/experiments/lm/pretrain/`** (here):
   - `jax_launch.py` — `pd-pretrain`: snapshot + immutable shared-FS workspace + sbatch
-    `pd-pretrain-train` (or `--local` to run in the current shell). Slim mirror of `pd-lm`.
+    `python -m pretrain.train` (or `--local` to run in the current shell). Slim mirror of `pd-lm`.
   - `run_info.py` — `find_pretrain_cache(project, run_id)`: the torch-free read-side index
     into the cache (the torch `PretrainRunInfo`'s wandb-download path is gone — the cache
     is written directly to shared FS).
 
 ## Cache compatibility (load-bearing)
 
-A freshly-pretrained target is decomposable with NO conversion. `pd-pretrain-train` writes
+A freshly-pretrained target is decomposable with NO conversion. `pretrain.train` writes
 `PARAM_DECOMP_OUT_DIR/pretrain_cache/<project>-<run_id>/model_step_<N>.safetensors` keyed
 `h.{i}.attn.{q,k,v,o}_proj.weight`, `h.{i}.mlp.{c_fc,down_proj}.weight`,
 `h.{i}.rms_{1,2}.weight`, `wte.weight`, `ln_f.weight` (NO `lm_head.weight` — tied), every

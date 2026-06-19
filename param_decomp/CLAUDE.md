@@ -85,7 +85,7 @@ recon-grid step factory, orbax checkpointing, schedules, SIGTERM-save). A target
 exactly three seams: the data source (`sample_batch(step) -> residual`), the eval metric
 (`eval_fn(state, now_step) -> dict`, run every `eval_every`), and (for the LM) the perf
 token count. `run.py::train` is the thin LM caller (parquet `sample_batch` + the
-CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); `pd-train` is LM-ONLY
+CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); `param_decomp.run` is LM-ONLY
 (`config.build_from_schema` validates `LMExperimentConfig`; `main`'s `match cfg.target`
 covers only `TargetConfig` / `LlamaSimpleMLPTargetConfig`). `cfg.target` is typed by the
 `config.TargetSites` protocol (just `.sites`), `cfg.data` is `DataConfig | None` (None for a
@@ -145,7 +145,7 @@ alongside config and lab.
 
 ## The training pipeline (`run.py`)
 
-`pd-train <config.yaml>` is the composition root and the only I/O layer; the step
+`python -m param_decomp.run <config.yaml>` is the composition root and the only I/O layer; the step
 stays pure. Data is a pre-tokenized parquet artifact under
 `$DATA_MOUNT/artifacts/mechanisms/param-decomp/datasets/` (`fineweb_llama_tok_2048`
 for Llama-8B, `pile_neox_tok_512` for `LlamaSimpleMLP`) — NEVER stream/tokenize from
@@ -168,7 +168,7 @@ NOT changed C / sites / ci-fn arch). Add to the config:
 
 ```yaml
 resume_provenance:
-  # ABSOLUTE path — pd-train runs with cwd = <workspace> (the repo root), so a
+  # ABSOLUTE path — the trainer runs with cwd = <workspace> (the repo root), so a
   # relative path would resolve under the workspace, not the output runs dir.
   parent_run_dir: /mnt/data/artifacts/mechanisms/param-decomp/runs/p-bd3cd4d4
   parent_step: 175000
