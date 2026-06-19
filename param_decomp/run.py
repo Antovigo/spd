@@ -1,16 +1,18 @@
 """The generic VPD decomposition-training ENGINE — the one train loop every target
 (LM, TMS, ResidMLP, …) runs through.
 
-`run_decomposition_training(cfg, raw_cfg, lm, frozen, sample_batch, eval_fn, eval_every,
-perf_tokens_per_step, mesh)` owns the generic machinery: init / restore / fine-tune init /
-faith warmup (`_init_or_restore_state`), the recon-grid step factory, orbax checkpointing,
-schedules, metrics fan-out (`MetricsSink`), the in-loop slow/plot renderer
-(`SlowEvalRenderer`), and SIGTERM-save for SLURM requeue. A target injects three seams:
-the data source (`sample_batch`), the eval metric (`eval_fn`), and the perf token count.
+`run_decomposition_training(pd, cadence, run, raw_cfg, lm, frozen, ci_fn, data,
+remat_recon_forwards, sample_batch, eval_fn, eval_every, perf_tokens_per_step, mesh)` owns
+the generic machinery: init / restore / fine-tune init / faith warmup
+(`_init_or_restore_state`), the recon-grid step factory, orbax checkpointing, schedules,
+metrics fan-out (`MetricsSink`), the in-loop slow/plot renderer (`SlowEvalRenderer`), and
+SIGTERM-save for SLURM requeue. It reads the pydantic `PDConfig` / `Cadence` DIRECTLY; the
+target injects three seams: the data source (`sample_batch`), the eval metric (`eval_fn`),
+and the perf token count.
 
 This module is a pure library — it has NO `main()` and reads no YAML. The per-domain
-composition root (read the run YAML → build the target / data loader / `ExperimentConfig`
-→ call this engine) lives lab-side: `param_decomp_lab/experiments/lm/run.py` for the LM,
+composition root (read the run YAML → build the target / data loader / `BuiltRun` → call
+this engine) lives lab-side: `param_decomp_lab/experiments/lm/run.py` for the LM,
 `param_decomp_lab/experiments/{tms,resid_mlp}/run.py` for the toys.
 """
 
@@ -43,8 +45,8 @@ from param_decomp.checkpoint import (
     restore_latest,
     save_state,
 )
-from param_decomp.config import ExperimentConfig
-from param_decomp.configs import flatten_typed_lists
+from param_decomp.config import CIFnArch, DataConfig, RunInstance
+from param_decomp.configs import Cadence, PDConfig, flatten_typed_lists
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.run_state import build_optimizers, init_train_state
@@ -122,31 +124,31 @@ _METRIC_KEYS = {
 class MetricsSink:
     """Process-0 metrics fan-out: jsonl always, wandb when configured."""
 
-    def __init__(self, cfg: ExperimentConfig, wandb_config: dict[str, object], is_main: bool):
+    def __init__(self, run: RunInstance, wandb_config: dict[str, object], is_main: bool):
         self._jsonl = None
         self._wandb = None
         if not is_main:
             return
-        self._jsonl = (cfg.run_dir / "metrics.jsonl").open("a")
-        if cfg.wandb is not None:
+        self._jsonl = (run.run_dir / "metrics.jsonl").open("a")
+        if run.wandb is not None:
             import wandb
 
             wandb.init(
-                project=cfg.wandb.project,
-                entity=cfg.wandb.entity,
-                name=cfg.run_name,
-                id=cfg.run_id,
-                group=cfg.wandb.group,
-                tags=list(cfg.wandb.tags),
+                project=run.wandb.project,
+                entity=run.wandb.entity,
+                name=run.run_name,
+                id=run.run_id,
+                group=run.wandb.group,
+                tags=list(run.wandb.tags),
                 resume="allow",
                 config=wandb_config,
             )
             # Persist the run's pinned config.yaml as a downloadable wandb run file
             # (parity with the torch trainer's init_pd_run -> wandb.save), not just the
             # flattened wandb.config dict. Pinned to run_dir before train() / wandb.init.
-            config_yaml = cfg.run_dir / "config.yaml"
+            config_yaml = run.run_dir / "config.yaml"
             assert config_yaml.exists(), config_yaml
-            wandb.save(str(config_yaml), base_path=str(cfg.run_dir), policy="now")
+            wandb.save(str(config_yaml), base_path=str(run.run_dir), policy="now")
             # The in-loop slow tier (`SlowEvalRenderer`) logs `slow_eval/*` on the live
             # `_step` axis at the eval step (SPEC S28/S29), so NO dedicated `slow_eval/step`
             # metric is defined here. Slow eval is in-loop only (no offline CLI).
@@ -277,7 +279,10 @@ def _render_and_log_slow_eval(
 
 
 def _init_or_restore_state(
-    cfg: ExperimentConfig,
+    pd: PDConfig,
+    ci_fn_arch: CIFnArch,
+    data: DataConfig | None,
+    run: RunInstance,
     lm: DecomposedModel,
     frozen: Any,
     opt_vu: optax.GradientTransformation,
@@ -292,7 +297,9 @@ def _init_or_restore_state(
 
     Returns `(state, start_step)`, or `None` when a SIGTERM landed mid-warmup (the caller
     must exit cleanly for requeue — no valid checkpoint exists pre-step-0)."""
-    state = _ensure_global(init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh), mesh)
+    state = _ensure_global(
+        init_train_state(pd, lm, ci_fn_arch, data, opt_vu, opt_ci, init_key, src_key, mesh), mesh
+    )
 
     restored = restore_latest(checkpoint_manager, state)
     if restored is not None:
@@ -302,13 +309,13 @@ def _init_or_restore_state(
             print(f"resumed from checkpoint step {ckpt_step}", flush=True)
         return state, ckpt_step
 
-    if cfg.resume_provenance is not None:
+    if run.resume_provenance is not None:
         # Fine-tune init (SPEC S33): own ckpts/ is empty, so this is the FIRST entry, not a
         # requeue — load the parent's trained V/U + ci_fn onto the fresh reference, start a
         # clean schedule from step 0 (fresh optimizer / sources, no faith warmup). The
         # parent↔new structural-compat check (sites + ci-fn arch) runs lab-side in the LM
         # composition root before this engine is entered.
-        prov = cfg.resume_provenance
+        prov = run.resume_provenance
         state = init_from_parent(prov.parent_run_dir / "ckpts", prov.parent_step, state)
         save_state(checkpoint_manager, 0, state)
         if is_main:
@@ -319,8 +326,8 @@ def _init_or_restore_state(
             )
         return state, 0
 
-    if cfg.faith_warmup.steps > 0:
-        faith_warmup_optimizer = optax.adamw(cfg.faith_warmup.lr, weight_decay=0.0)
+    if pd.faithfulness_warmup_steps > 0:
+        faith_warmup_optimizer = optax.adamw(pd.faithfulness_warmup_lr, weight_decay=0.0)
         faith_warmup_opt_state = faith_warmup_optimizer.init(
             eqx.filter(state.components, eqx.is_array)
         )
@@ -328,7 +335,7 @@ def _init_or_restore_state(
         warmed_components = state.components
         t0 = time.time()
         faith_warmup_loss = None
-        for _ in range(cfg.faith_warmup.steps):
+        for _ in range(pd.faithfulness_warmup_steps):
             warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
                 warmed_components, faith_warmup_opt_state, frozen
             )
@@ -348,7 +355,7 @@ def _init_or_restore_state(
         )
         if is_main:
             print(
-                f"faith warmup: {cfg.faith_warmup.steps} steps in {time.time() - t0:.0f}s, "
+                f"faith warmup: {pd.faithfulness_warmup_steps} steps in {time.time() - t0:.0f}s, "
                 f"final faith {float(faith_warmup_loss):.3e}",
                 flush=True,
             )
@@ -357,10 +364,15 @@ def _init_or_restore_state(
 
 
 def run_decomposition_training(
-    cfg: ExperimentConfig,
+    pd: PDConfig,
+    cadence: Cadence,
+    run: RunInstance,
     raw_cfg: dict[str, object],
     lm: DecomposedModel,
     frozen: Any,
+    ci_fn: CIFnArch,
+    data: DataConfig | None,
+    remat_recon_forwards: bool,
     sample_batch: Callable[[int], jax.Array],
     eval_fn: Callable[[TrainState, int], dict[str, float]] | None,
     eval_every: int,
@@ -370,6 +382,12 @@ def run_decomposition_training(
     """The generic VPD decomposition-training engine — the ONE train loop every target
     (LM, TMS, ResidMLP, …) runs through.
 
+    Reads the pydantic algorithm config DIRECTLY: `pd` (seed / steps / optimizers / loss
+    metrics / faith warmup / sampling), `cadence` (log / save / checkpoint-retention
+    rhythm), `run` (the run identity + wandb lineage). The lab-built objects ride alongside:
+    the decomposed `lm` + `frozen` target, the CI-fn arch `ci_fn`, the data source `data`
+    (None for a toy), and the `remat_recon_forwards` compute knob.
+
     The target supplies only its three injectable seams:
 
     - `sample_batch(step) -> residual [*leading, d]`: the residual entering the decomposed
@@ -377,8 +395,8 @@ def run_decomposition_training(
       prefix over a parquet token batch; a toy generates it synthetically.
     - `eval_fn(state, now_step) -> dict[str, float]`: an in-loop eval pass run every
       `eval_every` completed steps, its record logged under that step. `None` disables it.
-    - `eval_every`: the eval cadence. For an LM this is `cfg.eval.every`; a toy folds its
-      cheap target-CI eval onto the `log_every` cadence.
+    - `eval_every`: the eval cadence. For an LM this is `eval.every`; a toy folds its
+      cheap target-CI eval onto the `train_log_every` cadence.
 
     Everything generic — `init_train_state`, fine-tune init, faith warmup, the recon-grid
     step factory, orbax checkpointing, schedules, SIGTERM-save — lives here. The step
@@ -388,30 +406,33 @@ def run_decomposition_training(
     "token" has no meaning) omits the perf keys."""
     is_main = jax.process_index() == 0
     ndev = mesh.devices.size
+    assert cadence.save_every is not None and cadence.keep_last_n_checkpoints is not None, cadence
+    save_every = cadence.save_every
 
-    cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(cfg)
+    run.run_dir.mkdir(parents=True, exist_ok=True)
+    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(pd)
 
-    key = random.PRNGKey(cfg.seed)
+    key = random.PRNGKey(pd.seed)
     init_key, src_key, run_key = random.split(key, 3)
 
-    checkpoint_manager = make_checkpoint_manager(cfg.run_dir / "ckpts", cfg.cadence.keep_last)
-    init = _init_or_restore_state(
-        cfg, lm, frozen, opt_vu, opt_ci, init_key, src_key, mesh, checkpoint_manager, is_main
+    checkpoint_manager = make_checkpoint_manager(
+        run.run_dir / "ckpts", cadence.keep_last_n_checkpoints
     )
+    init = _init_or_restore_state(
+        pd, ci_fn, data, run, lm, frozen, opt_vu, opt_ci, init_key, src_key, mesh,
+        checkpoint_manager, is_main,
+    )  # fmt: skip
     if init is None:
         return  # SIGTERM mid-warmup: clean exit for requeue
     state, start_step = init
 
     step_fn = make_train_step(
         lm=lm,
-        loss_spec=build_recon_terms(
-            cfg.loss_metrics, lm.site_names, cfg.n_mask_samples, cfg.sampling
-        ),
+        loss_spec=build_recon_terms(pd.loss_metrics, lm.site_names, pd.n_mask_samples, pd.sampling),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
-        total_steps=cfg.steps,
-        remat_recon_forwards=cfg.remat_recon_forwards,
+        total_steps=pd.steps,
+        remat_recon_forwards=remat_recon_forwards,
         mesh=mesh,
     )
 
@@ -425,25 +446,25 @@ def run_decomposition_training(
             jax_runtime={
                 "n_devices": ndev,
                 "n_processes": jax.process_count(),
-                "remat_recon_forwards": cfg.remat_recon_forwards,
-                "run_id": cfg.run_id,
-                "run_dir": str(cfg.run_dir),
+                "remat_recon_forwards": remat_recon_forwards,
+                "run_id": run.run_id,
+                "run_dir": str(run.run_dir),
             },
         )
     )
-    sink = MetricsSink(cfg, wandb_config, is_main)
+    sink = MetricsSink(run, wandb_config, is_main)
     window_t0 = time.time()
     last_logged = start_step
 
-    for step in range(start_step, cfg.steps):
+    for step in range(start_step, pd.steps):
         residual = sample_batch(step)
         state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
 
         now_step = step + 1
-        dense = cfg.cadence.dense_log_phase
+        dense = cadence.dense_log_phase
         log_now = (
-            now_step % cfg.cadence.log_every == 0
-            or now_step == cfg.steps
+            now_step % cadence.train_log_every == 0
+            or now_step == pd.steps
             or (dense is not None and now_step <= dense.until_step and now_step % dense.every == 0)
         )
         if log_now:
@@ -476,7 +497,7 @@ def run_decomposition_training(
                 sink.log(now_step, eval_record)
                 window_t0 = time.time()
 
-        if now_step % cfg.cadence.save_every == 0 or now_step == cfg.steps or _sigterm_received:
+        if now_step % save_every == 0 or now_step == pd.steps or _sigterm_received:
             save_state(checkpoint_manager, now_step, state)
             if is_main:
                 print(f"checkpoint saved @ step {now_step}", flush=True)

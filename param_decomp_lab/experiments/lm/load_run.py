@@ -36,7 +36,7 @@ from jaxtyping import Array, Float, Int
 from param_decomp import llama_simple_mlp
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, restore_step
 from param_decomp.ci_fn import CIFn
-from param_decomp.config import ExperimentConfig
+from param_decomp.config import BuiltRun
 from param_decomp.llama8b import (
     DecompVU,
     first_decomposed_layer,
@@ -71,7 +71,7 @@ class HarvestForward:
 
 
 def build_target(
-    cfg: ExperimentConfig, mesh: jax.sharding.Mesh
+    cfg: BuiltRun, mesh: jax.sharding.Mesh
 ) -> tuple[DecomposedModel, AnyFrozenTarget, AnyPrefix, Callable[[Any, Any], jax.Array], int]:
     """`(lm, frozen target, prefix, prefix_residual_fn, vocab_size)` for the run's target
     config. SimpleMLP reads its local pretrain cache (no network); llama8b reads the HF
@@ -134,7 +134,7 @@ class LoadedJaxRun:
     run_id: str
     step: int
     lm: DecomposedModel
-    config: ExperimentConfig
+    config: BuiltRun
     vocab_size: int
     _state: TrainState
     _forward: Callable[
@@ -171,11 +171,14 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
     mesh = dp_mesh()
     lm, target, prefix, prefix_residual_fn, vocab_size = build_target(cfg, mesh)
 
-    opt_vu, opt_ci, _ = build_optimizers(cfg)
-    init_key, src_key = jax.random.split(jax.random.PRNGKey(cfg.seed))
-    reference = init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh)
+    opt_vu, opt_ci, _ = build_optimizers(cfg.pd)
+    init_key, src_key = jax.random.split(jax.random.PRNGKey(cfg.pd.seed))
+    reference = init_train_state(
+        cfg.pd, lm, cfg.ci_fn, cfg.data, opt_vu, opt_ci, init_key, src_key, mesh
+    )
 
-    manager = make_checkpoint_manager(run_dir / "ckpts", cfg.cadence.keep_last)
+    assert cfg.cadence.keep_last_n_checkpoints is not None, cfg.cadence
+    manager = make_checkpoint_manager(run_dir / "ckpts", cfg.cadence.keep_last_n_checkpoints)
     if step is None:
         restored = restore_latest(manager, reference)
         assert restored is not None, f"no checkpoints under {run_dir / 'ckpts'}"
@@ -212,7 +215,7 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
         )
 
     return LoadedJaxRun(
-        run_id=cfg.run_id,
+        run_id=cfg.run.run_id,
         step=resolved_step,
         lm=lm,
         config=cfg,

@@ -48,17 +48,18 @@ def _reference_lm_raw():
 def test_b128_config_converts(tmp_path: Path):
     converted, raw = load_config(_stamped_config(tmp_path, CONFIGS / "llama8b_l18_b128_cmp32.yaml"))
     assert raw["pd"]["batch_size"] == 128
-    assert converted.run_name == "jax-l18-b128-cmp32-from-torch"
+    assert converted.run.run_name == "jax-l18-b128-cmp32-from-torch"
     assert converted.data is not None and converted.data.global_batch == 128
     assert converted.target.sites == mlp_family_site_cs(18, 18, 24576)
     spec = build_recon_terms(
-        converted.loss_metrics, tuple(sc.name for sc in converted.target.sites),
-        converted.n_mask_samples, converted.sampling,
+        converted.pd.loss_metrics, tuple(sc.name for sc in converted.target.sites),
+        converted.pd.n_mask_samples, converted.pd.sampling,
     )  # fmt: skip
     assert spec.faith_coeff == 1e5 and spec.imp_min.pnorm == 2.0
     (ppgd,) = spec.persistent.values()
     assert isinstance(ppgd, PersistentPGDReconLossConfig)
-    assert ppgd.n_warmup_steps == 2 and converted.vu_optimizer.grad_clip_norm == 0.01
+    assert ppgd.n_warmup_steps == 2
+    assert converted.pd.components_optimizer.grad_clip_norm == 0.01
     assert [t.name for t in spec.recon_terms] == [
         "StochasticReconSubsetLoss",
         "PersistentPGDReconLoss",
@@ -288,12 +289,13 @@ def test_c49k_config_converts(tmp_path: Path):
     site patterns) must convert cleanly."""
     converted, _raw = load_config(_stamped_config(tmp_path, CONFIGS / "llama8b_l18_C49k_200k.yaml"))
     assert converted.target.sites == mlp_family_site_cs(18, 18, 49152)
-    assert converted.steps == 200000
+    assert converted.pd.steps == 200000
     assert isinstance(converted.data, DataConfig)
     assert converted.data.global_batch == 512 and converted.data.seq_len == 2048
-    assert converted.vu_optimizer.lr == 7e-05 and converted.ci_optimizer.lr == 7e-05
+    assert converted.pd.components_optimizer.lr_schedule.start_val == 7e-05
+    assert converted.pd.ci_fn_optimizer.lr_schedule.start_val == 7e-05
     assert converted.eval is not None and converted.eval.pgd is not None
-    assert converted.wandb is not None and converted.wandb.entity is None
+    assert converted.run.wandb is not None and converted.run.wandb.entity is None
 
 
 def test_nine_layer_config_converts(tmp_path: Path):
@@ -302,14 +304,15 @@ def test_nine_layer_config_converts(tmp_path: Path):
     converted, _raw = load_config(
         _stamped_config(tmp_path, CONFIGS / "llama8b_l18-26_9layer_chunkwise.yaml")
     )
-    assert converted.run_name == "jax-l18-26-9L-seq512-b128-40k"
+    assert converted.run.run_name == "jax-l18-26-9L-seq512-b128-40k"
     assert len(converted.target.sites) == 27
     assert isinstance(converted.data, DataConfig)
     assert converted.data.seq_len == 512 and converted.data.global_batch == 128
-    assert converted.steps == 40000
-    assert converted.vu_optimizer.lr == 1.5e-4 and converted.ci_optimizer.lr == 5e-5
-    assert converted.remat_recon_forwards is True
-    imp = next(m for m in converted.loss_metrics if m.type == "ImportanceMinimalityLoss")
+    assert converted.pd.steps == 40000
+    assert converted.pd.components_optimizer.lr_schedule.start_val == 1.5e-4
+    assert converted.pd.ci_fn_optimizer.lr_schedule.start_val == 5e-5
+    assert converted.runtime.remat_recon_forwards is True
+    imp = next(m for m in converted.pd.loss_metrics if m.type == "ImportanceMinimalityLoss")
     assert imp.eps == 1e-6 and imp.coeff == 5e-6
 
 
@@ -344,9 +347,9 @@ def test_run_id_required_and_drives_identity(tmp_path: Path):
     """The run dir and wandb id are the p-id (runs/<id>/ convention); the human name
     stays the wandb display name. Missing or malformed run_id refuses at build time."""
     cfg, _ = load_config(_stamped_config(tmp_path, CONFIGS / "llama8b_l18_C49k_200k.yaml"))
-    assert cfg.run_id == RUN_ID
-    assert cfg.run_dir.name == RUN_ID
-    assert cfg.run_name == "jax-l18-C49k-200k"
+    assert cfg.run.run_id == RUN_ID
+    assert cfg.run.run_dir.name == RUN_ID
+    assert cfg.run.run_name == "jax-l18-C49k-200k"
 
     # the committed config carries no run_id (minted at submit) → build refuses
     with pytest.raises(AssertionError, match="run_id must be"):

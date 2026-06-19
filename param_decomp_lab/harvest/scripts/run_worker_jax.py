@@ -65,7 +65,7 @@ def harvest_jax_run(
         "JAX harvest path requires a ParamDecompHarvestConfig"
     )
     activation_threshold = method_config.activation_threshold
-    data, seed = run.config.data, run.config.seed
+    data, seed = run.config.data, run.config.pd.seed
     assert isinstance(data, DataConfig), f"JAX harvest is LM-only, got {type(data).__name__}"
     rank, world_size = rank_world_size if rank_world_size is not None else (0, 1)
     schedule = BatchSchedule(scan_shards(data.dir), config.batch_size, seed)

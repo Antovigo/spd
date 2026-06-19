@@ -1,14 +1,15 @@
 # `param_decomp_lab/experiments/`
 
 Experiment glue + the per-domain COMPOSITION ROOTS, torch-free. Training is JAX through the
-generic core engine (`param_decomp.run.run_decomposition_training`, a pure library). Each
-domain's `run.py` is its composition root: read the run YAML → build the target / data
-loader / `ExperimentConfig` → call the engine. LM runs go to SLURM via `pd-lm` (which
-sbatches `python -m param_decomp_lab.experiments.lm.run`); the toy domains (TMS, ResidMLP)
-run on CPU in-process via `pd-tms` / `pd-resid-mlp`. The shared experiment YAML schema +
-the shared YAML→`ExperimentConfig` conversion (`convert_shared_algorithm_config` /
-`run_instance` / `*_ci_arch` / `SharedAlgorithmConfig`) live in `experiments/config.py`;
-each domain's `config.py` carries its own target/data schema + (for the LM) its build.
+generic core engine (`param_decomp.run.run_decomposition_training`, a pure library that reads
+the pydantic `PDConfig` / `Cadence` directly). Each domain's `run.py` is its composition
+root: read the run YAML → build the target / data loader / `config.BuiltRun` → call the
+engine. LM runs go to SLURM via `pd-lm` (which sbatches
+`python -m param_decomp_lab.experiments.lm.run`); the toy domains (TMS, ResidMLP) run on CPU
+in-process via `pd-tms` / `pd-resid-mlp`. The shared experiment YAML schema + the shared
+validation / run-identity helpers (`assert_canonical_algorithm_config` / `run_instance` /
+`*_ci_arch`) live in `experiments/config.py`; each domain's `config.py` carries its own
+target/data schema + (for the LM) its `BuiltRun` build.
 autointerp/clustering read a run's target topology from
 `experiments.lm.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
 see `param_decomp_lab/adapters/jax_pd.py`.
@@ -21,17 +22,17 @@ The TMS and ResidualMLP toys are LAB experiments that call the core engine as a 
 - `model.py` — the JAX `DecomposedModel` (sites, pure fns, MSE `recon_loss_fn`), the frozen
   target (`eqx.Module`), from-scratch in-process pretrain (`pretrain_*_target`), the
   ground-truth identity-CI eval (`identity_ci_error` + the single-feature probe), and the
-  lab `*TargetConfig` dataclass carried on `ExperimentConfig.target` (satisfies the core
+  lab `*TargetConfig` dataclass carried on `config.BuiltRun.target` (satisfies the core
   `config.TargetSites` protocol).
-- `run.py` — the `pd-tms` / `pd-resid-mlp` CLI: builds the `ExperimentConfig` from the
+- `run.py` — the `pd-tms` / `pd-resid-mlp` CLI: builds the `config.BuiltRun` from the
   canonical schema via the public shared helpers
-  (`config.convert_shared_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch`),
+  (`config.assert_canonical_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch`),
   pretrains + builds the target, and calls `run_decomposition_training` with a synthetic
   `sample_batch` + an `identity_ci_error` `eval_fn`. CPU, synchronous, no SLURM. The toy
   `eval_fn` ALSO renders the config-gated `UVPlots` figure when the run's `eval.metrics`
   names it (`toy_uv_eval.log_uv_figure`): the toys feed `UVPlots` their probe CI as the
   column-permutation source and their small on-host V/U, sharing `slow_eval.render_uv_figure`
-  / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). The toy core `ExperimentConfig.eval`
+  / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). The toy `BuiltRun.eval`
   stays `None` (the toy validates via the target-CI metric, not the LM scalar pass); the
   `eval.metrics` list is read straight off the raw schema dict (`toy_uv_eval.toy_uv_spec`).
 - `configs/*.yaml` — the canonical `experiments.{tms,resid_mlp}.config` schema (TMS: 5-2 /
@@ -44,9 +45,10 @@ autointerp / clustering is NOT yet wired (`load_run` is LM-only) — the remaini
 
 ## Layout
 
-The `ExperimentConfig[T,D]` generic + `EvalConfig` + the shared YAML→`ExperimentConfig`
-conversion live in `experiments/config.py` (`WandbConfig` / `ResumeProvenance` are core, in
-`param_decomp.configs`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
+The `ExperimentConfig[T,D]` schema generic + `EvalConfig` + the shared validation /
+run-identity helpers live in `experiments/config.py` (`WandbConfig` / `ResumeProvenance` are
+core, in `param_decomp.configs`; the engine's `BuiltRun` bundle is core, in
+`param_decomp.config`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
 `LMDataConfig`, the `target.spec` union, `build_from_schema` / `load_config`) in
 `experiments/lm/config.py`; the toy schemas in `experiments/{tms,resid_mlp}/config.py`.
 

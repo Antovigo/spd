@@ -178,9 +178,11 @@ def _build_reference(
     cfg = build_from_schema(schema_raw)
     llama_cfg = llama31_8b_config()
     lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, cfg.target.sites))
-    opt_vu, opt_ci, _ = build_optimizers(cfg)
-    init_key, src_key = jax.random.split(jax.random.PRNGKey(cfg.seed))
-    build = lambda: init_train_state(cfg, lm, opt_vu, opt_ci, init_key, src_key, mesh)
+    opt_vu, opt_ci, _ = build_optimizers(cfg.pd)
+    init_key, src_key = jax.random.split(jax.random.PRNGKey(cfg.pd.seed))
+    build = lambda: init_train_state(
+        cfg.pd, lm, cfg.ci_fn, cfg.data, opt_vu, opt_ci, init_key, src_key, mesh
+    )
     reference = jax.eval_shape(build) if abstract else build()
     return reference, cfg, lm
 

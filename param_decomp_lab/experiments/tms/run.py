@@ -21,7 +21,7 @@ from jax import random
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.config import ExperimentConfig
+from param_decomp.config import BuiltRun
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
 from param_decomp.run import run_decomposition_training
@@ -29,8 +29,7 @@ from param_decomp.sharding import dp_mesh
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.config import (
-    SharedAlgorithmConfig,
-    convert_shared_algorithm_config,
+    assert_canonical_algorithm_config,
     layerwise_mlp_ci_arch,
     run_instance,
 )
@@ -40,78 +39,57 @@ from param_decomp_lab.infra.run_files import generate_run_id
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 
 
-def build_tms_experiment_config(cfg: TMSExperimentConfig) -> ExperimentConfig:
-    """Convert the canonical TMS schema to the core `ExperimentConfig` via the shared
-    algorithm-config helpers. TMS validates via the in-loop target-CI metric (not the LM
-    CEandKLLosses scalar pass), so the core `eval` is `None`. The schema's `eval.metrics`
-    list is still read at run time for the config-gated `UVPlots` figure (`toy_uv_eval`)."""
+def build_tms_built_run(cfg: TMSExperimentConfig) -> BuiltRun:
+    """Convert the canonical TMS schema to the engine's `BuiltRun` bundle via the shared
+    helpers. TMS validates via the in-loop target-CI metric (not the LM CEandKLLosses scalar
+    pass), so `eval` is `None`. The schema's `eval.metrics` list is still read at run time
+    for the config-gated `UVPlots` figure (`toy_uv_eval`)."""
     assert cfg.pd.identity_decomposition_targets is None, "identity targets unsupported"
     site_cs = tms.canonical_site_cs(
         tuple(SiteC(t.module_pattern, t.C) for t in cfg.pd.decomposition_targets)
     )
-    shared = convert_shared_algorithm_config(cfg)
-    loss_metrics = tuple(cfg.pd.loss_metrics)
+    assert_canonical_algorithm_config(cfg)
     build_recon_terms(
-        loss_metrics, tuple(sc.name for sc in site_cs), cfg.pd.n_mask_samples, cfg.pd.sampling
+        cfg.pd.loss_metrics,
+        tuple(sc.name for sc in site_cs),
+        cfg.pd.n_mask_samples,
+        cfg.pd.sampling,
     )
-    run_name, run_id, out_dir = run_instance(cfg)
-    return _assemble(cfg, site_cs, shared, loss_metrics, run_name, run_id, out_dir)
-
-
-def _assemble(
-    cfg: TMSExperimentConfig,
-    site_cs: tuple[SiteC, ...],
-    shared: SharedAlgorithmConfig,
-    loss_metrics: tuple[Any, ...],
-    run_name: str,
-    run_id: str,
-    out_dir: Path,
-) -> ExperimentConfig:
-    return ExperimentConfig(
-        run_name=run_name,
-        run_id=run_id,
-        out_dir=out_dir,
-        seed=cfg.pd.seed,
-        steps=cfg.pd.steps,
-        target=tms.TMSTargetConfig(
-            n_features=cfg.target.n_features,
-            n_hidden=cfg.target.n_hidden,
-            n_hidden_layers=cfg.target.n_hidden_layers,
-            hidden_layer_init=cfg.target.hidden_layer_init,
-            init_bias_to_zero=cfg.target.init_bias_to_zero,
-            sites=site_cs,
-            pretrain_steps=cfg.target.pretrain.steps,
-            pretrain_batch_size=cfg.target.pretrain.batch_size,
-            pretrain_lr=cfg.target.pretrain.lr,
-            pretrain_seed=cfg.target.pretrain.seed,
-            feature_probability=cfg.data.feature_probability,
-            data_generation_type=cfg.data.data_generation_type,
-            global_batch=cfg.pd.batch_size,
-        ),
+    target = tms.TMSTargetConfig(
+        n_features=cfg.target.n_features,
+        n_hidden=cfg.target.n_hidden,
+        n_hidden_layers=cfg.target.n_hidden_layers,
+        hidden_layer_init=cfg.target.hidden_layer_init,
+        init_bias_to_zero=cfg.target.init_bias_to_zero,
+        sites=site_cs,
+        pretrain_steps=cfg.target.pretrain.steps,
+        pretrain_batch_size=cfg.target.pretrain.batch_size,
+        pretrain_lr=cfg.target.pretrain.lr,
+        pretrain_seed=cfg.target.pretrain.seed,
+        feature_probability=cfg.data.feature_probability,
+        data_generation_type=cfg.data.data_generation_type,
+        global_batch=cfg.pd.batch_size,
+    )
+    return BuiltRun(
+        pd=cfg.pd,
+        runtime=cfg.runtime,
+        cadence=cfg.cadence,
+        run=run_instance(cfg),
+        target=target,
         data=None,
-        loss_metrics=loss_metrics,
-        n_mask_samples=cfg.pd.n_mask_samples,
-        sampling=cfg.pd.sampling,
-        remat_recon_forwards=cfg.runtime.remat_recon_forwards,
-        vu_optimizer=shared.vu_optimizer,
-        ci_optimizer=shared.ci_optimizer,
         ci_fn=layerwise_mlp_ci_arch(cfg),
-        faith_warmup=shared.faith_warmup,
-        cadence=shared.cadence,
         eval=None,
-        wandb=cfg.wandb,
-        resume_provenance=None,
     )
 
 
-def run_tms_decomposition(cfg: ExperimentConfig, raw_cfg: dict[str, Any], mesh: Mesh) -> None:
+def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) -> None:
     """Build + pretrain the TMS target, then decompose it through the generic engine.
 
     The residual entering the decomposed model IS the raw input `x` (no prefix). The
     `eval_fn` reads the `lower_leaky` CI of the single-feature probe and logs the
     ground-truth `IdentityCIError` per site every train-log step (TMS has no separate eval
-    cadence — `eval_every = cadence.log_every`)."""
-    target_cfg = cfg.target
+    cadence — `eval_every = cadence.train_log_every`)."""
+    target_cfg = built.target
     assert isinstance(target_cfg, tms.TMSTargetConfig)
     is_main = jax.process_index() == 0
 
@@ -132,7 +110,7 @@ def run_tms_decomposition(cfg: ExperimentConfig, raw_cfg: dict[str, Any], mesh: 
         mesh,
     )
 
-    data_key = random.fold_in(random.PRNGKey(cfg.seed), 17)
+    data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
 
     @jax.jit
     def sample_residual(step_key: jax.Array) -> jax.Array:
@@ -159,7 +137,11 @@ def run_tms_decomposition(cfg: ExperimentConfig, raw_cfg: dict[str, Any], mesh: 
     def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
         ci_lower, ci_upper = single_feature_ci(state.ci_fn)
         toy_uv_eval.log_uv_figure(
-            uv_spec, state.components.vu, ci_upper, now_step, wandb_active=cfg.wandb is not None
+            uv_spec,
+            state.components.vu,
+            ci_upper,
+            now_step,
+            wandb_active=built.run.wandb is not None,
         )
         return {
             f"eval/identity_ci_error/{site}": float(tms.identity_ci_error(ci, tolerance=0.1))
@@ -167,13 +149,18 @@ def run_tms_decomposition(cfg: ExperimentConfig, raw_cfg: dict[str, Any], mesh: 
         }
 
     run_decomposition_training(
-        cfg=cfg,
+        pd=built.pd,
+        cadence=built.cadence,
+        run=built.run,
         raw_cfg=raw_cfg,
         lm=lm,
         frozen=frozen,
+        ci_fn=built.ci_fn,
+        data=built.data,
+        remat_recon_forwards=built.runtime.remat_recon_forwards,
         sample_batch=sample_batch,
         eval_fn=eval_fn,
-        eval_every=cfg.cadence.log_every,
+        eval_every=built.cadence.train_log_every,
         perf_tokens_per_step=None,
         mesh=mesh,
     )
@@ -192,11 +179,11 @@ def main(config: str, group: str | None = None, tags: str | None = None) -> None
         if tags is not None:
             wandb_cfg["tags"] = tags.split(",")
         schema_raw["wandb"] = wandb_cfg
-    cfg = build_tms_experiment_config(TMSExperimentConfig(**schema_raw))
-    cfg.run_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.run_dir / "config.yaml").write_text(yaml.safe_dump(schema_raw, sort_keys=False))
+    built = build_tms_built_run(TMSExperimentConfig(**schema_raw))
+    built.run.run_dir.mkdir(parents=True, exist_ok=True)
+    (built.run.run_dir / "config.yaml").write_text(yaml.safe_dump(schema_raw, sort_keys=False))
     mesh = dp_mesh()
-    run_tms_decomposition(cfg, schema_raw, mesh)
+    run_tms_decomposition(built, schema_raw, mesh)
 
 
 def cli() -> None:

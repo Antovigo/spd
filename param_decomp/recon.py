@@ -12,7 +12,7 @@ closed over by the jit'd step; only keys (and, for persistent terms, `TrainState
 entries) vary per step.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -295,7 +295,7 @@ def _assert_supported_persistent(cfg: PersistentPGDReconLossConfig) -> None:
 
 
 def build_recon_terms(
-    loss_metrics: tuple[AnyLossMetricConfig, ...],
+    loss_metrics: Sequence[AnyLossMetricConfig],
     site_names: tuple[str, ...],
     n_mask_samples: int,
     sampling: SamplingType,
