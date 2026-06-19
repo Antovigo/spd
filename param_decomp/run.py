@@ -25,7 +25,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Mapping
-from types import FrameType
+from types import FrameType, ModuleType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -127,37 +127,51 @@ _METRIC_KEYS = {
 
 
 class MetricsSink:
-    """Process-0 metrics fan-out: jsonl always, wandb when configured."""
+    """Process-0 metrics fan-out: jsonl always, wandb when configured.
 
-    def __init__(self, run: RunInstance, wandb_config: dict[str, object], is_main: bool):
-        self._jsonl = None
-        self._wandb = None
+    Construct via `for_run` (main rank, opens jsonl + maybe wandb) or `silent` (the no-op
+    handle for non-main DP ranks, tests, and quick interactive runs) — not the resolved-
+    channel `__init__` directly."""
+
+    def __init__(self, jsonl: io.TextIOWrapper | None, wandb_module: ModuleType | None):
+        self._jsonl = jsonl
+        self._wandb = wandb_module
+
+    @classmethod
+    def silent(cls) -> "MetricsSink":
+        return cls(jsonl=None, wandb_module=None)
+
+    @classmethod
+    def for_run(
+        cls, run: RunInstance, wandb_config: dict[str, object], is_main: bool
+    ) -> "MetricsSink":
         if not is_main:
-            return
-        self._jsonl = (run.run_dir / "metrics.jsonl").open("a")
-        if run.wandb is not None:
-            import wandb
+            return cls.silent()
+        jsonl = (run.run_dir / "metrics.jsonl").open("a")
+        if run.wandb is None:
+            return cls(jsonl=jsonl, wandb_module=None)
+        import wandb
 
-            wandb.init(
-                project=run.wandb.project,
-                entity=run.wandb.entity,
-                name=run.run_name,
-                id=run.run_id,
-                group=run.wandb.group,
-                tags=list(run.wandb.tags),
-                resume="allow",
-                config=wandb_config,
-            )
-            # Persist the run's pinned config.yaml as a downloadable wandb run file
-            # (parity with the torch trainer's init_pd_run -> wandb.save), not just the
-            # flattened wandb.config dict. Pinned to run_dir before train() / wandb.init.
-            config_yaml = run.run_dir / "config.yaml"
-            assert config_yaml.exists(), config_yaml
-            wandb.save(str(config_yaml), base_path=str(run.run_dir), policy="now")
-            # The in-loop slow tier (`SlowEvalRenderer`) logs `slow_eval/*` on the live
-            # `_step` axis at the eval step (SPEC S28/S29), so NO dedicated `slow_eval/step`
-            # metric is defined here. Slow eval is in-loop only (no offline CLI).
-            self._wandb = wandb
+        wandb.init(
+            project=run.wandb.project,
+            entity=run.wandb.entity,
+            name=run.run_name,
+            id=run.run_id,
+            group=run.wandb.group,
+            tags=list(run.wandb.tags),
+            resume="allow",
+            config=wandb_config,
+        )
+        # Persist the run's pinned config.yaml as a downloadable wandb run file
+        # (parity with the torch trainer's init_pd_run -> wandb.save), not just the
+        # flattened wandb.config dict. Pinned to run_dir before train() / wandb.init.
+        config_yaml = run.run_dir / "config.yaml"
+        assert config_yaml.exists(), config_yaml
+        wandb.save(str(config_yaml), base_path=str(run.run_dir), policy="now")
+        # The in-loop slow tier (`SlowEvalRenderer`) logs `slow_eval/*` on the live
+        # `_step` axis at the eval step (SPEC S28/S29), so NO dedicated `slow_eval/step`
+        # metric is defined here. Slow eval is in-loop only (no offline CLI).
+        return cls(jsonl=jsonl, wandb_module=wandb)
 
     def log(self, step: int, record: "LogRecord") -> None:
         if self._jsonl is None:
@@ -460,7 +474,7 @@ def run_decomposition_training(
             },
         )
     )
-    sink = MetricsSink(run, wandb_config, is_main)
+    sink = MetricsSink.for_run(run, wandb_config, is_main)
     window_t0 = time.time()
     last_logged = start_step
 
