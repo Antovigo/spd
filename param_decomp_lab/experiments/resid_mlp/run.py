@@ -22,6 +22,7 @@ from jax.sharding import PartitionSpec as P
 
 from param_decomp.built_run import BuiltRun
 from param_decomp.lm import SiteC
+from param_decomp.log import setup_logger
 from param_decomp.recon import build_recon_terms
 from param_decomp.run import run_decomposition_training
 from param_decomp.sharding import dp_mesh
@@ -199,6 +200,7 @@ def main(config: str, group: str | None = None, tags: str | None = None) -> None
         schema_raw["wandb"] = wandb_cfg
     built = build_resid_mlp_built_run(ResidMLPExperimentConfig(**schema_raw))
     built.run.run_dir.mkdir(parents=True, exist_ok=True)
+    setup_logger(built.run.run_dir / "logs.log")
     (built.run.run_dir / "config.yaml").write_text(yaml.safe_dump(schema_raw, sort_keys=False))
     mesh = dp_mesh()
     run_resid_mlp_decomposition(built, schema_raw, mesh)

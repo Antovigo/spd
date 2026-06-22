@@ -48,6 +48,7 @@ from param_decomp.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.eval import make_eval_step
 from param_decomp.hf_http import configure_hf_http_retries
 from param_decomp.lm import DecomposedModel
+from param_decomp.log import setup_logger
 from param_decomp.run import (
     SlowEvalRenderer,
     install_sigterm_flag,
@@ -380,6 +381,7 @@ def main(config: Path) -> None:
     if is_main:
         cache_dir.mkdir(parents=True, exist_ok=True)
         built.run.run_dir.mkdir(parents=True, exist_ok=True)
+        setup_logger(built.run.run_dir / "logs.log")
         _pin_config_copy(built.run.run_dir, "config.yaml", config)
         print(f"persistent XLA compilation cache: {cache_dir}", flush=True)
         site_summary = " ".join(f"{s.name}:C{s.C}" for s in built.target.sites)
