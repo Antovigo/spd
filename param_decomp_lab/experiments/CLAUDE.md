@@ -8,7 +8,7 @@ engine. LM runs go to SLURM via `pd-lm` (which sbatches
 `python -m param_decomp_lab.experiments.lm.run`); the toy domains (TMS, ResidMLP) run on CPU
 in-process via `pd-tms` / `pd-resid-mlp`. The shared experiment YAML schema + the shared
 validation / run-identity helpers (`assert_canonical_algorithm_config` / `run_instance` /
-`*_ci_arch`) live in `experiments/config.py`; each domain's `config.py` carries its own
+`ci_arch`) live in `experiments/config.py`; each domain's `config.py` carries its own
 target/data schema + (for the LM) its `BuiltRun` build.
 autointerp/clustering read a run's target topology from
 `experiments.lm.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
@@ -26,7 +26,7 @@ The TMS and ResidualMLP toys are LAB experiments that call the core engine as a 
   `config.TargetSites` protocol).
 - `run.py` — the `pd-tms` / `pd-resid-mlp` CLI: builds the `config.BuiltRun` from the
   canonical schema via the public shared helpers
-  (`config.assert_canonical_algorithm_config` / `run_instance` / `layerwise_mlp_ci_arch`),
+  (`config.assert_canonical_algorithm_config` / `run_instance` / `ci_arch`),
   pretrains + builds the target, and calls `run_decomposition_training` with a synthetic
   `sample_batch` + an `identity_ci_error` `eval_fn`. CPU, synchronous, no SLURM. The toy
   `eval_fn` ALSO renders the config-gated `UVPlots` figure when the run's `eval.metrics`
@@ -40,7 +40,7 @@ The TMS and ResidualMLP toys are LAB experiments that call the core engine as a 
 
 TMS deeper variant (`n_hidden_layers>0`, the `-id` configs) + the ResidMLP `global` CI arch
 (`fn_type=global_shared_mlp`) are restored and wired end-to-end (the global arch dispatches
-through the core `init_train_state` via `experiments.config.toy_ci_arch`). Toy harvest /
+through the core `init_train_state` via `experiments.config.ci_arch`). Toy harvest /
 autointerp / clustering is NOT yet wired (`load_run` is LM-only) — the remaining Phase-3 bucket.
 
 ## Layout

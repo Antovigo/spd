@@ -30,7 +30,7 @@ from param_decomp.train import TrainState
 from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.config import (
     assert_canonical_algorithm_config,
-    layerwise_mlp_ci_arch,
+    ci_arch,
     run_instance,
 )
 from param_decomp_lab.experiments.tms import model as tms
@@ -76,7 +76,7 @@ def build_tms_built_run(cfg: TMSExperimentConfig) -> BuiltRun:
         run=run_instance(cfg),
         target=target,
         data=None,
-        ci_fn=layerwise_mlp_ci_arch(cfg),
+        ci_fn=ci_arch(cfg.pd.ci_config, resolve_chunkwise=None),
         eval=None,
     )
 

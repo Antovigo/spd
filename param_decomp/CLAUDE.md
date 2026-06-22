@@ -105,7 +105,7 @@ only `TargetConfig` / `LlamaSimpleMLPTargetConfig`). `BuiltRun.target` is typed 
 `config.TargetSites` protocol (just `.sites`), `BuiltRun.data` is `DataConfig | None` (None
 for a toy run). The shared schema validation + run-identity / CI-fn-arch helpers are public
 lab-side for the toys to reuse: `experiments.config.assert_canonical_algorithm_config` /
-`run_instance` / `layerwise_mlp_ci_arch` / `toy_ci_arch`.
+`run_instance` / `ci_arch`.
 
 The TMS + ResidMLP targets now live under `param_decomp_lab/experiments/{tms,resid_mlp}/`
 (`model.py` = the JAX `DecomposedModel` + frozen target + in-process pretrain + identity-CI
@@ -119,7 +119,7 @@ sites jointly, concat/split in canonical site order), and the LM `ChunkwiseTrans
 `filter_vmap`). `run_state.init_train_state` dispatches CI-fn construction on `cfg.ci_fn`
 (`MLPCIArch` / `GlobalMLPCIArch` / `ChunkwiseTransformerCIArch`) and uses replicated (not
 C-sharded) V/U + CI for the tiny toys; the core `config.CIFnArch` admits all three and the
-lab `experiments.config.toy_ci_arch` builds the layerwise / global arch from the toy
+lab `experiments.config.ci_arch` builds the layerwise / global arch from the toy
 ci_config (validated end-to-end on CPU via
 `pd-resid-mlp`). Harvest / slow-eval / export over the toys are NOT wired
 (`experiments.lm.load_run.build_target` / `run_metadata` are LM-only).

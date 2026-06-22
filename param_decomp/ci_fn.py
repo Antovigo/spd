@@ -345,6 +345,10 @@ def init_chunkwise_transformer_ci_fn(
 # ------------------- per-site / global MLPs (positionless `expects_axes=()`) -------------------
 
 
+# The MLP arches below mirror their pydantic configs (`LayerwiseMlpCiConfig` /
+# `GlobalMlpCiConfig`) field-for-field by design: the lab's `ci_arch` converter is a trivial
+# `type`-strip + list→tuple. The duplication is deliberate — it keeps a uniform `CIFnArch`
+# union for `build_ci_fn` (vs the chunkwise arch, which genuinely resolves against a target).
 @dataclass(frozen=True)
 class MLPCIArch:
     """Hidden widths shared by every per-site MLP."""

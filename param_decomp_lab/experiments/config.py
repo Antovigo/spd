@@ -5,22 +5,30 @@ Each experiment subclasses `ExperimentConfig` to fix the concrete `target` / `da
 The generic engine reads the pydantic `pd` / `cadence` / `runtime` DIRECTLY, so there is
 no flattened mirror to build — `assert_canonical_algorithm_config` only VALIDATES that the
 schema lives in the subspace the JAX trainer implements (cosine-to-0.1 LR, plain AdamW,
-components-only grad clip, …), and `run_instance` / `*_ci_arch` resolve the run identity and
+components-only grad clip, …), and `run_instance` / `ci_arch` resolve the run identity and
 the CI-fn architecture; each experiment's `run.py` assembles the rest (target + data).
 """
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Self
 
 from pydantic import Field, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.ci_fn import CIFnArch, GlobalMLPCIArch, MLPCIArch
+from param_decomp.ci_fn import (
+    ChunkwiseTransformerCIArch,
+    CIFnArch,
+    GlobalMLPCIArch,
+    MLPCIArch,
+)
 from param_decomp.config import RunInstance
 from param_decomp.configs import (
     AnyEvalMetricConfig,
     Cadence,
+    ChunkwiseTransformerCiConfig,
+    CiConfig,
     GlobalMlpCiConfig,
     LayerwiseMlpCiConfig,
     OptimizerConfig,
@@ -91,26 +99,26 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
 _RUN_ID_PATTERN = re.compile(r"^p-[0-9a-f]{8}$")
 
 
-def layerwise_mlp_ci_arch(cfg: "ExperimentConfig[Any, Any]") -> MLPCIArch:
-    """Extract the layerwise per-site MLP CI-fn arch (`type=layerwise_mlp`) from a schema
-    config. Reused by the lab toy providers (which build their own runtime
-    `ExperimentConfig`)."""
-    ci = cfg.pd.ci_config
-    assert isinstance(ci, LayerwiseMlpCiConfig), ci
-    return MLPCIArch(hidden_dims=tuple(ci.hidden_dims))
-
-
-def toy_ci_arch(cfg: "ExperimentConfig[Any, Any]") -> CIFnArch:
-    """Extract the MLP CI-fn arch for a toy run: the layerwise per-site MLP
-    (`type=layerwise_mlp`) or the global shared MLP (`type=global_mlp`)."""
-    ci = cfg.pd.ci_config
-    match ci:
+def ci_arch(
+    ci_config: CiConfig,
+    resolve_chunkwise: "Callable[[ChunkwiseTransformerCiConfig], ChunkwiseTransformerCIArch] | None",
+) -> CIFnArch:
+    """The single config→arch converter. The MLP/global archs ARE their pydantic config
+    (strip `type`, list→tuple); the chunkwise arch RESOLVES against the LM target, so the
+    caller supplies `resolve_chunkwise` (a closure binding the resolved target — the chunk
+    generator + residual-width logic stays LM-side). The positionless toys never hit the
+    chunkwise branch and pass `resolve_chunkwise=None`."""
+    match ci_config:
         case LayerwiseMlpCiConfig():
-            return layerwise_mlp_ci_arch(cfg)
+            return MLPCIArch(hidden_dims=tuple(ci_config.hidden_dims))
         case GlobalMlpCiConfig():
-            return GlobalMLPCIArch(hidden_dims=tuple(ci.hidden_dims))
-        case _:
-            raise AssertionError(f"toy CI fn must be layerwise_mlp or global_mlp, got {ci}")
+            return GlobalMLPCIArch(hidden_dims=tuple(ci_config.hidden_dims))
+        case ChunkwiseTransformerCiConfig():
+            assert resolve_chunkwise is not None, (
+                "chunkwise_transformer CI fn needs an LM target to resolve against; "
+                "the positionless toys can't request it"
+            )
+            return resolve_chunkwise(ci_config)
 
 
 def _assert_cosine_to_tenth(schedule: ScheduleConfig, who: str) -> None:

@@ -41,6 +41,7 @@ from param_decomp.recon import build_recon_terms
 from param_decomp_lab.experiments.config import (
     ExperimentConfig,
     assert_canonical_algorithm_config,
+    ci_arch,
     run_instance,
 )
 
@@ -282,9 +283,11 @@ def _resolved_chunks(target: AnyLMTargetConfig, blocks_per_chunk: int) -> tuple[
     return tuple(chunks)
 
 
-def _ci_arch(cfg: LMExperimentConfig, target: AnyLMTargetConfig) -> ChunkwiseTransformerCIArch:
-    ci = cfg.pd.ci_config
-    assert isinstance(ci, ChunkwiseTransformerCiConfig), ci
+def _resolve_chunkwise_ci_arch(
+    target: AnyLMTargetConfig, ci: ChunkwiseTransformerCiConfig
+) -> ChunkwiseTransformerCIArch:
+    """Resolve the chunkwise-transformer arch against the LM target: the chunk generator
+    (`_resolved_chunks`) + the per-chunk input width (`_resolve_d_resid`)."""
     return ChunkwiseTransformerCIArch(
         chunks=_resolved_chunks(target, ci.blocks_per_chunk),
         input_dim=_resolve_d_resid(target),
@@ -409,7 +412,7 @@ def build_experiment_config(cfg: LMExperimentConfig) -> BuiltRun:
         run=run_instance(cfg),
         target=target,
         data=data,
-        ci_fn=_ci_arch(cfg, target),
+        ci_fn=ci_arch(cfg.pd.ci_config, lambda ci: _resolve_chunkwise_ci_arch(target, ci)),
         eval=_eval(cfg),
     )
 
@@ -420,7 +423,7 @@ def build_from_schema(schema_raw: dict[str, Any]) -> BuiltRun:
 
     The LM composition entry (`run.py`) is LM-only. The toy domains (TMS, ResidMLP) build
     their `BuiltRun` in their own `run.py` via the public shared helpers
-    (`assert_canonical_algorithm_config`, `run_instance`, `layerwise_mlp_ci_arch`)."""
+    (`assert_canonical_algorithm_config`, `run_instance`, `ci_arch`)."""
     cfg = LMExperimentConfig(**schema_raw)
     assert_supported_weights_dtype(cfg)
     return build_experiment_config(cfg)

@@ -28,8 +28,8 @@ from param_decomp.train import TrainState
 from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.config import (
     assert_canonical_algorithm_config,
+    ci_arch,
     run_instance,
-    toy_ci_arch,
 )
 from param_decomp_lab.experiments.resid_mlp import model as resid_mlp
 from param_decomp_lab.experiments.resid_mlp.config import ResidMLPExperimentConfig
@@ -77,7 +77,7 @@ def build_resid_mlp_built_run(cfg: ResidMLPExperimentConfig) -> BuiltRun:
         run=run_instance(cfg),
         target=target,
         data=None,
-        ci_fn=toy_ci_arch(cfg),
+        ci_fn=ci_arch(cfg.pd.ci_config, resolve_chunkwise=None),
         eval=None,
     )
 
