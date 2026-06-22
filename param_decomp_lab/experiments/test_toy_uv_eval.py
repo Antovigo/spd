@@ -14,7 +14,7 @@ import jax
 import pytest
 
 from param_decomp.ci_fn import MLPCIArch, init_layerwise_mlp_ci_fn
-from param_decomp.llama8b import init_decomp_vu
+from param_decomp.components import init_decomp_vu
 from param_decomp.lm import SiteC
 from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.tms.model import (

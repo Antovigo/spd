@@ -24,8 +24,8 @@ from param_decomp.ci_fn import (
     CIFn,
     build_ci_fn,
 )
+from param_decomp.components import init_decomp_vu
 from param_decomp.llama8b import (
-    init_decomp_vu,
     llama_decomposed_lm,
     llama_site_specs,
 )

@@ -41,7 +41,8 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Int
 from safetensors import safe_open
 
-from param_decomp.llama8b import DecompVU, FrozenAttn
+from param_decomp.components import DecompVU, site_out
+from param_decomp.llama8b import FrozenAttn
 from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 from vendored_jax.llama import rms_norm
 
@@ -264,33 +265,6 @@ def _gelu_tanh(x: Array) -> Array:
     return jax.nn.gelu(x, approximate=True)
 
 
-def _site_out(
-    x: Array,
-    V: Array,
-    U: Array,
-    W: Array,
-    mask: Array | None,
-    delta_mask: Array | None,
-    route: Array | None,
-) -> Array:
-    """One decomposed linear (SPEC §4.1), same as `llama8b._site_out`: `((x@V)*m)@U +
-    (x@Δ)*d`, routed per position against the frozen `x @ W.T`. `mask` may be None
-    (fully on); `route` None routes everywhere. `delta_mask` None drops the delta path
-    entirely (constant-source entries carry no delta, LOSS_PARITY_DESIGN §4b). The delta
-    on this PATH is bf16-computed from the cast components (documented divergence; the
-    faithfulness loss uses the fp32 `weight_deltas`, SPEC N2)."""
-    acts = x @ V
-    if mask is not None:
-        acts = acts * mask
-    out = acts @ U
-    if delta_mask is not None:
-        delta = W - (V @ U).T  # (d_out, d_in)
-        out = out + delta_mask[..., None] * (x @ delta.T)
-    if route is not None:
-        out = jnp.where(route[..., None], out, x @ W.T)
-    return out
-
-
 def _clean_mlp_out(layer: SimpleMLPSuffixLayer, mlp_in: Array) -> Array:
     """Frozen target MLP — exactly `W` applied, not the `V@U + (W−V@U)` identity, so
     non-live sites carry no V/U gradient and no decomposition rounding (SPEC S2/S3)."""
@@ -382,7 +356,7 @@ def _masked_site_out(
     if site not in live_set:
         return x_in @ W.T
     V, U = components.site(site)
-    out = _site_out(
+    out = site_out(
         x_in, V, U, W, masks[site], delta_masks[site] if has_delta else None,
         None if routes is None else routes[site],
     )  # fmt: skip

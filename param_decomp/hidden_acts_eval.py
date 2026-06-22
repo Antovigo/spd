@@ -16,7 +16,7 @@ combined `"<ClassName>"` (= Σ_sites sum_mse / Σ_sites n_elements).
   (expected); the deterministic CI variant is tight.
 
 The clean (target) per-site output is the frozen `x @ W`: `masked_site_outputs` with
-every site live but routed FALSE everywhere falls onto `_site_out`'s frozen `x @ W.T`
+every site live but routed FALSE everywhere falls onto `site_out`'s frozen `x @ W.T`
 branch — reusing the one seam instead of a separate frozen-W accessor. Masked and clean
 both run in COMPUTE_DT (bf16, matching the trained model, mirroring `load_run.py`); the
 MSE reduction is fp32.

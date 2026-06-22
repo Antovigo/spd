@@ -59,8 +59,9 @@ def test_jitted_sharded_inits_match_eager_values():
         ChunkwiseTransformerCIArch,
         build_ci_fn,
     )
+    from param_decomp.components import init_decomp_vu
     from param_decomp.configs import BSCScope, SCScope
-    from param_decomp.llama8b import canonical_site_cs, init_decomp_vu, llama_site_specs
+    from param_decomp.llama8b import canonical_site_cs, llama_site_specs
     from param_decomp.llama8b_sharding import (
         init_ci_fn_placed,
         init_decomp_vu_placed,

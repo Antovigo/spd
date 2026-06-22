@@ -32,7 +32,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
 from param_decomp.ci_fn import CI
-from param_decomp.llama8b import DecompVU
+from param_decomp.components import DecompVU, site_out
 from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 
 LINEAR1 = "linear1"
@@ -189,29 +189,6 @@ def site_inputs(target: TMSTarget, resid: Float[Array, "B n_features"]) -> dict[
     return inputs
 
 
-def _site_out(
-    x: Array,
-    V: Array,
-    U: Array,
-    W: Array,
-    mask: Array | None,
-    delta_mask: Array | None,
-    route: Array | None,
-) -> Array:
-    """One decomposed linear (SPEC §4.1), `llama8b._site_out` for the positionless waist:
-    `((x@V)*m)@U + (x@Δ)*d`, routed per cell against frozen `x @ W.T`."""
-    acts = x @ V
-    if mask is not None:
-        acts = acts * mask
-    out = acts @ U
-    if delta_mask is not None:
-        delta = W - (V @ U).T  # (d_out, d_in)
-        out = out + delta_mask[..., None] * (x @ delta.T)
-    if route is not None:
-        out = jnp.where(route[..., None], out, x @ W.T)
-    return out
-
-
 def _masked_site_out(
     components: DecompVU,
     site: str,
@@ -227,7 +204,7 @@ def _masked_site_out(
     if site not in live_set:
         return x_in @ W.T
     V, U = components.site(site)
-    out = _site_out(
+    out = site_out(
         x_in, V, U, W, masks[site], delta_masks[site] if has_delta else None,
         None if routes is None else routes[site],
     )  # fmt: skip

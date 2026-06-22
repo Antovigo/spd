@@ -28,14 +28,13 @@ import numpy as np
 jax.config.update("jax_enable_x64", False)
 
 from param_decomp.adversary import source_masks  # noqa: E402
+from param_decomp.components import DecompVU, site_out  # noqa: E402
 from param_decomp.llama8b import (  # noqa: E402
     MLP_KINDS,
-    DecompVU,
     FrozenAttn,
     SuffixLayer,
     Target,
     _clean_mlp_out,  # noqa: E402  (reference suffix forward in the chunk-plan gate check)
-    _site_out,  # noqa: E402
     llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
@@ -193,7 +192,7 @@ def _suffix_with_split_mlp(
     n_decomp_layers: int,
 ) -> jnp.ndarray:
     """Hand-rolled fp32 suffix forward where `live_layer`'s MLP runs `live_kinds`
-    through the decomposed `_site_out` path and EVERY other MLP site (including this
+    through the decomposed `site_out` path and EVERY other MLP site (including this
     layer's NON-live sibling sites) through the frozen `x @ W` path. This is the
     explicit S2 realization the production `subset_chunk_plan` relies on when a chunk
     boundary splits a layer's MLP — a reference for `masked_output(..., live=...)`."""
@@ -211,7 +210,7 @@ def _suffix_with_split_mlp(
                 if kind not in live_kinds:
                     return x_in @ W.T
                 V, U = vu.site(site)
-                return _site_out(x_in, V, U, W, masks[site], delta_masks[site], None)
+                return site_out(x_in, V, U, W, masks[site], delta_masks[site], None)
 
             gate = frozen_or_live("gate", suffix_layer.Wg, mlp_in)
             up = frozen_or_live("up", suffix_layer.Wu, mlp_in)

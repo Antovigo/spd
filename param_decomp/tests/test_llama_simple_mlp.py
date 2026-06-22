@@ -20,6 +20,7 @@ from param_decomp.ci_fn import (
     ChunkwiseTransformerCIFn,
     build_ci_fn,
 )
+from param_decomp.components import DecompVU, init_decomp_vu
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -29,7 +30,7 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.llama8b import DecompVU, FrozenAttn, init_decomp_vu
+from param_decomp.llama8b import FrozenAttn
 from param_decomp.llama_simple_mlp import (
     LlamaSimpleMLPConfig,
     SimpleMLPPrefix,
@@ -293,7 +294,7 @@ def test_zero_masking_one_site_changes_logits(ablated_site: str):
 
 
 def test_masked_site_outputs_frozen_when_routed_false_or_unmasked():
-    """Clean per-site output: routing FALSE everywhere falls onto `_site_out`'s frozen
+    """Clean per-site output: routing FALSE everywhere falls onto `site_out`'s frozen
     `x @ W` branch — exactly the target site output. With a single-site decomposition the
     frozen W per site is `site_input @ W.T`, recovered from `weight_deltas` + `V@U`."""
     cfg = _tiny_cfg()

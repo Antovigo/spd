@@ -78,7 +78,7 @@ def test_eval_step_keys_identities_and_determinism():
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
     lm = llama_decomposed_lm(cfg, sites)
 
-    from param_decomp.llama8b import init_decomp_vu
+    from param_decomp.components import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
@@ -150,7 +150,7 @@ def test_eval_step_fresh_pgd_probe():
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 4, C))
     lm = llama_decomposed_lm(cfg, sites)
 
-    from param_decomp.llama8b import init_decomp_vu
+    from param_decomp.components import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
@@ -201,7 +201,7 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
     the two paths are identical; the test bites under
     `XLA_FLAGS=--xla_force_host_platform_device_count=4`.
     """
-    from param_decomp.llama8b import init_decomp_vu
+    from param_decomp.components import init_decomp_vu
     from param_decomp.sharding import dp_mesh, shard_batch
 
     mesh = dp_mesh()
@@ -251,7 +251,7 @@ def test_eval_step_l0_groups_sum_member_sites():
     tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
     lm = llama_decomposed_lm(cfg, sites)
-    from param_decomp.llama8b import init_decomp_vu
+    from param_decomp.components import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))

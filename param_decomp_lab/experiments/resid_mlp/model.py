@@ -38,7 +38,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
 from param_decomp.ci_fn import CI
-from param_decomp.llama8b import DecompVU, _site_out
+from param_decomp.components import DecompVU, site_out
 from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 
 MLP_IN = "mlp_in"
@@ -256,11 +256,11 @@ def _decomposed_or_frozen(
     has_delta: bool,
     collect: dict[str, Array] | None,
 ) -> Array:
-    """One site's output: the decomposed `_site_out` if live, else the frozen `x @ Wᵀ`."""
+    """One site's output: the decomposed `site_out` if live, else the frozen `x @ Wᵀ`."""
     if site not in live_set:
         return x_in @ W.T
     V, U = components.site(site)
-    out = _site_out(
+    out = site_out(
         x_in, V, U, W, masks[site], delta_masks[site] if has_delta else None,
         None if routes is None else routes[site],
     )  # fmt: skip

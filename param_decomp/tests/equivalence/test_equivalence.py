@@ -170,7 +170,7 @@ def test_fixtures_are_batch_asymmetric_so_a_bt_transpose_is_observable() -> None
 def test_sc_source_broadcasts_over_batch_in_masked_forward() -> None:
     """SPEC S1/S16: an sc-scope source `(1, T, C+1)` broadcasts over `[B, T]` in the
     masked forward — shared across batch elements, free per position. This exercises the
-    `delta_mask[..., None]` / mask broadcast (llama8b `_site_out`) the way the PPGD path
+    `delta_mask[..., None]` / mask broadcast (`components.site_out`) the way the PPGD path
     does, and pins the broadcast AXIS: transposing the source to `(1, B, C+1)` (B != T)
     must break the forward rather than silently re-interpret the time axis as batch."""
     from param_decomp.llama8b import MLP_KINDS, site_name

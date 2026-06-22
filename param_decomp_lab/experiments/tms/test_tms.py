@@ -16,13 +16,13 @@ import optax
 import pytest
 
 from param_decomp.ci_fn import CI, MLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.components import DecompVU, init_decomp_vu
 from param_decomp.configs import (
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
 )
-from param_decomp.llama8b import DecompVU, init_decomp_vu
 from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 from param_decomp.recon import build_recon_terms
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step

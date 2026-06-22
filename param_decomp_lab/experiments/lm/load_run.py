@@ -37,9 +37,9 @@ from jaxtyping import Array, Float, Int
 from param_decomp import llama_simple_mlp
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, restore_step
 from param_decomp.ci_fn import CIFn
+from param_decomp.components import DecompVU
 from param_decomp.config import BuiltRun
 from param_decomp.llama8b import (
-    DecompVU,
     first_decomposed_layer,
     llama31_8b_config,
     llama_decomposed_lm,

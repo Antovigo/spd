@@ -19,6 +19,7 @@ from param_decomp.ci_fn import (
     ChunkwiseTransformerCIFn,
     build_ci_fn,
 )
+from param_decomp.components import DecompVU, init_decomp_vu
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -30,13 +31,11 @@ from param_decomp.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.llama8b import (
-    DecompVU,
     FrozenAttn,
     SuffixLayer,
     Target,
     canonical_site_cs,
     first_decomposed_layer,
-    init_decomp_vu,
     llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,

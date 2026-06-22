@@ -28,8 +28,8 @@ import jax.numpy as jnp
 from jax import random
 
 from param_decomp.adversary import init_fresh_pgd_sources, source_masks
+from param_decomp.components import init_decomp_vu
 from param_decomp.llama8b import (
-    init_decomp_vu,
     llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,

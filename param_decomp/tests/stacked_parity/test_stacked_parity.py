@@ -28,6 +28,7 @@ import pytest
 from jax import random
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
+from param_decomp.components import DecompVU
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -38,7 +39,6 @@ from param_decomp.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.llama8b import (
-    DecompVU,
     FrozenAttn,
     SuffixLayer,
     Target,
