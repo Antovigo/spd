@@ -42,9 +42,9 @@ from jaxtyping import Array, Float, Int
 from safetensors import safe_open
 
 from param_decomp.components import DecompVU, site_out
-from param_decomp.llama8b import FrozenAttn
 from param_decomp.lm import SiteC, SiteSpec
 from param_decomp.losses import kl_per_position
+from param_decomp.targets.llama8b import FrozenAttn
 from vendored_jax.llama import rms_norm
 
 KIND_ORDER = ("q_proj", "k_proj", "v_proj", "o_proj", "c_fc", "down_proj")

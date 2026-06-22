@@ -25,8 +25,8 @@ import fnmatch
 
 import pytest
 
-from param_decomp import llama8b, llama_simple_mlp
 from param_decomp.lm import SiteC
+from param_decomp.targets import llama8b, llama_simple_mlp
 
 
 def _named_modules_order(

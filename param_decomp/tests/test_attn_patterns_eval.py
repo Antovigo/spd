@@ -26,16 +26,16 @@ from param_decomp.ci_fn import (
     build_ci_fn,
 )
 from param_decomp.components import init_decomp_vu
-from param_decomp.llama8b import (
+from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
+from param_decomp.targets.llama8b import (
     llama_site_specs,
 )
-from param_decomp.llama_simple_mlp import (
+from param_decomp.targets.llama_simple_mlp import (
     canonical_site_cs as simple_canonical,
 )
-from param_decomp.llama_simple_mlp import (
+from param_decomp.targets.llama_simple_mlp import (
     site_specs as simple_site_specs,
 )
-from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg as _llama_cfg,
 )
@@ -114,7 +114,7 @@ def _llama_attn_setup():
         SiteC("layers.5.self_attn.q_proj", 8),
         SiteC("layers.5.self_attn.k_proj", 8),
     )
-    from param_decomp.llama8b import canonical_site_cs
+    from param_decomp.targets.llama8b import canonical_site_cs
 
     sites = llama_site_specs(cfg, canonical_site_cs(site_cs))
     lm = _llama_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))

@@ -30,7 +30,10 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.llama8b import (
+from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
+from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
+from param_decomp.targets.llama8b import (
     FrozenAttn,
     LlamaDecomposedModel,
     SuffixLayer,
@@ -42,9 +45,6 @@ from param_decomp.llama8b import (
     parse_site_name,
     site_name,
 )
-from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
-from param_decomp.recon import build_recon_terms
-from param_decomp.schedule import ScheduleConfig
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
 from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 

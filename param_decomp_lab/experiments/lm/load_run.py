@@ -35,12 +35,15 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
-from param_decomp import llama_simple_mlp
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, restore_step
 from param_decomp.ci_fn import CIFn
 from param_decomp.components import DecompVU
 from param_decomp.config import BuiltRun
-from param_decomp.llama8b import (
+from param_decomp.lm import DecomposedModel
+from param_decomp.run_state import build_optimizers, init_train_state
+from param_decomp.sharding import dp_mesh
+from param_decomp.targets import llama_simple_mlp
+from param_decomp.targets.llama8b import (
     first_decomposed_layer,
     llama31_8b_config,
     llama_site_specs,
@@ -48,11 +51,8 @@ from param_decomp.llama8b import (
     load_prefix_from_hf,
     prefix_residual,
 )
-from param_decomp.llama8b_sharding import replicate_target
-from param_decomp.lm import DecomposedModel
-from param_decomp.run_state import build_optimizers, init_train_state
-from param_decomp.sharding import dp_mesh
-from param_decomp.target_aliases import AnyPrefix
+from param_decomp.targets.llama8b_sharding import replicate_target
+from param_decomp.targets.target_aliases import AnyPrefix
 from param_decomp.train import COMPUTE_DT, TrainState, cast_floating
 from param_decomp_lab.experiments.lm.config import (
     LlamaSimpleMLPTargetConfig,

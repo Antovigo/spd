@@ -61,13 +61,13 @@ def test_jitted_sharded_inits_match_eager_values():
     )
     from param_decomp.components import init_decomp_vu
     from param_decomp.configs import BSCScope, SCScope
-    from param_decomp.llama8b import canonical_site_cs, llama_site_specs
-    from param_decomp.llama8b_sharding import (
+    from param_decomp.lm import SiteC
+    from param_decomp.targets.llama8b import canonical_site_cs, llama_site_specs
+    from param_decomp.targets.llama8b_sharding import (
         init_ci_fn_placed,
         init_decomp_vu_placed,
         init_sources_sharded,
     )
-    from param_decomp.lm import SiteC
     from param_decomp.tests.test_llama8b import _tiny_cfg
 
     mesh = dp_mesh()

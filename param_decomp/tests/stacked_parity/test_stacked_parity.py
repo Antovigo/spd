@@ -38,16 +38,16 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.llama8b import (
+from param_decomp.lm import DecomposedModel
+from param_decomp.recon import StochasticSources, build_recon_terms, subset_chunk_plan
+from param_decomp.schedule import ScheduleConfig
+from param_decomp.targets.llama8b import (
     FrozenAttn,
     SuffixLayer,
     build_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
-from param_decomp.lm import DecomposedModel
-from param_decomp.recon import StochasticSources, build_recon_terms, subset_chunk_plan
-from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.test_llama8b import _tiny_cfg
 from param_decomp.train import TrainState, make_train_step
 from vendored_jax.llama import llama3_inv_freq

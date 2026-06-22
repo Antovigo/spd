@@ -58,10 +58,10 @@ strategy: a chunking helper (`one_chunk`/`per_site`/`into_groups`) feeds the sin
 see LOSS_PARITY_DESIGN.md),
 consuming `losses.py` (pure loss terms + schedules) and `adversary.py` (persistent
 vs fresh source machinery — semantically distinct adversaries sharing only
-`source_masks`); `ci_fn.py` the shared CI transformer; `llama8b.py` + `llama8b_sharding.py` the first target. There is ONE
+`source_masks`); `ci_fn.py` the shared CI transformer; `targets/llama8b.py` + `targets/llama8b_sharding.py` the first target. There is ONE
 recon semantics: masks thread through the suffix forward, loss is KL on final logits
 (SPEC §2.3–2.5). Site-local recon is a conceptual no-no, not a "simplification".
-`llama_simple_mlp.py` is the second target (the pile-pretrained `LlamaSimpleMLP`,
+`targets/llama_simple_mlp.py` is the second target (the pile-pretrained `LlamaSimpleMLP`,
 t-9d2b8f02; sites `h.{i}.attn.{q,k,v,o}_proj` / `h.{i}.mlp.{c_fc,down_proj}`) —
 config dispatch is `TargetConfig` (llama8b) vs `LlamaSimpleMLPTargetConfig`, both LAB-side
 (`param_decomp_lab/experiments/lm/config.py`, which reads the canonical schema DIRECTLY —

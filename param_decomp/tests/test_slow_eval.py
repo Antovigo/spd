@@ -29,10 +29,6 @@ from param_decomp.configs import (
     PermutedCIPlotsConfig,
     UVPlotsConfig,
 )
-from param_decomp.llama8b import (
-    llama_site_specs,
-    mlp_family_site_cs,
-)
 from param_decomp.lm import DecomposedModel
 from param_decomp.run import SlowEvalRenderer, slow_eval_due
 from param_decomp.slow_eval import (
@@ -49,6 +45,10 @@ from param_decomp.slow_eval import (
     render_permutation_figures,
     render_slow_eval_figures,
     resolve_permutation_metrics,
+)
+from param_decomp.targets.llama8b import (
+    llama_site_specs,
+    mlp_family_site_cs,
 )
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg,

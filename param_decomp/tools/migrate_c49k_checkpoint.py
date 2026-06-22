@@ -54,9 +54,9 @@ from jaxtyping import Array
 
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, save_state
 from param_decomp.experiments.llama8b_real import _random_decomposed_lm
-from param_decomp.llama8b import llama31_8b_config, llama_site_specs
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh
+from param_decomp.targets.llama8b import llama31_8b_config, llama_site_specs
 from param_decomp.train import COMPUTE_DT, TrainState, cast_floating
 from param_decomp_lab.experiments.lm.config import build_from_schema
 

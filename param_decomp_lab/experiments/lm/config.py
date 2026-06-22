@@ -15,7 +15,6 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import Discriminator, Field, PositiveInt
 
-from param_decomp import llama8b, llama_simple_mlp
 from param_decomp.base_config import BaseConfig
 from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
 from param_decomp.config import (
@@ -35,9 +34,10 @@ from param_decomp.configs import (
     PGDReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
 )
-from param_decomp.llama8b import SITE_NAME_PATTERN, canonical_site_cs
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
+from param_decomp.targets import llama8b, llama_simple_mlp
+from param_decomp.targets.llama8b import SITE_NAME_PATTERN, canonical_site_cs
 from param_decomp_lab.experiments.config import (
     ExperimentConfig,
     assert_canonical_algorithm_config,

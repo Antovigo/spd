@@ -54,7 +54,11 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.llama8b import (
+from param_decomp.lm import SiteSpec
+from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
+from param_decomp.sharding import init_distributed
+from param_decomp.targets.llama8b import (
     DT,
     FrozenAttn,
     LlamaDecomposedModel,
@@ -67,7 +71,7 @@ from param_decomp.llama8b import (
     make_real_target_residual,
     mlp_family_site_cs,
 )
-from param_decomp.llama8b_sharding import (
+from param_decomp.targets.llama8b_sharding import (
     dp_mesh,
     init_ci_fn_placed,
     init_decomp_vu_placed,
@@ -75,10 +79,6 @@ from param_decomp.llama8b_sharding import (
     replicate_target,
     shard_batch,
 )
-from param_decomp.lm import SiteSpec
-from param_decomp.recon import build_recon_terms
-from param_decomp.schedule import ScheduleConfig
-from param_decomp.sharding import init_distributed
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
 from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 

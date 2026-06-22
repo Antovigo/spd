@@ -12,9 +12,9 @@ from pydantic import ValidationError
 
 from param_decomp.config import DataConfig
 from param_decomp.configs import PDConfig, PersistentPGDReconLossConfig
-from param_decomp.llama8b import mlp_family_site_cs
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
+from param_decomp.targets.llama8b import mlp_family_site_cs
 from param_decomp_lab.experiments.lm.config import (
     LMExperimentConfig,
     assert_supported_weights_dtype,

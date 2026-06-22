@@ -37,9 +37,9 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.llama8b import FrozenAttn, LlamaDecomposedModel
-from param_decomp.llama_simple_mlp import SimpleMLPDecomposedModel
 from param_decomp.lm import DecomposedModel, all_false_routes
+from param_decomp.targets.llama8b import FrozenAttn, LlamaDecomposedModel
+from param_decomp.targets.llama_simple_mlp import SimpleMLPDecomposedModel
 from param_decomp.train import COMPUTE_DT, cast_floating
 from vendored_jax.llama import apply_rope, repeat_kv, rope_cos_sin
 

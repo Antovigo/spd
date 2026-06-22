@@ -29,7 +29,12 @@ jax.config.update("jax_enable_x64", False)
 
 from param_decomp.adversary import source_masks  # noqa: E402
 from param_decomp.components import DecompVU, site_out  # noqa: E402
-from param_decomp.llama8b import (  # noqa: E402
+from param_decomp.losses import (  # noqa: E402
+    faithfulness_loss,
+    importance_minimality_terms,
+    kl_per_position,
+)
+from param_decomp.targets.llama8b import (  # noqa: E402
     MLP_KINDS,
     FrozenAttn,
     LlamaDecomposedModel,
@@ -39,11 +44,6 @@ from param_decomp.llama8b import (  # noqa: E402
     llama_site_specs,
     mlp_family_site_cs,
     site_name,
-)
-from param_decomp.losses import (  # noqa: E402
-    faithfulness_loss,
-    importance_minimality_terms,
-    kl_per_position,
 )
 from vendored_jax.llama import LlamaConfig, rms_norm  # noqa: E402
 

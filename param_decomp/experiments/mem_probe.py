@@ -51,15 +51,15 @@ from param_decomp.configs import (
 from param_decomp.experiments.llama8b_real import (
     _random_decomposed_lm,
 )
-from param_decomp.llama8b import (
+from param_decomp.recon import build_recon_terms
+from param_decomp.schedule import ScheduleConfig
+from param_decomp.sharding import init_distributed
+from param_decomp.targets.llama8b import (
     llama31_8b_config,
     llama_site_specs,
     mlp_family_site_cs,
 )
-from param_decomp.llama8b_sharding import dp_mesh
-from param_decomp.recon import build_recon_terms
-from param_decomp.schedule import ScheduleConfig
-from param_decomp.sharding import init_distributed
+from param_decomp.targets.llama8b_sharding import dp_mesh
 from param_decomp.train import TrainState, make_train_step
 
 

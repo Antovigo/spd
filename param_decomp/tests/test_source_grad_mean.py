@@ -40,12 +40,12 @@ from jax.sharding import PartitionSpec as P
 from param_decomp.adversary import init_persistent_sources, source_masks
 from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch, build_ci_fn
 from param_decomp.components import init_decomp_vu
-from param_decomp.llama8b import (
+from param_decomp.losses import kl_per_position
+from param_decomp.sharding import dp_mesh, shard_batch
+from param_decomp.targets.llama8b import (
     llama_site_specs,
     mlp_family_site_cs,
 )
-from param_decomp.losses import kl_per_position
-from param_decomp.sharding import dp_mesh, shard_batch
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 from param_decomp.train import COMPUTE_DT, cast_floating
 

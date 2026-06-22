@@ -36,11 +36,11 @@ from param_decomp.adversary import init_persistent_sources
 from param_decomp.ci_fn import CIFn, CIFnArch, build_ci_fn
 from param_decomp.components import DecompVU, init_decomp_vu
 from param_decomp.configs import BSCScope, PersistentPGDSourceScope, SCScope
-from param_decomp.llama8b import LlamaDecomposedModel
 from param_decomp.lm import SiteSpec
 from param_decomp.log import logger
 from param_decomp.sharding import dp_mesh
 from param_decomp.sharding import shard_batch as _generic_shard_batch
+from param_decomp.targets.llama8b import LlamaDecomposedModel
 
 __all__ = [
     "dp_mesh",

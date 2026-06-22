@@ -55,7 +55,7 @@ lab is composition / IO / CLI / experiment assembly**:
 - **`param-decomp`** (root: `param_decomp/` + sibling `pretrain/` + sibling
   `vendored_jax/`) — the core: the generic JAX single-pool VPD trainer ENGINE
   (`param_decomp/`: run.py = `run_decomposition_training`, lm.py, train.py, ci_fn.py,
-  llama8b.py, …), the torch-free pydantic config SCHEMA it now carries directly
+  targets/llama8b.py, …), the torch-free pydantic config SCHEMA it now carries directly
   (`base_config.py` = `BaseConfig`, `schedule.py`, `configs.py` = `PDConfig` /
   `RuntimeConfig` / `Cadence` / loss + eval-metric configs / routing / ci-fn / wandb
   shaping), the runtime `ExperimentConfig` dataclasses (`config.py`), the
@@ -153,7 +153,7 @@ and returns JAX-native as the #10 torch->jax adapter.
   runtime config dataclasses the engine consumes (`config.py`: `ExperimentConfig` /
   `DataConfig` / `EvalConfig` / … + the `TargetSites` protocol). The engine + numerics
   (`run.py` = `run_decomposition_training`, `lm.py` / `train.py` / `ci_fn.py` /
-  `llama8b.py` / `llama_simple_mlp.py` / `adversary.py` / `recon.py` / `losses.py` /
+  `targets/llama8b.py` / `targets/llama_simple_mlp.py` / `adversary.py` / `recon.py` / `losses.py` /
   `checkpoint.py` / `sharding.py` / `eval.py` / `slow_eval.py` + `log.py`) plus `configs/`
   (the self-contained run yamls) and `tests/` (incl. the `tests/equivalence/` frozen
   torch↔JAX goldens). The torch oracle lives at git tag `torch-oracle`.

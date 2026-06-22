@@ -36,19 +36,19 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.llama8b import (
-    llama_site_specs,
-    mlp_family_site_cs,
-)
-from param_decomp.llama8b_sharding import (
-    init_ci_fn_placed,
-    init_decomp_vu_placed,
-    init_sources_sharded,
-)
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import dp_mesh
+from param_decomp.targets.llama8b import (
+    llama_site_specs,
+    mlp_family_site_cs,
+)
+from param_decomp.targets.llama8b_sharding import (
+    init_ci_fn_placed,
+    init_decomp_vu_placed,
+    init_sources_sharded,
+)
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 from param_decomp.train import TrainState, make_train_step
 from vendored_jax.llama import LlamaConfig

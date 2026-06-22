@@ -68,7 +68,7 @@ from param_decomp.slow_eval import (
     make_slow_eval_step,
     resolve_permutation_metrics,
 )
-from param_decomp.target_aliases import AnyPrefix
+from param_decomp.targets.target_aliases import AnyPrefix
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments.lm.config import (
     load_config,

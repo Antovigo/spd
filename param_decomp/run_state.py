@@ -22,13 +22,13 @@ from param_decomp.adversary import init_sources_adam_state
 from param_decomp.ci_fn import CIFnArch
 from param_decomp.config import DataConfig
 from param_decomp.configs import OptimizerConfig, PDConfig
-from param_decomp.llama8b_sharding import (
+from param_decomp.lm import DecomposedModel
+from param_decomp.recon import build_recon_terms
+from param_decomp.targets.llama8b_sharding import (
     init_ci_fn_placed,
     init_decomp_vu_placed,
     init_sources_sharded,
 )
-from param_decomp.lm import DecomposedModel
-from param_decomp.recon import build_recon_terms
 from param_decomp.train import TrainState
 
 
