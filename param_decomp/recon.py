@@ -19,10 +19,8 @@ from jax import random
 from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.configs import (
-    AdamPGDConfig,
     AllRoutingConfig,
     AnyLossMetricConfig,
-    BSCScope,
     ChunkwiseSubsetReconLossConfig,
     CIMaskedReconLayerwiseLossConfig,
     CIMaskedReconLossConfig,
@@ -35,7 +33,6 @@ from param_decomp.configs import (
     PGDReconLayerwiseLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
-    SCScope,
     StaticProbabilityRoutingConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
@@ -278,16 +275,6 @@ class LossSpec:
     persistent: dict[str, PersistentPGDReconLossConfig]
 
 
-def _assert_supported_persistent(cfg: PersistentPGDReconLossConfig) -> None:
-    assert isinstance(cfg.scope, SCScope | BSCScope), (
-        f"persistent scope {cfg.scope} unsupported (sc/bsc only)"
-    )
-    optimizer = cfg.optimizer
-    assert isinstance(optimizer, AdamPGDConfig), optimizer
-    schedule = optimizer.lr_schedule
-    assert schedule.fn_type == "constant" and schedule.final_val_frac == 1.0, schedule
-
-
 def build_recon_terms(
     loss_metrics: Sequence[AnyLossMetricConfig],
     site_names: tuple[str, ...],
@@ -376,7 +363,8 @@ def build_recon_terms(
                 plan = make_plan(per_site(site_names), AllRoutingConfig(), fresh, n_samples=1)
                 terms.append(ReconLossTerm(assert_unique_instance_key(cfg), cfg.coeff, plan))
             case PersistentPGDReconLossConfig():
-                _assert_supported_persistent(cfg)
+                schedule = cfg.optimizer.lr_schedule
+                assert schedule.fn_type == "constant" and schedule.final_val_frac == 1.0, schedule
                 key = assert_unique_instance_key(cfg)
                 assert key not in persistent
                 persistent[key] = cfg

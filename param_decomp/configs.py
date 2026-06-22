@@ -246,9 +246,9 @@ def _alias_legacy_mask_scope(value: Any) -> Any:
 #
 # Deliberately NOT unified with `PersistentPGDSourceScope` below: per-step PGD encodes
 # its scope as a bare YAML string (this `Literal`), while persistent PGD encodes it as a
-# nested config object (the `CScope | ... | BSCScope` discriminated union). The value
-# spaces also differ — `bc` is per-step-only; `sc`/`nsc` are persistent-only. Converging
-# them would change the stored YAML shape of one side and break old-run parsing.
+# nested config object (the `SCScope | BSCScope` discriminated union). The value spaces
+# also differ — `bc` is per-step-only; `sc` is persistent-only. Converging them would
+# change the stored YAML shape of one side and break old-run parsing.
 MaskScopeLiteral = Literal["c", "bc", "bsc"]
 MaskScope = Annotated[MaskScopeLiteral, BeforeValidator(_alias_legacy_mask_scope)]
 
@@ -277,15 +277,8 @@ class PGDReconSubsetLossConfig(PGDConfig):
     )
 
 
-class SignPGDConfig(BaseConfig):
-    """Sign-PGD optimizer config (adds `lr * sign(grad)` to sources)."""
-
-    type: Literal["sign"] = "sign"
-    lr_schedule: ScheduleConfig
-
-
 class AdamPGDConfig(BaseConfig):
-    """Adam-style PGD optimizer config."""
+    """Adam-style PGD optimizer config — the only implemented persistent-PGD optimizer."""
 
     type: Literal["adam"] = "adam"
     beta1: Probability = Field(default=0.9, description="Adam beta1 for masks")
@@ -294,29 +287,10 @@ class AdamPGDConfig(BaseConfig):
     lr_schedule: ScheduleConfig
 
 
-PGDOptimizerConfig = SignPGDConfig | AdamPGDConfig
-
-
-class CScope(BaseConfig):
-    """PPGD source scope: one `[C]` source vector shared across all batch dims."""
-
-    type: Literal["c"] = "c"
-
-
 class SCScope(BaseConfig):
     """PPGD source scope: `[seq, C]` sources shared across batch elements, free per position."""
 
     type: Literal["sc"] = "sc"
-
-
-class NSCScope(BaseConfig):
-    """PPGD source scope: `n_sources` source vectors tiled along the batch dim.
-
-    `n_sources` must divide the per-rank batch size.
-    """
-
-    type: Literal["nsc"] = "nsc"
-    n_sources: PositiveInt
 
 
 class BSCScope(BaseConfig):
@@ -344,10 +318,10 @@ def _alias_legacy_scope_type(value: Any) -> Any:
 
 
 # Scope literals spell the stored source shape, read left-to-right in tensor order
-# (batch, seq, C). `c` is rank-polymorphic (all leading dims singleton); the
-# seq-bearing scopes require a sequence axis and are illegal off-LM.
+# (batch, seq, C). Only the two seq-bearing scopes are implemented for persistent PGD;
+# both require a sequence axis and are illegal off-LM.
 PersistentPGDSourceScope = Annotated[
-    CScope | SCScope | NSCScope | BSCScope,
+    SCScope | BSCScope,
     Field(discriminator="type"),
     BeforeValidator(_alias_legacy_scope_type),
 ]
@@ -376,7 +350,7 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
         return data
 
     type: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
-    optimizer: Annotated[PGDOptimizerConfig, Field(discriminator="type")]
+    optimizer: AdamPGDConfig
     scope: PersistentPGDSourceScope
     n_warmup_steps: NonNegativeInt = Field(
         default=0,

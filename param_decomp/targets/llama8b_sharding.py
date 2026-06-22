@@ -35,7 +35,7 @@ from jaxtyping import Array, PRNGKeyArray
 from param_decomp.adversary import init_persistent_sources
 from param_decomp.ci_fn import CIFn, CIFnArch, build_ci_fn
 from param_decomp.components import DecompVU, init_decomp_vu
-from param_decomp.configs import BSCScope, PersistentPGDSourceScope, SCScope
+from param_decomp.configs import BSCScope, SCScope
 from param_decomp.lm import SiteSpec
 from param_decomp.log import logger
 from param_decomp.sharding import dp_mesh
@@ -138,7 +138,7 @@ def init_sources_sharded(
     site_names: tuple[str, ...],
     site_component_counts: tuple[int, ...],
     seq_len: int,
-    scope: PersistentPGDSourceScope,
+    scope: SCScope | BSCScope,
     global_batch: int,
     key: PRNGKeyArray,
     mesh: Mesh,
@@ -166,8 +166,6 @@ def init_sources_sharded(
         case BSCScope():
             leading_shape = (global_batch, seq_len)
             placement = NamedSharding(mesh, P("dp", None, None))
-        case _:
-            raise AssertionError(f"unsupported persistent scope {scope}")
     init = partial(init_persistent_sources, site_names, site_component_counts, leading_shape)
     return jax.jit(init, out_shardings=placement)(key)
 
