@@ -38,7 +38,7 @@ root with sibling packages `pretrain/` (the in-house target-LM pretrainer) and
 | `hf_http.py` | `configure_hf_http_retries` — idempotent retrying-adapter install on huggingface_hub (cold-cache 8N-rank startup burst); no-op without huggingface_hub; JAX-side analog of `param_decomp_lab/infra/hf_http.py` |
 | `config.py` | the trainer's internal runtime `ExperimentConfig` dataclasses (the typed config the engine + `run_state` consume): `DataConfig` / `EvalConfig` / `CadenceConfig` / optimizer structs + the `TargetSites` protocol + `CIFnArch`. Domain-agnostic — the YAML→dataclass CONVERSION lives lab-side (`experiments/config.py` shared + `experiments/lm/config.py` LM) |
 | `configs.py` | the torch-free pydantic config SCHEMA: routing + decomposition-target + ci-fn + loss-metric + eval-metric configs, `PDConfig` / `RuntimeConfig` / `Cadence` / `WandbConfig` / `ResumeProvenance`, and the `wandb.config` shaping helpers (was the dissolved `param-decomp-config` distribution) |
-| `base_config.py` | `BaseConfig` (frozen `extra=forbid` pydantic `BaseModel` + YAML/JSON round-trip), `Probability`, `runtime_cast` |
+| `base_config.py` | `BaseConfig` (frozen `extra=forbid` pydantic `BaseModel` + YAML/JSON round-trip), `Probability` |
 | `schedule.py` | `ScheduleConfig` + `get_scheduled_value` (warmup → constant/linear/cosine decay) |
 | `configs/` | the single self-contained run yamls (one file per run; no wrapper/schema split) |
 | `targets/llama8b_sharding.py` | the 8B placement plan (frozen replicated; per-site V/U + CI + Adam C-sharded; source replicated; batch sharded) |

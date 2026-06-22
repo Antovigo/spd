@@ -7,14 +7,25 @@ for sampling and Efraimidis-Spirakis for merging parallel reservoirs.
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from jaxtyping import Bool, Float, Int
 
-from param_decomp.base_config import runtime_cast
 from param_decomp_lab.harvest.schemas import ActivationExample
 
 WINDOW_PAD_SENTINEL = -1
+
+
+def runtime_cast[T](type_: type[T], obj: Any) -> T:
+    """Cast `obj` to `type_`, raising `TypeError` if it is not actually an instance.
+
+    Use this when a wider static type needs to be narrowed for the type checker and the
+    narrowing should be enforced at runtime.
+    """
+    if not isinstance(obj, type_):
+        raise TypeError(f"Expected {type_}, got {type(obj)}")
+    return obj
 
 
 @dataclass

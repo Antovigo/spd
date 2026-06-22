@@ -148,7 +148,7 @@ and returns JAX-native as the #10 torch->jax adapter.
 ## Where things live
 
 - `param_decomp/` — the JAX trainer core. The pydantic config SCHEMA (`base_config.py` =
-  `BaseConfig` / `Probability` / `runtime_cast`; `schedule.py`; `configs.py` = routing +
+  `BaseConfig` / `Probability`; `schedule.py`; `configs.py` = routing +
   decomposition-target + ci-fn + loss + eval-metric configs + `PDConfig` / `RuntimeConfig`
   / `Cadence` / `WandbConfig` / `ResumeProvenance` + the wandb-shaping helpers). The
   built-run bundle the engine consumes (`built_run.py`: `BuiltRun` /
