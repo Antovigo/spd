@@ -57,12 +57,13 @@ from param_decomp.configs import (
 from param_decomp.llama8b import (
     DT,
     FrozenAttn,
+    LlamaDecomposedModel,
     SuffixLayer,
-    Target,
+    build_decomposed_lm,
+    first_decomposed_layer,
     llama31_8b_config,
-    llama_decomposed_lm,
     llama_site_specs,
-    load_target_from_hf,
+    load_decomposed_lm_from_hf,
     make_real_target_residual,
     mlp_family_site_cs,
 )
@@ -74,6 +75,7 @@ from param_decomp.llama8b_sharding import (
     replicate_target,
     shard_batch,
 )
+from param_decomp.lm import SiteSpec
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import init_distributed
@@ -81,7 +83,12 @@ from param_decomp.train import TrainState, make_faith_warmup_step, make_train_st
 from vendored_jax.llama import LlamaConfig, llama3_inv_freq
 
 
-def _random_target(cfg: LlamaConfig, first_layer: int, key: jax.Array) -> Target:
+def _random_decomposed_lm(
+    cfg: LlamaConfig, sites: tuple[SiteSpec, ...], key: jax.Array
+) -> LlamaDecomposedModel:
+    """A random `LlamaDecomposedModel` (random frozen suffix + the decomposition `sites`) —
+    the no-HF-weights bench analog of `load_decomposed_lm_from_hf`."""
+    first_layer = first_decomposed_layer(tuple(s.name for s in sites))
     ks = iter(random.split(key, 4096))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
@@ -101,12 +108,13 @@ def _random_target(cfg: LlamaConfig, first_layer: int, key: jax.Array) -> Target
             Wg=n((di, d)), Wu=n((di, d)), Wd=n((d, di)),
         )  # fmt: skip
 
-    return Target(
+    return build_decomposed_lm(
         layers=[suffix_layer() for _ in range(cfg.n_layer - first_layer)],
         norm=jnp.ones((d,), DT),
         lm_head=n((cfg.vocab_size, d), 0.02),
         inv_freq=llama3_inv_freq(cfg),
-        eps=cfg.rms_norm_eps,
+        cfg=cfg,
+        sites=sites,
     )
 
 
@@ -142,10 +150,10 @@ def main():
 
     cfg = llama31_8b_config()
     sites = llama_site_specs(cfg, mlp_family_site_cs(first, last, args.C))
-    lm = llama_decomposed_lm(cfg, sites)
+    site_names = tuple(s.name for s in sites)
     n_layers = last - first + 1
     arch = ChunkwiseTransformerCIArch(
-        chunks=(Chunk(input_taps=(f"resid.{first}",), output_sites=lm.site_names),),
+        chunks=(Chunk(input_taps=(f"resid.{first}",), output_sites=site_names),),
         input_dim=cfg.n_embd,
         d_model=4096,
         n_blocks=4,
@@ -155,7 +163,7 @@ def main():
     if is0:
         print(
             f"[p0] LLAMA8B single-pool PD | {ndev} GPU | gbatch={gbatch} seq={args.seq} "
-            f"layers={first}..{last} ({n_layers}L, {len(lm.sites)} sites) "
+            f"layers={first}..{last} ({n_layers}L, {len(sites)} sites) "
             f"C={args.C} n_warmup={args.n_warmup} faith_warmup={args.faith_warmup} "
             f"mode={'shard' if args.shard else 'replicated'} "
             f"weights={'HF' if args.real_weights else 'random'}"
@@ -165,12 +173,12 @@ def main():
     if args.real_weights:
         if is0:
             print("[p0] loading HF suffix + harvesting residual via prefix forward...")
-        target = load_target_from_hf(args.model_name, cfg, first)
+        lm = load_decomposed_lm_from_hf(args.model_name, cfg, sites)
         resid_global = make_real_target_residual(
             args.model_name, cfg, first, idx_global, chunk=args.per_gpu_batch
         )
     else:
-        target = _random_target(cfg, first, random.PRNGKey(0))
+        lm = _random_decomposed_lm(cfg, sites, random.PRNGKey(0))
         resid_global = (
             random.normal(random.PRNGKey(7), (gbatch, args.seq, cfg.n_embd)) * 0.5
         ).astype(DT)
@@ -184,7 +192,7 @@ def main():
     )
     opt_ci = optax.adamw(sched_ci, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.0)
 
-    target = replicate_target(target, mesh)
+    lm = replicate_target(lm, mesh)
     site_Cs = tuple(s.C for s in lm.sites)
     # fp32 masters; source init U[0,1] (SPEC S15), trailing channel = the weight-delta source.
     if args.shard:
@@ -211,11 +219,11 @@ def main():
     if args.faith_warmup > 0:
         wopt = optax.adamw(1.0e-3, weight_decay=0.0)
         wstate = wopt.init(eqx.filter(vu, eqx.is_array))
-        wstep = make_faith_warmup_step(lm, wopt)
+        wstep = make_faith_warmup_step(wopt)
         t0 = time.time()
         wloss: jax.Array | None = None
         for _ in range(args.faith_warmup):
-            vu, wstate, wloss = wstep(vu, wstate, target)
+            vu, wstate, wloss = wstep(lm, vu, wstate)
         assert wloss is not None
         jax.block_until_ready(wloss)
         if is0:
@@ -273,20 +281,20 @@ def main():
 
     m: dict[str, jax.Array] = {}
     for _ in range(2):
-        state, m = step(state, target, resid, random.PRNGKey(7))
+        state, m = step(lm, state, resid, random.PRNGKey(7))
         jax.block_until_ready((state.sources, m["total"]))
 
     per = []
     for s in range(args.steps):
         t = time.time()
-        state, m = step(state, target, resid, random.PRNGKey(1000 + s))
+        state, m = step(lm, state, resid, random.PRNGKey(1000 + s))
         jax.block_until_ready((state.sources, m["total"]))
         per.append(time.time() - t)
     blocked = sum(per) / len(per)
 
     t = time.time()
     for s in range(args.steps):
-        state, m = step(state, target, resid, random.PRNGKey(2000 + s))
+        state, m = step(lm, state, resid, random.PRNGKey(2000 + s))
     dispatch = (time.time() - t) / args.steps
     jax.block_until_ready((state.sources, m["total"]))
 

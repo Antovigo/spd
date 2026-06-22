@@ -47,46 +47,50 @@ SITE = "block.0.proj"
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
-class SyntheticFrozen:
-    """The frozen target: one `[D,D]` site weight plus two readout heads."""
-
-    W: Float[Array, "D D"]
-    read_coords: Float[Array, "K D"]
-    read_aux: Float[Array, "M D"]
-
-
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
-class SyntheticPrefix:
-    feat_proj: Float[Array, "D D"]
-
-
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
 class SyntheticComponents:
     V: Float[Array, "D C"]
     U: Float[Array, "C D"]
 
 
-def _heads(frozen: SyntheticFrozen, hidden: Array) -> tuple[Array, Array]:
-    return hidden @ frozen.read_coords.T, hidden @ frozen.read_aux.T
+class SyntheticDecomposedModel(eqx.Module):
+    """A non-LM `DecomposedModel`: dict input, tuple `(coords, aux)` output, geometric-MSE
+    recon. Carries its frozen target weights (`W` + two readout heads) as array fields; the
+    trainable V/U (`SyntheticComponents`) stays an explicit method arg."""
 
+    W: Float[Array, "D D"]
+    read_coords: Float[Array, "K D"]
+    read_aux: Float[Array, "M D"]
+    sites: tuple[SiteSpec, ...] = eqx.field(static=True)
+    leading_axes: tuple[str, ...] = eqx.field(static=True)
 
-def _synthetic_lm() -> DecomposedModel:
-    site = SiteSpec(name=SITE, d_in=D, d_out=D, C=C)
+    @property
+    def site_names(self) -> tuple[str, ...]:
+        return tuple(s.name for s in self.sites)
 
-    def clean_output(frozen: SyntheticFrozen, resid: Array) -> tuple[Array, Array]:
-        return _heads(frozen, resid @ frozen.W.T)
+    @staticmethod
+    def recon_loss_fn(
+        masked_output: tuple[Array, Array], clean_output: tuple[Array, Array]
+    ) -> Float[Array, ""]:
+        """Non-KL recon: mean squared error over both tuple heads, fp32, per position."""
+        coords_err = (
+            masked_output[0].astype(jnp.float32) - clean_output[0].astype(jnp.float32)
+        ) ** 2
+        aux_err = (masked_output[1].astype(jnp.float32) - clean_output[1].astype(jnp.float32)) ** 2
+        return (jnp.sum(coords_err) + jnp.sum(aux_err)) / (B * T)
 
-    def read_activations(
-        _frozen: SyntheticFrozen, resid: Array, wanted: tuple[str, ...]
-    ) -> dict[str, Array]:
+    def _heads(self, hidden: Array) -> tuple[Array, Array]:
+        return hidden @ self.read_coords.T, hidden @ self.read_aux.T
+
+    def clean_output(self, resid: Array) -> tuple[Array, Array]:
+        return self._heads(resid @ self.W.T)
+
+    def read_activations(self, resid: Array, wanted: tuple[str, ...]) -> dict[str, Array]:
         assert wanted == (SITE,), wanted
         return {SITE: resid}
 
     def masked_output(
-        frozen: SyntheticFrozen,
-        components: SyntheticComponents,
+        self,
+        vu: SyntheticComponents,
         resid: Array,
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -95,16 +99,16 @@ def _synthetic_lm() -> DecomposedModel:
         has_delta: bool,
     ) -> tuple[Array, Array]:
         assert live == (SITE,) and routes is None, (live, routes)
-        V, U, W = components.V, components.U, frozen.W
+        V, U, W = vu.V, vu.U, self.W
         hidden = (resid @ V) * masks[SITE] @ U
         if has_delta:
             delta = W - (V @ U).T
             hidden = hidden + delta_masks[SITE][..., None] * (resid @ delta.T)
-        return _heads(frozen, hidden)
+        return self._heads(hidden)
 
     def masked_site_outputs(
-        frozen: SyntheticFrozen,
-        components: SyntheticComponents,
+        self,
+        vu: SyntheticComponents,
         resid: Array,
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -113,57 +117,39 @@ def _synthetic_lm() -> DecomposedModel:
         has_delta: bool,
     ) -> dict[str, Array]:
         assert live == (SITE,) and routes is None, (live, routes)
-        V, U, W = components.V, components.U, frozen.W
+        V, U, W = vu.V, vu.U, self.W
         hidden = (resid @ V) * masks[SITE] @ U
         if has_delta:
             delta = W - (V @ U).T
             hidden = hidden + delta_masks[SITE][..., None] * (resid @ delta.T)
         return {SITE: hidden}
 
-    def weight_deltas(frozen: SyntheticFrozen, components: SyntheticComponents) -> dict[str, Array]:
+    def weight_deltas(self, vu: SyntheticComponents) -> dict[str, Array]:
         return {
-            SITE: frozen.W.astype(jnp.float32)
-            - (components.V.astype(jnp.float32) @ components.U.astype(jnp.float32)).T
+            SITE: self.W.astype(jnp.float32)
+            - (vu.V.astype(jnp.float32) @ vu.U.astype(jnp.float32)).T
         }
 
-    def geometric_mse(masked: tuple[Array, Array], clean: tuple[Array, Array]) -> Float[Array, ""]:
-        """Non-KL recon: mean squared error over both tuple heads, fp32, per position."""
-        coords_err = (masked[0].astype(jnp.float32) - clean[0].astype(jnp.float32)) ** 2
-        aux_err = (masked[1].astype(jnp.float32) - clean[1].astype(jnp.float32)) ** 2
-        return (jnp.sum(coords_err) + jnp.sum(aux_err)) / (B * T)
 
-    return DecomposedModel(
-        sites=(site,),
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class SyntheticPrefix:
+    feat_proj: Float[Array, "D D"]
+
+
+def _synthetic_lm(key: jax.Array) -> SyntheticDecomposedModel:
+    return SyntheticDecomposedModel(
+        W=random.normal(random.fold_in(key, 0), (D, D)),
+        read_coords=random.normal(random.fold_in(key, 1), (K_COORDS, D)),
+        read_aux=random.normal(random.fold_in(key, 2), (M_AUX, D)),
+        sites=(SiteSpec(name=SITE, d_in=D, d_out=D, C=C),),
         leading_axes=("sequence",),
-        clean_output=clean_output,
-        read_activations=read_activations,
-        masked_output=masked_output,
-        masked_site_outputs=masked_site_outputs,
-        weight_deltas=weight_deltas,
-        recon_loss_fn=geometric_mse,
     )
 
 
 def prefix_residual(prefix: SyntheticPrefix, inputs: dict[str, Array]) -> Array:
     """Input edge: a DICT batch -> the `[B,T,D]` residual (not token ids)."""
     return (inputs["feat"] @ prefix.feat_proj.T) * inputs["gain"][..., None]
-
-
-def test_default_recon_loss_fn_is_kl_per_position():
-    """An LM target that omits `recon_loss_fn` gets `kl_per_position` — the LM path is
-    byte-for-byte the pre-seam behavior (proved at scale by the stacked-parity golden)."""
-    from param_decomp.losses import kl_per_position
-
-    lm = DecomposedModel(
-        sites=(SiteSpec(SITE, D, D, C),),
-        leading_axes=("sequence",),
-        clean_output=lambda f, r: r,
-        read_activations=lambda f, r, wanted: {SITE: r},
-        masked_output=lambda *a: a[2],
-        masked_site_outputs=lambda *a: {SITE: a[2]},
-        weight_deltas=lambda f, c: {},
-    )
-    assert lm.recon_loss_fn is kl_per_position
 
 
 def test_prefix_residual_consumes_dict_input():
@@ -180,26 +166,21 @@ def test_prefix_residual_consumes_dict_input():
 
 def test_tuple_output_and_geometric_loss_flow():
     """`clean_output`/`masked_output` emit a tuple; `recon_loss_fn` (MSE) contracts it."""
-    lm = _synthetic_lm()
     key = random.PRNGKey(1)
-    frozen = SyntheticFrozen(
-        W=random.normal(random.fold_in(key, 0), (D, D)),
-        read_coords=random.normal(random.fold_in(key, 1), (K_COORDS, D)),
-        read_aux=random.normal(random.fold_in(key, 2), (M_AUX, D)),
-    )
+    lm = _synthetic_lm(key)
     components = SyntheticComponents(
         V=random.normal(random.fold_in(key, 3), (D, C)) * 0.1,
         U=random.normal(random.fold_in(key, 4), (C, D)) * 0.1,
     )
     resid = random.normal(random.fold_in(key, 5), (B, T, D))
 
-    clean = lm.clean_output(frozen, resid)
+    clean = lm.clean_output(resid)
     assert isinstance(clean, tuple) and len(clean) == 2
     assert clean[0].shape == (B, T, K_COORDS) and clean[1].shape == (B, T, M_AUX)
 
     masks = {SITE: jnp.ones((B, T, C))}
     delta_masks = {SITE: jnp.zeros((B, T))}
-    masked = lm.masked_output(frozen, components, resid, masks, delta_masks, None, (SITE,), False)
+    masked = lm.masked_output(components, resid, masks, delta_masks, None, (SITE,), False)
     assert isinstance(masked, tuple) and len(masked) == 2
 
     loss = lm.recon_loss_fn(masked, clean)
@@ -227,13 +208,8 @@ def _initial_state(
 def test_train_step_runs_through_generic_target():
     """End-to-end: the real `make_train_step` drives the synthetic dict-in/tuple-out/MSE
     target for two steps; the loss stays finite and the trainable V/U actually move."""
-    lm = _synthetic_lm()
     key = random.PRNGKey(2)
-    frozen = SyntheticFrozen(
-        W=random.normal(random.fold_in(key, 0), (D, D)),
-        read_coords=random.normal(random.fold_in(key, 1), (K_COORDS, D)),
-        read_aux=random.normal(random.fold_in(key, 2), (M_AUX, D)),
-    )
+    lm = _synthetic_lm(key)
     components = SyntheticComponents(
         V=random.normal(random.fold_in(key, 3), (D, C)) * 0.1,
         U=random.normal(random.fold_in(key, 4), (C, D)) * 0.1,
@@ -272,7 +248,7 @@ def test_train_step_runs_through_generic_target():
     V_before = state.components.V
     run_key = random.PRNGKey(3)
     for step_idx in range(2):
-        state, metrics = step_fn(state, frozen, resid, random.fold_in(run_key, step_idx))
+        state, metrics = step_fn(lm, state, resid, random.fold_in(run_key, step_idx))
         assert jnp.isfinite(metrics["total"]), (step_idx, metrics["total"])
         assert "loss/StochasticReconLoss" in metrics
 

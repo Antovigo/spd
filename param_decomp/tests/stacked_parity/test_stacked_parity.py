@@ -41,8 +41,7 @@ from param_decomp.configs import (
 from param_decomp.llama8b import (
     FrozenAttn,
     SuffixLayer,
-    Target,
-    llama_decomposed_lm,
+    build_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
@@ -69,7 +68,7 @@ old fixed names. The stored arrays themselves are untouched — only the lookup 
 the live metrics dict is remapped."""
 
 
-def _load() -> tuple[dict[str, np.ndarray], DecomposedModel, Target, DecompVU, jnp.ndarray]:
+def _load() -> tuple[dict[str, np.ndarray], DecomposedModel, DecompVU, jnp.ndarray]:
     assert FIXTURES.exists(), "regenerate via gen_stacked_fixtures.py on the base branch"
     f = dict(np.load(FIXTURES))
     cfg = _tiny_cfg()
@@ -100,14 +99,13 @@ def _load() -> tuple[dict[str, np.ndarray], DecomposedModel, Target, DecompVU, j
         )
         for i in range(first, cfg.n_layer)
     ]
-    tgt = Target(
-        layers=layers, norm=a("tgt::norm"), lm_head=a("tgt::lm_head"),
-        inv_freq=llama3_inv_freq(cfg), eps=cfg.rms_norm_eps,
-    )  # fmt: skip
     sites = llama_site_specs(cfg, mlp_family_site_cs(first, last, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = build_decomposed_lm(
+        layers=layers, norm=a("tgt::norm"), lm_head=a("tgt::lm_head"),
+        inv_freq=llama3_inv_freq(cfg), cfg=cfg, sites=sites,
+    )  # fmt: skip
     vu = DecompVU(vu={s.name: (a(f"vu::V::{s.name}"), a(f"vu::U::{s.name}")) for s in sites})
-    return f, lm, tgt, vu, a("resid")
+    return f, lm, vu, a("resid")
 
 
 def _assert_close(got: jnp.ndarray, want: np.ndarray, what: str) -> None:
@@ -132,34 +130,34 @@ def _build_trajectory_ci_fn(lm: DecomposedModel, key: jnp.ndarray):
 
 
 def test_clean_output_bit_identical():
-    f, lm, tgt, _vu, resid = _load()
-    clean = lm.clean_output(tgt, resid)
+    f, lm, _vu, resid = _load()
+    clean = lm.clean_output(resid)
     assert jnp.array_equal(clean, jnp.asarray(f["out::clean"])), (
         "clean logits diverged from the stacked implementation (must be bit-identical)"
     )
 
 
 def test_site_inputs_and_weight_deltas_match():
-    f, lm, tgt, vu, resid = _load()
-    site_inputs = lm.read_activations(tgt, resid, lm.site_names)
+    f, lm, vu, resid = _load()
+    site_inputs = lm.read_activations(resid, lm.site_names)
     for name in lm.site_names:
         _assert_close(site_inputs[name], f[f"out::site_input::{name}"], f"site_input {name}")
-    deltas = lm.weight_deltas(tgt, vu)
+    deltas = lm.weight_deltas(vu)
     for name in lm.site_names:
         _assert_close(deltas[name], f[f"out::wd::{name}"], f"weight_delta {name}")
 
 
 def test_masked_output_match():
-    f, lm, tgt, vu, resid = _load()
+    f, lm, vu, resid = _load()
     masks = {s: jnp.asarray(f[f"mask::{s}"]) for s in lm.site_names}
     delta_masks = {s: jnp.asarray(f[f"delta_mask::{s}"]) for s in lm.site_names}
-    masked_all = lm.masked_output(tgt, vu, resid, masks, delta_masks, None, lm.site_names, True)
+    masked_all = lm.masked_output(vu, resid, masks, delta_masks, None, lm.site_names, True)
     _assert_close(masked_all, f["out::masked_all"], "masked_output (all live)")
 
     chunk0 = lm.site_names[:3]
     routes0 = {s: jnp.asarray(f[f"route0::{s}"]) for s in chunk0}
     masked_subset = lm.masked_output(
-        tgt, vu, resid,
+        vu, resid,
         {s: masks[s] for s in chunk0}, {s: delta_masks[s] for s in chunk0}, routes0, chunk0, True,
     )  # fmt: skip
     _assert_close(masked_subset, f["out::masked_subset"], "masked_output (subset live)")
@@ -173,7 +171,7 @@ def test_chunk_plan_static_live_set_matches():
     plan directly and asserts its first chunk's frozen-site forward matches the torch
     golden (`out::masked_subset`), so the chunk-plan path is verified against the oracle.
     """
-    f, lm, tgt, vu, resid = _load()
+    f, lm, vu, resid = _load()
 
     plan = subset_chunk_plan(
         lm.site_names, sites_per_chunk=3, n_samples=1, sources=StochasticSources()
@@ -186,7 +184,7 @@ def test_chunk_plan_static_live_set_matches():
     delta_masks = {s: jnp.asarray(f[f"delta_mask::{s}"]) for s in chunk0}
     routes = {s: jnp.asarray(f[f"route0::{s}"]) for s in chunk0}
     masked = lm.masked_output(
-        tgt, vu, resid, masks, delta_masks, routes, plan[0].live_sites, plan[0].has_delta
+        vu, resid, masks, delta_masks, routes, plan[0].live_sites, plan[0].has_delta
     )
     _assert_close(masked, f["out::masked_subset"], "chunk-plan static-live-set forward")
 
@@ -203,7 +201,7 @@ def test_chunk_plan_static_live_set_matches():
     strict=True,
 )
 def test_train_trajectory_matches():
-    f, lm, tgt, vu, resid = _load()
+    f, lm, vu, resid = _load()
     T = int(f["_scalar_T"])
     n_train_steps = int(f["_scalar_N_TRAIN_STEPS"])
     n_warmup = int(f["_scalar_N_WARMUP"])
@@ -264,7 +262,7 @@ def test_train_trajectory_matches():
     )
     run_key = random.PRNGKey(7)
     for step_idx in range(n_train_steps):
-        state, metrics = step_fn(state, tgt, resid, random.fold_in(run_key, step_idx))
+        state, metrics = step_fn(lm, state, resid, random.fold_in(run_key, step_idx))
         for fixture_key in STABLE_FIXTURE_METRIC_KEYS:
             metric_key = METRIC_KEY_BY_FIXTURE_KEY.get(fixture_key, fixture_key)
             got = float(metrics[metric_key])

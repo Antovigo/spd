@@ -12,6 +12,7 @@ These toys train in seconds; `pd-resid-mlp` runs synchronously on CPU in the mai
 from pathlib import Path
 from typing import Any
 
+import equinox as eqx
 import fire
 import jax
 import yaml
@@ -102,28 +103,32 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
         out_bias=target_cfg.out_bias,
         fixed_identity_embedding=target_cfg.fixed_identity_embedding,
     )
-    lm = resid_mlp.resid_mlp_decomposed_model(
-        resid_cfg, resid_mlp.site_specs(resid_cfg, target_cfg.sites)
-    )
     if is_main:
         print(f"pretraining ResidMLP target ({target_cfg.pretrain_steps} steps)...", flush=True)
-    frozen = resid_mlp.replicate_target(
-        resid_mlp.pretrain_resid_mlp_target(
-            resid_cfg,
-            target_cfg.feature_probability,
-            target_cfg.data_generation_type,
-            target_cfg.pretrain_steps,
-            target_cfg.pretrain_batch_size,
-            target_cfg.pretrain_lr,
-            target_cfg.pretrain_seed,
+    target = resid_mlp.pretrain_resid_mlp_target(
+        resid_cfg,
+        target_cfg.feature_probability,
+        target_cfg.data_generation_type,
+        target_cfg.pretrain_steps,
+        target_cfg.pretrain_batch_size,
+        target_cfg.pretrain_lr,
+        target_cfg.pretrain_seed,
+    )
+    # The model IS the frozen target: one `eqx.Module` carries the ResidMLP weights as a field
+    # and the decomposition contract as methods.
+    lm = resid_mlp.replicate_target(
+        resid_mlp.resid_mlp_decomposed_model(
+            resid_cfg, target, resid_mlp.site_specs(resid_cfg, target_cfg.sites)
         ),
         mesh,
     )
 
     data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
 
-    @jax.jit
-    def sample_residual(step_key: jax.Array) -> jax.Array:
+    # `tgt` is the filter_jit ARG (frozen `W_E` traced, not baked) — closing over an
+    # array-bearing eqx target would bake its weights into the HLO.
+    @eqx.filter_jit
+    def sample_residual(tgt: resid_mlp.ResidMLPTarget, step_key: jax.Array) -> jax.Array:
         x = resid_mlp.sample_sparse_features(
             step_key,
             target_cfg.global_batch,
@@ -131,22 +136,25 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
             target_cfg.feature_probability,
             target_cfg.data_generation_type,
         )
-        residual = resid_mlp.resid_mlp_input_residual(frozen, x)
+        residual = resid_mlp.resid_mlp_input_residual(tgt, x)
         return jax.lax.with_sharding_constraint(residual, NamedSharding(mesh, P("dp")))
 
     def sample_batch(step: int) -> jax.Array:
-        return sample_residual(random.fold_in(data_key, step))
+        return sample_residual(lm.target, random.fold_in(data_key, step))
 
-    @jax.jit
-    def single_feature_ci(ci_fn: Any) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
-        resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ frozen.W_E
-        ci = ci_fn(lm.read_activations(frozen, resid, ci_fn.input_names))
+    # `model` is the filter_jit ARG (frozen weights traced, not baked).
+    @eqx.filter_jit
+    def single_feature_ci(
+        model: resid_mlp.ResidMLPDecomposedModel, ci_fn: Any
+    ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
+        resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ model.target.W_E
+        ci = ci_fn(model.read_activations(resid, ci_fn.input_names))
         return ci.lower, ci.upper
 
     uv_spec = toy_uv_eval.toy_uv_spec(lm, raw_cfg)
 
     def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
-        ci_lower, ci_upper = single_feature_ci(state.ci_fn)
+        ci_lower, ci_upper = single_feature_ci(lm, state.ci_fn)
         toy_uv_eval.log_uv_figure(
             uv_spec,
             state.components.vu,
@@ -165,7 +173,6 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
         run=built.run,
         raw_cfg=raw_cfg,
         lm=lm,
-        frozen=frozen,
         ci_fn=built.ci_fn,
         data=built.data,
         remat_recon_forwards=built.runtime.remat_recon_forwards,

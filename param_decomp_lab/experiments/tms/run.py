@@ -14,6 +14,7 @@ SLURM / `param_decomp.run` / CUDA). It mints its own `p-<8hex>` run id (toys do 
 from pathlib import Path
 from typing import Any
 
+import equinox as eqx
 import fire
 import jax
 import yaml
@@ -92,20 +93,21 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
     is_main = jax.process_index() == 0
 
     tms_cfg = tms.TMSConfig(n_features=target_cfg.n_features, n_hidden=target_cfg.n_hidden)
-    lm = tms.tms_decomposed_model(tms_cfg, tms.site_specs(tms_cfg, target_cfg.sites))
     if is_main:
         print(f"pretraining TMS target ({target_cfg.pretrain_steps} steps)...", flush=True)
-    frozen = tms.replicate_target(
-        tms.pretrain_tms_target(
-            tms_cfg,
-            target_cfg.feature_probability,
-            target_cfg.data_generation_type,
-            target_cfg.pretrain_steps,
-            target_cfg.pretrain_batch_size,
-            target_cfg.pretrain_lr,
-            target_cfg.pretrain_seed,
-        ),
-        mesh,
+    target = tms.pretrain_tms_target(
+        tms_cfg,
+        target_cfg.feature_probability,
+        target_cfg.data_generation_type,
+        target_cfg.pretrain_steps,
+        target_cfg.pretrain_batch_size,
+        target_cfg.pretrain_lr,
+        target_cfg.pretrain_seed,
+    )
+    # The model IS the frozen target: one `eqx.Module` carries the TMS weights as a field and
+    # the decomposition contract as methods.
+    lm = tms.replicate_target(
+        tms.tms_decomposed_model(tms_cfg, target, tms.site_specs(tms_cfg, target_cfg.sites)), mesh
     )
 
     data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
@@ -124,16 +126,20 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
     def sample_batch(step: int) -> jax.Array:
         return sample_residual(random.fold_in(data_key, step))
 
-    @jax.jit
-    def single_feature_ci(ci_fn: Any) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
+    # `model` is the filter_jit ARG (frozen TMS weights traced, not baked) — closing over an
+    # array-bearing eqx model would bake its weights into the HLO.
+    @eqx.filter_jit
+    def single_feature_ci(
+        model: tms.TMSDecomposedModel, ci_fn: Any
+    ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
         probe = tms.single_feature_probe(target_cfg.n_features)
-        ci = ci_fn(lm.read_activations(frozen, probe, ci_fn.input_names))
+        ci = ci_fn(model.read_activations(probe, ci_fn.input_names))
         return ci.lower, ci.upper
 
     uv_spec = toy_uv_eval.toy_uv_spec(lm, raw_cfg)
 
     def eval_fn(state: TrainState, now_step: int) -> dict[str, float]:
-        ci_lower, ci_upper = single_feature_ci(state.ci_fn)
+        ci_lower, ci_upper = single_feature_ci(lm, state.ci_fn)
         toy_uv_eval.log_uv_figure(
             uv_spec,
             state.components.vu,
@@ -152,7 +158,6 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
         run=built.run,
         raw_cfg=raw_cfg,
         lm=lm,
-        frozen=frozen,
         ci_fn=built.ci_fn,
         data=built.data,
         remat_recon_forwards=built.runtime.remat_recon_forwards,

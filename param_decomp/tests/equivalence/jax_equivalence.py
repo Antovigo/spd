@@ -32,10 +32,10 @@ from param_decomp.components import DecompVU, site_out  # noqa: E402
 from param_decomp.llama8b import (  # noqa: E402
     MLP_KINDS,
     FrozenAttn,
+    LlamaDecomposedModel,
     SuffixLayer,
-    Target,
     _clean_mlp_out,  # noqa: E402  (reference suffix forward in the chunk-plan gate check)
-    llama_decomposed_lm,
+    build_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
     site_name,
@@ -104,10 +104,6 @@ def _build(f: dict[str, np.ndarray]):
     ]
     # inv_freq unused (attn zeroed); a dummy valid-shaped array.
     inv_freq = jnp.ones((d // 4,), jnp.float32)
-    tgt = Target(
-        layers=decomp_layers + tail, norm=a("norm"), lm_head=a("lm_head"),
-        inv_freq=inv_freq, eps=eps,
-    )  # fmt: skip
     vu = DecompVU(
         vu={
             site_name(i, kind): (a(f"V{kind[0]}_{i}"), a(f"U{kind[0]}_{i}"))
@@ -130,17 +126,24 @@ def _build(f: dict[str, np.ndarray]):
         rope_high_freq_factor=4.0,
         rope_original_max_position_embeddings=128,
     )
-    lm = llama_decomposed_lm(cfg, llama_site_specs(cfg, mlp_family_site_cs(0, n_layers - 1, C)))
-    return lm, tgt, vu, n_layers
+    lm = build_decomposed_lm(
+        layers=decomp_layers + tail,
+        norm=a("norm"),
+        lm_head=a("lm_head"),
+        inv_freq=inv_freq,
+        cfg=cfg,
+        sites=llama_site_specs(cfg, mlp_family_site_cs(0, n_layers - 1, C)),
+    )
+    return lm, vu, n_layers
 
 
 def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
     """The four JAX loss-term values on the fixtures `f` (fp32). Shared by `main` and
     the pytest so there is one term-computation path."""
-    lm, tgt, vu, n_layers = _build(f)
+    lm, vu, n_layers = _build(f)
     resid = jnp.asarray(f["resid"], dtype=FP)
 
-    clean = jax.lax.stop_gradient(lm.clean_output(tgt, resid))
+    clean = jax.lax.stop_gradient(lm.clean_output(resid))
 
     # fixtures key CI per kind as (B, T, L, C); the trainer keys per site.
     def per_site(prefix: str) -> dict[str, jnp.ndarray]:
@@ -151,7 +154,7 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
     ci_upper = per_site("ci_upper")
 
     # ---- faith ----
-    faith = float(faithfulness_loss(lm.weight_deltas(tgt, vu)))
+    faith = float(faithfulness_loss(lm.weight_deltas(vu)))
 
     # ---- imp ----
     imp_lp, imp_entropy = importance_minimality_terms(
@@ -168,21 +171,21 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
         masks = {s: ci_lower[s] + (1.0 - ci_lower[s]) * stoch_u[s] for s in chunk}
         delta_masks = {s: stoch_delta[s] for s in chunk}
         routes = {site_name(i, k): jnp.asarray(f[f"route_chunk{i}_{k}"]) for k in MLP_KINDS}
-        pred = lm.masked_output(tgt, vu, resid, masks, delta_masks, routes, chunk, True)
+        pred = lm.masked_output(vu, resid, masks, delta_masks, routes, chunk, True)
         stoch_total += float(kl_per_position(pred, clean))
     stoch = stoch_total / n_layers
 
     # ---- ppgd (FIXED sources) ----
     source = per_site("ppgd_source")  # {site: (1, T, C+1)}
     masks, delta_masks = source_masks(ci_lower, source, lm.site_names)
-    pred = lm.masked_output(tgt, vu, resid, masks, delta_masks, None, lm.site_names, True)
+    pred = lm.masked_output(vu, resid, masks, delta_masks, None, lm.site_names, True)
     ppgd = float(kl_per_position(pred, clean))
 
     return {"faith": faith, "imp": imp, "stoch": stoch, "ppgd": ppgd}
 
 
 def _suffix_with_split_mlp(
-    tgt: Target,
+    tgt: LlamaDecomposedModel,
     vu: DecompVU,
     resid: jnp.ndarray,
     live_layer: int,
@@ -228,9 +231,9 @@ def chunk_plan_static_gate_kl(f: dict[str, np.ndarray]) -> tuple[float, float]:
     `subset_chunk_plan` exercises but the per-chunk `stoch` term (whole live chunks) and
     the all-sites `ppgd` term never do. Returns (gate-path KL, explicit-frozen-reference
     KL); the test asserts they agree to fp32 tolerance."""
-    lm, tgt, vu, n_layers = _build(f)
+    lm, vu, n_layers = _build(f)
     resid = jnp.asarray(f["resid"], dtype=FP)
-    clean = jax.lax.stop_gradient(lm.clean_output(tgt, resid))
+    clean = jax.lax.stop_gradient(lm.clean_output(resid))
 
     def per_site(prefix: str) -> dict[str, jnp.ndarray]:
         by_kind = {k: jnp.asarray(f[f"{prefix}_{k}"], dtype=FP) for k in MLP_KINDS}
@@ -246,9 +249,9 @@ def chunk_plan_static_gate_kl(f: dict[str, np.ndarray]) -> tuple[float, float]:
     masks = {s: ci_lower[s] + (1.0 - ci_lower[s]) * stoch_u[s] for s in live}
     delta_masks = {s: stoch_delta[s] for s in live}
 
-    gate_pred = lm.masked_output(tgt, vu, resid, masks, delta_masks, None, live, True)
+    gate_pred = lm.masked_output(vu, resid, masks, delta_masks, None, live, True)
     ref_pred = _suffix_with_split_mlp(
-        tgt, vu, resid, live_layer, live_kinds, masks, delta_masks, n_layers
+        lm, vu, resid, live_layer, live_kinds, masks, delta_masks, n_layers
     )
     return float(kl_per_position(gate_pred, clean)), float(kl_per_position(ref_pred, clean))
 

@@ -37,7 +37,6 @@ from param_decomp.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.llama8b import (
-    llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
@@ -50,7 +49,7 @@ from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import dp_mesh
-from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
+from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 from param_decomp.train import TrainState, make_train_step
 from vendored_jax.llama import LlamaConfig
 
@@ -72,10 +71,9 @@ def _chunkwise_arch(lm: DecomposedModel, cfg: LlamaConfig) -> ChunkwiseTransform
 
 def _build(seed: int):
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 3, jax.random.PRNGKey(0))
     C, seq = 8, 16
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(seed))
     ci_fn = build_ci_fn(_chunkwise_arch(lm, cfg), lm.sites, jax.random.PRNGKey(seed + 1))
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
@@ -120,13 +118,13 @@ def _build(seed: int):
         remat_recon_forwards=True, mesh=None,
     )  # fmt: skip
     resid = jax.random.normal(jax.random.PRNGKey(9), (2, seq, cfg.n_embd)) * 0.5
-    return tgt, state, step, resid
+    return lm, state, step, resid
 
 
 def test_roundtrip_and_exact_resume(tmp_path: Path):
-    tgt, state, step, resid = _build(seed=1)
+    lm, state, step, resid = _build(seed=1)
     for i in range(2):
-        state, _ = step(state, tgt, resid, jax.random.PRNGKey(i))
+        state, _ = step(lm, state, resid, jax.random.PRNGKey(i))
 
     mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
     save_state(mgr, 2, state)
@@ -141,8 +139,8 @@ def test_roundtrip_and_exact_resume(tmp_path: Path):
         assert jnp.array_equal(jnp.asarray(a), jnp.asarray(b))
 
     # SPEC S22: the restored state continues the exact trajectory.
-    state_cont, m_cont = step(state, tgt, resid, jax.random.PRNGKey(100))
-    loaded_cont, m_load = step(loaded, tgt, resid, jax.random.PRNGKey(100))
+    state_cont, m_cont = step(lm, state, resid, jax.random.PRNGKey(100))
+    loaded_cont, m_load = step(lm, loaded, resid, jax.random.PRNGKey(100))
     for k in m_cont:
         assert float(m_cont[k]) == float(m_load[k]), k
     for a, b in zip(jax.tree.leaves(state_cont), jax.tree.leaves(loaded_cont), strict=True):
@@ -157,9 +155,9 @@ def test_persistent_adam_step_count_roundtrip_and_post_resume_bias_correction(tm
     state_key = "PersistentPGDReconLoss"
     beta1, beta2 = 0.5, 0.99
 
-    tgt, state, step, resid = _build(seed=1)
+    lm, state, step, resid = _build(seed=1)
     for i in range(3):
-        state, _ = step(state, tgt, resid, jax.random.PRNGKey(i))
+        state, _ = step(lm, state, resid, jax.random.PRNGKey(i))
 
     pre_save = state.sources_opt_state[state_key]
     n_ascents = int(pre_save.step_count)
@@ -221,7 +219,7 @@ def _build_sharded(seed: int, mesh: Mesh):
     n = mesh.devices.size
     C, seq = 8 * n, 16
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     shardable = n > 1 and all(s.C % n == 0 for s in sites)
     vu = init_decomp_vu_placed(sites, jax.random.PRNGKey(seed), mesh, shardable)
     ci_fn = init_ci_fn_placed(

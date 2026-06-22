@@ -43,7 +43,7 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
+from param_decomp.llama8b import llama_site_specs, mlp_family_site_cs
 from param_decomp.llama8b_sharding import (
     dp_mesh,
     init_ci_fn_placed,
@@ -53,7 +53,7 @@ from param_decomp.llama8b_sharding import (
 from param_decomp.recon import build_recon_terms
 from param_decomp.run import _ensure_global
 from param_decomp.schedule import ScheduleConfig
-from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
+from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 from param_decomp.train import TrainState, make_train_step
 
 # Needs >1 jax device (production topology); hangs at the default 1 device, so gated behind
@@ -82,10 +82,9 @@ def _build_sharded(seed: int):
     TWO persistent terms. `C=8` so the C axis tiles a 4-device mesh."""
     mesh = dp_mesh()
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 3, jax.random.PRNGKey(0))
     C, seq = 8, 16
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
 
     n = mesh.devices.size
     shardable = n > 1 and all(s.C % n == 0 for s in lm.sites)
@@ -155,7 +154,7 @@ def _build_sharded(seed: int):
         jax.random.normal(jax.random.PRNGKey(9), (4, seq, cfg.n_embd)) * 0.5,
         NamedSharding(mesh, jax.sharding.PartitionSpec("dp")),
     )
-    return tgt, state, step, resid
+    return lm, state, step, resid
 
 
 def _assert_moments_present(
@@ -180,9 +179,9 @@ def test_sharded_roundtrip_persists_source_moments(tmp_path: Path):
     """Device-agnostic like the other invariance tests: at 1 device the round-trip is a
     trivial-mesh structural check; only `XLA_FLAGS=--xla_force_host_platform_device_count=4`
     actually shards C, where the `sharding` equality assertions bite."""
-    tgt, state, step, resid = _build_sharded(seed=1)
+    lm, state, step, resid = _build_sharded(seed=1)
     for i in range(2):
-        state, _ = step(state, tgt, resid, jax.random.PRNGKey(i))
+        state, _ = step(lm, state, resid, jax.random.PRNGKey(i))
     # The ascents must have advanced each term's Adam counter before we save.
     _assert_moments_present(state.sources, state.sources_opt_state)
 
@@ -213,8 +212,8 @@ def test_sharded_roundtrip_persists_source_moments(tmp_path: Path):
         assert got.sharding == ref.sharding, (got.sharding, ref.sharding)
 
     # SPEC S22: the restored state continues the EXACT trajectory.
-    state_cont, m_cont = step(state, tgt, resid, jax.random.PRNGKey(100))
-    loaded_cont, m_load = step(loaded, tgt, resid, jax.random.PRNGKey(100))
+    state_cont, m_cont = step(lm, state, resid, jax.random.PRNGKey(100))
+    loaded_cont, m_load = step(lm, loaded, resid, jax.random.PRNGKey(100))
     for k in m_cont:
         assert float(m_cont[k]) == float(m_load[k]), k
     for a, b in zip(jax.tree.leaves(state_cont), jax.tree.leaves(loaded_cont), strict=True):

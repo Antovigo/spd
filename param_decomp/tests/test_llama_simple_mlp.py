@@ -33,21 +33,20 @@ from param_decomp.configs import (
 from param_decomp.llama8b import FrozenAttn
 from param_decomp.llama_simple_mlp import (
     LlamaSimpleMLPConfig,
+    SimpleMLPDecomposedModel,
     SimpleMLPPrefix,
     SimpleMLPSuffixLayer,
-    SimpleMLPTarget,
+    build_decomposed_simple_mlp,
     canonical_site_cs,
-    clean_suffix_logits,
     expand_wildcard_site_cs,
     first_decomposed_layer,
-    llama_simple_mlp_decomposed_lm,
     parse_site_name,
     plain_rope_inv_freq,
     prefix_residual,
     site_name,
     site_specs,
 )
-from param_decomp.lm import DecomposedModel, SiteC
+from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
@@ -96,22 +95,19 @@ def _tiny_layers(cfg: LlamaSimpleMLPConfig, n: int, key: jax.Array) -> list[Simp
     ]
 
 
-def _tiny_target_and_prefix(
-    cfg: LlamaSimpleMLPConfig, first_layer: int, key: jax.Array
-) -> tuple[SimpleMLPTarget, SimpleMLPPrefix]:
+def _tiny_decomposed_model(
+    cfg: LlamaSimpleMLPConfig, sites: tuple[SiteSpec, ...], key: jax.Array
+) -> SimpleMLPDecomposedModel:
+    """A tiny random `SimpleMLPDecomposedModel` carrying a random frozen suffix from
+    `first_decomposed_layer(sites)..end` plus the decomposition `sites`."""
+    first_layer = first_decomposed_layer(tuple(s.name for s in sites))
     layers_key, embed_key = jax.random.split(key)
     layers = _tiny_layers(cfg, cfg.n_layer, layers_key)
-    inv_freq = plain_rope_inv_freq(cfg)
     embed = jax.random.normal(embed_key, (cfg.vocab_size, cfg.n_embd)) * 0.02
-    target = SimpleMLPTarget(
+    return build_decomposed_simple_mlp(
         layers=layers[first_layer:], norm=jnp.ones((cfg.n_embd,)), lm_head=embed,
-        inv_freq=inv_freq, eps=cfg.rms_norm_eps, n_ctx=cfg.n_ctx,
+        cfg=cfg, sites=sites,
     )  # fmt: skip
-    prefix = SimpleMLPPrefix(
-        embed=embed, blocks=layers[:first_layer], inv_freq=inv_freq,
-        eps=cfg.rms_norm_eps, n_ctx=cfg.n_ctx,
-    )  # fmt: skip
-    return target, prefix
 
 
 _MIXED_SITE_CS = (
@@ -206,29 +202,38 @@ def test_site_specs_dims():
 def test_prefix_suffix_threading_matches_full_forward():
     cfg = _tiny_cfg()
     idx = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
-    target_full, prefix_full = _tiny_target_and_prefix(cfg, 0, jax.random.PRNGKey(0))
-    full_logits = clean_suffix_logits(target_full, prefix_residual(prefix_full, idx))
+    layers_key, embed_key = jax.random.split(jax.random.PRNGKey(0))
+    layers = _tiny_layers(cfg, cfg.n_layer, layers_key)
+    embed = jax.random.normal(embed_key, (cfg.vocab_size, cfg.n_embd)) * 0.02
+    inv_freq = plain_rope_inv_freq(cfg)
+    norm = jnp.ones((cfg.n_embd,))
+
+    full_sites = site_specs(cfg, (SiteC(site_name(0, "q_proj"), 1),))
+    target_full = build_decomposed_simple_mlp(
+        layers=layers, norm=norm, lm_head=embed, cfg=cfg, sites=full_sites
+    )
+    prefix_full = SimpleMLPPrefix(
+        embed=embed, blocks=[], inv_freq=inv_freq, eps=cfg.rms_norm_eps, n_ctx=cfg.n_ctx
+    )
+    full_logits = target_full.clean_output(prefix_residual(prefix_full, idx))
 
     first_layer = 2
-    target_split = SimpleMLPTarget(
-        layers=target_full.layers[first_layer:], norm=target_full.norm,
-        lm_head=target_full.lm_head, inv_freq=target_full.inv_freq,
-        eps=target_full.eps, n_ctx=target_full.n_ctx,
-    )  # fmt: skip
+    split_sites = site_specs(cfg, (SiteC(site_name(first_layer, "q_proj"), 1),))
+    target_split = build_decomposed_simple_mlp(
+        layers=layers[first_layer:], norm=norm, lm_head=embed, cfg=cfg, sites=split_sites
+    )
     prefix_split = SimpleMLPPrefix(
-        embed=prefix_full.embed, blocks=target_full.layers[:first_layer],
-        inv_freq=target_full.inv_freq, eps=target_full.eps, n_ctx=target_full.n_ctx,
+        embed=embed, blocks=layers[:first_layer], inv_freq=inv_freq,
+        eps=cfg.rms_norm_eps, n_ctx=cfg.n_ctx,
     )  # fmt: skip
-    split_logits = clean_suffix_logits(target_split, prefix_residual(prefix_split, idx))
+    split_logits = target_split.clean_output(prefix_residual(prefix_split, idx))
     assert jnp.array_equal(full_logits, split_logits), "prefix/suffix split drifted"
 
 
 def test_clean_path_and_masked_identity():
     cfg = _tiny_cfg()
-    first = first_decomposed_layer(tuple(s.name for s in _MIXED_SITE_CS))
-    target, _ = _tiny_target_and_prefix(cfg, first, jax.random.PRNGKey(0))
     sites = site_specs(cfg, _MIXED_SITE_CS)
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
@@ -239,11 +244,11 @@ def test_clean_path_and_masked_identity():
         V, U = vu.site(spec.name)
         assert V.shape == (spec.d_in, spec.C) and U.shape == (spec.C, spec.d_out)
 
-    clean = lm.clean_output(target, resid)
+    clean = lm.clean_output(resid)
     assert clean.shape == (b, t, cfg.vocab_size)
 
     # SPEC S2: a masked forward with NO live sites is the frozen path — bit-identical.
-    none_masked = lm.masked_output(target, vu, resid, {}, {}, None, (), True)
+    none_masked = lm.masked_output(vu, resid, {}, {}, None, (), True)
     assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
 
     # All-live, masks=1, delta=1, route-everywhere reconstructs the frozen path up to
@@ -251,17 +256,17 @@ def test_clean_path_and_masked_identity():
     names = lm.site_names
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in lm.sites}
     ones_delta = {s: jnp.ones((b, t)) for s in names}
-    full = lm.masked_output(target, vu, resid, ones_masks, ones_delta, None, names, True)
+    full = lm.masked_output(vu, resid, ones_masks, ones_delta, None, names, True)
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
-    site_in = lm.read_activations(target, resid, lm.site_names)
+    site_in = lm.read_activations(resid, lm.site_names)
     assert set(site_in) == set(names)
     # q and v read the same post-LN1 residual; down_proj reads the post-GELU acts
     assert jnp.array_equal(site_in["h.2.attn.q_proj"], site_in["h.2.attn.v_proj"])
     assert site_in["h.3.mlp.down_proj"].shape == (b, t, cfg.n_intermediate)
     assert site_in["h.2.mlp.c_fc"].shape == (b, t, cfg.n_embd)
 
-    deltas = lm.weight_deltas(target, vu)
+    deltas = lm.weight_deltas(vu)
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
     assert deltas["h.2.attn.q_proj"].shape == (qd, cfg.n_embd)
     assert deltas["h.2.attn.v_proj"].shape == (kvd, cfg.n_embd)
@@ -275,18 +280,16 @@ def test_zero_masking_one_site_changes_logits(ablated_site: str):
     """q is live ahead of RoPE/SDPA; c_fc ahead of the GELU — zero-mask + zero-delta on
     either must change the logits."""
     cfg = _tiny_cfg()
-    first = first_decomposed_layer(tuple(s.name for s in _MIXED_SITE_CS))
-    target, _ = _tiny_target_and_prefix(cfg, first, jax.random.PRNGKey(0))
     sites = site_specs(cfg, _MIXED_SITE_CS)
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    clean = lm.clean_output(target, resid)
+    clean = lm.clean_output(resid)
     C = {s.name: s.C for s in _MIXED_SITE_CS}[ablated_site]
     ablated = lm.masked_output(
-        target, vu, resid,
+        vu, resid,
         {ablated_site: jnp.zeros((b, t, C))}, {ablated_site: jnp.zeros((b, t))},
         None, (ablated_site,), True,
     )  # fmt: skip
@@ -299,26 +302,24 @@ def test_masked_site_outputs_frozen_when_routed_false_or_unmasked():
     frozen W per site is `site_input @ W.T`, recovered from `weight_deltas` + `V@U`."""
     cfg = _tiny_cfg()
     sites_cs = (SiteC("h.2.attn.q_proj", 8), SiteC("h.2.mlp.c_fc", 12))
-    first = first_decomposed_layer(tuple(s.name for s in sites_cs))
-    target, _ = _tiny_target_and_prefix(cfg, first, jax.random.PRNGKey(0))
     sites = site_specs(cfg, sites_cs)
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     names = lm.site_names
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    site_in = lm.read_activations(target, resid, lm.site_names)
+    site_in = lm.read_activations(resid, lm.site_names)
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in lm.sites}
     zeros_delta = {s: jnp.zeros((b, t)) for s in names}
     false_routes = {s: jnp.zeros((b, t), bool) for s in names}
 
     clean_outs = lm.masked_site_outputs(
-        target, vu, resid, ones_masks, zeros_delta, false_routes, names, False
+        vu, resid, ones_masks, zeros_delta, false_routes, names, False
     )
     assert set(clean_outs) == set(names)
     # frozen `x @ W` per site, reconstructed independently from weight_deltas + V@U.
-    deltas = lm.weight_deltas(target, vu)
+    deltas = lm.weight_deltas(vu)
     for s in names:
         V, U = vu.site(s)
         W = (V.astype(jnp.float32) @ U.astype(jnp.float32)).T + deltas[s]  # (d_out, d_in)
@@ -333,32 +334,28 @@ def test_masked_site_outputs_match_hand_computed_masked_linear(site_name_str: st
     masked site contaminating the threaded forward)."""
     cfg = _tiny_cfg()
     sites_cs = (SiteC(site_name_str, 8),)
-    first = first_decomposed_layer((site_name_str,))
-    target, _ = _tiny_target_and_prefix(cfg, first, jax.random.PRNGKey(0))
     sites = site_specs(cfg, sites_cs)
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     names = lm.site_names
     s = site_name_str
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    x_in = lm.read_activations(target, resid, (s,))[s]
+    x_in = lm.read_activations(resid, (s,))[s]
     V, U = vu.site(s)
     mask = jax.random.uniform(jax.random.PRNGKey(7), (b, t, sites_cs[0].C))
 
     no_delta = lm.masked_site_outputs(
-        target, vu, resid, {s: mask}, {s: jnp.zeros((b, t))}, None, names, False
+        vu, resid, {s: mask}, {s: jnp.zeros((b, t))}, None, names, False
     )
     hand = ((x_in @ V) * mask) @ U
     assert jnp.allclose(no_delta[s], hand, atol=1e-4), s
 
     # delta path: + delta_mask · (x @ Δ), Δ = W − V@U == lm.weight_deltas (fp32 oracle)
-    delta_in = lm.weight_deltas(target, vu)[s]
+    delta_in = lm.weight_deltas(vu)[s]
     delta_mask = jax.random.uniform(jax.random.PRNGKey(9), (b, t))
-    with_delta = lm.masked_site_outputs(
-        target, vu, resid, {s: mask}, {s: delta_mask}, None, names, True
-    )
+    with_delta = lm.masked_site_outputs(vu, resid, {s: mask}, {s: delta_mask}, None, names, True)
     hand_delta = delta_mask[..., None] * (x_in.astype(jnp.float32) @ delta_in.T)
     expected = hand.astype(jnp.float32) + hand_delta
     assert jnp.allclose(with_delta[s].astype(jnp.float32), expected, atol=1e-3), s
@@ -367,33 +364,30 @@ def test_masked_site_outputs_match_hand_computed_masked_linear(site_name_str: st
 def test_o_site_masks_attention_output():
     cfg = _tiny_cfg()
     o_site = "h.2.attn.o_proj"
-    target, _ = _tiny_target_and_prefix(cfg, 2, jax.random.PRNGKey(0))
     sites = site_specs(cfg, (SiteC(o_site, 8),))
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    clean = lm.clean_output(target, resid)
+    clean = lm.clean_output(resid)
     ones = lm.masked_output(
-        target, vu, resid, {o_site: jnp.ones((b, t, 8))}, {o_site: jnp.ones((b, t))}, None,
+        vu, resid, {o_site: jnp.ones((b, t, 8))}, {o_site: jnp.ones((b, t))}, None,
         (o_site,), True,
     )  # fmt: skip
     assert jnp.allclose(clean, ones, atol=1e-4)
     # o's clean site input is the pre-o_proj attention output, shape (b, t, qd)
-    site_in = lm.read_activations(target, resid, lm.site_names)
+    site_in = lm.read_activations(resid, lm.site_names)
     assert site_in[o_site].shape == (b, t, cfg.n_head * cfg.head_dim)
 
 
 def test_step_trains_and_has_vpd_signature():
     cfg = _tiny_cfg()
     site_cs = _MIXED_SITE_CS
-    first = first_decomposed_layer(tuple(s.name for s in site_cs))
-    target, _ = _tiny_target_and_prefix(cfg, first, jax.random.PRNGKey(0))
     seq = 16
     n_warmup = 2
     sites = site_specs(cfg, site_cs)
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_chunkwise_ci_fn(lm, jax.random.PRNGKey(2))
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
@@ -452,7 +446,7 @@ def test_step_trains_and_has_vpd_signature():
     n_steps = 4
     losses = []
     for i in range(n_steps):
-        state, m = step(state, target, resid, jax.random.PRNGKey(100 + i))
+        state, m = step(lm, state, resid, jax.random.PRNGKey(100 + i))
         losses.append({k: float(v) for k, v in m.items()})
 
     assert all(jnp.isfinite(jnp.array(list(m.values()))).all() for m in losses)
@@ -476,17 +470,15 @@ def test_step_trains_and_has_vpd_signature():
 def test_faith_warmup_decreases_faith():
     cfg = _tiny_cfg()
     sites = site_specs(cfg, canonical_site_cs(_MIXED_SITE_CS))
-    first = first_decomposed_layer(tuple(s.name for s in sites))
-    target, _ = _tiny_target_and_prefix(cfg, first, jax.random.PRNGKey(0))
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(lm, opt)
+    wstep = make_faith_warmup_step(opt)
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss: float | None = None
     loss = None
     for _ in range(30):
-        vu, ostate, loss = wstep(vu, ostate, target)
+        vu, ostate, loss = wstep(lm, vu, ostate)
         first_loss = float(loss) if first_loss is None else first_loss
     assert first_loss is not None and loss is not None
     assert float(loss) < first_loss * 0.9, (first_loss, float(loss))

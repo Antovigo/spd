@@ -68,7 +68,7 @@ from param_decomp.slow_eval import (
     make_slow_eval_step,
     resolve_permutation_metrics,
 )
-from param_decomp.target_aliases import AnyFrozenTarget, AnyPrefix
+from param_decomp.target_aliases import AnyPrefix
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments.lm.config import (
     load_config,
@@ -122,7 +122,6 @@ def train(
     built: BuiltRun,
     raw_cfg: dict[str, object],
     lm: DecomposedModel,
-    frozen: AnyFrozenTarget,
     prefix: AnyPrefix,
     prefix_residual_fn: Callable[[Any, Any], jax.Array],
     mesh: Mesh,
@@ -168,9 +167,7 @@ def train(
             "pass's batches, so it can only fire on a fast-eval step"
         )
         eval_every = built.eval.every
-        eval_fn = _make_lm_eval_fn(
-            built, lm, frozen, prefix, harvest, run_key, mesh, n_proc, is_main
-        )
+        eval_fn = _make_lm_eval_fn(built, lm, prefix, harvest, run_key, mesh, n_proc, is_main)
 
     run_decomposition_training(
         pd=built.pd,
@@ -178,7 +175,6 @@ def train(
         run=built.run,
         raw_cfg=raw_cfg,
         lm=lm,
-        frozen=frozen,
         ci_fn=built.ci_fn,
         data=data,
         remat_recon_forwards=built.runtime.remat_recon_forwards,
@@ -193,7 +189,6 @@ def train(
 def _make_lm_eval_fn(
     built: BuiltRun,
     lm: DecomposedModel,
-    frozen: AnyFrozenTarget,
     prefix: AnyPrefix,
     harvest: Callable[[Any, Any], jax.Array],
     run_key: PRNGKeyArray,
@@ -225,7 +220,7 @@ def _make_lm_eval_fn(
     )
     attn_steps: dict[str, Any] = {}
     if eval.attn_patterns is not None:
-        pattern_fn = attn_pattern_for(frozen)
+        pattern_fn = attn_pattern_for(lm)
         if eval.attn_patterns.ci_masked:
             attn_steps["CIMaskedAttnPatternsReconLoss"] = make_ci_attn_patterns_step(lm, pattern_fn)
         if eval.attn_patterns.stochastic:
@@ -265,7 +260,7 @@ def _make_lm_eval_fn(
             # fold values >= pd.steps never collide with the train step keys
             eval_key = random.fold_in(run_key, pd.steps + eval_pass_index * eval.n_steps + j)
             eval_metrics = eval_step_fn(
-                state.components, state.ci_fn, frozen, eval_tokens, eval_residual, eval_key
+                lm, state.components, state.ci_fn, eval_tokens, eval_residual, eval_key
             )
             for k, v in eval_metrics.items():
                 metric_sums[k] = metric_sums.get(k, jnp.zeros(())) + v
@@ -277,7 +272,7 @@ def _make_lm_eval_fn(
             # is summed over distributions, divided by their count.
             attn_key = random.fold_in(run_key, 2 * pd.steps + eval_pass_index)
             reductions = accumulate_attn_patterns(
-                attn_step, state.components, state.ci_fn, frozen, eval_residuals, attn_key
+                attn_step, lm, state.components, state.ci_fn, eval_residuals, attn_key
             )
             eval_record |= {
                 f"eval/loss/{k}": v
@@ -292,11 +287,11 @@ def _make_lm_eval_fn(
             # hidden-acts scalars ride the live `_step` axis through `eval_record`; the
             # figures' pure-host render + wandb.log happen OFF the loop on rank 0.
             site_reductions = accumulate_site_reductions(
-                slow_eval_step, state.ci_fn, frozen, eval_residuals, eval.slow_n_batches_accum
+                slow_eval_step, lm, state.ci_fn, eval_residuals, eval.slow_n_batches_accum
             )
             hidden_acts_key = random.fold_in(run_key, 3 * pd.steps + eval_pass_index)
             hidden_acts = compute_hidden_acts_metrics(
-                lm, state, frozen, eval_residuals, pd.n_mask_samples, hidden_acts_key
+                lm, state, eval_residuals, pd.n_mask_samples, hidden_acts_key
             )
             eval_record |= {f"eval/slow/loss/{k}": v for k, v in hidden_acts.items()}
             # The position-CI all-gather is ALSO collective (every rank joins it), gated on
@@ -306,7 +301,7 @@ def _make_lm_eval_fn(
             position_ci: dict[str, PositionCI] | None = None
             if position_ci_step is not None:
                 position_ci = accumulate_position_ci(
-                    position_ci_step, state.ci_fn, frozen, eval_residuals
+                    position_ci_step, lm, state.ci_fn, eval_residuals
                 )
                 identity_ci_errors = compute_identity_ci_errors(
                     perm_spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE
@@ -396,9 +391,11 @@ def main(config: Path) -> None:
             flush=True,
         )
 
-    lm, frozen, prefix, prefix_residual_fn, _vocab_size = build_target(built, mesh)
+    # The `lm` (an eqx model) IS the frozen target — it carries the suffix weights as fields,
+    # so the function-table era's separate `frozen` object is gone.
+    lm, prefix, prefix_residual_fn, _vocab_size = build_target(built, mesh)
 
-    train(built, raw_cfg, lm, frozen, prefix, prefix_residual_fn, mesh)
+    train(built, raw_cfg, lm, prefix, prefix_residual_fn, mesh)
 
     if jax.process_count() > 1:
         import jax.experimental.multihost_utils as mhu

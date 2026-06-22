@@ -25,12 +25,16 @@ never silently diverge. Cite IDs (`S14`, `N1`, …) in commit messages and revie
 
 ## Architecture in one breath
 
-`lm.py` defines `DecomposedModel` — ordered `sites` + `leading_axes` + five pure fns
-(`clean_output`, `read_activations`, `masked_output`, `masked_site_outputs`,
-`weight_deltas`) plus a pluggable
-`recon_loss_fn` (default `kl_per_position`), flat site-name-keyed dicts at the boundary,
-frozen pytree always a runtime arg (never a jit closure constant — an 8B target becomes a
-multi-GB HLO constant). The activation waist is GENERIC `[*leading, d]` (masks/CI
+`lm.py` defines `DecomposedModel` — a `@runtime_checkable Protocol`: ordered `sites` +
+`leading_axes` + the methods `clean_output`, `read_activations`, `masked_output`,
+`masked_site_outputs`, `weight_deltas`, and a `recon_loss_fn` (LM: `kl_per_position`). The
+concrete impl per target is an `eqx.Module` (`LlamaDecomposedModel`,
+`SimpleMLPDecomposedModel`, `TMSDecomposedModel`, `ResidMLPDecomposedModel`) carrying its
+FROZEN target weights as ARRAY FIELDS; the TRAINABLE V/U (`vu: DecompVU`) stays an explicit
+METHOD ARG (separate lifecycle — own optimizer + checkpoint, C-sharded while the frozen
+weights replicate). Flat site-name-keyed dicts at the boundary; the model threads into the
+jitted step as a pytree ARG (never a jit-closure constant — an 8B target becomes a multi-GB
+HLO constant; see "HLO-baking rule" below). The activation waist is GENERIC `[*leading, d]` (masks/CI
 `[*leading, C]`), `leading = (batch,) + named position axes`: masking / routing / sources
 / imp-min all read an opaque `leading = residual.shape[:-1]`; reductions are
 `math.prod(shape[:-1])` / `axis=tuple(range(ndim-1))`. CI is independent over every leading
@@ -124,6 +128,27 @@ lab `experiments.config.ci_arch` builds the layerwise / global arch from the toy
 ci_config (validated end-to-end on CPU via
 `pd-resid-mlp`). Harvest / slow-eval / export over the toys are NOT wired
 (`experiments.lm.load_run.build_target` / `run_metadata` are LM-only).
+
+## The HLO-baking rule (filter_jit discipline)
+
+The decomposed model is an `eqx.Module` whose frozen target weights are ARRAY FIELDS — a
+Llama-8B suffix is multi-GB. Therefore:
+
+- **Every `jax.jit` that touches a model is an `eqx.filter_jit` with the model as a TRACED
+  ARG** — never `@jax.jit` over a function that CLOSES OVER an array-bearing model. A closed-
+  over model is a jit *constant*: its arrays bake into the HLO (multi-GB constant tensors,
+  recompiled per concrete model). As a traced arg, the array leaves are dynamic inputs and
+  the static fields (`sites`, `first_layer`, `eps`, `leading_axes`) bake harmlessly.
+- **Step factories read only STATIC config off the closed-over `lm` at trace-setup**
+  (`lm.site_names`, `lm.sites`, `lm.recon_loss_fn` — `recon_loss_fn` is a `@staticmethod`,
+  pure, holds no arrays, so closing over it is safe). All ARRAY access goes through the
+  model ARG (named `model` inside the jitted fn). `make_train_step`, `make_eval_step`,
+  `make_*_hidden_acts_step`, `make_slow_eval_step`, `make_position_ci_step`,
+  `make_*_attn_patterns_step`, and `make_faith_warmup_step` all follow this; each carries a
+  comment at the step factory. The toy `run.py`s and `load_run.py`'s harvest `forward`
+  thread the model (and the prefix) as filter_jit args too.
+- This is why the methods take only the *runtime-varying* args (`vu`, `resid`, masks, …) and
+  the frozen weights ride on `self`: `self` reaches the trace as the traced model arg.
 
 ## Invariants with sharp teeth (the ones that have actually bitten)
 

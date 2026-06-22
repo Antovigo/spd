@@ -7,6 +7,7 @@ against a hand-rolled computation, and determinism in the key.
 
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -19,11 +20,11 @@ from param_decomp.ci_fn import (
 )
 from param_decomp.config import EvalPGDConfig
 from param_decomp.eval import make_eval_step, next_token_cross_entropy
-from param_decomp.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
+from param_decomp.llama8b import llama_site_specs, mlp_family_site_cs
 from param_decomp.lm import DecomposedModel, SiteSpec
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg,
-    _tiny_target,
+    _tiny_decomposed_lm,
 )
 
 
@@ -43,21 +44,64 @@ def _build_ci_fn(lm: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
     return build_ci_fn(arch, lm.sites, key)
 
 
-def _positionless_model() -> DecomposedModel:
-    """A minimal `leading_axes=()` `DecomposedModel` whose pure fns are never called — used
-    only to exercise the LM-only `leading_axes` guards (which fire at construction)."""
+class _PositionlessStub(eqx.Module):
+    """A minimal `leading_axes=()` model whose methods are never called — used only to
+    exercise the LM-only `leading_axes` guards (which fire at construction)."""
 
-    def _unused(*_args: object) -> Any:
+    sites: tuple[SiteSpec, ...] = eqx.field(static=True)
+    leading_axes: tuple[str, ...] = eqx.field(static=True)
+
+    @property
+    def site_names(self) -> tuple[str, ...]:
+        return tuple(s.name for s in self.sites)
+
+    def recon_loss_fn(self, masked_output: Any, clean_output: Any) -> jax.Array:
+        del masked_output, clean_output
         raise AssertionError("positionless stub fn must not be called")
 
-    return DecomposedModel(
+    def clean_output(self, resid: Any) -> Any:
+        del resid
+        raise AssertionError("positionless stub fn must not be called")
+
+    def read_activations(self, resid: Any, wanted: tuple[str, ...]) -> dict[str, jax.Array]:
+        del resid, wanted
+        raise AssertionError("positionless stub fn must not be called")
+
+    def masked_output(
+        self,
+        vu: Any,
+        resid: Any,
+        masks: Any,
+        delta_masks: Any,
+        routes: Any,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> Any:
+        del vu, resid, masks, delta_masks, routes, live, has_delta
+        raise AssertionError("positionless stub fn must not be called")
+
+    def masked_site_outputs(
+        self,
+        vu: Any,
+        resid: Any,
+        masks: Any,
+        delta_masks: Any,
+        routes: Any,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> dict[str, jax.Array]:
+        del vu, resid, masks, delta_masks, routes, live, has_delta
+        raise AssertionError("positionless stub fn must not be called")
+
+    def weight_deltas(self, vu: Any) -> dict[str, jax.Array]:
+        del vu
+        raise AssertionError("positionless stub fn must not be called")
+
+
+def _positionless_model() -> DecomposedModel:
+    return _PositionlessStub(
         sites=(SiteSpec("linear1", 5, 2, 8), SiteSpec("linear2", 2, 5, 6)),
         leading_axes=(),
-        clean_output=_unused,
-        read_activations=_unused,
-        masked_output=_unused,
-        masked_site_outputs=_unused,
-        weight_deltas=_unused,
     )
 
 
@@ -74,10 +118,9 @@ def test_next_token_cross_entropy_matches_manual():
 
 def test_eval_step_keys_identities_and_determinism():
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     C = 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
 
     from param_decomp.components import init_decomp_vu
 
@@ -98,7 +141,7 @@ def test_eval_step_keys_identities_and_determinism():
         pgd=None,
         mesh=None,
     )
-    out = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out = eval_step(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
 
     variants = ("ci_masked", "unmasked", "stoch_masked", "random_masked", "rounded_masked")
     expected_keys = (
@@ -122,9 +165,9 @@ def test_eval_step_keys_identities_and_determinism():
         assert float(out[f"l0/-1.0_{site}"]) == C
 
     # deterministic in the key; key-independent variants unchanged under a new key
-    out_same = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out_same = eval_step(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
     assert all(jnp.array_equal(out[k], out_same[k]) for k in out)
-    out_other = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(6))
+    out_other = eval_step(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(6))
     for variant in ("ci_masked", "unmasked", "rounded_masked", "zero_masked"):
         assert jnp.array_equal(out[f"ce_kl/kl_{variant}"], out_other[f"ce_kl/kl_{variant}"])
     assert not jnp.array_equal(out["ce_kl/kl_stoch_masked"], out_other["ce_kl/kl_stoch_masked"])
@@ -137,7 +180,7 @@ def test_eval_step_keys_identities_and_determinism():
         pgd=None,
         mesh=None,
     )
-    out_dead = eval_step_dead(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out_dead = eval_step_dead(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
     for site in lm.site_names:
         assert float(out_dead[f"l0/1.5_{site}"]) == 0
 
@@ -146,10 +189,9 @@ def test_eval_step_fresh_pgd_probe():
     """The fresh-PGD probe must come out at least as adversarial as the unascended
     random source it starts from (ascent on a fixed objective), and be deterministic."""
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     C = 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 4, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
 
     from param_decomp.components import init_decomp_vu
 
@@ -175,15 +217,15 @@ def test_eval_step_fresh_pgd_probe():
         pgd=EvalPGDConfig(n_steps=0, step_size=0.1),
         mesh=None,
     )
-    out = ascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
-    out0 = unascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out = ascended(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
+    out0 = unascended(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
 
     assert "loss/PGDReconLoss" in out
     assert jnp.isfinite(out["loss/PGDReconLoss"])
     assert float(out["loss/PGDReconLoss"]) >= float(out0["loss/PGDReconLoss"]), (
         "8 sign-ascent steps must not be less adversarial than the raw random source"
     )
-    out_same = ascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out_same = ascended(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
     assert jnp.array_equal(out["loss/PGDReconLoss"], out_same["loss/PGDReconLoss"])
 
 
@@ -209,9 +251,8 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
     n_dev = mesh.devices.size
 
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 4, 8))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
 
@@ -228,9 +269,9 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
         l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=mesh,
     )  # fmt: skip
 
-    out_single = single_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out_single = single_step(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
     out_sharded = sharded_step(
-        vu, ci_fn, tgt, token_ids, shard_batch(residual, mesh, batch_axis=0), jax.random.PRNGKey(5)
+        lm, vu, ci_fn, token_ids, shard_batch(residual, mesh, batch_axis=0), jax.random.PRNGKey(5)
     )
 
     single_kl = float(out_single["loss/PGDReconLoss"])
@@ -249,9 +290,8 @@ def test_eval_step_l0_groups_sum_member_sites():
     """torch CI_L0 `groups` parity: a group's L0 is the SUM of its fnmatch-member
     sites' L0s; an unmatched pattern refuses at build time."""
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     from param_decomp.components import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
@@ -264,7 +304,7 @@ def test_eval_step_l0_groups_sum_member_sites():
         lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
         l0_group_patterns=groups, pgd=None, mesh=None,
     )  # fmt: skip
-    out = eval_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
+    out = eval_step(lm, vu, ci_fn, token_ids, residual, jax.random.PRNGKey(5))
     layer4_sites = [s for s in lm.site_names if s.startswith("layers.4.")]
     expected_layer4 = sum(float(out[f"l0/0.0_{s}"]) for s in layer4_sites)
     expected_total = sum(float(out[f"l0/0.0_{s}"]) for s in lm.site_names)

@@ -33,7 +33,7 @@ from jaxtyping import Array, Float
 
 from param_decomp.ci_fn import CI
 from param_decomp.components import DecompVU, site_out
-from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
+from param_decomp.lm import SiteC, SiteSpec
 
 LINEAR1 = "linear1"
 LINEAR2 = "linear2"
@@ -286,23 +286,76 @@ def tms_mse(masked: Float[Array, "B n_features"], clean: Float[Array, "B n_featu
     return jnp.mean((masked - clean) ** 2)
 
 
-def tms_decomposed_model(cfg: TMSConfig, sites: tuple[SiteSpec, ...]) -> DecomposedModel:
+class TMSDecomposedModel(eqx.Module):
+    """The TMS `DecomposedModel` (the `lm.py` contract; SPEC §1), positionless
+    (`leading_axes=()`).
+
+    Carries the FROZEN `TMSTarget` weights as a field — threaded into the jitted step as a
+    pytree arg, weights traced not baked. The TRAINABLE V/U (`vu: DecompVU`) is an explicit
+    method arg, NOT a field (separate lifecycle). `sites` / `leading_axes` are static."""
+
+    target: TMSTarget
+    sites: tuple[SiteSpec, ...] = eqx.field(static=True)
+    leading_axes: tuple[str, ...] = eqx.field(static=True)
+
+    @property
+    def site_names(self) -> tuple[str, ...]:
+        return tuple(s.name for s in self.sites)
+
+    @staticmethod
+    def recon_loss_fn(
+        masked_output: Float[Array, "B n_features"], clean_output: Float[Array, "B n_features"]
+    ) -> Array:
+        return tms_mse(masked_output, clean_output)
+
+    def clean_output(self, resid: Float[Array, "B n_features"]) -> Array:
+        return clean_output(self.target, resid)
+
+    def read_activations(
+        self, resid: Float[Array, "B n_features"], wanted: tuple[str, ...]
+    ) -> dict[str, Array]:
+        inputs = site_inputs(self.target, resid)
+        return {k: inputs[k] for k in wanted}
+
+    def masked_output(
+        self,
+        vu: DecompVU,
+        resid: Float[Array, "B n_features"],
+        masks: dict[str, Array],
+        delta_masks: dict[str, Array],
+        routes: dict[str, Array] | None,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> Array:
+        return masked_output(self.target, vu, resid, masks, delta_masks, routes, live, has_delta)
+
+    def masked_site_outputs(
+        self,
+        vu: DecompVU,
+        resid: Float[Array, "B n_features"],
+        masks: dict[str, Array],
+        delta_masks: dict[str, Array],
+        routes: dict[str, Array] | None,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> dict[str, Array]:
+        return masked_site_outputs(
+            self.target, vu, resid, masks, delta_masks, routes, live, has_delta
+        )
+
+    def weight_deltas(self, vu: DecompVU) -> dict[str, Array]:
+        return weight_deltas_fp32(self.target, vu, self.sites)
+
+
+def tms_decomposed_model(
+    cfg: TMSConfig, target: TMSTarget, sites: tuple[SiteSpec, ...]
+) -> TMSDecomposedModel:
+    """Wrap a pretrained `TMSTarget` + decomposition config into the `DecomposedModel`."""
     sites = site_specs(cfg, tuple(SiteC(s.name, s.C) for s in sites))
-    return DecomposedModel(
-        sites=sites,
-        leading_axes=(),
-        clean_output=clean_output,
-        read_activations=lambda target, resid, wanted: {
-            k: site_inputs(target, resid)[k] for k in wanted
-        },
-        masked_output=masked_output,
-        masked_site_outputs=masked_site_outputs,
-        weight_deltas=lambda target, components: weight_deltas_fp32(target, components, sites),
-        recon_loss_fn=tms_mse,
-    )
+    return TMSDecomposedModel(target=target, sites=sites, leading_axes=())
 
 
-def replicate_target(target: TMSTarget, mesh: Mesh) -> TMSTarget:
+def replicate_target[T: (TMSTarget, TMSDecomposedModel)](target: T, mesh: Mesh) -> T:
     """Replicate the tiny frozen TMS weights on every device (the `replicate_frozen`
     analog; V/U / CI placement reuses the generic plan)."""
     repl = NamedSharding(mesh, P())
@@ -517,15 +570,14 @@ def single_feature_probe(n_features: int) -> Float[Array, "n_features n_features
 
 
 def single_feature_ci(
-    lm: DecomposedModel,
-    target: TMSTarget,
+    lm: TMSDecomposedModel,
     ci_fn: "CIFnCallable",
     n_features: int,
 ) -> dict[str, Array]:
     """Feed the single-feature probe and read the `lower_leaky` CI per site,
     `{site: [n_features, C]}`."""
     probe = single_feature_probe(n_features)
-    return ci_fn(lm.read_activations(target, probe, ci_fn.input_names)).lower
+    return ci_fn(lm.read_activations(probe, ci_fn.input_names)).lower
 
 
 # ----------------------------- visualizations -----------------------------

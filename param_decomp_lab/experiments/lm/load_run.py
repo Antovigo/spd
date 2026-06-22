@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
@@ -42,17 +43,16 @@ from param_decomp.config import BuiltRun
 from param_decomp.llama8b import (
     first_decomposed_layer,
     llama31_8b_config,
-    llama_decomposed_lm,
     llama_site_specs,
+    load_decomposed_lm_from_hf,
     load_prefix_from_hf,
-    load_target_from_hf,
     prefix_residual,
 )
 from param_decomp.llama8b_sharding import replicate_target
 from param_decomp.lm import DecomposedModel
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh
-from param_decomp.target_aliases import AnyFrozenTarget, AnyPrefix
+from param_decomp.target_aliases import AnyPrefix
 from param_decomp.train import COMPUTE_DT, TrainState, cast_floating
 from param_decomp_lab.experiments.lm.config import (
     LlamaSimpleMLPTargetConfig,
@@ -73,10 +73,11 @@ class HarvestForward:
 
 def build_target(
     cfg: BuiltRun, mesh: jax.sharding.Mesh
-) -> tuple[DecomposedModel, AnyFrozenTarget, AnyPrefix, Callable[[Any, Any], jax.Array], int]:
-    """`(lm, frozen target, prefix, prefix_residual_fn, vocab_size)` for the run's target
-    config. SimpleMLP reads its local pretrain cache (no network); llama8b reads the HF
-    snapshot (frozen bf16 target + fp32-compute, matching `run.py::main`).
+) -> tuple[DecomposedModel, AnyPrefix, Callable[[Any, Any], jax.Array], int]:
+    """`(lm, prefix, prefix_residual_fn, vocab_size)` for the run's target config. The `lm`
+    (an `eqx.Module`) IS the frozen target — it carries the suffix weights as fields. SimpleMLP
+    reads its local pretrain cache (no network); llama8b reads the HF snapshot (frozen bf16
+    weights + fp32-compute, matching `run.py::main`).
 
     LM-only: harvest/slow-eval over the toy (TMS/ResidMLP) targets is not wired — those
     validate via their in-loop target-CI metric in the lab provider, not this path."""
@@ -84,35 +85,33 @@ def build_target(
         case LlamaSimpleMLPTargetConfig():
             cache_dir = llama_simple_mlp.pretrain_cache_dir(cfg.target.pretrain_run_path)
             simple_cfg = llama_simple_mlp.load_model_config(cache_dir)
-            lm = llama_simple_mlp.llama_simple_mlp_decomposed_lm(
-                simple_cfg, llama_simple_mlp.site_specs(simple_cfg, cfg.target.sites)
-            )
-            first_layer = llama_simple_mlp.first_decomposed_layer(lm.site_names)
-            target = llama_simple_mlp.replicate_frozen(
-                llama_simple_mlp.load_target_from_pretrain_cache(
-                    cache_dir, simple_cfg, first_layer, jnp.bfloat16
+            sites = llama_simple_mlp.site_specs(simple_cfg, cfg.target.sites)
+            lm = llama_simple_mlp.replicate_frozen(
+                llama_simple_mlp.load_decomposed_lm_from_pretrain_cache(
+                    cache_dir, simple_cfg, sites, jnp.bfloat16
                 ),
                 mesh,
             )
+            first_layer = llama_simple_mlp.first_decomposed_layer(lm.site_names)
             prefix = llama_simple_mlp.replicate_frozen(
                 llama_simple_mlp.load_prefix_from_pretrain_cache(
                     cache_dir, simple_cfg, first_layer, jnp.bfloat16
                 ),
                 mesh,
             )
-            return lm, target, prefix, llama_simple_mlp.prefix_residual, simple_cfg.vocab_size
+            return lm, prefix, llama_simple_mlp.prefix_residual, simple_cfg.vocab_size
         case TargetConfig():
             llama_cfg = llama31_8b_config()
-            lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, cfg.target.sites))
-            first_layer = first_decomposed_layer(lm.site_names)
-            target = replicate_target(
-                load_target_from_hf(cfg.target.model_name, llama_cfg, first_layer), mesh
+            sites = llama_site_specs(llama_cfg, cfg.target.sites)
+            lm = replicate_target(
+                load_decomposed_lm_from_hf(cfg.target.model_name, llama_cfg, sites), mesh
             )
+            first_layer = first_decomposed_layer(lm.site_names)
             prefix = jax.device_put(
                 load_prefix_from_hf(cfg.target.model_name, llama_cfg, first_layer),
                 NamedSharding(mesh, P()),
             )
-            return lm, target, prefix, prefix_residual, llama_cfg.vocab_size
+            return lm, prefix, prefix_residual, llama_cfg.vocab_size
         case _:
             raise AssertionError(f"build_target is LM-only; got target {type(cfg.target).__name__}")
 
@@ -138,8 +137,9 @@ class LoadedJaxRun:
     config: BuiltRun
     vocab_size: int
     _state: TrainState
+    _prefix: AnyPrefix
     _forward: Callable[
-        [DecompVU, CIFn, Int[Array, "B T"]],
+        [DecomposedModel, AnyPrefix, DecompVU, CIFn, Int[Array, "B T"]],
         tuple[dict[str, Array], dict[str, Array], Array],
     ]
 
@@ -157,7 +157,7 @@ class LoadedJaxRun:
         ci_fn = self._state.ci_fn
         assert isinstance(ci_fn, CIFn), "harvest is the transformer-CI-fn (LM) path only"
         lower_leaky_ci, component_acts, output_probs = self._forward(
-            self._state.components, ci_fn, token_ids
+            self.lm, self._prefix, self._state.components, ci_fn, token_ids
         )
         return HarvestForward(
             lower_leaky_ci=lower_leaky_ci,
@@ -170,7 +170,7 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
     """Open the run at `run_dir`; restore checkpoint `step` (latest if None)."""
     cfg = load_run_dir_config(run_dir)
     mesh = dp_mesh()
-    lm, target, prefix, prefix_residual_fn, vocab_size = build_target(cfg, mesh)
+    lm, prefix, prefix_residual_fn, vocab_size = build_target(cfg, mesh)
 
     opt_vu, opt_ci, _ = build_optimizers(cfg.pd)
     init_key, src_key = jax.random.split(jax.random.PRNGKey(cfg.pd.seed))
@@ -191,14 +191,21 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
     site_names = lm.site_names
     u_norms = _u_norms(state.components, site_names)
 
-    @jax.jit
+    # `model` is the filter_jit ARG (frozen weights traced, not baked); `prefix` rides as a
+    # captured constant here — it is a forward-only harvest helper, not in any gradient graph,
+    # but threading it keeps it off the HLO too.
+    @eqx.filter_jit
     def forward(
-        components: DecompVU, ci_fn: CIFn, token_ids: Int[Array, "B T"]
+        model: DecomposedModel,
+        prefix_: AnyPrefix,
+        components: DecompVU,
+        ci_fn: CIFn,
+        token_ids: Int[Array, "B T"],
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
-        residual = prefix_residual_fn(prefix, token_ids)
-        clean_output = lm.clean_output(target, residual)
-        taps = lm.read_activations(target, residual, ci_fn.input_names)
-        site_inputs = lm.read_activations(target, residual, site_names)
+        residual = prefix_residual_fn(prefix_, token_ids)
+        clean_output = model.clean_output(residual)
+        taps = model.read_activations(residual, ci_fn.input_names)
+        site_inputs = model.read_activations(residual, site_names)
 
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
@@ -223,6 +230,7 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
         config=cfg,
         vocab_size=vocab_size,
         _state=state,
+        _prefix=prefix,
         _forward=forward,
     )
 

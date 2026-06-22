@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import jax
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from jax import random
@@ -96,31 +96,32 @@ class SiteReduction:
 
 
 SlowEvalStep = Callable[
-    [Any, Any, Float[Array, "*leading d"]],
+    [DecomposedModel, Any, Float[Array, "*leading d"]],
     tuple[dict[str, Array], dict[str, Array], Array, dict[str, Array], dict[str, Array]],
 ]
-"""`(ci_fn, frozen, residual) -> (density_counts, ci_sums, n_positions, flat_lower,
+"""`(model, ci_fn, residual) -> (density_counts, ci_sums, n_positions, flat_lower,
 flat_logits)` — the per-batch reduction, pre-reduced over positions. The slow plot
-metrics read only the CI arrays, so V/U (`components`) is not an input."""
+metrics read only the CI arrays, so V/U (`components`) is not an input. `model`
+(frozen-weight-bearing) is the jit ARG."""
 
 
 def make_slow_eval_step(lm: DecomposedModel, ci_alive_threshold: float) -> SlowEvalStep:
-    """Build the jit'd per-batch reduction `slow_eval_step(ci_fn, frozen, residual) ->
+    """Build the jit'd per-batch reduction `slow_eval_step(model, ci_fn, residual) ->
     ({site: density_counts}, {site: ci_sums}, n_positions, {site: flat lower},
     {site: flat logits})`. `lower`/`logits` are returned whole (the host caps the
     histogram sample); counts/sums are pre-reduced over positions."""
     site_names = lm.site_names
 
-    @jax.jit
+    @eqx.filter_jit
     def slow_eval_step(
-        ci_fn: Any, frozen: Any, residual: Float[Array, "*leading d"]
+        model: DecomposedModel, ci_fn: Any, residual: Float[Array, "*leading d"]
     ) -> tuple[dict[str, Array], dict[str, Array], Array, dict[str, Array], dict[str, Array]]:
         # CI fn stays fp32 (its master dtype): torch offline-eval keeps V/U + CI fn fp32,
         # casting only the frozen target to bf16. The slow plot metrics are a
         # fp32-CI-fn readout, so we don't take eval.py's bf16-compute path here.
         taps = {
             k: x.astype(jnp.float32)
-            for k, x in lm.read_activations(frozen, residual, ci_fn.input_names).items()
+            for k, x in model.read_activations(residual, ci_fn.input_names).items()
         }
         logits = ci_fn(taps).logits
         lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in site_names}
@@ -144,8 +145,8 @@ def make_slow_eval_step(lm: DecomposedModel, ci_alive_threshold: float) -> SlowE
 
 def accumulate_site_reductions(
     slow_eval_step: SlowEvalStep,
+    model: DecomposedModel,
     ci_fn: Any,
-    frozen: Any,
     residual_batches: list[Float[Array, "*leading d"]],
     n_batches_accum: int | None,
 ) -> dict[str, SiteReduction]:
@@ -159,7 +160,7 @@ def accumulate_site_reductions(
     logits_chunks: dict[str, list[np.ndarray]] = {}
     total_positions = 0
     for batch_idx, residual in enumerate(residual_batches):
-        d, s, n_pos, flat_lower, flat_logits = slow_eval_step(ci_fn, frozen, residual)
+        d, s, n_pos, flat_lower, flat_logits = slow_eval_step(model, ci_fn, residual)
         total_positions += int(n_pos)
         keep_sample = n_batches_accum is None or batch_idx < n_batches_accum
         for site in d:
@@ -183,12 +184,13 @@ def accumulate_site_reductions(
 
 
 PositionCIStep = Callable[
-    [Any, Any, Float[Array, "*leading d"]],
+    [DecomposedModel, Any, Float[Array, "*leading d"]],
     tuple[dict[str, Array], dict[str, Array], Array],
 ]
-"""`(ci_fn, frozen, residual) -> ({site: lower (T, C)}, {site: upper (T, C)}, n_batch)` —
+"""`(model, ci_fn, residual) -> ({site: lower (T, C)}, {site: upper (T, C)}, n_batch)` —
 the per-batch CI summed over the batch leading axis, position axis kept. Pairs with
-`accumulate_position_ci` to form a batch-mean `(T, C)` CI matrix per site."""
+`accumulate_position_ci` to form a batch-mean `(T, C)` CI matrix per site. `model`
+(frozen-weight-bearing) is the jit ARG."""
 
 
 def make_position_ci_step(lm: DecomposedModel) -> PositionCIStep:
@@ -197,13 +199,13 @@ def make_position_ci_step(lm: DecomposedModel) -> PositionCIStep:
     the residual is `(B, T, d)` and CI is `(B, T, C)`."""
     site_names = lm.site_names
 
-    @jax.jit
+    @eqx.filter_jit
     def position_ci_step(
-        ci_fn: Any, frozen: Any, residual: Float[Array, "*leading d"]
+        model: DecomposedModel, ci_fn: Any, residual: Float[Array, "*leading d"]
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
         taps = {
             k: x.astype(jnp.float32)
-            for k, x in lm.read_activations(frozen, residual, ci_fn.input_names).items()
+            for k, x in model.read_activations(residual, ci_fn.input_names).items()
         }
         logits = ci_fn(taps).logits
         lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in site_names}
@@ -228,8 +230,8 @@ class PositionCI:
 
 def accumulate_position_ci(
     position_ci_step: PositionCIStep,
+    model: DecomposedModel,
     ci_fn: Any,
-    frozen: Any,
     residual_batches: list[Float[Array, "*leading d"]],
 ) -> dict[str, PositionCI]:
     """Fold `position_ci_step` over the eval batches into a batch-mean `(T, C)` CI matrix
@@ -240,7 +242,7 @@ def accumulate_position_ci(
     upper: dict[str, np.ndarray] = {}
     total_batch = 0
     for batch_idx, residual in enumerate(residual_batches):
-        lo, hi, n_batch = position_ci_step(ci_fn, frozen, residual)
+        lo, hi, n_batch = position_ci_step(model, ci_fn, residual)
         total_batch += int(n_batch)
         for site in lo:
             lo_np, hi_np = np.asarray(lo[site]), np.asarray(hi[site])
@@ -647,9 +649,8 @@ def render_slow_eval_figures(
 
 
 def compute_hidden_acts_metrics(
-    lm: DecomposedModel,
+    model: DecomposedModel,
     state: Any,
-    frozen: Any,
     residual_batches: list[Float[Array, "*leading d"]],
     n_mask_samples: int,
     base_key: Array,
@@ -658,13 +659,13 @@ def compute_hidden_acts_metrics(
     `<ClassName>[/<site>]` log keys. `state.components`/`state.ci_fn` are the restored
     trajectory; `base_key` seeds the stochastic variant's per-batch draws."""
     ci_key, stoch_key = random.split(base_key)
-    ci_step = make_ci_hidden_acts_step(lm)
+    ci_step = make_ci_hidden_acts_step(model)
     ci_reductions = accumulate_hidden_acts(
-        ci_step, state.components, state.ci_fn, frozen, residual_batches, ci_key
+        ci_step, model, state.components, state.ci_fn, residual_batches, ci_key
     )
-    stoch_step = make_stochastic_hidden_acts_step(lm, n_mask_samples)
+    stoch_step = make_stochastic_hidden_acts_step(model, n_mask_samples)
     stoch_reductions = accumulate_hidden_acts(
-        stoch_step, state.components, state.ci_fn, frozen, residual_batches, stoch_key
+        stoch_step, model, state.components, state.ci_fn, residual_batches, stoch_key
     )
     return {
         **hidden_acts_log_entries("CIHiddenActsReconLoss", ci_reductions),

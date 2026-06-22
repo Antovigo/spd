@@ -49,11 +49,10 @@ from param_decomp.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.experiments.llama8b_real import (
-    _random_target,
+    _random_decomposed_lm,
 )
 from param_decomp.llama8b import (
     llama31_8b_config,
-    llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
@@ -154,7 +153,10 @@ def main() -> None:
     sites = llama_site_specs(cfg, mlp_family_site_cs(args.first_layer, args.last_layer, args.C))
     seq = args.seq
     gbatch = args.per_gpu_batch * ndev
-    lm = llama_decomposed_lm(cfg, sites)
+    abstract_key = jax.ShapeDtypeStruct((2,), jnp.uint32, sharding=NamedSharding(mesh, P()))
+    # `lm` is built abstractly (no allocation) — it carries its STATIC config (sites,
+    # first_layer, eps) concretely; the frozen weight leaves stay abstract for the lowering.
+    lm = eqx.filter_eval_shape(_random_decomposed_lm, cfg, sites, abstract_key)
 
     opt_vu = optax.chain(
         optax.clip_by_global_norm(0.01),
@@ -198,12 +200,8 @@ def main() -> None:
     )
     state_in = _place_state(typed, mesh)
 
-    target_shapes = (
-        jax.jit(_random_target, static_argnums=(0, 1))
-        .lower(cfg, args.first_layer, key_repl)
-        .out_info
-    )
-    target_in = _abstract_replicated(target_shapes, mesh)
+    # The model IS the frozen target; replicate its abstract weight leaves for the lowering.
+    model_in = _abstract_replicated(lm, mesh)
     resid_in = jax.ShapeDtypeStruct(
         (gbatch, seq, cfg.n_embd), jnp.bfloat16, sharding=NamedSharding(mesh, P("dp"))
     )
@@ -217,7 +215,13 @@ def main() -> None:
         remat_recon_forwards=not args.no_remat, mesh=mesh,
     )  # fmt: skip
 
-    compiled = step_fn.lower(state_in, target_in, resid_in, key_in).compile()
+    # `eqx.filter_jit.lower` treats a bare `ShapeDtypeStruct` as a STATIC leaf (its `is_array`
+    # filter excludes it), so it can't be lowered abstractly the way `jax.jit.lower` can. Wrap
+    # the (already-jitted) step in a plain `jax.jit` whose `.lower` converts the abstract avals
+    # to tracers — which the inner `filter_jit` then sees as dynamic arrays. The model's static
+    # config (`sites`/`first_layer`/`eps`) rides through unchanged on `model_in`.
+    lower_wrapper: Any = jax.jit(step_fn)
+    compiled = lower_wrapper.lower(model_in, state_in, resid_in, key_in).compile()
     if is0:
         ma = compiled.memory_analysis()
         assert ma is not None, "backend returned no memory analysis"

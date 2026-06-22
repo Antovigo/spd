@@ -42,23 +42,21 @@ from param_decomp.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.llama8b import (
-    llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import dp_mesh, shard_batch
-from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
+from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 from param_decomp.train import TrainState, make_train_step
 
 
 def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 3, random.PRNGKey(0))
     C, seq, gbatch = 8, 16, 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 6, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, random.PRNGKey(0))
     vu = init_decomp_vu(sites, random.PRNGKey(1))
     arch = ChunkwiseTransformerCIArch(
         chunks=(Chunk(input_taps=("resid.3",), output_sites=lm.site_names),),
@@ -119,7 +117,7 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
 
     out = []
     for i in range(steps):
-        state, m = step(state, tgt, resid, random.PRNGKey(100 + i))
+        state, m = step(lm, state, resid, random.PRNGKey(100 + i))
         out.append({k: float(v) for k, v in m.items()})
     return out
 

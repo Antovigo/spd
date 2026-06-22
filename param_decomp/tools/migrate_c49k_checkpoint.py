@@ -43,6 +43,7 @@ import secrets
 from pathlib import Path
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
@@ -52,7 +53,8 @@ from jax.sharding import SingleDeviceSharding
 from jaxtyping import Array
 
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, save_state
-from param_decomp.llama8b import llama31_8b_config, llama_decomposed_lm, llama_site_specs
+from param_decomp.experiments.llama8b_real import _random_decomposed_lm
+from param_decomp.llama8b import llama31_8b_config, llama_site_specs
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh
 from param_decomp.train import COMPUTE_DT, TrainState, cast_floating
@@ -177,7 +179,10 @@ def _build_reference(
     schema_raw.setdefault("runtime", {})["remat_recon_forwards"] = False
     cfg = build_from_schema(schema_raw)
     llama_cfg = llama31_8b_config()
-    lm = llama_decomposed_lm(llama_cfg, llama_site_specs(llama_cfg, cfg.target.sites))
+    sites = llama_site_specs(llama_cfg, cfg.target.sites)
+    # The migration only needs `lm`'s STATIC config (sites / leading_axes) to build the
+    # reference TrainState — the frozen weights never enter; build them abstractly (no alloc).
+    lm = eqx.filter_eval_shape(_random_decomposed_lm, llama_cfg, sites, jax.random.PRNGKey(0))
     opt_vu, opt_ci, _ = build_optimizers(cfg.pd)
     init_key, src_key = jax.random.split(jax.random.PRNGKey(cfg.pd.seed))
     build = lambda: init_train_state(

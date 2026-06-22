@@ -30,7 +30,6 @@ from param_decomp.configs import (
     UVPlotsConfig,
 )
 from param_decomp.llama8b import (
-    llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
@@ -53,7 +52,7 @@ from param_decomp.slow_eval import (
 )
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg,
-    _tiny_target,
+    _tiny_decomposed_lm,
 )
 
 
@@ -75,23 +74,22 @@ def _build_ci_fn(lm: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
 
 def _tiny_setup(threshold: float):
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     C = 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     step = make_slow_eval_step(lm, threshold)
-    return cfg, lm, tgt, ci_fn, step, C
+    return cfg, lm, ci_fn, step, C
 
 
 def test_reductions_match_hand_rolled_per_component():
-    cfg, lm, tgt, ci_fn, step, C = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, C = _tiny_setup(threshold=0.0)
     b, t = 3, 16
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
 
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], n_batches_accum=None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], n_batches_accum=None)
 
-    taps = lm.read_activations(tgt, residual, ci_fn.input_names)
+    taps = lm.read_activations(residual, ci_fn.input_names)
     logits = ci_fn(taps).logits
     lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in lm.site_names}
     for site in lm.site_names:
@@ -103,21 +101,21 @@ def test_reductions_match_hand_rolled_per_component():
 
 
 def test_density_threshold_caps_counts_at_n_positions():
-    cfg, _, tgt, ci_fn, step, _ = _tiny_setup(threshold=-1.0)  # everything "alive"
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=-1.0)  # everything "alive"
     residual = jax.random.normal(jax.random.PRNGKey(7), (2, 16, cfg.n_embd)) * 0.5
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], n_batches_accum=None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], n_batches_accum=None)
     for r in reductions.values():
         np.testing.assert_array_equal(r.density_counts, np.full_like(r.density_counts, 2 * 16))
 
 
 def test_cross_batch_sum_accumulates_linearly():
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     res_a = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd)) * 0.5
     res_b = jax.random.normal(jax.random.PRNGKey(5), (2, 16, cfg.n_embd)) * 0.5
 
-    one = accumulate_site_reductions(step, ci_fn, tgt, [res_a], None)
-    two = accumulate_site_reductions(step, ci_fn, tgt, [res_a, res_b], None)
-    other = accumulate_site_reductions(step, ci_fn, tgt, [res_b], None)
+    one = accumulate_site_reductions(step, lm, ci_fn, [res_a], None)
+    two = accumulate_site_reductions(step, lm, ci_fn, [res_a, res_b], None)
+    other = accumulate_site_reductions(step, lm, ci_fn, [res_b], None)
     for site in lm.site_names:
         assert two[site].n_positions == one[site].n_positions + other[site].n_positions
         np.testing.assert_allclose(
@@ -126,13 +124,13 @@ def test_cross_batch_sum_accumulates_linearly():
 
 
 def test_n_batches_accum_caps_histogram_sample_only():
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     batches = [
         jax.random.normal(jax.random.fold_in(jax.random.PRNGKey(9), i), (2, 16, cfg.n_embd))
         for i in range(3)
     ]
-    capped = accumulate_site_reductions(step, ci_fn, tgt, batches, n_batches_accum=1)
-    full = accumulate_site_reductions(step, ci_fn, tgt, batches, n_batches_accum=None)
+    capped = accumulate_site_reductions(step, lm, ci_fn, batches, n_batches_accum=1)
+    full = accumulate_site_reductions(step, lm, ci_fn, batches, n_batches_accum=None)
     for site in lm.site_names:
         # the cap only limits the histogram raw-value sample; counts/sums span all batches
         assert capped[site].n_positions == full[site].n_positions == 3 * 2 * 16
@@ -141,9 +139,9 @@ def test_n_batches_accum_caps_histogram_sample_only():
 
 
 def test_pre_sigmoid_differs_from_lower():
-    cfg, _, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd))
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
     for r in reductions.values():
         # lower is clamped to [0, 1]; logits are unbounded — they cannot be identical
         assert r.lower_sample.min() >= 0.0 and r.lower_sample.max() <= 1.0
@@ -151,9 +149,9 @@ def test_pre_sigmoid_differs_from_lower():
 
 
 def test_render_emits_torch_keyed_pngs():
-    cfg, _, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd))
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
     figures = render_slow_eval_figures(reductions)
     assert set(figures) == {
         "figures/causal_importance_values",
@@ -167,9 +165,9 @@ def test_render_emits_torch_keyed_pngs():
 
 
 def test_finite_reductions():
-    cfg, _, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd))
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
     for r in reductions.values():
         assert np.all(np.isfinite(r.density_counts))
         assert np.all(np.isfinite(r.ci_sums))
@@ -258,12 +256,11 @@ def test_resolve_permutation_metrics_empty_when_unconfigured():
 
 def _tiny_position_ci():
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
-    position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
+    position_ci = accumulate_position_ci(make_position_ci_step(lm), lm, ci_fn, [residual])
     return lm, position_ci
 
 
@@ -356,9 +353,9 @@ class _FakeWandb(types.ModuleType):
 
 
 def test_renderer_logs_figures_on_live_step_axis(monkeypatch: pytest.MonkeyPatch):
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd))
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
 
     fake = _FakeWandb()
     monkeypatch.setitem(sys.modules, "wandb", fake)
@@ -388,10 +385,10 @@ def test_in_loop_renderer_includes_permutation_heatmaps_and_uv_when_gathered(
     when the config names UVPlots and the gathered V/U is passed, the UVPlots figure too
     (SPEC S28 amended: in-loop UVPlots is a naive gather, small-scale-only). IdentityCIError
     is computed synchronously on the collective path, not on the background thread."""
-    cfg, lm, tgt, ci_fn, step, C = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, C = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
-    position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
+    position_ci = accumulate_position_ci(make_position_ci_step(lm), lm, ci_fn, [residual])
 
     metrics = [
         PermutedCIPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"]),
@@ -433,10 +430,10 @@ def test_in_loop_renderer_skips_uv_when_components_not_gathered(
 ):
     """When the config does NOT name UVPlots, the trainer gathers no V/U (`components=None`)
     and the UVPlots figure is skipped, while the CI heatmaps still render."""
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
-    position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
+    position_ci = accumulate_position_ci(make_position_ci_step(lm), lm, ci_fn, [residual])
 
     spec = resolve_permutation_metrics(
         lm.site_names,
@@ -458,9 +455,9 @@ def test_in_loop_renderer_skips_uv_when_components_not_gathered(
 
 
 def test_renderer_noop_off_main_rank(monkeypatch: pytest.MonkeyPatch):
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd))
-    reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
 
     fake = _FakeWandb()
     monkeypatch.setitem(sys.modules, "wandb", fake)
@@ -479,7 +476,7 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
     the live `_step` axis, and the main loop never blocks waiting on a render."""
     import time
 
-    cfg, lm, tgt, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    cfg, lm, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd))
 
     fake = _FakeWandb()
@@ -493,7 +490,7 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
     for now_step in range(every, 10 * every + 1, every):  # 1000, 2000, ..., 10000
         if slow_eval_due(now_step, every, slow_every, slow_on_first_step=True):
             # the COLLECTIVE part (runs on every rank in the real loop)
-            reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], None)
+            reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
             renderer.submit(reductions, spec, position_ci=None, components=None, now_step=now_step)
     main_loop_s = time.time() - t0
     renderer.join()  # flush

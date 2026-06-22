@@ -25,9 +25,9 @@ CONFIGS = Path(__file__).parent.parent / "configs"
 def test_init_from_parent_loads_components_resets_schedule(tmp_path: Path):
     # A parent run: train a couple of steps so its V/U + ci_fn + sources + step are
     # non-trivial, then checkpoint.
-    tgt, parent_state, step, resid = _build(seed=1)
+    lm, parent_state, step, resid = _build(seed=1)
     for i in range(2):
-        parent_state, _ = step(parent_state, tgt, resid, jax.random.PRNGKey(i))
+        parent_state, _ = step(lm, parent_state, resid, jax.random.PRNGKey(i))
     assert int(parent_state.step) == 2
 
     parent_ckpt_dir = tmp_path / "parent" / "ckpts"

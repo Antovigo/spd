@@ -119,14 +119,17 @@ def make_train_step(
     remat_recon_forwards: bool,
     mesh: Mesh | None,
 ):
-    """Build the jit'd `step(state, frozen, residual, key) -> (state, metrics)`.
+    """Build the `eqx.filter_jit`'d `step(model, state, residual, key) -> (state, metrics)`.
 
-    `loss_spec` (from `build_recon_terms`) carries the SHARED torch loss configs
-    mapped onto recon terms; the supported subset is asserted there. `mesh` (when
-    given) pins every batch-leading activation to `P('dp', ...)` so the masked
-    re-forwards stay on per-device sub-batches (activation memory 1/n_dev)."""
+    `model` is the jit ARG (frozen 8B weights traced as array leaves, never baked); the
+    factory closes over only static config (`site_names`, `recon_loss_fn`, term wiring) read
+    off `lm` here. `loss_spec` (from `build_recon_terms`) carries the SHARED torch loss
+    configs mapped onto recon terms; the supported subset is asserted there. `mesh` (when
+    given) pins every batch-leading activation to `P('dp', ...)` so the masked re-forwards
+    stay on per-device sub-batches (activation memory 1/n_dev)."""
     site_names = lm.site_names
-    recon_loss_fn = lm.recon_loss_fn
+    sites = lm.sites
+    recon_loss_fn = lm.recon_loss_fn  # static method: pure, holds no arrays — safe to close
     recon_terms = loss_spec.recon_terms
     imp_min = loss_spec.imp_min
     faith_coeff = loss_spec.faith_coeff
@@ -163,7 +166,7 @@ def make_train_step(
 
     @jaxtyped(typechecker=beartype)
     def masked_forward(
-        frozen: Any,
+        model: DecomposedModel,
         components_bf16: Any,
         residual: Float[Array, "*leading d"],
         masks: dict[str, Float[Array, "*leading _"]],
@@ -173,8 +176,8 @@ def make_train_step(
         has_delta: bool,
     ) -> Any:
         return batch_sharded(
-            lm.masked_output(
-                frozen, components_bf16, residual, masks, delta_masks, routes, live_sites, has_delta
+            model.masked_output(
+                components_bf16, residual, masks, delta_masks, routes, live_sites, has_delta
             )
         )
 
@@ -222,7 +225,7 @@ def make_train_step(
         entry: ReconForward,
         sources: dict[str, Array],
         routes_per_draw: tuple[Routes, ...],
-        frozen: Any,
+        model: DecomposedModel,
         components_bf16: Any,
         ci_lower: dict[str, Array],
         residual: Array,
@@ -235,7 +238,7 @@ def make_train_step(
         total = jnp.zeros((), jnp.float32)
         for routes in routes_per_draw:
             masked = forward_fn(
-                frozen,
+                model,
                 components_bf16,
                 residual,
                 masks,
@@ -247,18 +250,21 @@ def make_train_step(
             total = total + recon_loss_fn(masked, clean_output)
         return total / len(routes_per_draw)
 
-    @jax.jit
+    @eqx.filter_jit
     @jaxtyped(typechecker=beartype)
     def step(
-        state: TrainState, frozen: Any, residual: Float[Array, "*leading d"], key: PRNGKeyArray
+        model: DecomposedModel,
+        state: TrainState,
+        residual: Float[Array, "*leading d"],
+        key: PRNGKeyArray,
     ) -> tuple[TrainState, dict[str, Array]]:
         step_f32 = state.step.astype(jnp.float32)
         pnorm = annealed_pnorm(step_f32, total_steps, imp_min)
         leading = residual.shape[:-1]
 
         residual = batch_sharded(residual)
-        clean_output = jax.lax.stop_gradient(batch_sharded(lm.clean_output(frozen, residual)))
-        taps = lm.read_activations(frozen, residual, state.ci_fn.input_names)
+        clean_output = jax.lax.stop_gradient(batch_sharded(model.clean_output(residual)))
+        taps = model.read_activations(residual, state.ci_fn.input_names)
 
         # ── adversary ascents: params + CI detached (SPEC §4.5) ──
         components_detached = jax.lax.stop_gradient(cast_floating(state.components, COMPUTE_DT))
@@ -292,7 +298,7 @@ def make_train_step(
             def warmup_loss(sources: dict[str, Array]) -> Array:
                 masks, delta_masks = source_masks(ci_lower_detached, sources, site_names)
                 masked = masked_forward(
-                    frozen,
+                    model,
                     components_detached,
                     residual,
                     masks,
@@ -346,7 +352,7 @@ def make_train_step(
                 routing_key, init_key = random.split(random.fold_in(term_key, entry_idx))
                 routes_per_draw = entry.sample_routing(routing_key, leading)
                 fixed_routes[(term_idx, entry_idx)] = routes_per_draw
-                live_specs = tuple(s for s in lm.sites if s.name in entry.live_sites)
+                live_specs = tuple(s for s in sites if s.name in entry.live_sites)
                 init = init_fresh_pgd_sources(
                     live_specs, fresh_cfg.init, fresh_cfg.scope, leading, init_key
                 )
@@ -360,7 +366,7 @@ def make_train_step(
                         entry,
                         sources,
                         routes,
-                        frozen,
+                        model,
                         components_detached,
                         ci_lower_detached,
                         residual,
@@ -398,7 +404,7 @@ def make_train_step(
             components_bf16 = cast_floating(components, COMPUTE_DT)
             ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
             ci = batch_sharded_ci(ci_fn_bf16(taps))
-            faith_loss = faithfulness_loss(lm.weight_deltas(frozen, components))
+            faith_loss = faithfulness_loss(model.weight_deltas(components))
             imp_lp, imp_entropy = importance_minimality_terms(ci.upper, pnorm, imp_min.eps)
             imp_loss = imp_lp + imp_min.beta * imp_entropy
 
@@ -436,7 +442,7 @@ def make_train_step(
                                     ci.lower, persistent_sources[state_key], entry.live_sites
                                 )
                         masked = checkpointed_masked_forward(
-                            frozen,
+                            model,
                             components_bf16,
                             residual,
                             masks,
@@ -535,14 +541,17 @@ def make_train_step(
 
 
 def make_faith_warmup_step(
-    lm: DecomposedModel, opt: optax.GradientTransformation
-) -> Callable[[Any, optax.OptState, Any], tuple[Any, optax.OptState, Array]]:
-    @jax.jit
+    opt: optax.GradientTransformation,
+) -> Callable[[DecomposedModel, Any, optax.OptState], tuple[Any, optax.OptState, Array]]:
+    """`model` is the jit ARG (frozen weights traced, not baked) — `weight_deltas` reads its
+    per-site W slices, so closing over the model would bake them into the HLO."""
+
+    @eqx.filter_jit
     def warmup_step(
-        components: Any, opt_state: optax.OptState, frozen: Any
+        model: DecomposedModel, components: Any, opt_state: optax.OptState
     ) -> tuple[Any, optax.OptState, Array]:
         def loss_fn(components_: Any) -> Array:
-            return faithfulness_loss(lm.weight_deltas(frozen, components_))
+            return faithfulness_loss(model.weight_deltas(components_))
 
         loss, grad = eqx.filter_value_and_grad(loss_fn)(components)
         updates, opt_state = opt.update(grad, opt_state, eqx.filter(components, eqx.is_array))

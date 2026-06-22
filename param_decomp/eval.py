@@ -46,6 +46,7 @@ the parity argument above is what keeps it correct if `n_steps` is raised.
 from fnmatch import fnmatch
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -79,9 +80,10 @@ def make_eval_step(
     pgd: EvalPGDConfig | None,
     mesh: Mesh | None,
 ):
-    """Build the jit'd `eval_step(components, ci_fn, frozen, token_ids, residual, key)
-    -> {metric_key: scalar}` with torch-parity keys (un-prefixed: the caller adds
-    `eval/`).
+    """Build the `eqx.filter_jit`'d `eval_step(model, components, ci_fn, token_ids,
+    residual, key) -> {metric_key: scalar}` with torch-parity keys (un-prefixed: the caller
+    adds `eval/`). `model` (the frozen-weight-bearing `DecomposedModel`) is the jit ARG —
+    its array leaves traced, never baked.
 
     `pgd` (an `EvalPGDConfig`) enables the fresh sign-PGD recon probe (torch
     `PGDReconLoss` with `init: random, mask_scope: c`): per site one
@@ -112,27 +114,27 @@ def make_eval_step(
         return batch_shard_leading(x, mesh)
 
     def masked_forward(
-        frozen: Any, components_bf16: Any, residual: Array, masks: dict[str, Array],
+        model: DecomposedModel, components_bf16: Any, residual: Array, masks: dict[str, Array],
         delta_masks: dict[str, Array],
     ) -> Array:  # fmt: skip
         return batch_sharded(
-            lm.masked_output(
-                frozen, components_bf16, residual, masks, delta_masks, None, site_names, True
+            model.masked_output(
+                components_bf16, residual, masks, delta_masks, None, site_names, True
             )
         )
 
-    @jax.jit
+    @eqx.filter_jit
     def eval_step(
+        model: DecomposedModel,
         components: Any,
         ci_fn: Any,
-        frozen: Any,
         token_ids: Int[Array, "B T"],
         residual: Float[Array, "*leading d"],
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         residual = batch_sharded(residual)
-        clean_output = batch_sharded(lm.clean_output(frozen, residual))
-        taps = lm.read_activations(frozen, residual, ci_fn.input_names)
+        clean_output = batch_sharded(model.clean_output(residual))
+        taps = model.read_activations(residual, ci_fn.input_names)
 
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
@@ -182,7 +184,7 @@ def make_eval_step(
         kl: dict[str, Array] = {}
         ce: dict[str, Array] = {}
         for variant, (masks, delta_masks) in variant_masks.items():
-            variant_logits = masked_forward(frozen, components_bf16, residual, masks, delta_masks)
+            variant_logits = masked_forward(model, components_bf16, residual, masks, delta_masks)
             kl[variant] = kl_per_position(variant_logits, clean_output)
             ce[variant] = next_token_cross_entropy(variant_logits, token_ids)
         target_ce = next_token_cross_entropy(clean_output, token_ids)
@@ -221,7 +223,7 @@ def make_eval_step(
                     ci_site = ci_lower[site]
                     masks[site] = ci_site + (1.0 - ci_site) * source[..., :-1]
                     delta_masks[site] = source[..., -1]
-                masked = masked_forward(frozen, components_bf16, residual, masks, delta_masks)
+                masked = masked_forward(model, components_bf16, residual, masks, delta_masks)
                 return kl_per_position(masked, clean_output)
 
             def ascend(

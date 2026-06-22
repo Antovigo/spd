@@ -7,6 +7,7 @@ host-side token-weighted accumulation (combined = Σ sum_kl / Σ n_distributions
 
 from typing import Any
 
+import equinox as eqx
 import jax
 import numpy as np
 import pytest
@@ -26,30 +27,26 @@ from param_decomp.ci_fn import (
 )
 from param_decomp.components import init_decomp_vu
 from param_decomp.llama8b import (
-    llama_decomposed_lm,
     llama_site_specs,
 )
 from param_decomp.llama_simple_mlp import (
     canonical_site_cs as simple_canonical,
 )
 from param_decomp.llama_simple_mlp import (
-    llama_simple_mlp_decomposed_lm,
-)
-from param_decomp.llama_simple_mlp import (
     site_specs as simple_site_specs,
 )
-from param_decomp.lm import DecomposedModel, SiteC
+from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg as _llama_cfg,
 )
 from param_decomp.tests.test_llama8b import (
-    _tiny_target as _llama_target,
+    _tiny_decomposed_lm as _llama_decomposed_lm,
 )
 from param_decomp.tests.test_llama_simple_mlp import (
     _tiny_cfg as _simple_cfg,
 )
 from param_decomp.tests.test_llama_simple_mlp import (
-    _tiny_target_and_prefix as _simple_target_and_prefix,
+    _tiny_decomposed_model as _simple_decomposed_model,
 )
 
 
@@ -71,8 +68,9 @@ def _build_ci_fn(lm: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
 
 def test_attn_pattern_for_shape_and_causal_softmax_llama():
     cfg = _llama_cfg()
-    target = _llama_target(cfg, 0, jax.random.PRNGKey(0))
-    pattern_fn = attn_pattern_for(target)
+    sites = llama_site_specs(cfg, (SiteC("layers.0.self_attn.q_proj", 4),))
+    lm = _llama_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    pattern_fn = attn_pattern_for(lm)
     b, t = 2, 9
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
     q = jax.random.normal(jax.random.PRNGKey(1), (b, t, qd))
@@ -88,8 +86,9 @@ def test_attn_pattern_for_shape_and_causal_softmax_llama():
 
 def test_attn_pattern_for_shape_and_causal_softmax_simple_mlp():
     cfg = _simple_cfg()
-    target, _ = _simple_target_and_prefix(cfg, 0, jax.random.PRNGKey(0))
-    pattern_fn = attn_pattern_for(target)
+    sites = simple_site_specs(cfg, (SiteC("h.0.attn.q_proj", 4),))
+    lm = _simple_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
+    pattern_fn = attn_pattern_for(lm)
     b, t = 2, 7
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
     q = jax.random.normal(jax.random.PRNGKey(1), (b, t, qd))
@@ -109,7 +108,6 @@ def test_attn_pattern_for_refuses_non_attention_target():
 
 def _llama_attn_setup():
     cfg = _llama_cfg()
-    target = _llama_target(cfg, 4, jax.random.PRNGKey(0))
     site_cs = (
         SiteC("layers.4.self_attn.q_proj", 6),
         SiteC("layers.4.self_attn.k_proj", 6),
@@ -119,20 +117,20 @@ def _llama_attn_setup():
     from param_decomp.llama8b import canonical_site_cs
 
     sites = llama_site_specs(cfg, canonical_site_cs(site_cs))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _llama_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     components = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
-    return cfg, lm, target, components, ci_fn
+    return cfg, lm, components, ci_fn
 
 
 def test_ci_step_clean_equals_masked_when_ci_all_one_gives_finite_kl():
-    cfg, lm, target, components, ci_fn = _llama_attn_setup()
-    pattern_fn = attn_pattern_for(target)
+    cfg, lm, components, ci_fn = _llama_attn_setup()
+    pattern_fn = attn_pattern_for(lm)
     step = make_ci_attn_patterns_step(lm, pattern_fn)
     b, t = 2, 12
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
 
-    sum_kl, n_dist = step(components, ci_fn, target, residual, jax.random.PRNGKey(0))
+    sum_kl, n_dist = step(lm, components, ci_fn, residual, jax.random.PRNGKey(0))
 
     q_sites = [s for s in lm.site_names if s.endswith("q_proj")]
     assert set(sum_kl) == set(q_sites) == set(n_dist)
@@ -143,18 +141,16 @@ def test_ci_step_clean_equals_masked_when_ci_all_one_gives_finite_kl():
 
 
 def test_accumulate_is_token_weighted_and_combines():
-    cfg, lm, target, components, ci_fn = _llama_attn_setup()
-    pattern_fn = attn_pattern_for(target)
+    cfg, lm, components, ci_fn = _llama_attn_setup()
+    pattern_fn = attn_pattern_for(lm)
     step = make_ci_attn_patterns_step(lm, pattern_fn)
     res_a = jax.random.normal(jax.random.PRNGKey(4), (2, 10, cfg.n_embd)) * 0.5
     res_b = jax.random.normal(jax.random.PRNGKey(5), (2, 10, cfg.n_embd)) * 0.5
 
-    one = accumulate_attn_patterns(step, components, ci_fn, target, [res_a], jax.random.PRNGKey(0))
-    other = accumulate_attn_patterns(
-        step, components, ci_fn, target, [res_b], jax.random.PRNGKey(0)
-    )
+    one = accumulate_attn_patterns(step, lm, components, ci_fn, [res_a], jax.random.PRNGKey(0))
+    other = accumulate_attn_patterns(step, lm, components, ci_fn, [res_b], jax.random.PRNGKey(0))
     two = accumulate_attn_patterns(
-        step, components, ci_fn, target, [res_a, res_b], jax.random.PRNGKey(0)
+        step, lm, components, ci_fn, [res_a, res_b], jax.random.PRNGKey(0)
     )
     for site in one:
         assert two[site].n_distributions == one[site].n_distributions + other[site].n_distributions
@@ -176,14 +172,14 @@ def test_accumulate_is_token_weighted_and_combines():
 
 
 def test_stochastic_step_runs_and_scales_n_by_draws():
-    cfg, lm, target, components, ci_fn = _llama_attn_setup()
-    pattern_fn = attn_pattern_for(target)
+    cfg, lm, components, ci_fn = _llama_attn_setup()
+    pattern_fn = attn_pattern_for(lm)
     n_draws = 3
     step = make_stochastic_attn_patterns_step(lm, pattern_fn, n_draws)
     b, t = 2, 8
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
 
-    sum_kl, n_dist = step(components, ci_fn, target, residual, jax.random.PRNGKey(0))
+    sum_kl, n_dist = step(lm, components, ci_fn, residual, jax.random.PRNGKey(0))
     for q in (s for s in lm.site_names if s.endswith("q_proj")):
         assert int(n_dist[q]) == b * cfg.n_head * t * n_draws
         assert np.isfinite(float(sum_kl[q])) and float(sum_kl[q]) >= 0.0
@@ -191,39 +187,82 @@ def test_stochastic_step_runs_and_scales_n_by_draws():
 
 def test_simple_mlp_step_runs_end_to_end():
     cfg = _simple_cfg()
-    target, _ = _simple_target_and_prefix(cfg, 0, jax.random.PRNGKey(0))
     site_cs = simple_canonical((SiteC("h.0.attn.q_proj", 6), SiteC("h.0.attn.k_proj", 6)))
     sites = simple_site_specs(cfg, site_cs)
-    lm = llama_simple_mlp_decomposed_lm(cfg, sites)
+    lm = _simple_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     components = init_decomp_vu(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
-    step = make_ci_attn_patterns_step(lm, attn_pattern_for(target))
+    step = make_ci_attn_patterns_step(lm, attn_pattern_for(lm))
     b, t = 2, 10
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
 
-    sum_kl, n_dist = step(components, ci_fn, target, residual, jax.random.PRNGKey(0))
+    sum_kl, n_dist = step(lm, components, ci_fn, residual, jax.random.PRNGKey(0))
     assert set(sum_kl) == {"h.0.attn.q_proj"}
     assert int(n_dist["h.0.attn.q_proj"]) == b * cfg.n_head * t
     assert np.isfinite(float(sum_kl["h.0.attn.q_proj"]))
+
+
+class _PositionlessStub(eqx.Module):
+    """A `leading_axes=()` model whose methods are never called — only exercises the
+    LM-only `leading_axes` guards (which fire at step construction)."""
+
+    sites: tuple[SiteSpec, ...] = eqx.field(static=True)
+    leading_axes: tuple[str, ...] = eqx.field(static=True)
+
+    @property
+    def site_names(self) -> tuple[str, ...]:
+        return tuple(s.name for s in self.sites)
+
+    def recon_loss_fn(self, masked_output: Any, clean_output: Any) -> jax.Array:
+        del masked_output, clean_output
+        raise AssertionError("positionless stub fn must not be called")
+
+    def clean_output(self, resid: Any) -> Any:
+        del resid
+        raise AssertionError("positionless stub fn must not be called")
+
+    def read_activations(self, resid: Any, wanted: tuple[str, ...]) -> dict[str, jax.Array]:
+        del resid, wanted
+        raise AssertionError("positionless stub fn must not be called")
+
+    def masked_output(
+        self,
+        vu: Any,
+        resid: Any,
+        masks: Any,
+        delta_masks: Any,
+        routes: Any,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> Any:
+        del vu, resid, masks, delta_masks, routes, live, has_delta
+        raise AssertionError("positionless stub fn must not be called")
+
+    def masked_site_outputs(
+        self,
+        vu: Any,
+        resid: Any,
+        masks: Any,
+        delta_masks: Any,
+        routes: Any,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> dict[str, jax.Array]:
+        del vu, resid, masks, delta_masks, routes, live, has_delta
+        raise AssertionError("positionless stub fn must not be called")
+
+    def weight_deltas(self, vu: Any) -> dict[str, jax.Array]:
+        del vu
+        raise AssertionError("positionless stub fn must not be called")
 
 
 def test_attn_patterns_steps_reject_positionless_target():
     """Attention patterns are causal maps over a sequence axis; both step constructors
     must fail loud against a positionless (`leading_axes=()`) target. The leading-axes
     guard fires before site/pattern inspection, so a dummy pattern fn is fine."""
-    from param_decomp.lm import DecomposedModel, SiteSpec
-
-    def _unused(*_args: object) -> Any:
-        raise AssertionError("positionless stub fn must not be called")
-
-    lm = DecomposedModel(
+    lm = _PositionlessStub(
         sites=(SiteSpec("linear1", 5, 2, 8), SiteSpec("linear2", 2, 5, 6)),
         leading_axes=(),
-        clean_output=_unused,
-        read_activations=_unused,
-        masked_output=_unused,
-        masked_site_outputs=_unused,
-        weight_deltas=_unused,
     )
     assert lm.leading_axes == ()
     dummy_pattern_fn = lambda q, k: q  # noqa: E731 — never reached; assert fires first

@@ -30,13 +30,12 @@ from jax import random
 from param_decomp.adversary import init_fresh_pgd_sources, source_masks
 from param_decomp.components import init_decomp_vu
 from param_decomp.llama8b import (
-    llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
 from param_decomp.losses import kl_per_position
 from param_decomp.sharding import dp_mesh, shard_batch
-from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
+from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 
 
 def _ascend_cscope_source(
@@ -51,10 +50,9 @@ def _ascend_cscope_source(
     source grad is born from a cross-shard reduction."""
     cfg = _tiny_cfg()
     first_layer = 3
-    frozen = _tiny_target(cfg, first_layer, random.PRNGKey(0))
     C, seq, gbatch = 8, 16, 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(first_layer, first_layer + 2, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, random.PRNGKey(0))
     components = jax.tree.map(
         lambda x: jax.lax.stop_gradient(x), init_decomp_vu(sites, random.PRNGKey(1))
     )
@@ -64,7 +62,7 @@ def _ascend_cscope_source(
     if mesh is not None:
         residual = shard_batch(residual, mesh, batch_axis=0)
 
-    clean_output = jax.lax.stop_gradient(lm.clean_output(frozen, residual))
+    clean_output = jax.lax.stop_gradient(lm.clean_output(residual))
     # ci_lower = 0 so the mask is just the c-scope source — the cleanest probe of the
     # sign-ascent. Shapes match the masked forward's per-site (B, T, C) expectation.
     ci_lower = {s.name: jnp.zeros((gbatch, seq, s.C), jnp.float32) for s in sites}
@@ -74,7 +72,7 @@ def _ascend_cscope_source(
     def ascent_loss(sources: dict[str, jax.Array]) -> jax.Array:
         masks, delta_masks = source_masks(ci_lower, sources, lm.site_names)
         masked = lm.masked_output(
-            frozen, components, residual, masks, delta_masks, None, lm.site_names, True
+            components, residual, masks, delta_masks, None, lm.site_names, True
         )
         return kl_per_position(masked, clean_output)
 

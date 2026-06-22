@@ -41,13 +41,12 @@ from param_decomp.adversary import init_persistent_sources, source_masks
 from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch, build_ci_fn
 from param_decomp.components import init_decomp_vu
 from param_decomp.llama8b import (
-    llama_decomposed_lm,
     llama_site_specs,
     mlp_family_site_cs,
 )
 from param_decomp.losses import kl_per_position
 from param_decomp.sharding import dp_mesh, shard_batch
-from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
+from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_decomposed_lm
 from param_decomp.train import COMPUTE_DT, cast_floating
 
 
@@ -56,10 +55,9 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
     sources, with components/CI frozen (SPEC §4.5) — the leaf whose cross-device
     reduction we are pinning. Returns one fp32 grad array per site."""
     cfg = _tiny_cfg()
-    tgt = _tiny_target(cfg, 3, random.PRNGKey(0))
     C, seq, gbatch = 8, 16, 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 6, C))
-    lm = llama_decomposed_lm(cfg, sites)
+    lm = _tiny_decomposed_lm(cfg, sites, random.PRNGKey(0))
     vu = init_decomp_vu(sites, random.PRNGKey(1))
     first_block = min(int(name.split(".")[1]) for name in lm.site_names)
     ci_arch = ChunkwiseTransformerCIArch(
@@ -85,14 +83,14 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
 
     components_bf16 = cast_floating(vu, COMPUTE_DT)
     ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-    taps = lm.read_activations(tgt, resid, ci_fn.input_names)
+    taps = lm.read_activations(resid, ci_fn.input_names)
     ci_lower = ci_fn_bf16(taps).lower
-    clean_output = jax.lax.stop_gradient(lm.clean_output(tgt, resid))
+    clean_output = jax.lax.stop_gradient(lm.clean_output(resid))
 
     def source_loss(sources: dict[str, jax.Array]) -> jax.Array:
         masks, delta_masks = source_masks(ci_lower, sources, lm.site_names)
         masked = lm.masked_output(
-            tgt, components_bf16, resid, masks, delta_masks, None, lm.site_names, True
+            components_bf16, resid, masks, delta_masks, None, lm.site_names, True
         )
         return kl_per_position(masked, clean_output)
 

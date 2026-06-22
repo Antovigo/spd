@@ -29,12 +29,12 @@ from param_decomp_lab.experiments.tms.model import (
 def _toy_setup():
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
-    lm = tms_decomposed_model(cfg, sites)
+    target = init_tms_target(cfg, jax.random.PRNGKey(3))
+    lm = tms_decomposed_model(cfg, target, sites)
     ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    frozen = init_tms_target(cfg, jax.random.PRNGKey(3))
     probe = single_feature_probe(cfg.n_features)
-    probe_upper = ci_fn(lm.read_activations(frozen, probe, ci_fn.input_names)).upper
+    probe_upper = ci_fn(lm.read_activations(probe, ci_fn.input_names)).upper
     return lm, vu, probe_upper
 
 

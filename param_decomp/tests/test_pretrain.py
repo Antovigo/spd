@@ -92,7 +92,7 @@ def test_cache_round_trip_matches_decomposition_loader():
         target = lsm.load_target_from_pretrain_cache(cache, loaded_cfg, 0, jnp.float32)
         prefix = lsm.load_prefix_from_pretrain_cache(cache, loaded_cfg, 0, jnp.float32)
         idx = jnp.arange(2 * 16, dtype=jnp.int32).reshape(2, 16) % mc.vocab_size
-        loaded_logits = lsm.clean_suffix_logits(target, lsm.prefix_residual(prefix, idx))
+        loaded_logits = target.clean_output(lsm.prefix_residual(prefix, idx))
         assert jnp.allclose(loaded_logits, model(idx), atol=1e-4)
 
 

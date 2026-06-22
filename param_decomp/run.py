@@ -1,7 +1,7 @@
 """The generic VPD decomposition-training ENGINE — the one train loop every target
 (LM, TMS, ResidMLP, …) runs through.
 
-`run_decomposition_training(pd, cadence, run, raw_cfg, lm, frozen, ci_fn, data,
+`run_decomposition_training(pd, cadence, run, raw_cfg, lm, ci_fn, data,
 remat_recon_forwards, sample_batch, eval_fn, eval_every, perf_tokens_per_step, mesh)` owns
 the generic machinery: init / restore / fine-tune init / faith warmup
 (`_init_or_restore_state`), the recon-grid step factory, orbax checkpointing, schedules,
@@ -305,7 +305,6 @@ def _init_or_restore_state(
     data: DataConfig | None,
     run: RunInstance,
     lm: DecomposedModel,
-    frozen: Any,
     opt_vu: optax.GradientTransformation,
     opt_ci: optax.GradientTransformation,
     init_key: PRNGKeyArray,
@@ -352,13 +351,13 @@ def _init_or_restore_state(
         faith_warmup_opt_state = faith_warmup_optimizer.init(
             eqx.filter(state.components, eqx.is_array)
         )
-        faith_warmup_step = make_faith_warmup_step(lm, faith_warmup_optimizer)
+        faith_warmup_step = make_faith_warmup_step(faith_warmup_optimizer)
         warmed_components = state.components
         t0 = time.time()
         faith_warmup_loss = None
         for _ in range(pd.faithfulness_warmup_steps):
             warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
-                warmed_components, faith_warmup_opt_state, frozen
+                lm, warmed_components, faith_warmup_opt_state
             )
             if _sigterm_received:
                 # No valid checkpoint exists yet (the step-0 save happens only after warmup
@@ -390,7 +389,6 @@ def run_decomposition_training(
     run: RunInstance,
     raw_cfg: dict[str, object],
     lm: DecomposedModel,
-    frozen: Any,
     ci_fn: CIFnArch,
     data: DataConfig | None,
     remat_recon_forwards: bool,
@@ -406,8 +404,10 @@ def run_decomposition_training(
     Reads the pydantic algorithm config DIRECTLY: `pd` (seed / steps / optimizers / loss
     metrics / faith warmup), `cadence` (log / save / checkpoint-retention
     rhythm), `run` (the run identity + wandb lineage). The lab-built objects ride alongside:
-    the decomposed `lm` + `frozen` target, the CI-fn arch `ci_fn`, the data source `data`
-    (None for a toy), and the `remat_recon_forwards` compute knob.
+    the decomposed model `lm` (an `eqx.Module` carrying the frozen target weights as
+    fields — threaded into the jitted step as a pytree arg, never closed over), the CI-fn
+    arch `ci_fn`, the data source `data` (None for a toy), and the `remat_recon_forwards`
+    compute knob.
 
     The target supplies only its three injectable seams:
 
@@ -440,7 +440,7 @@ def run_decomposition_training(
         run.run_dir / "ckpts", cadence.keep_last_n_checkpoints
     )
     init = _init_or_restore_state(
-        pd, ci_fn, data, run, lm, frozen, opt_vu, opt_ci, init_key, src_key, mesh,
+        pd, ci_fn, data, run, lm, opt_vu, opt_ci, init_key, src_key, mesh,
         checkpoint_manager, is_main,
     )  # fmt: skip
     if init is None:
@@ -479,7 +479,7 @@ def run_decomposition_training(
 
     for step in range(start_step, pd.steps):
         residual = sample_batch(step)
-        state, metrics = step_fn(state, frozen, residual, random.fold_in(run_key, step))
+        state, metrics = step_fn(lm, state, residual, random.fold_in(run_key, step))
 
         now_step = step + 1
         dense = cadence.dense_log_phase

@@ -21,7 +21,6 @@ import pytest
 from jaxtyping import Array
 
 from param_decomp.llama_simple_mlp import (
-    clean_suffix_logits,
     config_from_model_config_dict,
     load_model_config,
     load_target_from_pretrain_cache,
@@ -50,7 +49,7 @@ def test_tiny_random_model_matches_torch_logits():
     prefix = prefix_from_weights(get, cfg, first_layer=0)
     idx = jnp.asarray(fixture["idx"])
 
-    logits = clean_suffix_logits(target, prefix_residual(prefix, idx))
+    logits = target.clean_output(prefix_residual(prefix, idx))
     assert logits.shape == fixture["logits"].shape
     assert _max_abs_diff(logits, fixture["logits"]) < 1e-5
 
@@ -63,7 +62,7 @@ def test_real_t9d2b8f02_weights_match_torch_logits():
 
     embed = target.lm_head  # tied: wte.weight serves embedding and head
     resid = embed[jnp.asarray(fixture["idx"])]
-    logits = clean_suffix_logits(target, resid)
+    logits = target.clean_output(resid)
 
     assert logits.shape == fixture["logits"].shape
     # fp32 end to end; |logits| ~ 15, observed max abs diff ~1e-4 (matmul reassociation)

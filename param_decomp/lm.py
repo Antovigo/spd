@@ -1,10 +1,11 @@
 """`DecomposedModel` — the interface a vendored target implements for the generic trainer.
 
 The trainer (`train.py`) is abstract over the target model: it sees an ordered set of
-decomposed **sites** (SPEC §1.2) and a handful of pure functions over `(frozen, vu)`
-pytrees. Everything at the boundary is keyed by site name (flat dicts, torch-module-path
-style); how a target lays its parameters out internally (e.g. the Llama target's stacked
-layer axis) is its own business.
+decomposed **sites** (SPEC §1.2) and a handful of methods on the model `eqx.Module`. The
+model carries its FROZEN target weights as fields; the TRAINABLE V/U (`vu`) is passed to
+the forward methods explicitly (separate lifecycle). Everything at the boundary is keyed
+by site name (flat dicts, torch-module-path style); how a target lays its parameters out
+internally (e.g. the Llama target's stacked layer axis) is its own business.
 
 The activation WAIST is generic: per decomposed site activations are `[*leading, d]`
 and masks/CI are `[*leading, C]`, where `leading = (batch,) + named position axes`
@@ -15,20 +16,18 @@ operate over the opaque `*leading` prefix. The three EDGES are generic too — t
 INPUT (whatever `read_activations`/`clean_output`/`masked_output` read upstream of the
 residual; tokens for an LM, a dict for a bio target), the model's OUTPUT
 (`clean_output`/`masked_output` return `Any` — logits, a tuple of heads, coords), and the
-recon comparison (`recon_loss_fn`, default `kl_per_position`).
+recon comparison (`recon_loss_fn`, `kl_per_position` for an LM).
 
-Every function takes the frozen-target pytree as a RUNTIME argument. Never close over
-it: a frozen 8B target captured as a jit constant bakes multi-GB weights into the HLO.
+The frozen weights ride on the model `eqx.Module` and reach the jitted step as a pytree
+ARG (`eqx.filter_jit` traces the array leaves). Never close over the model in a jit: a
+frozen 8B target captured as a constant bakes multi-GB weights into the HLO.
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
-
-from param_decomp.losses import kl_per_position
 
 SiteMasks = dict[str, Float[Array, "*leading C"]]
 SiteDeltaMasks = dict[str, Float[Array, "*leading"]]
@@ -62,87 +61,92 @@ class SiteSpec:
     C: int
 
 
-@dataclass(frozen=True)
-class DecomposedModel:
-    """Pure-function table over `(frozen, vu)` pytrees (see module docstring).
+@runtime_checkable
+class DecomposedModel(Protocol):
+    """The interface a vendored target implements for the generic trainer (see module
+    docstring). The concrete impl is an `eqx.Module` carrying its FROZEN target weights as
+    array fields — so it threads into the jitted step as a pytree arg (array leaves traced,
+    static fields baked), never as a closed-over multi-GB constant. The methods below take
+    only the *runtime-varying* arguments; the frozen weights ride on `self`.
+
+    The TRAINABLE V/U (`vu`) stay an explicit method arg, NOT a `self` field: they have a
+    different lifecycle (fp32 masters, their own optimizer + checkpoint, C-sharded while the
+    frozen weights replicate), and the step casts/details them independently of the model.
 
     `sites` fixes the canonical site order — chunking (SPEC S10) and the CI fn's
     input/output concatenation both follow it.
-
-    `masked_output(frozen, vu, resid, masks, delta_masks, routes, live, has_delta)`:
-    `live` (a tuple of site names, static under jit) lists the sites running their
-    decomposed forward; all other sites MUST run the frozen `x @ W` path (SPEC S2).
-    `masks`/`delta_masks` may broadcast over the batch dim (the PPGD source case).
-    `has_delta` (static) False skips the `x @ Δ` matmul for constant-source entries
-    whose delta mask is a constant 0 (LOSS_PARITY_DESIGN §4b).
 
     `leading_axes` names the position axes of the activation waist (batch is implicit and
     always present): `("sequence",)` for an LM, `()` for a TMS-style target. At trainer
     construction it must equal the CI fn's `expects_axes` (early fail) so the CI fn stays
     per-domain without the generic loop adapting.
 
-    `clean_output` is the all-frozen forward — the recon target (SPEC S3); never the
-    `mask=1` decomposed identity. Its output (and `masked_output`') is `Any`: an LM
-    emits `[*leading, vocab]` logits, a bio target a tuple of heads or coordinates.
-
-    `weight_deltas` returns fp32 `W − V@U` per site from fp32 master `vu` (SPEC N2).
-
-    `masked_site_outputs` shares `masked_output`'s masking machinery but returns the
-    per-`live`-site decomposed LINEAR OUTPUT (`((x@V)*m)@U + (x@Δ)*d`, the intermediate
-    `masked_output` threads onward) instead of final logits, keyed by site (SPEC S31).
-    It exists ONLY for the offline hidden-acts recon eval metrics — never the recon grid,
-    which stays KL-on-final-logits (SPEC §2.3). The clean (target) per-site output is the
-    frozen `x @ W` of `read_activations`, derivable without this fn.
-
-    `recon_loss_fn(clean_output, masked_output) -> scalar` is the recon comparison the
-    step minimizes (SPEC §2.3). It defaults to `kl_per_position` (the LM cross-entropy
-    surrogate); a non-LM target supplies its own (e.g. an MSE/geometric loss). It must
-    reduce to a scalar and contract whatever shape its model emits.
+    `recon_loss_fn(masked_output, clean_output) -> scalar` is the recon comparison the step
+    minimizes (SPEC §2.3): the LM uses `kl_per_position`; a non-LM target supplies its own
+    (e.g. MSE/geometric). It must reduce to a scalar and contract whatever shape the model
+    emits. It is a static method/attr on the concrete model, not a forward over `self`.
     """
 
     sites: tuple[SiteSpec, ...]
     leading_axes: tuple[str, ...]
-    clean_output: Callable[[Any, Float[Array, "*leading d"]], Any]
-    read_activations: Callable[
-        [Any, Float[Array, "*leading d"], tuple[str, ...]],
-        dict[str, Float[Array, "*leading d_tap"]],
-    ]
-    """The CI fn's activation accessor: `(frozen, resid, wanted) -> {key: activation}`.
-    `wanted` is the CI fn's static `input_names` — OPAQUE keys the target knows how to
-    produce (an LM's `resid.{layer}` taps; a positionless toy's per-site inputs). The
-    target is the only key→activation interpreter; core just routes by key."""
-    masked_output: Callable[
-        [
-            Any,
-            Any,
-            Float[Array, "*leading d"],
-            SiteMasks,
-            SiteDeltaMasks,
-            SiteRoutes,
-            tuple[str, ...],
-            bool,
-        ],
-        Any,
-    ]
-    masked_site_outputs: Callable[
-        [
-            Any,
-            Any,
-            Float[Array, "*leading d"],
-            SiteMasks,
-            SiteDeltaMasks,
-            SiteRoutes,
-            tuple[str, ...],
-            bool,
-        ],
-        dict[str, Float[Array, "*leading d_out"]],
-    ]
-    weight_deltas: Callable[[Any, Any], dict[str, Float[Array, "d_out d_in"]]]
-    recon_loss_fn: Callable[[Any, Any], Float[Array, ""]] = field(default=kl_per_position)
 
     @property
-    def site_names(self) -> tuple[str, ...]:
-        return tuple(s.name for s in self.sites)
+    def site_names(self) -> tuple[str, ...]: ...
+
+    def recon_loss_fn(self, masked_output: Any, clean_output: Any) -> Float[Array, ""]:
+        """Recon comparison the step minimizes (SPEC §2.3). LM: `kl_per_position`."""
+        ...
+
+    def clean_output(self, resid: Float[Array, "*leading d"]) -> Any:
+        """All-frozen forward — the recon target (SPEC S3); never the `mask=1` decomposed
+        identity. `Any`: an LM emits `[*leading, vocab]` logits, a bio target a tuple of
+        heads or coordinates."""
+        ...
+
+    def read_activations(
+        self, resid: Float[Array, "*leading d"], wanted: tuple[str, ...]
+    ) -> dict[str, Float[Array, "*leading d_tap"]]:
+        """The CI fn's activation accessor. `wanted` is the CI fn's static `input_names` —
+        OPAQUE keys the target knows how to produce (an LM's `resid.{layer}` taps; a
+        positionless toy's per-site inputs). The target is the only key→activation
+        interpreter; core just routes by key."""
+        ...
+
+    def masked_output(
+        self,
+        vu: Any,
+        resid: Float[Array, "*leading d"],
+        masks: SiteMasks,
+        delta_masks: SiteDeltaMasks,
+        routes: SiteRoutes,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> Any:
+        """The masked decomposed forward (SPEC §1.3, S2). `live` (static under jit) lists
+        the sites running their decomposed forward; all other sites run the frozen `x @ W`
+        path. `masks`/`delta_masks` may broadcast over the batch dim (the PPGD source case).
+        `has_delta` (static) False skips the `x @ Δ` matmul for constant-source entries
+        whose delta mask is a constant 0 (LOSS_PARITY_DESIGN §4b)."""
+        ...
+
+    def masked_site_outputs(
+        self,
+        vu: Any,
+        resid: Float[Array, "*leading d"],
+        masks: SiteMasks,
+        delta_masks: SiteDeltaMasks,
+        routes: SiteRoutes,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> dict[str, Float[Array, "*leading d_out"]]:
+        """Per-`live`-site decomposed LINEAR OUTPUT of `masked_output`'s forward
+        (`((x@V)*m)@U + (x@Δ)*d`), keyed by site (SPEC S31). For the offline hidden-acts
+        recon eval metrics only — never the recon grid, which stays KL-on-final-logits."""
+        ...
+
+    def weight_deltas(self, vu: Any) -> dict[str, Float[Array, "d_out d_in"]]:
+        """fp32 `W − V@U` per site from the fp32 master `vu` (SPEC N2)."""
+        ...
 
 
 def chunk_sites(site_names: tuple[str, ...], sites_per_chunk: int) -> tuple[tuple[str, ...], ...]:
