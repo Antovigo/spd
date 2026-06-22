@@ -399,7 +399,7 @@ def assert_supported_weights_dtype(cfg: LMExperimentConfig) -> None:
     )
 
 
-def build_experiment_config(cfg: LMExperimentConfig) -> BuiltRun:
+def build_experiment_config(cfg: LMExperimentConfig, run_id: str) -> BuiltRun:
     target = _resolve_target(cfg)
     assert_canonical_algorithm_config(cfg)
     _assert_losses_supported(cfg, tuple(sc.name for sc in target.sites))
@@ -409,7 +409,7 @@ def build_experiment_config(cfg: LMExperimentConfig) -> BuiltRun:
         pd=cfg.pd,
         runtime=cfg.runtime,
         cadence=cfg.cadence,
-        run=run_instance(cfg),
+        run=run_instance(cfg, run_id),
         target=target,
         data=data,
         ci_fn=ci_arch(cfg.pd.ci_config, lambda ci: _resolve_chunkwise_ci_arch(target, ci)),
@@ -417,28 +417,30 @@ def build_experiment_config(cfg: LMExperimentConfig) -> BuiltRun:
     )
 
 
-def build_from_schema(schema_raw: dict[str, Any]) -> BuiltRun:
+def build_from_schema(schema_raw: dict[str, Any], run_id: str) -> BuiltRun:
     """Validate a single self-contained LM run config (the canonical `LMExperimentConfig`
-    schema + run-instance fields) and convert it to the engine's `BuiltRun` bundle.
+    schema) and convert it to the engine's `BuiltRun` bundle. `run_id` is the minted run
+    identity (the launcher's CLI arg, or the run-dir name when reloading a finished run).
 
     The LM composition entry (`run.py`) is LM-only. The toy domains (TMS, ResidMLP) build
     their `BuiltRun` in their own `run.py` via the public shared helpers
     (`assert_canonical_algorithm_config`, `run_instance`, `ci_arch`)."""
     cfg = LMExperimentConfig(**schema_raw)
     assert_supported_weights_dtype(cfg)
-    return build_experiment_config(cfg)
+    return build_experiment_config(cfg, run_id)
 
 
-def load_config(config_path: Path) -> tuple[BuiltRun, dict[str, Any]]:
+def load_config(config_path: Path, run_id: str) -> tuple[BuiltRun, dict[str, Any]]:
     """Parse a single self-contained LM run YAML (the canonical schema + top-level
-    `run_name`/`run_id`/`out_dir`, `runtime.remat_recon_forwards`, `wandb.group`/`tags`)
-    -> (built run, raw dict for wandb logging)."""
+    `run_name`, `runtime.remat_recon_forwards`, `wandb.group`/`tags`) -> (built run, raw
+    dict for wandb logging). `run_id` is the minted run identity."""
     schema_raw = yaml.safe_load(config_path.read_text())
-    return build_from_schema(schema_raw), schema_raw
+    return build_from_schema(schema_raw, run_id), schema_raw
 
 
 def load_run_dir_config(run_dir: Path) -> BuiltRun:
     """Rebuild a run's `BuiltRun` bundle from its single pinned `config.yaml`
-    (for tools that read finished/live run dirs, e.g. harvest / fine-tune compat)."""
+    (for tools that read finished/live run dirs, e.g. harvest / fine-tune compat). The
+    run id is the run-dir name."""
     schema_raw = yaml.safe_load((run_dir / "config.yaml").read_text())
-    return build_from_schema(schema_raw)
+    return build_from_schema(schema_raw, run_dir.name)

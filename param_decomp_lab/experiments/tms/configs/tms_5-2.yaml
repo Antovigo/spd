@@ -2,7 +2,6 @@
 # pd-lm, 1 node. Validates via the in-loop ground-truth target-CI metric
 # (eval/identity_ci_error/<site>) logged each train-log step — no separate eval pass.
 run_name: jax-tms-5-2
-out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 # TMS 5->2 PD decomposition — the canonical superposition toy (5 features in 2 hidden
 # dims). The JAX counterpart of the torch `tms_5-2_config.yaml`, adapted to the JAX
 # trainer's schema: the target is pretrained from scratch in-process (no wandb run_path),

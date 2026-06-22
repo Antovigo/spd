@@ -4,7 +4,6 @@
 # ground-truth CI is the dense pattern (all n_hidden directions live). 20000 steps.
 # CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[16]). Runs on 1 GPU.
 run_name: jax-tms-40-10-id
-out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 pd:
   seed: 0
   n_mask_samples: 1

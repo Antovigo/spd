@@ -50,9 +50,12 @@ _MINIMAL_LM = {
 }
 
 
-def test_rank_command_runs_trainer_as_module():
-    command = _rank_command(Path("param_decomp/configs/x.yaml"), rank_env="export FOO=1")
+def test_rank_command_runs_trainer_as_module_with_run_id():
+    command = _rank_command(
+        Path("param_decomp/configs/x.yaml"), "p-abcd1234", rank_env="export FOO=1"
+    )
     assert "exec python -m param_decomp_lab.experiments.lm.run" in command
+    assert "--run-id p-abcd1234" in command
     assert "pd-train" not in command
 
 
@@ -70,20 +73,19 @@ def test_validate_config_rejects_pre_stamped_run_id(tmp_path: Path):
         _validate_config(config)
 
 
-def test_stamp_config_writes_run_id_out_dir_and_wandb(tmp_path: Path):
+def test_stamp_config_writes_wandb_and_omits_run_identity(tmp_path: Path):
     config = tmp_path / "c.yaml"
     config.write_text(yaml.safe_dump(_MINIMAL_LM))
-    _stamp_config(config, "p-abcd1234", group="grp", tags=["a", "b"])
+    _stamp_config(config, group="grp", tags=["a", "b"])
     raw = yaml.safe_load(config.read_text())
-    assert raw["run_id"] == "p-abcd1234"
-    assert raw["out_dir"].endswith("/runs")
+    assert "run_id" not in raw and "out_dir" not in raw
     assert raw["wandb"]["group"] == "grp" and raw["wandb"]["tags"] == ["a", "b"]
 
 
-def test_stamp_config_keeps_author_out_dir(tmp_path: Path):
+def test_stamp_config_noop_without_wandb_knobs(tmp_path: Path):
     config = tmp_path / "c.yaml"
-    config.write_text(yaml.safe_dump(dict(_MINIMAL_LM, out_dir="/custom/runs")))
-    _stamp_config(config, "p-abcd1234", group=None, tags=[])
+    config.write_text(yaml.safe_dump(_MINIMAL_LM))
+    _stamp_config(config, group=None, tags=[])
     raw = yaml.safe_load(config.read_text())
-    assert raw["out_dir"] == "/custom/runs"
+    assert "run_id" not in raw and "out_dir" not in raw
     assert "group" not in raw["wandb"] and "tags" not in raw["wandb"]

@@ -9,7 +9,6 @@
 # B=128 chosen: ~32 GiB headroom, lands on the B=128 LR precedent exactly. Probed live at
 # MEM_FRACTION 0.92.
 run_name: jax-l18-26-9L-seq512-b128-40k
-out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 # From-scratch 9-layer R&D decomposition of Llama-3.1-8B MLP layers 18-26 inclusive
 # (9 layers x 3 matrices = 27 decomposition_targets). Derived from the single-layer-18
 # C49k run (torch/llama8b_l18_C49k_200k_1pool.yaml). DELIBERATE EDITS vs that base:

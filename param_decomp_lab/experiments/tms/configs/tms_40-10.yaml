@@ -5,7 +5,6 @@
 # target. CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[16]). Validates via the
 # in-loop ground-truth target-CI metric (eval/identity_ci_error/<site>). Runs on 1 GPU.
 run_name: jax-tms-40-10
-out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 pd:
   seed: 0
   n_mask_samples: 1

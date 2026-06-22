@@ -11,7 +11,6 @@ the CI-fn architecture; each experiment's `run.py` assembles the rest (target + 
 
 import re
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, Self
 
 from pydantic import Field, PositiveInt, model_validator
@@ -38,6 +37,7 @@ from param_decomp.configs import (
     WandbConfig,
 )
 from param_decomp.schedule import ScheduleConfig
+from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 
 
 class EvalConfig(BaseConfig):
@@ -69,19 +69,26 @@ class ExperimentConfig[T: BaseConfig, D: BaseConfig](BaseConfig):
     Omit the `eval:` block to skip eval entirely; omit `wandb:` to skip wandb (the run
     still writes `config.yaml` + checkpoints locally).
 
-    `run_id` / `out_dir` are minted by `pd-lm` at submit time (both `None` in a
-    hand-authored config); the stamped workspace copy carries them, and the trainer
-    resumes by byte-comparing that pinned copy.
+    The run id is NOT a config field: it is minted by the launcher and passed to
+    `run_instance` as an explicit argument. The run dir is a pure function of settings
+    + id (`PARAM_DECOMP_OUT_DIR/runs/<run_id>`).
     """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_run_identity_fields(cls, data: object) -> object:
+        # Shared-storage shim: stored run config.yamls carry `run_id` (minted identity,
+        # now passed to `run_instance` as an arg and derived from the run-dir name) and
+        # `out_dir` (vestigial; the run dir is `PARAM_DECOMP_OUT_DIR/runs/<run_id>`). Both
+        # fields are removed; strip them so existing configs still load under extra=forbid.
+        if not isinstance(data, dict):
+            return data
+        data.pop("run_id", None)
+        data.pop("out_dir", None)
+        return data
 
     run_name: str
     """Human-readable display name (the wandb run NAME)."""
-    run_id: str | None = None
-    """Canonical `p-<8hex>` id (wandb run ID + run-dir name). `None` in a hand-authored
-    config; minted + stamped by `pd-lm` at submit time."""
-    out_dir: Path | None = None
-    """Run-output root (the run dir is `out_dir / run_id`). `None` lets `pd-lm` mint
-    `PARAM_DECOMP_OUT_DIR/runs`; set it to override (the llama8b configs use `jax_runs`)."""
 
     pd: PDConfig
     runtime: RuntimeConfig
@@ -156,17 +163,14 @@ def assert_canonical_algorithm_config(cfg: "ExperimentConfig[Any, Any]") -> None
     assert cadence.save_every is not None and cadence.keep_last_n_checkpoints is not None, cadence
 
 
-def run_instance(cfg: "ExperimentConfig[Any, Any]") -> RunInstance:
-    """The resolved run identity + logging lineage. `run_id` / `out_dir` are minted +
-    stamped by `pd-lm`; a config reaching the trainer must carry both."""
-    assert cfg.run_id is not None and _RUN_ID_PATTERN.match(cfg.run_id), (
-        f"run_id must be p-<8hex>, got {cfg.run_id!r} (pd-lm stamps it at submit)"
-    )
-    assert cfg.out_dir is not None, "out_dir unset (pd-lm mints it at submit)"
+def run_instance(cfg: "ExperimentConfig[Any, Any]", run_id: str) -> RunInstance:
+    """The resolved run identity + logging lineage. `run_id` is minted by the launcher (a
+    toy mints its own); the run dir is `PARAM_DECOMP_OUT_DIR/runs/<run_id>`."""
+    assert _RUN_ID_PATTERN.match(run_id), f"run_id must be p-<8hex>, got {run_id!r}"
     return RunInstance(
         run_name=cfg.run_name,
-        run_id=cfg.run_id,
-        out_dir=cfg.out_dir,
+        run_id=run_id,
+        out_dir=PARAM_DECOMP_OUT_DIR / "runs",
         wandb=cfg.wandb,
         resume_provenance=cfg.resume_provenance,
     )

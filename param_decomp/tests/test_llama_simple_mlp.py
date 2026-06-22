@@ -528,7 +528,6 @@ def test_pretrained_target_converts_with_wildcards():
 
     reference_yaml = Path(__file__).parent.parent / "configs" / "llama8b_l18_b128_cmp32.yaml"
     raw = yaml.safe_load(reference_yaml.read_text())
-    raw["run_id"] = "p-00000000"
     raw["target"]["spec"] = {
         "kind": "pretrained",
         "model_class": (
@@ -541,7 +540,7 @@ def test_pretrained_target_converts_with_wildcards():
     ]
     raw["data"]["max_seq_len"] = 512  # the model's n_ctx
 
-    cfg = build_experiment_config(LMExperimentConfig(**raw))
+    cfg = build_experiment_config(LMExperimentConfig(**raw), "p-00000000")
     target = cfg.target
     assert isinstance(target, LlamaSimpleMLPTargetConfig)
     assert target.pretrain_run_path == "goodfire/spd/runs/t-9d2b8f02"

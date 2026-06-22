@@ -54,10 +54,11 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export XLA_FLAGS="--xla_gpu_enable_command_buffer=\""""
 
 
-def _rank_command(config_rel: Path, rank_env: str) -> str:
+def _rank_command(config_rel: Path, run_id: str, rank_env: str) -> str:
     return (
         f"source .venv/bin/activate\n{rank_env}\n"
-        f"exec python -m param_decomp_lab.experiments.lm.run {shlex.quote(str(config_rel))}"
+        f"exec python -m param_decomp_lab.experiments.lm.run "
+        f"{shlex.quote(str(config_rel))} --run-id {shlex.quote(run_id)}"
     )
 
 
@@ -77,11 +78,11 @@ def main(
 
     Args:
         config_path: Single self-contained run yaml (the canonical schema + top-level
-            `run_name`, optional `out_dir`), inside the repo. `runtime.dp` declares the
-            world size: `None` → run inline (single device); `N` (a multiple of 8) →
-            submit across `N // 8` nodes. `run_id` and `out_dir` are minted here and
-            stamped into the workspace copy; `out_dir` defaults to
-            `PARAM_DECOMP_OUT_DIR/runs` (the current cluster) when absent.
+            `run_name`), inside the repo. `runtime.dp` declares the world size: `None` →
+            run inline (single device); `N` (a multiple of 8) → submit across `N // 8`
+            nodes. The `run_id` is minted here and passed to the trainer as a `--run-id`
+            CLI arg (so it survives requeue); the run dir is
+            `PARAM_DECOMP_OUT_DIR/runs/<run_id>`.
         time: SLURM time limit.
         qos: SLURM QoS (e.g. `opportunistic`); None is the normal QoS.
         run_id: Resubmit an existing launch — reuses its workspace (and identity)
@@ -110,7 +111,7 @@ def main(
         snapshot_ref, commit_hash = create_git_snapshot(snapshot_id=run_id)
         logger.info(f"Created git snapshot: {snapshot_ref} ({commit_hash[:8]})")
         workspace = WORKSPACES_DIR / run_id
-        _build_workspace(workspace, snapshot_ref, run_id, config_rel, group, tag_list)
+        _build_workspace(workspace, snapshot_ref, config_rel, group, tag_list)
     else:
         snapshot_ref = f"refs/runs/snapshot/{run_id}"
         workspace = WORKSPACES_DIR / run_id
@@ -134,7 +135,9 @@ def main(
     rank_env = _RANK_ENV
     if allocator is not None:
         rank_env = f"{rank_env}\nexport XLA_PYTHON_CLIENT_ALLOCATOR={allocator}"
-    command = f"srun {_SRUN_FLAGS} bash -c {shlex.quote(_rank_command(config_rel, rank_env))}"
+    command = (
+        f"srun {_SRUN_FLAGS} bash -c {shlex.quote(_rank_command(config_rel, run_id, rank_env))}"
+    )
     script = generate_script(slurm_config, command, setup=f'cd "{workspace}"')
     result = submit_slurm_job(script, "pd-lm")
 
@@ -157,10 +160,17 @@ def _run_local(config_rel: Path, run_name: str, group: str | None, tags: list[st
     """Mint a run id, stamp the live config in place, and run the trainer inline."""
     run_id = generate_run_id("param_decomp")
     config = REPO_ROOT / config_rel
-    _stamp_config(config, run_id, group, tags)
+    _stamp_config(config, group, tags)
     logger.section(f"pd-lm local: {run_name} ({run_id})")
     subprocess.run(
-        [sys.executable, "-m", "param_decomp_lab.experiments.lm.run", str(config_rel)],
+        [
+            sys.executable,
+            "-m",
+            "param_decomp_lab.experiments.lm.run",
+            str(config_rel),
+            "--run-id",
+            run_id,
+        ],
         cwd=REPO_ROOT,
         check=True,
         env=os.environ.copy(),
@@ -195,14 +205,13 @@ def _validate_config(config_path: Path) -> tuple[LMExperimentConfig, str]:
 def _build_workspace(
     workspace: Path,
     snapshot_ref: str,
-    run_id: str,
     config_rel: Path,
     group: str | None,
     tags: list[str],
 ) -> None:
     """Materialize the snapshot as an immutable shared-FS checkout with the one CUDA
-    venv, then stamp the run identity (run_id, out_dir-if-absent, wandb group/tags) into
-    the workspace's single config yaml."""
+    venv, then stamp the wandb group/tags into the workspace's single config yaml. The run
+    id rides as a `--run-id` CLI arg on the trainer command, not in the config."""
     assert not workspace.exists(), f"workspace already exists: {workspace}"
     workspace.parent.mkdir(parents=True, exist_ok=True)
     UV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -228,24 +237,21 @@ def _build_workspace(
         env=build_env,
     )
 
-    _stamp_config(workspace / config_rel, run_id, group, tags)
+    _stamp_config(workspace / config_rel, group, tags)
 
 
-def _stamp_config(config: Path, run_id: str, group: str | None, tags: list[str]) -> None:
-    """Stamp the minted run identity into the workspace's single config yaml: top-level
-    `run_id`, `out_dir` (minted when the author left it absent), and the wandb UI knobs
-    onto the `wandb:` block (no-op when `wandb:` is omitted)."""
+def _stamp_config(config: Path, group: str | None, tags: list[str]) -> None:
+    """Stamp the wandb UI knobs onto the workspace's single config yaml's `wandb:` block
+    (no-op when `wandb:` is omitted). The run id is NOT stamped — it is passed to the
+    trainer as a `--run-id` CLI arg, and the run dir derives from it."""
+    if group is None and not tags:
+        return
     raw = yaml.safe_load(config.read_text())
-    assert "run_id" not in raw, "run_id already stamped"
-    raw["run_id"] = run_id
-    if raw.get("out_dir") is None:
-        raw["out_dir"] = str(PARAM_DECOMP_OUT_DIR / "runs")
-    if group is not None or tags:
-        assert raw.get("wandb") is not None, "wandb group/tags need a wandb: block in the config"
-        if group is not None:
-            raw["wandb"]["group"] = group
-        if tags:
-            raw["wandb"]["tags"] = tags
+    assert raw.get("wandb") is not None, "wandb group/tags need a wandb: block in the config"
+    if group is not None:
+        raw["wandb"]["group"] = group
+    if tags:
+        raw["wandb"]["tags"] = tags
     config.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 

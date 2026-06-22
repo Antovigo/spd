@@ -361,9 +361,9 @@ def _pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
         copy.write_text(source.read_text())
 
 
-def main(config: Path) -> None:
+def main(config: Path, run_id: str) -> None:
     config = Path(config)
-    built, raw_cfg = load_config(config)
+    built, raw_cfg = load_config(config, run_id)
 
     install_sigterm_flag()
     init_distributed(built.runtime.dp)

@@ -3,7 +3,6 @@
 # referenced torch LMExperimentConfig yaml via param-decomp-config. Semantically the
 # same run as llama8b_l18_b128_cmp32.yaml — the converter test asserts that.
 run_name: jax-l18-b128-cmp32-from-torch
-out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 # torch leg of the torch-vs-JAX same-config comparison (32 GPU / 4 nodes each side).
 # Single-pool core Trainer (param_decomp/optimize.py) with the SPEC §2 production
 # constants (= lr_mid), full-model forward (no residual-start on this path), vendored

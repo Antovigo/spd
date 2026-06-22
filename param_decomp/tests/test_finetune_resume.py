@@ -81,7 +81,6 @@ def test_init_from_parent_rejects_missing_step(tmp_path: Path):
 
 
 def _stamp(raw: dict[str, object], run_dir: Path) -> Path:
-    raw = dict(raw, run_id="p-0123abcd", out_dir=str(run_dir.parent))
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.yaml").write_text(yaml.safe_dump(raw))
     return run_dir
@@ -98,7 +97,7 @@ def test_structural_compat_passes_on_matching_changes_only(tmp_path: Path):
         raw["pd"]["components_optimizer"],
         lr_schedule=dict(raw["pd"]["components_optimizer"]["lr_schedule"], start_val=1e-4),
     )
-    new_cfg = build_from_schema(dict(new_raw, run_id="p-aaaaaaaa", out_dir=str(tmp_path)))
+    new_cfg = build_from_schema(new_raw, "p-aaaaaaaa")
     prov = ResumeProvenance(parent_run_dir=parent_dir, parent_step=10)
     assert_finetune_structural_compat(new_cfg, prov)
 
@@ -110,7 +109,7 @@ def test_structural_compat_fires_on_changed_C(tmp_path: Path):
     new_raw = dict(raw)
     new_targets = [dict(t, C=t["C"] // 2) for t in raw["pd"]["decomposition_targets"]]
     new_raw["pd"] = dict(raw["pd"], decomposition_targets=new_targets)
-    new_cfg = build_from_schema(dict(new_raw, run_id="p-aaaaaaaa", out_dir=str(tmp_path)))
+    new_cfg = build_from_schema(new_raw, "p-aaaaaaaa")
     prov = ResumeProvenance(parent_run_dir=parent_dir, parent_step=10)
     with pytest.raises(AssertionError, match="fine-tune sites mismatch"):
         assert_finetune_structural_compat(new_cfg, prov)

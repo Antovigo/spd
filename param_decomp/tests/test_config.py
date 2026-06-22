@@ -1,8 +1,8 @@
 """The single-file run-config route — the trainer's only config surface.
 
-Committed configs deliberately carry NO `run_id` (`pd-lm` mints one and stamps the
-workspace copy at submit time) and some leave `out_dir` absent (minted at submit), so
-tests inject both the same way `pd-lm` does."""
+The run id is NOT a config field: the launcher mints one and passes it to the build
+helpers as an explicit arg (`RUN_ID` here), and the run dir derives from it
+(`PARAM_DECOMP_OUT_DIR/runs/<run_id>`)."""
 
 from pathlib import Path
 
@@ -27,22 +27,8 @@ CONFIGS = Path(__file__).parent.parent / "configs"
 RUN_ID = "p-0123abcd"
 
 
-def _stamped_config(tmp_path: Path, config: Path) -> Path:
-    """A tmp copy of `config` with `run_id` + (if absent) `out_dir` stamped — what the
-    pd-lm workspace copy looks like at submit time."""
-    raw = yaml.safe_load(config.read_text())
-    raw["run_id"] = RUN_ID
-    if raw.get("out_dir") is None:
-        raw["out_dir"] = "/tmp/out"
-    stamped = tmp_path / config.name
-    stamped.write_text(yaml.safe_dump(raw))
-    return stamped
-
-
 def _reference_lm_raw():
-    raw = yaml.safe_load((CONFIGS / "llama8b_l18_b128_cmp32.yaml").read_text())
-    raw["run_id"] = RUN_ID
-    return raw
+    return yaml.safe_load((CONFIGS / "llama8b_l18_b128_cmp32.yaml").read_text())
 
 
 def test_removed_pdconfig_fields_strip_from_stored_configs_but_reject_bad_values():
@@ -70,8 +56,8 @@ def test_removed_pdconfig_fields_strip_from_stored_configs_but_reject_bad_values
             PDConfig.model_validate({**pd, **bad})
 
 
-def test_b128_config_converts(tmp_path: Path):
-    converted, raw = load_config(_stamped_config(tmp_path, CONFIGS / "llama8b_l18_b128_cmp32.yaml"))
+def test_b128_config_converts():
+    converted, raw = load_config(CONFIGS / "llama8b_l18_b128_cmp32.yaml", RUN_ID)
     assert raw["pd"]["batch_size"] == 128
     assert converted.run.run_name == "jax-l18-b128-cmp32-from-torch"
     assert converted.data is not None and converted.data.global_batch == 128
@@ -118,7 +104,7 @@ def test_eval_block_maps_slow_tier_and_defers_offline_only_metrics(
             {"type": "UVPlots", "identity_patterns": None, "dense_patterns": None},  # in-loop slow
         ],
     }
-    cfg = build_experiment_config(LMExperimentConfig(**raw))
+    cfg = build_experiment_config(LMExperimentConfig(**raw), RUN_ID)
     assert cfg.eval is not None
     assert (cfg.eval.batch_size, cfg.eval.every, cfg.eval.n_steps) == (128, 1000, 1)
     assert (cfg.eval.slow_every, cfg.eval.slow_on_first_step) == (10000, True)
@@ -142,7 +128,7 @@ def test_unsupported_settings_refuse():
         ),
     )
     with pytest.raises(AssertionError, match="unsupported training loss"):
-        build_experiment_config(LMExperimentConfig(**hidden_acts_training_loss))
+        build_experiment_config(LMExperimentConfig(**hidden_acts_training_loss), RUN_ID)
 
     sigmoid_ppgd = dict(
         raw,
@@ -169,7 +155,7 @@ def test_unsupported_settings_refuse():
         ),
     )
     with pytest.raises(AssertionError, match="unsupported decomposition target"):
-        build_experiment_config(LMExperimentConfig(**non_site_target))
+        build_experiment_config(LMExperimentConfig(**non_site_target), RUN_ID)
 
     embedding_target = dict(
         raw,
@@ -179,7 +165,7 @@ def test_unsupported_settings_refuse():
         ),
     )
     with pytest.raises(AssertionError, match="unsupported decomposition target"):
-        build_experiment_config(LMExperimentConfig(**embedding_target))
+        build_experiment_config(LMExperimentConfig(**embedding_target), RUN_ID)
 
 
 def test_unsupported_model_family_refuses_and_supported_families_dispatch():
@@ -195,7 +181,7 @@ def test_unsupported_model_family_refuses_and_supported_families_dispatch():
 
     def _converted_target(spec: dict[str, str]):
         cfg = build_experiment_config(
-            LMExperimentConfig(**dict(raw, target=dict(raw["target"], spec=spec)))
+            LMExperimentConfig(**dict(raw, target=dict(raw["target"], spec=spec))), RUN_ID
         )
         return cfg.target
 
@@ -283,7 +269,7 @@ def test_decaying_persistent_source_schedule_refuses():
         ),
     )
     with pytest.raises(AssertionError):
-        build_experiment_config(LMExperimentConfig(**decaying_source))
+        build_experiment_config(LMExperimentConfig(**decaying_source), RUN_ID)
 
 
 def test_arbitrary_sites_with_per_site_c_convert():
@@ -301,7 +287,7 @@ def test_arbitrary_sites_with_per_site_c_convert():
             ],
         ),
     )
-    cfg = build_experiment_config(LMExperimentConfig(**general))
+    cfg = build_experiment_config(LMExperimentConfig(**general), RUN_ID)
     assert cfg.target.sites == (
         SiteC("layers.18.self_attn.q_proj", 128),
         SiteC("layers.18.self_attn.v_proj", 32),
@@ -309,10 +295,10 @@ def test_arbitrary_sites_with_per_site_c_convert():
     )
 
 
-def test_c49k_config_converts(tmp_path: Path):
+def test_c49k_config_converts():
     """The C49k/200k config (raw-HF target spec, bf16 weights_dtype, `model.`-prefixed
     site patterns) must convert cleanly."""
-    converted, _raw = load_config(_stamped_config(tmp_path, CONFIGS / "llama8b_l18_C49k_200k.yaml"))
+    converted, _raw = load_config(CONFIGS / "llama8b_l18_C49k_200k.yaml", RUN_ID)
     assert converted.target.sites == mlp_family_site_cs(18, 18, 49152)
     assert converted.pd.steps == 200000
     assert isinstance(converted.data, DataConfig)
@@ -323,12 +309,10 @@ def test_c49k_config_converts(tmp_path: Path):
     assert converted.run.wandb is not None and converted.run.wandb.entity is None
 
 
-def test_nine_layer_config_converts(tmp_path: Path):
+def test_nine_layer_config_converts():
     """The launch-critical 9-layer chunkwise config: 27 MLP sites (layers 18-26), seq
     512, B=128, 40k steps, eps 1e-6, comp 1.5e-4 / ci_fn 5e-5, remat on."""
-    converted, _raw = load_config(
-        _stamped_config(tmp_path, CONFIGS / "llama8b_l18-26_9layer_chunkwise.yaml")
-    )
+    converted, _raw = load_config(CONFIGS / "llama8b_l18-26_9layer_chunkwise.yaml", RUN_ID)
     assert converted.run.run_name == "jax-l18-26-9L-seq512-b128-40k"
     assert len(converted.target.sites) == 27
     assert isinstance(converted.data, DataConfig)
@@ -347,7 +331,6 @@ def test_fp32_frozen_target_is_refused():
     downgrade (issue #727). Consumption paths (`load_run_dir_config`) ignore the field,
     so the guard lives in the build route, not a reload path."""
     raw = yaml.safe_load((CONFIGS / "llama8b_l18_C49k_200k.yaml").read_text())
-    raw["run_id"] = RUN_ID
     cfg = LMExperimentConfig(**raw)
     cfg = cfg.model_copy(
         update={"target": cfg.target.model_copy(update={"weights_dtype": "float32"})}
@@ -359,28 +342,24 @@ def test_fp32_frozen_target_is_refused():
 def test_load_run_dir_config_rebuilds_runs(tmp_path: Path):
     """Tools read run dirs via `load_run_dir_config`; runs pin the single self-contained
     config as `config.yaml` (run.py's `_pin_config_copy`), and the rebuilt config must
-    equal the launch-time conversion."""
-    stamped = _stamped_config(tmp_path, CONFIGS / "llama8b_l18_C49k_200k.yaml")
-    expected, _ = load_config(stamped)
-    run_dir = tmp_path / "run"
+    equal the launch-time conversion. The run id is the run-dir name."""
+    config = CONFIGS / "llama8b_l18_C49k_200k.yaml"
+    expected, _ = load_config(config, RUN_ID)
+    run_dir = tmp_path / RUN_ID
     run_dir.mkdir()
-    (run_dir / "config.yaml").write_text(stamped.read_text())
+    (run_dir / "config.yaml").write_text(config.read_text())
     assert load_run_dir_config(run_dir) == expected
 
 
-def test_run_id_required_and_drives_identity(tmp_path: Path):
+def test_run_id_drives_identity_and_rejects_malformed():
     """The run dir and wandb id are the p-id (runs/<id>/ convention); the human name
-    stays the wandb display name. Missing or malformed run_id refuses at build time."""
-    cfg, _ = load_config(_stamped_config(tmp_path, CONFIGS / "llama8b_l18_C49k_200k.yaml"))
+    stays the wandb display name. The run id is the build helper's arg; a malformed id
+    refuses at build time."""
+    config = CONFIGS / "llama8b_l18_C49k_200k.yaml"
+    cfg, _ = load_config(config, RUN_ID)
     assert cfg.run.run_id == RUN_ID
     assert cfg.run.run_dir.name == RUN_ID
     assert cfg.run.run_name == "jax-l18-C49k-200k"
 
-    # the committed config carries no run_id (minted at submit) → build refuses
     with pytest.raises(AssertionError, match="run_id must be"):
-        load_config(CONFIGS / "llama8b_l18_C49k_200k.yaml")
-
-    bad_id = _stamped_config(tmp_path, CONFIGS / "llama8b_l18_C49k_200k.yaml")
-    bad_id.write_text(bad_id.read_text().replace(RUN_ID, "run42"))
-    with pytest.raises(AssertionError, match="run_id must be"):
-        load_config(bad_id)
+        load_config(config, "run42")

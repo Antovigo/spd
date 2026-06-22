@@ -165,7 +165,7 @@ def _build_new_state(old: dict[str, Any], reference: TrainState) -> TrainState:
 
 
 def _build_reference(
-    run_dir: Path, run_id: str, out_dir: Path, mesh: Any, *, abstract: bool
+    run_dir: Path, run_id: str, mesh: Any, *, abstract: bool
 ) -> tuple[TrainState, Any, Any]:
     """`(reference TrainState, cfg, lm)`. `abstract=True` returns the reference as a tree
     of `ShapeDtypeStruct`s via `jax.eval_shape` (zero host memory) — used as the remap
@@ -174,10 +174,8 @@ def _build_reference(
     schema_raw = yaml.safe_load((run_dir / "experiment_config.yaml").read_text())
     schema_raw["target"]["weights_dtype"] = "bfloat16"
     schema_raw["run_name"] = run_dir.name
-    schema_raw["run_id"] = run_id
-    schema_raw["out_dir"] = str(out_dir)
     schema_raw.setdefault("runtime", {})["remat_recon_forwards"] = False
-    cfg = build_from_schema(schema_raw)
+    cfg = build_from_schema(schema_raw, run_id)
     llama_cfg = llama31_8b_config()
     sites = llama_site_specs(llama_cfg, cfg.target.sites)
     # The migration only needs `lm`'s STATIC config (sites / leading_axes) to build the
@@ -268,9 +266,7 @@ def main() -> None:
     assert mesh.devices.size == 1, f"run on a single device (got {mesh.devices.size})"
 
     print("building abstract current reference (eval_shape, no host alloc) ...", flush=True)
-    abstract_reference, cfg, lm = _build_reference(
-        src_run_dir, run_id, dst_run_dir.parent, mesh, abstract=True
-    )
+    abstract_reference, cfg, lm = _build_reference(src_run_dir, run_id, mesh, abstract=True)
 
     print("restoring OLD checkpoint (single-device CPU) ...", flush=True)
     old = _restore_old_tree(src_ckpt)
@@ -288,9 +284,7 @@ def main() -> None:
     del new_state
 
     print("verifying restore onto a fresh abstract reference ...", flush=True)
-    fresh_reference, _, _ = _build_reference(
-        src_run_dir, run_id, dst_run_dir.parent, mesh, abstract=True
-    )
+    fresh_reference, _, _ = _build_reference(src_run_dir, run_id, mesh, abstract=True)
     _verify(dst_run_dir, fresh_reference, lm, cfg)
     print("MIGRATION OK", flush=True)
 

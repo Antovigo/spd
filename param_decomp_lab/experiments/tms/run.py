@@ -38,10 +38,9 @@ from param_decomp_lab.experiments.config import (
 from param_decomp_lab.experiments.tms import model as tms
 from param_decomp_lab.experiments.tms.config import TMSExperimentConfig
 from param_decomp_lab.infra.run_files import generate_run_id
-from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 
 
-def build_tms_built_run(cfg: TMSExperimentConfig) -> BuiltRun:
+def build_tms_built_run(cfg: TMSExperimentConfig, run_id: str) -> BuiltRun:
     """Convert the canonical TMS schema to the engine's `BuiltRun` bundle via the shared
     helpers. TMS validates via the in-loop target-CI metric (not the LM CEandKLLosses scalar
     pass), so `eval` is `None`. The schema's `eval.metrics` list is still read at run time
@@ -74,7 +73,7 @@ def build_tms_built_run(cfg: TMSExperimentConfig) -> BuiltRun:
         pd=cfg.pd,
         runtime=cfg.runtime,
         cadence=cfg.cadence,
-        run=run_instance(cfg),
+        run=run_instance(cfg, run_id),
         target=target,
         data=None,
         ci_fn=ci_arch(cfg.pd.ci_config, resolve_chunkwise=None),
@@ -172,10 +171,7 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
 
 def main(config: str, group: str | None = None, tags: str | None = None) -> None:
     schema_raw = yaml.safe_load(Path(config).read_text())
-    if schema_raw.get("run_id") is None:
-        schema_raw["run_id"] = generate_run_id("param_decomp")
-    if schema_raw.get("out_dir") is None:
-        schema_raw["out_dir"] = str(PARAM_DECOMP_OUT_DIR / "runs")
+    run_id = generate_run_id("param_decomp")
     if group is not None or tags is not None:
         wandb_cfg = dict(schema_raw.get("wandb") or {})
         if group is not None:
@@ -183,7 +179,7 @@ def main(config: str, group: str | None = None, tags: str | None = None) -> None
         if tags is not None:
             wandb_cfg["tags"] = tags.split(",")
         schema_raw["wandb"] = wandb_cfg
-    built = build_tms_built_run(TMSExperimentConfig(**schema_raw))
+    built = build_tms_built_run(TMSExperimentConfig(**schema_raw), run_id)
     built.run.run_dir.mkdir(parents=True, exist_ok=True)
     setup_logger(built.run.run_dir / "logs.log")
     (built.run.run_dir / "config.yaml").write_text(yaml.safe_dump(schema_raw, sort_keys=False))

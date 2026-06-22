@@ -224,7 +224,7 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
         )
 
     return LoadedJaxRun(
-        run_id=cfg.run.run_id,
+        run_id=run_dir.name,
         step=resolved_step,
         lm=lm,
         config=cfg,
