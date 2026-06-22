@@ -44,6 +44,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PRNGKeyArray
 
+from param_decomp.built_run import DataConfig, RunInstance
 from param_decomp.checkpoint import (
     init_from_parent,
     make_checkpoint_manager,
@@ -51,7 +52,6 @@ from param_decomp.checkpoint import (
     save_state,
 )
 from param_decomp.ci_fn import CIFnArch
-from param_decomp.config import DataConfig, RunInstance
 from param_decomp.configs import Cadence, PDConfig, flatten_typed_lists
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms

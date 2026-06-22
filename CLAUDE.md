@@ -58,7 +58,8 @@ lab is composition / IO / CLI / experiment assembly**:
   targets/llama8b.py, …), the torch-free pydantic config SCHEMA it now carries directly
   (`base_config.py` = `BaseConfig`, `schedule.py`, `configs.py` = `PDConfig` /
   `RuntimeConfig` / `Cadence` / loss + eval-metric configs / routing / ci-fn / wandb
-  shaping), the runtime `ExperimentConfig` dataclasses (`config.py`), the
+  shaping), the built-run bundle (`built_run.py`: `BuiltRun` / `DataConfig` /
+  `EvalConfig` / `RunInstance` / `TargetSites`), the
   `param_decomp.log` logger, the in-house target-LM pretrainer (`pretrain/`), and the
   bit-parity vendored JAX archs (`vendored_jax/`). Carries jax + pydantic as deps. NO
   CLI entrypoints, NO `main()`, NO YAML/experiment reading — the engine takes built
@@ -127,7 +128,7 @@ from param_decomp_lab.experiments.lm.load_run import open_jax_run, run_metadata
 - `PDConfig` — algorithm config: seed, CI fn, loss metrics, optimizers, decomposition
   targets. The torch-free pydantic schema now lives in core
   (`param_decomp.configs`, alongside `base_config` / `schedule`); the engine reads the
-  derived runtime `ExperimentConfig` (`param_decomp.config`). (The eval-metric *config*
+  derived runtime `ExperimentConfig` (`param_decomp.built_run`). (The eval-metric *config*
   classes likewise live in `param_decomp.configs`; only their torch `Metric` *impls* were
   dropped.)
 - `RuntimeConfig` — compute substrate: `autocast_bf16`, `device`, `dp`. Perturbs numerics
@@ -150,7 +151,7 @@ and returns JAX-native as the #10 torch->jax adapter.
   `BaseConfig` / `Probability` / `runtime_cast`; `schedule.py`; `configs.py` = routing +
   decomposition-target + ci-fn + loss + eval-metric configs + `PDConfig` / `RuntimeConfig`
   / `Cadence` / `WandbConfig` / `ResumeProvenance` + the wandb-shaping helpers). The
-  runtime config dataclasses the engine consumes (`config.py`: `ExperimentConfig` /
+  built-run bundle the engine consumes (`built_run.py`: `BuiltRun` /
   `DataConfig` / `EvalConfig` / … + the `TargetSites` protocol). The engine + numerics
   (`run.py` = `run_decomposition_training`, `lm.py` / `train.py` / `ci_fn.py` /
   `targets/llama8b.py` / `targets/llama_simple_mlp.py` / `adversary.py` / `recon.py` / `losses.py` /

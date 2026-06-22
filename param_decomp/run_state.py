@@ -19,8 +19,8 @@ from jax.typing import ArrayLike
 from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.adversary import init_sources_adam_state
+from param_decomp.built_run import DataConfig
 from param_decomp.ci_fn import CIFnArch
-from param_decomp.config import DataConfig
 from param_decomp.configs import OptimizerConfig, PDConfig
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms

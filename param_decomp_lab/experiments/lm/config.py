@@ -2,7 +2,7 @@
 LM YAML→`BuiltRun` conversion.
 
 This module reads the canonical `LMExperimentConfig` schema directly and builds the engine's
-`BuiltRun` bundle (`param_decomp.config`) — the pydantic `pd` / `cadence` / `runtime`
+`BuiltRun` bundle (`param_decomp.built_run`) — the pydantic `pd` / `cadence` / `runtime`
 verbatim plus the resolved target / data / CI-fn arch / eval — asserting loudly on anything
 the JAX trainer doesn't implement. The composition entry (`run.py`) calls `load_config` /
 `build_from_schema`; consumers that read a finished run dir call `load_run_dir_config`.
@@ -16,8 +16,7 @@ import yaml
 from pydantic import Discriminator, Field, PositiveInt
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
-from param_decomp.config import (
+from param_decomp.built_run import (
     AttnPatternsEvalConfig,
     BuiltRun,
     DataConfig,
@@ -25,6 +24,7 @@ from param_decomp.config import (
     EvalPGDConfig,
     WeightsDtype,
 )
+from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
 from param_decomp.configs import (
     CEandKLLossesConfig,
     ChunkwiseTransformerCiConfig,
@@ -170,7 +170,7 @@ class LlamaSimpleMLPTargetConfig:
 
 AnyLMTargetConfig = TargetConfig | LlamaSimpleMLPTargetConfig
 """The LM target configs the LM composition builds. Non-LM targets (the toys) live in the
-lab and satisfy `param_decomp.config.TargetSites` — the core `BuiltRun.target` is typed by
+lab and satisfy `param_decomp.built_run.TargetSites` — the core `BuiltRun.target` is typed by
 that protocol, never by a closed union, so it accepts a lab target config too."""
 
 

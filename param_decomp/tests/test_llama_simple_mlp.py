@@ -519,7 +519,7 @@ def test_pretrained_target_converts_with_wildcards():
     wildcard decomposition patterns over the checkpoint's n_layer (4)."""
     import yaml
 
-    from param_decomp.config import DataConfig
+    from param_decomp.built_run import DataConfig
     from param_decomp_lab.experiments.lm.config import (
         LlamaSimpleMLPTargetConfig,
         LMExperimentConfig,

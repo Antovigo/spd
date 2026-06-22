@@ -42,7 +42,7 @@ from param_decomp.attn_patterns_eval import (
     make_ci_attn_patterns_step,
     make_stochastic_attn_patterns_step,
 )
-from param_decomp.config import BuiltRun, DataConfig
+from param_decomp.built_run import BuiltRun, DataConfig
 from param_decomp.configs import ResumeProvenance
 from param_decomp.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.eval import make_eval_step

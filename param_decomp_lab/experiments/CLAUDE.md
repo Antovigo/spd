@@ -48,7 +48,7 @@ autointerp / clustering is NOT yet wired (`load_run` is LM-only) — the remaini
 The `ExperimentConfig[T,D]` schema generic + `EvalConfig` + the shared validation /
 run-identity helpers live in `experiments/config.py` (`WandbConfig` / `ResumeProvenance` are
 core, in `param_decomp.configs`; the engine's `BuiltRun` bundle is core, in
-`param_decomp.config`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
+`param_decomp.built_run`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
 `LMDataConfig`, the `target.spec` union, `build_from_schema` / `load_config`) in
 `experiments/lm/config.py`; the toy schemas in `experiments/{tms,resid_mlp}/config.py`.
 
@@ -94,7 +94,7 @@ target:
 
 `output_extract` (default `"logits"`) is the key/index used to pull the prediction
 tensor out of the model's forward output. The `model_class` strings are NOT imported by
-the JAX trainer — `param_decomp.config` only asserts the class-name suffix and routes
+the JAX trainer — `param_decomp.built_run` only asserts the class-name suffix and routes
 to its own vendored JAX arch (`pretrained` LlamaSimpleMLP -> the pretrain-cache loader,
 `hf_weights_in_vendored` Llama -> `vendored_jax`). The dotted `model_class` is a stable
 identifier only, never imported.

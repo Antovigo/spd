@@ -35,10 +35,10 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
+from param_decomp.built_run import BuiltRun
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, restore_step
 from param_decomp.ci_fn import CIFn
 from param_decomp.components import DecompVU
-from param_decomp.config import BuiltRun
 from param_decomp.lm import DecomposedModel
 from param_decomp.run_state import build_optimizers, init_train_state
 from param_decomp.sharding import dp_mesh

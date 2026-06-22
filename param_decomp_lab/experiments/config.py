@@ -17,13 +17,13 @@ from typing import Any, Self
 from pydantic import Field, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
+from param_decomp.built_run import RunInstance
 from param_decomp.ci_fn import (
     ChunkwiseTransformerCIArch,
     CIFnArch,
     GlobalMLPCIArch,
     MLPCIArch,
 )
-from param_decomp.config import RunInstance
 from param_decomp.configs import (
     AnyEvalMetricConfig,
     Cadence,

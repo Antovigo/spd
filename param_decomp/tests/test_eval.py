@@ -12,13 +12,13 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from param_decomp.built_run import EvalPGDConfig
 from param_decomp.ci_fn import (
     Chunk,
     ChunkwiseTransformerCIArch,
     CIFn,
     build_ci_fn,
 )
-from param_decomp.config import EvalPGDConfig
 from param_decomp.eval import make_eval_step, next_token_cross_entropy
 from param_decomp.lm import DecomposedModel, SiteSpec
 from param_decomp.targets.llama8b import llama_site_specs, mlp_family_site_cs

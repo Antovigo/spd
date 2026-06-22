@@ -10,7 +10,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from param_decomp.config import DataConfig
+from param_decomp.built_run import DataConfig
 from param_decomp.configs import PDConfig, PersistentPGDReconLossConfig
 from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms

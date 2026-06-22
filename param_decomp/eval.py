@@ -53,7 +53,7 @@ from jax import random
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.config import EvalPGDConfig
+from param_decomp.built_run import EvalPGDConfig
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import kl_per_position
 from param_decomp.sharding import batch_shard_leading
