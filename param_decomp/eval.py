@@ -54,6 +54,7 @@ from jax.sharding import Mesh
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 from param_decomp.built_run import EvalPGDConfig
+from param_decomp.components import DecompVU
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import kl_per_position
 from param_decomp.sharding import batch_shard_leading
@@ -114,7 +115,7 @@ def make_eval_step(
         return batch_shard_leading(x, mesh)
 
     def masked_forward(
-        model: DecomposedModel, components_bf16: Any, residual: Array, masks: dict[str, Array],
+        model: DecomposedModel, components_bf16: DecompVU, residual: Array, masks: dict[str, Array],
         delta_masks: dict[str, Array],
     ) -> Array:  # fmt: skip
         return batch_sharded(
@@ -126,7 +127,7 @@ def make_eval_step(
     @eqx.filter_jit
     def eval_step(
         model: DecomposedModel,
-        components: Any,
+        components: DecompVU,
         ci_fn: Any,
         token_ids: Int[Array, "B T"],
         residual: Float[Array, "*leading d"],

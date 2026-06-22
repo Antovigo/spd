@@ -1,18 +1,37 @@
 """The decomposition representation, shared by every target (LM and toy alike).
 
-`DecompVU` is the trainable per-site V/U master pytree; `init_decomp_vu` seeds it;
-`site_out` is the one decomposed-linear primitive (SPEC §4.1, `((x@V)*m)@U + (x@Δ)*d`).
-These are domain-neutral — they depend only on `SiteSpec` and the V/U/W arrays — so they
-live here rather than inside any one target (previously they lived in `llama8b.py`, which
-made even the positionless toys import from `llama8b`).
+`SiteC` / `SiteSpec` are the per-site shape primitives (config-level name+C, and the
+shape-carrying spec); `DecompVU` is the trainable per-site V/U master pytree;
+`init_decomp_vu` seeds it; `site_out` is the one decomposed-linear primitive (SPEC §4.1,
+`((x@V)*m)@U + (x@Δ)*d`). These are domain-neutral — they depend only on the site shapes
+and the V/U/W arrays — so they live here rather than inside `lm.py` (whose `DecomposedModel`
+Protocol references `DecompVU`/`SiteSpec`) or any one target.
 """
+
+from dataclasses import dataclass
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
-from param_decomp.lm import SiteSpec
+
+@dataclass(frozen=True)
+class SiteC:
+    """A decomposed site as configured: its torch-module-path name and its C.
+
+    The shape-carrying `SiteSpec` is derived from this plus the target's config."""
+
+    name: str
+    C: int
+
+
+@dataclass(frozen=True)
+class SiteSpec:
+    name: str
+    d_in: int
+    d_out: int
+    C: int
 
 
 class DecompVU(eqx.Module):

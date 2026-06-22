@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from param_decomp.ci_fn import CIFnArch
+from param_decomp.components import SiteC
 from param_decomp.configs import Cadence, PDConfig, ResumeProvenance, RuntimeConfig, WandbConfig
-from param_decomp.lm import SiteC
 
 
 class TargetSites(Protocol):

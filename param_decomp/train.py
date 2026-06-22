@@ -34,6 +34,7 @@ from param_decomp.adversary import (
     sources_adam_ascend_project,
 )
 from param_decomp.ci_fn import CI, CIFn
+from param_decomp.components import DecompVU
 from param_decomp.configs import AdamPGDConfig
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import (
@@ -72,7 +73,7 @@ def _select_pytree(active: Array, when_active: Any, when_inactive: Any) -> Any:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class TrainState:
-    components: Any  # LM-specific trainable pytree (V/U), fp32 masters
+    components: DecompVU  # the universal trainable V/U pytree, fp32 masters
     ci_fn: CIFn  # fp32 masters
     components_opt_state: optax.OptState
     ci_fn_opt_state: optax.OptState
@@ -84,7 +85,7 @@ class TrainState:
     step: Array
 
 
-def _grad_norm_metrics(components_grad: Any, ci_fn_grad: Any) -> dict[str, Array]:
+def _grad_norm_metrics(components_grad: DecompVU, ci_fn_grad: Any) -> dict[str, Array]:
     """Pre-clip gradient L2 norms, matching the torch `component_grad_norms` families:
     per-leaf `grad_norms/components<path>` / `grad_norms/ci_fns<path>` (paths are this
     pytree's own — e.g. `.vu['layers.18.mlp.gate_proj'][0]` for the per-site Llama
@@ -167,7 +168,7 @@ def make_train_step(
     @jaxtyped(typechecker=beartype)
     def masked_forward(
         model: DecomposedModel,
-        components_bf16: Any,
+        components_bf16: DecompVU,
         residual: Float[Array, "*leading d"],
         masks: dict[str, Float[Array, "*leading _"]],
         delta_masks: dict[str, Float[Array, "..."]],
@@ -226,7 +227,7 @@ def make_train_step(
         sources: dict[str, Array],
         routes_per_draw: tuple[Routes, ...],
         model: DecomposedModel,
-        components_bf16: Any,
+        components_bf16: DecompVU,
         ci_lower: dict[str, Array],
         residual: Array,
         clean_output: Array,
@@ -398,7 +399,7 @@ def make_train_step(
         # are NOT detached here, but components/ci grads through them are what torch
         # gets too (sources are leaves). ──
         def loss_fn(
-            trainable: tuple[Any, CIFn, dict[str, dict[str, Array]]],
+            trainable: tuple[DecompVU, CIFn, dict[str, dict[str, Array]]],
         ) -> tuple[Array, tuple[Array, Array, tuple[Array, ...]]]:
             components, ci_fn, persistent_sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)
@@ -542,15 +543,15 @@ def make_train_step(
 
 def make_faith_warmup_step(
     opt: optax.GradientTransformation,
-) -> Callable[[DecomposedModel, Any, optax.OptState], tuple[Any, optax.OptState, Array]]:
+) -> Callable[[DecomposedModel, DecompVU, optax.OptState], tuple[DecompVU, optax.OptState, Array]]:
     """`model` is the jit ARG (frozen weights traced, not baked) — `weight_deltas` reads its
     per-site W slices, so closing over the model would bake them into the HLO."""
 
     @eqx.filter_jit
     def warmup_step(
-        model: DecomposedModel, components: Any, opt_state: optax.OptState
-    ) -> tuple[Any, optax.OptState, Array]:
-        def loss_fn(components_: Any) -> Array:
+        model: DecomposedModel, components: DecompVU, opt_state: optax.OptState
+    ) -> tuple[DecompVU, optax.OptState, Array]:
+        def loss_fn(components_: DecompVU) -> Array:
             return faithfulness_loss(model.weight_deltas(components_))
 
         loss, grad = eqx.filter_value_and_grad(loss_fn)(components)

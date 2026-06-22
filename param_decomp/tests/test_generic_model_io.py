@@ -3,7 +3,9 @@
 The trainer's `[B,T,d]` residual is the fixed waist; only three EDGES are generic — the
 model INPUT (`prefix_residual_fn` reads it), the model OUTPUT (`clean_output` /
 `masked_output` return `Any`), and the recon comparison (`DecomposedModel.recon_loss_fn`).
-This builds a tiny non-LM target that bends ALL THREE at once:
+The trainable components are NOT a generic edge: every target carries the universal
+`DecompVU` V/U pytree, so this synthetic target uses it too. This builds a tiny non-LM
+target that bends the three real edges at once:
 
   * INPUT  — a dict `{"feat": [B,T,d], "gain": [B,T]}` rather than token ids.
   * OUTPUT — a tuple `(coords [B,T,k], aux [B,T,m])` rather than `[B,T,vocab]` logits.
@@ -31,12 +33,13 @@ from param_decomp.ci_fn import (
     ChunkwiseTransformerCIArch,
     build_ci_fn,
 )
+from param_decomp.components import DecompVU, SiteSpec
 from param_decomp.configs import (
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
     StochasticReconLossConfig,
 )
-from param_decomp.lm import DecomposedModel, SiteSpec
+from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.train import TrainState, make_train_step
 
@@ -45,17 +48,10 @@ K_COORDS, M_AUX = 4, 2
 SITE = "block.0.proj"
 
 
-@jax.tree_util.register_dataclass
-@dataclass(frozen=True)
-class SyntheticComponents:
-    V: Float[Array, "D C"]
-    U: Float[Array, "C D"]
-
-
 class SyntheticDecomposedModel(eqx.Module):
     """A non-LM `DecomposedModel`: dict input, tuple `(coords, aux)` output, geometric-MSE
     recon. Carries its frozen target weights (`W` + two readout heads) as array fields; the
-    trainable V/U (`SyntheticComponents`) stays an explicit method arg."""
+    trainable V/U (the universal `DecompVU`) stays an explicit method arg."""
 
     W: Float[Array, "D D"]
     read_coords: Float[Array, "K D"]
@@ -90,7 +86,7 @@ class SyntheticDecomposedModel(eqx.Module):
 
     def masked_output(
         self,
-        vu: SyntheticComponents,
+        vu: DecompVU,
         resid: Array,
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -99,7 +95,8 @@ class SyntheticDecomposedModel(eqx.Module):
         has_delta: bool,
     ) -> tuple[Array, Array]:
         assert live == (SITE,) and routes is None, (live, routes)
-        V, U, W = vu.V, vu.U, self.W
+        V, U = vu.site(SITE)
+        W = self.W
         hidden = (resid @ V) * masks[SITE] @ U
         if has_delta:
             delta = W - (V @ U).T
@@ -108,7 +105,7 @@ class SyntheticDecomposedModel(eqx.Module):
 
     def masked_site_outputs(
         self,
-        vu: SyntheticComponents,
+        vu: DecompVU,
         resid: Array,
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -117,17 +114,18 @@ class SyntheticDecomposedModel(eqx.Module):
         has_delta: bool,
     ) -> dict[str, Array]:
         assert live == (SITE,) and routes is None, (live, routes)
-        V, U, W = vu.V, vu.U, self.W
+        V, U = vu.site(SITE)
+        W = self.W
         hidden = (resid @ V) * masks[SITE] @ U
         if has_delta:
             delta = W - (V @ U).T
             hidden = hidden + delta_masks[SITE][..., None] * (resid @ delta.T)
         return {SITE: hidden}
 
-    def weight_deltas(self, vu: SyntheticComponents) -> dict[str, Array]:
+    def weight_deltas(self, vu: DecompVU) -> dict[str, Array]:
+        V, U = vu.site(SITE)
         return {
-            SITE: self.W.astype(jnp.float32)
-            - (vu.V.astype(jnp.float32) @ vu.U.astype(jnp.float32)).T
+            SITE: self.W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
         }
 
 
@@ -145,6 +143,12 @@ def _synthetic_lm(key: jax.Array) -> SyntheticDecomposedModel:
         sites=(SiteSpec(name=SITE, d_in=D, d_out=D, C=C),),
         leading_axes=("sequence",),
     )
+
+
+def _synthetic_vu(key: jax.Array) -> DecompVU:
+    V = random.normal(random.fold_in(key, 3), (D, C)) * 0.1
+    U = random.normal(random.fold_in(key, 4), (C, D)) * 0.1
+    return DecompVU(vu={SITE: (V, U)})
 
 
 def prefix_residual(prefix: SyntheticPrefix, inputs: dict[str, Array]) -> Array:
@@ -168,10 +172,7 @@ def test_tuple_output_and_geometric_loss_flow():
     """`clean_output`/`masked_output` emit a tuple; `recon_loss_fn` (MSE) contracts it."""
     key = random.PRNGKey(1)
     lm = _synthetic_lm(key)
-    components = SyntheticComponents(
-        V=random.normal(random.fold_in(key, 3), (D, C)) * 0.1,
-        U=random.normal(random.fold_in(key, 4), (C, D)) * 0.1,
-    )
+    components = _synthetic_vu(key)
     resid = random.normal(random.fold_in(key, 5), (B, T, D))
 
     clean = lm.clean_output(resid)
@@ -187,9 +188,7 @@ def test_tuple_output_and_geometric_loss_flow():
     assert loss.shape == () and jnp.isfinite(loss)
 
 
-def _initial_state(
-    lm: DecomposedModel, components: SyntheticComponents, ci_arch: ChunkwiseTransformerCIArch
-):
+def _initial_state(lm: DecomposedModel, components: DecompVU, ci_arch: ChunkwiseTransformerCIArch):
     opt_vu = optax.adamw(1e-2, weight_decay=0.0)
     opt_ci = optax.adamw(1e-2, weight_decay=0.0)
     ci_fn = build_ci_fn(ci_arch, lm.sites, random.PRNGKey(11))
@@ -210,10 +209,7 @@ def test_train_step_runs_through_generic_target():
     target for two steps; the loss stays finite and the trainable V/U actually move."""
     key = random.PRNGKey(2)
     lm = _synthetic_lm(key)
-    components = SyntheticComponents(
-        V=random.normal(random.fold_in(key, 3), (D, C)) * 0.1,
-        U=random.normal(random.fold_in(key, 4), (C, D)) * 0.1,
-    )
+    components = _synthetic_vu(key)
     resid = random.normal(random.fold_in(key, 5), (B, T, D))
 
     ci_arch = ChunkwiseTransformerCIArch(
@@ -245,11 +241,13 @@ def test_train_step_runs_through_generic_target():
         mesh=None,
     )
 
-    V_before = state.components.V
+    V_before = state.components.site(SITE)[0]
     run_key = random.PRNGKey(3)
     for step_idx in range(2):
         state, metrics = step_fn(lm, state, resid, random.fold_in(run_key, step_idx))
         assert jnp.isfinite(metrics["total"]), (step_idx, metrics["total"])
         assert "loss/StochasticReconLoss" in metrics
 
-    assert not jnp.allclose(state.components.V, V_before), "V did not move — step is a no-op"
+    assert not jnp.allclose(state.components.site(SITE)[0], V_before), (
+        "V did not move — step is a no-op"
+    )

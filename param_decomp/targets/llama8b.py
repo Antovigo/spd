@@ -27,8 +27,7 @@ import numpy as np
 from jaxtyping import Array, Float
 from safetensors import safe_open
 
-from param_decomp.components import DecompVU, site_out
-from param_decomp.lm import SiteC, SiteSpec
+from param_decomp.components import DecompVU, SiteC, SiteSpec, site_out
 from param_decomp.losses import kl_per_position
 from vendored_jax.llama import (
     LlamaConfig,

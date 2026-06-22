@@ -25,7 +25,7 @@ import fnmatch
 
 import pytest
 
-from param_decomp.lm import SiteC
+from param_decomp.components import SiteC
 from param_decomp.targets import llama8b, llama_simple_mlp
 
 

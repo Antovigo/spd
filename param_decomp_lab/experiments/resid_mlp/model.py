@@ -38,8 +38,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
 from param_decomp.ci_fn import CI
-from param_decomp.components import DecompVU, site_out
-from param_decomp.lm import SiteC, SiteSpec
+from param_decomp.components import DecompVU, SiteC, SiteSpec, site_out
 
 MLP_IN = "mlp_in"
 MLP_OUT = "mlp_out"

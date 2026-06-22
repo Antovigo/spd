@@ -23,11 +23,12 @@ ARG (`eqx.filter_jit` traces the array leaves). Never close over the model in a 
 frozen 8B target captured as a constant bakes multi-GB weights into the HLO.
 """
 
-from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
+
+from param_decomp.components import DecompVU, SiteSpec
 
 SiteMasks = dict[str, Float[Array, "*leading C"]]
 SiteDeltaMasks = dict[str, Float[Array, "*leading"]]
@@ -41,24 +42,6 @@ def all_false_routes(site_names: tuple[str, ...], leading: tuple[int, ...]) -> d
     target `x @ W` per site (the clean recon target used by the hidden-acts / attn-pattern
     eval metrics)."""
     return {s: jnp.zeros(leading, bool) for s in site_names}
-
-
-@dataclass(frozen=True)
-class SiteC:
-    """A decomposed site as configured: its torch-module-path name and its C.
-
-    The shape-carrying `SiteSpec` is derived from this plus the target's config."""
-
-    name: str
-    C: int
-
-
-@dataclass(frozen=True)
-class SiteSpec:
-    name: str
-    d_in: int
-    d_out: int
-    C: int
 
 
 @runtime_checkable
@@ -114,7 +97,7 @@ class DecomposedModel(Protocol):
 
     def masked_output(
         self,
-        vu: Any,
+        vu: DecompVU,
         resid: Float[Array, "*leading d"],
         masks: SiteMasks,
         delta_masks: SiteDeltaMasks,
@@ -131,7 +114,7 @@ class DecomposedModel(Protocol):
 
     def masked_site_outputs(
         self,
-        vu: Any,
+        vu: DecompVU,
         resid: Float[Array, "*leading d"],
         masks: SiteMasks,
         delta_masks: SiteDeltaMasks,
@@ -144,7 +127,7 @@ class DecomposedModel(Protocol):
         recon eval metrics only — never the recon grid, which stays KL-on-final-logits."""
         ...
 
-    def weight_deltas(self, vu: Any) -> dict[str, Float[Array, "d_out d_in"]]:
+    def weight_deltas(self, vu: DecompVU) -> dict[str, Float[Array, "d_out d_in"]]:
         """fp32 `W − V@U` per site from the fp32 master `vu` (SPEC N2)."""
         ...
 

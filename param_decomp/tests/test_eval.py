@@ -19,8 +19,9 @@ from param_decomp.ci_fn import (
     CIFn,
     build_ci_fn,
 )
+from param_decomp.components import SiteSpec
 from param_decomp.eval import make_eval_step, next_token_cross_entropy
-from param_decomp.lm import DecomposedModel, SiteSpec
+from param_decomp.lm import DecomposedModel
 from param_decomp.targets.llama8b import llama_site_specs, mlp_family_site_cs
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg,

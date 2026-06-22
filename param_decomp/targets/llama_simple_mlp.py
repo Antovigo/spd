@@ -41,8 +41,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Int
 from safetensors import safe_open
 
-from param_decomp.components import DecompVU, site_out
-from param_decomp.lm import SiteC, SiteSpec
+from param_decomp.components import DecompVU, SiteC, SiteSpec, site_out
 from param_decomp.losses import kl_per_position
 from param_decomp.targets.llama8b import FrozenAttn
 from vendored_jax.llama import rms_norm

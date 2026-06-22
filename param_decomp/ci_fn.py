@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.lm import SiteSpec
+from param_decomp.components import SiteSpec
 from vendored_jax.llama import apply_rope, attn_implementation, rms_norm, rope_cos_sin
 
 CI_FN_RMS_EPS = float(jnp.finfo(jnp.float32).eps)

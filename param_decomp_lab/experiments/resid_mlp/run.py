@@ -21,7 +21,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.built_run import BuiltRun
-from param_decomp.lm import SiteC
+from param_decomp.components import SiteC
 from param_decomp.log import setup_logger
 from param_decomp.recon import build_recon_terms
 from param_decomp.run import run_decomposition_training

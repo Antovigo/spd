@@ -37,6 +37,7 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
+from param_decomp.components import DecompVU
 from param_decomp.lm import DecomposedModel, all_false_routes
 from param_decomp.targets.llama8b import FrozenAttn, LlamaDecomposedModel
 from param_decomp.targets.llama_simple_mlp import SimpleMLPDecomposedModel
@@ -146,7 +147,7 @@ def _clean_patterns(
     model: DecomposedModel,
     pattern_fn: AttnPatternFn,
     layer_pairs: tuple[tuple[str, str], ...],
-    components_bf16: Any,
+    components_bf16: DecompVU,
     residual: Array,
     ci_lower: dict[str, Array],
 ) -> dict[str, Array]:
@@ -196,7 +197,7 @@ def make_ci_attn_patterns_step(lm: DecomposedModel, pattern_fn: AttnPatternFn) -
     @eqx.filter_jit
     def step(
         model: DecomposedModel,
-        components: Any,
+        components: DecompVU,
         ci_fn: Any,
         residual: Float[Array, "*leading d"],
         _key: PRNGKeyArray,
@@ -235,7 +236,7 @@ def make_stochastic_attn_patterns_step(
     @eqx.filter_jit
     def step(
         model: DecomposedModel,
-        components: Any,
+        components: DecompVU,
         ci_fn: Any,
         residual: Float[Array, "*leading d"],
         key: PRNGKeyArray,
@@ -280,7 +281,7 @@ def make_stochastic_attn_patterns_step(
 def accumulate_attn_patterns(
     step: AttnPatternsStep,
     model: DecomposedModel,
-    components: Any,
+    components: DecompVU,
     ci_fn: Any,
     residual_batches: list[Float[Array, "*leading d"]],
     base_key: PRNGKeyArray,

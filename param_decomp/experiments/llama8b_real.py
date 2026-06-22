@@ -44,7 +44,7 @@ from param_decomp.ci_fn import (
     ChunkwiseTransformerCIArch,
     build_ci_fn,
 )
-from param_decomp.components import init_decomp_vu
+from param_decomp.components import SiteSpec, init_decomp_vu
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -54,7 +54,6 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.lm import SiteSpec
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import init_distributed

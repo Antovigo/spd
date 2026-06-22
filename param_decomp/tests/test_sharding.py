@@ -59,9 +59,8 @@ def test_jitted_sharded_inits_match_eager_values():
         ChunkwiseTransformerCIArch,
         build_ci_fn,
     )
-    from param_decomp.components import init_decomp_vu
+    from param_decomp.components import SiteC, init_decomp_vu
     from param_decomp.configs import BSCScope, SCScope
-    from param_decomp.lm import SiteC
     from param_decomp.targets.llama8b import canonical_site_cs, llama_site_specs
     from param_decomp.targets.llama8b_sharding import (
         init_ci_fn_placed,
@@ -167,7 +166,7 @@ def test_fresh_pgd_c_bc_sources_are_replica_identical():
     from jax.sharding import PartitionSpec as P
 
     from param_decomp.adversary import init_fresh_pgd_sources
-    from param_decomp.lm import SiteSpec
+    from param_decomp.components import SiteSpec
 
     mesh = dp_mesh()
     n = mesh.devices.size

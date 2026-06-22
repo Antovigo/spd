@@ -20,7 +20,7 @@ from param_decomp.ci_fn import (
     ChunkwiseTransformerCIFn,
     build_ci_fn,
 )
-from param_decomp.components import DecompVU, init_decomp_vu
+from param_decomp.components import DecompVU, SiteC, SiteSpec, init_decomp_vu
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -30,7 +30,7 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
+from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.targets.llama8b import FrozenAttn

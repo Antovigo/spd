@@ -25,6 +25,7 @@ from param_decomp.built_run import (
     WeightsDtype,
 )
 from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
+from param_decomp.components import SiteC
 from param_decomp.configs import (
     CEandKLLossesConfig,
     ChunkwiseTransformerCiConfig,
@@ -34,7 +35,6 @@ from param_decomp.configs import (
     PGDReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
 )
-from param_decomp.lm import SiteC
 from param_decomp.recon import build_recon_terms
 from param_decomp.targets import llama8b, llama_simple_mlp
 from param_decomp.targets.llama8b import SITE_NAME_PATTERN, canonical_site_cs

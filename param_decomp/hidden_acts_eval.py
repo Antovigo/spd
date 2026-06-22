@@ -32,6 +32,7 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
+from param_decomp.components import DecompVU
 from param_decomp.lm import DecomposedModel, all_false_routes
 from param_decomp.train import COMPUTE_DT, cast_floating
 
@@ -72,7 +73,7 @@ def make_ci_hidden_acts_step(lm: DecomposedModel) -> HiddenActsStep:
     @eqx.filter_jit
     def step(
         model: DecomposedModel,
-        components: Any,
+        components: DecompVU,
         ci_fn: Any,
         residual: Float[Array, "*leading d"],
         _key: PRNGKeyArray,
@@ -109,7 +110,7 @@ def make_stochastic_hidden_acts_step(lm: DecomposedModel, n_mask_samples: int) -
     @eqx.filter_jit
     def step(
         model: DecomposedModel,
-        components: Any,
+        components: DecompVU,
         ci_fn: Any,
         residual: Float[Array, "*leading d"],
         key: PRNGKeyArray,
@@ -155,7 +156,7 @@ def make_stochastic_hidden_acts_step(lm: DecomposedModel, n_mask_samples: int) -
 def accumulate_hidden_acts(
     step: HiddenActsStep,
     model: DecomposedModel,
-    components: Any,
+    components: DecompVU,
     ci_fn: Any,
     residual_batches: list[Float[Array, "*leading d"]],
     base_key: PRNGKeyArray,
