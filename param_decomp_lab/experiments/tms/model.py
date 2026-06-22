@@ -31,7 +31,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
-from param_decomp.ci_fn import CIValues
+from param_decomp.ci_fn import CI
 from param_decomp.llama8b import DecompVU
 from param_decomp.lm import DecomposedModel, SiteC, SiteSpec
 
@@ -53,10 +53,12 @@ def site_names_for(n_hidden_layers: int) -> tuple[str, ...]:
 
 
 class CIFnCallable(Protocol):
-    """The CI-fn surface the TMS target-CI probe needs: `__call__(site_inputs) -> CIValues`
-    (satisfied by both `ci_fn.CIFn` and `ci_fn_mlp.LayerwiseMLPCIFn`)."""
+    """The CI-fn surface the TMS target-CI probe needs: `__call__(taps) -> CI` plus the
+    `input_names` the probe feeds (satisfied by `ci_fn.LayerwiseMLPCIFn` / `GlobalMLPCIFn`)."""
 
-    def __call__(self, site_inputs: dict[str, Array]) -> CIValues: ...
+    input_names: tuple[str, ...]
+
+    def __call__(self, taps: dict[str, Array]) -> CI: ...
 
 
 @dataclass(frozen=True)
@@ -313,7 +315,9 @@ def tms_decomposed_model(cfg: TMSConfig, sites: tuple[SiteSpec, ...]) -> Decompo
         sites=sites,
         leading_axes=(),
         clean_output=clean_output,
-        site_inputs=site_inputs,
+        read_activations=lambda target, resid, wanted: {
+            k: site_inputs(target, resid)[k] for k in wanted
+        },
         masked_output=masked_output,
         masked_site_outputs=masked_site_outputs,
         weight_deltas=lambda target, components: weight_deltas_fp32(target, components, sites),
@@ -543,7 +547,8 @@ def single_feature_ci(
 ) -> dict[str, Array]:
     """Feed the single-feature probe and read the `lower_leaky` CI per site,
     `{site: [n_features, C]}`."""
-    return ci_fn(lm.site_inputs(target, single_feature_probe(n_features))).lower
+    probe = single_feature_probe(n_features)
+    return ci_fn(lm.read_activations(target, probe, ci_fn.input_names)).lower
 
 
 # ----------------------------- visualizations -----------------------------

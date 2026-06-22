@@ -19,16 +19,12 @@ from jax.typing import ArrayLike
 from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.adversary import init_sources_adam_state
-from param_decomp.ci_fn import CIArch
-from param_decomp.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
-from param_decomp.config import CIFnArch, DataConfig
+from param_decomp.ci_fn import CIFnArch
+from param_decomp.config import DataConfig
 from param_decomp.configs import OptimizerConfig, PDConfig
 from param_decomp.llama8b_sharding import (
-    init_ci_fn_sharded,
-    init_decomp_vu_replicated,
-    init_decomp_vu_sharded,
-    init_global_mlp_ci_fn_replicated,
-    init_layerwise_mlp_ci_fn_replicated,
+    init_ci_fn_placed,
+    init_decomp_vu_placed,
     init_sources_sharded,
 )
 from param_decomp.lm import DecomposedModel
@@ -120,16 +116,13 @@ def init_train_state(
     mesh: Mesh,
 ) -> TrainState:
     ci_key = random.fold_in(init_key, 1)
-    match ci_fn_arch:
-        case MLPCIArch():
-            components = init_decomp_vu_replicated(lm.sites, init_key, mesh)
-            ci_fn = init_layerwise_mlp_ci_fn_replicated(ci_fn_arch, lm.sites, ci_key, mesh)
-        case GlobalMLPCIArch():
-            components = init_decomp_vu_replicated(lm.sites, init_key, mesh)
-            ci_fn = init_global_mlp_ci_fn_replicated(ci_fn_arch, lm.sites, ci_key, mesh)
-        case CIArch():
-            components = init_decomp_vu_sharded(lm.sites, init_key, mesh)
-            ci_fn = init_ci_fn_sharded(ci_fn_arch, lm.sites, ci_key, mesh)
+    # Sharding is a SCALE decision, not an arch one: C-shard V/U + CI when the mesh has >1
+    # device and every site's C tiles it; otherwise replicate (single-device / toy meshes,
+    # or C not dividing the mesh). Same path for every CI-fn arch.
+    n = mesh.devices.size
+    shardable = n > 1 and all(s.C % n == 0 for s in lm.sites)
+    components = init_decomp_vu_placed(lm.sites, init_key, mesh, shardable)
+    ci_fn = init_ci_fn_placed(ci_fn_arch, lm.sites, ci_key, mesh, shardable)
     assert ci_fn.expects_axes == lm.leading_axes, (
         f"CI fn expects leading axes {ci_fn.expects_axes} but model has {lm.leading_axes}"
     )

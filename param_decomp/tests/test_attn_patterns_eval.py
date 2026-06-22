@@ -18,7 +18,12 @@ from param_decomp.attn_patterns_eval import (
     make_ci_attn_patterns_step,
     make_stochastic_attn_patterns_step,
 )
-from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    CIFn,
+    build_ci_fn,
+)
 from param_decomp.llama8b import (
     init_decomp_vu,
     llama_decomposed_lm,
@@ -33,7 +38,7 @@ from param_decomp.llama_simple_mlp import (
 from param_decomp.llama_simple_mlp import (
     site_specs as simple_site_specs,
 )
-from param_decomp.lm import SiteC
+from param_decomp.lm import DecomposedModel, SiteC
 from param_decomp.tests.test_llama8b import (
     _tiny_cfg as _llama_cfg,
 )
@@ -46,6 +51,22 @@ from param_decomp.tests.test_llama_simple_mlp import (
 from param_decomp.tests.test_llama_simple_mlp import (
     _tiny_target_and_prefix as _simple_target_and_prefix,
 )
+
+
+def _build_ci_fn(lm: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
+    """One transformer chunk over all sites, reading the residual entering the first
+    decomposed block. The old `CIArch(16, 1, 2, 32)` dims map onto the chunk arch."""
+    site_names = lm.site_names
+    first_block = min(int(name.split(".")[1]) for name in site_names)
+    arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=site_names),),
+        input_dim=n_embd,
+        d_model=16,
+        n_blocks=1,
+        n_heads=2,
+        mlp_hidden=32,
+    )
+    return build_ci_fn(arch, lm.sites, key)
 
 
 def test_attn_pattern_for_shape_and_causal_softmax_llama():
@@ -100,7 +121,7 @@ def _llama_attn_setup():
     sites = llama_site_specs(cfg, canonical_site_cs(site_cs))
     lm = llama_decomposed_lm(cfg, sites)
     components = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     return cfg, lm, target, components, ci_fn
 
 
@@ -175,7 +196,7 @@ def test_simple_mlp_step_runs_end_to_end():
     sites = simple_site_specs(cfg, site_cs)
     lm = llama_simple_mlp_decomposed_lm(cfg, sites)
     components = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     step = make_ci_attn_patterns_step(lm, attn_pattern_for(target))
     b, t = 2, 10
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
@@ -199,7 +220,7 @@ def test_attn_patterns_steps_reject_positionless_target():
         sites=(SiteSpec("linear1", 5, 2, 8), SiteSpec("linear2", 2, 5, 6)),
         leading_axes=(),
         clean_output=_unused,
-        site_inputs=_unused,
+        read_activations=_unused,
         masked_output=_unused,
         masked_site_outputs=_unused,
         weight_deltas=_unused,

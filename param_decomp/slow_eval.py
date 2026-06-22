@@ -119,10 +119,11 @@ def make_slow_eval_step(lm: DecomposedModel, ci_alive_threshold: float) -> SlowE
         # CI fn stays fp32 (its master dtype): torch offline-eval keeps V/U + CI fn fp32,
         # casting only the frozen target to bf16. The slow plot metrics are a
         # fp32-CI-fn readout, so we don't take eval.py's bf16-compute path here.
-        site_inputs = {
-            s: x.astype(jnp.float32) for s, x in lm.site_inputs(frozen, residual).items()
+        taps = {
+            k: x.astype(jnp.float32)
+            for k, x in lm.read_activations(frozen, residual, ci_fn.input_names).items()
         }
-        logits = ci_fn.site_logits(site_inputs)
+        logits = ci_fn(taps).logits
         lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in site_names}
 
         density_counts = {
@@ -201,10 +202,11 @@ def make_position_ci_step(lm: DecomposedModel) -> PositionCIStep:
     def position_ci_step(
         ci_fn: Any, frozen: Any, residual: Float[Array, "*leading d"]
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
-        site_inputs = {
-            s: x.astype(jnp.float32) for s, x in lm.site_inputs(frozen, residual).items()
+        taps = {
+            k: x.astype(jnp.float32)
+            for k, x in lm.read_activations(frozen, residual, ci_fn.input_names).items()
         }
-        logits = ci_fn.site_logits(site_inputs)
+        logits = ci_fn(taps).logits
         lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in site_names}
         upper = {s: upper_leaky_hard_sigmoid(logits[s]) for s in site_names}
         first = lower[site_names[0]]

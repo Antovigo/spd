@@ -17,7 +17,8 @@ orbax checkpoint and the target is built from its own config. CPU-friendly (jax 
 back to CPU); a single device is enough for a small harvest.
 
 `forward` mirrors the forward-only subset of `eval.make_eval_step`: clean logits +
-`site_inputs` + lower-leaky CI, plus per-component acts (the harvest extra). bf16
+the CI fn's residual taps + lower-leaky CI, plus per-component acts (the harvest extra,
+from the frozen per-site matrix inputs `lm.read_activations` serves for site-name keys). bf16
 compute on the components / CI fn (training's `COMPUTE_DT`) so consumed CI matches the
 trained model's; output probs are fp32 from the fp32-upcast frozen forward.
 """
@@ -196,11 +197,12 @@ def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
         residual = prefix_residual_fn(prefix, token_ids)
         clean_output = lm.clean_output(target, residual)
-        site_inputs = lm.site_inputs(target, residual)
+        taps = lm.read_activations(target, residual, ci_fn.input_names)
+        site_inputs = lm.read_activations(target, residual, site_names)
 
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        lower_ci = ci_fn_bf16(site_inputs).lower
+        lower_ci = ci_fn_bf16(taps).lower
 
         component_acts = {}
         for site in site_names:

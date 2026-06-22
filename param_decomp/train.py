@@ -34,8 +34,7 @@ from param_decomp.adversary import (
     source_masks,
     sources_adam_ascend_project,
 )
-from param_decomp.ci_fn import CIFn, CIValues
-from param_decomp.ci_fn_mlp import GlobalMLPCIFn, LayerwiseMLPCIFn
+from param_decomp.ci_fn import CI, CIFn
 from param_decomp.configs import AdamPGDConfig
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import (
@@ -54,10 +53,11 @@ from param_decomp.recon import (
     StochasticSources,
 )
 
-AnyCIFn = CIFn | LayerwiseMLPCIFn | GlobalMLPCIFn
-"""The CI-fn families: the shared-transformer (`ci_fn.py`, `expects_axes=("sequence",)`),
-the layerwise per-site MLP and the global shared MLP (`ci_fn_mlp.py`, `expects_axes=()`).
-All expose `__call__(site_inputs) -> CIValues` + `expects_axes`, so the step is agnostic."""
+AnyCIFn = CIFn
+"""Every CI fn satisfies the `CIFn` protocol (`__call__(taps) -> CI` + `input_names` /
+`output_names` / `expects_axes`): the chunkwise transformer (`ci_fn.py`,
+`expects_axes=("sequence",)`) for LMs, the per-site / global MLPs (`expects_axes=()`)
+for the positionless toys — all in `ci_fn.py`. The step is agnostic."""
 
 COMPUTE_DT = jnp.bfloat16
 
@@ -157,15 +157,17 @@ def make_train_step(
         spec = ["dp"] + [None] * (x.ndim - 1)
         return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
 
-    def batch_sharded_ci(ci_values: CIValues) -> CIValues:
+    def batch_sharded_ci(ci: CI) -> CI:
         """Reshard the CI-fn output to batch-sharded ONCE, here. The CI head's `out_w`
         is ΣC-sharded, so its output is born C-sharded; without a single producer-side
         pin, GSPMD inserts a separate C→batch reshard for every consumer (each plan
         forward, the adversaries, imp-min — forward and backward), and those
-        all-to-all buffers dominate the temp arena at scale."""
-        return CIValues(
-            lower={site: batch_sharded(v) for site, v in ci_values.lower.items()},
-            upper={site: batch_sharded(v) for site, v in ci_values.upper.items()},
+        all-to-all buffers dominate the temp arena at scale. `logits` is passed through
+        (unused in the step — only the squashings are; DCE drops it)."""
+        return CI(
+            logits=ci.logits,
+            lower={site: batch_sharded(v) for site, v in ci.lower.items()},
+            upper={site: batch_sharded(v) for site, v in ci.upper.items()},
         )
 
     @jaxtyped(typechecker=beartype)
@@ -272,12 +274,12 @@ def make_train_step(
 
         residual = batch_sharded(residual)
         clean_output = jax.lax.stop_gradient(batch_sharded(lm.clean_output(frozen, residual)))
-        site_inputs = lm.site_inputs(frozen, residual)
+        taps = lm.read_activations(frozen, residual, state.ci_fn.input_names)
 
         # ── adversary ascents: params + CI detached (SPEC §4.5) ──
         components_detached = jax.lax.stop_gradient(cast_floating(state.components, COMPUTE_DT))
         ci_fn_detached = jax.lax.stop_gradient(cast_floating(state.ci_fn, COMPUTE_DT))
-        ci_lower_detached = batch_sharded_ci(ci_fn_detached(site_inputs)).lower
+        ci_lower_detached = batch_sharded_ci(ci_fn_detached(taps)).lower
 
         # Persistent terms: n_warmup supplemental Adam ascents each, against the
         # route-ALL all-sites forward (SPEC S24 — torch warmup parity, NOT the term's
@@ -411,7 +413,7 @@ def make_train_step(
             components, ci_fn, persistent_sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)
             ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-            ci = batch_sharded_ci(ci_fn_bf16(site_inputs))
+            ci = batch_sharded_ci(ci_fn_bf16(taps))
             faith_loss = faithfulness_loss(lm.weight_deltas(frozen, components))
             imp_lp, imp_entropy = importance_minimality_terms(ci.upper, pnorm, imp_min.eps)
             imp_loss = imp_lp + imp_min.beta * imp_entropy

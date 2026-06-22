@@ -21,7 +21,11 @@ from param_decomp.checkpoint import (
     restore_step,
     save_state,
 )
-from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    build_ci_fn,
+)
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -38,15 +42,32 @@ from param_decomp.llama8b import (
     mlp_family_site_cs,
 )
 from param_decomp.llama8b_sharding import (
-    init_ci_fn_sharded,
-    init_decomp_vu_sharded,
+    init_ci_fn_placed,
+    init_decomp_vu_placed,
     init_sources_sharded,
 )
+from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import dp_mesh
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
 from param_decomp.train import TrainState, make_train_step
+from vendored_jax.llama import LlamaConfig
+
+
+def _chunkwise_arch(lm: DecomposedModel, cfg: LlamaConfig) -> ChunkwiseTransformerCIArch:
+    """The old `CIArch(16, 2, 2, 32)` → one chunk reading the residual entering the first
+    decomposed block and emitting CI for every site; `input_dim` is the residual width."""
+    site_names = lm.site_names
+    first_block = min(int(n.split(".")[1]) for n in site_names)
+    return ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=site_names),),
+        input_dim=cfg.n_embd,
+        d_model=16,
+        n_blocks=2,
+        n_heads=2,
+        mlp_hidden=32,
+    )
 
 
 def _build(seed: int):
@@ -56,7 +77,7 @@ def _build(seed: int):
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
     lm = llama_decomposed_lm(cfg, sites)
     vu = init_decomp_vu(sites, jax.random.PRNGKey(seed))
-    ci_fn = init_ci_fn(CIArch(16, 2, 2, 32), lm.sites, jax.random.PRNGKey(seed + 1))
+    ci_fn = build_ci_fn(_chunkwise_arch(lm, cfg), lm.sites, jax.random.PRNGKey(seed + 1))
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
     src = init_persistent_sources(
@@ -202,8 +223,11 @@ def _build_sharded(seed: int, mesh: Mesh):
     C, seq = 8 * n, 16
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
     lm = llama_decomposed_lm(cfg, sites)
-    vu = init_decomp_vu_sharded(sites, jax.random.PRNGKey(seed), mesh)
-    ci_fn = init_ci_fn_sharded(CIArch(16, 2, 2, 32), lm.sites, jax.random.PRNGKey(seed + 1), mesh)
+    shardable = n > 1 and all(s.C % n == 0 for s in sites)
+    vu = init_decomp_vu_placed(sites, jax.random.PRNGKey(seed), mesh, shardable)
+    ci_fn = init_ci_fn_placed(
+        _chunkwise_arch(lm, cfg), lm.sites, jax.random.PRNGKey(seed + 1), mesh, shardable
+    )
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
     src = init_sources_sharded(

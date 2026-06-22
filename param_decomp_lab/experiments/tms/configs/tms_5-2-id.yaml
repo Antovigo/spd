@@ -2,7 +2,7 @@
 # Inserts a frozen `hidden_layers.0` (n_hidden -> n_hidden, identity init) between linear1
 # and linear2, adding a third dense decomposition site. The dense site's ground-truth CI
 # is the dense pattern (all n_hidden directions live), not the per-feature identity.
-# CI fn: layerwise per-site MLP (fn_type=mlp, hidden_dims=[16]). Runs on 1 GPU.
+# CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[16]). Runs on 1 GPU.
 run_name: jax-tms-5-2-id
 out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 pd:
@@ -10,8 +10,7 @@ pd:
   n_mask_samples: 1
   sampling: continuous
   ci_config:
-    mode: layerwise
-    fn_type: mlp
+    type: layerwise_mlp
     hidden_dims:
     - 16
   decomposition_targets:

@@ -33,7 +33,7 @@ from jax.sharding import NamedSharding
 
 from param_decomp.adversary import SourcesAdamState, init_sources_adam_state
 from param_decomp.checkpoint import make_checkpoint_manager, restore_latest, save_state
-from param_decomp.ci_fn import CIArch
+from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -46,8 +46,8 @@ from param_decomp.configs import (
 from param_decomp.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
 from param_decomp.llama8b_sharding import (
     dp_mesh,
-    init_ci_fn_sharded,
-    init_decomp_vu_sharded,
+    init_ci_fn_placed,
+    init_decomp_vu_placed,
     init_sources_sharded,
 )
 from param_decomp.recon import build_recon_terms
@@ -87,8 +87,19 @@ def _build_sharded(seed: int):
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
     lm = llama_decomposed_lm(cfg, sites)
 
-    vu = init_decomp_vu_sharded(lm.sites, jax.random.PRNGKey(seed), mesh)
-    ci_fn = init_ci_fn_sharded(CIArch(16, 2, 2, 32), lm.sites, jax.random.PRNGKey(seed + 1), mesh)
+    n = mesh.devices.size
+    shardable = n > 1 and all(s.C % n == 0 for s in lm.sites)
+    first_block = min(int(s.name.split(".")[1]) for s in lm.sites)
+    ci_arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=lm.site_names),),
+        input_dim=cfg.n_embd,
+        d_model=16,
+        n_blocks=2,
+        n_heads=2,
+        mlp_hidden=32,
+    )
+    vu = init_decomp_vu_placed(lm.sites, jax.random.PRNGKey(seed), mesh, shardable)
+    ci_fn = init_ci_fn_placed(ci_arch, lm.sites, jax.random.PRNGKey(seed + 1), mesh, shardable)
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
     site_cs = tuple(s.C for s in lm.sites)

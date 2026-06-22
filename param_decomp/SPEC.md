@@ -66,7 +66,7 @@ and the tables (§2, §3, §6). Prose between them is orientation only. Notation
 | components opt | AdamW(.9, .999, ε 1e-8, wd 0), lr `1.5e-4` cosine → `0.1×`, **grad-clip 0.01** |
 | CI opt | AdamW(.9, .999, ε 1e-8, wd 0), lr `5e-5` cosine → `0.1×`, no clip |
 | faith warmup | 400 steps, AdamW lr `1e-3`, wd 0 |
-| CI fn | shared transformer: `d_model 4096`, 4 blocks, 64 heads, mlp `[16384]`, RoPE base 10000, bidirectional; leaky-hard sigmoid (hardwired) |
+| CI fn | chunkwise transformer (§4.6): per-chunk independent transformer, `d_model 4096`, 4 blocks, 64 heads, mlp `[16384]`, RoPE base 10000, bidirectional; leaky-hard sigmoid (hardwired) |
 | steps | 100k; checkpoint cadence per config |
 
 ## 3. State
@@ -105,17 +105,24 @@ def masked_forward(residual[B,T,d], live_sites, masks, delta_masks, routes) -> l
     each site s ∉ live_sites computes x @ W_s            # frozen path, NOT y_dec(mask=1)   (S2)
 
 def clean_output(residual)   = masked_forward(residual, live_sites=∅)                       (S3)
-def site_inputs(residual)    = the activation entering each site's weight on the clean path
-    # MLP sites: gate_in = up_in = post-ln2 residual; down_in = silu(gate)·up               (S4)
-    # attn sites: q_in = k_in = v_in = post-ln1 residual; o_in = pre-o_proj attn output
+def read_activations(residual, wanted: tuple[str,...]) -> {tap_key: [B,T,d_tap]}             (S4)
+    # general clean-path activation accessor keyed by OPAQUE tap keys. `wanted` is the
+    # CI fn's static `input_names`; the target is the sole key→activation interpreter.
+    # LM: residual-stream taps `resid.{layer}` (residual entering block `layer`), and/or
+    #     per-site matrix-input keys (site names) for harvest.
+    # positionless toys: the per-site matrix inputs, keyed by site name.
 ```
 
 ### 4.2 CI
 
 ```
-def ci(ci_fn, site_inputs) -> (ci_lower, ci_upper):      # each {site: [B,T,C]}
-    logits = CI_TRANSFORMER(ci_fn, site_inputs)          # architecture pinned in §4.6
-    return lower_leaky_hard(logits), upper_leaky_hard(logits)                               (S5)
+def ci(ci_fn, taps) -> CI{logits, lower, upper}:         # each {site: [B,T,C]}, sites PARTITION the model
+    logits = CI_ARCH(ci_fn, taps)                        # architecture pinned in §4.6 (★ chunkwise)
+    return CI.from_logits(logits)                        # the two squashings, centralized (S5)
+
+CI.from_logits(logits): lower = lower_leaky_hard(logits); upper = upper_leaky_hard(logits)
+    # `logits` is a KEPT view (histograms / heatmaps plot the pre-squash value).
+    # `ci_lower` ≡ CI.lower feeds every mask; `ci_upper` ≡ CI.upper feeds imp-min only.
 
 lower_leaky_hard: fwd clamp(x,0,1); CUSTOM bwd (nested where, boundaries are <=):
                   pass g on 0<x≤1; at x≤0 pass α·g ONLY where g<0, else 0; at x>1 zero.
@@ -171,8 +178,8 @@ def sources_update(sources, sources_grad, opt_state):
 def train_step(state, batch, step):
     residual = sg[ prefix_forward(batch) ]           # per fresh batch                      (S18)
     cln      = sg[ clean_output(residual) ]                                                  (S3)
-    ci_lower, ci_upper = ci(ci_fn, site_inputs(residual))   # ONE conceptual CI eval/step;
-                                                            # recompute allowed (deterministic)
+    CI = ci(ci_fn, read_activations(residual, ci_fn.input_names))   # ONE conceptual CI eval/step;
+    ci_lower, ci_upper = CI.lower, CI.upper                         # recompute allowed (deterministic)
     # -- supplemental adversary ascents (components & CI detached) --
     set SRC_STEP lr = sched_src(step)                # stepped once per TRAINING step       (S13)
     repeat n_warmup:
@@ -200,28 +207,58 @@ before the loop:                                                                
     repeat 400: components = adamw_warm(components, ∂faithfulness_loss/∂components, lr=1e-3)
 ```
 
-### 4.6 CI transformer architecture (pinned)
+### 4.6 CI architecture (pinned: chunkwise transformer)
+
+**AMENDED 2026-06-22** (Oli-approved): the abstract contract is UNCHANGED — `CI_fn:
+read_activations → CI` — but the pinned REALIZATION changes from one global transformer
+over every site's input concatenated to a **chunkwise transformer**: the sites partition
+into chunks, and each chunk runs its OWN independent transformer. (The CI fn is a protocol
+`dict[InputTap,Array] → CI`; the input keyspace — clean-path tap keys — is independent of
+the output keyspace — the decomposition sites — and the output sites must PARTITION the
+model's sites.)
 
 ```
-in:   {site: x_s [B,T,d_in_s]}  (clean site inputs, fixed site order)
-1.    h_s = rms_norm(x_s)                      # weightless; eps = finfo(fp32).eps ~1.19e-7 (S4)
-2.    h   = concat_s(h_s) @ W_in + b_in        # → [B,T,d_model]; NO nonlinearity here
+in:   {tap_key: x [B,T,d_tap]}  (clean-path taps = ci_fn.input_names; opaque keys, §4.1 S4)
+sites partition into CHUNKS; each chunk c declares input_taps ⊆ tap_keys and output_sites.
+per chunk c (an INDEPENDENT pre-norm bidirectional-RoPE transformer):
+1.    h_c = concat_{k ∈ input_taps_c}( rms_norm(x_k) )   # weightless per tap;
+                                                          # eps = finfo(fp32).eps ~1.19e-7 (S4)
+                                                          # → [B,T, input_dim]
+2.    h   = h_c @ W_in_c + b_in_c                         # → [B,T,d_model]; NO nonlinearity here
 3.    × n_blocks (pre-norm):
         h += attn(rms_norm_weightless(h))      # bidirectional MHA, rotate-half RoPE
                                                # base 10000; q/k/v/out bias-FREE
                                                # RoPE inv_freq is a stop-gradient buffer (S27)
         h += mlp(rms_norm_weightless(h))       # Linear(d→16384)+b → GELU(erf, NOT tanh) → Linear(→d)+b (S6)
-4.    logits = h @ W_out + b_out               # → [B,T, Σ_s C_s], split per site in order
-init: biases zero; weights fan-in scaled (torch init_param_)
+4.    c_chunk_c = h @ W_out_c + b_out_c        # → [B,T, Σ_{s ∈ output_sites_c} C_s]
+                                               # split back per site, in the chunk's site order
+the per-chunk transformers are STACKED along a leading n_chunks axis and run under ONE
+eqx.filter_vmap → requires HOMOGENEOUS chunks: equal total input width (`input_dim`) and
+equal `c_chunk` (Σ C over the chunk's output sites). Asserted at init.
+init: biases zero; weights fan-in scaled (Kaiming: relu-gain √2 on in_proj / MLP-in,
+      linear gain 1 on out / MLP-out; PyTorch-default U(±1/√fan_in) on the attn projections)
 ```
 
-CI-fn numerics unify with the torch oracle (#624/#625/#730, resolved "unify — match
-torch"): GELU is exact-erf (`jax.nn.gelu(..., approximate=False)`, matching torch
-`nn.GELU()`), and the weightless RMSNorm uses `eps = finfo(fp32).eps` (`CI_FN_RMS_EPS`,
-matching torch `F.rms_norm`'s default `eps=None → finfo(x.dtype).eps`; RMS upcasts to
-fp32, so fp32 finfo governs). This makes torch→JAX CI-fn weight transfer bit-faithful
-on the clean path. Refs: `ci_fn.py` GELU line + `CI_FN_RMS_EPS`; torch
-`ci_nn_blocks.py:167,174`.
+`input_dim` is a generic linear-input width (a plain in_proj fan-in), NOT a residual-dim
+or transformer concept in core — the lab computes it from the taps it authored (their
+widths summed) and core stays agnostic to what the taps mean. Layerwise (one site per
+chunk) and global (all sites in one chunk) are degenerate chunkings of this same form.
+The positionless toys (`expects_axes=()`) are the MLP siblings (`LayerwiseMLPCIFn` /
+`GlobalMLPCIFn`), not transformers.
+
+CI-fn numerics still unify with the torch oracle's per-block primitives (#624/#625/#730,
+resolved "unify — match torch"): GELU is exact-erf (`jax.nn.gelu(..., approximate=False)`,
+matching torch `nn.GELU()`), the weightless RMSNorm uses `eps = finfo(fp32).eps`
+(`CI_FN_RMS_EPS`, matching torch `F.rms_norm`'s default `eps=None → finfo(x.dtype).eps`;
+RMS upcasts to fp32, so fp32 finfo governs), and RoPE is base-10000 bidirectional with
+`inv_freq` stop-gradient'd (S27). **Torch-oracle scope (AMENDED 2026-06-22):** the
+CI-fn ARCHITECTURE is now JAX-native and INTENTIONALLY no longer bit-faithful to the
+torch oracle's single global-concat CI fn — the chunkwise partition has no torch
+counterpart, so the prior "torch→JAX CI-fn weight transfer is bit-faithful on the clean
+path" clause is RETIRED. Everything else remains torch-oracle-grounded — recon,
+faithfulness, sources/PPGD, the squashings (S5/S6), the imp-min reduction, the grad clip
+(S19), the schedules (S20) — and the `tests/equivalence/` suite still pins them. Refs:
+`ci_fn.py` (`ChunkwiseTransformerCIFn`, `CIBlock`, GELU line, `CI_FN_RMS_EPS`, `inv_freq`).
 
 ---
 
@@ -232,8 +269,8 @@ on the clean path. Refs: `ci_fn.py` GELU line + `CI_FN_RMS_EPS`; torch
 | S1 | `mask = ci + (1−ci)·source` per component channel; the delta channel is the raw source value, never ci-interpolated; CI has no delta output. |
 | S2 | A site not live in a forward runs the frozen `x @ W_s` path — zero V/U gradient, zero decomposition rounding, and none of the live path's ~9× compute or `(B,T,C)` activations. |
 | S3 | The recon target `clean_output` is the frozen-path forward, stop-gradient. Never the `mask=1, delta=1` decomposed identity (differs in bf16 and pollutes the graph). Under residual-start (S18), `clean_output` is the SUFFIX-only clean forward over the harvested residual (`clean_suffix_logits`); this equals the whole-model frozen forward because the frozen prefix is stop-gradient'd and runs once outside the graph — the two forms are identical under sg of the frozen prefix. The on-branch torch single-pool reference computes the whole-model frozen forward; JAX computes the suffix-only form; they agree by this equivalence. |
-| S4 | CI inputs are the clean site inputs from the frozen path of the same batch. |
-| S5 | `ci_lower` and `ci_upper` are two squashings of the SAME logits. `ci_lower` feeds every mask; `ci_upper` feeds imp-min only; no other crossing. |
+| S4 | **AMENDED 2026-06-22** (Oli-approved): CI inputs come from `read_activations(residual, ci_fn.input_names)` — a GENERAL clean-path activation accessor keyed by OPAQUE tap keys (was the fixed `site_inputs` seam). `input_names` is the CI fn's static declaration; the target is the SOLE key→activation interpreter, producing exactly the requested taps off the frozen path of the same batch. For the LM these are residual-stream taps `resid.{layer}` (the residual entering block `layer`) and/or per-site matrix-input keys (site names) for harvest; for positionless toys they are the per-site matrix inputs. Core never parses a key. (Was: "CI inputs are the clean site inputs from the frozen path of the same batch.") |
+| S5 | **AMENDED 2026-06-22** (Oli-approved): the CI fn returns a `CI{logits, lower, upper}` bundle (was `(ci_lower, ci_upper)`). `lower` and `upper` are two squashings of the SAME `logits`, centralized in `CI.from_logits` (no impl re-triplicates them); `logits` is KEPT as a consumed view (histograms / heatmaps plot the pre-squash value). `ci_lower ≡ CI.lower` feeds every mask; `ci_upper ≡ CI.upper` feeds imp-min only; no other crossing. The squashings themselves (S6) are UNCHANGED — only the bundling and the `logits` view changed. The CI fn is a protocol `dict[InputTap,Array] → CI` whose output sites PARTITION the model's sites (input keyspace independent of output keyspace). |
 | S6 | The squashings' forward/backward are exactly §4.2 — including `lower_leaky_hard`'s grad-sign-gated lower leak (a custom VJP, not autodiff of the forward). The backward is a nested `where` with `<=` boundaries: on `0 < x <= 1` pass `g`; at `x <= 0` pass `α·g` ONLY where `g < 0`, else `0`; at `x > 1` pass `0`; `α=0.01`. The boundary tie at `x=0` resolves to the LOWER (`x <= 0`) branch — this `<=` placement is exactly what makes torch (`ci_sigmoids.py`) and JAX (`ci_fn.py`, `_lhs_b`) bit-identical and is load-bearing, not incidental. Grad-checked by `tests/test_lower_leaky_hard_grad.py` (`g<0` vs `g>0` at `x<0`, `x∈(0,1]`, `x>1`; #789). |
 | S7 | Imp-min groups per site: the `log2(1+sum)` consumes one site's per-component sum. Merging sites/layers into one group is incorrect (convexity). |
 | S8 | The per-component sums are over the **global batch**, accumulated before the `log2`. (Per-shard results combined after the log are incorrect — Jensen; see D2.) |
@@ -255,7 +292,7 @@ on the clean path. Refs: `ci_fn.py` GELU line + `CI_FN_RMS_EPS`; torch
 | S24 | A persistent term's WARMUP ascents forward all sites, routed everywhere — regardless of the term's loss plan (torch parity: `persistent_pgd_state.warmup` hardcodes route-all). A fresh-PGD entry draws its routing ONCE per step, shared by all its ascents and its main loss forward (torch parity: `pgd_masked_recon_loss_update`). |
 | S25 | Recon KL direction is `KL(softmax(clean_output) ‖ softmax(masked_output))` — `P = clean`, `Q = masked`. Equivalently `Σ p_clean · (log p_clean − log p_masked)`. Torch `recon_loss_kl` realizes this as `F.kl_div(log_softmax(pred=masked), softmax(target=clean), reduction='sum')` (`batch_and_loss_fns.py::recon_loss_kl`); reversing the arguments is a silent, plausible bug, so the direction is semantic, not incidental. |
 | S26 | Normalization identity: `(Σ_forwards sum_kl) / (Σ_forwards n_positions) == mean_forwards(sum_kl / n_positions)`, valid **iff** every forward shares the same `(B,T)` (so `n_positions` is constant across forwards). This precondition is what makes JAX's mean-over-forwards (S10′) equal torch's `(Σ sum_kl)/(Σ n_positions)` accumulator; uniform `(B,T)` across all forwards in a term is therefore required. (Stated in LOSS_PARITY_DESIGN §4e; cross-ref S10′.) |
-| S27 | The CI transformer's RoPE `inv_freq` (§4.6) is a non-trained buffer and MUST be stop-gradient'd in the CI fn. In JAX it is a pytree leaf and would otherwise be optax-updated, silently drifting the rotary frequencies; torch carries it as a registered buffer (no grad). Ref `ci_fn.py:115`. |
+| S27 | The CI transformer's RoPE `inv_freq` (§4.6) is a non-trained buffer and MUST be stop-gradient'd in the CI fn. In JAX it is a pytree leaf and would otherwise be optax-updated, silently drifting the rotary frequencies. In the chunkwise CI fn `inv_freq` is shared across chunks (a single buffer, NOT mapped over `n_chunks`) and `stop_gradient`'d inside `ChunkwiseTransformerCIFn.__call__` before the `filter_vmap`. Ref `ci_fn.py` (`ChunkwiseTransformerCIFn.__call__`, `jax.lax.stop_gradient(self.inv_freq)`). |
 | S28 | Eval runs in-loop in TWO tiers (§10): a FAST scalar tier on cadence `eval.every`, and a SLOW/plot tier on cadence `eval.slow_every` (a multiple of `every`, so it lands on a fast-eval step and REUSES that step's in-memory eval batches — no second forward, no second data read). Slow/plot eval is IN-LOOP ONLY — there is no offline/retrospective CLI (`pd-slow-eval` and `run_offline_slow_eval` are removed; `slow_eval.py` is a pure library of the accumulate/render/metric fns the in-loop tier calls). The slow tier renders the plot metrics (`CIHistograms`, `ComponentActivationDensity`, `CIMeanPerComponent` → the shared `render_slow_eval_figures` figure set), the config-gated CI-heatmap / `PermutedCIPlots` figures + the `IdentityCIError` scalars (both driven by the cheap `(T, C)` per-site position-CI matrix from `accumulate_position_ci`, gated on the config naming them), the two hidden-acts recon scalars (`compute_hidden_acts_metrics`), and — when the config names it — the `UVPlots` figure. `UVPlots` is a config-gated figure metric usable for ANY decomposition (the torch `Metric` pattern: it returns a wandb figure): cheap for the toys (TMS/ResidMLP — small, replicated, on-host V/U, no gather; rendered off the toy probe CI by `render_uv_figure`), and a NAIVE full host gather of the C-sharded V/U for the LM in-loop tier (`run.py` gathers V/U only when `want_uv_plots` and passes `components` to `render_permutation_figures`). The LM gather OOMs / breaks at production C BY DESIGN (per Oli) — no special handling, the gather (collective, on the eval pass) is the cost; zero cost when `UVPlots` is not named. The slow tier is forward-only (one target forward + the CI-fn forward + sigmoid + C-sized reductions; no backward / masking grid / PPGD / optimizer state), so its peak HBM ≤ the train step's own high-water mark (the UVPlots gather aside) — where training fits, in-loop slow eval fits. **AMENDED 2026-06-18** (Oli-approved): reverses the migration-era "slow tier is offline-only, no in-loop analog" decision (and supersedes the retired torch-era push-triggered `pd-offline-eval` sidecar); the slow tier runs in-loop next to the fast pass. **RE-AMENDED 2026-06-19** (Oli-approved): drops the "`pd-slow-eval` CLI retained" clause — slow eval is in-loop only — and makes `UVPlots` an in-loop config-gated figure metric (cheap for toys, naive/breaks-at-scale for the LM by design) rather than offline-only. The lineage of why the out-of-process sidecar is a known dead end is recorded in lore `2026-06-18--in-loop-slow-eval-proposal`. |
 | S28a | **Multi-host split (in-loop slow tier).** The slow tier separates a COLLECTIVE part — run in lockstep on ALL ranks — from a pure-HOST part — run on rank 0 only, OFF the train loop. Collective: the jitted forward + the device→host pull (`accumulate_site_reductions` / `compute_hidden_acts_metrics` / `accumulate_position_ci` materialize C-sharded reductions to numpy; `np.asarray` triggers the all-gather every rank must join — `accumulate_position_ci` runs only when the config names a CI-heatmap / permutation / identity-error metric, so it adds zero cost otherwise). When the config names `UVPlots`, the C-sharded V/U is ALSO gathered to host here (`np.asarray` over `state.components.vu`) — a NAIVE collective gather that OOMs / breaks at production C by design (S28); gated on `want_uv_plots`, so zero cost otherwise. Host: matplotlib render + `wandb.log` of the figure PNGs (the base set + the config-driven CI heatmaps + `UVPlots` when the V/U was gathered), handed to a `SlowEvalRenderer` BACKGROUND THREAD on rank 0 (`run.py`) — the main loop proceeds immediately on every rank, near-zero cross-rank divergence. The thread touches ZERO jax/device state; at most one render is in flight (a new submit `join()`s the prior first); an `atexit` join flushes the last render before process exit (the trainer never calls `wandb.finish`). The hidden-acts SCALARS and the `IdentityCIError` SCALARS ride the live `_step` axis (the fast eval record, computed on the collective path and logged synchronously by the sink at the eval step — cheap, and scalars must stay `_step`-monotonic, so they are NOT deferred to the background thread); the FIGURES log on `_step` at `step=now_step` from the background thread — a render that lands after the head advances past `now_step` is dropped by wandb's monotonic-`_step` rule (a benign one-figure-set miss, warned not raised), which slow eval's forward-only seconds against a coarse `slow_every` is not expected to hit. The toys run the same `UVPlots` figure synchronously on CPU (single-process, tiny V/U): `toy_uv_eval.log_uv_figure` renders + logs it from the toy `eval_fn` on the live `_step` axis when the config names it. |
 | S29 | JAX `EvalConfig` carries `batch_size`, `every`, `n_steps`, `slow_every`, `slow_on_first_step`, `slow_n_batches_accum` (+ `rounding_threshold`, `ci_alive_threshold`). `slow_every` / `slow_on_first_step` are read from the canonical schema and drive the in-loop slow tier (S28); `slow_n_batches_accum` is the `CIHistograms.n_batches_accum` histogram-sample cap (None = uncapped). `eval` is atomic-optional (`EvalConfig | None`): `None` disables in-loop eval (both tiers). **AMENDED 2026-06-18**: re-adds `slow_every` / `slow_on_first_step`, deliberately dropped in the original S29 when the slow tier was offline-only. |
@@ -323,10 +360,10 @@ ancestry are on-branch (rows below).
 | §4.3 recon term (stochastic) | OFF-BRANCH: `param_decomp_lab/metrics/chunkwise_subset_recon.py` (`ChunkwiseSubsetReconLoss`) on `feature/fsdp-lm-trainer`; pinned by `tests/equivalence/` fixtures, no on-branch Metric |
 | §4.4–4.5 adversary, ordering | `param_decomp/metrics/persistent_pgd_state.py` (init/warmup/step/scopes; source Adam denom `v_hat.sqrt().add_(eps)` @ `:125` — N1), `param_decomp/metrics/persistent_pgd_recon.py` (`before_backward`/`after_backward`), `param_decomp/metrics/pgd_utils.py`, `param_decomp/train_step.py::run_loss_step` (hook order), `param_decomp/optimize.py` (clip → step) |
 | §4.5 warmup, schedules | `param_decomp/faithfulness_warmup.py`, `param_decomp_config/schedule.py::get_scheduled_value` |
-| §4.6 CI arch | `param_decomp/ci_fns.py::GlobalSharedTransformerCiFn` (`:156`), `param_decomp/ci_nn_blocks.py` |
+| §4.6 CI arch (torch oracle, RETIRED for arch) | `param_decomp/ci_fns.py::GlobalSharedTransformerCiFn`, `param_decomp/ci_nn_blocks.py` — the torch global-concat CI fn, no longer bit-faithful to the pinned JAX arch (§4.6 AMENDED 2026-06-22); JAX arch is native (`ci_fn.py::ChunkwiseTransformerCIFn`) |
 
 The JAX implementation (`jax_single_pool/train.py`) uses these pseudocode names
-verbatim: `clean_output`, `site_inputs`, `source_masks`, `stochastic_recon_loss`,
+verbatim: `clean_output`, `read_activations`, `source_masks`, `stochastic_recon_loss`,
 `adversarial_recon_loss`, `sources_adam_ascend_project`, `ReconPlan`/`ReconForward`,
 `uniform_k_routing`, `subset_chunk_plan`, `per_site_plan`.
 

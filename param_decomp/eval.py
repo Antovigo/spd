@@ -135,12 +135,12 @@ def make_eval_step(
     ) -> dict[str, Array]:
         residual = batch_sharded(residual)
         clean_output = batch_sharded(lm.clean_output(frozen, residual))
-        site_inputs = lm.site_inputs(frozen, residual)
+        taps = lm.read_activations(frozen, residual, ci_fn.input_names)
 
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
         # one explicit C-shard -> batch-shard reshard; see train.py batch_sharded_ci
-        ci_lower = {site: batch_sharded(v) for site, v in ci_fn_bf16(site_inputs).lower.items()}
+        ci_lower = {site: batch_sharded(v) for site, v in ci_fn_bf16(taps).lower.items()}
 
         leading = token_ids.shape
         zeros_delta = {site: jnp.zeros(leading, COMPUTE_DT) for site in site_names}

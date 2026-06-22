@@ -16,13 +16,13 @@ from typing import Any, Self
 from pydantic import Field, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
-from param_decomp.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
-from param_decomp.config import CIFnArch, RunInstance
+from param_decomp.ci_fn import CIFnArch, GlobalMLPCIArch, MLPCIArch
+from param_decomp.config import RunInstance
 from param_decomp.configs import (
     AnyEvalMetricConfig,
     Cadence,
-    GlobalSharedMlpCiConfig,
-    LayerwiseCiConfig,
+    GlobalMlpCiConfig,
+    LayerwiseMlpCiConfig,
     OptimizerConfig,
     PDConfig,
     ResumeProvenance,
@@ -92,28 +92,25 @@ _RUN_ID_PATTERN = re.compile(r"^p-[0-9a-f]{8}$")
 
 
 def layerwise_mlp_ci_arch(cfg: "ExperimentConfig[Any, Any]") -> MLPCIArch:
-    """Extract the layerwise per-site MLP CI-fn arch (`fn_type=mlp`) from a schema config.
-    Reused by the lab toy providers (which build their own runtime `ExperimentConfig`)."""
+    """Extract the layerwise per-site MLP CI-fn arch (`type=layerwise_mlp`) from a schema
+    config. Reused by the lab toy providers (which build their own runtime
+    `ExperimentConfig`)."""
     ci = cfg.pd.ci_config
-    assert isinstance(ci, LayerwiseCiConfig), ci
-    assert ci.fn_type == "mlp", f"layerwise CI fn must be fn_type=mlp, got {ci.fn_type}"
-    assert ci.hidden_dims, "layerwise MLP CI fn needs at least one hidden layer"
+    assert isinstance(ci, LayerwiseMlpCiConfig), ci
     return MLPCIArch(hidden_dims=tuple(ci.hidden_dims))
 
 
 def toy_ci_arch(cfg: "ExperimentConfig[Any, Any]") -> CIFnArch:
     """Extract the MLP CI-fn arch for a toy run: the layerwise per-site MLP
-    (`mode=layerwise, fn_type=mlp`) or the global shared MLP (`mode=global,
-    fn_type=global_shared_mlp`)."""
+    (`type=layerwise_mlp`) or the global shared MLP (`type=global_mlp`)."""
     ci = cfg.pd.ci_config
     match ci:
-        case LayerwiseCiConfig():
+        case LayerwiseMlpCiConfig():
             return layerwise_mlp_ci_arch(cfg)
-        case GlobalSharedMlpCiConfig():
-            assert ci.hidden_dims, "global_shared_mlp CI fn needs at least one hidden layer"
+        case GlobalMlpCiConfig():
             return GlobalMLPCIArch(hidden_dims=tuple(ci.hidden_dims))
         case _:
-            raise AssertionError(f"toy CI fn must be layerwise mlp or global_shared_mlp, got {ci}")
+            raise AssertionError(f"toy CI fn must be layerwise_mlp or global_mlp, got {ci}")
 
 
 def _assert_cosine_to_tenth(schedule: ScheduleConfig, who: str) -> None:

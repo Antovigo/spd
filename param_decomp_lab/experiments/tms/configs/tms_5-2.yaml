@@ -9,14 +9,13 @@ out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
 # and FaithfulnessLoss is in the loss list (the JAX recon-term builder requires it; the
 # torch TMS configs relied on faith warmup alone). The decomposition is UNTIED
 # (linear1/linear2 are two sites with independent V/U), the target is
-# tied. CI fn: layerwise per-site MLP (fn_type=mlp, hidden_dims=[16]). Runs on 1 GPU.
+# tied. CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[16]). Runs on 1 GPU.
 pd:
   seed: 0
   n_mask_samples: 1
   sampling: continuous
   ci_config:
-    mode: layerwise
-    fn_type: mlp
+    type: layerwise_mlp
     hidden_dims:
     - 16
   decomposition_targets:

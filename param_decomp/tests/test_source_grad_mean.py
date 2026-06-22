@@ -38,7 +38,7 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.adversary import init_persistent_sources, source_masks
-from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch, build_ci_fn
 from param_decomp.llama8b import (
     init_decomp_vu,
     llama_decomposed_lm,
@@ -61,7 +61,16 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 6, C))
     lm = llama_decomposed_lm(cfg, sites)
     vu = init_decomp_vu(sites, random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 2, 2, 32), lm.sites, random.PRNGKey(2))
+    first_block = min(int(name.split(".")[1]) for name in lm.site_names)
+    ci_arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=lm.site_names),),
+        input_dim=cfg.n_embd,
+        d_model=16,
+        n_blocks=2,
+        n_heads=2,
+        mlp_hidden=32,
+    )
+    ci_fn = build_ci_fn(ci_arch, lm.sites, random.PRNGKey(2))
     src = init_persistent_sources(
         lm.site_names, tuple(s.C for s in lm.sites), (1, seq), random.PRNGKey(3)
     )
@@ -76,8 +85,8 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
 
     components_bf16 = cast_floating(vu, COMPUTE_DT)
     ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-    site_inputs = lm.site_inputs(tgt, resid)
-    ci_lower = ci_fn_bf16(site_inputs).lower
+    taps = lm.read_activations(tgt, resid, ci_fn.input_names)
+    ci_lower = ci_fn_bf16(taps).lower
     clean_output = jax.lax.stop_gradient(lm.clean_output(tgt, resid))
 
     def source_loss(sources: dict[str, jax.Array]) -> jax.Array:

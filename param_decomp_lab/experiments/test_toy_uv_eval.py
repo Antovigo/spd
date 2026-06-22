@@ -13,7 +13,7 @@ from typing import Any
 import jax
 import pytest
 
-from param_decomp.ci_fn_mlp import MLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.ci_fn import MLPCIArch, init_layerwise_mlp_ci_fn
 from param_decomp.llama8b import init_decomp_vu
 from param_decomp.lm import SiteC
 from param_decomp_lab.experiments import toy_uv_eval
@@ -33,7 +33,8 @@ def _toy_setup():
     ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(0))
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
     frozen = init_tms_target(cfg, jax.random.PRNGKey(3))
-    probe_upper = ci_fn(lm.site_inputs(frozen, single_feature_probe(cfg.n_features))).upper
+    probe = single_feature_probe(cfg.n_features)
+    probe_upper = ci_fn(lm.read_activations(frozen, probe, ci_fn.input_names)).upper
     return lm, vu, probe_upper
 
 

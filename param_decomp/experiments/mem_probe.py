@@ -33,7 +33,11 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
-from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    build_ci_fn,
+)
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -93,13 +97,18 @@ def _place_state(typed: TrainState, mesh: Mesh) -> TrainState:
 
 
 def _typed_state_struct(
-    lm: Any, opt_vu: Any, opt_ci: Any, ci_arch: CIArch, src_leading: tuple[int, int], key: Any
+    lm: Any,
+    opt_vu: Any,
+    opt_ci: Any,
+    ci_arch: ChunkwiseTransformerCIArch,
+    src_leading: tuple[int, int],
+    key: Any,
 ) -> TrainState:
     """The `TrainState` pytree STRUCTURE (typed, sharding-less) via the UNSHARDED init
     constructors under `eval_shape` — allocates nothing. `_place_state` then attaches the
     GSPMD shardings per leaf, reproducing the trainer's sharded init abstractly."""
     components = init_decomp_vu(lm.sites, key)
-    ci_fn = init_ci_fn(ci_arch, lm.sites, random.fold_in(key, 1))
+    ci_fn = build_ci_fn(ci_arch, lm.sites, random.fold_in(key, 1))
     sources = init_persistent_sources(
         lm.site_names, tuple(s.C for s in lm.sites), src_leading, random.fold_in(key, 2)
     )
@@ -176,7 +185,14 @@ def main() -> None:
         loss_metrics, lm.site_names, n_mask_samples=1, sampling="continuous"
     )
 
-    ci_arch = CIArch(4096, 4, 64, 16384)
+    ci_arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{args.first_layer}",), output_sites=lm.site_names),),
+        input_dim=cfg.n_embd,
+        d_model=4096,
+        n_blocks=4,
+        n_heads=64,
+        mlp_hidden=16384,
+    )
     key_repl = jax.ShapeDtypeStruct((2,), jnp.uint32, sharding=NamedSharding(mesh, P()))
 
     typed = jax.eval_shape(

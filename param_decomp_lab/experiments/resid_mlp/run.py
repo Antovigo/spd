@@ -141,7 +141,7 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
     @jax.jit
     def single_feature_ci(ci_fn: Any) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
         resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ frozen.W_E
-        ci = ci_fn(lm.site_inputs(frozen, resid))
+        ci = ci_fn(lm.read_activations(frozen, resid, ci_fn.input_names))
         return ci.lower, ci.upper
 
     uv_spec = toy_uv_eval.toy_uv_spec(lm, raw_cfg)

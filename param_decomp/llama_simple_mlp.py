@@ -312,40 +312,64 @@ def clean_suffix_logits(target: SimpleMLPTarget, resid: Float[Array, "b t d"]) -
     return x @ target.lm_head.T
 
 
-def clean_site_inputs(
+def _tap_layer(key: str) -> int:
+    """Global block index a `read_activations` key reads at: the block a `resid.{L}` tap
+    enters, or the block a decomposed site lives in."""
+    if key.startswith("resid."):
+        return int(key.split(".")[1])
+    return parse_site_name(key)[0]
+
+
+def clean_activations(
     target: SimpleMLPTarget,
     first_layer: int,
-    site_names: tuple[str, ...],
+    wanted: tuple[str, ...],
     resid: Float[Array, "b t d"],
 ) -> dict[str, Array]:
-    """Clean CI inputs per site (SPEC S4), all on the frozen path, threaded layer to
-    layer: q/k/v ← the post-LN1 residual, o ← the pre-o_proj attention output,
-    c_fc ← the post-LN2 residual, down_proj ← gelu(c_fc out)."""
+    """Frozen-path activation accessor (CI input side, SPEC S4; harvest's per-site matrix
+    inputs).
+
+    `wanted` keys are either `resid.{global_layer}` (residual stream ENTERING that block —
+    the chunkwise CI fn's `input_names`) or a decomposed SITE NAME (the activation entering
+    that site's weight on the frozen path: `q/k/v_proj` ← post-LN1 residual, `o_proj` ← the
+    attention output, `c_fc` ← post-LN2 residual, `down_proj` ← `gelu_tanh(mlp_in @ Wfc)`).
+    The residual is threaded identically to `clean_suffix_logits`; the per-site intermediates
+    come from the same RMSNorm/attn/MLP math."""
     assert resid.shape[1] <= target.n_ctx, (resid.shape, target.n_ctx)
-    wanted = frozenset(site_names)
-    last_site_layer = max(parse_site_name(name)[0] for name in site_names)
-    inputs: dict[str, Array] = {}
+    wanted_set = frozenset(wanted)
+    last = max(_tap_layer(key) for key in wanted)
+    site_kinds_by_layer: dict[int, set[str]] = {}
+    for key in wanted_set:
+        if not key.startswith("resid."):
+            layer_idx, kind = parse_site_name(key)
+            site_kinds_by_layer.setdefault(layer_idx, set()).add(kind)
+    taps: dict[str, Array] = {}
     x = resid
     for layer_offset, layer in enumerate(target.layers):
         layer_idx = first_layer + layer_offset
-        if layer_idx > last_site_layer:
+        if f"resid.{layer_idx}" in wanted_set:
+            taps[f"resid.{layer_idx}"] = x
+        kinds = site_kinds_by_layer.get(layer_idx, set())
+        if kinds:
+            attn = layer.attn
+            h1 = rms_norm(x, layer.ln1, target.eps)
+            for kind in ("q_proj", "k_proj", "v_proj"):
+                if kind in kinds:
+                    taps[site_name(layer_idx, kind)] = h1
+            attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
+            if "o_proj" in kinds:
+                taps[site_name(layer_idx, "o_proj")] = attn_y
+            post_attn = x + attn_y @ attn.wo.T
+            mlp_in = rms_norm(post_attn, layer.ln2, target.eps)
+            if "c_fc" in kinds:
+                taps[site_name(layer_idx, "c_fc")] = mlp_in
+            if "down_proj" in kinds:
+                taps[site_name(layer_idx, "down_proj")] = _gelu_tanh(mlp_in @ layer.Wfc.T)
+        if layer_idx == last:
             break
-        attn = layer.attn
-        h1 = rms_norm(x, layer.ln1, target.eps)
-        attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
-        post_attn = x + attn_y @ attn.wo.T
-        mlp_in = rms_norm(post_attn, layer.ln2, target.eps)
-        down_in = _gelu_tanh(mlp_in @ layer.Wfc.T)
-        for kind, site_input in (
-            ("q_proj", h1), ("k_proj", h1), ("v_proj", h1), ("o_proj", attn_y),
-            ("c_fc", mlp_in), ("down_proj", down_in),
-        ):  # fmt: skip
-            name = site_name(layer_idx, kind)
-            if name in wanted:
-                inputs[name] = site_input
-        x = post_attn + down_in @ layer.Wdown.T
-    assert set(inputs) == wanted, (sorted(inputs), sorted(wanted))
-    return inputs
+        x = _clean_block(layer, x, target.inv_freq, target.eps)
+    assert set(taps) == wanted_set, (sorted(taps), sorted(wanted))
+    return taps
 
 
 def _masked_site_out(
@@ -503,7 +527,9 @@ def llama_simple_mlp_decomposed_lm(
         sites=sites,
         leading_axes=("sequence",),
         clean_output=lambda frozen, resid: clean_suffix_logits(frozen, resid),
-        site_inputs=lambda frozen, resid: clean_site_inputs(frozen, first_layer, site_names, resid),
+        read_activations=lambda frozen, resid, wanted: clean_activations(
+            frozen, first_layer, wanted, resid
+        ),
         masked_output=lambda frozen,
         components,
         resid,

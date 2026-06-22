@@ -15,9 +15,9 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import Discriminator, Field, PositiveInt
 
-from param_decomp import llama_simple_mlp
+from param_decomp import llama8b, llama_simple_mlp
 from param_decomp.base_config import BaseConfig
-from param_decomp.ci_fn import CIArch
+from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
 from param_decomp.config import (
     AttnPatternsEvalConfig,
     BuiltRun,
@@ -28,10 +28,10 @@ from param_decomp.config import (
 )
 from param_decomp.configs import (
     CEandKLLossesConfig,
+    ChunkwiseTransformerCiConfig,
     CI_L0Config,
     CIHistogramsConfig,
     CIMaskedAttnPatternsReconLossConfig,
-    GlobalSharedTransformerCiFnConfig,
     PGDReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
 )
@@ -239,20 +239,59 @@ def _resolve_target(cfg: LMExperimentConfig) -> AnyLMTargetConfig:
             return LlamaSimpleMLPTargetConfig(pretrain_run_path=spec.run_path, sites=sites)
 
 
-def _ci_arch(cfg: LMExperimentConfig, seq_len: int) -> CIArch:
-    ci = cfg.pd.ci_config
-    assert isinstance(ci, GlobalSharedTransformerCiFnConfig), ci
-    transformer = ci.simple_transformer_ci_cfg
-    assert transformer.mlp_hidden_dim is not None and len(transformer.mlp_hidden_dim) == 1, (
-        f"CI MLP must be single-hidden-layer, got {transformer.mlp_hidden_dim}"
+def _block_of_site(target: AnyLMTargetConfig, site_name: str) -> int:
+    """Transformer-block index of a decomposition site, parsed with the target's own site
+    grammar (`layers.{i}...` for llama8b, `h.{i}...` for LlamaSimpleMLP)."""
+    match target:
+        case TargetConfig():
+            return llama8b.parse_site_name(site_name)[0]
+        case LlamaSimpleMLPTargetConfig():
+            return llama_simple_mlp.parse_site_name(site_name)[0]
+
+
+def _resolve_d_resid(target: AnyLMTargetConfig) -> int:
+    """Residual-stream width of the target — the per-chunk CI-transformer input dim, since
+    each chunk reads one residual tap of this width."""
+    match target:
+        case TargetConfig():
+            return llama8b.llama31_8b_config().n_embd
+        case LlamaSimpleMLPTargetConfig():
+            cache_dir = llama_simple_mlp.pretrain_cache_dir(target.pretrain_run_path)
+            return llama_simple_mlp.load_model_config(cache_dir).n_embd
+
+
+def _resolved_chunks(target: AnyLMTargetConfig, blocks_per_chunk: int) -> tuple[Chunk, ...]:
+    """Group the decomposition sites into chunks of `blocks_per_chunk` CONSECUTIVE blocks.
+
+    Each chunk reads ONE residual tap — `resid.{first_block_of_chunk}`, the residual
+    entering the chunk — and emits CI for every site in those blocks. Sites are grouped by
+    block, the distinct blocks sorted ascending, then partitioned into consecutive
+    `blocks_per_chunk`-block groups (no ragged tail)."""
+    sites_by_block: dict[int, list[str]] = {}
+    for spec in target.sites:
+        sites_by_block.setdefault(_block_of_site(target, spec.name), []).append(spec.name)
+    blocks = sorted(sites_by_block)
+    assert len(blocks) % blocks_per_chunk == 0, (
+        f"{len(blocks)} decomposed blocks not divisible by blocks_per_chunk={blocks_per_chunk}"
     )
-    assert transformer.attn_config.rope_base == 10000.0, transformer.attn_config
-    assert transformer.attn_config.max_len >= seq_len, (transformer.attn_config.max_len, seq_len)
-    return CIArch(
-        d_model=transformer.d_model,
-        n_blocks=transformer.n_blocks,
-        n_heads=transformer.attn_config.n_heads,
-        mlp_hidden=transformer.mlp_hidden_dim[0],
+    chunks = []
+    for start in range(0, len(blocks), blocks_per_chunk):
+        chunk_blocks = blocks[start : start + blocks_per_chunk]
+        output_sites = tuple(name for block in chunk_blocks for name in sites_by_block[block])
+        chunks.append(Chunk(input_taps=(f"resid.{chunk_blocks[0]}",), output_sites=output_sites))
+    return tuple(chunks)
+
+
+def _ci_arch(cfg: LMExperimentConfig, target: AnyLMTargetConfig) -> ChunkwiseTransformerCIArch:
+    ci = cfg.pd.ci_config
+    assert isinstance(ci, ChunkwiseTransformerCiConfig), ci
+    return ChunkwiseTransformerCIArch(
+        chunks=_resolved_chunks(target, ci.blocks_per_chunk),
+        input_dim=_resolve_d_resid(target),
+        d_model=ci.d_model,
+        n_blocks=ci.n_blocks,
+        n_heads=ci.n_heads,
+        mlp_hidden=ci.mlp_hidden,
     )
 
 
@@ -370,7 +409,7 @@ def build_experiment_config(cfg: LMExperimentConfig) -> BuiltRun:
         run=run_instance(cfg),
         target=target,
         data=data,
-        ci_fn=_ci_arch(cfg, data.seq_len),
+        ci_fn=_ci_arch(cfg, target),
         eval=_eval(cfg),
     )
 

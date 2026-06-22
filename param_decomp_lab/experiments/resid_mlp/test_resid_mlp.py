@@ -15,8 +15,8 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from param_decomp.ci_fn import CIValues
-from param_decomp.ci_fn_mlp import (
+from param_decomp.ci_fn import (
+    CI,
     GlobalMLPCIArch,
     MLPCIArch,
     init_global_mlp_ci_fn,
@@ -48,6 +48,7 @@ from param_decomp_lab.experiments.resid_mlp.model import (
     resid_mlp_mse,
     sample_sparse_features,
     single_feature_ci,
+    site_inputs,
     site_specs,
 )
 
@@ -139,7 +140,7 @@ def test_clean_path_and_masked_identity():
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
     # site_inputs: mlp_in reads the residual entering its layer, mlp_out the post-act hidden.
-    site_in = lm.site_inputs(target, resid)
+    site_in = site_inputs(target, resid)
     assert set(site_in) == set(names)
     assert jnp.array_equal(site_in["layers.0.mlp_in"], resid)
     assert site_in["layers.0.mlp_in"].shape == (b, cfg.d_embed)
@@ -201,9 +202,9 @@ def test_mlp_ci_fn_per_site_logits_and_values():
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
-    inputs = lm.site_inputs(target, x @ target.W_E)
+    inputs = lm.read_activations(target, x @ target.W_E, ci_fn.input_names)
     values = ci_fn(inputs)
-    assert isinstance(values, CIValues)
+    assert isinstance(values, CI)
     assert values.lower["layers.0.mlp_in"].shape == (b, 6)
     assert values.lower["layers.0.mlp_out"].shape == (b, 7)
     for v in values.lower.values():
@@ -437,8 +438,8 @@ def test_global_ci_fn_shapes_and_range():
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
-    values = ci_fn(lm.site_inputs(target, x @ target.W_E))
-    assert isinstance(values, CIValues)
+    values = ci_fn(lm.read_activations(target, x @ target.W_E, ci_fn.input_names))
+    assert isinstance(values, CI)
     assert values.lower["layers.0.mlp_in"].shape == (b, 6)
     assert values.lower["layers.0.mlp_out"].shape == (b, 7)
     for v in values.lower.values():
@@ -496,7 +497,7 @@ def test_three_layer_clean_and_masked_forward():
     full = lm.masked_output(target, vu, resid, ones_masks, ones_delta, None, names, True)
     assert jnp.allclose(clean, full, atol=1e-4)
 
-    site_in = lm.site_inputs(target, resid)
+    site_in = site_inputs(target, resid)
     assert set(site_in) == set(names)
     assert site_in["layers.2.mlp_in"].shape == (b, cfg.d_embed)
     assert site_in["layers.2.mlp_out"].shape == (b, cfg.d_mlp)

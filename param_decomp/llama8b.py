@@ -330,38 +330,65 @@ def clean_suffix_logits(target: Target, resid: Float[Array, "b t d"]) -> Array:
     return x @ target.lm_head.T
 
 
-def clean_site_inputs(
-    target: Target, first_layer: int, site_names: tuple[str, ...], resid: Float[Array, "b t d"]
+def _tap_layer(key: str) -> int:
+    """Global block index a `read_activations` key reads at: the block a `resid.{L}` tap
+    enters, or the block a decomposed site lives in."""
+    if key.startswith("resid."):
+        return int(key.split(".")[1])
+    return parse_site_name(key)[0]
+
+
+def clean_activations(
+    target: Target, first_layer: int, wanted: tuple[str, ...], resid: Float[Array, "b t d"]
 ) -> dict[str, Array]:
-    """Clean CI inputs per site (SPEC S4), all on the frozen path, threaded layer to
-    layer: q/k/v ← the post-LN1 residual, o ← the pre-o_proj attention output,
-    gate/up ← the post-LN2 residual, down ← silu(gate)·up."""
-    wanted = frozenset(site_names)
-    last_site_layer = max(parse_site_name(name)[0] for name in site_names)
-    inputs: dict[str, Array] = {}
+    """Frozen-path activation accessor (CI input side, SPEC S4; harvest's per-site matrix
+    inputs).
+
+    `wanted` keys are either `resid.{global_layer}` (residual stream ENTERING that block —
+    the chunkwise CI fn's `input_names`) or a decomposed SITE NAME (the activation entering
+    that site's weight on the frozen path: `q/k/v_proj` ← post-LN1 residual, `o_proj` ← the
+    attention output, `gate/up_proj` ← post-LN2 residual, `down_proj` ← `silu(gate)·up`).
+    The residual is threaded identically to `clean_suffix_logits`; the per-site intermediates
+    come from the same RMSNorm/attn/MLP math. Stops once the last requested key's block is
+    fully covered (no wasted block compute past it)."""
+    wanted_set = frozenset(wanted)
+    last = max(_tap_layer(key) for key in wanted)
+    site_kinds_by_layer: dict[int, set[str]] = {}
+    for key in wanted_set:
+        if not key.startswith("resid."):
+            layer, kind = parse_site_name(key)
+            site_kinds_by_layer.setdefault(layer, set()).add(kind)
+    taps: dict[str, Array] = {}
     x = resid
     for layer_offset, suffix_layer in enumerate(target.layers):
         layer = first_layer + layer_offset
-        if layer > last_site_layer:
+        if f"resid.{layer}" in wanted_set:
+            taps[f"resid.{layer}"] = x
+        kinds = site_kinds_by_layer.get(layer, set())
+        if kinds:
+            attn = suffix_layer.attn
+            h1 = rms_norm(x, suffix_layer.ln1, target.eps)
+            for kind in ("q", "k", "v"):
+                if kind in kinds:
+                    taps[site_name(layer, kind)] = h1
+            attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
+            if "o" in kinds:
+                taps[site_name(layer, "o")] = attn_y
+            post_attn = x + attn_y @ attn.wo.T
+            mlp_in = rms_norm(post_attn, suffix_layer.ln2, target.eps)
+            for kind in ("gate", "up"):
+                if kind in kinds:
+                    taps[site_name(layer, kind)] = mlp_in
+            if "down" in kinds:
+                taps[site_name(layer, "down")] = jax.nn.silu(mlp_in @ suffix_layer.Wg.T) * (
+                    mlp_in @ suffix_layer.Wu.T
+                )
+        if layer == last:
             break
-        attn = suffix_layer.attn
-        h1 = rms_norm(x, suffix_layer.ln1, target.eps)
-        attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
-        post_attn = x + attn_y @ attn.wo.T
-        mlp_in = rms_norm(post_attn, suffix_layer.ln2, target.eps)
-        gate = mlp_in @ suffix_layer.Wg.T
-        up = mlp_in @ suffix_layer.Wu.T
-        down_in = jax.nn.silu(gate) * up
-        for kind, site_input in (
-            ("q", h1), ("k", h1), ("v", h1), ("o", attn_y),
-            ("gate", mlp_in), ("up", mlp_in), ("down", down_in),
-        ):  # fmt: skip
-            name = site_name(layer, kind)
-            if name in wanted:
-                inputs[name] = site_input
-        x = post_attn + down_in @ suffix_layer.Wd.T
-    assert set(inputs) == wanted, (sorted(inputs), sorted(wanted))
-    return inputs
+        x = x + suffix_layer.attn(rms_norm(x, suffix_layer.ln1, target.eps), target.inv_freq)
+        x = x + _clean_mlp_out(suffix_layer, rms_norm(x, suffix_layer.ln2, target.eps))
+    assert set(taps) == wanted_set, (sorted(taps), sorted(wanted))
+    return taps
 
 
 def _masked_site_out(
@@ -510,7 +537,9 @@ def llama_decomposed_lm(cfg: LlamaConfig, sites: tuple[SiteSpec, ...]) -> Decomp
         sites=sites,
         leading_axes=("sequence",),
         clean_output=lambda frozen, resid: clean_suffix_logits(frozen, resid),
-        site_inputs=lambda frozen, resid: clean_site_inputs(frozen, first_layer, site_names, resid),
+        read_activations=lambda frozen, resid, wanted: clean_activations(
+            frozen, first_layer, wanted, resid
+        ),
         masked_output=lambda frozen,
         components,
         resid,

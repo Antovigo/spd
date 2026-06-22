@@ -10,8 +10,7 @@ pd:
   n_mask_samples: 1
   sampling: continuous
   ci_config:
-    mode: layerwise
-    fn_type: mlp
+    type: layerwise_mlp
     hidden_dims:
     - 16
   decomposition_targets:

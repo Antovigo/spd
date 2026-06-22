@@ -82,7 +82,10 @@ renders it off the small on-host V/U + the probe CI as permutation source (cheap
 gather), sharing `slow_eval.render_uv_figure` / `plot_uv_matrices` with the LM path.
 
 **The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
-toy-specific code (CI-fn arches are the one allowed exception — see `ci_fn_mlp.py`). The
+toy-specific code — the toy *targets* (`DecomposedModel`s, pretrain, identity-CI eval) are
+all lab-side. CI-fn *architectures* are NOT toy-specific code: core owns every CI-fn arch
+regardless of which experiments use it. The positionless MLPs and the sequence transformer
+are peers in `ci_fn.py` (differing by domain, not status), not a toy carve-out. The
 generic engine is `run.py::run_decomposition_training(pd, cadence, run, raw_cfg, lm, frozen,
 ci_fn, data, remat_recon_forwards, sample_batch, eval_fn, eval_every, perf_tokens_per_step,
 mesh)` — the ONE train loop every target runs through (init/restore/finetune/faith-warmup
@@ -108,15 +111,16 @@ The TMS + ResidMLP targets now live under `param_decomp_lab/experiments/{tms,res
 (`model.py` = the JAX `DecomposedModel` + frozen target + in-process pretrain + identity-CI
 eval; `run.py` = the `pd-tms` / `pd-resid-mlp` CPU CLI that builds the `ExperimentConfig`
 from the canonical schema and calls `run_decomposition_training`). They are positionless
-(`leading_axes=()`) and use the layerwise per-site MLP CI fn. `ci_fn_mlp.py` (the second
-CI-fn arch, the allowed exception) stays in the core: `LayerwiseMLPCIFn` (`fn_type=mlp`,
-`expects_axes=()`, one independent MLP per site mapping `site_input [B,d_in] -> [B,C]`) plus
-the new `GlobalMLPCIFn` (`fn_type=global_shared_mlp`, one shared MLP over all sites jointly,
-concat/split in canonical site order). `run_state.init_train_state` dispatches CI-fn
-construction on `cfg.ci_fn` (`CIArch` transformer / `MLPCIArch` layerwise / `GlobalMLPCIArch`
-global) and uses replicated (not C-sharded) V/U + CI for the tiny toys; the core
-`config.CIFnArch` admits all three and the lab `experiments.config.toy_ci_arch` builds the
-layerwise / global arch from the toy ci_config (validated end-to-end on CPU via
+(`leading_axes=()`) and use the MLP CI fns. All CI-fn architectures live together in
+`ci_fn.py`: `LayerwiseMLPCIFn` (`expects_axes=()`, one independent MLP per site mapping
+`site_input [B,d_in] -> [B,C]`), `GlobalMLPCIFn` (`expects_axes=()`, one shared MLP over all
+sites jointly, concat/split in canonical site order), and the LM `ChunkwiseTransformerCIFn`
+(`expects_axes=("sequence",)`, per-chunk transformers reading residual taps, stacked +
+`filter_vmap`). `run_state.init_train_state` dispatches CI-fn construction on `cfg.ci_fn`
+(`MLPCIArch` / `GlobalMLPCIArch` / `ChunkwiseTransformerCIArch`) and uses replicated (not
+C-sharded) V/U + CI for the tiny toys; the core `config.CIFnArch` admits all three and the
+lab `experiments.config.toy_ci_arch` builds the layerwise / global arch from the toy
+ci_config (validated end-to-end on CPU via
 `pd-resid-mlp`). Harvest / slow-eval / export over the toys are NOT wired
 (`experiments.lm.load_run.build_target` / `run_metadata` are LM-only).
 

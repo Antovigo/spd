@@ -39,7 +39,11 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
-from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    build_ci_fn,
+)
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -64,8 +68,8 @@ from param_decomp.llama8b import (
 )
 from param_decomp.llama8b_sharding import (
     dp_mesh,
-    init_ci_fn_sharded,
-    init_decomp_vu_sharded,
+    init_ci_fn_placed,
+    init_decomp_vu_placed,
     init_sources_sharded,
     replicate_target,
     shard_batch,
@@ -140,7 +144,14 @@ def main():
     sites = llama_site_specs(cfg, mlp_family_site_cs(first, last, args.C))
     lm = llama_decomposed_lm(cfg, sites)
     n_layers = last - first + 1
-    arch = CIArch(d_model=4096, n_blocks=4, n_heads=64, mlp_hidden=16384)
+    arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first}",), output_sites=lm.site_names),),
+        input_dim=cfg.n_embd,
+        d_model=4096,
+        n_blocks=4,
+        n_heads=64,
+        mlp_hidden=16384,
+    )
     if is0:
         print(
             f"[p0] LLAMA8B single-pool PD | {ndev} GPU | gbatch={gbatch} seq={args.seq} "
@@ -177,8 +188,9 @@ def main():
     site_Cs = tuple(s.C for s in lm.sites)
     # fp32 masters; source init U[0,1] (SPEC S15), trailing channel = the weight-delta source.
     if args.shard:
-        vu = init_decomp_vu_sharded(lm.sites, random.PRNGKey(1), mesh)
-        ci_fn = init_ci_fn_sharded(arch, lm.sites, random.PRNGKey(2), mesh)
+        shardable = ndev > 1 and all(s.C % ndev == 0 for s in lm.sites)
+        vu = init_decomp_vu_placed(lm.sites, random.PRNGKey(1), mesh, shardable)
+        ci_fn = init_ci_fn_placed(arch, lm.sites, random.PRNGKey(2), mesh, shardable)
         src = init_sources_sharded(
             lm.site_names, site_Cs, args.seq, SCScope(), 1, random.PRNGKey(3), mesh
         )
@@ -186,7 +198,7 @@ def main():
         repl = NamedSharding(mesh, P())
         put = lambda a: jax.device_put(a, repl) if eqx.is_array(a) else a  # noqa: E731
         vu = jax.tree.map(put, init_decomp_vu(lm.sites, random.PRNGKey(1)))
-        ci_fn = jax.tree.map(put, init_ci_fn(arch, lm.sites, random.PRNGKey(2)))
+        ci_fn = jax.tree.map(put, build_ci_fn(arch, lm.sites, random.PRNGKey(2)))
         src = {
             k: jax.device_put(v, repl)
             for k, v in init_persistent_sources(

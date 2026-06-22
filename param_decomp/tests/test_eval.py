@@ -11,6 +11,12 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    CIFn,
+    build_ci_fn,
+)
 from param_decomp.eval import make_eval_step, next_token_cross_entropy
 from param_decomp.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
 from param_decomp.lm import DecomposedModel, SiteSpec
@@ -18,6 +24,22 @@ from param_decomp.tests.test_llama8b import (
     _tiny_cfg,
     _tiny_target,
 )
+
+
+def _build_ci_fn(lm: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
+    """One transformer chunk over all sites, reading the residual entering the first
+    decomposed block. The old `CIArch(16, 1, 2, 32)` dims map onto the chunk arch."""
+    site_names = lm.site_names
+    first_block = min(int(name.split(".")[1]) for name in site_names)
+    arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=site_names),),
+        input_dim=n_embd,
+        d_model=16,
+        n_blocks=1,
+        n_heads=2,
+        mlp_hidden=32,
+    )
+    return build_ci_fn(arch, lm.sites, key)
 
 
 def _positionless_model() -> DecomposedModel:
@@ -31,7 +53,7 @@ def _positionless_model() -> DecomposedModel:
         sites=(SiteSpec("linear1", 5, 2, 8), SiteSpec("linear2", 2, 5, 6)),
         leading_axes=(),
         clean_output=_unused,
-        site_inputs=_unused,
+        read_activations=_unused,
         masked_output=_unused,
         masked_site_outputs=_unused,
         weight_deltas=_unused,
@@ -56,11 +78,10 @@ def test_eval_step_keys_identities_and_determinism():
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
     lm = llama_decomposed_lm(cfg, sites)
 
-    from param_decomp.ci_fn import CIArch, init_ci_fn
     from param_decomp.llama8b import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
 
     b, t = 2, 16
     token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
@@ -129,11 +150,10 @@ def test_eval_step_fresh_pgd_probe():
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 4, C))
     lm = llama_decomposed_lm(cfg, sites)
 
-    from param_decomp.ci_fn import CIArch, init_ci_fn
     from param_decomp.llama8b import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     b, t = 2, 16
     token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
@@ -181,7 +201,6 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
     the two paths are identical; the test bites under
     `XLA_FLAGS=--xla_force_host_platform_device_count=4`.
     """
-    from param_decomp.ci_fn import CIArch, init_ci_fn
     from param_decomp.llama8b import init_decomp_vu
     from param_decomp.sharding import dp_mesh, shard_batch
 
@@ -193,7 +212,7 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 4, 8))
     lm = llama_decomposed_lm(cfg, sites)
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
 
     b, t = 4 * n_dev, 16
     token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
@@ -232,11 +251,10 @@ def test_eval_step_l0_groups_sum_member_sites():
     tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
     lm = llama_decomposed_lm(cfg, sites)
-    from param_decomp.ci_fn import CIArch, init_ci_fn
     from param_decomp.llama8b import init_decomp_vu
 
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
     residual = jax.random.normal(jax.random.PRNGKey(4), (2, 16, cfg.n_embd)) * 0.5
 

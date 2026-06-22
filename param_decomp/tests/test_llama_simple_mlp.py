@@ -14,7 +14,12 @@ import optax
 import pytest
 
 from param_decomp.adversary import init_persistent_sources, init_sources_adam_state
-from param_decomp.ci_fn import CIArch, CIFn, init_ci_fn
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    ChunkwiseTransformerCIFn,
+    build_ci_fn,
+)
 from param_decomp.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
@@ -41,7 +46,7 @@ from param_decomp.llama_simple_mlp import (
     site_name,
     site_specs,
 )
-from param_decomp.lm import SiteC
+from param_decomp.lm import DecomposedModel, SiteC
 from param_decomp.recon import build_recon_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
@@ -115,6 +120,25 @@ _MIXED_SITE_CS = (
     SiteC("h.3.mlp.down_proj", 16),
 )
 """Attention + MLP sites across two layers with heterogeneous per-site C."""
+
+
+def _build_chunkwise_ci_fn(lm: DecomposedModel, key: jax.Array) -> ChunkwiseTransformerCIFn:
+    """Old `init_ci_fn(CIArch(16, 2, 2, 32), lm.sites, key)` → the new chunkwise builder:
+    one chunk reading the residual entering the first decomposed block, emitting CI for every
+    site. `input_dim` is the target residual width (`n_embd`)."""
+    site_names = lm.site_names
+    first_block = min(parse_site_name(n)[0] for n in site_names)
+    arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=site_names),),
+        input_dim=_tiny_cfg().n_embd,
+        d_model=16,
+        n_blocks=2,
+        n_heads=2,
+        mlp_hidden=32,
+    )
+    ci_fn = build_ci_fn(arch, lm.sites, key)
+    assert isinstance(ci_fn, ChunkwiseTransformerCIFn)
+    return ci_fn
 
 
 def test_site_name_helpers():
@@ -229,7 +253,7 @@ def test_clean_path_and_masked_identity():
     full = lm.masked_output(target, vu, resid, ones_masks, ones_delta, None, names, True)
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
-    site_in = lm.site_inputs(target, resid)
+    site_in = lm.read_activations(target, resid, lm.site_names)
     assert set(site_in) == set(names)
     # q and v read the same post-LN1 residual; down_proj reads the post-GELU acts
     assert jnp.array_equal(site_in["h.2.attn.q_proj"], site_in["h.2.attn.v_proj"])
@@ -283,7 +307,7 @@ def test_masked_site_outputs_frozen_when_routed_false_or_unmasked():
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    site_in = lm.site_inputs(target, resid)
+    site_in = lm.read_activations(target, resid, lm.site_names)
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in lm.sites}
     zeros_delta = {s: jnp.zeros((b, t)) for s in names}
     false_routes = {s: jnp.zeros((b, t), bool) for s in names}
@@ -318,7 +342,7 @@ def test_masked_site_outputs_match_hand_computed_masked_linear(site_name_str: st
     b, t = 2, 16
     resid = jax.random.normal(jax.random.PRNGKey(2), (b, t, cfg.n_embd)) * 0.5
 
-    x_in = lm.site_inputs(target, resid)[s]
+    x_in = lm.read_activations(target, resid, (s,))[s]
     V, U = vu.site(s)
     mask = jax.random.uniform(jax.random.PRNGKey(7), (b, t, sites_cs[0].C))
 
@@ -356,7 +380,7 @@ def test_o_site_masks_attention_output():
     )  # fmt: skip
     assert jnp.allclose(clean, ones, atol=1e-4)
     # o's clean site input is the pre-o_proj attention output, shape (b, t, qd)
-    site_in = lm.site_inputs(target, resid)
+    site_in = lm.read_activations(target, resid, lm.site_names)
     assert site_in[o_site].shape == (b, t, cfg.n_head * cfg.head_dim)
 
 
@@ -370,8 +394,7 @@ def test_step_trains_and_has_vpd_signature():
     sites = site_specs(cfg, site_cs)
     lm = llama_simple_mlp_decomposed_lm(cfg, sites)
     vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
-    ci_fn = init_ci_fn(CIArch(d_model=16, n_blocks=2, n_heads=2, mlp_hidden=32),
-                       lm.sites, jax.random.PRNGKey(2))  # fmt: skip
+    ci_fn = _build_chunkwise_ci_fn(lm, jax.random.PRNGKey(2))
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
 
@@ -446,8 +469,8 @@ def test_step_trains_and_has_vpd_signature():
     assert isinstance(state.components, DecompVU)
     for V, U in state.components.vu.values():
         assert V.dtype == jnp.float32 and U.dtype == jnp.float32
-    assert isinstance(state.ci_fn, CIFn)
-    assert state.ci_fn.in_proj_w.dtype == jnp.float32
+    assert isinstance(state.ci_fn, ChunkwiseTransformerCIFn)
+    assert state.ci_fn.chunks.in_proj_w.dtype == jnp.float32
 
 
 def test_faith_warmup_decreases_faith():

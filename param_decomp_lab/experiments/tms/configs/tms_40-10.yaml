@@ -2,7 +2,7 @@
 # dims). The JAX counterpart of the torch `tms_40-10_config.yaml`: target pretrained from
 # scratch in-process (no wandb run_path), FaithfulnessLoss in the loss list, UNTIED
 # decomposition (linear1/linear2 two sites with independent V/U), tied
-# target. CI fn: layerwise per-site MLP (fn_type=mlp, hidden_dims=[16]). Validates via the
+# target. CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[16]). Validates via the
 # in-loop ground-truth target-CI metric (eval/identity_ci_error/<site>). Runs on 1 GPU.
 run_name: jax-tms-40-10
 out_dir: /mnt/data/artifacts/mechanisms/param-decomp/jax_runs
@@ -11,8 +11,7 @@ pd:
   n_mask_samples: 1
   sampling: continuous
   ci_config:
-    mode: layerwise
-    fn_type: mlp
+    type: layerwise_mlp
     hidden_dims:
     - 16
   decomposition_targets:

@@ -16,12 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from param_decomp.ci_fn import CIArch
-from param_decomp.ci_fn_mlp import GlobalMLPCIArch, MLPCIArch
+from param_decomp.ci_fn import CIFnArch
 from param_decomp.configs import Cadence, PDConfig, ResumeProvenance, RuntimeConfig, WandbConfig
 from param_decomp.lm import SiteC
-
-CIFnArch = CIArch | MLPCIArch | GlobalMLPCIArch
 
 
 class TargetSites(Protocol):

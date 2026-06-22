@@ -45,25 +45,28 @@ def test_shard_batch_requires_divisible_batch():
 
 
 def test_jitted_sharded_inits_match_eager_values():
-    """`init_*_sharded` must be a placement-only change: same values as the eager init
-    fns (threefry is partitionable, so generating under jit with `out_shardings` cannot
-    perturb the stream — only op fusion can reassociate the scaling, SPEC D4: rel ~1e-7),
-    with the expected per-site placements (V shards C on axis 1, U on axis 0) — for a
-    heterogeneous-C site set spanning attention and MLP matrices."""
-    import pytest
+    """`init_*_placed` with `shardable=True` must be a placement-only change: same values as
+    the host (unsharded) init fns (threefry is partitionable, so generating under jit with
+    `out_shardings` cannot perturb the stream — only op fusion can reassociate the scaling,
+    SPEC D4: rel ~1e-7), with the expected per-site placements (V shards C on axis 1, U on
+    axis 0) — for a heterogeneous-C site set spanning attention and MLP matrices."""
     from jax.sharding import NamedSharding
     from jax.sharding import PartitionSpec as P
 
     from param_decomp.adversary import init_persistent_sources
-    from param_decomp.ci_fn import CIArch, init_ci_fn
+    from param_decomp.ci_fn import (
+        Chunk,
+        ChunkwiseTransformerCIArch,
+        build_ci_fn,
+    )
     from param_decomp.configs import BSCScope, SCScope
     from param_decomp.llama8b import canonical_site_cs, init_decomp_vu, llama_site_specs
     from param_decomp.llama8b_sharding import (
-        init_ci_fn_sharded,
-        init_decomp_vu_sharded,
+        init_ci_fn_placed,
+        init_decomp_vu_placed,
         init_sources_sharded,
     )
-    from param_decomp.lm import SiteC, SiteSpec
+    from param_decomp.lm import SiteC
     from param_decomp.tests.test_llama8b import _tiny_cfg
 
     mesh = dp_mesh()
@@ -80,27 +83,45 @@ def test_jitted_sharded_inits_match_eager_values():
             )
         ),
     )
+    # The caller's scale decision (run_state.init_train_state): shard only when the mesh
+    # tiles and every C divides it. At n==1 this is False → the placed init replicates.
+    shardable = n > 1 and all(s.C % n == 0 for s in sites)
 
-    vu_sharded = init_decomp_vu_sharded(sites, jax.random.PRNGKey(1), mesh)
+    vu_placed = init_decomp_vu_placed(sites, jax.random.PRNGKey(1), mesh, shardable)
     vu_eager = init_decomp_vu(sites, jax.random.PRNGKey(1))
     for spec in sites:
-        V, U = vu_sharded.site(spec.name)
+        V, U = vu_placed.site(spec.name)
         assert isinstance(V.sharding, NamedSharding) and isinstance(U.sharding, NamedSharding)
-        assert V.sharding.spec == P(None, "dp"), spec.name
-        assert U.sharding.spec == P("dp", None), spec.name
-    for got, want in zip(jax.tree.leaves(vu_sharded), jax.tree.leaves(vu_eager), strict=True):
+        if shardable:
+            assert V.sharding.spec == P(None, "dp"), spec.name
+            assert U.sharding.spec == P("dp", None), spec.name
+        else:
+            assert V.sharding.spec == P(), spec.name
+            assert U.sharding.spec == P(), spec.name
+    for got, want in zip(jax.tree.leaves(vu_placed), jax.tree.leaves(vu_eager), strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert jnp.allclose(jnp.asarray(got), want, rtol=1e-6, atol=0)
 
+    # A C not divisible by the mesh is not shardable: the caller's predicate is False, so
+    # the placed init replicates rather than tiling the C axis.
     if n > 1:
-        indivisible = (SiteSpec("layers.2.mlp.gate_proj", cfg.n_embd, cfg.n_intermediate, n + 1),)
-        with pytest.raises(AssertionError, match="not divisible"):
-            init_decomp_vu_sharded(indivisible, jax.random.PRNGKey(1), mesh)
+        indivisible = llama_site_specs(cfg, (SiteC("layers.2.mlp.gate_proj", n + 1),))
+        assert not all(s.C % n == 0 for s in indivisible)
 
-    arch = CIArch(d_model=16, n_blocks=1, n_heads=2, mlp_hidden=8 * n)
-    ci_sharded = init_ci_fn_sharded(arch, sites, jax.random.PRNGKey(2), mesh)
-    ci_eager = init_ci_fn(arch, sites, jax.random.PRNGKey(2))
-    for got, want in zip(jax.tree.leaves(ci_sharded), jax.tree.leaves(ci_eager), strict=True):
+    first_block = min(int(s.name.split(".")[1]) for s in sites)
+    arch = ChunkwiseTransformerCIArch(
+        chunks=(
+            Chunk(input_taps=(f"resid.{first_block}",), output_sites=tuple(s.name for s in sites)),
+        ),
+        input_dim=cfg.n_embd,
+        d_model=16,
+        n_blocks=1,
+        n_heads=2,
+        mlp_hidden=8 * n,
+    )
+    ci_placed = init_ci_fn_placed(arch, sites, jax.random.PRNGKey(2), mesh, shardable)
+    ci_eager = build_ci_fn(arch, sites, jax.random.PRNGKey(2))
+    for got, want in zip(jax.tree.leaves(ci_placed), jax.tree.leaves(ci_eager), strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert jnp.allclose(jnp.asarray(got), want, rtol=1e-6, atol=0)
 

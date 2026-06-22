@@ -15,8 +15,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from param_decomp.ci_fn import CIValues
-from param_decomp.ci_fn_mlp import MLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.ci_fn import CI, MLPCIArch, init_layerwise_mlp_ci_fn
 from param_decomp.configs import (
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
@@ -39,6 +38,7 @@ from param_decomp_lab.experiments.tms.model import (
     pretrain_tms_target,
     sample_sparse_features,
     single_feature_ci,
+    site_inputs,
     site_specs,
     tms_decomposed_model,
     tms_mse,
@@ -107,7 +107,7 @@ def test_clean_path_and_masked_identity():
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
     # site_inputs: linear1 reads x, linear2 reads frozen linear1(x).
-    site_in = lm.site_inputs(target, x)
+    site_in = site_inputs(target, x)
     assert set(site_in) == set(names)
     assert jnp.array_equal(site_in["linear1"], x)
     assert site_in["linear1"].shape == (b, cfg.n_features)
@@ -149,9 +149,9 @@ def test_mlp_ci_fn_per_site_logits_and_values():
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
-    inputs = lm.site_inputs(target, x)
+    inputs = lm.read_activations(target, x, ci_fn.input_names)
     values = ci_fn(inputs)
-    assert isinstance(values, CIValues)
+    assert isinstance(values, CI)
     assert values.lower["linear1"].shape == (b, 8)
     assert values.lower["linear2"].shape == (b, 6)
     # lower_leaky is clamped to [0,1]
@@ -425,7 +425,7 @@ def test_deeper_clean_and_masked_forward_with_identity_hidden_layers():
 
     # site_inputs threads through the hidden layers: each hidden-layer site reads the chain
     # output up to it; with identity layers those equal the linear1 output.
-    site_in = lm.site_inputs(target, x)
+    site_in = site_inputs(target, x)
     assert set(site_in) == {"linear1", "hidden_layers.0", "hidden_layers.1", "linear2"}
     assert jnp.allclose(site_in["hidden_layers.0"], hidden, atol=1e-5)
     assert jnp.allclose(site_in["hidden_layers.1"], hidden, atol=1e-5)  # identity passthrough

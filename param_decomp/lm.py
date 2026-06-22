@@ -12,7 +12,7 @@ and masks/CI are `[*leading, C]`, where `leading = (batch,) + named position axe
 is ever-present and semantics-free (the data/shard axis); CI is always independent over
 every leading axis. Masking, routing, source scopes, imp-min, and normalization all
 operate over the opaque `*leading` prefix. The three EDGES are generic too — the model's
-INPUT (whatever `site_inputs`/`clean_output`/`masked_output` read upstream of the
+INPUT (whatever `read_activations`/`clean_output`/`masked_output` read upstream of the
 residual; tokens for an LM, a dict for a bio target), the model's OUTPUT
 (`clean_output`/`masked_output` return `Any` — logits, a tuple of heads, coords), and the
 recon comparison (`recon_loss_fn`, default `kl_per_position`).
@@ -95,9 +95,14 @@ class DecomposedModel:
     sites: tuple[SiteSpec, ...]
     leading_axes: tuple[str, ...]
     clean_output: Callable[[Any, Float[Array, "*leading d"]], Any]
-    site_inputs: Callable[
-        [Any, Float[Array, "*leading d"]], dict[str, Float[Array, "*leading d_in"]]
+    read_activations: Callable[
+        [Any, Float[Array, "*leading d"], tuple[str, ...]],
+        dict[str, Float[Array, "*leading d_tap"]],
     ]
+    """The CI fn's activation accessor: `(frozen, resid, wanted) -> {key: activation}`.
+    `wanted` is the CI fn's static `input_names` — OPAQUE keys the target knows how to
+    produce (an LM's `resid.{layer}` taps; a positionless toy's per-site inputs). The
+    target is the only key→activation interpreter; core just routes by key."""
     masked_output: Callable[
         [
             Any,

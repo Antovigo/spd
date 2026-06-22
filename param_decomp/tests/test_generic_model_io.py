@@ -26,7 +26,11 @@ import optax
 from jax import random
 from jaxtyping import Array, Float
 
-from param_decomp.ci_fn import CIArch, init_ci_fn
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    build_ci_fn,
+)
 from param_decomp.configs import (
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
@@ -74,7 +78,10 @@ def _synthetic_lm() -> DecomposedModel:
     def clean_output(frozen: SyntheticFrozen, resid: Array) -> tuple[Array, Array]:
         return _heads(frozen, resid @ frozen.W.T)
 
-    def site_inputs(_frozen: SyntheticFrozen, resid: Array) -> dict[str, Array]:
+    def read_activations(
+        _frozen: SyntheticFrozen, resid: Array, wanted: tuple[str, ...]
+    ) -> dict[str, Array]:
+        assert wanted == (SITE,), wanted
         return {SITE: resid}
 
     def masked_output(
@@ -129,7 +136,7 @@ def _synthetic_lm() -> DecomposedModel:
         sites=(site,),
         leading_axes=("sequence",),
         clean_output=clean_output,
-        site_inputs=site_inputs,
+        read_activations=read_activations,
         masked_output=masked_output,
         masked_site_outputs=masked_site_outputs,
         weight_deltas=weight_deltas,
@@ -151,7 +158,7 @@ def test_default_recon_loss_fn_is_kl_per_position():
         sites=(SiteSpec(SITE, D, D, C),),
         leading_axes=("sequence",),
         clean_output=lambda f, r: r,
-        site_inputs=lambda f, r: {SITE: r},
+        read_activations=lambda f, r, wanted: {SITE: r},
         masked_output=lambda *a: a[2],
         masked_site_outputs=lambda *a: {SITE: a[2]},
         weight_deltas=lambda f, c: {},
@@ -199,10 +206,12 @@ def test_tuple_output_and_geometric_loss_flow():
     assert loss.shape == () and jnp.isfinite(loss)
 
 
-def _initial_state(lm: DecomposedModel, components: SyntheticComponents, ci_arch: CIArch):
+def _initial_state(
+    lm: DecomposedModel, components: SyntheticComponents, ci_arch: ChunkwiseTransformerCIArch
+):
     opt_vu = optax.adamw(1e-2, weight_decay=0.0)
     opt_ci = optax.adamw(1e-2, weight_decay=0.0)
-    ci_fn = init_ci_fn(ci_arch, lm.sites, random.PRNGKey(11))
+    ci_fn = build_ci_fn(ci_arch, lm.sites, random.PRNGKey(11))
     state = TrainState(
         components=components,
         ci_fn=ci_fn,
@@ -231,7 +240,14 @@ def test_train_step_runs_through_generic_target():
     )
     resid = random.normal(random.fold_in(key, 5), (B, T, D))
 
-    ci_arch = CIArch(d_model=8, n_blocks=1, n_heads=2, mlp_hidden=16)
+    ci_arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(SITE,), output_sites=(SITE,)),),
+        input_dim=D,
+        d_model=8,
+        n_blocks=1,
+        n_heads=2,
+        mlp_hidden=16,
+    )
     state, opt_vu, opt_ci = _initial_state(lm, components, ci_arch)
 
     loss_spec = build_recon_terms(

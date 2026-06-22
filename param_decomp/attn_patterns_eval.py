@@ -206,10 +206,10 @@ def make_ci_attn_patterns_step(lm: DecomposedModel, pattern_fn: AttnPatternFn) -
         residual: Float[Array, "*leading d"],
         _key: PRNGKeyArray,
     ) -> tuple[dict[str, Array], dict[str, int]]:
-        site_inputs = lm.site_inputs(frozen, residual)
+        taps = lm.read_activations(frozen, residual, ci_fn.input_names)
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        ci_lower = ci_fn_bf16(site_inputs).lower
+        ci_lower = ci_fn_bf16(taps).lower
 
         target_patterns = _clean_patterns(
             lm, pattern_fn, layer_pairs, frozen, components_bf16, residual, ci_lower
@@ -245,10 +245,10 @@ def make_stochastic_attn_patterns_step(
         residual: Float[Array, "*leading d"],
         key: PRNGKeyArray,
     ) -> tuple[dict[str, Array], dict[str, int]]:
-        site_inputs = lm.site_inputs(frozen, residual)
+        taps = lm.read_activations(frozen, residual, ci_fn.input_names)
         components_bf16 = cast_floating(components, COMPUTE_DT)
         ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        ci_lower = ci_fn_bf16(site_inputs).lower
+        ci_lower = ci_fn_bf16(taps).lower
 
         target_patterns = _clean_patterns(
             lm, pattern_fn, layer_pairs, frozen, components_bf16, residual, ci_lower

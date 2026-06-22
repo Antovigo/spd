@@ -16,7 +16,13 @@ import jax
 import numpy as np
 import pytest
 
-from param_decomp.ci_fn import CIArch, init_ci_fn, lower_leaky_hard_sigmoid
+from param_decomp.ci_fn import (
+    Chunk,
+    ChunkwiseTransformerCIArch,
+    CIFn,
+    build_ci_fn,
+    lower_leaky_hard_sigmoid,
+)
 from param_decomp.configs import (
     IdentityCIErrorConfig,
     IdentityCITargetSpec,
@@ -28,6 +34,7 @@ from param_decomp.llama8b import (
     llama_site_specs,
     mlp_family_site_cs,
 )
+from param_decomp.lm import DecomposedModel
 from param_decomp.run import SlowEvalRenderer, slow_eval_due
 from param_decomp.slow_eval import (
     PermutationMetricSpec,
@@ -50,13 +57,29 @@ from param_decomp.tests.test_llama8b import (
 )
 
 
+def _build_ci_fn(lm: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
+    """One transformer chunk over all sites, reading the residual entering the first
+    decomposed block. The old `CIArch(16, 1, 2, 32)` dims map onto the chunk arch."""
+    site_names = lm.site_names
+    first_block = min(int(name.split(".")[1]) for name in site_names)
+    arch = ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=site_names),),
+        input_dim=n_embd,
+        d_model=16,
+        n_blocks=1,
+        n_heads=2,
+        mlp_hidden=32,
+    )
+    return build_ci_fn(arch, lm.sites, key)
+
+
 def _tiny_setup(threshold: float):
     cfg = _tiny_cfg()
     tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     C = 8
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
     lm = llama_decomposed_lm(cfg, sites)
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     step = make_slow_eval_step(lm, threshold)
     return cfg, lm, tgt, ci_fn, step, C
 
@@ -68,8 +91,9 @@ def test_reductions_match_hand_rolled_per_component():
 
     reductions = accumulate_site_reductions(step, ci_fn, tgt, [residual], n_batches_accum=None)
 
-    site_inputs = lm.site_inputs(tgt, residual)
-    lower = {s: lower_leaky_hard_sigmoid(ci_fn.site_logits(site_inputs)[s]) for s in lm.site_names}
+    taps = lm.read_activations(tgt, residual, ci_fn.input_names)
+    logits = ci_fn(taps).logits
+    lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in lm.site_names}
     for site in lm.site_names:
         flat = np.asarray(lower[site]).reshape(-1, C).astype(np.float32)
         r = reductions[site]
@@ -237,7 +261,7 @@ def _tiny_position_ci():
     tgt = _tiny_target(cfg, 4, jax.random.PRNGKey(0))
     sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
     lm = llama_decomposed_lm(cfg, sites)
-    ci_fn = init_ci_fn(CIArch(16, 1, 2, 32), lm.sites, jax.random.PRNGKey(2))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
     residual = jax.random.normal(jax.random.PRNGKey(4), (3, 12, cfg.n_embd)) * 0.5
     position_ci = accumulate_position_ci(make_position_ci_step(lm), ci_fn, tgt, [residual])
     return lm, position_ci
