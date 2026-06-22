@@ -53,12 +53,6 @@ from param_decomp.recon import (
     StochasticSources,
 )
 
-AnyCIFn = CIFn
-"""Every CI fn satisfies the `CIFn` protocol (`__call__(taps) -> CI` + `input_names` /
-`output_names` / `expects_axes`): the chunkwise transformer (`ci_fn.py`,
-`expects_axes=("sequence",)`) for LMs, the per-site / global MLPs (`expects_axes=()`)
-for the positionless toys — all in `ci_fn.py`. The step is agnostic."""
-
 COMPUTE_DT = jnp.bfloat16
 
 
@@ -79,7 +73,7 @@ def _select_pytree(active: Array, when_active: Any, when_inactive: Any) -> Any:
 @dataclass(frozen=True)
 class TrainState:
     components: Any  # LM-specific trainable pytree (V/U), fp32 masters
-    ci_fn: AnyCIFn  # fp32 masters
+    ci_fn: CIFn  # fp32 masters
     components_opt_state: optax.OptState
     ci_fn_opt_state: optax.OptState
     sources: dict[str, dict[str, Array]]
@@ -408,7 +402,7 @@ def make_train_step(
         # are NOT detached here, but components/ci grads through them are what torch
         # gets too (sources are leaves). ──
         def loss_fn(
-            trainable: tuple[Any, AnyCIFn, dict[str, dict[str, Array]]],
+            trainable: tuple[Any, CIFn, dict[str, dict[str, Array]]],
         ) -> tuple[Array, tuple[Array, Array, tuple[Array, ...]]]:
             components, ci_fn, persistent_sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)

@@ -353,40 +353,28 @@ def clean_activations(
     fully covered (no wasted block compute past it)."""
     wanted_set = frozenset(wanted)
     last = max(_tap_layer(key) for key in wanted)
-    site_kinds_by_layer: dict[int, set[str]] = {}
-    for key in wanted_set:
-        if not key.startswith("resid."):
-            layer, kind = parse_site_name(key)
-            site_kinds_by_layer.setdefault(layer, set()).add(kind)
     taps: dict[str, Array] = {}
     x = resid
     for layer_offset, suffix_layer in enumerate(target.layers):
         layer = first_layer + layer_offset
         if f"resid.{layer}" in wanted_set:
             taps[f"resid.{layer}"] = x
-        kinds = site_kinds_by_layer.get(layer, set())
-        if kinds:
-            attn = suffix_layer.attn
-            h1 = rms_norm(x, suffix_layer.ln1, target.eps)
-            for kind in ("q", "k", "v"):
-                if kind in kinds:
-                    taps[site_name(layer, kind)] = h1
-            attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
-            if "o" in kinds:
-                taps[site_name(layer, "o")] = attn_y
-            post_attn = x + attn_y @ attn.wo.T
-            mlp_in = rms_norm(post_attn, suffix_layer.ln2, target.eps)
-            for kind in ("gate", "up"):
-                if kind in kinds:
-                    taps[site_name(layer, kind)] = mlp_in
-            if "down" in kinds:
-                taps[site_name(layer, "down")] = jax.nn.silu(mlp_in @ suffix_layer.Wg.T) * (
-                    mlp_in @ suffix_layer.Wu.T
-                )
+        attn = suffix_layer.attn
+        h1 = rms_norm(x, suffix_layer.ln1, target.eps)
+        attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
+        post_attn = x + attn_y @ attn.wo.T
+        mlp_in = rms_norm(post_attn, suffix_layer.ln2, target.eps)
+        down_in = jax.nn.silu(mlp_in @ suffix_layer.Wg.T) * (mlp_in @ suffix_layer.Wu.T)
+        for kind, site_input in (
+            ("q", h1), ("k", h1), ("v", h1), ("o", attn_y),
+            ("gate", mlp_in), ("up", mlp_in), ("down", down_in),
+        ):  # fmt: skip
+            name = site_name(layer, kind)
+            if name in wanted_set:
+                taps[name] = site_input
+        x = post_attn + down_in @ suffix_layer.Wd.T
         if layer == last:
             break
-        x = x + suffix_layer.attn(rms_norm(x, suffix_layer.ln1, target.eps), target.inv_freq)
-        x = x + _clean_mlp_out(suffix_layer, rms_norm(x, suffix_layer.ln2, target.eps))
     assert set(taps) == wanted_set, (sorted(taps), sorted(wanted))
     return taps
 

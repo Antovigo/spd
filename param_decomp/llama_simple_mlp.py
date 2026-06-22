@@ -338,36 +338,28 @@ def clean_activations(
     assert resid.shape[1] <= target.n_ctx, (resid.shape, target.n_ctx)
     wanted_set = frozenset(wanted)
     last = max(_tap_layer(key) for key in wanted)
-    site_kinds_by_layer: dict[int, set[str]] = {}
-    for key in wanted_set:
-        if not key.startswith("resid."):
-            layer_idx, kind = parse_site_name(key)
-            site_kinds_by_layer.setdefault(layer_idx, set()).add(kind)
     taps: dict[str, Array] = {}
     x = resid
     for layer_offset, layer in enumerate(target.layers):
         layer_idx = first_layer + layer_offset
         if f"resid.{layer_idx}" in wanted_set:
             taps[f"resid.{layer_idx}"] = x
-        kinds = site_kinds_by_layer.get(layer_idx, set())
-        if kinds:
-            attn = layer.attn
-            h1 = rms_norm(x, layer.ln1, target.eps)
-            for kind in ("q_proj", "k_proj", "v_proj"):
-                if kind in kinds:
-                    taps[site_name(layer_idx, kind)] = h1
-            attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
-            if "o_proj" in kinds:
-                taps[site_name(layer_idx, "o_proj")] = attn_y
-            post_attn = x + attn_y @ attn.wo.T
-            mlp_in = rms_norm(post_attn, layer.ln2, target.eps)
-            if "c_fc" in kinds:
-                taps[site_name(layer_idx, "c_fc")] = mlp_in
-            if "down_proj" in kinds:
-                taps[site_name(layer_idx, "down_proj")] = _gelu_tanh(mlp_in @ layer.Wfc.T)
+        attn = layer.attn
+        h1 = rms_norm(x, layer.ln1, target.eps)
+        attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, target.inv_freq)
+        post_attn = x + attn_y @ attn.wo.T
+        mlp_in = rms_norm(post_attn, layer.ln2, target.eps)
+        down_in = _gelu_tanh(mlp_in @ layer.Wfc.T)
+        for kind, site_input in (
+            ("q_proj", h1), ("k_proj", h1), ("v_proj", h1), ("o_proj", attn_y),
+            ("c_fc", mlp_in), ("down_proj", down_in),
+        ):  # fmt: skip
+            name = site_name(layer_idx, kind)
+            if name in wanted_set:
+                taps[name] = site_input
+        x = post_attn + down_in @ layer.Wdown.T
         if layer_idx == last:
             break
-        x = _clean_block(layer, x, target.inv_freq, target.eps)
     assert set(taps) == wanted_set, (sorted(taps), sorted(wanted))
     return taps
 
