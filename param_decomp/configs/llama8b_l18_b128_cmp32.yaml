@@ -28,7 +28,6 @@ pd:
         n_heads: 64
         max_len: 2048
         rope_base: 10000.0
-  sampling: continuous
   decomposition_targets:
   - module_pattern: layers.18.mlp.gate_proj
     C: 24576
@@ -122,8 +121,6 @@ data:
   streaming: false
 runtime:
   remat_recon_forwards: true
-  autocast_bf16: true
-  device: cuda
   dp: null
 wandb:
   project: param-decomp-llama

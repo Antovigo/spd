@@ -71,7 +71,12 @@ _sigterm_received = False
 def install_sigterm_flag() -> None:
     """Install the SIGTERM handler the engine's save-on-preempt logic reads. Called by the
     composition root (which owns process setup) before `run_decomposition_training`."""
-    _install_sigterm_flag()
+
+    def handler(_signum: int, _frame: FrameType | None) -> None:
+        global _sigterm_received
+        _sigterm_received = True
+
+    signal.signal(signal.SIGTERM, handler)
 
 
 def sigterm_received() -> bool:
@@ -80,12 +85,16 @@ def sigterm_received() -> bool:
     return _sigterm_received
 
 
-def _install_sigterm_flag() -> None:
-    def handler(_signum: int, _frame: FrameType | None) -> None:
-        global _sigterm_received
-        _sigterm_received = True
+def _log_wandb_safe(wandb_module: "ModuleType", payload: "LogRecord", step: int, what: str) -> None:
+    """`wandb.log` swallowing `CommError` only — a transient wandb-server outage must not
+    kill a multi-day run, while genuine misuse (e.g. a non-dict record) still raises. The
+    soft-fail is deliberate (drops the failed record, keeps training)."""
+    import wandb.errors
 
-    signal.signal(signal.SIGTERM, handler)
+    try:
+        wandb_module.log(payload, step=step)
+    except wandb.errors.CommError as e:
+        print(f"wandb communication error, skipping {what}: {e}", flush=True)
 
 
 def _ensure_global[T](tree: T, mesh: Mesh) -> T:
@@ -193,14 +202,7 @@ class MetricsSink:
             flush=True,
         )
         if self._wandb is not None:
-            import wandb.errors
-
-            # CommError catches wandb-server hiccups (a transient outage must not kill a
-            # multi-day run) while letting genuine misuse (e.g. a non-dict record) raise.
-            try:
-                self._wandb.log(record, step=step)
-            except wandb.errors.CommError as e:
-                print(f"wandb communication error, skipping log: {e}", flush=True)
+            _log_wandb_safe(self._wandb, record, step, "log")
 
 
 class SlowEvalRenderer:
@@ -286,7 +288,6 @@ def _render_and_log_slow_eval(
     the host-gathered V/U, the `UVPlots` heatmaps) and log them to wandb on the live `_step`
     axis at `now_step`. No jax/device access — safe off the train loop."""
     import wandb
-    import wandb.errors
     from PIL import Image
 
     figures = render_slow_eval_figures(reductions)
@@ -295,10 +296,7 @@ def _render_and_log_slow_eval(
     payload: dict[str, Any] = {
         f"slow_eval/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in figures.items()
     }
-    try:
-        wandb.log(payload, step=now_step)
-    except wandb.errors.CommError as e:
-        print(f"wandb communication error, skipping slow-eval figures: {e}", flush=True)
+    _log_wandb_safe(wandb, payload, now_step, "slow-eval figures")
 
 
 def _init_or_restore_state(
@@ -406,7 +404,7 @@ def run_decomposition_training(
     (LM, TMS, ResidMLP, …) runs through.
 
     Reads the pydantic algorithm config DIRECTLY: `pd` (seed / steps / optimizers / loss
-    metrics / faith warmup / sampling), `cadence` (log / save / checkpoint-retention
+    metrics / faith warmup), `cadence` (log / save / checkpoint-retention
     rhythm), `run` (the run identity + wandb lineage). The lab-built objects ride alongside:
     the decomposed `lm` + `frozen` target, the CI-fn arch `ci_fn`, the data source `data`
     (None for a toy), and the `remat_recon_forwards` compute knob.
@@ -451,7 +449,7 @@ def run_decomposition_training(
 
     step_fn = make_train_step(
         lm=lm,
-        loss_spec=build_recon_terms(pd.loss_metrics, lm.site_names, pd.n_mask_samples, pd.sampling),
+        loss_spec=build_recon_terms(pd.loss_metrics, lm.site_names, pd.n_mask_samples),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=pd.steps,

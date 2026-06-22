@@ -141,7 +141,6 @@ def _build_sharded(seed: int):
         ),
         lm.site_names,
         n_mask_samples=1,
-        sampling="continuous",
     )  # fmt: skip
     assert tuple(loss_spec.persistent) == PERSISTENT_TERMS, loss_spec.persistent
 

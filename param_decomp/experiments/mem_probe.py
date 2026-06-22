@@ -181,9 +181,7 @@ def main() -> None:
             n_warmup_steps=2,
         ),
     )  # fmt: skip
-    loss_spec = build_recon_terms(
-        loss_metrics, lm.site_names, n_mask_samples=1, sampling="continuous"
-    )
+    loss_spec = build_recon_terms(loss_metrics, lm.site_names, n_mask_samples=1)
 
     ci_arch = ChunkwiseTransformerCIArch(
         chunks=(Chunk(input_taps=(f"resid.{args.first_layer}",), output_sites=lm.site_names),),

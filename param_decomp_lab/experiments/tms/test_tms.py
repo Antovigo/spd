@@ -201,9 +201,7 @@ def _make_state_and_step(
         ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
         sources={}, sources_opt_state={}, step=jnp.zeros((), jnp.int32),
     )  # fmt: skip
-    loss_spec = build_recon_terms(
-        _loss_metrics(), lm.site_names, n_mask_samples=1, sampling="continuous"
-    )
+    loss_spec = build_recon_terms(_loss_metrics(), lm.site_names, n_mask_samples=1)
     step = make_train_step(
         lm=lm, loss_spec=loss_spec, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=total_steps, remat_recon_forwards=False, mesh=None,
@@ -308,7 +306,7 @@ def _faith_warmed_state(
         ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
         sources={}, sources_opt_state={}, step=jnp.zeros((), jnp.int32),
     )  # fmt: skip
-    loss_spec = build_recon_terms(_recovery_loss_metrics(), lm.site_names, 1, "continuous")
+    loss_spec = build_recon_terms(_recovery_loss_metrics(), lm.site_names, 1)
     step = make_train_step(
         lm=lm, loss_spec=loss_spec, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=total_steps, remat_recon_forwards=False, mesh=None,

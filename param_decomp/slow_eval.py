@@ -39,7 +39,7 @@ permutation and is the one figure metric usable for ANY decomposition: the toys 
 their probe CI as the permutation source (`render_uv_figure`), the LM in-loop tier feeds it
 the position-CI upper matrix. The LM in-loop UVPlots does a NAIVE host gather of the
 C-sharded V/U — cheap for the toys (small, replicated, already on host) but it OOMs / breaks
-at production C BY DESIGN (per Oli): no special handling, the gather is the cost.
+at production C BY DESIGN: no special handling, the gather is the cost.
 """
 
 import fnmatch
@@ -64,7 +64,6 @@ from param_decomp.configs import (
     IdentityCIErrorConfig,
     IdentityCITargetSpec,
     PermutedCIPlotsConfig,
-    SamplingType,
     UVPlotsConfig,
 )
 from param_decomp.hidden_acts_eval import (
@@ -568,7 +567,7 @@ def render_permutation_figures(
 
     The CI heatmaps come from `position_ci` (cheap). `components` is the host-gathered
     C-sharded V/U: pass it (and have `UVPlots` configured) to render `UVPlots`, `None` to
-    skip it. The gather is NAIVE — it OOMs / breaks at production C BY DESIGN (per Oli), so
+    skip it. The gather is NAIVE — it OOMs / breaks at production C BY DESIGN, so
     the caller only gathers when `spec.want_uv_plots` and accepts the failure at scale; the
     UV column order reuses the position-CI permutation."""
     figures: dict[str, bytes] = {}
@@ -653,7 +652,6 @@ def compute_hidden_acts_metrics(
     frozen: Any,
     residual_batches: list[Float[Array, "*leading d"]],
     n_mask_samples: int,
-    sampling: SamplingType,
     base_key: Array,
 ) -> dict[str, float]:
     """Both hidden-acts recon eval metrics over the eval batches, keyed by the torch
@@ -664,7 +662,7 @@ def compute_hidden_acts_metrics(
     ci_reductions = accumulate_hidden_acts(
         ci_step, state.components, state.ci_fn, frozen, residual_batches, ci_key
     )
-    stoch_step = make_stochastic_hidden_acts_step(lm, n_mask_samples, sampling)
+    stoch_step = make_stochastic_hidden_acts_step(lm, n_mask_samples)
     stoch_reductions = accumulate_hidden_acts(
         stoch_step, state.components, state.ci_fn, frozen, residual_batches, stoch_key
     )

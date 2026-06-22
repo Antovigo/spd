@@ -70,7 +70,7 @@ python -m param_decomp.experiments.llama8b_real --real_weights --first_layer 20 
 ## Design
 
 - **Generic over vendored LMs.** The trainer sees only the `DecomposedModel` fn-table
-  (`lm.py`): ordered `sites`, `clean_output`, `site_inputs`, `masked_output`,
+  (`lm.py`): ordered `sites`, `clean_output`, `read_activations`, `masked_output`,
   `masked_site_outputs` (the hidden-acts eval seam, SPEC S31), `weight_deltas` — all
   pure, all taking the frozen pytree as a *runtime arg* (a frozen
   8B target closed over as a jit constant bakes multi-GB weights into the HLO). Adding

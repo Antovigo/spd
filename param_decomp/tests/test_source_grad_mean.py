@@ -46,7 +46,7 @@ from param_decomp.llama8b import (
     mlp_family_site_cs,
 )
 from param_decomp.losses import kl_per_position
-from param_decomp.sharding import dp_mesh, replicate, shard_batch
+from param_decomp.sharding import dp_mesh, shard_batch
 from param_decomp.tests.test_llama8b import _tiny_cfg, _tiny_target
 from param_decomp.train import COMPUTE_DT, cast_floating
 
@@ -81,7 +81,7 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
         resid = shard_batch(resid, mesh, batch_axis=0)
         # The source leaf is REPLICATED across `dp` — exactly `init_sources_sharded`'s
         # placement (`P()`); this is where the SUM-vs-MEAN reduction lands.
-        src = {name: replicate(v, mesh) for name, v in src.items()}
+        src = {name: jax.device_put(v, NamedSharding(mesh, P())) for name, v in src.items()}
 
     components_bf16 = cast_floating(vu, COMPUTE_DT)
     ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)

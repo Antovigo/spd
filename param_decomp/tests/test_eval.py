@@ -17,6 +17,7 @@ from param_decomp.ci_fn import (
     CIFn,
     build_ci_fn,
 )
+from param_decomp.config import EvalPGDConfig
 from param_decomp.eval import make_eval_step, next_token_cross_entropy
 from param_decomp.llama8b import llama_decomposed_lm, llama_site_specs, mlp_family_site_cs
 from param_decomp.lm import DecomposedModel, SiteSpec
@@ -163,7 +164,7 @@ def test_eval_step_fresh_pgd_probe():
         rounding_threshold=0.0,
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
-        pgd=(8, 0.1),
+        pgd=EvalPGDConfig(n_steps=8, step_size=0.1),
         mesh=None,
     )
     unascended = make_eval_step(
@@ -171,7 +172,7 @@ def test_eval_step_fresh_pgd_probe():
         rounding_threshold=0.0,
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
-        pgd=(0, 0.1),
+        pgd=EvalPGDConfig(n_steps=0, step_size=0.1),
         mesh=None,
     )
     out = ascended(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))
@@ -220,11 +221,11 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
 
     single_step = make_eval_step(
         lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, pgd=(8, 0.1), mesh=None,
+        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=None,
     )  # fmt: skip
     sharded_step = make_eval_step(
         lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, pgd=(8, 0.1), mesh=mesh,
+        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=mesh,
     )  # fmt: skip
 
     out_single = single_step(vu, ci_fn, tgt, token_ids, residual, jax.random.PRNGKey(5))

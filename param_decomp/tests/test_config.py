@@ -78,7 +78,7 @@ def test_b128_config_converts(tmp_path: Path):
     assert converted.target.sites == mlp_family_site_cs(18, 18, 24576)
     spec = build_recon_terms(
         converted.pd.loss_metrics, tuple(sc.name for sc in converted.target.sites),
-        converted.pd.n_mask_samples, converted.pd.sampling,
+        converted.pd.n_mask_samples,
     )  # fmt: skip
     assert spec.faith_coeff == 1e5 and spec.imp_min.pnorm == 2.0
     (ppgd,) = spec.persistent.values()

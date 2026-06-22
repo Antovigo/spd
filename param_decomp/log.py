@@ -67,24 +67,6 @@ class _ParamDecompLogger(logging.Logger):
         term_width: int = shutil.get_terminal_size(fallback=(50, 20)).columns
         self.info("\n" + DIV_CHAR * term_width + "\n" + msg + "\n" + DIV_CHAR * term_width)
 
-    def set_format(self, handler: str, style: LogFormat) -> None:
-        """Swap this logger's handler formatters in place.
-
-        it would be nicer to do this when we initialize the logger, but that's done on module import
-        """
-        fmt: logging.Formatter = logging.Formatter(**_FORMATTERS[style])
-        found_handler: bool = False
-        for h in self.handlers:
-            if getattr(h, "name", None) == handler:
-                h.setFormatter(fmt)
-                found_handler = True
-                break
-        if not found_handler:
-            raise ValueError(
-                f"Handler '{handler}' not found in logger '{self.name}' handlers: {self.handlers}. "
-                f"could not set {style = }"
-            )
-
 
 def setup_logger(logfile: Path = DEFAULT_LOGFILE) -> _ParamDecompLogger:
     """Setup a logger to be used in all modules in the library.
@@ -92,15 +74,6 @@ def setup_logger(logfile: Path = DEFAULT_LOGFILE) -> _ParamDecompLogger:
     Sets up logging configuration with a console handler and a file handler.
     Console handler logs messages with INFO level, file handler logs WARNING level.
     The root logger is configured to use both handlers.
-
-    Returns:
-        _ParamDecompLogger: A configured logger object.
-
-    Example:
-        >>> logger = setup_logger()
-        >>> logger.debug("Debug message")
-        >>> logger.info("Info message")
-        >>> logger.warning("Warning message")
     """
     logging.setLoggerClass(_ParamDecompLogger)
 

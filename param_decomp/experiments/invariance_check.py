@@ -108,7 +108,6 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         ),
         lm.site_names,
         n_mask_samples=1,
-        sampling="continuous",
     )  # fmt: skip
     step = make_train_step(
         lm=lm,

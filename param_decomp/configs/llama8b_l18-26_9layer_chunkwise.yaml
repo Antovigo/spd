@@ -211,13 +211,10 @@ pd:
   - coeff: 100000.0
     type: FaithfulnessLoss
   n_mask_samples: 1
-  sampling: continuous
   seed: 0
   steps: 40000
 runtime:
   remat_recon_forwards: true
-  autocast_bf16: true
-  device: cuda:0
   dp: 64
 target:
   output_extract: logits

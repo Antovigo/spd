@@ -126,7 +126,7 @@ def init_train_state(
     assert ci_fn.expects_axes == lm.leading_axes, (
         f"CI fn expects leading axes {ci_fn.expects_axes} but model has {lm.leading_axes}"
     )
-    loss_spec = build_recon_terms(pd.loss_metrics, lm.site_names, pd.n_mask_samples, pd.sampling)
+    loss_spec = build_recon_terms(pd.loss_metrics, lm.site_names, pd.n_mask_samples)
     sources: dict[str, dict[str, Array]] = {}
     if loss_spec.persistent:
         # Persistent sources live on a position axis; TMS (no position axis) carries none.

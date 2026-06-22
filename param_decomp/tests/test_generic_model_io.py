@@ -258,7 +258,6 @@ def test_train_step_runs_through_generic_target():
         ),
         lm.site_names,
         n_mask_samples=1,
-        sampling="continuous",
     )
     step_fn = make_train_step(
         lm=lm,

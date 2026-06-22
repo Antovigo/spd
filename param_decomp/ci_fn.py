@@ -126,7 +126,6 @@ class CIBlock(eqx.Module):
     w2: Array
     b2: Array
     n_head: int = eqx.field(static=True)
-    head_dim: int = eqx.field(static=True)
     eps: float = eqx.field(static=True)
 
     def __call__(self, x: Float[Array, "b t d"], inv_freq: Array) -> Array:
@@ -173,7 +172,7 @@ class _ChunkMeta:
     """Per-chunk static routing, index-aligned with the stacked `chunks` leading axis."""
 
     input_taps: tuple[str, ...]  # taps to RMS-norm + concatenate as this chunk's input
-    sites: tuple[str, ...]  # output sites this chunk scores
+    output_sites: tuple[str, ...]  # output sites this chunk scores
     c: tuple[int, ...]  # C per output site (splits the head's c_chunk slab)
 
 
@@ -247,7 +246,7 @@ class ChunkwiseTransformerCIFn(eqx.Module):
         out: SiteDict = {}
         for chunk_idx, m in enumerate(self.chunk_meta):
             offset = 0
-            for site, c in zip(m.sites, m.c, strict=True):
+            for site, c in zip(m.output_sites, m.c, strict=True):
                 out[site] = stacked[chunk_idx, ..., offset : offset + c]
                 offset += c
             assert offset == stacked.shape[-1], (offset, stacked.shape[-1])  # full slab consumed
@@ -258,7 +257,6 @@ def _init_chunk_transformer(
     arch: ChunkwiseTransformerCIArch,
     total_d_in: int,
     c_chunk: int,
-    head_dim: int,
     key: PRNGKeyArray,
 ) -> ChunkTransformer:
     """One chunk's params, same Kaiming scheme as the old global transformer: relu-gain
@@ -285,7 +283,7 @@ def _init_chunk_transformer(
             wv=attn_default(kv, (d, d), d), wo=attn_default(ko, (d, d), d),
             w1=kaiming(k1, (d, mlp), d, relu_gain), b1=jnp.zeros((mlp,)),
             w2=kaiming(k2, (mlp, d), mlp, 1.0), b2=jnp.zeros((d,)),
-            n_head=arch.n_heads, head_dim=head_dim, eps=CI_FN_RMS_EPS,
+            n_head=arch.n_heads, eps=CI_FN_RMS_EPS,
         )  # fmt: skip
 
     in_key, out_key, *block_keys = jax.random.split(key, arch.n_blocks + 2)
@@ -323,7 +321,7 @@ def init_chunkwise_transformer_ci_fn(
     inv_freq = 1.0 / (10000.0 ** (jnp.arange(0, hd, 2, dtype=jnp.float32) / hd))
 
     per_chunk = [
-        _init_chunk_transformer(arch, arch.input_dim, c_chunk, hd, jax.random.fold_in(key, i))
+        _init_chunk_transformer(arch, arch.input_dim, c_chunk, jax.random.fold_in(key, i))
         for i in range(len(arch.chunks))
     ]
     stacked: ChunkTransformer = jax.tree.map(lambda *xs: jnp.stack(xs), *per_chunk)

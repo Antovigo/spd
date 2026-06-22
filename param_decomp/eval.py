@@ -49,12 +49,13 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
+from param_decomp.config import EvalPGDConfig
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import kl_per_position
+from param_decomp.sharding import batch_shard_leading
 from param_decomp.train import COMPUTE_DT, cast_floating
 
 
@@ -75,14 +76,14 @@ def make_eval_step(
     rounding_threshold: float,
     ci_alive_threshold: float,
     l0_group_patterns: dict[str, tuple[str, ...]] | None,
-    pgd: tuple[int, float] | None,
+    pgd: EvalPGDConfig | None,
     mesh: Mesh | None,
 ):
     """Build the jit'd `eval_step(components, ci_fn, frozen, token_ids, residual, key)
     -> {metric_key: scalar}` with torch-parity keys (un-prefixed: the caller adds
     `eval/`).
 
-    `pgd = (n_steps, step_size)` enables the fresh sign-PGD recon probe (torch
+    `pgd` (an `EvalPGDConfig`) enables the fresh sign-PGD recon probe (torch
     `PGDReconLoss` with `init: random, mask_scope: c`): per site one
     `(1, 1, C+1)` source shared across batch AND positions, `n_steps` ascents of
     `source += step_size * sign(∂KL/∂source)` clamped to `[0, 1]`, KL evaluated at the
@@ -91,8 +92,7 @@ def make_eval_step(
 
     CEandKLLosses / CI_L0 read tokens + vocab logits (next-token CE, KL over the vocab
     axis) and the fresh-PGD source is `(1, 1, C+1)` over a `(batch, sequence)` waist, so
-    this metric is LM-only — asserted on `leading_axes` at construction (localize-and-
-    assert: fail loudly, never silently mis-shape a positionless target)."""
+    this metric is LM-only — asserted on `leading_axes` at construction."""
     assert lm.leading_axes == ("sequence",), (
         f"CEandKLLosses/CI_L0 eval is LM-only (tokens + vocab logits over a sequence "
         f"axis); model has leading_axes={lm.leading_axes}"
@@ -109,10 +109,7 @@ def make_eval_step(
             l0_groups[group_name] = members
 
     def batch_sharded(x: Array) -> Array:
-        if mesh is None:
-            return x
-        spec = ["dp"] + [None] * (x.ndim - 1)
-        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
+        return batch_shard_leading(x, mesh)
 
     def masked_forward(
         frozen: Any, components_bf16: Any, residual: Array, masks: dict[str, Array],
@@ -193,13 +190,10 @@ def make_eval_step(
         out: dict[str, Array] = {}
         for variant in variant_masks:
             out[f"ce_kl/kl_{variant}"] = kl[variant]
-        for variant in variant_masks:
-            if variant == "zero_masked":
-                continue
+        difference_variants = tuple(v for v in variant_masks if v != "zero_masked")
+        for variant in difference_variants:
             out[f"ce_kl/ce_difference_{variant}"] = ce[variant] - target_ce
-        for variant in variant_masks:
-            if variant == "zero_masked":
-                continue
+        for variant in difference_variants:
             out[f"ce_kl/ce_unrecovered_{variant}"] = (ce[variant] - target_ce) / (
                 ce["zero_masked"] - target_ce
             )
@@ -216,7 +210,8 @@ def make_eval_step(
             )
 
         if pgd is not None:
-            pgd_n_steps, pgd_step_size = pgd
+            pgd_n_steps = pgd.n_steps
+            pgd_step_size = pgd.step_size
 
             def kl_at_sources(adversarial_sources: dict[str, Array]) -> Array:
                 masks = {}

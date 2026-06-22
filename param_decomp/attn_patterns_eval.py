@@ -36,10 +36,9 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.configs import SamplingType
 from param_decomp.llama8b import FrozenAttn, Target
 from param_decomp.llama_simple_mlp import SimpleMLPTarget
-from param_decomp.lm import DecomposedModel
+from param_decomp.lm import DecomposedModel, all_false_routes
 from param_decomp.train import COMPUTE_DT, cast_floating
 from vendored_jax.llama import apply_rope, repeat_kv, rope_cos_sin
 
@@ -123,10 +122,6 @@ class LayerKLReduction:
     n_distributions: int
 
 
-def _all_false_routes(site_names: tuple[str, ...], leading: tuple[int, ...]) -> dict[str, Array]:
-    return {s: jnp.zeros(leading, bool) for s in site_names}
-
-
 def _pattern_kl(target_pattern: Array, masked_pattern: Array) -> Array:
     """`Σ target · (log target − log masked.clamp(1e-12))` in fp32 (torch
     `F.kl_div(masked.clamp(1e-12).log(), target, reduction="sum")`)."""
@@ -164,7 +159,7 @@ def _clean_patterns(
         frozen, components_bf16, residual,
         {s: jnp.ones_like(ci_lower[s]) for s in site_names},
         {s: jnp.zeros(leading, COMPUTE_DT) for s in site_names},
-        _all_false_routes(site_names, leading), site_names, False,
+        all_false_routes(site_names, leading), site_names, False,
     )  # fmt: skip
     return {q: pattern_fn(clean_outputs[q], clean_outputs[k]) for q, k in layer_pairs}
 
@@ -227,7 +222,7 @@ def make_ci_attn_patterns_step(lm: DecomposedModel, pattern_fn: AttnPatternFn) -
 
 
 def make_stochastic_attn_patterns_step(
-    lm: DecomposedModel, pattern_fn: AttnPatternFn, n_mask_samples: int, sampling: SamplingType
+    lm: DecomposedModel, pattern_fn: AttnPatternFn, n_mask_samples: int
 ) -> AttnPatternsStep:
     """Stochastic-mask attn-patterns step: `n_mask_samples` draws of `mask = ci + (1−ci)·s`
     (with weight deltas), per-draw per-layer pattern KL summed. RNG via per-draw / per-site
@@ -263,11 +258,7 @@ def make_stochastic_attn_patterns_step(
             for site_idx, site in enumerate(site_names):
                 ci_site = ci_lower[site]
                 source_key = random.fold_in(mask_key, site_idx)
-                match sampling:
-                    case "continuous":
-                        source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
-                    case _:
-                        source = random.bernoulli(source_key, 0.5, ci_site.shape).astype(COMPUTE_DT)
+                source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
                 masks[site] = ci_site + (1.0 - ci_site) * source
                 delta_masks[site] = random.uniform(
                     random.fold_in(delta_key, site_idx), leading, COMPUTE_DT

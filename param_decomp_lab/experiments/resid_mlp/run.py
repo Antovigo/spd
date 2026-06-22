@@ -50,7 +50,6 @@ def build_resid_mlp_built_run(cfg: ResidMLPExperimentConfig) -> BuiltRun:
         cfg.pd.loss_metrics,
         tuple(sc.name for sc in site_cs),
         cfg.pd.n_mask_samples,
-        cfg.pd.sampling,
     )
     target = resid_mlp.ResidMLPTargetConfig(
         n_features=cfg.target.n_features,

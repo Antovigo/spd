@@ -179,7 +179,7 @@ def test_stochastic_step_runs_and_scales_n_by_draws():
     cfg, lm, target, components, ci_fn = _llama_attn_setup()
     pattern_fn = attn_pattern_for(target)
     n_draws = 3
-    step = make_stochastic_attn_patterns_step(lm, pattern_fn, n_draws, "continuous")
+    step = make_stochastic_attn_patterns_step(lm, pattern_fn, n_draws)
     b, t = 2, 8
     residual = jax.random.normal(jax.random.PRNGKey(4), (b, t, cfg.n_embd)) * 0.5
 
@@ -230,4 +230,4 @@ def test_attn_patterns_steps_reject_positionless_target():
     with pytest.raises(AssertionError, match="LM-only"):
         make_ci_attn_patterns_step(lm, dummy_pattern_fn)
     with pytest.raises(AssertionError, match="LM-only"):
-        make_stochastic_attn_patterns_step(lm, dummy_pattern_fn, 1, "continuous")
+        make_stochastic_attn_patterns_step(lm, dummy_pattern_fn, 1)

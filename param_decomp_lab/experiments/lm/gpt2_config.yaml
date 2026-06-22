@@ -9,7 +9,6 @@ pd:
   decomposition_targets:
   - module_pattern: transformer.h.1.attn.c_attn
     C: 768
-  sampling: continuous
   batch_size: 2
   steps: 50000
   components_optimizer:
@@ -70,8 +69,6 @@ data:
   train_split: train
   eval_split: train
 runtime:
-  autocast_bf16: true
-  device: cuda
   dp: null
 wandb:
   project: param-decomp

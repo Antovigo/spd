@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
 from param_decomp.losses import kl_per_position
@@ -34,6 +35,13 @@ SiteDeltaMasks = dict[str, Float[Array, "*leading"]]
 SiteRoutes = dict[str, Bool[Array, "*leading"]] | None
 """Per-site per-position routing; `None` routes every position to the decomposition
 (SPEC §1.3). Positions routing False take the frozen `x @ W` path."""
+
+
+def all_false_routes(site_names: tuple[str, ...], leading: tuple[int, ...]) -> dict[str, Array]:
+    """Route every position to the frozen path so `masked_site_outputs` returns the
+    target `x @ W` per site (the clean recon target used by the hidden-acts / attn-pattern
+    eval metrics)."""
+    return {s: jnp.zeros(leading, bool) for s in site_names}
 
 
 @dataclass(frozen=True)
@@ -84,7 +92,7 @@ class DecomposedModel:
     `masked_output` threads onward) instead of final logits, keyed by site (SPEC S31).
     It exists ONLY for the offline hidden-acts recon eval metrics — never the recon grid,
     which stays KL-on-final-logits (SPEC §2.3). The clean (target) per-site output is the
-    frozen `x @ W` of `site_inputs`, derivable without this fn.
+    frozen `x @ W` of `read_activations`, derivable without this fn.
 
     `recon_loss_fn(clean_output, masked_output) -> scalar` is the recon comparison the
     step minimizes (SPEC §2.3). It defaults to `kl_per_position` (the LM cross-entropy

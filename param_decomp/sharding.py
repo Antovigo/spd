@@ -7,8 +7,8 @@ every collective (the grad all-reduce, the source-grad reduction) automatically
 because the mean-losses reduce over the sharded batch axis. No manual NCCL, no
 pool-coordination code.
 
-Placement is expressed as `NamedSharding`: `replicate` for params (target-specific
-plans like `llama8b_sharding.py` layer C-sharding on top), `shard_batch` for the
+Placement is expressed as `NamedSharding`: target-specific plans (like
+`llama8b_sharding.py`) place params with layer C-sharding; `shard_batch` shards the
 data axis.
 """
 
@@ -52,8 +52,14 @@ def dp_mesh() -> Mesh:
     return Mesh(np.array(jax.devices()), axis_names=("dp",))
 
 
-def replicate(x: jax.Array, mesh: Mesh) -> jax.Array:
-    return jax.device_put(x, NamedSharding(mesh, P()))
+def batch_shard_leading(x: jax.Array, mesh: Mesh | None) -> jax.Array:
+    """In-jit `with_sharding_constraint` pinning the LEADING (batch) axis to `'dp'`, the
+    rest replicated. `mesh is None` (single device) is a passthrough. Keeps the masked
+    re-forwards on per-device sub-batches (activation memory 1/n_dev)."""
+    if mesh is None:
+        return x
+    spec = ["dp"] + [None] * (x.ndim - 1)
+    return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
 
 
 def shard_batch(full_global: jax.Array, mesh: Mesh, batch_axis: int) -> jax.Array:

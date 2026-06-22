@@ -7,7 +7,6 @@ run_name: jax-resid-mlp-3l
 pd:
   seed: 0
   n_mask_samples: 1
-  sampling: continuous
   ci_config:
     type: layerwise_mlp
     hidden_dims:
@@ -59,8 +58,6 @@ pd:
   faithfulness_warmup_weight_decay: 0.0
 runtime:
   remat_recon_forwards: false
-  autocast_bf16: true
-  device: cuda
   dp: null
 cadence:
   train_log_every: 100

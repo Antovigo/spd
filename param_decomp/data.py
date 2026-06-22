@@ -45,7 +45,6 @@ def scan_shards(data_dir: Path) -> tuple[ShardInfo, ...]:
 @dataclass(frozen=True)
 class BatchLocation:
     epoch: int
-    shard_idx: int  # position in the epoch's shard ORDER (not file index)
     file_idx: int  # index into the sorted file list
     batch_in_shard: int
 
@@ -75,7 +74,6 @@ class BatchSchedule:
         prev = 0 if shard_idx == 0 else int(cum[shard_idx - 1])
         return BatchLocation(
             epoch=epoch,
-            shard_idx=shard_idx,
             file_idx=int(order[shard_idx]),
             batch_in_shard=pos - prev,
         )

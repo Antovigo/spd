@@ -260,7 +260,6 @@ def main():
         ),
         lm.site_names,
         n_mask_samples=1,
-        sampling="continuous",
     )
     step = make_train_step(
         lm=lm,

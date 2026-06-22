@@ -14,7 +14,6 @@ pd:
         n_heads: 8
         max_len: 1024
         rope_base: 10000.0
-  sampling: continuous
   decomposition_targets:
   - module_pattern: h.*.mlp.c_fc
     C: 1152
@@ -124,8 +123,6 @@ data:
   is_tokenized: false
   streaming: false
 runtime:
-  autocast_bf16: true
-  device: cuda
   dp: null
 wandb:
   project: param-decomp

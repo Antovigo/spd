@@ -26,7 +26,8 @@ never silently diverge. Cite IDs (`S14`, `N1`, …) in commit messages and revie
 ## Architecture in one breath
 
 `lm.py` defines `DecomposedModel` — ordered `sites` + `leading_axes` + five pure fns
-(`clean_output`, `site_inputs`, `masked_output`, `weight_deltas`) plus a pluggable
+(`clean_output`, `read_activations`, `masked_output`, `masked_site_outputs`,
+`weight_deltas`) plus a pluggable
 `recon_loss_fn` (default `kl_per_position`), flat site-name-keyed dicts at the boundary,
 frozen pytree always a runtime arg (never a jit closure constant — an 8B target becomes a
 multi-GB HLO constant). The activation waist is GENERIC `[*leading, d]` (masks/CI
@@ -91,7 +92,7 @@ ci_fn, data, remat_recon_forwards, sample_batch, eval_fn, eval_every, perf_token
 mesh)` — the ONE train loop every target runs through (init/restore/finetune/faith-warmup
 via `_init_or_restore_state`, the recon-grid step factory, orbax checkpointing, schedules,
 SIGTERM-save). It reads the pydantic `PDConfig` / `Cadence` (`param_decomp.configs`)
-DIRECTLY — optimizers / loss metrics / faith warmup / seed / steps / sampling — so there is
+DIRECTLY — optimizers / loss metrics / faith warmup / seed / steps — so there is
 NO flattened mirror DC (the old `config.ExperimentConfig`); the run identity rides in
 `config.RunInstance`, and the lab-built objects (`ci_fn` arch, `data`, the decomposed target)
 pass alongside. A target injects exactly three seams: the data source

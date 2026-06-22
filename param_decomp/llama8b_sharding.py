@@ -144,7 +144,7 @@ def init_sources_sharded(
     mesh: Mesh,
 ) -> dict[str, Array]:
     """Seeded PPGD-source init -> placed per scope (jit + `out_shardings`; same
-    no-host-tree rationale as `init_decomp_vu_sharded`).
+    no-host-tree rationale as `init_decomp_vu_placed`).
 
     `sc`: `{site: (1, T, C+1)}` REPLICATED over `dp`. One adversarial source shared
     across the whole global batch (leading batch axis = 1, broadcast); it combines

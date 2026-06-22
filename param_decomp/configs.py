@@ -1,7 +1,7 @@
 """The torch-free pydantic config schema for the algorithm core.
 
 Every algorithm-level config class lives here (or in the sibling `base_config` /
-`schedule` modules): routing + sampling, decomposition targets, the CI-fn config tree,
+`schedule` modules): routing, decomposition targets, the CI-fn config tree,
 loss-metric configs, eval-metric configs, the top-level `PDConfig` / `RuntimeConfig` /
 `Cadence`, and the `wandb.config` shaping helpers. Depends only on pydantic / numpy /
 pyyaml / annotated-types (via `base_config`), so non-trainer consumers validate the same
@@ -29,7 +29,7 @@ from param_decomp.base_config import BaseConfig, Probability
 from param_decomp.schedule import ScheduleConfig
 
 # ---------------------------------------------------------------------------
-# Routing + sampling
+# Routing
 # ---------------------------------------------------------------------------
 
 
@@ -54,10 +54,6 @@ class AllRoutingConfig(BaseConfig):
 
 # Discriminated union over the subset-routing configs (keyed by ``type``).
 SubsetRoutingType = UniformKSubsetRoutingConfig | StaticProbabilityRoutingConfig | AllRoutingConfig
-
-
-# ``"continuous"`` draws uniform [0, 1) sources; ``"binomial"`` draws Bernoulli sources.
-SamplingType = Literal["continuous", "binomial"]
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +249,8 @@ def _alias_legacy_mask_scope(value: Any) -> Any:
 # nested config object (the `CScope | ... | BSCScope` discriminated union). The value
 # spaces also differ — `bc` is per-step-only; `sc`/`nsc` are persistent-only. Converging
 # them would change the stored YAML shape of one side and break old-run parsing.
-MaskScope = Annotated[Literal["c", "bc", "bsc"], BeforeValidator(_alias_legacy_mask_scope)]
+MaskScopeLiteral = Literal["c", "bc", "bsc"]
+MaskScope = Annotated[MaskScopeLiteral, BeforeValidator(_alias_legacy_mask_scope)]
 
 
 class PGDConfig(LossMetricConfig):
@@ -564,20 +561,28 @@ AnyLossMetricConfig = Annotated[
 
 
 class RuntimeConfig(BaseConfig):
-    """Compute substrate: device, precision, data-parallelism degree.
+    """Compute substrate: data-parallelism degree, rematerialization.
 
     Perturbs numerics but doesn't change the algorithm. Future home for NCCL flags,
     gradient accumulation steps, fp8 variants, etc.
     """
 
-    autocast_bf16: bool = Field(
-        default=True,
-        description="Use torch.autocast with bfloat16 mixed precision in training and eval.",
-    )
-    device: str = Field(
-        default="cuda",
-        description="Device to run on, e.g. 'cuda', 'cuda:0', or 'cpu'.",
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_removed_torch_runtime_fields(cls, data: object) -> object:
+        # Shared-storage shim (provenance): stored run config.yamls carry torch-trainer
+        # runtime fields the JAX trainer no longer has (`device`, `autocast_bf16` — bf16 is
+        # unconditional, device is JAX-managed). Strip them so existing runs still load;
+        # reject a non-supported value loudly. See param_decomp/MIGRATION_HOLES.md.
+        if not isinstance(data, dict):
+            return data
+        data.pop("device", None)
+        if "autocast_bf16" in data:
+            assert data.pop("autocast_bf16") is True, (
+                "autocast_bf16 was removed (the JAX trainer always computes in bf16)"
+            )
+        return data
+
     dp: PositiveInt | None = Field(
         default=None,
         description=(
@@ -600,12 +605,8 @@ class RuntimeConfig(BaseConfig):
     )
 
     @model_validator(mode="after")
-    def validate_device_dp(self) -> Self:
-        assert self.device == "cpu" or self.device == "cuda" or self.device.startswith("cuda:"), (
-            f"device must be 'cpu', 'cuda', or 'cuda:<index>', got {self.device!r}"
-        )
+    def validate_dp(self) -> Self:
         if self.dp is not None:
-            assert self.device.startswith("cuda"), "dp requires a cuda device"
             assert self.dp >= 2, "if set, dp must be at least 2 (pass None for single device)."
         return self
 
@@ -643,6 +644,10 @@ class PDConfig(BaseConfig):
             assert not data.pop("identity_decomposition_targets"), (
                 "identity_decomposition_targets was removed (identity insertion is not in the JAX trainer)"
             )
+        if "sampling" in data:
+            assert data.pop("sampling") == "continuous", (
+                "sampling was removed (continuous-only); binomial mask sampling is gone"
+            )
         return data
 
     # --- General ---
@@ -658,10 +663,6 @@ class PDConfig(BaseConfig):
         ...,
         discriminator="type",
         description="Configuration for the causal importance function.",
-    )
-    sampling: SamplingType = Field(
-        default="continuous",
-        description="Sampling mode for stochastic elements: 'continuous' (default) or 'binomial'",
     )
     decomposition_targets: list[DecompositionTargetConfig] = Field(
         ...,

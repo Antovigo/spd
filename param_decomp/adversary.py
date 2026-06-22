@@ -15,14 +15,13 @@ else (SPEC §3):
 """
 
 from dataclasses import dataclass
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.configs import AdamPGDConfig
+from param_decomp.configs import AdamPGDConfig, MaskScopeLiteral, PGDInitStrategy
 from param_decomp.lm import SiteSpec
 
 
@@ -54,8 +53,8 @@ def init_persistent_sources(
 
 def init_fresh_pgd_sources(
     sites: tuple[SiteSpec, ...],
-    init: Literal["random", "ones", "zeroes"],
-    scope: Literal["c", "bc", "bsc"],
+    init: PGDInitStrategy,
+    scope: MaskScopeLiteral,
     leading: tuple[int, ...],
     key: PRNGKeyArray,
 ) -> dict[str, Array]:

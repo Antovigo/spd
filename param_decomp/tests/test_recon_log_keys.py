@@ -75,7 +75,6 @@ def _build(recon_configs: tuple[object, ...]):
         (*_non_recon_configs(), *recon_configs),  # pyright: ignore[reportArgumentType]
         site_names=SITE_NAMES,
         n_mask_samples=1,
-        sampling="continuous",
     )
 
 

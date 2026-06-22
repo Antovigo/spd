@@ -32,8 +32,7 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.configs import SamplingType
-from param_decomp.lm import DecomposedModel
+from param_decomp.lm import DecomposedModel, all_false_routes
 from param_decomp.train import COMPUTE_DT, cast_floating
 
 
@@ -44,12 +43,6 @@ class SiteMSEReduction:
 
     sum_mse: float
     n_elements: int
-
-
-def _all_false_routes(site_names: tuple[str, ...], leading: tuple[int, ...]) -> dict[str, Array]:
-    """Route every position to the frozen path so `masked_site_outputs` returns the
-    target `x @ W` per site (the clean recon target)."""
-    return {s: jnp.zeros(leading, bool) for s in site_names}
 
 
 def _per_site_sum_mse(
@@ -93,7 +86,7 @@ def make_ci_hidden_acts_step(lm: DecomposedModel) -> HiddenActsStep:
         clean = lm.masked_site_outputs(
             frozen, components_bf16, residual,
             {s: jnp.ones_like(ci_lower[s]) for s in site_names}, zeros_delta,
-            _all_false_routes(site_names, leading), site_names, False,
+            all_false_routes(site_names, leading), site_names, False,
         )  # fmt: skip
         masked = lm.masked_site_outputs(
             frozen, components_bf16, residual, ci_lower, zeros_delta, None, site_names, False
@@ -105,9 +98,7 @@ def make_ci_hidden_acts_step(lm: DecomposedModel) -> HiddenActsStep:
     return step
 
 
-def make_stochastic_hidden_acts_step(
-    lm: DecomposedModel, n_mask_samples: int, sampling: SamplingType
-) -> HiddenActsStep:
+def make_stochastic_hidden_acts_step(lm: DecomposedModel, n_mask_samples: int) -> HiddenActsStep:
     """Stochastic-mask hidden-acts step: `n_mask_samples` draws of `mask = ci + (1−ci)·s`
     (with weight deltas), per-draw per-site MSE summed. RNG via per-draw / per-site
     `fold_in` (the eval-step discipline, mirrors `train.stochastic_entry_masks`)."""
@@ -132,7 +123,7 @@ def make_stochastic_hidden_acts_step(
             frozen, components_bf16, residual,
             {s: jnp.ones_like(ci_lower[s]) for s in site_names},
             {s: jnp.zeros(leading, COMPUTE_DT) for s in site_names},
-            _all_false_routes(site_names, leading), site_names, False,
+            all_false_routes(site_names, leading), site_names, False,
         )  # fmt: skip
 
         sum_mse = {s: jnp.zeros((), jnp.float32) for s in site_names}
@@ -143,11 +134,7 @@ def make_stochastic_hidden_acts_step(
             for site_idx, site in enumerate(site_names):
                 ci_site = ci_lower[site]
                 source_key = random.fold_in(mask_key, site_idx)
-                match sampling:
-                    case "continuous":
-                        source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
-                    case _:
-                        source = random.bernoulli(source_key, 0.5, ci_site.shape).astype(COMPUTE_DT)
+                source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
                 masks[site] = ci_site + (1.0 - ci_site) * source
                 delta_masks[site] = random.uniform(
                     random.fold_in(delta_key, site_idx), leading, COMPUTE_DT

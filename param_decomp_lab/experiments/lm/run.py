@@ -215,13 +215,12 @@ def _make_lm_eval_fn(
     assert eval_server.per_process % jax.local_device_count() == 0, (
         eval_server.per_process, jax.local_device_count(),
     )  # fmt: skip
-    eval_pgd = (eval.pgd.n_steps, eval.pgd.step_size) if eval.pgd else None
     eval_step_fn = make_eval_step(
         lm,
         eval.rounding_threshold,
         eval.ci_alive_threshold,
         eval.l0_groups,
-        eval_pgd,
+        eval.pgd,
         mesh,
     )
     attn_steps: dict[str, Any] = {}
@@ -231,7 +230,7 @@ def _make_lm_eval_fn(
             attn_steps["CIMaskedAttnPatternsReconLoss"] = make_ci_attn_patterns_step(lm, pattern_fn)
         if eval.attn_patterns.stochastic:
             attn_steps["StochasticAttnPatternsReconLoss"] = make_stochastic_attn_patterns_step(
-                lm, pattern_fn, pd.n_mask_samples, pd.sampling
+                lm, pattern_fn, pd.n_mask_samples
             )
 
     slow_eval_step = make_slow_eval_step(lm, eval.ci_alive_threshold)
@@ -297,7 +296,7 @@ def _make_lm_eval_fn(
             )
             hidden_acts_key = random.fold_in(run_key, 3 * pd.steps + eval_pass_index)
             hidden_acts = compute_hidden_acts_metrics(
-                lm, state, frozen, eval_residuals, pd.n_mask_samples, pd.sampling, hidden_acts_key
+                lm, state, frozen, eval_residuals, pd.n_mask_samples, hidden_acts_key
             )
             eval_record |= {f"eval/slow/loss/{k}": v for k, v in hidden_acts.items()}
             # The position-CI all-gather is ALSO collective (every rank joins it), gated on

@@ -302,7 +302,7 @@ def _assert_losses_supported(cfg: LMExperimentConfig, site_names: tuple[str, ...
     """Run the schema's loss configs through `build_recon_terms` so unsupported metrics
     refuse at convert time rather than on the GPUs. The engine reads `pd.loss_metrics`
     verbatim (yaml order is RNG-load-bearing), so nothing is returned."""
-    build_recon_terms(cfg.pd.loss_metrics, site_names, cfg.pd.n_mask_samples, cfg.pd.sampling)
+    build_recon_terms(cfg.pd.loss_metrics, site_names, cfg.pd.n_mask_samples)
 
 
 def _data(cfg: LMExperimentConfig) -> DataConfig:

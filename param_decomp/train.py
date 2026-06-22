@@ -24,8 +24,7 @@ import jax.numpy as jnp
 import optax
 from beartype import beartype
 from jax import random
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 from jaxtyping import Array, Bool, Float, PRNGKeyArray, jaxtyped
 
 from param_decomp.adversary import (
@@ -52,6 +51,7 @@ from param_decomp.recon import (
     Routes,
     StochasticSources,
 )
+from param_decomp.sharding import batch_shard_leading
 
 COMPUTE_DT = jnp.bfloat16
 
@@ -146,10 +146,7 @@ def make_train_step(
         persistent_adams[state_key] = optimizer
 
     def batch_sharded(x: Array) -> Array:
-        if mesh is None:
-            return x
-        spec = ["dp"] + [None] * (x.ndim - 1)
-        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(*spec)))
+        return batch_shard_leading(x, mesh)
 
     def batch_sharded_ci(ci: CI) -> CI:
         """Reshard the CI-fn output to batch-sharded ONCE, here. The CI head's `out_w`
@@ -191,7 +188,6 @@ def make_train_step(
     )
 
     def stochastic_entry_masks(
-        strategy: StochasticSources,
         ci_lower: dict[str, Array],
         live_sites: tuple[str, ...],
         leading_shape: tuple[int, ...],
@@ -203,13 +199,7 @@ def make_train_step(
         for site_idx, site in enumerate(live_sites):
             ci_site = ci_lower[site]
             source_key = random.fold_in(mask_source_key, site_idx)
-            match strategy.sampling:
-                case "continuous":
-                    stochastic_source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
-                case "binomial":
-                    stochastic_source = random.bernoulli(source_key, 0.5, ci_site.shape).astype(
-                        COMPUTE_DT
-                    )
+            stochastic_source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
             masks[site] = ci_site + (1.0 - ci_site) * stochastic_source
             delta_masks[site] = random.uniform(
                 random.fold_in(delta_mask_key, site_idx), leading_shape, COMPUTE_DT
@@ -427,9 +417,9 @@ def make_train_step(
                     for draw_idx, routes in enumerate(routes_per_draw):
                         draw_key = random.fold_in(entry_key, draw_idx)
                         match entry.sources:
-                            case StochasticSources() as strategy:
+                            case StochasticSources():
                                 masks, delta_masks = stochastic_entry_masks(
-                                    strategy, ci.lower, entry.live_sites, leading, draw_key
+                                    ci.lower, entry.live_sites, leading, draw_key
                                 )
                             case ConstantSources() as strategy:
                                 masks, delta_masks = constant_entry_masks(

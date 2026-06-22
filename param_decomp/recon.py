@@ -14,7 +14,6 @@ entries) vary per step.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 from jax import random
 from jaxtyping import Array, PRNGKeyArray
@@ -30,11 +29,12 @@ from param_decomp.configs import (
     CIMaskedReconSubsetLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
+    MaskScopeLiteral,
     PersistentPGDReconLossConfig,
+    PGDInitStrategy,
     PGDReconLayerwiseLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
-    SamplingType,
     SCScope,
     StaticProbabilityRoutingConfig,
     StochasticReconLayerwiseLossConfig,
@@ -63,9 +63,7 @@ sampler identities, family sizes — is static; only the key varies per step."""
 
 @dataclass(frozen=True)
 class StochasticSources:
-    """Fresh per-draw sources: components `U[0,1]` (or Bernoulli), delta `U[0,1]`."""
-
-    sampling: SamplingType
+    """Fresh per-draw sources: components `U[0,1]`, delta `U[0,1]`."""
 
 
 @dataclass(frozen=True)
@@ -84,10 +82,10 @@ class FreshPGDSources:
     across steps. The entry's routing is drawn ONCE per step and shared by every
     ascent and the final loss forward (SPEC S24, torch parity)."""
 
-    init: Literal["random", "ones", "zeroes"]
+    init: PGDInitStrategy
     n_steps: int
     step_size: float
-    scope: Literal["c", "bc", "bsc"]
+    scope: MaskScopeLiteral
 
 
 @dataclass(frozen=True)
@@ -100,14 +98,6 @@ class PersistentSources:
 
 
 MaskSourceStrategy = StochasticSources | ConstantSources | FreshPGDSources | PersistentSources
-
-
-def strategy_has_delta(sources: MaskSourceStrategy) -> bool:
-    """`ConstantSources` carries no delta path (torch passes no `weight_deltas` for the
-    Unmasked/CIMasked losses); its `delta_mask` would be a constant 0, so the `x @ Δ`
-    matmul is skipped entirely (static, retrace-safe — LOSS_PARITY_DESIGN §4b). Every
-    other strategy drives a live delta mask."""
-    return not isinstance(sources, ConstantSources)
 
 
 @dataclass(frozen=True)
@@ -124,7 +114,11 @@ class ReconForward:
 
     @property
     def has_delta(self) -> bool:
-        return strategy_has_delta(self.sources)
+        """`ConstantSources` carries no delta path (torch passes no `weight_deltas` for the
+        Unmasked/CIMasked losses); its `delta_mask` would be a constant 0, so the `x @ Δ`
+        matmul is skipped entirely (static, retrace-safe — LOSS_PARITY_DESIGN §4b). Every
+        other strategy drives a live delta mask."""
+        return not isinstance(self.sources, ConstantSources)
 
 
 ReconPlan = tuple[ReconForward, ...]
@@ -298,7 +292,6 @@ def build_recon_terms(
     loss_metrics: Sequence[AnyLossMetricConfig],
     site_names: tuple[str, ...],
     n_mask_samples: int,
-    sampling: SamplingType,
 ) -> LossSpec:
     """Map the shared torch loss configs onto recon terms (LOSS_PARITY_DESIGN §3).
 
@@ -345,20 +338,20 @@ def build_recon_terms(
                 plan = make_plan(
                     one_chunk(site_names),
                     AllRoutingConfig(),
-                    StochasticSources(sampling),
+                    StochasticSources(),
                     n_mask_samples,
                 )
                 terms.append(ReconLossTerm(assert_unique_instance_key(cfg), cfg.coeff, plan))
             case StochasticReconSubsetLossConfig():
                 plan = make_plan(
-                    one_chunk(site_names), cfg.routing, StochasticSources(sampling), n_mask_samples
+                    one_chunk(site_names), cfg.routing, StochasticSources(), n_mask_samples
                 )
                 terms.append(ReconLossTerm(assert_unique_instance_key(cfg), cfg.coeff, plan))
             case StochasticReconLayerwiseLossConfig():
                 plan = make_plan(
                     per_site(site_names),
                     AllRoutingConfig(),
-                    StochasticSources(sampling),
+                    StochasticSources(),
                     n_mask_samples,
                 )
                 terms.append(ReconLossTerm(assert_unique_instance_key(cfg), cfg.coeff, plan))
@@ -367,7 +360,7 @@ def build_recon_terms(
                 plan = make_plan(
                     into_groups(site_names, cfg.sites_per_chunk),
                     cfg.routing,
-                    StochasticSources(sampling),
+                    StochasticSources(),
                     cfg.n_samples,
                 )
                 terms.append(ReconLossTerm(assert_unique_instance_key(cfg), cfg.coeff, plan))

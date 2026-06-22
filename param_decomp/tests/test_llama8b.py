@@ -342,7 +342,6 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
         ),
         lm.site_names,
         n_mask_samples=1,
-        sampling="continuous",
     )
     step = make_train_step(
         lm=lm,
@@ -469,7 +468,6 @@ def test_fresh_pgd_adversary_step():
             ),
             lm.site_names,
             n_mask_samples=1,
-            sampling="continuous",
         )
         step = make_train_step(
             lm=lm,

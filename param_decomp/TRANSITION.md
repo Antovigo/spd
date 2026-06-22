@@ -47,9 +47,9 @@ dead.
 Promote what already exists — pure-functional, state-injected. There is no torch
 counterpart to keep in sync.
 
-- **`DecomposedModel`** (`lm.py`): ordered `sites` + `clean_output` / `site_inputs` /
-  `masked_output` / `weight_deltas` over `(frozen, vu)` pytrees.
-- **`CIFn`** (`ci_fn.py`): `site_inputs -> (ci_lower, ci_upper)`. (SRP: model and CI are
+- **`DecomposedModel`** (`lm.py`): ordered `sites` + `clean_output` / `read_activations` /
+  `masked_output` / `masked_site_outputs` / `weight_deltas` over `(frozen, vu)` pytrees.
+- **`CIFn`** (`ci_fn.py`): `read_activations -> (ci_lower, ci_upper)`. (SRP: model and CI are
   separate concerns; a run is the pair + frozen target.)
 - **Dispatch lives only at the edges:** one `load(run) -> Decomposition` and one
   `export(state) -> orbax`. Nothing else knows architecture/layout.

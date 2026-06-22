@@ -492,7 +492,7 @@ def llama_simple_mlp_decomposed_lm(
     return DecomposedModel(
         sites=sites,
         leading_axes=("sequence",),
-        clean_output=lambda frozen, resid: clean_suffix_logits(frozen, resid),
+        clean_output=clean_suffix_logits,
         read_activations=lambda frozen, resid, wanted: clean_activations(
             frozen, first_layer, wanted, resid
         ),

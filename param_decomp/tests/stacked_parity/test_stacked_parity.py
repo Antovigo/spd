@@ -176,7 +176,7 @@ def test_chunk_plan_static_live_set_matches():
     f, lm, tgt, vu, resid = _load()
 
     plan = subset_chunk_plan(
-        lm.site_names, sites_per_chunk=3, n_samples=1, sources=StochasticSources("continuous")
+        lm.site_names, sites_per_chunk=3, n_samples=1, sources=StochasticSources()
     )
     chunk0 = lm.site_names[:3]
     assert plan[0].live_sites == chunk0, (plan[0].live_sites, chunk0)
@@ -252,7 +252,6 @@ def test_train_trajectory_matches():
         ),
         lm.site_names,
         n_mask_samples=1,
-        sampling="continuous",
     )
     step_fn = make_train_step(
         lm=lm,

@@ -3,7 +3,7 @@
 entering the generic engine (`run.py::run_decomposition_training`).
 
 The engine reads `pd` / `cadence` / `runtime` DIRECTLY (no flattened mirror): optimizers,
-faith warmup, loss metrics, seed, steps, sampling all come off `PDConfig`. The bundle only
+faith warmup, loss metrics, seed, steps all come off `PDConfig`. The bundle only
 carries the things that are genuinely BUILT lab-side and cannot live in the pydantic schema:
 the run identity (`RunInstance`), the decomposed `target` (typed by the `TargetSites`
 protocol — just `.sites`), the resolved `data` source (`DataConfig | None`, None for a
@@ -118,7 +118,7 @@ class BuiltRun:
     algorithm config (read DIRECTLY) plus the lab-built objects.
 
     `pd` / `runtime` / `cadence` are the verbatim pydantic config — the engine reads
-    optimizers / loss metrics / faith warmup / seed / steps / sampling / cadence off them,
+    optimizers / loss metrics / faith warmup / seed / steps / cadence off them,
     so there is no flattened mirror to drift. The rest is what composition resolves: the
     run identity, the decomposed target (only `.sites` is read), the data source (`None`
     for a toy), the built CI-fn architecture, and the resolved scalar-tier eval config."""
