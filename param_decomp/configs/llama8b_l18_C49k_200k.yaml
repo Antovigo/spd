@@ -70,18 +70,12 @@ eval:
 pd:
   batch_size: 512
   ci_config:
-    fn_type: global_shared_transformer
-    hidden_dims: null
-    mode: global
-    simple_transformer_ci_cfg:
-      attn_config:
-        max_len: 2048
-        n_heads: 64
-        rope_base: 10000.0
-      d_model: 4096
-      mlp_hidden_dim:
-      - 16384
-      n_blocks: 4
+    type: chunkwise_transformer
+    blocks_per_chunk: 1
+    d_model: 4096
+    n_blocks: 4
+    n_heads: 64
+    mlp_hidden: 16384
   ci_fn_optimizer:
     betas:
     - 0.9

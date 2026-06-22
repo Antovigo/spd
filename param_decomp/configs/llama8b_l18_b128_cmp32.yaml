@@ -16,18 +16,12 @@ pd:
   seed: 0
   n_mask_samples: 1
   ci_config:
-    mode: global
-    fn_type: global_shared_transformer
-    hidden_dims: null
-    simple_transformer_ci_cfg:
-      d_model: 4096
-      n_blocks: 4
-      mlp_hidden_dim:
-      - 16384
-      attn_config:
-        n_heads: 64
-        max_len: 2048
-        rope_base: 10000.0
+    type: chunkwise_transformer
+    blocks_per_chunk: 1
+    d_model: 4096
+    n_blocks: 4
+    n_heads: 64
+    mlp_hidden: 16384
   decomposition_targets:
   - module_pattern: layers.18.mlp.gate_proj
     C: 24576
