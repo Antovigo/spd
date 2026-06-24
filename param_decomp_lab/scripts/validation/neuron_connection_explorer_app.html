@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Neuron connection explorer</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #fff; color: #222; }
+  header { padding: 10px 16px; border-bottom: 1px solid #ddd; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 12px 0 0; }
+  label { font-size: 13px; }
+  input[type=number] { width: 64px; padding: 2px 4px; font-size: 13px; }
+  #wrap { display: flex; }
+  #stage { flex: 1; overflow: auto; max-height: calc(100vh - 52px); }
+  #panel { width: 280px; border-left: 1px solid #ddd; padding: 12px; box-sizing: border-box; }
+  #panel h2 { font-size: 13px; margin: 0 0 6px; }
+  #panel .kv { font-size: 13px; line-height: 1.5; }
+  .col-title { font-size: 12px; fill: #666; font-weight: 600; }
+  .node text { font-size: 11px; }
+  .node rect { cursor: pointer; }
+  #hint { font-size: 12px; color: #888; }
+  canvas { border: 1px solid #eee; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Neuron connection explorer</h1>
+  <label>a <input id="a" type="number" min="1" value="2" /></label>
+  <label>b <input id="b" type="number" min="1" value="3" /></label>
+  <label>conn. threshold <input id="thr" type="number" step="0.01" value="0.15" /></label>
+  <span id="hint"></span>
+</header>
+<div id="wrap">
+  <div id="stage"><svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <div id="panel">
+    <h2 id="panel-title">Hover a subcomponent or neuron</h2>
+    <canvas id="ci" width="220" height="220" style="display:none"></canvas>
+    <div id="kv" class="kv"></div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script>
+const D = window.PD_DATA, META = D.meta, N = META.n, U = D.n_universe;
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function b64ToBytes(b64) {
+  const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function b64ToU16(b64) { return new Uint16Array(b64ToBytes(b64).buffer); }
+function h2f(h) {
+  const s = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, f = h & 0x03ff;
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  if (e === 0x1f) return f ? NaN : (s ? -Infinity : Infinity);
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+const NEURON_UP = b64ToU16(D.neuron_up), NEURON_GATE = b64ToU16(D.neuron_gate);
+function neuronVal(arr, a, b, ui) { return h2f(arr[((a - 1) * N + (b - 1)) * U + ui]); }
+function silu(x) { return x / (1 + Math.exp(-x)); }
+
+// Decode each subcomponent's sparse CI grid into a dense [N*N] Float32Array (once).
+function decodeCi(ci) {
+  const idx = b64ToU16(ci.idx), val = b64ToBytes(ci.val), dense = new Float32Array(N * N);
+  for (let k = 0; k < idx.length; k++) dense[idx[k]] = val[k] / 255;
+  return dense;
+}
+const ALL = [];
+for (const grp of ["up", "gate", "down"]) for (const s of D.subcomps[grp]) {
+  s.group = grp; s.dense = decodeCi(s.ci); s.label = grp[0] + s.c; ALL.push(s);
+}
+function ciAt(s, a, b) { return s.dense[(a - 1) * N + (b - 1)]; }
+
+// Color: red positive, blue negative, intensity by |w| (saturating ~0.6).
+function connColor(w) {
+  const t = Math.min(Math.abs(w) / 0.6, 1), c = Math.round(255 * (1 - t));
+  return w >= 0 ? `rgb(255,${c},${c})` : `rgb(${c},${c},255)`;
+}
+
+const svg = document.getElementById("svg");
+const elA = document.getElementById("a"), elB = document.getElementById("b"), elThr = document.getElementById("thr");
+const panelTitle = document.getElementById("panel-title"), kv = document.getElementById("kv");
+const ciCanvas = document.getElementById("ci"), ctx = ciCanvas.getContext("2d");
+
+function showSubcomp(s, a, b) {
+  panelTitle.textContent = `${s.group}_proj #${s.c} · period ${s.period}`;
+  ciCanvas.style.display = "block";
+  const cell = ciCanvas.width / N, img = ctx.createImageData(ciCanvas.width, ciCanvas.height);
+  for (let av = 0; av < N; av++) for (let bv = 0; bv < N; bv++) {
+    const v = s.dense[av * N + bv];
+    for (let py = 0; py < cell; py++) for (let px = 0; px < cell; px++) {
+      const x = Math.floor(av * cell) + px, y = Math.floor((N - 1 - bv) * cell) + py;
+      const o = (y * ciCanvas.width + x) * 4, c = Math.round(255 * (1 - v));
+      img.data[o] = 255; img.data[o + 1] = c; img.data[o + 2] = c; img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  kv.innerHTML = `CI at (a=${a}, b=${b}): <b>${ciAt(s, a, b).toFixed(3)}</b><br><span style="color:#888">x=a, y=b (origin bottom-left)</span>`;
+}
+function showNeuron(nid, ui, a, b) {
+  panelTitle.textContent = `neuron #${nid}`;
+  ciCanvas.style.display = "none";
+  const up = neuronVal(NEURON_UP, a, b, ui), gate = neuronVal(NEURON_GATE, a, b, ui);
+  kv.innerHTML = `up: <b>${up.toFixed(3)}</b><br>gate: <b>${gate.toFixed(3)}</b><br>output silu(gate)·up: <b>${(silu(gate) * up).toFixed(3)}</b>`;
+}
+
+function node(x, y, label, fill, onhover) {
+  const g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "node");
+  const r = document.createElementNS(SVGNS, "rect");
+  r.setAttribute("x", x - 5); r.setAttribute("y", y - 6); r.setAttribute("width", 10); r.setAttribute("height", 12);
+  r.setAttribute("fill", fill); r.setAttribute("rx", 2);
+  const t = document.createElementNS(SVGNS, "text");
+  t.setAttribute("x", x + (label.anchor === "end" ? -9 : 9)); t.setAttribute("y", y + 4);
+  t.setAttribute("text-anchor", label.anchor); t.textContent = label.text;
+  g.appendChild(r); g.appendChild(t); g.addEventListener("mouseenter", onhover); svg.appendChild(g);
+}
+function line(x1, y1, x2, y2, w) {
+  const l = document.createElementNS(SVGNS, "line");
+  l.setAttribute("x1", x1); l.setAttribute("y1", y1); l.setAttribute("x2", x2); l.setAttribute("y2", y2);
+  l.setAttribute("stroke", connColor(w)); l.setAttribute("stroke-width", Math.min(0.5 + Math.abs(w) * 4, 4));
+  l.setAttribute("opacity", 0.85); svg.appendChild(l);
+}
+const periodColor = p => `hsl(${(p * 47) % 360},55%,80%)`;
+
+function render() {
+  const a = Math.max(1, Math.min(N, +elA.value)), b = Math.max(1, Math.min(N, +elB.value)), thr = +elThr.value;
+  svg.innerHTML = "";
+  const leftX = 150, centerX = 540, rightX = 930, top = 50, dy = 20, width = 1080;
+
+  const active = ALL.filter(s => ciAt(s, a, b) > 0);
+  const inputs = active.filter(s => s.group !== "down");   // gate + up, left column (up first)
+  inputs.sort((p, q) => (p.group === q.group ? p.period - q.period : p.group === "up" ? -1 : 1));
+  const downs = active.filter(s => s.group === "down").sort((p, q) => p.period - q.period);
+
+  // Displayed neurons: any active subcomponent connects above threshold. Track each neuron's
+  // strongest gate/up driver (by |w|) for vertical sorting.
+  const shown = new Map();  // ui -> {best, drvOrder, w}
+  active.forEach((s, _) => {
+    for (const [ui, w] of s.conn) {
+      if (Math.abs(w) < thr) continue;
+      const cur = shown.get(ui) || { drvOrder: 1e9, w: 0 };
+      if (s.group !== "down" && Math.abs(w) > Math.abs(cur.w)) {
+        const order = inputs.indexOf(s);
+        shown.set(ui, { drvOrder: order, w });
+      } else if (!shown.has(ui)) shown.set(ui, cur);
+    }
+  });
+  const neurons = [...shown.entries()].map(([ui, m]) => ({ ui, nid: D.neuron_ids[ui], ...m }));
+  neurons.sort((p, q) => p.drvOrder - q.drvOrder || Math.abs(q.w) - Math.abs(p.w));
+  const neuronY = new Map(); neurons.forEach((nu, i) => neuronY.set(nu.ui, top + i * dy));
+
+  const inputY = new Map(); inputs.forEach((s, i) => inputY.set(s, top + i * dy));
+  const downY = new Map(); downs.forEach((s, i) => downY.set(s, top + i * dy));
+  const height = top + Math.max(inputs.length, neurons.length, downs.length, 1) * dy + 20;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("width", width); svg.setAttribute("height", height);
+
+  for (const [x, label] of [[leftX, "gate / up (input)"], [centerX, "neurons"], [rightX, "down (output)"]]) {
+    const t = document.createElementNS(SVGNS, "text");
+    t.setAttribute("x", x); t.setAttribute("y", 28); t.setAttribute("text-anchor", "middle");
+    t.setAttribute("class", "col-title"); t.textContent = label; svg.appendChild(t);
+  }
+
+  // Lines first (under nodes). input -> neuron, neuron -> down.
+  for (const s of inputs) for (const [ui, w] of s.conn) {
+    if (Math.abs(w) >= thr && neuronY.has(ui)) line(leftX + 6, inputY.get(s), centerX - 6, neuronY.get(ui), w);
+  }
+  for (const s of downs) for (const [ui, w] of s.conn) {
+    if (Math.abs(w) >= thr && neuronY.has(ui)) line(centerX + 6, neuronY.get(ui), rightX - 6, downY.get(s), w);
+  }
+
+  for (const s of inputs) node(leftX, inputY.get(s), { text: `${s.label}·p${s.period}`, anchor: "end" }, periodColor(s.period), () => showSubcomp(s, a, b));
+  for (const s of downs) node(rightX, downY.get(s), { text: `${s.label}·p${s.period}`, anchor: "start" }, periodColor(s.period), () => showSubcomp(s, a, b));
+  for (const nu of neurons) node(centerX, neuronY.get(nu.ui), { text: `${nu.nid}`, anchor: "start" }, "#eee", () => showNeuron(nu.nid, nu.ui, a, b));
+
+  document.getElementById("hint").textContent =
+    `${inputs.length} input + ${downs.length} down active · ${neurons.length} neurons shown (|conn| > ${thr})`;
+}
+for (const el of [elA, elB, elThr]) el.addEventListener("input", render);
+render();
+</script>
+</body>
+</html>

@@ -76,4 +76,18 @@ CPU, mmap U/V. Two figures: `cosine_gate_up_add.png` (22 comps, V|U side by side
   Obj 5's stated colour semantics.
 - Result: clear period-block structure in the gate/up V vectors (esp. the p50 group);
   U vectors near-orthogonal (14336-dim neuron space).
+
+### Obj 5 — `build_neuron_connection_explorer.py` + `neuron_connection_explorer_app.html` ✅
+CPU generator + dependency-free vanilla-JS/SVG applet. Connection strength = `U[c,j]*||V_c||`
+(gate/up write) or `V[j,c]/||V_c||` (down read). Left=gate/up active subcomps (up on top,
+period-sorted), center=neurons above the conn threshold sorted by their strongest gate/up
+driver, right=down subcomps. Lines red/blue by sign; hover subcomp → CI (a,b) heatmap, hover
+neuron → up/gate/silu(gate)·up. Neuron up/gate grids shipped as fp16 base64 (decoded in JS).
+- **Sizing:** connection strengths are small in 14336-dim space (median |w|≈0.10, p90≈0.14,
+  max 0.51), so floor 0.05 + UI thr 0.10 flooded the view (360 neurons / 64.9 MB data.js).
+  Raised `conn_floor` default to 0.1 and UI default threshold to 0.15 → 613-neuron universe,
+  **33 MB**, ~60 neurons shown. Limitation logged in spec: UI threshold below `conn_floor`
+  can't surface new neurons (lower `--conn-floor` to widen, at the cost of file size).
+- Playwright (headless Chromium via `headless_check.py`): no JS errors; verified node/line
+  counts, subcomp-hover CI panel, neuron-hover up/gate/output, and operand re-render.
 </content>
