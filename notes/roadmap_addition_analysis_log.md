@@ -46,8 +46,25 @@ outputs; plain forward (no masks) so captures are the true target in/outputs. St
   `alive_components_add.tsv` (822 alive; 652 in MLP: 219 gate / 197 up / 236 down) +
   `alive_components_per_position_add.json` (consumed later by Obj 5).
 
-### Obj 2 — `collect_inner_activations.py` (running, job 1584)
+### Obj 2 — `collect_inner_activations.py`
 Normalized inner act `(x·V_c)/||V_c||` at last token via einsum on the cached module input
 (input is already post-RMSNorm for gate/up, post-SwiGLU for down). Mean-CI filter over the
 grid applied here → `alive_filtered_add.tsv`; full grid → `inner_activations_add.tsv`.
+- **Problem (job 1584):** `einsum().cpu().numpy()` raised `unsupported ScalarType BFloat16` —
+  under bf16 autocast the matmul returns bf16 even though both inputs were `.float()`. Fixed
+  by `.float()`-ing the einsum *result* before numpy (same gotcha noted in collect_ablation_kl).
+  Resubmitted as job 1585 → OK.
+- Result: **38/652** MLP components pass mean-CI > 0.1 (16 down / 7 gate / 15 up). Note the
+  0.1 mean-CI default is fairly strict (mean over the whole 100×100 grid); lower `--mean-ci-thr`
+  to widen the set.
+
+### Obj 3 — `compute_subcomp_periods.py` ✅
+CPU. Reads `inner_activations_<op>.tsv` (+ `alive_filtered_<op>.tsv` for layer/full-matrix),
+rebuilds each `[N,N]` grid, measures periodicity of the `f(a)`/`f(b)` marginals via
+autocorrelation (best lag in `1..N//2`) and FFT (peak frequency → period). Representative
+`period`/`period_axis` taken from the stronger FFT peak.
+- Detected periods cluster at 2/5/10/20/50/100 — the expected modular structure.
+- **Note:** autocorrelation often returns lag 1 with high score for smooth/monotone marginals
+  (lag-1 correlation dominates); FFT is the cleaner periodicity signal, hence used for the
+  representative period. Both metrics stored per spec.
 </content>
