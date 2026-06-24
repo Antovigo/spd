@@ -67,4 +67,13 @@ autocorrelation (best lag in `1..N//2`) and FFT (peak frequency → period). Rep
 - **Note:** autocorrelation often returns lag 1 with high score for smooth/monotone marginals
   (lag-1 correlation dominates); FFT is the cleaner periodicity signal, hence used for the
   representative period. Both metrics stored per spec.
+
+### Obj 4 — `plot_subcomp_cosine.py` ✅
+CPU, mmap U/V. Two figures: `cosine_gate_up_add.png` (22 comps, V|U side by side) and
+`cosine_down_add.png` (16 comps), sorted by period with thick separators, `RdBu_r`
+(positive=red), vmin/vmax ±1. Labels `{g,u,d}{comp}·p{period}`.
+- Decision: used `RdBu_r` (not literal `RdBu`) so positive=red / negative=blue, matching
+  Obj 5's stated colour semantics.
+- Result: clear period-block structure in the gate/up V vectors (esp. the p50 group);
+  U vectors near-orthogonal (14336-dim neuron space).
 </content>
