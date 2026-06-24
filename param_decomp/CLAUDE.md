@@ -38,7 +38,7 @@ HLO constant; see "HLO-baking rule" below). The activation waist is GENERIC `[*l
 `[*leading, C]`), `leading = (batch,) + named position axes`: masking / routing / sources
 / imp-min all read an opaque `leading = residual.shape[:-1]`; reductions are
 `math.prod(shape[:-1])` / `axis=tuple(range(ndim-1))`. CI is independent over every leading
-axis (no per-axis CI semantics, only axis NAMES — see AXIS_SEMANTICS_DESIGN.md).
+axis (no per-axis CI semantics, only axis NAMES).
 `DecomposedModel.leading_axes` names the position axes (`("sequence",)` for LM, `()` for
 TMS); `CIFn.expects_axes` mirrors it, and `init_train_state` asserts they're equal (early
 fail) so the CI fn stays per-domain (RoPE over `sequence`) without the core adapting. The
@@ -51,10 +51,11 @@ comparison (`recon_loss_fn(clean_output, masked_output) -> scalar`, default
 tensors in one forward share one `*leading` prefix) is enforced at trace time by
 `@jaxtyped(typechecker=beartype)` on the core `step`, `masked_forward`, and the loss fns.
 `train.py` is the generic step factory
-(fp32 masters / bf16 compute) over a static tuple of recon loss TERMS (S10′ — the
-torch loss-class cartesian product factored as chunking × routing × mask-source
-strategy: a chunking helper (`one_chunk`/`per_site`/`into_groups`) feeds the single
-`make_plan` constructor, built from the shared configs by `recon.build_recon_terms`;
+(fp32 masters / bf16 compute) over a flat tuple of self-describing loss TERMS
+(`recon.LossTerms` — faithfulness, importance-minimality, and the recon terms, iterated
+uniformly; S10′ — the recon loss-class cartesian product factored as chunking × routing ×
+mask-source strategy: a chunking helper (`one_chunk`/`per_site`/`into_groups`) feeds the
+single `make_plan` constructor, built from the shared configs by `recon.build_loss_terms`;
 see LOSS_PARITY_DESIGN.md),
 consuming `losses.py` (pure loss terms + schedules) and `adversary.py` (persistent
 vs fresh source machinery — semantically distinct adversaries sharing only

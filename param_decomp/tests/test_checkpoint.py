@@ -37,7 +37,7 @@ from param_decomp.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.lm import DecomposedModel
-from param_decomp.recon import build_recon_terms
+from param_decomp.recon import build_loss_terms
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.sharding import dp_mesh
 from param_decomp.targets.llama8b import (
@@ -89,7 +89,7 @@ def _build(seed: int):
         sources_opt_state={"PersistentPGDReconLoss": init_sources_adam_state(src)},
         step=jnp.zeros((), jnp.int32),
     )  # fmt: skip
-    loss_spec = build_recon_terms(
+    loss_terms = build_loss_terms(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
@@ -108,11 +108,10 @@ def _build(seed: int):
             ),
         ),
         lm.site_names,
-        n_mask_samples=1,
     )  # fmt: skip
     step = make_train_step(
         lm=lm,
-        loss_spec=loss_spec,
+        loss_terms=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
         remat_recon_forwards=True, mesh=None,
@@ -220,10 +219,9 @@ def _build_sharded(seed: int, mesh: Mesh):
     C, seq = 8 * n, 16
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
     lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
-    shardable = n > 1 and all(s.C % n == 0 for s in sites)
-    vu = init_decomp_vu_placed(sites, jax.random.PRNGKey(seed), mesh, shardable)
+    vu = init_decomp_vu_placed(sites, jax.random.PRNGKey(seed), mesh)
     ci_fn = init_ci_fn_placed(
-        _chunkwise_arch(lm, cfg), lm.sites, jax.random.PRNGKey(seed + 1), mesh, shardable
+        _chunkwise_arch(lm, cfg), lm.sites, jax.random.PRNGKey(seed + 1), mesh
     )
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)

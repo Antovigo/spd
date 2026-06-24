@@ -43,7 +43,7 @@ from param_decomp.configs import (
     SCScope,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.recon import build_recon_terms
+from param_decomp.recon import build_loss_terms, persistent_configs
 from param_decomp.run import _ensure_global
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.targets.llama8b import llama_site_specs, mlp_family_site_cs
@@ -86,8 +86,6 @@ def _build_sharded(seed: int):
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
     lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
 
-    n = mesh.devices.size
-    shardable = n > 1 and all(s.C % n == 0 for s in lm.sites)
     first_block = min(int(s.name.split(".")[1]) for s in lm.sites)
     ci_arch = ChunkwiseTransformerCIArch(
         chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=lm.site_names),),
@@ -97,8 +95,8 @@ def _build_sharded(seed: int):
         n_heads=2,
         mlp_hidden=32,
     )
-    vu = init_decomp_vu_placed(lm.sites, jax.random.PRNGKey(seed), mesh, shardable)
-    ci_fn = init_ci_fn_placed(ci_arch, lm.sites, jax.random.PRNGKey(seed + 1), mesh, shardable)
+    vu = init_decomp_vu_placed(lm.sites, jax.random.PRNGKey(seed), mesh)
+    ci_fn = init_ci_fn_placed(ci_arch, lm.sites, jax.random.PRNGKey(seed + 1), mesh)
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
     site_cs = tuple(s.C for s in lm.sites)
@@ -127,7 +125,7 @@ def _build_sharded(seed: int):
     state = _ensure_global(state, mesh)
     assert isinstance(state, TrainState)
 
-    loss_spec = build_recon_terms(
+    loss_terms = build_loss_terms(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
@@ -139,13 +137,12 @@ def _build_sharded(seed: int):
             _persistent_cfg("ppgd_second"),
         ),
         lm.site_names,
-        n_mask_samples=1,
     )  # fmt: skip
-    assert tuple(loss_spec.persistent) == PERSISTENT_TERMS, loss_spec.persistent
+    assert tuple(persistent_configs(loss_terms)) == PERSISTENT_TERMS, loss_terms
 
     step = make_train_step(
         lm=lm,
-        loss_spec=loss_spec,
+        loss_terms=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
         remat_recon_forwards=True, mesh=mesh,

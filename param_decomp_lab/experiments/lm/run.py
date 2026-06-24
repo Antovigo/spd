@@ -68,6 +68,7 @@ from param_decomp.slow_eval import (
     make_position_ci_step,
     make_slow_eval_step,
     resolve_permutation_metrics,
+    stochastic_hidden_acts_n_mask_samples,
 )
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments.lm.config import (
@@ -120,7 +121,6 @@ def assert_finetune_structural_compat(built: BuiltRun, prov: ResumeProvenance) -
 
 def train(
     built: BuiltRun,
-    raw_cfg: dict[str, object],
     lm: DecomposedModel,
     mesh: Mesh,
 ) -> None:
@@ -163,7 +163,6 @@ def train(
         pd=built.pd,
         cadence=built.cadence,
         run=built.run,
-        raw_cfg=raw_cfg,
         lm=lm,
         ci_fn=built.ci_fn,
         data=data,
@@ -171,7 +170,6 @@ def train(
         sample_batch=sample_batch,
         eval_fn=eval_fn,
         eval_every=eval_every,
-        perf_tokens_per_step=data.global_batch * data.seq_len,
         mesh=mesh,
     )
 
@@ -213,7 +211,7 @@ def _make_lm_eval_fn(
             attn_steps["CIMaskedAttnPatternsReconLoss"] = make_ci_attn_patterns_step(lm, pattern_fn)
         if eval.attn_patterns.stochastic:
             attn_steps["StochasticAttnPatternsReconLoss"] = make_stochastic_attn_patterns_step(
-                lm, pattern_fn, pd.n_mask_samples
+                lm, pattern_fn, eval.attn_patterns.stochastic_n_mask_samples
             )
 
     slow_eval_step = make_slow_eval_step(lm, eval.ci_alive_threshold)
@@ -221,9 +219,9 @@ def _make_lm_eval_fn(
     # The CI-heatmap / permutation / UV / identity-error metrics read off the run's typed
     # `eval.metrics` (re-validated from the pinned config.yaml: the trainer's `EvalConfig`
     # drops the raw metric list). config.yaml is pinned before train().
-    perm_spec = resolve_permutation_metrics(
-        lm.site_names, eval_metrics_from_run_dir(built.run.run_dir)
-    )
+    run_eval_metrics = eval_metrics_from_run_dir(built.run.run_dir)
+    perm_spec = resolve_permutation_metrics(lm.site_names, run_eval_metrics)
+    hidden_acts_n_mask_samples = stochastic_hidden_acts_n_mask_samples(run_eval_metrics)
     want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
     position_ci_step = make_position_ci_step(lm) if want_position_ci else None
 
@@ -276,7 +274,7 @@ def _make_lm_eval_fn(
             )
             hidden_acts_key = random.fold_in(run_key, 3 * pd.steps + eval_pass_index)
             hidden_acts = compute_hidden_acts_metrics(
-                lm, state, eval_batches, pd.n_mask_samples, hidden_acts_key
+                lm, state, eval_batches, hidden_acts_n_mask_samples, hidden_acts_key
             )
             eval_record |= {f"eval/slow/loss/{k}": v for k, v in hidden_acts.items()}
             # The position-CI all-gather is ALSO collective (every rank joins it), gated on
@@ -347,7 +345,7 @@ def _pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
 
 def main(config: Path, run_id: str) -> None:
     config = Path(config)
-    built, raw_cfg = load_config(config, run_id)
+    built, _raw_cfg = load_config(config, run_id)
 
     install_sigterm_flag()
     init_distributed(built.runtime.dp)
@@ -381,7 +379,7 @@ def main(config: Path, run_id: str) -> None:
     # so the function-table era's separate `frozen` object is gone.
     lm, _vocab_size = build_target(built, mesh)
 
-    train(built, raw_cfg, lm, mesh)
+    train(built, lm, mesh)
 
     if jax.process_count() > 1:
         import jax.experimental.multihost_utils as mhu

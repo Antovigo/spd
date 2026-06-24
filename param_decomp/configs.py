@@ -178,10 +178,12 @@ class CIMaskedReconSubsetLossConfig(LossMetricConfig):
 
 class StochasticReconLossConfig(LossMetricConfig):
     type: Literal["StochasticReconLoss"] = "StochasticReconLoss"
+    n_mask_samples: PositiveInt = 1
 
 
 class StochasticReconLayerwiseLossConfig(LossMetricConfig):
     type: Literal["StochasticReconLayerwiseLoss"] = "StochasticReconLayerwiseLoss"
+    n_mask_samples: PositiveInt = 1
 
 
 class StochasticReconSubsetLossConfig(LossMetricConfig):
@@ -189,10 +191,12 @@ class StochasticReconSubsetLossConfig(LossMetricConfig):
     routing: Annotated[SubsetRoutingType, Field(discriminator="type")] = (
         UniformKSubsetRoutingConfig()
     )
+    n_mask_samples: PositiveInt = 1
 
 
 class StochasticHiddenActsReconLossConfig(LossMetricConfig):
     type: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
+    n_mask_samples: PositiveInt = 1
 
 
 class UnmaskedReconLossConfig(LossMetricConfig):
@@ -209,7 +213,7 @@ class ChunkwiseSubsetReconLossConfig(LossMetricConfig):
     clean logits (when `use_fused_kl`). The total is the mean over all chunk forwards of
     `recon_loss / n_positions`, matching the 2-pool's per-step recon.
 
-    The JAX single-pool trainer implements this natively: `recon.build_recon_terms`
+    The JAX single-pool trainer implements this natively: `recon.build_loss_terms`
     maps this `type` onto `recon.subset_chunk_plan` (a parameterization of the one
     `chunkwise_plan` builder), and the jitted step runs the chunk forwards directly —
     no vendored `LMComponentModel` or lab recon-plan machinery is involved.
@@ -333,7 +337,7 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
 
     `update()` returns `None` before `start_frac` of training. Sources are clamped to
     `[0, 1]` after each step — the only implemented parameterization. (A sigmoid
-    parameterization was removed; see param_decomp/MIGRATION_HOLES.md to re-add it.)
+    parameterization was removed.)
     """
 
     @model_validator(mode="before")
@@ -344,8 +348,7 @@ class PersistentPGDReconLossConfig(LossMetricConfig):
         # it so those configs still load. A True value was never supported -> reject.
         if isinstance(data, dict) and "use_sigmoid_parameterization" in data:
             assert not data.pop("use_sigmoid_parameterization"), (
-                "use_sigmoid_parameterization was removed (clamp-only); see "
-                "param_decomp/MIGRATION_HOLES.md to re-add the sigmoid parameterization"
+                "use_sigmoid_parameterization was removed (clamp-only)"
             )
         return data
 
@@ -428,6 +431,7 @@ class CIMaskedAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
 
 class StochasticAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
     type: Literal["StochasticAttnPatternsReconLoss"] = "StochasticAttnPatternsReconLoss"
+    n_mask_samples: PositiveInt = 1
 
 
 class CIMeanPerComponentConfig(BaseConfig):
@@ -547,7 +551,7 @@ class RuntimeConfig(BaseConfig):
         # Shared-storage shim (provenance): stored run config.yamls carry torch-trainer
         # runtime fields the JAX trainer no longer has (`device`, `autocast_bf16` — bf16 is
         # unconditional, device is JAX-managed). Strip them so existing runs still load;
-        # reject a non-supported value loudly. See param_decomp/MIGRATION_HOLES.md.
+        # reject a non-supported value loudly.
         if not isinstance(data, dict):
             return data
         data.pop("device", None)
@@ -599,7 +603,7 @@ class PDConfig(BaseConfig):
         # Shared-storage shim (provenance): stored run config.yamls carry fields the JAX
         # trainer no longer has — each only ever had ONE supported value. Strip them so
         # existing runs still load (harvest / autointerp / fine-tune / run_metadata); reject
-        # a non-supported value loudly. See param_decomp/MIGRATION_HOLES.md.
+        # a non-supported value loudly.
         if not isinstance(data, dict):
             return data
         if "sigmoid_type" in data:
@@ -622,16 +626,30 @@ class PDConfig(BaseConfig):
             assert data.pop("sampling") == "continuous", (
                 "sampling was removed (continuous-only); binomial mask sampling is gone"
             )
+        if "n_mask_samples" in data:
+            # `n_mask_samples` moved from a trainer-level knob onto the stochastic loss
+            # configs that actually draw samples. Push the stored value down onto every
+            # stochastic recon entry that does not set its own, so existing run configs
+            # keep their sample count; entries with an explicit value win.
+            n = data.pop("n_mask_samples")
+            stochastic_types = {
+                "StochasticReconLoss",
+                "StochasticReconLayerwiseLoss",
+                "StochasticReconSubsetLoss",
+            }
+            for entry in data.get("loss_metrics", []):
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("type") in stochastic_types
+                    and "n_mask_samples" not in entry
+                ):
+                    entry["n_mask_samples"] = n
         return data
 
     # --- General ---
     seed: int = Field(
         default=0,
         description="Random seed for reproducibility, including LM dataset shuffling.",
-    )
-    n_mask_samples: PositiveInt = Field(
-        ...,
-        description="Number of stochastic masks to sample when using stochastic recon losses",
     )
     ci_config: CiConfig = Field(
         ...,

@@ -40,7 +40,7 @@ from param_decomp.configs import (
     StochasticReconLossConfig,
 )
 from param_decomp.lm import DecomposedModel
-from param_decomp.recon import build_recon_terms
+from param_decomp.recon import build_loss_terms
 from param_decomp.train import TrainState, make_train_step
 
 B, T, D, C = 2, 3, 8, 5
@@ -62,6 +62,10 @@ class SyntheticDecomposedModel(eqx.Module):
     @property
     def site_names(self) -> tuple[str, ...]:
         return tuple(s.name for s in self.sites)
+
+    def shardings(self, mesh: "jax.sharding.Mesh") -> "SyntheticDecomposedModel":
+        repl = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+        return jax.tree.map(lambda _a: repl, self)
 
     @staticmethod
     def recon_loss_fn(
@@ -222,18 +226,17 @@ def test_train_step_runs_through_generic_target():
     )
     state, opt_vu, opt_ci = _initial_state(lm, components, ci_arch)
 
-    loss_spec = build_recon_terms(
+    loss_terms = build_loss_terms(
         (
             FaithfulnessLossConfig(coeff=1.0),
             ImportanceMinimalityLossConfig(coeff=1e-4, pnorm=2.0, beta=0.0, p_anneal_final_p=1.0),
             StochasticReconLossConfig(coeff=1.0),
         ),
         lm.site_names,
-        n_mask_samples=1,
     )
     step_fn = make_train_step(
         lm=lm,
-        loss_spec=loss_spec,
+        loss_terms=loss_terms,
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=10,

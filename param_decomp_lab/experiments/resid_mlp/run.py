@@ -23,7 +23,7 @@ from jax.sharding import PartitionSpec as P
 from param_decomp.built_run import BuiltRun
 from param_decomp.components import SiteC
 from param_decomp.log import setup_logger
-from param_decomp.recon import build_recon_terms
+from param_decomp.recon import build_loss_terms
 from param_decomp.run import run_decomposition_training
 from param_decomp.sharding import dp_mesh
 from param_decomp.train import TrainState
@@ -47,10 +47,9 @@ def build_resid_mlp_built_run(cfg: ResidMLPExperimentConfig, run_id: str) -> Bui
         tuple(SiteC(t.module_pattern, t.C) for t in cfg.pd.decomposition_targets)
     )
     assert_canonical_algorithm_config(cfg)
-    build_recon_terms(
+    build_loss_terms(
         cfg.pd.loss_metrics,
         tuple(sc.name for sc in site_cs),
-        cfg.pd.n_mask_samples,
     )
     target = resid_mlp.ResidMLPTargetConfig(
         n_features=cfg.target.n_features,
@@ -171,7 +170,6 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
         pd=built.pd,
         cadence=built.cadence,
         run=built.run,
-        raw_cfg=raw_cfg,
         lm=lm,
         ci_fn=built.ci_fn,
         data=built.data,
@@ -179,7 +177,6 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
         sample_batch=sample_batch,
         eval_fn=eval_fn,
         eval_every=built.cadence.train_log_every,
-        perf_tokens_per_step=None,
         mesh=mesh,
     )
 
