@@ -175,15 +175,21 @@ class FrozenAttn(eqx.Module):
         q, k = apply_rope(q, k, cos, sin)
         k = repeat_kv(k, self.n_rep)
         v = repeat_kv(v, self.n_rep)
-        # cuDNN flash attention's custom partitioner requires q/k/v identically sharded.
-        # Under the scan+cond masked forward, XLA shards q but REPLICATES the smaller GQA
-        # k/v -> "Query, key and value should have same sharding". Pin all three to the
-        # batch-sharded layout. Guarded so it's a no-op off-mesh (CPU tests / single device);
-        # `run.py` sets the global mesh so the bare PartitionSpec resolves. Validated on GPU:
-        # job 108953 (no-fix=error, with-constraint=compiles).
+        # cuDNN flash attention's custom partitioner requires q/k/v IDENTICALLY sharded.
+        # On the 2-D (dp, tp) mesh, pin all three head-parallel: batch on `dp`, HEADS on `tp`
+        # (`P("dp","tp",None,None)` for `[b, heads, t, hd]`). Heads are independent, so this is
+        # clean tensor-parallel attention, and the identical layout is exactly what cuDNN
+        # demands. It MUST come after `repeat_kv` — k/v are now expanded to `n_head` (matching
+        # q), so all three shard the same 64 heads on `tp`; constraining the raw `n_kv_head`
+        # k/v would give a layout inconsistent with q. The q/k/v projection outputs are
+        # `d_out`-replicated (U = `P("tp",None)`); this constraint does the replicated->head-
+        # on-tp reshard right here. Guarded so it's a no-op off-mesh (CPU tests / single
+        # device); `run.py` sets the global mesh. At `tp=1` heads land on a size-1 axis =
+        # replicated (the old 1-D behavior). Validated on GPU: 1-D was job 108953; the 2-D
+        # head-parallel form is the fix for the `dp/tp` mesh's "same sharding" partitioner error.
         if not jax.sharding.get_abstract_mesh().empty:
-            bt = jax.sharding.PartitionSpec("dp", None, None, None)
-            q, k, v = (jax.lax.with_sharding_constraint(a, bt) for a in (q, k, v))
+            qkv_spec = jax.sharding.PartitionSpec("dp", "tp", None, None)
+            q, k, v = (jax.lax.with_sharding_constraint(a, qkv_spec) for a in (q, k, v))
         return causal_sdpa(q, k, v).transpose(0, 2, 1, 3).reshape(b, t, self.n_head * self.head_dim)
 
     def __call__(self, x: Float[Array, "b t d"], inv_freq: Array) -> Array:
