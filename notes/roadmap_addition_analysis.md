@@ -61,3 +61,26 @@ Draw lines between subcomponents and neuron to show the connection strengths. Ne
 Use a white background and keep it simple and minimalistic. 
 
 Use the playwright plugin to make sure the applet runs smoothly.
+
+# Objective 6
+Estimate and reduce the real dimensionality of the subcomponent representation, separately for the **input space** (what the up and gate subcomponents read: the post-RMSNorm MLP input — not the raw residual stream — projected onto the span of their unit V directions) and the **output space** (what the down subcomponents write: the MLP output projected onto the span of their unit U directions). Both activations are taken at the last token, directly from the grids stored in Objective 1 (`mlp_input` and `mlp_output`).
+
+The subcomponent directions are non-orthogonal and redundant (several may read/write the same plane), so build an orthonormal basis Q of their span from the Gram matrix G of the unit directions (G = E Λ Eᵀ, keeping the non-negligible eigenvalues; Q = Dᵀ E Λ^(-1/2), where D stacks the unit directions). The reduced representation is the stored activation projected onto that basis, z = Qᵀ x — a plain projection of the real activation (no reconstruction or synthesis), so the input and output sides are handled identically.
+
+As a completeness check, report the fraction of each activation's variance that lands in the subspace (‖z‖² / ‖x‖²): how much of what the MLP actually reads / writes lives in the subcomponents' directions.
+
+Run TwoNN (the scikit-dimension package) on z to estimate the intrinsic dimensionality of the input and output representations. The geometric rank (non-negligible G eigenvalues) and the linear effective dimension (participation ratio of the cov(z) / PCA spectrum) come for free from the construction and the scree plot below.
+
+For verification, build an interactive HTML applet (generated with Plotly as a single self-contained, offline file) to visualize the structure of z:
+- Show the scree plot (PCA eigenvalues of cov(z)), with a dialog to set the eigenvalue / rank threshold.
+- Show interactive, rotatable 3D scatter plots, each with the points' shadow projected on the "floor". Show two orderings, both in consecutive groups of three axes: the raw orthonormal z-axes (z0–z2, z3–z5, …) and the PCA-ordered axes (PC1–3, PC4–6, …).
+- Have a selector to colour the points by the first operand (a), the second operand (b), or the result (a+b for addition).
+- Do all of the above for both the input and the output activations.
+- Show the TwoNN result at the bottom of the page.
+
+# Objective 7
+Run Independent Subspace Analysis on z to find mutually independent blocks, without assuming what they encode. Whiten z, run ICA (scikit-learn FastICA), then group the components into subspaces by their magnitude (energy) correlation, so a circular feature — whose components are linearly uncorrelated but jointly dependent — is recovered as a single subspace. Output the subspace decomposition.
+
+Interpret each block afterwards with the (a, b) grid (e.g. colour a 2D projection by a, b, a+b) and check the blocks are near-orthogonal via principal angles; the discovery itself stays unsupervised.
+
+Again, build an interactive HTML applet (Plotly, self-contained offline) for visualization of the results, reusing the Objective 6 3D machinery (per-subspace 3D projection coloured by a / b / a+b) plus the energy-correlation and principal-angle heatmaps.
