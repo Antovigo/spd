@@ -77,18 +77,25 @@ def _persistent_cfg(name: str | None) -> PersistentPGDReconLossConfig:
 
 
 def _build_sharded(seed: int):
-    """A TrainState placed exactly as `init_train_state` places a production run: V/U +
-    their Adam moments C-sharded over `dp`, sources + their Adam moments replicated, with
-    TWO persistent terms. `C=8` so the C axis tiles a 4-device mesh."""
-    mesh = dp_mesh()
+    """A TrainState placed exactly as `init_train_state` places a production run on the 2-D
+    `(dp, tp)` mesh: V/U + their Adam moments C-sharded over `tp`, the CI fn chunk-parallel
+    over `dp` + Megatron over `tp`, sources + their Adam moments replicated, with TWO
+    persistent terms. On the 4-device sim: `dp=2, tp=2`; `C=8` tiles `tp`, and the CI fn's
+    two per-layer chunks tile `dp`."""
+    mesh = dp_mesh(tp=2)
     cfg = _tiny_cfg()
     C, seq = 8, 16
     sites = llama_site_specs(cfg, mlp_family_site_cs(3, 4, C))
     lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
 
-    first_block = min(int(s.name.split(".")[1]) for s in lm.sites)
+    by_layer: dict[int, list[str]] = {}
+    for name in lm.site_names:
+        by_layer.setdefault(int(name.split(".")[1]), []).append(name)
     ci_arch = ChunkwiseTransformerCIArch(
-        chunks=(Chunk(input_taps=(f"resid.{first_block}",), output_sites=lm.site_names),),
+        chunks=tuple(
+            Chunk(input_taps=(f"resid.{layer}",), output_sites=tuple(names))
+            for layer, names in sorted(by_layer.items())
+        ),
         input_dim=cfg.n_embd,
         d_model=16,
         n_blocks=2,
@@ -147,11 +154,11 @@ def _build_sharded(seed: int):
         total_steps=100,
         remat_recon_forwards=True, mesh=mesh,
     )  # fmt: skip
-    resid = jax.device_put(
-        jax.random.normal(jax.random.PRNGKey(9), (4, seq, cfg.n_embd)) * 0.5,
+    tokens = jax.device_put(
+        jax.random.randint(jax.random.PRNGKey(9), (4, seq), 0, cfg.vocab_size),
         NamedSharding(mesh, jax.sharding.PartitionSpec("dp")),
     )
-    return lm, state, step, resid
+    return lm, state, step, tokens
 
 
 def _assert_moments_present(

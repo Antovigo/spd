@@ -138,37 +138,42 @@ class CIBlock(eqx.Module):
     eps: float = eqx.field(static=True)
 
     def shardings(self, mesh: Mesh) -> "CIBlock":
-        """Megatron-style placement, with a leading un-sharded `n_chunks` axis (flat dp;
-        chunk-parallel out of scope). All arrays are stored `[n_chunks, ...]`.
+        """2-D `(dp, tp)` placement. The leading `n_chunks` axis (axis 0) is CHUNK-parallel
+        on `dp`; the within-chunk Megatron dims are tensor-parallel on `tp`. All arrays are
+        stored `[n_chunks, ...]`.
 
         Attention col/row-parallel: qkv (`[nc, out, in]`) shard their OUTPUT (head) dim
-        (axis 1) so each device owns a head slab; the out-proj shards its INPUT dim (axis 2),
-        so the per-head attention output flows sharded and a single all-reduce closes it.
+        (axis 1) on `tp` so each device owns a head slab; the out-proj shards its INPUT dim
+        (axis 2) on `tp`, so the per-head attention output flows sharded and a single
+        all-reduce closes it.
 
         MLP row-parallel: up-proj `w1 [nc, d_model, mlp_hidden]` shards its OUTPUT
-        (`mlp_hidden`, axis 2); down-proj `w2 [nc, mlp_hidden, d_model]` shards its INPUT
-        (`mlp_hidden`, axis 1). The hidden flows sharded; no intermediate gather. Biases
-        replicate."""
-        shard_axis1 = NamedSharding(mesh, P(None, "dp", None))
-        shard_axis2 = NamedSharding(mesh, P(None, None, "dp"))
-        repl = NamedSharding(mesh, P())
+        (`mlp_hidden`, axis 2) on `tp`; down-proj `w2 [nc, mlp_hidden, d_model]` shards its
+        INPUT (`mlp_hidden`, axis 1) on `tp`. The hidden flows sharded; no intermediate
+        gather. Biases chunk-shard on `dp`, `tp`-replicated (GSPMD broadcasts them over the
+        tp-sharded activation)."""
+        tp_axis1 = NamedSharding(mesh, P("dp", "tp", None))
+        tp_axis2 = NamedSharding(mesh, P("dp", None, "tp"))
+        chunk_only = NamedSharding(mesh, P("dp", None))
+        for w in (self.wq, self.wk, self.wv, self.wo, self.w1, self.w2):
+            assert_divisible(w.shape[0], mesh, "dp", "CIBlock n_chunks")
         for w in (self.wq, self.wk, self.wv):
-            assert_divisible(w.shape[1], mesh, "CIBlock attn qkv out (head dim)")
-        assert_divisible(self.wo.shape[2], mesh, "CIBlock attn out-proj in (head dim)")
-        assert_divisible(self.w1.shape[2], mesh, "CIBlock mlp up-proj out (mlp_hidden)")
-        assert_divisible(self.w2.shape[1], mesh, "CIBlock mlp down-proj in (mlp_hidden)")
+            assert_divisible(w.shape[1], mesh, "tp", "CIBlock attn qkv out (head dim)")
+        assert_divisible(self.wo.shape[2], mesh, "tp", "CIBlock attn out-proj in (head dim)")
+        assert_divisible(self.w1.shape[2], mesh, "tp", "CIBlock mlp up-proj out (mlp_hidden)")
+        assert_divisible(self.w2.shape[1], mesh, "tp", "CIBlock mlp down-proj in (mlp_hidden)")
         return eqx.tree_at(
             lambda b: (b.wq, b.wk, b.wv, b.wo, b.w1, b.b1, b.w2, b.b2),
             self,
             (
-                shard_axis1,
-                shard_axis1,
-                shard_axis1,
-                shard_axis2,
-                shard_axis2,
-                repl,
-                shard_axis1,
-                repl,
+                tp_axis1,
+                tp_axis1,
+                tp_axis1,
+                tp_axis2,
+                tp_axis2,
+                chunk_only,
+                tp_axis1,
+                chunk_only,
             ),
         )
 
@@ -251,17 +256,21 @@ class ChunkTransformer(eqx.Module):
     out_b: Float[Array, " c_chunk"]
 
     def shardings(self, mesh: Mesh) -> "ChunkTransformer":
-        """Per-leaf `dp` placement, leading un-sharded `n_chunks` axis. `in_proj_w
-        [nc, total_d_in, d_model]` shards `d_model` (axis 2); `out_w [nc, d_model, c_chunk]`
-        shards `c_chunk` (axis 2); blocks delegate to `CIBlock.shardings`; biases replicate."""
-        shard_last = NamedSharding(mesh, P(None, None, "dp"))
-        repl = NamedSharding(mesh, P())
-        assert_divisible(self.in_proj_w.shape[2], mesh, "ChunkTransformer in_proj_w d_model")
-        assert_divisible(self.out_w.shape[2], mesh, "ChunkTransformer out_w c_chunk")
+        """2-D `(dp, tp)` placement: the leading `n_chunks` axis (axis 0) is CHUNK-parallel
+        on `dp`; the within-chunk hidden dims are tensor-parallel on `tp`. `in_proj_w
+        [nc, total_d_in, d_model]` shards `d_model` (axis 2) on `tp`; `out_w
+        [nc, d_model, c_chunk]` shards `c_chunk` (axis 2) on `tp`; blocks delegate to
+        `CIBlock.shardings`; biases chunk-shard on `dp` (`tp`-replicated, GSPMD broadcasts)."""
+        tp_last = NamedSharding(mesh, P("dp", None, "tp"))
+        chunk_only = NamedSharding(mesh, P("dp", None))
+        for w in (self.in_proj_w, self.out_w):
+            assert_divisible(w.shape[0], mesh, "dp", "ChunkTransformer n_chunks")
+        assert_divisible(self.in_proj_w.shape[2], mesh, "tp", "ChunkTransformer in_proj_w d_model")
+        assert_divisible(self.out_w.shape[2], mesh, "tp", "ChunkTransformer out_w c_chunk")
         return eqx.tree_at(
             lambda ct: (ct.in_proj_w, ct.in_proj_b, ct.blocks, ct.out_w, ct.out_b),
             self,
-            (shard_last, repl, [b.shardings(mesh) for b in self.blocks], shard_last, repl),
+            (tp_last, chunk_only, [b.shardings(mesh) for b in self.blocks], tp_last, chunk_only),
         )
 
     def __call__(self, x: Float[Array, "*leading total_d_in"], inv_freq: Array) -> Array:
@@ -434,7 +443,7 @@ class SiteMLP(eqx.Module):
         shard_out = NamedSharding(mesh, P(None, "dp"))
         repl = NamedSharding(mesh, P())
         for layer_idx, w in enumerate(self.weights):
-            assert_divisible(w.shape[1], mesh, f"SiteMLP.weights[{layer_idx}].d_out")
+            assert_divisible(w.shape[1], mesh, "dp", f"SiteMLP.weights[{layer_idx}].d_out")
         return eqx.tree_at(
             lambda m: (m.weights, m.biases),
             self,

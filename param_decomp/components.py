@@ -48,14 +48,16 @@ class DecompVU(eqx.Module):
         return self.vu[name]
 
     def shardings(self, mesh: "Mesh") -> "DecompVU":
-        """Per-leaf `dp` placement matching this tree's structure: V `(d_in, C)` shards its
-        C axis (axis 1), U `(C, d_out)` shards its C axis (axis 0). Asserts every site's C
-        tiles the mesh."""
-        shard_V = NamedSharding(mesh, P(None, "dp"))
-        shard_U = NamedSharding(mesh, P("dp", None))
+        """V/U placement on the `tp` axis (the V/U = {dp, tp} scheme): V `(d_in, C)` shards
+        its C axis (axis 1) on `tp`, U `(C, d_out)` shards its C axis (axis 0) on `tp`;
+        data-parallel-replicated on `dp`. C lives on `tp` (not `dp`) so it stays off the
+        batch axis — the masked forward's `x @ V` would otherwise contend batch-vs-C on the
+        same mesh axis. Asserts every site's C tiles `tp`."""
+        shard_V = NamedSharding(mesh, P(None, "tp"))
+        shard_U = NamedSharding(mesh, P("tp", None))
         placed: dict[str, tuple[NamedSharding, NamedSharding]] = {}
         for name, (V, _U) in self.vu.items():
-            assert_divisible(V.shape[1], mesh, f"DecompVU[{name}].V.C")
+            assert_divisible(V.shape[1], mesh, "tp", f"DecompVU[{name}].V.C")
             placed[name] = (shard_V, shard_U)
         return DecompVU(vu=placed)  # pyright: ignore[reportArgumentType]
 

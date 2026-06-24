@@ -69,8 +69,11 @@ def test_jitted_sharded_inits_match_eager_values():
     )
     from param_decomp.tests.test_llama8b import _tiny_cfg
 
-    mesh = dp_mesh()
-    n = mesh.devices.size
+    # All devices on the `tp` axis (dp=1): V/U C-shard and the CI fn's within-chunk Megatron
+    # both live on `tp`, and the single test chunk (n_chunks=1) trivially tiles dp=1.
+    # chunk-on-dp tiling (n_chunks % dp) is exercised by the CPU multi-device mesh sim.
+    n = jax.device_count()
+    mesh = dp_mesh(tp=n)
     cfg = _tiny_cfg()
     sites = llama_site_specs(
         cfg,
@@ -84,15 +87,15 @@ def test_jitted_sharded_inits_match_eager_values():
         ),
     )
     # Placement is MODEL-OWNED and uniform across mesh sizes: V/U always declare their C
-    # axis sharded (`P(None,"dp")` / `P("dp",None)`); at n==1 the dp axis has size 1 so it
-    # is trivially divisible and effectively replicated, but the SPEC is still C-sharded.
+    # axis sharded on `tp` (`P(None,"tp")` / `P("tp",None)`); at tp==1 the axis has size 1 so
+    # it is trivially divisible and effectively replicated, but the SPEC is still C-sharded.
     vu_placed = init_decomp_vu_placed(sites, jax.random.PRNGKey(1), mesh)
     vu_eager = init_decomp_vu(sites, jax.random.PRNGKey(1))
     for spec in sites:
         V, U = vu_placed.site(spec.name)
         assert isinstance(V.sharding, NamedSharding) and isinstance(U.sharding, NamedSharding)
-        assert V.sharding.spec == P(None, "dp"), spec.name
-        assert U.sharding.spec == P("dp", None), spec.name
+        assert V.sharding.spec == P(None, "tp"), spec.name
+        assert U.sharding.spec == P("tp", None), spec.name
     for got, want in zip(jax.tree.leaves(vu_placed), jax.tree.leaves(vu_eager), strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert jnp.allclose(jnp.asarray(got), want, rtol=1e-6, atol=0)

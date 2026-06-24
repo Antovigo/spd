@@ -591,6 +591,7 @@ runtime:
   autocast_bf16: true
   device: cuda:0
   dp: 128
+  tp: 8
   remat_recon_forwards: true
 target:
   output_extract: logits

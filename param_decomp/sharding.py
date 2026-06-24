@@ -79,13 +79,13 @@ def place_via_shardings[T](tree: T, shardings: T) -> T:
     )
 
 
-def assert_divisible(dim: int, mesh: Mesh, what: str) -> None:
-    """Fail loud if a declared `dp`-shard axis cannot tile the mesh. Uniform across mesh
-    sizes — at `n == 1` it is trivially true, so there is no single-device special case.
+def assert_divisible(dim: int, mesh: Mesh, axis: str, what: str) -> None:
+    """Fail loud if a dim sharded on mesh `axis` cannot tile that axis. Uniform across mesh
+    sizes — at axis size 1 it is trivially true, so there is no single-device special case.
     `what` names the model / field / axis so a non-dividing dim crashes with a clear
     message rather than silently replicating."""
-    n = mesh.devices.size
-    assert dim % n == 0, f"{what}: dim {dim} not divisible by mesh size {n}"
+    n = mesh.shape[axis]
+    assert dim % n == 0, f"{what}: dim {dim} not divisible by mesh axis '{axis}' size {n}"
 
 
 def batch_shard_leading(x: jax.Array, mesh: Mesh | None) -> jax.Array:
