@@ -86,16 +86,16 @@ def test_jitted_sharded_inits_match_eager_values():
             )
         ),
     )
-    # Placement is MODEL-OWNED and uniform across mesh sizes: V/U always declare their C
-    # axis sharded on `tp` (`P(None,"tp")` / `P("tp",None)`); at tp==1 the axis has size 1 so
-    # it is trivially divisible and effectively replicated, but the SPEC is still C-sharded.
+    # Placement is MODEL-OWNED and uniform across mesh sizes: V/U FSDP-shard d_in/d_out on
+    # `dp` and C on `tp` (`P("dp","tp")` / `P("tp","dp")`); at an axis of size 1 it is
+    # trivially divisible and effectively replicated on that axis, but the SPEC is unchanged.
     vu_placed = init_decomp_vu_placed(sites, jax.random.PRNGKey(1), mesh)
     vu_eager = init_decomp_vu(sites, jax.random.PRNGKey(1))
     for spec in sites:
         V, U = vu_placed.site(spec.name)
         assert isinstance(V.sharding, NamedSharding) and isinstance(U.sharding, NamedSharding)
-        assert V.sharding.spec == P(None, "tp"), spec.name
-        assert U.sharding.spec == P("tp", None), spec.name
+        assert V.sharding.spec == P("dp", "tp"), spec.name
+        assert U.sharding.spec == P("tp", "dp"), spec.name
     for got, want in zip(jax.tree.leaves(vu_placed), jax.tree.leaves(vu_eager), strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert jnp.allclose(jnp.asarray(got), want, rtol=1e-6, atol=0)
