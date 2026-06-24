@@ -2,10 +2,9 @@
 
 The decomposed sites are any per-layer weight matrices (SPEC §1/§3) named torch-style:
 `layers.{i}.self_attn.{q,k,v,o}_proj` and `layers.{i}.mlp.{gate,up,down}_proj`, each
-with its own C. `LlamaDecomposedModel` (an `eqx.Module`) carries the frozen residual-start
-suffix — from the lowest decomposed layer (`first_decomposed_layer`) to the LM head — as
-array fields, threaded into the jitted step as a pytree arg; suffix layers without sites
-run the plain frozen block.
+with its own C. `LlamaDecomposedModel` (an `eqx.Module`) carries the full frozen model —
+embedding through every layer to the LM head — as array fields, threaded into the jitted
+step as a pytree arg; layers without sites run the plain frozen block.
 
 q/k/v sites are decomposed BEFORE RoPE/SDPA (the masked site output feeds the
 attention math); the o site applies to the attention output. V/U masters are fp32
@@ -143,13 +142,7 @@ def llama_site_specs(cfg: LlamaConfig, site_cs: tuple[SiteC, ...]) -> tuple[Site
     return tuple(specs)
 
 
-def first_decomposed_layer(site_names: tuple[str, ...]) -> int:
-    """The residual-start boundary: the suffix runs from the lowest decomposed layer."""
-    assert site_names
-    return min(parse_site_name(name)[0] for name in site_names)
-
-
-# ----------------------------- frozen suffix -----------------------------
+# ----------------------------- frozen layers -----------------------------
 
 
 class FrozenAttn(eqx.Module):
@@ -197,8 +190,8 @@ class FrozenAttn(eqx.Module):
         return self.core(x @ self.wq.T, x @ self.wk.T, x @ self.wv.T, inv_freq) @ self.wo.T
 
 
-class SuffixLayer(eqx.Module):
-    """One suffix layer's frozen weights — norms, attention, MLP. Decomposed sites read
+class LlamaLayer(eqx.Module):
+    """One layer's frozen weights — norms, attention, MLP. Decomposed sites read
     their frozen target W from here at forward time; layers without sites run the
     plain frozen block from the same fields. Weights pass as a runtime arg — never
     baked into the HLO as a multi-GB constant."""
@@ -211,22 +204,22 @@ class SuffixLayer(eqx.Module):
     Wd: Float[Array, "d di"]
 
 
-def _frozen_site_weight(suffix_layer: SuffixLayer, kind: str) -> Array:
+def _frozen_site_weight(layer: LlamaLayer, kind: str) -> Array:
     match kind:
         case "q":
-            return suffix_layer.attn.wq
+            return layer.attn.wq
         case "k":
-            return suffix_layer.attn.wk
+            return layer.attn.wk
         case "v":
-            return suffix_layer.attn.wv
+            return layer.attn.wv
         case "o":
-            return suffix_layer.attn.wo
+            return layer.attn.wo
         case "gate":
-            return suffix_layer.Wg
+            return layer.Wg
         case "up":
-            return suffix_layer.Wu
+            return layer.Wu
         case "down":
-            return suffix_layer.Wd
+            return layer.Wd
         case _:
             raise AssertionError(f"unknown kind {kind!r}")
 
@@ -234,16 +227,14 @@ def _frozen_site_weight(suffix_layer: SuffixLayer, kind: str) -> Array:
 # ----------------------------- forwards -----------------------------
 
 
-def _clean_mlp_out(suffix_layer: SuffixLayer, mlp_in: Array) -> Array:
+def _clean_mlp_out(layer: LlamaLayer, mlp_in: Array) -> Array:
     """Frozen target MLP — exactly `W` applied, not the `V@U + (W−V@U)` identity, so
     non-live sites carry no V/U gradient and no decomposition rounding (SPEC S2/S3)."""
-    return (
-        jax.nn.silu(mlp_in @ suffix_layer.Wg.T) * (mlp_in @ suffix_layer.Wu.T)
-    ) @ suffix_layer.Wd.T
+    return (jax.nn.silu(mlp_in @ layer.Wg.T) * (mlp_in @ layer.Wu.T)) @ layer.Wd.T
 
 
-def _stack_layers(layers: list[SuffixLayer]) -> SuffixLayer:
-    """Stack a per-layer `SuffixLayer` list into one whose array leaves carry a leading
+def _stack_layers(layers: list[LlamaLayer]) -> LlamaLayer:
+    """Stack a per-layer `LlamaLayer` list into one whose array leaves carry a leading
     layer axis — the `xs` for a `lax.scan` over the (homogeneous) block stack. Static
     fields (attn head counts) ride in the treedef, shared across iterations."""
     return jax.tree.map(lambda *per_layer: jnp.stack(per_layer), *layers)
@@ -342,15 +333,14 @@ class LlamaDecomposedModel(eqx.Module):
     separate lifecycle (own optimizer + checkpoint, C-sharded while these weights
     replicate), so it is NOT a field here.
 
-    Forward methods take token `inputs` and embed internally; the `*_from_residual`
-    variants run the post-embedding computation (the engine calls the token entry, tests
-    drive the residual entry). Blocks with no decomposed site run the plain frozen path —
-    so a subset decomposition just leaves the rest frozen; there is no prefix/suffix cut.
+    Forward methods take token `inputs` and embed internally. Blocks with no decomposed
+    site run the plain frozen path — so a subset decomposition just leaves the rest
+    frozen.
 
     `sites` / `leading_axes` are static config."""
 
     embed: Float[Array, "vocab d"]
-    layers: list[SuffixLayer]
+    layers: list[LlamaLayer]
     norm: Float[Array, " d"]
     lm_head: Float[Array, "vocab d"]
     inv_freq: Float[Array, " hd2"]
@@ -364,7 +354,7 @@ class LlamaDecomposedModel(eqx.Module):
 
     def shardings(self, mesh: "Mesh") -> "LlamaDecomposedModel":
         """Replicate every frozen leaf on the `dp` mesh (the FSDP-style memory story: the
-        ~3.6B bf16 suffix is small vs activations, so replicating avoids all-gathering the
+        ~3.6B bf16 target is small vs activations, so replicating avoids all-gathering the
         target each forward)."""
         repl = NamedSharding(mesh, P())
         return jax.tree.map(lambda _a: repl, self)
@@ -382,7 +372,7 @@ class LlamaDecomposedModel(eqx.Module):
         fix for the full model; the scan reassociates float ops vs an unrolled loop, within
         fp32 tolerance)."""
 
-        def block(x: Array, layer: SuffixLayer) -> tuple[Array, None]:
+        def block(x: Array, layer: LlamaLayer) -> tuple[Array, None]:
             x = x + layer.attn(rms_norm(x, layer.ln1, self.eps), self.inv_freq)
             x = x + _clean_mlp_out(layer, rms_norm(x, layer.ln2, self.eps))
             return x, None
@@ -430,7 +420,7 @@ class LlamaDecomposedModel(eqx.Module):
         assert set(taps) == wanted_set, (sorted(taps), sorted(wanted))
         return taps
 
-    def _run_masked_suffix(
+    def _run_masked_forward(
         self,
         vu: DecompVU,
         inputs: Int[Array, "b t"],
@@ -475,7 +465,7 @@ class LlamaDecomposedModel(eqx.Module):
             return out, (out if want_collect else None)
 
         def block(
-            x: Array, layer_in: tuple[SuffixLayer, dict[str, dict[str, Array]]]
+            x: Array, layer_in: tuple[LlamaLayer, dict[str, dict[str, Array]]]
         ) -> tuple[Array, dict[str, Array] | None]:
             sl, pk = layer_in
             attn = sl.attn
@@ -523,7 +513,7 @@ class LlamaDecomposedModel(eqx.Module):
         live: tuple[str, ...],
         has_delta: bool,
     ) -> Array:
-        return self._run_masked_suffix(
+        return self._run_masked_forward(
             vu, inputs, masks, delta_masks, routes, live, has_delta, None
         )
 
@@ -540,7 +530,7 @@ class LlamaDecomposedModel(eqx.Module):
         """Per-`live`-site decomposed output of the masked forward (SPEC S31). Runs the
         exact `masked_output` forward, discards the logits, returns the collected outputs."""
         collect: dict[str, Array] = {}
-        self._run_masked_suffix(vu, inputs, masks, delta_masks, routes, live, has_delta, collect)
+        self._run_masked_forward(vu, inputs, masks, delta_masks, routes, live, has_delta, collect)
         assert set(collect) == set(live), (sorted(collect), sorted(live))
         return collect
 
@@ -600,10 +590,10 @@ def _load_attn(w: _HFWeights, i: int, cfg: LlamaConfig) -> FrozenAttn:
     )
 
 
-def _load_blocks(w: "_HFWeights", cfg: LlamaConfig) -> list[SuffixLayer]:
+def _load_blocks(w: "_HFWeights", cfg: LlamaConfig) -> list[LlamaLayer]:
     pre = "model.layers"
     return [
-        SuffixLayer(
+        LlamaLayer(
             ln1=w.get(f"{pre}.{i}.input_layernorm.weight"),
             ln2=w.get(f"{pre}.{i}.post_attention_layernorm.weight"),
             attn=_load_attn(w, i, cfg),
@@ -617,7 +607,7 @@ def _load_blocks(w: "_HFWeights", cfg: LlamaConfig) -> list[SuffixLayer]:
 
 def build_decomposed_lm(
     embed: Array,
-    layers: list[SuffixLayer],
+    layers: list[LlamaLayer],
     norm: Array,
     lm_head: Array,
     inv_freq: Array,

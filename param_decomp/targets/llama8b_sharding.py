@@ -2,7 +2,7 @@
 
 The memory consumers, and how each is placed on the 1-D `dp` mesh:
 
-  * frozen suffix (`Target`): REPLICATED. ~3.6B bf16 params (14 blocks + lm_head) ~=
+  * frozen target: REPLICATED. ~3.6B bf16 params (all blocks + lm_head) ~=
     7.3GB/device. Small relative to activations; replicating avoids all-gathering the
     target every forward.
   * components (V/U) + their Adam states: SHARDED over `dp` (the FSDP analog). The fp32
@@ -14,7 +14,7 @@ The memory consumers, and how each is placed on the 1-D `dp` mesh:
     CI and its grad reduction falls out of the global-mean loss (torch
     `reduce_source_grads` analog). Tiny vs activations, so replicating costs nothing;
     the C+1 axis is odd and cannot tile the mesh anyway. `SrcAdamState` mirrors it.
-  * residual input + all activations: BATCH-sharded over `dp`. The masked suffix
+  * token input + all activations: BATCH-sharded over `dp`. The masked
     re-forwards then run on per-device sub-batches -> activation memory scales 1/n_dev.
     This is what unlocks a global batch that OOMs replicated on one device.
 

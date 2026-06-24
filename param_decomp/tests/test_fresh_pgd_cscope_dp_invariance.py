@@ -57,7 +57,7 @@ def _ascend_cscope_source(
         lambda x: jax.lax.stop_gradient(x), init_decomp_vu(sites, random.PRNGKey(1))
     )
 
-    residual = random.normal(random.PRNGKey(4), (gbatch, seq, cfg.n_embd)) * 0.5
+    residual = random.randint(random.PRNGKey(4), (gbatch, seq), 0, cfg.vocab_size)
     mesh = dp_mesh() if sharded else None
     if mesh is not None:
         residual = shard_batch(residual, mesh, batch_axis=0)
