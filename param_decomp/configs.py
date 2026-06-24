@@ -573,6 +573,19 @@ class RuntimeConfig(BaseConfig):
             "sharded data-parallel across the workers."
         ),
     )
+    tp: PositiveInt = Field(
+        default=1,
+        le=8,
+        description=(
+            "Tensor-parallel degree (the intra-node Megatron axis). The device mesh is 2-D "
+            "`(dp // tp, tp)`: the `tp` axis tensor-parallel-shards the per-block weights "
+            "(target + CI fn) and must stay on NVLink — so `tp <= 8`, the per-node GPU count "
+            "on every cluster we run (asserted). The `dp` axis carries data-parallelism for "
+            "the target/V-U AND chunk-parallelism for the chunkwise CI fn (reinterpreted via "
+            "one reshard at the CI boundary). `tp = 1` (default) is a degenerate single-column "
+            "mesh = pure `dp`. `dp` must be divisible by `tp`."
+        ),
+    )
     remat_recon_forwards: bool = Field(
         default=False,
         description=(
@@ -586,6 +599,9 @@ class RuntimeConfig(BaseConfig):
     def validate_dp(self) -> Self:
         if self.dp is not None:
             assert self.dp >= 2, "if set, dp must be at least 2 (pass None for single device)."
+            assert self.dp % self.tp == 0, (
+                f"dp={self.dp} must be divisible by tp={self.tp} (the mesh is (dp//tp, tp))"
+            )
         return self
 
 

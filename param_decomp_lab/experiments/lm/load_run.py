@@ -145,7 +145,7 @@ class LoadedJaxRun:
 def open_jax_run(run_dir: Path, step: int | None = None) -> LoadedJaxRun:
     """Open the run at `run_dir`; restore checkpoint `step` (latest if None)."""
     cfg = load_run_dir_config(run_dir)
-    mesh = dp_mesh()
+    mesh = dp_mesh(cfg.runtime.tp)
     lm, vocab_size = build_target(cfg, mesh)
 
     opt_vu, opt_ci, _ = build_optimizers(cfg.pd)

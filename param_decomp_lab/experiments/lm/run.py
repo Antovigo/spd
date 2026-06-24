@@ -352,7 +352,7 @@ def main(config: Path, run_id: str) -> None:
     # Harden the cold-cache HF weight load against the 8N-rank startup burst before any
     # per-rank Hub call (no-op when huggingface_hub is absent / cache is pre-warmed).
     configure_hf_http_retries()
-    mesh = dp_mesh()
+    mesh = dp_mesh(built.runtime.tp)
 
     if built.run.resume_provenance is not None:
         assert_finetune_structural_compat(built, built.run.resume_provenance)

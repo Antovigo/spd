@@ -53,8 +53,16 @@ def init_distributed(dp: int | None) -> bool:
     return True
 
 
-def dp_mesh() -> Mesh:
-    return Mesh(np.array(jax.devices()), axis_names=("dp",))
+def dp_mesh(tp: int = 1) -> Mesh:
+    """The 2-D device mesh `(dp, tp)`. `tp` is the tensor-parallel degree (intra-node
+    Megatron axis); `dp` (= n_devices // tp) carries data-parallelism for the target/V-U and
+    chunk-parallelism for the chunkwise CI fn. `tp = 1` is a degenerate single-column mesh —
+    the `dp` axis has the full device count, identical to the old 1-D mesh for any
+    `"dp"`-only sharding."""
+    devices = np.array(jax.devices())
+    n = devices.size
+    assert n % tp == 0, f"device count {n} not divisible by tp={tp}"
+    return Mesh(devices.reshape(n // tp, tp), axis_names=("dp", "tp"))
 
 
 def place_via_shardings[T](tree: T, shardings: T) -> T:
