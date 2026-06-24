@@ -50,8 +50,8 @@ def _heatmap(
     ax.set_title(title)
     ax.set_xticks(range(len(labels)))
     ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels, fontsize=5, rotation=90)
-    ax.set_yticklabels(labels, fontsize=5)
+    ax.set_xticklabels(labels, fontsize=11, rotation=90)
+    ax.set_yticklabels(labels, fontsize=11)
     for b in boundaries:  # thick separators between period groups
         ax.axhline(b - 0.5, color="black", lw=1.5)
         ax.axvline(b - 0.5, color="black", lw=1.5)

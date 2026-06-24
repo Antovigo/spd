@@ -322,6 +322,21 @@ incompatible dimensions, so two figures:
 
 Outputs to `<run_dir>/figures/subcomp_cosine/`.
 
+**plot_ab_inner_heatmaps.py**
+
+args:
+- the `inner_activations_<op>.tsv` from `collect_inner_activations` (positional)
+- `--output-dir`
+
+CPU. The inner-activation twin of `plot_ab_heatmaps`: identical figure layout (matrices down
+the rows, subcomponents across the columns, one `a×b` tile each — same tile size, gaps, fonts,
+margins, colorbar, via the shared `plot_ab_heatmaps._plot_position`) but coloured by the
+subcomponent's normalized inner activation `(x·V_c)/||V_c||` at the last token instead of CI.
+Inner activations are signed, so a diverging `RdBu_r` on a symmetric shared scale
+(`±max|inner|`, positive=red) replaces CI's 0..1 `RdPu`. One figure (inner activations are
+last-token only), written next to the CI heatmaps as
+`<run_dir>/figures/ab_heatmaps_<op>/inner_activations.png`.
+
 **build_neuron_connection_explorer.py**
 
 args:

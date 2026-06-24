@@ -102,15 +102,22 @@ def _build_grids(
 
 
 def _plot_position(
-    pos: str,
-    op: str,
     modules: list[str],
     alive: dict[str, list[int]],
     grids_at_pos: dict[str, dict[int, np.ndarray]],
     a_max: int,
     b_max: int,
     out_path: Path,
+    *,
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    cbar_label: str,
+    title: str,
 ) -> None:
+    """Render one matrix×subcomponent grid of `a×b` heatmaps. Styling (colormap, limits,
+    colorbar label, suptitle) is caller-supplied so the same layout serves both the CI and
+    inner-activation views."""
     n_rows = len(modules)
     n_cols = max(len(alive[m]) for m in modules)
 
@@ -146,9 +153,9 @@ def _plot_position(
                 grid,
                 origin="lower",
                 extent=(0.5, a_max + 0.5, 0.5, b_max + 0.5),
-                cmap="RdPu",
-                vmin=0.0,
-                vmax=1.0,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
                 aspect="equal",
                 interpolation="none",
             )
@@ -196,14 +203,9 @@ def _plot_position(
     cbar_w = _CBAR_LEN_IN / fig_w
     cax = fig.add_axes(((left_f + right_f) / 2 - cbar_w / 2, 0.40 / fig_h, cbar_w, 0.09 / fig_h))
     cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
-    cbar.set_label("causal importance", fontsize=_AXIS_FS - 1)
+    cbar.set_label(cbar_label, fontsize=_AXIS_FS - 1)
     cbar.ax.tick_params(labelsize=_TICK_FS)
-    fig.suptitle(
-        f'position {pos}: causal importance over "a{op}b="',
-        fontsize=_TITLE_FS,
-        fontweight="bold",
-        y=1 - 0.30 / fig_h,
-    )
+    fig.suptitle(title, fontsize=_TITLE_FS, fontweight="bold", y=1 - 0.30 / fig_h)
     fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
 
@@ -267,14 +269,17 @@ def plot_ab_heatmaps(
         if not modules:
             continue
         _plot_position(
-            pos,
-            op,
             modules,
             alive,
             grids[pos],
             a_max,
             b_max,
             out_dir / f"position_{int(pos):02d}.png",
+            cmap="RdPu",
+            vmin=0.0,
+            vmax=1.0,
+            cbar_label="causal importance",
+            title=f'position {pos}: causal importance over "a{op}b="',
         )
         n_written += 1
 

@@ -202,6 +202,8 @@ uv run python -m $V.collect_inner_activations  "$MODEL_PATH" --op=$OP --slurm --
 ```bash
 uv run python -m $V.compute_subcomp_periods "$RUN_DIR/inner_activations_$OP.tsv"
 uv run python -m $V.plot_subcomp_cosine "$MODEL_PATH" --op=$OP
+# inner-activation (a,b) heatmaps — same layout as plot_ab_heatmaps, written next to it:
+uv run python -m $V.plot_ab_inner_heatmaps "$RUN_DIR/inner_activations_$OP.tsv"
 uv run python -m $V.build_neuron_connection_explorer "$MODEL_PATH" --op=$OP
 # lower --conn-floor (default 0.1) to let the UI threshold reach weaker connections,
 # at the cost of a larger data.js. The applet's "hover shows" toggle switches the
