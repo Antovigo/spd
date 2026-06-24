@@ -90,4 +90,14 @@ neuron → up/gate/silu(gate)·up. Neuron up/gate grids shipped as fp16 base64 (
   can't surface new neurons (lower `--conn-floor` to widen, at the cost of file size).
 - Playwright (headless Chromium via `headless_check.py`): no JS errors; verified node/line
   counts, subcomp-hover CI panel, neuron-hover up/gate/output, and operand re-render.
+
+### Docs ✅
+All five scripts documented in `spec.md` (new "Arithmetic analysis" section) and runnable
+per-op examples added to `commands.md`. `common.py` helpers noted in the validation `CLAUDE.md`.
+
+## Status: all 6 objectives complete (addition). sub/mult supported via `--op`; not yet run.
+
+Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,
+`inner_activations_add.tsv`, `alive_filtered_add.tsv` (38 comps), `subcomp_periods_add.tsv`,
+`figures/subcomp_cosine/`, `figures/neuron_explorer_add/`.
 </content>

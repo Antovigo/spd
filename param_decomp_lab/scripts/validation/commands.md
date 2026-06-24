@@ -163,3 +163,56 @@ both every 50 batches, so a wall-clock kill still leaves usable partial output.
 uv run python -m param_decomp_lab.scripts.validation.screen_components_on_data "$MODEL_PATH" \
     --n-batches=300 --slurm --slurm-time=0:28:00
 ```
+
+## Arithmetic analysis pipeline (`roadmap_addition_analysis`)
+
+One operation at a time (`add` / `sub` / `mult`) over the `1..100 × 1..100` grid. Reference
+run `addmult-L18-03`. Set `OP=add` and run top to bottom; swap `OP` for `sub` / `mult`.
+
+```bash
+MODEL_PATH=~/out/runs/addmult-L18-03/model_28000.pth
+RUN_DIR=$(dirname "$MODEL_PATH")
+OP=add
+PROMPTS=param_decomp_lab/experiments/lm/prompts/addition_1-100.txt   # sub/mult: *_1-100.txt
+V=param_decomp_lab.scripts.validation
+```
+
+### 0. Per-op alive set (existing script, GPU)
+
+The arithmetic scripts treat "alive" as the per-op `find_alive_components` set ∩ a mean-CI
+filter, so first run `find_alive_components` on this op's prompts (writes the per-op TSV + the
+per-position JSON the explorer reuses):
+
+```bash
+uv run python -m $V.find_alive_components "$MODEL_PATH" --prompts="$PROMPTS" \
+    --output="$RUN_DIR/alive_components_$OP.tsv" \
+    --output-json="$RUN_DIR/alive_components_per_position_$OP.json" --slurm --slurm-time=0:30:00
+```
+
+### 1-2. Hidden + inner activations (GPU)
+
+```bash
+uv run python -m $V.collect_hidden_activations "$MODEL_PATH" --op=$OP --slurm --slurm-time=0:30:00
+uv run python -m $V.collect_inner_activations  "$MODEL_PATH" --op=$OP --slurm --slurm-time=0:30:00
+# collect_inner_activations writes inner_activations_<op>.tsv + alive_filtered_<op>.tsv
+# (lower --mean-ci-thr to widen the alive set; default 0.1 is fairly strict).
+```
+
+### 3-5. Periods, cosine heatmaps, explorer (CPU — run on the login node)
+
+```bash
+uv run python -m $V.compute_subcomp_periods "$RUN_DIR/inner_activations_$OP.tsv"
+uv run python -m $V.plot_subcomp_cosine "$MODEL_PATH" --op=$OP
+uv run python -m $V.build_neuron_connection_explorer "$MODEL_PATH" --op=$OP
+# lower --conn-floor (default 0.1) to let the UI threshold reach weaker connections,
+# at the cost of a larger data.js.
+```
+
+Smoke-test the explorer applet in headless Chromium (see `headless_check` below):
+
+```bash
+PY=~/.cache/pd-headless/venv/bin/python
+$PY param_decomp_lab/scripts/validation/headless_check.py \
+    "$RUN_DIR/figures/neuron_explorer_$OP/index.html" --wait-ms=2000 --timeout-ms=30000 \
+    --probes="document.querySelectorAll('.node').length;;document.getElementById('hint').textContent"
+```

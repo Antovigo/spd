@@ -118,6 +118,11 @@ reimplementing. Implemented so far:
 - **`escape_tsv_value`** — reversible backslash-escaping for TSV cells.
 - **`SlurmOptions` + `submit_self_to_slurm`** — the `--slurm` self-resubmission path (see
   above).
+- **Arithmetic-analysis helpers** (`roadmap_addition_analysis`): `op_symbol` /
+  `op_prompts_file` / `parse_operands` resolve an operation (`add`/`sub`/`mult`) to its infix
+  symbol, `1..100` prompt file, and `(a, b)` parser; `MLP_MATRICES` is the L18 MLP proj
+  triple; `read_alive_components` reads an alive-components TSV into `AliveComponent`s
+  (optionally filtered to given proj names).
 
 Add to `common.py` when a second script needs it (mirroring SPD's `common.py`): task
 resolution (target vs nontarget, `--prompts` / `--split` overrides), a single-epoch

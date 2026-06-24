@@ -228,3 +228,118 @@ at least once, sorted by descending `frac_active`:
 Output 2 — JSONL (default `screen_components_on_data.jsonl`), one object per component:
 `{matrix, component, alive_on_addition, contexts: [{ci, pos, token, left_context}, ...]}`,
 contexts sorted by descending CI (the firing token repr'd, plus decoded left context).
+
+---
+
+## Arithmetic analysis (`roadmap_addition_analysis`)
+
+A pipeline that probes the L18 MLP decomposition one **operation** at a time over its
+`1..100 × 1..100` prompt grid (`add` `+`, `sub` `-`, `mult` `×`). Every output file is
+suffixed with the operation (`_add` / `_sub` / `_mult`) and the three scripts that read the
+grid all act at the **last token** (the `=` answer position).
+
+**"Alive" here means two things at once:** flagged by `find_alive_components` (run *per-op*,
+via `--prompts=<op>_1-100.txt`) **and** mean lower-leaky CI over the grid above
+`--mean-ci-thr` (default 0.1). The intersection is materialised once by
+`collect_inner_activations` into `alive_filtered_<op>.tsv`, which the period / cosine /
+explorer scripts consume. Only the three L18 MLP matrices are considered (decomposed
+attention is dropped). Operation helpers (`op_symbol`, `op_prompts_file`, `parse_operands`,
+`MLP_MATRICES`) and `read_alive_components` live in `common.py`.
+
+Pipeline (run `find_alive_components --prompts=<op>` first to get the per-op alive set):
+`collect_hidden_activations` + `collect_inner_activations` → `compute_subcomp_periods` →
+`plot_subcomp_cosine` / `build_neuron_connection_explorer`.
+
+**collect_hidden_activations.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--layer`: decomposed-MLP block (default: inferred, the single MLP layer in the run)
+- `--batch-size`: forward chunk (default 256)
+- `--output`, plus `--slurm` (+ knobs)
+
+Forward-hooks the L18 MLP at five points and stores each one's **last-token** activation over
+the grid. A plain forward (no masks) runs the bare target model, so the captures are the true
+module in/outputs. GPU. Output (default `hidden_activations_<op>.npz`): five `[N, N, dim]`
+float16 grids indexed `[a-1, b-1]` — `resid_pre_mlp`, `mlp_input` (post-RMSNorm),
+`gate_preact`, `up_preact` (both pre-SwiGLU), `mlp_output` (post-down-proj) — plus `a`, `b`,
+`op`, `layer`. Stored as npz (not JSON): the full hidden states are ~410M floats. The
+post-SwiGLU neuron activation `silu(gate_preact)*up_preact` is derivable, not stored.
+
+**collect_inner_activations.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--mean-ci-thr`: mean-CI cutoff for the alive filter (default 0.1)
+- `--alive-tsv`: existing-alive list (default `alive_components_<op>.tsv` in the run folder)
+- `--batch-size` (default 256), `--output`, `--output-alive`, plus `--slurm` (+ knobs)
+
+For every existing-alive MLP subcomponent and every prompt, computes the normalized inner
+activation `(x · V_c) / ||V_c||` at the last token (`x` = the cached module input, already
+post-RMSNorm for gate/up and post-SwiGLU for down, so nothing is reapplied). Also computes
+each component's mean last-token CI over the grid and keeps those above `--mean-ci-thr`. GPU.
+Outputs:
+- `inner_activations_<op>.tsv` — one row per (kept component, prompt): `a, operation, b,
+  matrix, subcomponent, inner_act` (`operation` is the infix symbol; `matrix` the bare proj).
+- `alive_filtered_<op>.tsv` — the surviving alive set: `layer, matrix, component, mean_ci`.
+
+**compute_subcomp_periods.py**
+
+args:
+- the `inner_activations_<op>.tsv` from the previous script (positional)
+- `--output`
+
+CPU. Rebuilds each subcomponent's `[N, N]` inner-activation grid and measures the periodicity
+of its `f(a)` (mean over b) and `f(b)` (mean over a) marginals two ways: **autocorrelation**
+(best lag in `1..N//2`; score = unit-`r(0)` autocorrelation there) and **FFT** (peak nonzero
+frequency → `period = round(N/k)`; score = that frequency's fraction of DC-removed power).
+Reads `alive_filtered_<op>.tsv` (same dir) for the `layer`/full-`matrix` columns. Output
+(default `subcomp_periods_<op>.tsv`): `layer, matrix, component`, the four
+`{autocorr,fft}_{a,b}_{period,score}` columns, and a representative `period` / `period_axis`
+(the FFT axis with the stronger peak — used for downstream sorting). Note: autocorrelation
+tends to return lag 1 for smooth/monotone marginals, so the representative period uses FFT.
+
+**plot_subcomp_cosine.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--output-dir`
+
+CPU (mmap U/V, no forward). Cosine-similarity heatmaps between alive subcomponents' V and U
+vectors, sorted by representative period with a thick separator between period groups
+(`RdBu_r`, symmetric ±1; positive=red). The SwiGLU boundary splits the vectors into
+incompatible dimensions, so two figures:
+- `cosine_gate_up_<op>.png` — gate + up together (they share both spaces): V (residual,
+  d_model) and U (neuron, d_int) side by side.
+- `cosine_down_<op>.png` — down: V (neuron) and U (residual) side by side.
+
+Outputs to `<run_dir>/figures/subcomp_cosine/`.
+
+**build_neuron_connection_explorer.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--conn-floor`: min |connection strength| stored per (subcomponent, neuron) (default 0.1)
+- `--top-neurons`: cap on neurons stored per subcomponent (default 60)
+- `--output-dir`
+
+CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
+server/CDN/GPU) into `<run_dir>/figures/neuron_explorer_<op>/`. Connection strength uses the
+V-unit normalization (V→V/||V||, U→U·||V||): gate/up (pre-SwiGLU) write strength to neuron
+`j` is `U[c,j]·||V_c||`; down (post-SwiGLU) read strength is `V[j,c]/||V_c||`. The user picks
+`(a, b)` and a connection threshold; the page shows active gate/up subcomponents (left, up on
+top, period-sorted), the neurons they connect above threshold (center, sorted by strongest
+gate/up driver then strength), and active down subcomponents (right), with lines coloured by
+connection sign (red +, blue −). Hovering a subcomponent draws its CI `(a, b)` heatmap;
+hovering a neuron shows its up / gate / `silu(gate)·up` output for the current prompt.
+
+Reads `alive_filtered_<op>.tsv`, `subcomp_periods_<op>.tsv`, the `find_alive_components`
+per-position JSON (`alive_components_per_position_<op>.json`, for CI patterns + per-prompt
+activity), and `hidden_activations_<op>.npz` (neuron up/gate grids, shipped fp16 base64).
+Limitation: the UI threshold cannot surface neurons whose connection is below `--conn-floor`
+(they aren't stored) — lower `--conn-floor` to widen the universe, at the cost of `data.js`
+size. Smoke-test with `headless_check.py`.
