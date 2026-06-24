@@ -136,7 +136,20 @@ with floor shadows, a/b/a+b colour).
   rank 14 → PR 6.6, TwoNN 6.6, 18.6%. Redundancy shows as PR ≪ rank (directions correlated, not
   collinear); only ~17–19% of total activation variance lives in the alive subcomponent subspace.
 
-## Status: Obj 1–6 complete (addition). Obj 7 (ISA) pending. sub/mult supported via `--op`; not yet run.
+### Obj 7 — `find_independent_subspaces.py` + `isa_explorer_app.html` ✅ (run: llama8b-add-02)
+ISA on the reduced `z`: PCA-reduce to `--var-keep` variance, FastICA, then group components
+into subspaces by energy (magnitude) correlation; near-orthogonality checked via principal
+angles. Plotly applet: per-subspace 3D scatter (a/b/a+b colour) + energy-correlation and
+principal-angle heatmaps.
+- **Tuning:** first run (`var_keep=0.99`) kept 17/12 components (≫ the ~11/6.6 effective dims),
+  FastICA didn't converge, and grouping was nearly all singletons. Lowered default `var_keep`
+  to 0.9 and raised `max_iter` → converged; input 11 ICs → 9 subspaces (two 2-D blocks + seven
+  1-D), output 8 ICs → 8 1-D. Added a non-convergence warning.
+- The energy-correlation heatmap clearly shows the two 2-D input blocks (IC3–IC8, IC1–IC4 at
+  ~0.4–0.5 off-diagonal); principal angles between all subspaces are 80–90° (near-orthogonal).
+- Same WebGL caveat for the 3D scatter under headless; heatmaps render fine, no JS errors.
+
+## Status: all 7 objectives complete (addition, run on llama8b-add-02). sub/mult supported via `--op`; not yet run.
 
 Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,
 `inner_activations_add.tsv`, `alive_filtered_add.tsv` (38 comps), `subcomp_periods_add.tsv`,

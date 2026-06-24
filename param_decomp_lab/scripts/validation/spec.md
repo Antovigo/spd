@@ -397,3 +397,28 @@ activation variance living in the subcomponent subspace. Reads `alive_filtered_<
   axes in groups of three, a colour selector (a / b / a+b), for both sides, with the TwoNN /
   rank / PR / variance table at the bottom. The 3D uses WebGL, so headless screenshots show
   only the colorbar — open it in a real browser to see the points.
+
+**find_independent_subspaces.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--var-keep`: PCA cumulative-variance kept before ICA (default 0.9 — drops near-noise
+  directions that hurt ICA convergence)
+- `--group-distance`: average-linkage cut on `1 − |energy-corr|` for grouping components into
+  subspaces (default 0.75, i.e. group when energy correlation > 0.25)
+- `--seed`, `--max-iter` (FastICA; default 20000), `--output-dir`
+
+CPU. Independent Subspace Analysis of the reduced representation `z` from
+`reduce_dimensionality` (reads `dimensionality_<op>.npz`). Per side: reduce z to the PCs
+capturing `--var-keep` of the variance, run scikit-learn FastICA, then group the independent
+components into subspaces by the **magnitude (energy) correlation** `|corr(|s_i|, |s_j|)|` —
+so a circular feature (components linearly uncorrelated but jointly dependent) is recovered as
+one subspace. Blocks are checked for near-orthogonality via the principal angles between their
+z-space directions (logs a warning if FastICA didn't converge). Discovery uses no `(a, b)`
+labels; they are only used afterward to colour the projections. Outputs:
+- `independent_subspaces_<op>.json` — per side, the component→subspace grouping.
+- `figures/independent_subspaces_<op>/index.html` — a self-contained Plotly applet: a 3D
+  scatter of the selected subspace's components (colour a / b / a+b), the energy-correlation
+  heatmap (components ordered by subspace), and the min-principal-angle heatmap between
+  subspaces. As with Objective 6, the 3D is WebGL (real browser to see the points).

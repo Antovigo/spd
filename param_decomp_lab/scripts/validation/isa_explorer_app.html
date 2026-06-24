@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Independent subspaces</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #fff; color: #222; }
+  header { padding: 10px 16px; border-bottom: 1px solid #ddd; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 10px 0 0; }
+  label { font-size: 13px; }
+  select { font-size: 13px; padding: 2px 4px; }
+  #scatter { width: 100%; }
+  .heatmaps { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 20px; }
+  #energy, #angles { width: 480px; max-width: 48vw; }
+</style>
+<script>/*__PLOTLY_JS__*/</script>
+</head>
+<body>
+<header>
+  <h1>Independent subspaces</h1>
+  <label>side <select id="side"><option value="input">input</option><option value="output">output</option></select></label>
+  <label>subspace <select id="sub"></select></label>
+  <label>colour <select id="color"><option value="a">a</option><option value="b">b</option><option value="sum">a+b</option></select></label>
+  <span id="hint" style="font-size:12px;color:#888"></span>
+</header>
+<div id="scatter"></div>
+<div class="heatmaps">
+  <div><h3 style="font-size:13px;margin:6px">Energy correlation (components, grouped by subspace)</h3><div id="energy"></div></div>
+  <div><h3 style="font-size:13px;margin:6px">Min principal angle between subspaces (°)</h3><div id="angles"></div></div>
+</div>
+<script>window.PD_DATA = /*__PD_DATA__*/;</script>
+<script>
+const D = window.PD_DATA, META = D.meta, N = META.a.length;
+const elSide = document.getElementById("side"), elSub = document.getElementById("sub"), elColor = document.getElementById("color");
+const ZEROS = new Array(N).fill(0);
+const curSide = () => D.sides[elSide.value];
+const colorArr = () => ({ a: META.a, b: META.b, sum: META.sum })[elColor.value];
+
+function populateSubspaces() {
+  const subs = curSide().subspaces, prev = +elSub.value || 0;
+  elSub.innerHTML = "";
+  subs.forEach((m, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = `S${i} — dim ${m.length} [${m.join(",")}]`;
+    elSub.appendChild(o);
+  });
+  elSub.value = Math.min(prev, subs.length - 1);
+}
+
+function drawScatter() {
+  const s = curSide(), members = s.subspaces[+elSub.value], src = s.sources;
+  const trace = {
+    type: "scatter3d", mode: "markers",
+    x: src[members[0]], y: members.length > 1 ? src[members[1]] : ZEROS, z: members.length > 2 ? src[members[2]] : ZEROS,
+    marker: { size: 2, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: elColor.value, thickness: 12 } },
+    projection: { z: { show: true, opacity: 0.12 } }, hoverinfo: "skip",
+  };
+  const ax = members.map(c => "IC" + c);
+  const layout = {
+    margin: { l: 0, r: 0, t: 28, b: 0 }, height: 520,
+    title: `${elSide.value} — subspace S${elSub.value} (dim ${members.length}, colour ${elColor.value})`,
+    scene: { xaxis: { title: ax[0] }, yaxis: { title: ax[1] || "" }, zaxis: { title: ax[2] || "" } },
+  };
+  Plotly.react("scatter", [trace], layout, { responsive: true });
+}
+
+function drawEnergy() {
+  const s = curSide(), order = s.subspaces.flat(), m = s.energy_corr;
+  const reordered = order.map(i => order.map(j => m[i][j]));
+  const labels = order.map(c => "IC" + c);
+  Plotly.react("energy", [{ type: "heatmap", z: reordered, x: labels, y: labels, colorscale: "Viridis", zmin: 0, zmax: 1 }],
+    { height: 440, margin: { l: 50, r: 10, t: 10, b: 50 }, yaxis: { autorange: "reversed" } }, { responsive: true });
+}
+
+function drawAngles() {
+  const m = curSide().principal_angles, n = m.length, labels = m.map((_, i) => "S" + i);
+  Plotly.react("angles", [{
+    type: "heatmap", z: m, x: labels, y: labels, colorscale: "RdBu", zmin: 0, zmax: 90,
+    text: m.map(row => row.map(v => v.toFixed(0))), texttemplate: "%{text}", hoverinfo: "skip",
+  }], { height: 440, margin: { l: 40, r: 10, t: 10, b: 40 }, yaxis: { autorange: "reversed" } }, { responsive: true });
+}
+
+function refreshSide() {
+  populateSubspaces();
+  const s = curSide();
+  document.getElementById("hint").textContent =
+    `${s.sources.length} independent components → ${s.subspaces.length} subspaces`;
+  drawScatter(); drawEnergy(); drawAngles();
+}
+elSide.onchange = refreshSide;
+elSub.onchange = drawScatter;
+elColor.onchange = drawScatter;
+refreshSide();
+</script>
+</body>
+</html>

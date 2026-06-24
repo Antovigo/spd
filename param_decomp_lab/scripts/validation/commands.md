@@ -222,6 +222,18 @@ uv run python -m $V.reduce_dimensionality "$MODEL_PATH" --op=$OP
 # open figures/dimensionality_<op>/index.html in a real browser (3D is WebGL).
 ```
 
+### 7. Independent subspaces (ISA, CPU)
+
+Runs ICA on the reduced `z` and groups components into independent subspaces by energy
+correlation (so circular features stay one block), checking near-orthogonality via principal
+angles. Writes `independent_subspaces_<op>.json` and a self-contained Plotly applet.
+
+```bash
+uv run python -m $V.find_independent_subspaces "$MODEL_PATH" --op=$OP
+# tune --var-keep (PCs before ICA) and --group-distance (subspace cut) if grouping looks off;
+# it warns if FastICA didn't converge.
+```
+
 Smoke-test the explorer applet in headless Chromium (see `headless_check` below):
 
 ```bash
