@@ -1,5 +1,6 @@
 """Shared helpers for the validation scripts."""
 
+import csv
 import re
 import shlex
 from dataclasses import dataclass
@@ -13,8 +14,81 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.log import logger
 from param_decomp_lab.experiments.lm.run import LMExperimentConfig, SavedLMRun
 from param_decomp_lab.infra.paths import ModelPath
-from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
+from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME, REPO_ROOT
 from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
+
+# The arithmetic-analysis scripts (roadmap_addition_analysis) operate one operation at a
+# time. Each operation maps to its infix symbol and its `1..100 × 1..100` prompt file.
+OP_SYMBOL = {"add": "+", "sub": "-", "mult": "×"}
+_OP_PROMPTS_FILE = {
+    "add": "addition_1-100.txt",
+    "sub": "subtraction_1-100.txt",
+    "mult": "multiplication_1-100.txt",
+}
+_PROMPTS_DIR = REPO_ROOT / "param_decomp_lab" / "experiments" / "lm" / "prompts"
+# The three L18 MLP matrices these scripts analyse (decomposed attn is ignored).
+MLP_MATRICES = ("gate_proj", "up_proj", "down_proj")
+
+
+def op_symbol(op: str) -> str:
+    assert op in OP_SYMBOL, f"unknown operation {op!r}; expected one of {list(OP_SYMBOL)}"
+    return OP_SYMBOL[op]
+
+
+def op_prompts_file(op: str) -> Path:
+    """The repo's `1..100 × 1..100` prompt file for one operation."""
+    path = _PROMPTS_DIR / _OP_PROMPTS_FILE[op]
+    assert path.exists(), f"missing prompt file for {op!r}: {path}"
+    return path
+
+
+_AB_PATTERNS = {op: re.compile(rf"^(\d+){re.escape(sym)}(\d+)=$") for op, sym in OP_SYMBOL.items()}
+
+
+def parse_operands(prompt: str, op: str) -> tuple[int, int]:
+    """Parse `a` and `b` from an `a<op>b=` prompt for the given operation."""
+    match = _AB_PATTERNS[op].match(prompt)
+    assert match is not None, f"prompt is not 'a{op_symbol(op)}b=': {prompt!r}"
+    return int(match.group(1)), int(match.group(2))
+
+
+@dataclass(frozen=True)
+class AliveComponent:
+    module: str  # full path, e.g. model.layers.18.mlp.gate_proj
+    matrix: str  # the alive-TSV `matrix` cell, e.g. mlp.gate_proj
+    proj: str  # the bare projection name, e.g. gate_proj
+    component: int
+    layer: int
+
+
+def read_alive_components(
+    tsv_path: Path, keep_projs: tuple[str, ...] | None = None
+) -> list[AliveComponent]:
+    """Read an alive-components TSV (schema `layer, matrix, component, ...`).
+
+    `keep_projs`, when given, restricts to those bare projection names (e.g.
+    `("gate_proj", "up_proj", "down_proj")` to drop decomposed attention).
+    """
+    assert tsv_path.exists(), f"missing alive-components TSV: {tsv_path}"
+    out: list[AliveComponent] = []
+    with tsv_path.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            matrix = row["matrix"]
+            proj = matrix.split(".")[-1]
+            if keep_projs is not None and proj not in keep_projs:
+                continue
+            layer = int(row["layer"])
+            out.append(
+                AliveComponent(
+                    module=f"model.layers.{layer}.{matrix}",
+                    matrix=matrix,
+                    proj=proj,
+                    component=int(row["component"]),
+                    layer=layer,
+                )
+            )
+    assert out, f"no alive components (kept projs {keep_projs}) in {tsv_path}"
+    return out
 
 
 @dataclass(frozen=True)
