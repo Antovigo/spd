@@ -127,6 +127,7 @@ def _build(f: dict[str, np.ndarray]):
         rope_original_max_position_embeddings=128,
     )
     lm = build_decomposed_lm(
+        embed=jnp.zeros((cfg.vocab_size, cfg.n_embd), jnp.float32),
         layers=decomp_layers + tail,
         norm=a("norm"),
         lm_head=a("lm_head"),

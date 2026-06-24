@@ -24,7 +24,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Int
 from safetensors import safe_open
 
 from param_decomp.components import DecompVU, SiteC, SiteSpec, site_out
@@ -186,30 +186,6 @@ class FrozenAttn(eqx.Module):
         return self.core(x @ self.wq.T, x @ self.wk.T, x @ self.wv.T, inv_freq) @ self.wo.T
 
 
-class FrozenMLP(eqx.Module):
-    wg: Float[Array, "di d"]
-    wu: Float[Array, "di d"]
-    wd: Float[Array, "d di"]
-
-    def __call__(self, x: Array) -> Array:
-        return (jax.nn.silu(x @ self.wg.T) * (x @ self.wu.T)) @ self.wd.T
-
-
-class FrozenBlock(eqx.Module):
-    """A fully-frozen transformer block — the `Prefix` building block."""
-
-    ln1: Float[Array, " d"]
-    ln2: Float[Array, " d"]
-    attn: FrozenAttn
-    mlp: FrozenMLP
-    eps: float = eqx.field(static=True)
-
-    def __call__(self, x: Array, inv_freq: Array) -> Array:
-        x = x + self.attn(rms_norm(x, self.ln1, self.eps), inv_freq)
-        x = x + self.mlp(rms_norm(x, self.ln2, self.eps))
-        return x
-
-
 class SuffixLayer(eqx.Module):
     """One suffix layer's frozen weights — norms, attention, MLP. Decomposed sites read
     their frozen target W from here at forward time; layers without sites run the
@@ -293,22 +269,26 @@ def _masked_site_out(
 class LlamaDecomposedModel(eqx.Module):
     """The Llama-8B `DecomposedModel` (the `lm.py` contract; SPEC §1).
 
-    Carries the FROZEN residual-start suffix (layers `first_layer..n_layer-1`, final norm,
-    lm_head) as array fields — so it threads into the jitted step as a pytree arg, its
-    weights traced not baked. The TRAINABLE V/U (`vu: DecompVU`) is passed to the forward
-    methods explicitly: separate lifecycle (own optimizer + checkpoint, C-sharded while
-    these weights replicate), so it is NOT a field here.
+    Carries the FROZEN full model (embedding, all blocks, final norm, lm_head) as array
+    fields — so it threads into the jitted step as a pytree arg, its weights traced not
+    baked. The TRAINABLE V/U (`vu: DecompVU`) is passed to the forward methods explicitly:
+    separate lifecycle (own optimizer + checkpoint, C-sharded while these weights
+    replicate), so it is NOT a field here.
 
-    `sites` / `leading_axes` / `first_layer` are static config — `first_layer` indexes the
-    suffix and never enters the gradient graph."""
+    Forward methods take token `inputs` and embed internally; the `*_from_residual`
+    variants run the post-embedding computation (the engine calls the token entry, tests
+    drive the residual entry). Blocks with no decomposed site run the plain frozen path —
+    so a subset decomposition just leaves the rest frozen; there is no prefix/suffix cut.
 
+    `sites` / `leading_axes` are static config."""
+
+    embed: Float[Array, "vocab d"]
     layers: list[SuffixLayer]
     norm: Float[Array, " d"]
     lm_head: Float[Array, "vocab d"]
     inv_freq: Float[Array, " hd2"]
     sites: tuple[SiteSpec, ...] = eqx.field(static=True)
     leading_axes: tuple[str, ...] = eqx.field(static=True)
-    first_layer: int = eqx.field(static=True)
     eps: float = eqx.field(static=True)
 
     @property
@@ -319,42 +299,44 @@ class LlamaDecomposedModel(eqx.Module):
     def recon_loss_fn(masked_output: Array, clean_output: Array) -> Array:
         return kl_per_position(masked_output, clean_output)
 
-    def clean_output(self, resid: Float[Array, "b t d"]) -> Array:
-        """The all-frozen suffix forward — the recon target (SPEC S3)."""
-        x = resid
-        for suffix_layer in self.layers:
-            x = x + suffix_layer.attn(rms_norm(x, suffix_layer.ln1, self.eps), self.inv_freq)
-            x = x + _clean_mlp_out(suffix_layer, rms_norm(x, suffix_layer.ln2, self.eps))
+    def embed_tokens(self, tokens: Int[Array, "b t"]) -> Float[Array, "b t d"]:
+        return self.embed[tokens]
+
+    def clean_output(self, inputs: Int[Array, "b t"]) -> Array:
+        """The all-frozen forward — the recon target (SPEC S3)."""
+        x = self.embed_tokens(inputs)
+        for block in self.layers:
+            x = x + block.attn(rms_norm(x, block.ln1, self.eps), self.inv_freq)
+            x = x + _clean_mlp_out(block, rms_norm(x, block.ln2, self.eps))
         x = rms_norm(x, self.norm, self.eps)
         return x @ self.lm_head.T
 
     def read_activations(
-        self, resid: Float[Array, "b t d"], wanted: tuple[str, ...]
+        self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
     ) -> dict[str, Array]:
         """Frozen-path activation accessor (CI input side, SPEC S4; harvest's per-site
         matrix inputs).
 
-        `wanted` keys are either `resid.{global_layer}` (residual stream ENTERING that block
-        — the chunkwise CI fn's `input_names`) or a decomposed SITE NAME (the activation
-        entering that site's weight on the frozen path: `q/k/v_proj` ← post-LN1 residual,
-        `o_proj` ← the attention output, `gate/up_proj` ← post-LN2 residual, `down_proj` ←
+        `wanted` keys are either `resid.{layer}` (residual stream ENTERING that block — the
+        chunkwise CI fn's `input_names`) or a decomposed SITE NAME (the activation entering
+        that site's weight on the frozen path: `q/k/v_proj` ← post-LN1 residual, `o_proj` ←
+        the attention output, `gate/up_proj` ← post-LN2 residual, `down_proj` ←
         `silu(gate)·up`). The residual is threaded identically to `clean_output`; the
         per-site intermediates come from the same RMSNorm/attn/MLP math. Stops once the last
         requested key's block is fully covered (no wasted block compute past it)."""
         wanted_set = frozenset(wanted)
         last = max(_tap_layer(key) for key in wanted)
         taps: dict[str, Array] = {}
-        x = resid
-        for layer_offset, suffix_layer in enumerate(self.layers):
-            layer = self.first_layer + layer_offset
+        x = self.embed_tokens(inputs)
+        for layer, block in enumerate(self.layers):
             if f"resid.{layer}" in wanted_set:
                 taps[f"resid.{layer}"] = x
-            attn = suffix_layer.attn
-            h1 = rms_norm(x, suffix_layer.ln1, self.eps)
+            attn = block.attn
+            h1 = rms_norm(x, block.ln1, self.eps)
             attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, self.inv_freq)
             post_attn = x + attn_y @ attn.wo.T
-            mlp_in = rms_norm(post_attn, suffix_layer.ln2, self.eps)
-            down_in = jax.nn.silu(mlp_in @ suffix_layer.Wg.T) * (mlp_in @ suffix_layer.Wu.T)
+            mlp_in = rms_norm(post_attn, block.ln2, self.eps)
+            down_in = jax.nn.silu(mlp_in @ block.Wg.T) * (mlp_in @ block.Wu.T)
             for kind, site_input in (
                 ("q", h1), ("k", h1), ("v", h1), ("o", attn_y),
                 ("gate", mlp_in), ("up", mlp_in), ("down", down_in),
@@ -362,7 +344,7 @@ class LlamaDecomposedModel(eqx.Module):
                 name = site_name(layer, kind)
                 if name in wanted_set:
                     taps[name] = site_input
-            x = post_attn + down_in @ suffix_layer.Wd.T
+            x = post_attn + down_in @ block.Wd.T
             if layer == last:
                 break
         assert set(taps) == wanted_set, (sorted(taps), sorted(wanted))
@@ -371,7 +353,7 @@ class LlamaDecomposedModel(eqx.Module):
     def _run_masked_suffix(
         self,
         vu: DecompVU,
-        resid: Float[Array, "b t d"],
+        inputs: Int[Array, "b t"],
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
         routes: dict[str, Array] | None,
@@ -379,7 +361,7 @@ class LlamaDecomposedModel(eqx.Module):
         has_delta: bool,
         collect: dict[str, Array] | None,
     ) -> Array:
-        """The masked decomposed suffix forward shared by `masked_output` and
+        """The masked decomposed forward shared by `masked_output` and
         `masked_site_outputs` (SPEC §1.3, S2): sites in `live` run their decomposed forward
         with `masks[s]` / `delta_masks[s]` / `routes[s]`; every other site — and every site
         absent from the decomposition entirely — runs the frozen `x @ W` path. `live` and
@@ -387,13 +369,12 @@ class LlamaDecomposedModel(eqx.Module):
         (LOSS_PARITY_DESIGN §4b). A non-None `collect` gathers per-site decomposed
         outputs."""
         live_set = frozenset(live)
-        x = resid
-        for layer_offset, suffix_layer in enumerate(self.layers):
-            layer = self.first_layer + layer_offset
+        x = self.embed_tokens(inputs)
+        for layer, block in enumerate(self.layers):
             live_kinds = {kind for kind in KIND_ORDER if site_name(layer, kind) in live_set}
-            attn = suffix_layer.attn
+            attn = block.attn
             site_args = (masks, delta_masks, routes, live_set, has_delta, collect)
-            h1 = rms_norm(x, suffix_layer.ln1, self.eps)
+            h1 = rms_norm(x, block.ln1, self.eps)
             if not live_kinds & set(ATTN_KINDS):
                 attn_out = attn(h1, self.inv_freq)
             else:
@@ -403,19 +384,15 @@ class LlamaDecomposedModel(eqx.Module):
                 attn_y = attn.core(q, k, v, self.inv_freq)
                 attn_out = _masked_site_out(vu, site_name(layer, "o"), attn.wo, attn_y, *site_args)
             post_attn = x + attn_out
-            mlp_in = rms_norm(post_attn, suffix_layer.ln2, self.eps)
+            mlp_in = rms_norm(post_attn, block.ln2, self.eps)
             if not live_kinds & set(MLP_KINDS):
-                mlp_out = _clean_mlp_out(suffix_layer, mlp_in)
+                mlp_out = _clean_mlp_out(block, mlp_in)
             else:
-                gate = _masked_site_out(
-                    vu, site_name(layer, "gate"), suffix_layer.Wg, mlp_in, *site_args
-                )
-                up = _masked_site_out(
-                    vu, site_name(layer, "up"), suffix_layer.Wu, mlp_in, *site_args
-                )
+                gate = _masked_site_out(vu, site_name(layer, "gate"), block.Wg, mlp_in, *site_args)
+                up = _masked_site_out(vu, site_name(layer, "up"), block.Wu, mlp_in, *site_args)
                 down_in = jax.nn.silu(gate) * up
                 mlp_out = _masked_site_out(
-                    vu, site_name(layer, "down"), suffix_layer.Wd, down_in, *site_args
+                    vu, site_name(layer, "down"), block.Wd, down_in, *site_args
                 )
             x = post_attn + mlp_out
         x = rms_norm(x, self.norm, self.eps)
@@ -424,19 +401,21 @@ class LlamaDecomposedModel(eqx.Module):
     def masked_output(
         self,
         vu: DecompVU,
-        resid: Float[Array, "b t d"],
+        inputs: Int[Array, "b t"],
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
         routes: dict[str, Array] | None,
         live: tuple[str, ...],
         has_delta: bool,
     ) -> Array:
-        return self._run_masked_suffix(vu, resid, masks, delta_masks, routes, live, has_delta, None)
+        return self._run_masked_suffix(
+            vu, inputs, masks, delta_masks, routes, live, has_delta, None
+        )
 
     def masked_site_outputs(
         self,
         vu: DecompVU,
-        resid: Float[Array, "b t d"],
+        inputs: Int[Array, "b t"],
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
         routes: dict[str, Array] | None,
@@ -446,7 +425,7 @@ class LlamaDecomposedModel(eqx.Module):
         """Per-`live`-site decomposed output of the masked forward (SPEC S31). Runs the
         exact `masked_output` forward, discards the logits, returns the collected outputs."""
         collect: dict[str, Array] = {}
-        self._run_masked_suffix(vu, resid, masks, delta_masks, routes, live, has_delta, collect)
+        self._run_masked_suffix(vu, inputs, masks, delta_masks, routes, live, has_delta, collect)
         assert set(collect) == set(live), (sorted(collect), sorted(live))
         return collect
 
@@ -455,7 +434,7 @@ class LlamaDecomposedModel(eqx.Module):
         out: dict[str, Array] = {}
         for spec in self.sites:
             layer, kind = parse_site_name(spec.name)
-            W = _frozen_site_weight(self.layers[layer - self.first_layer], kind)
+            W = _frozen_site_weight(self.layers[layer], kind)
             V, U = vu.site(spec.name)
             out[spec.name] = (
                 W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
@@ -506,22 +485,7 @@ def _load_attn(w: _HFWeights, i: int, cfg: LlamaConfig) -> FrozenAttn:
     )
 
 
-def _load_block(w: _HFWeights, i: int, cfg: LlamaConfig) -> FrozenBlock:
-    pre = "model.layers"
-    return FrozenBlock(
-        ln1=w.get(f"{pre}.{i}.input_layernorm.weight"),
-        ln2=w.get(f"{pre}.{i}.post_attention_layernorm.weight"),
-        attn=_load_attn(w, i, cfg),
-        mlp=FrozenMLP(
-            wg=w.get(f"{pre}.{i}.mlp.gate_proj.weight"),
-            wu=w.get(f"{pre}.{i}.mlp.up_proj.weight"),
-            wd=w.get(f"{pre}.{i}.mlp.down_proj.weight"),
-        ),
-        eps=cfg.rms_norm_eps,
-    )
-
-
-def _load_suffix_layers(w: "_HFWeights", cfg: LlamaConfig, first_layer: int) -> list[SuffixLayer]:
+def _load_blocks(w: "_HFWeights", cfg: LlamaConfig) -> list[SuffixLayer]:
     pre = "model.layers"
     return [
         SuffixLayer(
@@ -532,11 +496,12 @@ def _load_suffix_layers(w: "_HFWeights", cfg: LlamaConfig, first_layer: int) -> 
             Wu=w.get(f"{pre}.{i}.mlp.up_proj.weight"),
             Wd=w.get(f"{pre}.{i}.mlp.down_proj.weight"),
         )
-        for i in range(first_layer, cfg.n_layer)
+        for i in range(cfg.n_layer)
     ]
 
 
 def build_decomposed_lm(
+    embed: Array,
     layers: list[SuffixLayer],
     norm: Array,
     lm_head: Array,
@@ -544,20 +509,20 @@ def build_decomposed_lm(
     cfg: LlamaConfig,
     sites: tuple[SiteSpec, ...],
 ) -> LlamaDecomposedModel:
-    """Assemble a `LlamaDecomposedModel` from frozen suffix arrays + decomposition config.
-    `sites` must be canonical-ordered with dims matching `cfg`."""
+    """Assemble a `LlamaDecomposedModel` from the frozen full-model arrays + decomposition
+    config. `sites` must be canonical-ordered with dims matching `cfg`."""
     site_cs = tuple(SiteC(s.name, s.C) for s in sites)
     assert sites == llama_site_specs(cfg, canonical_site_cs(site_cs)), (
         f"sites are not the canonical specs for this config: {sites}"
     )
     return LlamaDecomposedModel(
+        embed=embed,
         layers=layers,
         norm=norm,
         lm_head=lm_head,
         inv_freq=inv_freq,
         sites=sites,
         leading_axes=("sequence",),
-        first_layer=first_decomposed_layer(tuple(s.name for s in sites)),
         eps=cfg.rms_norm_eps,
     )
 
@@ -565,58 +530,16 @@ def build_decomposed_lm(
 def load_decomposed_lm_from_hf(
     model_name: str, cfg: LlamaConfig, sites: tuple[SiteSpec, ...]
 ) -> LlamaDecomposedModel:
-    """Load the Llama-8B `DecomposedModel`: the frozen residual-start suffix as fields plus
-    the static decomposition config (`sites` / `first_layer`). Only `first_layer..n_layer-1`
-    is materialized — the prefix is consumed separately via `load_prefix_from_hf`."""
-    first_layer = first_decomposed_layer(tuple(s.name for s in sites))
+    """Load the Llama-8B `DecomposedModel`: the full frozen model (embedding, all blocks,
+    final norm, lm_head) as fields plus the static decomposition config (`sites`). Blocks
+    without a decomposed site run the plain frozen path."""
     w = _HFWeights(_hf_snapshot_dir(model_name))
     return build_decomposed_lm(
-        layers=_load_suffix_layers(w, cfg, first_layer),
+        embed=w.get("model.embed_tokens.weight"),
+        layers=_load_blocks(w, cfg),
         norm=w.get("model.norm.weight"),
         lm_head=w.get("lm_head.weight"),
         inv_freq=llama3_inv_freq(cfg),
         cfg=cfg,
         sites=sites,
     )
-
-
-class Prefix(eqx.Module):
-    """The frozen L0..first-1 prefix: embedding + blocks. Used only to harvest the
-    residual entering the suffix (SPEC §1.1) — never in any gradient graph."""
-
-    embed: Float[Array, "vocab d"]
-    blocks: list[FrozenBlock]
-    inv_freq: Float[Array, " hd2"]
-
-
-def load_prefix_from_hf(model_name: str, cfg: LlamaConfig, first_layer: int) -> Prefix:
-    w = _HFWeights(_hf_snapshot_dir(model_name))
-    return Prefix(
-        embed=w.get("model.embed_tokens.weight"),
-        blocks=[_load_block(w, i, cfg) for i in range(first_layer)],
-        inv_freq=llama3_inv_freq(cfg),
-    )
-
-
-def prefix_residual(prefix: Prefix, idx: Array) -> Array:
-    """Pure prefix forward: token ids `(b, t)` -> residual entering `first` (b, t, d).
-    The trainer jits this with `prefix` as a runtime arg and the batch dp-sharded."""
-    x = prefix.embed[idx]
-    for blk in prefix.blocks:
-        x = blk(x, prefix.inv_freq)
-    return x
-
-
-def make_real_target_residual(
-    model_name: str, cfg: LlamaConfig, first_layer: int, idx: Array, chunk: int
-) -> Array:
-    """One-shot eager harvest for the bench: loads the prefix, runs it in micro-batch
-    chunks (`chunk`) so peak activation is one chunk's forward, discards the weights.
-    The trainer instead keeps a `Prefix` resident and jits `prefix_residual`."""
-    prefix = load_prefix_from_hf(model_name, cfg, first_layer)
-    b = idx.shape[0]
-    outs = [
-        jax.block_until_ready(prefix_residual(prefix, idx[i : i + chunk]))
-        for i in range(0, b, chunk)
-    ]
-    return jnp.concatenate(outs, axis=0)

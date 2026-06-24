@@ -120,7 +120,7 @@ def make_train_step(
     remat_recon_forwards: bool,
     mesh: Mesh | None,
 ):
-    """Build the `eqx.filter_jit`'d `step(model, state, residual, key) -> (state, metrics)`.
+    """Build the `eqx.filter_jit`'d `step(model, state, batch, key) -> (state, metrics)`.
 
     `model` is the jit ARG (frozen 8B weights traced as array leaves, never baked); the
     factory closes over only static config (`site_names`, `recon_loss_fn`, term wiring) read
@@ -169,7 +169,7 @@ def make_train_step(
     def masked_forward(
         model: DecomposedModel,
         components_bf16: DecompVU,
-        residual: Float[Array, "*leading d"],
+        batch: Any,
         masks: dict[str, Float[Array, "*leading _"]],
         delta_masks: dict[str, Float[Array, "..."]],
         routes: dict[str, Bool[Array, "*leading"]] | None,
@@ -178,7 +178,7 @@ def make_train_step(
     ) -> Any:
         return batch_sharded(
             model.masked_output(
-                components_bf16, residual, masks, delta_masks, routes, live_sites, has_delta
+                components_bf16, batch, masks, delta_masks, routes, live_sites, has_delta
             )
         )
 
@@ -229,7 +229,7 @@ def make_train_step(
         model: DecomposedModel,
         components_bf16: DecompVU,
         ci_lower: dict[str, Array],
-        residual: Array,
+        batch: Any,
         clean_output: Array,
         forward_fn: Any,
     ) -> Array:
@@ -241,7 +241,7 @@ def make_train_step(
             masked = forward_fn(
                 model,
                 components_bf16,
-                residual,
+                batch,
                 masks,
                 delta_masks,
                 routes,
@@ -256,16 +256,19 @@ def make_train_step(
     def step(
         model: DecomposedModel,
         state: TrainState,
-        residual: Float[Array, "*leading d"],
+        batch: Any,
         key: PRNGKeyArray,
     ) -> tuple[TrainState, dict[str, Array]]:
         step_f32 = state.step.astype(jnp.float32)
         pnorm = annealed_pnorm(step_f32, total_steps, imp_min)
-        leading = residual.shape[:-1]
 
-        residual = batch_sharded(residual)
-        clean_output = jax.lax.stop_gradient(batch_sharded(model.clean_output(residual)))
-        taps = model.read_activations(residual, state.ci_fn.input_names)
+        batch = batch_sharded(batch)
+        clean_output = jax.lax.stop_gradient(batch_sharded(model.clean_output(batch)))
+        taps = model.read_activations(batch, state.ci_fn.input_names)
+        # `leading` (batch, *positions) — the shape masks/sources/routes live in. Sourced
+        # from a tap (always `[*leading, d_tap]`), not the opaque batch, so the engine never
+        # assumes the batch's rank/feature dim.
+        leading = next(iter(taps.values())).shape[:-1]
 
         # ── adversary ascents: params + CI detached (SPEC §4.5) ──
         components_detached = jax.lax.stop_gradient(cast_floating(state.components, COMPUTE_DT))
@@ -301,7 +304,7 @@ def make_train_step(
                 masked = masked_forward(
                     model,
                     components_detached,
-                    residual,
+                    batch,
                     masks,
                     delta_masks,
                     None,
@@ -370,7 +373,7 @@ def make_train_step(
                         model,
                         components_detached,
                         ci_lower_detached,
-                        residual,
+                        batch,
                         clean_output,
                         masked_forward,
                     )
@@ -445,7 +448,7 @@ def make_train_step(
                         masked = checkpointed_masked_forward(
                             model,
                             components_bf16,
-                            residual,
+                            batch,
                             masks,
                             delta_masks,
                             routes,

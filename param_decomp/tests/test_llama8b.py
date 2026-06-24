@@ -92,6 +92,7 @@ def _tiny_decomposed_lm(
         )
 
     return build_decomposed_lm(
+        embed=n((cfg.vocab_size, d), 0.02),
         layers=[suffix_layer() for _ in range(cfg.n_layer - first_layer)],
         norm=jnp.ones((d,)),
         lm_head=n((cfg.vocab_size, d), 0.02),

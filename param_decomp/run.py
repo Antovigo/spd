@@ -392,7 +392,7 @@ def run_decomposition_training(
     ci_fn: CIFnArch,
     data: DataConfig | None,
     remat_recon_forwards: bool,
-    sample_batch: Callable[[int], jax.Array],
+    sample_batch: Callable[[int], Any],
     eval_fn: "Callable[[TrainState, int], LogRecord] | None",
     eval_every: int,
     perf_tokens_per_step: int | None,
@@ -411,9 +411,10 @@ def run_decomposition_training(
 
     The target supplies only its three injectable seams:
 
-    - `sample_batch(step) -> residual [*leading, d]`: the residual entering the decomposed
-      model for `step`, already mesh-placed on `P("dp")`. An LM harvests it from the frozen
-      prefix over a parquet token batch; a toy generates it synthetically.
+    - `sample_batch(step) -> batch`: the opaque per-step model input (a pure function of
+      `step`, for O(1) resume). The model interprets it (an LM's token ids `[B, T]` → embed;
+      a toy's feature vector, which already is the `[*leading, d]` waist). The engine only
+      assumes axis 0 is the batch/`dp` axis (for sharding); it never names tokens or `d`.
     - `eval_fn(state, now_step) -> dict[str, float]`: an in-loop eval pass run every
       `eval_every` completed steps, its record logged under that step. `None` disables it.
     - `eval_every`: the eval cadence. For an LM this is `eval.every`; a toy folds its
@@ -427,6 +428,11 @@ def run_decomposition_training(
     "token" has no meaning) omits the perf keys."""
     is_main = jax.process_index() == 0
     ndev = mesh.devices.size
+    # Activate the mesh so bare-PartitionSpec `with_sharding_constraint`s inside the forward
+    # resolve (the attn q/k/v batch-sharding pin in `FrozenAttn.core`, needed for cuDNN
+    # flash attention under the scan+cond masked forward). Explicit NamedShardings elsewhere
+    # are unaffected.
+    jax.set_mesh(mesh)
     assert cadence.save_every is not None and cadence.keep_last_n_checkpoints is not None, cadence
     save_every = cadence.save_every
 
@@ -478,8 +484,8 @@ def run_decomposition_training(
     last_logged = start_step
 
     for step in range(start_step, pd.steps):
-        residual = sample_batch(step)
-        state, metrics = step_fn(lm, state, residual, random.fold_in(run_key, step))
+        batch = sample_batch(step)
+        state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step))
 
         now_step = step + 1
         dense = cadence.dense_log_phase

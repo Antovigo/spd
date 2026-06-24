@@ -101,6 +101,7 @@ def _load() -> tuple[dict[str, np.ndarray], DecomposedModel, DecompVU, jnp.ndarr
     ]
     sites = llama_site_specs(cfg, mlp_family_site_cs(first, last, C))
     lm = build_decomposed_lm(
+        embed=jnp.zeros((cfg.vocab_size, cfg.n_embd), jnp.float32),
         layers=layers, norm=a("tgt::norm"), lm_head=a("tgt::lm_head"),
         inv_freq=llama3_inv_freq(cfg), cfg=cfg, sites=sites,
     )  # fmt: skip

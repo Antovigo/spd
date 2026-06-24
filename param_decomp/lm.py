@@ -80,14 +80,15 @@ class DecomposedModel(Protocol):
         """Recon comparison the step minimizes (SPEC §2.3). LM: `kl_per_position`."""
         ...
 
-    def clean_output(self, resid: Float[Array, "*leading d"]) -> Any:
+    def clean_output(self, inputs: Any, /) -> Any:
         """All-frozen forward — the recon target (SPEC S3); never the `mask=1` decomposed
-        identity. `Any`: an LM emits `[*leading, vocab]` logits, a bio target a tuple of
-        heads or coordinates."""
+        identity. `inputs` is positional-only and target-specific (an LM's token ids → embed;
+        a toy's feature vector, which already is the waist). `Any` return: an LM emits
+        `[*leading, vocab]` logits, a bio target a tuple of heads or coordinates."""
         ...
 
     def read_activations(
-        self, resid: Float[Array, "*leading d"], wanted: tuple[str, ...]
+        self, inputs: Any, /, wanted: tuple[str, ...]
     ) -> dict[str, Float[Array, "*leading d_tap"]]:
         """The CI fn's activation accessor. `wanted` is the CI fn's static `input_names` —
         OPAQUE keys the target knows how to produce (an LM's `resid.{layer}` taps; a
@@ -98,7 +99,8 @@ class DecomposedModel(Protocol):
     def masked_output(
         self,
         vu: DecompVU,
-        resid: Float[Array, "*leading d"],
+        inputs: Any,
+        /,
         masks: SiteMasks,
         delta_masks: SiteDeltaMasks,
         routes: SiteRoutes,
@@ -115,7 +117,8 @@ class DecomposedModel(Protocol):
     def masked_site_outputs(
         self,
         vu: DecompVU,
-        resid: Float[Array, "*leading d"],
+        inputs: Any,
+        /,
         masks: SiteMasks,
         delta_masks: SiteDeltaMasks,
         routes: SiteRoutes,
