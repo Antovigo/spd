@@ -48,20 +48,22 @@ class DecompVU(eqx.Module):
         return self.vu[name]
 
     def shardings(self, mesh: "Mesh") -> "DecompVU":
-        """FSDP-on-`dp` × Megatron-on-`tp` placement (storage `/(dp·tp)`): V `(d_in, C)`
-        shards `d_in` (axis 0) on `dp` and C (axis 1) on `tp`; U `(C, d_out)` shards C
-        (axis 0) on `tp` and `d_out` (axis 1) on `dp`. C stays on `tp` so the per-component
-        axis aligns with the CI fn's output C (also `tp`) — no reshard between the CI mask
-        and `x @ V`. The `dp` (FSDP) shard is gathered per-site for compute (ZeRO-3); it
-        keeps V/U off the `/tp`-only floor that OOMs the faith warmup. Asserts d_in/d_out
-        tile `dp` and C tiles `tp`."""
+        """V FSDP-on-`dp` × Megatron-on-`tp`; U Megatron-on-`tp` only. V `(d_in, C)` shards
+        `d_in` (axis 0) on `dp` and C (axis 1) on `tp` (storage `/(dp·tp)`, `d_in` gathered
+        per-site for compute, ZeRO-3). U `(C, d_out)` shards only C (axis 0) on `tp`, with
+        `d_out` REPLICATED — deliberately NOT FSDP'd: `d_out` is the q/k/v site outputs'
+        head dim, and sharding it on `dp` makes GSPMD resolve the attention q/k/v shardings
+        inconsistently (v keeps `d_out` on `dp`, q/k gather it), which cuDNN flash-attn's
+        custom partitioner rejects ("Query, key and value should have same sharding").
+        Replicated `d_out` keeps all of q/k/v batch-on-`dp` / `d_out`-replicated → consistent.
+        C stays on `tp` so it aligns with the CI fn's output C (no mask reshard). Asserts
+        d_in tiles `dp` and C tiles `tp`."""
         shard_V = NamedSharding(mesh, P("dp", "tp"))
-        shard_U = NamedSharding(mesh, P("tp", "dp"))
+        shard_U = NamedSharding(mesh, P("tp", None))
         placed: dict[str, tuple[NamedSharding, NamedSharding]] = {}
-        for name, (V, U) in self.vu.items():
+        for name, (V, _U) in self.vu.items():
             assert_divisible(V.shape[0], mesh, "dp", f"DecompVU[{name}].V.d_in")
             assert_divisible(V.shape[1], mesh, "tp", f"DecompVU[{name}].V.C")
-            assert_divisible(U.shape[1], mesh, "dp", f"DecompVU[{name}].U.d_out")
             placed[name] = (shard_V, shard_U)
         return DecompVU(vu=placed)  # pyright: ignore[reportArgumentType]
 

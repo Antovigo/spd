@@ -86,16 +86,17 @@ def test_jitted_sharded_inits_match_eager_values():
             )
         ),
     )
-    # Placement is MODEL-OWNED and uniform across mesh sizes: V/U FSDP-shard d_in/d_out on
-    # `dp` and C on `tp` (`P("dp","tp")` / `P("tp","dp")`); at an axis of size 1 it is
-    # trivially divisible and effectively replicated on that axis, but the SPEC is unchanged.
+    # Placement is MODEL-OWNED and uniform across mesh sizes: V FSDP-shards d_in on `dp` and
+    # C on `tp` (`P("dp","tp")`); U shards only C on `tp` with d_out REPLICATED (`P("tp",None)`)
+    # — d_out is the attn q/k/v head dim and sharding it on `dp` breaks cuDNN's q/k/v-identical
+    # requirement. At an axis of size 1 the shard is trivially replicated; the SPEC is unchanged.
     vu_placed = init_decomp_vu_placed(sites, jax.random.PRNGKey(1), mesh)
     vu_eager = init_decomp_vu(sites, jax.random.PRNGKey(1))
     for spec in sites:
         V, U = vu_placed.site(spec.name)
         assert isinstance(V.sharding, NamedSharding) and isinstance(U.sharding, NamedSharding)
         assert V.sharding.spec == P("dp", "tp"), spec.name
-        assert U.sharding.spec == P("tp", "dp"), spec.name
+        assert U.sharding.spec == P("tp", None), spec.name
     for got, want in zip(jax.tree.leaves(vu_placed), jax.tree.leaves(vu_eager), strict=True):
         assert got.shape == want.shape and got.dtype == want.dtype
         assert jnp.allclose(jnp.asarray(got), want, rtol=1e-6, atol=0)
