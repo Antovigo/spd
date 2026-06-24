@@ -119,7 +119,24 @@ importance and signed normalized inner activation (diverging colormap). Inner gr
 job 1586; periods/cosine/explorer on CPU). Headless Chromium: no JS errors; toggle verified
 (CI 1.000 ↔ inner 2.766 at (2,3)).
 
-## Status: all 6 objectives complete (addition). sub/mult supported via `--op`; not yet run.
+### Obj 6 — `reduce_dimensionality.py` + `dimensionality_explorer_app.html` ✅ (run: llama8b-add-02)
+Projects the stored `mlp_input` / `mlp_output` onto the alive subcomponents' read/write
+subspaces (orthonormal `Q = Dᵀ E Λ^(-1/2)` from the direction Gram), giving `z = Qᵀx`. Reports
+geometric rank, PCA participation ratio, TwoNN (scikit-dimension), and the variance-captured
+completeness fraction. Plotly self-contained applet (scree + threshold, raw-z & PCA 3D views
+with floor shadows, a/b/a+b colour).
+- Added `plotly` + `scikit-dimension` to `param_decomp_lab` deps; needs `uv sync --all-packages`
+  (plain `uv sync` only audits the root and silently skips workspace-member deps).
+- **Bug:** forgot the `window.PD_DATA = /*__PD_DATA__*/` injection line in the template, so the
+  data marker matched nothing and the applet loaded with `PD_DATA` undefined (plotly itself was
+  fine). Added the line + a fail-fast assert that both injection markers exist in the template.
+- **Headless note:** `scatter3d` is WebGL; headless Chromium can't render it to a screenshot
+  ("CONTEXT_LOST_WEBGL"), so only the colorbar shows. No JS errors; scree/stats/controls verified.
+- Results (llama8b-add-02): input rank 20 → PR 10.9, TwoNN 6.3, 16.9% variance captured; output
+  rank 14 → PR 6.6, TwoNN 6.6, 18.6%. Redundancy shows as PR ≪ rank (directions correlated, not
+  collinear); only ~17–19% of total activation variance lives in the alive subcomponent subspace.
+
+## Status: Obj 1–6 complete (addition). Obj 7 (ISA) pending. sub/mult supported via `--op`; not yet run.
 
 Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,
 `inner_activations_add.tsv`, `alive_filtered_add.tsv` (38 comps), `subcomp_periods_add.tsv`,

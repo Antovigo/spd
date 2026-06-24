@@ -210,6 +210,18 @@ uv run python -m $V.build_neuron_connection_explorer "$MODEL_PATH" --op=$OP
 # subcomponent heatmap between causal importance and (signed) inner activation.
 ```
 
+### 6. Real dimensionality of the representation (CPU)
+
+Projects the stored `mlp_input` / `mlp_output` onto the alive subcomponents' read / write
+subspaces and reports the real dimensionality (geometric rank, PCA participation ratio,
+TwoNN intrinsic dim) + the variance-captured completeness check. Writes
+`dimensionality_<op>.{npz,json}` and a self-contained Plotly applet.
+
+```bash
+uv run python -m $V.reduce_dimensionality "$MODEL_PATH" --op=$OP
+# open figures/dimensionality_<op>/index.html in a real browser (3D is WebGL).
+```
+
 Smoke-test the explorer applet in headless Chromium (see `headless_check` below):
 
 ```bash

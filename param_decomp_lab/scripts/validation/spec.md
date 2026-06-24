@@ -365,3 +365,35 @@ this op's symbol with an assert that ≥1 prompt matched, for CI patterns + acti
 (neuron up/gate grids, fp16 base64). Limitation: the UI threshold cannot surface neurons whose
 connection is below `--conn-floor` (they aren't stored) — lower `--conn-floor` to widen the
 universe, at the cost of `data.js` size. Smoke-test with `headless_check.py`.
+
+**reduce_dimensionality.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--rank-eps`: relative cutoff on G eigenvalues for the orthonormal basis (default 1e-6 —
+  drops only numerically-zero directions, so the geometric rank is essentially full)
+- `--output-dir`
+
+CPU (mmap U/V + the stored activations, no forward). Measures the real dimensionality of the
+last-token MLP representation on two sides: **input** = the post-RMSNorm MLP input
+(`mlp_input` from `collect_hidden_activations`) projected onto the span of the alive up/gate
+unit V directions; **output** = the MLP output (`mlp_output`) projected onto the span of the
+alive down unit U directions. For each side it builds an orthonormal basis `Q = Dᵀ E Λ^(-1/2)`
+of the direction span (`G = D Dᵀ = E Λ Eᵀ`) and reduces the real activation to `z = Qᵀ x` — a
+plain projection, so several subcomponents reading/writing the same plane collapse exactly.
+
+Reports per side: geometric rank (non-negligible G eigenvalues), linear effective dimension
+(participation ratio of the cov(z) / PCA spectrum), intrinsic dimension (TwoNN via
+`scikit-dimension`, on z), and the completeness fraction `‖z‖²/‖x‖²` (centered) — the share of
+activation variance living in the subcomponent subspace. Reads `alive_filtered_<op>.tsv` and
+`hidden_activations_<op>.npz`. Outputs:
+- `dimensionality_<op>.npz` — `z` (raw orthonormal) and `pca` (PCA-rotated) per side, plus the
+  `(a, b)` per row. Consumed by the ISA script (Objective 7).
+- `dimensionality_<op>.json` — the scalar summary (rank / PR / TwoNN / var fraction per side).
+- `figures/dimensionality_<op>/index.html` — a single self-contained **Plotly** applet
+  (plotly.js inlined, `file://`-openable): a scree plot with an eigenvalue-threshold dialog,
+  rotatable 3D scatter (floor-shadow projection) over both the raw z-axes and the PCA-ordered
+  axes in groups of three, a colour selector (a / b / a+b), for both sides, with the TwoNN /
+  rank / PR / variance table at the bottom. The 3D uses WebGL, so headless screenshots show
+  only the colorbar — open it in a real browser to see the points.

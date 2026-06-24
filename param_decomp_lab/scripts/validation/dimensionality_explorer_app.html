@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Dimensionality explorer</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #fff; color: #222; }
+  header { padding: 10px 16px; border-bottom: 1px solid #ddd; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 10px 0 0; }
+  label { font-size: 13px; }
+  select, input { font-size: 13px; padding: 2px 4px; }
+  #scatter { width: 100%; }
+  #scree { width: 100%; max-width: 720px; }
+  footer { padding: 8px 16px 20px; }
+  table { border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #ddd; padding: 4px 10px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+</style>
+<script>/*__PLOTLY_JS__*/</script>
+</head>
+<body>
+<header>
+  <h1>Dimensionality explorer</h1>
+  <label>side <select id="side"><option value="input">input</option><option value="output">output</option></select></label>
+  <label>axes <select id="order"><option value="z">raw z</option><option value="pca">PCA-ordered</option></select></label>
+  <label>group <select id="group"></select></label>
+  <label>colour <select id="color"><option value="a">a</option><option value="b">b</option><option value="sum">a+b</option></select></label>
+  <label>scree threshold <input id="thr" type="number" step="any" /></label>
+</header>
+<div id="scatter"></div>
+<div id="scree"></div>
+<footer id="stats"></footer>
+<script>window.PD_DATA = /*__PD_DATA__*/;</script>
+<script>
+const D = window.PD_DATA, META = D.meta;
+const elSide = document.getElementById("side"), elOrder = document.getElementById("order");
+const elGroup = document.getElementById("group"), elColor = document.getElementById("color");
+const elThr = document.getElementById("thr");
+
+const curSide = () => D.sides[elSide.value];
+const colorArr = () => ({ a: META.a, b: META.b, sum: META.sum })[elColor.value];
+const axesData = () => (elOrder.value === "pca" ? curSide().pca : curSide().z);
+const axisName = i => (elOrder.value === "pca" ? "PC" + (i + 1) : "z" + i);
+
+function populateGroups() {
+  const cols = axesData().length, nGroups = Math.ceil(cols / 3), prev = +elGroup.value || 0;
+  elGroup.innerHTML = "";
+  for (let g = 0; g < nGroups; g++) {
+    const i = 3 * g, hi = Math.min(i + 2, cols - 1);
+    const o = document.createElement("option");
+    o.value = g; o.textContent = `${axisName(i)}–${axisName(hi)}`;
+    elGroup.appendChild(o);
+  }
+  elGroup.value = Math.min(prev, nGroups - 1);
+}
+
+function drawScatter() {
+  const data = axesData(), cols = data.length, g = Math.min(+elGroup.value, Math.ceil(cols / 3) - 1);
+  const i = 3 * g, j = Math.min(i + 1, cols - 1), k = Math.min(i + 2, cols - 1);
+  const trace = {
+    type: "scatter3d", mode: "markers",
+    x: data[i], y: data[j], z: data[k],
+    marker: { size: 2, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: elColor.value, thickness: 12 } },
+    projection: { z: { show: true, opacity: 0.12 } }, hoverinfo: "skip",
+  };
+  const layout = {
+    margin: { l: 0, r: 0, t: 28, b: 0 }, height: 560,
+    title: `${elSide.value} — ${elOrder.value === "pca" ? "PCA-ordered" : "raw z"} (colour: ${elColor.value})`,
+    scene: { xaxis: { title: axisName(i) }, yaxis: { title: axisName(j) }, zaxis: { title: axisName(k) } },
+  };
+  Plotly.react("scatter", [trace], layout, { responsive: true });
+}
+
+function drawScree() {
+  const eigs = curSide().pca_eigs, thr = +elThr.value;
+  const kept = eigs.filter(e => e >= thr).length;
+  const trace = { type: "bar", x: eigs.map((_, i) => i + 1), y: eigs, marker: { color: eigs.map(e => (e >= thr ? "#1f77b4" : "#ccc")) } };
+  const layout = {
+    height: 300, margin: { l: 55, r: 10, t: 30, b: 40 },
+    title: `scree (${elSide.value}) — ${kept} component${kept === 1 ? "" : "s"} ≥ threshold`,
+    xaxis: { title: "component" }, yaxis: { title: "eigenvalue (cov z)", type: "log" },
+    shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: thr, y1: thr, line: { dash: "dash", color: "red" } }],
+  };
+  Plotly.react("scree", [trace], layout, { responsive: true });
+}
+
+function drawStats() {
+  const rows = Object.entries(D.sides).map(([name, s]) =>
+    `<tr><td>${name}</td><td>${s.rank}</td><td>${s.participation_ratio}</td><td>${s.twonn}</td><td>${(s.var_fraction * 100).toFixed(1)}%</td></tr>`).join("");
+  document.getElementById("stats").innerHTML =
+    `<table><tr><th>side</th><th>geometric rank</th><th>participation ratio</th><th>TwoNN (intrinsic)</th><th>variance captured</th></tr>${rows}</table>`;
+}
+
+elSide.onchange = () => { elThr.value = (curSide().pca_eigs[0] * 0.01).toExponential(2); populateGroups(); drawScatter(); drawScree(); };
+elOrder.onchange = () => { populateGroups(); drawScatter(); };
+elGroup.onchange = drawScatter;
+elColor.onchange = drawScatter;
+elThr.oninput = drawScree;
+
+elThr.value = (curSide().pca_eigs[0] * 0.01).toExponential(2);
+populateGroups();
+drawScatter();
+drawScree();
+drawStats();
+</script>
+</body>
+</html>

@@ -16,6 +16,8 @@ dependencies = [
     "streamlit",
     "streamlit-antd-components",
     "scipy>=1.14.1",
+    "scikit-dimension", # intrinsic-dimension estimators (TwoNN) for the validation scripts
+    "plotly", # interactive 3D applets for the dimensionality / ISA validation scripts
     "fastapi",
     "uvicorn",
     "orjson",
