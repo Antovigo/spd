@@ -45,7 +45,7 @@ def test_tiny_random_model_matches_torch_logits():
     def get(key: str) -> Array:
         return jnp.asarray(fixture[f"weights.{key}"], dtype=jnp.float32)
 
-    target = target_from_weights(get, cfg, first_layer=0)
+    target = target_from_weights(get, cfg)
     prefix = prefix_from_weights(get, cfg, first_layer=0)
     idx = jnp.asarray(fixture["idx"])
 
@@ -58,7 +58,7 @@ def test_tiny_random_model_matches_torch_logits():
 def test_real_t9d2b8f02_weights_match_torch_logits():
     fixture = np.load(FIXTURE_DIR / "real_t-9d2b8f02_fixture.npz")
     cfg = load_model_config(REAL_CACHE_DIR)
-    target = load_target_from_pretrain_cache(REAL_CACHE_DIR, cfg, 0, jnp.float32)
+    target = load_target_from_pretrain_cache(REAL_CACHE_DIR, cfg, jnp.float32)
 
     embed = target.lm_head  # tied: wte.weight serves embedding and head
     resid = embed[jnp.asarray(fixture["idx"])]

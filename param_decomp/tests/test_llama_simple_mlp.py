@@ -105,7 +105,7 @@ def _tiny_decomposed_model(
     layers = _tiny_layers(cfg, cfg.n_layer, layers_key)
     embed = jax.random.normal(embed_key, (cfg.vocab_size, cfg.n_embd)) * 0.02
     return build_decomposed_simple_mlp(
-        layers=layers[first_layer:], norm=jnp.ones((cfg.n_embd,)), lm_head=embed,
+        embed=embed, layers=layers[first_layer:], norm=jnp.ones((cfg.n_embd,)), lm_head=embed,
         cfg=cfg, sites=sites,
     )  # fmt: skip
 
@@ -210,7 +210,7 @@ def test_prefix_suffix_threading_matches_full_forward():
 
     full_sites = site_specs(cfg, (SiteC(site_name(0, "q_proj"), 1),))
     target_full = build_decomposed_simple_mlp(
-        layers=layers, norm=norm, lm_head=embed, cfg=cfg, sites=full_sites
+        embed=embed, layers=layers, norm=norm, lm_head=embed, cfg=cfg, sites=full_sites
     )
     prefix_full = SimpleMLPPrefix(
         embed=embed, blocks=[], inv_freq=inv_freq, eps=cfg.rms_norm_eps, n_ctx=cfg.n_ctx
@@ -220,7 +220,12 @@ def test_prefix_suffix_threading_matches_full_forward():
     first_layer = 2
     split_sites = site_specs(cfg, (SiteC(site_name(first_layer, "q_proj"), 1),))
     target_split = build_decomposed_simple_mlp(
-        layers=layers[first_layer:], norm=norm, lm_head=embed, cfg=cfg, sites=split_sites
+        embed=embed,
+        layers=layers[first_layer:],
+        norm=norm,
+        lm_head=embed,
+        cfg=cfg,
+        sites=split_sites,
     )
     prefix_split = SimpleMLPPrefix(
         embed=embed, blocks=layers[:first_layer], inv_freq=inv_freq,
