@@ -238,15 +238,19 @@ A pipeline that probes the L18 MLP decomposition one **operation** at a time ove
 suffixed with the operation (`_add` / `_sub` / `_mult`) and the three scripts that read the
 grid all act at the **last token** (the `=` answer position).
 
-**"Alive" here means two things at once:** flagged by `find_alive_components` (run *per-op*,
-via `--prompts=<op>_1-100.txt`) **and** mean lower-leaky CI over the grid above
-`--mean-ci-thr` (default 0.1). The intersection is materialised once by
-`collect_inner_activations` into `alive_filtered_<op>.tsv`, which the period / cosine /
-explorer scripts consume. Only the three L18 MLP matrices are considered (decomposed
-attention is dropped). Operation helpers (`op_symbol`, `op_prompts_file`, `parse_operands`,
-`MLP_MATRICES`) and `read_alive_components` live in `common.py`.
+**"Alive" here means two things at once:** ever causally important on the run's **original**
+data — flagged by `find_alive_components` run once with defaults, writing the *unsuffixed*
+`alive_components.tsv` / `alive_components_per_position.json` (op-agnostic) — **and** mean
+lower-leaky CI over *this op's* grid above `--mean-ci-thr` (default 0.1). The downstream
+scripts read `find_alive_components`'s output and do the per-op / last-position / mean-CI
+filtering themselves; `collect_inner_activations` materialises the intersection once into
+`alive_filtered_<op>.tsv`, which the period / cosine / explorer scripts consume. Only the
+three L18 MLP matrices are considered (decomposed attention is dropped). Shared helpers in
+`common.py`: `op_symbol` / `op_prompts_file` / `parse_operands` / `MLP_MATRICES`,
+`read_alive_components` / `read_subcomp_periods`, `square_grid_size` (asserts full grid
+coverage), `load_component_uv` (mmap U/V).
 
-Pipeline (run `find_alive_components --prompts=<op>` first to get the per-op alive set):
+Pipeline (run `find_alive_components` with defaults once first):
 `collect_hidden_activations` + `collect_inner_activations` → `compute_subcomp_periods` →
 `plot_subcomp_cosine` / `build_neuron_connection_explorer`.
 
@@ -273,7 +277,7 @@ args:
 - the path to a decomposed model
 - `--op`: `add` (default) / `sub` / `mult`
 - `--mean-ci-thr`: mean-CI cutoff for the alive filter (default 0.1)
-- `--alive-tsv`: existing-alive list (default `alive_components_<op>.tsv` in the run folder)
+- `--alive-tsv`: `find_alive_components` output (default `alive_components.tsv` in the run folder)
 - `--batch-size` (default 256), `--output`, `--output-alive`, plus `--slurm` (+ knobs)
 
 For every existing-alive MLP subcomponent and every prompt, computes the normalized inner
@@ -334,12 +338,15 @@ V-unit normalization (V→V/||V||, U→U·||V||): gate/up (pre-SwiGLU) write str
 `(a, b)` and a connection threshold; the page shows active gate/up subcomponents (left, up on
 top, period-sorted), the neurons they connect above threshold (center, sorted by strongest
 gate/up driver then strength), and active down subcomponents (right), with lines coloured by
-connection sign (red +, blue −). Hovering a subcomponent draws its CI `(a, b)` heatmap;
-hovering a neuron shows its up / gate / `silu(gate)·up` output for the current prompt.
+connection sign (red +, blue −). A "hover shows" toggle switches the subcomponent heatmap
+between causal importance (0..1, red ramp) and signed normalized inner activation (red +,
+blue −, per-component scaled); per-prompt activity (which subcomponents/neurons appear) stays
+CI-based regardless. Hovering a neuron shows its up / gate / `silu(gate)·up` output.
 
 Reads `alive_filtered_<op>.tsv`, `subcomp_periods_<op>.tsv`, the `find_alive_components`
-per-position JSON (`alive_components_per_position_<op>.json`, for CI patterns + per-prompt
-activity), and `hidden_activations_<op>.npz` (neuron up/gate grids, shipped fp16 base64).
-Limitation: the UI threshold cannot surface neurons whose connection is below `--conn-floor`
-(they aren't stored) — lower `--conn-floor` to widen the universe, at the cost of `data.js`
-size. Smoke-test with `headless_check.py`.
+per-position JSON (`alive_components_per_position.json` — unsuffixed/op-agnostic, filtered to
+this op's symbol with an assert that ≥1 prompt matched, for CI patterns + activity),
+`inner_activations_<op>.tsv` (inner-activation heatmaps), and `hidden_activations_<op>.npz`
+(neuron up/gate grids, fp16 base64). Limitation: the UI threshold cannot surface neurons whose
+connection is below `--conn-floor` (they aren't stored) — lower `--conn-floor` to widen the
+universe, at the cost of `data.js` size. Smoke-test with `headless_check.py`.

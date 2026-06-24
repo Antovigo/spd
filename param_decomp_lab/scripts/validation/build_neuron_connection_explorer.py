@@ -16,11 +16,14 @@ unchanged):
 
 Lines between subcomponents and neurons are coloured by connection strength (red positive,
 blue negative). Hovering a subcomponent shows its causal-importance `(a, b)` heatmap;
-hovering a neuron shows its up / gate / post-SwiGLU output value for the current prompt.
+hovering a subcomponent shows its `(a, b)` heatmap — CI *or* normalized inner activation per
+the page toggle; hovering a neuron shows its up / gate / post-SwiGLU output for the prompt.
 
-CPU-only: reads the checkpoint U/V (mmap), the filtered-alive list, the periods, the
-`find_alive_components` per-position JSON (CI patterns + per-prompt activity), and the
-`collect_hidden_activations` npz (neuron values). No forward pass.
+CPU-only: reads the checkpoint U/V (mmap), the filtered-alive list (`alive_filtered_<op>.tsv`),
+the periods, the `find_alive_components` per-position JSON (`alive_components_per_position.json`
+— op-agnostic, filtered here; CI patterns + per-prompt activity), the `collect_inner_activations`
+TSV (inner-activation patterns), and the `collect_hidden_activations` npz (neuron values). No
+forward pass.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.build_neuron_connection_explorer <model_path> \
@@ -39,25 +42,19 @@ from typing import Any
 
 import fire
 import numpy as np
-import torch
 from numpy.typing import NDArray
 
 from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
-from param_decomp_lab.scripts.validation.common import MLP_MATRICES, read_alive_components
+from param_decomp_lab.scripts.validation.common import (
+    MLP_MATRICES,
+    load_component_uv,
+    op_symbol,
+    read_alive_components,
+    read_subcomp_periods,
+)
 
 _APP_TEMPLATE = Path(__file__).with_name("neuron_connection_explorer_app.html")
-
-
-def _load_uv(
-    checkpoint: Path, layer: int
-) -> dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]:
-    sd = torch.load(checkpoint, map_location="cpu", mmap=True, weights_only=True)
-    prefix = f"_components.model-layers-{layer}-mlp"
-    return {
-        proj: (sd[f"{prefix}-{proj}.V"].float().numpy(), sd[f"{prefix}-{proj}.U"].float().numpy())
-        for proj in MLP_MATRICES
-    }
 
 
 def _conn_vector(
@@ -71,25 +68,24 @@ def _conn_vector(
     return u[c, :] * v_norm  # pre-SwiGLU write weights U[c,:]*||V_c||
 
 
-def _read_periods(tsv_path: Path) -> dict[tuple[str, int], int]:
-    out: dict[tuple[str, int], int] = {}
-    with tsv_path.open() as f:
-        for row in csv.DictReader(f, delimiter="\t"):
-            out[(row["matrix"].split(".")[-1], int(row["component"]))] = int(row["period"])
-    return out
-
-
 def _ci_grids(
-    json_path: Path, alive_keys: set[tuple[str, int]], n: int
+    json_path: Path, op: str, alive_keys: set[tuple[str, int]], n: int
 ) -> dict[tuple[str, int], NDArray[np.float32]]:
-    """Last-position CI `(a, b)` grid for each filtered-alive subcomponent."""
+    """Last-position CI `(a, b)` grid for each filtered-alive subcomponent, this op only.
+
+    The `find_alive_components` per-position JSON is op-agnostic (it can hold `a+b=` and
+    `a×b=` prompts together), so we match on this op's exact symbol and assert ≥1 prompt hit —
+    a wrong/missing JSON fails loudly instead of yielding silent all-zero grids.
+    """
     data: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = json.loads(json_path.read_text())
-    pattern = re.compile(r"^(\d+)\D(\d+)=$")
+    pattern = re.compile(rf"^(\d+){re.escape(op_symbol(op))}(\d+)=$")
     grids = {key: np.zeros((n, n), dtype=np.float32) for key in alive_keys}
+    matched = 0
     for prompt, per_pos in data.items():
         m = pattern.match(prompt)
         if m is None:
             continue
+        matched += 1
         a, b = int(m.group(1)), int(m.group(2))
         last = max(per_pos, key=int)
         for module, comps in per_pos[last].items():
@@ -98,6 +94,20 @@ def _ci_grids(
                 key = (proj, entry["component"])
                 if key in grids:
                     grids[key][a - 1, b - 1] = entry["ci"]
+    assert matched > 0, f"no '{op}' ({op_symbol(op)}) prompts in {json_path.name}"
+    return grids
+
+
+def _inner_grids(
+    tsv_path: Path, alive_keys: set[tuple[str, int]], n: int
+) -> dict[tuple[str, int], NDArray[np.float32]]:
+    """Dense `(a, b)` normalized-inner-activation grid per filtered-alive subcomponent."""
+    grids = {key: np.zeros((n, n), dtype=np.float32) for key in alive_keys}
+    with tsv_path.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            key = (row["matrix"], int(row["subcomponent"]))
+            if key in grids:
+                grids[key][int(row["a"]) - 1, int(row["b"]) - 1] = float(row["inner_act"])
     return grids
 
 
@@ -112,6 +122,11 @@ def _sparse_grid(grid: NDArray[np.float32]) -> dict[str, str]:
     }
 
 
+def _dense_b64(grid: NDArray[np.float32]) -> str:
+    """Dense `[N, N]` grid (row-major `[a, b]`) as fp16 base64 — keeps signed values."""
+    return base64.b64encode(grid.astype(np.float16).tobytes()).decode("ascii")
+
+
 def build_neuron_connection_explorer(
     model_path: ModelPath,
     op: str = "add",
@@ -124,9 +139,9 @@ def build_neuron_connection_explorer(
     run_dir = checkpoint.parent
 
     alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    periods = _read_periods(run_dir / f"subcomp_periods_{op}.tsv")
+    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
-    uv = _load_uv(checkpoint, layer)
+    uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
 
     npz_path = run_dir / f"hidden_activations_{op}.npz"
     assert npz_path.exists(), f"missing {npz_path.name}; run collect_hidden_activations first"
@@ -136,7 +151,10 @@ def build_neuron_connection_explorer(
     gate_grid = hidden["gate_preact"]
 
     alive_keys = {(a.proj, a.component) for a in alive}
-    ci_grids = _ci_grids(run_dir / f"alive_components_per_position_{op}.json", alive_keys, n)
+    # CI patterns come from the (unsuffixed, op-agnostic) find_alive_components output; the
+    # signed inner-activation patterns from this op's collect_inner_activations TSV.
+    ci_grids = _ci_grids(run_dir / "alive_components_per_position.json", op, alive_keys, n)
+    inner_grids = _inner_grids(run_dir / f"inner_activations_{op}.tsv", alive_keys, n)
 
     # Per subcomponent: select its strongest neurons (|conn| > floor, top-K), accumulate the
     # neuron universe (union across all subcomponents and matrices).
@@ -167,6 +185,7 @@ def build_neuron_connection_explorer(
                 "c": a.component,
                 "period": periods[(a.proj, a.component)],
                 "ci": _sparse_grid(ci_grids[(a.proj, a.component)]),
+                "inner": _dense_b64(inner_grids[(a.proj, a.component)]),
                 "conn": [[u_index[j], w] for j, w in selected[(a.proj, a.component)]],
             }
             for a in comps

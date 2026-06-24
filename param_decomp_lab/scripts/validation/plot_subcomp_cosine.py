@@ -19,43 +19,22 @@ Usage:
 Outputs: `<run_dir>/figures/subcomp_cosine/cosine_{gate_up,down}_<op>.png`.
 """
 
-import csv
 from pathlib import Path
 
 import fire
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from matplotlib.axes import Axes
 from numpy.typing import NDArray
 
 from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
-from param_decomp_lab.scripts.validation.common import MLP_MATRICES, read_alive_components
-
-
-def _load_uv(
-    checkpoint: Path, layer: int
-) -> dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]:
-    """proj -> (V [d_in, C], U [C, d_out]) for each MLP matrix, via mmap."""
-    sd = torch.load(checkpoint, map_location="cpu", mmap=True, weights_only=True)
-    prefix = f"_components.model-layers-{layer}-mlp"
-    return {
-        proj: (
-            sd[f"{prefix}-{proj}.V"].float().numpy(),
-            sd[f"{prefix}-{proj}.U"].float().numpy(),
-        )
-        for proj in MLP_MATRICES
-    }
-
-
-def _read_periods(tsv_path: Path) -> dict[tuple[str, int], int]:
-    """(proj, component) -> representative period."""
-    out: dict[tuple[str, int], int] = {}
-    with tsv_path.open() as f:
-        for row in csv.DictReader(f, delimiter="\t"):
-            out[(row["matrix"].split(".")[-1], int(row["component"]))] = int(row["period"])
-    return out
+from param_decomp_lab.scripts.validation.common import (
+    MLP_MATRICES,
+    load_component_uv,
+    read_alive_components,
+    read_subcomp_periods,
+)
 
 
 def _cosine(vectors: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -118,13 +97,13 @@ def plot_subcomp_cosine(
     run_dir = checkpoint.parent
 
     alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    periods = _read_periods(run_dir / f"subcomp_periods_{op}.tsv")
+    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
     alive_by_proj: dict[str, list[int]] = {proj: [] for proj in MLP_MATRICES}
     for a in alive:
         alive_by_proj[a.proj].append(a.component)
 
-    uv = _load_uv(checkpoint, layer)
+    uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
     out_dir = (
         Path(output_dir).expanduser() if output_dir else run_dir / "figures" / "subcomp_cosine"
     )

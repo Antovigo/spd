@@ -95,6 +95,30 @@ neuron → up/gate/silu(gate)·up. Neuron up/gate grids shipped as fp16 base64 (
 All five scripts documented in `spec.md` (new "Arithmetic analysis" section) and runnable
 per-op examples added to `commands.md`. `common.py` helpers noted in the validation `CLAUDE.md`.
 
+## Post-review changes
+
+Code review (`/code-review high`) surfaced findings; user direction applied:
+1. **Alive-set architecture redesigned.** `find_alive_components` stays op-agnostic and
+   unsuffixed (ever-alive on the run's *original* data); downstream scripts read its
+   `alive_components.tsv` / `alive_components_per_position.json` and do the per-op +
+   last-position + mean-CI filtering themselves. `collect_inner_activations` default
+   `--alive-tsv` → unsuffixed `alive_components.tsv`. Re-ran: candidate pool 652→1207 MLP,
+   still **38** pass mean-CI>0.1 (mult-only-alive comps don't clear the addition filter).
+2. **Explorer op-regex fix.** `_ci_grids` now matches `op_symbol(op)` exactly (not `\D`) and
+   asserts ≥1 prompt hit — the unsuffixed JSON holds both `+` and `×`, so `\D` would have
+   mis-binned `a×b=` into the addition grid. Reads unsuffixed `alive_components_per_position.json`.
+3. **Grid-coverage assert** added via `common.square_grid_size` (full unique `n×n` or raise),
+   used by both collectors.
+4. **Hoisted** `_load_uv`→`load_component_uv` and `_read_periods`→`read_subcomp_periods` into
+   `common.py`; both new files import them.
+5. `_sparse_grid` duplication left as-is (per user).
+
+**New feature:** explorer "hover shows" toggle — subcomponent heatmap switches between causal
+importance and signed normalized inner activation (diverging colormap). Inner grids read from
+`inner_activations_<op>.tsv`, shipped fp16 base64. Re-ran the full chain (inner re-run on GPU
+job 1586; periods/cosine/explorer on CPU). Headless Chromium: no JS errors; toggle verified
+(CI 1.000 ↔ inner 2.766 at (2,3)).
+
 ## Status: all 6 objectives complete (addition). sub/mult supported via `--op`; not yet run.
 
 Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,

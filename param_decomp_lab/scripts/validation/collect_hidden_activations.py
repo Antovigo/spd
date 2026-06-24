@@ -43,6 +43,7 @@ from param_decomp_lab.scripts.validation.common import (
     op_prompts_file,
     op_symbol,
     parse_operands,
+    square_grid_size,
     submit_self_to_slurm,
 )
 
@@ -95,7 +96,7 @@ def collect_hidden_activations(
     prompts_file = op_prompts_file(op)
     prompt_texts = [ln.strip() for ln in prompts_file.read_text().splitlines() if ln.strip()]
     ab = [parse_operands(t, op) for t in prompt_texts]
-    n = max(max(a, b) for a, b in ab)
+    n = square_grid_size(ab)
     pool = load_prompts_dataset(str(prompts_file), cast(Any, run.tokenizer)).to(device)
     assert pool.shape[0] == len(prompt_texts)
     logger.info(f"{op} ({op_symbol(op)}): {len(prompt_texts)} prompts, N={n}, layer {layer}")

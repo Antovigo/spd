@@ -6,7 +6,9 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
+from numpy.typing import NDArray
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
@@ -89,6 +91,42 @@ def read_alive_components(
             )
     assert out, f"no alive components (kept projs {keep_projs}) in {tsv_path}"
     return out
+
+
+def read_subcomp_periods(tsv_path: Path) -> dict[tuple[str, int], int]:
+    """`(proj, component) -> representative period` from a `subcomp_periods` TSV."""
+    assert tsv_path.exists(), f"missing subcomp-periods TSV: {tsv_path}"
+    out: dict[tuple[str, int], int] = {}
+    with tsv_path.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            out[(row["matrix"].split(".")[-1], int(row["component"]))] = int(row["period"])
+    return out
+
+
+def square_grid_size(ab: list[tuple[int, int]]) -> int:
+    """Side `n` of the `1..n × 1..n` operand grid, asserting full unique coverage.
+
+    The arithmetic scripts index dense `[n, n]` grids by `(a-1, b-1)`; a hole or duplicate
+    would leave a silent 0 (poisoning means / periods), so we require every cell exactly once.
+    """
+    n = max(max(a, b) for a, b in ab)
+    assert min(min(a, b) for a, b in ab) == 1, "operands must start at 1"
+    assert len(set(ab)) == len(ab) == n * n, (
+        f"expected a full {n}x{n} grid, got {len(ab)} prompts ({len(set(ab))} unique)"
+    )
+    return n
+
+
+def load_component_uv(
+    checkpoint: Path, layer: int, projs: tuple[str, ...]
+) -> dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]:
+    """`proj -> (V [d_in, C], U [C, d_out])` for each MLP matrix, read via mmap (no forward)."""
+    sd = torch.load(checkpoint, map_location="cpu", mmap=True, weights_only=True)
+    prefix = f"_components.model-layers-{layer}-mlp"
+    return {
+        proj: (sd[f"{prefix}-{proj}.V"].float().numpy(), sd[f"{prefix}-{proj}.U"].float().numpy())
+        for proj in projs
+    }
 
 
 @dataclass(frozen=True)

@@ -27,6 +27,12 @@
   <label>a <input id="a" type="number" min="1" value="2" /></label>
   <label>b <input id="b" type="number" min="1" value="3" /></label>
   <label>conn. threshold <input id="thr" type="number" step="0.01" value="0.15" /></label>
+  <label>hover shows
+    <select id="mode">
+      <option value="ci">causal importance</option>
+      <option value="inner">inner activation</option>
+    </select>
+  </label>
   <span id="hint"></span>
 </header>
 <div id="wrap">
@@ -64,10 +70,20 @@ function decodeCi(ci) {
   for (let k = 0; k < idx.length; k++) dense[idx[k]] = val[k] / 255;
   return dense;
 }
+// Decode the dense fp16 inner-activation grid (row-major [a,b], signed).
+function decodeInner(b64) {
+  const u16 = b64ToU16(b64), dense = new Float32Array(N * N);
+  for (let k = 0; k < N * N; k++) dense[k] = h2f(u16[k]);
+  return dense;
+}
 const ALL = [];
 for (const grp of ["up", "gate", "down"]) for (const s of D.subcomps[grp]) {
-  s.group = grp; s.dense = decodeCi(s.ci); s.label = grp[0] + s.c; ALL.push(s);
+  s.group = grp; s.dense = decodeCi(s.ci); s.innerDense = decodeInner(s.inner);
+  s.innerMax = s.innerDense.reduce((m, v) => Math.max(m, Math.abs(v)), 1e-6);
+  s.label = grp[0] + s.c; ALL.push(s);
 }
+// Activity (which subcomponents/neurons are shown) is always CI-based, independent of the
+// hover-display toggle.
 function ciAt(s, a, b) { return s.dense[(a - 1) * N + (b - 1)]; }
 
 // Color: red positive, blue negative, intensity by |w| (saturating ~0.6).
@@ -78,23 +94,36 @@ function connColor(w) {
 
 const svg = document.getElementById("svg");
 const elA = document.getElementById("a"), elB = document.getElementById("b"), elThr = document.getElementById("thr");
+const elMode = document.getElementById("mode");
 const panelTitle = document.getElementById("panel-title"), kv = document.getElementById("kv");
 const ciCanvas = document.getElementById("ci"), ctx = ciCanvas.getContext("2d");
 
+// rgba for a grid value: CI uses a 0..1 red ramp; inner activation is signed (red +, blue -)
+// scaled by the subcomponent's max |value|.
+function gridColor(mode, v, scale) {
+  if (mode === "ci") { const c = Math.round(255 * (1 - v)); return [255, c, c]; }
+  const t = Math.max(-1, Math.min(1, v / scale)), c = Math.round(255 * (1 - Math.abs(t)));
+  return t >= 0 ? [255, c, c] : [c, c, 255];
+}
+let lastSubcomp = null;
 function showSubcomp(s, a, b) {
+  lastSubcomp = s;
+  const mode = elMode.value;
   panelTitle.textContent = `${s.group}_proj #${s.c} · period ${s.period}`;
   ciCanvas.style.display = "block";
+  const grid = mode === "ci" ? s.dense : s.innerDense, scale = s.innerMax;
   const cell = ciCanvas.width / N, img = ctx.createImageData(ciCanvas.width, ciCanvas.height);
   for (let av = 0; av < N; av++) for (let bv = 0; bv < N; bv++) {
-    const v = s.dense[av * N + bv];
+    const [r, g, bl] = gridColor(mode, grid[av * N + bv], scale);
     for (let py = 0; py < cell; py++) for (let px = 0; px < cell; px++) {
       const x = Math.floor(av * cell) + px, y = Math.floor((N - 1 - bv) * cell) + py;
-      const o = (y * ciCanvas.width + x) * 4, c = Math.round(255 * (1 - v));
-      img.data[o] = 255; img.data[o + 1] = c; img.data[o + 2] = c; img.data[o + 3] = 255;
+      const o = (y * ciCanvas.width + x) * 4;
+      img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = bl; img.data[o + 3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
-  kv.innerHTML = `CI at (a=${a}, b=${b}): <b>${ciAt(s, a, b).toFixed(3)}</b><br><span style="color:#888">x=a, y=b (origin bottom-left)</span>`;
+  const val = grid[(a - 1) * N + (b - 1)], lab = mode === "ci" ? "CI" : "inner act";
+  kv.innerHTML = `${lab} at (a=${a}, b=${b}): <b>${val.toFixed(3)}</b><br><span style="color:#888">x=a, y=b (origin bottom-left)</span>`;
 }
 function showNeuron(nid, ui, a, b) {
   panelTitle.textContent = `neuron #${nid}`;
@@ -176,6 +205,10 @@ function render() {
     `${inputs.length} input + ${downs.length} down active · ${neurons.length} neurons shown (|conn| > ${thr})`;
 }
 for (const el of [elA, elB, elThr]) el.addEventListener("input", render);
+// Mode only changes the hover heatmap; re-render the last-hovered subcomponent if any.
+elMode.addEventListener("change", () => {
+  if (lastSubcomp) showSubcomp(lastSubcomp, Math.max(1, Math.min(N, +elA.value)), Math.max(1, Math.min(N, +elB.value)));
+});
 render();
 </script>
 </body>

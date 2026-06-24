@@ -7,11 +7,12 @@ directly per matrix — post-RMSNorm MLP input for gate/up, post-SwiGLU neuron a
 for down — which is exactly what the cached pre-weight acts hold, so no manual RMSNorm /
 nonlinearity is reapplied.
 
-"Alive" is the intersection of the existing `find_alive_components` set (run per-op, so it
-reflects activity over all positions of this operation) with a **mean-CI** filter: a
-component is kept only if its mean lower-leaky CI at the last token over the whole grid
-exceeds `--mean-ci-thr` (default 0.1). The surviving set is written to
-`alive_filtered_<op>.tsv` and consumed by the period / cosine / explorer scripts.
+"Alive" is the intersection of the `find_alive_components` set (ever causally important on
+the run's original data — its default unsuffixed `alive_components.tsv`) with a **mean-CI**
+filter applied *here* for this operation: a component is kept only if its mean lower-leaky CI
+at the last token over this op's whole grid exceeds `--mean-ci-thr` (default 0.1). The
+surviving set is written to `alive_filtered_<op>.tsv` and consumed by the period / cosine /
+explorer scripts.
 
 An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-GPU job.
 
@@ -48,6 +49,7 @@ from param_decomp_lab.scripts.validation.common import (
     op_symbol,
     parse_operands,
     read_alive_components,
+    square_grid_size,
     submit_self_to_slurm,
 )
 
@@ -92,16 +94,14 @@ def collect_inner_activations(
     run = load_lm_run(model_path)
     model, cfg, device = run.model, run.cfg, run.device
 
-    alive_path = (
-        Path(alive_tsv).expanduser() if alive_tsv else run.run_dir / f"alive_components_{op}.tsv"
-    )
+    alive_path = Path(alive_tsv).expanduser() if alive_tsv else run.run_dir / "alive_components.tsv"
     alive = read_alive_components(alive_path, keep_projs=MLP_MATRICES)
     logger.info(f"{len(alive)} existing-alive MLP components from {alive_path.name}")
 
     prompts_file = op_prompts_file(op)
     prompt_texts = [ln.strip() for ln in prompts_file.read_text().splitlines() if ln.strip()]
     ab = [parse_operands(t, op) for t in prompt_texts]
-    n = max(max(a, b) for a, b in ab)
+    n = square_grid_size(ab)
     pool = load_prompts_dataset(str(prompts_file), cast(Any, run.tokenizer)).to(device)
     assert pool.shape[0] == len(prompt_texts)
 
