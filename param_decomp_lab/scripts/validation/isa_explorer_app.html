@@ -47,13 +47,20 @@ function populateSubspaces() {
   elSub.value = Math.min(prev, subs.length - 1);
 }
 
+const floorOf = arr => arr.reduce((m, v) => (v < m ? v : m), Infinity);
+
 function drawScatter() {
   const s = curSide(), members = s.subspaces[+elSub.value], src = s.sources;
+  const x = src[members[0]], y = members.length > 1 ? src[members[1]] : ZEROS, z = members.length > 2 ? src[members[2]] : ZEROS;
+  const floorZ = floorOf(z);
+  const shadow = {
+    type: "scatter3d", mode: "markers", x: x, y: y, z: z.map(() => floorZ),
+    marker: { size: 2, color: "#999", opacity: 0.3 }, hoverinfo: "skip", showlegend: false,
+  };
   const trace = {
-    type: "scatter3d", mode: "markers",
-    x: src[members[0]], y: members.length > 1 ? src[members[1]] : ZEROS, z: members.length > 2 ? src[members[2]] : ZEROS,
+    type: "scatter3d", mode: "markers", x: x, y: y, z: z,
     marker: { size: 2, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: elColor.value, thickness: 12 } },
-    projection: { z: { show: true, opacity: 0.12 } }, hoverinfo: "skip",
+    hoverinfo: "skip",
   };
   const ax = members.map(c => "IC" + c);
   const layout = {
@@ -61,7 +68,7 @@ function drawScatter() {
     title: `${elSide.value} — subspace S${elSub.value} (dim ${members.length}, colour ${elColor.value})`,
     scene: { xaxis: { title: ax[0] }, yaxis: { title: ax[1] || "" }, zaxis: { title: ax[2] || "" } },
   };
-  Plotly.react("scatter", [trace], layout, { responsive: true });
+  Plotly.react("scatter", [shadow, trace], layout, { responsive: true });
 }
 
 function drawEnergy() {

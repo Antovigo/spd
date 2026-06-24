@@ -54,21 +54,28 @@ function populateGroups() {
   elGroup.value = Math.min(prev, nGroups - 1);
 }
 
+const floorOf = arr => arr.reduce((m, v) => (v < m ? v : m), Infinity);
+
 function drawScatter() {
   const data = axesData(), cols = data.length, g = Math.min(+elGroup.value, Math.ceil(cols / 3) - 1);
   const i = 3 * g, j = Math.min(i + 1, cols - 1), k = Math.min(i + 2, cols - 1);
+  const floorZ = floorOf(data[k]);
+  const shadow = {
+    type: "scatter3d", mode: "markers", x: data[i], y: data[j], z: data[k].map(() => floorZ),
+    marker: { size: 2, color: "#999", opacity: 0.3 }, hoverinfo: "skip", showlegend: false,
+  };
   const trace = {
     type: "scatter3d", mode: "markers",
     x: data[i], y: data[j], z: data[k],
     marker: { size: 2, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: elColor.value, thickness: 12 } },
-    projection: { z: { show: true, opacity: 0.12 } }, hoverinfo: "skip",
+    hoverinfo: "skip",
   };
   const layout = {
     margin: { l: 0, r: 0, t: 28, b: 0 }, height: 560,
     title: `${elSide.value} — ${elOrder.value === "pca" ? "PCA-ordered" : "raw z"} (colour: ${elColor.value})`,
     scene: { xaxis: { title: axisName(i) }, yaxis: { title: axisName(j) }, zaxis: { title: axisName(k) } },
   };
-  Plotly.react("scatter", [trace], layout, { responsive: true });
+  Plotly.react("scatter", [shadow, trace], layout, { responsive: true });
 }
 
 function drawScree() {
