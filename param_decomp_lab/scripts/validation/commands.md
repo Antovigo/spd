@@ -236,13 +236,15 @@ uv run python -m $V.find_independent_subspaces "$MODEL_PATH" --op=$OP
 
 ### 8. Pick-3-subcomponent subspace scatter (CPU)
 
-A Plotly applet: pick up to 3 subcomponents from a thumbnail grid (each thumbnail is its
-inner-activation (a,b) pattern) and see the activation projected onto those 3 directions as a
-rotatable 3D scatter (input = mlp_input·V̂ of up/gate; output = mlp_output·Û of down).
+A Plotly applet spanning every available task: pick up to 3 subcomponents from a thumbnail
+grid (organised into task → period sections) and see all tasks' activations projected onto
+those 3 directions as a rotatable 3D scatter, coloured by task / a / b. Auto-detects the tasks
+with a `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv`.
 
 ```bash
-uv run python -m $V.build_subspace_scatter "$MODEL_PATH" --op=$OP
-# open figures/subspace_scatter_<op>/index.html in a real browser (3D is WebGL).
+uv run python -m $V.build_subspace_scatter "$MODEL_PATH"            # all detected tasks
+uv run python -m $V.build_subspace_scatter "$MODEL_PATH" --ops=add,mult
+# open figures/subspace_scatter/index.html in a real browser (3D is WebGL).
 ```
 
 Smoke-test the explorer applet in headless Chromium (see `headless_check` below):

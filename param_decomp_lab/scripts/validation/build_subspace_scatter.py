@@ -1,23 +1,27 @@
 """Interactive 3D scatter of L18 MLP activations in a user-picked 3-subcomponent subspace.
 
-A GPU-free HTML applet: the user picks up to 3 subcomponents from a thumbnail list (each
-thumbnail is that subcomponent's inner-activation pattern over the (a, b) grid) and sees the
-last-token activation projected onto those 3 directions as a rotatable 3D scatter.
+A GPU-free HTML applet spanning every available task (add / sub / mult). The user picks up to
+3 subcomponents from a thumbnail list — organised into high-level **task** sections, then by
+period — and sees, as a rotatable 3D scatter, the last-token activations of *all* tasks
+projected onto those 3 directions (each point uses its own task's activation):
 
 - **input** space: the post-RMSNorm MLP input (`mlp_input`) projected onto the unit V
-  directions of the up/gate subcomponents (`x · V̂_c`, i.e. the inner activation).
+  directions of the up/gate subcomponents (`x · V̂_c`).
 - **output** space: the MLP output (`mlp_output`) projected onto the unit U directions of the
   down subcomponents (`y · Û_c`).
 
-Both come straight from the `collect_hidden_activations` npz + the checkpoint directions; the
-available subcomponents are the alive set (`alive_filtered_<op>.tsv`). A dark-grey shadow is
-the points flattened onto the floor of the 3D box (it stays on the bottom plane).
+Tasks are auto-detected from the run folder (those with a `hidden_activations_<op>.npz` and
+`alive_filtered_<op>.tsv`). Periods come from `subcomp_periods_<op>.tsv` when present;
+subcomponents without an assigned period are grouped under "no period". Each direction's sign
+(an arbitrary gauge) is flipped so the median projection is positive (its arrow points toward
+the data). The directions are kept at their true mutual angles in the applet (Cholesky
+embedding) and a dark-grey shadow is the points flattened onto the box floor.
 
 CPU-only. Usage:
     python -m param_decomp_lab.scripts.validation.build_subspace_scatter <model_path> \
-        [--op=add] [--output-dir=PATH]
+        [--ops=add,mult] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/subspace_scatter_<op>/index.html` (self-contained Plotly applet).
+Output: `<run_dir>/figures/subspace_scatter/index.html` (self-contained Plotly applet).
 """
 
 import base64
@@ -45,6 +49,7 @@ from param_decomp_lab.scripts.validation.common import (  # noqa: E402
 )
 
 _APP_TEMPLATE = Path(__file__).with_name("subspace_scatter_app.html")
+_CANDIDATE_OPS = ("add", "sub", "mult")
 # side -> (which vector defines the direction, the matrices, the activation grid key)
 _SIDES = {
     "input": ("V", ("gate_proj", "up_proj"), "mlp_input"),
@@ -64,79 +69,121 @@ def _thumbnail(grid: NDArray[np.float32]) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _resolve_ops(run_dir: Path, ops: str | tuple[str, ...] | None) -> list[str]:
+    if ops is not None:
+        return list(ops) if isinstance(ops, (list, tuple)) else str(ops).split(",")
+    detected = [
+        op
+        for op in _CANDIDATE_OPS
+        if (run_dir / f"hidden_activations_{op}.npz").exists()
+        and (run_dir / f"alive_filtered_{op}.tsv").exists()
+    ]
+    assert detected, (
+        f"no tasks with hidden_activations_<op>.npz + alive_filtered_<op>.tsv in {run_dir}"
+    )
+    return detected
+
+
 def build_subspace_scatter(
-    model_path: ModelPath, op: str = "add", output_dir: str | None = None
+    model_path: ModelPath, ops: str | None = None, output_dir: str | None = None
 ) -> Path:
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
+    op_list = _resolve_ops(run_dir, ops)
+    logger.info(f"tasks: {op_list}")
 
-    alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    layer = alive[0].layer
+    # Per-task: alive set, (optional) periods, and the stored activations.
+    per_op: dict[str, dict[str, Any]] = {}
+    n = 0
+    for op in op_list:
+        alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
+        periods_path = run_dir / f"subcomp_periods_{op}.tsv"
+        periods = read_subcomp_periods(periods_path) if periods_path.exists() else {}
+        hidden = np.load(run_dir / f"hidden_activations_{op}.npz", allow_pickle=True)
+        nn = int(hidden["a"].shape[0])
+        assert n in (0, nn), f"grid size mismatch across tasks ({n} vs {nn})"
+        n = nn
+        per_op[op] = {"alive": alive, "periods": periods, "hidden": hidden}
+
+    layer = per_op[op_list[0]]["alive"][0].layer
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
-    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
-    alive_by_proj: dict[str, list[int]] = {p: [] for p in MLP_MATRICES}
-    for a in alive:
-        alive_by_proj[a.proj].append(a.component)
 
-    npz_path = run_dir / f"hidden_activations_{op}.npz"
-    assert npz_path.exists(), f"missing {npz_path.name}; run collect_hidden_activations first"
-    hidden = np.load(npz_path, allow_pickle=True)
-    n = int(hidden["a"].shape[0])
-    a_per_row = np.repeat(np.arange(1, n + 1), n)
-    b_per_row = np.tile(np.arange(1, n + 1), n)
+    # Shared point metadata: every task's full (a, b) grid, concatenated.
+    a_grid = np.repeat(np.arange(1, n + 1), n)
+    b_grid = np.tile(np.arange(1, n + 1), n)
+    point_task = [ti for ti in range(len(op_list)) for _ in range(n * n)]
+    point_a = [int(v) for _ in op_list for v in a_grid]
+    point_b = [int(v) for _ in op_list for v in b_grid]
 
     sides: dict[str, Any] = {}
     for side, (which, projs, grid_key) in _SIDES.items():
-        acts = hidden[grid_key].reshape(n * n, hidden[grid_key].shape[-1]).astype(np.float32)
-        # Sort the pickable list by period (then matrix, component) so the applet groups it.
-        items = sorted(
-            ((proj, c, periods[(proj, c)]) for proj in projs for c in alive_by_proj[proj]),
-            key=lambda t: (t[2], t[0], t[1]),
+        acts = {
+            op: per_op[op]["hidden"][grid_key].reshape(n * n, -1).astype(np.float32)
+            for op in op_list
+        }
+        # Union of components alive on any task for this side -> one direction each.
+        union = sorted(
+            {
+                (a.proj, a.component)
+                for op in op_list
+                for a in per_op[op]["alive"]
+                if a.proj in projs
+            }
         )
-        comps: list[dict[str, Any]] = []
+        dir_index = {key: i for i, key in enumerate(union)}
+        dir_label: list[str] = []
+        dir_proj: list[NDArray[np.float32]] = []
         dirs: list[NDArray[np.float32]] = []
-        for proj, c, period in items:
+        for proj, c in union:
             v, u = uv[proj]
             d = v[:, c] if which == "V" else u[c, :]
             d = d / max(float(np.linalg.norm(d)), 1e-12)
-            coords = acts @ d  # [N] activation projected onto the unit direction
-            # The V/U sign is an arbitrary gauge; flip it so the median projection is positive,
-            # i.e. the direction (its red arrow) points toward the bulk of the data. Flipping
-            # `d` keeps the projections, thumbnail, and Gram all consistent.
-            if float(np.median(coords)) < 0:
-                d, coords = -d, -coords
+            proj_all = np.concatenate([acts[op] @ d for op in op_list])  # over every task's points
+            if float(np.median(proj_all)) < 0:  # gauge: arrow points toward the data
+                d, proj_all = -d, -proj_all
             dirs.append(d)
-            comps.append(
-                {
-                    "label": f"{proj[0]}{c}",
-                    "period": period,
-                    "proj": [round(float(x), 4) for x in coords],
-                    "thumb": _thumbnail(coords.reshape(n, n)),
-                }
-            )
-        # Pairwise cosine of the unit directions, so the applet can place the picked axes at
-        # their true mutual angles (Cholesky embedding) instead of forcing them orthogonal.
+            dir_proj.append(proj_all)
+            dir_label.append(f"{proj[0]}{c}")
         gram = np.stack(dirs) @ np.stack(dirs).T
+
+        # Picks: one card per (task, alive component on this side), sorted by period (none last).
+        picks: list[dict[str, Any]] = []
+        for ti, op in enumerate(op_list):
+            periods = per_op[op]["periods"]
+            comps = sorted(
+                {(a.proj, a.component) for a in per_op[op]["alive"] if a.proj in projs},
+                key=lambda pc: (periods.get(pc) is None, periods.get(pc) or 0, pc[0], pc[1]),
+            )
+            offset = ti * n * n
+            for proj, c in comps:
+                di = dir_index[(proj, c)]
+                thumb_grid = dir_proj[di][offset : offset + n * n].reshape(n, n)
+                picks.append(
+                    {
+                        "dir": di,
+                        "task": op,
+                        "period": periods.get((proj, c)),
+                        "label": dir_label[di],
+                        "thumb": _thumbnail(thumb_grid),
+                    }
+                )
         sides[side] = {
-            "comps": comps,
             "gram": [[round(float(g), 4) for g in row] for row in gram],
+            "dir_proj": [[round(float(x), 4) for x in p] for p in dir_proj],
+            "dir_label": dir_label,
+            "picks": picks,
         }
-        logger.info(f"{side}: {len(comps)} pickable subcomponents")
+        logger.info(
+            f"{side}: {len(union)} directions, {len(picks)} pickable cards across {len(op_list)} tasks"
+        )
 
     payload = {
-        "meta": {
-            "op": op,
-            "a": a_per_row.tolist(),
-            "b": b_per_row.tolist(),
-            "sum": (a_per_row + b_per_row).tolist(),
-        },
+        "meta": {"tasks": op_list, "point_task": point_task, "a": point_a, "b": point_b},
         "sides": sides,
     }
     out_dir = (
-        Path(output_dir).expanduser()
-        if output_dir
-        else run_dir / "figures" / f"subspace_scatter_{op}"
+        Path(output_dir).expanduser() if output_dir else run_dir / "figures" / "subspace_scatter"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     assert _APP_TEMPLATE.exists(), f"app template missing: {_APP_TEMPLATE}"
@@ -147,7 +194,7 @@ def build_subspace_scatter(
         "/*__PD_DATA__*/", json.dumps(payload, separators=(",", ":"))
     )
     (out_dir / "index.html").write_text(html)
-    logger.info(f"wrote subspace-scatter applet for {op} → {out_dir}")
+    logger.info(f"wrote subspace-scatter applet ({', '.join(op_list)}) → {out_dir}")
     return out_dir
 
 

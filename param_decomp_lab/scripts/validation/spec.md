@@ -427,25 +427,29 @@ labels; they are only used afterward to colour the projections. Outputs:
 
 args:
 - the path to a decomposed model
-- `--op`: `add` (default) / `sub` / `mult`
+- `--ops`: comma-separated tasks (default: auto-detect every op with a
+  `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv` in the run folder)
 - `--output-dir`
 
 CPU. A self-contained Plotly applet for exploring the activation geometry in a user-picked
-3-subcomponent subspace. The right panel is a thumbnail grid (4 per row, grouped into period
-sections from `subcomp_periods_<op>.tsv`) of the alive subcomponents — each thumbnail is that
-subcomponent's inner-activation `(a, b)` pattern, signed `RdBu_r`; the user clicks up to 3, and
-the 3D scatter shows the last-token activation projected onto those 3 unit directions —
-**input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down). Each direction's
-sign (an arbitrary gauge) is flipped so the majority of points are positive. The directions are
-kept at their **true mutual angles**: each point is embedded via the Cholesky factor of the
-picked sub-Gram (`P = L⁻¹s`) and the three directions are drawn as red oblique arrows (≈ ¾ of
-the data range, since the V/U norm is also an arbitrary gauge), with `aspectmode:"data"` so the
-angles aren't re-stretched. A colour selector (a / b / a+b) with an optional modulo (none / 2 /
-5 / 10 / 20 / 25 / 50 / 100, to expose digit/period structure) recolours the points; the
-current camera is re-applied on every redraw so changing colour/mod/picks doesn't reset the
-view. A dark-grey floor shadow (the points flattened to the box floor) aids reading. Reads
-`alive_filtered_<op>.tsv`, `subcomp_periods_<op>.tsv`, and `hidden_activations_<op>.npz`; the
-directions come from the checkpoint. Output:
-`figures/subspace_scatter_<op>/index.html`. The 3D is WebGL (real browser to see the points);
-note a screen-fixed (non-orbiting) shadow isn't possible in a single Plotly 3D scene, so the
-shadow is the standard floor projection.
+3-subcomponent subspace, **spanning every available task** (add / sub / mult). The right panel
+is a thumbnail grid (4 per row) of the alive subcomponents, organised into high-level **task**
+sections, then by period — each thumbnail is that subcomponent's inner-activation `(a, b)`
+pattern on its task, signed `RdBu_r`. Periods come from `subcomp_periods_<op>.tsv` when present;
+subcomponents with no assigned period go under a "no period" section (e.g. `mult`, pending a
+log-period scheme). The user clicks up to 3 directions (from any task), and the 3D scatter
+overlays **all** tasks' last-token activations projected onto those 3 unit directions — each
+point uses its own task's activation (**input** = `mlp_input · V̂` (up/gate), **output** =
+`mlp_output · Û` (down)). Each direction's sign (an arbitrary gauge) is flipped so the median
+projection (over all tasks' points) is positive, so its arrow points toward the data. The
+directions are kept at their **true mutual angles**: each point is embedded via the Cholesky
+factor of the picked sub-Gram (`P = L⁻¹s`) and the three directions are drawn as red oblique
+arrows (≈ ¾ of the data range, since the V/U norm is also an arbitrary gauge), with
+`aspectmode:"data"`. A colour selector (task / a / b, with an optional modulo none / 2 / 5 / 10
+/ 20 / 25 / 50 / 100 on a/b) recolours the points; the current camera is re-applied on every
+redraw so changing colour/mod/picks doesn't reset the view. A dark-grey floor shadow aids
+reading. Reads each task's `alive_filtered_<op>.tsv`, optional `subcomp_periods_<op>.tsv`, and
+`hidden_activations_<op>.npz`; directions come from the checkpoint. Output:
+`figures/subspace_scatter/index.html`. The 3D is WebGL (real browser to see the points); a
+screen-fixed (non-orbiting) shadow isn't possible in a single Plotly 3D scene, so the shadow is
+the standard floor projection.
