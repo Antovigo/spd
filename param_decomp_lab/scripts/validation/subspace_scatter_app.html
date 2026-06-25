@@ -77,9 +77,9 @@ function colorArr(idx) {
   const base = { a: META.a, b: META.b, result: META.result }[elColor.value];
   const m = +elMod.value, off = +elOffset.value || 0;
   if (m <= 1) return idx.map(p => base[p]);
-  if (modKind() === "log") {  // multiplicative phase: frac((log x − offset) / log r)
+  if (modKind() === "log") {  // multiplicative phase frac((log x − offset)/log r); needs x > 0
     const lr = Math.log(m);
-    return idx.map(p => ((((Math.log(base[p]) - off) / lr) % 1) + 1) % 1);
+    return idx.map(p => { const v = base[p]; return v > 0 ? ((((Math.log(v) - off) / lr) % 1) + 1) % 1 : 0; });
   }
   return idx.map(p => (((base[p] - off) % m) + m) % m);  // (x − offset) mod m
 }

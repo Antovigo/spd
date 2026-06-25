@@ -88,13 +88,13 @@ def _cv_r2(x: NDArray[np.float64], y: NDArray[np.float64], w: float, nsplit: int
     m = len(y)
     if m < 12:
         return -1.0
+    design = np.c_[np.cos(w * x), np.sin(w * x), np.ones(m)]  # built once; splits just slice rows
     scores: list[float] = []
     for _ in range(nsplit):
         idx = rng.permutation(m)
         tr, te = idx[: m // 2], idx[m // 2 :]
-        a_tr = np.c_[np.cos(w * x[tr]), np.sin(w * x[tr]), np.ones(len(tr))]
-        coef, *_ = np.linalg.lstsq(a_tr, y[tr], rcond=None)
-        pred = np.c_[np.cos(w * x[te]), np.sin(w * x[te]), np.ones(len(te))] @ coef
+        coef, *_ = np.linalg.lstsq(design[tr], y[tr], rcond=None)
+        pred = design[te] @ coef
         sst = float(((y[te] - y[te].mean()) ** 2).sum())
         scores.append(1.0 - float(((y[te] - pred) ** 2).sum()) / sst if sst > 1e-12 else -1.0)
     return float(np.mean(scores))
