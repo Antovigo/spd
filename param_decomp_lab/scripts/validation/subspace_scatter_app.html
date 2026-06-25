@@ -10,7 +10,8 @@
   label { font-size: 13px; }
   select { font-size: 13px; padding: 2px 4px; }
   #wrap { display: flex; }
-  #scatter { flex: 1; min-width: 0; height: calc(100vh - 52px); }
+  #plots { flex: 1; min-width: 0; display: flex; }
+  .plot { flex: 1; min-width: 0; height: calc(100vh - 52px); }
   #panel { width: 600px; border-left: 1px solid #ddd; overflow-y: auto; height: calc(100vh - 52px); padding: 8px; box-sizing: border-box; }
   .grid { display: flex; flex-wrap: wrap; gap: 6px; }
   .section { width: 100%; font-size: 12px; font-weight: 600; color: #555; border-top: 1px solid #ccc; padding: 8px 2px 2px; margin-top: 4px; }
@@ -27,27 +28,26 @@
 <header>
   <h1>Subspace scatter</h1>
   <label>side <select id="side"><option value="input">input</option><option value="output">output</option></select></label>
-  <label>colour <select id="color"><option value="a">a</option><option value="b">b</option><option value="sum">a+b</option></select></label>
   <label>mod <select id="mod"><option value="1">none</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
   <span id="hint"></span>
 </header>
 <div id="wrap">
-  <div id="scatter"></div>
+  <div id="plots"><div id="scatterA" class="plot"></div><div id="scatterB" class="plot"></div></div>
   <div id="panel"><div class="grid" id="grid"></div></div>
 </div>
 <script>window.PD_DATA = /*__PD_DATA__*/;</script>
 <script>
 const D = window.PD_DATA, META = D.meta, N = META.a.length;
-const elSide = document.getElementById("side"), elColor = document.getElementById("color");
-const elMod = document.getElementById("mod");
+const elSide = document.getElementById("side"), elMod = document.getElementById("mod");
 const grid = document.getElementById("grid"), hint = document.getElementById("hint");
+const PLOTS = [{ id: "scatterA", field: "a" }, { id: "scatterB", field: "b" }];  // side-by-side, synced
 let selected = [];  // comp indices for the current side, in pick order, max 3
 
 const curSide = () => D.sides[elSide.value];
 const curComps = () => curSide().comps;
-const colorLabel = () => elColor.value + (+elMod.value > 1 ? " mod " + elMod.value : "");
-function colorArr() {
-  const base = { a: META.a, b: META.b, sum: META.sum }[elColor.value], m = +elMod.value;
+const label = field => field + (+elMod.value > 1 ? " mod " + elMod.value : "");
+function colorFor(field) {
+  const base = { a: META.a, b: META.b, sum: META.sum }[field], m = +elMod.value;
   return m > 1 ? base.map(v => v % m) : base;
 }
 
@@ -102,62 +102,89 @@ function toggle(i) {
   drawScatter();
 }
 
-function drawScatter() {
-  const comps = curComps(), k = selected.length, labels = selected.map(i => comps[i].label);
-  hint.textContent = `${k}/3 picked${labels.length ? ": " + labels.join(", ") : " — pick subcomponents on the right"}`;
-  if (k === 0) { Plotly.react("scatter", [], {}); return; }
-
-  // Embed each point so its projection onto each picked direction equals that inner activation,
-  // with the directions kept at their real angles (Cholesky of the picked sub-Gram).
-  const gram = curSide().gram, G = selected.map(i => selected.map(j => gram[i][j])), L = cholesky(G);
+// Embed each point so its projection onto each picked direction equals that inner activation,
+// with the directions kept at their real angles (Cholesky of the picked sub-Gram). Geometry is
+// shared by both plots (they differ only in colour).
+function geometry() {
+  const comps = curComps(), gram = curSide().gram;
+  const L = cholesky(selected.map(i => selected.map(j => gram[i][j])));
   const X = new Array(N), Y = new Array(N), Z = new Array(N);
-  let scale = 1e-6;
+  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity, zmin = Infinity, zmax = -Infinity;
   for (let p = 0; p < N; p++) {
     const P = forwardSolve(L, selected.map(i => comps[i].proj[p]));
-    X[p] = P[0] || 0; Y[p] = P[1] || 0; Z[p] = P[2] || 0;
-    scale = Math.max(scale, Math.abs(X[p]), Math.abs(Y[p]), Math.abs(Z[p]));
+    const x = P[0] || 0, y = P[1] || 0, z = P[2] || 0;
+    X[p] = x; Y[p] = y; Z[p] = z;
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+    if (z < zmin) zmin = z; if (z > zmax) zmax = z;
   }
-  const floorZ = Z.reduce((m, v) => (v < m ? v : m), Infinity);
+  const range = Math.max(xmax - xmin, ymax - ymin, zmax - zmin, 1e-6);
+  return { X, Y, Z, L, floorZ: zmin, arrowLen: 0.5 * range };  // arrows ≈ ½ the data range
+}
+
+function plotOne(plot, geo) {
+  const comps = curComps(), { X, Y, Z, L, floorZ, arrowLen } = geo;
   const shadow = {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z.map(() => floorZ),
     marker: { size: 2, color: "#555", opacity: 0.3 }, hoverinfo: "skip", showlegend: false,
   };
   const trace = {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z,
-    marker: { size: 2.5, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: colorLabel(), thickness: 12 } },
+    marker: { size: 2.5, color: colorFor(plot.field), colorscale: "Viridis", showscale: true, colorbar: { title: label(plot.field), thickness: 12 } },
     hoverinfo: "skip",
   };
-  // One arrow per picked subcomponent, along its true (oblique) direction = row i of L.
   const axisTraces = selected.map((idx, i) => {
     const f = [0, 0, 0];
     for (let m = 0; m <= i; m++) f[m] = L[i][m];
     return {
       type: "scatter3d", mode: "lines+text",
-      x: [0, scale * f[0]], y: [0, scale * f[1]], z: [0, scale * f[2]],
+      x: [0, arrowLen * f[0]], y: [0, arrowLen * f[1]], z: [0, arrowLen * f[2]],
       line: { color: "#d62728", width: 2 }, text: ["", comps[idx].label],
       textposition: "top center", textfont: { size: 13, color: "#d62728" }, hoverinfo: "skip", showlegend: false,
     };
   });
-  // aspectmode "data" keeps equal scale on every axis, so the oblique angles aren't re-stretched.
-  // Preserve the current camera so a redraw doesn't snap the view back to default.
-  const gd = document.getElementById("scatter");
+  // Preserve this plot's current camera so a redraw doesn't snap the view back to default.
+  const gd = document.getElementById(plot.id);
   const scene = { aspectmode: "data", xaxis: { title: "" }, yaxis: { title: "" }, zaxis: { title: "" } };
   const cam = gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene.camera;
   if (cam) scene.camera = cam;
-  Plotly.react("scatter", [shadow, trace, ...axisTraces], { margin: { l: 0, r: 0, t: 10, b: 0 }, scene }, { responsive: true });
+  const layout = { margin: { l: 0, r: 0, t: 26, b: 0 }, title: { text: "colour: " + plot.field, font: { size: 13 }, x: 0.5, xanchor: "center" }, scene };
+  Plotly.react(plot.id, [shadow, trace, ...axisTraces], layout, { responsive: true });
 }
 
-// Colour/mod only restyle the points trace — no re-plot, so the camera stays put.
+function drawScatter() {
+  const k = selected.length, labels = selected.map(i => curComps()[i].label);
+  hint.textContent = `${k}/3 picked${labels.length ? ": " + labels.join(", ") : " — pick subcomponents on the right"}`;
+  if (k === 0) { PLOTS.forEach(p => Plotly.react(p.id, [], {})); return; }
+  const geo = geometry();
+  PLOTS.forEach(p => plotOne(p, geo));
+}
+
+// Mod only restyles the points trace of each plot — no re-plot, so the cameras stay put.
 function updateColors() {
-  if (selected.length === 0) return;
-  Plotly.restyle("scatter", { "marker.color": [colorArr()], "marker.colorbar.title": [colorLabel()] }, [1]);
+  if (!selected.length) return;
+  PLOTS.forEach(p => Plotly.restyle(p.id, { "marker.color": [colorFor(p.field)], "marker.colorbar.title": [label(p.field)] }, [1]));
+}
+
+// Parallel rotation: mirror one plot's camera onto the other (guarded against feedback).
+let syncing = false;
+function syncCamera(srcId, dstId) {
+  document.getElementById(srcId).on("plotly_relayout", () => {
+    if (syncing) return;
+    const fl = document.getElementById(srcId)._fullLayout;
+    const cam = fl && fl.scene && fl.scene.camera;
+    if (!cam) return;
+    syncing = true;
+    Plotly.relayout(dstId, { "scene.camera": cam }).then(() => { syncing = false; });
+  });
 }
 
 elSide.onchange = () => { selected = []; renderList(); drawScatter(); };
-elColor.onchange = updateColors;
 elMod.onchange = updateColors;
 renderList();
 drawScatter();
+syncCamera("scatterA", "scatterB");
+syncCamera("scatterB", "scatterA");
 </script>
 </body>
 </html>
