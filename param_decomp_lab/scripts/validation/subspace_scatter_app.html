@@ -11,13 +11,14 @@
   select { font-size: 13px; padding: 2px 4px; }
   #wrap { display: flex; }
   #scatter { flex: 1; min-width: 0; height: calc(100vh - 52px); }
-  #panel { width: 280px; border-left: 1px solid #ddd; overflow-y: auto; height: calc(100vh - 52px); padding: 8px; box-sizing: border-box; }
+  #panel { width: 600px; border-left: 1px solid #ddd; overflow-y: auto; height: calc(100vh - 52px); padding: 8px; box-sizing: border-box; }
   .grid { display: flex; flex-wrap: wrap; gap: 6px; }
-  .card { width: 76px; cursor: pointer; border: 2px solid transparent; border-radius: 4px; padding: 2px; text-align: center; }
+  .section { width: 100%; font-size: 12px; font-weight: 600; color: #555; border-top: 1px solid #ccc; padding: 8px 2px 2px; margin-top: 4px; }
+  .card { width: 132px; cursor: pointer; border: 2px solid transparent; border-radius: 4px; padding: 2px; text-align: center; box-sizing: border-box; }
   .card:hover { background: #f3f3f3; }
   .card.sel { border-color: #d62728; background: #fdeaea; }
-  .card img { width: 64px; height: 64px; image-rendering: pixelated; display: block; margin: 0 auto; }
-  .card span { font-size: 11px; }
+  .card img { width: 128px; height: 128px; image-rendering: pixelated; display: block; margin: 0 auto; }
+  .card span { font-size: 12px; }
   #hint { font-size: 12px; color: #888; }
 </style>
 <script>/*__PLOTLY_JS__*/</script>
@@ -47,7 +48,15 @@ const floorOf = arr => arr.reduce((m, v) => (v < m ? v : m), Infinity);
 
 function renderList() {
   grid.innerHTML = "";
+  let lastPeriod = null;
   curComps().forEach((c, i) => {
+    if (c.period !== lastPeriod) {
+      lastPeriod = c.period;
+      const sec = document.createElement("div");
+      sec.className = "section";
+      sec.textContent = "period " + c.period;
+      grid.appendChild(sec);
+    }
     const card = document.createElement("div");
     card.className = "card" + (selected.includes(i) ? " sel" : "");
     card.innerHTML = `<img src="${c.thumb}" alt=""><span>${c.label}</span>`;

@@ -431,13 +431,14 @@ args:
 - `--output-dir`
 
 CPU. A self-contained Plotly applet for exploring the activation geometry in a user-picked
-3-subcomponent subspace. The right panel is a thumbnail grid of the alive subcomponents (each
-thumbnail is that subcomponent's inner-activation `(a, b)` pattern, signed `RdBu_r`); the user
-clicks up to 3 and the 3D scatter live-updates to the last-token activation projected onto
-those 3 unit directions — **input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û`
-(down). A colour selector (a / b / a+b) and a dark-grey floor shadow (the points flattened to
-the box floor) aid reading. Reads `alive_filtered_<op>.tsv` and `hidden_activations_<op>.npz`;
-the directions come from the checkpoint. Output:
+3-subcomponent subspace. The right panel is a thumbnail grid (4 per row, grouped into period
+sections from `subcomp_periods_<op>.tsv`) of the alive subcomponents — each thumbnail is that
+subcomponent's inner-activation `(a, b)` pattern, signed `RdBu_r`; the user clicks up to 3 and
+the 3D scatter live-updates to the last-token activation projected onto those 3 unit
+directions — **input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down). A
+colour selector (a / b / a+b) and a dark-grey floor shadow (the points flattened to the box
+floor) aid reading. Reads `alive_filtered_<op>.tsv`, `subcomp_periods_<op>.tsv`, and
+`hidden_activations_<op>.npz`; the directions come from the checkpoint. Output:
 `figures/subspace_scatter_<op>/index.html`. The 3D is WebGL (real browser to see the points);
 note a screen-fixed (non-orbiting) shadow isn't possible in a single Plotly 3D scene, so the
 shadow is the standard floor projection.

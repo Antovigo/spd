@@ -41,6 +41,7 @@ from param_decomp_lab.scripts.validation.common import (  # noqa: E402
     MLP_MATRICES,
     load_component_uv,
     read_alive_components,
+    read_subcomp_periods,
 )
 
 _APP_TEMPLATE = Path(__file__).with_name("subspace_scatter_app.html")
@@ -54,11 +55,11 @@ _SIDES = {
 def _thumbnail(grid: NDArray[np.float32]) -> str:
     """A small signed-diverging heatmap of the (a, b) pattern as a base64 PNG data URI."""
     lim = float(np.abs(grid).max()) or 1.0
-    fig, ax = plt.subplots(figsize=(0.8, 0.8))
+    fig, ax = plt.subplots(figsize=(1.0, 1.0))
     ax.imshow(grid.T, origin="lower", aspect="auto", cmap="RdBu_r", vmin=-lim, vmax=lim)
     ax.axis("off")
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=60, bbox_inches="tight", pad_inches=0)
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -73,6 +74,7 @@ def build_subspace_scatter(
     alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
     layer = alive[0].layer
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
+    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
     alive_by_proj: dict[str, list[int]] = {p: [] for p in MLP_MATRICES}
     for a in alive:
         alive_by_proj[a.proj].append(a.component)
@@ -87,20 +89,25 @@ def build_subspace_scatter(
     sides: dict[str, Any] = {}
     for side, (which, projs, grid_key) in _SIDES.items():
         acts = hidden[grid_key].reshape(n * n, hidden[grid_key].shape[-1]).astype(np.float32)
+        # Sort the pickable list by period (then matrix, component) so the applet groups it.
+        items = sorted(
+            ((proj, c, periods[(proj, c)]) for proj in projs for c in alive_by_proj[proj]),
+            key=lambda t: (t[2], t[0], t[1]),
+        )
         comps: list[dict[str, Any]] = []
-        for proj in projs:
+        for proj, c, period in items:
             v, u = uv[proj]
-            for c in alive_by_proj[proj]:
-                d = v[:, c] if which == "V" else u[c, :]
-                d = d / max(float(np.linalg.norm(d)), 1e-12)
-                coords = acts @ d  # [N] activation projected onto the unit direction
-                comps.append(
-                    {
-                        "label": f"{proj[0]}{c}",
-                        "proj": [round(float(x), 4) for x in coords],
-                        "thumb": _thumbnail(coords.reshape(n, n)),
-                    }
-                )
+            d = v[:, c] if which == "V" else u[c, :]
+            d = d / max(float(np.linalg.norm(d)), 1e-12)
+            coords = acts @ d  # [N] activation projected onto the unit direction
+            comps.append(
+                {
+                    "label": f"{proj[0]}{c}",
+                    "period": period,
+                    "proj": [round(float(x), 4) for x in coords],
+                    "thumb": _thumbnail(coords.reshape(n, n)),
+                }
+            )
         sides[side] = {"comps": comps}
         logger.info(f"{side}: {len(comps)} pickable subcomponents")
 
