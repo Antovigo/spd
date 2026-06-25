@@ -143,18 +143,36 @@ class FaithfulnessLossConfig(LossMetricConfig):
     type: Literal["FaithfulnessLoss"] = "FaithfulnessLoss"
 
 
+class FrequencyMinimalityConfig(BaseConfig):
+    """The frequency-minimality penalty riding on an imp-min term: a component's per-token
+    firing frequency `f_c` (over the whole global batch) penalized by
+    `f_c * log2(1 + reference_token_count * f_c)`, summed over components and scaled by
+    `coeff`.
+
+    `reference_token_count` (`a'`) is the token count the penalty is normalized against, so
+    the curvature is invariant to batch size at a fixed firing rate. Setting it to the run's
+    global `batch_size * seq_len` reproduces the implicit `B*T` the old rolled `beta` term
+    baked inside its `log2`; coefficients then transfer as `coeff = old imp.coeff * old
+    beta`. The `f=0 -> 0` cutoff is inherent to the form.
+    """
+
+    coeff: NonNegativeFloat
+    reference_token_count: PositiveInt
+
+
 class ImportanceMinimalityLossConfig(LossMetricConfig):
     """Config for the `L_p`-style importance-minimality penalty on upper-leaky CI values.
 
-    `pnorm` is the initial `p`; `beta` weights the entropy-like `mean * log2(1 + sum)`
-    term added on top of the `L_p` term. `pnorm` is linearly annealed toward
-    `p_anneal_final_p` between `p_anneal_start_frac` and `p_anneal_end_frac` of training
-    (no-op when `p_anneal_final_p is None` or `p_anneal_start_frac == 1.0`).
+    `pnorm` is the initial `p`, linearly annealed toward `p_anneal_final_p` between
+    `p_anneal_start_frac` and `p_anneal_end_frac` of training (no-op when
+    `p_anneal_final_p is None` or `p_anneal_start_frac == 1.0`). `frequency` (when present)
+    adds the batch-invariant frequency-minimality penalty over the same `(c + eps)^p`
+    per-component sums.
     """
 
     type: Literal["ImportanceMinimalityLoss"] = "ImportanceMinimalityLoss"
     pnorm: NonNegativeFloat
-    beta: NonNegativeFloat
+    frequency: FrequencyMinimalityConfig | None = None
     p_anneal_start_frac: Probability = 1.0
     p_anneal_final_p: NonNegativeFloat | None = None
     p_anneal_end_frac: Probability = 1.0
@@ -166,7 +184,7 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
 
     Per-value penalty `phi_gamma(c) = c^2 / (c^2 + gamma^2)` — a smooth approximation to
     the active-component count `1[c>0]`, exact only as `gamma -> 0` — fed through the same
-    per-site `lp + beta * mean * log2(1 + sum)` structure as `ImportanceMinimalityLoss`.
+    per-site `lp` mean (plus the optional `frequency` term) as `ImportanceMinimalityLoss`.
     Differs from the `L_p` penalty only in the per-value shape: `phi'(0) = 0` and
     `|phi'| <= 0.65/gamma` everywhere, so there is no singularity at the origin (no `eps`
     floor, no aggressive grad clip) — the gradient is localized on the threshold band
@@ -179,15 +197,15 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
 
     type: Literal["SmoothL0ImportanceMinimalityLoss"] = "SmoothL0ImportanceMinimalityLoss"
     gamma: PositiveFloat
-    beta: NonNegativeFloat
+    frequency: FrequencyMinimalityConfig | None = None
     gamma_anneal_start_frac: Probability = 1.0
     gamma_anneal_final_gamma: PositiveFloat | None = None
     gamma_anneal_end_frac: Probability = 1.0
 
 
-# The two imp-min penalties share the `coeff`/`beta` surface and the `lp + beta * entropy`
-# aggregation; they differ only in the per-value penalty shape and its annealed parameter
-# (`p` vs `gamma`). The trainer's single imp-min slot accepts either.
+# The two imp-min penalties share the `coeff` + optional `frequency` surface and the
+# `lp` mean aggregation; they differ only in the per-value penalty shape and its annealed
+# parameter (`p` vs `gamma`). The trainer's single imp-min slot accepts either.
 AnyImportanceMinimalityLossConfig = (
     ImportanceMinimalityLossConfig | SmoothL0ImportanceMinimalityLossConfig
 )

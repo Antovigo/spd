@@ -68,7 +68,7 @@ def _build_step_and_args():
     loss_terms = build_loss_terms(
         (
             FaithfulnessLossConfig(coeff=1.0),
-            ImportanceMinimalityLossConfig(coeff=1e-4, pnorm=2.0, beta=0.0, p_anneal_final_p=1.0),
+            ImportanceMinimalityLossConfig(coeff=1e-4, pnorm=2.0, p_anneal_final_p=1.0),
             StochasticReconLossConfig(coeff=1.0),
         ),
         lm.site_names,

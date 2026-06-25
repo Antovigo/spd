@@ -397,7 +397,6 @@ def test_step_trains_and_has_vpd_signature():
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
                 pnorm=2.0,
-                beta=0.2,
                 p_anneal_start_frac=0.0,
                 p_anneal_final_p=0.4,
                 p_anneal_end_frac=1.0,
