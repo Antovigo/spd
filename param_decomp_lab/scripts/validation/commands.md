@@ -234,6 +234,17 @@ uv run python -m $V.find_independent_subspaces "$MODEL_PATH" --op=$OP
 # it warns if FastICA didn't converge.
 ```
 
+### 8. Pick-3-subcomponent subspace scatter (CPU)
+
+A Plotly applet: pick up to 3 subcomponents from a thumbnail grid (each thumbnail is its
+inner-activation (a,b) pattern) and see the activation projected onto those 3 directions as a
+rotatable 3D scatter (input = mlp_input·V̂ of up/gate; output = mlp_output·Û of down).
+
+```bash
+uv run python -m $V.build_subspace_scatter "$MODEL_PATH" --op=$OP
+# open figures/subspace_scatter_<op>/index.html in a real browser (3D is WebGL).
+```
+
 Smoke-test the explorer applet in headless Chromium (see `headless_check` below):
 
 ```bash

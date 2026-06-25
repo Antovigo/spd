@@ -149,7 +149,18 @@ principal-angle heatmaps.
   ~0.4–0.5 off-diagonal); principal angles between all subspaces are 80–90° (near-orthogonal).
 - Same WebGL caveat for the 3D scatter under headless; heatmaps render fine, no JS errors.
 
-## Status: all 7 objectives complete (addition, run on llama8b-add-02). sub/mult supported via `--op`; not yet run.
+### Obj 8 — `build_subspace_scatter.py` + `subspace_scatter_app.html` ✅ (run: llama8b-add-02)
+Plotly applet: pick up to 3 alive subcomponents from a thumbnail grid (each = its inner-act
+(a,b) heatmap, matplotlib PNG) → 3D scatter of the activation projected onto those 3 unit
+directions (input mlp_input·V̂ of up/gate; output mlp_output·Û of down), colour a/b/a+b, with a
+dark-grey floor shadow. All from the npz + checkpoint; no GPU.
+- **Shadow caveat (flagged to user):** a screen-fixed shadow that ignores 3D rotation isn't
+  possible in one Plotly gl3d scene (the scene orbits as a whole), so it's the standard floor
+  projection (points flattened to z=min, grey #555).
+- Headless: no JS errors; thumbnails render, 3-pick cap + side-reset verified. 3D is WebGL so
+  the scatter doesn't capture in headless screenshots (empty until a pick, as designed).
+
+## Status: all 8 objectives complete (addition, run on llama8b-add-02). sub/mult supported via `--op`; not yet run.
 
 Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,
 `inner_activations_add.tsv`, `alive_filtered_add.tsv` (38 comps), `subcomp_periods_add.tsv`,
