@@ -17,8 +17,10 @@ for bf16 compute.
 The chunkwise-transformer (`ChunkwiseTransformerCIFn`) is the LM impl: each chunk reads
 one or more residual taps (RMS-normed per tap, then concatenated) and emits CI for the
 matrix sites it covers, via an independent pre-norm bidirectional-RoPE transformer. The
-per-chunk transformers are stacked along a leading `n_chunks` axis and run under a single
-`eqx.filter_vmap`. The positionless toys use the MLP impls below (`LayerwiseMLPCIFn` /
+per-chunk transformers are stacked along a leading `n_chunks` axis and run under a
+`jax.lax.scan` over that axis (so the chunk iteration lowers as a loop — one chunk's FSDP
+weight gather live at a time, not all `n_chunks` hoisted into the flat entry computation).
+The positionless toys use the MLP impls below (`LayerwiseMLPCIFn` /
 `GlobalMLPCIFn`); every impl satisfies the same `CIFn` protocol and is equally core — the
 architectures differ by domain (sequence vs positionless), not by status.
 """
@@ -241,7 +243,7 @@ class ChunkTransformer(eqx.Module):
     `[*leading, c_chunk]` logits, via in_proj → RoPE blocks → head.
 
     In the bundle every array below carries a leading `n_chunks` axis and the module is
-    run under `eqx.filter_vmap`, so this body is written for a single chunk."""
+    run under `jax.lax.scan` over that axis, so this body is written for a single chunk."""
 
     in_proj_w: Float[Array, "total_d_in d_model"]
     in_proj_b: Float[Array, " d_model"]
@@ -277,10 +279,11 @@ class ChunkTransformer(eqx.Module):
 
 
 class ChunkwiseTransformerCIFn(eqx.Module):
-    """Per-chunk `ChunkTransformer`s stacked along a leading `n_chunks` axis, run under one
-    `eqx.filter_vmap`. Each chunk's input is its `chunk_input_taps` RMS-normed per tap and
-    concatenated. Requires homogeneous chunks (equal total input width and `c_chunk`) so
-    the stack is rectangular — asserted at init."""
+    """Per-chunk `ChunkTransformer`s stacked along a leading `n_chunks` axis, iterated by a
+    `jax.lax.scan` over that axis (lowers as a loop so one chunk's FSDP weight gather is live
+    at a time, not all `n_chunks` at once). Each chunk's input is its `chunk_input_taps`
+    RMS-normed per tap and concatenated. Requires homogeneous chunks (equal total input width
+    and `c_chunk`) so the stack is rectangular — asserted at init."""
 
     chunks: ChunkTransformer  # arrays stacked along leading n_chunks
     inv_freq: Array  # shared across chunks (RoPE buffer); NOT mapped
@@ -309,8 +312,22 @@ class ChunkwiseTransformerCIFn(eqx.Module):
         ]
         stacked_in = jnp.stack(per_chunk_in, axis=0)  # [n_chunks, *leading, total_d_in]
         inv_freq = jax.lax.stop_gradient(self.inv_freq)
-        run = eqx.filter_vmap(lambda ct, x: ct(x, inv_freq))
-        stacked_logits = run(self.chunks, stacked_in)  # [n_chunks, *leading, c_chunk]
+        # `lax.scan` (not `filter_vmap`) over the leading `n_chunks` axis so XLA lowers the
+        # chunk iteration as a loop: one chunk's FSDP weight all-gather (∝ ΣC/tp) is live at
+        # a time, then freed, instead of every chunk's gathered weights materialized at once
+        # (the vmap unrolls, hoisting all n_chunks gathers into the flat entry computation).
+        # Same math as the vmap — scan stacks per-iteration outputs exactly as vmap maps
+        # them; results match up to fp32 reassociation (XLA picks different matmul layouts).
+        chunk_arrays, chunk_static = eqx.partition(self.chunks, eqx.is_array)
+
+        def run_chunk(_: None, scanned: tuple[ChunkTransformer, Array]) -> tuple[None, Array]:
+            chunk_array, chunk_input = scanned
+            chunk = eqx.combine(chunk_array, chunk_static)
+            return None, chunk(chunk_input, inv_freq)
+
+        _, stacked_logits = jax.lax.scan(
+            run_chunk, None, (chunk_arrays, stacked_in)
+        )  # [n_chunks, *leading, c_chunk]
         return CI.from_logits(self._split(stacked_logits))
 
     def _split(self, stacked: Array) -> SiteDict:
@@ -375,7 +392,7 @@ def init_chunkwise_transformer_ci_fn(
 
     - partition: the chunks' output sites are disjoint and cover every model site.
     - homogeneity: equal tap count (→ equal total input width) and equal `Σ C` per chunk,
-      so the per-chunk params stack rectangularly for `filter_vmap`.
+      so the per-chunk params stack rectangularly along the scanned `n_chunks` axis.
     """
     site_c = {s.name: s.C for s in sites}
     covered = [name for ch in arch.chunks for name in ch.output_sites]
