@@ -101,9 +101,10 @@ def build_subspace_scatter(
             d = v[:, c] if which == "V" else u[c, :]
             d = d / max(float(np.linalg.norm(d)), 1e-12)
             coords = acts @ d  # [N] activation projected onto the unit direction
-            # The V/U sign is an arbitrary gauge; flip it so most points are on the positive
-            # side. Flipping `d` keeps the projections, thumbnail, and Gram all consistent.
-            if (coords > 0).mean() < 0.5:
+            # The V/U sign is an arbitrary gauge; flip it so the median projection is positive,
+            # i.e. the direction (its red arrow) points toward the bulk of the data. Flipping
+            # `d` keeps the projections, thumbnail, and Gram all consistent.
+            if float(np.median(coords)) < 0:
                 d, coords = -d, -coords
             dirs.append(d)
             comps.append(
