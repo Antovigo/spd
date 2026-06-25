@@ -435,7 +435,8 @@ CPU. A self-contained Plotly applet for exploring the activation geometry in a u
 sections from `subcomp_periods_<op>.tsv`) of the alive subcomponents — each thumbnail is that
 subcomponent's inner-activation `(a, b)` pattern, signed `RdBu_r`; the user clicks up to 3 and
 the 3D scatter live-updates to the last-token activation projected onto those 3 unit
-directions — **input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down). The
+directions — **input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down). Each
+direction's sign (an arbitrary gauge) is flipped so the majority of points are positive. The
 directions are kept at their **true mutual angles**: each point is embedded via the Cholesky
 factor of the picked sub-Gram (`P = L⁻¹s`) and the three directions are drawn as oblique
 arrows, with `aspectmode:"data"` so the angles aren't re-stretched. A colour selector (a / b /

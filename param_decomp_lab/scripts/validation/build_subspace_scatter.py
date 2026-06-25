@@ -100,8 +100,12 @@ def build_subspace_scatter(
             v, u = uv[proj]
             d = v[:, c] if which == "V" else u[c, :]
             d = d / max(float(np.linalg.norm(d)), 1e-12)
-            dirs.append(d)
             coords = acts @ d  # [N] activation projected onto the unit direction
+            # The V/U sign is an arbitrary gauge; flip it so most points are on the positive
+            # side. Flipping `d` keeps the projections, thumbnail, and Gram all consistent.
+            if (coords > 0).mean() < 0.5:
+                d, coords = -d, -coords
+            dirs.append(d)
             comps.append(
                 {
                     "label": f"{proj[0]}{c}",
