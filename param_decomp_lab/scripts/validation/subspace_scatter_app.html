@@ -28,6 +28,7 @@
   <h1>Subspace scatter</h1>
   <label>side <select id="side"><option value="input">input</option><option value="output">output</option></select></label>
   <label>colour <select id="color"><option value="a">a</option><option value="b">b</option><option value="sum">a+b</option></select></label>
+  <label>mod <select id="mod"><option value="1">none</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
   <span id="hint"></span>
 </header>
 <div id="wrap">
@@ -38,12 +39,17 @@
 <script>
 const D = window.PD_DATA, META = D.meta, N = META.a.length;
 const elSide = document.getElementById("side"), elColor = document.getElementById("color");
+const elMod = document.getElementById("mod");
 const grid = document.getElementById("grid"), hint = document.getElementById("hint");
 let selected = [];  // comp indices for the current side, in pick order, max 3
 
 const curSide = () => D.sides[elSide.value];
 const curComps = () => curSide().comps;
-const colorArr = () => ({ a: META.a, b: META.b, sum: META.sum })[elColor.value];
+const colorLabel = () => elColor.value + (+elMod.value > 1 ? " mod " + elMod.value : "");
+function colorArr() {
+  const base = { a: META.a, b: META.b, sum: META.sum }[elColor.value], m = +elMod.value;
+  return m > 1 ? base.map(v => v % m) : base;
+}
 
 // Cholesky of a k×k Gram (k≤3): lower-triangular L with L Lᵀ = G, so its rows are unit
 // vectors at the directions' true mutual angles.
@@ -118,7 +124,7 @@ function drawScatter() {
   };
   const trace = {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z,
-    marker: { size: 2.5, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: elColor.value, thickness: 12 } },
+    marker: { size: 2.5, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: colorLabel(), thickness: 12 } },
     hoverinfo: "skip",
   };
   // One arrow per picked subcomponent, along its true (oblique) direction = row i of L.
@@ -142,6 +148,7 @@ function drawScatter() {
 
 elSide.onchange = () => { selected = []; renderList(); drawScatter(); };
 elColor.onchange = drawScatter;
+elMod.onchange = drawScatter;
 renderList();
 drawScatter();
 </script>
