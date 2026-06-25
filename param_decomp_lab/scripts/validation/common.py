@@ -94,12 +94,42 @@ def read_alive_components(
 
 
 def read_subcomp_periods(tsv_path: Path) -> dict[tuple[str, int], int]:
-    """`(proj, component) -> representative period` from a `subcomp_periods` TSV."""
+    """`(proj, component) -> representative additive period` from a `subcomp_periods` TSV."""
     assert tsv_path.exists(), f"missing subcomp-periods TSV: {tsv_path}"
     out: dict[tuple[str, int], int] = {}
     with tsv_path.open() as f:
         for row in csv.DictReader(f, delimiter="\t"):
             out[(row["matrix"].split(".")[-1], int(row["component"]))] = int(row["period"])
+    return out
+
+
+@dataclass(frozen=True)
+class PeriodGroup:
+    kind: str  # "additive" | "log" | "none"
+    value: float  # additive integer period, or log multiplicative ratio, or 0
+    label: str  # e.g. "period 10", "×1.27", "no period"
+    sort_key: tuple[int, float]  # additive < log < none, then by value
+
+
+def read_subcomp_period_groups(tsv_path: Path) -> dict[tuple[str, int], PeriodGroup]:
+    """`(proj, component) -> PeriodGroup`, using `period_type` (additive/log/none).
+
+    Back-compatible with older period TSVs that lack the log columns (treated as additive).
+    """
+    assert tsv_path.exists(), f"missing subcomp-periods TSV: {tsv_path}"
+    out: dict[tuple[str, int], PeriodGroup] = {}
+    with tsv_path.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            key = (row["matrix"].split(".")[-1], int(row["component"]))
+            kind = row.get("period_type") or "additive"
+            if kind == "log":
+                ratio = float(row["log_period"])
+                out[key] = PeriodGroup("log", ratio, f"×{ratio:g}", (1, ratio))
+            elif kind == "additive":
+                p = int(row["period"])
+                out[key] = PeriodGroup("additive", float(p), f"period {p}", (0, float(p)))
+            else:
+                out[key] = PeriodGroup("none", 0.0, "no period", (2, 0.0))
     return out
 
 

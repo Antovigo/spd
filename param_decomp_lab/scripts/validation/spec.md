@@ -293,17 +293,30 @@ Outputs:
 
 args:
 - the `inner_activations_<op>.tsv` from the previous script (positional)
+- `--log-bar`: held-out R² a log fit must clear to count (default 0.45)
 - `--output`
 
-CPU. Rebuilds each subcomponent's `[N, N]` inner-activation grid and measures the periodicity
-of its `f(a)` (mean over b) and `f(b)` (mean over a) marginals two ways: **autocorrelation**
-(best lag in `1..N//2`; score = unit-`r(0)` autocorrelation there) and **FFT** (peak nonzero
-frequency → `period = round(N/k)`; score = that frequency's fraction of DC-removed power).
-Reads `alive_filtered_<op>.tsv` (same dir) for the `layer`/full-`matrix` columns. Output
-(default `subcomp_periods_<op>.tsv`): `layer, matrix, component`, the four
-`{autocorr,fft}_{a,b}_{period,score}` columns, and a representative `period` / `period_axis`
-(the FFT axis with the stronger peak — used for downstream sorting). Note: autocorrelation
-tends to return lag 1 for smooth/monotone marginals, so the representative period uses FFT.
+CPU. Rebuilds each subcomponent's `[N, N]` inner-activation grid and measures periodicity of
+its `f(a)` (mean over b) and `f(b)` (mean over a) marginals **two ways**:
+
+- **additive** (add/sub): integer period of the marginal — **autocorrelation** (best lag in
+  `1..N//2`; score = unit-`r(0)` autocorrelation) and **FFT** (peak nonzero frequency →
+  `round(N/k)`; score = fraction of DC-removed power), with a representative `period` /
+  `period_axis` (stronger FFT peak).
+- **logarithmic** (mult): the marginal repeats each time the operand grows by a fixed
+  multiplicative ratio `r`. A sinusoid is fit in `log(operand)` over `operand > threshold`
+  (the periodicity is usually only resolved above some value); the period is chosen by the
+  most **cross-validated** evidence (fit on half the points, scored on the held-out half — so a
+  few high-value points lining up by chance don't pass), reported at the lowest threshold whose
+  held-out fit clears `--log-bar`. Detected ratios are **clustered** (in log-ratio space) so
+  they snap to a handful of canonical periods.
+
+`period_type` ∈ {additive, log, none} is decided by comparing the additive and log
+cross-validated R² (log wins a near-tie, since the linear/log sinusoids are near-degenerate for
+long periods and log is the meaningful reading on mult). Reads `alive_filtered_<op>.tsv` for
+`layer`/`matrix`. Output (`subcomp_periods_<op>.tsv`): the additive columns above, the log
+columns (`log_{a,b}_ratio/thr/cvr2`, representative `log_period` ratio / `log_axis` /
+`log_threshold`), the `additive_cvr2` / `log_cvr2` used for the decision, and `period_type`.
 
 **plot_subcomp_cosine.py**
 
