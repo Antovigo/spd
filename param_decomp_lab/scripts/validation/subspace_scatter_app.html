@@ -139,16 +139,23 @@ function drawScatter() {
     };
   });
   // aspectmode "data" keeps equal scale on every axis, so the oblique angles aren't re-stretched.
-  const layout = {
-    margin: { l: 0, r: 0, t: 10, b: 0 },
-    scene: { aspectmode: "data", xaxis: { title: "" }, yaxis: { title: "" }, zaxis: { title: "" } },
-  };
-  Plotly.react("scatter", [shadow, trace, ...axisTraces], layout, { responsive: true });
+  // Preserve the current camera so a redraw doesn't snap the view back to default.
+  const gd = document.getElementById("scatter");
+  const scene = { aspectmode: "data", xaxis: { title: "" }, yaxis: { title: "" }, zaxis: { title: "" } };
+  const cam = gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene.camera;
+  if (cam) scene.camera = cam;
+  Plotly.react("scatter", [shadow, trace, ...axisTraces], { margin: { l: 0, r: 0, t: 10, b: 0 }, scene }, { responsive: true });
+}
+
+// Colour/mod only restyle the points trace — no re-plot, so the camera stays put.
+function updateColors() {
+  if (selected.length === 0) return;
+  Plotly.restyle("scatter", { "marker.color": [colorArr()], "marker.colorbar.title": [colorLabel()] }, [1]);
 }
 
 elSide.onchange = () => { selected = []; renderList(); drawScatter(); };
-elColor.onchange = drawScatter;
-elMod.onchange = drawScatter;
+elColor.onchange = updateColors;
+elMod.onchange = updateColors;
 renderList();
 drawScatter();
 </script>
