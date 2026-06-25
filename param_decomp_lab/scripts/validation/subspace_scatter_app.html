@@ -39,12 +39,34 @@
 const D = window.PD_DATA, META = D.meta, N = META.a.length;
 const elSide = document.getElementById("side"), elColor = document.getElementById("color");
 const grid = document.getElementById("grid"), hint = document.getElementById("hint");
-const ZEROS = new Array(N).fill(0);
 let selected = [];  // comp indices for the current side, in pick order, max 3
 
-const curComps = () => D.sides[elSide.value].comps;
+const curSide = () => D.sides[elSide.value];
+const curComps = () => curSide().comps;
 const colorArr = () => ({ a: META.a, b: META.b, sum: META.sum })[elColor.value];
-const floorOf = arr => arr.reduce((m, v) => (v < m ? v : m), Infinity);
+
+// Cholesky of a k×k Gram (k≤3): lower-triangular L with L Lᵀ = G, so its rows are unit
+// vectors at the directions' true mutual angles.
+function cholesky(G) {
+  const k = G.length, L = Array.from({ length: k }, () => new Array(k).fill(0));
+  for (let i = 0; i < k; i++)
+    for (let j = 0; j <= i; j++) {
+      let sum = G[i][j];
+      for (let m = 0; m < j; m++) sum -= L[i][m] * L[j][m];
+      L[i][j] = i === j ? Math.sqrt(Math.max(sum, 1e-9)) : sum / L[j][j];
+    }
+  return L;
+}
+// Solve L P = s for P (forward substitution) — the point with inner products s along the axes.
+function forwardSolve(L, s) {
+  const k = L.length, P = new Array(k);
+  for (let i = 0; i < k; i++) {
+    let v = s[i];
+    for (let m = 0; m < i; m++) v -= L[i][m] * P[m];
+    P[i] = v / L[i][i];
+  }
+  return P;
+}
 
 function renderList() {
   grid.innerHTML = "";
@@ -75,26 +97,47 @@ function toggle(i) {
 }
 
 function drawScatter() {
-  const comps = curComps();
-  const axes = selected.map(i => comps[i].proj);
-  const x = axes[0] || ZEROS, y = axes[1] || ZEROS, z = axes[2] || ZEROS;
-  const labels = selected.map(i => comps[i].label);
-  hint.textContent = `${selected.length}/3 picked${labels.length ? ": " + labels.join(", ") : " — pick subcomponents on the right"}`;
-  const floorZ = selected.length ? floorOf(z) : 0;
+  const comps = curComps(), k = selected.length, labels = selected.map(i => comps[i].label);
+  hint.textContent = `${k}/3 picked${labels.length ? ": " + labels.join(", ") : " — pick subcomponents on the right"}`;
+  if (k === 0) { Plotly.react("scatter", [], {}); return; }
+
+  // Embed each point so its projection onto each picked direction equals that inner activation,
+  // with the directions kept at their real angles (Cholesky of the picked sub-Gram).
+  const gram = curSide().gram, G = selected.map(i => selected.map(j => gram[i][j])), L = cholesky(G);
+  const X = new Array(N), Y = new Array(N), Z = new Array(N);
+  let scale = 1e-6;
+  for (let p = 0; p < N; p++) {
+    const P = forwardSolve(L, selected.map(i => comps[i].proj[p]));
+    X[p] = P[0] || 0; Y[p] = P[1] || 0; Z[p] = P[2] || 0;
+    scale = Math.max(scale, Math.abs(X[p]), Math.abs(Y[p]), Math.abs(Z[p]));
+  }
+  const floorZ = Z.reduce((m, v) => (v < m ? v : m), Infinity);
   const shadow = {
-    type: "scatter3d", mode: "markers", x: x, y: y, z: z.map(() => floorZ),
+    type: "scatter3d", mode: "markers", x: X, y: Y, z: Z.map(() => floorZ),
     marker: { size: 2, color: "#555", opacity: 0.3 }, hoverinfo: "skip", showlegend: false,
   };
   const trace = {
-    type: "scatter3d", mode: "markers", x: x, y: y, z: z,
+    type: "scatter3d", mode: "markers", x: X, y: Y, z: Z,
     marker: { size: 2.5, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: { title: elColor.value, thickness: 12 } },
     hoverinfo: "skip",
   };
+  // One arrow per picked subcomponent, along its true (oblique) direction = row i of L.
+  const axisTraces = selected.map((idx, i) => {
+    const f = [0, 0, 0];
+    for (let m = 0; m <= i; m++) f[m] = L[i][m];
+    return {
+      type: "scatter3d", mode: "lines+text",
+      x: [0, scale * f[0]], y: [0, scale * f[1]], z: [0, scale * f[2]],
+      line: { color: "#333", width: 5 }, text: ["", comps[idx].label],
+      textposition: "top center", textfont: { size: 13 }, hoverinfo: "skip", showlegend: false,
+    };
+  });
+  // aspectmode "data" keeps equal scale on every axis, so the oblique angles aren't re-stretched.
   const layout = {
     margin: { l: 0, r: 0, t: 10, b: 0 },
-    scene: { xaxis: { title: labels[0] || "" }, yaxis: { title: labels[1] || "" }, zaxis: { title: labels[2] || "" } },
+    scene: { aspectmode: "data", xaxis: { title: "" }, yaxis: { title: "" }, zaxis: { title: "" } },
   };
-  Plotly.react("scatter", selected.length ? [shadow, trace] : [], layout, { responsive: true });
+  Plotly.react("scatter", [shadow, trace, ...axisTraces], layout, { responsive: true });
 }
 
 elSide.onchange = () => { selected = []; renderList(); drawScatter(); };

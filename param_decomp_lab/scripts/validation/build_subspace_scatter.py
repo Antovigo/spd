@@ -95,10 +95,12 @@ def build_subspace_scatter(
             key=lambda t: (t[2], t[0], t[1]),
         )
         comps: list[dict[str, Any]] = []
+        dirs: list[NDArray[np.float32]] = []
         for proj, c, period in items:
             v, u = uv[proj]
             d = v[:, c] if which == "V" else u[c, :]
             d = d / max(float(np.linalg.norm(d)), 1e-12)
+            dirs.append(d)
             coords = acts @ d  # [N] activation projected onto the unit direction
             comps.append(
                 {
@@ -108,7 +110,13 @@ def build_subspace_scatter(
                     "thumb": _thumbnail(coords.reshape(n, n)),
                 }
             )
-        sides[side] = {"comps": comps}
+        # Pairwise cosine of the unit directions, so the applet can place the picked axes at
+        # their true mutual angles (Cholesky embedding) instead of forcing them orthogonal.
+        gram = np.stack(dirs) @ np.stack(dirs).T
+        sides[side] = {
+            "comps": comps,
+            "gram": [[round(float(g), 4) for g in row] for row in gram],
+        }
         logger.info(f"{side}: {len(comps)} pickable subcomponents")
 
     payload = {
