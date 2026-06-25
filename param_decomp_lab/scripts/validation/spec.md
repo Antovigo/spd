@@ -447,10 +447,10 @@ args:
 CPU. A self-contained Plotly applet for exploring the activation geometry in a user-picked
 3-subcomponent subspace, **spanning every available task** (add / sub / mult). The right panel
 is a thumbnail grid (4 per row) of the alive subcomponents, organised into high-level **task**
-sections, then by period — each thumbnail is that subcomponent's inner-activation `(a, b)`
-pattern on its task, signed `RdBu_r`. Periods come from `subcomp_periods_<op>.tsv` when present;
-subcomponents with no assigned period go under a "no period" section (e.g. `mult`, pending a
-log-period scheme). The user clicks up to 3 directions (from any task); a **points** selector
+sections, then by period group — `period N` (additive), `×r` (log multiplicative ratio), or
+`no period` — from `subcomp_periods_<op>.tsv` (via `read_subcomp_period_groups`; absent file →
+all "no period"). Each thumbnail is that subcomponent's inner-activation `(a, b)` pattern on its
+task, signed `RdBu_r`. The user clicks up to 3 directions (from any task); a **points** selector
 chooses which single task's last-token activations are scattered onto those 3 unit directions
 (**input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down)). Each direction's
 sign (an arbitrary gauge) is flipped so the median projection (over all tasks' points) is

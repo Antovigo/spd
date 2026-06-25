@@ -91,16 +91,16 @@ function forwardSolve(L, s) {
 
 function renderList() {
   grid.innerHTML = "";
-  let lastTask = null, lastPeriod;
+  let lastTask = null, lastGroup;
   curSide().picks.forEach(p => {
     if (p.task !== lastTask) {
-      lastTask = p.task; lastPeriod = undefined;
+      lastTask = p.task; lastGroup = undefined;
       const h = document.createElement("div"); h.className = "task-section"; h.textContent = p.task; grid.appendChild(h);
     }
-    if (p.period !== lastPeriod) {
-      lastPeriod = p.period;
+    if (p.group !== lastGroup) {
+      lastGroup = p.group;
       const s = document.createElement("div"); s.className = "section";
-      s.textContent = p.period == null ? "no period" : "period " + p.period;
+      s.textContent = p.group;
       grid.appendChild(s);
     }
     const card = document.createElement("div");

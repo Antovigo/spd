@@ -43,10 +43,13 @@ from param_decomp.log import logger  # noqa: E402
 from param_decomp_lab.infra.paths import ModelPath  # noqa: E402
 from param_decomp_lab.scripts.validation.common import (  # noqa: E402
     MLP_MATRICES,
+    PeriodGroup,
     load_component_uv,
     read_alive_components,
-    read_subcomp_periods,
+    read_subcomp_period_groups,
 )
+
+_NO_PERIOD = PeriodGroup("none", 0.0, "no period", (2, 0.0))
 
 _APP_TEMPLATE = Path(__file__).with_name("subspace_scatter_app.html")
 _CANDIDATE_OPS = ("add", "sub", "mult")
@@ -101,7 +104,7 @@ def build_subspace_scatter(
     for op in op_list:
         alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
         periods_path = run_dir / f"subcomp_periods_{op}.tsv"
-        periods = read_subcomp_periods(periods_path) if periods_path.exists() else {}
+        periods = read_subcomp_period_groups(periods_path) if periods_path.exists() else {}
         hidden = np.load(run_dir / f"hidden_activations_{op}.npz", allow_pickle=True)
         nn = int(hidden["a"].shape[0])
         assert n in (0, nn), f"grid size mismatch across tasks ({n} vs {nn})"
@@ -160,7 +163,7 @@ def build_subspace_scatter(
             periods = per_op[op]["periods"]
             comps = sorted(
                 {(a.proj, a.component) for a in per_op[op]["alive"] if a.proj in projs},
-                key=lambda pc: (periods.get(pc) is None, periods.get(pc) or 0, pc[0], pc[1]),
+                key=lambda pc, p=periods: (p.get(pc, _NO_PERIOD).sort_key, pc[0], pc[1]),
             )
             offset = ti * n * n
             for proj, c in comps:
@@ -170,7 +173,7 @@ def build_subspace_scatter(
                     {
                         "dir": di,
                         "task": op,
-                        "period": periods.get((proj, c)),
+                        "group": periods.get((proj, c), _NO_PERIOD).label,
                         "label": dir_label[di],
                         "thumb": _thumbnail(thumb_grid),
                     }
