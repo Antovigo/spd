@@ -160,7 +160,25 @@ dark-grey floor shadow. All from the npz + checkpoint; no GPU.
 - Headless: no JS errors; thumbnails render, 3-pick cap + side-reset verified. 3D is WebGL so
   the scatter doesn't capture in headless screenshots (empty until a pick, as designed).
 
-## Status: all 8 objectives complete (addition, run on llama8b-add-02). sub/mult supported via `--op`; not yet run.
+### Obj 9 — logarithmic period detection ✅ (run: addmult-L18-03, mult)
+Log-periodic detector added to `compute_subcomp_periods`: fit a sinusoid in `log(operand)` over
+`operand > threshold`, pick the multiplicative ratio with the most **cross-validated** evidence
+(held-out R²) at the lowest threshold clearing `--log-bar` (0.45); cluster detected ratios
+(log-ratio space) into canonical periods. New `period_type` (additive/log/none) by comparing
+additive vs log CV-R² (log wins near-ties — linear/log sinusoids are degenerate for long
+periods). Schema gains log columns; `common.read_subcomp_period_groups` exposes the grouping.
+- **Candidate set:** the 6 named test components are CI-alive (max CI=1) but active on only
+  2.5–7% of prompts, so mean CI < 0.1 dropped them. Per user, **lowered the mean-CI threshold**:
+  re-ran `collect_inner_activations --op=mult --mean-ci-thr=0.02` → 166-component mult set
+  (includes all 6). (My initial "not CI-alive" claim was a zsh word-splitting bug in a check.)
+- **Validation:** all 6 detected as log with correct axes; down#112 & gate#104 correctly a-only;
+  clusters ×1.27 (29), ×2.0 (22), ×2.4 (8), ×3.0 (5), ×3.7 (2), ×6.5 (8) — a clean handful.
+- **Applet:** `build_subspace_scatter` now groups picks by `read_subcomp_period_groups`
+  (`period N` / `×r` / `no period`); mult log components appear by ratio. data.js ~40 MB.
+- **Note:** add still uses mean-CI 0.1 (38 comps); lower it similarly if add needs its sparse
+  components too. Full-scan log detection is ~2.5 min for 166 comps (CV over period×threshold).
+
+## Status: Obj 1–9 complete. Obj 9 (log periods) run on addmult-L18-03 mult; add re-run for the new schema.
 
 Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,
 `inner_activations_add.tsv`, `alive_filtered_add.tsv` (38 comps), `subcomp_periods_add.tsv`,

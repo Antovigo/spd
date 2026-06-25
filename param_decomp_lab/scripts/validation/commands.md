@@ -194,7 +194,9 @@ uv run python -m $V.find_alive_components "$MODEL_PATH" --slurm --slurm-time=0:3
 uv run python -m $V.collect_hidden_activations "$MODEL_PATH" --op=$OP --slurm --slurm-time=0:30:00
 uv run python -m $V.collect_inner_activations  "$MODEL_PATH" --op=$OP --slurm --slurm-time=0:30:00
 # collect_inner_activations writes inner_activations_<op>.tsv + alive_filtered_<op>.tsv
-# (lower --mean-ci-thr to widen the alive set; default 0.1 is fairly strict).
+# (lower --mean-ci-thr to widen the alive set; default 0.1 is fairly strict). For mult, the
+# log-periodic components fire strongly but only on a few % of prompts, so use a low threshold:
+#   ... --op=mult --mean-ci-thr=0.02
 ```
 
 ### 3-5. Periods, cosine heatmaps, explorer (CPU — run on the login node)
