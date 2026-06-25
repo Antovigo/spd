@@ -31,6 +31,7 @@
   <label>points <select id="ptask"></select></label>
   <label>colour <select id="color"><option value="result">result</option><option value="a">a</option><option value="b">b</option></select></label>
   <label>mod <select id="mod"><option value="1">none</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
+  <label>offset <input id="offset" type="number" value="0" style="width: 56px" /></label>
   <span id="hint"></span>
 </header>
 <div id="wrap">
@@ -42,6 +43,7 @@
 const D = window.PD_DATA, META = D.meta, N = META.point_task.length;
 const elSide = document.getElementById("side"), elColor = document.getElementById("color");
 const elMod = document.getElementById("mod"), elPtask = document.getElementById("ptask");
+const elOffset = document.getElementById("offset");
 const grid = document.getElementById("grid"), hint = document.getElementById("hint");
 let selected = [];  // direction indices for the current side, in pick order, max 3
 
@@ -54,10 +56,15 @@ const activePoints = () => {  // point indices belonging to the selected task
   return idx;
 };
 function colorArr(idx) {
-  const base = { a: META.a, b: META.b, result: META.result }[elColor.value], m = +elMod.value;
-  return idx.map(p => (m > 1 ? base[p] % m : base[p]));
+  const base = { a: META.a, b: META.b, result: META.result }[elColor.value];
+  const m = +elMod.value, off = +elOffset.value || 0;
+  return idx.map(p => (m > 1 ? (((base[p] - off) % m) + m) % m : base[p]));  // (x - offset) mod m
 }
-const colorLabel = () => elColor.value + (+elMod.value > 1 ? " mod " + elMod.value : "");
+const colorLabel = () => {
+  const m = +elMod.value, off = +elOffset.value || 0;
+  if (m <= 1) return elColor.value;
+  return (off ? `(${elColor.value}−${off})` : elColor.value) + " mod " + m;
+};
 
 // Cholesky of a k×k Gram (k≤3): lower-triangular L with L Lᵀ = G, so its rows are unit
 // vectors at the directions' true mutual angles.
@@ -172,6 +179,7 @@ function drawScatter() {
 elSide.onchange = () => { selected = []; renderList(); drawScatter(); };
 elColor.onchange = drawScatter;
 elMod.onchange = drawScatter;
+elOffset.oninput = drawScatter;
 elPtask.onchange = drawScatter;
 renderList();
 drawScatter();

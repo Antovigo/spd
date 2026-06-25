@@ -446,8 +446,9 @@ angles**: each point is embedded via the Cholesky factor of the picked sub-Gram 
 and the three directions are drawn as red oblique arrows (≈ ¾ of the data range, since the V/U
 norm is also an arbitrary gauge), with `aspectmode:"data"`. A colour selector — `result` (the
 task's operation, `a+b` / `a−b` / `a×b`), `a`, or `b`, with an optional modulo (none / 2 / 5 /
-10 / 20 / 25 / 50 / 100) — recolours the points; the current camera is re-applied on every
-redraw so changing colour/mod/picks/points doesn't reset the view. A dark-grey floor shadow aids
+10 / 20 / 25 / 50 / 100) and a phase offset (colours by `(x − offset) mod m`) — recolours the
+points; the current camera is re-applied on every redraw so changing colour/mod/picks/points
+doesn't reset the view. A dark-grey floor shadow aids
 reading. Reads each task's `alive_filtered_<op>.tsv`, optional `subcomp_periods_<op>.tsv`, and
 `hidden_activations_<op>.npz`; directions come from the checkpoint. Output:
 `figures/subspace_scatter/index.html`. The 3D is WebGL (real browser to see the points); a
