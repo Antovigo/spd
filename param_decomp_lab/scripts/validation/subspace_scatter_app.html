@@ -134,8 +134,8 @@ function drawScatter() {
     return {
       type: "scatter3d", mode: "lines+text",
       x: [0, scale * f[0]], y: [0, scale * f[1]], z: [0, scale * f[2]],
-      line: { color: "#333", width: 5 }, text: ["", comps[idx].label],
-      textposition: "top center", textfont: { size: 13 }, hoverinfo: "skip", showlegend: false,
+      line: { color: "#d62728", width: 2 }, text: ["", comps[idx].label],
+      textposition: "top center", textfont: { size: 13, color: "#d62728" }, hoverinfo: "skip", showlegend: false,
     };
   });
   // aspectmode "data" keeps equal scale on every axis, so the oblique angles aren't re-stretched.
