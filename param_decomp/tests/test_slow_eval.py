@@ -486,13 +486,10 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
     spec = resolve_permutation_metrics(lm.site_names, [])
     every, slow_every = 1000, 3000
     renderer = SlowEvalRenderer(is_main=True)
-    # What the train loop actually pays per slow step is the COLLECTIVE accumulate plus the
-    # `submit` DISPATCH; the matplotlib render runs off-thread. In the real loop `slow_every`
-    # train steps separate two slow evals, so a render always finishes in the background
-    # before the next `submit` (its one-in-flight `join` is a no-op). We mimic that gap by
-    # joining the renderer BETWEEN submits, OUTSIDE the timed window — so the budget measures
-    # the dispatch cost the loop pays, not matplotlib wall-clock (off-thread and sensitive to
-    # CPU oversubscription under parallel test runs).
+    # Time only the dispatch the loop pays (accumulate + submit), not the off-thread render.
+    # Joining between submits, outside the timed window, recreates the real loop's gap of
+    # `slow_every` train steps where the render finishes before the next submit (so submit's
+    # one-in-flight `join` is a no-op).
     dispatch_s = 0.0
     for now_step in range(every, 10 * every + 1, every):  # 1000, 2000, ..., 10000
         if slow_eval_due(now_step, every, slow_every, slow_on_first_step=True):
@@ -500,7 +497,7 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
             reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
             renderer.submit(reductions, spec, position_ci=None, components=None, now_step=now_step)
             dispatch_s += time.time() - t0
-            renderer.join()  # let the off-thread render finish, as the train-step gap would
+            renderer.join()
     renderer.join()  # flush
 
     logged_steps = sorted(s for _, s in fake.logged)
