@@ -2,8 +2,8 @@
 
 A GPU-free HTML applet spanning every available task (add / sub / mult). The user picks up to
 3 subcomponents from a thumbnail list — organised into high-level **task** sections, then by
-period — and sees, as a rotatable 3D scatter, the last-token activations of *all* tasks
-projected onto those 3 directions (each point uses its own task's activation):
+period — and a points selector chooses which single task's last-token activations are
+scattered (as a rotatable 3D plot) onto those 3 directions:
 
 - **input** space: the post-RMSNorm MLP input (`mlp_input`) projected onto the unit V
   directions of the up/gate subcomponents (`x · V̂_c`).
