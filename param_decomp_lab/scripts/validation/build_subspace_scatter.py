@@ -126,6 +126,19 @@ def build_subspace_scatter(
         for a, b in zip(a_grid, b_grid, strict=True)
     ]
 
+    # Per-task modulo options for the colour control: integer residues (add/sub) or — when the
+    # task's subcomponents are mostly log-periodic (mult) — the detected log ratios, so colour
+    # can show the multiplicative phase that matches an actual subcomponent frequency.
+    task_mods: list[dict[str, Any]] = []
+    for op in op_list:
+        groups = list(per_op[op]["periods"].values())
+        n_log = sum(g.kind == "log" for g in groups)
+        if n_log > sum(g.kind == "additive" for g in groups):
+            ratios = sorted({round(g.value, 2) for g in groups if g.kind == "log"})
+            task_mods.append({"kind": "log", "values": ratios})
+        else:
+            task_mods.append({"kind": "additive", "values": [2, 5, 10, 20, 25, 50, 100]})
+
     sides: dict[str, Any] = {}
     for side, (which, projs, grid_key) in _SIDES.items():
         acts = {
@@ -195,6 +208,7 @@ def build_subspace_scatter(
             "a": point_a,
             "b": point_b,
             "result": point_result,
+            "task_mods": task_mods,
         },
         "sides": sides,
     }

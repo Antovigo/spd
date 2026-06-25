@@ -30,7 +30,7 @@
   <label>side <select id="side"><option value="input">input</option><option value="output">output</option></select></label>
   <label>points <select id="ptask"></select></label>
   <label>colour <select id="color"><option value="result">result</option><option value="a">a</option><option value="b">b</option></select></label>
-  <label>mod <select id="mod"><option value="1">none</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
+  <label>mod <select id="mod"></select></label>
   <label>offset <input id="offset" type="number" value="0" style="width: 56px" /></label>
   <span id="hint"></span>
 </header>
@@ -49,20 +49,44 @@ let selected = [];  // direction indices for the current side, in pick order, ma
 
 META.tasks.forEach((t, i) => { const o = document.createElement("option"); o.value = i; o.textContent = t; elPtask.appendChild(o); });
 
+// A cyclic hue wheel for multiplicative-phase colouring (0 and 1 are the same colour).
+const CYCLIC = [[0, "#e6194b"], [0.1667, "#ffe119"], [0.3333, "#3cb44b"], [0.5, "#42d4f4"],
+  [0.6667, "#4363d8"], [0.8333, "#f032e6"], [1, "#e6194b"]];
+
 const curSide = () => D.sides[elSide.value];
+const modKind = () => (META.task_mods[+elPtask.value] || {}).kind || "additive";
 const activePoints = () => {  // point indices belonging to the selected task
   const t = +elPtask.value, idx = [];
   for (let p = 0; p < N; p++) if (META.point_task[p] === t) idx.push(p);
   return idx;
 };
+// Populate the mod dropdown with the current task's frequencies (integer residues for add/sub;
+// detected log ratios for mult, which colour by multiplicative phase).
+function populateMods() {
+  const tm = META.task_mods[+elPtask.value] || { kind: "additive", values: [] };
+  const prev = elMod.value;
+  elMod.innerHTML = '<option value="1">none</option>';
+  for (const v of tm.values) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = tm.kind === "log" ? "×" + v : "mod " + v;
+    elMod.appendChild(o);
+  }
+  elMod.value = [...elMod.options].some(o => o.value === prev) ? prev : "1";
+}
 function colorArr(idx) {
   const base = { a: META.a, b: META.b, result: META.result }[elColor.value];
   const m = +elMod.value, off = +elOffset.value || 0;
-  return idx.map(p => (m > 1 ? (((base[p] - off) % m) + m) % m : base[p]));  // (x - offset) mod m
+  if (m <= 1) return idx.map(p => base[p]);
+  if (modKind() === "log") {  // multiplicative phase: frac((log x − offset) / log r)
+    const lr = Math.log(m);
+    return idx.map(p => ((((Math.log(base[p]) - off) / lr) % 1) + 1) % 1);
+  }
+  return idx.map(p => (((base[p] - off) % m) + m) % m);  // (x − offset) mod m
 }
 const colorLabel = () => {
   const m = +elMod.value, off = +elOffset.value || 0;
   if (m <= 1) return elColor.value;
+  if (modKind() === "log") return `${elColor.value} phase ×${m}`;
   return (off ? `(${elColor.value}−${off})` : elColor.value) + " mod " + m;
 };
 
@@ -153,9 +177,10 @@ function drawScatter() {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z.map(() => floorZ),
     marker: { size: 2, color: "#555", opacity: 0.3 }, hoverinfo: "skip", showlegend: false,
   };
+  const cyclic = +elMod.value > 1 && modKind() === "log";  // phase wraps → cyclic colours
   const trace = {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z,
-    marker: { size: 2.5, color: colorArr(idx), colorscale: "Viridis", showscale: true, colorbar: { title: colorLabel(), thickness: 12 } },
+    marker: { size: 2.5, color: colorArr(idx), colorscale: cyclic ? CYCLIC : "Viridis", showscale: true, colorbar: { title: colorLabel(), thickness: 12 } },
     hoverinfo: "skip",
   };
   const axisTraces = selected.map((d, i) => {
@@ -180,7 +205,8 @@ elSide.onchange = () => { selected = []; renderList(); drawScatter(); };
 elColor.onchange = drawScatter;
 elMod.onchange = drawScatter;
 elOffset.oninput = drawScatter;
-elPtask.onchange = drawScatter;
+elPtask.onchange = () => { populateMods(); drawScatter(); };
+populateMods();
 renderList();
 drawScatter();
 </script>
