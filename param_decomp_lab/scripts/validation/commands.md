@@ -237,9 +237,9 @@ uv run python -m $V.find_independent_subspaces "$MODEL_PATH" --op=$OP
 ### 8. Pick-3-subcomponent subspace scatter (CPU)
 
 A Plotly applet spanning every available task: pick up to 3 subcomponents from a thumbnail
-grid (organised into task → period sections) and see all tasks' activations projected onto
-those 3 directions as a rotatable 3D scatter, coloured by task / a / b. Auto-detects the tasks
-with a `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv`.
+grid (organised into task → period sections); a points selector chooses which single task's
+activations are scattered onto those 3 directions, coloured by result (a+b / a×b …) / a / b.
+Auto-detects the tasks with a `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv`.
 
 ```bash
 uv run python -m $V.build_subspace_scatter "$MODEL_PATH"            # all detected tasks

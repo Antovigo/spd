@@ -84,3 +84,23 @@ Run Independent Subspace Analysis on z to find mutually independent blocks, with
 Interpret each block afterwards with the (a, b) grid (e.g. colour a 2D projection by a, b, a+b) and check the blocks are near-orthogonal via principal angles; the discovery itself stays unsupervised.
 
 Again, build an interactive HTML applet (Plotly, self-contained offline) for visualization of the results, reusing the Objective 6 3D machinery (per-subspace 3D projection coloured by a / b / a+b) plus the energy-correlation and principal-angle heatmaps.
+
+# Objective 8
+Build a new HTML applet to visualize activations (either input space post-RMSnorm or the MLP output space) as a 3D scatter plot, using the subspace of 3 user-selected subcomponents.
+On the right, there is a list of subcomponents to pick from, each with a thumbnail showing their inner-activation pattern as a function of the two operands. The user can pick up to 3. The plot is updated live.
+For the input space, the available bases are the V vectors from the up_proj and gate subcomponents. For the output space, they are the U vectors from the down_proj subcomponents.
+The scatterplot is interactive and can be rotated. At the bottom there is a dark grey shadow to help visualization. The shadow should always be at the bottom, and not rotate with the rest of the points. Let me know if this is complicated to implement.
+
+# Objective 9
+To work with multiplication, we need a way to assign periods to subcomponents that activate with a logarithmic pattern: that is, the inner activations should roughly periodic with respect to log(a) or log(b) (or both). This is made trickier by the fact that they are only periodic over a limited range: usually, for very small values of a or b, the resolution is too low to see any periodic pattern. For this objective, come up with a scheme to detect log periods — such that it works even if the periodicity is only apparent for values over some threshold, not the whole range. Of course, make sure you are not overfitting a small set of high value that happen to look periodic by coincidence. Try to find the period for which there is the most evidence that the subcomponent activates periodically, at this period, for x > some threshold value (which should be as low as possible).
+For testing, here are subcomponents from the addmult-L18-03 decomposition that activate logarithmically, at different periods and only for high enough values. These are periodic in both a and b:
+* mlp.up_proj#39
+* mlp.down_proj#373
+* mlp.up_proj#122
+* mlp.up_proj#291
+
+And these are periodic only in a:
+* mlp.down_proj#112
+* mlp.gate_proj#104
+
+Once the detection scheme works well, incorporate it into the script that detects periods. 

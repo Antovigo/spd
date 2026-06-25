@@ -50,6 +50,8 @@ from param_decomp_lab.scripts.validation.common import (  # noqa: E402
 
 _APP_TEMPLATE = Path(__file__).with_name("subspace_scatter_app.html")
 _CANDIDATE_OPS = ("add", "sub", "mult")
+# Per-task result of the operation, used as a colour option.
+_RESULT = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mult": lambda a, b: a * b}
 # side -> (which vector defines the direction, the matrices, the activation grid key)
 _SIDES = {
     "input": ("V", ("gate_proj", "up_proj"), "mlp_input"),
@@ -115,6 +117,11 @@ def build_subspace_scatter(
     point_task = [ti for ti in range(len(op_list)) for _ in range(n * n)]
     point_a = [int(v) for _ in op_list for v in a_grid]
     point_b = [int(v) for _ in op_list for v in b_grid]
+    point_result = [
+        int(_RESULT[op](int(a), int(b)))
+        for op in op_list
+        for a, b in zip(a_grid, b_grid, strict=True)
+    ]
 
     sides: dict[str, Any] = {}
     for side, (which, projs, grid_key) in _SIDES.items():
@@ -179,7 +186,13 @@ def build_subspace_scatter(
         )
 
     payload = {
-        "meta": {"tasks": op_list, "point_task": point_task, "a": point_a, "b": point_b},
+        "meta": {
+            "tasks": op_list,
+            "point_task": point_task,
+            "a": point_a,
+            "b": point_b,
+            "result": point_result,
+        },
         "sides": sides,
     }
     out_dir = (

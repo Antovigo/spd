@@ -28,7 +28,8 @@
 <header>
   <h1>Subspace scatter</h1>
   <label>side <select id="side"><option value="input">input</option><option value="output">output</option></select></label>
-  <label>colour <select id="color"><option value="task">task</option><option value="a">a</option><option value="b">b</option></select></label>
+  <label>points <select id="ptask"></select></label>
+  <label>colour <select id="color"><option value="result">result</option><option value="a">a</option><option value="b">b</option></select></label>
   <label>mod <select id="mod"><option value="1">none</option><option value="2">2</option><option value="5">5</option><option value="10">10</option><option value="20">20</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select></label>
   <span id="hint"></span>
 </header>
@@ -40,17 +41,23 @@
 <script>
 const D = window.PD_DATA, META = D.meta, N = META.point_task.length;
 const elSide = document.getElementById("side"), elColor = document.getElementById("color");
-const elMod = document.getElementById("mod");
+const elMod = document.getElementById("mod"), elPtask = document.getElementById("ptask");
 const grid = document.getElementById("grid"), hint = document.getElementById("hint");
 let selected = [];  // direction indices for the current side, in pick order, max 3
 
+META.tasks.forEach((t, i) => { const o = document.createElement("option"); o.value = i; o.textContent = t; elPtask.appendChild(o); });
+
 const curSide = () => D.sides[elSide.value];
-function colorArr() {
-  if (elColor.value === "task") return META.point_task;
-  const base = { a: META.a, b: META.b }[elColor.value], m = +elMod.value;
-  return m > 1 ? base.map(v => v % m) : base;
+const activePoints = () => {  // point indices belonging to the selected task
+  const t = +elPtask.value, idx = [];
+  for (let p = 0; p < N; p++) if (META.point_task[p] === t) idx.push(p);
+  return idx;
+};
+function colorArr(idx) {
+  const base = { a: META.a, b: META.b, result: META.result }[elColor.value], m = +elMod.value;
+  return idx.map(p => (m > 1 ? base[p] % m : base[p]));
 }
-const colorLabel = () => elColor.value === "task" ? "task" : elColor.value + (+elMod.value > 1 ? " mod " + elMod.value : "");
+const colorLabel = () => elColor.value + (+elMod.value > 1 ? " mod " + elMod.value : "");
 
 // Cholesky of a k×k Gram (k≤3): lower-triangular L with L Lᵀ = G, so its rows are unit
 // vectors at the directions' true mutual angles.
@@ -108,15 +115,16 @@ function toggle(dir) {
 
 // Embed each point so its projection onto each picked direction equals that inner activation,
 // with the directions kept at their real angles (Cholesky of the picked sub-Gram).
-function geometry() {
+function geometry(idx) {
   const dp = curSide().dir_proj, gram = curSide().gram;
   const L = cholesky(selected.map(i => selected.map(j => gram[i][j])));
-  const X = new Array(N), Y = new Array(N), Z = new Array(N);
+  const M = idx.length, X = new Array(M), Y = new Array(M), Z = new Array(M);
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity, zmin = Infinity, zmax = -Infinity;
-  for (let p = 0; p < N; p++) {
+  for (let q = 0; q < M; q++) {
+    const p = idx[q];
     const P = forwardSolve(L, selected.map(d => dp[d][p]));
     const x = P[0] || 0, y = P[1] || 0, z = P[2] || 0;
-    X[p] = x; Y[p] = y; Z[p] = z;
+    X[q] = x; Y[q] = y; Z[q] = z;
     if (x < xmin) xmin = x; if (x > xmax) xmax = x;
     if (y < ymin) ymin = y; if (y > ymax) ymax = y;
     if (z < zmin) zmin = z; if (z > zmax) zmax = z;
@@ -132,16 +140,15 @@ function drawScatter() {
   const gd = document.getElementById("scatter");
   if (k === 0) { Plotly.react("scatter", [], {}); return; }
 
-  const { X, Y, Z, L, floorZ, arrowLen } = geometry();
-  const cb = { title: colorLabel(), thickness: 12 };
-  if (elColor.value === "task") { cb.tickmode = "array"; cb.tickvals = META.tasks.map((_, i) => i); cb.ticktext = META.tasks; }
+  const idx = activePoints();
+  const { X, Y, Z, L, floorZ, arrowLen } = geometry(idx);
   const shadow = {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z.map(() => floorZ),
     marker: { size: 2, color: "#555", opacity: 0.3 }, hoverinfo: "skip", showlegend: false,
   };
   const trace = {
     type: "scatter3d", mode: "markers", x: X, y: Y, z: Z,
-    marker: { size: 2.5, color: colorArr(), colorscale: "Viridis", showscale: true, colorbar: cb },
+    marker: { size: 2.5, color: colorArr(idx), colorscale: "Viridis", showscale: true, colorbar: { title: colorLabel(), thickness: 12 } },
     hoverinfo: "skip",
   };
   const axisTraces = selected.map((d, i) => {
@@ -165,7 +172,7 @@ function drawScatter() {
 elSide.onchange = () => { selected = []; renderList(); drawScatter(); };
 elColor.onchange = drawScatter;
 elMod.onchange = drawScatter;
-if (META.tasks.length < 2) elColor.value = "a";  // task colour is uniform with a single task
+elPtask.onchange = drawScatter;
 renderList();
 drawScatter();
 </script>

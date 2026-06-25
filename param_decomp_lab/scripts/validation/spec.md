@@ -437,17 +437,17 @@ is a thumbnail grid (4 per row) of the alive subcomponents, organised into high-
 sections, then by period — each thumbnail is that subcomponent's inner-activation `(a, b)`
 pattern on its task, signed `RdBu_r`. Periods come from `subcomp_periods_<op>.tsv` when present;
 subcomponents with no assigned period go under a "no period" section (e.g. `mult`, pending a
-log-period scheme). The user clicks up to 3 directions (from any task), and the 3D scatter
-overlays **all** tasks' last-token activations projected onto those 3 unit directions — each
-point uses its own task's activation (**input** = `mlp_input · V̂` (up/gate), **output** =
-`mlp_output · Û` (down)). Each direction's sign (an arbitrary gauge) is flipped so the median
-projection (over all tasks' points) is positive, so its arrow points toward the data. The
-directions are kept at their **true mutual angles**: each point is embedded via the Cholesky
-factor of the picked sub-Gram (`P = L⁻¹s`) and the three directions are drawn as red oblique
-arrows (≈ ¾ of the data range, since the V/U norm is also an arbitrary gauge), with
-`aspectmode:"data"`. A colour selector (task / a / b, with an optional modulo none / 2 / 5 / 10
-/ 20 / 25 / 50 / 100 on a/b) recolours the points; the current camera is re-applied on every
-redraw so changing colour/mod/picks doesn't reset the view. A dark-grey floor shadow aids
+log-period scheme). The user clicks up to 3 directions (from any task); a **points** selector
+chooses which single task's last-token activations are scattered onto those 3 unit directions
+(**input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down)). Each direction's
+sign (an arbitrary gauge) is flipped so the median projection (over all tasks' points) is
+positive, so its arrow points toward the data. The directions are kept at their **true mutual
+angles**: each point is embedded via the Cholesky factor of the picked sub-Gram (`P = L⁻¹s`)
+and the three directions are drawn as red oblique arrows (≈ ¾ of the data range, since the V/U
+norm is also an arbitrary gauge), with `aspectmode:"data"`. A colour selector — `result` (the
+task's operation, `a+b` / `a−b` / `a×b`), `a`, or `b`, with an optional modulo (none / 2 / 5 /
+10 / 20 / 25 / 50 / 100) — recolours the points; the current camera is re-applied on every
+redraw so changing colour/mod/picks/points doesn't reset the view. A dark-grey floor shadow aids
 reading. Reads each task's `alive_filtered_<op>.tsv`, optional `subcomp_periods_<op>.tsv`, and
 `hidden_activations_<op>.npz`; directions come from the checkpoint. Output:
 `figures/subspace_scatter/index.html`. The 3D is WebGL (real browser to see the points); a
