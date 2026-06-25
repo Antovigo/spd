@@ -388,6 +388,7 @@ def run_decomposition_training(
     ci_fn: CIFnArch,
     data: DataConfig | None,
     remat_recon_forwards: bool,
+    remat_ci_fn: bool,
     sample_batch: Callable[[int], Any],
     eval_fn: "Callable[[TrainState, int], LogRecord] | None",
     eval_every: int,
@@ -453,6 +454,7 @@ def run_decomposition_training(
         ci_fn_optimizer=opt_ci,
         total_steps=pd.steps,
         remat_recon_forwards=remat_recon_forwards,
+        remat_ci_fn=False,
         mesh=mesh,
     )
 
@@ -465,6 +467,7 @@ def run_decomposition_training(
                 "n_devices": ndev,
                 "n_processes": jax.process_count(),
                 "remat_recon_forwards": remat_recon_forwards,
+                "remat_ci_fn": remat_ci_fn,
                 "run_id": run.run_id,
                 "run_dir": str(run.run_dir),
             },

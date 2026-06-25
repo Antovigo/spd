@@ -594,6 +594,15 @@ class RuntimeConfig(BaseConfig):
             "substrate knob, no algorithm effect."
         ),
     )
+    remat_ci_fn: bool = Field(
+        default=False,
+        description=(
+            "JAX trainer memory/compute trade: rematerialize the CI-fn forward "
+            "(recompute it in the backward instead of storing its activations). The "
+            "CI-fn activations scale with batch, so this is the main lever for larger "
+            "batch on big targets. Compute substrate knob, no algorithm effect."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_dp(self) -> Self:

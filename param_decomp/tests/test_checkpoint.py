@@ -114,7 +114,7 @@ def _build(seed: int):
         loss_terms=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, mesh=None,
+        remat_recon_forwards=True, remat_ci_fn=False, mesh=None,
     )  # fmt: skip
     resid = jax.random.randint(jax.random.PRNGKey(9), (2, seq), 0, cfg.vocab_size)
     return lm, state, step, resid

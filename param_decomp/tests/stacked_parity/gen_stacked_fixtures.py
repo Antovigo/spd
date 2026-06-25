@@ -195,6 +195,7 @@ def main() -> None:
         total_steps=100,
         recon_plan=subset_chunk_plan(lm.site_names, 3, 1),
         remat_recon_forwards=False,
+        remat_ci_fn=False,
         mesh=None,
     )
     run_key = random.PRNGKey(7)

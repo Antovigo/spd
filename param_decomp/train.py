@@ -122,6 +122,7 @@ def make_train_step(
     ci_fn_optimizer: optax.GradientTransformation,
     total_steps: int,
     remat_recon_forwards: bool,
+    remat_ci_fn: bool,
     mesh: Mesh | None,
 ):
     """Build the `eqx.filter_jit`'d `step(model, state, batch, key) -> (state, metrics)`.
@@ -200,6 +201,15 @@ def make_train_step(
         if remat_recon_forwards
         else masked_forward
     )
+
+    # The CI-fn forward's activations (4-block transformer × n_chunks) are stored for the
+    # backward unless rematerialized. They scale with batch, so recomputing the CI fn in the
+    # backward is the main activation-memory lever for larger batch. `eqx.filter_checkpoint`
+    # handles the CIFn module's static/dynamic split.
+    def _apply_ci_fn(ci_fn: CIFn, taps: dict[str, Array]) -> CI:
+        return ci_fn(taps)
+
+    apply_ci_fn = eqx.filter_checkpoint(_apply_ci_fn) if remat_ci_fn else _apply_ci_fn
 
     def stochastic_entry_masks(
         ci_lower: dict[str, Array],
@@ -417,7 +427,7 @@ def make_train_step(
             components, ci_fn, persistent_sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)
             ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-            ci = batch_sharded_ci(ci_fn_bf16(taps))
+            ci = batch_sharded_ci(apply_ci_fn(ci_fn_bf16, taps))
             faith_loss = faithfulness_loss(model.weight_deltas(components))
             imp_lp, imp_entropy = importance_minimality_terms(ci.upper, pnorm, imp_min.eps)
             imp_loss = imp_lp + imp_min.beta * imp_entropy

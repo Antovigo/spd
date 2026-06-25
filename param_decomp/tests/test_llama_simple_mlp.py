@@ -401,6 +401,7 @@ def test_step_trains_and_has_vpd_signature():
         ci_fn_optimizer=opt_ci,
         total_steps=100,
         remat_recon_forwards=True,
+        remat_ci_fn=False,
         mesh=None,
     )
 

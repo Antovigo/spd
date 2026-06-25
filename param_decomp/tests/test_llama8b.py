@@ -347,6 +347,7 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
         ci_fn_optimizer=opt_ci,
         total_steps=100,
         remat_recon_forwards=True,
+        remat_ci_fn=False,
         mesh=None,
     )
 
@@ -468,6 +469,7 @@ def test_fresh_pgd_adversary_step():
             ci_fn_optimizer=opt_ci,
             total_steps=100,
             remat_recon_forwards=False,
+            remat_ci_fn=False,
             mesh=None,
         )
         tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)

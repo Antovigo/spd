@@ -81,6 +81,7 @@ def _build_step_and_args():
         ci_fn_optimizer=opt_ci,
         total_steps=10,
         remat_recon_forwards=False,
+        remat_ci_fn=False,
         mesh=None,
     )
     return step_fn, lm, state, resid

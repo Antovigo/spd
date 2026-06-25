@@ -271,6 +271,7 @@ def test_train_trajectory_matches():
         ci_fn_optimizer=opt_ci,
         total_steps=100,
         remat_recon_forwards=False,
+        remat_ci_fn=False,
         mesh=None,
     )
     run_key = random.PRNGKey(7)

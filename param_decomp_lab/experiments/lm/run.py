@@ -171,6 +171,7 @@ def train(
         ci_fn=built.ci_fn,
         data=data,
         remat_recon_forwards=built.runtime.remat_recon_forwards,
+        remat_ci_fn=built.runtime.remat_ci_fn,
         sample_batch=sample_batch,
         eval_fn=eval_fn,
         eval_every=eval_every,

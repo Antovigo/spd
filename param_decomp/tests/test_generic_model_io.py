@@ -241,6 +241,7 @@ def test_train_step_runs_through_generic_target():
         ci_fn_optimizer=opt_ci,
         total_steps=10,
         remat_recon_forwards=False,
+        remat_ci_fn=False,
         mesh=None,
     )
 

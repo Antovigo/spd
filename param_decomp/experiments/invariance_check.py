@@ -111,7 +111,7 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         loss_terms=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, mesh=mesh,
+        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh,
     )  # fmt: skip
 
     out = []
