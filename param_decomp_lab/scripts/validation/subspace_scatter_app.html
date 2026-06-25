@@ -118,7 +118,7 @@ function geometry() {
     if (z < zmin) zmin = z; if (z > zmax) zmax = z;
   }
   const range = Math.max(xmax - xmin, ymax - ymin, zmax - zmin, 1e-6);
-  return { X, Y, Z, L, floorZ: zmin, arrowLen: 0.5 * range };  // arrows ≈ ½ the data range
+  return { X, Y, Z, L, floorZ: zmin, arrowLen: 0.75 * range };  // arrows ≈ ¾ the data range
 }
 
 function drawScatter() {
@@ -143,7 +143,7 @@ function drawScatter() {
     return {
       type: "scatter3d", mode: "lines+text",
       x: [0, arrowLen * f[0]], y: [0, arrowLen * f[1]], z: [0, arrowLen * f[2]],
-      line: { color: "#d62728", width: 2 }, text: ["", comps[idx].label],
+      line: { color: "#d62728", width: 3 }, text: ["", comps[idx].label],
       textposition: "top center", textfont: { size: 13, color: "#d62728" }, hoverinfo: "skip", showlegend: false,
     };
   });

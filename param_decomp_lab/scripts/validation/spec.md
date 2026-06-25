@@ -438,7 +438,7 @@ the 3D scatter shows the last-token activation projected onto those 3 unit direc
 **input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down). Each direction's
 sign (an arbitrary gauge) is flipped so the majority of points are positive. The directions are
 kept at their **true mutual angles**: each point is embedded via the Cholesky factor of the
-picked sub-Gram (`P = L⁻¹s`) and the three directions are drawn as red oblique arrows (≈ half
+picked sub-Gram (`P = L⁻¹s`) and the three directions are drawn as red oblique arrows (≈ ¾ of
 the data range, since the V/U norm is also an arbitrary gauge), with `aspectmode:"data"` so the
 angles aren't re-stretched. A colour selector (a / b / a+b) with an optional modulo (none / 2 /
 5 / 10 / 20 / 25 / 50 / 100, to expose digit/period structure) recolours the points; the
