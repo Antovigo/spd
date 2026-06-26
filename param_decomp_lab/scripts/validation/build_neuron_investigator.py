@@ -21,15 +21,23 @@ threshold. Write scores render blue, read scores red — done by flipping the si
 columns and colouring with a diverging RdBu scale.
 Clicking a cell selects that (neuron, subcomponent) pair; the right half then lays the
 subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate / post-SwiGLU-output
-`(a, b)` heatmaps in a 2×2 grid that fills the panel, each with its own colour scale.
+`(a, b)` heatmaps, each with its own colour scale. For a *write* (gate/up) subcomponent it adds
+two more `(a, b)` grids: the subcomponent's contribution to the neuron's gate / up preactivation
+(`inner_act_c · ||V_c|| · U[c, j]`) and the counterfactual preactivation with that contribution
+removed (final − contribution) — i.e. what the neuron's gate / up would be without the
+subcomponent. (Not drawn for *read* (down) subcomponents, where it isn't defined.) An operation
+toggle re-renders every grid on a *different* task's activations (defaulting to the build op,
+switchable to any operation with a saved npz) — to see how the same neuron / subcomponent
+responds to add / sub / mult.
 
-Only the top-`top_neurons` neurons by total interaction score are kept — their up / gate
+Only the top-`top_neurons` neurons by total interaction score are kept — their per-op up / gate
 grids (needed for the right panel) are the bulk of the payload, so the cap bounds the file size.
 
 CPU-only: reads the checkpoint U/V (mmap) plus, from `<run>/analysis/datasets/`, the
 filtered-alive list (`alive_filtered_<op>.tsv`, for mean CI), the periods
-(`subcomp_periods_<op>.tsv`), the inner-activation TSV (`inner_activations_<op>.tsv`), and the
-hidden-activation npz (`hidden_activations_<op>.npz`, for the neuron grids). No forward pass.
+(`subcomp_periods_<op>.tsv`), the build op's inner-activation TSV (`inner_activations_<op>.tsv`,
+for the score), and one hidden-activation npz per operation (`hidden_activations_<o>.npz`, for
+the per-op neuron / subcomponent grids). No forward pass.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.build_neuron_investigator <model_path> \
@@ -123,6 +131,51 @@ def _dense_b64(grid: NDArray[Any]) -> str:
     return base64.b64encode(np.ascontiguousarray(grid, dtype=np.float16).tobytes()).decode("ascii")
 
 
+def _op_panel_grids(
+    npz_path: Path,
+    neuron_ids: NDArray[np.intp],
+    alive: list[Any],
+    uv: dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]],
+    n: int,
+) -> dict[str, str]:
+    """Right-panel grids for one operation: the kept neurons' up/gate `(a, b)` grids and every
+    build-op subcomponent's inner-activation `(a, b)` grid, computed on *this* op's activations
+    (so the toggle shows how the same neuron / subcomponent responds to a different task).
+
+    inner = (op input) · (V_c / ||V_c||): the post-RMSNorm MLP input for write (up/gate)
+    subcomponents, the post-SwiGLU activation `silu(gate)·up` for read (down) ones.
+    """
+    z = np.load(npz_path, allow_pickle=True)
+    up, gate, mlp_in = z["up_preact"], z["gate_preact"], z["mlp_input"]
+    assert int(z["a"].shape[0]) == n, f"{npz_path.name}: grid side {z['a'].shape[0]} != {n}"
+    d_int = up.shape[-1]
+    up_k = np.transpose(up[:, :, neuron_ids], (2, 0, 1)).astype(np.float16)
+    gate_k = np.transpose(gate[:, :, neuron_ids], (2, 0, 1)).astype(np.float16)
+
+    mlp_in32 = mlp_in.astype(np.float32)  # [N, N, d_model] — write subcomponents read this
+    # post-SwiGLU activation [N*N, d_int] — read (down) subcomponents read this; only built if needed.
+    swiglu = (
+        _silu(gate.reshape(n * n, d_int).astype(np.float32))
+        * up.reshape(n * n, d_int).astype(np.float32)
+        if any(a.proj == "down_proj" for a in alive)
+        else None
+    )
+    inner = np.zeros((len(alive), n, n), dtype=np.float32)
+    for i, a in enumerate(alive):
+        v, _ = uv[a.proj]
+        vn = v[:, a.component].astype(np.float32)
+        vn = vn / max(float(np.linalg.norm(vn)), 1e-12)
+        if a.proj == "down_proj":
+            assert swiglu is not None
+            inner[i] = (swiglu @ vn).reshape(n, n)
+        else:
+            inner[i] = mlp_in32 @ vn
+    return {"up": _dense_b64(up_k), "gate": _dense_b64(gate_k), "inner": _dense_b64(inner)}
+
+
+_OP_CANDIDATES = ("add", "sub", "mult")
+
+
 def build_neuron_investigator(
     model_path: ModelPath,
     op: str = "add",
@@ -133,6 +186,12 @@ def build_neuron_investigator(
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
     data_dir = analysis_datasets_dir(run_dir)
+
+    # Operations the right-panel toggle can switch to: those with a saved hidden-activation npz.
+    available_ops = [
+        o for o in _OP_CANDIDATES if (data_dir / f"hidden_activations_{o}.npz").exists()
+    ]
+    assert op in available_ops, f"build op {op!r} has no hidden_activations_{op}.npz in {data_dir}"
 
     alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
     mean_ci = _read_mean_ci(data_dir / f"alive_filtered_{op}.tsv")
@@ -166,15 +225,17 @@ def build_neuron_investigator(
     ).astype(np.float32)
     neuron_h_std = h.std(axis=0)  # [d_int]
     score = np.zeros((len(alive), d_int), dtype=np.float32)
+    # Signed per-neuron write weight ||V_c||·U[c,j] for input (gate/up) subcomponents (0 for reads):
+    # the subcomponent's contribution to neuron j is inner_act_c (normalised) · this weight.
+    write_weight = np.zeros((len(alive), d_int), dtype=np.float32)
     for i, a in enumerate(alive):
         v, u = uv[a.proj]
         v_norm = max(float(np.linalg.norm(v[:, a.component])), 1e-12)
         if a.proj == "down_proj":  # read: neuron-activation std × unit read weight |V[j,c]|/||V_c||
             score[i] = neuron_h_std * (np.abs(v[:, a.component]) / v_norm)
         else:  # write: std of (x·V_c)·U_c[j] over the grid = std(inner_act_c) · ||V_c|| · |U[c,j]|
-            score[i] = (
-                float(inner_grids[(a.proj, a.component)].std()) * v_norm * np.abs(u[a.component, :])
-            )
+            write_weight[i] = v_norm * u[a.component, :]
+            score[i] = float(inner_grids[(a.proj, a.component)].std()) * np.abs(write_weight[i])
 
     # Vertical axis: top-K neurons by total interaction score across every subcomponent / matrix.
     total = score.sum(axis=0)  # [d_int]
@@ -182,13 +243,18 @@ def build_neuron_investigator(
     logger.info(
         f"{len(alive)} subcomponents, top {len(neuron_ids)}/{d_int} neurons by total interaction score"
     )
+    del h  # free the [N*N, d_int] post-SwiGLU buffer before the per-op panel pass
 
     # Signed score matrix [subcomp, neuron]: write (gate/up) +, read (down) − → RdBu.
     signed = score[:, neuron_ids] * np.where(is_read, -1.0, 1.0)[:, None]
+    write_weight_k = write_weight[:, neuron_ids]  # [subcomp, neuron] signed ||V_c||·U[c,j]
 
-    # Neuron up / gate grids reindexed to [K, N, N] (row-major [a, b]) for the right panel.
-    up_k = np.transpose(up_grid[:, :, neuron_ids], (2, 0, 1)).astype(np.float16)
-    gate_k = np.transpose(gate_grid[:, :, neuron_ids], (2, 0, 1)).astype(np.float16)
+    # Right-panel grids per available op (the build op plus any other task with a saved npz), so
+    # the toggle can show how the focused neuron / subcomponent responds to a different operation.
+    ops_grids = {
+        o: _op_panel_grids(data_dir / f"hidden_activations_{o}.npz", neuron_ids, alive, uv, n)
+        for o in available_ops
+    }
 
     payload: dict[str, Any] = {
         "meta": {
@@ -199,6 +265,7 @@ def build_neuron_investigator(
             "n_subcomps": len(alive),
             "n_neurons": len(neuron_ids),
             "page_size": 50,  # neurons (rows) per page
+            "ops": [{"op": o, "symbol": op_symbol(o)} for o in available_ops],
         },
         "subcomps": [
             {
@@ -211,15 +278,16 @@ def build_neuron_investigator(
                 "mean_ci": round(mean_ci[(a.proj, a.component)], 4),
                 "confidence": round(confidence[(a.proj, a.component)], 4),
                 "is_read": bool(a.proj == "down_proj"),
-                "inner": _dense_b64(inner_grids[(a.proj, a.component)]),
             }
             for a in alive
         ],
         "neuron_ids": [int(j) for j in neuron_ids],
         "neuron_totals": [round(float(total[j]), 4) for j in neuron_ids],
         "score": _dense_b64(signed),  # [n_subcomps, n_neurons] signed interaction score
-        "neuron_up": _dense_b64(up_k),  # [n_neurons, N, N]
-        "neuron_gate": _dense_b64(gate_k),
+        # signed write weight ||V_c||·U[c,j]; contribution grid = (per-op inner) · this (input only).
+        "write_weight": _dense_b64(write_weight_k),
+        # per op: {up, gate: [n_neurons, N, N]; inner: [n_subcomps, N, N]} — the right panel.
+        "ops": ops_grids,
     }
 
     out_dir = (

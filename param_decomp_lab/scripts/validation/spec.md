@@ -508,12 +508,22 @@ below the threshold. Write scores render blue, read red (the down
 columns' sign is flipped and an RdBu scale applied), on a shared `|score|` scale.
 Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half then
 lays the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
-post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps in a **2×2 grid that fills the panel**
-(canvases sized from the panel width, so exactly two fit per row), each signed `RdBu_r` on a
-per-heatmap scale with its own colour bar.
+post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps, each signed `RdBu_r` on a per-heatmap
+scale with its own colour bar. For a **write (gate/up) subcomponent** it adds two more grids: the
+subcomponent's contribution to the neuron's gate/up preactivation (`inner_act_c·||V_c||·U[c,j]`)
+and the counterfactual preactivation with it removed (final − contribution) — the neuron's gate/up
+without that subcomponent. (Omitted for read (down) subcomponents.) Hovering any heatmap pixel
+shows a tooltip with the operands `a`, `b` and that cell's value. A **plot-size** control sets the heatmaps' pixels-per-operand-value
+(each `(a, b)` cell is that many px wide); the heatmaps then pack as many per row as the right
+panel's current width allows. The **divider** between the panels is drag-resizable (set the left
+panel's width; the right takes the rest and its heatmaps reflow). An **operation toggle** in the right panel re-renders
+all four grids on a *different* task's activations — defaulting to the build op, switchable to
+any operation with a saved `hidden_activations_<o>.npz` (hidden when only one is available) — so
+the same neuron / subcomponent can be compared across add / sub / mult.
 
-Only the top `--top-neurons` neurons are kept — their up/gate grids (for the right panel) are
-the payload's bulk, so the cap bounds `data.js` size (~28 MB at 512). Reads
-`alive_filtered_<op>.tsv` (mean CI), `subcomp_periods_<op>.tsv`, `inner_activations_<op>.tsv`,
-and `hidden_activations_<op>.npz` (neuron up/gate grids, fp16 base64); U/V from the checkpoint
-(mmap). No forward pass. Smoke-test with `headless_check.py`.
+Only the top `--top-neurons` neurons are kept — their per-op up/gate grids (for the right panel)
+are the payload's bulk, so the cap bounds `data.js` size (~28 MB at 512 for one op, scaling with
+the number of available ops). Reads `alive_filtered_<op>.tsv` (mean CI),
+`subcomp_periods_<op>.tsv`, the build op's `inner_activations_<op>.tsv` (for the score), and one
+`hidden_activations_<o>.npz` per available op (per-op neuron up/gate + subcomponent inner grids,
+fp16 base64); U/V from the checkpoint (mmap). No forward pass. Smoke-test with `headless_check.py`.

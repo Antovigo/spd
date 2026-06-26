@@ -261,7 +261,10 @@ period-confidence; neurons by total interaction score per frequency, paged; writ
 red, with an input/output/all + threshold neuron filter). Clicking a cell selects a (neuron,
 subcomponent) pair;
 the right half shows that subcomponent's inner-activation `(a,b)` heatmap and the neuron's up /
-gate / output heatmaps.
+gate / output heatmaps — plus, for write (gate/up) subcomponents, its contribution to the
+neuron's gate/up and the counterfactual without it — with an **operation toggle** to re-render them on a different task's
+activations (add / sub / mult — any op with a saved npz), a **plot-size** control (px per operand
+value; plots pack as many per row as fit), and a **drag-resizable divider** between the panels.
 
 ```bash
 uv run python -m $V.build_neuron_investigator "$MODEL_PATH" --op=$OP

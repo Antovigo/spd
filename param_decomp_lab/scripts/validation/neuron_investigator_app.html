@@ -13,18 +13,21 @@
   button { font-size: 13px; padding: 2px 10px; cursor: pointer; }
   button:disabled { opacity: 0.4; cursor: default; }
   #hint { font-size: 12px; color: #888; }
-  #wrap { display: flex; align-items: flex-start; }
-  #left, #right { width: 50vw; box-sizing: border-box; padding: 12px; }
-  #left { overflow: auto; max-height: calc(100vh - 50px); }
-  #right { border-left: 1px solid #ddd; overflow-y: auto; max-height: calc(100vh - 50px); }
+  #wrap { display: flex; align-items: stretch; }
+  #left { width: 50vw; flex: 0 0 auto; box-sizing: border-box; padding: 12px; overflow: auto; max-height: calc(100vh - 50px); }
+  #divider { flex: 0 0 6px; cursor: col-resize; background: #e6e6e6; }
+  #divider:hover, #divider.dragging { background: #bbb; }
+  #right { flex: 1 1 0; min-width: 0; box-sizing: border-box; padding: 12px; overflow-y: auto; max-height: calc(100vh - 50px); }
   #right h2 { font-size: 13px; margin: 0 0 8px; }
-  #grids { font-size: 0; }  /* kill inline-block whitespace so two cells fill the row exactly */
+  #grids { font-size: 0; }  /* kill inline-block whitespace; cells then pack as many per row as fit */
   .cell { display: inline-block; vertical-align: top; margin: 0 0 14px 0; }
   .cell .t { font-size: 12px; color: #555; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cell .row { display: flex; gap: 0; align-items: flex-start; }
   canvas { image-rendering: pixelated; }
   #matrix { border: 1px solid #eee; }
   .note { font-size: 11px; color: #999; }
+  #tooltip { position: fixed; pointer-events: none; display: none; z-index: 10; background: rgba(0,0,0,0.82); color: #fff; font-size: 11px; padding: 3px 6px; border-radius: 3px; white-space: nowrap; }
+  .cell .row canvas:first-child { cursor: crosshair; }
 </style>
 </head>
 <body>
@@ -47,12 +50,18 @@
 </header>
 <div id="wrap">
   <div id="left"><canvas id="matrix"></canvas></div>
+  <div id="divider" title="drag to resize the panels"></div>
   <div id="right">
     <h2 id="sel-title">No pair selected</h2>
+    <div id="rightctl" style="margin-bottom:6px">
+      <label id="oplabel">operation <select id="rightop"></select></label>
+      <label style="margin-left:12px">plot size <input id="pxper" type="number" min="1" step="1" value="4" /> px/value</label>
+    </div>
     <div class="note" style="margin-bottom:8px">heatmaps: x = a, y = b (origin bottom-left)</div>
     <div id="grids"></div>
   </div>
 </div>
+<div id="tooltip"></div>
 <script src="data.js"></script>
 <script>
 const D = window.PD_DATA, META = D.meta, N = META.n;
@@ -78,11 +87,20 @@ function decodeDense(u16, off, len) {
 }
 function silu(x) { return x / (1 + Math.exp(-x)); }
 
-// score[s, neuron] = signed interaction score (write +, read -); neuron up/gate grids [neuron, a, b].
+// score[s, neuron] = signed interaction score (write +, read -).
 const SCORE = decodeDense(b64ToU16(D.score), 0, NS * NN);
-const UP = b64ToU16(D.neuron_up), GATE = b64ToU16(D.neuron_gate);
+// write_weight[s, neuron] = signed ||V_c||·U[c,j] (input subcomps; 0 for reads). A write
+// subcomponent's contribution to neuron j on a given op is its inner grid times this scalar.
+const WRITE_WEIGHT = decodeDense(b64ToU16(D.write_weight), 0, NS * NN);
+// Per-op right-panel grids: up/gate [neuron, a, b], inner [subcomp, a, b]. The op toggle picks
+// which task's activations the right panel renders; the left matrix is always the build op.
+const OPS = {};
+for (const o in D.ops) OPS[o] = { up: b64ToU16(D.ops[o].up), gate: b64ToU16(D.ops[o].gate), inner: b64ToU16(D.ops[o].inner) };
+const OP_SYM = {}; META.ops.forEach(m => OP_SYM[m.op] = m.symbol);
+let rightOp = META.op;
+let pxPerValue = 4;  // right-panel heatmap: pixels per integer operand value (matches #pxper default)
 let scoreMax = 1e-6; for (let i = 0; i < SCORE.length; i++) scoreMax = Math.max(scoreMax, Math.abs(SCORE[i]));
-function neuronGrid(u16, k) { return decodeDense(u16, k * N * N, N * N); }
+function gridAt(u16, k) { return decodeDense(u16, k * N * N, N * N); }
 SUBS.forEach(s => { s.label = s.proj[0] + s.c; });  // u/g/d initial + index
 
 // Diverging colour. redPositive: red for +, blue for -. Else (score) blue +, red -.
@@ -284,11 +302,28 @@ function drawColorbar(cv, scale, redPositive) {
   ctx.fillText("−" + scale.toPrecision(2), tx, y0 + barH - 1);
 }
 function maxAbs(v) { let m = 1e-6; for (let i = 0; i < v.length; i++) m = Math.max(m, Math.abs(v[i])); return m; }
+// hover tooltip: a / b are the operands (grid index + 1, since the grids cover 1..N), value is
+// the heatmap cell; b is read bottom-up to match the origin-bottom-left rendering.
+const tooltip = document.getElementById("tooltip");
+function fmtVal(v) { const a = Math.abs(v); return (a !== 0 && (a < 1e-3 || a >= 1e4)) ? v.toExponential(3) : v.toFixed(4); }
+function bindHover(cv, vals) {
+  cv.addEventListener("mousemove", e => {
+    const rect = cv.getBoundingClientRect();
+    const ai = Math.floor((e.clientX - rect.left) / rect.width * N);
+    const bi = N - 1 - Math.floor((e.clientY - rect.top) / rect.height * N);
+    if (ai < 0 || ai >= N || bi < 0 || bi >= N) { tooltip.style.display = "none"; return; }
+    tooltip.textContent = `a=${ai + 1}, b=${bi + 1}, value=${fmtVal(vals[ai * N + bi])}`;
+    tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+    tooltip.style.display = "block";
+  });
+  cv.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+}
 function heatmap(title, vals, side, barW) {
   const { heat, bar } = heatRow(title, side, barW);
   const scale = maxAbs(vals);
   drawGrid(heat, vals, scale, true);
   drawColorbar(bar, scale, true);
+  bindHover(heat, vals);
 }
 
 function drawRight() {
@@ -298,22 +333,55 @@ function drawRight() {
   const role = s.is_read ? "reads from" : "writes to";
   const score = Math.abs(SCORE[sel.s * NN + sel.neuron]);
   selTitle.innerHTML = `${s.proj} #${s.c} (${s.period_label}, mean CI ${s.mean_ci}) ${role} neuron ${nid} · interaction score ${score.toFixed(4)}`;
-  const inner = decodeDense(b64ToU16(s.inner), 0, N * N);
-  const up = neuronGrid(UP, sel.neuron), gate = neuronGrid(GATE, sel.neuron);
+  const og = OPS[rightOp], sym = OP_SYM[rightOp];
+  const inner = gridAt(og.inner, sel.s);
+  const up = gridAt(og.up, sel.neuron), gate = gridAt(og.gate, sel.neuron);
   const out = new Float32Array(N * N);
   for (let i = 0; i < out.length; i++) out[i] = silu(gate[i]) * up[i];
-  // Two columns fill the panel exactly; each = heatmap (square) + colour bar.
-  const colW = Math.floor((grids.clientWidth || 700) / 2);
-  const side = Math.max(80, colW - BAR_W);
-  heatmap(`subcomponent inner act (${s.label})`, inner, side, BAR_W);
-  heatmap(`neuron ${nid} · up`, up, side, BAR_W);
-  heatmap(`neuron ${nid} · gate`, gate, side, BAR_W);
-  heatmap(`neuron ${nid} · output silu(gate)·up`, out, side, BAR_W);
+  // Each (a, b) cell is pxPerValue px, so the heatmap square is pxPerValue·N; cells then pack as
+  // many per row as the right panel's current width allows (inline-block wrapping).
+  const side = Math.max(20, Math.round(pxPerValue * N));
+  heatmap(`${rightOp} (${sym}) · inner act (${s.label})`, inner, side, BAR_W);
+  heatmap(`${rightOp} (${sym}) · neuron ${nid} · up`, up, side, BAR_W);
+  heatmap(`${rightOp} (${sym}) · neuron ${nid} · gate`, gate, side, BAR_W);
+  heatmap(`${rightOp} (${sym}) · neuron ${nid} · output silu(gate)·up`, out, side, BAR_W);
+  // Write (gate/up) subcomponents only: contribution = inner · ||V_c||·U[c,j], and the
+  // counterfactual preactivation (final − contribution) — what the neuron's gate/up would be
+  // without this subcomponent. Undefined for read (down) subcomponents.
+  if (!s.is_read) {
+    const tgt = s.proj === "gate_proj" ? gate : up, tname = s.proj === "gate_proj" ? "gate" : "up";
+    const w = WRITE_WEIGHT[sel.s * NN + sel.neuron];
+    const contrib = new Float32Array(N * N), without = new Float32Array(N * N);
+    for (let i = 0; i < contrib.length; i++) { contrib[i] = inner[i] * w; without[i] = tgt[i] - contrib[i]; }
+    heatmap(`${rightOp} (${sym}) · ${s.label} → neuron ${nid} ${tname} contribution`, contrib, side, BAR_W);
+    heatmap(`${rightOp} (${sym}) · neuron ${nid} ${tname} without ${s.label}`, without, side, BAR_W);
+  }
 }
-window.addEventListener("resize", () => { if (sel) drawRight(); });
+// Plot size is panel-width-independent (fixed pxPerValue), so resizing reflows the cells with
+// no redraw; only a pxPerValue change re-renders.
 
 document.getElementById("meta").textContent =
   `${META.op} (${META.symbol}) · L${META.layer} · ${NS} subcomponents · top ${NN} neurons`;
+// right-panel operation toggle: defaults to the build op; only shown when ≥2 ops are available.
+const elRightOp = document.getElementById("rightop");
+for (const m of META.ops) { const o = document.createElement("option"); o.value = m.op; o.textContent = `${m.op} (${m.symbol})`; elRightOp.appendChild(o); }
+elRightOp.value = rightOp;
+if (META.ops.length < 2) document.getElementById("oplabel").style.display = "none";
+elRightOp.addEventListener("change", () => { rightOp = elRightOp.value; drawRight(); });
+// right-panel plot size: pixels per integer operand value (each (a, b) cell is this many px wide).
+const elPxPer = document.getElementById("pxper");
+elPxPer.addEventListener("input", () => { pxPerValue = Math.max(1, +elPxPer.value || 4); drawRight(); });
+// draggable divider: set the left panel's width; the right panel (flex:1) takes the rest and its
+// heatmap cells reflow to as many per row as fit.
+const divider = document.getElementById("divider"), wrap = document.getElementById("wrap"), leftPane = document.getElementById("left");
+let dragging = false;
+divider.addEventListener("mousedown", e => { dragging = true; divider.classList.add("dragging"); document.body.style.userSelect = "none"; e.preventDefault(); });
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  const wr = wrap.getBoundingClientRect();
+  leftPane.style.width = Math.max(200, Math.min(wr.width - 220, e.clientX - wr.left)) + "px";
+});
+window.addEventListener("mouseup", () => { if (dragging) { dragging = false; divider.classList.remove("dragging"); document.body.style.userSelect = ""; } });
 document.getElementById("prev").addEventListener("click", () => { if (page > 0) { page--; drawMatrix(); } });
 document.getElementById("next").addEventListener("click", () => { if (page < pageCount() - 1) { page++; drawMatrix(); } });
 elRows.value = rowsPerPage;
