@@ -3,12 +3,12 @@
 CONFIG-DRIVEN: the launch mode is a pure function of `runtime.dp` in the run config — no
 `--nodes` / `--local` flags. `dp is None` → run the trainer INLINE in the current process
 (single device, no SLURM, no workspace; smoke / debug). `dp is not None` → submit to SLURM
-across `nodes = dp // 8` nodes (8 GPUs each, one task per GPU).
+across `nodes = dp // 8` nodes (8 GPUs each, one srun task per node claiming all 8 GPUs).
 
 The SLURM path mints the `p-<8hex>` run id, snapshots the working tree to
 `refs/runs/snapshot/<id>`, materializes the snapshot as a shared-FS workspace (clone + the
-one CUDA venv, built at submit time on the login node — the trainer runs 8 srun tasks per
-node, so in-job per-node cloning would race), stamps the run id (+ out_dir / wandb group /
+one CUDA venv, built at submit time on the login node — all nodes share the one FS
+workspace, so in-job cloning would race), stamps the run id (+ out_dir / wandb group /
 tags) into the workspace's single config yaml, and sbatches. Requeues re-enter the same
 immutable workspace.
 """

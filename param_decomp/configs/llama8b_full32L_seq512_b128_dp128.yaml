@@ -587,13 +587,9 @@ pd:
     type: PersistentPGDReconLoss
   - coeff: 1000000.0
     type: FaithfulnessLoss
-  n_mask_samples: 1
-  sampling: continuous
   seed: 0
   steps: 200000
 runtime:
-  autocast_bf16: true
-  device: cuda:0
   dp: 128
   tp: 8
   remat_recon_forwards: true
