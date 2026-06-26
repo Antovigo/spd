@@ -455,7 +455,7 @@ def run_decomposition_training(
         ci_fn_optimizer=opt_ci,
         total_steps=pd.steps,
         remat_recon_forwards=remat_recon_forwards,
-        remat_ci_fn=False,
+        remat_ci_fn=remat_ci_fn,
         mesh=mesh,
     )
 

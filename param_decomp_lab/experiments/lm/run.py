@@ -370,12 +370,16 @@ def main(config: Path, run_id: str) -> None:
         setup_logger(built.run.run_dir / "logs.log")
         _pin_config_copy(built.run.run_dir, "config.yaml", config)
         print(f"persistent XLA compilation cache: {cache_dir}", flush=True)
-        site_summary = " ".join(f"{s.name}:C{s.C}" for s in built.target.sites)
+        site_kind_counts: dict[str, int] = {}
+        for s in built.target.sites:
+            kind = s.name.rsplit(".", 1)[-1]
+            site_kind_counts[kind] = site_kind_counts.get(kind, 0) + 1
+        site_summary = ", ".join(f"{k}×{n}" for k, n in sorted(site_kind_counts.items()))
         assert isinstance(built.data, DataConfig)
         print(
             f"run {built.run.run_name} | {mesh.devices.size} GPU / {jax.process_count()} proc | "
             f"B={built.data.global_batch} seq={built.data.seq_len} "
-            f"sites=[{site_summary}] steps={built.pd.steps}",
+            f"sites={len(built.target.sites)} [{site_summary}] steps={built.pd.steps}",
             flush=True,
         )
 
