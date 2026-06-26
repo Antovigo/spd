@@ -249,11 +249,28 @@ uv run python -m $V.build_subspace_scatter "$MODEL_PATH" --ops=add,mult
 # open figures/subspace_scatter/index.html in a real browser (3D is WebGL).
 ```
 
-Smoke-test the explorer applet in headless Chromium (see `headless_check` below):
+### 10. Neuron investigator (CPU)
+
+A self-contained HTML applet to investigate which neurons take part in the task. Left half:
+a neuron × subcomponent heatmap of the coefficient of interaction (subcomponents sorted by
+period then mean CI; neurons sorted by total coefficient, paged; write blue / read red).
+Clicking a cell selects a (neuron, subcomponent) pair; the right half shows that
+subcomponent's inner-activation `(a,b)` heatmap and the neuron's up / gate / output heatmaps.
+
+```bash
+uv run python -m $V.build_neuron_investigator "$MODEL_PATH" --op=$OP
+# raise --top-neurons (default 512) for deeper paging at the cost of data.js size.
+# open figures/neuron_investigator_<op>/index.html in a real browser.
+```
+
+Smoke-test the explorer / investigator applets in headless Chromium (see `headless_check`):
 
 ```bash
 PY=~/.cache/pd-headless/venv/bin/python
 $PY param_decomp_lab/scripts/validation/headless_check.py \
     "$RUN_DIR/figures/neuron_explorer_$OP/index.html" --wait-ms=2000 --timeout-ms=30000 \
     --probes="document.querySelectorAll('.node').length;;document.getElementById('hint').textContent"
+$PY param_decomp_lab/scripts/validation/headless_check.py \
+    "$RUN_DIR/figures/neuron_investigator_$OP/index.html" --clicks='#matrix' \
+    --probes="document.querySelectorAll('#grids canvas').length"
 ```

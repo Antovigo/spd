@@ -469,3 +469,29 @@ reading. Reads each task's `alive_filtered_<op>.tsv`, optional `subcomp_periods_
 `figures/subspace_scatter/index.html`. The 3D is WebGL (real browser to see the points); a
 screen-fixed (non-orbiting) shadow isn't possible in a single Plotly 3D scene, so the shadow is
 the standard floor projection.
+
+**build_neuron_investigator.py**
+
+args:
+- the path to a decomposed model
+- `--op`: `add` (default) / `sub` / `mult`
+- `--top-neurons`: number of neurons kept (by total coefficient of interaction; default 512)
+- `--output-dir`
+
+CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
+server/CDN/GPU) into `<run_dir>/figures/neuron_investigator_<op>/`. The **coefficient of
+interaction** between a subcomponent and a neuron is the unit-normalized read/write weight
+(always ≥ 0): gate/up (pre-SwiGLU, *write*) `|U[c,j]|/||U_c||`; down (post-SwiGLU, *read*)
+`|V[j,c]|/||V_c||`. The left half is a neuron × subcomponent heatmap — subcomponents (columns)
+sorted by period then mean CI; neurons (rows) sorted by total coefficient across all matrices,
+paged (default page = subcomponent count, adjustable). Write coefficients render blue, read red
+(the down columns' sign is flipped and an RdBu scale applied), on a shared `|coeff|` scale.
+Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half then
+shows the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
+post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps (all signed `RdBu_r`, per-heatmap scale).
+
+Only the top `--top-neurons` neurons are kept — their up/gate grids (for the right panel) are
+the payload's bulk, so the cap bounds `data.js` size (~28 MB at 512). Reads
+`alive_filtered_<op>.tsv` (mean CI), `subcomp_periods_<op>.tsv`, `inner_activations_<op>.tsv`,
+and `hidden_activations_<op>.npz` (neuron up/gate grids, fp16 base64); U/V from the checkpoint
+(mmap). No forward pass. Smoke-test with `headless_check.py`.

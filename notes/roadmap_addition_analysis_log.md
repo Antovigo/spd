@@ -183,4 +183,19 @@ periods). Schema gains log columns; `common.read_subcomp_period_groups` exposes 
 Artifacts in `~/out/runs/addmult-L18-03/`: `hidden_activations_add.npz`,
 `inner_activations_add.tsv`, `alive_filtered_add.tsv` (38 comps), `subcomp_periods_add.tsv`,
 `figures/subcomp_cosine/`, `figures/neuron_explorer_add/`.
-</content>
+
+# Objective 10 — neuron investigator applet
+
+New `build_neuron_investigator.py` + `neuron_investigator_app.html`. **Coefficient of
+interaction** (unit-normalized, ≥0): write (gate/up) `|U_c[j]|/||U_c||`, read (down)
+`|V_c[j]|/||V_c||` — simpler than Obj 5's V-unit *connection strength* (no norm transfer
+between U/V; just normalize the relevant vector). Two-panel applet: left = neuron ×
+subcomponent heatmap (cols sorted period→mean CI; rows = top-K neurons by total coeff,
+paged; write blue / read red via sign-flip + RdBu); click a cell → right panel shows the
+subcomponent inner-act `(a,b)` heatmap + the neuron's up/gate/output (`silu(gate)·up`)
+heatmaps, output computed in JS from embedded gate/up grids.
+- **Size:** per-neuron up/gate grids dominate the payload, so capped to `--top-neurons`
+  (default 512) by total coefficient → data.js ~28 MB. (Per user: top-K, not all 14336.)
+- **Ran on llama8b-add-02** (`model_20000.pth`): 35 subcomponents, top 512/14336 neurons.
+  Headless-checked clean (click `#matrix` → 4 right-panel canvases render, no JS errors).
+- Artifact: `~/out/runs/llama8b-add-02/figures/neuron_investigator_add/{index.html,data.js}`.

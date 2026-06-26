@@ -104,3 +104,23 @@ And these are periodic only in a:
 * mlp.gate_proj#104
 
 Once the detection scheme works well, incorporate it into the script that detects periods. 
+
+# Objective 10
+Make an interactive HTML app to investigate which neurons are involved in the arithmetic tasks. For now, let’s just support addition.
+
+Required data:
+- for each subcomponent x each neuron, we need their coefficient of interaction. For subcomponents in up_proj or gate (that write to the neurons), it’s the absolute value of u/||u|| at that neuron. For subcomponents in down_proj (that read from the neurons), it’s the absolute value of v/||v||.
+
+The applet should have two panels, each taking on horizontal half of the screen.
+
+The left panel should be a 2D heatmap:
+- horizontal axis: alive subcomponents, sorted by period, then by mean CI over the 100x100 addition target data
+- vertical axis: neurons, sorted by their total coefficient of interaction across subcomponents (across all matrices)
+- color: the coefficient of interaction. Subcomponents that write to the neuron should be shown on a white-to-blue color scale, and subcomponents that read from the neuron should be show on a white-to-red scale. A simple way to do that is to use a RdBu diverging scale, and flip the sign of output subcomponents (since coefficients of interaction are always positive).
+  
+  The heatmap should only show as many neurons as fit on the screen (the number of alive subcomponents is a good starting point). Then, there should be buttons to scroll to the next/previous page.
+  By clicking on the heatmap, the user selects a neuron/subcomponent pair, which gets highlighted with a thin black border. This displays information in the right panel.
+
+  The right panel shows information about the selected neuron/subcomponent pair:
+  - the inner activation heatmap of that subcomponent as a function of the two operands a and b
+  - heatmaps of the up_proj, gate and output values for the selected neuron as a function of the two operands a and b

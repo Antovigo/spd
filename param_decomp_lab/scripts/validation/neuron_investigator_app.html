@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Neuron investigator</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #fff; color: #222; }
+  header { padding: 8px 16px; border-bottom: 1px solid #ddd; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 10px 0 0; }
+  label { font-size: 13px; }
+  input[type=number] { width: 60px; padding: 2px 4px; font-size: 13px; }
+  button { font-size: 13px; padding: 2px 10px; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #hint { font-size: 12px; color: #888; }
+  #wrap { display: flex; align-items: flex-start; }
+  #left, #right { width: 50vw; box-sizing: border-box; padding: 12px; }
+  #left { overflow: auto; max-height: calc(100vh - 50px); }
+  #right { border-left: 1px solid #ddd; }
+  #right h2 { font-size: 13px; margin: 0 0 8px; }
+  .cell { display: inline-block; margin: 0 14px 14px 0; vertical-align: top; }
+  .cell .t { font-size: 12px; color: #555; margin-bottom: 3px; }
+  canvas { image-rendering: pixelated; }
+  #matrix { border: 1px solid #eee; }
+  .note { font-size: 11px; color: #999; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Neuron investigator</h1>
+  <span id="meta"></span>
+  <button id="prev">&larr; prev</button>
+  <span id="page"></span>
+  <button id="next">next &rarr;</button>
+  <label>rows/page <input id="rows" type="number" min="1" /></label>
+  <span id="hint">click a cell to inspect a (neuron, subcomponent) pair</span>
+</header>
+<div id="wrap">
+  <div id="left"><canvas id="matrix"></canvas></div>
+  <div id="right">
+    <h2 id="sel-title">No pair selected</h2>
+    <div id="grids"></div>
+    <div class="note">heatmaps: x = a, y = b (origin bottom-left)</div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script>
+const D = window.PD_DATA, META = D.meta, N = META.n;
+const SUBS = D.subcomps, NS = META.n_subcomps, NN = META.n_neurons;
+
+function b64ToBytes(b64) {
+  const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function b64ToU16(b64) { return new Uint16Array(b64ToBytes(b64).buffer); }
+function h2f(h) {
+  const s = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, f = h & 0x03ff;
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  if (e === 0x1f) return f ? NaN : (s ? -Infinity : Infinity);
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+function decodeDense(u16, off, len) {
+  const out = new Float32Array(len);
+  for (let k = 0; k < len; k++) out[k] = h2f(u16[off + k]);
+  return out;
+}
+function silu(x) { return x / (1 + Math.exp(-x)); }
+
+// coeff[s, neuron] signed (write +, read -); neuron up/gate grids [neuron, a, b].
+const COEFF = decodeDense(b64ToU16(D.coeff), 0, NS * NN);
+const UP = b64ToU16(D.neuron_up), GATE = b64ToU16(D.neuron_gate);
+let coeffMax = 1e-6; for (let i = 0; i < COEFF.length; i++) coeffMax = Math.max(coeffMax, Math.abs(COEFF[i]));
+function neuronGrid(u16, k) { return decodeDense(u16, k * N * N, N * N); }
+SUBS.forEach(s => { s.label = s.proj[0] + s.c; });  // u/g/d initial + index
+
+// Diverging colour. redPositive: red for +, blue for -. Else (coeff) blue +, red -.
+function divColor(t, redPositive) {
+  t = Math.max(-1, Math.min(1, t));
+  const c = Math.round(255 * (1 - Math.abs(t)));
+  const pos = redPositive ? [255, c, c] : [c, c, 255];
+  const neg = redPositive ? [c, c, 255] : [255, c, c];
+  return t >= 0 ? pos : neg;
+}
+
+// ---- left: neuron x subcomponent matrix -------------------------------------------------
+const matrix = document.getElementById("matrix"), mctx = matrix.getContext("2d");
+const elRows = document.getElementById("rows"), elPage = document.getElementById("page");
+const COLW = 16, LABEL_TOP = 64, LABEL_LEFT = 56;
+let page = 0, rowsPerPage = META.page_size;
+let sel = null;  // {s, neuron}  (global subcomp index, global neuron index)
+
+function pageCount() { return Math.ceil(NN / rowsPerPage); }
+function drawMatrix() {
+  const r0 = page * rowsPerPage, r1 = Math.min(NN, r0 + rowsPerPage), rows = r1 - r0;
+  const cellH = COLW, w = LABEL_LEFT + NS * COLW, h = LABEL_TOP + rows * cellH;
+  matrix.width = w; matrix.height = h;
+  mctx.clearRect(0, 0, w, h);
+  mctx.font = "10px sans-serif";
+  // cells
+  for (let ri = 0; ri < rows; ri++) {
+    const neuron = r0 + ri;
+    for (let s = 0; s < NS; s++) {
+      const [cr, cg, cb] = divColor(COEFF[s * NN + neuron] / coeffMax, false);
+      mctx.fillStyle = `rgb(${cr},${cg},${cb})`;
+      mctx.fillRect(LABEL_LEFT + s * COLW, LABEL_TOP + ri * cellH, COLW, cellH);
+    }
+  }
+  // grid lines
+  mctx.strokeStyle = "#eee"; mctx.lineWidth = 1;
+  for (let s = 0; s <= NS; s++) { mctx.beginPath(); mctx.moveTo(LABEL_LEFT + s * COLW, LABEL_TOP); mctx.lineTo(LABEL_LEFT + s * COLW, h); mctx.stroke(); }
+  for (let ri = 0; ri <= rows; ri++) { mctx.beginPath(); mctx.moveTo(LABEL_LEFT, LABEL_TOP + ri * cellH); mctx.lineTo(w, LABEL_TOP + ri * cellH); mctx.stroke(); }
+  // column labels (rotated)
+  mctx.fillStyle = "#444"; mctx.textAlign = "left";
+  for (let s = 0; s < NS; s++) {
+    mctx.save();
+    mctx.translate(LABEL_LEFT + s * COLW + COLW / 2 + 3, LABEL_TOP - 4);
+    mctx.rotate(-Math.PI / 2);
+    mctx.fillText(SUBS[s].label, 0, 0);
+    mctx.restore();
+  }
+  // row labels (neuron ids)
+  mctx.textAlign = "right";
+  for (let ri = 0; ri < rows; ri++) {
+    mctx.fillStyle = "#444";
+    mctx.fillText(D.neuron_ids[r0 + ri], LABEL_LEFT - 4, LABEL_TOP + ri * cellH + cellH - 4);
+  }
+  // selection border (if on this page)
+  if (sel && sel.neuron >= r0 && sel.neuron < r1) {
+    mctx.strokeStyle = "#000"; mctx.lineWidth = 2;
+    mctx.strokeRect(LABEL_LEFT + sel.s * COLW + 1, LABEL_TOP + (sel.neuron - r0) * cellH + 1, COLW - 2, cellH - 2);
+  }
+  elPage.textContent = `neurons ${r0 + 1}–${r1} of ${NN} · page ${page + 1}/${pageCount()}`;
+  document.getElementById("prev").disabled = page <= 0;
+  document.getElementById("next").disabled = page >= pageCount() - 1;
+}
+
+matrix.addEventListener("click", e => {
+  const rect = matrix.getBoundingClientRect();
+  const x = e.clientX - rect.left - LABEL_LEFT, y = e.clientY - rect.top - LABEL_TOP;
+  if (x < 0 || y < 0) return;
+  const s = Math.floor(x / COLW), ri = Math.floor(y / COLW);
+  if (s >= NS) return;
+  const neuron = page * rowsPerPage + ri;
+  if (neuron >= NN) return;
+  sel = { s, neuron };
+  drawMatrix(); drawRight();
+});
+
+// ---- right: selected pair heatmaps ------------------------------------------------------
+const grids = document.getElementById("grids"), selTitle = document.getElementById("sel-title");
+function heatCanvas(title) {
+  const wrap = document.createElement("div"); wrap.className = "cell";
+  const t = document.createElement("div"); t.className = "t"; t.textContent = title;
+  const cv = document.createElement("canvas"); cv.width = 200; cv.height = 200;
+  wrap.appendChild(t); wrap.appendChild(cv); grids.appendChild(wrap);
+  return cv;
+}
+function drawGrid(cv, vals, scale, redPositive) {
+  const ctx = cv.getContext("2d"), cell = cv.width / N, img = ctx.createImageData(cv.width, cv.height);
+  for (let a = 0; a < N; a++) for (let b = 0; b < N; b++) {
+    const [r, g, bl] = divColor(vals[a * N + b] / scale, redPositive);
+    for (let py = 0; py < cell; py++) for (let px = 0; px < cell; px++) {
+      const x = Math.floor(a * cell) + px, yy = Math.floor((N - 1 - b) * cell) + py;
+      const o = (yy * cv.width + x) * 4;
+      img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = bl; img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function maxAbs(v) { let m = 1e-6; for (let i = 0; i < v.length; i++) m = Math.max(m, Math.abs(v[i])); return m; }
+
+function drawRight() {
+  grids.innerHTML = "";
+  if (!sel) { selTitle.textContent = "No pair selected"; return; }
+  const s = SUBS[sel.s], nid = D.neuron_ids[sel.neuron];
+  const role = s.is_read ? "reads from" : "writes to";
+  const coeff = Math.abs(COEFF[sel.s * NN + sel.neuron]);
+  selTitle.innerHTML = `${s.proj} #${s.c} (period ${s.period}, mean CI ${s.mean_ci}) ${role} neuron ${nid} · coeff ${coeff.toFixed(3)}`;
+  const inner = decodeDense(b64ToU16(s.inner), 0, N * N);
+  const up = neuronGrid(UP, sel.neuron), gate = neuronGrid(GATE, sel.neuron);
+  const out = new Float32Array(N * N);
+  for (let i = 0; i < out.length; i++) out[i] = silu(gate[i]) * up[i];
+  drawGrid(heatCanvas(`subcomponent inner act (${s.label})`), inner, maxAbs(inner), true);
+  drawGrid(heatCanvas(`neuron ${nid} · up`), up, maxAbs(up), true);
+  drawGrid(heatCanvas(`neuron ${nid} · gate`), gate, maxAbs(gate), true);
+  drawGrid(heatCanvas(`neuron ${nid} · output silu(gate)·up`), out, maxAbs(out), true);
+}
+
+document.getElementById("meta").textContent =
+  `${META.op} (${META.symbol}) · L${META.layer} · ${NS} subcomponents · top ${NN} neurons`;
+document.getElementById("prev").addEventListener("click", () => { if (page > 0) { page--; drawMatrix(); } });
+document.getElementById("next").addEventListener("click", () => { if (page < pageCount() - 1) { page++; drawMatrix(); } });
+elRows.value = rowsPerPage;
+elRows.addEventListener("change", () => {
+  rowsPerPage = Math.max(1, Math.min(NN, +elRows.value || META.page_size));
+  page = 0; drawMatrix();
+});
+drawMatrix(); drawRight();
+</script>
+</body>
+</html>
