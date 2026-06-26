@@ -226,6 +226,9 @@ Rewired the neuron investigator to use it everywhere (left heatmap colour, top-K
 selection, neuron frequency sort, right-panel title). Input/output scores share the RdBu scale —
 visually balanced on add-02 (both write/read columns visible). Renamed payload `coeff`→`score`,
 JS `COEFF`→`SCORE`.
-- **Filter (per user):** "min max-score" field hides neurons whose largest single interaction
-  score (over subcomponents) is below the threshold. On add-02: top-512 max-scores span
-  max 1.37 / p50 0.12 / min 0.067; threshold 0.1 → 425 neurons, 0.3 → 27. Headless-checked clean.
+- **Filter (per user):** a neuron filter — `input`/`output`/`all` dropdown (replacing the
+  one-option neuron-sort dropdown) + a typed threshold — hides neurons whose **total**
+  interaction score over the chosen subcomponent scope is below the threshold. On add-02 at
+  threshold 0.2: all/input keep 512, output → 19 (read coupling is sparse). Headless-checked clean.
+- **Ran on addmult-L18-03** (`model_28000.pth`, `--op=add`): 48 subcomponents, top 512 neurons,
+  data.js 28.7 MB → `~/out/runs/addmult-L18-03/analysis/neuron_investigator_add/`. Renders clean.

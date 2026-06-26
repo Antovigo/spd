@@ -30,12 +30,14 @@
 <header>
   <h1>Neuron investigator</h1>
   <span id="meta"></span>
-  <label>neuron sort
-    <select id="sort">
-      <option value="freq">total interaction score per frequency</option>
+  <label>filter neurons by
+    <select id="filterscope">
+      <option value="all">total score (all)</option>
+      <option value="input">total score (input)</option>
+      <option value="output">total score (output)</option>
     </select>
   </label>
-  <label>min max-score <input id="minscore" type="number" min="0" step="0.001" value="0" /></label>
+  <label>min total score <input id="minscore" type="number" min="0" step="0.001" value="0" /></label>
   <button id="prev">&larr; prev</button>
   <span id="page"></span>
   <button id="next">next &rarr;</button>
@@ -133,20 +135,27 @@ function computeNeuronOrder() {
 // ---- left: neuron x subcomponent matrix -------------------------------------------------
 const matrix = document.getElementById("matrix"), mctx = matrix.getContext("2d");
 const elRows = document.getElementById("rows"), elPage = document.getElementById("page");
-const elMinScore = document.getElementById("minscore");
+const elMinScore = document.getElementById("minscore"), elScope = document.getElementById("filterscope");
 const COLW = 16, BAND_H = 18, NAME_H = 46, LABEL_TOP = BAND_H + NAME_H, LABEL_LEFT = 56;
-let page = 0, rowsPerPage = META.page_size, minScore = 0;
+let page = 0, rowsPerPage = META.page_size, minScore = 0, filterScope = "all";
 const layout = computeSubcompLayout();     // subcomponent columns (fixed order)
 const neuronOrder = computeNeuronOrder();  // neuron rows, by frequency coupling
-// Each neuron's max |interaction score| across subcomponents — drives the threshold filter.
-const neuronMaxScore = new Float32Array(NN);
+// Each neuron's total interaction score over input (gate/up), output (down), and all
+// subcomponents — the threshold filter keeps neurons whose chosen-scope total ≥ minScore.
+const neuronTotal = { all: new Float32Array(NN), input: new Float32Array(NN), output: new Float32Array(NN) };
 for (let nrn = 0; nrn < NN; nrn++) {
-  let m = 0;
-  for (let s = 0; s < NS; s++) { const v = Math.abs(SCORE[s * NN + nrn]); if (v > m) m = v; }
-  neuronMaxScore[nrn] = m;
+  let ti = 0, to = 0;
+  for (let s = 0; s < NS; s++) {
+    const v = Math.abs(SCORE[s * NN + nrn]);
+    if (SUBS[s].is_read) to += v; else ti += v;
+  }
+  neuronTotal.input[nrn] = ti; neuronTotal.output[nrn] = to; neuronTotal.all[nrn] = ti + to;
 }
 let visible = neuronOrder.slice();  // neuronOrder filtered by minScore (rows actually shown)
-function applyFilter() { visible = neuronOrder.filter(nrn => neuronMaxScore[nrn] >= minScore); }
+function applyFilter() {
+  const tot = neuronTotal[filterScope];
+  visible = neuronOrder.filter(nrn => tot[nrn] >= minScore);
+}
 let sel = null;  // {s, neuron} — global subcomponent build index, global neuron build index
 
 function pageCount() { return Math.max(1, Math.ceil(visible.length / rowsPerPage)); }
@@ -304,6 +313,10 @@ elRows.addEventListener("change", () => {
 });
 elMinScore.addEventListener("input", () => {
   minScore = Math.max(0, +elMinScore.value || 0);
+  applyFilter(); page = 0; drawMatrix();
+});
+elScope.addEventListener("change", () => {
+  filterScope = elScope.value;
   applyFilter(); page = 0; drawMatrix();
 });
 drawMatrix(); drawRight();

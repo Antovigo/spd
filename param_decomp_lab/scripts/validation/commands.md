@@ -258,7 +258,8 @@ A self-contained HTML applet to investigate which neurons take part in the task.
 a neuron × subcomponent heatmap of the interaction score (the std over the target grid of what
 each subcomponent writes to / reads from each neuron; subcomponents sorted by period → matrix →
 period-confidence; neurons by total interaction score per frequency, paged; write blue / read
-red, with a max-score threshold filter). Clicking a cell selects a (neuron, subcomponent) pair;
+red, with an input/output/all + threshold neuron filter). Clicking a cell selects a (neuron,
+subcomponent) pair;
 the right half shows that subcomponent's inner-activation `(a,b)` heatmap and the neuron's up /
 gate / output heatmaps.
 

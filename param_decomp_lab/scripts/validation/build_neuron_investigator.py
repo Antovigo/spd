@@ -14,9 +14,10 @@ ordered by period, then matrix (gate > up > down), then the confidence the perio
 (the chosen fit's CV R²) — with thick delimiters between periods and thin ones between
 matrices, and period band labels above the names. Neurons (rows) are ordered by total
 interaction score per frequency (grouped by the period they couple to most strongly, then by
-that coupling), paged 50 at a time, with a min max-score field that hides neurons whose largest
-single interaction score is below the threshold. Write scores render blue, read scores red —
-done by flipping the sign of down (read) columns and colouring with a diverging RdBu scale.
+that coupling), paged 50 at a time. A neuron filter hides those whose total interaction score —
+over input (gate/up), output (down), or all subcomponents per a dropdown — is below a typed
+threshold. Write scores render blue, read scores red — done by flipping the sign of down (read)
+columns and colouring with a diverging RdBu scale.
 Clicking a cell selects that (neuron, subcomponent) pair; the right half then stacks
 (scrollable) the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
 post-SwiGLU-output `(a, b)` heatmaps, each with a colour scale.
