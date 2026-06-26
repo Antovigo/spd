@@ -255,10 +255,12 @@ uv run python -m $V.build_subspace_scatter "$MODEL_PATH" --ops=add,mult
 ### 10. Neuron investigator (CPU)
 
 A self-contained HTML applet to investigate which neurons take part in the task. Left half:
-a neuron × subcomponent heatmap of the coefficient of interaction (subcomponents sorted by
-period then mean CI; neurons sorted by total coefficient, paged; write blue / read red).
-Clicking a cell selects a (neuron, subcomponent) pair; the right half shows that
-subcomponent's inner-activation `(a,b)` heatmap and the neuron's up / gate / output heatmaps.
+a neuron × subcomponent heatmap of the interaction score (the std over the target grid of what
+each subcomponent writes to / reads from each neuron; subcomponents sorted by period → matrix →
+period-confidence; neurons by total interaction score per frequency, paged; write blue / read
+red, with a max-score threshold filter). Clicking a cell selects a (neuron, subcomponent) pair;
+the right half shows that subcomponent's inner-activation `(a,b)` heatmap and the neuron's up /
+gate / output heatmaps.
 
 ```bash
 uv run python -m $V.build_neuron_investigator "$MODEL_PATH" --op=$OP

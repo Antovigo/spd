@@ -124,3 +124,14 @@ The left panel should be a 2D heatmap:
   The right panel shows information about the selected neuron/subcomponent pair:
   - the inner activation heatmap of that subcomponent as a function of the two operands a and b
   - heatmaps of the up_proj, gate and output values for the selected neuron as a function of the two operands a and b
+
+# Objective 11
+Let’s redefine the coefficient of interaction, so it better accounts for the actual variation of activations over the target data.
+Let x be the subcomponent vector that interacts with the neurons: u for input matrices and v for the output matrix. Currently the coefficient of interaction is abs(x/||x||). This means that a subcomponent with an overall low ||x|| will get high coeffs of interaction, even if this subcomponent has little effect on the neuron.
+So let’s adopt a new definition, based on the standard deviation of activations across the target dataset. This will be called "interaction score" and replace the previous coefficient of interaction.
+- for input subcomponents, a neuron’s interaction score is the standard deviation of what the subcomponent writes to that neuron over the target data. It can be calculated from the subcomponent’s inner activations and the subcomponent’s u and v vectors (remember that the inner activation is defined as the dot product between the input activations and the subcomponent’s normalized input vector  v/||v||).
+- for output subcomponents, a neuron’s interaction score is simply the standard deviation of the neuron’s final activation (after swiGLU, i.e. what’s fed to the down_proj for this neuron) multiplied by the the subcomponent’s normalized input vector v/||v|| for that neuron.
+This means we have two slightly different metrics for input and output subcomponents, but it should be fine for now.
+Update the neuron investigator so it uses the new metrics instead of the previous ones.
+
+Add a selector to filter neurons based on their max interaction score across subcomponents (so I can type in a threshold).

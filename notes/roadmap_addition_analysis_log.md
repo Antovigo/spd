@@ -210,3 +210,22 @@ Reserved `<run>/figures/` for training; all validation scripts now write dataset
 `<run>/analysis/datasets/` and figures/applets to `<run>/analysis/<name>/`. New `common.py`
 helpers `analysis_dir` / `analysis_datasets_dir` / `run_dir_of_dataset`. Migrated + de-staled
 both `llama8b-add-02` and `addmult-L18-03` on disk. See commit `cf6464f70`.
+
+Further investigator iterations: subcomponent columns fixed-sorted period→matrix→period-confidence
+(thick period / thin matrix delimiters); neuron rows by total-score-per-frequency (single option).
+
+# Objective 11 — interaction score (replaces coefficient of interaction)
+
+Per-(subcomponent, neuron) metric is now the **std over the target grid** of what the
+subcomponent writes/reads, so a low-‖x‖ subcomponent no longer gets inflated coupling:
+- input (gate/up, write): `std(inner_act_c) · ||V_c|| · |U[c,j]|` (std of the contribution
+  `(x·V_c)·U[c,j]`; ‖V_c‖·U[c,j] is gauge-invariant).
+- output (down, read): `std_grid(silu(gate_j)·up_j) · |V[j,c]|/||V_c||` (per-neuron post-SwiGLU
+  activation std × unit read weight).
+Rewired the neuron investigator to use it everywhere (left heatmap colour, top-K neuron
+selection, neuron frequency sort, right-panel title). Input/output scores share the RdBu scale —
+visually balanced on add-02 (both write/read columns visible). Renamed payload `coeff`→`score`,
+JS `COEFF`→`SCORE`.
+- **Filter (per user):** "min max-score" field hides neurons whose largest single interaction
+  score (over subcomponents) is below the threshold. On add-02: top-512 max-scores span
+  max 1.37 / p50 0.12 / min 0.067; threshold 0.1 → 425 neurons, 0.3 → 27. Headless-checked clean.

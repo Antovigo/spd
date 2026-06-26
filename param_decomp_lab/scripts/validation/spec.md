@@ -485,20 +485,25 @@ the standard floor projection.
 args:
 - the path to a decomposed model
 - `--op`: `add` (default) / `sub` / `mult`
-- `--top-neurons`: number of neurons kept (by total coefficient of interaction; default 512)
+- `--top-neurons`: number of neurons kept (by total interaction score; default 512)
 - `--output-dir`
 
 CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
-server/CDN/GPU) into `<run_dir>/analysis/neuron_investigator_<op>/`. The **coefficient of
-interaction** between a subcomponent and a neuron is the unit-normalized read/write weight
-(always ≥ 0): gate/up (pre-SwiGLU, *write*) `|U[c,j]|/||U_c||`; down (post-SwiGLU, *read*)
-`|V[j,c]|/||V_c||`. The left half is a neuron × subcomponent heatmap. Subcomponents (columns)
-are ordered by **period, then matrix** (gate > up > down), then the confidence the period is
-correct (the chosen fit's CV R²) — with period band labels above the names, thick delimiters
-between periods and thin between matrices. Neurons (rows) are ordered **by total coefficient
-per frequency** (the only sort option: grouped by the period they couple to most strongly, then
-by that coupling), paged 50 at a time (adjustable). Write coefficients render blue, read red
-(the down columns' sign is flipped and an RdBu scale applied), on a shared `|coeff|` scale.
+server/CDN/GPU) into `<run_dir>/analysis/neuron_investigator_<op>/`. The **interaction score**
+between a subcomponent and a neuron is the std, over the target grid, of what the subcomponent
+writes to / reads from that neuron (always ≥ 0): gate/up (pre-SwiGLU, *write*)
+`std(inner_act_c)·||V_c||·|U[c,j]|` (std of the contribution `(x·V_c)·U[c,j]`); down
+(post-SwiGLU, *read*) `std_grid(silu(gate_j)·up_j)·|V[j,c]|/||V_c||` (the neuron's post-SwiGLU
+activation std × unit read weight) — two slightly different metrics for input vs output, sharing
+a scale. The left half is a neuron × subcomponent heatmap. Subcomponents (columns) are ordered
+by **period, then matrix** (gate > up > down), then the confidence the period is correct (the
+chosen fit's CV R²) — with period band labels above the names, thick delimiters between periods
+and thin between matrices. Neurons (rows) are ordered **by total interaction score per
+frequency** (the only sort option: grouped by the period they couple to most strongly, then by
+that coupling), paged 50 at a time (adjustable), with a **min max-score** field that hides
+neurons whose largest single interaction score (over all subcomponents) is below the threshold.
+Write scores render blue, read red (the down
+columns' sign is flipped and an RdBu scale applied), on a shared `|score|` scale.
 Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half
 (vertically scrollable) then stacks the subcomponent's inner-activation `(a, b)` heatmap and the
 neuron's up / gate / post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps — large, each signed

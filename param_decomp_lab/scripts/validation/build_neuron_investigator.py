@@ -1,24 +1,28 @@
 """Build a GPU-free HTML app to investigate which neurons take part in an arithmetic task.
 
 For L18's MLP it cross-tabulates every filtered-alive subcomponent against the hidden
-neurons it couples to, via the per-(subcomponent, neuron) **coefficient of interaction**
-(the unit-normalized read/write weight, always ≥ 0):
-- gate / up (pre-SwiGLU, *write* to neurons): `|U[c, j]| / ||U_c||`,
-- down (post-SwiGLU, *read* from neurons): `|V[j, c]| / ||V_c||`.
+neurons it couples to, via the per-(subcomponent, neuron) **interaction score** — the
+standard deviation, over the target grid, of what the subcomponent writes to / reads from
+that neuron (always ≥ 0):
+- gate / up (pre-SwiGLU, *write*): `std(inner_act_c) · ||V_c|| · |U[c, j]|` — the std over the
+  100×100 grid of the contribution `(x·V_c)·U[c,j]` the subcomponent adds to neuron `j`,
+- down (post-SwiGLU, *read*): `std_grid(silu(gate_j)·up_j) · |V[j, c]| / ||V_c||` — the neuron's
+  post-SwiGLU-activation std times the subcomponent's unit read weight.
 
 The applet's left half is a neuron × subcomponent heatmap. Subcomponents (columns) are
 ordered by period, then matrix (gate > up > down), then the confidence the period is correct
 (the chosen fit's CV R²) — with thick delimiters between periods and thin ones between
 matrices, and period band labels above the names. Neurons (rows) are ordered by total
-coefficient per frequency (grouped by the period they couple to most strongly, then by that
-coupling), paged 50 at a time. Write coefficients render blue, read coefficients red — done
-by flipping the sign of down (read) columns and colouring with a diverging RdBu scale.
+interaction score per frequency (grouped by the period they couple to most strongly, then by
+that coupling), paged 50 at a time, with a min max-score field that hides neurons whose largest
+single interaction score is below the threshold. Write scores render blue, read scores red —
+done by flipping the sign of down (read) columns and colouring with a diverging RdBu scale.
 Clicking a cell selects that (neuron, subcomponent) pair; the right half then stacks
 (scrollable) the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
 post-SwiGLU-output `(a, b)` heatmaps, each with a colour scale.
 
-Only the top-`top_neurons` neurons by total coefficient are kept — their up / gate grids
-(needed for the right panel) are the bulk of the payload, so the cap bounds the file size.
+Only the top-`top_neurons` neurons by total interaction score are kept — their up / gate
+grids (needed for the right panel) are the bulk of the payload, so the cap bounds the file size.
 
 CPU-only: reads the checkpoint U/V (mmap) plus, from `<run>/analysis/datasets/`, the
 filtered-alive list (`alive_filtered_<op>.tsv`, for mean CI), the periods
@@ -47,7 +51,6 @@ from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
-    AliveComponent,
     analysis_datasets_dir,
     analysis_dir,
     load_component_uv,
@@ -86,14 +89,8 @@ def _read_period_confidence(tsv_path: Path) -> dict[tuple[str, int], float]:
     return out
 
 
-def _coeff_vector(
-    a: AliveComponent, uv: dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]
-) -> NDArray[np.float32]:
-    """Per-neuron coefficient of interaction (unit-normalized, ≥ 0) for one subcomponent."""
-    v, u = uv[a.proj]
-    # down (post-SwiGLU): read weights |V[:,c]|/||V_c||; gate/up (pre-SwiGLU): write |U[c,:]|/||U_c||.
-    vec = v[:, a.component] if a.proj == "down_proj" else u[a.component, :]
-    return (np.abs(vec) / max(float(np.linalg.norm(vec)), 1e-12)).astype(np.float32)
+def _silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
+    return (x / (1.0 + np.exp(-x))).astype(np.float32)
 
 
 def _inner_grids(
@@ -143,21 +140,38 @@ def build_neuron_investigator(
     alive = sorted(
         alive, key=lambda a: (periods[(a.proj, a.component)], -mean_ci[(a.proj, a.component)])
     )
-    coeff = np.stack([_coeff_vector(a, uv) for a in alive])  # [n_subcomps, d_int], ≥ 0
     is_read = np.array([a.proj == "down_proj" for a in alive])
-
-    # Vertical axis: top-K neurons by total coefficient across every subcomponent / matrix.
-    total = coeff.sum(axis=0)  # [d_int]
-    neuron_ids = np.argsort(-total)[:top_neurons]
-    logger.info(
-        f"{len(alive)} subcomponents, top {len(neuron_ids)}/{coeff.shape[1]} neurons by total coefficient"
-    )
-
-    # Signed coefficient matrix [subcomp, neuron]: write (gate/up) +, read (down) − → RdBu.
-    signed = coeff[:, neuron_ids] * np.where(is_read, -1.0, 1.0)[:, None]
-
     alive_keys = {(a.proj, a.component) for a in alive}
     inner_grids = _inner_grids(data_dir / f"inner_activations_{op}.tsv", alive_keys, n)
+
+    # Interaction score [n_subcomps, d_int], ≥ 0: the std over the target grid of what each
+    # subcomponent writes to / reads from each neuron.
+    d_int = up_grid.shape[-1]
+    # post-SwiGLU activation std per neuron (the read magnitude for down subcomponents).
+    h = _silu(gate_grid.reshape(n * n, d_int).astype(np.float32)) * up_grid.reshape(
+        n * n, d_int
+    ).astype(np.float32)
+    neuron_h_std = h.std(axis=0)  # [d_int]
+    score = np.zeros((len(alive), d_int), dtype=np.float32)
+    for i, a in enumerate(alive):
+        v, u = uv[a.proj]
+        v_norm = max(float(np.linalg.norm(v[:, a.component])), 1e-12)
+        if a.proj == "down_proj":  # read: neuron-activation std × unit read weight |V[j,c]|/||V_c||
+            score[i] = neuron_h_std * (np.abs(v[:, a.component]) / v_norm)
+        else:  # write: std of (x·V_c)·U_c[j] over the grid = std(inner_act_c) · ||V_c|| · |U[c,j]|
+            score[i] = (
+                float(inner_grids[(a.proj, a.component)].std()) * v_norm * np.abs(u[a.component, :])
+            )
+
+    # Vertical axis: top-K neurons by total interaction score across every subcomponent / matrix.
+    total = score.sum(axis=0)  # [d_int]
+    neuron_ids = np.argsort(-total)[:top_neurons]
+    logger.info(
+        f"{len(alive)} subcomponents, top {len(neuron_ids)}/{d_int} neurons by total interaction score"
+    )
+
+    # Signed score matrix [subcomp, neuron]: write (gate/up) +, read (down) − → RdBu.
+    signed = score[:, neuron_ids] * np.where(is_read, -1.0, 1.0)[:, None]
 
     # Neuron up / gate grids reindexed to [K, N, N] (row-major [a, b]) for the right panel.
     up_k = np.transpose(up_grid[:, :, neuron_ids], (2, 0, 1)).astype(np.float16)
@@ -187,7 +201,7 @@ def build_neuron_investigator(
         ],
         "neuron_ids": [int(j) for j in neuron_ids],
         "neuron_totals": [round(float(total[j]), 4) for j in neuron_ids],
-        "coeff": _dense_b64(signed),  # [n_subcomps, n_neurons]
+        "score": _dense_b64(signed),  # [n_subcomps, n_neurons] signed interaction score
         "neuron_up": _dense_b64(up_k),  # [n_neurons, N, N]
         "neuron_gate": _dense_b64(gate_k),
     }

@@ -32,9 +32,10 @@
   <span id="meta"></span>
   <label>neuron sort
     <select id="sort">
-      <option value="freq">total coefficient per frequency</option>
+      <option value="freq">total interaction score per frequency</option>
     </select>
   </label>
+  <label>min max-score <input id="minscore" type="number" min="0" step="0.001" value="0" /></label>
   <button id="prev">&larr; prev</button>
   <span id="page"></span>
   <button id="next">next &rarr;</button>
@@ -74,14 +75,14 @@ function decodeDense(u16, off, len) {
 }
 function silu(x) { return x / (1 + Math.exp(-x)); }
 
-// coeff[s, neuron] signed (write +, read -); neuron up/gate grids [neuron, a, b].
-const COEFF = decodeDense(b64ToU16(D.coeff), 0, NS * NN);
+// score[s, neuron] = signed interaction score (write +, read -); neuron up/gate grids [neuron, a, b].
+const SCORE = decodeDense(b64ToU16(D.score), 0, NS * NN);
 const UP = b64ToU16(D.neuron_up), GATE = b64ToU16(D.neuron_gate);
-let coeffMax = 1e-6; for (let i = 0; i < COEFF.length; i++) coeffMax = Math.max(coeffMax, Math.abs(COEFF[i]));
+let scoreMax = 1e-6; for (let i = 0; i < SCORE.length; i++) scoreMax = Math.max(scoreMax, Math.abs(SCORE[i]));
 function neuronGrid(u16, k) { return decodeDense(u16, k * N * N, N * N); }
 SUBS.forEach(s => { s.label = s.proj[0] + s.c; });  // u/g/d initial + index
 
-// Diverging colour. redPositive: red for +, blue for -. Else (coeff) blue +, red -.
+// Diverging colour. redPositive: red for +, blue for -. Else (score) blue +, red -.
 function divColor(t, redPositive) {
   t = Math.max(-1, Math.min(1, t));
   const c = Math.round(255 * (1 - Math.abs(t)));
@@ -112,13 +113,13 @@ function computeSubcompLayout() {
   return { order, major, minor, bands };
 }
 // Neuron rows: grouped by the frequency (period) they couple to most strongly, then by that
-// coupling (descending) — "total coefficient per frequency".
+// coupling (descending) — "total interaction score per frequency".
 function computeNeuronOrder() {
   const key = new Array(NN);
   for (let nrn = 0; nrn < NN; nrn++) {
     const byPeriod = new Map();
     for (let s = 0; s < NS; s++) {
-      const p = SUBS[s].period, v = Math.abs(COEFF[s * NN + nrn]);
+      const p = SUBS[s].period, v = Math.abs(SCORE[s * NN + nrn]);
       byPeriod.set(p, (byPeriod.get(p) || 0) + v);
     }
     let domP = Infinity, domV = -1;
@@ -132,25 +133,35 @@ function computeNeuronOrder() {
 // ---- left: neuron x subcomponent matrix -------------------------------------------------
 const matrix = document.getElementById("matrix"), mctx = matrix.getContext("2d");
 const elRows = document.getElementById("rows"), elPage = document.getElementById("page");
+const elMinScore = document.getElementById("minscore");
 const COLW = 16, BAND_H = 18, NAME_H = 46, LABEL_TOP = BAND_H + NAME_H, LABEL_LEFT = 56;
-let page = 0, rowsPerPage = META.page_size;
+let page = 0, rowsPerPage = META.page_size, minScore = 0;
 const layout = computeSubcompLayout();     // subcomponent columns (fixed order)
 const neuronOrder = computeNeuronOrder();  // neuron rows, by frequency coupling
+// Each neuron's max |interaction score| across subcomponents — drives the threshold filter.
+const neuronMaxScore = new Float32Array(NN);
+for (let nrn = 0; nrn < NN; nrn++) {
+  let m = 0;
+  for (let s = 0; s < NS; s++) { const v = Math.abs(SCORE[s * NN + nrn]); if (v > m) m = v; }
+  neuronMaxScore[nrn] = m;
+}
+let visible = neuronOrder.slice();  // neuronOrder filtered by minScore (rows actually shown)
+function applyFilter() { visible = neuronOrder.filter(nrn => neuronMaxScore[nrn] >= minScore); }
 let sel = null;  // {s, neuron} — global subcomponent build index, global neuron build index
 
-function pageCount() { return Math.ceil(NN / rowsPerPage); }
+function pageCount() { return Math.max(1, Math.ceil(visible.length / rowsPerPage)); }
 function drawMatrix() {
   const order = layout.order;
-  const r0 = page * rowsPerPage, r1 = Math.min(NN, r0 + rowsPerPage), rows = r1 - r0;
+  const r0 = page * rowsPerPage, r1 = Math.min(visible.length, r0 + rowsPerPage), rows = r1 - r0;
   const cellH = COLW, w = LABEL_LEFT + NS * COLW, h = LABEL_TOP + rows * cellH;
   matrix.width = w; matrix.height = h;
   mctx.clearRect(0, 0, w, h);
   mctx.font = "10px sans-serif";
   // cells
   for (let ri = 0; ri < rows; ri++) {
-    const neuron = neuronOrder[r0 + ri];
+    const neuron = visible[r0 + ri];
     for (let col = 0; col < NS; col++) {
-      const [cr, cg, cb] = divColor(COEFF[order[col] * NN + neuron] / coeffMax, false);
+      const [cr, cg, cb] = divColor(SCORE[order[col] * NN + neuron] / scoreMax, false);
       mctx.fillStyle = `rgb(${cr},${cg},${cb})`;
       mctx.fillRect(LABEL_LEFT + col * COLW, LABEL_TOP + ri * cellH, COLW, cellH);
     }
@@ -189,17 +200,17 @@ function drawMatrix() {
   mctx.textAlign = "right";
   for (let ri = 0; ri < rows; ri++) {
     mctx.fillStyle = "#444";
-    mctx.fillText(D.neuron_ids[neuronOrder[r0 + ri]], LABEL_LEFT - 4, LABEL_TOP + ri * cellH + cellH - 4);
+    mctx.fillText(D.neuron_ids[visible[r0 + ri]], LABEL_LEFT - 4, LABEL_TOP + ri * cellH + cellH - 4);
   }
   // selection border (if both its column and row are on this page)
   if (sel) {
-    const col = order.indexOf(sel.s), dispRow = neuronOrder.indexOf(sel.neuron);
+    const col = order.indexOf(sel.s), dispRow = visible.indexOf(sel.neuron);
     if (col >= 0 && dispRow >= r0 && dispRow < r1) {
       mctx.strokeStyle = "#000"; mctx.lineWidth = 2;
       mctx.strokeRect(LABEL_LEFT + col * COLW + 1, LABEL_TOP + (dispRow - r0) * cellH + 1, COLW - 2, cellH - 2);
     }
   }
-  elPage.textContent = `neurons ${r0 + 1}–${r1} of ${NN} · page ${page + 1}/${pageCount()}`;
+  elPage.textContent = `neurons ${rows ? r0 + 1 : 0}–${r1} of ${visible.length} · page ${page + 1}/${pageCount()}`;
   document.getElementById("prev").disabled = page <= 0;
   document.getElementById("next").disabled = page >= pageCount() - 1;
 }
@@ -211,8 +222,8 @@ matrix.addEventListener("click", e => {
   const col = Math.floor(x / COLW), ri = Math.floor(y / COLW);
   if (col >= NS) return;
   const dispRow = page * rowsPerPage + ri;
-  if (dispRow >= NN) return;
-  sel = { s: layout.order[col], neuron: neuronOrder[dispRow] };
+  if (dispRow >= visible.length) return;
+  sel = { s: layout.order[col], neuron: visible[dispRow] };
   drawMatrix(); drawRight();
 });
 
@@ -270,8 +281,8 @@ function drawRight() {
   if (!sel) { selTitle.textContent = "No pair selected"; return; }
   const s = SUBS[sel.s], nid = D.neuron_ids[sel.neuron];
   const role = s.is_read ? "reads from" : "writes to";
-  const coeff = Math.abs(COEFF[sel.s * NN + sel.neuron]);
-  selTitle.innerHTML = `${s.proj} #${s.c} (period ${s.period}, mean CI ${s.mean_ci}) ${role} neuron ${nid} · coeff ${coeff.toFixed(3)}`;
+  const score = Math.abs(SCORE[sel.s * NN + sel.neuron]);
+  selTitle.innerHTML = `${s.proj} #${s.c} (period ${s.period}, mean CI ${s.mean_ci}) ${role} neuron ${nid} · interaction score ${score.toFixed(4)}`;
   const inner = decodeDense(b64ToU16(s.inner), 0, N * N);
   const up = neuronGrid(UP, sel.neuron), gate = neuronGrid(GATE, sel.neuron);
   const out = new Float32Array(N * N);
@@ -290,6 +301,10 @@ elRows.value = rowsPerPage;
 elRows.addEventListener("change", () => {
   rowsPerPage = Math.max(1, Math.min(NN, +elRows.value || META.page_size));
   page = 0; drawMatrix();
+});
+elMinScore.addEventListener("input", () => {
+  minScore = Math.max(0, +elMinScore.value || 0);
+  applyFilter(); page = 0; drawMatrix();
 });
 drawMatrix(); drawRight();
 </script>
