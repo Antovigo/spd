@@ -19,9 +19,9 @@ that coupling), paged 50 at a time. A neuron filter hides those whose total inte
 over input (gate/up), output (down), or all subcomponents per a dropdown — is below a typed
 threshold. Write scores render blue, read scores red — done by flipping the sign of down (read)
 columns and colouring with a diverging RdBu scale.
-Clicking a cell selects that (neuron, subcomponent) pair; the right half then stacks
-(scrollable) the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
-post-SwiGLU-output `(a, b)` heatmaps, each with a colour scale.
+Clicking a cell selects that (neuron, subcomponent) pair; the right half then lays the
+subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate / post-SwiGLU-output
+`(a, b)` heatmaps in a 2×2 grid that fills the panel, each with its own colour scale.
 
 Only the top-`top_neurons` neurons by total interaction score are kept — their up / gate
 grids (needed for the right panel) are the bulk of the payload, so the cap bounds the file size.

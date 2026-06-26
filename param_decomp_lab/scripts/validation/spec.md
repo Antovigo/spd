@@ -506,10 +506,11 @@ they couple to most strongly, then by that coupling), paged
 threshold) hides neurons whose total interaction score over the chosen subcomponent scope is
 below the threshold. Write scores render blue, read red (the down
 columns' sign is flipped and an RdBu scale applied), on a shared `|score|` scale.
-Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half
-(vertically scrollable) then stacks the subcomponent's inner-activation `(a, b)` heatmap and the
-neuron's up / gate / post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps — large, each signed
-`RdBu_r` on a per-heatmap scale with its own colour bar.
+Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half then
+lays the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
+post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps in a **2×2 grid that fills the panel**
+(canvases sized from the panel width, so exactly two fit per row), each signed `RdBu_r` on a
+per-heatmap scale with its own colour bar.
 
 Only the top `--top-neurons` neurons are kept — their up/gate grids (for the right panel) are
 the payload's bulk, so the cap bounds `data.js` size (~28 MB at 512). Reads

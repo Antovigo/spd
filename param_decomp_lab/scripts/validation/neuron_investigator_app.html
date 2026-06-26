@@ -18,9 +18,10 @@
   #left { overflow: auto; max-height: calc(100vh - 50px); }
   #right { border-left: 1px solid #ddd; overflow-y: auto; max-height: calc(100vh - 50px); }
   #right h2 { font-size: 13px; margin: 0 0 8px; }
-  .cell { display: block; margin: 0 0 22px 0; }
-  .cell .t { font-size: 13px; color: #555; margin-bottom: 4px; }
-  .cell .row { display: flex; gap: 6px; align-items: flex-start; }
+  #grids { font-size: 0; }  /* kill inline-block whitespace so two cells fill the row exactly */
+  .cell { display: inline-block; vertical-align: top; margin: 0 0 14px 0; }
+  .cell .t { font-size: 12px; color: #555; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell .row { display: flex; gap: 0; align-items: flex-start; }
   canvas { image-rendering: pixelated; }
   #matrix { border: 1px solid #eee; }
   .note { font-size: 11px; color: #999; }
@@ -237,27 +238,31 @@ matrix.addEventListener("click", e => {
   drawMatrix(); drawRight();
 });
 
-// ---- right: selected pair heatmaps (large, stacked, with colour scales) ----------------
-const HEAT = 600;  // 3x the old 200px tiles
+// ---- right: selected pair heatmaps (2×2 grid filling the panel, with colour scales) -----
+const BAR_W = 64;  // colour-bar width; heatmap takes the rest of the half-panel column
 const grids = document.getElementById("grids"), selTitle = document.getElementById("sel-title");
-function heatRow(title) {
-  const wrap = document.createElement("div"); wrap.className = "cell";
-  const t = document.createElement("div"); t.className = "t"; t.textContent = title;
+function heatRow(title, side, barW) {
+  const wrap = document.createElement("div"); wrap.className = "cell"; wrap.style.width = (side + barW) + "px";
+  const t = document.createElement("div"); t.className = "t"; t.textContent = title; t.title = title;
   const row = document.createElement("div"); row.className = "row";
-  const heat = document.createElement("canvas"); heat.width = HEAT; heat.height = HEAT;
-  const bar = document.createElement("canvas"); bar.width = 64; bar.height = HEAT;
+  const heat = document.createElement("canvas"); heat.width = side; heat.height = side;
+  const bar = document.createElement("canvas"); bar.width = barW; bar.height = side;
   row.appendChild(heat); row.appendChild(bar);
   wrap.appendChild(t); wrap.appendChild(row); grids.appendChild(wrap);
   return { heat, bar };
 }
+// Edge-rounded fill: cell [a] spans pixels [round(a·W/N), round((a+1)·W/N)) so neighbours share
+// boundaries exactly — no seams or gaps at any (non-integer) canvas size.
 function drawGrid(cv, vals, scale, redPositive) {
-  const ctx = cv.getContext("2d"), cell = cv.width / N, img = ctx.createImageData(cv.width, cv.height);
-  for (let a = 0; a < N; a++) for (let b = 0; b < N; b++) {
-    const [r, g, bl] = divColor(vals[a * N + b] / scale, redPositive);
-    for (let py = 0; py < cell; py++) for (let px = 0; px < cell; px++) {
-      const x = Math.floor(a * cell) + px, yy = Math.floor((N - 1 - b) * cell) + py;
-      const o = (yy * cv.width + x) * 4;
-      img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = bl; img.data[o + 3] = 255;
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height, img = ctx.createImageData(W, H), d = img.data;
+  for (let a = 0; a < N; a++) {
+    const x0 = Math.round(a * W / N), x1 = Math.round((a + 1) * W / N);
+    for (let b = 0; b < N; b++) {
+      const y0 = Math.round((N - 1 - b) * H / N), y1 = Math.round((N - b) * H / N);
+      const [r, g, bl] = divColor(vals[a * N + b] / scale, redPositive);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const o = (y * W + x) * 4; d[o] = r; d[o + 1] = g; d[o + 2] = bl; d[o + 3] = 255;
+      }
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -279,8 +284,8 @@ function drawColorbar(cv, scale, redPositive) {
   ctx.fillText("−" + scale.toPrecision(2), tx, y0 + barH - 1);
 }
 function maxAbs(v) { let m = 1e-6; for (let i = 0; i < v.length; i++) m = Math.max(m, Math.abs(v[i])); return m; }
-function heatmap(title, vals) {
-  const { heat, bar } = heatRow(title);
+function heatmap(title, vals, side, barW) {
+  const { heat, bar } = heatRow(title, side, barW);
   const scale = maxAbs(vals);
   drawGrid(heat, vals, scale, true);
   drawColorbar(bar, scale, true);
@@ -297,11 +302,15 @@ function drawRight() {
   const up = neuronGrid(UP, sel.neuron), gate = neuronGrid(GATE, sel.neuron);
   const out = new Float32Array(N * N);
   for (let i = 0; i < out.length; i++) out[i] = silu(gate[i]) * up[i];
-  heatmap(`subcomponent inner act (${s.label})`, inner);
-  heatmap(`neuron ${nid} · up`, up);
-  heatmap(`neuron ${nid} · gate`, gate);
-  heatmap(`neuron ${nid} · output silu(gate)·up`, out);
+  // Two columns fill the panel exactly; each = heatmap (square) + colour bar.
+  const colW = Math.floor((grids.clientWidth || 700) / 2);
+  const side = Math.max(80, colW - BAR_W);
+  heatmap(`subcomponent inner act (${s.label})`, inner, side, BAR_W);
+  heatmap(`neuron ${nid} · up`, up, side, BAR_W);
+  heatmap(`neuron ${nid} · gate`, gate, side, BAR_W);
+  heatmap(`neuron ${nid} · output silu(gate)·up`, out, side, BAR_W);
 }
+window.addEventListener("resize", () => { if (sel) drawRight(); });
 
 document.getElementById("meta").textContent =
   `${META.op} (${META.symbol}) · L${META.layer} · ${NS} subcomponents · top ${NN} neurons`;
