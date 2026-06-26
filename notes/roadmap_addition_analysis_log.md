@@ -198,4 +198,15 @@ heatmaps, output computed in JS from embedded gate/up grids.
   (default 512) by total coefficient → data.js ~28 MB. (Per user: top-K, not all 14336.)
 - **Ran on llama8b-add-02** (`model_20000.pth`): 35 subcomponents, top 512/14336 neurons.
   Headless-checked clean (click `#matrix` → 4 right-panel canvases render, no JS errors).
-- Artifact: `~/out/runs/llama8b-add-02/figures/neuron_investigator_add/{index.html,data.js}`.
+- Artifact: `~/out/runs/llama8b-add-02/analysis/neuron_investigator_add/{index.html,data.js}`.
+- **Iteration (per user):** column sort selector (matrix→period default, with period band
+  labels + thick matrix / thin period delimiters; or total coeff overall / per-frequency /
+  per-matrix), 50 neurons/page, right panel 3× larger + vertically stacked/scrollable with
+  per-heatmap colour bars. Added `total_coeff` per subcomp to the payload for the coeff sorts.
+
+# Folder reorg (orthogonal)
+
+Reserved `<run>/figures/` for training; all validation scripts now write datasets to
+`<run>/analysis/datasets/` and figures/applets to `<run>/analysis/<name>/`. New `common.py`
+helpers `analysis_dir` / `analysis_datasets_dir` / `run_dir_of_dataset`. Migrated + de-staled
+both `llama8b-add-02` and `addmult-L18-03` on disk. See commit `cf6464f70`.

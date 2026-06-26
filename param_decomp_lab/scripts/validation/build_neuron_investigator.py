@@ -6,12 +6,15 @@ neurons it couples to, via the per-(subcomponent, neuron) **coefficient of inter
 - gate / up (pre-SwiGLU, *write* to neurons): `|U[c, j]| / ||U_c||`,
 - down (post-SwiGLU, *read* from neurons): `|V[j, c]| / ||V_c||`.
 
-The applet's left half is a neuron × subcomponent heatmap (subcomponents sorted by period
-then mean CI; neurons sorted by total coefficient across all matrices, paged). Write
-coefficients render blue, read coefficients red — done by flipping the sign of down (read)
-columns and colouring with a diverging RdBu scale. Clicking a cell selects that
-(neuron, subcomponent) pair; the right half then shows the subcomponent's inner-activation
-`(a, b)` heatmap alongside the neuron's up / gate / post-SwiGLU-output `(a, b)` heatmaps.
+The applet's left half is a neuron × subcomponent heatmap. Subcomponents (columns) are
+ordered by a selector — by matrix (gate > up > down) then period (default, with period band
+labels and matrix/period delimiters), or by total coefficient overall / within frequency /
+within matrix — and neurons (rows) are sorted by total coefficient across all matrices,
+paged 50 at a time. Write coefficients render blue, read coefficients red — done by flipping
+the sign of down (read) columns and colouring with a diverging RdBu scale. Clicking a cell
+selects that (neuron, subcomponent) pair; the right half then stacks (scrollable) the
+subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
+post-SwiGLU-output `(a, b)` heatmaps, each with a colour scale.
 
 Only the top-`top_neurons` neurons by total coefficient are kept — their up / gate grids
 (needed for the right panel) are the bulk of the payload, so the cap bounds the file size.
@@ -122,6 +125,9 @@ def build_neuron_investigator(
     )
     coeff = np.stack([_coeff_vector(a, uv) for a in alive])  # [n_subcomps, d_int], ≥ 0
     is_read = np.array([a.proj == "down_proj" for a in alive])
+    subcomp_total = coeff.sum(
+        axis=1
+    )  # [n_subcomps] total coupling (over every neuron), for sorting
 
     # Vertical axis: top-K neurons by total coefficient across every subcomponent / matrix.
     total = coeff.sum(axis=0)  # [d_int]
@@ -148,7 +154,7 @@ def build_neuron_investigator(
             "layer": layer,
             "n_subcomps": len(alive),
             "n_neurons": len(neuron_ids),
-            "page_size": len(alive),  # "as many neurons as fit" ≈ subcomponent count
+            "page_size": 50,  # neurons (rows) per page
         },
         "subcomps": [
             {
@@ -156,10 +162,11 @@ def build_neuron_investigator(
                 "c": a.component,
                 "period": periods[(a.proj, a.component)],
                 "mean_ci": round(mean_ci[(a.proj, a.component)], 4),
+                "total_coeff": round(float(subcomp_total[i]), 4),
                 "is_read": bool(a.proj == "down_proj"),
                 "inner": _dense_b64(inner_grids[(a.proj, a.component)]),
             }
-            for a in alive
+            for i, a in enumerate(alive)
         ],
         "neuron_ids": [int(j) for j in neuron_ids],
         "neuron_totals": [round(float(total[j]), 4) for j in neuron_ids],

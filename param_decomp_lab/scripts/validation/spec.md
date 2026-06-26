@@ -492,13 +492,16 @@ CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-ope
 server/CDN/GPU) into `<run_dir>/analysis/neuron_investigator_<op>/`. The **coefficient of
 interaction** between a subcomponent and a neuron is the unit-normalized read/write weight
 (always ≥ 0): gate/up (pre-SwiGLU, *write*) `|U[c,j]|/||U_c||`; down (post-SwiGLU, *read*)
-`|V[j,c]|/||V_c||`. The left half is a neuron × subcomponent heatmap — subcomponents (columns)
-sorted by period then mean CI; neurons (rows) sorted by total coefficient across all matrices,
-paged (default page = subcomponent count, adjustable). Write coefficients render blue, read red
-(the down columns' sign is flipped and an RdBu scale applied), on a shared `|coeff|` scale.
-Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half then
-shows the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
-post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps (all signed `RdBu_r`, per-heatmap scale).
+`|V[j,c]|/||V_c||`. The left half is a neuron × subcomponent heatmap. Subcomponents (columns)
+are ordered by a **sort selector**: matrix (gate > up > down) then period (default — with
+period band labels above the names, thick delimiters between matrices and thin between periods),
+or total coefficient overall / within frequency / within matrix. Neurons (rows) are sorted by
+total coefficient across all matrices, paged 50 at a time (adjustable). Write coefficients
+render blue, read red (the down columns' sign is flipped and an RdBu scale applied), on a shared
+`|coeff|` scale. Clicking a cell selects that (neuron, subcomponent) pair (black border); the
+right half (vertically scrollable) then stacks the subcomponent's inner-activation `(a, b)`
+heatmap and the neuron's up / gate / post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps —
+large, each signed `RdBu_r` on a per-heatmap scale with its own colour bar.
 
 Only the top `--top-neurons` neurons are kept — their up/gate grids (for the right panel) are
 the payload's bulk, so the cap bounds `data.js` size (~28 MB at 512). Reads

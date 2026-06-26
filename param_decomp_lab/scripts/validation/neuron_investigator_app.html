@@ -9,16 +9,18 @@
   header h1 { font-size: 15px; font-weight: 600; margin: 0 10px 0 0; }
   label { font-size: 13px; }
   input[type=number] { width: 60px; padding: 2px 4px; font-size: 13px; }
+  select { font-size: 13px; padding: 2px 4px; }
   button { font-size: 13px; padding: 2px 10px; cursor: pointer; }
   button:disabled { opacity: 0.4; cursor: default; }
   #hint { font-size: 12px; color: #888; }
   #wrap { display: flex; align-items: flex-start; }
   #left, #right { width: 50vw; box-sizing: border-box; padding: 12px; }
   #left { overflow: auto; max-height: calc(100vh - 50px); }
-  #right { border-left: 1px solid #ddd; }
+  #right { border-left: 1px solid #ddd; overflow-y: auto; max-height: calc(100vh - 50px); }
   #right h2 { font-size: 13px; margin: 0 0 8px; }
-  .cell { display: inline-block; margin: 0 14px 14px 0; vertical-align: top; }
-  .cell .t { font-size: 12px; color: #555; margin-bottom: 3px; }
+  .cell { display: block; margin: 0 0 22px 0; }
+  .cell .t { font-size: 13px; color: #555; margin-bottom: 4px; }
+  .cell .row { display: flex; gap: 6px; align-items: flex-start; }
   canvas { image-rendering: pixelated; }
   #matrix { border: 1px solid #eee; }
   .note { font-size: 11px; color: #999; }
@@ -28,6 +30,14 @@
 <header>
   <h1>Neuron investigator</h1>
   <span id="meta"></span>
+  <label>sort
+    <select id="sort">
+      <option value="matrix">matrix, then period</option>
+      <option value="total">total coefficient</option>
+      <option value="freq">total coefficient per frequency</option>
+      <option value="matrixcoeff">total coefficient per matrix</option>
+    </select>
+  </label>
   <button id="prev">&larr; prev</button>
   <span id="page"></span>
   <button id="next">next &rarr;</button>
@@ -38,14 +48,15 @@
   <div id="left"><canvas id="matrix"></canvas></div>
   <div id="right">
     <h2 id="sel-title">No pair selected</h2>
+    <div class="note" style="margin-bottom:8px">heatmaps: x = a, y = b (origin bottom-left)</div>
     <div id="grids"></div>
-    <div class="note">heatmaps: x = a, y = b (origin bottom-left)</div>
   </div>
 </div>
 <script src="data.js"></script>
 <script>
 const D = window.PD_DATA, META = D.meta, N = META.n;
 const SUBS = D.subcomps, NS = META.n_subcomps, NN = META.n_neurons;
+const MATRIX_RANK = { gate_proj: 0, up_proj: 1, down_proj: 2 };
 
 function b64ToBytes(b64) {
   const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
@@ -82,15 +93,56 @@ function divColor(t, redPositive) {
   return t >= 0 ? pos : neg;
 }
 
+// ---- subcomponent ordering (selector) --------------------------------------------------
+// Returns the display order (build indices), thick/thin column delimiters, and period bands.
+function periodRuns(order, breakOnMatrix) {
+  const runs = [];
+  let s = 0;
+  for (let k = 1; k <= order.length; k++) {
+    const brk = k === order.length
+      || SUBS[order[k]].period !== SUBS[order[s]].period
+      || (breakOnMatrix && SUBS[order[k]].proj !== SUBS[order[s]].proj);
+    if (brk) { runs.push({ start: s, end: k, period: SUBS[order[s]].period }); s = k; }
+  }
+  return runs;
+}
+function computeOrder(mode) {
+  const mr = i => MATRIX_RANK[SUBS[i].proj];
+  const order = SUBS.map((_, i) => i);
+  const major = new Set(), minor = new Set();
+  let bands = [];
+  if (mode === "total") {
+    order.sort((a, b) => SUBS[b].total_coeff - SUBS[a].total_coeff);
+  } else if (mode === "freq") {
+    order.sort((a, b) => SUBS[a].period - SUBS[b].period || SUBS[b].total_coeff - SUBS[a].total_coeff);
+    for (let k = 1; k < order.length; k++) if (SUBS[order[k]].period !== SUBS[order[k - 1]].period) major.add(k);
+    bands = periodRuns(order, false);
+  } else if (mode === "matrixcoeff") {
+    order.sort((a, b) => mr(a) - mr(b) || SUBS[b].total_coeff - SUBS[a].total_coeff);
+    for (let k = 1; k < order.length; k++) if (mr(order[k]) !== mr(order[k - 1])) major.add(k);
+  } else {  // matrix, then period (default)
+    order.sort((a, b) => mr(a) - mr(b) || SUBS[a].period - SUBS[b].period || SUBS[b].mean_ci - SUBS[a].mean_ci);
+    for (let k = 1; k < order.length; k++) {
+      if (mr(order[k]) !== mr(order[k - 1])) major.add(k);
+      else if (SUBS[order[k]].period !== SUBS[order[k - 1]].period) minor.add(k);
+    }
+    bands = periodRuns(order, true);
+  }
+  return { order, major, minor, bands };
+}
+
 // ---- left: neuron x subcomponent matrix -------------------------------------------------
 const matrix = document.getElementById("matrix"), mctx = matrix.getContext("2d");
 const elRows = document.getElementById("rows"), elPage = document.getElementById("page");
-const COLW = 16, LABEL_TOP = 64, LABEL_LEFT = 56;
+const elSort = document.getElementById("sort");
+const COLW = 16, BAND_H = 18, NAME_H = 46, LABEL_TOP = BAND_H + NAME_H, LABEL_LEFT = 56;
 let page = 0, rowsPerPage = META.page_size;
-let sel = null;  // {s, neuron}  (global subcomp index, global neuron index)
+let layout = computeOrder("matrix");  // {order, major, minor, bands}
+let sel = null;  // {s, neuron}  (global subcomp build index, global neuron index)
 
 function pageCount() { return Math.ceil(NN / rowsPerPage); }
 function drawMatrix() {
+  const order = layout.order;
   const r0 = page * rowsPerPage, r1 = Math.min(NN, r0 + rowsPerPage), rows = r1 - r0;
   const cellH = COLW, w = LABEL_LEFT + NS * COLW, h = LABEL_TOP + rows * cellH;
   matrix.width = w; matrix.height = h;
@@ -99,23 +151,40 @@ function drawMatrix() {
   // cells
   for (let ri = 0; ri < rows; ri++) {
     const neuron = r0 + ri;
-    for (let s = 0; s < NS; s++) {
-      const [cr, cg, cb] = divColor(COEFF[s * NN + neuron] / coeffMax, false);
+    for (let col = 0; col < NS; col++) {
+      const [cr, cg, cb] = divColor(COEFF[order[col] * NN + neuron] / coeffMax, false);
       mctx.fillStyle = `rgb(${cr},${cg},${cb})`;
-      mctx.fillRect(LABEL_LEFT + s * COLW, LABEL_TOP + ri * cellH, COLW, cellH);
+      mctx.fillRect(LABEL_LEFT + col * COLW, LABEL_TOP + ri * cellH, COLW, cellH);
     }
   }
-  // grid lines
+  // light grid lines
   mctx.strokeStyle = "#eee"; mctx.lineWidth = 1;
-  for (let s = 0; s <= NS; s++) { mctx.beginPath(); mctx.moveTo(LABEL_LEFT + s * COLW, LABEL_TOP); mctx.lineTo(LABEL_LEFT + s * COLW, h); mctx.stroke(); }
+  for (let col = 0; col <= NS; col++) { mctx.beginPath(); mctx.moveTo(LABEL_LEFT + col * COLW, LABEL_TOP); mctx.lineTo(LABEL_LEFT + col * COLW, h); mctx.stroke(); }
   for (let ri = 0; ri <= rows; ri++) { mctx.beginPath(); mctx.moveTo(LABEL_LEFT, LABEL_TOP + ri * cellH); mctx.lineTo(w, LABEL_TOP + ri * cellH); mctx.stroke(); }
-  // column labels (rotated)
-  mctx.fillStyle = "#444"; mctx.textAlign = "left";
-  for (let s = 0; s < NS; s++) {
+  // group delimiters (thin between periods, thick between matrices) — run from band area down.
+  const delim = (col, width, color) => {
+    mctx.strokeStyle = color; mctx.lineWidth = width;
+    const x = LABEL_LEFT + col * COLW;
+    mctx.beginPath(); mctx.moveTo(x, BAND_H); mctx.lineTo(x, h); mctx.stroke();
+  };
+  layout.minor.forEach(col => delim(col, 1, "#bbb"));
+  layout.major.forEach(col => delim(col, 2.5, "#000"));
+  // period band labels above the column names
+  mctx.fillStyle = "#333"; mctx.textAlign = "center"; mctx.font = "11px sans-serif";
+  for (const band of layout.bands) {
+    const cx = LABEL_LEFT + (band.start + band.end) / 2 * COLW;
+    mctx.fillText(`p${band.period}`, cx, BAND_H - 5);
+    mctx.strokeStyle = "#ddd"; mctx.lineWidth = 1;
+    mctx.beginPath(); mctx.moveTo(LABEL_LEFT + band.start * COLW + 1, BAND_H - 2);
+    mctx.lineTo(LABEL_LEFT + band.end * COLW - 1, BAND_H - 2); mctx.stroke();
+  }
+  // column labels (rotated subcomponent names)
+  mctx.fillStyle = "#444"; mctx.textAlign = "left"; mctx.font = "10px sans-serif";
+  for (let col = 0; col < NS; col++) {
     mctx.save();
-    mctx.translate(LABEL_LEFT + s * COLW + COLW / 2 + 3, LABEL_TOP - 4);
+    mctx.translate(LABEL_LEFT + col * COLW + COLW / 2 + 3, LABEL_TOP - 4);
     mctx.rotate(-Math.PI / 2);
-    mctx.fillText(SUBS[s].label, 0, 0);
+    mctx.fillText(SUBS[order[col]].label, 0, 0);
     mctx.restore();
   }
   // row labels (neuron ids)
@@ -124,10 +193,13 @@ function drawMatrix() {
     mctx.fillStyle = "#444";
     mctx.fillText(D.neuron_ids[r0 + ri], LABEL_LEFT - 4, LABEL_TOP + ri * cellH + cellH - 4);
   }
-  // selection border (if on this page)
+  // selection border (if both its column and row are on this page)
   if (sel && sel.neuron >= r0 && sel.neuron < r1) {
-    mctx.strokeStyle = "#000"; mctx.lineWidth = 2;
-    mctx.strokeRect(LABEL_LEFT + sel.s * COLW + 1, LABEL_TOP + (sel.neuron - r0) * cellH + 1, COLW - 2, cellH - 2);
+    const col = order.indexOf(sel.s);
+    if (col >= 0) {
+      mctx.strokeStyle = "#000"; mctx.lineWidth = 2;
+      mctx.strokeRect(LABEL_LEFT + col * COLW + 1, LABEL_TOP + (sel.neuron - r0) * cellH + 1, COLW - 2, cellH - 2);
+    }
   }
   elPage.textContent = `neurons ${r0 + 1}–${r1} of ${NN} · page ${page + 1}/${pageCount()}`;
   document.getElementById("prev").disabled = page <= 0;
@@ -138,22 +210,26 @@ matrix.addEventListener("click", e => {
   const rect = matrix.getBoundingClientRect();
   const x = e.clientX - rect.left - LABEL_LEFT, y = e.clientY - rect.top - LABEL_TOP;
   if (x < 0 || y < 0) return;
-  const s = Math.floor(x / COLW), ri = Math.floor(y / COLW);
-  if (s >= NS) return;
+  const col = Math.floor(x / COLW), ri = Math.floor(y / COLW);
+  if (col >= NS) return;
   const neuron = page * rowsPerPage + ri;
   if (neuron >= NN) return;
-  sel = { s, neuron };
+  sel = { s: layout.order[col], neuron };
   drawMatrix(); drawRight();
 });
 
-// ---- right: selected pair heatmaps ------------------------------------------------------
+// ---- right: selected pair heatmaps (large, stacked, with colour scales) ----------------
+const HEAT = 600;  // 3x the old 200px tiles
 const grids = document.getElementById("grids"), selTitle = document.getElementById("sel-title");
-function heatCanvas(title) {
+function heatRow(title) {
   const wrap = document.createElement("div"); wrap.className = "cell";
   const t = document.createElement("div"); t.className = "t"; t.textContent = title;
-  const cv = document.createElement("canvas"); cv.width = 200; cv.height = 200;
-  wrap.appendChild(t); wrap.appendChild(cv); grids.appendChild(wrap);
-  return cv;
+  const row = document.createElement("div"); row.className = "row";
+  const heat = document.createElement("canvas"); heat.width = HEAT; heat.height = HEAT;
+  const bar = document.createElement("canvas"); bar.width = 64; bar.height = HEAT;
+  row.appendChild(heat); row.appendChild(bar);
+  wrap.appendChild(t); wrap.appendChild(row); grids.appendChild(wrap);
+  return { heat, bar };
 }
 function drawGrid(cv, vals, scale, redPositive) {
   const ctx = cv.getContext("2d"), cell = cv.width / N, img = ctx.createImageData(cv.width, cv.height);
@@ -167,7 +243,29 @@ function drawGrid(cv, vals, scale, redPositive) {
   }
   ctx.putImageData(img, 0, 0);
 }
+function drawColorbar(cv, scale, redPositive) {
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  const x0 = 2, y0 = 8, barW = 18, barH = H - 16;
+  for (let py = 0; py < barH; py++) {
+    const t = 1 - 2 * (py / (barH - 1));  // +1 top .. -1 bottom
+    const [r, g, b] = divColor(t, redPositive);
+    ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(x0, y0 + py, barW, 1);
+  }
+  ctx.strokeStyle = "#ccc"; ctx.lineWidth = 1; ctx.strokeRect(x0, y0, barW, barH);
+  ctx.fillStyle = "#444"; ctx.font = "11px sans-serif"; ctx.textAlign = "left";
+  const tx = x0 + barW + 4;
+  ctx.fillText("+" + scale.toPrecision(2), tx, y0 + 9);
+  ctx.fillText("0", tx, y0 + barH / 2 + 3);
+  ctx.fillText("−" + scale.toPrecision(2), tx, y0 + barH - 1);
+}
 function maxAbs(v) { let m = 1e-6; for (let i = 0; i < v.length; i++) m = Math.max(m, Math.abs(v[i])); return m; }
+function heatmap(title, vals) {
+  const { heat, bar } = heatRow(title);
+  const scale = maxAbs(vals);
+  drawGrid(heat, vals, scale, true);
+  drawColorbar(bar, scale, true);
+}
 
 function drawRight() {
   grids.innerHTML = "";
@@ -180,10 +278,10 @@ function drawRight() {
   const up = neuronGrid(UP, sel.neuron), gate = neuronGrid(GATE, sel.neuron);
   const out = new Float32Array(N * N);
   for (let i = 0; i < out.length; i++) out[i] = silu(gate[i]) * up[i];
-  drawGrid(heatCanvas(`subcomponent inner act (${s.label})`), inner, maxAbs(inner), true);
-  drawGrid(heatCanvas(`neuron ${nid} · up`), up, maxAbs(up), true);
-  drawGrid(heatCanvas(`neuron ${nid} · gate`), gate, maxAbs(gate), true);
-  drawGrid(heatCanvas(`neuron ${nid} · output silu(gate)·up`), out, maxAbs(out), true);
+  heatmap(`subcomponent inner act (${s.label})`, inner);
+  heatmap(`neuron ${nid} · up`, up);
+  heatmap(`neuron ${nid} · gate`, gate);
+  heatmap(`neuron ${nid} · output silu(gate)·up`, out);
 }
 
 document.getElementById("meta").textContent =
@@ -195,6 +293,7 @@ elRows.addEventListener("change", () => {
   rowsPerPage = Math.max(1, Math.min(NN, +elRows.value || META.page_size));
   page = 0; drawMatrix();
 });
+elSort.addEventListener("change", () => { layout = computeOrder(elSort.value); drawMatrix(); });
 drawMatrix(); drawRight();
 </script>
 </body>
