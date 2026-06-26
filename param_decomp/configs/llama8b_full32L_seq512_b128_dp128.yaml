@@ -19,7 +19,9 @@
 #      0.5 x n_chunks = 2.0 to keep per-site recon pressure chunk-count-invariant.
 #      THIS IS THE KNOB TO RE-TUNE once we know step time (finer chunks = better signal).
 #   4. remat_recon_forwards: true (224 sites' full-network chunk forwards need it).
-#   5. data seq 512 (fineweb_llama_tok_512), matching the reference's seq.
+#   5. remat_ci_fn: true (checkpoint the ~31B CI fn; without it the step is the GPU
+#      compile wall — ~80 min + near-OOM — since the whole CI forward materialises).
+#   6. data seq 512 (fineweb_llama_tok_512), matching the reference's seq.
 # out_dir / run_id are minted by pd-lm.
 run_name: jax-full32L-allmat-seq512-b128-dp128
 cadence:
@@ -595,6 +597,7 @@ runtime:
   dp: 128
   tp: 8
   remat_recon_forwards: true
+  remat_ci_fn: true
 target:
   output_extract: logits
   weights_dtype: bfloat16
