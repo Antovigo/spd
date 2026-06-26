@@ -130,6 +130,7 @@ def make_train_step(
     faith_coeff = faith_term.coeff
     imp_min = imp_term.cfg
     imp_coeff = imp_term.coeff
+    freq_coeff = imp_min.frequency.coeff if imp_min.frequency is not None else 0.0
 
     def batch_sharded(x: Array) -> Array:
         return batch_shard_leading(x, mesh)
@@ -373,14 +374,13 @@ def make_train_step(
         # gets too (sources are leaves). ──
         def loss_fn(
             trainable: tuple[DecompVU, CIFn, dict[str, dict[str, Array]]],
-        ) -> tuple[Array, tuple[Array, Array, tuple[Array, ...]]]:
+        ) -> tuple[Array, tuple[Array, Array, Array, tuple[Array, ...]]]:
             components, ci_fn, persistent_sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)
             ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
             ci = batch_sharded_ci(apply_ci_fn(ci_fn_bf16, taps))
             faith_loss = faithfulness_loss(model.weight_deltas(components))
-            imp_lp, imp_entropy = imp_min_terms(ci.upper, imp_min, imp_min_param)
-            imp_loss = imp_lp + imp_min.beta * imp_entropy
+            imp_lp, imp_freq = imp_min_terms(ci.upper, imp_min, imp_min_param)
 
             term_losses: list[Array] = []
             for term_idx, term in enumerate(recon_terms):
@@ -436,14 +436,16 @@ def make_train_step(
                         term_loss = (step_f32 >= start_frac * total_steps) * term_loss
                 term_losses.append(term_loss)
 
-            total_loss = faith_coeff * faith_loss + imp_coeff * imp_loss
+            total_loss = faith_coeff * faith_loss + imp_coeff * imp_lp + freq_coeff * imp_freq
             for term, term_loss in zip(recon_terms, term_losses, strict=True):
                 total_loss = total_loss + term.coeff * term_loss
-            return total_loss, (faith_loss, imp_loss, tuple(term_losses))
+            return total_loss, (faith_loss, imp_lp, imp_freq, tuple(term_losses))
 
-        (total_loss, (faith_loss, imp_loss, term_losses)), grads = eqx.filter_value_and_grad(
-            loss_fn, has_aux=True
-        )((state.components, state.ci_fn, {k: a.sources for k, a in warmed_advs.items()}))
+        (total_loss, (faith_loss, imp_lp, imp_freq, term_losses)), grads = (
+            eqx.filter_value_and_grad(loss_fn, has_aux=True)(
+                (state.components, state.ci_fn, {k: a.sources for k, a in warmed_advs.items()})
+            )
+        )
         components_grad, ci_fn_grad, persistent_grads_scaled = grads
         grad_norm_metrics = _grad_norm_metrics(components_grad, ci_fn_grad)
 
@@ -479,7 +481,8 @@ def make_train_step(
         metrics = {
             "total": total_loss,
             "faith": faith_loss,
-            "imp": imp_loss,
+            "imp": imp_lp,
+            "freq": imp_freq,
             "p_imp": imp_min_param,
             **{f"loss/{t.name}": v for t, v in zip(recon_terms, term_losses, strict=True)},
             **grad_norm_metrics,

@@ -181,7 +181,6 @@ def _loss_metrics():
         ImportanceMinimalityLossConfig(
             coeff=3e-3,
             pnorm=1.0,
-            beta=0.0,
             p_anneal_start_frac=0.0,
             p_anneal_final_p=1.0,
             p_anneal_end_frac=1.0,
@@ -276,7 +275,6 @@ def _recovery_loss_metrics():
         ImportanceMinimalityLossConfig(
             coeff=3e-3,
             pnorm=1.0,
-            beta=0.0,
             p_anneal_start_frac=0.0,
             p_anneal_final_p=1.0,
             p_anneal_end_frac=1.0,

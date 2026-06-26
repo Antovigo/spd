@@ -38,6 +38,7 @@ from param_decomp.adversary import (  # noqa: E402
 from param_decomp.ci_fn import CIArch, init_ci_fn  # noqa: E402
 from param_decomp.configs import (  # noqa: E402
     AdamPGDConfig,
+    FrequencyMinimalityConfig,
     ImportanceMinimalityLossConfig,
     PersistentPGDReconLossConfig,
     SCScope,
@@ -175,7 +176,7 @@ def main() -> None:
         imp_min=ImportanceMinimalityLossConfig(
             coeff=5e-6,
             pnorm=2.0,
-            beta=0.2,
+            frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=32),
             p_anneal_start_frac=0.0,
             p_anneal_final_p=0.4,
             p_anneal_end_frac=1.0,

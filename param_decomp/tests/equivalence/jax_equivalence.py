@@ -158,10 +158,16 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
     faith = float(faithfulness_loss(lm.weight_deltas(vu)))
 
     # ---- imp ----
-    imp_lp, imp_entropy = importance_minimality_terms(
-        ci_upper, jnp.asarray(float(f["_scalar_IMP_P"])), float(f["_scalar_IMP_EPS"])
+    # a' = B·T reproduces the old rolled `log2(1 + B·T·f_c)`, so `imp_lp + beta·freq`
+    # equals the old `imp_lp + beta·entropy` the golden was generated against.
+    n_positions = int(np.prod(next(iter(ci_upper.values())).shape[:-1]))
+    imp_lp, imp_freq = importance_minimality_terms(
+        ci_upper,
+        jnp.asarray(float(f["_scalar_IMP_P"])),
+        float(f["_scalar_IMP_EPS"]),
+        reference_token_count=n_positions,
     )
-    imp = float(imp_lp + float(f["_scalar_IMP_BETA"]) * imp_entropy)
+    imp = float(imp_lp + float(f["_scalar_IMP_BETA"]) * imp_freq)
 
     # ---- stoch (per-chunk, FIXED masks) ----
     stoch_u = per_site("stoch_u")

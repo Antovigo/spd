@@ -59,7 +59,7 @@ and the tables (§2, §3, §6). Prose between them is orientation only. Notation
 | C | 24576 (bench: 8192); the delta component is always built → source channel dim `C+1` |
 | data | fineweb, seq `T=2048`, global batch `B=512`, fresh batch per step |
 | coeffs | faith `1e5` · imp `5e-6` · stoch `0.5` · ppgd `0.5` |
-| imp-min | `beta 0.2`, `eps 1e-12`, `p: 2.0 → 0.4` linear over `[0, 1]`-frac of training |
+| imp-min | `eps 1e-12`, `p: 2.0 → 0.4` linear over `[0, 1]`-frac of training; `frequency` coeff `1e-6` (= imp `5e-6` · old beta `0.2`), `reference_token_count = B·T = 1048576` |
 | stoch | plan = sequential 3-site chunks × `uniform_k_routing(chunk, n_draws=1)` |
 | PPGD | scope `broadcast_across_batch`, `n_warmup 2`, clamp-parameterization, Adam(β₁ .5, β₂ .99, ε 1e-8), lr const `0.01` w/ 2.5% LR-warmup |
 | components opt | AdamW(.9, .999, ε 1e-8, wd 0), lr `1.5e-4` cosine → `0.1×`, **grad-clip 0.01** |
@@ -141,9 +141,14 @@ def kl_per_position(masked_output, clean_output) =
 
 def faithfulness_loss(components) = ( Σ_s ‖W_s − V_s@U_s‖_F² ) / ( Σ_s numel(W_s) )        (S17)
 
-def importance_minimality_loss(ci_upper, pnorm):         # per-site grouping                (S7)
+def imp_min_terms(ci_upper, pnorm, reference_token_count):   # per-site grouping             (S7)
     for s: per_component_sums[c] = Σ_{b,t} (ci_upper_s[b,t,c] + eps) ** pnorm           (S8,S9)
-    return Σ_s Σ_c (per_component_sums[c]/(B·T)) · (1 + beta · log2(1 + per_component_sums[c]))
+           f[s,c] = per_component_sums[c] / (B·T)            # per-token firing frequency
+    lp   = Σ_s Σ_c f[s,c]                                    # bare mean term (imp coeff)
+    freq = Σ_s Σ_c f[s,c] · log2(1 + a' · f[s,c])           # a' = reference_token_count (freq coeff)
+    return lp, freq          # total imp contribution = imp_coeff·lp + freq_coeff·freq   (S8')
+    # freq is omitted (0) when no `frequency` is configured. Setting a' = B·T recovers the
+    # old rolled `Σ_c f·(1 + beta·log2(1 + B·T·f))` with freq_coeff = imp_coeff·beta.
 
 # RECON_PLAN: a static list of entries (live_sites, SAMPLE_ROUTING); each entry's sampler
 # returns a statically-sized FAMILY of routing draws, each draw = one forward (§6).
@@ -270,8 +275,9 @@ faithfulness, sources/PPGD, the squashings (S5/S6), the imp-min reduction, the g
 | S4 | **AMENDED 2026-06-22** (Oli-approved): CI inputs come from `read_activations(batch, ci_fn.input_names)` — a GENERAL clean-path activation accessor keyed by OPAQUE tap keys (was the fixed `site_inputs` seam). `input_names` is the CI fn's static declaration; the target is the SOLE key→activation interpreter, producing exactly the requested taps off the frozen path of the same batch. For the LM these are residual-stream taps `resid.{layer}` (the residual entering block `layer`) and/or per-site matrix-input keys (site names) for harvest; for positionless toys they are the per-site matrix inputs. Core never parses a key. (Was: "CI inputs are the clean site inputs from the frozen path of the same batch.") |
 | S5 | **AMENDED 2026-06-22** (Oli-approved): the CI fn returns a `CI{logits, lower, upper}` bundle (was `(ci_lower, ci_upper)`). `lower` and `upper` are two squashings of the SAME `logits`, centralized in `CI.from_logits` (no impl re-triplicates them); `logits` is KEPT as a consumed view (histograms / heatmaps plot the pre-squash value). `ci_lower ≡ CI.lower` feeds every mask; `ci_upper ≡ CI.upper` feeds imp-min only; no other crossing. The squashings themselves (S6) are UNCHANGED — only the bundling and the `logits` view changed. The CI fn is a protocol `dict[InputTap,Array] → CI` whose output sites PARTITION the model's sites (input keyspace independent of output keyspace). |
 | S6 | The squashings' forward/backward are exactly §4.2 — including `lower_leaky_hard`'s grad-sign-gated lower leak (a custom VJP, not autodiff of the forward). The backward is a nested `where` with `<=` boundaries: on `0 < x <= 1` pass `g`; at `x <= 0` pass `α·g` ONLY where `g < 0`, else `0`; at `x > 1` pass `0`; `α=0.01`. The boundary tie at `x=0` resolves to the LOWER (`x <= 0`) branch — this `<=` placement is exactly what makes torch (`ci_sigmoids.py`) and JAX (`ci_fn.py`, `_lhs_b`) bit-identical and is load-bearing, not incidental. Grad-checked by `tests/test_lower_leaky_hard_grad.py` (`g<0` vs `g>0` at `x<0`, `x∈(0,1]`, `x>1`; #789). |
-| S7 | Imp-min groups per site: the `log2(1+sum)` consumes one site's per-component sum. Merging sites/layers into one group is incorrect (convexity). |
-| S8 | The per-component sums are over the **global batch**, accumulated before the `log2`. (Per-shard results combined after the log are incorrect — Jensen; see D2.) |
+| S7 | Imp-min groups per site: the frequency penalty's `log2(1 + a'·f_c)` consumes one site's per-component frequency. Merging sites/layers into one group is incorrect (convexity). |
+| S8 | The per-component frequencies `f_c = (Σ_{b,t} ψ(c)) / B·T` are over the **global batch**, formed before the `log2`. (Per-shard `f_c` combined after the log are incorrect — Jensen; see D2.) The two imp-min terms (`lp = Σ_c f_c`, `freq = Σ_c f_c·log2(1 + a'·f_c)`) share these per-component sums in one pass. |
+| S8' | Imp-min contributes `imp_coeff·lp + freq_coeff·freq` with INDEPENDENT coefficients; the frequency normalizer `a' = reference_token_count` is explicit (batch-invariant at fixed firing rate), not the implicit `B·T`. `freq` is absent when no `frequency` is configured. `a' = B·T` recovers the old rolled `imp_coeff·Σ_c f·(1 + beta·log2(1 + B·T·f))` with `freq_coeff = imp_coeff·beta`. |
 | S9 | `pnorm(step)` anneals linearly `2.0 → 0.4` over the configured frac window; `eps` sits inside the power. **JAX narrowing:** annealing is REQUIRED — `annealed_pnorm` asserts `cfg.p_anneal_final_p is not None` (`losses.py:53`) and `train.py:122` asserts it too. Torch supports a constant-p config (`importance_minimality.py:16-37` returns `initial_p` when no annealing window). Constant-p in JAX is expressed by setting `p_anneal_final_p == pnorm` (a flat schedule); any other torch constant-p config is REFUSED (fail-fast assert), never silently approximated. |
 | S10′ | The recon objective is a static tuple of coefficiented loss TERMS (one per configured recon loss metric, in config order). Each term is a static plan of `(live_sites, SAMPLE_ROUTING, MASK_SOURCE)` entries; the term's loss = mean over ALL its forwards (every draw of every entry) of `kl_per_position`; the total adds `coeff · term` per term. Plan structures (live-sets, sampler identities, family sizes, strategy kinds) are fixed across steps. The §4 pseudocode shows the production two-term instantiation (`stochastic_recon_loss` + `adversarial_recon_loss`). Recon KL direction is pinned by S25; the mean-over-forwards ≡ accumulator identity by S26. |
 | S11 | `uniform_k_routing`, per position: `k ~ U{1..|live_sites|}` then a uniform `k`-subset of the live sites routes True; non-live sites are not live at all. Routing draws are fresh per step, sampled inside the step. |
@@ -369,8 +375,11 @@ Rationale worth keeping: the two squashings give each consumer gradient only in 
 permitted direction (masks may push CI up out of saturation; the sparsity penalty may
 not push it below 0). The adversary is *persistent* because re-finding the worst-case
 ablation from scratch each step under-trains the adversary at any affordable inner-step
-count. The `log2` term approximates a description-length / frequency penalty (`L_freq`
-in the VPD paper) — its convexity is why S8 demands the true global sum. Fused-linear-KL
+count. The `freq` term is the description-length / frequency penalty (`L_freq` in the VPD
+paper); normalizing its `log2` by an explicit `a' = reference_token_count` (rather than the
+implicit `B·T`) makes its curvature batch-invariant at a fixed firing rate, so batch size
+and frequency-penalty strength are independently tunable. Its convexity is why S8 demands
+the true global per-component frequency. Fused-linear-KL
 and LM-head-bypass are memory/throughput optimizations and must be semantically
 invisible (cf. `recon_loss_kl` equivalence).
 
