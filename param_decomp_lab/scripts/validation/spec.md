@@ -493,15 +493,16 @@ server/CDN/GPU) into `<run_dir>/analysis/neuron_investigator_<op>/`. The **coeff
 interaction** between a subcomponent and a neuron is the unit-normalized read/write weight
 (always ≥ 0): gate/up (pre-SwiGLU, *write*) `|U[c,j]|/||U_c||`; down (post-SwiGLU, *read*)
 `|V[j,c]|/||V_c||`. The left half is a neuron × subcomponent heatmap. Subcomponents (columns)
-are ordered by a **sort selector**: matrix (gate > up > down) then period (default — with
-period band labels above the names, thick delimiters between matrices and thin between periods),
-or total coefficient overall / within frequency / within matrix. Neurons (rows) are sorted by
-total coefficient across all matrices, paged 50 at a time (adjustable). Write coefficients
-render blue, read red (the down columns' sign is flipped and an RdBu scale applied), on a shared
-`|coeff|` scale. Clicking a cell selects that (neuron, subcomponent) pair (black border); the
-right half (vertically scrollable) then stacks the subcomponent's inner-activation `(a, b)`
-heatmap and the neuron's up / gate / post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps —
-large, each signed `RdBu_r` on a per-heatmap scale with its own colour bar.
+are ordered by **period, then matrix** (gate > up > down), then the confidence the period is
+correct (the chosen fit's CV R²) — with period band labels above the names, thick delimiters
+between periods and thin between matrices. Neurons (rows) are ordered **by total coefficient
+per frequency** (the only sort option: grouped by the period they couple to most strongly, then
+by that coupling), paged 50 at a time (adjustable). Write coefficients render blue, read red
+(the down columns' sign is flipped and an RdBu scale applied), on a shared `|coeff|` scale.
+Clicking a cell selects that (neuron, subcomponent) pair (black border); the right half
+(vertically scrollable) then stacks the subcomponent's inner-activation `(a, b)` heatmap and the
+neuron's up / gate / post-SwiGLU output (`silu(gate)·up`) `(a, b)` heatmaps — large, each signed
+`RdBu_r` on a per-heatmap scale with its own colour bar.
 
 Only the top `--top-neurons` neurons are kept — their up/gate grids (for the right panel) are
 the payload's bulk, so the cap bounds `data.js` size (~28 MB at 512). Reads

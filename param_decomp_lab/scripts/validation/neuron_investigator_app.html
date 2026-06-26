@@ -30,12 +30,9 @@
 <header>
   <h1>Neuron investigator</h1>
   <span id="meta"></span>
-  <label>sort
+  <label>neuron sort
     <select id="sort">
-      <option value="matrix">matrix, then period</option>
-      <option value="total">total coefficient</option>
       <option value="freq">total coefficient per frequency</option>
-      <option value="matrixcoeff">total coefficient per matrix</option>
     </select>
   </label>
   <button id="prev">&larr; prev</button>
@@ -93,52 +90,53 @@ function divColor(t, redPositive) {
   return t >= 0 ? pos : neg;
 }
 
-// ---- subcomponent ordering (selector) --------------------------------------------------
-// Returns the display order (build indices), thick/thin column delimiters, and period bands.
-function periodRuns(order, breakOnMatrix) {
-  const runs = [];
+// ---- ordering ---------------------------------------------------------------------------
+// Subcomponent columns: period, then matrix (gate>up>down), then confidence-in-period (desc).
+// Thick delimiters between periods, thin between matrices; one period band label per period.
+function computeSubcompLayout() {
+  const mr = i => MATRIX_RANK[SUBS[i].proj];
+  const order = SUBS.map((_, i) => i).sort((a, b) =>
+    SUBS[a].period - SUBS[b].period || mr(a) - mr(b) || SUBS[b].confidence - SUBS[a].confidence);
+  const major = new Set(), minor = new Set();
+  for (let k = 1; k < order.length; k++) {
+    if (SUBS[order[k]].period !== SUBS[order[k - 1]].period) major.add(k);
+    else if (mr(order[k]) !== mr(order[k - 1])) minor.add(k);
+  }
+  const bands = [];
   let s = 0;
   for (let k = 1; k <= order.length; k++) {
-    const brk = k === order.length
-      || SUBS[order[k]].period !== SUBS[order[s]].period
-      || (breakOnMatrix && SUBS[order[k]].proj !== SUBS[order[s]].proj);
-    if (brk) { runs.push({ start: s, end: k, period: SUBS[order[s]].period }); s = k; }
-  }
-  return runs;
-}
-function computeOrder(mode) {
-  const mr = i => MATRIX_RANK[SUBS[i].proj];
-  const order = SUBS.map((_, i) => i);
-  const major = new Set(), minor = new Set();
-  let bands = [];
-  if (mode === "total") {
-    order.sort((a, b) => SUBS[b].total_coeff - SUBS[a].total_coeff);
-  } else if (mode === "freq") {
-    order.sort((a, b) => SUBS[a].period - SUBS[b].period || SUBS[b].total_coeff - SUBS[a].total_coeff);
-    for (let k = 1; k < order.length; k++) if (SUBS[order[k]].period !== SUBS[order[k - 1]].period) major.add(k);
-    bands = periodRuns(order, false);
-  } else if (mode === "matrixcoeff") {
-    order.sort((a, b) => mr(a) - mr(b) || SUBS[b].total_coeff - SUBS[a].total_coeff);
-    for (let k = 1; k < order.length; k++) if (mr(order[k]) !== mr(order[k - 1])) major.add(k);
-  } else {  // matrix, then period (default)
-    order.sort((a, b) => mr(a) - mr(b) || SUBS[a].period - SUBS[b].period || SUBS[b].mean_ci - SUBS[a].mean_ci);
-    for (let k = 1; k < order.length; k++) {
-      if (mr(order[k]) !== mr(order[k - 1])) major.add(k);
-      else if (SUBS[order[k]].period !== SUBS[order[k - 1]].period) minor.add(k);
+    if (k === order.length || SUBS[order[k]].period !== SUBS[order[s]].period) {
+      bands.push({ start: s, end: k, period: SUBS[order[s]].period }); s = k;
     }
-    bands = periodRuns(order, true);
   }
   return { order, major, minor, bands };
+}
+// Neuron rows: grouped by the frequency (period) they couple to most strongly, then by that
+// coupling (descending) — "total coefficient per frequency".
+function computeNeuronOrder() {
+  const key = new Array(NN);
+  for (let nrn = 0; nrn < NN; nrn++) {
+    const byPeriod = new Map();
+    for (let s = 0; s < NS; s++) {
+      const p = SUBS[s].period, v = Math.abs(COEFF[s * NN + nrn]);
+      byPeriod.set(p, (byPeriod.get(p) || 0) + v);
+    }
+    let domP = Infinity, domV = -1;
+    for (const [p, v] of byPeriod) if (v > domV || (v === domV && p < domP)) { domV = v; domP = p; }
+    key[nrn] = { domP, domV };
+  }
+  return Array.from({ length: NN }, (_, i) => i)
+    .sort((a, b) => key[a].domP - key[b].domP || key[b].domV - key[a].domV);
 }
 
 // ---- left: neuron x subcomponent matrix -------------------------------------------------
 const matrix = document.getElementById("matrix"), mctx = matrix.getContext("2d");
 const elRows = document.getElementById("rows"), elPage = document.getElementById("page");
-const elSort = document.getElementById("sort");
 const COLW = 16, BAND_H = 18, NAME_H = 46, LABEL_TOP = BAND_H + NAME_H, LABEL_LEFT = 56;
 let page = 0, rowsPerPage = META.page_size;
-let layout = computeOrder("matrix");  // {order, major, minor, bands}
-let sel = null;  // {s, neuron}  (global subcomp build index, global neuron index)
+const layout = computeSubcompLayout();     // subcomponent columns (fixed order)
+const neuronOrder = computeNeuronOrder();  // neuron rows, by frequency coupling
+let sel = null;  // {s, neuron} — global subcomponent build index, global neuron build index
 
 function pageCount() { return Math.ceil(NN / rowsPerPage); }
 function drawMatrix() {
@@ -150,7 +148,7 @@ function drawMatrix() {
   mctx.font = "10px sans-serif";
   // cells
   for (let ri = 0; ri < rows; ri++) {
-    const neuron = r0 + ri;
+    const neuron = neuronOrder[r0 + ri];
     for (let col = 0; col < NS; col++) {
       const [cr, cg, cb] = divColor(COEFF[order[col] * NN + neuron] / coeffMax, false);
       mctx.fillStyle = `rgb(${cr},${cg},${cb})`;
@@ -191,14 +189,14 @@ function drawMatrix() {
   mctx.textAlign = "right";
   for (let ri = 0; ri < rows; ri++) {
     mctx.fillStyle = "#444";
-    mctx.fillText(D.neuron_ids[r0 + ri], LABEL_LEFT - 4, LABEL_TOP + ri * cellH + cellH - 4);
+    mctx.fillText(D.neuron_ids[neuronOrder[r0 + ri]], LABEL_LEFT - 4, LABEL_TOP + ri * cellH + cellH - 4);
   }
   // selection border (if both its column and row are on this page)
-  if (sel && sel.neuron >= r0 && sel.neuron < r1) {
-    const col = order.indexOf(sel.s);
-    if (col >= 0) {
+  if (sel) {
+    const col = order.indexOf(sel.s), dispRow = neuronOrder.indexOf(sel.neuron);
+    if (col >= 0 && dispRow >= r0 && dispRow < r1) {
       mctx.strokeStyle = "#000"; mctx.lineWidth = 2;
-      mctx.strokeRect(LABEL_LEFT + col * COLW + 1, LABEL_TOP + (sel.neuron - r0) * cellH + 1, COLW - 2, cellH - 2);
+      mctx.strokeRect(LABEL_LEFT + col * COLW + 1, LABEL_TOP + (dispRow - r0) * cellH + 1, COLW - 2, cellH - 2);
     }
   }
   elPage.textContent = `neurons ${r0 + 1}–${r1} of ${NN} · page ${page + 1}/${pageCount()}`;
@@ -212,9 +210,9 @@ matrix.addEventListener("click", e => {
   if (x < 0 || y < 0) return;
   const col = Math.floor(x / COLW), ri = Math.floor(y / COLW);
   if (col >= NS) return;
-  const neuron = page * rowsPerPage + ri;
-  if (neuron >= NN) return;
-  sel = { s: layout.order[col], neuron };
+  const dispRow = page * rowsPerPage + ri;
+  if (dispRow >= NN) return;
+  sel = { s: layout.order[col], neuron: neuronOrder[dispRow] };
   drawMatrix(); drawRight();
 });
 
@@ -293,7 +291,6 @@ elRows.addEventListener("change", () => {
   rowsPerPage = Math.max(1, Math.min(NN, +elRows.value || META.page_size));
   page = 0; drawMatrix();
 });
-elSort.addEventListener("change", () => { layout = computeOrder(elSort.value); drawMatrix(); });
 drawMatrix(); drawRight();
 </script>
 </body>

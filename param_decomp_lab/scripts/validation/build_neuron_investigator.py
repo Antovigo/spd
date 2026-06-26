@@ -7,13 +7,14 @@ neurons it couples to, via the per-(subcomponent, neuron) **coefficient of inter
 - down (post-SwiGLU, *read* from neurons): `|V[j, c]| / ||V_c||`.
 
 The applet's left half is a neuron × subcomponent heatmap. Subcomponents (columns) are
-ordered by a selector — by matrix (gate > up > down) then period (default, with period band
-labels and matrix/period delimiters), or by total coefficient overall / within frequency /
-within matrix — and neurons (rows) are sorted by total coefficient across all matrices,
-paged 50 at a time. Write coefficients render blue, read coefficients red — done by flipping
-the sign of down (read) columns and colouring with a diverging RdBu scale. Clicking a cell
-selects that (neuron, subcomponent) pair; the right half then stacks (scrollable) the
-subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
+ordered by period, then matrix (gate > up > down), then the confidence the period is correct
+(the chosen fit's CV R²) — with thick delimiters between periods and thin ones between
+matrices, and period band labels above the names. Neurons (rows) are ordered by total
+coefficient per frequency (grouped by the period they couple to most strongly, then by that
+coupling), paged 50 at a time. Write coefficients render blue, read coefficients red — done
+by flipping the sign of down (read) columns and colouring with a diverging RdBu scale.
+Clicking a cell selects that (neuron, subcomponent) pair; the right half then stacks
+(scrollable) the subcomponent's inner-activation `(a, b)` heatmap and the neuron's up / gate /
 post-SwiGLU-output `(a, b)` heatmaps, each with a colour scale.
 
 Only the top-`top_neurons` neurons by total coefficient are kept — their up / gate grids
@@ -67,6 +68,24 @@ def _read_mean_ci(tsv_path: Path) -> dict[tuple[str, int], float]:
     return out
 
 
+def _read_period_confidence(tsv_path: Path) -> dict[tuple[str, int], float]:
+    """`(proj, component) -> confidence the detected period is real`, from `subcomp_periods`.
+
+    The cross-validated R² of the chosen periodic fit (`additive_cvr2` / `log_cvr2` by
+    `period_type`; the larger of the two when no type wins, which reads as low confidence).
+    """
+    out: dict[tuple[str, int], float] = {}
+    with tsv_path.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            add_r2, log_r2 = float(row["additive_cvr2"] or 0), float(row["log_cvr2"] or 0)
+            kind = row.get("period_type") or "additive"
+            conf = (
+                add_r2 if kind == "additive" else log_r2 if kind == "log" else max(add_r2, log_r2)
+            )
+            out[(row["matrix"].split(".")[-1], int(row["component"]))] = conf
+    return out
+
+
 def _coeff_vector(
     a: AliveComponent, uv: dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]
 ) -> NDArray[np.float32]:
@@ -109,6 +128,7 @@ def build_neuron_investigator(
     alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
     mean_ci = _read_mean_ci(data_dir / f"alive_filtered_{op}.tsv")
     periods = read_subcomp_periods(data_dir / f"subcomp_periods_{op}.tsv")
+    confidence = _read_period_confidence(data_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
 
@@ -125,9 +145,6 @@ def build_neuron_investigator(
     )
     coeff = np.stack([_coeff_vector(a, uv) for a in alive])  # [n_subcomps, d_int], ≥ 0
     is_read = np.array([a.proj == "down_proj" for a in alive])
-    subcomp_total = coeff.sum(
-        axis=1
-    )  # [n_subcomps] total coupling (over every neuron), for sorting
 
     # Vertical axis: top-K neurons by total coefficient across every subcomponent / matrix.
     total = coeff.sum(axis=0)  # [d_int]
@@ -162,11 +179,11 @@ def build_neuron_investigator(
                 "c": a.component,
                 "period": periods[(a.proj, a.component)],
                 "mean_ci": round(mean_ci[(a.proj, a.component)], 4),
-                "total_coeff": round(float(subcomp_total[i]), 4),
+                "confidence": round(confidence[(a.proj, a.component)], 4),
                 "is_read": bool(a.proj == "down_proj"),
                 "inner": _dense_b64(inner_grids[(a.proj, a.component)]),
             }
-            for i, a in enumerate(alive)
+            for a in alive
         ],
         "neuron_ids": [int(j) for j in neuron_ids],
         "neuron_totals": [round(float(total[j]), 4) for j in neuron_ids],
