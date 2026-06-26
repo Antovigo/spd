@@ -496,10 +496,12 @@ writes to / reads from that neuron (always ≥ 0): gate/up (pre-SwiGLU, *write*)
 (post-SwiGLU, *read*) `std_grid(silu(gate_j)·up_j)·|V[j,c]|/||V_c||` (the neuron's post-SwiGLU
 activation std × unit read weight) — two slightly different metrics for input vs output, sharing
 a scale. The left half is a neuron × subcomponent heatmap. Subcomponents (columns) are ordered
-by **period, then matrix** (gate > up > down), then the confidence the period is correct (the
-chosen fit's CV R²) — with period band labels above the names, thick delimiters between periods
-and thin between matrices. Neurons (rows) are ordered **by total interaction score per
-frequency** (grouped by the period they couple to most strongly, then by that coupling), paged
+by **period group, then matrix** (gate > up > down), then the confidence the period is correct
+(the chosen fit's CV R²). Period groups are additive (`p10`) < multiplicative (`×1.27`, for
+mult's log-periodic components) < none (`—`), via `read_subcomp_period_groups` — with period
+band labels above the names, thick delimiters between groups and thin between matrices. Neurons
+(rows) are ordered **by total interaction score per frequency** (grouped by the period group
+they couple to most strongly, then by that coupling), paged
 50 at a time (adjustable). A **neuron filter** (a `input`/`output`/`all` dropdown + a typed
 threshold) hides neurons whose total interaction score over the chosen subcomponent scope is
 below the threshold. Write scores render blue, read red (the down

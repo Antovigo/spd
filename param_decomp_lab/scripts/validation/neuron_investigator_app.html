@@ -95,33 +95,34 @@ function divColor(t, redPositive) {
 
 // ---- ordering ---------------------------------------------------------------------------
 // Subcomponent columns: period, then matrix (gate>up>down), then confidence-in-period (desc).
-// Thick delimiters between periods, thin between matrices; one period band label per period.
+// Thick delimiters between period groups, thin between matrices; one band label per group.
+// Period groups order additive (p10) < multiplicative (×1.27) < none, via period_sort.
 function computeSubcompLayout() {
   const mr = i => MATRIX_RANK[SUBS[i].proj];
   const order = SUBS.map((_, i) => i).sort((a, b) =>
-    SUBS[a].period - SUBS[b].period || mr(a) - mr(b) || SUBS[b].confidence - SUBS[a].confidence);
+    SUBS[a].period_sort - SUBS[b].period_sort || mr(a) - mr(b) || SUBS[b].confidence - SUBS[a].confidence);
   const major = new Set(), minor = new Set();
   for (let k = 1; k < order.length; k++) {
-    if (SUBS[order[k]].period !== SUBS[order[k - 1]].period) major.add(k);
+    if (SUBS[order[k]].period_sort !== SUBS[order[k - 1]].period_sort) major.add(k);
     else if (mr(order[k]) !== mr(order[k - 1])) minor.add(k);
   }
   const bands = [];
   let s = 0;
   for (let k = 1; k <= order.length; k++) {
-    if (k === order.length || SUBS[order[k]].period !== SUBS[order[s]].period) {
-      bands.push({ start: s, end: k, period: SUBS[order[s]].period }); s = k;
+    if (k === order.length || SUBS[order[k]].period_sort !== SUBS[order[s]].period_sort) {
+      bands.push({ start: s, end: k, label: SUBS[order[s]].period_label }); s = k;
     }
   }
   return { order, major, minor, bands };
 }
-// Neuron rows: grouped by the frequency (period) they couple to most strongly, then by that
+// Neuron rows: grouped by the period group they couple to most strongly, then by that
 // coupling (descending) — "total interaction score per frequency".
 function computeNeuronOrder() {
   const key = new Array(NN);
   for (let nrn = 0; nrn < NN; nrn++) {
     const byPeriod = new Map();
     for (let s = 0; s < NS; s++) {
-      const p = SUBS[s].period, v = Math.abs(SCORE[s * NN + nrn]);
+      const p = SUBS[s].period_sort, v = Math.abs(SCORE[s * NN + nrn]);
       byPeriod.set(p, (byPeriod.get(p) || 0) + v);
     }
     let domP = Infinity, domV = -1;
@@ -191,7 +192,7 @@ function drawMatrix() {
   mctx.fillStyle = "#333"; mctx.textAlign = "center"; mctx.font = "11px sans-serif";
   for (const band of layout.bands) {
     const cx = LABEL_LEFT + (band.start + band.end) / 2 * COLW;
-    mctx.fillText(`p${band.period}`, cx, BAND_H - 5);
+    mctx.fillText(band.label, cx, BAND_H - 5);
     mctx.strokeStyle = "#ddd"; mctx.lineWidth = 1;
     mctx.beginPath(); mctx.moveTo(LABEL_LEFT + band.start * COLW + 1, BAND_H - 2);
     mctx.lineTo(LABEL_LEFT + band.end * COLW - 1, BAND_H - 2); mctx.stroke();
@@ -291,7 +292,7 @@ function drawRight() {
   const s = SUBS[sel.s], nid = D.neuron_ids[sel.neuron];
   const role = s.is_read ? "reads from" : "writes to";
   const score = Math.abs(SCORE[sel.s * NN + sel.neuron]);
-  selTitle.innerHTML = `${s.proj} #${s.c} (period ${s.period}, mean CI ${s.mean_ci}) ${role} neuron ${nid} · interaction score ${score.toFixed(4)}`;
+  selTitle.innerHTML = `${s.proj} #${s.c} (${s.period_label}, mean CI ${s.mean_ci}) ${role} neuron ${nid} · interaction score ${score.toFixed(4)}`;
   const inner = decodeDense(b64ToU16(s.inner), 0, N * N);
   const up = neuronGrid(UP, sel.neuron), gate = neuronGrid(GATE, sel.neuron);
   const out = new Float32Array(N * N);

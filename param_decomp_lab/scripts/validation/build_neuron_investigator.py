@@ -10,9 +10,10 @@ that neuron (always ≥ 0):
   post-SwiGLU-activation std times the subcomponent's unit read weight.
 
 The applet's left half is a neuron × subcomponent heatmap. Subcomponents (columns) are
-ordered by period, then matrix (gate > up > down), then the confidence the period is correct
-(the chosen fit's CV R²) — with thick delimiters between periods and thin ones between
-matrices, and period band labels above the names. Neurons (rows) are ordered by total
+ordered by period group (additive `p10` < multiplicative `×1.27` < none), then matrix
+(gate > up > down), then the confidence the period is correct (the chosen fit's CV R²) — with
+thick delimiters between period groups and thin ones between matrices, and period band labels
+above the names. Neurons (rows) are ordered by total
 interaction score per frequency (grouped by the period they couple to most strongly, then by
 that coupling), paged 50 at a time. A neuron filter hides those whose total interaction score —
 over input (gate/up), output (down), or all subcomponents per a dropdown — is below a typed
@@ -52,12 +53,13 @@ from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
+    PeriodGroup,
     analysis_datasets_dir,
     analysis_dir,
     load_component_uv,
     op_symbol,
     read_alive_components,
-    read_subcomp_periods,
+    read_subcomp_period_groups,
 )
 
 _APP_TEMPLATE = Path(__file__).with_name("neuron_investigator_app.html")
@@ -94,6 +96,15 @@ def _silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
     return (x / (1.0 + np.exp(-x))).astype(np.float32)
 
 
+def _period_label(pg: PeriodGroup) -> str:
+    """Compact band label: `p10` (additive), `×1.27` (log multiplicative), `—` (none)."""
+    if pg.kind == "additive":
+        return f"p{int(pg.value)}"
+    if pg.kind == "log":
+        return f"×{pg.value:g}"
+    return "—"
+
+
 def _inner_grids(
     tsv_path: Path, alive_keys: set[tuple[str, int]], n: int
 ) -> dict[tuple[str, int], NDArray[np.float32]]:
@@ -125,7 +136,7 @@ def build_neuron_investigator(
 
     alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
     mean_ci = _read_mean_ci(data_dir / f"alive_filtered_{op}.tsv")
-    periods = read_subcomp_periods(data_dir / f"subcomp_periods_{op}.tsv")
+    periods = read_subcomp_period_groups(data_dir / f"subcomp_periods_{op}.tsv")
     confidence = _read_period_confidence(data_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
@@ -137,9 +148,10 @@ def build_neuron_investigator(
     up_grid = hidden["up_preact"]  # [N, N, d_int] float16
     gate_grid = hidden["gate_preact"]
 
-    # Horizontal axis order: by period, then strongest mean CI first.
+    # Horizontal axis order: by period group, then strongest mean CI first.
     alive = sorted(
-        alive, key=lambda a: (periods[(a.proj, a.component)], -mean_ci[(a.proj, a.component)])
+        alive,
+        key=lambda a: (periods[(a.proj, a.component)].sort_key, -mean_ci[(a.proj, a.component)]),
     )
     is_read = np.array([a.proj == "down_proj" for a in alive])
     alive_keys = {(a.proj, a.component) for a in alive}
@@ -192,7 +204,10 @@ def build_neuron_investigator(
             {
                 "proj": a.proj,
                 "c": a.component,
-                "period": periods[(a.proj, a.component)],
+                "period_label": _period_label(periods[(a.proj, a.component)]),
+                # one sortable scalar per period group: additive < log < none, then by value.
+                "period_sort": periods[(a.proj, a.component)].sort_key[0] * 1e6
+                + periods[(a.proj, a.component)].sort_key[1],
                 "mean_ci": round(mean_ci[(a.proj, a.component)], 4),
                 "confidence": round(confidence[(a.proj, a.component)], 4),
                 "is_read": bool(a.proj == "down_proj"),

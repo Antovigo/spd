@@ -232,3 +232,9 @@ JS `COEFF`→`SCORE`.
   threshold 0.2: all/input keep 512, output → 19 (read coupling is sparse). Headless-checked clean.
 - **Ran on addmult-L18-03** (`model_28000.pth`, `--op=add`): 48 subcomponents, top 512 neurons,
   data.js 28.7 MB → `~/out/runs/addmult-L18-03/analysis/neuron_investigator_add/`. Renders clean.
+- **Multiplicative periods (per user):** switched the investigator from `read_subcomp_periods`
+  (additive int) to `read_subcomp_period_groups`, embedding `period_label` (`p10` / `×1.27` / `—`)
+  + a sortable `period_sort` (additive < log < none). Column sort, band labels, delimiters, and
+  neuron frequency grouping all use the period group. Ran `--op=mult` on addmult-L18-03: 166
+  subcomponents, labels span `p2, p100, ×1.265, ×1.999, ×2.398, ×3.018, ×3.728, ×6.472, —`.
+  Output `~/out/runs/addmult-L18-03/analysis/neuron_investigator_mult/`. Headless clean.
