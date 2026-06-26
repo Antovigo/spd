@@ -52,6 +52,8 @@ _SRUN_FLAGS = "--kill-on-bad-exit=1 --ntasks-per-node=1"
 # CUDA-graph capture (XLA command buffers) intermittently dies with
 # CUDA_ERROR_STREAM_CAPTURE_INVALIDATED on disjoint allocations — disabling
 # measured ~0% cost (8,007 vs 8,015 tok/s/GPU).
+# NCCL_DEBUG=WARN overrides the cluster default (NCCL_DEBUG=INFO / NCCL_DEBUG_SUBSYS=ALL),
+# which logs every collective and bloats the slurm logs to tens of GB per run.
 # LD_LIBRARY_PATH: jax[cuda12]'s version check dlopens cuSPARSE et al. by soname and on
 # this cluster doesn't find the pip-installed nvidia libs ("Unable to load cuSPARSE") —
 # point the loader at the venv's nvidia/*/lib dirs.
@@ -61,7 +63,8 @@ _SRUN_FLAGS = "--kill-on-bad-exit=1 --ntasks-per-node=1"
 # XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB: XLA's pinned host-staging pool defaults to 64 GB, which
 # the full-model step blows past right after the faith warmup (job 127622). The b200 nodes
 # carry ~2 TB RAM, so raise the ceiling generously (it is a cap, allocated on demand).
-_RANK_ENV = r'''export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
+_RANK_ENV = r'''export NCCL_DEBUG=WARN
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB=1024
 export XLA_FLAGS="--xla_gpu_enable_command_buffer= --xla_gpu_autotune_level=0"
 export LD_LIBRARY_PATH="$(python -c 'import nvidia, os, glob; print(":".join(sorted(glob.glob(os.path.join(list(nvidia.__path__)[0], "*", "lib")))))')${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"'''

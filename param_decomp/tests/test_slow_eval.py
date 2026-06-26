@@ -486,13 +486,18 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
     spec = resolve_permutation_metrics(lm.site_names, [])
     every, slow_every = 1000, 3000
     renderer = SlowEvalRenderer(is_main=True)
-    t0 = time.time()
+    # Time only the dispatch the loop pays (accumulate + submit), not the off-thread render.
+    # Joining between submits, outside the timed window, recreates the real loop's gap of
+    # `slow_every` train steps where the render finishes before the next submit (so submit's
+    # one-in-flight `join` is a no-op).
+    dispatch_s = 0.0
     for now_step in range(every, 10 * every + 1, every):  # 1000, 2000, ..., 10000
         if slow_eval_due(now_step, every, slow_every, slow_on_first_step=True):
-            # the COLLECTIVE part (runs on every rank in the real loop)
+            t0 = time.time()
             reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
             renderer.submit(reductions, spec, position_ci=None, components=None, now_step=now_step)
-    main_loop_s = time.time() - t0
+            dispatch_s += time.time() - t0
+            renderer.join()
     renderer.join()  # flush
 
     logged_steps = sorted(s for _, s in fake.logged)
@@ -501,4 +506,4 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
     for payload, _ in fake.logged:
         assert all(k.startswith("slow_eval/figures/") for k in payload)
     # the dispatch loop itself must not block on rendering — accumulate + submit are quick
-    assert main_loop_s < 30.0, main_loop_s
+    assert dispatch_s < 30.0, dispatch_s
