@@ -22,7 +22,7 @@ Usage:
         [--output=PATH] [--output-alive=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=1:00:00 --slurm-mem=...]]
 
-Outputs (default in the run folder):
+Outputs (default in the run's `analysis/datasets/`):
 - `inner_activations_<op>.tsv` — one row per (filtered-alive component, prompt): columns
   `a, operation, b, matrix, subcomponent, inner_act`.
 - `alive_filtered_<op>.tsv` — the surviving alive set: `layer, matrix, component, mean_ci`.
@@ -44,6 +44,7 @@ from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     op_prompts_file,
     op_symbol,
@@ -94,7 +95,8 @@ def collect_inner_activations(
     run = load_lm_run(model_path)
     model, cfg, device = run.model, run.cfg, run.device
 
-    alive_path = Path(alive_tsv).expanduser() if alive_tsv else run.run_dir / "alive_components.tsv"
+    data_dir = analysis_datasets_dir(run.run_dir)
+    alive_path = Path(alive_tsv).expanduser() if alive_tsv else data_dir / "alive_components.tsv"
     alive = read_alive_components(alive_path, keep_projs=MLP_MATRICES)
     logger.info(f"{len(alive)} existing-alive MLP components from {alive_path.name}")
 
@@ -148,13 +150,12 @@ def collect_inner_activations(
     keep = mean_ci > mean_ci_thr
     logger.info(f"{int(keep.sum())}/{len(alive)} pass mean-CI > {mean_ci_thr}")
 
-    out_path = Path(output).expanduser() if output else run.run_dir / f"inner_activations_{op}.tsv"
+    out_path = Path(output).expanduser() if output else data_dir / f"inner_activations_{op}.tsv"
     alive_out = (
-        Path(output_alive).expanduser()
-        if output_alive
-        else run.run_dir / f"alive_filtered_{op}.tsv"
+        Path(output_alive).expanduser() if output_alive else data_dir / f"alive_filtered_{op}.tsv"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    alive_out.parent.mkdir(parents=True, exist_ok=True)
 
     sym = op_symbol(op)
     with out_path.open("w", newline="") as f:

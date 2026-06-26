@@ -10,7 +10,7 @@ numbers / other contexts), and surfaces the non-addition situations that drive t
 addition module.
 
 Components alive on the addition task are flagged in the summary via `--alive-tsv`
-(default `alive_components.tsv` in the run folder).
+(default `alive_components.tsv` in the run's `analysis/datasets/`).
 
 An 8B forward pass needs a GPU; pass `--slurm` to submit as a single-GPU job.
 
@@ -20,7 +20,7 @@ Usage:
         [--context-window=24] [--seed=0] [--output-tsv=PATH] [--output=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=0:30:00 --slurm-mem=...]]
 
-Outputs (default in the run folder):
+Outputs (default in the run's `analysis/datasets/`):
 - `screen_components_on_data.tsv` — one row per component that ever fires: matrix,
   component, alive_on_addition, count_active, frac_active, max_ci.
 - `screen_components_on_data.jsonl` — one object per component with its top-k contexts.
@@ -43,6 +43,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     parse_module_name,
     submit_self_to_slurm,
@@ -104,16 +105,16 @@ def screen_components_on_data(
     model, cfg, device, tokenizer = run.model, run.cfg, run.device, run.tokenizer
     assert cfg.nontarget is not None, "run has no nontarget config to screen"
 
+    data_dir = analysis_datasets_dir(run.run_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
     tsv_path = (
-        Path(output_tsv).expanduser()
-        if output_tsv
-        else run.run_dir / "screen_components_on_data.tsv"
+        Path(output_tsv).expanduser() if output_tsv else data_dir / "screen_components_on_data.tsv"
     )
     jsonl_path = (
-        Path(output).expanduser() if output else run.run_dir / "screen_components_on_data.jsonl"
+        Path(output).expanduser() if output else data_dir / "screen_components_on_data.jsonl"
     )
 
-    alive_path = Path(alive_tsv).expanduser() if alive_tsv else run.run_dir / "alive_components.tsv"
+    alive_path = Path(alive_tsv).expanduser() if alive_tsv else data_dir / "alive_components.tsv"
     alive = _load_alive(alive_path)
 
     loader = build_lm_loader(

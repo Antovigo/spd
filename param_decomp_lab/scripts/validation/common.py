@@ -186,6 +186,29 @@ def load_lm_run(model_path: ModelPath) -> LoadedRun:
     )
 
 
+# Analysis artifacts live under `<run>/analysis/` so `<run>/figures/` stays reserved for the
+# figures the training loop emits. Shared datasets (alive lists, activation grids, periods, …)
+# go one level deeper, in `<run>/analysis/datasets/`; figures and applets sit directly under
+# `<run>/analysis/`.
+
+
+def analysis_dir(run_dir: Path) -> Path:
+    return run_dir / "analysis"
+
+
+def analysis_datasets_dir(run_dir: Path) -> Path:
+    return run_dir / "analysis" / "datasets"
+
+
+def run_dir_of_dataset(dataset_path: Path) -> Path:
+    """Recover the run folder owning a dataset stored under `<run>/analysis/datasets/`."""
+    parent = dataset_path.parent
+    assert parent.name == "datasets" and parent.parent.name == "analysis", (
+        f"expected a dataset under <run>/analysis/datasets/, got {dataset_path}"
+    )
+    return parent.parent.parent
+
+
 def escape_tsv_value(s: str) -> str:
     """Backslash-escape characters that break naive tab-splitting, reversibly."""
     return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")

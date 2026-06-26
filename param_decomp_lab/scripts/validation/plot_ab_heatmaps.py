@@ -16,7 +16,7 @@ Usage:
     python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps <per_position_json> \
         [--op=+] [--ci-thr=0.01] [--grep=SUBSTRING] [--module-grep=SUBSTRING] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/ab_heatmaps_<add|sub|mult>/position_<pos>.png` (one per position).
+Output: `<run_dir>/analysis/ab_heatmaps_<add|sub|mult>/position_<pos>.png` (one per position).
 """
 
 import json
@@ -32,7 +32,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from param_decomp.log import logger  # noqa: E402
-from param_decomp_lab.scripts.validation.common import parse_module_name  # noqa: E402
+from param_decomp_lab.scripts.validation.common import (  # noqa: E402
+    analysis_dir,
+    parse_module_name,
+    run_dir_of_dataset,
+)
 
 # prompt -> position(str) -> module -> [{"component": int, "ci": float}]
 PerPosition = dict[str, dict[str, dict[str, list[dict[str, Any]]]]]
@@ -248,7 +252,7 @@ def plot_ab_heatmaps(
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else json_file.parent / "figures" / f"ab_heatmaps_{_OP_LABEL[op]}"
+        else analysis_dir(run_dir_of_dataset(json_file)) / f"ab_heatmaps_{_OP_LABEL[op]}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("position_*.png"):  # don't leave figures from a prior, wider run

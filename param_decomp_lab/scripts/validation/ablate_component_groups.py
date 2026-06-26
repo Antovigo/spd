@@ -4,8 +4,7 @@ Runs a sample of the run's `X+Y=` target prompts through the circuit (CI > `--ci
 delta off) and, for each named component group, re-runs with exactly that group forced
 off. The answer is a single token, so we read the argmax at the `=` position and compare
 the predicted integer to `X+Y`. Contrasting which groups break the *ones digit* vs the
-*magnitude* of the answer turns the geometric grid story (see `lab_notebook.md`,
-`figures/pos4_grid*.png`) into a causal one.
+*magnitude* of the answer turns the geometric grid story into a causal one.
 
 Groups are defined in `_GROUPS` below, keyed by the families found in the grid analysis.
 
@@ -16,7 +15,8 @@ Usage:
         [--n-examples=1024] [--ci-thr=0.1] [--batch-size=128] [--seed=0] [--output=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=1:00:00 --slurm-mem=...]]
 
-Output (default `<run_dir>/ablate_component_groups.tsv`): one row per (prompt, condition).
+Output (default `<run_dir>/analysis/datasets/ablate_component_groups.tsv`): one row per
+(prompt, condition).
 Columns: example, x, y, correct, condition, pred (decoded argmax token, repr'd),
 pred_int (parsed int or empty), correct_flag.
 """
@@ -38,6 +38,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     submit_self_to_slurm,
 )
@@ -152,7 +153,11 @@ def ablate_component_groups(
                         }
                     )
 
-    out_path = Path(output).expanduser() if output else run.run_dir / "ablate_component_groups.tsv"
+    out_path = (
+        Path(output).expanduser()
+        if output
+        else analysis_datasets_dir(run.run_dir) / "ablate_component_groups.tsv"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter="\t")

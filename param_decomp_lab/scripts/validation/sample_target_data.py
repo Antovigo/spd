@@ -20,7 +20,8 @@ Usage:
         [--n-examples=50] [--ci-thr=0.1] [--top-n=5] [--batch-size=8] [--seed=0] \
         [--output=PATH] [--slurm [--partition=... --gpus=1 --slurm-time=1:00:00 --slurm-mem=...]]
 
-Output (default `<run_dir>/sample_target_data.tsv`): one row per (sequence, position, model).
+Output (default `<run_dir>/analysis/datasets/sample_target_data.tsv`): one row per
+(sequence, position, model).
 """
 
 import csv
@@ -39,6 +40,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     submit_self_to_slurm,
 )
@@ -156,7 +158,11 @@ def sample_target_data(
                             )
                         rows.append(row)
 
-    out_path = Path(output).expanduser() if output else run.run_dir / "sample_target_data.tsv"
+    out_path = (
+        Path(output).expanduser()
+        if output
+        else analysis_datasets_dir(run.run_dir) / "sample_target_data.tsv"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter="\t")

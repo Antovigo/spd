@@ -10,7 +10,10 @@ no separate `source .venv/bin/activate` needed.
 # The targeted 8B addition run.
 MODEL_PATH=~/out/runs/llama8b-add-02/model_20000.pth
 RUN_DIR=$(dirname "$MODEL_PATH")
-JSON="$RUN_DIR/alive_components_per_position.json"
+# Analysis artifacts live under <run>/analysis/: figures + applets directly in it, shared
+# datasets in analysis/datasets/. (figures/ is reserved for training-loop figures.)
+DATASETS="$RUN_DIR/analysis/datasets"
+JSON="$DATASETS/alive_components_per_position.json"
 ```
 
 ## sample_target_data
@@ -21,7 +24,7 @@ active, inactive subcomponents and delta off). Long format: one row per
 `(sequence, position, model)`.
 
 A forward pass of the 8B target needs a GPU, so submit it to SLURM with `--slurm` (the
-login node has none). Output lands in the run folder as `sample_target_data.tsv`.
+login node has none). Output lands in `analysis/datasets/` as `sample_target_data.tsv`.
 
 ```bash
 # Submit to SLURM (single GPU). Tail the log path it prints to watch progress.
@@ -48,7 +51,7 @@ uv run python -m param_decomp_lab.scripts.validation.sample_target_data "$MODEL_
 
 Run every target prompt and record which subcomponents are ever active (CI > `--ci-thr`).
 Writes `alive_components.tsv` (one row per alive subcomponent) and
-`alive_components_per_prompt.json` (active components per prompt) to the run folder.
+`alive_components_per_position.json` (active components per prompt) to `analysis/datasets/`.
 
 ```bash
 # Submit to SLURM (single GPU).
@@ -65,7 +68,7 @@ Causal test of what each pos-`=` component *family* does. For each named group (
 in `_GROUPS` in the script — units-digit lattice, sum-bands, operand-magnitude, …) force
 exactly that group off in the circuit mask and re-read the single-token answer at `=`,
 comparing the predicted integer to `X+Y`. Writes `ablate_component_groups.tsv` (one row
-per prompt × condition) to the run folder.
+per prompt × condition) to `analysis/datasets/`.
 
 ```bash
 # Submit to SLURM (single GPU). 1024 random prompts × all groups, ~1 min after load.
@@ -79,14 +82,14 @@ CPU-only — read the per-position JSON from `find_alive_components` and render 
 GPU/SLURM needed; run directly on the login node.
 
 ```bash
-JSON="$RUN_DIR/alive_components_per_position.json"   # RUN_DIR=$(dirname "$MODEL_PATH")
+JSON="$DATASETS/alive_components_per_position.json"   # DATASETS="$RUN_DIR/analysis/datasets"
 
 # Prompt × subcomponent heatmaps, faceted by matrix, one PNG per position.
 uv run python -m param_decomp_lab.scripts.validation.plot_ci_heatmaps "$JSON"
 uv run python -m param_decomp_lab.scripts.validation.plot_ci_heatmaps "$JSON" --grep="2+" --n-prompts=100
 
 # a×b CI grids: rows = matrices, cols = per-position active subcomponents, one PNG per position.
-# --op picks the operator (writes to figures/ab_heatmaps_{add,sub}/); --grep filters prompts.
+# --op picks the operator (writes to analysis/ab_heatmaps_{add,sub}/); --grep filters prompts.
 uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --op=+ --ci-thr=0.5
 uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --op=- --ci-thr=0.5
 ```
@@ -97,7 +100,7 @@ Interactive, GPU-free HTML explorer for `a+b=` runs: detects each component's pe
 *base* (mod 2/5/10/...) via an η² residue-variance fingerprint, and reads the gate/up/down
 neuron-space overlap from the checkpoint U/V (mmap, CPU-only — no forward pass). Writes a
 self-contained `index.html` + `data.js` (open from `file://`, no server/CDN/GPU) into
-`figures/addition_explorer/`. Reads the `find_alive_components` JSON next to the checkpoint.
+`analysis/addition_explorer/`. Reads the `find_alive_components` JSON from `analysis/datasets/`.
 
 ```bash
 uv run python -m param_decomp_lab.scripts.validation.build_addition_explorer "$MODEL_PATH"
@@ -116,7 +119,7 @@ normalized inner activation `(x·V_c)/||V_c||`, and CI. Reference = all componen
 uv run python -m param_decomp_lab.scripts.validation.collect_ablation_kl "$MODEL_PATH" --slurm
 # smoke test first (subset, short):
 uv run python -m param_decomp_lab.scripts.validation.collect_ablation_kl "$MODEL_PATH" \
-    --max-prompts=256 --max-components=12 --output-dir="$RUN_DIR/ablation_kl_smoke" --slurm --slurm-time=0:20:00
+    --max-prompts=256 --max-components=12 --output-dir="$DATASETS/ablation_kl_smoke" --slurm --slurm-time=0:20:00
 ```
 
 ## build_arith_ablation_explorer
@@ -125,7 +128,7 @@ GPU-free HTML explorer over `collect_ablation_kl`'s `data.npz` (Objective 2). De
 component's period by autocorrelation of the ablation-KL marginal (spiky, non-sinusoidal),
 and packs the (a,b) grids of all five switchable color metrics (CI, ablation KL, inner
 activation, original token, ablated token). Writes `index.html` + `data.js` to
-`figures/arith_ablation_explorer/`.
+`analysis/arith_ablation_explorer/`.
 
 ```bash
 uv run python -m param_decomp_lab.scripts.validation.build_arith_ablation_explorer "$RUN_DIR"
@@ -143,7 +146,7 @@ without root).
 bash param_decomp_lab/scripts/validation/headless_setup.sh   # once; idempotent
 
 PY=~/.cache/pd-headless/venv/bin/python
-APP=~/out/runs/llama8b-add-refine-treat-01/figures/addition_explorer/index.html
+APP=~/out/runs/llama8b-add-refine-treat-01/analysis/addition_explorer/index.html
 $PY param_decomp_lab/scripts/validation/headless_check.py "$APP" \
     --clicks='[data-view=bases];;[data-view=interplay];;[data-view=inspector];;[data-view=gallery]' \
     --probes="document.querySelectorAll('#gallery .card').length"
@@ -193,7 +196,7 @@ uv run python -m $V.find_alive_components "$MODEL_PATH" --slurm --slurm-time=0:3
 ```bash
 uv run python -m $V.collect_hidden_activations "$MODEL_PATH" --op=$OP --slurm --slurm-time=0:30:00
 uv run python -m $V.collect_inner_activations  "$MODEL_PATH" --op=$OP --slurm --slurm-time=0:30:00
-# collect_inner_activations writes inner_activations_<op>.tsv + alive_filtered_<op>.tsv
+# collect_inner_activations writes inner_activations_<op>.tsv + alive_filtered_<op>.tsv to analysis/datasets/
 # (lower --mean-ci-thr to widen the alive set; default 0.1 is fairly strict). For mult, the
 # log-periodic components fire strongly but only on a few % of prompts, so use a low threshold:
 #   ... --op=mult --mean-ci-thr=0.02
@@ -202,10 +205,10 @@ uv run python -m $V.collect_inner_activations  "$MODEL_PATH" --op=$OP --slurm --
 ### 3-5. Periods, cosine heatmaps, explorer (CPU — run on the login node)
 
 ```bash
-uv run python -m $V.compute_subcomp_periods "$RUN_DIR/inner_activations_$OP.tsv"
+uv run python -m $V.compute_subcomp_periods "$DATASETS/inner_activations_$OP.tsv"
 uv run python -m $V.plot_subcomp_cosine "$MODEL_PATH" --op=$OP
-# inner-activation (a,b) heatmaps — same layout as plot_ab_heatmaps, written next to it:
-uv run python -m $V.plot_ab_inner_heatmaps "$RUN_DIR/inner_activations_$OP.tsv"
+# inner-activation (a,b) heatmaps — same layout as plot_ab_heatmaps, into analysis/ab_heatmaps_<op>/:
+uv run python -m $V.plot_ab_inner_heatmaps "$DATASETS/inner_activations_$OP.tsv"
 uv run python -m $V.build_neuron_connection_explorer "$MODEL_PATH" --op=$OP
 # lower --conn-floor (default 0.1) to let the UI threshold reach weaker connections,
 # at the cost of a larger data.js. The applet's "hover shows" toggle switches the
@@ -221,7 +224,7 @@ TwoNN intrinsic dim) + the variance-captured completeness check. Writes
 
 ```bash
 uv run python -m $V.reduce_dimensionality "$MODEL_PATH" --op=$OP
-# open figures/dimensionality_<op>/index.html in a real browser (3D is WebGL).
+# open analysis/dimensionality_<op>/index.html in a real browser (3D is WebGL).
 ```
 
 ### 7. Independent subspaces (ISA, CPU)
@@ -246,7 +249,7 @@ Auto-detects the tasks with a `hidden_activations_<op>.npz` + `alive_filtered_<o
 ```bash
 uv run python -m $V.build_subspace_scatter "$MODEL_PATH"            # all detected tasks
 uv run python -m $V.build_subspace_scatter "$MODEL_PATH" --ops=add,mult
-# open figures/subspace_scatter/index.html in a real browser (3D is WebGL).
+# open analysis/subspace_scatter/index.html in a real browser (3D is WebGL).
 ```
 
 ### 10. Neuron investigator (CPU)
@@ -260,7 +263,7 @@ subcomponent's inner-activation `(a,b)` heatmap and the neuron's up / gate / out
 ```bash
 uv run python -m $V.build_neuron_investigator "$MODEL_PATH" --op=$OP
 # raise --top-neurons (default 512) for deeper paging at the cost of data.js size.
-# open figures/neuron_investigator_<op>/index.html in a real browser.
+# open analysis/neuron_investigator_<op>/index.html in a real browser.
 ```
 
 Smoke-test the explorer / investigator applets in headless Chromium (see `headless_check`):
@@ -268,9 +271,9 @@ Smoke-test the explorer / investigator applets in headless Chromium (see `headle
 ```bash
 PY=~/.cache/pd-headless/venv/bin/python
 $PY param_decomp_lab/scripts/validation/headless_check.py \
-    "$RUN_DIR/figures/neuron_explorer_$OP/index.html" --wait-ms=2000 --timeout-ms=30000 \
+    "$RUN_DIR/analysis/neuron_explorer_$OP/index.html" --wait-ms=2000 --timeout-ms=30000 \
     --probes="document.querySelectorAll('.node').length;;document.getElementById('hint').textContent"
 $PY param_decomp_lab/scripts/validation/headless_check.py \
-    "$RUN_DIR/figures/neuron_investigator_$OP/index.html" --clicks='#matrix' \
+    "$RUN_DIR/analysis/neuron_investigator_$OP/index.html" --clicks='#matrix' \
     --probes="document.querySelectorAll('#grids canvas').length"
 ```

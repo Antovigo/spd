@@ -12,7 +12,7 @@ Usage:
         [--ci-thr=0.1] [--batch-size=8] [--output=PATH] [--output-json=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=1:00:00 --slurm-mem=...]]
 
-Outputs (default in the run folder):
+Outputs (default in the run's `analysis/datasets/`):
 - `alive_components.tsv` — one row per alive subcomponent: layer, matrix, component,
   fraction_active, max_ci, mean_activation.
 - `alive_components_per_position.json` — per (prompt, position), the active components with
@@ -38,6 +38,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     parse_module_name,
     submit_self_to_slurm,
@@ -183,13 +184,15 @@ def find_alive_components(
             )
     rows.sort(key=lambda r: (r["layer"], r["matrix"], r["component"]))
 
-    out_path = Path(output).expanduser() if output else run.run_dir / "alive_components.tsv"
+    data_dir = analysis_datasets_dir(run.run_dir)
+    out_path = Path(output).expanduser() if output else data_dir / "alive_components.tsv"
     json_path = (
         Path(output_json).expanduser()
         if output_json
-        else run.run_dir / "alive_components_per_position.json"
+        else data_dir / "alive_components_per_position.json"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_TSV_FIELDS, delimiter="\t")
         writer.writeheader()

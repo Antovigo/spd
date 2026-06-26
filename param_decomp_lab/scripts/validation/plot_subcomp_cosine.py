@@ -16,7 +16,7 @@ Usage:
     python -m param_decomp_lab.scripts.validation.plot_subcomp_cosine <model_path> \
         [--op=add] [--output-dir=PATH]
 
-Outputs: `<run_dir>/figures/subcomp_cosine/cosine_{gate_up,down}_<op>.png`.
+Outputs: `<run_dir>/analysis/subcomp_cosine/cosine_{gate_up,down}_<op>.png`.
 """
 
 from pathlib import Path
@@ -31,6 +31,8 @@ from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
+    analysis_datasets_dir,
+    analysis_dir,
     load_component_uv,
     read_alive_components,
     read_subcomp_periods,
@@ -95,9 +97,10 @@ def plot_subcomp_cosine(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
+    data_dir = analysis_datasets_dir(run_dir)
 
-    alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
+    alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
+    periods = read_subcomp_periods(data_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
     alive_by_proj: dict[str, list[int]] = {proj: [] for proj in MLP_MATRICES}
     for a in alive:
@@ -105,7 +108,7 @@ def plot_subcomp_cosine(
 
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
     out_dir = (
-        Path(output_dir).expanduser() if output_dir else run_dir / "figures" / "subcomp_cosine"
+        Path(output_dir).expanduser() if output_dir else analysis_dir(run_dir) / "subcomp_cosine"
     )
     _plot_group(
         ("gate_proj", "up_proj"),

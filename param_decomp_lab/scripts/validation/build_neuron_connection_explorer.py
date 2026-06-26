@@ -29,7 +29,7 @@ Usage:
     python -m param_decomp_lab.scripts.validation.build_neuron_connection_explorer <model_path> \
         [--op=add] [--conn-floor=0.1] [--top-neurons=60] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/neuron_explorer_<op>/{index.html,data.js}`.
+Output: `<run_dir>/analysis/neuron_explorer_<op>/{index.html,data.js}`.
 """
 
 import base64
@@ -48,6 +48,8 @@ from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
+    analysis_datasets_dir,
+    analysis_dir,
     load_component_uv,
     op_symbol,
     read_alive_components,
@@ -137,13 +139,14 @@ def build_neuron_connection_explorer(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
+    data_dir = analysis_datasets_dir(run_dir)
 
-    alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
+    alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
+    periods = read_subcomp_periods(data_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
 
-    npz_path = run_dir / f"hidden_activations_{op}.npz"
+    npz_path = data_dir / f"hidden_activations_{op}.npz"
     assert npz_path.exists(), f"missing {npz_path.name}; run collect_hidden_activations first"
     hidden = np.load(npz_path, allow_pickle=True)
     n = int(hidden["a"].shape[0])
@@ -153,8 +156,8 @@ def build_neuron_connection_explorer(
     alive_keys = {(a.proj, a.component) for a in alive}
     # CI patterns come from the (unsuffixed, op-agnostic) find_alive_components output; the
     # signed inner-activation patterns from this op's collect_inner_activations TSV.
-    ci_grids = _ci_grids(run_dir / "alive_components_per_position.json", op, alive_keys, n)
-    inner_grids = _inner_grids(run_dir / f"inner_activations_{op}.tsv", alive_keys, n)
+    ci_grids = _ci_grids(data_dir / "alive_components_per_position.json", op, alive_keys, n)
+    inner_grids = _inner_grids(data_dir / f"inner_activations_{op}.tsv", alive_keys, n)
 
     # Per subcomponent: select its strongest neurons (|conn| > floor, top-K), accumulate the
     # neuron universe (union across all subcomponents and matrices).
@@ -218,7 +221,7 @@ def build_neuron_connection_explorer(
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else run_dir / "figures" / f"neuron_explorer_{op}"
+        else analysis_dir(run_dir) / f"neuron_explorer_{op}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "data.js").write_text(

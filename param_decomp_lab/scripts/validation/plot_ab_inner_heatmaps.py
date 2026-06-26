@@ -15,7 +15,7 @@ Usage:
     python -m param_decomp_lab.scripts.validation.plot_ab_inner_heatmaps <inner_activations_tsv> \
         [--output-dir=PATH]
 
-Output: `<run_dir>/figures/ab_heatmaps_<op>/inner_activations.png`.
+Output: `<run_dir>/analysis/ab_heatmaps_<op>/inner_activations.png`.
 """
 
 import csv
@@ -26,7 +26,7 @@ import fire
 import numpy as np
 
 from param_decomp.log import logger
-from param_decomp_lab.scripts.validation.common import op_symbol
+from param_decomp_lab.scripts.validation.common import analysis_dir, op_symbol, run_dir_of_dataset
 from param_decomp_lab.scripts.validation.plot_ab_heatmaps import _plot_position
 
 
@@ -70,7 +70,7 @@ def plot_ab_inner_heatmaps(inner_activations_tsv: str, output_dir: str | None = 
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else tsv_path.parent / "figures" / f"ab_heatmaps_{op}"
+        else analysis_dir(run_dir_of_dataset(tsv_path)) / f"ab_heatmaps_{op}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "inner_activations.png"

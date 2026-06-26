@@ -29,7 +29,7 @@ Usage:
         [--op=+] [--ci-thr=0.1] [--positions=1,3,4] [--max-modulus=25] [--top-k=10] \
         [--no-weights] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/addition_explorer/{index.html,data.js}`.
+Output: `<run_dir>/analysis/addition_explorer/{index.html,data.js}`.
 """
 
 import base64
@@ -48,7 +48,11 @@ from numpy.typing import NDArray
 
 from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
-from param_decomp_lab.scripts.validation.common import parse_module_name
+from param_decomp_lab.scripts.validation.common import (
+    analysis_datasets_dir,
+    analysis_dir,
+    parse_module_name,
+)
 
 _APP_TEMPLATE = Path(__file__).with_name("addition_explorer_app.html")
 _SHORT = {
@@ -285,7 +289,7 @@ def build_addition_explorer(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
-    json_path = run_dir / "alive_components_per_position.json"
+    json_path = analysis_datasets_dir(run_dir) / "alive_components_per_position.json"
     assert json_path.exists(), (
         f"missing {json_path.name}; run find_alive_components first (its CI threshold becomes "
         "this explorer's noise floor)"
@@ -342,7 +346,7 @@ def build_addition_explorer(
         }
 
     out_dir = (
-        Path(output_dir).expanduser() if output_dir else run_dir / "figures" / "addition_explorer"
+        Path(output_dir).expanduser() if output_dir else analysis_dir(run_dir) / "addition_explorer"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     data_js = out_dir / "data.js"

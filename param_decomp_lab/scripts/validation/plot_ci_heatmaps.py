@@ -12,7 +12,7 @@ Usage:
     python -m param_decomp_lab.scripts.validation.plot_ci_heatmaps <per_position_json> \
         [--n-prompts=50] [--grep=SUBSTRING] [--output-dir=PATH]
 
-Output: `<json_dir>/ci_heatmaps/position_<pos>.png` (one per position).
+Output: `<run_dir>/analysis/ci_heatmaps/position_<pos>.png` (one per position).
 """
 
 import json
@@ -28,7 +28,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from param_decomp.log import logger  # noqa: E402
-from param_decomp_lab.scripts.validation.common import parse_module_name  # noqa: E402
+from param_decomp_lab.scripts.validation.common import (  # noqa: E402
+    analysis_dir,
+    parse_module_name,
+    run_dir_of_dataset,
+)
 
 # prompt -> position(str) -> module -> [{"component": int, "ci": float}]
 PerPosition = dict[str, dict[str, dict[str, list[dict[str, Any]]]]]
@@ -116,7 +120,11 @@ def plot_ci_heatmaps(
     modules = sorted(alive, key=parse_module_name)
     positions = sorted({pos for prompt in prompts for pos in data[prompt]}, key=int)
 
-    out_dir = Path(output_dir).expanduser() if output_dir else json_file.parent / "ci_heatmaps"
+    out_dir = (
+        Path(output_dir).expanduser()
+        if output_dir
+        else analysis_dir(run_dir_of_dataset(json_file)) / "ci_heatmaps"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for pos in positions:

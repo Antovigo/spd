@@ -16,16 +16,16 @@ columns and colouring with a diverging RdBu scale. Clicking a cell selects that
 Only the top-`top_neurons` neurons by total coefficient are kept — their up / gate grids
 (needed for the right panel) are the bulk of the payload, so the cap bounds the file size.
 
-CPU-only: reads the checkpoint U/V (mmap), the filtered-alive list (`alive_filtered_<op>.tsv`,
-for mean CI), the periods (`subcomp_periods_<op>.tsv`), the inner-activation TSV
-(`inner_activations_<op>.tsv`), and the hidden-activation npz (`hidden_activations_<op>.npz`,
-for the neuron grids). No forward pass.
+CPU-only: reads the checkpoint U/V (mmap) plus, from `<run>/analysis/datasets/`, the
+filtered-alive list (`alive_filtered_<op>.tsv`, for mean CI), the periods
+(`subcomp_periods_<op>.tsv`), the inner-activation TSV (`inner_activations_<op>.tsv`), and the
+hidden-activation npz (`hidden_activations_<op>.npz`, for the neuron grids). No forward pass.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.build_neuron_investigator <model_path> \
         [--op=add] [--top-neurons=512] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/neuron_investigator_<op>/{index.html,data.js}`.
+Output: `<run_dir>/analysis/neuron_investigator_<op>/{index.html,data.js}`.
 """
 
 import base64
@@ -44,6 +44,8 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
     AliveComponent,
+    analysis_datasets_dir,
+    analysis_dir,
     load_component_uv,
     op_symbol,
     read_alive_components,
@@ -99,14 +101,15 @@ def build_neuron_investigator(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
+    data_dir = analysis_datasets_dir(run_dir)
 
-    alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    mean_ci = _read_mean_ci(run_dir / f"alive_filtered_{op}.tsv")
-    periods = read_subcomp_periods(run_dir / f"subcomp_periods_{op}.tsv")
+    alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
+    mean_ci = _read_mean_ci(data_dir / f"alive_filtered_{op}.tsv")
+    periods = read_subcomp_periods(data_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
 
-    npz_path = run_dir / f"hidden_activations_{op}.npz"
+    npz_path = data_dir / f"hidden_activations_{op}.npz"
     assert npz_path.exists(), f"missing {npz_path.name}; run collect_hidden_activations first"
     hidden = np.load(npz_path, allow_pickle=True)
     n = int(hidden["a"].shape[0])
@@ -131,7 +134,7 @@ def build_neuron_investigator(
     signed = coeff[:, neuron_ids] * np.where(is_read, -1.0, 1.0)[:, None]
 
     alive_keys = {(a.proj, a.component) for a in alive}
-    inner_grids = _inner_grids(run_dir / f"inner_activations_{op}.tsv", alive_keys, n)
+    inner_grids = _inner_grids(data_dir / f"inner_activations_{op}.tsv", alive_keys, n)
 
     # Neuron up / gate grids reindexed to [K, N, N] (row-major [a, b]) for the right panel.
     up_k = np.transpose(up_grid[:, :, neuron_ids], (2, 0, 1)).astype(np.float16)
@@ -168,7 +171,7 @@ def build_neuron_investigator(
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else run_dir / "figures" / f"neuron_investigator_{op}"
+        else analysis_dir(run_dir) / f"neuron_investigator_{op}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "data.js").write_text(

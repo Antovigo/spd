@@ -25,7 +25,8 @@ Usage:
     python -m param_decomp_lab.scripts.validation.compute_subcomp_periods \
         <inner_activations_tsv> [--log-bar=0.45] [--output=PATH]
 
-Output (default `subcomp_periods_<op>.tsv` in the run folder): one row per subcomponent.
+Output (default `subcomp_periods_<op>.tsv` beside the input TSV, in `analysis/datasets/`):
+one row per subcomponent.
 """
 
 import csv
@@ -166,9 +167,9 @@ def compute_subcomp_periods(
     tsv_path = Path(inner_activations_tsv).expanduser()
     assert tsv_path.exists(), f"missing inner-activations TSV: {tsv_path}"
     op = _infer_op(tsv_path)
-    run_dir = tsv_path.parent
+    data_dir = tsv_path.parent  # the inner-activations TSV lives in <run>/analysis/datasets/
 
-    alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv")
+    alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv")
     meta = {(a.proj, a.component): (a.layer, a.matrix) for a in alive}
 
     cells: dict[tuple[str, int], list[tuple[int, int, float]]] = defaultdict(list)
@@ -263,7 +264,7 @@ def compute_subcomp_periods(
         r["period_type"] = "log" if is_log else "additive" if is_add else "none"
     rows.sort(key=lambda r: (r["layer"], r["matrix"], r["component"]))
 
-    out_path = Path(output).expanduser() if output else run_dir / f"subcomp_periods_{op}.tsv"
+    out_path = Path(output).expanduser() if output else data_dir / f"subcomp_periods_{op}.tsv"
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_FIELDS, delimiter="\t", extrasaction="ignore")
         writer.writeheader()

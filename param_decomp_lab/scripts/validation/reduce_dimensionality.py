@@ -24,8 +24,8 @@ CPU-only. Usage:
     python -m param_decomp_lab.scripts.validation.reduce_dimensionality <model_path> \
         [--op=add] [--rank-eps=1e-6] [--output-dir=PATH]
 
-Outputs (run folder): `dimensionality_<op>.npz`, `dimensionality_<op>.json` (the scalar
-summary), and `figures/dimensionality_<op>/index.html`.
+Outputs: `analysis/datasets/dimensionality_<op>.{npz,json}` (the scalar summary) and
+`analysis/dimensionality_<op>/index.html`.
 """
 
 import json
@@ -43,6 +43,8 @@ from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.scripts.validation.common import (
     MLP_MATRICES,
+    analysis_datasets_dir,
+    analysis_dir,
     load_component_uv,
     read_alive_components,
 )
@@ -130,15 +132,16 @@ def reduce_dimensionality(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
+    data_dir = analysis_datasets_dir(run_dir)
 
-    alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
+    alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
     layer = alive[0].layer
     alive_by_proj: dict[str, list[int]] = {p: [] for p in MLP_MATRICES}
     for a in alive:
         alive_by_proj[a.proj].append(a.component)
     uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
 
-    npz_path = run_dir / f"hidden_activations_{op}.npz"
+    npz_path = data_dir / f"hidden_activations_{op}.npz"
     assert npz_path.exists(), f"missing {npz_path.name}; run collect_hidden_activations first"
     hidden = np.load(npz_path, allow_pickle=True)
     n = int(hidden["a"].shape[0])
@@ -160,7 +163,7 @@ def reduce_dimensionality(
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else run_dir / "figures" / f"dimensionality_{op}"
+        else analysis_dir(run_dir) / f"dimensionality_{op}"
     )
     _write_outputs(run_dir, out_dir, op, n, a_per_row, b_per_row, results)
     logger.info(f"wrote dimensionality analysis + applet for {op} → {out_dir}")
@@ -189,8 +192,10 @@ def _write_outputs(
             "twonn": r.twonn,
             "var_fraction": r.var_fraction,
         }
-    np.savez_compressed(run_dir / f"dimensionality_{op}.npz", **npz)
-    (run_dir / f"dimensionality_{op}.json").write_text(json.dumps(summary, indent=2))
+    data_dir = analysis_datasets_dir(run_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(data_dir / f"dimensionality_{op}.npz", **npz)
+    (data_dir / f"dimensionality_{op}.json").write_text(json.dumps(summary, indent=2))
 
     payload = {
         "meta": {

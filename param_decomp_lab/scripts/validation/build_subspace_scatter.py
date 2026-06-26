@@ -10,8 +10,9 @@ scattered (as a rotatable 3D plot) onto those 3 directions:
 - **output** space: the MLP output (`mlp_output`) projected onto the unit U directions of the
   down subcomponents (`y · Û_c`).
 
-Tasks are auto-detected from the run folder (those with a `hidden_activations_<op>.npz` and
-`alive_filtered_<op>.tsv`). Periods come from `subcomp_periods_<op>.tsv` when present;
+Tasks are auto-detected from the run's `analysis/datasets/` (those with a
+`hidden_activations_<op>.npz` and `alive_filtered_<op>.tsv`). Periods come from
+`subcomp_periods_<op>.tsv` when present;
 subcomponents without an assigned period are grouped under "no period". Each direction's sign
 (an arbitrary gauge) is flipped so the median projection is positive (its arrow points toward
 the data). The directions are kept at their true mutual angles in the applet (Cholesky
@@ -21,7 +22,7 @@ CPU-only. Usage:
     python -m param_decomp_lab.scripts.validation.build_subspace_scatter <model_path> \
         [--ops=add,mult] [--output-dir=PATH]
 
-Output: `<run_dir>/figures/subspace_scatter/index.html` (self-contained Plotly applet).
+Output: `<run_dir>/analysis/subspace_scatter/index.html` (self-contained Plotly applet).
 """
 
 import base64
@@ -44,6 +45,8 @@ from param_decomp_lab.infra.paths import ModelPath  # noqa: E402
 from param_decomp_lab.scripts.validation.common import (  # noqa: E402
     MLP_MATRICES,
     PeriodGroup,
+    analysis_datasets_dir,
+    analysis_dir,
     load_component_uv,
     read_alive_components,
     read_subcomp_period_groups,
@@ -74,17 +77,17 @@ def _thumbnail(grid: NDArray[np.float32]) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _resolve_ops(run_dir: Path, ops: str | tuple[str, ...] | None) -> list[str]:
+def _resolve_ops(data_dir: Path, ops: str | tuple[str, ...] | None) -> list[str]:
     if ops is not None:
         return list(ops) if isinstance(ops, (list, tuple)) else str(ops).split(",")
     detected = [
         op
         for op in _CANDIDATE_OPS
-        if (run_dir / f"hidden_activations_{op}.npz").exists()
-        and (run_dir / f"alive_filtered_{op}.tsv").exists()
+        if (data_dir / f"hidden_activations_{op}.npz").exists()
+        and (data_dir / f"alive_filtered_{op}.tsv").exists()
     ]
     assert detected, (
-        f"no tasks with hidden_activations_<op>.npz + alive_filtered_<op>.tsv in {run_dir}"
+        f"no tasks with hidden_activations_<op>.npz + alive_filtered_<op>.tsv in {data_dir}"
     )
     return detected
 
@@ -95,17 +98,20 @@ def build_subspace_scatter(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
-    op_list = _resolve_ops(run_dir, ops)
+    data_dir = analysis_datasets_dir(run_dir)
+    op_list = _resolve_ops(data_dir, ops)
     logger.info(f"tasks: {op_list}")
 
     # Per-task: alive set, (optional) periods, and the stored activations.
     per_op: dict[str, dict[str, Any]] = {}
     n = 0
     for op in op_list:
-        alive = read_alive_components(run_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-        periods_path = run_dir / f"subcomp_periods_{op}.tsv"
+        alive = read_alive_components(
+            data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES
+        )
+        periods_path = data_dir / f"subcomp_periods_{op}.tsv"
         periods = read_subcomp_period_groups(periods_path) if periods_path.exists() else {}
-        hidden = np.load(run_dir / f"hidden_activations_{op}.npz", allow_pickle=True)
+        hidden = np.load(data_dir / f"hidden_activations_{op}.npz", allow_pickle=True)
         nn = int(hidden["a"].shape[0])
         assert n in (0, nn), f"grid size mismatch across tasks ({n} vs {nn})"
         n = nn
@@ -213,7 +219,7 @@ def build_subspace_scatter(
         "sides": sides,
     }
     out_dir = (
-        Path(output_dir).expanduser() if output_dir else run_dir / "figures" / "subspace_scatter"
+        Path(output_dir).expanduser() if output_dir else analysis_dir(run_dir) / "subspace_scatter"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     assert _APP_TEMPLATE.exists(), f"app template missing: {_APP_TEMPLATE}"

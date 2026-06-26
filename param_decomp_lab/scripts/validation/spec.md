@@ -3,6 +3,15 @@
 One entry per script. Each describes the arguments, behaviour, and output schema. See
 `CLAUDE.md` in this folder for the shared CLI design.
 
+**Output layout.** Analysis artifacts live under the run's `analysis/` folder, never in
+`figures/` (which is reserved for the figures the training loop emits). Shared **datasets**
+(alive lists, activation grids/TSVs, periods, dimensionality / ISA summaries, ablation
+bundles) go in `<run_dir>/analysis/datasets/`; **figures and applets** go directly in
+`<run_dir>/analysis/<name>/`. `--output*` flags still override per file/dir. Helpers in
+`common.py`: `analysis_dir(run_dir)`, `analysis_datasets_dir(run_dir)`, and
+`run_dir_of_dataset(path)` (recovers the run dir from a dataset under `analysis/datasets/`,
+for scripts whose first positional arg is a dataset rather than a checkpoint).
+
 **sample_target_data.py**
 
 args:
@@ -51,7 +60,7 @@ Implementation:
   taken at every position.
 - LM tasks only (next-token predictions and a tokenizer are required).
 
-Output TSV (default `sample_target_data.tsv` in the decomposed model's folder), **long
+Output TSV (default `sample_target_data.tsv` in the run's `analysis/datasets/`), **long
 format**: one row per `(sequence, position, model)`, so each sequence yields
 `2 * n_positions` rows. Columns:
 - `example` — index of the sequence within the sample
@@ -95,7 +104,7 @@ Implementation:
   `max_ci`, and `activation_sum` (sum of `V^T x` over active positions); `count_total` is
   the total valid-position count.
 
-Output 1 — TSV (default `alive_components.tsv` in the run folder), one row per alive
+Output 1 — TSV (default `alive_components.tsv` in `analysis/datasets/`), one row per alive
 subcomponent (`count_active > 0`), sorted by `(layer, matrix, component)`. Same schema as
 the SPD `find_alive_components.py`:
 - `layer` — block number from the module path (e.g. 18)
@@ -106,7 +115,7 @@ the SPD `find_alive_components.py`:
 - `max_ci` — max observed lower-leaky CI
 - `mean_activation` — mean `V^T x` over the positions where it was active
 
-Output 2 — JSON (default `alive_components_per_position.json` in the run folder), the active
+Output 2 — JSON (default `alive_components_per_position.json` in `analysis/datasets/`), the active
 components per (prompt, position), organised **prompt > position > matrix > list**:
 ```json
 {
@@ -151,7 +160,7 @@ are read off directly. LM prompts-based target data only (asserts `cfg.data.prom
 not a CLI argument; this script is the place to encode and re-run a specific ablation
 hypothesis.
 
-Output TSV (default `ablate_component_groups.tsv` in the run folder), one row per
+Output TSV (default `ablate_component_groups.tsv` in `analysis/datasets/`), one row per
 `(prompt, condition)` where condition ∈ {`baseline`, *group names*}:
 - `example` — index within the subsample
 - `x`, `y` — the operands (parsed from the `X+Y=` prompt)
@@ -167,7 +176,7 @@ args:
 - the per-position JSON from `find_alive_components.py`
 - `--n-prompts`: cap on prompts shown, in file order (default 50)
 - `--grep`: keep only prompts containing this substring (default none → all)
-- `--output-dir`: overrides the figure folder (default `<json_dir>/ci_heatmaps/`)
+- `--output-dir`: overrides the figure folder (default `<run_dir>/analysis/ci_heatmaps/`)
 
 CPU-only (no model loaded). For each token position, draws one heatmap with prompts on the
 y-axis (tiny text) and alive subcomponents on the x-axis, faceted by matrix, coloured by
@@ -180,7 +189,7 @@ position (`position_<pos>.png`).
 
 args:
 - the per-position JSON from `find_alive_components.py` (prompts must be `a+b=`)
-- `--output-dir`: overrides the figure folder (default `<run_dir>/figures/ab_heatmaps/`)
+- `--output-dir`: overrides the figure folder (default `<run_dir>/analysis/ab_heatmaps_<op>/`)
 
 CPU-only (no model loaded). A variant view for `a+b=` arithmetic prompts. For each token
 position, writes one figure whose subplots form a grid: matrices down the rows, every alive
@@ -203,7 +212,7 @@ args:
 - `--context-window`: tokens of left context stored per firing (default 24)
 - `--seed`: stream shuffle seed (default 0)
 - `--alive-tsv`: alive-on-addition list used to flag components (default `alive_components.tsv`
-  in the run folder)
+  in `analysis/datasets/`)
 - `--output-tsv` / `--output`: override the TSV / JSONL paths
 - `--slurm` (+ `--partition` / `--gpus` / `--slurm-time` / `--slurm-mem`): submit as a
   single-GPU SLURM job (see `CLAUDE.md` → "GPU scripts run via SLURM")
@@ -277,7 +286,7 @@ args:
 - the path to a decomposed model
 - `--op`: `add` (default) / `sub` / `mult`
 - `--mean-ci-thr`: mean-CI cutoff for the alive filter (default 0.1)
-- `--alive-tsv`: `find_alive_components` output (default `alive_components.tsv` in the run folder)
+- `--alive-tsv`: `find_alive_components` output (default `alive_components.tsv` in `analysis/datasets/`)
 - `--batch-size` (default 256), `--output`, `--output-alive`, plus `--slurm` (+ knobs)
 
 For every existing-alive MLP subcomponent and every prompt, computes the normalized inner
@@ -333,7 +342,7 @@ incompatible dimensions, so two figures:
   d_model) and U (neuron, d_int) side by side.
 - `cosine_down_<op>.png` — down: V (neuron) and U (residual) side by side.
 
-Outputs to `<run_dir>/figures/subcomp_cosine/`.
+Outputs to `<run_dir>/analysis/subcomp_cosine/`.
 
 **plot_ab_inner_heatmaps.py**
 
@@ -348,7 +357,7 @@ subcomponent's normalized inner activation `(x·V_c)/||V_c||` at the last token 
 Inner activations are signed, so a diverging `RdBu_r` on a symmetric shared scale
 (`±max|inner|`, positive=red) replaces CI's 0..1 `RdPu`. One figure (inner activations are
 last-token only), written next to the CI heatmaps as
-`<run_dir>/figures/ab_heatmaps_<op>/inner_activations.png`.
+`<run_dir>/analysis/ab_heatmaps_<op>/inner_activations.png`.
 
 **build_neuron_connection_explorer.py**
 
@@ -360,7 +369,7 @@ args:
 - `--output-dir`
 
 CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
-server/CDN/GPU) into `<run_dir>/figures/neuron_explorer_<op>/`. Connection strength uses the
+server/CDN/GPU) into `<run_dir>/analysis/neuron_explorer_<op>/`. Connection strength uses the
 V-unit normalization (V→V/||V||, U→U·||V||): gate/up (pre-SwiGLU) write strength to neuron
 `j` is `U[c,j]·||V_c||`; down (post-SwiGLU) read strength is `V[j,c]/||V_c||`. The user picks
 `(a, b)` and a connection threshold; the page shows active gate/up subcomponents (left, up on
@@ -400,11 +409,12 @@ Reports per side: geometric rank (non-negligible G eigenvalues), linear effectiv
 (participation ratio of the cov(z) / PCA spectrum), intrinsic dimension (TwoNN via
 `scikit-dimension`, on z), and the completeness fraction `‖z‖²/‖x‖²` (centered) — the share of
 activation variance living in the subcomponent subspace. Reads `alive_filtered_<op>.tsv` and
-`hidden_activations_<op>.npz`. Outputs:
-- `dimensionality_<op>.npz` — `z` (raw orthonormal) and `pca` (PCA-rotated) per side, plus the
-  `(a, b)` per row. Consumed by the ISA script (Objective 7).
-- `dimensionality_<op>.json` — the scalar summary (rank / PR / TwoNN / var fraction per side).
-- `figures/dimensionality_<op>/index.html` — a single self-contained **Plotly** applet
+`hidden_activations_<op>.npz` (from `analysis/datasets/`). Outputs:
+- `analysis/datasets/dimensionality_<op>.npz` — `z` (raw orthonormal) and `pca` (PCA-rotated)
+  per side, plus the `(a, b)` per row. Consumed by the ISA script (Objective 7).
+- `analysis/datasets/dimensionality_<op>.json` — the scalar summary (rank / PR / TwoNN / var
+  fraction per side).
+- `analysis/dimensionality_<op>/index.html` — a single self-contained **Plotly** applet
   (plotly.js inlined, `file://`-openable): a scree plot with an eigenvalue-threshold dialog,
   rotatable 3D scatter (floor-shadow projection) over both the raw z-axes and the PCA-ordered
   axes in groups of three, a colour selector (a / b / a+b), for both sides, with the TwoNN /
@@ -430,8 +440,8 @@ so a circular feature (components linearly uncorrelated but jointly dependent) i
 one subspace. Blocks are checked for near-orthogonality via the principal angles between their
 z-space directions (logs a warning if FastICA didn't converge). Discovery uses no `(a, b)`
 labels; they are only used afterward to colour the projections. Outputs:
-- `independent_subspaces_<op>.json` — per side, the component→subspace grouping.
-- `figures/independent_subspaces_<op>/index.html` — a self-contained Plotly applet: a 3D
+- `analysis/datasets/independent_subspaces_<op>.json` — per side, the component→subspace grouping.
+- `analysis/independent_subspaces_<op>/index.html` — a self-contained Plotly applet: a 3D
   scatter of the selected subspace's components (colour a / b / a+b), the energy-correlation
   heatmap (components ordered by subspace), and the min-principal-angle heatmap between
   subspaces. As with Objective 6, the 3D is WebGL (real browser to see the points).
@@ -441,7 +451,7 @@ labels; they are only used afterward to colour the projections. Outputs:
 args:
 - the path to a decomposed model
 - `--ops`: comma-separated tasks (default: auto-detect every op with a
-  `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv` in the run folder)
+  `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv` in `analysis/datasets/`)
 - `--output-dir`
 
 CPU. A self-contained Plotly applet for exploring the activation geometry in a user-picked
@@ -466,7 +476,7 @@ ratios for a log task (mult), which colour by the **multiplicative phase**
 redraw so changing colour/mod/picks/points doesn't reset the view. A dark-grey floor shadow aids
 reading. Reads each task's `alive_filtered_<op>.tsv`, optional `subcomp_periods_<op>.tsv`, and
 `hidden_activations_<op>.npz`; directions come from the checkpoint. Output:
-`figures/subspace_scatter/index.html`. The 3D is WebGL (real browser to see the points); a
+`analysis/subspace_scatter/index.html`. The 3D is WebGL (real browser to see the points); a
 screen-fixed (non-orbiting) shadow isn't possible in a single Plotly 3D scene, so the shadow is
 the standard floor projection.
 
@@ -479,7 +489,7 @@ args:
 - `--output-dir`
 
 CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
-server/CDN/GPU) into `<run_dir>/figures/neuron_investigator_<op>/`. The **coefficient of
+server/CDN/GPU) into `<run_dir>/analysis/neuron_investigator_<op>/`. The **coefficient of
 interaction** between a subcomponent and a neuron is the unit-normalized read/write weight
 (always ≥ 0): gate/up (pre-SwiGLU, *write*) `|U[c,j]|/||U_c||`; down (post-SwiGLU, *read*)
 `|V[j,c]|/||V_c||`. The left half is a neuron × subcomponent heatmap — subcomponents (columns)

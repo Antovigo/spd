@@ -12,7 +12,7 @@ Usage:
     python -m param_decomp_lab.scripts.validation.build_arith_ablation_explorer <run_dir_or_npz> \
         [--output-dir=PATH]
 
-Output: `<run_dir>/figures/arith_ablation_explorer/{index.html,data.js}`.
+Output: `<run_dir>/analysis/arith_ablation_explorer/{index.html,data.js}`.
 """
 
 import base64
@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from param_decomp.log import logger
+from param_decomp_lab.scripts.validation.common import analysis_datasets_dir, analysis_dir
 
 _APP_TEMPLATE = Path(__file__).with_name("arith_ablation_explorer_app.html")
 
@@ -100,10 +101,14 @@ def _b64_u8(arr: NDArray[np.float64], scale: float) -> str:
 def build_arith_ablation_explorer(source: str, output_dir: str | None = None) -> Path:
     """Write the ablation-KL explorer (`index.html` + `data.js`). Returns the output folder."""
     src = Path(source).expanduser()
-    npz_path = src if src.suffix == ".npz" else src / "ablation_kl" / "data.npz"
+    if src.suffix == ".npz":
+        npz_path = src
+        run_dir = npz_path.parents[3]  # <run>/analysis/datasets/ablation_kl/data.npz
+    else:
+        run_dir = src
+        npz_path = analysis_datasets_dir(run_dir) / "ablation_kl" / "data.npz"
     assert npz_path.exists(), f"npz not found: {npz_path} (run collect_ablation_kl first)"
     meta = json.loads((npz_path.parent / "meta.json").read_text())
-    run_dir = npz_path.parent.parent
     n = int(meta["n"])
 
     # ||U||·||V|| per component, keyed by full module path (the short matrix name collides
@@ -162,7 +167,7 @@ def build_arith_ablation_explorer(source: str, output_dir: str | None = None) ->
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else run_dir / "figures" / "arith_ablation_explorer"
+        else analysis_dir(run_dir) / "arith_ablation_explorer"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     data_js = out_dir / "data.js"

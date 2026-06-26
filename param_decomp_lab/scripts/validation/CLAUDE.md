@@ -55,9 +55,15 @@ common case wants — keep them high in the call stack, don't re-default downstr
 
 ## Output
 
-- **Default location: the decomposed model's run folder** (the checkpoint's parent dir),
-  under a fixed, script-specific filename. `--output*` overrides it. This keeps every
-  artifact for a run co-located (see the "Saved-run layout" in the root `CLAUDE.md`).
+- **Default location: the run's `analysis/` folder** (under the checkpoint's parent dir),
+  *never* `figures/` (reserved for the figures the training loop emits). Shared **datasets**
+  (alive lists, activation grids/TSVs, periods, dimensionality / ISA summaries, ablation
+  bundles) go in `<run>/analysis/datasets/`; **figures and applets** go directly in
+  `<run>/analysis/<name>/`. `--output*` overrides per file/dir. Use the `common.py` helpers
+  `analysis_dir(run_dir)` / `analysis_datasets_dir(run_dir)` rather than hand-building the
+  paths; scripts whose first positional arg is a dataset (not a checkpoint) recover the run
+  dir via `run_dir_of_dataset(path)`. This keeps every artifact for a run co-located (see the
+  "Saved-run layout" in the root `CLAUDE.md`).
 - **Target vs nontarget filenames differ by a `_nontarget` suffix** (`effect_of_ablation.tsv`
   → `effect_of_ablation_nontarget.tsv`) so both can coexist. When a script compares two
   runs, suffix the output with the *other* run's folder name so several can coexist.
@@ -115,6 +121,10 @@ reimplementing. Implemented so far:
 - **`load_lm_run(model_path) -> LoadedRun`** — wraps `SavedLMRun.from_path(...).load_model()`
   to return an eval-moded `ComponentModel` on the compute device, plus `cfg`, `run_dir`,
   and `tokenizer` in one call.
+- **`analysis_dir` / `analysis_datasets_dir` / `run_dir_of_dataset`** — the per-run output
+  layout: `<run>/analysis/` (figures + applets), `<run>/analysis/datasets/` (shared
+  datasets), and the inverse that recovers the run dir from a dataset path (for scripts
+  taking a dataset as their first positional arg). See **Output** above.
 - **`escape_tsv_value`** — reversible backslash-escaping for TSV cells.
 - **`SlurmOptions` + `submit_self_to_slurm`** — the `--slurm` self-resubmission path (see
   above).

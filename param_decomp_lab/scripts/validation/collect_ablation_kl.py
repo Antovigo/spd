@@ -36,7 +36,7 @@ Usage:
         [--max-components=N] [--output-dir=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
 
-Output dir (default `<run_dir>/ablation_kl/`):
+Output dir (default `<run_dir>/analysis/datasets/ablation_kl/`):
 - `data.npz`       — grids [n_alive, N, N] (kl, abl_token, abl_prob, inner_act, ci) +
                      per-prompt [N, N] (orig_token, orig_prob) + component order arrays.
 - `components.tsv` — one row per alive component: layer, matrix, component, u_norm, v_norm,
@@ -64,6 +64,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     parse_module_name,
     submit_self_to_slurm,
@@ -80,7 +81,7 @@ class _AliveComponent:
 
 
 def _read_alive(run_dir: Path) -> list[_AliveComponent]:
-    tsv = run_dir / "alive_components.tsv"
+    tsv = analysis_datasets_dir(run_dir) / "alive_components.tsv"
     assert tsv.exists(), f"missing {tsv}; run find_alive_components first"
     out: list[_AliveComponent] = []
     with tsv.open() as f:
@@ -315,7 +316,11 @@ def _write_outputs(
     g: _Grids,
     tokenizer: Any,
 ) -> Path:
-    out_dir = Path(output_dir).expanduser() if output_dir else run_dir / "ablation_kl"
+    out_dir = (
+        Path(output_dir).expanduser()
+        if output_dir
+        else analysis_datasets_dir(run_dir) / "ablation_kl"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     np.savez_compressed(

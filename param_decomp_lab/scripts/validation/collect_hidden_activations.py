@@ -20,7 +20,7 @@ Usage:
         [--op=add] [--layer=18] [--batch-size=256] [--output=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=1:00:00 --slurm-mem=...]]
 
-Output (default `hidden_activations_<op>.npz` in the run folder): the five grids above
+Output (default `hidden_activations_<op>.npz` in the run's `analysis/datasets/`): the five grids above
 plus `a`, `b` axis values, `op`, and `layer`.
 """
 
@@ -39,6 +39,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
 from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
+    analysis_datasets_dir,
     load_lm_run,
     op_prompts_file,
     op_symbol,
@@ -146,7 +147,11 @@ def collect_hidden_activations(
     for h in handles:
         h.remove()
 
-    out_path = Path(output).expanduser() if output else run.run_dir / f"hidden_activations_{op}.npz"
+    out_path = (
+        Path(output).expanduser()
+        if output
+        else analysis_datasets_dir(run.run_dir) / f"hidden_activations_{op}.npz"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "a": np.arange(1, n + 1, dtype=np.int32),

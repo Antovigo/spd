@@ -20,8 +20,8 @@ CPU-only. Usage:
         [--op=add] [--var-keep=0.9] [--group-distance=0.75] [--seed=0] [--max-iter=20000] \
         [--output-dir=PATH]
 
-Outputs (run folder): `independent_subspaces_<op>.json` (the block summary) and
-`figures/independent_subspaces_<op>/index.html` (a self-contained Plotly applet).
+Outputs: `analysis/datasets/independent_subspaces_<op>.json` (the block summary) and
+`analysis/independent_subspaces_<op>/index.html` (a self-contained Plotly applet).
 """
 
 import json
@@ -39,6 +39,7 @@ from sklearn.decomposition import FastICA
 
 from param_decomp.log import logger
 from param_decomp_lab.infra.paths import ModelPath
+from param_decomp_lab.scripts.validation.common import analysis_datasets_dir, analysis_dir
 
 _APP_TEMPLATE = Path(__file__).with_name("isa_explorer_app.html")
 _SIDES = ("input", "output")
@@ -126,7 +127,7 @@ def find_independent_subspaces(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
-    dim_npz = run_dir / f"dimensionality_{op}.npz"
+    dim_npz = analysis_datasets_dir(run_dir) / f"dimensionality_{op}.npz"
     assert dim_npz.exists(), f"missing {dim_npz.name}; run reduce_dimensionality first"
     data = np.load(dim_npz, allow_pickle=True)
     a, b = data["a"].astype(int), data["b"].astype(int)
@@ -142,7 +143,7 @@ def find_independent_subspaces(
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else run_dir / "figures" / f"independent_subspaces_{op}"
+        else analysis_dir(run_dir) / f"independent_subspaces_{op}"
     )
     _write_outputs(run_dir, out_dir, op, a, b, results)
     logger.info(f"wrote ISA decomposition + applet for {op} → {out_dir}")
@@ -169,7 +170,9 @@ def _write_outputs(
             for side, r in results.items()
         },
     }
-    (run_dir / f"independent_subspaces_{op}.json").write_text(json.dumps(summary, indent=2))
+    data_dir = analysis_datasets_dir(run_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / f"independent_subspaces_{op}.json").write_text(json.dumps(summary, indent=2))
 
     payload = {
         "meta": {"op": op, "a": a.tolist(), "b": b.tolist(), "sum": (a + b).tolist()},
