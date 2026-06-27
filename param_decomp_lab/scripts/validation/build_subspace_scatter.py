@@ -5,10 +5,14 @@ A GPU-free HTML applet spanning every available task (add / sub / mult). The use
 period — and a points selector chooses which single task's last-token activations are
 scattered (as a rotatable 3D plot) onto those 3 directions:
 
-- **input** space: the post-RMSNorm MLP input (`mlp_input`) projected onto the unit V
-  directions of the up/gate subcomponents (`x · V̂_c`).
-- **output** space: the MLP output (`mlp_output`) projected onto the unit U directions of the
-  down subcomponents (`y · Û_c`).
+- **input**: the post-RMSNorm MLP input (`mlp_input`) projected onto the unit V directions of
+  the up/gate subcomponents (`x · V̂_c`).
+- **pre-nonlinearity**: each up/gate subcomponent's own preactivation (`up_preact` / `gate_preact`)
+  projected onto its unit U direction — what the matrix writes to the neurons, pre-SwiGLU.
+- **post-nonlinearity**: the post-SwiGLU neuron output (`silu(gate)·up`) projected onto the unit
+  V directions of the down subcomponents — what the down matrix reads.
+- **output**: the MLP output (`mlp_output`) projected onto the unit U directions of the down
+  subcomponents (`y · Û_c`).
 
 Tasks are auto-detected from the run's `analysis/datasets/` (those with a
 `hidden_activations_<op>.npz` and `alive_filtered_<op>.tsv`). Periods come from
@@ -58,11 +62,43 @@ _APP_TEMPLATE = Path(__file__).with_name("subspace_scatter_app.html")
 _CANDIDATE_OPS = ("add", "sub", "mult")
 # Per-task result of the operation, used as a colour option.
 _RESULT = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mult": lambda a, b: a * b}
-# side -> (which vector defines the direction, the matrices, the activation grid key)
+# side -> (which vector defines the direction, the matrices the picks come from). Which activation
+# each direction is projected onto is resolved per (side, matrix) by `_side_acts`, in MLP order:
+# input → pre-nonlinearity → post-nonlinearity → output.
 _SIDES = {
-    "input": ("V", ("gate_proj", "up_proj"), "mlp_input"),
-    "output": ("U", ("down_proj",), "mlp_output"),
+    "input": ("V", ("gate_proj", "up_proj")),
+    "pre-nonlinearity": ("U", ("gate_proj", "up_proj")),
+    "post-nonlinearity": ("V", ("down_proj",)),
+    "output": ("U", ("down_proj",)),
 }
+
+
+def _silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
+    return (x / (1.0 + np.exp(-x))).astype(np.float32)
+
+
+def _side_acts(side: str, hidden: Any, n: int) -> dict[str, NDArray[np.float32]]:
+    """Per matrix, the last-token activation a subcomponent direction is projected onto:
+    `input` → post-RMSNorm MLP input (up/gate V is d_model); `output` → MLP output (down U is
+    d_model); `pre-nonlinearity` → the matrix's own preactivation (up/gate U is d_int);
+    `post-nonlinearity` → the post-SwiGLU neuron output `silu(gate)·up` (down V is d_int).
+    """
+
+    def flat(key: str) -> NDArray[np.float32]:
+        return hidden[key].reshape(n * n, -1).astype(np.float32)
+
+    match side:
+        case "input":
+            g = flat("mlp_input")
+            return {"gate_proj": g, "up_proj": g}
+        case "output":
+            return {"down_proj": flat("mlp_output")}
+        case "pre-nonlinearity":
+            return {"up_proj": flat("up_preact"), "gate_proj": flat("gate_preact")}
+        case "post-nonlinearity":
+            return {"down_proj": _silu(flat("gate_preact")) * flat("up_preact")}
+        case _:
+            raise AssertionError(f"unknown side {side!r}")
 
 
 def _thumbnail(grid: NDArray[np.float32]) -> str:
@@ -146,11 +182,10 @@ def build_subspace_scatter(
             task_mods.append({"kind": "additive", "values": [2, 5, 10, 20, 25, 50, 100]})
 
     sides: dict[str, Any] = {}
-    for side, (which, projs, grid_key) in _SIDES.items():
+    for side, (which, projs) in _SIDES.items():
         acts = {
-            op: per_op[op]["hidden"][grid_key].reshape(n * n, -1).astype(np.float32)
-            for op in op_list
-        }
+            op: _side_acts(side, per_op[op]["hidden"], n) for op in op_list
+        }  # [op][proj] -> [n*n, dim]
         # Union of components alive on any task for this side -> one direction each.
         union = sorted(
             {
@@ -167,8 +202,8 @@ def build_subspace_scatter(
         for proj, c in union:
             v, u = uv[proj]
             d = v[:, c] if which == "V" else u[c, :]
-            d = d / max(float(np.linalg.norm(d)), 1e-12)
-            proj_all = np.concatenate([acts[op] @ d for op in op_list])  # over every task's points
+            d = (d / max(float(np.linalg.norm(d)), 1e-12)).astype(np.float32)
+            proj_all = np.concatenate([acts[op][proj] @ d for op in op_list]).astype(np.float32)
             if float(np.median(proj_all)) < 0:  # gauge: arrow points toward the data
                 d, proj_all = -d, -proj_all
             dirs.append(d)

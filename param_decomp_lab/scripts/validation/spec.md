@@ -461,8 +461,12 @@ sections, then by period group — `period N` (additive), `×r` (log multiplicat
 `no period` — from `subcomp_periods_<op>.tsv` (via `read_subcomp_period_groups`; absent file →
 all "no period"). Each thumbnail is that subcomponent's inner-activation `(a, b)` pattern on its
 task, signed `RdBu_r`. The user clicks up to 3 directions (from any task); a **points** selector
-chooses which single task's last-token activations are scattered onto those 3 unit directions
-(**input** = `mlp_input · V̂` (up/gate), **output** = `mlp_output · Û` (down)). Each direction's
+chooses which single task's last-token activations are scattered onto those 3 unit directions.
+A **side** selector (MLP order) sets which activation each direction projects and which matrices
+the picks come from: **input** = `mlp_input · V̂` (up/gate); **pre-nonlinearity** = each up/gate
+subcomponent's own preactivation `up_preact`/`gate_preact` onto its `Û` (what the matrix writes,
+pre-SwiGLU); **post-nonlinearity** = the post-SwiGLU neuron output `silu(gate)·up` onto the down
+`V̂` (what down reads); **output** = `mlp_output · Û` (down). Each direction's
 sign (an arbitrary gauge) is flipped so the median projection (over all tasks' points) is
 positive, so its arrow points toward the data. The directions are kept at their **true mutual
 angles**: each point is embedded via the Cholesky factor of the picked sub-Gram (`P = L⁻¹s`)
@@ -527,3 +531,36 @@ the number of available ops). Reads `alive_filtered_<op>.tsv` (mean CI),
 `subcomp_periods_<op>.tsv`, the build op's `inner_activations_<op>.tsv` (for the score), and one
 `hidden_activations_<o>.npz` per available op (per-op neuron up/gate + subcomponent inner grids,
 fp16 base64); U/V from the checkpoint (mmap). No forward pass. Smoke-test with `headless_check.py`.
+
+**measure_model_accuracy.py**
+
+args:
+- the path to a decomposed model
+- `--ablate`: comma-separated `matrix:component` to ablate (e.g. `gate_proj:163,down_proj:240`;
+  bare `gate:163` also accepted). The matrices are matched by suffix against the decomposed
+  module paths and must each resolve to exactly one module. Omit for the un-ablated model.
+- `--range`: half-width `n` of the answer window (default 5)
+- `--batch-size`: forward-pass chunk size (default 512)
+- `--output-dir`: overrides the output directory
+- `--slurm` (+ `--partition` / `--gpus` / `--slurm-time` / `--slurm-mem`): submit as a single-GPU
+  SLURM job (see `CLAUDE.md` → "GPU scripts run via SLURM")
+
+GPU. Runs every `a<op>b=` prompt of the run's target distribution through the **all-on
+reconstruction** (every component on + delta on, which reproduces the target model) and, per
+prompt, records the probability on the correct answer token and on every wrong answer in a `±n`
+window (offset `k` → the first token of `str(result + k)`). With `--ablate`, the listed
+subcomponents are masked off (`U_c V_c^T` removed, delta + all others stay on), so original vs
+ablated differ only by the ablation. A first-batch reconstruction check (asserts un-ablated only)
+guards the mask/delta wiring. The op (add/sub/mult) and the result are auto-detected from the
+prompt format; the answer is read at the last (`=`) position (the prompt pool shares one length).
+For the `1..100` grid every windowed result is a 1–3 digit number — a single Llama-3 token — so
+the first-token probability is the number's probability.
+
+Output (note: **`<run_dir>/model_accuracy/`**, not `analysis/`, per the objective's request):
+`accuracy[_<ablation>].json` — the filename is suffixed with the ablated subcomponents
+(`accuracy_gate163_down240.json`; empty un-ablated). JSON: run/op/range/ablation metadata +
+`accuracy` + `mean_p_correct`, then per prompt `a`, `b`, `result`, the correct token + its
+probability, the argmax token + whether it is correct, and `offset_probs` mapping each offset in
+`-n..+n` to its token's probability (offset 0 = correct). A sibling `model_accuracy_notebook.py`
+(marimo) is copied in to plot the results: per-offset mean ±1 std curves (4 operand-parity classes
+× original/ablated) and `(a, b)` P(correct) heatmaps. Open with `marimo edit model_accuracy_notebook.py`.

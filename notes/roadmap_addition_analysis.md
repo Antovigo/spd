@@ -135,3 +135,8 @@ This means we have two slightly different metrics for input and output subcompon
 Update the neuron investigator so it uses the new metrics instead of the previous ones.
 
 Add a selector to filter neurons based on their max interaction score across subcomponents (so I can type in a threshold).
+
+# Objective 12
+Let’s upgrade the Subspace Scatter applet, to inspect what happens inside the MLP. Currently, there’s a dropdown called "side" that can be either input or output. Let’s add two more option: "pre-nonlinearity" and "post-nonlinearity". Pre-nonlinearity shows the hidden activations before the nonlinearity is computed (i.e., the values directly out of the up_proj or gate), in the subspace of the selected subcomponent’s out vector (u). As before in this applet, the actual directions of the subcomponents out vectors should be shown as red arrows. The subcomponents can be selected from the up or gate matrices.
+Post-nonlinearity shows the hidden activations after the nonlinearity (the actual outputs of the neurons) in the subspace of the selectod subcomponent’s input vectors (v). The subcomponents can be selected from the down matrix.
+

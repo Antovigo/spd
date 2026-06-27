@@ -244,6 +244,9 @@ uv run python -m $V.find_independent_subspaces "$MODEL_PATH" --op=$OP
 A Plotly applet spanning every available task: pick up to 3 subcomponents from a thumbnail
 grid (organised into task → period sections); a points selector chooses which single task's
 activations are scattered onto those 3 directions, coloured by result (a+b / a×b …) / a / b.
+A **side** selector (input → pre-nonlinearity → post-nonlinearity → output) chooses which MLP
+activation each direction projects (and which matrices the picks come from: up/gate for
+input & pre-nonlinearity, down for post-nonlinearity & output).
 Auto-detects the tasks with a `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv`.
 
 ```bash
@@ -282,4 +285,21 @@ $PY param_decomp_lab/scripts/validation/headless_check.py \
 $PY param_decomp_lab/scripts/validation/headless_check.py \
     "$RUN_DIR/analysis/neuron_investigator_$OP/index.html" --clicks='#matrix' \
     --probes="document.querySelectorAll('#grids canvas').length"
+```
+
+### 11. Per-prompt accuracy, original vs ablated (GPU)
+
+Probability the model puts on the correct answer (and on each wrong answer in a `±--range`
+window) for every `a<op>b=` prompt, on the all-on reconstruction and with subcomponents ablated.
+Writes `<run_dir>/model_accuracy/accuracy[_<ablation>].json` (filename suffixed with the ablated
+subcomponents) plus a marimo notebook to plot them. GPU — submit with `--slurm`.
+
+```bash
+CKPT=~/out/runs/llama8b-add-02/model_20000.pth
+# original model (no ablation)
+uv run python -m $V.measure_model_accuracy "$CKPT" --slurm
+# gate-163 + down-240 from L18's MLP ablated (range defaults to ±5)
+uv run python -m $V.measure_model_accuracy "$CKPT" --ablate=gate_proj:163,down_proj:240 --slurm
+# plot: pip/uv install marimo, then
+marimo edit ~/out/runs/llama8b-add-02/model_accuracy/model_accuracy_notebook.py
 ```

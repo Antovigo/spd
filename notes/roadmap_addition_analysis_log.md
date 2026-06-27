@@ -238,3 +238,21 @@ JS `COEFF`→`SCORE`.
   neuron frequency grouping all use the period group. Ran `--op=mult` on addmult-L18-03: 166
   subcomponents, labels span `p2, p100, ×1.265, ×1.999, ×2.398, ×3.018, ×3.728, ×6.472, —`.
   Output `~/out/runs/addmult-L18-03/analysis/neuron_investigator_mult/`. Headless clean.
+
+# Objective 12 — subspace scatter: pre/post-nonlinearity sides
+Added two `side` options to `build_subspace_scatter.py` + `subspace_scatter_app.html`, so the
+applet inspects activations through the MLP (dropdown order input → pre-nonlinearity →
+post-nonlinearity → output):
+- **pre-nonlinearity**: each up/gate subcomponent's own preactivation (`up_preact` for up,
+  `gate_preact` for gate) projected onto its unit **U** (out) direction — what the matrix writes
+  to the neurons, pre-SwiGLU. Picks from up/gate; red arrows are the U directions.
+- **post-nonlinearity**: the post-SwiGLU neuron output `silu(gate)·up` projected onto the unit
+  **V** (in) directions of the **down** subcomponents — what down reads. Picks from down.
+Generalised the per-side activation: `_SIDES` now maps side → (which vector, picks' matrices) and
+a new `_side_acts(side, hidden, n)` resolves the activation **per matrix** (so pre-nonlinearity
+uses up_preact for up directions and gate_preact for gate directions in one scatter). Dimensions
+line up per side: input/output use d_model (V_up/gate, U_down); pre/post use d_int (U_up/gate,
+V_down). HTML is otherwise data-driven — only the `side` dropdown gained the two options.
+Verified: input vs pre-nonlinearity project the same direction onto different spaces (g34 range
+[-1.09, 4.26] vs [3.52, 10.53]). Ran on llama8b-add-02 (add: 21 up/gate, 14 down dirs) and
+addmult-L18-03 (add+mult: 119 up/gate, 91 down dirs). All four sides render clean, no JS errors.
