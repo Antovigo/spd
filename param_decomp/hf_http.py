@@ -5,7 +5,7 @@ HF snapshot (`llama8b._hf_snapshot_dir` asserts the snapshot exists, no network 
 But at production topology (8 ranks/node x N nodes) a *cold* cache turns startup into an
 8N-rank simultaneous Hub burst, and a single `ReadTimeout` on one rank tears the whole
 job down before training begins. This mounts a retrying adapter on huggingface_hub's
-session factory so connect/read timeouts and 5xx/429 are retried with jittered backoff,
+session factory so connect/read timeouts and 408/429/5xx are retried with jittered backoff,
 de-synchronizing the simultaneous retries of many ranks.
 
 `huggingface_hub` is not a hard dependency of this distribution (weights come via
@@ -17,13 +17,16 @@ import importlib.util
 _configured = False
 
 
-def configure_hf_http_retries(*, total_retries: int = 5, backoff_factor: float = 1.5) -> None:
+def configure_hf_http_retries(*, total_retries: int = 8, backoff_factor: float = 1.5) -> None:
     """Install a retrying HTTP backend on huggingface_hub (idempotent, process-global).
 
     `backoff_factor` with full jitter spaces retries at roughly 0, 1.5, 3, 6, 12s; the
     jitter de-synchronizes the simultaneous retries of many ranks. Only idempotent
     methods (GET/HEAD) are retried, so non-idempotent writes are untouched. No-op when
     `huggingface_hub` is not installed in this venv.
+
+    `408` covers the HF Xet CDN (us.aws.cdn.hf.co/xet-bridge-us), which intermittently
+    times out dataset-shard GETs and would otherwise kill long streaming runs.
     """
     global _configured
     if _configured:
@@ -45,7 +48,7 @@ def configure_hf_http_retries(*, total_retries: int = 5, backoff_factor: float =
         status=total_retries,
         backoff_factor=backoff_factor,
         backoff_jitter=1.0,
-        status_forcelist=(429, 500, 502, 503, 504),
+        status_forcelist=(408, 429, 500, 502, 503, 504),
         allowed_methods=frozenset({"GET", "HEAD", "OPTIONS"}),
         respect_retry_after_header=True,
         raise_on_status=False,
