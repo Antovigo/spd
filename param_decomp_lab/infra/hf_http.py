@@ -4,7 +4,7 @@ HF's default session retries file *downloads* (via `http_backoff`) but mounts a 
 adapter for metadata calls like `HfApi.repo_info` — the call `datasets` makes to resolve
 a streaming dataset's layout at startup. A single `ReadTimeout` there raises, and in a
 DDP job that one rank's failure tears down every rank before training begins. This mounts
-a retrying adapter on the session factory so connect/read timeouts and 5xx/429 are
+a retrying adapter on the session factory so connect/read timeouts and 408/429/5xx are
 retried with jittered backoff across *all* Hub HTTP calls (dataset, tokenizer, model).
 """
 
