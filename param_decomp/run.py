@@ -79,10 +79,17 @@ def install_sigterm_flag() -> None:
     signal.signal(signal.SIGTERM, handler)
 
 
-def sigterm_received() -> bool:
-    """Whether a SIGTERM has landed. A composition root's eval pass reads this to abandon
-    a partial eval cleanly (the engine's save block then checkpoints + exits for requeue)."""
-    return _sigterm_received
+def _sigterm_consensus() -> bool:
+    """Cross-rank-agreed SIGTERM flag. SLURM delivers SIGTERM per task with no simultaneity
+    guarantee, so reading the per-process flag independently at a collective gate (faith-warmup
+    exit, eval entry, orbax save) can diverge ranks and hang. OR-reduce it across processes;
+    callers read it once per step into a local the handler can't mutate mid-step. No-op when not
+    distributed."""
+    if jax.process_count() == 1:
+        return _sigterm_received
+    import jax.experimental.multihost_utils as mhu
+
+    return bool(np.asarray(mhu.process_allgather(np.asarray(_sigterm_received))).any())
 
 
 def _log_wandb_safe(wandb_module: "ModuleType", payload: "LogRecord", step: int, what: str) -> None:
@@ -376,7 +383,7 @@ def _init_or_restore_state(
             warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
                 lm, warmed_components, faith_warmup_opt_state
             )
-            if _sigterm_received:
+            if _sigterm_consensus():
                 # No valid checkpoint exists yet (the step-0 save happens only after warmup
                 # completes, and resume skips warmup whenever a checkpoint is present — a
                 # partially-warmed step-0 save would resume as if fully warmed). Exit
@@ -657,6 +664,7 @@ def run_decomposition_training(
                     print(f"PD_PROFILE: stop_trace @ step {step}", flush=True)
 
         now_step = step + 1
+        sigterm = _sigterm_consensus()
         dense = cadence.dense_log_phase
         log_now = (
             now_step % cadence.train_log_every == 0
@@ -676,31 +684,27 @@ def run_decomposition_training(
             record["step_time_s"] = per_step
             record["elapsed_s"] = time.time() - loop_t0
             record["eta_s"] = (pd.steps - now_step) * per_step
-            record["train/schedules/lr/components"] = float(jnp.asarray(sched_vu(now_step)))
-            record["train/schedules/lr/ci_fn"] = float(jnp.asarray(sched_ci(now_step)))
+            # the LR this step applied (optax count is the pre-increment `step` == now_step - 1)
+            record["train/schedules/lr/components"] = float(jnp.asarray(sched_vu(now_step - 1)))
+            record["train/schedules/lr/ci_fn"] = float(jnp.asarray(sched_ci(now_step - 1)))
             mem_stats = jax.local_devices()[0].memory_stats()
             if mem_stats is not None:
                 record["train/mem/peak_gb_per_rank"] = mem_stats["peak_bytes_in_use"] / 1e9
             sink.log(now_step, record)
             window_t0 = time.time()
 
-        if eval_fn is not None and now_step % eval_every == 0 and not _sigterm_received:
+        if eval_fn is not None and now_step % eval_every == 0 and not sigterm:
             eval_record = eval_fn(state, now_step)
-            # A SIGTERM raised DURING the eval pass abandons its partial record unlogged and
-            # falls through to the save block (synchronous save of the completed `now_step`).
-            if not _sigterm_received:
-                sink.log(now_step, eval_record)
-                window_t0 = time.time()
+            sink.log(now_step, eval_record)
+            window_t0 = time.time()
 
         _skip_save = os.environ.get("PD_NO_CHECKPOINT", "") == "1"  # profiling runs skip all saves
-        if not _skip_save and (
-            now_step % save_every == 0 or now_step == pd.steps or _sigterm_received
-        ):
+        if not _skip_save and (now_step % save_every == 0 or now_step == pd.steps or sigterm):
             save_state(checkpoint_manager, now_step, state)
             if is_main:
                 print(f"checkpoint saved @ step {now_step}", flush=True)
             window_t0 = time.time()
-        if _sigterm_received:
+        if sigterm:
             if is_main:
                 print("SIGTERM: checkpoint saved, exiting for requeue", flush=True)
             break

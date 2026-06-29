@@ -54,7 +54,6 @@ from param_decomp.run import (
     SlowEvalRenderer,
     install_sigterm_flag,
     run_decomposition_training,
-    sigterm_received,
     slow_eval_due,
 )
 from param_decomp.sharding import hsdp_mesh, init_distributed
@@ -262,9 +261,9 @@ def _make_lm_eval_fn(
         # docstring for the per-key parity argument (cites SPEC S8/D2).
         metric_sums: dict[str, jax.Array] = {}
         eval_batches: list[jax.Array] = []
+        # No per-rank SIGTERM abandon inside this loop — it would desync the collective
+        # device->host gathers below; the engine gates pass entry on cross-rank consensus.
         for j in range(eval.n_steps):
-            if sigterm_received():
-                break
             eval_tokens = _global_token_batch(
                 eval_server.local_batch(eval_pass_index * eval.n_steps + j),
                 mesh,
@@ -291,7 +290,7 @@ def _make_lm_eval_fn(
                 for k, v in attn_patterns_log_entries(class_name, reductions).items()
             }
         slow_due = slow_eval_due(now_step, eval.every, eval.slow_every, eval.slow_on_first_step)
-        if eval_batches and slow_due and not sigterm_received():
+        if eval_batches and slow_due:
             # SLOW/PLOT TIER (SPEC S28/S29). The COLLECTIVE part runs in lockstep on every
             # rank — `accumulate_site_reductions` / `compute_hidden_acts_metrics` pull
             # C-sharded reductions to numpy, whose `np.asarray` triggers the all-gather all
