@@ -95,7 +95,7 @@ def test_reductions_match_hand_rolled_per_component():
     taps = {
         k: x.astype(COMPUTE_DT) for k, x in lm.read_activations(residual, ci_fn.input_names).items()
     }
-    logits = {s: v.astype("float32") for s, v in ci_fn_bf16(taps).logits.items()}
+    logits = {s: v.astype("float32") for s, v in ci_fn_bf16(taps, remat=False).logits.items()}
     lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in lm.site_names}
     for site in lm.site_names:
         flat = np.asarray(lower[site]).reshape(-1, C).astype(np.float32)

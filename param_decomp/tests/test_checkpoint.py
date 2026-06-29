@@ -40,7 +40,7 @@ from param_decomp.configs import (
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_loss_terms
 from param_decomp.schedule import ScheduleConfig
-from param_decomp.sharding import dp_mesh
+from param_decomp.sharding import hsdp_mesh
 from param_decomp.targets.llama8b import (
     llama_site_specs,
     mlp_family_site_cs,
@@ -133,7 +133,7 @@ def _build(seed: int):
     )  # fmt: skip
     step = make_train_step(
         lm=lm,
-        loss_terms=loss_terms,
+        losses=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
         remat_recon_forwards=True, remat_ci_fn=False, mesh=None,
@@ -279,7 +279,7 @@ def test_sharded_roundtrip_bit_equal(tmp_path: Path):
     case (still a real save->restore, just one shard)."""
     from jax.sharding import NamedSharding
 
-    mesh = dp_mesh()
+    mesh = hsdp_mesh()
     state = _build_sharded(seed=1, mesh=mesh)
 
     # The big V/U + ci_fn + sources leaves must be genuinely C-sharded over the mesh

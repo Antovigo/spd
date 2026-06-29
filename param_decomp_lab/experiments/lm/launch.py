@@ -64,9 +64,16 @@ _SRUN_FLAGS = "--kill-on-bad-exit=1 --ntasks-per-node=1"
 # the full-model step blows past right after the faith warmup (job 127622). The b200 nodes
 # carry ~2 TB RAM, so raise the ceiling generously (it is a cap, allocated on demand).
 _RANK_ENV = r'''export NCCL_DEBUG=WARN
+export MALLOC_ARENA_MAX=2
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB=1024
-export XLA_FLAGS="--xla_gpu_enable_command_buffer= --xla_gpu_autotune_level=0"
+export XLA_FLAGS="--xla_gpu_enable_command_buffer="
+export PD_PROFILE_TRACE=0
+# Env-gated profiling hooks (run.py), all DEFAULT-OFF: PD_MEM_PROFILE=1 (memory_analysis +
+# memory_stats peak + device_memory_profile, then exits), PD_TIME_STEPS=1 (per-step wall),
+# PD_PROFILE_TRACE=1 (perfetto window via PD_PROFILE_START/STEPS), PD_ASYNC_TEST=1. Add
+# PD_NO_CHECKPOINT=1 alongside any of these for throwaway profiling runs (skips ALL saves —
+# NEVER for a real run).
 export LD_LIBRARY_PATH="$(python -c 'import nvidia, os, glob; print(":".join(sorted(glob.glob(os.path.join(list(nvidia.__path__)[0], "*", "lib")))))')${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"'''
 
 

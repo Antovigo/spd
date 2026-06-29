@@ -151,7 +151,7 @@ def test_mlp_ci_fn_per_site_logits_and_values():
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
     inputs = lm.read_activations(x, ci_fn.input_names)
-    values = ci_fn(inputs)
+    values = ci_fn(inputs, remat=False)
     assert isinstance(values, CI)
     assert values.lower["linear1"].shape == (b, 8)
     assert values.lower["linear2"].shape == (b, 6)
@@ -206,7 +206,7 @@ def _make_state_and_step(
     )  # fmt: skip
     loss_terms = build_loss_terms(_loss_metrics(), lm.site_names)
     step = make_train_step(
-        lm=lm, loss_terms=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
+        lm=lm, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None,
     )  # fmt: skip
     return lm, state, step
@@ -309,7 +309,7 @@ def _faith_warmed_state(
     )  # fmt: skip
     loss_terms = build_loss_terms(_recovery_loss_metrics(), lm.site_names)
     step = make_train_step(
-        lm=lm, loss_terms=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
+        lm=lm, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None,
     )  # fmt: skip
     return state, step

@@ -20,6 +20,7 @@ import dataclasses
 import io
 import json
 import math
+import os
 import signal
 import threading
 import time
@@ -361,7 +362,9 @@ def _init_or_restore_state(
         return state, 0
 
     if pd.faithfulness_warmup_steps > 0:
-        faith_warmup_optimizer = optax.adamw(pd.faithfulness_warmup_lr, weight_decay=0.0)
+        faith_warmup_optimizer = optax.adamw(
+            pd.faithfulness_warmup_lr, weight_decay=pd.faithfulness_warmup_weight_decay
+        )
         faith_warmup_opt_state = faith_warmup_optimizer.init(
             eqx.filter(state.components, eqx.is_array)
         )
@@ -393,7 +396,8 @@ def _init_or_restore_state(
                 f"final faith {float(faith_warmup_loss):.3e}",
                 flush=True,
             )
-    save_state(checkpoint_manager, 0, state)
+    if os.environ.get("PD_NO_CHECKPOINT", "") != "1":  # profiling runs skip all saves
+        save_state(checkpoint_manager, 0, state)
     return state, 0
 
 
@@ -466,7 +470,7 @@ def run_decomposition_training(
 
     step_fn = make_train_step(
         lm=lm,
-        loss_terms=build_loss_terms(pd.loss_metrics, lm.site_names),
+        losses=build_loss_terms(pd.loss_metrics, lm.site_names),
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=pd.steps,
@@ -494,9 +498,163 @@ def run_decomposition_training(
     window_t0 = loop_t0 = time.time()
     last_logged = start_step
 
+    # SCRATCH PROFILER HOOK (revertable): env-gated jax.profiler.trace over a window of
+    # steady-state steps + per-step block_until_ready wall-clock. PD_PROFILE_TRACE=1 enables;
+    # PD_PROFILE_START / PD_PROFILE_STEPS pick the window (default start at first post-warmup
+    # step, 3 steps). Trace lands in run_dir/profile (rank-0 dir is the one to pull).
+    import os as _os
+
+    _profile_on = _os.environ.get("PD_PROFILE_TRACE", "") == "1"
+    _profile_start = int(_os.environ.get("PD_PROFILE_START", str(start_step + 2)))
+    _profile_steps = int(_os.environ.get("PD_PROFILE_STEPS", "3"))
+    _profile_dir = str(run.run_dir / "profile")
+    _profiling = False
+    _prof_t0 = 0.0
+    _time_steps = _os.environ.get("PD_TIME_STEPS", "") == "1"
+
+    if _os.environ.get("PD_LEAF_BENCH", "") == "1":
+        import collections as _collections
+
+        _ident = jax.jit(lambda s: s)
+
+        def _bench_dispatch(tree: object, n: int = 15) -> float:
+            jax.block_until_ready(_ident(tree))  # compile
+            _b0 = time.perf_counter()
+            for _ in range(n):
+                jax.block_until_ready(_ident(tree))
+            return (time.perf_counter() - _b0) / n
+
+        _vu = state.components.vu
+        _by_kind: dict[str, list[tuple[jax.Array, jax.Array]]] = _collections.defaultdict(list)
+        for _name, _VU in _vu.items():
+            _by_kind[_name.split(".")[-1]].append(_VU)
+        _stacked = {
+            _k: (jnp.stack([_v for _v, _u in _lst]), jnp.stack([_u for _v, _u in _lst]))
+            for _k, _lst in _by_kind.items()
+        }
+        _t_dict = _bench_dispatch(_vu)
+        _t_stacked = _bench_dispatch(_stacked)
+        if is_main:
+            print(
+                f"PD_BENCH identity-dispatch: per-site-dict("
+                f"{len(jax.tree_util.tree_leaves(_vu))} leaves)={_t_dict:.3f}s  "
+                f"stacked-per-kind({len(jax.tree_util.tree_leaves(_stacked))} leaves)="
+                f"{_t_stacked:.3f}s  speedup={_t_dict / max(_t_stacked, 1e-6):.1f}x",
+                flush=True,
+            )
+
+    if _os.environ.get("PD_ASYNC_TEST", "") == "1":
+        _atk = random.fold_in(run_key, start_step)
+        _ab = sample_batch(start_step)
+        _aa0 = time.perf_counter()
+        _as1, _am1 = step_fn(lm, state, _ab, _atk)
+        _aa1 = time.perf_counter()
+        _as2, _am2 = step_fn(lm, _as1, _ab, _atk)
+        _aa2 = time.perf_counter()
+        _as3, _am3 = step_fn(lm, _as2, _ab, _atk)
+        _aa3 = time.perf_counter()
+        jax.block_until_ready((_as3, _am3["total"]))
+        _aa4 = time.perf_counter()
+        if is_main:
+            print(
+                f"PD_ASYNC: call1={_aa1 - _aa0:.3f}s call2={_aa2 - _aa1:.3f}s "
+                f"call3={_aa3 - _aa2:.3f}s final_block={_aa4 - _aa3:.3f}s "
+                f"(async/device-bound => calls small + big final_block; "
+                f"sync/host-bound => each call big)",
+                flush=True,
+            )
+
+    if _os.environ.get("PD_MEM_PROFILE", "") == "1":
+        _gib = 1024**3
+        _mb = sample_batch(start_step)
+        _mk = random.fold_in(run_key, start_step)
+        _step_jit: Any = (
+            step_fn  # eqx.filter_jit object exposes .lower(); the Callable alias hides it
+        )
+        _compiled = _step_jit.lower(lm, state, _mb, _mk).compile()
+        _ma = getattr(_compiled, "compiled", _compiled).memory_analysis()
+        if is_main:
+            print(
+                "PD_MEM static memory_analysis(): "
+                f"argument={_ma.argument_size_in_bytes / _gib:.2f}GiB "
+                f"output={_ma.output_size_in_bytes / _gib:.2f}GiB "
+                f"temp={_ma.temp_size_in_bytes / _gib:.2f}GiB "
+                f"alias={_ma.alias_size_in_bytes / _gib:.2f}GiB",
+                flush=True,
+            )
+        _dev = jax.local_devices()[0]
+        _dev.memory_stats()  # reset peak baseline read
+        _ms_state, _ms_metrics = step_fn(lm, state, _mb, _mk)
+        _ms_state, _ms_metrics = step_fn(lm, _ms_state, _mb, _mk)
+        jax.block_until_ready((_ms_state, _ms_metrics["total"]))
+        _ms = _dev.memory_stats()
+        if is_main and _ms is not None:
+            print(
+                "PD_MEM runtime memory_stats(): "
+                f"peak={_ms.get('peak_bytes_in_use', 0) / _gib:.2f}GiB "
+                f"in_use={_ms.get('bytes_in_use', 0) / _gib:.2f}GiB "
+                f"largest_alloc={_ms.get('largest_alloc_size', 0) / _gib:.2f}GiB "
+                f"limit={_ms.get('bytes_limit', 0) / _gib:.2f}GiB",
+                flush=True,
+            )
+        _prof_path = str(run.run_dir / f"device_memory_{jax.process_index()}.prof")
+        jax.profiler.save_device_memory_profile(_prof_path)
+        if is_main:
+            print(f"PD_MEM: resident device-memory profile -> {_prof_path}", flush=True)
+        _os._exit(0)  # profiling-only path; donation has consumed `state`, so don't enter the loop
+
     for step in range(start_step, pd.steps):
-        batch = sample_batch(step)
-        state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step))
+        if _profile_on and step == _profile_start:
+            jax.block_until_ready(state)
+            jax.profiler.start_trace(_profile_dir, create_perfetto_trace=True)
+            _profiling = True
+            _prof_t0 = time.time()
+            if is_main:
+                print(f"PD_PROFILE: start_trace @ step {step} -> {_profile_dir}", flush=True)
+
+        if _time_steps and is_main and step < start_step + 8:
+            if step == start_step:
+                import equinox as _eqx
+
+                _pp0 = time.perf_counter()
+                _arrs, _ = _eqx.partition((lm, state), _eqx.is_array)
+                _pp1 = time.perf_counter()
+                _nl_state = len(jax.tree_util.tree_leaves(state))
+                _nl_lm = len(jax.tree_util.tree_leaves(lm))
+                print(
+                    f"PD_LEAVES: state={_nl_state} lm={_nl_lm} "
+                    f"eqx.partition(lm,state)={_pp1 - _pp0:.3f}s",
+                    flush=True,
+                )
+            _ts0 = time.perf_counter()
+            batch = sample_batch(step)
+            _ts1 = time.perf_counter()
+            state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step))
+            _ts2 = time.perf_counter()
+            jax.block_until_ready((state, metrics["total"]))
+            _ts3 = time.perf_counter()
+            print(
+                f"PD_TIME step {step}: sample={_ts1 - _ts0:.3f}s dispatch(py)={_ts2 - _ts1:.3f}s "
+                f"compute(dev)={_ts3 - _ts2:.3f}s total={_ts3 - _ts0:.3f}s",
+                flush=True,
+            )
+        else:
+            batch = sample_batch(step)
+            state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step))
+
+        if _profiling:
+            jax.block_until_ready((state, metrics["total"]))
+            if is_main:
+                print(
+                    f"PD_PROFILE: step {step} wall {time.time() - _prof_t0:.3f}s (cumulative)",
+                    flush=True,
+                )
+            _prof_t0 = time.time()
+            if step + 1 >= _profile_start + _profile_steps:
+                jax.profiler.stop_trace()
+                _profiling = False
+                if is_main:
+                    print(f"PD_PROFILE: stop_trace @ step {step}", flush=True)
 
         now_step = step + 1
         dense = cadence.dense_log_phase
@@ -534,7 +692,10 @@ def run_decomposition_training(
                 sink.log(now_step, eval_record)
                 window_t0 = time.time()
 
-        if now_step % save_every == 0 or now_step == pd.steps or _sigterm_received:
+        _skip_save = os.environ.get("PD_NO_CHECKPOINT", "") == "1"  # profiling runs skip all saves
+        if not _skip_save and (
+            now_step % save_every == 0 or now_step == pd.steps or _sigterm_received
+        ):
             save_state(checkpoint_manager, now_step, state)
             if is_main:
                 print(f"checkpoint saved @ step {now_step}", flush=True)

@@ -156,19 +156,20 @@ class FrozenAttn(eqx.Module):
     n_rep: int = eqx.field(static=True)
 
     def shardings(self, mesh: "Mesh") -> "FrozenAttn":
-        """Stacked (leading `n_layer`, UNSHARDED — the scan axis) FSDP on `dp`: the `d` dim
-        shards on `dp` (gathered per layer in the scan); the HEAD dim stays REPLICATED (NOT
-        TP'd). `core` runs batch-parallel attention (q/k/v constrained to `P("dp",...)`,
-        heads replicated — that identical spec is what cuDNN's partitioner requires), so the
-        projections must come out heads-replicated; TP'ing the head dim makes q (n_head) and
-        k/v (n_kv_head) shard to different per-rank head counts → cuDNN rejects them as
-        not-same-sharding. Attention weights are small, so dp-only sharding is plenty."""
-        in_dp = NamedSharding(mesh, P(None, None, "dp"))  # qkv [nc, head(repl), d on dp]
-        out_dp = NamedSharding(mesh, P(None, "dp", None))  # wo [nc, d on dp, head(repl)]
+        """Stacked (leading `n_layer`, UNSHARDED — the scan axis) FSDP on `fsdp`: the `d` dim
+        shards on `fsdp` (gathered per layer in the scan, on NVLink); the HEAD dim stays
+        REPLICATED. `core` runs batch-parallel attention (q/k/v constrained batch over the
+        full mesh, heads replicated — that identical spec is what cuDNN's partitioner
+        requires), so the projections must come out heads-replicated. Attention weights are
+        small, so FSDP-on-`fsdp` sharding is plenty."""
+        in_fsdp = NamedSharding(mesh, P(None, None, "fsdp"))  # qkv [nc, head(repl), d on fsdp]
+        out_fsdp = NamedSharding(mesh, P(None, "fsdp", None))  # wo [nc, d on fsdp, head(repl)]
         for w in (self.wq, self.wk, self.wv):
-            assert_divisible(w.shape[2], mesh, "dp", "FrozenAttn qkv in (d)")
-        assert_divisible(self.wo.shape[1], mesh, "dp", "FrozenAttn out-proj out (d)")
-        return eqx.tree_at(lambda a: (a.wq, a.wk, a.wv, a.wo), self, (in_dp, in_dp, in_dp, out_dp))
+            assert_divisible(w.shape[2], mesh, "fsdp", "FrozenAttn qkv in (d)")
+        assert_divisible(self.wo.shape[1], mesh, "fsdp", "FrozenAttn out-proj out (d)")
+        return eqx.tree_at(
+            lambda a: (a.wq, a.wk, a.wv, a.wo), self, (in_fsdp, in_fsdp, in_fsdp, out_fsdp)
+        )
 
     def core(
         self,
@@ -195,18 +196,17 @@ class FrozenAttn(eqx.Module):
         # AND its rematerialized backward). Real GQA keeps q (n_head) and k/v (n_kv_head) as
         # independent head-parallel tensors with the SAME spec (different head COUNTS is fine).
         # cuDNN flash attention's custom partitioner requires q/k/v IDENTICALLY sharded.
-        # On the 2-D (dp, tp) mesh, pin all three head-parallel: batch on `dp`, HEADS on `tp`
-        # (`P("dp","tp",None,None)` for `[b, heads, t, hd]`). Heads are independent, so this is
-        # clean tensor-parallel attention, and the identical spec is exactly what cuDNN
-        # demands (n_head % tp == 0 and n_kv_head % tp == 0). The q/k/v projection outputs are
-        # `d_out`-replicated (U = `P("tp",None)`); this constraint does the replicated->head-
-        # on-tp reshard right here. Guarded so it's a no-op off-mesh (CPU tests / single
-        # device); `run.py` sets the global mesh. At `tp=1` heads land on a size-1 axis =
-        # replicated (the old 1-D behavior). Validated on GPU: 1-D was job 108953; the 2-D
-        # head-parallel form is the fix for the `dp/tp` mesh's "same sharding" partitioner error.
+        # Pure HSDP: pin all three batch-parallel over the FULL mesh, HEADS replicated
+        # (`P(('replicate','fsdp'), None, None, None)` for `[b, heads, t, hd]`). The identical
+        # q/k/v spec is exactly what cuDNN's flash partitioner demands; heads-replicated keeps
+        # q (n_head) and k/v (n_kv_head) consistently sharded (no head TP that would split them
+        # to different per-rank counts). The q/k/v projection outputs are `d_out`-replicated
+        # (U FSDP's the C side, not d_out's head); this constraint pins the batch right here.
+        # Guarded so it's a no-op off-mesh (CPU tests / single device); `run.py` sets the
+        # global mesh.
         if not jax.sharding.get_abstract_mesh().empty:
             qkv_spec = jax.sharding.PartitionSpec(
-                "dp", None, None, None
+                ("replicate", "fsdp"), None, None, None
             )  # batch-parallel: q/k/v IDENTICAL spec -> cuDNN happy; flash = no score materialization
             q, k, v = (jax.lax.with_sharding_constraint(a, qkv_spec) for a in (q, k, v))
         return causal_sdpa(q, k, v).transpose(0, 2, 1, 3).reshape(b, t, self.n_head * self.head_dim)
@@ -229,20 +229,19 @@ class LlamaLayer(eqx.Module):
     Wd: Float[Array, "d di"]
 
     def shardings(self, mesh: "Mesh") -> "LlamaLayer":
-        """Stacked FSDP on `dp` (no TP): every MLP weight shards its `d`-dim (4096) on `dp`,
-        the intermediate (14336) stays replicated; gathered per layer in the scan. (TP on the
-        target would Megatron the intermediate but add reshards through the replicated
-        residual for a frozen 16 GB model — dp-only `/dp` is ample: 16 GB → 0.5 GB at dp=32.)
-        Norms replicate (tiny); attn delegates to `FrozenAttn.shardings`."""
-        in_dp = NamedSharding(mesh, P(None, None, "dp"))  # Wg/Wu [nc, di(repl), d on dp]
-        out_dp = NamedSharding(mesh, P(None, "dp", None))  # Wd [nc, d on dp, di(repl)]
+        """Stacked FSDP on `fsdp` (no TP): every MLP weight shards its `d`-dim (4096) on
+        `fsdp`, the intermediate (14336) stays replicated; gathered per layer in the scan, on
+        NVLink. (`/fsdp` is ample for a frozen 16 GB model: 16 GB → 2 GB at fsdp=8.) Norms
+        replicate (tiny); attn delegates to `FrozenAttn.shardings`."""
+        in_fsdp = NamedSharding(mesh, P(None, None, "fsdp"))  # Wg/Wu [nc, di(repl), d on fsdp]
+        out_fsdp = NamedSharding(mesh, P(None, "fsdp", None))  # Wd [nc, d on fsdp, di(repl)]
         repl = NamedSharding(mesh, P())
-        assert_divisible(self.Wg.shape[2], mesh, "dp", "Wg in (d)")
-        assert_divisible(self.Wd.shape[1], mesh, "dp", "Wd out (d)")
+        assert_divisible(self.Wg.shape[2], mesh, "fsdp", "Wg in (d)")
+        assert_divisible(self.Wd.shape[1], mesh, "fsdp", "Wd out (d)")
         return eqx.tree_at(
             lambda layer: (layer.ln1, layer.ln2, layer.attn, layer.Wg, layer.Wu, layer.Wd),
             self,
-            (repl, repl, self.attn.shardings(mesh), in_dp, in_dp, out_dp),
+            (repl, repl, self.attn.shardings(mesh), in_fsdp, in_fsdp, out_fsdp),
         )
 
 
@@ -305,35 +304,18 @@ def _per_kind_dims(components: DecompVU) -> dict[str, tuple[int, int, int]]:
     return kind_dims
 
 
-def _stack_per_kind_masked_inputs(
-    components: DecompVU,
-    n_layers: int,
-    leading: tuple[int, ...],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
-    routes: dict[str, Array] | None,
-    live_set: frozenset[str],
-    has_delta: bool,
-) -> dict[str, dict[str, Array]]:
-    """Per decomposed KIND, the layer-stacked `(V, U, live, mask[, delta][, route])` arrays
-    the scan body consumes — a leading layer axis, one homogeneous body across layers. Sites
-    absent from `live` get dummy mask/delta/route (the `cond` frozen branch ignores them);
-    `masks`/`delta_masks`/`routes` exist only for live sites (recon builds them per-chunk).
+def _stack_per_kind_vu(components: DecompVU, n_layers: int) -> dict[str, dict[str, Array]]:
+    """Per decomposed KIND, the layer-stacked `(V, U)` arrays — the MASK-INDEPENDENT part of
+    the scan inputs (a leading layer axis, one homogeneous body across layers). Mask/live/
+    delta/route are attached per-forward by `_attach_per_kind_masks`; the V/U stack +
+    `_reconstruct_compute_weights` (the ÷N→÷fsdp cross-node gather) are the same for EVERY
+    forward in a step, so they are built ONCE via `prepare_compute_weights` and shared.
     Per-kind dims (d_in, C, d_out) must be uniform across layers (asserted in `_per_kind_dims`)."""
     kind_dims = _per_kind_dims(components)
     vu_dt = next(iter(components.vu.values()))[0].dtype
-    # Dummy mask/delta/route shapes match the REAL entries (the source scope sets the leading
-    # shape: `sc` broadcasts over batch as `(1, T)`, not the full `(B, T)`).
-    a_mask = next(iter(masks.values())) if masks else None
-    mask_lead = a_mask.shape[:-1] if a_mask is not None else leading
-    mask_dt = a_mask.dtype if a_mask is not None else vu_dt
-    a_delta = next(iter(delta_masks.values())) if (has_delta and delta_masks) else None
-    a_route = next(iter(routes.values())) if (routes and len(routes)) else None
-
     per_kind: dict[str, dict[str, Array]] = {}
     for kind, (d_in, C, d_out) in kind_dims.items():
         names = [site_name(layer, kind) for layer in range(n_layers)]
-        live_flags = jnp.array([n in live_set for n in names])
         Vs = jnp.stack(
             [
                 components.vu[n][0] if n in components.vu else jnp.zeros((d_in, C), vu_dt)
@@ -346,10 +328,41 @@ def _stack_per_kind_masked_inputs(
                 for n in names
             ]
         )
+        per_kind[kind] = {"V": Vs, "U": Us}
+    return per_kind
+
+
+def _attach_per_kind_masks(
+    prepared: dict[str, dict[str, Array]],
+    n_layers: int,
+    leading: tuple[int, ...],
+    masks: dict[str, Array],
+    delta_masks: dict[str, Array],
+    routes: dict[str, Array] | None,
+    live_set: frozenset[str],
+    has_delta: bool,
+) -> dict[str, dict[str, Array]]:
+    """Attach the per-forward `(live, mask[, delta][, route])` stacks to the shared, already
+    stacked + ÷fsdp-reconstructed `prepared` per-kind `(V, U)` weights. Sites absent from
+    `live` get dummy mask/delta/route (the `cond` frozen branch ignores them); `masks`/
+    `delta_masks`/`routes` exist only for live sites (recon builds them per-chunk)."""
+    # Dummy mask/delta/route shapes match the REAL entries (the source scope sets the leading
+    # shape: `sc` broadcasts over batch as `(1, T)`, not the full `(B, T)`).
+    a_mask = next(iter(masks.values())) if masks else None
+    mask_lead = a_mask.shape[:-1] if a_mask is not None else leading
+    a_delta = next(iter(delta_masks.values())) if (has_delta and delta_masks) else None
+    a_route = next(iter(routes.values())) if (routes and len(routes)) else None
+
+    per_kind: dict[str, dict[str, Array]] = {}
+    for kind, vu_entry in prepared.items():
+        C = vu_entry["V"].shape[-1]
+        mask_dt = a_mask.dtype if a_mask is not None else vu_entry["V"].dtype
+        names = [site_name(layer, kind) for layer in range(n_layers)]
+        live_flags = jnp.array([n in live_set for n in names])
         masks_k = jnp.stack(
             [masks[n] if n in live_set else jnp.ones((*mask_lead, C), mask_dt) for n in names]
         )
-        entry: dict[str, Array] = {"V": Vs, "U": Us, "live": live_flags, "mask": masks_k}
+        entry: dict[str, Array] = {**vu_entry, "live": live_flags, "mask": masks_k}
         if has_delta:
             d_shape = a_delta.shape if a_delta is not None else leading
             d_dt = a_delta.dtype if a_delta is not None else mask_dt
@@ -364,6 +377,46 @@ def _stack_per_kind_masked_inputs(
             )
         per_kind[kind] = entry
     return per_kind
+
+
+def _reconstruct_compute_weights(
+    per_kind: dict[str, dict[str, Array]],
+) -> dict[str, dict[str, Array]]:
+    """The ZeRO-1 weight reconstruction (pure-HSDP backup layout). The stacked
+    `[n_layer, d_in, C]` / `[n_layer, C, d_out]` compute weights arrive with their FSDP dim
+    sharded ÷N over the FULL mesh (the master is `P(("replicate","fsdp"), ...)`). Reconstruct
+    them to the `fsdp`-sharded (÷fsdp) COMPUTE layout here — BEFORE the layer scan — so:
+
+      * the cross-`replicate` gather runs ONCE per step in ENTRY (off the hot path),
+        landing a SMALL ÷fsdp-resident weight stack (`[n_layer, d_in/fsdp, C]`), NOT the full
+        `[n_layer, d_in, C]` model;
+      * the per-layer scan body then gathers ONE layer's `fsdp` shard to full d_in
+        transiently (intra-node NVLink), freed each iteration — never a full-model resident.
+
+    Cast to bf16 HERE (not f32) so the ÷fsdp-resident compute stack is half-size and XLA
+    can't keep an f32 full copy alive. The fp32 masters + Adam stay ÷N (untouched — this is
+    a separate read-only compute view). The leading `n_layer` axis (the scan `xs`) stays
+    unsharded. No-op off-mesh (CPU / single device); `run.py` sets the global mesh."""
+    if jax.sharding.get_abstract_mesh().empty:
+        return per_kind
+    import os as _os
+
+    if _os.environ.get("PD_REPLICATE_WEIGHTS", "") == "1":
+        # EXPERIMENT: replicate the bf16 COMPUTE weights (optimizer masters stay ÷N) so the
+        # per-layer FSDP all-gather vanishes — trades HBM (full V/U resident) for no gather.
+        v_spec = P(None, None, None)
+        u_spec = P(None, None, None)
+    else:
+        v_spec = P(None, "fsdp", None)  # [n_layer, d_in ÷fsdp, C] — replicate gathered once/step
+        u_spec = P(None, None, "fsdp")  # [n_layer, C, d_out ÷fsdp]
+    out: dict[str, dict[str, Array]] = {}
+    for kind, entry in per_kind.items():
+        pinned = dict(entry)
+        v = jax.lax.with_sharding_constraint(entry["V"].astype(jnp.bfloat16), v_spec)
+        u = jax.lax.with_sharding_constraint(entry["U"].astype(jnp.bfloat16), u_spec)
+        pinned["V"], pinned["U"] = v, u
+        out[kind] = pinned
+    return out
 
 
 class LlamaDecomposedModel(eqx.Module):
@@ -405,12 +458,12 @@ class LlamaDecomposedModel(eqx.Module):
         return [jax.tree.map(lambda a, idx=i: a[idx], self.stacked) for i in range(self.n_layer)]
 
     def shardings(self, mesh: "Mesh") -> "LlamaDecomposedModel":
-        """FSDP(`dp`)×TP(`tp`) the per-layer weights (`stacked.shardings` — `d` on `dp`,
-        head/intermediate on `tp`; the ~14 GB layer bulk shards `/(dp·tp)`, gathered per layer
-        inside the scan). embed / lm_head / norm / inv_freq REPLICATE — the ~2 GB embed+head
-        is small and vocab-parallel logits/lookup aren't worth the complexity. (The old
-        all-replicate justification — "the target is small vs activations" — is stale: at the
-        full 32-layer model the replicated target + its backward/remat copies dominate the
+        """FSDP-on-`fsdp` the per-layer weights (`stacked.shardings` — `d` on `fsdp`,
+        head/intermediate replicated; the ~14 GB layer bulk shards `/fsdp`, gathered per layer
+        inside the scan, on NVLink). embed / lm_head / norm / inv_freq REPLICATE — the ~2 GB
+        embed+head is small and vocab-parallel logits/lookup aren't worth the complexity. (The
+        old all-replicate justification — "the target is small vs activations" — is stale: at
+        the full 32-layer model the replicated target + its backward/remat copies dominate the
         step's peak, which is what this shards away.)"""
         repl = NamedSharding(mesh, P())
         return eqx.tree_at(
@@ -483,7 +536,7 @@ class LlamaDecomposedModel(eqx.Module):
 
     def _run_masked_forward(
         self,
-        vu: DecompVU,
+        prepared: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -500,12 +553,17 @@ class LlamaDecomposedModel(eqx.Module):
         `x @ W`. One block body compiles regardless of depth / chunk count; `cond` runs only
         the taken branch so frozen sites do no V@U. `live`/`has_delta` are static; a non-None
         `collect` gathers per-live-site decomposed outputs (SPEC S31). Requires per-kind dims
-        uniform across layers (asserted) — the layer stack must be homogeneous to scan."""
+        uniform across layers (asserted) — the layer stack must be homogeneous to scan.
+
+        `prepared` is the shared, stacked + ÷fsdp-reconstructed per-kind `(V, U)` from
+        `prepare_compute_weights` (built ONCE per step) — this fn only ATTACHES the per-forward
+        masks, so the ÷N→÷fsdp cross-node gather is not re-run here (SPEC unchanged; numerics
+        identical — the reconstruction is mask-independent and the same for every forward)."""
         live_set = frozenset(live)
         resid = self.embed_tokens(inputs)
         leading = resid.shape[:-1]
-        per_kind = _stack_per_kind_masked_inputs(
-            vu, self.n_layer, leading, masks, delta_masks, routes, live_set, has_delta
+        per_kind = _attach_per_kind_masks(
+            prepared, self.n_layer, leading, masks, delta_masks, routes, live_set, has_delta
         )
         decomposed_kinds = frozenset(per_kind)
         want_collect = collect is not None
@@ -572,9 +630,19 @@ class LlamaDecomposedModel(eqx.Module):
                 collect[site] = ys[kind][layer]
         return logits
 
+    def prepare_compute_weights(self, vu: DecompVU) -> dict[str, dict[str, Array]]:
+        """Build the shared per-kind compute weights ONCE per step (SPEC unchanged): stack the
+        per-site V/U into the layer-stacked `[n_layer, …]` form and run the ÷N→÷fsdp cross-node
+        reconstruction + bf16 cast. The result is mask-independent and identical for every
+        forward in the step, so the engine builds it once and threads it into all
+        `masked_output` / `masked_site_outputs` calls — the cross-node gather then runs ONCE per
+        step (ENTRY) instead of once per forward (the per-forward re-gather was ~10 co-resident
+        copies of the ÷fsdp stack at peak)."""
+        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.n_layer))
+
     def masked_output(
         self,
-        vu: DecompVU,
+        prepared: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -585,12 +653,12 @@ class LlamaDecomposedModel(eqx.Module):
         remat: bool,
     ) -> Array:
         return self._run_masked_forward(
-            vu, inputs, masks, delta_masks, routes, live, has_delta, remat, None
+            prepared, inputs, masks, delta_masks, routes, live, has_delta, remat, None
         )
 
     def masked_site_outputs(
         self,
-        vu: DecompVU,
+        prepared: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
         masks: dict[str, Array],
         delta_masks: dict[str, Array],
@@ -602,7 +670,7 @@ class LlamaDecomposedModel(eqx.Module):
         exact `masked_output` forward, discards the logits, returns the collected outputs."""
         collect: dict[str, Array] = {}
         self._run_masked_forward(
-            vu, inputs, masks, delta_masks, routes, live, has_delta, False, collect
+            prepared, inputs, masks, delta_masks, routes, live, has_delta, False, collect
         )
         assert set(collect) == set(live), (sorted(collect), sorted(live))
         return collect

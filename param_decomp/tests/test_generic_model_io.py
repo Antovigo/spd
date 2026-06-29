@@ -88,6 +88,9 @@ class SyntheticDecomposedModel(eqx.Module):
         assert wanted == (SITE,), wanted
         return {SITE: resid}
 
+    def prepare_compute_weights(self, vu: DecompVU) -> DecompVU:
+        return vu
+
     def masked_output(
         self,
         vu: DecompVU,
@@ -240,7 +243,7 @@ def test_train_step_runs_through_generic_target():
     )
     step_fn = make_train_step(
         lm=lm,
-        loss_terms=loss_terms,
+        losses=loss_terms,
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=10,
@@ -249,7 +252,7 @@ def test_train_step_runs_through_generic_target():
         mesh=None,
     )
 
-    V_before = state.components.site(SITE)[0]
+    V_before = jax.device_get(state.components.site(SITE)[0])  # host copy survives step donation
     run_key = random.PRNGKey(3)
     for step_idx in range(2):
         state, metrics = step_fn(lm, state, resid, random.fold_in(run_key, step_idx))
