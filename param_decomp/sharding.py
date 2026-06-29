@@ -66,13 +66,22 @@ def dp_mesh(tp: int = 1) -> Mesh:
 
 
 def place_via_shardings[T](tree: T, shardings: T) -> T:
-    """Eager `device_put` of each array leaf of `tree` onto the matching `NamedSharding`
-    leaf of `shardings` (a same-structure pytree, e.g. from a model's `.shardings(mesh)`).
-    Static / non-array leaves pass through. The apply path for an already-loaded frozen
-    model (vs the jitted `out_shardings` init path for freshly-seeded params)."""
+    """Place each array leaf of `tree` onto the matching `NamedSharding` leaf of `shardings`
+    (a same-structure pytree, e.g. from a model's `.shardings(mesh)`). Static / non-array
+    leaves pass through. The apply path for an already-loaded frozen model (vs the jitted
+    `out_shardings` init path for freshly-seeded params).
+
+    Replicated leaves go through `make_array_from_callback`, not `device_put`: `device_put`
+    onto a replicated multi-process sharding runs a cross-host equality allgather that OOMs at
+    dp>=64. The frozen target is identical on every host, so the local copy IS the global one."""
     is_array = lambda x: hasattr(x, "shape") and hasattr(x, "dtype")  # noqa: E731
+    place = lambda a, s: (  # noqa: E731
+        jax.make_array_from_callback(a.shape, s, lambda _idx: a)
+        if s.is_fully_replicated
+        else jax.device_put(a, s)
+    )
     return jax.tree.map(
-        lambda a, s: jax.device_put(a, s) if is_array(a) else a,
+        lambda a, s: place(a, s) if is_array(a) else a,
         tree,
         shardings,
         is_leaf=lambda x: isinstance(x, NamedSharding),
