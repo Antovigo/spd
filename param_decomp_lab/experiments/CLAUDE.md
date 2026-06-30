@@ -60,10 +60,30 @@ target:
     model_class: param_decomp_lab.experiments.lm.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
     run_path: goodfire/spd/runs/<run_id>
   output_extract: 0
+
+# or
+target:
+  spec:
+    kind: interpbench                   # InterpBench (Tracr-derived) case
+    case_id: "19"
+    n_samples: 20000                    # size of the generated input set
+  output_extract: null                  # converted model returns a bare logits tensor
+data:
+  dataset_name: unused-interpbench-synthetic   # placeholders: inputs are generated, not
+  tokenizer_name: unused-interpbench-synthetic # loaded; the HF fields are ignored
 ```
 
 `output_extract` (default `"logits"`) is the key/index `make_run_batch` uses to pull
 the prediction tensor out of the model's forward output.
+
+`interpbench` (see `lm/interpbench/`) converts a HookedTransformer-format InterpBench
+model to a plain `nn.Linear` model so PD can decompose its q/k/v/o + MLP matrices
+(embed/unembed left whole). Inputs are generated synthetically from a vendored per-case
+vocab + the case's encoding map (`interpbench/data.py::CASE_SPECS`, only case 19 so far),
+so `build_lm_loader` dispatches on the target kind and the `data:` block's HF fields are
+unused placeholders. The shared `LMDataConfig` / `LMTargetSpec` types are kept intact
+(no widening) so existing reloaders and config consumers are unaffected. No LayerNorm
+support, so the IOI models are out of scope for this converter.
 
 ## Anatomy of `run.py`
 

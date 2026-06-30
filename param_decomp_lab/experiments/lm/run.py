@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 
 import fire
 import torch.nn as nn
-from pydantic import Discriminator
+from pydantic import Discriminator, PositiveInt, model_validator
 from torch.utils.data import DataLoader
 
 from param_decomp.base_config import BaseConfig
@@ -45,6 +45,11 @@ from param_decomp_lab.experiments.lm.data import (
     collate_fn_for,
     create_lm_data_loader,
     rank_batch_size,
+)
+from param_decomp_lab.experiments.lm.interpbench.data import make_interpbench_loader
+from param_decomp_lab.experiments.lm.interpbench.model import (
+    INTERPBENCH_MODEL_CLASS,
+    InterpBenchTransformer,
 )
 from param_decomp_lab.experiments.utils import (
     EXPERIMENT_CONFIG_FILENAME,
@@ -96,8 +101,25 @@ class PretrainedTarget(BaseConfig):
     run_path: ModelPath
 
 
+class InterpBenchTarget(BaseConfig):
+    """Convert an InterpBench (Tracr-derived) case to a plain `nn.Linear` target model.
+
+    Inputs are generated synthetically (no HF dataset), so the sibling `data:` block's
+    `dataset_name` / `tokenizer_name` are unused placeholders for these runs; `n_samples`
+    here sizes the generated input set. `model_class` is fixed to the converted model so
+    downstream metadata consumers keep working; it is not used to load the model.
+    `LMTargetConfig.output_extract` must be `null` (the converted model returns a bare
+    logits tensor).
+    """
+
+    kind: Literal["interpbench"] = "interpbench"
+    case_id: str
+    n_samples: PositiveInt = 20000
+    model_class: str = INTERPBENCH_MODEL_CLASS
+
+
 LMTargetSpec = Annotated[
-    HFTarget | PretrainedTarget,
+    HFTarget | PretrainedTarget | InterpBenchTarget,
     Discriminator("kind"),
 ]
 
@@ -106,11 +128,19 @@ class LMTargetConfig(BaseConfig):
     """Config for the LM target model and how to extract the prediction tensor.
 
     `output_extract` (passed to `make_run_batch`) pulls the prediction tensor out of the
-    model's forward output (default `"logits"`).
+    model's forward output (default `"logits"`; `null` for `InterpBenchTarget`).
     """
 
     spec: LMTargetSpec
     output_extract: int | str | None = "logits"
+
+    @model_validator(mode="after")
+    def _interpbench_needs_bare_logits(self) -> "LMTargetConfig":
+        if isinstance(self.spec, InterpBenchTarget):
+            assert self.output_extract is None, (
+                "InterpBenchTarget returns a bare logits tensor; set output_extract: null"
+            )
+        return self
 
 
 class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
@@ -120,18 +150,21 @@ class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):
 def build_target(target_cfg: LMTargetConfig) -> nn.Module:
     """Load the LM target model in eval mode, dispatching on `target_cfg.spec.kind`."""
     spec = target_cfg.spec
-    cls = _resolve_class(spec.model_class)
     match spec:
         case HFTarget():
+            cls = _resolve_class(spec.model_class)
             target_model = ensure_cached_and_call(cls.from_pretrained, spec.model_name)
         case PretrainedTarget():
             from param_decomp_lab.experiments.lm.pretrain.run_info import PretrainRunInfo
 
+            cls = _resolve_class(spec.model_class)
             run_info = ensure_cached_and_call(PretrainRunInfo.from_path, spec.run_path)
             # Older PretrainRunInfo objects predate model_type; default it from the model class.
             if "model_type" not in run_info.model_config_dict:
                 run_info.model_config_dict["model_type"] = spec.model_class.rsplit(".", 1)[-1]
             target_model = cls.from_run_info(run_info)
+        case InterpBenchTarget():
+            target_model = InterpBenchTransformer.from_hf(spec.case_id)
     target_model.eval()
     return target_model
 
@@ -149,10 +182,22 @@ def build_lm_loader(
     """LM `DataLoader` for the requested split.
 
     The eval seed is offset by 1 so eval shuffles differently from train when both come
-    from the same `pd_config.seed`.
+    from the same `pd_config.seed`. For an `InterpBenchTarget` the loader is synthetic
+    (generated from the case's vocab) and `data_cfg`'s HF fields are ignored.
     """
-    del target_cfg, device
+    del device
     effective_seed = (seed or 0) + (1 if split == "eval" else 0)
+    if isinstance(target_cfg.spec, InterpBenchTarget):
+        assert dist_state is None or dist_state.world_size == 1, (
+            "interpbench synthetic loader does not shard across ranks; run without --dp"
+        )
+        return make_interpbench_loader(
+            target_cfg.spec.case_id,
+            batch_size=batch_size,
+            n_samples=target_cfg.spec.n_samples,
+            seed=effective_seed,
+            shuffle=split == "train",
+        )
     split_name = data_cfg.eval_split if split == "eval" else data_cfg.train_split
     loader, _ = create_lm_data_loader(
         data_cfg,

@@ -1,0 +1,85 @@
+pd:
+  seed: 0
+  n_mask_samples: 1
+  ci_config:
+    mode: layerwise
+    fn_type: vector_mlp
+    hidden_dims:
+    - 16
+  sigmoid_type: leaky_hard
+  decomposition_targets:
+  - module_pattern: blocks.*.attn.q_proj
+    C: 32
+  - module_pattern: blocks.*.attn.k_proj
+    C: 32
+  - module_pattern: blocks.*.attn.v_proj
+    C: 32
+  - module_pattern: blocks.*.attn.o_proj
+    C: 32
+  - module_pattern: blocks.*.mlp.in_proj
+    C: 96
+  - module_pattern: blocks.*.mlp.out_proj
+    C: 96
+  identity_decomposition_targets: null
+  sampling: continuous
+  use_delta_component: true
+  batch_size: 256
+  steps: 30000
+  components_optimizer:
+    lr_schedule:
+      start_val: 3e-4
+      fn_type: cosine
+      warmup_pct: 0.01
+      final_val_frac: 0.1
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 3e-4
+      fn_type: cosine
+      warmup_pct: 0.01
+      final_val_frac: 0.1
+  faithfulness_warmup_steps: 200
+  faithfulness_warmup_lr: 0.01
+  faithfulness_warmup_weight_decay: 0.1
+  loss_metrics:
+    - type: ImportanceMinimalityLoss
+      coeff: 0.0003
+      pnorm: 2.0
+      beta: 0
+      p_anneal_start_frac: 0.0
+      p_anneal_final_p: 0.3
+      p_anneal_end_frac: 1.0
+    - type: StochasticReconLayerwiseLoss
+      coeff: 2.0
+cadence:
+  train_log_every: 100
+eval:
+  n_steps: 5
+  batch_size: 256
+  every: 1000
+  slow_every: 5000
+  slow_on_first_step: true
+  metrics:
+    - type: CIHistograms
+      n_batches_accum: 5
+    - type: ComponentActivationDensity
+    - type: CI_L0
+      groups: null
+    - type: CEandKLLosses
+      rounding_threshold: 0.0
+    - type: CIMeanPerComponent
+    - type: StochasticHiddenActsReconLoss
+target:
+  spec:
+    kind: interpbench
+    case_id: "19"
+    n_samples: 20000
+  output_extract: null
+data:
+  # Inputs are generated synthetically from the case vocab; these HF fields are
+  # unused placeholders to satisfy the shared LMDataConfig schema.
+  dataset_name: unused-interpbench-synthetic
+  tokenizer_name: unused-interpbench-synthetic
+runtime:
+  autocast_bf16: false
+  device: cuda
+  dp: null
