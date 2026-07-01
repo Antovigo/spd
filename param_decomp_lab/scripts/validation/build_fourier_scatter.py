@@ -84,7 +84,9 @@ def _read_ci_grids(
     column (so the applet's CI colouring degrades gracefully)."""
     if not tsv_path.exists():
         return {}
-    grids = {k: np.zeros((n, n), dtype=np.float32) for k in wanted}
+    # NaN = not recorded for this task (component filtered out of its TSV) → greyed in the applet,
+    # distinct from a genuine CI of 0.
+    grids = {k: np.full((n, n), np.nan, dtype=np.float32) for k in wanted}
     with tsv_path.open() as f:
         reader = csv.DictReader(f, delimiter="\t")
         if "ci" not in (reader.fieldnames or []):
@@ -97,16 +99,27 @@ def _read_ci_grids(
 
 
 def _plane(
-    feature: dict[str, Any],
+    feature: dict[str, Any], fallback_acts: NDArray[np.float32]
 ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
     """`(offset, e1, e2)` for a Fourier feature: the circle centre and an orthonormal basis of its
-    plane (`e1` along `cos_vec`, `e2` the part of `sin_vec` orthogonal to `e1`)."""
+    plane. `e1` is along `cos_vec`; `e2` is the part of `sin_vec` orthogonal to `e1` — except when
+    that is degenerate (e.g. period 2, where `sin(2πv/2)=0` for every integer `v` so `sin_vec≈0`
+    and the circle would collapse to the `e1` line). Then `e2` falls back to the direction of most
+    `fallback_acts` variance orthogonal to `e1` — an arbitrary but informative second axis for
+    visualisation (as in Feucht et al.)."""
     offset = np.asarray(feature["offset"], dtype=np.float32)
     cos = np.asarray(feature["cos"], dtype=np.float32)
     sin = np.asarray(feature["sin"], dtype=np.float32)
     e1 = (cos / max(float(np.linalg.norm(cos)), 1e-12)).astype(np.float32)
     w = sin - float(sin @ e1) * e1
-    e2 = (w / max(float(np.linalg.norm(w)), 1e-12)).astype(np.float32)
+    if float(np.linalg.norm(w)) > 1e-3 * max(float(np.linalg.norm(cos)), 1e-12):
+        e2 = (w / np.linalg.norm(w)).astype(np.float32)
+    else:
+        xc = fallback_acts - fallback_acts.mean(axis=0)
+        xc = xc - np.outer(xc @ e1, e1)  # variance orthogonal to e1
+        top = np.linalg.eigh(xc.T @ xc)[1][:, -1].astype(np.float32)
+        top = top - float(top @ e1) * e1
+        e2 = (top / max(float(np.linalg.norm(top)), 1e-12)).astype(np.float32)
     return offset, e1, e2
 
 
@@ -164,6 +177,9 @@ def build_fourier_scatter(
     }
     layer = alive_by_op[op_list[0]][0].layer
     for op in op_list:
+        assert "space" in bases[op], (
+            f"coordinates_{op}.json lacks `space`; refit find_fourier_features"
+        )
         assert bases[op]["layer"] == layer, (
             f"coordinates_{op}.json was fit at layer {bases[op]['layer']} but the checkpoint's "
             f"alive components are layer {layer}; the projection plane would be from the wrong space"
@@ -192,19 +208,22 @@ def build_fourier_scatter(
         op: np.load(data_dir / f"hidden_activations_{op}.npz", allow_pickle=True) for op in op_list
     }
     n = int(hidden[op_list[0]]["a"].shape[0])
+    # Post-SwiGLU output is only needed for down-subcomponent inner activations; skip it entirely
+    # (a per-task [n*n, d_int] fp32 buffer) when no down_proj component is alive.
+    need_swiglu = any(a.proj == "down_proj" for comps in alive_by_op.values() for a in comps)
     acts: dict[str, dict[str, NDArray[np.float32]]] = {}
     for op in op_list:
         z = hidden[op]
         assert int(z["a"].shape[0]) == n, f"grid size mismatch for {op}"
-        d_int = z["up_preact"].shape[-1]
-        swiglu = _silu(z["gate_preact"].reshape(n * n, d_int).astype(np.float32)) * z[
-            "up_preact"
-        ].reshape(n * n, d_int).astype(np.float32)
         acts[op] = {
             "mlp_input": z["mlp_input"].reshape(n * n, -1).astype(np.float32),
             "mlp_output": z["mlp_output"].reshape(n * n, -1).astype(np.float32),
-            "swiglu": swiglu,
         }
+        if need_swiglu:
+            d_int = z["up_preact"].shape[-1]
+            acts[op]["swiglu"] = _silu(
+                z["gate_preact"].reshape(n * n, d_int).astype(np.float32)
+            ) * z["up_preact"].reshape(n * n, d_int).astype(np.float32)
 
     # Union of alive subcomponents across tasks, split by which vector defines their direction.
     union = sorted({(a.proj, a.component) for comps in alive_by_op.values() for a in comps})
@@ -237,7 +256,8 @@ def build_fourier_scatter(
             centers_out[basis_op][operand] = []
 
             for pk in period_keys:
-                offset, e1, e2 = _plane(feats[pk])
+                # the basis task's own activations seed the fallback 2nd axis for degenerate planes.
+                offset, e1, e2 = _plane(feats[pk], acts[basis_op][grid_key])
                 # Everything is in raw activation-projection coords (x·e1, x·e2): points, arrows
                 # (unit directions from the activation-space zero) and the circle centre all share
                 # the origin, so an off-zero circle centre (offset projected) is visible.
@@ -299,19 +319,18 @@ def build_fourier_scatter(
         inner[op] = _b64(stack)
 
     # Per-task CI (a, b) grid per kept subcomponent (for the "CI of selected" point colouring),
-    # read from the inner-activations TSVs' `ci` column. Empty unless every task has it.
+    # read from the inner-activations TSVs' `ci` column. Per-task: a task whose TSV predates the
+    # column is simply omitted (the applet greys CI colouring for it) rather than disabling it for
+    # every task. Missing components within a task are NaN (greyed), distinct from a true CI of 0.
     kept_keys = {union[sid] for sid in kept}
     ci_by_op: dict[str, str] = {}
     for op in op_list:
         grids = _read_ci_grids(data_dir / f"inner_activations_{op}.tsv", kept_keys, n)
         if not grids:
-            ci_by_op = {}
-            break
+            continue
         stack = np.stack([grids[union[sid]] for sid in kept]) if kept else np.zeros((0, n, n))
         ci_by_op[op] = _b64(stack)
-    logger.info(
-        f"CI colour data: {'present' if ci_by_op else 'absent (rerun collect_inner_activations)'}"
-    )
+    logger.info(f"CI colour data present for: {', '.join(sorted(ci_by_op)) or 'no task'}")
 
     a_grid = np.repeat(np.arange(1, n + 1), n).astype(np.int32)
     b_grid = np.tile(np.arange(1, n + 1), n).astype(np.int32)

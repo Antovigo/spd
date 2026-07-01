@@ -642,14 +642,19 @@ subcomponents / neurons against the circular features. For a chosen **basis task
 orthonormalised `(cos_vec, sin_vec)` of that Fourier feature; one plot per period, side by side. It
 scatters the chosen **activation task**'s activations projected onto that plane (input operands ←
 `mlp_input`, result ← `mlp_output`) — so e.g. subtraction activations can be viewed on addition's
-basis. Everything is in **raw projection coords** (`x·e1, x·e2`): points, the subcomponent arrows
-(which start at the **activation-space zero** `(0,0)`), and a crosshair+ring marker at the Fourier
-circle centre (the projected `offset`) share one origin, so an off-zero centre is visible. Points
-colour by `a` / `b` / result, either raw (linear ramp) or by `(value − offset) mod m` / the
-multiplicative log phase on a cyclic wheel via a `mod` + `offset` form (options from the task's
-`subcomp_periods`, like the subspace-scatter applet); a further **CI (selected)** colour option
-(shown only when the `inner_activations_<op>.tsv` carry a `ci` column) paints each point by the
-currently-selected subcomponent's causal importance on that prompt. Colour/mod/offset changes and
+basis. The plane is the orthonormalised `(cos_vec, sin_vec)`; when the sin axis is degenerate
+(e.g. period 2, where `sin(2πv/2)=0` for every integer `v` so the circle would collapse to the
+`e1` line), the second axis falls back to the direction of most activation variance orthogonal to
+`e1` — an arbitrary but informative viewing axis, as in Feucht et al. Everything is in **raw
+projection coords** (`x·e1, x·e2`): points, the subcomponent arrows (which start at the
+**activation-space zero** `(0,0)`), and a crosshair+ring marker at the Fourier circle centre (the
+projected `offset`) share one origin, so an off-zero centre is visible. Points colour by `a` / `b`
+/ result, either raw or by `(value − offset) mod m` / the multiplicative log phase via a `mod` +
+`offset` form (options from the task's `subcomp_periods`, like the subspace-scatter applet); a
+further **CI (selected)** colour option (per task: shown when some `inner_activations_<op>.tsv`
+carries a `ci` column, greyed for tasks lacking it or for a subcomponent absent from a task's TSV)
+paints each point by the currently-selected subcomponent's causal importance on that prompt. All
+colouring uses a **viridis 0→1** map with a single shared legend. Colour/mod/offset changes and
 selecting a new subcomponent recolour in place (zoom preserved). Scroll zooms, drag pans. The **unit** subcomponent directions (gate/up `V` for
 input operands, down `U` for the result) are drawn as arrows scaled to the point cloud; only those
 whose in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖; clicking a

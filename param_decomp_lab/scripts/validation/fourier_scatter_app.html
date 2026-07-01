@@ -41,6 +41,13 @@
   <label>overlay<select id="overlay"><option value="subcomponents">subcomponents</option><option value="neurons">neurons</option></select></label>
   <label>neuron matrix<select id="neuronProj" disabled></select></label>
   <label>threshold<input id="thr" type="number" step="0.05" min="0" max="1" value="0.3" /></label>
+  <label>colour scale
+    <span style="display:flex;align-items:center;gap:4px">
+      <span id="legLo" style="font-size:10px;color:#444"></span>
+      <canvas id="legend" width="120" height="10" style="border:1px solid #ccc"></canvas>
+      <span id="legHi" style="font-size:10px;color:#444"></span>
+    </span>
+  </label>
   <span class="hint" id="hint"></span>
 </div>
 <div id="plots"></div>
@@ -66,11 +73,14 @@ function decodeF16(b64) {
   return out;
 }
 
-// ---- colour maps --------------------------------------------------------------------------
-// Linear ramp (blue -> red) for a raw value range; cyclic hue wheel for a modular phase in [0,1)
-// so the wrap point (0 == 1) shares a colour.
-function ramp(t) { const h = (1 - Math.max(0, Math.min(1, t))) * 240; return `hsl(${h},85%,45%)`; }
-function cyc(t) { return `hsl(${(((t % 1) + 1) % 1) * 360},80%,50%)`; }
+// ---- colour map: viridis 0..1 -------------------------------------------------------------
+const _VIRIDIS = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
+function viridis(t) {
+  t = Math.max(0, Math.min(1, t));
+  const x = t * (_VIRIDIS.length - 1), i = Math.min(_VIRIDIS.length - 2, Math.floor(x)), f = x - i;
+  const a = _VIRIDIS[i], b = _VIRIDIS[i + 1];
+  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * f)},${Math.round(a[1] + (b[1] - a[1]) * f)},${Math.round(a[2] + (b[2] - a[2]) * f)})`;
+}
 
 // ---- DOM refs -----------------------------------------------------------------------------
 const el = id => document.getElementById(id);
@@ -108,7 +118,7 @@ function modKind() { return (D.meta.task_mods[sel.actTask] || { kind: "additive"
 function colorInfo() {
   if (sel.colorBy === "ci") {
     // colour by the selected subcomponent's causal importance on each prompt (mod/offset ignored).
-    if (!SELECTED || !D.meta.has_ci) return { vals: null };  // nothing selected → grey
+    if (SELECTED === null || !D.ci[sel.actTask]) return { vals: null };  // nothing selected / no CI for this task → grey
     const stack = ciCache(sel.actTask), pos = D.subcomp_pos[String(SELECTED)];
     return { vals: stack.subarray(pos * N * N, (pos + 1) * N * N), cyclic: false, lo: 0, span: 1 };
   }
@@ -198,6 +208,7 @@ function rebuild() {
   const periods = D.periods[sel.basisTask][sel.operand];
   const isLog = D.meta.space[sel.basisTask] === "log";
   const color = colorInfo();
+  updateLegend(color);
 
   const container = el("plots"); container.innerHTML = ""; plots = [];
   periods.forEach((pv, pi) => {
@@ -218,10 +229,20 @@ function rebuild() {
   });
 }
 
+// Shared viridis legend across all plots (all plots use the same colour mapping).
+function updateLegend(color) {
+  const cv = el("legend"), g = cv.getContext("2d");
+  for (let x = 0; x < cv.width; x++) { g.fillStyle = viridis(x / (cv.width - 1)); g.fillRect(x, 0, 1, cv.height); }
+  const fmt = x => Number.isInteger(x) ? String(x) : x.toFixed(2);
+  el("legLo").textContent = color.vals ? fmt(color.lo) : "—";
+  el("legHi").textContent = color.vals ? fmt(color.lo + color.span) : "—";
+}
+
 // Recompute colours only (mod/offset/colour-by) and redraw in place — view/zoom preserved.
 function recolor() {
   sel.colorBy = el("colorBy").value; sel.mod = +el("mod").value; sel.offset = parseFloat(el("offset").value) || 0;
   const color = colorInfo();
+  updateLegend(color);
   for (const st of plots) { st.color = color; draw(st); }
 }
 
@@ -244,7 +265,9 @@ function draw(st) {
   for (let i = 0, j = 0; i < p.length; i += 2, j++) {
     const s = toScreen(st, p[i], p[i + 1]);
     if (s[0] < -3 || s[0] > SIZE + 3 || s[1] < -3 || s[1] > SIZE + 3) continue;
-    ctx.fillStyle = !c.vals ? "#ccc" : c.cyclic ? cyc(c.vals[j] / c.span) : ramp((c.vals[j] - c.lo) / c.span);
+    const v = c.vals ? c.vals[j] : NaN;  // NaN = not-recorded (e.g. CI absent for this subcomp/task)
+    const t = c.cyclic ? (((v / c.span) % 1) + 1) % 1 : (v - c.lo) / c.span;
+    ctx.fillStyle = !c.vals || Number.isNaN(v) ? "#ccc" : viridis(t);
     ctx.fillRect(s[0] - 1.1, s[1] - 1.1, 2.2, 2.2);
   }
 
@@ -261,14 +284,14 @@ function draw(st) {
     if (A.norm[i] < sel.thr) continue;
     const ex = A.xy[i][0] * st.arrowScale, ey = A.xy[i][1] * st.arrowScale;
     const e = toScreen(st, ex, ey);
-    const highlighted = SELECTED && A.meta[i].kind === "sub" && A.meta[i].id === SELECTED;
+    const highlighted = SELECTED !== null && A.meta[i].kind === "sub" && A.meta[i].id === SELECTED;
     ctx.strokeStyle = A.meta[i].kind === "sub" ? (highlighted ? "#000" : "#c0392b") : "#2c7fb8";
-    ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = highlighted ? 2.4 : 1.2;
+    ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = highlighted ? 3.5 : 2.2;
     ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
-    const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 5;
+    const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = highlighted ? 13 : 10, hw = 0.5;
     ctx.beginPath(); ctx.moveTo(e[0], e[1]);
-    ctx.lineTo(e[0] - hl * Math.cos(ang - 0.4), e[1] - hl * Math.sin(ang - 0.4));
-    ctx.lineTo(e[0] - hl * Math.cos(ang + 0.4), e[1] - hl * Math.sin(ang + 0.4));
+    ctx.lineTo(e[0] - hl * Math.cos(ang - hw), e[1] - hl * Math.sin(ang - hw));
+    ctx.lineTo(e[0] - hl * Math.cos(ang + hw), e[1] - hl * Math.sin(ang + hw));
     ctx.closePath(); ctx.fill();
   }
 }
