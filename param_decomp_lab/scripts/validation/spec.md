@@ -651,9 +651,10 @@ projection coords** (`x·e1, x·e2`): points, the subcomponent arrows (which sta
 projected `offset`) share one origin, so an off-zero centre is visible. Points colour by `a`, `b`,
 `a+b`, `a-b`, `a×b` (computed from the operand grids, independent of the active task), each either
 raw or by `(value − offset) mod m` via a `mod` + `offset` form (options from the task's
-`subcomp_periods`, like the subspace-scatter applet); a **model accuracy** option (shown when the
-shared `arithmetic_map/results.tsv` covers a task) paints each point by the base model's P(correct
-answer token) for the active task's operation; and a **CI (selected)** option (per task: shown when
+`subcomp_periods`, like the subspace-scatter applet); a **model accuracy** option (1 if the base
+model's argmax next token is the correct answer, else 0) and a **P(correct)** option (its
+probability mass on the correct token) — both shown when the shared `arithmetic_map/results.tsv`
+covers a task, for the active task's operation; and a **CI (selected)** option (per task: shown when
 some `inner_activations_<op>.tsv` carries a `ci` column, greyed for tasks lacking it or for a
 subcomponent absent from a task's TSV) paints each point by the currently-selected subcomponent's
 causal importance on that prompt. All

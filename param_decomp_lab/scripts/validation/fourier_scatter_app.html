@@ -96,7 +96,7 @@ fill(el("actTask"), D.meta.tasks);
 fill(el("basisTask"), D.meta.tasks);
 fill(el("operand"), D.meta.operands, D.meta.operands.map(o => ({ a: "first operand (a)", b: "second operand (b)", result: "result" }[o])));
 const cbVals = ["a", "b", "a+b", "a-b", "a×b"], cbLabels = ["a", "b", "a+b", "a-b", "a×b"];
-if (D.meta.has_accuracy) { cbVals.push("accuracy"); cbLabels.push("model accuracy"); }
+if (D.meta.has_accuracy) { cbVals.push("accuracy", "p_correct"); cbLabels.push("model accuracy", "P(correct)"); }
 if (D.meta.has_ci) { cbVals.push("ci"); cbLabels.push("CI (selected)"); }
 fill(el("colorBy"), cbVals, cbLabels);
 sel.actTask = D.meta.tasks[0]; sel.basisTask = D.meta.tasks[0]; sel.operand = D.meta.operands[0];
@@ -127,10 +127,11 @@ function colorInfo() {
     const v = stack.subarray(pos * N * N, (pos + 1) * N * N);
     return { vals: v, raw: v, cyclic: false, lo: 0, span: 1 };
   }
-  if (sel.colorBy === "accuracy") {
-    // P(correct answer token) of the base model for the active task's operation (mod/offset ignored).
-    const acc = (D.meta.accuracy || {})[sel.actTask];
-    return acc ? { vals: acc, raw: acc, cyclic: false, lo: 0, span: 1 } : { vals: null };  // no data → grey
+  if (sel.colorBy === "accuracy" || sel.colorBy === "p_correct") {
+    // base-model performance for the active task's op (mod/offset ignored): `accuracy` = argmax
+    // next token is correct (0/1), `p_correct` = probability on the correct token.
+    const g = (D.meta[sel.colorBy] || {})[sel.actTask];
+    return g ? { vals: g, raw: g, cyclic: false, lo: 0, span: 1 } : { vals: null };  // no data → grey
   }
   // colour value computed directly from the operand grids, independent of the active task's op.
   const A = D.meta.a, B = D.meta.b;

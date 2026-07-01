@@ -4,10 +4,11 @@ For each canonical period of a chosen **basis task** (add / sub / mult) and **op
 input operand `a`, second input operand `b`, or the output `result`), the applet scatters the
 activations of a chosen **activation task** projected onto that period's 2D Fourier plane — so you
 can e.g. plot subtraction activations on addition's basis. One plot per period, side by side.
-Points colour (viridis) by `a`, `b`, `a+b`, `a-b`, `a×b`, the base model's **accuracy**
-(P of the correct answer token, from the shared `arithmetic_map`), or the **selected
-subcomponent's CI** — the arithmetic ones optionally reduced by a `mod` + `offset` form (like the
-subspace-scatter applet) to `(value − offset) mod m`; scroll to zoom, drag to pan.
+Points colour (viridis) by `a`, `b`, `a+b`, `a-b`, `a×b`, the base model's **accuracy** (1 if the
+argmax next token is the correct answer) or **P(correct)** (probability on the correct token) from
+the shared `arithmetic_map`, or the **selected subcomponent's CI** — the arithmetic ones optionally
+reduced by a `mod` + `offset` form (like the subspace-scatter applet) to `(value − offset) mod m`;
+scroll to zoom, drag to pan.
 
 Everything is in **raw activation-projection coordinates** (`x·e1, x·e2`): the points, the
 subcomponent **unit** direction arrows (which emanate from the activation-space zero `(0,0)`), and
@@ -103,23 +104,33 @@ def _read_ci_grids(
 
 def _accuracy_by_op(
     op_list: list[str], a_grid: NDArray[np.integer], b_grid: NDArray[np.integer]
-) -> dict[str, list[float]]:
-    """Per-op P(correct answer token) over the (a, b) grid, read from the shared
-    `arithmetic_map/results.tsv` and aligned to the applet's point order via `(a, b)` lookup.
-    Empty for ops whose condition is absent (the accuracy colour option is then hidden)."""
+) -> dict[str, dict[str, list[float]]]:
+    """Per-op base-model performance over the (a, b) grid, read from the shared
+    `arithmetic_map/results.tsv` and aligned to the applet's point order via `(a, b)` lookup:
+    `accuracy` (1 if the argmax next token is the correct answer, else 0) and `p_correct` (the
+    probability mass on the correct token). Empty for ops whose condition is absent."""
     results = PARAM_DECOMP_OUT_DIR / "arithmetic_map" / "results.tsv"
     if not results.exists():
         return {}
     wanted = {_ACCURACY_CONDITION[op]: op for op in op_list if op in _ACCURACY_CONDITION}
-    p: dict[str, dict[tuple[int, int], float]] = {op: {} for op in wanted.values()}
+    cells: dict[str, dict[tuple[int, int], tuple[float, float]]] = {
+        op: {} for op in wanted.values()
+    }
     with results.open() as f:
         for row in csv.DictReader(f, delimiter="\t"):
             op = wanted.get(row["condition"])
             if op is not None:
-                p[op][(int(row["a"]), int(row["b"]))] = float(row["p_correct"])
+                cells[op][(int(row["a"]), int(row["b"]))] = (
+                    float(row["correct"]),
+                    float(row["p_correct"]),
+                )
+    ab = list(zip(a_grid, b_grid, strict=True))
     return {
-        op: [round(grid[(int(a), int(b))], 4) for a, b in zip(a_grid, b_grid, strict=True)]
-        for op, grid in p.items()
+        op: {
+            "accuracy": [round(grid[(int(a), int(b))][0], 4) for a, b in ab],
+            "p_correct": [round(grid[(int(a), int(b))][1], 4) for a, b in ab],
+        }
+        for op, grid in cells.items()
         if grid
     }
 
@@ -380,7 +391,8 @@ def build_fourier_scatter(
             "space": {op: bases[op]["space"] for op in op_list},
             "a": [int(v) for v in a_grid],
             "b": [int(v) for v in b_grid],
-            "accuracy": acc_by_op,
+            "accuracy": {op: d["accuracy"] for op, d in acc_by_op.items()},
+            "p_correct": {op: d["p_correct"] for op, d in acc_by_op.items()},
         },
         "periods": periods_out,
         "points": points_out,
