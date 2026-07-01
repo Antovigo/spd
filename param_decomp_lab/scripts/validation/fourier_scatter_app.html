@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fourier feature scatter</title>
+<style>
+  :root { font-family: system-ui, sans-serif; font-size: 13px; }
+  body { margin: 0; background: #fafafa; color: #222; }
+  #controls {
+    position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 1px solid #ddd;
+    padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+  }
+  #controls label { display: flex; flex-direction: column; font-size: 11px; color: #666; gap: 2px; }
+  #controls select, #controls input { font-size: 13px; padding: 2px 4px; }
+  #controls input[type=number] { width: 64px; }
+  #title { font-weight: 600; font-size: 14px; margin-right: 8px; }
+  #plots { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; align-items: flex-start; }
+  .plot { border: 1px solid #ddd; background: #fff; border-radius: 4px; }
+  .plot .cap { font-size: 11px; text-align: center; padding: 3px 0; color: #444; border-bottom: 1px solid #eee; }
+  canvas { display: block; }
+  #bottom { padding: 8px 12px; border-top: 1px solid #ddd; background: #fff; }
+  #bottom h3 { margin: 4px 0 8px; font-size: 13px; }
+  #inner { display: flex; flex-wrap: wrap; gap: 12px; }
+  .innercell { text-align: center; font-size: 11px; color: #444; }
+  #tooltip {
+    position: fixed; pointer-events: none; background: rgba(0,0,0,.8); color: #fff; padding: 3px 6px;
+    border-radius: 3px; font-size: 11px; display: none; z-index: 20; white-space: nowrap;
+  }
+  .hint { color: #888; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span id="title">Fourier feature scatter</span>
+  <label>activation task<select id="actTask"></select></label>
+  <label>basis task<select id="basisTask"></select></label>
+  <label>operand<select id="operand"></select></label>
+  <label>colour by<select id="colorBy"></select></label>
+  <label>mod<select id="mod"></select></label>
+  <label>offset<input id="offset" type="number" value="0" style="width:56px" /></label>
+  <label>overlay<select id="overlay"><option value="subcomponents">subcomponents</option><option value="neurons">neurons</option></select></label>
+  <label>neuron matrix<select id="neuronProj" disabled></select></label>
+  <label>threshold<input id="thr" type="number" step="0.05" min="0" max="1" value="0.3" /></label>
+  <span class="hint" id="hint"></span>
+</div>
+<div id="plots"></div>
+<div id="bottom"><h3 id="bottomTitle">Click a subcomponent arrowhead to see its inner-activation heatmaps.</h3><div id="inner"></div></div>
+<div id="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.PD_DATA;
+const N = D.meta.n;
+
+// ---- decode helpers (little-endian fp16) --------------------------------------------------
+function f16(u) {
+  const s = (u & 0x8000) >> 15, e = (u & 0x7c00) >> 10, f = u & 0x03ff;
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  if (e === 31) return f ? NaN : (s ? -Infinity : Infinity);
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+function decodeF16(b64) {
+  const bin = atob(b64), len = bin.length >> 1, out = new Float32Array(len);
+  for (let i = 0; i < len; i++) out[i] = f16(bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8));
+  return out;
+}
+
+// ---- colour maps --------------------------------------------------------------------------
+// Linear ramp (blue -> red) for a raw value range; cyclic hue wheel for a modular phase in [0,1)
+// so the wrap point (0 == 1) shares a colour.
+function ramp(t) { const h = (1 - Math.max(0, Math.min(1, t))) * 240; return `hsl(${h},85%,45%)`; }
+function cyc(t) { return `hsl(${(((t % 1) + 1) % 1) * 360},80%,50%)`; }
+
+// ---- DOM refs -----------------------------------------------------------------------------
+const el = id => document.getElementById(id);
+const tooltip = el("tooltip");
+const sel = { actTask: null, basisTask: null, operand: null, colorBy: "result", mod: 1, offset: 0, overlay: "subcomponents", neuronProj: null, thr: 0.3 };
+
+function fill(selectEl, values, labels) {
+  selectEl.innerHTML = "";
+  values.forEach((v, i) => { const o = document.createElement("option"); o.value = v; o.textContent = labels ? labels[i] : v; selectEl.appendChild(o); });
+}
+
+fill(el("actTask"), D.meta.tasks);
+fill(el("basisTask"), D.meta.tasks);
+fill(el("operand"), D.meta.operands, D.meta.operands.map(o => ({ a: "first operand (a)", b: "second operand (b)", result: "result" }[o])));
+fill(el("colorBy"), D.meta.has_ci ? ["a", "b", "result", "ci"] : ["a", "b", "result"],
+  D.meta.has_ci ? ["a", "b", "result", "CI (selected)"] : ["a", "b", "result"]);
+sel.actTask = D.meta.tasks[0]; sel.basisTask = D.meta.tasks[0]; sel.operand = D.meta.operands[0];
+el("actTask").value = sel.actTask; el("basisTask").value = sel.basisTask; el("operand").value = sel.operand;
+el("colorBy").value = sel.colorBy;
+
+// projs available for the current operand's neuron overlay (from the shipped neuron data).
+function operandProjs() {
+  const per = D.neurons[sel.basisTask][sel.operand][0];
+  return Object.keys(per);
+}
+
+// ---- plot state ---------------------------------------------------------------------------
+let plots = []; // one per period: {canvas, ctx, view, points, colorVals, colorLim, arrows, arrowScale, periodVal}
+const SIZE = 330;
+
+function modKind() { return (D.meta.task_mods[sel.actTask] || { kind: "additive" }).kind; }
+
+// Colour values per point: raw (mod=none) → linear ramp over the range; else `(n − offset) mod m`
+// (additive) or the multiplicative phase `frac((log n − offset)/log r)` (log task) → cyclic wheel.
+function colorInfo() {
+  if (sel.colorBy === "ci") {
+    // colour by the selected subcomponent's causal importance on each prompt (mod/offset ignored).
+    if (!SELECTED || !D.meta.has_ci) return { vals: null };  // nothing selected → grey
+    const stack = ciCache(sel.actTask), pos = D.subcomp_pos[String(SELECTED)];
+    return { vals: stack.subarray(pos * N * N, (pos + 1) * N * N), cyclic: false, lo: 0, span: 1 };
+  }
+  const base = sel.colorBy === "result" ? D.meta.result[sel.actTask] : D.meta[sel.colorBy];
+  const m = sel.mod, off = sel.offset;
+  if (m <= 1) {
+    let lo = Infinity, hi = -Infinity;
+    for (const v of base) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    return { vals: base, cyclic: false, lo, span: (hi - lo) || 1 };
+  }
+  if (modKind() === "log") {
+    const lr = Math.log(m);
+    return { vals: base.map(v => (v > 0 ? ((((Math.log(v) - off) / lr) % 1) + 1) % 1 : 0)), cyclic: true, lo: 0, span: 1 };
+  }
+  return { vals: base.map(v => (((v - off) % m) + m) % m), cyclic: true, lo: 0, span: m };
+}
+
+function populateMods() {
+  const tm = D.meta.task_mods[sel.actTask] || { kind: "additive", values: [] };
+  const prev = el("mod").value;
+  el("mod").innerHTML = '<option value="1">none</option>';
+  for (const v of tm.values) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = tm.kind === "log" ? "×" + v : "mod " + v;
+    el("mod").appendChild(o);
+  }
+  el("mod").value = [...el("mod").options].some(o => o.value === prev) ? prev : "1";
+  sel.mod = +el("mod").value;
+}
+
+function buildArrows(periodIdx) {
+  // returns {xy:[k][2] unit-plane coords, norm:[k], meta:[{kind,id,label}]}
+  const out = { xy: [], norm: [], meta: [] };
+  if (sel.overlay === "subcomponents") {
+    const s = D.subcomp[sel.basisTask][sel.operand][periodIdx];
+    const xy = decodeF16(s.xy), norm = decodeF16(s.norm);
+    s.ids.forEach((id, i) => {
+      out.xy.push([xy[2 * i], xy[2 * i + 1]]); out.norm.push(norm[i]);
+      out.meta.push({ kind: "sub", id, label: D.subcomp_list.find(x => x.id === id).label });
+    });
+  } else {
+    const proj = sel.neuronProj || operandProjs()[0];
+    const nd = D.neurons[sel.basisTask][sel.operand][periodIdx][proj];
+    if (nd) {
+      const xy = decodeF16(nd.xy), norm = decodeF16(nd.norm);
+      nd.ids.forEach((id, i) => {
+        out.xy.push([xy[2 * i], xy[2 * i + 1]]); out.norm.push(norm[i]);
+        out.meta.push({ kind: "neuron", id, label: proj[0] + "·" + id });
+      });
+    }
+  }
+  return out;
+}
+
+function initView(points) {
+  // centre of the point cloud (≈ the projected circle centre) and its 97th-pct spread radius.
+  let sx = 0, sy = 0; const np = points.length / 2;
+  for (let i = 0; i < points.length; i += 2) { sx += points[i]; sy += points[i + 1]; }
+  const cx0 = sx / np, cy0 = sy / np;
+  const rs = [];
+  for (let i = 0; i < points.length; i += 2) rs.push(Math.hypot(points[i] - cx0, points[i + 1] - cy0));
+  rs.sort((a, b) => a - b);
+  const r = rs[Math.floor(rs.length * 0.97)] || 1;
+  // fit the view to the cloud AND the activation-space origin (0,0), where arrows emanate, so an
+  // off-zero circle centre is visible.
+  const minx = Math.min(cx0 - r, 0), maxx = Math.max(cx0 + r, 0);
+  const miny = Math.min(cy0 - r, 0), maxy = Math.max(cy0 + r, 0);
+  const ext = Math.max(maxx - minx, maxy - miny, 1e-6);
+  return { k: (SIZE * 0.9) / ext, cx: (minx + maxx) / 2, cy: (miny + maxy) / 2, r };
+}
+
+function rebuild() {
+  sel.actTask = el("actTask").value; sel.basisTask = el("basisTask").value;
+  sel.operand = el("operand").value; sel.colorBy = el("colorBy").value;
+  sel.overlay = el("overlay").value; sel.thr = parseFloat(el("thr").value) || 0;
+  populateMods(); sel.offset = parseFloat(el("offset").value) || 0;
+
+  // neuron-matrix dropdown reflects the operand's side
+  const projs = operandProjs();
+  const npSel = el("neuronProj");
+  fill(npSel, projs, projs.map(p => p.replace("_proj", "")));
+  npSel.disabled = sel.overlay !== "neurons";
+  if (!projs.includes(sel.neuronProj)) sel.neuronProj = projs[0];
+  npSel.value = sel.neuronProj;
+  el("hint").textContent = `arrows from the activation-space zero; shipped for in-plane norm ≥ ${D.meta.arrow_floor}`;
+
+  const periods = D.periods[sel.basisTask][sel.operand];
+  const isLog = D.meta.space[sel.basisTask] === "log";
+  const color = colorInfo();
+
+  const container = el("plots"); container.innerHTML = ""; plots = [];
+  periods.forEach((pv, pi) => {
+    const wrap = document.createElement("div"); wrap.className = "plot";
+    const cap = document.createElement("div"); cap.className = "cap";
+    cap.textContent = isLog ? `×${pv} (log)` : `period ${pv}`;
+    const canvas = document.createElement("canvas"); canvas.width = SIZE; canvas.height = SIZE;
+    wrap.appendChild(cap); wrap.appendChild(canvas); container.appendChild(wrap);
+
+    const points = decodeF16(D.points[sel.basisTask][sel.operand][sel.actTask][pi]);
+    const view = initView(points);
+    const arrows = buildArrows(pi);
+    const center = D.centers[sel.basisTask][sel.operand][pi];
+    const st = { canvas, ctx: canvas.getContext("2d"), view, points, color, arrows, arrowScale: view.r * 0.92, center, pi };
+    attachInteraction(st);
+    plots.push(st);
+    draw(st);
+  });
+}
+
+// Recompute colours only (mod/offset/colour-by) and redraw in place — view/zoom preserved.
+function recolor() {
+  sel.colorBy = el("colorBy").value; sel.mod = +el("mod").value; sel.offset = parseFloat(el("offset").value) || 0;
+  const color = colorInfo();
+  for (const st of plots) { st.color = color; draw(st); }
+}
+
+function toScreen(st, x, y) {
+  return [SIZE / 2 + (x - st.view.cx) * st.view.k, SIZE / 2 - (y - st.view.cy) * st.view.k];
+}
+function fromScreen(st, px, py) {
+  return [st.view.cx + (px - SIZE / 2) / st.view.k, st.view.cy - (py - SIZE / 2) / st.view.k];
+}
+
+function draw(st) {
+  const ctx = st.ctx; ctx.clearRect(0, 0, SIZE, SIZE);
+  // axes through the activation-space zero (0,0), where the arrows emanate
+  ctx.strokeStyle = "#eee"; ctx.lineWidth = 1;
+  const o = toScreen(st, 0, 0);
+  ctx.beginPath(); ctx.moveTo(o[0], 0); ctx.lineTo(o[0], SIZE); ctx.moveTo(0, o[1]); ctx.lineTo(SIZE, o[1]); ctx.stroke();
+
+  // points, coloured per the current mod/offset selection
+  const p = st.points, c = st.color;
+  for (let i = 0, j = 0; i < p.length; i += 2, j++) {
+    const s = toScreen(st, p[i], p[i + 1]);
+    if (s[0] < -3 || s[0] > SIZE + 3 || s[1] < -3 || s[1] > SIZE + 3) continue;
+    ctx.fillStyle = !c.vals ? "#ccc" : c.cyclic ? cyc(c.vals[j] / c.span) : ramp((c.vals[j] - c.lo) / c.span);
+    ctx.fillRect(s[0] - 1.1, s[1] - 1.1, 2.2, 2.2);
+  }
+
+  // Fourier-circle centre (the projected offset) — its displacement from the (0,0) crosshair shows
+  // an off-zero circle centre.
+  const cc = toScreen(st, st.center[0], st.center[1]);
+  ctx.strokeStyle = "#333"; ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.arc(cc[0], cc[1], 4, 0, 2 * Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cc[0] - 6, cc[1]); ctx.lineTo(cc[0] + 6, cc[1]); ctx.moveTo(cc[0], cc[1] - 6); ctx.lineTo(cc[0], cc[1] + 6); ctx.stroke();
+
+  // arrows (unit-plane coords scaled to the cloud radius), filtered by threshold
+  const A = st.arrows;
+  for (let i = 0; i < A.xy.length; i++) {
+    if (A.norm[i] < sel.thr) continue;
+    const ex = A.xy[i][0] * st.arrowScale, ey = A.xy[i][1] * st.arrowScale;
+    const e = toScreen(st, ex, ey);
+    const highlighted = SELECTED && A.meta[i].kind === "sub" && A.meta[i].id === SELECTED;
+    ctx.strokeStyle = A.meta[i].kind === "sub" ? (highlighted ? "#000" : "#c0392b") : "#2c7fb8";
+    ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = highlighted ? 2.4 : 1.2;
+    ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
+    const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 5;
+    ctx.beginPath(); ctx.moveTo(e[0], e[1]);
+    ctx.lineTo(e[0] - hl * Math.cos(ang - 0.4), e[1] - hl * Math.sin(ang - 0.4));
+    ctx.lineTo(e[0] - hl * Math.cos(ang + 0.4), e[1] - hl * Math.sin(ang + 0.4));
+    ctx.closePath(); ctx.fill();
+  }
+}
+
+// ---- interaction: zoom (wheel), pan (drag), hover + click on arrowheads --------------------
+let SELECTED = null;
+function attachInteraction(st) {
+  const c = st.canvas;
+  c.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    const before = fromScreen(st, ev.offsetX, ev.offsetY);
+    st.view.k *= Math.exp(-ev.deltaY * 0.0015);
+    const after = fromScreen(st, ev.offsetX, ev.offsetY);
+    st.view.cx += before[0] - after[0]; st.view.cy += before[1] - after[1];
+    draw(st);
+  }, { passive: false });
+  let drag = null;
+  c.addEventListener("mousedown", ev => { drag = { x: ev.offsetX, y: ev.offsetY, cx: st.view.cx, cy: st.view.cy }; });
+  window.addEventListener("mouseup", () => { drag = null; });
+  c.addEventListener("mousemove", ev => {
+    if (drag) {
+      st.view.cx = drag.cx - (ev.offsetX - drag.x) / st.view.k;
+      st.view.cy = drag.cy + (ev.offsetY - drag.y) / st.view.k;
+      draw(st); return;
+    }
+    const hit = arrowAt(st, ev.offsetX, ev.offsetY);
+    if (hit) {
+      tooltip.style.display = "block"; tooltip.style.left = (ev.clientX + 10) + "px"; tooltip.style.top = (ev.clientY + 10) + "px";
+      tooltip.textContent = `${hit.meta.label}  ‖proj‖=${hit.norm.toFixed(3)}`;
+      c.style.cursor = "pointer";
+    } else { tooltip.style.display = "none"; c.style.cursor = "default"; }
+  });
+  c.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+  c.addEventListener("click", ev => {
+    const hit = arrowAt(st, ev.offsetX, ev.offsetY);
+    if (hit && hit.meta.kind === "sub") {
+      SELECTED = hit.meta.id; showInner(hit.meta);
+      if (sel.colorBy === "ci") recolor(); else plots.forEach(draw);  // CI colouring tracks the selection
+    }
+  });
+}
+
+function arrowAt(st, px, py) {
+  const A = st.arrows; let best = null, bestd = 8;
+  for (let i = 0; i < A.xy.length; i++) {
+    if (A.norm[i] < sel.thr) continue;
+    const e = toScreen(st, A.xy[i][0] * st.arrowScale, A.xy[i][1] * st.arrowScale);
+    const d = Math.hypot(e[0] - px, e[1] - py);
+    if (d < bestd) { bestd = d; best = { meta: A.meta[i], norm: A.norm[i] }; }
+  }
+  return best;
+}
+
+// ---- inner-activation heatmaps for a clicked subcomponent ---------------------------------
+function showInner(meta) {
+  el("bottomTitle").textContent = `Subcomponent ${meta.label} — inner-activation (a, b) heatmaps`;
+  const box = el("inner"); box.innerHTML = "";
+  const pos = D.subcomp_pos[String(meta.id)];
+  D.meta.tasks.forEach(op => {
+    const stack = innerCache(op);
+    const grid = stack.subarray(pos * N * N, (pos + 1) * N * N);
+    let lim = 1e-6; for (const v of grid) lim = Math.max(lim, Math.abs(v));
+    const cell = document.createElement("div"); cell.className = "innercell";
+    const cv = document.createElement("canvas"); cv.width = N; cv.height = N;
+    const ctx = cv.getContext("2d"); const img = ctx.createImageData(N, N);
+    for (let a = 0; a < N; a++) for (let b = 0; b < N; b++) {
+      const v = grid[a * N + b], t = Math.max(-1, Math.min(1, v / lim));
+      const idx = ((N - 1 - b) * N + a) * 4; // origin lower-left: rows = b, cols = a
+      let r, g, bl;
+      if (t >= 0) { r = 255; g = Math.round(255 - t * 255); bl = g; } else { r = Math.round(255 + t * 255); g = r; bl = 255; }
+      img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = bl; img.data[idx + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    cv.style.width = "150px"; cv.style.height = "150px"; cv.style.imageRendering = "pixelated"; cv.style.border = "1px solid #ccc";
+    cell.appendChild(cv);
+    const lab = document.createElement("div"); lab.textContent = `${op} ${D.meta.symbol[op]} (±${lim.toFixed(2)})`; cell.appendChild(lab);
+    box.appendChild(cell);
+  });
+}
+const _innerCache = {};
+function innerCache(op) { if (!_innerCache[op]) _innerCache[op] = decodeF16(D.inner[op]); return _innerCache[op]; }
+const _ciCache = {};
+function ciCache(op) { if (!_ciCache[op]) _ciCache[op] = decodeF16(D.ci[op]); return _ciCache[op]; }
+
+// ---- wire controls ------------------------------------------------------------------------
+// Structural changes rebuild the plots; colour/mod/offset only recolour (view preserved).
+["actTask", "basisTask", "operand", "overlay"].forEach(id =>
+  el(id).addEventListener("change", () => { rebuild(); }));
+el("neuronProj").addEventListener("change", () => { sel.neuronProj = el("neuronProj").value; rebuild(); });
+["colorBy", "mod"].forEach(id => el(id).addEventListener("change", recolor));
+el("offset").addEventListener("input", recolor);
+el("thr").addEventListener("input", () => { sel.thr = parseFloat(el("thr").value) || 0; plots.forEach(draw); });
+
+rebuild();
+</script>
+</body>
+</html>

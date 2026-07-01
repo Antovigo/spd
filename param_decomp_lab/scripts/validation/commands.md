@@ -303,3 +303,65 @@ uv run python -m $V.measure_model_accuracy "$CKPT" --ablate=gate_proj:163,down_p
 # plot: pip/uv install marimo, then
 marimo edit ~/out/runs/llama8b-add-02/model_accuracy/model_accuracy_notebook.py
 ```
+
+### 13. Fourier (circular) features around L18's MLP (CPU)
+
+Recovers the plane + center of the circular feature the model uses — the operands `a`, `b` in the
+post-RMSNorm MLP input and the task result in the MLP output (Feucht et al. 2026). CPU-only: it
+consumes the `hidden_activations_<op>.npz` grids from step 1, so collect those first (one per
+task). Fit separately per task; writes `~/out/runs/fourier_features/coordinates_<op>.json`
+(`features[side][variable][period]` → `{period, r2, offset, cos, sin}`, each vector `d_model`-long).
+
+For **add/sub** the fit is in linear space at `T ∈ {2,5,10,20,50,100}`. For **mult** it fits in
+**log space** (`θ = 2π·log(v)/log(r)`) — multiplication is periodic in `log v`. Which ratios? Find
+them first with `find_log_periods` (13a), then let `find_fourier_features` read the canonical
+clustered ratios straight from the sibling `subcomp_periods_mult.tsv`.
+
+```bash
+for OP in add sub mult; do
+  uv run python -m $V.find_fourier_features \
+    ~/out/runs/llama8b-add-02/analysis/datasets/hidden_activations_$OP.npz
+done
+# override the space/periods if needed (mult defaults to log + the TSV ratios):
+uv run python -m $V.find_fourier_features "$NPZ_MULT" --space=log --periods=1.26,2.0
+```
+
+### 13a. Find the log-space periods for multiplication (CPU)
+
+Multiplication has no integer period; the operand is encoded as a **circle whose phase advances
+with `log v`**. This finds those circles without any frequency grid: per value, average out the
+nuisance operand, detrend (DC + linear-in-`log v`), SVD to get the dominant 2D plane, and read the
+log-period off how fast the phase winds per unit `log v` (`P = 2π/median ω`, ratio `e^P`).
+Diagnostics (`sv_ratio≈1`, `radius_cv≈0`, `omega_cv≈0`) flag a genuine circle. Writes a figure +
+JSON to `~/out/runs/fourier_features/log_periods_mult.{png,json}`. The clean result is the second
+operand `b` at ratio ≈×1.26 (matching the `subcomp_periods_mult.tsv` clusters).
+
+```bash
+uv run python -m $V.find_log_periods \
+  ~/out/runs/addmult-L18-03/analysis/datasets/hidden_activations_mult.npz --v-min=10
+```
+
+### 14. Fourier-feature scatter applet — subcomponents vs neurons (CPU)
+
+Interactive applet (canvas, no CDN/GPU): scatters one task's activations projected onto another
+task's Fourier plane, one plot per period, side by side. Dropdowns for **activation task**, **basis
+task**, **operand** (`a` / `b` / result), **colour by** (`a`/`b`/result) with a **mod** + **offset**
+form (colours by `(value−offset) mod m` on a cyclic wheel, like the subspace-scatter applet), and
+**overlay** (subcomponent unit directions, or individual gate/up read-row / down write-column
+neuron directions) with a **threshold** on in-plane norm. A **CI (selected)** colour option (when
+`inner_activations_<op>.tsv` has a `ci` column — rerun `collect_inner_activations`) paints points by
+the selected subcomponent's causal importance per prompt. Arrows start at the activation-space zero
+and a marker shows the Fourier circle centre, so an off-zero centre is visible. Scroll to zoom,
+drag to pan; hover an arrow for its label + ‖proj‖; click a subcomponent arrowhead to see its
+inner-activation `(a, b)` heatmaps (one per task). Reads the bases from `find_fourier_features`'
+`~/out/runs/fourier_features/coordinates_<op>.json` (override with `--coordinates-dir`), plus the
+run's `hidden_activations_<op>.npz` / `alive_filtered_<op>.tsv` / `subcomp_periods_<op>.tsv` and the
+checkpoint U/V + target MLP weights. Writes `<run_dir>/analysis/fourier_scatter/{index.html,data.js}`.
+
+```bash
+CKPT=~/out/runs/addmult-L18-03/model_28000.pth
+uv run python -m $V.build_fourier_scatter "$CKPT"        # add,mult auto-detected (npz + basis present)
+# smoke-test in headless Chromium:
+PY=~/.cache/pd-headless/venv/bin/python
+$PY $V_DIR/headless_check.py ~/out/runs/addmult-L18-03/analysis/fourier_scatter/index.html
+```

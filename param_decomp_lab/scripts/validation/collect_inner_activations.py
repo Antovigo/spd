@@ -24,7 +24,8 @@ Usage:
 
 Outputs (default in the run's `analysis/datasets/`):
 - `inner_activations_<op>.tsv` — one row per (filtered-alive component, prompt): columns
-  `a, operation, b, matrix, subcomponent, inner_act`.
+  `a, operation, b, matrix, subcomponent, inner_act, ci` (`ci` = last-token lower-leaky causal
+  importance of that component on that prompt).
 - `alive_filtered_<op>.tsv` — the surviving alive set: `layer, matrix, component, mean_ci`.
 """
 
@@ -55,7 +56,7 @@ from param_decomp_lab.scripts.validation.common import (
 )
 
 _MODULE = "param_decomp_lab.scripts.validation.collect_inner_activations"
-_TSV_FIELDS = ["a", "operation", "b", "matrix", "subcomponent", "inner_act"]
+_TSV_FIELDS = ["a", "operation", "b", "matrix", "subcomponent", "inner_act", "ci"]
 _ALIVE_FIELDS = ["layer", "matrix", "component", "mean_ci"]
 
 
@@ -163,7 +164,7 @@ def collect_inner_activations(
         writer.writeheader()
         for i in np.nonzero(keep)[0]:
             comp = alive[i]
-            grid = inner[i]
+            grid, cgrid = inner[i], ci_grid[i]
             for a in range(n):
                 for b in range(n):
                     writer.writerow(
@@ -174,6 +175,7 @@ def collect_inner_activations(
                             "matrix": comp.proj,
                             "subcomponent": comp.component,
                             "inner_act": round(float(grid[a, b]), 6),
+                            "ci": round(float(cgrid[a, b]), 6),
                         }
                     )
 

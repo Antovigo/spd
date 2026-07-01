@@ -295,7 +295,8 @@ post-RMSNorm for gate/up and post-SwiGLU for down, so nothing is reapplied). Als
 each component's mean last-token CI over the grid and keeps those above `--mean-ci-thr`. GPU.
 Outputs:
 - `inner_activations_<op>.tsv` — one row per (kept component, prompt): `a, operation, b,
-  matrix, subcomponent, inner_act` (`operation` is the infix symbol; `matrix` the bare proj).
+  matrix, subcomponent, inner_act, ci` (`operation` is the infix symbol; `matrix` the bare proj;
+  `ci` = that component's last-token lower-leaky causal importance on the prompt).
 - `alive_filtered_<op>.tsv` — the surviving alive set: `layer, matrix, component, mean_ci`.
 
 **compute_subcomp_periods.py**
@@ -564,3 +565,104 @@ probability, the argmax token + whether it is correct, and `offset_probs` mappin
 `-n..+n` to its token's probability (offset 0 = correct). A sibling `model_accuracy_notebook.py`
 (marimo) is copied in to plot the results: per-offset mean ±1 std curves (4 operand-parity classes
 × original/ablated) and `(a, b)` P(correct) heatmaps. Open with `marimo edit model_accuracy_notebook.py`.
+
+**find_fourier_features.py**
+
+args:
+- the path to a `hidden_activations_<op>.npz` grid (from `collect_hidden_activations`; the op is
+  read from the file)
+- `--periods`: periods/ratios to fit (default: linear `2,5,10,20,50,100`, or — in log space — the
+  clustered ratios read from the sibling `subcomp_periods_<op>.tsv`)
+- `--space`: `linear` or `log` (default: `log` for mult, `linear` otherwise)
+- `--output`: overrides the output path
+
+CPU (no forward pass — it reuses the saved activation grids). Replicates Feucht et al. (2026)'s
+probing for the circular ("Fourier") features around L18's MLP. For each period and each probed
+variable it fits the generative model `x̄(v) ≈ offset + cos(θ)·cos_vec + sin(θ)·sin_vec` by least
+squares on the **mean activation per distinct probed value** (equal weight per value, which
+isolates the probed variable from the nuisance operand). The angle is `θ = 2πv/T` in **linear**
+space (`period` = integer `T`, add/sub) or `θ = 2π·log(v)/log(r)` in **log** space (`period` =
+multiplicative ratio `r`, mult — one turn per `×r`; multiplication is periodic in `log v`). In log
+space the default ratios come from the run's `subcomp_periods_mult.tsv` clusters (the frequencies
+the period analysis already found; see `find_log_periods` for how those are located from scratch).
+`offset` is the circle's center; `(cos_vec, sin_vec)` span its plane; `r2` is the fraction of the
+conditional mean's variance that period explains (each explains only a fraction — the mean is a sum
+over several). Two sides, matching the paper: **input** = the post-RMSNorm MLP input (`mlp_input`
+grid), probed for each operand `a` and `b`; **output** = the MLP's residual write (`mlp_output`
+grid), probed for the task result (`a+b` / `a-b` / `a×b`). Fit separately per task.
+
+Output (fixed dir per the objective: **`<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/`**, not the
+source run's `analysis/`): `coordinates_<op>.json` — op/symbol/layer/`space`/source/grid metadata +
+`features[side][variable][period]` → `{period, r2, offset, cos, sin}`, each vector `d_model`-long
+(`period` is the ratio `r` in log space). For addition/subtraction the input operands and output
+sums show clear circular structure (higher-period `r2`); for multiplication only the second operand
+`b` fits cleanly (log ratio ≈×1.27), while `a` and the product do not.
+
+**find_log_periods.py**
+
+args:
+- the path to a `hidden_activations_<op>.npz` grid (from `collect_hidden_activations`)
+- `--v-min`: smallest operand/result value used (default 10) — below it `log v` is sampled too
+  coarsely and the phase step aliases past the Nyquist limit `π`
+- `--n-planes`: how many SVD pairs (candidate planes) to report per variable (default 3)
+- `--output`: overrides the output path (a `.png`; the `.json` sits beside it)
+
+CPU. Finds the **log-space periods** of the multiplication circular features **without scanning any
+frequency grid**. Multiplication is periodic in `log v`: the operand is a circle whose phase
+advances with `log v`. Per probed variable (input `a`, `b`; output result): average out the
+nuisance operand → `x̄(v)`; remove DC + the linear-in-`log v` trend (the magnitude direction); SVD
+over `v` (a circular feature is a near-degenerate singular-value **pair** whose scores are a
+`cos`/`sin` of the same phase); for each consecutive pair `(2k, 2k+1)` project onto the plane and
+take the **signed angle increment** between consecutive values ÷ `Δ log v` → angular velocity `ω`.
+The log-period is `P = 2π/|median ω|`, ratio `r = e^P`. Diagnostics: `sv_ratio` (≈1 for a
+degenerate pair), `radius_cv` (0 = perfect circle), `omega_cv` (0 = phase exactly linear in
+`log v`), `var_share`. Only `v ≥ --v-min` is used (Nyquist).
+
+Output (same fixed dir): `log_periods_<op>.png` — per-variable figure (top-plane trajectory
+coloured by `log v`, plus unwrapped phase vs `log v` with the fitted slope) — and `.json` with each
+variable's planes and diagnostics. Empirically only the second operand `b` is a clean log-circle
+(ratio ≈×1.26, `omega_cv≈0.17`), reproducing the `subcomp_periods_mult.tsv` dominant cluster; `a`
+and the product are not clean single-period log-circles.
+
+**build_fourier_scatter.py**
+
+args:
+- the path to a decomposed model (checkpoint)
+- `--coordinates-dir`: where the `coordinates_<op>.json` bases live (default
+  `<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/`)
+- `--ops`: comma-separated tasks to include (default: auto — those with both a
+  `hidden_activations_<op>.npz` and a `coordinates_<op>.json`)
+- `--arrow-floor`: minimum in-plane norm for an arrow to be shipped (default 0.1); the applet's
+  threshold form filters further, and inner grids are only shipped for subcomponents clearing it
+- `--output-dir`: overrides the output dir
+
+CPU (no forward pass). A self-contained canvas applet (vanilla JS, no CDN) for comparing
+subcomponents / neurons against the circular features. For a chosen **basis task** and **operand**
+(first operand `a`, second operand `b`, or the output result), each canonical period's plane is the
+orthonormalised `(cos_vec, sin_vec)` of that Fourier feature; one plot per period, side by side. It
+scatters the chosen **activation task**'s activations projected onto that plane (input operands ←
+`mlp_input`, result ← `mlp_output`) — so e.g. subtraction activations can be viewed on addition's
+basis. Everything is in **raw projection coords** (`x·e1, x·e2`): points, the subcomponent arrows
+(which start at the **activation-space zero** `(0,0)`), and a crosshair+ring marker at the Fourier
+circle centre (the projected `offset`) share one origin, so an off-zero centre is visible. Points
+colour by `a` / `b` / result, either raw (linear ramp) or by `(value − offset) mod m` / the
+multiplicative log phase on a cyclic wheel via a `mod` + `offset` form (options from the task's
+`subcomp_periods`, like the subspace-scatter applet); a further **CI (selected)** colour option
+(shown only when the `inner_activations_<op>.tsv` carry a `ci` column) paints each point by the
+currently-selected subcomponent's causal importance on that prompt. Colour/mod/offset changes and
+selecting a new subcomponent recolour in place (zoom preserved). Scroll zooms, drag pans. The **unit** subcomponent directions (gate/up `V` for
+input operands, down `U` for the result) are drawn as arrows scaled to the point cloud; only those
+whose in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖; clicking a
+subcomponent arrowhead opens its inner-activation `(a, b)` heatmaps (one per task) at the bottom.
+An **overlay** toggle swaps subcomponents for **individual neurons'** directions — gate/up read
+rows or the down write columns of the frozen target weight (a neuron-matrix dropdown) — so
+directions captured by neurons but not subcomponents (or vice versa) are visible. Reads the bases
+(`coordinates_<op>.json`; asserts each was fit at the checkpoint's layer), the run's
+`hidden_activations_<op>.npz` / `alive_filtered_<op>.tsv` / `subcomp_periods_<op>.tsv`, and the
+checkpoint U/V + target MLP weights (mmap). No forward pass.
+
+Output: `<run_dir>/analysis/fourier_scatter/{index.html,data.js}` — `data.js` holds, per
+(basis task, operand, period): the projected point clouds for every activation task, the projected
+circle centre, the floor-passing subcomponent and neuron arrow coords + in-plane norms, plus the
+kept subcomponents' inner-activation and (when available) CI grids per task (fp16 base64).
+Smoke-test with `headless_check.py`.

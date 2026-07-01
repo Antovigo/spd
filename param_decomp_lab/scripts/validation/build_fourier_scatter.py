@@ -1,0 +1,374 @@
+"""Build a GPU-free HTML applet comparing subcomponents/neurons to the Fourier features.
+
+For each canonical period of a chosen **basis task** (add / sub / mult) and **operand** (first
+input operand `a`, second input operand `b`, or the output `result`), the applet scatters the
+activations of a chosen **activation task** projected onto that period's 2D Fourier plane — so you
+can e.g. plot subtraction activations on addition's basis. One plot per period, side by side.
+Points colour by `a`, `b`, or `result`, either raw (a linear ramp) or — with a `mod` + `offset`
+form like the subspace-scatter applet — by `(value − offset) mod m` (or the multiplicative phase
+for a log task) on a cyclic wheel; scroll to zoom, drag to pan.
+
+Everything is in **raw activation-projection coordinates** (`x·e1, x·e2`): the points, the
+subcomponent **unit** direction arrows (which emanate from the activation-space zero `(0,0)`), and
+a marker at the Fourier circle's centre (the projected `offset`) all share one origin, so an
+off-zero circle centre is visible. Arrows use the gate/up `V` (read) directions for input operands
+and the down `U` (write) directions for the result; only those whose in-plane norm clears a typed
+threshold show; clicking an arrowhead opens that subcomponent's inner-activation `(a, b)` heatmaps
+(one per task) at the bottom. An overlay toggle swaps the subcomponent arrows for **individual
+neurons'** directions (gate/up read rows or down write columns of the frozen target weight) — to
+see directions captured by neurons but not subcomponents, or vice versa.
+
+The Fourier bases are read from `find_fourier_features`' output (`coordinates_<task>.json` under
+`<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/` by default). Each period's plane is the
+orthonormalised `(cos_vec, sin_vec)`. Activation grids, the alive set, periods (for the colour-mod
+options) and inner activations come from the run's `analysis/datasets/`.
+
+CPU-only (no forward pass). Usage:
+    python -m param_decomp_lab.scripts.validation.build_fourier_scatter <model_path> \
+        [--coordinates-dir=PATH] [--ops=add,sub,mult] [--arrow-floor=0.1] [--output-dir=PATH]
+
+Output: `<run_dir>/analysis/fourier_scatter/{index.html,data.js}`.
+"""
+
+import base64
+import csv
+import json
+from pathlib import Path
+from typing import Any
+
+import fire
+import numpy as np
+from numpy.typing import NDArray
+
+from param_decomp.log import logger
+from param_decomp_lab.infra.paths import ModelPath
+from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
+from param_decomp_lab.scripts.validation.common import (
+    MLP_MATRICES,
+    analysis_datasets_dir,
+    analysis_dir,
+    load_component_uv,
+    load_target_mlp_weights,
+    op_symbol,
+    read_alive_components,
+    read_subcomp_period_groups,
+)
+
+_APP_TEMPLATE = Path(__file__).with_name("fourier_scatter_app.html")
+_CANDIDATE_OPS = ("add", "sub", "mult")
+_RESULT = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mult": lambda a, b: a * b}
+# operand -> (basis side in coordinates_<op>.json, feature variable, activation grid, subcomp
+# projs / neuron proj set). Input operands live in the post-RMSNorm MLP input and use the gate/up
+# read (V) directions; the result lives in the MLP output and uses the down write (U) directions.
+_OPERANDS = {
+    "a": ("input", "a", "mlp_input", ("gate_proj", "up_proj")),
+    "b": ("input", "b", "mlp_input", ("gate_proj", "up_proj")),
+    "result": ("output", "result", "mlp_output", ("down_proj",)),
+}
+
+
+def _silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
+    return (x / (1.0 + np.exp(-x))).astype(np.float32)
+
+
+def _b64(arr: NDArray[Any]) -> str:
+    """Row-major fp16 array as base64 (keeps signed values)."""
+    return base64.b64encode(np.ascontiguousarray(arr, dtype=np.float16).tobytes()).decode("ascii")
+
+
+def _read_ci_grids(
+    tsv_path: Path, wanted: set[tuple[str, int]], n: int
+) -> dict[tuple[str, int], NDArray[np.float32]]:
+    """Per-(proj, component) last-token CI `(a, b)` grid from an `inner_activations_<op>.tsv`
+    `ci` column, for the wanted keys. Returns `{}` if the file is absent or predates the `ci`
+    column (so the applet's CI colouring degrades gracefully)."""
+    if not tsv_path.exists():
+        return {}
+    grids = {k: np.zeros((n, n), dtype=np.float32) for k in wanted}
+    with tsv_path.open() as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        if "ci" not in (reader.fieldnames or []):
+            return {}
+        for row in reader:
+            key = (row["matrix"], int(row["subcomponent"]))
+            if key in grids:
+                grids[key][int(row["a"]) - 1, int(row["b"]) - 1] = float(row["ci"])
+    return grids
+
+
+def _plane(
+    feature: dict[str, Any],
+) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
+    """`(offset, e1, e2)` for a Fourier feature: the circle centre and an orthonormal basis of its
+    plane (`e1` along `cos_vec`, `e2` the part of `sin_vec` orthogonal to `e1`)."""
+    offset = np.asarray(feature["offset"], dtype=np.float32)
+    cos = np.asarray(feature["cos"], dtype=np.float32)
+    sin = np.asarray(feature["sin"], dtype=np.float32)
+    e1 = (cos / max(float(np.linalg.norm(cos)), 1e-12)).astype(np.float32)
+    w = sin - float(sin @ e1) * e1
+    e2 = (w / max(float(np.linalg.norm(w)), 1e-12)).astype(np.float32)
+    return offset, e1, e2
+
+
+def _unit_projection(
+    dirs: NDArray[np.float32], e1: NDArray[np.float32], e2: NDArray[np.float32]
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Project each row of `dirs` (after unit-normalising it) onto `(e1, e2)`; return `[k, 2]`
+    coords and the in-plane norm `sqrt(c1²+c2²) ∈ [0, 1]`."""
+    norms = np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), 1e-12)
+    unit = dirs / norms
+    coords = np.stack([unit @ e1, unit @ e2], axis=1).astype(np.float32)  # [k, 2]
+    inplane = np.linalg.norm(coords, axis=1).astype(np.float32)
+    return coords, inplane
+
+
+def _resolve_ops(data_dir: Path, coord_dir: Path, ops: str | tuple[str, ...] | None) -> list[str]:
+    if ops is not None:
+        # fire parses `--ops=add,sub` as a tuple and `--ops=add` as a str.
+        return list(ops) if isinstance(ops, (list, tuple)) else str(ops).split(",")
+    detected = [
+        op
+        for op in _CANDIDATE_OPS
+        if (data_dir / f"hidden_activations_{op}.npz").exists()
+        and (coord_dir / f"coordinates_{op}.json").exists()
+    ]
+    assert detected, (
+        f"no task with both hidden_activations_<op>.npz ({data_dir}) and a Fourier basis ({coord_dir})"
+    )
+    return detected
+
+
+def build_fourier_scatter(
+    model_path: ModelPath,
+    coordinates_dir: str | None = None,
+    ops: str | tuple[str, ...] | None = None,
+    arrow_floor: float = 0.1,
+    output_dir: str | None = None,
+) -> Path:
+    checkpoint = Path(model_path).expanduser()
+    assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
+    run_dir = checkpoint.parent
+    data_dir = analysis_datasets_dir(run_dir)
+    coord_dir = (
+        Path(coordinates_dir).expanduser()
+        if coordinates_dir
+        else PARAM_DECOMP_OUT_DIR / "runs" / "fourier_features"
+    )
+    op_list = _resolve_ops(data_dir, coord_dir, ops)
+    logger.info(f"tasks: {op_list} (bases from {coord_dir})")
+
+    bases = {op: json.loads((coord_dir / f"coordinates_{op}.json").read_text()) for op in op_list}
+    alive_by_op = {
+        op: read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
+        for op in op_list
+    }
+    layer = alive_by_op[op_list[0]][0].layer
+    for op in op_list:
+        assert bases[op]["layer"] == layer, (
+            f"coordinates_{op}.json was fit at layer {bases[op]['layer']} but the checkpoint's "
+            f"alive components are layer {layer}; the projection plane would be from the wrong space"
+        )
+    uv = load_component_uv(checkpoint, layer, MLP_MATRICES)
+    weights = load_target_mlp_weights(checkpoint, layer, MLP_MATRICES)
+
+    # Per-task colour-modulo options (matching the subspace-scatter applet): integer residues, or
+    # the detected log ratios for a task whose subcomponents are mostly log-periodic (mult).
+    task_mods: dict[str, dict[str, Any]] = {}
+    for op in op_list:
+        ppath = data_dir / f"subcomp_periods_{op}.tsv"
+        groups = list(read_subcomp_period_groups(ppath).values()) if ppath.exists() else []
+        n_log = sum(g.kind == "log" for g in groups)
+        if n_log > sum(g.kind == "additive" for g in groups):
+            task_mods[op] = {
+                "kind": "log",
+                "values": sorted({round(g.value, 2) for g in groups if g.kind == "log"}),
+            }
+        else:
+            task_mods[op] = {"kind": "additive", "values": [2, 5, 10, 20, 25, 50, 100]}
+
+    # Activation grids per task: mlp_input / mlp_output flattened, plus the post-SwiGLU neuron
+    # output (for down-subcomponent inner activations).
+    hidden = {
+        op: np.load(data_dir / f"hidden_activations_{op}.npz", allow_pickle=True) for op in op_list
+    }
+    n = int(hidden[op_list[0]]["a"].shape[0])
+    acts: dict[str, dict[str, NDArray[np.float32]]] = {}
+    for op in op_list:
+        z = hidden[op]
+        assert int(z["a"].shape[0]) == n, f"grid size mismatch for {op}"
+        d_int = z["up_preact"].shape[-1]
+        swiglu = _silu(z["gate_preact"].reshape(n * n, d_int).astype(np.float32)) * z[
+            "up_preact"
+        ].reshape(n * n, d_int).astype(np.float32)
+        acts[op] = {
+            "mlp_input": z["mlp_input"].reshape(n * n, -1).astype(np.float32),
+            "mlp_output": z["mlp_output"].reshape(n * n, -1).astype(np.float32),
+            "swiglu": swiglu,
+        }
+
+    # Union of alive subcomponents across tasks, split by which vector defines their direction.
+    union = sorted({(a.proj, a.component) for comps in alive_by_op.values() for a in comps})
+    sub_id = {key: i for i, key in enumerate(union)}
+    # Unit direction of each subcomponent (V for gate/up, U for down) in its side's space.
+    sub_dir = {}
+    for proj, c in union:
+        v, u = uv[proj]
+        vec = v[:, c] if proj != "down_proj" else u[c, :]
+        sub_dir[(proj, c)] = vec.astype(np.float32)
+
+    kept_subs: set[int] = set()  # subcomponents that clear the floor in at least one plot
+    periods_out: dict[str, dict[str, list[float]]] = {}
+    points_out: dict[str, dict[str, dict[str, list[str]]]] = {}
+    subcomp_out: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    neurons_out: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    centers_out: dict[str, dict[str, list[list[float]]]] = {}
+
+    for basis_op in op_list:
+        periods_out[basis_op], points_out[basis_op] = {}, {}
+        subcomp_out[basis_op], neurons_out[basis_op] = {}, {}
+        centers_out[basis_op] = {}
+        for operand, (side, variable, grid_key, projs) in _OPERANDS.items():
+            feats = bases[basis_op]["features"][side][variable]
+            period_keys = sorted(feats, key=float)
+            periods_out[basis_op][operand] = [float(p) for p in period_keys]
+            points_out[basis_op][operand] = {op: [] for op in op_list}
+            subcomp_out[basis_op][operand] = []
+            neurons_out[basis_op][operand] = []
+            centers_out[basis_op][operand] = []
+
+            for pk in period_keys:
+                offset, e1, e2 = _plane(feats[pk])
+                # Everything is in raw activation-projection coords (x·e1, x·e2): points, arrows
+                # (unit directions from the activation-space zero) and the circle centre all share
+                # the origin, so an off-zero circle centre (offset projected) is visible.
+                centers_out[basis_op][operand].append(
+                    [round(float(offset @ e1), 4), round(float(offset @ e2), 4)]
+                )
+                for op in op_list:
+                    x = acts[op][grid_key]
+                    coords = np.stack([x @ e1, x @ e2], axis=1)
+                    points_out[basis_op][operand][op].append(_b64(coords))
+
+                # Subcomponent arrows for this plot (only those clearing the floor).
+                keys = [(p, c) for (p, c) in union if p in projs]
+                if keys:
+                    dirs = np.stack([sub_dir[k] for k in keys])
+                    coords, inplane = _unit_projection(dirs, e1, e2)
+                    mask = inplane >= arrow_floor
+                    ids = [sub_id[keys[i]] for i in np.nonzero(mask)[0]]
+                else:
+                    ids, coords, inplane, mask = (
+                        [],
+                        np.zeros((0, 2), np.float32),
+                        np.zeros(0),
+                        np.zeros(0, bool),
+                    )
+                kept_subs.update(ids)
+                subcomp_out[basis_op][operand].append(
+                    {"ids": ids, "xy": _b64(coords[mask]), "norm": _b64(inplane[mask])}
+                )
+
+                # Neuron arrows: read rows (gate/up) for input operands, write columns (down) for
+                # the result — unit-normalised, floor-pruned, per proj.
+                per_proj: dict[str, Any] = {}
+                for proj in projs:
+                    w = weights[proj]  # [d_out, d_in]
+                    ndirs = w if proj != "down_proj" else w.T  # neuron dir per row
+                    coords, inplane = _unit_projection(ndirs, e1, e2)
+                    mask = inplane >= arrow_floor
+                    per_proj[proj] = {
+                        "ids": [int(i) for i in np.nonzero(mask)[0]],
+                        "xy": _b64(coords[mask]),
+                        "norm": _b64(inplane[mask]),
+                    }
+                neurons_out[basis_op][operand].append(per_proj)
+
+    # Inner-activation (a, b) grids for the kept subcomponents, one stack per task (click panel).
+    kept = sorted(kept_subs)
+    kept_pos = {sid: i for i, sid in enumerate(kept)}
+    inner: dict[str, str] = {}
+    for op in op_list:
+        stack = np.zeros((len(kept), n, n), dtype=np.float32)
+        for sid in kept:
+            proj, c = union[sid]
+            v, _ = uv[proj]
+            vn = v[:, c].astype(np.float32)
+            vn = vn / max(float(np.linalg.norm(vn)), 1e-12)
+            src = acts[op]["swiglu"] if proj == "down_proj" else acts[op]["mlp_input"]
+            stack[kept_pos[sid]] = (src @ vn).reshape(n, n)
+        inner[op] = _b64(stack)
+
+    # Per-task CI (a, b) grid per kept subcomponent (for the "CI of selected" point colouring),
+    # read from the inner-activations TSVs' `ci` column. Empty unless every task has it.
+    kept_keys = {union[sid] for sid in kept}
+    ci_by_op: dict[str, str] = {}
+    for op in op_list:
+        grids = _read_ci_grids(data_dir / f"inner_activations_{op}.tsv", kept_keys, n)
+        if not grids:
+            ci_by_op = {}
+            break
+        stack = np.stack([grids[union[sid]] for sid in kept]) if kept else np.zeros((0, n, n))
+        ci_by_op[op] = _b64(stack)
+    logger.info(
+        f"CI colour data: {'present' if ci_by_op else 'absent (rerun collect_inner_activations)'}"
+    )
+
+    a_grid = np.repeat(np.arange(1, n + 1), n).astype(np.int32)
+    b_grid = np.tile(np.arange(1, n + 1), n).astype(np.int32)
+    payload = {
+        "meta": {
+            "tasks": op_list,
+            "n": n,
+            "layer": int(layer),
+            "symbol": {op: op_symbol(op) for op in op_list},
+            "operands": list(_OPERANDS),
+            "arrow_floor": arrow_floor,
+            "task_mods": task_mods,
+            "has_ci": bool(ci_by_op),
+            "space": {op: bases[op]["space"] for op in op_list},
+            "a": [int(v) for v in a_grid],
+            "b": [int(v) for v in b_grid],
+            "result": {
+                op: [int(_RESULT[op](int(a), int(b))) for a, b in zip(a_grid, b_grid, strict=True)]
+                for op in op_list
+            },
+        },
+        "periods": periods_out,
+        "points": points_out,
+        "centers": centers_out,
+        "subcomp": subcomp_out,
+        "neurons": neurons_out,
+        "subcomp_list": [
+            {
+                "id": sid,
+                "proj": union[sid][0],
+                "c": union[sid][1],
+                "label": f"{union[sid][0][0]}{union[sid][1]}",
+            }
+            for sid in kept
+        ],
+        "subcomp_pos": {str(sid): kept_pos[sid] for sid in kept},
+        "inner": inner,
+        "ci": ci_by_op,
+    }
+
+    out_dir = (
+        Path(output_dir).expanduser() if output_dir else analysis_dir(run_dir) / "fourier_scatter"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "data.js").write_text(
+        f"window.PD_DATA = {json.dumps(payload, separators=(',', ':'))};\n"
+    )
+    assert _APP_TEMPLATE.exists(), f"app template missing: {_APP_TEMPLATE}"
+    (out_dir / "index.html").write_text(_APP_TEMPLATE.read_text())
+
+    size_mb = (out_dir / "data.js").stat().st_size / 1e6
+    logger.info(
+        f"wrote fourier-scatter applet ({', '.join(op_list)}; {len(kept)} kept subcomps) "
+        f"→ {out_dir} (data.js {size_mb:.1f} MB)"
+    )
+    return out_dir
+
+
+if __name__ == "__main__":
+    fire.Fire(build_fourier_scatter)

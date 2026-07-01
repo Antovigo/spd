@@ -159,6 +159,19 @@ def load_component_uv(
     }
 
 
+def load_target_mlp_weights(
+    checkpoint: Path, layer: int, projs: tuple[str, ...]
+) -> dict[str, NDArray[np.float32]]:
+    """`proj -> W [d_out, d_in]`, the frozen target-model MLP weight, read via mmap (no forward).
+
+    A neuron's read direction is a row of the gate/up weight (`[d_int, d_model]`); its write
+    direction is a column of the down weight (`[d_model, d_int]`).
+    """
+    sd = torch.load(checkpoint, map_location="cpu", mmap=True, weights_only=True)
+    prefix = f"target_model.model.layers.{layer}.mlp"
+    return {proj: sd[f"{prefix}.{proj}.weight"].float().numpy() for proj in projs}
+
+
 @dataclass(frozen=True)
 class LoadedRun:
     model: ComponentModel
