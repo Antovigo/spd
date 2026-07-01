@@ -4,9 +4,10 @@ For each canonical period of a chosen **basis task** (add / sub / mult) and **op
 input operand `a`, second input operand `b`, or the output `result`), the applet scatters the
 activations of a chosen **activation task** projected onto that period's 2D Fourier plane — so you
 can e.g. plot subtraction activations on addition's basis. One plot per period, side by side.
-Points colour by `a`, `b`, or `result`, either raw (a linear ramp) or — with a `mod` + `offset`
-form like the subspace-scatter applet — by `(value − offset) mod m` (or the multiplicative phase
-for a log task) on a cyclic wheel; scroll to zoom, drag to pan.
+Points colour (viridis) by `a`, `b`, `a+b`, `a-b`, `a×b`, the base model's **accuracy**
+(P of the correct answer token, from the shared `arithmetic_map`), or the **selected
+subcomponent's CI** — the arithmetic ones optionally reduced by a `mod` + `offset` form (like the
+subspace-scatter applet) to `(value − offset) mod m`; scroll to zoom, drag to pan.
 
 Everything is in **raw activation-projection coordinates** (`x·e1, x·e2`): the points, the
 subcomponent **unit** direction arrows (which emanate from the activation-space zero `(0,0)`), and
@@ -56,7 +57,9 @@ from param_decomp_lab.scripts.validation.common import (
 
 _APP_TEMPLATE = Path(__file__).with_name("fourier_scatter_app.html")
 _CANDIDATE_OPS = ("add", "sub", "mult")
-_RESULT = {"add": lambda a, b: a + b, "sub": lambda a, b: a - b, "mult": lambda a, b: a * b}
+# map_arithmetic condition (in the shared arithmetic_map/results.tsv) whose prompt symbol matches
+# each op, for the "model accuracy" (P of the correct answer token) colour option.
+_ACCURACY_CONDITION = {"add": "digit_add_plus", "sub": "digit_sub_minus", "mult": "digit_mul_times"}
 # operand -> (basis side in coordinates_<op>.json, feature variable, activation grid, subcomp
 # projs / neuron proj set). Input operands live in the post-RMSNorm MLP input and use the gate/up
 # read (V) directions; the result lives in the MLP output and uses the down write (U) directions.
@@ -96,6 +99,29 @@ def _read_ci_grids(
             if key in grids:
                 grids[key][int(row["a"]) - 1, int(row["b"]) - 1] = float(row["ci"])
     return grids
+
+
+def _accuracy_by_op(
+    op_list: list[str], a_grid: NDArray[np.integer], b_grid: NDArray[np.integer]
+) -> dict[str, list[float]]:
+    """Per-op P(correct answer token) over the (a, b) grid, read from the shared
+    `arithmetic_map/results.tsv` and aligned to the applet's point order via `(a, b)` lookup.
+    Empty for ops whose condition is absent (the accuracy colour option is then hidden)."""
+    results = PARAM_DECOMP_OUT_DIR / "arithmetic_map" / "results.tsv"
+    if not results.exists():
+        return {}
+    wanted = {_ACCURACY_CONDITION[op]: op for op in op_list if op in _ACCURACY_CONDITION}
+    p: dict[str, dict[tuple[int, int], float]] = {op: {} for op in wanted.values()}
+    with results.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            op = wanted.get(row["condition"])
+            if op is not None:
+                p[op][(int(row["a"]), int(row["b"]))] = float(row["p_correct"])
+    return {
+        op: [round(grid[(int(a), int(b))], 4) for a, b in zip(a_grid, b_grid, strict=True)]
+        for op, grid in p.items()
+        if grid
+    }
 
 
 def _plane(
@@ -334,6 +360,12 @@ def build_fourier_scatter(
 
     a_grid = np.repeat(np.arange(1, n + 1), n).astype(np.int32)
     b_grid = np.tile(np.arange(1, n + 1), n).astype(np.int32)
+
+    acc_by_op = _accuracy_by_op(op_list, a_grid, b_grid)
+    logger.info(
+        f"model-accuracy colour data present for: {', '.join(sorted(acc_by_op)) or 'no task'}"
+    )
+
     payload = {
         "meta": {
             "tasks": op_list,
@@ -344,13 +376,11 @@ def build_fourier_scatter(
             "arrow_floor": arrow_floor,
             "task_mods": task_mods,
             "has_ci": bool(ci_by_op),
+            "has_accuracy": bool(acc_by_op),
             "space": {op: bases[op]["space"] for op in op_list},
             "a": [int(v) for v in a_grid],
             "b": [int(v) for v in b_grid],
-            "result": {
-                op: [int(_RESULT[op](int(a), int(b))) for a, b in zip(a_grid, b_grid, strict=True)]
-                for op in op_list
-            },
+            "accuracy": acc_by_op,
         },
         "periods": periods_out,
         "points": points_out,

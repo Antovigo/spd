@@ -62,12 +62,13 @@ _APP_TEMPLATE = Path(__file__).with_name("neuron_connection_explorer_app.html")
 def _conn_vector(
     proj: str, c: int, uv: dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]
 ) -> NDArray[np.float32]:
-    """Per-neuron connection strength of subcomponent `c` (V-unit normalized)."""
+    """Unit-normalised per-neuron connection direction of subcomponent `c`: the read direction
+    `V[:,c]` (down) or write direction `U[c,:]` (gate/up), each scaled to L2 norm 1. So an edge
+    value is that neuron's share of the subcomponent's connection energy (∑_j w² = 1) and one
+    threshold / colour ramp means the same on read and write sides."""
     v, u = uv[proj]
-    v_norm = float(np.linalg.norm(v[:, c]))
-    if proj == "down_proj":  # post-SwiGLU read weights V[:,c]/||V_c||
-        return v[:, c] / max(v_norm, 1e-12)
-    return u[c, :] * v_norm  # pre-SwiGLU write weights U[c,:]*||V_c||
+    vec = v[:, c] if proj == "down_proj" else u[c, :]
+    return vec / max(float(np.linalg.norm(vec)), 1e-12)
 
 
 def _ci_grids(

@@ -85,7 +85,7 @@ function viridis(t) {
 // ---- DOM refs -----------------------------------------------------------------------------
 const el = id => document.getElementById(id);
 const tooltip = el("tooltip");
-const sel = { actTask: null, basisTask: null, operand: null, colorBy: "result", mod: 1, offset: 0, overlay: "subcomponents", neuronProj: null, thr: 0.3 };
+const sel = { actTask: null, basisTask: null, operand: null, colorBy: "a+b", mod: 1, offset: 0, overlay: "subcomponents", neuronProj: null, thr: 0.3 };
 
 function fill(selectEl, values, labels) {
   selectEl.innerHTML = "";
@@ -95,8 +95,10 @@ function fill(selectEl, values, labels) {
 fill(el("actTask"), D.meta.tasks);
 fill(el("basisTask"), D.meta.tasks);
 fill(el("operand"), D.meta.operands, D.meta.operands.map(o => ({ a: "first operand (a)", b: "second operand (b)", result: "result" }[o])));
-fill(el("colorBy"), D.meta.has_ci ? ["a", "b", "result", "ci"] : ["a", "b", "result"],
-  D.meta.has_ci ? ["a", "b", "result", "CI (selected)"] : ["a", "b", "result"]);
+const cbVals = ["a", "b", "a+b", "a-b", "a×b"], cbLabels = ["a", "b", "a+b", "a-b", "a×b"];
+if (D.meta.has_accuracy) { cbVals.push("accuracy"); cbLabels.push("model accuracy"); }
+if (D.meta.has_ci) { cbVals.push("ci"); cbLabels.push("CI (selected)"); }
+fill(el("colorBy"), cbVals, cbLabels);
 sel.actTask = D.meta.tasks[0]; sel.basisTask = D.meta.tasks[0]; sel.operand = D.meta.operands[0];
 el("actTask").value = sel.actTask; el("basisTask").value = sel.basisTask; el("operand").value = sel.operand;
 el("colorBy").value = sel.colorBy;
@@ -122,7 +124,15 @@ function colorInfo() {
     const stack = ciCache(sel.actTask), pos = D.subcomp_pos[String(SELECTED)];
     return { vals: stack.subarray(pos * N * N, (pos + 1) * N * N), cyclic: false, lo: 0, span: 1 };
   }
-  const base = sel.colorBy === "result" ? D.meta.result[sel.actTask] : D.meta[sel.colorBy];
+  if (sel.colorBy === "accuracy") {
+    // P(correct answer token) of the base model for the active task's operation (mod/offset ignored).
+    const acc = (D.meta.accuracy || {})[sel.actTask];
+    return acc ? { vals: acc, cyclic: false, lo: 0, span: 1 } : { vals: null };  // no data → grey
+  }
+  // colour value computed directly from the operand grids, independent of the active task's op.
+  const A = D.meta.a, B = D.meta.b;
+  const base = { "a": A, "b": B, "a+b": A.map((v, i) => v + B[i]), "a-b": A.map((v, i) => v - B[i]),
+    "a×b": A.map((v, i) => v * B[i]) }[sel.colorBy];
   const m = sel.mod, off = sel.offset;
   if (m <= 1) {
     let lo = Infinity, hi = -Infinity;
@@ -133,7 +143,8 @@ function colorInfo() {
     const lr = Math.log(m);
     return { vals: base.map(v => (v > 0 ? ((((Math.log(v) - off) / lr) % 1) + 1) % 1 : 0)), cyclic: true, lo: 0, span: 1 };
   }
-  return { vals: base.map(v => (((v - off) % m) + m) % m), cyclic: true, lo: 0, span: m };
+  // residue ∈ {0 … m−1}; map the reachable max (m−1) to the top of the viridis scale.
+  return { vals: base.map(v => (((v - off) % m) + m) % m), cyclic: false, lo: 0, span: m - 1 };
 }
 
 function populateMods() {
@@ -285,7 +296,7 @@ function draw(st) {
     const ex = A.xy[i][0] * st.arrowScale, ey = A.xy[i][1] * st.arrowScale;
     const e = toScreen(st, ex, ey);
     const highlighted = SELECTED !== null && A.meta[i].kind === "sub" && A.meta[i].id === SELECTED;
-    ctx.strokeStyle = A.meta[i].kind === "sub" ? (highlighted ? "#000" : "#c0392b") : "#2c7fb8";
+    ctx.strokeStyle = highlighted ? "#000" : "#ff2020";  // bright red, stands out on viridis
     ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = highlighted ? 3.5 : 2.2;
     ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
     const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = highlighted ? 13 : 10, hw = 0.5;

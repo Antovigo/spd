@@ -370,10 +370,11 @@ args:
 - `--output-dir`
 
 CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
-server/CDN/GPU) into `<run_dir>/analysis/neuron_explorer_<op>/`. Connection strength uses the
-V-unit normalization (V→V/||V||, U→U·||V||): gate/up (pre-SwiGLU) write strength to neuron
-`j` is `U[c,j]·||V_c||`; down (post-SwiGLU) read strength is `V[j,c]/||V_c||`. The user picks
-`(a, b)` and a connection threshold; the page shows active gate/up subcomponents (left, up on
+server/CDN/GPU) into `<run_dir>/analysis/neuron_explorer_<op>/`. Each subcomponent's connection
+vector is **unit-normalised** (`V[:,c]/||V_c||` for down reads, `U[c,:]/||U_c||` for gate/up
+writes), so an edge value is that neuron's share of the subcomponent's connection energy
+(`∑_j w²=1`) and one threshold / colour ramp means the same on the read and write sides. The user
+picks `(a, b)` and a connection threshold; the page shows active gate/up subcomponents (left, up on
 top, period-sorted), the neurons they connect above threshold (center, sorted by strongest
 gate/up driver then strength), and active down subcomponents (right), with lines coloured by
 connection sign (red +, blue −). A "hover shows" toggle switches the subcomponent heatmap
@@ -495,12 +496,11 @@ args:
 
 CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
 server/CDN/GPU) into `<run_dir>/analysis/neuron_investigator_<op>/`. The **interaction score**
-between a subcomponent and a neuron is the std, over the target grid, of what the subcomponent
-writes to / reads from that neuron (always ≥ 0): gate/up (pre-SwiGLU, *write*)
-`std(inner_act_c)·||V_c||·|U[c,j]|` (std of the contribution `(x·V_c)·U[c,j]`); down
-(post-SwiGLU, *read*) `std_grid(silu(gate_j)·up_j)·|V[j,c]|/||V_c||` (the neuron's post-SwiGLU
-activation std × unit read weight) — two slightly different metrics for input vs output, sharing
-a scale. The left half is a neuron × subcomponent heatmap. Subcomponents (columns) are ordered
+between a subcomponent and a neuron is the **fraction of the target's variance** over the grid that
+their rank-1 term explains (always ≥ 0), so write and read sides are on one comparable scale:
+gate/up (pre-SwiGLU, *write*) `std((x·V_c)·U[c,j]) / std(neuron j's own gate/up preactivation)`;
+down (post-SwiGLU, *read*) `std(silu(gate_j)·up_j · V[j,c]) / std(the down read total)` =
+`std(silu(gate_j)·up_j)·|V[j,c]|/||V_c|| / std(inner_act_c)`. The left half is a neuron × subcomponent heatmap. Subcomponents (columns) are ordered
 by **period group, then matrix** (gate > up > down), then the confidence the period is correct
 (the chosen fit's CV R²). Period groups are additive (`p10`) < multiplicative (`×1.27`, for
 mult's log-periodic components) < none (`—`), via `read_subcomp_period_groups` — with period
@@ -648,16 +648,21 @@ basis. The plane is the orthonormalised `(cos_vec, sin_vec)`; when the sin axis 
 `e1` — an arbitrary but informative viewing axis, as in Feucht et al. Everything is in **raw
 projection coords** (`x·e1, x·e2`): points, the subcomponent arrows (which start at the
 **activation-space zero** `(0,0)`), and a crosshair+ring marker at the Fourier circle centre (the
-projected `offset`) share one origin, so an off-zero centre is visible. Points colour by `a` / `b`
-/ result, either raw or by `(value − offset) mod m` / the multiplicative log phase via a `mod` +
-`offset` form (options from the task's `subcomp_periods`, like the subspace-scatter applet); a
-further **CI (selected)** colour option (per task: shown when some `inner_activations_<op>.tsv`
-carries a `ci` column, greyed for tasks lacking it or for a subcomponent absent from a task's TSV)
-paints each point by the currently-selected subcomponent's causal importance on that prompt. All
-colouring uses a **viridis 0→1** map with a single shared legend. Colour/mod/offset changes and
-selecting a new subcomponent recolour in place (zoom preserved). Scroll zooms, drag pans. The **unit** subcomponent directions (gate/up `V` for
-input operands, down `U` for the result) are drawn as arrows scaled to the point cloud; only those
-whose in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖; clicking a
+projected `offset`) share one origin, so an off-zero centre is visible. Points colour by `a`, `b`,
+`a+b`, `a-b`, `a×b` (computed from the operand grids, independent of the active task), each either
+raw or by `(value − offset) mod m` via a `mod` + `offset` form (options from the task's
+`subcomp_periods`, like the subspace-scatter applet); a **model accuracy** option (shown when the
+shared `arithmetic_map/results.tsv` covers a task) paints each point by the base model's P(correct
+answer token) for the active task's operation; and a **CI (selected)** option (per task: shown when
+some `inner_activations_<op>.tsv` carries a `ci` column, greyed for tasks lacking it or for a
+subcomponent absent from a task's TSV) paints each point by the currently-selected subcomponent's
+causal importance on that prompt. All
+colouring uses a **viridis 0→1** map with a single shared legend (for a `mod m` residue the scale
+runs 0…`m−1`, the reachable max). Colour/mod/offset changes and selecting a new subcomponent
+recolour in place (zoom preserved). Scroll zooms, drag pans. The **unit** subcomponent directions
+(gate/up `V` for input operands, down `U` for the result) are drawn as bright-red arrows (same
+colour for subcomponents and the neuron overlay) scaled to the point cloud; only those whose
+in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖; clicking a
 subcomponent arrowhead opens its inner-activation `(a, b)` heatmaps (one per task) at the bottom.
 An **overlay** toggle swaps subcomponents for **individual neurons'** directions — gate/up read
 rows or the down write columns of the frozen target weight (a neuron-matrix dropdown) — so

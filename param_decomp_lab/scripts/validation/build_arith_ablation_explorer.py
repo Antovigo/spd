@@ -87,8 +87,7 @@ def _detect_period(kl: NDArray[np.float64], n: int) -> dict[str, Any]:
     return {"axis": best_axis, "period": period, "strength": strength}
 
 
-def _b64_i8(arr: NDArray[np.float64]) -> str:
-    scale = float(np.abs(arr).max()) or 1.0
+def _b64_i8(arr: NDArray[np.float64], scale: float) -> str:
     q = np.clip(np.rint(arr / scale * 127), -127, 127).astype(np.int8)
     return base64.b64encode(np.ascontiguousarray(q).tobytes()).decode("ascii")
 
@@ -145,7 +144,7 @@ def build_arith_ablation_explorer(source: str, output_dir: str | None = None) ->
                 "grids": {
                     "ci": _b64_u8(np.clip(ci[i], 0, 1), 1.0),
                     "kl": _b64_u8(kl[i], kl_scale),
-                    "inner": _b64_i8(inner[i]),
+                    "inner": _b64_i8(inner[i], inner_scale),
                 },
             }
         )

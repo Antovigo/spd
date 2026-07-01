@@ -256,7 +256,7 @@ matrix.addEventListener("click", e => {
   drawMatrix(); drawRight();
 });
 
-// ---- right: selected pair heatmaps (2×2 grid filling the panel, with colour scales) -----
+// ---- right: selected pair heatmaps (reflowing 4/6-cell panel, with colour scales) -------
 const BAR_W = 64;  // colour-bar width; heatmap takes the rest of the half-panel column
 const grids = document.getElementById("grids"), selTitle = document.getElementById("sel-title");
 function heatRow(title, side, barW) {

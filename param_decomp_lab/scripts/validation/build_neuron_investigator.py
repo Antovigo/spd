@@ -216,14 +216,19 @@ def build_neuron_investigator(
     alive_keys = {(a.proj, a.component) for a in alive}
     inner_grids = _inner_grids(data_dir / f"inner_activations_{op}.tsv", alive_keys, n)
 
-    # Interaction score [n_subcomps, d_int], ≥ 0: the std over the target grid of what each
-    # subcomponent writes to / reads from each neuron.
+    # Interaction score [n_subcomps, d_int], ≥ 0: the fraction of the *target's* variance over the
+    # grid that this subcomponent↔neuron rank-1 term explains, so writes (into a neuron preact) and
+    # reads (from a neuron into a subcomponent inner act) are on one comparable scale. Write term
+    # std = std((x·V_c)·U[c,j]) ÷ std(neuron j's own gate/up preactivation); read term std =
+    # std(swiglu_j·V[j,c]) ÷ std(the down read total) = read magnitude ÷ std(inner_act_c).
     d_int = up_grid.shape[-1]
-    # post-SwiGLU activation std per neuron (the read magnitude for down subcomponents).
-    h = _silu(gate_grid.reshape(n * n, d_int).astype(np.float32)) * up_grid.reshape(
-        n * n, d_int
-    ).astype(np.float32)
-    neuron_h_std = h.std(axis=0)  # [d_int]
+    gate_flat = gate_grid.reshape(n * n, d_int).astype(np.float32)
+    up_flat = up_grid.reshape(n * n, d_int).astype(np.float32)
+    neuron_h_std = (_silu(gate_flat) * up_flat).std(axis=0)  # [d_int]; post-SwiGLU read magnitude
+    preact_std = {
+        "gate_proj": np.maximum(gate_flat.std(axis=0), 1e-12),
+        "up_proj": np.maximum(up_flat.std(axis=0), 1e-12),
+    }
     score = np.zeros((len(alive), d_int), dtype=np.float32)
     # Signed per-neuron write weight ||V_c||·U[c,j] for input (gate/up) subcomponents (0 for reads):
     # the subcomponent's contribution to neuron j is inner_act_c (normalised) · this weight.
@@ -231,11 +236,12 @@ def build_neuron_investigator(
     for i, a in enumerate(alive):
         v, u = uv[a.proj]
         v_norm = max(float(np.linalg.norm(v[:, a.component])), 1e-12)
-        if a.proj == "down_proj":  # read: neuron-activation std × unit read weight |V[j,c]|/||V_c||
-            score[i] = neuron_h_std * (np.abs(v[:, a.component]) / v_norm)
-        else:  # write: std of (x·V_c)·U_c[j] over the grid = std(inner_act_c) · ||V_c|| · |U[c,j]|
+        inner_std = max(float(inner_grids[(a.proj, a.component)].std()), 1e-12)
+        if a.proj == "down_proj":  # read: neuron contribution to inner_c ÷ std(inner_c)
+            score[i] = neuron_h_std * (np.abs(v[:, a.component]) / v_norm) / inner_std
+        else:  # write: contribution to neuron j's preact ÷ std of that neuron's preactivation
             write_weight[i] = v_norm * u[a.component, :]
-            score[i] = float(inner_grids[(a.proj, a.component)].std()) * np.abs(write_weight[i])
+            score[i] = inner_std * np.abs(write_weight[i]) / preact_std[a.proj]
 
     # Vertical axis: top-K neurons by total interaction score across every subcomponent / matrix.
     total = score.sum(axis=0)  # [d_int]
@@ -243,7 +249,7 @@ def build_neuron_investigator(
     logger.info(
         f"{len(alive)} subcomponents, top {len(neuron_ids)}/{d_int} neurons by total interaction score"
     )
-    del h  # free the [N*N, d_int] post-SwiGLU buffer before the per-op panel pass
+    del gate_flat, up_flat  # free the [N*N, d_int] buffers before the per-op panel pass
 
     # Signed score matrix [subcomp, neuron]: write (gate/up) +, read (down) − → RdBu.
     signed = score[:, neuron_ids] * np.where(is_read, -1.0, 1.0)[:, None]

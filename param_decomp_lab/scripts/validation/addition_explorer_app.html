@@ -113,10 +113,11 @@
   </section>
 
   <section class="view" id="view-bases">
-    <p class="note">Each component's "base" is the integer period of its most periodic axis
-      (FFT of the causal-importance marginal), kept only when its periodicity strength clears
-      the slider. Vertical stripes ⇒ periodic in <b>a</b>, horizontal ⇒ <b>b</b>, diagonal ⇒
-      <b>a+b</b> or <b>a−b</b>. Click a bar to filter the gallery.</p>
+    <p class="note">Each component's "base" is the smallest residue modulus <b>m</b> whose
+      class-variance η²(m) of the causal-importance grid reaches the plateau, kept only when
+      its periodicity strength clears the slider. Vertical stripes ⇒ periodic in <b>a</b>,
+      horizontal ⇒ <b>b</b>, diagonal ⇒ <b>a+b</b> or <b>a−b</b>. Click a bar to filter the
+      gallery.</p>
     <div class="row">
       <div class="box"><h3>Components per base</h3><canvas id="baseHist" class="chart" width="520" height="300"></canvas></div>
       <div class="box"><h3>Periodicity by axis</h3><canvas id="axisHist" class="chart" width="360" height="300"></canvas></div>
@@ -150,7 +151,7 @@
       <div class="grp muted">click the reference grid to set the cell</div>
     </div>
     <div class="row">
-      <div class="box"><h3>Coverage map (any component active)</h3>
+      <div class="box"><h3>Coverage map (number of active components)</h3>
         <canvas id="insMap" class="chart cellgrid" width="300" height="300"></canvas>
         <div class="muted" style="font-size:11px">x = a, y = b, origin bottom-left</div></div>
       <div class="box" style="flex:1"><h3 id="insTitle">Active components</h3><div id="insBody"></div></div>

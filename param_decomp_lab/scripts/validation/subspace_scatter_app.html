@@ -86,7 +86,7 @@ function colorArr(idx) {
 const colorLabel = () => {
   const m = +elMod.value, off = +elOffset.value || 0;
   if (m <= 1) return elColor.value;
-  if (modKind() === "log") return `${elColor.value} phase ×${m}`;
+  if (modKind() === "log") return `${elColor.value} phase ×${m}` + (off ? ` (−${off})` : "");
   return (off ? `(${elColor.value}−${off})` : elColor.value) + " mod " + m;
 };
 
