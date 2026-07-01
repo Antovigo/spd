@@ -115,6 +115,8 @@ const SIZE = 330;
 
 function modKind() { return (D.meta.task_mods[sel.actTask] || { kind: "additive" }).kind; }
 
+const fmtVal = x => Number.isFinite(x) ? (Number.isInteger(x) ? String(x) : (+x).toFixed(3)) : "—";
+
 // Colour values per point: raw (mod=none) → linear ramp over the range; else `(n − offset) mod m`
 // (additive) or the multiplicative phase `frac((log n − offset)/log r)` (log task) → cyclic wheel.
 function colorInfo() {
@@ -122,12 +124,13 @@ function colorInfo() {
     // colour by the selected subcomponent's causal importance on each prompt (mod/offset ignored).
     if (SELECTED === null || !D.ci[sel.actTask]) return { vals: null };  // nothing selected / no CI for this task → grey
     const stack = ciCache(sel.actTask), pos = D.subcomp_pos[String(SELECTED)];
-    return { vals: stack.subarray(pos * N * N, (pos + 1) * N * N), cyclic: false, lo: 0, span: 1 };
+    const v = stack.subarray(pos * N * N, (pos + 1) * N * N);
+    return { vals: v, raw: v, cyclic: false, lo: 0, span: 1 };
   }
   if (sel.colorBy === "accuracy") {
     // P(correct answer token) of the base model for the active task's operation (mod/offset ignored).
     const acc = (D.meta.accuracy || {})[sel.actTask];
-    return acc ? { vals: acc, cyclic: false, lo: 0, span: 1 } : { vals: null };  // no data → grey
+    return acc ? { vals: acc, raw: acc, cyclic: false, lo: 0, span: 1 } : { vals: null };  // no data → grey
   }
   // colour value computed directly from the operand grids, independent of the active task's op.
   const A = D.meta.a, B = D.meta.b;
@@ -137,14 +140,14 @@ function colorInfo() {
   if (m <= 1) {
     let lo = Infinity, hi = -Infinity;
     for (const v of base) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-    return { vals: base, cyclic: false, lo, span: (hi - lo) || 1 };
+    return { vals: base, raw: base, cyclic: false, lo, span: (hi - lo) || 1 };
   }
   if (modKind() === "log") {
     const lr = Math.log(m);
-    return { vals: base.map(v => (v > 0 ? ((((Math.log(v) - off) / lr) % 1) + 1) % 1 : 0)), cyclic: true, lo: 0, span: 1 };
+    return { vals: base.map(v => (v > 0 ? ((((Math.log(v) - off) / lr) % 1) + 1) % 1 : 0)), raw: base, cyclic: true, lo: 0, span: 1 };
   }
   // residue ∈ {0 … m−1}; map the reachable max (m−1) to the top of the viridis scale.
-  return { vals: base.map(v => (((v - off) % m) + m) % m), cyclic: false, lo: 0, span: m - 1 };
+  return { vals: base.map(v => (((v - off) % m) + m) % m), raw: base, cyclic: false, lo: 0, span: m - 1 };
 }
 
 function populateMods() {
@@ -333,6 +336,15 @@ function attachInteraction(st) {
       tooltip.style.display = "block"; tooltip.style.left = (ev.clientX + 10) + "px"; tooltip.style.top = (ev.clientY + 10) + "px";
       tooltip.textContent = `${hit.meta.label}  ‖proj‖=${hit.norm.toFixed(3)}`;
       c.style.cursor = "pointer";
+      return;
+    }
+    const j = pointAt(st, ev.offsetX, ev.offsetY);
+    if (j >= 0) {
+      const raw = st.color.raw, v = raw ? raw[j] : NaN;
+      const prompt = `${D.meta.a[j]}${D.meta.symbol[sel.actTask]}${D.meta.b[j]}=`;
+      tooltip.style.display = "block"; tooltip.style.left = (ev.clientX + 10) + "px"; tooltip.style.top = (ev.clientY + 10) + "px";
+      tooltip.textContent = `${fmtVal(v)} (${prompt})`;
+      c.style.cursor = "default";
     } else { tooltip.style.display = "none"; c.style.cursor = "default"; }
   });
   c.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
@@ -343,6 +355,16 @@ function attachInteraction(st) {
       if (sel.colorBy === "ci") recolor(); else plots.forEach(draw);  // CI colouring tracks the selection
     }
   });
+}
+
+function pointAt(st, px, py) {
+  const p = st.points; let best = -1, bestd = 6;  // nearest point within a few pixels → its index
+  for (let i = 0; i < p.length; i += 2) {
+    const s = toScreen(st, p[i], p[i + 1]);
+    const d = Math.hypot(s[0] - px, s[1] - py);
+    if (d < bestd) { bestd = d; best = i >> 1; }
+  }
+  return best;
 }
 
 function arrowAt(st, px, py) {

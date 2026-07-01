@@ -659,7 +659,8 @@ subcomponent absent from a task's TSV) paints each point by the currently-select
 causal importance on that prompt. All
 colouring uses a **viridis 0→1** map with a single shared legend (for a `mod m` residue the scale
 runs 0…`m−1`, the reachable max). Colour/mod/offset changes and selecting a new subcomponent
-recolour in place (zoom preserved). Scroll zooms, drag pans. The **unit** subcomponent directions
+recolour in place (zoom preserved). Scroll zooms, drag pans. Hovering a point shows its selected
+colour value and prompt (`<value> (a<sym>b=)`). The **unit** subcomponent directions
 (gate/up `V` for input operands, down `U` for the result) are drawn as bright-red arrows (same
 colour for subcomponents and the neuron overlay) scaled to the point cloud; only those whose
 in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖; clicking a
