@@ -1,18 +1,22 @@
 """Build a GPU-free HTML applet: the activations in the basis of Feucht's fitted Fourier probes.
 
-Projects the collected resid-layer-output activations (the `1..max_value` `a+b=` grid) onto each
-fitted probe's **predicted `(cos, sin)`** plane (`w_cos·x + b_cos`, `w_sin·x + b_sin`) — a clean
-feature traces the unit circle. One plot per period for a chosen **basis variable** (`a`, `b`, or
-`a+b`); colour the points by `a`, `b`, or `a+b`, optionally reduced to `(value − offset) mod m`.
-Scroll to zoom, drag to pan. When the sin axis is degenerate (period 2) the 2nd axis falls back to
+For the full-spectrum sweep the applet leads with an **R²-vs-period curve** (one line per variable
+`a` / `b` / `a+b`) — the control: it should spike only at the true periods. Clicking a period draws
+the **scatter** of activations projected onto that probe's **predicted `(cos, sin)`** plane
+(`w_cos·x + b_cos`, `w_sin·x + b_sin`) — a clean feature traces the unit circle, a fake period a
+blob. Colour the points by `a`, `b`, or `a+b`, optionally reduced to `(value − offset) mod m`;
+scroll to zoom, drag to pan. When the sin axis is degenerate (period 2) the 2nd axis falls back to
 the top activation-variance direction ⊥ the cos direction (rescaled so the residue split shows).
+
+A fixed random subset of `n_show` points is shipped per plot (the sweep has hundreds of periods, and
+one scatter shows at a time) to bound `data.js` size / render cost.
 
 Consumes `resid_activations.npz` + `probes.json` from `collect_resid_activations` /
 `fit_fourier_probes`. CPU-only (no forward pass).
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_probe_scatter <probes.json> \
-        [--activations=PATH] [--output-dir=PATH]
+        [--activations=PATH] [--n-show=15000] [--output-dir=PATH]
 
 Output: `<out-dir>/probe_scatter/{index.html,data.js}` (default beside `probes.json`).
 """
@@ -80,13 +84,14 @@ def build_probe_scatter(
     probes_json: str,
     activations: str | None = None,
     output_dir: str | None = None,
+    n_show: int = 15000,
 ) -> Path:
     probes_path = Path(probes_json).expanduser()
     assert probes_path.exists(), f"missing probes json: {probes_path}"
     payload = json.loads(probes_path.read_text())
     probes = payload["probes"]
     variables = payload["variables"]
-    periods = [str(p) for p in payload["periods"]]
+    periods_by_var = {v: [int(p) for p in payload["periods_by_variable"][v]] for v in variables}
 
     npz_path = (
         Path(activations).expanduser() if activations else Path(payload["source"]).expanduser()
@@ -98,34 +103,40 @@ def build_probe_scatter(
     x = grid.reshape(g * g, -1).astype(np.float32)
     aa, bb = np.meshgrid(data["a"].astype(np.int64), data["b"].astype(np.int64), indexing="ij")
     a_flat, b_flat = aa.reshape(-1), bb.reshape(-1)
+    x_mean = x.mean(axis=0, keepdims=True)
+    # one plot is shown at a time (click the R² curve), but the full sweep has hundreds of periods;
+    # ship a fixed random subset of points per plot to bound data.js size + render cost.
+    n_show = min(n_show, g * g)
+    subset = np.sort(np.random.default_rng(0).choice(g * g, size=n_show, replace=False))
 
     points_out: dict[str, list[str]] = {}
     centers_out: dict[str, list[list[float]]] = {}
     r2_out: dict[str, list[float | None]] = {}
     for var in variables:
         points_out[var], centers_out[var], r2_out[var] = [], [], []
-        for pk in periods:
-            plane = _plane(probes[var][pk], x)
-            points_out[var].append(_b64_f16(_project(plane, x)))
-            centers_out[var].append(
-                [round(float(c), 4) for c in _project(plane, x.mean(axis=0, keepdims=True))[0]]
-            )
-            r2s = [
-                probes[var][pk][k] for k in ("r2_cos", "r2_sin") if probes[var][pk][k] is not None
-            ]
+        for period in periods_by_var[var]:
+            probe = probes[var][str(period)]
+            plane = _plane(probe, x)
+            points_out[var].append(_b64_f16(_project(plane, x)[subset]))
+            centers_out[var].append([round(float(c), 4) for c in _project(plane, x_mean)[0]])
+            r2s = [probe[k] for k in ("r2_cos", "r2_sin") if probe[k] is not None]
             r2_out[var].append(round(float(np.mean(r2s)), 4) if r2s else None)
+        logger.info(f"{var}: {len(periods_by_var[var])} periods projected")
 
     out = {
         "meta": {
             "variables": variables,
-            "periods": [int(p) for p in payload["periods"]],
-            "max_value": payload["max_value"],
-            "layer": payload["layer"],
-            "n": g * g,
+            "periods": periods_by_var,
             "r2": r2_out,
+            "canonical": [2, 5, 10, 20, 50, 100],
+            "max_value": payload["max_value"],
+            "max_period": payload["max_period"],
+            "layer": payload["layer"],
+            "n_total": g * g,
+            "n_show": n_show,
         },
-        "a": _b64_i16(a_flat),
-        "b": _b64_i16(b_flat),
+        "a": _b64_i16(a_flat[subset]),
+        "b": _b64_i16(b_flat[subset]),
         "points": points_out,
         "centers": centers_out,
     }

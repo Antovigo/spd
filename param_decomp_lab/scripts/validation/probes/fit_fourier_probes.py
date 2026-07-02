@@ -11,15 +11,21 @@ each an `nn.Linear(d_model, 1)` (bias) optimised by Adam (lr 1e-3) against MSE f
 order, so the split matches theirs). `r2_*` is the held-out (test) R². For period 2 `sin(2πv/2)=0`
 identically, so its sin probe is skipped (`w_sin=0`, `r2_sin=null`).
 
+By default it sweeps Feucht's **full per-variable spectrum** — every period `2..min(v.max()//2,
+max_period)` (`max_period=150`; so `a`,`b` → 2..100, `a+b` → 2..150). This is a control: `R²` should
+spike only at the true periods and stay low elsewhere (a fake period gives a blob, not a circle).
+`--periods` overrides with an explicit shared list.
+
 Consumes `resid_activations.npz` from `collect_resid_activations`. GPU strongly recommended (500
-epochs × 36 probes); pass `--slurm` to submit as a single-GPU job.
+epochs × ~700 probes for the full sweep); pass `--slurm` to submit as a single-GPU job.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.fit_fourier_probes <resid_activations.npz> \
-        [--periods=2,5,10,20,50,100] [--output=PATH] [--slurm ...]
+        [--max-period=150 | --periods=2,5,10,...] [--output=PATH] [--slurm ...]
 
-Output (default `probes.json` beside the npz): metadata + `probes[variable][period] =
-{w_cos, b_cos, w_sin, b_sin, r2_cos, r2_sin}`, the weight vectors `d_model`-long.
+Output (default `probes.json` beside the npz): metadata (`periods_by_variable`, `max_period`) +
+`probes[variable][period] = {w_cos, b_cos, w_sin, b_sin, r2_cos, r2_sin}`, weight vectors
+`d_model`-long.
 """
 
 import json
@@ -42,7 +48,6 @@ _LR = 1e-3
 _EPOCHS = 500
 _TEST_SIZE = 0.2
 _RANDOM_STATE = 42
-_PERIODS = (2, 5, 10, 20, 50, 100)
 
 
 class LinearProbe(nn.Module):
@@ -87,16 +92,17 @@ def _train_probe(
 def fit_fourier_probes(
     resid_activations_npz: str,
     periods: tuple[int, ...] | int | None = None,
+    max_period: int = 150,
     output: str | None = None,
     slurm: bool = False,
     partition: str | None = DEFAULT_PARTITION_NAME,
     gpus: int = 1,
-    slurm_time: str = "1:00:00",
+    slurm_time: str = "2:00:00",
     slurm_mem: str | None = None,
 ) -> Path | None:
     npz_path = Path(resid_activations_npz).expanduser()
     if slurm:
-        argv = [str(npz_path)]
+        argv = [str(npz_path), f"--max-period={max_period}"]
         if periods is not None:
             argv.append(f"--periods={','.join(str(p) for p in _as_tuple(periods))}")
         if output is not None:
@@ -108,7 +114,8 @@ def fit_fourier_probes(
         return None
 
     assert npz_path.exists(), f"missing resid activations: {npz_path}"
-    periods = _as_tuple(periods) if periods is not None else _PERIODS
+    # None → Feucht's full per-variable sweep `2..min(v.max()//2, max_period)`; else a shared list.
+    explicit_periods = _as_tuple(periods) if periods is not None else None
     data = np.load(npz_path)
     grid = data["resid"]  # [G, G, d] fp16, indexed [a-1, b-1]
     g = int(grid.shape[0])
@@ -136,9 +143,16 @@ def fit_fourier_probes(
         torch.cuda.manual_seed_all(_RANDOM_STATE)
 
     probes: dict[str, dict[str, Any]] = {}
+    periods_by_variable: dict[str, list[int]] = {}
     for var_name, values in variables.items():
+        var_periods = (
+            explicit_periods
+            if explicit_periods is not None
+            else tuple(range(2, min(int(values.max()) // 2, max_period) + 1))
+        )
+        periods_by_variable[var_name] = list(var_periods)
         probes[var_name] = {}
-        for period in periods:
+        for period in var_periods:
             entry: dict[str, Any] = {}
             for func_name, func in (("cos", np.cos), ("sin", np.sin)):
                 target = func(2.0 * np.pi * values / period).astype(np.float32)
@@ -155,8 +169,11 @@ def fit_fourier_probes(
                 entry[f"b_{func_name}"] = round(float(b), 6)
                 entry[f"r2_{func_name}"] = r2
             probes[var_name][str(period)] = entry
-            r2s = {fn: probes[var_name][str(period)][f"r2_{fn}"] for fn in ("cos", "sin")}
-            logger.info(f"{var_name} T={period}: {r2s}")
+        r2_cos = [probes[var_name][str(p)]["r2_cos"] for p in var_periods]
+        logger.info(
+            f"{var_name}: {len(var_periods)} periods {var_periods[0]}..{var_periods[-1]}, "
+            f"cos R² max {max(r for r in r2_cos if r is not None):.3f}"
+        )
 
     payload = {
         "model": "meta-llama/Llama-3.1-8B",
@@ -164,7 +181,8 @@ def fit_fourier_probes(
         "max_value": int(data["max_value"]),
         "site": "resid_layer_output",
         "variables": list(variables),
-        "periods": list(periods),
+        "periods_by_variable": periods_by_variable,
+        "max_period": max_period,
         "lr": _LR,
         "epochs": _EPOCHS,
         "test_size": _TEST_SIZE,

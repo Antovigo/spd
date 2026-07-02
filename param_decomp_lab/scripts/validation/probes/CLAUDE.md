@@ -27,14 +27,21 @@ Default artifact dir: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`.
   **500 epochs**, on **raw** (un-standardised) activations. `train_test_split(test_size=0.2,
   random_state=42)`; run order `a` outer / `b` inner matches their prompt order, so the split
   coincides. `r2_*` is the held-out (test) R². Period 2 has `sin≡0` → its sin probe is skipped.
+- **Default = full per-variable sweep**: every `T ∈ 2..min(v.max()//2, max_period)` (`max_period`
+  150; `a`,`b` → 2..100, `a+b` → 2..150), ~700 probes. `--periods` fits an explicit shared list.
 - Closed-form least squares would give a higher R² / tighter circles; we deliberately keep their
-  Adam-500-epochs fit so the results match theirs (e.g. the a+b feature is a fuzzy ring with the
-  characteristic period-20 dip to R²≈0.44–0.50; operands fit much tighter, R²≈0.98).
+  Adam-500-epochs fit so the results match theirs.
 
-## Applet
+## Applet — the control
 
-`build_probe_scatter` projects the collected activations onto each probe's predicted `(cos, sin)`
-plane (a clean feature traces the unit circle). Controls: **basis variable** (which probe defines
-the plane), **colour by** `a` / `b` / `a+b` with **mod** + **offset** (`(value − offset) mod m`,
-scale `0..m-1`), zoom/pan, hover. Vanilla-JS canvas, no CDN — smoke-test with the parent folder's
-`headless_check.py`.
+`build_probe_scatter` leads with an **R²-vs-period curve** (one line per variable). This is the
+control: R² should spike only at the model's true periods. Empirically `a+b` spikes sharply at
+periods 2/5/10 (+a broad 50–100 harmonic hump) and sits at ~0 elsewhere — clicking a spike period
+draws a **circle**, a valley period a **blob**. (`a`/`b` stay high at every period because a single
+operand is ~directly decodable, so any function of it is too; `a+b` is the discriminating variable.)
+
+Clicking a period draws its scatter: the activations projected onto that probe's predicted
+`(cos, sin)` plane. Controls: **basis variable**, **colour by** `a`/`b`/`a+b` with **mod** +
+**offset** (`(value − offset) mod m`, scale `0..m-1`), zoom/pan, hover. A fixed `n_show` random
+subset of points is shipped per plot to bound `data.js`. Vanilla-JS canvas, no CDN — smoke-test
+with the parent folder's `headless_check.py`.
