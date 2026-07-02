@@ -12,10 +12,12 @@ directions of MLP **neurons** or the run's **subcomponents** (dropdown):
 Fig 9c scale: everything is projected onto the **unit-normalised** probe directions `d = w/‖w‖`,
 and the activation cloud is recomputed in that same normalised, mean-centred frame — so an arrow
 `v·d` and a centred activation `x·d − mean` share one scale, and arrows read as increments from the
-ring centre. Neuron write = `down_proj[:, n]·d` (raw, Fig 9c). Subcomponent write = `(U[c]/‖V[:,c]‖)·d`
-(`V[:,c]` the 14336-d input vector) so its scale is comparable to a neuron's. Read arrows are the
-raw read vector projected. Only the top-`top_k` units by projected 2D norm are shipped per plane;
-the applet's threshold slider filters those.
+ring centre. Neuron read/write are the raw gate/up row / down column (Fig 9c). Subcomponents scale
+the residual-space vector by the norm of the component's *other* (14336-d) vector, symmetric across
+read and write: write = `U[c]·‖V[:,c]‖`, read = `V[:,c]·‖U[c]‖`. This is gauge-invariant (a rank-1
+`u vᵀ` is free under `u→αu, v→v/α`) and equals the component's residual move per one std of its
+activation — the same quantity a neuron's raw row/column is, so the two coexist on one scale.
+Only the top-`top_k` units by projected 2D norm are shipped per plane; the threshold slider filters.
 
 Consumes a decomposition `<run>/model_<step>.pth` plus the shared `resid_activations.npz` +
 `probes_<site>.json` (from `collect_resid_activations` / `fit_fourier_probes`; the probes' target
@@ -87,8 +89,10 @@ def _read_candidates(
     """Residual-space read directions `[M, d_model]` + `g`/`u` matrix tag + unit index, gate then up."""
     if kind == "neurons":
         g_dirs, u_dirs = weights["gate_proj"], weights["up_proj"]  # (d_ff, d_model) rows = reads
-    else:
-        g_dirs, u_dirs = uv["gate_proj"][0].T, uv["up_proj"][0].T  # V (d_model, C) -> (C, d_model)
+    else:  # subcomponent read V[:,c] · ‖U[c]‖ (× neuron-space output norm) — symmetric with write
+        (v_g, u_g), (v_u, u_u) = uv["gate_proj"], uv["up_proj"]  # V (d_model, C), U (C, d_ff)
+        g_dirs = (v_g * np.linalg.norm(u_g, axis=1)).T  # (d_model, C) -> (C, d_model)
+        u_dirs = (v_u * np.linalg.norm(u_u, axis=1)).T
     ids = np.arange(g_dirs.shape[0])
     dirs = np.concatenate([g_dirs, u_dirs], axis=0).astype(np.float32)
     mats = np.concatenate([np.full(len(ids), _MAT_CODE["g"]), np.full(len(ids), _MAT_CODE["u"])])
@@ -103,7 +107,7 @@ def _write_candidates(
         dirs = weights["down_proj"].T  # (d_model, d_ff) columns = write dirs -> (d_ff, d_model)
     else:
         v_down, u_down = uv["down_proj"]  # V (d_ff, C), U (C, d_model)
-        dirs = u_down / np.linalg.norm(v_down, axis=0)[:, None]  # U[c] / ‖V[:,c]‖ (input-vec norm)
+        dirs = u_down * np.linalg.norm(v_down, axis=0)[:, None]  # U[c] · ‖V[:,c]‖ (input-vec norm)
     dirs = dirs.astype(np.float32)
     mats = np.full(dirs.shape[0], _MAT_CODE["d"], np.int8)
     return dirs, mats, np.arange(dirs.shape[0])

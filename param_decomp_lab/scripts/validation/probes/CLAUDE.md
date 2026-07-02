@@ -76,10 +76,14 @@ Same point clouds, but tied to a **decomposition run** (its checkpoint) and drop
 projected onto the T-Fourier plane) and generalising it to reads and to the decomposition:
 
 - **read** arrows on the operand planes (`a`, `b`): the residual read direction — neuron `gate`/`up`
-  row, or subcomponent `gate`/`up` `V[:,c]`. Tagged `g` / `u` (both shown).
+  row, or subcomponent `gate`/`up` `V[:,c] · ‖U[c]‖`. Tagged `g` / `u` (both shown).
 - **write** arrows on the sum plane (`a+b`): the residual write direction — neuron `down_proj[:,n]`,
-  or subcomponent `down_proj.U[c] / ‖down_proj.V[:,c]‖` (÷ the 14336-d input-vector norm, so its
-  scale matches a neuron's). Tagged `d`.
+  or subcomponent `down_proj.U[c] · ‖down_proj.V[:,c]‖`. Tagged `d`.
+
+Subcomponents scale the residual-space vector by the norm of the component's *other* (14336-d)
+vector — symmetric across read (`V·‖U‖`) and write (`U·‖V‖`). A rank-1 `u vᵀ` is gauge-free
+(`u→αu, v→v/α`); this product form is gauge-invariant and equals the residual move per one std of
+the unit's activation — the same quantity a raw neuron row/column is, so both are neuron-comparable.
 
 **Fig 9c scale**: everything is projected onto the **unit-normalised** probe directions `d = w/‖w‖`,
 and the cloud is recomputed in that same normalised, mean-centred frame — so `v·d` (arrow, from the

@@ -111,6 +111,16 @@ def read_alive_components(
     return out
 
 
+def read_mean_ci(tsv_path: Path) -> dict[tuple[str, int], float]:
+    """`(proj, component) -> mean CI` from an `alive_filtered_<op>.tsv`."""
+    assert tsv_path.exists(), f"missing filtered-alive TSV: {tsv_path}"
+    out: dict[tuple[str, int], float] = {}
+    with tsv_path.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            out[(row["matrix"].split(".")[-1], int(row["component"]))] = float(row["mean_ci"])
+    return out
+
+
 def read_subcomp_periods(tsv_path: Path) -> dict[tuple[str, int], int]:
     """`(proj, component) -> representative additive period` from a `subcomp_periods` TSV."""
     assert tsv_path.exists(), f"missing subcomp-periods TSV: {tsv_path}"
