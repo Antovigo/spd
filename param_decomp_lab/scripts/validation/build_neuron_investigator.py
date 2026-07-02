@@ -67,19 +67,11 @@ from param_decomp_lab.scripts.validation.common import (
     load_component_uv,
     op_symbol,
     read_alive_components,
+    read_mean_ci,
     read_subcomp_period_groups,
 )
 
 _APP_TEMPLATE = Path(__file__).with_name("neuron_investigator_app.html")
-
-
-def _read_mean_ci(tsv_path: Path) -> dict[tuple[str, int], float]:
-    """`(proj, component) -> mean CI` from an `alive_filtered_<op>.tsv`."""
-    out: dict[tuple[str, int], float] = {}
-    with tsv_path.open() as f:
-        for row in csv.DictReader(f, delimiter="\t"):
-            out[(row["matrix"].split(".")[-1], int(row["component"]))] = float(row["mean_ci"])
-    return out
 
 
 def _read_period_confidence(tsv_path: Path) -> dict[tuple[str, int], float]:
@@ -194,7 +186,7 @@ def build_neuron_investigator(
     assert op in available_ops, f"build op {op!r} has no hidden_activations_{op}.npz in {data_dir}"
 
     alive = read_alive_components(data_dir / f"alive_filtered_{op}.tsv", keep_projs=MLP_MATRICES)
-    mean_ci = _read_mean_ci(data_dir / f"alive_filtered_{op}.tsv")
+    mean_ci = read_mean_ci(data_dir / f"alive_filtered_{op}.tsv")
     periods = read_subcomp_period_groups(data_dir / f"subcomp_periods_{op}.tsv")
     confidence = _read_period_confidence(data_dir / f"subcomp_periods_{op}.tsv")
     layer = alive[0].layer

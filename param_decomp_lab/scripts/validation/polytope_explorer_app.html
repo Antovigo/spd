@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Polytope explorer</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #fff; color: #222; }
+  header { padding: 8px 16px; border-bottom: 1px solid #ddd; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0 10px 0 0; }
+  label { font-size: 13px; }
+  input[type=number] { width: 60px; padding: 2px 4px; font-size: 13px; }
+  select { font-size: 13px; padding: 2px 4px; }
+  #hint { font-size: 12px; color: #888; }
+  #wrap { display: flex; align-items: stretch; }
+  #left { width: 46vw; flex: 0 0 auto; box-sizing: border-box; padding: 12px; overflow: auto; max-height: calc(100vh - 50px); }
+  #divider { flex: 0 0 6px; cursor: col-resize; background: #e6e6e6; }
+  #divider:hover, #divider.dragging { background: #bbb; }
+  #right { flex: 1 1 0; min-width: 0; box-sizing: border-box; padding: 12px; overflow-y: auto; max-height: calc(100vh - 50px); }
+  #right h2 { font-size: 13px; margin: 0 0 8px; }
+  #right h3 { font-size: 12px; margin: 12px 0 6px; }
+  .note { font-size: 11px; color: #999; }
+  canvas { image-rendering: pixelated; }
+  #map { cursor: crosshair; border: 1px solid #eee; }
+  #legend { margin-top: 8px; font-size: 12px; }
+  .legrow { display: flex; gap: 6px; align-items: baseline; padding: 1px 2px; cursor: default; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .legrow:hover { background: #f2f2f2; }
+  .sw { display: inline-block; width: 12px; height: 12px; border: 1px solid #ccc; flex: 0 0 auto; align-self: center; }
+  .thumbs { font-size: 0; }  /* kill inline-block whitespace; cells pack as many per row as fit */
+  .cell { display: inline-block; vertical-align: top; margin: 0 10px 12px 0; }
+  .cell .t { font-size: 11px; color: #444; margin-bottom: 2px; white-space: nowrap; }
+  .cell .t .v { color: #999; }
+  .cell .n { font-size: 10px; color: #999; margin-bottom: 3px; white-space: nowrap; }
+  .cell.off canvas { opacity: 0.3; }
+  .cell.on .hm { outline: 2px solid #d33; }
+  .hm { position: relative; display: inline-block; font-size: 0; }
+  .mk { position: absolute; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid #000; box-shadow: 0 0 0 1.5px #fff; pointer-events: none; display: none; box-sizing: border-box; }
+  #tooltip { position: fixed; pointer-events: none; display: none; z-index: 10; background: rgba(0,0,0,0.82); color: #fff; font-size: 11px; padding: 3px 6px; border-radius: 3px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Polytope explorer</h1>
+  <span id="meta" class="note"></span>
+  <label>operation <select id="op"></select></label>
+  <label>colour by
+    <select id="mode">
+      <option value="gates">gate-sign combo</option>
+      <option value="subs">subcomponent-CI combo</option>
+    </select>
+  </label>
+  <label id="topklabel">combo gates: top <input id="topk" type="number" min="0" step="1" /></label>
+  <label id="subtopklabel">combo subs: top <input id="subtopk" type="number" min="0" step="1" /></label>
+  <label>CI thr <input id="cithr" type="number" min="0" max="1" step="0.05" value="0.1" /></label>
+  <label>max colours <input id="maxcolors" type="number" min="1" step="1" value="20" /></label>
+  <label>map px/value <input id="mappx" type="number" min="1" step="1" value="6" /></label>
+  <span id="hint">hover the map to inspect a prompt; click to pin</span>
+</header>
+<div id="wrap">
+  <div id="left">
+    <canvas id="map"></canvas>
+    <div class="note">x = a, y = b (origin bottom-left) · one colour = one combination (polytope) · hover a legend row to highlight its region</div>
+    <div id="legend"></div>
+  </div>
+  <div id="divider" title="drag to resize the panels"></div>
+  <div id="right">
+    <h2 id="pix-title">Hover the map to inspect a prompt</h2>
+    <div style="margin-bottom:6px">
+      <label>subcomponent heatmap <select id="subview"><option value="ci">causal importance</option><option value="inner">inner activation</option></select></label>
+      <label style="margin-left:12px">plot size <input id="thumbpx" type="number" min="0.5" step="0.5" value="1.5" /> px/value</label>
+    </div>
+    <h3>alive gates <span class="note" id="gatenote"></span></h3>
+    <div id="gatesec" class="thumbs"></div>
+    <h3>subcomponents <span class="note" id="subnote"></span></h3>
+    <div id="subsec" class="thumbs"></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+<script src="data.js"></script>
+<script>
+const D = window.PD_DATA, META = D.meta, N = META.n, NN = N * N;
+const OP_META = {}; META.ops.forEach(m => OP_META[m.op] = m);
+const GREY = "#c4c4c4";
+
+function b64ToBytes(b64) {
+  const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function b64ToU16(b64) { return new Uint16Array(b64ToBytes(b64).buffer); }
+function h2f(h) {
+  const s = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, f = h & 0x03ff;
+  if (e === 0) return (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+  if (e === 0x1f) return f ? NaN : (s ? -Infinity : Infinity);
+  return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+function decodeAll(b64) {
+  const u16 = b64ToU16(b64), out = new Float32Array(u16.length);
+  for (let k = 0; k < u16.length; k++) out[k] = h2f(u16[k]);
+  return out;
+}
+function fmtVal(v) { const a = Math.abs(v); return (a !== 0 && (a < 1e-3 || a >= 1e4)) ? v.toExponential(2) : v.toFixed(2); }
+function opResult(op, a, b) { return op === "add" ? a + b : op === "sub" ? a - b : a * b; }
+
+// Per-op decoded arrays, built lazily on first selection.
+const CACHE = {};
+function opData(op) {
+  if (!CACHE[op]) {
+    const o = D.ops[op];
+    CACHE[op] = {
+      symbol: o.symbol, gates: o.gates, subs: o.subs,
+      gateVals: decodeAll(o.gate_grids),   // [K, N, N] row-major [a-1, b-1]
+      ciVals: decodeAll(o.ci_grids),       // [S, N, N]
+      innerVals: decodeAll(o.inner_grids), // [S, N, N]
+    };
+    o.gates.forEach((g, i) => g.label = "g" + g.id);
+    o.subs.forEach(s => s.label = s.proj[0] + s.c);  // u/g/d initial + index
+  }
+  return CACHE[op];
+}
+
+// ---- state -------------------------------------------------------------------------------
+let curOp = META.ops[0].op;
+let mode = "gates";           // "gates" (sign combo) | "subs" (CI combo)
+let ciThr = 0.1;              // subcomponent "causally important" threshold (bits + hover highlight)
+let maxColors = 20;           // combos beyond this many pool into grey
+let mapPx = 6, thumbPx = 1.5; // pixels per operand value
+let subview = "ci";           // subcomponent thumbnail metric
+const includedG = {}, includedS = {};  // op -> Set of included item indices (combo bits)
+function topSubsByCi(op, k) {
+  const subs = opData(op).subs;
+  return subs.map((_, i) => i).sort((x, y) => subs[y].mean_ci - subs[x].mean_ci).slice(0, k);
+}
+function inclG(op) { return includedG[op] ??= new Set(opData(op).gates.slice(0, META.default_top_gates).map((_, i) => i)); }
+function inclS(op) { return includedS[op] ??= new Set(topSubsByCi(op, META.default_top_subs)); }
+let pinned = null, curPix = null;  // {a, b} 0-based grid indices
+
+// Combination state, rebuilt by recompute(): pixelRank[p] = frequency rank of pixel p's combo.
+let combo = { items: [], patterns: [], pixelRank: new Int32Array(NN), colored: 0 };
+
+function paletteColor(i) {
+  return `hsl(${(i * 137.508) % 360}, 65%, ${[52, 38, 68][i % 3]}%)`;
+}
+function bitAt(od, item, p) {
+  return mode === "gates" ? od.gateVals[item * NN + p] > 0 : od.ciVals[item * NN + p] > ciThr;
+}
+function recompute() {
+  const od = opData(curOp);
+  const items = [...(mode === "gates" ? inclG(curOp) : inclS(curOp))].sort((x, y) => x - y);
+  const counts = new Map(), keys = new Array(NN);
+  for (let p = 0; p < NN; p++) {
+    let key = "";
+    for (const it of items) key += bitAt(od, it, p) ? "1" : "0";
+    keys[p] = key;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  const patterns = [...counts.entries()].map(([key, count]) => ({ key, count }))
+    .sort((x, y) => y.count - x.count);
+  const rankOf = new Map(patterns.map((pt, r) => [pt.key, r]));
+  const pixelRank = new Int32Array(NN);
+  for (let p = 0; p < NN; p++) pixelRank[p] = rankOf.get(keys[p]);
+  combo = { items, patterns, pixelRank, colored: Math.min(maxColors, patterns.length) };
+  drawMap(null); buildLegend();
+  if (curPix) updateDetail();
+}
+
+// ---- left: the polytope map + legend -----------------------------------------------------
+const map = document.getElementById("map"), mctx = map.getContext("2d");
+const tooltip = document.getElementById("tooltip");
+// Edge-rounded fill (cell [a] spans [round(a·W/N), round((a+1)·W/N))) — no seams at any size.
+function drawMap(highlight) {
+  const W = N * mapPx;
+  map.width = W; map.height = W;
+  for (let a = 0; a < N; a++) {
+    const x0 = Math.round(a * W / N), x1 = Math.round((a + 1) * W / N);
+    for (let b = 0; b < N; b++) {
+      const y0 = Math.round((N - 1 - b) * W / N), y1 = Math.round((N - b) * W / N);
+      const rank = combo.pixelRank[a * N + b];
+      const hit = highlight === null || (highlight === "pooled" ? rank >= combo.colored : rank === highlight);
+      mctx.fillStyle = rank < combo.colored ? paletteColor(rank) : GREY;
+      mctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+      if (!hit) { mctx.fillStyle = "rgba(255,255,255,0.88)"; mctx.fillRect(x0, y0, x1 - x0, y1 - y0); }
+    }
+  }
+  if (pinned) {
+    mctx.strokeStyle = "#000"; mctx.lineWidth = 2;
+    mctx.strokeRect(Math.round(pinned.a * W / N), Math.round((N - 1 - pinned.b) * W / N),
+                    Math.max(2, Math.round(W / N)), Math.max(2, Math.round(W / N)));
+  }
+}
+function onLabels(key) {
+  const od = opData(curOp), src = mode === "gates" ? od.gates : od.subs;
+  const on = [];
+  for (let i = 0; i < key.length; i++) if (key[i] === "1") on.push(src[combo.items[i]].label);
+  return on;
+}
+function buildLegend() {
+  const legend = document.getElementById("legend");
+  legend.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "note";
+  head.textContent = `${combo.patterns.length} combinations of ${combo.items.length} ` +
+    `${mode === "gates" ? "gate-sign" : "subcomponent-CI"} bits · ` +
+    `${combo.colored} coloured, ${combo.patterns.length - combo.colored} pooled in grey`;
+  legend.appendChild(head);
+  const addRow = (color, text, title, highlight) => {
+    const row = document.createElement("div"); row.className = "legrow";
+    const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = color;
+    const tx = document.createElement("span"); tx.textContent = text; tx.title = title;
+    row.appendChild(sw); row.appendChild(tx); legend.appendChild(row);
+    row.addEventListener("mouseenter", () => drawMap(highlight));
+    row.addEventListener("mouseleave", () => drawMap(null));
+  };
+  for (let r = 0; r < combo.colored; r++) {
+    const pt = combo.patterns[r], on = onLabels(pt.key);
+    const shown = on.slice(0, 10).join(" ") + (on.length > 10 ? ` +${on.length - 10}` : "");
+    addRow(paletteColor(r), `#${r + 1} · ${pt.count} px · ${on.length} on: ${on.length ? shown : "none"}`,
+           on.join(" "), r);
+  }
+  if (combo.patterns.length > combo.colored) {
+    let px = 0;
+    for (let r = combo.colored; r < combo.patterns.length; r++) px += combo.patterns[r].count;
+    addRow(GREY, `pooled · ${px} px · ${combo.patterns.length - combo.colored} rarer combinations`, "", "pooled");
+  }
+}
+
+map.addEventListener("mousemove", e => {
+  const rect = map.getBoundingClientRect();
+  const a = Math.floor((e.clientX - rect.left) / rect.width * N);
+  const b = N - 1 - Math.floor((e.clientY - rect.top) / rect.height * N);
+  if (a < 0 || a >= N || b < 0 || b >= N) { tooltip.style.display = "none"; return; }
+  const rank = combo.pixelRank[a * N + b], sym = opData(curOp).symbol;
+  tooltip.textContent = `a=${a + 1}, b=${b + 1} · ${a + 1}${sym}${b + 1}=${opResult(curOp, a + 1, b + 1)}` +
+    ` · combo #${rank + 1} (${combo.patterns[rank].count} px)`;
+  tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+  tooltip.style.display = "block";
+  if (!pinned && (!curPix || curPix.a !== a || curPix.b !== b)) { curPix = { a, b }; updateDetail(); }
+});
+map.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+map.addEventListener("click", e => {
+  const rect = map.getBoundingClientRect();
+  const a = Math.floor((e.clientX - rect.left) / rect.width * N);
+  const b = N - 1 - Math.floor((e.clientY - rect.top) / rect.height * N);
+  if (a < 0 || a >= N || b < 0 || b >= N) return;
+  pinned = (pinned && pinned.a === a && pinned.b === b) ? null : { a, b };
+  if (pinned) { curPix = { a, b }; updateDetail(); }
+  drawMap(null);
+});
+
+// ---- right: per-gate / per-subcomponent (a, b) thumbnails --------------------------------
+// Diverging colour, red positive (like the other applets' heatmaps).
+function divColor(t) {
+  t = Math.max(-1, Math.min(1, t));
+  const c = Math.round(255 * (1 - Math.abs(t)));
+  return t >= 0 ? [255, c, c] : [c, c, 255];
+}
+function drawGrid(cv, vals) {
+  let scale = 1e-6;
+  for (let i = 0; i < vals.length; i++) scale = Math.max(scale, Math.abs(vals[i]));
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height, img = ctx.createImageData(W, H), d = img.data;
+  for (let a = 0; a < N; a++) {
+    const x0 = Math.round(a * W / N), x1 = Math.round((a + 1) * W / N);
+    for (let b = 0; b < N; b++) {
+      const y0 = Math.round((N - 1 - b) * H / N), y1 = Math.round((N - b) * H / N);
+      const [r, g, bl] = divColor(vals[a * N + b] / scale);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const o = (y * W + x) * 4; d[o] = r; d[o + 1] = g; d[o + 2] = bl; d[o + 3] = 255;
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function bindHover(cv, valsFn) {
+  cv.addEventListener("mousemove", e => {
+    const rect = cv.getBoundingClientRect();
+    const a = Math.floor((e.clientX - rect.left) / rect.width * N);
+    const b = N - 1 - Math.floor((e.clientY - rect.top) / rect.height * N);
+    if (a < 0 || a >= N || b < 0 || b >= N) { tooltip.style.display = "none"; return; }
+    tooltip.textContent = `a=${a + 1}, b=${b + 1}, value=${fmtVal(valsFn()[a * N + b])}`;
+    tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+    tooltip.style.display = "block";
+  });
+  cv.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+}
+
+let gateThumbs = [], subThumbs = [];
+function makeThumb(parent, label, note, checked, onToggle, valsFn) {
+  const side = Math.max(20, Math.round(thumbPx * N));
+  const cell = document.createElement("div"); cell.className = "cell"; cell.style.width = side + "px";
+  const t = document.createElement("div"); t.className = "t";
+  const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = checked;
+  cb.title = "include this bit in the combination"; cb.addEventListener("change", () => onToggle(cb.checked));
+  const name = document.createElement("span"); name.textContent = " " + label + " ";
+  const val = document.createElement("span"); val.className = "v";
+  t.appendChild(cb); t.appendChild(name); t.appendChild(val);
+  const nt = document.createElement("div"); nt.className = "n"; nt.textContent = note;
+  const hm = document.createElement("span"); hm.className = "hm";
+  const cv = document.createElement("canvas"); cv.width = side; cv.height = side;
+  const mk = document.createElement("div"); mk.className = "mk";
+  hm.appendChild(cv); hm.appendChild(mk);
+  cell.appendChild(t); cell.appendChild(nt); cell.appendChild(hm);
+  parent.appendChild(cell);
+  drawGrid(cv, valsFn());
+  bindHover(cv, valsFn);
+  return { cell, cv, mk, val, cb, valsFn };
+}
+function buildThumbs() {
+  const od = opData(curOp);
+  const gatesec = document.getElementById("gatesec"), subsec = document.getElementById("subsec");
+  gatesec.innerHTML = ""; subsec.innerHTML = "";
+  gateThumbs = od.gates.map((g, i) => makeThumb(
+    gatesec, g.label, `rel ${g.rel} · pos ${(g.pos_frac * 100).toFixed(0)}%`,
+    inclG(curOp).has(i),
+    on => { on ? inclG(curOp).add(i) : inclG(curOp).delete(i); recompute(); },
+    () => od.gateVals.subarray(i * NN, (i + 1) * NN)));
+  subThumbs = od.subs.map((s, i) => makeThumb(
+    subsec, `${s.proj} #${s.c}`, `mean CI ${s.mean_ci}`,
+    inclS(curOp).has(i),
+    on => { on ? inclS(curOp).add(i) : inclS(curOp).delete(i); recompute(); },
+    () => (subview === "ci" ? od.ciVals : od.innerVals).subarray(i * NN, (i + 1) * NN)));
+  const m = OP_META[curOp];
+  document.getElementById("gatenote").textContent =
+    `${m.n_flipping}/${META.d_int} gates flip sign on ${curOp}; top ${m.n_kept} by output relevance shown · red border = gate > 0 at the pixel`;
+  document.getElementById("subnote").textContent =
+    `filtered-alive subcomponents · red border = CI > thr at the pixel`;
+  if (curPix) updateDetail();
+}
+function placeMarker(th) {
+  if (!curPix) { th.mk.style.display = "none"; return; }
+  const side = th.cv.width;
+  th.mk.style.left = ((curPix.a + 0.5) * side / N - 3.5) + "px";
+  th.mk.style.top = ((N - 1 - curPix.b + 0.5) * side / N - 3.5) + "px";
+  th.mk.style.display = "block";
+}
+function updateDetail() {
+  const od = opData(curOp);
+  const p = curPix.a * N + curPix.b, rank = combo.pixelRank[p];
+  const a1 = curPix.a + 1, b1 = curPix.b + 1;
+  document.getElementById("pix-title").textContent =
+    `a=${a1} · b=${b1} · ${a1}${od.symbol}${b1} = ${opResult(curOp, a1, b1)} · ` +
+    `combo #${rank + 1} of ${combo.patterns.length} (${combo.patterns[rank].count} px` +
+    `${rank >= combo.colored ? ", pooled" : ""})${pinned ? " · pinned" : ""}`;
+  gateThumbs.forEach((th, i) => {
+    const v = od.gateVals[i * NN + p];
+    th.cell.classList.toggle("on", v > 0); th.cell.classList.toggle("off", v <= 0);
+    th.val.textContent = (v > 0 ? "+" : "") + fmtVal(v);
+    placeMarker(th);
+  });
+  subThumbs.forEach((th, i) => {
+    const ci = od.ciVals[i * NN + p];
+    th.cell.classList.toggle("on", ci > ciThr); th.cell.classList.toggle("off", ci <= ciThr);
+    th.val.textContent = subview === "ci" ? `CI ${fmtVal(ci)}` : `inner ${fmtVal(od.innerVals[i * NN + p])}`;
+    placeMarker(th);
+  });
+}
+
+// ---- controls ----------------------------------------------------------------------------
+const elOp = document.getElementById("op");
+for (const m of META.ops) { const o = document.createElement("option"); o.value = m.op; o.textContent = `${m.op} (${m.symbol})`; elOp.appendChild(o); }
+elOp.value = curOp;
+elOp.addEventListener("change", () => {
+  curOp = elOp.value;
+  document.getElementById("topk").value = inclG(curOp).size;
+  document.getElementById("subtopk").value = inclS(curOp).size;
+  buildThumbs(); recompute();
+});
+document.getElementById("mode").addEventListener("change", e => { mode = e.target.value; recompute(); });
+const elTopk = document.getElementById("topk");
+elTopk.value = Math.min(META.default_top_gates, OP_META[curOp].n_kept);
+elTopk.addEventListener("change", () => {
+  const k = Math.max(0, Math.min(opData(curOp).gates.length, Math.round(+elTopk.value || 0)));
+  includedG[curOp] = new Set(Array.from({ length: k }, (_, i) => i));
+  gateThumbs.forEach((th, i) => th.cb.checked = i < k);
+  recompute();
+});
+const elSubtopk = document.getElementById("subtopk");
+elSubtopk.value = Math.min(META.default_top_subs, OP_META[curOp].n_subs);
+elSubtopk.addEventListener("change", () => {
+  const k = Math.max(0, Math.min(opData(curOp).subs.length, Math.round(+elSubtopk.value || 0)));
+  includedS[curOp] = new Set(topSubsByCi(curOp, k));
+  const inc = inclS(curOp);
+  subThumbs.forEach((th, i) => th.cb.checked = inc.has(i));
+  recompute();
+});
+document.getElementById("cithr").addEventListener("input", e => {
+  ciThr = Math.max(0, +e.target.value || 0);
+  recompute();
+});
+document.getElementById("maxcolors").addEventListener("input", e => {
+  maxColors = Math.max(1, Math.round(+e.target.value || 20));
+  recompute();
+});
+document.getElementById("mappx").addEventListener("input", e => {
+  mapPx = Math.max(1, Math.round(+e.target.value || 6));
+  drawMap(null);
+});
+document.getElementById("thumbpx").addEventListener("input", e => {
+  thumbPx = Math.max(0.5, +e.target.value || 1.5);
+  buildThumbs();
+});
+document.getElementById("subview").addEventListener("change", e => {
+  subview = e.target.value;
+  subThumbs.forEach(th => drawGrid(th.cv, th.valsFn()));
+  if (curPix) updateDetail();
+});
+// draggable divider: set the left panel's width; the right panel (flex:1) takes the rest.
+const divider = document.getElementById("divider"), wrap = document.getElementById("wrap"), leftPane = document.getElementById("left");
+let dragging = false;
+divider.addEventListener("mousedown", e => { dragging = true; divider.classList.add("dragging"); document.body.style.userSelect = "none"; e.preventDefault(); });
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  const wr = wrap.getBoundingClientRect();
+  leftPane.style.width = Math.max(200, Math.min(wr.width - 220, e.clientX - wr.left)) + "px";
+});
+window.addEventListener("mouseup", () => { if (dragging) { dragging = false; divider.classList.remove("dragging"); document.body.style.userSelect = ""; } });
+
+document.getElementById("meta").textContent = `L${META.layer} · ${N}×${N} operand grid`;
+buildThumbs(); recompute();
+</script>
+</body>
+</html>

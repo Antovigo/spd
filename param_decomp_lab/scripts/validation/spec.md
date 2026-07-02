@@ -688,3 +688,50 @@ task and the projected circle centre (both sites); plus, per (basis task, operan
 floor-passing subcomponent and neuron arrow coords + in-plane norms (mlp site), and the kept
 subcomponents' inner-activation and (when available) CI grids per task (fp16 base64). Smoke-test
 with `headless_check.py`.
+
+**build_polytope_explorer.py**
+
+args:
+- the path to a decomposed model
+- `--ops`: comma list of operations to include (default: every op with
+  `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv` + `inner_activations_<op>.tsv`
+  in `analysis/datasets/`)
+- `--top-gates`: alive gates stored per op, by output relevance (default 64)
+- `--output-dir`
+
+CPU. Emits a self-contained HTML applet (`index.html` + `data.js`, `file://`-openable, no
+server/CDN/GPU) into `<run_dir>/analysis/polytope_explorer/`. A SwiGLU MLP is piecewise
+(approximately) linear: wherever every gate preactivation keeps its sign, the MLP applies one
+roughly fixed linear map (ignoring the negative silu bump near zero). The applet colours the
+op's `(a, b)` operand grid by **which combination of alive gates is positive** — one colour =
+one combination = one polytope — answering "which prompts activate the same combination of
+gates?"; a second mode colours by the combination of **causally-important subcomponents**
+(CI > a typed threshold) instead.
+
+**Alive gates** are the neurons of the decomposed layer's MLP whose gate preactivation takes
+both signs across the op's grid (a never-flipping gate contributes no polytope boundary
+there). Most of `d_int` flips somewhere, so only the `--top-gates` most output-relevant are
+stored, ranked by `std over the grid of silu(gate_j)·up_j` · `||down column j||` (the size of
+the neuron's contribution to the MLP output). In the applet a **top-k** control (default 8;
+on the reference add run the top-20 combinations then cover ~70% of the grid) plus per-gate
+checkboxes choose which stored gates form the combination; CI mode has its own top-k
+(default the 8 highest-mean-CI subcomponents) and per-subcomponent checkboxes — including
+every subcomponent shatters the map into thousands of singleton combinations.
+Combinations are ranked by pixel count; the most frequent
+`max colours` get distinct colours (golden-angle HSL), the rest pool into grey. The legend
+lists each coloured combination (count + which bits are on); hovering a row highlights its
+region on the map. Hovering a map pixel shows a tooltip (`a`, `b`, result, combination rank)
+and drives the right panel; clicking pins the pixel (black square marker).
+
+The right panel shows one `(a, b)` heatmap thumbnail per stored gate (its preactivation grid;
+title shows output relevance + fraction-positive) and per filtered-alive subcomponent (CI or
+inner-activation grid, per a dropdown). At the current pixel, active thumbnails (gate > 0 /
+CI > thr) get a red border and inactive ones dim; a dot marks the pixel on every thumbnail
+and a value readout shows each item's value there. **Operation selector** across every
+included op; map and thumbnail pixels-per-value controls; drag-resizable divider.
+
+Reads, per op: `hidden_activations_<op>.npz` (gate/up grids), `alive_filtered_<op>.tsv`, and
+`inner_activations_<op>.tsv` (must carry the `ci` column — rerun `collect_inner_activations`
+if not); plus the checkpoint's target down-projection weight (mmap). No forward pass.
+`data.js` holds fp16-base64 gate / CI / inner `(a, b)` grids (~14 MB for two ops at the
+defaults). Smoke-test with `headless_check.py`.

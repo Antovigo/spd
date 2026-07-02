@@ -365,3 +365,26 @@ uv run python -m $V.build_fourier_scatter "$CKPT"        # add,mult auto-detecte
 PY=~/.cache/pd-headless/venv/bin/python
 $PY $V_DIR/headless_check.py ~/out/runs/addmult-L18-03/analysis/fourier_scatter/index.html
 ```
+
+### 15. Polytope explorer (CPU)
+
+A self-contained HTML applet mapping the operand grid into SwiGLU gate-sign polytopes. The
+`(a, b)` map is coloured by which combination of **alive gates** (gate preactivation > 0 —
+alive = takes both signs on the op's grid, top `--top-gates` kept by output relevance) — or,
+in a second mode, of **causally-important subcomponents** (CI > thr) — is active on each
+prompt; one colour = one combination = one region where the MLP is roughly linear. A top-k
+control + per-thumbnail checkboxes choose the combination bits; rare combinations pool into
+grey; hovering a legend row highlights its region; hovering / clicking a map pixel shows
+which gate / subcomponent `(a, b)` thumbnails are active there. Operation selector across
+every op with saved `hidden_activations_<op>.npz` + `alive_filtered_<op>.tsv` +
+`inner_activations_<op>.tsv` (the last must carry the `ci` column).
+
+```bash
+uv run python -m $V.build_polytope_explorer "$MODEL_PATH"                # all detected ops
+uv run python -m $V.build_polytope_explorer "$MODEL_PATH" --ops=add,mult --top-gates=64
+# open analysis/polytope_explorer/index.html; smoke-test headless:
+PY=~/.cache/pd-headless/venv/bin/python
+$PY param_decomp_lab/scripts/validation/headless_check.py \
+    "$RUN_DIR/analysis/polytope_explorer/index.html" \
+    --probes="document.querySelectorAll('#legend .legrow').length"
+```

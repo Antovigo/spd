@@ -132,7 +132,8 @@ reimplementing. Implemented so far:
   `op_prompts_file` / `parse_operands` resolve an operation (`add`/`sub`/`mult`) to its infix
   symbol, `1..100` prompt file, and `(a, b)` parser; `MLP_MATRICES` is the L18 MLP proj
   triple; `read_alive_components` reads an alive-components TSV into `AliveComponent`s
-  (optionally filtered to given proj names); `read_subcomp_periods` reads a `subcomp_periods`
+  (optionally filtered to given proj names); `read_mean_ci` reads an `alive_filtered_<op>.tsv`
+  into a `(proj, component) -> mean CI` map; `read_subcomp_periods` reads a `subcomp_periods`
   TSV; `square_grid_size` returns the grid side `n` while asserting full unique coverage;
   `load_component_uv` mmap-loads per-matrix `(V, U)` from a checkpoint; `load_target_mlp_weights`
   mmap-loads the frozen target MLP weights `W [d_out, d_in]` (a neuron's read row / write column).
