@@ -55,6 +55,12 @@
     <div class="cap">arrows shown (strongest first)</div>
     <div id="arrowList" style="font-size:11px;padding:6px;max-height:440px;overflow:auto"></div>
   </div>
+  <div class="panel" id="infoPanel" style="min-width:270px;display:none">
+    <div class="cap" id="infoCap">selected direction</div>
+    <div id="infoBody" style="font-size:12px;padding:8px;line-height:1.5"></div>
+    <canvas id="heat" width="256" height="256" style="display:none;margin:6px auto;image-rendering:pixelated"></canvas>
+    <div id="heatCap" class="cap" style="display:none"></div>
+  </div>
 </div>
 <div id="tooltip"></div>
 <script src="data.js"></script>
@@ -92,6 +98,17 @@ function decodeI8(b64) {
   for (let i = 0; i < n; i++) out[i] = (bin.charCodeAt(i) << 24) >> 24;
   return out;
 }
+function decodeU8(b64) {
+  const bin = atob(b64), n = bin.length, out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i) & 0xff;
+  return out;
+}
+function divColor(t) {  // diverging blue–white–red, t ∈ [-1, 1] (for the ± dot-product heatmap)
+  t = Math.max(-1, Math.min(1, t));
+  const w = [247, 247, 247], end = t < 0 ? [33, 102, 172] : [178, 24, 43], u = Math.abs(t);
+  return [Math.round(w[0] + (end[0] - w[0]) * u), Math.round(w[1] + (end[1] - w[1]) * u),
+          Math.round(w[2] + (end[2] - w[2]) * u)];
+}
 const _VIRIDIS = [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]];
 function viridis(t) {
   t = Math.max(0, Math.min(1, t)); const x = t * 4, i = Math.min(3, Math.floor(x)), f = x - i;
@@ -105,8 +122,27 @@ const TAG_COLOR = { g: "#1f77b4", u: "#ff7f0e", d: "#c1121f" };  // gate-read / 
 const TAG_NAME = { g: "gate read", u: "up read", d: "down write" };
 const SIZE = 460;
 const sel = { site: null, basis: null, period: null, colorBy: "a+b", mod: 1, offset: 0,
-              dirKind: "neurons", thresh: D.meta.arrow_norm_default };
+              dirKind: "neurons", thresh: D.meta.arrow_norm_default, selected: null };
 let scat = null;
+
+// ---- dot-product heatmap (subcomponents) — reconstructed from the per-site low-rank basis --------
+const HEAT_R = D.meta.heat_rank, GRID_N = Math.round(Math.sqrt(D.meta.n_total));
+const heatIndex = {}; D.heat.matids.forEach((m, i) => { heatIndex[m] = i; });
+const _hp = {}, _hq = {}, _hm = {}, _ci = {};
+const heatP = s => _hp[s] || (_hp[s] = decodeF16(D.heat.p[s]));
+const heatQ = s => _hq[s] || (_hq[s] = decodeF16(D.heat.qd[s]));
+const heatM = s => _hm[s] || (_hm[s] = decodeF16(D.heat.m[s]));
+const ciGrid = matid => _ci[matid] || (_ci[matid] = decodeU8(D.ci[matid]));
+function reconstructHeat(matid, site) {  // dir·activation(a,b) = m + P·qd, over the full grid
+  const row = heatIndex[matid], P = heatP(site), Q = heatQ(site), m = heatM(site)[row];
+  const n = D.meta.n_total, out = new Float32Array(n), qoff = row * HEAT_R;
+  for (let ab = 0; ab < n; ab++) {
+    let acc = m; const poff = ab * HEAT_R;
+    for (let r = 0; r < HEAT_R; r++) acc += P[poff + r] * Q[qoff + r];
+    out[ab] = acc;
+  }
+  return out;
+}
 
 function fill(node, values, labels) {
   node.innerHTML = "";
@@ -114,7 +150,9 @@ function fill(node, values, labels) {
     o.value = v; o.textContent = labels ? labels[i] : v; node.appendChild(o); });
 }
 fill(el("basis"), D.meta.variables, D.meta.variables.map(v => "probe: " + v));
-fill(el("colorBy"), ["a", "b", "a+b"]);
+const cbVals = ["a", "b", "a+b"], cbLabels = ["a", "b", "a+b"];
+if (D.meta.has_ci) { cbVals.push("ci"); cbLabels.push("CI (selected subcomp)"); }
+fill(el("colorBy"), cbVals, cbLabels);
 fill(el("dirKind"), ["none", ...D.meta.kinds]);
 sel.basis = D.meta.variables.includes("a+b") ? "a+b" : D.meta.variables[0];
 el("basis").value = sel.basis; el("colorBy").value = sel.colorBy; el("dirKind").value = sel.dirKind;
@@ -156,7 +194,19 @@ function rawValues() {
   for (let i = 0; i < A.length; i++) s[i] = A[i] + B[i];
   return s;
 }
+function ciInfo() {  // colour by the selected subcomponent's CI (a, b ≤ ci_n); rest grey
+  const N = A.length, vals = new Float32Array(N).fill(NaN), raw = new Float32Array(N).fill(NaN);
+  const s = sel.selected;
+  if (s && sel.dirKind === "subcomponents" && D.ci[s.tag + s.id]) {
+    const grid = ciGrid(s.tag + s.id), cn = D.meta.ci_n;
+    for (let j = 0; j < N; j++) {
+      if (A[j] <= cn && B[j] <= cn) { const v = grid[(A[j] - 1) * cn + (B[j] - 1)] / 255; vals[j] = v; raw[j] = v; }
+    }
+  }
+  return { raw, vals, lo: 0, span: 1 };  // CI ∈ [0, 1]
+}
 function colorInfo() {
+  if (sel.colorBy === "ci") return ciInfo();
   const raw = rawValues();
   if (sel.mod > 1) {
     const m = Math.round(sel.mod), k = Math.round(sel.offset), vals = new Float32Array(raw.length);
@@ -230,17 +280,17 @@ el("chart").addEventListener("click", ev => {
 function arrowsFor() {  // decoded arrows for the current (kind, site, basis, period)
   if (sel.dirKind === "none") return [];
   const rec = D.arrows[sel.dirKind][sel.site][sel.basis][nearestPeriodIdx(sel.basis, sel.period)];
-  const mat = decodeI8(rec.mat), idx = decodeI16(rec.idx), cs = decodeF16(rec.cs);
+  const mat = decodeI8(rec.mat), idx = decodeI16(rec.idx), cs = decodeF16(rec.cs), ang = decodeF16(rec.ang);
   const T = sel.period, out = [];
   for (let i = 0; i < mat.length; i++) {
     const c = cs[2 * i], s = cs[2 * i + 1], norm = Math.hypot(c, s);
     const residue = (((Math.atan2(s, c) / (2 * Math.PI / T)) % T) + T) % T;
-    out.push({ tag: D.meta.mat_labels[mat[i]], id: idx[i], c, s, norm, residue });
+    out.push({ tag: D.meta.mat_labels[mat[i]], id: idx[i], c, s, norm, residue, ang: ang[i] });
   }
   return out;
 }
 function drawArrowhead(ctx, x0, y0, x1, y1, color) {
-  const ang = Math.atan2(y1 - y0, x1 - x0), h = 8;
+  const ang = Math.atan2(y1 - y0, x1 - x0), h = 20;
   ctx.fillStyle = color;
   ctx.beginPath(); ctx.moveTo(x1, y1);
   ctx.lineTo(x1 - h * Math.cos(ang - 0.4), y1 - h * Math.sin(ang - 0.4));
@@ -277,14 +327,20 @@ function drawScatter() {
   ctx.moveTo(ox, oy - 5); ctx.lineTo(ox, oy + 5); ctx.stroke();
   // arrows from origin
   let shown = 0;
+  const s = sel.selected;
   for (const ar of st.arrows) {
     if (ar.norm < sel.thresh) continue;
     shown++;
     const x1 = cx + (ar.c - v.cx) * v.k, y1 = cy - (ar.s - v.cy) * v.k;
     const col = TAG_COLOR[ar.tag] || "#666";
-    ctx.strokeStyle = col; ctx.lineWidth = 1.8;
+    const isSel = s && ar.tag === s.tag && ar.id === s.id;
+    ctx.strokeStyle = col; ctx.lineWidth = isSel ? 3.6 : 1.8;
     ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(x1, y1); ctx.stroke();
     drawArrowhead(ctx, ox, oy, x1, y1, col);
+    if (isSel) {  // black ring on the selected arrowhead
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x1, y1, 9, 0, 7); ctx.stroke();
+    }
   }
   st.shown = shown;
 }
@@ -314,12 +370,22 @@ cv.addEventListener("wheel", ev => {
   st.view.cx = wx - (mx - SIZE / 2) / st.view.k; st.view.cy = wy + (my - SIZE / 2) / st.view.k;
   drawScatter();
 }, { passive: false });
-let drag = null;
-cv.addEventListener("mousedown", ev => { drag = { x: ev.offsetX, y: ev.offsetY, cx: scat.view.cx, cy: scat.view.cy }; });
+let drag = null, dragMoved = false;
+cv.addEventListener("mousedown", ev => {
+  drag = { x: ev.offsetX, y: ev.offsetY, cx: scat.view.cx, cy: scat.view.cy }; dragMoved = false;
+});
 window.addEventListener("mouseup", () => { drag = null; });
+cv.addEventListener("click", ev => {  // pick the arrow under the cursor (ignore drag-releases)
+  if (dragMoved) return;
+  const ar = arrowAt(scat, ev.offsetX, ev.offsetY);
+  sel.selected = ar ? { tag: ar.tag, id: ar.id, ang: ar.ang, basis: sel.basis, period: sel.period } : null;
+  updateInfo(); drawScatter();
+  if (sel.colorBy === "ci") { scat.color = colorInfo(); updateLegend(scat.color); drawScatter(); }
+});
 cv.addEventListener("mousemove", ev => {
   const st = scat; if (!st) return;
   if (drag) {
+    dragMoved = true;
     st.view.cx = drag.cx - (ev.offsetX - drag.x) / st.view.k;
     st.view.cy = drag.cy + (ev.offsetY - drag.y) / st.view.k; drawScatter(); return;
   }
@@ -346,6 +412,40 @@ function renderArrowList() {
        <b>${ar.tag}${ar.id}</b> · ${ar.norm.toFixed(3)} · res ${ar.residue.toFixed(2)}</div>`
   ).join("") || "<i>none above threshold</i>";
 }
+// ---- selection info panel (angle + subcomponent dot-product heatmap) ------------------------
+function renderHeat(matid) {
+  const heat = reconstructHeat(matid, sel.site);
+  let mx = 1e-9; for (let i = 0; i < heat.length; i++) mx = Math.max(mx, Math.abs(heat[i]));
+  const off = document.createElement("canvas"); off.width = GRID_N; off.height = GRID_N;
+  const octx = off.getContext("2d"), img = octx.createImageData(GRID_N, GRID_N);
+  for (let a = 0; a < GRID_N; a++) for (let b = 0; b < GRID_N; b++) {
+    const col = divColor(heat[a * GRID_N + b] / mx), o = ((GRID_N - 1 - b) * GRID_N + a) * 4;  // x=a, y=b↑
+    img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2]; img.data[o + 3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  const ctx = el("heat").getContext("2d"); ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, 256, 256); ctx.drawImage(off, 0, 0, 256, 256);
+  el("heatCap").textContent = `dir·activation over (a→x, b→y) at ${sel.site} · ±${mx.toFixed(3)} (blue−/red+)`;
+}
+function updateInfo() {
+  const s = sel.selected, panel = el("infoPanel");
+  if (!s) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  const cur = scat.arrows.find(a => a.tag === s.tag && a.id === s.id);  // current-plane angle if shown
+  const ang = cur ? cur.ang : s.ang, pBasis = cur ? sel.basis : s.basis, pT = cur ? sel.period : s.period;
+  const isSub = sel.dirKind === "subcomponents";
+  el("infoCap").textContent = `${s.tag}${s.id} — ${TAG_NAME[s.tag]} ${isSub ? "subcomponent" : "neuron"}`;
+  let html = `angle to plane (${pBasis}, T=${pT}): <b>${ang == null ? "–" : ang.toFixed(1) + "°"}</b>`
+    + `<br><span style="color:#888">0° = direction lies in the plane, 90° = orthogonal</span>`;
+  if (isSub && heatIndex[s.tag + s.id] !== undefined) {
+    renderHeat(s.tag + s.id);
+    el("heat").style.display = ""; el("heatCap").style.display = "";
+  } else {
+    el("heat").style.display = "none"; el("heatCap").style.display = "none";
+    if (!isSub) html += `<br><br><i>heatmap: subcomponents only</i>`;
+  }
+  el("infoBody").innerHTML = html;
+}
 function rebuildScatter() {
   const idx = nearestPeriodIdx(sel.basis, sel.period);
   const points = decodeF16(D.points[sel.site][sel.basis][idx]);
@@ -356,7 +456,7 @@ function rebuildScatter() {
   const dir = (sel.basis === "a+b") ? "write" : "read";
   el("scatCap").textContent = `${SITE_LABEL[sel.site] || sel.site} — basis "${sel.basis}" (${dir}), period ${sel.period}`
     + (r2 == null ? "" : `  (R²=${r2.toFixed(3)})`);
-  drawScatter(); renderArrowList();
+  drawScatter(); renderArrowList(); updateInfo();
 }
 function recolor() {
   sel.colorBy = el("colorBy").value; sel.mod = parseFloat(el("mod").value) || 1;
@@ -369,7 +469,9 @@ el("basis").addEventListener("change", () => {
   sel.period = periodsOf(sel.basis)[nearestPeriodIdx(sel.basis, sel.period)];
   drawChart(); rebuildScatter();
 });
-el("dirKind").addEventListener("change", () => { sel.dirKind = el("dirKind").value; rebuildScatter(); });
+el("dirKind").addEventListener("change", () => {
+  sel.dirKind = el("dirKind").value; sel.selected = null; rebuildScatter();
+});
 el("thresh").addEventListener("input", () => {
   sel.thresh = parseFloat(el("thresh").value) || 0;
   if (scat) { scat.view = initView(scat.points, scat.arrows); drawScatter(); renderArrowList(); }
@@ -381,7 +483,8 @@ el("offset").addEventListener("input", recolor);
 el("title").textContent = `Direction scatter — ${D.meta.run}`;
 el("hint").textContent = `L${D.meta.layer} MLP ${D.meta.kinds.join(" / ")} directions on the normalised Fourier plane`
   + ` (read g/u on operands a,b; write d on a+b). Arrows = unit·probe (Fig 9c scale), from the ring centre;`
-  + ` threshold filters by |v·d|. Cloud: ${D.meta.n_show} of ${D.meta.n_total} activations, centred & rescaled.`;
+  + ` threshold filters by |v·d|. Click an arrow for its plane-angle + (subcomponents) dir·activation heatmap.`
+  + ` Cloud: ${D.meta.n_show} of ${D.meta.n_total} activations, centred & rescaled.`;
 drawChart(); rebuildScatter();
 </script>
 </body>

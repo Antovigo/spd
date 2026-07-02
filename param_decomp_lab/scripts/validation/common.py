@@ -50,6 +50,10 @@ def b64_i8(arr: NDArray[Any]) -> str:
     return base64.b64encode(np.ascontiguousarray(arr, dtype=np.int8).tobytes()).decode("ascii")
 
 
+def b64_u8(arr: NDArray[Any]) -> str:
+    return base64.b64encode(np.ascontiguousarray(arr, dtype=np.uint8).tobytes()).decode("ascii")
+
+
 def op_symbol(op: str) -> str:
     assert op in OP_SYMBOL, f"unknown operation {op!r}; expected one of {list(OP_SYMBOL)}"
     return OP_SYMBOL[op]

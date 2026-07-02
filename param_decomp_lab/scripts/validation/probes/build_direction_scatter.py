@@ -19,17 +19,28 @@ read and write: write = `U[c]·‖V[:,c]‖`, read = `V[:,c]·‖U[c]‖`. This 
 activation — the same quantity a neuron's raw row/column is, so the two coexist on one scale.
 Only the top-`top_k` units by projected 2D norm are shipped per plane; the threshold slider filters.
 
+Selecting an arrow opens a right panel: its **angle** to the current Fourier plane (0° = the direction
+lies in the plane), and — for a subcomponent — the **`dir · activation(a, b)` heatmap** (its inner
+activation for reads, write-projection for writes). The heatmap is reconstructed in-browser from a
+per-site low-rank basis of the activation grid (`heat_rank` components), so any of the ~1.4k
+subcomponents works without shipping a grid each. A **colour-by CI** mode tints the points by the
+selected subcomponent's causal importance, read from the `inner_activations_add.tsv` `ci` column
+(a, b ≤ 100; points outside are greyed). Neuron heatmaps are omitted (too many directions to basis).
+
 Consumes a decomposition `<run>/model_<step>.pth` plus the shared `resid_activations.npz` +
 `probes_<site>.json` (from `collect_resid_activations` / `fit_fourier_probes`; the probes' target
-model must be the same base model the checkpoint decomposes). CPU-only.
+model must be the same base model the checkpoint decomposes) and, for CI colouring, the run's
+`analysis/datasets/inner_activations_add.tsv`. CPU-only.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_direction_scatter <checkpoint.pth> \
-        <resid_activations.npz> [--layer=18] [--top-k=100] [--n-show=10000] [--output-dir=PATH]
+        <resid_activations.npz> [--layer=18] [--top-k=100] [--n-show=8000] [--heat-rank=48] \
+        [--output-dir=PATH]
 
 Output: `<run>/analysis/direction_scatter/{index.html,data.js}` (default).
 """
 
+import csv
 import json
 import shutil
 from pathlib import Path
@@ -38,14 +49,17 @@ from typing import Any
 import fire
 import numpy as np
 from numpy.typing import NDArray
+from sklearn.utils.extmath import randomized_svd
 
 from param_decomp.log import logger
 from param_decomp_lab.scripts.validation.common import (
     RESID_SITES,
+    analysis_datasets_dir,
     analysis_dir,
     b64_f16,
     b64_i8,
     b64_i16,
+    b64_u8,
     load_component_uv,
     load_target_mlp_weights,
 )
@@ -54,6 +68,9 @@ _APP_TEMPLATE = Path(__file__).with_name("direction_scatter_app.html")
 _MAT_CODE = {"g": 0, "u": 1, "d": 2}  # gate-read / up-read / down-write
 _KINDS = ("neurons", "subcomponents")
 _MLP = ("gate_proj", "up_proj", "down_proj")
+_PROJ_MAT = {"gate_proj": "g", "up_proj": "u", "down_proj": "d"}
+_HEAT_RANK = 48  # low-rank of each site's activation grid; heatmaps reconstruct in this subspace
+_CI_N = 100  # inner_activations harvest grid side (a, b ∈ 1..100)
 
 
 def _frame(
@@ -113,12 +130,66 @@ def _write_candidates(
     return dirs, mats, np.arange(dirs.shape[0])
 
 
+def _ortho_plane(probe: dict[str, Any]) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Orthonormal basis `(e1, e2)` of the probe plane `span(w_cos, w_sin)`, for the direction→plane
+    angle. `e2 = 0` when the plane is degenerate (period-2 `sin ≡ 0`), collapsing to the cos axis."""
+    w_cos = np.asarray(probe["w_cos"], np.float32)
+    w_sin = np.asarray(probe["w_sin"], np.float32)
+    e1 = w_cos / max(float(np.linalg.norm(w_cos)), 1e-12)
+    perp = w_sin - (w_sin @ e1) * e1
+    n_perp = float(np.linalg.norm(perp))
+    e2 = perp / n_perp if n_perp > 1e-6 else np.zeros_like(e1)
+    return e1, e2
+
+
+def _subcomp_dirs(
+    uv: dict[str, tuple[Any, Any]],
+) -> tuple[list[str], NDArray[np.float32]]:
+    """Raw residual-space direction per subcomponent (its inner-activation / write vector): gate/up
+    read `V[:,c]`, down write `U[c]`. Returns matids (`"g0"`, `"u3"`, `"d7"`, …) and `[N, d_model]`.
+    Unscaled by the gauge norm — the heatmap is `dir · activation`, whose (a, b) pattern is
+    invariant to that per-component constant."""
+    matids: list[str] = []
+    dirs: list[NDArray[np.float32]] = []
+    for proj in ("gate_proj", "up_proj"):
+        v = uv[proj][0]  # (d_model, C)
+        dirs.append(v.T.astype(np.float32))
+        matids += [f"{_PROJ_MAT[proj]}{c}" for c in range(v.shape[1])]
+    u_down = uv["down_proj"][1]  # (C, d_model)
+    dirs.append(u_down.astype(np.float32))
+    matids += [f"d{c}" for c in range(u_down.shape[0])]
+    return matids, np.concatenate(dirs, axis=0)
+
+
+def _read_ci_grids(tsv: Path) -> dict[str, NDArray[np.float32]]:
+    """`{matid: (n, n) CI grid}` from an `inner_activations_<op>.tsv` `ci` column (a, b ∈ 1..n). `{}`
+    if the file / column is absent, so CI colouring degrades gracefully. Each present subcomponent
+    is assumed fully covered (the harvest sweeps the whole grid)."""
+    if not tsv.exists():
+        return {}
+    grids: dict[str, NDArray[np.float32]] = {}
+    with tsv.open() as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        if "ci" not in (reader.fieldnames or []):
+            return {}
+        for row in reader:
+            a, b = int(row["a"]), int(row["b"])
+            if a > _CI_N or b > _CI_N:
+                continue
+            matid = _PROJ_MAT[row["matrix"].split(".")[-1]] + row["subcomponent"]
+            grids.setdefault(matid, np.zeros((_CI_N, _CI_N), np.float32))[a - 1, b - 1] = float(
+                row["ci"]
+            )
+    return grids
+
+
 def build_direction_scatter(
     checkpoint: str,
     activations_npz: str,
     layer: int = 18,
     top_k: int = 100,
-    n_show: int = 10000,
+    n_show: int = 8000,
+    heat_rank: int = _HEAT_RANK,
     output_dir: str | None = None,
 ) -> Path:
     ck = Path(checkpoint).expanduser()
@@ -147,14 +218,36 @@ def build_direction_scatter(
     d_model = weights["down_proj"].shape[0]
     read_cand = {k: _read_candidates(k, weights, uv) for k in _KINDS}
     write_cand = {k: _write_candidates(k, weights, uv) for k in _KINDS}
+    dnorm = {  # ‖dir‖ per candidate row, for the direction→plane angle (uses the unit direction)
+        "read": {k: np.linalg.norm(read_cand[k][0], axis=1) for k in _KINDS},
+        "write": {k: np.linalg.norm(write_cand[k][0], axis=1) for k in _KINDS},
+    }
+    sub_matids, sub_dirs = _subcomp_dirs(uv)  # raw residual dir per subcomponent, for heatmaps
 
     points_out: dict[str, dict[str, list[str]]] = {}
     r2_out: dict[str, dict[str, list[float | None]]] = {}
     arrows_out: dict[str, dict[str, dict[str, list[dict[str, str]]]]] = {k: {} for k in _KINDS}
+    heat_p: dict[str, str] = {}  # (n_total, R) low-rank spatial basis per site
+    heat_qd: dict[str, str] = {}  # (N_sub, R) direction coords in that basis
+    heat_m: dict[str, str] = {}  # (N_sub,) direction · site-mean
     all_norms: list[NDArray[np.float32]] = []
     for site, payload in site_payloads.items():
         probes = payload["probes"]
         x = data[f"resid_{site}"].reshape(g * g, -1).astype(np.float32)
+        # Low-rank of the (mean-centred) activation grid: dir·act(a,b) ≈ (dir·mean) + P @ (Vᵀ·dir),
+        # so the browser reconstructs any subcomponent's dot-product heatmap from a shared per-site
+        # basis P and a small per-direction vector. Exact within the top-`heat_rank` subspace.
+        mean_s = x.mean(axis=0)
+        u_svd, s_svd, vt_svd = randomized_svd(x - mean_s, n_components=heat_rank, random_state=0)
+        p_lr = (u_svd * s_svd).astype(np.float32)
+        m_s = (sub_dirs @ mean_s).astype(np.float32)
+        heat_p[site] = b64_f16(p_lr)
+        heat_qd[site] = b64_f16((sub_dirs @ vt_svd.T).astype(np.float32))
+        heat_m[site] = b64_f16(m_s)
+        if site == "post":
+            approx = m_s[0] + p_lr @ (sub_dirs[0] @ vt_svd.T)
+            corr = float(np.corrcoef(approx, x @ sub_dirs[0])[0, 1])
+            logger.info(f"heatmap low-rank R={heat_rank}: {sub_matids[0]} recon corr={corr:.4f}")
         points_out[site], r2_out[site] = {}, {}
         for k in _KINDS:
             arrows_out[k][site] = {}
@@ -162,18 +255,25 @@ def build_direction_scatter(
             ps = periods_by_var[var]
             points_out[site][var], r2_out[site][var] = [], []
             axes = np.empty((d_model, 2 * len(ps)), np.float32)  # [.. axis_cos_j, axis_sin_j ..]
+            ortho = np.empty(
+                (d_model, 2 * len(ps)), np.float32
+            )  # orthonormal plane basis, for angle
             for j, p in enumerate(ps):
                 probe = probes[var][str(p)]
                 axis_c, axis_s, center = _frame(probe, x)
                 axes[:, 2 * j], axes[:, 2 * j + 1] = axis_c, axis_s
+                ortho[:, 2 * j], ortho[:, 2 * j + 1] = _ortho_plane(probe)
                 cloud = np.stack([x @ axis_c - center[0], x @ axis_s - center[1]], axis=1)
                 points_out[site][var].append(b64_f16(cloud[subset]))
                 r2s = [probe[c] for c in ("r2_cos", "r2_sin") if probe[c] is not None]
                 r2_out[site][var].append(round(float(np.mean(r2s)), 4) if r2s else None)
-            cand = read_cand if var in ("a", "b") else write_cand
+            role = "read" if var in ("a", "b") else "write"
+            cand = read_cand if role == "read" else write_cand
             for k in _KINDS:
                 dirs, mats, idx = cand[k]
                 proj = dirs @ axes  # (M, 2P); NOT centred — arrows are increments from ring centre
+                oproj = dirs @ ortho  # (M, 2P) onto the orthonormal plane basis, for the angle
+                dn = dnorm[role][k]
                 arrows_out[k][site][var] = []
                 for j, p in enumerate(ps):
                     c, s = proj[:, 2 * j], proj[:, 2 * j + 1]
@@ -181,11 +281,14 @@ def build_direction_scatter(
                     kk = min(top_k, norm.shape[0])
                     top = np.argpartition(norm, -kk)[-kk:]
                     top = top[np.argsort(norm[top])[::-1]]
+                    inplane = np.sqrt(oproj[top, 2 * j] ** 2 + oproj[top, 2 * j + 1] ** 2)
+                    ang = np.degrees(np.arccos(np.clip(inplane / np.maximum(dn[top], 1e-12), 0, 1)))
                     arrows_out[k][site][var].append(
                         {
                             "mat": b64_i8(mats[top]),
                             "idx": b64_i16(idx[top].astype(np.int16)),
                             "cs": b64_f16(np.stack([c[top], s[top]], axis=1)),
+                            "ang": b64_f16(ang.astype(np.float32)),
                         }
                     )
                     all_norms.append(norm[top])
@@ -195,10 +298,15 @@ def build_direction_scatter(
                         )
             logger.info(f"{site}/{var}: {len(ps)} planes")
 
+    run_dir = ck.parent
+    ci_grids = _read_ci_grids(analysis_datasets_dir(run_dir) / "inner_activations_add.tsv")
+    ci_out = {mid: b64_u8(np.clip(grid, 0.0, 1.0) * 255.0) for mid, grid in ci_grids.items()}
+    logger.info(f"CI colour data for {len(ci_out)} subcomponents (a, b ≤ {_CI_N})")
+
     norms = np.concatenate(all_norms)
     out = {
         "meta": {
-            "run": ck.parent.name,
+            "run": run_dir.name,
             "sites": list(site_payloads),
             "variables": variables,
             "periods": periods_by_var,
@@ -214,14 +322,18 @@ def build_direction_scatter(
             "layer": first["layer"],
             "n_total": g * g,
             "n_show": n_show,
+            "heat_rank": heat_rank,
+            "has_ci": bool(ci_out),
+            "ci_n": _CI_N,
         },
         "a": b64_i16(a_flat[subset]),
         "b": b64_i16(b_flat[subset]),
         "points": points_out,
         "arrows": arrows_out,
+        "heat": {"matids": sub_matids, "p": heat_p, "qd": heat_qd, "m": heat_m},
+        "ci": ci_out,
     }
 
-    run_dir = ck.parent
     out_dir = (
         Path(output_dir).expanduser() if output_dir else analysis_dir(run_dir) / "direction_scatter"
     )

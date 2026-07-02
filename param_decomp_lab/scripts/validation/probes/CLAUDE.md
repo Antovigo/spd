@@ -90,6 +90,24 @@ and the cloud is recomputed in that same normalised, mean-centred frame — so `
 ring centre as an increment) and `x·d − mean` (activation) share one scale. Only the top-`top_k`
 units by projected 2D norm are shipped per plane; the **threshold** slider filters those by `|v·d|`.
 
+**Selection panel** (ported from `build_fourier_scatter`): click an arrowhead to open a right panel.
+
+- **Angle** to the current Fourier plane (0° = the direction lies in the plane, 90° = orthogonal),
+  from the orthonormal in-plane fraction of the *unit* direction. Shipped per shown arrow (`ang`), so
+  it tracks the current site/period; both neurons and subcomponents.
+- **`dir · activation(a, b)` heatmap** — subcomponents only (its inner activation for reads,
+  write-projection for writes). Too many neuron directions to ship a grid each, so it's reconstructed
+  in-browser: each site's activation grid gets a rank-`heat_rank` factorisation (`randomized_svd`),
+  shipped as a shared spatial basis `P` plus a per-subcomponent `qd = Vᵀ·dir` and `m = dir·mean`;
+  `dir·act(a,b) = m + P·qd`. Exact within the top-`heat_rank` subspace — on real component directions
+  (`R=48`) the reconstruction correlates ~0.93+ with the exact grid. Uses the **current site**.
+- **Colour by CI**: tints points by the selected subcomponent's causal importance, read from the run's
+  `analysis/datasets/inner_activations_add.tsv` `ci` column (a, b ≤ 100; points outside are grey).
+  Only the subcomponents that harvest covered are present; others fall back to grey.
+
+Arrowheads render at Fig-9c-legible size. `n_show` defaults to 8000 to keep `data.js` ~85 MB with the
+added heatmap basis + CI grids.
+
 The target model must be the same base model the checkpoint decomposes (it always is — L18 MLP
 decompositions freeze base Llama-3.1-8B), so the shared `resid_activations.npz` + `probes_<site>.json`
 apply to any run. Sanity check baked into the generator: on `post`/`a+b`/`T=10` the top-8 write
