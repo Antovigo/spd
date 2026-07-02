@@ -16,16 +16,18 @@ max_period)` (`max_period=150`; so `a`,`b` → 2..100, `a+b` → 2..150). This i
 spike only at the true periods and stay low elsewhere (a fake period gives a blob, not a circle).
 `--periods` overrides with an explicit shared list.
 
-Consumes `resid_activations.npz` from `collect_resid_activations`. GPU strongly recommended (500
-epochs × ~700 probes for the full sweep); pass `--slurm` to submit as a single-GPU job.
+Consumes `resid_activations.npz` from `collect_resid_activations`; `--site` picks which grid —
+`post` (residual after the MLP, default) or `pre` (residual before the MLP). GPU strongly
+recommended (500 epochs × ~700 probes for the full sweep); pass `--slurm` to submit as a
+single-GPU job.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.fit_fourier_probes <resid_activations.npz> \
-        [--max-period=150 | --periods=2,5,10,...] [--output=PATH] [--slurm ...]
+        [--site=post|pre] [--max-period=150 | --periods=2,5,10,...] [--output=PATH] [--slurm ...]
 
-Output (default `probes.json` beside the npz): metadata (`periods_by_variable`, `max_period`) +
-`probes[variable][period] = {w_cos, b_cos, w_sin, b_sin, r2_cos, r2_sin}`, weight vectors
-`d_model`-long.
+Output (default `probes_<site>.json` beside the npz): metadata (`site`, `periods_by_variable`,
+`max_period`) + `probes[variable][period] = {w_cos, b_cos, w_sin, b_sin, r2_cos, r2_sin}`, weight
+vectors `d_model`-long.
 """
 
 import json
@@ -91,6 +93,7 @@ def _train_probe(
 
 def fit_fourier_probes(
     resid_activations_npz: str,
+    site: str = "post",
     periods: tuple[int, ...] | int | None = None,
     max_period: int = 150,
     output: str | None = None,
@@ -100,9 +103,12 @@ def fit_fourier_probes(
     slurm_time: str = "2:00:00",
     slurm_mem: str | None = None,
 ) -> Path | None:
+    assert site in ("post", "pre"), (
+        f"site must be 'post' (after MLP) or 'pre' (before MLP), got {site!r}"
+    )
     npz_path = Path(resid_activations_npz).expanduser()
     if slurm:
-        argv = [str(npz_path), f"--max-period={max_period}"]
+        argv = [str(npz_path), f"--site={site}", f"--max-period={max_period}"]
         if periods is not None:
             argv.append(f"--periods={','.join(str(p) for p in _as_tuple(periods))}")
         if output is not None:
@@ -110,14 +116,14 @@ def fit_fourier_probes(
         opts = SlurmOptions(
             partition=partition, gpus=gpus, slurm_time=slurm_time, slurm_mem=slurm_mem
         )
-        submit_self_to_slurm(_MODULE, argv, opts, job_name="val-fit-probes")
+        submit_self_to_slurm(_MODULE, argv, opts, job_name=f"val-fit-probes-{site}")
         return None
 
     assert npz_path.exists(), f"missing resid activations: {npz_path}"
     # None → Feucht's full per-variable sweep `2..min(v.max()//2, max_period)`; else a shared list.
     explicit_periods = _as_tuple(periods) if periods is not None else None
     data = np.load(npz_path)
-    grid = data["resid"]  # [G, G, d] fp16, indexed [a-1, b-1]
+    grid = data[f"resid_{site}"]  # [G, G, d] fp16, indexed [a-1, b-1]
     g = int(grid.shape[0])
     a_axis, b_axis = data["a"].astype(np.int64), data["b"].astype(np.int64)
     # flatten a-outer / b-inner (matches Feucht's prompt order so the split coincides)
@@ -179,7 +185,7 @@ def fit_fourier_probes(
         "model": "meta-llama/Llama-3.1-8B",
         "layer": int(data["layer"]),
         "max_value": int(data["max_value"]),
-        "site": "resid_layer_output",
+        "site": site,  # 'post' = resid after MLP, 'pre' = resid before MLP (input to RMSNorm)
         "variables": list(variables),
         "periods_by_variable": periods_by_variable,
         "max_period": max_period,
@@ -190,7 +196,7 @@ def fit_fourier_probes(
         "source": str(npz_path),
         "probes": probes,
     }
-    out_path = Path(output).expanduser() if output else npz_path.with_name("probes.json")
+    out_path = Path(output).expanduser() if output else npz_path.with_name(f"probes_{site}.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload))
     logger.info(f"wrote probes ({out_path.stat().st_size / 1e6:.1f} MB) → {out_path}")

@@ -10,6 +10,10 @@
   select, input { font-size: 13px; padding: 2px 4px; }
   #title { font-weight: 600; font-size: 15px; margin-right: 8px; }
   #hint { font-size: 11px; color: #666; margin: 2px 0 6px; }
+  #siteTabs { display: flex; gap: 2px; margin-bottom: 6px; }
+  .tab { font-size: 12px; padding: 4px 12px; border: 1px solid #ccc; border-bottom: none;
+         background: #f0f0f0; cursor: pointer; border-radius: 4px 4px 0 0; }
+  .tab.active { background: #fff; font-weight: 600; border-color: #999; }
   #lower { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
   .panel { border: 1px solid #ddd; }
   .cap { font-size: 12px; text-align: center; padding: 3px; background: #f6f6f6; color: #333; }
@@ -35,6 +39,7 @@
   </label>
 </div>
 <div id="hint"></div>
+<div id="siteTabs"></div>
 <div class="panel" style="display:inline-block">
   <div class="cap">held-out R² vs period — click a period to view its scatter (spikes = real features)</div>
   <canvas id="chart" width="1000" height="270"></canvas>
@@ -86,7 +91,7 @@ function viridis(t) {
 const A = decodeI16(D.a), B = decodeI16(D.b);
 const VAR_COLORS = { "a": "#1f77b4", "b": "#2ca02c", "a+b": "#d62728" };
 const SIZE = 460;
-const sel = { basis: null, period: null, colorBy: "a+b", mod: 1, offset: 0 };
+const sel = { site: null, basis: null, period: null, colorBy: "a+b", mod: 1, offset: 0 };
 let scat = null;
 
 function fill(node, values, labels) {
@@ -98,6 +103,20 @@ fill(el("basis"), D.meta.variables, D.meta.variables.map(v => "probe: " + v));
 fill(el("colorBy"), ["a", "b", "a+b"]);
 sel.basis = D.meta.variables.includes("a+b") ? "a+b" : D.meta.variables[0];
 el("basis").value = sel.basis; el("colorBy").value = sel.colorBy;
+
+// site tabs: which residual-stream site the probes were fit on
+const SITE_LABEL = { post: "after MLP (L18 output)", pre: "before MLP (input to RMSNorm)" };
+sel.site = D.meta.sites[0];
+D.meta.sites.forEach(s => {
+  const t = document.createElement("div"); t.className = "tab" + (s === sel.site ? " active" : "");
+  t.textContent = SITE_LABEL[s] || s;
+  t.addEventListener("click", () => {
+    sel.site = s;
+    [...el("siteTabs").children].forEach(c => c.classList.toggle("active", c === t));
+    drawChart(); rebuildScatter();
+  });
+  el("siteTabs").appendChild(t);
+});
 
 function periodsOf(v) { return D.meta.periods[v]; }
 function nearestPeriodIdx(v, p) {  // index into periodsOf(v) of the closest period to p
@@ -142,7 +161,7 @@ function drawChart() {
   const ctx = el("chart").getContext("2d");
   ctx.clearRect(0, 0, CH.w, CH.h);
   let lo = 0;
-  for (const v of D.meta.variables) for (const r of D.meta.r2[v]) if (r != null) lo = Math.min(lo, r);
+  for (const v of D.meta.variables) for (const r of D.meta.r2[sel.site][v]) if (r != null) lo = Math.min(lo, r);
   lo = Math.max(-0.5, lo);  // clip extreme negatives for display
   chartY = r => CH.t + (1 - (Math.max(lo, r) - lo) / (1 - lo)) * (CH.h - CH.t - CH.b);
   // y gridlines
@@ -162,7 +181,7 @@ function drawChart() {
   ctx.beginPath(); ctx.moveTo(xs, CH.t); ctx.lineTo(xs, CH.h - CH.b); ctx.stroke();
   // one polyline per variable
   D.meta.variables.forEach((v, vi) => {
-    const ps = periodsOf(v), r2 = D.meta.r2[v];
+    const ps = periodsOf(v), r2 = D.meta.r2[sel.site][v];
     ctx.strokeStyle = VAR_COLORS[v] || "#666"; ctx.lineWidth = 1.6; ctx.beginPath();
     let started = false;
     for (let i = 0; i < ps.length; i++) {
@@ -177,25 +196,19 @@ function drawChart() {
     ctx.fillText(v, CH.w - CH.r - 75, CH.t + 13 + vi * 14);
   });
   // selected point on the basis line
-  const ix = nearestPeriodIdx(sel.basis, sel.period), rv = D.meta.r2[sel.basis][ix];
+  const ix = nearestPeriodIdx(sel.basis, sel.period), rv = D.meta.r2[sel.site][sel.basis][ix];
   if (rv != null) { ctx.fillStyle = "#000";
     ctx.beginPath(); ctx.arc(chartX(sel.period), chartY(rv), 4, 0, 7); ctx.fill(); }
 }
 el("chart").addEventListener("click", ev => {
-  const r = el("chart").getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
-  const pMax = D.meta.max_period, pClick = 2 + (mx - CH.l) / (CH.w - CH.l - CH.r) * (pMax - 2);
-  // nearest (variable, period) datapoint in pixels → pick basis + period
-  let best = null, bd = Infinity;
-  for (const v of D.meta.variables) {
-    const ps = periodsOf(v), r2 = D.meta.r2[v];
-    for (let i = 0; i < ps.length; i++) {
-      if (r2[i] == null) continue;
-      const d = (chartX(ps[i]) - mx) ** 2 + (chartY(r2[i]) - my) ** 2;
-      if (d < bd) { bd = d; best = { v, p: ps[i] }; }
-    }
-  }
-  if (!best) return;
-  sel.basis = best.v; sel.period = best.p; el("basis").value = sel.basis;
+  const r = el("chart").getBoundingClientRect(), mx = ev.clientX - r.left;
+  // pick the nearest period on the current basis's line (the dropdown chooses the variable)
+  const ps = periodsOf(sel.basis);
+  let bi = 0, bd = Infinity;
+  for (let i = 0; i < ps.length; i++) { const d = Math.abs(chartX(ps[i]) - mx); if (d < bd) { bd = d; bi = i; } }
+  sel.period = ps[bi];
+  // map the colormap's modulo to the picked period (colour by residue mod that period)
+  sel.mod = sel.period; el("mod").value = sel.period;
   drawChart(); rebuildScatter();
 });
 
@@ -261,12 +274,12 @@ cv.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
 
 function rebuildScatter() {
   const idx = nearestPeriodIdx(sel.basis, sel.period);
-  const points = decodeF16(D.points[sel.basis][idx]);
+  const points = decodeF16(D.points[sel.site][sel.basis][idx]);
   const color = colorInfo(); updateLegend(color);
   scat = { ctx: cv.getContext("2d"), view: initView(points), points, color,
-           center: D.centers[sel.basis][idx] };
-  const r2 = D.meta.r2[sel.basis][idx];
-  el("scatCap").textContent = `basis "${sel.basis}", period ${sel.period}`
+           center: D.centers[sel.site][sel.basis][idx] };
+  const r2 = D.meta.r2[sel.site][sel.basis][idx];
+  el("scatCap").textContent = `${SITE_LABEL[sel.site] || sel.site} — basis "${sel.basis}", period ${sel.period}`
     + (r2 == null ? "" : `  (R²=${r2.toFixed(3)})`);
   drawScatter();
 }
@@ -285,9 +298,9 @@ el("colorBy").addEventListener("change", recolor);
 el("mod").addEventListener("input", recolor);
 el("offset").addEventListener("input", recolor);
 
-el("hint").textContent = `activations at layer ${D.meta.layer} residual output, a,b in 1..${D.meta.max_value}`
+el("hint").textContent = `layer ${D.meta.layer} residual stream (tab: before/after the MLP), a,b in 1..${D.meta.max_value}`
   + ` (${D.meta.n_show} of ${D.meta.n_total} points shown); projected onto each probe's predicted (cos,sin).`
-  + ` A real period gives a circle (high R²); a fake period a blob.`;
+  + ` A real period gives a circle (high R²); a fake period a blob. Clicking a period sets the colour mod to it.`;
 drawChart(); rebuildScatter();
 </script>
 </body>

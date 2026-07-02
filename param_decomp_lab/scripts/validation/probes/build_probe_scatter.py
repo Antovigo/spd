@@ -11,14 +11,14 @@ the top activation-variance direction ⊥ the cos direction (rescaled so the res
 A fixed random subset of `n_show` points is shipped per plot (the sweep has hundreds of periods, and
 one scatter shows at a time) to bound `data.js` size / render cost.
 
-Consumes `resid_activations.npz` + `probes.json` from `collect_resid_activations` /
-`fit_fourier_probes`. CPU-only (no forward pass).
+Consumes `resid_activations.npz` (from `collect_resid_activations`) plus every `probes_<site>.json`
+beside it (from `fit_fourier_probes --site`); each site becomes a tab. CPU-only (no forward pass).
 
 Usage:
-    python -m param_decomp_lab.scripts.validation.probes.build_probe_scatter <probes.json> \
-        [--activations=PATH] [--n-show=15000] [--output-dir=PATH]
+    python -m param_decomp_lab.scripts.validation.probes.build_probe_scatter <resid_activations.npz> \
+        [--n-show=15000] [--output-dir=PATH]
 
-Output: `<out-dir>/probe_scatter/{index.html,data.js}` (default beside `probes.json`).
+Output: `<out-dir>/probe_scatter/{index.html,data.js}` (default beside the npz).
 """
 
 import base64
@@ -81,57 +81,68 @@ def _project(plane: dict[str, Any], x: NDArray[np.float32]) -> NDArray[np.float3
 
 
 def build_probe_scatter(
-    probes_json: str,
-    activations: str | None = None,
+    activations_npz: str,
     output_dir: str | None = None,
     n_show: int = 15000,
 ) -> Path:
-    probes_path = Path(probes_json).expanduser()
-    assert probes_path.exists(), f"missing probes json: {probes_path}"
-    payload = json.loads(probes_path.read_text())
-    probes = payload["probes"]
-    variables = payload["variables"]
-    periods_by_var = {v: [int(p) for p in payload["periods_by_variable"][v]] for v in variables}
-
-    npz_path = (
-        Path(activations).expanduser() if activations else Path(payload["source"]).expanduser()
-    )
+    npz_path = Path(activations_npz).expanduser()
     assert npz_path.exists(), f"missing resid activations: {npz_path}"
     data = np.load(npz_path)
-    grid = data["resid"]
-    g = int(grid.shape[0])
-    x = grid.reshape(g * g, -1).astype(np.float32)
+    g = int(data["a"].shape[0])
+    # each site's probes live in `probes_<site>.json` beside the npz (fit_fourier_probes --site).
+    site_payloads = {
+        s: json.loads(p.read_text())
+        for s in ("post", "pre")
+        if (p := npz_path.with_name(f"probes_{s}.json")).exists()
+    }
+    assert site_payloads, f"no probes_<site>.json beside {npz_path} (run fit_fourier_probes first)"
+    first = next(iter(site_payloads.values()))
+    variables = first["variables"]
+    periods_by_var = {v: [int(p) for p in first["periods_by_variable"][v]] for v in variables}
+
     aa, bb = np.meshgrid(data["a"].astype(np.int64), data["b"].astype(np.int64), indexing="ij")
     a_flat, b_flat = aa.reshape(-1), bb.reshape(-1)
-    x_mean = x.mean(axis=0, keepdims=True)
     # one plot is shown at a time (click the R² curve), but the full sweep has hundreds of periods;
     # ship a fixed random subset of points per plot to bound data.js size + render cost.
     n_show = min(n_show, g * g)
     subset = np.sort(np.random.default_rng(0).choice(g * g, size=n_show, replace=False))
 
-    points_out: dict[str, list[str]] = {}
-    centers_out: dict[str, list[list[float]]] = {}
-    r2_out: dict[str, list[float | None]] = {}
-    for var in variables:
-        points_out[var], centers_out[var], r2_out[var] = [], [], []
-        for period in periods_by_var[var]:
-            probe = probes[var][str(period)]
-            plane = _plane(probe, x)
-            points_out[var].append(_b64_f16(_project(plane, x)[subset]))
-            centers_out[var].append([round(float(c), 4) for c in _project(plane, x_mean)[0]])
-            r2s = [probe[k] for k in ("r2_cos", "r2_sin") if probe[k] is not None]
-            r2_out[var].append(round(float(np.mean(r2s)), 4) if r2s else None)
-        logger.info(f"{var}: {len(periods_by_var[var])} periods projected")
+    points_out: dict[str, dict[str, list[str]]] = {}
+    centers_out: dict[str, dict[str, list[list[float]]]] = {}
+    r2_out: dict[str, dict[str, list[float | None]]] = {}
+    for site, payload in site_payloads.items():
+        assert {v: [int(p) for p in payload["periods_by_variable"][v]] for v in variables} == (
+            periods_by_var
+        ), f"site {site} has different periods than {next(iter(site_payloads))}"
+        probes = payload["probes"]
+        x = data[f"resid_{site}"].reshape(g * g, -1).astype(np.float32)
+        x_mean = x.mean(axis=0, keepdims=True)
+        points_out[site], centers_out[site], r2_out[site] = {}, {}, {}
+        for var in variables:
+            points_out[site][var], centers_out[site][var], r2_out[site][var] = [], [], []
+            for period in periods_by_var[var]:
+                probe = probes[var][str(period)]
+                plane = _plane(probe, x)
+                points_out[site][var].append(_b64_f16(_project(plane, x)[subset]))
+                centers_out[site][var].append(
+                    [round(float(c), 4) for c in _project(plane, x_mean)[0]]
+                )
+                r2s = [probe[k] for k in ("r2_cos", "r2_sin") if probe[k] is not None]
+                r2_out[site][var].append(round(float(np.mean(r2s)), 4) if r2s else None)
+        logger.info(
+            f"site {site}: projected {sum(len(periods_by_var[v]) for v in variables)} planes"
+        )
 
     out = {
         "meta": {
+            "sites": list(site_payloads),
             "variables": variables,
             "periods": periods_by_var,
             "r2": r2_out,
             "canonical": [2, 5, 10, 20, 50, 100],
-            "max_value": payload["max_value"],
-            "max_period": payload["max_period"],
-            "layer": payload["layer"],
+            "max_value": first["max_value"],
+            "max_period": first["max_period"],
+            "layer": first["layer"],
             "n_total": g * g,
             "n_show": n_show,
         },
@@ -141,7 +152,7 @@ def build_probe_scatter(
         "centers": centers_out,
     }
 
-    out_dir = Path(output_dir).expanduser() if output_dir else probes_path.parent / "probe_scatter"
+    out_dir = Path(output_dir).expanduser() if output_dir else npz_path.parent / "probe_scatter"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "data.js").write_text(
         f"window.PD_DATA = {json.dumps(out, separators=(',', ':'))};\n"

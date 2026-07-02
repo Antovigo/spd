@@ -9,17 +9,29 @@ folder (which probe the MLP in/out spaces with a closed-form fit). Everything he
 ## Pipeline
 
 ```
-collect_resid_activations.py  (GPU/--slurm)  → resid_activations.npz
-fit_fourier_probes.py         (GPU/--slurm)  → probes.json
+collect_resid_activations.py  (GPU/--slurm)  → resid_activations.npz  (resid_post + resid_pre)
+fit_fourier_probes.py --site  (GPU/--slurm)  → probes_<site>.json     (run once per site)
 build_probe_scatter.py        (CPU)          → probe_scatter/{index.html,data.js}
 ```
 
-Default artifact dir: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`.
+Default artifact dir: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`. `build_probe_scatter`
+takes the **npz** and picks up every `probes_<site>.json` beside it — one tab per site.
+
+## Two sites (before / after the MLP)
+
+The collector captures the layer-18 residual stream at two points around the MLP, in one
+forward pass; `fit_fourier_probes --site={post,pre}` fits the same probes on each:
+
+- **`post`** — the **decoder-block output** (`out[0]` of `model.layers[18]`): residual after
+  this layer's attention *and* MLP (Feucht's `source="resid"`). This is what Feucht ship.
+- **`pre`** — the input to `post_attention_layernorm`: residual *fed to* the RMSNorm+MLP,
+  i.e. after attention but **before the MLP** writes. Comparing the two isolates what L18's
+  MLP adds — the operand (`a`/`b`) curves are ~identical pre/post (already in the residual),
+  while `a+b`'s peak R² is higher post-MLP, i.e. the MLP sharpens the sum representation.
 
 ## Fidelity to Feucht
 
-- **Site**: the layer-18 **decoder-block output** (`out[0]` of `model.layers[18]`) = the
-  residual stream after that layer's attention *and* MLP have written (their `source="resid"`).
+- **Site**: Feucht's is `post` (the block output); `pre` is our added control.
 - **Data**: `{a}+{b}=` for `a, b ∈ 1..200` (40 000 prompts), **last token** (`=`), left-padded
   so position `-1` is always the `=`.
 - **Probe**: per period `T` and variable `v ∈ {a, b, a+b}` (their input / offset / output), two
@@ -34,14 +46,17 @@ Default artifact dir: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`.
 
 ## Applet — the control
 
-`build_probe_scatter` leads with an **R²-vs-period curve** (one line per variable). This is the
-control: R² should spike only at the model's true periods. Empirically `a+b` spikes sharply at
-periods 2/5/10 (+a broad 50–100 harmonic hump) and sits at ~0 elsewhere — clicking a spike period
-draws a **circle**, a valley period a **blob**. (`a`/`b` stay high at every period because a single
-operand is ~directly decodable, so any function of it is too; `a+b` is the discriminating variable.)
+`build_probe_scatter` leads with an **R²-vs-period curve** (one line per variable), under a
+**site tab** (before / after the MLP). This is the control: R² should spike only at the model's
+true periods. Empirically `a+b` spikes sharply at periods 2/5/10 (+a broad 50–100 harmonic hump)
+and sits at ~0 elsewhere — clicking a spike period draws a **circle**, a valley period a **blob**.
+(`a`/`b` stay high at every period because a single operand is ~directly decodable, so any function
+of it is too; `a+b` is the discriminating variable.)
 
-Clicking a period draws its scatter: the activations projected onto that probe's predicted
-`(cos, sin)` plane. Controls: **basis variable**, **colour by** `a`/`b`/`a+b` with **mod** +
-**offset** (`(value − offset) mod m`, scale `0..m-1`), zoom/pan, hover. A fixed `n_show` random
-subset of points is shipped per plot to bound `data.js`. Vanilla-JS canvas, no CDN — smoke-test
-with the parent folder's `headless_check.py`.
+Clicking the curve picks the period **on the current basis** (the **basis variable** dropdown
+chooses which of `a`/`b`/`a+b`), and sets the colour **mod** to that period so the residue classes
+line up. It draws the scatter: activations projected onto that probe's predicted `(cos, sin)` plane.
+Other controls: **colour by** `a`/`b`/`a+b` with **mod** + **offset** (`(value − offset) mod m`,
+scale `0..m-1`), zoom/pan, hover. A fixed `n_show` random subset of points is shipped per plot,
+**per site**, to bound `data.js`. Vanilla-JS canvas, no CDN — smoke-test with the parent folder's
+`headless_check.py`.

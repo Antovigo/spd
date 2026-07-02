@@ -1,10 +1,15 @@
-"""Collect Llama-3.1-8B's layer-18 residual-stream *output* over the `a+b=` grid (Feucht's site).
+"""Collect Llama-3.1-8B's layer-18 residual stream, before and after the MLP, over the `a+b=` grid.
 
 Reproduces Feucht et al.'s (2026, "Arithmetic in the Wild") activation extraction: runs every
 `{a}+{b}=` prompt for `a, b` in `1..max_value` (default 200, as they use) through the model and
-stores, at the **last token** (the `=`), the **decoder layer output** of `layer` — the residual
-stream after that layer's attention *and* MLP have written (their `source="resid"`, i.e. the block
-output `out[0]`). Batches are **left-padded**, so position `-1` is the `=` for every prompt.
+stores, at the **last token** (the `=`), two residual-stream sites around `layer`'s MLP:
+
+- `resid_post` — the **decoder-block output** (`out[0]`): the residual after this layer's attention
+  *and* MLP have written (Feucht's `source="resid"`).
+- `resid_pre`  — the input to `post_attention_layernorm`: the residual *fed to* the RMSNorm+MLP
+  sub-block, i.e. after attention but **before the MLP** writes.
+
+Batches are **left-padded**, so position `-1` is the `=` for every prompt.
 
 An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-GPU job.
 
@@ -13,9 +18,9 @@ Usage:
         [--layer=18] [--max-value=200] [--batch-size=64] [--output=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=1:00:00 --slurm-mem=...]]
 
-Output (default `resid_activations.npz` under `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`): a
-`resid` grid `[G, G, d_model]` fp16 indexed `[a-1, b-1]` (`G = max_value`), plus `a`, `b` axes,
-`layer`, `max_value`.
+Output (default `resid_activations.npz` under `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`):
+`resid_post` and `resid_pre` grids `[G, G, d_model]` fp16 indexed `[a-1, b-1]` (`G = max_value`),
+plus `a`, `b` axes, `layer`, `max_value`.
 """
 
 from pathlib import Path
@@ -77,30 +82,42 @@ def collect_resid_activations(
     ab = [(int(a), int(b)) for a in values for b in values]
     logger.info(f"{len(prompts)} prompts (a,b in 1..{max_value}), layer {layer}")
 
+    layer_mod = hf.get_submodule(f"model.layers.{layer}")
+    norm_mod = layer_mod.get_submodule("post_attention_layernorm")
     captured: dict[str, torch.Tensor] = {}
 
-    def hook(_m: Any, _inp: Any, out: Any) -> None:
-        hidden = out[0] if isinstance(out, tuple) else out  # decoder-layer output = resid stream
-        captured["resid"] = hidden[:, -1].float()  # last token (`=`), left-padded
+    def post_hook(_m: Any, _inp: Any, out: Any) -> None:
+        hidden = out[0] if isinstance(out, tuple) else out  # block output = resid after attn + MLP
+        captured["post"] = hidden[:, -1].float()  # last token (`=`), left-padded
 
-    handle = hf.get_submodule(f"model.layers.{layer}").register_forward_hook(hook)
+    def pre_hook(_m: Any, args: Any) -> None:
+        captured["pre"] = args[0][
+            :, -1
+        ].float()  # input to post_attention_layernorm = pre-MLP resid
 
-    grid: np.ndarray | None = None  # allocated on the first batch, once d_model is known
+    handles = [
+        layer_mod.register_forward_hook(post_hook),
+        norm_mod.register_forward_pre_hook(pre_hook),
+    ]
+
+    grids: dict[str, np.ndarray] = {}  # allocated on the first batch, once d_model is known
     with torch.no_grad(), bf16_autocast(enabled=run.cfg.runtime.autocast_bf16):
         for start in range(0, len(prompts), batch_size):
             batch = prompts[start : start + batch_size]
             inputs = tokenizer(batch, return_tensors="pt", padding=True).to(run.device)
             captured.clear()
             hf(**inputs)
-            acts = captured["resid"].cpu().numpy().astype(np.float16)
-            if grid is None:
-                grid = np.zeros((max_value, max_value, acts.shape[-1]), dtype=np.float16)
-            for i, (a, b) in enumerate(ab[start : start + len(batch)]):
-                grid[a - 1, b - 1] = acts[i]
+            for site in ("post", "pre"):
+                acts = captured[site].cpu().numpy().astype(np.float16)
+                if site not in grids:
+                    grids[site] = np.zeros((max_value, max_value, acts.shape[-1]), dtype=np.float16)
+                for i, (a, b) in enumerate(ab[start : start + len(batch)]):
+                    grids[site][a - 1, b - 1] = acts[i]
             if (start // batch_size) % 50 == 0:
                 logger.info(f"batch {start // batch_size + 1}/{-(-len(prompts) // batch_size)}")
-    handle.remove()
-    assert grid is not None, "no prompts processed"
+    for h in handles:
+        h.remove()
+    assert set(grids) == {"post", "pre"}, f"missing sites: {{'post', 'pre'}} - {set(grids)}"
 
     out_path = (
         Path(output).expanduser()
@@ -110,13 +127,16 @@ def collect_resid_activations(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out_path,
-        resid=grid,
+        resid_post=grids["post"],
+        resid_pre=grids["pre"],
         a=np.arange(1, max_value + 1, dtype=np.int32),
         b=np.arange(1, max_value + 1, dtype=np.int32),
         layer=layer,
         max_value=max_value,
     )
-    logger.info(f"wrote resid grid ({out_path.stat().st_size / 1e6:.0f} MB) → {out_path}")
+    logger.info(
+        f"wrote resid_post + resid_pre ({out_path.stat().st_size / 1e6:.0f} MB) → {out_path}"
+    )
     return out_path
 
 
