@@ -1,10 +1,12 @@
 """Shared helpers for the validation scripts."""
 
+import base64
 import csv
 import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,6 +36,18 @@ MLP_MATRICES = ("gate_proj", "up_proj", "down_proj")
 # Residual-stream sites captured around a layer's MLP by the fourier-probes pipeline, in
 # computation order: pre-MLP resid → RMSNorm output (MLP input) → MLP output (Δ) → block output.
 RESID_SITES = ("pre", "norm", "mlp_out", "post")
+
+
+def b64_f16(arr: NDArray[Any]) -> str:
+    return base64.b64encode(np.ascontiguousarray(arr, dtype=np.float16).tobytes()).decode("ascii")
+
+
+def b64_i16(arr: NDArray[Any]) -> str:
+    return base64.b64encode(np.ascontiguousarray(arr, dtype=np.int16).tobytes()).decode("ascii")
+
+
+def b64_i8(arr: NDArray[Any]) -> str:
+    return base64.b64encode(np.ascontiguousarray(arr, dtype=np.int8).tobytes()).decode("ascii")
 
 
 def op_symbol(op: str) -> str:

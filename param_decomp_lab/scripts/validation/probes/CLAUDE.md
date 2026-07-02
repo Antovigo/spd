@@ -9,13 +9,16 @@ folder (which probe the MLP in/out spaces with a closed-form fit). Everything he
 ## Pipeline
 
 ```
-collect_resid_activations.py  (GPU/--slurm)  → resid_activations.npz  (resid_post + resid_pre)
+collect_resid_activations.py  (GPU/--slurm)  → resid_activations.npz  (resid_<site> grids)
 fit_fourier_probes.py --site  (GPU/--slurm)  → probes_<site>.json     (run once per site)
 build_probe_scatter.py        (CPU)          → probe_scatter/{index.html,data.js}
+build_direction_scatter.py    (CPU)          → <run>/analysis/direction_scatter/{...}
 ```
 
-Default artifact dir: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`. `build_probe_scatter`
-takes the **npz** and picks up every `probes_<site>.json` beside it — one tab per site.
+Default artifact dir for the shared probes: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`.
+`build_probe_scatter` takes the **npz** and picks up every `probes_<site>.json` beside it — one
+tab per site. `build_direction_scatter` additionally takes a **decomposition checkpoint** and drops
+its applet in that run's `analysis/` folder (below).
 
 ## Four sites (around the MLP)
 
@@ -64,3 +67,26 @@ Other controls: **colour by** `a`/`b`/`a+b` with **mod** + **offset** (`(value �
 scale `0..m-1`), zoom/pan, hover. A fixed `n_show` random subset of points is shipped per plot,
 **per site**, to bound `data.js`. Vanilla-JS canvas, no CDN — smoke-test with the parent folder's
 `headless_check.py`.
+
+## Direction scatter — Feucht Fig 9c overlay (`build_direction_scatter`)
+
+Same point clouds, but tied to a **decomposition run** (its checkpoint) and dropped in
+`<run>/analysis/direction_scatter/`. Over each cloud it draws **arrows** for the directions of MLP
+**neurons** or the run's **subcomponents** (a dropdown), reproducing Feucht Fig 9c (down_proj rows
+projected onto the T-Fourier plane) and generalising it to reads and to the decomposition:
+
+- **read** arrows on the operand planes (`a`, `b`): the residual read direction — neuron `gate`/`up`
+  row, or subcomponent `gate`/`up` `V[:,c]`. Tagged `g` / `u` (both shown).
+- **write** arrows on the sum plane (`a+b`): the residual write direction — neuron `down_proj[:,n]`,
+  or subcomponent `down_proj.U[c] / ‖down_proj.V[:,c]‖` (÷ the 14336-d input-vector norm, so its
+  scale matches a neuron's). Tagged `d`.
+
+**Fig 9c scale**: everything is projected onto the **unit-normalised** probe directions `d = w/‖w‖`,
+and the cloud is recomputed in that same normalised, mean-centred frame — so `v·d` (arrow, from the
+ring centre as an increment) and `x·d − mean` (activation) share one scale. Only the top-`top_k`
+units by projected 2D norm are shipped per plane; the **threshold** slider filters those by `|v·d|`.
+
+The target model must be the same base model the checkpoint decomposes (it always is — L18 MLP
+decompositions freeze base Llama-3.1-8B), so the shared `resid_activations.npz` + `probes_<site>.json`
+apply to any run. Sanity check baked into the generator: on `post`/`a+b`/`T=10` the top-8 write
+neurons reproduce Feucht's hard-coded mod-10 addition-neuron list exactly.
