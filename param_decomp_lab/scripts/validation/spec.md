@@ -664,9 +664,12 @@ recolour in place (zoom preserved). Scroll zooms, drag pans. Hovering a point sh
 colour value and prompt (`<value> (a<sym>b=)`). The **unit** subcomponent directions
 (gate/up `V` for input operands, down `U` for the result) are drawn as bright-red arrows (same
 colour for subcomponents and the neuron overlay) scaled to the point cloud; only those whose
-in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖; clicking a
-subcomponent arrowhead opens its inner-activation `(a, b)` heatmaps (one per task) at the bottom.
-An **overlay** toggle swaps subcomponents for **individual neurons'** directions — gate/up read
+in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖. Clicking a
+subcomponent **or** neuron arrowhead selects it and draws a bar chart of its **angle to every
+Fourier plane** (arccos of the in-plane norm; 0° = the direction lies in the plane), grouped by
+basis task · operand with one bar per period — using the full un-floored projection so orthogonal
+planes appear too; a clicked subcomponent additionally opens its inner-activation `(a, b)` heatmaps
+(one per task) at the bottom. An **overlay** toggle swaps subcomponents for **individual neurons'** directions — gate/up read
 rows or the down write columns of the frozen target weight (a neuron-matrix dropdown) — so
 directions captured by neurons but not subcomponents (or vice versa) are visible. Reads the bases
 (`coordinates_<op>.json`; asserts each was fit at the checkpoint's layer), the run's

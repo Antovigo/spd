@@ -273,6 +273,8 @@ def build_fourier_scatter(
         sub_dir[(proj, c)] = vec.astype(np.float32)
 
     kept_subs: set[int] = set()  # subcomponents that clear the floor in at least one plot
+    shown_neurons: set[tuple[str, int]] = set()  # (proj, idx) drawn as an arrow in some plot
+    plane_cache: dict[tuple[str, str, str], tuple[NDArray[np.float32], NDArray[np.float32]]] = {}
     periods_out: dict[str, dict[str, list[float]]] = {}
     points_out: dict[str, dict[str, dict[str, list[str]]]] = {}
     subcomp_out: dict[str, dict[str, list[dict[str, Any]]]] = {}
@@ -295,6 +297,7 @@ def build_fourier_scatter(
             for pk in period_keys:
                 # the basis task's own activations seed the fallback 2nd axis for degenerate planes.
                 offset, e1, e2 = _plane(feats[pk], acts[basis_op][grid_key])
+                plane_cache[(basis_op, operand, pk)] = (e1, e2)
                 # Everything is in raw activation-projection coords (x·e1, x·e2): points, arrows
                 # (unit directions from the activation-space zero) and the circle centre all share
                 # the origin, so an off-zero circle centre (offset projected) is visible.
@@ -333,16 +336,53 @@ def build_fourier_scatter(
                     ndirs = w if proj != "down_proj" else w.T  # neuron dir per row
                     coords, inplane = _unit_projection(ndirs, e1, e2)
                     mask = inplane >= arrow_floor
+                    shown = [int(i) for i in np.nonzero(mask)[0]]
+                    shown_neurons.update((proj, i) for i in shown)
                     per_proj[proj] = {
-                        "ids": [int(i) for i in np.nonzero(mask)[0]],
+                        "ids": shown,
                         "xy": _b64(coords[mask]),
                         "norm": _b64(inplane[mask]),
                     }
                 neurons_out[basis_op][operand].append(per_proj)
 
-    # Inner-activation (a, b) grids for the kept subcomponents, one stack per task (click panel).
     kept = sorted(kept_subs)
     kept_pos = {sid: i for i, sid in enumerate(kept)}
+
+    # Angle (deg, 0 = lies in the plane) from each selectable direction to every Fourier plane of
+    # its side, keyed by "<basis>|<operand>" → [angle per period] (aligned with periods_out order).
+    # Shown on selection; uses the full (un-floored) projection so orthogonal planes are included.
+    neuron_dir = {
+        (proj, idx): (weights[proj][idx] if proj != "down_proj" else weights[proj].T[idx]).astype(
+            np.float32
+        )
+        for proj, idx in shown_neurons
+    }
+    subcomp_angles: dict[str, dict[str, list[float]]] = {}
+    neuron_angles: dict[str, dict[str, list[float]]] = {}
+    for basis_op in op_list:
+        for operand, (side, variable, _grid, projs) in _OPERANDS.items():
+            series = f"{basis_op}|{operand}"
+            period_keys = sorted(bases[basis_op]["features"][side][variable], key=float)
+            sub_keys = [k for k in union if k[0] in projs and sub_id[k] in kept_subs]
+            neur_keys = [k for k in shown_neurons if k[0] in projs]
+            sub_arr = np.stack([sub_dir[k] for k in sub_keys]) if sub_keys else None
+            neur_arr = np.stack([neuron_dir[k] for k in neur_keys]) if neur_keys else None
+            for pk in period_keys:
+                e1, e2 = plane_cache[(basis_op, operand, pk)]
+                for keys, arr, table, idfmt in (
+                    (sub_keys, sub_arr, subcomp_angles, lambda k: str(sub_id[k])),
+                    (neur_keys, neur_arr, neuron_angles, lambda k: f"{k[0]}:{k[1]}"),
+                ):
+                    if arr is None:
+                        continue
+                    _, inplane = _unit_projection(arr, e1, e2)
+                    deg = np.degrees(np.arccos(np.clip(inplane, 0.0, 1.0)))
+                    for k, d in zip(keys, deg, strict=True):
+                        table.setdefault(idfmt(k), {}).setdefault(series, []).append(
+                            round(float(d), 1)
+                        )
+
+    # Inner-activation (a, b) grids for the kept subcomponents, one stack per task (click panel).
     inner: dict[str, str] = {}
     for op in op_list:
         stack = np.zeros((len(kept), n, n), dtype=np.float32)
@@ -411,6 +451,8 @@ def build_fourier_scatter(
         "subcomp_pos": {str(sid): kept_pos[sid] for sid in kept},
         "inner": inner,
         "ci": ci_by_op,
+        "subcomp_angles": subcomp_angles,
+        "neuron_angles": neuron_angles,
     }
 
     out_dir = (

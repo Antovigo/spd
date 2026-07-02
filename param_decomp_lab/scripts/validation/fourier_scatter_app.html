@@ -51,7 +51,7 @@
   <span class="hint" id="hint"></span>
 </div>
 <div id="plots"></div>
-<div id="bottom"><h3 id="bottomTitle">Click a subcomponent arrowhead to see its inner-activation heatmaps.</h3><div id="inner"></div></div>
+<div id="bottom"><h3 id="bottomTitle">Click a subcomponent or neuron arrowhead: its angle to each Fourier plane (and, for a subcomponent, its inner-activation heatmaps).</h3><canvas id="angles" width="1000" height="220" style="display:none"></canvas><div id="inner"></div></div>
 <div id="tooltip"></div>
 
 <script src="data.js"></script>
@@ -299,7 +299,9 @@ function draw(st) {
     if (A.norm[i] < sel.thr) continue;
     const ex = A.xy[i][0] * st.arrowScale, ey = A.xy[i][1] * st.arrowScale;
     const e = toScreen(st, ex, ey);
-    const highlighted = SELECTED !== null && A.meta[i].kind === "sub" && A.meta[i].id === SELECTED;
+    const mi = A.meta[i];
+    const highlighted = (mi.kind === "sub" && mi.id === SELECTED) ||
+      (mi.kind === "neuron" && sel.neuronProj + ":" + mi.id === SELECTED_NEURON);
     ctx.strokeStyle = highlighted ? "#000" : "#ff2020";  // bright red, stands out on viridis
     ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = highlighted ? 3.5 : 2.2;
     ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
@@ -312,7 +314,7 @@ function draw(st) {
 }
 
 // ---- interaction: zoom (wheel), pan (drag), hover + click on arrowheads --------------------
-let SELECTED = null;
+let SELECTED = null, SELECTED_NEURON = null;
 function attachInteraction(st) {
   const c = st.canvas;
   c.addEventListener("wheel", ev => {
@@ -351,9 +353,16 @@ function attachInteraction(st) {
   c.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
   c.addEventListener("click", ev => {
     const hit = arrowAt(st, ev.offsetX, ev.offsetY);
-    if (hit && hit.meta.kind === "sub") {
+    if (!hit) return;
+    if (hit.meta.kind === "sub") {
       SELECTED = hit.meta.id; showInner(hit.meta);
+      showAngles("Subcomponent " + hit.meta.label, D.subcomp_angles[String(hit.meta.id)]);
       if (sel.colorBy === "ci") recolor(); else plots.forEach(draw);  // CI colouring tracks the selection
+    } else {  // neuron: highlight it and show its plane angles (no inner-activation panel)
+      SELECTED_NEURON = sel.neuronProj + ":" + hit.meta.id;
+      el("inner").innerHTML = "";
+      showAngles("Neuron " + hit.meta.label, D.neuron_angles[SELECTED_NEURON]);
+      plots.forEach(draw);
     }
   });
 }
@@ -380,8 +389,43 @@ function arrowAt(st, px, py) {
 }
 
 // ---- inner-activation heatmaps for a clicked subcomponent ---------------------------------
+// Bar chart of the selected direction's angle to every Fourier plane (0° = lies in the plane),
+// grouped by basis task · operand, one bar per period.
+function showAngles(title, table) {
+  el("bottomTitle").textContent = title;
+  const cv = el("angles");
+  if (!table || !Object.keys(table).length) { cv.style.display = "none"; return; }
+  cv.style.display = "block";
+  const g = cv.getContext("2d"), W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const x0 = 34, x1 = W - 10, y0 = 24, y1 = H - 40;
+  g.fillStyle = "#444"; g.font = "11px sans-serif"; g.textAlign = "center";
+  g.fillText("angle to each Fourier plane (°) — 0° = direction lies in the plane", W / 2, 13);
+  g.font = "10px sans-serif";
+  for (const t of [0, 30, 60, 90]) {
+    const y = y1 - t / 90 * (y1 - y0);
+    g.strokeStyle = "#e6e6e6"; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+    g.fillStyle = "#888"; g.textAlign = "right"; g.fillText(t + "°", x0 - 3, y + 3);
+  }
+  const series = Object.keys(table);
+  const gap = 12, groupW = (x1 - x0 - gap * (series.length - 1)) / series.length;
+  let gx = x0;
+  series.forEach(sk => {
+    const angs = table[sk], parts = sk.split("|"), basis = parts[0], operand = parts[1];
+    const periods = ((D.periods[basis] || {})[operand]) || angs.map((_, i) => i + 1);
+    const bw = groupW / angs.length;
+    angs.forEach((a, i) => {
+      const h = a / 90 * (y1 - y0), bx = gx + i * bw;
+      g.fillStyle = "#3b6ea5"; g.fillRect(bx + 1, y1 - h, Math.max(1, bw - 2), h);
+      if (bw > 10) { g.fillStyle = "#999"; g.font = "8px sans-serif"; g.textAlign = "center"; g.fillText(String(periods[i]), bx + bw / 2, y1 + 9); }
+    });
+    g.fillStyle = "#333"; g.font = "10px sans-serif"; g.textAlign = "center";
+    g.fillText(basis + "·" + operand, gx + groupW / 2, y1 + 24);
+    gx += groupW + gap;
+  });
+}
+
 function showInner(meta) {
-  el("bottomTitle").textContent = `Subcomponent ${meta.label} — inner-activation (a, b) heatmaps`;
   const box = el("inner"); box.innerHTML = "";
   const pos = D.subcomp_pos[String(meta.id)];
   D.meta.tasks.forEach(op => {
