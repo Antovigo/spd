@@ -95,7 +95,7 @@ function fill(selectEl, values, labels) {
 
 fill(el("actTask"), D.meta.tasks);
 fill(el("basisTask"), D.meta.tasks);
-fill(el("site"), D.meta.sites, D.meta.sites.map(s => ({ mlp: "MLP in/out", resid: "residual (Feucht)" }[s] || s)));
+fill(el("site"), D.meta.sites, D.meta.sites.map(s => ({ mlp: "MLP in/out", resid: "residual stream", feucht: "Feucht probe (a+b)" }[s] || s)));
 fill(el("operand"), D.meta.operands, D.meta.operands.map(o => ({ a: "first operand (a)", b: "second operand (b)", result: "result" }[o])));
 const cbVals = ["a", "b", "a+b", "a-b", "a×b"], cbLabels = ["a", "b", "a+b", "a-b", "a×b"];
 if (D.meta.has_accuracy) { cbVals.push("accuracy", "p_correct"); cbLabels.push("model accuracy", "P(correct)"); }
@@ -213,6 +213,12 @@ function rebuild() {
   sel.site = el("site").value;
   sel.operand = el("operand").value; sel.colorBy = el("colorBy").value;
   sel.overlay = el("overlay").value; sel.thr = parseFloat(el("thr").value) || 0;
+  // some sites (feucht) cover only certain basis/operand combos — snap to an available one + lock.
+  const availBasis = Object.keys(D.points[sel.site]);
+  if (!availBasis.includes(sel.basisTask)) { sel.basisTask = availBasis[0]; el("basisTask").value = sel.basisTask; }
+  const availOp = Object.keys(D.points[sel.site][sel.basisTask]);
+  if (!availOp.includes(sel.operand)) { sel.operand = availOp[0]; el("operand").value = sel.operand; }
+  el("basisTask").disabled = availBasis.length < 2; el("operand").disabled = availOp.length < 2;
   populateMods(); sel.offset = parseFloat(el("offset").value) || 0;
   const mlpSite = sel.site === "mlp";  // arrows/overlay only where V/U directions live in-space
 
@@ -227,7 +233,9 @@ function rebuild() {
   npSel.value = sel.neuronProj;
   el("hint").textContent = mlpSite
     ? `points = predicted (cos,sin); subcomponent/neuron arrows shipped for in-plane norm ≥ ${D.meta.arrow_floor}`
-    : `points = predicted (cos,sin) of the residual-stream probe (Feucht site); no in-space component overlay`;
+    : sel.site === "feucht"
+      ? `points = predicted (cos,sin) of Feucht et al.'s downloaded a+b probe (resid layer-output); no overlay`
+      : `points = predicted (cos,sin) of our residual-stream probe; no in-space component overlay`;
 
   const periods = D.periods[sel.basisTask][sel.operand];
   const isLog = D.meta.space[sel.basisTask] === "log";

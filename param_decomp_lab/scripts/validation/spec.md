@@ -634,6 +634,9 @@ args:
   `hidden_activations_<op>.npz` and a `coordinates_<op>.json`)
 - `--arrow-floor`: minimum in-plane norm for an arrow to be shipped (default 0.1); the applet's
   threshold form filters further, and inner grids are only shipped for subcomponents clearing it
+- `--feucht-probes-dir`: dir of Feucht et al.'s *downloaded* probes (default
+  `<coordinates-dir>/feucht_addition_resid`, `probe_period{T}_{cos,sin}.pt`); when present adds a
+  `feucht` site (add/result only). Absent → the site is silently omitted
 - `--output-dir`: overrides the output dir
 
 CPU (no forward pass). A self-contained canvas applet (vanilla JS, no CDN) for comparing
@@ -642,9 +645,11 @@ subcomponents / neurons against the circular features. For a chosen **basis task
 one plot, side by side. Points are the chosen **activation task**'s activations mapped to the
 probe's **predicted `(cos, sin)`** (`w_cos·x + b_cos`, `w_sin·x + b_sin`) — a clean feature traces
 the unit circle, exactly Feucht's plot — so e.g. subtraction activations can be viewed on addition's
-probe. The **site** dropdown picks where the probe was read: `mlp` (a/b ← `mlp_input`, result ←
-`mlp_output`; the spaces the SPD components read/write) or `resid` (the residual stream, reproducing
-Feucht). When the sin axis is degenerate (period 2, `sin(2πv/2)=0` so `w_sin≈0`) the plot falls back
+probe. The **site** dropdown picks which probe: `mlp` (a/b ← `mlp_input`, result ← `mlp_output`; the
+spaces the SPD components read/write), `resid` (our probe on the residual stream), or — when Feucht
+et al.'s downloaded probes are staged — `feucht`, projecting onto their *shipped* addition-output
+probe (variable a+b at the resid layer-output; add/result only, other basis/operand locked) to
+eyeball our fit against theirs. When the sin axis is degenerate (period 2, `sin(2πv/2)=0` so `w_sin≈0`) the plot falls back
 to an orthonormal frame — `e1` along `w_cos`, `e2` the top activation-variance direction ⊥ `e1`
 (rescaled to the cos-axis spread so the residue split stays visible), as in Feucht et al. A
 crosshair+ring marks the projected circle centre. Points colour by `a`, `b`,

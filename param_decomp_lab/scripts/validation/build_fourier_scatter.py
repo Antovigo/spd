@@ -13,8 +13,10 @@ scroll to zoom, drag to pan.
 Points are Feucht's probe coordinates: `(w_cos·x + b_cos, w_sin·x + b_sin)` = the predicted
 `(cos, sin)`, so a clean feature traces the unit circle (for a degenerate sin axis — period 2 — the
 2nd axis falls back to the top activation-variance direction ⊥ the cos direction). A **site**
-dropdown picks where the probe was read: `mlp` (a/b at `mlp_input`, result at `mlp_output` — the
-spaces the SPD subcomponents read/write) or `resid` (the residual stream, reproducing Feucht).
+dropdown picks which probe: `mlp` (a/b at `mlp_input`, result at `mlp_output` — the spaces the SPD
+subcomponents read/write), `resid` (our probe on the residual stream), or — when Feucht et al.'s
+downloaded probes are present (`feucht_addition_resid/`) — `feucht`, projecting onto their *shipped*
+addition-output probe (variable a+b, resid layer-output; add/result only) to eyeball our fit vs theirs.
 
 At the MLP site only, the subcomponent **unit** directions (gate/up `V` for input operands, down
 `U` for the result) — and, via an overlay toggle, **individual neuron** directions (gate/up read
@@ -76,6 +78,11 @@ _OPERAND_PROJS = {
     "b": ("gate_proj", "up_proj"),
     "result": ("down_proj",),
 }
+# Optional extra "site" projecting onto Feucht et al.'s *downloaded* probes (their shipped addition
+# output probes: variable a+b, read at the resid layer-output). Only this one (task, operand) exists.
+_FEUCHT_SITE = "feucht"
+_FEUCHT_TASK = "add"
+_FEUCHT_OPERAND = "result"
 
 
 def _silu(x: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -205,6 +212,33 @@ def _project_dirs(
     return coords, inplane
 
 
+def _load_feucht_probes(
+    probe_dir: Path, period_keys: list[str]
+) -> dict[str, dict[str, Any]] | None:
+    """Feucht et al.'s *shipped* addition/resid output probes (`probe_period{T}_{cos,sin}.pt`, each an
+    `nn.Linear(d_model, 1)` state_dict). Returns `{period_key: {w_cos, b_cos, w_sin, b_sin}}` for the
+    given period keys (same weight-vector shape as our own probes), or None if the dir is absent."""
+    if not probe_dir.exists():
+        return None
+    import torch
+
+    def load(path: Path) -> tuple[NDArray[np.float32], float]:
+        sd = torch.load(path, map_location="cpu", weights_only=True)
+        return sd["linear.weight"].squeeze(0).float().numpy(), float(sd["linear.bias"].reshape(()))
+
+    probes: dict[str, dict[str, Any]] = {}
+    for pk in period_keys:
+        t = int(float(pk))
+        f_cos, f_sin = probe_dir / f"probe_period{t}_cos.pt", probe_dir / f"probe_period{t}_sin.pt"
+        assert f_cos.exists() and f_sin.exists(), (
+            f"missing Feucht probe for period {t} in {probe_dir}"
+        )
+        w_cos, b_cos = load(f_cos)
+        w_sin, b_sin = load(f_sin)
+        probes[pk] = {"w_cos": w_cos, "b_cos": b_cos, "w_sin": w_sin, "b_sin": b_sin}
+    return probes
+
+
 def _resolve_ops(data_dir: Path, coord_dir: Path, ops: str | tuple[str, ...] | None) -> list[str]:
     if ops is not None:
         # fire parses `--ops=add,sub` as a tuple and `--ops=add` as a str.
@@ -226,6 +260,7 @@ def build_fourier_scatter(
     coordinates_dir: str | None = None,
     ops: str | tuple[str, ...] | None = None,
     arrow_floor: float = 0.1,
+    feucht_probes_dir: str | None = None,
     output_dir: str | None = None,
 ) -> Path:
     checkpoint = Path(model_path).expanduser()
@@ -236,6 +271,11 @@ def build_fourier_scatter(
         Path(coordinates_dir).expanduser()
         if coordinates_dir
         else PARAM_DECOMP_OUT_DIR / "runs" / "fourier_features"
+    )
+    feucht_dir = (
+        Path(feucht_probes_dir).expanduser()
+        if feucht_probes_dir
+        else coord_dir / "feucht_addition_resid"
     )
     op_list = _resolve_ops(data_dir, coord_dir, ops)
     logger.info(f"tasks: {op_list} (bases from {coord_dir})")
@@ -388,6 +428,32 @@ def build_fourier_scatter(
                     }
                 neurons_out[basis_op][operand].append(per_proj)
 
+    # Optional Feucht site: project the activations onto Feucht et al.'s *downloaded* probes (their
+    # shipped addition output probe — variable a+b at the resid layer-output). Only add/result.
+    all_sites = list(sites)
+    feucht_probes = None
+    if _FEUCHT_TASK in op_list:
+        fr_keys = sorted(bases[_FEUCHT_TASK]["features"]["resid"][_FEUCHT_OPERAND], key=float)
+        feucht_probes = _load_feucht_probes(feucht_dir, fr_keys)
+    if feucht_probes is not None:
+        grid_key = _SITE_GRID["resid"][_FEUCHT_OPERAND]  # resid layer-output (Feucht's site)
+        basis_mean = acts[_FEUCHT_TASK][grid_key].mean(axis=0, keepdims=True)
+        points_out[_FEUCHT_SITE] = {_FEUCHT_TASK: {_FEUCHT_OPERAND: {op: [] for op in op_list}}}
+        centers_out[_FEUCHT_SITE] = {_FEUCHT_TASK: {_FEUCHT_OPERAND: []}}
+        for pk in sorted(feucht_probes, key=float):
+            plane = _probe_plane(feucht_probes[pk], acts[_FEUCHT_TASK][grid_key])
+            centers_out[_FEUCHT_SITE][_FEUCHT_TASK][_FEUCHT_OPERAND].append(
+                [round(float(c), 4) for c in _project_points(plane, basis_mean)[0]]
+            )
+            for op in op_list:
+                points_out[_FEUCHT_SITE][_FEUCHT_TASK][_FEUCHT_OPERAND][op].append(
+                    _b64(_project_points(plane, acts[op][grid_key]))
+                )
+        all_sites.append(_FEUCHT_SITE)
+        logger.info(
+            f"added '{_FEUCHT_SITE}' site (add/result, {len(feucht_probes)} periods) from {feucht_dir}"
+        )
+
     kept = sorted(kept_subs)
     kept_pos = {sid: i for i, sid in enumerate(kept)}
 
@@ -468,7 +534,7 @@ def build_fourier_scatter(
             "layer": int(layer),
             "symbol": {op: op_symbol(op) for op in op_list},
             "operands": list(_OPERANDS),
-            "sites": sites,
+            "sites": all_sites,
             "arrow_floor": arrow_floor,
             "task_mods": task_mods,
             "has_ci": bool(ci_by_op),
