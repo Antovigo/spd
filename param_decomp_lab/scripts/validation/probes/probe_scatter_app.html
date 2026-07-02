@@ -105,8 +105,13 @@ sel.basis = D.meta.variables.includes("a+b") ? "a+b" : D.meta.variables[0];
 el("basis").value = sel.basis; el("colorBy").value = sel.colorBy;
 
 // site tabs: which residual-stream site the probes were fit on
-const SITE_LABEL = { post: "after MLP (L18 output)", pre: "before MLP (input to RMSNorm)" };
-sel.site = D.meta.sites[0];
+const SITE_LABEL = {
+  pre: "before MLP (input to RMSNorm)",
+  norm: "MLP input (after RMSNorm)",
+  mlp_out: "MLP output (Δ to residual)",
+  post: "after MLP (L18 output)",
+};
+sel.site = D.meta.sites.includes("post") ? "post" : D.meta.sites[0];
 D.meta.sites.forEach(s => {
   const t = document.createElement("div"); t.className = "tab" + (s === sel.site ? " active" : "");
   t.textContent = SITE_LABEL[s] || s;

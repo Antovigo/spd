@@ -17,21 +17,25 @@ build_probe_scatter.py        (CPU)          → probe_scatter/{index.html,data.
 Default artifact dir: `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`. `build_probe_scatter`
 takes the **npz** and picks up every `probes_<site>.json` beside it — one tab per site.
 
-## Two sites (before / after the MLP)
+## Four sites (around the MLP)
 
-The collector captures the layer-18 residual stream at two points around the MLP, in one
-forward pass; `fit_fourier_probes --site={post,pre}` fits the same probes on each:
+The collector captures the layer-18 residual stream at four points around the MLP, in one
+forward pass (`RESID_SITES` in `common.py`, computation order); `fit_fourier_probes --site`
+fits the same probes on each, and the applet shows one tab per site:
 
-- **`post`** — the **decoder-block output** (`out[0]` of `model.layers[18]`): residual after
-  this layer's attention *and* MLP (Feucht's `source="resid"`). This is what Feucht ship.
-- **`pre`** — the input to `post_attention_layernorm`: residual *fed to* the RMSNorm+MLP,
-  i.e. after attention but **before the MLP** writes. Comparing the two isolates what L18's
-  MLP adds — the operand (`a`/`b`) curves are ~identical pre/post (already in the residual),
-  while `a+b`'s peak R² is higher post-MLP, i.e. the MLP sharpens the sum representation.
+- **`pre`** — input to `post_attention_layernorm`: residual after attention, **before the MLP**.
+- **`norm`** — the MLP's actual input: `post_attention_layernorm` output (after RMSNorm).
+- **`mlp_out`** — the MLP output: the **Δ** the MLP writes into the residual stream.
+- **`post`** — the **decoder-block output** (`out[0] = pre + mlp_out`): after attention *and*
+  MLP (Feucht's `source="resid"`). This is what Feucht ship.
+
+Comparing sites isolates the MLP's role: the operand (`a`/`b`) curves are ~identical across
+sites (operands sit in the residual already), while `a+b`'s peak R² is higher post-MLP than
+pre-MLP — the `mlp_out` tab shows what the MLP itself writes for the sum.
 
 ## Fidelity to Feucht
 
-- **Site**: Feucht's is `post` (the block output); `pre` is our added control.
+- **Site**: Feucht's is `post` (the block output); the other three are our added controls.
 - **Data**: `{a}+{b}=` for `a, b ∈ 1..200` (40 000 prompts), **last token** (`=`), left-padded
   so position `-1` is always the `=`.
 - **Probe**: per period `T` and variable `v ∈ {a, b, a+b}` (their input / offset / output), two

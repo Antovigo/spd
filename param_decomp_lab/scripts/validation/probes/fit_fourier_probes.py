@@ -16,14 +16,13 @@ max_period)` (`max_period=150`; so `a`,`b` → 2..100, `a+b` → 2..150). This i
 spike only at the true periods and stay low elsewhere (a fake period gives a blob, not a circle).
 `--periods` overrides with an explicit shared list.
 
-Consumes `resid_activations.npz` from `collect_resid_activations`; `--site` picks which grid —
-`post` (residual after the MLP, default) or `pre` (residual before the MLP). GPU strongly
-recommended (500 epochs × ~700 probes for the full sweep); pass `--slurm` to submit as a
-single-GPU job.
+Consumes `resid_activations.npz` from `collect_resid_activations`; `--site` picks which grid — one
+of `pre` / `norm` / `mlp_out` / `post` (default; residual after the MLP). GPU strongly recommended
+(500 epochs × ~700 probes for the full sweep); pass `--slurm` to submit as a single-GPU job.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.fit_fourier_probes <resid_activations.npz> \
-        [--site=post|pre] [--max-period=150 | --periods=2,5,10,...] [--output=PATH] [--slurm ...]
+        [--site=pre|norm|mlp_out|post] [--max-period=150 | --periods=2,5,...] [--output=PATH] [--slurm]
 
 Output (default `probes_<site>.json` beside the npz): metadata (`site`, `periods_by_variable`,
 `max_period`) + `probes[variable][period] = {w_cos, b_cos, w_sin, b_sin, r2_cos, r2_sin}`, weight
@@ -43,7 +42,11 @@ from torch import nn
 
 from param_decomp.log import logger
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
-from param_decomp_lab.scripts.validation.common import SlurmOptions, submit_self_to_slurm
+from param_decomp_lab.scripts.validation.common import (
+    RESID_SITES,
+    SlurmOptions,
+    submit_self_to_slurm,
+)
 
 _MODULE = "param_decomp_lab.scripts.validation.probes.fit_fourier_probes"
 _LR = 1e-3
@@ -103,9 +106,7 @@ def fit_fourier_probes(
     slurm_time: str = "2:00:00",
     slurm_mem: str | None = None,
 ) -> Path | None:
-    assert site in ("post", "pre"), (
-        f"site must be 'post' (after MLP) or 'pre' (before MLP), got {site!r}"
-    )
+    assert site in RESID_SITES, f"site must be one of {RESID_SITES}, got {site!r}"
     npz_path = Path(resid_activations_npz).expanduser()
     if slurm:
         argv = [str(npz_path), f"--site={site}", f"--max-period={max_period}"]

@@ -32,6 +32,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from param_decomp.log import logger
+from param_decomp_lab.scripts.validation.common import RESID_SITES
 
 _APP_TEMPLATE = Path(__file__).with_name("probe_scatter_app.html")
 
@@ -89,10 +90,11 @@ def build_probe_scatter(
     assert npz_path.exists(), f"missing resid activations: {npz_path}"
     data = np.load(npz_path)
     g = int(data["a"].shape[0])
-    # each site's probes live in `probes_<site>.json` beside the npz (fit_fourier_probes --site).
+    # each site's probes live in `probes_<site>.json` beside the npz (fit_fourier_probes --site);
+    # iterate RESID_SITES so tabs come out in computation order (pre → norm → mlp_out → post).
     site_payloads = {
         s: json.loads(p.read_text())
-        for s in ("post", "pre")
+        for s in RESID_SITES
         if (p := npz_path.with_name(f"probes_{s}.json")).exists()
     }
     assert site_payloads, f"no probes_<site>.json beside {npz_path} (run fit_fourier_probes first)"

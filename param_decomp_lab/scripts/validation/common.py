@@ -31,6 +31,10 @@ _PROMPTS_DIR = REPO_ROOT / "param_decomp_lab" / "experiments" / "lm" / "prompts"
 # The three L18 MLP matrices these scripts analyse (decomposed attn is ignored).
 MLP_MATRICES = ("gate_proj", "up_proj", "down_proj")
 
+# Residual-stream sites captured around a layer's MLP by the fourier-probes pipeline, in
+# computation order: pre-MLP resid → RMSNorm output (MLP input) → MLP output (Δ) → block output.
+RESID_SITES = ("pre", "norm", "mlp_out", "post")
+
 
 def op_symbol(op: str) -> str:
     assert op in OP_SYMBOL, f"unknown operation {op!r}; expected one of {list(OP_SYMBOL)}"
