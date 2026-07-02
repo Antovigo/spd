@@ -10,20 +10,22 @@ the shared `arithmetic_map`, or the **selected subcomponent's CI** — the arith
 reduced by a `mod` + `offset` form (like the subspace-scatter applet) to `(value − offset) mod m`;
 scroll to zoom, drag to pan.
 
-Everything is in **raw activation-projection coordinates** (`x·e1, x·e2`): the points, the
-subcomponent **unit** direction arrows (which emanate from the activation-space zero `(0,0)`), and
-a marker at the Fourier circle's centre (the projected `offset`) all share one origin, so an
-off-zero circle centre is visible. Arrows use the gate/up `V` (read) directions for input operands
-and the down `U` (write) directions for the result; only those whose in-plane norm clears a typed
-threshold show; clicking an arrowhead opens that subcomponent's inner-activation `(a, b)` heatmaps
-(one per task) at the bottom. An overlay toggle swaps the subcomponent arrows for **individual
-neurons'** directions (gate/up read rows or down write columns of the frozen target weight) — to
-see directions captured by neurons but not subcomponents, or vice versa.
+Points are Feucht's probe coordinates: `(w_cos·x + b_cos, w_sin·x + b_sin)` = the predicted
+`(cos, sin)`, so a clean feature traces the unit circle (for a degenerate sin axis — period 2 — the
+2nd axis falls back to the top activation-variance direction ⊥ the cos direction). A **site**
+dropdown picks where the probe was read: `mlp` (a/b at `mlp_input`, result at `mlp_output` — the
+spaces the SPD subcomponents read/write) or `resid` (the residual stream, reproducing Feucht).
 
-The Fourier bases are read from `find_fourier_features`' output (`coordinates_<task>.json` under
-`<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/` by default). Each period's plane is the
-orthonormalised `(cos_vec, sin_vec)`. Activation grids, the alive set, periods (for the colour-mod
-options) and inner activations come from the run's `analysis/datasets/`.
+At the MLP site only, the subcomponent **unit** directions (gate/up `V` for input operands, down
+`U` for the result) — and, via an overlay toggle, **individual neuron** directions (gate/up read
+rows / down write columns of the frozen target weight) — are drawn as arrows in the same frame;
+only those whose in-plane norm clears a typed threshold show. Clicking a subcomponent or neuron
+arrowhead draws its **angle to every Fourier plane** and (for a subcomponent) opens its
+inner-activation `(a, b)` heatmaps.
+
+The probes are read from `find_fourier_features`' output (`coordinates_<task>.json` under
+`<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/` by default). Activation grids, the alive set,
+periods (for the colour-mod options) and inner activations come from the run's `analysis/datasets/`.
 
 CPU-only (no forward pass). Usage:
     python -m param_decomp_lab.scripts.validation.build_fourier_scatter <model_path> \
@@ -61,13 +63,18 @@ _CANDIDATE_OPS = ("add", "sub", "mult")
 # map_arithmetic condition (in the shared arithmetic_map/results.tsv) whose prompt symbol matches
 # each op, for the "model accuracy" (P of the correct answer token) colour option.
 _ACCURACY_CONDITION = {"add": "digit_add_plus", "sub": "digit_sub_minus", "mult": "digit_mul_times"}
-# operand -> (basis side in coordinates_<op>.json, feature variable, activation grid, subcomp
-# projs / neuron proj set). Input operands live in the post-RMSNorm MLP input and use the gate/up
-# read (V) directions; the result lives in the MLP output and uses the down write (U) directions.
-_OPERANDS = {
-    "a": ("input", "a", "mlp_input", ("gate_proj", "up_proj")),
-    "b": ("input", "b", "mlp_input", ("gate_proj", "up_proj")),
-    "result": ("output", "result", "mlp_output", ("down_proj",)),
+_OPERANDS = ("a", "b", "result")
+# activation grid each operand is probed at, per site (matches find_fourier_features._site_grids).
+_SITE_GRID = {
+    "mlp": {"a": "mlp_input", "b": "mlp_input", "result": "mlp_output"},
+    "resid": {"a": "resid_pre_mlp", "b": "resid_pre_mlp", "result": "resid_post"},
+}
+# subcomponent / neuron proj set whose direction each operand's arrows use (MLP site only): input
+# operands read via gate/up `V`, the result writes via down `U`.
+_OPERAND_PROJS = {
+    "a": ("gate_proj", "up_proj"),
+    "b": ("gate_proj", "up_proj"),
+    "result": ("down_proj",),
 }
 
 
@@ -135,40 +142,66 @@ def _accuracy_by_op(
     }
 
 
-def _plane(
-    feature: dict[str, Any], fallback_acts: NDArray[np.float32]
-) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
-    """`(offset, e1, e2)` for a Fourier feature: the circle centre and an orthonormal basis of its
-    plane. `e1` is along `cos_vec`; `e2` is the part of `sin_vec` orthogonal to `e1` — except when
-    that is degenerate (e.g. period 2, where `sin(2πv/2)=0` for every integer `v` so `sin_vec≈0`
-    and the circle would collapse to the `e1` line). Then `e2` falls back to the direction of most
-    `fallback_acts` variance orthogonal to `e1` — an arbitrary but informative second axis for
-    visualisation (as in Feucht et al.)."""
-    offset = np.asarray(feature["offset"], dtype=np.float32)
-    cos = np.asarray(feature["cos"], dtype=np.float32)
-    sin = np.asarray(feature["sin"], dtype=np.float32)
-    e1 = (cos / max(float(np.linalg.norm(cos)), 1e-12)).astype(np.float32)
-    w = sin - float(sin @ e1) * e1
-    if float(np.linalg.norm(w)) > 1e-3 * max(float(np.linalg.norm(cos)), 1e-12):
-        e2 = (w / np.linalg.norm(w)).astype(np.float32)
-    else:
-        xc = fallback_acts - fallback_acts.mean(axis=0)
-        xc = xc - np.outer(xc @ e1, e1)  # variance orthogonal to e1
-        top = np.linalg.eigh(xc.T @ xc)[1][:, -1].astype(np.float32)
-        top = top - float(top @ e1) * e1
-        e2 = (top / max(float(np.linalg.norm(top)), 1e-12)).astype(np.float32)
-    return offset, e1, e2
+def _probe_plane(probe: dict[str, Any], fallback_acts: NDArray[np.float32]) -> dict[str, Any]:
+    """Projection frame for one Feucht probe `[cos,sin] ≈ x·[w_cos,w_sin] + [b_cos,b_sin]`.
+
+    `mode="pred"`: point/direction coords are the predicted `(cos, sin)` (`x·w (+b)`), so a clean
+    feature traces the unit circle — Feucht's plot. `mode="ortho"`: an orthonormal fallback used
+    when the sin axis is degenerate (period 2, `sin(2πv/2)=0` so `w_sin≈0` and the circle collapses
+    to the `e1` line) — `e2` is then the direction of most `fallback_acts` variance ⊥ `e1`. `e1,e2`
+    are always an orthonormal basis of the plane, used for the in-plane norm and plane angles."""
+    w_cos = np.asarray(probe["w_cos"], dtype=np.float32)
+    w_sin = np.asarray(probe["w_sin"], dtype=np.float32)
+    n1 = float(np.linalg.norm(w_cos))
+    e1 = (w_cos / max(n1, 1e-12)).astype(np.float32)
+    resid = w_sin - float(w_sin @ e1) * e1
+    if float(np.linalg.norm(resid)) > 1e-3 * max(n1, 1e-12):
+        e2 = (resid / np.linalg.norm(resid)).astype(np.float32)
+        return {
+            "mode": "pred",
+            "w_cos": w_cos,
+            "b_cos": float(probe["b_cos"]),
+            "w_sin": w_sin,
+            "b_sin": float(probe["b_sin"]),
+            "e1": e1,
+            "e2": e2,
+        }
+    xc = fallback_acts - fallback_acts.mean(axis=0)
+    xc = xc - np.outer(xc @ e1, e1)  # variance orthogonal to e1
+    top = np.linalg.eigh(xc.T @ xc)[1][:, -1].astype(np.float32)
+    top = top - float(top @ e1) * e1
+    e2 = (top / max(float(np.linalg.norm(top)), 1e-12)).astype(np.float32)
+    # The fallback axis (top activation variance) usually dwarfs the cos-axis spread, hiding the
+    # residue separation. Rescale the drawn e2 coord to the cos-axis spread so both stay visible.
+    s1 = float(np.std(fallback_acts @ e1))
+    s2 = float(np.std(fallback_acts @ e2))
+    return {"mode": "ortho", "e1": e1, "e2": e2, "e2scale": s1 / max(s2, 1e-12)}
 
 
-def _unit_projection(
-    dirs: NDArray[np.float32], e1: NDArray[np.float32], e2: NDArray[np.float32]
+def _project_points(plane: dict[str, Any], x: NDArray[np.float32]) -> NDArray[np.float32]:
+    if plane["mode"] == "pred":
+        return np.stack(
+            [x @ plane["w_cos"] + plane["b_cos"], x @ plane["w_sin"] + plane["b_sin"]], axis=1
+        ).astype(np.float32)
+    return np.stack([x @ plane["e1"], (x @ plane["e2"]) * plane["e2scale"]], axis=1).astype(
+        np.float32
+    )
+
+
+def _project_dirs(
+    plane: dict[str, Any], dirs: NDArray[np.float32]
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-    """Project each row of `dirs` (after unit-normalising it) onto `(e1, e2)`; return `[k, 2]`
-    coords and the in-plane norm `sqrt(c1²+c2²) ∈ [0, 1]`."""
-    norms = np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), 1e-12)
-    unit = dirs / norms
-    coords = np.stack([unit @ e1, unit @ e2], axis=1).astype(np.float32)  # [k, 2]
-    inplane = np.linalg.norm(coords, axis=1).astype(np.float32)
+    """Unit-normalise `dirs`; return drawn coords (in the plane's mode, sharing the point frame) and
+    the orthonormal in-plane norm `sqrt((·e1)²+(·e2)²) ∈ [0,1]` (for the arrow floor / angle — this
+    stays the true orthonormal norm even when the drawn e2 coord is rescaled)."""
+    unit = dirs / np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), 1e-12)
+    inplane = np.sqrt((unit @ plane["e1"]) ** 2 + (unit @ plane["e2"]) ** 2).astype(np.float32)
+    if plane["mode"] == "pred":
+        coords = np.stack([unit @ plane["w_cos"], unit @ plane["w_sin"]], axis=1).astype(np.float32)
+    else:
+        coords = np.stack(
+            [unit @ plane["e1"], (unit @ plane["e2"]) * plane["e2scale"]], axis=1
+        ).astype(np.float32)
     return coords, inplane
 
 
@@ -214,8 +247,8 @@ def build_fourier_scatter(
     }
     layer = alive_by_op[op_list[0]][0].layer
     for op in op_list:
-        assert "space" in bases[op], (
-            f"coordinates_{op}.json lacks `space`; refit find_fourier_features"
+        assert "sites" in bases[op] and "space" in bases[op], (
+            f"coordinates_{op}.json is the old schema; refit find_fourier_features"
         )
         assert bases[op]["layer"] == layer, (
             f"coordinates_{op}.json was fit at layer {bases[op]['layer']} but the checkpoint's "
@@ -252,9 +285,13 @@ def build_fourier_scatter(
     for op in op_list:
         z = hidden[op]
         assert int(z["a"].shape[0]) == n, f"grid size mismatch for {op}"
+        mlp_output = z["mlp_output"].reshape(n * n, -1).astype(np.float32)
+        resid_pre = z["resid_pre_mlp"].reshape(n * n, -1).astype(np.float32)
         acts[op] = {
             "mlp_input": z["mlp_input"].reshape(n * n, -1).astype(np.float32),
-            "mlp_output": z["mlp_output"].reshape(n * n, -1).astype(np.float32),
+            "mlp_output": mlp_output,
+            "resid_pre_mlp": resid_pre,
+            "resid_post": resid_pre + mlp_output,  # residual after this layer's MLP write
         }
         if need_swiglu:
             d_int = z["up_preact"].shape[-1]
@@ -272,48 +309,56 @@ def build_fourier_scatter(
         vec = v[:, c] if proj != "down_proj" else u[c, :]
         sub_dir[(proj, c)] = vec.astype(np.float32)
 
+    sites = list(bases[op_list[0]]["sites"])
     kept_subs: set[int] = set()  # subcomponents that clear the floor in at least one plot
     shown_neurons: set[tuple[str, int]] = set()  # (proj, idx) drawn as an arrow in some plot
-    plane_cache: dict[tuple[str, str, str], tuple[NDArray[np.float32], NDArray[np.float32]]] = {}
+    plane_cache: dict[
+        tuple[str, str, str], dict[str, Any]
+    ] = {}  # MLP-site planes for arrows/angles
     periods_out: dict[str, dict[str, list[float]]] = {}
-    points_out: dict[str, dict[str, dict[str, list[str]]]] = {}
+    points_out: dict[str, dict[str, dict[str, dict[str, list[str]]]]] = {s: {} for s in sites}
+    centers_out: dict[str, dict[str, dict[str, list[list[float]]]]] = {s: {} for s in sites}
     subcomp_out: dict[str, dict[str, list[dict[str, Any]]]] = {}
     neurons_out: dict[str, dict[str, list[dict[str, Any]]]] = {}
-    centers_out: dict[str, dict[str, list[list[float]]]] = {}
 
     for basis_op in op_list:
-        periods_out[basis_op], points_out[basis_op] = {}, {}
+        periods_out[basis_op] = {}
         subcomp_out[basis_op], neurons_out[basis_op] = {}, {}
-        centers_out[basis_op] = {}
-        for operand, (side, variable, grid_key, projs) in _OPERANDS.items():
-            feats = bases[basis_op]["features"][side][variable]
-            period_keys = sorted(feats, key=float)
+        for s in sites:
+            points_out[s][basis_op], centers_out[s][basis_op] = {}, {}
+        for operand in _OPERANDS:
+            feats_site = {s: bases[basis_op]["features"][s][operand] for s in sites}
+            period_keys = sorted(feats_site[sites[0]], key=float)
             periods_out[basis_op][operand] = [float(p) for p in period_keys]
-            points_out[basis_op][operand] = {op: [] for op in op_list}
+
+            # Points + circle centre at every site (both reproduce Feucht's plot / the coherent-MLP
+            # plot); the basis task's own activations seed the degenerate-plane fallback axis.
+            for s in sites:
+                grid_key = _SITE_GRID[s][operand]
+                basis_mean = acts[basis_op][grid_key].mean(axis=0, keepdims=True)
+                points_out[s][basis_op][operand] = {op: [] for op in op_list}
+                centers_out[s][basis_op][operand] = []
+                for pk in period_keys:
+                    plane = _probe_plane(feats_site[s][pk], acts[basis_op][grid_key])
+                    if s == "mlp":
+                        plane_cache[(basis_op, operand, pk)] = plane
+                    centers_out[s][basis_op][operand].append(
+                        [round(float(c), 4) for c in _project_points(plane, basis_mean)[0]]
+                    )
+                    for op in op_list:
+                        points_out[s][basis_op][operand][op].append(
+                            _b64(_project_points(plane, acts[op][grid_key]))
+                        )
+
+            # Subcomponent / neuron arrows: MLP site only (their V/U directions live in MLP space).
             subcomp_out[basis_op][operand] = []
             neurons_out[basis_op][operand] = []
-            centers_out[basis_op][operand] = []
-
+            projs = _OPERAND_PROJS[operand]
+            keys = [(p, c) for (p, c) in union if p in projs]
             for pk in period_keys:
-                # the basis task's own activations seed the fallback 2nd axis for degenerate planes.
-                offset, e1, e2 = _plane(feats[pk], acts[basis_op][grid_key])
-                plane_cache[(basis_op, operand, pk)] = (e1, e2)
-                # Everything is in raw activation-projection coords (x·e1, x·e2): points, arrows
-                # (unit directions from the activation-space zero) and the circle centre all share
-                # the origin, so an off-zero circle centre (offset projected) is visible.
-                centers_out[basis_op][operand].append(
-                    [round(float(offset @ e1), 4), round(float(offset @ e2), 4)]
-                )
-                for op in op_list:
-                    x = acts[op][grid_key]
-                    coords = np.stack([x @ e1, x @ e2], axis=1)
-                    points_out[basis_op][operand][op].append(_b64(coords))
-
-                # Subcomponent arrows for this plot (only those clearing the floor).
-                keys = [(p, c) for (p, c) in union if p in projs]
+                plane = plane_cache[(basis_op, operand, pk)]
                 if keys:
-                    dirs = np.stack([sub_dir[k] for k in keys])
-                    coords, inplane = _unit_projection(dirs, e1, e2)
+                    coords, inplane = _project_dirs(plane, np.stack([sub_dir[k] for k in keys]))
                     mask = inplane >= arrow_floor
                     ids = [sub_id[keys[i]] for i in np.nonzero(mask)[0]]
                 else:
@@ -328,13 +373,11 @@ def build_fourier_scatter(
                     {"ids": ids, "xy": _b64(coords[mask]), "norm": _b64(inplane[mask])}
                 )
 
-                # Neuron arrows: read rows (gate/up) for input operands, write columns (down) for
-                # the result — unit-normalised, floor-pruned, per proj.
                 per_proj: dict[str, Any] = {}
                 for proj in projs:
                     w = weights[proj]  # [d_out, d_in]
                     ndirs = w if proj != "down_proj" else w.T  # neuron dir per row
-                    coords, inplane = _unit_projection(ndirs, e1, e2)
+                    coords, inplane = _project_dirs(plane, ndirs)
                     mask = inplane >= arrow_floor
                     shown = [int(i) for i in np.nonzero(mask)[0]]
                     shown_neurons.update((proj, i) for i in shown)
@@ -348,8 +391,8 @@ def build_fourier_scatter(
     kept = sorted(kept_subs)
     kept_pos = {sid: i for i, sid in enumerate(kept)}
 
-    # Angle (deg, 0 = lies in the plane) from each selectable direction to every Fourier plane of
-    # its side, keyed by "<basis>|<operand>" → [angle per period] (aligned with periods_out order).
+    # Angle (deg, 0 = lies in the plane) from each selectable direction to every MLP-site Fourier
+    # plane, keyed by "<basis>|<operand>" → [angle per period] (aligned with periods_out order).
     # Shown on selection; uses the full (un-floored) projection so orthogonal planes are included.
     neuron_dir = {
         (proj, idx): (weights[proj][idx] if proj != "down_proj" else weights[proj].T[idx]).astype(
@@ -360,22 +403,23 @@ def build_fourier_scatter(
     subcomp_angles: dict[str, dict[str, list[float]]] = {}
     neuron_angles: dict[str, dict[str, list[float]]] = {}
     for basis_op in op_list:
-        for operand, (side, variable, _grid, projs) in _OPERANDS.items():
+        for operand in _OPERANDS:
             series = f"{basis_op}|{operand}"
-            period_keys = sorted(bases[basis_op]["features"][side][variable], key=float)
+            projs = _OPERAND_PROJS[operand]
+            period_keys = sorted(bases[basis_op]["features"]["mlp"][operand], key=float)
             sub_keys = [k for k in union if k[0] in projs and sub_id[k] in kept_subs]
             neur_keys = [k for k in shown_neurons if k[0] in projs]
             sub_arr = np.stack([sub_dir[k] for k in sub_keys]) if sub_keys else None
             neur_arr = np.stack([neuron_dir[k] for k in neur_keys]) if neur_keys else None
             for pk in period_keys:
-                e1, e2 = plane_cache[(basis_op, operand, pk)]
+                plane = plane_cache[(basis_op, operand, pk)]
                 for keys, arr, table, idfmt in (
                     (sub_keys, sub_arr, subcomp_angles, lambda k: str(sub_id[k])),
                     (neur_keys, neur_arr, neuron_angles, lambda k: f"{k[0]}:{k[1]}"),
                 ):
                     if arr is None:
                         continue
-                    _, inplane = _unit_projection(arr, e1, e2)
+                    _, inplane = _project_dirs(plane, arr)
                     deg = np.degrees(np.arccos(np.clip(inplane, 0.0, 1.0)))
                     for k, d in zip(keys, deg, strict=True):
                         table.setdefault(idfmt(k), {}).setdefault(series, []).append(
@@ -424,6 +468,7 @@ def build_fourier_scatter(
             "layer": int(layer),
             "symbol": {op: op_symbol(op) for op in op_list},
             "operands": list(_OPERANDS),
+            "sites": sites,
             "arrow_floor": arrow_floor,
             "task_mods": task_mods,
             "has_ci": bool(ci_by_op),

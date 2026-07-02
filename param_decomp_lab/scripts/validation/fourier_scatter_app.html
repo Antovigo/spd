@@ -34,6 +34,7 @@
   <span id="title">Fourier feature scatter</span>
   <label>activation task<select id="actTask"></select></label>
   <label>basis task<select id="basisTask"></select></label>
+  <label>site<select id="site"></select></label>
   <label>operand<select id="operand"></select></label>
   <label>colour by<select id="colorBy"></select></label>
   <label>mod<select id="mod"></select></label>
@@ -85,7 +86,7 @@ function viridis(t) {
 // ---- DOM refs -----------------------------------------------------------------------------
 const el = id => document.getElementById(id);
 const tooltip = el("tooltip");
-const sel = { actTask: null, basisTask: null, operand: null, colorBy: "a+b", mod: 1, offset: 0, overlay: "subcomponents", neuronProj: null, thr: 0.3 };
+const sel = { actTask: null, basisTask: null, site: null, operand: null, colorBy: "a+b", mod: 1, offset: 0, overlay: "subcomponents", neuronProj: null, thr: 0.3 };
 
 function fill(selectEl, values, labels) {
   selectEl.innerHTML = "";
@@ -94,14 +95,16 @@ function fill(selectEl, values, labels) {
 
 fill(el("actTask"), D.meta.tasks);
 fill(el("basisTask"), D.meta.tasks);
+fill(el("site"), D.meta.sites, D.meta.sites.map(s => ({ mlp: "MLP in/out", resid: "residual (Feucht)" }[s] || s)));
 fill(el("operand"), D.meta.operands, D.meta.operands.map(o => ({ a: "first operand (a)", b: "second operand (b)", result: "result" }[o])));
 const cbVals = ["a", "b", "a+b", "a-b", "a×b"], cbLabels = ["a", "b", "a+b", "a-b", "a×b"];
 if (D.meta.has_accuracy) { cbVals.push("accuracy", "p_correct"); cbLabels.push("model accuracy", "P(correct)"); }
 if (D.meta.has_ci) { cbVals.push("ci"); cbLabels.push("CI (selected)"); }
 fill(el("colorBy"), cbVals, cbLabels);
 sel.actTask = D.meta.tasks[0]; sel.basisTask = D.meta.tasks[0]; sel.operand = D.meta.operands[0];
+sel.site = D.meta.sites[0];
 el("actTask").value = sel.actTask; el("basisTask").value = sel.basisTask; el("operand").value = sel.operand;
-el("colorBy").value = sel.colorBy;
+el("site").value = sel.site; el("colorBy").value = sel.colorBy;
 
 // projs available for the current operand's neuron overlay (from the shipped neuron data).
 function operandProjs() {
@@ -207,18 +210,24 @@ function initView(points) {
 
 function rebuild() {
   sel.actTask = el("actTask").value; sel.basisTask = el("basisTask").value;
+  sel.site = el("site").value;
   sel.operand = el("operand").value; sel.colorBy = el("colorBy").value;
   sel.overlay = el("overlay").value; sel.thr = parseFloat(el("thr").value) || 0;
   populateMods(); sel.offset = parseFloat(el("offset").value) || 0;
+  const mlpSite = sel.site === "mlp";  // arrows/overlay only where V/U directions live in-space
 
   // neuron-matrix dropdown reflects the operand's side
   const projs = operandProjs();
   const npSel = el("neuronProj");
   fill(npSel, projs, projs.map(p => p.replace("_proj", "")));
-  npSel.disabled = sel.overlay !== "neurons";
+  el("overlay").disabled = !mlpSite;
+  npSel.disabled = !mlpSite || sel.overlay !== "neurons";
+  el("thr").disabled = !mlpSite;
   if (!projs.includes(sel.neuronProj)) sel.neuronProj = projs[0];
   npSel.value = sel.neuronProj;
-  el("hint").textContent = `arrows from the activation-space zero; shipped for in-plane norm ≥ ${D.meta.arrow_floor}`;
+  el("hint").textContent = mlpSite
+    ? `points = predicted (cos,sin); subcomponent/neuron arrows shipped for in-plane norm ≥ ${D.meta.arrow_floor}`
+    : `points = predicted (cos,sin) of the residual-stream probe (Feucht site); no in-space component overlay`;
 
   const periods = D.periods[sel.basisTask][sel.operand];
   const isLog = D.meta.space[sel.basisTask] === "log";
@@ -233,10 +242,10 @@ function rebuild() {
     const canvas = document.createElement("canvas"); canvas.width = SIZE; canvas.height = SIZE;
     wrap.appendChild(cap); wrap.appendChild(canvas); container.appendChild(wrap);
 
-    const points = decodeF16(D.points[sel.basisTask][sel.operand][sel.actTask][pi]);
+    const points = decodeF16(D.points[sel.site][sel.basisTask][sel.operand][sel.actTask][pi]);
     const view = initView(points);
-    const arrows = buildArrows(pi);
-    const center = D.centers[sel.basisTask][sel.operand][pi];
+    const arrows = mlpSite ? buildArrows(pi) : { xy: [], norm: [], meta: [] };
+    const center = D.centers[sel.site][sel.basisTask][sel.operand][pi];
     const st = { canvas, ctx: canvas.getContext("2d"), view, points, color, arrows, arrowScale: view.r * 0.92, center, pi };
     attachInteraction(st);
     plots.push(st);
@@ -456,7 +465,7 @@ function ciCache(op) { if (!_ciCache[op]) _ciCache[op] = decodeF16(D.ci[op]); re
 
 // ---- wire controls ------------------------------------------------------------------------
 // Structural changes rebuild the plots; colour/mod/offset only recolour (view preserved).
-["actTask", "basisTask", "operand", "overlay"].forEach(id =>
+["actTask", "basisTask", "site", "operand", "overlay"].forEach(id =>
   el(id).addEventListener("change", () => { rebuild(); }));
 el("neuronProj").addEventListener("change", () => { sel.neuronProj = el("neuronProj").value; rebuild(); });
 ["colorBy", "mod"].forEach(id => el(id).addEventListener("change", recolor));

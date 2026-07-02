@@ -577,26 +577,26 @@ args:
 - `--output`: overrides the output path
 
 CPU (no forward pass — it reuses the saved activation grids). Replicates Feucht et al. (2026)'s
-probing for the circular ("Fourier") features around L18's MLP. For each period and each probed
-variable it fits the generative model `x̄(v) ≈ offset + cos(θ)·cos_vec + sin(θ)·sin_vec` by least
-squares on the **mean activation per distinct probed value** (equal weight per value, which
-isolates the probed variable from the nuisance operand). The angle is `θ = 2πv/T` in **linear**
-space (`period` = integer `T`, add/sub) or `θ = 2π·log(v)/log(r)` in **log** space (`period` =
-multiplicative ratio `r`, mult — one turn per `×r`; multiplication is periodic in `log v`). In log
-space the default ratios come from the run's `subcomp_periods_mult.tsv` clusters (the frequencies
-the period analysis already found; see `find_log_periods` for how those are located from scratch).
-`offset` is the circle's center; `(cos_vec, sin_vec)` span its plane; `r2` is the fraction of the
-conditional mean's variance that period explains (each explains only a fraction — the mean is a sum
-over several). Two sides, matching the paper: **input** = the post-RMSNorm MLP input (`mlp_input`
-grid), probed for each operand `a` and `b`; **output** = the MLP's residual write (`mlp_output`
-grid), probed for the task result (`a+b` / `a-b` / `a×b`). Fit separately per task.
+probing for the circular ("Fourier") features around L18's MLP **exactly** (their Eq. 9, bias
+included). For each period `T` and probed variable `v` (operand `a`, `b`, or the result) it fits two
+linear probes over the **individual prompts** — `cos(θ) ≈ w_cos·x + b_cos`, `sin(θ) ≈ w_sin·x +
+b_sin` — where `θ = 2πv/T` in **linear** space (`period` = integer `T`, add/sub) or `θ =
+2π·log(v)/log(r)` in **log** space (`period` = multiplicative ratio `r`, mult — one turn per `×r`).
+In log space the default ratios come from the run's `subcomp_periods_mult.tsv` clusters. Solved by
+normal equations (float64; a 4098×4098 solve, orders faster than lstsq's full SVD) on a fixed 80/20
+train split; `r2` is the **held-out** fraction of variance explained, averaged over the cos and sin
+probes (period 2 has `sin(2πv/2)=0`, so only cos counts). Probes are fit at two **sites**: **mlp** —
+`a`,`b` at the post-RMSNorm `mlp_input`, the result at `mlp_output` (where the SPD components read /
+write); **resid** — `a`,`b` at `resid_pre_mlp` (the residual stream, Feucht's site), the result at
+`resid_pre_mlp + mlp_output` (residual after the MLP write). Fit separately per task.
 
 Output (fixed dir per the objective: **`<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/`**, not the
-source run's `analysis/`): `coordinates_<op>.json` — op/symbol/layer/`space`/source/grid metadata +
-`features[side][variable][period]` → `{period, r2, offset, cos, sin}`, each vector `d_model`-long
-(`period` is the ratio `r` in log space). For addition/subtraction the input operands and output
-sums show clear circular structure (higher-period `r2`); for multiplication only the second operand
-`b` fits cleanly (log ratio ≈×1.27), while `a` and the product do not.
+source run's `analysis/`): `coordinates_<op>.json` — op/symbol/layer/`space`/`sites`/source/grid
+metadata + `features[site][operand][period]` → `{period, r2, w_cos, b_cos, w_sin, b_sin}`, the `w_*`
+vectors `d_model`-long (`period` is the ratio `r` in log space). Empirically the operands fit
+cleanly at every period (held-out `r2 ≈ 0.98–0.99`); the result is cleanest at long periods and
+weakest around period 20 (add) / mid periods (sub, mult); the two sites give near-identical `r2`
+(they differ only by RMSNorm, which the linear probe absorbs).
 
 **find_log_periods.py**
 
@@ -637,18 +637,17 @@ args:
 - `--output-dir`: overrides the output dir
 
 CPU (no forward pass). A self-contained canvas applet (vanilla JS, no CDN) for comparing
-subcomponents / neurons against the circular features. For a chosen **basis task** and **operand**
-(first operand `a`, second operand `b`, or the output result), each canonical period's plane is the
-orthonormalised `(cos_vec, sin_vec)` of that Fourier feature; one plot per period, side by side. It
-scatters the chosen **activation task**'s activations projected onto that plane (input operands ←
-`mlp_input`, result ← `mlp_output`) — so e.g. subtraction activations can be viewed on addition's
-basis. The plane is the orthonormalised `(cos_vec, sin_vec)`; when the sin axis is degenerate
-(e.g. period 2, where `sin(2πv/2)=0` for every integer `v` so the circle would collapse to the
-`e1` line), the second axis falls back to the direction of most activation variance orthogonal to
-`e1` — an arbitrary but informative viewing axis, as in Feucht et al. Everything is in **raw
-projection coords** (`x·e1, x·e2`): points, the subcomponent arrows (which start at the
-**activation-space zero** `(0,0)`), and a crosshair+ring marker at the Fourier circle centre (the
-projected `offset`) share one origin, so an off-zero centre is visible. Points colour by `a`, `b`,
+subcomponents / neurons against the circular features. For a chosen **basis task**, **site**, and
+**operand** (first operand `a`, second operand `b`, or the output result), each period's probe gives
+one plot, side by side. Points are the chosen **activation task**'s activations mapped to the
+probe's **predicted `(cos, sin)`** (`w_cos·x + b_cos`, `w_sin·x + b_sin`) — a clean feature traces
+the unit circle, exactly Feucht's plot — so e.g. subtraction activations can be viewed on addition's
+probe. The **site** dropdown picks where the probe was read: `mlp` (a/b ← `mlp_input`, result ←
+`mlp_output`; the spaces the SPD components read/write) or `resid` (the residual stream, reproducing
+Feucht). When the sin axis is degenerate (period 2, `sin(2πv/2)=0` so `w_sin≈0`) the plot falls back
+to an orthonormal frame — `e1` along `w_cos`, `e2` the top activation-variance direction ⊥ `e1`
+(rescaled to the cos-axis spread so the residue split stays visible), as in Feucht et al. A
+crosshair+ring marks the projected circle centre. Points colour by `a`, `b`,
 `a+b`, `a-b`, `a×b` (computed from the operand grids, independent of the active task), each either
 raw or by `(value − offset) mod m` via a `mod` + `offset` form (options from the task's
 `subcomp_periods`, like the subspace-scatter applet); a **model accuracy** option (1 if the base
@@ -661,23 +660,26 @@ causal importance on that prompt. All
 colouring uses a **viridis 0→1** map with a single shared legend (for a `mod m` residue the scale
 runs 0…`m−1`, the reachable max). Colour/mod/offset changes and selecting a new subcomponent
 recolour in place (zoom preserved). Scroll zooms, drag pans. Hovering a point shows its selected
-colour value and prompt (`<value> (a<sym>b=)`). The **unit** subcomponent directions
-(gate/up `V` for input operands, down `U` for the result) are drawn as bright-red arrows (same
-colour for subcomponents and the neuron overlay) scaled to the point cloud; only those whose
-in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖. Clicking a
-subcomponent **or** neuron arrowhead selects it and draws a bar chart of its **angle to every
-Fourier plane** (arccos of the in-plane norm; 0° = the direction lies in the plane), grouped by
-basis task · operand with one bar per period — using the full un-floored projection so orthogonal
-planes appear too; a clicked subcomponent additionally opens its inner-activation `(a, b)` heatmaps
-(one per task) at the bottom. An **overlay** toggle swaps subcomponents for **individual neurons'** directions — gate/up read
-rows or the down write columns of the frozen target weight (a neuron-matrix dropdown) — so
-directions captured by neurons but not subcomponents (or vice versa) are visible. Reads the bases
-(`coordinates_<op>.json`; asserts each was fit at the checkpoint's layer), the run's
-`hidden_activations_<op>.npz` / `alive_filtered_<op>.tsv` / `subcomp_periods_<op>.tsv`, and the
-checkpoint U/V + target MLP weights (mmap). No forward pass.
+colour value and prompt (`<value> (a<sym>b=)`). At the **mlp** site only (the components' V/U
+directions live in MLP space), the **unit** subcomponent directions (gate/up `V` for input operands,
+down `U` for the result) are drawn as bright-red arrows in the same predicted-`(cos,sin)` frame
+(same colour for subcomponents and the neuron overlay), scaled to the point cloud; only those whose
+in-plane norm ≥ the typed threshold show; hovering shows the label + ‖proj‖. At the **resid** site
+the arrows / overlay / threshold controls are disabled (cross-space projection isn't meaningful) —
+just the Feucht circle. Clicking a subcomponent **or** neuron arrowhead selects it and draws a bar
+chart of its **angle to every MLP-site Fourier plane** (arccos of the in-plane norm; 0° = the
+direction lies in the plane), grouped by basis task · operand with one bar per period — using the
+full un-floored projection so orthogonal planes appear too; a clicked subcomponent additionally
+opens its inner-activation `(a, b)` heatmaps (one per task) at the bottom. An **overlay** toggle
+swaps subcomponents for **individual neurons'** directions — gate/up read rows or the down write
+columns of the frozen target weight (a neuron-matrix dropdown). Reads the probes
+(`coordinates_<op>.json`; asserts each was fit at the checkpoint's layer and carries `sites`), the
+run's `hidden_activations_<op>.npz` (incl. `resid_pre_mlp`) / `alive_filtered_<op>.tsv` /
+`subcomp_periods_<op>.tsv`, and the checkpoint U/V + target MLP weights (mmap). No forward pass.
 
 Output: `<run_dir>/analysis/fourier_scatter/{index.html,data.js}` — `data.js` holds, per
-(basis task, operand, period): the projected point clouds for every activation task, the projected
-circle centre, the floor-passing subcomponent and neuron arrow coords + in-plane norms, plus the
-kept subcomponents' inner-activation and (when available) CI grids per task (fp16 base64).
-Smoke-test with `headless_check.py`.
+(site, basis task, operand, period): the predicted-`(cos,sin)` point clouds for every activation
+task and the projected circle centre (both sites); plus, per (basis task, operand, period): the
+floor-passing subcomponent and neuron arrow coords + in-plane norms (mlp site), and the kept
+subcomponents' inner-activation and (when available) CI grids per task (fp16 base64). Smoke-test
+with `headless_check.py`.

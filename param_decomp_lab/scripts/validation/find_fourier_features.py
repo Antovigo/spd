@@ -1,45 +1,38 @@
-"""Fit the circular ("Fourier") features Llama-3.1-8B uses around layer 18's MLP.
+"""Fit the circular ("Fourier") probes Llama-3.1-8B uses around layer 18's MLP.
 
-Feucht et al. (2026, https://arxiv.org/pdf/2605.01148v1) show that the model represents each
-operand as a circular feature in the activations *entering* L18's MLP, and writes the task
-result as a circular feature in what the MLP *adds back* to the residual stream. This script
-replicates their probing strategy to recover, for each canonical period, the plane in activation
-space that the circle lives in and the circle's center.
+Feucht et al. (2026, "Arithmetic in the Wild", https://arxiv.org/abs/2605.01148) train linear
+probes that read a number's circular (Fourier) representation off the model's activations. For a
+period `T` and integer variable `v` (operand `a`, operand `b`, or the result), the probe predicts
+the two Fourier coordinates from the activation `x` (their Eq. 9, bias included):
 
-A circular feature is the generative fit (`x` = activation vector)
+    cos(θ) ≈ w_cos · x + b_cos ,    sin(θ) ≈ w_sin · x + b_sin
 
-    x ≈ offset + cos(θ)·cos_vec + sin(θ)·sin_vec
+fit by least squares over the individual prompts. `θ = 2πv/T` in **linear** space (add/sub) or
+`θ = 2π·log(v)/log(r)` in **log** space (mult, `period` = multiplicative ratio `r`; the ratios are
+the canonical log-periods from the sibling `subcomp_periods_mult.tsv`). This replicates their
+probing exactly.
 
-solved by least squares. The angle depends on the value `v` and the `--space`:
-- **linear** (add/sub): `θ = 2π v / T`, `period` = integer `T`.
-- **log** (mult): `θ = 2π·log(v)/log(r)`, `period` = multiplicative ratio `r` — one full turn each
-  time `v` scales by `r`. Multiplication is periodic in `log v` (a helix in log space). The default
-  ratios are the canonical log-periods the period analysis already found, read from the sibling
-  `subcomp_periods_mult.tsv` (≈×1.27 is the dominant one; cross-checked by `find_log_periods`).
-  `space` defaults to `log` for mult and `linear` otherwise.
+Probes are fit at two **sites**, selectable in the applet:
+- **mlp** — `a`, `b` at `mlp_input` (post-RMSNorm, where the gate/up components read); the result at
+  `mlp_output` (the MLP write, where the down components write).
+- **resid** — `a`, `b` at `resid_pre_mlp` (the residual stream entering the MLP, Feucht's site); the
+  result at `resid_pre_mlp + mlp_output` (the residual after the MLP has written).
 
-To isolate the probed variable from the nuisance operand, the fit is on the mean activation per
-distinct probed value (equal weight per value), matching the paper's probing. `offset` is the
-center of the circle; `(cos_vec, sin_vec)` span its plane. `r2` is the fraction of that conditional
-mean's variance the circle explains — the diagnostic for whether the feature is really there at
-that period (the mean is a sum over several periods, so each single one explains only a fraction).
+Weights are fit on a train split; `r2` is the held-out (test) fraction of variance explained,
+averaged over the cos and sin probes — the diagnostic for whether the feature is present at `T`
+(for period 2 `sin(2πv/2)=0` identically, so only the cos probe contributes).
 
-Sides and their probed variables, matching the paper:
-- **input** — the post-RMSNorm activation entering the MLP (`mlp_input`), probed for each
-  operand `a` and `b` separately.
-- **output** — what the MLP writes to the residual (`mlp_output`), probed for the task result
-  (`a+b` / `a-b` / `a×b`).
-
-Consumes the `hidden_activations_<op>.npz` grid from `collect_hidden_activations` (so no GPU /
-forward pass here); run that once per task first. Fit separately per task.
+Consumes the `hidden_activations_<op>.npz` grid from `collect_hidden_activations` (no GPU / forward
+pass here); run that once per task first. Fit separately per task.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.find_fourier_features <hidden_activations_npz> \
         [--periods=2,5,10,...] [--space=linear|log] [--output=PATH]
 
 Output (default `<PARAM_DECOMP_OUT_DIR>/runs/fourier_features/coordinates_<op>.json`): run/op
-metadata (incl. `space`) plus `features[side][variable][period] = {period, r2, offset, cos, sin}`,
-each vector a `d_model`-long list. For log space `period` holds the ratio `r`.
+metadata (incl. `space`, `sites`) plus
+`features[site][operand][period] = {period, r2, w_cos, b_cos, w_sin, b_sin}`, each `w_*` a
+`d_model`-long list. For log space `period` holds the ratio `r`.
 """
 
 import json
@@ -56,12 +49,13 @@ from param_decomp_lab.scripts.validation.common import op_symbol, read_subcomp_p
 
 # Linear space (add/sub): integer periods `T`, θ = 2πv/T.
 _CANONICAL_PERIODS = (2, 5, 10, 20, 50, 100)
-# Log space (mult): multiplicative ratios `r`, θ = 2π·log_r(v) (one turn each time v scales by r).
-# Fallback only — the default log ratios are read from the run's `subcomp_periods_mult.tsv` (the
-# frequencies the period analysis already found across mult runs; ≈×1.27 is the dominant one).
+# Log space (mult): multiplicative ratios `r`, θ = 2π·log_r(v). Fallback only — the default ratios
+# are read from the run's `subcomp_periods_mult.tsv` (the frequencies the period analysis found).
 _CANONICAL_RATIOS = (1.26,)
-# side -> the npz activation grid it probes (input = post-RMSNorm, output = residual write).
-_SIDE_GRID = {"input": "mlp_input", "output": "mlp_output"}
+_SITES = ("mlp", "resid")
+_OPERANDS = ("a", "b", "result")
+_TRAIN_FRAC = 0.8
+_SPLIT_SEED = 0
 
 
 def _space_for_op(op: str) -> str:
@@ -93,50 +87,71 @@ def _result(op: str, a: NDArray[np.int64], b: NDArray[np.int64]) -> NDArray[np.i
             raise AssertionError(f"unknown operation {op!r}")
 
 
-def _conditional_means(
-    acts: NDArray[np.float32], values: NDArray[np.int64]
-) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
-    """`(unique_values, x̄(v))`: the mean activation per distinct probed value (equal weight per
-    value) — this isolates the probed variable's signal from the nuisance operand and is
-    period-independent, so it's computed once per (side, variable)."""
-    unique = np.unique(values)
-    means = np.stack([acts[values == v].mean(axis=0) for v in unique]).astype(np.float64)  # [k, d]
-    return unique, means
+def _site_grids(data: Any, n: int) -> dict[str, dict[str, NDArray[np.float32]]]:
+    """Per-site, per-operand `[n*n, d]` activation grid the probe reads (see module docstring)."""
 
+    def flat(name: str) -> NDArray[np.float32]:
+        return data[name].reshape(n * n, -1).astype(np.float32)
 
-def _fit_circle(
-    unique: NDArray[np.int64], means: NDArray[np.float64], period: float, space: str
-) -> dict[str, Any]:
-    """Least-squares generative fit `x̄(v) ≈ offset + cos(θ)·cos_vec + sin(θ)·sin_vec`.
-
-    The angle `θ` is `2πv/T` in linear space (`period` = integer `T`) or `2π·log(v)/log(r)` in log
-    space (`period` = multiplicative ratio `r`, so one turn per `×r`), fit on the conditional means
-    (see `_conditional_means`). Returns the three fitted `d`-vectors plus the fraction of the
-    conditional mean's variance the circle explains (`r2`).
-    """
-    if space == "log":
-        assert unique.min() > 0, f"log space needs positive values, got min {unique.min()}"
-        assert period > 0.0 and period != 1.0, f"log ratio must be positive and != 1, got {period}"
-        theta = 2.0 * np.pi * np.log(unique.astype(np.float64)) / np.log(period)
-    else:
-        theta = 2.0 * np.pi * unique.astype(np.float64) / period
-    design = np.stack([np.ones_like(theta), np.cos(theta), np.sin(theta)], axis=1)  # [k, 3]
-    coeffs, _, _, _ = np.linalg.lstsq(design, means, rcond=None)  # [3, d]
-    offset, cos_vec, sin_vec = coeffs
-
-    pred = design @ coeffs
-    ss_res = float(((means - pred) ** 2).sum())
-    ss_tot = float(((means - means.mean(axis=0)) ** 2).sum())
-    assert ss_tot > 0.0, "conditional means are constant across the probed value; r2 undefined"
-    r2 = 1.0 - ss_res / ss_tot
-
+    mlp_in, mlp_out = flat("mlp_input"), flat("mlp_output")
+    resid_pre = flat("resid_pre_mlp")
+    resid_post = resid_pre + mlp_out
     return {
-        "period": period,
-        "r2": round(r2, 6),
-        "offset": [round(x, 6) for x in offset.tolist()],
-        "cos": [round(x, 6) for x in cos_vec.tolist()],
-        "sin": [round(x, 6) for x in sin_vec.tolist()],
+        "mlp": {"a": mlp_in, "b": mlp_in, "result": mlp_out},
+        "resid": {"a": resid_pre, "b": resid_pre, "result": resid_post},
     }
+
+
+def _theta(values: NDArray[np.int64], period: float, space: str) -> NDArray[np.float64]:
+    v = values.astype(np.float64)
+    if space == "log":
+        assert period > 0.0 and period != 1.0, f"log ratio must be positive and != 1, got {period}"
+        assert v.min() > 0, f"log space needs positive values, got min {v.min()}"
+        return 2.0 * np.pi * np.log(v) / np.log(period)
+    return 2.0 * np.pi * v / period
+
+
+def _fit_probes(
+    x: NDArray[np.float32],
+    values: NDArray[np.int64],
+    periods: tuple[float, ...],
+    space: str,
+    train: NDArray[np.int64],
+    test: NDArray[np.int64],
+) -> dict[str, Any]:
+    """Feucht's linear Fourier probes `[cos θ, sin θ] ≈ x·W + b` (bias) for every period at once —
+    one least squares over the train prompts with the `[N, 2·P]` stacked cos/sin targets (the design
+    is shared). Per period: the two weight vectors + biases and the held-out (test) R², averaged
+    over the cos and sin probes (only cos where sin is degenerate, e.g. period 2)."""
+    cols = [
+        np.stack([np.cos(t), np.sin(t)], axis=1)
+        for t in (_theta(values, p, space) for p in periods)
+    ]
+    y = np.concatenate(cols, axis=1)  # [N, 2P]: (cos_p0, sin_p0, cos_p1, ...)
+    design = np.concatenate([x, np.ones((x.shape[0], 1), np.float32)], axis=1)  # [N, d+1]
+    # Normal equations (float64) — a 4098×4098 solve beats lstsq's full SVD of an 8000×4097 matrix
+    # by orders of magnitude on CPU; the probe design is well-conditioned so squaring is harmless.
+    xtr = design[train].astype(np.float64)
+    coef = np.linalg.solve(xtr.T @ xtr, xtr.T @ y[train])  # [d+1, 2P]
+
+    pred = design[test] @ coef
+    ss_res = ((y[test] - pred) ** 2).sum(axis=0)  # [2P]
+    ss_tot = ((y[test] - y[test].mean(axis=0)) ** 2).sum(axis=0)  # [2P]
+    out: dict[str, Any] = {}
+    for i, period in enumerate(periods):
+        c, s = 2 * i, 2 * i + 1
+        valid = ss_tot[[c, s]] > 1e-9  # sin constant (0) at period 2 → excluded from R²
+        assert valid.any(), f"both cos and sin targets constant at period {period}"
+        r2 = (1.0 - ss_res[[c, s]][valid] / ss_tot[[c, s]][valid]).mean()
+        out[str(period)] = {
+            "period": period,
+            "r2": round(float(r2), 6),
+            "w_cos": [round(float(t), 6) for t in coef[:-1, c]],
+            "b_cos": round(float(coef[-1, c]), 6),
+            "w_sin": [round(float(t), 6) for t in coef[:-1, s]],
+            "b_sin": round(float(coef[-1, s]), 6),
+        }
+    return out
 
 
 def find_fourier_features(
@@ -153,45 +168,50 @@ def find_fourier_features(
 
     space = space if space is not None else _space_for_op(op)
     assert space in ("linear", "log"), f"space must be 'linear' or 'log', got {space!r}"
-    # In log space `periods` are multiplicative ratios; in linear space, integer periods.
     if periods is None:
         periods = (
             _log_ratios_from_periods_tsv(npz_path, op) if space == "log" else _CANONICAL_PERIODS
         )
     elif not isinstance(periods, (list, tuple)):
         periods = (periods,)  # fire parses a single `--periods=1.26` as a scalar
+    periods = tuple(periods)
 
     a_axis, b_axis = data["a"], data["b"]
     n = a_axis.shape[0]
     assert b_axis.shape[0] == n, "non-square operand grid"
     # grids are [a-1, b-1, d]; flatten with `indexing="ij"` so sample k has a=aa[k], b=bb[k].
     aa, bb = np.meshgrid(a_axis.astype(np.int64), b_axis.astype(np.int64), indexing="ij")
-    variable_values = {
-        "input": {"a": aa.reshape(-1), "b": bb.reshape(-1)},
-        "output": {"result": _result(op, aa, bb).reshape(-1)},
+    operand_values = {
+        "a": aa.reshape(-1),
+        "b": bb.reshape(-1),
+        "result": _result(op, aa, bb).reshape(-1),
     }
+    site_grids = _site_grids(data, n)
+
+    # One fixed train/test split shared by every probe (deterministic).
+    perm = np.random.default_rng(_SPLIT_SEED).permutation(n * n)
+    n_train = int(_TRAIN_FRAC * n * n)
+    train, test = perm[:n_train], perm[n_train:]
 
     features: dict[str, dict[str, dict[str, Any]]] = {}
-    for side, grid_key in _SIDE_GRID.items():
-        grid = data[grid_key]
-        assert grid.ndim == 3 and grid.shape[:2] == (n, n), (
-            f"unexpected {grid_key} shape {grid.shape}"
-        )
-        acts = grid.reshape(n * n, grid.shape[-1]).astype(np.float32)
-        features[side] = {}
-        for variable, values in variable_values[side].items():
-            unique, means = _conditional_means(acts, values)  # period-independent
-            features[side][variable] = {
-                str(period): _fit_circle(unique, means, period, space) for period in periods
-            }
-            r2s = {p: features[side][variable][str(p)]["r2"] for p in periods}
-            logger.info(f"{op} {side}/{variable} ({space}): r2 by period {r2s}")
+    for site in _SITES:
+        features[site] = {}
+        for operand in _OPERANDS:
+            x = site_grids[site].pop(operand)  # drop as we go to keep peak memory down
+            features[site][operand] = _fit_probes(
+                x, operand_values[operand], periods, space, train, test
+            )
+            del x
+            r2s = {p: features[site][operand][str(p)]["r2"] for p in periods}
+            logger.info(f"{op} {site}/{operand} ({space}): held-out r2 by period {r2s}")
 
     payload = {
         "op": op,
         "symbol": op_symbol(op),
         "layer": layer,
         "space": space,
+        "sites": list(_SITES),
+        "operands": list(_OPERANDS),
         "source": str(npz_path),
         "n_prompts": int(n * n),
         "grid_size": int(n),
@@ -207,7 +227,7 @@ def find_fourier_features(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload))
     size_mb = out_path.stat().st_size / 1e6
-    logger.info(f"wrote Fourier features for {op} ({size_mb:.1f} MB) → {out_path}")
+    logger.info(f"wrote Fourier probes for {op} ({size_mb:.1f} MB) → {out_path}")
     return out_path
 
 
