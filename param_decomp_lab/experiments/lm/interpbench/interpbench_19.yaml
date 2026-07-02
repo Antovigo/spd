@@ -1,73 +1,117 @@
 pd:
   seed: 0
   n_mask_samples: 1
+  # Global shared-transformer CI fn (scaled-down pile-llama-4L); sharp context-dependent
+  # masks are what let the eval PGD adversary be defeated (mask = ci + (1-ci)*source).
   ci_config:
-    mode: layerwise
-    fn_type: vector_mlp
-    hidden_dims:
-    - 16
+    mode: global
+    fn_type: global_shared_transformer
+    hidden_dims: null
+    simple_transformer_ci_cfg:
+      d_model: 256
+      n_blocks: 4
+      mlp_hidden_dim:
+      - 1024
+      attn_config:
+        n_heads: 4
+        max_len: 16
+        rope_base: 10000.0
+  sampling: continuous
   sigmoid_type: leaky_hard
   decomposition_targets:
   - module_pattern: blocks.*.attn.q_proj
-    C: 32
+    C: 100
   - module_pattern: blocks.*.attn.k_proj
-    C: 32
+    C: 100
   - module_pattern: blocks.*.attn.v_proj
-    C: 32
+    C: 100
   - module_pattern: blocks.*.attn.o_proj
-    C: 32
+    C: 100
   - module_pattern: blocks.*.mlp.in_proj
-    C: 96
+    C: 100
   - module_pattern: blocks.*.mlp.out_proj
-    C: 96
+    C: 100
   identity_decomposition_targets: null
-  sampling: continuous
   use_delta_component: true
-  batch_size: 256
-  steps: 30000
+  # Components LR above CI-fn LR keeps the masks from thrashing -> sparser, cleaner CI.
   components_optimizer:
     lr_schedule:
-      start_val: 3e-4
-      fn_type: cosine
-      warmup_pct: 0.01
+      start_val: 1.0e-03
+      warmup_pct: 0.0
       final_val_frac: 0.1
+      fn_type: cosine
+    grad_clip_norm: 0.01
   ci_fn_optimizer:
     lr_schedule:
-      start_val: 3e-4
-      fn_type: cosine
-      warmup_pct: 0.01
+      start_val: 3.0e-04
+      warmup_pct: 0.0
       final_val_frac: 0.1
+      fn_type: cosine
+  steps: 20000
+  batch_size: 256
   faithfulness_warmup_steps: 200
-  faithfulness_warmup_lr: 0.01
-  faithfulness_warmup_weight_decay: 0.1
+  faithfulness_warmup_lr: 0.001
+  faithfulness_warmup_weight_decay: 0.0
   loss_metrics:
+    # coeff 0.03 targets a sparse decomposition (~5 alive components/matrix, L0 ~55)
+    # with eval PGDReconLoss ~0.08 (< 0.1). For a strict recon < 0.02 use coeff 0.001
+    # (L0 ~530). See notes/interpbench/notebook.md for the impmin/L0/recon frontier.
     - type: ImportanceMinimalityLoss
-      coeff: 0.0003
+      coeff: 0.03
       pnorm: 2.0
-      beta: 0
+      beta: 0.0
       p_anneal_start_frac: 0.0
-      p_anneal_final_p: 0.3
+      p_anneal_final_p: 0.4
       p_anneal_end_frac: 1.0
-    - type: StochasticReconLayerwiseLoss
+      eps: 1.0e-12
+    - type: StochasticReconSubsetLoss
+      coeff: 0.5
+      routing:
+        type: uniform_k_subset
+    - type: PersistentPGDReconLoss
       coeff: 2.0
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          start_val: 0.01
+          warmup_pct: 0.025
+          final_val_frac: 1.0
+          fn_type: constant
+      scope:
+        type: per_batch_per_position
+      use_sigmoid_parameterization: false
+      n_warmup_steps: 2
+    - type: FaithfulnessLoss
+      coeff: 10000000.0
 cadence:
-  train_log_every: 100
+  train_log_every: 200
 eval:
-  n_steps: 5
+  n_steps: 10
   batch_size: 256
   every: 1000
-  slow_every: 5000
+  slow_every: 2000
   slow_on_first_step: true
   metrics:
+    - type: ComponentActivationDensity
     - type: CIHistograms
       n_batches_accum: 5
-    - type: ComponentActivationDensity
-    - type: CI_L0
-      groups: null
-    - type: CEandKLLosses
-      rounding_threshold: 0.0
     - type: CIMeanPerComponent
-    - type: StochasticHiddenActsReconLoss
+    - type: CI_L0
+      groups:
+        layer_0:
+        - blocks.0.*
+        layer_1:
+        - blocks.1.*
+        total:
+        - '*'
+    - type: PGDReconLoss
+      init: random
+      step_size: 0.1
+      n_steps: 20
+      mask_scope: shared_across_batch
 target:
   spec:
     kind: interpbench

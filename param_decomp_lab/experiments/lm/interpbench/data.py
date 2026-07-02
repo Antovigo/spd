@@ -118,5 +118,8 @@ def make_interpbench_loader(
     case_id: str, *, batch_size: int, n_samples: int, seed: int, shuffle: bool
 ) -> DataLoader[Tensor]:
     return DataLoader(
-        InterpBenchInputs(case_id, n_samples, seed), batch_size=batch_size, shuffle=shuffle
+        InterpBenchInputs(case_id, n_samples, seed),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=True,
     )
