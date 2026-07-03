@@ -222,9 +222,15 @@ function renderCompDetail(c) {
   if (!g) { det.append("(no grids)"); return; }
   const side = Math.round((N - 1) / g.stride) + 1;
   const row = document.createElement("div");
-  heatmap(row, decQ8(g.kl), side, { cap: "ablation KL" });
-  heatmap(row, decQ8(g.dlp), side, { cap: "Δ correct logprob", diverging: true });
-  heatmap(row, decI16(g.dval), side, { cap: "ablated answer − truth", diverging: true, sentinel: -30000, fmt: v => v.toFixed(0) });
+  if (g.kl) {
+    heatmap(row, decQ8(g.kl), side, { cap: "ablation KL" });
+    heatmap(row, decQ8(g.dlp), side, { cap: "Δ correct logprob", diverging: true });
+    heatmap(row, decI16(g.dval), side, { cap: "ablated answer − truth", diverging: true, sentinel: -30000, fmt: v => v.toFixed(0) });
+  } else {
+    const note = document.createElement("div"); note.className = "statline";
+    note.textContent = "(ablation grids not shipped for this low-KL component — raise --top-comps)";
+    row.appendChild(note);
+  }
   heatmap(row, decQ8(g.inner), N, { cap: "inner activation x·V", diverging: true });
   det.appendChild(row);
 

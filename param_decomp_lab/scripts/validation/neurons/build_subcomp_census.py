@@ -78,6 +78,7 @@ def _i16_b64(grid: np.ndarray) -> str:
 def build_subcomp_census(
     model_path: ModelPath,
     census_dir: str | None = None,
+    top_comps: int = 400,
     output_dir: str | None = None,
 ) -> Path:
     saved = SavedLMRun.from_path(model_path)
@@ -119,6 +120,12 @@ def build_subcomp_census(
     )
     vmap = token_value_map(tokenizer, tok_all)
 
+    # ablation grids (kl/dlp/dval, heavy at stride 1) ship only for the top `top_comps`
+    # rows by max KL; the inner-activation grid ships for every component (the explanation
+    # reconstruction and the detail view need it).
+    row_max_kl = kl_all.reshape(kl_all.shape[0], -1).max(axis=1)
+    ship_rows = set(np.argsort(-row_max_kl)[:top_comps].tolist())
+
     comps_meta: list[dict[str, Any]] = []
     comp_grids: dict[str, Any] = {}
     for proj in MLP_PROJS:
@@ -145,18 +152,19 @@ def build_subcomp_census(
                 "pscore": np.round(pscore[c], 3).tolist(),
             }
             comps_meta.append(meta)
-            tok = tok_all[row]
-            dval = np.full(tok.shape, _VALUE_SENTINEL, dtype=np.int16)
-            for tid, val in vmap.items():
-                sel = tok == tid
-                dval[sel] = np.clip(val - true_ans[sel], _VALUE_SENTINEL + 1, 30000)
             entry: dict[str, Any] = {
                 "stride": stride,
-                "kl": _q8(kl),
-                "dlp": _q8(dlp_all[row]),
-                "dval": _i16_b64(dval),
                 "inner": _q8(inner[c].astype(np.float32), symmetric=True),
             }
+            if row in ship_rows:
+                tok = tok_all[row]
+                dval = np.full(tok.shape, _VALUE_SENTINEL, dtype=np.int16)
+                for tid, val in vmap.items():
+                    sel = tok == tid
+                    dval[sel] = np.clip(val - true_ans[sel], _VALUE_SENTINEL + 1, 30000)
+                entry["kl"] = _q8(kl)
+                entry["dlp"] = _q8(dlp_all[row])
+                entry["dval"] = _i16_b64(dval)
             if offset_all is not None and clean_offset is not None:
                 delta = offset_all[row].astype(np.float32) - clean_offset
                 flips = flip_all[row]
