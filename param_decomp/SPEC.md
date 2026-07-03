@@ -409,11 +409,16 @@ the training-step semantics. The two tiers (S28–S30):
 - **Cast-point seam.** `CEandKLLosses` carries the bf16-input cast-point asymmetry recorded
   in N3 (torch softmax under bf16 autocast; JAX fp32 before `log_softmax`), an accepted seam.
 
-## 11. Targeted PD (tPD) — DRAFT / not yet wired
+## 11. Targeted PD (tPD)
 
-> STATUS: scaffold only (branch `feature/targeted-jax`). This section pins the INTENDED
-> semantics; the two-pass step is not yet implemented. Ref: `notes/targeted_jax_plan.md`
-> and the paper *Targeted Recovery of Weight-Space Mechanisms From Neural Networks*.
+> STATUS: engine two-pass IMPLEMENTED + validated on the toys (branch
+> `feature/targeted-jax`). `run_decomposition_training(..., nontarget=NontargetPass(...))`
+> runs the second delta-forced-on recon grid; wired for TMS + ResidMLP via `active_indices`
+> + a `nontarget` config block. GPU convergence: TMS-40-10-id and ResidMLP-1l each recover
+> the 3 target-feature mechanisms (identity CI on the target probes), reconstruct faithfully
+> (recon ~1e-4), and stay inert off-target. LM path (`lm_targeted/`) is still scaffold. Ref:
+> `notes/targeted_jax_plan.md` and the paper *Targeted Recovery of Weight-Space Mechanisms
+> From Neural Networks*.
 
 Targeted PD decomposes only the mechanisms causally important on a narrow TARGET dataset,
 while a broad NON-TARGET stream keeps behavior faithful off-target. One optimizer step
