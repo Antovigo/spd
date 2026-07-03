@@ -525,22 +525,32 @@ def sample_sparse_features(
     n_features: int,
     feature_probability: float,
     generation_type: str,
+    active_indices: tuple[int, ...] | None = None,
 ) -> Float[Array, "B n_features"]:
     """Synthetic sparse-feature batch (torch `SparseFeatureDataset` with ResidMLP's
     `value_range=(-1, 1)`): each feature takes a `U[-1, 1]` value, gated by
     `feature_probability` (`at_least_zero_active`) or exactly one active per row
-    (`exactly_one_active`)."""
+    (`exactly_one_active`).
+
+    `active_indices` (targeted PD): when set, ONLY those feature columns may be nonzero — the
+    TARGET stream restricted to the chosen features' subspace (torch
+    `SparseFeatureDataset.active_indices`)."""
     value_key, gate_key = jax.random.split(key)
     values = jax.random.uniform(value_key, (batch, n_features), minval=-1.0, maxval=1.0)
     match generation_type:
         case "at_least_zero_active":
             mask = jax.random.uniform(gate_key, (batch, n_features)) < feature_probability
-            return values * mask
+            out = values * mask
         case "exactly_one_active":
             active = jax.random.randint(gate_key, (batch,), 0, n_features)
-            return values * jax.nn.one_hot(active, n_features)
+            out = values * jax.nn.one_hot(active, n_features)
         case _:
             raise AssertionError(f"unsupported ResidMLP generation type {generation_type!r}")
+    if active_indices is not None:
+        assert all(0 <= i < n_features for i in active_indices), (active_indices, n_features)
+        keep = jnp.zeros(n_features, bool).at[jnp.array(active_indices)].set(True)
+        out = out * keep
+    return out
 
 
 def label_coeffs(n_features: int, use_trivial: bool, key: Array) -> Float[Array, " n_features"]:
@@ -718,6 +728,15 @@ SINGLE_FEATURE_PROBE_MAGNITUDE = 0.75
 def single_feature_probe(n_features: int) -> Float[Array, "n_features n_features"]:
     """The single-feature probe: `eye(n_features) * 0.75`, one active feature per row."""
     return jnp.eye(n_features) * SINGLE_FEATURE_PROBE_MAGNITUDE
+
+
+def targeted_feature_probe(
+    n_features: int, active_indices: tuple[int, ...]
+) -> Float[Array, "n_active n_features"]:
+    """One-hot probe over the TARGET features only (targeted PD): the `eye(n_features)` rows
+    at `active_indices`, scaled to the single-feature magnitude — each target feature should
+    recover one distinct component."""
+    return jnp.eye(n_features)[jnp.array(active_indices)] * SINGLE_FEATURE_PROBE_MAGNITUDE
 
 
 def single_feature_ci(

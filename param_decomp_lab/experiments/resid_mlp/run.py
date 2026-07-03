@@ -24,12 +24,13 @@ from param_decomp.built_run import BuiltRun
 from param_decomp.components import SiteC
 from param_decomp.log import setup_logger
 from param_decomp.recon import build_loss_terms
-from param_decomp.run import run_decomposition_training
+from param_decomp.run import NontargetPass, run_decomposition_training
 from param_decomp.sharding import hsdp_mesh
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.config import (
     assert_canonical_algorithm_config,
+    build_nontarget_loss_metrics,
     ci_arch,
     run_instance,
 )
@@ -81,7 +82,9 @@ def build_resid_mlp_built_run(cfg: ResidMLPExperimentConfig, run_id: str) -> Bui
     )
 
 
-def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) -> None:
+def run_resid_mlp_decomposition(
+    built: BuiltRun, cfg: ResidMLPExperimentConfig, raw_cfg: dict[str, Any], mesh: Mesh
+) -> None:
     """Build + pretrain the ResidMLP target, then decompose it through the generic engine.
 
     The residual entering the decomposed model is `x @ W_E` (the prefix `W_E` is carried
@@ -123,6 +126,9 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
     )
 
     data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
+    # targeted PD: the TARGET stream restricts nonzero features to `active_indices`; None ⇒
+    # the full distribution (plain PD). Static (Python tuple) so it bakes into the jit.
+    active_indices = tuple(cfg.data.active_indices) if cfg.data.active_indices is not None else None
 
     # `tgt` is the filter_jit ARG (frozen `W_E` traced, not baked) — closing over an
     # array-bearing eqx target would bake its weights into the HLO.
@@ -134,6 +140,7 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
             target_cfg.n_features,
             target_cfg.feature_probability,
             target_cfg.data_generation_type,
+            active_indices=active_indices,
         )
         residual = resid_mlp.resid_mlp_input_residual(tgt, x)
         return jax.lax.with_sharding_constraint(
@@ -143,13 +150,52 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
     def sample_batch(step: int) -> jax.Array:
         return sample_residual(lm.target, random.fold_in(data_key, step))
 
+    # ── targeted PD: the NON-TARGET stream (full distribution) + its filtered loss set;
+    # the engine runs a second recon grid over it with the delta forced fully on (SPEC §11). ──
+    nontarget: NontargetPass | None = None
+    if cfg.nontarget is not None:
+        nt_cfg = cfg.nontarget
+        nt_data_key = random.fold_in(random.PRNGKey(built.pd.seed), 23)
+
+        @eqx.filter_jit
+        def sample_nt_residual(tgt: resid_mlp.ResidMLPTarget, step_key: jax.Array) -> jax.Array:
+            x = resid_mlp.sample_sparse_features(
+                step_key,
+                nt_cfg.batch_size,
+                target_cfg.n_features,
+                nt_cfg.data.feature_probability,
+                nt_cfg.data.data_generation_type,
+                active_indices=None,
+            )
+            residual = resid_mlp.resid_mlp_input_residual(tgt, x)
+            return jax.lax.with_sharding_constraint(
+                residual, NamedSharding(mesh, P(("replicate", "fsdp")))
+            )
+
+        def nontarget_sample_batch(step: int) -> jax.Array:
+            return sample_nt_residual(lm.target, random.fold_in(nt_data_key, step))
+
+        nontarget = NontargetPass(
+            sample_batch=nontarget_sample_batch,
+            loss_metrics=build_nontarget_loss_metrics(
+                cfg.pd.loss_metrics, nt_cfg.impmin_coeff_ratio
+            ),
+        )
+
+    # Targeted: probe only the TARGET features; plain: the full single-feature probe.
+    probe = (
+        resid_mlp.targeted_feature_probe(target_cfg.n_features, active_indices)
+        if active_indices is not None
+        else resid_mlp.single_feature_probe(target_cfg.n_features)
+    )
+
     # `model` is the filter_jit ARG (frozen weights traced, not baked).
     @eqx.filter_jit
     def single_feature_ci(
         model: resid_mlp.ResidMLPDecomposedModel, ci_fn: Any
     ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
-        resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ model.target.W_E
-        ci = ci_fn(model.read_activations(resid, ci_fn.input_names))
+        resid = probe @ model.target.W_E
+        ci = ci_fn(model.read_activations(resid, ci_fn.input_names), remat=False)
         return ci.lower, ci.upper
 
     uv_spec = toy_uv_eval.toy_uv_spec(lm, raw_cfg)
@@ -181,6 +227,7 @@ def run_resid_mlp_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: 
         eval_fn=eval_fn,
         eval_every=built.cadence.train_log_every,
         mesh=mesh,
+        nontarget=nontarget,
     )
 
 
@@ -194,12 +241,13 @@ def main(config: str, group: str | None = None, tags: str | None = None) -> None
         if tags is not None:
             wandb_cfg["tags"] = tags.split(",")
         schema_raw["wandb"] = wandb_cfg
-    built = build_resid_mlp_built_run(ResidMLPExperimentConfig(**schema_raw), run_id)
+    cfg = ResidMLPExperimentConfig(**schema_raw)
+    built = build_resid_mlp_built_run(cfg, run_id)
     built.run.run_dir.mkdir(parents=True, exist_ok=True)
     setup_logger(built.run.run_dir / "logs.log")
     (built.run.run_dir / "config.yaml").write_text(yaml.safe_dump(schema_raw, sort_keys=False))
     mesh = hsdp_mesh()
-    run_resid_mlp_decomposition(built, schema_raw, mesh)
+    run_resid_mlp_decomposition(built, cfg, schema_raw, mesh)
 
 
 def cli() -> None:

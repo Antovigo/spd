@@ -1,0 +1,84 @@
+# Targeted PD (tPD) on ResidualMLP 1-layer: decompose ONLY the mechanisms for 3 target
+# features ([49, 53, 97] of 100), keeping behavior faithful off-target via a non-target
+# stream with the delta forced fully on. Mirrors the torch convergence run (SPEC §11).
+# Runs on 1 GPU (dp: null → inline). Expected: mlp_in recovers 3 distinct components
+# (identity CI on the target-feature probes), mlp_out a small dense set; ~inert off-target.
+run_name: jax-resid-mlp-1l-targeted
+pd:
+  seed: 0
+  ci_config:
+    type: layerwise_mlp
+    hidden_dims:
+    - 16
+  decomposition_targets:
+  - module_pattern: layers.0.mlp_in
+    C: 100
+  - module_pattern: layers.0.mlp_out
+    C: 100
+  loss_metrics:
+  # FaithfulnessLoss present but INERT (coeff 0): engine requires the term; tPD needs the
+  # delta nonzero to carry non-target behavior.
+  - type: FaithfulnessLoss
+    coeff: 0.0
+  - type: ImportanceMinimalityLoss
+    coeff: 1e-5
+    pnorm: 2.0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 2.0
+    p_anneal_end_frac: 1.0
+  - type: StochasticReconLayerwiseLoss
+    coeff: 1.0
+  - type: StochasticReconLoss
+    coeff: 1.0
+  batch_size: 2048
+  steps: 10000
+  components_optimizer:
+    grad_clip_norm: 0.01
+    lr_schedule:
+      start_val: 2e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 2e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  faithfulness_warmup_steps: 0
+  faithfulness_warmup_lr: 0.01
+  faithfulness_warmup_weight_decay: 0.0
+runtime:
+  remat_recon_forwards: false
+  dp: null
+cadence:
+  train_log_every: 100
+  save_every: 5000
+  keep_last_n_checkpoints: 2
+target:
+  n_features: 100
+  d_embed: 1000
+  d_mlp: 50
+  n_layers: 1
+  act_fn_name: relu
+  in_bias: false
+  out_bias: false
+  pretrain:
+    steps: 2000
+    batch_size: 2048
+    lr: 3e-3
+    seed: 0
+data:
+  # TARGET stream: only these 3 features fire. feature_probability raised so they activate.
+  feature_probability: 0.2
+  data_generation_type: at_least_zero_active
+  active_indices: [49, 53, 97]
+nontarget:
+  # NON-TARGET stream: the full 100-feature distribution at the production sparsity.
+  data:
+    feature_probability: 0.01
+    data_generation_type: at_least_zero_active
+  batch_size: 2048
+  impmin_coeff_ratio: 1.0
+wandb:
+  project: param-decomp

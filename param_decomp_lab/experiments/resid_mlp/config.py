@@ -15,10 +15,14 @@ to the `d_embed` residual stream, and a fixed unembed `W_U` (`d_embed → n_feat
 
 from typing import Literal
 
-from pydantic import PositiveInt, model_validator
+from pydantic import NonNegativeInt, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig, Probability
-from param_decomp_lab.experiments.config import ExperimentConfig
+from param_decomp_lab.experiments.config import (
+    ExperimentConfig,
+    NontargetConfig,
+    assert_targeted_faithfulness_off,
+)
 
 ResidMLPDataGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
 ResidMLPActFn = Literal["gelu", "relu"]
@@ -90,11 +94,30 @@ class ResidMLPTargetConfig(BaseConfig):
 
 
 class ResidMLPDataConfig(BaseConfig):
-    """Synthetic sparse-feature data for the PD decomposition step (values in [-1, 1])."""
+    """Synthetic sparse-feature data for the PD decomposition step (values in [-1, 1]).
+
+    `active_indices` (targeted PD): the TARGET stream restricts nonzero features to these
+    columns. None (non-target / plain path) = the full distribution."""
 
     feature_probability: Probability
     data_generation_type: ResidMLPDataGenerationType = "at_least_zero_active"
+    active_indices: list[NonNegativeInt] | None = None
 
 
 class ResidMLPExperimentConfig(ExperimentConfig[ResidMLPTargetConfig, ResidMLPDataConfig]):
-    pass
+    """Plain PD when `nontarget is None`; targeted PD (tPD) when set — `data.active_indices`
+    is the target features, `nontarget.data` is the broad distribution."""
+
+    nontarget: NontargetConfig[ResidMLPDataConfig] | None = None
+
+    @model_validator(mode="after")
+    def _assert_targeted_invariants(self) -> "ResidMLPExperimentConfig":
+        if self.nontarget is not None:
+            assert self.data.active_indices is not None, (
+                "targeted ResidMLP (nontarget set) needs data.active_indices"
+            )
+            assert self.nontarget.data.active_indices is None, (
+                "nontarget.data is the full distribution — leave active_indices unset"
+            )
+            assert_targeted_faithfulness_off(self.pd)
+        return self
