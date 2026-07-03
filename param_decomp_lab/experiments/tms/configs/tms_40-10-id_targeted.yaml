@@ -73,10 +73,13 @@ target:
     seed: 0
 data:
   # TARGET stream: only these 3 features fire. feature_probability raised so they actually
-  # activate (only 3 columns are ever nonzero).
+  # activate (only 3 columns are ever nonzero). Features chosen to be well-represented in
+  # this pretrained target (W1 column-norm ~1.0) — the target drops some features entirely
+  # in superposition (e.g. feature 24 has norm ~0.02), and tPD correctly finds no mechanism
+  # for an unrepresented feature, so target features must be ones the model actually uses.
   feature_probability: 0.2
   data_generation_type: at_least_zero_active
-  active_indices: [2, 24, 26]
+  active_indices: [2, 13, 26]
 nontarget:
   # NON-TARGET stream: the full 40-feature distribution at the production sparsity.
   data:
