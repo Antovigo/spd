@@ -101,16 +101,23 @@ def build_subcomp_census(
 
     cand = links["candidate_neurons"]
     lags = translation_lags()
-    acts = np.load(census / "activations_add.npz")
+    with np.load(census / "activations_add.npz") as z:  # materialize once (NpzFile re-decompresses)
+        acts = {"gate_preact": z["gate_preact"], "up_preact": z["up_preact"], "a": z["a"]}
     neuron_period = np.load(census / "periodicity_add.npz")["score"]  # [d_int, 3, n_lags]
     with open(census / "candidates.tsv") as f:
         cand_stats = {int(r["neuron"]): r for r in csv.DictReader(f, delimiter="\t")}
 
-    vmap = token_value_map(tokenizer, abl["abl_token"])
     true_ans = correct_answer_grid("add")[::stride, ::stride]
+    # hoist every npz member out of the loop — NpzFile re-decompresses on each access
     kl_all = abl["kl"].astype(np.float32)
+    tok_all = abl["abl_token"]
     flip_all = abl["answer_flip"]
     dlp_all = abl["delta_correct_logprob"].astype(np.float32)
+    offset_all = abl["offset_logprob"] if "offset_logprob" in abl.files else None
+    clean_offset = (
+        abl["clean_offset_logprob"].astype(np.float32) if offset_all is not None else None
+    )
+    vmap = token_value_map(tokenizer, tok_all)
 
     comps_meta: list[dict[str, Any]] = []
     comp_grids: dict[str, Any] = {}
@@ -138,7 +145,7 @@ def build_subcomp_census(
                 "pscore": np.round(pscore[c], 3).tolist(),
             }
             comps_meta.append(meta)
-            tok = abl["abl_token"][row]
+            tok = tok_all[row]
             dval = np.full(tok.shape, _VALUE_SENTINEL, dtype=np.int16)
             for tid, val in vmap.items():
                 sel = tok == tid
@@ -150,10 +157,8 @@ def build_subcomp_census(
                 "dval": _i16_b64(dval),
                 "inner": _q8(inner[c].astype(np.float32), symmetric=True),
             }
-            if "offset_logprob" in abl:
-                delta = abl["offset_logprob"][row].astype(np.float32) - abl[
-                    "clean_offset_logprob"
-                ].astype(np.float32)
+            if offset_all is not None and clean_offset is not None:
+                delta = offset_all[row].astype(np.float32) - clean_offset
                 flips = flip_all[row]
                 entry["offset_mean"] = np.round(delta.mean(axis=(0, 1)), 3).tolist()
                 entry["offset_mean_flip"] = (

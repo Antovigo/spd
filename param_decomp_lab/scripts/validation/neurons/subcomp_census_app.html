@@ -150,9 +150,9 @@ function isMultiPeriod(sc) {
     if ((l[0] === 0) !== (l[1] === 0) && sc[i] > 0.5) hits.add(l[0] || l[1]);
   });
   const ps = [...hits].sort((a, b) => a - b);
-  for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++)
-    if (ps[j] % ps[i] !== 0) return true; // two incommensurate periods
-  return false;
+  // multi-period = some detected period is NOT a multiple of the smallest (a single
+  // fundamental p explains high scores at every multiple of p, so those don't count)
+  return ps.length > 1 && ps.slice(1).some(q => q % ps[0] !== 0);
 }
 
 // ---------- tabs ----------

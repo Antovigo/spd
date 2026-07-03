@@ -127,7 +127,11 @@ def build_neuron_census(
             }
         abl[op]["row_of"] = {int(n): i for i, n in enumerate(abl[op]["neuron_ids"])}
 
-    acts = {op: np.load(root / f"activations_{op}.npz") for op in NEURON_OPS}
+    # materialize the big activation arrays once — NpzFile re-decompresses on every access
+    acts = {}
+    for op in NEURON_OPS:
+        with np.load(root / f"activations_{op}.npz") as z:
+            acts[op] = {"gate_preact": z["gate_preact"], "up_preact": z["up_preact"], "a": z["a"]}
     baseline = {op: np.load(root / f"baseline_{op}.npz") for op in NEURON_OPS}
 
     value_maps = {op: token_value_map(tokenizer, abl[op]["abl_token"]) for op in NEURON_OPS}
@@ -138,8 +142,12 @@ def build_neuron_census(
         nid = int(row["neuron"])
         meta: dict[str, Any] = {"id": nid}
         for k, v in row.items():
-            if k != "neuron":
+            if k == "neuron":
+                continue
+            try:
                 meta[k] = float(v) if "." in v or "e" in v.lower() else int(v)
+            except ValueError:
+                meta[k] = v  # non-numeric column, e.g. `source`
         for op in NEURON_OPS:
             sc = periodicity[op]["score"][nid]  # [3, n_lags]
             meta[f"pscore_{op}"] = np.round(sc, 3).tolist()
