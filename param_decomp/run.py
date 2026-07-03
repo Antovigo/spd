@@ -52,7 +52,7 @@ from param_decomp.checkpoint import (
     save_state,
 )
 from param_decomp.ci_fn import CIFnArch
-from param_decomp.configs import Cadence, PDConfig, flatten_typed_lists
+from param_decomp.configs import AnyLossMetricConfig, Cadence, PDConfig, flatten_typed_lists
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_loss_terms
 from param_decomp.run_state import build_optimizers, init_train_state
@@ -408,6 +408,19 @@ def _init_or_restore_state(
     return state, 0
 
 
+@dataclasses.dataclass(frozen=True)
+class NontargetPass:
+    """Targeted PD (SPEC §11): the non-target stream + its loss set. `sample_batch(step)`
+    yields the broad-distribution batch; `loss_metrics` is the filtered, imp-min-scaled
+    non-target loss set built lab-side (PPGD / unmasked / hidden-acts dropped; faith kept
+    inert). The engine runs a second recon grid over this batch with the delta forced fully
+    on (`delta_override=1.0`), accumulated into the same optimizer step. `None` ⇒ a plain
+    (untargeted) run."""
+
+    sample_batch: Callable[[int], Any]
+    loss_metrics: list[AnyLossMetricConfig]
+
+
 def run_decomposition_training(
     pd: PDConfig,
     cadence: Cadence,
@@ -421,6 +434,7 @@ def run_decomposition_training(
     eval_fn: "Callable[[TrainState, int], LogRecord] | None",
     eval_every: int,
     mesh: Mesh,
+    nontarget: NontargetPass | None = None,
 ) -> None:
     """The generic VPD decomposition-training engine — the ONE train loop every target
     (LM, TMS, ResidMLP, …) runs through.
@@ -475,6 +489,9 @@ def run_decomposition_training(
         return  # SIGTERM mid-warmup: clean exit for requeue
     state, start_step = init
 
+    nontarget_losses = (
+        build_loss_terms(nontarget.loss_metrics, lm.site_names) if nontarget is not None else None
+    )
     step_fn = make_train_step(
         lm=lm,
         losses=build_loss_terms(pd.loss_metrics, lm.site_names),
@@ -484,6 +501,7 @@ def run_decomposition_training(
         remat_recon_forwards=remat_recon_forwards,
         remat_ci_fn=remat_ci_fn,
         mesh=mesh,
+        nontarget_losses=nontarget_losses,
     )
 
     # record what this run actually executes on so wandb never lies about topology.
@@ -643,8 +661,9 @@ def run_decomposition_training(
                 )
             _ts0 = time.perf_counter()
             batch = sample_batch(step)
+            nt_batch = nontarget.sample_batch(step) if nontarget is not None else None
             _ts1 = time.perf_counter()
-            state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step))
+            state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step), nt_batch)
             _ts2 = time.perf_counter()
             jax.block_until_ready((state, metrics["total"]))
             _ts3 = time.perf_counter()
@@ -655,7 +674,8 @@ def run_decomposition_training(
             )
         else:
             batch = sample_batch(step)
-            state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step))
+            nt_batch = nontarget.sample_batch(step) if nontarget is not None else None
+            state, metrics = step_fn(lm, state, batch, random.fold_in(run_key, step), nt_batch)
 
         if _profiling:
             jax.block_until_ready((state, metrics["total"]))

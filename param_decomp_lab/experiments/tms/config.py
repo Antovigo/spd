@@ -9,10 +9,14 @@ synthetic sparse-feature data), so a run is fully reproducible from the config a
 
 from typing import Literal
 
-from pydantic import NonNegativeInt, PositiveInt
+from pydantic import NonNegativeInt, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig, Probability
-from param_decomp_lab.experiments.config import ExperimentConfig
+from param_decomp_lab.experiments.config import (
+    ExperimentConfig,
+    NontargetConfig,
+    assert_targeted_faithfulness_off,
+)
 
 TMSDataGenerationType = Literal[
     "exactly_one_active",
@@ -56,11 +60,31 @@ class TMSTargetConfig(BaseConfig):
 
 
 class TMSDataConfig(BaseConfig):
-    """Synthetic sparse-feature data for the PD decomposition step."""
+    """Synthetic sparse-feature data for the PD decomposition step.
+
+    `active_indices` (targeted PD): the TARGET stream restricts nonzero features to these
+    columns (torch `SparseFeatureDataset.active_indices`). None (the non-target / plain path)
+    = the full distribution."""
 
     feature_probability: Probability
     data_generation_type: TMSDataGenerationType = "at_least_zero_active"
+    active_indices: list[NonNegativeInt] | None = None
 
 
 class TMSExperimentConfig(ExperimentConfig[TMSTargetConfig, TMSDataConfig]):
-    pass
+    """Plain PD when `nontarget is None`; targeted PD (tPD) when set — `data.active_indices`
+    is the target features, `nontarget.data` is the broad distribution."""
+
+    nontarget: NontargetConfig[TMSDataConfig] | None = None
+
+    @model_validator(mode="after")
+    def _assert_targeted_invariants(self) -> "TMSExperimentConfig":
+        if self.nontarget is not None:
+            assert self.data.active_indices is not None, (
+                "targeted TMS (nontarget set) needs data.active_indices (the target features)"
+            )
+            assert self.nontarget.data.active_indices is None, (
+                "nontarget.data is the full distribution — leave active_indices unset"
+            )
+            assert_targeted_faithfulness_off(self.pd)
+        return self

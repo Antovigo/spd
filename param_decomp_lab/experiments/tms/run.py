@@ -26,12 +26,13 @@ from param_decomp.built_run import BuiltRun
 from param_decomp.components import SiteC
 from param_decomp.log import setup_logger
 from param_decomp.recon import build_loss_terms
-from param_decomp.run import run_decomposition_training
+from param_decomp.run import NontargetPass, run_decomposition_training
 from param_decomp.sharding import hsdp_mesh
 from param_decomp.train import TrainState
 from param_decomp_lab.experiments import toy_uv_eval
 from param_decomp_lab.experiments.config import (
     assert_canonical_algorithm_config,
+    build_nontarget_loss_metrics,
     ci_arch,
     run_instance,
 )
@@ -80,7 +81,9 @@ def build_tms_built_run(cfg: TMSExperimentConfig, run_id: str) -> BuiltRun:
     )
 
 
-def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) -> None:
+def run_tms_decomposition(
+    built: BuiltRun, cfg: TMSExperimentConfig, raw_cfg: dict[str, Any], mesh: Mesh
+) -> None:
     """Build + pretrain the TMS target, then decompose it through the generic engine.
 
     The residual entering the decomposed model IS the raw input `x` (no prefix). The
@@ -91,7 +94,13 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
     assert isinstance(target_cfg, tms.TMSTargetConfig)
     is_main = jax.process_index() == 0
 
-    tms_cfg = tms.TMSConfig(n_features=target_cfg.n_features, n_hidden=target_cfg.n_hidden)
+    tms_cfg = tms.TMSConfig(
+        n_features=target_cfg.n_features,
+        n_hidden=target_cfg.n_hidden,
+        n_hidden_layers=target_cfg.n_hidden_layers,
+        hidden_layer_init=target_cfg.hidden_layer_init,
+        init_bias_to_zero=target_cfg.init_bias_to_zero,
+    )
     if is_main:
         print(f"pretraining TMS target ({target_cfg.pretrain_steps} steps)...", flush=True)
     target = tms.pretrain_tms_target(
@@ -110,6 +119,9 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
     )
 
     data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
+    # targeted PD: the TARGET stream restricts nonzero features to `active_indices`; None ⇒
+    # the full distribution (plain PD). Static (Python tuple) so it bakes into the jit.
+    active_indices = tuple(cfg.data.active_indices) if cfg.data.active_indices is not None else None
 
     @jax.jit
     def sample_residual(step_key: jax.Array) -> jax.Array:
@@ -119,20 +131,59 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
             target_cfg.n_features,
             target_cfg.feature_probability,
             target_cfg.data_generation_type,
+            active_indices=active_indices,
         )
         return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(("replicate", "fsdp"))))
 
     def sample_batch(step: int) -> jax.Array:
         return sample_residual(random.fold_in(data_key, step))
 
+    # ── targeted PD: the NON-TARGET stream (full distribution) + its filtered loss set. The
+    # engine runs a second recon grid over it with the delta forced fully on (SPEC §11). ──
+    nontarget: NontargetPass | None = None
+    if cfg.nontarget is not None:
+        nt_cfg = cfg.nontarget
+        nt_data_key = random.fold_in(random.PRNGKey(built.pd.seed), 23)
+
+        @jax.jit
+        def sample_nt_residual(step_key: jax.Array) -> jax.Array:
+            x = tms.sample_sparse_features(
+                step_key,
+                nt_cfg.batch_size,
+                target_cfg.n_features,
+                nt_cfg.data.feature_probability,
+                nt_cfg.data.data_generation_type,
+                active_indices=None,
+            )
+            return jax.lax.with_sharding_constraint(
+                x, NamedSharding(mesh, P(("replicate", "fsdp")))
+            )
+
+        def nontarget_sample_batch(step: int) -> jax.Array:
+            return sample_nt_residual(random.fold_in(nt_data_key, step))
+
+        nontarget = NontargetPass(
+            sample_batch=nontarget_sample_batch,
+            loss_metrics=build_nontarget_loss_metrics(
+                cfg.pd.loss_metrics, nt_cfg.impmin_coeff_ratio
+            ),
+        )
+
     # `model` is the filter_jit ARG (frozen TMS weights traced, not baked) — closing over an
     # array-bearing eqx model would bake its weights into the HLO.
+    # Targeted: probe only the TARGET features (each should recover one distinct component);
+    # plain: the full single-feature probe. `probe` is static (closed into the jit).
+    probe = (
+        tms.targeted_feature_probe(target_cfg.n_features, active_indices)
+        if active_indices is not None
+        else tms.single_feature_probe(target_cfg.n_features)
+    )
+
     @eqx.filter_jit
     def single_feature_ci(
         model: tms.TMSDecomposedModel, ci_fn: Any
     ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
-        probe = tms.single_feature_probe(target_cfg.n_features)
-        ci = ci_fn(model.read_activations(probe, ci_fn.input_names))
+        ci = ci_fn(model.read_activations(probe, ci_fn.input_names), remat=False)
         return ci.lower, ci.upper
 
     uv_spec = toy_uv_eval.toy_uv_spec(lm, raw_cfg)
@@ -164,6 +215,7 @@ def run_tms_decomposition(built: BuiltRun, raw_cfg: dict[str, Any], mesh: Mesh) 
         eval_fn=eval_fn,
         eval_every=built.cadence.train_log_every,
         mesh=mesh,
+        nontarget=nontarget,
     )
 
 
@@ -177,12 +229,13 @@ def main(config: str, group: str | None = None, tags: str | None = None) -> None
         if tags is not None:
             wandb_cfg["tags"] = tags.split(",")
         schema_raw["wandb"] = wandb_cfg
-    built = build_tms_built_run(TMSExperimentConfig(**schema_raw), run_id)
+    cfg = TMSExperimentConfig(**schema_raw)
+    built = build_tms_built_run(cfg, run_id)
     built.run.run_dir.mkdir(parents=True, exist_ok=True)
     setup_logger(built.run.run_dir / "logs.log")
     (built.run.run_dir / "config.yaml").write_text(yaml.safe_dump(schema_raw, sort_keys=False))
     mesh = hsdp_mesh()
-    run_tms_decomposition(built, schema_raw, mesh)
+    run_tms_decomposition(built, cfg, schema_raw, mesh)
 
 
 def cli() -> None:

@@ -448,11 +448,16 @@ def sample_sparse_features(
     n_features: int,
     feature_probability: float,
     generation_type: str,
+    active_indices: tuple[int, ...] | None = None,
 ) -> Float[Array, "B n_features"]:
     """Synthetic sparse-feature batch (torch `SparseFeatureDataset`, `value_range=(0,1)`):
     `at_least_zero_active` gates each feature independently by `feature_probability`;
     `exactly_n_active` (`exactly_one_active` … `exactly_five_active`) activates exactly `n`
     distinct features per row via a random permutation. Inactive features are 0.
+
+    `active_indices` (targeted PD): when set, ONLY those feature columns may be nonzero — the
+    TARGET stream (torch `SparseFeatureDataset.active_indices`). Every other column is zeroed
+    after gating, so the target data spans only the chosen features' subspace.
 
     NOTE: torch's `synced_inputs` (co-activating feature groups) and the no-zero-sample
     rejection variant (`_generate_multi_feature_batch_no_zero_samples`) are not ported —
@@ -461,14 +466,20 @@ def sample_sparse_features(
     values = jax.random.uniform(value_key, (batch, n_features))
     if generation_type == "at_least_zero_active":
         mask = jax.random.uniform(gate_key, (batch, n_features)) < feature_probability
-        return values * mask
-    n = _EXACTLY_N_ACTIVE.get(generation_type)
-    assert n is not None, f"unsupported TMS generation type {generation_type!r}"
-    assert n <= n_features, f"cannot activate {n} of {n_features} features"
-    sort_key = jax.random.uniform(gate_key, (batch, n_features))
-    active = jnp.argsort(sort_key, axis=-1)[:, :n]  # n distinct features per row
-    one_hot = jax.nn.one_hot(active, n_features).sum(axis=-2)  # [B, n_features], n ones per row
-    return values * one_hot
+        out = values * mask
+    else:
+        n = _EXACTLY_N_ACTIVE.get(generation_type)
+        assert n is not None, f"unsupported TMS generation type {generation_type!r}"
+        assert n <= n_features, f"cannot activate {n} of {n_features} features"
+        sort_key = jax.random.uniform(gate_key, (batch, n_features))
+        active = jnp.argsort(sort_key, axis=-1)[:, :n]  # n distinct features per row
+        one_hot = jax.nn.one_hot(active, n_features).sum(axis=-2)  # [B, n_features], n per row
+        out = values * one_hot
+    if active_indices is not None:
+        assert all(0 <= i < n_features for i in active_indices), (active_indices, n_features)
+        keep = jnp.zeros(n_features, bool).at[jnp.array(active_indices)].set(True)
+        out = out * keep
+    return out
 
 
 def pretrain_tms_target(
@@ -591,6 +602,16 @@ def single_feature_probe(n_features: int) -> Float[Array, "n_features n_features
     """The single-feature probe (torch `get_single_feature_causal_importances`):
     `eye(n_features) * 0.75`, one active feature per row."""
     return jnp.eye(n_features) * SINGLE_FEATURE_PROBE_MAGNITUDE
+
+
+def targeted_feature_probe(
+    n_features: int, active_indices: tuple[int, ...]
+) -> Float[Array, "n_active n_features"]:
+    """One-hot probe over the TARGET features only (targeted PD): the `eye(n_features)` rows
+    at `active_indices`, scaled to the single-feature magnitude. Row `k` probes target
+    feature `active_indices[k]`; feeds the per-target identity-CI check (each target feature
+    should recover one distinct component)."""
+    return jnp.eye(n_features)[jnp.array(active_indices)] * SINGLE_FEATURE_PROBE_MAGNITUDE
 
 
 def single_feature_ci(

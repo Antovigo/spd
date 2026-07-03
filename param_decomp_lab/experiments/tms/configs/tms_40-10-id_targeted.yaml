@@ -1,0 +1,88 @@
+# Targeted PD (tPD) on TMS 40->10-id: decompose ONLY the mechanisms for 3 target features
+# ([2, 24, 26] of 40), keeping behavior faithful off-target via a non-target stream with the
+# delta forced fully on. Mirrors the torch convergence run (SPEC §11). Runs on 1 GPU
+# (dp: null → inline single-process; the process uses whatever device JAX sees).
+#
+# Expected: the 3 target-feature probes recover 3 distinct components (identity CI) on
+# linear1/linear2; the dense hidden site stays dense; components are ~inert off-target
+# (nontarget imp/L0 drops).
+run_name: jax-tms-40-10-id-targeted
+pd:
+  seed: 0
+  ci_config:
+    type: layerwise_mlp
+    hidden_dims:
+    - 16
+  decomposition_targets:
+  - module_pattern: linear1
+    C: 200
+  - module_pattern: hidden_layers.0
+    C: 200
+  - module_pattern: linear2
+    C: 200
+  loss_metrics:
+  # FaithfulnessLoss present but INERT (coeff 0): engine requires the term; tPD needs the
+  # delta nonzero to carry non-target behavior.
+  - type: FaithfulnessLoss
+    coeff: 0.0
+  - type: ImportanceMinimalityLoss
+    coeff: 1e-4
+    pnorm: 2.0
+    p_anneal_start_frac: 0.0
+    p_anneal_final_p: 1.0
+    p_anneal_end_frac: 1.0
+  - type: StochasticReconLoss
+    coeff: 1.0
+  - type: StochasticReconLayerwiseLoss
+    coeff: 1.0
+  batch_size: 4096
+  steps: 20000
+  components_optimizer:
+    grad_clip_norm: 0.01
+    lr_schedule:
+      start_val: 1e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 1e-3
+      fn_type: cosine
+      warmup_pct: 0.0
+      final_val_frac: 0.1
+  faithfulness_warmup_steps: 0
+  faithfulness_warmup_lr: 0.01
+  faithfulness_warmup_weight_decay: 0.0
+runtime:
+  remat_recon_forwards: false
+  dp: null
+cadence:
+  train_log_every: 200
+  save_every: 5000
+  keep_last_n_checkpoints: 2
+target:
+  n_features: 40
+  n_hidden: 10
+  n_hidden_layers: 1
+  hidden_layer_init: identity
+  init_bias_to_zero: true
+  pretrain:
+    steps: 10000
+    batch_size: 8192
+    lr: 5e-3
+    seed: 0
+data:
+  # TARGET stream: only these 3 features fire. feature_probability raised so they actually
+  # activate (only 3 columns are ever nonzero).
+  feature_probability: 0.2
+  data_generation_type: at_least_zero_active
+  active_indices: [2, 24, 26]
+nontarget:
+  # NON-TARGET stream: the full 40-feature distribution at the production sparsity.
+  data:
+    feature_probability: 0.05
+    data_generation_type: at_least_zero_active
+  batch_size: 4096
+  impmin_coeff_ratio: 20.0
+wandb:
+  project: param-decomp

@@ -25,20 +25,83 @@ from param_decomp.ci_fn import (
 )
 from param_decomp.configs import (
     AnyEvalMetricConfig,
+    AnyLossMetricConfig,
     Cadence,
     ChunkwiseTransformerCiConfig,
     CiConfig,
+    FaithfulnessLossConfig,
     GlobalMlpCiConfig,
+    ImportanceMinimalityLossConfig,
     LayerwiseMlpCiConfig,
     OptimizerConfig,
     PDConfig,
     PersistentPGDReconLossConfig,
     ResumeProvenance,
     RuntimeConfig,
+    StochasticHiddenActsReconLossConfig,
+    UnmaskedReconLossConfig,
     WandbConfig,
 )
 from param_decomp.schedule import ScheduleConfig
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
+
+# ── targeted PD (tPD) shared config surface (SPEC §11). Both the LM (`lm_targeted`) and the
+# toys reuse these. ──
+
+# Losses dropped from the NON-TARGET pass: PPGD is a stateful per-step adversary the delta
+# override deliberately does not drive; unmasked recon is meaningless with a forced-on delta;
+# hidden-acts recon is a target-only diagnostic. (Torch parity: "losses excluded from the
+# nontarget pass".) FaithfulnessLoss is KEPT (inert, coeff 0) — the engine requires it.
+EXCLUDED_NONTARGET_LOSS_CONFIGS: tuple[type, ...] = (
+    PersistentPGDReconLossConfig,
+    UnmaskedReconLossConfig,
+    StochasticHiddenActsReconLossConfig,
+)
+
+
+class NontargetConfig[D: BaseConfig](BaseConfig):
+    """The broad NON-TARGET stream + its per-pass settings (SPEC §11). `data` reuses the
+    experiment's own data-config type (`TMSDataConfig`, `LMDataConfig`, …) at the full
+    distribution (no `active_indices`). `impmin_coeff_ratio` scales the importance-minimality
+    coeff on the non-target pass (the paper ~2, accounting for fewer active components
+    off-target). The non-target pass forces the delta component fully on."""
+
+    data: D
+    batch_size: PositiveInt
+    impmin_coeff_ratio: float = 1.0
+
+
+def build_nontarget_loss_metrics(
+    loss_metrics: list[AnyLossMetricConfig], impmin_coeff_ratio: float
+) -> list[AnyLossMetricConfig]:
+    """Derive the non-target-pass loss set from the target-pass losses: drop the excluded
+    types (`EXCLUDED_NONTARGET_LOSS_CONFIGS`) and scale the importance-minimality coeff by
+    `impmin_coeff_ratio`. Keeps a full-model recon loss + the inert faith term."""
+    out: list[AnyLossMetricConfig] = []
+    for cfg in loss_metrics:
+        if isinstance(cfg, EXCLUDED_NONTARGET_LOSS_CONFIGS):
+            continue
+        if isinstance(cfg, ImportanceMinimalityLossConfig) and cfg.coeff is not None:
+            out.append(cfg.model_copy(update={"coeff": cfg.coeff * impmin_coeff_ratio}))
+        else:
+            out.append(cfg.model_copy())
+    return out
+
+
+def assert_targeted_faithfulness_off(pd: PDConfig) -> None:
+    """The shared tPD invariant: faithfulness pressure OFF (it drives the delta -> 0, but the
+    delta must stay nonzero to carry non-target behavior), while satisfying the engine's
+    requirement of exactly one FaithfulnessLoss term (kept at coeff 0)."""
+    assert pd.faithfulness_warmup_steps == 0, (
+        "targeted PD needs a nonzero delta; a faithfulness warmup drives delta -> 0. "
+        "Set pd.faithfulness_warmup_steps: 0."
+    )
+    faith = [m for m in pd.loss_metrics if isinstance(m, FaithfulnessLossConfig)]
+    assert len(faith) == 1 and faith[0].coeff == 0.0, (
+        "targeted PD requires exactly one FaithfulnessLoss with coeff: 0.0 — the engine needs "
+        f"the term, tPD needs it inert so the delta stays nonzero. Got "
+        f"{[(type(m).__name__, m.coeff) for m in faith]}."
+    )
 
 
 class EvalConfig(BaseConfig):
