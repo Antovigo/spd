@@ -60,7 +60,7 @@ _MODULE = "param_decomp_lab.scripts.validation.neurons.collect_neuron_activation
 
 def collect_neuron_activations(
     model_path: ModelPath,
-    ops: str = "add,sub",
+    ops: str | tuple[str, ...] = "add,sub",
     layer: int = 18,
     batch_size: int = 256,
     out_dir: str | None = None,
@@ -70,10 +70,11 @@ def collect_neuron_activations(
     slurm_time: str = "2:00:00",
     slurm_mem: str | None = None,
 ) -> list[Path] | None:
+    ops_list = list(ops) if isinstance(ops, tuple) else ops.split(",")  # fire parses a,b as tuple
     if slurm:
         argv = [
             str(Path(model_path).expanduser()),
-            f"--ops={ops}",
+            f"--ops={','.join(ops_list)}",
             f"--layer={layer}",
             f"--batch-size={batch_size}",
         ]
@@ -109,7 +110,7 @@ def collect_neuron_activations(
     ]
 
     written: list[Path] = []
-    for op in ops.split(","):
+    for op in ops_list:
         input_ids = tokenize_grid(run.tokenizer, op)
         correct_token = correct_first_token_grid(run.tokenizer, op).reshape(-1)
         n = input_ids.shape[0]
