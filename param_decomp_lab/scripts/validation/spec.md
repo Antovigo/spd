@@ -822,13 +822,20 @@ Output: `periodicity_<op>.npz` — `score [14336, 3, n_lags]`, `lags`, plus `kl_
 
 **neurons/select_candidate_neurons.py**
 
-args: `--census-dir`, `--kl-thr` (default 0.01), `--floor-margin` (default 5 — `kl_thr` must
-exceed `floor_margin ×` the measured null-patch noise floor, asserted), `--output`.
+args: `--census-dir`, `--kl-thr` (default 0.01), `--floor-margin` (default 3 — `kl_thr` must
+exceed `floor_margin ×` the measured null-patch noise floor, asserted), `--bound-top`
+(default 256), `--output`.
 
-Keeps a neuron when its screen max KL exceeds `--kl-thr` on any op or it flips the argmax
-answer anywhere. Output `candidates.tsv`: `neuron`, per-op `max_kl / mean_kl / n_flip /
-min_dlp`, sorted by overall max KL. This TSV is the `--neurons-tsv` input of the full-grid
-ablation run and the candidate list every downstream neuron script consumes.
+Union of two nets, both feeding the stride-1 full-grid ablation (the unaliased ground
+truth): **screen** — max screen KL over any op exceeds `--kl-thr` (argmax flips alone do NOT
+qualify: ~10k neurons flip near-tied argmaxes at negligible KL); **bound** — the stride-5
+screen only samples `a, b ≡ 0 (mod 5)`, phase-aliasing exactly the periodic neurons this
+census is after, so per op the top `--bound-top` neurons by the full-grid perturbation bound
+`max |silu(gate)·up| · ‖down col‖` (from `activations_<op>.npz` + `subspace.npz` norms) join
+regardless of screen KL. Output `candidates.tsv`: `neuron`, `source` (screen/bound/both),
+per-op `max_kl / mean_kl / n_flip / min_dlp / bound`, sorted by overall max KL. This TSV is
+the `--neurons-tsv` input of the full-grid ablation run and the candidate list every
+downstream neuron script consumes.
 
 **neurons/compute_neuron_subspace.py**
 
