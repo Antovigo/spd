@@ -70,9 +70,10 @@
       <div class="controls">
         <label>channel <select id="explChan"><option value="0">gate</option><option value="1">up</option></select></label>
       </div>
-      <div class="statline">x: neuron ablation max KL (log) · y: R² of preact explained by
-        <b>measured-causal</b> components (○) and all components (·). Bottom-right = causally
-        important but unexplained.</div>
+      <div class="statline">x: neuron ablation max KL (log) · y: <b>mean-centred</b> R² of the
+        preact pattern explained by <b>measured-causal</b> components (○) and all components (·)
+        — centred because the weight delta carries most DC. Bottom-right = causally important
+        but unexplained.</div>
       <canvas id="explCanvas" width="560" height="380"></canvas>
     </div>
   </div>
@@ -347,7 +348,7 @@ function renderExpl() {
   const cv = document.getElementById("explCanvas"), ctx = cv.getContext("2d");
   ctx.clearRect(0, 0, cv.width, cv.height);
   const pts = D.neurons.map(nm => ({
-    id: nm.id, x: Math.log10(nm.max_kl_add + 1e-4), rc: nm.r2_causal[chan], ra: nm.r2_all[chan], nm
+    id: nm.id, x: Math.log10(nm.max_kl_add + 1e-4), rc: nm.r2_causal_c[chan], ra: nm.r2_all_c[chan], nm
   }));
   const xs = pts.map(p => p.x), x0 = Math.min(...xs), x1 = Math.max(...xs) + 1e-6;
   const X = x => 40 + (x - x0) / (x1 - x0) * (cv.width - 55);
@@ -382,7 +383,7 @@ function renderNeuronDetail(nm, chan) {
   const proj = chan === 0 ? "gate_proj" : "up_proj";
   det.innerHTML = `<h2>neuron ${nm.id}</h2>` +
     `<div class="statline">ablation maxKL(add) ${nm.max_kl_add.toPrecision(3)} · source ${nm.source} · ` +
-    `R² by causal comps: gate ${nm.r2_causal[0]}, up ${nm.r2_causal[1]} · by all: gate ${nm.r2_all[0]}, up ${nm.r2_all[1]}` +
+    `centred R² by causal comps: gate ${nm.r2_causal_c[0]}, up ${nm.r2_causal_c[1]} · by all: gate ${nm.r2_all_c[0]}, up ${nm.r2_all_c[1]} · uncentred (incl. DC) causal: gate ${nm.r2_causal[0]}, up ${nm.r2_causal[1]}` +
     (isMultiPeriod(nm.pscore) ? ' · <span class="multiP">multi-period</span>' : "") + "</div>";
   const ng = D.neuron_grids[String(nm.id)];
   const jIdx = D.neurons.indexOf(nm);

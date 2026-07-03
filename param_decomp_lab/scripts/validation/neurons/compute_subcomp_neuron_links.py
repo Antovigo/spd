@@ -56,8 +56,17 @@ from param_decomp_lab.scripts.validation.neurons.common import (
 MLP_PROJS = ("gate_proj", "up_proj", "down_proj")
 
 
-def _r2(target: np.ndarray, pred: np.ndarray) -> np.ndarray:
-    """Per-column R² of pred vs target, both `[n_points, n_neurons]`."""
+def _r2(target: np.ndarray, pred: np.ndarray, center: bool) -> np.ndarray:
+    """Per-column R² of pred vs target, both `[n_points, n_neurons]`.
+
+    `center=True` removes each column's mean from BOTH sides first — "does the prediction
+    explain the activation pattern over the grid" — which matters here because in a targeted
+    run the weight delta carries most of each neuron's DC offset, so uncentered R² can be
+    hugely negative even when the components track the pattern perfectly.
+    """
+    if center:
+        pred = pred - pred.mean(axis=0, keepdims=True)
+        target = target - target.mean(axis=0, keepdims=True)
     resid = ((target - pred) ** 2).sum(axis=0)
     var = ((target - target.mean(axis=0, keepdims=True)) ** 2).sum(axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -142,6 +151,8 @@ def compute_subcomp_neuron_links(
 
     r2_all = np.zeros((len(cand), 2), dtype=np.float32)
     r2_causal = np.zeros((len(cand), 2), dtype=np.float32)
+    r2_all_centered = np.zeros((len(cand), 2), dtype=np.float32)
+    r2_causal_centered = np.zeros((len(cand), 2), dtype=np.float32)
     targets = {"gate_proj": gate, "up_proj": up}
     for ci, proj in enumerate(("gate_proj", "up_proj")):
         v, u = uv[proj]
@@ -149,17 +160,22 @@ def compute_subcomp_neuron_links(
         pred_all = x_flat @ (v @ u[:, cand])
         causal = causal_by_proj[proj]
         pred_causal = x_flat @ (v[:, causal] @ u[causal][:, cand])
-        r2_all[:, ci] = _r2(target, pred_all)
-        r2_causal[:, ci] = _r2(target, pred_causal)
+        r2_all[:, ci] = _r2(target, pred_all, center=False)
+        r2_causal[:, ci] = _r2(target, pred_causal, center=False)
+        r2_all_centered[:, ci] = _r2(target, pred_all, center=True)
+        r2_causal_centered[:, ci] = _r2(target, pred_causal, center=True)
         w_row_norm = np.linalg.norm(weights[proj][cand], axis=1)
         w_hat_norm = np.linalg.norm((v @ u[:, cand]).T, axis=1)
         logger.info(
-            f"{proj}: r2_all mean {r2_all[:, ci].mean():.3f}, "
-            f"r2_causal mean {r2_causal[:, ci].mean():.3f}, "
+            f"{proj}: r2_causal_centered mean {r2_causal_centered[:, ci].mean():.3f} "
+            f"(median {np.median(r2_causal_centered[:, ci]):.3f}), "
+            f"uncentered mean {r2_causal[:, ci].mean():.3f}, "
             f"median |W_hat|/|W| {np.median(w_hat_norm / w_row_norm):.3f}"
         )
     arrays["r2_all"] = r2_all
     arrays["r2_causal"] = r2_causal
+    arrays["r2_all_centered"] = r2_all_centered
+    arrays["r2_causal_centered"] = r2_causal_centered
 
     out_path = (
         Path(output).expanduser()

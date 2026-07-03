@@ -175,6 +175,8 @@ def build_subcomp_census(
                 "pscore": np.round(neuron_period[nid, 2], 3).tolist(),  # combined channel
                 "r2_all": np.round(links["r2_all"][i], 3).tolist(),
                 "r2_causal": np.round(links["r2_causal"][i], 3).tolist(),
+                "r2_all_c": np.round(links["r2_all_centered"][i], 3).tolist(),
+                "r2_causal_c": np.round(links["r2_causal_centered"][i], 3).tolist(),
             }
         )
         neuron_grids[str(nid)] = {
