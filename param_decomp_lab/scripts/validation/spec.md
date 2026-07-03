@@ -802,3 +802,89 @@ Output: `ablation_screen_<op>.npz` (stride > 1) or `ablation_full_<op>[_shard<i>
 `[n_neurons, n_a, n_b]`, `offset_logprob` fp16 `[n_neurons, n_a, n_b, n_offsets]` (stride 1),
 per-prompt `null_kl` / `orig_token` / `clean_offset_logprob`, and `neuron_ids`, `a`, `b`,
 `offsets`, `layer`, `op`, `stride`.
+
+**neurons/compute_neuron_periodicity.py**
+
+args: the `activations_<op>.npz`; `--ablation-npz` (full-grid ablation npz — adds KL-grid
+scores for its candidate neurons); `--output`.
+
+Translation-invariance score per neuron × channel (gate / up / combined) × lag, where the lag
+set (`common.translation_lags()`) is pure-a `(p, 0)`, pure-b `(0, p)` and all mixed `(p, ±q)`
+for p, q in `PERIODS` — Pearson correlation between the **planar-detrended** grid and its
+shifted self over the overlap. No sinusoid assumption; mixed lags catch checkerboards and
+diagonals (`a+b mod p` is invariant along `(k, -k)`, `a-b mod p` along `(k, k)`). A true
+period-p pattern also scores ~1 at multiples of p: consumers read profiles, not argmaxes.
+Detrending matters: a shifted linear trend self-correlates perfectly, so without it every
+magnitude-trending neuron scores ~1 everywhere. CPU-only, minutes for all 14336 × 3 × 2 ops.
+
+Output: `periodicity_<op>.npz` — `score [14336, 3, n_lags]`, `lags`, plus `kl_score` /
+`kl_neuron_ids` with `--ablation-npz`.
+
+**neurons/select_candidate_neurons.py**
+
+args: `--census-dir`, `--kl-thr` (default 0.01), `--floor-margin` (default 5 — `kl_thr` must
+exceed `floor_margin ×` the measured null-patch noise floor, asserted), `--output`.
+
+Keeps a neuron when its screen max KL exceeds `--kl-thr` on any op or it flips the argmax
+answer anywhere. Output `candidates.tsv`: `neuron`, per-op `max_kl / mean_kl / n_flip /
+min_dlp`, sorted by overall max KL. This TSV is the `--neurons-tsv` input of the full-grid
+ablation run and the candidate list every downstream neuron script consumes.
+
+**neurons/compute_neuron_subspace.py**
+
+args: model path (only to mmap the frozen L18 MLP weights); `--candidates-tsv` (adds a PCA
+over the candidate set's read/write vectors); `--probes-dir` (default the shared
+`runs/fourier_probes/`); `--layer`; `--output`.
+
+Projects each neuron's read rows (gate/up) onto the Fourier probe planes fitted at the MLP
+input (`norm` site) and its write column (down) onto the planes at the MLP output
+(`mlp_out`), per variable (`a`, `b`, `a+b`) and period in `PERIODS`. Ships the in-plane
+fraction of the **unit** direction plus each plane's held-out r² (to discount junk planes).
+Output `subspace.npz`: `read_frac [14336, 2, 3, 8]`, `write_frac [14336, 3, 8]`,
+`read_r2` / `write_r2`, `norms`, and `pca_sv_{gate,up,down}` + `candidate_ids` when given.
+
+**neurons/collect_subcomp_ablation_kl.py**
+
+The subcomponent analogue of `collect_neuron_ablation_kl`, for a run's L18 MLP matrices only
+(gate/up/down — attention k/v ablation would invalidate the frozen prefix KV cache, asserted
+away). Removes one component's rank-1 `U_c V_c^T` from the frozen weight at the `=` position
+(down: direct write patch; gate/up: recompute the SwiGLU with the component's contribution
+subtracted from the preactivation — algebraically exact, checked to 6e-14 in f64) and runs the
+same patched tail. Defaults to **all C components per matrix** (the point is not trusting the
+learned CI); `--components-tsv` (matrix + component columns) restricts. Same stride semantics
+and output arrays as the neuron script, with `matrix` / `component` keys; writes
+`subcomp_ablation_<screen|full>_<op>.npz` in the run's `analysis/datasets/`.
+
+**neurons/compute_subcomp_neuron_links.py**
+
+args: model path (checkpoint mmap); `--acts-npz` (census `activations_add.npz`),
+`--candidates-tsv` (census neuron candidates), `--subcomp-screen-npz` (the run's
+`subcomp_ablation_screen_add.npz`), `--subcomp-kl-thr` (measured-KL causality threshold for
+components), `--layer`, `--output`.
+
+CPU one-pass producer for the subcomponent story: per matrix the subcomponent
+inner-activation grids on the 0..200 addition grid (`x·V_c`, x = MLP input for gate/up /
+post-SwiGLU acts for down) + their translation-invariance periodicity + measured-causal
+flags; the coupling weights to the candidate neurons (`U[c, j]` for gate/up writes,
+`V[j, c]` for down reads) with per-component inner-act stds (`std·|U|` = functional
+interaction strength); and the **explanation R²** per candidate neuron × channel — variance
+of the neuron's gate/up preactivation grid explained by the sum of all components vs only
+the measured-causal ones. Low causal-R² on a high-KL neuron = a causally-important neuron
+the decomposition's causal components do not explain. Output
+`subcomp_neuron_links_add.npz` in the run's `analysis/datasets/`.
+
+**neurons/build_neuron_census.py**
+
+args: model path (tokenizer only — decodes ablated answer tokens to numbers);
+`--census-dir`, `--top-k` (candidates that ship full grids, default 200), `--output-dir`.
+
+The census applet (`<census_dir>/applet/{index.html,data.js}`, vanilla JS/canvas, `file://`).
+Left: summary (candidate count, null floors, model accuracy), sortable/filterable candidate
+table (min-KL + per-lag periodicity filters), KL-vs-periodicity scatter, baseline accuracy
+maps. Right, per selected neuron: KL / Δcorrect-logprob / (ablated-answer − truth) heatmaps
+(the last with residue-class error-mode histograms: condition on `a ≡ r (mod m)` /
+`b ≡ r (mod m)`), gate/up/combined activation grids, the full per-channel lag-score profile
+(click a lag to recompute an **in-browser local windowed periodicity map**), the
+answer-offset Δlogprob profile (all prompts and flip-only), and the probe-plane in-plane
+fraction table. Grids ship uint8-quantized base64; falls back to 41×41 screen grids when the
+full-grid ablation npz is absent. Smoke-test with `headless_check.py`.

@@ -409,3 +409,21 @@ uv run python -m $N.collect_neuron_ablation_kl "$CKPT" --op=sub --stride=5 --slu
 uv run python -m $N.collect_neuron_ablation_kl "$CKPT" --op=add --stride=1 \
     --neurons-tsv=~/out/runs/neurons/candidates.tsv --shard-index=0 --shard-count=2 --slurm
 ```
+
+```bash
+# after the screens land: candidates, periodicity, subspace, applet (all CPU)
+uv run python -m $N.select_candidate_neurons --kl-thr=0.01
+uv run python -m $N.compute_neuron_periodicity ~/out/runs/neurons/activations_add.npz
+uv run python -m $N.compute_neuron_periodicity ~/out/runs/neurons/activations_sub.npz
+uv run python -m $N.compute_neuron_subspace "$CKPT" --candidates-tsv=~/out/runs/neurons/candidates.tsv
+uv run python -m $N.build_neuron_census "$CKPT"
+PY=~/.cache/pd-headless/venv/bin/python
+$PY param_decomp_lab/scripts/validation/headless_check.py ~/out/runs/neurons/applet/index.html
+
+# subcomponent phase (reference run addsub-L18-04-2x-beta0.75-LR, addition only)
+SCKPT=~/out/runs/addsub-L18-04-2x-beta0.75-LR/model_20000.pth
+uv run python -m $N.collect_subcomp_ablation_kl "$SCKPT" --op=add --stride=5 --slurm   # screen, all C
+uv run python -m $N.collect_subcomp_ablation_kl "$SCKPT" --op=add --stride=1 --slurm \
+    --components-tsv=<causal-components.tsv>                                            # full grid
+uv run python -m $N.compute_subcomp_neuron_links "$SCKPT"                               # CPU links + R²
+```

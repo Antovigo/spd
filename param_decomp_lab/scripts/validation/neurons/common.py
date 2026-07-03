@@ -82,6 +82,77 @@ def token_value_map(
     return out
 
 
+def translation_lags() -> NDArray[np.int32]:
+    """The `(Δa, Δb)` lag set for periodicity scoring: pure-a `(p, 0)`, pure-b `(0, p)`, and
+    every mixed `(p, q)` / `(p, -q)` combination of `PERIODS` (checkerboards / diagonals).
+
+    Signed mixed lags matter: correlation at `(Δa, Δb)` equals `(-Δa, -Δb)`, so `(p, q)` and
+    `(p, -q)` are the two genuinely distinct diagonal families (a pattern in `a+b mod p` is
+    invariant along `(k, -k)`; one in `a-b mod p` along `(k, k)`).
+    """
+    lags = [(p, 0) for p in PERIODS] + [(0, p) for p in PERIODS]
+    lags += [(p, sq) for p in PERIODS for q in PERIODS for sq in (q, -q)]
+    return np.array(lags, dtype=np.int32)
+
+
+def translation_scores(
+    grids: NDArray[np.floating], lags: NDArray[np.int32], neuron_chunk: int = 2048
+) -> NDArray[np.float32]:
+    """Translation-invariance score per grid per lag: `[n, n_lags]`.
+
+    For each `[N, N]` grid, the Pearson correlation between the grid and itself shifted by
+    `(Δa, Δb)`, over the overlapping region (mean-centred there, so DC never counts as
+    periodic). Each grid is first **planar-detrended** (best-fit `c0 + c1·a + c2·b` removed):
+    a shifted linear trend correlates perfectly with itself, so without this every
+    magnitude-trending neuron would score ~1 at every lag. 1 = exactly translation-invariant
+    at that lag; no sinusoid assumption. A true period-p pattern also scores high at multiples
+    of p — read profiles, not argmaxes. Near-constant / pure-trend grids (residual std ~ 0)
+    score 0.
+    """
+    n, n_side, _ = grids.shape
+    assert grids.shape[2] == n_side
+    coords = np.linspace(-1.0, 1.0, n_side, dtype=np.float32)
+    design = np.stack(
+        [
+            np.ones((n_side, n_side), dtype=np.float32),
+            np.broadcast_to(coords[:, None], (n_side, n_side)),
+            np.broadcast_to(coords[None, :], (n_side, n_side)),
+        ],
+        axis=-1,
+    ).reshape(-1, 3)
+    pinv = np.linalg.pinv(design)  # [3, N*N]
+    out = np.zeros((n, len(lags)), dtype=np.float32)
+    for start in range(0, n, neuron_chunk):
+        chunk = grids[start : start + neuron_chunk].astype(np.float32)
+        n_chunk = chunk.shape[0]
+        flat = chunk.reshape(n_chunk, -1)
+        coeffs = flat @ pinv.T  # [chunk, 3]
+        g = (flat - coeffs @ design.T).reshape(n_chunk, n_side, n_side)
+        for li, (da, db) in enumerate(lags.tolist()):
+            assert 0 <= da < n_side and abs(db) < n_side
+            if db >= 0:
+                x = g[:, : n_side - da, : n_side - db]
+                y = g[:, da:, db:]
+            else:
+                x = g[:, : n_side - da, -db:]
+                y = g[:, da:, : n_side + db]
+            xc = x.reshape(n_chunk, -1)
+            yc = y.reshape(n_chunk, -1)
+            xc = xc - xc.mean(axis=1, keepdims=True)
+            yc = yc - yc.mean(axis=1, keepdims=True)
+            denom = np.sqrt((xc**2).sum(axis=1) * (yc**2).sum(axis=1))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                corr = (xc * yc).sum(axis=1) / denom
+            out[start : start + n_chunk, li] = np.where(denom > 1e-6, corr, 0.0)
+    return out
+
+
+def silu_combine(gate: NDArray[np.floating], up: NDArray[np.floating]) -> NDArray[np.float32]:
+    """Post-SwiGLU neuron activation `silu(gate) * up`, computed in fp32."""
+    g = gate.astype(np.float32)
+    return ((g / (1.0 + np.exp(-g))) * up.astype(np.float32)).astype(np.float32)
+
+
 def tokenize_grid(tokenizer: PreTrainedTokenizerBase, op: str) -> torch.Tensor:
     """All prompts tokenized, `[N_VALUES**2, PROMPT_LEN]` — uniform length, no padding."""
     ids = tokenizer(grid_prompts(op), return_tensors="pt").input_ids

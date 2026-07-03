@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>L18 neuron census</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; background: #fafafa; color: #222; }
+  #layout { display: flex; height: 100vh; }
+  #left { width: 46%; min-width: 480px; overflow-y: auto; padding: 10px; border-right: 2px solid #ccc; }
+  #right { flex: 1; overflow-y: auto; padding: 10px; }
+  h2 { font-size: 15px; margin: 12px 0 6px; }
+  h3 { font-size: 13px; margin: 10px 0 4px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  .controls label { color: #555; }
+  select, input[type=number], input[type=text] { font: inherit; padding: 1px 3px; }
+  input[type=number] { width: 70px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { padding: 2px 6px; text-align: right; border-bottom: 1px solid #eee; white-space: nowrap; }
+  th { cursor: pointer; background: #f0f0f0; position: sticky; top: 0; }
+  tr:hover { background: #eef4ff; cursor: pointer; }
+  tr.sel { background: #dce8ff; }
+  .chip { display: inline-block; padding: 0 4px; border-radius: 3px; background: #e3e8f0; margin-left: 2px; font-size: 11px; }
+  .hm { display: inline-block; margin: 4px; vertical-align: top; }
+  .hm canvas { border: 1px solid #bbb; image-rendering: pixelated; }
+  .hm .cap { font-size: 11px; color: #555; text-align: center; }
+  #tooltip { position: fixed; pointer-events: none; background: #222; color: #fff; padding: 3px 6px;
+             border-radius: 3px; font-size: 11px; display: none; z-index: 10; }
+  .statline { color: #555; font-size: 12px; margin: 2px 0; }
+  .bar { display: inline-block; height: 10px; background: #4a7; vertical-align: middle; }
+  .bar.neg { background: #c66; }
+  #summary { background: #fff; border: 1px solid #ddd; padding: 8px; margin-bottom: 8px; }
+  .lagcell { width: 16px; height: 16px; display: inline-block; margin: 0; cursor: pointer; }
+  #scatter { border: 1px solid #bbb; background: #fff; }
+</style>
+</head>
+<body>
+<div id="tooltip"></div>
+<div id="layout">
+  <div id="left">
+    <div id="summary"></div>
+    <div class="controls">
+      <label>op <select id="tblOp"></select></label>
+      <label>min max-KL <input type="number" id="minKl" value="0.05" step="0.01"></label>
+      <label>period filter <select id="perFilter"><option value="">any</option></select></label>
+      <label>channel <select id="perChan"></select></label>
+      <label>min score <input type="number" id="minPer" value="0.5" step="0.05"></label>
+    </div>
+    <div class="statline" id="tblCount"></div>
+    <div style="max-height:40vh; overflow-y:auto;"><table id="tbl"></table></div>
+    <h2>KL vs periodicity</h2>
+    <div class="controls">
+      <label>lag <select id="scLag"></select></label>
+      <label>channel <select id="scChan"></select></label>
+    </div>
+    <canvas id="scatter" width="520" height="320"></canvas>
+    <h2>Model baseline</h2>
+    <div id="baseline"></div>
+  </div>
+  <div id="right">
+    <div id="detail"><i>Click a neuron in the table or scatter.</i></div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.DATA;
+const N = D.n_values;
+const tooltip = document.getElementById("tooltip");
+
+// ---------- decoding ----------
+function b64bytes(s) {
+  const bin = atob(s); const a = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return a;
+}
+function decQ8(q) {
+  const bytes = b64bytes(q.b64); const out = new Float32Array(bytes.length);
+  const scale = (q.hi - q.lo) / 255;
+  for (let i = 0; i < bytes.length; i++) out[i] = q.lo + bytes[i] * scale;
+  return out;
+}
+function decI16(s) { return new Int16Array(b64bytes(s).buffer); }
+
+// ---------- colormaps ----------
+function magColor(t) { // 0..1, white->blue->dark
+  const r = Math.round(255 * (1 - t)), g = Math.round(255 * (1 - 0.7 * t)), b = 255;
+  return [r, g, Math.round(b - 60 * t)];
+}
+function divColor(t) { // -1..1 RdBu
+  t = Math.max(-1, Math.min(1, t));
+  if (t < 0) { const u = -t; return [Math.round(255 - 60 * u), Math.round(255 - 190 * u), Math.round(255 - 190 * u)]; }
+  const u = t; return [Math.round(255 - 190 * u), Math.round(255 - 190 * u), Math.round(255 - 60 * u)];
+}
+
+// ---------- heatmap ----------
+function heatmap(parent, grid, side, opts) {
+  // grid: Float32Array/Int16Array length side*side (row = a, col = b)
+  const o = Object.assign({ cap: "", diverging: false, px: Math.max(1, Math.floor(220 / side)),
+                            sentinel: null, fmt: v => v.toPrecision(3) }, opts || {});
+  const wrap = document.createElement("div"); wrap.className = "hm";
+  const cv = document.createElement("canvas");
+  cv.width = side; cv.height = side;
+  cv.style.width = (side * o.px) + "px"; cv.style.height = (side * o.px) + "px";
+  const ctx = cv.getContext("2d");
+  const img = ctx.createImageData(side, side);
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < grid.length; i++) {
+    const v = grid[i];
+    if (o.sentinel !== null && v === o.sentinel) continue;
+    if (v < lo) lo = v; if (v > hi) hi = v;
+  }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  const absmax = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+  for (let i = 0; i < grid.length; i++) {
+    const v = grid[i]; let c;
+    if (o.sentinel !== null && v === o.sentinel) c = [130, 130, 130];
+    else if (o.diverging) c = divColor(v / absmax);
+    else c = magColor((v - lo) / ((hi - lo) || 1));
+    img.data[4 * i] = c[0]; img.data[4 * i + 1] = c[1]; img.data[4 * i + 2] = c[2]; img.data[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  cv.addEventListener("mousemove", e => {
+    const r = cv.getBoundingClientRect();
+    const j = Math.floor((e.clientX - r.left) / r.width * side);
+    const i = Math.floor((e.clientY - r.top) / r.height * side);
+    if (i < 0 || j < 0 || i >= side || j >= side) return;
+    const stride = Math.round((N - 1) / (side - 1));
+    const v = grid[i * side + j];
+    tooltip.style.display = "block";
+    tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+    tooltip.textContent = `a=${i * stride} b=${j * stride}  ${o.sentinel !== null && v === o.sentinel ? "n/a" : o.fmt(v)}`;
+  });
+  cv.addEventListener("mouseleave", () => tooltip.style.display = "none");
+  const cap = document.createElement("div"); cap.className = "cap";
+  cap.textContent = o.cap + (o.diverging ? ` [±${absmax.toPrecision(2)}]` : ` [${lo.toPrecision(2)}, ${hi.toPrecision(2)}]`);
+  wrap.appendChild(cv); wrap.appendChild(cap); parent.appendChild(wrap);
+  return cv;
+}
+
+// ---------- lag helpers ----------
+const lagLabel = l => `(${l[0]},${l[1]})`;
+const pureA = D.lags.map((l, i) => [l, i]).filter(([l]) => l[1] === 0);
+const pureB = D.lags.map((l, i) => [l, i]).filter(([l]) => l[0] === 0);
+
+function topLags(scores, k) {
+  // scores: array over lags; returns top-k [lagIdx, score] above 0
+  return scores.map((s, i) => [i, s]).sort((a, b) => b[1] - a[1]).slice(0, k);
+}
+function periodChips(meta, op, chanIdx) {
+  const sc = meta["pscore_" + op][chanIdx];
+  return topLags(sc, 2).filter(([, s]) => s > 0.4)
+    .map(([i, s]) => `<span class="chip">${lagLabel(D.lags[i])}:${s.toFixed(2)}</span>`).join("");
+}
+
+// ---------- table ----------
+const tblOp = document.getElementById("tblOp");
+const perChan = document.getElementById("perChan");
+const scChan = document.getElementById("scChan");
+const scLag = document.getElementById("scLag");
+const perFilter = document.getElementById("perFilter");
+D.ops.forEach(op => tblOp.add(new Option(op, op)));
+D.channels.forEach((c, i) => { perChan.add(new Option(c, i)); scChan.add(new Option(c, i)); });
+perChan.value = "2"; scChan.value = "2";
+D.lags.forEach((l, i) => { perFilter.add(new Option(lagLabel(l), i)); scLag.add(new Option(lagLabel(l), i)); });
+
+let sortKey = null, sortDir = -1, selected = null;
+
+function visibleNeurons() {
+  const op = tblOp.value, minKl = +document.getElementById("minKl").value;
+  const pf = perFilter.value, chan = +perChan.value, minPer = +document.getElementById("minPer").value;
+  return D.neurons.filter(m => {
+    if ((m["max_kl_" + op] || 0) < minKl) return false;
+    if (pf !== "" && m["pscore_" + op][chan][+pf] < minPer) return false;
+    return true;
+  });
+}
+
+function renderTable() {
+  const op = tblOp.value, chan = +perChan.value;
+  let rows = visibleNeurons();
+  if (sortKey) rows = rows.slice().sort((a, b) => sortDir * ((a[sortKey] || 0) - (b[sortKey] || 0)));
+  const cols = ["neuron", "max_kl_" + op, "mean_kl_" + op, "n_flip_" + op, "min_dlp_" + op];
+  document.getElementById("tblCount").textContent =
+    `${rows.length} neurons shown (of ${D.neurons.length} candidates)`;
+  const tbl = document.getElementById("tbl");
+  tbl.innerHTML = "<tr>" + cols.map(c =>
+    `<th data-k="${c === "neuron" ? "id" : c}">${c.replace("_" + op, "")}</th>`).join("") +
+    "<th>top lags</th><th>write a+b</th></tr>";
+  tbl.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+    const k = th.dataset.k; if (!k) return;
+    if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+    renderTable();
+  }));
+  const tIdx = D.periods.indexOf(10);
+  rows.slice(0, 400).forEach(m => {
+    const tr = document.createElement("tr");
+    if (selected === m.id) tr.className = "sel";
+    const wf = m.write_frac ? m.write_frac[2][tIdx >= 0 ? tIdx : 0].toFixed(2) : "";
+    tr.innerHTML = `<td>${m.id}</td>` +
+      cols.slice(1).map(c => `<td>${(+m[c]).toPrecision(3)}</td>`).join("") +
+      `<td style="text-align:left">${periodChips(m, op, chan)}</td><td>${wf}</td>`;
+    tr.addEventListener("click", () => { selected = m.id; renderTable(); renderDetail(m.id); });
+    tbl.appendChild(tr);
+  });
+}
+
+// ---------- scatter ----------
+function renderScatter() {
+  const cv = document.getElementById("scatter"), ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const op = tblOp.value, lag = +scLag.value, chan = +scChan.value;
+  const pts = D.neurons.map(m => ({
+    id: m.id, x: m["pscore_" + op][chan][lag], y: Math.log10((m["max_kl_" + op] || 1e-4) + 1e-4)
+  }));
+  const x0 = -1, x1 = 1;
+  const ys = pts.map(p => p.y), y0 = Math.min(...ys), y1 = Math.max(...ys) + 1e-6;
+  const X = x => 30 + (x - x0) / (x1 - x0) * (cv.width - 40);
+  const Y = y => cv.height - 20 - (y - y0) / (y1 - y0) * (cv.height - 35);
+  ctx.strokeStyle = "#999"; ctx.strokeRect(30, 10, cv.width - 40, cv.height - 30);
+  ctx.fillStyle = "#555"; ctx.fillText("periodicity score @ " + lagLabel(D.lags[lag]), cv.width / 2 - 60, cv.height - 4);
+  ctx.save(); ctx.translate(10, cv.height / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("log10 max KL", -35, 0); ctx.restore();
+  cv._pts = [];
+  pts.forEach(p => {
+    ctx.fillStyle = p.id === selected ? "#d33" : "rgba(40,80,180,0.55)";
+    const x = X(p.x), y = Y(p.y);
+    ctx.beginPath(); ctx.arc(x, y, p.id === selected ? 4 : 2.5, 0, 7); ctx.fill();
+    cv._pts.push({ x, y, id: p.id });
+  });
+}
+document.getElementById("scatter").addEventListener("click", e => {
+  const cv = e.target, r = cv.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  let best = null, bd = 100;
+  cv._pts.forEach(p => { const d = (p.x - mx) ** 2 + (p.y - my) ** 2; if (d < bd) { bd = d; best = p.id; } });
+  if (best !== null) { selected = best; renderTable(); renderScatter(); renderDetail(best); }
+});
+
+// ---------- local windowed periodicity ----------
+function localPeriodicity(grid, side, da, db, w) {
+  const out = new Float32Array(side * side).fill(0);
+  const half = Math.floor(w / 2);
+  for (let i = 0; i < side; i++) for (let j = 0; j < side; j++) {
+    let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, n = 0;
+    for (let u = i - half; u <= i + half; u++) for (let v = j - half; v <= j + half; v++) {
+      const u2 = u + da, v2 = v + db;
+      if (u < 0 || v < 0 || u >= side || v >= side || u2 < 0 || v2 < 0 || u2 >= side || v2 >= side) continue;
+      const x = grid[u * side + v], y = grid[u2 * side + v2];
+      sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; n++;
+    }
+    if (n < 8) continue;
+    const cov = sxy - sx * sy / n, vx = sxx - sx * sx / n, vy = syy - sy * sy / n;
+    out[i * side + j] = (vx > 1e-9 && vy > 1e-9) ? cov / Math.sqrt(vx * vy) : 0;
+  }
+  return out;
+}
+
+// ---------- detail panel ----------
+function barRow(label, val, scale) {
+  const w = Math.min(160, Math.abs(val) / scale * 160);
+  return `<div>${label} <span class="bar ${val < 0 ? "neg" : ""}" style="width:${w}px"></span> ${val.toFixed(3)}</div>`;
+}
+
+function renderDetail(nid) {
+  const det = document.getElementById("detail");
+  det.innerHTML = "";
+  const meta = D.neurons.find(m => m.id === nid);
+  const g = D.grids[String(nid)];
+  const h = document.createElement("h2");
+  h.textContent = `neuron ${nid}`;
+  det.appendChild(h);
+  const stat = document.createElement("div"); stat.className = "statline";
+  stat.textContent = D.ops.map(op =>
+    `${op}: maxKL ${(+meta["max_kl_" + op]).toPrecision(3)}, flips ${meta["n_flip_" + op]}`).join(" | ");
+  det.appendChild(stat);
+  if (!g) { det.append("(no shipped grids for this neuron — raise --top-k)"); return; }
+
+  const opSel = document.createElement("select");
+  D.ops.forEach(op => { if (g[op]) opSel.add(new Option(op, op)); });
+  const chanForLocal = document.createElement("select");
+  ["gate", "up", "comb"].forEach(c => chanForLocal.add(new Option(c, c)));
+  chanForLocal.value = "comb";
+  const lagSel = document.createElement("select");
+  D.lags.forEach((l, i) => lagSel.add(new Option(lagLabel(l), i)));
+  const winInp = document.createElement("input");
+  winInp.type = "number"; winInp.value = 41; winInp.step = 2; winInp.min = 11;
+  const ctr = document.createElement("div"); ctr.className = "controls";
+  ctr.append("op ", opSel, " local-periodicity: channel ", chanForLocal, " lag ", lagSel, " window ", winInp);
+  det.appendChild(ctr);
+  const body = document.createElement("div");
+  det.appendChild(body);
+
+  function draw() {
+    body.innerHTML = "";
+    const op = opSel.value, e = g[op];
+    const sideAbl = Math.round((N - 1) / e.stride) + 1;
+    const row1 = document.createElement("div");
+    body.appendChild(row1);
+    heatmap(row1, decQ8(e.kl), sideAbl, { cap: "ablation KL" });
+    heatmap(row1, decQ8(e.dlp), sideAbl, { cap: "Δ correct logprob", diverging: true });
+    heatmap(row1, decI16(e.dval), sideAbl, { cap: "ablated answer − truth", diverging: true, sentinel: -30000, fmt: v => v.toFixed(0) });
+    const row2 = document.createElement("div");
+    body.appendChild(row2);
+    const gate = decQ8(e.gate), up = decQ8(e.up), comb = decQ8(e.comb);
+    heatmap(row2, gate, N, { cap: "gate preact", diverging: true });
+    heatmap(row2, up, N, { cap: "up preact", diverging: true });
+    heatmap(row2, comb, N, { cap: "silu(gate)·up", diverging: true });
+
+    // local periodicity
+    const lp = document.createElement("div");
+    const chGrid = { gate, up, comb }[chanForLocal.value];
+    const l = D.lags[+lagSel.value];
+    const w = Math.max(11, +winInp.value | 1);
+    heatmap(lp, localPeriodicity(chGrid, N, l[0], l[1], w), N,
+      { cap: `local periodicity ${chanForLocal.value} @ ${lagLabel(l)}, win ${w}`, diverging: true });
+    body.appendChild(lp);
+
+    // periodicity score matrix per channel
+    const pm = document.createElement("div");
+    pm.innerHTML = "<h3>translation-invariance scores (click cell to set local lag)</h3>";
+    D.channels.forEach((cn, ci) => {
+      const sc = meta["pscore_" + op][ci];
+      const div = document.createElement("div");
+      div.innerHTML = `<b>${cn}</b> pure-a: ` + pureA.map(([l, i]) =>
+        `<span class="lagcell" data-i="${i}" title="${lagLabel(l)}: ${sc[i].toFixed(2)}"
+          style="background:rgb(${divColor(sc[i]).join(",")})"></span>`).join("") +
+        " pure-b: " + pureB.map(([l, i]) =>
+        `<span class="lagcell" data-i="${i}" title="${lagLabel(l)}: ${sc[i].toFixed(2)}"
+          style="background:rgb(${divColor(sc[i]).join(",")})"></span>`).join("") +
+        ` top: ${topLags(sc, 3).map(([i, s]) => lagLabel(D.lags[i]) + ":" + s.toFixed(2)).join(" ")}`;
+      pm.appendChild(div);
+    });
+    pm.querySelectorAll(".lagcell").forEach(el => el.addEventListener("click", () => {
+      lagSel.value = el.dataset.i; draw();
+    }));
+    body.appendChild(pm);
+
+    // offset profile
+    if (e.offset_mean) {
+      const of = document.createElement("div");
+      of.innerHTML = "<h3>answer-offset Δlogprob (ablated − clean)</h3>";
+      const scale = Math.max(...e.offset_mean.map(Math.abs), 0.01);
+      of.innerHTML += e.offset_mean.map((v, i) => barRow("δ=" + D.offsets[i], v, scale)).join("");
+      if (e.offset_mean_flip) {
+        of.innerHTML += "<h3>… on answer-flip prompts only</h3>";
+        const s2 = Math.max(...e.offset_mean_flip.map(Math.abs), 0.01);
+        of.innerHTML += e.offset_mean_flip.map((v, i) => barRow("δ=" + D.offsets[i], v, s2)).join("");
+      }
+      body.appendChild(of);
+    }
+
+    // error modes with residue conditioning
+    const em = document.createElement("div");
+    em.innerHTML = "<h3>error modes (ablated argmax vs truth)</h3>";
+    const selAmod = document.createElement("select"), selBmod = document.createElement("select");
+    [["", "a: any"], ...[2, 5, 10].flatMap(m => Array.from({length: m}, (_, r) => [m + ":" + r, `a≡${r} (mod ${m})`]))]
+      .forEach(([v, t]) => selAmod.add(new Option(t, v)));
+    [["", "b: any"], ...[2, 5, 10].flatMap(m => Array.from({length: m}, (_, r) => [m + ":" + r, `b≡${r} (mod ${m})`]))]
+      .forEach(([v, t]) => selBmod.add(new Option(t, v)));
+    const emc = document.createElement("div"); emc.className = "controls";
+    emc.append(selAmod, selBmod);
+    const emo = document.createElement("div");
+    em.append(emc, emo); body.appendChild(em);
+    function histo() {
+      const dv = decI16(e.dval), side = sideAbl, stride = e.stride;
+      const pass = (sel, idx) => {
+        if (!sel.value) return true;
+        const [m, r] = sel.value.split(":").map(Number);
+        return (idx * stride) % m === r;
+      };
+      const counts = new Map(); let total = 0, changed = 0;
+      for (let i = 0; i < side; i++) for (let j = 0; j < side; j++) {
+        if (!pass(selAmod, i) || !pass(selBmod, j)) continue;
+        total++;
+        const v = dv[i * side + j];
+        if (v === 0) continue;
+        changed++;
+        const key = v === -30000 ? "non-numeric" : String(v);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+      emo.innerHTML = `<div class="statline">${changed}/${total} prompts change argmax under this filter</div>` +
+        top.map(([k, c]) => barRow("Δ=" + k, c / (total || 1), Math.max(top[0][1] / total, 0.01))).join("");
+    }
+    selAmod.addEventListener("change", histo); selBmod.addEventListener("change", histo);
+    histo();
+
+    // subspace
+    const ss = document.createElement("div");
+    ss.innerHTML = "<h3>probe-plane in-plane fraction (read: norm site; write: mlp_out site)</h3>";
+    const per = D.periods;
+    let html = "<table><tr><th></th>" + per.map(p => `<th>T=${p}</th>`).join("") + "</tr>";
+    [["gate read", meta.read_frac[0]], ["up read", meta.read_frac[1]]].forEach(([lab, rf]) => {
+      D.variables.forEach((v, vi) => {
+        html += `<tr><td>${lab} · ${v}</td>` + per.map((p, ti) =>
+          `<td style="background:rgba(60,110,220,${rf[vi][ti]})">${rf[vi][ti].toFixed(2)}</td>`).join("") + "</tr>";
+      });
+    });
+    D.variables.forEach((v, vi) => {
+      html += `<tr><td>write · ${v}</td>` + per.map((p, ti) =>
+        `<td style="background:rgba(200,80,80,${meta.write_frac[vi][ti]})">${meta.write_frac[vi][ti].toFixed(2)}</td>`).join("") + "</tr>";
+    });
+    html += "</table><div class='statline'>probe r² (read a/b/a+b): " +
+      D.read_r2.map((r, i) => D.variables[i] + " " + r.map(x => x.toFixed(2)).join("/")).join(" · ") + "</div>";
+    ss.innerHTML += html;
+    body.appendChild(ss);
+  }
+  opSel.addEventListener("change", draw);
+  chanForLocal.addEventListener("change", draw);
+  lagSel.addEventListener("change", draw);
+  winInp.addEventListener("change", draw);
+  draw();
+}
+
+// ---------- baseline + summary ----------
+function renderBaseline() {
+  const div = document.getElementById("baseline");
+  div.innerHTML = "";
+  D.ops.forEach(op => {
+    const b = D.baseline[op];
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<b>${op}</b> accuracy ${(100 * b.accuracy).toFixed(1)}%`;
+    div.appendChild(wrap);
+    heatmap(wrap, decQ8(b.is_correct), N, { cap: op + " argmax correct", px: 1 });
+    heatmap(wrap, decQ8(b.correct_prob), N, { cap: op + " p(correct)", px: 1 });
+  });
+}
+function renderSummary() {
+  const s = document.getElementById("summary");
+  const shipped = Object.keys(D.grids).length;
+  s.innerHTML = `<b>L18 neuron census</b> — ${D.neurons.length} candidate neurons ` +
+    `(screen KL threshold; null floor ${Object.entries(D.null_kl_max || {}).map(([o, v]) => o + " " + v.toExponential(1)).join(", ")}); ` +
+    `${shipped} with full grids. Channels: ${D.channels.join(", ")}. ` +
+    `Periods tested: ${D.periods.join(", ")} (pure a, pure b, and all mixed ± combinations).`;
+}
+
+["tblOp", "minKl", "perFilter", "perChan", "minPer"].forEach(id =>
+  document.getElementById(id).addEventListener("change", () => { renderTable(); renderScatter(); }));
+["scLag", "scChan"].forEach(id =>
+  document.getElementById(id).addEventListener("change", renderScatter));
+
+renderSummary(); renderTable(); renderScatter(); renderBaseline();
+</script>
+</body>
+</html>

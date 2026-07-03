@@ -1,0 +1,155 @@
+"""Which residual subspaces do L18 neurons read from / write to, per Fourier period.
+
+For every neuron, projects its **read** directions (gate / up rows of the frozen L18 MLP,
+`[4096]`) onto the Feucht-style Fourier probe planes fitted on the MLP input (`norm` site),
+and its **write** direction (down column) onto the planes fitted on the MLP output
+(`mlp_out` site) — for each variable (`a`, `b`, `a+b`) and each period in `PERIODS`. The
+per-plane quantity is the **in-plane fraction** of the unit direction (`‖P·w‖ / ‖w‖`, P the
+orthonormal projector of span(w_cos, w_sin)): 1 = the direction lies in the probe plane,
+0 = orthogonal. Probe-plane quality ships alongside as the held-out `r2` (min of cos/sin),
+so a high in-plane fraction on a junk plane can be discounted.
+
+With `--candidates-tsv` (a `neuron` column) it also runs a PCA over the candidate set's
+read / write vectors — singular values → how many directions the causal neurons collectively
+span in each space.
+
+CPU-only (weights are mmap-read from the checkpoint; probes from `runs/fourier_probes/`).
+
+Usage:
+    python -m param_decomp_lab.scripts.validation.neurons.compute_neuron_subspace \
+        <model_path> [--candidates-tsv=PATH] [--probes-dir=PATH] [--layer=18] [--output=PATH]
+
+Output (default `subspace.npz` in the census dir):
+- `read_frac`  — `[14336, 2, 3, n_periods]` fp32: (gate, up) × (a, b, a+b) × period
+- `write_frac` — `[14336, 3, n_periods]` fp32: (a, b, a+b) × period, down column on `mlp_out`
+- `read_r2` / `write_r2` — `[3, n_periods]` probe quality per plane
+- `norms`      — `[14336, 3]`: gate-row, up-row, down-column L2 norms
+- `pca_sv_<space>` (`gate` / `up` / `down`) + `candidate_ids` — with `--candidates-tsv`
+- `periods`, `variables`, `layer`
+"""
+
+import csv
+import json
+from pathlib import Path
+from typing import Any
+
+import fire
+import numpy as np
+from numpy.typing import NDArray
+
+from param_decomp.log import logger
+from param_decomp_lab.experiments.lm.run import SavedLMRun
+from param_decomp_lab.infra.paths import ModelPath
+from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
+from param_decomp_lab.scripts.validation.neurons.common import D_INT, NEURONS_DIR, PERIODS
+
+VARIABLES = ("a", "b", "a+b")
+
+
+def _plane_basis(probe: dict[str, Any]) -> NDArray[np.float32] | None:
+    """Orthonormal basis `[4096, 2]` of span(w_cos, w_sin); None for degenerate planes
+    (period 2 has no sin probe)."""
+    if "w_sin" not in probe or probe["w_sin"] is None:
+        return None
+    w = np.stack([probe["w_cos"], probe["w_sin"]], axis=1).astype(np.float32)
+    q, _ = np.linalg.qr(w)
+    return q.astype(np.float32)
+
+
+def _in_plane_frac(
+    unit_dirs: NDArray[np.float32], basis: NDArray[np.float32]
+) -> NDArray[np.float32]:
+    """`[n, d] x [d, k]` -> `[n]` norm of the projection of each unit row onto the basis."""
+    return np.linalg.norm(unit_dirs @ basis, axis=1).astype(np.float32)
+
+
+def compute_neuron_subspace(
+    model_path: ModelPath,
+    candidates_tsv: str | None = None,
+    probes_dir: str | None = None,
+    layer: int = 18,
+    output: str | None = None,
+) -> Path:
+    from param_decomp_lab.scripts.validation.common import load_target_mlp_weights
+
+    checkpoint = SavedLMRun.from_path(model_path).checkpoint_path
+    weights = load_target_mlp_weights(checkpoint, layer, ("gate_proj", "up_proj", "down_proj"))
+    gate_rows = weights["gate_proj"]  # [d_int, d_model]
+    up_rows = weights["up_proj"]
+    down_cols = weights["down_proj"].T  # [d_int, d_model]
+    assert gate_rows.shape[0] == D_INT
+
+    def unit(m: NDArray[np.float32]) -> NDArray[np.float32]:
+        return (m / np.linalg.norm(m, axis=1, keepdims=True)).astype(np.float32)
+
+    probes_root = (
+        Path(probes_dir).expanduser()
+        if probes_dir
+        else (PARAM_DECOMP_OUT_DIR / "runs" / "fourier_probes")
+    )
+    read_probes = json.loads((probes_root / "probes_norm.json").read_text())["probes"]
+    write_probes = json.loads((probes_root / "probes_mlp_out.json").read_text())["probes"]
+
+    n_t = len(PERIODS)
+    read_frac = np.zeros((D_INT, 2, len(VARIABLES), n_t), dtype=np.float32)
+    write_frac = np.zeros((D_INT, len(VARIABLES), n_t), dtype=np.float32)
+    read_r2 = np.zeros((len(VARIABLES), n_t), dtype=np.float32)
+    write_r2 = np.zeros((len(VARIABLES), n_t), dtype=np.float32)
+
+    unit_reads = [unit(gate_rows), unit(up_rows)]
+    unit_writes = unit(down_cols)
+    for vi, var in enumerate(VARIABLES):
+        for ti, t in enumerate(PERIODS):
+            rp = read_probes[var].get(str(t))
+            wp = write_probes[var].get(str(t))
+            for probe, r2_out, target in ((rp, read_r2, "read"), (wp, write_r2, "write")):
+                if probe is None:
+                    continue
+                basis = _plane_basis(probe)
+                if basis is None:  # period 2: 1-D cos-only "plane" (sin probe skipped)
+                    basis = unit(np.array(probe["w_cos"], dtype=np.float32)[None]).T
+                r2s = [r for r in (probe["r2_cos"], probe.get("r2_sin")) if r is not None]
+                r2_out[vi, ti] = min(r2s)
+                if target == "read":
+                    for gi in range(2):
+                        read_frac[:, gi, vi, ti] = _in_plane_frac(unit_reads[gi], basis)
+                else:
+                    write_frac[:, vi, ti] = _in_plane_frac(unit_writes, basis)
+
+    extra: dict[str, Any] = {}
+    if candidates_tsv is not None:
+        with open(Path(candidates_tsv).expanduser()) as f:
+            ids = np.array([int(r["neuron"]) for r in csv.DictReader(f, delimiter="\t")])
+        for name, mat in (("gate", gate_rows), ("up", up_rows), ("down", down_cols)):
+            centered = mat[ids] - mat[ids].mean(axis=0, keepdims=True)
+            extra[f"pca_sv_{name}"] = np.linalg.svd(centered, compute_uv=False).astype(np.float32)
+        extra["candidate_ids"] = ids.astype(np.int32)
+        logger.info(f"PCA over {len(ids)} candidate neurons")
+
+    out_path = Path(output).expanduser() if output else NEURONS_DIR / "subspace.npz"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    arrays: dict[str, Any] = {
+        "read_frac": read_frac,
+        "write_frac": write_frac,
+        "read_r2": read_r2,
+        "write_r2": write_r2,
+        "norms": np.stack(
+            [
+                np.linalg.norm(gate_rows, axis=1),
+                np.linalg.norm(up_rows, axis=1),
+                np.linalg.norm(down_cols, axis=1),
+            ],
+            axis=1,
+        ).astype(np.float32),
+        "periods": np.array(PERIODS, dtype=np.int32),
+        "variables": np.array(VARIABLES),
+        "layer": layer,
+        **extra,
+    }
+    np.savez_compressed(out_path, **arrays)
+    logger.info(f"wrote {out_path}")
+    return out_path
+
+
+if __name__ == "__main__":
+    fire.Fire(compute_neuron_subspace)
