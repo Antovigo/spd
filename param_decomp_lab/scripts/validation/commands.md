@@ -388,3 +388,24 @@ $PY param_decomp_lab/scripts/validation/headless_check.py \
     "$RUN_DIR/analysis/polytope_explorer/index.html" \
     --probes="document.querySelectorAll('#legend .legrow').length"
 ```
+
+### 16. Neuron census — L18 neurons over the 0..200 add/sub grids (GPU + CPU)
+
+Decomposition-free: probes the frozen base model's L18 MLP neurons. Outputs land in
+`~/out/runs/neurons/` (the shared census dir), not a run's `analysis/`.
+
+```bash
+N=param_decomp_lab.scripts.validation.neurons
+CKPT=~/out/runs/addsub-L18-04-4x/model_24000.pth
+
+# activations + mlp_input + answer baseline, both ops (~30 min, 1 GPU)
+uv run python -m $N.collect_neuron_activations "$CKPT" --slurm
+
+# dense ablation-KL screen: all 14336 neurons x 41x41 subgrid, one op per job (~2 h each)
+uv run python -m $N.collect_neuron_ablation_kl "$CKPT" --op=add --stride=5 --slurm --slurm-time=6:00:00
+uv run python -m $N.collect_neuron_ablation_kl "$CKPT" --op=sub --stride=5 --slurm --slurm-time=6:00:00
+
+# full 201x201 grid for the screened candidates, sharded (after candidates.tsv exists)
+uv run python -m $N.collect_neuron_ablation_kl "$CKPT" --op=add --stride=1 \
+    --neurons-tsv=~/out/runs/neurons/candidates.tsv --shard-index=0 --shard-count=2 --slurm
+```

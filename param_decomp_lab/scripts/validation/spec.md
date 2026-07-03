@@ -735,3 +735,70 @@ Reads, per op: `hidden_activations_<op>.npz` (gate/up grids), `alive_filtered_<o
 if not); plus the checkpoint's target down-projection weight (mmap). No forward pass.
 `data.js` holds fp16-base64 gate / CI / inner `(a, b)` grids (~14 MB for two ops at the
 defaults). Smoke-test with `headless_check.py`.
+
+---
+
+## Neuron census (`neurons/`)
+
+A decomposition-free pipeline probing the frozen base model's L18 MLP **neurons** over the
+0..200 operand grids (`a<op>b=` for add / sub — 201×201 prompts per op, every prompt exactly
+5 Llama-3 tokens: `<BOS> a op b =`). Everything lands in the shared
+`<PARAM_DECOMP_OUT_DIR>/runs/neurons/` census dir (like `fourier_probes/`), not a run's
+`analysis/` — the model_path argument only locates the frozen target model. Shared helpers in
+`neurons/common.py`: `VALUES` (0..200), `PERIODS` (2, 5, 10, 20, 25, 33, 50, 100), `OFFSETS`
+(±1, ±2, ±5, ±10, ±20, ±25, ±50, ±100), prompt/answer-token grid builders, `token_value_map`.
+
+**neurons/collect_neuron_activations.py**
+
+args:
+- the path to a decomposed model (only to locate the frozen base model)
+- `--ops`: comma list of ops to run (default `add,sub`)
+- `--layer` (default 18), `--batch-size` (default 256), `--out-dir` (default the census dir)
+- `--slurm` + the usual SLURM knobs
+
+Per op, one clean forward over the grid capturing at the `=` position: `gate_preact` /
+`up_preact` `[201, 201, 14336]` fp16 (post-SwiGLU `silu(gate)·up` is derivable), `mlp_input`
+`[201, 201, 4096]` fp16 (the post-RMSNorm MLP input — what neuron gate/up rows and gate/up
+subcomponent V vectors read, so subcomponent inner activations are CPU-derivable on the same
+grid), and the model-answer baseline: `orig_token` / `orig_prob` (argmax next token),
+`correct_token` / `correct_prob` / `correct_logprob` (the true answer's **first** token — sums
+are single tokens, negative differences start with `-`), `is_correct`.
+
+Outputs: `activations_<op>.npz`, `baseline_<op>.npz`.
+
+**neurons/collect_neuron_ablation_kl.py**
+
+args:
+- the path to a decomposed model (only to locate the frozen base model)
+- `--op` (default `add`), `--stride` (default 5): prompts are `a, b in VALUES[::stride]` —
+  stride 5 → the 41×41 dense screen, stride 1 → the full 201×201 grid
+- `--neurons-tsv`: restrict to a candidate set (any TSV with a `neuron` column); default all
+  14336 neurons
+- `--shard-index` / `--shard-count`: contiguous split of the neuron set across SLURM jobs
+- `--layer` (default 18), `--batch-size` (prompts per clean forward, default 64), `--chunk`
+  (neurons per patched batch, default 256), `--output`, `--slurm` + knobs
+
+Zeroes one neuron's post-SwiGLU activation **at the `=` position only** (equivalently removes
+`act_j · W_down[:, j]` from the MLP output there) and measures the next-token effect vs the
+clean model. Positions before `=` keep their clean K/V, so the ablated forward re-runs only
+layers `layer+1..31` + final norm + lm_head on the single patched token against the clean KV
+cache, batched over `(prompt × neuron-chunk)` rows — this is what makes all-14336 × grid
+tractable (~1–2 h/op for the screen on one L40). The tail is hand-rolled (RMSNorm → QKV →
+RoPE at position 4 → SDPA over 4 cached keys + own → MLP; GQA via `repeat_interleave`);
+validated to ~1e-7 max |Δlogit| against a real hooked ablation on a toy Llama. A **null
+patch** (delta = 0) per prompt batch measures the bf16 noise floor; its KL grid ships as
+`null_kl` and its max is asserted `< 0.02`. Caveat by construction: a neuron acting purely at
+operand positions is invisible (its effect is frozen into the clean K/V).
+
+Per (neuron, prompt): `kl` (KL(P_clean ‖ P_ablated), full vocab), `abl_token` / `abl_prob`
+(argmax under ablation — decode with `token_value_map` for error-mode analysis: 44 → 43 vs
+54), `answer_flip`, `delta_correct_logprob`, and (stride 1 only) `offset_logprob` — ablated
+logprob of the first token of `str(answer + δ)` for δ in `OFFSETS`, with the clean
+counterpart per prompt in `clean_offset_logprob` (offsets crossing zero degenerate to the
+bare `-` token; mask by comparing token ids).
+
+Output: `ablation_screen_<op>.npz` (stride > 1) or `ablation_full_<op>[_shard<i>of<k>].npz`:
+`kl` / `abl_prob` / `delta_correct_logprob` fp16 + `abl_token` int32 + `answer_flip` bool
+`[n_neurons, n_a, n_b]`, `offset_logprob` fp16 `[n_neurons, n_a, n_b, n_offsets]` (stride 1),
+per-prompt `null_kl` / `orig_token` / `clean_offset_logprob`, and `neuron_ids`, `a`, `b`,
+`offsets`, `layer`, `op`, `stride`.
