@@ -73,16 +73,19 @@ class LMTargetedExperimentConfig(ExperimentConfig[LMTargetConfig, TargetPromptsD
     @model_validator(mode="after")
     def _assert_targeted_invariants(self) -> "LMTargetedExperimentConfig":
         # The delta component is always on in the JAX trainer, so no `use_delta_component`
-        # check is needed (it was removed from PDConfig). tPD only additionally forbids the
-        # faithfulness pressure that would drive the delta -> 0 (it must stay nonzero to
-        # carry non-target behavior).
+        # check is needed (it was removed from PDConfig). tPD needs the faithfulness pressure
+        # OFF (it drives the delta -> 0, but the delta must stay nonzero to carry non-target
+        # behavior). The JAX engine (`recon.build_loss_terms`) nonetheless requires exactly
+        # one FaithfulnessLoss term, so tPD keeps it present but INERT (coeff 0.0).
         assert self.pd.faithfulness_warmup_steps == 0, (
             "targeted PD needs a nonzero delta (it carries non-target behavior); a "
             "faithfulness warmup drives delta -> 0. Set pd.faithfulness_warmup_steps: 0."
         )
-        assert not any(isinstance(m, FaithfulnessLossConfig) for m in self.pd.loss_metrics), (
-            "targeted PD forbids FaithfulnessLoss (it drives delta -> 0); drop it from "
-            "pd.loss_metrics."
+        faith = [m for m in self.pd.loss_metrics if isinstance(m, FaithfulnessLossConfig)]
+        assert len(faith) == 1 and faith[0].coeff == 0.0, (
+            "targeted PD requires exactly one FaithfulnessLoss with coeff: 0.0 — the engine "
+            "needs the term (build_loss_terms asserts it), tPD needs it inert so the delta "
+            f"stays nonzero. Got {[(type(m).__name__, m.coeff) for m in faith]}."
         )
         return self
 

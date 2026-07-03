@@ -32,7 +32,10 @@ pd:
   ci_fn_optimizer:
     lr_schedule: {start_val: 1.0e-4, warmup_pct: 0.0, final_val_frac: 0.1, fn_type: cosine}
   loss_metrics:
-    # NO FaithfulnessLoss (validator forbids it) — tPD keeps the delta nonzero.
+    # FaithfulnessLoss present but INERT (coeff 0): the engine's build_loss_terms requires
+    # exactly one faith term, but tPD needs it off so the delta stays nonzero.
+    - type: FaithfulnessLoss
+      coeff: 0.0
     - type: ImportanceMinimalityLoss
       coeff: 1.0e-3
       pnorm: 2.0
