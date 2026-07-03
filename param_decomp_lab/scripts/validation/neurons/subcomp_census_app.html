@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>L18 subcomponent census</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; background: #fafafa; color: #222; }
+  #layout { display: flex; height: 100vh; }
+  #left { width: 46%; min-width: 500px; overflow-y: auto; padding: 10px; border-right: 2px solid #ccc; }
+  #right { flex: 1; overflow-y: auto; padding: 10px; }
+  h2 { font-size: 15px; margin: 12px 0 6px; }
+  h3 { font-size: 13px; margin: 10px 0 4px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  select, input[type=number] { font: inherit; padding: 1px 3px; }
+  input[type=number] { width: 70px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { padding: 2px 6px; text-align: right; border-bottom: 1px solid #eee; white-space: nowrap; }
+  th { cursor: pointer; background: #f0f0f0; position: sticky; top: 0; }
+  tr:hover { background: #eef4ff; cursor: pointer; }
+  tr.sel { background: #dce8ff; }
+  .chip { display: inline-block; padding: 0 4px; border-radius: 3px; background: #e3e8f0; margin-left: 2px; font-size: 11px; }
+  .hm { display: inline-block; margin: 4px; vertical-align: top; }
+  .hm canvas { border: 1px solid #bbb; image-rendering: pixelated; }
+  .hm .cap { font-size: 11px; color: #555; text-align: center; max-width: 220px; }
+  #tooltip { position: fixed; pointer-events: none; background: #222; color: #fff; padding: 3px 6px;
+             border-radius: 3px; font-size: 11px; display: none; z-index: 10; }
+  .statline { color: #555; font-size: 12px; margin: 2px 0; }
+  .bar { display: inline-block; height: 10px; background: #4a7; vertical-align: middle; }
+  .bar.neg { background: #c66; }
+  #summary { background: #fff; border: 1px solid #ddd; padding: 8px; margin-bottom: 8px; }
+  .tabbtn { padding: 3px 10px; border: 1px solid #aaa; background: #eee; cursor: pointer; border-radius: 4px 4px 0 0; }
+  .tabbtn.on { background: #fff; font-weight: bold; }
+  #connCanvas, #explCanvas { border: 1px solid #bbb; background: #fff; }
+  .multiP { color: #c40; font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="tooltip"></div>
+<div id="layout">
+  <div id="left">
+    <div id="summary"></div>
+    <div class="controls">
+      <span class="tabbtn on" data-tab="table">components</span>
+      <span class="tabbtn" data-tab="conn">connection matrix</span>
+      <span class="tabbtn" data-tab="expl">explanation</span>
+    </div>
+    <div id="tab-table">
+      <div class="controls">
+        <label>matrix <select id="matSel"><option value="">all</option></select></label>
+        <label>min max-KL <input type="number" id="minKl" value="0.001" step="0.001"></label>
+        <label>causal only <input type="checkbox" id="causalOnly"></label>
+      </div>
+      <div class="statline" id="tblCount"></div>
+      <div style="max-height:70vh; overflow-y:auto;"><table id="tbl"></table></div>
+    </div>
+    <div id="tab-conn" style="display:none">
+      <div class="controls">
+        <label>coupling <select id="connSide">
+          <option value="write">write into neurons (gate/up U)</option>
+          <option value="read">read from neurons (down V)</option></select></label>
+        <label>weight by inner std <input type="checkbox" id="connStd" checked></label>
+        <label>causal comps only <input type="checkbox" id="connCausal" checked></label>
+      </div>
+      <div class="statline">rows: candidate neurons grouped by dominant combined-act period ·
+        cols: components grouped by matrix, then dominant inner-act period.
+        <span class="multiP">◆</span> = multi-period neuron.</div>
+      <canvas id="connCanvas"></canvas>
+    </div>
+    <div id="tab-expl" style="display:none">
+      <div class="controls">
+        <label>channel <select id="explChan"><option value="0">gate</option><option value="1">up</option></select></label>
+      </div>
+      <div class="statline">x: neuron ablation max KL (log) · y: R² of preact explained by
+        <b>measured-causal</b> components (○) and all components (·). Bottom-right = causally
+        important but unexplained.</div>
+      <canvas id="explCanvas" width="560" height="380"></canvas>
+    </div>
+  </div>
+  <div id="right"><div id="detail"><i>Click a component row, matrix cell, or explanation point.</i></div></div>
+</div>
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.DATA;
+const N = D.n_values;
+const tooltip = document.getElementById("tooltip");
+const CSHAPE = D.coupling.shape; // [C, n_cand]
+
+function b64bytes(s) { const b = atob(s); const a = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
+function decQ8(q) { const b = b64bytes(q.b64); const o = new Float32Array(b.length);
+  const s = (q.hi - q.lo) / 255; for (let i = 0; i < b.length; i++) o[i] = q.lo + b[i] * s; return o; }
+function decI16(s) { return new Int16Array(b64bytes(s).buffer); }
+function magColor(t) { return [Math.round(255 * (1 - t)), Math.round(255 * (1 - 0.7 * t)), Math.round(255 - 60 * t)]; }
+function divColor(t) { t = Math.max(-1, Math.min(1, t));
+  if (t < 0) { const u = -t; return [Math.round(255 - 60 * u), Math.round(255 - 190 * u), Math.round(255 - 190 * u)]; }
+  return [Math.round(255 - 190 * t), Math.round(255 - 190 * t), Math.round(255 - 60 * t)]; }
+const lagLabel = l => `(${l[0]},${l[1]})`;
+
+const coupW = { write: null, read: null };
+const U = { gate: decQ8(D.coupling.u_gate), up: decQ8(D.coupling.u_up) };
+const Vd = decQ8(D.coupling.v_down); // [C, n_cand] (transposed at build)
+
+function heatmap(parent, grid, side, opts) {
+  const o = Object.assign({ cap: "", diverging: false, px: Math.max(1, Math.floor(200 / side)),
+                            sentinel: null, fmt: v => v.toPrecision(3) }, opts || {});
+  const wrap = document.createElement("div"); wrap.className = "hm";
+  const cv = document.createElement("canvas"); cv.width = side; cv.height = side;
+  cv.style.width = (side * o.px) + "px"; cv.style.height = (side * o.px) + "px";
+  const ctx = cv.getContext("2d"); const img = ctx.createImageData(side, side);
+  let lo = Infinity, hi = -Infinity;
+  for (const v of grid) { if (o.sentinel !== null && v === o.sentinel) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  const am = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+  for (let i = 0; i < grid.length; i++) {
+    const v = grid[i];
+    const c = (o.sentinel !== null && v === o.sentinel) ? [130,130,130]
+      : o.diverging ? divColor(v / am) : magColor((v - lo) / ((hi - lo) || 1));
+    img.data[4*i] = c[0]; img.data[4*i+1] = c[1]; img.data[4*i+2] = c[2]; img.data[4*i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  cv.addEventListener("mousemove", e => {
+    const r = cv.getBoundingClientRect();
+    const j = Math.floor((e.clientX - r.left) / r.width * side), i = Math.floor((e.clientY - r.top) / r.height * side);
+    if (i < 0 || j < 0 || i >= side || j >= side) return;
+    const stride = Math.round((N - 1) / (side - 1));
+    tooltip.style.display = "block"; tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+    const v = grid[i * side + j];
+    tooltip.textContent = `a=${i*stride} b=${j*stride}  ${o.sentinel !== null && v === o.sentinel ? "n/a" : o.fmt(v)}`;
+  });
+  cv.addEventListener("mouseleave", () => tooltip.style.display = "none");
+  const cap = document.createElement("div"); cap.className = "cap";
+  cap.textContent = o.cap + (o.diverging ? ` [±${am.toPrecision(2)}]` : ` [${lo.toPrecision(2)}, ${hi.toPrecision(2)}]`);
+  wrap.append(cv, cap); parent.appendChild(wrap);
+}
+
+function topLags(sc, k) { return sc.map((s, i) => [i, s]).sort((a, b) => b[1] - a[1]).slice(0, k); }
+function dominantPurePeriod(sc) {
+  // best pure-a or pure-b lag above 0.4; returns period value or 0
+  let best = 0, bs = 0.4;
+  D.lags.forEach((l, i) => {
+    if ((l[0] === 0) !== (l[1] === 0)) { if (sc[i] > bs) { bs = sc[i]; best = l[0] || l[1]; } }
+  });
+  return best;
+}
+function isMultiPeriod(sc) {
+  const hits = new Set();
+  D.lags.forEach((l, i) => {
+    if ((l[0] === 0) !== (l[1] === 0) && sc[i] > 0.5) hits.add(l[0] || l[1]);
+  });
+  const ps = [...hits].sort((a, b) => a - b);
+  for (let i = 0; i < ps.length; i++) for (let j = i + 1; j < ps.length; j++)
+    if (ps[j] % ps[i] !== 0) return true; // two incommensurate periods
+  return false;
+}
+
+// ---------- tabs ----------
+document.querySelectorAll(".tabbtn").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabbtn").forEach(x => x.classList.toggle("on", x === b));
+  ["table", "conn", "expl"].forEach(t =>
+    document.getElementById("tab-" + t).style.display = b.dataset.tab === t ? "" : "none");
+  if (b.dataset.tab === "conn") renderConn();
+  if (b.dataset.tab === "expl") renderExpl();
+}));
+
+// ---------- component table ----------
+const matSel = document.getElementById("matSel");
+D.matrices.forEach(m => matSel.add(new Option(m, m)));
+let sortKey = "max_kl", sortDir = -1, selected = null;
+function renderTable() {
+  const mat = matSel.value, minKl = +document.getElementById("minKl").value;
+  const causalOnly = document.getElementById("causalOnly").checked;
+  let rows = D.comps.filter(c => (!mat || c.matrix === mat) && c.max_kl >= minKl && (!causalOnly || c.causal));
+  rows.sort((a, b) => sortDir * ((a[sortKey] || 0) - (b[sortKey] || 0)));
+  document.getElementById("tblCount").textContent =
+    `${rows.length} components shown (of ${D.comps.length}; ${D.comps.filter(c => c.causal).length} causal at screen KL > ${D.subcomp_kl_thr})`;
+  const tbl = document.getElementById("tbl");
+  const cols = ["matrix", "comp", "max_kl", "mean_kl", "n_flip", "min_dlp", "inner_std"];
+  tbl.innerHTML = "<tr>" + cols.map(c => `<th data-k="${c}">${c}</th>`).join("") + "<th>causal</th><th>top lags</th></tr>";
+  tbl.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+    const k = th.dataset.k; if (!k) return;
+    if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+    renderTable();
+  }));
+  rows.slice(0, 400).forEach(c => {
+    const tr = document.createElement("tr");
+    const key = c.matrix + ":" + c.comp;
+    if (selected === key) tr.className = "sel";
+    tr.innerHTML = `<td>${c.matrix.replace("_proj","")}</td><td>${c.comp}</td>` +
+      ["max_kl","mean_kl","n_flip","min_dlp","inner_std"].map(k => `<td>${(+c[k]).toPrecision(3)}</td>`).join("") +
+      `<td>${c.causal ? "✓" : ""}</td><td style="text-align:left">` +
+      topLags(c.pscore, 2).filter(([,s]) => s > 0.4).map(([i,s]) =>
+        `<span class="chip">${lagLabel(D.lags[i])}:${s.toFixed(2)}</span>`).join("") + "</td>";
+    tr.addEventListener("click", () => { selected = key; renderTable(); renderCompDetail(c); });
+    tbl.appendChild(tr);
+  });
+}
+["matSel","minKl","causalOnly"].forEach(id => document.getElementById(id).addEventListener("change", renderTable));
+
+// ---------- component detail ----------
+function couplingOf(comp) {
+  // returns [n_cand] signed coupling of this component to each candidate neuron
+  const n = CSHAPE[1];
+  const out = new Float32Array(n);
+  for (let j = 0; j < n; j++) {
+    if (comp.matrix === "gate_proj") out[j] = U.gate[comp.comp * n + j];
+    else if (comp.matrix === "up_proj") out[j] = U.up[comp.comp * n + j];
+    else out[j] = Vd[comp.comp * n + j];
+  }
+  return out;
+}
+function barRow(label, val, scale) {
+  const w = Math.min(160, Math.abs(val) / scale * 160);
+  return `<div>${label} <span class="bar ${val < 0 ? "neg" : ""}" style="width:${w}px"></span> ${val.toFixed(3)}</div>`;
+}
+function renderCompDetail(c) {
+  const det = document.getElementById("detail");
+  det.innerHTML = `<h2>${c.matrix} : ${c.comp} ${c.causal ? "(causal)" : ""}</h2>` +
+    `<div class="statline">measured ablation: maxKL ${c.max_kl}, flips ${c.n_flip}, min Δcorrect-lp ${c.min_dlp}</div>`;
+  const g = D.comp_grids[c.matrix + ":" + c.comp];
+  if (!g) { det.append("(no grids)"); return; }
+  const side = Math.round((N - 1) / g.stride) + 1;
+  const row = document.createElement("div");
+  heatmap(row, decQ8(g.kl), side, { cap: "ablation KL" });
+  heatmap(row, decQ8(g.dlp), side, { cap: "Δ correct logprob", diverging: true });
+  heatmap(row, decI16(g.dval), side, { cap: "ablated answer − truth", diverging: true, sentinel: -30000, fmt: v => v.toFixed(0) });
+  heatmap(row, decQ8(g.inner), N, { cap: "inner activation x·V", diverging: true });
+  det.appendChild(row);
+
+  const pm = document.createElement("div");
+  pm.innerHTML = "<h3>inner-act periodicity (top lags)</h3>" +
+    topLags(c.pscore, 6).map(([i, s]) => `<span class="chip">${lagLabel(D.lags[i])}: ${s.toFixed(2)}</span>`).join(" ");
+  det.appendChild(pm);
+
+  if (g.offset_mean) {
+    const of = document.createElement("div");
+    const sc = Math.max(...g.offset_mean.map(Math.abs), 0.01);
+    of.innerHTML = "<h3>answer-offset Δlogprob</h3>" + g.offset_mean.map((v, i) => barRow("δ=" + D.offsets[i], v, sc)).join("");
+    if (g.offset_mean_flip) {
+      const s2 = Math.max(...g.offset_mean_flip.map(Math.abs), 0.01);
+      of.innerHTML += "<h3>… flips only</h3>" + g.offset_mean_flip.map((v, i) => barRow("δ=" + D.offsets[i], v, s2)).join("");
+    }
+    det.appendChild(of);
+  }
+
+  // top coupled neurons
+  const coup = couplingOf(c);
+  const strength = D.neurons.map((nm, j) => [j, Math.abs(coup[j]) * (c.matrix === "down_proj" ? 1 : c.inner_std)]);
+  strength.sort((a, b) => b[1] - a[1]);
+  const cn = document.createElement("div");
+  cn.innerHTML = `<h3>top coupled candidate neurons (${c.matrix === "down_proj" ? "reads from" : "writes into"})</h3>`;
+  strength.slice(0, 8).forEach(([j]) => {
+    const nm = D.neurons[j];
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<b>n${nm.id}</b> coupling ${coup[j].toPrecision(3)} · neuron maxKL ${nm.max_kl_add.toPrecision(3)} ` +
+      topLags(nm.pscore, 2).filter(([, s]) => s > 0.4).map(([i, s]) =>
+        `<span class="chip">${lagLabel(D.lags[i])}:${s.toFixed(2)}</span>`).join("") +
+      (isMultiPeriod(nm.pscore) ? ' <span class="multiP">multi-period</span>' : "");
+    const ng = D.neuron_grids[String(nm.id)];
+    if (ng) heatmap(wrap, decQ8(ng.comb), N, { cap: `n${nm.id} silu(g)·u`, diverging: true, px: 1 });
+    cn.appendChild(wrap);
+  });
+  det.appendChild(cn);
+}
+
+// ---------- connection matrix ----------
+function orderedNeurons() {
+  return D.neurons.map((nm, j) => ({ j, nm, p: dominantPurePeriod(nm.pscore) }))
+    .sort((a, b) => (a.p - b.p) || (b.nm.max_kl_add - a.nm.max_kl_add));
+}
+function orderedComps(causalOnly) {
+  return D.comps.map((c, k) => ({ k, c, p: dominantPurePeriod(c.pscore) }))
+    .filter(x => !causalOnly || x.c.causal)
+    .sort((a, b) => D.matrices.indexOf(a.c.matrix) - D.matrices.indexOf(b.c.matrix) || (a.p - b.p) || (b.c.max_kl - a.c.max_kl));
+}
+function renderConn() {
+  const side = document.getElementById("connSide").value;
+  const useStd = document.getElementById("connStd").checked;
+  const causalOnly = document.getElementById("connCausal").checked;
+  const rows = orderedNeurons();
+  const cols = orderedComps(causalOnly).filter(x =>
+    side === "write" ? x.c.matrix !== "down_proj" : x.c.matrix === "down_proj");
+  const cell = 6, offX = 60, offY = 40;
+  const cv = document.getElementById("connCanvas");
+  cv.width = offX + cols.length * cell + 10; cv.height = offY + rows.length * cell + 10;
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.font = "10px sans-serif";
+  const n = CSHAPE[1];
+  let vmax = 1e-9;
+  const vals = [];
+  cols.forEach((cc, x) => {
+    const coup = couplingOf(cc.c);
+    rows.forEach((rr, y) => {
+      let v = coup[rr.j];
+      if (useStd && cc.c.matrix !== "down_proj") v *= cc.c.inner_std;
+      vals.push([x, y, v]); vmax = Math.max(vmax, Math.abs(v));
+    });
+  });
+  vals.forEach(([x, y, v]) => {
+    const c = divColor(v / vmax);
+    ctx.fillStyle = `rgb(${c.join(",")})`;
+    ctx.fillRect(offX + x * cell, offY + y * cell, cell - 0.5, cell - 0.5);
+  });
+  // group separators + labels
+  ctx.fillStyle = "#333"; ctx.strokeStyle = "#333";
+  let lastP = null;
+  rows.forEach((rr, y) => {
+    if (rr.p !== lastP) {
+      lastP = rr.p;
+      ctx.fillText("p" + (rr.p || "-"), 4, offY + y * cell + 8);
+      ctx.beginPath(); ctx.moveTo(offX - 4, offY + y * cell); ctx.lineTo(cv.width - 6, offY + y * cell); ctx.stroke();
+    }
+    if (isMultiPeriod(rr.nm.pscore)) { ctx.fillStyle = "#c40"; ctx.fillText("◆", offX - 14, offY + y * cell + 7); ctx.fillStyle = "#333"; }
+  });
+  let lastKey = null;
+  cols.forEach((cc, x) => {
+    const key = cc.c.matrix + "/" + cc.p;
+    if (key !== lastKey) {
+      lastKey = key;
+      ctx.save(); ctx.translate(offX + x * cell + 6, 4); ctx.rotate(Math.PI / 3);
+      ctx.fillText(cc.c.matrix.replace("_proj", "") + " p" + (cc.p || "-"), 0, 0); ctx.restore();
+      ctx.beginPath(); ctx.moveTo(offX + x * cell, offY - 4); ctx.lineTo(offX + x * cell, cv.height - 6); ctx.stroke();
+    }
+  });
+  cv.onmousemove = e => {
+    const r = cv.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left - offX) / cell), y = Math.floor((e.clientY - r.top - offY) / cell);
+    if (x < 0 || y < 0 || x >= cols.length || y >= rows.length) { tooltip.style.display = "none"; return; }
+    const cc = cols[x].c, rr = rows[y].nm;
+    const v = vals.find(([vx, vy]) => vx === x && vy === y)[2];
+    tooltip.style.display = "block"; tooltip.style.left = (e.clientX + 12) + "px"; tooltip.style.top = (e.clientY + 12) + "px";
+    tooltip.textContent = `${cc.matrix}:${cc.comp} × n${rr.id}  ${v.toPrecision(3)}`;
+  };
+  cv.onmouseleave = () => tooltip.style.display = "none";
+  cv.onclick = e => {
+    const r = cv.getBoundingClientRect();
+    const x = Math.floor((e.clientX - r.left - offX) / cell);
+    if (x >= 0 && x < cols.length) { selected = cols[x].c.matrix + ":" + cols[x].c.comp; renderCompDetail(cols[x].c); }
+  };
+}
+["connSide","connStd","connCausal"].forEach(id => document.getElementById(id).addEventListener("change", renderConn));
+
+// ---------- explanation view ----------
+function renderExpl() {
+  const chan = +document.getElementById("explChan").value;
+  const cv = document.getElementById("explCanvas"), ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const pts = D.neurons.map(nm => ({
+    id: nm.id, x: Math.log10(nm.max_kl_add + 1e-4), rc: nm.r2_causal[chan], ra: nm.r2_all[chan], nm
+  }));
+  const xs = pts.map(p => p.x), x0 = Math.min(...xs), x1 = Math.max(...xs) + 1e-6;
+  const X = x => 40 + (x - x0) / (x1 - x0) * (cv.width - 55);
+  const Y = y => {
+    const t = (Math.max(-0.1, Math.min(1, y)) + 0.1) / 1.1;
+    return cv.height - 25 - t * (cv.height - 40);
+  };
+  ctx.strokeStyle = "#999"; ctx.strokeRect(40, 8, cv.width - 55, cv.height - 33);
+  ctx.fillStyle = "#555";
+  ctx.fillText("log10 neuron ablation max KL (add)", cv.width / 2 - 80, cv.height - 6);
+  ctx.save(); ctx.translate(10, cv.height / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("R² explained", -30, 0); ctx.restore();
+  [0, 0.5, 1].forEach(v => { ctx.fillText(v.toFixed(1), 20, Y(v) + 3); });
+  cv._pts = [];
+  pts.forEach(p => {
+    ctx.fillStyle = "rgba(120,120,120,0.5)";
+    ctx.beginPath(); ctx.arc(X(p.x), Y(p.ra), 1.5, 0, 7); ctx.fill();
+    ctx.strokeStyle = p.id === selected ? "#d33" : "rgba(40,80,180,0.8)";
+    ctx.beginPath(); ctx.arc(X(p.x), Y(p.rc), 3.5, 0, 7); ctx.stroke();
+    cv._pts.push({ x: X(p.x), y: Y(p.rc), nm: p.nm });
+  });
+  cv.onclick = e => {
+    const r = cv.getBoundingClientRect(); const mx = e.clientX - r.left, my = e.clientY - r.top;
+    let best = null, bd = 120;
+    cv._pts.forEach(p => { const d = (p.x - mx) ** 2 + (p.y - my) ** 2; if (d < bd) { bd = d; best = p.nm; } });
+    if (best) { selected = best.id; renderNeuronDetail(best, chan); }
+  };
+}
+document.getElementById("explChan").addEventListener("change", renderExpl);
+
+function renderNeuronDetail(nm, chan) {
+  const det = document.getElementById("detail");
+  const proj = chan === 0 ? "gate_proj" : "up_proj";
+  det.innerHTML = `<h2>neuron ${nm.id}</h2>` +
+    `<div class="statline">ablation maxKL(add) ${nm.max_kl_add.toPrecision(3)} · source ${nm.source} · ` +
+    `R² by causal comps: gate ${nm.r2_causal[0]}, up ${nm.r2_causal[1]} · by all: gate ${nm.r2_all[0]}, up ${nm.r2_all[1]}` +
+    (isMultiPeriod(nm.pscore) ? ' · <span class="multiP">multi-period</span>' : "") + "</div>";
+  const ng = D.neuron_grids[String(nm.id)];
+  const jIdx = D.neurons.indexOf(nm);
+  const nCand = CSHAPE[1];
+  // reconstruct explained grid from causal comps of the chosen matrix
+  const target = decQ8(ng[chan === 0 ? "gate" : "up"]);
+  const recon = new Float32Array(N * N);
+  const Um = chan === 0 ? U.gate : U.up;
+  D.comps.filter(c => c.matrix === proj && c.causal).forEach(c => {
+    const g = D.comp_grids[c.matrix + ":" + c.comp];
+    if (!g) return;
+    const inner = decQ8(g.inner);
+    const w = Um[c.comp * nCand + jIdx];
+    for (let i = 0; i < N * N; i++) recon[i] += inner[i] * w;
+  });
+  const resid = new Float32Array(N * N);
+  for (let i = 0; i < N * N; i++) resid[i] = target[i] - recon[i];
+  const row = document.createElement("div");
+  heatmap(row, target, N, { cap: `${proj.replace("_proj","")} preact (actual)`, diverging: true });
+  heatmap(row, recon, N, { cap: "explained by causal comps", diverging: true });
+  heatmap(row, resid, N, { cap: "residual (unexplained)", diverging: true });
+  heatmap(row, decQ8(ng.comb), N, { cap: "silu(g)·u", diverging: true });
+  det.appendChild(row);
+  const pm = document.createElement("div");
+  pm.innerHTML = "<h3>combined-act periodicity (top lags)</h3>" +
+    topLags(nm.pscore, 6).map(([i, s]) => `<span class="chip">${lagLabel(D.lags[i])}: ${s.toFixed(2)}</span>`).join(" ");
+  det.appendChild(pm);
+}
+
+// ---------- summary ----------
+(function () {
+  const nc = D.comps.filter(c => c.causal).length;
+  const multi = D.neurons.filter(nm => isMultiPeriod(nm.pscore)).length;
+  document.getElementById("summary").innerHTML =
+    `<b>Subcomponent census (addition)</b> — ${D.comps.length} components ablated one by one ` +
+    `(${nc} causal at measured screen KL > ${D.subcomp_kl_thr}); ${D.neurons.length} candidate neurons, ` +
+    `${multi} multi-period. Coupling and explanation use the shipped U/V and inner-activation grids.`;
+})();
+renderTable();
+</script>
+</body>
+</html>

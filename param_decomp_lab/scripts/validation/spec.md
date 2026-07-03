@@ -895,3 +895,22 @@ maps. Right, per selected neuron: KL / Δcorrect-logprob / (ablated-answer − t
 answer-offset Δlogprob profile (all prompts and flip-only), and the probe-plane in-plane
 fraction table. Grids ship uint8-quantized base64; falls back to 41×41 screen grids when the
 full-grid ablation npz is absent. Smoke-test with `headless_check.py`.
+
+**neurons/build_subcomp_census.py**
+
+args: the decomposition run's model path; `--census-dir` (the shared neuron census),
+`--output-dir`.
+
+The subcomponent applet (`<run>/analysis/subcomp_census/{index.html,data.js}`), three tabs:
+**components** — sortable table (measured ablation KL stats, causal flag, inner-act std, top
+periodicity lags) with a detail panel (KL / Δcorrect-logprob / error-mode / inner-activation
+grids, offset profile, and the top coupled candidate neurons with their own period chips and
+combined-act thumbnails); **connection matrix** — candidate neurons (rows, grouped by
+dominant combined-act period; ◆ marks multi-period neurons, i.e. two incommensurate pure
+periods above 0.5) × components (cols, grouped by matrix then dominant inner-act period),
+cell = signed coupling `U[c, j]` (optionally × inner-act std) or down-read `V[j, c]`,
+period-matched blocks being the thing to look for; **explanation** — per candidate neuron,
+neuron ablation max KL vs the R² of its gate/up preact explained by measured-causal
+components (r2_all as small dots for reference); clicking reconstructs actual / explained /
+residual grids in-browser from the shipped inner grids × couplings. Prefers
+`subcomp_ablation_full_add.npz` over the screen when present.

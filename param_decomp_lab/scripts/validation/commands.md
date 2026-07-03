@@ -427,3 +427,10 @@ uv run python -m $N.collect_subcomp_ablation_kl "$SCKPT" --op=add --stride=1 --s
     --components-tsv=<causal-components.tsv>                                            # full grid
 uv run python -m $N.compute_subcomp_neuron_links "$SCKPT"                               # CPU links + R²
 ```
+
+```bash
+# subcomponent applet (after subcomp screen/full + links exist)
+uv run python -m $N.build_subcomp_census "$SCKPT"
+$PY param_decomp_lab/scripts/validation/headless_check.py \
+    ~/out/runs/addsub-L18-04-2x-beta0.75-LR/analysis/subcomp_census/index.html
+```
