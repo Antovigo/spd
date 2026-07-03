@@ -193,7 +193,11 @@ def make_train_step(
         live_sites: tuple[str, ...],
         leading_shape: tuple[int, ...],
         draw_key: PRNGKeyArray,
+        delta_override: float | None = None,
     ) -> tuple[dict[str, Array], dict[str, Array]]:
+        """`delta_override` (targeted PD, SPEC-tPD): when not None, PIN each delta mask to
+        this constant instead of drawing `U[0,1)` — the non-target pass forces the residual
+        fully on (`delta_override=1.0`). Default None = today's stochastic behavior."""
         mask_source_key, delta_mask_key = random.split(draw_key)
         masks = {}
         delta_masks = {}
@@ -202,8 +206,12 @@ def make_train_step(
             source_key = random.fold_in(mask_source_key, site_idx)
             stochastic_source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
             masks[site] = ci_site + (1.0 - ci_site) * stochastic_source
-            delta_masks[site] = random.uniform(
-                random.fold_in(delta_mask_key, site_idx), leading_shape, COMPUTE_DT
+            delta_masks[site] = (
+                jnp.full(leading_shape, delta_override, COMPUTE_DT)
+                if delta_override is not None
+                else random.uniform(
+                    random.fold_in(delta_mask_key, site_idx), leading_shape, COMPUTE_DT
+                )
             )
         return masks, delta_masks
 

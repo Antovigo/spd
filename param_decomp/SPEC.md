@@ -408,3 +408,39 @@ the training-step semantics. The two tiers (S28–S30):
   train-log step and every slow step is an eval step.
 - **Cast-point seam.** `CEandKLLosses` carries the bf16-input cast-point asymmetry recorded
   in N3 (torch softmax under bf16 autocast; JAX fp32 before `log_softmax`), an accepted seam.
+
+## 11. Targeted PD (tPD) — DRAFT / not yet wired
+
+> STATUS: scaffold only (branch `feature/targeted-jax`). This section pins the INTENDED
+> semantics; the two-pass step is not yet implemented. Ref: `notes/targeted_jax_plan.md`
+> and the paper *Targeted Recovery of Weight-Space Mechanisms From Neural Networks*.
+
+Targeted PD decomposes only the mechanisms causally important on a narrow TARGET dataset,
+while a broad NON-TARGET stream keeps behavior faithful off-target. One optimizer step
+runs TWO recon passes whose gradients accumulate (a single `jax.grad` over their summed
+loss — no second backward, unlike the torch DDP impl):
+
+- **Target pass** — the narrow target batch through the normal recon grid. The delta is
+  adversarially ablated (it is already the C+1 source channel; the persistent-PGD adversary
+  drives it), forcing the target output from the rank-1 subcomponents. FaithfulnessLoss and
+  faith-warmup are DISABLED (they drive Δ→0; tPD needs Δ nonzero). Subcomponents are NOT
+  required to sum to `W`.
+- **Non-target pass** — the broad batch with the delta mask PINNED to 1.0
+  (`delta_override=1.0`), so `components + Δ` reconstruct the target exactly. Component
+  masks are sampled stochastically. The importance-minimality coeff is scaled by
+  `nontarget.impmin_coeff_ratio` (paper ~2). PPGD / unmasked / hidden-acts losses are
+  dropped from this pass.
+
+Proposed invariants (to be finalized on implementation):
+- **S-tPD-1** — the delta-mask override enters ONLY through `adversary.source_masks` /
+  `train.stochastic_entry_masks`'s `delta_override` param (default None = untargeted,
+  byte-identical). No other site reads it. (JAX has no torch-style ContextVar; the value
+  is threaded explicitly into the jitted step, per the HLO-baking rule — a static scalar.)
+- **S-tPD-2** — the non-target pass ALWAYS retains a full-model recon loss so its
+  contribution to the summed gradient covers every component (the CI fn + V/U).
+- **S-tPD-3** — one optimizer step = target-pass loss + non-target-pass loss, one
+  `value_and_grad`. Both passes share the CI fn and components; each builds its own forward
+  graph.
+- **S-tPD-4** — the target stream is a fixed prompt pool tokenized once at build time; the
+  non-target stream is the normal parquet path. Both feed the engine via the `sample_batch`
+  seam (S per §"three seams").
