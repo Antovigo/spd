@@ -143,6 +143,19 @@ resolution (target vs nontarget, `--prompts` / `--split` overrides), a single-ep
 `input_ids` iterator, `(layer, matrix)` ↔ module-path parsing, `--task-*` JSON parsing.
 If two scripts need the same thing, it belongs here.
 
+## Subfolders
+
+- **`probes/`** — Feucht-faithful Fourier probing of the residual sites around L18's MLP
+  (own CLAUDE.md).
+- **`neurons/`** — the L18 neuron/subcomponent census over the 0..200 `a<op>b=` grids:
+  activations + answer baselines, measured last-position ablation KL (hand-rolled
+  layers-19..31 KV-cache patched tail; per-neuron and per-rank-1-subcomponent),
+  translation-invariance periodicity, probe-plane subspace projections,
+  subcomponent↔neuron coupling / explanation R², and two applets (`build_neuron_census`,
+  `build_subcomp_census`). Neuron-level artifacts are decomposition-free and live in the
+  shared `runs/neurons/` census dir; subcomponent artifacts live in the reference run's
+  `analysis/`. Per-script specs in `spec.md`, runnable chains in `commands.md`.
+
 ## Composition & sample commands
 
 - Scripts form pipelines by reading each other's TSVs (e.g.
