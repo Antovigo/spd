@@ -21,17 +21,20 @@ pd:
   - type: FaithfulnessLoss
     coeff: 0.0
   - type: ImportanceMinimalityLoss
-    coeff: 1e-5
+    # Swept for clean recovery (8-way GPU sweep): coeff 2e-4 + p-anneal→0.5 gives exactly
+    # one component per target feature on mlp_in AND 0% off-target on mlp_out. Weaker
+    # settings (1e-5, p=2.0) left an extra alive component + dense off-target mlp_out.
+    coeff: 2e-4
     pnorm: 2.0
     p_anneal_start_frac: 0.0
-    p_anneal_final_p: 2.0
+    p_anneal_final_p: 0.5
     p_anneal_end_frac: 1.0
   - type: StochasticReconLayerwiseLoss
     coeff: 1.0
   - type: StochasticReconLoss
     coeff: 1.0
   batch_size: 2048
-  steps: 10000
+  steps: 15000
   components_optimizer:
     grad_clip_norm: 0.01
     lr_schedule:
@@ -79,6 +82,6 @@ nontarget:
     feature_probability: 0.01
     data_generation_type: at_least_zero_active
   batch_size: 2048
-  impmin_coeff_ratio: 1.0
+  impmin_coeff_ratio: 20.0
 wandb:
   project: param-decomp
