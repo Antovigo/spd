@@ -35,7 +35,10 @@ model must be the same base model the checkpoint decomposes) and, for CI colouri
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_direction_scatter <checkpoint.pth> \
         <resid_activations.npz> [--layer=18] [--top-k=100] [--n-show=8000] [--heat-rank=48] \
-        [--output-dir=PATH]
+        [--alive-tsv=<run>/analysis/datasets/alive_components.tsv] [--output-dir=PATH]
+
+`--alive-tsv` restricts the subcomponent arrows / heatmaps to the alive components listed in
+the TSV (neurons are unaffected); indices keep their original numbering.
 
 Output: `<run>/analysis/direction_scatter/{index.html,data.js}` (default).
 """
@@ -62,6 +65,7 @@ from param_decomp_lab.scripts.validation.common import (
     b64_u8,
     load_component_uv,
     load_target_mlp_weights,
+    read_alive_components,
 )
 
 _APP_TEMPLATE = Path(__file__).with_name("direction_scatter_app.html")
@@ -101,33 +105,50 @@ def _frame(
 
 
 def _read_candidates(
-    kind: str, weights: dict[str, NDArray[np.float32]], uv: dict[str, tuple[Any, Any]]
+    kind: str,
+    weights: dict[str, NDArray[np.float32]],
+    uv: dict[str, tuple[Any, Any]],
+    keep: "dict[str, NDArray[np.int64]] | None",
 ) -> tuple[NDArray[np.float32], NDArray[np.int8], NDArray[np.int64]]:
-    """Residual-space read directions `[M, d_model]` + `g`/`u` matrix tag + unit index, gate then up."""
+    """Residual-space read directions `[M, d_model]` + `g`/`u` matrix tag + unit index, gate then up.
+
+    `keep` (subcomponents only) restricts each projection to those component indices; the
+    returned indices stay original so arrow labels keep matching the harvest."""
     if kind == "neurons":
         g_dirs, u_dirs = weights["gate_proj"], weights["up_proj"]  # (d_ff, d_model) rows = reads
+        g_ids, u_ids = np.arange(g_dirs.shape[0]), np.arange(u_dirs.shape[0])
     else:  # subcomponent read V[:,c] · ‖U[c]‖ (× neuron-space output norm) — symmetric with write
         (v_g, u_g), (v_u, u_u) = uv["gate_proj"], uv["up_proj"]  # V (d_model, C), U (C, d_ff)
         g_dirs = (v_g * np.linalg.norm(u_g, axis=1)).T  # (d_model, C) -> (C, d_model)
         u_dirs = (v_u * np.linalg.norm(u_u, axis=1)).T
-    ids = np.arange(g_dirs.shape[0])
+        g_ids = np.arange(g_dirs.shape[0]) if keep is None else keep["gate_proj"]
+        u_ids = np.arange(u_dirs.shape[0]) if keep is None else keep["up_proj"]
+        g_dirs, u_dirs = g_dirs[g_ids], u_dirs[u_ids]
     dirs = np.concatenate([g_dirs, u_dirs], axis=0).astype(np.float32)
-    mats = np.concatenate([np.full(len(ids), _MAT_CODE["g"]), np.full(len(ids), _MAT_CODE["u"])])
-    return dirs, mats.astype(np.int8), np.concatenate([ids, ids])
+    mats = np.concatenate(
+        [np.full(len(g_ids), _MAT_CODE["g"]), np.full(len(u_ids), _MAT_CODE["u"])]
+    )
+    return dirs, mats.astype(np.int8), np.concatenate([g_ids, u_ids])
 
 
 def _write_candidates(
-    kind: str, weights: dict[str, NDArray[np.float32]], uv: dict[str, tuple[Any, Any]]
+    kind: str,
+    weights: dict[str, NDArray[np.float32]],
+    uv: dict[str, tuple[Any, Any]],
+    keep: "dict[str, NDArray[np.int64]] | None",
 ) -> tuple[NDArray[np.float32], NDArray[np.int8], NDArray[np.int64]]:
     """Residual-space write directions `[M, d_model]` + `d` tag + unit index (down only)."""
     if kind == "neurons":
         dirs = weights["down_proj"].T  # (d_model, d_ff) columns = write dirs -> (d_ff, d_model)
+        ids = np.arange(dirs.shape[0])
     else:
         v_down, u_down = uv["down_proj"]  # V (d_ff, C), U (C, d_model)
         dirs = u_down * np.linalg.norm(v_down, axis=0)[:, None]  # U[c] · ‖V[:,c]‖ (input-vec norm)
+        ids = np.arange(dirs.shape[0]) if keep is None else keep["down_proj"]
+        dirs = dirs[ids]
     dirs = dirs.astype(np.float32)
     mats = np.full(dirs.shape[0], _MAT_CODE["d"], np.int8)
-    return dirs, mats, np.arange(dirs.shape[0])
+    return dirs, mats, ids
 
 
 def _ortho_plane(probe: dict[str, Any]) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
@@ -144,20 +165,23 @@ def _ortho_plane(probe: dict[str, Any]) -> tuple[NDArray[np.float32], NDArray[np
 
 def _subcomp_dirs(
     uv: dict[str, tuple[Any, Any]],
+    keep: "dict[str, NDArray[np.int64]] | None",
 ) -> tuple[list[str], NDArray[np.float32]]:
     """Raw residual-space direction per subcomponent (its inner-activation / write vector): gate/up
     read `V[:,c]`, down write `U[c]`. Returns matids (`"g0"`, `"u3"`, `"d7"`, …) and `[N, d_model]`.
     Unscaled by the gauge norm — the heatmap is `dir · activation`, whose (a, b) pattern is
-    invariant to that per-component constant."""
+    invariant to that per-component constant. `keep` restricts to those component indices."""
     matids: list[str] = []
     dirs: list[NDArray[np.float32]] = []
     for proj in ("gate_proj", "up_proj"):
         v = uv[proj][0]  # (d_model, C)
-        dirs.append(v.T.astype(np.float32))
-        matids += [f"{_PROJ_MAT[proj]}{c}" for c in range(v.shape[1])]
+        ids = np.arange(v.shape[1]) if keep is None else keep[proj]
+        dirs.append(v.T[ids].astype(np.float32))
+        matids += [f"{_PROJ_MAT[proj]}{c}" for c in ids]
     u_down = uv["down_proj"][1]  # (C, d_model)
-    dirs.append(u_down.astype(np.float32))
-    matids += [f"d{c}" for c in range(u_down.shape[0])]
+    ids = np.arange(u_down.shape[0]) if keep is None else keep["down_proj"]
+    dirs.append(u_down[ids].astype(np.float32))
+    matids += [f"d{c}" for c in ids]
     return matids, np.concatenate(dirs, axis=0)
 
 
@@ -190,6 +214,7 @@ def build_direction_scatter(
     top_k: int = 100,
     n_show: int = 8000,
     heat_rank: int = _HEAT_RANK,
+    alive_tsv: str | None = None,
     output_dir: str | None = None,
 ) -> Path:
     ck = Path(checkpoint).expanduser()
@@ -213,16 +238,26 @@ def build_direction_scatter(
     n_show = min(n_show, g * g)
     subset = np.sort(np.random.default_rng(0).choice(g * g, size=n_show, replace=False))
 
+    keep: dict[str, NDArray[np.int64]] | None = None
+    if alive_tsv is not None:
+        alive = read_alive_components(Path(alive_tsv).expanduser(), keep_projs=_MLP)
+        keep = {
+            proj: np.array(sorted({c.component for c in alive if c.proj == proj}), np.int64)
+            for proj in _MLP
+        }
+        assert all(len(ids) for ids in keep.values()), f"a proj has no alive rows in {alive_tsv}"
+        logger.info("alive filter: " + ", ".join(f"{p} {len(keep[p])}" for p in _MLP))
+
     weights = load_target_mlp_weights(ck, layer, _MLP)
     uv = load_component_uv(ck, layer, _MLP)
     d_model = weights["down_proj"].shape[0]
-    read_cand = {k: _read_candidates(k, weights, uv) for k in _KINDS}
-    write_cand = {k: _write_candidates(k, weights, uv) for k in _KINDS}
+    read_cand = {k: _read_candidates(k, weights, uv, keep) for k in _KINDS}
+    write_cand = {k: _write_candidates(k, weights, uv, keep) for k in _KINDS}
     dnorm = {  # ‖dir‖ per candidate row, for the direction→plane angle (uses the unit direction)
         "read": {k: np.linalg.norm(read_cand[k][0], axis=1) for k in _KINDS},
         "write": {k: np.linalg.norm(write_cand[k][0], axis=1) for k in _KINDS},
     }
-    sub_matids, sub_dirs = _subcomp_dirs(uv)  # raw residual dir per subcomponent, for heatmaps
+    sub_matids, sub_dirs = _subcomp_dirs(uv, keep)  # raw residual dir per subcomp, for heatmaps
 
     points_out: dict[str, dict[str, list[str]]] = {}
     r2_out: dict[str, dict[str, list[float | None]]] = {}
@@ -325,6 +360,11 @@ def build_direction_scatter(
             "heat_rank": heat_rank,
             "has_ci": bool(ci_out),
             "ci_n": _CI_N,
+            # per-variable held-out value ranges of the probe fit (block-held-out probes
+            # only; None for full-fit probes) — drives the fit-vs-held-out colour mode
+            "block_ranges": first.get("block_ranges"),
+            # alive-subcomponent counts per tag when --alive-tsv filtered the arrows
+            "alive": None if keep is None else {_PROJ_MAT[p]: len(keep[p]) for p in _MLP},
         },
         "a": b64_i16(a_flat[subset]),
         "b": b64_i16(b_flat[subset]),

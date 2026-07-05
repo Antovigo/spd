@@ -104,6 +104,14 @@ units by projected 2D norm are shipped per plane; the **threshold** slider filte
 - **Colour by CI**: tints points by the selected subcomponent's causal importance, read from the run's
   `analysis/datasets/inner_activations_add.tsv` `ci` column (a, b ≤ 100; points outside are grey).
   Only the subcomponents that harvest covered are present; others fall back to grey.
+- **Show fit vs. held-out** (checkbox; appears when the probes JSON carries a `block_ranges`
+  field — per-variable held-out value ranges, e.g. probes fit with contiguous value blocks
+  excluded): held-out points render at full opacity, in-fit points fade to 25%, while colours
+  keep following the colour-by mode (a/b/a+b/CI). A visual generalization test: held-out
+  points land on the ring in phase only for real periods.
+- **`--alive-tsv <run>/analysis/datasets/alive_components.tsv`**: restricts the subcomponent
+  arrows and heatmap basis to the run's alive components (original indices kept; neurons
+  unaffected). The hint line reports the alive counts per tag.
 
 Arrowheads render at Fig-9c-legible size. `n_show` defaults to 8000 to keep `data.js` ~85 MB with the
 added heatmap basis + CI grids.

@@ -32,6 +32,8 @@
   <label>colour by<select id="colorBy"></select></label>
   <label>mod<input id="mod" type="number" min="1" value="1" style="width:60px" /></label>
   <label>offset<input id="offset" type="number" value="0" style="width:60px" /></label>
+  <label id="heldWrap" style="display:none;flex-direction:row;align-items:center;gap:5px">
+    <input id="heldChk" type="checkbox" />show fit vs. held-out</label>
   <label>colour scale
     <span style="display:flex;align-items:center;gap:4px">
       <span id="legLo" style="font-size:10px;color:#444"></span>
@@ -205,6 +207,16 @@ function ciInfo() {  // colour by the selected subcomponent's CI (a, b ≤ ci_n)
   }
   return { raw, vals, lo: 0, span: 1 };  // CI ∈ [0, 1]
 }
+const _heldCache = {};
+function heldMaskFor(basis) {  // 1 = the point's basis-variable value was held out of the probe fit
+  if (_heldCache[basis]) return _heldCache[basis];
+  const ranges = D.meta.block_ranges[basis], N = A.length, m = new Uint8Array(N);
+  for (let j = 0; j < N; j++) {
+    const v = basis === "a" ? A[j] : basis === "b" ? B[j] : A[j] + B[j];
+    m[j] = ranges.some(r => v >= r[0] && v <= r[1]) ? 1 : 0;
+  }
+  return (_heldCache[basis] = m);
+}
 function colorInfo() {
   if (sel.colorBy === "ci") return ciInfo();
   const raw = rawValues();
@@ -313,13 +325,17 @@ function drawScatter() {
   const st = scat, ctx = st.ctx, v = st.view, c = st.color, pts = st.points;
   ctx.clearRect(0, 0, SIZE, SIZE);
   const cx = SIZE / 2, cy = SIZE / 2;
+  // fit-vs-held-out: held-out points at full opacity, in-fit points faded to 25%
+  const hm = sel.showHeld && D.meta.block_ranges ? heldMaskFor(sel.basis) : null;
   for (let j = 0; j < pts.length / 2; j++) {
     const px = cx + (pts[2 * j] - v.cx) * v.k, py = cy - (pts[2 * j + 1] - v.cy) * v.k;
     if (px < -2 || px > SIZE + 2 || py < -2 || py > SIZE + 2) continue;
     const val = c.vals[j];
+    ctx.globalAlpha = hm && !hm[j] ? 0.25 : 1;
     ctx.fillStyle = isNaN(val) ? "#ccc" : viridis((val - c.lo) / c.span);
     ctx.fillRect(px - 1, py - 1, 2, 2);
   }
+  ctx.globalAlpha = 1;
   // origin (ring centre) crosshair — arrows emanate from here
   const ox = cx + (0 - v.cx) * v.k, oy = cy - (0 - v.cy) * v.k;
   ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
@@ -479,12 +495,15 @@ el("thresh").addEventListener("input", () => {
 el("colorBy").addEventListener("change", recolor);
 el("mod").addEventListener("input", recolor);
 el("offset").addEventListener("input", recolor);
+if (D.meta.block_ranges) el("heldWrap").style.display = "";
+el("heldChk").addEventListener("change", () => { sel.showHeld = el("heldChk").checked; drawScatter(); });
 
 el("title").textContent = `Direction scatter — ${D.meta.run}`;
 el("hint").textContent = `L${D.meta.layer} MLP ${D.meta.kinds.join(" / ")} directions on the normalised Fourier plane`
   + ` (read g/u on operands a,b; write d on a+b). Arrows = unit·probe (Fig 9c scale), from the ring centre;`
   + ` threshold filters by |v·d|. Click an arrow for its plane-angle + (subcomponents) dir·activation heatmap.`
-  + ` Cloud: ${D.meta.n_show} of ${D.meta.n_total} activations, centred & rescaled.`;
+  + ` Cloud: ${D.meta.n_show} of ${D.meta.n_total} activations, centred & rescaled.`
+  + (D.meta.alive ? ` Subcomponents: alive only (g ${D.meta.alive.g} / u ${D.meta.alive.u} / d ${D.meta.alive.d}).` : "");
 drawChart(); rebuildScatter();
 </script>
 </body>
