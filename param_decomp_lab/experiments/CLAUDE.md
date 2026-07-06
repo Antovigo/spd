@@ -59,9 +59,21 @@ experiments/
 │   ├── launch.py        # pd-lm: snapshot + shared-FS workspace + sbatch
 │   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
 │   └── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
+├── lm_targeted/            # pd-lm-targeted: tPD LM (fixed-prompt target + parquet non-target)
 ├── tms/                     # pd-tms (CPU): model.py + run.py + configs/ + test_tms.py
 └── resid_mlp/               # pd-resid-mlp (CPU): model.py + run.py + configs/ + test
 ```
+
+## Targeted PD (tPD)
+
+Targeted PD (SPEC §11) decomposes only the mechanisms causally important on a narrow TARGET
+stream, keeping behavior faithful off-target via a broad NON-TARGET stream. The shared config
+surface lives in `experiments/config.py` (`NontargetConfig`, `build_nontarget_loss_metrics`,
+`assert_targeted_faithfulness_off`, `EXCLUDED_NONTARGET_LOSS_CONFIGS`); each domain's `run.py`
+builds a `param_decomp.run.NontargetPass` and passes it (plus `recon_positions` for the LM) to
+the engine. TMS / ResidMLP make it a config option (`nontarget` + `data.active_indices`); the
+LM is a separate composition root (`lm_targeted/`, `pd-lm-targeted`) reusing the plain-LM
+target / eval / ci-fn resolution with a fixed-prompt target loader (`lm_targeted/data.py`).
 
 ## LM `target.spec`
 

@@ -453,7 +453,7 @@ grad = ∇_{components, ci_fn, sources} (L_target + L_nontarget)      # single v
   run + non-target pass) scores all positions unchanged.
 
 The target stream is task-specific and feeds the engine's `sample_batch` seam like any other
-data: for the toys it is `active_indices`-restricted sparse features; the LM fixed-prompt
-loader is not yet built. Non-target data is the normal path. Status / results live in
-`notes/targeted_jax_plan.md`, not here. Ref: the paper *Targeted Recovery of Weight-Space
-Mechanisms From Neural Networks*.
+data: for the toys it is `active_indices`-restricted sparse features; for the LM it is a fixed
+prompt pool (`experiments.lm_targeted.data.load_prompt_tokens`, end-padded per S38). Non-target
+data is the normal path. Status / results live in `notes/targeted_jax_plan.md`, not here.
+Ref: the paper *Targeted Recovery of Weight-Space Mechanisms From Neural Networks*.

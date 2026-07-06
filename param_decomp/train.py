@@ -160,13 +160,6 @@ def make_train_step(
     imp_coeff = imp_term.coeff
     freq_coeff = imp_min.frequency.coeff if imp_min.frequency is not None else 0.0
 
-    # ── targeted PD (SPEC §11, S34-S37): a second recon pass over a non-target batch with the
-    # delta forced fully on, accumulated into the SAME backward as the target pass so one
-    # optimizer step grads both (S34). `nontarget_loss_surface` (built lab-side from the
-    # filtered, impmin-scaled non-target loss set) supplies the non-target recon terms + the
-    # scaled imp coeff; its faith term is unused (faith is off in tPD, carried inert by the
-    # target pass, S36). `None` ⇒ the non-target path is untraced. ──
-
     def batch_sharded(x: Array) -> Array:
         return batch_shard_leading(x, mesh)
 
