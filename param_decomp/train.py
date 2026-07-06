@@ -510,7 +510,14 @@ def make_train_step(
 
             total_loss = faith_coeff * faith_loss + imp_coeff * imp_lp + freq_coeff * imp_freq
             target_grid = recon_grid(
-                recon_terms, ci, batch, clean_output, leading, 1, False, target_recon_loss_fn
+                recon_terms,
+                ci,
+                batch,
+                clean_output,
+                leading,
+                key_offset=1,
+                force_delta_on=False,
+                recon_loss=target_recon_loss_fn,
             )
             for term, term_loss in target_grid:
                 total_loss = total_loss + term.coeff * term_loss
@@ -538,9 +545,9 @@ def make_train_step(
                     nt_inputs.batch,
                     nt_inputs.clean_output,
                     nt_inputs.leading,
-                    1 + len(recon_terms),
-                    True,
-                    recon_loss_fn,
+                    key_offset=1 + len(recon_terms),
+                    force_delta_on=True,
+                    recon_loss=recon_loss_fn,
                 )
                 for term, nt_term_loss in nt_grid:
                     nt_total = nt_total + term.coeff * nt_term_loss
