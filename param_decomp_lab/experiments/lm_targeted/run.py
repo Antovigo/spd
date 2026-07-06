@@ -144,8 +144,7 @@ def train(
 
 def main(config: Path, run_id: str) -> None:
     config = Path(config)
-    built, _raw_cfg = load_targeted_config(config, run_id)
-    cfg = LMTargetedExperimentConfig(**_raw_cfg)
+    built, cfg = load_targeted_config(config, run_id)
 
     install_sigterm_flag()
     _enable_hlo_dump(built.run.run_dir)

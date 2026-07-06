@@ -9,7 +9,6 @@ non-target pass (SPEC §11). Reuses the plain-LM target / eval / ci-fn resolutio
 """
 
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import model_validator
@@ -106,15 +105,12 @@ def build_targeted(cfg: LMTargetedExperimentConfig, run_id: str) -> BuiltRun:
     )
 
 
-def build_targeted_from_schema(schema_raw: dict[str, Any], run_id: str) -> BuiltRun:
-    """Validate a self-contained tPD LM run config (`LMTargetedExperimentConfig`) and convert
-    it to the engine's `BuiltRun`. `run_id` is the minted run identity."""
-    cfg = LMTargetedExperimentConfig(**schema_raw)
+def load_targeted_config(
+    config_path: Path, run_id: str
+) -> tuple[BuiltRun, LMTargetedExperimentConfig]:
+    """Parse a tPD LM run YAML -> (built run, validated config). The composition root needs the
+    config too (for the tPD-specific `nontarget` / `data.prompts_file` fields absent from
+    `BuiltRun`), so it is validated once here and returned rather than re-parsed."""
+    cfg = LMTargetedExperimentConfig(**yaml.safe_load(config_path.read_text()))
     assert_supported_weights_dtype(cfg)
-    return build_targeted(cfg, run_id)
-
-
-def load_targeted_config(config_path: Path, run_id: str) -> tuple[BuiltRun, dict[str, Any]]:
-    """Parse a tPD LM run YAML -> (built run, raw dict for wandb logging)."""
-    schema_raw = yaml.safe_load(config_path.read_text())
-    return build_targeted_from_schema(schema_raw, run_id), schema_raw
+    return build_targeted(cfg, run_id), cfg
