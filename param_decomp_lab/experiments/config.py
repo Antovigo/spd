@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable
 from typing import Any, Self
 
-from pydantic import Field, PositiveInt, model_validator
+from pydantic import Field, NonNegativeFloat, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
 from param_decomp.built_run import RunInstance
@@ -45,8 +45,8 @@ from param_decomp.configs import (
 from param_decomp.schedule import ScheduleConfig
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 
-# ── targeted PD (tPD) shared config surface (SPEC §11). Both the LM (`lm_targeted`) and the
-# toys reuse these. ──
+# ── targeted PD (tPD) shared config surface (SPEC §11), reused across the per-domain
+# experiment configs. ──
 
 # Losses dropped from the NON-TARGET pass: PPGD is a stateful per-step adversary the delta
 # override deliberately does not drive; unmasked recon is meaningless with a forced-on delta;
@@ -68,7 +68,7 @@ class NontargetConfig[D: BaseConfig](BaseConfig):
 
     data: D
     batch_size: PositiveInt
-    impmin_coeff_ratio: float = 1.0
+    impmin_coeff_ratio: NonNegativeFloat = 1.0
 
 
 def build_nontarget_loss_metrics(

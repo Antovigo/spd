@@ -48,6 +48,7 @@ from param_decomp.recon import (
     LossSurface,
     PersistentSources,
     ReconForward,
+    ReconLossTerm,
     Routes,
     StochasticSources,
 )
@@ -72,6 +73,18 @@ class TrainState:
     state + static config). One state_key per persistent loss term (SPEC S23); empty when
     no persistent term."""
     step: Array
+
+
+@dataclass(frozen=True)
+class _NontargetInputs:
+    """Per-step non-target batch prep for targeted PD (SPEC S34): the sharded non-target
+    batch, its frozen clean output, the CI taps, and the leading shape. Built only when a
+    non-target pass is configured."""
+
+    batch: Any
+    clean_output: Any
+    taps: dict[str, Array]
+    leading: tuple[int, ...]
 
 
 def _grad_norm_metrics(components_grad: DecompVU, ci_fn_grad: Any) -> dict[str, Array]:
@@ -109,7 +122,7 @@ def make_train_step(
     remat_recon_forwards: bool,
     remat_ci_fn: bool,
     mesh: Mesh | None,
-    nontarget_losses: LossSurface | None = None,
+    nontarget_loss_surface: LossSurface | None = None,
 ):
     """Build the `eqx.filter_jit`'d `step(model, state, batch, key) -> (state, metrics)`.
 
@@ -131,23 +144,12 @@ def make_train_step(
     imp_coeff = imp_term.coeff
     freq_coeff = imp_min.frequency.coeff if imp_min.frequency is not None else 0.0
 
-    # ── targeted PD (SPEC §11 / S-tPD-*): a second recon pass over a non-target batch with
-    # the delta component forced fully ON (`delta_override=1.0`), accumulated into the SAME
-    # backward. `nontarget_losses` is a full `LossSurface` (built lab-side from the filtered,
-    # impmin-scaled non-target loss set); its faith term is IGNORED here (faith is
-    # batch-independent and off in tPD — the target pass carries it, at coeff 0). PPGD/fresh
-    # sources are excluded from the non-target set, so only stochastic/constant recon reach
-    # the non-target loop. `None` ⇒ the whole non-target path is untraced (untargeted runs
-    # stay byte-identical). ──
-    nt_recon_terms = nontarget_losses.recon if nontarget_losses is not None else ()
-    nt_imp_term = nontarget_losses.imp if nontarget_losses is not None else None
-    nt_imp_coeff = nt_imp_term.coeff if nt_imp_term is not None else 0.0
-    nt_imp_min = nt_imp_term.cfg if nt_imp_term is not None else imp_min
-    nt_freq_coeff = (
-        nt_imp_min.frequency.coeff
-        if nt_imp_term is not None and nt_imp_min.frequency is not None
-        else 0.0
-    )
+    # ── targeted PD (SPEC §11, S34-S37): a second recon pass over a non-target batch with the
+    # delta forced fully on, accumulated into the SAME backward as the target pass so one
+    # optimizer step grads both (S34). `nontarget_loss_surface` (built lab-side from the
+    # filtered, impmin-scaled non-target loss set) supplies the non-target recon terms + the
+    # scaled imp coeff; its faith term is unused (faith is off in tPD, carried inert by the
+    # target pass, S36). `None` ⇒ the non-target path is untraced. ──
 
     def batch_sharded(x: Array) -> Array:
         return batch_shard_leading(x, mesh)
@@ -212,11 +214,11 @@ def make_train_step(
         live_sites: tuple[str, ...],
         leading_shape: tuple[int, ...],
         draw_key: PRNGKeyArray,
-        delta_override: float | None = None,
+        force_delta_on: bool = False,
     ) -> tuple[dict[str, Array], dict[str, Array]]:
-        """`delta_override` (targeted PD, SPEC-tPD): when not None, PIN each delta mask to
-        this constant instead of drawing `U[0,1)` — the non-target pass forces the residual
-        fully on (`delta_override=1.0`). Default None = today's stochastic behavior."""
+        """`force_delta_on` (targeted PD non-target pass, SPEC S35): pin every delta mask to
+        1.0 so `components + Δ` reconstruct the frozen output; otherwise the delta is drawn
+        `U[0,1)` like the component sources."""
         mask_source_key, delta_mask_key = random.split(draw_key)
         masks = {}
         delta_masks = {}
@@ -226,8 +228,8 @@ def make_train_step(
             stochastic_source = random.uniform(source_key, ci_site.shape, COMPUTE_DT)
             masks[site] = ci_site + (1.0 - ci_site) * stochastic_source
             delta_masks[site] = (
-                jnp.full(leading_shape, delta_override, COMPUTE_DT)
-                if delta_override is not None
+                jnp.ones(leading_shape, COMPUTE_DT)
+                if force_delta_on
                 else random.uniform(
                     random.fold_in(delta_mask_key, site_idx), leading_shape, COMPUTE_DT
                 )
@@ -294,21 +296,22 @@ def make_train_step(
         with jax.named_scope("pd_read_taps"):
             taps = model.read_activations(batch, state.ci_fn.input_names)
 
-        # tPD non-target batch prep (clean target + taps), mirroring the target block. Only
-        # built when a non-target pass is configured; consumed inside `loss_fn` (SPEC S-tPD-3).
-        # Hoisted (Any=None) so the closure references stay bound on the untargeted path.
-        nt_batch: Any = None
-        nt_clean_output: Any = None
-        nt_taps: Any = None
-        nt_leading: Any = None
-        if nontarget_losses is not None:
-            assert nontarget_batch is not None, "nontarget pass active but no nontarget_batch"
+        # tPD non-target batch prep — the clean target + CI taps for the non-target stream,
+        # built only when a non-target pass is configured (SPEC S34), consumed inside `loss_fn`.
+        nt_inputs = None
+        if nontarget_loss_surface is not None:
+            assert nontarget_batch is not None, "non-target pass active but no nontarget_batch"
             nt_batch = batch_sharded(nontarget_batch)
             with jax.named_scope("pd_nt_clean_fwd"):
-                nt_clean_output = jax.lax.stop_gradient(batch_sharded(model.clean_output(nt_batch)))
+                nt_clean = jax.lax.stop_gradient(batch_sharded(model.clean_output(nt_batch)))
             with jax.named_scope("pd_nt_read_taps"):
                 nt_taps = model.read_activations(nt_batch, state.ci_fn.input_names)
-            nt_leading = next(iter(nt_taps.values())).shape[:-1]
+            nt_inputs = _NontargetInputs(
+                batch=nt_batch,
+                clean_output=nt_clean,
+                taps=nt_taps,
+                leading=next(iter(nt_taps.values())).shape[:-1],
+            )
         # `leading` (batch, *positions) — the shape masks/sources/routes live in. Sourced
         # from a tap (always `[*leading, d_tap]`), not the opaque batch, so the engine never
         # assumes the batch's rank/feature dim.
@@ -414,129 +417,124 @@ def make_train_step(
             faith_loss = faithfulness_loss(model.weight_deltas(components))
             imp_lp, imp_freq = imp_min_terms(ci.upper, imp_min, imp_min_param)
 
-            term_losses: list[Array] = []
-            for term_idx, term in enumerate(recon_terms):
-                term_key = random.fold_in(key, 1 + term_idx)
-                total = jnp.zeros((), jnp.float32)
-                n_forwards = 0
-                for entry_idx, entry in enumerate(term.plan):
-                    entry_key, routing_key = random.split(random.fold_in(term_key, entry_idx))
-                    match entry.sources:
-                        case FreshPGDSources():
-                            routes_per_draw = fixed_routes[(term_idx, entry_idx)]
-                        case _:
-                            routes_per_draw = entry.sample_routing(routing_key, leading)
-                    for draw_idx, routes in enumerate(routes_per_draw):
-                        draw_key = random.fold_in(entry_key, draw_idx)
-                        match entry.sources:
-                            case StochasticSources():
-                                masks, delta_masks = stochastic_entry_masks(
-                                    ci.lower, entry.live_sites, leading, draw_key
-                                )
-                            case ConstantSources() as strategy:
-                                masks, delta_masks = constant_entry_masks(
-                                    strategy, ci.lower, entry.live_sites
-                                )
-                            case FreshPGDSources():
-                                masks, delta_masks = source_masks(
-                                    ci.lower,
-                                    fresh_sources[(term_idx, entry_idx)],
-                                    entry.live_sites,
-                                )
-                            case PersistentSources(state_key=state_key):
-                                masks, delta_masks = source_masks(
-                                    ci.lower, persistent_sources[state_key], entry.live_sites
-                                )
-                        with jax.named_scope("pd_recon_masked_fwd"):
-                            masked = masked_forward(
-                                model,
-                                prepared,
-                                batch,
-                                masks,
-                                delta_masks,
-                                routes,
-                                entry.live_sites,
-                                entry.has_delta,
-                            )
-                        total = total + recon_loss_fn(masked, clean_output)
-                        n_forwards += 1
-                assert n_forwards > 0, f"term {term.name!r} produced no forwards"
-                term_loss = total / n_forwards
-                first_sources = term.plan[0].sources
-                if isinstance(first_sources, PersistentSources):
-                    start_frac = state.adversaries[first_sources.state_key].start_frac
-                    if start_frac > 0.0:
-                        term_loss = (step_f32 >= start_frac * total_steps) * term_loss
-                term_losses.append(term_loss)
-
-            total_loss = faith_coeff * faith_loss + imp_coeff * imp_lp + freq_coeff * imp_freq
-            for term, term_loss in zip(recon_terms, term_losses, strict=True):
-                total_loss = total_loss + term.coeff * term_loss
-
-            # ── tPD non-target pass: same components + CI fn, a fresh CI forward on the
-            # non-target taps, and a recon grid with the delta forced ON (delta_override=1.0)
-            # so `components + Δ` reconstruct the frozen output. Its loss (recon + scaled
-            # imp-min) is added to the SAME total, so one backward grads both (SPEC S-tPD-3).
-            # Deliberately a separate loop from the target grid above (target stays
-            # byte-identical). ──
-            nt_aux: dict[str, Array] = {}
-            if nontarget_losses is not None:
-                with jax.named_scope("pd_ci_fn_fwd_nontarget"):
-                    nt_ci = ci_batch_sharded(ci_fn_bf16(nt_taps, remat=remat_ci_fn))
-                nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, nt_imp_min, imp_min_param)
-                nt_total = nt_imp_coeff * nt_imp_lp + nt_freq_coeff * nt_imp_freq
-                nt_aux["nontarget/imp"] = nt_imp_lp
-                nt_aux["nontarget/freq"] = nt_imp_freq
-                for term_idx, term in enumerate(nt_recon_terms):
-                    # keys disjoint from the target grid's `fold_in(key, 1 + term_idx)`
-                    term_key = random.fold_in(key, 1 + len(recon_terms) + term_idx)
+            def recon_grid(
+                grid_terms: tuple[ReconLossTerm, ...],
+                ci: CI,
+                batch: Any,
+                clean_output: Array,
+                leading: tuple[int, ...],
+                key_offset: int,
+                force_delta_on: bool,
+            ) -> list[tuple[ReconLossTerm, Array]]:
+                """Mean-KL recon over the term/entry/draw grid (SPEC S10'), shared by the target
+                pass and the tPD non-target pass. `force_delta_on` (S35) pins the delta on and
+                restricts the set to stochastic/constant sources; the target pass
+                (`force_delta_on=False`) additionally handles fresh-PGD / persistent sources.
+                `key_offset` keeps the two passes' per-term RNG disjoint (R1)."""
+                out: list[tuple[ReconLossTerm, Array]] = []
+                for term_idx, term in enumerate(grid_terms):
+                    term_key = random.fold_in(key, key_offset + term_idx)
                     total = jnp.zeros((), jnp.float32)
                     n_forwards = 0
                     for entry_idx, entry in enumerate(term.plan):
                         entry_key, routing_key = random.split(random.fold_in(term_key, entry_idx))
-                        routes_per_draw = entry.sample_routing(routing_key, nt_leading)
+                        match entry.sources:
+                            case FreshPGDSources():
+                                routes_per_draw = fixed_routes[(term_idx, entry_idx)]
+                            case _:
+                                routes_per_draw = entry.sample_routing(routing_key, leading)
                         for draw_idx, routes in enumerate(routes_per_draw):
                             draw_key = random.fold_in(entry_key, draw_idx)
                             match entry.sources:
                                 case StochasticSources():
                                     masks, delta_masks = stochastic_entry_masks(
-                                        nt_ci.lower,
+                                        ci.lower,
                                         entry.live_sites,
-                                        nt_leading,
+                                        leading,
                                         draw_key,
-                                        delta_override=1.0,
+                                        force_delta_on,
                                     )
                                 case ConstantSources() as strategy:
                                     masks, delta_masks = constant_entry_masks(
-                                        strategy, nt_ci.lower, entry.live_sites
+                                        strategy, ci.lower, entry.live_sites
                                     )
-                                case _:
-                                    raise TypeError(
-                                        "nontarget pass supports only stochastic/constant recon; "
-                                        f"got {type(entry.sources).__name__} — PPGD / fresh-PGD "
-                                        "must be excluded from the non-target loss set (SPEC S-tPD)"
+                                case FreshPGDSources():
+                                    assert not force_delta_on, (
+                                        "non-target recon set must exclude fresh-PGD (SPEC S35)"
                                     )
-                            with jax.named_scope("pd_nt_recon_masked_fwd"):
+                                    masks, delta_masks = source_masks(
+                                        ci.lower,
+                                        fresh_sources[(term_idx, entry_idx)],
+                                        entry.live_sites,
+                                    )
+                                case PersistentSources(state_key=state_key):
+                                    assert not force_delta_on, (
+                                        "non-target recon set must exclude PPGD (SPEC S35)"
+                                    )
+                                    masks, delta_masks = source_masks(
+                                        ci.lower, persistent_sources[state_key], entry.live_sites
+                                    )
+                            with jax.named_scope("pd_recon_masked_fwd"):
                                 masked = masked_forward(
                                     model,
                                     prepared,
-                                    nt_batch,
+                                    batch,
                                     masks,
                                     delta_masks,
                                     routes,
                                     entry.live_sites,
                                     entry.has_delta,
                                 )
-                            total = total + recon_loss_fn(masked, nt_clean_output)
+                            total = total + recon_loss_fn(masked, clean_output)
                             n_forwards += 1
-                    assert n_forwards > 0, f"nontarget term {term.name!r} produced no forwards"
-                    nt_term_loss = total / n_forwards
+                    assert n_forwards > 0, f"term {term.name!r} produced no forwards"
+                    term_loss = total / n_forwards
+                    first_sources = term.plan[0].sources
+                    if isinstance(first_sources, PersistentSources):
+                        start_frac = state.adversaries[first_sources.state_key].start_frac
+                        if start_frac > 0.0:
+                            term_loss = (step_f32 >= start_frac * total_steps) * term_loss
+                    out.append((term, term_loss))
+                return out
+
+            total_loss = faith_coeff * faith_loss + imp_coeff * imp_lp + freq_coeff * imp_freq
+            target_grid = recon_grid(recon_terms, ci, batch, clean_output, leading, 1, False)
+            for term, term_loss in target_grid:
+                total_loss = total_loss + term.coeff * term_loss
+            term_losses = tuple(term_loss for _, term_loss in target_grid)
+
+            # ── tPD non-target pass (S34-S37): a fresh CI forward on the non-target taps + a
+            # recon grid with the delta forced on (S35) + scaled imp-min (S37), all added to
+            # the SAME total so one backward grads both passes (S34). ──
+            nt_aux: dict[str, Array] = {}
+            if nontarget_loss_surface is not None:
+                assert nt_inputs is not None
+                nt_imp = nontarget_loss_surface.imp
+                nt_freq_coeff = (
+                    nt_imp.cfg.frequency.coeff if nt_imp.cfg.frequency is not None else 0.0
+                )
+                with jax.named_scope("pd_ci_fn_fwd_nontarget"):
+                    nt_ci = ci_batch_sharded(ci_fn_bf16(nt_inputs.taps, remat=remat_ci_fn))
+                nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, nt_imp.cfg, imp_min_param)
+                nt_total = nt_imp.coeff * nt_imp_lp + nt_freq_coeff * nt_imp_freq
+                nt_aux["nontarget/imp"] = nt_imp_lp
+                nt_aux["nontarget/freq"] = nt_imp_freq
+                nt_grid = recon_grid(
+                    nontarget_loss_surface.recon,
+                    nt_ci,
+                    nt_inputs.batch,
+                    nt_inputs.clean_output,
+                    nt_inputs.leading,
+                    1 + len(recon_terms),
+                    True,
+                )
+                for term, nt_term_loss in nt_grid:
                     nt_total = nt_total + term.coeff * nt_term_loss
                     nt_aux[f"nontarget/loss/{term.name}"] = nt_term_loss
                 nt_aux["nontarget/total"] = nt_total
                 total_loss = total_loss + nt_total
 
-            return total_loss, (faith_loss, imp_lp, imp_freq, tuple(term_losses), nt_aux)
+            return total_loss, (faith_loss, imp_lp, imp_freq, term_losses, nt_aux)
 
         with jax.named_scope("pd_value_and_grad"):
             (total_loss, (faith_loss, imp_lp, imp_freq, term_losses, nt_aux)), grads = (

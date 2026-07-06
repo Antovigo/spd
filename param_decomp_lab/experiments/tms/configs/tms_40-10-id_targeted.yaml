@@ -1,6 +1,6 @@
 # Targeted PD (tPD) on TMS 40->10-id: decompose ONLY the mechanisms for 3 target features
-# ([2, 24, 26] of 40), keeping behavior faithful off-target via a non-target stream with the
-# delta forced fully on. Mirrors the torch convergence run (SPEC §11). Runs on 1 GPU
+# ([2, 13, 26] of 40), keeping behavior faithful off-target via a non-target stream with the
+# delta forced fully on (SPEC §11). Runs on 1 GPU
 # (dp: null → inline single-process; the process uses whatever device JAX sees).
 #
 # Expected: the 3 target-feature probes recover 3 distinct components (identity CI) on
@@ -73,10 +73,9 @@ target:
     seed: 0
 data:
   # TARGET stream: only these 3 features fire. feature_probability raised so they actually
-  # activate (only 3 columns are ever nonzero). Features chosen to be well-represented in
-  # this pretrained target (W1 column-norm ~1.0) — the target drops some features entirely
-  # in superposition (e.g. feature 24 has norm ~0.02), and tPD correctly finds no mechanism
-  # for an unrepresented feature, so target features must be ones the model actually uses.
+  # activate (only 3 columns are ever nonzero). Target features must be well-represented in
+  # this pretrained target (W1 column-norm ~1) — the model drops some features in
+  # superposition, and tPD correctly finds no mechanism for an unrepresented feature.
   feature_probability: 0.2
   data_generation_type: at_least_zero_active
   active_indices: [2, 13, 26]

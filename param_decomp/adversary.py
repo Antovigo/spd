@@ -135,29 +135,18 @@ def sources_adam_ascend_project(
 
 
 def source_masks(
-    ci_lower: dict[str, Array],
-    sources: dict[str, Array],
-    site_names: tuple[str, ...],
-    delta_override: float | None = None,
+    ci_lower: dict[str, Array], sources: dict[str, Array], site_names: tuple[str, ...]
 ) -> tuple[dict[str, Array], dict[str, Array]]:
     """`mask = ci + (1−ci)·source[:, :C]`; delta mask = raw trailing channel (SPEC S1).
     Shared by both adversaries; sources broadcast over whatever leading dims their
     scope left singleton. The fp32 source state is cast to the CI dtype here
-    (torch-under-autocast behavior); the source gradient flows back through the cast.
-
-    `delta_override` (targeted PD, SPEC-tPD): when not None, PIN every delta mask to this
-    constant instead of the adversarial trailing channel — the non-target pass forces the
-    residual fully on (`delta_override=1.0`) so `components + Δ` reconstruct the target
-    exactly. Default None = today's adversarial behavior (byte-identical)."""
+    (torch-under-autocast behavior); the source gradient flows back through the cast."""
     masks = {}
     delta_masks = {}
     for site in site_names:
         source = sources[site].astype(ci_lower[site].dtype)
         masks[site] = ci_lower[site] + (1.0 - ci_lower[site]) * source[..., :-1]
-        delta = source[..., -1]
-        delta_masks[site] = (
-            jnp.full_like(delta, delta_override) if delta_override is not None else delta
-        )
+        delta_masks[site] = source[..., -1]
     return masks, delta_masks
 
 

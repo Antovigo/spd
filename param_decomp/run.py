@@ -410,12 +410,9 @@ def _init_or_restore_state(
 
 @dataclasses.dataclass(frozen=True)
 class NontargetPass:
-    """Targeted PD (SPEC §11): the non-target stream + its loss set. `sample_batch(step)`
-    yields the broad-distribution batch; `loss_metrics` is the filtered, imp-min-scaled
-    non-target loss set built lab-side (PPGD / unmasked / hidden-acts dropped; faith kept
-    inert). The engine runs a second recon grid over this batch with the delta forced fully
-    on (`delta_override=1.0`), accumulated into the same optimizer step. `None` ⇒ a plain
-    (untargeted) run."""
+    """Targeted PD (SPEC §11, S34): the non-target stream + its filtered, imp-min-scaled loss
+    set (built lab-side). The engine runs a second recon grid over this batch with the delta
+    forced on, accumulated into the same optimizer step."""
 
     sample_batch: Callable[[int], Any]
     loss_metrics: list[AnyLossMetricConfig]
@@ -489,7 +486,7 @@ def run_decomposition_training(
         return  # SIGTERM mid-warmup: clean exit for requeue
     state, start_step = init
 
-    nontarget_losses = (
+    nontarget_loss_surface = (
         build_loss_terms(nontarget.loss_metrics, lm.site_names) if nontarget is not None else None
     )
     step_fn = make_train_step(
@@ -501,7 +498,7 @@ def run_decomposition_training(
         remat_recon_forwards=remat_recon_forwards,
         remat_ci_fn=remat_ci_fn,
         mesh=mesh,
-        nontarget_losses=nontarget_losses,
+        nontarget_loss_surface=nontarget_loss_surface,
     )
 
     # record what this run actually executes on so wandb never lies about topology.

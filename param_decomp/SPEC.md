@@ -411,41 +411,43 @@ the training-step semantics. The two tiers (S28–S30):
 
 ## 11. Targeted PD (tPD)
 
-> STATUS: engine two-pass IMPLEMENTED + validated on the toys (branch
-> `feature/targeted-jax`). `run_decomposition_training(..., nontarget=NontargetPass(...))`
-> runs the second delta-forced-on recon grid; wired for TMS + ResidMLP via `active_indices`
-> + a `nontarget` config block. GPU convergence: TMS-40-10-id and ResidMLP-1l each recover
-> the 3 target-feature mechanisms (identity CI on the target probes), reconstruct faithfully
-> (recon ~1e-4), and stay inert off-target. LM path (`lm_targeted/`) is still scaffold. Ref:
-> `notes/targeted_jax_plan.md` and the paper *Targeted Recovery of Weight-Space Mechanisms
-> From Neural Networks*.
-
 Targeted PD decomposes only the mechanisms causally important on a narrow TARGET dataset,
-while a broad NON-TARGET stream keeps behavior faithful off-target. One optimizer step
-runs TWO recon passes whose gradients accumulate (a single `jax.grad` over their summed
-loss — no second backward, unlike the torch DDP impl):
+while a broad NON-TARGET stream keeps behavior faithful off-target. One optimizer step runs
+TWO recon passes whose gradients accumulate in a single `jax.grad` over their summed loss:
 
 - **Target pass** — the narrow target batch through the normal recon grid. The delta is
-  adversarially ablated (it is already the C+1 source channel; the persistent-PGD adversary
-  drives it), forcing the target output from the rank-1 subcomponents. FaithfulnessLoss and
-  faith-warmup are DISABLED (they drive Δ→0; tPD needs Δ nonzero). Subcomponents are NOT
-  required to sum to `W`.
-- **Non-target pass** — the broad batch with the delta mask PINNED to 1.0
-  (`delta_override=1.0`), so `components + Δ` reconstruct the target exactly. Component
-  masks are sampled stochastically. The importance-minimality coeff is scaled by
-  `nontarget.impmin_coeff_ratio` (paper ~2). PPGD / unmasked / hidden-acts losses are
-  dropped from this pass.
+  adversarially ablated (it is already the `C+1` source channel that the persistent-PGD
+  adversary drives), forcing the target output from the rank-1 subcomponents. Subcomponents
+  are NOT required to sum to `W` (faithfulness is off, S36).
+- **Non-target pass** — the broad batch with the delta mask pinned fully on, so
+  `components + Δ` reconstruct the frozen output. Component masks are sampled stochastically;
+  the importance-minimality coeff is scaled by `nontarget.impmin_coeff_ratio`.
 
-Proposed invariants (to be finalized on implementation):
-- **S-tPD-1** — the delta-mask override enters ONLY through `adversary.source_masks` /
-  `train.stochastic_entry_masks`'s `delta_override` param (default None = untargeted,
-  byte-identical). No other site reads it. (JAX has no torch-style ContextVar; the value
-  is threaded explicitly into the jitted step, per the HLO-baking rule — a static scalar.)
-- **S-tPD-2** — the non-target pass ALWAYS retains a full-model recon loss so its
-  contribution to the summed gradient covers every component (the CI fn + V/U).
-- **S-tPD-3** — one optimizer step = target-pass loss + non-target-pass loss, one
-  `value_and_grad`. Both passes share the CI fn and components; each builds its own forward
-  graph.
-- **S-tPD-4** — the target stream is a fixed prompt pool tokenized once at build time; the
-  non-target stream is the normal parquet path. Both feed the engine via the `sample_batch`
-  seam (S per §"three seams").
+```
+# ONE step; ci_fn + components shared across both passes:
+L_target    = faith + imp(ci(target_taps)) + Σ recon_grid(target_terms,    ci_t, force_delta_on=False)
+L_nontarget = ratio·imp(ci(nontarget_taps)) + Σ recon_grid(nontarget_terms, ci_n, force_delta_on=True)
+grad = ∇_{components, ci_fn, sources} (L_target + L_nontarget)      # single value_and_grad   (S34)
+```
+
+- **S34** — one optimizer step = `∇(L_target + L_nontarget)`, a single `value_and_grad`.
+  Both passes share the CI fn + components; each builds its own forward graph. `nontarget`
+  absent ⇒ the non-target path is not traced (untargeted runs are unchanged).
+- **S35** — the non-target pass pins every delta mask to `1.0` (`force_delta_on`, read only
+  in `train.stochastic_entry_masks`). Its loss set is restricted to stochastic/constant recon
+  + importance-minimality; PPGD / fresh-PGD / unmasked / hidden-acts are excluded (fail-fast
+  if a fresh/persistent term reaches the non-target grid). It ALWAYS retains a full-model
+  recon loss so its gradient covers every component (CI fn + V/U).
+- **S36** — faithfulness is OFF in tPD: exactly one `FaithfulnessLoss` at `coeff 0` and
+  `faithfulness_warmup_steps == 0` (both otherwise drive Δ→0; tPD needs Δ nonzero to carry
+  non-target behavior). Enforced lab-side by `assert_targeted_faithfulness_off`.
+- **S37** — the non-target pass's importance-minimality coeff is the target coeff ×
+  `impmin_coeff_ratio`. The paper uses ~2; the toy configs use up to 20 (tuned so the
+  recovered components stay inactive off-target on the small toys — see
+  `notes/tpd_style_review.md` history / the run configs).
+
+The target stream is task-specific and feeds the engine's `sample_batch` seam like any other
+data: for the toys it is `active_indices`-restricted sparse features; the LM fixed-prompt
+loader is not yet built. Non-target data is the normal path. Status / results live in
+`notes/targeted_jax_plan.md`, not here. Ref: the paper *Targeted Recovery of Weight-Space
+Mechanisms From Neural Networks*.

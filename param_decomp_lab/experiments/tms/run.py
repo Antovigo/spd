@@ -120,7 +120,7 @@ def run_tms_decomposition(
 
     data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
     # targeted PD: the TARGET stream restricts nonzero features to `active_indices`; None ⇒
-    # the full distribution (plain PD). Static (Python tuple) so it bakes into the jit.
+    # the full distribution (plain PD). A static Python tuple (a jit-time constant).
     active_indices = tuple(cfg.data.active_indices) if cfg.data.active_indices is not None else None
 
     @jax.jit
@@ -143,6 +143,7 @@ def run_tms_decomposition(
     nontarget: NontargetPass | None = None
     if cfg.nontarget is not None:
         nt_cfg = cfg.nontarget
+        # distinct salt (23) from the target stream's (17) so the two streams' batches differ
         nt_data_key = random.fold_in(random.PRNGKey(built.pd.seed), 23)
 
         @jax.jit
@@ -172,7 +173,8 @@ def run_tms_decomposition(
     # `model` is the filter_jit ARG (frozen TMS weights traced, not baked) — closing over an
     # array-bearing eqx model would bake its weights into the HLO.
     # Targeted: probe only the TARGET features (each should recover one distinct component);
-    # plain: the full single-feature probe. `probe` is static (closed into the jit).
+    # plain: the full single-feature probe. `probe` is a tiny host array closed into this toy
+    # CPU jit — cheap to bake, unlike a real target's weights (which ride as a filter_jit arg).
     probe = (
         tms.targeted_feature_probe(target_cfg.n_features, active_indices)
         if active_indices is not None

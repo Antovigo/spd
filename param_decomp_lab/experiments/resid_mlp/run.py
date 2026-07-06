@@ -127,7 +127,7 @@ def run_resid_mlp_decomposition(
 
     data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
     # targeted PD: the TARGET stream restricts nonzero features to `active_indices`; None ⇒
-    # the full distribution (plain PD). Static (Python tuple) so it bakes into the jit.
+    # the full distribution (plain PD). A static Python tuple (a jit-time constant).
     active_indices = tuple(cfg.data.active_indices) if cfg.data.active_indices is not None else None
 
     # `tgt` is the filter_jit ARG (frozen `W_E` traced, not baked) — closing over an
@@ -155,6 +155,7 @@ def run_resid_mlp_decomposition(
     nontarget: NontargetPass | None = None
     if cfg.nontarget is not None:
         nt_cfg = cfg.nontarget
+        # distinct salt (23) from the target stream's (17) so the two streams' batches differ
         nt_data_key = random.fold_in(random.PRNGKey(built.pd.seed), 23)
 
         @eqx.filter_jit
