@@ -39,8 +39,8 @@ eval:
   - rounding_threshold: 0.0
     type: CEandKLLosses
   n_steps: 1
-  slow_every: 5000
-  slow_on_first_step: true
+  slow_every: 60000
+  slow_on_first_step: false
 pd:
   batch_size: 256
   ci_config:
