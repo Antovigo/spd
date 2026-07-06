@@ -1,14 +1,14 @@
 run_name: tpd-pile4l-numpy-pandas
 cadence:
   keep_last_n_checkpoints: 2
-  save_every: 1000
+  save_every: 5000
   train_log_every: 100
 data:
   tokenizer_name: EleutherAI/gpt-neox-20b
   prompts_file: param_decomp_lab/experiments/lm_targeted/prompts/numpy_and_pandas.txt
   max_seq_len: 16
 nontarget:
-  batch_size: 64
+  batch_size: 256
   impmin_coeff_ratio: 2.0
   data:
     dataset_name: parquet
@@ -20,8 +20,8 @@ nontarget:
     streaming: false
     eval_split: train
 eval:
-  batch_size: 128
-  every: 500
+  batch_size: 256
+  every: 1000
   metrics:
   - ci_alive_threshold: 0.0
     groups:
@@ -39,10 +39,10 @@ eval:
   - rounding_threshold: 0.0
     type: CEandKLLosses
   n_steps: 1
-  slow_every: 2000
+  slow_every: 5000
   slow_on_first_step: true
 pd:
-  batch_size: 64
+  batch_size: 256
   ci_config:
     type: chunkwise_transformer
     blocks_per_chunk: 1
@@ -112,10 +112,13 @@ pd:
   - coeff: 0.0
     type: FaithfulnessLoss
   seed: 0
-  steps: 2000
+  steps: 30000
 runtime:
   remat_recon_forwards: false
-  dp: null
+  dp: 8
+  launch_env:
+    env:
+      PARAM_DECOMP_OUT_DIR: /mnt/polished-lake/home/lee/param-decomp/out
 target:
   weights_dtype: bfloat16
   spec:
