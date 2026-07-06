@@ -123,6 +123,7 @@ def make_train_step(
     remat_ci_fn: bool,
     mesh: Mesh | None,
     nontarget_loss_surface: LossSurface | None = None,
+    recon_positions: int | None = None,
 ):
     """Build the `eqx.filter_jit`'d `step(model, state, batch, key) -> (state, metrics)`.
 
@@ -136,6 +137,21 @@ def make_train_step(
     site_names = lm.site_names
     sites = lm.sites
     recon_loss_fn = lm.recon_loss_fn  # static method: pure, holds no arrays — safe to close
+
+    # tPD short-prompt targets (SPEC S38): score recon on only the first `recon_positions`
+    # sequence positions. Causal attention makes trailing pad positions invisible to these, so
+    # end-padding the target to a flash-attn-supported length leaves the scored positions'
+    # outputs unchanged. Applies to the TARGET pass (main recon + its adversary ascents), NOT
+    # the non-target pass (full-length parquet). None = score all positions (every non-tPD run).
+    if recon_positions is not None:
+        n_recon = recon_positions
+
+        def target_recon_loss_fn(masked_output: Any, clean_output: Any) -> Array:
+            sliced = jax.tree.map(lambda a: a[:, :n_recon], (masked_output, clean_output))
+            return recon_loss_fn(*sliced)
+    else:
+        target_recon_loss_fn = recon_loss_fn
+
     recon_terms = losses.recon
     faith_term = losses.faith
     imp_term = losses.imp
@@ -275,7 +291,7 @@ def make_train_step(
                 entry.live_sites,
                 entry.has_delta,
             )
-            total = total + recon_loss_fn(masked, clean_output)
+            total = total + target_recon_loss_fn(masked, clean_output)
         return total / len(routes_per_draw)
 
     @eqx.filter_jit(donate="all-except-first")
@@ -333,7 +349,7 @@ def make_train_step(
             masked = masked_forward(
                 model, prepared_detached, batch, masks, delta_masks, None, site_names, True
             )
-            return recon_loss_fn(masked, clean_output)
+            return target_recon_loss_fn(masked, clean_output)
 
         with jax.named_scope("pd_pgd_warmup_ascend"):
             warmed_advs = {
@@ -425,11 +441,13 @@ def make_train_step(
                 leading: tuple[int, ...],
                 key_offset: int,
                 force_delta_on: bool,
+                recon_loss: Callable[[Any, Any], Array],
             ) -> list[tuple[ReconLossTerm, Array]]:
                 """Mean-KL recon over the term/entry/draw grid (SPEC S10'), shared by the target
                 pass and the tPD non-target pass. `force_delta_on` (S35) pins the delta on and
                 restricts the set to stochastic/constant sources; the target pass
                 (`force_delta_on=False`) additionally handles fresh-PGD / persistent sources.
+                `recon_loss` is the target's position-sliced fn (S38) or the plain full-seq fn.
                 `key_offset` keeps the two passes' per-term RNG disjoint (R1)."""
                 out: list[tuple[ReconLossTerm, Array]] = []
                 for term_idx, term in enumerate(grid_terms):
@@ -485,7 +503,7 @@ def make_train_step(
                                     entry.live_sites,
                                     entry.has_delta,
                                 )
-                            total = total + recon_loss_fn(masked, clean_output)
+                            total = total + recon_loss(masked, clean_output)
                             n_forwards += 1
                     assert n_forwards > 0, f"term {term.name!r} produced no forwards"
                     term_loss = total / n_forwards
@@ -498,7 +516,9 @@ def make_train_step(
                 return out
 
             total_loss = faith_coeff * faith_loss + imp_coeff * imp_lp + freq_coeff * imp_freq
-            target_grid = recon_grid(recon_terms, ci, batch, clean_output, leading, 1, False)
+            target_grid = recon_grid(
+                recon_terms, ci, batch, clean_output, leading, 1, False, target_recon_loss_fn
+            )
             for term, term_loss in target_grid:
                 total_loss = total_loss + term.coeff * term_loss
             term_losses = tuple(term_loss for _, term_loss in target_grid)
@@ -527,6 +547,7 @@ def make_train_step(
                     nt_inputs.leading,
                     1 + len(recon_terms),
                     True,
+                    recon_loss_fn,
                 )
                 for term, nt_term_loss in nt_grid:
                     nt_total = nt_total + term.coeff * nt_term_loss

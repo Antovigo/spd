@@ -432,6 +432,7 @@ def run_decomposition_training(
     eval_every: int,
     mesh: Mesh,
     nontarget: NontargetPass | None = None,
+    recon_positions: int | None = None,
 ) -> None:
     """The generic VPD decomposition-training engine — the ONE train loop every target
     (LM, TMS, ResidMLP, …) runs through.
@@ -499,6 +500,7 @@ def run_decomposition_training(
         remat_ci_fn=remat_ci_fn,
         mesh=mesh,
         nontarget_loss_surface=nontarget_loss_surface,
+        recon_positions=recon_positions,
     )
 
     # record what this run actually executes on so wandb never lies about topology.

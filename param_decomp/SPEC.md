@@ -442,7 +442,13 @@ grad = ∇_{components, ci_fn, sources} (L_target + L_nontarget)      # single v
   `faithfulness_warmup_steps == 0` (both otherwise drive Δ→0; tPD needs Δ nonzero to carry
   non-target behavior). Enforced lab-side by `assert_targeted_faithfulness_off`.
 - **S37** — the non-target pass's importance-minimality coeff is the target coeff ×
-  `impmin_coeff_ratio`. The paper uses ~2; the toy configs use up to 20 (tuned so the
+  `impmin_coeff_ratio`.
+- **S38** — short constant-length prompt targets are END-padded to a flash-attn-supported
+  `max_seq_len`; the target-pass recon (main grid AND its adversary ascents — consistently)
+  scores only the first `recon_positions` (real) positions. Causal attention makes the
+  trailing pad causally invisible to those positions, so their logits equal the unpadded
+  forward's. The non-target pass scores all positions. `recon_positions=None` (every non-tPD
+  run + non-target pass) scores all positions unchanged. The paper uses ~2; the toy configs use up to 20 (tuned so the
   recovered components stay inactive off-target on the small toys — see
   `notes/tpd_style_review.md` history / the run configs).
 

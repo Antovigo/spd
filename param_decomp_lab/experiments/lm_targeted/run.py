@@ -93,7 +93,7 @@ def train(
 
     # TARGET stream: the fixed prompt pool, tokenized once at build time.
     assert cfg.data.prompts_file is not None
-    prompt_tokens = load_prompt_tokens(
+    prompt_tokens, recon_positions = load_prompt_tokens(
         cfg.data.prompts_file, cfg.data.tokenizer_name, cfg.data.max_seq_len
     )
     sample_batch = make_prompt_sample_batch(
@@ -137,6 +137,7 @@ def train(
         eval_every=eval_every,
         mesh=mesh,
         nontarget=nontarget,
+        recon_positions=recon_positions,
     )
 
 

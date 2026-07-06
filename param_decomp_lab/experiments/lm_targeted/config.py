@@ -4,10 +4,8 @@ The LM analog of the toy targeted runs (`experiments/{tms,resid_mlp}`): the TARG
 a fixed prompt pool (`data.prompts_file`), the NON-TARGET stream is the normal parquet path
 (`nontarget.data.dataset_name == "parquet"`), and the delta component is forced on over the
 non-target pass (SPEC §11). Reuses the plain-LM target / eval / ci-fn resolution
-(`experiments.lm.config`) verbatim; the only tPD-specific build is the `data` seam — the
-engine sizes the persistent-PGD source off `data.seq_len` / `data.global_batch` on the
-TARGET pass, so `BuiltRun.data` carries the TARGET prompt length + batch, not the parquet
-stream.
+(`experiments.lm.config`) verbatim; the only tPD-specific build is the `data` seam
+(`_targeted_data`), which points the engine's `data` at the non-target parquet stream.
 """
 
 from pathlib import Path
@@ -17,6 +15,7 @@ import yaml
 from pydantic import model_validator
 
 from param_decomp.built_run import BuiltRun, DataConfig
+from param_decomp.configs import PersistentPGDReconLossConfig
 from param_decomp_lab.experiments.config import (
     NontargetConfig,
     assert_canonical_algorithm_config,
@@ -50,6 +49,13 @@ class LMTargetedExperimentConfig(LMExperimentConfig):
         assert self.nontarget.data.dataset_name is not None, (
             "targeted LM non-target stream must be parquet (set nontarget.data.dataset_name)"
         )
+        # Persistent-PGD sources would size off the (non-target) data.seq_len, but they run on
+        # the target pass (target seq) — the two differ under tPD. Until the engine takes a
+        # separate target-seq for source sizing, tPD uses fresh-PGD / stochastic recon only.
+        assert not any(isinstance(m, PersistentPGDReconLossConfig) for m in self.pd.loss_metrics), (
+            "targeted PD does not yet support PersistentPGDReconLoss (target-seq source sizing "
+            "unhandled); use PGDReconLoss (fresh) or stochastic recon."
+        )
         return self
 
 
@@ -68,14 +74,16 @@ def _nontarget_parquet_dir(cfg: LMTargetedExperimentConfig) -> Path:
 
 
 def _targeted_data(cfg: LMTargetedExperimentConfig) -> DataConfig:
-    """The tPD `data` seam: `seq_len` = the TARGET prompt length, `global_batch` matches the
-    plain-LM `_data` (`pd.batch_size`), `dir` = the NON-target parquet dir. The engine reads
-    only `seq_len` / `global_batch` for persistent-PGD source sizing on the TARGET pass; `dir`
-    is unused by the engine but must be a valid path."""
+    """The engine's `data` seam for tPD = the NON-target parquet stream (the broad
+    distribution the in-loop eval + perf read). The target stream is the fixed prompts, fed
+    via the `sample_batch` seam, so it doesn't ride on `data`. Fresh-PGD sources size per-step
+    to the actual target batch, so `data.seq_len` isn't a source-sizing input here; a tPD
+    config using PERSISTENT PGD would need a separate target-seq (the persistent adversary
+    runs on the target pass) — not supported yet, so tPD uses fresh-PGD / stochastic recon."""
     return DataConfig(
         dir=_nontarget_parquet_dir(cfg),
-        seq_len=cfg.data.max_seq_len,
-        global_batch=cfg.pd.batch_size,
+        seq_len=cfg.nontarget.data.max_seq_len,
+        global_batch=cfg.nontarget.batch_size,
     )
 
 

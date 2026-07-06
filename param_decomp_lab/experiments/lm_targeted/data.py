@@ -13,22 +13,30 @@ from jax.sharding import PartitionSpec as P
 from transformers import AutoTokenizer
 
 
-def load_prompt_tokens(prompts_file: str, tokenizer_name: str, max_seq_len: int) -> np.ndarray:
-    """Tokenize each non-empty line of `prompts_file` to a fixed `[n_prompts, max_seq_len]`
-    int32 array. Every prompt must tokenize to EXACTLY `max_seq_len` (no pad / no truncate) —
-    tPD targets are short constant-length prompts (e.g. "import numpy as"), and silently
-    padding or truncating would change which positions the recon KL scores."""
+def load_prompt_tokens(
+    prompts_file: str, tokenizer_name: str, max_seq_len: int
+) -> tuple[np.ndarray, int]:
+    """Tokenize each non-empty line of `prompts_file` into a fixed `[n_prompts, max_seq_len]`
+    int32 array, returning `(tokens, recon_positions)` where `recon_positions` is the real
+    (pre-pad) prompt length. tPD targets are short constant-length prompts (e.g. "import numpy
+    as"); they are END-padded (token 0) to `max_seq_len` so the forward clears the cuDNN
+    flash-attn min-seq. Causal attention makes trailing pad invisible to the real positions,
+    so recon is scored on only the first `recon_positions` positions (SPEC S38). All prompts
+    must share one real length (so a single `recon_positions` applies to the batch)."""
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, local_files_only=True)
     lines = [ln for ln in Path(prompts_file).read_text().splitlines() if ln.strip()]
     assert lines, f"no prompts in {prompts_file}"
-    rows = []
-    for ln in lines:
-        ids = tokenizer.encode(ln, add_special_tokens=False)
-        assert len(ids) == max_seq_len, (
-            f"prompt {ln!r} tokenizes to {len(ids)} tokens, expected max_seq_len={max_seq_len}"
-        )
-        rows.append(ids)
-    return np.asarray(rows, dtype=np.int32)
+    tokenized = [tokenizer.encode(ln, add_special_tokens=False) for ln in lines]
+    lengths = {len(ids) for ids in tokenized}
+    assert len(lengths) == 1, (
+        f"all prompts must share one length (for a single recon_positions), got {lengths}"
+    )
+    recon_positions = lengths.pop()
+    assert recon_positions <= max_seq_len, (
+        f"prompt length {recon_positions} exceeds max_seq_len {max_seq_len}"
+    )
+    rows = [ids + [0] * (max_seq_len - recon_positions) for ids in tokenized]
+    return np.asarray(rows, dtype=np.int32), recon_positions
 
 
 def make_prompt_sample_batch(

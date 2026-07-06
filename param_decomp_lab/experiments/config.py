@@ -36,6 +36,8 @@ from param_decomp.configs import (
     OptimizerConfig,
     PDConfig,
     PersistentPGDReconLossConfig,
+    PGDReconLossConfig,
+    PGDReconSubsetLossConfig,
     ResumeProvenance,
     RuntimeConfig,
     StochasticHiddenActsReconLossConfig,
@@ -48,12 +50,15 @@ from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 # ── targeted PD (tPD) shared config surface (SPEC §11), reused across the per-domain
 # experiment configs. ──
 
-# Losses dropped from the NON-TARGET pass: PPGD is a stateful per-step adversary the delta
-# override deliberately does not drive; unmasked recon is meaningless with a forced-on delta;
-# hidden-acts recon is a target-only diagnostic. (Torch parity: "losses excluded from the
-# nontarget pass".) FaithfulnessLoss is KEPT (inert, coeff 0) — the engine requires it.
+# Losses dropped from the NON-TARGET pass (SPEC S35): the non-target pass is stochastic-only,
+# so both adversarial recons (persistent + fresh PGD) are excluded — the delta is forced on
+# there, not adversarially probed; unmasked recon is meaningless with a forced-on delta;
+# hidden-acts recon is a target-only diagnostic. FaithfulnessLoss is KEPT (inert, coeff 0) —
+# the engine requires exactly one faith term.
 EXCLUDED_NONTARGET_LOSS_CONFIGS: tuple[type, ...] = (
     PersistentPGDReconLossConfig,
+    PGDReconLossConfig,
+    PGDReconSubsetLossConfig,
     UnmaskedReconLossConfig,
     StochasticHiddenActsReconLossConfig,
 )

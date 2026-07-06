@@ -6,7 +6,7 @@ cadence:
 data:
   tokenizer_name: EleutherAI/gpt-neox-20b
   prompts_file: param_decomp_lab/experiments/lm_targeted/prompts/numpy_and_pandas.txt
-  max_seq_len: 3
+  max_seq_len: 16
 nontarget:
   batch_size: 64
   impmin_coeff_ratio: 2.0
