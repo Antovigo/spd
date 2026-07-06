@@ -40,6 +40,7 @@ from param_decomp_lab.experiments.lm.run import (
 from param_decomp_lab.experiments.lm_targeted.config import (
     LMTargetedExperimentConfig,
     load_targeted_config,
+    nontarget_parquet_dir,
 )
 from param_decomp_lab.experiments.lm_targeted.data import (
     load_prompt_tokens,
@@ -49,13 +50,13 @@ from param_decomp_lab.experiments.lm_targeted.data import (
 
 def _nontarget_sample_batch(
     cfg: LMTargetedExperimentConfig, seq_len: int, mesh: Mesh
-) -> tuple[Callable[[int], jax.Array], int]:
+) -> Callable[[int], jax.Array]:
     """The parquet NON-TARGET stream `sample_batch` (the normal LM path, built from
-    `nontarget.data` at `nontarget.batch_size * world`), plus its global batch size."""
+    `nontarget.data` at `nontarget.batch_size * world`)."""
     n_proc = jax.process_count()
     n_dev = mesh.devices.size
     nontarget_global_batch = cfg.nontarget.batch_size * n_proc
-    parquet_dir = Path(cfg.nontarget.data.data_files).parent  # pyright: ignore[reportArgumentType]
+    parquet_dir = nontarget_parquet_dir(cfg)
     assert nontarget_global_batch % n_dev == 0, (nontarget_global_batch, n_dev)
     assert nontarget_global_batch >= n_dev, (
         f"non-target global batch {nontarget_global_batch} < device count {n_dev}"
@@ -70,7 +71,7 @@ def _nontarget_sample_batch(
     def sample_batch(step: int) -> jax.Array:
         return _global_token_batch(server.local_batch(step), mesh, nontarget_global_batch)
 
-    return sample_batch, nontarget_global_batch
+    return sample_batch
 
 
 def train(
@@ -101,7 +102,7 @@ def train(
     )
 
     # NON-TARGET stream: the broad parquet distribution (SPEC §11).
-    nontarget_sample_batch, _ = _nontarget_sample_batch(cfg, cfg.nontarget.data.max_seq_len, mesh)
+    nontarget_sample_batch = _nontarget_sample_batch(cfg, cfg.nontarget.data.max_seq_len, mesh)
     nontarget = NontargetPass(
         sample_batch=nontarget_sample_batch,
         loss_metrics=build_nontarget_loss_metrics(

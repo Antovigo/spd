@@ -6,12 +6,21 @@ Living doc for the rolling STYLE/CLEANLINESS janitor over the **targeted PD (tPD
 ("the one rule", HLO-baking); `param_decomp_lab/experiments/CLAUDE.md`. Behavior-preserving
 fixes only; anything numerics/semantics-changing goes under "Deferred", never into code.
 
+**Status (pass 4):** since pass 3 the branch REBUILT the LM targeted composition root — the
+`lm_targeted/` tree that pass 3 recorded as deleted (B1) is back and functional, and the tPD
+two-pass now runs end-to-end. Pass 4 reviewed the fresh LM code
+(`experiments/lm_targeted/{config,data,run,launch,test_lm_targeted}.py`, the
+`numpy_pandas_4L_targeted.yaml` config + `prompts/`), the `recon_positions` seam in
+`train.py` / `run.py`, SPEC §11 S38, `experiments/config.py`
+(`EXCLUDED_NONTARGET_LOSS_CONFIGS` now drops both PGD variants), and `adapters/pd.py`. The
+toy delta is unchanged from pass 3 (still conforms). Fixed 3 behavior-preserving items this
+pass (P1–P3 below); `make check` clean (0/0); required suite green (55 passed, 2 skipped).
+
 **Status (pass 3, @ HEAD `14f0bd33d`):** ALL prior findings (B1–B3, M1–M4, m1–m7, N1–N7 =
-24) are RESOLVED — fixed in commit `14f0bd33d` ("refactor(tPD): clean up per the style
-review"). Pass 3 re-verified every one against current `file:line`, freshly re-reviewed the
-whole current diff (13 code files + SPEC + plan note), and found NOTHING new to fix that is
-behavior-preserving. `make check` clean (0 errors / 0 warnings); the required regression +
-targeted suite is green (51 passed, 2 skipped). The tPD delta now conforms to the guide.
+24) were RESOLVED in commit `14f0bd33d` ("refactor(tPD): clean up per the style review").
+(Note: pass-3 finding B1 recorded the `lm_targeted/` tree as deleted "until the LM path is
+implemented" — it has since been rebuilt, so B1's deletion no longer holds; the new tree is
+reviewed fresh in pass 4.)
 
 ---
 
@@ -74,9 +83,24 @@ Grouped by the original finding ids. Each verified against current code.
 
 ---
 
+## Resolved this pass (pass 4)
+
+- **P1** — SPEC §11 S38 (`recon_positions`) carried a trailing sentence about the paper's ~2
+  vs the toys' ~20 `impmin_coeff_ratio`, which is an S37 (imp-min coeff) topic, not an S38
+  (recon-position slicing) one. Moved that sentence up to S37 where it belongs.
+- **P2** — `lm_targeted/run.py::_nontarget_sample_batch` returned
+  `(sample_batch, nontarget_global_batch)` but the sole caller discarded the second element
+  (`nontarget_sample_batch, _ = …`). Dropped the dead return value; return the callable only
+  (style guide: delete unused code).
+- **P3** — `_nontarget_sample_batch` resolved the parquet dir inline as
+  `Path(cfg.nontarget.data.data_files).parent` with a `# pyright: ignore[reportArgumentType]`,
+  duplicating (minus its asserts) `config.nontarget_parquet_dir`, which `_targeted_data`
+  already uses. Reused `nontarget_parquet_dir` (dropping the pyright-ignore) and promoted it
+  from `_nontarget_parquet_dir` to a public name since it is now shared across the two modules.
+
 ## Open findings (behavior-preserving), ranked
 
-None. The tPD delta is clean against the guide as of `14f0bd33d`.
+None. The tPD delta (toy + LM) is clean against the guide after P1–P3.
 
 ---
 
@@ -89,7 +113,12 @@ None outstanding. For the record, the following were considered and are NOT bugs
   the `nontarget_loss_surface` name, SPEC §11 `S34-S37`, and the shared
   `NontargetConfig`/`build_nontarget_loss_metrics`/`assert_targeted_faithfulness_off` in
   `experiments/config.py` — all correct, keep.
-- The DELETED `lm_targeted/` tree stays deleted (rebuild functional when the LM path lands).
+- The rebuilt `lm_targeted/` tree: reviewed fresh in pass 4. Its `run.py::train` mirrors
+  `lm/run.py::train` (mesh asserts, eval-cadence assert block, `run_key` split) — the
+  composition-root parallelism the repo tolerates, not copy-paste to collapse. Kept as-is.
+- The persistent-PGD-forbidden guard in `LMTargetedExperimentConfig._assert_targeted_invariants`
+  + the two `assert not force_delta_on` arms in `recon_grid` + `EXCLUDED_NONTARGET_LOSS_CONFIGS`
+  dropping both PGD variants: intentional design (SPEC S35), leave.
 - `impmin_coeff_ratio: 20.0` in the two toy YAMLs vs the paper's ~2: a TUNED config value, not
   a style defect — SPEC S37 documents the gap. Changing it would change training numerics, so
   it is out of janitor scope regardless.

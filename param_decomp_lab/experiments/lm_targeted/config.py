@@ -59,7 +59,7 @@ class LMTargetedExperimentConfig(LMExperimentConfig):
         return self
 
 
-def _nontarget_parquet_dir(cfg: LMTargetedExperimentConfig) -> Path:
+def nontarget_parquet_dir(cfg: LMTargetedExperimentConfig) -> Path:
     """The non-target parquet shard dir, resolved from `nontarget.data` the same way
     `experiments.lm.config._data` resolves the plain-LM parquet dir."""
     data = cfg.nontarget.data
@@ -81,7 +81,7 @@ def _targeted_data(cfg: LMTargetedExperimentConfig) -> DataConfig:
     config using PERSISTENT PGD would need a separate target-seq (the persistent adversary
     runs on the target pass) — not supported yet, so tPD uses fresh-PGD / stochastic recon."""
     return DataConfig(
-        dir=_nontarget_parquet_dir(cfg),
+        dir=nontarget_parquet_dir(cfg),
         seq_len=cfg.nontarget.data.max_seq_len,
         global_batch=cfg.nontarget.batch_size,
     )
