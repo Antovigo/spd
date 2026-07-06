@@ -164,6 +164,7 @@ perChan.value = "2"; scChan.value = "2";
 D.lags.forEach((l, i) => { perFilter.add(new Option(lagLabel(l), i)); scLag.add(new Option(lagLabel(l), i)); });
 
 let sortKey = null, sortDir = -1, selected = null;
+let detailPx = 1;  // canvas pixels per prompt for the right-panel heatmaps (persists across selections)
 
 function visibleNeurons() {
   const op = tblOp.value, minKl = +document.getElementById("minKl").value;
@@ -283,8 +284,12 @@ function renderDetail(nid) {
   D.lags.forEach((l, i) => lagSel.add(new Option(lagLabel(l), i)));
   const winInp = document.createElement("input");
   winInp.type = "number"; winInp.value = 41; winInp.step = 2; winInp.min = 11;
+  const pxInp = document.createElement("input");
+  pxInp.type = "number"; pxInp.value = detailPx; pxInp.step = 1; pxInp.min = 1;
+  pxInp.title = "canvas pixels per prompt (one (a,b) cell)";
   const ctr = document.createElement("div"); ctr.className = "controls";
-  ctr.append("op ", opSel, " local-periodicity: channel ", chanForLocal, " lag ", lagSel, " window ", winInp);
+  ctr.append("op ", opSel, " local-periodicity: channel ", chanForLocal, " lag ", lagSel,
+             " window ", winInp, " px/prompt ", pxInp);
   det.appendChild(ctr);
   const body = document.createElement("div");
   det.appendChild(body);
@@ -292,18 +297,19 @@ function renderDetail(nid) {
   function draw() {
     body.innerHTML = "";
     const op = opSel.value, e = g[op];
+    const pxPP = Math.max(1, +pxInp.value | 0);  // pixels per prompt; ablation grids scale by stride
     const sideAbl = Math.round((N - 1) / e.stride) + 1;
     const row1 = document.createElement("div");
     body.appendChild(row1);
-    heatmap(row1, decQ8(e.kl), sideAbl, { cap: "ablation KL" });
-    heatmap(row1, decQ8(e.dlp), sideAbl, { cap: "Δ correct logprob", diverging: true });
-    heatmap(row1, decI16(e.dval), sideAbl, { cap: "ablated answer − truth", diverging: true, sentinel: -30000, fmt: v => v.toFixed(0) });
+    heatmap(row1, decQ8(e.kl), sideAbl, { cap: "ablation KL", px: pxPP * e.stride });
+    heatmap(row1, decQ8(e.dlp), sideAbl, { cap: "Δ correct logprob", diverging: true, px: pxPP * e.stride });
+    heatmap(row1, decI16(e.dval), sideAbl, { cap: "ablated answer − truth", diverging: true, sentinel: -30000, fmt: v => v.toFixed(0), px: pxPP * e.stride });
     const row2 = document.createElement("div");
     body.appendChild(row2);
     const gate = decQ8(e.gate), up = decQ8(e.up), comb = decQ8(e.comb);
-    heatmap(row2, gate, N, { cap: "gate preact", diverging: true });
-    heatmap(row2, up, N, { cap: "up preact", diverging: true });
-    heatmap(row2, comb, N, { cap: "silu(gate)·up", diverging: true });
+    heatmap(row2, gate, N, { cap: "gate preact", diverging: true, px: pxPP });
+    heatmap(row2, up, N, { cap: "up preact", diverging: true, px: pxPP });
+    heatmap(row2, comb, N, { cap: "silu(gate)·up", diverging: true, px: pxPP });
 
     // local periodicity
     const lp = document.createElement("div");
@@ -311,7 +317,7 @@ function renderDetail(nid) {
     const l = D.lags[+lagSel.value];
     const w = Math.max(11, +winInp.value | 1);
     heatmap(lp, localPeriodicity(chGrid, N, l[0], l[1], w), N,
-      { cap: `local periodicity ${chanForLocal.value} @ ${lagLabel(l)}, win ${w}`, diverging: true });
+      { cap: `local periodicity ${chanForLocal.value} @ ${lagLabel(l)}, win ${w}`, diverging: true, px: pxPP });
     body.appendChild(lp);
 
     // periodicity score matrix per channel
@@ -408,6 +414,7 @@ function renderDetail(nid) {
   chanForLocal.addEventListener("change", draw);
   lagSel.addEventListener("change", draw);
   winInp.addEventListener("change", draw);
+  pxInp.addEventListener("change", () => { detailPx = Math.max(1, +pxInp.value | 0); draw(); });
   draw();
 }
 
