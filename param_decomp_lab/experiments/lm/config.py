@@ -112,9 +112,16 @@ class LMTargetConfig(BaseConfig):
 
 
 class LMDataConfig(BaseConfig):
-    """LM experiment dataset / dataloader settings."""
+    """LM experiment dataset / dataloader settings. Exactly one source is set: `dataset_name`
+    (the pre-tokenized parquet path, the normal stream) OR `prompts_file` (a fixed prompt pool
+    for the targeted-PD target stream, tokenized once at build time)."""
 
-    dataset_name: str = Field(..., description="HuggingFace dataset id")
+    dataset_name: str | None = Field(default=None, description="HuggingFace dataset id")
+    prompts_file: str | None = Field(
+        default=None,
+        description="Path to a newline-separated fixed prompt pool (tPD target stream); "
+        "mutually exclusive with dataset_name.",
+    )
     data_files: str | None = Field(
         default=None,
         description=(
@@ -136,6 +143,14 @@ class LMDataConfig(BaseConfig):
     streaming: bool = Field(default=False)
     buffer_size: PositiveInt = Field(default=1000)
     shuffle_each_epoch: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "LMDataConfig":
+        assert (self.dataset_name is None) != (self.prompts_file is None), (
+            "set exactly one of dataset_name / prompts_file, got "
+            f"dataset_name={self.dataset_name!r} prompts_file={self.prompts_file!r}"
+        )
+        return self
 
 
 class LMExperimentConfig(ExperimentConfig[LMTargetConfig, LMDataConfig]):

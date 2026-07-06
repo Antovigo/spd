@@ -37,6 +37,9 @@ dependencies = [
 # `python -m param_decomp.run` (or `--local` to run it inline). The core trainer
 # (`param_decomp.run`) itself lives in the root `param-decomp` distribution.
 pd-lm = "param_decomp_lab.experiments.lm.launch:cli"
+# Targeted-PD (tPD) LM decomposition launcher (fixed-prompt target stream + broad non-target
+# stream); same config-driven `runtime.dp` mode selection as `pd-lm`.
+pd-lm-targeted = "param_decomp_lab.experiments.lm_targeted.launch:cli"
 # Toy-domain decomposition runners (CPU, in-process pretrain -> decompose via the generic
 # core engine `run_decomposition_training`). Run synchronously, no SLURM.
 pd-tms = "param_decomp_lab.experiments.tms.run:cli"
@@ -75,6 +78,7 @@ packages = [
     "param_decomp_lab.experiments",
     "param_decomp_lab.experiments.lm",
     "param_decomp_lab.experiments.lm.pretrain",
+    "param_decomp_lab.experiments.lm_targeted",
     "param_decomp_lab.experiments.resid_mlp",
     "param_decomp_lab.experiments.tms",
     "param_decomp_lab.harvest",

@@ -77,6 +77,7 @@ class PDAdapter:
         the corpus — recover the corpus from the shard directory (e.g.
         `.../pile_neox_tok_512/*.parquet` -> `pile_neox_tok_512`)."""
         data = self.cfg.data
+        assert data.dataset_name is not None, "adapter runs over a parquet-stream run"
         if data.dataset_name != "parquet":
             return data.dataset_name
         assert data.data_files is not None, "parquet data config without data_files"
