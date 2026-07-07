@@ -3,34 +3,31 @@
 Does MLP 18 build the result (`a+b`) circular features from scratch, or add to structure
 already present in the residual stream? And which neurons / subcomponents of a decomposition
 build that structure? The applet shows one plot per canonical period in the probes' predicted
-`(cos, sin)` frame, four rows sharing one zoomable view per column:
+`(cos, sin)` frame, five rows sharing one zoomable view per column:
 
 1. residual **before** the MLP, on the probes fit **before** it (`probes_pre.json`, site `pre`)
 2. residual **before** the MLP, on the probes fit **after** it (`probes_post.json`, site `post`)
 3. residual **after** the MLP, on the post probes
-4. residual after the MLP on the post probes, **with a user-picked set of neurons or
-   subcomponents ablated**
+4. residual after the MLP on the post probes, **with one neuron or subcomponent ablated**
+5. residual after the **alive-components-only MLP** on the post probes: the MLP recomputed
+   with every decomposed matrix reconstructed from just the applet's alive subcomponents
+   (binary mask, delta off) — how much of the representation the kept circuit rebuilds
 
 Rows 1 vs 2 separate what the pre-MLP structure looks like in its own best frame from how much
 of it already lies in the *final* representation's frame; rows 2 vs 3 show what the MLP adds in
 that frame. Hovering a point highlights the same prompt in every plot.
 
-The ablated row is emulated inside the applet (no forward pass, arbitrary simultaneous sets):
+The ablated row handles **one item at a time**, exactly on the full grid:
 
-- **neurons** — exact on the full grid: the MLP output is additive over neurons, so ablating a
-  set removes `Σ_j act_j · (w · W_down[:, j])` from the post projection. Only census neurons
-  whose measured ablation `max_kl` exceeds `--kl-thr` are selectable; their post-SwiGLU
-  activation grids ship exactly (fp16).
-- **down subcomponents** — exact on the full grid: removing rank-1 `U_c V_c^T` from `W_down`
-  subtracts `(h · V_c) · (w · U_c)`, additive over components.
-- **gate/up subcomponents** — ablating these perturbs every neuron's preactivation (the alive
-  components' couplings are dense), so the applet re-evaluates the full 14336-neuron SwiGLU on
-  a `--stride`-strided subgrid from shipped low-rank preactivation factors (rank `--rank` SVD,
-  neuron columns weighted by their probe-projection norm). Single-component ablations ship
-  their **exact** full-grid deltas; multi-component ablations use the emulator with a
-  control-variate correction (`emu(S) − Σ_c emu({c}) + Σ_c exact({c})`), so only the
-  *interaction* between components is approximated. Build-time fidelity numbers ship in the
-  payload and are displayed in the applet.
+- **neurons** — the MLP output is additive over neurons, so ablating one removes
+  `act_j · (w · W_down[:, j])` from the post projection. Only census neurons whose measured
+  ablation `max_kl` exceeds `--kl-thr` are selectable; their post-SwiGLU activation grids ship
+  fp16.
+- **down subcomponents** — removing rank-1 `U_c V_c^T` from `W_down` subtracts
+  `(h · V_c) · (w · U_c)`.
+- **gate/up subcomponents** — the SwiGLU is re-evaluated at build time with the component's
+  rank-1 term removed from its preactivation; the exact full-grid projected delta ships per
+  component.
 
 CPU-only (no forward pass; mmap for weights). The op is fixed to `add` — the probes' result
 variable is `a+b`.
@@ -38,8 +35,7 @@ variable is `a+b`.
 Usage:
     python -m param_decomp_lab.scripts.validation.build_result_feature_construction \
         <model_path> [--probes-dir=.../fourier_probes] [--census-dir=PATH] [--kl-thr=0.01] \
-        [--last-ci-thr=0.01] [--periods=2,5,10,20,50,100] [--rank=64] [--stride=2] \
-        [--output-dir=PATH]
+        [--last-ci-thr=0.01] [--periods=2,5,10,20,50,100] [--output-dir=PATH]
 
 Reads: `probes_post.json` + `probes_pre.json` (default dir
 `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`), the run's `hidden_activations_add.npz` /
@@ -78,9 +74,7 @@ from param_decomp_lab.scripts.validation.neurons.common import NEURONS_DIR, silu
 _APP_TEMPLATE = Path(__file__).with_name("result_feature_construction_app.html")
 _PROJ_TAG = {"gate_proj": "g", "up_proj": "u", "down_proj": "d"}
 _DEFAULT_PERIODS = "2,5,10,20,50,100"
-# columns with a tiny probe-projection norm can't influence the projected output; the weight
-# floor keeps the SVD from spending rank on them without dividing by ~0 on the way back
-_WEIGHT_FLOOR = 0.05
+_CIRCUIT_CHUNK = 2000  # prompts per chunk for the alive-only MLP row (bounds the [.., d_int] mats)
 
 
 def _probe_axes(
@@ -159,19 +153,16 @@ def _gu_dact(
     gate: NDArray[np.float32],
     up: NDArray[np.float32],
     act: NDArray[np.float32],
-    sel: list[tuple[str, NDArray[np.float32], NDArray[np.float32]]],
+    proj: str,
+    inner: NDArray[np.float32],
+    u_row: NDArray[np.float32],
 ) -> NDArray[np.float32]:
-    """Exact post-SwiGLU activation delta `[N, d_int]` for ablating gate/up components together.
-
-    `sel` rows are `(proj, inner [N], U_row [d_int])`; the SwiGLU is re-evaluated with each
-    component's rank-1 term removed from its preactivation. Project onto `wd` for the output
-    delta in the probe frame.
-    """
-    dg = np.zeros_like(gate)
-    du = np.zeros_like(up)
-    for proj, inner, u_row in sel:
-        (dg if proj == "gate_proj" else du)[...] += np.outer(inner, u_row)
-    return silu_combine(gate - dg, up - du) - act
+    """Exact post-SwiGLU activation delta `[N, d_int]` for ablating one gate/up component:
+    the SwiGLU re-evaluated with the component's rank-1 term removed from its preactivation."""
+    d = np.outer(inner, u_row)
+    if proj == "gate_proj":
+        return silu_combine(gate - d, up) - act
+    return silu_combine(gate, up - d) - act
 
 
 def build_result_feature_construction(
@@ -181,8 +172,6 @@ def build_result_feature_construction(
     kl_thr: float = 0.01,
     last_ci_thr: float = 0.01,
     periods: str = _DEFAULT_PERIODS,
-    rank: int = 64,
-    stride: int = 2,
     output_dir: str | None = None,
 ) -> Path:
     ck = Path(model_path).expanduser()
@@ -221,14 +210,13 @@ def build_result_feature_construction(
     x = d["mlp_input"].reshape(n_prompts, -1).astype(np.float32)
     gate = d["gate_preact"].reshape(n_prompts, -1).astype(np.float32)
     up = d["up_preact"].reshape(n_prompts, -1).astype(np.float32)
-    d_int = gate.shape[1]
     resid_post = resid_pre + mlp_out
 
     weights = load_target_mlp_weights(ck, layer, MLP_MATRICES)
     uv = load_component_uv(ck, layer, MLP_MATRICES)
     act = silu_combine(gate, up)
 
-    # the post frame carries the ablation math (rows 2-4); the pre frame only projects row 1
+    # the post frame carries the ablation math (rows 2-5); the pre frame only projects row 1
     w_post, b_post, r2_post = _probe_axes(
         probe_payloads["post"]["probes"]["a+b"], period_list, resid_post
     )
@@ -278,56 +266,60 @@ def build_result_feature_construction(
     # exact full-grid single-component deltas (gate/up; down deltas are exact in-browser)
     exact_single: dict[tuple[str, int], NDArray[np.float32]] = {}
     for proj, c in gu_comps:
-        dact = _gu_dact(gate, up, act, [(proj, inner_grids[(proj, c)], uv[proj][1][c])])
+        dact = _gu_dact(gate, up, act, proj, inner_grids[(proj, c)], uv[proj][1][c])
         exact_single[(proj, c)] = (dact @ wd).astype(np.float32)
         del dact
         logger.info(f"exact single delta {_PROJ_TAG[proj]}{c}")
 
-    # --- emulator: low-rank preactivation factors on the strided subgrid --------------------
-    ii = np.arange(0, n, stride)
-    sub_idx = (ii[:, None] * n + ii[None, :]).ravel()
-    m = len(sub_idx)
-    wcol = np.linalg.norm(wd, axis=1).astype(np.float32)
-    wcol = np.maximum(wcol / wcol.mean(), _WEIGHT_FLOOR)
-    factors: dict[str, NDArray[np.float32]] = {}
-    recon: dict[str, NDArray[np.float32]] = {}
-    for name, pre in (("g", gate), ("u", up)):
-        gsub = pre[sub_idx]
-        mean = gsub.mean(axis=0)
-        u_svd, s_svd, vt_svd = np.linalg.svd((gsub - mean) * wcol, full_matrices=False)
-        z = (u_svd[:, :rank] * s_svd[:rank]).astype(np.float32)
-        coef = (vt_svd[:rank] / wcol).astype(np.float32)
-        # coefficients ship neuron-major ([d_int, rank]) — the browser reconstructs per neuron
-        factors[f"z{name}"], factors[f"c{name}"], factors[f"m{name}"] = z, coef.T.copy(), mean
-        recon[name] = mean + z @ coef
-        logger.info(f"{name}: rank-{rank} SVD on the {m}-prompt subgrid")
+    # --- circuit row: the MLP with only the alive subcomponents on, delta off ----------------
+    # Each decomposed matrix is reconstructed from just the kept components (binary mask), so
+    # preactivations are `(x·V) U` over the alive gate/up sets and the output goes through the
+    # alive down set only. Chunked over prompts to bound the [chunk, d_int] intermediates.
+    def stack_v(proj: str, comps: list[tuple[str, int]]) -> NDArray[np.float32]:
+        return np.stack([uv[proj][0][:, c] for _, c in comps], axis=1)
 
-    # fidelity: exact vs control-variate emulation for representative multi-component sets
-    gate_s, up_s, act_s = gate[sub_idx], up[sub_idx], act[sub_idx]
-    act_r = silu_combine(recon["g"], recon["u"])
-    emu_single = {
-        (proj, c): _gu_dact(
-            recon["g"],
-            recon["u"],
-            act_r,
-            [(proj, inner_grids[(proj, c)][sub_idx], uv[proj][1][c])],
-        )
-        @ wd
-        for proj, c in gu_comps
-    }
-    fidelity: list[dict[str, Any]] = []
-    checks = [("all gate+up", gu_comps)]
-    if len(gu_comps) >= 4:
-        checks.append(("4 components", gu_comps[:4]))
-    for label, sel in checks:
-        rows = [(p, inner_grids[(p, c)][sub_idx], uv[p][1][c]) for p, c in sel]
-        dex = _gu_dact(gate_s, up_s, act_s, rows) @ wd
-        dem = _gu_dact(recon["g"], recon["u"], act_r, rows) @ wd
-        cv = dem - sum(emu_single[pc] for pc in sel) + sum(exact_single[pc][sub_idx] for pc in sel)
-        mag = float(np.linalg.norm(dex, axis=1).mean())
-        rel = float(np.linalg.norm(cv - dex, axis=1).mean()) / max(mag, 1e-9)
-        fidelity.append({"config": label, "n_comps": len(sel), "rel_rms": round(rel, 4)})
-        logger.info(f"emulator fidelity [{label}]: rel-rms {rel:.4f} (|delta| {mag:.3f})")
+    def stack_u(proj: str, comps: list[tuple[str, int]]) -> NDArray[np.float32]:
+        return np.stack([uv[proj][1][c] for _, c in comps])
+
+    gate_alive = [pc for pc in gu_comps if pc[0] == "gate_proj"]
+    up_alive = [pc for pc in gu_comps if pc[0] == "up_proj"]
+    assert gate_alive and up_alive and down_comps, "circuit row needs alive comps in every proj"
+    vg, ug = stack_v("gate_proj", gate_alive), stack_u("gate_proj", gate_alive)
+    vu, uu = stack_v("up_proj", up_alive), stack_u("up_proj", up_alive)
+    vd = stack_v("down_proj", down_comps)
+    ud_w = stack_u("down_proj", down_comps) @ w_post  # [Cd, 2P]
+    y_circuit = np.empty((n_prompts, w_post.shape[1]), np.float32)
+    for s in range(0, n_prompts, _CIRCUIT_CHUNK):
+        sl = slice(s, min(s + _CIRCUIT_CHUNK, n_prompts))
+        gate_m = (x[sl] @ vg) @ ug
+        up_m = (x[sl] @ vu) @ uu
+        y_circuit[sl] = (silu_combine(gate_m, up_m) @ vd) @ ud_w
+    proj_post_on_post = resid_post @ w_post + b_post
+    proj_circuit = resid_pre @ w_post + b_post + y_circuit
+    dev = float(np.linalg.norm(proj_circuit - proj_post_on_post, axis=1).mean())
+    logger.info(f"circuit row: mean |Δ| to the true post projection {dev:.3f}")
+
+    # --- alignment grids: activation · unit direction, per item ------------------------------
+    # Read side dots the activation the direction actually reads (MLP input `x` for gate/up V
+    # and neuron gate/up rows; post-SwiGLU `h` for down V). Write side dots the space the
+    # direction writes into (gate/up preactivations for gate/up U; the post residual for down U
+    # and neuron down columns). Signed, colour-by options in the applet.
+    def unit(v: NDArray[np.float32]) -> NDArray[np.float32]:
+        return (v / np.linalg.norm(v)).astype(np.float32)
+
+    align_in_sub = np.stack(
+        [(x if p != "down_proj" else act) @ unit(uv[p][0][:, c]) for p, c in gu_comps + down_comps]
+    )
+    write_base = {"gate_proj": gate, "up_proj": up}
+    align_out_sub = np.stack(
+        [write_base[p] @ unit(uv[p][1][c]) for p, c in gu_comps]
+        + [resid_post @ unit(uv[p][1][c]) for p, c in down_comps]
+    )
+    align_in_g = (gate[:, neuron_ids] / np.linalg.norm(weights["gate_proj"][neuron_ids], axis=1)).T
+    align_in_u = (up[:, neuron_ids] / np.linalg.norm(weights["up_proj"][neuron_ids], axis=1)).T
+    dcols = weights["down_proj"][:, neuron_ids]
+    align_out_d = (resid_post @ (dcols / np.linalg.norm(dcols, axis=0))).T
+    logger.info("alignment grids computed")
 
     # --- ablation-direction arrows -----------------------------------------------------------
     # Unit residual-space directions mapped through the same linear map as the points: read
@@ -363,19 +355,17 @@ def build_result_feature_construction(
             "run": run_dir.name,
             "layer": layer,
             "n": n,
-            "stride": stride,
-            "rank": rank,
             "kl_thr": kl_thr,
             "last_ci_thr": last_ci_thr,
             "periods": period_list,
             "r2": {"post": r2_post, "pre": r2_pre},
             "mods": sorted({p for p in period_list if p > 1}),
-            "fidelity": fidelity,
         },
-        # the three distinct clouds behind the four rows (row 4 = row 3 + ablation delta)
+        # the four distinct clouds behind the five rows (row 4 = row 3 + ablation delta)
         "proj_pre_on_pre": b64_f16(resid_pre @ w_pre + b_pre),
         "proj_pre_on_post": b64_f16(resid_pre @ w_post + b_post),
-        "proj_post_on_post": b64_f16(resid_post @ w_post + b_post),
+        "proj_post_on_post": b64_f16(proj_post_on_post),
+        "proj_circuit_on_post": b64_f16(proj_circuit),
         "neurons": [{"id": j, "kl": round(kl[j], 4)} for j in neuron_ids],
         "neuron_act": b64_f16(act[:, neuron_ids].T),
         "neuron_wd": b64_f16(wd[neuron_ids]),
@@ -385,20 +375,18 @@ def build_result_feature_construction(
         "neuron_arrow_u": b64_f16(neuron_arrow["u"]),
         "neuron_arrow_d": b64_f16(neuron_arrow["d"]),
         "sub_inner": b64_f16(np.stack([inner_grids[pc] for pc in gu_comps + down_comps])),
-        "gu_coupling": b64_f16(np.stack([uv[p][1][c] for p, c in gu_comps])) if gu_comps else "",
+        "align_in_sub": b64_f16(align_in_sub),
+        "align_out_sub": b64_f16(align_out_sub),
+        "align_in_g": b64_f16(align_in_g),
+        "align_in_u": b64_f16(align_in_u),
+        "align_out_d": b64_f16(align_out_d),
         "gu_exact_delta": b64_f16(np.stack([exact_single[pc] for pc in gu_comps]))
         if gu_comps
         else "",
         "down_wu": b64_f16(np.stack([uv[p][1][c] @ w_post for p, c in down_comps]))
         if down_comps
         else "",
-        "down_vcoupling": b64_f16(np.stack([uv[p][0][:, c] for p, c in down_comps]))
-        if down_comps
-        else "",
-        "wd_all": b64_f16(wd),
-        "emul": {k: b64_f16(v) for k, v in factors.items()},
     }
-    assert d_int == wd.shape[0]
 
     out_dir = (
         Path(output_dir).expanduser()

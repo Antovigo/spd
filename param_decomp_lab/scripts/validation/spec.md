@@ -704,55 +704,52 @@ args:
   which are invisible/ablatable-to-no-effect at the `=` token this applet reads; the per-prompt
   `ci` column of `inner_activations_add.tsv` supplies the max
 - `--periods`: comma list of probe periods shown, one plot per period (default `2,5,10,20,50,100`)
-- `--rank`: SVD rank of the shipped preactivation factors (default 64)
-- `--stride`: operand stride of the emulated subgrid (default 2 → 50×50 of the 100×100 grid)
 - `--output-dir`
 
 CPU (no forward pass). Asks whether MLP 18 **builds** the result (`a+b`) circular features or
 **adds to** structure already in the residual stream — and which neurons / subcomponents build
 them. A self-contained canvas applet (`index.html` + `data.js`): one plot per period, in the
 probes' predicted-`(cos, sin)` frame (red ring = unit circle; column captions carry both
-sites' r²). **Four rows** share one zoomable view per column: (1) pre-MLP residual on the
+sites' r²). **Five rows** share one zoomable view per column: (1) pre-MLP residual on the
 **pre**-fit probes — the pre-existing structure in its own best frame; (2) pre-MLP residual on
 the **post**-fit probes — how much of it already lies in the final representation's frame;
-(3) post-MLP residual on the post probes; (4) row 3 with a user-picked **ablation set**
-applied. **Hovering a point marks the same prompt in every plot** (overlay canvases, no
+(3) post-MLP residual on the post probes; (4) row 3 with **one ablated neuron or
+subcomponent**; (5) the **alive-components-only MLP** — the residual after an MLP whose
+decomposed matrices are reconstructed from just the applet's alive subcomponents (binary
+mask, delta off; computed at build time) — how much of the representation the kept circuit
+rebuilds. **Hovering a point marks the same prompt in every plot** (overlay canvases, no
 repaint), so a prompt's trajectory across the rows reads directly. Colour by `a` / `b`
 / `a+b` with mod + offset, or by the **ablation displacement** — `Δ (plane)` (the 2D
 original→ablated move in each column's own probe plane) or `Δ (total)` (the norm over all
 planes) — prompt-keyed so every row colours, scaled to the 99th percentile, grey where
-undefined (no ablation / off the emulated subgrid), value in the tooltip. Ablated items also
-draw **red direction arrows**: each gate/up subcomponent's unit read direction (`V̂`; neurons
-their gate + up rows) on row 1's pre frame, each down subcomponent's unit write direction
-(`Û`; neurons their down column) on row 2's post frame — mapped through the same linear map
+undefined (no ablation), value in the tooltip; or by the **alignment** of the activations with
+the selected item's unit direction (signed dot product, diverging blue–grey–red on a symmetric
+99th-pct scale): `align · read dir` = `x·V̂` (gate/up; down uses `h·V̂`) or the neuron's
+normalized gate preactivation, `align · read dir (up row)` = the neuron's normalized up
+preactivation (neuron-only), `align · write dir` = the gate/up preactivation vector onto `Û`,
+or the post residual onto a down `Û` / the neuron's unit down column. The ablated item also
+draws **red direction arrows**: a gate/up subcomponent's unit read direction (`V̂`; a neuron
+its gate + up rows) on row 1's pre frame, a down subcomponent's unit write direction
+(`Û`; a neuron its down column) on row 2's post frame — mapped through the same linear map
 as the points (`v̂·W` per plane, so lengths compare across periods; display-scaled per row to
 the unit ring, raw ‖proj‖ on arrowhead hover). RMSNorm between the pre residual and the
 gate/up input is absorbed by the probes, so raw directions are used (as in
 `build_direction_scatter`). An **ablate**
-dropdown picks neurons or subcomponents (not mixed); a **period dropdown** (subcomponents
+dropdown picks neurons or subcomponents; a **period dropdown** (subcomponents
 only) filters the list to one period group (`period N` / `×r` / `no period`, labels from
 `subcomp_periods_add.tsv`; searching a filtered-out id resets it);
 the side panel lists them with checkboxes, `(a, b)` thumbnails (post-SwiGLU activation /
 inner activation), KL / mean-CI / period info, and a **search-by-id** box (`12023` for neurons,
-`g124` for subcomponents). Any number can be ablated simultaneously; the third row updates by
-emulating the MLP in-browser:
-
-- **neurons** — exact, full grid (the MLP output is additive over neurons; only measured-causal
-  census neurons with `max_kl > --kl-thr` are listed, their activation grids shipped fp16).
-- **down subcomponents** — exact, full grid (rank-1 removal from `W_down` is additive given `h`).
-- **gate/up subcomponents** — dense couplings perturb every neuron, so the applet re-evaluates
-  the full 14336-neuron SwiGLU on the strided subgrid from shipped rank-`--rank` SVD factors of
-  the gate/up preactivation grids (neuron columns weighted by probe-projection norm, reconstructed
-  once in-browser, cached int16). Single components ship their **exact** full-grid deltas;
-  multi-component sets use the emulator with a **control-variate** correction
-  (`emu(S) − Σ emu({c}) + Σ exact({c})`) so only the between-component interaction is
-  approximated — build-time fidelity: ≤0.2% rel error for small sets, ~2% ablating
-  every alive gate/up component (numbers ship in `meta.fidelity` and display in the panel).
-  Mixed gate/up + down selections correct the down read for the emulated `Δh`.
+`g124` for subcomponents). **One item is ablated at a time** (picking a new one replaces the
+old), always exactly on the full grid: a neuron subtracts `act_j · (w · W_down[:, j])`
+(additive over neurons), a down subcomponent subtracts `(h · V_c) · (w · U_c)`, and gate/up
+subcomponents ship their exact full-grid deltas (SwiGLU re-evaluated at build time with the
+rank-1 term removed).
 
 Ablation math lives entirely in the post frame (the only frame with an ablated row); the pre
 probes contribute one projected cloud + the caption r². Reads the two probes JSONs, the run's
-`hidden_activations_add.npz` / `alive_filtered_add.tsv` / `subcomp_periods_add.tsv`, the
+`hidden_activations_add.npz` / `alive_filtered_add.tsv` / `subcomp_periods_add.tsv` /
+`inner_activations_add.tsv`, the
 census `candidates.tsv` (+ `ablation_full_add.npz`), and the checkpoint U/V + frozen MLP
 weights (mmap). Addition only (the probes' result variable is `a+b`).
 Output: `<run_dir>/analysis/result_feature_construction/{index.html,data.js}`.

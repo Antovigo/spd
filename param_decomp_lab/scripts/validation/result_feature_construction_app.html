@@ -30,7 +30,6 @@
   }
   #side h3 { margin: 4px 0; font-size: 13px; }
   #status { font-size: 11px; color: #666; min-height: 14px; margin: 4px 0; }
-  #fidelity { font-size: 10px; color: #888; margin: 4px 0; }
   #searchrow { display: flex; gap: 4px; margin: 6px 0; }
   #search { flex: 1; font-size: 12px; padding: 2px 4px; }
   .item { display: flex; align-items: center; gap: 6px; padding: 2px 2px; border-radius: 3px; }
@@ -51,7 +50,7 @@
 <body>
 <div id="controls">
   <span id="title">Result feature construction</span>
-  <label>colour by<select id="colorBy"><option>a</option><option>b</option><option selected>a+b</option><option value="dplane">ablation Δ (plane)</option><option value="dtotal">ablation Δ (total)</option></select></label>
+  <label>colour by<select id="colorBy"><option>a</option><option>b</option><option selected>a+b</option><option value="dplane">ablation Δ (plane)</option><option value="dtotal">ablation Δ (total)</option><option value="ain">align · read dir</option><option value="ainup">align · read dir (up row)</option><option value="aout">align · write dir</option></select></label>
   <label>mod<select id="mod"></select></label>
   <label>offset<input id="offset" type="number" value="0" style="width:56px" /></label>
   <label>ablate<select id="mode"><option value="subcomponents">subcomponents</option><option value="neurons">neurons</option></select></label>
@@ -62,11 +61,10 @@
   <div id="side">
     <h3 id="sideTitle"></h3>
     <div id="status"></div>
-    <div id="fidelity"></div>
     <div id="searchrow">
       <select id="periodFilter" title="show only subcomponents with this period"></select>
       <input id="search" placeholder="search id, e.g. g124 or 12023" />
-      <button id="addBtn">add</button>
+      <button id="addBtn">select</button>
       <button id="clearBtn">clear</button>
     </div>
     <div id="items"></div>
@@ -79,9 +77,6 @@
 "use strict";
 const D = window.PD_DATA;
 const N = D.meta.n, NP = N * N, P = D.meta.periods.length, P2 = 2 * P;
-const STRIDE = D.meta.stride, RANK = D.meta.rank;
-const SUB_SIDE = Math.floor((N - 1) / STRIDE) + 1, M = SUB_SIDE * SUB_SIDE;
-let D_INT = 0;  // set from wd_all at init (one row per MLP neuron)
 
 // ---- fp16 decode via a 65536-entry lookup table (fast enough for the multi-MB payloads) ----
 const F16_TABLE = (() => {
@@ -100,12 +95,7 @@ function decodeF16(b64) {
   return out;
 }
 const _cache = {};
-function arr(key) { if (!(key in _cache)) _cache[key] = decodeF16(keyData(key)); return _cache[key]; }
-function keyData(key) {
-  const parts = key.split("."); let v = D;
-  for (const p of parts) v = v[p];
-  return v;
-}
+function arr(key) { if (!(key in _cache)) _cache[key] = decodeF16(D[key]); return _cache[key]; }
 
 // ---- colour map ----------------------------------------------------------------------------
 const _VIRIDIS = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
@@ -120,15 +110,18 @@ const el = id => document.getElementById(id);
 const tooltip = el("tooltip");
 const aOf = t => Math.floor(t / N) + 1, bOf = t => (t % N) + 1;
 
-// ---- selection state -----------------------------------------------------------------------
+// ---- selection state: one ablated item at a time ---------------------------------------------
 let MODE = "subcomponents";
-const SELECTED = new Set();          // neuron ids (numbers) or subcomp ids ("g124")
+let SELECTED_ID = null;   // a neuron id (number) or subcomp id ("g124"), or null
 const SIZE = 240;
 
 // ---- colour --------------------------------------------------------------------------------
 // The delta modes colour every row by the prompt's original→ablated displacement in the probe
 // frame: `dplane` = the 2D move in the current column's plane, `dtotal` = the norm over all
-// planes. NaN (no ablation / prompt off the emulated subgrid) renders grey.
+// planes. The align modes colour by the dot of the activation with the selected item's unit
+// read/write direction (signed, diverging map): read = x·V̂ (gate/up; down uses h·V̂) or the
+// neuron's normalized gate/up preactivation; write = the gate/up preactivation onto Û, or the
+// post residual onto Û / the neuron's down column. NaN (no selection / N/A) renders grey.
 function colorInfo() {
   const cb = el("colorBy").value, m = +el("mod").value, off = +el("offset").value || 0;
   if (cb === "dplane" || cb === "dtotal") {
@@ -140,6 +133,21 @@ function colorInfo() {
     };
     return { f: t => dd.total[t] / dd.hiTotal, val: t => dd.total[t] };
   }
+  if (cb === "ain" || cb === "ainup" || cb === "aout") {
+    let g = null;
+    if (SELECTED_ID !== null && MODE === "neurons") {
+      const i = D.neurons.findIndex(nr => nr.id === SELECTED_ID);
+      const key = cb === "ain" ? "align_in_g" : cb === "ainup" ? "align_in_u" : "align_out_d";
+      g = arr(key).subarray(i * NP, (i + 1) * NP);
+    } else if (SELECTED_ID !== null && cb !== "ainup") {  // the up-row read is neuron-only
+      const i = D.subcomps.findIndex(c => c.id === SELECTED_ID);
+      g = arr(cb === "ain" ? "align_in_sub" : "align_out_sub").subarray(i * NP, (i + 1) * NP);
+    }
+    if (!g) return { f: () => NaN, val: () => NaN };
+    const abs = [...g].map(Math.abs).sort((a, b) => a - b);
+    const hi = abs[Math.floor(abs.length * 0.99)] || 1;
+    return { f: t => g[t] / hi, val: t => g[t], signed: true };
+  }
   const f = cb === "a" ? aOf : cb === "b" ? bOf : (t => aOf(t) + bOf(t));
   if (m <= 1) {
     const lo = cb === "a+b" ? 2 : 1, hi = cb === "a+b" ? 2 * N : N;
@@ -148,64 +156,70 @@ function colorInfo() {
   return { f: t => ((((f(t) - off) % m) + m) % m) / Math.max(m - 1, 1), raw: f, label: [0, m - 1] };
 }
 
+// signed diverging map for the align modes: blue (−1) → light grey (0) → red (+1); the grey
+// midpoint keeps near-zero points visible on the white background
+function rdbu(t) {
+  t = Math.max(-1, Math.min(1, t));
+  const mid = [214, 214, 214], neg = [42, 76, 192], pos = [186, 24, 38];
+  const c = t < 0 ? neg : pos, a = Math.abs(t);
+  return `rgb(${Math.round(mid[0] + (c[0] - mid[0]) * a)},${Math.round(mid[1] + (c[1] - mid[1]) * a)},${Math.round(mid[2] + (c[2] - mid[2]) * a)})`;
+}
+
 // per-prompt displacement magnitudes of the current DELTA, per plane and overall; scales are
 // the 99th percentile so one outlier prompt doesn't wash the map out
 let DELTA_DIST = null;
 function deltaDistances() {
   if (DELTA_DIST) return DELTA_DIST;
-  const plane = new Float32Array(NP * P).fill(NaN);
-  const total = new Float32Array(NP).fill(NaN);
-  const src = DELTA.full || DELTA.sub;
-  const count = DELTA.full ? NP : M;
-  for (let i = 0; i < count; i++) {
-    const t = DELTA.full ? i : subToFull(i);
+  const plane = new Float32Array(NP * P);
+  const total = new Float32Array(NP);
+  for (let t = 0; t < NP; t++) {
     let tot = 0;
     for (let j = 0; j < P; j++) {
-      const dx = src[i * P2 + 2 * j], dy = src[i * P2 + 2 * j + 1];
+      const dx = DELTA[t * P2 + 2 * j], dy = DELTA[t * P2 + 2 * j + 1];
       plane[t * P + j] = Math.hypot(dx, dy);
       tot += dx * dx + dy * dy;
     }
     total[t] = Math.sqrt(tot);
   }
   const q99 = a => {
-    const v = [...a].filter(Number.isFinite).sort((x, y) => x - y);
+    const v = [...a].sort((x, y) => x - y);
     return v[Math.floor(v.length * 0.99)] || 1;
   };
   DELTA_DIST = { plane, total, hiPlane: q99(plane), hiTotal: q99(total) };
   return DELTA_DIST;
 }
 function setDelta(d) { DELTA = d; DELTA_DIST = null; }
-function deltaColorMode() { return el("colorBy").value.startsWith("d"); }
-// the ablated row always redraws; delta colouring repaints every row
-function refreshAfterDelta() { if (deltaColorMode()) recolor(); else drawRow(3); }
+// colour modes that depend on the current selection (delta displacement / alignment)
+function selectionColorMode() {
+  return ["dplane", "dtotal", "ain", "ainup", "aout"].includes(el("colorBy").value);
+}
+// the ablated row always redraws; selection-keyed colouring repaints every row
+function refreshAfterDelta() { if (selectionColorMode()) recolor(); else drawRow(3); }
 
 // ---- ablation-direction arrows ---------------------------------------------------------------
-// For each ablated item: its read direction (gate/up subcomp V, neuron gate + up rows) drawn on
-// row 0's pre frame; its write direction (down subcomp U, neuron down column) on row 1's post
-// frame. Unit residual directions go through the same linear map as the points (v̂·W per
-// plane), so arrow lengths compare across periods; display is scaled per row so the longest
-// arrow spans 0.9 of the unit ring (raw ‖proj‖ in the tooltip).
+// The ablated item's read direction (gate/up subcomp V, neuron gate + up rows) drawn on row 0's
+// pre frame; its write direction (down subcomp U, neuron down column) on row 1's post frame.
+// Unit residual directions go through the same linear map as the points (v̂·W per plane), so
+// arrow lengths compare across periods; display is scaled per row so the longest arrow spans
+// 0.9 of the unit ring (raw ‖proj‖ in the tooltip).
 const ARROWS = { 0: [], 1: [], scale: { 0: 1, 1: 1 } };
 function refreshArrows() {
   for (const row of [0, 1]) {
     const list = [];
-    if (MODE === "neurons") {
-      D.neurons.forEach((nrec, i) => {
-        if (!SELECTED.has(nrec.id)) return;
-        if (row === 0) {
-          list.push({ label: `${nrec.id} gate read`, p: arr("neuron_arrow_g").subarray(i * P2, (i + 1) * P2) });
-          list.push({ label: `${nrec.id} up read`, p: arr("neuron_arrow_u").subarray(i * P2, (i + 1) * P2) });
-        } else {
-          list.push({ label: `${nrec.id} down write`, p: arr("neuron_arrow_d").subarray(i * P2, (i + 1) * P2) });
-        }
-      });
-    } else {
-      D.subcomps.forEach((c, i) => {
-        if (!SELECTED.has(c.id)) return;
-        if ((c.proj === "d") === (row === 1)) {
-          list.push({ label: `${c.id} ${row ? "write" : "read"}`, p: arr("sub_arrow").subarray(i * P2, (i + 1) * P2) });
-        }
-      });
+    if (SELECTED_ID !== null && MODE === "neurons") {
+      const i = D.neurons.findIndex(nr => nr.id === SELECTED_ID);
+      if (row === 0) {
+        list.push({ label: `${SELECTED_ID} gate read`, p: arr("neuron_arrow_g").subarray(i * P2, (i + 1) * P2) });
+        list.push({ label: `${SELECTED_ID} up read`, p: arr("neuron_arrow_u").subarray(i * P2, (i + 1) * P2) });
+      } else {
+        list.push({ label: `${SELECTED_ID} down write`, p: arr("neuron_arrow_d").subarray(i * P2, (i + 1) * P2) });
+      }
+    } else if (SELECTED_ID !== null) {
+      const i = D.subcomps.findIndex(c => c.id === SELECTED_ID);
+      const c = D.subcomps[i];
+      if ((c.proj === "d") === (row === 1)) {
+        list.push({ label: `${c.id} ${row ? "write" : "read"}`, p: arr("sub_arrow").subarray(i * P2, (i + 1) * P2) });
+      }
     }
     let mx = 0;
     for (const a of list) for (let j = 0; j < P; j++) mx = Math.max(mx, Math.hypot(a.p[2 * j], a.p[2 * j + 1]));
@@ -215,36 +229,27 @@ function refreshArrows() {
 }
 
 // ---- plots ---------------------------------------------------------------------------------
-// Four fixed rows: which activation cloud, on which probe frame; the last row applies the
-// ablation delta. One view per column, shared by all rows so correspondences read directly.
+// Five fixed rows: which activation cloud, on which probe frame; row 3 applies the ablation
+// delta; row 4 is the alive-components-only MLP (binary mask, delta off), computed at build
+// time. One view per column, shared by all rows so correspondences read directly.
 const ROWS = [
   { label: `pre-MLP acts · pre probes`, cloud: "proj_pre_on_pre", abl: false },
   { label: `pre-MLP acts · post probes`, cloud: "proj_pre_on_post", abl: false },
   { label: `post-MLP acts · post probes`, cloud: "proj_post_on_post", abl: false },
   { label: `post-MLP, ablated`, cloud: "proj_post_on_post", abl: true },
+  { label: `alive-comps MLP (no Δ) · post probes`, cloud: "proj_circuit_on_post", abl: false },
 ];
 let views = [];   // per column {k, cx, cy}
 let cells = [];   // [row][col] -> {canvas, ctx, ov, octx}
 
-// ablation result: null = nothing ablated (last row mirrors row 3)
-// {full: Float32Array [NP*P2]} or {sub: Float32Array [M*P2]}
+// ablation result: null = nothing ablated (row 3 mirrors row 2); Float32Array [NP*P2]
 let DELTA = null;
 
 function rowPoints(row) {
   const r = ROWS[row];
   const proj = arr(r.cloud);
-  if (!r.abl || !DELTA) return { proj, map: null, count: NP };
-  if (DELTA.full) return { proj, delta: DELTA.full, map: null, count: NP };
-  return { proj, delta: DELTA.sub, map: subToFull, count: M };
-}
-function subToFull(i) {
-  const r = Math.floor(i / SUB_SIDE), c = i % SUB_SIDE;
-  return (r * STRIDE) * N + (c * STRIDE);
-}
-function fullToSub(t) {
-  const a0 = Math.floor(t / N), b0 = t % N;
-  if (a0 % STRIDE || b0 % STRIDE) return -1;
-  return (a0 / STRIDE) * SUB_SIDE + (b0 / STRIDE);
+  if (r.abl && DELTA) return { proj, delta: DELTA };
+  return { proj };
 }
 
 function initViews() {
@@ -274,23 +279,21 @@ function drawCell(row, col) {
   ctx.strokeStyle = "#eee"; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(o[0], 0); ctx.lineTo(o[0], SIZE); ctx.moveTo(0, o[1]); ctx.lineTo(SIZE, o[1]); ctx.stroke();
   const rp = rowPoints(row);
-  const ps = rp.map ? 2.4 : 1.6;   // subgrid points are 4x sparser: draw bigger
-  for (let i = 0; i < rp.count; i++) {
-    const t = rp.map ? rp.map(i) : i;
+  for (let t = 0; t < NP; t++) {
     let x = rp.proj[t * P2 + 2 * col], y = rp.proj[t * P2 + 2 * col + 1];
-    if (rp.delta) { x += rp.delta[i * P2 + 2 * col]; y += rp.delta[i * P2 + 2 * col + 1]; }
+    if (rp.delta) { x += rp.delta[t * P2 + 2 * col]; y += rp.delta[t * P2 + 2 * col + 1]; }
     const s = toScreen(v, x, y);
     if (s[0] < -3 || s[0] > SIZE + 3 || s[1] < -3 || s[1] > SIZE + 3) continue;
     const cv = color.f(t, col);
-    ctx.fillStyle = Number.isFinite(cv) ? viridis(cv) : "#ccc";
-    ctx.fillRect(s[0] - ps / 2, s[1] - ps / 2, ps, ps);
+    ctx.fillStyle = !Number.isFinite(cv) ? "#ccc" : color.signed ? rdbu(cv) : viridis(cv);
+    ctx.fillRect(s[0] - 0.8, s[1] - 0.8, 1.6, 1.6);
   }
   // unit circle of the probe's predicted (cos, sin) — a perfect feature traces it
   const c0 = toScreen(v, 0, 0);
   ctx.strokeStyle = "rgba(200,60,60,.5)"; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.arc(c0[0], c0[1], v.k, 0, 2 * Math.PI); ctx.stroke();
 
-  // read/write direction arrows of the ablated items (rows 0 and 1 only)
+  // read/write direction arrow of the ablated item (rows 0 and 1 only)
   const arrows = ARROWS[row];
   if (arrows && arrows.length) {
     const k = ARROWS.scale[row];
@@ -325,11 +328,11 @@ function drawAll() { for (let c = 0; c < P; c++) drawColumn(c); drawHighlight();
 function drawRow(row) { for (let c = 0; c < P; c++) drawCell(row, c); drawHighlight(); }
 
 let COLOR = null;
-const _DELTA_HINT = "select an ablation to colour by Δ";
+const _SEL_HINT = "select an item to colour by Δ / alignment";
 function recolor() {
   COLOR = colorInfo();
-  if (deltaColorMode() && !DELTA) setStatus(_DELTA_HINT);
-  else if (el("status").textContent === _DELTA_HINT) setStatus("");
+  if (selectionColorMode() && SELECTED_ID === null) setStatus(_SEL_HINT);
+  else if (el("status").textContent === _SEL_HINT) setStatus("");
   drawAll();
 }
 
@@ -343,10 +346,8 @@ function drawHighlight() {
       const g = cells[r][c].octx;
       g.clearRect(0, 0, SIZE, SIZE);
       if (HOVER_T < 0) continue;
-      let di = HOVER_T;
-      if (rp.map) { di = fullToSub(HOVER_T); if (di < 0) continue; }  // prompt off the subgrid
       let x = rp.proj[HOVER_T * P2 + 2 * c], y = rp.proj[HOVER_T * P2 + 2 * c + 1];
-      if (rp.delta) { x += rp.delta[di * P2 + 2 * c]; y += rp.delta[di * P2 + 2 * c + 1]; }
+      if (rp.delta) { x += rp.delta[HOVER_T * P2 + 2 * c]; y += rp.delta[HOVER_T * P2 + 2 * c + 1]; }
       const s = toScreen(views[c], x, y);
       if (s[0] < -8 || s[0] > SIZE + 8 || s[1] < -8 || s[1] > SIZE + 8) continue;
       g.strokeStyle = "#fff"; g.lineWidth = 3.5;
@@ -429,10 +430,9 @@ function attachInteraction(canvas, row, col) {
 function pointAt(row, col, px, py) {
   const v = views[col], rp = rowPoints(row);
   let best = -1, bestd = 6;
-  for (let i = 0; i < rp.count; i++) {
-    const t = rp.map ? rp.map(i) : i;
+  for (let t = 0; t < NP; t++) {
     let x = rp.proj[t * P2 + 2 * col], y = rp.proj[t * P2 + 2 * col + 1];
-    if (rp.delta) { x += rp.delta[i * P2 + 2 * col]; y += rp.delta[i * P2 + 2 * col + 1]; }
+    if (rp.delta) { x += rp.delta[t * P2 + 2 * col]; y += rp.delta[t * P2 + 2 * col + 1]; }
     const s = toScreen(v, x, y);
     const dd = Math.hypot(s[0] - px, s[1] - py);
     if (dd < bestd) { bestd = dd; best = t; }
@@ -464,8 +464,8 @@ function thumb(grid, stride) {
 function itemRow(id, label, info, gridFn) {
   const row = document.createElement("div"); row.className = "item"; row.dataset.id = String(id);
   const cb = document.createElement("input"); cb.type = "checkbox";
-  cb.checked = SELECTED.has(id);
-  cb.addEventListener("change", () => { toggle(id, cb.checked); });
+  cb.checked = SELECTED_ID === id;
+  cb.addEventListener("change", () => { select(cb.checked ? id : null); });
   const lab = document.createElement("span"); lab.className = "lab"; lab.textContent = label;
   const inf = document.createElement("span"); inf.className = "info"; inf.textContent = info;
   row.appendChild(cb); row.appendChild(lab); row.appendChild(inf);
@@ -534,231 +534,56 @@ function buildSide() {
         () => inner.subarray(i * NP, (i + 1) * NP)));
     });
   }
-  updateFidelityNote();
   applyPeriodFilter();
 }
 
-function toggle(id, on) {
-  if (on) SELECTED.add(id); else SELECTED.delete(id);
+// Single-selection: picking an item replaces any previous pick.
+function select(id) {
+  SELECTED_ID = id;
   for (const row of el("items").children) {
-    if (row.dataset && row.dataset.id === String(id)) {
-      row.classList.toggle("checked", on);
-      const cb = row.querySelector("input"); if (cb) cb.checked = on;
-    }
+    if (!row.dataset || !row.dataset.id) continue;
+    const on = String(id) === row.dataset.id;
+    row.classList.toggle("checked", on);
+    const cb = row.querySelector("input"); if (cb) cb.checked = on;
   }
   recomputeDelta();
 }
 
-function updateFidelityNote() {
-  const f = el("fidelity");
-  if (MODE === "neurons") { f.textContent = "neuron ablation is exact (additive in W_down), full grid."; return; }
-  const parts = (D.meta.fidelity || []).map(x => `${x.config}: ${(x.rel_rms * 100).toFixed(1)}%`);
-  f.textContent = `single subcomponent / down-only: exact, full grid. Multi gate/up: emulated on the `
-    + `stride-${STRIDE} subgrid (control-variate; build-time interaction error — ${parts.join(", ")}).`;
-}
-
-// ---- ablation math -------------------------------------------------------------------------
+// ---- ablation math: one item, exact on the full grid ----------------------------------------
 function recomputeDelta() {
   refreshArrows(); drawRow(0); drawRow(1);  // direction arrows track the selection immediately
-  if (EMU.running) { EMU.pending = true; return; }  // re-run with the fresh selection when done
-  if (SELECTED.size === 0) { setDelta(null); setStatus(""); refreshAfterDelta(); return; }
+  if (SELECTED_ID === null) { setDelta(null); setStatus(""); refreshAfterDelta(); return; }
+  const out = new Float32Array(NP * P2);
   if (MODE === "neurons") {
-    const acts = arr("neuron_act"), wds = arr("neuron_wd");
-    const out = new Float32Array(NP * P2);
-    let k = 0;
-    D.neurons.forEach((nrec, i) => {
-      if (!SELECTED.has(nrec.id)) return;
-      k++;
-      const a = acts.subarray(i * NP, (i + 1) * NP), w = wds.subarray(i * P2, (i + 1) * P2);
-      for (let t = 0; t < NP; t++) {
-        const av = a[t], base = t * P2;
-        for (let p = 0; p < P2; p++) out[base + p] -= av * w[p];
-      }
-    });
-    setDelta({ full: out });
-    setStatus(`${k} neuron(s) ablated — exact, full grid.`);
-    refreshAfterDelta(); return;
-  }
-  // subcomponents
-  const selGu = [], selDown = [];
-  D.subcomps.forEach((c, i) => {
-    if (!SELECTED.has(c.id)) return;
-    (c.proj === "d" ? selDown : selGu).push({ rec: c, i });
-  });
-  const nGu = D.subcomps.filter(c => c.proj !== "d").length;
-  if (selGu.length === 0) {
-    // down-only: exact, additive, full grid
-    const inner = arr("sub_inner"), wu = arr("down_wu");
-    const out = new Float32Array(NP * P2);
-    for (const s of selDown) {
-      const grid = inner.subarray(s.i * NP, (s.i + 1) * NP);
-      const w = wu.subarray((s.i - nGu) * P2, (s.i - nGu + 1) * P2);
-      for (let t = 0; t < NP; t++) {
-        const iv = grid[t], base = t * P2;
-        for (let p = 0; p < P2; p++) out[base + p] -= iv * w[p];
-      }
+    const i = D.neurons.findIndex(nr => nr.id === SELECTED_ID);
+    const a = arr("neuron_act").subarray(i * NP, (i + 1) * NP);
+    const w = arr("neuron_wd").subarray(i * P2, (i + 1) * P2);
+    for (let t = 0; t < NP; t++) {
+      const av = a[t], base = t * P2;
+      for (let p = 0; p < P2; p++) out[base + p] -= av * w[p];
     }
-    setDelta({ full: out });
-    setStatus(`${selDown.length} down subcomponent(s) ablated — exact, full grid.`);
+    setDelta(out);
+    setStatus(`neuron ${SELECTED_ID} ablated — exact, full grid.`);
     refreshAfterDelta(); return;
   }
-  if (selGu.length === 1 && selDown.length === 0) {
-    // single gate/up: shipped exact full-grid delta
-    const ex = arr("gu_exact_delta");
-    setDelta({ full: ex.slice(selGu[0].i * NP * P2, (selGu[0].i + 1) * NP * P2) });
-    setStatus(`${selGu[0].rec.id} ablated — exact, full grid.`);
-    refreshAfterDelta(); return;
+  const i = D.subcomps.findIndex(c => c.id === SELECTED_ID);
+  const c = D.subcomps[i];
+  if (c.proj === "d") {
+    const nGu = D.subcomps.filter(s => s.proj !== "d").length;
+    const grid = arr("sub_inner").subarray(i * NP, (i + 1) * NP);
+    const w = arr("down_wu").subarray((i - nGu) * P2, (i - nGu + 1) * P2);
+    for (let t = 0; t < NP; t++) {
+      const iv = grid[t], base = t * P2;
+      for (let p = 0; p < P2; p++) out[base + p] -= iv * w[p];
+    }
+    setDelta(out);
+  } else {
+    setDelta(arr("gu_exact_delta").slice(i * NP * P2, (i + 1) * NP * P2));
   }
-  emulate(selGu, selDown);
+  setStatus(`${c.id} ablated — exact, full grid.`);
+  refreshAfterDelta();
 }
 function setStatus(s) { el("status").textContent = s; }
-
-// ---- emulator: full-neuron SwiGLU re-evaluation on the subgrid ------------------------------
-// Reconstructed preactivations cached as per-neuron-quantized int16 (layout [neuron][subgrid t]).
-const EMU = { ready: false, running: false, pending: false, g: null, u: null, scale: null, off: null, singles: {} };
-
-function subgridIdx() {
-  const idx = new Int32Array(M);
-  for (let i = 0; i < M; i++) idx[i] = subToFull(i);
-  return idx;
-}
-const SUB_IDX = subgridIdx();
-
-function reconstruct(done) {
-  if (EMU.ready) { done(); return; }
-  const zg = arr("emul.zg"), cg = arr("emul.cg"), mg = arr("emul.mg");
-  const zu = arr("emul.zu"), cu = arr("emul.cu"), mu = arr("emul.mu");
-  EMU.g = new Int16Array(M * D_INT); EMU.u = new Int16Array(M * D_INT);
-  EMU.scale = new Float32Array(2 * D_INT); EMU.off = new Float32Array(2 * D_INT);
-  const col = new Float32Array(M);
-  let j = 0;
-  const CHUNK = 256;
-  function step() {
-    const jEnd = Math.min(j + CHUNK, D_INT);
-    for (; j < jEnd; j++) {
-      for (let ch = 0; ch < 2; ch++) {
-        const z = ch ? zu : zg, cf = ch ? cu : cg, mean = ch ? mu : mg, dst = ch ? EMU.u : EMU.g;
-        const cbase = j * RANK;
-        let lo = Infinity, hi = -Infinity;
-        for (let t = 0; t < M; t++) {
-          let acc = mean[j];
-          const zbase = t * RANK;
-          for (let r = 0; r < RANK; r++) acc += z[zbase + r] * cf[cbase + r];
-          col[t] = acc;
-          if (acc < lo) lo = acc; if (acc > hi) hi = acc;
-        }
-        const span = (hi - lo) || 1, sc = span / 65535;
-        EMU.scale[ch * D_INT + j] = sc; EMU.off[ch * D_INT + j] = lo;
-        const dbase = j * M;
-        for (let t = 0; t < M; t++) dst[dbase + t] = Math.round((col[t] - lo) / sc) - 32768;
-      }
-    }
-    if (j < D_INT) {
-      setStatus(`reconstructing preactivations… ${Math.round(100 * j / D_INT)}%`);
-      setTimeout(step, 0);
-    } else { EMU.ready = true; done(); }
-  }
-  step();
-}
-
-function silu(v) { return v / (1 + Math.exp(-v)); }
-
-// One emulator pass: projected-output delta [M*P2] for ablating the given gate/up rows,
-// plus (optionally) per-down-comp read deltas Σ_j Δact_j V[j,c].
-function emuPass(rows, downCols, done) {
-  const wdAll = arr("wd_all");
-  const out = new Float32Array(M * P2);
-  const dRead = downCols.map(() => new Float32Array(M));
-  const nR = rows.length;
-  const innerSub = rows.map(r => {
-    const g = arr("sub_inner").subarray(r.i * NP, (r.i + 1) * NP);
-    const v = new Float32Array(M);
-    for (let t = 0; t < M; t++) v[t] = g[SUB_IDX[t]];
-    return v;
-  });
-  const coup = rows.map(r => arr("gu_coupling").subarray(r.i * D_INT, (r.i + 1) * D_INT));
-  const isGate = rows.map(r => r.rec.proj === "g");
-  const vcp = downCols.map(i => arr("down_vcoupling").subarray(i * D_INT, (i + 1) * D_INT));
-  let j = 0;
-  const CHUNK = 384;
-  function step() {
-    const jEnd = Math.min(j + CHUNK, D_INT);
-    for (; j < jEnd; j++) {
-      const gsc = EMU.scale[j], gof = EMU.off[j], usc = EMU.scale[D_INT + j], uof = EMU.off[D_INT + j];
-      const gbase = j * M, wbase = j * P2;
-      let ug = 0, uu = 0;
-      for (let r = 0; r < nR; r++) { if (isGate[r]) ug += Math.abs(coup[r][j]); else uu += Math.abs(coup[r][j]); }
-      if (ug === 0 && uu === 0) continue;
-      for (let t = 0; t < M; t++) {
-        const g0 = gof + (EMU.g[gbase + t] + 32768) * gsc;
-        const u0 = uof + (EMU.u[gbase + t] + 32768) * usc;
-        let dg = 0, du = 0;
-        for (let r = 0; r < nR; r++) {
-          const c = coup[r][j] * innerSub[r][t];
-          if (isGate[r]) dg += c; else du += c;
-        }
-        const dact = silu(g0 - dg) * (u0 - du) - silu(g0) * u0;
-        if (dact === 0) continue;
-        const base = t * P2;
-        for (let p = 0; p < P2; p++) out[base + p] += dact * wdAll[wbase + p];
-        for (let k = 0; k < dRead.length; k++) dRead[k][t] += dact * vcp[k][j];
-      }
-    }
-    if (j < D_INT) {
-      setStatus(`emulating… ${Math.round(100 * j / D_INT)}%`);
-      setTimeout(step, 0);
-    } else done(out, dRead);
-  }
-  step();
-}
-
-function emulate(selGu, selDown) {
-  if (EMU.running) return;
-  EMU.running = true;
-  const nGu = D.subcomps.filter(c => c.proj !== "d").length;
-  reconstruct(() => {
-    // cache single-comp emulated deltas for the control variate
-    const need = selGu.filter(s => !(s.rec.id in EMU.singles));
-    function afterSingles() {
-      emuPass(selGu, selDown.map(s => s.i - nGu), (raw, dRead) => {
-        const out = raw;
-        // control variate: emu(S) − Σ emu({c}) + Σ exact({c})|subgrid
-        const ex = arr("gu_exact_delta");
-        for (const s of selGu) {
-          const single = EMU.singles[s.rec.id];
-          const exact = ex.subarray(s.i * NP * P2, (s.i + 1) * NP * P2);
-          for (let t = 0; t < M; t++) {
-            const base = t * P2, ebase = SUB_IDX[t] * P2;
-            for (let p = 0; p < P2; p++) out[base + p] += exact[ebase + p] - single[base + p];
-          }
-        }
-        // down comps: exact given the emulated h' (shipped inner + emulated read delta)
-        const inner = arr("sub_inner"), wu = arr("down_wu");
-        selDown.forEach((s, k) => {
-          const grid = inner.subarray(s.i * NP, (s.i + 1) * NP);
-          const w = wu.subarray((s.i - nGu) * P2, (s.i - nGu + 1) * P2);
-          for (let t = 0; t < M; t++) {
-            const iv = grid[SUB_IDX[t]] + dRead[k][t], base = t * P2;
-            for (let p = 0; p < P2; p++) out[base + p] -= iv * w[p];
-          }
-        });
-        EMU.running = false;
-        // selection changed mid-run: discard this result and recompute fresh
-        if (EMU.pending) { EMU.pending = false; recomputeDelta(); return; }
-        setDelta({ sub: out });
-        setStatus(`${selGu.length + selDown.length} subcomponent(s) ablated — emulated `
-          + `(stride-${STRIDE} subgrid, control-variate).`);
-        refreshAfterDelta();
-      });
-    }
-    function nextSingle() {
-      if (!need.length) { afterSingles(); return; }
-      const s = need.shift();
-      emuPass([s], [], out => { EMU.singles[s.rec.id] = out; nextSingle(); });
-    }
-    nextSingle();
-  });
-}
 
 // ---- search --------------------------------------------------------------------------------
 function doSearch() {
@@ -773,7 +598,7 @@ function doSearch() {
     if (D.subcomps.some(c => c.id === q)) id = q;
     else { setStatus(`subcomponent ${q} is not in the alive set`); return; }
   }
-  toggle(id, true);
+  select(id);
   // a filtered-out hit resets the period filter so the row is visible to scroll to
   if (MODE === "subcomponents" && el("periodFilter").value
       && SUB_PERIOD[id] !== el("periodFilter").value) {
@@ -797,7 +622,7 @@ function populateMods() {
 }
 el("mode").addEventListener("change", () => {
   MODE = el("mode").value;
-  SELECTED.clear();
+  SELECTED_ID = null;
   buildSide(); recomputeDelta();
 });
 ["colorBy", "mod"].forEach(id => el(id).addEventListener("change", recolor));
@@ -805,21 +630,12 @@ el("offset").addEventListener("input", recolor);
 el("periodFilter").addEventListener("change", applyPeriodFilter);
 el("addBtn").addEventListener("click", doSearch);
 el("search").addEventListener("keydown", ev => { if (ev.key === "Enter") doSearch(); });
-el("clearBtn").addEventListener("click", () => {
-  SELECTED.clear();
-  for (const row of el("items").children) {
-    if (!row.dataset || !row.dataset.id) continue;
-    row.classList.remove("checked");
-    const cb = row.querySelector("input"); if (cb) cb.checked = false;
-  }
-  recomputeDelta();
-});
+el("clearBtn").addEventListener("click", () => { select(null); });
 
 el("hint").textContent = `${D.meta.run} · L${D.meta.layer} · a+b probes on the residual stream `
-  + `(rows: pre/post activations × pre/post probes) · ${N}×${N} grid · red ring = predicted unit circle · `
-  + `hover a point to mark its prompt everywhere · red arrows = ablated items' read (row 1) / `
-  + `write (row 2) directions`;
-D_INT = arr("wd_all").length / P2;
+  + `(rows: pre/post/circuit activations × pre/post probes) · ${N}×${N} grid · red ring = predicted `
+  + `unit circle · hover a point to mark its prompt everywhere · red arrows = ablated item's read `
+  + `(row 1) / write (row 2) directions · one ablation at a time, always exact on the full grid`;
 populateMods();
 populatePeriodFilter();
 buildGrid();
