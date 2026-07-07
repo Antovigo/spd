@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Result feature construction</title>
+<style>
+  :root { font-family: system-ui, sans-serif; font-size: 13px; }
+  body { margin: 0; background: #fafafa; color: #222; }
+  #controls {
+    position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 1px solid #ddd;
+    padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+  }
+  #controls label { display: flex; flex-direction: column; font-size: 11px; color: #666; gap: 2px; }
+  #controls select, #controls input { font-size: 13px; padding: 2px 4px; }
+  #title { font-weight: 600; font-size: 14px; margin-right: 8px; }
+  #main { display: flex; align-items: flex-start; }
+  #plotwrap { flex: 1 1 auto; overflow-x: auto; padding: 10px; }
+  #grid { display: grid; gap: 4px; }
+  .colcap { font-size: 11px; text-align: center; color: #444; padding: 2px 0; }
+  .rowlab {
+    writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; font-size: 11px;
+    color: #444; padding: 0 2px; max-height: 240px;
+  }
+  .cell { border: 1px solid #ddd; background: #fff; }
+  canvas { display: block; }
+  #side {
+    flex: 0 0 320px; border-left: 1px solid #ddd; background: #fff; padding: 8px;
+    position: sticky; top: 46px; max-height: calc(100vh - 46px); overflow-y: auto;
+  }
+  #side h3 { margin: 4px 0; font-size: 13px; }
+  #status { font-size: 11px; color: #666; min-height: 14px; margin: 4px 0; }
+  #fidelity { font-size: 10px; color: #888; margin: 4px 0; }
+  #searchrow { display: flex; gap: 4px; margin: 6px 0; }
+  #search { flex: 1; font-size: 12px; padding: 2px 4px; }
+  .item { display: flex; align-items: center; gap: 6px; padding: 2px 2px; border-radius: 3px; }
+  .item:hover { background: #f0f4ff; }
+  .item.checked { background: #e8f0ff; }
+  .item .lab { font-weight: 600; min-width: 48px; }
+  .item .info { font-size: 10px; color: #777; flex: 1; }
+  .item canvas { border: 1px solid #ccc; image-rendering: pixelated; }
+  .grouphead { font-size: 11px; color: #555; font-weight: 600; margin: 8px 0 2px; border-bottom: 1px solid #eee; }
+  #tooltip {
+    position: fixed; pointer-events: none; background: rgba(0,0,0,.8); color: #fff; padding: 3px 6px;
+    border-radius: 3px; font-size: 11px; display: none; z-index: 20; white-space: nowrap;
+  }
+  .hint { color: #888; font-size: 11px; }
+  button { font-size: 11px; padding: 2px 8px; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span id="title">Result feature construction</span>
+  <label>colour by<select id="colorBy"><option>a</option><option>b</option><option selected>a+b</option></select></label>
+  <label>mod<select id="mod"></select></label>
+  <label>offset<input id="offset" type="number" value="0" style="width:56px" /></label>
+  <label>ablate<select id="mode"><option value="subcomponents">subcomponents</option><option value="neurons">neurons</option></select></label>
+  <span class="hint" id="hint"></span>
+</div>
+<div id="main">
+  <div id="plotwrap"><div id="grid"></div></div>
+  <div id="side">
+    <h3 id="sideTitle"></h3>
+    <div id="status"></div>
+    <div id="fidelity"></div>
+    <div id="searchrow">
+      <input id="search" placeholder="search id, e.g. g124 or 12023" />
+      <button id="addBtn">add</button>
+      <button id="clearBtn">clear</button>
+    </div>
+    <div id="items"></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.PD_DATA;
+const N = D.meta.n, NP = N * N, P = D.meta.periods.length, P2 = 2 * P;
+const STRIDE = D.meta.stride, RANK = D.meta.rank;
+const SUB_SIDE = Math.floor((N - 1) / STRIDE) + 1, M = SUB_SIDE * SUB_SIDE;
+let D_INT = 0;  // set from wd_all at init (one row per MLP neuron)
+
+// ---- fp16 decode via a 65536-entry lookup table (fast enough for the multi-MB payloads) ----
+const F16_TABLE = (() => {
+  const t = new Float32Array(65536);
+  for (let u = 0; u < 65536; u++) {
+    const s = (u & 0x8000) >> 15, e = (u & 0x7c00) >> 10, f = u & 0x03ff;
+    t[u] = e === 0 ? (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024)
+      : e === 31 ? (f ? NaN : (s ? -Infinity : Infinity))
+      : (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+  }
+  return t;
+})();
+function decodeF16(b64) {
+  const bin = atob(b64), len = bin.length >> 1, out = new Float32Array(len);
+  for (let i = 0; i < len; i++) out[i] = F16_TABLE[bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8)];
+  return out;
+}
+const _cache = {};
+function arr(key) { if (!(key in _cache)) _cache[key] = decodeF16(keyData(key)); return _cache[key]; }
+function keyData(key) {
+  const parts = key.split("."); let v = D;
+  for (const p of parts) v = v[p];
+  return v;
+}
+
+// ---- colour map ----------------------------------------------------------------------------
+const _VIRIDIS = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
+function viridis(t) {
+  t = Math.max(0, Math.min(1, t));
+  const x = t * (_VIRIDIS.length - 1), i = Math.min(_VIRIDIS.length - 2, Math.floor(x)), f = x - i;
+  const a = _VIRIDIS[i], b = _VIRIDIS[i + 1];
+  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * f)},${Math.round(a[1] + (b[1] - a[1]) * f)},${Math.round(a[2] + (b[2] - a[2]) * f)})`;
+}
+
+const el = id => document.getElementById(id);
+const tooltip = el("tooltip");
+const aOf = t => Math.floor(t / N) + 1, bOf = t => (t % N) + 1;
+
+// ---- selection state -----------------------------------------------------------------------
+let MODE = "subcomponents";
+const SELECTED = new Set();          // neuron ids (numbers) or subcomp ids ("g124")
+const SIZE = 240;
+
+// ---- colour --------------------------------------------------------------------------------
+function colorInfo() {
+  const cb = el("colorBy").value, m = +el("mod").value, off = +el("offset").value || 0;
+  const f = cb === "a" ? aOf : cb === "b" ? bOf : (t => aOf(t) + bOf(t));
+  if (m <= 1) {
+    const lo = cb === "a+b" ? 2 : 1, hi = cb === "a+b" ? 2 * N : N;
+    return { f: t => (f(t) - lo) / (hi - lo), raw: f, label: [lo, hi] };
+  }
+  return { f: t => ((((f(t) - off) % m) + m) % m) / Math.max(m - 1, 1), raw: f, label: [0, m - 1] };
+}
+
+// ---- plots ---------------------------------------------------------------------------------
+// One view per column (period), shared by the three rows so before/after/ablated compare.
+let views = [];   // per column {k, cx, cy}
+let cells = [];   // [row][col] -> {canvas, ctx}
+const ROWS = ["before MLP " + D.meta.layer, "after MLP " + D.meta.layer, "after, ablated"];
+
+// ablation result: null = nothing ablated (row 2 mirrors row 1)
+// {full: Float32Array [NP*P2]} or {sub: Float32Array [M*P2]}
+let DELTA = null;
+
+function rowPoints(row) {
+  // returns {proj, idx(t->grid index), count}
+  if (row === 0) return { proj: arr("proj_pre"), map: null, count: NP };
+  if (row === 1 || !DELTA) return { proj: arr("proj_post"), map: null, count: NP };
+  if (DELTA.full) return { proj: arr("proj_post"), delta: DELTA.full, map: null, count: NP };
+  return { proj: arr("proj_post"), delta: DELTA.sub, map: subToFull, count: M };
+}
+function subToFull(i) {
+  const r = Math.floor(i / SUB_SIDE), c = i % SUB_SIDE;
+  return (r * STRIDE) * N + (c * STRIDE);
+}
+
+function initViews() {
+  views = [];
+  const pre = arr("proj_pre"), post = arr("proj_post");
+  for (let j = 0; j < P; j++) {
+    let lo0 = Infinity, hi0 = -Infinity, lo1 = Infinity, hi1 = -Infinity;
+    for (const proj of [pre, post]) {
+      for (let t = 0; t < NP; t++) {
+        const x = proj[t * P2 + 2 * j], y = proj[t * P2 + 2 * j + 1];
+        if (x < lo0) lo0 = x; if (x > hi0) hi0 = x;
+        if (y < lo1) lo1 = y; if (y > hi1) hi1 = y;
+      }
+    }
+    const ext = Math.max(hi0 - lo0, hi1 - lo1, 1e-6);
+    views.push({ k: (SIZE * 0.92) / ext, cx: (lo0 + hi0) / 2, cy: (lo1 + hi1) / 2 });
+  }
+}
+
+function toScreen(v, x, y) { return [SIZE / 2 + (x - v.cx) * v.k, SIZE / 2 - (y - v.cy) * v.k]; }
+function fromScreen(v, px, py) { return [v.cx + (px - SIZE / 2) / v.k, v.cy - (py - SIZE / 2) / v.k]; }
+
+function drawCell(row, col) {
+  const { ctx } = cells[row][col], v = views[col], color = COLOR;
+  ctx.clearRect(0, 0, SIZE, SIZE);
+  const o = toScreen(v, 0, 0);
+  ctx.strokeStyle = "#eee"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(o[0], 0); ctx.lineTo(o[0], SIZE); ctx.moveTo(0, o[1]); ctx.lineTo(SIZE, o[1]); ctx.stroke();
+  const rp = rowPoints(row);
+  const ps = rp.map ? 2.4 : 1.6;   // subgrid points are 4x sparser: draw bigger
+  for (let i = 0; i < rp.count; i++) {
+    const t = rp.map ? rp.map(i) : i;
+    let x = rp.proj[t * P2 + 2 * col], y = rp.proj[t * P2 + 2 * col + 1];
+    if (rp.delta) { x += rp.delta[i * P2 + 2 * col]; y += rp.delta[i * P2 + 2 * col + 1]; }
+    const s = toScreen(v, x, y);
+    if (s[0] < -3 || s[0] > SIZE + 3 || s[1] < -3 || s[1] > SIZE + 3) continue;
+    ctx.fillStyle = viridis(color.f(t));
+    ctx.fillRect(s[0] - ps / 2, s[1] - ps / 2, ps, ps);
+  }
+  // unit circle of the probe's predicted (cos, sin) — a perfect feature traces it
+  const c0 = toScreen(v, 0, 0);
+  ctx.strokeStyle = "rgba(200,60,60,.5)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(c0[0], c0[1], v.k, 0, 2 * Math.PI); ctx.stroke();
+}
+
+function drawColumn(col) { for (let r = 0; r < 3; r++) drawCell(r, col); }
+function drawAll() { for (let c = 0; c < P; c++) drawColumn(c); }
+function drawRow(row) { for (let c = 0; c < P; c++) drawCell(row, c); }
+
+let COLOR = null;
+function recolor() { COLOR = colorInfo(); drawAll(); }
+
+function buildGrid() {
+  const grid = el("grid");
+  grid.style.gridTemplateColumns = `18px repeat(${P}, ${SIZE + 2}px)`;
+  grid.innerHTML = "";
+  grid.appendChild(document.createElement("div"));
+  D.meta.periods.forEach((t, j) => {
+    const cap = document.createElement("div"); cap.className = "colcap";
+    cap.textContent = `T=${t} · r²=${D.meta.r2[j].toFixed(2)}`;
+    grid.appendChild(cap);
+  });
+  cells = [];
+  for (let r = 0; r < 3; r++) {
+    const lab = document.createElement("div"); lab.className = "rowlab"; lab.textContent = ROWS[r];
+    grid.appendChild(lab);
+    cells.push([]);
+    for (let c = 0; c < P; c++) {
+      const cell = document.createElement("div"); cell.className = "cell";
+      const canvas = document.createElement("canvas"); canvas.width = SIZE; canvas.height = SIZE;
+      cell.appendChild(canvas); grid.appendChild(cell);
+      cells[r].push({ canvas, ctx: canvas.getContext("2d") });
+      attachInteraction(canvas, r, c);
+    }
+  }
+}
+
+function attachInteraction(canvas, row, col) {
+  canvas.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    const v = views[col];
+    const before = fromScreen(v, ev.offsetX, ev.offsetY);
+    v.k *= Math.exp(-ev.deltaY * 0.0015);
+    const after = fromScreen(v, ev.offsetX, ev.offsetY);
+    v.cx += before[0] - after[0]; v.cy += before[1] - after[1];
+    drawColumn(col);
+  }, { passive: false });
+  let drag = null;
+  canvas.addEventListener("mousedown", ev => { drag = { x: ev.offsetX, y: ev.offsetY, cx: views[col].cx, cy: views[col].cy }; });
+  window.addEventListener("mouseup", () => { drag = null; });
+  canvas.addEventListener("mousemove", ev => {
+    if (drag) {
+      views[col].cx = drag.cx - (ev.offsetX - drag.x) / views[col].k;
+      views[col].cy = drag.cy + (ev.offsetY - drag.y) / views[col].k;
+      drawColumn(col); return;
+    }
+    const t = pointAt(row, col, ev.offsetX, ev.offsetY);
+    if (t >= 0) {
+      tooltip.style.display = "block";
+      tooltip.style.left = (ev.clientX + 10) + "px"; tooltip.style.top = (ev.clientY + 10) + "px";
+      tooltip.textContent = `${aOf(t)}+${bOf(t)}=${aOf(t) + bOf(t)}`;
+    } else tooltip.style.display = "none";
+  });
+  canvas.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+}
+
+function pointAt(row, col, px, py) {
+  const v = views[col], rp = rowPoints(row);
+  let best = -1, bestd = 6;
+  for (let i = 0; i < rp.count; i++) {
+    const t = rp.map ? rp.map(i) : i;
+    let x = rp.proj[t * P2 + 2 * col], y = rp.proj[t * P2 + 2 * col + 1];
+    if (rp.delta) { x += rp.delta[i * P2 + 2 * col]; y += rp.delta[i * P2 + 2 * col + 1]; }
+    const s = toScreen(v, x, y);
+    const dd = Math.hypot(s[0] - px, s[1] - py);
+    if (dd < bestd) { bestd = dd; best = t; }
+  }
+  return best;
+}
+
+// ---- side panel ----------------------------------------------------------------------------
+function thumb(grid, stride) {
+  // signed RdBu thumbnail of a [N,N] grid (row-major a*N+b), origin lower-left, a on x
+  const side = Math.ceil(N / stride);
+  const cv = document.createElement("canvas"); cv.width = side; cv.height = side;
+  cv.style.width = "44px"; cv.style.height = "44px";
+  let lim = 1e-9;
+  for (let i = 0; i < grid.length; i++) { const v = Math.abs(grid[i]); if (v > lim) lim = v; }
+  const ctx = cv.getContext("2d"), img = ctx.createImageData(side, side);
+  for (let a = 0; a < side; a++) for (let b = 0; b < side; b++) {
+    const v = grid[(a * stride) * N + (b * stride)] / lim;
+    const t = Math.max(-1, Math.min(1, v));
+    const idx = ((side - 1 - b) * side + a) * 4;
+    let r, g, bl;
+    if (t >= 0) { r = 255; g = Math.round(255 - t * 255); bl = g; } else { r = Math.round(255 + t * 255); g = r; bl = 255; }
+    img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = bl; img.data[idx + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+function itemRow(id, label, info, gridFn) {
+  const row = document.createElement("div"); row.className = "item"; row.dataset.id = String(id);
+  const cb = document.createElement("input"); cb.type = "checkbox";
+  cb.checked = SELECTED.has(id);
+  cb.addEventListener("change", () => { toggle(id, cb.checked); });
+  const lab = document.createElement("span"); lab.className = "lab"; lab.textContent = label;
+  const inf = document.createElement("span"); inf.className = "info"; inf.textContent = info;
+  row.appendChild(cb); row.appendChild(lab); row.appendChild(inf);
+  row.appendChild(thumb(gridFn(), 2));
+  return row;
+}
+
+function buildSide() {
+  el("sideTitle").textContent = MODE === "neurons"
+    ? `neurons (measured ablation max KL > ${D.meta.kl_thr})`
+    : "alive subcomponents";
+  const box = el("items"); box.innerHTML = "";
+  if (MODE === "neurons") {
+    const acts = arr("neuron_act");
+    D.neurons.forEach((nrec, i) => {
+      box.appendChild(itemRow(nrec.id, String(nrec.id), `KL ${nrec.kl}`,
+        () => acts.subarray(i * NP, (i + 1) * NP)));
+    });
+  } else {
+    const inner = arr("sub_inner");
+    let lastProj = "";
+    D.subcomps.forEach((c, i) => {
+      if (c.proj !== lastProj) {
+        lastProj = c.proj;
+        const head = document.createElement("div"); head.className = "grouphead";
+        head.textContent = { g: "gate", u: "up", d: "down" }[c.proj];
+        box.appendChild(head);
+      }
+      box.appendChild(itemRow(c.id, c.id, `CI ${c.ci} · ${c.period}`,
+        () => inner.subarray(i * NP, (i + 1) * NP)));
+    });
+  }
+  updateFidelityNote();
+}
+
+function toggle(id, on) {
+  if (on) SELECTED.add(id); else SELECTED.delete(id);
+  for (const row of el("items").children) {
+    if (row.dataset && row.dataset.id === String(id)) {
+      row.classList.toggle("checked", on);
+      const cb = row.querySelector("input"); if (cb) cb.checked = on;
+    }
+  }
+  recomputeDelta();
+}
+
+function updateFidelityNote() {
+  const f = el("fidelity");
+  if (MODE === "neurons") { f.textContent = "neuron ablation is exact (additive in W_down), full grid."; return; }
+  const parts = (D.meta.fidelity || []).map(x => `${x.config}: ${(x.rel_rms * 100).toFixed(1)}%`);
+  f.textContent = `single subcomponent / down-only: exact, full grid. Multi gate/up: emulated on the `
+    + `stride-${STRIDE} subgrid (control-variate; build-time interaction error — ${parts.join(", ")}).`;
+}
+
+// ---- ablation math -------------------------------------------------------------------------
+function recomputeDelta() {
+  if (EMU.running) { EMU.pending = true; return; }  // re-run with the fresh selection when done
+  if (SELECTED.size === 0) { DELTA = null; setStatus(""); drawRow(2); return; }
+  if (MODE === "neurons") {
+    const acts = arr("neuron_act"), wds = arr("neuron_wd");
+    const out = new Float32Array(NP * P2);
+    let k = 0;
+    D.neurons.forEach((nrec, i) => {
+      if (!SELECTED.has(nrec.id)) return;
+      k++;
+      const a = acts.subarray(i * NP, (i + 1) * NP), w = wds.subarray(i * P2, (i + 1) * P2);
+      for (let t = 0; t < NP; t++) {
+        const av = a[t], base = t * P2;
+        for (let p = 0; p < P2; p++) out[base + p] -= av * w[p];
+      }
+    });
+    DELTA = { full: out };
+    setStatus(`${k} neuron(s) ablated — exact, full grid.`);
+    drawRow(2); return;
+  }
+  // subcomponents
+  const selGu = [], selDown = [];
+  D.subcomps.forEach((c, i) => {
+    if (!SELECTED.has(c.id)) return;
+    (c.proj === "d" ? selDown : selGu).push({ rec: c, i });
+  });
+  const nGu = D.subcomps.filter(c => c.proj !== "d").length;
+  if (selGu.length === 0) {
+    // down-only: exact, additive, full grid
+    const inner = arr("sub_inner"), wu = arr("down_wu");
+    const out = new Float32Array(NP * P2);
+    for (const s of selDown) {
+      const grid = inner.subarray(s.i * NP, (s.i + 1) * NP);
+      const w = wu.subarray((s.i - nGu) * P2, (s.i - nGu + 1) * P2);
+      for (let t = 0; t < NP; t++) {
+        const iv = grid[t], base = t * P2;
+        for (let p = 0; p < P2; p++) out[base + p] -= iv * w[p];
+      }
+    }
+    DELTA = { full: out };
+    setStatus(`${selDown.length} down subcomponent(s) ablated — exact, full grid.`);
+    drawRow(2); return;
+  }
+  if (selGu.length === 1 && selDown.length === 0) {
+    // single gate/up: shipped exact full-grid delta
+    const ex = arr("gu_exact_delta");
+    DELTA = { full: ex.slice(selGu[0].i * NP * P2, (selGu[0].i + 1) * NP * P2) };
+    setStatus(`${selGu[0].rec.id} ablated — exact, full grid.`);
+    drawRow(2); return;
+  }
+  emulate(selGu, selDown);
+}
+function setStatus(s) { el("status").textContent = s; }
+
+// ---- emulator: full-neuron SwiGLU re-evaluation on the subgrid ------------------------------
+// Reconstructed preactivations cached as per-neuron-quantized int16 (layout [neuron][subgrid t]).
+const EMU = { ready: false, running: false, pending: false, g: null, u: null, scale: null, off: null, singles: {} };
+
+function subgridIdx() {
+  const idx = new Int32Array(M);
+  for (let i = 0; i < M; i++) idx[i] = subToFull(i);
+  return idx;
+}
+const SUB_IDX = subgridIdx();
+
+function reconstruct(done) {
+  if (EMU.ready) { done(); return; }
+  const zg = arr("emul.zg"), cg = arr("emul.cg"), mg = arr("emul.mg");
+  const zu = arr("emul.zu"), cu = arr("emul.cu"), mu = arr("emul.mu");
+  EMU.g = new Int16Array(M * D_INT); EMU.u = new Int16Array(M * D_INT);
+  EMU.scale = new Float32Array(2 * D_INT); EMU.off = new Float32Array(2 * D_INT);
+  const col = new Float32Array(M);
+  let j = 0;
+  const CHUNK = 256;
+  function step() {
+    const jEnd = Math.min(j + CHUNK, D_INT);
+    for (; j < jEnd; j++) {
+      for (let ch = 0; ch < 2; ch++) {
+        const z = ch ? zu : zg, cf = ch ? cu : cg, mean = ch ? mu : mg, dst = ch ? EMU.u : EMU.g;
+        const cbase = j * RANK;
+        let lo = Infinity, hi = -Infinity;
+        for (let t = 0; t < M; t++) {
+          let acc = mean[j];
+          const zbase = t * RANK;
+          for (let r = 0; r < RANK; r++) acc += z[zbase + r] * cf[cbase + r];
+          col[t] = acc;
+          if (acc < lo) lo = acc; if (acc > hi) hi = acc;
+        }
+        const span = (hi - lo) || 1, sc = span / 65535;
+        EMU.scale[ch * D_INT + j] = sc; EMU.off[ch * D_INT + j] = lo;
+        const dbase = j * M;
+        for (let t = 0; t < M; t++) dst[dbase + t] = Math.round((col[t] - lo) / sc) - 32768;
+      }
+    }
+    if (j < D_INT) {
+      setStatus(`reconstructing preactivations… ${Math.round(100 * j / D_INT)}%`);
+      setTimeout(step, 0);
+    } else { EMU.ready = true; done(); }
+  }
+  step();
+}
+
+function silu(v) { return v / (1 + Math.exp(-v)); }
+
+// One emulator pass: projected-output delta [M*P2] for ablating the given gate/up rows,
+// plus (optionally) per-down-comp read deltas Σ_j Δact_j V[j,c].
+function emuPass(rows, downCols, done) {
+  const wdAll = arr("wd_all");
+  const out = new Float32Array(M * P2);
+  const dRead = downCols.map(() => new Float32Array(M));
+  const nR = rows.length;
+  const innerSub = rows.map(r => {
+    const g = arr("sub_inner").subarray(r.i * NP, (r.i + 1) * NP);
+    const v = new Float32Array(M);
+    for (let t = 0; t < M; t++) v[t] = g[SUB_IDX[t]];
+    return v;
+  });
+  const coup = rows.map(r => arr("gu_coupling").subarray(r.i * D_INT, (r.i + 1) * D_INT));
+  const isGate = rows.map(r => r.rec.proj === "g");
+  const vcp = downCols.map(i => arr("down_vcoupling").subarray(i * D_INT, (i + 1) * D_INT));
+  let j = 0;
+  const CHUNK = 384;
+  function step() {
+    const jEnd = Math.min(j + CHUNK, D_INT);
+    for (; j < jEnd; j++) {
+      const gsc = EMU.scale[j], gof = EMU.off[j], usc = EMU.scale[D_INT + j], uof = EMU.off[D_INT + j];
+      const gbase = j * M, wbase = j * P2;
+      let ug = 0, uu = 0;
+      for (let r = 0; r < nR; r++) { if (isGate[r]) ug += Math.abs(coup[r][j]); else uu += Math.abs(coup[r][j]); }
+      if (ug === 0 && uu === 0) continue;
+      for (let t = 0; t < M; t++) {
+        const g0 = gof + (EMU.g[gbase + t] + 32768) * gsc;
+        const u0 = uof + (EMU.u[gbase + t] + 32768) * usc;
+        let dg = 0, du = 0;
+        for (let r = 0; r < nR; r++) {
+          const c = coup[r][j] * innerSub[r][t];
+          if (isGate[r]) dg += c; else du += c;
+        }
+        const dact = silu(g0 - dg) * (u0 - du) - silu(g0) * u0;
+        if (dact === 0) continue;
+        const base = t * P2;
+        for (let p = 0; p < P2; p++) out[base + p] += dact * wdAll[wbase + p];
+        for (let k = 0; k < dRead.length; k++) dRead[k][t] += dact * vcp[k][j];
+      }
+    }
+    if (j < D_INT) {
+      setStatus(`emulating… ${Math.round(100 * j / D_INT)}%`);
+      setTimeout(step, 0);
+    } else done(out, dRead);
+  }
+  step();
+}
+
+function emulate(selGu, selDown) {
+  if (EMU.running) return;
+  EMU.running = true;
+  const nGu = D.subcomps.filter(c => c.proj !== "d").length;
+  reconstruct(() => {
+    // cache single-comp emulated deltas for the control variate
+    const need = selGu.filter(s => !(s.rec.id in EMU.singles));
+    function afterSingles() {
+      emuPass(selGu, selDown.map(s => s.i - nGu), (raw, dRead) => {
+        const out = raw;
+        // control variate: emu(S) − Σ emu({c}) + Σ exact({c})|subgrid
+        const ex = arr("gu_exact_delta");
+        for (const s of selGu) {
+          const single = EMU.singles[s.rec.id];
+          const exact = ex.subarray(s.i * NP * P2, (s.i + 1) * NP * P2);
+          for (let t = 0; t < M; t++) {
+            const base = t * P2, ebase = SUB_IDX[t] * P2;
+            for (let p = 0; p < P2; p++) out[base + p] += exact[ebase + p] - single[base + p];
+          }
+        }
+        // down comps: exact given the emulated h' (shipped inner + emulated read delta)
+        const inner = arr("sub_inner"), wu = arr("down_wu");
+        selDown.forEach((s, k) => {
+          const grid = inner.subarray(s.i * NP, (s.i + 1) * NP);
+          const w = wu.subarray((s.i - nGu) * P2, (s.i - nGu + 1) * P2);
+          for (let t = 0; t < M; t++) {
+            const iv = grid[SUB_IDX[t]] + dRead[k][t], base = t * P2;
+            for (let p = 0; p < P2; p++) out[base + p] -= iv * w[p];
+          }
+        });
+        EMU.running = false;
+        // selection/mode changed mid-run: discard this result and recompute fresh
+        if (EMU.pending) { EMU.pending = false; recomputeDelta(); return; }
+        DELTA = { sub: out };
+        setStatus(`${selGu.length + selDown.length} subcomponent(s) ablated — emulated `
+          + `(stride-${STRIDE} subgrid, control-variate).`);
+        drawRow(2);
+      });
+    }
+    function nextSingle() {
+      if (!need.length) { afterSingles(); return; }
+      const s = need.shift();
+      emuPass([s], [], out => { EMU.singles[s.rec.id] = out; nextSingle(); });
+    }
+    nextSingle();
+  });
+}
+
+// ---- search --------------------------------------------------------------------------------
+function doSearch() {
+  const q = el("search").value.trim();
+  if (!q) return;
+  let id = null;
+  if (MODE === "neurons") {
+    const num = parseInt(q, 10);
+    if (D.neurons.some(nr => nr.id === num)) id = num;
+    else { setStatus(`neuron ${q} is not in the causal set (max KL ≤ ${D.meta.kl_thr} or unmeasured)`); return; }
+  } else {
+    if (D.subcomps.some(c => c.id === q)) id = q;
+    else { setStatus(`subcomponent ${q} is not in the alive set`); return; }
+  }
+  toggle(id, true);
+  for (const row of el("items").children) {
+    if (row.dataset && row.dataset.id === String(id)) row.scrollIntoView({ block: "center" });
+  }
+  el("search").value = "";
+}
+
+// ---- wire ----------------------------------------------------------------------------------
+function populateMods() {
+  const sel = el("mod");
+  sel.innerHTML = '<option value="1">none</option>';
+  for (const v of D.meta.mods) {
+    const o = document.createElement("option"); o.value = v; o.textContent = "mod " + v;
+    sel.appendChild(o);
+  }
+}
+el("mode").addEventListener("change", () => {
+  MODE = el("mode").value;
+  SELECTED.clear();
+  buildSide(); recomputeDelta();
+});
+["colorBy", "mod"].forEach(id => el(id).addEventListener("change", recolor));
+el("offset").addEventListener("input", recolor);
+el("addBtn").addEventListener("click", doSearch);
+el("search").addEventListener("keydown", ev => { if (ev.key === "Enter") doSearch(); });
+el("clearBtn").addEventListener("click", () => {
+  SELECTED.clear();
+  for (const row of el("items").children) {
+    if (!row.dataset || !row.dataset.id) continue;
+    row.classList.remove("checked");
+    const cb = row.querySelector("input"); if (cb) cb.checked = false;
+  }
+  recomputeDelta();
+});
+
+el("hint").textContent = `${D.meta.run} · L${D.meta.layer} · probes ${D.meta.probes} (a+b, post-MLP residual) · `
+  + `${N}×${N} grid · red ring = predicted unit circle`;
+D_INT = arr("wd_all").length / P2;
+populateMods();
+buildGrid();
+initViews();
+COLOR = colorInfo();
+drawAll();
+buildSide();
+</script>
+</body>
+</html>

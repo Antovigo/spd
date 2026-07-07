@@ -366,6 +366,26 @@ PY=~/.cache/pd-headless/venv/bin/python
 $PY $V_DIR/headless_check.py ~/out/runs/addmult-L18-03/analysis/fourier_scatter/index.html
 ```
 
+### 14b. Result feature construction — before/after MLP18 with in-browser ablation (CPU)
+
+Does MLP 18 build the `a+b` circular features or add to pre-existing structure — and which
+neurons / subcomponents build them? One plot per canonical period on the **post-MLP residual**
+Fourier probes (`runs/fourier_probes/probes_post.json`), three linked rows: residual before the
+MLP, after, and after with a checkbox-picked set of **neurons** (measured max KL > 0.01, from
+the census) or **subcomponents** (the alive set) ablated — any number at once, emulated
+in-browser (exact for neurons / down / single gate-up; low-rank full-SwiGLU emulation with a
+control-variate correction for multi gate/up sets). Search items by id (`12023` / `g124`).
+
+```bash
+CKPT=~/out/runs/addsub-L18-04-8x-beta0.75-LR/model_24000.pth
+uv run python -m $V.build_result_feature_construction "$CKPT"
+# smoke-test:
+PY=~/.cache/pd-headless/venv/bin/python
+$PY param_decomp_lab/scripts/validation/headless_check.py \
+    "$(dirname "$CKPT")/analysis/result_feature_construction/index.html" \
+    --probes="document.querySelectorAll('#grid canvas').length;;document.querySelectorAll('#items .item').length"
+```
+
 ### 15. Polytope explorer (CPU)
 
 A self-contained HTML applet mapping the operand grid into SwiGLU gate-sign polytopes. The

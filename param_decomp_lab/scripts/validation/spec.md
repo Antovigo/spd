@@ -689,6 +689,52 @@ floor-passing subcomponent and neuron arrow coords + in-plane norms (mlp site), 
 subcomponents' inner-activation and (when available) CI grids per task (fp16 base64). Smoke-test
 with `headless_check.py`.
 
+**build_result_feature_construction.py**
+
+args:
+- the path to a decomposed model (checkpoint)
+- `--probes`: a `probes_post.json` from the `probes/` pipeline (default the shared
+  `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/probes_post.json`; asserts `site == "post"` and a
+  matching layer)
+- `--census-dir`: the neuron census dir (default `runs/neurons/`) — supplies the measured
+  ablation KL (`candidates.tsv`, overridden by `ablation_full_add.npz` where present)
+- `--kl-thr`: measured max-KL floor for a neuron to be selectable (default 0.01)
+- `--periods`: comma list of probe periods shown, one plot per period (default `2,5,10,20,50,100`)
+- `--rank`: SVD rank of the shipped preactivation factors (default 64)
+- `--stride`: operand stride of the emulated subgrid (default 2 → 50×50 of the 100×100 grid)
+- `--output-dir`
+
+CPU (no forward pass). Asks whether MLP 18 **builds** the result (`a+b`) circular features or
+**adds to** structure already in the residual stream — and which neurons / subcomponents build
+them. A self-contained canvas applet (`index.html` + `data.js`): one plot per period, all
+projected on the **post-MLP residual** Fourier probes in their predicted-`(cos, sin)` frame
+(red ring = unit circle), three rows sharing one zoomable view per column — residual **before**
+the MLP, **after**, and after with a user-picked **ablation set** applied. Colour by `a` / `b`
+/ `a+b` with mod + offset. An **ablate** dropdown picks neurons or subcomponents (not mixed);
+the side panel lists them with checkboxes, `(a, b)` thumbnails (post-SwiGLU activation /
+inner activation), KL / mean-CI / period info, and a **search-by-id** box (`12023` for neurons,
+`g124` for subcomponents). Any number can be ablated simultaneously; the third row updates by
+emulating the MLP in-browser:
+
+- **neurons** — exact, full grid (the MLP output is additive over neurons; only measured-causal
+  census neurons with `max_kl > --kl-thr` are listed, their activation grids shipped fp16).
+- **down subcomponents** — exact, full grid (rank-1 removal from `W_down` is additive given `h`).
+- **gate/up subcomponents** — dense couplings perturb every neuron, so the applet re-evaluates
+  the full 14336-neuron SwiGLU on the strided subgrid from shipped rank-`--rank` SVD factors of
+  the gate/up preactivation grids (neuron columns weighted by probe-projection norm, reconstructed
+  once in-browser, cached int16). Single components ship their **exact** full-grid deltas;
+  multi-component sets use the emulator with a **control-variate** correction
+  (`emu(S) − Σ emu({c}) + Σ exact({c})`) so only the between-component interaction is
+  approximated — build-time fidelity: ≤0.2% rel error for small sets, ~2% ablating every alive
+  gate/up component (numbers ship in `meta.fidelity` and display in the panel). Mixed
+  gate/up + down selections correct the down read for the emulated `Δh`.
+
+Reads the probes JSON, the run's `hidden_activations_add.npz` / `alive_filtered_add.tsv` /
+`subcomp_periods_add.tsv`, the census `candidates.tsv` (+ `ablation_full_add.npz`), and the
+checkpoint U/V + frozen MLP weights (mmap). Addition only (the probes' result variable is
+`a+b`). Output: `<run_dir>/analysis/result_feature_construction/{index.html,data.js}`.
+Smoke-test with `headless_check.py`.
+
 **build_polytope_explorer.py**
 
 args:
