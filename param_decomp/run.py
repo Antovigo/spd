@@ -325,6 +325,7 @@ def _init_or_restore_state(
     pd: PDConfig,
     ci_fn_arch: CIFnArch,
     data: DataConfig | None,
+    persistent_source_seq_len: int | None,
     run: RunInstance,
     lm: DecomposedModel,
     opt_vu: optax.GradientTransformation,
@@ -340,7 +341,19 @@ def _init_or_restore_state(
     Returns `(state, start_step)`, or `None` when a SIGTERM landed mid-warmup (the caller
     must exit cleanly for requeue — no valid checkpoint exists pre-step-0)."""
     state = _ensure_global(
-        init_train_state(pd, lm, ci_fn_arch, data, opt_vu, opt_ci, init_key, src_key, mesh), mesh
+        init_train_state(
+            pd,
+            lm,
+            ci_fn_arch,
+            data,
+            persistent_source_seq_len,
+            opt_vu,
+            opt_ci,
+            init_key,
+            src_key,
+            mesh,
+        ),  # fmt: skip
+        mesh,
     )
 
     restored = restore_latest(checkpoint_manager, state)
@@ -418,6 +431,21 @@ class NontargetPass:
     loss_metrics: list[AnyLossMetricConfig]
 
 
+@dataclasses.dataclass(frozen=True)
+class TargetPromptGeometry:
+    """tPD fixed-prompt target-stream geometry (SPEC S38/S39): prompts share one real length
+    (`recon_positions`, the scored prefix) and are end-padded to `seq_len` (the forward's
+    sequence length). Recon + adversary ascents score only the first `recon_positions`
+    positions; persistent-PGD sources size at `seq_len` — NOT at the engine `data`'s seq,
+    which under tPD describes the non-target parquet stream."""
+
+    recon_positions: int
+    seq_len: int
+
+    def __post_init__(self) -> None:
+        assert 0 < self.recon_positions <= self.seq_len, (self.recon_positions, self.seq_len)
+
+
 def run_decomposition_training(
     pd: PDConfig,
     cadence: Cadence,
@@ -432,7 +460,7 @@ def run_decomposition_training(
     eval_every: int,
     mesh: Mesh,
     nontarget: NontargetPass | None = None,
-    recon_positions: int | None = None,
+    target_prompts: TargetPromptGeometry | None = None,
 ) -> None:
     """The generic VPD decomposition-training engine — the ONE train loop every target
     (LM, TMS, ResidMLP, …) runs through.
@@ -479,9 +507,17 @@ def run_decomposition_training(
     checkpoint_manager = make_checkpoint_manager(
         run.run_dir / "ckpts", cadence.keep_last_n_checkpoints
     )
+    # Persistent-PGD sources live on the seq axis of the pass they ascend in — the MAIN
+    # (target) pass. Plain runs: the `data` seq. tPD runs: the padded prompt seq (S39),
+    # since `data` there describes the non-target parquet stream.
+    persistent_source_seq_len = (
+        target_prompts.seq_len
+        if target_prompts is not None
+        else (data.seq_len if data is not None else None)
+    )
     init = _init_or_restore_state(
-        pd, ci_fn, data, run, lm, opt_vu, opt_ci, init_key, src_key, mesh,
-        checkpoint_manager, is_main,
+        pd, ci_fn, data, persistent_source_seq_len, run, lm, opt_vu, opt_ci, init_key,
+        src_key, mesh, checkpoint_manager, is_main,
     )  # fmt: skip
     if init is None:
         return  # SIGTERM mid-warmup: clean exit for requeue
@@ -500,7 +536,7 @@ def run_decomposition_training(
         remat_ci_fn=remat_ci_fn,
         mesh=mesh,
         nontarget_loss_surface=nontarget_loss_surface,
-        recon_positions=recon_positions,
+        recon_positions=target_prompts.recon_positions if target_prompts is not None else None,
     )
 
     # record what this run actually executes on so wandb never lies about topology.
