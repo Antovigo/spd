@@ -895,6 +895,23 @@ class PDConfig(BaseConfig):
         description="Weight decay for warmup phase optimizer",
     )
 
+    # --- CI-scaled component weight decay (SPEC S40) ---
+    ci_scaled_component_weight_decay: NonNegativeFloat = Field(
+        default=0.0,
+        description=(
+            "Decoupled per-subcomponent weight decay applied after each optimizer step, "
+            "scaled by (1 - max lower-leaky CI over the train batch): a subcomponent at "
+            "CI 1 anywhere in the batch is untouched, one that never activates decays at "
+            "the full lr*coeff rate. 0 disables."
+        ),
+    )
+    ci_scaled_component_weight_decay_start_frac: Probability = Field(
+        default=0.0,
+        description=(
+            "Fraction of training after which the CI-scaled decay activates; 0 starts at step 0."
+        ),
+    )
+
     @model_validator(mode="after")
     def validate_loss_metrics_have_coeff(self) -> Self:
         assert self.loss_metrics, "loss_metrics must contain at least one training loss"

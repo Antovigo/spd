@@ -109,6 +109,28 @@ def _grad_norm_metrics(components_grad: DecompVU, ci_fn_grad: Any) -> dict[str, 
     return out
 
 
+def ci_scaled_weight_decay_keep(
+    batch_ci_max: dict[str, Array], lr: Array, coeff: float, active: Array
+) -> dict[str, Array]:
+    """SPEC S40: per-subcomponent keep factor `1 - lr*coeff*(1 - clamp(max_ci, 0, 1))` —
+    a subcomponent whose CI reaches 1 anywhere in the batch is untouched, one that never
+    activates decays at the full `lr*coeff` rate. Identity (1.0) while `active` is false."""
+    return {
+        site: jnp.where(active, 1.0 - lr * coeff * (1.0 - jnp.clip(m, 0.0, 1.0)), 1.0)
+        for site, m in batch_ci_max.items()
+    }
+
+
+def apply_ci_scaled_weight_decay(components: DecompVU, keep: dict[str, Array]) -> DecompVU:
+    """Scale each site's V columns / U rows by that subcomponent's `keep` factor (SPEC S40,
+    torch parity: `optimize._apply_ci_scaled_weight_decay`)."""
+    vu = {
+        site: (v * keep[site][None, :], u * keep[site][:, None])
+        for site, (v, u) in components.vu.items()
+    }
+    return DecompVU(vu=vu)
+
+
 # ───────────────────────────── the step factory ─────────────────────────────
 
 
@@ -124,6 +146,9 @@ def make_train_step(
     mesh: Mesh | None,
     nontarget_loss_surface: LossSurface | None = None,
     recon_positions: int | None = None,
+    ci_scaled_component_weight_decay: float = 0.0,
+    ci_scaled_component_weight_decay_start_frac: float = 0.0,
+    components_lr_schedule: Callable[[Array], Array] | None = None,
 ):
     """Build the `eqx.filter_jit`'d `step(model, state, batch, key) -> (state, metrics)`.
 
@@ -151,6 +176,10 @@ def make_train_step(
             return recon_loss_fn(*sliced)
     else:
         target_recon_loss_fn = recon_loss_fn
+
+    assert ci_scaled_component_weight_decay == 0.0 or components_lr_schedule is not None, (
+        "CI-scaled weight decay (S40) needs the components LR schedule to scale by"
+    )
 
     recon_terms = losses.recon
     faith_term = losses.faith
@@ -414,7 +443,10 @@ def make_train_step(
         # gets too (sources are leaves). ──
         def loss_fn(
             trainable: tuple[DecompVU, CIFn, dict[str, dict[str, Array]]],
-        ) -> tuple[Array, tuple[Array, Array, Array, tuple[Array, ...], dict[str, Array]]]:
+        ) -> tuple[
+            Array,
+            tuple[Array, Array, Array, tuple[Array, ...], dict[str, Array], dict[str, Array]],
+        ]:
             components, ci_fn, persistent_sources = trainable
             components_bf16 = cast_floating(components, COMPUTE_DT)
             # ONE ÷N→÷fsdp reconstruction for the whole recon grid (shared by every forward +
@@ -425,6 +457,21 @@ def make_train_step(
                 ci = ci_batch_sharded(ci_fn_bf16(taps, remat=remat_ci_fn))
             faith_loss = faithfulness_loss(model.weight_deltas(components))
             imp_lp, imp_freq = imp_min_terms(ci.upper, imp_min, imp_min_param)
+
+            # Per-subcomponent max lower-leaky CI over the (target) batch, for the S40
+            # CI-scaled decay applied after the optimizer step. The max over the sharded
+            # leading axes is a collective, matching torch's cross-rank MAX reduce.
+            ci_wd_max = (
+                {
+                    site: jnp.max(
+                        jax.lax.stop_gradient(v).astype(jnp.float32),
+                        axis=tuple(range(v.ndim - 1)),
+                    )
+                    for site, v in ci.lower.items()
+                }
+                if ci_scaled_component_weight_decay > 0.0
+                else {}
+            )
 
             def recon_grid(
                 grid_terms: tuple[ReconLossTerm, ...],
@@ -555,10 +602,10 @@ def make_train_step(
                 nt_aux["nontarget/total"] = nt_total
                 total_loss = total_loss + nt_total
 
-            return total_loss, (faith_loss, imp_lp, imp_freq, term_losses, nt_aux)
+            return total_loss, (faith_loss, imp_lp, imp_freq, term_losses, nt_aux, ci_wd_max)
 
         with jax.named_scope("pd_value_and_grad"):
-            (total_loss, (faith_loss, imp_lp, imp_freq, term_losses, nt_aux)), grads = (
+            (total_loss, (faith_loss, imp_lp, imp_freq, term_losses, nt_aux, ci_wd_max)), grads = (
                 eqx.filter_value_and_grad(loss_fn, has_aux=True)(
                     (state.components, state.ci_fn, {k: a.sources for k, a in warmed_advs.items()})
                 )
@@ -593,6 +640,19 @@ def make_train_step(
         )
         new_components = eqx.apply_updates(state.components, components_updates)
         new_ci_fn = eqx.apply_updates(state.ci_fn, ci_fn_updates)
+
+        if ci_scaled_component_weight_decay > 0.0:
+            # S40: decoupled CI-scaled decay AFTER the optimizer step (torch parity), gated
+            # until `start_frac` of training via the identity keep factor.
+            assert components_lr_schedule is not None
+            active = step_f32 >= ci_scaled_component_weight_decay_start_frac * total_steps
+            keep = ci_scaled_weight_decay_keep(
+                ci_wd_max,
+                components_lr_schedule(step_f32),
+                ci_scaled_component_weight_decay,
+                active,
+            )
+            new_components = apply_ci_scaled_weight_decay(new_components, keep)
 
         new_state = TrainState(
             components=new_components,

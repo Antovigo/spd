@@ -537,6 +537,9 @@ def run_decomposition_training(
         mesh=mesh,
         nontarget_loss_surface=nontarget_loss_surface,
         recon_positions=target_prompts.recon_positions if target_prompts is not None else None,
+        ci_scaled_component_weight_decay=pd.ci_scaled_component_weight_decay,
+        ci_scaled_component_weight_decay_start_frac=pd.ci_scaled_component_weight_decay_start_frac,
+        components_lr_schedule=sched_vu,
     )
 
     # record what this run actually executes on so wandb never lies about topology.

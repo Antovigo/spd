@@ -459,6 +459,18 @@ grad = ∇_{components, ci_fn, sources} (L_target + L_nontarget)      # single v
   target batch — `_targeted_data`). Warmup and final ascents score the S38-sliced target
   recon loss, so pad-position sources get zero gradient and stay at init (causally inert per
   S38). All non-tPD persistent semantics (S13′–S16, S22–S24, S32) apply unchanged.
+- **S40** — CI-scaled component weight decay (torch parity:
+  `optimize._apply_ci_scaled_weight_decay`; generic, config-gated on
+  `pd.ci_scaled_component_weight_decay > 0`). AFTER each optimizer step, every
+  subcomponent's V column and U row are scaled by
+  `keep_c = 1 − lr·coeff·(1 − clamp(max_c, 0, 1))`, where `max_c` is that subcomponent's
+  max LOWER-leaky CI over the MAIN (target) batch's leading dims — a global max (the
+  sharded-batch reduction is collective, matching torch's cross-rank MAX) — and `lr` is the
+  CURRENT scheduled components LR. Decoupled: no interaction with Adam moments; the CI is
+  the pre-update forward's (stop-gradient). Inert until
+  `step ≥ start_frac·steps` (`keep = 1` exactly). A CI-1 subcomponent is untouched; a
+  never-active one decays at the full `lr·coeff` rate — the cleanup force that shrinks
+  dead components' weights (imp-min only pushes their CI, not their V/U).
 
 The target stream is task-specific and feeds the engine's `sample_batch` seam like any other
 data: for the toys it is `active_indices`-restricted sparse features; for the LM it is a fixed
