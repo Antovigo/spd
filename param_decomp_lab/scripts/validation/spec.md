@@ -714,7 +714,11 @@ the **post**-fit probes — how much of it already lies in the final representat
 (3) post-MLP residual on the post probes; (4) row 3 with a user-picked **ablation set**
 applied. **Hovering a point marks the same prompt in every plot** (overlay canvases, no
 repaint), so a prompt's trajectory across the rows reads directly. Colour by `a` / `b`
-/ `a+b` with mod + offset. An **ablate** dropdown picks neurons or subcomponents (not mixed);
+/ `a+b` with mod + offset, or by the **ablation displacement** — `Δ (plane)` (the 2D
+original→ablated move in each column's own probe plane) or `Δ (total)` (the norm over all
+planes) — prompt-keyed so every row colours, scaled to the 99th percentile, grey where
+undefined (no ablation / off the emulated subgrid), value in the tooltip. An **ablate**
+dropdown picks neurons or subcomponents (not mixed);
 the side panel lists them with checkboxes, `(a, b)` thumbnails (post-SwiGLU activation /
 inner activation), KL / mean-CI / period info, and a **search-by-id** box (`12023` for neurons,
 `g124` for subcomponents). Any number can be ablated simultaneously; the third row updates by
