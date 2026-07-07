@@ -64,6 +64,7 @@
     <div id="status"></div>
     <div id="fidelity"></div>
     <div id="searchrow">
+      <select id="periodFilter" title="show only subcomponents with this period"></select>
       <input id="search" placeholder="search id, e.g. g124 or 12023" />
       <button id="addBtn">add</button>
       <button id="clearBtn">clear</button>
@@ -472,10 +473,46 @@ function itemRow(id, label, info, gridFn) {
   return row;
 }
 
+// ---- period filter (subcomponents only): hide items whose period label doesn't match --------
+const SUB_PERIOD = {};  // id -> period label
+function periodKey(lbl) {
+  if (lbl.startsWith("period ")) return [0, parseFloat(lbl.slice(7))];
+  if (lbl.startsWith("×")) return [1, parseFloat(lbl.slice(1))];
+  if (lbl === "no period") return [2, 0];
+  return [3, 0];
+}
+function populatePeriodFilter() {
+  D.subcomps.forEach(c => { SUB_PERIOD[c.id] = c.period; });
+  const sel = el("periodFilter");
+  sel.innerHTML = '<option value="">all periods</option>';
+  const vals = [...new Set(D.subcomps.map(c => c.period))]
+    .sort((a, b) => { const ka = periodKey(a), kb = periodKey(b); return ka[0] - kb[0] || ka[1] - kb[1]; });
+  for (const v of vals) {
+    const o = document.createElement("option"); o.value = v; o.textContent = v;
+    sel.appendChild(o);
+  }
+}
+function applyPeriodFilter() {
+  const v = MODE === "subcomponents" ? el("periodFilter").value : "";
+  let header = null, headerHasVisible = false;
+  for (const row of el("items").children) {
+    if (row.classList.contains("grouphead")) {
+      if (header) header.style.display = headerHasVisible ? "" : "none";
+      header = row; headerHasVisible = false;
+      continue;
+    }
+    const show = !v || SUB_PERIOD[row.dataset.id] === v;
+    row.style.display = show ? "" : "none";
+    if (show) headerHasVisible = true;
+  }
+  if (header) header.style.display = headerHasVisible ? "" : "none";
+}
+
 function buildSide() {
   el("sideTitle").textContent = MODE === "neurons"
     ? `neurons (measured ablation max KL > ${D.meta.kl_thr})`
-    : "alive subcomponents";
+    : `alive subcomponents (last-token CI reaches ${D.meta.last_ci_thr ?? "?"})`;
+  el("periodFilter").style.display = MODE === "neurons" ? "none" : "";
   const box = el("items"); box.innerHTML = "";
   if (MODE === "neurons") {
     const acts = arr("neuron_act");
@@ -498,6 +535,7 @@ function buildSide() {
     });
   }
   updateFidelityNote();
+  applyPeriodFilter();
 }
 
 function toggle(id, on) {
@@ -736,6 +774,12 @@ function doSearch() {
     else { setStatus(`subcomponent ${q} is not in the alive set`); return; }
   }
   toggle(id, true);
+  // a filtered-out hit resets the period filter so the row is visible to scroll to
+  if (MODE === "subcomponents" && el("periodFilter").value
+      && SUB_PERIOD[id] !== el("periodFilter").value) {
+    el("periodFilter").value = "";
+    applyPeriodFilter();
+  }
   for (const row of el("items").children) {
     if (row.dataset && row.dataset.id === String(id)) row.scrollIntoView({ block: "center" });
   }
@@ -758,6 +802,7 @@ el("mode").addEventListener("change", () => {
 });
 ["colorBy", "mod"].forEach(id => el(id).addEventListener("change", recolor));
 el("offset").addEventListener("input", recolor);
+el("periodFilter").addEventListener("change", applyPeriodFilter);
 el("addBtn").addEventListener("click", doSearch);
 el("search").addEventListener("keydown", ev => { if (ev.key === "Enter") doSearch(); });
 el("clearBtn").addEventListener("click", () => {
@@ -776,6 +821,7 @@ el("hint").textContent = `${D.meta.run} · L${D.meta.layer} · a+b probes on the
   + `write (row 2) directions`;
 D_INT = arr("wd_all").length / P2;
 populateMods();
+populatePeriodFilter();
 buildGrid();
 initViews();
 COLOR = colorInfo();

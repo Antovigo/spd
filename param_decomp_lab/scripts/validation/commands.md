@@ -373,7 +373,9 @@ neurons / subcomponents build them? One plot per canonical period on the residua
 Fourier probes (`runs/fourier_probes/probes_{pre,post}.json`), four linked rows: pre-MLP
 residual on the pre-fit probes, pre-MLP residual on the post-fit probes, post-MLP residual on
 the post probes, and the same with a checkbox-picked set of **neurons** (measured max KL >
-0.01, from the census) or **subcomponents** (the alive set) ablated — any number at once,
+0.01, from the census) or **subcomponents** (the alive set, restricted to those whose
+last-token CI reaches `--last-ci-thr` = 0.01 on ≥1 prompt; a period dropdown filters the
+list) ablated — any number at once,
 emulated in-browser (exact for neurons / down / single gate-up; low-rank full-SwiGLU emulation
 with a control-variate correction for multi gate/up sets). Hovering a point marks the same
 prompt in every plot; ablated items draw red read-direction arrows on row 1 (pre frame) and

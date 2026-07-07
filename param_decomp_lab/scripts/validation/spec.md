@@ -699,6 +699,10 @@ args:
 - `--census-dir`: the neuron census dir (default `runs/neurons/`) — supplies the measured
   ablation KL (`candidates.tsv`, overridden by `ablation_full_add.npz` where present)
 - `--kl-thr`: measured max-KL floor for a neuron to be selectable (default 0.01)
+- `--last-ci-thr`: last-token CI an alive subcomponent must reach on ≥1 prompt to be included
+  (default 0.01) — the alive filter may admit components acting only at operand positions,
+  which are invisible/ablatable-to-no-effect at the `=` token this applet reads; the per-prompt
+  `ci` column of `inner_activations_add.tsv` supplies the max
 - `--periods`: comma list of probe periods shown, one plot per period (default `2,5,10,20,50,100`)
 - `--rank`: SVD rank of the shipped preactivation factors (default 64)
 - `--stride`: operand stride of the emulated subgrid (default 2 → 50×50 of the 100×100 grid)
@@ -725,7 +729,9 @@ as the points (`v̂·W` per plane, so lengths compare across periods; display-sc
 the unit ring, raw ‖proj‖ on arrowhead hover). RMSNorm between the pre residual and the
 gate/up input is absorbed by the probes, so raw directions are used (as in
 `build_direction_scatter`). An **ablate**
-dropdown picks neurons or subcomponents (not mixed);
+dropdown picks neurons or subcomponents (not mixed); a **period dropdown** (subcomponents
+only) filters the list to one period group (`period N` / `×r` / `no period`, labels from
+`subcomp_periods_add.tsv`; searching a filtered-out id resets it);
 the side panel lists them with checkboxes, `(a, b)` thumbnails (post-SwiGLU activation /
 inner activation), KL / mean-CI / period info, and a **search-by-id** box (`12023` for neurons,
 `g124` for subcomponents). Any number can be ablated simultaneously; the third row updates by

@@ -38,13 +38,15 @@ variable is `a+b`.
 Usage:
     python -m param_decomp_lab.scripts.validation.build_result_feature_construction \
         <model_path> [--probes-dir=.../fourier_probes] [--census-dir=PATH] [--kl-thr=0.01] \
-        [--periods=2,5,10,20,50,100] [--rank=64] [--stride=2] [--output-dir=PATH]
+        [--last-ci-thr=0.01] [--periods=2,5,10,20,50,100] [--rank=64] [--stride=2] \
+        [--output-dir=PATH]
 
 Reads: `probes_post.json` + `probes_pre.json` (default dir
 `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`), the run's `hidden_activations_add.npz` /
-`alive_filtered_add.tsv` / `subcomp_periods_add.tsv`, the census `candidates.tsv`
-(+ `ablation_full_add.npz` when present, overriding the screen KL), and the checkpoint U/V +
-frozen MLP weights (mmap).
+`alive_filtered_add.tsv` / `subcomp_periods_add.tsv` / `inner_activations_add.tsv` (whose
+last-token `ci` column drops alive components never causally important at the `=` position:
+max CI < `--last-ci-thr`), the census `candidates.tsv` (+ `ablation_full_add.npz` when
+present, overriding the screen KL), and the checkpoint U/V + frozen MLP weights (mmap).
 
 Output: `<run_dir>/analysis/result_feature_construction/{index.html,data.js}`.
 """
@@ -120,6 +122,22 @@ def _probe_axes(
     return w, b, r2s
 
 
+def _max_last_token_ci(inner_tsv: Path) -> dict[tuple[str, int], float]:
+    """`(proj, component) -> max last-token CI over the grid`, from the `ci` column of an
+    `inner_activations_<op>.tsv`."""
+    assert inner_tsv.exists(), f"missing inner activations: {inner_tsv}"
+    out: dict[tuple[str, int], float] = {}
+    with inner_tsv.open() as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        assert "ci" in (reader.fieldnames or []), f"no ci column in {inner_tsv}"
+        for row in reader:
+            key = (row["matrix"].split(".")[-1], int(row["subcomponent"]))
+            ci = float(row["ci"])
+            if ci > out.get(key, 0.0):
+                out[key] = ci
+    return out
+
+
 def _neuron_kl(census_dir: Path) -> dict[int, float]:
     """Neuron → measured ablation max KL on addition: the screen value from `candidates.tsv`,
     overridden by the full-grid ablation npz where it covers the neuron (unaliased)."""
@@ -161,6 +179,7 @@ def build_result_feature_construction(
     probes_dir: str | None = None,
     census_dir: str | None = None,
     kl_thr: float = 0.01,
+    last_ci_thr: float = 0.01,
     periods: str = _DEFAULT_PERIODS,
     rank: int = 64,
     stride: int = 2,
@@ -231,16 +250,24 @@ def build_result_feature_construction(
     assert neuron_ids, f"no census neuron clears max_kl > {kl_thr}"
     logger.info(f"{len(neuron_ids)} neurons with measured ablation max KL > {kl_thr}")
 
-    # --- subcomponents: alive on add, split by side -----------------------------------------
+    # --- subcomponents: alive on add AND causally important at the last token ----------------
+    # The alive filter may include components acting only at operand positions; this applet
+    # reads/ablates at the `=` token, so those are dropped via the per-prompt last-token CI.
     mean_ci = read_mean_ci(datasets / "alive_filtered_add.tsv")
     period_groups = read_subcomp_period_groups(datasets / "subcomp_periods_add.tsv")
-    alive = sorted(
+    max_ci = _max_last_token_ci(datasets / "inner_activations_add.tsv")
+    alive_all = sorted(
         ((proj, c) for (proj, c) in mean_ci if proj in MLP_MATRICES),
         key=lambda pc: (MLP_MATRICES.index(pc[0]), pc[1]),
     )
+    alive = [pc for pc in alive_all if max_ci.get(pc, 0.0) >= last_ci_thr]
+    assert alive, f"no alive component reaches last-token CI ≥ {last_ci_thr}"
     gu_comps = [(p, c) for p, c in alive if p != "down_proj"]
     down_comps = [(p, c) for p, c in alive if p == "down_proj"]
-    logger.info(f"alive subcomponents: {len(gu_comps)} gate/up + {len(down_comps)} down")
+    logger.info(
+        f"alive subcomponents: {len(gu_comps)} gate/up + {len(down_comps)} down "
+        f"({len(alive_all) - len(alive)} dropped: max last-token CI < {last_ci_thr})"
+    )
 
     inner_grids: dict[tuple[str, int], NDArray[np.float32]] = {}
     for proj, c in gu_comps:
@@ -339,6 +366,7 @@ def build_result_feature_construction(
             "stride": stride,
             "rank": rank,
             "kl_thr": kl_thr,
+            "last_ci_thr": last_ci_thr,
             "periods": period_list,
             "r2": {"post": r2_post, "pre": r2_pre},
             "mods": sorted({p for p in period_list if p > 1}),
