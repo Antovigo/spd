@@ -693,11 +693,9 @@ with `headless_check.py`.
 
 args:
 - the path to a decomposed model (checkpoint)
-- `--probes-dir`: dir holding the `probes_<site>.json` files from the `probes/` pipeline
-  (default the shared `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`; each file's site and
-  layer are asserted)
-- `--bases`: comma list of probe bases to ship, from {`post`, `pre`} (default `post,pre`) —
-  the applet's **basis** dropdown switches between them
+- `--probes-dir`: dir holding the `probes_post.json` + `probes_pre.json` files from the
+  `probes/` pipeline (default the shared `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`; each
+  file's site and layer are asserted)
 - `--census-dir`: the neuron census dir (default `runs/neurons/`) — supplies the measured
   ablation KL (`candidates.tsv`, overridden by `ablation_full_add.npz` where present)
 - `--kl-thr`: measured max-KL floor for a neuron to be selectable (default 0.01)
@@ -708,12 +706,14 @@ args:
 
 CPU (no forward pass). Asks whether MLP 18 **builds** the result (`a+b`) circular features or
 **adds to** structure already in the residual stream — and which neurons / subcomponents build
-them. A self-contained canvas applet (`index.html` + `data.js`): one plot per period, all
-projected on the residual-stream Fourier probes in their predicted-`(cos, sin)` frame (red
-ring = unit circle) — a **basis** dropdown picks whether the probes were fit **after** the MLP
-(`post`, the default) or **before** it (`pre`); per-basis zoom/pan is preserved when switching.
-Three rows share one zoomable view per column — residual **before** the MLP, **after**, and
-after with a user-picked **ablation set** applied. Colour by `a` / `b`
+them. A self-contained canvas applet (`index.html` + `data.js`): one plot per period, in the
+probes' predicted-`(cos, sin)` frame (red ring = unit circle; column captions carry both
+sites' r²). **Four rows** share one zoomable view per column: (1) pre-MLP residual on the
+**pre**-fit probes — the pre-existing structure in its own best frame; (2) pre-MLP residual on
+the **post**-fit probes — how much of it already lies in the final representation's frame;
+(3) post-MLP residual on the post probes; (4) row 3 with a user-picked **ablation set**
+applied. **Hovering a point marks the same prompt in every plot** (overlay canvases, no
+repaint), so a prompt's trajectory across the rows reads directly. Colour by `a` / `b`
 / `a+b` with mod + offset. An **ablate** dropdown picks neurons or subcomponents (not mixed);
 the side panel lists them with checkboxes, `(a, b)` thumbnails (post-SwiGLU activation /
 inner activation), KL / mean-CI / period info, and a **search-by-id** box (`12023` for neurons,
@@ -729,17 +729,15 @@ emulating the MLP in-browser:
   once in-browser, cached int16). Single components ship their **exact** full-grid deltas;
   multi-component sets use the emulator with a **control-variate** correction
   (`emu(S) − Σ emu({c}) + Σ exact({c})`) so only the between-component interaction is
-  approximated — build-time fidelity per basis: ≤0.2% rel error for small sets, ~2% ablating
+  approximated — build-time fidelity: ≤0.2% rel error for small sets, ~2% ablating
   every alive gate/up component (numbers ship in `meta.fidelity` and display in the panel).
   Mixed gate/up + down selections correct the down read for the emulated `Δh`.
 
-The heavy payload (neuron activation grids, SVD factors) is basis-independent and shipped
-once; each extra basis adds only its projected clouds, per-unit projected write vectors, and
-exact single deltas (~7 MB), with the SVD column weights taken as the max projection norm over
-the bases. Reads the per-basis probes JSONs, the run's `hidden_activations_add.npz` /
-`alive_filtered_add.tsv` / `subcomp_periods_add.tsv`, the census `candidates.tsv`
-(+ `ablation_full_add.npz`), and the checkpoint U/V + frozen MLP weights (mmap). Addition only
-(the probes' result variable is `a+b`).
+Ablation math lives entirely in the post frame (the only frame with an ablated row); the pre
+probes contribute one projected cloud + the caption r². Reads the two probes JSONs, the run's
+`hidden_activations_add.npz` / `alive_filtered_add.tsv` / `subcomp_periods_add.tsv`, the
+census `candidates.tsv` (+ `ablation_full_add.npz`), and the checkpoint U/V + frozen MLP
+weights (mmap). Addition only (the probes' result variable is `a+b`).
 Output: `<run_dir>/analysis/result_feature_construction/{index.html,data.js}`.
 Smoke-test with `headless_check.py`.
 
