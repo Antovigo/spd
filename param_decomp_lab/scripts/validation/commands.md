@@ -369,8 +369,10 @@ $PY $V_DIR/headless_check.py ~/out/runs/addmult-L18-03/analysis/fourier_scatter/
 ### 14b. Result feature construction — before/after MLP18 with in-browser ablation (CPU)
 
 Does MLP 18 build the `a+b` circular features or add to pre-existing structure — and which
-neurons / subcomponents build them? One plot per canonical period on the **post-MLP residual**
-Fourier probes (`runs/fourier_probes/probes_post.json`), three linked rows: residual before the
+neurons / subcomponents build them? One plot per canonical period on the residual-stream
+Fourier probes (`runs/fourier_probes/probes_<site>.json`; a **basis** dropdown switches
+between the probes fit after the MLP (`post`) and before it (`pre`) — `--bases=post,pre`),
+three linked rows: residual before the
 MLP, after, and after with a checkbox-picked set of **neurons** (measured max KL > 0.01, from
 the census) or **subcomponents** (the alive set) ablated — any number at once, emulated
 in-browser (exact for neurons / down / single gate-up; low-rank full-SwiGLU emulation with a

@@ -50,6 +50,7 @@
 <body>
 <div id="controls">
   <span id="title">Result feature construction</span>
+  <label>basis (probes)<select id="basis"></select></label>
   <label>colour by<select id="colorBy"><option>a</option><option>b</option><option selected>a+b</option></select></label>
   <label>mod<select id="mod"></select></label>
   <label>offset<input id="offset" type="number" value="0" style="width:56px" /></label>
@@ -120,6 +121,9 @@ const aOf = t => Math.floor(t / N) + 1, bOf = t => (t % N) + 1;
 
 // ---- selection state -----------------------------------------------------------------------
 let MODE = "subcomponents";
+let BASIS = D.meta.bases[0];         // which probes project the clouds (post / pre)
+const bkey = name => `bases.${BASIS}.${name}`;
+const BASIS_LABEL = { post: `after MLP ${D.meta.layer} (post)`, pre: `before MLP ${D.meta.layer} (pre)` };
 const SELECTED = new Set();          // neuron ids (numbers) or subcomp ids ("g124")
 const SIZE = 240;
 
@@ -146,19 +150,21 @@ let DELTA = null;
 
 function rowPoints(row) {
   // returns {proj, idx(t->grid index), count}
-  if (row === 0) return { proj: arr("proj_pre"), map: null, count: NP };
-  if (row === 1 || !DELTA) return { proj: arr("proj_post"), map: null, count: NP };
-  if (DELTA.full) return { proj: arr("proj_post"), delta: DELTA.full, map: null, count: NP };
-  return { proj: arr("proj_post"), delta: DELTA.sub, map: subToFull, count: M };
+  if (row === 0) return { proj: arr(bkey("proj_pre")), map: null, count: NP };
+  if (row === 1 || !DELTA) return { proj: arr(bkey("proj_post")), map: null, count: NP };
+  if (DELTA.full) return { proj: arr(bkey("proj_post")), delta: DELTA.full, map: null, count: NP };
+  return { proj: arr(bkey("proj_post")), delta: DELTA.sub, map: subToFull, count: M };
 }
 function subToFull(i) {
   const r = Math.floor(i / SUB_SIDE), c = i % SUB_SIDE;
   return (r * STRIDE) * N + (c * STRIDE);
 }
 
+const VIEWS = {};  // per basis, so switching back preserves zoom/pan
 function initViews() {
-  views = [];
-  const pre = arr("proj_pre"), post = arr("proj_post");
+  if (VIEWS[BASIS]) { views = VIEWS[BASIS]; return; }
+  views = VIEWS[BASIS] = [];
+  const pre = arr(bkey("proj_pre")), post = arr(bkey("proj_post"));
   for (let j = 0; j < P; j++) {
     let lo0 = Infinity, hi0 = -Infinity, lo1 = Infinity, hi1 = -Infinity;
     for (const proj of [pre, post]) {
@@ -213,7 +219,7 @@ function buildGrid() {
   grid.appendChild(document.createElement("div"));
   D.meta.periods.forEach((t, j) => {
     const cap = document.createElement("div"); cap.className = "colcap";
-    cap.textContent = `T=${t} · r²=${D.meta.r2[j].toFixed(2)}`;
+    cap.textContent = `T=${t} · r²=${D.meta.r2[BASIS][j].toFixed(2)}`;
     grid.appendChild(cap);
   });
   cells = [];
@@ -349,7 +355,7 @@ function toggle(id, on) {
 function updateFidelityNote() {
   const f = el("fidelity");
   if (MODE === "neurons") { f.textContent = "neuron ablation is exact (additive in W_down), full grid."; return; }
-  const parts = (D.meta.fidelity || []).map(x => `${x.config}: ${(x.rel_rms * 100).toFixed(1)}%`);
+  const parts = (D.meta.fidelity[BASIS] || []).map(x => `${x.config}: ${(x.rel_rms * 100).toFixed(1)}%`);
   f.textContent = `single subcomponent / down-only: exact, full grid. Multi gate/up: emulated on the `
     + `stride-${STRIDE} subgrid (control-variate; build-time interaction error — ${parts.join(", ")}).`;
 }
@@ -359,7 +365,7 @@ function recomputeDelta() {
   if (EMU.running) { EMU.pending = true; return; }  // re-run with the fresh selection when done
   if (SELECTED.size === 0) { DELTA = null; setStatus(""); drawRow(2); return; }
   if (MODE === "neurons") {
-    const acts = arr("neuron_act"), wds = arr("neuron_wd");
+    const acts = arr("neuron_act"), wds = arr(bkey("neuron_wd"));
     const out = new Float32Array(NP * P2);
     let k = 0;
     D.neurons.forEach((nrec, i) => {
@@ -384,7 +390,7 @@ function recomputeDelta() {
   const nGu = D.subcomps.filter(c => c.proj !== "d").length;
   if (selGu.length === 0) {
     // down-only: exact, additive, full grid
-    const inner = arr("sub_inner"), wu = arr("down_wu");
+    const inner = arr("sub_inner"), wu = arr(bkey("down_wu"));
     const out = new Float32Array(NP * P2);
     for (const s of selDown) {
       const grid = inner.subarray(s.i * NP, (s.i + 1) * NP);
@@ -400,7 +406,7 @@ function recomputeDelta() {
   }
   if (selGu.length === 1 && selDown.length === 0) {
     // single gate/up: shipped exact full-grid delta
-    const ex = arr("gu_exact_delta");
+    const ex = arr(bkey("gu_exact_delta"));
     DELTA = { full: ex.slice(selGu[0].i * NP * P2, (selGu[0].i + 1) * NP * P2) };
     setStatus(`${selGu[0].rec.id} ablated — exact, full grid.`);
     drawRow(2); return;
@@ -460,9 +466,10 @@ function reconstruct(done) {
 function silu(v) { return v / (1 + Math.exp(-v)); }
 
 // One emulator pass: projected-output delta [M*P2] for ablating the given gate/up rows,
-// plus (optionally) per-down-comp read deltas Σ_j Δact_j V[j,c].
-function emuPass(rows, downCols, done) {
-  const wdAll = arr("wd_all");
+// plus (optionally) per-down-comp read deltas Σ_j Δact_j V[j,c]. `basis` is pinned by the
+// caller so chained passes stay consistent across a mid-run basis switch.
+function emuPass(basis, rows, downCols, done) {
+  const wdAll = arr(`bases.${basis}.wd_all`);
   const out = new Float32Array(M * P2);
   const dRead = downCols.map(() => new Float32Array(M));
   const nR = rows.length;
@@ -511,17 +518,18 @@ function emuPass(rows, downCols, done) {
 function emulate(selGu, selDown) {
   if (EMU.running) return;
   EMU.running = true;
+  const basis0 = BASIS;  // a mid-run basis switch sets EMU.pending; results under basis0 stay valid
   const nGu = D.subcomps.filter(c => c.proj !== "d").length;
   reconstruct(() => {
-    // cache single-comp emulated deltas for the control variate
-    const need = selGu.filter(s => !(s.rec.id in EMU.singles));
+    // cache single-comp emulated deltas for the control variate (projections are per-basis)
+    const need = selGu.filter(s => !((basis0 + ":" + s.rec.id) in EMU.singles));
     function afterSingles() {
-      emuPass(selGu, selDown.map(s => s.i - nGu), (raw, dRead) => {
+      emuPass(basis0, selGu, selDown.map(s => s.i - nGu), (raw, dRead) => {
         const out = raw;
         // control variate: emu(S) − Σ emu({c}) + Σ exact({c})|subgrid
-        const ex = arr("gu_exact_delta");
+        const ex = arr(`bases.${basis0}.gu_exact_delta`);
         for (const s of selGu) {
-          const single = EMU.singles[s.rec.id];
+          const single = EMU.singles[basis0 + ":" + s.rec.id];
           const exact = ex.subarray(s.i * NP * P2, (s.i + 1) * NP * P2);
           for (let t = 0; t < M; t++) {
             const base = t * P2, ebase = SUB_IDX[t] * P2;
@@ -529,7 +537,7 @@ function emulate(selGu, selDown) {
           }
         }
         // down comps: exact given the emulated h' (shipped inner + emulated read delta)
-        const inner = arr("sub_inner"), wu = arr("down_wu");
+        const inner = arr("sub_inner"), wu = arr(`bases.${basis0}.down_wu`);
         selDown.forEach((s, k) => {
           const grid = inner.subarray(s.i * NP, (s.i + 1) * NP);
           const w = wu.subarray((s.i - nGu) * P2, (s.i - nGu + 1) * P2);
@@ -550,7 +558,7 @@ function emulate(selGu, selDown) {
     function nextSingle() {
       if (!need.length) { afterSingles(); return; }
       const s = need.shift();
-      emuPass([s], [], out => { EMU.singles[s.rec.id] = out; nextSingle(); });
+      emuPass(basis0, [s], [], out => { EMU.singles[basis0 + ":" + s.rec.id] = out; nextSingle(); });
     }
     nextSingle();
   });
@@ -585,6 +593,24 @@ function populateMods() {
     sel.appendChild(o);
   }
 }
+function populateBasis() {
+  const sel = el("basis");
+  sel.innerHTML = "";
+  for (const b of D.meta.bases) {
+    const o = document.createElement("option"); o.value = b; o.textContent = BASIS_LABEL[b] || b;
+    sel.appendChild(o);
+  }
+  sel.value = BASIS;
+  sel.disabled = D.meta.bases.length < 2;
+}
+el("basis").addEventListener("change", () => {
+  BASIS = el("basis").value;
+  buildGrid();       // captions carry the basis r²; canvases are recreated
+  initViews();       // per-basis views (zoom preserved when returning)
+  drawAll();
+  updateFidelityNote();
+  recomputeDelta();  // re-project the ablated row on the new basis (selection kept)
+});
 el("mode").addEventListener("change", () => {
   MODE = el("mode").value;
   SELECTED.clear();
@@ -604,9 +630,10 @@ el("clearBtn").addEventListener("click", () => {
   recomputeDelta();
 });
 
-el("hint").textContent = `${D.meta.run} · L${D.meta.layer} · probes ${D.meta.probes} (a+b, post-MLP residual) · `
-  + `${N}×${N} grid · red ring = predicted unit circle`;
-D_INT = arr("wd_all").length / P2;
+el("hint").textContent = `${D.meta.run} · L${D.meta.layer} · a+b probes on the residual stream `
+  + `(basis dropdown: fit after vs before the MLP) · ${N}×${N} grid · red ring = predicted unit circle`;
+D_INT = arr(bkey("wd_all")).length / P2;
+populateBasis();
 populateMods();
 buildGrid();
 initViews();
