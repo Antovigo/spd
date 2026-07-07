@@ -717,7 +717,14 @@ repaint), so a prompt's trajectory across the rows reads directly. Colour by `a`
 / `a+b` with mod + offset, or by the **ablation displacement** — `Δ (plane)` (the 2D
 original→ablated move in each column's own probe plane) or `Δ (total)` (the norm over all
 planes) — prompt-keyed so every row colours, scaled to the 99th percentile, grey where
-undefined (no ablation / off the emulated subgrid), value in the tooltip. An **ablate**
+undefined (no ablation / off the emulated subgrid), value in the tooltip. Ablated items also
+draw **red direction arrows**: each gate/up subcomponent's unit read direction (`V̂`; neurons
+their gate + up rows) on row 1's pre frame, each down subcomponent's unit write direction
+(`Û`; neurons their down column) on row 2's post frame — mapped through the same linear map
+as the points (`v̂·W` per plane, so lengths compare across periods; display-scaled per row to
+the unit ring, raw ‖proj‖ on arrowhead hover). RMSNorm between the pre residual and the
+gate/up input is absorbed by the probes, so raw directions are used (as in
+`build_direction_scatter`). An **ablate**
 dropdown picks neurons or subcomponents (not mixed);
 the side panel lists them with checkboxes, `(a, b)` thumbnails (post-SwiGLU activation /
 inner activation), KL / mean-CI / period info, and a **search-by-id** box (`12023` for neurons,

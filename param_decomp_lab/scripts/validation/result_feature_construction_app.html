@@ -178,6 +178,41 @@ function deltaColorMode() { return el("colorBy").value.startsWith("d"); }
 // the ablated row always redraws; delta colouring repaints every row
 function refreshAfterDelta() { if (deltaColorMode()) recolor(); else drawRow(3); }
 
+// ---- ablation-direction arrows ---------------------------------------------------------------
+// For each ablated item: its read direction (gate/up subcomp V, neuron gate + up rows) drawn on
+// row 0's pre frame; its write direction (down subcomp U, neuron down column) on row 1's post
+// frame. Unit residual directions go through the same linear map as the points (v̂·W per
+// plane), so arrow lengths compare across periods; display is scaled per row so the longest
+// arrow spans 0.9 of the unit ring (raw ‖proj‖ in the tooltip).
+const ARROWS = { 0: [], 1: [], scale: { 0: 1, 1: 1 } };
+function refreshArrows() {
+  for (const row of [0, 1]) {
+    const list = [];
+    if (MODE === "neurons") {
+      D.neurons.forEach((nrec, i) => {
+        if (!SELECTED.has(nrec.id)) return;
+        if (row === 0) {
+          list.push({ label: `${nrec.id} gate read`, p: arr("neuron_arrow_g").subarray(i * P2, (i + 1) * P2) });
+          list.push({ label: `${nrec.id} up read`, p: arr("neuron_arrow_u").subarray(i * P2, (i + 1) * P2) });
+        } else {
+          list.push({ label: `${nrec.id} down write`, p: arr("neuron_arrow_d").subarray(i * P2, (i + 1) * P2) });
+        }
+      });
+    } else {
+      D.subcomps.forEach((c, i) => {
+        if (!SELECTED.has(c.id)) return;
+        if ((c.proj === "d") === (row === 1)) {
+          list.push({ label: `${c.id} ${row ? "write" : "read"}`, p: arr("sub_arrow").subarray(i * P2, (i + 1) * P2) });
+        }
+      });
+    }
+    let mx = 0;
+    for (const a of list) for (let j = 0; j < P; j++) mx = Math.max(mx, Math.hypot(a.p[2 * j], a.p[2 * j + 1]));
+    ARROWS[row] = list;
+    ARROWS.scale[row] = mx > 0 ? 0.9 / mx : 1;
+  }
+}
+
 // ---- plots ---------------------------------------------------------------------------------
 // Four fixed rows: which activation cloud, on which probe frame; the last row applies the
 // ablation delta. One view per column, shared by all rows so correspondences read directly.
@@ -253,6 +288,35 @@ function drawCell(row, col) {
   const c0 = toScreen(v, 0, 0);
   ctx.strokeStyle = "rgba(200,60,60,.5)"; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.arc(c0[0], c0[1], v.k, 0, 2 * Math.PI); ctx.stroke();
+
+  // read/write direction arrows of the ablated items (rows 0 and 1 only)
+  const arrows = ARROWS[row];
+  if (arrows && arrows.length) {
+    const k = ARROWS.scale[row];
+    ctx.strokeStyle = ctx.fillStyle = "#ff2020"; ctx.lineWidth = 2;
+    for (const a of arrows) {
+      const e = toScreen(v, a.p[2 * col] * k, a.p[2 * col + 1] * k);
+      ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(e[0], e[1]); ctx.stroke();
+      const ang = Math.atan2(e[1] - o[1], e[0] - o[0]), hl = 9, hw = 0.5;
+      ctx.beginPath(); ctx.moveTo(e[0], e[1]);
+      ctx.lineTo(e[0] - hl * Math.cos(ang - hw), e[1] - hl * Math.sin(ang - hw));
+      ctx.lineTo(e[0] - hl * Math.cos(ang + hw), e[1] - hl * Math.sin(ang + hw));
+      ctx.closePath(); ctx.fill();
+    }
+  }
+}
+
+function arrowAt(row, col, px, py) {
+  const list = ARROWS[row];
+  if (!list || !list.length) return null;
+  const v = views[col], k = ARROWS.scale[row];
+  let best = null, bestd = 9;
+  for (const a of list) {
+    const e = toScreen(v, a.p[2 * col] * k, a.p[2 * col + 1] * k);
+    const d = Math.hypot(e[0] - px, e[1] - py);
+    if (d < bestd) { bestd = d; best = a; }
+  }
+  return best;
 }
 
 function drawColumn(col) { for (let r = 0; r < ROWS.length; r++) drawCell(r, col); }
@@ -336,6 +400,14 @@ function attachInteraction(canvas, row, col) {
       views[col].cx = drag.cx - (ev.offsetX - drag.x) / views[col].k;
       views[col].cy = drag.cy + (ev.offsetY - drag.y) / views[col].k;
       drawColumn(col); drawHighlight(); return;
+    }
+    const ah = row <= 1 ? arrowAt(row, col, ev.offsetX, ev.offsetY) : null;
+    if (ah) {
+      if (HOVER_T !== -1) { HOVER_T = -1; drawHighlight(); }
+      tooltip.style.display = "block";
+      tooltip.style.left = (ev.clientX + 10) + "px"; tooltip.style.top = (ev.clientY + 10) + "px";
+      tooltip.textContent = `${ah.label} · ‖proj‖ ${Math.hypot(ah.p[2 * col], ah.p[2 * col + 1]).toFixed(3)}`;
+      return;
     }
     const t = pointAt(row, col, ev.offsetX, ev.offsetY);
     if (t !== HOVER_T) { HOVER_T = t; drawHighlight(); }
@@ -449,6 +521,7 @@ function updateFidelityNote() {
 
 // ---- ablation math -------------------------------------------------------------------------
 function recomputeDelta() {
+  refreshArrows(); drawRow(0); drawRow(1);  // direction arrows track the selection immediately
   if (EMU.running) { EMU.pending = true; return; }  // re-run with the fresh selection when done
   if (SELECTED.size === 0) { setDelta(null); setStatus(""); refreshAfterDelta(); return; }
   if (MODE === "neurons") {
@@ -699,7 +772,8 @@ el("clearBtn").addEventListener("click", () => {
 
 el("hint").textContent = `${D.meta.run} · L${D.meta.layer} · a+b probes on the residual stream `
   + `(rows: pre/post activations × pre/post probes) · ${N}×${N} grid · red ring = predicted unit circle · `
-  + `hover a point to mark its prompt everywhere`;
+  + `hover a point to mark its prompt everywhere · red arrows = ablated items' read (row 1) / `
+  + `write (row 2) directions`;
 D_INT = arr("wd_all").length / P2;
 populateMods();
 buildGrid();

@@ -376,7 +376,8 @@ the post probes, and the same with a checkbox-picked set of **neurons** (measure
 0.01, from the census) or **subcomponents** (the alive set) ablated — any number at once,
 emulated in-browser (exact for neurons / down / single gate-up; low-rank full-SwiGLU emulation
 with a control-variate correction for multi gate/up sets). Hovering a point marks the same
-prompt in every plot. Search items by id (`12023` / `g124`).
+prompt in every plot; ablated items draw red read-direction arrows on row 1 (pre frame) and
+write-direction arrows on row 2 (post frame). Search items by id (`12023` / `g124`).
 
 ```bash
 CKPT=~/out/runs/addsub-L18-04-8x-beta0.75-LR/model_24000.pth
@@ -455,4 +456,34 @@ uv run python -m $N.compute_subcomp_neuron_links "$SCKPT"                       
 uv run python -m $N.build_subcomp_census "$SCKPT"
 $PY param_decomp_lab/scripts/validation/headless_check.py \
     ~/out/runs/addsub-L18-04-2x-beta0.75-LR/analysis/subcomp_census/index.html
+```
+
+### 17. Minimal sufficient subset — CI-ranked sufficiency curve (GPU)
+
+Ranks all subcomponents by mean lower-leaky CI on the target prompts, then sweeps top-k
+subsets (rest hard zero, delta fully on) and measures last-position KL / argmax agreement
+vs the raw target model. The alive subset is the top-k for the smallest swept k with
+mean KL <= `--kl-thr` (default 0.007); the curve figure shows mean + q5-q95 ribbon +
+max KL with the alive cut marked. Pass a dense `--ks` around the knee to tighten the cut.
+
+```bash
+uv run python -m $V.find_alive_subcomponents "$MODEL_PATH" --slurm
+uv run python -m $V.find_alive_subcomponents "$MODEL_PATH" --kl-thr=0.02 --ks=0,8,16,32,64,128 --slurm
+# outputs: datasets/alive_subcomponents.tsv (the alive subset), datasets/alive_subcomponents_curve.tsv,
+#          datasets/alive_subcomponents_kl.npz (per-prompt KL + full ranking),
+#          analysis/alive_subcomponents/recon_vs_k.png
+```
+
+### 18. Alive neurons — greedy removal on the census grids (GPU)
+
+Neuron analog of §17 without CI: orders L18 neurons by mean |post-SwiGLU activation| at
+`=` (ascending) and greedily zeroes them (adaptive batch + bisection) while the mean KL
+vs the base model on a scoring subset of the 0..200 add/sub grids stays <= `--kl-thr`.
+Kept neurons are the alive set; decomposition-independent, so outputs go to `runs/neurons/`.
+
+```bash
+uv run python -m $N.find_alive_neurons "$CKPT" --slurm
+uv run python -m $N.find_alive_neurons "$CKPT" --kl-thr=0.02 --score-prompts=8000 --slurm
+# outputs: runs/neurons/alive_neurons.tsv, alive_neurons_curve.tsv, alive_neurons.npz,
+#          alive_neurons_curve.png
 ```

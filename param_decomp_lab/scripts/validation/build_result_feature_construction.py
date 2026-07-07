@@ -302,6 +302,25 @@ def build_result_feature_construction(
         fidelity.append({"config": label, "n_comps": len(sel), "rel_rms": round(rel, 4)})
         logger.info(f"emulator fidelity [{label}]: rel-rms {rel:.4f} (|delta| {mag:.3f})")
 
+    # --- ablation-direction arrows -----------------------------------------------------------
+    # Unit residual-space directions mapped through the same linear map as the points: read
+    # directions (gate/up V columns, neuron gate/up rows — what the unit reads from the
+    # residual) onto the pre frame; write directions (down U rows, neuron down columns — what
+    # it writes) onto the post frame. RMSNorm sits between the pre residual and the actual
+    # gate/up input; the probes absorb it linearly, so raw directions are used (as in
+    # `build_direction_scatter`).
+    def unit_rows(mat: NDArray[np.float32]) -> NDArray[np.float32]:
+        return mat / np.linalg.norm(mat, axis=1, keepdims=True)
+
+    sub_arrow_rows = [
+        (uv[p][0][:, c] / np.linalg.norm(uv[p][0][:, c])) @ w_pre for p, c in gu_comps
+    ] + [(uv[p][1][c] / np.linalg.norm(uv[p][1][c])) @ w_post for p, c in down_comps]
+    neuron_arrow = {
+        "g": unit_rows(weights["gate_proj"][neuron_ids]) @ w_pre,
+        "u": unit_rows(weights["up_proj"][neuron_ids]) @ w_pre,
+        "d": unit_rows(weights["down_proj"][:, neuron_ids].T) @ w_post,
+    }
+
     # --- payload -----------------------------------------------------------------------------
     def comp_entry(proj: str, c: int) -> dict[str, Any]:
         group = period_groups.get((proj, c))
@@ -333,6 +352,10 @@ def build_result_feature_construction(
         "neuron_act": b64_f16(act[:, neuron_ids].T),
         "neuron_wd": b64_f16(wd[neuron_ids]),
         "subcomps": [comp_entry(p, c) for p, c in gu_comps + down_comps],
+        "sub_arrow": b64_f16(np.stack(sub_arrow_rows)),
+        "neuron_arrow_g": b64_f16(neuron_arrow["g"]),
+        "neuron_arrow_u": b64_f16(neuron_arrow["u"]),
+        "neuron_arrow_d": b64_f16(neuron_arrow["d"]),
         "sub_inner": b64_f16(np.stack([inner_grids[pc] for pc in gu_comps + down_comps])),
         "gu_coupling": b64_f16(np.stack([uv[p][1][c] for p, c in gu_comps])) if gu_comps else "",
         "gu_exact_delta": b64_f16(np.stack([exact_single[pc] for pc in gu_comps]))
