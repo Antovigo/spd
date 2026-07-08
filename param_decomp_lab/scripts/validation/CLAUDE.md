@@ -151,10 +151,10 @@ If two scripts need the same thing, it belongs here.
   activations + answer baselines, measured last-position ablation KL (hand-rolled
   layers-19..31 KV-cache patched tail; per-neuron and per-rank-1-subcomponent),
   translation-invariance periodicity, probe-plane subspace projections,
-  subcomponent↔neuron coupling / explanation R², and two applets (`build_neuron_census`,
-  `build_subcomp_census`). Neuron-level artifacts are decomposition-free and live in the
-  shared `runs/neurons/` census dir; subcomponent artifacts live in the reference run's
-  `analysis/`. Per-script specs in `spec.md`, runnable chains in `commands.md`.
+  subcomponent↔neuron coupling / explanation R², the greedy alive-neuron subset
+  (`find_alive_neurons`), and two applets (`build_neuron_census`, `build_subcomp_census`).
+  Neuron-level artifacts are decomposition-free and live in the shared `runs/neurons/`
+  census dir; subcomponent artifacts live in the reference run's `analysis/`. Per-script specs in `spec.md`, runnable chains in `commands.md`.
 
 ## Composition & sample commands
 
