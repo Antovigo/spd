@@ -510,3 +510,28 @@ uv run python -m $V.collect_projection_kl "$MODEL_PATH" --ops=add --alive-tsv="$
 uv run python -m $V.collect_projection_kl "$MODEL_PATH" --ci-thr=0.01 --slurm
 # outputs: datasets/projection_kl_ci0.01/..., analysis/projection_kl_ci0.01/kl_heatmaps_{add,sub}.png
 ```
+
+### 20. Subspace filtering — projection battery per block (GPU + marimo)
+
+Implements `subspace_filtering/plan.md`: per block (mlp / attn) and selected set
+(alive = `alive_subcomponents.tsv`, active = per-prompt CI > 0.01 at `=`), projects each
+matrix's input/output at `=` onto the selected subcomponents' V/U spans (original
+weights) or onto the matrix's row/col space (circuit), in raw / centered / bias flavors,
+plus the no-projection circuit baseline (delta always off).
+
+```bash
+SF=param_decomp_lab.scripts.validation.subspace_filtering
+uv run python -m $SF.collect_filtered_kl "$MODEL_PATH" mlp  --subset=alive  --slurm
+uv run python -m $SF.collect_filtered_kl "$MODEL_PATH" attn --subset=alive  --slurm
+uv run python -m $SF.collect_filtered_kl "$MODEL_PATH" mlp  --subset=active --slurm
+uv run python -m $SF.collect_filtered_kl "$MODEL_PATH" attn --subset=active --slurm
+# outputs: datasets/subspace_filtering/{kl_<block>_<subset>_<op>.tsv, nci_<block>_<op>.tsv, meta_*.json}
+
+# plots (boxplots, heatmap quadriptychs, raw-vs-centered scatters) — marimo notebook;
+# PNGs are saved to analysis/subspace_filtering/<block>_<subset>/ as a side effect:
+uv pip install marimo
+marimo edit param_decomp_lab/scripts/validation/subspace_filtering/plots_notebook.py
+# headless render of one combo:
+SUBFILT_BLOCK=mlp SUBFILT_SUBSET=alive SUBFILT_OP=add \
+  uv run python param_decomp_lab/scripts/validation/subspace_filtering/plots_notebook.py
+```
