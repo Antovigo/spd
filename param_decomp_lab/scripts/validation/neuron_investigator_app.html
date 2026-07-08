@@ -42,6 +42,8 @@
     </select>
   </label>
   <label>min total score <input id="minscore" type="number" min="0" step="0.001" value="0" /></label>
+  <label>neuron ID(s) <input id="nidfilter" type="text" placeholder="e.g. 12154, 2955" style="width:130px" /></label>
+  <span id="nidmsg" style="color:#c33"></span>
   <button id="prev">&larr; prev</button>
   <span id="page"></span>
   <button id="next">next &rarr;</button>
@@ -172,7 +174,17 @@ for (let nrn = 0; nrn < NN; nrn++) {
   neuronTotal.input[nrn] = ti; neuronTotal.output[nrn] = to; neuronTotal.all[nrn] = ti + to;
 }
 let visible = neuronOrder.slice();  // neuronOrder filtered by minScore (rows actually shown)
+let idFilter = null;  // Set of real neuron ids typed into #nidfilter; overrides the score filter
 function applyFilter() {
+  const msg = document.getElementById("nidmsg");
+  if (idFilter && idFilter.size) {  // explicit ids: show them regardless of the score threshold
+    visible = neuronOrder.filter(nrn => idFilter.has(+D.neuron_ids[nrn]));
+    const found = new Set(visible.map(nrn => +D.neuron_ids[nrn]));
+    const missing = [...idFilter].filter(id => !found.has(id));
+    msg.textContent = missing.length ? `not shipped: ${missing.join(", ")} (top ${NN} only)` : "";
+    return;
+  }
+  msg.textContent = "";
   const tot = neuronTotal[filterScope];
   visible = neuronOrder.filter(nrn => tot[nrn] >= minScore);
 }
@@ -395,6 +407,12 @@ elMinScore.addEventListener("input", () => {
 });
 elScope.addEventListener("change", () => {
   filterScope = elScope.value;
+  applyFilter(); page = 0; drawMatrix();
+});
+// neuron-ID filter: comma/space-separated real ids; empty clears back to the score filter.
+document.getElementById("nidfilter").addEventListener("input", e => {
+  const ids = e.target.value.split(/[\s,;]+/).filter(t => t !== "").map(Number).filter(Number.isFinite);
+  idFilter = ids.length ? new Set(ids) : null;
   applyFilter(); page = 0; drawMatrix();
 });
 drawMatrix(); drawRight();
