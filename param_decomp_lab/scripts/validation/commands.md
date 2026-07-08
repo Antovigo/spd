@@ -489,3 +489,24 @@ uv run python -m $N.find_alive_neurons "$CKPT" --kl-thr=0.02 --score-prompts=800
 # outputs: runs/neurons/alive_neurons.tsv, alive_neurons_curve.tsv, alive_neurons.npz,
 #          alive_neurons_curve.png
 ```
+
+### 19. Subspace-projection KL — alive subspaces vs alive circuit (GPU)
+
+Projects the original model's L18 MLP input (onto the alive gate/up `V` span) or output
+(onto the alive down `U` span) at the `=` position, weights unchanged, and compares the
+last-position KL vs the target against running only the alive subcomponents (dead + delta
+off at `=`). If the decomposition found the causally relevant subspace, the projections
+should hurt no more than the circuit. Reads `alive_components.tsv`; one heatmap PNG per op.
+
+```bash
+uv run python -m $V.collect_projection_kl "$MODEL_PATH" --slurm
+# add-only, custom alive list:
+uv run python -m $V.collect_projection_kl "$MODEL_PATH" --ops=add --alive-tsv="$DATASETS/alive_components.tsv" --slurm
+# outputs: datasets/projection_kl/{data_add.npz,data_sub.npz,summary.tsv,meta.json},
+#          analysis/projection_kl/kl_heatmaps_{add,sub}.png
+
+# per-prompt sets instead of the static alive list: subcomponents with lower-leaky CI > 0.01
+# at the `=` position of each prompt define that prompt's subspaces and circuit (`ci_only`)
+uv run python -m $V.collect_projection_kl "$MODEL_PATH" --ci-thr=0.01 --slurm
+# outputs: datasets/projection_kl_ci0.01/..., analysis/projection_kl_ci0.01/kl_heatmaps_{add,sub}.png
+```

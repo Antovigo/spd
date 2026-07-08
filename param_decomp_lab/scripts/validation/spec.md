@@ -802,6 +802,65 @@ if not); plus the checkpoint's target down-projection weight (mmap). No forward 
 `data.js` holds fp16-base64 gate / CI / inner `(a, b)` grids (~14 MB for two ops at the
 defaults). Smoke-test with `headless_check.py`.
 
+**collect_projection_kl.py**
+
+args:
+- the path to a decomposed model
+- `--ops`: comma list of operations to run (default `add,sub`)
+- `--batch-size`: forward-pass chunk size over the prompt grid (default 512)
+- `--ci-thr`: switch to **per-prompt** sets — subcomponents with lower-leaky CI above
+  this at the last position of each prompt (default off = static alive mode)
+- `--alive-tsv`: override the alive-components TSV (default the run's
+  `analysis/datasets/alive_components.tsv`; static mode only, incompatible with `--ci-thr`)
+- `--output-dir` / `--output-fig-dir`: override the dataset dir / figure dir
+- `--slurm` + knobs: submit as a single-GPU job (see `CLAUDE.md` → "GPU scripts run via
+  SLURM"); the login node has no GPU.
+
+Tests whether the decomposition's subspaces are the *causally relevant* subspaces of the
+decomposed layer's MLP, not just a sufficient circuit: if they are, projecting the
+**original model's** activations onto them (weights unchanged) should preserve the output
+about as well as running the circuit itself. Per prompt of each op's `1..100 × 1..100`
+grid it measures `KL(P_target || P_variant)` of the last-position next-token distribution
+for three variants, each intervening **only at the last (`=`) position** (where the set
+is defined) and leaving decomposed attention and earlier positions untouched:
+
+- `projected_inputs` — a forward pre-hook on the MLP module projects the post-RMSNorm MLP
+  input onto the span of the set's gate_proj + up_proj `V` columns; the unchanged MLP
+  weights consume the projected input.
+- `projected_outputs` — a forward hook projects the MLP output (the residual-stream
+  write) onto the span of the set's down_proj `U` rows before it is added to the residual.
+- `alive_only` / `ci_only` — the MLP weight is replaced by the set's subcomponent sum:
+  component masks 1 on the set / 0 off it and the weight-delta **off** at the last
+  position; all components + delta on at earlier positions (exact reconstruction there).
+
+The subcomponent set is either **static** (default): the alive set from
+`alive_components.tsv`, one subspace shared by every prompt, circuit variant
+`alive_only`; or **per prompt** (`--ci-thr=X`): the subcomponents whose lower-leaky CI
+(continuous sampling) at the last position exceeds `X` on that prompt — the reference
+forward then also feeds the CI fn (`cache_type="input"`), each prompt gets its own
+SVD bases and circuit mask, the circuit variant is `ci_only`, and outputs land in
+`projection_kl_ci<X>/` instead of `projection_kl/`. An empty per-prompt set projects to
+the zero vector.
+
+Bases are orthonormalised by SVD in float32 (singular values > `1e-5 · s_max` kept); the
+projections run in float32 and cast back to the model dtype. The reference is the raw
+target model, so the circuit variant carries the decomposition's reconstruction-error
+floor while the projections don't. A first-batch wiring check asserts all-on + delta
+reproduces the target (mean KL < 0.5). One reference + three variant forwards per chunk.
+
+Outputs (defaults in the run's `analysis/` layout; `<name>` = `projection_kl` or
+`projection_kl_ci<X>`):
+- `datasets/<name>/data_<op>.npz` — `kl` [3, N, N] (variant order in `variants`),
+  `token` [3, N, N] (per-variant argmax token id), `orig_token` / `orig_prob` [N, N];
+  with `--ci-thr` also `n_ci_in` / `n_ci_out` [N, N] (per-prompt set sizes: gate+up V
+  vectors / down U vectors).
+- `datasets/<name>/summary.tsv` — per (op, variant): mean/median/q95/max KL + argmax
+  agreement.
+- `datasets/<name>/meta.json` — set definition (alive counts + subspace ranks, or
+  `ci_thr`), KL direction, token-id → string decode map.
+- `<name>/kl_heatmaps_<op>.png` — the three KL(a, b) heatmaps, shared log colour scale,
+  per-panel mean KL in the title.
+
 ---
 
 ## Neuron census (`neurons/`)
