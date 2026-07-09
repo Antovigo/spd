@@ -16,8 +16,13 @@ Multi-process: launched one process per GPU under SLURM (`init_distributed`); ev
 process computes the same global schedule and contributes its local batch slice.
 """
 
+import atexit
+import io
 import os
+import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +41,16 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PRNGKeyArray
 
+from param_decomp.arithmetic_eval import (
+    ArithmeticGrid,
+    ArithmeticGridStep,
+    ArithmeticSelection,
+    ComponentActivationModel,
+    compute_arithmetic_selection,
+    make_arithmetic_grid_step,
+    n_alive_scalars,
+    render_arithmetic_figures,
+)
 from param_decomp.attn_patterns_eval import (
     accumulate_attn_patterns,
     attn_pattern_for,
@@ -43,7 +58,7 @@ from param_decomp.attn_patterns_eval import (
     make_ci_attn_patterns_step,
     make_stochastic_attn_patterns_step,
 )
-from param_decomp.built_run import BuiltRun, DataConfig
+from param_decomp.built_run import ArithmeticEvalConfig, BuiltRun, DataConfig, TargetSites
 from param_decomp.configs import ResumeProvenance, WeightMagnitudeConfig
 from param_decomp.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.eval import make_eval_step
@@ -52,6 +67,7 @@ from param_decomp.lm import DecomposedModel
 from param_decomp.log import setup_logger
 from param_decomp.run import (
     SlowEvalRenderer,
+    _log_wandb_safe,
     install_sigterm_flag,
     run_decomposition_training,
     slow_eval_due,
@@ -71,7 +87,9 @@ from param_decomp.slow_eval import (
     stochastic_hidden_acts_n_mask_samples,
 )
 from param_decomp.train import TrainState
+from param_decomp_lab.experiments.lm.arithmetic_probe import build_arithmetic_probe
 from param_decomp_lab.experiments.lm.config import (
+    TargetConfig,
     load_config,
     load_run_dir_config,
 )
@@ -201,6 +219,142 @@ def train(
     )
 
 
+class BackgroundRenderer:
+    """Rank-0 background thread for a figure tier's pure-host tail (matplotlib +
+    `wandb.log`). `submit` takes a `render` closure over ONLY materialized numpy results and
+    runs it off-thread so the train loop proceeds on every rank; the closure must touch ZERO
+    jax/device state. One render in flight at a time (a `submit` joins the prior first). The
+    figures log on the live `_step` at `now_step`; an `atexit` join (registered on the first
+    submit, after `wandb.init`, so LIFO runs it before wandb's own flush) drains the last."""
+
+    def __init__(self, is_main: bool):
+        self._is_main = is_main
+        self._thread: threading.Thread | None = None
+        self._atexit_registered = False
+
+    def join(self) -> None:
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def submit(self, render: Callable[[], None]) -> None:
+        if not self._is_main:
+            return
+        if not self._atexit_registered:
+            atexit.register(self.join)
+            self._atexit_registered = True
+        self.join()  # cap to one in-flight render
+        self._thread = threading.Thread(target=render, daemon=True)
+        self._thread.start()
+
+
+def render_and_log_arithmetic(
+    selection: ArithmeticSelection, grid: ArithmeticGrid, top_k: int, now_step: int
+) -> None:
+    """Pure-host `BackgroundRenderer` target: render the per-`(threshold, site)` CI + `x@V`
+    activation heatmaps off the materialized `ArithmeticSelection` and log them on the live
+    `_step` at `now_step` (the n_alive / dropped SCALARS ride the synchronous `eval_record`
+    instead). No jax/device access — safe off the train loop."""
+    import wandb
+    from PIL import Image
+
+    figures = render_arithmetic_figures(selection, grid, top_k)
+    payload: dict[str, Any] = {
+        f"eval/arithmetic/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in figures.items()
+    }
+    _log_wandb_safe(wandb, payload, now_step, "arithmetic CI-grid figures")
+
+
+def _arithmetic_probe_global(tokens: np.ndarray, mesh: Mesh, n_proc: int) -> jax.Array:
+    """Shard the fixed probe over the mesh like a normal batch: pad the row count up to a
+    multiple of the device count (pad rows append AFTER the real grid and are trimmed after
+    the gather) and hand each process its contiguous slice."""
+    n, t = tokens.shape
+    n_dev = mesh.devices.size
+    pad = (-n) % n_dev
+    if pad:
+        tokens = np.concatenate([tokens, np.zeros((pad, t), tokens.dtype)], axis=0)
+    n_pad = tokens.shape[0]
+    per_process = n_pad // n_proc
+    assert per_process % jax.local_device_count() == 0, (per_process, jax.local_device_count())
+    proc = jax.process_index()
+    local = tokens[proc * per_process : (proc + 1) * per_process]
+    return _global_token_batch(local, mesh, n_pad)
+
+
+@dataclass(frozen=True)
+class _ArithmeticEval:
+    """The arithmetic CI-grid eval, built once. `run` does the (collective) selection +
+    column gather, emits the n_alive / dropped scalars, and submits the CI + activation
+    heatmap figures off-thread — one self-contained block the slow tier calls."""
+
+    step: ArithmeticGridStep
+    model: ComponentActivationModel
+    tokens: jax.Array
+    grid: ArithmeticGrid
+    n_prompts: int
+    thresholds: tuple[float, ...]
+    top_k: int
+    renderer: BackgroundRenderer
+
+    def run(self, state: "TrainState", now_step: int) -> "LogRecord":
+        selection = compute_arithmetic_selection(
+            self.step,
+            self.model,
+            state.components,
+            state.ci_fn,
+            self.tokens,
+            self.n_prompts,
+            self.thresholds,
+            self.top_k,
+        )
+        record: dict[str, LogValue] = {
+            f"eval/arithmetic/{k}": v
+            for k, v in n_alive_scalars(selection.active, self.top_k).items()
+        }
+        self.renderer.submit(
+            partial(render_and_log_arithmetic, selection, self.grid, self.top_k, now_step)
+        )
+        return record
+
+
+def _make_arithmetic_eval(
+    arith: ArithmeticEvalConfig | None,
+    target: TargetSites,
+    lm: DecomposedModel,
+    mesh: Mesh,
+    n_proc: int,
+    is_main: bool,
+) -> _ArithmeticEval | None:
+    """Build the probe in-memory from the metric spec + the target's tokenizer. The build is
+    deterministic, so every rank constructs the identical grid — no rank-0 write, no barrier."""
+    if arith is None:
+        return None
+    assert isinstance(lm, ComponentActivationModel), (
+        f"arithmetic eval needs a model exposing masked_component_activations; "
+        f"{type(lm).__name__} does not"
+    )
+    assert isinstance(target, TargetConfig), (
+        f"arithmetic eval reads the probe tokenizer off the HF target; {type(target).__name__} "
+        f"carries no model_name"
+    )
+    from transformers import AutoTokenizer  # heavy import; only the arith probe needs it in-job
+
+    tokenizer = AutoTokenizer.from_pretrained(target.model_name, local_files_only=True)
+    probe = build_arithmetic_probe(arith.operation, arith.a_range, arith.b_range, tokenizer)
+    n_prompts = probe.tokens.shape[0]
+    return _ArithmeticEval(
+        step=make_arithmetic_grid_step(lm, probe.answer_position, n_prompts),
+        model=lm,
+        tokens=_arithmetic_probe_global(probe.tokens, mesh, n_proc),
+        grid=probe.grid,
+        n_prompts=n_prompts,
+        thresholds=arith.thresholds,
+        top_k=arith.top_k,
+        renderer=BackgroundRenderer(is_main),
+    )
+
+
 def _make_lm_eval_fn(
     built: BuiltRun,
     lm: DecomposedModel,
@@ -254,6 +408,7 @@ def _make_lm_eval_fn(
     want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
     want_weight_magnitude = any(isinstance(m, WeightMagnitudeConfig) for m in run_eval_metrics)
     position_ci_step = make_position_ci_step(lm) if want_position_ci else None
+    arith_eval = _make_arithmetic_eval(eval.arithmetic, built.target, lm, mesh, n_proc, is_main)
 
     def eval_fn(state: TrainState, now_step: int) -> "LogRecord":
         eval_pass_index = now_step // eval.every
@@ -334,6 +489,8 @@ def _make_lm_eval_fn(
             slow_renderer.submit(
                 site_reductions, perm_spec, position_ci, components, want_weight_magnitude, now_step
             )
+            if arith_eval is not None:
+                eval_record |= arith_eval.run(state, now_step)
         if is_main and built.run.wandb is not None:
             # torch CI_L0.compute() emitted a per-layer L0 bar chart alongside the scalars;
             # rebuild it host-side from the `eval/l0/<thr>_<site|group>` scalars already in

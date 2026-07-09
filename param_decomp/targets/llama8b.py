@@ -545,15 +545,19 @@ class LlamaDecomposedModel(eqx.Module):
         has_delta: bool,
         remat: bool,
         collect: dict[str, Array] | None,
+        collect_activations: dict[str, Array] | None = None,
     ) -> Array:
-        """The masked decomposed forward shared by `masked_output` and `masked_site_outputs`
-        (SPEC §1.3, S2), as a `lax.scan` over the block stack with a per-site `lax.cond`: a
-        site in `live` runs its decomposed forward (`masks[s]`/`delta_masks[s]`/`routes[s]`),
-        every other site — and every site absent from the decomposition — runs the frozen
-        `x @ W`. One block body compiles regardless of depth / chunk count; `cond` runs only
-        the taken branch so frozen sites do no V@U. `live`/`has_delta` are static; a non-None
-        `collect` gathers per-live-site decomposed outputs (SPEC S31). Requires per-kind dims
-        uniform across layers (asserted) — the layer stack must be homogeneous to scan.
+        """The masked decomposed forward shared by `masked_output` / `masked_site_outputs` /
+        `masked_component_activations` (SPEC §1.3, S2), as a `lax.scan` over the block stack
+        with a per-site `lax.cond`: a site in `live` runs its decomposed forward
+        (`masks[s]`/`delta_masks[s]`/`routes[s]`), every other site — and every site absent
+        from the decomposition — runs the frozen `x @ W`. One block body compiles regardless
+        of depth / chunk count; `cond` runs only the taken branch so frozen sites do no V@U.
+        `live`/`has_delta` are static; a non-None `collect` gathers per-live-site decomposed
+        OUTPUTS (SPEC S31), and a non-None `collect_activations` gathers per-live-site
+        component ACTIVATIONS `x@V` (`[*leading, C]`, the pre-mask coefficient the arithmetic
+        CI-grid eval visualizes). Requires per-kind dims uniform across layers (asserted) —
+        the layer stack must be homogeneous to scan.
 
         `prepared` is the shared, stacked + ÷fsdp-reconstructed per-kind `(V, U)` from
         `prepare_compute_weights` (built ONCE per step) — this fn only ATTACHES the per-forward
@@ -567,12 +571,13 @@ class LlamaDecomposedModel(eqx.Module):
         )
         decomposed_kinds = frozenset(per_kind)
         want_collect = collect is not None
+        want_collect_acts = collect_activations is not None
 
         def masked_site(
             x_in: Array, kind: str, W: Array, pk: dict[str, dict[str, Array]]
-        ) -> tuple[Array, Array | None]:
+        ) -> tuple[Array, Array | None, Array | None]:
             if kind not in decomposed_kinds:
-                return x_in @ W.T, None
+                return x_in @ W.T, None, None
             e = pk[kind]
 
             def decomp(_: None) -> Array:
@@ -582,36 +587,40 @@ class LlamaDecomposedModel(eqx.Module):
                 return x_in @ W.T
 
             out = jax.lax.cond(e["live"], decomp, frozen, None)
-            return out, (out if want_collect else None)
+            act = (x_in @ e["V"]) if want_collect_acts else None  # pre-mask coeff
+            return out, (out if want_collect else None), act
 
         def block(
             x: Array, layer_in: tuple[LlamaLayer, dict[str, dict[str, Array]]]
-        ) -> tuple[Array, dict[str, Array] | None]:
+        ) -> tuple[Array, tuple[dict[str, Array] | None, dict[str, Array] | None]]:
             sl, pk = layer_in
             attn = sl.attn
             h1 = rms_norm(x, sl.ln1, self.eps)
-            q, qc = masked_site(h1, "q", attn.wq, pk)
-            k, kc = masked_site(h1, "k", attn.wk, pk)
-            v, vc = masked_site(h1, "v", attn.wv, pk)
+            q, qc, qa = masked_site(h1, "q", attn.wq, pk)
+            k, kc, ka = masked_site(h1, "k", attn.wk, pk)
+            v, vc, va = masked_site(h1, "v", attn.wv, pk)
             attn_y = attn.core(q, k, v, self.inv_freq)
-            o, oc = masked_site(attn_y, "o", attn.wo, pk)
+            o, oc, oa = masked_site(attn_y, "o", attn.wo, pk)
             post_attn = x + o
             h2 = rms_norm(post_attn, sl.ln2, self.eps)
-            g, gc = masked_site(h2, "gate", sl.Wg, pk)
-            u, uc = masked_site(h2, "up", sl.Wu, pk)
-            d, dc = masked_site(jax.nn.silu(g) * u, "down", sl.Wd, pk)
+            g, gc, ga = masked_site(h2, "gate", sl.Wg, pk)
+            u, uc, ua = masked_site(h2, "up", sl.Wu, pk)
+            d, dc, da = masked_site(jax.nn.silu(g) * u, "down", sl.Wd, pk)
             x = post_attn + d
+            kinds = ("q", "k", "v", "o", "gate", "up", "down")
             collected = (
-                {
-                    name: c
-                    for name, c in (("q", qc), ("k", kc), ("v", vc), ("o", oc),
-                                    ("gate", gc), ("up", uc), ("down", dc))
-                    if c is not None
-                }
+                {n: c for n, c in zip(kinds, (qc, kc, vc, oc, gc, uc, dc), strict=True)
+                 if c is not None}
                 if want_collect
                 else None
             )  # fmt: skip
-            return x, collected
+            collected_acts = (
+                {n: a for n, a in zip(kinds, (qa, ka, va, oa, ga, ua, da), strict=True)
+                 if a is not None}
+                if want_collect_acts
+                else None
+            )  # fmt: skip
+            return x, (collected, collected_acts)
 
         # Per-LAYER checkpoint of the scan BODY in BOTH modes — `remat` controls ONLY whether
         # the layer ACTIVATIONS are recomputed; it NEVER controls the ÷fsdp→full V/U gather.
@@ -634,11 +643,16 @@ class LlamaDecomposedModel(eqx.Module):
         x, ys = jax.lax.scan(jax.checkpoint(block, policy=policy), resid, (self.stacked, per_kind))
         x = rms_norm(x, self.norm, self.eps)
         logits = x @ self.lm_head.T
-        if collect is not None:
-            assert ys is not None  # collect requested -> the scan emitted per-kind outputs
-            for site in live:
-                layer, kind = parse_site_name(site)
-                collect[site] = ys[kind][layer]
+        if collect is not None or collect_activations is not None:
+            assert ys is not None  # requested -> the scan emitted the per-kind stacks
+            ys_out, ys_acts = ys
+            for sink, stacked in ((collect, ys_out), (collect_activations, ys_acts)):
+                if sink is None:
+                    continue
+                assert stacked is not None  # sink requested -> the scan emitted this stack
+                for site in live:
+                    layer, kind = parse_site_name(site)
+                    sink[site] = stacked[kind][layer]
         return logits
 
     def prepare_compute_weights(self, vu: DecompVU) -> dict[str, dict[str, Array]]:
@@ -685,6 +699,33 @@ class LlamaDecomposedModel(eqx.Module):
         )
         assert set(collect) == set(live), (sorted(collect), sorted(live))
         return collect
+
+    def masked_component_activations(
+        self,
+        prepared: dict[str, dict[str, Array]],
+        inputs: Int[Array, "b t"],
+        masks: dict[str, Array],
+        delta_masks: dict[str, Array],
+        routes: dict[str, Array] | None,
+        live: tuple[str, ...],
+        has_delta: bool,
+    ) -> dict[str, Array]:
+        """Per-`live`-site component activation `x@V` (`[*leading, C]`, the coefficient
+        BEFORE the per-component `*mask`) from the masked forward. A site's OWN mask does not
+        enter its `x@V`, but the masks passed still shape a downstream site's input (e.g.
+        `down`'s input is the masked `silu(gate)*up`) — so pass the masks the visualization
+        wants the forward to run under. For the arithmetic CI-grid eval's activation heatmaps;
+        LM-only, off the recon path."""
+        collect_activations: dict[str, Array] = {}
+        self._run_masked_forward(
+            prepared, inputs, masks, delta_masks, routes, live, has_delta, False, None,
+            collect_activations=collect_activations,
+        )  # fmt: skip
+        assert set(collect_activations) == set(live), (
+            sorted(collect_activations),
+            sorted(live),
+        )
+        return collect_activations
 
     def weight_deltas(self, vu: DecompVU) -> dict[str, Array]:
         """fp32 `W − V@U` per site from fp32 masters (SPEC N2; faithfulness input)."""

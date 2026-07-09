@@ -86,6 +86,14 @@ NAIVE host gather of the C-sharded V/U (gated on `want_uv_plots`) and passes `co
 special handling; for the positionless toys (TMS/ResidMLP) `toy_uv_eval.log_uv_figure`
 renders it off the small on-host V/U + the probe CI as permutation source (cheap, no
 gather), sharing `slow_eval.render_uv_figure` / `plot_uv_matrices` with the LM path.
+The `ArithmeticCIGrid` metric (`arithmetic_eval.py`) is another config-gated slow-tier
+figure eval (LM-only): a fixed `a×b` operand-grid probe built in-memory from the target
+tokenizer (lab `experiments/lm/arithmetic_probe.py`), yielding per-component CI +
+activation `x@V` heatmaps (via `LlamaDecomposedModel.masked_component_activations`, the
+`x@V` seam threaded through `_run_masked_forward`'s `collect_activations`) + n_alive
+scalars per threshold. Resolved schema→`built_run.ArithmeticEvalConfig`; wired in the
+shared LM `eval_fn` (`experiments/lm/run.py::_make_arithmetic_eval`), so both the plain-LM
+and tPD (`lm_targeted`) composition roots get it.
 
 **The toys (TMS, ResidMLP) live in the lab, not the core.** The core trainer carries ZERO
 toy-specific code — the toy *targets* (`DecomposedModel`s, pretrain, identity-CI eval) are

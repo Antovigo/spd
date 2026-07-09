@@ -17,6 +17,7 @@ from pydantic import Discriminator, Field, PositiveInt, model_validator
 
 from param_decomp.base_config import BaseConfig
 from param_decomp.built_run import (
+    ArithmeticEvalConfig,
     AttnPatternsEvalConfig,
     BuiltRun,
     DataConfig,
@@ -28,6 +29,7 @@ from param_decomp.built_run import (
 from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
 from param_decomp.components import SiteC
 from param_decomp.configs import (
+    ArithmeticCIGridConfig,
     CEandKLLossesConfig,
     ChunkwiseTransformerCiConfig,
     CI_L0Config,
@@ -145,6 +147,13 @@ class LMDataConfig(BaseConfig):
     streaming: bool = Field(default=False)
     buffer_size: PositiveInt = Field(default=1000)
     shuffle_each_epoch: bool = Field(default=True)
+    add_special_tokens: bool = Field(
+        default=False,
+        description="Prepend the tokenizer's special tokens (e.g. Llama's BOS) when tokenizing "
+        "a `prompts_file` target pool. Default False preserves the numpy/pandas tPD run; set "
+        "True to match an eval probe that tokenizes with add_special_tokens=True (the "
+        "ArithmeticCIGrid probe includes BOS).",
+    )
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> "LMDataConfig":
@@ -355,7 +364,7 @@ def _assert_separate_qk_attn_paths(
 def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
     if cfg.eval is None:
         return None
-    ce_kl = ci_l0 = density = pgd = target_recon = None
+    ce_kl = ci_l0 = density = pgd = target_recon = arithmetic = None
     attn_ci = attn_stoch = False
     attn_stoch_n_mask_samples = 1
     slow_n_batches_accum: int | None = None
@@ -379,6 +388,14 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
                 target_recon = EvalTargetReconConfig(
                     rounding_threshold=metric.rounding_threshold,
                     ci_alive_threshold=metric.ci_alive_threshold,
+                )
+            case ArithmeticCIGridConfig():
+                arithmetic = ArithmeticEvalConfig(
+                    operation=metric.operation,
+                    a_range=metric.a_range,
+                    b_range=metric.b_range,
+                    thresholds=tuple(metric.thresholds),
+                    top_k=metric.top_k,
                 )
             case CIHistogramsConfig():
                 slow_n_batches_accum = metric.n_batches_accum
@@ -408,6 +425,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
         ),
         pgd=pgd,
         target_recon=target_recon,
+        arithmetic=arithmetic,
         attn_patterns=(
             AttnPatternsEvalConfig(
                 ci_masked=attn_ci,
