@@ -22,6 +22,7 @@ from param_decomp.built_run import (
     DataConfig,
     EvalConfig,
     EvalPGDConfig,
+    EvalTargetReconConfig,
     WeightsDtype,
 )
 from param_decomp.ci_fn import Chunk, ChunkwiseTransformerCIArch
@@ -35,6 +36,7 @@ from param_decomp.configs import (
     ComponentActivationDensityConfig,
     PGDReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
+    TargetReconLossConfig,
 )
 from param_decomp.recon import build_loss_terms
 from param_decomp.targets import llama8b, llama_simple_mlp
@@ -210,6 +212,7 @@ SLOW_TIER_EVAL_METRIC_TYPES = frozenset(
         "UVPlots",
         "PermutedCIPlots",
         "IdentityCIError",
+        "WeightMagnitude",
     }
 )
 
@@ -352,7 +355,7 @@ def _assert_separate_qk_attn_paths(
 def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
     if cfg.eval is None:
         return None
-    ce_kl = ci_l0 = density = pgd = None
+    ce_kl = ci_l0 = density = pgd = target_recon = None
     attn_ci = attn_stoch = False
     attn_stoch_n_mask_samples = 1
     slow_n_batches_accum: int | None = None
@@ -372,6 +375,11 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
                 _assert_separate_qk_attn_paths(metric)
                 attn_stoch = True
                 attn_stoch_n_mask_samples = metric.n_mask_samples
+            case TargetReconLossConfig():
+                target_recon = EvalTargetReconConfig(
+                    rounding_threshold=metric.rounding_threshold,
+                    ci_alive_threshold=metric.ci_alive_threshold,
+                )
             case CIHistogramsConfig():
                 slow_n_batches_accum = metric.n_batches_accum
             case ComponentActivationDensityConfig():
@@ -399,6 +407,7 @@ def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
             else None
         ),
         pgd=pgd,
+        target_recon=target_recon,
         attn_patterns=(
             AttnPatternsEvalConfig(
                 ci_masked=attn_ci,

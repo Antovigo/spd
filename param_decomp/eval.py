@@ -54,7 +54,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.built_run import EvalPGDConfig
+from param_decomp.built_run import EvalPGDConfig, EvalTargetReconConfig
 from param_decomp.components import DecompVU
 from param_decomp.lm import DecomposedModel
 from param_decomp.losses import kl_per_position
@@ -80,6 +80,7 @@ def make_eval_step(
     ci_alive_threshold: float,
     l0_group_patterns: dict[str, tuple[str, ...]] | None,
     pgd: EvalPGDConfig | None,
+    target_recon: EvalTargetReconConfig | None,
     mesh: Mesh | None,
 ):
     """Build the `eqx.filter_jit`'d `eval_step(model, components, ci_fn, token_ids,
@@ -156,7 +157,7 @@ def make_eval_step(
         leading = token_ids.shape
         zeros_delta = {site: jnp.zeros(leading, COMPUTE_DT) for site in site_names}
 
-        stoch_key, random_key, pgd_key = random.split(key, 3)
+        stoch_key, random_key, pgd_key, recon_key = random.split(key, 4)
         variant_masks: dict[str, tuple[dict[str, Array], dict[str, Array]]] = {}
         variant_masks["ci_masked"] = (ci_lower, zeros_delta)
         variant_masks["unmasked"] = (
@@ -261,6 +262,51 @@ def make_eval_step(
             }
             final_sources, _ = jax.lax.scan(ascend, initial_sources, None, length=pgd_n_steps)
             out["loss/PGDReconLoss"] = kl_at_sources(final_sources)
+
+        if target_recon is not None:
+            recon_rounding = target_recon.rounding_threshold
+            recon_alive = target_recon.ci_alive_threshold
+
+            def recon_kl(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
+                masked = masked_forward(model, prepared, token_ids, masks, delta_masks)
+                return kl_per_position(masked, clean_output)
+
+            # `delta_value` pins the delta-component mask (0.0 on target — components must do
+            # the work; 1.0 on nontarget, for the deferred NontargetReconLoss). `delta_only`
+            # always pins the delta to 1.0 (torch parity). One stochastic mask sample.
+            def recon_strategies(delta_value: float, sample_key: PRNGKeyArray) -> dict[str, Array]:
+                pinned = {site: jnp.full(leading, delta_value, COMPUTE_DT) for site in site_names}
+                ones_delta = {site: jnp.ones(leading, COMPUTE_DT) for site in site_names}
+                stochastic = {
+                    site: ci_lower[site]
+                    + (1.0 - ci_lower[site])
+                    * random.uniform(
+                        random.fold_in(sample_key, site_idx), ci_lower[site].shape, COMPUTE_DT
+                    )
+                    for site_idx, site in enumerate(site_names)
+                }
+                rounded = {
+                    site: (ci_lower[site] > recon_rounding).astype(COMPUTE_DT)
+                    for site in site_names
+                }
+                zeros = {site: jnp.zeros_like(ci_lower[site]) for site in site_names}
+                total_l0 = sum(
+                    (
+                        (ci_lower[site] > recon_alive).astype(jnp.float32).sum(-1).mean()
+                        for site in site_names
+                    ),
+                    start=jnp.zeros((), jnp.float32),
+                )
+                return {
+                    "stochastic": recon_kl(stochastic, pinned),
+                    "ci_masked": recon_kl(ci_lower, pinned),
+                    "rounded": recon_kl(rounded, pinned),
+                    "delta_only": recon_kl(zeros, ones_delta),
+                    "total_l0": total_l0,
+                }
+
+            for strategy, value in recon_strategies(0.0, recon_key).items():
+                out[f"target_recon/{strategy}"] = value
         return out
 
     return eval_step

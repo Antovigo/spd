@@ -44,6 +44,7 @@ from param_decomp.slow_eval import (
     permute_to_identity,
     render_permutation_figures,
     render_slow_eval_figures,
+    render_weight_magnitude_figure,
     resolve_permutation_metrics,
 )
 from param_decomp.targets.llama8b import (
@@ -368,7 +369,14 @@ def test_renderer_logs_figures_on_live_step_axis(monkeypatch: pytest.MonkeyPatch
 
     spec = resolve_permutation_metrics(lm.site_names, [])
     renderer = SlowEvalRenderer(is_main=True)
-    renderer.submit(reductions, spec, position_ci=None, components=None, now_step=4242)
+    renderer.submit(
+        reductions,
+        spec,
+        position_ci=None,
+        components=None,
+        want_weight_magnitude=False,
+        now_step=4242,
+    )
     renderer.join()  # flush the background render
 
     assert len(fake.logged) == 1
@@ -417,7 +425,9 @@ def test_in_loop_renderer_includes_permutation_heatmaps_and_uv_when_gathered(
 
     components = {name: (np.zeros((4, C)), np.zeros((C, 5))) for name in lm.site_names}
     renderer = SlowEvalRenderer(is_main=True)
-    renderer.submit(reductions, spec, position_ci, components, now_step=7000)
+    renderer.submit(
+        reductions, spec, position_ci, components, want_weight_magnitude=False, now_step=7000
+    )
     renderer.join()
 
     assert len(fake.logged) == 1
@@ -451,12 +461,56 @@ def test_in_loop_renderer_skips_uv_when_components_not_gathered(
     monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
 
     renderer = SlowEvalRenderer(is_main=True)
-    renderer.submit(reductions, spec, position_ci, components=None, now_step=7000)
+    renderer.submit(
+        reductions, spec, position_ci, components=None, want_weight_magnitude=False, now_step=7000
+    )
     renderer.join()
 
     payload, _ = fake.logged[0]
     assert "slow_eval/figures/causal_importances" in payload
     assert "slow_eval/figures/uv_matrices" not in payload
+
+
+def test_ci_max_reduction_and_weight_magnitude_figure():
+    """The slow reduction carries a per-component CI max (shape `(C,)`), and
+    `render_weight_magnitude_figure` turns the host-gathered V/U + that max into a valid
+    PNG under the torch `figures/weight_magnitude` key."""
+    cfg, lm, ci_fn, step, C = _tiny_setup(threshold=0.0)
+    residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
+    for site in lm.site_names:
+        assert reductions[site].ci_max.shape == (C,)
+        assert np.all(np.isfinite(reductions[site].ci_max))
+
+    components = {name: (np.ones((4, C)), np.ones((C, 5))) for name in lm.site_names}
+    figures = render_weight_magnitude_figure(reductions, components)
+    assert set(figures) == {"figures/weight_magnitude"}
+    assert figures["figures/weight_magnitude"][:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_in_loop_renderer_weight_magnitude(monkeypatch: pytest.MonkeyPatch):
+    """`want_weight_magnitude=True` with gathered V/U logs `slow_eval/figures/weight_magnitude`
+    on the background thread, even with no permutation plots configured (position_ci=None)."""
+    cfg, lm, ci_fn, step, C = _tiny_setup(threshold=0.0)
+    residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
+    reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
+    spec = resolve_permutation_metrics(lm.site_names, [])
+
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
+
+    components = {name: (np.ones((4, C)), np.ones((C, 5))) for name in lm.site_names}
+    renderer = SlowEvalRenderer(is_main=True)
+    renderer.submit(
+        reductions, spec, position_ci=None, components=components,
+        want_weight_magnitude=True, now_step=7000,
+    )  # fmt: skip
+    renderer.join()
+
+    payload, logged_step = fake.logged[0]
+    assert logged_step == 7000
+    assert "slow_eval/figures/weight_magnitude" in payload
 
 
 def test_renderer_noop_off_main_rank(monkeypatch: pytest.MonkeyPatch):
@@ -470,7 +524,14 @@ def test_renderer_noop_off_main_rank(monkeypatch: pytest.MonkeyPatch):
 
     spec = resolve_permutation_metrics(lm.site_names, [])
     renderer = SlowEvalRenderer(is_main=False)
-    renderer.submit(reductions, spec, position_ci=None, components=None, now_step=4242)
+    renderer.submit(
+        reductions,
+        spec,
+        position_ci=None,
+        components=None,
+        want_weight_magnitude=False,
+        now_step=4242,
+    )
     renderer.join()
     assert fake.logged == []  # non-main ranks do the collective pull but never render/log
 
@@ -500,7 +561,14 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
         if slow_eval_due(now_step, every, slow_every, slow_on_first_step=True):
             t0 = time.time()
             reductions = accumulate_site_reductions(step, lm, ci_fn, [residual], None)
-            renderer.submit(reductions, spec, position_ci=None, components=None, now_step=now_step)
+            renderer.submit(
+                reductions,
+                spec,
+                position_ci=None,
+                components=None,
+                want_weight_magnitude=False,
+                now_step=now_step,
+            )
             dispatch_s += time.time() - t0
             renderer.join()
     renderer.join()  # flush

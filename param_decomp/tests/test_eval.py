@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from param_decomp.built_run import EvalPGDConfig
+from param_decomp.built_run import EvalPGDConfig, EvalTargetReconConfig
 from param_decomp.ci_fn import (
     Chunk,
     ChunkwiseTransformerCIArch,
@@ -148,6 +148,7 @@ def test_eval_step_keys_identities_and_determinism():
         ci_alive_threshold=-1.0,
         l0_group_patterns=None,
         pgd=None,
+        target_recon=None,
         mesh=None,
     )
     out = eval_step(lm, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -187,6 +188,7 @@ def test_eval_step_keys_identities_and_determinism():
         ci_alive_threshold=1.5,
         l0_group_patterns=None,
         pgd=None,
+        target_recon=None,
         mesh=None,
     )
     out_dead = eval_step_dead(lm, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -215,6 +217,7 @@ def test_eval_step_fresh_pgd_probe():
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
         pgd=EvalPGDConfig(n_steps=8, step_size=0.1),
+        target_recon=None,
         mesh=None,
     )
     unascended = make_eval_step(
@@ -223,6 +226,7 @@ def test_eval_step_fresh_pgd_probe():
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
         pgd=EvalPGDConfig(n_steps=0, step_size=0.1),
+        target_recon=None,
         mesh=None,
     )
     out = ascended(lm, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -269,11 +273,11 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
 
     single_step = make_eval_step(
         lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=None,
+        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), target_recon=None, mesh=None,
     )  # fmt: skip
     sharded_step = make_eval_step(
         lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=mesh,
+        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), target_recon=None, mesh=mesh,
     )  # fmt: skip
 
     out_single = single_step(lm, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -306,7 +310,7 @@ def test_eval_step_l0_groups_sum_member_sites():
     groups = {"layer_4": ("layers.4.*",), "total": ("*",)}
     eval_step = make_eval_step(
         lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=groups, pgd=None, mesh=None,
+        l0_group_patterns=groups, pgd=None, target_recon=None, mesh=None,
     )  # fmt: skip
     out = eval_step(lm, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     layer4_sites = [s for s in lm.site_names if s.startswith("layers.4.")]
@@ -318,8 +322,36 @@ def test_eval_step_l0_groups_sum_member_sites():
     with pytest.raises(AssertionError, match="matches no sites"):
         make_eval_step(
             lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-            l0_group_patterns={"ghost": ("layers.99.*",)}, pgd=None, mesh=None,
+            l0_group_patterns={"ghost": ("layers.99.*",)}, pgd=None, target_recon=None, mesh=None,
         )  # fmt: skip
+
+
+def test_eval_step_target_recon_strategies():
+    """TargetReconLoss adds the four strategy KLs + summed L0; `total_l0` at an
+    all-alive threshold is `n_sites * C`, and every strategy KL is finite and non-negative."""
+    cfg = _tiny_cfg()
+    C = 8
+    sites = llama_site_specs(cfg, mlp_family_site_cs(4, 5, C))
+    lm = _tiny_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    from param_decomp.components import init_decomp_vu
+
+    vu = init_decomp_vu(sites, jax.random.PRNGKey(1))
+    ci_fn = _build_ci_fn(lm, cfg.n_embd, jax.random.PRNGKey(2))
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
+
+    eval_step = make_eval_step(
+        lm, rounding_threshold=0.0, ci_alive_threshold=0.0, l0_group_patterns=None, pgd=None,
+        target_recon=EvalTargetReconConfig(rounding_threshold=0.5, ci_alive_threshold=-1.0),
+        mesh=None,
+    )  # fmt: skip
+    out = eval_step(lm, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
+
+    strategies = ("stochastic", "ci_masked", "rounded", "delta_only")
+    for strategy in strategies:
+        assert jnp.isfinite(out[f"target_recon/{strategy}"]), strategy
+        assert float(out[f"target_recon/{strategy}"]) >= 0.0, strategy  # KL is non-negative
+    # ci_alive_threshold=-1 => every component alive at every position => C per site.
+    assert float(out["target_recon/total_l0"]) == C * len(lm.site_names)
 
 
 def test_make_eval_step_rejects_positionless_target():
@@ -330,5 +362,5 @@ def test_make_eval_step_rejects_positionless_target():
     with pytest.raises(AssertionError, match="LM-only"):
         make_eval_step(
             lm, rounding_threshold=0.0, ci_alive_threshold=0.0,
-            l0_group_patterns=None, pgd=None, mesh=None,
+            l0_group_patterns=None, pgd=None, target_recon=None, mesh=None,
         )  # fmt: skip

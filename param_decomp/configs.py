@@ -539,6 +539,24 @@ class UVPlotsConfig(_PermutationPlotsBaseConfig):
     type: Literal["UVPlots"] = "UVPlots"
 
 
+class TargetReconLossConfig(BaseConfig):
+    """Recon KL under four masking strategies (stochastic / ci_masked / rounded /
+    delta_only) plus summed CI L0, on the TARGET distribution (delta component off).
+
+    `rounding_threshold` binarises CI for the `rounded` strategy; `ci_alive_threshold`
+    is the cutoff for the `total_l0` count."""
+
+    type: Literal["TargetReconLoss"] = "TargetReconLoss"
+    rounding_threshold: float
+    ci_alive_threshold: float = 0.1
+
+
+class WeightMagnitudeConfig(BaseConfig):
+    """Per-site figure of `‖V_c‖·‖U_c‖` per component, coloured by max CI over the batch."""
+
+    type: Literal["WeightMagnitude"] = "WeightMagnitude"
+
+
 AnyEvalMetricConfig = Annotated[
     CEandKLLossesConfig
     | CIHiddenActsReconLossConfig
@@ -552,7 +570,9 @@ AnyEvalMetricConfig = Annotated[
     | PGDReconLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
-    | UVPlotsConfig,
+    | TargetReconLossConfig
+    | UVPlotsConfig
+    | WeightMagnitudeConfig,
     Discriminator("type"),
 ]
 

@@ -88,36 +88,45 @@ class SiteReduction:
     `density_counts[c]` = #(positions where `lower_leaky > threshold`); `ci_sums[c]` =
     Σ positions `lower_leaky`; `n_positions` = total positions seen (shared count for
     both means). `lower_sample` / `logits_sample` are flattened raw values from the first
-    `n_batches_accum` batches, for the two `CIHistograms` histograms."""
+    `n_batches_accum` batches, for the two `CIHistograms` histograms. `ci_max[c]` = max
+    `lower_leaky` over all positions seen (the `WeightMagnitude` colour scale)."""
 
     density_counts: np.ndarray
     ci_sums: np.ndarray
     n_positions: int
     lower_sample: np.ndarray
     logits_sample: np.ndarray
+    ci_max: np.ndarray
 
 
 SlowEvalStep = Callable[
     [DecomposedModel, Any, Float[Array, "*leading d"]],
-    tuple[dict[str, Array], dict[str, Array], Array, dict[str, Array], dict[str, Array]],
-]
+    tuple[
+        dict[str, Array], dict[str, Array], Array, dict[str, Array], dict[str, Array],
+        dict[str, Array],
+    ],
+]  # fmt: skip
 """`(model, ci_fn, residual) -> (density_counts, ci_sums, n_positions, flat_lower,
-flat_logits)` — the per-batch reduction, pre-reduced over positions. The slow plot
-metrics read only the CI arrays, so V/U (`components`) is not an input. `model`
+flat_logits, ci_max)` — the per-batch reduction, pre-reduced over positions (`ci_max`
+is the per-component max over positions, for `WeightMagnitude`). The slow plot metrics
+read only the CI arrays, so V/U (`components`) is not an input. `model`
 (frozen-weight-bearing) is the jit ARG."""
 
 
 def make_slow_eval_step(lm: DecomposedModel, ci_alive_threshold: float) -> SlowEvalStep:
     """Build the jit'd per-batch reduction `slow_eval_step(model, ci_fn, residual) ->
     ({site: density_counts}, {site: ci_sums}, n_positions, {site: flat lower},
-    {site: flat logits})`. `lower`/`logits` are returned whole (the host caps the
-    histogram sample); counts/sums are pre-reduced over positions."""
+    {site: flat logits}, {site: ci_max})`. `lower`/`logits` are returned whole (the host
+    caps the histogram sample); counts/sums/max are pre-reduced over positions."""
     site_names = lm.site_names
 
     @eqx.filter_jit
     def slow_eval_step(
         model: DecomposedModel, ci_fn: Any, residual: Float[Array, "*leading d"]
-    ) -> tuple[dict[str, Array], dict[str, Array], Array, dict[str, Array], dict[str, Array]]:
+    ) -> tuple[
+        dict[str, Array], dict[str, Array], Array, dict[str, Array], dict[str, Array],
+        dict[str, Array],
+    ]:  # fmt: skip
         # Read the CI fn in training precision (bf16), like train.py / eval.py: the readout
         # reflects the deployed model, and cuDNN flash attention rejects fp32.
         ci_fn = cast_floating(ci_fn, COMPUTE_DT)
@@ -136,11 +145,12 @@ def make_slow_eval_step(lm: DecomposedModel, ci_alive_threshold: float) -> SlowE
             for s in site_names
         }
         ci_sums = {s: lower[s].reshape(-1, lower[s].shape[-1]).sum(0) for s in site_names}
+        ci_max = {s: lower[s].reshape(-1, lower[s].shape[-1]).max(0) for s in site_names}
         first = lower[site_names[0]]
         n_positions = jnp.asarray(math.prod(first.shape[:-1]), jnp.int32)
         flat_lower = {s: lower[s].reshape(-1) for s in site_names}
         flat_logits = {s: logits[s].reshape(-1) for s in site_names}
-        return density_counts, ci_sums, n_positions, flat_lower, flat_logits
+        return density_counts, ci_sums, n_positions, flat_lower, flat_logits, ci_max
 
     return slow_eval_step
 
@@ -158,17 +168,19 @@ def accumulate_site_reductions(
     assert residual_batches, "slow eval needs at least one batch"
     density: dict[str, np.ndarray] = {}
     sums: dict[str, np.ndarray] = {}
+    maxes: dict[str, np.ndarray] = {}
     lower_chunks: dict[str, list[np.ndarray]] = {}
     logits_chunks: dict[str, list[np.ndarray]] = {}
     total_positions = 0
     for batch_idx, residual in enumerate(residual_batches):
-        d, s, n_pos, flat_lower, flat_logits = slow_eval_step(model, ci_fn, residual)
+        d, s, n_pos, flat_lower, flat_logits, cmax = slow_eval_step(model, ci_fn, residual)
         total_positions += int(n_pos)
         keep_sample = n_batches_accum is None or batch_idx < n_batches_accum
         for site in d:
-            counts, ci_sum = np.asarray(d[site]), np.asarray(s[site])
+            counts, ci_sum, ci_mx = np.asarray(d[site]), np.asarray(s[site]), np.asarray(cmax[site])
             density[site] = counts if batch_idx == 0 else density[site] + counts
             sums[site] = ci_sum if batch_idx == 0 else sums[site] + ci_sum
+            maxes[site] = ci_mx if batch_idx == 0 else np.maximum(maxes[site], ci_mx)
             if keep_sample:
                 # The sample keeps the dp-sharded batch axis; on >1 process a bare np.asarray
                 # spans non-addressable devices, so gather it (counts/sums are already reduced).
@@ -186,6 +198,7 @@ def accumulate_site_reductions(
             n_positions=total_positions,
             lower_sample=np.concatenate(lower_chunks[site]),
             logits_sample=np.concatenate(logits_chunks[site]),
+            ci_max=maxes[site],
         )
         for site in density
     }
@@ -479,6 +492,44 @@ def plot_mean_component_cis_both_scales(
     return images[0], images[1]
 
 
+def plot_weight_magnitude(
+    weight_magnitudes: dict[str, np.ndarray], max_ci_per_component: dict[str, np.ndarray]
+) -> bytes:
+    """Per-site scatter of `‖V_c‖·‖U_c‖` per component, sorted descending, coloured by max
+    CI over the batch (torch `plot_weight_magnitude`). Shared linear y (0..global max) and a
+    shared 0..1 CI colour scale."""
+    assert set(weight_magnitudes) == set(max_ci_per_component)
+    n_rows, n_cols = _grid_dims(len(weight_magnitudes))
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=(8 * n_cols, 3 * n_rows), dpi=200, squeeze=False
+    )
+    flat_axes = axs.T.ravel()
+    for ax in flat_axes[len(weight_magnitudes) :]:
+        ax.set_visible(False)
+    global_max_mag = max(float(mags.max()) for mags in weight_magnitudes.values())
+    scatter = None
+    for ax, (name, mags) in zip(flat_axes, weight_magnitudes.items(), strict=False):
+        sort_idx = np.argsort(mags)[::-1]
+        scatter = ax.scatter(
+            range(len(mags)),
+            mags[sort_idx],
+            c=max_ci_per_component[name][sort_idx],
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+            marker="x",
+            s=10,
+        )
+        ax.set_ylim(0, global_max_mag)
+        ax.ticklabel_format(axis="y", style="plain")
+        ax.set_xlabel("Component")
+        ax.set_ylabel("‖V_c‖·‖U_c‖")
+        ax.set_title(name, fontsize=10)
+    assert scatter is not None
+    fig.colorbar(scatter, ax=axs.ravel().tolist(), label="max CI over batch")
+    return _render_figure(fig)
+
+
 def _plot_ci_matrices(matrices: dict[str, np.ndarray], colormap: str, title_prefix: str) -> bytes:
     """Per-site `(rows, C)` CI heatmaps stacked vertically with a shared colorbar (torch
     `_plot_causal_importances_figure`). `rows` is the position axis for the LM path."""
@@ -596,6 +647,22 @@ def render_permutation_figures(
         )
         figures["figures/uv_matrices"] = plot_uv_matrices(present, perms)
     return figures
+
+
+def render_weight_magnitude_figure(
+    reductions: dict[str, SiteReduction],
+    components: dict[str, tuple[np.ndarray, np.ndarray]],
+) -> dict[str, bytes]:
+    """The `WeightMagnitude` figure (`{figures/weight_magnitude: png}`). `components` is the
+    host-gathered `{site: (V, U)}` (V `(d_in, C)`, U `(C, d_out)`); the colour is each
+    component's eval-pass max CI from `reductions`. Shares the NAIVE V/U gather with
+    `UVPlots` — OOMs at production C BY DESIGN, so the caller gathers only when configured."""
+    weight_magnitudes = {
+        name: np.linalg.norm(V, axis=0) * np.linalg.norm(U, axis=1)
+        for name, (V, U) in components.items()
+    }
+    max_ci = {name: reductions[name].ci_max for name in components}
+    return {"figures/weight_magnitude": plot_weight_magnitude(weight_magnitudes, max_ci)}
 
 
 def render_uv_figure(

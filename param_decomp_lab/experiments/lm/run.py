@@ -44,7 +44,7 @@ from param_decomp.attn_patterns_eval import (
     make_stochastic_attn_patterns_step,
 )
 from param_decomp.built_run import BuiltRun, DataConfig
-from param_decomp.configs import ResumeProvenance
+from param_decomp.configs import ResumeProvenance, WeightMagnitudeConfig
 from param_decomp.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.eval import make_eval_step
 from param_decomp.hf_http import configure_hf_http_retries
@@ -230,6 +230,7 @@ def _make_lm_eval_fn(
         eval.l0_ci_alive_threshold,
         eval.l0_groups,
         eval.pgd,
+        eval.target_recon,
         mesh,
     )
     attn_steps: dict[str, Any] = {}
@@ -251,6 +252,7 @@ def _make_lm_eval_fn(
     perm_spec = resolve_permutation_metrics(lm.site_names, run_eval_metrics)
     hidden_acts_n_mask_samples = stochastic_hidden_acts_n_mask_samples(run_eval_metrics)
     want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
+    want_weight_magnitude = any(isinstance(m, WeightMagnitudeConfig) for m in run_eval_metrics)
     position_ci_step = make_position_ci_step(lm) if want_position_ci else None
 
     def eval_fn(state: TrainState, now_step: int) -> "LogRecord":
@@ -318,17 +320,20 @@ def _make_lm_eval_fn(
                     perm_spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE
                 )
                 eval_record |= {f"eval/slow/{k}": v for k, v in identity_ci_errors.items()}
-            # `UVPlots` needs the C-sharded V/U gathered to host (collective `np.asarray`).
-            # This NAIVE gather is small-scale-only — it OOMs / breaks at production C BY
-            # DESIGN (per Oli); gated on the config naming UVPlots so it costs nothing
-            # otherwise. The component column order reuses the position-CI permutation.
+            # `UVPlots` / `WeightMagnitude` need the C-sharded V/U gathered to host
+            # (collective `np.asarray`). This NAIVE gather is small-scale-only — it OOMs /
+            # breaks at production C BY DESIGN (per Oli); gated on the config naming one of
+            # those metrics so it costs nothing otherwise. `UVPlots` reuses the position-CI
+            # permutation for the component column order; `WeightMagnitude` needs no reorder.
             components: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
-            if perm_spec.want_uv_plots:
+            if perm_spec.want_uv_plots or want_weight_magnitude:
                 components = {
                     name: (np.asarray(V), np.asarray(U))
                     for name, (V, U) in state.components.vu.items()
                 }
-            slow_renderer.submit(site_reductions, perm_spec, position_ci, components, now_step)
+            slow_renderer.submit(
+                site_reductions, perm_spec, position_ci, components, want_weight_magnitude, now_step
+            )
         if is_main and built.run.wandb is not None:
             # torch CI_L0.compute() emitted a per-layer L0 bar chart alongside the scalars;
             # rebuild it host-side from the `eval/l0/<thr>_<site|group>` scalars already in

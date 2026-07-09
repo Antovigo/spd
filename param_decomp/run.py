@@ -62,6 +62,7 @@ from param_decomp.slow_eval import (
     SiteReduction,
     render_permutation_figures,
     render_slow_eval_figures,
+    render_weight_magnitude_figure,
 )
 from param_decomp.train import TrainState, make_faith_warmup_step, make_train_step
 
@@ -274,6 +275,7 @@ class SlowEvalRenderer:
         perm_spec: PermutationMetricSpec,
         position_ci: dict[str, PositionCI] | None,
         components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
+        want_weight_magnitude: bool,
         now_step: int,
     ) -> None:
         if not self._is_main:
@@ -284,7 +286,7 @@ class SlowEvalRenderer:
         self.join()  # cap to one in-flight render
         self._thread = threading.Thread(
             target=_render_and_log_slow_eval,
-            args=(reductions, perm_spec, position_ci, components, now_step),
+            args=(reductions, perm_spec, position_ci, components, want_weight_magnitude, now_step),
             daemon=True,
         )
         self._thread.start()
@@ -303,18 +305,21 @@ def _render_and_log_slow_eval(
     perm_spec: PermutationMetricSpec,
     position_ci: dict[str, PositionCI] | None,
     components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
+    want_weight_magnitude: bool,
     now_step: int,
 ) -> None:
     """Pure-host: render the slow figures (the base plot set plus, when `position_ci` is
     materialized, the config-driven CI-heatmap/permutation figures, and when `components` is
-    the host-gathered V/U, the `UVPlots` heatmaps) and log them to wandb on the live `_step`
-    axis at `now_step`. No jax/device access — safe off the train loop."""
+    the host-gathered V/U, the `UVPlots` / `WeightMagnitude` figures) and log them to wandb
+    on the live `_step` axis at `now_step`. No jax/device access — safe off the train loop."""
     import wandb
     from PIL import Image
 
     figures = render_slow_eval_figures(reductions)
     if position_ci is not None:
         figures |= render_permutation_figures(perm_spec, position_ci, components)
+    if want_weight_magnitude and components is not None:
+        figures |= render_weight_magnitude_figure(reductions, components)
     payload: dict[str, Any] = {
         f"slow_eval/{k}": wandb.Image(Image.open(io.BytesIO(v))) for k, v in figures.items()
     }

@@ -53,6 +53,16 @@ class EvalPGDConfig:
 
 
 @dataclass(frozen=True)
+class EvalTargetReconConfig:
+    """Targeted recon eval (torch `TargetReconLoss`): recon KL under four mask strategies
+    plus summed CI L0, on the target distribution (delta component off). Own thresholds,
+    independent of the CE/KL and CI-L0 cutoffs."""
+
+    rounding_threshold: float
+    ci_alive_threshold: float
+
+
+@dataclass(frozen=True)
 class AttnPatternsEvalConfig:
     """In-loop attention-pattern recon metrics (torch `CIMaskedAttnPatternsReconLoss` /
     `StochasticAttnPatternsReconLoss`). Q/K are read from the decomposed `*q_proj`/`*k_proj`
@@ -98,6 +108,9 @@ class EvalConfig:
     """torch CI_L0 `groups`: fnmatch site patterns whose member L0s sum into a
     group-named key. None = per-site keys only."""
     pgd: EvalPGDConfig | None
+    target_recon: EvalTargetReconConfig | None
+    """torch `TargetReconLoss` — the four-strategy recon eval on the target distribution.
+    None when the metric is absent from `eval.metrics`."""
     attn_patterns: AttnPatternsEvalConfig | None
 
 
