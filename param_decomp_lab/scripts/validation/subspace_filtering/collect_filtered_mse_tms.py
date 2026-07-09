@@ -27,6 +27,8 @@ Usage:
 Outputs (default `<run>/analysis/datasets/subspace_filtering/`):
 - `mse_tms.tsv` — long format: experiment, flavor, sample, mse.
 - `nci_tms.tsv` — per-sample active counts: sample, n_ci_linear1, n_ci_linear2.
+- `features_tms.npz` — the input batch `x [n_samples, n_features]` (for per-feature
+  aggregation, e.g. `plot_mse_by_feature_tms.py`).
 - `meta_tms.json` — span-rank stats vs d per site, matrix-space ranks, wiring check.
 - `<run>/analysis/subspace_filtering/boxplot_tms.png` — summary boxplot (log-y).
 """
@@ -317,6 +319,10 @@ def collect_filtered_mse_tms(
         counts = {m: supports[m].sum(axis=1) for m in modules}
         for si in range(n_samples):
             writer.writerow([si, *(int(counts[m][si]) for m in modules)])
+
+    features_path = out_dir / "features_tms.npz"
+    np.savez_compressed(features_path, x=x.cpu().numpy())
+    logger.info(f"wrote {features_path}")
 
     meta = {
         "run_id": run_dir.name,
