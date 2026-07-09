@@ -17,7 +17,7 @@ Run with `uv pip install marimo`, then `marimo edit plots_notebook.py` (or `mari
 
 import marimo
 
-__generated_with = "0.9.0"
+__generated_with = "0.23.11"
 app = marimo.App(width="medium")
 
 
@@ -38,15 +38,13 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # Subspace filtering — KL under projections
+    mo.md("""
+    # Subspace filtering — KL under projections
 
-        Per-prompt last-position `KL(target ‖ variant)` for the projection battery of
-        `collect_filtered_kl.py`. Pick the run, block, subset, and operation; figures
-        are saved to `<run>/analysis/subspace_filtering/` as a side effect.
-        """
-    )
+    Per-prompt last-position `KL(target ‖ variant)` for the projection battery of
+    `collect_filtered_kl.py`. Pick the run, block, subset, and operation; figures
+    are saved to `<run>/analysis/subspace_filtering/` as a side effect.
+    """)
     return
 
 
@@ -89,7 +87,18 @@ def _(Path, block_ui, json, op_ui, pd, run_dir_ui, subset_ui):
     experiments = [e for e in df["experiment"].unique() if e != "circuit_baseline"]
     n_grid = int(df["a"].max())
     baseline_kl = df[df["experiment"] == "circuit_baseline"]["kl"].to_numpy()
-    return baseline_kl, block, data_dir, df, experiments, fig_dir, meta, n_grid, nci, op, subset
+    return (
+        baseline_kl,
+        block,
+        df,
+        experiments,
+        fig_dir,
+        meta,
+        n_grid,
+        nci,
+        op,
+        subset,
+    )
 
 
 @app.cell
@@ -107,9 +116,10 @@ def _(df, n_grid, np):
 @app.cell
 def _(baseline_kl, block, df, experiments, fig_dir, np, op, plt, subset):
     _FLAVORS = ("raw", "centered", "bias")
+    #_FLAVORS = ("raw",)
     _floor = 1e-8
 
-    def _boxplot():
+    def _boxplot_subcomp_in_orig_span(experiments):
         fig, ax = plt.subplots(figsize=(max(9, 1.7 * len(experiments)), 5))
         colors = {"raw": "tab:red", "centered": "tab:blue", "bias": "tab:orange"}
         for fi, flavor in enumerate(_FLAVORS):
@@ -153,12 +163,78 @@ def _(baseline_kl, block, df, experiments, fig_dir, np, op, plt, subset):
         fig.savefig(fig_dir / f"boxplot_{op}.png", dpi=150)
         return fig
 
-    _boxplot()
+    _boxplot_subcomp_in_orig_span([e for e in experiments if e.startswith("orig")])
     return
 
 
 @app.cell
-def _(LogNorm, baseline_kl, block, experiments, fig_dir, grid_of, mo, n_grid, np, op, plt, subset):
+def _(baseline_kl, block, df, experiments, fig_dir, np, op, plt, subset):
+    _FLAVORS = ("raw", "centered", "bias")
+    #_FLAVORS = ("raw",)
+    _floor = 1e-8
+
+    def _boxplot_orig_in_subcomp_span(experiments):
+        fig, ax = plt.subplots(figsize=(max(9, 1.7 * len(experiments)), 5))
+        colors = {"raw": "tab:red", "centered": "tab:blue", "bias": "tab:orange"}
+        for fi, flavor in enumerate(_FLAVORS):
+            data = [
+                np.maximum(
+                    df[(df["experiment"] == e) & (df["flavor"] == flavor)]["kl"].to_numpy(),
+                    _floor,
+                )
+                for e in experiments
+            ]
+            bp = ax.boxplot(
+                data,
+                positions=np.arange(len(experiments)) * 4.0 + fi,
+                widths=0.8,
+                showfliers=False,
+                patch_artist=True,
+            )
+            for patch in bp["boxes"]:
+                patch.set_facecolor(colors[flavor])
+                patch.set_alpha(0.6)
+        bp = ax.boxplot(
+            [np.maximum(baseline_kl, _floor)],
+            positions=[len(experiments) * 4.0],
+            widths=0.8,
+            showfliers=False,
+            patch_artist=True,
+        )
+        bp["boxes"][0].set_facecolor("tab:green")
+        ax.axhline(float(np.mean(baseline_kl)), color="tab:green", ls="--", lw=1)
+        ax.set_yscale("log")
+        ax.set_xticks([*(np.arange(len(experiments)) * 4.0 + 1), len(experiments) * 4.0])
+        ax.set_xticklabels([*experiments, "circuit_baseline"], rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel("KL(target ‖ variant) at `=`")
+        handles = [
+            plt.Rectangle((0, 0), 1, 1, facecolor=c, alpha=0.6)
+            for c in [*colors.values(), "tab:green"]
+        ]
+        ax.legend(handles, [*_FLAVORS, "baseline"], fontsize=8)
+        ax.set_title(f"{block}/{subset}/{op}: per-prompt KL by intervention and flavor")
+        fig.tight_layout()
+        fig.savefig(fig_dir / f"boxplot_{op}.png", dpi=150)
+        return fig
+
+    _boxplot_orig_in_subcomp_span([e for e in experiments if e.startswith("circuit")])
+    return
+
+
+@app.cell
+def _(
+    LogNorm,
+    block,
+    experiments,
+    fig_dir,
+    grid_of,
+    mo,
+    n_grid,
+    np,
+    op,
+    plt,
+    subset,
+):
     _floor = 1e-8
 
     def _heatmap(experiment: str):
@@ -232,7 +308,14 @@ def _(block, df, experiments, fig_dir, nci, np, op, plt, subset):
 
 @app.cell
 def _(json, meta, mo):
-    mo.md(f"### meta\n```json\n{json.dumps(meta, indent=2)[:4000]}\n```")
+    mo.md(f"""
+    ### meta\n```json\n{json.dumps(meta, indent=2)[:4000]}\n```
+    """)
+    return
+
+
+@app.cell
+def _():
     return
 
 
