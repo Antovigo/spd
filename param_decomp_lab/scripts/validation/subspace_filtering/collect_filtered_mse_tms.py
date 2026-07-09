@@ -30,7 +30,7 @@ Outputs (default `<run>/analysis/datasets/subspace_filtering/`):
 - `features_tms.npz` — the input batch `x [n_samples, n_features]` (for per-feature
   aggregation, e.g. `plot_mse_by_feature_tms.py`).
 - `meta_tms.json` — span-rank stats vs d per site, matrix-space ranks, wiring check.
-- `<run>/analysis/subspace_filtering/boxplot_tms.png` — summary boxplot (log-y).
+- `<run>/analysis/subspace_filtering/beeswarm_tms.png` — summary beeswarm (log-y).
 """
 
 import csv
@@ -123,7 +123,7 @@ def collect_filtered_mse_tms(
     seed: int = 0,
     output_dir: str | None = None,
 ) -> Path:
-    """Write the long-format per-sample MSE TSV + counts + meta + boxplot; returns the dataset dir."""
+    """Write the long-format per-sample MSE TSV + counts + meta + beeswarm; returns the dataset dir."""
     run = SavedTMSRun.from_path(model_path)
     model = run.load_model()
     model.eval()
@@ -346,55 +346,65 @@ def collect_filtered_mse_tms(
 
     fig_dir = analysis_dir(run_dir) / "subspace_filtering"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    _write_boxplot(mse, [iv.key for iv in interventions], row_of, fig_dir / "boxplot_tms.png")
+    _write_beeswarm(mse, [iv.key for iv in interventions], row_of, fig_dir / "beeswarm_tms.png")
     logger.info(f"done ({n_samples} samples)")
     return out_dir
 
 
-def _write_boxplot(
+def _swarm_offsets(log_vals: np.ndarray, n_bins: int = 40, width: float = 0.22) -> np.ndarray:
+    """Beeswarm x-offsets: within each log-space bin, spread points evenly, width ~ density."""
+    lo, hi = log_vals.min(), log_vals.max()
+    bins = (
+        np.zeros_like(log_vals, dtype=int)
+        if hi == lo
+        else (((log_vals - lo) / (hi - lo) * (n_bins - 1)).astype(int))
+    )
+    offsets = np.zeros_like(log_vals)
+    max_count = max(np.bincount(bins).max(), 1)
+    for b in np.unique(bins):
+        idx = np.where(bins == b)[0]
+        k = len(idx)
+        half = width * min(k / max_count, 1.0)
+        offsets[idx] = np.linspace(-half, half, k) if k > 1 else 0.0
+    return offsets
+
+
+def _write_beeswarm(
     mse: np.ndarray,
     intervention_keys: list[str],
     row_of: dict[tuple[str, str], int],
     path: Path,
+    max_points: int = 400,
 ) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     floor = 1e-12
-    flierprops = dict(marker=".", markersize=2, alpha=0.25)
+    rng = np.random.default_rng(0)
     fig, ax = plt.subplots(figsize=(1.8 * len(intervention_keys) + 2, 5))
     colors = {"raw": "tab:red", "centered": "tab:blue", "bias": "tab:orange"}
+
+    def swarm(vals: np.ndarray, x_center: float, color: str) -> None:
+        vals = np.maximum(vals, floor)
+        if len(vals) > max_points:
+            vals = rng.choice(vals, size=max_points, replace=False)
+        log_vals = np.log10(vals)
+        xs = x_center + _swarm_offsets(log_vals)
+        ax.scatter(xs, vals, s=3, color=color, alpha=0.4, linewidths=0)
+
     for gi, key in enumerate(intervention_keys):
         for fi, flavor in enumerate(FLAVORS):
-            vals = np.maximum(mse[row_of[(key, flavor)]], floor)
-            box = ax.boxplot(
-                [vals],
-                positions=[gi + (fi - 1) * 0.25],
-                widths=0.2,
-                whis=(5, 95),
-                flierprops=flierprops,
-                patch_artist=True,
-            )
-            box["boxes"][0].set_facecolor(colors[flavor])
-            box["boxes"][0].set_alpha(0.6)
+            swarm(mse[row_of[(key, flavor)]], gi + (fi - 1) * 0.28, colors[flavor])
     base_vals = np.maximum(mse[row_of[(_BASELINE_KEY, "none")]], floor)
-    box = ax.boxplot(
-        [base_vals],
-        positions=[len(intervention_keys)],
-        widths=0.2,
-        whis=(5, 95),
-        flierprops=flierprops,
-        patch_artist=True,
-    )
-    box["boxes"][0].set_facecolor("tab:green")
-    box["boxes"][0].set_alpha(0.6)
+    swarm(base_vals, float(len(intervention_keys)), "tab:green")
     ax.axhline(float(base_vals.mean()), color="tab:green", ls="--", lw=1)
     ax.set_yscale("log")
     ax.set_xticks(list(range(len(intervention_keys) + 1)))
     ax.set_xticklabels([*intervention_keys, _BASELINE_KEY], rotation=20, ha="right")
     ax.set_ylabel("per-sample MSE vs original output")
     handles = [
-        plt.Rectangle((0, 0), 1, 1, facecolor=c, alpha=0.6) for c in [*colors.values(), "tab:green"]
+        plt.Line2D([], [], marker="o", ls="", color=c, alpha=0.7)
+        for c in [*colors.values(), "tab:green"]
     ]
     ax.legend(handles, [*colors.keys(), "baseline"], loc="upper left")
     fig.tight_layout()
