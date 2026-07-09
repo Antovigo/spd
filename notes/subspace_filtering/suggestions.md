@@ -77,6 +77,28 @@ share/cancel.
   `U ← P_col U`), fold the removed mass into Δ, fine-tune briefly. Cheap way to test
   how much F3 matters before touching the training loop.
 
+**Explicit parameterization.** For `W [d_out, d_in]` with components `V [d_in, C]`
+(read, `x @ V`) and `U [C, d_out]` (write, `acts @ U`): take the economy SVD
+`W = Q_out Σ Q_inᵀ` once at init (numerical rank `r`, singular values > τ·σ_max,
+τ ~ 1e-5), store `Q_in [d_in, r]` and `Q_out [d_out, r]` as frozen buffers, and learn
+coordinates instead of ambient vectors:
+
+- `A [r, C]` with effective `V = Q_in A [d_in, C]`
+- `B [C, r]` with effective `U = B Q_outᵀ [C, d_out]`
+
+Then `W_sum = Q_out (Bᵀ Aᵀ) Q_inᵀ`, so faithfulness reduces to `Bᵀ Aᵀ ≈ Σ [r, r]` —
+the components decompose the singular-value matrix in SVD coordinates, and F3 holds for
+any parameter values. The CI function is untouched (`x @ V` has the same shape), and
+`x @ V = (x @ Q_in) @ A` shares one `[d_in → r]` matmul per site across components.
+Prefer this coordinate form over on-the-fly projectors (`V = P_row Ṽ`): Adam's
+per-coordinate scaling doesn't commute with a projector, so the projected form leaks
+out of the subspace between steps, while coordinates are optimizer-safe and smaller.
+Only the narrow side of a rectangular matrix is constrained in practice (full-rank
+measured everywhere): 8B `gate/up_proj [14336, 4096]` → write side only
+(`B [C, 4096]`, `V` stays free); `down_proj [4096, 14336]` → read side only
+(`A [4096, C]`, `U` free); square attention matrices unchanged (F3 vacuous there).
+Retrofit: `A = Q_inᵀ V`, `B = U Q_out`, add `W_sum − W'_sum` to Δ.
+
 ### B. An explicit, always-on offset component per matrix (targets F2)
 
 The F2 failure is structural: the original reads its effective biases from
