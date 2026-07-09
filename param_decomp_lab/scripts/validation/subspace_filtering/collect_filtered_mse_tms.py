@@ -1,12 +1,15 @@
-"""Subspace-filtering battery for a TMS-5-2 decomposition — per-sample MSE vs the target.
+"""Subspace-filtering battery for a TMS decomposition — per-sample MSE vs the target.
 
 Same question as `collect_filtered_kl_fulldata.py` (do the selected subcomponents'
 subspaces match the original matrices' causally-used subspaces?) for a TMS toy
 decomposition. Differences from the LM batteries:
 
-- Model: `SavedTMSRun` — `out = ReLU(linear2(linear1(x)))`, activations are `[b, d]`
-  (no sequence dim), and `linear2` carries a frozen target bias which the circuit hook
-  re-adds (asserted, not assumed).
+- Model: `SavedTMSRun` — `out = ReLU(linear2(hidden_layers...(linear1(x))))`,
+  activations are `[b, d]` (no sequence dim), and `linear2` carries a frozen target
+  bias which the circuit hook re-adds (asserted, not assumed). Every decomposition
+  target gets span tests; matrix-space (row/col) tests run only on non-square
+  matrices — square modules (e.g. a fixed identity hidden layer) are skipped with a
+  logged note since projecting onto the full space is vacuous.
 - Data: one batch of `--n-samples` draws from the run's own `SparseFeatureDataset`
   config (seeded).
 - Readout: per-sample MSE between the variant's output and the *original* model's
@@ -125,11 +128,15 @@ def collect_filtered_mse_tms(
     run_dir = run.checkpoint_path.parent
 
     modules = sorted(model.components)
-    assert modules == ["linear1", "linear2"], f"expected TMS linears, got {modules}"
+    hidden = [m for m in modules if m.startswith("hidden_layers.")]
+    assert modules == sorted(["linear1", "linear2", *hidden]), (
+        f"expected TMS linears (+ optional hidden layers), got {modules}"
+    )
     linears = {m: model.target_model.get_submodule(m) for m in modules}
     for m in modules:
         assert isinstance(linears[m], nn.Linear), f"{m} is not nn.Linear"
-    assert linears["linear1"].bias is None, "linear1 unexpectedly has a bias"
+        if m != "linear2":
+            assert linears[m].bias is None, f"{m} unexpectedly has a bias"
     assert linears["linear2"].bias is not None, "linear2 unexpectedly has no bias"
     biases = {m: cast(Tensor | None, linears[m].bias) for m in modules}
     biases = {m: None if b is None else b.detach().float() for m, b in biases.items()}
@@ -152,6 +159,11 @@ def collect_filtered_mse_tms(
     ]
     matrix_keys = [iv.key for iv in interventions if iv.space == "matrix"]
     assert matrix_keys == ["circuit_in_row:linear1", "circuit_out_col:linear2"], matrix_keys
+    for m in modules:
+        if w[m].shape[0] == w[m].shape[1]:
+            logger.info(
+                f"{m} is square ({tuple(w[m].shape)}): matrix-space tests are vacuous, skipped"
+            )
 
     matrix_q = {
         (iv.module, iv.side): orthonormal_basis(w[iv.module].T if iv.side == "in" else w[iv.module])
@@ -301,10 +313,10 @@ def collect_filtered_mse_tms(
     nci_path = out_dir / "nci_tms.tsv"
     with nci_path.open("w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
-        writer.writerow(["sample", "n_ci_linear1", "n_ci_linear2"])
-        n1, n2 = supports["linear1"].sum(axis=1), supports["linear2"].sum(axis=1)
+        writer.writerow(["sample", *(f"n_ci_{m}" for m in modules)])
+        counts = {m: supports[m].sum(axis=1) for m in modules}
         for si in range(n_samples):
-            writer.writerow([si, int(n1[si]), int(n2[si])])
+            writer.writerow([si, *(int(counts[m][si]) for m in modules)])
 
     meta = {
         "run_id": run_dir.name,
@@ -316,6 +328,7 @@ def collect_filtered_mse_tms(
         "mu": "mean over the n_samples batch, per site, under the intervened model variant",
         "span_rank_stats": rank_stats,
         "matrix_space_rank": {f"{m}.{s}": int(q.shape[1]) for (m, s), q in matrix_q.items()},
+        "matrix_space_skipped_square": [m for m in modules if w[m].shape[0] == w[m].shape[1]],
         "wiring_check_mse": wiring_mse,
         "experiments": [iv.key for iv in interventions] + [_BASELINE_KEY],
         "flavors": list(FLAVORS),
@@ -344,7 +357,7 @@ def _write_boxplot(
     floor = 1e-12
     flierprops = dict(marker=".", markersize=2, alpha=0.25)
     fig, ax = plt.subplots(figsize=(1.8 * len(intervention_keys) + 2, 5))
-    colors = {"raw": "tab:red", "centered": "tab:blue", "bias": "tab:green"}
+    colors = {"raw": "tab:red", "centered": "tab:blue", "bias": "tab:orange"}
     for gi, key in enumerate(intervention_keys):
         for fi, flavor in enumerate(FLAVORS):
             vals = np.maximum(mse[row_of[(key, flavor)]], floor)
@@ -357,6 +370,7 @@ def _write_boxplot(
                 patch_artist=True,
             )
             box["boxes"][0].set_facecolor(colors[flavor])
+            box["boxes"][0].set_alpha(0.6)
     base_vals = np.maximum(mse[row_of[(_BASELINE_KEY, "none")]], floor)
     box = ax.boxplot(
         [base_vals],
@@ -366,13 +380,16 @@ def _write_boxplot(
         flierprops=flierprops,
         patch_artist=True,
     )
-    box["boxes"][0].set_facecolor("tab:gray")
+    box["boxes"][0].set_facecolor("tab:green")
+    box["boxes"][0].set_alpha(0.6)
+    ax.axhline(float(base_vals.mean()), color="tab:green", ls="--", lw=1)
     ax.set_yscale("log")
     ax.set_xticks(list(range(len(intervention_keys) + 1)))
     ax.set_xticklabels([*intervention_keys, _BASELINE_KEY], rotation=20, ha="right")
     ax.set_ylabel("per-sample MSE vs original output")
-    handles = [plt.Rectangle((0, 0), 1, 1, facecolor=c) for c in colors.values()]
-    handles.append(plt.Rectangle((0, 0), 1, 1, facecolor="tab:gray"))
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, facecolor=c, alpha=0.6) for c in [*colors.values(), "tab:green"]
+    ]
     ax.legend(handles, [*colors.keys(), "baseline"], loc="upper left")
     fig.tight_layout()
     fig.savefig(path, dpi=150)

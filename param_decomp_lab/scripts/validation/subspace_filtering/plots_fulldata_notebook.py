@@ -1,6 +1,6 @@
 """Marimo notebook plotting the `collect_filtered_kl_fulldata.py` outputs.
 
-Reads `kl_fulldata_<block>.tsv` / `nci_fulldata_<block>.tsv` / `meta_fulldata_<block>.json`
+Reads `kl_fulldata_<block>.tsv` / `meta_fulldata_<block>.json`
 from a run's `analysis/datasets/subspace_filtering/` and renders, per block:
 
 - grouped boxplots of the per-(prompt, position) KL distribution, one group per
