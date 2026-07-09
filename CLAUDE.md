@@ -69,8 +69,9 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
   tied weights, faithfulness warmup. Flipping a field here changes what algorithm runs.
   `svd_rank_threshold` switches Linear targets to `SVDLinearComponents` (components
   learned in the target weight's SVD coordinates, so read/write vectors stay in
-  `row(W)`/`col(W)` by construction; incompatible with tied weights and non-Linear
-  targets). See `notes/subspace_filtering/plan.md`.
+  `row(W)`/`col(W)` by construction; `svd_constrain` picks the constrained sides —
+  `in`/`out`/`both`; incompatible with tied weights and non-Linear targets). See
+  `notes/subspace_filtering/plan.md`.
 - `RuntimeConfig` — compute substrate: `autocast_bf16`, `device`, `dp`. Perturbs numerics
   without changing the algorithm.
 - `Cadence` — train-log / save period predicates. Train-log fires every

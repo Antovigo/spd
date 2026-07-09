@@ -150,6 +150,12 @@ class PDConfig(BaseConfig):
         "directions). Guarantees read/write vectors lie in row(W)/col(W). Requires all "
         "targets to be nn.Linear and no tied weights.",
     )
+    svd_constrain: Literal["in", "out", "both"] = Field(
+        default="both",
+        description="Which sides the SVD parameterization constrains: read vectors "
+        "('in'), write vectors ('out'), or 'both'. Ignored when svd_rank_threshold "
+        "is unset.",
+    )
 
     @cached_property
     def all_decomposition_target_configs(self) -> list[DecompositionTargetConfig]:

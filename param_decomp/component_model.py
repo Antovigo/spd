@@ -19,7 +19,7 @@ from param_decomp.base_config import runtime_cast
 from param_decomp.batch_and_loss_fns import RunBatch
 from param_decomp.ci_fns import CiConfig, make_ci_fn_wrapper
 from param_decomp.ci_sigmoids import SIGMOID_TYPES, SigmoidType
-from param_decomp.components import Components, make_components
+from param_decomp.components import Components, SVDConstrain, make_components
 from param_decomp.decomposition_targets import DecompositionTarget, Identity
 from param_decomp.masks import ComponentsMaskInfo, SamplingType
 
@@ -71,6 +71,7 @@ class ComponentModel(nn.Module):
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,
         svd_rank_threshold: float | None = None,
+        svd_constrain: SVDConstrain = "both",
     ):
         """Wrap `target_model` with parameter-component machinery.
 
@@ -88,6 +89,8 @@ class ComponentModel(nn.Module):
             svd_rank_threshold: When set, components are learned in the SVD coordinates
                 of each frozen target weight (see `SVDLinearComponents`); `None` keeps
                 the dense `V`/`U` parameterization.
+            svd_constrain: Which sides the SVD parameterization constrains (`"in"`,
+                `"out"`, `"both"`). Ignored when `svd_rank_threshold` is None.
         """
         super().__init__()
         self._run_batch: RunBatch = run_batch
@@ -103,7 +106,10 @@ class ComponentModel(nn.Module):
         self.target_module_paths = list(self.module_to_c.keys())
 
         self.components = make_components(
-            target_model, self.module_to_c, svd_rank_threshold=svd_rank_threshold
+            target_model,
+            self.module_to_c,
+            svd_rank_threshold=svd_rank_threshold,
+            svd_constrain=svd_constrain,
         )
         self._components = nn.ModuleDict(
             {k.replace(".", "-"): self.components[k] for k in sorted(self.components)}

@@ -46,6 +46,7 @@ def test_forward_matches_dense_on_full_rank_square():
     bias = torch.randn(d)
     svd_comp = SVDLinearComponents(C=5, target_weight=w, rank_threshold=0.0, bias=bias)
     dense_comp = LinearComponents(C=5, d_in=d, d_out=d, bias=bias)
+    assert svd_comp.Q_in is not None and svd_comp.Q_out is not None
     with torch.no_grad():
         dense_comp.V.copy_(svd_comp.Q_in @ svd_comp.A)
         dense_comp.U.copy_(svd_comp.B @ svd_comp.Q_out.T)
@@ -70,6 +71,7 @@ def test_rank_truncation_and_tail_in_delta():
     w = _spectrum_weight([10.0, 5.0, 1e-4], d_out=12, d_in=7)
     comp = SVDLinearComponents(C=4, target_weight=w, rank_threshold=1e-2)
     assert comp.r == 2
+    assert comp.Q_out is not None
 
     kept_p = comp.Q_out @ comp.Q_out.T
     weight = comp.weight
@@ -101,7 +103,8 @@ def test_grads_reach_coordinates_only():
     comp(torch.randn(2, 6)).sum().backward()
     assert comp.A.grad is not None and comp.A.grad.abs().sum() > 0
     assert comp.B.grad is not None and comp.B.grad.abs().sum() > 0
-    assert not comp.Q_in.requires_grad and not comp.Q_out.requires_grad
+    assert comp.Q_in is not None and not comp.Q_in.requires_grad
+    assert comp.Q_out is not None and not comp.Q_out.requires_grad
 
 
 def test_state_dict_round_trip_restores_basis():
@@ -111,12 +114,46 @@ def test_state_dict_round_trip_restores_basis():
     assert {"A", "B", "Q_in", "Q_out", "singular_values"} <= set(sd.keys())
 
     fresh = SVDLinearComponents(C=4, target_weight=w, rank_threshold=0.0)
+    assert fresh.Q_in is not None
     with torch.no_grad():
         fresh.A.mul_(0.0)
         fresh.Q_in.mul_(-1.0)  # simulate a different SVD sign convention
     fresh.load_state_dict(sd)
     assert torch.allclose(fresh.V, comp.V, atol=1e-6)
     assert torch.allclose(fresh.U, comp.U, atol=1e-6)
+
+
+def test_constrain_in_only():
+    w = _spectrum_weight([5.0, 2.0, 1.0], d_out=10, d_in=6)
+    comp = SVDLinearComponents(C=4, target_weight=w, rank_threshold=1e-5, constrain="in")
+    assert comp.Q_in is not None and comp.Q_out is None
+    assert comp.A.shape == (3, 4)
+    assert comp.B.shape == (4, 10)
+    assert comp.U is comp.B
+
+    row_basis, _ = torch.linalg.qr(w.T)
+    row_p = row_basis[:, :3] @ row_basis[:, :3].T
+    assert torch.allclose(row_p @ comp.V, comp.V, atol=1e-5)
+
+    x = torch.randn(5, 6)
+    assert torch.allclose(comp.get_component_acts(x), x @ comp.V, atol=1e-5)
+    assert torch.allclose(comp(x), (x @ comp.V) @ comp.U, atol=1e-5)
+
+
+def test_constrain_out_only():
+    w = _spectrum_weight([5.0, 2.0, 1.0], d_out=10, d_in=6)
+    comp = SVDLinearComponents(C=4, target_weight=w, rank_threshold=1e-5, constrain="out")
+    assert comp.Q_in is None and comp.Q_out is not None
+    assert comp.A.shape == (6, 4)
+    assert comp.B.shape == (4, 3)
+    assert comp.V is comp.A
+
+    col_basis, _ = torch.linalg.qr(w)
+    col_p = col_basis[:, :3] @ col_basis[:, :3].T
+    assert torch.allclose(comp.U @ col_p, comp.U, atol=1e-5)
+
+    x = torch.randn(5, 6)
+    assert torch.allclose(comp(x), (x @ comp.V) @ comp.U, atol=1e-5)
 
 
 def test_make_components_dispatch():

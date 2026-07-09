@@ -192,21 +192,27 @@ class LinearComponents(DenseComponents):
         return out
 
 
+SVDConstrain = Literal["in", "out", "both"]
+
+
 class SVDLinearComponents(Components):
     """Linear components learned in the SVD coordinates of the frozen target weight.
 
     From the economy SVD `W = Q_out diag(S) Q_in^T` (computed once at init, fp32),
     singular directions with `S > rank_threshold * S.max()` are kept (`r` of them) and
     stored as frozen persistent buffers. The learned parameters are coordinates
-    `A [r, C]` and `B [C, r]`; the effective read/write vectors `V = Q_in A` /
-    `U = B Q_out^T` therefore lie in `row(W)` / `col(W)` by construction. The
-    rank-truncated tail of `W` is not representable by the component sum and flows
-    into the weight delta. Init matches `DenseComponents`' effective distribution
-    (Gaussians are rotation-invariant): `A ~ N(0, 1/d_in)`, `B ~ N(0, 1/C)`.
+    `A [r_in, C]` and `B [C, r_out]`; on a constrained side the effective read/write
+    vectors `V = Q_in A` / `U = B Q_out^T` lie in `row(W)` / `col(W)` by construction.
+    `constrain` picks which sides that applies to: an unconstrained side drops its `Q`
+    buffer and its coordinates are the ambient vectors themselves (`r_in = d_in` /
+    `r_out = d_out`). The rank-truncated tail of `W` is not representable by the
+    component sum and flows into the weight delta. Init matches `DenseComponents`'
+    effective distribution (Gaussians are rotation-invariant): `A ~ N(0, 1/d_in)`,
+    `B ~ N(0, 1/C)`.
     """
 
-    Q_in: Float[Tensor, "d_in r"]
-    Q_out: Float[Tensor, "d_out r"]
+    Q_in: Float[Tensor, "d_in r"] | None
+    Q_out: Float[Tensor, "d_out r"] | None
     singular_values: Float[Tensor, " r"]
     bias: Float[Tensor, "... d_out"] | None
 
@@ -215,23 +221,27 @@ class SVDLinearComponents(Components):
         C: int,
         target_weight: Float[Tensor, "d_out d_in"],
         rank_threshold: float,
+        constrain: SVDConstrain = "both",
         bias: Tensor | None = None,
     ):
         super().__init__(C)
         d_out, d_in = target_weight.shape
         self.d_in = d_in
         self.d_out = d_out
+        self.constrain = constrain
 
         q_out, s, vh = torch.linalg.svd(target_weight.detach().float(), full_matrices=False)
         r = int((s > rank_threshold * s[0]).sum().item())
         assert r >= 1, f"rank_threshold {rank_threshold} keeps no singular directions"
         self.r = r
-        self.register_buffer("Q_in", vh[:r].T.contiguous())
-        self.register_buffer("Q_out", q_out[:, :r].contiguous())
+        self.register_buffer("Q_in", vh[:r].T.contiguous() if constrain in ("in", "both") else None)
+        self.register_buffer(
+            "Q_out", q_out[:, :r].contiguous() if constrain in ("out", "both") else None
+        )
         self.register_buffer("singular_values", s[:r].contiguous())
 
-        self.A = nn.Parameter(torch.empty(r, C))
-        self.B = nn.Parameter(torch.empty(C, r))
+        self.A = nn.Parameter(torch.empty(r if self.Q_in is not None else d_in, C))
+        self.B = nn.Parameter(torch.empty(C, r if self.Q_out is not None else d_out))
         init_param_(self.A, fan_val=d_in, nonlinearity="linear")
         init_param_(self.B, fan_val=C, nonlinearity="linear")
 
@@ -241,25 +251,28 @@ class SVDLinearComponents(Components):
     @property
     @override
     def V(self) -> Float[Tensor, "d_in C"]:  # pyright: ignore[reportIncompatibleVariableOverride]
+        if self.Q_in is None:
+            return self.A
         return einops.einsum(self.Q_in, self.A, "d_in r, r C -> d_in C")
 
     @property
     @override
     def U(self) -> Float[Tensor, "C d_out"]:  # pyright: ignore[reportIncompatibleVariableOverride]
+        if self.Q_out is None:
+            return self.B
         return einops.einsum(self.B, self.Q_out, "C r, d_out r -> C d_out")
 
     @property
     @override
     def weight(self) -> Float[Tensor, "d_out d_in"]:
-        core = einops.einsum(self.A, self.B, "r_in C, C r_out -> r_out r_in")
-        return einops.einsum(
-            self.Q_out, core, self.Q_in, "d_out r_out, r_out r_in, d_in r_in -> d_out d_in"
-        )
+        return einops.einsum(self.V, self.U, "d_in C, C d_out -> d_out d_in")
 
     @override
     def get_component_acts(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... C"]:
-        x_r = einops.einsum(x.to(self.A.dtype), self.Q_in, "... d_in, d_in r -> ... r")
-        return einops.einsum(x_r, self.A, "... r, r C -> ... C")
+        x = x.to(self.A.dtype)
+        if self.Q_in is not None:
+            x = einops.einsum(x, self.Q_in, "... d_in, d_in r -> ... r")
+        return einops.einsum(x, self.A, "... r_in, r_in C -> ... C")
 
     @override
     def scale_subcomponents_(self, keep: Float[Tensor, " C"]) -> None:
@@ -274,7 +287,7 @@ class SVDLinearComponents(Components):
         weight_delta_and_mask: WeightDeltaAndMask | None = None,
         component_acts_cache: dict[str, Float[Tensor, "... C"]] | None = None,
     ) -> Float[Tensor, "... d_out"]:
-        """Same contract as `LinearComponents.forward`; both projections factor through
+        """Same contract as `LinearComponents.forward`; constrained sides factor through
         the SVD coordinates (`(x @ Q_in) @ A`, `(acts @ B) @ Q_out^T`)."""
         component_acts = self.get_component_acts(x)
         if component_acts_cache is not None:
@@ -285,8 +298,9 @@ class SVDLinearComponents(Components):
         if mask is not None:
             component_acts = component_acts * mask
 
-        out_r = einops.einsum(component_acts, self.B, "... C, C r -> ... r")
-        out = einops.einsum(out_r, self.Q_out, "... r, d_out r -> ... d_out")
+        out = einops.einsum(component_acts, self.B, "... C, C r_out -> ... r_out")
+        if self.Q_out is not None:
+            out = einops.einsum(out, self.Q_out, "... r, d_out r -> ... d_out")
 
         if weight_delta_and_mask is not None:
             weight_delta, weight_delta_mask = weight_delta_and_mask
@@ -393,6 +407,7 @@ def make_components(
     target_model: nn.Module,
     module_to_c: dict[str, int],
     svd_rank_threshold: float | None = None,
+    svd_constrain: SVDConstrain = "both",
 ) -> dict[str, Components]:
     """Build one `Components` instance per target module path.
 
@@ -412,6 +427,8 @@ def make_components(
             SVD coordinates of its frozen weight (`SVDLinearComponents`), keeping
             singular directions with `sigma > threshold * sigma_max`; `0.0` keeps all
             nonzero directions. Only `nn.Linear` targets are supported in this mode.
+        svd_constrain: Which sides the SVD parameterization constrains — read (`"in"`),
+            write (`"out"`), or `"both"`. Ignored when `svd_rank_threshold` is None.
 
     Returns:
         Dict keyed by the same submodule paths, mapping to a `Components` instance whose
@@ -431,6 +448,7 @@ def make_components(
                     C=C,
                     target_weight=target_module.weight,
                     rank_threshold=svd_rank_threshold,
+                    constrain=svd_constrain,
                     bias=target_module.bias.data if target_module.bias is not None else None,  # pyright: ignore[reportUnnecessaryComparison]
                 )
             case nn.Linear():

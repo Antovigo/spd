@@ -377,6 +377,7 @@ class Trainer:
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
             svd_rank_threshold=pd_config.svd_rank_threshold,
+            svd_constrain=pd_config.svd_constrain,
         )
         model.to(device)
 
