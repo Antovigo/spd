@@ -142,6 +142,14 @@ class PDConfig(BaseConfig):
         default=None,
         description="List of identity module patterns with C values.",
     )
+    svd_rank_threshold: float | None = Field(
+        default=None,
+        description="When set, parameterize every Linear target's components in the SVD "
+        "coordinates of its frozen weight (V = Q_in A, U = B Q_out^T), keeping singular "
+        "directions with sigma > threshold * sigma_max (0.0 keeps all nonzero "
+        "directions). Guarantees read/write vectors lie in row(W)/col(W). Requires all "
+        "targets to be nn.Linear and no tied weights.",
+    )
 
     @cached_property
     def all_decomposition_target_configs(self) -> list[DecompositionTargetConfig]:

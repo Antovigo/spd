@@ -31,6 +31,7 @@ from param_decomp.batch_and_loss_fns import (
     move_batch_to_device,
 )
 from param_decomp.component_model import ComponentModel, OutputWithCache, component_grad_norms
+from param_decomp.components import DenseComponents
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
@@ -234,9 +235,7 @@ def _apply_ci_scaled_weight_decay(
         for name, ci_max in batch_ci_max.items():
             global_ci_max = all_reduce(ci_max, op=ReduceOp.MAX).clamp(0.0, 1.0)
             keep = 1.0 - lr * coeff * (1.0 - global_ci_max)
-            component = component_model.components[name]
-            component.V.mul_(keep[None, :])
-            component.U.mul_(keep[:, None])
+            component_model.components[name].scale_subcomponents_(keep)
 
 
 def tie_component_weights(
@@ -247,6 +246,9 @@ def tie_component_weights(
         src = component_model.components[src_name]
         assert tgt is not None and src is not None, (
             f"Cannot tie weights between {src_name} and {tgt_name} - one or both are None"
+        )
+        assert isinstance(tgt, DenseComponents) and isinstance(src, DenseComponents), (
+            "tied weights require the dense V/U parameterization"
         )
         tgt.U.data = src.V.data.T
         tgt.V.data = src.U.data.T
@@ -374,6 +376,7 @@ class Trainer:
             decomposition_targets=decomposition_targets,
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
+            svd_rank_threshold=pd_config.svd_rank_threshold,
         )
         model.to(device)
 

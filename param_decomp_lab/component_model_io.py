@@ -17,6 +17,7 @@ from param_decomp.ci_fns import (
     LayerwiseCiConfig,
 )
 from param_decomp.component_model import ComponentModel
+from param_decomp.components import DenseComponents
 from param_decomp.configs import PDConfig
 from param_decomp.decomposition_targets import (
     DecompositionTargetConfig,
@@ -79,6 +80,7 @@ def load_component_model(
         decomposition_targets=resolved_targets,
         ci_config=pd_config.ci_config,
         sigmoid_type=pd_config.sigmoid_type,
+        svd_rank_threshold=pd_config.svd_rank_threshold,
     )
 
     comp_model_weights = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -91,6 +93,9 @@ def load_component_model(
             src = comp_model.components[src_name]
             assert tgt is not None and src is not None, (
                 f"Cannot tie weights between {src_name} and {tgt_name} - one or both are None"
+            )
+            assert isinstance(tgt, DenseComponents) and isinstance(src, DenseComponents), (
+                "tied weights require the dense V/U parameterization"
             )
             tgt.U.data = src.V.data.T
             tgt.V.data = src.U.data.T

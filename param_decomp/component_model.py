@@ -70,6 +70,7 @@ class ComponentModel(nn.Module):
         decomposition_targets: list[DecompositionTarget],
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,
+        svd_rank_threshold: float | None = None,
     ):
         """Wrap `target_model` with parameter-component machinery.
 
@@ -84,6 +85,9 @@ class ComponentModel(nn.Module):
             sigmoid_type: Sigmoid used to squash raw CI-fn outputs. `"leaky_hard"`
                 splits into lower- and upper-leaky variants; everything else uses one
                 function for both branches.
+            svd_rank_threshold: When set, components are learned in the SVD coordinates
+                of each frozen target weight (see `SVDLinearComponents`); `None` keeps
+                the dense `V`/`U` parameterization.
         """
         super().__init__()
         self._run_batch: RunBatch = run_batch
@@ -98,7 +102,9 @@ class ComponentModel(nn.Module):
         self.module_to_c = {target.module_path: target.C for target in decomposition_targets}
         self.target_module_paths = list(self.module_to_c.keys())
 
-        self.components = make_components(target_model, self.module_to_c)
+        self.components = make_components(
+            target_model, self.module_to_c, svd_rank_threshold=svd_rank_threshold
+        )
         self._components = nn.ModuleDict(
             {k.replace(".", "-"): self.components[k] for k in sorted(self.components)}
         )
