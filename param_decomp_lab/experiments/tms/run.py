@@ -99,10 +99,6 @@ def make_run_batch(target_cfg: TMSTargetConfig) -> RunBatch:
     return run_batch_first_element
 
 
-def _tied_weights_for(target_model: TMSModel) -> list[tuple[str, str]] | None:
-    return [("linear1", "linear2")] if target_model.config.tied_weights else None
-
-
 @dataclass(frozen=True)
 class SavedTMSRun:
     """Handle to a completed TMS PD run on disk or in W&B."""
@@ -144,12 +140,11 @@ def main(
     logger.info(f"Using device: {device}")
 
     target_model = build_target(cfg.target).to(device)
-    cfg = cfg.model_copy(
-        update={
-            "pd": cfg.pd.model_copy(update={"tied_weights": _tied_weights_for(target_model)}),
-            "runtime": cfg.runtime.model_copy(update={"device": device}),
-        }
-    )
+    if cfg.pd.tied_weights is not None:
+        assert target_model.config.tied_weights, (
+            "pd.tied_weights is set but the target model was trained untied"
+        )
+    cfg = cfg.model_copy(update={"runtime": cfg.runtime.model_copy(update={"device": device})})
 
     train_loader = build_tms_loader(
         cfg.target, cfg.data, split="train", device=device, batch_size=cfg.pd.batch_size

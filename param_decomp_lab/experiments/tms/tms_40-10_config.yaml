@@ -14,6 +14,7 @@ pd:
     C: 200
   identity_decomposition_targets: null
   use_delta_component: true
+  tied_weights: [[linear1, linear2]]
   batch_size: 4096
   steps: 10000
   components_optimizer:

@@ -31,7 +31,6 @@ from param_decomp_lab.experiments.resid_mlp.run import build_target as build_res
 from param_decomp_lab.experiments.resid_mlp.run import make_run_batch as make_resid_mlp_run_batch
 from param_decomp_lab.experiments.tms.run import (
     TMSExperimentConfig,
-    _tied_weights_for,
     build_tms_loader,
 )
 from param_decomp_lab.experiments.tms.run import _build_eval_loop as _build_tms_eval_loop
@@ -128,12 +127,7 @@ class TestTargetedConvergence:
         nontarget_cfg = cfg.nontarget
 
         set_seed(cfg.pd.seed)
-        cfg = cfg.model_copy(
-            update={
-                "pd": cfg.pd.model_copy(update={"tied_weights": _tied_weights_for(target_model)}),
-                "runtime": cfg.runtime.model_copy(update={"device": device}),
-            }
-        )
+        cfg = cfg.model_copy(update={"runtime": cfg.runtime.model_copy(update={"device": device})})
         train_loader = build_tms_loader(
             cfg.target, cfg.data, split="train", device=device, batch_size=cfg.pd.batch_size
         )

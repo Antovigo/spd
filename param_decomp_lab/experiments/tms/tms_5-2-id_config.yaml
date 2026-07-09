@@ -15,6 +15,7 @@ pd:
   - module_pattern: hidden_layers.0
     C: 20
   use_delta_component: true
+  tied_weights: [[linear1, linear2]]
   batch_size: 4096
   steps: 10000
   components_optimizer:

@@ -13,6 +13,7 @@ pd:
   - module_pattern: linear2
     C: 20
   use_delta_component: true
+  tied_weights: [[linear1, linear2]]
   loss_metrics:
     - type: ImportanceMinimalityLoss
       coeff: 3e-3
