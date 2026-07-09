@@ -80,9 +80,14 @@ bias ≈ −0.25). Three decompositions (C=20, impmin 3e-3 pnorm 1.0, 10k steps)
   issue: the per-feature read vectors e_i do not lie in the 2-dim row(W1), so the
   identity solution is not expressible under the restriction — on a matrix whose
   rank is far below the number of features it transmits (superposition), the
-  restriction forbids exactly the mechanism we want. Contrast with 8B L18, where
-  every matrix is numerically full rank on the narrow side and τ=0 removes only
-  null-space mass.
+  restriction forbids exactly the mechanism we want. Caveat: this is NOT ruled out
+  for 8B L18 by the E0 full-rank finding — TMS-5-2's W1 is also numerically full
+  rank (2 = min dim); superposition means features > min-dim, which weight spectra
+  can't see. L18's constrained interfaces have TMS-like compression ratios
+  (down 4096/14336, k/v 1024/4096, gate/up col 4096/14336 vs TMS 2/5), so whether
+  they are in the superposed regime is exactly what E2's CI structure (n_alive,
+  heatmap density at those interfaces) will show. Only square q/o at τ=0 are
+  provably unaffected.
 
 Battery (raw flavor, mean per-sample MSE, 4096 samples; baseline in row 1):
 
