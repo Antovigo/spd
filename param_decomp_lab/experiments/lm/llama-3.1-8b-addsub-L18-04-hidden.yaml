@@ -1,6 +1,7 @@
 cadence:
   keep_last_n_checkpoints: 2
   save_every: 5000
+  sync_checkpoints_to_wandb: false
   train_log_every: 100
 data:
   buffer_size: 1000
@@ -17,7 +18,7 @@ data:
   tokenizer_name: meta-llama/Llama-3.1-8B
   train_split: train
 eval:
-  batch_size: 256
+  batch_size: 128
   every: 500
   metrics:
   - ci_alive_threshold: 0.0
@@ -51,9 +52,9 @@ eval:
   n_steps: 10
   slow_every: 1000
   slow_on_first_step: true
-label: llama8b-L18-addsub-b256
+label: addsub-L18-04-hidden
 nontarget:
-  batch_size: 256
+  batch_size: 128
   data:
     buffer_size: 1000
     column_name: text
@@ -68,10 +69,10 @@ nontarget:
     streaming: true
     tokenizer_name: meta-llama/Llama-3.1-8B
     train_split: train
-  eval_batch_size: 256
+  eval_batch_size: 128
   impmin_coeff_ratio: 2.0
 pd:
-  batch_size: 256
+  batch_size: 128
   ci_config:
     fn_type: global_shared_transformer
     hidden_dims: null
@@ -79,11 +80,11 @@ pd:
     simple_transformer_ci_cfg:
       attn_config:
         max_len: 64
-        n_heads: 6
+        n_heads: 8
         rope_base: 10000.0
-      d_model: 384
+      d_model: 512
       mlp_hidden_dim:
-      - 1536
+      - 2048
       n_blocks: 4
   ci_fn_optimizer:
     betas:
@@ -93,20 +94,20 @@ pd:
     lr_schedule:
       final_val_frac: 0.1
       fn_type: cosine
-      start_val: 0.001
+      start_val: 0.00016
       warmup_pct: 0.0
     weight_decay: 0.0
-  ci_scaled_component_weight_decay: 0.2
-  ci_scaled_component_weight_decay_start_frac: 0.5
+  ci_scaled_component_weight_decay: 0.3
+  ci_scaled_component_weight_decay_start_frac: 0.0
   components_optimizer:
     betas:
     - 0.9
     - 0.999
     grad_clip_norm: 0.01
     lr_schedule:
-      final_val_frac: 0.0
+      final_val_frac: 0.1
       fn_type: cosine
-      start_val: 0.001
+      start_val: 0.00032
       warmup_pct: 0.0
     weight_decay: 0.0
   decomposition_targets:
@@ -116,25 +117,25 @@ pd:
     module_pattern: model.layers.18.mlp.up_proj
   - C: 456
     module_pattern: model.layers.18.mlp.down_proj
-  - C: 192
+  - C: 72
     module_pattern: model.layers.18.self_attn.q_proj
-  - C: 192
+  - C: 72
     module_pattern: model.layers.18.self_attn.k_proj
-  - C: 232
+  - C: 128
     module_pattern: model.layers.18.self_attn.v_proj
-  - C: 232
+  - C: 128
     module_pattern: model.layers.18.self_attn.o_proj
   faithfulness_warmup_lr: 0.001
   faithfulness_warmup_steps: 0
   faithfulness_warmup_weight_decay: 0.0
   identity_decomposition_targets: null
   loss_metrics:
-  - beta: 0.5
-    coeff: 0.00012
+  - beta: 0.75
+    coeff: 5.0e-05
     coeff_anneal_end_frac: 1.0
-    coeff_anneal_start_frac: 0.05
-    coeff_peak_multiplier: 10.0
-    coeff_warmup_frac: 0.05
+    coeff_anneal_start_frac: 0.0
+    coeff_peak_multiplier: 2.0
+    coeff_warmup_frac: 0.0
     eps: 1.0e-12
     name: null
     p_anneal_end_frac: 1.0
@@ -147,6 +148,9 @@ pd:
     routing:
       type: uniform_k_subset
     type: StochasticReconSubsetLoss
+  - coeff: 0.001
+    name: null
+    type: StochasticHiddenActsReconLoss
   - coeff: 0.5
     name: null
     type: UnmaskedReconLoss
@@ -170,16 +174,16 @@ pd:
     type: PersistentPGDReconLoss
     use_sigmoid_parameterization: false
   n_mask_samples: 1
-  sampling: continuous
+  sampling: binomial
   seed: 0
   sigmoid_type: leaky_hard
-  steps: 20000
+  steps: 24000
   tied_weights: null
   use_delta_component: true
 runtime:
   autocast_bf16: true
   device: cuda:0
-  dp: 4
+  dp: 2
 target:
   output_extract: logits
   recon_positions: all
