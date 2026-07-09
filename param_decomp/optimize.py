@@ -383,14 +383,23 @@ class Trainer:
         # Diverge global RNG per rank so stochastic masks/sources differ across DP workers.
         seed_per_rank(pd_config.seed)
 
+        # All model buffers are static and rank-identical (frozen biases, SVD bases,
+        # rope caches), so skip DDP's per-forward buffer broadcast: it would both
+        # in-place-overwrite tensors saved for backward (multiple forwards happen per
+        # step) and rebroadcast the large Q_in/Q_out bases on every call.
         if dist_state is not None:
             if dist_state.backend == "nccl":
                 device_id = dist_state.local_rank
                 self._wrapped_model: nn.Module = torch.nn.parallel.DistributedDataParallel(
-                    model, device_ids=[device_id], output_device=device_id
+                    model,
+                    device_ids=[device_id],
+                    output_device=device_id,
+                    broadcast_buffers=False,
                 )
             else:
-                self._wrapped_model = torch.nn.parallel.DistributedDataParallel(model)
+                self._wrapped_model = torch.nn.parallel.DistributedDataParallel(
+                    model, broadcast_buffers=False
+                )
             component_model = cast(ComponentModel, self._wrapped_model.module)
         else:
             self._wrapped_model = model

@@ -156,6 +156,11 @@ If two scripts need the same thing, it belongs here.
   (CPU-only, per-sample MSE-vs-target readout, handles `linear2`'s frozen bias and
   optional square `hidden_layers.*` targets — span tests only; matrix-space tests
   are skipped on square matrices).
+- **`subspace_restriction/`** — Proposal-A (SVD-coordinate parameterization) support:
+  `scan_spectra.py` (singular spectra + numerical ranks of a checkpoint's target
+  weights, CPU) and `retrofit_svd_projection.py` (post-hoc `V <- Q_in Q_in^T V`,
+  `U <- U Q_out Q_out^T` projection of a dense checkpoint into a copied run dir, CPU).
+  Spec: `notes/subspace_filtering/plan.md`.
 - **`neurons/`** — the L18 neuron/subcomponent census over the 0..200 `a<op>b=` grids:
   activations + answer baselines, measured last-position ablation KL (hand-rolled
   layers-19..31 KV-cache patched tail; per-neuron and per-rank-1-subcomponent),
