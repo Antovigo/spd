@@ -60,6 +60,59 @@ Conclusions:
    constraint from scratch).
 3. F1 (orig-span tests) barely moves — no free win from projection alone.
 
+## TMS-5-2 (tied pentagon target): tied vs untied vs SVD-restricted (2026-07-09)
+
+Target: the original tied TMS-5-2 (`goodfire/spd-pre-Sep-2025/runs/0hsp07o4`,
+migrated to `~/pd_scratch/subspace_restriction_tms/targets/tms5-2`; pentagon W, tied,
+bias ≈ −0.25). Three decompositions (C=20, impmin 3e-3 pnorm 1.0, 10k steps), runs
+`~/out/runs/tms_5-2_tiedtarget_{tieddecomp,untieddecomp,svddecomp}`:
+
+- **tieddecomp** (components tied like the target): perfect — 5 components/matrix,
+  |cos to e_i| ≈ 0.995, IdentityCIError 0.
+- **untieddecomp** (tied target, untied components): perfect at seed 1 — 5+5
+  components, cos ≈ 0.99, IdentityCIError 0. Seed 0 merged features 0+4 in linear2
+  (4 error); seed sensitivity, not hyperparameters (coeff 1e-3 and pnorm 2.0 variants
+  were worse; sweep runs kept as `tms52tune-*`).
+- **svddecomp** (untied + `svd_rank_threshold: 0.0`): **collapses to exactly
+  r = 2 components per matrix** with dense CI (IdentityCIError 18); functionally
+  excellent (recon 1e-4, faithfulness 1e-3) but per-feature structure is gone, and
+  weaker minimality (1e-3, 3e-4) does not recover it. Structural, not a tuning
+  issue: the per-feature read vectors e_i do not lie in the 2-dim row(W1), so the
+  identity solution is not expressible under the restriction — on a matrix whose
+  rank is far below the number of features it transmits (superposition), the
+  restriction forbids exactly the mechanism we want. Contrast with 8B L18, where
+  every matrix is numerically full rank on the narrow side and τ=0 removes only
+  null-space mass.
+
+Battery (raw flavor, mean per-sample MSE, 4096 samples; baseline in row 1):
+
+| experiment | tied | untied | svd |
+|---|---|---|---|
+| circuit_baseline | 0.00022 | 0.00023 | 0.00006 |
+| circuit_in_row:linear1 | 0.00851 | 0.00882 | **0.00006 (= baseline)** |
+| circuit_out_col:linear2 | 0.00263 | 0.00258 | 0.00560 |
+| orig_in_span:linear1 | 0.00004 | 0.00004 | 0.00058 |
+| orig_in_span:linear2 | 0.00001 | 0.00001 | 0.00063 |
+| orig_out_span:linear1 | 0.00001 | 0.00002 | 0.00003 |
+| orig_out_span:linear2 | 0.00019 | 0.00024 | 0.00528 |
+
+Readings:
+
+1. Both dense decompositions **fail legality on linear1's read side ~40× baseline**
+   (same signature as the 8B MLP): the perfect per-feature mechanism itself reads
+   e_i ∉ row(W1), i.e. on a rank-deficient matrix the *ground-truth* mechanism is
+   "illegal" by the F3 criterion. F3-as-hard-constraint and per-feature mechanisms
+   are mutually exclusive under superposition.
+2. The SVD run passes `circuit_in_row` exactly (structural) but is *worse* on the
+   span tests (`orig_out_span:linear2` 28× the tied run) — its two dense components'
+   per-sample spans no longer carry per-feature signal.
+3. `circuit_out_col:linear2` is elevated for all three: the frozen output bias is not
+   in col(W2); that term is what the bias flavor isolates, not a decomposition defect.
+
+Plots: `beeswarm_tms.png` (boxplot replaced by density-binned beeswarm — discrete
+5-input MSE distributions collapse in a boxplot) and
+`mse_by_feature_tms[_single_active].png` under each run's `analysis/subspace_filtering/`.
+
 ## E2 — addsub-L18-05-svd-tau0 (in flight)
 
 Memory probe (steps=3): peak 44.7 GiB / 46 — fits with the ~1 GB of fp32 Q buffers.
