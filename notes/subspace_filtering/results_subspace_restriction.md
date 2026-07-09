@@ -143,12 +143,18 @@ Vs the reference at matched steps — three separable effects:
    per-matrix CI-L0 win at the most-restricted read interface (v_proj, rank
    1024/4096): 0.17 vs 0.35 (5× at step 500).
 
-Mechanism: dense readers carry ~75–84% of mass in null(W) — signal the matrix
-annihilates but which still enters the CI gates via `x·V`, producing spurious
-(especially off-distribution) activations that the minimality loss must grind away.
-The restriction deletes that channel. No TMS-collapse signature (CI got sparser,
-not denser) — consistent with addsub routing far fewer features through L18 than
-the ranks allow.
+Mechanism (corrected — the global_shared_transformer CI fn reads raw site
+activations, not `x·V`, so the gate *inputs* are identical across runs): illegal
+mass inflates each component's *functional footprint under masking*. A dense
+component's standalone contribution `(x·V_c) U_c` responds to null(W) directions
+that only cancel across the full sum; every partial mask (stochastic subsets, PGD,
+CI-masked eval) breaks the cancellation, so the trained gates must keep components
+more-on, on more inputs — especially off-distribution, where null-space directions
+are active. The restriction shrinks footprints to the function-shaped part, letting
+gates shut components off cheaply. Fits the PGD gap (adversarial masks exploit
+cancellation-breaking) and E1's 44× circuit shift when the illegal mass was deleted
+post-hoc. No TMS-collapse signature (CI got sparser, not denser) — consistent with
+addsub routing far fewer features through L18 than the ranks allow.
 
 ## Soft legality pressure (transfer to the dense parameterization)
 
