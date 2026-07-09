@@ -125,5 +125,40 @@ Found + fixed a real bug: DDP's default per-forward buffer broadcast in-place
 clobbers Q_in/Q_out saved for backward → `broadcast_buffers=False` (all buffers are
 static and rank-identical).
 
-Full run: SLURM job 4157, 24k steps, 2×L40, exact reference recipe +
-`svd_rank_threshold: 0.0`.
+Full run: SLURM job 4158 (4157 died pending on QOSMaxWallDuration — resubmitted at
+24 h), 24k steps, 2×L40, exact reference recipe + `svd_rank_threshold: 0.0`.
+
+### Early investigation (step ~1600): why is it ahead?
+
+Vs the reference at matched steps — three separable effects:
+
+1. **Better init.** Step 0: unmasked KL 0.48 vs 1.27, eval PGD-recon 1.02 vs 4.32.
+   Random coordinates confined to row/col(W) damage the model far less than ambient
+   random init.
+2. **Growing lead on sparsity, not just a head start.** Equivalent-quality lead on
+   CI-L0: ref needs +500 steps at step 500, +1500 steps by step 1500 (12.9 vs 15.0
+   total CI-L0). kl_ci holds a ~constant 500-step lead (0.0160 vs 0.0171).
+3. **The dominant effect is targetedness.** Nontarget CI-masked recon 0.026 vs 0.057
+   (2.2×), nontarget L0 1.36 vs 2.65, nontarget train ImpMin ~3× lower. Largest
+   per-matrix CI-L0 win at the most-restricted read interface (v_proj, rank
+   1024/4096): 0.17 vs 0.35 (5× at step 500).
+
+Mechanism: dense readers carry ~75–84% of mass in null(W) — signal the matrix
+annihilates but which still enters the CI gates via `x·V`, producing spurious
+(especially off-distribution) activations that the minimality loss must grind away.
+The restriction deletes that channel. No TMS-collapse signature (CI got sparser,
+not denser) — consistent with addsub routing far fewer features through L18 than
+the ranks allow.
+
+## Soft legality pressure (transfer to the dense parameterization)
+
+`PDConfig.legality_pressure = {rank_threshold, project_init, decay_coeff}`
+(commit `2b1c1ca16`): keeps dense V/U, optionally (a) projects the fresh init into
+row/col(W), (b) decays only the out-of-space mass by `lr * decay_coeff` per step.
+Superposition-compatible: illegal mass survives wherever the losses defend it (the
+TMS-5-2 per-feature solution pays a finite, recoverable cost, unlike under the hard
+restriction). Attribution pair on the reference recipe:
+
+- `addsub-L18-05-dense-projinit` — init projection only (isolates effect 1).
+- `addsub-L18-05-dense-legdecay` — projection + decay 1.0 (adds the training-time
+  pressure; cumulative unprotected shrink over 24k steps ≈ e^-4 of illegal mass).
