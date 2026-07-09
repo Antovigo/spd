@@ -535,3 +535,21 @@ marimo edit param_decomp_lab/scripts/validation/subspace_filtering/plots_noteboo
 SUBFILT_BLOCK=mlp SUBFILT_SUBSET=alive SUBFILT_OP=add \
   uv run python param_decomp_lab/scripts/validation/subspace_filtering/plots_notebook.py
 ```
+
+### 20b. Subspace filtering — full-data decomposition (GPU)
+
+Same battery on a full-data run (e.g. the 4-block Pile model `s-55ea3f9b`, staged under
+`~/out/runs/s-55ea3f9b/` with `experiment_config.yaml` copied from
+`pile_llama_simple_mlp-4L.yaml`): every layer at once, every position, 100 training-stream
+sequences, per-prompt union CI sets.
+
+```bash
+FD=~/out/runs/s-55ea3f9b/model_400000.pth
+uv run python -m $SF.collect_filtered_kl_fulldata "$FD" mlp  --slurm
+uv run python -m $SF.collect_filtered_kl_fulldata "$FD" attn --slurm
+# outputs: datasets/subspace_filtering/{kl_fulldata_<block>.tsv, nci_fulldata_<block>.tsv,
+#          counts_fulldata_<block>.npz, prompts_fulldata.npz, meta_fulldata_<block>.json}
+# plots (headless; or `marimo edit`):
+SUBFILT_RUN=~/out/runs/s-55ea3f9b SUBFILT_BLOCK=mlp \
+  uv run python param_decomp_lab/scripts/validation/subspace_filtering/plots_fulldata_notebook.py
+```

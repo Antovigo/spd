@@ -72,6 +72,16 @@ from param_decomp_lab.scripts.validation.common import (
     square_grid_size,
     submit_self_to_slurm,
 )
+from param_decomp_lab.scripts.validation.subspace_filtering.lib import (
+    FLAVORS,
+    apply_flavor,
+    circuit_hook,
+    orthonormal_basis,
+    project_onto,
+    project_rows,
+    projection_out_hook,
+    projection_pre_hook,
+)
 
 _MODULE = "param_decomp_lab.scripts.validation.subspace_filtering.collect_filtered_kl"
 _BLOCK_MATRICES = {
@@ -79,7 +89,6 @@ _BLOCK_MATRICES = {
     "attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
 }
 _BLOCK_PARENT = {"mlp": "mlp", "attn": "self_attn"}
-_FLAVORS = ("raw", "centered", "bias")
 _BASELINE_KEY = "circuit_baseline"
 
 Side = Literal["in", "out"]
@@ -109,79 +118,6 @@ def _build_interventions(mats: tuple[str, ...], w: dict[str, Tensor]) -> list[_I
         if w[m].shape[1] < w[m].shape[0]
     ]
     return ivs
-
-
-def _orthonormal_basis(vectors: Tensor) -> Tensor:
-    """Orthonormal basis `Q [d, r]` of the span of the columns of `vectors [d, n]`."""
-    left, sv, _ = torch.linalg.svd(vectors, full_matrices=False)
-    keep = sv > sv[0] * 1e-5
-    return left[:, keep].contiguous()
-
-
-def _proj(x: Tensor, basis: Tensor | None) -> Tensor:
-    """Project rows of `x [b, d]` onto span(`basis [d, r]`); `None` = zero span."""
-    if basis is None:
-        return torch.zeros_like(x)
-    return (x @ basis) @ basis.T
-
-
-def _proj_rows(x: Tensor, bases: list[Tensor | None]) -> Tensor:
-    """Per-row projection: row `i` of `x [b, d]` onto its own `bases[i]`."""
-    assert len(bases) == x.shape[0], f"{len(bases)} bases for batch {x.shape[0]}"
-    out = torch.empty_like(x)
-    for i, basis in enumerate(bases):
-        out[i] = 0.0 if basis is None else (x[i] @ basis) @ basis.T
-    return out
-
-
-def _flavored(x: Tensor, mu: Tensor, flavor: str, proj_fn: Callable[[Tensor], Tensor]) -> Tensor:
-    """Apply one projection flavor to `x [b, d]` (all float32)."""
-    match flavor:
-        case "raw":
-            return proj_fn(x)
-        case "centered":
-            return mu + proj_fn(x - mu)
-        case "bias":
-            return x - mu + proj_fn(mu.expand_as(x))
-        case _:
-            raise AssertionError(f"unknown flavor {flavor!r}")
-
-
-def _pre_hook(transform: Callable[[Tensor], Tensor]) -> Callable[..., Any]:
-    def hook(_mod: Any, args: tuple[Any, ...]) -> tuple[Any, ...]:
-        x = args[0].clone()
-        with torch.autocast("cuda", enabled=False):
-            x[:, -1] = transform(x[:, -1].float()).to(x.dtype)
-        return (x, *args[1:])
-
-    return hook
-
-
-def _out_hook(transform: Callable[[Tensor], Tensor]) -> Callable[..., Any]:
-    def hook(_mod: Any, _args: tuple[Any, ...], output: Tensor) -> Tensor:
-        out = output.clone()
-        with torch.autocast("cuda", enabled=False):
-            out[:, -1] = transform(out[:, -1].float()).to(out.dtype)
-        return out
-
-    return hook
-
-
-def _circuit_hook(v: Tensor, u: Tensor, mask: Tensor) -> Callable[..., Any]:
-    """Replace the module's last-position output with the masked subcomponent sum.
-
-    `v [d_in, C]`, `u [C, d_out]` float32; `mask` `[C]` (static) or `[b, C]` (per prompt).
-    Earlier positions keep the original-weight output.
-    """
-
-    def hook(_mod: Any, args: tuple[Any, ...], output: Tensor) -> Tensor:
-        out = output.clone()
-        with torch.autocast("cuda", enabled=False):
-            acts = (args[0][:, -1].float() @ v) * mask
-            out[:, -1] = (acts @ u).to(out.dtype)
-        return out
-
-    return hook
 
 
 def _last_pos_kl(out: Tensor, logP: Tensor, P: Tensor) -> np.ndarray:
@@ -251,7 +187,7 @@ def collect_filtered_kl(
     n_comp = {m: v[m].shape[1] for m in mats}
 
     interventions = _build_interventions(mats, w)
-    experiments = [(iv, flavor) for iv in interventions for flavor in _FLAVORS]
+    experiments = [(iv, flavor) for iv in interventions for flavor in FLAVORS]
     exp_keys = [f"{iv.key}|{flavor}" for iv, flavor in experiments] + [_BASELINE_KEY]
 
     # Static selected sets (alive mode) and their span bases.
@@ -272,8 +208,8 @@ def collect_filtered_kl(
         for m in mats:
             if not sel[m]:
                 logger.info(f"NOTE: no alive subcomponents for {m} — empty span (projects to 0)")
-            span_q[(m, "in")] = _orthonormal_basis(v[m][:, sel[m]]) if sel[m] else None
-            span_q[(m, "out")] = _orthonormal_basis(u[m][sel[m]].T) if sel[m] else None
+            span_q[(m, "in")] = orthonormal_basis(v[m][:, sel[m]]) if sel[m] else None
+            span_q[(m, "out")] = orthonormal_basis(u[m][sel[m]].T) if sel[m] else None
         static_mask = {}
         for m in mats:
             mask = torch.zeros(n_comp[m], device=device)
@@ -290,7 +226,7 @@ def collect_filtered_kl(
         if iv.space != "matrix":
             continue
         vectors = w[iv.matrix].T if iv.side == "in" else w[iv.matrix]
-        matrix_q[(iv.matrix, iv.side)] = _orthonormal_basis(vectors)
+        matrix_q[(iv.matrix, iv.side)] = orthonormal_basis(vectors)
     logger.info(
         f"{block}: {len(interventions)} interventions, matrix-space ranks "
         f"{ {f'{m}.{s}': int(q.shape[1]) for (m, s), q in matrix_q.items()} }"
@@ -397,19 +333,22 @@ def collect_filtered_kl(
                             for i in range(b):
                                 idx = np.flatnonzero(sup_b[i])
                                 q = (
-                                    _orthonormal_basis(vecs[:, torch.from_numpy(idx).to(device)])
+                                    orthonormal_basis(vecs[:, torch.from_numpy(idx).to(device)])
                                     if len(idx)
                                     else None
                                 )
                                 bases.append(q)
-                                ov += float((key_mu - _proj(key_mu[None], q)[0]).norm()) / mu_norm
+                                ov += (
+                                    float((key_mu - project_onto(key_mu[None], q)[0]).norm())
+                                    / mu_norm
+                                )
                             row_bases[(m, side)] = bases
                             overlap_sums[(m, side)] = overlap_sums.get((m, side), 0.0) + ov
                 else:
                     mask_b = {m: static_mask[m] for m in mats}
                     row_bases = {}
 
-                circuit_hooks = {m: _circuit_hook(v[m], u[m], mask_b[m]) for m in mats}
+                circuit_hooks = {m: circuit_hook(v[m], u[m], mask_b[m]) for m in mats}
 
                 def run_variant(
                     circuit: bool,
@@ -443,7 +382,13 @@ def collect_filtered_kl(
                     assert m_chk[1] == "in"
                     chk = run_variant(
                         False,
-                        [(linears[m_chk[0]], "pre", _pre_hook(lambda x, q=q_chk: _proj(x, q)))],
+                        [
+                            (
+                                linears[m_chk[0]],
+                                "pre",
+                                projection_pre_hook(lambda x, q=q_chk: project_onto(x, q)),
+                            )
+                        ],
                     )
                     wiring_kl = float(chk.mean())
                     logger.info(
@@ -459,18 +404,18 @@ def collect_filtered_kl(
                     mu_site = mu[(kind, iv.matrix, iv.side)]
                     if iv.space == "matrix":
                         q_fixed = matrix_q[(iv.matrix, iv.side)]
-                        proj_fn = lambda x, q=q_fixed: _proj(x, q)
+                        proj_fn = lambda x, q=q_fixed: project_onto(x, q)
                     elif subset == "alive":
                         q_span = span_q[(iv.matrix, iv.side)]
-                        proj_fn = lambda x, q=q_span: _proj(x, q)
+                        proj_fn = lambda x, q=q_span: project_onto(x, q)
                     else:
                         bases_site = row_bases[(iv.matrix, iv.side)]
-                        proj_fn = lambda x, bs=bases_site: _proj_rows(x, bs)
-                    transform = lambda x, f=flavor, m_=mu_site, p=proj_fn: _flavored(x, m_, f, p)
+                        proj_fn = lambda x, bs=bases_site: project_rows(x, bs)
+                    transform = lambda x, f=flavor, m_=mu_site, p=proj_fn: apply_flavor(x, m_, f, p)
                     hook = (
-                        (linears[iv.matrix], "pre", _pre_hook(transform))
+                        (linears[iv.matrix], "pre", projection_pre_hook(transform))
                         if iv.side == "in"
-                        else (linears[iv.matrix], "out", _out_hook(transform))
+                        else (linears[iv.matrix], "out", projection_out_hook(transform))
                     )
                     kl[ei, grid_rows, grid_cols] = run_variant(iv.circuit, [hook])
 
@@ -511,7 +456,8 @@ def collect_filtered_kl(
                 f"{m}.{s}": round(
                     float(
                         (
-                            mu[("orig", m, s)] - _proj(mu[("orig", m, s)][None], span_q[(m, s)])[0]
+                            mu[("orig", m, s)]
+                            - project_onto(mu[("orig", m, s)][None], span_q[(m, s)])[0]
                         ).norm()
                         / mu[("orig", m, s)].norm().clamp_min(1e-12)
                     ),
@@ -538,7 +484,7 @@ def collect_filtered_kl(
         "layer": layer,
         "ops": op_list,
         "experiments": [iv.key for iv in interventions] + [_BASELINE_KEY],
-        "flavors": list(_FLAVORS),
+        "flavors": list(FLAVORS),
         "n_selected": {m: len(sel[m]) for m in mats} if subset == "alive" else "per-prompt",
         "span_rank": {
             f"{m}.{s}": (int(q.shape[1]) if q is not None else 0) for (m, s), q in span_q.items()

@@ -863,6 +863,64 @@ Outputs (defaults in the run's `analysis/` layout; `<name>` = `projection_kl` or
 
 ---
 
+## Subspace filtering (`subspace_filtering/`)
+
+The projection battery testing whether the selected subcomponents' input/output
+subspaces match the original matrices' causally-used subspaces. `plan.md` in the folder
+is the experiment-design spec; shared projection/flavor/hook machinery lives in `lib.py`;
+plots are marimo notebooks (`plots_notebook.py`, `plots_fulldata_notebook.py`, both
+excluded from basedpyright) that save PNGs into `analysis/subspace_filtering/` as they
+render.
+
+**subspace_filtering/collect_filtered_kl.py**
+
+args:
+- the path to a decomposed model
+- `block` (positional): `mlp` or `attn` — which L18 block to test
+- `--subset`: `alive` (static set from `alive_subcomponents.tsv`) or `active`
+  (per-prompt: lower-leaky CI > `--ci-thr` at the last position; default `alive`)
+- `--ci-thr` (default 0.01), `--ops` (default `add,sub`), `--batch-size` (default 512)
+- `--alive-tsv`: override the alive TSV (subset=alive only)
+- `--output-dir`; `--slurm` + knobs (single GPU)
+
+Per prompt of each op's `1..100 x 1..100` grid, measures `KL(P_target || P_variant)` of
+the last-position next-token distribution. Interventions (one site each, at `=` only):
+`orig_in_span:<m>` / `orig_out_span:<m>` (original weights, m's input/output projected
+onto the selected V-columns / U-rows span), `circuit_in_row:<m>` / `circuit_out_col:<m>`
+(circuit — selected subcomponents only, delta off at `=`, exact elsewhere — with m's
+input/output projected onto `row(W_m)` / `col(W_m)`; only where the matrix is narrow on
+that side), and `circuit_baseline`. Each projection runs raw `P x`, centered
+`mu + P(x-mu)`, and bias `x - (I-P)mu`, with `mu` the per-op grid mean at `=` under the
+intervened model variant. A first-batch wiring check asserts row-space projection into
+the original weights is a no-op. Outputs to `analysis/datasets/subspace_filtering/`:
+`kl_<block>_<subset>_<op>.tsv` (experiment, flavor, a, b, kl), `nci_<block>_<op>.tsv`
+(active only), `meta_<block>_<subset>.json` (set sizes, span/matrix ranks, `mu` overlap
+diagnostics, wiring-check KL).
+
+**subspace_filtering/collect_filtered_kl_fulldata.py**
+
+args:
+- the path to a decomposed model (e.g. the staged full-data run `s-55ea3f9b`)
+- `block` (positional): `mlp` or `attn`
+- `--n-prompts` (default 100), `--seq-len` (default 256), `--ci-thr` (default 0.01),
+  `--batch-size` (default 25), `--seed` (default 0)
+- `--output-dir`; `--slurm` + knobs
+
+Full-data variant: samples `--n-prompts` sequences from the run's own training stream
+(seeded; token ids saved to `prompts_fulldata.npz`), trims to `--seq-len`, intervenes at
+**every position** and on the same matrix type across **all** decomposed layers
+simultaneously, and records KL per (prompt, position). Selected sets are per-prompt
+unions over positions of CI > `--ci-thr`; `mu` is the pooled token mean per site
+(circuit-site means from an actual circuit forward). Layers/matrices are derived from
+`model.components`; target linears must be bias-free (asserted); all-square blocks get
+no experiment-2 sites and skip the wiring check. Outputs: `kl_fulldata_<block>.tsv`
+(experiment, flavor, prompt, pos, kl), `nci_fulldata_<block>.tsv` (per-prompt union set
+sizes), `counts_fulldata_<block>.npz` (per-position active counts), and
+`meta_fulldata_<block>.json` — whose `span_rank_stats` (per-prompt span rank vs `d`) is
+the key vacuousness diagnostic when active sets are large.
+
+---
+
 ## Neuron census (`neurons/`)
 
 A decomposition-free pipeline probing the frozen base model's L18 MLP **neurons** over the
