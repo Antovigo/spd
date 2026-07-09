@@ -1,9 +1,10 @@
 """Launch a targeted-PD (tPD) LM decomposition run
 (`python -m param_decomp_lab.experiments.lm_targeted.run`).
 
-CONFIG-DRIVEN via `runtime.dp`, exactly like `pd-lm` (`experiments.lm.launch`): `dp is None`
-runs the trainer INLINE; `dp = N` (a multiple of 8) snapshots the tree to an immutable
-shared-FS workspace, installs the `[cuda]` extra there, and sbatches across `N // 8` nodes.
+CONFIG-DRIVEN via `runtime.dp`: `dp is None` runs the trainer INLINE; otherwise it snapshots
+the tree to an immutable shared-FS workspace, installs the `[cuda]` extra there, and sbatches.
+`dp <= 8` is a SINGLE-node partial allocation of `dp` GPUs (e.g. `dp: 2` for a 2-GPU L40 run);
+`dp > 8` must be a multiple of 8 (whole nodes), sbatched across `dp // 8` nodes.
 The only tPD difference is the module run (`...lm_targeted.run`) and validating the config
 against `LMTargetedExperimentConfig`; everything else reuses `experiments.lm.launch`.
 """
@@ -36,6 +37,19 @@ from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_sl
 _SRUN_FLAGS = "--kill-on-bad-exit=1 --ntasks-per-node=1"
 
 _MODULE = "param_decomp_lab.experiments.lm_targeted.run"
+
+
+def _nodes_and_gpus_per_node(dp: int) -> tuple[int, int]:
+    """Map `runtime.dp` (total GPUs) to `(n_nodes, gpus_per_node)`. `dp <= GPUS_PER_NODE`
+    is a single partial-node allocation of `dp` GPUs (one process owning them all — how you
+    run at the 2-GPU L40 scale); a larger `dp` must be whole nodes (a multiple of
+    `GPUS_PER_NODE`). `sharding.init_distributed` mirrors this world-size rule."""
+    if dp <= GPUS_PER_NODE:
+        return 1, dp
+    assert dp % GPUS_PER_NODE == 0, (
+        f"runtime.dp={dp} must be <= {GPUS_PER_NODE} (one partial node) or a multiple of it"
+    )
+    return dp // GPUS_PER_NODE, GPUS_PER_NODE
 
 
 def _validate_config(config_path: Path) -> tuple[LMTargetedExperimentConfig, str]:
@@ -87,8 +101,7 @@ def main(
     if dp is None:
         _run_local(config_rel, run_name, group, tag_list)
         return
-    assert dp % GPUS_PER_NODE == 0, f"runtime.dp={dp} must be a multiple of {GPUS_PER_NODE}"
-    nodes = dp // GPUS_PER_NODE
+    nodes, gpus_per_node = _nodes_and_gpus_per_node(dp)
 
     if run_id is None:
         run_id = generate_run_id("param_decomp")
@@ -106,7 +119,7 @@ def main(
         job_name=f"pd-{run_name}",
         partition=None,
         qos=qos,
-        n_gpus=GPUS_PER_NODE,
+        n_gpus=gpus_per_node,
         n_nodes=nodes,
         ntasks_per_node=1,
         time=time,

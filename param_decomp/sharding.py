@@ -45,7 +45,10 @@ def init_distributed(dp: int | None) -> bool:
     """
     if dp is None:
         return False
-    assert dp % _GPUS_PER_NODE == 0, f"dp={dp} must be a multiple of {_GPUS_PER_NODE} (GPUs/node)"
+    assert dp <= _GPUS_PER_NODE or dp % _GPUS_PER_NODE == 0, (
+        f"dp={dp} must be <= {_GPUS_PER_NODE} (a single partial-node allocation of dp GPUs) "
+        f"or a multiple of {_GPUS_PER_NODE} (whole nodes)"
+    )
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     n_local = len([d for d in cuda_visible.split(",") if d]) or _GPUS_PER_NODE
     jax.distributed.initialize(local_device_ids=list(range(n_local)))
