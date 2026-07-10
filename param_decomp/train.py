@@ -329,23 +329,31 @@ def make_train_step(
         clean_targets: dict[str, Array],
         live_sites: tuple[str, ...],
         routes: Routes,
+        n_positions: int | None,
     ) -> tuple[Array, Array]:
         """Hidden-acts recon aux (SPEC S31): per `live` site, `Σ (masked − frozen)²`
         over positions ROUTED TRUE (the activations directly after an actually-replaced matrix),
-        plus the routed element count. `routes` None (route-all) counts every position. Returns
-        `(sum_sq, n_elements)` in fp32 so the term accumulates across draws and divides once."""
+        plus the routed element count. `routes` None (route-all) counts every position.
+        `n_positions` slices the sequence axis to the first `n_positions` (the tPD scored prompt,
+        SPEC S38) before scoring; None scores the full sequence. Returns `(sum_sq, n_elements)`
+        in fp32 so the term accumulates across draws and divides once."""
         sum_sq = jnp.zeros((), jnp.float32)
         n = jnp.zeros((), jnp.float32)
         for site in live_sites:
-            se = (
-                masked_sites[site].astype(jnp.float32) - clean_targets[site].astype(jnp.float32)
-            ) ** 2
+            masked = masked_sites[site]
+            clean = clean_targets[site]
+            if n_positions is not None:
+                masked = masked[:, :n_positions]
+                clean = clean[:, :n_positions]
+            se = (masked.astype(jnp.float32) - clean.astype(jnp.float32)) ** 2
             d_out = se.shape[-1]
             if routes is None:
                 sum_sq = sum_sq + jnp.sum(se)
                 n = n + jnp.asarray(se.size, jnp.float32)
             else:
                 w = routes[site].astype(jnp.float32)
+                if n_positions is not None:
+                    w = w[:, :n_positions]
                 sum_sq = sum_sq + jnp.sum(se * w[..., None])
                 n = n + jnp.sum(w) * d_out
         return sum_sq, n
@@ -570,15 +578,18 @@ def make_train_step(
                 force_delta_on: bool,
                 recon_loss: Callable[[Any, Any], Array],
                 clean_site_targets: dict[str, Array] | None,
+                hidden_acts_positions: int | None,
             ) -> list[tuple[ReconLossTerm, Array, Array | None]]:
                 """Mean-KL recon over the term/entry/draw grid (SPEC S10'), shared by the target
                 pass and the tPD non-target pass. `force_delta_on` (S35) pins the delta on and
                 restricts the set to stochastic/constant sources; the target pass
                 (`force_delta_on=False`) additionally handles fresh-PGD / persistent sources.
-                `recon_loss` is the target's position-sliced fn (S38) or the plain full-seq fn.
-                `key_offset` keeps the two passes' per-term RNG disjoint (R1). A term with
-                `hidden_acts` also returns its site-local MSE (SPEC S31), collected from
-                the SAME masked forwards against `clean_site_targets`; `None` otherwise."""
+                `recon_loss` is the target's position-sliced fn (S38) or the plain full-seq fn;
+                `hidden_acts_positions` slices the hidden-acts aux the same way (target = scored
+                prompt, non-target = None / full sequence). `key_offset` keeps the two passes'
+                per-term RNG disjoint (R1). A term with `hidden_acts` also returns its site-local
+                MSE (SPEC S31), collected from the SAME masked forwards against
+                `clean_site_targets`; `None` otherwise."""
                 out: list[tuple[ReconLossTerm, Array, Array | None]] = []
                 for term_idx, term in enumerate(grid_terms):
                     term_key = random.fold_in(key, key_offset + term_idx)
@@ -645,7 +656,11 @@ def make_train_step(
                                     f"term {term.name!r} has hidden_acts but no clean site targets"
                                 )
                                 sum_sq, n_el = route_masked_site_mse(
-                                    site_collect, clean_site_targets, entry.live_sites, routes
+                                    site_collect,
+                                    clean_site_targets,
+                                    entry.live_sites,
+                                    routes,
+                                    hidden_acts_positions,
                                 )
                                 ha_sum_sq = ha_sum_sq + sum_sq
                                 ha_n = ha_n + n_el
@@ -674,6 +689,7 @@ def make_train_step(
                 force_delta_on=False,
                 recon_loss=target_recon_loss_fn,
                 clean_site_targets=clean_site_targets,
+                hidden_acts_positions=recon_positions,
             )
             hidden_acts_metrics: dict[str, Array] = {}
             for term, term_loss, ha_mse in target_grid:
@@ -710,6 +726,7 @@ def make_train_step(
                     force_delta_on=True,
                     recon_loss=recon_loss_fn,
                     clean_site_targets=nt_inputs.clean_site_targets,
+                    hidden_acts_positions=None,
                 )
                 for term, nt_term_loss, nt_ha_mse in nt_grid:
                     nt_total = nt_total + term.coeff * nt_term_loss
