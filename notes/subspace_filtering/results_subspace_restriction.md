@@ -228,6 +228,11 @@ Copies of the key figures live in `figures/` next to this file:
 
 - `initstudy_curves.png` — the 6-treatment × 3-seed init study (per-treatment mean,
   seed min–max bands).
+- `initstudy_3treatment_curves.png` — control vs out-of-basis decay vs
+  initialize-on-basis only; shared power-of-10 scales (recon panels share one
+  scale, L0 panels another).
+- `initstudy_3treatment_beeswarm.png` — the same metrics as per-seed dots at
+  step 0 and step 1000 (control and decay share bit-identical inits).
 - `L18_singular_spectra.png` — E0 spectra of the 7 decomposed L18 matrices.
 - `battery_{mlp,attn}_{add,sub}_{reference,retrofit}.png` — E1: subspace-filtering
   battery boxplots for the dense reference vs its projected retrofit.
