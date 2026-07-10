@@ -322,6 +322,7 @@ def _make_arithmetic_eval(
     arith: ArithmeticEvalConfig | None,
     target: TargetSites,
     lm: DecomposedModel,
+    seq_len: int,
     mesh: Mesh,
     n_proc: int,
     is_main: bool,
@@ -341,7 +342,9 @@ def _make_arithmetic_eval(
     from transformers import AutoTokenizer  # heavy import; only the arith probe needs it in-job
 
     tokenizer = AutoTokenizer.from_pretrained(target.model_name, local_files_only=True)
-    probe = build_arithmetic_probe(arith.operation, arith.a_range, arith.b_range, tokenizer)
+    probe = build_arithmetic_probe(
+        arith.operation, arith.a_range, arith.b_range, tokenizer, seq_len
+    )
     n_prompts = probe.tokens.shape[0]
     return _ArithmeticEval(
         step=make_arithmetic_grid_step(lm, probe.answer_position, n_prompts),
@@ -408,7 +411,9 @@ def _make_lm_eval_fn(
     want_position_ci = perm_spec.any_plots or perm_spec.any_identity_error
     want_weight_magnitude = any(isinstance(m, WeightMagnitudeConfig) for m in run_eval_metrics)
     position_ci_step = make_position_ci_step(lm) if want_position_ci else None
-    arith_eval = _make_arithmetic_eval(eval.arithmetic, built.target, lm, mesh, n_proc, is_main)
+    arith_eval = _make_arithmetic_eval(
+        eval.arithmetic, built.target, lm, data.seq_len, mesh, n_proc, is_main
+    )
 
     def eval_fn(state: TrainState, now_step: int) -> "LogRecord":
         eval_pass_index = now_step // eval.every

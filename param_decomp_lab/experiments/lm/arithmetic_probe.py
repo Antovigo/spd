@@ -9,7 +9,9 @@ tokenizer, so every rank builds the identical grid at startup with no coordinati
 
 For Llama-3.1 every 1-3 digit integer is a single token, so `"<a>+<b>="` is a constant
 4 tokens (5 with BOS) and every sum 2..200 is a single token — the asserts below codify
-that; a range/op that breaks either invariant fails fast rather than silently padding.
+that; a range/op that breaks either invariant fails fast. All rows are then end-padded to
+the run's `seq_len` (like the trainer's target prompts) so the forward clears the cuDNN
+flash-attn min-seq; the `=` answer position stays at the last real token.
 """
 
 from collections.abc import Sequence
@@ -52,6 +54,7 @@ def build_arithmetic_probe(
     a_range: tuple[int, int],
     b_range: tuple[int, int],
     tokenizer: PromptEncoder,
+    pad_to: int,
 ) -> ArithmeticProbe:
     assert operation in OPERATIONS, f"operation must be one of {sorted(OPERATIONS)}"
     symbol, result_fn = OPERATIONS[operation]
@@ -69,8 +72,8 @@ def build_arithmetic_probe(
                 seq_len = len(ids)
             assert len(ids) == seq_len, (
                 f"prompt {prompt!r} tokenizes to {len(ids)} tokens but expected {seq_len}; "
-                f"all prompts must share one length (padding is disabled) — pick an operand "
-                f"range whose operands are all single tokens"
+                f"all prompts must share one length — pick an operand range whose operands "
+                f"are all single tokens"
             )
             answer = result_fn(a, b)
             answer_tokens = tokenizer.encode(str(answer), add_special_tokens=False)
@@ -80,8 +83,13 @@ def build_arithmetic_probe(
             )
             rows.append(ids)
     assert seq_len is not None
+    # End-pad (token 0) to the run's seq_len so the forward clears the cuDNN flash-attn
+    # min-seq, mirroring the trainer's target prompts. Causal attention makes trailing pad
+    # invisible to the `=` answer position, which stays at seq_len - 1.
+    assert seq_len <= pad_to, f"probe prompt length {seq_len} exceeds run seq_len {pad_to}"
+    padded = [ids + [0] * (pad_to - seq_len) for ids in rows]
     return ArithmeticProbe(
-        tokens=np.asarray(rows, dtype=np.int32),
+        tokens=np.asarray(padded, dtype=np.int32),
         grid=ArithmeticGrid(a_values=a_values, b_values=b_values, symbol=symbol),
         answer_position=seq_len - 1,
     )

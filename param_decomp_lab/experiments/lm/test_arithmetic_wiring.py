@@ -36,7 +36,7 @@ class _StubTokenizer:
 
 
 def test_build_arithmetic_probe_grid_row_major_with_bos():
-    probe = build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer())
+    probe = build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer(), pad_to=5)
     assert probe.tokens.shape == (12, 5) and probe.tokens.dtype == np.int32
     assert probe.answer_position == 4
     assert probe.grid.a_values == (1, 2, 3) and probe.grid.b_values == (1, 2, 3, 4)
@@ -48,29 +48,39 @@ def test_build_arithmetic_probe_grid_row_major_with_bos():
     assert grid_view[2, 3].tolist() == [BOS, 1003, SYMBOL_IDS["+"], 1004, SYMBOL_IDS["="]]
 
 
+def test_build_arithmetic_probe_end_pads_to_seq_len():
+    # pad_to > real length: rows end-pad with token 0, answer position stays at the last real token
+    probe = build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer(), pad_to=8)
+    assert probe.tokens.shape == (12, 8)
+    assert probe.answer_position == 4
+    assert probe.tokens[0].tolist() == [BOS, 1001, SYMBOL_IDS["+"], 1001, SYMBOL_IDS["="], 0, 0, 0]
+    with pytest.raises(AssertionError, match="exceeds run seq_len"):
+        build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer(), pad_to=4)
+
+
 def test_build_arithmetic_probe_operation_dispatch_and_rejects_unknown():
-    probe = build_arithmetic_probe("mul", (2, 3), (2, 3), _StubTokenizer())
+    probe = build_arithmetic_probe("mul", (2, 3), (2, 3), _StubTokenizer(), pad_to=5)
     assert probe.grid.symbol == "*"
     assert probe.tokens[0][2] == SYMBOL_IDS["*"]
     with pytest.raises(AssertionError, match="operation must be"):
-        build_arithmetic_probe("div", (1, 2), (1, 2), _StubTokenizer())
+        build_arithmetic_probe("div", (1, 2), (1, 2), _StubTokenizer(), pad_to=5)
 
 
 def test_build_arithmetic_probe_rejects_multi_token_operand():
     # a=10 splits into two digit tokens -> prompt lengths diverge (sub keeps the answers
     # single-digit so the length assert, not the answer assert, is what fires)
     with pytest.raises(AssertionError, match="one length"):
-        build_arithmetic_probe("sub", (9, 10), (1, 2), _StubTokenizer(split_from=10))
+        build_arithmetic_probe("sub", (9, 10), (1, 2), _StubTokenizer(split_from=10), pad_to=8)
 
 
 def test_build_arithmetic_probe_rejects_multi_token_answer():
     # operands single-token but 5+5=10 splits -> the answer premise breaks
     with pytest.raises(AssertionError, match="single answer token"):
-        build_arithmetic_probe("add", (5, 5), (5, 6), _StubTokenizer(split_from=10))
+        build_arithmetic_probe("add", (5, 5), (5, 6), _StubTokenizer(split_from=10), pad_to=8)
 
 
 def test_arithmetic_probe_global_preserves_grid():
-    probe = build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer())
+    probe = build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer(), pad_to=5)
     devices = np.asarray(jax.devices()[:1]).reshape(1, 1)
     mesh = Mesh(devices, ("replicate", "fsdp"))
     sharded = _arithmetic_probe_global(probe.tokens, mesh, n_proc=1)
