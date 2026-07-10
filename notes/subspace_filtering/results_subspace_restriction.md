@@ -202,8 +202,22 @@ Readings (figure: `~/pd_scratch/subspace_restriction/initstudy_curves.png`):
    0.32) has removed only ~27% of unprotected illegal mass (vs ~98% by 24k), so the
    short run *underestimates* its converged effect.
 4. Effects are roughly additive → the combined soft treatment (projected init +
-   decay) is predicted to approach the hard-svd numbers. Being tested as
-   `initstudy-L18-soft-s{0,1,2}`.
+   decay) is predicted to approach the hard-svd numbers.
 5. The residual svd-vs-projinit gap (e.g. nontarget L0 0.41 vs 0.59) is the
    constraint/optimizer-geometry contribution — the part a soft method must win via
    the decay's cumulative action (or not at all).
+
+### Soft arms: `soft` (projinit + decay 1.0) and `soft5` (projinit + decay 5.0)
+
+Ratios to dense at step 1000: soft = kl_ci 0.92, PGD 0.61, nt_ci 0.56, nt_L0 0.55
+(between projinit and svd everywhere). soft5 = nt_ci 0.50 / nt_L0 0.48 (closer to
+svd) **but target side regresses**: kl_ci 0.98, CI_L0 0.95, PGD 0.70 — worse than
+soft, near dense.
+
+**The svd–soft gap is not decay slowness.** Speeding the decay up trades
+target-side quality for nontarget quiescence instead of approaching svd uniformly:
+the target losses route through some illegal mass during optimization and fight a
+strong decay. The hard constraint avoids the fight (gradients never see illegal
+directions), achieving best-of-both. Soft operating point: decay_coeff ≈ 1.
+Full-length confirmation: `addsub-L18-05-soft` (job 4333, reference recipe +
+project_init + decay 1.0, 24k steps) vs the reference and E2.
