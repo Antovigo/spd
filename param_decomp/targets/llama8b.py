@@ -494,6 +494,34 @@ class LlamaDecomposedModel(eqx.Module):
         x = rms_norm(x, self.norm, self.eps)
         return x @ self.lm_head.T
 
+    def clean_output_and_site_outputs(
+        self, inputs: Int[Array, "b t"]
+    ) -> tuple[Array, dict[str, Array]]:
+        """`clean_output`'s logits plus each decomposed site's frozen `x @ W` output — the
+        hidden-acts recon targets (SPEC S31), intermediates of this one forward. The block runs
+        the identical logits math (same matmuls, naming the projection outputs), so the returned
+        logits equal `clean_output`'s. Only the decomposed kinds are stacked over layers."""
+        wanted_kinds = tuple({parse_site_name(s)[1] for s in self.site_names})
+
+        def block(x: Array, layer: LlamaLayer) -> tuple[Array, dict[str, Array]]:
+            attn = layer.attn
+            h1 = rms_norm(x, layer.ln1, self.eps)
+            q, k, v = h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T
+            o = attn.core(q, k, v, self.inv_freq) @ attn.wo.T
+            post_attn = x + o
+            h2 = rms_norm(post_attn, layer.ln2, self.eps)
+            g, u = h2 @ layer.Wg.T, h2 @ layer.Wu.T
+            d = (jax.nn.silu(g) * u) @ layer.Wd.T
+            by_kind: dict[str, Array] = {
+                "q": q, "k": k, "v": v, "o": o, "gate": g, "up": u, "down": d,
+            }  # fmt: skip
+            return post_attn + d, {kind: by_kind[kind] for kind in wanted_kinds}
+
+        x, ys = jax.lax.scan(block, self.embed_tokens(inputs), self.stacked)
+        x = rms_norm(x, self.norm, self.eps)
+        collect = {s: ys[parse_site_name(s)[1]][parse_site_name(s)[0]] for s in self.site_names}
+        return x @ self.lm_head.T, collect
+
     def read_activations(
         self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
     ) -> dict[str, Array]:
@@ -680,6 +708,26 @@ class LlamaDecomposedModel(eqx.Module):
         return self._run_masked_forward(
             prepared, inputs, masks, delta_masks, routes, live, has_delta, remat, None
         )
+
+    def masked_output_and_site_outputs(
+        self,
+        prepared: dict[str, dict[str, Array]],
+        inputs: Int[Array, "b t"],
+        masks: dict[str, Array],
+        delta_masks: dict[str, Array],
+        routes: dict[str, Array] | None,
+        live: tuple[str, ...],
+        has_delta: bool,
+        *,
+        remat: bool,
+    ) -> tuple[Array, dict[str, Array]]:
+        """`masked_output`'s logits plus each `live` site's masked output — both from one
+        forward, for the hidden-acts recon aux (SPEC S31) sharing the recon forward."""
+        collect: dict[str, Array] = {}
+        logits = self._run_masked_forward(
+            prepared, inputs, masks, delta_masks, routes, live, has_delta, remat, collect
+        )
+        return logits, collect
 
     def masked_site_outputs(
         self,
