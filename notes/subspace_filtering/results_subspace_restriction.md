@@ -221,3 +221,20 @@ strong decay. The hard constraint avoids the fight (gradients never see illegal
 directions), achieving best-of-both. Soft operating point: decay_coeff ≈ 1.
 Full-length confirmation: `addsub-L18-05-soft` (job 4333, reference recipe +
 project_init + decay 1.0, 24k steps) vs the reference and E2.
+
+## Figures
+
+Copies of the key figures live in `figures/` next to this file:
+
+- `initstudy_curves.png` — the 6-treatment × 3-seed init study (per-treatment mean,
+  seed min–max bands).
+- `L18_singular_spectra.png` — E0 spectra of the 7 decomposed L18 matrices.
+- `battery_{mlp,attn}_{add,sub}_{reference,retrofit}.png` — E1: subspace-filtering
+  battery boxplots for the dense reference vs its projected retrofit.
+- `tms52_ci_heatmap_{tieddecomp,untieddecomp,svddecomp}.png` — TMS-5-2 CI heatmaps:
+  perfect diagonals for tied/untied, the r=2 collapse under the hard restriction.
+- `tms52_beeswarm_{tieddecomp,untieddecomp,svddecomp}.png` — TMS-5-2 battery
+  beeswarms.
+
+Originals: `~/pd_scratch/subspace_restriction/` (study + spectra) and each run's
+`analysis/subspace_filtering/` / `figures/` dirs.
