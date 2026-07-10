@@ -128,8 +128,14 @@ def main(
         comment=comment if comment is not None else (wandb_url or run_id),
     )
     rank_env = _render_rank_env(cfg.runtime.launch_env)
-    srun = f"srun --nodes={nodes} --ntasks={nodes} {_SRUN_FLAGS}"
-    command = f"{srun} bash -c {shlex.quote(_rank_command(config_rel, run_id, rank_env))}"
+    rank_command = f"bash -c {shlex.quote(_rank_command(config_rel, run_id, rank_env))}"
+    # A single-node run needs no srun — this cluster's batch scripts run the launcher directly
+    # on the allocated node (its `--gpus-per-node` GPUs are already CUDA_VISIBLE); srun isn't on
+    # the compute nodes' PATH. Multi-node still needs srun to place one task per node.
+    if nodes == 1:
+        command = rank_command
+    else:
+        command = f"srun --nodes={nodes} --ntasks={nodes} {_SRUN_FLAGS} {rank_command}"
     script = generate_script(slurm_config, command, setup=f'cd "{workspace}"')
     result = submit_slurm_job(script, "pd-lm-targeted")
 
