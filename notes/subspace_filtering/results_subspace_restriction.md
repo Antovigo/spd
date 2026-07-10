@@ -168,3 +168,42 @@ restriction). Attribution pair on the reference recipe:
 - `addsub-L18-05-dense-projinit` — init projection only (isolates effect 1).
 - `addsub-L18-05-dense-legdecay` — projection + decay 1.0 (adds the training-time
   pressure; cumulative unprotected shrink over 24k steps ≈ e^-4 of illegal mass).
+
+(Superseded by the seed-controlled init study below.)
+
+## Init study — 3 seeds × {dense, legdecay, projinit, svd}, 1000 steps (2026-07-10)
+
+12 runs (`initstudy-L18-<t>-s{0,1,2}`), each replicating the first 1000 steps of the
+reference recipe (schedules remapped: LR cosine→linear segment ≤0.1% error, pnorm
+endpoint 1.9375 exact, PPGD warmup 600 steps exact, ImpMin coeff ≈ constant 2×
+(≤2.1% drift); eval every 100). `legdecay` (`project_init: false`, decay 1.0) has
+**bit-identical init to `dense` per seed**; `projinit` isolates the init;
+`svd` = hard constraint. Sanity: `svd-s0` matches E2's step-1000 kl_ci within 1.3%.
+
+Step-1000 means (3 seeds), ratio to dense:
+
+| metric | dense | legdecay | projinit | svd |
+|---|---|---|---|---|
+| kl_ci_masked | 0.0212 | 0.97 | 0.94 | 0.90 |
+| CI_L0 total | 16.98 | 0.92 | 0.90 | 0.88 |
+| n_alive total | 1168 | 0.76 | 0.73 | 0.69 |
+| PGD recon (eval) | 0.0584 | 0.77 | 0.67 | 0.54 |
+| nontarget ci-masked | 0.0885 | 0.78 | 0.61 | 0.44 |
+| nontarget L0 | 4.35 | 0.74 | 0.59 | 0.41 |
+
+Readings (figure: `~/pd_scratch/subspace_restriction/initstudy_curves.png`):
+
+1. Consistent ordering dense > legdecay > projinit > svd on essentially every
+   metric; the nontarget panels separate beyond seed bands.
+2. **Init is the dominant identified factor at this horizon**: projinit alone
+   captures ~60–70% of svd's nontarget advantage and most of the L0/n_alive gain.
+3. **The decay is real but slow-acting**: with identical init, legdecay bends away
+   from dense late in the window — by step 1000 the cumulative shrink (Σ lr·coeff ≈
+   0.32) has removed only ~27% of unprotected illegal mass (vs ~98% by 24k), so the
+   short run *underestimates* its converged effect.
+4. Effects are roughly additive → the combined soft treatment (projected init +
+   decay) is predicted to approach the hard-svd numbers. Being tested as
+   `initstudy-L18-soft-s{0,1,2}`.
+5. The residual svd-vs-projinit gap (e.g. nontarget L0 0.41 vs 0.59) is the
+   constraint/optimizer-geometry contribution — the part a soft method must win via
+   the decay's cumulative action (or not at all).
