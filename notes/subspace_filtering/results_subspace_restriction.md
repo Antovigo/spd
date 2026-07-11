@@ -221,6 +221,53 @@ strong decay. The hard constraint avoids the fight (gradients never see illegal
 directions), achieving best-of-both. Soft operating point: decay_coeff ≈ 1.
 Full-length confirmation: `addsub-L18-05-soft` (job 4333, reference recipe +
 project_init + decay 1.0, 24k steps) vs the reference and E2.
+(Job 4333 was preempted; superseded by the 20k pair below.)
+
+## Endgame — full-length runs at step 20000 (2026-07-11)
+
+Four runs, identical recipe, compared at step 20000 (`init-proj` = projected init
+only; `subspace-decay` = projected init + illegal-mass decay 1.0; `svd` = hard
+constraint, its 24k run was killed at 21480 by a job preemption — intact
+step-20000 checkpoint used for the battery).
+
+Training metrics: init-proj and subspace-decay reach **reference-level target
+recon (kl_ci 0.0077) with ~24% fewer alive components (251/253 vs 332)**, better
+PGD (0.0079/0.0079 vs 0.0082) and better nontarget recon (0.0047/0.0037 vs
+0.0057; nontarget L0 is the one metric where the reference ends best, 0.053 vs
+~0.10, all tiny). The hard svd run ends slightly *worse* than everyone on
+target-side metrics (kl_ci 0.0082, n_alive 424) — its early advantage inverts at
+convergence.
+
+Battery, raw flavor, mean KL, mlp block:
+
+| experiment | reference | init-proj | subspace-decay | svd |
+|---|---|---|---|---|
+| circuit_baseline | 0.0117 | 0.0108 | 0.0117 | 0.0121 |
+| circuit_in_row:down | 0.1741 | 0.1784 | **0.0904** | 0.0121 (=base) |
+| circuit_out_col:gate | 0.0469 | 0.0352 | **0.0191** | 0.0121 (=base) |
+| circuit_out_col:up | 0.0617 | 0.0390 | **0.0195** | 0.0121 (=base) |
+| orig_in_span:down | 0.1871 | 0.2070 | **0.1065** | 0.1204 |
+| orig_in_span:gate | 0.1476 | 0.1269 | 0.1449 | 0.1694 |
+| orig_in_span:up | 0.1482 | 0.1474 | **0.1128** | 0.1291 |
+| orig_out_span:down | 0.0978 | 0.1095 | 0.1115 | **0.0725** |
+| orig_out_span:gate | 0.1058 | 0.1142 | **0.0981** | 0.1230 |
+| orig_out_span:up | 0.3089 | 0.2351 | 0.1700 | **0.1332** |
+
+Attention: all ≈ reference except `orig_out_span:q` (decay 0.0092, best; svd
+0.0379, worst) and svd's attn circuit baseline (0.0144 vs 0.023).
+
+Verdict:
+
+1. **subspace-decay is the practical winner**: reference-level function, 2–9×
+   better legality, best-or-near-best span sufficiency, 24% fewer alive
+   components, superposition-compatible (soft pressure). This is the
+   recommendation for the normal decomposition mode.
+2. **init-proj alone does not hold**: its endpoint battery ≈ reference — without
+   ongoing pressure, illegal mass regrows over 20k unconstrained steps. Its value
+   is training dynamics (n_alive, nontarget recon), not endpoint mechanism.
+3. **The hard constraint buys structural legality but costs quality at
+   convergence** (worse target recon / n_alive / most attn spans) on top of the
+   TMS-demonstrated superposition incompatibility.
 
 ## Figures
 
