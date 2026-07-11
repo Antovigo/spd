@@ -116,7 +116,7 @@ def _(df, n_grid, np):
 @app.cell
 def _(baseline_kl, block, df, experiments, fig_dir, np, op, plt, subset):
     _FLAVORS = ("raw", "centered", "bias")
-    #_FLAVORS = ("raw",)
+    # _FLAVORS = ("raw",)
     _floor = 1e-8
 
     def _boxplot_subcomp_in_orig_span(experiments):
@@ -170,7 +170,7 @@ def _(baseline_kl, block, df, experiments, fig_dir, np, op, plt, subset):
 @app.cell
 def _(baseline_kl, block, df, experiments, fig_dir, np, op, plt, subset):
     _FLAVORS = ("raw", "centered", "bias")
-    #_FLAVORS = ("raw",)
+    # _FLAVORS = ("raw",)
     _floor = 1e-8
 
     def _boxplot_orig_in_subcomp_span(experiments):
