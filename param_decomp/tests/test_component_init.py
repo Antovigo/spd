@@ -4,7 +4,7 @@ import einops
 import torch
 
 from param_decomp.components import LinearComponents
-from param_decomp.optimize import init_coupled_, init_rowcombo_
+from param_decomp.optimize import init_coupled_, init_coupled_unit_, init_rowcombo_
 
 
 def _random_weight(d_out: int, d_in: int) -> torch.Tensor:
@@ -71,6 +71,30 @@ def test_coupled_wide_output_derives_u_and_sums_to_w():
     # E[sum of components] = W; sample error ~ sqrt(d_in / C).
     rel_err = (_component_sum(comp) - w).norm() / w.norm()
     assert rel_err < 0.2
+
+
+def test_coupled_unit_seeds_are_unit_norm_and_derived_side_is_raw_w_image():
+    w = _random_weight(10, 6)  # d_in < d_out: V seeded, U derived
+    comp = LinearComponents(C=8, d_in=6, d_out=10)
+    init_coupled_unit_({"m": comp}, {"m": w}, seed=0)
+    assert torch.allclose(comp.V.norm(dim=0), torch.ones(8), atol=1e-5)
+    assert torch.allclose(comp.U, (w @ comp.V).T, atol=1e-6)
+    assert _col_space_residual(comp.U, w).abs().max() < 1e-5
+
+    w_t = w.T.contiguous()  # d_in > d_out: U seeded, V derived
+    comp_t = LinearComponents(C=8, d_in=10, d_out=6)
+    init_coupled_unit_({"m": comp_t}, {"m": w_t}, seed=0)
+    assert torch.allclose(comp_t.U.norm(dim=1), torch.ones(8), atol=1e-5)
+    assert torch.allclose(comp_t.V, w_t.T @ comp_t.U.T, atol=1e-6)
+    assert _row_space_residual(comp_t.V, w_t).abs().max() < 1e-5
+
+
+def test_coupled_unit_sum_is_w_restricted_to_seed_span():
+    w = _random_weight(10, 6)
+    comp = LinearComponents(C=4, d_in=6, d_out=10)
+    init_coupled_unit_({"m": comp}, {"m": w}, seed=0)
+    # sum_c u_c v_c^T = W V V^T exactly.
+    assert torch.allclose(_component_sum(comp), w @ comp.V @ comp.V.T, atol=1e-5)
 
 
 def test_coupled_wide_input_derives_v_and_sums_to_w():

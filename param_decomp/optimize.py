@@ -329,6 +329,10 @@ def init_coupled_(
     space for a numerically full-rank target). `d_in <= d_out`: `U_c <- (d_in/C)(W V_c)^T`;
     else `V_c <- W^T u_c`. Scales make the expected component sum equal W, so each
     component starts as a coherent slice of W's action and the delta starts near zero.
+
+    Caveat: with `C << min(d_in, d_out)` the realized component sum is a rank-C sketch,
+    so the expectation calibration inflates every component by ~`d/C` — see
+    `init_coupled_unit_` for the boost-free variant.
     """
     with torch.no_grad():
         for name, w in target_weights.items():
@@ -340,6 +344,41 @@ def init_coupled_(
                 comp.U.copy_((w @ comp.V.float()).T * (d_in / comp.C))
             else:
                 comp.V.copy_(w.T @ comp.U.float().T)
+
+
+def init_coupled_unit_(
+    components: dict[str, Components],
+    target_weights: dict[str, Tensor],
+    seed: int,
+) -> None:
+    """In place: unit-norm seed on the narrow side, wide side its raw W-image.
+
+    `d_in <= d_out`: `v_c ~ unit norm`, `U_c <- (W v_c)^T`; else `u_c ~ unit norm`,
+    `V_c <- W^T u_c`. No C-dependent rescale — components sit at W's natural scale
+    and the component sum approximates W restricted to a rank-C random subspace
+    (the delta carries the complement). A dedicated generator keeps draws
+    rank-identical under DDP.
+    """
+    with torch.no_grad():
+        generators: dict[torch.device, torch.Generator] = {}
+        for name, w in target_weights.items():
+            comp = components[name]
+            assert isinstance(comp, DenseComponents)
+            w = w.detach().float()
+            d_out, d_in = w.shape
+            gen = generators.setdefault(
+                w.device, torch.Generator(device=w.device).manual_seed(seed)
+            )
+            if d_in <= d_out:
+                v = torch.randn(d_in, comp.C, device=w.device, generator=gen)
+                v /= v.norm(dim=0, keepdim=True)
+                comp.V.copy_(v)
+                comp.U.copy_((w @ v).T)
+            else:
+                u = torch.randn(comp.C, d_out, device=w.device, generator=gen)
+                u /= u.norm(dim=1, keepdim=True)
+                comp.U.copy_(u)
+                comp.V.copy_(w.T @ u.T)
 
 
 def tie_component_weights(
@@ -558,6 +597,8 @@ class Trainer:
                     init_rowcombo_(component_model.components, target_weights, pd_config.seed)
                 case "coupled":
                     init_coupled_(component_model.components, target_weights)
+                case "coupled_unit":
+                    init_coupled_unit_(component_model.components, target_weights, pd_config.seed)
 
         self._legality_bases: dict[str, tuple[Tensor, Tensor]] | None = None
         if pd_config.legality_pressure is not None:

@@ -189,15 +189,18 @@ class PDConfig(BaseConfig):
         "out-of-space mass. Superposition-compatible alternative to svd_rank_threshold "
         "(with which it is mutually exclusive).",
     )
-    component_init: Literal["dense", "rowcombo", "coupled"] = Field(
+    component_init: Literal["dense", "rowcombo", "coupled", "coupled_unit"] = Field(
         default="dense",
         description="How V/U are initialized. 'dense': iid normal (init_param_). "
         "'rowcombo': random combinations of the target's rows/columns — legal spans on "
         "both sides, sigma-weighted, dense-matched norm statistics. 'coupled': keep the "
         "dense init on the narrow side and derive the wide side through W (U_c from "
         "(W V_c)^T when d_in <= d_out, else V_c from W^T u_c), scaled so the expected "
-        "component sum equals W. Both alternatives require the dense parameterization, "
-        "no tied weights, and supersede legality_pressure.project_init.",
+        "component sum equals W (inflates components by ~d/C when C << d). "
+        "'coupled_unit': same coupling from unit-norm seeds with the raw W-image on the "
+        "derived side — W-natural component scale, component sum ~ W on a rank-C "
+        "subspace. All alternatives require the dense parameterization, no tied "
+        "weights, and supersede legality_pressure.project_init.",
     )
 
     @cached_property
