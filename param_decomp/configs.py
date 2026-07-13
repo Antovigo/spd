@@ -202,6 +202,12 @@ class PDConfig(BaseConfig):
         "subspace. All alternatives require the dense parameterization, no tied "
         "weights, and supersede legality_pressure.project_init.",
     )
+    ci_fn_output_bias_init: float | None = Field(
+        default=None,
+        description="When set, zero the CI fn's output-head weights and fill its bias "
+        "with this value at init, so every subcomponent has CI = sigmoid(value) on all "
+        "inputs before training (e.g. 0.5 or 0.9 to start components mostly-on).",
+    )
 
     @cached_property
     def all_decomposition_target_configs(self) -> list[DecompositionTargetConfig]:

@@ -381,6 +381,24 @@ def init_coupled_unit_(
                 comp.V.copy_(w.T @ u.T)
 
 
+def init_ci_fn_output_bias_(ci_fn: nn.Module, bias_value: float) -> None:
+    """Zero the CI fn's output-head weight and set its bias to `bias_value`, so every
+    subcomponent has CI = sigmoid(bias_value) on all inputs at init. Supports the
+    global_shared_transformer CI fn (the one all LM configs use)."""
+    from param_decomp.ci_fns import GlobalCiFnWrapper, GlobalSharedTransformerCiFn
+
+    assert isinstance(ci_fn, GlobalCiFnWrapper), (
+        f"ci_fn_output_bias_init supports the global CI fn wrapper, got {type(ci_fn)}"
+    )
+    fn = ci_fn._global_ci_fn
+    assert isinstance(fn, GlobalSharedTransformerCiFn), (
+        f"ci_fn_output_bias_init supports global_shared_transformer, got {type(fn)}"
+    )
+    with torch.no_grad():
+        fn._output_head.W.zero_()
+        fn._output_head.b.fill_(bias_value)
+
+
 def tie_component_weights(
     component_model: ComponentModel, tied_weights: list[tuple[str, str]]
 ) -> None:
@@ -599,6 +617,9 @@ class Trainer:
                     init_coupled_(component_model.components, target_weights)
                 case "coupled_unit":
                     init_coupled_unit_(component_model.components, target_weights, pd_config.seed)
+
+        if pd_config.ci_fn_output_bias_init is not None:
+            init_ci_fn_output_bias_(component_model.ci_fn, pd_config.ci_fn_output_bias_init)
 
         self._legality_bases: dict[str, tuple[Tensor, Tensor]] | None = None
         if pd_config.legality_pressure is not None:
