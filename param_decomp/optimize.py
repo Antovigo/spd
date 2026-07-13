@@ -291,6 +291,57 @@ def apply_illegal_mass_decay_(
             u.sub_(shrink * (u - (u @ q_out) @ q_out.T))
 
 
+def init_rowcombo_(
+    components: dict[str, Components],
+    target_weights: dict[str, Tensor],
+    seed: int,
+) -> None:
+    """In place: re-init V/U as random combinations of each target's rows/columns.
+
+    `V_c = W^T g_c / |W|_F` and `U_c = (W h_c)^T sqrt(d_out/C) / |W|_F` with iid normal
+    `g, h` — both sides land in the legal spans with sigma-weighted direction mass,
+    matching the dense init's norm statistics (`E|V_c|^2 = 1`, `E|U_c|^2 = d_out/C`).
+    A dedicated generator keeps draws rank-identical under DDP.
+    """
+    with torch.no_grad():
+        generators: dict[torch.device, torch.Generator] = {}
+        for name, w in target_weights.items():
+            comp = components[name]
+            assert isinstance(comp, DenseComponents)
+            w = w.detach().float()
+            d_out, d_in = w.shape
+            gen = generators.setdefault(
+                w.device, torch.Generator(device=w.device).manual_seed(seed)
+            )
+            g = torch.randn(d_out, comp.C, device=w.device, generator=gen)
+            h = torch.randn(d_in, comp.C, device=w.device, generator=gen)
+            comp.V.copy_((w.T @ g) / w.norm())
+            comp.U.copy_((w @ h).T * ((d_out / comp.C) ** 0.5 / w.norm()))
+
+
+def init_coupled_(
+    components: dict[str, Components],
+    target_weights: dict[str, Tensor],
+) -> None:
+    """In place: derive each component's wide side from its narrow-side seed through W.
+
+    The narrow side keeps the dense init already in place (its legal span is the whole
+    space for a numerically full-rank target). `d_in <= d_out`: `U_c <- (d_in/C)(W V_c)^T`;
+    else `V_c <- W^T u_c`. Scales make the expected component sum equal W, so each
+    component starts as a coherent slice of W's action and the delta starts near zero.
+    """
+    with torch.no_grad():
+        for name, w in target_weights.items():
+            comp = components[name]
+            assert isinstance(comp, DenseComponents)
+            w = w.detach().float()
+            d_out, d_in = w.shape
+            if d_in <= d_out:
+                comp.U.copy_((w @ comp.V.float()).T * (d_in / comp.C))
+            else:
+                comp.V.copy_(w.T @ comp.U.float().T)
+
+
 def tie_component_weights(
     component_model: ComponentModel, tied_weights: list[tuple[str, str]]
 ) -> None:
@@ -487,6 +538,26 @@ class Trainer:
         )
 
         self.loss_metrics, _ = instantiate_metrics(pd_config, component_model, device)
+
+        if pd_config.component_init != "dense":
+            assert pd_config.svd_rank_threshold is None, (
+                "component_init variants target the dense parameterization"
+            )
+            assert pd_config.tied_weights is None, (
+                "component_init variants overwrite V/U and would break tied weights"
+            )
+            assert (
+                pd_config.legality_pressure is None or not pd_config.legality_pressure.project_init
+            ), "component_init replaces the init; combine legality_pressure via decay only"
+            target_weights = {
+                name: component_model.target_weight(name)
+                for name in component_model.target_module_paths
+            }
+            match pd_config.component_init:
+                case "rowcombo":
+                    init_rowcombo_(component_model.components, target_weights, pd_config.seed)
+                case "coupled":
+                    init_coupled_(component_model.components, target_weights)
 
         self._legality_bases: dict[str, tuple[Tensor, Tensor]] | None = None
         if pd_config.legality_pressure is not None:

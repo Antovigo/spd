@@ -70,8 +70,10 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
   `svd_rank_threshold` switches Linear targets to `SVDLinearComponents` (components
   learned in the target weight's SVD coordinates, so read/write vectors stay in
   `row(W)`/`col(W)` by construction; `svd_constrain` picks the constrained sides —
-  `in`/`out`/`both`; incompatible with tied weights and non-Linear targets). See
-  `notes/subspace_filtering/plan.md`.
+  `in`/`out`/`both`; incompatible with tied weights and non-Linear targets).
+  `component_init` picks alternative dense V/U inits (`rowcombo`: random combinations
+  of the target's rows/columns; `coupled`: wide side derived through W so the expected
+  component sum equals W). See `notes/subspace_filtering/plan.md`.
 - `RuntimeConfig` — compute substrate: `autocast_bf16`, `device`, `dp`. Perturbs numerics
   without changing the algorithm.
 - `Cadence` — train-log / save period predicates. Train-log fires every

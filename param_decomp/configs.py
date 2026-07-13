@@ -189,6 +189,16 @@ class PDConfig(BaseConfig):
         "out-of-space mass. Superposition-compatible alternative to svd_rank_threshold "
         "(with which it is mutually exclusive).",
     )
+    component_init: Literal["dense", "rowcombo", "coupled"] = Field(
+        default="dense",
+        description="How V/U are initialized. 'dense': iid normal (init_param_). "
+        "'rowcombo': random combinations of the target's rows/columns — legal spans on "
+        "both sides, sigma-weighted, dense-matched norm statistics. 'coupled': keep the "
+        "dense init on the narrow side and derive the wide side through W (U_c from "
+        "(W V_c)^T when d_in <= d_out, else V_c from W^T u_c), scaled so the expected "
+        "component sum equals W. Both alternatives require the dense parameterization, "
+        "no tied weights, and supersede legality_pressure.project_init.",
+    )
 
     @cached_property
     def all_decomposition_target_configs(self) -> list[DecompositionTargetConfig]:
