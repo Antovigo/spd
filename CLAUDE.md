@@ -67,13 +67,12 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
   `TrainingState` for resumption.
 - `PDConfig` — algorithm: seed, CI fn, loss metrics, optimizers, decomposition targets,
   tied weights, faithfulness warmup. Flipping a field here changes what algorithm runs.
-  `svd_rank_threshold` switches Linear targets to `SVDLinearComponents` (components
-  learned in the target weight's SVD coordinates, so read/write vectors stay in
-  `row(W)`/`col(W)` by construction; `svd_constrain` picks the constrained sides —
-  `in`/`out`/`both`; incompatible with tied weights and non-Linear targets).
-  `component_init` picks alternative dense V/U inits (`rowcombo`: random combinations
-  of the target's rows/columns; `coupled`: wide side derived through W so the expected
-  component sum equals W). See `notes/subspace_filtering/plan.md`.
+  `weight_init` picks the component V/U init: `kaiming` (iid normal, ignores W),
+  `coupled` (unit-norm seed on the narrow side, wide side its raw W-image — component
+  sum ~ W on a rank-C subspace), or `span_proj` (project the kaiming init onto
+  `row(W)`/`col(W)` once at init; needs `init_rank_threshold`). The non-`kaiming`
+  schemes are incompatible with tied weights. `ci_fn_output_bias_init` zeros the CI
+  fn's output head and sets its bias so every subcomponent starts at CI = sigmoid(b).
 - `RuntimeConfig` — compute substrate: `autocast_bf16`, `device`, `dp`. Perturbs numerics
   without changing the algorithm.
 - `Cadence` — train-log / save period predicates. Train-log fires every

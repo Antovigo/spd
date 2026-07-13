@@ -2,7 +2,8 @@
 
 Reads the frozen `target_model.*` weights of every decomposed module straight from the
 checkpoint, computes their singular values, and reports the numerical rank at a grid of
-`rank_threshold` values (`sigma > tau * sigma_max`) — the knob of `SVDLinearComponents`.
+`rank_threshold` values (`sigma > tau * sigma_max`) — the `init_rank_threshold` knob of
+the `span_proj` weight init.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.subspace_restriction.scan_spectra \

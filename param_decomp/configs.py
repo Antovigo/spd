@@ -104,32 +104,6 @@ class RuntimeConfig(BaseConfig):
         return self
 
 
-class LegalityPressureConfig(BaseConfig):
-    """Soft pressure toward legal components: read/write vectors in row(W)/col(W).
-
-    Unlike `svd_rank_threshold` (a hard reparameterization), this keeps the dense
-    parameterization — components may hold out-of-space ("illegal") mass whenever the
-    losses defend it, so superposed per-feature mechanisms stay expressible.
-    """
-
-    rank_threshold: NonNegativeFloat = Field(
-        ...,
-        description="Numerical-rank cutoff defining the target spaces: keep singular "
-        "directions with sigma > threshold * sigma_max (e.g. 1e-5).",
-    )
-    project_init: bool = Field(
-        ...,
-        description="Project the fresh dense V/U init into row(W)/col(W) once at trainer "
-        "construction (V <- Q_in Q_in^T V, U <- U Q_out Q_out^T).",
-    )
-    decay_coeff: NonNegativeFloat = Field(
-        ...,
-        description="Decoupled per-step decay of the out-of-space V/U mass: "
-        "illegal part shrinks by lr * decay_coeff each step (legal part untouched). "
-        "0 disables the decay (init projection only).",
-    )
-
-
 class PDConfig(BaseConfig):
     """Algorithm specification: seed, CI function, losses, optimizers, target modules.
 
@@ -168,39 +142,21 @@ class PDConfig(BaseConfig):
         default=None,
         description="List of identity module patterns with C values.",
     )
-    svd_rank_threshold: float | None = Field(
+    weight_init: Literal["kaiming", "coupled", "span_proj"] = Field(
+        default="kaiming",
+        description="How component V/U are initialized. 'kaiming': iid normal "
+        "(init_param_), ignores W. 'coupled': unit-norm seed on the narrow side, wide "
+        "side its raw W-image (U_c from (W v_c)^T when d_in <= d_out, else V_c from "
+        "W^T u_c) — W-natural scale, component sum ~ W on a rank-C subspace. "
+        "'span_proj': project the kaiming init onto row(W)/col(W) once at init "
+        "(V <- Q_in Q_in^T V, U <- U Q_out Q_out^T); needs init_rank_threshold. "
+        "Non-'kaiming' schemes require no tied weights.",
+    )
+    init_rank_threshold: float | None = Field(
         default=None,
-        description="When set, parameterize every Linear target's components in the SVD "
-        "coordinates of its frozen weight (V = Q_in A, U = B Q_out^T), keeping singular "
-        "directions with sigma > threshold * sigma_max (0.0 keeps all nonzero "
-        "directions). Guarantees read/write vectors lie in row(W)/col(W). Requires all "
-        "targets to be nn.Linear and no tied weights.",
-    )
-    svd_constrain: Literal["in", "out", "both"] = Field(
-        default="both",
-        description="Which sides the SVD parameterization constrains: read vectors "
-        "('in'), write vectors ('out'), or 'both'. Ignored when svd_rank_threshold "
-        "is unset.",
-    )
-    legality_pressure: LegalityPressureConfig | None = Field(
-        default=None,
-        description="Soft pressure toward read/write vectors inside row(W)/col(W) for the "
-        "dense parameterization: optional init projection plus per-step decay of the "
-        "out-of-space mass. Superposition-compatible alternative to svd_rank_threshold "
-        "(with which it is mutually exclusive).",
-    )
-    component_init: Literal["dense", "rowcombo", "coupled", "coupled_unit"] = Field(
-        default="dense",
-        description="How V/U are initialized. 'dense': iid normal (init_param_). "
-        "'rowcombo': random combinations of the target's rows/columns — legal spans on "
-        "both sides, sigma-weighted, dense-matched norm statistics. 'coupled': keep the "
-        "dense init on the narrow side and derive the wide side through W (U_c from "
-        "(W V_c)^T when d_in <= d_out, else V_c from W^T u_c), scaled so the expected "
-        "component sum equals W (inflates components by ~d/C when C << d). "
-        "'coupled_unit': same coupling from unit-norm seeds with the raw W-image on the "
-        "derived side — W-natural component scale, component sum ~ W on a rank-C "
-        "subspace. All alternatives require the dense parameterization, no tied "
-        "weights, and supersede legality_pressure.project_init.",
+        description="Numerical-rank cutoff for the 'span_proj' weight_init: keep "
+        "singular directions with sigma > threshold * sigma_max (e.g. 1e-5). Required "
+        "iff weight_init == 'span_proj', None otherwise.",
     )
     ci_fn_output_bias_init: float | None = Field(
         default=None,
@@ -289,6 +245,16 @@ class PDConfig(BaseConfig):
         assert self.loss_metrics, "loss_metrics must contain at least one training loss"
         for cfg in self.loss_metrics:
             assert cfg.coeff is not None, f"loss_metrics.{cfg.type!r} must set `coeff`"
+        return self
+
+    @model_validator(mode="after")
+    def validate_init_rank_threshold(self) -> Self:
+        needs = self.weight_init == "span_proj"
+        has = self.init_rank_threshold is not None
+        assert needs == has, (
+            "init_rank_threshold must be set iff weight_init == 'span_proj' "
+            f"(weight_init={self.weight_init!r}, init_rank_threshold={self.init_rank_threshold!r})"
+        )
         return self
 
 

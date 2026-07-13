@@ -80,8 +80,6 @@ def load_component_model(
         decomposition_targets=resolved_targets,
         ci_config=pd_config.ci_config,
         sigmoid_type=pd_config.sigmoid_type,
-        svd_rank_threshold=pd_config.svd_rank_threshold,
-        svd_constrain=pd_config.svd_constrain,
     )
 
     comp_model_weights = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
