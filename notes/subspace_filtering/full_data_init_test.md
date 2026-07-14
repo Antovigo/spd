@@ -151,28 +151,44 @@ Progress: 18 passes; the 6 `raw` passes are near-instant (1 step), the 6 `train`
 ## Step 4 — retrieve the data to your laptop (before shutting the pod down)
 
 The driver writes no checkpoints, so each run dir holds just the tiny `metrics.jsonl` +
-`experiment_config.yaml`. Pull them from the pod. Fill in your pod's SSH host/port
-(runpod shows these under "Connect"):
+`experiment_config.yaml`.
+
+**Recommended: `runpodctl send/receive`** — peer-to-peer, no SSH keys (rsync/scp need a
+public key installed on the pod + the *direct-TCP* endpoint, and error out with a password
+prompt otherwise, since `root` has no password).
 
 ```bash
-# on your LAPTOP, from wherever you want the data:
-rsync -avz -e "ssh -p <POD_PORT>" \
-    --prune-empty-dirs \
-    --include='*/' \
-    --include='metrics.jsonl' \
-    --include='experiment_config.yaml' \
-    --exclude='*' \
-    root@<POD_HOST>:/workspace/pd_out/runs/ \
-    ./full_data_init_test_runs/
+# on the POD: tar the metrics, then send (prints a one-time code)
+cd /workspace/pd_out/runs
+tar czf /workspace/init_test_metrics.tgz cinit-*/metrics.jsonl cinit-*/experiment_config.yaml
+runpodctl send /workspace/init_test_metrics.tgz
 ```
 
-Confirm you pulled all 18:
+```bash
+# on your LAPTOP (install runpodctl first; e.g. brew install runpod/runpodctl/runpodctl)
+runpodctl receive <code-printed-by-send>
+mkdir -p full_data_init_test_runs && tar xzf init_test_metrics.tgz -C full_data_init_test_runs
+```
+
+<details><summary>Alternative: rsync (needs SSH key set up)</summary>
+
+Add your `~/.ssh/id_ed25519.pub` in RunPod → Settings → SSH Public Keys, **restart the pod**
+(keys inject at start), and use the **direct-TCP** connect string (`root@<ip> -p <port>`,
+*not* the `ssh.runpod.io` proxy — the proxy doesn't support rsync/scp):
+
+```bash
+rsync -avz -e "ssh -p <POD_PORT> -i ~/.ssh/id_ed25519" \
+    --prune-empty-dirs --include='*/' \
+    --include='metrics.jsonl' --include='experiment_config.yaml' --exclude='*' \
+    root@<POD_HOST>:/workspace/pd_out/runs/ ./full_data_init_test_runs/
+```
+</details>
+
+Confirm you pulled all 18, then it's safe to shut the pod down:
 
 ```bash
 ls -d ./full_data_init_test_runs/cinit-*   # expect 18 dirs
 ```
-
-Now it's safe to shut the pod down.
 
 ## Step 5 — plot (on your laptop)
 
