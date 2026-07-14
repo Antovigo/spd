@@ -35,7 +35,7 @@ model must be the same base model the checkpoint decomposes) and, for CI colouri
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_direction_scatter <checkpoint.pth> \
         <resid_activations.npz> [--layer=18] [--top-k=100] [--n-show=8000] [--heat-rank=48] \
-        [--alive-tsv=<run>/analysis/datasets/alive_components.tsv] [--output-dir=PATH]
+        [--alive-tsv=<run>/analysis/datasets/alive_subcomponents.tsv] [--output-dir=PATH]
 
 `--alive-tsv` restricts the subcomponent arrows / heatmaps to the alive components listed in
 the TSV (neurons are unaffected); indices keep their original numbering.

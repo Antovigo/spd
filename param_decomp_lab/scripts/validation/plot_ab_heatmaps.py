@@ -10,7 +10,7 @@ prompts exceeds `--ci-thr` (CI below the source JSON's collection threshold, ~0.
 absent and counts as 0), so the column set is per-position. `--module-grep` restricts to
 modules whose name contains a substring (e.g. `layers.18.mlp` to plot only one layer's
 MLP of a full-network run). CPU-only — no model is loaded; reads the
-`find_alive_components` per-position JSON.
+`find_alive_subcomponents` per-position JSON (`alive_subcomponents_per_position.json`).
 
 Usage:
     python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps <per_position_json> \

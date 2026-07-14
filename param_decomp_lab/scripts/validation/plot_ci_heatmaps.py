@@ -1,4 +1,4 @@
-"""Plot per-position CI heatmaps from a `find_alive_components` per-position JSON.
+"""Plot per-position CI heatmaps from a `find_alive_subcomponents` per-position JSON.
 
 For each token position, draws a heatmap with prompts on the y-axis (tiny text) and alive
 subcomponents on the x-axis, faceted by decomposed matrix, coloured by lower-leaky CI. One

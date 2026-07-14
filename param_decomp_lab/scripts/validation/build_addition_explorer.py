@@ -5,7 +5,7 @@ Answers two questions about a targeted MLP decomposition run on addition prompts
 2. Which intermediate *neurons* carry each base, and how do the gate / up / down
    projections cooperate?
 
-It reads the `find_alive_components` per-position JSON (causal importances over the
+It reads the `find_alive_subcomponents` per-position JSON (causal importances over the
 (a, b) operand grid) and the decomposed checkpoint's component weights (U / V, loaded via
 mmap so only the tiny per-component tensors touch RAM). No model forward pass, so it runs
 on the GPU-less login node. Note: neuron *involvement* is read off the weights (which
@@ -289,10 +289,10 @@ def build_addition_explorer(
     checkpoint = Path(model_path).expanduser()
     assert checkpoint.exists(), f"checkpoint not found: {checkpoint}"
     run_dir = checkpoint.parent
-    json_path = analysis_datasets_dir(run_dir) / "alive_components_per_position.json"
+    json_path = analysis_datasets_dir(run_dir) / "alive_subcomponents_per_position.json"
     assert json_path.exists(), (
-        f"missing {json_path.name}; run find_alive_components first (its CI threshold becomes "
-        "this explorer's noise floor)"
+        f"missing {json_path.name}; run find_alive_subcomponents first (its CI threshold "
+        "becomes this explorer's noise floor)"
     )
     pos_list = [int(p) for p in str(positions).split(",")]
     data: PerPosition = json.loads(json_path.read_text())

@@ -109,7 +109,7 @@ units by projected 2D norm are shipped per plane; the **threshold** slider filte
   excluded): held-out points render at full opacity, in-fit points fade to 25%, while colours
   keep following the colour-by mode (a/b/a+b/CI). A visual generalization test: held-out
   points land on the ring in phase only for real periods.
-- **`--alive-tsv <run>/analysis/datasets/alive_components.tsv`**: restricts the subcomponent
+- **`--alive-tsv <run>/analysis/datasets/alive_subcomponents.tsv`**: restricts the subcomponent
   arrows and heatmap basis to the run's alive components (original indices kept; neurons
   unaffected). The hint line reports the alive counts per tag.
 

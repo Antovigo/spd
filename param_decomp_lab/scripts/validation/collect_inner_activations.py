@@ -7,12 +7,11 @@ directly per matrix — post-RMSNorm MLP input for gate/up, post-SwiGLU neuron a
 for down — which is exactly what the cached pre-weight acts hold, so no manual RMSNorm /
 nonlinearity is reapplied.
 
-"Alive" is the intersection of the `find_alive_components` set (ever causally important on
-the run's original data — its default unsuffixed `alive_components.tsv`) with a **mean-CI**
-filter applied *here* for this operation: a component is kept only if its mean lower-leaky CI
-at the last token over this op's whole grid exceeds `--mean-ci-thr` (default 0.1). The
-surviving set is written to `alive_filtered_<op>.tsv` and consumed by the period / cosine /
-explorer scripts.
+"Alive" is the intersection of the reference `find_alive_subcomponents` set (its default
+`alive_subcomponents.tsv`) with a **mean-CI** filter applied *here* for this operation: a
+component is kept only if its mean lower-leaky CI at the last token over this op's whole
+grid exceeds `--mean-ci-thr` (default 0.1). The surviving set is written to
+`alive_filtered_<op>.tsv` and consumed by the period / cosine / explorer scripts.
 
 An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-GPU job.
 
@@ -97,7 +96,7 @@ def collect_inner_activations(
     model, cfg, device = run.model, run.cfg, run.device
 
     data_dir = analysis_datasets_dir(run.run_dir)
-    alive_path = Path(alive_tsv).expanduser() if alive_tsv else data_dir / "alive_components.tsv"
+    alive_path = Path(alive_tsv).expanduser() if alive_tsv else data_dir / "alive_subcomponents.tsv"
     alive = read_alive_components(alive_path, keep_projs=MLP_MATRICES)
     logger.info(f"{len(alive)} existing-alive MLP components from {alive_path.name}")
 

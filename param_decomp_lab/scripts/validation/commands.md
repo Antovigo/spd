@@ -13,7 +13,7 @@ RUN_DIR=$(dirname "$MODEL_PATH")
 # Analysis artifacts live under <run>/analysis/: figures + applets directly in it, shared
 # datasets in analysis/datasets/. (figures/ is reserved for training-loop figures.)
 DATASETS="$RUN_DIR/analysis/datasets"
-JSON="$DATASETS/alive_components_per_position.json"
+JSON="$DATASETS/alive_subcomponents_per_position.json"
 ```
 
 ## sample_target_data
@@ -47,19 +47,29 @@ srun --gpus=1 --time=1:00:00 --pty bash   # then, in the shell it opens:
 uv run python -m param_decomp_lab.scripts.validation.sample_target_data "$MODEL_PATH"
 ```
 
-## find_alive_components
+## find_alive_subcomponents
 
-Run every target prompt and record which subcomponents are ever active (CI > `--ci-thr`).
-Writes `alive_components.tsv` (one row per alive subcomponent) and
-`alive_components_per_position.json` (active components per prompt) to `analysis/datasets/`.
+The reference alive set + CI-ranked sufficiency curve. Ranks all subcomponents by mean
+lower-leaky CI at the last (`=`) position, sweeps top-k subsets (rest hard zero at `=`,
+delta fully on) and measures last-position KL / argmax agreement vs the raw target model.
+The alive subset is the top-k for the smallest swept k with mean KL <= `--kl-thr`
+(default 0.008). Every downstream script reads this output.
+
+Outputs (in the run's `analysis/` layout):
+- `datasets/alive_subcomponents.tsv` — the reference alive list
+- `datasets/alive_subcomponents_curve.tsv` + `datasets/alive_subcomponents_kl.npz` —
+  the sweep, for re-thresholding without a GPU
+- `datasets/alive_subcomponents_per_position.json` — per-(prompt, position) CI of the
+  alive subcomponents above `--ci-thr` (the input to the CI/AB heatmap plots and applets)
+- `alive_subcomponents/recon_vs_k.png` — the KL-vs-sparsity curve with the alive cut marked
 
 ```bash
 # Submit to SLURM (single GPU).
-uv run python -m param_decomp_lab.scripts.validation.find_alive_components "$MODEL_PATH" --slurm
+uv run python -m param_decomp_lab.scripts.validation.find_alive_subcomponents "$MODEL_PATH" --slurm
 
-# Lower threshold to catch weakly-firing components:
-uv run python -m param_decomp_lab.scripts.validation.find_alive_components "$MODEL_PATH" \
-    --ci-thr=0.01 --slurm
+# Looser KL threshold, dense k grid around the knee:
+uv run python -m param_decomp_lab.scripts.validation.find_alive_subcomponents "$MODEL_PATH" \
+    --kl-thr=0.02 --ks=0,8,16,32,64,128 --slurm
 ```
 
 ## ablate_component_groups
@@ -78,11 +88,11 @@ uv run python -m param_decomp_lab.scripts.validation.ablate_component_groups "$M
 
 ## plot_ci_heatmaps / plot_ab_heatmaps
 
-CPU-only — read the per-position JSON from `find_alive_components` and render heatmaps. No
-GPU/SLURM needed; run directly on the login node.
+CPU-only — read the per-position JSON from `find_alive_subcomponents` and render heatmaps.
+No GPU needed, but submit as a (CPU) SLURM job anyway to keep load off the login node.
 
 ```bash
-JSON="$DATASETS/alive_components_per_position.json"   # DATASETS="$RUN_DIR/analysis/datasets"
+JSON="$DATASETS/alive_subcomponents_per_position.json"   # DATASETS="$RUN_DIR/analysis/datasets"
 
 # Prompt × subcomponent heatmaps, faceted by matrix, one PNG per position.
 uv run python -m param_decomp_lab.scripts.validation.plot_ci_heatmaps "$JSON"
@@ -100,7 +110,7 @@ Interactive, GPU-free HTML explorer for `a+b=` runs: detects each component's pe
 *base* (mod 2/5/10/...) via an η² residue-variance fingerprint, and reads the gate/up/down
 neuron-space overlap from the checkpoint U/V (mmap, CPU-only — no forward pass). Writes a
 self-contained `index.html` + `data.js` (open from `file://`, no server/CDN/GPU) into
-`analysis/addition_explorer/`. Reads the `find_alive_components` JSON from `analysis/datasets/`.
+`analysis/addition_explorer/`. Reads the `find_alive_subcomponents` JSON from `analysis/datasets/`.
 
 ```bash
 uv run python -m param_decomp_lab.scripts.validation.build_addition_explorer "$MODEL_PATH"
@@ -179,16 +189,16 @@ OP=add
 V=param_decomp_lab.scripts.validation
 ```
 
-### 0. Ever-alive set on the original data (existing script, GPU — run once)
+### 0. Reference alive set on the original data (GPU — run once)
 
-`find_alive_components` finds subcomponents ever causally important on the run's **original**
-distribution; it is op-agnostic and writes the **unsuffixed** `alive_components.tsv` +
-`alive_components_per_position.json`. Run it once with defaults (no `--prompts` / `--output`);
-the arithmetic scripts read these and apply the per-op + last-position + mean-CI filtering
-themselves.
+`find_alive_subcomponents` (see its section above) produces the reference alive list on
+the run's **original** distribution; it is op-agnostic and writes the **unsuffixed**
+`alive_subcomponents.tsv` + `alive_subcomponents_per_position.json`. Run it once with
+defaults (no `--prompts` / `--output`); the arithmetic scripts read these and apply the
+per-op + last-position + mean-CI filtering themselves.
 
 ```bash
-uv run python -m $V.find_alive_components "$MODEL_PATH" --slurm --slurm-time=0:30:00
+uv run python -m $V.find_alive_subcomponents "$MODEL_PATH" --slurm
 ```
 
 ### 1-2. Hidden + inner activations (GPU)
@@ -462,19 +472,7 @@ $PY param_decomp_lab/scripts/validation/headless_check.py \
 
 ### 17. Minimal sufficient subset — CI-ranked sufficiency curve (GPU)
 
-Ranks all subcomponents by mean lower-leaky CI on the target prompts, then sweeps top-k
-subsets (rest hard zero, delta fully on) and measures last-position KL / argmax agreement
-vs the raw target model. The alive subset is the top-k for the smallest swept k with
-mean KL <= `--kl-thr` (default 0.007); the curve figure shows mean + q5-q95 ribbon +
-max KL with the alive cut marked. Pass a dense `--ks` around the knee to tighten the cut.
-
-```bash
-uv run python -m $V.find_alive_subcomponents "$MODEL_PATH" --slurm
-uv run python -m $V.find_alive_subcomponents "$MODEL_PATH" --kl-thr=0.02 --ks=0,8,16,32,64,128 --slurm
-# outputs: datasets/alive_subcomponents.tsv (the alive subset), datasets/alive_subcomponents_curve.tsv,
-#          datasets/alive_subcomponents_kl.npz (per-prompt KL + full ranking),
-#          analysis/alive_subcomponents/recon_vs_k.png
-```
+This is `find_alive_subcomponents` — see its section at the top of this file.
 
 ### 18. Alive neurons — greedy removal on the census grids (GPU)
 
@@ -496,12 +494,12 @@ Projects the original model's L18 MLP input (onto the alive gate/up `V` span) or
 (onto the alive down `U` span) at the `=` position, weights unchanged, and compares the
 last-position KL vs the target against running only the alive subcomponents (dead + delta
 off at `=`). If the decomposition found the causally relevant subspace, the projections
-should hurt no more than the circuit. Reads `alive_components.tsv`; one heatmap PNG per op.
+should hurt no more than the circuit. Reads `alive_subcomponents.tsv`; one heatmap PNG per op.
 
 ```bash
 uv run python -m $V.collect_projection_kl "$MODEL_PATH" --slurm
 # add-only, custom alive list:
-uv run python -m $V.collect_projection_kl "$MODEL_PATH" --ops=add --alive-tsv="$DATASETS/alive_components.tsv" --slurm
+uv run python -m $V.collect_projection_kl "$MODEL_PATH" --ops=add --alive-tsv="$DATASETS/alive_subcomponents.tsv" --slurm
 # outputs: datasets/projection_kl/{data_add.npz,data_sub.npz,summary.tsv,meta.json},
 #          analysis/projection_kl/kl_heatmaps_{add,sub}.png
 

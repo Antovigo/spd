@@ -21,22 +21,29 @@ SLURM job instead of running it on the (GPU-less) login node.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.find_alive_subcomponents <model_path> \
-        [--kl-thr=0.008] [--batch-size=256] [--n-points=40] [--ks=0,8,64,...] \
+        [--kl-thr=0.008] [--ci-thr=0.1] [--batch-size=256] [--n-points=40] [--ks=0,8,64,...] \
         [--prompts=PATH] [--output=PATH] [--output-curve=PATH] [--output-npz=PATH] \
-        [--output-fig=PATH] \
+        [--output-fig=PATH] [--output-json=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
 
 Outputs (defaults in the run's `analysis/` layout):
 - `datasets/alive_subcomponents.tsv` — the alive subset (the top-k_alive rows of the CI
-  ranking): layer, matrix, component, rank, mean_ci, mean_ci_last.
+  ranking): layer, matrix, component, rank, mean_ci, mean_ci_last. The reference alive
+  list consumed by every downstream script.
 - `datasets/alive_subcomponents_curve.tsv` — per swept k: k, mean_ci_at_k, mean_kl,
   q5_kl, q95_kl, max_kl, argmax_agree.
 - `datasets/alive_subcomponents_kl.npz` — per-(k, prompt) KL + argmax agreement, plus
   the full CI ranking, for per-prompt analysis / re-thresholding without a GPU.
+- `datasets/alive_subcomponents_per_position.json` — per (prompt, position), the alive
+  subcomponents with lower-leaky CI > `--ci-thr` at that position, organised as
+  prompt > position > matrix (full module path) > [{component, ci}]. Consumed by
+  `plot_ci_heatmaps` / `plot_ab_heatmaps` / `build_addition_explorer` /
+  `build_neuron_connection_explorer`.
 - `alive_subcomponents/recon_vs_k.png` — the recon-vs-k curve with the alive cut marked.
 """
 
 import csv
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -123,6 +130,7 @@ def _plot_curve(
 def find_alive_subcomponents(
     model_path: ModelPath,
     kl_thr: float = 0.008,
+    ci_thr: float = 0.1,
     batch_size: int = 256,
     n_points: int = 40,
     ks: str | None = None,
@@ -131,13 +139,14 @@ def find_alive_subcomponents(
     output_curve: str | None = None,
     output_npz: str | None = None,
     output_fig: str | None = None,
+    output_json: str | None = None,
     slurm: bool = False,
     partition: str | None = DEFAULT_PARTITION_NAME,
     gpus: int = 1,
     slurm_time: str = "2:00:00",
     slurm_mem: str | None = None,
 ) -> tuple[Path, Path] | None:
-    """Write the alive subset + top-k sufficiency curve (TSVs, npz, and figure).
+    """Write the alive subset + top-k sufficiency curve + per-position CI JSON.
 
     Returns `(alive_tsv, curve_tsv)`, or `None` when `--slurm` submits the job instead.
     """
@@ -145,6 +154,7 @@ def find_alive_subcomponents(
         argv = [
             str(Path(model_path).expanduser()),
             f"--kl-thr={kl_thr}",
+            f"--ci-thr={ci_thr}",
             f"--batch-size={batch_size}",
             f"--n-points={n_points}",
         ]
@@ -157,6 +167,7 @@ def find_alive_subcomponents(
             ("--output-curve", output_curve),
             ("--output-npz", output_npz),
             ("--output-fig", output_fig),
+            ("--output-json", output_json),
         ]:
             if val is not None:
                 argv.append(f"{flag}={Path(val).expanduser()}")
@@ -176,6 +187,9 @@ def find_alive_subcomponents(
     prompt_texts = [
         ln.strip() for ln in Path(prompts_path).expanduser().read_text().splitlines() if ln.strip()
     ]
+    assert len(set(prompt_texts)) == len(prompt_texts), (
+        "duplicate prompts in the prompts file would collide as JSON keys"
+    )
     pool = load_prompts_dataset(str(Path(prompts_path).expanduser()), cast(Any, tokenizer))
     pool = pool.to(device)
     assert pool.shape[0] == len(prompt_texts)
@@ -187,9 +201,13 @@ def find_alive_subcomponents(
     weight_deltas = model.calc_weight_deltas()
     dtype = next(model.parameters()).dtype
 
-    # Phase 1: mean lower-leaky CI per subcomponent (all positions, and last position).
+    # Phase 1: mean lower-leaky CI per subcomponent (all positions, and last position), plus
+    # the sparse per-(prompt, position) record of components with CI > ci_thr (filtered to
+    # the alive set before writing the JSON).
     ci_sum = {m: torch.zeros(n_comp[m], device=device) for m in modules}
     ci_last_sum = {m: torch.zeros(n_comp[m], device=device) for m in modules}
+    # prompt -> position -> module -> [{component, ci}]
+    per_position: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
     with torch.no_grad(), bf16_autocast(enabled=cfg.runtime.autocast_bf16):
         for start in range(0, n_prompts, batch_size):
             chunk = pool[start : start + batch_size]
@@ -199,6 +217,27 @@ def find_alive_subcomponents(
                 ll = ci.lower_leaky[m].float()  # [b, seq, C]
                 ci_sum[m] += ll.sum(dim=(0, 1))
                 ci_last_sum[m] += ll[:, -1].sum(dim=0)
+
+            # Move CI to CPU/numpy once per chunk to avoid per-element syncs.
+            ci_np = {m: ci.lower_leaky[m].float().cpu().numpy() for m in modules}
+            for i in range(chunk.shape[0]):
+                pos_entry: dict[str, dict[str, list[dict[str, Any]]]] = {}
+                for pos in range(seq):
+                    per_module: dict[str, list[dict[str, Any]]] = {}
+                    for m, arr in ci_np.items():
+                        ci_vec = arr[i, pos]  # [C]
+                        active_idx = (ci_vec > ci_thr).nonzero()[0]
+                        if active_idx.size > 0:
+                            per_module[m] = sorted(
+                                (
+                                    {"component": int(comp), "ci": round(float(ci_vec[comp]), 3)}
+                                    for comp in active_idx
+                                ),
+                                key=lambda d: d["ci"],
+                                reverse=True,
+                            )
+                    pos_entry[str(pos)] = per_module
+                per_position[prompt_texts[start + i]] = pos_entry
 
     ranking: list[tuple[str, int, float, float]] = []  # (module, component, mean_ci, mean_ci_last)
     for m in modules:
@@ -275,7 +314,12 @@ def find_alive_subcomponents(
         if output_fig
         else analysis_dir(run.run_dir) / "alive_subcomponents" / "recon_vs_k.png"
     )
-    for p in (alive_path, curve_path, npz_path, fig_path):
+    json_path = (
+        Path(output_json).expanduser()
+        if output_json
+        else data_dir / "alive_subcomponents_per_position.json"
+    )
+    for p in (alive_path, curve_path, npz_path, fig_path, json_path):
         p.parent.mkdir(parents=True, exist_ok=True)
 
     with alive_path.open("w", newline="") as f:
@@ -325,9 +369,19 @@ def find_alive_subcomponents(
     )
     _plot_curve(k_list, kl, agree_mean, k_alive, kl_thr, fig_path)
 
+    alive_set = {(module, component) for module, component, _, _ in ranking[:k_alive]}
+    for pos_entry in per_position.values():
+        for pos, per_module in pos_entry.items():
+            pos_entry[pos] = {
+                m: kept
+                for m, comps in per_module.items()
+                if (kept := [e for e in comps if (m, e["component"]) in alive_set])
+            }
+    json_path.write_text(json.dumps(per_position, separators=(",", ":")))
+
     logger.info(
         f"{k_alive}/{n_total} subcomponents alive (mean KL <= {kl_thr} at k={k_alive}) over "
-        f"{n_prompts} prompts → {alive_path}, {curve_path}, {fig_path}"
+        f"{n_prompts} prompts → {alive_path}, {curve_path}, {json_path}, {fig_path}"
     )
     return alive_path, curve_path
 

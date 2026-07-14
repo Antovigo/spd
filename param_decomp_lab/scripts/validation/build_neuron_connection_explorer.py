@@ -20,7 +20,7 @@ hovering a subcomponent shows its `(a, b)` heatmap — CI *or* normalized inner 
 the page toggle; hovering a neuron shows its up / gate / post-SwiGLU output for the prompt.
 
 CPU-only: reads the checkpoint U/V (mmap), the filtered-alive list (`alive_filtered_<op>.tsv`),
-the periods, the `find_alive_components` per-position JSON (`alive_components_per_position.json`
+the periods, the `find_alive_subcomponents` per-position JSON (`alive_subcomponents_per_position.json`
 — op-agnostic, filtered here; CI patterns + per-prompt activity), the `collect_inner_activations`
 TSV (inner-activation patterns), and the `collect_hidden_activations` npz (neuron values). No
 forward pass.
@@ -76,7 +76,7 @@ def _ci_grids(
 ) -> dict[tuple[str, int], NDArray[np.float32]]:
     """Last-position CI `(a, b)` grid for each filtered-alive subcomponent, this op only.
 
-    The `find_alive_components` per-position JSON is op-agnostic (it can hold `a+b=` and
+    The `find_alive_subcomponents` per-position JSON is op-agnostic (it can hold `a+b=` and
     `a×b=` prompts together), so we match on this op's exact symbol and assert ≥1 prompt hit —
     a wrong/missing JSON fails loudly instead of yielding silent all-zero grids.
     """
@@ -155,9 +155,9 @@ def build_neuron_connection_explorer(
     gate_grid = hidden["gate_preact"]
 
     alive_keys = {(a.proj, a.component) for a in alive}
-    # CI patterns come from the (unsuffixed, op-agnostic) find_alive_components output; the
+    # CI patterns come from the (unsuffixed, op-agnostic) find_alive_subcomponents output; the
     # signed inner-activation patterns from this op's collect_inner_activations TSV.
-    ci_grids = _ci_grids(data_dir / "alive_components_per_position.json", op, alive_keys, n)
+    ci_grids = _ci_grids(data_dir / "alive_subcomponents_per_position.json", op, alive_keys, n)
     inner_grids = _inner_grids(data_dir / f"inner_activations_{op}.tsv", alive_keys, n)
 
     # Per subcomponent: select its strongest neurons (|conn| > floor, top-K), accumulate the
