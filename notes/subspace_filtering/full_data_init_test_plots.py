@@ -225,9 +225,9 @@ def plot_group(data, group, keys, seeds, phases, out_dir, prefix) -> None:
                 highs.append(max(vals) if vals else math.nan)
                 seed_pts.append(vals)
             ax.fill_between(xs, lows, highs, color=color, alpha=0.18, lw=0)
-            ax.plot(xs, means, "-o", color=color, lw=2, label=label)
+            ax.plot(xs, means, "-", color=color, lw=1, label=label)
             for x, vals in zip(xs, seed_pts, strict=True):
-                ax.scatter([x] * len(vals), vals, color=color, alpha=0.35, s=16, zorder=3)
+                ax.scatter([x] * len(vals), vals, color=color, alpha=0.35, s=8, zorder=3)
 
         if group in LOG_GROUPS:
             ax.set_yscale("log")
