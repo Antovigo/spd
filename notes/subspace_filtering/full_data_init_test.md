@@ -117,15 +117,24 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export HF_HUB_ETAG_TIMEOUT=30
 export HF_HUB_DOWNLOAD_TIMEOUT=30
 
-# 8-GPU single-node run (all 12 passes, one process)
-torchrun --standalone --nproc_per_node=8 \
+# 8-GPU single-node run (all 12 passes, one process), detached so it survives the
+# web terminal disconnecting. nohup inherits the exports above — keep it in this shell.
+nohup torchrun --standalone --nproc_per_node=8 \
     notes/subspace_filtering/full_data_init_test_driver.py \
-    2>&1 | tee /workspace/full_data_init_test.log
+    > /workspace/full_data_init_test.log 2>&1 &
 ```
 
-To detach, wrap the `torchrun` in `tmux`/`nohup`. Progress: 12 passes; the 6 `raw` passes
-are near-instant (1 step), the 6 `train` passes are 100 warmup + 200 steps each. Results
-land in `$PARAM_DECOMP_OUT_DIR/runs/cinit-*/metrics.jsonl`.
+Monitor / manage (the web terminal has no tmux; nohup needs none):
+
+```bash
+tail -f /workspace/full_data_init_test.log   # Ctrl-C stops watching, not the job
+ps aux | grep torchrun                       # or `nvidia-smi` — busy GPUs = running
+pkill -f full_data_init_test_driver          # to stop it
+```
+
+Progress: 12 passes; the 6 `raw` passes are near-instant (1 step), the 6 `train` passes
+are 100 warmup + 200 steps each. Results land in
+`$PARAM_DECOMP_OUT_DIR/runs/cinit-*/metrics.jsonl`.
 
 ---
 
