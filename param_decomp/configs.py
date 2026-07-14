@@ -142,27 +142,13 @@ class PDConfig(BaseConfig):
         default=None,
         description="List of identity module patterns with C values.",
     )
-    weight_init: Literal["kaiming", "coupled", "span_proj"] = Field(
+    weight_init: Literal["kaiming", "coupled"] = Field(
         default="kaiming",
         description="How component V/U are initialized. 'kaiming': iid normal "
         "(init_param_), ignores W. 'coupled': unit-norm seed on the narrow side, wide "
         "side its raw W-image (U_c from (W v_c)^T when d_in <= d_out, else V_c from "
         "W^T u_c) — W-natural scale, component sum ~ W on a rank-C subspace. "
-        "'span_proj': project the kaiming init onto row(W)/col(W) once at init "
-        "(V <- Q_in Q_in^T V, U <- U Q_out Q_out^T); needs init_rank_threshold. "
-        "Non-'kaiming' schemes require no tied weights.",
-    )
-    init_rank_threshold: float | None = Field(
-        default=None,
-        description="Numerical-rank cutoff for the 'span_proj' weight_init: keep "
-        "singular directions with sigma > threshold * sigma_max (e.g. 1e-5). Required "
-        "iff weight_init == 'span_proj', None otherwise.",
-    )
-    ci_fn_output_bias_init: float | None = Field(
-        default=None,
-        description="When set, zero the CI fn's output-head weights and fill its bias "
-        "with this value at init, so every subcomponent has CI = sigmoid(value) on all "
-        "inputs before training (e.g. 0.5 or 0.9 to start components mostly-on).",
+        "'coupled' requires no tied weights.",
     )
 
     @cached_property
@@ -245,16 +231,6 @@ class PDConfig(BaseConfig):
         assert self.loss_metrics, "loss_metrics must contain at least one training loss"
         for cfg in self.loss_metrics:
             assert cfg.coeff is not None, f"loss_metrics.{cfg.type!r} must set `coeff`"
-        return self
-
-    @model_validator(mode="after")
-    def validate_init_rank_threshold(self) -> Self:
-        needs = self.weight_init == "span_proj"
-        has = self.init_rank_threshold is not None
-        assert needs == has, (
-            "init_rank_threshold must be set iff weight_init == 'span_proj' "
-            f"(weight_init={self.weight_init!r}, init_rank_threshold={self.init_rank_threshold!r})"
-        )
         return self
 
 

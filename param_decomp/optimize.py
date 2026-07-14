@@ -13,7 +13,7 @@ import signal
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Self, assert_never, cast
+from typing import Any, Self, cast
 
 import torch
 import torch.nn as nn
@@ -238,36 +238,6 @@ def _apply_ci_scaled_weight_decay(
             component_model.components[name].scale_subcomponents_(keep)
 
 
-def compute_target_space_bases(
-    target_weights: dict[str, Tensor],
-    rank_threshold: float,
-) -> dict[str, tuple[Tensor, Tensor]]:
-    """Orthonormal `(Q_in [d_in, r], Q_out [d_out, r])` bases of each target's row/col space.
-
-    `r` keeps singular directions with `sigma > rank_threshold * sigma_max`.
-    """
-    bases: dict[str, tuple[Tensor, Tensor]] = {}
-    for name, w in target_weights.items():
-        q_out, s, vh = torch.linalg.svd(w.detach().float(), full_matrices=False)
-        r = int((s > rank_threshold * s[0]).sum().item())
-        assert r >= 1, f"rank_threshold {rank_threshold} keeps no singular directions for {name}"
-        bases[name] = (vh[:r].T.contiguous(), q_out[:, :r].contiguous())
-    return bases
-
-
-def project_components_to_target_spaces_(
-    components: dict[str, Components],
-    bases: dict[str, tuple[Tensor, Tensor]],
-) -> None:
-    """In place: `V <- Q_in Q_in^T V`, `U <- U Q_out Q_out^T`."""
-    with torch.no_grad():
-        for name, (q_in, q_out) in bases.items():
-            comp = components[name]
-            assert isinstance(comp, DenseComponents)
-            comp.V.copy_(q_in @ (q_in.T @ comp.V))
-            comp.U.copy_((comp.U @ q_out) @ q_out.T)
-
-
 def init_coupled_(
     components: dict[str, Components],
     target_weights: dict[str, Tensor],
@@ -301,24 +271,6 @@ def init_coupled_(
                 u /= u.norm(dim=1, keepdim=True)
                 comp.U.copy_(u)
                 comp.V.copy_(w.T @ u.T)
-
-
-def init_ci_fn_output_bias_(ci_fn: nn.Module, bias_value: float) -> None:
-    """Zero the CI fn's output-head weight and set its bias to `bias_value`, so every
-    subcomponent has CI = sigmoid(bias_value) on all inputs at init. Supports the
-    global_shared_transformer CI fn (the one all LM configs use)."""
-    from param_decomp.ci_fns import GlobalCiFnWrapper, GlobalSharedTransformerCiFn
-
-    assert isinstance(ci_fn, GlobalCiFnWrapper), (
-        f"ci_fn_output_bias_init supports the global CI fn wrapper, got {type(ci_fn)}"
-    )
-    fn = ci_fn._global_ci_fn
-    assert isinstance(fn, GlobalSharedTransformerCiFn), (
-        f"ci_fn_output_bias_init supports global_shared_transformer, got {type(fn)}"
-    )
-    with torch.no_grad():
-        fn._output_head.W.zero_()
-        fn._output_head.b.fill_(bias_value)
 
 
 def tie_component_weights(
@@ -515,28 +467,15 @@ class Trainer:
 
         self.loss_metrics, _ = instantiate_metrics(pd_config, component_model, device)
 
-        if pd_config.weight_init != "kaiming":
+        if pd_config.weight_init == "coupled":
             assert pd_config.tied_weights is None, (
-                "weight_init variants overwrite V/U and would break tied weights"
+                "coupled init overwrites V/U and would break tied weights"
             )
             target_weights = {
                 name: component_model.target_weight(name)
                 for name in component_model.target_module_paths
             }
-            match pd_config.weight_init:
-                case "coupled":
-                    init_coupled_(component_model.components, target_weights, pd_config.seed)
-                case "span_proj":
-                    assert pd_config.init_rank_threshold is not None
-                    bases = compute_target_space_bases(
-                        target_weights, pd_config.init_rank_threshold
-                    )
-                    project_components_to_target_spaces_(component_model.components, bases)
-                case _:
-                    assert_never(pd_config.weight_init)
-
-        if pd_config.ci_fn_output_bias_init is not None:
-            init_ci_fn_output_bias_(component_model.ci_fn, pd_config.ci_fn_output_bias_init)
+            init_coupled_(component_model.components, target_weights, pd_config.seed)
 
     # ============================ Named-param accessors for optimizer state ============================
 
