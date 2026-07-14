@@ -1,12 +1,16 @@
 """Load-once driver: coupled vs kaiming init on the full-data pile_llama 4L decomposition.
 
-Runs 6 conditions ({coupled, kaiming} x seeds {0, 1, 2}) in a single process so the
-target model and the data pipeline are built exactly once and shared across every
-condition. Each condition is measured at three points:
+Runs {coupled, kaiming} x seeds {0, 1, 2} in a single process so the target model and the
+data pipeline are built exactly once and shared across every condition. Three phases per
+(scheme, seed) — 18 passes total:
 
-  (a) init        raw init, before warmup   -> a `warmup=0, steps=1` pass ("raw")
-  (b) post-warmup after 100 warmup steps     -> the `train` pass, eval @ step 0
-  (c) trained     after 200 main steps        -> the `train` pass, eval @ step 200
+  raw      warmup=0, steps=1    -> init measurement (step 0)
+  train    warmup=100, steps=200-> post-warmup (step 0) + trained (step 200), faithfulness on
+  nofaith  warmup=0, steps=200  -> trained-nofaith (step 200): NO faithfulness warmup and
+                                   FaithfulnessLoss removed from the training loss. Weight
+                                   faithfulness is still observed via an eval probe (the same
+                                   FaithfulnessLoss run as an eval metric -> eval/loss/
+                                   FaithfulnessLoss), logged at init (step 0) and step 200.
 
 The `raw` pass takes one optimizer step at step 0 (steps must be a PositiveInt), but the
 step is bounded by `grad_clip_norm=0.01` (||delta|| <= lr*0.01 = 5e-7) so the step-0 eval
@@ -15,7 +19,11 @@ is effectively raw init. The exact raw-init weight faithfulness is `train/loss/F
 
 Data is held constant across all conditions (fixed DATA_SEED); only `pd.seed` varies, so
 the three seeds are three draws of the initialization / stochastic training, on identical
-data. Weight init and warmup are the only knobs that change what is being compared.
+data. Weight init, warmup, and the faithfulness loss are the only knobs that change.
+
+Idempotent: a pass whose final step is already in metrics.jsonl is skipped, so re-launching
+after a partial/earlier run only runs what's missing (single-node shared FS -> all ranks
+skip in lockstep).
 
 Launch (8xH100, single node), from the repo root:
 
@@ -24,11 +32,13 @@ Launch (8xH100, single node), from the repo root:
 """
 
 import gc
+import json
 
 import torch
 
 from param_decomp.distributed import is_main_process
 from param_decomp.log import logger
+from param_decomp.metrics.faithfulness import FaithfulnessLoss
 from param_decomp.optimize import EvalLoop, Trainer
 from param_decomp_lab.distributed import get_device, init_distributed
 from param_decomp_lab.eval_metrics import EVAL_METRIC_CLASSES
@@ -40,7 +50,7 @@ from param_decomp_lab.experiments.lm.run import (
     make_run_batch,
 )
 from param_decomp_lab.experiments.utils import init_pd_run
-from param_decomp_lab.infra.settings import REPO_ROOT
+from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR, REPO_ROOT
 from param_decomp_lab.seed import set_seed
 
 BASE_CONFIG_PATH = REPO_ROOT / "param_decomp_lab/experiments/lm/pile_llama_simple_mlp-4L.yaml"
@@ -51,16 +61,24 @@ SEEDS = [0, 1, 2]
 # Data is identical for every condition: init variance is the only thing seeds vary.
 DATA_SEED = 0
 
-# Measurement-point config. `eval every == 200` fires eval at step 0 and step 200.
-WARMUP_STEPS = 100
+# `eval every == 200` fires eval at step 0 and step 200.
 TRAIN_STEPS = 200
 EVAL_EVERY = 200
 
+# phase -> (faithfulness_warmup_steps, steps). "nofaith" additionally drops FaithfulnessLoss
+# from the training loss and adds it back as an eval probe (see run_condition).
+PHASE_SPEC = {
+    "raw": (0, 1),
+    "train": (100, TRAIN_STEPS),
+    "nofaith": (0, TRAIN_STEPS),
+}
 
-def build_eval_loop(cfg: LMExperimentConfig, eval_loader) -> EvalLoop:
+
+def build_eval_loop(cfg: LMExperimentConfig, eval_loader, *, extra_metrics=()) -> EvalLoop:
     """EvalLoop wrapping the shared eval loader with fresh metric instances."""
     assert cfg.eval is not None
     metrics = [EVAL_METRIC_CLASSES[m.type](m) for m in cfg.eval.metrics]
+    metrics.extend(extra_metrics)
     return EvalLoop(
         loader=eval_loader,
         metrics=metrics,
@@ -77,6 +95,15 @@ def _skip_checkpoint(_snapshot: object) -> None:
     model_/training_.pth snapshots Trainer writes unconditionally at the final step."""
 
 
+def _final_step_logged(run_id: str, final_step: int) -> bool:
+    """True if a prior run of this condition already logged its final step (resume-skip)."""
+    path = PARAM_DECOMP_OUT_DIR / "runs" / run_id / "metrics.jsonl"
+    if not path.exists():
+        return False
+    with open(path) as f:
+        return any(json.loads(line)["step"] == final_step for line in f if line.strip())
+
+
 def run_condition(
     *,
     base_cfg: LMExperimentConfig,
@@ -87,9 +114,23 @@ def run_condition(
     seed: int,
     phase: str,
 ) -> None:
-    """One (scheme, seed, phase) pass. `phase` is 'raw' (init) or 'train'."""
-    warmup_steps = 0 if phase == "raw" else WARMUP_STEPS
-    steps = 1 if phase == "raw" else TRAIN_STEPS
+    """One (scheme, seed, phase) pass. `phase` in {'raw', 'train', 'nofaith'}."""
+    warmup_steps, steps = PHASE_SPEC[phase]
+    run_id = f"cinit-{scheme}-s{seed}-{phase}"
+
+    if _final_step_logged(run_id, steps):
+        if is_main_process():
+            logger.info(f"=== skip {run_id}: step {steps} already logged ===")
+        return
+
+    loss_metrics = list(base_cfg.pd.loss_metrics)
+    extra_eval_metrics = ()
+    if phase == "nofaith":
+        # No faithfulness pressure during training; still observe weight faithfulness by
+        # running the same FaithfulnessLoss as an eval probe (-> eval/loss/FaithfulnessLoss).
+        faith_cfg = next(m for m in loss_metrics if m.type == "FaithfulnessLoss")
+        loss_metrics = [m for m in loss_metrics if m.type != "FaithfulnessLoss"]
+        extra_eval_metrics = (FaithfulnessLoss(faith_cfg),)
 
     pd = base_cfg.pd.model_copy(
         update={
@@ -97,14 +138,14 @@ def run_condition(
             "seed": seed,
             "faithfulness_warmup_steps": warmup_steps,
             "steps": steps,
+            "loss_metrics": loss_metrics,
         }
     )
     cadence = base_cfg.cadence.model_copy(update={"train_log_every": EVAL_EVERY})
     cfg = base_cfg.model_copy(update={"pd": pd, "cadence": cadence})
 
     set_seed(seed)
-    eval_loop = build_eval_loop(cfg, eval_loader)
-    run_id = f"cinit-{scheme}-s{seed}-{phase}"
+    eval_loop = build_eval_loop(cfg, eval_loader, extra_metrics=extra_eval_metrics)
     # wandb disabled (cfg.wandb=None) -> RunSink.local, metrics go to metrics.jsonl only.
     sink = init_pd_run(cfg, group=None, tags=None, run_id=run_id)
     # Trainer checkpoints unconditionally at the final step; skip the (multi-GB) write so
@@ -151,7 +192,7 @@ def main() -> None:
     )
     assert base_cfg.eval is not None, "the pile config must define an eval block"
 
-    # --- load target + data ONCE, share across all 12 passes --- #
+    # --- load target + data ONCE, share across all 18 passes --- #
     target_model = build_target(base_cfg.target)
     train_loader = build_lm_loader(
         base_cfg.target,
@@ -174,7 +215,7 @@ def main() -> None:
 
     for scheme in SCHEMES:
         for seed in SEEDS:
-            for phase in ("raw", "train"):
+            for phase in PHASE_SPEC:
                 run_condition(
                     base_cfg=base_cfg,
                     target_model=target_model,

@@ -7,14 +7,22 @@ a **runpod 8×H100** node. **No wandb logging** — everything is written locall
 
 ## Design
 
-6 conditions = `{coupled, kaiming}` × seeds `{0, 1, 2}`. Each condition is measured at
-three points:
+6 conditions = `{coupled, kaiming}` × seeds `{0, 1, 2}`, each run through **three phases**
+(`raw`, `train`, `nofaith`) = **18 passes**, giving four measurement points:
 
 | Point | Meaning | How it's captured |
 |---|---|---|
-| **(a) init** | raw init, before warmup | `raw` pass: `warmup=0, steps=1`, metrics @ step 0 |
+| **(a) init** | raw init, before warmup | `raw` pass (`warmup=0, steps=1`), metrics @ step 0 |
 | **(b) post-warmup** | after 100 faithfulness-warmup steps | `train` pass, metrics @ step 0 |
-| **(c) trained** | after 200 main steps | `train` pass, metrics @ step 200 |
+| **(c) trained** | after 200 main steps, faithfulness on | `train` pass, metrics @ step 200 |
+| **(d) trained-nofaith** | after 200 main steps, **no faithfulness** | `nofaith` pass (`warmup=0, steps=200`), metrics @ step 200 |
+
+The `nofaith` phase drops faithfulness entirely — no warmup and `FaithfulnessLoss` removed
+from the training loss — to see how the decomposition behaves with no faithfulness
+pressure. Weight faithfulness is still **observed** there via an eval probe (the same
+`FaithfulnessLoss` run as an eval metric → `eval/loss/FaithfulnessLoss`), logged at init
+and step 200. The plots coalesce that with the loss-side `train/loss/FaithfulnessLoss` from
+the other phases into one `faithfulness` panel.
 
 - **Warmup = 100** (not the config's 400), then **200 main steps** — as requested.
 - The `raw` pass takes one optimizer step at step 0 (`steps` is a `PositiveInt`, so 0 is
@@ -31,15 +39,17 @@ three points:
   eval/log cadence (so metrics land at step 0 and 200).
 
 **Load once:** the driver (`full_data_init_test_driver.py`) builds the target model and
-the train/eval data pipeline **once**, then loops all 12 passes (6 conditions × {raw,
-train}) in a single process. No reloading between conditions.
+the train/eval data pipeline **once**, then loops all 18 passes (6 conditions × {raw,
+train, nofaith}) in a single process. No reloading between conditions. Passes whose final
+step is already in `metrics.jsonl` are **skipped**, so re-launching after a partial or
+earlier run only does what's missing.
 
 Runs on `feature/subspace_restriction` because coupled init lives only there
 (`PDConfig.weight_init`, `init_coupled_`) and that branch also carries the
 `broadcast_buffers=False` DDP fix the multi-forward pile step needs on 8 GPUs. No core
 `param_decomp/` changes were needed.
 
-Output: **12 local run dirs** at `$PARAM_DECOMP_OUT_DIR/runs/cinit-<scheme>-s<seed>-<raw|train>/`,
+Output: **18 local run dirs** at `$PARAM_DECOMP_OUT_DIR/runs/cinit-<scheme>-s<seed>-<raw|train|nofaith>/`,
 each with a `metrics.jsonl`.
 
 ---
@@ -117,7 +127,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export HF_HUB_ETAG_TIMEOUT=30
 export HF_HUB_DOWNLOAD_TIMEOUT=30
 
-# 8-GPU single-node run (all 12 passes, one process), detached so it survives the
+# 8-GPU single-node run (all 18 passes, one process), detached so it survives the
 # web terminal disconnecting. nohup inherits the exports above — keep it in this shell.
 nohup torchrun --standalone --nproc_per_node=8 \
     notes/subspace_filtering/full_data_init_test_driver.py \
@@ -132,8 +142,8 @@ ps aux | grep torchrun                       # or `nvidia-smi` — busy GPUs = r
 pkill -f full_data_init_test_driver          # to stop it
 ```
 
-Progress: 12 passes; the 6 `raw` passes are near-instant (1 step), the 6 `train` passes
-are 100 warmup + 200 steps each. Results land in
+Progress: 18 passes; the 6 `raw` passes are near-instant (1 step), the 6 `train` passes are
+100 warmup + 200 steps, the 6 `nofaith` passes are 200 steps. Results land in
 `$PARAM_DECOMP_OUT_DIR/runs/cinit-*/metrics.jsonl`.
 
 ---
@@ -156,10 +166,10 @@ rsync -avz -e "ssh -p <POD_PORT>" \
     ./full_data_init_test_runs/
 ```
 
-Confirm you pulled all 12:
+Confirm you pulled all 18:
 
 ```bash
-ls -d ./full_data_init_test_runs/cinit-*   # expect 12 dirs
+ls -d ./full_data_init_test_runs/cinit-*   # expect 18 dirs
 ```
 
 Now it's safe to shut the pod down.
@@ -175,8 +185,10 @@ python notes/subspace_filtering/full_data_init_test_plots.py ./full_data_init_te
 ```
 
 The script writes one figure **per group** — coupled (red `#d62728`) vs kaiming (grey
-`#555555`) across init → post-warmup → trained, mean over seeds + min-max ribbon — plus a
-tidy `summary.csv` (all scalar keys, one row per scheme/seed/phase). Grouping is
+`#555555`) across init → post-warmup → trained → trained-nofaith, mean over seeds + min-max
+ribbon — plus a tidy `summary.csv` (all scalar keys, one row per scheme/seed/phase).
+Note the last x-position (`trained-nofaith`) is a **separate arm** (no faithfulness), not a
+continuation of the trajectory. Grouping is
 **explicit**, keyed off the verified metric-key formats this config emits (each group is
 asserted non-empty, so a key-format change fails loudly rather than mis-grouping):
 
@@ -187,18 +199,21 @@ asserted non-empty, so a key-format change fails loudly rather than mis-grouping
   intentionally excluded — the aggregate is the headline.
 - **`l0.png`** — every `eval/l0/*` panel (total + per-layer) on **another shared log
   y-axis**, same pow10 rule.
-- **`faithfulness.png`** — `train/loss/FaithfulnessLoss` on its own log panel (the
-  headline weight-space metric).
+- **`faithfulness.png`** — the coalesced `faithfulness` key on its own log panel (the
+  headline weight-space metric): `train/loss/FaithfulnessLoss` for the faith phases,
+  `eval/loss/FaithfulnessLoss` (the eval probe) for `trained-nofaith`.
 - **`ce_kl.png`** — the CI-masked CE/KL headline (`kl_ci_masked`,
   `ce_unrecovered_ci_masked`, `ce_difference_ci_masked`), each on its own linear axis.
 
 ### What the plots answer
 
-- **`train/loss/FaithfulnessLoss` — the headline** (weight-space faithfulness):
+- **`faithfulness` — the headline** (weight-space faithfulness):
   - **init:** does coupled start far more faithful than kaiming?
   - **init → post-warmup:** does 100 warmup steps *substitute* for coupled init (kaiming
     catches up), or only recover part of the gain?
   - **post-warmup → trained:** does any init advantage persist / compound over 200 steps?
+  - **trained vs trained-nofaith:** with no faithfulness pressure, how far does faithfulness
+    drift, and does coupled init hold it closer than kaiming without the loss enforcing it?
 - **Eval metrics** (`CEandKLLosses`, `*ReconLoss`, `CI_L0`, `CIMeanPerComponent`, …) tell
   the same story in activation space. Note: at raw **init** the CI function is untrained
   (random), so CI-dependent metrics at that point are noisy — read the clean init signal

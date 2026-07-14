@@ -1,12 +1,13 @@
 """Plot coupled-vs-kaiming init results from the local metrics.jsonl files.
 
 Run on the machine that has the retrieved run dirs (e.g. your laptop), NOT via wandb.
-Expects a directory containing the 12 run folders `cinit-<scheme>-s<seed>-<raw|train>/`,
-each with a `metrics.jsonl`. Reconstructs the three measurement points per condition:
+Expects a directory of run folders `cinit-<scheme>-s<seed>-<raw|train|nofaith>/`, each with
+a `metrics.jsonl`. Reconstructs the measurement points per condition:
 
-  init         raw run,   step 0
-  post-warmup  train run, step 0
-  trained      train run, step 200
+  init            raw run,     step 0
+  post-warmup     train run,   step 0
+  trained         train run,   step 200
+  trained-nofaith nofaith run, step 200   (no warmup, no faithfulness loss)
 
 Plotting conventions (matching the scratch init-study scripts):
   * All recon-loss panels share ONE log y-axis; all L0 panels share ANOTHER — each
@@ -21,7 +22,8 @@ Grouping is EXPLICIT, keyed off the verified metric-key formats this config emit
                               (the per-module eval/loss/<Class>/<module> variants are
                               intentionally excluded — the aggregate is the headline)
   l0:                         eval/l0/<threshold>_<group>
-  faithfulness:               train/loss/FaithfulnessLoss
+  faithfulness:               coalesced 'faithfulness' key = train/loss/FaithfulnessLoss
+                              (faith phases) or eval/loss/FaithfulnessLoss (nofaith probe)
   ce/kl headline:             eval/ce_kl/{kl,ce_*}_ci_masked
 
 Writes one figure per group + a tidy summary.csv (all scalar keys).
@@ -43,9 +45,9 @@ import matplotlib.pyplot as plt
 
 SCHEMES = ["kaiming", "coupled"]
 SCHEME_STYLE = {"kaiming": ("kaiming", "#555555"), "coupled": ("coupled", "#d62728")}
-PHASES = ["init", "post-warmup", "trained"]
+PHASES = ["init", "post-warmup", "trained", "trained-nofaith"]
 
-FAITHFULNESS_KEY = "train/loss/FaithfulnessLoss"
+FAITHFULNESS_KEY = "faithfulness"  # synthetic, injected by _inject_faithfulness
 CE_KL_HEADLINE = [
     "eval/ce_kl/kl_ci_masked",
     "eval/ce_kl/ce_unrecovered_ci_masked",
@@ -102,6 +104,18 @@ def at_step(steps: dict[int, dict[str, float]], step: int, run_name: str) -> dic
     return steps[step]
 
 
+def _inject_faithfulness(data: dict[tuple[str, int, str], dict[str, float]]) -> None:
+    """Coalesce loss-side (train/loss/FaithfulnessLoss, faith phases) and eval-probe
+    (eval/loss/FaithfulnessLoss, nofaith phase) weight faithfulness into one 'faithfulness'
+    key, so a single panel spans every phase."""
+    for d in data.values():
+        tf = d.get("train/loss/FaithfulnessLoss")
+        ef = d.get("eval/loss/FaithfulnessLoss")
+        v = tf if tf is not None else ef
+        if v is not None:
+            d["faithfulness"] = v
+
+
 def collect(runs_dir: Path, train_steps: int) -> dict[tuple[str, int, str], dict[str, float]]:
     """(scheme, seed, phase) -> {metric_key: value}."""
     out: dict[tuple[str, int, str], dict[str, float]] = {}
@@ -116,8 +130,11 @@ def collect(runs_dir: Path, train_steps: int) -> dict[tuple[str, int, str], dict
         elif kind == "train":
             out[(scheme, seed, "post-warmup")] = at_step(steps, 0, run_dir.name)
             out[(scheme, seed, "trained")] = at_step(steps, train_steps, run_dir.name)
+        elif kind == "nofaith":
+            out[(scheme, seed, "trained-nofaith")] = at_step(steps, train_steps, run_dir.name)
         else:
             raise AssertionError(f"unknown phase {kind!r}")
+    _inject_faithfulness(out)
     return out
 
 
