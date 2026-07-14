@@ -199,39 +199,48 @@ login node). Reads only the local `metrics.jsonl` files — no wandb, no GPU.
 
 ```bash
 python notes/subspace_filtering/full_data_init_test_plots.py ./full_data_init_test_runs
-# -> ./full_data_init_test_runs/figures/{faithfulness,recon,l0,ce_kl}.png + summary.csv
+# -> ./full_data_init_test_runs/figures/{faith,nofaith}_{faithfulness,recon,l0,ce_kl}.png
+#    + summary.csv
 ```
 
-The script writes one figure **per group** — coupled (red `#d62728`) vs kaiming (grey
-`#555555`) across init → post-warmup → trained → trained-nofaith, mean over seeds + min-max
-ribbon — plus a tidy `summary.csv` (all scalar keys, one row per scheme/seed/phase).
-Note the last x-position (`trained-nofaith`) is a **separate arm** (no faithfulness), not a
-continuation of the trajectory. Grouping is
+The runs split into **two comparison series**, each its own set of figures
+(`<series>_<group>.png`), sharing the `init` start point:
+
+- **`faith_*.png`** — the faithfulness arm: **init → post-warmup → trained** (faithfulness
+  warmup + loss on).
+- **`nofaith_*.png`** — the no-faithfulness arm: **init → trained-nofaith** (no warmup, no
+  faithfulness loss).
+
+Within each series the script writes one figure **per group** — coupled (red `#d62728`) vs
+kaiming (grey `#555555`), mean over seeds + min-max ribbon — plus a shared tidy
+`summary.csv` (all scalar keys, one row per scheme/seed/phase, all four phases). Each series
+is **self-scaled**: shared log limits are pooled over that series' own phases. Grouping is
 **explicit**, keyed off the verified metric-key formats this config emits (each group is
 asserted non-empty, so a key-format change fails loudly rather than mis-grouping):
 
-- **`recon.png`** — the aggregate recon scalars (`eval/loss/PGDReconLoss`,
-  `eval/loss/CIHiddenActsReconLoss`, `eval/loss/StochasticHiddenActsReconLoss`) on **one
-  shared log y-axis**, pow10 limits (`10**floor(log10(min>0))` .. `10**ceil(log10(max))`)
-  pooled over the group. Per-module recon keys (`eval/loss/<Class>/<module>`) are
-  intentionally excluded — the aggregate is the headline.
-- **`l0.png`** — every `eval/l0/*` panel (total + per-layer) on **another shared log
-  y-axis**, same pow10 rule.
-- **`faithfulness.png`** — the coalesced `faithfulness` key on its own log panel (the
-  headline weight-space metric): `train/loss/FaithfulnessLoss` for the faith phases,
+- **`<series>_recon.png`** — the aggregate recon scalar (`eval/loss/PGDReconLoss`) on a
+  **shared log y-axis**, pow10 limits (`10**floor(log10(min>0))` .. `10**ceil(log10(max))`)
+  pooled over the series. Per-module recon keys (`eval/loss/<Class>/<module>`) **and** the
+  hidden-acts recon metrics (`CIHiddenActsReconLoss`, `StochasticHiddenActsReconLoss`) are
+  intentionally excluded — only the PGD recon aggregate is the headline.
+- **`<series>_l0.png`** — every `eval/l0/*` panel (total + per-layer) on **another shared
+  log y-axis**, same pow10 rule.
+- **`<series>_faithfulness.png`** — the coalesced `faithfulness` key on its own log panel
+  (the headline weight-space metric): `train/loss/FaithfulnessLoss` for the faith phases,
   `eval/loss/FaithfulnessLoss` (the eval probe) for `trained-nofaith`.
-- **`ce_kl.png`** — the CI-masked CE/KL headline (`kl_ci_masked`,
+- **`<series>_ce_kl.png`** — the CI-masked CE/KL headline (`kl_ci_masked`,
   `ce_unrecovered_ci_masked`, `ce_difference_ci_masked`), each on its own linear axis.
 
 ### What the plots answer
 
-- **`faithfulness` — the headline** (weight-space faithfulness):
+- **`faith_faithfulness.png` — the headline** (weight-space faithfulness, faith arm):
   - **init:** does coupled start far more faithful than kaiming?
   - **init → post-warmup:** does 100 warmup steps *substitute* for coupled init (kaiming
     catches up), or only recover part of the gain?
   - **post-warmup → trained:** does any init advantage persist / compound over 200 steps?
-  - **trained vs trained-nofaith:** with no faithfulness pressure, how far does faithfulness
-    drift, and does coupled init hold it closer than kaiming without the loss enforcing it?
+- **`nofaith_faithfulness.png`** (the no-faithfulness arm) — from the same `init`, with no
+  faithfulness pressure, how far does faithfulness drift over 200 steps, and does coupled
+  init hold it closer than kaiming without the loss enforcing it?
 - **Eval metrics** (`CEandKLLosses`, `*ReconLoss`, `CI_L0`, `CIMeanPerComponent`, …) tell
   the same story in activation space. Note: at raw **init** the CI function is untrained
   (random), so CI-dependent metrics at that point are noisy — read the clean init signal

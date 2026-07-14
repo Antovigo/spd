@@ -17,16 +17,19 @@ Plotting conventions (matching the scratch init-study scripts):
   * kaiming = control (grey #555555); coupled = idea-under-test (red #d62728).
   * mean line across seeds + min-max ribbon.
 
+Two comparison SERIES, each its own figure set (`<series>_<group>.png`):
+  faith:    init -> post-warmup -> trained          (faithfulness warmup + loss)
+  nofaith:  init -> trained-nofaith                 (no warmup, no faithfulness loss)
+
 Grouping is EXPLICIT, keyed off the verified metric-key formats this config emits:
-  recon (aggregate scalars):  eval/loss/<Class>       where <Class> contains "Recon"
-                              (the per-module eval/loss/<Class>/<module> variants are
-                              intentionally excluded — the aggregate is the headline)
+  recon:                      eval/loss/PGDReconLoss (aggregate recon scalar; the
+                              hidden-acts recon metrics and per-module keys are excluded)
   l0:                         eval/l0/<threshold>_<group>
   faithfulness:               coalesced 'faithfulness' key = train/loss/FaithfulnessLoss
                               (faith phases) or eval/loss/FaithfulnessLoss (nofaith probe)
   ce/kl headline:             eval/ce_kl/{kl,ce_*}_ci_masked
 
-Writes one figure per group + a tidy summary.csv (all scalar keys).
+Writes one figure per (series, group) + a tidy summary.csv (all scalar keys, all phases).
 
     python full_data_init_test_plots.py <runs_dir> [--out <figures_dir>] [--train-steps 200]
 """
@@ -45,7 +48,13 @@ import matplotlib.pyplot as plt
 
 SCHEMES = ["kaiming", "coupled"]
 SCHEME_STYLE = {"kaiming": ("kaiming", "#555555"), "coupled": ("coupled", "#d62728")}
-PHASES = ["init", "post-warmup", "trained", "trained-nofaith"]
+ALL_PHASES = ["init", "post-warmup", "trained", "trained-nofaith"]
+# Two comparison series -> separate figure sets (`<series>_<group>.png`), sharing the
+# 'init' start. Each series is self-scaled: shared log limits are pooled over its own phases.
+SERIES = {
+    "faith": ["init", "post-warmup", "trained"],
+    "nofaith": ["init", "trained-nofaith"],
+}
 
 FAITHFULNESS_KEY = "faithfulness"  # synthetic, injected by _inject_faithfulness
 CE_KL_HEADLINE = [
@@ -60,8 +69,14 @@ GROUP_ORDER = ["faithfulness", "recon", "l0", "ce_kl"]
 
 
 def is_recon_aggregate(key: str) -> bool:
-    """`eval/loss/<Class>` recon scalar — excludes per-module `.../<module>` (3+ slashes)."""
-    return key.startswith("eval/loss/") and "recon" in key.lower() and key.count("/") == 2
+    """`eval/loss/<Class>` recon scalar — excludes per-module `.../<module>` (3+ slashes)
+    and the hidden-acts recon metrics (so only PGDReconLoss remains)."""
+    return (
+        key.startswith("eval/loss/")
+        and "recon" in key.lower()
+        and key.count("/") == 2
+        and "hiddenacts" not in key.lower()
+    )
 
 
 def group_keys(keys: list[str]) -> dict[str, list[str]]:
@@ -159,30 +174,32 @@ def pow10_limits(vals: list[float]) -> tuple[float, float] | None:
     return lo, (hi if hi > lo else lo * 10)
 
 
-def group_values(data, keys, seeds) -> list[float]:
+def group_values(data, keys, seeds, phases) -> list[float]:
     out: list[float] = []
     for key in keys:
         for scheme in SCHEMES:
             for seed in seeds:
-                for phase in PHASES:
+                for phase in phases:
                     d = data.get((scheme, seed, phase))
                     if d is not None and key in d:
                         out.append(d[key])
     return out
 
 
-def plot_group(data, group: str, keys: list[str], seeds: list[int], out_dir: Path) -> None:
+def plot_group(data, group, keys, seeds, phases, out_dir, prefix) -> None:
     n = len(keys)
     fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 4.6), squeeze=False)
     axes = axes[0]
 
-    shared = pow10_limits(group_values(data, keys, seeds)) if group in SHARED_GROUPS else None
-    xs = list(range(len(PHASES)))
+    shared = (
+        pow10_limits(group_values(data, keys, seeds, phases)) if group in SHARED_GROUPS else None
+    )
+    xs = list(range(len(phases)))
     for ax, key in zip(axes, keys, strict=True):
         for scheme in SCHEMES:
             label, color = SCHEME_STYLE[scheme]
             means, lows, highs, seed_pts = [], [], [], []
-            for phase in PHASES:
+            for phase in phases:
                 vals = [
                     data[(scheme, seed, phase)][key]
                     for seed in seeds
@@ -199,17 +216,21 @@ def plot_group(data, group: str, keys: list[str], seeds: list[int], out_dir: Pat
 
         if group in LOG_GROUPS:
             ax.set_yscale("log")
-            lim = shared if shared is not None else pow10_limits(group_values(data, [key], seeds))
+            lim = (
+                shared
+                if shared is not None
+                else pow10_limits(group_values(data, [key], seeds, phases))
+            )
             if lim is not None:
                 ax.set_ylim(*lim)
         ax.set_title(key.split("/")[-1], fontsize=9)
         ax.set_xticks(xs)
-        ax.set_xticklabels(PHASES, rotation=20, ha="right")
+        ax.set_xticklabels(phases, rotation=20, ha="right")
         ax.grid(True, which="both", alpha=0.3)
     axes[0].legend(fontsize=9)
-    fig.suptitle(group + (" (shared log axis)" if group in SHARED_GROUPS else ""))
+    fig.suptitle(f"{prefix}: {group}" + (" (shared log axis)" if group in SHARED_GROUPS else ""))
     fig.tight_layout()
-    fig.savefig(out_dir / f"{group}.png", dpi=150)
+    fig.savefig(out_dir / f"{prefix}_{group}.png", dpi=150)
     plt.close(fig)
 
 
@@ -219,7 +240,7 @@ def write_summary_csv(data, keys, seeds, out_dir: Path) -> None:
         w.writerow(["scheme", "seed", "phase", *keys])
         for scheme in SCHEMES:
             for seed in seeds:
-                for phase in PHASES:
+                for phase in ALL_PHASES:
                     d = data.get((scheme, seed, phase))
                     if d is None:
                         continue
@@ -248,9 +269,12 @@ def main() -> None:
     for group in GROUP_ORDER:
         if grouped.get(group):
             print(f"  {group}: {grouped[group]}")
-            plot_group(data, group, grouped[group], seeds, out_dir)
+    for series_name, phases in SERIES.items():
+        for group in GROUP_ORDER:
+            if grouped.get(group):
+                plot_group(data, group, grouped[group], seeds, phases, out_dir, series_name)
     write_summary_csv(data, keys, seeds, out_dir)
-    print(f"wrote {out_dir}/*.png + summary.csv")
+    print(f"wrote {out_dir}/{{{','.join(SERIES)}}}_*.png + summary.csv")
 
 
 if __name__ == "__main__":
