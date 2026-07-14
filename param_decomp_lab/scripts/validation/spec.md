@@ -74,49 +74,62 @@ format**: one row per `(sequence, position, model)`, so each sequence yields
 Rows are emitted in `(example, pos, model)` order, so the `original` and `ablated` rows for
 the same position are adjacent for easy comparison.
 
-**find_alive_components.py**
+**find_alive_subcomponents.py**
 
 args:
 - the path to a decomposed model (a checkpoint `model_<step>.pth`, or a run dir / W&B path)
-- `--ci-thr`: lower-leaky CI threshold above which a subcomponent counts as active (default
-  0.1 — matches the circuit threshold in `sample_target_data.py`, so the alive set is
-  exactly the components the circuit ever uses)
-- `--batch-size`: forward-pass chunk size over the prompt pool (default 8)
-- `--output`: overrides the TSV path
-- `--output-json`: overrides the JSON path
+- `--kl-thr`: mean last-position KL below which a top-k subset counts as sufficient
+  (default 0.008); the alive set is the smallest swept k under it
+- `--ci-thr`: lower-leaky CI threshold above which a subcomponent is recorded in the
+  per-position JSON (default 0.1 — matches the circuit threshold in
+  `sample_target_data.py`)
+- `--batch-size`: forward-pass chunk size over the prompt pool (default 256)
+- `--n-points`: size of the default log-spaced k grid (default 40)
+- `--ks`: explicit comma-separated k grid overriding `--n-points` (pass a dense grid
+  around the knee to tighten the alive cut)
+- `--prompts`: override the LM `prompts_file`
+- `--output` / `--output-curve` / `--output-npz` / `--output-fig` / `--output-json`:
+  override the per-file paths
 - `--slurm` (+ `--partition` / `--gpus` / `--slurm-time` / `--slurm-mem`): submit as a
   single-GPU SLURM job (see `CLAUDE.md` → "GPU scripts run via SLURM")
 
-Runs **every** prompt in the run's target distribution (read in file order from
-`cfg.data.prompts_file`) through the decomposed model and records which subcomponents reach
-lower-leaky CI > `--ci-thr` on at least one (prompt, position). Requires prompts-based
-target data (asserts `cfg.data.prompts_file` is set). Only real (non-pad) positions are
-counted — prompts are right-padded, so positions where the token is the pad id (falling
-back to `eos_token_id`) are masked out of every statistic.
+Produces the run's **reference alive list**. Ranks every subcomponent by mean lower-leaky
+CI at the last (`=`) position over the target prompts (read in file order from
+`cfg.data.prompts_file`; requires prompts-based target data), then sweeps top-k prefixes of
+that ranking: for each k the top-k subcomponents are enabled and all others zeroed **at the
+last position only** (everything on at earlier positions, weight-delta fully on
+everywhere), and the masked model's last-position output is compared to the raw target
+model's (KL + argmax agreement). The alive subcomponents are the top-k for the smallest
+swept k whose mean KL is ≤ `--kl-thr`. Every downstream script consumes this output.
 
 Implementation:
-- The prompt pool is tokenised once (via `load_prompts_dataset`) in file order, so prompt
-  index = file line, and processed in `--batch-size` chunks. Per chunk, one
-  `cache_type="input"` forward pass feeds `calc_causal_importances`
-  (`sampling="continuous"`, deterministic) for the CI and `get_all_component_acts` for the
-  per-component inner activations `V^T x`. Runs under `torch.no_grad()` + `bf16_autocast`.
-- Per-component running stats (over valid positions across all prompts): `count_active`,
-  `max_ci`, and `activation_sum` (sum of `V^T x` over active positions); `count_total` is
-  the total valid-position count.
+- Phase 1 (ranking + JSON): per `--batch-size` chunk, one `cache_type="input"` forward
+  feeds `calc_causal_importances` (`sampling="continuous"`, deterministic); accumulates
+  per-subcomponent mean CI (all positions and last position) and the sparse
+  per-(prompt, position) record of subcomponents with CI > `--ci-thr`. Runs under
+  `torch.no_grad()` + `bf16_autocast`.
+- Phase 2 (sweep): outer loop over chunks (one target-reference forward each), inner loop
+  over ks ascending, growing the enabled set incrementally. Asserts the all-on + delta
+  masked model reproduces the raw target (mask-wiring check).
 
-Output 1 — TSV (default `alive_components.tsv` in `analysis/datasets/`), one row per alive
-subcomponent (`count_active > 0`), sorted by `(layer, matrix, component)`. Same schema as
-the SPD `find_alive_components.py`:
+Output 1 — TSV (default `alive_subcomponents.tsv` in `analysis/datasets/`), the alive
+subset (top-k_alive rows of the ranking), one row per subcomponent:
 - `layer` — block number from the module path (e.g. 18)
 - `matrix` — the rest of the module path (e.g. `mlp.gate_proj`)
 - `component` — the subcomponent index
-- `fraction_active` — `count_active / count_total` (fraction of seen valid positions where
-  it was active)
-- `max_ci` — max observed lower-leaky CI
-- `mean_activation` — mean `V^T x` over the positions where it was active
+- `rank` — position in the last-position mean-CI ranking (0 = highest)
+- `mean_ci` / `mean_ci_last` — mean lower-leaky CI over all positions / the last position
 
-Output 2 — JSON (default `alive_components_per_position.json` in `analysis/datasets/`), the active
-components per (prompt, position), organised **prompt > position > matrix > list**:
+Output 2 — TSV (default `alive_subcomponents_curve.tsv`), one row per swept k:
+`k, mean_ci_at_k, mean_kl, q5_kl, q95_kl, max_kl, argmax_agree`.
+
+Output 3 — npz (default `alive_subcomponents_kl.npz`): per-(k, prompt) KL + argmax
+agreement plus the full CI ranking, for per-prompt analysis / re-thresholding without a
+GPU.
+
+Output 4 — JSON (default `alive_subcomponents_per_position.json` in `analysis/datasets/`),
+the **alive** subcomponents active per (prompt, position), organised
+**prompt > position > matrix > list**:
 ```json
 {
   "<prompt text>": {
@@ -129,11 +142,16 @@ components per (prompt, position), organised **prompt > position > matrix > list
   ...
 }
 ```
-Keys are the prompt strings (asserted unique); position keys are stringified ints over the
-prompt's real positions. For each (prompt, position), only modules with ≥1 active component
-appear; the component list is sorted by descending CI (each component's `ci` is its
-lower-leaky CI at that position, rounded to 3 dp). Written compactly (no indent). Consumed
-by `plot_ci_heatmaps.py` and `plot_ab_heatmaps.py`.
+Keys are the prompt strings (asserted unique); position keys are stringified ints. For each
+(prompt, position), only modules with ≥1 active alive subcomponent appear; the component
+list is sorted by descending CI (each component's `ci` is its lower-leaky CI at that
+position, rounded to 3 dp). Written compactly (no indent). Consumed by
+`plot_ci_heatmaps.py`, `plot_ab_heatmaps.py`, `build_addition_explorer.py`, and
+`build_neuron_connection_explorer.py`.
+
+Output 5 — figure (default `analysis/alive_subcomponents/recon_vs_k.png`): the
+recon-vs-k curve (mean + q5–q95 ribbon + max KL, argmax agreement on a twin axis) with
+the alive cut marked.
 
 **ablate_component_groups.py**
 
@@ -173,7 +191,7 @@ Output TSV (default `ablate_component_groups.tsv` in `analysis/datasets/`), one 
 **plot_ci_heatmaps.py**
 
 args:
-- the per-position JSON from `find_alive_components.py`
+- the per-position JSON from `find_alive_subcomponents.py`
 - `--n-prompts`: cap on prompts shown, in file order (default 50)
 - `--grep`: keep only prompts containing this substring (default none → all)
 - `--output-dir`: overrides the figure folder (default `<run_dir>/analysis/ci_heatmaps/`)
@@ -188,7 +206,7 @@ position (`position_<pos>.png`).
 **plot_ab_heatmaps.py**
 
 args:
-- the per-position JSON from `find_alive_components.py` (prompts must be `a+b=`)
+- the per-position JSON from `find_alive_subcomponents.py` (prompts must be `a+b=`)
 - `--output-dir`: overrides the figure folder (default `<run_dir>/analysis/ab_heatmaps_<op>/`)
 
 CPU-only (no model loaded). A variant view for `a+b=` arithmetic prompts. For each token
@@ -211,7 +229,7 @@ args:
 - `--top-k`: max-activating contexts kept per component (default 30)
 - `--context-window`: tokens of left context stored per firing (default 24)
 - `--seed`: stream shuffle seed (default 0)
-- `--alive-tsv`: alive-on-addition list used to flag components (default `alive_components.tsv`
+- `--alive-tsv`: alive-on-addition list used to flag components (default `alive_subcomponents.tsv`
   in `analysis/datasets/`)
 - `--output-tsv` / `--output`: override the TSV / JSONL paths
 - `--slurm` (+ `--partition` / `--gpus` / `--slurm-time` / `--slurm-mem`): submit as a
@@ -247,11 +265,11 @@ A pipeline that probes the L18 MLP decomposition one **operation** at a time ove
 suffixed with the operation (`_add` / `_sub` / `_mult`) and the three scripts that read the
 grid all act at the **last token** (the `=` answer position).
 
-**"Alive" here means two things at once:** ever causally important on the run's **original**
-data — flagged by `find_alive_components` run once with defaults, writing the *unsuffixed*
-`alive_components.tsv` / `alive_components_per_position.json` (op-agnostic) — **and** mean
+**"Alive" here means two things at once:** in the run's **reference alive list** — from
+`find_alive_subcomponents` run once with defaults, writing the *unsuffixed*
+`alive_subcomponents.tsv` / `alive_subcomponents_per_position.json` (op-agnostic) — **and** mean
 lower-leaky CI over *this op's* grid above `--mean-ci-thr` (default 0.1). The downstream
-scripts read `find_alive_components`'s output and do the per-op / last-position / mean-CI
+scripts read `find_alive_subcomponents`'s output and do the per-op / last-position / mean-CI
 filtering themselves; `collect_inner_activations` materialises the intersection once into
 `alive_filtered_<op>.tsv`, which the period / cosine / explorer scripts consume. Only the
 three L18 MLP matrices are considered (decomposed attention is dropped). Shared helpers in
@@ -259,7 +277,7 @@ three L18 MLP matrices are considered (decomposed attention is dropped). Shared 
 `read_alive_components` / `read_subcomp_periods`, `square_grid_size` (asserts full grid
 coverage), `load_component_uv` (mmap U/V).
 
-Pipeline (run `find_alive_components` with defaults once first):
+Pipeline (run `find_alive_subcomponents` with defaults once first):
 `collect_hidden_activations` + `collect_inner_activations` → `compute_subcomp_periods` →
 `plot_subcomp_cosine` / `build_neuron_connection_explorer`.
 
@@ -286,7 +304,7 @@ args:
 - the path to a decomposed model
 - `--op`: `add` (default) / `sub` / `mult`
 - `--mean-ci-thr`: mean-CI cutoff for the alive filter (default 0.1)
-- `--alive-tsv`: `find_alive_components` output (default `alive_components.tsv` in `analysis/datasets/`)
+- `--alive-tsv`: `find_alive_subcomponents` output (default `alive_subcomponents.tsv` in `analysis/datasets/`)
 - `--batch-size` (default 256), `--output`, `--output-alive`, plus `--slurm` (+ knobs)
 
 For every existing-alive MLP subcomponent and every prompt, computes the normalized inner
@@ -382,8 +400,8 @@ between causal importance (0..1, red ramp) and signed normalized inner activatio
 blue −, per-component scaled); per-prompt activity (which subcomponents/neurons appear) stays
 CI-based regardless. Hovering a neuron shows its up / gate / `silu(gate)·up` output.
 
-Reads `alive_filtered_<op>.tsv`, `subcomp_periods_<op>.tsv`, the `find_alive_components`
-per-position JSON (`alive_components_per_position.json` — unsuffixed/op-agnostic, filtered to
+Reads `alive_filtered_<op>.tsv`, `subcomp_periods_<op>.tsv`, the `find_alive_subcomponents`
+per-position JSON (`alive_subcomponents_per_position.json` — unsuffixed/op-agnostic, filtered to
 this op's symbol with an assert that ≥1 prompt matched, for CI patterns + activity),
 `inner_activations_<op>.tsv` (inner-activation heatmaps), and `hidden_activations_<op>.npz`
 (neuron up/gate grids, fp16 base64). Limitation: the UI threshold cannot surface neurons whose
@@ -811,7 +829,7 @@ args:
 - `--ci-thr`: switch to **per-prompt** sets — subcomponents with lower-leaky CI above
   this at the last position of each prompt (default off = static alive mode)
 - `--alive-tsv`: override the alive-components TSV (default the run's
-  `analysis/datasets/alive_components.tsv`; static mode only, incompatible with `--ci-thr`)
+  `analysis/datasets/alive_subcomponents.tsv`; static mode only, incompatible with `--ci-thr`)
 - `--output-dir` / `--output-fig-dir`: override the dataset dir / figure dir
 - `--slurm` + knobs: submit as a single-GPU job (see `CLAUDE.md` → "GPU scripts run via
   SLURM"); the login node has no GPU.
@@ -834,7 +852,7 @@ is defined) and leaving decomposed attention and earlier positions untouched:
   position; all components + delta on at earlier positions (exact reconstruction there).
 
 The subcomponent set is either **static** (default): the alive set from
-`alive_components.tsv`, one subspace shared by every prompt, circuit variant
+`alive_subcomponents.tsv`, one subspace shared by every prompt, circuit variant
 `alive_only`; or **per prompt** (`--ci-thr=X`): the subcomponents whose lower-leaky CI
 (continuous sampling) at the last position exceeds `X` on that prompt — the reference
 forward then also feeds the CI fn (`cache_type="input"`), each prompt gets its own

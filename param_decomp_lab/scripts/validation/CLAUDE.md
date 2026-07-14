@@ -159,7 +159,9 @@ If two scripts need the same thing, it belongs here.
 ## Composition & sample commands
 
 - Scripts form pipelines by reading each other's TSVs (e.g.
-  `find_alive_components` → `effect_of_ablation` → `summarize_*` → `find_swap_candidates`).
+  `find_alive_subcomponents` → `collect_inner_activations` → `compute_subcomp_periods` →
+  the explorer applets). `find_alive_subcomponents` produces the **reference alive list**
+  (`alive_subcomponents.tsv` + per-position CI JSON); every downstream script consumes it.
   Decouple an expensive full pass from cheap re-filtering by writing an intermediate
   summary TSV, so tweaking a threshold doesn't force another pass over the big file.
 - Keep a **`commands.md`** (or `commands.sh`) in this folder with self-contained, runnable

@@ -21,8 +21,8 @@ and all earlier positions untouched:
 
 Two ways to define the subcomponent set:
 
-- default — the static **alive** set from `alive_components.tsv`
-  (`find_alive_components` output, filtered to the MLP matrices); one subspace shared by
+- default — the static **alive** set from `alive_subcomponents.tsv`
+  (`find_alive_subcomponents` output, filtered to the MLP matrices); one subspace shared by
   every prompt; the circuit variant is `alive_only`.
 - `--ci-thr=X` — **per prompt**: the subcomponents whose lower-leaky CI (continuous
   sampling) at the last position exceeds `X` on that prompt. Each prompt gets its own
@@ -232,7 +232,7 @@ def collect_projection_kl(
         tsv = (
             Path(alive_tsv).expanduser()
             if alive_tsv
-            else analysis_datasets_dir(run.run_dir) / "alive_components.tsv"
+            else analysis_datasets_dir(run.run_dir) / "alive_subcomponents.tsv"
         )
         alive = read_alive_components(tsv, keep_projs=MLP_MATRICES)
         assert {a.layer for a in alive} == {layer}, f"alive TSV layer != decomposed layer {layer}"

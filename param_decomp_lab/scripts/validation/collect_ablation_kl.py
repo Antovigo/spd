@@ -81,8 +81,8 @@ class _AliveComponent:
 
 
 def _read_alive(run_dir: Path) -> list[_AliveComponent]:
-    tsv = analysis_datasets_dir(run_dir) / "alive_components.tsv"
-    assert tsv.exists(), f"missing {tsv}; run find_alive_components first"
+    tsv = analysis_datasets_dir(run_dir) / "alive_subcomponents.tsv"
+    assert tsv.exists(), f"missing {tsv}; run find_alive_subcomponents first"
     out: list[_AliveComponent] = []
     with tsv.open() as f:
         for row in csv.DictReader(f, delimiter="\t"):

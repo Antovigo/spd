@@ -10,7 +10,7 @@ numbers / other contexts), and surfaces the non-addition situations that drive t
 addition module.
 
 Components alive on the addition task are flagged in the summary via `--alive-tsv`
-(default `alive_components.tsv` in the run's `analysis/datasets/`).
+(default `alive_subcomponents.tsv` in the run's `analysis/datasets/`).
 
 An 8B forward pass needs a GPU; pass `--slurm` to submit as a single-GPU job.
 
@@ -114,7 +114,7 @@ def screen_components_on_data(
         Path(output).expanduser() if output else data_dir / "screen_components_on_data.jsonl"
     )
 
-    alive_path = Path(alive_tsv).expanduser() if alive_tsv else data_dir / "alive_components.tsv"
+    alive_path = Path(alive_tsv).expanduser() if alive_tsv else data_dir / "alive_subcomponents.tsv"
     alive = _load_alive(alive_path)
 
     loader = build_lm_loader(
