@@ -24,9 +24,13 @@ Two comparison SERIES, each its own figure set (`<series>_<group>.png`):
 Grouping is EXPLICIT, keyed off the verified metric-key formats this config emits:
   recon:                      eval/loss/PGDReconLoss (aggregate recon scalar; the
                               hidden-acts recon metrics and per-module keys are excluded)
-  l0:                         eval/l0/<threshold>_<group>
+  l0:                         eval/l0/<threshold>_<group> for the config's aggregate
+                              groups only — per-block (layer_N) + total; the per-matrix
+                              layer keys are excluded
   faithfulness:               coalesced 'faithfulness' key = train/loss/FaithfulnessLoss
                               (faith phases) or eval/loss/FaithfulnessLoss (nofaith probe)
+  impmin:                     train/loss/ImportanceMinimalityLoss (a training loss in
+                              every phase, logged at step 0 and the final step)
   ce/kl headline:             eval/ce_kl/{kl,ce_*}_ci_masked
 
 Writes one figure per (series, group) + a tidy summary.csv (all scalar keys, all phases).
@@ -38,6 +42,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -57,15 +62,20 @@ SERIES = {
 }
 
 FAITHFULNESS_KEY = "faithfulness"  # synthetic, injected by _inject_faithfulness
+IMPMIN_KEY = "train/loss/ImportanceMinimalityLoss"
 CE_KL_HEADLINE = [
     "eval/ce_kl/kl_ci_masked",
     "eval/ce_kl/ce_unrecovered_ci_masked",
     "eval/ce_kl/ce_difference_ci_masked",
 ]
 
-LOG_GROUPS = {"recon", "l0", "faithfulness"}
+# Aggregate L0 keys only: eval/l0/<threshold>_(layer_<n>|total), the CI_L0 `groups` from
+# the config. Per-matrix keys (eval/l0/<threshold>_h.<n>.<module>...) are excluded.
+L0_AGGREGATE_RE = re.compile(r"eval/l0/[\d.]+_(layer_\d+|total)")
+
+LOG_GROUPS = {"recon", "l0", "faithfulness", "impmin"}
 SHARED_GROUPS = {"recon", "l0"}  # every panel in these groups uses identical y-limits
-GROUP_ORDER = ["faithfulness", "recon", "l0", "ce_kl"]
+GROUP_ORDER = ["faithfulness", "impmin", "recon", "l0", "ce_kl"]
 
 
 def is_recon_aggregate(key: str) -> bool:
@@ -82,16 +92,21 @@ def is_recon_aggregate(key: str) -> bool:
 def group_keys(keys: list[str]) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {
         "faithfulness": [k for k in keys if k == FAITHFULNESS_KEY],
+        "impmin": [k for k in keys if k == IMPMIN_KEY],
         "recon": sorted(k for k in keys if is_recon_aggregate(k)),
-        "l0": sorted(k for k in keys if k.startswith("eval/l0/")),
+        "l0": sorted(k for k in keys if L0_AGGREGATE_RE.fullmatch(k)),
         "ce_kl": [k for k in CE_KL_HEADLINE if k in keys],
     }
     assert grouped["faithfulness"], f"{FAITHFULNESS_KEY} not found — was faithfulness logged?"
+    assert grouped["impmin"], f"{IMPMIN_KEY} not found — was the train loss logged?"
     assert grouped["recon"], (
         "no recon aggregate keys (eval/loss/<Class> containing 'Recon') found — the "
         "metric-key format changed; update is_recon_aggregate"
     )
-    assert grouped["l0"], "no L0 keys (eval/l0/*) found — the metric-key format changed"
+    assert grouped["l0"], (
+        "no aggregate L0 keys (eval/l0/<threshold>_(layer_<n>|total)) found — the "
+        "metric-key format or the CI_L0 group names changed; update L0_AGGREGATE_RE"
+    )
     return grouped
 
 
