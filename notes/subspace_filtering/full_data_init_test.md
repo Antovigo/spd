@@ -67,12 +67,11 @@ Fresh 8×H100 pod. Pick a **persistent volume** path (survives pod restarts) for
 and the HF cache — below assumes `/workspace`.
 
 ```bash
-# --- clone + checkout ---
+# --- clone just this branch, shallow (fast: skips other branches + history) ---
 cd /workspace
-git clone https://github.com/goodfire-ai/param-decomp.git
+git clone --branch feature/subspace_restriction --single-branch --depth 1 \
+    https://github.com/goodfire-ai/param-decomp.git
 cd param-decomp
-git checkout feature/subspace_restriction
-git pull
 
 # --- install (uv workspace, both packages, no dev deps) ---
 pip install -U uv            # if uv not already present
