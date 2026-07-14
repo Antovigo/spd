@@ -49,11 +49,11 @@ uv run python -m param_decomp_lab.scripts.validation.sample_target_data "$MODEL_
 
 ## find_alive_subcomponents
 
-The reference alive set + CI-ranked sufficiency curve. Ranks all subcomponents by mean
-lower-leaky CI at the last (`=`) position, sweeps top-k subsets (rest hard zero at `=`,
-delta fully on) and measures last-position KL / argmax agreement vs the raw target model.
-The alive subset is the top-k for the smallest swept k with mean KL <= `--kl-thr`
-(default 0.008). Every downstream script reads this output.
+The reference alive set + CI-ranked sufficiency curve. Ranks all subcomponents by
+max-over-positions mean lower-leaky CI, sweeps top-k subsets (rest hard zero at every
+position, delta fully on) and measures last-position KL / argmax agreement vs the raw
+target model. The alive subset is the top-k for the smallest swept k with mean KL <=
+`--kl-thr` (default 0.008). Every downstream script reads this output.
 
 Outputs (in the run's `analysis/` layout):
 - `datasets/alive_subcomponents.tsv` — the reference alive list

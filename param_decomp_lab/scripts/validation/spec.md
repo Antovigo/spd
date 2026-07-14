@@ -93,21 +93,23 @@ args:
 - `--slurm` (+ `--partition` / `--gpus` / `--slurm-time` / `--slurm-mem`): submit as a
   single-GPU SLURM job (see `CLAUDE.md` → "GPU scripts run via SLURM")
 
-Produces the run's **reference alive list**. Ranks every subcomponent by mean lower-leaky
-CI at the last (`=`) position over the target prompts (read in file order from
-`cfg.data.prompts_file`; requires prompts-based target data), then sweeps top-k prefixes of
-that ranking: for each k the top-k subcomponents are enabled and all others zeroed **at the
-last position only** (everything on at earlier positions, weight-delta fully on
+Produces the run's **reference alive list**. Ranks every subcomponent by its
+max-over-positions mean lower-leaky CI (per position, mean over the target prompts — read
+in file order from `cfg.data.prompts_file`; requires prompts-based target data — then max
+over positions, so a subcomponent that only fires early ranks by its early-position
+strength), then sweeps top-k prefixes of that ranking: for each k the top-k subcomponents
+are enabled and all others zeroed **at every position** (weight-delta fully on
 everywhere), and the masked model's last-position output is compared to the raw target
-model's (KL + argmax agreement). The alive subcomponents are the top-k for the smallest
-swept k whose mean KL is ≤ `--kl-thr`. Every downstream script consumes this output.
+model's (KL + argmax agreement) — the KL is read at `=` because that is where the answer
+is read, but masking acts everywhere, so a component matters iff masking it anywhere
+moves the `=` output. The alive subcomponents are the top-k for the smallest swept k
+whose mean KL is ≤ `--kl-thr`. Every downstream script consumes this output.
 
 Implementation:
 - Phase 1 (ranking + JSON): per `--batch-size` chunk, one `cache_type="input"` forward
   feeds `calc_causal_importances` (`sampling="continuous"`, deterministic); accumulates
-  per-subcomponent mean CI (all positions and last position) and the sparse
-  per-(prompt, position) record of subcomponents with CI > `--ci-thr`. Runs under
-  `torch.no_grad()` + `bf16_autocast`.
+  per-(position, subcomponent) mean CI and the sparse per-(prompt, position) record of
+  subcomponents with CI > `--ci-thr`. Runs under `torch.no_grad()` + `bf16_autocast`.
 - Phase 2 (sweep): outer loop over chunks (one target-reference forward each), inner loop
   over ks ascending, growing the enabled set incrementally. Asserts the all-on + delta
   masked model reproduces the raw target (mask-wiring check).
@@ -117,11 +119,12 @@ subset (top-k_alive rows of the ranking), one row per subcomponent:
 - `layer` — block number from the module path (e.g. 18)
 - `matrix` — the rest of the module path (e.g. `mlp.gate_proj`)
 - `component` — the subcomponent index
-- `rank` — position in the last-position mean-CI ranking (0 = highest)
-- `mean_ci` / `mean_ci_last` — mean lower-leaky CI over all positions / the last position
+- `rank` — position in the max-over-positions mean-CI ranking (0 = highest)
+- `mean_ci` / `mean_ci_last` / `max_mean_ci` — mean lower-leaky CI over all positions /
+  at the last position / at the subcomponent's strongest position (the rank key)
 
 Output 2 — TSV (default `alive_subcomponents_curve.tsv`), one row per swept k:
-`k, mean_ci_at_k, mean_kl, q5_kl, q95_kl, max_kl, argmax_agree`.
+`k, max_mean_ci_at_k, mean_kl, q5_kl, q95_kl, max_kl, argmax_agree`.
 
 Output 3 — npz (default `alive_subcomponents_kl.npz`): per-(k, prompt) KL + argmax
 agreement plus the full CI ranking, for per-prompt analysis / re-thresholding without a
