@@ -61,10 +61,25 @@ git push
 
 ---
 
-## Step 2 — on the runpod pod: setup
+## Step 2a — provision the RunPod pod
 
-Fresh 8×H100 pod. Pick a **persistent volume** path (survives pod restarts) for outputs
-and the HF cache — below assumes `/workspace`.
+| Choice | What to pick | Why |
+|---|---|---|
+| **GPU** | **8 × H100 80GB SXM** | Matches `--nproc_per_node=8`. SXM (NVLink) gives faster DDP all-reduce than PCIe. Fewer GPUs also work if they divide the global batch of 64 (1/2/4/8) — just edit `--nproc_per_node`. |
+| **Template / image** | Any maintained **CUDA 12.x** image with `git` (e.g. a RunPod PyTorch template) | uv installs Python 3.13 + the pinned torch itself, so the image's Python/torch versions don't matter — it only needs a recent H100 driver (CUDA 12.x) and git. |
+| **Deploy type** | **On-Demand** | The run is short (200 steps × 6), but a Spot preemption mid-run would waste the setup. On-Demand avoids that. |
+
+**Storage** — the run writes everything (venv, HF cache, target model, checkpoints) under
+`/workspace`, so that must be the persistent volume:
+
+| Disk | Size | Notes |
+|---|---|---|
+| **Volume disk** (persistent, mount `/workspace`) | **~250 GB** | Survives stop/restart. Holds the `.venv` (~10 GB), HF cache + target model (~15 GB), and the **12 checkpoints** — each `Trainer` snapshot bundles optimizer state, so these dominate (several–15 GB each). If disk-constrained: the analysis only needs `metrics.jsonl` (Step 4 pulls just those), so you can shrink the volume and delete `model_*.pth` as you go — tell me if you'd rather the driver skip checkpointing entirely. |
+| **Container disk** (ephemeral) | **~40 GB** | Just the base image / OS. Keep the uv cache off it (`UV_CACHE_DIR` below) so large torch wheels don't fill it. |
+
+## Step 2b — on the pod: setup
+
+Below assumes the persistent volume is mounted at `/workspace`.
 
 ```bash
 # --- clone just this branch, shallow (fast: skips other branches + history) ---
@@ -74,8 +89,9 @@ git clone --branch feature/subspace_restriction --single-branch --depth 1 \
 cd param-decomp
 
 # --- install (uv workspace, both packages, no dev deps) ---
+export UV_CACHE_DIR=/workspace/uv_cache   # keep torch wheels off the ephemeral container disk
 pip install -U uv            # if uv not already present
-make install-lab             # == uv sync --all-packages --no-dev
+make install-lab             # == uv sync --all-packages --no-dev (uv fetches Python 3.13)
 source .venv/bin/activate
 
 # --- credentials ---
