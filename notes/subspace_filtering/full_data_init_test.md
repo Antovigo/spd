@@ -42,7 +42,9 @@ the other phases into one `faithfulness` panel.
 the train/eval data pipeline **once**, then loops all 18 passes (6 conditions × {raw,
 train, nofaith}) in a single process. No reloading between conditions. Passes whose final
 step is already in `metrics.jsonl` are **skipped**, so re-launching after a partial or
-earlier run only does what's missing.
+earlier run only does what's missing. **Re-export the Step 3 env vars (especially
+`PARAM_DECOMP_OUT_DIR`) in the shell you re-launch from** — a fresh terminal loses them,
+and the driver would then read/write a different `./out` dir and re-run everything.
 
 Runs on `feature/subspace_restriction` because coupled init lives only there
 (`PDConfig.weight_init`, `init_coupled_`) and that branch also carries the

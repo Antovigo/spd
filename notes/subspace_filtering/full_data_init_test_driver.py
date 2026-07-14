@@ -118,9 +118,13 @@ def run_condition(
     warmup_steps, steps = PHASE_SPEC[phase]
     run_id = f"cinit-{scheme}-s{seed}-{phase}"
 
-    if _final_step_logged(run_id, steps):
+    # Resume-skip marker = the last step that actually gets logged (eval + train-log fire
+    # every EVAL_EVERY and at step 0). The raw pass (steps=1) logs nothing after step 0, so
+    # its marker is 0, not 1 — checking `steps` would never match and always re-run it.
+    done_step = (steps // EVAL_EVERY) * EVAL_EVERY
+    if _final_step_logged(run_id, done_step):
         if is_main_process():
-            logger.info(f"=== skip {run_id}: step {steps} already logged ===")
+            logger.info(f"=== skip {run_id}: step {done_step} already logged ===")
         return
 
     loss_metrics = list(base_cfg.pd.loss_metrics)
