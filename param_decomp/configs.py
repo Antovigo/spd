@@ -104,32 +104,6 @@ class RuntimeConfig(BaseConfig):
         return self
 
 
-class LegalityPressureConfig(BaseConfig):
-    """Soft pressure toward legal components: read/write vectors in row(W)/col(W).
-
-    Keeps the dense parameterization — components may hold out-of-space ("illegal")
-    mass whenever the losses defend it, so superposed per-feature mechanisms stay
-    expressible.
-    """
-
-    rank_threshold: NonNegativeFloat = Field(
-        ...,
-        description="Numerical-rank cutoff defining the target spaces: keep singular "
-        "directions with sigma > threshold * sigma_max (e.g. 1e-5).",
-    )
-    project_init: bool = Field(
-        ...,
-        description="Project the fresh dense V/U init into row(W)/col(W) once at trainer "
-        "construction (V <- Q_in Q_in^T V, U <- U Q_out Q_out^T).",
-    )
-    decay_coeff: NonNegativeFloat = Field(
-        ...,
-        description="Decoupled per-step decay of the out-of-space V/U mass: "
-        "illegal part shrinks by lr * decay_coeff each step (legal part untouched). "
-        "0 disables the decay (init projection only).",
-    )
-
-
 class PDConfig(BaseConfig):
     """Algorithm specification: seed, CI function, losses, optimizers, target modules.
 
@@ -229,12 +203,6 @@ class PDConfig(BaseConfig):
         "`ci_scaled_component_weight_decay`. 0 starts at step 0; 0.8 starts the decay only in "
         "the final 20% of training. No effect when the decay coeff is 0.",
     )
-    legality_pressure: LegalityPressureConfig | None = Field(
-        default=None,
-        description="Soft pressure toward read/write vectors inside row(W)/col(W): "
-        "optional init projection plus per-step decay of the out-of-space mass.",
-    )
-
     # --- Faithfulness Warmup ---
     faithfulness_warmup_steps: NonNegativeInt = Field(
         default=0,

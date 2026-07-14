@@ -31,7 +31,6 @@ from param_decomp.batch_and_loss_fns import (
     move_batch_to_device,
 )
 from param_decomp.component_model import ComponentModel, OutputWithCache, component_grad_norms
-from param_decomp.components import Components, LinearComponents
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
@@ -240,59 +239,6 @@ def _apply_ci_scaled_weight_decay(
             component.U.mul_(keep[:, None])
 
 
-def compute_legality_bases(
-    target_weights: dict[str, Tensor],
-    rank_threshold: float,
-) -> dict[str, tuple[Tensor, Tensor]]:
-    """Orthonormal `(Q_in [d_in, r], Q_out [d_out, r])` bases of each target's row/col space.
-
-    `r` keeps singular directions with `sigma > rank_threshold * sigma_max`.
-    """
-    bases: dict[str, tuple[Tensor, Tensor]] = {}
-    for name, w in target_weights.items():
-        q_out, s, vh = torch.linalg.svd(w.detach().float(), full_matrices=False)
-        r = int((s > rank_threshold * s[0]).sum().item())
-        assert r >= 1, f"rank_threshold {rank_threshold} keeps no singular directions for {name}"
-        bases[name] = (vh[:r].T.contiguous(), q_out[:, :r].contiguous())
-    return bases
-
-
-def project_components_to_target_spaces_(
-    components: dict[str, Components],
-    bases: dict[str, tuple[Tensor, Tensor]],
-) -> None:
-    """In place: `V <- Q_in Q_in^T V`, `U <- U Q_out Q_out^T`."""
-    with torch.no_grad():
-        for name, (q_in, q_out) in bases.items():
-            comp = components[name]
-            assert isinstance(comp, LinearComponents)
-            comp.V.copy_(q_in @ (q_in.T @ comp.V))
-            comp.U.copy_((comp.U @ q_out) @ q_out.T)
-
-
-def apply_illegal_mass_decay_(
-    components: dict[str, Components],
-    bases: dict[str, tuple[Tensor, Tensor]],
-    *,
-    coeff: float,
-    lr: float,
-) -> None:
-    """Shrink the V/U mass outside row(W)/col(W) by `lr * coeff`, in place.
-
-    The legal (in-space) part is untouched, so this is a decoupled decay on the
-    illegal part only — components keep illegal mass exactly where the losses
-    defend it.
-    """
-    shrink = lr * coeff
-    with torch.no_grad():
-        for name, (q_in, q_out) in bases.items():
-            comp = components[name]
-            assert isinstance(comp, LinearComponents)
-            v, u = comp.V, comp.U
-            v.sub_(shrink * (v - q_in @ (q_in.T @ v)))
-            u.sub_(shrink * (u - (u @ q_out) @ q_out.T))
-
-
 def tie_component_weights(
     component_model: ComponentModel, tied_weights: list[tuple[str, str]]
 ) -> None:
@@ -475,22 +421,6 @@ class Trainer:
         )
 
         self.loss_metrics, _ = instantiate_metrics(pd_config, component_model, device)
-
-        self._legality_bases: dict[str, tuple[Tensor, Tensor]] | None = None
-        if pd_config.legality_pressure is not None:
-            target_weights = {
-                name: component_model.target_weight(name)
-                for name in component_model.target_module_paths
-            }
-            bases = compute_legality_bases(
-                target_weights, pd_config.legality_pressure.rank_threshold
-            )
-            if pd_config.legality_pressure.project_init:
-                project_components_to_target_spaces_(component_model.components, bases)
-            # The bases (~1 GB for an 8B MLP block) are only needed again for the
-            # per-step decay.
-            if pd_config.legality_pressure.decay_coeff > 0.0:
-                self._legality_bases = bases
 
     # ============================ Named-param accessors for optimizer state ============================
 
@@ -931,15 +861,6 @@ class Trainer:
                         self.component_model,
                         batch_ci_max,
                         coeff=pd_config.ci_scaled_component_weight_decay,
-                        lr=components_lr,
-                    )
-
-                if self._legality_bases is not None:
-                    assert pd_config.legality_pressure is not None
-                    apply_illegal_mass_decay_(
-                        self.component_model.components,
-                        self._legality_bases,
-                        coeff=pd_config.legality_pressure.decay_coeff,
                         lr=components_lr,
                     )
 

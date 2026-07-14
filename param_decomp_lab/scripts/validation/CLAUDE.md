@@ -147,15 +147,6 @@ If two scripts need the same thing, it belongs here.
 
 - **`probes/`** — Feucht-faithful Fourier probing of the residual sites around L18's MLP
   (own CLAUDE.md).
-- **`subspace_filtering/`** — projection battery testing whether the selected
-  subcomponents' input/output subspaces match the original matrices' causally-used
-  subspaces (raw / mean-centered / bias-only projections at `=`, per block). `plan.md`
-  is the spec, `collect_filtered_kl.py` the GPU collector, `plots_notebook.py` the
-  marimo plots (excluded from basedpyright like `model_accuracy_notebook.py`).
-  `collect_filtered_mse_tms.py` runs the same battery on a TMS toy decomposition
-  (CPU-only, per-sample MSE-vs-target readout, handles `linear2`'s frozen bias and
-  optional square `hidden_layers.*` targets — span tests only; matrix-space tests
-  are skipped on square matrices).
 - **`neurons/`** — the L18 neuron/subcomponent census over the 0..200 `a<op>b=` grids:
   activations + answer baselines, measured last-position ablation KL (hand-rolled
   layers-19..31 KV-cache patched tail; per-neuron and per-rank-1-subcomponent),
