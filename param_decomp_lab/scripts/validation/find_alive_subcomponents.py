@@ -1,13 +1,14 @@
 """Find a minimal subset of subcomponents sufficient to reconstruct the target output.
 
-Ranks every subcomponent by mean lower-leaky CI **at the last (`=`) position** over the
-target prompts, then sweeps top-k prefixes of that ranking: for each k, the top-k
-subcomponents are enabled and all others are zeroed **at the last position only** (every
-component stays on at earlier positions; the weight-delta component fully on everywhere —
-matching `TargetReconLoss`), and the masked model's last-position output is compared to the
-raw target model's (KL + argmax agreement). Everything is last-position because that is
-where the answer is read: a component matters here iff masking it *there* moves the output.
-k=0 is the delta-only-at-`=` floor; k=C_total must reproduce the target exactly. The
+Ranks every subcomponent by its **max-over-positions mean lower-leaky CI** (per position,
+mean over the target prompts; then max over positions — so a subcomponent that only fires
+early ranks by its early-position strength), then sweeps top-k prefixes of that ranking:
+for each k, the top-k subcomponents are enabled and all others are zeroed **at every
+position** (the weight-delta component fully on everywhere), and the masked model's
+last-position output is compared to the raw target model's (KL + argmax agreement). The
+KL is read at the last position because that is where the answer is read — but masking
+acts everywhere, so a component matters iff masking it *anywhere* on the prompt moves the
+`=` output. k=0 is the delta-only floor; k=C_total must reproduce the target exactly. The
 **alive subcomponents** are the top-k for the smallest swept k whose mean KL is ≤
 `--kl-thr` — pass a dense `--ks` grid around the knee to tighten the selection.
 
@@ -28,9 +29,9 @@ Usage:
 
 Outputs (defaults in the run's `analysis/` layout):
 - `datasets/alive_subcomponents.tsv` — the alive subset (the top-k_alive rows of the CI
-  ranking): layer, matrix, component, rank, mean_ci, mean_ci_last. The reference alive
-  list consumed by every downstream script.
-- `datasets/alive_subcomponents_curve.tsv` — per swept k: k, mean_ci_at_k, mean_kl,
+  ranking): layer, matrix, component, rank, mean_ci, mean_ci_last, max_mean_ci. The
+  reference alive list consumed by every downstream script.
+- `datasets/alive_subcomponents_curve.tsv` — per swept k: k, max_mean_ci_at_k, mean_kl,
   q5_kl, q95_kl, max_kl, argmax_agree.
 - `datasets/alive_subcomponents_kl.npz` — per-(k, prompt) KL + argmax agreement, plus
   the full CI ranking, for per-prompt analysis / re-thresholding without a GPU.
@@ -71,8 +72,8 @@ from param_decomp_lab.scripts.validation.common import (  # noqa: E402
 )
 
 _MODULE = "param_decomp_lab.scripts.validation.find_alive_subcomponents"
-_RANK_FIELDS = ["layer", "matrix", "component", "rank", "mean_ci", "mean_ci_last"]
-_CURVE_FIELDS = ["k", "mean_ci_at_k", "mean_kl", "q5_kl", "q95_kl", "max_kl", "argmax_agree"]
+_RANK_FIELDS = ["layer", "matrix", "component", "rank", "mean_ci", "mean_ci_last", "max_mean_ci"]
+_CURVE_FIELDS = ["k", "max_mean_ci_at_k", "mean_kl", "q5_kl", "q95_kl", "max_kl", "argmax_agree"]
 
 
 def _k_grid(ks: Any, n_points: int, n_total: int) -> list[int]:
@@ -108,15 +109,13 @@ def _plot_curve(
     ax.plot(kx, np.maximum(max_kl[pos], floor), ":", color="tab:blue", lw=1, label="max")
     ax.plot(kx, np.maximum(mean_kl[pos], floor), "o-", color="tab:blue", label="mean")
     if 0 in k_list:
-        ax.axhline(
-            mean_kl[k_list.index(0)], ls="--", color="grey", label="delta-only at last pos (k=0)"
-        )
+        ax.axhline(mean_kl[k_list.index(0)], ls="--", color="grey", label="delta-only (k=0)")
     ax.axvline(k_alive, ls="--", color="tab:green", lw=1, label=f"alive: k={k_alive} @ KL≤{kl_thr}")
     ax.legend(loc="center left", fontsize=8)
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("k (top-k subcomponents by last-position mean CI)")
-    ax.set_ylabel("KL(target ‖ top-k @ last pos)", color="tab:blue")
+    ax.set_xlabel("k (top-k subcomponents by max-over-positions mean CI)")
+    ax.set_ylabel("last-pos KL(target ‖ top-k)", color="tab:blue")
     ax2 = ax.twinx()
     ax2.plot(kx, agree[pos], "s-", color="tab:orange", alpha=0.7)
     ax2.set_ylabel("argmax agreement", color="tab:orange")
@@ -201,11 +200,10 @@ def find_alive_subcomponents(
     weight_deltas = model.calc_weight_deltas()
     dtype = next(model.parameters()).dtype
 
-    # Phase 1: mean lower-leaky CI per subcomponent (all positions, and last position), plus
-    # the sparse per-(prompt, position) record of components with CI > ci_thr (filtered to
-    # the alive set before writing the JSON).
-    ci_sum = {m: torch.zeros(n_comp[m], device=device) for m in modules}
-    ci_last_sum = {m: torch.zeros(n_comp[m], device=device) for m in modules}
+    # Phase 1: per-(position, subcomponent) mean lower-leaky CI, plus the sparse
+    # per-(prompt, position) record of components with CI > ci_thr (filtered to the alive
+    # set before writing the JSON).
+    ci_pos_sum = {m: torch.zeros(seq, n_comp[m], device=device) for m in modules}
     # prompt -> position -> module -> [{component, ci}]
     per_position: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
     with torch.no_grad(), bf16_autocast(enabled=cfg.runtime.autocast_bf16):
@@ -214,9 +212,7 @@ def find_alive_subcomponents(
             cached = model(chunk, cache_type="input")
             ci = model.calc_causal_importances(cached.cache, sampling="continuous")
             for m in modules:
-                ll = ci.lower_leaky[m].float()  # [b, seq, C]
-                ci_sum[m] += ll.sum(dim=(0, 1))
-                ci_last_sum[m] += ll[:, -1].sum(dim=0)
+                ci_pos_sum[m] += ci.lower_leaky[m].float().sum(dim=0)  # [seq, C]
 
             # Move CI to CPU/numpy once per chunk to avoid per-element syncs.
             ci_np = {m: ci.lower_leaky[m].float().cpu().numpy() for m in modules}
@@ -239,12 +235,17 @@ def find_alive_subcomponents(
                     pos_entry[str(pos)] = per_module
                 per_position[prompt_texts[start + i]] = pos_entry
 
-    ranking: list[tuple[str, int, float, float]] = []  # (module, component, mean_ci, mean_ci_last)
+    # (module, component, mean_ci, mean_ci_last, max_mean_ci)
+    ranking: list[tuple[str, int, float, float, float]] = []
     for m in modules:
-        mean_ci = (ci_sum[m] / (n_prompts * seq)).tolist()
-        mean_ci_last = (ci_last_sum[m] / n_prompts).tolist()
-        ranking.extend((m, c, mean_ci[c], mean_ci_last[c]) for c in range(n_comp[m]))
-    ranking.sort(key=lambda r: r[3], reverse=True)  # by last-position CI — where the answer is read
+        pos_mean = ci_pos_sum[m] / n_prompts  # [seq, C]
+        mean_ci = pos_mean.mean(dim=0).tolist()
+        mean_ci_last = pos_mean[-1].tolist()
+        max_mean_ci = pos_mean.amax(dim=0).tolist()
+        ranking.extend(
+            (m, c, mean_ci[c], mean_ci_last[c], max_mean_ci[c]) for c in range(n_comp[m])
+        )
+    ranking.sort(key=lambda r: r[4], reverse=True)  # by the position where each fires hardest
 
     k_list = _k_grid(ks, n_points, n_total)
 
@@ -264,16 +265,12 @@ def find_alive_subcomponents(
             enabled = {m: torch.zeros(n_comp[m], device=device, dtype=dtype) for m in modules}
             prev_k = 0
             for ki, k in enumerate(k_list):
-                for module, component, _, _ in ranking[prev_k:k]:
+                for module, component, *_ in ranking[prev_k:k]:
                     enabled[module][component] = 1.0
                 prev_k = k
-                # ablate outside the top-k at the last position only: everything stays on
-                # at earlier positions, so the test isolates what the `=` read needs
-                masks = {}
-                for m in modules:
-                    full = torch.ones(b, seq, n_comp[m], device=device, dtype=dtype)
-                    full[:, -1] = enabled[m]
-                    masks[m] = full
+                # ablate outside the top-k at every position (the delta stays fully on),
+                # so a component important anywhere on the prompt registers at the `=` read
+                masks = {m: enabled[m].expand(b, seq, n_comp[m]) for m in modules}
                 infos = make_mask_infos(
                     masks,
                     weight_deltas_and_masks={m: (weight_deltas[m], delta_mask) for m in modules},
@@ -325,7 +322,9 @@ def find_alive_subcomponents(
     with alive_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_RANK_FIELDS, delimiter="\t")
         writer.writeheader()
-        for rank, (module, component, mean_ci, mean_ci_last) in enumerate(ranking[:k_alive]):
+        for rank, (module, component, mean_ci, mean_ci_last, max_mean_ci) in enumerate(
+            ranking[:k_alive]
+        ):
             layer, matrix = parse_module_name(module)
             writer.writerow(
                 {
@@ -335,6 +334,7 @@ def find_alive_subcomponents(
                     "rank": rank,
                     "mean_ci": mean_ci,
                     "mean_ci_last": mean_ci_last,
+                    "max_mean_ci": max_mean_ci,
                 }
             )
 
@@ -345,7 +345,7 @@ def find_alive_subcomponents(
             writer.writerow(
                 {
                     "k": k,
-                    "mean_ci_at_k": ranking[k - 1][3] if k > 0 else "",
+                    "max_mean_ci_at_k": ranking[k - 1][4] if k > 0 else "",
                     "mean_kl": float(mean_kl[ki]),
                     "q5_kl": float(np.percentile(kl[ki], 5)),
                     "q95_kl": float(np.percentile(kl[ki], 95)),
@@ -364,12 +364,13 @@ def find_alive_subcomponents(
         rank_component=np.array([r[1] for r in ranking]),
         rank_mean_ci=np.array([r[2] for r in ranking]),
         rank_mean_ci_last=np.array([r[3] for r in ranking]),
+        rank_max_mean_ci=np.array([r[4] for r in ranking]),
         k_alive=np.array(k_alive),
         kl_thr=np.array(kl_thr),
     )
     _plot_curve(k_list, kl, agree_mean, k_alive, kl_thr, fig_path)
 
-    alive_set = {(module, component) for module, component, _, _ in ranking[:k_alive]}
+    alive_set = {(module, component) for module, component, *_ in ranking[:k_alive]}
     for pos_entry in per_position.values():
         for pos, per_module in pos_entry.items():
             pos_entry[pos] = {
