@@ -69,12 +69,13 @@ git push
 | **Template / image** | Any maintained **CUDA 12.x** image with `git` (e.g. a RunPod PyTorch template) | uv installs Python 3.13 + the pinned torch itself, so the image's Python/torch versions don't matter — it only needs a recent H100 driver (CUDA 12.x) and git. |
 | **Deploy type** | **On-Demand** | The run is short (200 steps × 6), but a Spot preemption mid-run would waste the setup. On-Demand avoids that. |
 
-**Storage** — the run writes everything (venv, HF cache, target model, checkpoints) under
-`/workspace`, so that must be the persistent volume:
+**Storage** — the run writes the venv, HF cache, target model, and `metrics.jsonl` under
+`/workspace`, so that must be the persistent volume. The driver **skips checkpointing**
+(`_skip_checkpoint`), so there are no multi-GB `model_/training_.pth` files — disk stays small:
 
 | Disk | Size | Notes |
 |---|---|---|
-| **Volume disk** (persistent, mount `/workspace`) | **~250 GB** | Survives stop/restart. Holds the `.venv` (~10 GB), HF cache + target model (~15 GB), and the **12 checkpoints** — each `Trainer` snapshot bundles optimizer state, so these dominate (several–15 GB each). If disk-constrained: the analysis only needs `metrics.jsonl` (Step 4 pulls just those), so you can shrink the volume and delete `model_*.pth` as you go — tell me if you'd rather the driver skip checkpointing entirely. |
+| **Volume disk** (persistent, mount `/workspace`) | **~50 GB** | Survives stop/restart. Holds the `.venv` + uv cache (~20 GB), HF cache + target model (~15 GB), and the tiny `metrics.jsonl` logs. No checkpoints are written. |
 | **Container disk** (ephemeral) | **~40 GB** | Just the base image / OS. Keep the uv cache off it (`UV_CACHE_DIR` below) so large torch wheels don't fill it. |
 
 ## Step 2b — on the pod: setup
@@ -130,9 +131,9 @@ land in `$PARAM_DECOMP_OUT_DIR/runs/cinit-*/metrics.jsonl`.
 
 ## Step 4 — retrieve the data to your laptop (before shutting the pod down)
 
-The `metrics.jsonl` + `experiment_config.yaml` files are tiny; checkpoints
-(`model_*.pth`) are large and not needed for plots. Pull just the metrics from the pod.
-Fill in your pod's SSH host/port (runpod shows these under "Connect"):
+The driver writes no checkpoints, so each run dir holds just the tiny `metrics.jsonl` +
+`experiment_config.yaml`. Pull them from the pod. Fill in your pod's SSH host/port
+(runpod shows these under "Connect"):
 
 ```bash
 # on your LAPTOP, from wherever you want the data:
@@ -146,9 +147,7 @@ rsync -avz -e "ssh -p <POD_PORT>" \
     ./full_data_init_test_runs/
 ```
 
-To also grab the checkpoints (large — only if you want offline recompute), rerun without
-the `--include/--exclude` filters, or add `--include='model_*.pth'` before the
-`--exclude='*'` line. Confirm you pulled all 12:
+Confirm you pulled all 12:
 
 ```bash
 ls -d ./full_data_init_test_runs/cinit-*   # expect 12 dirs

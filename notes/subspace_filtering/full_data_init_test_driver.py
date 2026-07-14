@@ -72,6 +72,11 @@ def build_eval_loop(cfg: LMExperimentConfig, eval_loader) -> EvalLoop:
     )
 
 
+def _skip_checkpoint(_snapshot: object) -> None:
+    """No-op: this experiment needs only metrics.jsonl, not the multi-GB, optimizer-bearing
+    model_/training_.pth snapshots Trainer writes unconditionally at the final step."""
+
+
 def run_condition(
     *,
     base_cfg: LMExperimentConfig,
@@ -102,6 +107,9 @@ def run_condition(
     run_id = f"cinit-{scheme}-s{seed}-{phase}"
     # wandb disabled (cfg.wandb=None) -> RunSink.local, metrics go to metrics.jsonl only.
     sink = init_pd_run(cfg, group=None, tags=None, run_id=run_id)
+    # Trainer checkpoints unconditionally at the final step; skip the (multi-GB) write so
+    # the pod only needs disk for metrics.jsonl. RunSink is frozen -> object.__setattr__.
+    object.__setattr__(sink, "checkpoint", _skip_checkpoint)
 
     if is_main_process():
         logger.info(f"=== condition {run_id}: warmup={warmup_steps} steps={steps} ===")
