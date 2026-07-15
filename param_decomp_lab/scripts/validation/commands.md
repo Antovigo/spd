@@ -51,10 +51,10 @@ uv run python -m param_decomp_lab.scripts.validation.sample_target_data "$MODEL_
 
 The reference alive set + CI-ranked sufficiency curve. Ranks all subcomponents by
 max-over-positions mean lower-leaky CI, sweeps top-k subsets (rest hard zero at every
-position, delta fully on) and measures last-position KL / argmax agreement vs the raw
-target model. The alive subset is the top-k for the smallest swept k with mean KL <=
+position, delta off — TargetReconLoss target-data semantics) and measures last-position
+KL / argmax agreement vs the raw target model. The alive subset is the top-k for the smallest swept k with mean KL <=
 `--kl-thr`, which defaults to the run's own rounded-circuit KL (per-position CI >
-`--rounding-thr` masks, delta on, last-position KL on the same prompts) so the cut
+`--rounding-thr` masks, delta off, last-position KL on the same prompts) so the cut
 adapts to each decomposition's achieved reconstruction quality. Every downstream script
 reads this output.
 

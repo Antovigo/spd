@@ -4,18 +4,21 @@ Ranks every subcomponent by its **max-over-positions mean lower-leaky CI** (per 
 mean over the target prompts; then max over positions — so a subcomponent that only fires
 early ranks by its early-position strength), then sweeps top-k prefixes of that ranking:
 for each k, the top-k subcomponents are enabled and all others are zeroed **at every
-position** (the weight-delta component fully on everywhere), and the masked model's
-last-position output is compared to the raw target model's (KL + argmax agreement). The
-KL is read at the last position because that is where the answer is read — but masking
-acts everywhere, so a component matters iff masking it *anywhere* on the prompt moves the
-`=` output. k=0 is the delta-only floor; k=C_total must reproduce the target exactly. The
-**alive subcomponents** are the top-k for the smallest swept k whose mean KL is ≤ the
-threshold — pass a dense `--ks` grid around the knee to tighten the selection.
+position** (the weight-delta component pinned **off** everywhere, matching
+`TargetReconLoss` on target data: the components must do the work), and the masked
+model's last-position output is compared to the raw target model's (KL + argmax
+agreement). The KL is read at the last position because that is where the answer is read
+— but masking acts everywhere, so a component matters iff masking it *anywhere* on the
+prompt moves the `=` output. k=0 is the all-components-off floor; k=C_total is the full
+component-sum reconstruction (a faithfulness check — it approximates, not equals, the
+target). The **alive subcomponents** are the top-k for the smallest swept k whose mean
+KL is ≤ the threshold — pass a dense `--ks` grid around the knee to tighten the
+selection.
 
 The default threshold (`--kl-thr=rounded`) anchors to the run's own achieved quality:
 the sweep also evaluates the **rounded circuit** — per-(prompt, position) masks with CI >
-`--rounding-thr` (0.01, matching `TargetReconLoss`), delta on — at the last position on
-the same prompts, and cuts at its mean KL. The alive set is then the smallest static
+`--rounding-thr` (0.01), delta off, matching `TargetReconLoss`'s `rounded` strategy — at
+the last position on the same prompts, and cuts at its mean KL. The alive set is then the smallest static
 top-k that reconstructs as well as the decomposition's own rounded circuit does, and the
 anchor adapts across decompositions instead of hard-coding an absolute. Computing the
 anchor in-sweep (not reading `eval/target_recon/rounded` from the training logs) keeps it
@@ -123,7 +126,9 @@ def _plot_curve(
     ax.plot(kx, np.maximum(max_kl[pos], floor), ":", color="tab:blue", lw=1, label="max")
     ax.plot(kx, np.maximum(mean_kl[pos], floor), "o-", color="tab:blue", label="mean")
     if 0 in k_list:
-        ax.axhline(mean_kl[k_list.index(0)], ls="--", color="grey", label="delta-only (k=0)")
+        ax.axhline(
+            mean_kl[k_list.index(0)], ls="--", color="grey", label="all components off (k=0)"
+        )
     ax.axhline(rounded_mean, ls=":", color="tab:red", lw=1, label="rounded circuit (anchor)")
     ax.axvline(
         k_alive, ls="--", color="tab:green", lw=1, label=f"alive: k={k_alive} @ KL≤{kl_thr:.4g}"
@@ -290,9 +295,12 @@ def find_alive_subcomponents(
             P = logP.exp()
             ref_token = logP.argmax(dim=-1)
 
-            delta_mask = torch.ones(b, seq, device=device, dtype=dtype)
+            # Delta pinned off everywhere: on target data the components must do the
+            # work (TargetReconLoss semantics). A ones mask here silently makes every
+            # subset look sufficient — the delta absorbs what masked components drop.
+            delta_mask = torch.zeros(b, seq, device=device, dtype=dtype)
 
-            # The rounded circuit — per-(prompt, position) masks, delta on — read at the
+            # The rounded circuit — per-(prompt, position) masks, delta off — read at the
             # last position like the sweep, so its mean KL is a commensurable kl_thr anchor.
             rounded_masks = {
                 m: torch.from_numpy(rounded_np[m][start : start + b]).to(device=device, dtype=dtype)
@@ -323,11 +331,15 @@ def find_alive_subcomponents(
                 agree[ki, start : start + b] = (logQ.argmax(dim=-1) == ref_token).cpu().numpy()
 
             if start == 0 and k_list[-1] == n_total:
-                # All-on + delta must reproduce the raw target model; otherwise the
-                # mask/delta wiring is wrong and the whole curve is meaningless.
+                # All components on, delta off = the full component-sum reconstruction.
+                # A faithful decomposition keeps this small; a blow-up means the curve
+                # is meaningless (mask wiring bug or an unfaithful decomposition).
                 full_kl = float(kl[-1, :b].mean())
-                assert full_kl < 0.5, f"all-on+delta != target (KL {full_kl}); mask wiring bug"
-                logger.info(f"reconstruction check: mean KL(target||all_on)={full_kl:.4g}")
+                assert full_kl < 0.5, (
+                    f"component-sum (all-on, delta off) far from target (KL {full_kl}); "
+                    "mask wiring bug or unfaithful decomposition"
+                )
+                logger.info(f"faithfulness check: mean KL(target||all_on_no_delta)={full_kl:.4g}")
 
     mean_kl = kl.mean(axis=1)
     agree_mean = agree.mean(axis=1)
