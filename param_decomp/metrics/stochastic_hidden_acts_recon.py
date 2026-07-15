@@ -3,6 +3,7 @@ from typing import Literal, override
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Int
+from pydantic import PositiveFloat
 from torch import Tensor
 from torch.distributed import ReduceOp
 
@@ -21,7 +22,18 @@ PerModuleMSE = dict[str, tuple[Float[Tensor, ""], int]]
 
 
 class StochasticHiddenActsReconLossConfig(LossMetricConfig):
+    """Config for the stochastic hidden-acts reconstruction loss.
+
+    `coeff_end_multiplier`, when set, decays the live training loss exponentially over
+    training: the loss is scaled by `coeff_end_multiplier ** current_frac_of_training`
+    (1.0 at step 0, exactly `coeff_end_multiplier` at the final step). Use a tiny value
+    (e.g. 1e-4) to decay to effectively zero — an exponential cannot reach exact zero.
+    Like the ImportanceMinimality coeff schedule, the multiplier scales the live loss
+    only; the value logged by `compute()` is unaffected.
+    """
+
     type: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
+    coeff_end_multiplier: PositiveFloat | None = None
 
 
 def calc_hidden_acts_mse(
@@ -155,7 +167,10 @@ class StochasticHiddenActsReconLoss(Metric[StochasticHiddenActsReconLossConfig])
             weight_deltas=wd,
         )
         sum_loss, n = self._accum.accumulate(per_module)
-        return sum_loss / n
+        loss = sum_loss / n
+        if self.cfg.coeff_end_multiplier is not None:
+            loss = loss * self.cfg.coeff_end_multiplier**ctx.current_frac_of_training
+        return loss
 
     @override
     def compute(self) -> MetricResult:
