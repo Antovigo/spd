@@ -80,7 +80,7 @@ args:
 - the path to a decomposed model (a checkpoint `model_<step>.pth`, or a run dir / W&B path)
 - `--kl-thr`: mean last-position KL below which a top-k subset counts as sufficient; the
   alive set is the smallest swept k under it. Default `rounded`: anchor to the run's own
-  rounded circuit — per-(prompt, position) masks with CI > `--rounding-thr`, delta on —
+  rounded circuit — per-(prompt, position) masks with CI > `--rounding-thr`, delta off —
   evaluated in-sweep at the last position on the same prompts (commensurable with the
   sweep, unlike the whole-sequence `eval/target_recon/rounded` training metric). Pass a
   float for an explicit absolute cut.
@@ -104,8 +104,9 @@ max-over-positions mean lower-leaky CI (per position, mean over the target promp
 in file order from `cfg.data.prompts_file`; requires prompts-based target data — then max
 over positions, so a subcomponent that only fires early ranks by its early-position
 strength), then sweeps top-k prefixes of that ranking: for each k the top-k subcomponents
-are enabled and all others zeroed **at every position** (weight-delta fully on
-everywhere), and the masked model's last-position output is compared to the raw target
+are enabled and all others zeroed **at every position**, with the weight-delta pinned
+**off** everywhere (`TargetReconLoss` target-data semantics: the components must do the
+work), and the masked model's last-position output is compared to the raw target
 model's (KL + argmax agreement) — the KL is read at `=` because that is where the answer
 is read, but masking acts everywhere, so a component matters iff masking it anywhere
 moves the `=` output. The alive subcomponents are the top-k for the smallest swept k
@@ -117,7 +118,7 @@ Implementation:
   per-(position, subcomponent) mean CI and the sparse per-(prompt, position) record of
   subcomponents with CI > `--ci-thr`. Runs under `torch.no_grad()` + `bf16_autocast`.
 - Phase 2 (sweep): outer loop over chunks (one target-reference forward each), inner loop
-  over ks ascending, growing the enabled set incrementally. Asserts the all-on + delta
+  over ks ascending, growing the enabled set incrementally. Asserts the all-on (no-delta)
   masked model reproduces the raw target (mask-wiring check).
 
 Output 1 — TSV (default `alive_subcomponents.tsv` in `analysis/datasets/`), the alive
