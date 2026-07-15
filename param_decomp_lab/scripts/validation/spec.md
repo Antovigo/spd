@@ -78,8 +78,14 @@ the same position are adjacent for easy comparison.
 
 args:
 - the path to a decomposed model (a checkpoint `model_<step>.pth`, or a run dir / W&B path)
-- `--kl-thr`: mean last-position KL below which a top-k subset counts as sufficient
-  (default 0.008); the alive set is the smallest swept k under it
+- `--kl-thr`: mean last-position KL below which a top-k subset counts as sufficient; the
+  alive set is the smallest swept k under it. Default `rounded`: anchor to the run's own
+  rounded circuit — per-(prompt, position) masks with CI > `--rounding-thr`, delta on —
+  evaluated in-sweep at the last position on the same prompts (commensurable with the
+  sweep, unlike the whole-sequence `eval/target_recon/rounded` training metric). Pass a
+  float for an explicit absolute cut.
+- `--rounding-thr`: CI rounding threshold defining the anchor circuit (default 0.01,
+  matching `TargetReconLoss`)
 - `--ci-thr`: lower-leaky CI threshold above which a subcomponent is recorded in the
   per-position JSON (default 0.1 — matches the circuit threshold in
   `sample_target_data.py`)
@@ -127,8 +133,8 @@ Output 2 — TSV (default `alive_subcomponents_curve.tsv`), one row per swept k:
 `k, max_mean_ci_at_k, mean_kl, q5_kl, q95_kl, max_kl, argmax_agree`.
 
 Output 3 — npz (default `alive_subcomponents_kl.npz`): per-(k, prompt) KL + argmax
-agreement plus the full CI ranking, for per-prompt analysis / re-thresholding without a
-GPU.
+agreement, the rounded-circuit per-prompt KL (`rounded_kl`), and the full CI ranking,
+for per-prompt analysis / re-thresholding without a GPU.
 
 Output 4 — JSON (default `alive_subcomponents_per_position.json` in `analysis/datasets/`),
 the **alive** subcomponents active per (prompt, position), organised
