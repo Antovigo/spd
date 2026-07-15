@@ -1,5 +1,7 @@
 # Parameter Decomposition
 
+> **Note:** Active development happens in a private repository; this repo receives periodic code releases.
+
 Training tools for parameter decomposition on neural networks. For a compact implementation of
 the core method, see [`nano_param_decomp/`](nano_param_decomp/).
 
