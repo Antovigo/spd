@@ -9,8 +9,19 @@ last-position output is compared to the raw target model's (KL + argmax agreemen
 KL is read at the last position because that is where the answer is read — but masking
 acts everywhere, so a component matters iff masking it *anywhere* on the prompt moves the
 `=` output. k=0 is the delta-only floor; k=C_total must reproduce the target exactly. The
-**alive subcomponents** are the top-k for the smallest swept k whose mean KL is ≤
-`--kl-thr` — pass a dense `--ks` grid around the knee to tighten the selection.
+**alive subcomponents** are the top-k for the smallest swept k whose mean KL is ≤ the
+threshold — pass a dense `--ks` grid around the knee to tighten the selection.
+
+The default threshold (`--kl-thr=rounded`) anchors to the run's own achieved quality:
+the sweep also evaluates the **rounded circuit** — per-(prompt, position) masks with CI >
+`--rounding-thr` (0.01, matching `TargetReconLoss`), delta on — at the last position on
+the same prompts, and cuts at its mean KL. The alive set is then the smallest static
+top-k that reconstructs as well as the decomposition's own rounded circuit does, and the
+anchor adapts across decompositions instead of hard-coding an absolute. Computing the
+anchor in-sweep (not reading `eval/target_recon/rounded` from the training logs) keeps it
+commensurable: the logged metric averages over all sequence positions, while both the
+sweep and this anchor read KL at the last position only. Pass a float `--kl-thr` for an
+explicit absolute cut.
 
 The ranking is a proxy: CI measures per-subcomponent maskability with everything else
 present, so redundant pairs can both rank low. If the curve degrades earlier than the AB
@@ -22,7 +33,8 @@ SLURM job instead of running it on the (GPU-less) login node.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.find_alive_subcomponents <model_path> \
-        [--kl-thr=0.008] [--ci-thr=0.1] [--batch-size=256] [--n-points=40] [--ks=0,8,64,...] \
+        [--kl-thr=rounded|0.008] [--rounding-thr=0.01] [--ci-thr=0.1] [--batch-size=256] \
+        [--n-points=40] [--ks=0,8,64,...] \
         [--prompts=PATH] [--output=PATH] [--output-curve=PATH] [--output-npz=PATH] \
         [--output-fig=PATH] [--output-json=PATH] \
         [--slurm [--partition=... --gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
@@ -33,8 +45,9 @@ Outputs (defaults in the run's `analysis/` layout):
   reference alive list consumed by every downstream script.
 - `datasets/alive_subcomponents_curve.tsv` — per swept k: k, max_mean_ci_at_k, mean_kl,
   q5_kl, q95_kl, max_kl, argmax_agree.
-- `datasets/alive_subcomponents_kl.npz` — per-(k, prompt) KL + argmax agreement, plus
-  the full CI ranking, for per-prompt analysis / re-thresholding without a GPU.
+- `datasets/alive_subcomponents_kl.npz` — per-(k, prompt) KL + argmax agreement, the
+  rounded-circuit per-prompt KL (`rounded_kl`), and the full CI ranking, for per-prompt
+  analysis / re-thresholding without a GPU.
 - `datasets/alive_subcomponents_per_position.json` — per (prompt, position), the alive
   subcomponents with lower-leaky CI > `--ci-thr` at that position, organised as
   prompt > position > matrix (full module path) > [{component, ci}]. Consumed by
@@ -93,6 +106,7 @@ def _plot_curve(
     agree: np.ndarray,
     k_alive: int,
     kl_thr: float,
+    rounded_mean: float,
     fig_path: Path,
 ) -> None:
     mean_kl = kl.mean(axis=1)
@@ -110,7 +124,10 @@ def _plot_curve(
     ax.plot(kx, np.maximum(mean_kl[pos], floor), "o-", color="tab:blue", label="mean")
     if 0 in k_list:
         ax.axhline(mean_kl[k_list.index(0)], ls="--", color="grey", label="delta-only (k=0)")
-    ax.axvline(k_alive, ls="--", color="tab:green", lw=1, label=f"alive: k={k_alive} @ KL≤{kl_thr}")
+    ax.axhline(rounded_mean, ls=":", color="tab:red", lw=1, label="rounded circuit (anchor)")
+    ax.axvline(
+        k_alive, ls="--", color="tab:green", lw=1, label=f"alive: k={k_alive} @ KL≤{kl_thr:.4g}"
+    )
     ax.legend(loc="center left", fontsize=8)
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -128,7 +145,8 @@ def _plot_curve(
 
 def find_alive_subcomponents(
     model_path: ModelPath,
-    kl_thr: float = 0.008,
+    kl_thr: float | str = "rounded",
+    rounding_thr: float = 0.01,
     ci_thr: float = 0.1,
     batch_size: int = 256,
     n_points: int = 40,
@@ -153,6 +171,7 @@ def find_alive_subcomponents(
         argv = [
             str(Path(model_path).expanduser()),
             f"--kl-thr={kl_thr}",
+            f"--rounding-thr={rounding_thr}",
             f"--ci-thr={ci_thr}",
             f"--batch-size={batch_size}",
             f"--n-points={n_points}",
@@ -175,6 +194,10 @@ def find_alive_subcomponents(
         )
         submit_self_to_slurm(_MODULE, argv, opts, job_name="val-find-alive-subcomponents")
         return None
+
+    assert kl_thr == "rounded" or isinstance(kl_thr, int | float), (
+        f"--kl-thr must be 'rounded' or a float, got {kl_thr!r}"
+    )
 
     run = load_lm_run(model_path)
     model, cfg, device, tokenizer = run.model, run.cfg, run.device, run.tokenizer
@@ -200,10 +223,12 @@ def find_alive_subcomponents(
     weight_deltas = model.calc_weight_deltas()
     dtype = next(model.parameters()).dtype
 
-    # Phase 1: per-(position, subcomponent) mean lower-leaky CI, plus the sparse
+    # Phase 1: per-(position, subcomponent) mean lower-leaky CI, the sparse
     # per-(prompt, position) record of components with CI > ci_thr (filtered to the alive
-    # set before writing the JSON).
+    # set before writing the JSON), and the rounded-circuit masks (CI > rounding_thr) that
+    # phase 2 evaluates as the kl_thr anchor.
     ci_pos_sum = {m: torch.zeros(seq, n_comp[m], device=device) for m in modules}
+    rounded_np = {m: np.zeros((n_prompts, seq, n_comp[m]), dtype=bool) for m in modules}
     # prompt -> position -> module -> [{component, ci}]
     per_position: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
     with torch.no_grad(), bf16_autocast(enabled=cfg.runtime.autocast_bf16):
@@ -216,6 +241,8 @@ def find_alive_subcomponents(
 
             # Move CI to CPU/numpy once per chunk to avoid per-element syncs.
             ci_np = {m: ci.lower_leaky[m].float().cpu().numpy() for m in modules}
+            for m in modules:
+                rounded_np[m][start : start + chunk.shape[0]] = ci_np[m] > rounding_thr
             for i in range(chunk.shape[0]):
                 pos_entry: dict[str, dict[str, list[dict[str, Any]]]] = {}
                 for pos in range(seq):
@@ -250,9 +277,11 @@ def find_alive_subcomponents(
     k_list = _k_grid(ks, n_points, n_total)
 
     # Phase 2: sweep top-k subsets. Outer loop over chunks (one target-reference forward
-    # each), inner loop over ks ascending, growing the enabled set incrementally.
+    # + one rounded-circuit forward each), inner loop over ks ascending, growing the
+    # enabled set incrementally.
     kl = np.zeros((len(k_list), n_prompts), np.float32)
     agree = np.zeros((len(k_list), n_prompts), bool)
+    rounded_kl = np.zeros(n_prompts, np.float32)
     with torch.no_grad(), bf16_autocast(enabled=cfg.runtime.autocast_bf16):
         for start in range(0, n_prompts, batch_size):
             chunk = pool[start : start + batch_size]
@@ -262,6 +291,19 @@ def find_alive_subcomponents(
             ref_token = logP.argmax(dim=-1)
 
             delta_mask = torch.ones(b, seq, device=device, dtype=dtype)
+
+            # The rounded circuit — per-(prompt, position) masks, delta on — read at the
+            # last position like the sweep, so its mean KL is a commensurable kl_thr anchor.
+            rounded_masks = {
+                m: torch.from_numpy(rounded_np[m][start : start + b]).to(device=device, dtype=dtype)
+                for m in modules
+            }
+            infos = make_mask_infos(
+                rounded_masks,
+                weight_deltas_and_masks={m: (weight_deltas[m], delta_mask) for m in modules},
+            )
+            logR = torch.log_softmax(model(chunk, mask_infos=infos)[:, -1].float(), dim=-1)
+            rounded_kl[start : start + b] = (P * (logP - logR)).sum(dim=-1).cpu().numpy()
             enabled = {m: torch.zeros(n_comp[m], device=device, dtype=dtype) for m in modules}
             prev_k = 0
             for ki, k in enumerate(k_list):
@@ -289,10 +331,16 @@ def find_alive_subcomponents(
 
     mean_kl = kl.mean(axis=1)
     agree_mean = agree.mean(axis=1)
-    under_thr = [k for ki, k in enumerate(k_list) if mean_kl[ki] <= kl_thr]
+    rounded_mean = float(rounded_kl.mean())
+    kl_thr_val = rounded_mean if kl_thr == "rounded" else float(kl_thr)
+    logger.info(
+        f"rounded-circuit anchor: mean last-pos KL={rounded_mean:.4g} "
+        f"(kl_thr={'anchor' if kl_thr == 'rounded' else kl_thr_val})"
+    )
+    under_thr = [k for ki, k in enumerate(k_list) if mean_kl[ki] <= kl_thr_val]
     assert under_thr, (
-        f"no swept k reaches mean KL <= {kl_thr} (best: {mean_kl.min():.4g} at k={k_list[-1]}); "
-        "raise --kl-thr or check the decomposition"
+        f"no swept k reaches mean KL <= {kl_thr_val} (best: {mean_kl.min():.4g} at "
+        f"k={k_list[-1]}); raise --kl-thr or check the decomposition"
     )
     k_alive = under_thr[0]
 
@@ -366,9 +414,10 @@ def find_alive_subcomponents(
         rank_mean_ci_last=np.array([r[3] for r in ranking]),
         rank_max_mean_ci=np.array([r[4] for r in ranking]),
         k_alive=np.array(k_alive),
-        kl_thr=np.array(kl_thr),
+        rounded_kl=rounded_kl,
+        kl_thr=np.array(kl_thr_val),
     )
-    _plot_curve(k_list, kl, agree_mean, k_alive, kl_thr, fig_path)
+    _plot_curve(k_list, kl, agree_mean, k_alive, kl_thr_val, rounded_mean, fig_path)
 
     alive_set = {(module, component) for module, component, *_ in ranking[:k_alive]}
     for pos_entry in per_position.values():
@@ -381,7 +430,7 @@ def find_alive_subcomponents(
     json_path.write_text(json.dumps(per_position, separators=(",", ":")))
 
     logger.info(
-        f"{k_alive}/{n_total} subcomponents alive (mean KL <= {kl_thr} at k={k_alive}) over "
+        f"{k_alive}/{n_total} subcomponents alive (mean KL <= {kl_thr_val:.4g} at k={k_alive}) over "
         f"{n_prompts} prompts → {alive_path}, {curve_path}, {json_path}, {fig_path}"
     )
     return alive_path, curve_path
