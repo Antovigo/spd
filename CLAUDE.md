@@ -100,6 +100,10 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
   torchrun wrapper), wandb, sqlite, git, run_files, markdown, pydantic helpers.
 - `param_decomp_lab/{seed.py, distributed.py, batch_and_loss_fns.py, component_model_io.py, run_sink.py}`
   — lab-side helpers that aren't big enough to warrant their own subdir.
+- `param_decomp_lab/combine/` — assemble several single-block LM decompositions into
+  one `ComponentModel` (per-block CI fns via the `grouped_global` CI mode in
+  `param_decomp/ci_fns.py`), evaluate the assembly standalone, fine-tune it. See
+  `notes/combine_layers/spec.md`.
 
 ## Module pointers
 

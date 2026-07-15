@@ -1,5 +1,6 @@
 """Causal-importance function configs, CI-fn modules, and wrappers."""
 
+import fnmatch
 from dataclasses import dataclass
 from typing import Literal, Self, override
 
@@ -114,9 +115,54 @@ class GlobalCiConfig(BaseConfig):
         return self
 
 
+class GroupedGlobalCiConfig(BaseConfig):
+    """Independent global CI fns, one per named group of decomposition targets.
+
+    Each group gets its own `fn_type` network (same architecture config for all groups)
+    over just its group's modules. Groups partition the decomposition targets: every
+    resolved target module path must fnmatch exactly one group's patterns, and every
+    group must match at least one target.
+    """
+
+    mode: Literal["grouped_global"] = "grouped_global"
+    fn_type: GlobalCiFnType = Field(
+        ...,
+        description="Type of per-group CI function: global_shared_mlp or global_shared_transformer",
+    )
+    hidden_dims: list[PositiveInt] | None = Field(
+        default=None,
+        description="Hidden dimensions for global_shared_mlp CI functions.",
+    )
+    simple_transformer_ci_cfg: GlobalSharedTransformerCiConfig | None = None
+    groups: dict[str, list[str]] = Field(
+        ...,
+        description="Group name -> fnmatch patterns over resolved module paths.",
+    )
+
+    @model_validator(mode="after")
+    def validate_ci_config(self) -> Self:
+        if self.fn_type == "global_shared_mlp":
+            assert self.hidden_dims is not None, (
+                "hidden_dims must be specified when fn_type='global_shared_mlp'"
+            )
+        elif self.fn_type == "global_shared_transformer":
+            assert self.simple_transformer_ci_cfg is not None, (
+                "simple_transformer_ci_cfg must be specified when fn_type='global_shared_transformer'"
+            )
+            assert self.hidden_dims is None, (
+                "hidden_dims is only used for fn_type='global_shared_mlp'"
+            )
+        assert self.groups, "groups must be non-empty"
+        for group_name in self.groups:
+            assert "." not in group_name, (
+                f"group name {group_name!r} must not contain '.' (used as a ModuleDict key)"
+            )
+        return self
+
+
 # Discriminated union (by `mode`) of every CI-fn config the trainer accepts. Pydantic
 # picks the right branch from the YAML `pd.ci_config.mode` literal.
-CiConfig = LayerwiseCiConfig | GlobalCiConfig
+CiConfig = LayerwiseCiConfig | GlobalCiConfig | GroupedGlobalCiConfig
 
 
 class MLPCiFn(nn.Module):
@@ -416,6 +462,63 @@ class GlobalCiFnWrapper(nn.Module):
         return self._global_ci_fn(transformed)
 
 
+class GroupedGlobalCiFnWrapper(nn.Module):
+    """Routes each module's input to its group's global CI fn and merges the outputs.
+
+    Same dict-in/dict-out interface as the other wrappers. Each inner CI fn only ever
+    sees the modules of its own group, so a group's CI fn is interchangeable with the
+    `_global_ci_fn` of a run that decomposed exactly those modules.
+    """
+
+    def __init__(
+        self,
+        group_ci_fns: dict[str, GlobalSharedMLPCiFn | GlobalSharedTransformerCiFn],
+        module_to_group: dict[str, str],
+        components: dict[str, Components],
+    ):
+        super().__init__()
+        self._group_ci_fns = nn.ModuleDict(group_ci_fns)
+        self.module_to_group = module_to_group
+        self.components = components
+
+    @override
+    def forward(
+        self,
+        layer_acts: dict[str, Float[Tensor, "..."]],
+    ) -> dict[str, Float[Tensor, "... C"]]:
+        outputs: dict[str, Float[Tensor, "... C"]] = {}
+        for group_name, group_ci_fn in self._group_ci_fns.items():
+            group_acts: dict[str, Float[Tensor, ...]] = {}
+            for layer_name, acts in layer_acts.items():
+                if self.module_to_group[layer_name] != group_name:
+                    continue
+                component = self.components[layer_name]
+                if isinstance(component, EmbeddingComponents):
+                    group_acts[layer_name] = component.get_component_acts(acts)
+                else:
+                    group_acts[layer_name] = acts
+            outputs.update(group_ci_fn(group_acts))
+        return outputs
+
+
+def assign_ci_fn_groups(module_paths: list[str], groups: dict[str, list[str]]) -> dict[str, str]:
+    """Match each resolved module path to exactly one group by fnmatch patterns."""
+    module_to_group: dict[str, str] = {}
+    for path in module_paths:
+        matches = [
+            name
+            for name, patterns in groups.items()
+            if any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+        ]
+        assert len(matches) == 1, (
+            f"module {path!r} matched groups {matches}; must match exactly one"
+        )
+        module_to_group[path] = matches[0]
+    unmatched_groups = set(groups) - set(module_to_group.values())
+    assert not unmatched_groups, f"groups matched no decomposition target: {unmatched_groups}"
+    return module_to_group
+
+
 def _make_layerwise_ci_fn(
     target_module: nn.Module,
     C: int,
@@ -482,12 +585,13 @@ def make_ci_fn_wrapper(
     module_to_c: dict[str, int],
     components: dict[str, Components],
     ci_config: CiConfig,
-) -> LayerwiseCiFnWrapper | GlobalCiFnWrapper:
+) -> "LayerwiseCiFnWrapper | GlobalCiFnWrapper | GroupedGlobalCiFnWrapper":
     """Build the CI-fn wrapper selected by `ci_config`.
 
     `LayerwiseCiConfig` → one inner CI fn per `module_to_c` entry inside a
     `LayerwiseCiFnWrapper`; `GlobalCiConfig` → a single global CI fn inside a
-    `GlobalCiFnWrapper`.
+    `GlobalCiFnWrapper`; `GroupedGlobalCiConfig` → one global CI fn per group of
+    targets inside a `GroupedGlobalCiFnWrapper`.
 
     Args:
         target_model: Frozen target model; used to look up each decomposition target's
@@ -521,3 +625,28 @@ def make_ci_fn_wrapper(
                 ci_config=ci_config,
             )
             return GlobalCiFnWrapper(global_ci_fn=raw_global, components=components)
+        case GroupedGlobalCiConfig():
+            module_to_group = assign_ci_fn_groups(list(module_to_c), ci_config.groups)
+            per_group_config = GlobalCiConfig(
+                fn_type=ci_config.fn_type,
+                hidden_dims=ci_config.hidden_dims,
+                simple_transformer_ci_cfg=ci_config.simple_transformer_ci_cfg,
+            )
+            group_ci_fns = {
+                group_name: _make_global_ci_fn(
+                    target_model=target_model,
+                    module_to_c={
+                        path: C
+                        for path, C in module_to_c.items()
+                        if module_to_group[path] == group_name
+                    },
+                    components=components,
+                    ci_config=per_group_config,
+                )
+                for group_name in ci_config.groups
+            }
+            return GroupedGlobalCiFnWrapper(
+                group_ci_fns=group_ci_fns,
+                module_to_group=module_to_group,
+                components=components,
+            )
