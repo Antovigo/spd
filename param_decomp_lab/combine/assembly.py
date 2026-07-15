@@ -69,6 +69,8 @@ def load_source_runs(runs: list[str]) -> list[SourceRun]:
     ref = sources[0].cfg
     for s in sources[1:]:
         assert s.cfg.target == ref.target, f"{s.name}: target differs from {sources[0].name}"
+        assert s.cfg.data == ref.data, f"{s.name}: target data distribution differs"
+        assert s.cfg.nontarget == ref.nontarget, f"{s.name}: nontarget config differs"
         assert s.cfg.pd.ci_config == ref.pd.ci_config, f"{s.name}: ci_config differs"
         assert s.cfg.pd.sigmoid_type == ref.pd.sigmoid_type, f"{s.name}: sigmoid_type differs"
         assert s.cfg.pd.use_delta_component == ref.pd.use_delta_component
@@ -126,6 +128,65 @@ def load_combined_state(
     allowed_prefixes = ("target_model.",) if load_ci_fns else ("target_model.", "ci_fn.")
     bad_missing = [k for k in missing if not k.startswith(allowed_prefixes)]
     assert not bad_missing, f"missing keys not covered by the sources: {bad_missing[:5]}"
+
+
+def group_patterns_by_layer(patterns: list[str]) -> dict[str, list[str]]:
+    """Partition module patterns into `layers<N>` groups by their block index."""
+    groups: dict[str, list[str]] = {}
+    for pattern in patterns:
+        match = re.match(r"model\.layers\.(\d+)\.", pattern)
+        assert match is not None, f"pattern {pattern!r} has no block index"
+        groups.setdefault(f"layers{match.group(1)}", []).append(pattern)
+    return {name: sorted(members) for name, members in groups.items()}
+
+
+def load_finetuned_state(model: ComponentModel, run: str) -> None:
+    """Overwrite `model`'s components + CI fns from a fine-tuned combined checkpoint."""
+    from param_decomp_lab.experiments.lm.run import SavedLMRun
+
+    saved = SavedLMRun.from_path(resolve_run_dir(run))
+    checkpoint = torch.load(saved.checkpoint_path, map_location="cpu", weights_only=True, mmap=True)
+    state = {
+        key: value
+        for key, value in checkpoint.items()
+        if key.startswith("_components.") or key.startswith("ci_fn.")
+    }
+    assert state, f"{run}: no component/ci_fn keys in {saved.checkpoint_path}"
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    assert not unexpected, f"{run}: unexpected keys: {unexpected[:5]}"
+    bad_missing = [k for k in missing if not k.startswith("target_model.")]
+    assert not bad_missing, f"{run}: keys not covered by checkpoint: {bad_missing[:5]}"
+
+
+def load_franken_state(model: ComponentModel, donors: dict[str, str]) -> None:
+    """Load each group's components + CI fn from that group's donor combined run.
+
+    `donors` maps group name (e.g. 'layers16') to a fine-tuned combined run whose
+    checkpoint supplies ONLY that group's weights; other groups keep `model`'s
+    current state.
+    """
+    from param_decomp.ci_fns import GroupedGlobalCiFnWrapper
+    from param_decomp_lab.experiments.lm.run import SavedLMRun
+
+    wrapper = model.ci_fn
+    assert isinstance(wrapper, GroupedGlobalCiFnWrapper)
+    for group, run in donors.items():
+        module_paths = [p for p, g in wrapper.module_to_group.items() if g == group]
+        assert module_paths, f"unknown group {group!r}"
+        saved = SavedLMRun.from_path(resolve_run_dir(run))
+        checkpoint = torch.load(
+            saved.checkpoint_path, map_location="cpu", weights_only=True, mmap=True
+        )
+        component_prefixes = tuple(f"_components.{p.replace('.', '-')}." for p in module_paths)
+        ci_prefix = f"ci_fn._group_ci_fns.{group}."
+        state = {
+            key: value
+            for key, value in checkpoint.items()
+            if key.startswith(component_prefixes) or key.startswith(ci_prefix)
+        }
+        assert state, f"{run}: no keys for group {group!r} in {saved.checkpoint_path}"
+        _, unexpected = model.load_state_dict(state, strict=False)
+        assert not unexpected, f"{run}: unexpected keys: {unexpected[:5]}"
 
 
 def build_combined_component_model(

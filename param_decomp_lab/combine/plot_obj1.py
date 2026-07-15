@@ -24,6 +24,7 @@ TARGET_SERIES = {
     "PGD": "loss/PGDReconLoss",
     "ci_masked": "target_recon/ci_masked",
     "stochastic": "target_recon/stochastic",
+    "delta_only": "target_recon/delta_only",
 }
 NONTARGET_SERIES = {
     "rounded": "nontarget_recon/rounded",
@@ -98,6 +99,34 @@ def _panel(
                 linewidths=1.2,
                 zorder=5,
             )
+
+    handles = [
+        plt.Line2D(
+            [],
+            [],
+            marker="o",
+            linestyle="none",
+            markerfacecolor="none",
+            markeredgecolor=SERIES_COLORS[label],
+            markersize=6,
+            label=label,
+        )
+        for label in series
+    ]
+    if log_refs:
+        handles.append(
+            plt.Line2D(
+                [],
+                [],
+                marker="D",
+                linestyle="none",
+                markerfacecolor="none",
+                markeredgecolor=REFERENCE_GRAY,
+                markersize=6,
+                label="end-of-training log (rounded)",
+            )
+        )
+    ax.legend(handles=handles, loc="lower right", frameon=False, fontsize=8)
 
     ax.set_yticks(range(len(subjects)))
     ax.set_yticklabels([_short_name(s) for s in subjects], color=TEXT_PRIMARY)
@@ -244,44 +273,10 @@ def main(
     for ax in axes:
         ax.set_xlabel("reconstruction loss (KL per position)", color=TEXT_SECONDARY, fontsize=9)
 
-    handles = [
-        plt.Line2D(
-            [],
-            [],
-            marker="o",
-            linestyle="none",
-            markerfacecolor="none",
-            markeredgecolor=color,
-            markersize=6,
-            label=label,
-        )
-        for label, color in SERIES_COLORS.items()
-    ]
-    if log_refs:
-        handles.append(
-            plt.Line2D(
-                [],
-                [],
-                marker="D",
-                linestyle="none",
-                markerfacecolor="none",
-                markeredgecolor=REFERENCE_GRAY,
-                markersize=6,
-                label="end-of-training log (rounded)",
-            )
-        )
-    fig.legend(
-        handles=handles,
-        loc="upper center",
-        ncol=len(handles),
-        frameon=False,
-        fontsize=9,
-        bbox_to_anchor=(0.5, 1.02),
-    )
     fig.suptitle(
         "Recon loss per eval batch: single-block decompositions vs all four combined "
         f"(rounding thr {payload['meta']['ci_thr']})",
-        y=1.10,
+        y=1.02,
         color=TEXT_PRIMARY,
         fontsize=12,
     )

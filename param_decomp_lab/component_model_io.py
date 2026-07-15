@@ -29,7 +29,7 @@ from param_decomp.decomposition_targets import (
 def _validate_checkpoint_ci_config_compatibility(
     state_dict: dict[str, Tensor], ci_config: CiConfig
 ) -> None:
-    """Assert the checkpoint's CI weight keys match the layerwise/global mode in `ci_config`."""
+    """Assert the checkpoint's CI weight keys match the CI mode in `ci_config`."""
     has_layerwise_ci_fns = any(k.startswith("ci_fn._ci_fns") for k in state_dict)
     has_global_ci_fn = any(k.startswith("ci_fn._global_ci_fn") for k in state_dict)
     has_grouped_ci_fns = any(k.startswith("ci_fn._group_ci_fns") for k in state_dict)

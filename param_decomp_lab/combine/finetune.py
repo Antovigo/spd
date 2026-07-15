@@ -16,7 +16,8 @@ from typing import Literal
 
 import fire
 
-from param_decomp.ci_fns import GlobalCiConfig
+from param_decomp.ci_fns import GlobalCiConfig, GroupedGlobalCiFnWrapper
+from param_decomp.component_model import ComponentModel
 from param_decomp.configs import OptimizerConfig, PDConfig
 from param_decomp.distributed import is_main_process
 from param_decomp.log import logger
@@ -27,6 +28,7 @@ from param_decomp_lab.combine.assembly import (
     SourceRun,
     combined_ci_config,
     load_combined_state,
+    load_finetuned_state,
     load_source_runs,
 )
 from param_decomp_lab.distributed import get_device, init_distributed, with_distributed_cleanup
@@ -133,6 +135,7 @@ def make_combined_config(
             "loss_metrics": loss_metrics,
             "components_optimizer": with_lr(ref_pd.components_optimizer, components_lr),
             "ci_fn_optimizer": with_lr(ref_pd.ci_fn_optimizer, ci_fn_lr),
+            "faithfulness_warmup_steps": 0,
         }
     )
     pd = PDConfig.model_validate(pd.model_dump())
@@ -162,6 +165,20 @@ def make_combined_config(
     )
 
 
+def _freeze_all_but_group(component_model: ComponentModel, group: str) -> None:
+    ci_fn = component_model.ci_fn
+    assert isinstance(ci_fn, GroupedGlobalCiFnWrapper)
+    assert group in ci_fn._group_ci_fns, (
+        f"unknown group {group!r}; have {list(ci_fn._group_ci_fns)}"
+    )
+    for group_name, group_ci_fn in ci_fn._group_ci_fns.items():
+        if group_name != group:
+            group_ci_fn.requires_grad_(False)
+    for path, component in component_model.components.items():
+        if ci_fn.module_to_group[path] != group:
+            component.requires_grad_(False)
+
+
 @with_distributed_cleanup
 def main(
     runs: str,
@@ -172,6 +189,8 @@ def main(
     ci_fn_lr: float = 5e-5,
     freeze_ci_fns: bool = False,
     freeze_components: bool = False,
+    train_only_group: str | None = None,
+    init_from: str | None = None,
     impmin_coeff: float | None = None,
     ci_fn_mode: CiFnMode = "grouped",
     ci_d_model: int | None = None,
@@ -195,6 +214,12 @@ def main(
         ci_fn_lr: CI-fn LR; ignored when `freeze_ci_fns`.
         freeze_ci_fns: Pin the CI-fn LR to 0 (objective 2a).
         freeze_components: Pin the components LR to 0.
+        train_only_group: Train only this block's components + CI fn (e.g.
+            'layers17'); every other group is hard-frozen via requires_grad, which
+            also exempts it from CI-scaled weight decay (objective 4 stage 2).
+        init_from: Run id/path of a fine-tuned combined checkpoint (grouped CI) to
+            initialise from, e.g. the over-sparse decomposition. Loaded on top of the
+            sources' assembled state.
         impmin_coeff: Importance-minimality coeff; defaults to min over sources of
             their base (end-of-anneal) coeff.
         ci_fn_mode: 'grouped' loads each source's CI fn as a per-block group;
@@ -239,6 +264,10 @@ def main(
     )
 
     dist_state = init_distributed()
+    assert train_only_group is None or dist_state is None, (
+        "train_only_group is single-process only: DDP's reducer registers all params "
+        "at construction and hangs on the post-hoc frozen ones"
+    )
     if is_main_process():
         logger.info(f"Distributed state: {dist_state}")
         logger.info(
@@ -279,6 +308,8 @@ def main(
             "ci_fn_mode": ci_fn_mode,
             "freeze_ci_fns": freeze_ci_fns,
             "freeze_components": freeze_components,
+            "train_only_group": train_only_group,
+            "init_from": init_from,
         }
         (sink.out_dir / "combine_provenance.json").write_text(json.dumps(provenance, indent=2))
 
@@ -292,6 +323,11 @@ def main(
             runtime_config=cfg.runtime,
         )
         load_combined_state(trainer.component_model, sources, load_ci_fns=ci_fn_mode == "grouped")
+        if init_from is not None:
+            assert ci_fn_mode == "grouped", "init_from requires ci_fn_mode='grouped'"
+            load_finetuned_state(trainer.component_model, init_from)
+        if train_only_group is not None:
+            _freeze_all_but_group(trainer.component_model, train_only_group)
         trainer.run(train_loader, sink, cfg.cadence, eval_loop, nontarget=nontarget)
     finally:
         sink.finish()

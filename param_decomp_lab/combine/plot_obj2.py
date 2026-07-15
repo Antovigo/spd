@@ -38,8 +38,16 @@ def _trajectory_figure(
     fig, (ax_recon, ax_l0) = plt.subplots(
         1, 2, figsize=(10, 3.8), facecolor="white", width_ratios=[1.4, 1]
     )
-    linestyles = {"combine-L16-19-both-02": "-", "combine-L16-19-frozenci-04": "--"}
-    short = {"combine-L16-19-both-02": "both", "combine-L16-19-frozenci-04": "frozen CI"}
+    linestyles = {
+        "combine-L16-19-both-02": "-",
+        "combine-L16-19-frozenci-04": "--",
+        "combine-L16-19-obj3-freshci-01": ":",
+    }
+    short = {
+        "combine-L16-19-both-02": "both",
+        "combine-L16-19-frozenci-04": "frozen CI",
+        "combine-L16-19-obj3-freshci-01": "fresh single CI",
+    }
     for run_name, run_dir in run_dirs.items():
         records = _eval_records(run_dir)
         steps = [d["step"] for d in records]
@@ -53,15 +61,6 @@ def _trajectory_figure(
                 linewidth=1.8,
                 marker="o",
                 markersize=4,
-            )
-            ax_recon.annotate(
-                f"{label} ({short[run_name]})",
-                (steps[-1], values[-1]),
-                textcoords="offset points",
-                xytext=(6, 0),
-                color=SERIES_COLORS[label],
-                fontsize=8,
-                va="center",
             )
         l0 = [d["eval/target_recon/total_l0"] for d in records]
         ax_l0.plot(
@@ -83,10 +82,20 @@ def _trajectory_figure(
             va="center",
         )
 
+    legend_handles = [
+        plt.Line2D([], [], color=SERIES_COLORS[label], linewidth=2, label=label)
+        for label in TRAJECTORY_KEYS
+    ] + [
+        plt.Line2D(
+            [], [], color=TEXT_PRIMARY, linewidth=1.5, linestyle=linestyles[run], label=short[run]
+        )
+        for run in run_dirs
+    ]
+    ax_recon.legend(handles=legend_handles, loc="upper right", frameon=False, fontsize=8, ncol=2)
     ax_recon.set_yscale("log")
     ax_recon.axhspan(*singles_band, color="#e6e5df", alpha=0.6, zorder=0)
     ax_recon.annotate(
-        "single-block range",
+        "single-block range (rounded recon)",
         (0, singles_band[1]),
         textcoords="offset points",
         xytext=(4, 3),
@@ -98,7 +107,7 @@ def _trajectory_figure(
         "Target recon during fine-tuning", color=TEXT_PRIMARY, fontsize=11, loc="left"
     )
     ax_l0.set_ylabel("total L0 (CI > 0.1)", color=TEXT_SECONDARY, fontsize=9)
-    ax_l0.set_ylim(bottom=0)
+    ax_l0.set_yscale("log")
     ax_l0.set_title("Sparsity during fine-tuning", color=TEXT_PRIMARY, fontsize=11, loc="left")
     for ax in (ax_recon, ax_l0):
         ax.set_xlabel("fine-tuning step", color=TEXT_SECONDARY, fontsize=9)
@@ -112,14 +121,17 @@ def _trajectory_figure(
     print(f"wrote {out_path}")
 
 
-def main(obj1_json: str, obj2_json: str, out_dir: str, runs_dir: str) -> None:
-    """Render obj-2 figures: merged subject dot plot + fine-tuning trajectories.
+def main(
+    obj1_json: str, obj2_json: str, out_dir: str, runs_dir: str, obj3_json: str | None = None
+) -> None:
+    """Render obj-2/3 figures: merged subject dot plot + fine-tuning trajectories.
 
     Args:
         obj1_json: eval_combined output with singles + raw combined.
         obj2_json: eval_combined output with the fine-tuned subjects.
         out_dir: Directory for the PNGs.
         runs_dir: Runs root (for the fine-tuned runs' metrics.jsonl trajectories).
+        obj3_json: eval_combined output with the fresh-single-CI subject (objective 3).
     """
     obj1 = json.loads(Path(obj1_json).read_text())
     obj2 = json.loads(Path(obj2_json).read_text())
@@ -127,11 +139,15 @@ def main(obj1_json: str, obj2_json: str, out_dir: str, runs_dir: str) -> None:
     rename = {
         "combine-L16-19-frozenci-04": "combined + FT (frozen CI)",
         "combine-L16-19-both-02": "combined + FT (both)",
+        "combine-L16-19-obj3-freshci-01": "combined + FT (fresh single CI)",
     }
-    for name, r in obj2["results"].items():
+    finetuned_results = dict(obj2["results"])
+    if obj3_json is not None:
+        finetuned_results.update(json.loads(Path(obj3_json).read_text())["results"])
+    for name, r in finetuned_results.items():
         results[rename.get(name, name)] = r
     singles = [s for s in obj1["results"] if s != "combined"]
-    subjects = singles + ["combined"] + [rename[n] for n in obj2["results"] if n in rename]
+    subjects = singles + ["combined"] + [rename[n] for n in finetuned_results if n in rename]
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), sharey=True, facecolor="white")
     _panel(
@@ -147,30 +163,9 @@ def main(obj1_json: str, obj2_json: str, out_dir: str, runs_dir: str) -> None:
     )
     for ax in axes:
         ax.set_xlabel("reconstruction loss (KL per position)", color=TEXT_SECONDARY, fontsize=9)
-    handles = [
-        plt.Line2D(
-            [],
-            [],
-            marker="o",
-            linestyle="none",
-            markerfacecolor="none",
-            markeredgecolor=color,
-            markersize=6,
-            label=label,
-        )
-        for label, color in SERIES_COLORS.items()
-    ]
-    fig.legend(
-        handles=handles,
-        loc="upper center",
-        ncol=len(handles),
-        frameon=False,
-        fontsize=9,
-        bbox_to_anchor=(0.5, 1.02),
-    )
     fig.suptitle(
         "Recon per eval batch: singles, raw combination, and 2000-step fine-tunes",
-        y=1.09,
+        y=1.02,
         color=TEXT_PRIMARY,
         fontsize=12,
     )
@@ -181,11 +176,9 @@ def main(obj1_json: str, obj2_json: str, out_dir: str, runs_dir: str) -> None:
     print(f"wrote {out_path}")
 
     singles_rounded = [obj1["results"][s]["mean"]["target_recon/rounded"] for s in singles]
+    trajectory_runs = {name: Path(runs_dir) / name for name in rename if name in finetuned_results}
     _trajectory_figure(
-        {
-            "combine-L16-19-both-02": Path(runs_dir) / "combine-L16-19-both-02",
-            "combine-L16-19-frozenci-04": Path(runs_dir) / "combine-L16-19-frozenci-04",
-        },
+        trajectory_runs,
         (min(singles_rounded), max(singles_rounded)),
         Path(out_dir) / "obj2_trajectory.png",
     )

@@ -585,7 +585,7 @@ def make_ci_fn_wrapper(
     module_to_c: dict[str, int],
     components: dict[str, Components],
     ci_config: CiConfig,
-) -> "LayerwiseCiFnWrapper | GlobalCiFnWrapper | GroupedGlobalCiFnWrapper":
+) -> LayerwiseCiFnWrapper | GlobalCiFnWrapper | GroupedGlobalCiFnWrapper:
     """Build the CI-fn wrapper selected by `ci_config`.
 
     `LayerwiseCiConfig` → one inner CI fn per `module_to_c` entry inside a

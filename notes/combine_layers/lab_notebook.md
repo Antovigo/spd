@@ -26,8 +26,10 @@
 
 - `--ci-thr` default 0.01, matching `rounding_threshold` of the runs' own
   `TargetReconLoss` evals, so combined numbers are directly comparable to the
-  end-of-training `eval/target_recon/rounded` logs. (0.1 in the roadmap text is the
-  *aliveness* threshold used for L0.)
+  end-of-training `eval/target_recon/rounded` logs. **This deviates from the
+  roadmap, which specified default 0.1** — changed by explicit decision (Antoine,
+  2026-07-15) for comparability with the training logs; 0.1 remains the aliveness
+  threshold for L0 (`--ci_alive_thr`).
 - The per-block CI-fn multiplexer is a small core addition (`param_decomp/ci_fns.py`),
   not a lab-side hack — objective 2 needs to train through it.
 - Nontarget (FineWeb, delta=1) is evaluated everywhere, including objective 1.
@@ -182,6 +184,51 @@ Reading:
   consistent with the "prefer excellent PGD recon over low L0" rule.
 - Final apples-to-apples eval (same script/seed as obj-1): job 4731 →
   `~/out/combine/obj2_finetuned_eval.json`.
+
+### Code review pass (2026-07-15)
+
+Ran /code-review (medium) focused on spec fidelity. Fixed: wrong nontarget-L0 column
+in the obj-2 report table (singles are 0.07–0.11, not 0.27–0.35 — raw combination
+already raises off-distribution L0 3–5×); the "end-of-training coeff" claim (L16/L17
+converged at 5e-5, fine-tune uses min=3e-5 — now stated as a caveat); additive
+expectation 0.0114/2.2× (was 0.0111/2.3×); per-panel figure legends (PGD only in
+target panel, delta_only now plotted in both); `faithfulness_warmup_steps` pinned to
+0 in combined configs (would otherwise replay warmup at lr 1e-3 on the loaded
+assembly for sources that use it); data/nontarget-equality asserts across sources;
+target-equality assert before evaluating finetuned subjects. Deferred (reported
+only): CI_L0 regex-vs-fnmatch group matching (latent, needs a core fix),
+eval_kwargs dataclass refactor, `_build_ctx` reuse of core `_build_metric_context`.
+
+### Obj 4 design (completeness training)
+
+Roadmap hypothesis: single-block decompositions each dropped their copy of
+redundant cross-layer mechanisms (impmin pressure + the other blocks' intact copies
+covering during training) → the combined model is missing ALL copies. Supporting
+evidence already in hand: frozen-CI fine-tuning (masks pinned → cannot resurrect
+anything) plateaus at 0.044, while CI-free fine-tuning reaches 0.024 at +30 L0 —
+consistent with "something must be woken up".
+
+Design decisions for stage 2 (per-block fine-tune):
+- **Both the block's components and its CI fn train** — resurrection requires masks
+  to open, which pinned CI fns cannot do.
+- **"Rest of network = over-sparse" is realised by hard-freezing** the other blocks
+  (requires_grad False on their components + CI fns) while keeping them as
+  decomposition targets: the recon losses' masked forwards already replace all
+  blocks, so block k trains against the other blocks' (frozen) reconstructions.
+  Core fix required: `_apply_ci_scaled_weight_decay` now skips frozen components
+  (it decays weights directly at the scheduled components-LR, outside the
+  optimizer, and would otherwise shrink "frozen" blocks' dormant subcomponents
+  ~3%/1000 steps).
+- **Init from the over-sparse checkpoint** (`--init_from=combine-L16-19-frozenci-04`):
+  components = over-sparse, CI fns = the sources' originals (frozenci never moved
+  them).
+- requires_grad freezing is single-process only (DDP's reducer would hang on
+  post-hoc frozen params) — asserted.
+- Validation built into the protocol: each per-block run's step-0 eval must
+  reproduce frozenci-04's final eval (≈0.0437 rounded) since nothing has trained.
+- Stage 3 will frankenstein-assemble the four completed blocks (each block's
+  components + CI fn taken from its own per-block run) and evaluate; joint
+  short fine-tune only if the franken assembly degrades.
 
 ### Obj 3 launched
 

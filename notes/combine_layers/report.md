@@ -47,11 +47,11 @@ How the error grows with the number of replaced blocks (chain starting at L16):
 | +L17 (2) | 0.0437 | 0.0710 | 0.0134 |
 | +L18 (3) | 0.2154 | 0.3218 | 0.0189 |
 | +L19 (4) | 0.2567 | 0.4028 | 0.0248 |
-| L18+L19 (2, off-chain) | 0.0252 | 0.0527 | 0.0111 |
+| L18+L19 (2, off-chain) | 0.0252 | 0.0527 | 0.0114 |
 
 Each early addition multiplies the loss ~5-6× rather than adding its single-block
 contribution; by three blocks the compounding dominates (11× the additive
-expectation). The off-chain pair L18+L19 shows the same superadditivity (2.3× its
+expectation). The off-chain pair L18+L19 shows the same superadditivity (2.2× its
 additive expectation), so this is not specific to L16/L17.
 
 **Answer to the roadmap question:** yes, the combined rounded recon is *much* higher
@@ -62,19 +62,27 @@ mere concatenation.
 ## Objective 2: fine-tuning the assembly is feasible — train both, not components-only
 
 Setup: the assembled model fine-tuned for 2000 steps with the full targeted loop
-(nontarget FineWeb pass, ratio 2.0), importance-minimality pinned to its
-end-of-training state (coeff 3e-5, p = 0.5), components LR 1e-4 and CI-fn LR 5e-5
-(cosine, sources' schedule shape). Memory forced single-GPU runs at global batch 32
-(sources used 128), so these are feasibility-grade, not final-quality.
+(nontarget FineWeb pass, ratio 2.0), importance-minimality held constant at p = 0.5
+(the sources' end-of-anneal p) with coeff = min over sources = 3e-5 — per the
+prefer-recon-over-sparsity rule. Caveat: L16/L17 converged at coeff 5e-5, so those
+two blocks are fine-tuned under 40% weaker sparsity pressure than their own
+converged objective; part of the L0 growth below is attributable to that, not only
+to CI-fn retraining. Components LR 1e-4, CI-fn LR 5e-5 (cosine, sources' schedule
+shape). Memory forced single-GPU runs at global batch 32 (sources used 128), so
+these are feasibility-grade, not final-quality.
 
 ![fine-tuned vs baselines](report_figures/obj2_recon.png)
 
 | subject (same eval script/seed) | rounded | PGD | target L0 | ntgt rounded | ntgt L0 |
 |---|---|---|---|---|---|
-| singles (range) | 0.0055–0.0072 | 0.0059–0.0076 | 7.9–12.6 | 0.0032–0.0038 | 0.27–0.35 |
-| raw combined | 0.257 | 0.403 | 38.1 | 0.0122 | 0.30 |
+| singles (range) | 0.0055–0.0072 | 0.0059–0.0076 | 7.9–12.6 | 0.0032–0.0038 | 0.07–0.11 |
+| raw combined | 0.257 | 0.403 | 38.1 | 0.0122 | 0.35 |
 | combined + FT, frozen CI fns | 0.0431 | 0.126 | 38.1 | 0.0132 | 0.35 |
 | combined + FT, both | **0.0239** | **0.0551** | 67.6 | 0.0133 | 0.59 |
+
+Note the nontarget L0 column: already the *raw* combination raises off-distribution
+activation 3–5× over the singles (0.07–0.11 → 0.35); fine-tuning with frozen CI fns
+holds that level, while training the CI fns adds another ~1.7× (0.59).
 
 ![fine-tuning trajectories](report_figures/obj2_trajectory.png)
 

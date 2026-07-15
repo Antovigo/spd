@@ -232,9 +232,11 @@ def _apply_ci_scaled_weight_decay(
     """
     with torch.no_grad():
         for name, ci_max in batch_ci_max.items():
+            component = component_model.components[name]
+            if not component.V.requires_grad:
+                continue
             global_ci_max = all_reduce(ci_max, op=ReduceOp.MAX).clamp(0.0, 1.0)
             keep = 1.0 - lr * coeff * (1.0 - global_ci_max)
-            component = component_model.components[name]
             component.V.mul_(keep[None, :])
             component.U.mul_(keep[:, None])
 

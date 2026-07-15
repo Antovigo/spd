@@ -13,7 +13,7 @@ import fire
 import torch
 
 from param_decomp.batch_and_loss_fns import ReconstructionLoss, move_batch_to_device
-from param_decomp.ci_fns import GroupedGlobalCiConfig
+from param_decomp.ci_fns import GlobalCiConfig, GroupedGlobalCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.configs import PDConfig
 from param_decomp.metrics.base import Metric
@@ -25,6 +25,9 @@ from param_decomp_lab.batch_and_loss_fns import recon_loss_kl
 from param_decomp_lab.combine.assembly import (
     SourceRun,
     build_combined_component_model,
+    group_patterns_by_layer,
+    load_finetuned_state,
+    load_franken_state,
     load_source_runs,
     resolve_run_dir,
 )
@@ -189,6 +192,8 @@ def _evaluate_assembled(
     target_model: torch.nn.Module,
     seed: int,
     device: str,
+    franken_base: str | None = None,
+    franken_donors: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> dict[str, list[float]]:
     set_seed(seed)
@@ -196,6 +201,10 @@ def _evaluate_assembled(
     model = build_combined_component_model(
         sources, target_model, make_run_batch(ref_cfg.target), device
     )
+    if franken_base is not None:
+        load_finetuned_state(model, franken_base)
+    if franken_donors is not None:
+        load_franken_state(model, franken_donors)
     l0_groups = {s.group: sorted(s.module_patterns) for s in sources}
     result = _evaluate_model(model, ref_cfg, l0_groups, device=device, **kwargs)
     del model
@@ -207,23 +216,34 @@ def _evaluate_finetuned(
     run: str,
     *,
     target_model: torch.nn.Module,
+    expected_target: Any,
     seed: int,
     device: str,
     **kwargs: Any,
 ) -> dict[str, list[float]]:
     set_seed(seed)
     saved = SavedLMRun.from_path(resolve_run_dir(run))
-    ci_config = saved.cfg.pd.ci_config
-    assert isinstance(ci_config, GroupedGlobalCiConfig), (
-        f"{run}: expected a fine-tuned combined run (grouped_global CI), got {ci_config.mode}"
+    assert saved.cfg.target == expected_target, (
+        f"{run}: target spec differs from the assembled sources' target — its checkpoint "
+        f"would overwrite the shared target model with different weights"
     )
+    ci_config = saved.cfg.pd.ci_config
+    if isinstance(ci_config, GroupedGlobalCiConfig):
+        l0_groups = dict(ci_config.groups)
+    else:
+        assert isinstance(ci_config, GlobalCiConfig), (
+            f"{run}: expected a fine-tuned combined run, got CI mode {ci_config.mode}"
+        )
+        l0_groups = group_patterns_by_layer(
+            [t.module_pattern for t in saved.cfg.pd.decomposition_targets]
+        )
     model = load_component_model(
         pd_config=saved.cfg.pd,
         checkpoint_path=saved.checkpoint_path,
         target_model=target_model,
         run_batch=make_run_batch(saved.cfg.target),
     ).to(device)
-    result = _evaluate_model(model, saved.cfg, dict(ci_config.groups), device=device, **kwargs)
+    result = _evaluate_model(model, saved.cfg, l0_groups, device=device, **kwargs)
     del model
     torch.cuda.empty_cache()
     return result
@@ -233,6 +253,8 @@ def main(
     runs: str,
     out: str,
     finetuned: str | None = None,
+    franken: str | None = None,
+    franken_base: str | None = None,
     ci_thr: float = 0.01,
     ci_alive_thr: float = 0.1,
     n_steps: int = 10,
@@ -251,6 +273,11 @@ def main(
         out: Output JSON path.
         finetuned: Comma-separated ids of fine-tuned combined runs (grouped_global CI)
             to evaluate as additional subjects, loaded from their own checkpoints.
+        franken: 'group:run,group:run,...' — evaluate a frankenstein subject whose
+            per-group weights come from each group's donor combined run (objective 4
+            stage 3).
+        franken_base: Combined run loaded before the donors (fills any group without
+            a donor, e.g. the over-sparse decomposition).
         ci_thr: Rounding threshold for the rounded recon mask (CI > thr -> 1).
         ci_alive_thr: Aliveness threshold for L0 counts.
         n_steps: Eval batches per subject and distribution.
@@ -283,23 +310,41 @@ def main(
         "nontarget_batch_size": nontarget_batch_size,
     }
 
+    franken_donors: dict[str, str] | None = None
+    if franken is not None:
+        franken_donors = dict(pair.split(":", 1) for pair in franken.split(",") if pair.strip())
+        assert franken_donors, "empty franken spec"
+
     subjects: list[tuple[str, list[SourceRun] | str]] = []
     if include_singles:
         subjects += [(s.name, [s]) for s in sources]
     if include_combined:
         subjects.append(("combined", sources))
     subjects += [(run, run) for run in finetuned_list]
+    if franken_donors is not None:
+        subjects.append(("franken", sources))
 
     results: dict[str, dict[str, Any]] = {}
     for subject_name, subject in subjects:
         print(f"=== evaluating {subject_name} ===", flush=True)
         if isinstance(subject, str):
             per_batch = _evaluate_finetuned(
-                subject, target_model=target_model, seed=seed, device=device, **eval_kwargs
+                subject,
+                target_model=target_model,
+                expected_target=ref_cfg.target,
+                seed=seed,
+                device=device,
+                **eval_kwargs,
             )
         else:
             per_batch = _evaluate_assembled(
-                subject, target_model=target_model, seed=seed, device=device, **eval_kwargs
+                subject,
+                target_model=target_model,
+                seed=seed,
+                device=device,
+                franken_base=franken_base if subject_name == "franken" else None,
+                franken_donors=franken_donors if subject_name == "franken" else None,
+                **eval_kwargs,
             )
         means = {k: sum(v) / len(v) for k, v in per_batch.items()}
         results[subject_name] = {"mean": means, "per_batch": per_batch}
@@ -310,6 +355,8 @@ def main(
         "meta": {
             "runs": {s.name: str(s.checkpoint_path) for s in sources},
             "finetuned": finetuned_list,
+            "franken": franken_donors,
+            "franken_base": franken_base,
             "ci_thr": ci_thr,
             "ci_alive_thr": ci_alive_thr,
             "n_steps": n_steps,

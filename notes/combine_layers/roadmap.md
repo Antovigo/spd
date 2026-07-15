@@ -29,8 +29,15 @@ Similarly to objective 2 (or if objective 2 is deemed unfeasible), another way t
 
 If this fails, an alternative would be to distill the multiple CI function into a single combined CI function, but that’s much more complicated -- only explore this direction if you deem it necessary.
 
-# Objective 4: anti-redundancy training
-[TBA]
+# Objective 4: completeness training
+The decomposition might be incomplete because of redundant mechanisms:  if n layers contain redundant mechanisms, such that removing one of them doesn’t change the output but removing all them does, then these mechanisms might be completely absent, because each decomposition independently gets rid of its own copy (under the pressure of the importance-minimality loss).
+
+However, there might be a way to recover all the copies of each mechanism:
+1) assemble the single-block decompositions and fine-tune the subcomponents (while freezing the CI network). This corrects for system drift (making sure the subcomponents can work together), but does not resurrect any missing redundant component. The result of this fine-tuning is called the "over-sparse" decomposition. It presumably misses some subcomponents.
+2) now we fine-tune each block one by one. While one block is being fine-tuned, the rest of the network is replaced with the over-sparse version, so it’s missing the redundant mechanism. Therefore, the fine-tuned block must resurrect its own copy of the missing mechanism. We repeat this for all decomposed layers.
+3) finally, we assemble the "complete" decomposed layers and check that they can work well together.
+
+For this objective, think about how that could work in practice and what would be the best way to implement this. Then, implement it and experiment until you find something that works well.
 
 # Objective 5: resurrect subcomponents
 [TBA]

@@ -72,7 +72,7 @@ Configs currently kept next to their implementation for this reason:
 - `ScheduleConfig` → `param_decomp.schedule`
 - `DecompositionTargetConfig` → `param_decomp.decomposition_targets`
 - `CiConfig` family (`LayerwiseCiConfig`, `AttnConfig`, `GlobalSharedTransformerCiConfig`,
-  `GlobalCiConfig`) → `param_decomp.ci_fns`
+  `GlobalCiConfig`, `GroupedGlobalCiConfig`) → `param_decomp.ci_fns`
 - `SamplingType`, `SubsetRoutingType` + members → `param_decomp.masks`
 - Each loss metric's `LossMetricConfig` subclass → `param_decomp/metrics/<name>.py`
 
