@@ -11,6 +11,45 @@ All numbers: KL per position between the masked-component model and the target m
 rounding threshold 0.01 (same as the runs' own end-of-training "rounded recon" logs),
 means over 10 eval batches (dots in the figures are the individual batches).
 
+## Hyperparameter summary
+
+**Source runs** — identical across the four blocks except where noted:
+
+| | value |
+|---|---|
+| decomposed matrices | 7 per block: gate/up/down_proj C=456 each, q/k_proj C=72, v/o_proj C=128 (C = 1768 per block) |
+| steps × batch | 20 000 × 128, dp=2 (L17: 24 000 steps) |
+| components / CI-fn LR | 3.2e-4 / 1.6e-4, cosine → 0.1× |
+| CI fn | `global_shared_transformer`, d_model 512, 4 blocks, 8 heads — 33.4M params per run |
+| importance minimality | coeff 5e-5 (L16/L17) or 3e-5 (L18/L19), beta 0.75; coeff anneal ×2→×1, p anneal 2.0 → 0.5 |
+| other loss coeffs | StochasticReconSubset 1.0, UnmaskedRecon 0.5, PersistentPGDRecon 0.5, StochasticHiddenActsRecon 1e-3 |
+| CI-scaled component weight decay | 0.3 |
+| nontarget pass | FineWeb, batch 128, `impmin_coeff_ratio` 2.0 |
+| checkpoints combined | `model_20000` (L16/L18/L19), `model_24000` (L17) |
+
+**Fine-tunes** (objectives 2–4) — everything not listed is inherited unchanged from
+the sources (loss coeffs, weight decay 0.3, nontarget ratio 2.0, leaky-hard sigmoid,
+binomial sampling, delta component). Batch sizes are memory-driven (single L40 GPU):
+
+| | obj 2: frozen CI / both | obj 3: fresh single CI | obj 4: resurrect / reconcile |
+|---|---|---|---|
+| init | source checkpoints | sources (components), random CI fn | over-sparse ckpt / franken assembly |
+| steps | 2000 | 2000 | 1000 per stage |
+| global batch | 32 | 32 | 32 |
+| components LR | 1e-4, cosine → 0.1× | same | same |
+| CI-fn LR | frozen / 5e-5 | 1.6e-4 (from-scratch value) | 5e-5 / frozen |
+| importance minimality | coeff 3e-5 (min over sources), p = 0.5, anneals off — the sources' end-of-training state | same | same |
+| CI config | `grouped_global`, 4 × 33.4M | single global d512 × 4 blocks, 95.9M | `grouped_global`, 4 × 33.4M |
+| nontarget / eval batch | 16/64 (frozen), 32/128 (both) | 32/64 | 16/64 |
+| faithfulness warmup | 0 steps | 0 | 0 |
+
+Two deliberate deviations from a pure continuation of the sources' objective:
+the pinned impmin coeff 3e-5 under-weights sparsity for L16/L17 (their converged
+value was 5e-5 — the prefer-recon-over-sparsity rule), and global batch is 32 vs
+the sources' 128 (memory). "Frozen" CI fns use LR 1e-12 rather than
+`requires_grad=False` (schedule validation + DDP reducer constraints), except
+obj-4 resurrection where the other blocks are hard-frozen.
+
 ## Objective 1: the decompositions do NOT readily combine
 
 ![recon per subject](report_figures/obj1_recon.png)
@@ -110,14 +149,16 @@ Key conclusions:
 
 Setup: same fine-tune as objective 2's "both" variant, but ONE
 `global_shared_transformer` CI fn over all 28 matrices (source architecture,
-d512 × 4 blocks: ~90M params vs ~124M for the four per-block CI fns), randomly
+d512 × 4 blocks: 95.9M params vs 133.7M for the four per-block CI fns at
+33.4M each — 28% smaller; the shared transformer core is reused, only the
+per-matrix input/output heads grow with the matrix count), randomly
 initialised; CI-fn LR 1.6e-4 (the sources' from-scratch value); components
 initialised from the sources.
 
 | subject | rounded | PGD | target L0 | ntgt rounded | ntgt L0 | CI-fn params |
 |---|---|---|---|---|---|---|
-| FT both (4 per-block CI fns) | **0.0239** | 0.0551 | **67.6** | 0.0133 | **0.59** | ~124M |
-| FT fresh single CI fn | 0.0266 | **0.0484** | 97.9 | 0.0132 | 2.73 | ~90M |
+| FT both (4 per-block CI fns) | **0.0239** | 0.0551 | **67.6** | 0.0133 | **0.59** | 133.7M |
+| FT fresh single CI fn | 0.0266 | **0.0484** | 97.9 | 0.0132 | 2.73 | 95.9M |
 
 (Dot-plot and trajectory figures above include this variant.)
 
