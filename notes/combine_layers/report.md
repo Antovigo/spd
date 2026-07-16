@@ -234,6 +234,75 @@ failure is then the statement: the four decompositions are complete relative to 
 intact model but incomplete relative to each other. Completeness training turns that
 diagnosis into a repair in four steps, each of which isolates one assumption.
 
+**When do the losses favor pruning a subcomponent?** Write the end-state training
+loss per token position as
+
+$$L \;=\; w\,\mathbb{E}_{\text{masks}}[\mathrm{KL}] \;+\; \lambda \sum_c u_c^{\,p} \;+\; \text{(mask-blind terms)},$$
+
+where `u_c ∈ [0, 1]` is component `c`'s causal importance, `p = 0.5` after the anneal,
+`λ = 3×10⁻⁵` (the impmin coeff), and `w` collects the coefficients of the loss terms
+that actually see masked forwards — stochastic recon (1.0) and PGD (0.5), so
+`w ≈ 1–1.5`; UnmaskedRecon is mask-blind and drops out. Under binomial sampling `c` is
+dropped with probability `1 − u_c`, so for one component with marginal masking cost
+`ΔKL(c | context)`, and treating the other masks as fixed background,
+
+$$L(u) \;=\; \lambda u^{p} \;+\; w\,(1-u)\,\Delta\mathrm{KL} \;+\; \text{const}.$$
+
+For `p < 1` this is concave in `u`, so the optimum sits at a boundary; comparing
+`L(1) = λ` with `L(0) = w·ΔKL`:
+
+$$\textbf{prune } c \;\Leftrightarrow\; \Delta\mathrm{KL}(c \mid \text{context}) \;<\; \tau := \lambda / w \;\approx\; 2\text{–}3\times10^{-5}$$
+
+in KL-per-position units. (During most of source training `p = 2`, which is convex
+with interior optimum `u* ≈ w·ΔKL / 2λ` — graded CIs; the anneal to `p = 0.5` is what
+binarises them and makes the boundary comparison the operative one.)
+
+**Redundant pairs.** Let `c` and `c′` be two implementations of the same mechanism:
+`ε ≈ 0` the cost of removing one while the other operates, `F ≫ ε` the cost of
+removing both. Everything depends on whether the partner is *inside the maskable set*:
+
+- **Partner maskable (same run).** The stochastic loss visits the both-off state with
+  probability `(1−u)(1−u′)`, so the boundary optima cost `2λ` (keep both),
+  `λ + wε` (keep one), `wF` (keep neither). With `ε ≈ 0`: keep exactly one iff
+  `F > τ`, prune both iff `F < τ`. Within-run redundancy is priced correctly.
+- **Partner not maskable (single-block training).** The partner lives in the exact,
+  non-decomposed remainder; its "mask" never varies, so the both-off state has
+  probability zero under *every* loss term — including the adversarial one (PGD can
+  only perturb masks of decomposed modules). The blindness is architectural, not a
+  weak-adversary artifact. `c`'s expected marginal cost is `ε`, and it is pruned iff
+  `ε < τ` — **regardless of `F`**. Both halves of a cross-block pair are pruned
+  symmetrically, and combination then silently pays `F` per lost pair; summing over
+  pairs is objective 1's superadditivity.
+
+**Disappearance / re-appearance conditions.** A subcomponent disappears in
+single-block training iff `ε < τ`; it re-appears in a resurrection phase iff its
+marginal against that phase's background exceeds the threshold,
+`ΔKL(c | over-sparse rest) = F′ > τ` (`F′ ≈ F` when the partner copy is dead in the
+background). The protocol therefore repairs exactly the mechanisms with
+
+$$\varepsilon \;<\; \tau \;<\; F',$$
+
+and leaves dead everything with `F′ ≤ τ` — an irreducible recon gap bounded by
+`(#still-dead) × τ`. A practical corollary: since the CI-scaled weight decay (0.3)
+drains pruned components' weights throughout training, re-appearance re-*grows* a
+mechanism rather than un-hiding a preserved one — irrelevant to the criterion, but
+the reason resurrection is a 1000-step training phase and not a mask flip.
+
+Consistency with the observed numbers:
+
+- The resurrection carriers L16/L18 gained ΔL0 ≈ 12.6/14.8 for rounded-recon gains of
+  0.0064/0.0075 ⇒ `F ≈ 5×10⁻⁴` per component ≈ 20 τ — comfortably above threshold,
+  which is why those phases moved recon.
+- L17/L19 revived +4.0/+4.6 L0 with ~no rounded improvement but PGD −16%/−9%: their
+  components were justified by the adversarial term inside `w` (`F_adv > τ` while
+  `F_stoch ≈ 0`). Revival-for-robustness is part of the criterion, not a leak.
+- The sufficiency-curve slope at complete-joint-01's alive boundary (k 2270 → 2849:
+  mean KL 0.0238 → 0.0197) is ≈ 7×10⁻⁶ per component — marginal values at or below
+  τ, i.e. the CI fn's alive/dead boundary sits where the threshold account puts it.
+- Caveat: the L16/L17 sources pruned at coeff 5×10⁻⁵ (τ ~1.7× higher than the
+  fine-tunes' 3×10⁻⁵), one more reason L0 grows during any fine-tune that trains
+  CI fns.
+
 **Step 0 — diagnosis by frozen-mask saturation.** CI fns read the *unmasked*
 activations, which faithfulness pins to the target model's; so with CI fns frozen the
 mask pattern is a fixed function of the input, independent of the component weights
