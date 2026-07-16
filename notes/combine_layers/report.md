@@ -106,8 +106,78 @@ Key conclusions:
    smaller batch, the truncated LR schedule, and the still-decreasing trajectory,
    longer/bigger fine-tuning plausibly closes most of it.
 
-## Objective 3: re-train a single CI fn
+## Objective 3: a single lighter CI fn works — no distillation needed
 
-(running — `combine-L16-19-obj3-freshci-01`: source-architecture global CI fn
-(d512 × 4 blocks, ~90M params vs 124M for the four per-block CI fns) trained from
-scratch over all 28 matrices, components initialised from the sources.)
+Setup: same fine-tune as objective 2's "both" variant, but ONE
+`global_shared_transformer` CI fn over all 28 matrices (source architecture,
+d512 × 4 blocks: ~90M params vs ~124M for the four per-block CI fns), randomly
+initialised; CI-fn LR 1.6e-4 (the sources' from-scratch value); components
+initialised from the sources.
+
+| subject | rounded | PGD | target L0 | ntgt rounded | ntgt L0 | CI-fn params |
+|---|---|---|---|---|---|---|
+| FT both (4 per-block CI fns) | **0.0239** | 0.0551 | **67.6** | 0.0133 | **0.59** | ~124M |
+| FT fresh single CI fn | 0.0266 | **0.0484** | 97.9 | 0.0132 | 2.73 | ~90M |
+
+(Dot-plot and trajectory figures above include this variant.)
+
+Key conclusions:
+
+1. **Feasible.** From a random initialisation (step 0: rounded 0.73, everything
+   half-on at L0 3434) the single CI fn organises within ~500 steps and reaches
+   recon comparable to the per-block bundle by 2000 — slightly worse rounded,
+   and the best adversarial (PGD) recon of any variant.
+2. The costs at this budget are **sparsity** (L0 98 vs 68, but still falling
+   steeply: 187 → 128 → 111 → 97 over the second half) and **targeting**
+   (nontarget L0 2.7 vs 0.6). Both trajectories suggest longer training closes
+   the gap; the CI fn simply hasn't finished tightening.
+3. The fallback (distilling the four CI fns into one) is unnecessary.
+
+## Objective 4: completeness training works — and beats plain joint fine-tuning
+
+Protocol (all stages at global batch 32, frozen-CI stages train only components):
+
+1. **Over-sparse decomposition** = the objective-2 frozen-CI run: components adapt
+   under pinned masks; plateaus at rounded 0.0431 (pinned masks cannot resurrect
+   dropped mechanisms).
+2. **Per-block resurrection** (1000 steps each, other blocks hard-frozen at the
+   over-sparse state, init from its checkpoint): each block trains its components
+   *and its CI fn* against the over-sparse rest, so it must supply whatever
+   redundant mechanism the ensemble lost.
+
+   | block | rounded 0→1000 | PGD 0→1000 | L0 gained |
+   |---|---|---|---|
+   | L16 | 0.0426 → 0.0362 | 0.150 → 0.114 | +12.6 |
+   | L17 | 0.0426 → 0.0451 | 0.150 → 0.126 | +4.0 |
+   | L18 | 0.0426 → 0.0351 | 0.150 → 0.108 | +14.8 |
+   | L19 | 0.0426 → 0.0487 | 0.150 → 0.136 | +4.6 |
+
+   Redundancy is heterogeneous: **L16/L18 are the resurrectors** (large L0 gains and
+   real recon improvements); L17/L19 wake little.
+3. **Frankenstein assembly** (each block from its own run): rounded **0.0605** —
+   *worse* than the over-sparse baseline. The per-block gains do not compose (each
+   block was tuned against the over-sparse others; all four changed at once — the
+   objective-1 superadditivity in miniature; naive additive expectation was 0.037).
+4. **Reconciliation** (1000-step joint fine-tune from the franken state, CI fns
+   frozen): rounded 0.0605 → **0.0229** within 1000 steps.
+
+| variant (standalone eval, same script/seed) | rounded | PGD | L0 | ntgt rounded | ntgt L0 |
+|---|---|---|---|---|---|
+| over-sparse (frozen-CI FT of raw assembly) | 0.0431 | 0.126 | 38.1 | 0.0132 | 0.35 |
+| franken (resurrected, no reconcile) | 0.0605 | 0.135 | 72.8 | 0.0447 | 0.45 |
+| **completeness (resurrect + reconcile)** | **0.0228** | 0.0598 | 72.8 | 0.0163 | **0.45** |
+| joint FT "both" (reference) | 0.0239 | 0.0551 | 67.6 | 0.0133 | 0.59 |
+
+Key conclusions:
+
+1. **The resurrection hypothesis is confirmed.** Frozen-mask training saturates at
+   0.043 (stage 1 proved this); after per-block resurrection the *same* frozen-mask
+   training reaches 0.0228. The difference is entirely the ~35 L0 of components the
+   per-block phase woke up — mechanisms the single-block decompositions had dropped.
+2. **The completeness protocol matches full joint fine-tuning on target recon**
+   (0.0228 vs 0.0239) at similar L0, with somewhat better off-distribution sparsity
+   (ntgt L0 0.45 vs 0.59) — while all mask changes happened in isolated,
+   attributable per-block phases rather than one entangled joint optimisation.
+3. **Reconciliation is mandatory** — assembling the resurrected blocks without it is
+   worse than not resurrecting at all (0.0605 vs 0.0431 rounded, and 3.4× worse
+   nontarget recon, which the reconciliation also heals: 0.052 → 0.015).

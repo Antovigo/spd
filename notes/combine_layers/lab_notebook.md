@@ -230,6 +230,64 @@ Design decisions for stage 2 (per-block fine-tune):
   components + CI fn taken from its own per-block run) and evaluate; joint
   short fine-tune only if the franken assembly degrades.
 
+### Obj 3 finals (standalone eval, `obj3_eval.json`)
+
+| model | rounded | PGD | L0 | ntgt rounded | ntgt L0 | CI-fn params |
+|---|---|---|---|---|---|---|
+| both-02 (4 per-block CI fns) | 0.0239 | 0.0551 | 67.6 | 0.0133 | 0.59 | ~124M |
+| obj3 fresh single CI fn | 0.0266 | **0.0484** | 97.9 | 0.0132 | 2.73 | ~90M |
+
+A single from-scratch CI fn over all 28 matrices reaches comparable recon (slightly
+worse rounded, best PGD of all variants) with a lighter CI stack, but is less sparse
+(L0 98 vs 68, still falling at 2000 steps: 187→128→111→97) and notably less targeted
+(ntgt L0 2.7 vs 0.6). Verdict: viable; needs longer training to catch up on
+sparsity/targeting. Distillation not needed.
+
+### Obj 4 stage 2 — all four blocks (steps 0 → 1000, others frozen at over-sparse)
+
+| block | rounded | PGD | total L0 |
+|---|---|---|---|
+| L16 | 0.0426 → 0.0362 | 0.150 → 0.114 | 38.1 → 50.7 (+12.6) |
+| L17 | 0.0426 → 0.0451 | 0.150 → 0.126 | 38.1 → 42.1 (+4.0) |
+| L18 | 0.0426 → 0.0351 | 0.150 → 0.108 | 38.1 → 52.9 (+14.8) |
+| L19 | 0.0426 → 0.0487 | 0.150 → 0.136 | 38.1 → 42.7 (+4.6) |
+
+Every step-0 eval reproduced frozenci-04's final (0.0426/0.150/38.1) — init/freeze
+machinery validated four times. Clear per-block heterogeneity: **L16 and L18 are the
+resurrectors** (+13–15 L0 and real recon gains); L17/L19 wake little and their
+rounded recon even drifts slightly up (they mostly re-tune PGD robustness). Also
+faster than joint runs (~1.5 s/it vs 2.7: frozen blocks skip gradient work).
+
+### Obj 4 stage 3 — franken assembly does NOT compose (obj4_franken_eval.json)
+
+franken (each block from its own per-block run): rounded **0.0605**, PGD 0.135,
+L0 72.8, ntgt rounded **0.0447** (vs over-sparse 0.0431 / 0.126 / 38.1 / 0.0132).
+Worse than the over-sparse baseline it grew from, and 3.4× worse nontarget recon.
+Naive additive expectation from the per-block gains was ≈0.037; interaction penalty
+≈ +0.023 — the obj-1 superadditivity in miniature: each block was tuned against the
+over-sparse *others*, and all four changed at once.
+
+→ Reconciliation pass launched (`complete-joint-01`, job 4747): joint fine-tune
+from the franken state with frozen CI fns (masks keep the resurrected components
+alive; components re-align), 1000 steps. Success criterion: beat over-sparse
+(0.0431) substantially at its ~73 L0, ideally approaching both-02 (0.0239 @ 68) —
+which would show the completeness protocol buys recon that frozen-mask training
+alone could not.
+
+### Obj 4 stage 3 — reconciliation succeeds (2026-07-16, complete-joint-01)
+
+Trajectory: rounded 0.0598 → 0.0235 (step 500) → 0.0229 (step 1000); PGD 0.163 →
+0.070; L0 flat at ~72–74 (CI fns frozen ⇒ masks pinned); nontarget rounded healed
+0.052 → 0.0148. Standalone eval (`obj4_joint_eval.json`): rounded **0.0228**, PGD
+0.0598, L0 72.8, ntgt rounded 0.0163, ntgt L0 0.454.
+
+**Success criterion met and exceeded**: frozen-mask training that plateaued at
+0.0431 from the raw assembly reaches 0.0228 from the resurrected assembly — the
+difference is attributable to the ~35 L0 of per-block-resurrected components. The
+protocol matches joint "both" fine-tuning on recon (0.0228 vs 0.0239) at similar
+L0 with better nontarget sparsity (0.45 vs 0.59), and every mask change happened in
+an isolated, per-block phase. Figures regenerated with both obj-4 subjects.
+
 ### Obj 3 launched
 
 - `combine-L16-19-obj3-freshci-01` (job 4732): components from the sources, ONE

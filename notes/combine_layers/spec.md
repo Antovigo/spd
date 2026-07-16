@@ -84,8 +84,24 @@ DDP: `torchrun --standalone --nproc_per_node=N -m param_decomp_lab.combine.finet
 single-GPU at global batch 32).
 
 `eval_combined` also accepts `--finetuned=<ids>`: fine-tuned combined runs
-(grouped_global CI) evaluated as additional subjects from their own checkpoints,
-through the identical metric loop.
+(grouped_global or global CI) evaluated as additional subjects from their own
+checkpoints, through the identical metric loop; and `--franken=group:run,...`
+(+ optional `--franken_base=<run>`): a subject assembled per-group from donor
+combined runs (objective 4 stage 3).
+
+## Objective 4 machinery (completeness training)
+
+- `finetune.py --init_from=<run>`: initialise from a fine-tuned combined checkpoint
+  (e.g. the over-sparse decomposition) instead of just the sources.
+- `finetune.py --train_only_group=layers<N>`: hard-freeze (requires_grad) every
+  other group's components + CI fns. Single-process only (DDP's reducer would hang).
+  Core change: `_apply_ci_scaled_weight_decay` skips frozen components — the decay
+  is applied outside the optimizer at the scheduled LR and would otherwise shrink
+  "frozen" blocks' dormant subcomponents.
+- `finetune.py --franken_init=group:run,...`: per-group init from donor combined
+  runs (applied after `--init_from`), for the stage-3 reconciliation fine-tune.
+- `assembly.py`: `load_finetuned_state`, `load_franken_state`,
+  `group_patterns_by_layer`.
 
 ## Plotting
 

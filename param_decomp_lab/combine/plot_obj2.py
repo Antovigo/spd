@@ -122,9 +122,15 @@ def _trajectory_figure(
 
 
 def main(
-    obj1_json: str, obj2_json: str, out_dir: str, runs_dir: str, obj3_json: str | None = None
+    obj1_json: str,
+    obj2_json: str,
+    out_dir: str,
+    runs_dir: str,
+    obj3_json: str | None = None,
+    obj4_franken_json: str | None = None,
+    obj4_joint_json: str | None = None,
 ) -> None:
-    """Render obj-2/3 figures: merged subject dot plot + fine-tuning trajectories.
+    """Render obj-2/3/4 figures: merged subject dot plot + fine-tuning trajectories.
 
     Args:
         obj1_json: eval_combined output with singles + raw combined.
@@ -132,6 +138,8 @@ def main(
         out_dir: Directory for the PNGs.
         runs_dir: Runs root (for the fine-tuned runs' metrics.jsonl trajectories).
         obj3_json: eval_combined output with the fresh-single-CI subject (objective 3).
+        obj4_franken_json: eval_combined output with the franken subject (objective 4).
+        obj4_joint_json: eval_combined output with the reconciled subject (objective 4).
     """
     obj1 = json.loads(Path(obj1_json).read_text())
     obj2 = json.loads(Path(obj2_json).read_text())
@@ -140,10 +148,13 @@ def main(
         "combine-L16-19-frozenci-04": "combined + FT (frozen CI)",
         "combine-L16-19-both-02": "combined + FT (both)",
         "combine-L16-19-obj3-freshci-01": "combined + FT (fresh single CI)",
+        "franken": "per-block resurrected (no reconcile)",
+        "complete-joint-01": "completeness (resurrect + reconcile)",
     }
     finetuned_results = dict(obj2["results"])
-    if obj3_json is not None:
-        finetuned_results.update(json.loads(Path(obj3_json).read_text())["results"])
+    for extra in (obj3_json, obj4_franken_json, obj4_joint_json):
+        if extra is not None:
+            finetuned_results.update(json.loads(Path(extra).read_text())["results"])
     for name, r in finetuned_results.items():
         results[rename.get(name, name)] = r
     singles = [s for s in obj1["results"] if s != "combined"]
@@ -164,7 +175,7 @@ def main(
     for ax in axes:
         ax.set_xlabel("reconstruction loss (KL per position)", color=TEXT_SECONDARY, fontsize=9)
     fig.suptitle(
-        "Recon per eval batch: singles, raw combination, and 2000-step fine-tunes",
+        "Recon per eval batch: singles, raw combination, and fine-tuned variants",
         y=1.02,
         color=TEXT_PRIMARY,
         fontsize=12,
@@ -176,7 +187,14 @@ def main(
     print(f"wrote {out_path}")
 
     singles_rounded = [obj1["results"][s]["mean"]["target_recon/rounded"] for s in singles]
-    trajectory_runs = {name: Path(runs_dir) / name for name in rename if name in finetuned_results}
+    trajectory_names = (
+        "combine-L16-19-both-02",
+        "combine-L16-19-frozenci-04",
+        "combine-L16-19-obj3-freshci-01",
+    )
+    trajectory_runs = {
+        name: Path(runs_dir) / name for name in trajectory_names if name in finetuned_results
+    }
     _trajectory_figure(
         trajectory_runs,
         (min(singles_rounded), max(singles_rounded)),

@@ -98,6 +98,34 @@ sbatch -J obj3-freshci ~/pd_scratch/combine_layers/obj2_finetune.sbatch \
 (`--ci_d_model` / `--ci_n_blocks` override the CI-fn size; default = source arch,
 d512 × 4 blocks, which is already lighter than four per-block CI fns.)
 
+## Objective 4 — completeness training
+
+Stage 1 (over-sparse) = the obj-2 frozen-CI run (`combine-L16-19-frozenci-04`).
+
+Stage 2 — per-block resurrection (one job per block, ~25 min each on 1 GPU):
+
+```bash
+for L in 16 17 18 19; do
+  sbatch -J complete-L$L ~/pd_scratch/combine_layers/obj2_finetune.sbatch complete-L$L-01 \
+    --init_from=combine-L16-19-frozenci-04 --train_only_group=layers$L \
+    --steps=1000 --save_every=1000 --nontarget_batch_size=16 --group=combine-obj4
+done
+```
+
+Each run's step-0 eval must reproduce frozenci-04's final (≈0.043 rounded) — built-in
+validation of the init/freeze machinery.
+
+Stage 3 — frankenstein assembly eval (each block from its own per-block run):
+
+```bash
+python -m param_decomp_lab.combine.eval_combined \
+  --runs=addsub-L16-04-init-proj,addsub-L17-04-init-proj,addsub-L18-05-coupled,addsub-L19-05 \
+  --include_singles=False --include_combined=False \
+  --franken=layers16:complete-L16-01,layers17:complete-L17-01,layers18:complete-L18-01,layers19:complete-L19-01 \
+  --franken_base=combine-L16-19-frozenci-04 \
+  --out=$HOME/out/combine/obj4_franken_eval.json
+```
+
 ## Tests
 
 ```bash

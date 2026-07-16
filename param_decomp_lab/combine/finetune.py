@@ -29,6 +29,7 @@ from param_decomp_lab.combine.assembly import (
     combined_ci_config,
     load_combined_state,
     load_finetuned_state,
+    load_franken_state,
     load_source_runs,
 )
 from param_decomp_lab.distributed import get_device, init_distributed, with_distributed_cleanup
@@ -191,6 +192,7 @@ def main(
     freeze_components: bool = False,
     train_only_group: str | None = None,
     init_from: str | None = None,
+    franken_init: str | None = None,
     impmin_coeff: float | None = None,
     ci_fn_mode: CiFnMode = "grouped",
     ci_d_model: int | None = None,
@@ -220,6 +222,9 @@ def main(
         init_from: Run id/path of a fine-tuned combined checkpoint (grouped CI) to
             initialise from, e.g. the over-sparse decomposition. Loaded on top of the
             sources' assembled state.
+        franken_init: 'group:run,...' — per-group init from each group's donor
+            combined run, applied after `init_from` (objective 4 stage 3
+            reconciliation).
         impmin_coeff: Importance-minimality coeff; defaults to min over sources of
             their base (end-of-anneal) coeff.
         ci_fn_mode: 'grouped' loads each source's CI fn as a per-block group;
@@ -326,6 +331,11 @@ def main(
         if init_from is not None:
             assert ci_fn_mode == "grouped", "init_from requires ci_fn_mode='grouped'"
             load_finetuned_state(trainer.component_model, init_from)
+        if franken_init is not None:
+            assert ci_fn_mode == "grouped", "franken_init requires ci_fn_mode='grouped'"
+            donors = dict(pair.split(":", 1) for pair in franken_init.split(",") if pair.strip())
+            assert donors, "empty franken_init spec"
+            load_franken_state(trainer.component_model, donors)
         if train_only_group is not None:
             _freeze_all_but_group(trainer.component_model, train_only_group)
         trainer.run(train_loader, sink, cfg.cadence, eval_loop, nontarget=nontarget)
