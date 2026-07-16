@@ -222,3 +222,72 @@ Key conclusions:
 3. **Reconciliation is mandatory** — assembling the resurrected blocks without it is
    worse than not resurrecting at all (0.0605 vs 0.0431 rounded, and 3.4× worse
    nontarget recon, which the reconciliation also heals: 0.052 → 0.015).
+
+### A more formal account: mechanism, assumptions, failure modes
+
+**The claim being tested.** Call a block's decomposition *complete relative to a
+context* (= the rest of the model) if its masked forward reproduces the target
+block's function on the input distribution that context induces. A single-block run
+trains against the intact model, so its sparsity objective prunes every component
+whose function is redundant *given exact computation elsewhere*. The objective-1
+failure is then the statement: the four decompositions are complete relative to the
+intact model but incomplete relative to each other. Completeness training turns that
+diagnosis into a repair in four steps, each of which isolates one assumption.
+
+**Step 0 — diagnosis by frozen-mask saturation.** CI fns read the *unmasked*
+activations, which faithfulness pins to the target model's; so with CI fns frozen the
+mask pattern is a fixed function of the input, independent of the component weights
+being trained. Frozen-CI fine-tuning therefore optimises weights inside a fixed alive
+set. When it plateaus far above single-block quality (0.0431 vs ~0.006) while the
+CI-fns-trained run keeps descending, the residual error is not weight misfit — it is
+function missing from the alive set. *Assumption:* the plateau is an expressivity
+limit, not an optimisation failure.
+
+**Step 1 — per-block resurrection.** Block `b` trains its components *and its CI fn*
+against the frozen over-sparse rest; since weight-fitting alone has just been shown
+saturated, loss can only fall by recruiting dormant components — resurrecting masks.
+Because the other three blocks are frozen, every mask change in a phase is
+attributable to one block, and the four phases are independent (parallelisable: each
+conditions only on the same over-sparse checkpoint). *Assumptions:* (a) **spare
+capacity** — dormant components exist to host the missing function (amply satisfied:
+C = 1768/block vs ~10 alive); (b) **block-locality** — the missing mechanisms are
+expressible within a single block acting against a frozen rest; a mechanism only
+reachable by *coordinated* changes across blocks is invisible to this stage;
+(c) sparsity pressure stays on (same impmin coeff), so what wakes is load-bearing —
+supported by the gains being heterogeneous in an interpretable way (L16/L18 carry
+the redundancy, L17/L19 wake little).
+
+**Step 2 — reassembly transfers masks, not weights.** Because CIs are functions of
+the clean activations, each block's resurrected mask pattern survives reassembly
+verbatim (franken L0 = the sum of the per-block L0s exactly). The franken model
+nevertheless fails (0.0605, worse than the 0.0431 baseline): each block's *weights*
+were tuned against the over-sparse others, and four simultaneous replacements
+recreate the objective-1 superadditivity in miniature. This step is expected to fail;
+it exists to separate what transfers (masks) from what doesn't (weights).
+
+**Step 3 — reconciliation as the controlled test.** Rerun exactly the step-0
+procedure — frozen-CI joint fine-tuning — from the franken state. Identical
+objective, identical masks-pinned constraint; the only difference from step 0 is the
+enlarged alive set (38 → 73). Reaching 0.0228 (vs the 0.0431 floor, and matching the
+0.0239 joint-FT reference) attributes the entire improvement to the resurrected
+components — which is the completeness claim, confirmed. *Assumption:* one
+resurrection round suffices, i.e. after it the remaining misfit is weight-fixable
+inside the pinned alive set. Had reconciliation also saturated high, the protocol
+would iterate (resurrect → reconcile → …) with no convergence guarantee.
+
+**When it should not be expected to work:**
+
+- **Non-local incompleteness** — missing mechanisms that require coordinated changes
+  in several blocks at once; per-block resurrection cannot discover them (didn't
+  bite here, but nothing in the protocol rules it out elsewhere).
+- **No spare capacity** — a block whose components are all alive has nowhere to host
+  a resurrected mechanism.
+- **Compensator pollution** — the resurrection objective asks block `b` to reduce the
+  *whole* ensemble's error, not to restore specifically its own dropped mechanisms;
+  a resurrected component may therefore encode "cancel the other blocks' noise"
+  rather than a native mechanism. The isolated phases make mask changes *auditable*,
+  not automatically *native*; the worse the over-sparse baseline, the stronger this
+  pull. Interpretability claims about resurrected components need the same per-component
+  validation as any others.
+- **One-sided repair** — the protocol only adds components; spurious survivors of the
+  over-sparse baseline are never pruned, and nothing re-checks the original alive set.

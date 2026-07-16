@@ -172,13 +172,17 @@ def _plot_position(
 
     assert im is not None
 
-    # Facet titles (matrix names) outermost; single axis titles just inside them, next to plots.
+    # Facet titles (layer + matrix) outermost; single axis titles just inside them, next
+    # to plots. Bare module names (no layer, e.g. from plot_ab_inner_heatmaps) keep just
+    # the proj name.
     for ax0, module in zip(first_axes, modules, strict=True):
+        layer, matrix = parse_module_name(module)
+        facet = matrix.rsplit(".", 1)[-1] if layer < 0 else f"L{layer} {matrix.rsplit('.', 1)[-1]}"
         box = ax0.get_position()
         fig.text(
             (left - 0.66) / fig_w,
             (box.y0 + box.y1) / 2,
-            module.rsplit(".", 1)[-1],
+            facet,
             rotation=90,
             ha="center",
             va="center",

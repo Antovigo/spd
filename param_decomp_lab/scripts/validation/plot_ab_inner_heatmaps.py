@@ -61,8 +61,8 @@ def plot_ab_inner_heatmaps(inner_activations_tsv: str, output_dir: str | None = 
         per_comp[comp][b - 1, a - 1] = val
 
     # Bare proj names sort to down/gate/up — the same order parse_module_name gives the CI
-    # plot — and `_plot_position` uses `module.rsplit(".", 1)[-1]` for the row label, so the
-    # short names render identically.
+    # plot — and `_plot_position` labels layer-less module names with just the proj name,
+    # so the short names render identically.
     modules = sorted(grids)
     alive = {m: sorted(grids[m]) for m in modules}
     vmax = max(float(np.abs(g).max()) for per in grids.values() for g in per.values())

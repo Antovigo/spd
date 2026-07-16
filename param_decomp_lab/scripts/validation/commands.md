@@ -53,7 +53,12 @@ The reference alive set + CI-ranked sufficiency curve. Ranks all subcomponents b
 max-over-positions mean lower-leaky CI, sweeps top-k subsets (rest hard zero at every
 position, delta fully on) and measures last-position KL / argmax agreement vs the raw
 target model. The alive subset is the top-k for the smallest swept k with mean KL <=
-`--kl-thr` (default 0.008). Every downstream script reads this output.
+`--kl-thr`. **Set `--kl-thr` to the run's own observed rounded recon** (its
+end-of-training `eval/target_recon/rounded`); the 0.008 default is just the reference
+run's value (`addsub-L18-04-hidden` finished at 0.0074) and inflates the alive set for
+any run with a higher recon floor. The npz stores the full per-(k, prompt) sweep, so a
+wrong threshold can be re-cut on CPU without re-running. Every downstream script reads
+this output.
 
 Outputs (in the run's `analysis/` layout):
 - `datasets/alive_subcomponents.tsv` — the reference alive list
