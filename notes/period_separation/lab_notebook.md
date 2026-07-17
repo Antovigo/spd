@@ -92,3 +92,46 @@ peak 3–5x with a gentler base coeff) — separation may be buyable with schedu
 Launched: trains 4813 (base) / 4815 (p1) / 4817 (nopeak), analyses 4814/4816/4818
 chained `afterok`. (First launch attempt 4804–4806 died on the known stale
 `ci_fn_output_bias_init` field in the stage4-derived yaml — stripped and relaunched.)
+
+## 2026-07-17 — wave 1 results: softening impmin does NOT separate
+
+`+` pos-4 MLP aggregates at 5k steps; alive = full-sweep circuit size; anchor from the
+run's own rounded circuit:
+
+| probe | n | clean | med_band | mw_band | alive | PGD | rounded | anchor |
+|---|---|---|---|---|---|---|---|---|
+| base | 71 | 8 | 0.271 | 0.312 | 177 | 0.00951 | 0.00898 | 0.01275 |
+| p1 (p stays ≥ 1) | 81 | 7 | 0.273 | 0.297 | 315 | 0.00854 | 0.00759 | 0.01252 |
+| nopeak (mult 1x) | 92 | 8 | 0.253 | 0.261 | 260 | 0.00706 | 0.00607 | 0.01083 |
+
+- H1 and H2 **refuted** in their naive direction: relaxing the p-anneal or the coeff
+  multiplier buys reconstruction but *inflates* the circuit (315 / 260 vs 177 alive; 81 /
+  92 vs 71 active at the answer position) with the same absolute number of clean
+  components — i.e. the extra components are mixed/noisy, and per-component purity does
+  not improve. Consistent with the baseline 5x finding from the other side.
+- **Schedule reading corrected** (from `_get_coeff_multiplier`): with
+  `warmup_frac 0, anneal 0→1`, the multiplier starts AT the peak and decays linearly to
+  1x — the recipe applies its strongest impmin pressure *early*, while `p` is still
+  convex (≈2). The 5x runs were therefore "strong early convex pressure", not a
+  mid-training spike. New working model: **early convex impmin while the topology forms
+  is the separation force** — it shrinks marginal CI usage proportionally (no
+  winner-take-all merging at p≈2) so components crystallise around single features;
+  concave-p late refines sparsity.
+- psep-base at 5k reads med_band 0.271 vs the 20k coupled parent's 0.323 — confirms
+  purity keeps improving with training; probes compare only within-wave.
+
+## 2026-07-17 — wave 2 (design + launch)
+
+Testing the "early strong convex impmin" model and its recon trade-off, all at 5k:
+
+- `psep-5x` — coeff starts at 5x, decays to 1x over the run (probe-scale replicate of
+  the direction that won in the 20k baselines).
+- `psep-5x-hid0.1` — 5x + hidden-acts 0.1 → 0 (exact hid_sched-5x recipe; the baseline
+  table's best cell. Does the hidden-acts schedule add anything over 5x alone?).
+- `psep-5xanneal0.5` — 5x decaying to 1x by *mid-training* (`coeff_anneal_end_frac 0.5`),
+  then flat: keeps the early pressure, releases late — aims for 5x-level separation
+  without the late recon cost.
+- `psep-base-s1` — base recipe, seed 1: the seed noise floor every comparison needs.
+
+Trains 4823 / 4825 / 4827 / 4829 (s1 queued behind 4823 for the GPU cap), analyses
+4824 / 4826 / 4828 / 4830 chained `afterok`.
