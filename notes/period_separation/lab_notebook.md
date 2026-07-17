@@ -34,6 +34,44 @@ Newest entries at the bottom. Runs referenced by their run id in `~/out/runs/`.
 Reading: early hidden-acts magnitude controls circuit size (topology knob); impmin peak
 5x only hurts. Period-purity columns for these runs pending job 4803.
 
+## 2026-07-17 — baseline period-purity table (job 4803)
+
+`+` rows, answer position (pos 4), MLP matrices pooled; `n` = scored (non-flat)
+subcomponents, `clean` = band_purity > 0.5, `med_band` = n-weighted median band_purity,
+`n50` = mean orbits to 50% power:
+
+| run | n | flat | clean | med_band | mw_band | n50 |
+|---|---|---|---|---|---|---|
+| L15-05-coupled | 7 | 9 | 4 | 0.594 | 0.678 | 14.0 |
+| L16-04-init-proj | 12 | 5 | 3 | 0.352 | 0.407 | 5.8 |
+| L17-04-init-proj | 14 | 3 | 7 | 0.516 | 0.416 | 22.1 |
+| L18-05-coupled | 59 | 3 | 9 | 0.323 | 0.383 | 17.4 |
+| L18-05-coupled @15k | 59 | 3 | 7 | 0.311 | 0.374 | 17.4 |
+| L18-05-dense | 55 | 7 | 8 | 0.295 | 0.320 | 12.0 |
+| L18-05-hid_sched | 59 | 2 | 9 | 0.308 | 0.344 | 12.8 |
+| L18-05-hid_sched @5k | 54 | 8 | 5 | 0.255 | 0.285 | 13.3 |
+| **L18-05-hid_sched-5x** | **34** | 5 | **10** | **0.392** | **0.428** | 7.6 |
+| L18-05-hid_sched-5x @10k | 34 | 5 | 5 | 0.358 | 0.351 | 30.2 |
+| L18-05-hid_sched0.01 | 49 | 4 | 8 | 0.339 | 0.324 | 16.4 |
+| L18-05-hid_sched0.01-5x-b | 37 | 3 | 9 | 0.364 | 0.423 | 11.8 |
+| L19-05 | 15 | 4 | 1 | 0.287 | 0.268 | 18.7 |
+| L20-05-coupled | 21 | 2 | 2 | 0.275 | 0.287 | 32.2 |
+
+Observations:
+
+- **The 5x-impmin-peak runs are the cleanest L18 decompositions** (med_band 0.39/0.36 vs
+  0.32 coupled) and have far fewer per-position-active MLP components (34–37 vs 59), with
+  the same absolute number of clean ones. Against H1/H2's naive direction: *more* impmin
+  pressure improved period separation — apparently by pruning/suppressing the noisy mixed
+  components — while costing ~60% reconstruction. The interesting axis is now the
+  **separation-vs-recon trade-off**, and whether p-anneal/peak *shape* can buy the
+  separation without the recon cost.
+- Purity improves over training everywhere (coupled 15k→20k, hid_sched 5k→20k, 5x
+  10k→20k) — late training refines rather than merges, mildly against H1. 5k probes will
+  read lower in absolute terms; only probe-vs-probe comparisons at 5k are valid.
+- Cross-layer numbers (L15 strikingly clean with only 7 scored + 9 flat; L19/L20 messy)
+  confound recipe with layer — recipe comparisons must stay within-layer.
+
 ## 2026-07-17 — probe wave 1 (design)
 
 All probes: coupled recipe, `steps: 5000` (schedules compress — deliberate, see spec.md
@@ -47,4 +85,10 @@ probe protocol), 2 GPUs, ~3.5h. Names `addsub-L18-06-psep-*`:
 
 Wave-2 candidates (pick after wave 1): p-anneal *timing* (start_frac 0.5 → concave only
 after topology sets), hidden-acts 0.1-constant × p1 interaction, impmin coeff halved,
-higher C on the MLP matrices, seed replicate of psep-base for the noise floor.
+higher C on the MLP matrices, seed replicate of psep-base for the noise floor. The
+baseline table adds a live candidate: probe the *5x direction* at matched recon (e.g.
+peak 3–5x with a gentler base coeff) — separation may be buyable with schedule shape.
+
+Launched: trains 4813 (base) / 4815 (p1) / 4817 (nopeak), analyses 4814/4816/4818
+chained `afterok`. (First launch attempt 4804–4806 died on the known stale
+`ci_fn_output_bias_init` field in the stage4-derived yaml — stripped and relaunched.)
