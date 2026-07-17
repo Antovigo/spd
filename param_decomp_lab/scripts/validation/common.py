@@ -272,6 +272,60 @@ def parse_module_name(module_name: str) -> tuple[int, str]:
     return int(match.group(1)), module_name[match.end() :]
 
 
+# The `find_alive_subcomponents` per-position CI JSON:
+# prompt -> position(str) -> module -> [{"component": int, "ci": float}]
+PerPosition = dict[str, dict[str, dict[str, list[dict[str, Any]]]]]
+OP_LABEL = {"+": "add", "-": "sub", "*": "mult", "×": "mult"}
+
+
+def parse_ab_prompts(
+    data: PerPosition, op: str, grep: str | None
+) -> tuple[dict[str, tuple[int, int]], int, int]:
+    """Map each `a<op>b=` prompt to `(a, b)` (keeping only those containing `grep`); also
+    return `(a_max, b_max)`."""
+    pattern = re.compile(rf"^(\d+){re.escape(op)}(\d+)=$")
+    ab: dict[str, tuple[int, int]] = {}
+    for prompt in data:
+        if grep is not None and grep not in prompt:
+            continue
+        match = pattern.match(prompt)
+        if match is not None:
+            ab[prompt] = (int(match.group(1)), int(match.group(2)))
+    assert ab, f"no prompts of the form 'a{op}b=' (grep={grep!r}) found in the JSON"
+    a_max = max(a for a, _ in ab.values())
+    b_max = max(b for _, b in ab.values())
+    return ab, a_max, b_max
+
+
+def build_ci_grids(
+    data: PerPosition,
+    ab: dict[str, tuple[int, int]],
+    a_max: int,
+    b_max: int,
+    keep_modules: set[str],
+) -> dict[str, dict[str, dict[int, np.ndarray]]]:
+    """pos -> module -> component -> [b_max, a_max] CI grid (filled lazily, 0 where inactive).
+
+    Only `keep_modules` are materialised — skipping the rest keeps memory bounded on
+    full-network runs (dozens of matrices) where the caller plots one module subset.
+    """
+    grids: dict[str, dict[str, dict[int, np.ndarray]]] = {}
+    for prompt, (a, b) in ab.items():
+        for pos, per_module in data[prompt].items():
+            per_pos = grids.setdefault(pos, {})
+            for module, comps in per_module.items():
+                if module not in keep_modules:
+                    continue
+                per_mod = per_pos.setdefault(module, {})
+                for entry in comps:
+                    grid = per_mod.get(entry["component"])
+                    if grid is None:
+                        grid = np.zeros((b_max, a_max))
+                        per_mod[entry["component"]] = grid
+                    grid[b - 1, a - 1] = entry["ci"]
+    return grids
+
+
 @dataclass(frozen=True)
 class SlurmOptions:
     """The `--slurm` flag plus its SLURM knobs, shared by every GPU validation script.

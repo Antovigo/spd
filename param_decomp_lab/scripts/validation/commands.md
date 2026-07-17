@@ -107,6 +107,14 @@ uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --
 uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --op=- --ci-thr=0.5
 ```
 
+## score_period_separation
+
+CPU-only — score each subcomponent's period purity from the per-position JSON.
+
+```bash
+uv run python -m param_decomp_lab.scripts.validation.score_period_separation "$JSON"
+```
+
 ## build_addition_explorer
 
 Interactive, GPU-free HTML explorer for `a+b=` runs: detects each component's periodic

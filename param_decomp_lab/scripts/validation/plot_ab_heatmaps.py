@@ -20,7 +20,6 @@ Output: `<run_dir>/analysis/ab_heatmaps_<add|sub|mult>/position_<pos>.png` (one 
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -33,14 +32,15 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from param_decomp.log import logger  # noqa: E402
 from param_decomp_lab.scripts.validation.common import (  # noqa: E402
+    OP_LABEL,
+    PerPosition,
     analysis_dir,
+    build_ci_grids,
+    parse_ab_prompts,
     parse_module_name,
     run_dir_of_dataset,
 )
 
-# prompt -> position(str) -> module -> [{"component": int, "ci": float}]
-PerPosition = dict[str, dict[str, dict[str, list[dict[str, Any]]]]]
-_OP_LABEL = {"+": "add", "-": "sub", "*": "mult", "×": "mult"}
 _TILE_IN = 0.5  # square side of each a×b tile, inches
 _COL_GAP_IN = 0.12  # horizontal gap between tiles
 _ROW_GAP_IN = 0.62  # vertical gap between matrix rows (room for the big facet labels)
@@ -51,58 +51,10 @@ _CBAR_LEN_IN = 2.2  # horizontal colorbar length, ~matching the old vertical bar
 _TITLE_FS, _FACET_FS, _LABEL_FS, _AXIS_FS, _TICK_FS = 11, 9.75, 6.5, 6.3, 4.5
 
 
-def _parse_ab(
-    data: PerPosition, op: str, grep: str | None
-) -> tuple[dict[str, tuple[int, int]], int, int]:
-    """Map each `a<op>b=` prompt to `(a, b)` (keeping only those containing `grep`); also
-    return `(a_max, b_max)`."""
-    pattern = re.compile(rf"^(\d+){re.escape(op)}(\d+)=$")
-    ab: dict[str, tuple[int, int]] = {}
-    for prompt in data:
-        if grep is not None and grep not in prompt:
-            continue
-        match = pattern.match(prompt)
-        if match is not None:
-            ab[prompt] = (int(match.group(1)), int(match.group(2)))
-    assert ab, f"no prompts of the form 'a{op}b=' (grep={grep!r}) found in the JSON"
-    a_max = max(a for a, _ in ab.values())
-    b_max = max(b for _, b in ab.values())
-    return ab, a_max, b_max
-
-
 def _all_modules(data: PerPosition) -> list[str]:
     """Every decomposed module appearing in the JSON, ordered by `(layer, matrix)`."""
     modules = {m for pp in data.values() for pm in pp.values() for m in pm}
     return sorted(modules, key=parse_module_name)
-
-
-def _build_grids(
-    data: PerPosition,
-    ab: dict[str, tuple[int, int]],
-    a_max: int,
-    b_max: int,
-    keep_modules: set[str],
-) -> dict[str, dict[str, dict[int, np.ndarray]]]:
-    """pos -> module -> component -> [b_max, a_max] CI grid (filled lazily, 0 where inactive).
-
-    Only `keep_modules` are materialised — skipping the rest keeps memory bounded on
-    full-network runs (dozens of matrices) where the caller plots one module subset.
-    """
-    grids: dict[str, dict[str, dict[int, np.ndarray]]] = {}
-    for prompt, (a, b) in ab.items():
-        for pos, per_module in data[prompt].items():
-            per_pos = grids.setdefault(pos, {})
-            for module, comps in per_module.items():
-                if module not in keep_modules:
-                    continue
-                per_mod = per_pos.setdefault(module, {})
-                for entry in comps:
-                    grid = per_mod.get(entry["component"])
-                    if grid is None:
-                        grid = np.zeros((b_max, a_max))
-                        per_mod[entry["component"]] = grid
-                    grid[b - 1, a - 1] = entry["ci"]
-    return grids
 
 
 def _plot_position(
@@ -230,14 +182,14 @@ def plot_ab_heatmaps(
     modules whose name contains that substring. `position` restricts output to that single
     token position (e.g. `--position=4` for the `=` answer token of a last-token run).
     """
-    assert op in _OP_LABEL, f"--op must be one of {list(_OP_LABEL)}, got {op!r}"
+    assert op in OP_LABEL, f"--op must be one of {list(OP_LABEL)}, got {op!r}"
     json_file = Path(json_path).expanduser()
     data: PerPosition = json.loads(json_file.read_text())
 
-    ab, a_max, b_max = _parse_ab(data, op, grep)
+    ab, a_max, b_max = parse_ab_prompts(data, op, grep)
     all_modules = [m for m in _all_modules(data) if module_grep is None or module_grep in m]
     assert all_modules, f"no modules match module_grep={module_grep!r}"
-    grids = _build_grids(data, ab, a_max, b_max, set(all_modules))
+    grids = build_ci_grids(data, ab, a_max, b_max, set(all_modules))
     # Mean CI is taken over the displayed (a, b) prompts only (a full grid has unused cells,
     # e.g. for subtraction); inactive/sub-threshold cells are 0 in the grid.
     displayed = np.zeros((b_max, a_max), dtype=bool)
@@ -252,7 +204,7 @@ def plot_ab_heatmaps(
     out_dir = (
         Path(output_dir).expanduser()
         if output_dir
-        else analysis_dir(run_dir_of_dataset(json_file)) / f"ab_heatmaps_{_OP_LABEL[op]}"
+        else analysis_dir(run_dir_of_dataset(json_file)) / f"ab_heatmaps_{OP_LABEL[op]}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("position_*.png"):  # don't leave figures from a prior, wider run

@@ -228,6 +228,26 @@ colorbar). All alive subcomponents are shown; subplot titles are the component i
 labels the matrix, and the figure carries `a` / `b` operand axis titles. Writes one PNG per
 position (`position_<pos>.png`).
 
+**score_period_separation.py**
+
+args:
+- the per-position JSON from `find_alive_subcomponents.py` (prompts must be `a<op>b=`)
+- `--min-mass`: mean-CI cutoff below which a (position, subcomponent) grid is skipped (default 0.01)
+- `--output` / `--output-summary`: override the two TSV paths
+
+CPU-only (no model loaded). Quantifies how cleanly each subcomponent's CI pattern isolates a
+single operand period. Per (op, position, subcomponent) the `[b, a]` CI grid is DC-removed and
+2D-FFT'd; power is grouped into conjugate frequency orbits labelled `a` / `b` / `a+b` / `a-b` /
+`mixed2d` with an integer period. Reports `purity` (top orbit's power share), `band_purity`
+(top orbit + its harmonics — the headline cleanliness number, `> 0.5` = clean),
+`n_orbits_50/90` (orbits to reach that power share), and the top-3 orbits. Always-on grids
+(std < 0.05) are labelled `flat` and excluded from aggregates. Subtraction's triangular
+prompt coverage falls back to 1D marginal FFTs (diagonal structure invisible there — compare
+runs on the `+` rows). Writes `period_separation.tsv` (per-subcomponent rows) and
+`period_separation_summary.tsv` (per op × position × matrix: `n_clean`, `n_flat`,
+median / mass-weighted `band_purity`, `mean_n_orbits_50`, per-period counts). A
+`..._step<k>` JSON yields `..._step<k>.tsv` outputs.
+
 **screen_components_on_data.py**
 
 args:
