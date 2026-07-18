@@ -135,3 +135,47 @@ Testing the "early strong convex impmin" model and its recon trade-off, all at 5
 
 Trains 4823 / 4825 / 4827 / 4829 (s1 queued behind 4823 for the GPU cap), analyses
 4824 / 4826 / 4828 / 4830 chained `afterok`.
+
+## 2026-07-18 — wave 2 results: seed noise floor + which metrics discriminate
+
+Full 5k probe table (`+` pos-4 MLP; alive = anchored sweep count, NOT comparable across
+recipes with different recon — the anchor moves):
+
+| probe | n | clean | med_band | mw_band | n50 | alive | PGD | rounded |
+|---|---|---|---|---|---|---|---|---|
+| base | 71 | 8 | 0.271 | 0.312 | 33.0 | 177 | 0.00951 | 0.00898 |
+| base-s1 (seed 1) | 84 | 8 | 0.257 | 0.299 | 32.1 | 215 | 0.00934 | 0.00904 |
+| p1 | 81 | 7 | 0.273 | 0.297 | 29.1 | 315 | 0.00854 | 0.00759 |
+| nopeak | 92 | 8 | 0.253 | 0.261 | 27.3 | 260 | 0.00706 | 0.00607 |
+| 5x | 49 | 3 | 0.270 | 0.296 | 32.7 | 315 | 0.01222 | 0.01152 |
+| 5x-hid0.1 | 43 | 4 | 0.290 | 0.324 | 17.4 | 260 | 0.01231 | 0.01157 |
+| 5xanneal0.5 | 54 | 5 | 0.283 | 0.289 | 21.2 | 260 | 0.01118 | 0.01055 |
+
+- **Seed noise floor** (base vs base-s1): Δmed_band ≈ 0.015, Δn ≈ 13, Δalive ≈ 40.
+  ⇒ med_band differences among probes (all 0.25–0.29) are *within noise* at 5k; the
+  sweep-based `alive` is both noisy and anchor-confounded. The discriminative
+  metrics at 5k are the **pos-4 active count `n`** and **`mean n_orbits_50`**.
+- **Early-5x concentrates usage**: n = 49/43/54 for the 5x family vs 71–92 for 2x —
+  well beyond noise, replicating the 20k finding at probe scale. Purity per component
+  doesn't move yet at 5k (it emerged 10k→20k in the baselines).
+- **Hidden-acts 0.1 is what reduces mixing**: n50 17.4 (5x-hid0.1) and 21.2
+  (5xanneal0.5) vs ~32 for everything without it. hid_sched@5k (uncompressed schedule)
+  also sat at n50 13.3. The n50 signal tracks the hidden-acts term, not the impmin
+  strength.
+- Releasing impmin at mid-run (5xanneal0.5) recovered less recon than hoped
+  (0.0112 vs 0.0122 full-5x, base 0.0095) — early pressure does most of the recon
+  damage too, not just the separation work.
+
+Working model, updated: **early hidden-acts reconstruction pressure pins components to
+period-specific neuron groups (low mixing / n50); early impmin strength prunes the
+active set (low n) at a recon cost.** The two compose (hid_sched-5x was the 20k
+winner).
+
+## 2026-07-18 — wave 3 (design + launch): isolate the hidden-acts axis
+
+All 5k, vs base/base-s1: `psep-hid0.1` (2x impmin + hidden-acts 0.1 → ~0 — compressed
+hid_sched; does hid0.1 alone reduce n50 without the 5x recon cost?), `psep-hid0.3`
+(3x that pressure — dose response), `psep-5x-hidconst` (5x + hidden-acts 0.1 constant,
+no decay — is the *decay* needed, or is constant support better late?).
+
+Trains 4935 / 4937 / 4939, analyses 4936 / 4938 / 4940 chained.
