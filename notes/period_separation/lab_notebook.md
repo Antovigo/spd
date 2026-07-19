@@ -179,3 +179,31 @@ hid_sched; does hid0.1 alone reduce n50 without the 5x recon cost?), `psep-hid0.
 no decay — is the *decay* needed, or is constant support better late?).
 
 Trains 4935 / 4937 / 4939, analyses 4936 / 4938 / 4940 chained.
+
+## 2026-07-19 — wave 3 results: hid-acts dose & shape
+
+| probe | n | clean | med_band | mw_band | n50 | PGD |
+|---|---|---|---|---|---|---|
+| hid0.1 (2x) | 76 | 6 | 0.291 | 0.309 | 23.9 | 0.00936 |
+| hid0.3 (2x) | 80 | 9 | 0.232 | 0.296 | 31.7 | 0.00926 |
+| 5x-hidconst | 47 | 5 | 0.314 | 0.336 | 30.4 | 0.01197 |
+
+- **hid0.1 alone reduces mixing for free**: n50 33 → 24 at unchanged recon (PGD 0.0094 ≈
+  base) — but doesn't concentrate usage (n 76 ≈ base). The two levers really are
+  independent.
+- **Dose is non-monotonic**: 0.3 loses the n50 gain (31.7) and has the worst med_band.
+  0.1 is near the sweet spot; don't push the coefficient, shape it.
+- **The decay matters**: 5x + *constant* 0.1 keeps n low (47) but n50 back at 30 (vs
+  17.4 decayed). Holding the hidden-acts constraint to the end freezes mixed patterns
+  in; pressing early and releasing lets impmin clean up late. (Its med/mw_band are the
+  highest, though — worth a second look when validating.)
+
+## 2026-07-19 — wave 4 (design + launch): push and protect the winner
+
+- `psep-10x-hid0.1` — impmin 10x → 1x, hid 0.1 → 0: does usage concentrate further
+  (n < 43), and does recon degrade gracefully or collapse?
+- `psep-5x-hid0.1-p1` — the winning combo but `p_anneal_final_p 1.0`: is late concave-p
+  needed at all once the early pressure has done the work, and does dropping it buy
+  recon?
+
+Trains 5018 / 5020, analyses 5019 / 5021 chained.
