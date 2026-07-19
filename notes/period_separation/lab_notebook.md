@@ -207,3 +207,21 @@ Trains 4935 / 4937 / 4939, analyses 4936 / 4938 / 4940 chained.
   recon?
 
 Trains 5018 / 5020, analyses 5019 / 5021 chained.
+
+## 2026-07-19 — wave 4 results: the frontier scales; late concave-p is load-bearing
+
+| probe | n | clean | med_band | mw_band | n50 | PGD |
+|---|---|---|---|---|---|---|
+| 10x-hid0.1 | 28 | 4 | 0.274 | 0.326 | 15.2 | 0.01507 |
+| 5x-hid0.1-p1 | 51 | 7 | 0.238 | 0.296 | 48.3 | 0.01226 |
+
+- **10x keeps sliding the Pareto**: n 43 → 28, n50 17.4 → 15.2, recon 0.0123 → 0.0151.
+  Degradation is roughly linear in the multiplier — no cliff up to 10x.
+- **Dropping the late concave-p phase destroys mixing**: n50 48.3 (worst of all 12
+  probes), recon unchanged. Combined with wave 1 (p1 alone ≈ base) the interaction is
+  now clear: with strong early pressure, the late concave phase is what *purifies* the
+  concentrated components. It refines, it does not merge — H1 fully inverted.
+- 20k validation of `10x-hid0.1` launched as `addsub-L18-07-10x-hid0.1`
+  (train 5036, analyze 5037).
+
+Final 12-probe table lives in report.md; findings consolidated there.
