@@ -77,6 +77,25 @@ def _end_state_impmin(
     )
 
 
+def _anneal_impmin(
+    cfg: ImportanceMinimalityLossConfig, coeff: float
+) -> ImportanceMinimalityLossConfig:
+    """Replay the sources' full impmin schedule over the merge: coeff 2x -> 1x, p -> 0.5."""
+    assert cfg.pnorm == 2.0, f"anneal merge expects sources pinned at pnorm 2.0, got {cfg.pnorm}"
+    return cfg.model_copy(
+        update={
+            "coeff": coeff,
+            "p_anneal_final_p": 0.5,
+            "p_anneal_start_frac": 0.0,
+            "p_anneal_end_frac": 1.0,
+            "coeff_warmup_frac": 0.0,
+            "coeff_peak_multiplier": 2.0,
+            "coeff_anneal_start_frac": 0.0,
+            "coeff_anneal_end_frac": 1.0,
+        }
+    )
+
+
 def make_combined_config(
     sources: list[SourceRun],
     *,
@@ -86,6 +105,7 @@ def make_combined_config(
     components_lr: float,
     ci_fn_lr: float,
     impmin_coeff: float,
+    impmin_anneal: bool,
     ci_fn_mode: CiFnMode,
     ci_d_model: int | None,
     ci_n_blocks: int | None,
@@ -118,8 +138,9 @@ def make_combined_config(
             )
             ci_config = ref_ci.model_copy(update={"simple_transformer_ci_cfg": transformer_cfg})
 
+    impmin = _anneal_impmin if impmin_anneal else _end_state_impmin
     loss_metrics = [
-        _end_state_impmin(m, impmin_coeff) if isinstance(m, ImportanceMinimalityLossConfig) else m
+        impmin(m, impmin_coeff) if isinstance(m, ImportanceMinimalityLossConfig) else m
         for m in ref_pd.loss_metrics
     ]
 
@@ -216,6 +237,7 @@ def main(
     init_from: str | None = None,
     franken_init: str | None = None,
     impmin_coeff: float | None = None,
+    impmin_anneal: bool = False,
     ci_fn_mode: CiFnMode = "grouped",
     ci_d_model: int | None = None,
     ci_n_blocks: int | None = None,
@@ -253,6 +275,10 @@ def main(
             reconciliation).
         impmin_coeff: Importance-minimality coeff; defaults to min over sources of
             their base (end-of-anneal) coeff.
+        impmin_anneal: Replay the full impmin schedule over the merge instead of
+            pinning the end state: coeff ramps 2x -> 1x `impmin_coeff` and p anneals
+            2.0 -> 0.5 across the merge steps. For merging sources trained with
+            pinned schedules (pnorm 2, peak coeff).
         ci_fn_mode: 'grouped' loads each source's CI fn as a per-block group;
             'global_fresh' trains a single randomly-initialised global CI fn over all
             blocks (objective 3).
@@ -285,6 +311,7 @@ def main(
         components_lr=FROZEN_LR if freeze_components else components_lr,
         ci_fn_lr=FROZEN_LR if freeze_ci_fns else ci_fn_lr,
         impmin_coeff=effective_impmin,
+        impmin_anneal=impmin_anneal,
         ci_fn_mode=ci_fn_mode,
         ci_d_model=ci_d_model,
         ci_n_blocks=ci_n_blocks,
@@ -340,6 +367,7 @@ def main(
             "freeze_ci_fns": freeze_ci_fns,
             "freeze_components": freeze_components,
             "freeze_alive_components": freeze_alive_components,
+            "impmin_anneal": impmin_anneal,
             "train_only_group": train_only_group,
             "init_from": init_from,
         }

@@ -407,3 +407,61 @@ Interpretation for interp workflows: this is the "fixed library" mode — source
 mechanisms stay bit-identical (any interpretation of them transfers verbatim), and
 everything new is cleanly separated in previously-dead components. The price at this
 budget is ~35% worse rounded recon and ~2× the L0 of the best variants.
+
+## Variant: deferred anneal — flat-schedule singles, anneal during the merge
+
+The threshold account says the sources' schedules binarise and prune in the wrong
+context: the p 2→0.5 anneal happens during *single-block* training, where a redundant
+component's marginal value is ε (its partner sits in the exact remainder), so
+cross-block redundancy is discarded before merging ever starts. This variant defers
+the entire anneal to the merge: retrain L16/L17/L18 with **pinned schedules**
+(pnorm 2 and coeff pinned at the source's peak 2× value throughout; step-matched to
+the sources at 20k/20k/24k), then merge (3 blocks, "both" recipe, batch 32,
+**10k steps**) while replaying the full schedule — coeff 6e-5 → 3e-5, p 2.0 → 0.5 —
+across the merge (`finetune.py --impmin_anneal`).
+
+**Flat-schedule singles match the annealed sources** on-distribution, at moderately
+higher L0 — the predicted signature of not hard-pruning marginal components:
+
+| single | rounded | PGD | L0 | (annealed source) |
+|---|---|---|---|---|
+| L16 flatsched | 0.0070 | 0.0080 | 11.9 | 0.0072 / 9.6 |
+| L17 flatsched | 0.0064 | 0.0075 | 10.2 | 0.0062 / 8.0 |
+| L18 flatsched | 0.0056 | 0.0062 | 18.8 | 0.0055 / 12.6 |
+
+**The merge, against the matched control** — the original annealed L16/L17/L18
+sources merged identically (10k steps, "both" recipe) with the usual pinned
+end-state impmin:
+
+| subject (3-block model, same standalone eval) | rounded | PGD | L0 | ntgt rounded | ntgt L0 |
+|---|---|---|---|---|---|
+| raw combination, flat-schedule singles | 0.2316 | 0.3295 | 40.9 | 0.0088 | 2.46 |
+| raw combination, annealed sources | 0.2154 | 0.3218 | 30.2 | 0.0094 | 0.27 |
+| **anneal merge (deferred schedule)** | 0.0133 | **0.0217** | 40.3 | 0.0108 | 0.40 |
+| end-state control (annealed sources) | 0.0139 | 0.0290 | 38.5 | 0.0098 | 0.39 |
+
+Trajectories (rounded at steps 0/2k/4k/6k/8k/10k) nearly overlap: anneal 0.227 →
+0.0183 → 0.0164 → 0.0148 → 0.0136 → 0.0137; control 0.211 → 0.0188 → 0.0162 →
+0.0151 → 0.0138 → 0.0141. Both peak L0 ~52–54 mid-merge and settle at ~39.
+
+Key conclusions:
+
+1. **The deferred anneal is a wash on the joint objective.** Rounded, L0, and both
+   nontarget metrics land within noise of the control; both merges converge to the
+   same absolute L0 (~39) from opposite directions (the flat singles start with more
+   alive, the annealed ones grow into it). Where pruning decisions are *made* —
+   single-block context vs merge context — did not change what the merged model
+   ends up keeping, at this scale.
+2. **The one consistent edge is adversarial**: PGD 0.0217 vs 0.0290 (~25% better),
+   coherent with masks binarised in the merged context being harder to attack —
+   but a single run pair; treat as suggestive.
+3. **The dramatic improvement over the earlier 4-block merges (0.0133–0.0139 vs
+   0.0228–0.0239) is budget and block count, not the schedule.** The earlier "the
+   soft phase repairs fast" reading of the step-2000 value was an LR-schedule
+   artifact: at step 2k of a 10k cosine the LR is still ~0.9×, where the 2k merges
+   had fully decayed — the control shows the identical 2k value (0.0188 vs 0.0183)
+   with no anneal in play. The 3-vs-4-block share of the gap remains unseparated.
+4. **Flat schedules neither fix raw combination** (0.2316, slightly worse than the
+   annealed sources' 0.2154) **nor cost single-block quality** (recon matched at
+   +30–50% L0). If deferring the anneal is operationally convenient, it appears
+   safe — it just isn't the mechanism that makes merging work.

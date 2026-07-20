@@ -1,6 +1,64 @@
 # Lab notebook — combine_layers
 
-## 2026-07-16 (continued)
+## 2026-07-18
+
+### Deferred-anneal results — best merge so far
+
+- **Slip:** the 10k-step edit to the singles' YAMLs raced their job start (the
+  svd-tpd pipeline freed GPUs ~16h before its ETA and the jobs had already read the
+  configs) — they ran the full 20k/20k/24k. Net effect: step-matched to the original
+  sources after all; only the merge (4831) ran at the requested 10k.
+- Flat-schedule singles ≈ sources on recon (0.0056–0.0070) at higher L0
+  (11.9/10.2/18.8 vs 9.6/8.0/12.6) — marginal components survive p=2, as predicted.
+- Anneal merge `combine-L16-18-anneal-01`: **rounded 0.0133 / PGD 0.0217 / L0 40.3 /
+  ntgt 0.0108 / ntgt L0 0.40**. Recon 2.2× singles (4-block merges: ~4×), L0 = sum of
+  singles, ntgt L0 below the singles' sum. Raw combination of the flat singles still
+  fails (0.2316). At step 2k (old budget) already 0.0183 < both-02's 0.0239.
+- Control launched (job 4941, `combine-L16-18-endstate10k-01`): original annealed
+  L16/17/18 sources, end-state impmin, 10k steps — isolates deferred-anneal from
+  the 3-block/10k confounds.
+
+### Control result (2026-07-19): deferred anneal is a wash
+
+- Control: rounded 0.0139 / PGD 0.0290 / L0 38.5 / ntgt 0.0098 / ntgt L0 0.39 —
+  within noise of the anneal merge on everything except PGD (0.0290 vs 0.0217, the
+  anneal's one consistent ~25% edge; n=1, suggestive only).
+- Trajectories overlap (0.0188 vs 0.0183 at 2k) → my "soft phase repairs fast"
+  claim was an LR-schedule artifact (10k cosine still ~0.9× LR at step 2k; the 2k
+  merges were fully decayed). Both merges converge to L0 ≈ 39 from opposite sides.
+- Net: the 0.023→0.013 improvement over the 4-block merges = budget (+ maybe
+  3-vs-4 blocks); *where* the anneal happens doesn't move the joint objective.
+  Report section rewritten accordingly.
+
+## 2026-07-17
+
+### Deferred-anneal experiment launched (flat-schedule singles + annealing merge)
+
+- Idea (user): the sources annealed coeff ×2→×1 and p 2→0.5 *during single-block
+  training*, so pruning decisions were binarised in the wrong (intact-model) context.
+  Retrain L16/L17/L18 with **pinned schedules** (pnorm 2 throughout, coeff pinned at
+  the source's peak = 2× base: 1e-4/1e-4/6e-5), then run the *entire* anneal during
+  the merge. Per the threshold account, p=2 keeps interior optima (graded CIs, no
+  hard pruning), so cross-block redundancy should still be represented when the
+  binarising anneal happens — in the combined context, where its marginal value is
+  priced correctly.
+- New configs `~/pd_scratch/combine_layers/configs/addsub-L1{6,7,8}-06-flatsched.yaml`
+  (copies of the sources; only impmin schedule fields changed; **all 10k steps** —
+  user shortened from the sources' 20k/24k, so absolute quality is not directly
+  comparable to the originals, only the schedule contrast is). New `--impmin_anneal`
+  in `combine/finetune.py`: merge impmin replays the source schedule over the merge
+  steps (coeff 2×→1× of `--impmin_coeff`=3e-5, i.e. 6e-5→3e-5; p 2.0→0.5). Merge =
+  "both" recipe (grouped CI fns, everything trains), batch 32, **10k steps**, label
+  `combine-L16-18-anneal-01`. Note the merge is 3 blocks (no L19, per the ask).
+- Scheduling: user's svd-tpd pipeline holds all 6 GPUs. Jobs 4819 (L16, after the
+  3 svd-tpd jobs) and 4820/4821 (L17/L18, additionally after the 3 psep-analyze
+  jobs) each take 2 GPUs — worst-case concurrent usage stays ≤ 6. Merge + eval job
+  4831 (re-submitted after the 10k-step change; sbatch spools scripts, so the queued
+  4822 had to be cancelled) gated afterok on all three. Expected: singles start
+  ~+17h, run ~8–9.5h; merge ~6h at batch 32 (2.1 s/it per the frzalive run); results
+  in ~33h.
+
+## 2026-07-16
 
 ### freeze_alive_train_dead results
 

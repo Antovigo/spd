@@ -82,6 +82,9 @@ from the source runs (written to the run dir as usual, so `SavedLMRun` reloads w
   `U`; a non-persistent `frozen_subcomponents` buffer that
   `_apply_ci_scaled_weight_decay` respects). Test:
   `param_decomp/tests/test_frozen_subcomponents.py`.
+- `--impmin_anneal`: replay the sources' full impmin schedule over the merge (coeff
+  2×→1× of `--impmin_coeff`, p 2.0 → 0.5) instead of pinning the end state — for
+  merging sources trained with pinned schedules (pnorm 2, peak coeff throughout).
 - `--wandb=False` + `--nontarget_batch_size` for cheap probes.
 - Weights are loaded into `trainer.component_model` after `Trainer` construction
   (all DDP ranks load identical files, so no desync). `combine_provenance.json` in the

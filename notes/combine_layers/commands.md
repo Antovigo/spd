@@ -138,6 +138,24 @@ sbatch -J combine-frzalive ~/pd_scratch/combine_layers/obj2_finetune.sbatch \
   --group=combine-layers --tags=combine,freeze_alive_train_dead
 ```
 
+## Deferred-anneal experiment (flat-schedule singles + annealing merge)
+
+Single-block runs with pinned impmin schedules (pnorm 2, coeff = 2× base throughout;
+configs are source copies with only the impmin schedule fields changed):
+
+```bash
+C=~/pd_scratch/combine_layers/configs
+sbatch -J flatsched-L16 ~/pd_scratch/combine_layers/run_ddp.sbatch \
+  $C/addsub-L16-06-flatsched.yaml addsub-L16-06-flatsched   # 2 GPUs each
+```
+
+Merge with the anneal replayed over the merge steps (coeff 6e-5 → 3e-5, p 2 → 0.5),
+then the standalone eval (singles + raw combined + merged in one JSON):
+
+```bash
+sbatch ~/pd_scratch/combine_layers/anneal_merge.sbatch
+```
+
 ## Post-hoc analysis (AB heatmaps, subspace scatter)
 
 Alive lists — `--kl-thr` must be the run's own final rounded recon (see
