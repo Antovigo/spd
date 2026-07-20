@@ -1,5 +1,60 @@
 # Lab notebook — combine_layers
 
+## 2026-07-16 (continued)
+
+### freeze_alive_train_dead results
+
+- Job 4791 completed 2000 steps (~70 min, 2.08 s/it); standalone eval (job 4796):
+  rounded **0.0359**, PGD 0.0703, L0 152.6, ntgt rounded 0.0131, ntgt L0 2.50.
+- Beats the over-sparse run (0.0431/0.126) on both recon metrics with zero freedom on
+  alive weights → the repair is substantially routing + new glue, not weight
+  adjustment. Gap to the unfrozen fresh-CI variant remains (0.0359 vs 0.0266), L0
+  highest of all variants, still falling at cutoff.
+- Per-block L0 45.2/26.4/62.9/18.1 (L16/17/18/19): the L16/L18 redundancy-carrier
+  pattern replicates the obj-4 resurrection finding via an independent protocol.
+- First launch (4790) crashed instantly: fire parses `--tags=a,b` into a tuple but
+  `init_pd_run` expects a comma string — pass a single tag.
+- Report section + obj2 figures updated (new subject in dot plot and trajectories).
+
+### freeze_alive_train_dead launched
+
+- New variant (job 4790, `combine-L16-19-freeze_alive_train_dead-01`): freeze the
+  sources' reference-alive subcomponents (per-run `alive_subcomponents.tsv`:
+  146/100/177/177 for L16/17/18/19), train only the dead subcomponents + ONE fresh
+  global CI fn (obj-3 settings: ci_fn_lr 1.6e-4, components_lr 1e-4, batch 32).
+  Hypothesis: all repair is forced into previously-dead capacity, so the validated
+  single-block mechanisms provably cannot be polluted (stronger guarantee than the
+  completeness protocol's per-block attributability).
+- Machinery: per-subcomponent freezing is new —
+  `Components.freeze_subcomponents(frozen)` in core (grad hooks zero frozen columns
+  of V / rows of U; non-persistent buffer that `_apply_ci_scaled_weight_decay`
+  respects), `--freeze_alive_components` in `combine/finetune.py`. Test:
+  `test_frozen_subcomponents.py`.
+- Note: the frozen-alive weights are frozen, but the fresh CI fn is still free to
+  mask them — "frozen" constrains weights, not masks.
+
+### Analysis: AB heatmaps, subspace scatter, alive-threshold fix
+
+- **kl-thr convention violation caught (user)**: I ran `find_alive_subcomponents` on
+  the three fine-tuned combined runs with the default `--kl-thr=0.008`, but the
+  convention is *the run's own observed rounded recon* (0.008 is just the reference
+  run's 0.0074). Re-cut on CPU from the npz (no GPU rerun): both-02 thr 0.0239 →
+  2270 alive, freshci-01 thr 0.0266 → 2270, complete-joint-01 thr 0.0228 → 2849
+  (all previously 5634/7072). Heatmaps barely changed (the CI > 0.1 collection filter
+  dominated) but the alive TSVs are now the real reference lists. Convention added
+  to `scripts/validation/commands.md`.
+- AB heatmaps for the three fine-tuned runs (add+sub, all positions) in each run's
+  `analysis/ab_heatmaps_*`; facet labels now layer-qualified (`L16 gate_proj`) —
+  `plot_ab_heatmaps` fix, since combined runs have 4 layers of same-named matrices.
+- Subspace-scatter applet for both-02 (`analysis/subspace_scatter/index.html`,
+  L18 MLP): chain needed two combined-run fixes — `collect_hidden_activations
+  --layer=18` (its single-decomposed-MLP autodetect asserts on 4 layers) and an
+  L18-only alive TSV for `collect_inner_activations` (the applet infers its layer
+  from the alive list). 169 (add) / 82 (sub) alive-filtered MLP components.
+- Report: hyperparameter-summary section; formal account of completeness training +
+  mathematical pruning-threshold criterion (prune ⇔ ΔKL < τ = λ/w; redundant pairs;
+  ε < τ < F′ repair window).
+
 ## 2026-07-15
 
 ### Setup / reconnaissance

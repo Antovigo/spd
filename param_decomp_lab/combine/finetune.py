@@ -15,6 +15,7 @@ import json
 from typing import Literal
 
 import fire
+import torch
 
 from param_decomp.ci_fns import GlobalCiConfig, GroupedGlobalCiFnWrapper
 from param_decomp.component_model import ComponentModel
@@ -166,6 +167,26 @@ def make_combined_config(
     )
 
 
+def _freeze_alive_subcomponents(component_model: ComponentModel, sources: list[SourceRun]) -> None:
+    """Pin each source's reference-alive subcomponents; the dead ones stay trainable."""
+    from param_decomp_lab.scripts.validation.common import read_alive_components
+
+    alive_by_module: dict[str, list[int]] = {}
+    for source in sources:
+        tsv = source.checkpoint_path.parent / "analysis" / "datasets" / "alive_subcomponents.tsv"
+        for entry in read_alive_components(tsv):
+            alive_by_module.setdefault(entry.module, []).append(entry.component)
+    n_frozen = 0
+    for path, component in component_model.components.items():
+        frozen = torch.zeros(component.C, dtype=torch.bool)
+        frozen[alive_by_module.get(path, [])] = True
+        component.freeze_subcomponents(frozen)
+        n_frozen += int(frozen.sum())
+    logger.info(
+        f"froze {n_frozen} alive subcomponents across {len(component_model.components)} modules"
+    )
+
+
 def _freeze_all_but_group(component_model: ComponentModel, group: str) -> None:
     ci_fn = component_model.ci_fn
     assert isinstance(ci_fn, GroupedGlobalCiFnWrapper)
@@ -190,6 +211,7 @@ def main(
     ci_fn_lr: float = 5e-5,
     freeze_ci_fns: bool = False,
     freeze_components: bool = False,
+    freeze_alive_components: bool = False,
     train_only_group: str | None = None,
     init_from: str | None = None,
     franken_init: str | None = None,
@@ -216,6 +238,10 @@ def main(
         ci_fn_lr: CI-fn LR; ignored when `freeze_ci_fns`.
         freeze_ci_fns: Pin the CI-fn LR to 0 (objective 2a).
         freeze_components: Pin the components LR to 0.
+        freeze_alive_components: Pin each source's reference-alive subcomponents
+            (its `analysis/datasets/alive_subcomponents.tsv`) at their loaded weights
+            — gradients zeroed, CI-scaled weight decay skipped — while the dead
+            subcomponents keep training (the freeze_alive_train_dead variant).
         train_only_group: Train only this block's components + CI fn (e.g.
             'layers17'); every other group is hard-frozen via requires_grad, which
             also exempts it from CI-scaled weight decay (objective 4 stage 2).
@@ -313,6 +339,7 @@ def main(
             "ci_fn_mode": ci_fn_mode,
             "freeze_ci_fns": freeze_ci_fns,
             "freeze_components": freeze_components,
+            "freeze_alive_components": freeze_alive_components,
             "train_only_group": train_only_group,
             "init_from": init_from,
         }
@@ -338,6 +365,8 @@ def main(
             load_franken_state(trainer.component_model, donors)
         if train_only_group is not None:
             _freeze_all_but_group(trainer.component_model, train_only_group)
+        if freeze_alive_components:
+            _freeze_alive_subcomponents(trainer.component_model, sources)
         trainer.run(train_loader, sink, cfg.cadence, eval_loop, nontarget=nontarget)
     finally:
         sink.finish()

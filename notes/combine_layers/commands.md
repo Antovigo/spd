@@ -126,8 +126,53 @@ python -m param_decomp_lab.combine.eval_combined \
   --out=$HOME/out/combine/obj4_franken_eval.json
 ```
 
+## freeze_alive_train_dead
+
+Freeze the sources' reference-alive subcomponents, train the dead ones + a fresh
+global CI fn (needs each source's `analysis/datasets/alive_subcomponents.tsv`):
+
+```bash
+sbatch -J combine-frzalive ~/pd_scratch/combine_layers/obj2_finetune.sbatch \
+  combine-L16-19-freeze_alive_train_dead-01 \
+  --ci_fn_mode=global_fresh --ci_fn_lr=1.6e-4 --freeze_alive_components=True \
+  --group=combine-layers --tags=combine,freeze_alive_train_dead
+```
+
+## Post-hoc analysis (AB heatmaps, subspace scatter)
+
+Alive lists — `--kl-thr` must be the run's own final rounded recon (see
+`scripts/validation/commands.md`); a wrong cut re-cuts on CPU from the npz:
+
+```bash
+python -m param_decomp_lab.scripts.validation.find_alive_subcomponents \
+  ~/out/runs/<run>/model_<step>.pth --kl-thr=<final rounded recon> --slurm
+```
+
+AB heatmaps (CPU) from the per-position JSON, both ops:
+
+```bash
+python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps \
+  ~/out/runs/<run>/analysis/datasets/alive_subcomponents_per_position.json --op=+
+```
+
+Subspace-scatter applet for a combined run (L18 MLP; the collect scripts assume a
+single decomposed MLP layer, so pass the layer + an L18-only alive TSV):
+
+```bash
+CKPT=~/out/runs/combine-L16-19-both-02/model_2000.pth
+D=~/out/runs/combine-L16-19-both-02/analysis/datasets
+# L18-only alive list (awk keeps the header + layer-18 rows):
+awk -F'\t' 'NR==1 || $1=="18"' $D/alive_subcomponents.tsv > $D/alive_subcomponents_L18mlp.tsv
+python -m param_decomp_lab.scripts.validation.collect_hidden_activations "$CKPT" --op=add --layer=18 --slurm
+python -m param_decomp_lab.scripts.validation.collect_inner_activations  "$CKPT" --op=add \
+  --alive-tsv=$D/alive_subcomponents_L18mlp.tsv --slurm
+python -m param_decomp_lab.scripts.validation.compute_subcomp_periods $D/inner_activations_add.tsv
+python -m param_decomp_lab.scripts.validation.build_subspace_scatter "$CKPT"
+```
+
 ## Tests
 
 ```bash
 python -m pytest param_decomp/tests/test_grouped_ci_fn.py -q
+python -m pytest param_decomp/tests/test_frozen_subcomponents.py -q
 ```

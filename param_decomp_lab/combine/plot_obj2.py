@@ -42,11 +42,13 @@ def _trajectory_figure(
         "combine-L16-19-both-02": "-",
         "combine-L16-19-frozenci-04": "--",
         "combine-L16-19-obj3-freshci-01": ":",
+        "combine-L16-19-freeze_alive_train_dead-01": "-.",
     }
     short = {
         "combine-L16-19-both-02": "both",
         "combine-L16-19-frozenci-04": "frozen CI",
         "combine-L16-19-obj3-freshci-01": "fresh single CI",
+        "combine-L16-19-freeze_alive_train_dead-01": "frozen alive",
     }
     for run_name, run_dir in run_dirs.items():
         records = _eval_records(run_dir)
@@ -129,6 +131,7 @@ def main(
     obj3_json: str | None = None,
     obj4_franken_json: str | None = None,
     obj4_joint_json: str | None = None,
+    frzalive_json: str | None = None,
 ) -> None:
     """Render obj-2/3/4 figures: merged subject dot plot + fine-tuning trajectories.
 
@@ -140,6 +143,7 @@ def main(
         obj3_json: eval_combined output with the fresh-single-CI subject (objective 3).
         obj4_franken_json: eval_combined output with the franken subject (objective 4).
         obj4_joint_json: eval_combined output with the reconciled subject (objective 4).
+        frzalive_json: eval_combined output with the freeze_alive_train_dead subject.
     """
     obj1 = json.loads(Path(obj1_json).read_text())
     obj2 = json.loads(Path(obj2_json).read_text())
@@ -150,9 +154,10 @@ def main(
         "combine-L16-19-obj3-freshci-01": "combined + FT (fresh single CI)",
         "franken": "per-block resurrected (no reconcile)",
         "complete-joint-01": "completeness (resurrect + reconcile)",
+        "combine-L16-19-freeze_alive_train_dead-01": "frozen alive + trained dead + fresh CI",
     }
     finetuned_results = dict(obj2["results"])
-    for extra in (obj3_json, obj4_franken_json, obj4_joint_json):
+    for extra in (obj3_json, obj4_franken_json, obj4_joint_json, frzalive_json):
         if extra is not None:
             finetuned_results.update(json.loads(Path(extra).read_text())["results"])
     for name, r in finetuned_results.items():
@@ -191,6 +196,7 @@ def main(
         "combine-L16-19-both-02",
         "combine-L16-19-frozenci-04",
         "combine-L16-19-obj3-freshci-01",
+        "combine-L16-19-freeze_alive_train_dead-01",
     )
     trajectory_runs = {
         name: Path(runs_dir) / name for name in trajectory_names if name in finetuned_results

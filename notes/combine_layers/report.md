@@ -360,3 +360,50 @@ would iterate (resurrect → reconcile → …) with no convergence guarantee.
   validation as any others.
 - **One-sided repair** — the protocol only adds components; spurious survivors of the
   over-sparse baseline are never pruned, and nothing re-checks the original alive set.
+
+## Variant: freeze_alive_train_dead — frozen mechanisms, trainable glue
+
+Setup: assemble the four sources, **freeze the 600 reference-alive subcomponents**
+(each source's `find_alive_subcomponents` list: 146/100/177/177) at their loaded
+weights — gradients zeroed, CI-scaled weight decay skipped — train only the dead
+subcomponents plus ONE fresh global CI fn (obj-3 architecture and LRs; 2000 steps,
+batch 32). The frozen weights guarantee the validated single-block mechanisms cannot
+be modified at all — a strictly stronger guarantee than the completeness protocol's
+per-block attributability. Note the asymmetry: weights are frozen, masks are not —
+the fresh CI fn may still mask an alive component off.
+
+| variant (standalone eval, same script/seed) | rounded | PGD | L0 | ntgt rounded | ntgt L0 |
+|---|---|---|---|---|---|
+| over-sparse (frozen CI, trained weights) | 0.0431 | 0.126 | 38.1 | 0.0132 | 0.35 |
+| **frozen alive weights, trained dead + fresh CI** | **0.0359** | **0.0703** | 152.6 | 0.0131 | 2.50 |
+| FT fresh single CI (nothing frozen) | 0.0266 | 0.0484 | 97.9 | 0.0132 | 2.73 |
+| FT both / completeness | 0.0239 / 0.0228 | 0.0551 / 0.0598 | 67.6 / 72.8 | 0.0133 / 0.0163 | 0.59 / 0.45 |
+
+Trajectory: rounded 0.728 → 0.0503 → 0.0361 (steps 0/500/2000), L0 3434 → 282 → 150,
+both still falling at cutoff — same not-yet-converged signature as obj 3.
+
+Key conclusions:
+
+1. **Routing + dead capacity beats weight-retuning.** With *zero* freedom on the alive
+   weights this reaches 0.0359 / PGD 0.070 — better on both metrics than the
+   over-sparse run (0.0431 / 0.126), which could retune every alive weight but not
+   the masks. A large share of the combination repair is re-routing and new glue
+   components, not adjustment of the existing mechanisms.
+2. **But frozen mechanisms leave a gap** (~1.4× the unfrozen fresh-CI variant at the
+   same budget: 0.0359 vs 0.0266) and cost sparsity: L0 152.6, the highest of any
+   variant. In the threshold account, repairs that a small weight change to an alive
+   component could provide must instead be assembled from dead components, each of
+   which then has to clear the impmin threshold on its own.
+3. **The recruitment is block-heterogeneous in the familiar way**: per-block L0
+   45.2 / 26.4 / 62.9 / 18.1 for L16/17/18/19 — L16 and L18 again carry the
+   redundancy, exactly as the obj-4 resurrection found (their per-block gains were
+   +12.6 / +14.8 there). Two independent protocols agree on where the missing
+   mechanisms live; notably `L16.self_attn.o_proj` alone accounts for 14.9 of L16's
+   L0.
+4. Off-distribution behaviour matches the fresh-CI variant (ntgt rounded 0.0131,
+   ntgt L0 2.50 vs 2.73) — the fresh CI fn, not the freezing, governs targeting.
+
+Interpretation for interp workflows: this is the "fixed library" mode — source
+mechanisms stay bit-identical (any interpretation of them transfers verbatim), and
+everything new is cleanly separated in previously-dead components. The price at this
+budget is ~35% worse rounded recon and ~2× the L0 of the best variants.

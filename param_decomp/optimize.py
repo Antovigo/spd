@@ -237,6 +237,8 @@ def _apply_ci_scaled_weight_decay(
                 continue
             global_ci_max = all_reduce(ci_max, op=ReduceOp.MAX).clamp(0.0, 1.0)
             keep = 1.0 - lr * coeff * (1.0 - global_ci_max)
+            if component.frozen_subcomponents is not None:
+                keep = keep.masked_fill(component.frozen_subcomponents, 1.0)
             component.V.mul_(keep[None, :])
             component.U.mul_(keep[:, None])
 

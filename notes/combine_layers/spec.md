@@ -74,6 +74,14 @@ from the source runs (written to the run dir as usual, so `SavedLMRun` reloads w
 - `--freeze_ci_fns` / `--freeze_components`: effective freeze via `FROZEN_LR=1e-12`
   (schedules require start_val > 0; hard `requires_grad_(False)` after DDP
   construction would stall the reducer; Adam's step is ≈lr regardless of grad scale).
+- `--freeze_alive_components` (the *freeze_alive_train_dead* variant): pin each
+  source's reference-alive subcomponents (its `analysis/datasets/alive_subcomponents.tsv`)
+  at their loaded weights while the dead subcomponents keep training. Per-subcomponent
+  freezing is a small core addition: `Components.freeze_subcomponents(frozen)` in
+  `param_decomp/components.py` (grad hooks zero the frozen columns of `V` / rows of
+  `U`; a non-persistent `frozen_subcomponents` buffer that
+  `_apply_ci_scaled_weight_decay` respects). Test:
+  `param_decomp/tests/test_frozen_subcomponents.py`.
 - `--wandb=False` + `--nontarget_batch_size` for cheap probes.
 - Weights are loaded into `trainer.component_model` after `Trainer` construction
   (all DDP ranks load identical files, so no desync). `combine_provenance.json` in the

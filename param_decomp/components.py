@@ -9,7 +9,7 @@ from typing import Literal, override
 
 import einops
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn
 from torch.nn.init import calculate_gain
 from transformers.pytorch_utils import Conv1D as RadfordConv1D
@@ -72,6 +72,19 @@ class Components(ABC, nn.Module):
         self.U = nn.Parameter(torch.empty(C, u_dim))
         init_param_(self.V, fan_val=v_dim, nonlinearity="linear")
         init_param_(self.U, fan_val=C, nonlinearity="linear")
+        self.register_buffer("frozen_subcomponents", None, persistent=False)
+        self.frozen_subcomponents: Tensor | None
+
+    def freeze_subcomponents(self, frozen: Bool[Tensor, " C"]) -> None:
+        """Pin subcomponents (column `V[:, c]` + row `U[c, :]` where `frozen[c]`): their
+        gradients are zeroed and `_apply_ci_scaled_weight_decay` leaves them untouched,
+        while the remaining subcomponents train normally. Not persisted in state dicts."""
+        assert frozen.shape == (self.C,) and frozen.dtype == torch.bool
+        assert self.frozen_subcomponents is None, "freeze_subcomponents may only be called once"
+        frozen = frozen.to(self.V.device)
+        self.frozen_subcomponents = frozen
+        self.V.register_hook(lambda g: g.masked_fill(frozen[None, :], 0.0))
+        self.U.register_hook(lambda g: g.masked_fill(frozen[:, None], 0.0))
 
     @property
     @abstractmethod
