@@ -1,6 +1,6 @@
 # Period separation — report
 
-2026-07-19. Question: which hyperparameters / training recipes make the targeted L18
+2026-07-20 (final). Question: which hyperparameters / training recipes make the targeted L18
 addsub decomposition assign **one operand period per subcomponent** (periods 2, 5, 10,
 20, 50, 100 — the model's Fourier features), instead of mixing several periods in one?
 
@@ -36,15 +36,23 @@ band-purity differences at 5k are mostly seed noise (base vs base-s1: ±0.015).
   (p1 / nopeak alone) just inflates the circuit (315 / 260 alive vs 177) with equally
   mixed components.
 
-**3. Recommended recipes** (all = coupled recipe + the listed changes):
+**3. Recommended recipe — the Pareto has a knee at 5x** (20k-validated):
 
-| goal | recipe | evidence |
-|---|---|---|
-| best separation, recon secondary | impmin peak **10x**→1x + hidden-acts **0.1**→0 (`addsub-L18-07-10x-hid0.1`, 20k validation running) | 5k: n=28, n50=15.2, PGD 0.0151 |
-| strong separation, moderate recon cost | peak **5x** + hidden-acts **0.1**→0 — the existing **`addsub-L18-05-hid_sched-5x`** | 20k: med_band 0.392 (vs 0.323 coupled), 34 active vs 59, 10/34 clean; PGD 0.0087 vs 0.0055 |
-| free improvement, recon parity | peak 2x + hidden-acts **0.1**→0 — the existing **`addsub-L18-05-hid_sched`** | 5k: n50 24 vs 33 at identical PGD; 20k: recon ≈ coupled |
+| run (20k) | n | clean | med_band | n50 | PGD |
+|---|---|---|---|---|---|
+| coupled (baseline) | 59 | 9 | 0.323 | 17.4 | 0.0055 |
+| hid_sched (2x + hid0.1→0) | 59 | 9 | 0.308 | 12.8 | 0.0056 |
+| **hid_sched-5x (5x + hid0.1→0)** | **34** | **10** | **0.392** | **7.6** | 0.0087 |
+| 10x-hid0.1 (`addsub-L18-07-10x-hid0.1`) | 26 | 6 | 0.401 | 15.2 | 0.0111 |
 
-Keep the default p-anneal (2.0 → 0.5 over training) in all cases.
+**`addsub-L18-05-hid_sched-5x` is the recommended recipe** (coupled + impmin peak 5x→1x
++ hidden-acts 0.1 exponentially decayed to ~0; default p-anneal kept): best mixing
+(n50 7.6, 2.3× better than baseline), most clean components (10), 34 vs 59 active, at a
+~60% recon premium. The 20k validation shows 10x is **past the knee**: usage concentrates
+further (26 active, med_band 0.401) but per-component mixing and the clean count get
+*worse* (n50 15.2, 6 clean) at higher recon cost — squeezing too few components forces
+periods back together. If recon parity is required, `hid_sched` (2x + hid0.1→0) still
+improves mixing for free (n50 12.8 vs 17.4).
 
 **4. Corroborating dynamics.** Purity improves late everywhere (coupled 15k→20k,
 hid_sched 5k→20k, 5x 10k→20k): the early phase decides *which* components exist
@@ -55,9 +63,9 @@ that point.
 ## Caveats / open threads
 
 - 5k probes compress every schedule; absolute purity numbers at 5k undershoot 20k ones.
-  All probe conclusions are probe-vs-probe at matched steps; the 5x direction is
-  additionally validated at 20k (baseline table), the 10x one pending (run
-  `addsub-L18-07-10x-hid0.1`).
+  All probe conclusions are probe-vs-probe at matched steps; the 5x and 10x directions
+  are both validated at 20k (table above). Note the 5k probes ranked 10x above 5x on
+  n50 — the knee only appears at full training length; final calls need the 20k run.
 - One seed replicate only; n and n50 cross the noise floor comfortably, med_band does
   not.
 - The metric reads CI usage grids. Weight-side confirmation (`collect_inner_activations`
