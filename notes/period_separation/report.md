@@ -1,96 +1,189 @@
-# Period separation — report
+# Period separation — dynamics model & experimental plan
 
-2026-07-20 (final). Question: which hyperparameters / training recipes make the targeted L18
-addsub decomposition assign **one operand period per subcomponent** (periods 2, 5, 10,
-20, 50, 100 — the model's Fourier features), instead of mixing several periods in one?
+2026-07-21. Rewritten: the 5k probe series (`addsub-L18-06-psep-*`) compressed every
+schedule into 5000 steps and is therefore **invalid** as evidence about scheduling
+dynamics; those runs are deleted (disk + wandb). What survives as evidence: the
+full-length 20k runs (the `addsub-L18-05-*` grid and `addsub-L18-07-10x-hid0.1`), which
+suggest — but on a different base recipe and without controls — that impmin dose and
+early hidden-acts pressure both matter. This report sets up the clean experiment.
 
-Method: `score_period_separation` (2D-FFT orbit purity of the per-position CI grids; see
-spec.md) over the existing 20k runs plus twelve 5000-step probe runs
-(`addsub-L18-06-psep-*`, schedules compressed into 5k). Metrics that discriminate above
-the seed-noise floor: the **answer-position active-component count `n`** (how
-concentrated usage is) and **`n_orbits_50`** (how mixed each component is); median
-band-purity differences at 5k are mostly seed noise (base vs base-s1: ±0.015).
+## 1. Objective (lexicographic)
 
-## Findings
+1. **Reconstruction accuracy first.** Maximize target-distribution reconstruction
+   (final whole-sequence rounded KL; PGD recon as the adversarial check). This is never
+   traded away.
+2. **Then separation.** Conditional on near-perfect reconstruction, subcomponents should
+   isolate the operand periods (2, 5, 10, 20, 50, 100) — one period per subcomponent.
+3. **Then parsimony.** Among decompositions at the same reconstruction level, fewer
+   subcomponents is better. Extra subcomponents that *enable* better reconstruction are
+   wanted; extra subcomponents at equal reconstruction are bloat.
 
-**1. Two independent levers, doing different jobs.**
+Operationally: a **recon gate** `rounded KL ≤ τ` (τ set from the best baseline, see §5.1)
+defines "near-perfect"; separation and size are only ranked among gate-passing runs.
 
-- **Early impmin strength** (the coeff multiplier starts at its peak and decays to 1x —
-  note it is *early* pressure, not a mid-training spike) concentrates usage: peak 2x →
-  5x → 10x gives n = 71 → 43 → 28 active MLP components at the answer position, with
-  reconstruction degrading roughly linearly (PGD 0.0095 → 0.0123 → 0.0151). A
-  **separation–reconstruction Pareto with no cliff up to 10x**.
-- **Early hidden-acts reconstruction pressure** (`StochasticHiddenActsReconLoss`
-  coeff 0.1, exponentially decayed to ~0) reduces per-component mixing roughly for
-  free: n50 33 → 24 at 2x impmin (recon unchanged), 33 → 17 at 5x. It pins components
-  to period-specific neuron groups while the topology forms.
+## 2. The system, and what happens over training
 
-**2. Schedule shape matters more than magnitude — and in non-obvious directions.**
+Losses acting on the decomposition (04-hidden reference recipe):
 
-- *Press early, release late* (hidden-acts): constant 0.1 keeps n low but re-mixes
-  components (n50 30 vs 17 decayed). Dose is non-monotonic: 0.3 loses the gain entirely.
-- *The late concave-p phase is load-bearing*: keeping `p ≥ 1` in the winning combo
-  blows mixing up to n50 48 (worst of all probes) at zero recon gain. Late concave
-  impmin **purifies** the concentrated components rather than merging them — the naive
-  "Lp<1 merges co-occurring features" story is wrong here. Softening impmin generally
-  (p1 / nopeak alone) just inflates the circuit (315 / 260 alive vs 177) with equally
-  mixed components.
+- **Reconstruction forces**: `StochasticReconSubsetLoss` (1.0), `UnmaskedReconLoss`
+  (0.5), `PersistentPGDReconLoss` (0.5) on output KL; `StochasticHiddenActsReconLoss`
+  (0.001) on MLP-internal activations. The delta component is exact by construction and
+  pinned off on target data, so these force the *components* to carry the behavior.
+- **Sparsity forces**: `ImportanceMinimalityLoss` — per-datapoint L_p on CI, coeff 5e-5
+  with multiplier starting at 2x decaying to 1x, p annealing 2.0 → 0.5 linearly (the new
+  `SmoothL0ImportanceMinimalityLoss` replaces p-annealing with γ: φ(c)=c²/(c²+γ²),
+  γ 1 → 0.01) — and **CI-scaled weight decay** (0.3): each subcomponent shrinks at a
+  rate ∝ (1 − max CI over the batch), a use-it-or-lose-it prune gated by *max*, so rare
+  use protects a component.
 
-**3. Recommended recipe — the Pareto has a knee at 5x** (20k-validated):
+### Phase model (prediction)
 
-| run (20k) | n | clean | med_band | n50 | PGD |
-|---|---|---|---|---|---|
-| coupled (baseline) | 59 | 9 | 0.323 | 17.4 | 0.0055 |
-| hid_sched (2x + hid0.1→0) | 59 | 9 | 0.308 | 12.8 | 0.0056 |
-| **hid_sched-5x (5x + hid0.1→0)** | **34** | **10** | **0.392** | **7.6** | 0.0087 |
-| 10x-hid0.1 (`addsub-L18-07-10x-hid0.1`) | 26 | 6 | 0.401 | 15.2 | 0.0111 |
+Because the schedules move the balance of these forces, the run should pass through
+three qualitatively different phases:
 
-**`addsub-L18-05-hid_sched-5x` is the recommended recipe** (coupled + impmin peak 5x→1x
-+ hidden-acts 0.1 exponentially decayed to ~0; default p-anneal kept): best mixing
-(n50 7.6, 2.3× better than baseline), most clean components (10), 34 vs 59 active, at a
-~60% recon premium. The 20k validation shows 10x is **past the knee**: usage concentrates
-further (26 active, med_band 0.401) but per-component mixing and the clean count get
-*worse* (n50 15.2, 6 clean) at higher recon cost — squeezing too few components forces
-periods back together. If recon parity is required, `hid_sched` (2x + hid0.1→0) still
-improves mixing for free (n50 12.8 vs 17.4).
+- **P0 — recruitment/imprinting (~0–10%).** CI-fn is uncalibrated, recon losses dominate
+  (impmin is small against large recon gradients even with the 2x early multiplier).
+  Components grow to capture behavior; many get mid-range CIs. Whatever *alignment*
+  pressure exists now (hidden-acts matching period-specific MLP neurons) shapes which
+  feature ends up in which component — cheaply, because nothing is committed yet.
+- **P1 — crystallization (~10–50%).** CIs binarize (leaky-hard sigmoid saturates), the
+  alive set stabilizes, redundant components die (impmin + CI-scaled WD). Merges happen
+  here if the sparsity gain beats the recon cost: two features that co-occur on most
+  prompts (all mod-p features do — every answer needs every residue) are merge
+  candidates. **Which periods share a component is decided by the end of P1** (matches
+  the empirical "topology set by ~10k of 20k").
+- **P2 — refinement (~50–100%).** The concavity schedule arrives at p < 1 (or γ ≪ 1):
+  the penalty differential now acts on *mid* CIs — saturated CI≈1 costs the same
+  regardless of p, but ambiguous usage is pushed to 0. Prediction: this phase cannot
+  restructure (basin lock-in; cf. the ablation-floor negative result), it can only
+  *purify* CI patterns (mixing ↓) and fine-tune recon. Consistent with purity improving
+  15k→20k in every baseline.
 
-**4. Corroborating dynamics.** Purity improves late everywhere (coupled 15k→20k,
-hid_sched 5k→20k, 5x 10k→20k): the early phase decides *which* components exist
-(concentration), the late phase cleans *what each one holds* (purity). This matches the
-user's prior that topology is set by ~10k, and locates the two levers on either side of
-that point.
+## 3. Predicted effects, per hyperparameter
 
-## Caveats / open threads
+Notation: **R** = reconstruction, **N** = number of alive/active components,
+**S** = period separation (mixing ↓ = S ↑).
 
-- 5k probes compress every schedule; absolute purity numbers at 5k undershoot 20k ones.
-  All probe conclusions are probe-vs-probe at matched steps; the 5x and 10x directions
-  are both validated at 20k (table above). Note the 5k probes ranked 10x above 5x on
-  n50 — the knee only appears at full training length; final calls need the 20k run.
-- One seed replicate only; n and n50 cross the noise floor comfortably, med_band does
-  not.
-- The metric reads CI usage grids. Weight-side confirmation (`collect_inner_activations`
-  → `compute_subcomp_periods`) on the final recommended run is the natural next check,
-  along with whether the 10x recipe's anchored circuit stays functionally sufficient
-  (its anchor rises with its rounded KL).
-- `5x-hidconst` had the highest median band purity (0.314) despite bad n50 — if a
-  future pass optimises band purity specifically, revisit constant-vs-decayed with more
-  seeds.
+| knob | R | N | S | phase it acts through |
+|---|---|---|---|---|
+| impmin coeff (dose) ↑ | ↓ monotonic | ↓ monotonic | inverted-U | P1 deaths/merges |
+| impmin coeff timing (early vs late, matched dose) | early ≥ late | early ↓ more | early ↑ | early prunes pre-commitment; late must dismantle formed structure |
+| concavity anneal (p→0.5 / γ→0.01) present vs absent | ≈ / slight ↓ | reported-N ↓ (binarization) | ↑ | P2 purification of mid CIs |
+| concavity arriving early (concave during P0/P1) | ↓ (cliff/instability, L_p) | ↓ | ↓ (winner-take-all merges co-active periods) | P0/P1 |
+| SmoothL0 vs L_p (matched dose & schedule) | ≥ (no gradient cliff at c→0) | ≈ | ≥ (γ sets an explicit CI scale; cleaner binarization) | P2 mostly |
+| hidden-acts coeff 0.1 early | ≈ (free) | ≈ | ↑↑ (imprints period-specific neuron alignment) | P0 |
+| hidden-acts held high to the end | ↓ slight | ≈ | ↓ vs decayed (freezes P1 patterns, blocks P2 purification) | P2 |
+| hidden-acts too high (≥0.3) | ↓ | ≈ | ↓ (over-constrains components to span many neurons) | P0/P1 |
+| CI-scaled WD ↑ | ≈ (max-gated) | ↓ | ≈ | P1/P2 continuous |
+| CI-fn LR ratio ↓ | ≈ | ↓ | ↑ (prior recipe finding) | P0/P1 |
+| C (capacity) | ≈ (not binding: ~59/456 used) | — | ≈ | — |
 
-## Full 5k probe table
+Key predicted *interactions*:
 
-`+` rows, answer position, MLP matrices; n50 = mean orbits to 50% FFT power:
+- **impmin dose × hidden-acts**: hidden-acts imprinting should make impmin pruning
+  *safer* (components are cleaner, so the survivors reconstruct better) — the two
+  compose rather than trade off. (Suggested by hid_sched-5x being the best 20k
+  separator.)
+- **impmin dose × concavity timing**: strong early dose + late concavity is the
+  "concentrate then purify" pattern; strong dose *with* early concavity should be the
+  worst cell for S (merges under winner-take-all).
+- **Dynamics signature to look for**: if the phase model is right, N(t) should drop
+  mostly in P1 and flatline in P2, while S(t) (mixing) improves mostly in P2. Schedule
+  variants should move *which* phase does the work, visible in these curves.
 
-| probe | n | clean | med_band | mw_band | n50 | PGD | rounded |
-|---|---|---|---|---|---|---|---|
-| base | 71 | 8 | 0.271 | 0.312 | 33.0 | 0.00951 | 0.00898 |
-| base-s1 (seed) | 84 | 8 | 0.257 | 0.299 | 32.1 | 0.00934 | 0.00904 |
-| p1 | 81 | 7 | 0.273 | 0.297 | 29.1 | 0.00854 | 0.00759 |
-| nopeak | 92 | 8 | 0.253 | 0.261 | 27.3 | 0.00706 | 0.00607 |
-| 5x | 49 | 3 | 0.270 | 0.296 | 32.7 | 0.01222 | 0.01152 |
-| 5x-hid0.1 | 43 | 4 | 0.290 | 0.324 | 17.4 | 0.01231 | 0.01157 |
-| 5xanneal0.5 | 54 | 5 | 0.283 | 0.289 | 21.2 | 0.01118 | 0.01055 |
-| hid0.1 | 76 | 6 | 0.291 | 0.309 | 23.9 | 0.00936 | 0.00893 |
-| hid0.3 | 80 | 9 | 0.232 | 0.296 | 31.7 | 0.00926 | 0.00884 |
-| 5x-hidconst | 47 | 5 | 0.314 | 0.336 | 30.4 | 0.01197 | 0.01136 |
-| 10x-hid0.1 | 28 | 4 | 0.274 | 0.326 | 15.2 | 0.01507 | 0.01451 |
-| 5x-hid0.1-p1 | 51 | 7 | 0.238 | 0.296 | 48.3 | 0.01226 | 0.01163 |
+## 4. Shortlisted factors
+
+Fixed at 04-hidden values: recon-loss coeffs (1.0/0.5/0.5), CI-scaled WD 0.3, CI-fn/component
+LRs, C, beta 0.75, sampling, seed 0 (except replicates), **steps 24000 — every run runs the
+full schedule; no compressed probes**.
+
+Varied:
+
+1. **impmin dose**: coeff ∈ {2.5e-5, 5e-5, 1e-4, 2e-4} (04-hidden multiplier shape kept).
+2. **impmin family**: L_p (p 2→0.5) vs SmoothL0 (γ 1→0.01) at matched coeff.
+3. **impmin coeff timing**: flat vs early-2x vs late-2x at matched ∫coeff·dt.
+4. **concavity window**: full (0→100%), late-only (50→100%), none (stay convex).
+5. **hidden-acts**: coeff ∈ {0.001, 0.1} × schedule {constant, exp-decay→~0, decay ending
+   at 50%}.
+6. **seed**: ×3 at the center and final recipes (noise floor: the probe series showed
+   seed moves med_band by ~0.015 and active counts by ~15%).
+
+## 5. Experimental design
+
+### 5.1 Metrics (identical pipeline for every run)
+
+- **R**: final `eval/target_recon/rounded` (primary), `eval/loss/PGDReconLoss`
+  (adversarial check); full curves from metrics.jsonl (eval every 500).
+- **N**: answer-position active count (mean CI > 0.01 over prompts, from the
+  per-position JSON) — primary, anchor-free. Secondary: alive-sweep curve
+  (`alive_subcomponents_curve.tsv`) read at a **fixed** KL threshold for all runs
+  (post-hoc from the curve — no re-runs needed), since the default anchored threshold
+  moves with each run's recon and confounds cross-run size comparison.
+- **S**: `score_period_separation` — `n50` (primary: mean orbits to 50% power),
+  clean fraction (band_purity > 0.5), median band_purity (reported, noise-limited).
+  Weight-side confirmation (`collect_inner_activations` → `compute_subcomp_periods`)
+  on finalists only.
+- **Gate**: τ = rounded KL of the best control + 20% margin, set once stage 1 lands.
+- **Dynamics runs** (one designated run per factor level, not per seed): keep all
+  checkpoints (5k/10k/15k/20k/24k; `keep_last_n_checkpoints` raised), run the S
+  pipeline per checkpoint → S(t), N(t) curves at authentic schedule pace.
+
+### 5.2 Stages (each gates the next; ~2 GPUs × 14h per run, ≤3 concurrent)
+
+- **S0 — family pilot (running).** `addsub-L18-08-smoothl0` (= 04-hidden with SmoothL0,
+  coeff 5e-5, γ 1→0.01) vs the existing `addsub-L18-04-hidden` control. Decides: is
+  SmoothL0 viable at this coeff scale (its loss ≈ active-count, so the scale differs
+  from L_p's)? If wildly off, recalibrate coeff before S1.
+- **S1 — dose–response Pareto (6 new runs).** coeff × family grid
+  {2.5e-5, 1e-4, 2e-4} × {L_p, SmoothL0} (5e-5 cells covered by S0). Hidden-acts fixed
+  at 0.001. Output: R-vs-N Pareto curve per family (plot P1), S along the curve (P2).
+  Sets τ and each family's **knee coeff** (last dose before recon degrades past the
+  gate).
+- **S2 — hidden-acts (4 new runs).** At each family's knee: hidden-acts
+  {0.1→~0 decay, 0.1 constant} (0.001-constant = the S1 cell). Tests the imprinting
+  main effect, the freeze hypothesis (constant vs decayed), and the dose×hid
+  interaction.
+- **S3 — schedule shapes (5 new runs, winner family+knee+hid from S2).**
+  (a) coeff timing at matched dose: flat 7.5e-5 vs late-2x (early-2x = existing shape);
+  (b) concavity window: late-only (50→100%), none;
+  (c) hidden-acts decay ending at 50% instead of 100%.
+  These are the runs whose **checkpoint dynamics** (S(t), N(t)) test the phase model
+  directly: does moving a schedule move *when* N drops and *when* S improves?
+- **S4 — confirmation (2–3 new runs + analyses).** 3 seeds of the chosen recipe;
+  weight-side period analysis; final plots and recipe statement.
+
+Naming: `addsub-L18-08-<family><coeff>[-hid<h><shape>][-<schedule>][-s<seed>]`, e.g.
+`addsub-L18-08-sl0c1e-4-hid0.1decay`. Fresh names throughout (the deleted `-06-psep-*`
+wandb ids are tombstoned).
+
+### 5.3 Planned plots
+
+1. **P1 Pareto**: rounded KL (y, log) vs active count N (x); families as colors, doses
+   connected, seed error bars, gate line. The knee is the headline.
+2. **P2 conditional separation**: n50 (y) vs rounded KL (x), gate region shaded — shows
+   what separation is *buyable* at near-perfect recon.
+3. **P3 training dynamics**: recon and NAlive vs step, one panel per factor, all levels
+   overlaid (from metrics.jsonl, no extra compute).
+4. **P4 separation dynamics**: n50 and N vs checkpoint step for the S3 schedule
+   variants — the direct test that early schedules move P1 (N drops) and late schedules
+   move P2 (n50 drops).
+5. **P5 interaction**: R and n50 for the dose×hidden-acts cells (small grid heatmap).
+
+### 5.4 Threats to validity, handled
+
+- *Schedule compression* (killed the last attempt): every run is full-length; dynamics
+  are read from checkpoints of full runs, never from shortened runs.
+- *Seed noise*: replicates at center + final; factor effects only claimed when outside
+  the replicate spread.
+- *Anchor confound*: cross-run size uses the anchor-free active count + fixed-threshold
+  sweep reads.
+- *One-factor-at-a-time blindness*: the two interactions we have prior reason to expect
+  (dose×hid, dose×concavity-timing) get explicit cells; everything else stays OFAT
+  around a fixed center.
+
+## 6. Status
+
+- S0 pilot `addsub-L18-08-smoothl0` training (job 5114, 24k steps, ~14h).
+- `addsub-L18-04-hidden` is the L_p control (already trained + analysed).
+- S1 launches after the pilot's first eval points confirm the SmoothL0 coeff scale is
+  sane (n_alive not collapsing to 0 or staying at C).

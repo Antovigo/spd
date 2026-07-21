@@ -225,3 +225,20 @@ Trains 5018 / 5020, analyses 5019 / 5021 chained.
   (train 5036, analyze 5037).
 
 Final 12-probe table lives in report.md; findings consolidated there.
+
+## 2026-07-21 — probe series invalidated; reset
+
+- The `steps: 5000` probes compressed every schedule (fracs of training) into 5k steps,
+  so they never sampled the *actual* schedule dynamics — user call: this mostly
+  invalidates the probe experiment. All 12 `addsub-L18-06-psep-*` runs deleted from
+  disk and wandb (ids tombstoned — never reuse the names). Their conclusions are
+  downgraded to *suggestive*; what stands as evidence is the full-length 20k grid
+  (05-series + `addsub-L18-07-10x-hid0.1`).
+- New feature landed on this branch: `SmoothL0ImportanceMinimalityLoss`
+  (φ(c)=c²/(c²+γ²), γ-anneal replaces p-anneal; bounded gradient, no c→0 cliff).
+- Pilot launched: `addsub-L18-08-smoothl0` (job 5114) = `addsub-L18-04-hidden` with the
+  impmin entry swapped to SmoothL0 (coeff 5e-5, beta 0.75, γ 1 → 0.01 over training).
+  Note the 04-hidden 2x→1x coeff multiplier has no SmoothL0 equivalent → flat coeff.
+- report.md rewritten: objective hierarchy (recon ≻ separation ≻ parsimony), the
+  three-phase dynamics model (P0 imprint / P1 crystallize / P2 purify), per-knob
+  predictions, and the staged full-length experimental plan (S0–S4).
