@@ -108,11 +108,41 @@ zero pure components**. On the roadmap's criterion for this objective (effect on
 mixing): **kaiming picked** for the rest of the series. Coupled remains attractive if
 later objectives recover its lost pure cells at its better recon.
 
-## Objective 3 — fused hidden-acts recon loss — pending
+## Objective 3 — fused hidden-acts recon loss: free fidelity, mild purity gain at 0.1
 
-Re-implement `StochasticHiddenActsReconLoss` as an attribute of the StochasticRecon
-loss (no extra forward passes), following `experiment/8B_targeted_jax`; then sweep
-hidden-acts coeff ∈ {0, 0.001, 0.01, 0.1} at the winning recipe.
+Implementation: `HiddenActsReconAux` on `StochasticReconSubsetLossConfig` — the aux MSE
+is computed from the host loss's already-masked forward (no extra passes), against
+frozen `x@W+b` targets recomputed from the cached pre-weight acts
+(`param_decomp/metrics/stochastic_recon_subset.py`; parity-tested against the
+standalone metric). Sweep `addsub-L18-08-hid{0.001, 0.01, 0.1}` on the impmin3e-5
+recipe (which doubles as the 0 arm). Figure:
+[figures/obj3_hid_sweep.png](figures/obj3_hid_sweep.png).
+
+| run (hid coeff) | PGD | rounded | n_active | hid MSE (CI-masked) | n_pure_periods (/15) | fraction_pure |
+|---|---|---|---|---|---|---|
+| impmin3e-5 (0) | 0.00727 | 0.00616 | 164 | 0.272 | 11 | 0.26 |
+| hid0.001 | 0.00752 | 0.00631 | 161 | 0.224 | 10 | 0.17 |
+| hid0.01 | 0.00722 | 0.00627 | 166 | 0.142 | 12 | 0.19 |
+| hid0.1 | 0.00753 | 0.00609 | 169 | **0.054** | **12** | **0.26** |
+
+Readings:
+
+- **The aux is free**: output recon (PGD 0.0072–0.0075, all ≪ gate) and n_active
+  (161–169) are flat across three orders of magnitude of coeff — the hidden-acts
+  constraint does not trade against the main objectives at these doses.
+- **It does its job**: CI-masked hidden-acts MSE falls monotonically, 5× at coeff 0.1
+  (0.272 → 0.054; PGD-masked 0.123 → 0.030).
+- **Separation improves modestly at the top of the sweep**: hid0.1 reaches 12/15 pure
+  cells with full coverage and the best mixed_frac of the series (0.65), matching the
+  0-arm's fraction_pure (0.26). Notably it fixes gate_proj — all 5 periods pure there
+  (0-arm: 3) — leaving only up_proj-{T2, T20} and down_proj-T20 uncovered. The 0.001
+  arm is slightly *worse* than 0 (10/15, fraction 0.17) — the weak dose perturbs
+  without constraining.
+
+**Winner: hid coeff 0.1** for the rest of the series — equal recon, much tighter
+per-site fidelity, and the best purity of the sweep.
+
+
 
 ## Objective 4 — impmin β sweep — pending
 
