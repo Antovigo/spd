@@ -13,7 +13,7 @@ import signal
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Self, cast
+from typing import Any, Self, assert_never, cast
 
 import torch
 import torch.nn as nn
@@ -274,6 +274,46 @@ def init_coupled_(
                 comp.V.copy_(w.T @ u.T)
 
 
+def init_within_span_(
+    components: dict[str, Components],
+    target_weights: dict[str, Tensor],
+    seed: int,
+) -> None:
+    """In place: each side the W-image of its own independent Gaussian.
+
+    Coupled with the coupling broken: for `d_in <= d_out`, `V_c <- W^T g_c / |W^T g_c|`
+    and `U_c <- (W h_c)^T` with `h_c ~ unit norm`, `g_c` and `h_c` independent (mirrored
+    when `d_in > d_out`). Per side, the marginals match `init_coupled_` — directions
+    S^2-weighted within row(W)/col(W), unit-norm narrow side, W-natural-scale wide
+    side — but the sides are statistically independent, so the component sum has zero
+    mean and the delta initially carries all of W. A dedicated generator keeps draws
+    rank-identical under DDP.
+    """
+    with torch.no_grad():
+        generators: dict[torch.device, torch.Generator] = {}
+        for name, w in target_weights.items():
+            comp = components[name]
+            w = w.detach().float()
+            d_out, d_in = w.shape
+            gen = generators.setdefault(
+                w.device, torch.Generator(device=w.device).manual_seed(seed)
+            )
+            if d_in <= d_out:
+                g = torch.randn(d_out, comp.C, device=w.device, generator=gen)
+                v = w.T @ g
+                comp.V.copy_(v / v.norm(dim=0, keepdim=True))
+                h = torch.randn(d_in, comp.C, device=w.device, generator=gen)
+                h /= h.norm(dim=0, keepdim=True)
+                comp.U.copy_((w @ h).T)
+            else:
+                g = torch.randn(d_in, comp.C, device=w.device, generator=gen)
+                u = w @ g
+                comp.U.copy_((u / u.norm(dim=0, keepdim=True)).T)
+                h = torch.randn(d_out, comp.C, device=w.device, generator=gen)
+                h /= h.norm(dim=0, keepdim=True)
+                comp.V.copy_(w.T @ h)
+
+
 def tie_component_weights(
     component_model: ComponentModel, tied_weights: list[tuple[str, str]]
 ) -> None:
@@ -457,15 +497,21 @@ class Trainer:
 
         self.loss_metrics, _ = instantiate_metrics(pd_config, component_model, device)
 
-        if pd_config.weight_init == "coupled":
+        if pd_config.weight_init != "kaiming":
             assert pd_config.tied_weights is None, (
-                "coupled init overwrites V/U and would break tied weights"
+                f"{pd_config.weight_init} init overwrites V/U and would break tied weights"
             )
             target_weights = {
                 name: component_model.target_weight(name)
                 for name in component_model.target_module_paths
             }
-            init_coupled_(component_model.components, target_weights, pd_config.seed)
+            match pd_config.weight_init:
+                case "coupled":
+                    init_coupled_(component_model.components, target_weights, pd_config.seed)
+                case "within_span":
+                    init_within_span_(component_model.components, target_weights, pd_config.seed)
+                case _:
+                    assert_never(pd_config.weight_init)
 
     # ============================ Named-param accessors for optimizer state ============================
 

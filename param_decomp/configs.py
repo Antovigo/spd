@@ -146,13 +146,16 @@ class PDConfig(BaseConfig):
         default=None,
         description="List of identity module patterns with C values.",
     )
-    weight_init: Literal["kaiming", "coupled"] = Field(
+    weight_init: Literal["kaiming", "coupled", "within_span"] = Field(
         default="kaiming",
         description="How component V/U are initialized. 'kaiming': iid normal "
         "(init_param_), ignores W. 'coupled': unit-norm seed on the narrow side, wide "
         "side its raw W-image (U_c from (W v_c)^T when d_in <= d_out, else V_c from "
         "W^T u_c) — W-natural scale, component sum ~ W on a rank-C subspace. "
-        "'coupled' requires no tied weights.",
+        "'within_span': coupled with the coupling broken — each side is the W-image of "
+        "its own independent Gaussian (unit-norm narrow side, raw-W-image-scale wide "
+        "side), so both sides lie in W's row/col spaces but are statistically "
+        "independent. 'coupled' and 'within_span' require no tied weights.",
     )
 
     @cached_property
