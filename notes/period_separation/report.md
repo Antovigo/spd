@@ -80,11 +80,24 @@ simultaneously: PGD 0.0073 ≪ 0.015 gate, full per-matrix coverage, and n_pure_
 0.0125) if the up_proj T=2 coverage loss is acceptable. Base coeff for Objectives 2–4:
 **3e-5**.
 
-## Objective 2 — initialization (kaiming vs coupled) — pending
+## Objective 2 — initialization: kaiming wins on mixing
 
-Blocked on the Objective-1 winner. Plan: cherry-pick the coupled-init feature
-(`61ca40b9d` lineage) onto this branch, run `addsub-L18-08-init{kaiming,coupled}` at the
-winning coeff, compare period mixing.
+The coupled init was ported to this branch (`e5cdcbc80`; a raw cherry-pick would have
+removed SmoothL0, so the net feature was applied surgically). Comparison at the winning
+coeff 3e-5 — `addsub-L18-08-impmin3e-5` doubles as the kaiming arm (identical config,
+default init); `addsub-L18-08-initcoupled` is the same + `weight_init: coupled`:
+
+| run (init) | PGD | rounded | n_active | n_pure_periods | pure census |
+|---|---|---|---|---|---|
+| impmin3e-5 (kaiming) | 0.00727 | 0.00616 | 164 | **5** | T2=2 T5=9 T10=10 T20=2 T50=20 |
+| initcoupled (coupled) | **0.00564** | **0.00467** | 113 | 4 | T2=2 T10=2 T20=1 T50=5 — no pure T5 |
+
+Coupled init reconstructs better (−22% PGD) with fewer active components (113 vs 164),
+but **loses period-5 purity entirely**: its best T5 components all carry exactly one
+strong extra period (SNR 28–147) — genuine two-period mixes, not threshold near-misses.
+On the roadmap's criterion for this objective (effect on period mixing):
+**kaiming picked** for the rest of the series (5/5 pure periods). Coupled remains
+attractive if later objectives recover its lost pure period at its better recon.
 
 ## Objective 3 — fused hidden-acts recon loss — pending
 
