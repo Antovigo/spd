@@ -31,6 +31,7 @@ from param_decomp.batch_and_loss_fns import (
     move_batch_to_device,
 )
 from param_decomp.component_model import ComponentModel, OutputWithCache, component_grad_norms
+from param_decomp.components import Components
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
     insert_identity_operations_,
@@ -239,6 +240,40 @@ def _apply_ci_scaled_weight_decay(
             component.U.mul_(keep[:, None])
 
 
+def init_coupled_(
+    components: dict[str, Components],
+    target_weights: dict[str, Tensor],
+    seed: int,
+) -> None:
+    """In place: unit-norm seed on the narrow side, wide side its raw W-image.
+
+    `d_in <= d_out`: `v_c ~ unit norm`, `U_c <- (W v_c)^T`; else `u_c ~ unit norm`,
+    `V_c <- W^T u_c`. No C-dependent rescale — components sit at W's natural scale
+    and the component sum approximates W restricted to a rank-C random subspace
+    (the delta carries the complement). A dedicated generator keeps draws
+    rank-identical under DDP.
+    """
+    with torch.no_grad():
+        generators: dict[torch.device, torch.Generator] = {}
+        for name, w in target_weights.items():
+            comp = components[name]
+            w = w.detach().float()
+            d_out, d_in = w.shape
+            gen = generators.setdefault(
+                w.device, torch.Generator(device=w.device).manual_seed(seed)
+            )
+            if d_in <= d_out:
+                v = torch.randn(d_in, comp.C, device=w.device, generator=gen)
+                v /= v.norm(dim=0, keepdim=True)
+                comp.V.copy_(v)
+                comp.U.copy_((w @ v).T)
+            else:
+                u = torch.randn(comp.C, d_out, device=w.device, generator=gen)
+                u /= u.norm(dim=1, keepdim=True)
+                comp.U.copy_(u)
+                comp.V.copy_(w.T @ u.T)
+
+
 def tie_component_weights(
     component_model: ComponentModel, tied_weights: list[tuple[str, str]]
 ) -> None:
@@ -421,6 +456,16 @@ class Trainer:
         )
 
         self.loss_metrics, _ = instantiate_metrics(pd_config, component_model, device)
+
+        if pd_config.weight_init == "coupled":
+            assert pd_config.tied_weights is None, (
+                "coupled init overwrites V/U and would break tied weights"
+            )
+            target_weights = {
+                name: component_model.target_weight(name)
+                for name in component_model.target_module_paths
+            }
+            init_coupled_(component_model.components, target_weights, pd_config.seed)
 
     # ============================ Named-param accessors for optimizer state ============================
 
