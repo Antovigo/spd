@@ -244,3 +244,54 @@ Final 12-probe table lives in report.md; findings consolidated there.
 - report.md rewritten: objective hierarchy (recon ≻ separation ≻ parsimony), the
   three-phase dynamics model (P0 imprint / P1 crystallize / P2 purify), per-knob
   predictions, and the staged full-length experimental plan (S0–S4).
+- SmoothL0 pilots (`-08-smoothl0`, `-08-smoothl0-b`) cancelled and purged per user —
+  superseded by the plan below.
+
+## 2026-07-21 — new mixing metric (inner activations) + θ-sensitivity
+
+User redesign of the separation metric — CI-based n50 was wrong on three counts:
+CI's saturating nonlinearity manufactures harmonic spread; a same-period read on both
+operands (blob grid) is one period, not two; aperiodic components are fine. The
+failure mode to measure is **one component reading ≥2 distinct periods**.
+
+New `PeriodSeparation` eval metric (commit `4ada9c519`): answer-position inner
+activations `x·V/‖V‖` over the full a+b grid (linear in the residual features → one
+Fourier feature ≈ one spectral bin, no harmonic pooling needed); canonical period
+classes T ∈ {2,4,5,10,20,25,50,100} via the bins a linear read can produce ((f,0),
+(0,f), (f,±f)); component gated at mean CI > 0.1; `n_periods` = classes with share ≥ θ.
+`mixed_frac` and `excess_periods` are over *periodic* components only. Also logs a
+per-period census and an AB-heatmap-style inner-activation figure (top 20/matrix by
+mean CI). Caveat: T=100 is indistinguishable from a smooth aperiodic trend on a
+100-window.
+
+θ-sensitivity on six full-length runs (jobs 5118/5119), mixed_frac:
+
+| run | θ=0.10 | 0.15 | 0.20 | 0.25 | 0.30 |
+|---|---|---|---|---|---|
+| 04-hidden | 0.450 | 0.300 | 0.225 | 0.125 | 0.100 |
+| 05-coupled | 0.490 | 0.367 | **0.184** | 0.083 | 0.042 |
+| hid_sched | 0.458 | 0.271 | 0.188 | 0.125 | 0.064 |
+| hid_sched-5x | 0.471 | 0.412 | 0.294 | 0.176 | 0.091 |
+| hid_sched0.01 | 0.638 | 0.426 | 0.255 | 0.170 | 0.111 |
+| 10x-hid0.1 | 0.500 | 0.429 | 0.214 | 0.185 | 0.074 |
+
+- **Ranking is θ-unstable** (coupled: 4th at θ=0.10 → best at θ≥0.20; hid_sched-5x:
+  3rd → worst at 0.20): many components hold a secondary period at 10–25% power.
+  Mitigation: metric logs mixed_frac at θ ∈ {0.1, 0.2 (primary), 0.3} + a θ-free
+  `secondary_share` (mean share of the 2nd-strongest class).
+- Notably the *inner-activation* ranking inverts the old CI-based one — the 5x/10x
+  runs that looked cleanest on CI grids are among the most mixed in weight-read space,
+  while plain coupled is cleanest at θ≥0.2. CI cleanliness ≠ read-vector purity.
+- periodic_frac ≈ 1.0 everywhere: essentially every used component is periodic on
+  inner activations; the aperiodic escape hatch rarely triggers.
+- Census@0.2 shows all canonical periods represented (T=50 dominates everywhere,
+  ~40-50% of components).
+
+## 2026-07-21 — S1 sweep launched: SmoothL0 coeff scan
+
+Per user spec: 4000-step runs, γ = 1 constant (no anneal), coeff constant, **no
+hidden-acts loss**, eval every 250 with slow_every 250 (fine-grained PeriodSeparation
+curves + PGD/rounded recon). Constant hyperparameters → no schedule-compression
+concern. Names `addsub-L18-09-sl0scan-<coeff>`, coeff ∈ {1e-5, 3e-5, 1e-4, 3e-4,
+1e-3, 3e-3}; jobs 5120–5125 (3 concurrent, 3 chained). Selection metrics:
+PGDReconLoss + rounded recon vs mixed_frac/secondary_share.
