@@ -198,3 +198,52 @@ Takeaway: the skip pathology is not an artifact of the L_p gradient cliff or of
 the particular penalty shape — any penalty that prices CI mass prunes mechanisms
 whose marginal contribution is masked by redundancy. Recovery has to come from the
 training *protocol*, not the sparsity functional.
+
+## Experiment: per-block decomposition
+
+Decompose one block at a time (`blocks.b.mlp_in` + `blocks.b.mlp_out`, C = 64),
+leaving the other two blocks intact, with the `smoothl0_gamma_anneal`
+hyperparameters unchanged. Runs `toy_model_redundancy/perblock_b{0,1,2}`; each is
+scored against its own block's 32 ground-truth mechanisms.
+
+**Prediction going in: near-empty decompositions** — with both partners intact and
+permanently on, masking any of block b's subcomponents should cost ≈ 0, so the
+threshold account says everything gets pruned. Whole-block ablation KLs on the
+intact toy back this up: KL(full ‖ drop block b) = 9.6e-6 / 3.0e-5 / 1.7e-5 for
+b = 0/1/2 — removing an *entire block* costs about as much as the joint runs'
+total recon error.
+
+**Result: the opposite.**
+
+| run | skipped / 32 | active (in+out) | recon KL |
+|---|---|---|---|
+| perblock_b0 | **0** | 54+50 | 4.2e-7 |
+| perblock_b1 | **1** | 21+23 | 1.1e-6 |
+| perblock_b2 | 11 | 11+17 | 2.7e-6 |
+
+Per-block decomposition is far more complete than any joint run with the same
+penalty (the joint SmoothL0-anneal run skipped 18/32 in block 1 alone; per-block
+skips 1). The b1 map
+([figure](report_figures/active_subcomponents_perblock_b1.png)) is a clean binary
+near-diagonal — CIs saturate at ~1, and a few subcomponents each cover 2–3 tokens,
+so coverage is complete at slightly coarser granularity (21+23 active for 31/32
+tokens). b0 over-allocates (54+50); b2 is the exception, still skipping 11.
+
+Two things worth noting:
+
+1. **The static threshold account fails here.** The empty solution *is* cheaper in
+   loss terms (masking everything costs ≤ 3e-5 recon), yet training never finds it.
+   The annealed SmoothL0 is effectively bistable — strong push to 0 below γ,
+   negligible gradient above — so CIs that are high while γ is still large lock in
+   once γ shrinks. In the joint runs, in-model competition (another block's
+   subcomponent already reconstructing the token) sinks backup CIs during the
+   quadratic phase, before lock-in; in a per-block run there is no competitor, the
+   CI fn has no cheaper alternative to route through, and the mechanisms survive.
+   Which block skips is not ordered by the block-ablation KL (block 1 is the most
+   expensive to remove yet skipped 18/32 in the joint run) — optimization dynamics,
+   not just thresholds, decide what lives.
+2. **This is the toy-scale replica of the combine-layers situation.** The 8B
+   sources (`addsub-L16..19`) are per-block decompositions, and they, too, keep
+   per-block mechanisms alive that joint/merged training then prunes as redundant.
+   The testbed reproduces the whole arc: per-block → complete; joint or merged →
+   over-sparse; recovery needed at the merge.
