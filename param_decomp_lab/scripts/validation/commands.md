@@ -109,10 +109,10 @@ uv run python -m param_decomp_lab.scripts.validation.plot_ab_heatmaps "$JSON" --
 
 ## score_period_separation
 
-CPU-only — score each subcomponent's period purity from the per-position JSON.
+GPU — period mixing of each used subcomponent's inner activations over the a+b grid.
 
 ```bash
-uv run python -m param_decomp_lab.scripts.validation.score_period_separation "$JSON"
+uv run python -m param_decomp_lab.scripts.validation.score_period_separation "$MODEL_PATH" --slurm
 ```
 
 ## build_addition_explorer

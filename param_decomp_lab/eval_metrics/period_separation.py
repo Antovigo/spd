@@ -124,7 +124,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
             for name in ci_chunks
         }
 
-    def _scored_components(self) -> list[ComponentPeriods]:
+    def scored_components(self) -> list[ComponentPeriods]:
         scored = []
         for module_name, (mean_ci, inner) in self._answer_position_ci_and_inner().items():
             for comp in torch.nonzero(mean_ci > self.cfg.ci_gate).flatten().tolist():
@@ -142,7 +142,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
                 )
         return scored
 
-    def _plot(self, scored: list[ComponentPeriods]) -> "plt.Figure":
+    def plot_panel(self, scored: list[ComponentPeriods]) -> "plt.Figure":
         """AB-heatmap-style panel: matrices down the rows, top-`top_k_plot` (by mean CI)
         inner-activation grids across the columns."""
         modules = sorted({s.module for s in scored})
@@ -187,7 +187,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
 
     @override
     def compute(self) -> MetricResult:
-        scored = self._scored_components()
+        scored = self.scored_components()
         result: MetricResult = {"n_active": float(len(scored))}
         if not scored:
             return result
@@ -216,7 +216,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
                     census[period] = census.get(period, 0) + 1
         for period in sorted(census):
             result[f"census/T{period}"] = float(census[period])
-        fig = self._plot(scored)
+        fig = self.plot_panel(scored)
         result["inner_acts_heatmap"] = _render_figure(fig)
         plt.close(fig)
         return result
