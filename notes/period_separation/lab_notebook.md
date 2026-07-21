@@ -295,3 +295,42 @@ curves + PGD/rounded recon). Constant hyperparameters → no schedule-compressio
 concern. Names `addsub-L18-09-sl0scan-<coeff>`, coeff ∈ {1e-5, 3e-5, 1e-4, 3e-4,
 1e-3, 3e-3}; jobs 5120–5125 (3 concurrent, 3 chained). Selection metrics:
 PGDReconLoss + rounded recon vs mixed_frac/secondary_share.
+
+## 2026-07-21 — Objective 2 extended: within_span init arm
+
+User-requested third init condition, `within_span` = coupled with the coupling
+broken: `V_c ∝ Wᵀ g_c`, `U_c ∝ W h_c` with independent Gaussians — per-side
+marginals identical to coupled (S²-weighted in-span directions, unit-norm narrow
+side, W-image-scale wide side) but the sides are statistically independent, so
+the component sum starts at zero mean and the delta carries all of W. Rationale:
+span_proj (dropped pre-port in `61ca40b9d`) was in-span but threshold-dependent
+and scale-shrunk by √(r/d); within_span keeps the in-span property with
+W-natural scale and no rank threshold. Implemented + committed `0593b2a97`
+(configs literal, `init_within_span_`, unit tests, roadmap Obj-2 revision).
+
+Launched `addsub-L18-08-initwithinspan` (job 5173, yaml =
+`psep2/obj1/addsub-L18-08-impmin3e-5.yaml` + `weight_init: within_span`),
+dependency `afterany:5160:5161` to hold the 6-GPU cap while the Obj-3 hid sweep
+runs; scoring chained `afterok` as job 5174
+(`psep2/obj1/score_initwithinspan.sbatch`). Comparison vs kaiming
+(`-08-impmin3e-5`) and coupled (`-08-initcoupled`) on n_pure_periods + PGD at
+step 4000 to follow.
+
+## 2026-07-22 — Objective 5 launched (1e-3 regime) + hid1 arm
+
+Roadmap gained Objectives 5 (re-run init/hid/beta comparisons at impmin 1e-3) and 6
+(gamma-anneal fine-tunes). Launched the 1e-3 trainable arms — `impmin1e-3` doubles as
+the kaiming / hid-0 arm; beta arms at 1e-3 deferred until the 1e-3 init+hid winners are
+known. Also added `hid1` (coeff 1.0) to the 3e-5 hid sweep per the roadmap edit.
+All work queued as three strict serial 2-GPU chains (train -> score alternating), so
+usage never exceeds the 6-GPU cap:
+
+- slot 1 (behind initwithinspan 5201): score-WS -> hid1 (5224) -> score -> hid1-1e-3 (5230) -> score
+- slot 2 (behind beta0 5220): score -> initcoupled-1e-3 (5233) -> score -> hid0.001-1e-3 (5235) -> score -> hid0.01-1e-3 (5237) -> score
+- slot 3 (behind beta0.5 5221): score -> initwithinspan-1e-3 (5240) -> score -> hid0.1-1e-3 (5242) -> score
+
+Yamls in `~/pd_scratch/psep2/obj5/` (from the impmin1e-3 yaml; init arms add
+`weight_init`, hid arms add `hidden_acts_recon` to StochasticReconSubsetLoss).
+Objective-6 readiness: SmoothL0 already supports gamma annealing
+(`gamma_final`/`gamma_anneal_{start,end}_frac`); `training_4000.pth` snapshots exist in
+all run dirs. Open detail: resume with edited steps/anneal config.
