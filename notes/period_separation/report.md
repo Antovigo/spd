@@ -47,9 +47,38 @@ Readings:
 - Diagnostics: T=4 and T=25 detections are common (components genuinely read
   non-canonical harmonic planes), T=100 detections track magnitude/trend reads.
 
-**Winner: `impmin3e-5` (coeff = 3e-5)** — the largest dose that keeps full canonical
-coverage, with PGD 0.0073 ≪ the 0.015 gate and half the redundancy of 1e-5. Used as the
-base coeff for Objectives 2–4.
+### Revised mixing metric: `n_pure_periods`
+
+Visual inspection of the panels showed `mixed_frac` mis-ranking the sweep: the top-CI
+components at gentle doses are heavily mixed plaids while high doses leave some very
+clean components. The revised headline metric (user-specified): **n_pure_periods** =
+number of canonical periods with ≥ 1 *single-period* component (pure = detected at
+exactly one non-trend period; T=100 ignored, T=4/25 extras disqualify). Recomputed over
+the sweep:
+
+| run | PGD | n_active | n_pure_periods | pure census |
+|---|---|---|---|---|
+| impmin1e-5 | 0.0052 | 307 | **5** | T2=6 T5=15 T10=9 T20=7 T50=25 |
+| impmin3e-5 | 0.0073 | 164 | **5** | T2=2 T5=9 T10=10 T20=2 T50=20 |
+| impmin5e-5 | 0.0096 | 131 | 4 | no pure T20 |
+| impmin1e-4 | 0.0125 | 89 | **5** | T2=2 T5=5 T10=2 T20=1 T50=7 |
+| impmin3e-4 | 0.0157 ✗gate | 49 | **5** | T2=1 T5=6 T10=2 T20=1 T50=6 |
+| impmin1e-3 | 0.0272 ✗ | 25 | 2 | T5=4 T50=2 |
+| impmin3e-3 | 0.0650 ✗ | 9 | 1 | T50=1 |
+
+Reconciliation of panel vs metric: the panels show the top-20 by mean CI — at gentle
+doses the *dominant* components are mixed while dozens of pure components sit at mean CI
+0.15–0.35 below the panel cut; at 1e-3 the few survivors include spectacularly clean
+ones (own-SNR 60–300, others < 20) but periods 2/10/20 lose their pure representative
+entirely. Margin check: the gentle-dose pure components are mostly genuine (own-SNR
+30–260 with other classes ≤ 10), except pure-T20 which is threshold-marginal
+(max-other-SNR 16–19).
+
+**Winner: `impmin3e-5` (coeff = 3e-5)** — the largest dose satisfying every criterion
+simultaneously: PGD 0.0073 ≪ 0.015 gate, full per-matrix coverage, and n_pure_periods
+5/5. `impmin1e-4` is the leaner alternative (89 active, still 5/5 pure, gate-passing at
+0.0125) if the up_proj T=2 coverage loss is acceptable. Base coeff for Objectives 2–4:
+**3e-5**.
 
 ## Objective 2 — initialization (kaiming vs coupled) — pending
 
