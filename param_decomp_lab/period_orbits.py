@@ -50,3 +50,27 @@ def period_class_shares(grid: NDArray[np.floating]) -> dict[int, float]:
 def count_periods(shares: dict[int, float], theta: float) -> int:
     """Number of canonical period classes whose share clears `theta`."""
     return sum(1 for share in shares.values() if share >= theta)
+
+
+def _class_bins(f: int, n: int) -> list[tuple[int, int]]:
+    """Raw-index spectrum bins a linear read of period-`n/f` features can produce."""
+    folded = {(f, 0), (0, f), (f, f), (f, -f)}
+    return sorted({(ka % n, kb % n) for ka, kb in folded})
+
+
+def class_bin_powers(grid: NDArray[np.floating]) -> dict[int, float]:
+    """Max DC-removed 2D-FFT power over each canonical period class's bins, `{T: power}`.
+
+    The raw per-class signal strength; judged for *presence* against a null of the same
+    quantity over random read directions (see `eval_metrics.period_separation`), since
+    the module input is itself periodic — an absolute floor-relative test fires on
+    everything, a share-relative test misses small genuine periods.
+    """
+    n_b, n_a = grid.shape
+    assert n_a == n_b, f"period classes assume a square grid, got {grid.shape}"
+    n = n_a
+    power = np.abs(np.fft.fft2(grid - grid.mean())) ** 2
+    return {
+        n // f: max(float(power[kb, ka]) for ka, kb in _class_bins(f, n))
+        for f in canonical_fundamentals(n)
+    }

@@ -16,7 +16,7 @@ from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp_lab.eval_metrics.plotting import _render_figure
 from param_decomp_lab.experiments.lm.prompts_dataset import load_prompts_dataset
-from param_decomp_lab.period_orbits import count_periods, period_class_shares
+from param_decomp_lab.period_orbits import class_bin_powers, count_periods, period_class_shares
 
 
 class PeriodSeparationConfig(BaseConfig):
@@ -27,6 +27,8 @@ class PeriodSeparationConfig(BaseConfig):
     prompts_file: str
     tokenizer_name: str
     ci_gate: NonNegativeFloat = 0.1
+    snr_thr: NonNegativeFloat = 20.0
+    n_null_dirs: PositiveInt = 256
     theta: Probability = 0.2
     module_grep: str = "mlp"
     batch_size: PositiveInt = 512
@@ -42,14 +44,20 @@ class ComponentPeriods:
     mean_ci: float
     grid: np.ndarray
     shares: dict[int, float]
+    snr: dict[int, float]  # class power / random-direction null median
 
 
 class PeriodSeparation(Metric[PeriodSeparationConfig]):
     """Period mixing of the answer-position inner activations `x·V_c / ‖V_c‖`.
 
     Only subcomponents with mean CI > `ci_gate` over the grid prompts are scored. Each
-    scored grid's 2D spectrum is decomposed into canonical period classes
-    (`period_orbits.period_class_shares`); a class is *present* when its share ≥ `theta`.
+    scored grid's 2D spectrum is decomposed into canonical period classes; a class is
+    *present* when its bin power is `snr_thr`× the median of the same quantity over
+    `n_null_dirs` fixed random unit read-directions through the same module input.
+    That null is the point: the input is itself periodic, so a spectral-floor test
+    fires on everything while a share-relative test misses small genuine periods —
+    "above what a random direction would read" is the meaningful zero. (`theta` only
+    labels the share columns.)
     `n_periods` = number of present classes: 0 = aperiodic (fine), 1 = clean single
     period (fine, even when used on both operands — the blob grid), ≥ 2 = mixing —
     the one failure mode being measured.
@@ -95,12 +103,16 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
             self.sampling = ctx.sampling
         return None
 
-    def _answer_position_ci_and_inner(self) -> dict[str, tuple[Tensor, Tensor]]:
-        """Per matched module: `(mean CI [C], inner activations [n_prompts, C])`, both at
-        the answer (last) position; inner activations are V-column-normalised."""
+    def _answer_position_ci_and_inner(self) -> dict[str, tuple[Tensor, Tensor, Tensor]]:
+        """Per matched module: `(mean CI [C], inner activations [n_prompts, C],
+        null inner activations [n_prompts, n_null_dirs])`, all at the answer (last)
+        position. Inner activations are V-column-normalised; the null columns are fixed
+        random unit directions through the same module input — the presence null."""
         assert self.sampling is not None, "haven't seen an eval batch yet"
         ci_chunks: dict[str, list[Tensor]] = {}
         inner_chunks: dict[str, list[Tensor]] = {}
+        null_chunks: dict[str, list[Tensor]] = {}
+        null_dirs: dict[str, Tensor] = {}
         with torch.no_grad():
             for start in range(0, self.prompt_ids.shape[0], self.cfg.batch_size):
                 batch = self.prompt_ids[start : start + self.cfg.batch_size].to(self.device)
@@ -116,21 +128,45 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
                     assert ci_vals.ndim == 3, f"expected [batch, seq, C], got {ci_vals.shape}"
                     ci_chunks.setdefault(module_name, []).append(ci_vals[:, -1, :].float().cpu())
                     components = self.model.components[module_name]
-                    inner = components.get_component_acts(pre_weight_acts[module_name][:, -1, :])
+                    x_pos = pre_weight_acts[module_name][:, -1, :]
+                    inner = components.get_component_acts(x_pos)
                     inner = inner.float() / components.V.norm(dim=0).float().clamp_min(1e-8)
                     inner_chunks.setdefault(module_name, []).append(inner.cpu())
+                    if module_name not in null_dirs:
+                        gen = torch.Generator(device="cpu").manual_seed(0)
+                        dirs = torch.randn(x_pos.shape[-1], self.cfg.n_null_dirs, generator=gen)
+                        null_dirs[module_name] = (dirs / dirs.norm(dim=0)).to(
+                            device=x_pos.device, dtype=x_pos.dtype
+                        )
+                    null = (x_pos @ null_dirs[module_name]).float()
+                    null_chunks.setdefault(module_name, []).append(null.cpu())
         return {
-            name: (torch.cat(ci_chunks[name]).mean(dim=0), torch.cat(inner_chunks[name]))
+            name: (
+                torch.cat(ci_chunks[name]).mean(dim=0),
+                torch.cat(inner_chunks[name]),
+                torch.cat(null_chunks[name]),
+            )
             for name in ci_chunks
         }
 
     def scored_components(self) -> list[ComponentPeriods]:
         scored = []
-        for module_name, (mean_ci, inner) in self._answer_position_ci_and_inner().items():
+        for module_name, (mean_ci, inner, null) in self._answer_position_ci_and_inner().items():
+            null_powers: dict[int, list[float]] = {}
+            for j in range(null.shape[1]):
+                grid = torch.zeros(self.n, self.n)
+                grid[self.b_idx, self.a_idx] = null[:, j]
+                for period, p in class_bin_powers(grid.numpy()).items():
+                    null_powers.setdefault(period, []).append(p)
+            null_median = {
+                period: max(float(np.median(powers)), 1e-30)
+                for period, powers in null_powers.items()
+            }
             for comp in torch.nonzero(mean_ci > self.cfg.ci_gate).flatten().tolist():
                 grid = torch.zeros(self.n, self.n)
                 grid[self.b_idx, self.a_idx] = inner[:, comp]
                 grid_np = grid.numpy()
+                powers = class_bin_powers(grid_np)
                 scored.append(
                     ComponentPeriods(
                         module=module_name,
@@ -138,6 +174,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
                         mean_ci=float(mean_ci[comp]),
                         grid=grid_np,
                         shares=period_class_shares(grid_np),
+                        snr={p: powers[p] / null_median[p] for p in powers},
                     )
                 )
         return scored
@@ -171,7 +208,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
                 vmax = float(np.abs(s.grid).max()) or 1.0
                 ax.imshow(s.grid, origin="lower", cmap="RdBu_r", vmin=-vmax, vmax=vmax)
                 present = sorted(
-                    (period for period, sh in s.shares.items() if sh >= self.cfg.theta),
+                    (period for period, v in s.snr.items() if v >= self.cfg.snr_thr),
                     reverse=True,
                 )
                 label = ",".join(str(period) for period in present) if present else "-"
@@ -179,7 +216,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
             axes[row][0].set_ylabel(module.rsplit(".", 1)[-1], fontsize=6)
         fig.suptitle(
             f"answer-position inner activations (x·V/‖V‖) over a+b grid; "
-            f"[periods with share ≥ {self.cfg.theta}]",
+            f"[periods with SNR ≥ {self.cfg.snr_thr:g}]",
             fontsize=7,
         )
         fig.tight_layout()
@@ -191,28 +228,26 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
         result: MetricResult = {"n_active": float(len(scored))}
         if not scored:
             return result
-        n_periods = [count_periods(s.shares, self.cfg.theta) for s in scored]
+        n_periods = [count_periods(s.snr, self.cfg.snr_thr) for s in scored]
         periodic = [n for n in n_periods if n >= 1]
         result["periodic_frac"] = len(periodic) / len(scored)
         if periodic:
             result["mixed_frac"] = sum(1 for n in periodic if n >= 2) / len(periodic)
             result["excess_periods"] = sum(n - 1 for n in periodic) / len(periodic)
-        # The θ cut is sharp in practice (many components hold a secondary period at
-        # 10-25% power), so log the thresholded view at fixed side θs plus a θ-free
-        # mixing intensity: the mean share of the second-strongest period class.
-        for side_theta in (0.1, 0.3):
-            nps = [count_periods(s.shares, side_theta) for s in scored]
+        # Absolute detection is threshold-dependent too — log side-λ views for
+        # robustness, plus the θ-free share of the second-strongest class.
+        for side_thr in (10.0, 100.0):
+            nps = [count_periods(s.snr, side_thr) for s in scored]
             per = [n for n in nps if n >= 1]
             if per:
-                tag = f"t{int(side_theta * 100):02d}"
-                result[f"mixed_frac_{tag}"] = sum(1 for n in per if n >= 2) / len(per)
+                result[f"mixed_frac_snr{int(side_thr)}"] = sum(1 for n in per if n >= 2) / len(per)
         result["secondary_share"] = float(
             sum(sorted(s.shares.values())[-2] for s in scored) / len(scored)
         )
         census: dict[int, int] = {}
         for comp in scored:
-            for period, share in comp.shares.items():
-                if share >= self.cfg.theta:
+            for period, v in comp.snr.items():
+                if v >= self.cfg.snr_thr:
                     census[period] = census.get(period, 0) + 1
         for period in sorted(census):
             result[f"census/T{period}"] = float(census[period])
