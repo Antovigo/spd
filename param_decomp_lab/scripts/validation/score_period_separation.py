@@ -84,6 +84,7 @@ def _summary_row(scored: "list[ComponentPeriods]", snr_thr: float) -> dict[str, 
     )
     census: dict[int, int] = {}
     pure_census: dict[int, int] = {}
+    pure_cells: set[tuple[str, int]] = set()
     for s in scored:
         detected_all = {p for p, v in s.snr.items() if v >= snr_thr}
         for period in detected_all:
@@ -91,7 +92,8 @@ def _summary_row(scored: "list[ComponentPeriods]", snr_thr: float) -> dict[str, 
         detected = detected_all - {100}
         if len(detected) == 1 and (period := next(iter(detected))) in CANONICAL_PERIODS:
             pure_census[period] = pure_census.get(period, 0) + 1
-    row["n_pure_periods"] = len(pure_census)
+            pure_cells.add((s.module, period))
+    row["n_pure_periods"] = len(pure_cells)
     row["census"] = " ".join(f"T{p}={c}" for p, c in sorted(census.items()))
     row["pure_census"] = " ".join(f"T{p}={c}" for p, c in sorted(pure_census.items()))
     return row

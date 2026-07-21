@@ -52,19 +52,25 @@ Readings:
 Visual inspection of the panels showed `mixed_frac` mis-ranking the sweep: the top-CI
 components at gentle doses are heavily mixed plaids while high doses leave some very
 clean components. The revised headline metric (user-specified): **n_pure_periods** =
-number of canonical periods with ≥ 1 *single-period* component (pure = detected at
-exactly one non-trend period; T=100 ignored, T=4/25 extras disqualify). Recomputed over
-the sweep:
+number of (matrix × canonical period) cells with ≥ 1 *single-period* component (pure =
+detected at exactly one non-trend period; T=100 ignored, T=4/25 extras disqualify).
+Counted per matrix, so the maximum is 3 × 5 = 15 for the MLP triple. Recomputed over
+the sweep (pure census pooled across matrices):
 
-| run | PGD | n_active | n_pure_periods | pure census |
-|---|---|---|---|---|
-| impmin1e-5 | 0.0052 | 307 | **5** | T2=6 T5=15 T10=9 T20=7 T50=25 |
-| impmin3e-5 | 0.0073 | 164 | **5** | T2=2 T5=9 T10=10 T20=2 T50=20 |
-| impmin5e-5 | 0.0096 | 131 | 4 | no pure T20 |
-| impmin1e-4 | 0.0125 | 89 | **5** | T2=2 T5=5 T10=2 T20=1 T50=7 |
-| impmin3e-4 | 0.0157 ✗gate | 49 | **5** | T2=1 T5=6 T10=2 T20=1 T50=6 |
-| impmin1e-3 | 0.0272 ✗ | 25 | 2 | T5=4 T50=2 |
-| impmin3e-3 | 0.0650 ✗ | 9 | 1 | T50=1 |
+| run | PGD | n_active | n_pure_periods (/15) | n pure comps | pure census |
+|---|---|---|---|---|---|
+| impmin1e-5 | 0.0052 | 307 | **14** | 62 | T2=6 T5=15 T10=9 T20=7 T50=25 |
+| impmin3e-5 | 0.0073 | 164 | 11 | 43 | T2=2 T5=9 T10=10 T20=2 T50=20 |
+| impmin5e-5 | 0.0096 | 131 | 11 | 27 | T2=3 T5=4 T10=7 T50=13 — no pure T20 |
+| impmin1e-4 | 0.0125 | 89 | 10 | 17 | T2=2 T5=5 T10=2 T20=1 T50=7 |
+| impmin3e-4 | 0.0157 ✗gate | 49 | 9 | 16 | T2=1 T5=6 T10=2 T20=1 T50=6 |
+| impmin1e-3 | 0.0272 ✗ | 25 | 3 | 6 | T5=4 T50=2 |
+| impmin3e-3 | 0.0650 ✗ | 9 | 1 | 1 | T50=1 |
+
+Missing cells at the gentle end: `impmin1e-5` misses only up_proj-T2 (14/15);
+`impmin3e-5` additionally loses gate_proj-{T5, T20} and up_proj-{T2, T20}. Under the
+per-matrix definition the metric is monotone in the coeff — gentler is purer — where
+the pooled version had flattened the top four runs to 5/5.
 
 Reconciliation of panel vs metric: the panels show the top-20 by mean CI — at gentle
 doses the *dominant* components are mixed while dozens of pure components sit at mean CI
@@ -74,11 +80,12 @@ entirely. Margin check: the gentle-dose pure components are mostly genuine (own-
 30–260 with other classes ≤ 10), except pure-T20 which is threshold-marginal
 (max-other-SNR 16–19).
 
-**Winner: `impmin3e-5` (coeff = 3e-5)** — the largest dose satisfying every criterion
-simultaneously: PGD 0.0073 ≪ 0.015 gate, full per-matrix coverage, and n_pure_periods
-5/5. `impmin1e-4` is the leaner alternative (89 active, still 5/5 pure, gate-passing at
-0.0125) if the up_proj T=2 coverage loss is acceptable. Base coeff for Objectives 2–4:
-**3e-5**.
+**Winner: `impmin3e-5` (coeff = 3e-5)** — chosen under the pooled metric as the largest
+dose satisfying every criterion simultaneously (PGD 0.0073 ≪ 0.015 gate, full per-matrix
+coverage, pooled n_pure 5/5); it is the base coeff for the in-flight Objectives 2–3
+runs. Note the per-matrix revision reranks the top: `impmin1e-5` now leads (14/15 vs
+11/15) with better recon (0.0052) at the cost of 2× the active components (307 vs 164)
+and much higher redundancy (37.6 vs 22.7 comps/period).
 
 ## Objective 2 — initialization: kaiming wins on mixing
 
@@ -87,17 +94,19 @@ removed SmoothL0, so the net feature was applied surgically). Comparison at the 
 coeff 3e-5 — `addsub-L18-08-impmin3e-5` doubles as the kaiming arm (identical config,
 default init); `addsub-L18-08-initcoupled` is the same + `weight_init: coupled`:
 
-| run (init) | PGD | rounded | n_active | n_pure_periods | pure census |
+| run (init) | PGD | rounded | n_active | n_pure_periods (/15) | pure census |
 |---|---|---|---|---|---|
-| impmin3e-5 (kaiming) | 0.00727 | 0.00616 | 164 | **5** | T2=2 T5=9 T10=10 T20=2 T50=20 |
-| initcoupled (coupled) | **0.00564** | **0.00467** | 113 | 4 | T2=2 T10=2 T20=1 T50=5 — no pure T5 |
+| impmin3e-5 (kaiming) | 0.00727 | 0.00616 | 164 | **11** | T2=2 T5=9 T10=10 T20=2 T50=20 |
+| initcoupled (coupled) | **0.00564** | **0.00467** | 113 | 5 | T2=2 T10=2 T20=1 T50=5 — no pure T5 |
 
 Coupled init reconstructs better (−22% PGD) with fewer active components (113 vs 164),
 but **loses period-5 purity entirely**: its best T5 components all carry exactly one
 strong extra period (SNR 28–147) — genuine two-period mixes, not threshold near-misses.
-On the roadmap's criterion for this objective (effect on period mixing):
-**kaiming picked** for the rest of the series (5/5 pure periods). Coupled remains
-attractive if later objectives recover its lost pure period at its better recon.
+The per-matrix metric widens the gap further (11 vs 5 cells): coupled's 10 pure
+components sit only in down_proj (T2/T10/T50) and up_proj (T20/T50) — **gate_proj has
+zero pure components**. On the roadmap's criterion for this objective (effect on period
+mixing): **kaiming picked** for the rest of the series. Coupled remains attractive if
+later objectives recover its lost pure cells at its better recon.
 
 ## Objective 3 — fused hidden-acts recon loss — pending
 
