@@ -24,7 +24,7 @@ Runs `addsub-L18-08-impmin{1e-5, 3e-5, 5e-5, 1e-4, 3e-4, 1e-3, 3e-3}` (jobs 5141
 |---|---|---|---|---|---|---|---|
 | impmin1e-5 | 0.00524 | 0.00444 | 59.7 | 307 | **1.00** | 37.6 | 0.70 |
 | impmin3e-5 | 0.00727 | 0.00616 | 25.4 | 164 | **1.00** | 22.7 | 0.67 |
-| impmin5e-5 | *(running — interpolation probe)* | | | | | | |
+| impmin5e-5 | 0.00958 | 0.00731 | 17.7 | 131 | 0.93 | 18.4 | 0.67 |
 | impmin1e-4 | 0.01246 | 0.01075 | 10.3 | 89 | 0.93 | 13.6 | 0.73 |
 | impmin3e-4 | 0.01570 ✗gate | 0.01335 | 4.8 | 49 | 0.93 | 7.1 | 0.56 |
 | impmin1e-3 | 0.02724 ✗ | 0.02352 | 2.4 | 25 | 0.93 | 3.8 | 0.60 |
@@ -40,16 +40,16 @@ Readings:
 - **Mixing is flat (~0.6–0.73) across the whole sweep** — at 4000 steps with constant
   γ=1, the impmin dose does not separate periods; it only prunes. Separation will have
   to come from the later knobs (hidden-acts, γ-anneal, β).
-- Redundancy at the coverage-preserving doses is still far from the ideal
-  (22.7 components per covered period at 3e-5 vs the optimal 1): the sweet spot sits in
-  the 3e-5–1e-4 gap, hence the `impmin5e-5` interpolation probe (result pending; will
-  finalize the winner here).
+- The `impmin5e-5` interpolation probe located the coverage break precisely: **up_proj's
+  T=2 cell dies between coeff 3e-5 and 5e-5** (the same cell missing at 1e-4) — up_proj
+  carries only 2–3 period-2 components even at gentle doses, making it the fragile cell
+  the coeff must protect.
 - Diagnostics: T=4 and T=25 detections are common (components genuinely read
   non-canonical harmonic planes), T=100 detections track magnitude/trend reads.
 
-**Provisional winner: `impmin3e-5`** (full coverage, PGD 0.0073 ≪ gate, half the
-redundancy of 1e-5) — to be confirmed against `impmin5e-5` when it lands: if 5e-5 keeps
-coverage 1.0 it takes the win (lower redundancy at compliant recon).
+**Winner: `impmin3e-5` (coeff = 3e-5)** — the largest dose that keeps full canonical
+coverage, with PGD 0.0073 ≪ the 0.015 gate and half the redundancy of 1e-5. Used as the
+base coeff for Objectives 2–4.
 
 ## Objective 2 — initialization (kaiming vs coupled) — pending
 
