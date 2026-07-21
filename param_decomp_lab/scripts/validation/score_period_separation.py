@@ -27,8 +27,9 @@ per-class SNRs + shares, present periods, n_periods, secondary_share),
 `analysis/datasets/period_separation_summary.tsv` (per matrix + pooled: n_active,
 periodic_frac, mixed_frac at the three λs, excess_periods, secondary_share, census), and
 `analysis/inner_acts_period_panel.png` (AB-heatmap-style panel of the top `--top-k-plot`
-inner-activation grids per matrix by mean CI). GPU (one forward pass over the grid) —
-use `--slurm` from the login node.
+inner-activation grids per matrix by mean CI), and `analysis/inner_acts_pure_panel.png`
+(the same view filtered to the pure single-period subcomponents). GPU (one forward pass
+over the grid) — use `--slurm` from the login node.
 """
 
 import csv
@@ -106,6 +107,7 @@ def score_period_separation(
     output: str | None = None,
     output_summary: str | None = None,
     output_fig: str | None = None,
+    output_fig_pure: str | None = None,
     slurm: bool = False,
     partition: str | None = DEFAULT_PARTITION_NAME,
     gpus: int = 1,
@@ -119,7 +121,7 @@ def score_period_separation(
         argv += [f"--ci-gate={ci_gate}", f"--snr-thr={snr_thr}", f"--module-grep={module_grep}"]
         argv += [f"--batch-size={batch_size}", f"--top-k-plot={top_k_plot}"]
         for flag, val in (("output", output), ("output-summary", output_summary),
-                          ("output-fig", output_fig)):  # fmt: skip
+                          ("output-fig", output_fig), ("output-fig-pure", output_fig_pure)):  # fmt: skip
             if val is not None:
                 argv.append(f"--{flag}={Path(val).expanduser().resolve()}")
         submit_self_to_slurm(
@@ -163,6 +165,11 @@ def score_period_separation(
         Path(output_fig).expanduser()
         if output_fig
         else analysis_dir(run.run_dir) / "inner_acts_period_panel.png"
+    )
+    out_fig_pure_path = (
+        Path(output_fig_pure).expanduser()
+        if output_fig_pure
+        else analysis_dir(run.run_dir) / "inner_acts_pure_panel.png"
     )
 
     periods = sorted(scored[0].shares)
@@ -213,6 +220,19 @@ def score_period_separation(
 
     fig = metric.plot_panel(scored)
     fig.savefig(out_fig_path, dpi=250)
+
+    def _is_pure(s: "ComponentPeriods") -> bool:
+        detected = {p for p, v in s.snr.items() if v >= snr_thr} - {100}
+        return len(detected) == 1 and next(iter(detected)) in CANONICAL_PERIODS
+
+    pure_scored = [s for s in scored if _is_pure(s)]
+    if pure_scored:
+        fig_pure = metric.plot_panel(pure_scored)
+        fig_pure.suptitle(
+            f"PURE single-period subcomponents only (SNR ≥ {snr_thr:g}; T=100 ignored)",
+            fontsize=7,
+        )
+        fig_pure.savefig(out_fig_pure_path, dpi=250)
 
     pooled = _summary_row(scored, snr_thr)
     logger.info(
