@@ -111,3 +111,14 @@ These two concepts both show up in the PGD metrics and are easy to confuse:
 PPGD's state machine lives in `persistent_pgd_state.py` (shared); its `Metric`
 classes + configs live in `persistent_pgd_recon.py`. The split is so the subset
 variant (`PersistentPGDReconSubsetLoss`) can reuse the same state machine.
+
+## Hidden-acts recon: fused aux vs standalone
+
+`StochasticReconSubsetLossConfig.hidden_acts_recon` (`HiddenActsReconAux`, in
+`stochastic_recon_subset.py`) adds `coeff * MSE(masked site output, frozen x@W + b)`
+riding the host's stochastically-masked forwards — the frozen targets are recomputed
+from the step's cached clean input acts, so it costs **no extra forward** (unlike the
+standalone `StochasticHiddenActsReconLoss`, which runs its own clean + masked passes
+per step and survives only for older configs). The aux folds into the host's returned
+loss at the `aux.coeff / host.coeff` ratio (the trainer multiplies by the host coeff);
+eval logs it separately as `loss/StochasticReconSubsetLoss/hidden_acts`.
