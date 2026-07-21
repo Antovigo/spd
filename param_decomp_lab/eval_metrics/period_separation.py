@@ -265,6 +265,18 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
         result["coverage_frac"] = present_cells / (len(matrices) * len(CANONICAL_PERIODS))
         if present_cells:
             result["components_per_period"] = presences / present_cells
+        # A component is PURE-T when T is its only detected canonical period and it has
+        # no T=4/25 extras (genuine additional periodicities); T=100 detections are
+        # ignored (trend-confounded). n_pure_periods = canonical periods owning at
+        # least one pure component — the headline separation score (target: 5).
+        pure_census: dict[int, int] = {}
+        for s_comp in scored:
+            detected = {p for p, v in s_comp.snr.items() if v >= self.cfg.snr_thr and p != 100}
+            if len(detected) == 1 and (period := next(iter(detected))) in CANONICAL_PERIODS:
+                pure_census[period] = pure_census.get(period, 0) + 1
+        result["n_pure_periods"] = float(len(pure_census))
+        for period in sorted(pure_census):
+            result[f"pure_census/T{period}"] = float(pure_census[period])
         for module in matrices:
             comps = [s for s in scored if s.module == module]
             short = module.rsplit(".", 1)[-1]

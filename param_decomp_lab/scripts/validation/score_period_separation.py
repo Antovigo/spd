@@ -82,11 +82,17 @@ def _summary_row(scored: "list[ComponentPeriods]", snr_thr: float) -> dict[str, 
         round(sum(sorted(s.shares.values())[-2] for s in scored) / len(scored), 4) if scored else ""
     )
     census: dict[int, int] = {}
+    pure_census: dict[int, int] = {}
     for s in scored:
-        for period, v in s.snr.items():
-            if v >= snr_thr:
-                census[period] = census.get(period, 0) + 1
+        detected_all = {p for p, v in s.snr.items() if v >= snr_thr}
+        for period in detected_all:
+            census[period] = census.get(period, 0) + 1
+        detected = detected_all - {100}
+        if len(detected) == 1 and (period := next(iter(detected))) in CANONICAL_PERIODS:
+            pure_census[period] = pure_census.get(period, 0) + 1
+    row["n_pure_periods"] = len(pure_census)
     row["census"] = " ".join(f"T{p}={c}" for p, c in sorted(census.items()))
+    row["pure_census"] = " ".join(f"T{p}={c}" for p, c in sorted(pure_census.items()))
     return row
 
 
@@ -161,7 +167,7 @@ def score_period_separation(
 
     periods = sorted(scored[0].shares)
     fields = ["layer", "matrix", "component", "mean_ci", "n_periods", "present_periods",
-              "extra_periods"]  # fmt: skip
+              "extra_periods", "pure"]  # fmt: skip
     fields += [f"snr_T{p}" for p in periods] + [f"share_T{p}" for p in periods]
     fields += ["secondary_share"]
     with open(out_path, "w", newline="") as f:
@@ -172,11 +178,14 @@ def score_period_separation(
             detected = [p for p in periods if s.snr[p] >= snr_thr]
             present = sorted((p for p in detected if p in CANONICAL_PERIODS), reverse=True)
             extra = sorted((p for p in detected if p not in CANONICAL_PERIODS), reverse=True)
+            nontrend = set(detected) - {100}
+            pure = len(nontrend) == 1 and next(iter(nontrend)) in CANONICAL_PERIODS
             row: dict[str, object] = {
                 "layer": layer, "matrix": matrix, "component": s.component,
                 "mean_ci": round(s.mean_ci, 4), "n_periods": len(present),
                 "present_periods": " ".join(str(p) for p in present),
                 "extra_periods": " ".join(str(p) for p in extra),
+                "pure": int(pure),
                 "secondary_share": round(sorted(s.shares.values())[-2], 4),
             }  # fmt: skip
             for p in periods:
@@ -187,7 +196,13 @@ def score_period_separation(
     matrices = sorted({parse_module_name(s.module) for s in scored})
     summary_fields = ["layer", "matrix", "n_active", "periodic_frac"]
     summary_fields += [f"mixed_frac_snr{int(t)}" for t in _SNR_THRS]
-    summary_fields += ["excess_periods", "secondary_share", "census"]
+    summary_fields += [
+        "excess_periods",
+        "secondary_share",
+        "n_pure_periods",
+        "census",
+        "pure_census",
+    ]
     with open(out_summary_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=summary_fields, delimiter="\t")
         writer.writeheader()
