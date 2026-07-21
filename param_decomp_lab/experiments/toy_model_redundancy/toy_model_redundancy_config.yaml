@@ -1,0 +1,69 @@
+pd:
+  seed: 0
+  n_mask_samples: 1
+  ci_config:
+    mode: layerwise
+    fn_type: mlp
+    hidden_dims:
+    - 16
+  sigmoid_type: leaky_hard
+  decomposition_targets:
+  - module_pattern: blocks.*.mlp_in
+    C: 64
+  - module_pattern: blocks.*.mlp_out
+    C: 64
+  identity_decomposition_targets: null
+  use_delta_component: true
+  batch_size: 512
+  steps: 10000
+  components_optimizer:
+    lr_schedule:
+      start_val: 2e-3
+      fn_type: constant
+      warmup_pct: 0.0
+  ci_fn_optimizer:
+    lr_schedule:
+      start_val: 2e-3
+      fn_type: constant
+      warmup_pct: 0.0
+  faithfulness_warmup_steps: 200
+  faithfulness_warmup_lr: 0.01
+  faithfulness_warmup_weight_decay: 0.1
+  loss_metrics:
+    - type: ImportanceMinimalityLoss
+      coeff: 1e-5
+      pnorm: 2.0
+      beta: 0
+    - type: StochasticReconLayerwiseLoss
+      coeff: 1.0
+    - type: StochasticReconLoss
+      coeff: 1.0
+cadence:
+  train_log_every: 100
+eval:
+  n_steps: 20
+  batch_size: 512
+  every: 500
+  slow_every: 5000
+  slow_on_first_step: true
+  # PermutedCIPlots / IdentityCIError assume feature-vector inputs (TMS/ResidMLP) and
+  # do not apply to token-ID batches; plot_ci.py is the testbed-specific CI view.
+  metrics:
+    - type: CIHistograms
+      n_batches_accum: 5
+    - type: ComponentActivationDensity
+      ci_alive_threshold: 0.1
+    - type: CI_L0
+      groups: null
+      ci_alive_threshold: 0.1
+    - type: CIMeanPerComponent
+label: toy_model_redundancy
+target:
+  run_path: toy_model_redundancy/training
+data: {}
+runtime:
+  autocast_bf16: false
+  device: cuda
+  dp: null
+wandb:
+  project: param-decomp

@@ -15,6 +15,9 @@ experiments/
 │                            # + init_pd_run + EXPERIMENT_CONFIG_FILENAME
 ├── tms/run.py
 ├── resid_mlp/run.py
+├── toy_model_redundancy/    # redundancy testbed: decompose the n-fold-redundant
+│   ├── run.py               # cipher toy (toy_models/toy_model_redundancy.py);
+│   └── plot_ci.py           # CI-vs-ground-truth diagnostic (skipped-mechanism score)
 └── lm/
     ├── run.py
     ├── layerwise.py         # split LM YAML into per-matrix configs + SLURM-array submit
