@@ -47,16 +47,14 @@ coexist.
 
 import csv
 import json
-import math
 from collections import defaultdict
 from pathlib import Path
-from typing import NamedTuple
 
 import fire
 import numpy as np
-from numpy.typing import NDArray
 
 from param_decomp.log import logger
+from param_decomp_lab.period_orbits import orbit_powers_2d, orbit_powers_marginals
 from param_decomp_lab.scripts.validation.common import (
     PerPosition,
     build_ci_grids,
@@ -79,97 +77,6 @@ _SUMMARY_FIELDS = [
     "op", "pos", "layer", "matrix", "n_scored", "n_flat", "n_clean", "median_band_purity",
     "mass_weighted_band_purity", "mean_n_orbits_50", "period_counts",
 ]  # fmt: skip
-
-
-def _orbit_label(ka: int, kb: int, n: int) -> tuple[str, int]:
-    """Direction label and integer period of the frequency orbit `(ka, kb)` on an n×n grid.
-
-    `ka`/`kb` are the a-axis / b-axis frequencies with `kb` folded into `(-n/2, n/2]`.
-    """
-    if kb == 0:
-        return "a", round(n / ka)
-    if ka == 0:
-        return "b", round(n / abs(kb))
-    if ka == kb:
-        return "a+b", round(n / ka)
-    if ka == -kb:
-        return "a-b", round(n / ka)
-    return "mixed2d", round(n / math.gcd(ka, abs(kb)))
-
-
-class Orbit(NamedTuple):
-    """One conjugate frequency orbit: human label + integer period + power share, plus the
-    reduced direction `direction` and fundamental frequency `freq` (`(ka, kb) = freq *
-    direction`) that let harmonics of a common fundamental be pooled."""
-
-    label: str
-    period: int
-    share: float
-    direction: tuple[str | int, int]
-    freq: int
-
-    def is_harmonic_of(self, other: "Orbit") -> bool:
-        return self.direction == other.direction and self.freq % other.freq == 0
-
-
-def _orbit_powers_2d(grid: NDArray[np.floating]) -> list[Orbit]:
-    """Non-DC power per conjugate orbit of a square grid, descending by share.
-    `grid` is `[b, a]`, so axis 1 carries the a-frequency."""
-    n_b, n_a = grid.shape
-    assert n_a == n_b, f"period labels assume a square grid, got {grid.shape}"
-    n = n_a
-    f = np.fft.fft2(grid - grid.mean())
-    power = np.abs(f) ** 2
-    orbits: dict[tuple[int, int], float] = defaultdict(float)
-    for kb_raw in range(n):
-        for ka_raw in range(n):
-            if ka_raw == 0 and kb_raw == 0:
-                continue
-            ka = ka_raw - n if ka_raw > n // 2 else ka_raw
-            kb = kb_raw - n if kb_raw > n // 2 else kb_raw
-            key = (ka, kb) if (ka > 0 or (ka == 0 and kb > 0)) else (-ka, -kb)
-            orbits[key] += float(power[kb_raw, ka_raw])
-    total = sum(orbits.values())
-    if total < 1e-12:
-        return []
-    ranked = sorted(orbits.items(), key=lambda kv: kv[1], reverse=True)
-    return [
-        Orbit(*_orbit_label(ka, kb, n), p / total, (ka // g, kb // g), g)
-        for (ka, kb), p in ranked
-        for g in (math.gcd(ka, abs(kb)),)
-    ]
-
-
-def _orbit_powers_marginals(
-    grid: NDArray[np.floating], displayed: NDArray[np.bool_]
-) -> list[Orbit]:
-    """1D-FFT power orbits of the two displayed-cell marginals, pooled and normalised.
-
-    Fallback for ops whose prompts don't cover the full grid (subtraction's triangle):
-    `f(a)` = nan-mean of CI over the displayed b's, and vice versa. Diagonal (`a±b`)
-    structure is invisible to marginals — `+` rows are the comparable ones.
-    """
-    masked = np.where(displayed, grid, np.nan)
-    with np.errstate(invalid="ignore"):
-        marginals = (("a", np.nanmean(masked, axis=0)), ("b", np.nanmean(masked, axis=1)))
-    powers: list[Orbit] = []
-    for axis_label, marginal in marginals:
-        marginal = marginal[~np.isnan(marginal)]
-        if marginal.size < 4:
-            continue
-        centered = marginal - marginal.mean()
-        power = np.abs(np.fft.rfft(centered)) ** 2
-        for k in range(1, power.shape[0]):
-            powers.append(
-                Orbit(axis_label, round(marginal.size / k), float(power[k]), (axis_label, 0), k)
-            )
-    total = sum(o.share for o in powers)
-    if total < 1e-12:
-        return []
-    return [
-        o._replace(share=o.share / total)
-        for o in sorted(powers, key=lambda o: o.share, reverse=True)
-    ]
 
 
 def score_period_separation(
@@ -238,9 +145,9 @@ def score_period_separation(
                         )
                         continue
                     orbits = (
-                        _orbit_powers_2d(grid)
+                        orbit_powers_2d(grid)
                         if full_grid
-                        else _orbit_powers_marginals(grid, displayed)
+                        else orbit_powers_marginals(grid, displayed)
                     )
                     if not orbits:
                         continue

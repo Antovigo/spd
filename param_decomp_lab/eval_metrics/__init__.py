@@ -50,6 +50,10 @@ from param_decomp_lab.eval_metrics.nontarget_ci_mean_per_component import (
     NontargetCIMeanPerComponent,
     NontargetCIMeanPerComponentConfig,
 )
+from param_decomp_lab.eval_metrics.period_separation import (
+    PeriodSeparation,
+    PeriodSeparationConfig,
+)
 from param_decomp_lab.eval_metrics.permuted_ci_plots import PermutedCIPlots, PermutedCIPlotsConfig
 from param_decomp_lab.eval_metrics.targeted_ci_heatmap import (
     TargetedCIHeatmap,
@@ -77,6 +81,7 @@ AnyEvalMetricConfig = Annotated[
     | NAliveConfig
     | NontargetCIMeanPerComponentConfig
     | NontargetReconLossConfig
+    | PeriodSeparationConfig
     | PermutedCIPlotsConfig
     | PGDReconLossConfig
     | SmoothL0ImportanceMinimalityLossConfig
@@ -104,6 +109,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         NAlive,
         NontargetCIMeanPerComponent,
         NontargetReconLoss,
+        PeriodSeparation,
         PermutedCIPlots,
         PGDReconLoss,
         SmoothL0ImportanceMinimalityLoss,
