@@ -8,10 +8,10 @@ This testbed makes the failure exactly measurable: a toy transformer with *known
 trained-in* n-fold redundancy, so any decomposition can be scored by how many
 ground-truth mechanisms it skips.
 
-Code: `param_decomp_lab/toy_models/redundant_cipher_transformer.py` (toy) and
-`param_decomp_lab/experiments/cipher/` (PD experiment + `plot_ci.py` diagnostic).
-Runs: `~/out/runs/toy_model_redundancy_training` (toy),
-`~/out/runs/toy_model_redundancy_decomposition` (baseline decomposition).
+Code: `param_decomp_lab/toy_models/toy_model_redundancy.py` (toy) and
+`param_decomp_lab/experiments/toy_model_redundancy/` (PD experiment + `plot_ci.py` diagnostic).
+Runs: `~/out/runs/toy_model_redundancy/training` (toy),
+`~/out/runs/toy_model_redundancy/impmin_1e-5` (baseline decomposition).
 
 ## The toy model
 
@@ -72,7 +72,7 @@ with per-token accuracy 1.0 — the ground truth the decomposition is scored aga
 
 Standard joint decomposition of all 6 matrices (`blocks.*.mlp_in`, `blocks.*.mlp_out`),
 KL reconstruction against the toy's output distribution, uniform random token
-sequences as data. Config: `param_decomp_lab/experiments/cipher/cipher1_config.yaml`.
+sequences as data. Config: `param_decomp_lab/experiments/toy_model_redundancy/toy_model_redundancy_config.yaml`.
 
 Hyperparameters that matter for this experiment:
 
@@ -127,8 +127,8 @@ mechanisms should clear these cells. Baseline: 29 skipped, all in blocks 1–2.
 Reproduce:
 
 ```bash
-python -m param_decomp_lab.experiments.cipher.run <config.yaml> --run_id=cipher-<details>-<NN>
-python -m param_decomp_lab.experiments.cipher.plot_ci ~/out/runs/<run_id>
+python -m param_decomp_lab.experiments.toy_model_redundancy.run <config.yaml> --run_id=toy_model_redundancy/<details>
+python -m param_decomp_lab.experiments.toy_model_redundancy.plot_ci ~/out/runs/<run_id>
 ```
 
 ## Experiment: lowering the impmin coeff
@@ -136,7 +136,7 @@ python -m param_decomp_lab.experiments.cipher.plot_ci ~/out/runs/<run_id>
 If pruning is threshold-driven, lowering λ should recover mechanisms whose
 partner-masked marginal ΔKL sits between the old and new thresholds. Sweep at
 λ ∈ {3e-6, 1e-6, 3e-7} (baseline 1e-5), everything else identical; runs
-`toy_model_redundancy_impmin_{3e-6,1e-6,3e-7}`, ~20 min each on CPU.
+`toy_model_redundancy/impmin_{3e-6,1e-6,3e-7}`, ~20 min each on CPU.
 
 Results (active counts as mlp_in+mlp_out per block; ideal is 32+32 everywhere):
 
@@ -167,3 +167,34 @@ by the time the threshold is low enough to keep the backups, it is too low to
 force one-subcomponent-per-token in the redundant regime. Sparsity alone cannot
 do both jobs — which is the motivation for completeness-style protocols
 (train sparse, then recover/repair) rather than a single global penalty.
+
+## Experiment: SmoothL0 penalty
+
+Same as the λ = 1e-5 baseline but with `SmoothL0ImportanceMinimalityLoss`
+(Geman–McClure `φ(c) = c²/(c²+γ²)`, coeff 1e-5, beta 0) instead of the L_p penalty.
+Two variants: constant γ = 1, and γ linearly annealed 1 → 0.01 over the run. Runs
+`toy_model_redundancy/smoothl0_{gamma1,gamma_anneal}` (no wandb — nested run ids
+contain `/`, which wandb rejects).
+
+| penalty | skipped / 96 | b0 active | b1 active | b2 active | recon KL |
+|---|---|---|---|---|---|
+| L2, λ = 1e-5 (baseline) | 29 | 32+32 | 18+11 | 15+13 | 5.1e-6 |
+| SmoothL0 γ = 1 constant | 34 | 34+35 | 15+11 | 14+12 | 3.2e-6 |
+| SmoothL0 γ 1 → 0.01 | 37 | 36+39 | 14+11 | 12+9 | 2.3e-6 |
+
+Both are *worse* than the L2 baseline on completeness, and the anneal makes it
+worse still. This is consistent with the penalty's shape: for c ≪ γ = 1,
+φ ≈ c²/γ² — the same quadratic pressure the baseline applies to
+low-marginal-ΔKL backups, so they die the same way — while for CIs near 1 the
+penalty *saturates* (φ' at c = 1 is 4× weaker than L2's), so fully-on components
+are cheaper to keep and block 0 drifts into mild over-allocation (34–39 active)
+with some off-diagonal mixing. Annealing γ down to 0.01 turns φ into a near-hard
+L0: everything above γ pays the same full price, so the pressure to drop
+low-utility (redundant) components *increases* as γ shrinks — 37 skipped, the
+worst of all runs, at the best recon (2.3e-6). Recon and completeness anti-correlate
+across every run so far: freed capacity goes to fitting, not coverage.
+
+Takeaway: the skip pathology is not an artifact of the L_p gradient cliff or of
+the particular penalty shape — any penalty that prices CI mass prunes mechanisms
+whose marginal contribution is masked by redundancy. Recovery has to come from the
+training *protocol*, not the sparsity functional.

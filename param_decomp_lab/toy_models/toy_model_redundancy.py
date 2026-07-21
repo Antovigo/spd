@@ -20,8 +20,8 @@ derangement makes the certificate binary: the empty subset argmaxes to `x` itsel
 scores exactly 0 accuracy, any working subset ~1.
 
 Usage:
-    python -m param_decomp_lab.toy_models.redundant_cipher_transformer train [--out-dir=PATH]
-    python -m param_decomp_lab.toy_models.redundant_cipher_transformer verify <run_dir>
+    python -m param_decomp_lab.toy_models.toy_model_redundancy train [--out-dir=PATH]
+    python -m param_decomp_lab.toy_models.toy_model_redundancy verify <run_dir>
 
 Outputs in the run dir: `model.pth`, `config.json`, `verification.json` (per-subset CE
 + accuracy), `alignment.npz` (per-block read/write alignment to `e_x` / `e_(pi(x))`),
@@ -49,7 +49,7 @@ from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.seed import set_seed
 
 
-class RedundantCipherConfig(BaseConfig):
+class ToyModelRedundancyConfig(BaseConfig):
     vocab_size: PositiveInt = 32
     d_embed: PositiveInt = 64
     d_mlp: PositiveInt = 48
@@ -92,10 +92,10 @@ def _sample_derangement(vocab_size: int, generator: torch.Generator) -> Tensor:
             return pi
 
 
-class RedundantCipherTransformer(nn.Module):
+class ToyModelRedundancyTransformer(nn.Module):
     """Fixed unit-norm embedding, tied unembedding, final RMSNorm; only blocks train."""
 
-    def __init__(self, config: RedundantCipherConfig):
+    def __init__(self, config: ToyModelRedundancyConfig):
         super().__init__()
         self.config = config
         generator = torch.Generator().manual_seed(config.seed)
@@ -124,8 +124,8 @@ class RedundantCipherTransformer(nn.Module):
         return einops.einsum(self.final_norm(resid), self.W_E, "b s d, v d -> b s v")
 
     @classmethod
-    def from_run_dir(cls, run_dir: Path) -> "RedundantCipherTransformer":
-        config = RedundantCipherConfig.model_validate(
+    def from_run_dir(cls, run_dir: Path) -> "ToyModelRedundancyTransformer":
+        config = ToyModelRedundancyConfig.model_validate(
             json.loads((run_dir / "config.json").read_text())
         )
         model = cls(config)
@@ -134,7 +134,7 @@ class RedundantCipherTransformer(nn.Module):
 
 
 def sample_block_mask(
-    config: RedundantCipherConfig, batch_size: int, generator: torch.Generator
+    config: ToyModelRedundancyConfig, batch_size: int, generator: torch.Generator
 ) -> Float[Tensor, "batch n_blocks"]:
     """Per sequence: a block subset uniform over all `2^n - 1` non-empty subsets."""
     subset = torch.randint(1, 2**config.n_blocks, (batch_size,), generator=generator)
@@ -142,8 +142,8 @@ def sample_block_mask(
     return ((subset[:, None] >> bits) & 1).float()
 
 
-def _cipher_loss_and_acc(
-    model: RedundantCipherTransformer,
+def _loss_and_acc(
+    model: ToyModelRedundancyTransformer,
     tokens: Int[Tensor, "batch seq"],
     block_mask: Float[Tensor, "batch n_blocks"] | None,
 ) -> tuple[Tensor, Tensor]:
@@ -161,16 +161,16 @@ def train(
     seed: int = 0,
 ) -> Path:
     """Train the toy and write model + config + verification artifacts."""
-    config = RedundantCipherConfig(steps=steps, n_blocks=n_blocks, seed=seed)
+    config = ToyModelRedundancyConfig(steps=steps, n_blocks=n_blocks, seed=seed)
     set_seed(config.seed)
     run_dir = (
         Path(out_dir).expanduser()
         if out_dir is not None
-        else PARAM_DECOMP_OUT_DIR / "runs" / "toy-redundant-cipher-01"
+        else PARAM_DECOMP_OUT_DIR / "runs" / "toy_model_redundancy" / "training"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    model = RedundantCipherTransformer(config)
+    model = ToyModelRedundancyTransformer(config)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     generator = torch.Generator().manual_seed(config.seed + 1)
 
@@ -179,7 +179,7 @@ def train(
             0, config.vocab_size, (config.batch_size, config.seq_len), generator=generator
         )
         block_mask = sample_block_mask(config, config.batch_size, generator)
-        loss, acc = _cipher_loss_and_acc(model, tokens, block_mask)
+        loss, acc = _loss_and_acc(model, tokens, block_mask)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -202,7 +202,7 @@ def verify(run_dir: str, n_samples: int = 8192, seed: int = 123) -> dict[str, di
     accuracy of each block alone, per input token).
     """
     path = Path(run_dir).expanduser()
-    model = RedundantCipherTransformer.from_run_dir(path)
+    model = ToyModelRedundancyTransformer.from_run_dir(path)
     config = model.config
     generator = torch.Generator().manual_seed(seed)
     tokens = torch.randint(0, config.vocab_size, (n_samples, config.seq_len), generator=generator)
@@ -211,7 +211,7 @@ def verify(run_dir: str, n_samples: int = 8192, seed: int = 123) -> dict[str, di
     with torch.no_grad():
         for keep in itertools.product((0.0, 1.0), repeat=config.n_blocks):
             mask = torch.tensor([keep]).expand(n_samples, -1)
-            loss, acc = _cipher_loss_and_acc(model, tokens, mask)
+            loss, acc = _loss_and_acc(model, tokens, mask)
             name = "".join(str(int(k)) for k in keep)
             report[name] = {"ce": float(loss), "accuracy": float(acc)}
 
