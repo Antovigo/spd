@@ -47,7 +47,7 @@ from param_decomp_lab.eval_metrics.period_separation import (  # noqa: E402
     PeriodSeparationConfig,
 )
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME  # noqa: E402
-from param_decomp_lab.period_orbits import count_periods  # noqa: E402
+from param_decomp_lab.period_orbits import CANONICAL_PERIODS, count_periods  # noqa: E402
 from param_decomp_lab.scripts.validation.common import (  # noqa: E402
     SlurmOptions,
     analysis_datasets_dir,
@@ -63,14 +63,14 @@ _SNR_THRS = (10.0, 20.0, 100.0)
 
 
 def _summary_row(scored: "list[ComponentPeriods]", snr_thr: float) -> dict[str, object]:
-    n_periods = [count_periods(s.snr, snr_thr) for s in scored]
+    n_periods = [count_periods(s.snr, snr_thr, CANONICAL_PERIODS) for s in scored]
     periodic = [n for n in n_periods if n >= 1]
     row: dict[str, object] = {
         "n_active": len(scored),
         "periodic_frac": round(len(periodic) / len(scored), 4) if scored else "",
     }
     for side_thr in _SNR_THRS:
-        nps = [count_periods(s.snr, side_thr) for s in scored]
+        nps = [count_periods(s.snr, side_thr, CANONICAL_PERIODS) for s in scored]
         per = [n for n in nps if n >= 1]
         row[f"mixed_frac_snr{int(side_thr)}"] = (
             round(sum(1 for n in per if n >= 2) / len(per), 4) if per else ""
@@ -160,7 +160,8 @@ def score_period_separation(
     )
 
     periods = sorted(scored[0].shares)
-    fields = ["layer", "matrix", "component", "mean_ci", "n_periods", "present_periods"]
+    fields = ["layer", "matrix", "component", "mean_ci", "n_periods", "present_periods",
+              "extra_periods"]  # fmt: skip
     fields += [f"snr_T{p}" for p in periods] + [f"share_T{p}" for p in periods]
     fields += ["secondary_share"]
     with open(out_path, "w", newline="") as f:
@@ -168,11 +169,14 @@ def score_period_separation(
         writer.writeheader()
         for s in sorted(scored, key=lambda s: (parse_module_name(s.module), s.component)):
             layer, matrix = parse_module_name(s.module)
-            present = sorted((p for p in periods if s.snr[p] >= snr_thr), reverse=True)
+            detected = [p for p in periods if s.snr[p] >= snr_thr]
+            present = sorted((p for p in detected if p in CANONICAL_PERIODS), reverse=True)
+            extra = sorted((p for p in detected if p not in CANONICAL_PERIODS), reverse=True)
             row: dict[str, object] = {
                 "layer": layer, "matrix": matrix, "component": s.component,
                 "mean_ci": round(s.mean_ci, 4), "n_periods": len(present),
                 "present_periods": " ".join(str(p) for p in present),
+                "extra_periods": " ".join(str(p) for p in extra),
                 "secondary_share": round(sorted(s.shares.values())[-2], 4),
             }  # fmt: skip
             for p in periods:

@@ -8,6 +8,12 @@ it is importable from anywhere without circularity.
 import numpy as np
 from numpy.typing import NDArray
 
+# The model's Fourier features (Feucht et al.) store integers modulo these periods; the
+# roadmap's coverage / mixing criteria are stated over this set. T=4 and T=25 are
+# detectable-but-noncanonical; T=100 is confounded with any smooth trend on a 1..100
+# grid. All three are reported as diagnostics, not counted as mixing.
+CANONICAL_PERIODS = (2, 5, 10, 20, 50)
+
 
 def canonical_fundamentals(n: int) -> tuple[int, ...]:
     """Fundamental frequencies of the canonical period classes on a 1..n grid: the
@@ -47,9 +53,12 @@ def period_class_shares(grid: NDArray[np.floating]) -> dict[int, float]:
     return shares
 
 
-def count_periods(shares: dict[int, float], theta: float) -> int:
-    """Number of canonical period classes whose share clears `theta`."""
-    return sum(1 for share in shares.values() if share >= theta)
+def count_periods(
+    scores: dict[int, float], thr: float, periods: tuple[int, ...] | None = None
+) -> int:
+    """Number of period classes (all, or the `periods` subset) whose score clears `thr`."""
+    keep = scores if periods is None else {p: scores[p] for p in periods if p in scores}
+    return sum(1 for score in keep.values() if score >= thr)
 
 
 def _class_bins(f: int, n: int) -> list[tuple[int, int]]:

@@ -16,7 +16,12 @@ from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp_lab.eval_metrics.plotting import _render_figure
 from param_decomp_lab.experiments.lm.prompts_dataset import load_prompts_dataset
-from param_decomp_lab.period_orbits import class_bin_powers, count_periods, period_class_shares
+from param_decomp_lab.period_orbits import (
+    CANONICAL_PERIODS,
+    class_bin_powers,
+    count_periods,
+    period_class_shares,
+)
 
 
 class PeriodSeparationConfig(BaseConfig):
@@ -228,7 +233,7 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
         result: MetricResult = {"n_active": float(len(scored))}
         if not scored:
             return result
-        n_periods = [count_periods(s.snr, self.cfg.snr_thr) for s in scored]
+        n_periods = [count_periods(s.snr, self.cfg.snr_thr, CANONICAL_PERIODS) for s in scored]
         periodic = [n for n in n_periods if n >= 1]
         result["periodic_frac"] = len(periodic) / len(scored)
         if periodic:
@@ -237,20 +242,36 @@ class PeriodSeparation(Metric[PeriodSeparationConfig]):
         # Absolute detection is threshold-dependent too — log side-λ views for
         # robustness, plus the θ-free share of the second-strongest class.
         for side_thr in (10.0, 100.0):
-            nps = [count_periods(s.snr, side_thr) for s in scored]
+            nps = [count_periods(s.snr, side_thr, CANONICAL_PERIODS) for s in scored]
             per = [n for n in nps if n >= 1]
             if per:
                 result[f"mixed_frac_snr{int(side_thr)}"] = sum(1 for n in per if n >= 2) / len(per)
         result["secondary_share"] = float(
             sum(sorted(s.shares.values())[-2] for s in scored) / len(scored)
         )
-        census: dict[int, int] = {}
-        for comp in scored:
-            for period, v in comp.snr.items():
-                if v >= self.cfg.snr_thr:
-                    census[period] = census.get(period, 0) + 1
-        for period in sorted(census):
-            result[f"census/T{period}"] = float(census[period])
+        # Roadmap criteria: every canonical period present in every matrix (coverage),
+        # with as few components per (matrix, period) cell as possible (redundancy).
+        # The per-matrix census covers ALL classes (T=4/25/100 as diagnostics).
+        matrices = sorted({s.module for s in scored})
+        present_cells = 0
+        presences = 0
+        for module in matrices:
+            comps = [s for s in scored if s.module == module]
+            for period in CANONICAL_PERIODS:
+                count = sum(1 for s in comps if s.snr[period] >= self.cfg.snr_thr)
+                if count > 0:
+                    present_cells += 1
+                    presences += count
+        result["coverage_frac"] = present_cells / (len(matrices) * len(CANONICAL_PERIODS))
+        if present_cells:
+            result["components_per_period"] = presences / present_cells
+        for module in matrices:
+            comps = [s for s in scored if s.module == module]
+            short = module.rsplit(".", 1)[-1]
+            for period in sorted(comps[0].snr):
+                count = sum(1 for s in comps if s.snr[period] >= self.cfg.snr_thr)
+                if count > 0:
+                    result[f"census/{short}/T{period}"] = float(count)
         fig = self.plot_panel(scored)
         result["inner_acts_heatmap"] = _render_figure(fig)
         plt.close(fig)
