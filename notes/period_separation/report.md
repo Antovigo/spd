@@ -130,8 +130,8 @@ Varied:
 
 ### 5.2 Stages (each gates the next; ~2 GPUs × 14h per run, ≤3 concurrent)
 
-- **S0 — family pilot (running).** `addsub-L18-08-smoothl0` (= 04-hidden with SmoothL0,
-  coeff 5e-5, γ 1→0.01) vs the existing `addsub-L18-04-hidden` control. Decides: is
+- **S0 — family pilot (running).** `addsub-L18-08-smoothl0-b` (= 04-hidden with SmoothL0,
+  coeff 1e-4 flat — the 04-hidden peak value held throughout — γ 1→0.01) vs the existing `addsub-L18-04-hidden` control. Decides: is
   SmoothL0 viable at this coeff scale (its loss ≈ active-count, so the scale differs
   from L_p's)? If wildly off, recalibrate coeff before S1.
 - **S1 — dose–response Pareto (6 new runs).** coeff × family grid
@@ -183,7 +183,7 @@ wandb ids are tombstoned).
 
 ## 6. Status
 
-- S0 pilot `addsub-L18-08-smoothl0` training (job 5114, 24k steps, ~14h).
+- S0 pilot `addsub-L18-08-smoothl0-b` training (job 5115, 24k steps, ~14h): SmoothL0 coeff 1e-4 flat (the 04-hidden peak value held throughout).
 - `addsub-L18-04-hidden` is the L_p control (already trained + analysed).
 - S1 launches after the pilot's first eval points confirm the SmoothL0 coeff scale is
   sane (n_alive not collapsing to 0 or staying at C).

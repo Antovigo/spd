@@ -236,9 +236,11 @@ Final 12-probe table lives in report.md; findings consolidated there.
   (05-series + `addsub-L18-07-10x-hid0.1`).
 - New feature landed on this branch: `SmoothL0ImportanceMinimalityLoss`
   (φ(c)=c²/(c²+γ²), γ-anneal replaces p-anneal; bounded gradient, no c→0 cliff).
-- Pilot launched: `addsub-L18-08-smoothl0` (job 5114) = `addsub-L18-04-hidden` with the
-  impmin entry swapped to SmoothL0 (coeff 5e-5, beta 0.75, γ 1 → 0.01 over training).
-  Note the 04-hidden 2x→1x coeff multiplier has no SmoothL0 equivalent → flat coeff.
+- Pilot: `addsub-L18-08-smoothl0` (coeff 5e-5, job 5114) was cancelled at step 172 and
+  relaunched as `addsub-L18-08-smoothl0-b` (job 5115) with **coeff 1e-4 flat — the
+  04-hidden peak value (5e-5 × 2x) held throughout** — since the 2x→1x multiplier has no
+  SmoothL0 equivalent. Otherwise identical: 04-hidden recipe, beta 0.75, γ 1 → 0.01
+  over 24k steps. (5e-5 partial deleted from disk + wandb; id tombstoned.)
 - report.md rewritten: objective hierarchy (recon ≻ separation ≻ parsimony), the
   three-phase dynamics model (P0 imprint / P1 crystallize / P2 purify), per-knob
   predictions, and the staged full-length experimental plan (S0–S4).
