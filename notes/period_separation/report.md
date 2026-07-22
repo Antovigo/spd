@@ -151,6 +151,32 @@ per-site fidelity, and the best purity of the sweep.
 
 
 
-## Objective 4 — impmin β sweep — pending
+## Objective 4 — impmin β: a second sparsity dial, not a separation dial
 
-β ∈ {0, 0.5, 0.75} at the best hyperparameters from Objectives 1–3.
+β weights the entropy-like `mean · log2(1 + sum)` term of the SmoothL0 penalty. Arms at
+the Objectives-1–3 recipe (impmin 3e-5, kaiming, hid 0.1): `addsub-L18-08-beta0`,
+`addsub-L18-08-beta0.5`; `addsub-L18-08-hid0.1` doubles as the β = 0.75 arm. Figure:
+[figures/obj4_beta_sweep.png](figures/obj4_beta_sweep.png).
+
+| run (β) | PGD | rounded | n_active | hid MSE (CI-masked) | n_pure_periods (/15) | fraction_pure |
+|---|---|---|---|---|---|---|
+| beta0 (0) | **0.00415** | **0.00351** | 488 | **0.034** | **14** | **0.29** |
+| beta0.5 (0.5) | 0.00641 | 0.00548 | 191 | 0.047 | 13 | 0.20 |
+| hid0.1 (0.75) | 0.00753 | 0.00609 | 169 | 0.054 | 12 | 0.26 |
+
+Readings:
+
+- **β is mostly a sparsity dial in disguise**: removing it triples n_active (488 vs
+  169) and every quality metric improves with it — recon, hidden-acts MSE, purity —
+  exactly the pattern of *lowering* the impmin coeff in Objective 1. β = 0 at 3e-5
+  looks like the impmin1e-5 arm (307 active, 14/15) shifted along the same trade-off
+  curve, and it misses the same cell (up_proj-T2, plus coverage 0.93).
+- At comparable footprint (191 vs 169 active), **β = 0.5 edges out 0.75** on purity
+  (13/15 vs 12/15, full coverage in both) though with a lower fraction_pure (0.20 vs
+  0.26).
+
+**Pick: β = 0.5** for the series — best n_pure_periods among the gate-passing arms
+that keep the component count near baseline. β = 0 is not a free win: its purity comes
+bundled with 3× the components, i.e. it re-buys the dense regime the impmin coeff was
+chosen to avoid; the 1e-3 regime (Objective 5) explores the opposite direction
+deliberately.
