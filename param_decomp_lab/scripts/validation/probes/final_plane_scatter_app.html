@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Final-plane scatter — stream positions on the L20 probe planes</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 16px; color: #1c1c1e; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 12px; margin-bottom: 10px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 10px;
+              font-size: 13px; }
+  .controls label { color: #444; margin-right: 4px; }
+  select, button, input[type=range] { font-size: 13px; }
+  #wrap { display: flex; gap: 18px; align-items: flex-start; }
+  canvas { border: 1px solid #ddd; border-radius: 4px; }
+  #side { font-size: 12.5px; color: #333; max-width: 260px; }
+  #stats { margin-bottom: 8px; line-height: 1.5; }
+  #stats .bad { color: #b00020; font-weight: 600; }
+  #stats .ok { color: #1b7f3b; font-weight: 600; }
+  #cbarlabel { color: #666; margin-top: 2px; }
+  #tooltip { position: fixed; pointer-events: none; background: #222; color: #fff; padding: 4px 8px;
+             border-radius: 4px; font-size: 12px; display: none; z-index: 5; white-space: pre; }
+  #poslabel { min-width: 74px; display: inline-block; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1 id="apptitle">Residual stream on the final-probe planes</h1>
+<div class="sub">Each point is one prompt at the <code>=</code> token, projected with the
+<b id="probelayer">final</b> probe of the selected (variable, period) — earlier positions show
+how that final state is constructed. Color by residue, or by how much each point moves under a
+block.</div>
+<div class="controls">
+  <span><label>op</label><select id="op"></select></span>
+  <span><label>variable</label><select id="variable"></select></span>
+  <span><label>period</label><select id="period"></select></span>
+  <span><label>position</label>
+    <input type="range" id="pos" min="0" max="6" value="0" step="1">
+    <span id="poslabel"></span>
+    <button id="play">▶ play</button></span>
+  <span><label>color by</label><select id="colorby">
+    <option value="value">value mod T</option>
+    <option value="plane">Δ in this plane</option>
+    <option value="resid">Δ in full resid</option>
+  </select></span>
+  <span id="blockwrap"><label>block</label><select id="block"></select></span>
+  <span><label><input type="checkbox" id="arrows"> arrows into shown pos</label></span>
+</div>
+<div id="wrap">
+  <canvas id="plot" width="640" height="640"></canvas>
+  <div id="side">
+    <div id="stats"></div>
+    <canvas id="cbar" width="240" height="14"></canvas>
+    <div id="cbarlabel"></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.FINAL_PLANE_DATA;
+const LAYERS = D.meta.layers;                 // ["L14", ..., "L20"]
+const CYC = D.meta.cmap_cyclic, SEQ = D.meta.cmap_seq;   // [[r,g,b], ...]
+const $ = id => document.getElementById(id);
+const state = { op: null, variable: null, period: null, pos: 0,
+                colorby: "value", block: "shown", arrows: false };
+
+function fillSelect(sel, items, labels) {
+  sel.innerHTML = "";
+  items.forEach((v, i) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = labels ? labels[i] : v;
+    sel.appendChild(o);
+  });
+}
+$("apptitle").textContent =
+  `Residual stream on the final (L${D.meta.probe_layer}-probe) planes`;
+$("probelayer").textContent = "L" + D.meta.probe_layer;
+fillSelect($("op"), Object.keys(D.ops));
+state.op = $("op").value;
+fillSelect($("variable"), D.meta.variables);
+state.variable = $("variable").value;
+fillSelect($("period"), D.meta.periods.map(String));
+state.period = $("period").value;
+$("pos").max = LAYERS.length - 1;
+fillSelect($("block"), ["shown"].concat(LAYERS.slice(1)),
+           ["into shown pos"].concat(LAYERS.slice(1).map(l => "block " + l.slice(1))));
+
+function lut(table, t) {
+  const x = Math.min(0.999999, Math.max(0, t)) * (table.length - 1);
+  const i = Math.floor(x), f = x - i;
+  const a = table[i], b = table[Math.min(i + 1, table.length - 1)];
+  return `rgb(${Math.round(a[0]+f*(b[0]-a[0]))},${Math.round(a[1]+f*(b[1]-a[1]))},${Math.round(a[2]+f*(b[2]-a[2]))})`;
+}
+
+function cur() { return D.ops[state.op].planes[state.variable][state.period]; }
+function coords(layerKey) { return cur().layers[layerKey]; }  // flat [x,y,...] or [x,...] if one_d
+function nPoints() { const c = coords(LAYERS[0]); return cur().one_d ? c.length : c.length / 2; }
+function jitterY(i) { return (((i * 2654435761) >>> 0) % 1000) / 1000 - 0.5; }
+
+function xy(layerKey, i, frame) {
+  const c = coords(layerKey);
+  if (cur().one_d) return [c[i], jitterY(i) * 0.35 * (frame.xmax - frame.xmin)];
+  return [c[2 * i], c[2 * i + 1]];
+}
+
+const frameCache = {};
+function frame() {
+  const key = state.op + "|" + state.variable + "|" + state.period;
+  if (frameCache[key]) return frameCache[key];
+  let xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
+  for (const lk of LAYERS) {
+    const c = coords(lk), od = cur().one_d;
+    for (let j = 0; j < c.length; j++) {
+      const isX = od || j % 2 === 0;
+      if (isX) { if (c[j] < xmin) xmin = c[j]; if (c[j] > xmax) xmax = c[j]; }
+      else { if (c[j] < ymin) ymin = c[j]; if (c[j] > ymax) ymax = c[j]; }
+    }
+  }
+  if (cur().one_d) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
+  const px = 0.06 * (xmax - xmin), py = 0.06 * (ymax - ymin);
+  const f = { xmin: xmin - px, xmax: xmax + px, ymin: ymin - py, ymax: ymax + py };
+  const w = f.xmax - f.xmin, h = f.ymax - f.ymin, s = Math.max(w, h);  // square, equal scale
+  f.xmin -= (s - w) / 2; f.xmax += (s - w) / 2; f.ymin -= (s - h) / 2; f.ymax += (s - h) / 2;
+  frameCache[key] = f;
+  return f;
+}
+
+function blockKey() {
+  if (state.block !== "shown") return state.block;
+  return state.pos > 0 ? LAYERS[state.pos] : null;   // transition INTO the shown position
+}
+
+const magCache = {};
+function magnitudes() {                        // per-point Δ for the selected block + metric
+  const bk = blockKey();
+  if (bk === null) return null;
+  const key = [state.colorby, state.op, state.variable, state.period, bk].join("|");
+  if (magCache[key]) return magCache[key];
+  const n = nPoints();
+  const out = new Float32Array(n);
+  if (state.colorby === "resid") {
+    const d = D.ops[state.op].resid_delta[bk];
+    for (let i = 0; i < n; i++) out[i] = d[i];
+  } else {
+    const prev = LAYERS[LAYERS.indexOf(bk) - 1], f = frame();
+    for (let i = 0; i < n; i++) {
+      const p0 = xy(prev, i, f), p1 = xy(bk, i, f);
+      out[i] = Math.hypot(p1[0] - p0[0], cur().one_d ? 0 : p1[1] - p0[1]);
+    }
+  }
+  const sorted = Array.from(out).sort((a, b) => a - b);
+  out.q95 = sorted[Math.floor(0.95 * (n - 1))] || 1;
+  magCache[key] = out;
+  return out;
+}
+
+function pointColor(i, mags, values) {
+  if (state.colorby === "value")
+    return lut(CYC, (((values[i] % state.period) + +state.period) % +state.period) / +state.period);
+  if (mags === null) return "#c7c7cc";
+  return lut(SEQ, mags[i] / mags.q95);
+}
+
+const canvas = $("plot"), ctx = canvas.getContext("2d");
+function toPx(p, f) {
+  return [ (p[0] - f.xmin) / (f.xmax - f.xmin) * canvas.width,
+           canvas.height - (p[1] - f.ymin) / (f.ymax - f.ymin) * canvas.height ];
+}
+
+let lastPx = [];   // for hover
+function draw() {
+  const f = frame(), lk = LAYERS[state.pos];
+  const values = D.ops[state.op].values[state.variable];
+  const mags = state.colorby === "value" ? null : magnitudes();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!cur().one_d) {                          // unit circle reference
+    ctx.strokeStyle = "#d0d0d5"; ctx.setLineDash([3, 4]); ctx.beginPath();
+    const c0 = toPx([0, 0], f), r = 1 / (f.xmax - f.xmin) * canvas.width;
+    ctx.arc(c0[0], c0[1], r, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
+  }
+  const n = nPoints();
+  if (state.arrows && state.pos > 0) {
+    const prev = LAYERS[state.pos - 1];
+    ctx.strokeStyle = "rgba(120,120,130,0.35)"; ctx.lineWidth = 1;
+    for (let i = 0; i < Math.min(n, 300); i++) {
+      const a = toPx(xy(prev, i, f), f), b = toPx(xy(lk, i, f), f);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
+  lastPx = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = toPx(xy(lk, i, f), f);
+    lastPx[i] = p;
+    ctx.fillStyle = pointColor(i, mags, values);
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath(); ctx.arc(p[0], p[1], 2.4, 0, 2 * Math.PI); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  $("poslabel").textContent = "after " + lk.slice(1);
+  drawSide(mags);
+}
+
+function drawSide(mags) {
+  const s = cur().l20, gate = s.accepted
+    ? `<span class="ok">accepted</span>` : `<span class="bad">gated</span>`;
+  const bk = blockKey();
+  $("stats").innerHTML =
+    `<b>${state.op} / ${state.variable} / T=${state.period}</b><br>` +
+    `L${D.meta.probe_layer} probe: cv R² = ${s.cv_r2.toFixed(2)}, p = ${s.p_value} — ${gate}<br>` +
+    (state.colorby === "value" ? "" :
+      bk === null ? "no incoming block at the first position" :
+      `Δ under block ${bk.slice(1)} (${state.colorby === "plane" ? "in-plane" : "full resid"})`);
+  const cb = $("cbar"), cctx = cb.getContext("2d");
+  const table = state.colorby === "value" ? CYC : SEQ;
+  for (let x = 0; x < cb.width; x++) {
+    cctx.fillStyle = lut(table, x / (cb.width - 1));
+    cctx.fillRect(x, 0, 1, cb.height);
+  }
+  $("cbarlabel").textContent = state.colorby === "value"
+    ? `0 … value mod ${state.period} … ${state.period}`
+    : (mags ? `0 … Δ … ${mags.q95.toPrecision(3)} (95th pct)` : "");
+}
+
+canvas.addEventListener("mousemove", e => {
+  const r = canvas.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  let best = -1, bd = 144;
+  for (let i = 0; i < lastPx.length; i++) {
+    const d = (lastPx[i][0] - mx) ** 2 + (lastPx[i][1] - my) ** 2;
+    if (d < bd) { bd = d; best = i; }
+  }
+  const tip = $("tooltip");
+  if (best < 0) { tip.style.display = "none"; return; }
+  const ab = D.ops[state.op].ab, v = D.ops[state.op].values[state.variable][best];
+  const mags = state.colorby === "value" ? null : magnitudes();
+  tip.textContent = `a=${ab[2 * best]}  b=${ab[2 * best + 1]}\n${state.variable}=${v}` +
+    `  mod ${state.period} = ${((v % state.period) + +state.period) % +state.period}` +
+    (mags ? `\nΔ = ${mags[best].toPrecision(3)}` : "");
+  tip.style.display = "block";
+  tip.style.left = (e.clientX + 14) + "px";
+  tip.style.top = (e.clientY + 8) + "px";
+});
+canvas.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; });
+
+let timer = null;
+$("play").addEventListener("click", () => {
+  if (timer) { clearInterval(timer); timer = null; $("play").textContent = "▶ play"; return; }
+  $("play").textContent = "⏸ stop";
+  timer = setInterval(() => {
+    state.pos = (state.pos + 1) % LAYERS.length;
+    $("pos").value = state.pos;
+    draw();
+  }, 700);
+});
+
+for (const id of ["op", "variable", "period", "colorby", "block"])
+  $(id).addEventListener("change", () => { state[id === "op" ? "op" : id] = $(id).value; draw(); });
+$("pos").addEventListener("input", () => { state.pos = +$("pos").value; draw(); });
+$("arrows").addEventListener("change", () => { state.arrows = $("arrows").checked; draw(); });
+$("blockwrap").style.display = "";
+draw();
+</script>
+</body>
+</html>

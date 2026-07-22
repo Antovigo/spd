@@ -31,8 +31,16 @@ collect_resid_stream.py   (GPU/--slurm)  → resid_stream_{add,sub}.npz   (resid
 fit_ridge_cv_probes.py    (GPU/--slurm)  → ridge_cv_probes_<op>.json    (one job per op)
 plot_ridge_cv_probes.py   (CPU, --slurm --gpus=0) → ridge_cv_heatmap.png + ridge_cv_summary.tsv
 export_ridge_cv_planes.py (CPU, local)   → ridge_cv_planes_<op>/probes_L<i>.json  (Feucht format)
-plot_probe_projections.py (CPU, --slurm --gpus=0) → probe_projections_<op>.png
+plot_probe_projections.py (CPU, --slurm --gpus=0) → probe_projections_<op>.png  (--all-layers: per-variable layer x period grids)
+build_final_plane_scatter.py (CPU, --slurm --gpus=0) → final_plane_scatter/{index.html,data.js}
 ```
+
+`build_final_plane_scatter` (template `final_plane_scatter_app.html`) fixes the probe to
+`--probe-layer` (default 20) and projects every stream position onto that plane — an
+applet for watching the final state get constructed: position slider + play, color by
+`value mod T` or by per-point movement under a chosen block (in-plane, or full-resid
+norm precomputed as `resid_delta`), displacement arrows, hover tooltips. Vanilla-JS
+canvas, `file://`, smoke-test with the parent folder's `headless_check.py`.
 
 `export_ridge_cv_planes` is a pure format transform (the shipped weights are the fit's
 full-range refit; `r2_cos = r2_sin = cv_r2`, with `cv_r2` / `p_value` / `lambda_rel` /
