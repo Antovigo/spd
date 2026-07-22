@@ -186,14 +186,14 @@ both combination phases being produced by the same L16-L20 circuitry.
 
 `plot_probe_projections --all-layers` scatters 3000 prompts on each probe's predicted
 (cos, sin) plane, colored by `v mod T` (cyclic colormap), so a genuine circular code
-shows as an ordered color wheel. One figure per op × variable: rows = every stream
-position in order (after L14 … after L20), cols = periods; grey tint = fails the null
-gate (those cells still draw their refit probe's projection — a blob or a collapsed
-dot is the point: nothing decodable). Operand rows show the *arrival* of the phases at
-the `=` token (b sharpens after L15, a after L16); the result rows show *generation* —
-a+b and a−b snap from unordered clouds to ordered color wheels after L16
-(T = 5/10/50/100 simultaneously), then tighten through L20, with T=20/25/33 appearing
-last. Sub-op result planes are markedly noisier than add's at every stage, matching
+shows as an ordered color wheel. One figure per op × variable (operands plus the
+op's own result): rows = every stream position in order (after L14 … after L20),
+cols = periods; grey tint = fails the null gate (those cells still draw their refit
+probe's projection — a blob or a collapsed dot is the point: nothing decodable).
+Operand rows show the *arrival* of the phases at the `=` token (b sharpens after L15,
+a after L16); the result figures show *generation* — the result snaps from unordered
+clouds to ordered color wheels after L16 (on add: T = 5/10/50/100 simultaneously),
+then tightens through L20, with T=20/25/33 appearing last. Sub-op result planes are markedly noisier than add's at every stage, matching
 the homogeneity breakdown noted above.
 
 `add` prompts:
@@ -201,13 +201,11 @@ the homogeneity breakdown noted above.
 ![add a](figures/probe_projections_add_a.png)
 ![add b](figures/probe_projections_add_b.png)
 ![add sum](figures/probe_projections_add_sum.png)
-![add diff](figures/probe_projections_add_diff.png)
 
 `sub` prompts:
 
 ![sub a](figures/probe_projections_sub_a.png)
 ![sub b](figures/probe_projections_sub_b.png)
-![sub sum](figures/probe_projections_sub_sum.png)
 ![sub diff](figures/probe_projections_sub_diff.png)
 
 Feucht-format export (`export_ridge_cv_planes`): `ridge_cv_planes_{add,sub}/probes_L<i>.json`
