@@ -257,3 +257,35 @@ locks it in.
 computation — block 0 perfect, backups maximally invisible. This is the cleanest
 possible starting state for scoring recovery protocols: their job is to fill in
 blocks 1–2 (64 skipped mechanisms) from here.
+
+## Lowering the impmin coeff under the best recipe
+
+Can completeness be bought by lowering the coeff, now that PPGD + deferred anneal
+gives a perfect block-0 decomposition? Downward sweep on the full recipe
+(everything identical to `joint_imp2e-4_ppgd_lateanneal` except the coeff); runs
+`toy_model_redundancy/joint_ppgd_lateanneal_imp{1e-4..1e-6}`:
+
+| coeff | skipped / 96 | b0 mean act/input (in / out) | b0 dupes | recon KL |
+|---|---|---|---|---|
+| 2e-4 (ref) | 64 | 1.00 / 1.00 | 0 / 0 | 4.9e-6 |
+| 1e-4 | 62 | 1.22 / 1.12 | 3 / 3 | 7.3e-6 |
+| 3e-5 | 60 | 1.34 / 2.62 | 10 / 25 | 3.7e-6 |
+| 1e-5 | 36 | 2.81 / 5.84 | 28 / 32 | 1.6e-6 |
+| 3e-6 | 18 | 6.91 / 13.59 | 32 / 32 | 5.2e-7 |
+| 1e-6 | **0** | **14.81 / 25.00** | 32 / 32 | 2.0e-7 |
+
+The backups reappear as the threshold drops — threshold-driven as always — but
+completeness arrives only at 1e-6, where block 0 has become essentially dense
+(15–25 active subcomponents *per input*;
+[figure](report_figures/active_subcomponents_ppgdla_imp1e-6.png)) and blocks 1–2
+are multi-active too. PPGD does not soften the completeness–cleanliness trade-off;
+the frontier is at least as steep as with plain stochastic sampling.
+
+**Conclusion, on the strongest recipe available: complete decompositions cannot be
+bought with the impmin coeff — recovering redundant mechanisms requires a
+protocol, not a coefficient.**
+
+Run length: a 5k-step variant of the reference (schedule compressing
+proportionally, anneal from 50%) gets close but not clean — b0 1.06/1.09 with 3
+dupes + 3 gaps vs the 10k run's exact 1.00/1.00. 5k is fine for iteration sweeps;
+flagship results keep 10k (structural convergence lands around step 7k).
