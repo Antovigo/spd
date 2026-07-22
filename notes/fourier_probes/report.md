@@ -182,30 +182,19 @@ both combination phases being produced by the same L16-L20 circuitry.
 - p-floor at n_perm=20 is 0.048; the gate is mostly carried by `cv_r2 > 0` plus the
   large real-vs-null margin. More perms / BH-FDR across the 448 cells would tighten it.
 
-## Probe-plane projections
+## Layer-by-layer projections — watching arrival and generation
 
-`plot_probe_projections` scatters 3000 prompts on each accepted probe's predicted
-(cos, sin) plane — best accepted layer per cell, colored by `v mod T` (cyclic
-colormap), so a genuine circular code shows as an ordered color wheel:
-
-![add projections](figures/probe_projections_add.png)
-![sub projections](figures/probe_projections_sub.png)
-
-Small T (5, 10) forms tight discrete residue clusters on the unit circle; large T
-(50, 100) forms continuous ordered rings. Marginal cells (a/T33 .37, sub results at
-T=20+) are visibly fuzzy blobs with only coarse angular ordering — consistent with
-their cv_r2 — and the sub-op result planes are markedly noisier than add's, matching
+`plot_probe_projections --all-layers` scatters 3000 prompts on each probe's predicted
+(cos, sin) plane, colored by `v mod T` (cyclic colormap), so a genuine circular code
+shows as an ordered color wheel. One figure per op × variable: rows = every stream
+position in order (after L14 … after L20), cols = periods; grey tint = fails the null
+gate (those cells still draw their refit probe's projection — a blob or a collapsed
+dot is the point: nothing decodable). Operand rows show the *arrival* of the phases at
+the `=` token (b sharpens after L15, a after L16); the result rows show *generation* —
+a+b and a−b snap from unordered clouds to ordered color wheels after L16
+(T = 5/10/50/100 simultaneously), then tighten through L20, with T=20/25/33 appearing
+last. Sub-op result planes are markedly noisier than add's at every stage, matching
 the homogeneity breakdown noted above.
-
-### Layer-by-layer projections — watching arrival and generation
-
-The same planes for **every** stream position in order (`--all-layers`): rows =
-after L14 … after L20, cols = periods; grey tint = fails the null gate (those cells
-still draw their refit probe's projection — a blob or a collapsed dot is the point:
-nothing decodable). Operand rows show the *arrival* of the phases at the `=` token
-(b sharpens after L15, a after L16); the result rows show *generation* — a+b and a−b
-snap from unordered clouds to ordered color wheels after L16 (T = 5/10/50/100
-simultaneously), then tighten through L20, with T=20/25/33 appearing last.
 
 `add` prompts:
 
