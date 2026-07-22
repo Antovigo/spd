@@ -247,3 +247,79 @@ Two things worth noting:
    per-block mechanisms alive that joint/merged training then prunes as redundant.
    The testbed reproduces the whole arc: per-block → complete; joint or merged →
    over-sparse; recovery needed at the merge.
+
+*(Caveat added after the coeff sweep below: the per-block completeness above is an
+artifact of the too-low coeff — at a properly tuned coeff, per-block decomposition
+is empty, restoring the threshold-account prediction. See "Block-by-block at the
+tuned coeff".)*
+
+## Tuning the coeff on the full network
+
+Goal: with the annealed SmoothL0, find the coeff whose *joint* decomposition gives
+a roughly diagonal one-subcomponent-per-input pattern at least for block 0 (the
+block the L2 λ = 1e-5 baseline resolved cleanly). Joint sweep, all else equal;
+block-0 stats (mean actives per input token; ideal exactly 1):
+
+| coeff | b0 mean (in / out) | b0 dupes | b0 zeros | b0 active | total skipped / 96 |
+|---|---|---|---|---|---|
+| 1e-5 | 1.66 / 2.41 | 16 / 21 | 2 / 1 | 36 / 39 | 37 |
+| 2e-5 | 1.56 / 1.94 | 8 / 16 | 3 / 0 | 39 / 41 | 39 |
+| 5e-5 | 2.59 / 1.59 | 18 / 13 | 2 / 0 | 31 / 34 | 49 |
+| 1e-4 | 1.75 / 1.19 | 9 / 4 | 1 / 0 | 33 / 33 | 52 |
+| **2e-4** | **1.19 / 0.94** | **3 / 2** | **2 / 4** | **30 / 28** | 54 |
+| 3e-4 | 0.97 / 0.88 | 3 / 2 | 7 / 6 | 27 / 28 | 55 |
+
+**Chosen: 2e-4** ([figure](report_figures/active_subcomponents_joint_imp2e-4.png))
+— both block-0 matrices near-diagonal (11 total per-input deviations vs 14 at 1e-4);
+3e-4 starts eating real block-0 mechanisms. Blocks 1–2 are essentially wiped at any
+coeff ≥ 1e-4 (2–8 active per matrix).
+
+## Block-by-block at the tuned coeff
+
+Per-block decomposition (partners intact) at coeff 2e-4:
+
+| per-block run @ 2e-4 | skipped / 32 | active (in + out) |
+|---|---|---|
+| block 0 | 7 | 26 + 26 |
+| block 1 | **32 — empty** | 0 + 0 |
+| block 2 | **32 — empty** | 0 + 0 |
+
+The original prediction holds once the coeff is right: a redundant block decomposed
+against an intact background yields *nothing* — every mechanism is free to mask.
+The earlier "per-block is nearly complete" result at coeff 1e-5 was purely the
+too-weak penalty. Block 0 survives per-block training (25/32 kept), identifying it
+as the block the model actually routes through in the full-context forward; blocks
+1–2 are pure backups from the decomposition's point of view. Consequence for the
+8B program: per-block completeness there is not guaranteed either — it depends on
+the block's in-context contribution exceeding the block-level threshold, not on the
+mechanism existing.
+
+## Interventions on the joint 2e-4 baseline
+
+Three single-change variants: components/CI-fn LR 2e-3 → 5e-4; γ anneal starting
+at 50% of training (longer quadratic phase before lock-in); adding
+`PersistentPGDReconLoss` (coeff 0.5, adam sources lr 0.01,
+`per_batch_per_position` — the 8B recipe).
+
+| variant | b0 mean (in / out) | b0 zeros | b0 dupes | b0 active | recon KL | total skipped |
+|---|---|---|---|---|---|---|
+| baseline 2e-4 | 1.19 / 0.94 | 2 / 4 | 3 / 2 | 30 / 28 | 2.1e-5 | 54 |
+| lowlr 5e-4 | 0.66 / 0.44 | 12 / 18 | 1 / 0 | 20 / 14 | 2.7e-5 | 62 |
+| lateanneal 50% | 0.84 / 0.81 | 5 / 8 | 0 / 1 | 27 / 26 | 1.1e-5 | 59 |
+| **ppgd** | **1.00 / 1.06** | **0 / 0** | **0 / 2** | **32 / 32** | **4.7e-6** | 64 |
+
+**PPGD produces the best decomposition of the study**
+([figure](report_figures/active_subcomponents_ppgd.png)): block-0 mlp_in is a
+*perfect* one-subcomponent-per-input diagonal (mean exactly 1.00, no gaps, no
+duplicates), mlp_out 32/32 with two stray cells, at 4× better recon than the
+baseline. Adversarial mask search punishes exactly what stochastic sampling
+tolerates: fragmented mechanisms have masks that break recon (PGD finds them), and
+duplicates buy no adversarial robustness for their impmin cost. The flip side:
+blocks 1–2 are *completely* empty (0 active anywhere) — PGD also certifies that
+pruned backups never break recon. Lower LR under-trains; late anneal is a mild
+regression.
+
+**State of the testbed**: `PPGD + SmoothL0(γ 1→0.01) @ coeff 2e-4` yields the ideal
+decomposition of the *routed* computation — block 0 perfect, backups maximally
+invisible. This is the cleanest possible starting state for scoring recovery
+protocols: their job is to fill in blocks 1–2 (64 skipped mechanisms) from here.
