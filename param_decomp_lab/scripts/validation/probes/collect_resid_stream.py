@@ -89,7 +89,8 @@ def collect_resid_stream(
 
     def make_hook(layer: int) -> Any:
         def hook(_m: Any, _i: Any, out: Any) -> None:
-            captured[layer] = out[0][:, -1].float()  # block output at the `=` (left-padded)
+            hidden = out[0] if isinstance(out, tuple) else out  # tuple or bare tensor by version
+            captured[layer] = hidden[:, -1].float()  # block output at the `=` (left-padded)
 
         return hook
 
