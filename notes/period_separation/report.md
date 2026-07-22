@@ -130,7 +130,8 @@ recipe (which doubles as the 0 arm). Figure:
 | impmin3e-5 (0) | 0.00727 | 0.00616 | 164 | 0.272 | 11 | 0.26 |
 | hid0.001 | 0.00752 | 0.00631 | 161 | 0.224 | 10 | 0.17 |
 | hid0.01 | 0.00722 | 0.00627 | 166 | 0.142 | 12 | 0.19 |
-| hid0.1 | 0.00753 | 0.00609 | 169 | **0.054** | **12** | **0.26** |
+| hid0.1 | 0.00753 | 0.00609 | 169 | 0.054 | **12** | **0.26** |
+| hid1 | 0.00709 | 0.00576 | 196 | **0.024** | 10 | 0.20 |
 
 Readings:
 
@@ -145,9 +146,13 @@ Readings:
   (0-arm: 3) — leaving only up_proj-{T2, T20} and down_proj-T20 uncovered. The 0.001
   arm is slightly *worse* than 0 (10/15, fraction 0.17) — the weak dose perturbs
   without constraining.
+- **Coeff 1.0 overshoots**: hidden-acts MSE keeps falling (0.024, best of the sweep,
+  with the best recon 0.00709) but purity regresses to 10/15 (gate_proj drops back to
+  3 pure periods, T20 pure disappears outside down_proj) and n_active creeps up to
+  196. The purity dose–response is an inverted U peaking at 0.1.
 
-**Winner: hid coeff 0.1** for the rest of the series — equal recon, much tighter
-per-site fidelity, and the best purity of the sweep.
+**Winner: hid coeff 0.1** for the rest of the series — near-equal recon, much tighter
+per-site fidelity, and the best purity of the sweep (12/15) at both neighbors' expense.
 
 
 
