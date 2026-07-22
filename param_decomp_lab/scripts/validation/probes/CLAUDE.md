@@ -30,7 +30,15 @@ position* — with a protocol that a linearly-separable-but-not-circular code ca
 collect_resid_stream.py   (GPU/--slurm)  → resid_stream_{add,sub}.npz   (resid_L14..L20 grids)
 fit_ridge_cv_probes.py    (GPU/--slurm)  → ridge_cv_probes_<op>.json    (one job per op)
 plot_ridge_cv_probes.py   (CPU, --slurm --gpus=0) → ridge_cv_heatmap.png + ridge_cv_summary.tsv
+export_ridge_cv_planes.py (CPU, local)   → ridge_cv_planes_<op>/probes_L<i>.json  (Feucht format)
+plot_probe_projections.py (CPU, --slurm --gpus=0) → probe_projections_<op>.png
 ```
+
+`export_ridge_cv_planes` is a pure format transform (the shipped weights are the fit's
+full-range refit; `r2_cos = r2_sin = cv_r2`, with `cv_r2` / `p_value` / `lambda_rel` /
+`accepted` riding along). `plot_probe_projections` scatters a prompt subsample on each
+accepted probe's predicted (cos, sin) plane — best accepted layer per (variable, period)
+cell, colored by `v mod T` on a cyclic colormap, gated cells left grey.
 
 - **Collection**: decoder-block outputs of layers 14..20 (`resid_L<i>` = stream *after*
   block `i` = input to block `i+1`) at the `=` token, full `a<op>b=` grid, `a, b ∈ 1..200`,
