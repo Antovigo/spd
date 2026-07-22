@@ -197,6 +197,30 @@ T=20+) are visibly fuzzy blobs with only coarse angular ordering — consistent 
 their cv_r2 — and the sub-op result planes are markedly noisier than add's, matching
 the homogeneity breakdown noted above.
 
+### Layer-by-layer projections — watching arrival and generation
+
+The same planes for **every** stream position in order (`--all-layers`): rows =
+after L14 … after L20, cols = periods; grey tint = fails the null gate (those cells
+still draw their refit probe's projection — a blob or a collapsed dot is the point:
+nothing decodable). Operand rows show the *arrival* of the phases at the `=` token
+(b sharpens after L15, a after L16); the result rows show *generation* — a+b and a−b
+snap from unordered clouds to ordered color wheels after L16 (T = 5/10/50/100
+simultaneously), then tighten through L20, with T=20/25/33 appearing last.
+
+`add` prompts:
+
+![add a](figures/probe_projections_add_a.png)
+![add b](figures/probe_projections_add_b.png)
+![add sum](figures/probe_projections_add_sum.png)
+![add diff](figures/probe_projections_add_diff.png)
+
+`sub` prompts:
+
+![sub a](figures/probe_projections_sub_a.png)
+![sub b](figures/probe_projections_sub_b.png)
+![sub sum](figures/probe_projections_sub_sum.png)
+![sub diff](figures/probe_projections_sub_diff.png)
+
 Feucht-format export (`export_ridge_cv_planes`): `ridge_cv_planes_{add,sub}/probes_L<i>.json`
 — full-range-refit weights, `r2_cos = r2_sin = cv_r2`, plus `cv_r2` / `p_value` /
 `lambda_rel` / `accepted` per probe.
