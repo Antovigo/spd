@@ -98,15 +98,22 @@ default init); `addsub-L18-08-initcoupled` is the same + `weight_init: coupled`:
 |---|---|---|---|---|---|
 | impmin3e-5 (kaiming) | 0.00727 | 0.00616 | 164 | **11** | T2=2 T5=9 T10=10 T20=2 T50=20 |
 | initcoupled (coupled) | **0.00564** | **0.00467** | 113 | 5 | T2=2 T10=2 T20=1 T50=5 — no pure T5 |
+| initwithinspan (within_span) | 0.00588 | 0.00494 | 120 | 7 | T2=2 T10=3 T20=1 T50=10 — no pure T5 |
 
 Coupled init reconstructs better (−22% PGD) with fewer active components (113 vs 164),
 but **loses period-5 purity entirely**: its best T5 components all carry exactly one
 strong extra period (SNR 28–147) — genuine two-period mixes, not threshold near-misses.
 The per-matrix metric widens the gap further (11 vs 5 cells): coupled's 10 pure
 components sit only in down_proj (T2/T10/T50) and up_proj (T20/T50) — **gate_proj has
-zero pure components**. On the roadmap's criterion for this objective (effect on period
-mixing): **kaiming picked** for the rest of the series. Coupled remains attractive if
-later objectives recover its lost pure cells at its better recon.
+zero pure components**. The third arm, `within_span` (in-span like coupled but with the
+two sides statistically independent), sits strictly between: recon and n_active near
+coupled's (0.00588, 120), purity closer to kaiming's but still well short (7/15, worst
+mixed_frac of the three at 0.83, gate_proj nearly empty with one pure T50, and — like
+coupled — no pure T5 anywhere). So the purity loss of the in-span inits is driven by
+the span restriction itself, not the U–V coupling: breaking the coupling recovers only
+2 of the 6 cells coupled loses. On the roadmap's criterion for this objective (effect
+on period mixing): **kaiming picked** for the rest of the series. Coupled remains
+attractive if later objectives recover its lost pure cells at its better recon.
 
 ## Objective 3 — fused hidden-acts recon loss: free fidelity, mild purity gain at 0.1
 
