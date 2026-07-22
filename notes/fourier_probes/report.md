@@ -63,9 +63,28 @@ add/a+b/T100@L20: cv_r2 0.86 vs null max −0.33).
 - p-floor at n_perm=20 is 0.048; the gate is mostly carried by `cv_r2 > 0` plus the
   large real-vs-null margin. More perms / BH-FDR across the 448 cells would tighten it.
 
+## Probe-plane projections
+
+`plot_probe_projections` scatters 3000 prompts on each accepted probe's predicted
+(cos, sin) plane — best accepted layer per cell, colored by `v mod T` (cyclic
+colormap), so a genuine circular code shows as an ordered color wheel:
+
+![add projections](figures/probe_projections_add.png)
+![sub projections](figures/probe_projections_sub.png)
+
+Small T (5, 10) forms tight discrete residue clusters on the unit circle; large T
+(50, 100) forms continuous ordered rings. Marginal cells (a/T33 .37, sub results at
+T=20+) are visibly fuzzy blobs with only coarse angular ordering — consistent with
+their cv_r2 — and the sub-op result planes are markedly noisier than add's, matching
+the homogeneity breakdown noted above.
+
+Feucht-format export (`export_ridge_cv_planes`): `ridge_cv_planes_{add,sub}/probes_L<i>.json`
+— full-range-refit weights, `r2_cos = r2_sin = cv_r2`, plus `cv_r2` / `p_value` /
+`lambda_rel` / `accepted` per probe.
+
 ## Follow-ups
 
-- Export accepted probes to the Feucht-format `probes_<site>.json` so
-  `build_direction_scatter` can overlay subcomponent read/write arrows on these planes.
+- Point `build_direction_scatter` at the exported planes to overlay subcomponent
+  read/write arrows.
 - Cross-context validation (train probe on add, test on sub) as a second holdout axis
   that costs no value coverage.
