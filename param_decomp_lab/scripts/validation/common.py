@@ -19,7 +19,12 @@ from param_decomp.log import logger
 from param_decomp_lab.experiments.lm.run import LMExperimentConfig, SavedLMRun
 from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME, REPO_ROOT
-from param_decomp_lab.infra.slurm import SlurmConfig, generate_script, submit_slurm_job
+from param_decomp_lab.infra.slurm import (
+    SlurmConfig,
+    SubmitResult,
+    generate_script,
+    submit_slurm_job,
+)
 
 # The arithmetic-analysis scripts (roadmap_addition_analysis) operate one operation at a
 # time. Each operation maps to its infix symbol and its `1..100 × 1..100` prompt file.
@@ -339,9 +344,12 @@ class SlurmOptions:
     gpus: int = 1
     slurm_time: str = "1:00:00"
     slurm_mem: str | None = None
+    dependency: str | None = None  # afterok job id(s), colon-separated
 
 
-def submit_self_to_slurm(module: str, argv: list[str], opts: SlurmOptions, job_name: str) -> None:
+def submit_self_to_slurm(
+    module: str, argv: list[str], opts: SlurmOptions, job_name: str
+) -> SubmitResult:
     """Submit `python -m <module> <argv>` as a SLURM job (run from `REPO_ROOT`, no snapshot).
 
     `argv` must already be the non-SLURM CLI args (paths expanded to absolute, since the
@@ -354,6 +362,7 @@ def submit_self_to_slurm(module: str, argv: list[str], opts: SlurmOptions, job_n
         n_gpus=opts.gpus,
         time=opts.slurm_time,
         mem=opts.slurm_mem,
+        dependency_job_id=opts.dependency,
     )
     result = submit_slurm_job(generate_script(config, command), job_name)
     logger.section(f"Submitted {job_name} to SLURM")
@@ -365,3 +374,4 @@ def submit_self_to_slurm(module: str, argv: list[str], opts: SlurmOptions, job_n
             "Script": str(result.script_path),
         }
     )
+    return result
