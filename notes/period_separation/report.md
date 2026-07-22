@@ -185,3 +185,45 @@ that keep the component count near baseline. β = 0 is not a free win: its purit
 bundled with 3× the components, i.e. it re-buys the dense regime the impmin coeff was
 chosen to avoid; the 1e-3 regime (Objective 5) explores the opposite direction
 deliberately.
+
+## Objective 5 — the 1e-3 regime: no knob so far recovers the missing components
+
+Re-runs of Objectives 2–3 with impmin coeff 1e-3 (runs suffixed `-1e-3`, otherwise
+identical to the Objective-1 baselines; `impmin1e-3` doubles as the kaiming / hid-0
+reference). All arms hold 19–26 active components and PGD 0.023–0.027 (the 1e-3 regime
+fails the 0.015 gate by construction — that is its trade). Figure (hid sweep):
+[figures/obj5_hid_sweep_1e-3.png](figures/obj5_hid_sweep_1e-3.png).
+
+Init at 1e-3:
+
+| run (init) | PGD | n_active | n_pure_periods (/15) | pure census |
+|---|---|---|---|---|
+| impmin1e-3 (kaiming) | 0.02724 | 25 | **3** | up: T5=2 T50=2, down: T5=2 |
+| initcoupled-1e-3 | **0.02361** | 20 | 1 | up: T5=2 |
+| initwithinspan-1e-3 | 0.02334 | 19 | 1 | gate: T5=1 |
+
+Hidden-acts coeff at 1e-3:
+
+| run (hid coeff) | PGD | n_active | hid MSE (CI-masked) | n_pure_periods (/15) | mixed |
+|---|---|---|---|---|---|
+| impmin1e-3 (0) | 0.02724 | 25 | 0.283 | **3** | **0.60** |
+| hid0.001-1e-3 | 0.02657 | 23 | 0.269 | **3** | 0.74 |
+| hid0.01-1e-3 | 0.02557 | 24 | 0.229 | 2 | 0.83 |
+| hid0.1-1e-3 | 0.02571 | 24 | 0.127 | 1 | 0.92 |
+| hid1-1e-3 | **0.02514** | 26 | **0.055** | 1 | 0.85 |
+
+Readings — a clean negative result:
+
+- **Every intervention hurts or does nothing.** The plain 1e-3 baseline (kaiming,
+  hid 0) is the purity maximum of the whole regime at 3/15; both in-span inits drop to
+  1/15, and the hidden-acts loss *monotonically destroys* purity with dose (3 → 1/15,
+  mixed_frac 0.60 → 0.92) even as it does its own job (hid MSE 0.283 → 0.055).
+- Interpretation: with only ~20–25 surviving components, each must serve several
+  periods to keep recon; the hidden-acts constraint redistributes capacity toward
+  per-site fidelity, which under this budget forces *more* mixing, not less. The
+  purity benefit hid 0.1 showed at 3e-5 requires spare capacity to specialize.
+- gate_proj holds zero pure components in every arm except initwithinspan's single
+  T5; pure T2/T10/T20 exist nowhere in the regime.
+- The regime's hope — recover the missing components later (γ-anneal, Objective 6) —
+  now rests entirely on the **plain impmin1e-3 baseline**, which is the Objective-6
+  fine-tune candidate from this side. β arms at 1e-3 pending.
