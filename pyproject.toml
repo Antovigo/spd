@@ -12,7 +12,9 @@ dependencies = [
     # leaf deps directly (was the dissolved `param-decomp-config` package).
     "pydantic<2.12", # 2.12 upgrade blocked on pyright/wandb issues
     "annotated-types",
-    "typing-extensions", # TypeVar(default=...) on 3.12 (PEP 696 is stdlib only from 3.13)
+    # Explicit (not just transitive): TypeVar(default=...) on 3.12 (PEP 696 is stdlib
+    # only from 3.13).
+    "typing-extensions==4.15.0",
     "jax==0.10.1",
     "equinox==0.13.8",
     "optax==0.2.8",

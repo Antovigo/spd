@@ -27,7 +27,7 @@ composition / IO / CLI / experiment assembly**:
     (`run_decomposition_training`), `model.py` (`DecomposedModel`), the loss terms,
     the pydantic config schema (`configs.py` / `base_config.py` / `schedule.py`), and
     the built-run bundle (`built_run.py`). A pure library — no `main()`, no YAML
-    reading; it takes built objects. Semantics source of truth: `param_decomp/SPEC.md`.
+    reading; it takes built objects.
     `param_decomp/configs/` ships self-contained run YAMLs as reference recipes.
   - `pretrain/` — the in-house target-LM pretrainer (`python -m pretrain.train`).
   - `vendored_jax/` — bit-parity JAX ports of the target architectures.
@@ -37,8 +37,7 @@ composition / IO / CLI / experiment assembly**:
   (`experiments/lm/load_run.py`), the post-decomposition pipeline
   (`harvest/`, `autointerp/`, `clustering/`, `investigate/`, `postprocess/`), and
   `infra/` (settings, slurm, wandb). Depends on core; the reverse edge
-  (`param_decomp → param_decomp_lab`) is forbidden and pinned by
-  `param_decomp/tests/test_runtime_standalone.py`.
+  (`param_decomp → param_decomp_lab`) is forbidden.
 
 Also here: `nano_param_decomp/` — a single-file torch reference implementation of the
 method for paper readers — and `papers/` — the APD/SPD paper sources and figures.
@@ -51,7 +50,7 @@ declares none (its trainers run as modules, which is what the launchers sbatch).
 
 | Command | Purpose |
 |---|---|
-| `pd-lm` | Launch an LM decomposition run (SLURM or inline, per `runtime.dp`) |
+| `pd-lm` | Launch an LM decomposition run (SLURM or inline, per `runtime.launch`) |
 | `pd-pretrain` | Launch a target-LM pretraining run (SLURM or inline, per `dp`) |
 | `pd-tms` / `pd-resid-mlp` | Toy-domain decompositions (CPU, in-process, synchronous) |
 | `pd-harvest` | Component-statistics harvest over training data (SLURM) |
@@ -65,14 +64,19 @@ declares none (its trainers run as modules, which is what the launchers sbatch).
 
 A run is one self-contained YAML (the `param_decomp_lab.experiments.config.
 ExperimentConfig` schema over the core `param_decomp.configs` pieces). `pd-lm
-<config.yaml>` is config-driven: the launch mode is a pure function of `runtime.dp`.
+<config.yaml>` is config-driven: the launch mode is the config's `runtime.launch`,
+and `runtime.dp` (also required) declares the world size — both are authored
+decisions, never inferred from ambient env.
 
-- `dp: null` — run the trainer inline in the current process (single device; smoke/debug).
-- `dp: N` (multiple of 8) — mint a run id, snapshot the working tree to
+- `launch: inline` — mint a run id, pin the launch config, and run the trainer here,
+  in the launching process's allocation (no SLURM submission); the trainer asserts it
+  finds exactly `dp` local devices. `dp: 1` is the single-device smoke/debug run;
+  larger `dp` fits a run inside an external scheduler's own job.
+- `launch: slurm` (`dp` a multiple of 8) — mint a run id, snapshot the working tree to
   `refs/runs/snapshot/<id>`, stage the run dir (pinned `launch_config.yaml` + `.env`),
-  and sbatch `python -m param_decomp_lab.experiments.lm.run` across `N // 8` nodes;
-  each node builds its own workspace and CUDA venv at job start. SIGTERM → save →
-  requeue → resume.
+  and sbatch `python -m param_decomp_lab.experiments.lm.run` across `dp // 8` nodes,
+  one trainer process per node owning all 8 local GPUs; each node builds its own
+  workspace and CUDA venv at job start. SIGTERM → save → requeue → resume.
 
 Artifacts land under `PARAM_DECOMP_OUT_DIR/runs/<run_id>/` (`launch_config.yaml`,
 `ckpts/<step>/`, `metrics.jsonl`, then per-stage `harvest/`, `autointerp/`, …).
@@ -110,4 +114,4 @@ This is research code. Prioritize simplicity and fail-fast over defensive progra
   liberally.
 - **Comments carry what the code can't** — a constraint, invariant, or gotcha. Never
   narrate changes ("now uses X"). Docstrings default to a single line; skip them when
-  name + types say everything. SPEC invariant citations (`S14`, `D4`, …) are sanctioned.
+  name + types say everything.
