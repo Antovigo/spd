@@ -176,3 +176,37 @@ Array job 5456 (`txci_large_array.sbatch`, %3 throttle to respect the 6-GPU cap)
   {v8d32, v12d64, v16d32} × seeds {0, 1, 2}, hyperparameters unchanged from
   the exploratory runs (they produced good decompositions at every size —
   no tuning needed).
+
+### Seed-sweep results (final eval; mean [min–max] over 3 seeds)
+
+| variant | v8d32 L0 | v12d64 L0 | v16d32 L0 |
+|---|---|---|---|
+| layerwise MLP (s0 ref) | 3.50 | 4.93 | 6.53 |
+| txci baseline | 4.90 [4.62–5.25] | 9.52 [7.10–14.34] | 17.44 [13.48–19.66] |
+| txci_fnorm | **3.29 [3.19–3.43]** | **4.22 [4.01–4.39]** | **5.52 [5.37–5.66]** |
+| txci_cap2 | 7.08 [5.55–8.56], 1 crash | 9.33, 2 crashes | 13.76 [13.15–14.79] |
+| txci_fnorm_cap2 | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] | 5.37 / 6.04 (s2 pending) |
+
+- **fnorm is the robust winner**: tightest ranges, beats the layerwise reference
+  and the baseline at every size on every seed. Recon: v8 2.2e-5 [1.6–2.8],
+  v12 2.7e-5 [2.4–3.0], v16 1.2e-4 [5.9e-5–2.1e-4].
+- **The cap does not reliably add anything on top of the norm** across seeds
+  (slightly worse mean L0 at v8/v12); the seed-0 fnorm_cap2 wins at v8/v16 were
+  seed luck.
+- **cap2-only is confirmed unstable**: 3 crashes in 9 seeds (v8 s0, v12 s0+s1 —
+  all with the histogram-on-nonfinite signature), bad L0 when it survives.
+- **WD control (v8)**: baseline + CI-fn Adam WD 0.01 → L0 5.32 (≈ baseline's
+  4.90-mean); WD 0.1 → 6.83 (worse). Generic weight-space shrinkage does not fix
+  the saturation — the final-norm mechanism specifically does.
+
+### Cleanliness at v12/v16 (job 5491) → tuning grid
+
+Per-input multiplicity (dupes) and cross-input sharing for the fnorm winner:
+
+- v12 fnorm: b0.v/o ≈ 1.17/input (1–2 dupes each, 1 shared) — mild coeff issue.
+  (Layerwise ref is *worse* here: b0.v 2.25/input, 12 dupes.)
+- v16 fnorm: b0.v 2.25/input, 12 dupes, 11 shared; b0.o 1.62/input — both
+  pathologies (dupes → impmin coeff too low; shared subs → beta too low).
+
+Tuning grid on fnorm (array 5492): coeff 2e-4 at v8; {coeff 2e-4, beta 1.0,
+both} at v12 and v16.
