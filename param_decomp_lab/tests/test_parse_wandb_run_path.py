@@ -18,10 +18,10 @@ from param_decomp_lab.infra.wandb import parse_wandb_run_path
         ),
         ("  myentity/myproject/abcd1234  ", ("myentity", "myproject", "abcd1234")),  # whitespace
         ("my-entity/my_project/abcd1234", ("my-entity", "my_project", "abcd1234")),  # special chars
-        ("goodfire/spd/runs/s-d2ec3bfe", ("goodfire", "spd", "s-d2ec3bfe")),  # Newer runid format
+        ("goodfire/spd/runs/s-1a2b3c4d", ("goodfire", "spd", "s-1a2b3c4d")),  # Newer runid format
         (
-            "https://wandb.ai/goodfire/spd/runs/s-d2ec3bfe",
-            ("goodfire", "spd", "s-d2ec3bfe"),
+            "https://wandb.ai/goodfire/spd/runs/s-1a2b3c4d",
+            ("goodfire", "spd", "s-1a2b3c4d"),
         ),
     ],
     ids=[
@@ -56,7 +56,7 @@ def test_parse_wandb_run_path_valid(input_path: str, expected: tuple[str, str, s
         "https://example.com/myentity/myproject/runs/abcd1234",
         "https://wandb.ai/myentity/myproject/abcd1234",
         "wandb:myentity/myproject/abcd1234",
-        "wandb:goodfire/spd/runs/s-d2ec3bfe",
+        "wandb:goodfire/spd/runs/s-1a2b3c4d",
     ],
     ids=[
         "is-an-absolute-path",
