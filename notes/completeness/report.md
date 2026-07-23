@@ -183,7 +183,8 @@ block-0 count, 0 → 4).
 ## Completeness training: the two-CI resurrection protocol
 
 First protocol to reach **0/19 skipped with a structured map** (v8d32,
-`copy_v8d32_complete_{04,05,06}`). Starting from the finished joint decomposition,
+`copy_v8d32_complete_06-imp2e-4`; two sibling settings replicated it and were
+pruned from disk). Starting from the finished joint decomposition,
 duplicate the CI net into a *normal* and a *complete* copy (the duplicate shares
 the live components — its input features are `V^T x` and must track `V` as B
 reallocates weight), then fine-tune (components + both CI nets) with two per-step
@@ -213,15 +214,10 @@ per-500-step CI filmstrip for both nets).
 | normal | marginal map (routing mostly pruned too) | 13 / 19 |
 | complete | **per-block standalone map** | **0 / 19** |
 
-Robust across the anneal target and the IM coeff:
-
-| run | γ final | coeff | complete skipped | complete alive | b0 v / o per input (dupes) | normal skipped |
-|---|---|---|---|---|---|---|
-| 04 | 0.1 | 1e-4 | **0 / 19** | 61 | 1.00 (0) / 1.00 (0) | 13 / 19 |
-| 05 | 0.01 | 1e-4 | **0 / 19** | 59 | 1.00 (0) / 1.00 (0) | 13 / 19 |
-| 06 | 0.01 | 2e-4 | **0 / 19** | 59 | 1.00 (0) / 1.00 (0) | 13 / 19 |
-
-The cleanest variant (06, shown) is near-ideal:
+Robust across the anneal target and the IM coeff — γ final {0.1, 0.01} × coeff
+{1e-4, 2e-4} all reached 0/19 with clean b0 diagonals (1.00/input, 0 dupes) and
+an identical normal map (13/19). Only the cleanest variant is kept on disk:
+**run 06** (γ final 0.01, coeff 2e-4, complete alive 59), shown:
 
 ![complete net, run 06](report_figures/copy_v8d32_complete_06_complete.png)
 
@@ -229,7 +225,7 @@ The complete map is not merely "everything on": every block carries exact
 one-subcomponent-per-token v/o diagonals — blocks 1–2 regrow **dedicated backup
 diagonals for the redundant tokens 0–3** — and block 2, matching the ground-truth
 alone-map exactly, **omits t4**, the one free token block 2 alone cannot copy.
-Only b1.v carries extras (3 duplicated tokens in run 06; 4–5 in 04–05). Per-block
+Only b1.v carries extras (3 duplicated tokens). Per-block
 q/k-routing subcomponents reappear in blocks 1–2 (needed standalone, invisible
 marginally). Contrast with the transformer-CI zero-skip run, which bought
 coverage by being dense everywhere. The normal net is uniform across variants

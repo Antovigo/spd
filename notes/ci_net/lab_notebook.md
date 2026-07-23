@@ -310,3 +310,14 @@ whole fnorm advantage — 4.79 vs baseline 4.90). Earlier "init alone does nothi
 (newinit ≈ baseline) still holds; the two changes are synergistic: norm anchors the
 logit scale, zero-init starts every logit inside the sigmoid window so components
 begin life prunable. Neither suffices alone at v8. Recipe = both.
+
+## 2026-07-23 — cleanup round 2: complete runs + fully-redundant family
+
+- Completeness runs: kept only `copy_v8d32_complete_06-imp2e-4` (best: 0/19
+  skipped, cleanest map); deleted complete_{01,02,03,04,05} and the smoke run.
+  `notes/completeness/report.md` updated — robustness table condensed to prose,
+  run 06 is the single kept exemplar.
+- Fully-redundant v8d32 family: kept only `copy_v8d32_imp1e-4_beta0.5` (textbook:
+  full clean v/o diagonals in the first block, single q/k routing columns, zero
+  strays); deleted the rest of the imp sweep, `copy_v8d32_ppgdla_10k`, and the
+  non-partial perblock_b{0,1,2} runs.
