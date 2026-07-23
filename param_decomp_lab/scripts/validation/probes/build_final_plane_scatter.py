@@ -1,12 +1,17 @@
 """Applet: every residual-stream position projected onto the final (L20) probe planes.
 
-Fixes the probe to `--probe-layer`'s full-range-refit plane for each (variable, period)
-and projects the stream at *every* collected position onto it. The applet (vanilla-JS
-canvas, `file://`, no CDN) shows all positions **side by side** so the construction of
-the final state reads left to right; color by `value mod T` or by each point's Δ from
-the previous position — in-plane (computed client-side from consecutive projections) or
-full-residual norm (`resid_delta`, precomputed here) — on one shared scale across
-panels, all on viridis; plus displacement arrows and hover tooltips.
+Four rows × one column per stream position (vanilla-JS canvas, `file://`, no CDN):
+
+- rows 1-3: the stream projected on the **layer-of-interest's own** probes for `a`, `b`,
+  and the op's result — the data each block is working with;
+- row 4: every position on the fixed `--probe-layer` (default L20) result probe — the
+  final state being constructed.
+
+Color by `value mod T` (each row colored by its own variable) or by each point's Δ from
+the previous position — in-plane (own-probe rows compare against `prev`, the previous
+state projected into the *same* plane, shipped here; the final row uses consecutive
+projections) or full-residual norm (`resid_delta`) — one shared viridis scale across
+every displayed panel; plus displacement arrows and hover tooltips.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_final_plane_scatter \
@@ -126,6 +131,34 @@ def build_final_plane_scatter(
             }
             for v in meta["variables"]
         }
+        result_variable = {"add": "a+b", "sub": "a-b"}[op]
+        own_variables = ["a", "b", result_variable]
+        own: dict[str, dict[str, Any]] = {
+            v: {
+                str(t): {
+                    "one_d": results[probe_key][v][str(t)]["w_sin"] is None,
+                    "layers": {},
+                    "prev": {},
+                    "stats": {
+                        lk: {
+                            "cv_r2": results[lk][v][str(t)]["cv_r2"],
+                            "p_value": results[lk][v][str(t)]["p_value"],
+                            "accepted": bool(
+                                results[lk][v][str(t)]["p_value"] <= alpha
+                                and results[lk][v][str(t)]["cv_r2"] > 0
+                            ),
+                        }
+                        for lk in layer_keys
+                    },
+                }
+                for t in meta["periods"]
+            }
+            for v in own_variables
+        }
+
+        def flat(p: np.ndarray) -> list[float]:
+            return [round(float(c), 4) for c in (p[:, 0] if p.shape[1] == 1 else p.reshape(-1))]
+
         resid_delta: dict[str, list[float]] = {}
         prev: np.ndarray | None = None
         for layer_key in layer_keys:
@@ -136,21 +169,25 @@ def build_final_plane_scatter(
             for variable in meta["variables"]:
                 for period in meta["periods"]:
                     cell = results[probe_key][variable][str(period)]
-                    p = _project(x, cell)
-                    flat = p[:, 0] if p.shape[1] == 1 else p.reshape(-1)
-                    planes[variable][str(period)]["layers"][layer_key] = [
-                        round(float(c), 4) for c in flat
-                    ]
+                    planes[variable][str(period)]["layers"][layer_key] = flat(_project(x, cell))
+            for variable in own_variables:
+                for period in meta["periods"]:
+                    cell = results[layer_key][variable][str(period)]
+                    own[variable][str(period)]["layers"][layer_key] = flat(_project(x, cell))
+                    if prev is not None:
+                        own[variable][str(period)]["prev"][layer_key] = flat(_project(prev, cell))
             prev = x
         ab_flat: list[int] = []
         for i in show:
             ab_flat += [int(aa[i]), int(bb[i])]
         ops_data[op] = {
             "ab": ab_flat,
+            "result_variable": result_variable,
             "values": {
                 v: [int(x) for x in _variable_values(aa, bb, v)[show]] for v in meta["variables"]
             },
             "planes": planes,
+            "own": own,
             "resid_delta": resid_delta,
         }
         logger.info(f"{op}: projected {len(show)} prompts x {len(layer_keys)} positions")

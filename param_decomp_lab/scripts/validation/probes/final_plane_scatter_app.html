@@ -2,43 +2,41 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Final-plane scatter — stream positions on the L20 probe planes</title>
+<title>Final-plane scatter — stream positions on the probe planes</title>
 <style>
   body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 16px; color: #1c1c1e; }
   h1 { font-size: 16px; margin: 0 0 4px; }
-  .sub { color: #666; font-size: 12px; margin-bottom: 10px; max-width: 1200px; }
+  .sub { color: #666; font-size: 12px; margin-bottom: 10px; max-width: 1250px; }
   .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 8px;
               font-size: 13px; }
   .controls label { color: #444; margin-right: 4px; }
-  select, button { font-size: 13px; }
+  select { font-size: 13px; }
   #legend { display: flex; gap: 12px; align-items: center; font-size: 12.5px; color: #333;
             margin-bottom: 10px; }
-  #stats b { font-size: 13px; }
-  #stats .bad { color: #b00020; font-weight: 600; }
-  #stats .ok { color: #1b7f3b; font-weight: 600; }
   #cbarlabel { color: #666; }
-  #panels { display: flex; flex-wrap: wrap; gap: 10px; }
-  .panel { text-align: center; }
-  .panel .ptitle { font-size: 12px; color: #444; margin-bottom: 2px; font-weight: 600; }
-  canvas.plot { border: 1px solid #ddd; border-radius: 4px; }
+  #grid { display: grid; gap: 4px 6px; align-items: center; width: fit-content; }
+  .rowlabel { font-size: 11.5px; color: #333; font-weight: 600; text-align: right;
+              padding-right: 6px; white-space: nowrap; }
+  .colhead { font-size: 11.5px; color: #444; font-weight: 600; text-align: center; }
+  canvas.plot { border: 1px solid #ddd; border-radius: 3px; display: block; }
   #tooltip { position: fixed; pointer-events: none; background: #222; color: #fff; padding: 4px 8px;
              border-radius: 4px; font-size: 12px; display: none; z-index: 5; white-space: pre; }
 </style>
 </head>
 <body>
-<h1 id="apptitle">Residual stream on the final-probe planes</h1>
-<div class="sub">Each point is one prompt at the <code>=</code> token, projected with the
-<b id="probelayer">final</b> probe of the selected (variable, period); the panels show every
-stream position side by side, so the construction of the final state reads left to right.
-Δ color modes color each point by how much it moved <b>from the previous position</b> into the
-shown one (first panel grey), on one shared scale across all panels.</div>
+<h1 id="apptitle">Residual stream on the probe planes</h1>
+<div class="sub">Each point is one prompt at the <code>=</code> token; columns are stream
+positions. Rows 1–3: the stream projected on <b>that layer's own</b> probes for a, b, and the
+result — the data each block works with. Row 4: every position on the fixed
+<b id="probelayer">final</b>-layer result probe — the final state being constructed.
+Δ modes color each point by its movement <b>from the previous position</b>, measured in the
+panel's own plane (or full-resid norm), on one shared scale across all panels.</div>
 <div class="controls">
   <span><label>op</label><select id="op"></select></span>
-  <span><label>variable</label><select id="variable"></select></span>
   <span><label>period</label><select id="period"></select></span>
   <span><label>color by</label><select id="colorby">
     <option value="value">value mod T</option>
-    <option value="plane">Δ in this plane (vs prev)</option>
+    <option value="plane">Δ in panel plane (vs prev)</option>
     <option value="resid">Δ in full resid (vs prev)</option>
   </select></span>
   <span><label><input type="checkbox" id="arrows"> arrows from previous position</label></span>
@@ -48,7 +46,7 @@ shown one (first panel grey), on one shared scale across all panels.</div>
   <canvas id="cbar" width="200" height="13"></canvas>
   <span id="cbarlabel"></span>
 </div>
-<div id="panels"></div>
+<div id="grid"></div>
 <div id="tooltip"></div>
 <script src="data.js"></script>
 <script>
@@ -64,9 +62,10 @@ const VIRIDIS = [[68,1,84],[70,7,90],[71,13,96],[71,19,101],[72,24,106],[72,29,1
 [66,190,113],[74,193,109],[82,197,105],[90,200,100],[101,203,94],[110,206,88],[119,209,83],
 [129,211,77],[139,214,70],[149,216,64],[160,218,57],[170,220,50],[181,222,43],[192,223,37],
 [202,225,31],[213,226,26],[223,227,24],[234,229,26],[244,230,30],[253,231,37]];
-const PANEL = 280;
+const PANEL = 158;                            // CSS px; 7 columns fit one display row
+const DPR = window.devicePixelRatio || 1;
 const $ = id => document.getElementById(id);
-const state = { op: null, variable: null, period: null, colorby: "value", arrows: false };
+const state = { op: null, period: null, colorby: "value", arrows: false };
 
 function fillSelect(sel, items) {
   sel.innerHTML = "";
@@ -77,12 +76,10 @@ function fillSelect(sel, items) {
   }
 }
 $("apptitle").textContent =
-  `Residual stream on the final (L${D.meta.probe_layer}-probe) planes`;
+  `Residual stream on the probe planes (final = L${D.meta.probe_layer})`;
 $("probelayer").textContent = "L" + D.meta.probe_layer;
 fillSelect($("op"), Object.keys(D.ops));
 state.op = $("op").value;
-fillSelect($("variable"), D.meta.variables);
-state.variable = $("variable").value;
 fillSelect($("period"), D.meta.periods.map(String));
 state.period = $("period").value;
 
@@ -93,31 +90,59 @@ function lut(t) {
   return `rgb(${Math.round(a[0]+f*(b[0]-a[0]))},${Math.round(a[1]+f*(b[1]-a[1]))},${Math.round(a[2]+f*(b[2]-a[2]))})`;
 }
 
-function cur() { return D.ops[state.op].planes[state.variable][state.period]; }
-function coords(layerKey) { return cur().layers[layerKey]; }  // flat [x,y,...] or [x,...] if one_d
-function nPoints() { const c = coords(LAYERS[0]); return cur().one_d ? c.length : c.length / 2; }
+// Row definitions: kind "own" = layer-of-interest probes, "final" = fixed probe_layer probe.
+function rowDefs() {
+  const res = D.ops[state.op].result_variable;
+  return [
+    { key: "own_a", kind: "own", variable: "a", label: "a @ layer" },
+    { key: "own_b", kind: "own", variable: "b", label: "b @ layer" },
+    { key: "own_r", kind: "own", variable: res, label: res + " @ layer" },
+    { key: "final", kind: "final", variable: res, label: res + " @ L" + D.meta.probe_layer },
+  ];
+}
+function cellData(row) {
+  const o = D.ops[state.op];
+  return row.kind === "own" ? o.own[row.variable][state.period]
+                            : o.planes[row.variable][state.period];
+}
+function nPoints() {
+  const c = D.ops[state.op].planes["a"][state.period].layers[LAYERS[0]];
+  return D.ops[state.op].planes["a"][state.period].one_d ? c.length : c.length / 2;
+}
 function jitterY(i) { return (((i * 2654435761) >>> 0) % 1000) / 1000 - 0.5; }
 
-function xy(layerKey, i, frame) {
-  const c = coords(layerKey);
-  if (cur().one_d) return [c[i], jitterY(i) * 0.35 * (frame.xmax - frame.xmin)];
-  return [c[2 * i], c[2 * i + 1]];
+function getXY(flatArr, oneD, i, f) {
+  if (oneD) return [flatArr[i], jitterY(i) * 0.35 * (f.xmax - f.xmin)];
+  return [flatArr[2 * i], flatArr[2 * i + 1]];
+}
+
+// coords of row's panel at layer index li; prev=true -> previous state in the SAME plane.
+function rowCoords(row, li, prev) {
+  const cd = cellData(row), lk = LAYERS[li];
+  if (!prev) return cd.layers[lk];
+  if (row.kind === "own") return li > 0 ? cd.prev[lk] : null;
+  return li > 0 ? cd.layers[LAYERS[li - 1]] : null;   // final row: same plane at prev position
 }
 
 const frameCache = {};
-function frame() {
-  const key = state.op + "|" + state.variable + "|" + state.period;
+function rowFrame(row) {
+  const key = [row.key, state.op, state.period].join("|");
   if (frameCache[key]) return frameCache[key];
+  const cd = cellData(row);
   let xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
-  for (const lk of LAYERS) {
-    const c = coords(lk), od = cur().one_d;
-    for (let j = 0; j < c.length; j++) {
-      const isX = od || j % 2 === 0;
-      if (isX) { if (c[j] < xmin) xmin = c[j]; if (c[j] > xmax) xmax = c[j]; }
-      else { if (c[j] < ymin) ymin = c[j]; if (c[j] > ymax) ymax = c[j]; }
+  const scan = arr => {
+    for (let j = 0; j < arr.length; j++) {
+      const isX = cd.one_d || j % 2 === 0;
+      if (isX) { if (arr[j] < xmin) xmin = arr[j]; if (arr[j] > xmax) xmax = arr[j]; }
+      else { if (arr[j] < ymin) ymin = arr[j]; if (arr[j] > ymax) ymax = arr[j]; }
     }
+  };
+  for (let li = 0; li < LAYERS.length; li++) {
+    scan(rowCoords(row, li, false));
+    const p = rowCoords(row, li, true);
+    if (p) scan(p);
   }
-  if (cur().one_d) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
+  if (cd.one_d) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
   const px = 0.06 * (xmax - xmin), py = 0.06 * (ymax - ymin);
   const f = { xmin: xmin - px, xmax: xmax + px, ymin: ymin - py, ymax: ymax + py };
   const w = f.xmax - f.xmin, h = f.ymax - f.ymin, s = Math.max(w, h);  // square, equal scale
@@ -127,35 +152,32 @@ function frame() {
 }
 
 const magCache = {};
-function deltas(li) {                        // Δ from position li-1 into li; null at the first
+function deltas(row, li) {                    // Δ from position li-1 into li; null at the first
   if (li === 0 || state.colorby === "value") return null;
-  const lk = LAYERS[li];
-  const key = [state.colorby, state.op, state.variable, state.period, lk].join("|");
+  if (state.colorby === "resid") return D.ops[state.op].resid_delta[LAYERS[li]];
+  const key = ["plane", row.key, state.op, state.period, li].join("|");
   if (magCache[key]) return magCache[key];
+  const cd = cellData(row), f = rowFrame(row);
+  const cur = rowCoords(row, li, false), prev = rowCoords(row, li, true);
   const n = nPoints();
   const out = new Float32Array(n);
-  if (state.colorby === "resid") {
-    const d = D.ops[state.op].resid_delta[lk];
-    for (let i = 0; i < n; i++) out[i] = d[i];
-  } else {
-    const prev = LAYERS[li - 1], f = frame();
-    for (let i = 0; i < n; i++) {
-      const p0 = xy(prev, i, f), p1 = xy(lk, i, f);
-      out[i] = Math.hypot(p1[0] - p0[0], cur().one_d ? 0 : p1[1] - p0[1]);
-    }
+  for (let i = 0; i < n; i++) {
+    const p0 = getXY(prev, cd.one_d, i, f), p1 = getXY(cur, cd.one_d, i, f);
+    out[i] = Math.hypot(p1[0] - p0[0], cd.one_d ? 0 : p1[1] - p0[1]);
   }
   magCache[key] = out;
   return out;
 }
 
-function sharedQ95() {                       // one Δ scale across every displayed panel
+function sharedQ95() {                        // one Δ scale across every displayed panel
   const all = [];
-  for (let li = 1; li < LAYERS.length; li++) all.push(...deltas(li));
+  for (const row of rowDefs())
+    for (let li = 1; li < LAYERS.length; li++) all.push(...deltas(row, li));
   all.sort((a, b) => a - b);
   return all[Math.floor(0.95 * (all.length - 1))] || 1;
 }
 
-function pointColor(i, mags, q95, values) {
+function pointColor(row, i, mags, q95, values) {
   if (state.colorby === "value") {
     const T = +state.period;
     return lut((((values[i] % T) + T) % T) / Math.max(T - 1, 1));
@@ -164,21 +186,33 @@ function pointColor(i, mags, q95, values) {
   return lut(mags[i] / q95);
 }
 
-const panelDiv = $("panels");
-const canvases = [];
-for (let li = 0; li < LAYERS.length; li++) {
-  const box = document.createElement("div");
-  box.className = "panel";
-  const t = document.createElement("div");
-  t.className = "ptitle";
-  t.textContent = "after " + LAYERS[li].slice(1);
-  const cv = document.createElement("canvas");
-  cv.className = "plot";
-  cv.width = PANEL; cv.height = PANEL;
-  cv.dataset.li = li;
-  box.appendChild(t); box.appendChild(cv);
-  panelDiv.appendChild(box);
-  canvases.push(cv);
+const grid = $("grid");
+grid.style.gridTemplateColumns = `auto repeat(${LAYERS.length}, ${PANEL}px)`;
+grid.appendChild(document.createElement("div"));
+for (const lk of LAYERS) {
+  const h = document.createElement("div");
+  h.className = "colhead";
+  h.textContent = "after " + lk.slice(1);
+  grid.appendChild(h);
+}
+const canvases = [];                          // [rowIdx][li]
+const rowLabelDivs = [];
+for (let r = 0; r < 4; r++) {
+  const lab = document.createElement("div");
+  lab.className = "rowlabel";
+  grid.appendChild(lab);
+  rowLabelDivs.push(lab);
+  const rowCvs = [];
+  for (let li = 0; li < LAYERS.length; li++) {
+    const cv = document.createElement("canvas");
+    cv.className = "plot";
+    cv.width = PANEL * DPR; cv.height = PANEL * DPR;
+    cv.style.width = PANEL + "px"; cv.style.height = PANEL + "px";
+    cv.dataset.row = r; cv.dataset.li = li;
+    grid.appendChild(cv);
+    rowCvs.push(cv);
+  }
+  canvases.push(rowCvs);
 }
 
 function toPx(p, f) {
@@ -186,90 +220,97 @@ function toPx(p, f) {
            PANEL - (p[1] - f.ymin) / (f.ymax - f.ymin) * PANEL ];
 }
 
-let lastPx = [];   // per panel, for hover
+let lastPx = [];   // [rowIdx][li] -> point pixel positions, for hover
 let lastQ95 = 1;
 function drawAll() {
-  const f = frame();
-  const values = D.ops[state.op].values[state.variable];
+  const rows = rowDefs();
   const q95 = state.colorby === "value" ? 1 : sharedQ95();
   lastQ95 = q95;
-  lastPx = [];
+  lastPx = rows.map(() => new Array(LAYERS.length));
   const n = nPoints();
-  for (let li = 0; li < LAYERS.length; li++) {
-    const cv = canvases[li], ctx = cv.getContext("2d");
-    const lk = LAYERS[li];
-    const mags = deltas(li);
-    ctx.clearRect(0, 0, PANEL, PANEL);
-    if (!cur().one_d) {                      // unit circle reference
-      ctx.strokeStyle = "#d0d0d5"; ctx.setLineDash([3, 4]); ctx.beginPath();
-      const c0 = toPx([0, 0], f), r = 1 / (f.xmax - f.xmin) * PANEL;
-      ctx.arc(c0[0], c0[1], r, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
-    }
-    if (state.arrows && li > 0) {
-      const prev = LAYERS[li - 1];
-      ctx.strokeStyle = "rgba(120,120,130,0.3)"; ctx.lineWidth = 1;
-      for (let i = 0; i < Math.min(n, 300); i++) {
-        const a = toPx(xy(prev, i, f), f), b = toPx(xy(lk, i, f), f);
-        ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  rows.forEach((row, r) => {
+    rowLabelDivs[r].textContent = row.label;
+    const cd = cellData(row), f = rowFrame(row);
+    const values = D.ops[state.op].values[row.variable];
+    for (let li = 0; li < LAYERS.length; li++) {
+      const cv = canvases[r][li], ctx = cv.getContext("2d");
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.clearRect(0, 0, PANEL, PANEL);
+      const mags = deltas(row, li);
+      if (!cd.one_d) {                        // unit circle reference
+        ctx.strokeStyle = "#d8d8dc"; ctx.setLineDash([2, 3]); ctx.beginPath();
+        const c0 = toPx([0, 0], f), rad = 1 / (f.xmax - f.xmin) * PANEL;
+        ctx.arc(c0[0], c0[1], rad, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
       }
+      const cur = rowCoords(row, li, false), prev = rowCoords(row, li, true);
+      if (state.arrows && prev) {
+        ctx.strokeStyle = "rgba(120,120,130,0.3)"; ctx.lineWidth = 0.7;
+        for (let i = 0; i < Math.min(n, 250); i++) {
+          const a = toPx(getXY(prev, cd.one_d, i, f), f), b = toPx(getXY(cur, cd.one_d, i, f), f);
+          ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+        }
+      }
+      const px = new Array(n);
+      ctx.globalAlpha = 0.75;
+      for (let i = 0; i < n; i++) {
+        const p = toPx(getXY(cur, cd.one_d, i, f), f);
+        px[i] = p;
+        ctx.fillStyle = pointColor(row, i, mags, q95, values);
+        ctx.beginPath(); ctx.arc(p[0], p[1], 1.3, 0, 2 * Math.PI); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      const s = row.kind === "own" ? cd.stats[LAYERS[li]] : cd.l20;
+      ctx.font = "9px sans-serif";
+      ctx.fillStyle = s.accepted ? "#555" : "#b00020";
+      ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
+      lastPx[r][li] = px;
     }
-    const px = new Array(n);
-    ctx.globalAlpha = 0.75;
-    for (let i = 0; i < n; i++) {
-      const p = toPx(xy(lk, i, f), f);
-      px[i] = p;
-      ctx.fillStyle = pointColor(i, mags, q95, values);
-      ctx.beginPath(); ctx.arc(p[0], p[1], 1.8, 0, 2 * Math.PI); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    lastPx.push(px);
-  }
+  });
   drawLegend(q95);
 }
 
 function drawLegend(q95) {
-  const s = cur().l20, gate = s.accepted
-    ? `<span class="ok">accepted</span>` : `<span class="bad">gated</span>`;
-  $("stats").innerHTML =
-    `<b>${state.op} / ${state.variable} / T=${state.period}</b> — ` +
-    `L${D.meta.probe_layer} probe: cv R² = ${s.cv_r2.toFixed(2)}, p = ${s.p_value} — ${gate}`;
+  $("stats").innerHTML = `<b>${state.op} / T=${state.period}</b>` +
+    ` — panel tag: that probe's cv R² (red = fails the null gate)`;
   const cb = $("cbar"), cctx = cb.getContext("2d");
   for (let x = 0; x < cb.width; x++) {
     cctx.fillStyle = lut(x / (cb.width - 1));
     cctx.fillRect(x, 0, 1, cb.height);
   }
   $("cbarlabel").textContent = state.colorby === "value"
-    ? `value mod ${state.period}: 0 → ${state.period - 1}`
+    ? `value mod ${state.period} (per row's variable): 0 → ${state.period - 1}`
     : `Δ from previous position: 0 → ${q95.toPrecision(3)} (95th pct, shared across panels)`;
 }
 
-for (const cv of canvases) {
-  cv.addEventListener("mousemove", e => {
-    const li = +cv.dataset.li;
-    const r = cv.getBoundingClientRect();
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
-    const px = lastPx[li];
-    let best = -1, bd = 121;
-    for (let i = 0; i < px.length; i++) {
-      const d = (px[i][0] - mx) ** 2 + (px[i][1] - my) ** 2;
-      if (d < bd) { bd = d; best = i; }
-    }
-    const tip = $("tooltip");
-    if (best < 0) { tip.style.display = "none"; return; }
-    const ab = D.ops[state.op].ab, v = D.ops[state.op].values[state.variable][best];
-    const T = +state.period;
-    const mags = deltas(li);
-    tip.textContent = `a=${ab[2 * best]}  b=${ab[2 * best + 1]}\n${state.variable}=${v}` +
-      `  mod ${T} = ${((v % T) + T) % T}` +
-      (mags && state.colorby !== "value" ? `\nΔ = ${mags[best].toPrecision(3)}` : "");
-    tip.style.display = "block";
-    tip.style.left = (e.clientX + 14) + "px";
-    tip.style.top = (e.clientY + 8) + "px";
-  });
-  cv.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; });
-}
+grid.addEventListener("mousemove", e => {
+  const t = e.target;
+  const tip = $("tooltip");
+  if (t.tagName !== "CANVAS") { tip.style.display = "none"; return; }
+  const r = +t.dataset.row, li = +t.dataset.li;
+  const rect = t.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const px = lastPx[r] && lastPx[r][li];
+  if (!px) return;
+  let best = -1, bd = 100;
+  for (let i = 0; i < px.length; i++) {
+    const d = (px[i][0] - mx) ** 2 + (px[i][1] - my) ** 2;
+    if (d < bd) { bd = d; best = i; }
+  }
+  if (best < 0) { tip.style.display = "none"; return; }
+  const row = rowDefs()[r];
+  const ab = D.ops[state.op].ab, v = D.ops[state.op].values[row.variable][best];
+  const T = +state.period;
+  const mags = deltas(row, li);
+  tip.textContent = `a=${ab[2 * best]}  b=${ab[2 * best + 1]}\n${row.variable}=${v}` +
+    `  mod ${T} = ${((v % T) + T) % T}` +
+    (mags && state.colorby !== "value" ? `\nΔ = ${(+mags[best]).toPrecision(3)}` : "");
+  tip.style.display = "block";
+  tip.style.left = (e.clientX + 14) + "px";
+  tip.style.top = (e.clientY + 8) + "px";
+});
+grid.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; });
 
-for (const id of ["op", "variable", "period", "colorby"])
+for (const id of ["op", "period", "colorby"])
   $(id).addEventListener("change", () => { state[id] = $(id).value; drawAll(); });
 $("arrows").addEventListener("change", () => { state.arrows = $("arrows").checked; drawAll(); });
 drawAll();
