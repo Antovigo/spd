@@ -295,3 +295,18 @@ best recipe (fnorm, coeff 2e-4) against `copy_training_v8d32_partial`. Obsolete
 scratch scripts/configs (cipher/attn/cap/WD/newinit, `toy_redundant.sbatch`)
 deleted. `make check` + full lab tests pass; pending arrays (cilr, v8d64) validated
 against the new code.
+
+## 2026-07-24 — readout-init attribution result (array 5546, v8/v12 only)
+
+fnorm × old random readout init, 3 seeds, L0 mean [min–max]:
+
+| | zero-init (bias 0.5) | random init (bias 0) |
+|---|---|---|
+| v8d32 | 3.29 [3.19–3.43] | **4.79 [4.12–6.07]**, recon 3.6–7.3e-5 |
+| v12d64 | 4.22 [4.01–4.39] | 4.42 [4.14–4.60] |
+
+**The zero-init is load-bearing given the norm** (v8: random init loses nearly the
+whole fnorm advantage — 4.79 vs baseline 4.90). Earlier "init alone does nothing"
+(newinit ≈ baseline) still holds; the two changes are synergistic: norm anchors the
+logit scale, zero-init starts every logit inside the sigmoid window so components
+begin life prunable. Neither suffices alone at v8. Recipe = both.
