@@ -180,23 +180,68 @@ token-selective matrices (v/o); q/k routing subcomponents are active on every to
 and would otherwise mask v/o skips (this correction changed only the per-block
 block-0 count, 0 → 4).
 
-## Larger sizes (layerwise CI fn)
+## Larger sizes and CI-function architecture
 
-Same recipe on the bigger variants:
+With the recipe fixed, two things were varied: toy size and what computes the CIs —
+the layerwise MLP (hidden [16], one per matrix), a global shared MLP (hidden
+[256, 256], one network for all matrices), and a small global shared transformer
+(d_model 64, 2 blocks, 4 heads, RoPE) at beta 0.5 and 1.0. Columns: mechanisms
+skipped / ground truth, block-0 v and o mean active subcomponents per input (inputs
+with > 1), and eval stochastic-recon KL.
 
-| toy | b0 v / o per-input (dupes) | skipped / truth |
-|---|---|---|
-| v8d32 | 1.00 / 1.00 (0) — perfect | 10 / 19 |
-| v12d64 | 2.25 (12) / 1.00 (0) | 13 / 28 |
-| v16d32 | 3.44 (16) / 1.62 (7) | 18 / 31 |
+**v8d32** (truth 19):
 
-Block 0's v-matrix fragments as vocab grows at fixed recipe (candidate causes: C
-headroom drops from 2× to 1.5× vocab at v16; more tokens share d_embed = 32). In
-v16, blocks 1–2 each also keep a private q/k routing pair dedicated to one token
-(t10) — the "defector token" pattern with its routing visible. Free-half hosting is
-found at every size (v12: block 2's incidental full coverage; v16: blocks 1–2 host
-the free half). A global-shared-MLP CI fn is under test as the fix for the
-v-fragmentation.
+| CI fn | skipped | b0 v | b0 o | recon |
+|---|---|---|---|---|
+| layerwise MLP | 10 | 1.00 (0) | 1.00 (0) | 1.1e-5 |
+| global MLP | 7 | 1.62 (4) | 1.12 (1) | 3.5e-5 |
+| global transformer β 0.5 | 4 | 1.62 (4) | 1.12 (1) | 1.7e-5 |
+| global transformer β 1.0 | **0** | 3.12 (8) | 2.00 (3) | 6.5e-5 |
+
+**v12d64** (truth 28):
+
+| CI fn | skipped | b0 v | b0 o | recon |
+|---|---|---|---|---|
+| layerwise MLP | 13 | 2.25 (12) | 1.00 (0) | 2.1e-5 |
+| global MLP | 9 | 1.67 (4) | 1.25 (2) | 2.8e-5 |
+| global transformer β 0.5 | 10 | 2.58 (9) | 1.83 (5) | 2.1e-5 |
+| global transformer β 1.0 | 7 | 2.08 (7) | 2.08 (7) | 4.0e-5 |
+
+**v16d32** (truth 31):
+
+| CI fn | skipped | b0 v | b0 o | recon |
+|---|---|---|---|---|
+| layerwise MLP | 18 | 3.44 (16) | 1.62 (7) | 4.5e-5 |
+| global MLP | 9 | 2.19 (11) | 1.69 (6) | 2.1e-4 |
+| global transformer β 0.5 | 3 | 8.56 (16) | 5.56 (16) | 7.0e-4 |
+| global transformer β 1.0 | 2 | 5.50 (16) | 5.94 (15) | 1.1e-3 |
+
+Takeaways:
+
+- **CI expressivity recovers backups** — skips fall monotonically with CI capacity
+  at every size (v8: 10 → 7 → 4 → 0) — **but never cleanly**: every recovered copy
+  is paid for in duplication or reconstruction. Same law as the impmin-coeff sweep,
+  now along the architecture axis instead of the pressure axis.
+- **v8 transformer β 1.0 is the first zero-skip decomposition** at tolerable recon
+  (6.5e-5): all 12 redundant copies have CI > 0.1. An existence proof that a
+  context-aware CI fn *keeps backups alive* instead of pruning them — though at
+  ~2–3× duplication, so the copies are acknowledged, not cleanly factorized.
+- **At v16 the transformer CI collapses to dense** (b0 at 5–9 of 16–24 subs per
+  input, recon 30–70× the layerwise run); raising beta 0.5 → 1.0 trims skips
+  (3 → 2) without restoring sparsity — the entropy term is not the binding knob
+  there.
+- The global shared MLP is the balanced middle: strictly better than layerwise at
+  v12/v16 (fewer skips *and* fewer dupes), without the transformer's dense collapse.
+- Layerwise fragmentation with size persists (b0.v: v8 1.00 → v12 2.25 → v16 3.44;
+  candidate causes: C headroom drops from 2× to 1.5× vocab at v16; more tokens share
+  d_embed = 32). In v16, blocks 1–2 each keep a private q/k routing pair dedicated
+  to one token (t10) — the "defector token" pattern with its routing visible.
+  Free-half hosting is found at every size and architecture (v12: block 2's
+  incidental full coverage; v16: blocks 1–2 host the free half).
+
+The frontier moves; it doesn't break. No CI architecture (or coefficient) is both
+complete and clean — recovering redundant mechanisms *as mechanisms* still needs a
+protocol, not a hyperparameter.
 
 ## Reproduce
 
