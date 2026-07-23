@@ -264,3 +264,15 @@ Also probing (array 5555, after round 2): CI-net LR halved to 1e-3 (components
 stay 2e-3) on fnorm_i2e-4 at all sizes — LR was an untouched axis; the targeted
 recipe found CI-LR below components-LR gives cleaner components. All runs so far
 used 2e-3 for both.
+
+## 2026-07-23 — v16d32 retired, v8d64 added
+
+Decision: drop v16d32 entirely — all `copy_v16d32_*` runs and the
+`copy_training_v16d32_partial` target deleted from disk, its pending probe jobs
+cancelled, and the report rewritten without it. (Notebook entries above are kept
+as history; their v16 numbers refer to now-deleted runs.) Seed confirmations of
+fnorm_i2e-4 also cancelled — goal narrowed to "find something that works".
+
+Replacement: **v8d64** (vocab 8, d_embed 64, 4 redundant tokens) — the
+wide-embedding version of the canonical testbed. Train the target, then apply the
+current best formulas (fnorm_i2e-4, ± CI-LR/2 pending the probe results).

@@ -135,25 +135,26 @@ Final decomposition, `fnorm_cap2` — block-0 v/o perfectly clean (1.00/input,
 
 ![active subcomponents, fnorm_cap2](report_figures/active_fnorm_cap2.png)
 
-## Rigorous comparison: 3 seeds × 3 sizes × 4 variants
+## Rigorous comparison: 3 seeds × 4 variants
 
 Final CI-L0, mean [min–max] over seeds {0, 1, 2} (array 5464); recon stays within
-the reference band for the fnorm variants at every size:
+the reference band for the fnorm variants at every size. (A v16d32 testbed was
+also swept with the same verdict — dense collapse repaired by the norm — but that
+size has been retired and its runs deleted; v8d64 replaces it below.)
 
-| variant | v8d32 | v12d64 | v16d32 |
-|---|---|---|---|
-| layerwise MLP (seed-0 ref) | 3.50 | 4.93 | 6.53 |
-| transformer baseline | 4.90 [4.62–5.25] | 9.52 [7.10–14.34] | 17.44 [13.48–19.66] |
-| + final RMS norm | **3.29 [3.19–3.43]** | **4.22 [4.01–4.39]** | **5.52 [5.37–5.66]** |
-| + soft-cap only | 7.08, 1 crash | 9.33, 2 crashes | 13.76 [13.15–14.79] |
-| + norm + soft-cap | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] | 5.73 [5.37–6.04] |
+| variant | v8d32 | v12d64 |
+|---|---|---|
+| layerwise MLP (seed-0 ref) | 3.50 | 4.93 |
+| transformer baseline | 4.90 [4.62–5.25] | 9.52 [7.10–14.34] |
+| + final RMS norm | **3.29 [3.19–3.43]** | **4.22 [4.01–4.39]** |
+| + soft-cap only | 7.08, 1 crash | 9.33, 2 crashes |
+| + norm + soft-cap | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] |
 
 Robust conclusions:
 
 - **The final RMS norm is the consistent, measurable improvement.** Every seed at
   every size beats both the baseline transformer and the layerwise-MLP reference,
-  with the tightest seed variance of any variant. At v16d32 it repairs the dense
-  collapse outright (17.4 → 5.5 at 3–5× better recon).
+  with the tightest seed variance of any variant.
 - **The soft-cap adds nothing reliable on top of the norm.** Its seed-0 wins did
   not replicate; means are slightly worse than norm-alone at v8/v12.
 - **The soft-cap alone is actively harmful**: it bounds saturation depth but leaves
@@ -170,9 +171,8 @@ Robust conclusions:
 With the architecture fixed, the loss knobs re-tune. Cleanliness heuristics: several
 active subcomponents in one matrix for the same input (dupes) → impmin `coeff` too
 low; the same subcomponent active on several inputs (shared) → `beta` too low. The
-fnorm runs showed mild dupes at v12 (b0.v 1.17/input) and both pathologies at v16
-(b0.v 2.25/input, 12 dupes, 11 shared), so we swept `coeff` 1e-4 → 2e-4 and `beta`
-0.5 → 1.0:
+fnorm runs showed mild dupes at v12 (b0.v 1.17/input), so we swept `coeff`
+1e-4 → 2e-4 and `beta` 0.5 → 1.0:
 
 | run | CI-L0 | recon KL | b0.v /input (dupes, shared) |
 |---|---|---|---|
@@ -181,22 +181,19 @@ fnorm runs showed mild dupes at v12 (b0.v 1.17/input) and both pathologies at v1
 | v12 fnorm | 4.01 | 3.0e-5 | 1.17 (1, 1) |
 | v12 fnorm, coeff 2e-4 | **3.88** | 3.8e-5 | 1.17 (1, 2) |
 | v12 fnorm, coeff 2e-4 + beta 1 | 3.34 | 8.2e-5 | 1.08 (1, 1) |
-| v16 fnorm | 5.52 | 2.1e-4 | 2.25 (12, 11) |
-| v16 fnorm, coeff 2e-4 | **4.47** | **8.6e-5** | 1.75 (10, 4) |
-| v16 fnorm, coeff 2e-4 + beta 1 | 4.10 | 1.9e-4 | 1.69 (8, 5) |
 
-- **coeff 2e-4 is the new operating point at every size**: sparser, cleaner, and at
-  v16 it *improves* recon 2.5× — the under-pressured run was spending capacity
-  keeping strays half-reconstructed.
-- **beta 1.0 not adopted**: it trades recon for L0 without cleaning block 0 further;
-  the v16 shared-subs pathology (11 → 4) was fixed by the coeff alone.
+- **coeff 2e-4 is the new operating point**: sparser and cleaner at both sizes at
+  slightly higher recon. (The retired v16d32 sweep agreed, and there the coeff
+  also *improved* recon 2.5×.)
+- **beta 1.0 not adopted**: it trades recon for L0 without cleaning block 0
+  further.
 - At v8, coeff 2e-4 shows the first over-pruning hint (one b0 token column zeroed,
   coverage picked up by another block) — the coeff ceiling is near.
 
-In flight: coeff 4e-4 probes at v12/v16, a 3-seed confirmation of fnorm + coeff
-2e-4 at all sizes, and the readout-init attribution (fnorm × old random init ×
-3 seeds × 3 sizes — every fnorm number above implicitly includes the zero-init,
-whose solo effect was null but whose interaction with the norm is untested).
+In flight: a coeff 4e-4 probe at v12, a CI-net-LR/2 probe at each size, and the
+readout-init attribution (fnorm × old random init × 3 seeds — every fnorm number
+above implicitly includes the zero-init, whose solo effect was null but whose
+interaction with the norm is untested).
 
 ## Recommendation
 
