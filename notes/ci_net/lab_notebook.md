@@ -276,3 +276,22 @@ fnorm_i2e-4 also cancelled — goal narrowed to "find something that works".
 Replacement: **v8d64** (vocab 8, d_embed 64, 4 redundant tokens) — the
 wide-embedding version of the canonical testbed. Train the target, then apply the
 current best formulas (fnorm_i2e-4, ± CI-LR/2 pending the probe results).
+
+## 2026-07-23 — cleanup: failed/bad runs, obsolete toys, soft-cap and WD removed
+
+Disk: deleted all non-copy toy runs (cipher `attn_blockdrop_*`, the original MLP
+redundancy toy's `training*` / `*ppgd_lateanneal*` / non-copy `*ppgdla*` families),
+all failed runs, and every clearly-bad/dead-end run: cap-only and fnorm_cap2
+families (soft-cap inconclusive → removed entirely), `txci_beta1`, `txci_newinit`,
+the WD controls, and the smoke test. Notebook entries above referring to these
+describe now-deleted data.
+
+Code: `logit_softcap` removed from `param_decomp/ci_fns.py` (saved run configs on
+disk migrated by stripping the key); obsolete toy modules
+`toy_models/toy_model_redundancy.py` and `toy_model_redundancy_attn.py` deleted —
+`RMSNorm`/`AttnBlock` now live in `toy_model_redundancy_copy.py`; `run.py` and
+`ToyRedundancyCIPlot` are copy-only; the in-repo example YAML now runs the current
+best recipe (fnorm, coeff 2e-4) against `copy_training_v8d32_partial`. Obsolete
+scratch scripts/configs (cipher/attn/cap/WD/newinit, `toy_redundant.sbatch`)
+deleted. `make check` + full lab tests pass; pending arrays (cilr, v8d64) validated
+against the new code.
