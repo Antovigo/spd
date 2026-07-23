@@ -142,3 +142,37 @@ Array job 5456 (`txci_large_array.sbatch`, %3 throttle to respect the 6-GPU cap)
   (crash preceded the save), so no plot_ci analysis; metrics.jsonl survives.
 - Conclusion so far: the final RMS norm is necessary; the cap is only safe on top
   of it.
+
+### v16d32 (final eval, step 10000) — dense collapse repaired
+
+| run | CI-L0 | recon KL | skipped |
+|---|---|---|---|
+| layerwise MLP | 6.53 | 4.5e-5 | 18/31 |
+| global MLP | 6.43 | 2.1e-4 | 9/31 |
+| transformer baseline | 19.17 | 7.0e-4 | 3/31 |
+| `txci_fnorm` | 5.52 | 2.1e-4 | 17/31 |
+| `txci_cap2` | 13.15 | 7.9e-5 | 8/31 |
+| `txci_fnorm_cap2` | **5.37** | **7.0e-5** | 16/31 |
+
+- The completeness report's "at v16 the transformer CI collapses to dense" is a
+  *logit-scale* pathology, not an expressivity limit: fnorm+cap2 is
+  simultaneously the sparsest run at this size AND 10× more faithful than the
+  baseline transformer, beating both MLP references on L0 at comparable-or-better
+  recon.
+- At v16 the cap earns its keep on top of the norm: 3× recon improvement over
+  fnorm alone (7.0e-5 vs 2.1e-4) at slightly better L0.
+- Cap-only stayed numerically stable at this size (unlike v12) but is still bad
+  (L0 13.15) — consistent with "bounds saturation depth but leaves the trunk
+  unanchored".
+- Its low skip count (8/31, like globalci's 9) comes with L0 13 — dense coverage
+  again, not clean recovery.
+
+## 2026-07-23 — WD-only control (v8d32) + 3-seed rigorous sweep
+
+- `txci_wd1e-2` / `txci_wd1e-1` (array 5462): baseline transformer + CI-fn Adam
+  weight decay only — does generic logit-scale control suffice, or does the
+  norm+cap mechanism matter?
+- Seed sweep (array 5464, 25 runs): {txci, fnorm, cap2, fnorm_cap2} ×
+  {v8d32, v12d64, v16d32} × seeds {0, 1, 2}, hyperparameters unchanged from
+  the exploratory runs (they produced good decompositions at every size —
+  no tuning needed).
