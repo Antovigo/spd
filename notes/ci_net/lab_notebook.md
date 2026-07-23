@@ -210,3 +210,23 @@ Per-input multiplicity (dupes) and cross-input sharing for the fnorm winner:
 
 Tuning grid on fnorm (array 5492): coeff 2e-4 at v8; {coeff 2e-4, beta 1.0,
 both} at v12 and v16.
+
+## 2026-07-23 — readout-init audit
+
+Which runs used which output-head init (the zero-init is unconditional in the new
+code, so it rode along with every new run):
+
+- **old fan-in random init (bias 0)**: all baseline txci *seed-0* runs (predate the
+  code change) and every historical txci run.
+- **new zero-init (bias 0.5)**: `txci_newinit`, all fnorm / cap2 / fnorm_cap2 runs,
+  the tuning grid, the WD controls, **and the baseline txci s1/s2 seed-sweep runs**
+  — i.e. the baseline 3-seed row mixes inits (s0 old, s1/s2 new).
+
+Evidence so far that the init is not the driver: init-alone at v8 ≈ baseline
+(5.56 vs 5.25), and the mixed-init baseline seeds show no init-correlated split
+(old-init s0 is the *worst* v8 baseline seed). But `fnorm × old-init` was never
+run — the measured "fnorm effect" is strictly "fnorm + zero-init".
+
+Closing the gap: `zero_init_readout: bool = True` config field added
+(`false` restores fan-in init, bias 0); array 5546 runs
+`fnorm_randinit` × 3 sizes × 3 seeds after the tuning grid drains.
