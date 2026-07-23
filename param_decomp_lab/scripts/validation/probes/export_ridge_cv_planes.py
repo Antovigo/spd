@@ -45,12 +45,12 @@ def export_ridge_cv_planes(
         next(iter(next(iter(results.values())).values()))[str(meta["periods"][0])]["w_cos"]
     )
     out_paths: list[Path] = []
-    for layer in meta["layers"]:
+    for pos in meta["positions"]:
         probes: dict[str, dict[str, Any]] = {}
         for variable in meta["variables"]:
             probes[variable] = {}
             for period in meta["periods"]:
-                cell = results[f"L{layer}"][variable][str(period)]
+                cell = results[pos][variable][str(period)]
                 sin_ok = cell["w_sin"] is not None
                 probes[variable][str(period)] = {
                     "w_cos": cell["w_cos"],
@@ -64,14 +64,14 @@ def export_ridge_cv_planes(
                     "lambda_rel": cell["lambda_rel"],
                     "accepted": bool(cell["p_value"] <= alpha and cell["cv_r2"] > 0),
                 }
-        out = out_dir / f"probes_L{layer}.json"
+        out = out_dir / f"probes_{pos}.json"
         out.write_text(
             json.dumps(
                 {
                     "model": "meta-llama/Llama-3.1-8B",
-                    "layer": layer,
+                    "position": pos,
                     "max_value": meta["max_value"],
-                    "site": f"L{layer}",
+                    "site": pos,
                     "op": op,
                     "variables": meta["variables"],
                     "periods_by_variable": {v: meta["periods"] for v in meta["variables"]},

@@ -89,18 +89,18 @@ def build_final_plane_scatter(
         payload = json.loads(json_path.read_text())
         meta, results = payload["meta"], payload["results"]
         op = meta["op"]
-        layer_keys = [f"L{i}" for i in meta["layers"]]
+        layer_keys = [str(p) for p in meta["positions"]]
         probe_key = f"L{probe_layer}"
         assert probe_key in layer_keys, f"probe layer {probe_key} not in {layer_keys}"
         if shared_meta is None:
             shared_meta = {
-                "layers": layer_keys,
+                "positions": layer_keys,
                 "variables": meta["variables"],
                 "periods": meta["periods"],
             }
         else:
             assert shared_meta == {
-                "layers": layer_keys,
+                "positions": layer_keys,
                 "variables": meta["variables"],
                 "periods": meta["periods"],
             }, "jsons disagree on the grid"

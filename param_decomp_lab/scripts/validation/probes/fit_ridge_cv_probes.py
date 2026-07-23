@@ -1,6 +1,6 @@
 """Ridge Fourier probes: rotating-block CV picks λ, full-range refit, permutation-null gate.
 
-For each residual-stream position (`resid_L<i>` grid in a `collect_resid_stream` npz),
+For each residual-stream position (`resid_<pos>` grid in a `collect_resid_stream` npz),
 integer variable `v ∈ {a, b, a+b, a-b}`, and period `T`, fits
 
     cos(2πv/T) ≈ w·x + b ,   sin(2πv/T) ≈ w·x + b
@@ -23,7 +23,7 @@ by closed-form ridge on the raw per-prompt activations. Three-stage protocol:
    `p_value = (1 + #{null cv_r2 ≥ cv_r2}) / (1 + n_perm)`. Only probes clearing the
    null indicate real structure.
 
-Ridge is solved in the eigenbasis of the train Gram matrix — one eigh per (layer,
+Ridge is solved in the eigenbasis of the train Gram matrix — one eigh per (position,
 variable, fold, permutation), then every (period, λ) is a rescale + matvec — in fp32.
 GPU strongly recommended (~3k eighs of `d_model`² at the defaults); pass `--slurm`.
 
@@ -33,7 +33,7 @@ Usage:
         [--n-perm=20] [--seed=0] [--output=PATH] [--slurm [--slurm-time=8:00:00 ...]]
 
 Output (default `ridge_cv_probes_<op>.json` beside the npz): `meta` (fold value ranges
-per variable, λ grid, …) + `results[L<i>][variable][period]` = `{lambda_rel, cv_r2,
+per variable, λ grid, …) + `results[<pos>][variable][period]` = `{lambda_rel, cv_r2,
 fold_r2, cv_angerr_deg, null_cv_r2, p_value, full_r2, block_r2, w_cos, b_cos, w_sin,
 b_sin}` (`*_sin` null at period 2, where sin ≡ 0).
 """
@@ -232,13 +232,13 @@ def fit_ridge_cv_probes(
     t0 = time.time()
     data = np.load(npz_path)
     op = str(data["op"])
-    layers = [int(i) for i in data["layers"]]
+    positions = [str(p) for p in data["positions"]]
     a_axis, b_axis = data["a"].astype(np.int64), data["b"].astype(np.int64)
     aa, bb = (g.reshape(-1) for g in np.meshgrid(a_axis, b_axis, indexing="ij"))
     n = len(aa)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rng = np.random.default_rng(seed)
-    logger.info(f"{npz_path.name}: op={op}, layers {layers}, {n} prompts, device {device}")
+    logger.info(f"{npz_path.name}: op={op}, positions {positions}, {n} prompts, device {device}")
 
     block_ranges = {
         v: [
@@ -248,11 +248,11 @@ def fit_ridge_cv_probes(
         for v in variables
     }
     results: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
-    for layer in layers:
-        x = torch.from_numpy(np.asarray(data[f"resid_L{layer}"], dtype=np.float32)).to(device)
+    for pos in positions:
+        x = torch.from_numpy(np.asarray(data[f"resid_{pos}"], dtype=np.float32)).to(device)
         x = x.reshape(n, -1)
         full_basis = _RidgeBasis(x, np.ones(n, dtype=bool))
-        layer_results: dict[str, dict[str, dict[str, Any]]] = {}
+        pos_results: dict[str, dict[str, dict[str, Any]]] = {}
         for variable in variables:
             values = _variable_values(aa, bb, variable)
             r2, angerr = _cv_scores(x, values, periods, _LAMBDAS_REL, n_folds, with_angerr=True)
@@ -271,7 +271,7 @@ def fit_ridge_cv_probes(
             ym = y.mean(dim=0)
             yc = y - ym
             fold_masks = _fold_test_masks(values, n_folds)
-            layer_results[variable] = {}
+            pos_results[variable] = {}
             for j, period in enumerate(periods):
                 rel = _LAMBDAS_REL[int(best_il[j])]
                 coef = full_basis.coef_eig(yc[:, 2 * j : 2 * j + 2], rel * full_basis.mean_eig)
@@ -285,7 +285,7 @@ def fit_ridge_cv_probes(
                     if sin_valid[j]
                     else float("nan")
                 )
-                layer_results[variable][str(period)] = {
+                pos_results[variable][str(period)] = {
                     "lambda_rel": rel,
                     "cv_r2": round(float(cv_r2[j]), 5),
                     "fold_r2": [round(float(v), 5) for v in r2[:, j, int(best_il[j])]],
@@ -301,19 +301,19 @@ def fit_ridge_cv_probes(
                     else None,
                     "b_sin": round(float(bias[1]), 6) if sin_valid[j] else None,
                 }
-            top = max(layer_results[variable].items(), key=lambda kv: kv[1]["cv_r2"])
+            top = max(pos_results[variable].items(), key=lambda kv: kv[1]["cv_r2"])
             logger.info(
-                f"[{time.time() - t0:6.0f}s] L{layer}/{variable}: best T={top[0]} "
+                f"[{time.time() - t0:6.0f}s] {pos}/{variable}: best T={top[0]} "
                 f"cv_r2={top[1]['cv_r2']:.3f} (p={top[1]['p_value']:.3f})"
             )
-        results[f"L{layer}"] = layer_results
+        results[pos] = pos_results
         del x, full_basis
 
     payload = {
         "meta": {
             "source": str(npz_path),
             "op": op,
-            "layers": layers,
+            "positions": positions,
             "variables": list(variables),
             "periods": list(periods),
             "lambdas_rel": [float(f"{x:.4e}") for x in _LAMBDAS_REL],

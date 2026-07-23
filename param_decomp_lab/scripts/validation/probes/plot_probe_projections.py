@@ -138,7 +138,7 @@ def plot_probe_projections(
 
     if all_layers:
         assert output is None, "--output is ambiguous with --all-layers (one file per variable)"
-        layer_keys = [f"L{i}" for i in meta["layers"]]
+        layer_keys = [str(p) for p in meta["positions"]]
         proj: dict[tuple[str, str, int], NDArray[np.float32]] = {}
         for layer_key in layer_keys:
             x = np.asarray(data[f"resid_{layer_key}"], dtype=np.float32).reshape(n, -1)[show]

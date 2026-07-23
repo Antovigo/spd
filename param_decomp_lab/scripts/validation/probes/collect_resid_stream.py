@@ -1,12 +1,16 @@
-"""Collect the residual stream (decoder-block outputs) around layers 15-20 at the `=` token.
+"""Collect the residual stream around layers 15-20 at the `=` token, one grid per position.
 
 Generalises `collect_resid_activations` (four sites around L18's MLP) to the stream itself:
-one forward pass per batch captures each requested block's output (`out[0]`) at the last
-token, for the full `a<op>b=` grid (`a, b` in `1..max_value`), one output file per op.
-Block `L`'s output is the residual stream *after* block `L` — i.e. the input to block
-`L+1` — so the default `--layers=14..20` covers every stream position from entering
-layer 15 to leaving layer 20. Batches are left-padded, so position `-1` is the `=` for
-every prompt.
+one forward pass per batch captures, at the last token, every requested stream *position*
+for the full `a<op>b=` grid (`a, b` in `1..max_value`), one output file per op:
+
+- `L<i>` — block `i`'s output (`out[0]`), the stream after block `i` = input to block `i+1`;
+- `L<i>att` (all but the first layer) — the stream after block `i`'s **attention**, before
+  its MLP (forward-pre input of `post_attention_layernorm`).
+
+So the default `--layers=14..20` yields positions `L14, L15att, L15, ..., L20att, L20`, and
+consecutive deltas isolate each attention write (`into L<i>att`) and each MLP write
+(`into L<i>`). Batches are left-padded, so position `-1` is the `=` for every prompt.
 
 An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-GPU job.
 
@@ -16,8 +20,9 @@ Usage:
         [--output-dir=DIR] [--slurm [--partition=... --gpus=1 --slurm-time=3:00:00]]
 
 Output (default dir `<PARAM_DECOMP_OUT_DIR>/runs/fourier_probes/`): one
-`resid_stream_<op>.npz` per op with `resid_L<i>` grids `[G, G, d_model]` fp16 indexed
-`[a-1, b-1]` (`G = max_value`), plus `a`, `b`, `layers`, `max_value`, `op`.
+`resid_stream_<op>.npz` per op with `resid_<pos>` grids `[G, G, d_model]` fp16 indexed
+`[a-1, b-1]` (`G = max_value`), plus `a`, `b`, `positions` (strings, stream order),
+`layers`, `max_value`, `op`.
 """
 
 from pathlib import Path
@@ -85,17 +90,32 @@ def collect_resid_stream(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    captured: dict[int, torch.Tensor] = {}
+    positions = [f"L{layers[0]}"]
+    for i in layers[1:]:
+        positions += [f"L{i}att", f"L{i}"]
+    captured: dict[str, torch.Tensor] = {}
 
-    def make_hook(layer: int) -> Any:
+    def make_block_hook(pos: str) -> Any:
         def hook(_m: Any, _i: Any, out: Any) -> None:
             hidden = out[0] if isinstance(out, tuple) else out  # tuple or bare tensor by version
-            captured[layer] = hidden[:, -1].float()  # block output at the `=` (left-padded)
+            captured[pos] = hidden[:, -1].float()  # block output at the `=` (left-padded)
+
+        return hook
+
+    def make_att_hook(pos: str) -> Any:
+        def hook(_m: Any, args: Any) -> None:  # input to post-attn RMSNorm = resid after attention
+            captured[pos] = args[0][:, -1].float()
 
         return hook
 
     handles = [
-        hf.get_submodule(f"model.layers.{i}").register_forward_hook(make_hook(i)) for i in layers
+        hf.get_submodule(f"model.layers.{i}").register_forward_hook(make_block_hook(f"L{i}"))
+        for i in layers
+    ] + [
+        hf.get_submodule(f"model.layers.{i}.post_attention_layernorm").register_forward_pre_hook(
+            make_att_hook(f"L{i}att")
+        )
+        for i in layers[1:]
     ]
 
     out_dir = (
@@ -111,36 +131,41 @@ def collect_resid_stream(
     for op in ops:
         sym = op_symbol(op)
         prompts = [f"{a}{sym}{b}=" for a in values for b in values]
-        logger.info(f"op {op!r}: {len(prompts)} prompts (a,b in 1..{max_value}), layers {layers}")
-        grids: dict[int, np.ndarray] = {}  # allocated on the first batch, once d_model is known
+        logger.info(
+            f"op {op!r}: {len(prompts)} prompts (a,b in 1..{max_value}), positions {positions}"
+        )
+        grids: dict[str, np.ndarray] = {}  # allocated on the first batch, once d_model is known
         with torch.no_grad(), bf16_autocast(enabled=run.cfg.runtime.autocast_bf16):
             for start in range(0, len(prompts), batch_size):
                 batch = prompts[start : start + batch_size]
                 inputs = tokenizer(batch, return_tensors="pt", padding=True).to(run.device)
                 captured.clear()
                 hf(**inputs)
-                for layer in layers:
-                    acts = captured[layer].cpu().numpy().astype(np.float16)
-                    if layer not in grids:
-                        grids[layer] = np.zeros(
+                for pos in positions:
+                    acts = captured[pos].cpu().numpy().astype(np.float16)
+                    if pos not in grids:
+                        grids[pos] = np.zeros(
                             (max_value, max_value, acts.shape[-1]), dtype=np.float16
                         )
                     for i, (a, b) in enumerate(ab[start : start + len(batch)]):
-                        grids[layer][a - 1, b - 1] = acts[i]
+                        grids[pos][a - 1, b - 1] = acts[i]
                 if (start // batch_size) % 50 == 0:
                     logger.info(
                         f"{op}: batch {start // batch_size + 1}/{-(-len(prompts) // batch_size)}"
                     )
-        assert set(grids) == set(layers), f"missing layers: {set(layers).difference(grids)}"
+        assert set(grids) == set(positions), (
+            f"missing positions: {set(positions).difference(grids)}"
+        )
 
         out_path = out_dir / f"resid_stream_{op}.npz"
         arrays: dict[str, Any] = {
             "a": np.arange(1, max_value + 1, dtype=np.int32),
             "b": np.arange(1, max_value + 1, dtype=np.int32),
+            "positions": np.array(positions),
             "layers": np.array(layers, dtype=np.int32),
             "max_value": max_value,
             "op": op,
-            **{f"resid_L{i}": grids[i] for i in layers},
+            **{f"resid_{pos}": grids[pos] for pos in positions},
         }
         np.savez_compressed(out_path, **arrays)
         logger.info(f"wrote {op} ({out_path.stat().st_size / 1e6:.0f} MB) → {out_path}")

@@ -94,14 +94,14 @@ def plot_ridge_cv_probes(
     last_image = None
     for row_i, payload in enumerate(payloads):
         op = payload["meta"]["op"]
-        layers: list[int] = payload["meta"]["layers"]
+        positions: list[str] = payload["meta"]["positions"]
         for col_i, variable in enumerate(variables):
             ax = axes[row_i][col_i]
-            score = np.zeros((len(layers), len(periods)))
+            score = np.zeros((len(positions), len(periods)))
             accepted = np.zeros_like(score, dtype=bool)
-            for yi, layer in enumerate(layers):
+            for yi, pos in enumerate(positions):
                 for xi, period in enumerate(periods):
-                    entry = payload["results"][f"L{layer}"][variable][str(period)]
+                    entry = payload["results"][pos][variable][str(period)]
                     score[yi, xi] = entry["cv_r2"]
                     # beating the null is not enough: a probe with negative held-out R²
                     # (all scores deeply negative, real merely least-bad) is still no probe
@@ -109,7 +109,7 @@ def plot_ridge_cv_probes(
                     rows.append(
                         {
                             "op": op,
-                            "layer": layer,
+                            "position": pos,
                             "variable": variable,
                             "period": period,
                             "cv_r2": entry["cv_r2"],
@@ -127,7 +127,7 @@ def plot_ridge_cv_probes(
                 shown, cmap=_SEQ_CMAP, vmin=0.0, vmax=1.0, aspect="auto", interpolation="nearest"
             )
             ax.set_facecolor(_GATED_GREY)
-            for yi in range(len(layers)):
+            for yi in range(len(positions)):
                 for xi in range(len(periods)):
                     if accepted[yi, xi]:
                         dark_cell = np.clip(score[yi, xi], 0.0, 1.0) > 0.55
@@ -143,7 +143,7 @@ def plot_ridge_cv_probes(
                     else:
                         ax.text(xi, yi, "·", ha="center", va="center", fontsize=7, color="#8e8e93")
             ax.set_xticks(range(len(periods)), [str(p) for p in periods], fontsize=8)
-            ax.set_yticks(range(len(layers)), [f"L{layer}" for layer in layers], fontsize=8)
+            ax.set_yticks(range(len(positions)), positions, fontsize=8)
             ax.tick_params(length=0)
             for spine in ax.spines.values():
                 spine.set_visible(False)
