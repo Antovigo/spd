@@ -230,3 +230,32 @@ run — the measured "fnorm effect" is strictly "fnorm + zero-init".
 Closing the gap: `zero_init_readout: bool = True` config field added
 (`false` restores fan-in init, bias 0); array 5546 runs
 `fnorm_randinit` × 3 sizes × 3 seeds after the tuning grid drains.
+
+## 2026-07-23 — tuning round 1 results (array 5492)
+
+Heuristics: dupes → impmin coeff up; shared subs → beta up. All on the fnorm base:
+
+| run | L0 | recon | b0.v (dupes, shared) | skips |
+|---|---|---|---|---|
+| v8 fnorm (base) | 3.43 | 2.1e-5 | 1.00 (0, 0) | 10/19 |
+| v8 fnorm_i2e-4 | **3.06** | 2.9e-5 | 0.88 (0, 0), 1 zero | 10/19 |
+| v12 fnorm (base) | 4.01 | 3.0e-5 | 1.17 (1, 1) | 13/28 |
+| v12 fnorm_i2e-4 | **3.88** | 3.8e-5 | 1.17 (1, 2) | 15/28 |
+| v12 fnorm_b1 | 3.88 | 3.5e-5 | 1.17 (1, 1) | 14/28 |
+| v12 fnorm_i2e-4_b1 | 3.34 | 8.2e-5 | 1.08 (1, 1) | 10/28 |
+| v16 fnorm (base) | 5.52 | 2.1e-4 | 2.25 (12, 11) | 17/31 |
+| v16 fnorm_i2e-4 | **4.47** | **8.6e-5** | 1.75 (10, 4) | 18/31 |
+| v16 fnorm_b1 | 5.18 | 1.5e-4 | 1.75 (9, 4) | 16/31 |
+| v16 fnorm_i2e-4_b1 | 4.10 | 1.9e-4 | 1.69 (8, 5) | 18/31 |
+
+- **coeff 2e-4 is the new operating point at every size** — L0 down, cleanliness
+  up, recon within band; at v16 it *improves* recon 2.5× while sparsifying (the
+  base run was spending capacity keeping strays half-reconstructed).
+- **beta 1.0 not adopted**: alone it's dominated by i2e-4; combined it trades
+  recon for L0 at v12 (8.2e-5) without cleaning b0 further at v16. Notably the
+  v16 shared-subs problem (11 → 4) was fixed by the coeff, not beta.
+- v8 i2e-4 shows the first over-pruning hint: one b0.v/o token column zeroed
+  (covered by another block; skips unchanged).
+
+Round 2 (array 5553, after randinit): coeff 4e-4 probes at v12/v16 (v16 b0.v
+still has 10 dupes) + 3-seed confirmation of fnorm_i2e-4 at all sizes.

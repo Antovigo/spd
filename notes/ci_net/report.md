@@ -165,6 +165,39 @@ Robust conclusions:
   5.32 / 6.83 — no rescue. Generic weight shrinkage is not a substitute for
   normalizing the head's input scale.
 
+## Hyperparameter tuning on the fixed network
+
+With the architecture fixed, the loss knobs re-tune. Cleanliness heuristics: several
+active subcomponents in one matrix for the same input (dupes) → impmin `coeff` too
+low; the same subcomponent active on several inputs (shared) → `beta` too low. The
+fnorm runs showed mild dupes at v12 (b0.v 1.17/input) and both pathologies at v16
+(b0.v 2.25/input, 12 dupes, 11 shared), so we swept `coeff` 1e-4 → 2e-4 and `beta`
+0.5 → 1.0:
+
+| run | CI-L0 | recon KL | b0.v /input (dupes, shared) |
+|---|---|---|---|
+| v8 fnorm | 3.43 | 2.1e-5 | 1.00 (0, 0) |
+| v8 fnorm, coeff 2e-4 | **3.06** | 2.9e-5 | 0.88 (0, 0) |
+| v12 fnorm | 4.01 | 3.0e-5 | 1.17 (1, 1) |
+| v12 fnorm, coeff 2e-4 | **3.88** | 3.8e-5 | 1.17 (1, 2) |
+| v12 fnorm, coeff 2e-4 + beta 1 | 3.34 | 8.2e-5 | 1.08 (1, 1) |
+| v16 fnorm | 5.52 | 2.1e-4 | 2.25 (12, 11) |
+| v16 fnorm, coeff 2e-4 | **4.47** | **8.6e-5** | 1.75 (10, 4) |
+| v16 fnorm, coeff 2e-4 + beta 1 | 4.10 | 1.9e-4 | 1.69 (8, 5) |
+
+- **coeff 2e-4 is the new operating point at every size**: sparser, cleaner, and at
+  v16 it *improves* recon 2.5× — the under-pressured run was spending capacity
+  keeping strays half-reconstructed.
+- **beta 1.0 not adopted**: it trades recon for L0 without cleaning block 0 further;
+  the v16 shared-subs pathology (11 → 4) was fixed by the coeff alone.
+- At v8, coeff 2e-4 shows the first over-pruning hint (one b0 token column zeroed,
+  coverage picked up by another block) — the coeff ceiling is near.
+
+In flight: coeff 4e-4 probes at v12/v16, a 3-seed confirmation of fnorm + coeff
+2e-4 at all sizes, and the readout-init attribution (fnorm × old random init ×
+3 seeds × 3 sizes — every fnorm number above implicitly includes the zero-init,
+whose solo effect was null but whose interaction with the norm is untested).
+
 ## Recommendation
 
 Set `final_rms_norm: true` in `simple_transformer_ci_cfg` for all
@@ -172,4 +205,6 @@ Set `final_rms_norm: true` in `simple_transformer_ci_cfg` for all
 and available, but adds nothing on top of the norm and must never be used without
 it). Both fields default to the old behavior, so saved configs of existing txci
 runs reload and evaluate unchanged. The readout zero-init (bias 0.5) is
-unconditional — it only affects newly initialized CI networks.
+config-gated as `zero_init_readout` (default true) — it only affects newly
+initialized CI networks. On this testbed, pair the fixed network with impmin
+coeff 2e-4 (beta stays 0.5).
