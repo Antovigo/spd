@@ -183,10 +183,11 @@ block-0 count, 0 → 4).
 ## Completeness training: the two-CI resurrection protocol
 
 First protocol to reach **0/19 skipped with a structured map** (v8d32,
-`copy_v8d32_complete_01`). Starting from the finished joint decomposition,
-duplicate the CI net into a *normal* and a *complete* copy, then fine-tune
-(components + both CI nets) with two per-step configurations on one random block
-`b`, summed into one update:
+`copy_v8d32_complete_{04,05,06}`). Starting from the finished joint decomposition,
+duplicate the CI net into a *normal* and a *complete* copy (the duplicate shares
+the live components — its input features are `V^T x` and must track `V` as B
+reallocates weight), then fine-tune (components + both CI nets) with two per-step
+configurations on one random block `b`, summed into one update:
 
 - **A** — block `b` masked by the **normal** CI, other blocks left as the original
   matrices. The per-block regime: intact partners make every copy in `b`
@@ -200,9 +201,9 @@ duplicate the CI net into a *normal* and a *complete* copy, then fine-tune
 
 Same recipe losses per configuration (stochastic + layerwise + PPGD, independent
 PPGD sources per configuration; SmoothL0 on the selected block's masking net
-only), fresh γ anneal 1 → **0.1** over the last 25%, 10k steps. The all-normal
-joint masking is never trained — normal deliberately stops being a sufficient
-joint decomposition and becomes a marginal-importance map.
+only), fresh γ anneal over the last 25%, 10k steps. The all-normal joint masking
+is never trained — normal deliberately stops being a sufficient joint
+decomposition and becomes a marginal-importance map.
 Code: `param_decomp_lab/experiments/toy_model_redundancy/complete.py` (writes
 sibling `normal/` + `complete/` run dirs scoreable by `plot_ci`, plus a
 per-500-step CI filmstrip for both nets).
@@ -210,37 +211,40 @@ per-500-step CI filmstrip for both nets).
 | CI net | converges to | skipped / truth |
 |---|---|---|
 | normal | marginal map (routing mostly pruned too) | 13 / 19 |
-| complete | **block-alone map, cell for cell** | **0 / 19** |
+| complete | **per-block standalone map** | **0 / 19** |
 
-![complete net](report_figures/copy_v8d32_complete_01_complete.png)
+Robust across the anneal target and the IM coeff:
 
-The complete map is not merely "everything on": block 0 shows the full
-8-token v/o diagonals, blocks 1–2 regrow **dedicated backup diagonals for the
-redundant tokens 0–3**, block 2 keeps t5–7 and — matching the ground-truth
-alone-map exactly — **omits t4**, the one free token block 2 alone cannot copy.
-Per-block k-routing subcomponents reappear in blocks 1–2 (needed standalone,
-invisible marginally). Contrast with the transformer-CI zero-skip run, which
-bought coverage by being dense everywhere.
+| run | γ final | coeff | complete skipped | complete alive | b0 v / o per input (dupes) | normal skipped |
+|---|---|---|---|---|---|---|
+| 04 | 0.1 | 1e-4 | **0 / 19** | 61 | 1.00 (0) / 1.00 (0) | 13 / 19 |
+| 05 | 0.01 | 1e-4 | **0 / 19** | 59 | 1.00 (0) / 1.00 (0) | 13 / 19 |
+| 06 | 0.01 | 2e-4 | **0 / 19** | 59 | 1.00 (0) / 1.00 (0) | 13 / 19 |
 
-**Robustness** — the result replicates across the anneal target and the IM coeff
-(`copy_v8d32_complete_{01,02-gamma0.01,03-imp2e-4}`):
+The cleanest variant (06, shown) is near-ideal:
 
-| run | γ final | coeff | complete skipped | complete alive | normal skipped |
-|---|---|---|---|---|---|
-| 01 | 0.1 | 1e-4 | **0 / 19** | 69 | 13 / 19 |
-| 02 | 0.01 | 1e-4 | **0 / 19** | 69 | 12 / 19 |
-| 03 | 0.01 | 2e-4 | **0 / 19** | 70 | 9 / 19 |
+![complete net, run 06](report_figures/copy_v8d32_complete_06_complete.png)
 
-Caveats: at threshold 0.1 the complete net carries activity beyond the ideal
-diagonals (~69 alive subcomponents vs ~26 ideal; b0.v mean 2.4–3.4 active/input)
-and the B-configuration PPGD adversary retains 1.2–1.6e-2 KL. This excess is
-**invariant to both the sharper anneal and the higher coeff**, so it is
-structural, not soft-mask fuzz: part is the union of the in-context and
-standalone roles for the free half, part is shared "column" subcomponents (e.g.
-a b1.v sub active across several tokens at both positions) next to the per-token
-diagonals. The normal net's marginal map is degenerate across blocks and
-variant-dependent (13 / 12 / 9 skipped; b0 and b1 both keep t4–7 in-context
-roles; b2 down to t7; q/k routing pruned entirely in runs 02–03).
+The complete map is not merely "everything on": every block carries exact
+one-subcomponent-per-token v/o diagonals — blocks 1–2 regrow **dedicated backup
+diagonals for the redundant tokens 0–3** — and block 2, matching the ground-truth
+alone-map exactly, **omits t4**, the one free token block 2 alone cannot copy.
+Only b1.v carries extras (3 duplicated tokens in run 06; 4–5 in 04–05). Per-block
+q/k-routing subcomponents reappear in blocks 1–2 (needed standalone, invisible
+marginally). Contrast with the transformer-CI zero-skip run, which bought
+coverage by being dense everywhere. The normal net is uniform across variants
+(13/19 skipped, 18–19 alive: b0 t0+t4–6, b1 t4–7, b2 t7, no routing — one of
+several degenerate marginal solutions). Remaining caveat: the B-configuration
+PPGD adversary retains ~1.4e-2 KL in all variants (the all-complete joint
+configuration is never explicitly trained).
+
+*Correction note*: an earlier version of this section reported denser complete
+maps (~69 alive, "structural duplication") from runs 01–03. Those numbers were an
+artifact: `complete.py` originally deep-copied the CI wrapper *including* its
+(non-state-dict) components reference, so the complete net trained on a frozen
+`V` snapshot while the checkpoints re-paired its MLP with the trained `V` — a
+combination that never existed. Runs 04–06 share the live components and are the
+canonical results.
 
 ## Larger sizes and CI-function architecture
 
