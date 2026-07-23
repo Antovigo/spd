@@ -1,13 +1,12 @@
 """Applet: every residual-stream position projected onto the final (L20) probe planes.
 
 Fixes the probe to `--probe-layer`'s full-range-refit plane for each (variable, period)
-and projects the stream at *every* collected position onto it, so scrubbing through
-positions shows how the final state is constructed. The applet (vanilla-JS canvas,
-`file://`, no CDN) offers: op / variable / period selectors, a position slider with
-play, color by `value mod T` (cyclic) or by how much each point moves under a chosen
-block — in-plane (computed client-side from consecutive projections) or full-residual
-norm (`resid_delta`, precomputed here) — plus displacement arrows into the shown
-position and hover tooltips.
+and projects the stream at *every* collected position onto it. The applet (vanilla-JS
+canvas, `file://`, no CDN) shows all positions **side by side** so the construction of
+the final state reads left to right; color by `value mod T` or by each point's Δ from
+the previous position — in-plane (computed client-side from consecutive projections) or
+full-residual norm (`resid_delta`, precomputed here) — on one shared scale across
+panels, all on viridis; plus displacement arrows and hover tooltips.
 
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_final_plane_scatter \
@@ -26,7 +25,6 @@ from typing import Any
 
 import fire
 import numpy as np
-from matplotlib import colormaps
 
 from param_decomp.log import logger
 from param_decomp_lab.infra.settings import DEFAULT_PARTITION_NAME
@@ -36,11 +34,6 @@ from param_decomp_lab.scripts.validation.probes.plot_probe_projections import _p
 
 _MODULE = "param_decomp_lab.scripts.validation.probes.build_final_plane_scatter"
 _TEMPLATE = Path(__file__).parent / "final_plane_scatter_app.html"
-
-
-def _cmap_table(name: str, n: int = 64) -> list[list[int]]:
-    cmap = colormaps[name]
-    return [[int(round(255 * c)) for c in cmap(i / (n - 1))[:3]] for i in range(n)]
 
 
 def build_final_plane_scatter(
@@ -169,8 +162,6 @@ def build_final_plane_scatter(
             "probe_layer": probe_layer,
             "n_show": n_show,
             "alpha": alpha,
-            "cmap_cyclic": _cmap_table("twilight"),
-            "cmap_seq": _cmap_table("Blues"),
         },
         "ops": ops_data,
     }
