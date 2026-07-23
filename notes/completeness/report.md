@@ -81,6 +81,49 @@ half's structure is emergent, and shows two phenomena:
 Ground truth for scoring: **19 (block, token) mechanisms** (cells with block-alone
 accuracy > 0.9): 12 redundant + 7 free.
 
+### Block-ablation statistics, larger sizes
+
+Same format (redundant half = certificate; free half measured, for reference):
+
+**v12d64** (redundant t0–5, free t6–11):
+
+| blocks enabled | redundant half | free half |
+|---|---|---|
+| none | 0.170 | 0.000 |
+| block 0 alone | 1.000 | 0.497 (t6,7,11) |
+| block 1 alone | 1.000 | 0.167 (t7) |
+| block 2 alone | 1.000 | **1.000 — fully sufficient alone** |
+| blocks 1+2 (drop 0) | 1.000 | **0.162 (t6–10 fail)** |
+| blocks 0+2 (drop 1) | 1.000 | 1.000 |
+| blocks 0+1 (drop 2) | 1.000 | 1.000 |
+| all | 1.000 | 1.000 |
+
+The v8 interference pattern, starker: block 2 alone does the whole free half, yet
+removing block 0 breaks tokens 6–10 — block 1's uncompensated output corrupts what
+block 2 provides.
+
+**v16d32** (redundant t0–7, free t8–15):
+
+| blocks enabled | redundant half | free half |
+|---|---|---|
+| none | 0.126 | 0.000 |
+| block 0 alone | 1.000 | 0.129 (t12) |
+| block 1 alone | 1.000 | 0.000 |
+| block 2 alone | 1.000 | 0.749 (6 of 8) |
+| blocks 1+2 (drop 0) | 1.000 | 0.000 |
+| blocks 0+2 (drop 1) | 1.000 | **0.494 (t8,10,14,15 fail)** |
+| blocks 0+1 (drop 2) | 1.000 | 0.877 (t10 fails) |
+| all | 1.000 | 1.000 |
+
+Here the free half is genuinely cooperative: no single block and no pair reaches
+1.0 — only the full model. Block 1 is the extreme case: alone it contributes
+*nothing* on the free half, yet dropping it costs half the free tokens — a pure
+in-context contributor, invisible to the singleton map. The cross-size trend: as
+vocab grows relative to capacity, the free half shifts from incidental single-block
+redundancy (v12) toward distributed cooperation with interference (v16), and the
+"block-alone > 0.9" ground truth increasingly *undercounts* what is causally
+relevant in context.
+
 ## Decomposition recipe
 
 **PPGD + annealed, normalized SmoothL0**:
