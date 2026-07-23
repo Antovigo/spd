@@ -114,3 +114,31 @@ Recommendation: `final_rms_norm: true` + `logit_softcap: 2.0` for all future
 `global_shared_transformer` runs. Old txci checkpoints must be evaluated with
 `final_rms_norm: false` (their saved configs omit the field, defaulting to the
 old behavior, so reloads are unaffected).
+
+## 2026-07-23 — larger sizes: {v12d64, v16d32} × {fnorm, cap2, fnorm_cap2}
+
+Array job 5456 (`txci_large_array.sbatch`, %3 throttle to respect the 6-GPU cap).
+
+### v12d64 (final eval, step 10000)
+
+| run | CI-L0 | recon KL |
+|---|---|---|
+| layerwise MLP (`joint_norm`) | 4.93 | 2.1e-5 |
+| global MLP (`joint_globalci`) | 5.68 | 2.9e-5 |
+| transformer baseline (`joint_txci`) | 7.13 | 2.1e-5 |
+| `txci_fnorm` | **4.01** | 3.0e-5 |
+| `txci_fnorm_cap2` | 4.27 | 4.4e-5 |
+| `txci_cap2` (cap only) | 9.19 @9500 | 3.7e-5, then **crashed** |
+
+- Both norm variants beat the layerwise reference again. fnorm alone edges out
+  fnorm+cap here (reverse of v8; within seed noise presumably).
+- **Cap-only is unstable.** The run trained to 10000 but died in the final eval:
+  `np.histogram` hit non-finite pre-sigmoid values. Mechanism: with every logit
+  saturating the tanh, CI-fn grad norms collapse to ~1e-8, but Adam's normalized
+  updates keep drifting the (unnormed) trunk at ~lr per step until activations
+  overflow — the cap alone removes both the gradient pressure *and* the implicit
+  constraint on trunk scale. SmoothL0 at the end: 46 (vs ~4 for the norm variants) —
+  the CI net froze mid-training and sparsity never happened. No final checkpoint
+  (crash preceded the save), so no plot_ci analysis; metrics.jsonl survives.
+- Conclusion so far: the final RMS norm is necessary; the cap is only safe on top
+  of it.
