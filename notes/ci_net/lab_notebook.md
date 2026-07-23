@@ -259,3 +259,8 @@ Heuristics: dupes → impmin coeff up; shared subs → beta up. All on the fnorm
 
 Round 2 (array 5553, after randinit): coeff 4e-4 probes at v12/v16 (v16 b0.v
 still has 10 dupes) + 3-seed confirmation of fnorm_i2e-4 at all sizes.
+
+Also probing (array 5555, after round 2): CI-net LR halved to 1e-3 (components
+stay 2e-3) on fnorm_i2e-4 at all sizes — LR was an untouched axis; the targeted
+recipe found CI-LR below components-LR gives cleaner components. All runs so far
+used 2e-3 for both.
