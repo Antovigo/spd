@@ -59,8 +59,39 @@ Three standard-transformer changes to `GlobalSharedTransformerCiFn`
 1. **Final RMS norm** before the output head — config `final_rms_norm: true`.
 2. **Readout zero-init with bias 0.5** (unconditional) — all logits start at 0.5,
    mid-window.
-3. **Tanh logit soft-cap** centered on the window — config `logit_softcap: 2.0`,
-   `0.5 + cap·tanh((x−0.5)/cap)` — logits can never leave gradient reach.
+3. **Tanh logit soft-cap** centered on the window — config `logit_softcap: 2.0`.
+
+### How the soft-cap works
+
+The output head produces a raw logit `x` per component; the CI is `hard_sigmoid(x)`
+(= `clamp(x, 0, 1)`). The soft-cap replaces `x` with
+
+```
+x' = 0.5 + cap · tanh((x − 0.5) / cap)
+```
+
+before the sigmoid (Gemma-2 uses the uncentered form on attention/final logits).
+Properties:
+
+- **Identity near the window.** `tanh(u) ≈ u` for small `u`, so for logits near 0.5
+  (the center of the sigmoid's [0, 1] linear region) `x' ≈ x` — calibrated
+  intermediate values pass through unchanged.
+- **Hard bound on saturation depth.** `tanh` is bounded in (−1, 1), so
+  `x' ∈ (0.5 − cap, 0.5 + cap)` — with `cap = 2`, (−1.5, 2.5) — no matter how large
+  the raw logit gets. A maximally confident component sits at most 1.5 units from the
+  linear window instead of 100+.
+- **Gradient never vanishes upstream.** `dx'/dx = tanh'((x−0.5)/cap) > 0`
+  everywhere, so the (already alpha-leaky) sparsity gradient always propagates back
+  through the head with a sensible magnitude; combined with the bounded distance,
+  a stray at CI = 1 is always a few gradient steps from re-entering the window,
+  rather than frozen.
+
+The choice `cap = 2` is loose: CI = 1 needs `x' ≥ 1`, i.e. `tanh ≥ 0.25` (raw logit
+≈ 1.0), so confident components are cheap to represent, while the bound stays the
+same order as the window itself. The cap alone (without the final RMS norm) still
+bounds saturation depth, but lets the pre-cap logits — and the trunk driving them —
+grow unboundedly confident; the RMS norm addresses that upstream. The two compose:
+norm anchors the input scale of the head, cap bounds its output.
 
 ## Results
 
