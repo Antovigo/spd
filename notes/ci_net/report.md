@@ -135,16 +135,64 @@ fnorm runs showed mild dupes at v12 (b0.v 1.17/input), so we swept `coeff`
 - At v8, coeff 2e-4 shows the first over-pruning hint (one b0 token column zeroed,
   coverage picked up by another block) — the coeff ceiling is near.
 
-In flight: a coeff 4e-4 probe at v12, a CI-net-LR/2 probe at each size, and the
-readout-init attribution (fnorm × old random init × 3 seeds — every fnorm number
-above implicitly includes the zero-init, whose solo effect was null but whose
-interaction with the norm is untested).
+Follow-ups that closed the sweep:
+
+- **coeff 4e-4 is over the ceiling at v12**: L0 3.25 but recon 2.3× worse
+  (8.7e-5) and block 0 develops zeros (over-pruned). 2e-4 stands.
+- **CI-net LR halved to 1e-3** (components stay 2e-3): a clear win at v8d32 —
+  L0 3.00 at recon 1.65e-5, better than `i2e-4` on *both* axes, and it repairs
+  the over-pruning (block-0 v/o back to perfect 1.00/input with full coverage).
+  Neutral-to-negative elsewhere (v8d64: 3.31 vs 3.12; v12: 3.89 @ 5.6e-5,
+  dirtier b0) — a per-size knob, not part of the base formula.
+- **Readout-init attribution** (fnorm × old random init, 3 seeds): the zero-init
+  is **load-bearing given the norm**. At v8d32, fnorm with random init collapses
+  to 4.79 [4.12–6.07] — nearly the whole advantage gone (baseline 4.90); at
+  v12d64, 4.42 vs 4.22. Init alone did nothing; norm alone loses most of its
+  value: the two are synergistic. Norm anchors the logit scale; zero-init starts
+  every logit inside the sigmoid window so components begin life prunable.
+
+## v8d64
+
+New testbed replacing the retired v16d32: vocab 8, d_embed 64, 4 redundant tokens
+(`copy_training_v8d64_partial`) — the wide-embedding version, where token
+directions are nearly orthogonal. The formula transfers with no retuning; a small
+coeff bracket confirms 2e-4 and shows the response is smooth (no cliff):
+
+| run | CI-L0 | recon KL | skips |
+|---|---|---|---|
+| `txci_fnorm_i1e-4` | 3.74 | **6.1e-6** | 9/21 |
+| `txci_fnorm_i1.5e-4` | 3.25 | 8.7e-6 | 10/21 |
+| `txci_fnorm_i2e-4` | **3.12** | 8.5e-6 | 9/21 |
+| `txci_fnorm_i2e-4_cilr1e-3` | 3.31 | 9.5e-6 | 9/21 |
+
+`txci_fnorm_i2e-4` is textbook: **zero duplicates in the entire model**, perfect
+block-0 diagonals, recon 3× better than anything achieved at v8d32.
+
+## Final picks (the formula that works)
+
+Architecture: `global_shared_transformer` + `final_rms_norm: true` +
+`zero_init_readout: true` (both required — synergistic). Losses: SmoothL0 impmin
+coeff 2e-4, beta 0.5, γ 1 → 0.01 annealed over the last 25%; recipe losses
+unchanged (stochastic + layerwise + PPGD). LRs 2e-3/2e-3, except v8d32 where
+halving the CI-net LR to 1e-3 improves everything.
+
+| size | run | CI-L0 | recon KL | block-0 |
+|---|---|---|---|---|
+| v8d32 | `copy_v8d32_partial_joint_txci_fnorm_i2e-4_cilr1e-3` | 3.00 | 1.7e-5 | perfect |
+| v8d64 | `copy_v8d64_partial_joint_txci_fnorm_i2e-4` | 3.12 | 8.5e-6 | perfect, 0 dupes anywhere |
+| v12d64 | `copy_v12d64_partial_joint_txci_fnorm_i2e-4` | 3.88 | 3.8e-5 | 1.17/input (1 dupe) |
+
+![final v8d32](report_figures/active_v8d32_final.png)
+
+![final v8d64](report_figures/active_v8d64_final.png)
+
+![final v12d64](report_figures/active_v12d64_final.png)
 
 ## Recommendation
 
 Set `final_rms_norm: true` in `simple_transformer_ci_cfg` for all
-`global_shared_transformer` runs. The field defaults to the old behavior, so saved
-configs of existing txci runs reload and evaluate unchanged. The readout zero-init
-(bias 0.5) is config-gated as `zero_init_readout` (default true) — it only affects
-newly initialized CI networks. On this testbed, pair the fixed network with impmin
-coeff 2e-4 (beta stays 0.5).
+`global_shared_transformer` runs and keep `zero_init_readout: true` (the default)
+— both are required; each loses most of its value without the other. The
+`final_rms_norm` field defaults to the old behavior, so saved configs of existing
+txci runs reload and evaluate unchanged. On this testbed, pair the fixed network
+with impmin coeff 2e-4 (beta stays 0.5).

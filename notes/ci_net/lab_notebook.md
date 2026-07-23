@@ -321,3 +321,15 @@ begin life prunable. Neither suffices alone at v8. Recipe = both.
   full clean v/o diagonals in the first block, single q/k routing columns, zero
   strays); deleted the rest of the imp sweep, `copy_v8d32_ppgdla_10k`, and the
   non-partial perblock_b{0,1,2} runs.
+
+## 2026-07-24 — sweep closed: v8d64 + round-2 + CI-LR results
+
+- v8d64 (new target, trained job 5558): formula transfers untouched.
+  i2e-4 → L0 3.12 @ 8.5e-6, zero dupes anywhere, textbook. Coeff bracket
+  {1e-4: 3.74 @ 6.1e-6, 1.5e-4: 3.25, 2e-4: 3.12} — smooth, no cliff.
+- v12 i4e-4 over the ceiling (3.25 @ 8.7e-5, b0 zeros) — 2e-4 stands.
+- CI-LR/2: v8d32 win (3.00 @ 1.65e-5, b0 perfect incl. coverage — repairs
+  i2e-4's over-pruning); v8d64 3.31 (neutral-negative); v12 3.89 @ 5.6e-5
+  dirtier (negative). Per-size knob only.
+- Final picks recorded in report.md; next: completeness treatment on the three
+  picks (impmin 2e-4 to match, otherwise complete.py defaults).
