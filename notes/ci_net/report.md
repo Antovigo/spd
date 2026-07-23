@@ -80,11 +80,17 @@ Properties:
   `x' ∈ (0.5 − cap, 0.5 + cap)` — with `cap = 2`, (−1.5, 2.5) — no matter how large
   the raw logit gets. A maximally confident component sits at most 1.5 units from the
   linear window instead of 100+.
-- **Gradient never vanishes upstream.** `dx'/dx = tanh'((x−0.5)/cap) > 0`
-  everywhere, so the (already alpha-leaky) sparsity gradient always propagates back
-  through the head with a sensible magnitude; combined with the bounded distance,
-  a stray at CI = 1 is always a few gradient steps from re-entering the window,
-  rather than frozen.
+- **Bounded hysteresis, not bigger gradients.** The cap does *not* increase the
+  gradient on a saturated component — above the window the chain is still the
+  sigmoid's 0.01 leak (times `tanh' < 1`). What it bounds is the *integrated
+  distance* that small gradient must cover before the CI value changes at all:
+  ≤ 1.5 units instead of 30–150. Uncapped, a stray at logit +30 is frozen (the
+  gamma anneal ends long before the leak drags it back 29 units); capped, every
+  stray is a few steps from re-entering the window. The same bound on the negative
+  side helps dead components resurrect.
+- **No incentive to drift.** Uncapped, the trunk can keep burying logits deeper
+  (5 → 50 → 150) — confidence is loss-free and self-reinforcing. Capped, logits 5
+  and 50 map to nearly the same `x'`, so growing confident weights buys nothing.
 
 The choice `cap = 2` is loose: CI = 1 needs `x' ≥ 1`, i.e. `tanh ≥ 0.25` (raw logit
 ≈ 1.0), so confident components are cheap to represent, while the bound stays the
