@@ -15,7 +15,7 @@ for N > 8 — N must then be a multiple of 8). For local DDP, invoke directly vi
 import importlib
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -357,6 +357,7 @@ def _resume_main(
 
     effective_cfg = parent_cfg.model_copy(
         update={
+            "pd": resume_cfg.pd if resume_cfg.pd is not None else parent_cfg.pd,
             "runtime": parent_cfg.runtime.model_copy(
                 update={
                     "device": device,
@@ -372,6 +373,12 @@ def _resume_main(
     # the dict (model_dump output) in place is fine even on a frozen dataclass;
     # we're changing a value the dataclass references, not rebinding the field.
     snapshot.runtime_config["device"] = device
+    if resume_cfg.pd is not None:
+        assert resume_cfg.pd.steps > resolved_step, (
+            f"resume pd.steps ({resume_cfg.pd.steps}) must exceed the resumed step "
+            f"({resolved_step})"
+        )
+        snapshot = replace(snapshot, pd_config=resume_cfg.pd.model_dump())
 
     target_model = build_target(effective_cfg.target)
     train_loader = build_lm_loader(

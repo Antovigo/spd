@@ -158,6 +158,13 @@ one run folder and one wandb run. `init_pd_run(..., resume=True)` reopens the wa
 to branch a separate run instead. The `~/pd_scratch/autoresume.py` walltime harness
 relies on this — it resubmits each leg with no run_id rather than minting `-rN` runs.
 
+A fine-tune leg that changes the algorithm mid-trajectory sets `pd:` in the resume
+YAML (`ResumeConfig.pd`) — a full replacement `PDConfig` (copy the parent's block and
+edit) that overrides the snapshot's saved one. `steps` must exceed the resumed step;
+structural fields must match the parent (optimizer/PPGD state comes from the
+snapshot). Typical use: extend `steps` and switch on a γ-anneal for a fine-tune,
+branched with `--run_id`.
+
 ### `--group` and `--tags`
 
 Every `pd-*` run command accepts `--group <id>` and `--tags a,b,c` (no-ops when

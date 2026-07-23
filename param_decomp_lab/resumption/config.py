@@ -1,10 +1,10 @@
 """YAML schema for resuming a prior PD run.
 
 A resume YAML is distinct from the run YAML: it doesn't define a run, it points
-at one. The schema is deliberately small — `from_run` + `step`. The standard
-resume case is "continue with the original config"; mid-trajectory edits to the
-saved config (e.g. extending `steps`) are out-of-band — mutate the snapshot's
-`pd_config` dict in Python and pass it to `Trainer.from_snapshot` directly.
+at one. The standard resume case is "continue with the original config"
+(`from_run` + `step`); a fine-tune leg that changes the algorithm mid-trajectory
+(extending `steps`, switching on a schedule) additionally sets `pd:` — a full
+replacement `PDConfig` that overrides the snapshot's saved one.
 """
 
 from pathlib import Path
@@ -13,6 +13,7 @@ from typing import Literal
 import torch
 
 from param_decomp.base_config import BaseConfig
+from param_decomp.configs import PDConfig
 from param_decomp.training_state import TrainingState
 
 
@@ -26,6 +27,12 @@ class ResumeConfig(BaseConfig):
     step: int | Literal["latest"] = "latest"
     """Which checkpoint to load. `"latest"` picks the highest-numbered
     `training_<step>.pth` under `from_run`."""
+
+    pd: PDConfig | None = None
+    """Full replacement for the snapshot's `pd_config` (fine-tune legs). Copy the
+    parent's `pd:` block and edit; `steps` must exceed the resumed step. Optimizer
+    and PPGD state still come from the snapshot, so structural fields
+    (`decomposition_targets`, `ci_config`, optimizer types) must match the parent."""
 
 
 def resolve_step(run_dir: Path, step: int | Literal["latest"]) -> int:
