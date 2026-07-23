@@ -225,5 +225,24 @@ Readings — a clean negative result:
 - gate_proj holds zero pure components in every arm except initwithinspan's single
   T5; pure T2/T10/T20 exist nowhere in the regime.
 - The regime's hope — recover the missing components later (γ-anneal, Objective 6) —
-  now rests entirely on the **plain impmin1e-3 baseline**, which is the Objective-6
-  fine-tune candidate from this side. β arms at 1e-3 pending.
+  rests on the β arms below.
+
+β at 1e-3 (added after the arms above; same baseline, SmoothL0 β varied):
+
+| run (β) | PGD | n_active | n_pure_periods (/15) | mixed |
+|---|---|---|---|---|
+| beta0-1e-3 (0) | **0.01396** | 48 | **5** | 0.79 |
+| beta0.5-1e-3 (0.5) | 0.02320 | 28 | **5** | **0.61** |
+| impmin1e-3 (0.75) | 0.02724 | 25 | 3 | 0.60 |
+
+**β is the only knob that helps at 1e-3** — both arms reach 5/15 (baseline 3/15), and
+β = 0 nearly halves PGD to 0.0140 (gate-passing) at 48 active. But this is again the
+sparsity dial at work: at matched footprint the coeff route is purer (impmin3e-4: 49
+active, 9/15), so lowering the dose via β is strictly worse than lowering it via the
+coeff. Within the regime's own terms, `beta0.5-1e-3` is the better citizen (28 active,
+mixed 0.61, 5/15).
+
+**Objective-6 fine-tune candidates**: by highest n_pure_periods per regime —
+`addsub-L18-08-beta0` (14/15) on the 3e-5 side, though `hid0.1` (12/15, 169 active) is
+the recipe-faithful alternative if 488 components defeat the purpose; `beta0.5-1e-3`
+(5/15, tie broken by mixed_frac) on the 1e-3 side.
