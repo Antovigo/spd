@@ -226,11 +226,15 @@ function toPx(p, f) {
 
 let lastPx = [];   // [rowIdx][li] -> point pixel positions, for hover
 let lastQ95 = 1;
+let snapshots = [];  // [rowIdx][li] -> clean ImageData, restored under the hover marker
+let hoverIdx = null;
 function drawAll() {
   const rows = rowDefs();
   const q95 = state.colorby === "value" ? 1 : sharedQ95();
   lastQ95 = q95;
   lastPx = rows.map(() => new Array(LAYERS.length));
+  snapshots = rows.map(() => new Array(LAYERS.length));
+  hoverIdx = null;
   const n = nPoints();
   rows.forEach((row, r) => {
     rowLabelDivs[r].textContent = row.label;
@@ -268,9 +272,27 @@ function drawAll() {
       ctx.fillStyle = s.accepted ? "#555" : "#b00020";
       ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
       lastPx[r][li] = px;
+      snapshots[r][li] = ctx.getImageData(0, 0, cv.width, cv.height);
     }
   });
   drawLegend(q95);
+}
+
+function setHover(idx) {                      // mark the homologous point on every panel
+  if (idx === hoverIdx) return;
+  hoverIdx = idx;
+  for (let r = 0; r < canvases.length; r++)
+    for (let li = 0; li < LAYERS.length; li++) {
+      const cv = canvases[r][li], ctx = cv.getContext("2d");
+      ctx.putImageData(snapshots[r][li], 0, 0);
+      if (idx === null) continue;
+      const p = lastPx[r][li][idx];
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
+      ctx.lineWidth = 3; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+      ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
+      ctx.lineWidth = 1.5; ctx.strokeStyle = "#ff3b30"; ctx.stroke();
+    }
 }
 
 function drawLegend(q95) {
@@ -289,7 +311,7 @@ function drawLegend(q95) {
 grid.addEventListener("mousemove", e => {
   const t = e.target;
   const tip = $("tooltip");
-  if (t.tagName !== "CANVAS") { tip.style.display = "none"; return; }
+  if (t.tagName !== "CANVAS") { tip.style.display = "none"; setHover(null); return; }
   const r = +t.dataset.row, li = +t.dataset.li;
   const rect = t.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
@@ -300,7 +322,8 @@ grid.addEventListener("mousemove", e => {
     const d = (px[i][0] - mx) ** 2 + (px[i][1] - my) ** 2;
     if (d < bd) { bd = d; best = i; }
   }
-  if (best < 0) { tip.style.display = "none"; return; }
+  if (best < 0) { tip.style.display = "none"; setHover(null); return; }
+  setHover(best);
   const row = rowDefs()[r];
   const ab = D.ops[state.op].ab, v = D.ops[state.op].values[row.variable][best];
   const T = +state.period;
@@ -312,7 +335,7 @@ grid.addEventListener("mousemove", e => {
   tip.style.left = (e.clientX + 14) + "px";
   tip.style.top = (e.clientY + 8) + "px";
 });
-grid.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; });
+grid.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; setHover(null); });
 
 for (const id of ["op", "period", "colorby"])
   $(id).addEventListener("change", () => { state[id] = $(id).value; drawAll(); });
