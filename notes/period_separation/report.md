@@ -246,3 +246,40 @@ mixed 0.61, 5/15).
 `addsub-L18-08-beta0` (14/15) on the 3e-5 side, though `hid0.1` (12/15, 169 active) is
 the recipe-faithful alternative if 488 components defeat the purpose; `beta0.5-1e-3`
 (5/15, tie broken by mixed_frac) on the 1e-3 side.
+
+## Objective 6 — γ-anneal fine-tune: binarization prunes but does not separate
+
+Each candidate was fine-tuned for 2000 extra steps (4000 → 6000) with SmoothL0 γ
+annealed linearly 1 → 0.01 over the extension, resuming from `training_4000.pth` as a
+branched run (`-anneal` suffix; enabled by the new `ResumeConfig.pd` override,
+`91cc29f9c`). Everything else unchanged. Before → after:
+
+| run | n_active | PGD | n_pure_periods (/15) | mixed |
+|---|---|---|---|---|
+| beta0-anneal | 488 → 392 | 0.00415 → 0.00443 | 14 → 12 | 0.57 → 0.69 |
+| hid0.1-anneal | 169 → 130 | 0.00753 → 0.00775 | 12 → 8 | 0.65 → 0.75 |
+| beta0.5-1e-3-anneal | 28 → 25 | 0.02320 → 0.02306 | 5 → 4 | 0.61 → 0.60 |
+
+The anneal does what it mechanically promises — components are pruned (−20% to −25%
+active) at essentially unchanged recon, i.e. CIs binarized cleanly — but **purity
+degrades on every arm**. Neither hope survives:
+
+- 3e-5 hope (mixed components get pulled apart): the opposite — mixed_frac *rises*
+  (0.57 → 0.69, 0.65 → 0.75) and pure cells are lost (gate_proj loses T10/T20 in
+  beta0-anneal; hid0.1-anneal drops from 12 to 8). Binarization consolidates
+  multi-period components and prunes marginal pure ones.
+- 1e-3 hope (missing components recovered): nothing comes back — n_active *falls*
+  (28 → 25) and a pure cell is lost.
+
+## Series conclusions (Objectives 1–6)
+
+- Best 4000-step recipe on the roadmap's own criteria: **impmin 3e-5 (SmoothL0, γ=1),
+  kaiming init, fused hidden-acts coeff 0.1, β 0.5–0.75** — 11–13/15 pure cells, full
+  coverage, PGD ≪ gate.
+- Every sparsity-adjacent knob (impmin coeff, β, and the anneal's effective dose) moves
+  runs along one trade-off curve — footprint vs purity — rather than fixing mixing;
+  the hidden-acts loss is the only knob that bought purity at constant footprint, and
+  only in the capacity-rich regime.
+- Period mixing at 4000 steps is not undone by later binarization (Objective 6); if
+  separation is the goal, it has to be won during the initial optimization, e.g. via
+  capacity (β = 0 / gentler impmin) plus the hidden-acts constraint.
