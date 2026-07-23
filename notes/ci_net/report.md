@@ -146,7 +146,7 @@ the reference band for the fnorm variants at every size:
 | transformer baseline | 4.90 [4.62–5.25] | 9.52 [7.10–14.34] | 17.44 [13.48–19.66] |
 | + final RMS norm | **3.29 [3.19–3.43]** | **4.22 [4.01–4.39]** | **5.52 [5.37–5.66]** |
 | + soft-cap only | 7.08, 1 crash | 9.33, 2 crashes | 13.76 [13.15–14.79] |
-| + norm + soft-cap | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] | 5.37/6.04 (s2 pending) |
+| + norm + soft-cap | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] | 5.73 [5.37–6.04] |
 
 Robust conclusions:
 

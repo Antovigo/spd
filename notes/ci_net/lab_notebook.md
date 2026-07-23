@@ -185,7 +185,7 @@ Array job 5456 (`txci_large_array.sbatch`, %3 throttle to respect the 6-GPU cap)
 | txci baseline | 4.90 [4.62–5.25] | 9.52 [7.10–14.34] | 17.44 [13.48–19.66] |
 | txci_fnorm | **3.29 [3.19–3.43]** | **4.22 [4.01–4.39]** | **5.52 [5.37–5.66]** |
 | txci_cap2 | 7.08 [5.55–8.56], 1 crash | 9.33, 2 crashes | 13.76 [13.15–14.79] |
-| txci_fnorm_cap2 | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] | 5.37 / 6.04 (s2 pending) |
+| txci_fnorm_cap2 | 3.66 [3.24–3.87] | 4.41 [4.27–4.66] | 5.73 [5.37–6.04] |
 
 - **fnorm is the robust winner**: tightest ranges, beats the layerwise reference
   and the baseline at every size on every seed. Recon: v8 2.2e-5 [1.6–2.8],
