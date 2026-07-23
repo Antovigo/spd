@@ -30,7 +30,7 @@ model:
   flash_attention: false
 
 data:
-  dir: /mnt/data/artifacts/mechanisms/param-decomp/datasets/pile_neox_tok_512
+  dir: /path/to/datasets/pile_neox_tok_512
   tokenizer_name: EleutherAI/gpt-neox-20b
 
 wandb:

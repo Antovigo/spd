@@ -2054,7 +2054,7 @@ requires-dist = [
     { name = "pydantic", specifier = "<2.12" },
     { name = "pyyaml", specifier = "==6.0.2" },
     { name = "safetensors", specifier = "==0.7.0" },
-    { name = "typing-extensions", specifier = "==4.15.0" },
+    { name = "typing-extensions" },
     { name = "wandb", specifier = "==0.21.0" },
 ]
 provides-extras = ["cuda", "cuda13"]

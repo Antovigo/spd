@@ -12,6 +12,7 @@ dependencies = [
     # leaf deps directly (was the dissolved `param-decomp-config` package).
     "pydantic<2.12", # 2.12 upgrade blocked on pyright/wandb issues
     "annotated-types",
+    "typing-extensions", # TypeVar(default=...) on 3.12 (PEP 696 is stdlib only from 3.13)
     "jax==0.10.1",
     "equinox==0.13.8",
     "optax==0.2.8",
@@ -26,9 +27,6 @@ dependencies = [
     "wandb==0.21.0",
     "matplotlib==3.10.8",
     "pillow==12.0.0",
-    # Explicit (not just transitive): param_decomp.components imports TypeVar from
-    # typing_extensions for PEP 696 defaults on Python 3.12.
-    "typing-extensions==4.15.0",
 ]
 
 [project.optional-dependencies]

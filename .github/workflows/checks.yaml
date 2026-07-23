@@ -1,38 +1,70 @@
 name: Checks
-permissions:
-  contents: read
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - "**"
-  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # Guard the requires-python floor: downstream consumers deploy on Python 3.12, so
-  # the package must stay importable there. The full suite
-  # runs on 3.13.
-  python-312-compat:
-    name: python 3.12 compat (import smoke)
+  build:
+    name: install (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Import smoke
+        run: |
+          uv run python -c "import param_decomp, param_decomp_lab"
+          uv run python -c "import param_decomp.built_run; from param_decomp.components import SiteSpec"
+          uv run pd-lm --help > /dev/null
+
+  lint-type:
+    name: lint + type (py3.13)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
         with:
-          version: "0.8.19"
+          python-version: "3.13"
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
-      - name: Set up Python
-        run: uv python install 3.12
-      - name: Install dependencies
-        run: uv sync --all-packages --python 3.12
-      - name: Import smoke
-        run: |
-          uv run python -c "import param_decomp.built_run; from param_decomp.components import SiteSpec"
-          uv run pd-lm --help > /dev/null
+      - run: uv sync --frozen
+      - run: uv run ruff check --no-fix
+      - run: uv run ruff format --check
+      - run: make type
+
+  test:
+    name: tests (py3.13, non-slow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Cache JAX compile cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_test_cache
+          key: jax-test-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+      - run: >
+          uv run pytest
+          param_decomp/tests/ param_decomp_lab/tests/ param_decomp_lab/experiments/
+          --numprocesses 4 --dist worksteal --durations 15

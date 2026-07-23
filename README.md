@@ -47,13 +47,13 @@ The lab installs the `pd-*` CLIs. Decomposition runs are one self-contained YAML
 `param_decomp_lab/experiments/{tms,resid_mlp}/configs/`.
 
 ```bash
-pd-lm param_decomp_lab/experiments/lm/jose-ish.yaml            # LM run via SLURM (or --local)
+pd-lm param_decomp_lab/experiments/lm/jose-ish.yaml            # LM run (SLURM or inline, per runtime.dp)
 pd-tms param_decomp_lab/experiments/tms/configs/tms_5-2.yaml   # toy runs, CPU, in-process
 ```
 
 | CLI | What it runs |
 |---|---|
-| `pd-lm` | LM decomposition: snapshot + sbatch `python -m param_decomp_lab.experiments.lm.run` (`--local` runs inline) |
+| `pd-lm` | LM decomposition: `runtime.dp: N` → snapshot + sbatch `python -m param_decomp_lab.experiments.lm.run`; `dp: null` → inline |
 | `pd-tms` / `pd-resid-mlp` | toy-domain decompositions (CPU, in-process pretrain → decompose) |
 | `pd-pretrain` | target-LM pretraining launcher for `python -m pretrain.train` |
 | `pd-harvest` | component-statistics harvest over training data (SLURM array + merge) |

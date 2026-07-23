@@ -19,6 +19,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array
+
+# typing_extensions for `TypeVar(default=...)` (PEP 696): stdlib-supported only from 3.13,
+# and this package supports 3.12.
 from typing_extensions import TypeVar
 
 
