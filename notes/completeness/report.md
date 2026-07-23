@@ -222,11 +222,25 @@ Per-block k-routing subcomponents reappear in blocks 1–2 (needed standalone,
 invisible marginally). Contrast with the transformer-CI zero-skip run, which
 bought coverage by being dense everywhere.
 
-Caveats: at threshold 0.1 the complete net carries low-CI fuzz beyond the
-diagonals (69 alive subcomponents vs ~26 ideal; b0.v mean 3.38 active/input),
-and the B-configuration PPGD adversary still finds 1.2e-2 KL — likely the soft
-masks left by γ_final = 0.1. The normal net's marginal map is degenerate across
-blocks (b0 and b1 both keep t4–7 in-context roles; b2 down to t7).
+**Robustness** — the result replicates across the anneal target and the IM coeff
+(`copy_v8d32_complete_{01,02-gamma0.01,03-imp2e-4}`):
+
+| run | γ final | coeff | complete skipped | complete alive | normal skipped |
+|---|---|---|---|---|---|
+| 01 | 0.1 | 1e-4 | **0 / 19** | 69 | 13 / 19 |
+| 02 | 0.01 | 1e-4 | **0 / 19** | 69 | 12 / 19 |
+| 03 | 0.01 | 2e-4 | **0 / 19** | 70 | 9 / 19 |
+
+Caveats: at threshold 0.1 the complete net carries activity beyond the ideal
+diagonals (~69 alive subcomponents vs ~26 ideal; b0.v mean 2.4–3.4 active/input)
+and the B-configuration PPGD adversary retains 1.2–1.6e-2 KL. This excess is
+**invariant to both the sharper anneal and the higher coeff**, so it is
+structural, not soft-mask fuzz: part is the union of the in-context and
+standalone roles for the free half, part is shared "column" subcomponents (e.g.
+a b1.v sub active across several tokens at both positions) next to the per-token
+diagonals. The normal net's marginal map is degenerate across blocks and
+variant-dependent (13 / 12 / 9 skipped; b0 and b1 both keep t4–7 in-context
+roles; b2 down to t7; q/k routing pruned entirely in runs 02–03).
 
 ## Larger sizes and CI-function architecture
 
