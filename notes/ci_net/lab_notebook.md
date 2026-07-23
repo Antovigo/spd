@@ -83,3 +83,34 @@ Configs in `~/pd_scratch/combine_layers/configs/`, launched via
 Success criterion: closer to `_norm` on final CI-L0 / alive counts / stray stats
 (`txci_stats.py`, extended with per-module + total alive counts) without recon
 regression.
+
+## 2026-07-23 — results
+
+All three finished (~20 min each). Final metrics + cleanliness stats (job 5435):
+
+| run | CI-L0 | recon KL | v/o dupes | shared subs | skipped mechs |
+|---|---|---|---|---|---|
+| `joint_norm` (reference) | 3.50 | 1.1e-5 | 1 | 0 | 10/19 |
+| `joint_txci` (baseline) | 5.25 | 1.7e-5 | 7 | 9 | 4/19 |
+| `txci_newinit` (init only) | 5.56 | 5.8e-5 | 11 | 10 | 5/19 |
+| `txci_fnorm` | **3.43** | 2.1e-5 | 3 | 1 | 10/19 |
+| `txci_fnorm_cap2` | **3.24** | 1.9e-5 | 2 | 0 | 10/19 |
+
+- **The final RMS norm is the load-bearing change.** Init alone does nothing
+  (arguably worse). fnorm alone recovers the `_norm`-level result; the soft-cap
+  shaves a bit more (block-0 v and o both perfectly clean: 1.00/input, 0 dupes,
+  0 shared — matching `_norm` exactly).
+- Mechanism confirmed end-to-end: fnorm's final pre-sigmoid logits live in
+  ≈ [-5, +3.5] (vs [-80, +150] baseline); its step-5000 CI histograms show
+  abundant intermediate mass which the gamma anneal then prunes — same dynamics
+  as the MLP run.
+- Both fnorm variants skip 10/19 ground-truth mechanisms, exactly like `_norm` —
+  the baseline txci's 4/19 "coverage" was strays incidentally covering redundant
+  mechanisms, not real completeness.
+- Residual dirt vs `_norm`: `fnorm_cap2` keeps 3 alive in blocks.0.k (vs 1) and
+  one dupe in each of blocks.1.{v,o}. Small; possibly seed noise (n=1 per variant).
+
+Recommendation: `final_rms_norm: true` + `logit_softcap: 2.0` for all future
+`global_shared_transformer` runs. Old txci checkpoints must be evaluated with
+`final_rms_norm: false` (their saved configs omit the field, defaulting to the
+old behavior, so reloads are unaffected).

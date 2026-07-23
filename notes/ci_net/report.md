@@ -64,5 +64,49 @@ Three standard-transformer changes to `GlobalSharedTransformerCiFn`
 
 ## Results
 
-*(pending: `txci_newinit` / `txci_fnorm` / `txci_fnorm_cap2` runs on v8d32_partial,
-jobs 5431–5433)*
+Three variants on `v8d32_partial`, same config as `joint_txci` otherwise
+(`txci_newinit` = new head init only; `txci_fnorm` = + final RMS norm;
+`txci_fnorm_cap2` = + soft-cap 2.0):
+
+| run | CI-L0 | recon KL | v/o dupes | shared subs | skipped mechs |
+|---|---|---|---|---|---|
+| layerwise MLP (reference) | 3.50 | 1.1e-5 | 1 | 0 | 10/19 |
+| transformer baseline | 5.25 | 1.7e-5 | 7 | 9 | 4/19 |
+| + new init only | 5.56 | 5.8e-5 | 11 | 10 | 5/19 |
+| + final RMS norm | **3.43** | 2.1e-5 | 3 | 1 | 10/19 |
+| + RMS norm + soft-cap 2 | **3.24** | 1.9e-5 | 2 | 0 | 10/19 |
+
+**The final RMS norm is the load-bearing change**; the soft-cap helps a little more;
+the init alone does nothing. Both fixed variants now beat the layerwise-MLP reference
+on sparsity at comparable recon, and skip exactly the same 10/19 redundant mechanisms
+it does — the baseline transformer's apparent extra "coverage" (4/19 skipped) was
+strays incidentally covering redundant mechanisms.
+
+The mechanism is confirmed end-to-end. Fixed-transformer pre-sigmoid logits at
+step 10000 sit in [-5, +3.5], anchored on the sigmoid window:
+
+![pre-sigmoid, fixed transformer](report_figures/presigmoid_fnorm.png)
+
+Mid-training (step 5000) CI values regain the intermediate mass the anneal needs —
+compare with the near-binary baseline above:
+
+![CI hist 5000, fixed transformer](report_figures/ci_hist_5000_fnorm.png)
+
+Final decomposition, `fnorm_cap2` — block-0 v/o perfectly clean (1.00/input,
+0 dupes, 0 shared), single q routing column; residual dirt is 3 alive k components
+(vs 1) and one dupe in each of blocks.1.{v,o}:
+
+![active subcomponents, fnorm_cap2](report_figures/active_fnorm_cap2.png)
+
+## Recommendation
+
+Set `final_rms_norm: true` and `logit_softcap: 2.0` in
+`simple_transformer_ci_cfg` for all future `global_shared_transformer` runs. Both
+fields default to the old behavior, so saved configs of existing txci runs reload
+and evaluate unchanged. The readout zero-init (bias 0.5) is unconditional — it only
+affects newly initialized CI networks.
+
+Not investigated: whether the same fix closes the gap on the larger testbeds
+(v12d64, v16d32) where the completeness report found the transformer's dense
+collapse; a seed sweep (all numbers here are n=1); making the fixed settings the
+defaults.
