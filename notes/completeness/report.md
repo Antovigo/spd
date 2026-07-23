@@ -43,17 +43,20 @@ scores **exactly 1.0000**; the empty model is at chance (0.00). The same holds f
 the larger sizes (v12d64: all subsets 1.0000, empty 0.17; v16d32: all subsets
 1.0000, empty 0.13).
 
-**Free-half behavior** (tokens 4–7, never ablation-trained — measured, not
-certified; 8192 sequences, accuracy on the free half only):
+Full subset table (8192 sequences per half; the free half is measured, not
+certified — those inputs were never ablation-trained, so their ablation behavior is
+emergent):
 
-| blocks enabled | free-half accuracy |
-|---|---|
-| block 0 alone | 3/4 (misses t7) |
-| block 1 alone | 1/4 (only t4) |
-| block 2 alone | 3/4 (misses t4) |
-| blocks 1+2 (drop 0) | **1/4 (t5–7 fail)** |
-| blocks 0+2 (drop 1) | 4/4 |
-| blocks 0+1 (drop 2) | 4/4 |
+| blocks enabled | redundant half (t0–3) | free half (t4–7), for reference |
+|---|---|---|
+| none | 0.000 | 0.256 (~chance) |
+| block 0 alone | 1.000 | 0.750 (misses t7) |
+| block 1 alone | 1.000 | 0.251 (only t4) |
+| block 2 alone | 1.000 | 0.749 (misses t4) |
+| blocks 1+2 (drop 0) | 1.000 | **0.251 (t5–7 fail)** |
+| blocks 0+2 (drop 1) | 1.000 | 1.000 |
+| blocks 0+1 (drop 2) | 1.000 | 1.000 |
+| all | 1.000 | 1.000 |
 
 Per-token block-alone map (columns = tokens; 0–3 redundant):
 
