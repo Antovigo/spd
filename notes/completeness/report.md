@@ -37,18 +37,23 @@ drop-one-block accuracy per token).
 
 ## Block-ablation statistics (v8d32)
 
-8192 sequences, accuracy at the last position; tokens 0–3 redundant:
+**Redundancy certificate** — restricted to the dropout-trained inputs (tokens 0–3),
+which are the only ones expected to survive ablation. Every non-empty block subset
+scores **exactly 1.0000**; the empty model is at chance (0.00). The same holds for
+the larger sizes (v12d64: all subsets 1.0000, empty 0.17; v16d32: all subsets
+1.0000, empty 0.13).
 
-| blocks enabled | CE | accuracy |
-|---|---|---|
-| none | 2.77 | 0.13 (~chance) |
-| block 0 alone | 0.20 | 0.877 (7/8 — misses t7) |
-| block 1 alone | 1.55 | 0.626 (5/8 — only t4 of the free half) |
-| block 2 alone | 0.35 | 0.881 (7/8 — misses t4) |
-| blocks 1+2 (drop 0) | 1.28 | **0.626 (5/8 — t5–7 fail)** |
-| blocks 0+2 (drop 1) | 0.099 | 1.000 |
-| blocks 0+1 (drop 2) | 0.002 | 1.000 |
-| all | 2.4e-4 | 1.000 |
+**Free-half behavior** (tokens 4–7, never ablation-trained — measured, not
+certified; 8192 sequences, accuracy on the free half only):
+
+| blocks enabled | free-half accuracy |
+|---|---|
+| block 0 alone | 3/4 (misses t7) |
+| block 1 alone | 1/4 (only t4) |
+| block 2 alone | 3/4 (misses t4) |
+| blocks 1+2 (drop 0) | **1/4 (t5–7 fail)** |
+| blocks 0+2 (drop 1) | 4/4 |
+| blocks 0+1 (drop 2) | 4/4 |
 
 Per-token block-alone map (columns = tokens; 0–3 redundant):
 
