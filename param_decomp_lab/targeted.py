@@ -14,6 +14,9 @@ from param_decomp.metrics.persistent_pgd_recon import (
     PersistentPGDReconSubsetLossConfig,
     validate_pgd_scope,
 )
+from param_decomp.metrics.smooth_l0_importance_minimality import (
+    SmoothL0ImportanceMinimalityLossConfig,
+)
 from param_decomp.metrics.stochastic_hidden_acts_recon import StochasticHiddenActsReconLossConfig
 from param_decomp.metrics.unmasked_recon import UnmaskedReconLossConfig
 
@@ -57,7 +60,10 @@ def build_nontarget_loss_configs(
     for cfg in loss_metrics:
         if isinstance(cfg, _EXCLUDED_NONTARGET_LOSS_CONFIGS):
             continue
-        if isinstance(cfg, ImportanceMinimalityLossConfig) and cfg.coeff is not None:
+        if (
+            isinstance(cfg, ImportanceMinimalityLossConfig | SmoothL0ImportanceMinimalityLossConfig)
+            and cfg.coeff is not None
+        ):
             cfg = cfg.model_copy(update={"coeff": cfg.coeff * impmin_ratio})
         else:
             cfg = cfg.model_copy()
