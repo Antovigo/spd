@@ -42,6 +42,7 @@ from param_decomp.schedule import ScheduleConfig
 from param_decomp.targets.glu_transformer_sharding import (
     init_ci_fn_placed,
     init_component_stacks_placed,
+    init_coupled_component_stacks_placed,
     init_sources_sharded,
 )
 from param_decomp.train import Decomposition, TrainingItem, TrainState
@@ -182,8 +183,8 @@ def init_decomposition(
             zero_vu = component_stacks_from_sites(
                 {s.name: (jnp.zeros((s.d_in, s.C)), jnp.zeros((s.C, s.d_out))) for s in model.sites}
             )
-            components = init_component_stacks_placed(
-                model.sites, init_key, rules, target_weights=model.weight_deltas(zero_vu)
+            components = init_coupled_component_stacks_placed(
+                model.sites, model.weight_deltas(zero_vu), init_key, rules
             )
     ci_fn = init_ci_fn_placed(ci_fn_arch, model.sites, ci_key, mesh)
     assert ci_fn.has_position_axis == model.has_position_axis, (

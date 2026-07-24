@@ -45,6 +45,7 @@ unsharded tree per process). A non-dividing declared shard axis is a loud crash 
 placement construction / inside `.shardings` (fail-fast), never a silent replicate.
 """
 
+from collections.abc import Callable
 from functools import partial
 
 import equinox as eqx
@@ -77,6 +78,7 @@ __all__ = [
     "hsdp_mesh",
     "place_target",
     "init_component_stacks_placed",
+    "init_coupled_component_stacks_placed",
     "init_ci_fn_placed",
     "init_sources_sharded",
     "shard_batch",
@@ -89,25 +91,37 @@ def place_target(tgt: GLUDecomposedModel, mesh: Mesh) -> GLUDecomposedModel:
     return place_via_shardings(tgt, tgt.shardings(mesh))
 
 
-def init_component_stacks_placed(
-    sites: tuple[SiteSpec, ...],
-    key: PRNGKeyArray,
+def _init_component_stacks_via(
+    init: "Callable[..., ComponentStacks]",
+    args: tuple[PRNGKeyArray | dict[str, Array], ...],
     rules: PlacementRules,
-    target_weights: dict[str, Array] | None = None,
 ) -> ComponentStacks:
-    """Seeded V/U init placed by `component_stacks_shardings(_, rules)` (the run's placement
-    policy), values bit-identical to the retired per-site init (pinned by `test_sharding`).
-    One jit, 2×n_shapes sharded outputs — the persistence layout IS the stacked layout, so
-    the old two-stage stack-then-unstack fan-out (and its transient extra copy) is gone.
-    `target_weights` selects the coupled init (`init_coupled_component_stacks`), riding as
-    jit ARGUMENTS (not closure constants) so the frozen W arrays are not baked into the
-    compiled init; None is the kaiming default."""
-    if target_weights is None:
-        init, args = partial(init_component_stacks, sites), (key,)
-    else:
-        init, args = partial(init_coupled_component_stacks, sites), (target_weights, key)
+    """Run a `ComponentStacks` init placed by `component_stacks_shardings(_, rules)` (the
+    run's placement policy). One jit, 2×n_shapes sharded outputs — the persistence layout
+    IS the stacked layout, so no host-side full tree ever exists; `args` ride as jit
+    ARGUMENTS (not closure constants) so nothing large is baked into the compiled init."""
     placement = component_stacks_shardings(eqx.filter_eval_shape(init, *args), rules)
     return jax.jit(init, out_shardings=placement)(*args)
+
+
+def init_component_stacks_placed(
+    sites: tuple[SiteSpec, ...], key: PRNGKeyArray, rules: PlacementRules
+) -> ComponentStacks:
+    """Placed kaiming V/U init, values bit-identical to the retired per-site init (pinned
+    by `test_sharding`)."""
+    return _init_component_stacks_via(partial(init_component_stacks, sites), (key,), rules)
+
+
+def init_coupled_component_stacks_placed(
+    sites: tuple[SiteSpec, ...],
+    target_weights: dict[str, Array],
+    key: PRNGKeyArray,
+    rules: PlacementRules,
+) -> ComponentStacks:
+    """Placed coupled V/U init (`init_coupled_component_stacks`)."""
+    return _init_component_stacks_via(
+        partial(init_coupled_component_stacks, sites), (target_weights, key), rules
+    )
 
 
 def init_ci_fn_placed(
