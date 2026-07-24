@@ -258,6 +258,42 @@ caveat: the B-configuration PPGD adversary retains ~0.012 KL in all variants
 (≈ 50× the A residual; the all-complete joint configuration is never explicitly
 trained), so the complete masks are not yet adversarially tight.
 
+### Protocol variants: ab initio, subset selection, transformer CI
+
+Two axes beyond the baseline (run 06): **ab initio** (fresh components + CI nets
++ faithfulness warmup — `model_path` supplies only the config) instead of
+fine-tuning a finished decomposition, and **subset selection** (per step draw
+`k` uniform in `[1, n−1]`, then a uniform `k`-subset; configuration B masks all
+selected blocks with the complete net simultaneously, so resurrected components
+must reconstruct jointly). All at γ → 0.01, impmin 2e-4:
+
+| run | init | selection | CI fn | complete skipped | normal skipped | complete alive | B-PPGD |
+|---|---|---|---|---|---|---|---|
+| 06 | fine-tune | single | MLP | **0 / 19** | 13 / 19 | 59 | 0.012 |
+| 07 | fine-tune | subset | MLP | 2 / 19 | 7 / 19 | 43 | 0.0018 |
+| 08 | ab initio | single | MLP | **0 / 19** | 11 / 19 | 57 | 0.0072 |
+| 09 | ab initio | subset | MLP | 2 / 19 | 9 / 19 | 43 | 0.0019 |
+| 10 | ab initio | subset | transformer, final-norm | 4 / 19 | 8 / 19 | 42 | 0.0040 |
+| 11 | ab initio | subset | transformer, no final-norm | 2 / 19 | 7 / 19 | 52 | 0.0016 |
+
+Findings:
+
+- **Ab initio works** (run 08: 0/19, 57 alive, clean maps): the protocol does not
+  need a converged joint decomposition to start from — the marginal and
+  standalone maps co-emerge from random init.
+- **Subset selection is a trade**: it tightens the B-side adversarial
+  reconstruction ~7× (PPGD 0.012 → ~0.0017 — the joint-reconstruction pressure
+  it was designed to add) but consistently loses ~2 backup cells (07: b1t0+b2t0;
+  09: b1t0+b2t5; 11: b1t0+b2t0). The mechanism is visible in the normal maps:
+  subset-configuration A is leakier (e.g. run 07's normal net keeps block 0's
+  t0–t2 copies — 7/19 skipped vs 13/19 single-block), and wherever the normal
+  backdrop still covers a token, B's forcing vanishes and minimality prunes that
+  token's backups.
+- **Transformer CI, ab initio**: the no-final-norm variant matches the MLP
+  (2 skips) with the tightest B-PPGD of all (0.0016); final-norm — the
+  recommended setting for *joint* transformer-CI decompositions — underperforms
+  here (4 skips, including free-half cells b2t5/b2t6).
+
 *Correction note*: an earlier version of this section reported denser complete
 maps (~69 alive, "structural duplication") from runs 01–03. Those numbers were an
 artifact: `complete.py` originally deep-copied the CI wrapper *including* its
