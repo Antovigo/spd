@@ -169,6 +169,41 @@ def init_stack_arrays(
     return stacked
 
 
+def init_coupled_component_stacks(
+    sites: tuple[SiteSpec, ...], target_weights: dict[str, Array], key: Array
+) -> ComponentStacks:
+    """Coupled init: unit-norm seed on the narrow side, wide side its raw W-image.
+
+    `d_in <= d_out`: `v_c ~ unit norm`, `U_c <- (W v_c)^T`; else `u_c ~ unit norm`,
+    `V_c <- W^T u_c`. No C-dependent rescale — components sit at W's natural scale and
+    the component sum equals W restricted to the seed span (`W V V^T` when V is seeded),
+    the delta carrying the complement. One key per site, split in site order; vmapped
+    per shape group like `init_stack_arrays` so the compiled init doesn't scale with
+    site count."""
+    keys = jax.random.split(key, len(sites))
+    site_index = {spec.name: idx for idx, spec in enumerate(sites)}
+    stacked: dict[VUShape, tuple[Array, Array]] = {}
+    for (d_in, d_out, c), specs in vu_shape_groups(sites).items():
+        ws = jnp.stack([target_weights[spec.name] for spec in specs]).astype(jnp.float32)
+        assert ws.shape == (len(specs), d_out, d_in), (ws.shape, (d_in, d_out, c))
+        ks = keys[jnp.array([site_index[spec.name] for spec in specs])]
+        if d_in <= d_out:
+
+            def seed_v(k: Array, w: Array, s: tuple[int, int] = (d_in, c)) -> tuple[Array, Array]:
+                v = jax.random.normal(k, s)
+                v = v / jnp.linalg.norm(v, axis=0, keepdims=True)
+                return v, (w @ v).T
+        else:
+
+            def seed_v(k: Array, w: Array, s: tuple[int, int] = (c, d_out)) -> tuple[Array, Array]:
+                u = jax.random.normal(k, s)
+                u = u / jnp.linalg.norm(u, axis=1, keepdims=True)
+                return w.T @ u.T, u
+
+        stacked[(d_in, d_out, c)] = jax.vmap(seed_v)(ks, ws)
+    return ComponentStacks(stacks=stacked, site_slots=site_slots_for(sites))
+
+
 def component_stacks_from_sites(vu: dict[str, tuple[Array, Array]]) -> ComponentStacks:
     """Build the stacked `ComponentStacks` from a per-site `{name: (V, U)}` dict (site order =
     dict order). The explicit-arrays constructor for toys and tests; the trainer inits

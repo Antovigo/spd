@@ -1041,6 +1041,14 @@ class PDConfig(BaseConfig):
         default=0,
         description="Random seed for reproducibility, including LM dataset shuffling.",
     )
+    weight_init: Literal["kaiming", "coupled"] = Field(
+        default="kaiming",
+        description="How component V/U are initialized. 'kaiming': iid normal "
+        "(V ~ N(0, d_in^-0.5), U ~ N(0, C^-0.5)), ignores W. 'coupled': unit-norm seed on "
+        "the narrow side, wide side its raw W-image (U_c from (W v_c)^T when d_in <= d_out, "
+        "else V_c from W^T u_c) — W-natural scale, component sum ~ W on a rank-C random "
+        "subspace (the delta carries the complement).",
+    )
     loss_metrics: list[AnyLossMetricConfig] = Field(
         default_factory=list,
         description=(

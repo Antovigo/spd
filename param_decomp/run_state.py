@@ -8,6 +8,7 @@ optimizer-state structure.
 """
 
 from collections.abc import Callable
+from typing import Literal
 
 import equinox as eqx
 import jax
@@ -20,6 +21,7 @@ from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.adversary import PersistentAdversary, init_sources_adam_state
 from param_decomp.ci_fn import ChunkwiseTransformerCIArch, CIFnArch
+from param_decomp.components import component_stacks_from_sites
 from param_decomp.configs import (
     AdamPGDConfig,
     AdamWOptimizerConfig,
@@ -163,14 +165,26 @@ def init_decomposition(
     init_key: PRNGKeyArray,
     mesh: Mesh,
     rules: PlacementRules,
+    weight_init: Literal["kaiming", "coupled"] = "kaiming",
 ) -> Decomposition:
     """The trained-product half of `init_train_state`, factored out so a consumer can
     `jax.eval_shape` it to recover the saved `decomposition` item's tree structure
-    without building (or knowing about) the optimizers/adversaries."""
+    without building (or knowing about) the optimizers/adversaries (the `weight_init`
+    default is safe there — both inits produce the same tree)."""
     ci_key = random.fold_in(init_key, 1)
     # V/U placement derives from the rules table; the CI fn still declares its own
     # per-leaf shardings (the staged placement migration hasn't reached it).
-    components = init_component_stacks_placed(model.sites, init_key, rules)
+    match weight_init:
+        case "kaiming":
+            components = init_component_stacks_placed(model.sites, init_key, rules)
+        case "coupled":
+            # The protocol exposes W only through `weight_deltas`; on zero V/U the delta IS W.
+            zero_vu = component_stacks_from_sites(
+                {s.name: (jnp.zeros((s.d_in, s.C)), jnp.zeros((s.C, s.d_out))) for s in model.sites}
+            )
+            components = init_component_stacks_placed(
+                model.sites, init_key, rules, target_weights=model.weight_deltas(zero_vu)
+            )
     ci_fn = init_ci_fn_placed(ci_fn_arch, model.sites, ci_key, mesh)
     assert ci_fn.has_position_axis == model.has_position_axis, (
         f"CI fn has_position_axis={ci_fn.has_position_axis} but model declares "
@@ -195,7 +209,7 @@ def init_train_state(
     assert isinstance(positions, Positioned) == model.has_position_axis, (
         f"{positions} does not match the model's has_position_axis={model.has_position_axis}"
     )
-    decomposition = init_decomposition(model, ci_fn_arch, init_key, mesh, rules)
+    decomposition = init_decomposition(model, ci_fn_arch, init_key, mesh, rules, pd.weight_init)
     components, ci_fn = decomposition.components, decomposition.ci_fn
     losses = build_loss_terms(pd.loss_metrics, model.site_names)
     persistent = persistent_configs(losses.recon)

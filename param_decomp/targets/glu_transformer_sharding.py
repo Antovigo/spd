@@ -64,6 +64,7 @@ from param_decomp.components import (
     ComponentStacks,
     SiteSpec,
     init_component_stacks,
+    init_coupled_component_stacks,
 )
 from param_decomp.configs import SourceShape
 from param_decomp.model import PositionAxis, Positioned, Positionless
@@ -89,15 +90,24 @@ def place_target(tgt: GLUDecomposedModel, mesh: Mesh) -> GLUDecomposedModel:
 
 
 def init_component_stacks_placed(
-    sites: tuple[SiteSpec, ...], key: PRNGKeyArray, rules: PlacementRules
+    sites: tuple[SiteSpec, ...],
+    key: PRNGKeyArray,
+    rules: PlacementRules,
+    target_weights: dict[str, Array] | None = None,
 ) -> ComponentStacks:
     """Seeded V/U init placed by `component_stacks_shardings(_, rules)` (the run's placement
     policy), values bit-identical to the retired per-site init (pinned by `test_sharding`).
     One jit, 2×n_shapes sharded outputs — the persistence layout IS the stacked layout, so
-    the old two-stage stack-then-unstack fan-out (and its transient extra copy) is gone."""
-    abstract = eqx.filter_eval_shape(partial(init_component_stacks, sites), key)
-    placement = component_stacks_shardings(abstract, rules)
-    return jax.jit(partial(init_component_stacks, sites), out_shardings=placement)(key)
+    the old two-stage stack-then-unstack fan-out (and its transient extra copy) is gone.
+    `target_weights` selects the coupled init (`init_coupled_component_stacks`), riding as
+    jit ARGUMENTS (not closure constants) so the frozen W arrays are not baked into the
+    compiled init; None is the kaiming default."""
+    if target_weights is None:
+        init, args = partial(init_component_stacks, sites), (key,)
+    else:
+        init, args = partial(init_coupled_component_stacks, sites), (target_weights, key)
+    placement = component_stacks_shardings(eqx.filter_eval_shape(init, *args), rules)
+    return jax.jit(init, out_shardings=placement)(*args)
 
 
 def init_ci_fn_placed(
