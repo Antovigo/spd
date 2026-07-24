@@ -31,6 +31,7 @@ from pydantic import (
 )
 
 from param_decomp.base_config import BaseConfig, Probability
+from param_decomp.components import WeightInit
 from param_decomp.schedule import ScheduleConfig
 
 # ---------------------------------------------------------------------------
@@ -1041,7 +1042,7 @@ class PDConfig(BaseConfig):
         default=0,
         description="Random seed for reproducibility, including LM dataset shuffling.",
     )
-    weight_init: Literal["kaiming", "coupled"] = Field(
+    weight_init: WeightInit = Field(
         default="kaiming",
         description="How component V/U are initialized. 'kaiming': iid normal "
         "(V ~ N(0, d_in^-0.5), U ~ N(0, C^-0.5)), ignores W. 'coupled': unit-norm seed on "

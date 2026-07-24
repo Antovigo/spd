@@ -1,9 +1,9 @@
-"""Tests for the `coupled` component initialization (`init_coupled_component_stacks`)."""
+"""Tests for the `coupled` mode of `init_component_stacks`."""
 
 import jax
 import jax.numpy as jnp
 
-from param_decomp.components import SiteSpec, init_coupled_component_stacks
+from param_decomp.components import SiteSpec, init_component_stacks
 
 
 def _random_weight(d_out: int, d_in: int) -> jax.Array:
@@ -28,7 +28,7 @@ def _row_space_residual(v: jax.Array, w: jax.Array) -> jax.Array:
 def _init_single(w: jax.Array, c: int, seed: int) -> tuple[jax.Array, jax.Array]:
     d_out, d_in = w.shape
     sites = (SiteSpec(name="m", d_in=d_in, d_out=d_out, C=c),)
-    vu = init_coupled_component_stacks(sites, {"m": w}, jax.random.PRNGKey(seed))
+    vu = init_component_stacks(sites, jax.random.PRNGKey(seed), "coupled", {"m": w})
     return vu.site("m")
 
 
@@ -70,7 +70,7 @@ def test_coupled_stacked_sites_get_independent_draws_coupled_to_their_own_w():
         SiteSpec(name="a", d_in=6, d_out=10, C=8),
         SiteSpec(name="b", d_in=6, d_out=10, C=8),
     )
-    vu = init_coupled_component_stacks(sites, {"a": w_a, "b": w_b}, jax.random.PRNGKey(0))
+    vu = init_component_stacks(sites, jax.random.PRNGKey(0), "coupled", {"a": w_a, "b": w_b})
     V_a, U_a = vu.site("a")
     V_b, U_b = vu.site("b")
     assert not jnp.allclose(V_a, V_b)
