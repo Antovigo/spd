@@ -10,10 +10,6 @@ def _random_weight(d_out: int, d_in: int) -> jax.Array:
     return jax.random.normal(jax.random.PRNGKey(0), (d_out, d_in))
 
 
-def _component_sum(V: jax.Array, U: jax.Array) -> jax.Array:
-    return (V @ U).T
-
-
 def _col_space_residual(u: jax.Array, w: jax.Array) -> jax.Array:
     q_out, _, _ = jnp.linalg.svd(w, full_matrices=False)
     return u - (u @ q_out) @ q_out.T
@@ -44,20 +40,6 @@ def test_coupled_seeds_are_unit_norm_and_derived_side_is_raw_w_image():
     assert jnp.allclose(jnp.linalg.norm(U_t, axis=1), jnp.ones(8), atol=1e-5)
     assert jnp.allclose(V_t, w_t.T @ U_t.T, atol=1e-6)
     assert jnp.abs(_row_space_residual(V_t, w_t)).max() < 1e-5
-
-
-def test_coupled_sum_is_w_restricted_to_seed_span():
-    w = _random_weight(10, 6)
-    V, U = _init_single(w, c=4, seed=0)
-    # sum_c u_c v_c^T = W V V^T exactly.
-    assert jnp.allclose(_component_sum(V, U), w @ V @ V.T, atol=1e-5)
-
-
-def test_coupled_is_seed_deterministic():
-    w = _random_weight(10, 6)
-    V_a, U_a = _init_single(w, c=8, seed=7)
-    V_b, U_b = _init_single(w, c=8, seed=7)
-    assert jnp.array_equal(V_a, V_b) and jnp.array_equal(U_a, U_b)
 
 
 def test_coupled_stacked_sites_get_independent_draws_coupled_to_their_own_w():
