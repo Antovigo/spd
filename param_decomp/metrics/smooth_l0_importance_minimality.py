@@ -39,6 +39,9 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     gamma_anneal_start_frac: Probability = 1.0
     gamma_final: PositiveFloat | None = None
     gamma_anneal_end_frac: Probability = 1.0
+    normalize_at_one: bool = False
+    """Rescale `φ` by `(1 + γ²)` so a fully-active component (`c = 1`) always contributes
+    exactly 1, removing the implicit ~2x coefficient ramp across the γ anneal."""
 
 
 def _get_linear_annealed_gamma(
@@ -67,14 +70,16 @@ def _get_linear_annealed_gamma(
 def _per_component_sums(
     ci_upper_leaky: dict[str, Float[Tensor, "... C"]],
     gamma: float,
+    normalize_at_one: bool,
 ) -> tuple[dict[str, Float[Tensor, " C"]], int]:
     assert ci_upper_leaky, "Empty ci_upper_leaky"
     assert gamma > 0.0, f"gamma must be positive, got {gamma}"
     gamma_sq = gamma * gamma
+    scale = 1.0 + gamma_sq if normalize_at_one else 1.0
     out: dict[str, Float[Tensor, " C"]] = {}
     for layer_name, layer_ci in ci_upper_leaky.items():
         ci_sq = layer_ci * layer_ci
-        phi = ci_sq / (ci_sq + gamma_sq)
+        phi = ci_sq * scale / (ci_sq + gamma_sq)
         out[layer_name] = phi.sum(dim=tuple(range(phi.dim() - 1)))
     n_examples = next(iter(ci_upper_leaky.values())).shape[:-1].numel()
     return out, n_examples
@@ -118,6 +123,7 @@ def smooth_l0_importance_minimality_loss(
     gamma_anneal_start_frac: float,
     gamma_final: float | None,
     gamma_anneal_end_frac: float,
+    normalize_at_one: bool = False,
 ) -> Float[Tensor, ""]:
     """Compute the smooth-L0 importance-minimality loss directly (helper for external callers)."""
     annealed_gamma = _get_linear_annealed_gamma(
@@ -128,7 +134,7 @@ def smooth_l0_importance_minimality_loss(
         gamma_anneal_end_frac=gamma_anneal_end_frac,
     )
     per_component_sums, n_examples = _per_component_sums(
-        ci_upper_leaky=ci_upper_leaky, gamma=annealed_gamma
+        ci_upper_leaky=ci_upper_leaky, gamma=annealed_gamma, normalize_at_one=normalize_at_one
     )
     dist_state = get_distributed_state()
     world_size = dist_state.world_size if dist_state is not None else 1
@@ -167,6 +173,7 @@ class SmoothL0ImportanceMinimalityLoss(Metric[SmoothL0ImportanceMinimalityLossCo
         per_component_sums, n = _per_component_sums(
             ci_upper_leaky=ctx.ci.upper_leaky,
             gamma=gamma,
+            normalize_at_one=self.cfg.normalize_at_one,
         )
         for layer_name, layer_sums in per_component_sums.items():
             if layer_name not in self.per_component_sums:
