@@ -333,3 +333,18 @@ begin life prunable. Neither suffices alone at v8. Recipe = both.
   dirtier (negative). Per-size knob only.
 - Final picks recorded in report.md; next: completeness treatment on the three
   picks (impmin 2e-4 to match, otherwise complete.py defaults).
+
+## 2026-07-24 — completeness treatment on the final picks (jobs 5602–5604)
+
+`complete.py` (two-CI resurrection, impmin 2e-4 to match, otherwise defaults) on
+each size's final decomposition. Skipped mechanisms, normal → complete net:
+
+- v8d32: 13/19 → **0/19**
+- v8d64: 13/21 → **0/21**
+- v12d64: 16/28 → **0/28**
+
+Zero skips at every size, and the complete maps are *structured*: block-0 keeps
+full diagonals, blocks 1–2 regrow dedicated backup diagonals for the redundant
+tokens plus their own q/k routing — not the dense coverage the old transformer
+bought skips with. First time the resurrection protocol is demonstrated beyond
+v8 and on transformer-CI decompositions.

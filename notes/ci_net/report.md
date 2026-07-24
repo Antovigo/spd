@@ -188,6 +188,28 @@ halving the CI-net LR to 1e-3 improves everything.
 
 ![final v12d64](report_figures/active_v12d64_final.png)
 
+## Completeness treatment on the final picks
+
+The two-CI resurrection protocol (`complete.py`, impmin 2e-4 to match the
+decompositions, otherwise defaults) applied to each size's final decomposition.
+Skipped mechanisms, normal → complete net:
+
+| size | normal (marginal map) | complete |
+|---|---|---|
+| v8d32 | 13/19 | **0/19** |
+| v8d64 | 13/21 | **0/21** |
+| v12d64 | 16/28 | **0/28** |
+
+Full recovery at every size — the first demonstration of the protocol beyond v8
+and on transformer-CI decompositions. The complete maps are structured, not
+dense: block 0 keeps its full diagonals, blocks 1–2 regrow dedicated backup
+diagonals for the redundant tokens plus their own q/k routing (contrast the old
+baseline transformer, whose low skip counts came from dense coverage):
+
+![complete net, v12d64](report_figures/complete_v12d64.png)
+
+Runs: `copy_{v8d32,v8d64,v12d64}_complete_txci_01/{normal,complete}`.
+
 ## Recommendation
 
 Set `final_rms_norm: true` in `simple_transformer_ci_cfg` for all
