@@ -6,9 +6,9 @@ Usage:
 
 Output format:
     {
-        "clustering_run_id": "cr-5f228e5f",
+        "clustering_run_id": "cr-xxxxxxxx",
         "notes": "",
-        "pd_run": "goodfire/param-decomp/5cr21lbs",
+        "pd_run": "<entity>/<project>/<run-id>",
         "clusters": {"h.0.mlp.down_proj:1": 0, "h.0.mlp.down_proj:2": null, ...}
     }
 
@@ -51,7 +51,7 @@ def get_cluster_mapping(
     )
 
     merge = history.merges[iteration]
-    assignments = merge.group_idxs.numpy()
+    assignments = merge.group_idxs
     labels = list(history.labels)
 
     # Count members per cluster to identify singletons
