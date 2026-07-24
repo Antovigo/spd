@@ -241,9 +241,22 @@ q/k-routing subcomponents reappear in blocks 1–2 (needed standalone, invisible
 marginally). Contrast with the transformer-CI zero-skip run, which bought
 coverage by being dense everywhere. The normal net is uniform across variants
 (13/19 skipped, 18–19 alive: b0 t0+t4–6, b1 t4–7, b2 t7, no routing — one of
-several degenerate marginal solutions). Remaining caveat: the B-configuration
-PPGD adversary retains ~1.4e-2 KL in all variants (the all-complete joint
-configuration is never explicitly trained).
+several degenerate marginal solutions).
+
+Final losses at step 10 000 (run 06, raw metric values before coefficients; the
+minimality loss covers only the step's selected block):
+
+| configuration | SmoothL0 impmin | PPGD recon (KL) |
+|---|---|---|
+| A (normal / minimal) | 1.00 | 2.4e-4 |
+| B (complete) | 14.7 | 1.2e-2 |
+
+The impmin gap is the point of the protocol: the complete net pays ~15× the
+active-CI mass of the marginal net — the resurrected copies — and holds it
+because configuration B's reconstruction leaves no alternative. Remaining
+caveat: the B-configuration PPGD adversary retains ~1.4e-2 KL in all variants
+(≈ 50× the A residual; the all-complete joint configuration is never explicitly
+trained), so the complete masks are not yet adversarially tight.
 
 *Correction note*: an earlier version of this section reported denser complete
 maps (~69 alive, "structural duplication") from runs 01–03. Those numbers were an
