@@ -175,6 +175,17 @@ keeps exactly its free-half/in-context mechanisms and loses every redundant copy
 | block 1 | 5 | t4 | 4 — t0–3 |
 | block 2 | 7 | t5, t6, t7 | 4 — t0–3 |
 
+| block 0 | block 1 | block 2 |
+|---|---|---|
+| ![perblock b0](report_figures/copy_v8d32_partial_perblock_b0.png) | ![perblock b1](report_figures/copy_v8d32_partial_perblock_b1.png) | ![perblock b2](report_figures/copy_v8d32_partial_perblock_b2.png) |
+
+The maps make the over-minimality visible: every certified copy of tokens 0–3 is
+gone in every block — including block 0's, which the joint decomposition credits —
+because the intact partner blocks always compensate. What survives is exactly the
+in-context activity (block 1's v cells on t4–7 are its interference role, larger
+than its alone-map), so a per-block decomposition reads as "this block does almost
+nothing" precisely where the model is most redundant.
+
 *Metric note*: block-level coverage in the skip diagnostic counts only
 token-selective matrices (v/o); q/k routing subcomponents are active on every token
 and would otherwise mask v/o skips (this correction changed only the per-block
