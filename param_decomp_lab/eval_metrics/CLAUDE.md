@@ -57,6 +57,22 @@ three nontarget-data metrics are partitioned out of `EvalLoop.metrics` into
 by the trainer's mirror nontarget eval loop under `delta_override(1.0)`; the rest stay
 in the normal target eval pass.
 
+## `ABGridDataset` — (a,b)-grid snapshots + applet
+
+Slow eval metric (`ab_grid_dataset.py`) for `a<op>b=` prompt pools: at each slow eval
+it forwards the whole pool (one cached forward per batch, sharded across DDP ranks)
+and writes `<run>/ab_grids/step_<n>.js` — per-subcomponent CI (u8) and normalized
+inner-activation `(x·V_c)/‖V_c‖` (f16) grids over (op, a, b) at the configured token
+positions — plus `index.html`, a self-contained `file://`-openable applet
+(`ab_grids_app.html`, shipped next to the metric) with step/op/position selectors, a
+log-scale mean-CI threshold slider, and hover readouts. Full grids are stored only for
+subcomponents whose mean CI reaches `mean_ci_floor` (the mean-CI vector is stored for
+all, so the cut is visible); disk is ~1 MB per 10 saved subcomponents per snapshot.
+Delivery uses `param_decomp_lab/run_artifacts.py::RunDirArtifact` — a `MetricResult`
+value the local sink writes verbatim under the run dir (regenerating `manifest.js`)
+and wandb/`metrics.jsonl` skip. It lives outside `run_sink` so metrics can import it
+without pulling the sink's wandb/infra chain into `eval_metrics` (import cycle).
+
 ## Note on `PGDReconLoss` + `StochasticHiddenActsReconLoss`
 
 Both appear in `EVAL_METRIC_CLASSES` even though they're *loss* classes from core.

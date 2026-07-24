@@ -98,7 +98,7 @@ from param_decomp.batch_and_loss_fns import RunBatch, ReconstructionLoss
 - `param_decomp_lab/eval_metrics/` — batteries-included eval-metric set.
 - `param_decomp_lab/infra/` — settings, paths, slurm, ddp_launch (single-/multi-node
   torchrun wrapper), wandb, sqlite, git, run_files, markdown, pydantic helpers.
-- `param_decomp_lab/{seed.py, distributed.py, batch_and_loss_fns.py, component_model_io.py, run_sink.py}`
+- `param_decomp_lab/{seed.py, distributed.py, batch_and_loss_fns.py, component_model_io.py, run_sink.py, run_artifacts.py}`
   — lab-side helpers that aren't big enough to warrant their own subdir.
 
 ## Module pointers

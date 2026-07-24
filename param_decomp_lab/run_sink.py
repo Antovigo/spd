@@ -18,6 +18,7 @@ from param_decomp.log import logger
 from param_decomp.training_state import TrainingState
 from param_decomp_lab.infra.run_files import save_file, write_run_metadata_finish
 from param_decomp_lab.infra.wandb import init_wandb, try_wandb
+from param_decomp_lab.run_artifacts import RunDirArtifact
 
 
 def _local_log(data: dict[str, Any], step: int, out_dir: Path) -> None:
@@ -35,7 +36,10 @@ def _local_log(data: dict[str, Any], step: int, out_dir: Path) -> None:
 
     metrics_without_images: dict[str, Any] = {}
     for k, v in data.items():
-        if isinstance(v, Image.Image):
+        if isinstance(v, RunDirArtifact):
+            v.write(out_dir)
+            logger.info(f"Saved {k}: {v!r}")
+        elif isinstance(v, Image.Image):
             filename = f"{k.replace('/', '_')}_{step}.png"
             v.save(fig_dir / filename)
             logger.info(f"Saved figure {k} to {fig_dir / filename}")
@@ -133,12 +137,16 @@ class RunSink:
     def log(self, metrics: dict[str, Any], step: int) -> None:
         """Emit a flat metrics dict to disk and/or wandb.
 
-        Values may be scalars, PIL images, or `wandb.plot.CustomChart` payloads.
+        Values may be scalars, PIL images, `wandb.plot.CustomChart` payloads, or
+        `RunDirArtifact` bundles (written to disk only; skipped by wandb and jsonl).
         """
         if self.out_dir is not None:
             _local_log(metrics, step, self.out_dir)
         if self._wandb_active:
-            try_wandb(wandb.log, {k: _wandb_value(v) for k, v in metrics.items()}, step=step)
+            wandb_metrics = {
+                k: _wandb_value(v) for k, v in metrics.items() if not isinstance(v, RunDirArtifact)
+            }
+            try_wandb(wandb.log, wandb_metrics, step=step)
 
     def console(self, *lines: str) -> None:
         """Print lines to stderr via `tqdm.write`. No-op on non-main ranks."""

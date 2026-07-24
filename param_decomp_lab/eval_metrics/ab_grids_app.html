@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AB grids explorer</title>
+<style>
+  :root { --fg: #1c1c28; --muted: #6b6b80; --line: #e3e3ec; --card: #fafafd; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 system-ui, sans-serif; color: var(--fg); background: #fff; }
+  header { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: #fff; z-index: 5; }
+  header label { color: var(--muted); margin-right: 4px; }
+  select, input[type=range] { vertical-align: middle; }
+  #thrval { font-family: ui-monospace, monospace; min-width: 64px; display: inline-block; }
+  #count { color: var(--muted); }
+  #detail { display: none; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+  #detail .panes { display: flex; gap: 24px; flex-wrap: wrap; }
+  #detail h3 { margin: 0 0 6px; font-size: 14px; }
+  #detail .pane { text-align: center; }
+  #detail .pane .cap { color: var(--muted); margin-top: 4px; }
+  #readout { font-family: ui-monospace, monospace; margin-top: 6px; min-height: 1.3em; }
+  #gallery { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 16px; }
+  .tile { border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--card);
+          cursor: pointer; text-align: center; }
+  .tile.sel { outline: 2px solid #7b5cd6; }
+  .tile .lbl { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; }
+  canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
+  #empty { padding: 24px 16px; color: var(--muted); }
+  .axis-note { color: var(--muted); font-size: 11px; padding: 0 16px 10px; }
+</style>
+</head>
+<body>
+<header>
+  <span><label>step</label><select id="step"></select></span>
+  <span><label>position</label><select id="pos"></select></span>
+  <span><label>op</label><select id="op"></select></span>
+  <span><label>view</label><select id="view">
+    <option value="ci">CI</option><option value="inner">inner act</option></select></span>
+  <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
+    <span id="thrval"></span></span>
+  <span id="count"></span>
+</header>
+<div id="detail">
+  <h3 id="dtitle"></h3>
+  <div class="panes">
+    <div class="pane"><canvas id="dci"></canvas><div class="cap">CI</div></div>
+    <div class="pane"><canvas id="dinner"></canvas><div class="cap">inner act</div></div>
+  </div>
+  <div id="readout"></div>
+</div>
+<div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
+<div id="gallery"></div>
+<div id="empty" style="display:none">no subcomponents above threshold</div>
+
+<script src="manifest.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const steps = {};          // step number -> payload
+let cur = null;            // current payload
+let selected = null;       // {mi, si} selected component
+
+// Render only if this payload is still the selected step (script tags load async,
+// so an older request can land after a newer one).
+window.registerABGrids = payload => {
+  steps[payload.step] = payload;
+  if (+$("step").value === payload.step) setPayload(payload);
+};
+
+function b64Bytes(s) {
+  const bin = atob(s), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+const b64F32 = s => new Float32Array(b64Bytes(s).buffer);
+function b64F16(s) {
+  const u16 = new Uint16Array(b64Bytes(s).buffer), out = new Float32Array(u16.length);
+  for (let i = 0; i < u16.length; i++) {
+    const h = u16[i], sgn = (h & 0x8000) ? -1 : 1, exp = (h >> 10) & 0x1f, frac = h & 0x3ff;
+    if (exp === 0) out[i] = sgn * frac * 2 ** -24;
+    else if (exp === 31) out[i] = frac ? NaN : sgn * Infinity;
+    else out[i] = sgn * (1 + frac / 1024) * 2 ** (exp - 15);
+  }
+  return out;
+}
+
+// Decoded per-module caches for the current payload: {u8 ci, f32 inner, f32 meanCi}.
+const dec = new Map();
+function moduleData(mi) {
+  const key = cur.step + ":" + mi;
+  if (!dec.has(key)) {
+    const m = cur.modules[mi];
+    dec.set(key, {
+      meanCi: b64F32(m.mean_ci),
+      ci: m.ci ? b64Bytes(m.ci) : null,
+      inner: m.inner ? b64F16(m.inner) : null,
+    });
+  }
+  return dec.get(key);
+}
+
+const lerp = (a, b, t) => a + (b - a) * t;
+function ramp(stops, t) {
+  t = Math.min(1, Math.max(0, t));
+  const x = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+  return [0, 1, 2].map(c => Math.round(lerp(stops[i][c], stops[i + 1][c], f)));
+}
+const CI_STOPS = [[255,255,255],[252,197,192],[221,52,151],[73,0,106]];          // ~RdPu
+const DIV_STOPS = [[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31]]; // ~RdBu_r
+
+function shortName(name) { return name.split(".").slice(-2).join("."); }
+
+// value accessor into [comp, pos, op, a, b] flattened grids
+function gridIndex(si, pi, oi, ai, bi) {
+  const nPos = cur.positions.length, nOps = cur.ops.length;
+  return (((si * nPos + pi) * nOps + oi) * cur.n_a + ai) * cur.n_b + bi;
+}
+
+function drawGrid(canvas, getVal, colour, px) {
+  const { n_a, n_b } = cur;
+  canvas.width = n_b; canvas.height = n_a;
+  canvas.style.width = n_b * px + "px"; canvas.style.height = n_a * px + "px";
+  const g = canvas.getContext("2d"), img = g.createImageData(n_b, n_a);
+  for (let ai = 0; ai < n_a; ai++) for (let bi = 0; bi < n_b; bi++) {
+    const v = getVal(ai, bi), o = (ai * n_b + bi) * 4;
+    const rgb = Number.isNaN(v) ? [225, 225, 225] : colour(v);
+    img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+}
+
+function innerScale(data, si, pi, oi) {
+  let mx = 0;
+  for (let ai = 0; ai < cur.n_a; ai++) for (let bi = 0; bi < cur.n_b; bi++) {
+    const v = data.inner[gridIndex(si, pi, oi, ai, bi)];
+    if (!Number.isNaN(v)) mx = Math.max(mx, Math.abs(v));
+  }
+  return mx || 1;
+}
+
+function tileDrawers(mi, si, pi, oi) {
+  const data = moduleData(mi);
+  const ciVal = (ai, bi) => data.ci[gridIndex(si, pi, oi, ai, bi)] / 255;
+  const innerVal = (ai, bi) => data.inner[gridIndex(si, pi, oi, ai, bi)];
+  const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
+  return {
+    ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0),
+    inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0),
+    ciVal, innerVal,
+  };
+}
+
+function visibleComponents() {
+  const pi = +$("pos").value, thr = thrValue(), out = [];
+  cur.modules.forEach((m, mi) => {
+    const meanCi = moduleData(mi).meanCi, nPos = cur.positions.length;
+    m.saved.forEach((c, si) => {
+      let best = 0;
+      for (let p = 0; p < nPos; p++) best = Math.max(best, meanCi[p * m.C + c]);
+      if (meanCi[pi * m.C + c] >= thr || (thr <= cur.mean_ci_floor && best >= cur.mean_ci_floor))
+        out.push({ mi, si, c, name: m.name, meanCi: meanCi[pi * m.C + c] });
+    });
+  });
+  out.sort((x, y) => y.meanCi - x.meanCi);
+  return out;
+}
+
+// Threshold slider is log-spaced between the save floor and 1 (floor clamped so a
+// floor of 0 — "save everything" — still gives a finite log range).
+function thrValue() {
+  const lo = Math.log10(Math.max(cur.mean_ci_floor, 1e-6)), t = +$("thr").value;
+  return 10 ** lerp(lo, 0, t);
+}
+
+function renderGallery() {
+  const pi = +$("pos").value, oi = +$("op").value, view = $("view").value;
+  const comps = visibleComponents(), gallery = $("gallery");
+  gallery.innerHTML = "";
+  $("thrval").textContent = thrValue().toExponential(2);
+  $("count").textContent = comps.length + " shown";
+  $("empty").style.display = comps.length ? "none" : "block";
+  for (const comp of comps) {
+    const tile = document.createElement("div");
+    tile.className = "tile";
+    const cv = document.createElement("canvas");
+    cv.dataset.px = 2;
+    const lbl = document.createElement("div");
+    lbl.className = "lbl";
+    lbl.textContent = `${shortName(comp.name)} #${comp.c} · ${comp.meanCi.toExponential(1)}`;
+    tile.append(cv, lbl);
+    tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
+    if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
+    gallery.append(tile);
+    tileDrawers(comp.mi, comp.si, pi, oi)[view](cv);
+  }
+}
+
+function renderDetail() {
+  const detail = $("detail");
+  if (!selected || !cur.modules[selected.mi] || cur.modules[selected.mi].saved[selected.si] !== selected.c) {
+    detail.style.display = "none"; return;
+  }
+  detail.style.display = "block";
+  const pi = +$("pos").value, oi = +$("op").value;
+  $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${cur.positions[pi]} · step ${cur.step}`;
+  const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
+  for (const [id, kind] of [["dci", "ci"], ["dinner", "inner"]]) {
+    const cv = $(id);
+    cv.dataset.px = 4;
+    drawers[kind](cv);
+    cv.onmousemove = ev => {
+      const r = cv.getBoundingClientRect();
+      const bi = Math.floor((ev.clientX - r.left) / r.width * cur.n_b);
+      const ai = Math.floor((ev.clientY - r.top) / r.height * cur.n_a);
+      if (ai < 0 || bi < 0 || ai >= cur.n_a || bi >= cur.n_b) return;
+      const a = cur.a_min + ai, b = cur.b_min + bi;
+      $("readout").textContent =
+        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}   inner=${drawers.innerVal ? drawers.innerVal(ai, bi).toFixed(4) : "n/a"}`;
+    };
+  }
+}
+
+function render() { renderGallery(); renderDetail(); }
+
+function setPayload(payload) {
+  cur = payload;
+  const posSel = $("pos"), opSel = $("op");
+  const keepPos = posSel.value, keepOp = opSel.value;
+  posSel.innerHTML = payload.positions.map((p, i) => `<option value="${i}">${p}</option>`).join("");
+  opSel.innerHTML = payload.ops.map((o, i) => `<option value="${i}">${o}</option>`).join("");
+  if (keepPos && +keepPos < payload.positions.length) posSel.value = keepPos;
+  if (keepOp && +keepOp < payload.ops.length) opSel.value = keepOp;
+  render();
+}
+
+function loadStep(step, file) {
+  if (steps[step]) { setPayload(steps[step]); return; }
+  const tag = document.createElement("script");
+  tag.src = file;
+  document.body.append(tag);
+}
+
+const manifest = (window.AB_GRIDS_MANIFEST || []).map(f => ({ file: f, step: +f.match(/step_(\d+)\.js/)[1] }));
+manifest.sort((a, b) => a.step - b.step);
+$("step").innerHTML = manifest.map(m => `<option value="${m.step}">${m.step}</option>`).join("");
+if (manifest.length) $("step").value = manifest[manifest.length - 1].step;
+
+$("step").onchange = () => loadStep(+$("step").value, manifest.find(m => m.step === +$("step").value).file);
+for (const id of ["pos", "op", "view"]) $(id).onchange = render;
+$("thr").oninput = render;
+$("thr").value = 0;
+
+if (manifest.length) loadStep(manifest[manifest.length - 1].step, manifest[manifest.length - 1].file);
+else document.body.insertAdjacentHTML("beforeend", '<div id="empty" style="display:block">no snapshots yet — manifest.js is empty</div>');
+</script>
+</body>
+</html>

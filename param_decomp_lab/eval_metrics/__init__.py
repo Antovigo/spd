@@ -23,6 +23,7 @@ from param_decomp.metrics.stochastic_hidden_acts_recon import (
     StochasticHiddenActsReconLoss,
     StochasticHiddenActsReconLossConfig,
 )
+from param_decomp_lab.eval_metrics.ab_grid_dataset import ABGridDataset, ABGridDatasetConfig
 from param_decomp_lab.eval_metrics.attn_patterns_recon_loss import (
     CIMaskedAttnPatternsReconLoss,
     CIMaskedAttnPatternsReconLossConfig,
@@ -69,7 +70,8 @@ from param_decomp_lab.eval_metrics.uv_plots import UVPlots, UVPlotsConfig
 from param_decomp_lab.eval_metrics.weight_magnitude import WeightMagnitude, WeightMagnitudeConfig
 
 AnyEvalMetricConfig = Annotated[
-    CEandKLLossesConfig
+    ABGridDatasetConfig
+    | CEandKLLossesConfig
     | CIHiddenActsReconLossConfig
     | CIHistogramsConfig
     | CI_L0Config
@@ -97,6 +99,7 @@ AnyEvalMetricConfig = Annotated[
 EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
     cls.__name__: cls
     for cls in (
+        ABGridDataset,
         CEandKLLosses,
         CIHiddenActsReconLoss,
         CIHistograms,
