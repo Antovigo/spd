@@ -20,7 +20,7 @@ from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.adversary import PersistentAdversary, init_sources_adam_state
 from param_decomp.ci_fn import ChunkwiseTransformerCIArch, CIFnArch
-from param_decomp.components import WeightInit, component_stacks_from_sites
+from param_decomp.components import WeightInit
 from param_decomp.configs import (
     AdamPGDConfig,
     AdamWOptimizerConfig,
@@ -175,11 +175,7 @@ def init_decomposition(
         case "kaiming":
             target_weights = None
         case "coupled":
-            # The protocol exposes W only through `weight_deltas`; on zero V/U the delta IS W.
-            zero_vu = component_stacks_from_sites(
-                {s.name: (jnp.zeros((s.d_in, s.C)), jnp.zeros((s.C, s.d_out))) for s in model.sites}
-            )
-            target_weights = model.weight_deltas(zero_vu)
+            target_weights = {name: model.target_weight(name) for name in model.site_names}
     # V/U placement derives from the rules table; the CI fn still declares its own
     # per-leaf shardings (the staged placement migration hasn't reached it).
     components = init_component_stacks_placed(
