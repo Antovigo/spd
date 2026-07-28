@@ -1,10 +1,10 @@
 """The SHARED machinery of the vendored HF GLU-transformer decomposition targets: site
 grammar, frozen modules, the scan/masked-forward engine, and HF safetensors loading. The
-model FAMILIES live in their own files — `targets/llama8b.py`, `targets/qwen3_8b.py` —
+model FAMILIES live in their own files — `llama8b.py`, `qwen3_8b.py` —
 each contributing its arch config, its `FrozenAttn` variant (via the `_prep_qk` pre-RoPE
 hook, e.g. Qwen3's QK-norm), and its HF attn loader; nothing here switches on a family.
 
-The decomposed sites are any per-layer weight matrices named torch-style:
+The decomposed sites are any per-layer weight matrices (SPEC §1/§3) named torch-style:
 `layers.{i}.self_attn.{q,k,v,o}_proj` and `layers.{i}.mlp.{gate,up,down}_proj`, each
 with its own C. `GLUDecomposedModel` (an `eqx.Module`) carries the full frozen model —
 embedding through every layer to the LM head — as array fields, threaded into the jitted
@@ -12,10 +12,19 @@ step as a pytree arg; layers without sites run the plain frozen block.
 
 q/k/v sites are decomposed BEFORE `_prep_qk`/RoPE/SDPA (the masked site output feeds the
 attention math); the o site applies to the attention output. V/U masters are fp32
-keyed per site (`ComponentStacks`); frozen weights are stored bf16 — the trainer
+keyed per site (`ComponentStacks`); frozen weights are stored bf16 (SPEC N1) — the trainer
 casts for compute.
 
 Real HF weights load straight from the cached safetensors (no torch dep).
+
+Sharding (the production HSDP memory story): the frozen target declares its own
+placement via `.shardings(mesh)` — FSDP-sharded on `fsdp` (the `d` dim of every
+per-layer weight; embed / lm_head / norm / inv_freq replicate), applied by the engine's
+`sharding.place_target`, gathered one layer at a time in the scan on NVLink. The bf16
+COMPUTE weights are re-pinned to `fsdp`-only ONCE per step in
+`_reconstruct_compute_weights` (the cross-`replicate` gather, off the per-layer hot
+path). V/U, CI-fn, and source placement are the engine's concern (`placement`,
+`init_placed`), not this module's.
 """
 
 import json
@@ -36,8 +45,8 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Int
 from safetensors import safe_open
 
-from param_decomp import family
-from param_decomp.components import (
+from param_decomp.core import family
+from param_decomp.core.components import (
     ComponentStacks,
     SiteC,
     SiteSpec,
@@ -45,11 +54,17 @@ from param_decomp.components import (
     quantize_fp8,
     site_out,
 )
-from param_decomp.family import ArchFamily
-from param_decomp.losses import kl_per_position
-from param_decomp.sharding import assert_divisible
+from param_decomp.core.family import ArchFamily
+from param_decomp.core.losses import kl_per_position
+from param_decomp.core.sharding import assert_divisible
 from param_decomp.targets.transformer_taps import resid_tap_key
-from vendored_jax.llama import apply_rope, causal_sdpa, repeat_kv, rms_norm, rope_cos_sin
+from param_decomp.vendored_jax.llama import (
+    apply_rope,
+    causal_sdpa,
+    repeat_kv,
+    rms_norm,
+    rope_cos_sin,
+)
 
 
 class GLUArch(Protocol):
@@ -107,7 +122,7 @@ def default_inv_freq(head_dim: int, rope_theta: float) -> Float[Array, " hd2"]:
 
 
 # GLU = SwiGLU MLP (llama8b, qwen3_8b). The family's matrix vocabulary — the authored
-# c-spec keys (in the experiment harness's schema) are typed by it, so a c-spec key and a target matrix cannot drift.
+# c-spec keys (lab-side) are typed by it, so a c-spec key and a target matrix cannot drift.
 GluMatrix = Literal["q", "k", "v", "o", "gate", "up", "down"]
 
 KIND_ORDER: tuple[str, ...] = get_args(GluMatrix)
@@ -347,7 +362,7 @@ def _frozen_site_weight(layer: GLULayer, kind: str) -> Array:
 
 def _clean_mlp_out(layer: GLULayer, mlp_in: Array) -> Array:
     """Frozen target MLP — exactly `W` applied, not the `V@U + (W−V@U)` identity, so
-    non-live sites carry no V/U gradient and no decomposition rounding."""
+    non-live sites carry no V/U gradient and no decomposition rounding (SPEC S2/S3)."""
     return (jax.nn.silu(mlp_in @ layer.Wg.T) * (mlp_in @ layer.Wu.T)) @ layer.Wd.T
 
 
@@ -639,7 +654,7 @@ def _gather_full_weight(w: Array, spec: P) -> Array:
 
 
 class GLUDecomposedModel(eqx.Module):
-    """The GLU-transformer `DecomposedModel` (the `model.py` contract), shared
+    """The GLU-transformer `DecomposedModel` (the `model.py` contract; SPEC §1), shared
     across the HF GLU families — a family's identity lives in its `stacked.attn` module
     (its `FrozenAttn` variant) and `inv_freq`, never in a switch here.
 
@@ -718,7 +733,7 @@ class GLUDecomposedModel(eqx.Module):
         return self.embed[tokens]
 
     def clean_output(self, inputs: Int[Array, "b t"]) -> Array:
-        """The all-frozen forward — the recon target. A `lax.scan` over the block
+        """The all-frozen forward — the recon target (SPEC S3). A `lax.scan` over the block
         stack so XLA compiles one block body instead of unrolling all 32 layers (the compile
         fix for the full model; the scan reassociates float ops vs an unrolled loop, within
         fp32 tolerance)."""
@@ -729,7 +744,7 @@ class GLUDecomposedModel(eqx.Module):
     def read_activations(
         self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
     ) -> dict[str, Array]:
-        """Frozen-path activation accessor (CI input side; harvest's per-site
+        """Frozen-path activation accessor (CI input side, SPEC S4; harvest's per-site
         matrix inputs).
 
         `wanted` keys are either `resid.{layer}` (residual stream ENTERING that block — the
@@ -821,18 +836,18 @@ class GLUDecomposedModel(eqx.Module):
         collect_activations: dict[str, Array] | None = None,
     ) -> Array:
         """The masked decomposed forward shared by `masked_output` / `masked_output_stochastic`
-        / `masked_site_outputs` / `masked_component_activations`. `live_set` is
+        / `masked_site_outputs` / `masked_component_activations` (SPEC §1.3, S2). `live_set` is
         static at trace, so the forward runs as `[frozen prefix] → [live block] → [frozen suffix]`
         static sub-scans (no per-site `lax.cond`): only the live block carries + gathers V/U.
         `live`/`has_delta` are static; a non-None `collect` gathers per-live-site decomposed
-        OUTPUTS (`(x@V)*m@U + …`), and a non-None `collect_activations` gathers
+        OUTPUTS (`(x@V)*m@U + …`, SPEC S31), and a non-None `collect_activations` gathers
         per-live-site component ACTIVATIONS `x@V` (`[*leading, C]`, mask-independent — the
         pre-mask coefficient the arithmetic CI-grid eval visualizes). Assumes layer-aligned,
         contiguous chunks (asserted below).
 
         `prepared` is the shared, stacked + ÷fsdp-reconstructed per-kind `(V, U)` from
         `prepare_compute_weights` (built ONCE per step) — this fn only ATTACHES the per-forward
-        masks, so the ÷N→÷fsdp cross-node gather is not re-run here (semantics unchanged; numerics
+        masks, so the ÷N→÷fsdp cross-node gather is not re-run here (SPEC unchanged; numerics
         identical — the reconstruction is mask-independent and the same for every forward)."""
         live_set = frozenset(live)
         resid = self.embed_tokens(inputs)
@@ -1041,7 +1056,7 @@ class GLUDecomposedModel(eqx.Module):
         return logits
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> dict[str, dict[str, Array]]:
-        """Build the shared per-kind compute weights ONCE per step (semantics unchanged): stack the
+        """Build the shared per-kind compute weights ONCE per step (SPEC unchanged): stack the
         per-site V/U into the layer-stacked `[n_layer, …]` form and run the ÷N→÷fsdp cross-node
         reconstruction + bf16 cast. The result is mask-independent and identical for every
         forward in the step, so the engine builds it once and threads it into all
@@ -1069,7 +1084,7 @@ class GLUDecomposedModel(eqx.Module):
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
         """Per-kind `[n_layer, *leading, C]` stack of the CI envelope, built ONCE per step and
         shared across all stochastic recon forwards (`masked_output_stochastic`). The
-        StochasticReconCapable capability (semantics unchanged — pure recompute restructuring)."""
+        StochasticReconCapable capability (SPEC unchanged — pure recompute restructuring)."""
         return _stack_ci_per_kind(ci_lower, self.n_layer)
 
     def masked_output_stochastic(
@@ -1103,7 +1118,7 @@ class GLUDecomposedModel(eqx.Module):
         live: tuple[str, ...],
         has_delta: bool,
     ) -> dict[str, Array]:
-        """Per-`live`-site decomposed output of the masked forward. Runs the
+        """Per-`live`-site decomposed output of the masked forward (SPEC S31). Runs the
         exact `masked_output` forward, discards the logits, returns the collected outputs."""
         collect: dict[str, Array] = {}
         self._run_masked_forward(
@@ -1137,7 +1152,7 @@ class GLUDecomposedModel(eqx.Module):
         return collect_activations
 
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Array]:
-        """fp32 `W − V@U` per site from fp32 masters (faithfulness input)."""
+        """fp32 `W − V@U` per site from fp32 masters (SPEC N2; faithfulness input)."""
         out: dict[str, Array] = {}
         for spec in self.sites:
             layer, kind = parse_site_name(spec.name)
@@ -1153,18 +1168,13 @@ class GLUDecomposedModel(eqx.Module):
 
 
 def hf_snapshot_dir(model_name: str) -> Path:
-    """Newest local snapshot of `model_name`. `HF_HUB_CACHE` overrides; otherwise on
-    cluster (`DATA_MOUNT` set) the shared world-readable cache is the source — a home
-    `~/.cache` hub is silently mutable, and a wiped entry strands running jobs that
-    reload weights on requeue."""
+    """Newest local snapshot of `model_name`, from the STANDARD HF hub cache
+    (`HF_HUB_CACHE`, else `~/.cache/huggingface/hub`). Cluster launchers should export
+    `HF_HUB_CACHE` to a shared world-readable cache — a home `~/.cache` hub is silently
+    mutable, and a wiped entry strands running jobs that reload weights on requeue."""
     import os
 
-    default_cache = (
-        f"{os.environ['DATA_MOUNT']}/artifacts/hf_cache/hub"
-        if "DATA_MOUNT" in os.environ
-        else str(Path.home() / ".cache/huggingface/hub")
-    )
-    cache = Path(os.environ.get("HF_HUB_CACHE", default_cache))
+    cache = Path(os.environ.get("HF_HUB_CACHE", str(Path.home() / ".cache/huggingface/hub")))
     repo = "models--" + model_name.replace("/", "--")
     snaps = sorted((cache / repo / "snapshots").iterdir())
     assert snaps, f"no snapshot for {model_name} under {cache}"
@@ -1173,7 +1183,7 @@ def hf_snapshot_dir(model_name: str) -> Path:
 
 class HFWeights:
     """Lazy keyed access to the sharded safetensors of an HF checkpoint, cast to the
-    FAMILY's frozen-weights dtype (bf16 storage — the families pass it; this
+    FAMILY's frozen-weights dtype (SPEC N1: bf16 storage — the families pass it; this
     module holds no dtype opinion)."""
 
     def __init__(self, snapshot: Path, dtype: DTypeLike):

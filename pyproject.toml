@@ -1,7 +1,7 @@
 [project]
 name = "param-decomp"
 version = "0.0.1"
-description = "The JAX VPD trainer (core) + target pretraining + vendored JAX archs"
+description = "Parameter decomposition: the generic VPD library (core engine, targets, pretraining, vendored archs)"
 requires-python = ">=3.12,<3.14"
 urls = { "Homepage" = "https://github.com/goodfire-ai/param-decomp" }
 license = { text = "MIT" }
@@ -10,11 +10,8 @@ dependencies = [
     # The torch-free pydantic config schema now ships inside this distribution
     # (`param_decomp.configs` / `base_config` / `schedule`), so it carries the schema's
     # leaf deps directly (was the dissolved `param-decomp-config` package).
-    "pydantic<2.12", # 2.12 upgrade blocked on pyright/wandb issues
+    "pydantic<2.12", # https://github.com/goodfire-ai/param-decomp/pull/232 , issues/221
     "annotated-types",
-    # Explicit (not just transitive): TypeVar(default=...) on 3.12 (PEP 696 is stdlib
-    # only from 3.13).
-    "typing-extensions==4.15.0",
     "jax==0.10.1",
     "equinox==0.13.8",
     "optax==0.2.8",
@@ -29,35 +26,58 @@ dependencies = [
     "wandb==0.21.0",
     "matplotlib==3.10.8",
     "pillow==12.0.0",
+    # Explicit (not just transitive): param_decomp.components imports TypeVar from
+    # typing_extensions for PEP 696 defaults on Python 3.12.
+    "typing-extensions==4.15.0",
+    # Composition / consumer-layer deps (absorbed from the dissolved param-decomp-lab
+    # distribution when the lab merged into the library).
+    "fire",
+    "wandb-workspaces==0.1.12", # See https://github.com/wandb/wandb-workspaces/issues/65
+    "sympy",
+    "streamlit",
+    "streamlit-antd-components",
+    "scipy>=1.14.1",
+    "orjson",
+    "aiolimiter>=1.2",
+    "openrouter>=0.1.1",
+    "httpx>=0.28.0",
+    "zstandard", # For streaming datasets
+    "kaleido==0.2.1",
+    "numba>=0.64.0",
+    "requests",
+    "python-dotenv",
+    "tqdm",
+    "transformers",
+    # `datasets` less than 2.21.0 causes issues due to incompatibility with numpy>=2.0
+    "datasets>=2.21.0",
 ]
 
 [project.optional-dependencies]
-# CUDA jaxlib wheels for the cluster; pd-lm's job-side node workspaces install one of
-# these extras. The dev venv (CPU box) takes the base CPU jax above.
+# CUDA jaxlib wheels for GPU boxes; a dev venv on a CPU box takes the base CPU jax above.
 cuda = ["jax[cuda12]==0.10.1"]
 # CUDA-13 wheel track: same jax, newer runtime libs. cuBLAS >= 13.2 fixes a Blackwell TMEM
-# double-free (silent-corruption hazard; cuBLAS 12.9 warns on B200). Needs driver >= r580,
-# so the node setup picks cuda13 vs cuda off the node's own driver (one cluster's r570
-# falls back to cu12).
+# double-free (silent-corruption hazard; cuBLAS 12.9 warns on B200). Needs driver >= r580;
+# older drivers fall back to the cu12 extra.
 cuda13 = ["jax[cuda13]==0.10.1", "nvidia-cublas>=13.2.0.9"]
 
 [project.scripts]
-# No core console scripts: the trainers run as modules (`python -m param_decomp.run` /
-# `python -m pretrain.train`), which is what the lab launchers `pd-lm` / `pd-pretrain`
-# sbatch (and what you'd run for direct debug). Slow/plot eval is in-loop only (SPEC S28).
+# The library's own CLIs — all in-process, scheduler-free. The trainers run as modules
+# (`python -m param_decomp.experiments.lm.run` / `-m param_decomp.pretrain.train`), the
+# pipeline stages via their worker module mains; a deployment's submitters wrap those
+# module invocations.
+pd-tms = "param_decomp.experiments.tms.run:cli"
+pd-resid-mlp = "param_decomp.experiments.resid_mlp.run:cli"
+pd-cluster-merge = "param_decomp.clustering.scripts.run_merge:cli"
+pd-cluster-distances = "param_decomp.clustering.scripts.calc_distances:cli"
 
 [dependency-groups]
 dev = [
-    # The experiment harness (pd-lm and the other pd-* CLIs) rides the dev group so a
-    # plain `uv sync` installs it; core's runtime deps never include the lab (the
-    # `lab -> param_decomp` dependency edge is one-way).
-    "param-decomp-lab",
     "pytest",
     "pytest-cov", # for coverage reports
     "pytest-xdist", # parallel test execution
     "pytest-testmon", # only re-run tests affected by code changes
     "ruff",
-    "basedpyright<1.32.0", # pyright and wandb issues
+    "basedpyright<1.32.0", # pyright and wandb issues, see https://github.com/goodfire-ai/param-decomp/pull/232
     "pre-commit",
     "scikit-learn",
     "ipykernel",
@@ -75,24 +95,17 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 include-package-data = false
 
+[tool.setuptools.package-data]
+param_decomp = [
+    "experiments/**/*.yaml",
+    "clustering/configs/**/*.yaml",
+    "clustering/configs/**/*.json",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = [
-    "param_decomp",
-    "param_decomp.*",
-    "pretrain",
-    "pretrain.*",
-    "vendored_jax",
-    "vendored_jax.*",
-]
+include = ["param_decomp", "param_decomp.*"]
 namespaces = false
-
-[tool.uv.workspace]
-members = ["param_decomp_lab"]
-
-[tool.uv.sources]
-param-decomp = { workspace = true }
-param-decomp-lab = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -133,19 +146,16 @@ known-third-party = ["wandb"]
 # in a torch env, not this JAX-only one.
 # `vendored_jax` is a verbatim numeric mirror of the torch vendored Llama — kept out of
 # type-checking (its correctness contract is the parity tests, not types).
-include = ["param_decomp", "pretrain", "param_decomp_lab"]
+include = ["param_decomp"]
 exclude = [
     "**/wandb/**",
     "**/_scratch/**",
     "**/node_modules/**",
     "**/__pycache__",
     "nano_param_decomp",
-    "vendored_jax",
-    "param_decomp/tests/equivalence/torch_reference.py",  # torch-env script
-    "param_decomp/tools/convert_llama_simple_mlp_checkpoint.py",  # torch-env script
-    "param_decomp/tests/simple_mlp_equivalence/gen_torch_fixtures.py",  # torch-env script
-    "param_decomp/tests/qwen3_hf_parity/gen_hf_fixtures.py",  # torch-env script
-    "param_decomp/tests/stacked_parity/gen_stacked_fixtures.py",  # base-branch-only script (pre-restructure API)
+    "param_decomp/vendored_jax",
+    "param_decomp/targets/tests/qwen3_hf_parity/gen_hf_fixtures.py",  # torch-env script
+    "param_decomp/targets/tests/stacked_parity/gen_stacked_fixtures.py",  # base-branch-only script (pre-restructure API)
 ]
 stubPath = "typings" # Having type stubs for transformers shaves 10 seconds off basedpyright calls
 

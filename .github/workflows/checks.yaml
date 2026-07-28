@@ -1,70 +1,123 @@
 name: Checks
+permissions:
+  contents: read
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - dev
   pull_request:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    branches:
+      - "**"
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: install (py${{ matrix.python }})
+  # Guard the requires-python floor: downstream consumers deploy on Python 3.12, so
+  # the package must stay importable there. The full suite
+  # runs on 3.13 in the build shards below.
+  python-312-compat:
+    name: python 3.12 compat (import smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.8.19"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --python 3.12
+      - name: Import smoke
+        run: |
+          uv run python -c "import param_decomp.core.built_run; from param_decomp.core.components import SiteSpec"
+          uv run pd-tms --help > /dev/null
+
+  build:
+    # The test suite is sharded across parallel jobs (an exact partition — see the
+    # test-ci-* Makefile targets): one job running everything overruns the job timeout,
+    # and a timed-out job never saves its JAX compile cache, leaving every later run
+    # cold and slower still.
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: ${{ matrix.python }}
-          enable-cache: true
-      - run: uv sync --frozen
-      - name: Import smoke
-        run: |
-          uv run python -c "import param_decomp, param_decomp_lab"
-          uv run python -c "import param_decomp.built_run; from param_decomp.components import SiteSpec"
-          uv run pd-lm --help > /dev/null
-
-  lint-type:
-    name: lint + type (py3.13)
+        shard: [llama-goldens, core, lab-multidevice]
+    name: build (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/${{ github.repository }}/ci-mpi:latest
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.13"
-          enable-cache: true
-      - run: uv sync --frozen
-      - run: uv run ruff check --no-fix
-      - run: uv run ruff format --check
-      - run: make type
+      - name: Checkout
+        uses: actions/checkout@v7
 
-  test:
-    name: tests (py3.13, non-slow)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      MPLBACKEND: Agg
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      # Container runs as different user than repo owner, causing "dubious ownership" errors.
+      # Tests that run subprocesses (e.g. test_distributed.py) need git commands to work.
+      - name: Configure git safe directory
+        run: git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.13"
+          version: "0.8.19"
           enable-cache: true
-      - run: uv sync --frozen
-      - name: Cache JAX compile cache
-        uses: actions/cache@v4
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: make install-ci
+
+      - name: Print dependencies
+        run: uv pip list
+
+      - name: Cache HuggingFace downloads
+        uses: actions/cache@v6
         with:
-          path: .jax_test_cache
-          key: jax-test-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
-      - run: >
-          uv run pytest
-          param_decomp/tests/ param_decomp_lab/tests/ param_decomp_lab/experiments/
-          --numprocesses 4 --dist worksteal --durations 15
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-${{ github.run_id }}-${{ matrix.shard }}
+          restore-keys: |
+            hf-
+
+      # Compiled executables are content-addressed by HLO + backend + jax/xla version
+      # (conftest.py pins the CPU ISA ceiling to AVX2 so a cache entry stays valid across
+      # any runner), so a stale, cross-lockfile, or cross-shard hit is a safe no-op miss,
+      # not a wrong answer — restore-keys lets a uv.lock bump or a fresh shard degrade to
+      # a partial hit instead of cold. The key is per-shard because a cache key is
+      # immutable once saved: on a shared key only the first shard to finish would ever
+      # persist its compiles.
+      - name: Cache JAX compilation cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.jax_test_cache
+          key: jax-test-cache-${{ matrix.shard }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            jax-test-cache-${{ matrix.shard }}-
+            jax-test-cache-
+
+      - name: Run basedpyright
+        run: uv run basedpyright
+
+      - name: Run ruff lint
+        run: uv run ruff check --fix-only .
+
+      - name: Run ruff format
+        run: uv run ruff format .
+
+      - name: Run tests
+        run: make test-ci-${{ matrix.shard }}
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          OMPI_ALLOW_RUN_AS_ROOT: 1
+          OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+          HF_HOME: ${{ github.workspace }}/.hf-cache

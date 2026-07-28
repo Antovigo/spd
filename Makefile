@@ -1,20 +1,14 @@
 # setup
-# ONE venv for the whole workspace: the JAX trainer core (`param_decomp` + `pretrain` +
-# `vendored_jax`) is the root distribution and carries jax as a normal dependency, so a
-# single `uv sync --all-packages` installs core + config + lab into one `.venv`. The CPU
-# jax wheel is the base; the CUDA wheel is the `[cuda]` extra the per-run launch workspace
-# installs.
+# ONE venv: the library (`param_decomp`) is the root distribution and carries jax as a
+# normal dependency. The CPU jax wheel is the base; the CUDA wheels are the `[cuda]` /
+# `[cuda13]` extras a GPU deployment installs.
 .PHONY: install
 install:
 	uv sync --no-dev
 
-.PHONY: install-lab
-install-lab:
-	uv sync --all-packages --no-dev
-
 .PHONY: install-dev
 install-dev:
-	uv sync --all-packages
+	uv sync
 	uv run --no-sync pre-commit install
 
 # special install for CI (GitHub Actions) that reduces disk usage and install time
@@ -22,13 +16,12 @@ install-dev:
 # 2. install with `uv sync` but with some special options:
 #  > `--frozen` to enforce using the lock file for consistent dependency versions
 #  > `--link-mode copy` because symlinks/hardlinks dont work half the time anyway
-# Note: explored the `--compile-bytecode` option for test speedups, nothing came of it.
+# Note: explored the `--compile-bytecode` option for test speedups, nothing came of it. see https://github.com/goodfire-ai/param-decomp/pull/187/commits/740f6a28f4d3378078c917125356b6466f155e71
 .PHONY: install-ci
 install-ci:
 	uv venv --python 3.13 --clear
 	uv sync \
 		--frozen \
-		--all-packages \
 		--link-mode copy
 
 # checks
@@ -51,10 +44,11 @@ check-pre-commit:
 
 # tests
 
-# `param_decomp/tests/` is the JAX trainer core suite (incl. the LM equivalence goldens);
-# `param_decomp_lab/{tests,experiments}/` the lab suites (the toy TMS/ResidMLP tests live
-# beside their models under experiments/).
-TEST_PATHS = param_decomp/tests/ param_decomp_lab/tests/ param_decomp_lab/experiments/
+# `param_decomp/core/tests/` is the engine suite; `param_decomp/targets/tests/` the
+# per-target parity/golden suites (incl. the LM equivalence goldens);
+# `param_decomp/{tests,experiments}/` the library-level + composition suites (the toy
+# TMS/ResidMLP experiment tests live beside their composition roots under experiments/).
+TEST_PATHS = param_decomp/core/tests/ param_decomp/targets/tests/ param_decomp/tests/ param_decomp/experiments/
 
 .PHONY: test
 test:
@@ -74,7 +68,7 @@ test-all:
 # JAX compile cache and every later run repeats the compile cost. The llama goldens
 # split off because they dominate one xdist worker for ~8 min and co-schedule the
 # heaviest memory peaks next to the recon end-to-end tests on a 16GB runner.
-LLAMA_GOLDEN_TEST_PATHS = param_decomp/tests/test_llama8b.py param_decomp/tests/test_llama_simple_mlp.py
+LLAMA_GOLDEN_TEST_PATHS = param_decomp/targets/tests/test_llama8b.py param_decomp/targets/tests/test_llama_simple_mlp.py
 
 .PHONY: test-ci-llama-goldens
 test-ci-llama-goldens:
@@ -82,11 +76,11 @@ test-ci-llama-goldens:
 
 .PHONY: test-ci-core
 test-ci-core:
-	uv run pytest param_decomp/tests/ $(addprefix --ignore=,$(LLAMA_GOLDEN_TEST_PATHS)) --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
+	uv run pytest param_decomp/core/tests/ param_decomp/targets/tests/ $(addprefix --ignore=,$(LLAMA_GOLDEN_TEST_PATHS)) --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 
 .PHONY: test-ci-lab-multidevice
 test-ci-lab-multidevice:
-	uv run pytest param_decomp_lab/tests/ param_decomp_lab/experiments/ --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
+	uv run pytest param_decomp/tests/ param_decomp/experiments/ --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 	$(MAKE) test-multidevice
 
 # Tests needing >1 device (sharding / checkpoint topology). They hang at the default 1
@@ -101,7 +95,7 @@ COVERAGE_DIR=docs/coverage
 
 .PHONY: coverage
 coverage:
-	uv run pytest $(TEST_PATHS) --cov=param_decomp --cov=param_decomp_lab --runslow
+	uv run pytest $(TEST_PATHS) --cov=param_decomp --runslow
 	mkdir -p $(COVERAGE_DIR)
 	uv run python -m coverage report -m > $(COVERAGE_DIR)/coverage.txt
 	uv run python -m coverage html --directory=$(COVERAGE_DIR)/html/
