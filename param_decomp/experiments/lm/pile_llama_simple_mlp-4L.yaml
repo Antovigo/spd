@@ -8,7 +8,7 @@
 # it carries the current JAX algorithm (global 4-block chunkwise CI, smooth-L0
 # importance minimality, and merged stochastic-subset PPGD reconstruction).
 #
-# Launch on 2 nodes (16 GPUs, dp=16):
+# Run inside a 2-node allocation (16 GPUs, dp=16):
 #   python -m param_decomp.experiments.lm.run param_decomp/experiments/lm/pile_llama_simple_mlp-4L.yaml
 run_name: ai-jax-pile4l-ppgd-bsc
 cadence:

@@ -99,7 +99,7 @@ target:
   spec:
     kind: pretrained                    # in-repo lab-pretrained model
     model_class: param_decomp.experiments.lm.pretrain.models.llama_simple_mlp.LlamaSimpleMLP
-    run_path: <entity>/<project>/runs/<run_id>
+    run_path: <entity>/<project>/runs/<run_id>   # the W&B pretrain run — see below
 
 # or
 target:
@@ -115,6 +115,21 @@ target:
     model_class: transformers.Qwen3ForCausalLM
     model_name: Qwen/Qwen3-8B-Base
 ```
+
+### `kind: pretrained` — `run_path`
+
+`run_path` names the W&B pretrain run whose checkpoint is the target's weights — a name,
+never a location. It resolves to the local store entry
+`<data_root>/pretrain_cache/<project>-<run_id>/` (one `model_step_<N>.safetensors` plus
+`model_config.yaml`), fetched from W&B on first use and read from disk ever after
+(`infra/pretrain_cache.py::resolved_cache_dir` — a complete entry short-circuits, so cold
+starts are idempotent across ranks and requeues; `targets/` stays network-free). A local
+`param_decomp.pretrain.train` run writes the same layout directly as its output, so
+pretrain-here-then-decompose never touches W&B.
+
+Torch-era pretrain runs ship `model_step_<N>.pt`, which this loader can't read. The fetch
+downloads it anyway and then fails pointing at the local file and the converter at git
+tag `torch-oracle` — conversion needs torch, which the library deliberately doesn't depend on.
 
 `kind: hf`/`hf_weights_in_vendored` model names must be in `experiments/lm/config.py::HF_MODEL_FAMILIES`
 (Llama-3.1-8B, Qwen3-8B-Base) — anything else refuses at convert time. A Qwen3 run needs

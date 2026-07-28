@@ -58,6 +58,7 @@ from param_decomp.experiments.config import (
     assert_canonical_algorithm_config,
     run_instance,
 )
+from param_decomp.infra import pretrain_cache
 from param_decomp.infra.dataset_store import dataset_dir
 from param_decomp.targets import glu_transformer, llama8b, llama_simple_mlp, qwen3_8b
 from param_decomp.targets.glu_transformer import GluMatrix
@@ -74,16 +75,15 @@ class HFTarget(BaseConfig):
 
 
 class PretrainedTarget(BaseConfig):
-    """Load an in-repo lab-pretrained model.
-
-    `run_path` accepts any form `PretrainRunInfo.from_path` does — compact W&B
-    (`entity/project/runId`), full W&B (`entity/project/runs/runId`), or a local
-    checkpoint path (repo-relative paths are resolved at load time by `build_target`).
-    """
+    """Load an in-repo lab-pretrained model (`param_decomp.pretrain.train`'s output)."""
 
     kind: Literal["pretrained"] = "pretrained"
     model_class: str
     run_path: str
+    """`entity/project[/runs]/run_id` — the W&B pretrain run whose checkpoint is the
+    target's weights. A name, never a location: it resolves to the local store entry
+    `<data_root>/pretrain_cache/<project>-<run_id>`, fetched from W&B on first use if
+    not already there (`infra.pretrain_cache`), read from disk ever after."""
 
 
 class HFWeightsInVendored(BaseConfig):
@@ -471,7 +471,8 @@ class TargetConfig:
 @dataclass(frozen=True)
 class LlamaSimpleMLPTargetConfig:
     """The `LlamaSimpleMLP` lab-pretrained target (`param_decomp.core.llama_simple_mlp`);
-    weights from the pretrain cache resolved from `pretrain_run_path`."""
+    weights from the store entry `pretrain_run_path` resolves to
+    (`infra.pretrain_cache.resolved_cache_dir`)."""
 
     pretrain_run_path: str
     sites: tuple[SiteC, ...]
@@ -573,11 +574,12 @@ def _resolve_decomposition(cfg: LMExperimentConfig, data_root: Path) -> _Resolve
             return _ResolvedDecomposition(target, tree, grammar, site_specs)
         case PretrainedTarget():
             assert spec.model_class.rsplit(".", 1)[-1] == "LlamaSimpleMLP", spec.model_class
-            cache_dir = llama_simple_mlp.pretrain_cache_dir(data_root, spec.run_path)
+            cache_dir = pretrain_cache.resolved_cache_dir(data_root, spec.run_path)
             arch = llama_simple_mlp.load_model_config(cache_dir)
             tree = resolve_site_tree(sites, llama_simple_mlp.FAMILY, arch.n_layer)
             target = LlamaSimpleMLPTargetConfig(
-                pretrain_run_path=spec.run_path, sites=tree.site_cs(llama_simple_mlp.FAMILY.name_of)
+                pretrain_run_path=spec.run_path,
+                sites=tree.site_cs(llama_simple_mlp.FAMILY.name_of),
             )
             grammar = _bound_grammar(
                 llama_simple_mlp.FAMILY,

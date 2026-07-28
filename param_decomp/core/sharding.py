@@ -1,20 +1,9 @@
-"""GSPMD sharding helpers — the JAX analog of HSDP (hierarchical FSDP).
+"""GSPMD sharding helpers for the 3-D `(replicate, fsdp, tp)` device mesh.
 
-The HSDP single-pool SPMD design: a 2-D `(replicate, fsdp)` device mesh. `fsdp` is the
-8 intra-node NVLink GPUs (the weight all-gather / grad reduce-scatter axis — kept ON-CHIP);
-`replicate` is the across-node axis (one cross-node grad all-reduce per step, plus the
-pure data-parallel replicas). There is NO tensor-parallel / Megatron-C axis: V/U + the CI
-fn are FSDP-sharded over `fsdp` only, gathered per-layer on NVLink, with C never sharded.
-
-Data shards over the FULL mesh (both axes) so per-rank batch = B/N. Params + PGD sources
-are placed with an explicit sharding, and `jax.jit` inserts every collective (the FSDP
-weight gather on `fsdp`, the grad reduce-scatter on `fsdp` + the cross-node all-reduce on
-`replicate`, the source-grad reduction) automatically because the mean-losses reduce over
-the batch axis. No manual NCCL, no pool-coordination code.
-
-Placement is expressed as `NamedSharding`, and declared, never inferred: a target model
-declares its per-leaf placement via `.shardings(mesh)` and `place_target` applies it;
-`shard_batch` shards the data axis over the full mesh.
+`replicate` spans nodes. Each node is an `(fsdp, tp)` plane: `fsdp` shards the parameter
+and optimizer-state dimensions used by HSDP, while `tp` tensor-parallelizes target
+matrices that declare it. `tp=1` is the ordinary HSDP layout. Batches shard over
+`(replicate, fsdp)` and are replicated across `tp`.
 """
 
 import os

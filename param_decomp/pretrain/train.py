@@ -369,7 +369,7 @@ def _lr_at(cfg: PretrainConfig, step: int) -> float:
 
 def _cache_dir(cfg: PretrainConfig) -> Path:
     """`<data_root>/pretrain_cache/<project>-<run_id>` — the exact dir
-    `param_decomp.core.llama_simple_mlp.pretrain_cache_dir` resolves. `out_dir` is the runs
+    `param_decomp.infra.pretrain_cache.cache_dir_for_run` resolves. `out_dir` is the runs
     dir (`<data_root>/runs`), so the cache ROOT is its parent."""
     assert cfg.out_dir is not None and cfg.run_id is not None
     project = cfg.wandb.project if cfg.wandb is not None else "pretrain"

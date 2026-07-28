@@ -51,14 +51,13 @@ It is quarantined in `KNOWN_BROKEN` in
 
 The former pile-4L seat shared this story until 2026-07-27: it is now the
 current JAX reference config (table above), rewritten from and validated by
-[run p-76082aa1](https://wandb.ai/goodfire/param-decomp/runs/p-76082aa1).
+the completed JAX reference run.
 
 Two former seats shared this story and were evicted on 2026-07-23 ("Remove
-unused configs"; git history keeps the files): `jose.yaml` (the original
-gpt2-arch 4L flagship reference, unrunnable at tip for the reason above) and
-`jose-ish.yaml` (#917 — the deliberate rewrite of the flagship recipe onto one
-`chunkwise_transformer` chunk over all 4 blocks, its deviations from `jose`
-enumerated in its header).
+unused configs"; git history keeps the files): the original gpt2-arch 4L
+flagship reference (unrunnable at tip for the reason above) and its deliberate
+rewrite onto one `chunkwise_transformer` chunk over all 4 blocks — the direct
+ancestor of the current reference config.
 
 ## Rules
 

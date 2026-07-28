@@ -50,7 +50,7 @@ _ARCH: dict[str, Any] = {
 
 
 def _write_pretrain_cache(out_dir: Path) -> None:
-    """A tiny random LlamaSimpleMLP in the layout `pretrain_cache_dir` resolves
+    """A tiny random LlamaSimpleMLP in the layout `cache_dir_for_run` resolves
     (`model_config.yaml` + one `model_step_*.safetensors`, torch [out, in] weights)."""
     cache_dir = out_dir / "pretrain_cache" / "spd-t-00000000"
     cache_dir.mkdir(parents=True)

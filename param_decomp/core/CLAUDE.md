@@ -180,11 +180,10 @@ CPU CLI that builds the `ExperimentConfig` from the canonical schema and calls
 sites jointly, concat/split in canonical site order), and the LM `ChunkwiseTransformerCIFn`
 (positioned, per-chunk transformers reading residual taps, stacked +
 `lax.scan`'d with per-chunk remat, and **N per-site output heads** (one `[d_model, C_j]` per
-site-slot). NOTE: this is the pure-HSDP backup branch — the mesh is `(replicate, fsdp)` with
-NO tensor-parallel / Megatron-C axis (`fsdp` = the 8 intra-node NVLink GPUs, `replicate` =
-across nodes). The CI output C axis is NEVER sharded, so the per-site heads are a layout
-convenience here (they were load-bearing under the prior TP layout, which sliced a tp-sharded
-glued-ΣC head mid-site). **Persistence layouts (÷N)**: the trainable V/U masters AND their
+site-slot). The mesh is `(replicate, fsdp, tp)`: `replicate` spans nodes, while each
+node is an `(fsdp, tp)` plane. `tp` shards declared target dimensions and the CI output C
+axis; the per-site heads keep site boundaries explicit rather than slicing a glued-ΣC head
+mid-site. **Persistence layouts (÷N)**: the trainable V/U masters AND their
 optimizer moments persist as same-shape STACKS (`ComponentStacks.stacks`, owner-partitioned: stack
 axis ÷`replicate` — whole matrices owned per node-group, zero cross-node weight collectives,
 muon NS node-local — matrix d dims ÷`fsdp`, C ÷`tp`; SPEC D4 amendments 2026-07-15 +

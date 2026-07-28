@@ -505,26 +505,6 @@ class SimpleMLPDecomposedModel(eqx.Module):
 # ----------------------------- weight loading -----------------------------
 
 
-def pretrain_cache_dir(data_root: Path, run_path: str) -> Path:
-    """Resolve a pretrain wandb run path (`entity/project[/runs]/run_id`) to its cache
-    dir under `data_root` (the caller's environment decides where that is — this target
-    never reads ambient env and never talks to wandb). The cache must already exist:
-    a pretrain run's (`param_decomp.pretrain.train`) converted safetensors checkpoint +
-    `model_config.yaml`."""
-    match run_path.strip("/").split("/"):
-        case [_entity, project, "runs", run_id] | [_entity, project, run_id]:
-            pass
-        case parts:
-            raise AssertionError(f"unsupported pretrain run path {run_path!r} ({parts})")
-    cache_dir = data_root / "pretrain_cache" / f"{project}-{run_id}"
-    assert cache_dir.exists(), (
-        f"pretrain cache missing: {cache_dir} — stage a pretrained checkpoint there "
-        f"(safetensors + model_config.yaml; torch-era checkpoints convert via the "
-        f"converter at git tag `torch-oracle`)"
-    )
-    return cache_dir
-
-
 def load_model_config(cache_dir: Path) -> LlamaSimpleMLPConfig:
     return config_from_model_config_dict(
         yaml.safe_load((cache_dir / "model_config.yaml").read_text())
