@@ -2,16 +2,27 @@ pd:
   seed: 0
   n_mask_samples: 1
   ci_config:
-    mode: layerwise
-    fn_type: mlp
-    hidden_dims:
-    - 16
+    mode: global
+    fn_type: global_shared_transformer
+    hidden_dims: null
+    simple_transformer_ci_cfg:
+      d_model: 64
+      n_blocks: 2
+      attn_config:
+        n_heads: 4
+        max_len: 8
+        rope_base: 10000.0
+      final_rms_norm: true
   sigmoid_type: leaky_hard
   decomposition_targets:
-  - module_pattern: blocks.*.mlp_in
-    C: 64
-  - module_pattern: blocks.*.mlp_out
-    C: 64
+  - module_pattern: blocks.*.q
+    C: 8
+  - module_pattern: blocks.*.k
+    C: 8
+  - module_pattern: blocks.*.v
+    C: 16
+  - module_pattern: blocks.*.o
+    C: 16
   identity_decomposition_targets: null
   use_delta_component: true
   batch_size: 512
@@ -30,14 +41,34 @@ pd:
   faithfulness_warmup_lr: 0.01
   faithfulness_warmup_weight_decay: 0.1
   loss_metrics:
-    - type: ImportanceMinimalityLoss
-      coeff: 1e-5
-      pnorm: 2.0
-      beta: 0
-    - type: StochasticReconLayerwiseLoss
-      coeff: 1.0
-    - type: StochasticReconLoss
-      coeff: 1.0
+  - type: SmoothL0ImportanceMinimalityLoss
+    coeff: 2e-4
+    gamma: 1.0
+    beta: 0.5
+    gamma_final: 0.01
+    gamma_anneal_start_frac: 0.75
+    gamma_anneal_end_frac: 1.0
+    normalize_at_one: true
+  - type: StochasticReconLayerwiseLoss
+    coeff: 1.0
+  - type: StochasticReconLoss
+    coeff: 1.0
+  - type: PersistentPGDReconLoss
+    coeff: 0.5
+    optimizer:
+      type: adam
+      beta1: 0.5
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        fn_type: constant
+        start_val: 0.01
+        warmup_pct: 0.025
+        final_val_frac: 1.0
+    scope:
+      type: per_batch_per_position
+    start_frac: 0.0
+    use_sigmoid_parameterization: false
 cadence:
   train_log_every: 100
 eval:
@@ -46,20 +77,20 @@ eval:
   every: 500
   slow_every: 5000
   slow_on_first_step: true
-  # PermutedCIPlots / IdentityCIError assume feature-vector inputs (TMS/ResidMLP) and
-  # do not apply to token-ID batches; plot_ci.py is the testbed-specific CI view.
   metrics:
-    - type: CIHistograms
-      n_batches_accum: 5
-    - type: ComponentActivationDensity
-      ci_alive_threshold: 0.1
-    - type: CI_L0
-      groups: null
-      ci_alive_threshold: 0.1
-    - type: CIMeanPerComponent
+  - type: CIHistograms
+    n_batches_accum: 5
+  - type: ComponentActivationDensity
+    ci_alive_threshold: 0.1
+  - type: CI_L0
+    groups: null
+    ci_alive_threshold: 0.1
+  - type: CIMeanPerComponent
+  - type: ToyRedundancyCIPlot
+    ci_alive_threshold: 0.1
 label: toy_model_redundancy
 target:
-  run_path: toy_model_redundancy/training
+  run_path: toy_model_redundancy/copy_training_v8d32_partial
 data: {}
 runtime:
   autocast_bf16: false

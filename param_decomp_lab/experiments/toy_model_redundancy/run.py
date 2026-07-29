@@ -4,6 +4,7 @@ Decomposes the `toy_model_redundancy` toy's block MLP matrices with KL recon
 over its token distribution. Run via `python -m param_decomp_lab.experiments.toy_model_redundancy.run <config.yaml>`.
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, override
@@ -30,7 +31,7 @@ from param_decomp_lab.infra.paths import ModelPath
 from param_decomp_lab.infra.run_files import resolve_run_files
 from param_decomp_lab.infra.settings import PARAM_DECOMP_OUT_DIR
 from param_decomp_lab.seed import set_seed
-from param_decomp_lab.toy_models.toy_model_redundancy import ToyModelRedundancyTransformer
+from param_decomp_lab.toy_models.toy_model_redundancy_copy import ToyModelRedundancyCopyTransformer
 
 
 class ToyModelRedundancyTargetConfig(BaseConfig):
@@ -55,39 +56,34 @@ def resolve_toy_run_dir(run_path: str) -> Path:
     return path
 
 
-def build_target(target_cfg: ToyModelRedundancyTargetConfig) -> ToyModelRedundancyTransformer:
-    target_model = ToyModelRedundancyTransformer.from_run_dir(
-        resolve_toy_run_dir(target_cfg.run_path)
-    )
+AnyRedundancyToy = ToyModelRedundancyCopyTransformer
+
+
+def build_target(target_cfg: ToyModelRedundancyTargetConfig) -> AnyRedundancyToy:
+    run_dir = resolve_toy_run_dir(target_cfg.run_path)
+    cfg = json.loads((run_dir / "config.json").read_text())
+    assert cfg.get("kind") == "copy_attn", f"not a copy-toy run: {run_dir}"
+    target_model = ToyModelRedundancyCopyTransformer.from_run_dir(run_dir)
     target_model.eval()
     return target_model
 
 
 class _TokenDataset(IterableDataset[torch.Tensor]):
-    """Infinite uniform token batches `[batch, seq]` on `device`."""
+    """Infinite uniform input batches from the toy's own sampler, on `device`."""
 
-    def __init__(self, vocab_size: int, seq_len: int, batch_size: int, device: str):
-        self.vocab_size, self.seq_len, self.batch_size, self.device = (
-            vocab_size,
-            seq_len,
-            batch_size,
-            device,
-        )
+    def __init__(self, toy: AnyRedundancyToy, batch_size: int, device: str):
+        self.toy, self.batch_size, self.device = toy, batch_size, device
 
     @override
     def __iter__(self):  # noqa: ANN204
         while True:
-            yield torch.randint(
-                0, self.vocab_size, (self.batch_size, self.seq_len), device=self.device
-            )
+            yield self.toy.sample_inputs(self.batch_size).to(self.device)
 
 
 def build_toy_model_redundancy_loader(
     target_cfg: ToyModelRedundancyTargetConfig, *, device: str, batch_size: int
 ) -> DataLoader[Any]:
-    toy = ToyModelRedundancyTransformer.from_run_dir(resolve_toy_run_dir(target_cfg.run_path))
-    dataset = _TokenDataset(toy.config.vocab_size, toy.config.seq_len, batch_size, device)
-    return DataLoader(dataset, batch_size=None)
+    return DataLoader(_TokenDataset(build_target(target_cfg), batch_size, device), batch_size=None)
 
 
 @dataclass(frozen=True)

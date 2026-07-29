@@ -27,25 +27,25 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from param_decomp.log import logger  # noqa: E402
+from param_decomp_lab.experiments.toy_model_redundancy.ci_figure import (  # noqa: E402
+    plot_subcomponent_grid,
+)
 from param_decomp_lab.experiments.toy_model_redundancy.run import (  # noqa: E402
+    AnyRedundancyToy,
     SavedToyModelRedundancyRun,
     resolve_toy_run_dir,
 )
 from param_decomp_lab.infra.paths import ModelPath  # noqa: E402
-from param_decomp_lab.toy_models.toy_model_redundancy import (  # noqa: E402
-    ToyModelRedundancyTransformer,
-)
 
 
 def _token_cis(run: SavedToyModelRedundancyRun) -> dict[str, np.ndarray]:
-    """module -> `[vocab, C]` lower-leaky CI, one single-token sequence per vocab entry."""
+    """module -> `[vocab, seq, C]` lower-leaky CI, one probe sequence per vocab entry."""
     model = run.load_model()
-    vocab = cast(ToyModelRedundancyTransformer, model.target_model).config.vocab_size
-    tokens = torch.arange(vocab)[:, None]
+    tokens = cast(AnyRedundancyToy, model.target_model).enumerate_inputs()
     with torch.no_grad():
         cached = model(tokens, cache_type="input")
         ci = model.calc_causal_importances(cached.cache, sampling="continuous")
-    return {m: ci.lower_leaky[m][:, 0].float().numpy(force=True) for m in sorted(ci.lower_leaky)}
+    return {m: ci.lower_leaky[m].float().numpy(force=True) for m in sorted(ci.lower_leaky)}
 
 
 def plot_ci(model_path: ModelPath, ci_thr: float = 0.1) -> Path:
@@ -59,49 +59,25 @@ def plot_ci(model_path: ModelPath, ci_thr: float = 0.1) -> Path:
     out_dir = run.checkpoint_path.parent / "analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Figure 1: active-subcomponent heatmaps on a [matrix, block] grid, square cells.
-    # Only decomposed blocks appear; a partial (per-block) decomposition is scored
-    # against its own blocks' ground truth.
-    matrices = ("mlp_in", "mlp_out")
-    blocks_present = sorted({int(module.split(".")[1]) for module in cis})
-    assert len(cis) == len(blocks_present) * len(matrices), f"unexpected modules: {sorted(cis)}"
-    fig, axes = plt.subplots(
-        len(matrices),
-        len(blocks_present),
-        figsize=(4.4 * len(blocks_present) + 1.5, 9),
-        squeeze=False,
-        facecolor="white",
-        sharex=True,
-    )
-    im = None
-    for module, ci in cis.items():
-        _, block_str, matrix = module.split(".")
-        ax = axes[matrices.index(matrix), blocks_present.index(int(block_str))]
-        active = np.where(ci.max(axis=0) > ci_thr)[0]
-        order = active[np.argsort(ci[:, active].argmax(axis=0))]
-        im = ax.imshow(
-            ci[:, order].T, aspect="equal", cmap="RdPu", vmin=0, vmax=1, interpolation="none"
-        )
-        ax.set_title(f"{module} — {len(order)} subcomponents with max CI > {ci_thr}", fontsize=9)
-        ax.set_ylabel("subcomponent", fontsize=8)
-        ax.set_yticks(range(len(order)), [str(c) for c in order], fontsize=5)
-        ax.tick_params(labelsize=7)
-    for ax in axes[-1, :]:
-        ax.set_xlabel("input token", fontsize=8)
-    assert im is not None
-    fig.colorbar(im, ax=axes, label="causal importance", fraction=0.02)
-    for ax in axes.flat:
-        ax.set_anchor("NW")
+    # Figure 1: all-subcomponent CI heatmaps on a [matrix, block] grid, permuted to
+    # identity. Only decomposed blocks appear; a partial (per-block) decomposition is
+    # scored against its own blocks' ground truth.
+    fig = plot_subcomponent_grid(cis)
     fig.savefig(out_dir / "active_subcomponents.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
+    blocks_present = sorted({int(module.split(".")[1]) for module in cis})
 
     # Figure 2: per-block coverage vs ground truth, with skipped mechanisms marked.
     truth = truth[blocks_present]
     n_blocks = len(blocks_present)
+    # Routing matrices (q, k) are token-unselective — a single routing subcomponent is
+    # active on every token — so only token-selective matrices count as coverage.
     coverage = np.zeros((n_blocks, vocab))
     for module, ci in cis.items():
+        if module.rsplit(".", 1)[-1] in ("q", "k"):
+            continue
         row = blocks_present.index(int(module.split(".")[1]))
-        coverage[row] = np.maximum(coverage[row], ci.max(axis=1))
+        coverage[row] = np.maximum(coverage[row], ci.max(axis=(1, 2)))
     skipped = (truth > 0.9) & (coverage < ci_thr)
 
     fig, axes = plt.subplots(3, 1, figsize=(9, 5.2), facecolor="white", sharex=True)

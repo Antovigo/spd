@@ -69,6 +69,16 @@ class GlobalSharedTransformerCiConfig(BaseConfig):
         "If None, defaults to [4 * d_model].",
     )
     attn_config: AttnConfig
+    final_rms_norm: bool = Field(
+        default=False,
+        description="RMS-norm the residual stream before the output head, decoupling "
+        "logit scale from residual-stream growth.",
+    )
+    zero_init_readout: bool = Field(
+        default=True,
+        description="Zero-init the output head with bias 0.5 (all logits start "
+        "mid-window). False restores fan-in random init with zero bias.",
+    )
 
     @model_validator(mode="after")
     def validate_config(self) -> Self:
@@ -300,9 +310,10 @@ class GlobalSharedTransformerCiFn(nn.Module):
 
     Per-layer inputs are RMS-normed, concatenated along the feature dim, projected to
     `d_model`, and run through `n_layers` `TransformerBlock`s with bidirectional
-    self-attention. A final linear projection produces logits which are split back into
-    per-layer `[..., C]` slices in sorted-name order. For 2D inputs (e.g. TMS, resid_mlp
-    — no sequence axis) a singleton sequence dim is added before the transformer and
+    self-attention. A final linear projection (zero-init with bias 0.5, optionally
+    preceded by RMS norm) produces logits which are split back into per-layer
+    `[..., C]` slices in sorted-name order. For 2D inputs (e.g. TMS, resid_mlp — no
+    sequence axis) a singleton sequence dim is added before the transformer and
     squeezed out after.
     """
 
@@ -315,6 +326,8 @@ class GlobalSharedTransformerCiFn(nn.Module):
         max_len: int,
         mlp_hidden_dims: list[int] | None = None,
         rope_base: float = 10000.0,
+        final_rms_norm: bool = False,
+        zero_init_readout: bool = True,
     ):
         super().__init__()
 
@@ -324,6 +337,7 @@ class GlobalSharedTransformerCiFn(nn.Module):
         self.d_model = d_model
         self.n_transformer_layers = n_layers
         self.n_heads = n_heads
+        self.final_rms_norm = final_rms_norm
 
         if mlp_hidden_dims is None:
             mlp_hidden_dims = [4 * d_model]
@@ -333,6 +347,11 @@ class GlobalSharedTransformerCiFn(nn.Module):
 
         self._input_projector = Linear(total_input_dim, d_model, nonlinearity="relu")
         self._output_head = Linear(d_model, total_c, nonlinearity="linear")
+        if zero_init_readout:
+            # Logits start at exactly 0.5: mid-window in the hard sigmoid's linear
+            # region, within gradient reach of both losses.
+            nn.init.zeros_(self._output_head.W)
+            nn.init.constant_(self._output_head.b, 0.5)
 
         self._blocks = nn.ModuleList(
             [
@@ -368,6 +387,9 @@ class GlobalSharedTransformerCiFn(nn.Module):
         x = projected
         for block in self._blocks:
             x = block(x)
+
+        if self.final_rms_norm:
+            x = F.rms_norm(x, (self.d_model,))
 
         output = self._output_head(x)
 
@@ -577,6 +599,8 @@ def _make_global_ci_fn(
                 mlp_hidden_dims=transformer_cfg.mlp_hidden_dim,
                 max_len=transformer_cfg.attn_config.max_len,
                 rope_base=transformer_cfg.attn_config.rope_base,
+                final_rms_norm=transformer_cfg.final_rms_norm,
+                zero_init_readout=transformer_cfg.zero_init_readout,
             )
 
 

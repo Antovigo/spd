@@ -16,8 +16,11 @@ experiments/
 ├── tms/run.py
 ├── resid_mlp/run.py
 ├── toy_model_redundancy/    # redundancy testbed: decompose the n-fold-redundant
-│   ├── run.py               # cipher toy (toy_models/toy_model_redundancy.py);
-│   └── plot_ci.py           # CI-vs-ground-truth diagnostic (skipped-mechanism score)
+│   ├── run.py               # copy toy (toy_models/toy_model_redundancy_copy.py);
+│   ├── plot_ci.py           # CI-vs-ground-truth diagnostic (skipped-mechanism score)
+│   ├── ci_figure.py         # all-position subcomponent-CI grid (plot_ci + eval metric)
+│   └── complete.py          # completeness fine-tune: normal + "complete" CI-net pair
+│                            # resurrects redundant copies via per-block A/B configs
 └── lm/
     ├── run.py
     ├── layerwise.py         # split LM YAML into per-matrix configs + SLURM-array submit

@@ -61,6 +61,10 @@ from param_decomp_lab.eval_metrics.targeted_recon_loss import (
     TargetReconLoss,
     TargetReconLossConfig,
 )
+from param_decomp_lab.eval_metrics.toy_redundancy_ci_plot import (
+    ToyRedundancyCIPlot,
+    ToyRedundancyCIPlotConfig,
+)
 from param_decomp_lab.eval_metrics.uv_plots import UVPlots, UVPlotsConfig
 from param_decomp_lab.eval_metrics.weight_magnitude import WeightMagnitude, WeightMagnitudeConfig
 
@@ -85,6 +89,7 @@ AnyEvalMetricConfig = Annotated[
     | TargetedCIHeatmapConfig
     | TargetReconLossConfig
     | UVPlotsConfig
+    | ToyRedundancyCIPlotConfig
     | WeightMagnitudeConfig,
     Discriminator("type"),
 ]
@@ -112,6 +117,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         TargetedCIHeatmap,
         TargetReconLoss,
         UVPlots,
+        ToyRedundancyCIPlot,
         WeightMagnitude,
     )
 }
