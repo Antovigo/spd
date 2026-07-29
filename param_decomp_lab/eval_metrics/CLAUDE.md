@@ -68,10 +68,31 @@ positions — plus `index.html`, a self-contained `file://`-openable applet
 log-scale mean-CI threshold slider, and hover readouts. Full grids are stored only for
 subcomponents whose mean CI reaches `mean_ci_floor` (the mean-CI vector is stored for
 all, so the cut is visible); disk is ~1 MB per 10 saved subcomponents per snapshot.
+On a dual-CI run it records **both** nets from the same cached forward (one CI-fn call
+each, no second pass): the payload gains `ci_roles` plus per-module `mean_ci_hidden` /
+`ci_hidden` arrays, a subcomponent's grids are saved when *either* net's mean CI reaches
+`mean_ci_floor` (so hidden-only components survive the cut), and the applet gains a
+green/magenta merge view — subtractive on white, so white = neither, green = hidden-only
+(expected), **magenta = output-important but hidden-unimportant, the anomaly the sanity
+check looks for**, black = both. The hidden keys are optional and the applet falls back to
+the original single-colour rendering for control runs and pre-change snapshots.
+
 Delivery uses `param_decomp_lab/run_artifacts.py::RunDirArtifact` — a `MetricResult`
 value the local sink writes verbatim under the run dir (regenerating `manifest.js`)
 and wandb/`metrics.jsonl` skip. It lives outside `run_sink` so metrics can import it
 without pulling the sink's wandb/infra chain into `eval_metrics` (import cycle).
+
+## Dual-CI (hidden-activation) probes
+
+On a `pd.dual_hidden_ci` run, `CIHiddenActsReconLoss` and `PGDHiddenActsReconLoss` (the
+latter from core, registered here as eval-only) both take a `ci_role`. List
+`CIHiddenActsReconLoss` **twice**, once per role with distinct `name`s, to read off how much
+hidden-activation error each net's CI assignment leaves — that pairing is the direct
+measurement of the interference hypothesis, and what makes a dual run comparable to a
+single-CI control. See `param_decomp/metrics/CLAUDE.md` for the shared relative-error
+definition.
+
+`ABGridDataset` needs no `ci_role`: it records every role the model has (see below).
 
 ## Note on `PGDReconLoss` + `StochasticHiddenActsReconLoss`
 

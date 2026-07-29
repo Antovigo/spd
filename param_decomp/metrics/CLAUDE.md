@@ -16,7 +16,8 @@ core library. For eval metrics (user-extensible, lab-side), see
 | `dispatch.py` | `LOSS_METRIC_CLASSES` type→class table + `instantiate_metrics(...)` |
 | `<loss_name>.py` | One file per metric: `<Name>Loss` class + `<Name>LossConfig` config side-by-side |
 | `persistent_pgd_state.py` | PPGD adversarial-source state machine (shared by `persistent_pgd_recon.py`) |
-| `pgd_utils.py` | Shared PGD helpers used by the regular PGD recon metrics |
+| `pgd_utils.py` | Shared PGD helpers; `pgd_masked_objective_update` runs PGD against any mask-consuming objective (output recon and per-site activation error are two such) |
+| `hidden_acts.py` | Shared per-site (hidden-activation) relative-error machinery: clean targets, squared-error accumulation, DDP reduction, site filtering |
 | `output.py` | Shared output-extraction helpers used across recon losses |
 
 ## Adding a loss metric
@@ -122,3 +123,60 @@ standalone `StochasticHiddenActsReconLoss`, which runs its own clean + masked pa
 per step and survives only for older configs). The aux folds into the host's returned
 loss at the `aux.coeff / host.coeff` ratio (the trainer multiplies by the host coeff);
 eval logs it separately as `loss/StochasticReconSubsetLoss/hidden_acts`.
+
+## Dual CI networks (`CIRole`)
+
+`pd.dual_hidden_ci` builds a **second** CI fn on `ComponentModel` (`ci_fn_hidden`) of the
+same architecture as `ci_config`. Both nets score the *same* pool of subcomponents; they
+differ only in the reconstruction loss that trains them:
+
+- `"output"` — importance for reconstructing the target model's final output. The existing
+  net; every metric defaults to this role, so all pre-existing configs are unchanged.
+- `"hidden"` — importance for reconstructing the decomposed sites' activations.
+
+`CIRole` lives in `param_decomp/ci_fns.py`. `MetricContext` carries `ci` and
+`ci_hidden: CIOutputs | None`; metrics that can read either take a `ci_role` config field
+and go through `ctx.ci_for(role)`, which asserts the net exists. Both nets' parameters sit
+in the single `ci_fn_optimizer` — Adam is per-parameter and the nets are disjoint, so a
+shared optimizer is mathematically identical to two with the same hyperparameters.
+
+Two knock-on rules:
+
+- `ci_scaled_component_weight_decay` takes the **max over both nets'** batch CI max. A
+  subcomponent alive only in the hidden net is carrying interference, i.e. doing real work;
+  decaying it would fight the hidden-acts loss.
+- Anything keyed by metric *class name* breaks once one class has two instances. Loss log
+  keys, nontarget log keys, and the hidden-acts result dicts are all keyed by
+  `Metric.instance_key` instead (see `NamedMetricConfig` in `base.py`).
+
+## Hidden-activation reconstruction
+
+Three metrics measure the same quantity — the **relative** per-site error
+`Σ(out − tgt)² / Σ tgt²`, averaged over sites — under three different masks:
+
+| metric | mask | where |
+|---|---|---|
+| `StochasticHiddenReconSubsetLoss` | stochastic subset ablation | core, training loss |
+| `CIHiddenActsReconLoss` | CI itself | lab, eval only |
+| `PGDHiddenActsReconLoss` | adversarial (`n_steps` of sign-PGD) | core, eval only |
+
+Relative rather than raw MSE so that sites with very different activation scales (an MLP
+`down_proj` against an attention `q_proj`) weigh equally and the coefficient transfers
+across blocks. Numerator and denominator are accumulated and DDP-reduced separately — the
+result is a ratio of sums, never a mean of per-batch or per-rank ratios.
+
+Targets are the frozen model's own site outputs, recomputed as `F.linear(x_clean, W, b)`
+from the clean input activations the step already cached: **no extra forward pass**, and it
+measures accumulated drift from the target model rather than each site's local error given
+an already-perturbed input.
+
+All three use `ComponentModel.site_outputs`, which aborts the forward once every hooked
+site has been cached (a private sentinel exception, since a forward hook cannot ask PyTorch
+to stop). Everything past the last decomposition target would otherwise be wasted compute
+*and* retained-for-backward activations.
+
+`site_patterns` (fnmatch, e.g. `["*.mlp.down_proj", "*.self_attn.o_proj"]`) restricts which
+sites the error is *measured* at; masking always covers every decomposed site.
+
+Note the older `StochasticHiddenActsReconLoss` (raw MSE, its own clean + masked passes) and
+`StochasticReconSubsetLossConfig.hidden_acts_recon` still exist for older configs.

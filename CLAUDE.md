@@ -134,6 +134,16 @@ Targeted eval metrics in `param_decomp_lab/eval_metrics/`: `TargetReconLoss`,
 `param_decomp_lab/experiments/tms/tms_40-10-id_targeted_config.yaml`,
 `param_decomp_lab/experiments/resid_mlp/resid_mlp1_targeted_config.yaml`.
 
+## Dual CI networks (hidden-activation importance)
+
+`pd.dual_hidden_ci` adds a second CI network scoring each subcomponent's importance for
+reconstructing the *decomposed sites' activations*, alongside the existing net scoring
+importance for the final output. One shared pool of subcomponents, two reconstruction
+losses. Core surface: `CIRole` in `param_decomp/ci_fns.py`, `ComponentModel.ci_fn_hidden` /
+`ci_fn_for` / `site_outputs` (early-exit forward), `MetricContext.ci_for`, and the
+`hidden_acts.py` relative-error helpers. Metrics select a net via `ci_role`. Full
+description in `param_decomp/metrics/CLAUDE.md`; experiment notes in `notes/hidden_dual/`.
+
 ## Saved-run layout
 
 Every artifact for a decomposition lives under one dir per run:
