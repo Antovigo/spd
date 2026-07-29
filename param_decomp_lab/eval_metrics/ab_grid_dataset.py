@@ -15,6 +15,7 @@ from torch.distributed import ReduceOp
 from transformers import AutoTokenizer
 
 from param_decomp.base_config import BaseConfig, Probability
+from param_decomp.ci_fns import CIRole
 from param_decomp.distributed import all_reduce, get_distributed_state, is_main_process
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -23,6 +24,11 @@ from param_decomp_lab.run_artifacts import RunDirArtifact
 
 _PROMPT_RE = re.compile(r"^(\d+)([+\-*/])(\d+)=$")
 _APPLET_FILENAME = "ab_grids_app.html"
+
+# The output net keeps the original unsuffixed payload keys so the applet and any existing
+# snapshot reader stay compatible; the hidden net's arrays are additive.
+_MEAN_CI_KEY: dict[CIRole, str] = {"output": "mean_ci", "hidden": "mean_ci_hidden"}
+_CI_KEY: dict[CIRole, str] = {"output": "ci", "hidden": "ci_hidden"}
 
 
 class ABGridDatasetConfig(BaseConfig):
@@ -135,8 +141,31 @@ class ABGridDataset(Metric[ABGridDatasetConfig]):
         self.step = ctx.step
         return None
 
-    def _accumulate_pool(self) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-        """Per-module `[n_prompts, n_pos, C]` CI and inner-activation tensors (cpu f32)."""
+    @property
+    def ci_roles(self) -> tuple[CIRole, ...]:
+        """The CI nets this model has: `("output",)`, or both on a dual-CI run."""
+        return ("output", "hidden") if self.model.ci_fn_hidden is not None else ("output",)
+
+    def _saved_indices(self, mean_ci_per_role: dict[CIRole, Tensor]) -> Tensor:
+        """Subcomponents reaching `mean_ci_floor` at some position under *either* CI net.
+
+        Max over nets rather than over the output net alone: a subcomponent that matters
+        only for the hidden activations is exactly what this experiment is looking for, so
+        cutting it from the saved grids would hide the finding.
+        """
+        best_per_component = torch.stack(
+            [mean_ci.amax(dim=0) for mean_ci in mean_ci_per_role.values()]
+        ).amax(dim=0)
+        return (best_per_component >= self.cfg.mean_ci_floor).nonzero().squeeze(-1)
+
+    def _mean_ci_per_role(
+        self, ci_acc: dict["CIRole", dict[str, Tensor]], module: str
+    ) -> dict["CIRole", Tensor]:
+        """`[n_pos, C]` prompt-mean CI per role for one module."""
+        return {role: ci_acc[role][module].mean(dim=0) for role in ci_acc}
+
+    def _accumulate_pool(self) -> tuple[dict["CIRole", dict[str, Tensor]], dict[str, Tensor]]:
+        """Per-role, per-module `[n_prompts, n_pos, C]` CI plus inner activations (cpu f32)."""
         assert self.step is not None, "update() never ran before compute()"
         dist_state = get_distributed_state()
         world_size = dist_state.world_size if dist_state is not None else 1
@@ -148,7 +177,10 @@ class ABGridDataset(Metric[ABGridDatasetConfig]):
             for module, comps in self.model.components.items()
         }
         n_prompts, n_pos = self.prompt_ids.shape[0], len(self.positions)
-        ci_acc = {m: torch.zeros(n_prompts, n_pos, self.model.module_to_c[m]) for m in modules}
+        ci_acc: dict[CIRole, dict[str, Tensor]] = {
+            role: {m: torch.zeros(n_prompts, n_pos, self.model.module_to_c[m]) for m in modules}
+            for role in self.ci_roles
+        }
         inner_acc = {m: torch.zeros(n_prompts, n_pos, self.model.module_to_c[m]) for m in modules}
 
         batch_size = self.cfg.forward_batch_size
@@ -158,14 +190,20 @@ class ABGridDataset(Metric[ABGridDatasetConfig]):
             chunk = self.prompt_ids[start : start + batch_size].to(self.device)
             out = self.model(chunk, cache_type="input")
             assert not isinstance(out, Tensor)
-            ci = self.model.calc_causal_importances(
-                pre_weight_acts=out.cache,
-                detach_inputs=False,
-                sampling="continuous",
-            )
             row = slice(start, start + chunk.shape[0])
+            # Both nets read the same cached acts: one forward, one CI-fn call per role.
+            for role in self.ci_roles:
+                ci = self.model.calc_causal_importances(
+                    pre_weight_acts=out.cache,
+                    detach_inputs=False,
+                    sampling="continuous",
+                    role=role,
+                )
+                for module in modules:
+                    ci_acc[role][module][row] = (
+                        ci.lower_leaky[module][:, self.positions].float().cpu()
+                    )
             for module in modules:
-                ci_acc[module][row] = ci.lower_leaky[module][:, self.positions].float().cpu()
                 raw_x = out.cache[module]
                 assert raw_x.is_floating_point(), (
                     f"{module}: inner activations need float input acts "
@@ -175,27 +213,31 @@ class ABGridDataset(Metric[ABGridDatasetConfig]):
                 inner_acc[module][row] = torch.einsum("bpd,dc->bpc", x, v_unit[module]).cpu()
 
         if dist_state is not None:
-            for acc in (ci_acc, inner_acc):
+            for acc in (*ci_acc.values(), inner_acc):
                 for module in modules:
                     acc[module] = all_reduce(acc[module].to(self.device), op=ReduceOp.SUM).cpu()
         return ci_acc, inner_acc
 
-    def _payload(self, ci_acc: dict[str, Tensor], inner_acc: dict[str, Tensor]) -> dict[str, Any]:
+    def _payload(
+        self, ci_acc: dict["CIRole", dict[str, Tensor]], inner_acc: dict[str, Tensor]
+    ) -> dict[str, Any]:
+        to_comp_major = (4, 3, 0, 1, 2)  # [ops, a, b, pos, comp] -> [comp, pos, ops, a, b]
         modules_payload: list[dict[str, Any]] = []
-        for module, ci_vals in ci_acc.items():
-            mean_ci = ci_vals.mean(dim=0)
-            saved = (mean_ci.amax(dim=0) >= self.cfg.mean_ci_floor).nonzero().squeeze(-1)
+        for module in ci_acc["output"]:
+            mean_ci = self._mean_ci_per_role(ci_acc, module)
+            saved = self._saved_indices(mean_ci)
             entry: dict[str, Any] = {
                 "name": module,
-                "C": ci_vals.shape[-1],
-                "mean_ci": _b64(mean_ci.numpy().astype(np.float32)),
+                "C": ci_acc["output"][module].shape[-1],
                 "saved": saved.tolist(),
             }
+            for role in self.ci_roles:
+                entry[_MEAN_CI_KEY[role]] = _b64(mean_ci[role].numpy().astype(np.float32))
             if len(saved) > 0:
-                ci_grid = self.grid.scatter(ci_vals[:, :, saved].numpy(), fill=0.0)
+                for role in self.ci_roles:
+                    ci_grid = self.grid.scatter(ci_acc[role][module][:, :, saved].numpy(), fill=0.0)
+                    entry[_CI_KEY[role]] = _b64(encode_ci_u8(np.transpose(ci_grid, to_comp_major)))
                 inner_grid = self.grid.scatter(inner_acc[module][:, :, saved].numpy(), fill=np.nan)
-                to_comp_major = (4, 3, 0, 1, 2)  # [ops, a, b, pos, comp] -> [comp, pos, ops, a, b]
-                entry["ci"] = _b64(encode_ci_u8(np.transpose(ci_grid, to_comp_major)))
                 entry["inner"] = _b64(np.transpose(inner_grid, to_comp_major).astype(np.float16))
             modules_payload.append(entry)
         return {
@@ -208,6 +250,7 @@ class ABGridDataset(Metric[ABGridDatasetConfig]):
             "b_min": self.grid.b_min,
             "n_b": self.grid.n_b,
             "mean_ci_floor": self.cfg.mean_ci_floor,
+            "ci_roles": list(self.ci_roles),
             "modules": modules_payload,
         }
 
@@ -216,8 +259,8 @@ class ABGridDataset(Metric[ABGridDatasetConfig]):
         with torch.no_grad():
             ci_acc, inner_acc = self._accumulate_pool()
         n_saved = sum(
-            int((ci_vals.mean(dim=0).amax(dim=0) >= self.cfg.mean_ci_floor).sum())
-            for ci_vals in ci_acc.values()
+            len(self._saved_indices(self._mean_ci_per_role(ci_acc, module)))
+            for module in ci_acc["output"]
         )
         if not is_main_process():
             return {"ab_grids_saved_components": n_saved}

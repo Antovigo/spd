@@ -31,6 +31,10 @@
   .tile .lbl { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; }
   canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
   #empty { padding: 24px 16px; color: var(--muted); }
+  #legend { display: none; align-items: center; gap: 10px; padding: 0 16px 8px; color: var(--muted);
+            font-size: 11px; }
+  #legend .sw { display: inline-block; width: 11px; height: 11px; border: 1px solid var(--line);
+                vertical-align: -1px; margin-right: 3px; }
   .axis-note { color: var(--muted); font-size: 11px; padding: 0 16px 10px; }
 </style>
 </head>
@@ -39,20 +43,30 @@
   <span><label>step</label><select id="step"></select></span>
   <span><label>position</label><select id="pos"></select></span>
   <span><label>op</label><select id="op"></select></span>
-  <span><label>view</label><select id="view">
-    <option value="ci">CI</option><option value="inner">inner act</option></select></span>
+  <span><label>view</label><select id="view"></select></span>
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
     <span id="thrval"></span></span>
   <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="2" style="width:52px"></span>
   <span id="count"></span>
 </header>
 <div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
+<div id="legend">
+  <span>merge:</span>
+  <span><i class="sw" style="background:#fff"></i>neither</span>
+  <span><i class="sw" style="background:#0f0"></i>hidden only (expected)</span>
+  <span><i class="sw" style="background:#f0f"></i><b>output only &mdash; anomaly</b></span>
+  <span><i class="sw" style="background:#000"></i>both</span>
+</div>
 <div id="gallery"></div>
 <div id="empty" style="display:none">no subcomponents above threshold</div>
 <div id="detail">
   <h3 id="dtitle"></h3>
   <div class="panes">
-    <div class="pane"><canvas id="dci"></canvas><div class="cap">CI</div></div>
+    <div class="pane"><canvas id="dci"></canvas><div class="cap">CI (output)</div></div>
+    <div class="pane" id="dhidpane" style="display:none"><canvas id="dcihidden"></canvas>
+      <div class="cap">CI (hidden)</div></div>
+    <div class="pane" id="dmergepane" style="display:none"><canvas id="dcimerge"></canvas>
+      <div class="cap">merge</div></div>
     <div class="pane"><canvas id="dinner"></canvas><div class="cap">inner act</div></div>
   </div>
   <div id="readout"></div>
@@ -90,7 +104,12 @@ function b64F16(s) {
   return out;
 }
 
-// Decoded per-module caches for the current payload: {u8 ci, f32 inner, f32 meanCi}.
+// Roles present in the payload. Snapshots written before the dual-CI change have no
+// `ci_roles` key and carry only the output net's arrays.
+const ciRoles = () => cur.ci_roles || ["output"];
+const hasHidden = () => ciRoles().includes("hidden");
+
+// Decoded per-module caches for the current payload (u8 CI per role, f32 inner, f32 mean CI).
 const dec = new Map();
 function moduleData(mi) {
   const key = cur.step + ":" + mi;
@@ -98,7 +117,9 @@ function moduleData(mi) {
     const m = cur.modules[mi];
     dec.set(key, {
       meanCi: b64F32(m.mean_ci),
+      meanCiHidden: m.mean_ci_hidden ? b64F32(m.mean_ci_hidden) : null,
       ci: m.ci ? b64Bytes(m.ci) : null,
+      ciHidden: m.ci_hidden ? b64Bytes(m.ci_hidden) : null,
       inner: m.inner ? b64F16(m.inner) : null,
     });
   }
@@ -144,27 +165,52 @@ function innerScale(data, si, pi, oi) {
   return mx || 1;
 }
 
+// Subtractive merge on white, so "inactive" stays white as everywhere else in the app:
+// output CI removes green (-> magenta), hidden CI removes red and blue (-> green). White =
+// neither, black = both, green = hidden-only (expected), magenta = output-only (anomaly).
+const mergeRgb = ([out, hid]) => [
+  Math.round(255 * (1 - hid)), Math.round(255 * (1 - out)), Math.round(255 * (1 - hid)),
+];
+
 function tileDrawers(mi, si, pi, oi) {
   const data = moduleData(mi);
-  const ciVal = (ai, bi) => data.ci[gridIndex(si, pi, oi, ai, bi)] / 255;
-  const innerVal = (ai, bi) => data.inner[gridIndex(si, pi, oi, ai, bi)];
+  const at = (ai, bi) => gridIndex(si, pi, oi, ai, bi);
+  const ciVal = (ai, bi) => data.ci[at(ai, bi)] / 255;
+  const ciHiddenVal = data.ciHidden ? (ai, bi) => data.ciHidden[at(ai, bi)] / 255 : null;
+  const innerVal = (ai, bi) => data.inner[at(ai, bi)];
   const mx = data.inner ? innerScale(data, si, pi, oi) : 1;
-  return {
+  const drawers = {
     ci: cv => drawGrid(cv, ciVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0),
     inner: cv => drawGrid(cv, innerVal, v => ramp(DIV_STOPS, 0.5 + v / (2 * mx)), cv.dataset.px | 0),
-    ciVal, innerVal,
+    ciVal, ciHiddenVal, innerVal,
   };
+  if (ciHiddenVal) {
+    drawers.ci_hidden = cv => drawGrid(cv, ciHiddenVal, v => ramp(CI_STOPS, v), cv.dataset.px | 0);
+    drawers.ci_merge = cv =>
+      drawGrid(cv, (ai, bi) => [ciVal(ai, bi), ciHiddenVal(ai, bi)], mergeRgb, cv.dataset.px | 0);
+  }
+  return drawers;
 }
 
+// Ranked and thresholded on the max over CI nets, mirroring the metric-side save filter:
+// a subcomponent that only the hidden net cares about must not be filtered away.
 function visibleComponents() {
   const pi = +$("pos").value, thr = thrValue(), out = [];
   cur.modules.forEach((m, mi) => {
-    const meanCi = moduleData(mi).meanCi, nPos = cur.positions.length;
+    const data = moduleData(mi), nPos = cur.positions.length;
+    const arrays = data.meanCiHidden ? [data.meanCi, data.meanCiHidden] : [data.meanCi];
     m.saved.forEach((c, si) => {
-      let best = 0;
-      for (let p = 0; p < nPos; p++) best = Math.max(best, meanCi[p * m.C + c]);
-      if (meanCi[pi * m.C + c] >= thr || (thr <= cur.mean_ci_floor && best >= cur.mean_ci_floor))
-        out.push({ mi, si, c, name: m.name, meanCi: meanCi[pi * m.C + c] });
+      let atPos = 0, best = 0;
+      for (const arr of arrays) {
+        atPos = Math.max(atPos, arr[pi * m.C + c]);
+        for (let p = 0; p < nPos; p++) best = Math.max(best, arr[p * m.C + c]);
+      }
+      if (atPos >= thr || (thr <= cur.mean_ci_floor && best >= cur.mean_ci_floor))
+        out.push({
+          mi, si, c, name: m.name, meanCi: atPos,
+          meanCiOut: data.meanCi[pi * m.C + c],
+          meanCiHidden: data.meanCiHidden ? data.meanCiHidden[pi * m.C + c] : null,
+        });
     });
   });
   out.sort((x, y) => y.meanCi - x.meanCi);
@@ -185,6 +231,7 @@ function renderGallery() {
   $("thrval").textContent = thrValue().toExponential(2);
   $("count").textContent = comps.length + " shown";
   $("empty").style.display = comps.length ? "none" : "block";
+  $("legend").style.display = hasHidden() && $("view").value === "ci_merge" ? "flex" : "none";
 
   // One row per module (layer/matrix), tiles scrolling horizontally within it.
   const byModule = new Map();
@@ -207,7 +254,9 @@ function renderGallery() {
       cv.dataset.px = px;
       const lbl = document.createElement("div");
       lbl.className = "lbl";
-      lbl.textContent = `#${comp.c} · ${comp.meanCi.toExponential(1)}`;
+      lbl.textContent = comp.meanCiHidden === null
+        ? `#${comp.c} · ${comp.meanCi.toExponential(1)}`
+        : `#${comp.c} · o ${comp.meanCiOut.toExponential(1)} · h ${comp.meanCiHidden.toExponential(1)}`;
       tile.append(cv, lbl);
       tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
       if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
@@ -228,7 +277,11 @@ function renderDetail() {
   const pi = +$("pos").value, oi = +$("op").value;
   $("dtitle").textContent = `${selected.name} · component ${selected.c} · op ${cur.ops[oi]} · position ${cur.positions[pi]} · step ${cur.step}`;
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
-  for (const [id, kind] of [["dci", "ci"], ["dinner", "inner"]]) {
+  $("dhidpane").style.display = drawers.ci_hidden ? "block" : "none";
+  $("dmergepane").style.display = drawers.ci_merge ? "block" : "none";
+  const panes = [["dci", "ci"], ["dinner", "inner"]];
+  if (drawers.ci_hidden) panes.push(["dcihidden", "ci_hidden"], ["dcimerge", "ci_merge"]);
+  for (const [id, kind] of panes) {
     const cv = $(id);
     cv.dataset.px = pxValue() * 2;
     drawers[kind](cv);
@@ -238,16 +291,28 @@ function renderDetail() {
       const ai = Math.floor((ev.clientY - r.top) / r.height * cur.n_a);
       if (ai < 0 || bi < 0 || ai >= cur.n_a || bi >= cur.n_b) return;
       const a = cur.a_min + ai, b = cur.b_min + bi;
+      const hid = drawers.ciHiddenVal ? `   CI_hidden=${drawers.ciHiddenVal(ai, bi).toFixed(3)}` : "";
       $("readout").textContent =
-        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}   inner=${drawers.innerVal ? drawers.innerVal(ai, bi).toFixed(4) : "n/a"}`;
+        `a=${a} ${cur.ops[oi]} b=${b}   CI=${drawers.ciVal(ai, bi).toFixed(3)}${hid}   inner=${drawers.innerVal(ai, bi).toFixed(4)}`;
     };
   }
 }
 
 function render() { renderGallery(); renderDetail(); }
 
+const VIEW_OPTIONS = {
+  ci_merge: "CI merge (out/hid)",
+  ci: "CI (output)",
+  ci_hidden: "CI (hidden)",
+  inner: "inner act",
+};
+
 function setPayload(payload) {
   cur = payload;
+  const viewSel = $("view"), keepView = viewSel.value;
+  const views = hasHidden() ? ["ci_merge", "ci", "ci_hidden", "inner"] : ["ci", "inner"];
+  viewSel.innerHTML = views.map(v => `<option value="${v}">${VIEW_OPTIONS[v]}</option>`).join("");
+  viewSel.value = views.includes(keepView) ? keepView : views[0];
   const posSel = $("pos"), opSel = $("op");
   const keepPos = posSel.value, keepOp = opSel.value;
   posSel.innerHTML = payload.positions.map((p, i) => `<option value="${i}">${p}</option>`).join("");

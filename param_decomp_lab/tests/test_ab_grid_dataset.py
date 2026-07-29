@@ -107,6 +107,7 @@ class _StubModel:
     def __init__(self):
         self.components = {"blk.mlp": types.SimpleNamespace(V=torch.eye(D_IN)[:, :C].clone())}
         self.module_to_c = {"blk.mlp": C}
+        self.ci_fn_hidden = None  # single-CI stub; the dual-CI path is covered separately
 
     def __call__(self, chunk: torch.Tensor, cache_type: str) -> Any:
         x = torch.zeros(chunk.shape[0], SEQ, D_IN)
@@ -116,9 +117,14 @@ class _StubModel:
         )
 
     def calc_causal_importances(
-        self, pre_weight_acts: dict[str, torch.Tensor], detach_inputs: bool, sampling: str
+        self,
+        pre_weight_acts: dict[str, torch.Tensor],
+        detach_inputs: bool,
+        sampling: str,
+        role: str = "output",
     ) -> Any:
         del detach_inputs, sampling
+        assert role == "output"
         x = pre_weight_acts["blk.mlp"]
         ci = torch.zeros(x.shape[0], SEQ, C)
         ci[:, :, 0] = 1.0

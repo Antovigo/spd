@@ -14,6 +14,10 @@ from param_decomp.metrics.importance_minimality import (
     ImportanceMinimalityLoss,
     ImportanceMinimalityLossConfig,
 )
+from param_decomp.metrics.pgd_hidden_acts_recon import (
+    PGDHiddenActsReconLoss,
+    PGDHiddenActsReconLossConfig,
+)
 from param_decomp.metrics.pgd_masked_recon import PGDReconLoss, PGDReconLossConfig
 from param_decomp.metrics.smooth_l0_importance_minimality import (
     SmoothL0ImportanceMinimalityLoss,
@@ -85,6 +89,7 @@ AnyEvalMetricConfig = Annotated[
     | NontargetReconLossConfig
     | PeriodSeparationConfig
     | PermutedCIPlotsConfig
+    | PGDHiddenActsReconLossConfig
     | PGDReconLossConfig
     | SmoothL0ImportanceMinimalityLossConfig
     | StochasticAttnPatternsReconLossConfig
@@ -114,6 +119,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         NontargetReconLoss,
         PeriodSeparation,
         PermutedCIPlots,
+        PGDHiddenActsReconLoss,
         PGDReconLoss,
         SmoothL0ImportanceMinimalityLoss,
         StochasticAttnPatternsReconLoss,
