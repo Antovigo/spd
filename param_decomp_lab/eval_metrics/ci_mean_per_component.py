@@ -5,14 +5,20 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.base_config import BaseConfig
+from param_decomp.ci_fns import CIRole
 from param_decomp.distributed import all_reduce
-from param_decomp.metrics.base import Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult, NamedMetricConfig
 from param_decomp.metrics.context import MetricContext
 from param_decomp_lab.eval_metrics.plotting import plot_mean_component_cis_both_scales
 
 
-class CIMeanPerComponentConfig(BaseConfig):
+class CIMeanPerComponentConfig(NamedMetricConfig):
+    """`ci_role` picks which CI net to observe; give each instance a distinct `name` so their
+    log keys do not collide.
+    """
+
     type: Literal["CIMeanPerComponent"] = "CIMeanPerComponent"
+    ci_role: CIRole = "output"
 
 
 class _CIMeanPerComponentBase[TConfig: BaseConfig](Metric[TConfig]):
@@ -25,6 +31,11 @@ class _CIMeanPerComponentBase[TConfig: BaseConfig](Metric[TConfig]):
     log_namespace = "figures"
     slow = True
     _key_prefix: ClassVar[str] = ""
+
+    @property
+    def _ci_role(self) -> CIRole:
+        """The nontarget sibling has no `ci_role` field and always observes the output net."""
+        return getattr(self.cfg, "ci_role", "output")
 
     @override
     def reset(self) -> None:
@@ -39,7 +50,7 @@ class _CIMeanPerComponentBase[TConfig: BaseConfig](Metric[TConfig]):
 
     @override
     def update(self, ctx: MetricContext) -> None:
-        for module_name, ci_vals in ctx.ci.lower_leaky.items():
+        for module_name, ci_vals in ctx.ci_for(self._ci_role).lower_leaky.items():
             n_leading_dims = ci_vals.ndim - 1
             n_examples = ci_vals.shape[:n_leading_dims].numel()
             self.examples_seen[module_name] += n_examples
@@ -55,9 +66,10 @@ class _CIMeanPerComponentBase[TConfig: BaseConfig](Metric[TConfig]):
             examples_reduced = all_reduce(self.examples_seen[module_name], op=ReduceOp.SUM)
             mean_component_cis[module_name] = summed_ci / examples_reduced
         img_linear, img_log = plot_mean_component_cis_both_scales(mean_component_cis)
+        prefix = f"{self._key_prefix}{self.key_prefix}"
         return {
-            f"{self._key_prefix}ci_mean_per_component": img_linear,
-            f"{self._key_prefix}ci_mean_per_component_log": img_log,
+            f"{prefix}ci_mean_per_component": img_linear,
+            f"{prefix}ci_mean_per_component_log": img_log,
         }
 
 

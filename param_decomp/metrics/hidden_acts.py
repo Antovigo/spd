@@ -80,11 +80,14 @@ def site_squared_errors(
         if isinstance(routing_mask, Tensor):
             predicted = predicted[routing_mask]
             target = target[routing_mask]
-        # fp32 before subtracting: under bf16 autocast these two are close and large, so a
-        # bf16 difference throws away most of the significant bits, and a bf16 reduction
-        # over ~1e7 elements is worthless besides.
-        predicted, target = predicted.float(), target.float()
-        out[site] = ((predicted - target).pow(2).sum(), target.pow(2).sum())
+        # Upcast before subtracting: under bf16 autocast these two are close and large, so
+        # a bf16 difference discards most of the significant bits, and a bf16 reduction over
+        # ~1e7 elements is worthless besides. `sub_` on the fresh fp32 copy keeps only one
+        # such buffer live at a time — on the nontarget pass that is ~0.4 GiB of headroom.
+        out[site] = (
+            predicted.float().sub_(target).pow_(2).sum(),
+            target.float().pow(2).sum(),
+        )
     return out
 
 

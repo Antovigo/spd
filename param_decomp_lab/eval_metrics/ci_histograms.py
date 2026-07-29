@@ -5,17 +5,22 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
-from param_decomp.base_config import BaseConfig
+from param_decomp.ci_fns import CIRole
 from param_decomp.distributed import gather_all_tensors
-from param_decomp.metrics.base import Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult, NamedMetricConfig
 from param_decomp.metrics.context import MetricContext
 from param_decomp_lab.eval_metrics.plotting import plot_ci_values_histograms
 
 
-class CIHistogramsConfig(BaseConfig):
-    """`n_batches_accum=None` accumulates every batch in the eval pass."""
+class CIHistogramsConfig(NamedMetricConfig):
+    """`n_batches_accum=None` accumulates every batch in the eval pass.
+
+    `ci_role` picks which CI net to observe; give each instance a distinct `name` so their
+    log keys do not collide.
+    """
 
     type: Literal["CIHistograms"] = "CIHistograms"
+    ci_role: CIRole = "output"
     n_batches_accum: int | None
 
 
@@ -37,9 +42,10 @@ class CIHistograms(Metric[CIHistogramsConfig]):
         if self.cfg.n_batches_accum is not None and self.batches_seen >= self.cfg.n_batches_accum:
             return None
         self.batches_seen += 1
-        for k, v in ctx.ci.lower_leaky.items():
+        ci = ctx.ci_for(self.cfg.ci_role)
+        for k, v in ci.lower_leaky.items():
             self.lower_leaky_causal_importances[k].append(v.detach())
-        for k, v in ctx.ci.pre_sigmoid.items():
+        for k, v in ci.pre_sigmoid.items():
             self.pre_sigmoid_causal_importances[k].append(v.detach())
         return None
 
@@ -60,6 +66,6 @@ class CIHistograms(Metric[CIHistogramsConfig]):
         lower_leaky_fig = plot_ci_values_histograms(causal_importances=lower_leaky_cis)
         pre_sigmoid_fig = plot_ci_values_histograms(causal_importances=pre_sigmoid_cis)
         return {
-            "causal_importance_values": lower_leaky_fig,
-            "causal_importance_values_pre_sigmoid": pre_sigmoid_fig,
+            f"{self.key_prefix}causal_importance_values": lower_leaky_fig,
+            f"{self.key_prefix}causal_importance_values_pre_sigmoid": pre_sigmoid_fig,
         }

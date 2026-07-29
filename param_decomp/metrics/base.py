@@ -78,6 +78,17 @@ class Metric[TConfig: BaseConfig](ABC):
         name = self.cfg.name if isinstance(self.cfg, NamedMetricConfig) else None
         return name if name is not None else type(self).__name__
 
+    @property
+    def key_prefix(self) -> str:
+        """`"<name>/"` when this instance was explicitly named, else `""`.
+
+        Dict-returning metrics flatten under their own internal keys, so two instances of
+        one class overwrite each other unless they namespace. Prefixing only when `name` is
+        set leaves single-instance runs' log keys untouched.
+        """
+        name = self.cfg.name if isinstance(self.cfg, NamedMetricConfig) else None
+        return f"{name}/" if name is not None else ""
+
     def bind(self, *, model: ComponentModel, device: str) -> None:
         """Attach the live `ComponentModel` and device, then call `reset()`.
 

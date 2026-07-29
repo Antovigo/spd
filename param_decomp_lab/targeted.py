@@ -51,9 +51,12 @@ def build_nontarget_loss_configs(
 ) -> list[AnyLossMetricConfig]:
     """Derive the nontarget-pass loss set from the target-pass loss configs.
 
-    Drops losses that are meaningless or unsafe with a forced-on delta (unmasked recon,
-    both PPGD losses, hidden-acts recon); scales the importance-minimality coeff by
-    `impmin_ratio`. The result must retain a full-model recon loss so the nontarget
+    Drops losses that are meaningless or unsafe with a forced-on delta (unmasked recon, both
+    PPGD losses, and the legacy `StochasticHiddenActsReconLoss`); scales every
+    importance-minimality coeff by `impmin_ratio`, so a dual-CI run scales one instance per
+    CI net. `StochasticHiddenReconSubsetLoss` is deliberately kept: with the delta forced on
+    it drives the components to be inactive at each *site* on the nontarget distribution,
+    which is a more local version of the same pressure the output recon applies. The result must retain a full-model recon loss so the nontarget
     backward grads every parameter (a DDP requirement under the default reducer).
     """
     out: list[AnyLossMetricConfig] = []

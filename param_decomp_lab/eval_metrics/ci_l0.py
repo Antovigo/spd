@@ -8,9 +8,9 @@ from jaxtyping import Float
 from torch import Tensor
 from torch.distributed import ReduceOp
 
-from param_decomp.base_config import BaseConfig
+from param_decomp.ci_fns import CIRole
 from param_decomp.distributed import all_reduce
-from param_decomp.metrics.base import Metric, MetricResult
+from param_decomp.metrics.base import Metric, MetricResult, NamedMetricConfig
 from param_decomp.metrics.context import MetricContext
 
 
@@ -19,13 +19,17 @@ def calc_ci_l_zero(ci: Float[Tensor, "... C"], threshold: float) -> float:
     return (ci > threshold).float().sum(-1).mean().item()
 
 
-class CI_L0Config(BaseConfig):
+class CI_L0Config(NamedMetricConfig):
     """`groups` maps `{group_name: [fnmatch-style layer pattern, ...]}`.
 
     Matching layers' L0s are summed into the group and logged under the group's name.
+
+    `ci_role` picks which CI net to observe; give each instance a distinct `name` so their
+    log keys do not collide.
     """
 
     type: Literal["CI_L0"] = "CI_L0"
+    ci_role: CIRole = "output"
     groups: dict[str, list[str]] | None
     ci_alive_threshold: float = 0.0
 
@@ -43,7 +47,7 @@ class CI_L0(Metric[CI_L0Config]):
     @override
     def update(self, ctx: MetricContext) -> None:
         group_sums: dict[str, float] = defaultdict(float) if self.cfg.groups else {}
-        for layer_name, layer_ci in ctx.ci.lower_leaky.items():
+        for layer_name, layer_ci in ctx.ci_for(self.cfg.ci_role).lower_leaky.items():
             l0_val = calc_ci_l_zero(layer_ci, self.cfg.ci_alive_threshold)
             self.l0_values[layer_name].append(l0_val)
             if self.cfg.groups:
@@ -65,12 +69,12 @@ class CI_L0(Metric[CI_L0Config]):
             global_sum = all_reduce(torch.tensor(l0s, device=self.device).sum(), op=ReduceOp.SUM)
             global_count = all_reduce(torch.tensor(len(l0s), device=self.device), op=ReduceOp.SUM)
             avg_l0 = (global_sum / global_count).item()
-            out[f"{threshold}_{key}"] = avg_l0
+            out[f"{self.key_prefix}{threshold}_{key}"] = avg_l0
             table_data.append((key, avg_l0))
-        out["bar_chart"] = wandb.plot.bar(
+        out[f"{self.key_prefix}bar_chart"] = wandb.plot.bar(
             table=wandb.Table(columns=["layer", "l0"], data=table_data),
             label="layer",
             value="l0",
-            title=f"L0_{threshold}",
+            title=f"L0_{threshold} [{self.cfg.ci_role}]",
         )
         return out

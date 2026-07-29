@@ -339,6 +339,11 @@ class ComponentModel(nn.Module):
                 else torch.where(mask_info.routing_mask[..., None], components_out, output)
             )
 
+            if stop_when_cached is not None:
+                assert module_name not in cache, (
+                    f"{module_name} ran twice; site_outputs counts cached sites to decide when "
+                    "to stop, which assumes one call per site per forward"
+                )
             if cache_type == "output":
                 cache[module_name] = final_out
             if stop_when_cached is not None and len(cache) == stop_when_cached:

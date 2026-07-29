@@ -219,6 +219,10 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
         f"{ctx.target_out.device}, trainer on {device}"
     )
     assert torch.isfinite(ctx.target_out).all(), f"non-finite values in target_out at step {step}"
+    if ctx.ci_hidden is not None:
+        assert ctx.ci.lower_leaky.keys() == ctx.ci_hidden.lower_leaky.keys(), (
+            f"the two CI nets disagree on modules at step {step}"
+        )
     cis = {"ci": ctx.ci} | ({"ci_hidden": ctx.ci_hidden} if ctx.ci_hidden is not None else {})
     for label, ci in cis.items():
         assert ci.lower_leaky, f"empty {label}.lower_leaky dict at step {step}"

@@ -11,7 +11,7 @@ core library. For eval metrics (user-extensible, lab-side), see
 
 | File | Purpose |
 |---|---|
-| `base.py` | `Metric` ABC (lifecycle: `__init__(cfg)` → `bind` → `update` → `compute`) + `LossMetricConfig` base + `before_backward` / `after_backward` hooks |
+| `base.py` | `Metric` ABC (lifecycle: `__init__(cfg)` → `bind` → `update` → `compute`) + `NamedMetricConfig` / `LossMetricConfig` bases + `instance_key` / `key_prefix` + `before_backward` / `after_backward` hooks |
 | `context.py` | `MetricContext` — the per-step bundle every `Metric.update(ctx)` receives |
 | `dispatch.py` | `LOSS_METRIC_CLASSES` type→class table + `instantiate_metrics(...)` |
 | `<loss_name>.py` | One file per metric: `<Name>Loss` class + `<Name>LossConfig` config side-by-side |
@@ -51,8 +51,9 @@ sparsity number is `CI_L0`; each penalty's own `_no_beta` proxy is on its own sc
 ## Metric identity (`instance_key`) and same-class loss + eval
 
 Metric instances are keyed everywhere — instance dicts, state-dict, and log-key
-suffixes — by `Metric.instance_key`, which defaults to the class name. A loss-capable
-config can override it by setting `name` (on `LossMetricConfig`). This is what lets the
+suffixes — by `Metric.instance_key`, which defaults to the class name. Any
+`NamedMetricConfig` can override it by setting `name` (`LossMetricConfig` extends it, so
+loss configs have it too). This is what lets the
 *same* metric class appear under both `pd.loss_metrics` and `eval.metrics`: without a
 distinct `name` their instance keys collide and `instantiate_metrics` rejects the
 overlap. Example — a 1-step PGD training loss plus a 20-step PGD eval probe:
@@ -71,8 +72,11 @@ eval:
 ```
 
 `name` disambiguates scalar-output metrics (the log key is `{log_namespace}/{instance_key}`).
-A dict-returning metric flattens under its own internal keys, so two dict-returning
-instances of one class would still collide — namespace their keys if you need that.
+A dict-returning metric flattens under its own internal keys, so two instances of one class
+would still collide; they prefix their keys with `Metric.key_prefix`, which is `"<name>/"`
+when `name` is set and `""` otherwise — so a single-instance run's log keys are unchanged.
+`NAlive`, `CI_L0`, `CIMeanPerComponent` and `CIHistograms` do this, which is what lets a
+dual-CI run log one of each per CI net.
 
 ## Config placement rule
 
