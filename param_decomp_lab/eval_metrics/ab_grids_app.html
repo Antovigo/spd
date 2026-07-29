@@ -13,13 +13,18 @@
   select, input[type=range] { vertical-align: middle; }
   #thrval { font-family: ui-monospace, monospace; min-width: 64px; display: inline-block; }
   #count { color: var(--muted); }
-  #detail { display: none; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+  #detail { display: none; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--card); }
   #detail .panes { display: flex; gap: 24px; flex-wrap: wrap; }
   #detail h3 { margin: 0 0 6px; font-size: 14px; }
   #detail .pane { text-align: center; }
   #detail .pane .cap { color: var(--muted); margin-top: 4px; }
   #readout { font-family: ui-monospace, monospace; margin-top: 6px; min-height: 1.3em; }
-  #gallery { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 16px; }
+  #gallery { padding: 10px 16px; }
+  .matrix-row { margin-bottom: 16px; }
+  .matrix-row .row-title { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted);
+                           margin: 0 0 5px; }
+  .matrix-strip { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; }
+  .matrix-strip .tile { flex: 0 0 auto; }
   .tile { border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--card);
           cursor: pointer; text-align: center; }
   .tile.sel { outline: 2px solid #7b5cd6; }
@@ -38,8 +43,12 @@
     <option value="ci">CI</option><option value="inner">inner act</option></select></span>
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
     <span id="thrval"></span></span>
+  <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="2" style="width:52px"></span>
   <span id="count"></span>
 </header>
+<div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
+<div id="gallery"></div>
+<div id="empty" style="display:none">no subcomponents above threshold</div>
 <div id="detail">
   <h3 id="dtitle"></h3>
   <div class="panes">
@@ -48,9 +57,6 @@
   </div>
   <div id="readout"></div>
 </div>
-<div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
-<div id="gallery"></div>
-<div id="empty" style="display:none">no subcomponents above threshold</div>
 
 <script src="manifest.js"></script>
 <script>
@@ -108,7 +114,7 @@ function ramp(stops, t) {
 const CI_STOPS = [[255,255,255],[252,197,192],[221,52,151],[73,0,106]];          // ~RdPu
 const DIV_STOPS = [[5,48,97],[146,197,222],[247,247,247],[244,165,130],[103,0,31]]; // ~RdBu_r
 
-function shortName(name) { return name.split(".").slice(-2).join("."); }
+function pxValue() { return Math.max(1, +$("px").value | 0); }
 
 // value accessor into [comp, pos, op, a, b] flattened grids
 function gridIndex(si, pi, oi, ai, bi) {
@@ -173,25 +179,43 @@ function thrValue() {
 }
 
 function renderGallery() {
-  const pi = +$("pos").value, oi = +$("op").value, view = $("view").value;
+  const pi = +$("pos").value, oi = +$("op").value, view = $("view").value, px = pxValue();
   const comps = visibleComponents(), gallery = $("gallery");
   gallery.innerHTML = "";
   $("thrval").textContent = thrValue().toExponential(2);
   $("count").textContent = comps.length + " shown";
   $("empty").style.display = comps.length ? "none" : "block";
+
+  // One row per module (layer/matrix), tiles scrolling horizontally within it.
+  const byModule = new Map();
   for (const comp of comps) {
-    const tile = document.createElement("div");
-    tile.className = "tile";
-    const cv = document.createElement("canvas");
-    cv.dataset.px = 2;
-    const lbl = document.createElement("div");
-    lbl.className = "lbl";
-    lbl.textContent = `${shortName(comp.name)} #${comp.c} · ${comp.meanCi.toExponential(1)}`;
-    tile.append(cv, lbl);
-    tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
-    if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
-    gallery.append(tile);
-    tileDrawers(comp.mi, comp.si, pi, oi)[view](cv);
+    if (!byModule.has(comp.mi)) byModule.set(comp.mi, []);
+    byModule.get(comp.mi).push(comp);
+  }
+  for (const mi of [...byModule.keys()].sort((a, b) => a - b)) {
+    const row = document.createElement("div");
+    row.className = "matrix-row";
+    const title = document.createElement("div");
+    title.className = "row-title";
+    title.textContent = `${cur.modules[mi].name}  (${byModule.get(mi).length})`;
+    const strip = document.createElement("div");
+    strip.className = "matrix-strip";
+    for (const comp of byModule.get(mi)) {
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      const cv = document.createElement("canvas");
+      cv.dataset.px = px;
+      const lbl = document.createElement("div");
+      lbl.className = "lbl";
+      lbl.textContent = `#${comp.c} · ${comp.meanCi.toExponential(1)}`;
+      tile.append(cv, lbl);
+      tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
+      if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
+      strip.append(tile);
+      tileDrawers(comp.mi, comp.si, pi, oi)[view](cv);
+    }
+    row.append(title, strip);
+    gallery.append(row);
   }
 }
 
@@ -206,7 +230,7 @@ function renderDetail() {
   const drawers = tileDrawers(selected.mi, selected.si, pi, oi);
   for (const [id, kind] of [["dci", "ci"], ["dinner", "inner"]]) {
     const cv = $(id);
-    cv.dataset.px = 4;
+    cv.dataset.px = pxValue() * 2;
     drawers[kind](cv);
     cv.onmousemove = ev => {
       const r = cv.getBoundingClientRect();
@@ -248,6 +272,7 @@ if (manifest.length) $("step").value = manifest[manifest.length - 1].step;
 $("step").onchange = () => loadStep(+$("step").value, manifest.find(m => m.step === +$("step").value).file);
 for (const id of ["pos", "op", "view"]) $(id).onchange = render;
 $("thr").oninput = render;
+$("px").oninput = render;
 $("thr").value = 0;
 
 if (manifest.length) loadStep(manifest[manifest.length - 1].step, manifest[manifest.length - 1].file);

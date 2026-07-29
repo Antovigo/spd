@@ -30,7 +30,13 @@ Following the way it is implemented in the `experiment/8B_targeted_jax`, re-impl
 
 When that’s done, commit and push the changes.
 
-Now, let’s see if we can get better-separated components by adding the new auxilliary hidden-activation loss. Here again, since we are only looking at the first "stage" of training (first 4000 steps), there’s no need to try annealing. Just try different values (0, 0.001, 0.01, 0.1). Add a plot to the report showing the effect of the hidden-activation loss.
+Now, let’s see if we can get better-separated components by adding the new auxilliary hidden-activation loss. Here again, since we are only looking at the first "stage" of training (first 4000 steps), there’s no need to try annealing. Just try different values (0, 0.001, 0.01, 0.1, 1). Add a plot to the report showing the effect of the hidden-activation loss.
 
 # Objective 4 - Test the "beta" parameter of importance minimality (the frequency-minimality loss)
 Similarly to above, using the best hyperparameters found so far, test several values for the beta coefficient: 0, 0.5, 0.75.
+
+# Objective 5 - Re-run objective 2, 3, 4, but using 1e-3 impmin coeff
+The 3e-5 value chosen so far was picked because it preserves at least one component at each period, even though it also has a lot of multi-period components. So, the hope is that we can later get rid of these multi-period components somehow. With 1e-3, it seems that we have much fewer multi-period components, but we lose some of the relevant components. Here, the hope is that we can later recover the missing components somehow. At this point, it is hard to tell which is better, so it’s worse looking at the effect of hyperparameters in both regimes in parallel.
+
+# Objective 6 - Fine-tune the best decompositions for 2000 more steps, annealing gamma from 1 to 0.01
+This is expected to binarize the causal importances, driving some components to 0 while other are driven to 1. For both of the two selected impmin coeff values (1e-3 and 3e-5), pick the most promising decompositions (the ones with the highest n_pure_periods), and fine-tune for 2000 more steps, while annealing the SmoothL0ImportanceMinimality parameter from 1 to 0.01. 
