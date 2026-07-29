@@ -129,6 +129,10 @@ class _FakeCtx:
     ci: _FakeCI
     current_frac_of_training: float
 
+    def ci_for(self, role: str) -> _FakeCI:
+        assert role == "output", "these tests only exercise the output CI net"
+        return self.ci
+
 
 def _make_bound_metric(
     *, gamma: float, beta: float, device: str = "cpu"

@@ -1,7 +1,6 @@
 from typing import Annotated, Any, Literal, override
 
 import torch
-import torch.nn.functional as F
 from jaxtyping import Float
 from pydantic import Field, NonNegativeFloat
 from torch import Tensor
@@ -10,7 +9,6 @@ from torch.distributed import ReduceOp
 from param_decomp.base_config import BaseConfig
 from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModel
-from param_decomp.components import LinearComponents
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     Router,
@@ -22,6 +20,7 @@ from param_decomp.masks import (
 )
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp.metrics.hidden_acts import clean_site_outputs
 from param_decomp.torch_helpers import get_obj_device
 
 
@@ -142,19 +141,6 @@ class StochasticReconSubsetLoss(Metric[StochasticReconSubsetLossConfig]):
         self.sum_sq_err = torch.zeros((), device=self.device)
         self.n_elems = torch.zeros((), device=self.device, dtype=torch.long)
 
-    def _hidden_acts_targets(self, ctx: MetricContext) -> dict[str, Tensor]:
-        """Frozen per-site clean outputs `x@W + b` from the cached clean input acts."""
-        targets: dict[str, Tensor] = {}
-        for module_name, x in ctx.pre_weight_acts.items():
-            comp = self.model.components[module_name]
-            assert isinstance(comp, LinearComponents), (
-                f"hidden_acts_recon supports linear sites only, got {type(comp).__name__} "
-                f"for {module_name}"
-            )
-            w = self.model.target_weight(module_name)
-            targets[module_name] = F.linear(x.detach().to(w.dtype), w, comp.bias)
-        return targets
-
     @override
     def update(self, ctx: MetricContext) -> Tensor:
         wd = ctx.weight_deltas if ctx.use_delta_component else None
@@ -169,7 +155,11 @@ class StochasticReconSubsetLoss(Metric[StochasticReconSubsetLossConfig]):
             weight_deltas=wd,
             router=self.router,
             reconstruction_loss=ctx.reconstruction_loss,
-            hidden_acts_targets=self._hidden_acts_targets(ctx) if aux is not None else None,
+            hidden_acts_targets=(
+                clean_site_outputs(self.model, ctx.pre_weight_acts, list(ctx.pre_weight_acts))
+                if aux is not None
+                else None
+            ),
         )
         self.sum_loss += sum_loss.detach()
         self.n_examples += n

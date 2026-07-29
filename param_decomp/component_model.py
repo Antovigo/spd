@@ -17,11 +17,19 @@ from transformers.pytorch_utils import Conv1D as RadfordConv1D
 
 from param_decomp.base_config import runtime_cast
 from param_decomp.batch_and_loss_fns import RunBatch
-from param_decomp.ci_fns import CiConfig, make_ci_fn_wrapper
+from param_decomp.ci_fns import CiConfig, CIRole, make_ci_fn_wrapper
 from param_decomp.ci_sigmoids import SIGMOID_TYPES, SigmoidType
 from param_decomp.components import Components, make_components
 from param_decomp.decomposition_targets import DecompositionTarget, Identity
 from param_decomp.masks import ComponentsMaskInfo, SamplingType
+
+
+class _SiteCacheComplete(Exception):
+    """Aborts a forward pass once every hooked site has been cached (see `site_outputs`).
+
+    A forward hook cannot ask PyTorch to stop the pass, so unwinding the stack is the only
+    way to skip the model's remaining layers.
+    """
 
 
 class OutputWithCache(NamedTuple):
@@ -70,6 +78,7 @@ class ComponentModel(nn.Module):
         decomposition_targets: list[DecompositionTarget],
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,
+        dual_hidden_ci: bool = False,
     ):
         """Wrap `target_model` with parameter-component machinery.
 
@@ -84,6 +93,10 @@ class ComponentModel(nn.Module):
             sigmoid_type: Sigmoid used to squash raw CI-fn outputs. `"leaky_hard"`
                 splits into lower- and upper-leaky variants; everything else uses one
                 function for both branches.
+            dual_hidden_ci: Build a second CI fn (`ci_fn_hidden`) of the same
+                architecture, scoring importance for reconstructing the decomposed sites'
+                activations rather than the model output. Both nets score the same pool of
+                subcomponents; select between them with `CIRole`.
         """
         super().__init__()
         self._run_batch: RunBatch = run_batch
@@ -108,6 +121,16 @@ class ComponentModel(nn.Module):
             module_to_c=self.module_to_c,
             components=self.components,
             ci_config=ci_config,
+        )
+        self.ci_fn_hidden = (
+            make_ci_fn_wrapper(
+                target_model=target_model,
+                module_to_c=self.module_to_c,
+                components=self.components,
+                ci_config=ci_config,
+            )
+            if dual_hidden_ci
+            else None
         )
 
         if sigmoid_type == "leaky_hard":
@@ -217,6 +240,7 @@ class ComponentModel(nn.Module):
                 mask_info=mask_info,
                 cache_type=cache_type,
                 cache=cache,
+                stop_when_cached=None,
             )
 
         with self._attach_forward_hooks(hooks):
@@ -227,6 +251,44 @@ class ComponentModel(nn.Module):
                 return OutputWithCache(output=out, cache=cache)
             case "none":
                 return out
+
+    def site_outputs(
+        self,
+        batch: Any,
+        mask_infos: dict[str, ComponentsMaskInfo],
+    ) -> dict[str, Float[Tensor, "..."]]:
+        """Masked outputs of the decomposed sites, cutting the forward short once they're all in.
+
+        Site-level losses (hidden-activation reconstruction) read nothing downstream of the
+        last decomposition target, so running the rest of the model wastes compute and —
+        more importantly under memory pressure — makes autograd retain every downstream
+        activation. The pass therefore aborts as soon as the cache holds one entry per
+        module in `mask_infos`, which needs no knowledge of execution order. The aborting
+        module's output is already cached with its graph intact; only the value PyTorch
+        would have propagated onward is discarded.
+        """
+        cache: dict[str, Tensor] = {}
+        hooks: dict[str, Callable[..., Any]] = {
+            module_name: partial(
+                self._components_and_cache_hook,
+                module_name=module_name,
+                components=self.components[module_name],
+                mask_info=mask_info,
+                cache_type="output",
+                cache=cache,
+                stop_when_cached=len(mask_infos),
+            )
+            for module_name, mask_info in mask_infos.items()
+        }
+        try:
+            with self._attach_forward_hooks(hooks):
+                self._run_batch(self.target_model, batch)
+        except _SiteCacheComplete:
+            pass
+        assert cache.keys() == mask_infos.keys(), (
+            f"site_outputs cached {sorted(cache)}, expected {sorted(mask_infos)}"
+        )
+        return cache
 
     def _components_and_cache_hook(
         self,
@@ -239,11 +301,13 @@ class ComponentModel(nn.Module):
         mask_info: ComponentsMaskInfo | None,
         cache_type: Literal["component_acts", "input", "output", "none"],
         cache: dict[str, Tensor],
+        stop_when_cached: int | None,
     ) -> Any | None:
         """Forward hook handling both component replacement and caching.
 
         Returns the replaced output when components are applied, else `None` (telling
-        PyTorch to keep the original output).
+        PyTorch to keep the original output). When `stop_when_cached` is set, raises
+        `_SiteCacheComplete` once the cache holds that many entries — see `site_outputs`.
         """
         assert len(args) == 1, "Expected 1 argument"
         assert len(kwargs) == 0, "Expected no keyword arguments"
@@ -277,12 +341,16 @@ class ComponentModel(nn.Module):
 
             if cache_type == "output":
                 cache[module_name] = final_out
+            if stop_when_cached is not None and len(cache) == stop_when_cached:
+                raise _SiteCacheComplete
             return final_out
 
         # No component replacement - keep original output
         if cache_type == "output":
             assert isinstance(output, Tensor)
             cache[module_name] = output
+        if stop_when_cached is not None and len(cache) == stop_when_cached:
+            raise _SiteCacheComplete
         return None
 
     @contextmanager
@@ -304,10 +372,11 @@ class ComponentModel(nn.Module):
         pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "... pos"]],
         sampling: SamplingType,
         detach_inputs: bool = False,
+        role: CIRole = "output",
     ) -> CIOutputs:
         """CI values for every decomposition target.
 
-        Runs the CI fn on `pre_weight_acts` and squashes through both lower- and
+        Runs the selected CI fn on `pre_weight_acts` and squashes through both lower- and
         upper-leaky sigmoids. Under `sampling="binomial"`, the lower-leaky branch has a
         small amount of uniform noise mixed in before squashing.
 
@@ -320,12 +389,25 @@ class ComponentModel(nn.Module):
             detach_inputs: When true, gradients do not flow from CI back into
                 `pre_weight_acts`. Used by metrics that want to optimise CI without
                 perturbing the upstream graph.
+            role: Which CI net to run. `"hidden"` requires the model to have been built
+                with `dual_hidden_ci`.
         """
         if detach_inputs:
             pre_weight_acts = {k: v.detach() for k, v in pre_weight_acts.items()}
 
-        ci_fn_outputs = self.ci_fn(pre_weight_acts)
+        ci_fn_outputs = self.ci_fn_for(role)(pre_weight_acts)
         return self._apply_sigmoid_to_ci_outputs(ci_fn_outputs, sampling)
+
+    def ci_fn_for(self, role: CIRole) -> nn.Module:
+        """The CI fn scoring importance for `role`."""
+        match role:
+            case "output":
+                return self.ci_fn
+            case "hidden":
+                assert self.ci_fn_hidden is not None, (
+                    "role='hidden' needs a model built with dual_hidden_ci=True"
+                )
+                return self.ci_fn_hidden
 
     def _apply_sigmoid_to_ci_outputs(
         self,
@@ -382,7 +464,8 @@ def component_grad_norms(
     - `components/<module_path>.<param>` — L2 norm of each component parameter's
       gradient. `NaN` if its grad was never populated.
     - `ci_fns/<param>` — L2 norm of each CI-fn parameter's gradient. `NaN` if its grad
-      was never populated.
+      was never populated. The hidden CI net (when present) reports under
+      `ci_fns/hidden.<param>`, so per-net norms stay separable.
     - `summary/components`, `summary/ci_fns`, `summary/total` — aggregate L2 norms over
       each pool and over both pools. `NaN` if any contributing grad was missing.
     """
@@ -404,17 +487,20 @@ def component_grad_norms(
 
     ci_fn_grad_norm_sq_sum: Float[Tensor, ""] = torch.zeros((), device=device)
     missing_ci_fn_grad = False
-    for local_param_name, local_param in component_model.ci_fn.named_parameters():
+    ci_fn_params = list(component_model.ci_fn.named_parameters())
+    if component_model.ci_fn_hidden is not None:
+        ci_fn_params += [
+            (f"hidden.{n}", p) for n, p in component_model.ci_fn_hidden.named_parameters()
+        ]
+    for local_param_name, local_param in ci_fn_params:
+        key = f"ci_fns/{local_param_name}"
+        assert key not in out, f"Key {key} already exists in grad norms log"
         if local_param.grad is None:
             missing_ci_fn_grad = True
-            key = f"ci_fns/{local_param_name}"
-            assert key not in out, f"Key {key} already exists in grad norms log"
             out[key] = float("nan")
             continue
         ci_fn_grad = runtime_cast(Tensor, local_param.grad)
         ci_fn_grad_sum_sq = ci_fn_grad.pow(2).sum()
-        key = f"ci_fns/{local_param_name}"
-        assert key not in out, f"Key {key} already exists in grad norms log"
         out[key] = ci_fn_grad_sum_sq.sqrt().item()
         ci_fn_grad_norm_sq_sum += ci_fn_grad_sum_sq
 

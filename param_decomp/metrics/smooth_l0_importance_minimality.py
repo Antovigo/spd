@@ -18,6 +18,7 @@ from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.base_config import Probability
+from param_decomp.ci_fns import CIRole
 from param_decomp.distributed import all_reduce, get_distributed_state
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -31,9 +32,13 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     is linearly annealed toward `gamma_final` between `gamma_anneal_start_frac` and
     `gamma_anneal_end_frac` of training (no-op when `gamma_final is None` or
     `gamma_anneal_start_frac == 1.0`).
+
+    `ci_role` picks which CI net is penalised; a dual-CI run lists this loss twice, once per
+    net, with distinct `name`s.
     """
 
     type: Literal["SmoothL0ImportanceMinimalityLoss"] = "SmoothL0ImportanceMinimalityLoss"
+    ci_role: CIRole = "output"
     gamma: PositiveFloat
     beta: NonNegativeFloat
     gamma_anneal_start_frac: Probability = 1.0
@@ -171,7 +176,7 @@ class SmoothL0ImportanceMinimalityLoss(Metric[SmoothL0ImportanceMinimalityLossCo
             gamma_anneal_end_frac=self.cfg.gamma_anneal_end_frac,
         )
         per_component_sums, n = _per_component_sums(
-            ci_upper_leaky=ctx.ci.upper_leaky,
+            ci_upper_leaky=ctx.ci_for(self.cfg.ci_role).upper_leaky,
             gamma=gamma,
             normalize_at_one=self.cfg.normalize_at_one,
         )
@@ -197,7 +202,7 @@ class SmoothL0ImportanceMinimalityLoss(Metric[SmoothL0ImportanceMinimalityLossCo
         }
         n_examples = int(all_reduce(self.n_examples, op=ReduceOp.SUM))
         smooth_l0, entropy = _smooth_l0_and_entropy_terms(reduced_sums, n_examples, world_size=1)
-        name = type(self).__name__
+        name = self.instance_key
         return {
             name: smooth_l0 + self.cfg.beta * entropy,
             f"{name}_no_beta": smooth_l0,

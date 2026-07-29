@@ -37,6 +37,9 @@ from param_decomp.metrics.smooth_l0_importance_minimality import (
     SmoothL0ImportanceMinimalityLossConfig,
 )
 from param_decomp.metrics.stochastic_hidden_acts_recon import StochasticHiddenActsReconLossConfig
+from param_decomp.metrics.stochastic_hidden_recon_subset import (
+    StochasticHiddenReconSubsetLossConfig,
+)
 from param_decomp.metrics.stochastic_recon import StochasticReconLossConfig
 from param_decomp.metrics.stochastic_recon_layerwise import StochasticReconLayerwiseLossConfig
 from param_decomp.metrics.stochastic_recon_subset import StochasticReconSubsetLossConfig
@@ -69,6 +72,7 @@ AnyLossMetricConfig = Annotated[
     | PGDReconSubsetLossConfig
     | SmoothL0ImportanceMinimalityLossConfig
     | StochasticHiddenActsReconLossConfig
+    | StochasticHiddenReconSubsetLossConfig
     | StochasticReconLayerwiseLossConfig
     | StochasticReconLossConfig
     | StochasticReconSubsetLossConfig
@@ -129,6 +133,15 @@ class PDConfig(BaseConfig):
         ...,
         discriminator="mode",
         description="Configuration for the causal importance function.",
+    )
+    dual_hidden_ci: bool = Field(
+        default=False,
+        description="Build a second CI function of the same architecture, scoring each "
+        "subcomponent's importance for reconstructing the decomposed sites' activations "
+        "rather than the model's final output. Both nets score the same pool of "
+        "subcomponents and are trained by different reconstruction losses; metrics pick a "
+        "net via their `ci_role` field. Required by any loss or eval with "
+        "`ci_role: hidden`.",
     )
     sampling: SamplingType = Field(
         default="continuous",

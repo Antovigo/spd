@@ -18,20 +18,26 @@ from param_decomp.component_model import ComponentModel
 EvalDistribution = Literal["target", "nontarget"]
 
 
-class LossMetricConfig(BaseConfig):
+class NamedMetricConfig(BaseConfig):
+    """Config for a metric whose instance identity can be overridden.
+
+    `name` overrides the class name as this instance's identity (`Metric.instance_key`),
+    letting one metric class appear several times in a run with different settings — e.g.
+    a 1-step PGD training loss alongside a 20-step PGD eval probe, or one hidden-acts
+    probe per CI role. Leave `None` (the default) and the class name is used.
+    """
+
+    name: str | None = None
+
+
+class LossMetricConfig(NamedMetricConfig):
     """Pydantic config for a metric that can also be used as a training loss.
 
     `coeff` is required when this metric is listed under `loss_metrics` (asserted by
     `PDConfig`'s field validator); ignored for eval-only instances.
-
-    `name` overrides the class name as this instance's identity (`Metric.instance_key`),
-    letting the same metric class appear under both `loss_metrics` and `eval.metrics`
-    with different settings — e.g. a 1-step PGD training loss alongside a 20-step PGD
-    eval probe. Leave `None` (the default) and the class name is used.
     """
 
     coeff: float | None = None
-    name: str | None = None
 
 
 MetricResult = Tensor | Mapping[str, Any]
@@ -66,10 +72,10 @@ class Metric[TConfig: BaseConfig](ABC):
     def instance_key(self) -> str:
         """Identity for dict keys and log-key suffixes; defaults to the class name.
 
-        A loss-capable config may override it via `LossMetricConfig.name` so two
-        instances of the same metric class (one loss, one eval) stay distinct.
+        A `NamedMetricConfig` may override it via `name` so several instances of one
+        metric class (a loss and an eval probe, or one probe per CI role) stay distinct.
         """
-        name = self.cfg.name if isinstance(self.cfg, LossMetricConfig) else None
+        name = self.cfg.name if isinstance(self.cfg, NamedMetricConfig) else None
         return name if name is not None else type(self).__name__
 
     def bind(self, *, model: ComponentModel, device: str) -> None:

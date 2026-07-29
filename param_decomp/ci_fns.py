@@ -17,6 +17,16 @@ from param_decomp.components import Components, EmbeddingComponents, get_module_
 LayerwiseCiFnType = Literal["mlp", "vector_mlp", "shared_mlp"]
 GlobalCiFnType = Literal["global_shared_mlp", "global_shared_transformer"]
 
+CIRole = Literal["output", "hidden"]
+"""Which CI network a value came from, or which one a metric reads.
+
+`"output"` scores how much each subcomponent matters for reconstructing the target
+model's final output; `"hidden"` scores how much it matters for reconstructing the
+decomposed sites' activations. A run only has the latter under `pd.dual_hidden_ci`; the
+two nets share one pool of subcomponents and differ only in the reconstruction loss that
+trains them.
+"""
+
 
 class LayerwiseCiConfig(BaseConfig):
     """Layerwise CI fns — one independent CI fn per decomposition target."""

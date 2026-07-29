@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from functools import partial
 from typing import Any, Literal
 
 import torch
@@ -136,26 +135,45 @@ def _construct_mask_infos_from_adv_sources(
     )
 
 
-def _forward_with_adv_sources(
+PGDObjective = Callable[[dict[str, ComponentsMaskInfo]], tuple[Float[Tensor, ""], int]]
+"""Maps the mask payload built from the current adversarial sources to `(sum, n_examples)`.
+
+PGD ascends `sum / n_examples`. Output reconstruction is one such objective; per-site
+activation error is another.
+"""
+
+
+def pgd_masked_objective_update(
     model: ComponentModel,
-    batch: Any,
-    adv_sources: dict[str, Float[Tensor, "*batch_dim_or_ones mask_c"]],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
-    routing_masks: RoutingMasks,
-    target_out: Tensor,
-    batch_dims: tuple[int, ...],
-    reconstruction_loss: ReconstructionLoss,
+    router: Router,
+    pgd_config: PGDConfig,
+    objective: PGDObjective,
 ) -> tuple[Float[Tensor, ""], int]:
-    mask_infos = _construct_mask_infos_from_adv_sources(
-        adv_sources=adv_sources,
-        ci=ci,
-        weight_deltas=weight_deltas,
-        routing_masks=routing_masks,
-        batch_dims=batch_dims,
-    )
-    out = model(batch, mask_infos=mask_infos)
-    return reconstruction_loss(out, target_out)
+    """Per-step PGD against an arbitrary mask-consuming objective.
+
+    Inits fresh adversarial sources, runs `pgd_config.n_steps` of inner sign-PGD ascending
+    `objective`, and returns it evaluated at the final sources. Callers wanting output
+    reconstruction should use `pgd_masked_recon_loss_update`.
+    """
+    batch_dims = next(iter(ci.values())).shape[:-1]
+    device = next(iter(ci.values())).device
+    routing_masks = router.get_masks(module_names=model.target_module_paths, mask_shape=batch_dims)
+    adv_sources = _init_adv_sources(model, batch_dims, device, weight_deltas, pgd_config)
+
+    def forward_at_current_sources() -> tuple[Float[Tensor, ""], int]:
+        return objective(
+            _construct_mask_infos_from_adv_sources(
+                adv_sources=adv_sources,
+                ci=ci,
+                weight_deltas=weight_deltas,
+                routing_masks=routing_masks,
+                batch_dims=batch_dims,
+            )
+        )
+
+    return _run_pgd_loop(adv_sources, pgd_config, forward_at_current_sources)
 
 
 def pgd_masked_recon_loss_update(
@@ -173,20 +191,17 @@ def pgd_masked_recon_loss_update(
     Inits fresh adversarial sources, runs `pgd_config.n_steps` of inner sign-PGD against
     the recon objective, returns `(sum_loss, n_examples)` evaluated at the final sources.
     """
-    batch_dims = next(iter(ci.values())).shape[:-1]
-    routing_masks = router.get_masks(module_names=model.target_module_paths, mask_shape=batch_dims)
-    adv_sources = _init_adv_sources(model, batch_dims, target_out.device, weight_deltas, pgd_config)
 
-    fwd_pass = partial(
-        _forward_with_adv_sources,
+    def recon_objective(
+        mask_infos: dict[str, ComponentsMaskInfo],
+    ) -> tuple[Float[Tensor, ""], int]:
+        return reconstruction_loss(model(batch, mask_infos=mask_infos), target_out)
+
+    return pgd_masked_objective_update(
         model=model,
-        batch=batch,
-        adv_sources=adv_sources,
         ci=ci,
         weight_deltas=weight_deltas,
-        routing_masks=routing_masks,
-        target_out=target_out,
-        batch_dims=batch_dims,
-        reconstruction_loss=reconstruction_loss,
+        router=router,
+        pgd_config=pgd_config,
+        objective=recon_objective,
     )
-    return _run_pgd_loop(adv_sources, pgd_config, fwd_pass)

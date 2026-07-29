@@ -175,6 +175,19 @@ def _build_metric_context(
         pre_weight_acts=target_model_output.cache,
         detach_inputs=False,
         sampling=config.sampling,
+        role="output",
+    )
+    # Both CI nets read the same cached clean activations, so the second net costs one
+    # CI-fn forward and no extra pass over the target model.
+    ci_hidden = (
+        component_model.calc_causal_importances(
+            pre_weight_acts=target_model_output.cache,
+            detach_inputs=False,
+            sampling=config.sampling,
+            role="hidden",
+        )
+        if component_model.ci_fn_hidden is not None
+        else None
     )
     return MetricContext(
         model=component_model,
@@ -182,6 +195,7 @@ def _build_metric_context(
         target_out=target_model_output.output,
         pre_weight_acts=target_model_output.cache,
         ci=ci,
+        ci_hidden=ci_hidden,
         weight_deltas=weight_deltas,
         step=step,
         total_steps=config.steps,
@@ -205,15 +219,20 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
         f"{ctx.target_out.device}, trainer on {device}"
     )
     assert torch.isfinite(ctx.target_out).all(), f"non-finite values in target_out at step {step}"
-    assert ctx.ci.lower_leaky, f"empty ci.lower_leaky dict at step {step}"
-    assert ctx.ci.upper_leaky.keys() == ctx.ci.lower_leaky.keys(), (
-        f"ci upper/lower leaky key mismatch at step {step}"
-    )
-    for name, t in ctx.ci.lower_leaky.items():
-        assert torch.isfinite(t).all(), f"non-finite ci.lower_leaky[{name!r}] at step {step}"
-        assert str(t.device).startswith(device_prefix), (
-            f"ci.lower_leaky[{name!r}] device mismatch at step {step}: {t.device} vs {device}"
+    cis = {"ci": ctx.ci} | ({"ci_hidden": ctx.ci_hidden} if ctx.ci_hidden is not None else {})
+    for label, ci in cis.items():
+        assert ci.lower_leaky, f"empty {label}.lower_leaky dict at step {step}"
+        assert ci.upper_leaky.keys() == ci.lower_leaky.keys(), (
+            f"{label} upper/lower leaky key mismatch at step {step}"
         )
+        for name, t in ci.lower_leaky.items():
+            assert torch.isfinite(t).all(), (
+                f"non-finite {label}.lower_leaky[{name!r}] at step {step}"
+            )
+            assert str(t.device).startswith(device_prefix), (
+                f"{label}.lower_leaky[{name!r}] device mismatch at step {step}: "
+                f"{t.device} vs {device}"
+            )
 
 
 def _apply_ci_scaled_weight_decay(
@@ -449,6 +468,7 @@ class Trainer:
             decomposition_targets=decomposition_targets,
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
+            dual_hidden_ci=pd_config.dual_hidden_ci,
         )
         model.to(device)
 
@@ -479,7 +499,10 @@ class Trainer:
         assert component_model.ci_fn is not None, (
             "single-pool Trainer assumes a ComponentModel with the CI fn intact"
         )
-        self._ci_fn_params = list(component_model.ci_fn.parameters())
+        # Both CI nets share one optimizer: Adam is per-parameter and the nets have
+        # disjoint parameters, so a shared optimizer is identical to two with the same
+        # hyperparameters — splitting would only buy per-net LR/betas.
+        self._ci_fn_params = [p for _, p in self._ci_fn_optimizer_named_params()]
         assert len(self._component_params) > 0, "No parameters found in components to optimize"
 
         self.components_optimizer = optim.AdamW(
@@ -529,9 +552,21 @@ class Trainer:
         return out
 
     def _ci_fn_optimizer_named_params(self) -> list[tuple[str, nn.Parameter]]:
-        """The ``(name, param)`` pairs for ``ci_fn_optimizer``."""
-        assert self.component_model.ci_fn is not None
-        return [(f"ci_fn.{n}", p) for n, p in self.component_model.ci_fn.named_parameters()]
+        """The ``(name, param)`` pairs for ``ci_fn_optimizer``, output net then hidden net.
+
+        The hidden net's names are prefixed ``ci_fn_hidden.`` so that a single-CI
+        checkpoint's ``ci_fn.*`` optimizer state still loads into a dual-CI run, with the
+        hidden net's moments simply starting fresh. (The *model* state dict is a separate
+        matter — that load is strict, so a single-CI checkpoint cannot be resumed straight
+        into a dual-CI config.)
+        """
+        out = [(f"ci_fn.{n}", p) for n, p in self.component_model.ci_fn.named_parameters()]
+        if self.component_model.ci_fn_hidden is not None:
+            out += [
+                (f"ci_fn_hidden.{n}", p)
+                for n, p in self.component_model.ci_fn_hidden.named_parameters()
+            ]
+        return out
 
     def _build_all_metric_instances(
         self,
@@ -565,11 +600,10 @@ class Trainer:
                 nontarget_names: set[str] = set()
                 for m in eval_loop.nontarget.metrics:
                     m.bind(model=self.component_model, device=device)
-                    metric_name = type(m).__name__
-                    assert metric_name not in nontarget_names, (
-                        f"duplicate nontarget eval metric {metric_name!r}"
+                    assert m.instance_key not in nontarget_names, (
+                        f"duplicate nontarget eval metric {m.instance_key!r}"
                     )
-                    nontarget_names.add(metric_name)
+                    nontarget_names.add(m.instance_key)
                 overlap = sorted(
                     nontarget_names & (set(self.loss_metrics) | set(eval_only_instances))
                 )
@@ -757,6 +791,9 @@ class Trainer:
                 losses = {name: m.update(ctx) for name, m in self.loss_metrics.items()}
 
             # Per-subcomponent max CI over the target batch, for CI-scaled weight decay.
+            # Taken over BOTH CI nets: a subcomponent that only the hidden net calls
+            # important is still doing work (it carries interference), and decaying it
+            # would fight the hidden-acts recon loss.
             ci_scaled_wd_start_step = (
                 pd_config.ci_scaled_component_weight_decay_start_frac * pd_config.steps
             )
@@ -766,6 +803,10 @@ class Trainer:
                     name: ci.detach().float().amax(dim=tuple(range(ci.ndim - 1)))
                     for name, ci in ctx.ci.lower_leaky.items()
                 }
+                if ctx.ci_hidden is not None:
+                    for name, ci in ctx.ci_hidden.lower_leaky.items():
+                        hidden_max = ci.detach().float().amax(dim=tuple(range(ci.ndim - 1)))
+                        batch_ci_max[name] = torch.maximum(batch_ci_max[name], hidden_max)
 
             total_loss = torch.zeros((), device=device)
             active_loss_names: list[str] = []
@@ -839,9 +880,9 @@ class Trainer:
                 # Only sync loss scalars to the host on steps we actually log.
                 if cadence.should_log_train(step):
                     for metric_name, loss_val in nt_active_losses.items():
-                        batch_log_data[
-                            f"nontarget/loss/{type(nontarget_metrics[metric_name]).__name__}"
-                        ] = loss_val.item()
+                        # Keyed by instance, not class: a dual-CI run has one
+                        # importance-minimality instance per CI net.
+                        batch_log_data[f"nontarget/loss/{metric_name}"] = loss_val.item()
                     batch_log_data["nontarget/loss/total"] = nt_total.item()
 
             # --- Train Logging --- #
