@@ -25,10 +25,10 @@
                            margin: 0 0 5px; }
   .matrix-strip { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; }
   .matrix-strip .tile { flex: 0 0 auto; }
-  .tile { border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--card);
+  .tile { border: 1px solid var(--line); border-radius: 6px; background: var(--card);
           cursor: pointer; text-align: center; }
   .tile.sel { outline: 2px solid #7b5cd6; }
-  .tile .lbl { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; }
+  .tile .lbl { font-size: 11px; color: var(--muted); padding: 3px 4px; white-space: nowrap; }
   canvas { image-rendering: pixelated; display: block; margin: 0 auto; }
   #empty { padding: 24px 16px; color: var(--muted); }
   .axis-note { color: var(--muted); font-size: 11px; padding: 0 16px 10px; }
@@ -43,7 +43,7 @@
     <option value="ci">CI</option><option value="inner">inner act</option></select></span>
   <span><label>mean CI &ge;</label><input type="range" id="thr" min="0" max="1" step="0.001" style="width:180px">
     <span id="thrval"></span></span>
-  <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="2" style="width:52px"></span>
+  <span><label>px/square</label><input type="number" id="px" min="1" max="16" step="1" value="1" style="width:52px"></span>
   <span id="count"></span>
 </header>
 <div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
@@ -207,7 +207,7 @@ function renderGallery() {
       cv.dataset.px = px;
       const lbl = document.createElement("div");
       lbl.className = "lbl";
-      lbl.textContent = `#${comp.c} · ${comp.meanCi.toExponential(1)}`;
+      lbl.textContent = `#${comp.c}`;
       tile.append(cv, lbl);
       tile.onclick = () => { selected = { mi: comp.mi, si: comp.si, c: comp.c, name: comp.name }; render(); };
       if (selected && selected.mi === comp.mi && selected.si === comp.si) tile.classList.add("sel");
