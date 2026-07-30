@@ -175,7 +175,7 @@ class StochasticHiddenActsReconLoss(Metric[StochasticHiddenActsReconLossConfig])
     @override
     def compute(self) -> MetricResult:
         return compute_per_module_metrics(
-            class_name=type(self).__name__,
+            class_name=self.instance_key,
             per_module_sum_mse=self._accum.per_module_sum_mse,
             per_module_n_examples=self._accum.per_module_n_examples,
         )

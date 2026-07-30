@@ -186,5 +186,5 @@ class StochasticReconSubsetLoss(Metric[StochasticReconSubsetLossConfig]):
             return recon
         sum_sq_err = all_reduce(self.sum_sq_err, op=ReduceOp.SUM)
         n_elems = all_reduce(self.n_elems, op=ReduceOp.SUM)
-        name = type(self).__name__
+        name = self.instance_key
         return {name: recon, f"{name}/hidden_acts": sum_sq_err / n_elems.float()}

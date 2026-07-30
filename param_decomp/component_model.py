@@ -354,8 +354,7 @@ class ComponentModel(nn.Module):
         if cache_type == "output":
             assert isinstance(output, Tensor)
             cache[module_name] = output
-        if stop_when_cached is not None and len(cache) == stop_when_cached:
-            raise _SiteCacheComplete
+        assert stop_when_cached is None, "site_outputs always replaces components at every site"
         return None
 
     @contextmanager

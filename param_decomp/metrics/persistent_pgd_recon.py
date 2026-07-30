@@ -265,7 +265,7 @@ class _PersistentPGDReconBase[TConfig: _PersistentPGDBaseConfig](Metric[TConfig]
     def compute(self) -> MetricResult:
         out: dict[str, Float[Tensor, ""]] = {}
         if self._hidden_sum_mse:
-            class_name = f"{type(self).__name__}/hidden_acts"
+            class_name = f"{self.instance_key}/hidden_acts"
             out.update(
                 compute_per_module_metrics(
                     class_name=class_name,
@@ -276,7 +276,7 @@ class _PersistentPGDReconBase[TConfig: _PersistentPGDBaseConfig](Metric[TConfig]
         if self._recon_n_examples.item() > 0:
             sum_loss = all_reduce(self._recon_sum_loss)
             n = all_reduce(self._recon_n_examples)
-            out[f"{type(self).__name__}/output_recon"] = sum_loss / n
+            out[f"{self.instance_key}/output_recon"] = sum_loss / n
         return out
 
     @override
@@ -352,6 +352,7 @@ class PersistentPGDHiddenActsReconLoss(
     def reset(self) -> None:
         super().reset()
         self._site_errors: SiteErrors = {}
+        self._last_site_errors: SiteErrors = {}
 
     @override
     def _objective(self, ctx: MetricContext) -> PGDObjective:
@@ -361,7 +362,11 @@ class PersistentPGDHiddenActsReconLoss(
             mask_infos: dict[str, ComponentsMaskInfo],
         ) -> tuple[Float[Tensor, ""], int]:
             site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
-            return mean_relative_error(site_squared_errors(site_outputs, targets, mask_infos)), 1
+            # Stashed for `_accumulate_eval`: the last call is always the one at the final
+            # sources (warmup runs first, and is skipped entirely on eval batches), so this
+            # spares a second identical truncated forward just to recover the breakdown.
+            self._last_site_errors = site_squared_errors(site_outputs, targets, mask_infos)
+            return mean_relative_error(self._last_site_errors), 1
 
         return site_error
 
@@ -373,23 +378,11 @@ class PersistentPGDHiddenActsReconLoss(
         sum_loss: Float[Tensor, ""],
         n_examples: int,
     ) -> None:
-        """Re-measure per site at the current sources, for the same breakdown the other
-        hidden-acts probes report. One extra truncated forward, on eval batches only."""
-        del sum_loss, n_examples
-        assert self.state is not None
-        targets = clean_site_outputs(self.model, ctx.pre_weight_acts, self.measured_sites)
-        mask_infos = get_ppgd_mask_infos(
-            ci=ctx.ci_for(self.cfg.ci_role).lower_leaky,
-            weight_deltas=weight_deltas,
-            ppgd_sources=self.state.get_effective_sources(),
-            routing_masks="all",
-            batch_dims=ctx.target_out.shape[:-1],
-        )
-        site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
-        add_site_errors(
-            self._site_errors,
-            detached_site_errors(site_squared_errors(site_outputs, targets, mask_infos)),
-        )
+        """Accumulate the per-site breakdown the objective already computed at the final
+        sources — no second forward."""
+        del ctx, weight_deltas, sum_loss, n_examples
+        assert self._last_site_errors, "objective must have run before eval accumulation"
+        add_site_errors(self._site_errors, detached_site_errors(self._last_site_errors))
 
     @override
     def compute(self) -> MetricResult:

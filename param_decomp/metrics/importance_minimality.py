@@ -254,7 +254,7 @@ class ImportanceMinimalityLoss(Metric[ImportanceMinimalityLossConfig]):
         }
         n_examples = int(all_reduce(self.n_examples, op=ReduceOp.SUM))
         lp, entropy = _lp_and_entropy_terms(reduced_sums, n_examples, world_size=1)
-        name = type(self).__name__
+        name = self.instance_key
         return {
             name: lp + self.cfg.beta * entropy,
             f"{name}_no_beta": lp,

@@ -230,13 +230,13 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
             f"{label} upper/lower leaky key mismatch at step {step}"
         )
         for name, t in ci.lower_leaky.items():
-            assert torch.isfinite(t).all(), (
-                f"non-finite {label}.lower_leaky[{name!r}] at step {step}"
-            )
             assert str(t.device).startswith(device_prefix), (
                 f"{label}.lower_leaky[{name!r}] device mismatch at step {step}: "
                 f"{t.device} vs {device}"
             )
+        # One sync per net rather than one per module: this is a per-step path.
+        finite = torch.stack([t.isfinite().all() for t in ci.lower_leaky.values()]).all()
+        assert finite, f"non-finite {label}.lower_leaky at step {step}"
 
 
 def _apply_ci_scaled_weight_decay(

@@ -85,7 +85,8 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
             site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
             add_site_errors(batch_errors, site_squared_errors(site_outputs, targets, mask_infos))
 
-        add_site_errors(self._accum, detached_site_errors(batch_errors))
+        if ctx.is_eval:  # `compute()` is eval-only, and each eval pass `reset()`s first
+            add_site_errors(self._accum, detached_site_errors(batch_errors))
         return mean_relative_error(batch_errors)
 
     @override
