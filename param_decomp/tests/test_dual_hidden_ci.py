@@ -149,6 +149,40 @@ class TestRelativeSiteError:
         errors = site_squared_errors(model.site_outputs(batch, mask_infos), targets, mask_infos)
         assert mean_relative_error(errors).item() == pytest.approx(1.0, rel=1e-6)
 
+    def test_backward_reaches_upstream_components(self):
+        """Downstream site error must grad upstream components — the point of the loss.
+
+        Also the regression test for measuring several chained sites in one backward: an
+        in-place fp32 subtraction on a graph tensor corrupted this, and it is invisible
+        unless the test actually calls `backward` in fp32 with `routing_mask == "all"`.
+        """
+        model = make_two_layer_component_model(torch.randn(6, 4), torch.randn(3, 6))
+        batch = torch.randn(8, 4)
+        clean = model(batch, cache_type="input")
+        assert not isinstance(clean, Tensor)
+        mask_infos = _ones_mask_infos(model)
+
+        def grad_norms(measured: list[str]) -> tuple[float, float]:
+            model.zero_grad(set_to_none=True)
+            targets = clean_site_outputs(model, clean.cache, measured)
+            errors = site_squared_errors(model.site_outputs(batch, mask_infos), targets, mask_infos)
+            mean_relative_error(errors).backward()
+
+            def norm(path: str) -> float:
+                grad = model.components[path].V.grad
+                return 0.0 if grad is None else grad.norm().item()
+
+            return norm("fc1"), norm("fc2")
+
+        upstream_from_downstream, _ = grad_norms(["fc2"])
+        assert upstream_from_downstream > 0, (
+            "error at the downstream site must reach the upstream site's components"
+        )
+        _, downstream_from_upstream = grad_norms(["fc1"])
+        assert downstream_from_upstream == 0.0, "gradient must not flow forwards"
+        both_upstream, both_downstream = grad_norms(["fc1", "fc2"])
+        assert both_upstream > 0 and both_downstream > 0
+
     def test_targets_match_the_frozen_model(self):
         """`clean_site_outputs` must reproduce what the target model itself computes."""
         weight1, weight2 = torch.randn(4, 3), torch.randn(2, 4)

@@ -82,10 +82,12 @@ def site_squared_errors(
             target = target[routing_mask]
         # Upcast before subtracting: under bf16 autocast these two are close and large, so
         # a bf16 difference discards most of the significant bits, and a bf16 reduction over
-        # ~1e7 elements is worthless besides. `sub_` on the fresh fp32 copy keeps only one
-        # such buffer live at a time — on the nontarget pass that is ~0.4 GiB of headroom.
+        # ~1e7 elements is worthless besides. `copy=True` is load-bearing — plain `.float()`
+        # returns `predicted` itself when it is already fp32, and the in-place `sub_` would
+        # then corrupt a tensor the graph still needs. Subtracting in place into that fresh
+        # copy keeps only one fp32 buffer live per site.
         out[site] = (
-            predicted.float().sub_(target).pow_(2).sum(),
+            predicted.to(torch.float32, copy=True).sub_(target).pow_(2).sum(),
             target.float().pow(2).sum(),
         )
     return out
