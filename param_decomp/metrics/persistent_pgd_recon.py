@@ -15,9 +15,12 @@ from pydantic import Field, NonNegativeInt, PositiveInt
 from torch import Tensor
 
 from param_decomp.base_config import Probability
+from param_decomp.ci_fns import CIRole
+from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     AllLayersRouter,
+    ComponentsMaskInfo,
     Router,
     SubsetRoutingType,
     UniformKSubsetRoutingConfig,
@@ -25,6 +28,16 @@ from param_decomp.masks import (
 )
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
+from param_decomp.metrics.hidden_acts import (
+    SiteErrors,
+    add_site_errors,
+    clean_site_outputs,
+    detached_site_errors,
+    mean_relative_error,
+    reduced_relative_errors,
+    select_sites,
+    site_squared_errors,
+)
 from param_decomp.metrics.persistent_pgd_state import (
     PersistentPGDSourceScope,
     PersistentPGDState,
@@ -33,6 +46,7 @@ from param_decomp.metrics.persistent_pgd_state import (
     RepeatAcrossBatchScope,
     get_ppgd_mask_infos,
 )
+from param_decomp.metrics.pgd_utils import PGDObjective
 from param_decomp.metrics.stochastic_hidden_acts_recon import (
     calc_hidden_acts_mse,
     compute_per_module_metrics,
@@ -59,6 +73,9 @@ class _PersistentPGDBaseConfig(LossMetricConfig):
     )
     start_frac: Probability = 0.0
     n_samples: PositiveInt = 1
+    ci_role: CIRole = "output"
+    """Which CI net the adversary attacks. A dual-CI run gives each reconstruction
+    objective its own instance, and therefore its own persistent sources."""
 
 
 class PersistentPGDReconLossConfig(_PersistentPGDBaseConfig):
@@ -72,15 +89,25 @@ class PersistentPGDReconSubsetLossConfig(_PersistentPGDBaseConfig):
     ]
 
 
-def _router_for_cfg(
-    cfg: PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig,
-    device: torch.device | str,
-) -> Router:
+class PersistentPGDHiddenActsReconLossConfig(_PersistentPGDBaseConfig):
+    """Config for the persistent-adversary hidden-activation reconstruction loss.
+
+    Defaults `ci_role` to `"hidden"`: this exists to give the hidden-acts objective the same
+    persistent adversarial pressure the output objective already gets, attacking the net that
+    owns it. `site_patterns` filters the measured sites as elsewhere.
+    """
+
+    type: Literal["PersistentPGDHiddenActsReconLoss"] = "PersistentPGDHiddenActsReconLoss"
+    ci_role: CIRole = "hidden"
+    site_patterns: list[str] | None = None
+
+
+def _router_for_cfg(cfg: _PersistentPGDBaseConfig, device: torch.device | str) -> Router:
     match cfg:
-        case PersistentPGDReconLossConfig():
-            return AllLayersRouter()
         case PersistentPGDReconSubsetLossConfig(routing=routing):
             return get_subset_router(routing, device)
+        case _:
+            return AllLayersRouter()
 
 
 def validate_pgd_scope(
@@ -99,19 +126,17 @@ def validate_pgd_scope(
     )
     per_rank = batch_size // world_size
     for cfg in loss_metrics:
-        if isinstance(
-            cfg, PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-        ) and isinstance(cfg.scope, RepeatAcrossBatchScope):
+        if isinstance(cfg, _PersistentPGDBaseConfig) and isinstance(
+            cfg.scope, RepeatAcrossBatchScope
+        ):
             n = cfg.scope.n_sources
             assert per_rank % n == 0, (
-                f"{cfg.type}: repeat_across_batch n_sources={n} must divide "
+                f"{type(cfg).__name__}: repeat_across_batch n_sources={n} must divide "
                 f"per-rank batch_size={per_rank}"
             )
 
 
-class _PersistentPGDReconBase[
-    TConfig: PersistentPGDReconLossConfig | PersistentPGDReconSubsetLossConfig
-](Metric[TConfig]):
+class _PersistentPGDReconBase[TConfig: _PersistentPGDBaseConfig](Metric[TConfig]):
     """Shared logic between all-layers and subset PPGD recon metrics.
 
     Lazily constructs the `PersistentPGDState` on the first `update` so it can snapshot
@@ -147,7 +172,6 @@ class _PersistentPGDReconBase[
             n_warmup_steps=self.cfg.n_warmup_steps,
             n_samples=self.cfg.n_samples,
             router=_router_for_cfg(self.cfg, self.device),
-            reconstruction_loss=ctx.reconstruction_loss,
         )
         if self._pending_resume_state is not None:
             self.state.load_state_dict(self._pending_resume_state)
@@ -160,6 +184,21 @@ class _PersistentPGDReconBase[
         self._hidden_sum_mse: dict[str, Tensor] = {}
         self._hidden_n: dict[str, Tensor] = {}
 
+    def _objective(self, ctx: MetricContext) -> PGDObjective:
+        """What the adversary maximises, as a function of the mask payload.
+
+        Overridden by the hidden-activation variant; the base attacks output reconstruction.
+        """
+
+        def output_recon(
+            mask_infos: dict[str, ComponentsMaskInfo],
+        ) -> tuple[Float[Tensor, ""], int]:
+            return ctx.reconstruction_loss(
+                self.model(ctx.batch, mask_infos=mask_infos), ctx.target_out
+            )
+
+        return output_recon
+
     @override
     def update(self, ctx: MetricContext) -> Tensor | None:
         if ctx.current_frac_of_training < self.cfg.start_frac:
@@ -171,30 +210,31 @@ class _PersistentPGDReconBase[
             self.state.update_lr(step=ctx.step, total_steps=ctx.total_steps)
 
         wd = ctx.weight_deltas if ctx.use_delta_component else None
+        ci = ctx.ci_for(self.cfg.ci_role).lower_leaky
+        objective = self._objective(ctx)
 
         if not ctx.is_eval:
-            self.state.warmup(
-                model=self.model,
-                batch=ctx.batch,
-                target_out=ctx.target_out,
-                ci=ctx.ci.lower_leaky,
-                weight_deltas=wd,
-            )
+            self.state.warmup(model=self.model, ci=ci, weight_deltas=wd, objective=objective)
 
-        sum_loss, n_examples = self.state.compute_recon_sum_and_n(
-            model=self.model,
-            batch=ctx.batch,
-            target_out=ctx.target_out,
-            ci=ctx.ci.lower_leaky,
-            weight_deltas=wd,
+        sum_loss, n_examples = self.state.compute_sum_and_n(
+            model=self.model, ci=ci, weight_deltas=wd, objective=objective
         )
 
         if ctx.is_eval:
-            self._recon_sum_loss += sum_loss.detach()
-            self._recon_n_examples += n_examples
-            self._accum_hidden_acts(ctx, wd)
+            self._accumulate_eval(ctx, wd, sum_loss, n_examples)
 
         return sum_loss / n_examples
+
+    def _accumulate_eval(
+        self,
+        ctx: MetricContext,
+        weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+        sum_loss: Float[Tensor, ""],
+        n_examples: int,
+    ) -> None:
+        self._recon_sum_loss += sum_loss.detach()
+        self._recon_n_examples += n_examples
+        self._accum_hidden_acts(ctx, weight_deltas)
 
     def _accum_hidden_acts(
         self,
@@ -205,7 +245,7 @@ class _PersistentPGDReconBase[
         target_acts = self.model(ctx.batch, cache_type="output").cache
         batch_dims = ctx.target_out.shape[:-1]
         mask_infos = get_ppgd_mask_infos(
-            ci=ctx.ci.lower_leaky,
+            ci=ctx.ci_for(self.cfg.ci_role).lower_leaky,
             weight_deltas=weight_deltas,
             ppgd_sources=self.state.get_effective_sources(),
             routing_masks="all",
@@ -286,3 +326,73 @@ class PersistentPGDReconSubsetLoss(_PersistentPGDReconBase[PersistentPGDReconSub
     """`PersistentPGDReconLoss` variant that masks only a routed subset of layers per forward."""
 
     short_name = "PersistPGDReconSub"
+
+
+class PersistentPGDHiddenActsReconLoss(
+    _PersistentPGDReconBase[PersistentPGDHiddenActsReconLossConfig]
+):
+    """Hidden-activation reconstruction under an adversary whose sources persist across steps.
+
+    The hidden-acts counterpart of `PersistentPGDReconLoss`, so both reconstruction objectives
+    face the same kind of pressure. Each is a separate metric instance, so each owns its own
+    `PersistentPGDState` — separate sources, separate optimizer moments, separately
+    checkpointed under its own `instance_key`. The objective is the same relative per-site
+    error the stochastic loss and the eval probes report, measured through the truncated
+    `site_outputs` forward.
+    """
+
+    short_name = "PersistPGDHiddenRecon"
+
+    @override
+    def bind(self, *, model: ComponentModel, device: str) -> None:
+        super().bind(model=model, device=device)
+        self.measured_sites = select_sites(model.target_module_paths, self.cfg.site_patterns)
+
+    @override
+    def reset(self) -> None:
+        super().reset()
+        self._site_errors: SiteErrors = {}
+
+    @override
+    def _objective(self, ctx: MetricContext) -> PGDObjective:
+        targets = clean_site_outputs(self.model, ctx.pre_weight_acts, self.measured_sites)
+
+        def site_error(
+            mask_infos: dict[str, ComponentsMaskInfo],
+        ) -> tuple[Float[Tensor, ""], int]:
+            site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
+            return mean_relative_error(site_squared_errors(site_outputs, targets, mask_infos)), 1
+
+        return site_error
+
+    @override
+    def _accumulate_eval(
+        self,
+        ctx: MetricContext,
+        weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+        sum_loss: Float[Tensor, ""],
+        n_examples: int,
+    ) -> None:
+        """Re-measure per site at the current sources, for the same breakdown the other
+        hidden-acts probes report. One extra truncated forward, on eval batches only."""
+        del sum_loss, n_examples
+        assert self.state is not None
+        targets = clean_site_outputs(self.model, ctx.pre_weight_acts, self.measured_sites)
+        mask_infos = get_ppgd_mask_infos(
+            ci=ctx.ci_for(self.cfg.ci_role).lower_leaky,
+            weight_deltas=weight_deltas,
+            ppgd_sources=self.state.get_effective_sources(),
+            routing_masks="all",
+            batch_dims=ctx.target_out.shape[:-1],
+        )
+        site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
+        add_site_errors(
+            self._site_errors,
+            detached_site_errors(site_squared_errors(site_outputs, targets, mask_infos)),
+        )
+
+    @override
+    def compute(self) -> MetricResult:
+        if not self._site_errors:
+            return {}
+        return reduced_relative_errors(self._site_errors, self.instance_key)

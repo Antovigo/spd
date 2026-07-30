@@ -27,6 +27,7 @@ from param_decomp.metrics.ci_masked_recon_subset import CIMaskedReconSubsetLossC
 from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
 from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
 from param_decomp.metrics.persistent_pgd_recon import (
+    PersistentPGDHiddenActsReconLossConfig,
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
 )
@@ -65,6 +66,7 @@ AnyLossMetricConfig = Annotated[
     | CIMaskedReconSubsetLossConfig
     | FaithfulnessLossConfig
     | ImportanceMinimalityLossConfig
+    | PersistentPGDHiddenActsReconLossConfig
     | PersistentPGDReconLossConfig
     | PersistentPGDReconSubsetLossConfig
     | PGDReconLayerwiseLossConfig

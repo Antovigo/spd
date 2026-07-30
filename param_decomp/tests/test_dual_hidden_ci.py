@@ -18,10 +18,18 @@ from param_decomp.metrics.hidden_acts import (
     select_sites,
     site_squared_errors,
 )
+from param_decomp.metrics.persistent_pgd_recon import (
+    PersistentPGDHiddenActsReconLoss,
+    PersistentPGDHiddenActsReconLossConfig,
+    PersistentPGDReconLoss,
+    PersistentPGDReconLossConfig,
+)
+from param_decomp.metrics.persistent_pgd_state import AdamPGDConfig, PerBatchPerPositionScope
 from param_decomp.metrics.pgd_hidden_acts_recon import (
     PGDHiddenActsReconLoss,
     PGDHiddenActsReconLossConfig,
 )
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.metrics.fixtures import make_two_layer_component_model
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
 
@@ -270,6 +278,77 @@ class TestEvalDoesNotPerturbTraining:
         assert probe(None).is_slow is False, "fast by default"
         assert probe(True).is_slow is True, "config overrides the class default"
         assert probe(False).is_slow is False
+
+
+class TestPersistentPGDPerObjectiveSources:
+    """Each reconstruction objective must own its own persistent adversary."""
+
+    def _ctx(self, model: ComponentModel, batch: Tensor) -> MetricContext:
+        clean = model(batch, cache_type="input")
+        assert not isinstance(clean, Tensor)
+        return MetricContext(
+            model=model,
+            batch=batch,
+            target_out=clean.output,
+            pre_weight_acts=clean.cache,
+            ci=model.calc_causal_importances(clean.cache, sampling="continuous"),
+            ci_hidden=model.calc_causal_importances(clean.cache, sampling="continuous"),
+            weight_deltas=model.calc_weight_deltas(),
+            step=0,
+            total_steps=10,
+            use_delta_component=True,
+            sampling="continuous",
+            n_mask_samples=1,
+            reconstruction_loss=recon_loss_mse,
+            is_eval=False,
+        )
+
+    def test_sources_are_independent_and_separately_checkpointed(self):
+        model = make_two_layer_component_model(torch.randn(6, 4), torch.randn(3, 6))
+        optimizer = AdamPGDConfig(lr_schedule=ScheduleConfig(fn_type="constant", start_val=0.01))
+        out_loss = PersistentPGDReconLoss(
+            PersistentPGDReconLossConfig(
+                coeff=0.5, optimizer=optimizer, scope=PerBatchPerPositionScope(), n_warmup_steps=1
+            )
+        )
+        hid_loss = PersistentPGDHiddenActsReconLoss(
+            PersistentPGDHiddenActsReconLossConfig(
+                coeff=0.5, optimizer=optimizer, scope=PerBatchPerPositionScope(), n_warmup_steps=1
+            )
+        )
+        for m in (out_loss, hid_loss):
+            m.bind(model=model, device="cpu")
+
+        assert out_loss.instance_key != hid_loss.instance_key, "state would collide in the snapshot"
+        ctx = self._ctx(model, torch.randn(8, 4))
+        out_loss.update(ctx)
+        hid_loss.update(ctx)
+
+        assert out_loss.state is not None and hid_loss.state is not None
+        for name in model.target_module_paths:
+            a, b = out_loss.state.sources[name], hid_loss.state.sources[name]
+            assert a is not b, "the two objectives are sharing a source tensor"
+            assert not torch.equal(a, b), "sources should diverge once each adversary has stepped"
+
+        # Distinct instance keys mean the trainer's snapshot stores them separately.
+        snapshot = {m.instance_key: m.state_dict() for m in (out_loss, hid_loss)}
+        assert len(snapshot) == 2
+        assert not torch.equal(
+            snapshot[out_loss.instance_key]["sources"]["fc1"],
+            snapshot[hid_loss.instance_key]["sources"]["fc1"],
+        )
+
+    def test_hidden_variant_attacks_the_hidden_net_by_default(self):
+        assert (
+            PersistentPGDHiddenActsReconLossConfig(
+                coeff=0.5,
+                optimizer=AdamPGDConfig(
+                    lr_schedule=ScheduleConfig(fn_type="constant", start_val=0.01)
+                ),
+                scope=PerBatchPerPositionScope(),
+            ).ci_role
+            == "hidden"
+        )
 
 
 class TestSelectSites:

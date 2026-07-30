@@ -10,6 +10,7 @@ from param_decomp.distributed import get_distributed_state
 from param_decomp.metrics.base import Metric
 from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
 from param_decomp.metrics.persistent_pgd_recon import (
+    PersistentPGDHiddenActsReconLossConfig,
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
     validate_pgd_scope,
@@ -39,6 +40,7 @@ _EXCLUDED_NONTARGET_LOSS_CONFIGS = (
     UnmaskedReconLossConfig,
     PersistentPGDReconLossConfig,
     PersistentPGDReconSubsetLossConfig,
+    PersistentPGDHiddenActsReconLossConfig,
     StochasticHiddenActsReconLossConfig,
 )
 
@@ -51,8 +53,8 @@ def build_nontarget_loss_configs(
 ) -> list[AnyLossMetricConfig]:
     """Derive the nontarget-pass loss set from the target-pass loss configs.
 
-    Drops losses that are meaningless or unsafe with a forced-on delta (unmasked recon, both
-    PPGD losses, and the legacy `StochasticHiddenActsReconLoss`); scales every
+    Drops losses that are meaningless or unsafe with a forced-on delta (unmasked recon, every
+    PPGD loss, and the legacy `StochasticHiddenActsReconLoss`); scales every
     importance-minimality coeff by `impmin_ratio`, so a dual-CI run scales one instance per
     CI net. `StochasticHiddenReconSubsetLoss` is deliberately kept: with the delta forced on
     it drives the components to be inactive at each *site* on the nontarget distribution,

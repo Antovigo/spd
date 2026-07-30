@@ -9,7 +9,7 @@ from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
-from param_decomp.masks import AllLayersRouter, UniformKSubsetRoutingConfig
+from param_decomp.masks import AllLayersRouter, ComponentsMaskInfo, UniformKSubsetRoutingConfig
 from param_decomp.metrics.ci_masked_recon import ci_masked_recon_loss
 from param_decomp.metrics.ci_masked_recon_layerwise import (
     ci_masked_recon_layerwise_loss,
@@ -24,6 +24,7 @@ from param_decomp.metrics.persistent_pgd_state import (
     SignPGDConfig,
     SingleSourceScope,
 )
+from param_decomp.metrics.pgd_utils import PGDObjective
 from param_decomp.metrics.stochastic_recon import stochastic_recon_loss
 from param_decomp.metrics.stochastic_recon_layerwise import (
     stochastic_recon_layerwise_loss,
@@ -44,7 +45,6 @@ def _ppgd_state_from_cfg(
     batch_dims: tuple[int, ...],
     device: str,
     use_delta_component: bool,
-    reconstruction_loss: ReconstructionLoss,
 ) -> PersistentPGDState:
     return PersistentPGDState(
         module_to_c=module_to_c,
@@ -57,8 +57,21 @@ def _ppgd_state_from_cfg(
         n_warmup_steps=cfg.n_warmup_steps,
         n_samples=cfg.n_samples,
         router=AllLayersRouter(),
-        reconstruction_loss=reconstruction_loss,
     )
+
+
+def _recon_objective(
+    model: ComponentModel,
+    batch: Tensor,
+    target_out: Tensor,
+    reconstruction_loss: ReconstructionLoss,
+) -> PGDObjective:
+    """Output-reconstruction objective, which `PersistentPGDState` used to hold itself."""
+
+    def objective(mask_infos: dict[str, ComponentsMaskInfo]) -> tuple[Tensor, int]:
+        return reconstruction_loss(model(batch, mask_infos=mask_infos), target_out)
+
+    return objective
 
 
 class TinyLinearModel(nn.Module):
@@ -803,19 +816,17 @@ class TestPersistentPGDReconLoss:
             batch_dims=batch.shape[:2],
             device="cpu",
             use_delta_component=False,
-            reconstruction_loss=recon_loss_mse,
         )
 
         # Store initial mask values
         initial_sources = {k: v.clone() for k, v in state.sources.items()}
 
         # Compute loss and gradients
-        sum_loss, n = state.compute_recon_sum_and_n(
+        sum_loss, n = state.compute_sum_and_n(
             model=model,
-            batch=batch,
-            target_out=target_out,
             ci=ci,
             weight_deltas=None,
+            objective=_recon_objective(model, batch, target_out, recon_loss_mse),
         )
         loss = sum_loss / n
         grad = state.get_grads(loss)
@@ -856,19 +867,17 @@ class TestPersistentPGDReconLoss:
             batch_dims=batch.shape[:2],
             device="cpu",
             use_delta_component=False,
-            reconstruction_loss=recon_loss_mse,
         )
 
         # Run multiple steps
         sources_history = []
         for _ in range(5):
             sources_history.append({k: v.clone() for k, v in state.sources.items()})
-            sum_loss, n = state.compute_recon_sum_and_n(
+            sum_loss, n = state.compute_sum_and_n(
                 model=model,
-                batch=batch,
-                target_out=target_out,
                 ci=ci,
                 weight_deltas=None,
+                objective=_recon_objective(model, batch, target_out, recon_loss_mse),
             )
             loss = sum_loss / n
             grad = state.get_grads(loss)
@@ -911,18 +920,16 @@ class TestPersistentPGDReconLoss:
             batch_dims=batch_dims,
             device="cpu",
             use_delta_component=True,
-            reconstruction_loss=recon_loss_mse,
         )
 
         # Masks should have C+1 elements when using delta component
         assert state.sources["fc"].shape[-1] == model.module_to_c["fc"] + 1
 
-        sum_loss, n = state.compute_recon_sum_and_n(
+        sum_loss, n = state.compute_sum_and_n(
             model=model,
-            batch=batch,
-            target_out=target_out,
             ci=ci,
             weight_deltas=weight_deltas,
+            objective=_recon_objective(model, batch, target_out, recon_loss_mse),
         )
         loss = sum_loss / n
         grad = state.get_grads(loss)
@@ -975,18 +982,16 @@ class TestPersistentPGDReconLoss:
             batch_dims=batch_dims,
             device="cpu",
             use_delta_component=False,
-            reconstruction_loss=recon_loss_mse,
         )
 
         # Masks should have shape (1, 1, C) for single_mask scope - single mask shared across batch
         assert state.sources["fc"].shape == (1, 1, model.module_to_c["fc"])
 
-        sum_loss, n = state.compute_recon_sum_and_n(
+        sum_loss, n = state.compute_sum_and_n(
             model=model,
-            batch=batch,
-            target_out=target_out,
             ci=ci,
             weight_deltas=None,
+            objective=_recon_objective(model, batch, target_out, recon_loss_mse),
         )
         loss = sum_loss / n
         grad = state.get_grads(loss)
@@ -1018,15 +1023,13 @@ class TestPersistentPGDReconLoss:
             batch_dims=batch.shape[:2],
             device="cpu",
             use_delta_component=False,
-            reconstruction_loss=recon_loss_mse,
         )
 
-        sum_loss, n = state.compute_recon_sum_and_n(
+        sum_loss, n = state.compute_sum_and_n(
             model=model,
-            batch=batch,
-            target_out=target_out,
             ci=ci,
             weight_deltas=None,
+            objective=_recon_objective(model, batch, target_out, recon_loss_mse),
         )
         loss = sum_loss / n
         grad = state.get_grads(loss)

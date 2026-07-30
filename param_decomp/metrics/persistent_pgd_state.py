@@ -9,13 +9,12 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Any, Literal, override
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Float
 from pydantic import Field, NonNegativeFloat, PositiveInt
 from torch import Tensor
 from torch.distributed import ReduceOp
 
 from param_decomp.base_config import BaseConfig, Probability
-from param_decomp.batch_and_loss_fns import ReconstructionLoss
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import all_reduce, broadcast_tensor
 from param_decomp.masks import (
@@ -26,6 +25,7 @@ from param_decomp.masks import (
     interpolate_component_mask,
     make_mask_infos,
 )
+from param_decomp.metrics.pgd_utils import PGDObjective
 from param_decomp.schedule import ScheduleConfig, get_scheduled_value
 from param_decomp.targeted import get_delta_override
 
@@ -219,7 +219,6 @@ class PersistentPGDState:
         n_warmup_steps: int,
         n_samples: int,
         router: Router,
-        reconstruction_loss: ReconstructionLoss,
     ) -> None:
         self.optimizer = make_ppgd_optimizer(optimizer_cfg)
         self._skip_all_reduce = isinstance(scope, PerBatchPerPositionScope)
@@ -227,7 +226,6 @@ class PersistentPGDState:
         self._router = router
         self._n_warmup_steps = n_warmup_steps
         self._n_samples = n_samples
-        self._reconstruction_loss = reconstruction_loss
         self._lr_schedule = optimizer_cfg.lr_schedule
 
         self.sources: PPGDSources = {}
@@ -312,10 +310,9 @@ class PersistentPGDState:
     def warmup(
         self,
         model: ComponentModel,
-        batch: Int[Tensor, "..."] | Float[Tensor, "..."],
-        target_out: Float[Tensor, "... vocab"],
         ci: dict[str, Float[Tensor, "... C"]],
         weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+        objective: PGDObjective,
     ) -> None:
         """Run extra PGD steps to refine adversarial sources before the final loss computation.
 
@@ -323,25 +320,25 @@ class PersistentPGDState:
         """
         all_layers = AllLayersRouter()
         for _ in range(self._n_warmup_steps):
-            sum_loss, n = self.compute_recon_sum_and_n(
-                model, batch, target_out, ci, weight_deltas, router=all_layers
+            sum_loss, n = self.compute_sum_and_n(
+                model, ci, weight_deltas, objective, router=all_layers
             )
             grads = self.get_grads(sum_loss / n, retain_graph=False)
             self.step(grads)
 
-    def compute_recon_sum_and_n(
+    def compute_sum_and_n(
         self,
         model: ComponentModel,
-        batch: Int[Tensor, "..."] | Float[Tensor, "..."],
-        target_out: Float[Tensor, "... vocab"],
         ci: dict[str, Float[Tensor, "... C"]],
         weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
+        objective: PGDObjective,
         router: Router | None = None,
     ) -> tuple[Float[Tensor, ""], int]:
-        """Recon forward returning `(sum_loss, n_examples)` over all mask samples.
+        """`(sum, n_examples)` of `objective` at the current sources, over all mask samples.
 
-        Returning the unreduced pair lets eval accumulators weight by example count
-        across batches.
+        The objective is passed per call rather than held on the state because it closes over
+        the live batch; the state owns only the sources and their optimizer. Returning the
+        unreduced pair lets eval accumulators weight by example count across batches.
         """
         batch_dims = next(iter(ci.values())).shape[:-1]
         router = router or self._router
@@ -354,16 +351,10 @@ class PersistentPGDState:
             routing_masks = router.get_masks(
                 module_names=model.target_module_paths, mask_shape=batch_dims
             )
-            loss, n = _compute_ppgd_recon_loss(
-                model=model,
-                ppgd_sources=ppgd_sources,
-                reconstruction_loss=self._reconstruction_loss,
-                batch=batch,
-                target_out=target_out,
-                ci=ci,
-                weight_deltas=weight_deltas,
-                routing_masks=routing_masks,
+            mask_infos = get_ppgd_mask_infos(
+                ci, weight_deltas, ppgd_sources, routing_masks, batch_dims
             )
+            loss, n = objective(mask_infos)
             sum_loss = sum_loss + loss
             n_examples += n
         return sum_loss, n_examples
@@ -416,22 +407,3 @@ def get_ppgd_mask_infos(
         weight_deltas_and_masks=weight_deltas_and_masks,
         routing_masks=routing_masks,
     )
-
-
-def _compute_ppgd_recon_loss(
-    model: ComponentModel,
-    ppgd_sources: PPGDSources,
-    reconstruction_loss: ReconstructionLoss,
-    batch: Int[Tensor, "..."] | Float[Tensor, "..."],
-    target_out: Float[Tensor, "... vocab"],
-    ci: dict[str, Float[Tensor, "... C"]],
-    weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
-    routing_masks: RoutingMasks,
-) -> tuple[Float[Tensor, ""], int]:
-    assert ci, "Empty ci"
-    batch_dims = next(iter(ci.values())).shape[:-1]
-
-    mask_infos = get_ppgd_mask_infos(ci, weight_deltas, ppgd_sources, routing_masks, batch_dims)
-    out = model(batch, mask_infos=mask_infos)
-    loss, n_examples = reconstruction_loss(pred=out, target=target_out)
-    return loss, n_examples
