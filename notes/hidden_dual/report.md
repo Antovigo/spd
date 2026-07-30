@@ -144,9 +144,37 @@ identical but for the scheme — same batch, same C, same GPU count — so the c
 clean; the ctrl simply uses less of its allocation. The ctrl is queued behind the 6-GPU
 per-user cap and starts automatically.
 
-Wall-clock: the QOS caps a job at 24 h and the single-block reference took ~16.5 h, so
-`addsub-L18-09-dual` should finish in one leg. The 3-block runs will likely need a resume
-leg; the trainer checkpoints on SIGTERM, so a killed job resumes from its last step.
+## Measured step time
+
+| run | GPUs | sites | pure train s/step | overall s/step | projected total |
+|---|---|---|---|---|---|
+| `addsub-L18-09-one-im` (reference, complete) | 2 | 7 | 2.99 | 3.21 | 17.8 h (actual) |
+| `addsub-L18-09-dual` | 2 | 7 | 2.82 | 3.01–3.04 | **16.7–16.9 h** |
+| `addsub-L18to20-01-dual` | 4 | 21 | 3.53 | 3.69–3.77 | **20.5–20.9 h** |
+
+"Pure train" excludes steps where an eval fires; "overall" is elapsed ÷ steps, so it
+includes eval cost. Both dual runs are ~1000–1250 steps in and the marginal rate over the
+last 400 steps agrees with the average to within 3%, so these projections are stable.
+(`tqdm`'s own ETA read 38 h for the 3-block run — that is its EMA skewed by a recent eval
+spike, not a real rate; ignore it.)
+
+**The dual scheme did not cost per-step time on the single-block run — it is 6% faster than
+the reference.** That is not a clean measurement of the scheme, and it revises the plan's
++10% estimate only loosely, because two confounds both favour dual: the reference carries the
+standalone `StochasticHiddenActsReconLoss` (its own clean *and* masked full forward each
+step) which the dual run drops in favour of the truncated loss, and the dual run's nontarget
+batch is 96 vs 128. The honest reading is that the dual scheme's cost is roughly cancelled by
+dropping the older standalone hidden loss. The clean measurement is
+`addsub-L18to20-01-dual` vs `-ctrl`, which differ *only* in the scheme.
+
+Slow evals cost little: the gap between average and marginal rate implies ~80 s for the
+step-0 slow eval, so the four remaining ones (5000/10000/15000/20000) add only minutes.
+
+Wall-clock against the 24 h QOS cap: **both running dual runs should finish in a single leg**
+(16.9 h and 20.9 h), correcting the earlier expectation that the 3-block runs would need a
+resume. The 3-block margin is ~3 h, which is comfortable but not large; if a run does overrun,
+`GraceTime=0` makes the SIGTERM save unreliable, so it would resume from its last
+`save_every: 5000` checkpoint and lose up to 5000 steps.
 
 ## What to check first, at step 5000
 
