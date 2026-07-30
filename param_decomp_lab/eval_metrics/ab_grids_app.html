@@ -52,10 +52,10 @@
 <div class="axis-note">tiles: a on the vertical axis (top = a_min), b on the horizontal axis (left = b_min); hover the detail view for values</div>
 <div id="legend">
   <span>merge:</span>
-  <span><i class="sw" style="background:#000"></i>neither</span>
+  <span><i class="sw" style="background:#fff"></i>neither</span>
   <span><i class="sw" style="background:#0f0"></i>hidden only (expected)</span>
   <span><i class="sw" style="background:#f0f"></i><b>output only &mdash; anomaly</b></span>
-  <span><i class="sw" style="background:#fff"></i>both</span>
+  <span><i class="sw" style="background:#000"></i>both</span>
 </div>
 <div id="gallery"></div>
 <div id="empty" style="display:none">no subcomponents above threshold</div>
@@ -165,11 +165,11 @@ function innerScale(data, si, pi, oi) {
   return mx || 1;
 }
 
-// Additive merge on black: output CI adds red+blue (-> magenta), hidden CI adds green.
-// Black = neither, white = both, green = hidden-only (expected), magenta = output-only
-// (anomaly).
+// Subtractive merge on white, so "inactive" stays white as everywhere else in the app:
+// output CI removes green (-> magenta), hidden CI removes red and blue (-> green). White =
+// neither, black = both, green = hidden-only (expected), magenta = output-only (anomaly).
 const mergeRgb = ([out, hid]) => [
-  Math.round(255 * out), Math.round(255 * hid), Math.round(255 * out),
+  Math.round(255 * (1 - hid)), Math.round(255 * (1 - out)), Math.round(255 * (1 - hid)),
 ];
 
 function tileDrawers(mi, si, pi, oi) {
