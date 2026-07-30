@@ -117,6 +117,23 @@ PPGD's state machine lives in `persistent_pgd_state.py` (shared); its `Metric`
 classes + configs live in `persistent_pgd_recon.py`. The split is so the subset
 variant (`PersistentPGDReconSubsetLoss`) can reuse the same state machine.
 
+`PersistentPGDState` does not know what it is attacking: `warmup` and `compute_sum_and_n`
+take a `PGDObjective` per call, closing over the live batch, so the state owns only the
+sources and their optimizer. `_PersistentPGDReconBase._objective` is the single overridable
+seam — the base attacks output reconstruction, `PersistentPGDHiddenActsReconLoss` attacks the
+relative per-site activation error through the truncated `site_outputs` forward.
+
+**Each metric instance owns its own adversary.** The state is built lazily per instance and
+the trainer snapshots metric state keyed by `instance_key`, so a dual-CI run listing both a
+`PersistentPGDReconLoss` and a `PersistentPGDHiddenActsReconLoss` gets two independent
+source tensors, two optimizer states, separately checkpointed and resumed. PPGD configs
+carry `ci_role`, so each adversary attacks the CI net that owns its objective — without
+that, the output net would face a persistent adversary while the hidden net faced only
+stochastic masks, which would confound any comparison of their densities.
+
+All PPGD losses are excluded from the nontarget pass: with the delta forced fully on, the
+adversary's objective is degenerate.
+
 ## Hidden-acts recon: fused aux vs standalone
 
 `StochasticReconSubsetLossConfig.hidden_acts_recon` (`HiddenActsReconAux`, in

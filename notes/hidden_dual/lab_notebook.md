@@ -175,3 +175,38 @@ Cost of the fast PGD probe at `n_steps: 20` is roughly 5% wall clock (210 trunca
 + 200 source backwards per eval, every 500 steps). `n_steps: 5` brings that to ~1.5% and is
 the recommended setting for the frequent instance, with a 20-step `slow: true` sibling for
 the definitive number.
+
+
+## 2026-07-30 — persistent adversary for the hidden objective too
+
+`addsub-L18-09-dual` finished cleanly (20001 steps, 16.9 h, peak 39717 MiB), freeing 2 GPUs.
+Launched `addsub-L18-09-dual-ppgd` (job 6105) — identical to it in every respect except that
+the hidden-acts objective now also gets a persistent adversary, with its own sources.
+
+Motivation: the two CI nets were not under equal masking pressure. The output net faced
+stochastic masks *and* a persistent adversary sharpening across every prior step; the hidden
+net faced only stochastic masks. A denser hidden net could then have been an artefact of the
+weaker pressure rather than a property of hidden-activation importance. This run removes that
+confound, so `dual` vs `dual-ppgd` isolates exactly it.
+
+Loss composition (as agreed): hidden = Stochastic 1.0 + PPGD 0.5; output = Stochastic 1.0 +
+Unmasked 0.5 + PPGD 0.5. Both PPGD instances share the output run's hyperparameters (Adam
+lr 0.01, betas 0.5/0.99, `n_warmup_steps: 2`, `n_samples: 1`, `per_batch_per_position`). No
+PPGD on the nontarget pass. Evals unchanged.
+
+Implementation: `PersistentPGDState` no longer holds a reconstruction loss — it takes a
+`PGDObjective` per call, the same seam already used for per-step PGD, so one resumable state
+machine serves both objectives. Separate sources fall out of the metric-instance boundary
+(lazy per-instance state + snapshot keyed by `instance_key`) rather than needing special
+handling; pinned by a test asserting the tensors are distinct, diverge once stepped, and
+round-trip under separate keys.
+
+Migrating `test_spd_losses.py` to the new API needed doing twice: the first regex stripped
+`reconstruction_loss=` from unrelated helper calls, so the file was reverted and the
+substitution re-scoped to the state helper by name. Worth remembering that a bare
+`reconstruction_loss=recon_loss_mse,` pattern appears in several unrelated call sites.
+
+Step-0 sanity: each PPGD loss sits above its stochastic counterpart, as an adversarial mask
+must — output 0.173 vs 0.107, hidden 0.514 vs 0.452. Memory 39659 MiB, statistically
+identical to the plain dual run's 39657 (the extra sources are ~22 MB, the extra graphs
+transient). Rate 3.19 s/step → ~17.7 h projected, inside the 24 h cap in one leg.

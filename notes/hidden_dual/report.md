@@ -138,6 +138,12 @@ never surfaced.
 | `addsub-L18-09-dual` | 18 | 2 | 128 / 96 | 456, (72,72,128,128) | 6076 |
 | `addsub-L18to20-01-dual` | 18,19,20 | 4 | 128 / 96 | 304, (48,48,88,88) | 6077 |
 | `addsub-L18to20-01-ctrl` | 18,19,20 | 4 | 128 / 96 | 304, (48,48,88,88) | 6078 (queued) |
+| `addsub-L18-09-dual-ppgd` | 18 | 2 | 128 / 96 | 456, (72,72,128,128) | 6105 |
+
+`addsub-L18-09-dual-ppgd` is `addsub-L18-09-dual` plus a persistent adversary on the
+hidden-acts objective, with its own sources. It exists because the two CI nets were otherwise
+under unequal masking pressure — only the output net faced a persistent adversary — which
+would have confounded any comparison of their densities. The pair isolates that one variable.
 
 20 000 steps, `slow_every: 5000`, `ABGridDataset` in the slow set. The two `L18to20` runs are
 identical but for the scheme — same batch, same C, same GPU count — so the comparison is
