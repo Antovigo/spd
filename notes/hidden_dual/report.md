@@ -200,3 +200,104 @@ resume. The 3-block margin is ~3 h, which is comfortable but not large; if a run
 Note that `CIHiddenActsReconLoss` changed definition (raw per-module MSE → relative error, no
 delta), so its values are **not** comparable to those logged by earlier runs such as
 `addsub-L18-04-hidden`. Do not overlay those curves.
+
+## Balancing the two objectives: measured exchange rate
+
+The output loss is a KL (nats) and the hidden loss a relative activation error
+(dimensionless), so the shared `SmoothL0ImportanceMinimalityLoss` coefficient of `5e-5`
+prices sparsity differently for each net. Measured directly on
+`addsub-L18-09-dual/model_20000.pth` (CPU, fp32, 256 prompts) by
+`~/pd_scratch/hidden_dual/exchange_rate.py`; raw numbers in
+`<run>/analysis/exchange_rate.json`.
+
+### CI is saturated
+
+| net | exactly 0 | exactly 1 | intermediate | in (0.01, 0.5) |
+|---|---|---|---|---|
+| hidden | 97.79% | 1.91% | 0.298% | 0.111% |
+| output | 98.75% | 1.01% | 0.239% | 0.086% |
+
+Under `leaky_hard` there is no usable middle band, so any probe that sweeps a *threshold on
+CI values* measures nothing. Ablate components, or (component, position) entries, instead.
+
+### The two nets, side by side
+
+| mask | on-entries | hidden rel err | output KL |
+|---|---|---|---|
+| hidden CI | 47,458 | 0.0518 | 0.003746 |
+| output CI | 26,182 | 0.2238 | 0.003401 |
+
+Each net wins on its own objective and loses on the other's. The hidden net uses 1.81x the
+entries for 4.3x better activation reconstruction and slightly *worse* KL.
+
+Overlap over (component, position) entries: both 25,575 / hidden-only 21,883 / output-only
+607. Output-active implies hidden-active for 97.7% of entries; the converse fails for 46%.
+
+### There is no single exchange rate
+
+`kappa = d(output KL) / d(hidden rel err)` spans 200x depending on direction:
+
+| direction | kappa | vs random |
+|---|---|---|
+| hidden-only surplus ablated | 0.0015 | 67x cheaper |
+| output net's residual | 0.0152 | 6.6x cheaper |
+| hidden net's residual | 0.072 | 1.4x cheaper |
+| random, magnitude-matched | 0.100 | — |
+| marginal shared components ablated | 0.35 | 3.5x more expensive |
+
+So unit-conversion cannot balance the coefficients: converting hidden error into KL prices
+the hidden-only surplus — where most of the hidden objective's value sits — at ~zero, which
+drives `lambda_hidden` to infinity and reproduces the output net.
+
+The residual injection is exactly quadratic (kappa 0.0709 / 0.0709 / 0.0723 at alpha
+0.25 / 0.5 / 1.0, bending only at alpha 2.0 -> 0.0862), so the operating point sits inside
+linear response and these are genuine local slopes.
+
+### What does set the coefficient
+
+The *value* distribution is bimodal in the same place kappa is. Pricing the whole hidden-only
+surplus against the objective it is charged to:
+
+- benefit `c_hidden * d(rel err)` = 1.0 * 0.171 = 0.171
+- cost `lambda_hidden * d(Phi)` = 5e-5 * 17.1 = 8.6e-4
+
+The bulk sits ~200x above its keep-threshold and no plausible coefficient removes it. The
+*marginal* components sit at only ~2x (path 1). So `lambda_hidden: 5e-5 -> 1e-4` is surgical:
+it shaves the near-threshold fringe and cannot touch the bulk. Leave `lambda_out` at 5e-5.
+
+### Per-site
+
+| site | rel err | share | KL | kappa |
+|---|---|---|---|---|
+| mlp.down_proj | 0.01237 | 24% | 0.003624 | 0.293 |
+| mlp.up_proj | 0.00877 | 17% | 0.002080 | 0.237 |
+| mlp.gate_proj | 0.00616 | 12% | 0.002385 | 0.387 |
+| attn.o_proj | 0.00996 | 19% | 0.000689 | 0.069 |
+| attn.v_proj | 0.00757 | 15% | 0.000262 | 0.035 |
+| attn.q_proj | 0.00395 | 8% | 0.000294 | 0.074 |
+| attn.k_proj | 0.00306 | 6% | 0.000211 | 0.069 |
+
+Per-site KL is *not* additive: injecting at all sites overrides every site output, so
+gate/up reach the logits only via the clamped `down_proj` and q/k/v only via the clamped
+`o_proj`. `down_proj` alone reproduces 97% of the joint KL (0.003624 of 0.003746) — a causal
+bottleneck, not interference. Per-site rel err *is* additive (sums to 0.05184 vs 0.05183).
+
+Attention carries 47% of the hidden error at kappa 0.035-0.074, the MLP 53% at 0.237-0.387.
+Narrowing `site_patterns` to the residual-stream writes would align the hidden objective with
+output relevance — and thereby discard the most distinctively-hidden signal. Keep
+`site_patterns: null`.
+
+### Open
+
+The 607 output-only entries are 2.3% of the output mask but deliver 15% of output
+reconstruction quality (KL 0.004000 without them vs 0.003401 with) — ~7x an average entry.
+The 97.7% superset result holds by count, but its violations are systematically high-value,
+not leakage. Few enough to inspect individually in the grids.
+
+Random ablation measures the surplus's *mean* cost and cannot isolate the halo (the
+grid-adjacent subset) from genuine hidden-only mechanism. Splitting the surplus by (a,b)-grid
+adjacency would separate them; `ABGridDataset` already carries the structure.
+
+Cross-checks that passed to <=1%: frac=1.0 surplus ablation (0.22298) vs the logged
+`CIHiddenActsRecon_outputCI` (0.224859); surplus entries / positions (17.10) vs the logged
+`Phi_hidden - Phi_output` (17.08); injection at alpha=1 vs the path-1 k=0 baseline (exact).

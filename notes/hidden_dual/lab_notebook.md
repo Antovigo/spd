@@ -210,3 +210,40 @@ Step-0 sanity: each PPGD loss sits above its stochastic counterpart, as an adver
 must — output 0.173 vs 0.107, hidden 0.514 vs 0.452. Memory 39659 MiB, statistically
 identical to the plain dual run's 39657 (the extra sources are ~22 MB, the extra graphs
 transient). Rate 3.19 s/step → ~17.7 h projected, inside the 24 h cap in one leg.
+
+## Exchange-rate probe (job 6125, CPU)
+
+Asked how to balance the impmin coefficient between a KL and an MSE objective. First design
+swept a threshold `tau` on CI values and re-measured both objectives — wrong: under
+`leaky_hard` the CI is ~98% saturated at 0 and ~2% at 1, with only 0.11% in (0.01, 0.5), so
+the sweep would have been flat until everything died at once. Caught before it ran. Redesigned
+around ablating components (ranked by mean hidden CI, which under saturation *is* firing rate,
+which is what the impmin penalty is proportional to) and (component, position) entries.
+
+Ran CPU-only: all 6 GPUs were on the two training runs, and a no-gres job still *sees* the
+cards, so `CUDA_VISIBLE_DEVICES=""` is set in both the sbatch and the script, plus a
+`torch.cuda.is_available()` assert. fp32 throughout — the KL differences are ~1e-3 nats and
+bf16 logits would swamp them. Target built directly in fp32 (`spec.model_copy(update=...)`)
+rather than loading bf16 and converting, to avoid holding both copies. First submission at
+150G bounced on `QOSMaxMemoryPerUser`; 96G ran. Prompts tokenize to 5 tokens, not the
+config's `max_seq_len: 16`, so forwards were much cheaper than budgeted — 256 prompts, ~35 min
+for ~40 forwards.
+
+Two interpretation errors, both caught by the data:
+
+Extrapolated kappa from the first single 25-component step (0.183) and quoted a 3.6x
+coefficient change; the cumulative slope settled at 0.365 over 500 components, giving 1.9x.
+Single-segment slopes ranged 0.18-0.69 before converging.
+
+Claimed the per-site KLs summing to more than the joint total showed destructive interference
+between site residuals. It doesn't. The all-sites injection overrides every site output, so
+gate/up reach the logits only through the clamped `down_proj` and q/k/v only through the
+clamped `o_proj` — jointly they contribute nothing, and their effect is already folded into
+the write sites' residuals. `down_proj` alone gives 97% of the joint KL. A causal bottleneck,
+not interference. This also flipped the `site_patterns` advice.
+
+Headline: kappa spans 200x by direction (0.0015 for the hidden-only surplus, 0.35 for
+marginal shared components), so no unit conversion balances the two losses. What does set the
+coefficient is that the *value* distribution is bimodal in the same place — bulk surplus ~200x
+above its keep-threshold, marginal fringe at ~2x — making `lambda_hidden: 5e-5 -> 1e-4`
+surgical. Full numbers and cross-checks in `report.md`.
