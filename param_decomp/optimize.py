@@ -915,7 +915,9 @@ class Trainer:
                 eval_weight_deltas = self.component_model.calc_weight_deltas()
                 with torch.no_grad(), bf16_autocast(enabled=runtime_config.autocast_bf16):
                     slow_step = eval_loop.should_run_slow_eval(step)
-                    active = [m for m in all_instances.values() if not (m.slow and not slow_step)]
+                    active = [
+                        m for m in all_instances.values() if not (m.is_slow and not slow_step)
+                    ]
                     for m in active:
                         m.reset()
                     for _ in range(eval_loop.n_steps):
@@ -941,7 +943,9 @@ class Trainer:
                     if eval_loop.nontarget is not None:
                         assert nt_eval_iterator is not None
                         nt_active = [
-                            m for m in eval_loop.nontarget.metrics if not (m.slow and not slow_step)
+                            m
+                            for m in eval_loop.nontarget.metrics
+                            if not (m.is_slow and not slow_step)
                         ]
                         if nt_active:
                             for m in nt_active:

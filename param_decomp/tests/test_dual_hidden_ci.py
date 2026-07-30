@@ -11,14 +11,19 @@ from param_decomp.ci_fns import LayerwiseCiConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
 from param_decomp.masks import ComponentsMaskInfo, make_mask_infos
+from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
     clean_site_outputs,
     mean_relative_error,
     select_sites,
     site_squared_errors,
 )
+from param_decomp.metrics.pgd_hidden_acts_recon import (
+    PGDHiddenActsReconLoss,
+    PGDHiddenActsReconLossConfig,
+)
 from param_decomp.tests.metrics.fixtures import make_two_layer_component_model
-from param_decomp_lab.batch_and_loss_fns import run_batch_passthrough
+from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
 
 
 def _ones_mask_infos(model: ComponentModel) -> dict[str, ComponentsMaskInfo]:
@@ -194,6 +199,77 @@ class TestRelativeSiteError:
         targets = clean_site_outputs(model, clean_in.cache, model.target_module_paths)
         for path in model.target_module_paths:
             torch.testing.assert_close(targets[path], clean_out.cache[path])
+
+
+class TestEvalDoesNotPerturbTraining:
+    """The eval loop runs *after* backward and *before* the optimizer step.
+
+    So an eval probe that leaked into `.grad` would silently corrupt the update. The PGD
+    probe runs an inner ascent with its own backwards, which makes this worth pinning —
+    especially now that it fires on the fast cadence.
+    """
+
+    def test_pgd_hidden_probe_leaves_gradients_bitwise_unchanged(self):
+        model = make_two_layer_component_model(torch.randn(6, 4), torch.randn(3, 6))
+        batch = torch.randn(8, 4)
+        clean = model(batch, cache_type="input")
+        assert not isinstance(clean, Tensor)
+        ci = model.calc_causal_importances(clean.cache, sampling="continuous")
+
+        # Populate .grad the way a training step leaves it just before eval.
+        model.site_outputs(batch, _ones_mask_infos(model))["fc2"].sum().backward()
+        before = {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+        assert before, "test needs some populated gradients to be meaningful"
+
+        cfg = PGDHiddenActsReconLossConfig(
+            init="random",
+            step_size=0.1,
+            n_steps=5,
+            mask_scope="shared_across_batch",
+            ci_role="output",
+        )
+        metric = PGDHiddenActsReconLoss(cfg)
+        metric.bind(model=model, device="cpu")
+        with torch.no_grad():  # as the trainer invokes eval
+            metric.update(
+                MetricContext(
+                    model=model,
+                    batch=batch,
+                    target_out=clean.output,
+                    pre_weight_acts=clean.cache,
+                    ci=ci,
+                    ci_hidden=None,
+                    weight_deltas=model.calc_weight_deltas(),
+                    step=0,
+                    total_steps=1,
+                    use_delta_component=True,
+                    sampling="continuous",
+                    n_mask_samples=1,
+                    reconstruction_loss=recon_loss_mse,
+                    is_eval=True,
+                )
+            )
+        after = {n: p.grad for n, p in model.named_parameters() if p.grad is not None}
+        assert set(before) == set(after)
+        assert all(torch.equal(before[n], after[n]) for n in before), (
+            "a PGD eval probe modified training gradients"
+        )
+
+    def test_slow_is_overridable_per_instance(self):
+        def probe(slow: bool | None) -> PGDHiddenActsReconLoss:
+            return PGDHiddenActsReconLoss(
+                PGDHiddenActsReconLossConfig(
+                    init="random",
+                    step_size=0.1,
+                    n_steps=5,
+                    mask_scope="shared_across_batch",
+                    slow=slow,
+                )
+            )
+
+        assert probe(None).is_slow is False, "fast by default"
+        assert probe(True).is_slow is True, "config overrides the class default"
+        assert probe(False).is_slow is False
 
 
 class TestSelectSites:

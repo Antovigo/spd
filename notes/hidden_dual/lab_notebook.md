@@ -138,3 +138,40 @@ keys (identical values, as expected — `zero_init_readout` starts both nets at 
 recon losses on both passes, all four hidden-acts probes with per-site breakdowns, both nets'
 `n_alive`, and `ab_grids/step_0.js` carrying `"ci_roles": ["output", "hidden"]`. Probe ordering
 is as it should be: adversarial 1.81 > CI-masked 0.95 > stochastic 0.47.
+
+
+## 2026-07-30 — hidden-acts probes moved to the fast cadence
+
+At `slow_every: 5000` the hidden-acts probes only produced 5 points per run, which is too
+thin to see *when* the two CI nets diverge or to judge early whether the hidden-acts
+reconstruction actually needs adversarial optimisation. Changed for future runs:
+
+- `PGDHiddenActsReconLoss.slow` → `False`, and its config now mixes in a new
+  `EvalCadenceConfig` (`slow: bool | None`), so cadence is a per-instance config choice.
+  `Metric.is_slow` resolves class default vs override and the trainer gates on that.
+- `CIHiddenActsReconLoss.slow` → `False` too. It was slow when it ran two *full* forwards;
+  since it moved to `site_outputs` it costs one truncated forward per eval batch, which is
+  ~6x cheaper than `CEandKLLosses`, and that has never been slow.
+
+**The three launched runs are untouched.** Jobs 6076/6077 loaded their code at process start,
+so editing the worktree cannot affect them. Job 6078 (ctrl) had *not* started, so it would
+have picked up the new default and ended up on a different cadence from the dual runs,
+breaking the matched comparison — it was held (`scontrol hold`), its config pinned with
+`slow: true` on both hidden probes, then released.
+
+Two facts worth recording, both verified rather than assumed:
+
+- **Eval cannot perturb the decomposition.** The eval loop runs *after* backward and *before*
+  the optimizer step, with `.grad` already populated, so a leaky probe would corrupt the
+  update. It doesn't: `_run_pgd_loop` uses `torch.autograd.grad` w.r.t. the sources only and
+  never `.backward()`, so gradients come out bitwise identical. Pinned by
+  `TestEvalDoesNotPerturbTraining`.
+- **But eval does advance the global RNG.** Stochastic masks and PGD source init draw from
+  the global stream, so changing eval cadence changes the draws subsequent training steps
+  see. Runs with different eval cadence are therefore *not* bit-comparable — a different
+  sample path from the same distribution, not a different algorithm, and not a bias.
+
+Cost of the fast PGD probe at `n_steps: 20` is roughly 5% wall clock (210 truncated forwards
++ 200 source backwards per eval, every 500 steps). `n_steps: 5` brings that to ~1.5% and is
+the recommended setting for the frequent instance, with a 20-step `slow: true` sibling for
+the definitive number.

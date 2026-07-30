@@ -182,5 +182,14 @@ to stop). Everything past the last decomposition target would otherwise be waste
 `site_patterns` (fnmatch, e.g. `["*.mlp.down_proj", "*.self_attn.o_proj"]`) restricts which
 sites the error is *measured* at; masking always covers every decomposed site.
 
+Cadence: the CI-masked and stochastic probes cost one truncated forward per eval batch and
+run on the **fast** cadence (`eval.every`). `PGDHiddenActsReconLoss` costs `n_steps + 1`
+truncated forwards *per eval batch* — note the site count does **not** multiply this, since
+one forward captures every site — so its price is set by `n_steps`, and `slow` is therefore a
+config decision rather than a class one: mix in `EvalCadenceConfig` and set `slow: true` for a
+high-`n_steps` instance. The useful pattern is a cheap frequent probe (`n_steps: 5`) to see
+early whether the adversary finds materially more error than sampled masks, plus an occasional
+20-step instance under a distinct `name` for the definitive worst case.
+
 Note the older `StochasticHiddenActsReconLoss` (raw MSE, its own clean + masked passes) and
 `StochasticReconSubsetLossConfig.hidden_acts_recon` still exist for older configs.

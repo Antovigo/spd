@@ -3,7 +3,12 @@ from typing import Literal, override
 from param_decomp.ci_fns import CIRole
 from param_decomp.component_model import ComponentModel
 from param_decomp.masks import make_mask_infos
-from param_decomp.metrics.base import Metric, MetricResult, NamedMetricConfig
+from param_decomp.metrics.base import (
+    EvalCadenceConfig,
+    Metric,
+    MetricResult,
+    NamedMetricConfig,
+)
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
     SiteErrors,
@@ -16,7 +21,7 @@ from param_decomp.metrics.hidden_acts import (
 )
 
 
-class CIHiddenActsReconLossConfig(NamedMetricConfig):
+class CIHiddenActsReconLossConfig(NamedMetricConfig, EvalCadenceConfig):
     """`ci_role` picks which CI net supplies the mask; `site_patterns` filters the sites."""
 
     type: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
@@ -34,7 +39,9 @@ class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
     """
 
     log_namespace = "loss"
-    slow = True
+    # One truncated forward per eval batch since it moved to `site_outputs` — cheaper than
+    # `CEandKLLosses`, which is not slow either. It was slow when it ran two full forwards.
+    slow = False
     short_name = "CIHiddenActRecon"
 
     @override

@@ -13,7 +13,7 @@ from torch import Tensor
 from param_decomp.ci_fns import CIRole
 from param_decomp.component_model import ComponentModel
 from param_decomp.masks import AllLayersRouter, ComponentsMaskInfo
-from param_decomp.metrics.base import Metric, MetricResult
+from param_decomp.metrics.base import EvalCadenceConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
     SiteErrors,
@@ -28,11 +28,14 @@ from param_decomp.metrics.hidden_acts import (
 from param_decomp.metrics.pgd_utils import PGDConfig, pgd_masked_objective_update
 
 
-class PGDHiddenActsReconLossConfig(PGDConfig):
+class PGDHiddenActsReconLossConfig(PGDConfig, EvalCadenceConfig):
     """Config for the PGD-attacked per-site hidden-activation error.
 
     `site_patterns` filters which sites the error is measured at, as on
-    `StochasticHiddenReconSubsetLoss`. Masks always cover every decomposed site.
+    `StochasticHiddenReconSubsetLoss`. Masks always cover every decomposed site. Cost is set
+    by `n_steps` (each step is one truncated forward plus a backward to the sources), so
+    `slow` is left to the config: a few-step probe is cheap enough to run every eval, a
+    20-step one is better placed on the slow cadence.
     """
 
     type: Literal["PGDHiddenActsReconLoss"] = "PGDHiddenActsReconLoss"
@@ -50,7 +53,10 @@ class PGDHiddenActsReconLoss(Metric[PGDHiddenActsReconLossConfig]):
     """
 
     log_namespace = "loss"
-    slow = True
+    # Fast by default: knowing early whether the adversary finds much more error than
+    # sampled masks is the point of having this probe. Set `slow: true` in the config for a
+    # high-`n_steps` instance.
+    slow = False
     short_name = "PGDHiddenRecon"
 
     @override

@@ -30,6 +30,18 @@ class NamedMetricConfig(BaseConfig):
     name: str | None = None
 
 
+class EvalCadenceConfig(BaseConfig):
+    """Config for a metric whose slow-eval gating is a per-run choice.
+
+    `None` keeps the metric class's own `slow`; `True` / `False` overrides it, so one probe
+    can be a cheap frequent diagnostic in one run and an expensive occasional one in another
+    without touching code. Only the classes whose cost genuinely varies by config (e.g. a
+    PGD probe, whose price is set by `n_steps`) should mix this in.
+    """
+
+    slow: bool | None = None
+
+
 class LossMetricConfig(NamedMetricConfig):
     """Pydantic config for a metric that can also be used as a training loss.
 
@@ -88,6 +100,17 @@ class Metric[TConfig: BaseConfig](ABC):
         """
         name = self.cfg.name if isinstance(self.cfg, NamedMetricConfig) else None
         return f"{name}/" if name is not None else ""
+
+    @property
+    def is_slow(self) -> bool:
+        """Whether this instance is gated behind the slow-eval cadence.
+
+        The class's `slow`, unless an `EvalCadenceConfig` overrides it per instance. The
+        trainer gates on this, never on `slow` directly.
+        """
+        if isinstance(self.cfg, EvalCadenceConfig) and self.cfg.slow is not None:
+            return self.cfg.slow
+        return self.slow
 
     def bind(self, *, model: ComponentModel, device: str) -> None:
         """Attach the live `ComponentModel` and device, then call `reset()`.
