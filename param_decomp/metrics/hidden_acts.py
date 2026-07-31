@@ -78,6 +78,12 @@ def site_squared_errors(
         assert predicted.shape == target.shape, f"{site}: {predicted.shape} vs {target.shape}"
         routing_mask = mask_infos[site].routing_mask
         if isinstance(routing_mask, Tensor):
+            print(
+                f"DEBUG site={site} routing_mask.shape={tuple(routing_mask.shape)} "
+                f"routing_mask.sum={routing_mask.sum().item()} predicted.shape={tuple(predicted.shape)} "
+                f"target.shape={tuple(target.shape)} target.abs().max()={target.abs().max().item()}",
+                flush=True,
+            )
             predicted = predicted[routing_mask]
             target = target[routing_mask]
         # Upcast before subtracting: under bf16 autocast these two are close and large, so
