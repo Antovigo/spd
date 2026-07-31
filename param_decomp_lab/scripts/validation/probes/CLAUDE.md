@@ -45,21 +45,33 @@ canvas, `file://`, smoke-test with the parent folder's `headless_check.py`.
 ### `build_alive_plane_scatter.py` — real model vs. alive-only circuits
 
 Decomposition-aware variant of `build_final_plane_scatter`, dropped in
-`<run>/analysis/alive_plane_scatter/` (template `alive_plane_scatter_app.html`). Requires a
-`dual_hidden_ci` checkpoint with `find_alive_subcomponents` already run (reads
-`alive_subcomponents.tsv` + `_hidden.tsv`). Takes the checkpoint **and** the
+`<run>/analysis/alive_plane_scatter/` (template `alive_plane_scatter_app.html`). Requires
+`find_alive_subcomponents` already run (reads `alive_subcomponents.tsv`, plus `_hidden.tsv`
+when the checkpoint has a hidden CI net). Takes the checkpoint **and** the
 `ridge_cv_probes_<op>.json`(s) (positional, after the checkpoint) — the probe planes are
 decomposition-independent and reused as-is.
 
-Recomputes fresh activations for **three sources** over one sampled `a<op>b=` grid — the real
-model, and two circuits with only hidden-alive / only output-alive components active
-everywhere (delta off — `find_alive_subcomponents`'s masking) — so all three are exactly
-point-aligned. The `<result> @ layer` own-probe row is dropped (own rows: `a`, `b` only; the
-fixed-`--probe-layer` result row stays). Extra colorby modes beyond `final_plane_scatter`'s:
-**distortion** (plane-projected distance from the real model; disabled while viewing the real
-model itself) and **causal importance** (role + matrix + component pickers, gated by that
-role's alive list; CI is one value per prompt from the real-model forward, so it colors every
-panel identically regardless of which source is shown).
+Recomputes fresh activations for **two or three sources** (three on a `dual_hidden_ci`
+checkpoint, two otherwise) over one sampled `a<op>b=` grid — the real model, and one circuit
+per alive list with only that role's components active everywhere (delta off —
+`find_alive_subcomponents`'s masking) — so every source is exactly point-aligned. Running it
+on both a baseline and a dual run of the same decomposition is how you see what adding the
+hidden-CI net actually changed. The `<result> @ layer` own-probe row is dropped (own rows:
+`a`, `b` only; the fixed-`--probe-layer` result row stays). Extra colorby modes beyond
+`final_plane_scatter`'s: **distortion** (plane-projected distance from the real model;
+disabled while viewing the real model itself) and **causal importance** (role + matrix +
+component pickers, gated by that role's alive list; CI is one value per prompt from the
+real-model forward, so it colors every panel identically regardless of which source is
+shown).
+
+**view** (client-side only, no data regeneration needed — everything is already in
+`data.js`) toggles the grid's column axis: **all layers** (default) fixes one period and
+sweeps stream positions, matching `final_plane_scatter`; **all periods** fixes one layer
+(a new `layer` picker replaces the `period` picker) and sweeps periods instead, useful for
+comparing a single position across every period at a glance. The Δ-from-previous-position
+colorby modes (`plane`/`resid`) and displacement arrows are layers-view-only — there's no
+"previous" position when columns are periods — and get disabled (auto-falling back to
+`value`) when switching to the periods view.
 
 Batches are grouped by each sampled prompt's natural (non-zero-padded) token length rather
 than padded, since `ComponentModel`'s masked forward has no attention-mask support — this
