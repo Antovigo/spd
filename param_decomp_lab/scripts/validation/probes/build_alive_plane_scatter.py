@@ -85,6 +85,8 @@ _MODULE = "param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter"
 _TEMPLATE = Path(__file__).with_name("alive_plane_scatter_app.html")
 _OWN_VARIABLES = ("a", "b")
 _RESULT_VARIABLE = {"add": "a+b", "sub": "a-b"}
+# Periods the fitted grid has but this applet doesn't show.
+_EXCLUDED_PERIODS = (25, 33)
 Role = Literal["output", "hidden"]
 
 
@@ -210,7 +212,7 @@ def build_alive_plane_scatter(
         op_payloads.append((meta["op"], meta, results))
     assert shared_meta is not None
     layer_keys = cast(list[str], shared_meta["positions"])
-    periods = cast(list[int], shared_meta["periods"])
+    periods = [p for p in cast(list[int], shared_meta["periods"]) if p not in _EXCLUDED_PERIODS]
     max_value = cast(int, shared_meta["max_value"])
     layers = _layers_from_positions(layer_keys)
 
