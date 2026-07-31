@@ -164,6 +164,14 @@ If two scripts need the same thing, it belongs here.
   (`alive_subcomponents.tsv` + per-position CI JSON); every downstream script consumes it.
   Decouple an expensive full pass from cheap re-filtering by writing an intermediate
   summary TSV, so tweaking a threshold doesn't force another pass over the big file.
+  On a `dual_hidden_ci` checkpoint, `find_alive_subcomponents` additionally writes an
+  `_hidden`-suffixed sibling of every output file (`alive_subcomponents_hidden.tsv`, ...),
+  ranked and swept against the hidden CI net's own reconstruction target (decomposed-site
+  relative error, not output KL) instead of the output net's. The unsuffixed files keep
+  their original meaning and are written unconditionally, so existing downstream scripts
+  need no changes. Output-alive is assumed to be a subset of hidden-alive, so the hidden
+  list is the hidden sweep's own cut unioned with the output-alive set, not an
+  independent threshold — see the module docstring for why.
 - Keep a **`commands.md`** (or `commands.sh`) in this folder with self-contained, runnable
   example invocations — a setup block that defines `$MODEL_PATH` / `$RUN_DIR`, then one
   pasteable block per script with real paths. It doubles as living documentation of how
