@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alive-plane scatter — real model vs. alive-only circuits on the probe planes</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 16px; color: #1c1c1e; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #666; font-size: 12px; margin-bottom: 10px; max-width: 1250px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 8px;
+              font-size: 13px; }
+  .controls label { color: #444; margin-right: 4px; }
+  select { font-size: 13px; }
+  #legend { display: flex; gap: 12px; align-items: center; font-size: 12.5px; color: #333;
+            margin-bottom: 10px; }
+  #cbarlabel { color: #666; }
+  #gridwrap { overflow-x: auto; padding-bottom: 6px; }
+  #grid { display: grid; gap: 4px 6px; align-items: center; width: fit-content; }
+  .rowlabel { font-size: 11.5px; color: #333; font-weight: 600; text-align: right;
+              padding-right: 6px; white-space: nowrap; }
+  .colhead { font-size: 11.5px; color: #444; font-weight: 600; text-align: center; }
+  canvas.plot { border: 1px solid #ddd; border-radius: 3px; display: block; }
+  #tooltip { position: fixed; pointer-events: none; background: #222; color: #fff; padding: 4px 8px;
+             border-radius: 4px; font-size: 12px; display: none; z-index: 5; white-space: pre; }
+  #cicontrols { display: none; }
+</style>
+</head>
+<body>
+<h1 id="apptitle">Residual stream on the probe planes — real vs. alive-only circuits</h1>
+<div class="sub">Each point is one prompt at the <code>=</code> token; columns are stream
+positions — block outputs (<b>after N</b>) interleaved with post-attention states
+(<b>attn N</b>). Rows 1–2: the stream projected on <b>that layer's own</b> probes for a and
+b — the data each block works with. Row 3: every position on the fixed
+<b id="probelayer">final</b>-layer result probe — the final state being constructed.
+<b>data</b> picks which of three sources is shown: the real model, or a circuit with only
+hidden-alive / only output-alive components active (delta off, everything else hard zero —
+the same masking `find_alive_subcomponents` uses). All three are captured over the exact same
+sampled points, so they're directly comparable. <b>distortion</b> colours by each point's
+plane-projected distance from the real model (meaningless — and disabled — while viewing the
+real model itself). <b>causal importance</b> colours every panel by one selected alive
+subcomponent's CI on that prompt (read from the real model, so it doesn't depend on which
+source is shown).</div>
+<div class="controls">
+  <span><label>op</label><select id="op"></select></span>
+  <span><label>period</label><select id="period"></select></span>
+  <span><label>data</label><select id="source">
+    <option value="original">real model</option>
+    <option value="hidden_alive">hidden-alive only</option>
+    <option value="output_alive">output-alive only</option>
+  </select></span>
+  <span><label>color by</label><select id="colorby">
+    <option value="value">value mod T</option>
+    <option value="plane">Δ in panel plane (vs prev)</option>
+    <option value="resid">Δ in full resid (vs prev)</option>
+    <option value="distortion">distortion vs. real model</option>
+    <option value="ci">causal importance</option>
+  </select></span>
+  <span id="cicontrols">
+    <label>role</label><select id="cirole">
+      <option value="output">output</option>
+      <option value="hidden">hidden</option>
+    </select>
+    <label>matrix</label><select id="cimatrix"></select>
+    <label>component</label><select id="cicomponent"></select>
+  </span>
+  <span><label><input type="checkbox" id="arrows"> arrows from previous position</label></span>
+</div>
+<div id="legend">
+  <span id="stats"></span>
+  <canvas id="cbar" width="200" height="13"></canvas>
+  <span id="cbarlabel"></span>
+</div>
+<div id="gridwrap"><div id="grid"></div></div>
+<div id="tooltip"></div>
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.ALIVE_PLANE_DATA;
+const LAYERS = D.meta.positions;              // ["L14", "L15att", "L15", ..., "L20"]
+const N_ROWS = 3;
+const posLabel = p => p.endsWith("att") ? "attn " + p.slice(1, -3) : "after " + p.slice(1);
+const VIRIDIS = [[68,1,84],[70,7,90],[71,13,96],[71,19,101],[72,24,106],[72,29,111],[72,35,116],
+[72,40,120],[71,45,123],[70,50,126],[69,55,129],[68,59,132],[66,64,134],[64,69,136],[62,73,137],
+[61,78,138],[58,83,139],[56,88,140],[54,92,141],[52,96,141],[50,100,142],[49,104,142],[47,108,142],
+[45,112,142],[44,115,142],[42,119,142],[41,123,142],[39,127,142],[38,130,142],[36,134,142],
+[35,138,141],[33,142,141],[32,146,140],[31,150,139],[31,154,138],[31,158,137],[31,161,135],
+[33,165,133],[35,169,131],[38,173,129],[42,176,127],[47,180,124],[53,183,121],[59,187,117],
+[66,190,113],[74,193,109],[82,197,105],[90,200,100],[101,203,94],[110,206,88],[119,209,83],
+[129,211,77],[139,214,70],[149,216,64],[160,218,57],[170,220,50],[181,222,43],[192,223,37],
+[202,225,31],[213,226,26],[223,227,24],[234,229,26],[244,230,30],[253,231,37]];
+const PANEL = 158;                            // CSS px; 7 columns fit one display row
+const DPR = window.devicePixelRatio || 1;
+const $ = id => document.getElementById(id);
+const state = {
+  op: null, period: null, colorby: "value", arrows: false,
+  source: "original", ciRole: "output", ciMatrix: null, ciComponent: null,
+};
+
+function fillSelect(sel, items) {
+  sel.innerHTML = "";
+  for (const v of items) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v;
+    sel.appendChild(o);
+  }
+}
+function b64ToUint8(b64) {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+
+$("probelayer").textContent = "L" + D.meta.probe_layer;
+fillSelect($("op"), Object.keys(D.ops));
+state.op = $("op").value;
+fillSelect($("period"), D.meta.periods.map(String));
+state.period = $("period").value;
+
+function lut(t) {
+  const x = Math.min(0.999999, Math.max(0, t)) * (VIRIDIS.length - 1);
+  const i = Math.floor(x), f = x - i;
+  const a = VIRIDIS[i], b = VIRIDIS[Math.min(i + 1, VIRIDIS.length - 1)];
+  return `rgb(${Math.round(a[0]+f*(b[0]-a[0]))},${Math.round(a[1]+f*(b[1]-a[1]))},${Math.round(a[2]+f*(b[2]-a[2]))})`;
+}
+
+// Row definitions: kind "own" = layer-of-interest probes (a, b only), "final" = fixed probe_layer probe.
+function rowDefs() {
+  const res = D.ops[state.op].result_variable;
+  return [
+    { key: "own_a", kind: "own", variable: "a", label: "a @ layer" },
+    { key: "own_b", kind: "own", variable: "b", label: "b @ layer" },
+    { key: "final", kind: "final", variable: res, label: res + " @ L" + D.meta.probe_layer },
+  ];
+}
+function sourceData(src) { return D.ops[state.op].sources[src]; }
+function cellData(row, src) {
+  const o = sourceData(src || state.source);
+  return row.kind === "own" ? o.own[row.variable][state.period]
+                            : o.planes[row.variable][state.period];
+}
+function nPoints() {
+  const c = sourceData("original").planes[D.ops[state.op].result_variable][state.period];
+  return c.one_d ? c.layers[LAYERS[0]].length : c.layers[LAYERS[0]].length / 2;
+}
+function jitterY(i) { return (((i * 2654435761) >>> 0) % 1000) / 1000 - 0.5; }
+
+function getXY(flatArr, oneD, i, f) {
+  if (oneD) return [flatArr[i], jitterY(i) * 0.35 * (f.xmax - f.xmin)];
+  return [flatArr[2 * i], flatArr[2 * i + 1]];
+}
+
+// coords of row's panel at layer index li; prev=true -> previous state in the SAME plane.
+function rowCoords(row, li, prev, src) {
+  const cd = cellData(row, src), lk = LAYERS[li];
+  if (!prev) return cd.layers[lk];
+  if (row.kind === "own") return li > 0 ? cd.prev[lk] : null;
+  return li > 0 ? cd.layers[LAYERS[li - 1]] : null;   // final row: same plane at prev position
+}
+
+const frameCache = {};
+function rowFrame(row) {
+  // Shared across all 3 sources so panels are visually comparable when switching `data`.
+  const key = [row.key, state.op, state.period].join("|");
+  if (frameCache[key]) return frameCache[key];
+  let xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
+  const scan = arr => {
+    const cd = cellData(row);
+    for (let j = 0; j < arr.length; j++) {
+      const isX = cd.one_d || j % 2 === 0;
+      if (isX) { if (arr[j] < xmin) xmin = arr[j]; if (arr[j] > xmax) xmax = arr[j]; }
+      else { if (arr[j] < ymin) ymin = arr[j]; if (arr[j] > ymax) ymax = arr[j]; }
+    }
+  };
+  for (const src of D.meta.sources)
+    for (let li = 0; li < LAYERS.length; li++) {
+      scan(rowCoords(row, li, false, src));
+      const p = rowCoords(row, li, true, src);
+      if (p) scan(p);
+    }
+  const cd0 = cellData(row);
+  if (cd0.one_d) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
+  const px = 0.06 * (xmax - xmin), py = 0.06 * (ymax - ymin);
+  const f = { xmin: xmin - px, xmax: xmax + px, ymin: ymin - py, ymax: ymax + py };
+  const w = f.xmax - f.xmin, h = f.ymax - f.ymin, s = Math.max(w, h);  // square, equal scale
+  f.xmin -= (s - w) / 2; f.xmax += (s - w) / 2; f.ymin -= (s - h) / 2; f.ymax += (s - h) / 2;
+  frameCache[key] = f;
+  return f;
+}
+
+const magCache = {};
+function planeDeltas(row, li) {                // Δ from position li-1 into li, in this row's plane
+  const key = ["plane", row.key, state.op, state.period, state.source, li].join("|");
+  if (magCache[key]) return magCache[key];
+  const cd = cellData(row), f = rowFrame(row);
+  const cur = rowCoords(row, li, false), prev = rowCoords(row, li, true);
+  const n = nPoints();
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const p0 = getXY(prev, cd.one_d, i, f), p1 = getXY(cur, cd.one_d, i, f);
+    out[i] = Math.hypot(p1[0] - p0[0], cd.one_d ? 0 : p1[1] - p0[1]);
+  }
+  magCache[key] = out;
+  return out;
+}
+function distortionDeltas(row, li) {           // Δ from the real model, in this row's plane
+  const key = ["distort", row.key, state.op, state.period, state.source, li].join("|");
+  if (magCache[key]) return magCache[key];
+  const cd = cellData(row), f = rowFrame(row);
+  const cur = rowCoords(row, li, false, state.source);
+  const orig = rowCoords(row, li, false, "original");
+  const n = nPoints();
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const p0 = getXY(orig, cd.one_d, i, f), p1 = getXY(cur, cd.one_d, i, f);
+    out[i] = Math.hypot(p1[0] - p0[0], cd.one_d ? 0 : p1[1] - p0[1]);
+  }
+  magCache[key] = out;
+  return out;
+}
+function deltas(row, li) {
+  switch (state.colorby) {
+    case "resid":
+      return li === 0 ? null : sourceData(state.source).resid_delta[LAYERS[li]];
+    case "distortion":
+      return state.source === "original" ? null : distortionDeltas(row, li);
+    case "plane":
+      return li === 0 ? null : planeDeltas(row, li);
+    default:
+      return null;                             // "value" / "ci" don't use a Δ magnitude
+  }
+}
+
+function sharedQ95() {                        // one Δ scale across every displayed panel
+  const all = [];
+  for (const row of rowDefs())
+    for (let li = 1; li < LAYERS.length; li++) {
+      const d = deltas(row, li);
+      if (d) all.push(...d);
+    }
+  all.sort((a, b) => a - b);
+  return all[Math.floor(0.95 * (all.length - 1))] || 1;
+}
+
+let ciCache = null, ciCacheKey = null;
+function ciArray() {
+  const key = [state.op, state.ciRole, state.ciMatrix, state.ciComponent].join("|");
+  if (ciCacheKey === key) return ciCache;
+  const b64 = D.ops[state.op].ci[`${state.ciRole}|${state.ciMatrix}|${state.ciComponent}`];
+  ciCache = b64 ? b64ToUint8(b64) : null;
+  ciCacheKey = key;
+  return ciCache;
+}
+
+function pointColor(row, i, mags, q95, values) {
+  if (state.colorby === "ci") {
+    const arr = ciArray();
+    return arr ? lut(arr[i] / 255) : "#c7c7cc";
+  }
+  if (state.colorby === "value") {
+    const T = +state.period;
+    return lut((((values[i] % T) + T) % T) / Math.max(T - 1, 1));
+  }
+  if (mags === null) return "#c7c7cc";
+  return lut(mags[i] / q95);
+}
+
+const grid = $("grid");
+grid.style.gridTemplateColumns = `auto repeat(${LAYERS.length}, ${PANEL}px)`;
+grid.appendChild(document.createElement("div"));
+for (const lk of LAYERS) {
+  const h = document.createElement("div");
+  h.className = "colhead";
+  h.textContent = posLabel(lk);
+  grid.appendChild(h);
+}
+const canvases = [];                          // [rowIdx][li]
+const rowLabelDivs = [];
+for (let r = 0; r < N_ROWS; r++) {
+  const lab = document.createElement("div");
+  lab.className = "rowlabel";
+  grid.appendChild(lab);
+  rowLabelDivs.push(lab);
+  const rowCvs = [];
+  for (let li = 0; li < LAYERS.length; li++) {
+    const cv = document.createElement("canvas");
+    cv.className = "plot";
+    cv.width = PANEL * DPR; cv.height = PANEL * DPR;
+    cv.style.width = PANEL + "px"; cv.style.height = PANEL + "px";
+    cv.dataset.row = r; cv.dataset.li = li;
+    grid.appendChild(cv);
+    rowCvs.push(cv);
+  }
+  canvases.push(rowCvs);
+}
+
+function toPx(p, f) {
+  return [ (p[0] - f.xmin) / (f.xmax - f.xmin) * PANEL,
+           PANEL - (p[1] - f.ymin) / (f.ymax - f.ymin) * PANEL ];
+}
+
+let lastPx = [];   // [rowIdx][li] -> point pixel positions, for hover
+let lastQ95 = 1;
+let snapshots = [];  // [rowIdx][li] -> clean ImageData, restored under the hover marker
+let hoverIdx = null;
+function drawAll() {
+  const rows = rowDefs();
+  const q95 = (state.colorby === "value" || state.colorby === "ci") ? 1 : sharedQ95();
+  lastQ95 = q95;
+  lastPx = rows.map(() => new Array(LAYERS.length));
+  snapshots = rows.map(() => new Array(LAYERS.length));
+  hoverIdx = null;
+  const n = nPoints();
+  rows.forEach((row, r) => {
+    rowLabelDivs[r].textContent = row.label;
+    const cd = cellData(row), f = rowFrame(row);
+    const values = D.ops[state.op].values[row.variable];
+    for (let li = 0; li < LAYERS.length; li++) {
+      const cv = canvases[r][li], ctx = cv.getContext("2d");
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.clearRect(0, 0, PANEL, PANEL);
+      const mags = deltas(row, li);
+      if (!cd.one_d) {                        // unit circle reference
+        ctx.strokeStyle = "#d8d8dc"; ctx.setLineDash([2, 3]); ctx.beginPath();
+        const c0 = toPx([0, 0], f), rad = 1 / (f.xmax - f.xmin) * PANEL;
+        ctx.arc(c0[0], c0[1], rad, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
+      }
+      const cur = rowCoords(row, li, false), prev = rowCoords(row, li, true);
+      if (state.arrows && prev) {
+        ctx.strokeStyle = "rgba(120,120,130,0.3)"; ctx.lineWidth = 0.7;
+        for (let i = 0; i < Math.min(n, 250); i++) {
+          const a = toPx(getXY(prev, cd.one_d, i, f), f), b = toPx(getXY(cur, cd.one_d, i, f), f);
+          ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+        }
+      }
+      const px = new Array(n);
+      ctx.globalAlpha = 0.75;
+      for (let i = 0; i < n; i++) {
+        const p = toPx(getXY(cur, cd.one_d, i, f), f);
+        px[i] = p;
+        ctx.fillStyle = pointColor(row, i, mags, q95, values);
+        ctx.beginPath(); ctx.arc(p[0], p[1], 1.3, 0, 2 * Math.PI); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      const s = row.kind === "own" ? cd.stats[LAYERS[li]] : cd.l20;
+      ctx.font = "9px sans-serif";
+      ctx.fillStyle = s.accepted ? "#555" : "#b00020";
+      ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
+      lastPx[r][li] = px;
+      snapshots[r][li] = ctx.getImageData(0, 0, cv.width, cv.height);
+    }
+  });
+  drawLegend(q95);
+}
+
+function setHover(idx) {                      // mark the homologous point on every panel
+  if (idx === hoverIdx) return;
+  hoverIdx = idx;
+  for (let r = 0; r < canvases.length; r++)
+    for (let li = 0; li < LAYERS.length; li++) {
+      const cv = canvases[r][li], ctx = cv.getContext("2d");
+      ctx.putImageData(snapshots[r][li], 0, 0);
+      if (idx === null) continue;
+      const p = lastPx[r][li][idx];
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
+      ctx.lineWidth = 3; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+      ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
+      ctx.lineWidth = 1.5; ctx.strokeStyle = "#ff3b30"; ctx.stroke();
+    }
+}
+
+function drawLegend(q95) {
+  const srcLabel = { original: "real model", hidden_alive: "hidden-alive only", output_alive: "output-alive only" }[state.source];
+  $("stats").innerHTML = `<b>${state.op} / T=${state.period} / ${srcLabel}</b>` +
+    ` — panel tag: that probe's cv R² (red = fails the null gate)`;
+  const cb = $("cbar"), cctx = cb.getContext("2d");
+  for (let x = 0; x < cb.width; x++) {
+    cctx.fillStyle = lut(x / (cb.width - 1));
+    cctx.fillRect(x, 0, 1, cb.height);
+  }
+  if (state.colorby === "value") {
+    $("cbarlabel").textContent = `value mod ${state.period} (per row's variable): 0 → ${state.period - 1}`;
+  } else if (state.colorby === "ci") {
+    $("cbarlabel").textContent = state.ciComponent === null
+      ? "no alive components for this role"
+      : `causal importance of ${state.ciRole} ${state.ciMatrix}#${state.ciComponent}: 0 → 1`;
+  } else if (state.colorby === "distortion" && state.source === "original") {
+    $("cbarlabel").textContent = "distortion is 0 by definition while viewing the real model";
+  } else {
+    $("cbarlabel").textContent = `Δ from previous position: 0 → ${q95.toPrecision(3)} (95th pct, shared across panels)`;
+  }
+}
+
+grid.addEventListener("mousemove", e => {
+  const t = e.target;
+  const tip = $("tooltip");
+  if (t.tagName !== "CANVAS") { tip.style.display = "none"; setHover(null); return; }
+  const r = +t.dataset.row, li = +t.dataset.li;
+  const rect = t.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const px = lastPx[r] && lastPx[r][li];
+  if (!px) return;
+  let best = -1, bd = 100;
+  for (let i = 0; i < px.length; i++) {
+    const d = (px[i][0] - mx) ** 2 + (px[i][1] - my) ** 2;
+    if (d < bd) { bd = d; best = i; }
+  }
+  if (best < 0) { tip.style.display = "none"; setHover(null); return; }
+  setHover(best);
+  const row = rowDefs()[r];
+  const ab = D.ops[state.op].ab, v = D.ops[state.op].values[row.variable][best];
+  const T = +state.period;
+  const mags = deltas(row, li);
+  const ciArr = state.colorby === "ci" ? ciArray() : null;
+  tip.textContent = `a=${ab[2 * best]}  b=${ab[2 * best + 1]}\n${row.variable}=${v}` +
+    `  mod ${T} = ${((v % T) + T) % T}` +
+    (mags && state.colorby !== "value" ? `\nΔ = ${(+mags[best]).toPrecision(3)}` : "") +
+    (ciArr ? `\nCI = ${(ciArr[best] / 255).toPrecision(3)}` : "");
+  tip.style.display = "block";
+  tip.style.left = (e.clientX + 14) + "px";
+  tip.style.top = (e.clientY + 8) + "px";
+});
+grid.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; setHover(null); });
+
+function populateCiComponents() {
+  const comps = (D.meta.alive_components[state.ciRole] || []).filter(c => c.matrix === state.ciMatrix);
+  const opts = comps.map(c => String(c.component)).sort((a, b) => (+a) - (+b));
+  fillSelect($("cicomponent"), opts);
+  state.ciComponent = opts.length ? opts[0] : null;
+}
+function populateCiSelectors() {
+  const comps = D.meta.alive_components[state.ciRole] || [];
+  const matrices = [...new Set(comps.map(c => c.matrix))].sort();
+  fillSelect($("cimatrix"), matrices);
+  state.ciMatrix = matrices.length ? matrices[0] : null;
+  populateCiComponents();
+}
+populateCiSelectors();
+
+for (const id of ["op", "period", "source"])
+  $(id).addEventListener("change", () => { state[id] = $(id).value; drawAll(); });
+$("colorby").addEventListener("change", () => {
+  state.colorby = $("colorby").value;
+  $("cicontrols").style.display = state.colorby === "ci" ? "inline-flex" : "none";
+  drawAll();
+});
+$("cirole").addEventListener("change", () => { state.ciRole = $("cirole").value; populateCiSelectors(); drawAll(); });
+$("cimatrix").addEventListener("change", () => { state.ciMatrix = $("cimatrix").value; populateCiComponents(); drawAll(); });
+$("cicomponent").addEventListener("change", () => { state.ciComponent = $("cicomponent").value; drawAll(); });
+$("arrows").addEventListener("change", () => { state.arrows = $("arrows").checked; drawAll(); });
+drawAll();
+</script>
+</body>
+</html>
