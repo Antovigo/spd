@@ -132,6 +132,15 @@ def _flat(p: np.ndarray) -> list[float]:
     return [round(float(c), 4) for c in (p[:, 0] if p.shape[1] == 1 else p.reshape(-1))]
 
 
+def _comma_list(x: str | tuple[Any, ...]) -> list[str]:
+    """Split a `--flag=a,b,c` value into parts.
+
+    Fire parses an unquoted comma-separated CLI value into a tuple rather than a string
+    (see the identical guard around `--ks` in `find_alive_subcomponents.py`).
+    """
+    return x.split(",") if isinstance(x, str) else [str(v) for v in x]
+
+
 def build_alive_plane_scatter(
     model_path: ModelPath,
     *ridge_cv_jsons: str,
@@ -154,7 +163,7 @@ def build_alive_plane_scatter(
         argv = [
             str(Path(model_path).expanduser()),
             *[str(p) for p in json_paths],
-            f"--probe-layers={probe_layers}",
+            f"--probe-layers={','.join(_comma_list(probe_layers))}",
             f"--n-show={n_show}",
             f"--seed={seed}",
             f"--alpha={alpha}",
@@ -191,7 +200,7 @@ def build_alive_plane_scatter(
     weight_deltas = model.calc_weight_deltas()
     dtype = next(model.parameters()).dtype
 
-    probe_layer_list = sorted({int(x) for x in probe_layers.split(",")})
+    probe_layer_list = sorted({int(x) for x in _comma_list(probe_layers)})
     probe_keys = [f"L{pl}" for pl in probe_layer_list]
 
     # Load probe jsons; every op must share the same grid (positions/periods/max_value).
