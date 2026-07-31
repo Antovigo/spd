@@ -35,6 +35,7 @@ from param_decomp_lab.eval_metrics.attn_patterns_recon_loss import (
     StochasticAttnPatternsReconLossConfig,
 )
 from param_decomp_lab.eval_metrics.ce_and_kl_losses import CEandKLLosses, CEandKLLossesConfig
+from param_decomp_lab.eval_metrics.ci_anomaly_rate import CIAnomalyRate, CIAnomalyRateConfig
 from param_decomp_lab.eval_metrics.ci_hidden_acts_recon_loss import (
     CIHiddenActsReconLoss,
     CIHiddenActsReconLossConfig,
@@ -60,6 +61,10 @@ from param_decomp_lab.eval_metrics.period_separation import (
     PeriodSeparationConfig,
 )
 from param_decomp_lab.eval_metrics.permuted_ci_plots import PermutedCIPlots, PermutedCIPlotsConfig
+from param_decomp_lab.eval_metrics.rounded_logit_lens import (
+    RoundedLogitLens,
+    RoundedLogitLensConfig,
+)
 from param_decomp_lab.eval_metrics.targeted_ci_heatmap import (
     TargetedCIHeatmap,
     TargetedCIHeatmapConfig,
@@ -76,6 +81,7 @@ from param_decomp_lab.eval_metrics.weight_magnitude import WeightMagnitude, Weig
 AnyEvalMetricConfig = Annotated[
     ABGridDatasetConfig
     | CEandKLLossesConfig
+    | CIAnomalyRateConfig
     | CIHiddenActsReconLossConfig
     | CIHistogramsConfig
     | CI_L0Config
@@ -91,6 +97,7 @@ AnyEvalMetricConfig = Annotated[
     | PermutedCIPlotsConfig
     | PGDHiddenActsReconLossConfig
     | PGDReconLossConfig
+    | RoundedLogitLensConfig
     | SmoothL0ImportanceMinimalityLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
@@ -106,6 +113,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
     for cls in (
         ABGridDataset,
         CEandKLLosses,
+        CIAnomalyRate,
         CIHiddenActsReconLoss,
         CIHistograms,
         CI_L0,
@@ -121,6 +129,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         PermutedCIPlots,
         PGDHiddenActsReconLoss,
         PGDReconLoss,
+        RoundedLogitLens,
         SmoothL0ImportanceMinimalityLoss,
         StochasticAttnPatternsReconLoss,
         StochasticHiddenActsReconLoss,
