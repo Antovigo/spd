@@ -8,17 +8,52 @@ that needs distinct process-level device counts so it lives in the runnable
 experiment, not here.
 """
 
+from typing import cast
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from param_decomp.core.model import Positioned, Positionless
 from param_decomp.core.placement import from_config
-from param_decomp.core.sharding import hsdp_mesh, shard_batch
+from param_decomp.core.sharding import hsdp_mesh, place_via_shardings, shard_batch
 
 # Needs >1 jax device; hangs at the default 1 device, so gated behind --runmultidevice.
 # Run via `make test-multidevice` (sets XLA_FLAGS for simulated CPU devices). See conftest.
 pytestmark = pytest.mark.multidevice
+
+
+def test_place_via_shardings_does_not_device_put_complete_local_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frozen target is loaded completely and identically on every process. Placement must
+    serve each addressable shard from that local copy; `device_put` first equality-gathers any
+    axis replicated across processes, which materializes a process-count-multiplied global leaf.
+    """
+    from jax.sharding import Mesh, NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    mesh = Mesh(np.asarray(jax.devices()[:4]).reshape(2, 2), ("replicate", "fsdp"))
+    full = jnp.arange(8 * 12, dtype=jnp.bfloat16).reshape(8, 12)
+    shardings = {
+        "replicated": NamedSharding(mesh, P()),
+        "fsdp": NamedSharding(mesh, P(None, "fsdp")),
+    }
+
+    def device_put_is_the_regression(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("loaded target placement must not call jax.device_put")
+
+    monkeypatch.setattr(jax, "device_put", device_put_is_the_regression)
+    placed = cast(
+        dict[str, jax.Array],
+        place_via_shardings({"replicated": full, "fsdp": full}, shardings),
+    )
+
+    assert placed["replicated"].sharding == shardings["replicated"]
+    assert placed["fsdp"].sharding == shardings["fsdp"]
+    assert jnp.array_equal(placed["replicated"], full)
+    assert jnp.array_equal(placed["fsdp"], full)
 
 
 def test_shard_batch_preserves_global_data():

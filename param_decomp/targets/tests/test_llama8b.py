@@ -33,8 +33,8 @@ from param_decomp.core.configs import (
     PGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.core.recon import build_loss_terms
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
     TrainingItem,
@@ -341,7 +341,10 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
         optimizer=AdamPGDConfig(
             beta1=0.5,
             beta2=0.99,
-            lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            lr_schedule=ScheduleConfig(
+                max_val=0.01,
+                points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0)),
+            ),
         ),
         n_warmup_steps=n_warmup,
     )
@@ -364,15 +367,20 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
             step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                ),
             ),
             ChunkwiseSubsetReconLossConfig(
-                routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1
+                routing=UniformKSubsetRoutingConfig(),
+                coeff=0.5,
+                sites_per_chunk=3,
+                n_samples=1,
             ),
             ppgd_cfg,
         ),
@@ -387,6 +395,7 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
         remat_recon_forwards=True,
         remat_ci_fn=False,
         mesh=None,
+        compiler_options={},
     )
 
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
@@ -420,7 +429,7 @@ def test_faith_warmup_decreases_faith():
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt)
+    wstep = make_faith_warmup_step(opt, compiler_options={})
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss: float | None = None
     loss = None
@@ -481,15 +490,20 @@ def test_fresh_pgd_adversary_step():
         )  # fmt: skip
 
     def run_step(n_ascent_steps: int) -> tuple[TrainState, dict[str, jax.Array]]:
-        loss_terms = build_loss_terms(
+        loss_terms = build_objective(
             (
                 FaithfulnessLossConfig(coeff=1e7),
                 ImportanceMinimalityLossConfig(
                     coeff=2e-4,
-                    pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                    pnorm=ScheduleConfig(
+                        max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                    ),
                 ),
                 ChunkwiseSubsetReconLossConfig(
-                    routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=4, n_samples=1
+                    routing=UniformKSubsetRoutingConfig(),
+                    coeff=0.5,
+                    sites_per_chunk=4,
+                    n_samples=1,
                 ),
                 PGDReconLossConfig(
                     coeff=0.5,
@@ -510,6 +524,7 @@ def test_fresh_pgd_adversary_step():
             remat_recon_forwards=False,
             remat_ci_fn=False,
             mesh=None,
+            compiler_options={},
         )
         tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
         return step(model, make_state(), tokens, jax.random.PRNGKey(100))

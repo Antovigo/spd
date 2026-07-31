@@ -45,10 +45,10 @@ from param_decomp.core.losses import (
     scheduled_value_traced,
 )
 from param_decomp.core.model import DecomposedModel
+from param_decomp.core.objective import LossSurface
 from param_decomp.core.recon import (
     ConstantSources,
     FreshPGDSources,
-    LossSurface,
     MixedPersistentStochasticSources,
     PersistentSources,
     ReconForward,
@@ -155,7 +155,7 @@ def make_train_step(
     remat_ci_fn: bool,
     mesh: Mesh | None,
     ascend_replicate: bool = False,
-    compiler_options: dict[str, bool | int | str] | None = None,
+    compiler_options: dict[str, bool | int | str],
 ):
     """Build the `eqx.filter_jit`'d `step(model, state, batch, key) -> (state, metrics)`.
 
@@ -163,7 +163,7 @@ def make_train_step(
     factory closes over only static config (`site_names`, `recon_loss_fn`, term wiring) read
     off `model_static` here — the distinct name keeps an accidental closure over the
     array-bearing model (the HLO-baking hazard) a loud NameError, never silent.
-    `losses` (from `build_loss_terms`) is the `LossSurface` record — the
+    `losses` (from `build_objective`) is the `LossSurface` record — the
     faithfulness + importance-minimality singletons and the recon Σ, read by name. `mesh`
     (when given) pins every batch-leading activation over the full mesh
     (`P(('replicate', 'fsdp'), ...)`) so the masked re-forwards stay on per-rank sub-batches
@@ -185,8 +185,11 @@ def make_train_step(
     imp_loss_key = "imp_smooth_l0" if is_smooth_l0 else "imp"
     imp_min_param_key = "gamma_imp" if is_smooth_l0 else "p_imp"
 
-    def batch_sharded(x: Array) -> Array:
-        return batch_shard_leading(x, mesh)
+    def batch_sharded[T](x: T) -> T:
+        """Pin the leading (batch) axis of every array in the pytree. The batch and the
+        model output are opaque protocol edges (`Any` — tokens for an LM, a dict or tuple
+        for another target), so this maps over leaves rather than assuming one array."""
+        return jax.tree.map(lambda leaf: batch_shard_leading(leaf, mesh), x)
 
     def ci_shard(x: Array) -> Array:
         """Pin a CI / mask tensor `[batch, *positions, C]` batch over the full mesh, C
@@ -209,7 +212,7 @@ def make_train_step(
         )
 
     def replicate_for_ascend(prepared: Any) -> Any:
-        """Lever #5 (`RuntimeConfig.ascend_replicate`): gather the ÷fsdp compute weights to
+        """Lever #5 (`runtime.ascend_replicate`): gather the ÷fsdp compute weights to
         FULL/replicated ONCE before the adversary ascents, so the `n_warmup` ascend forwards run
         plain matmuls with NO per-layer ÷fsdp→full NVLink gather. The gather is
         mask-INDEPENDENT and the V/U are detached (constant) across ascend steps, so the
@@ -616,7 +619,7 @@ def make_train_step(
 
 def make_faith_warmup_step(
     opt: optax.GradientTransformation,
-    compiler_options: dict[str, bool | int | str] | None = None,
+    compiler_options: dict[str, bool | int | str],
 ) -> Callable[
     [DecomposedModel, ComponentStacks, optax.OptState],
     tuple[ComponentStacks, optax.OptState, Array],

@@ -10,9 +10,8 @@ single-pool trainer's data/sharding/checkpoint substrate.
 
 ## Split
 
-The trainer is a library subpackage (`param_decomp/pretrain/`); the entry point is the
-module invocation `python -m param_decomp.pretrain.train <config.yaml>` (a deployment's
-SLURM submitter typically wraps it):
+The trainer is a library subpackage (`param_decomp/pretrain/`); this package holds only
+the read side of the cache it writes.
 
 - **`param_decomp/pretrain/`** — the trainer:
   - `models.py` — trainable equinox defs for all three archs (`GPT2Simple`, `LlamaSimple`,
@@ -21,7 +20,7 @@ SLURM submitter typically wraps it):
   - `config.py` — `PretrainConfig` (the self-contained run yaml schema).
   - `train.py` — `python -m param_decomp.pretrain.train <config.yaml>`: the composition root + only I/O layer. fp32
     masters, AdamW (decay on 2D weights only), cosine+warmup, grad clip, orbax sharded
-    checkpoints, SIGTERM→save→requeue→resume. Reuses `param_decomp.core.data` (offline
+    checkpoints, SIGTERM→save→requeue→resume. Reuses `param_decomp.pretrain.batch_data` (offline
     pre-tokenized parquet, never streamed) + `param_decomp.core.sharding`.
   - `cache.py` — writes the decomposition trainer's `pretrain_cache/<project>-<run_id>/`
     layout (safetensors + `model_config.yaml`) at every save.
@@ -56,7 +55,7 @@ is bit-identical to the loader's `clean_suffix_logits` round-trip — pinned by
 ## Data
 
 Offline pre-tokenized parquet ONLY (the prestage tool's output;
-`param_decomp.core.data.ShardServer`). Shards are `block_size + 1` wide; the trainer serves
+`param_decomp.pretrain.batch_data.ShardServer`). Shards are `block_size + 1` wide; the trainer serves
 the full row and splits `x = tokens[:, :block]`, `y = tokens[:, 1:]` inside the step. The
 ported configs point at the staged `datasets/pile_neox_tok_512` (the torch configs'
 SimpleStories/streaming data is not staged — runtime tokenization is deliberately
@@ -64,15 +63,15 @@ unsupported).
 
 ## Usage
 
-The mode is CONFIG-DRIVEN via the config's `dp` (no `--nodes` / `--local` flags):
-`dp = N` (a multiple of 8) → run one process per node inside a SLURM allocation of
-`N // gpus_per_node` nodes (a deployment's submitter typically sbatches the module
-command); `dp = null` → run the trainer inline in the current venv (CPU / single GPU).
+The mode is CONFIG-DRIVEN via the config's `dp` (there are no `--nodes` / `--local`
+flags): `dp = N` → `jax.distributed` over `N // gpus_per_node` nodes, so launch ONE
+process per node inside an allocation of that shape; `dp = null` → a single device, run
+it anywhere (CPU / one GPU).
 
 ```bash
-# multi-GPU: config sets `dp: 8` (1 node = 8 GPUs); run inside the allocation
+# Distributed: config sets `dp: 8` (1 node = 8 GPUs), one process on that node
 python -m param_decomp.pretrain.train param_decomp/pretrain/configs/pile_llama_simple_mlp-4L-768.yaml
 
-# inline: config leaves `dp` unset (null)
+# Single device: config leaves `dp` unset (null)
 python -m param_decomp.pretrain.train param_decomp/pretrain/configs/pile_llama_simple_mlp-2L-128_SMOKE.yaml
 ```

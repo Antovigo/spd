@@ -109,7 +109,7 @@ def test_real_qwen3_8b_matches_hf():
     except (AssertionError, FileNotFoundError, KeyError):
         pytest.skip("no local Qwen/Qwen3-8B-Base snapshot")
     f = np.load(HERE / "qwen3_8b_real_logits.npz")
-    model = load_decomposed_qwen3_from_hf("Qwen/Qwen3-8B-Base", qwen3_8b_config(), ())
+    model = load_decomposed_qwen3_from_hf("Qwen/Qwen3-8B-Base", qwen3_8b_config(), (), jnp.bfloat16)
     logits = np.asarray(model.clean_output(jnp.asarray(f["tokens"]))[:, -1, :].astype(jnp.float32))
     ref = f["final_logits"]
     # tie-aware argmax: the golden is bf16, so distinct plausible tokens often carry the

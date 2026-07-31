@@ -1,7 +1,7 @@
 # setup
-# ONE venv: the library (`param_decomp`) is the root distribution and carries jax as a
-# normal dependency. The CPU jax wheel is the base; the CUDA wheels are the `[cuda]` /
-# `[cuda13]` extras a GPU deployment installs.
+# ONE venv: `param_decomp` carries jax as a normal dependency, so a single `uv sync`
+# installs everything into `.venv`. The CPU jax wheel is the base; a GPU host adds the
+# `[cuda]` (or `[cuda13]`) extra.
 .PHONY: install
 install:
 	uv sync --no-dev
@@ -50,12 +50,14 @@ check-pre-commit:
 # TMS/ResidMLP experiment tests live beside their composition roots under experiments/).
 TEST_PATHS = param_decomp/core/tests/ param_decomp/targets/tests/ param_decomp/tests/ param_decomp/experiments/
 
+# min(16, nproc). XLA already threads within each test, so once the workers saturate the
+# box another one buys nothing — the cap only stops a large workstation spawning dozens for
+# no gain. testmon is compatible: it ships its own xdist controller/worker sync.
+NUM_PROCESSES ?= $(shell nproc | awk '{print ($$1<16?$$1:16)}')
+
 .PHONY: test
 test:
-	uv run pytest $(TEST_PATHS) --testmon --durations 10
-
-# Use min(4, nproc) for numprocesses. Any more and it slows down the tests.
-NUM_PROCESSES ?= $(shell nproc | awk '{print ($$1<4?$$1:4)}')
+	uv run pytest $(TEST_PATHS) --testmon --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 
 .PHONY: test-all
 test-all:

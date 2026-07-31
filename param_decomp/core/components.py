@@ -40,33 +40,6 @@ class SiteSpec:
     C: int
 
 
-_FP8_E4M3_MAX = 448.0  # largest finite magnitude of float8_e4m3fn
-
-
-def quantize_fp8(w: Array) -> tuple[Array, Array]:
-    """Per-LEADING-ROW symmetric fp8 (e4m3fn) quantization for the Quantized All-Gather (QAG):
-    the weight is gathered as fp8 (½ the bf16 bytes), then dequantized for the bf16 matmul.
-    The scale reduces over every axis EXCEPT axis 0 (the stacked `n_layer` / `n_chunk` scan
-    axis), keepdims — so it (a) carries that scan axis like the weight does (a per-tensor
-    scalar would have no leading axis to `scan`-slice → IndexError) and (b) gives per-row
-    quantization (tighter than one global scale). Returns `(qvalue: float8_e4m3fn,
-    scale: f32 [L,1,…])` with `w ≈ qvalue.astype(bf16) * scale`. Computed BEFORE the gather
-    (scale rides along, survives it). amax==0 rows floored so the divide is finite."""
-    axes = tuple(range(1, w.ndim))
-    scale = (
-        jnp.maximum(jnp.max(jnp.abs(w), axis=axes, keepdims=True), jnp.float32(1e-12))
-        / _FP8_E4M3_MAX
-    )
-    q = (w / scale).astype(jnp.float8_e4m3fn)
-    return q, scale.astype(jnp.float32)
-
-
-def dequantize_fp8(q: Array, scale: Array) -> Array:
-    """Inverse of `quantize_fp8` to bf16 (the compute dtype). Done AFTER the all-gather so the
-    gather moves fp8 bytes."""
-    return q.astype(jnp.bfloat16) * scale.astype(jnp.bfloat16)
-
-
 VUShape = tuple[int, int, int]  # (d_in, d_out, C)
 
 # site name -> (shape group, slot on the group's stack axis); static, canonical site order

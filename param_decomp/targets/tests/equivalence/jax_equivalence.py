@@ -36,7 +36,6 @@ from param_decomp.core.components import (  # noqa: E402
 from param_decomp.core.losses import (  # noqa: E402
     faithfulness_loss,
     importance_minimality_terms,
-    kl_per_position,
 )
 from param_decomp.targets.glu_transformer import (  # noqa: E402
     MLP_KINDS,
@@ -49,6 +48,7 @@ from param_decomp.targets.glu_transformer import (  # noqa: E402
     mlp_family_site_cs,
     site_name,
 )
+from param_decomp.targets.losses import kl_per_position  # noqa: E402
 from param_decomp.vendored_jax.llama import LlamaConfig, rms_norm  # noqa: E402
 
 HERE = Path(__file__).resolve().parent

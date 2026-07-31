@@ -2,17 +2,62 @@
 
 Experiment glue + the per-domain COMPOSITION ROOTS, torch-free. Training is JAX through the
 generic core engine (`param_decomp.core.run.run_decomposition_training`, a pure library that reads
-the pydantic `PDConfig` / `Cadence` directly). Each domain's `run.py` is its composition
-root: read the run YAML → build the target / data loader / `config.BuiltRun` → call the
-engine. LM runs are `python -m param_decomp.experiments.lm.run <config.yaml>` (a
-deployment's SLURM submitter typically wraps this module invocation); the toy domains
-(TMS, ResidMLP) run on CPU in-process via `pd-tms` / `pd-resid-mlp`. The shared experiment YAML schema + the shared
-validation / run-identity helpers (`assert_canonical_algorithm_config` / `run_instance` /
-`ci_arch`) live in `experiments/config.py`; each domain's `config.py` carries its own
+the pydantic `PDConfig` / `Cadence` directly). Each toy domain's `run.py` and LM's `training.py` are composition roots: read the run YAML → build the target / data loader / `config.BuiltRun` → call the
+engine. LM runs go through `python -m param_decomp.experiments.lm.run`, inside a GPU
+allocation; the toy domains (TMS, ResidMLP) run on CPU in-process via their module mains
+(`python -m param_decomp.experiments.{tms,resid_mlp}.run`). The shared experiment YAML schema + the shared
+run-identity helpers (`run_instance` / `ci_arch`) live in
+`experiments/config.py`; each domain's `config.py` carries its own
 target/data schema + (for the LM) its `BuiltRun` build.
 autointerp/clustering read a run's target topology from
 `experiments.lm.load_run.run_metadata` (config + pretrain cache, no checkpoint restore) —
 see `param_decomp/adapters/pd.py`.
+
+## `pd` optimizers
+
+`pd.components_optimizer` (the V/U group) and `pd.ci_fn_optimizer` are
+`core.configs.AnyOptimizerConfig` — a union discriminated on `type`, **not** a single
+`OptimizerConfig`:
+
+| `type` | class | notes |
+|---|---|---|
+| `adamw` | `AdamWOptimizerConfig` | the canonical one; `type` may be omitted (a `type`-less optimizer block validates as `adamw`) |
+| `muon` | `MuonOptimizerConfig` | experimental, must be spelled explicitly |
+
+The literal is `adamw`, never `adam`. `adam` IS a valid literal elsewhere in the schema —
+`AdamPGDConfig.type`, the persistent-PGD adversary's own source optimizer
+(`pd.loss_metrics[].optimizer` under a `PersistentPGD*` term) — a different field with a
+different union; the two never substitute.
+
+Both blocks are honored exactly as written: `run_state.build_optimizers` reads the full
+`ScheduleConfig` (an arbitrary knot curve), both `betas` and `weight_decay`, and chains a
+global-norm clip only where `grad_clip_norm` is non-null. A schedule is `max_val` times a
+piecewise `frac` curve over normalized time `t = step / (total_steps - 1)`; a bare float
+is the constant schedule, so the seats spell the cosine decay out as knots. The shape
+below is the METHOD's recipe (SPEC S20) — what the maintained seats run, not a subspace
+the schema enforces:
+
+```yaml
+pd:
+  components_optimizer:            # type omitted => adamw
+    lr_schedule:
+      max_val: 7.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      max_val: 7.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: null
+```
 
 ## Toy domains (TMS, ResidMLP)
 
@@ -24,22 +69,30 @@ in-process pretrain (`pretrain_*_target`), the ground-truth identity-CI eval
 (`identity_ci_error` + the single-feature probe), and the `*TargetConfig` dataclass
 carried on `config.BuiltRun.target` (satisfies the core `config.TargetSites` protocol).
 Each `experiments/{tms,resid_mlp}/` carries:
-- `run.py` — the `pd-tms` / `pd-resid-mlp` CLI: builds the `config.BuiltRun` from the
+- `run.py` — the toy composition root (module main): builds the `config.BuiltRun` from the
   canonical schema via the public shared helpers
-  (`config.assert_canonical_algorithm_config` / `run_instance` / `ci_arch`),
+  (`config.run_instance` / `ci_arch`),
   pretrains + builds the target, and calls `run_decomposition_training` with a synthetic
-  `sample_batch` + an `identity_ci_error` `eval_fn`. CPU, synchronous, no SLURM. The toy
-  `eval_fn` ALSO logs the per-site-permuted CI heatmap alongside each checkpoint
-  (`toy_uv_eval.log_permuted_ci_heatmap`, unconditional, no config gate — the visual
+  `sample_batch` plus domain-bound identity/PGD/UV eval operations. CPU, synchronous, no
+  SLURM — and no `runtime:` section in the YAML at all: a toy is single-device by
+  construction (`sharding.single_device_mesh`, which asserts that world rather than
+  absorbing whatever devices are visible), so the engine's substrate arguments are
+  literals here (`ddp` placement, no remat, no `compiler_options`), not config.
+  The native toy operation ALSO logs the per-site-permuted CI heatmap alongside each checkpoint
+  (`toy_uv_eval.render_permuted_ci_heatmap`, unconditional, no config gate — the visual
   companion to the `IdentityCIError`/dense-CI-error scalars: each site permutes toward
   ITS target pattern, identity via Hungarian assignment or dense via column-mass sort —
   e.g. TMS's frozen `hidden_layers.*` and ResidMLP's `mlp_out` target dense, not identity)
   and renders the config-gated `UVPlots` figure when the run's `eval.metrics` names it
-  (`toy_uv_eval.log_uv_figure`): the toys feed `UVPlots` their probe CI as the
+  (`toy_uv_eval.render_uv_metric`): the toys feed `UVPlots` their probe CI as the
   column-permutation source and their small on-host V/U, sharing `slow_eval.render_uv_figure`
-  / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). The toy `BuiltRun.eval`
-  stays `None` (the toy validates via the target-CI metric, not the LM scalar pass); the
-  `eval.metrics` list is read straight off the raw schema dict (`toy_uv_eval.toy_uv_spec`).
+  / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). Toy `eval:` is a domain-specific
+  closed schema: fresh `PGDReconLoss` runs against the target's own `recon_loss_fn` on
+  independent synthetic batches, and optional `UVPlots` runs on the slow cadence — read off
+  its own `slow` declaration, the same one the LM binder reads (`eval_config.schedule_for`;
+  SPEC S29), never a per-family choice. LM-only
+  token metrics refuse when toy evaluator construction reaches them. Ground-truth identity/dense CI scoring remains the
+  toy runner's native validation pass on the train-log cadence.
 - `configs/*.yaml` — the canonical `experiments.{tms,resid_mlp}.config` schema (TMS: 5-2 /
   40-10 / the `-id` deeper variants; ResidMLP: 1l/2l/3l + the global-CI variant).
 
@@ -51,6 +104,36 @@ also use `global_mlp` (not `resid_mlp_1l`'s historical torch counterpart's per-s
 16/128-hidden-unit per-site MLP is an output bottleneck the shared global net doesn't have.
 Toy harvest / autointerp / clustering is NOT yet wired (`load_run` is LM-only) — the
 remaining Phase-3 bucket.
+
+## Picking a CI-fn arch — and `n_blocks: 0`
+
+`CIFn.has_position_axis` must equal the target's (`core.run_state.init_decomposition` asserts
+it), and `ChunkwiseTransformerCIArch` is the ONLY arch that declares `True` — both MLP arches
+are positionless. So a positioned target has exactly one arch available, and that arch's blocks
+self-attend OVER the position axis.
+
+For a sequence target that is the point. It is fatal when the position axis is large and
+derived: a pair-shaped target (an AF2-style pair representation, where a position is a residue
+PAIR) turns a 128-residue crop into 16384 positions — 16k×16k attention per chunk per forward,
+several times per step. Infeasible, not slow.
+
+**The answer is `LayerwiseMLPCIArch(has_position_axis=True)`.** The MLP arches were positionless by
+DECLARATION, not by construction — `SiteMLP.__call__` is `[*leading, d_in] -> [*leading, C]`,
+pointwise over every leading axis, so the same weights serve `[batch, d]` and
+`[batch, position, d]` alike. The arch now carries the axis (the target's shape, not the MLP's
+property) and the runtime checks it against the model. Pinned by
+`param_decomp/core/tests/test_ci_fn_positioned_mlp.py`.
+
+`n_blocks: 0` on the chunkwise arch also runs and is also position-local (pinned by
+`test_ci_fn_zero_blocks.py`), but it is a weaker instrument: the chunkwise path RMS-norms
+every tap before `in_proj`, so a blockless chunk is `RMSNorm → affine` — no learned
+nonlinearity, no hidden layer, and **invariant to tap magnitude** (measured: `f(x) == f(7x)`
+to 3.6e-7, where the MLP's outputs differ by 14). Use it as a cheap baseline, not as the
+position-local CI function.
+
+The LM schema (`ChunkwiseTransformerCiConfig.n_blocks`) stays `PositiveInt`: an LM's positions
+are tokens, cross-position CI is what that arch is for there, and 0 would be a typo rather than
+a choice. `n_blocks: 0` is available to any lab whose own schema admits it.
 
 ## Layout
 
@@ -75,13 +158,27 @@ target-anatomy vocabulary, so it lives in the domain that IS transformers —
 experiments/
 ├── utils.py                 # EXPERIMENT_CONFIG_FILENAME
 ├── lm/
-│   ├── run.py               # python -m param_decomp.experiments.lm.run — the LM composition root (what a SLURM submitter sbatches)
+│   ├── run.py               # python -m param_decomp.experiments.lm.run — pre-JAX env bootstrap deferring to training.py, the LM composition root
+│   ├── resolved.py          # LM-only resolved data/run types (ResolvedLMData, LMRun)
+│   ├── eval.py              # token CE/KL + CI-L0 fast pass
+│   ├── attn_patterns_eval.py / arithmetic_eval.py
+│   ├── data.py / hf_http.py
 │   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
 │   ├── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
 │   └── arithmetic_probe.py    # a x b arithmetic grid spec -> in-memory eval probe (ArithmeticCIGrid)
-├── tms/                     # pd-tms (CPU): run.py + configs/ + test_tms.py (target: param_decomp/targets/tms.py)
-└── resid_mlp/               # pd-resid-mlp (CPU): run.py + configs/ + test (target: param_decomp/targets/resid_mlp.py)
+├── tms/                     # TMS (CPU): run.py + configs/ + test_tms.py (target: param_decomp/targets/tms.py)
+└── resid_mlp/               # ResidMLP (CPU): run.py + configs/ + test (target: param_decomp/targets/resid_mlp.py)
 ```
+
+## Sites and the family grammar
+
+Read `param_decomp/core/family.py`'s module docstring before authoring a
+`decomposition.sites` c-spec or a new target. In short: site names are layer-indexed
+(`layers.{i}.self_attn.q_proj`, `h.{i}.mlp.c_fc`, …), the spelling and the within-block
+matrix order are declared as DATA by the target's `ArchFamily`, and the c-spec's `cs` keys
+are typed by that same vocabulary — so which layers get decomposed is a config choice
+(`layers: {kind: all | range | list}`), not a target property. A new target declares its
+family and gets any layer subset for free; layers without sites run the plain frozen block.
 
 ## LM `target.spec`
 
@@ -152,14 +249,13 @@ data:
 ```
 
 A store name resolves to `<data_root>/datasets/<name>` (`infra.dataset_store`); the
-deployment populates the store. The dataset dir is self-describing:
+deployment populates the store (the root CLAUDE.md describes ours). The dataset dir is self-describing:
 `meta.json` (`infra.dataset_store.DatasetMeta`) carries its seq_len and tokenizer, read
-at load time — prestage writes it alongside the shards. Stored pins predating this
-schema (`data_files` globs + the HF-era fields) migrate on load
-(`migrate_glob_pin_data`).
+at load time — prestage writes it alongside the shards. Tip reads pinned configs through
+this same strict schema; older shapes require their original revision or an external converter.
 
 The JAX prediction tensor is always the final logits (there is no `output_extract` —
-it was a torch-era field, stripped on load for back-compat). The `model_class` strings
+it was a torch-era field and current configs reject it). The `model_class` strings
 are NOT imported by the JAX trainer — `param_decomp.core.built_run` only asserts the class-name
 suffix and routes to its own vendored JAX arch (`pretrained` LlamaSimpleMLP -> the
 pretrain-cache loader, `hf_weights_in_vendored` Llama -> `vendored_jax`). The dotted
@@ -171,14 +267,12 @@ pile `LlamaSimpleMLP` decompositions), the production target.
 
 ## `runtime.launch_env` (rank env / XLA flags)
 
-The SLURM rank env (XLA flags, NCCL/host-memory knobs, `PD_*` profiling toggles) is
-config-driven via `runtime.launch_env` (`param_decomp.core.configs.LaunchEnv`), so `config.yaml`
-fully captures the environment a run executed with — A/B a flag in the YAML, not in
-the launcher. A SLURM submitter renders `LaunchEnv.as_env()` into each rank's
-environment; `LD_LIBRARY_PATH` is computed in-job from the freshly-built venv
-(machine-specific) and stays in the launcher. A
-profiling run is a config (`runtime.launch_env.profile`), not an env hack. Applies to
-the SLURM path only; a run-here module invocation inherits the caller's environment.
+The rank env (XLA client flags, NCCL/host-memory knobs) is config-driven via
+`runtime.launch_env` (`param_decomp.experiments.lm.runtime.LaunchEnv`), so `config.yaml`
+fully captures the environment a run executed with — A/B a flag in the YAML, not in your
+launch script. `lm/run.py` exports `LaunchEnv.as_env()` before importing JAX, so it
+applies on every path. `LD_LIBRARY_PATH` is deliberately NOT config-driven: it is
+machine-specific, so it belongs to whatever sets up the venv.
 
 ```yaml
 runtime:
@@ -186,14 +280,14 @@ runtime:
   launch_env:
     xla_flags: { gpu_enable_command_buffer: "", gpu_autotune_level: "0" }
     xla_python_client_allocator: platform
-    profile: { mem_profile: true, no_checkpoint: true }
     env: { SOME_ONE_OFF_VAR: "1" }           # escape hatch, merged last (overrides)
 ```
 
 ## `--group` and `--tags`
 
-Every run command (`pd-tms` / `pd-resid-mlp` and the LM module run) accepts
-`--group <id>` and `--tags a,b,c` (no-ops when `wandb:` is omitted):
+The toy run commands (`experiments.{tms,resid_mlp}.run`) accept `--group <id>` and
+`--tags a,b,c` (no-ops when `wandb:` is omitted); the LM root reads the same two fields
+from the config's `wandb:` block instead:
 
 - **`--group`** sets wandb's first-class `group` field — used by the UI's native
   collapsing and matched by workspace filters via `ws.Metric("Group")`.

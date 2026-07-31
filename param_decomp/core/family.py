@@ -1,12 +1,25 @@
 """A target's matrix grammar as data: arch families + the family-parameterized site helpers.
 
+A SITE is one decomposed weight matrix of one BLOCK, and its name is always
+LAYER-INDEXED — `layers.{i}.self_attn.q_proj` for the GLU family,
+`h.{i}.attn.q_proj` for `simple_mlp`. The layer index is the structure, the spelling is
+the family's own; `name_of(layer, matrix)` renders it and `parse(name)` inverts it,
+asserting on anything malformed (a site name is never string-manipulated elsewhere).
+
 `ArchFamily` is the ordered, exhaustive matrix set (canonical within-block order) + the
 `(layer, matrix) -> site name` renderer. Each target module builds its OWN family
 (`glu_transformer.FAMILY`, `llama_simple_mlp.FAMILY`), with `matrices` derived from the
 `Literal` matrix vocabulary the target module itself owns — the same vocabulary the
 authored c-spec keys (lab-side, `param_decomp/experiments/lm/config.py`) are typed
 by, so a c-spec key outside the family's vocabulary is unrepresentable, not merely
-asserted.
+asserted. The family is the whole grammar: `canonical_site_cs` derives the canonical
+order from it (layer-ascending, then family order) and `site_specs` resolves the shapes.
+
+WHICH layers carry sites is therefore a CONFIG choice (the c-spec's `layers` selection),
+never a target property: a target declares its family and serves any layer subset, and
+layers without sites run the plain frozen block. A new target gets multi-block
+decomposition by declaring an `ArchFamily` — hardcoding a block index is always the
+wrong shape.
 
 The activation-TAP grammar does NOT live here: tap keys are opaque strings to everything
 generic (`Chunk.input_taps` carries them as pytree-static keys), and their structure is the

@@ -2,7 +2,7 @@
 
 import importlib
 
-import param_decomp.core.hf_http as hf_http
+import param_decomp.experiments.lm.hf_http as hf_http
 
 
 def test_configure_is_idempotent_and_no_ops_without_hub():

@@ -16,6 +16,12 @@ All three are pre-norm decoder blocks under a flat `h.{i}.` module tree, `wte` t
 `lm_head`, no biases on the Llama variants. RoPE is plain rotate-half
 (`param_decomp.vendored_jax.llama.{rope_cos_sin,apply_rope}`); the GELU is the tanh approximation
 (torch `NewGELU`), matching `llama_simple_mlp._gelu_tanh`.
+
+The torch configs additionally carried knobs for variants this port does not have —
+merged-QKV attention, q/k/v/mlp biases, adjacent-pair rotary, partial rotary
+(`rotary_dim < head_dim`). Those are architectural properties here, not options, so they
+are absent from these configs; `pretrain.cache` states them as constants in the emitted
+`model_config.yaml`.
 """
 
 import math
@@ -47,7 +53,6 @@ class GPT2SimpleConfig(BaseConfig):
     n_head: int = 12
     n_embd: int = 768
     layer_norm_eps: float = 1e-5
-    flash_attention: bool = True
 
     @property
     def head_dim(self) -> int:
@@ -66,15 +71,9 @@ class LlamaSimpleConfig(BaseConfig):
     n_head: int = 12
     n_embd: int = 768
     n_intermediate: int = 768 * 4 * 2 // 3
-    mlp_bias: bool = False
-    attn_bias: bool = False
-    rotary_adjacent_pairs: bool = False
-    rotary_dim: int = 768 // 12
     rotary_base: int = 10000
     n_ctx: int = 1024
     n_key_value_heads: int = 12 // 4
-    use_grouped_query_attention: bool = True
-    flash_attention: bool = True
     rms_norm_eps: float = 1e-6
 
     @property
@@ -94,15 +93,9 @@ class LlamaSimpleMLPConfig(BaseConfig):
     n_head: int = 12
     n_embd: int = 768
     n_intermediate: int = 768 * 4
-    mlp_bias: bool = False
-    attn_bias: bool = False
-    rotary_adjacent_pairs: bool = False
-    rotary_dim: int = 768 // 12
     rotary_base: int = 10000
     n_ctx: int = 1024
     n_key_value_heads: int = 12 // 4
-    use_grouped_query_attention: bool = True
-    flash_attention: bool = True
     rms_norm_eps: float = 1e-6
 
     @property
@@ -297,8 +290,6 @@ def _init_llama_attention(
     d = cfg.n_embd
     qd = cfg.n_head * cfg.head_dim
     kvd = cfg.n_key_value_heads * cfg.head_dim
-    assert cfg.use_grouped_query_attention, "merged-qkv (c_attn) unsupported"
-    assert not cfg.attn_bias, "attn bias unsupported"
     return LlamaAttention(
         wq=_normal(keys(), (qd, d), _linear_std(cfg, False)),
         wk=_normal(keys(), (kvd, d), _linear_std(cfg, False)),
@@ -364,7 +355,6 @@ def init_llama_simple(cfg: LlamaSimpleConfig, key: Array) -> LlamaSimple:
     keys_it = iter(jax.random.split(key, cfg.n_layer * 7 + 2))
     nxt = lambda: next(keys_it)
     d, di = cfg.n_embd, cfg.n_intermediate
-    assert not cfg.mlp_bias, "mlp bias unsupported"
     blocks = [
         LlamaSimpleBlock(
             ln1=jnp.ones((d,)),
@@ -439,7 +429,6 @@ def init_llama_simple_mlp(cfg: LlamaSimpleMLPConfig, key: Array) -> LlamaSimpleM
     keys_it = iter(jax.random.split(key, cfg.n_layer * 6 + 2))
     nxt = lambda: next(keys_it)
     d, di = cfg.n_embd, cfg.n_intermediate
-    assert not cfg.mlp_bias, "mlp bias unsupported"
     blocks = [
         LlamaSimpleMLPBlock(
             ln1=jnp.ones((d,)),

@@ -71,8 +71,8 @@ tables for everyone else.
   Sufficient to rank resting layouts; NOT sufficient to drive `sharding: auto` — fixing
   the unit precedes any auto-search.
 - Out-of-table placement policy that stays out (named, not smuggled): `ascend_replicate`
-  and `gather_fp8` (RuntimeConfig knobs — an adversary-ascent phase and a layout×dtype
-  transform), and program-position choices (shard_map, init out_shardings).
+  (a `runtime:` knob — an adversary-ascent phase), and program-position choices
+  (shard_map, init out_shardings).
 
 
 ## Lessons from history (git + lore archaeology, 2026-07-15)
@@ -134,7 +134,7 @@ construction — `from_config(spec, mesh, sites)` resolves a TOTAL assignment
 flows downward as data. Construction happens where the resolved site set and the run's
 topology first coexist: config build (`experiments.lm.config._assert_placement_claims`,
 against the `sharding.hsdp_abstract_mesh` the config's `runtime.{dp,tp}` implies — so a
-`dp: N` misconfiguration refuses at submit-side validation, before submission)
+`dp: N` misconfiguration refuses at config build, before any device is touched)
 and the composition roots (the same `from_config` at the concrete mesh). Shape groups
 derive from config + target dims alone — no weights, no devices.
 
@@ -176,7 +176,7 @@ converges on the same vocabulary.
 ## Migration (staged, each lands green)
 
 1. `placement.py` engine + presets + tests (THIS increment).
-2. `RuntimeConfig.sharding: preset-name | PlacementTableConfig` (the explicit table is
+2. `runtime.sharding: preset-name | PlacementTableConfig` (the explicit table is
    a pydantic model mirroring the typed rows: `params: {persist, zero1?, forward}` +
    `activations`, closed vocabulary — unknown rows die at parse); thread
    `PlacementRules` into `run.py` → `init_train_state`; `ComponentStacks.shardings` /

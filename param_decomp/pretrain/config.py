@@ -1,11 +1,12 @@
 """The single self-contained pretrain run config (`pretrain.train` reads it directly).
 
 Mirrors the torch `Config` recipe fields (next-token CE, AdamW, cosine LR + warmup, grad
-clip) plus the run-instance fields the lab launcher stamps (`run_id`, `out_dir`). Data is
-the offline pre-tokenized parquet artifact served by `param_decomp.core.data.ShardServer` —
+clip) plus the run-instance fields the lab launcher stamps (`run_id`, `data_root`). Data is
+the offline pre-tokenized parquet artifact served by `param_decomp.pretrain.batch_data.ShardServer` —
 NEVER streamed from HF at run time.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -13,19 +14,13 @@ from annotated_types import Ge, Gt, Le
 from pydantic import Field, PositiveInt
 
 from param_decomp.core.base_config import BaseConfig
+from param_decomp.infra.dataset_store import DatasetRef
 from param_decomp.pretrain.models import (
     GPT2SimpleConfig,
     LlamaSimpleConfig,
     LlamaSimpleMLPConfig,
     ModelConfig,
 )
-
-
-class PretrainDataConfig(BaseConfig):
-    dir: Path
-    """Directory of `shard_*.parquet` int32 token shards (the prestage tool's output)."""
-    tokenizer_name: str
-    """HF tokenizer id, recorded in the cache for downstream display (not used at train time)."""
 
 
 class PretrainWandbConfig(BaseConfig):
@@ -35,10 +30,30 @@ class PretrainWandbConfig(BaseConfig):
     tags: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PretrainRunPaths:
+    """The launcher's stamp, narrowed once: every path the run reads or writes hangs off
+    `data_root`, so no downstream site re-asserts that the config was stamped."""
+
+    data_root: Path
+    run_id: str
+
+    @property
+    def run_dir(self) -> Path:
+        return self.data_root / "runs" / self.run_id
+
+    @property
+    def compilation_cache_dir(self) -> Path:
+        """A SIBLING of `runs/`, never per-run: every run and every rank shares it."""
+        return self.data_root / "xla_compilation_cache"
+
+
 class PretrainConfig(BaseConfig):
     seed: int = 45
     model: Annotated[ModelConfig, Field(discriminator="model_type")]
-    data: PretrainDataConfig
+    data: DatasetRef
+    """The shards to train on: a store name, or a tagged ad-hoc dir. Resolved against
+    `data_root`; the dataset's own facts ride with its shards as `meta.json`."""
 
     gpus_per_node: PositiveInt = Field(
         default=8,
@@ -73,7 +88,9 @@ class PretrainConfig(BaseConfig):
 
     run_id: str | None = None
     run_name: str
-    out_dir: Path | None = None
+    data_root: Path | None = None
+    """The one root of the run's local world — the dataset store, the runs dir, the
+    pretrain cache and the compilation cache all hang under it."""
     wandb: PretrainWandbConfig | None = None
 
     @property
@@ -81,11 +98,11 @@ class PretrainConfig(BaseConfig):
         return self.model.block_size
 
     @property
-    def run_dir(self) -> Path:
-        assert self.out_dir is not None and self.run_id is not None, (
-            "out_dir / run_id are minted by the launcher; absent in a hand-authored config"
+    def paths(self) -> PretrainRunPaths:
+        assert self.data_root is not None and self.run_id is not None, (
+            "data_root / run_id are minted by the launcher; absent in a hand-authored config"
         )
-        return self.out_dir / self.run_id
+        return PretrainRunPaths(data_root=self.data_root, run_id=self.run_id)
 
 
 def load_pretrain_config(path: Path) -> PretrainConfig:
@@ -97,7 +114,7 @@ __all__ = [
     "LlamaSimpleConfig",
     "LlamaSimpleMLPConfig",
     "PretrainConfig",
-    "PretrainDataConfig",
+    "PretrainRunPaths",
     "PretrainWandbConfig",
     "load_pretrain_config",
 ]

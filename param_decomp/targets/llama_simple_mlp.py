@@ -43,9 +43,9 @@ from safetensors import safe_open
 from param_decomp.core import family
 from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, site_out
 from param_decomp.core.family import ArchFamily
-from param_decomp.core.losses import kl_per_position
 from param_decomp.core.model import run_stochastic_masked_output
 from param_decomp.targets.glu_transformer import FrozenAttn
+from param_decomp.targets.losses import kl_per_position
 from param_decomp.targets.transformer_taps import resid_tap_key
 from param_decomp.vendored_jax.llama import rms_norm
 

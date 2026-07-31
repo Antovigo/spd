@@ -1,19 +1,11 @@
-"""The trainer's loss surface (SPEC S10'): the `LossSurface` record — the faithfulness +
-importance-minimality singletons and the recon Σ (each recon term a plan of which sites go
-live per forward, how positions route, and the mask-SOURCE strategy for the [0,1] source
-values). `build_loss_terms` validates the shared torch loss configs into that record.
+"""Recon plans for the VPD objective.
 
-A plan is built from two orthogonal choices: how the sites are grouped into live-sets
-(a helper `tuple[str, ...] -> list[LiveSet]`) and how each live-set is turned into routed
-forwards (`make_plan`, sharing one routing config + source strategy across live-sets).
-The torch loss-class cartesian product (`CIMasked`/`Stochastic`/`Unmasked`/`PGD`/
-`PersistentPGD` x `_`/`Subset`/`Layerwise`) factors exactly as chunking x routing x
-source strategy — see LOSS_PARITY_DESIGN.md. Everything here is static structure
-closed over by the jit'd step; only keys (and, for persistent terms, `TrainState`
-entries) vary per step.
+A recon term describes a closed traversal over live-site groups, routing draws, and mask-source
+strategies. This module knows nothing about the objective's faithfulness or importance terms;
+`objective.py` composes those with the recon terms into the complete loss surface.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from jax import random
@@ -21,29 +13,13 @@ from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.core.configs import (
     AllRoutingConfig,
-    AnyImportanceMinimalityLossConfig,
-    AnyLossMetricConfig,
-    ChunkwiseSubsetReconLossConfig,
-    CIMaskedReconLayerwiseLossConfig,
-    CIMaskedReconLossConfig,
-    CIMaskedReconSubsetLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
     MergedStochasticSubsetPPGDReconLossConfig,
     PersistentPGDReconLossConfig,
     PGDInitStrategy,
-    PGDReconLayerwiseLossConfig,
-    PGDReconLossConfig,
-    PGDReconSubsetLossConfig,
-    SmoothL0ImportanceMinimalityLossConfig,
     SourceShape,
     StaticProbabilityRoutingConfig,
-    StochasticReconLayerwiseLossConfig,
-    StochasticReconLossConfig,
-    StochasticReconSubsetLossConfig,
     SubsetRoutingType,
     UniformKSubsetRoutingConfig,
-    UnmaskedReconLossConfig,
 )
 from param_decomp.core.model import chunk_sites
 
@@ -153,44 +129,6 @@ class ReconLossTerm:
     name: str
     coeff: float
     plan: ReconPlan
-
-
-@dataclass(frozen=True)
-class FaithfulnessTerm:
-    """Weight-space term: `Σ_s ‖Δ_s‖² / Σ_s numel` (SPEC S17). Carries no plan — its
-    contribution reads the live weight deltas, not the masked forwards."""
-
-    name: str
-    coeff: float
-
-
-@dataclass(frozen=True)
-class ImportanceMinimalityTerm:
-    """CI-space imp-min + entropy term (SPEC S7-S9). Carries the config so the step reads
-    the annealed penalty parameter (`pnorm` / `gamma`) and `beta` straight off `cfg`. The
-    config is either of the two imp-min penalties (`L_p` or smooth-L0)."""
-
-    name: str
-    coeff: float
-    cfg: AnyImportanceMinimalityLossConfig
-
-
-LossTerm = FaithfulnessTerm | ImportanceMinimalityTerm | ReconLossTerm
-"""One built loss term. Each owns its `name` (the torch `instance_key`; log key
-`loss/<name>` for recon / `faith` / `imp`), its `coeff`, and the data its contribution
-needs."""
-
-
-@dataclass(frozen=True)
-class LossSurface:
-    """The VPD objective's fixed shape — `L = c·faith + c·imp + Σ c·recon` (SPEC S10').
-    faith and imp are singletons (exactly one each); recon is the genuinely plural sum.
-    Built by `build_loss_terms`; the step reads each role by name and runs its distinct
-    execution pattern — no isinstance dispatch over an arbitrary-order flat list."""
-
-    faith: FaithfulnessTerm
-    imp: ImportanceMinimalityTerm
-    recon: tuple[ReconLossTerm, ...]
 
 
 # ───────────────────────────── routing samplers ─────────────────────────────
@@ -335,145 +273,3 @@ def persistent_configs(
                 assert entry.sources.state_key not in out, entry.sources.state_key
                 out[entry.sources.state_key] = entry.sources.cfg
     return out
-
-
-def build_loss_terms(
-    loss_metrics: Sequence[AnyLossMetricConfig],
-    site_names: tuple[str, ...],
-) -> LossSurface:
-    """Validate the shared torch loss configs into the `LossSurface` record
-    (LOSS_PARITY_DESIGN §3): exactly one faithfulness + one importance-minimality term,
-    plus the recon terms (the genuinely plural Σ).
-
-    Asserts the subset this trainer implements; refuses everything else loudly.
-    Recon-term ORDER follows the config list — per-term RNG keys derive from the recon
-    index, so it is semantically load-bearing (SPEC R1). Stochastic terms read
-    `n_mask_samples` off their own config (no longer a trainer-level knob)."""
-    faith: FaithfulnessTerm | None = None
-    imp: ImportanceMinimalityTerm | None = None
-    recon_terms: list[ReconLossTerm] = []
-
-    def unique_name(cfg: AnyLossMetricConfig) -> str:
-        # Checks the already-committed terms (not this in-progress one), so the persistent
-        # case calling this twice — once for the state_key, once inside recon() — is safe.
-        name = cfg.name if cfg.name is not None else cfg.type
-        taken = {t.name for t in recon_terms}
-        if faith is not None:
-            taken.add(faith.name)
-        if imp is not None:
-            taken.add(imp.name)
-        assert name not in taken, f"duplicate loss instance_key {name!r}"
-        return name
-
-    def recon(cfg: AnyLossMetricConfig, plan: ReconPlan) -> ReconLossTerm:
-        assert cfg.coeff is not None
-        return ReconLossTerm(unique_name(cfg), cfg.coeff, plan)
-
-    for cfg in loss_metrics:
-        assert cfg.coeff is not None, f"{cfg.type}: training losses need a coeff"
-        match cfg:
-            case FaithfulnessLossConfig():
-                assert faith is None
-                faith = FaithfulnessTerm(unique_name(cfg), cfg.coeff)
-            case ImportanceMinimalityLossConfig():
-                assert imp is None
-                assert cfg.pnorm.warmup_pct == 0.0, "a p ramping from 0 is never intended"
-                imp = ImportanceMinimalityTerm(unique_name(cfg), cfg.coeff, cfg)
-            case SmoothL0ImportanceMinimalityLossConfig():
-                assert imp is None
-                assert cfg.gamma.warmup_pct == 0.0, "a gamma ramping from 0 is never intended"
-                imp = ImportanceMinimalityTerm(unique_name(cfg), cfg.coeff, cfg)
-            case UnmaskedReconLossConfig() | CIMaskedReconLossConfig():
-                value = 1.0 if isinstance(cfg, UnmaskedReconLossConfig) else 0.0
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    AllRoutingConfig(),
-                    ConstantSources(value),
-                    n_samples=1,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case CIMaskedReconSubsetLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names), cfg.routing, ConstantSources(0.0), n_samples=1
-                )
-                recon_terms.append(recon(cfg, plan))
-            case CIMaskedReconLayerwiseLossConfig():
-                plan = make_plan(
-                    each_site_live(site_names),
-                    AllRoutingConfig(),
-                    ConstantSources(0.0),
-                    n_samples=1,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case StochasticReconLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    AllRoutingConfig(),
-                    StochasticSources(),
-                    cfg.n_mask_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case StochasticReconSubsetLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names), cfg.routing, StochasticSources(), cfg.n_mask_samples
-                )
-                recon_terms.append(recon(cfg, plan))
-            case StochasticReconLayerwiseLossConfig():
-                plan = make_plan(
-                    each_site_live(site_names),
-                    AllRoutingConfig(),
-                    StochasticSources(),
-                    cfg.n_mask_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case ChunkwiseSubsetReconLossConfig():
-                assert isinstance(cfg.routing, UniformKSubsetRoutingConfig), cfg.routing
-                plan = make_plan(
-                    live_groups(site_names, cfg.sites_per_chunk),
-                    cfg.routing,
-                    StochasticSources(),
-                    cfg.n_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case PGDReconLossConfig() | PGDReconSubsetLossConfig():
-                fresh = FreshPGDSources(cfg.init, cfg.n_steps, cfg.step_size, cfg.source_shape)
-                routing = (
-                    cfg.routing if isinstance(cfg, PGDReconSubsetLossConfig) else AllRoutingConfig()
-                )
-                plan = make_plan(all_sites_live(site_names), routing, fresh, n_samples=1)
-                recon_terms.append(recon(cfg, plan))
-            case PGDReconLayerwiseLossConfig():
-                fresh = FreshPGDSources(cfg.init, cfg.n_steps, cfg.step_size, cfg.source_shape)
-                plan = make_plan(each_site_live(site_names), AllRoutingConfig(), fresh, n_samples=1)
-                recon_terms.append(recon(cfg, plan))
-            case MergedStochasticSubsetPPGDReconLossConfig():
-                key = unique_name(cfg)
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    cfg.routing,
-                    MixedPersistentStochasticSources(state_key=key, cfg=cfg),
-                    n_samples=1,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case PersistentPGDReconLossConfig():
-                key = unique_name(cfg)
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    AllRoutingConfig(),
-                    PersistentSources(state_key=key, cfg=cfg),
-                    n_samples=1,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case _:
-                # StochasticHiddenActsReconLoss lands here by design: it is keep-on-bridge
-                # (offline-eval only), not a JAX training loss (SPEC S31, LOSS_PARITY_DESIGN §4c).
-                raise AssertionError(f"unsupported training loss {cfg.type!r}")
-
-    assert faith is not None and imp is not None, (
-        f"need FaithfulnessLoss + ImportanceMinimalityLoss, got {[m.type for m in loss_metrics]}"
-    )
-    assert recon_terms, "no recon loss terms configured"
-    for term in recon_terms:
-        for entry in term.plan:
-            assert entry.live_sites and set(entry.live_sites) <= set(site_names), entry
-    return LossSurface(faith, imp, tuple(recon_terms))

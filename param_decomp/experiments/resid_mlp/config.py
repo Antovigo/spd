@@ -18,7 +18,10 @@ from typing import Literal
 from pydantic import PositiveInt, model_validator
 
 from param_decomp.core.base_config import BaseConfig, Probability
-from param_decomp.experiments.config import ExperimentConfig, ToyDecompositionConfig
+from param_decomp.experiments.toy_config import (
+    ToyDecompositionConfig,
+    ToyExperimentConfig,
+)
 
 ResidMLPDataGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
 ResidMLPActFn = Literal["gelu", "relu"]
@@ -72,12 +75,9 @@ class ResidMLPTargetConfig(BaseConfig):
     """`W_E = W_U = I` (requires `n_features == d_embed`); else a fixed random unit-norm
     embedding (torch `fixed_random_embedding`).
 
-    TODO(lab): expose the full `embedding_mode` (`fixed_identity`/`fixed_random`/`learned`)
-    and the pretrain `label_type`/`loss_type`/`use_trivial_label_coeffs`/`importance_val`
-    knobs here once `experiments/resid_mlp/run.py` threads them into
-    `ResidMLPTargetConfig` + `pretrain_resid_mlp_target` (both are off-limits in this
-    change). The model.py layer already implements all of them with back-compatible
-    defaults."""
+    TODO(lab): expose the full `embedding_mode` (`fixed_identity`/`fixed_random`/`learned`).
+    The pretrain objective fields live under `target.pretrain` and are threaded into target
+    pretraining verbatim."""
     pretrain: ResidMLPPretrainConfig
 
     @model_validator(mode="after")
@@ -96,7 +96,7 @@ class ResidMLPDataConfig(BaseConfig):
     data_generation_type: ResidMLPDataGenerationType = "at_least_zero_active"
 
 
-class ResidMLPExperimentConfig(ExperimentConfig):
+class ResidMLPExperimentConfig(ToyExperimentConfig):
     target: ResidMLPTargetConfig
     decomposition: ToyDecompositionConfig
     data: ResidMLPDataConfig

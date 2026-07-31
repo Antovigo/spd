@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from param_decomp.experiments.lm.arithmetic_eval_operation import global_arithmetic_probe
 from param_decomp.experiments.lm.arithmetic_probe import build_arithmetic_probe
-from param_decomp.experiments.lm.run import _arithmetic_probe_global
 
 BOS = 7
 SYMBOL_IDS = {"+": 101, "-": 102, "*": 103, "=": 104}
@@ -73,7 +73,7 @@ def test_arithmetic_probe_global_preserves_grid():
     probe = build_arithmetic_probe("add", (1, 3), (1, 4), _StubTokenizer())
     devices = np.asarray(jax.devices()[:1]).reshape(1, 1)
     mesh = Mesh(devices, ("replicate", "fsdp"))
-    sharded = _arithmetic_probe_global(probe.tokens, mesh, n_proc=1)
+    sharded = global_arithmetic_probe(probe.tokens, mesh, n_proc=1)
     # one device: no padding, rows preserved verbatim (the eval trims pad via n_prompts anyway)
     assert sharded.shape == probe.tokens.shape
     np.testing.assert_array_equal(np.asarray(sharded), probe.tokens)

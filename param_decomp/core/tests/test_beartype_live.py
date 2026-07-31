@@ -10,7 +10,7 @@ import pytest
 from jax import Array
 from jaxtyping import TypeCheckError
 
-from param_decomp.core.losses import kl_per_position
+from param_decomp.targets.losses import kl_per_position
 
 
 def test_valid_input_accepted() -> None:

@@ -22,7 +22,9 @@ per-chunk transformers are stacked along a leading `n_chunks` axis and run under
 weight gather live at a time, not all `n_chunks` hoisted into the flat entry computation).
 The positionless toys use the MLP impls below (`LayerwiseMLPCIFn` /
 `GlobalMLPCIFn`); every impl satisfies the same `CIFn` protocol and is equally core — the
-architectures differ by domain (sequence vs positionless), not by status.
+architectures differ by domain (sequence vs positionless), not by status. A POSITIONED target
+that cannot afford attention over its positions runs the same chunkwise impl at `n_blocks=0`,
+which is position-local by construction (see `ChunkwiseTransformerCIArch`).
 """
 
 from dataclasses import dataclass
@@ -37,7 +39,12 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from param_decomp.core.components import SiteSpec
-from param_decomp.vendored_jax.llama import apply_rope, rms_norm, rope_cos_sin
+from param_decomp.vendored_jax.llama import (
+    apply_rope,
+    attn_implementation,
+    rms_norm,
+    rope_cos_sin,
+)
 
 CI_FN_RMS_EPS = float(jnp.finfo(jnp.float32).eps)
 """Matches torch's `F.rms_norm` default eps (`finfo(fp32).eps` ~1.19e-7); RMS upcasts to
@@ -277,7 +284,7 @@ class CIBlock(eqx.Module):
         # cuDNN flash on GPU (its partitioner requires device-local heads — true here, no
         # head-sharding); XLA elsewhere (CPU tests have no cuDNN). Bidirectional. Fewer K/V
         # heads than query heads is GQA, grouped natively by dot_product_attention.
-        impl = "cudnn" if jax.default_backend() == "gpu" else "xla"
+        impl = attn_implementation(jax.default_backend(), qt.dtype)
         y = jax.nn.dot_product_attention(qt, kt, vt, is_causal=False, implementation=impl)
         x = x + einops.einsum(
             einops.rearrange(y, "b t nh hd -> b t (nh hd)"), self.wo, "b t i, o i -> b t o"
@@ -324,7 +331,16 @@ class ChunkwiseTransformerCIArch:
     stays agnostic to what the taps mean, so no transformer concept (residual width) leaks
     in. All chunks share one `input_dim` (the vmap homogeneity requirement).
 
-    `attention` is the resolved variant (the schema's `attention` union, translated)."""
+    `attention` is the resolved variant (the schema's `attention` union, translated).
+
+    `n_blocks=0` degenerates to `RMS-normed taps → in_proj → per-site output heads`: the FFN
+    lives inside the block alongside attention, so dropping blocks leaves an affine map on the
+    NORMALIZED tap — a direction-only probe, with no learned nonlinearity, no hidden layer, and
+    no sensitivity to tap magnitude at all. It is position-local (blocks are the only thing
+    reading ACROSS positions) and it runs, so it serves as a cheap baseline, but a positioned
+    target that wants a real per-position CI fn wants `LayerwiseMLPCIArch(has_position_axis=True)`.
+    Pinned by `core/tests/test_ci_fn_zero_blocks.py` (locality) and
+    `core/tests/test_ci_fn_positioned_mlp.py` (the magnitude contrast)."""
 
     chunks: tuple[Chunk, ...]
     input_dim: int
@@ -659,6 +675,10 @@ def init_chunkwise_transformer_ci_fn(
     # Per-chunk cat width must equal `arch.input_dim` (lab guarantees it; the runtime
     # `jnp.stack` / in_proj einsum fails loud if a chunk's taps don't sum to it).
 
+    assert arch.n_blocks >= 0, (
+        f"n_blocks must be >= 0 ({arch.n_blocks}); 0 is the legitimate position-local arch — "
+        "in_proj + output heads, no attention — see ChunkwiseTransformerCIArch"
+    )
     n_heads = arch.attention.n_heads
     hd = arch.d_model // n_heads
     assert arch.d_model % n_heads == 0 and hd % 2 == 0, (arch.d_model, n_heads)
@@ -692,10 +712,16 @@ def init_chunkwise_transformer_ci_fn(
 # `type`-strip + list→tuple. The duplication is deliberate — it keeps a uniform `CIFnArch`
 # union for `build_ci_fn` (vs the chunkwise arch, which genuinely resolves against a target).
 @dataclass(frozen=True)
-class MLPCIArch:
-    """Hidden widths shared by every per-site MLP."""
+class LayerwiseMLPCIArch:
+    """Hidden widths shared by every per-site MLP.
+
+    `has_position_axis` is the TARGET's shape, not a property of the MLP: the stack is
+    pointwise over every leading axis, so the same weights serve `[batch, d]` and
+    `[batch, position, d]` alike. It is declared here so the CI fn and the model can be
+    checked to agree (`core.run_state.init_decomposition`)."""
 
     hidden_dims: tuple[int, ...]
+    has_position_axis: bool
 
 
 class SiteMLP(eqx.Module):
@@ -775,7 +801,7 @@ def _init_mlp_stack(dims: tuple[int, ...], key: PRNGKeyArray) -> SiteMLP:
 
 
 def init_layerwise_mlp_ci_fn(
-    arch: MLPCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray
+    arch: LayerwiseMLPCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray
 ) -> LayerwiseMLPCIFn:
     """Per-site MLP init: each site's MLP maps `d_in -> hidden_dims... -> C`."""
     assert arch.hidden_dims, "MLP CI fn needs at least one hidden layer"
@@ -787,7 +813,10 @@ def init_layerwise_mlp_ci_fn(
     }
     names = tuple(s.name for s in sites)
     return LayerwiseMLPCIFn(
-        site_mlps=site_mlps, input_names=names, output_names=names, has_position_axis=False
+        site_mlps=site_mlps,
+        input_names=names,
+        output_names=names,
+        has_position_axis=arch.has_position_axis,
     )
 
 
@@ -796,6 +825,7 @@ class GlobalMLPCIArch:
     """Hidden widths of the single global MLP shared across ALL sites."""
 
     hidden_dims: tuple[int, ...]
+    has_position_axis: bool
 
 
 class GlobalMLPCIFn(eqx.Module):
@@ -853,14 +883,14 @@ def init_global_mlp_ci_fn(
         output_names=names,
         in_sizes=in_sizes,
         c_sizes=c_sizes,
-        has_position_axis=False,
+        has_position_axis=arch.has_position_axis,
     )
 
 
 # ----------------------------- construction (placement-agnostic) -----------------------------
 
 
-CIFnArch = ChunkwiseTransformerCIArch | MLPCIArch | GlobalMLPCIArch
+CIFnArch = ChunkwiseTransformerCIArch | LayerwiseMLPCIArch | GlobalMLPCIArch
 """Every CI-fn architecture. Construction goes through `build_ci_fn`; sharding/placement is
 a separate, scale-driven concern (see `init_placed`), never coupled to arch type."""
 
@@ -871,7 +901,7 @@ def build_ci_fn(arch: CIFnArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray) 
     match arch:
         case ChunkwiseTransformerCIArch():
             return init_chunkwise_transformer_ci_fn(arch, sites, key)
-        case MLPCIArch():
+        case LayerwiseMLPCIArch():
             return init_layerwise_mlp_ci_fn(arch, sites, key)
         case GlobalMLPCIArch():
             return init_global_mlp_ci_fn(arch, sites, key)

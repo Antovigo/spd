@@ -15,12 +15,12 @@ import yaml
 
 from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
 from param_decomp.core.checkpoint import init_from_parent, make_checkpoint_manager, save_state
-from param_decomp.core.configs import ResumeProvenance
+from param_decomp.core.configs import KeepLastNCheckpoints, ResumeProvenance
 from param_decomp.core.tests.test_checkpoint import _build
 from param_decomp.experiments.lm.config import build_from_schema
-from param_decomp.experiments.lm.run import assert_finetune_structural_compat
+from param_decomp.experiments.lm.training import assert_finetune_structural_compat
 
-CONFIGS = Path(__file__).parent.parent / "configs"
+CONFIGS = Path(__file__).parents[2] / "experiments" / "lm" / "configs"
 DATA_ROOT = Path("out")
 
 
@@ -33,7 +33,7 @@ def test_init_from_parent_loads_components_resets_schedule(tmp_path: Path):
     assert int(parent_state.training.step) == 2
 
     parent_ckpt_dir = tmp_path / "parent" / "ckpts"
-    mgr = make_checkpoint_manager(parent_ckpt_dir, keep_last=2)
+    mgr = make_checkpoint_manager(parent_ckpt_dir, KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, parent_state)
 
     # A fresh fine-tune reference (DIFFERENT seed): every leaf is independently initialized,
@@ -79,7 +79,7 @@ def test_init_from_parent_loads_components_resets_schedule(tmp_path: Path):
 def test_init_from_parent_rejects_missing_step(tmp_path: Path):
     _, parent_state, _, _ = _build(seed=1)
     parent_ckpt_dir = tmp_path / "parent" / "ckpts"
-    mgr = make_checkpoint_manager(parent_ckpt_dir, keep_last=2)
+    mgr = make_checkpoint_manager(parent_ckpt_dir, KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, parent_state)
 
     _, fresh, _, _ = _build(seed=7)
@@ -102,9 +102,9 @@ def test_structural_compat_passes_on_matching_changes_only(tmp_path: Path):
     new_raw["pd"] = dict(raw["pd"], steps=raw["pd"]["steps"] // 2)
     new_raw["pd"]["components_optimizer"] = dict(
         raw["pd"]["components_optimizer"],
-        lr_schedule=dict(raw["pd"]["components_optimizer"]["lr_schedule"], start_val=1e-4),
+        lr_schedule=dict(raw["pd"]["components_optimizer"]["lr_schedule"], max_val=1e-4),
     )
-    new_cfg = build_from_schema(new_raw, "p-aaaaaaaa", DATA_ROOT)
+    new_cfg, _ = build_from_schema(new_raw, "p-aaaaaaaa", DATA_ROOT)
     prov = ResumeProvenance(parent_run_dir=parent_dir, parent_step=10)
     assert_finetune_structural_compat(new_cfg, prov, DATA_ROOT)
 
@@ -117,7 +117,7 @@ def test_structural_compat_fires_on_changed_C(tmp_path: Path):
     old_sites = raw["decomposition"]["sites"]
     halved_cs = {matrix: c // 2 for matrix, c in old_sites["cs"].items()}
     new_raw["decomposition"] = dict(raw["decomposition"], sites=dict(old_sites, cs=halved_cs))
-    new_cfg = build_from_schema(new_raw, "p-aaaaaaaa", DATA_ROOT)
+    new_cfg, _ = build_from_schema(new_raw, "p-aaaaaaaa", DATA_ROOT)
     prov = ResumeProvenance(parent_run_dir=parent_dir, parent_step=10)
     with pytest.raises(AssertionError, match="fine-tune sites mismatch"):
         assert_finetune_structural_compat(new_cfg, prov, DATA_ROOT)

@@ -1,5 +1,8 @@
 # Clustering Module
 
+
+> This package is the in-job compute for this stage: worker module mains you run directly, inside whatever allocation your scheduler gave you. Nothing here submits or schedules a job.
+
 Hierarchical clustering of PD components based on coactivation patterns. Discovers stable
 groups of components that behave similarly.
 
@@ -19,40 +22,49 @@ python -m param_decomp.clustering.scripts.run_worker \
 # → <data_root>/clustering/harvests/ch-<id>/
 
 # 2. Merge from the snapshot (CPU-only).
-pd-cluster-merge /path/to/ch-<id>/ merge_config.json --run-id c-<id> --seed 0 [--plot]
+python -m param_decomp.clustering.scripts.run_merge /path/to/ch-<id>/ merge_config.json --run-id c-<id> --seed 0 [--plot]
 # → <data_root>/clustering/runs/c-<id>/
 ```
 
-`pd-cluster-merge` seeds the stdlib `random` the stochastic merge-pair samplers draw from,
+`run_merge` seeds the stdlib `random` the stochastic merge-pair samplers draw from,
 so distinct `--seed`s give independent merge trajectories over the same snapshot. `--plot`
 emits per-run diagnostics (`plots/cluster_sizes.png`, periodic `plots/iter_*.png`).
 
 ## Workflow: ensemble → consensus
 
 A single clustering run is noisy; cluster *stability* is read off an ensemble of seeded
-runs. The ensemble is a *pattern*, not a config class: fan one decomposition out into N
-seeded `harvest → merge` member pairs (member i uses `base_seed + i` for both the harvest
-dataset and the merge sampler), then run a consensus pass that normalizes member labels
-and computes per-iteration pairwise distances + a stability plot. Any scheduler can run
-the fan-out; the dependency shape is:
+runs. Fan one decomposition out into N seeded `harvest → merge` members — member `i`
+takes seed `base + i` for BOTH the harvest dataset (`--dataset_seed`) and the merge
+sampler (`--seed`) — then run consensus over the member run ids: it normalizes their
+labels and computes per-iteration pairwise distances + a stability plot. Three tiers:
 
 ```
-N × (run_worker, seeded dataset)                      1 GPU each
-   └─ N × (run_merge / pd-cluster-merge, seeded sampler)   CPU, after its harvest
-         └─ consensus per distance method             calc_distances / pd-cluster-distances
+N seeded harvests (1 GPU each)      run_worker --dataset_seed i
+   └─ N seeded merges (CPU)          run_merge --seed i
+         └─ consensus per method     calc_distances
 ```
 
 ```bash
-# Consensus over existing member runs:
-pd-cluster-distances --ensemble-id e-<id> --clustering-run-ids c-a,c-b,c-c \
+# Members: run each seed's harvest → merge (in parallel across GPUs, or serially).
+for i in 0 1 2 3; do
+  python -m param_decomp.clustering.scripts.run_worker \
+      --run_dir runs/p-xxxxxxxx --n_tokens 50000 --batch_size 16 --n_tokens_per_seq 16 \
+      --dataset_seed $i --harvest_id ch-member$i
+  python -m param_decomp.clustering.scripts.run_merge \
+      <data-root>/clustering/harvests/ch-member$i merge_config.json --run-id c-member$i --seed $i
+done
+
+# Consensus over the member runs:
+python -m param_decomp.clustering.scripts.calc_distances --ensemble-id e-<id> \
+    --clustering-run-ids c-member0,c-member1,c-member2,c-member3 \
     --distances-method perm_invariant_hamming
 ```
 
-Output:
+`calc_distances` creates the ensemble dir and writes:
 
 ```
 <data_root>/clustering/ensembles/<ensemble_id>/
-├── ensemble_meta.json                # normalization metadata (calc_distances)
+├── ensemble_meta.json                # normalization metadata
 ├── ensemble_merge_array.npz          # normalized merge array
 ├── distances_<method>.npz            # per-iteration distance tensor
 └── plots/distances_<method>.png      # stability plot
@@ -69,7 +81,7 @@ The run is opened with `param_decomp.experiments.lm.load_run.open_jax_run` (the 
 "open a run for consumption" pattern, shared with `harvest`); the lower-leaky CI from its
 frozen forward is sampled per token position (`flatten_lm_activations`) and streamed — as
 a numpy-array dict — into the `MembershipBuilder`, producing a `ProcessedMemberships`
-snapshot. `pd-cluster-merge` reads it unchanged.
+snapshot. `run_merge` reads it unchanged.
 
 - `HarvestConfig` (`harvest_config.py`): model_path, n_tokens, activation_threshold, etc.
 - `MergeConfig` (`merge_config.py`): alpha, iters, merge_pair_sampling_method, etc.
@@ -84,7 +96,7 @@ Stored under `<data_root>/clustering/` (`param_decomp/clustering/paths.py`; `dat
 │   ├── harvest_config.json
 │   ├── memberships.npz                  # Sparse CSC matrix (scipy)
 │   └── metadata.json                    # labels, n_samples, n_components
-├── runs/<run_id>/                       # Merge outputs (pd-cluster-merge)
+├── runs/<run_id>/                       # Merge outputs (run_merge)
 │   ├── merge_config.json
 │   └── history.zip                      # MergeHistory (group assignments per iteration)
 ```

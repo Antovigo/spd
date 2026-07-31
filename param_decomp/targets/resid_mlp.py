@@ -120,6 +120,10 @@ class ResidMLPTargetConfig:
     pretrain_batch_size: int
     pretrain_lr: float
     pretrain_seed: int
+    pretrain_label_type: LabelType
+    pretrain_loss_type: LossType
+    pretrain_use_trivial_label_coeffs: bool
+    pretrain_importance_val: float
     feature_probability: float
     data_generation_type: str
     global_batch: int

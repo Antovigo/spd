@@ -10,7 +10,9 @@ internally (e.g. the Llama target's stacked layer axis) is its own business.
 The activation WAIST comes in exactly TWO shapes: positionless `[B, d]` (masks/CI
 `[B, C]` — the toys) or with one position axis `[B, P, d]` (masks/CI `[B, P, C]` — an
 LM, whose position axis is the token sequence). `has_position_axis` declares which;
-`Positionless` / `Positioned` carry the run-scoped extents. Batch is ever-present and
+`Positionless` / `Positioned` carry the run-scoped extents. Those are the waist's shapes;
+a mask's leading axes match only in RANK, and are size 1 wherever the adversary's
+`source_shape` says so (`SiteMasks`). Batch is ever-present and
 semantics-free (the data/shard axis); CI is always independent over every leading axis.
 Masking, routing, source scopes, imp-min, and normalization all operate over the opaque
 leading prefix. The three EDGES are generic too — the model's
@@ -55,7 +57,19 @@ shapes are built. Must agree with the model's `has_position_axis`."""
 
 
 SiteMasks = dict[str, Float[Array, "*leading C"]]
+"""Per-site component masks. `*leading` always has the WAIST's RANK, but ANY leading axis
+may arrive size 1: an adversarial mask is materialized from a source stored per
+`source_shape` (`configs.SourceShape`), and every axis that spelling omits is a size-1
+broadcast axis — on a positioned target `c` gives `[1, 1, C]`, `bc` `[B, 1, C]`, `sc`
+`[1, P, C]`; positionless `c` gives `[1, C]`. Only the stochastic and constant sources
+build their masks at the full waist shape (from the CI). A target must therefore BROADCAST the leading axes against its own
+waist, never reshape them: a reshape survives every stochastic step and dies on the first
+adversarial one, long after the run looks healthy."""
+
 SiteDeltaMasks = dict[str, Float[Array, "*leading"]]
+"""The weight-delta counterpart of `SiteMasks` (the source's trailing channel) — same
+leading axes, same broadcast rule, no C axis."""
+
 SiteRoutes = dict[str, Bool[Array, "*leading"]] | None
 """Per-site per-position routing; `None` routes every position to the decomposition
 (SPEC §1.3). Positions routing False take the frozen `x @ W` path."""
@@ -163,8 +177,9 @@ class DecomposedModel(Protocol):
         """The masked decomposed forward (SPEC §1.3, S2). `prepared` is the output of
         `prepare_compute_weights` (the shared per-step compute weights). `live` (static under
         jit) lists the sites running their decomposed forward; all other sites run the frozen
-        `x @ W` path. `masks`/`delta_masks` may broadcast over the batch dim (the PPGD source
-        case). `has_delta` (static) False skips the `x @ Δ` matmul for constant-source entries
+        `x @ W` path. `masks`/`delta_masks` may be size 1 on ANY leading axis, per the
+        adversary's `source_shape` — broadcast them, never reshape (`SiteMasks`).
+        `has_delta` (static) False skips the `x @ Δ` matmul for constant-source entries
         whose delta mask is a constant 0 (LOSS_PARITY_DESIGN §4b). `remat` (static) gates
         gradient-checkpointing the forward at the model's natural granularity (a deep target
         rematerializes per-layer, recomputing one layer at a time in the backward instead of
@@ -215,7 +230,7 @@ class DecomposedModel(Protocol):
         """Per-`live`-site decomposed LINEAR OUTPUT of `masked_output`'s forward
         (`((x@V)*m)@U + (x@Δ)*d`), keyed by site (SPEC S31). `prepared` is the output of
         `prepare_compute_weights`. For the offline hidden-acts recon eval metrics only — never
-        the recon grid, which stays KL-on-final-logits."""
+        the recon traversal, which stays KL-on-final-logits."""
         ...
 
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Float[Array, "d_out d_in"]]:

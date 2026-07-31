@@ -185,8 +185,8 @@ def test_step_trains():
         ImportanceMinimalityLossConfig,
         UniformKSubsetRoutingConfig,
     )
-    from param_decomp.core.recon import build_loss_terms
-    from param_decomp.core.schedule import ScheduleConfig
+    from param_decomp.core.objective import build_objective
+    from param_decomp.core.schedule import Knot, ScheduleConfig
     from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
     from param_decomp.targets.testing import tiny_glu_chunkwise_ci_fn
 
@@ -206,15 +206,20 @@ def test_step_trains():
             step=jnp.zeros((), jnp.int32),
         ),
     )
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                ),
             ),
             ChunkwiseSubsetReconLossConfig(
-                routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1
+                routing=UniformKSubsetRoutingConfig(),
+                coeff=0.5,
+                sites_per_chunk=3,
+                n_samples=1,
             ),
         ),
         model.site_names,
@@ -228,6 +233,7 @@ def test_step_trains():
         remat_recon_forwards=True,
         remat_ci_fn=False,
         mesh=None,
+        compiler_options={},
     )
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
     state, metrics = step(model, state, tokens, jax.random.PRNGKey(100))

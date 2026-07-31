@@ -282,15 +282,3 @@ def test_boundary_refuses_an_assignment_with_a_different_stack_length():
     rules = from_config("owner", SINGLE_DEVICE_MESH, shrunk)
     with pytest.raises(AssertionError, match="expects a 2-stack"):
         component_stacks_audit(stacks, rules)
-
-
-def test_preset_names_match_runtime_config_literal():
-    import typing
-
-    from param_decomp.core.configs import RuntimeConfig
-    from param_decomp.core.placement import PRESET_NAMES
-
-    ann = RuntimeConfig.model_fields["sharding"].annotation
-    literals = [a for a in typing.get_args(ann) if typing.get_origin(a) is typing.Literal]
-    assert literals, ann
-    assert set(typing.get_args(literals[0])) == set(PRESET_NAMES)

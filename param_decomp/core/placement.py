@@ -115,7 +115,7 @@ class PlacedRule:
     ) -> int:
         """Upper-bound bytes moved PER MATERIALIZATION of the `to` layout (0 when the
         derived specs match — the owner-resident case; else ≤ the full global tensor).
-        Deliberately unmodeled: multiplicity (the recon grid materializes the forward
+        Deliberately unmodeled: multiplicity (the recon traversal materializes the forward
         layout many times per step; remat may replay it), residency-vs-regather, op-count,
         and axis locality — see PLACEMENT_DESIGN.md lessons 3-4. Good enough to rank
         resting layouts; NOT sufficient to drive an automatic search."""
@@ -403,7 +403,7 @@ def _from_spec(
 def from_config(
     spec: str | PlacementTableConfig, mesh: Mesh | AbstractMesh, sites: tuple[SiteSpec, ...]
 ) -> PlacementRules:
-    """`RuntimeConfig.sharding` + the run's resolved site set → the TOTAL placement
+    """The configured placement spec (`runtime.sharding`) + the run's resolved site set → the TOTAL placement
     policy: a preset name, or an explicit table (already parse-validated by
     `PlacementTableConfig` — closed row vocabulary). Construction is the decision point
     AND the claim check: a table WITHOUT a zero1 row claims every shape group tiles the

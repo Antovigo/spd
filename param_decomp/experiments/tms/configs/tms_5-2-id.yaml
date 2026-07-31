@@ -2,7 +2,7 @@
 # Inserts a frozen `hidden_layers.0` (n_hidden -> n_hidden, identity init) between linear1
 # and linear2, adding a third dense decomposition site. The dense site's ground-truth CI
 # is the dense pattern (all n_hidden directions live), not the per-feature identity.
-# CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[50]). Runs on 1 GPU.
+# CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[50]). Runs on CPU, single-process.
 run_name: jax-tms-5-2-id
 decomposition:
   sites:
@@ -27,17 +27,13 @@ pd:
     coeff: 8.0e-04
     type: SmoothL0ImportanceMinimalityLoss
     gamma:
-      start_val: 1.0
-      fn_type: linear
-      final_val_frac: 0.01
-      warmup_pct: 0.0
+      max_val: 1.0
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.01}
   - type: MergedStochasticSubsetPPGDReconLoss
     coeff: 1.0
-    adv_fraction:
-      start_val: 0.5
-      fn_type: constant
-      final_val_frac: 1.0
-      warmup_pct: 0.0
+    adv_fraction: 0.5
     n_warmup_steps: 2
     routing:
       type: uniform_k_subset
@@ -46,10 +42,11 @@ pd:
       beta2: 0.99
       eps: 1.0e-08
       lr_schedule:
-        final_val_frac: 1.0
-        fn_type: constant
-        start_val: 0.01
-        warmup_pct: 0.025
+        max_val: 0.01
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.025, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
       type: adam
     source_shape: bc
   - type: FaithfulnessLoss
@@ -62,10 +59,10 @@ pd:
     - 0.999
     grad_clip_norm: 1.0
     lr_schedule:
-      final_val_frac: 0.1
-      fn_type: cosine
-      start_val: 1e-03
-      warmup_pct: 0.0
+      max_val: 1e-03
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
     weight_decay: 0.0
   components_optimizer:
     betas:
@@ -73,22 +70,20 @@ pd:
     - 0.999
     grad_clip_norm: 1.0
     lr_schedule:
-      final_val_frac: 0.1
-      fn_type: cosine
-      start_val: 1e-03
-      warmup_pct: 0.0
+      max_val: 1e-03
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
     weight_decay: 0.0
   faithfulness_warmup_steps: 200
   faithfulness_warmup_lr: 0.01
   faithfulness_warmup_weight_decay: 0.0
-runtime:
-  remat_recon_forwards: false
-  dp: 1
-  sharding: ddp
 cadence:
   train_log_every: 200
   save_every: 5000
-  keep_last_n_checkpoints: 2
+  checkpoint_retention:
+    kind: keep_last
+    n: 2
 target:
   n_features: 5
   n_hidden: 2
@@ -104,14 +99,13 @@ data:
   feature_probability: 0.05
   data_generation_type: at_least_zero_active
 eval:
-  # Toys validate via the ground-truth CI metric; the permuted-CI heatmap logs
-  # unconditionally. Toys honor only the permutation/UV figure metrics, so the
-  # PGDReconLoss probe (authored by the sweep) and the cadence fields are inert
-  # until the toys grow the LM scalar eval pass.
+  # Fresh-PGD recon runs on synthetic eval batches. Ground-truth CI metrics are native
+  # to the toy runner and log independently on the train-log cadence.
   batch_size: 4096
   n_steps: 1
   every: 1000
-  slow_every: 2000
+  slow_every: 5000
+  slow_on_first_step: true
   metrics:
   - type: PGDReconLoss
     coeff: null

@@ -1,5 +1,8 @@
 # Harvest Module
 
+
+> This package is the in-job compute for this stage: worker module mains you run directly, inside whatever allocation your scheduler gave you. Nothing here submits or schedules a job.
+
 Offline pipeline that collects component statistics in a single pass over training data.
 Produces data consumed by the autointerp module (`param_decomp/autointerp/`). The
 whole module is **torch-free**: the only decomposition
@@ -50,11 +53,11 @@ forward outputs a new consumer needs there; don't re-open checkpoints ad hoc.
 
 ## Usage
 
-A sharded harvest is just the worker module invoked once per rank (`--rank R
---world_size N`, each rank serving its `process_index=R` slice of every global batch)
-plus a merge afterwards — a deployment's SLURM submitter typically wraps this as a job
-array with a dependent merge job, but any scheduler (or a shell loop) works.
-`HarvestConfig.n_batches` may be `"whole_dataset"` to consume the entire training set.
+A harvest is N worker ranks over one decomposition, then one merge over their saved
+states. Run the ranks however your allocation allows — concurrently across N GPUs, or
+serially on one — then merge. The decomposition target is named inside the config, by
+`method_config.wandb_path`; `HarvestConfig.n_batches` may be `"whole_dataset"` to
+consume the entire training set.
 
 ```bash
 # Single process (auto-generates subrun ID)
@@ -92,15 +95,24 @@ The tensor artefacts (`*.npz`, worker states) are NumPy `np.savez` archives.
 
 ## Architecture
 
-**Intruder evaluation** (`param_decomp/harvest/intruder.py`) evaluates the quality of the *decomposition itself* — whether component activation patterns are coherent — without relying on LLM-generated labels. Intruder scores are stored in `harvest.db`, not `interp.db`. Intruder eval is run as its own top-level stage, not as part of the harvest pipeline.
+### Intruder evaluation (`intruder.py`, `scripts/run_intruder.py`)
+
+Evaluates the quality of the *decomposition itself* — whether component activation
+patterns are coherent — without relying on LLM-generated labels. Intruder scores are
+stored in `harvest.db`, not `interp.db`. It is a separate entry point over a finished
+harvest, not a stage of the harvest pipeline:
+
+```bash
+python -m param_decomp.harvest.scripts.run_intruder <decomposition_id> \
+    --config_json '{...IntruderEvalConfig...}' --harvest_subrun_id h-YYYYMMDD_HHMMSS
+```
 
 ### Worker Script (`scripts/run_worker.py`)
 
 The only worker. Opens a JAX run, runs its frozen forward, accumulates into the NumPy
 `Harvester`. Args:
 - `--run_dir`: the JAX run dir (`runs/<run_id>`) (required)
-- `--data_root`: the output root the harvest writes under (default `./out`; a
-  deployment's submitter passes its resolved output root)
+- `--data_root`: the output root the harvest writes under (default `./out`)
 - `--n_batches`, `--batch_size`, `--activation_threshold`
 - `--rank R --world_size N`: serve `process_index=R`'s slice of every global batch; save
   to `worker_states/worker_<R>.npz`. Omit both for a single-process run that writes the

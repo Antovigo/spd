@@ -4,8 +4,8 @@
 # group, so their eval metrics (eval/identity_ci_error/<site> scalars and the permuted-CI
 # heatmaps logged per checkpoint) land side by side in one collapsible wandb view.
 #
-# The toys run synchronously on CPU (pd-tms / pd-resid-mlp) — no SLURM — so this just runs
-# them in sequence and prints the wandb group URL to watch.
+# The toys run synchronously on CPU, so this just runs them in sequence and prints the
+# wandb group URL to watch.
 #
 # Usage:
 #   ./param_decomp/experiments/run_toy_sweep.sh [GROUP] [TAGS]
@@ -29,15 +29,17 @@ source "$REPO_ROOT/.venv/bin/activate"
 ENTITY="$(python -c 'from param_decomp.infra.wandb import get_wandb_entity; print(get_wandb_entity())')"
 GROUP_URL="https://wandb.ai/${ENTITY}/${PROJECT}/groups/${GROUP}/workspace"
 
-# (runner config) pairs — pd-tms for the TMS toys, pd-resid-mlp for the ResidualMLP toys.
+# (composition root, config) pairs — one module main per toy domain.
+TMS=param_decomp.experiments.tms.run
+RESID_MLP=param_decomp.experiments.resid_mlp.run
 RUNS=(
-  "pd-tms:$SCRIPT_DIR/tms/configs/tms_5-2.yaml"
-  "pd-tms:$SCRIPT_DIR/tms/configs/tms_5-2-id.yaml"
-  "pd-tms:$SCRIPT_DIR/tms/configs/tms_40-10.yaml"
-  "pd-tms:$SCRIPT_DIR/tms/configs/tms_40-10-id.yaml"
-  "pd-resid-mlp:$SCRIPT_DIR/resid_mlp/configs/resid_mlp_1l.yaml"
-  "pd-resid-mlp:$SCRIPT_DIR/resid_mlp/configs/resid_mlp_2l.yaml"
-  "pd-resid-mlp:$SCRIPT_DIR/resid_mlp/configs/resid_mlp_3l.yaml"
+  "$TMS:$SCRIPT_DIR/tms/configs/tms_5-2.yaml"
+  "$TMS:$SCRIPT_DIR/tms/configs/tms_5-2-id.yaml"
+  "$TMS:$SCRIPT_DIR/tms/configs/tms_40-10.yaml"
+  "$TMS:$SCRIPT_DIR/tms/configs/tms_40-10-id.yaml"
+  "$RESID_MLP:$SCRIPT_DIR/resid_mlp/configs/resid_mlp_1l.yaml"
+  "$RESID_MLP:$SCRIPT_DIR/resid_mlp/configs/resid_mlp_2l.yaml"
+  "$RESID_MLP:$SCRIPT_DIR/resid_mlp/configs/resid_mlp_3l.yaml"
 )
 
 echo "Launching ${#RUNS[@]} toy decompositions under wandb group '${GROUP}'"
@@ -52,7 +54,7 @@ for entry in "${RUNS[@]}"; do
   if [[ -n "$TAGS" ]]; then
     args+=(--tags "$TAGS")
   fi
-  "$runner" "${args[@]}"
+  python -m "$runner" "${args[@]}"
   echo
 done
 

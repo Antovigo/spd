@@ -22,8 +22,8 @@ from param_decomp.core.configs import (
     ImportanceMinimalityLossConfig,
     StochasticReconLossConfig,
 )
-from param_decomp.core.recon import build_loss_terms
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.tests.test_generic_model_io import SyntheticDecomposedModel
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 
@@ -78,12 +78,14 @@ def _build_step_and_args():
             step=jnp.zeros((), jnp.int32),
         ),
     )
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1.0),
             ImportanceMinimalityLossConfig(
                 coeff=1e-4,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.5),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.5))
+                ),
             ),
             StochasticReconLossConfig(coeff=1.0),
         ),
@@ -98,6 +100,7 @@ def _build_step_and_args():
         remat_recon_forwards=False,
         remat_ci_fn=False,
         mesh=None,
+        compiler_options={},
     )
     return step_fn, model, state, inputs
 

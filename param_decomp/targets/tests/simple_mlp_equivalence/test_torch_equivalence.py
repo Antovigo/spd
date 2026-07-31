@@ -28,7 +28,7 @@ from param_decomp.targets.llama_simple_mlp import (
 )
 
 FIXTURE_DIR = Path(__file__).parent
-REAL_CACHE_DIR = Path("out/pretrain_cache/spd-t-9d2b8f02")
+REAL_CACHE_DIR = Path("/mnt/data/artifacts/mechanisms/param-decomp/pretrain_cache/spd-t-9d2b8f02")
 
 
 def _max_abs_diff(a: Array, b: np.ndarray) -> float:

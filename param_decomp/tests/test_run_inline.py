@@ -3,10 +3,13 @@
 
 `launch.main` validates the config (placement claims at the declared topology), pins it
 into a fresh run dir, and runs the trainer as a child process of this allocation — which
-must claim exactly the `runtime.dp` local devices (here 4 simulated CPU devices via
+must claim exactly the `runtime.dp` local devices (simulated CPU devices via
 `XLA_FLAGS=--xla_force_host_platform_device_count`) and train end-to-end: a tiny
 LlamaSimpleMLP target fabricated into the pretrain cache, tokens from tiny parquet
 shards, a real train step, and the final-step orbax checkpoint.
+
+The multi-device tests need `--runmultidevice`; the frozen-target dtype test runs at
+dp=1 so the default suite keeps covering it.
 """
 
 import subprocess
@@ -84,7 +87,7 @@ def _write_token_shards(shards_dir: Path) -> None:
     )
 
 
-def _write_run_config(path: Path, shards_dir: Path, dp: int) -> None:
+def _write_run_config(path: Path, shards_dir: Path, dp: int, weights_dtype: str) -> None:
     config = {
         "run_name": "inline-multidevice-smoke",
         "decomposition": {
@@ -105,11 +108,23 @@ def _write_run_config(path: Path, shards_dir: Path, dp: int) -> None:
         "pd": {
             "seed": 0,
             "components_optimizer": {
-                "lr_schedule": {"start_val": 1e-4, "fn_type": "cosine", "final_val_frac": 0.1},
+                "lr_schedule": {
+                    "max_val": 1e-4,
+                    "points": [
+                        {"at": 0.0, "frac": 1.0},
+                        {"at": 1.0, "frac": 0.1, "interp": "cosine"},
+                    ],
+                },
                 "grad_clip_norm": 1.0,
             },
             "ci_fn_optimizer": {
-                "lr_schedule": {"start_val": 1e-4, "fn_type": "cosine", "final_val_frac": 0.1},
+                "lr_schedule": {
+                    "max_val": 1e-4,
+                    "points": [
+                        {"at": 0.0, "frac": 1.0},
+                        {"at": 1.0, "frac": 0.1, "interp": "cosine"},
+                    ],
+                },
             },
             "steps": 2,
             "batch_size": 4,
@@ -118,15 +133,19 @@ def _write_run_config(path: Path, shards_dir: Path, dp: int) -> None:
                 {
                     "type": "ImportanceMinimalityLoss",
                     "coeff": 1.0,
-                    "pnorm": {"start_val": 2.0, "fn_type": "constant"},
+                    "pnorm": 2.0,
                 },
                 {"type": "StochasticReconLoss", "coeff": 1.0},
             ],
         },
         "runtime": {"dp": dp, "sharding": "zero1"},
-        "cadence": {"train_log_every": 1, "save_every": 2, "keep_last_n_checkpoints": 1},
+        "cadence": {
+            "train_log_every": 1,
+            "save_every": 2,
+            "checkpoint_retention": {"kind": "keep_last", "n": 1},
+        },
         "target": {
-            "weights_dtype": "bfloat16",
+            "weights_dtype": weights_dtype,
             "spec": {
                 "kind": "pretrained",
                 "model_class": (
@@ -135,7 +154,10 @@ def _write_run_config(path: Path, shards_dir: Path, dp: int) -> None:
                 "run_path": _RUN_PATH,
             },
         },
-        "data": {"kind": "dir", "dir": str(shards_dir)},
+        "data": {
+            "train": {"kind": "dir", "dir": str(shards_dir)},
+            "eval": {"kind": "dir", "dir": str(shards_dir.parent / "eval_shards")},
+        },
     }
     path.write_text(yaml.safe_dump(config))
 
@@ -154,31 +176,57 @@ def _run_module(config: Path, data_root: Path) -> None:
     )
 
 
+def _scaffold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, devices: int) -> Path:
+    """Out dir + pretrain cache + shards; the trainer child gets the root as an explicit
+    `--data-root` (the env carries only the forced CPU device count)."""
+    _write_pretrain_cache(tmp_path / "out")
+    _write_token_shards(tmp_path / "shards")
+    _write_token_shards(tmp_path / "eval_shards")
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setenv("XLA_FLAGS", f"--xla_force_host_platform_device_count={devices}")
+    return tmp_path
+
+
 @pytest.fixture
 def inline_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Out dir + pretrain cache + shards; the trainer child gets the root as an explicit
-    `--data-root` (the env carries only the forced 4-device CPU topology)."""
-    out_dir = tmp_path / "out"
-    _write_pretrain_cache(out_dir)
-    _write_token_shards(tmp_path / "shards")
-    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
-    monkeypatch.setenv("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
-    return tmp_path
+    return _scaffold(tmp_path, monkeypatch, devices=4)
+
+
+@pytest.fixture
+def single_device_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return _scaffold(tmp_path, monkeypatch, devices=1)
+
+
+def _assert_trained(out_dir: Path, final_step: int) -> None:
+    (run_dir,) = (out_dir / "runs").iterdir()
+    assert (run_dir / "launch_config.yaml").exists()
+    assert (run_dir / "metrics.jsonl").read_text().strip(), "no train metrics logged"
+    # the trainer always checkpoints the final step
+    assert (run_dir / "ckpts" / str(final_step) / "decomposition").exists()
 
 
 @pytest.mark.multidevice
 def test_inline_launch_trains_on_all_local_devices(inline_setup: Path) -> None:
     tmp_path = inline_setup
     config = tmp_path / "config.yaml"
-    _write_run_config(config, tmp_path / "shards", dp=4)
+    _write_run_config(config, tmp_path / "shards", dp=4, weights_dtype="bfloat16")
 
     _run_module(config, tmp_path / "out")
 
-    (run_dir,) = (tmp_path / "out" / "runs").iterdir()
-    assert (run_dir / "launch_config.yaml").exists()
-    assert (run_dir / "metrics.jsonl").read_text().strip(), "no train metrics logged"
-    # the trainer always checkpoints the final step
-    assert (run_dir / "ckpts" / "2" / "decomposition").exists()
+    _assert_trained(tmp_path / "out", final_step=2)
+
+
+def test_an_fp32_frozen_target_trains(single_device_setup: Path) -> None:
+    """`target.weights_dtype: float32` must survive real steps, not just the load. fp32
+    frozen weights meet bf16 compute V/U (`prepare_compute_weights`) in the masked
+    forward; that seam promotes rather than refusing, and this run is what says so."""
+    tmp_path = single_device_setup
+    config = tmp_path / "config.yaml"
+    _write_run_config(config, tmp_path / "shards", dp=1, weights_dtype="float32")
+
+    _run_module(config, tmp_path / "out")
+
+    _assert_trained(tmp_path / "out", final_step=2)
 
 
 @pytest.mark.multidevice
@@ -187,7 +235,7 @@ def test_inline_launch_refuses_a_mis_sized_allocation(inline_setup: Path) -> Non
     (`assert_inline_topology`), never silently shard over the ambient devices."""
     tmp_path = inline_setup
     config = tmp_path / "config.yaml"
-    _write_run_config(config, tmp_path / "shards", dp=2)
+    _write_run_config(config, tmp_path / "shards", dp=2, weights_dtype="bfloat16")
 
     with pytest.raises(subprocess.CalledProcessError):
         _run_module(config, tmp_path / "out")

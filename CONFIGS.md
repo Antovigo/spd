@@ -7,63 +7,56 @@ obligation: each schema change must migrate it, forever. Seats are capped at
 
 ## Why committing sweep configs adds nothing
 
-A launched run's config provenance already lives in three places, none of them
+A launched run's config provenance already lives in two places, neither of them
 the repo tree:
 
 1. the run dir's pinned `launch_config.yaml` (immutable; resume byte-compares it),
-2. the git snapshot ref `refs/runs/snapshot/<id>` taken at submit,
-3. the wandb run config.
+2. the wandb run config.
 
 So a sweep/profile/one-off yaml committed "for the record" records nothing —
-it only rots. Launch one-offs from your workspace
-(`python -m param_decomp.experiments.lm.run <path>` takes any path); if the
-sweep matters, its lore finding cites the run ids, and the run dirs carry the
-exact configs.
+it only rots. Keep one-offs in your own workspace (the composition roots take a
+config at any path); if the sweep matters, whatever you write up cites the run
+ids, and the run dirs carry the exact configs.
 
 ## The canonical seats
 
 | seat | file | purpose |
 |---|---|---|
-| llama8b L18 | `param_decomp/core/configs/llama8b_l18_C49k_200k.yaml` | the L18-MLP decomposition flagship recipe |
-| llama8b full-model | `param_decomp/core/configs/llama8b_full32L_HSDP_b64_dp64.yaml` | the full-32L production recipe (HSDP tp=1, dp64 — the tp>1/dp128 seats died with the tp=8 PPGD-source pathology; validated on 8×H100 nodes) |
-| save-path smoke | `param_decomp/core/configs/llama8b_full32L_HSDP_b32_dp32_SAVESMOKE.yaml` | cheap end-to-end save/resume smoke launch |
-| config-suite fixture | `param_decomp/core/configs/llama8b_l18_b128_cmp32.yaml` | the representative full config the core config/resume tests load (`test_config.py`, `test_finetune_resume.py`, `test_llama_simple_mlp.py`) |
-| chunkwise fixture | `param_decomp/core/configs/llama8b_l18-26_9layer_chunkwise.yaml` | the 27-site chunkwise CI-fn config `test_config.py` converts |
-| ss 2L SimpleMLP | `param_decomp/experiments/lm/ss_llama_simple_mlp-2L.yaml` | small-LM regression archetype — **unrunnable at tip**, see below |
-| pile 4L VPD reference | `param_decomp/experiments/lm/pile_llama_simple_mlp-4L.yaml` | current JAX reference for the VPD paper target; reproduces [p-76082aa1](https://wandb.ai/goodfire/param-decomp/runs/p-76082aa1) |
+| llama8b L18 | `param_decomp/experiments/lm/configs/llama8b_l18_C49k_200k.yaml` | the L18-MLP decomposition flagship recipe |
+| llama8b full-model | `param_decomp/experiments/lm/configs/llama8b_full32L_HSDP_b64_dp64.yaml` | the full-32L production recipe (HSDP tp=1, dp64 — the tp>1/dp128 seats died with the tp=8 PPGD-source pathology; validated on H100s) |
+| save-path smoke | `param_decomp/experiments/lm/configs/llama8b_full32L_HSDP_b32_dp32_SAVESMOKE.yaml` | cheap end-to-end save/resume smoke launch |
+| config-suite fixture | `param_decomp/experiments/lm/configs/llama8b_l18_b128_cmp32.yaml` | the representative full config the core config/resume tests load (`test_config.py`, `test_finetune_resume.py`, `test_llama_simple_mlp.py`) |
+| chunkwise fixture | `param_decomp/experiments/lm/configs/llama8b_l18-26_9layer_chunkwise.yaml` | the 27-site chunkwise CI-fn config `test_config.py` converts |
+| ss 2L SimpleMLP | `param_decomp/experiments/lm/configs/ss_llama_simple_mlp-2L.yaml` | current JAX reference for the 2L SimpleStories VPD target (dp=1); reproduces [p-5926d125](https://wandb.ai/goodfire/param-decomp-ss2l-repro/runs/p-5926d125) |
+| pile 4L VPD reference | `param_decomp/experiments/lm/configs/pile_llama_simple_mlp-4L.yaml` | current JAX reference for the VPD paper target; reproduces [p-76082aa1](https://wandb.ai/goodfire/param-decomp/runs/p-76082aa1) |
 
 The toy testbeds (`param_decomp/experiments/tms/configs/`,
 `param_decomp/experiments/resid_mlp/configs/`) and the pretrain configs
 (`param_decomp/pretrain/configs/`) are separate small schemas, maintained with
 their experiments; they are seats too, just not LM-schema ones.
 
-## The unrunnable seat
+## The pre-JAX archetypes
 
-`ss_llama_simple_mlp-2L.yaml` predates the modern schema: its `pd.ci_config`
-asks for `mode: global` / `fn_type: global_shared_transformer`, and the JAX
-trainer has no global-shared-transformer CI function — the name survives only
-in the torch reference (`nano_param_decomp/run.py`). It is not *unmigrated*;
-it is **not migratable as written**. Making it parse means either implementing
-a global CI fn in the JAX stack or deliberately changing its research meaning.
-It is quarantined in `KNOWN_BROKEN` in
-`param_decomp/tests/test_repo_configs_parse.py`, which asserts it still fails
-(so the list can't silently rot) and must only ever shrink.
+Three seats reached tip with a `pd.ci_config` asking for `mode: global` /
+`fn_type: global_shared_transformer`, a CI function the JAX trainer never
+gained (the name survives only in the torch reference,
+`nano_param_decomp/run.py`) — not *unmigrated* but **not migratable as
+written**. Two are now the JAX reference configs in the table above, each
+rewritten onto a `chunkwise_transformer` CI function and revalidated by a
+completed run: pile-4L on 2026-07-27, ss-2L on 2026-07-30. Neither reproduces
+the paper's own PyTorch decomposition — its Lp importance-minimality objective
+is gone from this codebase, so no config can express it.
 
-The former pile-4L seat shared this story until 2026-07-27: it is now the
-current JAX reference config (table above), rewritten from and validated by
-the completed JAX reference run.
-
-Two former seats shared this story and were evicted on 2026-07-23 ("Remove
-unused configs"; git history keeps the files): the original gpt2-arch 4L
-flagship reference (unrunnable at tip for the reason above) and its deliberate
-rewrite onto one `chunkwise_transformer` chunk over all 4 blocks — the direct
-ancestor of the current reference config.
+The third, `jose.yaml` (the original gpt2-arch 4L flagship reference), was
+evicted on 2026-07-23 ("Remove unused configs") along with `jose-ish.yaml`
+(#917 — the deliberate rewrite of that recipe onto one `chunkwise_transformer`
+chunk over all 4 blocks); git history keeps both.
 
 ## Rules
 
 1. **Every LM config yaml in the tree parses at tip** — CI-enforced by
-   `param_decomp/tests/test_repo_configs_parse.py` (schema parse +
-   `assert_canonical_algorithm_config`). A schema PR that breaks one migrates
+   `param_decomp/tests/test_repo_configs_parse.py` (schema parse + the placement
+   gate). A schema PR that breaks one migrates
    it **in the same PR**, with an executed in-repo migration (the #966
    pattern) — never a script attached to a PR comment (#939 attached one; it
    never ran, and 97 of 104 stored runs became unopenable before anyone
@@ -79,9 +72,12 @@ ancestor of the current reference config.
    basename first.
 4. **Stored-run pins are immutable.** Never migrate a run dir's
    `launch_config.yaml` in place (resume byte-compares it; a live old-code run
-   whose pin is rewritten refuses its next requeue). Consumers must not
-   require a full-schema parse of stored pins — they parse only the fields
-   they read (`ConsumerRunConfig`, PR #952).
+   whose pin is rewritten refuses its next requeue). Consumers reparse stored
+   pins against the full canonical schema
+   (`experiments/lm/config.py::load_config`, via `load_run.py`), so a pin from
+   an older schema opens at its original revision or through an explicit
+   external converter — tip does not migrate it (dataset-name case history
+   below).
 5. **Seats carry names, never locations** (the portability rule — root
    CLAUDE.md, "Configs are portable"). No absolute path appears in a committed
    config outside a tagged escape arm (`kind: dir`) — CI-enforced by the parse
@@ -94,12 +90,19 @@ ancestor of the current reference config.
 - **#966**: the counter-example — carve migration shipped as an in-repo,
   executed tool covering every live repo yaml.
 - **#982**: 25 sweep yamls in one PR — the accumulation pattern this policy
-  ends. The sweeps' findings live in lore; the run dirs pin their configs.
+  ends. The sweeps' findings were written up outside the tree; the run dirs pin
+  their configs.
+- **pretrain dataset-name schema** (2026-07-31): the pretrain seats' absolute
+  `data.dir` + duplicated `tokenizer_name` became the same `{kind: name, name}` reference
+  the LM decomposition seats use. The caller supplies `data_root`; the dataset store's
+  `meta.json` remains the tokenizer authority.
 - **dataset-name schema** (2026-07-27): the whole HF-costume `data:` block →
-  `data: {kind: name, name} | {kind: dir, dir}` — the block IS the dataset ref. The dataset's own facts
+  `data: {kind: name, name} | {kind: dir, dir}` — the block IS the dataset ref
+  (2026-07-30: nested to `data: {train, eval}`, each a dataset ref; `eval` is the held-out
+  split the eval pass reads, None = eval reads the training shards). The dataset's own facts
   (`seq_len`, `tokenizer_name`) moved into its `meta.json` (`infra.dataset_store.DatasetMeta`),
-  read at load; every seat re-stamped in the same PR; stored pins (immutable, rule 4)
-  migrate on load via `migrate_glob_pin_data`.
+  read at load; every seat re-stamped in the same PR. Older immutable pins require
+  their original revision or an explicit external converter; tip does not migrate them.
 - **#23** (2026-07-16): SwiGLU / FFN-as-its-own-config migrated all 30
   `param_decomp/configs/` yamls in one commit — the same 8-line edit applied
   30 times, ~26 of them to launched one-offs nobody will open again. The tax

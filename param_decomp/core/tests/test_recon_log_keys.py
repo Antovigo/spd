@@ -7,7 +7,7 @@ Two emit paths feed `train/loss/*`:
   * Recon terms — arrive from the jitted step already shaped `loss/<term.name>`
     (`train.py`), then `train/`-prefixed by the sink.
 
-`term.name` is set by `recon.build_loss_terms` to `cfg.name or cfg.type`. Torch's
+`term.name` is set by `objective.build_objective` to `cfg.name or cfg.type`. Torch's
 `Metric.instance_key` is `cfg.name or type(self).__name__`. They agree byte-for-byte
 because torch's `LOSS_METRIC_CLASSES` is keyed by `cls.__name__` and dispatch does
 `LOSS_METRIC_CLASSES[cfg.type](cfg)` — so torch can only run a config whose `type`
@@ -32,7 +32,8 @@ from param_decomp.core.configs import (
     StochasticReconSubsetLossConfig,
     UnmaskedReconLossConfig,
 )
-from param_decomp.core.recon import ReconLossTerm, build_loss_terms
+from param_decomp.core.objective import build_objective
+from param_decomp.core.recon import ReconLossTerm
 from param_decomp.core.schedule import ScheduleConfig
 
 SITE_NAMES = ("h.0.mlp.c_fc", "h.0.mlp.down_proj")
@@ -40,7 +41,7 @@ SITE_NAMES = ("h.0.mlp.c_fc", "h.0.mlp.down_proj")
 
 def _persistent_optimizer() -> AdamPGDConfig:
     # `_assert_supported_persistent` requires a constant, full-value lr schedule.
-    return AdamPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1, fn_type="constant"))
+    return AdamPGDConfig(lr_schedule=ScheduleConfig.constant(0.1))
 
 
 # Every recon loss config this trainer implements, one instance each. Order is
@@ -53,12 +54,26 @@ RECON_CONFIGS = (
     StochasticReconLossConfig(coeff=1.0),
     StochasticReconLayerwiseLossConfig(coeff=1.0),
     StochasticReconSubsetLossConfig(coeff=1.0),
-    PGDReconLossConfig(coeff=1.0, init="random", step_size=0.1, n_steps=1, source_shape="bsc"),
+    PGDReconLossConfig(
+        coeff=1.0,
+        init="random",
+        step_size=0.1,
+        n_steps=1,
+        source_shape="bsc",
+    ),
     PGDReconLayerwiseLossConfig(
-        coeff=1.0, init="random", step_size=0.1, n_steps=1, source_shape="bsc"
+        coeff=1.0,
+        init="random",
+        step_size=0.1,
+        n_steps=1,
+        source_shape="bsc",
     ),
     PGDReconSubsetLossConfig(
-        coeff=1.0, init="random", step_size=0.1, n_steps=1, source_shape="bsc"
+        coeff=1.0,
+        init="random",
+        step_size=0.1,
+        n_steps=1,
+        source_shape="bsc",
     ),
     PersistentPGDReconLossConfig(coeff=1.0, optimizer=_persistent_optimizer(), source_shape="sc"),
 )
@@ -67,14 +82,12 @@ RECON_CONFIGS = (
 def _non_recon_configs() -> tuple[FaithfulnessLossConfig, ImportanceMinimalityLossConfig]:
     return (
         FaithfulnessLossConfig(coeff=1.0),
-        ImportanceMinimalityLossConfig(
-            coeff=1.0, pnorm=ScheduleConfig(start_val=0.9, fn_type="constant")
-        ),
+        ImportanceMinimalityLossConfig(coeff=1.0, pnorm=ScheduleConfig.constant(0.9)),
     )
 
 
 def _recon_terms(recon_configs: tuple[object, ...]) -> tuple[ReconLossTerm, ...]:
-    terms = build_loss_terms(
+    terms = build_objective(
         (*_non_recon_configs(), *recon_configs),  # pyright: ignore[reportArgumentType]
         site_names=SITE_NAMES,
     )

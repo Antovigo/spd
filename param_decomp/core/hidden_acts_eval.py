@@ -75,7 +75,7 @@ def _waist_leading(ci_lower: dict[str, Array], site_names: tuple[str, ...]) -> t
 
 
 def make_ci_hidden_acts_step(
-    model_static: DecomposedModel, compiler_options: dict[str, bool | int | str] | None = None
+    model_static: DecomposedModel, compiler_options: dict[str, bool | int | str]
 ) -> HiddenActsStep:
     """Deterministic CI-mask hidden-acts step: `lower_leaky` CI, no delta, one forward."""
     site_names = model_static.site_names
@@ -113,7 +113,7 @@ def make_ci_hidden_acts_step(
 def make_stochastic_hidden_acts_step(
     model_static: DecomposedModel,
     n_mask_samples: int,
-    compiler_options: dict[str, bool | int | str] | None = None,
+    compiler_options: dict[str, bool | int | str],
 ) -> HiddenActsStep:
     """Stochastic-mask hidden-acts step: `n_mask_samples` draws of `mask = ci + (1−ci)·s`
     (with weight deltas), per-draw per-site MSE summed. RNG via per-draw / per-site

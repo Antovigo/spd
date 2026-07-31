@@ -39,22 +39,25 @@ def _shard_token_count(path: Path, seq_len: int) -> int:
 def prestage(
     *,
     out_dir: str,
-    num_files: int = 366,
-    task_id: int = 0,
-    num_tasks: int = 1,
-    dataset_repo: str = "HuggingFaceFW/fineweb",
-    subdir: str = "sample/350BT",
-    revision: str = "9bb295ddab0e05d785b879661af7260fed5140fc",
-    tokenizer_name: str = "meta-llama/Llama-3.1-8B",
-    seq_len: int = 2048,
-    column_name: str = "text",
-    num_proc: int = 96,
+    num_files: int,
+    skip_files: int,
+    task_id: int,
+    num_tasks: int,
+    dataset_repo: str,
+    subdir: str,
+    revision: str,
+    tokenizer_name: str,
+    seq_len: int,
+    column_name: str,
+    num_proc: int,
 ) -> None:
-    """Tokenize the first `num_files` source parquet files into int32 shards.
+    """Tokenize `num_files` source parquet files, starting at `skip_files`, into int32
+    shards. A disjoint eval split is `skip_files` set past the training split's file
+    range, into the same `dataset_repo`.
 
     Fan-out: task `task_id` of `num_tasks` processes the strided slice
     `range(task_id, num_files, num_tasks)`; shards are named by GLOBAL file index so
-    tasks never collide. ~366 files of `sample/350BT` ≈ 256B tokens ≈ 512GB on disk
+    tasks never collide. For scale: 366 files of fineweb `sample/350BT` ≈ 256B tokens ≈ 512GB on disk
     (int32 with ~2x parquet compression).
     Interruption-safe (scavenge): writes are atomic (`.tmp` + rename) and resume skips
     any already-complete shard, so a preempted+requeued task continues cleanly.
@@ -71,11 +74,13 @@ def prestage(
         if f.startswith(f"{subdir}/") and f.endswith(".parquet")
     )
     assert files, f"no parquet files under {subdir} in {dataset_repo}@{revision}"
-    num_files = min(num_files, len(files))
-    my_indices = list(range(task_id, num_files, num_tasks))
+    assert skip_files < len(files), f"skip_files={skip_files} >= {len(files)} available"
+    num_files = min(num_files, len(files) - skip_files)
+    my_indices = list(range(skip_files + task_id, skip_files + num_files, num_tasks))
     logger.info(
         f"task {task_id}/{num_tasks}: {len(files)} files available, processing "
-        f"{len(my_indices)} of the first {num_files} (indices {my_indices[:3]}...)"
+        f"{len(my_indices)} of files [{skip_files}, {skip_files + num_files}) "
+        f"(indices {my_indices[:3]}...)"
     )
 
     for i in my_indices:

@@ -1,10 +1,12 @@
 """The layering rule, as a test: subpackages of `param_decomp` import only DOWNWARD.
 
 `param_decomp` is JUST a library — mostly pure functions, mostly logic; everything
-infra-ish (schedulers, submission, cluster paths, code-shipping) lives in the private
-wrapper (`param_decomp_goodfire`), which imports the library and never vice versa
-(pinned by the head check below: `param_decomp_goodfire` is a forbidden import root
-everywhere in the library). The full principle is codified in the root CLAUDE.md,
+infra-ish (schedulers, submission, cluster paths, code-shipping) belongs to whatever
+launcher invokes it. A launcher may import the library; the library may never import a
+launcher. `param_decomp_goodfire` is the deployment wrapper this library is run under
+in-house, and the head check below names it a forbidden import root everywhere in the
+library — so the direction stays pinned whether or not that package is installed
+alongside. The full principle is codified in the root CLAUDE.md,
 "The library rule". Within it, the library is enumerated layers. Each subpackage declares the
 `param_decomp.*` prefixes it may import (`_LAYER_ALLOWED`); anything outside that set —
 including `torch`, banned everywhere (the runtime is JAX; the torch oracle lives at git
@@ -39,7 +41,17 @@ Tightening these to real per-layer sets is deliberate follow-up work."""
 _LAYER_ALLOWED: dict[str, tuple[str, ...]] = {
     "vendored_jax": ("param_decomp.vendored_jax",),
     "core": ("param_decomp.core", "param_decomp.vendored_jax"),
-    "pretrain": ("param_decomp.core", "param_decomp.pretrain", "param_decomp.vendored_jax"),
+    # `pretrain/train.py` is a composition root with its own `__main__`, so it reads the
+    # two pure contracts every composition root reads: the dataset store's layout + ref
+    # schema, and the data-root default. Named module by module — the rest of `infra`
+    # (wandb, run files, submission) stays firmly above this layer.
+    "pretrain": (
+        "param_decomp.core",
+        "param_decomp.infra.dataset_store",
+        "param_decomp.infra.paths",
+        "param_decomp.pretrain",
+        "param_decomp.vendored_jax",
+    ),
     "targets": ("param_decomp.core", "param_decomp.targets", "param_decomp.vendored_jax"),
     "adapters": _ANY,
     "autointerp": _ANY,

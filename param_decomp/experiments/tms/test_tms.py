@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from param_decomp.core.ci_fn import CI, MLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.core.ci_fn import CI, LayerwiseMLPCIArch, init_layerwise_mlp_ci_fn
 from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, init_component_stacks
 from param_decomp.core.configs import (
     FaithfulnessLossConfig,
@@ -24,7 +24,8 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
 )
 from param_decomp.core.model import DecomposedModel
-from param_decomp.core.recon import build_loss_terms
+from param_decomp.core.objective import build_objective
+from param_decomp.core.recon_eval import FreshPGDReconEval, make_fresh_pgd_eval_step
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
@@ -82,7 +83,9 @@ def test_positionless_and_ci_fn_position_kind_match():
     sites = site_specs(cfg, _site_cs())
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
     model = tms_decomposed_model(cfg, target, sites)
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(0))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(0)
+    )
     assert not model.has_position_axis
     assert not ci_fn.has_position_axis
 
@@ -151,7 +154,9 @@ def test_mlp_ci_fn_per_site_logits_and_values():
     sites = site_specs(cfg, _site_cs())
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
     model = tms_decomposed_model(cfg, target, sites)
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(3))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(3)
+    )
     b = 7
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
@@ -186,7 +191,7 @@ def _loss_metrics():
         FaithfulnessLossConfig(coeff=1e3),
         ImportanceMinimalityLossConfig(
             coeff=3e-3,
-            pnorm=ScheduleConfig(start_val=1.0, fn_type="constant"),
+            pnorm=ScheduleConfig.constant(1.0),
         ),  # fmt: skip
         StochasticReconLossConfig(coeff=1.0),
         StochasticReconLayerwiseLossConfig(coeff=1.0),
@@ -198,7 +203,9 @@ def _make_state_and_step(
 ) -> tuple[DecomposedModel, TrainState, Callable[..., tuple[TrainState, dict[str, jax.Array]]]]:
     model = tms_decomposed_model(cfg, target, sites)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(2))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(2)
+    )
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
     state = TrainState(
@@ -209,12 +216,37 @@ def _make_state_and_step(
             adversaries={}, step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(_loss_metrics(), model.site_names)
+    loss_terms = build_objective(_loss_metrics(), model.site_names)
     step = make_train_step(
         model_static=model, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None,
+        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None, compiler_options={},
     )  # fmt: skip
     return model, state, step
+
+
+def test_fresh_pgd_eval_runs_on_positionless_tms() -> None:
+    cfg = _tiny_cfg()
+    sites = site_specs(cfg, _site_cs())
+    target = init_tms_target(cfg, jax.random.PRNGKey(0))
+    model, state, _ = _make_state_and_step(cfg, target, sites, total_steps=20)
+    batch = sample_sparse_features(
+        jax.random.PRNGKey(3), 16, cfg.n_features, 0.3, "at_least_zero_active"
+    )
+    eval_step = make_fresh_pgd_eval_step(
+        model, FreshPGDReconEval(n_steps=2, step_size=0.1), mesh=None, compiler_options={}
+    )
+
+    value = eval_step(
+        model,
+        state.decomposition.components,
+        state.decomposition.ci_fn,
+        batch,
+        jax.random.PRNGKey(4),
+    )
+
+    assert value.shape == ()
+    assert jnp.isfinite(value)
+    assert value >= 0.0
 
 
 def test_step_trains_positionless_no_persistent_sources():
@@ -247,7 +279,7 @@ def test_faith_warmup_decreases_faith():
     model = tms_decomposed_model(cfg, target, sites)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt)
+    wstep = make_faith_warmup_step(opt, compiler_options={})
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss = None
     loss = None
@@ -279,7 +311,7 @@ def _recovery_loss_metrics():
         FaithfulnessLossConfig(coeff=1.0),
         ImportanceMinimalityLossConfig(
             coeff=3e-3,
-            pnorm=ScheduleConfig(start_val=1.0, fn_type="constant"),
+            pnorm=ScheduleConfig.constant(1.0),
         ),  # fmt: skip
         StochasticReconLossConfig(coeff=1.0),
         StochasticReconLayerwiseLossConfig(coeff=1.0),
@@ -295,9 +327,11 @@ def _faith_warmed_state(
     """Build a train state, run faith warmup (TMS needs it — the from-scratch V/U start
     far from `W`), then return state + step factory."""
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(2))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(2)
+    )
     warm_opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(warm_opt)
+    wstep = make_faith_warmup_step(warm_opt, compiler_options={})
     warm_state = warm_opt.init(eqx.filter(vu, eqx.is_array))
     for _ in range(warmup_steps):
         vu, warm_state, _ = wstep(model, vu, warm_state)
@@ -311,10 +345,10 @@ def _faith_warmed_state(
             adversaries={}, step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(_recovery_loss_metrics(), model.site_names)
+    loss_terms = build_objective(_recovery_loss_metrics(), model.site_names)
     step = make_train_step(
         model_static=model, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None,
+        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None, compiler_options={},
     )  # fmt: skip
     return state, step
 

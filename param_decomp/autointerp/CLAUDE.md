@@ -1,5 +1,8 @@
 # Autointerp Module
 
+
+> This package is the in-job compute for this stage: worker module mains you run directly, inside whatever allocation your scheduler gave you. Nothing here submits or schedules a job.
+
 LLM-based automated interpretation of PD components. Consumes pre-harvested data from `param_decomp/harvest/` (see `param_decomp/harvest/CLAUDE.md`).
 
 ## Usage
@@ -8,7 +11,7 @@ Autointerp requires harvest data to already exist (see [`../harvest/CLAUDE.md`](
 every CLI takes a `--harvest_subrun_id`.
 
 ```bash
-# One process, inline JSON config (a deployment's SLURM submitter typically wraps this)
+# One process, inline JSON config
 python -m param_decomp.autointerp.scripts.run_interpret <decomposition_id> \
     --config_json '{...AutointerpConfig...}' \
     --harvest_subrun_id h-YYYYMMDD_HHMMSS

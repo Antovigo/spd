@@ -18,7 +18,7 @@ import pytest
 from param_decomp.core.ci_fn import (
     CI,
     GlobalMLPCIArch,
-    MLPCIArch,
+    LayerwiseMLPCIArch,
     init_global_mlp_ci_fn,
     init_layerwise_mlp_ci_fn,
 )
@@ -30,7 +30,7 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
 )
 from param_decomp.core.model import DecomposedModel
-from param_decomp.core.recon import build_loss_terms
+from param_decomp.core.objective import build_objective
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
@@ -115,7 +115,9 @@ def test_positionless_and_ci_fn_position_kind_match():
     sites = site_specs(cfg, _site_cs())
     target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
     model = resid_mlp_decomposed_model(cfg, target, sites)
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(0))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(0)
+    )
     assert not model.has_position_axis
     assert not ci_fn.has_position_axis
 
@@ -202,7 +204,9 @@ def test_mlp_ci_fn_per_site_logits_and_values():
     sites = site_specs(cfg, _site_cs())
     target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
     model = resid_mlp_decomposed_model(cfg, target, sites)
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(3))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(3)
+    )
     b = 7
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
@@ -236,7 +240,7 @@ def _loss_metrics():
         FaithfulnessLossConfig(coeff=1e3),
         ImportanceMinimalityLossConfig(
             coeff=3e-3,
-            pnorm=ScheduleConfig(start_val=1.0, fn_type="constant"),
+            pnorm=ScheduleConfig.constant(1.0),
         ),  # fmt: skip
         StochasticReconLossConfig(coeff=1.0),
         StochasticReconLayerwiseLossConfig(coeff=1.0),
@@ -248,7 +252,9 @@ def _make_state_and_step(
 ) -> tuple[DecomposedModel, TrainState, Callable[..., tuple[TrainState, dict[str, jax.Array]]]]:
     model = resid_mlp_decomposed_model(cfg, target, sites)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(2))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(2)
+    )
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
     state = TrainState(
@@ -259,10 +265,10 @@ def _make_state_and_step(
             adversaries={}, step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(_loss_metrics(), model.site_names)
+    loss_terms = build_objective(_loss_metrics(), model.site_names)
     step = make_train_step(
         model_static=model, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None,
+        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None, compiler_options={},
     )  # fmt: skip
     return model, state, step
 
@@ -295,7 +301,7 @@ def test_faith_warmup_decreases_faith():
     model = resid_mlp_decomposed_model(cfg, target, sites)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt)
+    wstep = make_faith_warmup_step(opt, compiler_options={})
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss = None
     loss = None
@@ -337,7 +343,7 @@ def _recovery_loss_metrics():
         FaithfulnessLossConfig(coeff=1.0),
         ImportanceMinimalityLossConfig(
             coeff=3e-3,
-            pnorm=ScheduleConfig(start_val=1.0, fn_type="constant"),
+            pnorm=ScheduleConfig.constant(1.0),
         ),  # fmt: skip
         StochasticReconLossConfig(coeff=1.0),
         StochasticReconLayerwiseLossConfig(coeff=1.0),
@@ -351,9 +357,11 @@ def _faith_warmed_state(
     warmup_steps: int,
 ) -> tuple[TrainState, Callable[..., tuple[TrainState, dict[str, jax.Array]]]]:
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    ci_fn = init_layerwise_mlp_ci_fn(MLPCIArch(hidden_dims=(16,)), sites, jax.random.PRNGKey(2))
+    ci_fn = init_layerwise_mlp_ci_fn(
+        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(2)
+    )
     warm_opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(warm_opt)
+    wstep = make_faith_warmup_step(warm_opt, compiler_options={})
     warm_state = warm_opt.init(eqx.filter(vu, eqx.is_array))
     for _ in range(warmup_steps):
         vu, warm_state, _ = wstep(model, vu, warm_state)
@@ -367,10 +375,10 @@ def _faith_warmed_state(
             adversaries={}, step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(_recovery_loss_metrics(), model.site_names)
+    loss_terms = build_objective(_recovery_loss_metrics(), model.site_names)
     step = make_train_step(
         model_static=model, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None,
+        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None, compiler_options={},
     )  # fmt: skip
     return state, step
 
@@ -430,7 +438,7 @@ def test_global_ci_fn_shapes_and_range():
     target = init_resid_mlp_target(cfg, jax.random.PRNGKey(0))
     model = resid_mlp_decomposed_model(cfg, target, sites)
     ci_fn = init_global_mlp_ci_fn(
-        GlobalMLPCIArch(hidden_dims=(32, 24)), sites, jax.random.PRNGKey(3)
+        GlobalMLPCIArch(hidden_dims=(32, 24), has_position_axis=False), sites, jax.random.PRNGKey(3)
     )
     assert not ci_fn.has_position_axis and not model.has_position_axis
     b = 7
@@ -451,7 +459,9 @@ def test_global_ci_fn_concat_split_order_is_canonical():
     # the input dict is keyed (concat/split follow the static canonical site order).
     cfg = _tiny_cfg(n_layers=2)
     sites = site_specs(cfg, _site_cs(n_layers=2))
-    ci_fn = init_global_mlp_ci_fn(GlobalMLPCIArch(hidden_dims=(40,)), sites, jax.random.PRNGKey(4))
+    ci_fn = init_global_mlp_ci_fn(
+        GlobalMLPCIArch(hidden_dims=(40,), has_position_axis=False), sites, jax.random.PRNGKey(4)
+    )
     b = 5
     inputs = {s.name: jax.random.normal(jax.random.fold_in(jax.random.PRNGKey(9), i), (b, s.d_in))
               for i, s in enumerate(sites)}  # fmt: skip

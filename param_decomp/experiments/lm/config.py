@@ -2,10 +2,10 @@
 tree) PLUS the LM YAML→`BuiltRun` conversion.
 
 This module reads the canonical `LMExperimentConfig` schema directly and builds the engine's
-`BuiltRun` bundle (`param_decomp.core.built_run`) — the pydantic `pd` / `cadence` / `runtime`
+`BuiltRun` bundle (`param_decomp.core.built_run`) — the pydantic `pd` / `cadence`
 verbatim plus the resolved target / data / CI-fn arch / eval — asserting loudly on anything
 the JAX trainer doesn't implement. The composition entry (`run.py`) calls `load_config` /
-`build_from_schema`; consumers that read a finished run dir call `load_run_dir_config`.
+`build_from_schema`; stored-run consumers rebuild the same canonical schema.
 
 The authored `decomposition.sites` c-specs (`GluTransformerCSpec` / `SimpleMlpCSpec`, keys
 typed by each target family's own matrix vocabulary) resolve here into the block-structured
@@ -15,24 +15,21 @@ of a site name — which the chunkwise CI resolver consumes directly.
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Literal, Self
+from pathlib import Path
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 import yaml
-from pydantic import Discriminator, Field, NonNegativeInt, PositiveInt, model_validator
+from pydantic import (
+    Discriminator,
+    Field,
+    NonNegativeInt,
+    PositiveInt,
+    model_validator,
+)
 
 from param_decomp.core import placement
 from param_decomp.core.base_config import BaseConfig
-from param_decomp.core.built_run import (
-    LAUNCH_CONFIG_FILENAME,
-    ArithmeticEvalConfig,
-    AttnPatternsEvalConfig,
-    BuiltRun,
-    DataConfig,
-    EvalConfig,
-    EvalPGDConfig,
-    WeightsDtype,
-)
+from param_decomp.core.built_run import BuiltRun
 from param_decomp.core.ci_fn import (
     Chunk,
     ChunkwiseTransformerCIArch,
@@ -40,26 +37,24 @@ from param_decomp.core.ci_fn import (
     MHACIAttention,
 )
 from param_decomp.core.components import SiteC, SiteSpec
-from param_decomp.core.configs import (
-    ArithmeticCIGridConfig,
-    CEandKLLossesConfig,
-    CI_L0Config,
-    CIHistogramsConfig,
-    CIMaskedAttnPatternsReconLossConfig,
-    ComponentActivationDensityConfig,
-    PGDReconLossConfig,
-    StochasticAttnPatternsReconLossConfig,
-)
+from param_decomp.core.configs import ResumeProvenance
 from param_decomp.core.family import ArchFamily
-from param_decomp.core.recon import build_loss_terms
+from param_decomp.core.objective import build_objective
 from param_decomp.core.sharding import hsdp_abstract_mesh
 from param_decomp.experiments.config import (
     ExperimentConfig,
-    assert_canonical_algorithm_config,
     run_instance,
 )
+from param_decomp.experiments.eval_config import EvalConfig
+from param_decomp.experiments.lm.resolved import (
+    LMRun,
+    ResolvedLMData,
+    WeightsDtype,
+)
+from param_decomp.experiments.lm.runtime import RuntimeConfig
 from param_decomp.infra import pretrain_cache
-from param_decomp.infra.dataset_store import dataset_dir
+from param_decomp.infra.dataset_store import DatasetRef, resolve_dataset_ref
+from param_decomp.migrations.schedule_knots import migrate_raw as migrate_schedule_knots
 from param_decomp.targets import glu_transformer, llama8b, llama_simple_mlp, qwen3_8b
 from param_decomp.targets.glu_transformer import GluMatrix
 from param_decomp.targets.llama_simple_mlp import SimpleMlpMatrix
@@ -87,15 +82,14 @@ class PretrainedTarget(BaseConfig):
 
 
 class HFWeightsInVendored(BaseConfig):
-    """Load HF pretrained weights into a vendored `param_decomp.experiments.lm.pretrain.models.*`
-    architecture via `<class>.from_hf_pretrained(<hub_id>)`.
+    """Load HF pretrained weights into the vendored `VendoredLlama` architecture.
 
-    Useful when the decomposition target needs structural changes vs HF — e.g.
-    `GPT2Simple`'s separate q/k/v projections vs HF's fused `c_attn`.
+    Llama-3.1-8B only — `_resolve_decomposition` asserts the class and model name;
+    other HF families go through `kind: hf`.
     """
 
     kind: Literal["hf_weights_in_vendored"] = "hf_weights_in_vendored"
-    model_class: str  # must expose `from_hf_pretrained`
+    model_class: str  # must be `VendoredLlama`
     model_name: str  # HF hub id
 
 
@@ -109,72 +103,31 @@ class LMTargetConfig(BaseConfig):
     """Config for the LM target model."""
 
     spec: LMTargetSpec
-    weights_dtype: Literal["float32", "bfloat16"] = "float32"
-    """dtype for the FROZEN target weights. `bfloat16` halves the target's resident footprint
-    on every pool (the dominant resident term for an 8B target) — for natively-bf16 models the
-    matmuls already run bf16 under autocast, so this only changes residual/norm accumulation
-    precision (a clean-logit KL shift negligible vs recon KLs).
-    Only the frozen target is cast; trained V/U components stay fp32 (their AdamW master)."""
+    weights_dtype: WeightsDtype
+    """dtype for the FROZEN target weights. Only the frozen target is cast; trained V/U
+    components keep their fp32 AdamW master.
 
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_removed_torch_era_fields(cls, data: object) -> object:
-        # Shared-storage back-compat: `output_extract` / `activation_checkpointing` were
-        # torch-era fields the JAX path never reads (the JAX prediction tensor is always the
-        # final logits; remat is `runtime.remat_recon_forwards`). Drop them so stored run
-        # configs and the live yamls that still set them load.
-        if isinstance(data, dict):
-            data.pop("output_extract", None)
-            data.pop("activation_checkpointing", None)
-        return data
+    `bfloat16` halves the target's resident footprint on every pool — the dominant resident
+    term for an 8B target — and for a natively-bf16 checkpoint costs nothing beyond
+    residual/norm accumulation precision.
+
+    `float32` is a genuine option but not a free one: the masked forward promotes where
+    fp32 frozen weights meet the bf16 compute V/U, so the whole recon forward runs fp32.
+    That is ~2x the activation memory, and it drops off cuDNN flash attention
+    (`vendored_jax.llama.attn_implementation` selects it only for the half precisions), so
+    the [B, H, T, T] scores materialize. A reference-run dtype, not a production one.
+
+    Deliberately has no default: it is the largest single memory decision in the config,
+    and a stored config that omitted it could not say how its run was trained."""
 
 
-class NamedDataset(BaseConfig):
-    """A dataset in the store: shards + `meta.json` at `<data_root>/datasets/<name>`.
-    Names are immutable versions — a changed dataset is a new name."""
+class LMDataConfig(BaseConfig):
+    """The run's data: `train` feeds the trainer; `eval` is the held-out split the eval
+    pass reads. Each ref's facts (seq_len, tokenizer) ride with its shards as `meta.json`
+    (`param_decomp.infra.dataset_store`), read at load."""
 
-    kind: Literal["name"] = "name"
-    name: str
-
-    @model_validator(mode="after")
-    def _flat_name(self) -> Self:
-        assert self.name and "/" not in self.name and "*" not in self.name, (
-            f"dataset names are flat store names: {self.name!r}"
-        )
-        return self
-
-
-class DatasetDir(BaseConfig):
-    """Ad-hoc escape hatch: an explicit directory of `*.parquet` shards. Machine-specific
-    by nature, so the path must be absolute; a named store dataset is the portable form."""
-
-    kind: Literal["dir"] = "dir"
-    dir: Path
-
-    @model_validator(mode="after")
-    def _absolute(self) -> Self:
-        assert self.dir.is_absolute(), f"ad-hoc shard dirs are absolute paths: {self.dir}"
-        return self
-
-
-DatasetRef = Annotated[NamedDataset | DatasetDir, Discriminator("kind")]
-
-
-def migrate_glob_pin_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Stored-pin back-compat (pins are immutable, CONFIGS.md rule 4): a pin written
-    before the dataset-name schema carries HF-loader-shaped fields (`dataset_name:
-    parquet` + a `data_files` glob). Recover the `DatasetRef` dict from the glob; the
-    dropped fields were never read by the loader, and the two real facts (`max_seq_len`,
-    `tokenizer_name`) now live in the dataset's `meta.json`."""
-    assert data.get("dataset_name") == "parquet", data
-    glob = PurePosixPath(data["data_files"])
-    assert glob.name == "*.parquet", f"expected a *.parquet glob: {glob}"
-    if glob.is_absolute():
-        return {"kind": "dir", "dir": str(glob.parent)}
-    assert glob.parts[0] == "datasets" and len(glob.parts) == 3, (
-        f"relative shard globs live under datasets/<name>/: {glob}"
-    )
-    return {"kind": "name", "name": glob.parts[1]}
+    train: DatasetRef
+    eval: DatasetRef
 
 
 class AllLayers(BaseConfig):
@@ -393,20 +346,16 @@ class LMDecompositionConfig(BaseConfig):
 
 
 class LMExperimentConfig(ExperimentConfig):
+    runtime: RuntimeConfig
+    """The LM's compute substrate. Declared HERE, not on the shared base: an LM run is the
+    only domain that spans devices, nodes and a launcher, so it is the only one with a
+    world size, a placement policy, remat trades and an XLA-flag surface to author."""
+
+    eval: EvalConfig | None = None
+    resume_provenance: ResumeProvenance | None = None
     target: LMTargetConfig
     decomposition: LMDecompositionConfig
-    data: DatasetRef
-    """Which dataset. The dataset's own facts (seq_len, tokenizer) ride with its shards
-    as `meta.json` (`param_decomp.infra.dataset_store`), read at load."""
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_glob_pin(cls, values: object) -> object:
-        if isinstance(values, dict):
-            data = values.get("data")
-            if isinstance(data, dict) and "kind" not in data and "data_files" in data:
-                values["data"] = migrate_glob_pin_data(data)
-        return values
+    data: LMDataConfig
 
 
 @dataclass(frozen=True)
@@ -419,8 +368,8 @@ class HFModelFamily:
 
     arch_config: Callable[[], glu_transformer.GLUArch]
     load: Callable[..., glu_transformer.GLUDecomposedModel]
-    """`(model_name, cfg, sites, scan_unroll=..., gather_fp8=...)` — cfg is the family's
-    own arch-config type, so the common signature is erased here."""
+    """`(model_name, cfg, sites, weights_dtype)` — cfg is the family's own arch-config
+    type, so the common signature is erased here."""
     model_type: str
     model_class: str
     """The `target.spec.model_class` this family answers to (a stable identifier, never
@@ -461,11 +410,14 @@ class TargetConfig:
     model_name: str
     sites: tuple[SiteC, ...]
     """Decomposed sites with per-site C, in canonical order (`canonical_site_cs`)."""
+    weights_dtype: WeightsDtype
+    """The authored `target.weights_dtype`, carried to the composition root's target load."""
 
-    supported_weights_dtypes: frozenset[WeightsDtype] = frozenset({"bfloat16"})
-    """Frozen-target weight dtypes the loader supports (the HF family loaders pass
-    bf16). A config requesting a dtype outside this set is refused at
-    convert time — no silent downgrade (issue #727)."""
+    supported_weights_dtypes: ClassVar[frozenset[WeightsDtype]] = frozenset({"bfloat16", "float32"})
+    """Frozen-target weight dtypes the loader supports. `HFWeights` casts every tensor on
+    read, so the family loaders honour whichever of the two the config names. A config
+    requesting a dtype outside this set is refused at convert time — no silent downgrade
+    (issue #727)."""
 
 
 @dataclass(frozen=True)
@@ -478,38 +430,18 @@ class LlamaSimpleMLPTargetConfig:
     sites: tuple[SiteC, ...]
     """Decomposed sites with per-site C, in canonical order
     (`llama_simple_mlp.canonical_site_cs`)."""
+    weights_dtype: WeightsDtype
+    """The authored `target.weights_dtype`, carried to the composition root's target load."""
 
-    supported_weights_dtypes: frozenset[WeightsDtype] = frozenset({"bfloat16"})
-    """Frozen-target weight dtypes the loader supports (`llama_simple_mlp.py` loads bf16:
-    `jnp.bfloat16` hardcoded at the call site). See `TargetConfig.supported_weights_dtypes`."""
+    supported_weights_dtypes: ClassVar[frozenset[WeightsDtype]] = frozenset({"bfloat16", "float32"})
+    """Frozen-target weight dtypes the loader supports — `_checkpoint_weight_getter` casts
+    every safetensor on read. See `TargetConfig.supported_weights_dtypes`."""
 
 
 AnyLMTargetConfig = TargetConfig | LlamaSimpleMLPTargetConfig
 """The LM target configs the LM composition builds. Non-LM targets (the toys) live in the
 lab and satisfy `param_decomp.core.built_run.TargetSites` — the core `BuiltRun.target` is typed by
 that protocol, never by a closed union, so it accepts a lab target config too."""
-
-
-# Plot/heavy eval metrics the FAST in-loop scalar pass (`eval.py`) does NOT compute. They
-# run in the IN-LOOP SLOW TIER (SPEC S28/S29, in-loop only — no offline CLI), on cadence
-# `eval.slow_every`. The base plot metrics drive the shared `render_slow_eval_figures`
-# figure set; the two hidden-acts metrics drive `compute_hidden_acts_metrics`. The
-# permutation/UV/identity metrics (`UVPlots` / `PermutedCIPlots` / `IdentityCIError`) are
-# ALSO in-loop but are read by the composition straight off the raw config
-# (`slow_eval.eval_metrics_from_run_dir`), since the trainer's typed `EvalConfig` keeps only
-# scalar-tier fields — so `_eval` just accepts them here without populating `EvalConfig`.
-SLOW_TIER_EVAL_METRIC_TYPES = frozenset(
-    {
-        "CIHistograms",
-        "ComponentActivationDensity",
-        "CIMeanPerComponent",
-        "StochasticHiddenActsReconLoss",
-        "CIHiddenActsReconLoss",
-        "UVPlots",
-        "PermutedCIPlots",
-        "IdentityCIError",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -537,15 +469,17 @@ def _bound_grammar(
     )
 
 
-def _resolve_decomposition(cfg: LMExperimentConfig, data_root: Path) -> _ResolvedDecomposition:
+def _resolve_decomposition(
+    target_config: LMTargetConfig, decomposition: LMDecompositionConfig, data_root: Path
+) -> _ResolvedDecomposition:
     """Target spec + tiled `decomposition.sites` -> target config + `SiteTree`.
 
     HF specs resolve their family from `HF_MODEL_FAMILIES` (all GLU-transformer targets); `kind:
     pretrained` LlamaSimpleMLP specs map to the pretrain-cache loader (plain-MLP family). The
     tree is tiled from the per-matrix-type `cs` over the selected layers; `resolve_site_tree`
     asserts the c-spec's declared family matches the target's."""
-    spec = cfg.target.spec
-    sites = cfg.decomposition.sites
+    spec = target_config.spec
+    sites = decomposition.sites
     match spec:
         case HFWeightsInVendored() | HFTarget():
             match spec:
@@ -562,7 +496,9 @@ def _resolve_decomposition(cfg: LMExperimentConfig, data_root: Path) -> _Resolve
             arch = hf_family.arch_config()
             tree = resolve_site_tree(sites, glu_transformer.FAMILY, arch.n_layer)
             target = TargetConfig(
-                model_name=spec.model_name, sites=tree.site_cs(glu_transformer.FAMILY.name_of)
+                model_name=spec.model_name,
+                sites=tree.site_cs(glu_transformer.FAMILY.name_of),
+                weights_dtype=target_config.weights_dtype,
             )
             grammar = _bound_grammar(
                 glu_transformer.FAMILY,
@@ -580,6 +516,7 @@ def _resolve_decomposition(cfg: LMExperimentConfig, data_root: Path) -> _Resolve
             target = LlamaSimpleMLPTargetConfig(
                 pretrain_run_path=spec.run_path,
                 sites=tree.site_cs(llama_simple_mlp.FAMILY.name_of),
+                weights_dtype=target_config.weights_dtype,
             )
             grammar = _bound_grammar(
                 llama_simple_mlp.FAMILY,
@@ -589,10 +526,6 @@ def _resolve_decomposition(cfg: LMExperimentConfig, data_root: Path) -> _Resolve
             )
             site_specs = llama_simple_mlp.site_specs(arch, target.sites)
             return _ResolvedDecomposition(target, tree, grammar, site_specs)
-
-
-def _resolve_target(cfg: LMExperimentConfig, data_root: Path) -> AnyLMTargetConfig:
-    return _resolve_decomposition(cfg, data_root).target
 
 
 def _chunk_input_taps(
@@ -669,119 +602,30 @@ def _resolve_chunkwise_ci_arch(
 
 
 def _assert_losses_supported(cfg: LMExperimentConfig, site_names: tuple[str, ...]) -> None:
-    """Run the schema's loss configs through `build_loss_terms` so unsupported metrics
+    """Run the schema's loss configs through `build_objective` so unsupported metrics
     refuse at convert time rather than on the GPUs. The engine reads `pd.loss_metrics`
     verbatim (yaml order is RNG-load-bearing), so nothing is returned."""
-    build_loss_terms(cfg.pd.loss_metrics, site_names)
+    build_objective(cfg.pd.loss_metrics, site_names)
 
 
-def _data(cfg: LMExperimentConfig, data_root: Path) -> DataConfig:
-    match cfg.data:
-        case NamedDataset(name=name):
-            shard_dir = dataset_dir(data_root, name)
-        case DatasetDir(dir=dir):
-            shard_dir = dir
-    return DataConfig(dir=shard_dir)
-
-
-def _assert_separate_qk_attn_paths(
-    metric: CIMaskedAttnPatternsReconLossConfig | StochasticAttnPatternsReconLossConfig,
-) -> None:
-    """The JAX targets decompose attention as separate `*q_proj`/`*k_proj` sites; no JAX
-    target produces a combined-QKV (`c_attn`) site to split. Refuse the combined config
-    loudly (the attn-patterns step reads Q/K from the q/k_proj sites by name)."""
-    assert metric.c_attn_path is None, (
-        f"{metric.type}: combined c_attn is unsupported (no JAX target produces a merged-QKV "
-        f"site); decompose separate q_proj/k_proj sites instead"
+def _data(cfg: LMExperimentConfig, data_root: Path) -> ResolvedLMData:
+    shard_dir = resolve_dataset_ref(cfg.data.train, data_root)
+    eval_dir = resolve_dataset_ref(cfg.data.eval, data_root)
+    assert eval_dir != shard_dir, (
+        f"data.eval resolves to the training shard dir ({shard_dir}) — not a holdout"
     )
+    return ResolvedLMData(dir=shard_dir, eval_dir=eval_dir)
 
 
-def _eval(cfg: LMExperimentConfig) -> EvalConfig | None:
-    if cfg.eval is None:
-        return None
-    ce_kl = ci_l0 = density = pgd = None
-    arithmetic: ArithmeticEvalConfig | None = None
-    attn_ci = attn_stoch = False
-    attn_stoch_n_mask_samples = 1
-    slow_n_batches_accum: int | None = None
-    density_heatmap_n_bins: int | None = None
-    for metric in cfg.eval.metrics:
-        match metric:
-            case CEandKLLossesConfig():
-                ce_kl = metric
-            case CI_L0Config():
-                ci_l0 = metric
-            case ArithmeticCIGridConfig():
-                arithmetic = ArithmeticEvalConfig(
-                    operation=metric.operation,
-                    a_range=metric.a_range,
-                    b_range=metric.b_range,
-                    thresholds=tuple(metric.thresholds),
-                    top_k=metric.top_k,
-                )
-            case PGDReconLossConfig():
-                assert metric.init == "random" and metric.source_shape == "c", metric
-                pgd = EvalPGDConfig(n_steps=metric.n_steps, step_size=metric.step_size)
-            case CIMaskedAttnPatternsReconLossConfig():
-                _assert_separate_qk_attn_paths(metric)
-                attn_ci = True
-            case StochasticAttnPatternsReconLossConfig():
-                _assert_separate_qk_attn_paths(metric)
-                attn_stoch = True
-                attn_stoch_n_mask_samples = metric.n_mask_samples
-            case CIHistogramsConfig():
-                slow_n_batches_accum = metric.n_batches_accum
-                density_heatmap_n_bins = metric.density_heatmap_n_bins
-            case ComponentActivationDensityConfig():
-                density = metric  # slow-tier; we read only its aliveness cutoff here
-            case _ if metric.type in SLOW_TIER_EVAL_METRIC_TYPES:
-                pass  # rendered by the in-loop slow tier (run.py reads them off the raw cfg)
-            case _:
-                raise AssertionError(f"unsupported eval metric {metric.type!r}")
-    assert ce_kl is not None and ci_l0 is not None, (
-        "in-loop eval needs CEandKLLosses + CI_L0 in eval.metrics"
-    )
-    return EvalConfig(
-        batch_size=cfg.eval.batch_size,
-        every=cfg.eval.every,
-        n_steps=cfg.eval.n_steps,
-        slow_every=cfg.eval.slow_every,
-        slow_on_first_step=cfg.eval.slow_on_first_step,
-        slow_n_batches_accum=slow_n_batches_accum,
-        density_heatmap_n_bins=density_heatmap_n_bins,
-        rounding_threshold=ce_kl.rounding_threshold,
-        l0_ci_alive_threshold=ci_l0.ci_alive_threshold,
-        density_ci_alive_threshold=(density.ci_alive_threshold if density is not None else 0.0),
-        l0_groups=(
-            {group: tuple(patterns) for group, patterns in ci_l0.groups.items()}
-            if ci_l0.groups is not None
-            else None
-        ),
-        pgd=pgd,
-        attn_patterns=(
-            AttnPatternsEvalConfig(
-                ci_masked=attn_ci,
-                stochastic=attn_stoch,
-                stochastic_n_mask_samples=attn_stoch_n_mask_samples,
-            )
-            if attn_ci or attn_stoch
-            else None
-        ),
-        arithmetic=arithmetic,
-    )
-
-
-def assert_supported_weights_dtype(cfg: LMExperimentConfig, data_root: Path) -> None:
-    """Refuse a frozen-target weights_dtype the loader can't honour (issue #727: no
-    silent downgrade). Enforced at the train/submit boundary only — the bf16-only
-    loaders ignore `weights_dtype` when *consuming* a finished run, so opening an
-    already-trained bf16 run whose stored config predates the explicit-bf16
-    convention must not be blocked here."""
-    target = _resolve_target(cfg, data_root)
-    assert cfg.target.weights_dtype in target.supported_weights_dtypes, (
+def _assert_supported_weights_dtype(target: AnyLMTargetConfig) -> None:
+    """Refuse a frozen-target weights_dtype the target's loader can't honour (issue #727:
+    no silent downgrade). Every build route passes through here, train and consume alike —
+    the loaders read `weights_dtype` on both, so a dtype accepted at submit and ignored at
+    reload would be exactly the divergence #727 is about."""
+    assert target.weights_dtype in target.supported_weights_dtypes, (
         f"target {type(target).__name__} supports frozen-target weights_dtype "
         f"{sorted(target.supported_weights_dtypes)}, config asks for "
-        f"{cfg.target.weights_dtype!r}. No silent downgrade (issue #727): declare a "
+        f"{target.weights_dtype!r}. No silent downgrade (issue #727): declare a "
         f"supported dtype in the yaml."
     )
 
@@ -804,54 +648,56 @@ def _assert_placement_claims(resolved: _ResolvedDecomposition, cfg: LMExperiment
 def assert_placement_claims(cfg: LMExperimentConfig, data_root: Path) -> None:
     """Standalone spelling of the placement gate for submitters' pre-submit validation and
     the repo-config parse gate; `build_experiment_config` runs it on every build."""
-    _assert_placement_claims(_resolve_decomposition(cfg, data_root), cfg)
+    _assert_placement_claims(_resolve_decomposition(cfg.target, cfg.decomposition, data_root), cfg)
 
 
-def build_experiment_config(cfg: LMExperimentConfig, run_id: str, data_root: Path) -> BuiltRun:
-    resolved = _resolve_decomposition(cfg, data_root)
+def build_experiment_config(cfg: LMExperimentConfig, run_id: str, data_root: Path) -> LMRun:
+    resolved = _resolve_decomposition(cfg.target, cfg.decomposition, data_root)
     target = resolved.target
-    assert_canonical_algorithm_config(cfg)
     _assert_losses_supported(cfg, tuple(sc.name for sc in target.sites))
+    _assert_supported_weights_dtype(target)
     _assert_placement_claims(resolved, cfg)
     data = _data(cfg, data_root)
     ci_fn = _resolve_chunkwise_ci_arch(resolved.tree, cfg.decomposition.ci, resolved.grammar)
 
     return BuiltRun(
         pd=cfg.pd,
-        runtime=cfg.runtime,
         cadence=cfg.cadence,
-        run=run_instance(cfg, run_id, data_root),
+        run=run_instance(cfg, run_id, data_root, cfg.resume_provenance),
         target=target,
         data=data,
         ci_fn=ci_fn,
-        eval=_eval(cfg),
     )
 
 
-def build_from_schema(schema_raw: dict[str, Any], run_id: str, data_root: Path) -> BuiltRun:
+def build_from_schema(
+    schema_raw: dict[str, Any],
+    run_id: str,
+    data_root: Path,
+) -> tuple[LMRun, LMExperimentConfig]:
     """Validate a single self-contained LM run config (the canonical `LMExperimentConfig`
     schema) and convert it to the engine's `BuiltRun` bundle. `run_id` is the minted run
     identity (the launcher's CLI arg, or the run-dir name when reloading a finished run).
 
+    The authored config comes back alongside the bundle: `runtime` lives there, and the
+    composition root threads it into the engine explicitly (the bundle is core's, and core
+    reads no substrate).
+
     The LM composition entry (`run.py`) is LM-only. The toy domains (TMS, ResidMLP) build
     their `BuiltRun` in their own `run.py` via the public shared helpers
-    (`assert_canonical_algorithm_config`, `run_instance`, `ci_arch`)."""
-    cfg = LMExperimentConfig(**schema_raw)
-    assert_supported_weights_dtype(cfg, data_root)
-    return build_experiment_config(cfg, run_id, data_root)
+    (`run_instance`, `ci_arch`)."""
+    cfg = LMExperimentConfig.model_validate(schema_raw)
+    return build_experiment_config(cfg, run_id, data_root), cfg
 
 
-def load_config(config_path: Path, run_id: str, data_root: Path) -> tuple[BuiltRun, dict[str, Any]]:
-    """Parse a single self-contained LM run YAML (the canonical schema + top-level
-    `run_name`, `runtime.remat_recon_forwards`, `wandb.group`/`tags`) -> (built run, raw
-    dict for wandb logging). `run_id` is the minted run identity."""
-    schema_raw = yaml.safe_load(config_path.read_text())
-    return build_from_schema(schema_raw, run_id, data_root), schema_raw
+def load_config(
+    config_path: Path, run_id: str, data_root: Path
+) -> tuple[LMRun, LMExperimentConfig]:
+    """Parse one pinned LM run YAML into its built run and authored config.
 
-
-def load_run_dir_config(run_dir: Path, data_root: Path) -> BuiltRun:
-    """Rebuild a run's `BuiltRun` bundle from its single pinned launch config
-    (for tools that read finished/live run dirs, e.g. harvest / fine-tune compat). The
-    run id is the run-dir name; `data_root` resolves a `kind: pretrained` target's cache."""
-    schema_raw = yaml.safe_load((run_dir / LAUNCH_CONFIG_FILENAME).read_text())
-    return build_from_schema(schema_raw, run_dir.name, data_root)
+    The stored-config boundary converts the retired warmup/decay schedule shape in
+    memory before canonical validation. The pin stays byte-immutable, while pre-knot
+    runs remain loadable, resumable, and usable as fine-tune parents.
+    """
+    raw = yaml.safe_load(config_path.read_text())
+    return build_from_schema(migrate_schedule_knots(raw), run_id, data_root)

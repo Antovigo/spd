@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import numpy as np
 from jax.experimental import multihost_utils
 from jaxtyping import Array, Float, Int
-from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 
 from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid
@@ -225,9 +224,12 @@ def n_alive_scalars(active: dict[float, dict[str, np.ndarray]], top_k: int) -> d
 
 
 def _render_figure(fig: Figure) -> bytes:
+    """Encode a standalone `Figure` to PNG bytes. Object-oriented `Figure`, never `pyplot`:
+    this tier renders on `BackgroundRenderer`'s worker thread, where pyplot's global figure
+    registry is unsynchronized and an interactive backend cannot build a figure manager at
+    all (see `slow_eval._render_figure`)."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
     return buf.getvalue()
 
 
@@ -255,13 +257,8 @@ def plot_component_grids(
         vmin, vmax = value_range
     n_cols = min(n, 8)
     n_rows = (n + n_cols - 1) // n_cols
-    fig, axs = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(2.4 * n_cols, 2.6 * n_rows),
-        squeeze=False,
-        constrained_layout=True,
-    )
+    fig = Figure(figsize=(2.4 * n_cols, 2.6 * n_rows), layout="constrained")
+    axs = fig.subplots(n_rows, n_cols, squeeze=False)
     flat = axs.ravel()
     for ax in flat[n:]:
         ax.set_visible(False)

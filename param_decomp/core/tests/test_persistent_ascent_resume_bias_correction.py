@@ -27,9 +27,7 @@ from param_decomp.core.schedule import ScheduleConfig
 
 
 def _adam() -> AdamPGDConfig:
-    return AdamPGDConfig(
-        beta1=0.8, beta2=0.9, eps=1e-8, lr_schedule=ScheduleConfig(start_val=0.05, warmup_pct=0.0)
-    )
+    return AdamPGDConfig(beta1=0.8, beta2=0.9, eps=1e-8, lr_schedule=ScheduleConfig.constant(0.05))
 
 
 def _grad_for_ascent(ascent_idx: int) -> dict[str, jax.Array]:

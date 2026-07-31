@@ -45,13 +45,13 @@ from param_decomp.core.ci_fn import (
     build_ci_fn,
 )
 from param_decomp.core.components import init_component_stacks
-from param_decomp.core.losses import kl_per_position
 from param_decomp.core.sharding import hsdp_mesh, shard_batch
 from param_decomp.core.train import COMPUTE_DT, cast_floating
 from param_decomp.targets.glu_transformer import (
     glu_site_specs,
     mlp_family_site_cs,
 )
+from param_decomp.targets.losses import kl_per_position
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
 
 

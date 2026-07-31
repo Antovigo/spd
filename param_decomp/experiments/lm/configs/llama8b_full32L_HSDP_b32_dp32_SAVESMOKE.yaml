@@ -5,15 +5,21 @@
 # resume at the production per-rank shape without a production-length job.
 # Memory: this shape's fused recon backward needs ~180GB-class devices (B200) or a
 # larger world size — 80GB cards at dp32 run out of memory.
-# out_dir / run_id are minted at launch.
+# out_dir / run_id are minted at launch, never authored here.
 run_name: jax-full32L-HSDP-savesmoke
 cadence:
-  keep_last_n_checkpoints: 2
+  checkpoint_retention:
+    kind: keep_last
+    n: 2
   save_every: 100
   train_log_every: 10
 data:
-  kind: name
-  name: fineweb_llama_tok_512
+  train:
+    kind: name
+    name: fineweb_llama_tok_512
+  eval:
+    kind: name
+    name: fineweb_llama_tok_512_eval
 eval:
   batch_size: 32
   every: 1000
@@ -72,10 +78,10 @@ pd:
     - 0.999
     grad_clip_norm: null
     lr_schedule:
-      final_val_frac: 0.1
-      fn_type: cosine
-      start_val: 2.0e-05
-      warmup_pct: 0.0
+      max_val: 2.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
     weight_decay: 0.0
   components_optimizer:
     betas:
@@ -83,15 +89,14 @@ pd:
     - 0.999
     grad_clip_norm: 0.01
     lr_schedule:
-      final_val_frac: 0.1
-      fn_type: cosine
-      start_val: 2.0e-05
-      warmup_pct: 0.0
+      max_val: 2.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
     weight_decay: 0.0
   faithfulness_warmup_lr: 0.001
   faithfulness_warmup_steps: 0
   faithfulness_warmup_weight_decay: 0.0
-  identity_decomposition_targets: null
   loss_metrics:
   - frequency:
       coeff: 1.0e-06
@@ -99,12 +104,12 @@ pd:
     coeff: 5.0e-06
     eps: 1.0e-06
     pnorm:
-      start_val: 2.0
-      fn_type: linear
-      final_val_frac: 0.2
+      max_val: 2.0
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.2}
     type: ImportanceMinimalityLoss
   - coeff: 2.0
-    n_samples: 1
     routing:
       type: uniform_k_subset
     sites_per_chunk: 56
@@ -116,10 +121,11 @@ pd:
       beta2: 0.99
       eps: 1.0e-08
       lr_schedule:
-        final_val_frac: 1.0
-        fn_type: constant
-        start_val: 0.01
-        warmup_pct: 0.025
+        max_val: 0.01
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.025, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
       type: adam
     source_shape: bsc
     type: PersistentPGDReconLoss
@@ -135,7 +141,6 @@ runtime:
   remat_recon_forwards: true
   remat_ci_fn: true
 target:
-  output_extract: logits
   weights_dtype: bfloat16
   spec:
     kind: hf

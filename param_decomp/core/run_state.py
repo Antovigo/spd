@@ -34,11 +34,11 @@ from param_decomp.core.init_placed import (
 from param_decomp.core.losses import scheduled_value_traced
 from param_decomp.core.model import DecomposedModel, PositionAxis, Positioned
 from param_decomp.core.muon_stacked import stacked_muon
+from param_decomp.core.objective import build_objective
 from param_decomp.core.placement import PlacementRules
 from param_decomp.core.recon import (
     MixedPersistentStochasticSources,
     PersistentSources,
-    build_loss_terms,
     persistent_configs,
 )
 from param_decomp.core.schedule import ScheduleConfig
@@ -139,10 +139,9 @@ def build_optimizers(pd: PDConfig, ci_fn_arch: CIFnArch, mesh: Mesh | None):
     """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
     log path reports the exact LR the optimizer applies (single source of truth).
 
-    The canonical-shape asserts (cosine-to-0.1, canonical optimizer shape, required components
-    clip, optional CI-fn clip) live in
-    the lab conversion (`experiments.config.assert_canonical_algorithm_config`); here we
-    read the values straight off `PDConfig` so there is no second source of truth."""
+    Every knob is read straight off `PDConfig` and honored as written — the full
+    `ScheduleConfig` shape, both optimizer types, and a per-group clip that is simply
+    absent when `grad_clip_norm` is null."""
     sched_vu = optax_schedule(pd.components_optimizer.lr_schedule, pd.steps)
     sched_ci = optax_schedule(pd.ci_fn_optimizer.lr_schedule, pd.steps)
     opt_vu = _optimizer_with_clip(
@@ -197,7 +196,7 @@ def init_train_state(
     )
     decomposition = init_decomposition(model, ci_fn_arch, init_key, mesh, rules)
     components, ci_fn = decomposition.components, decomposition.ci_fn
-    losses = build_loss_terms(pd.loss_metrics, model.site_names)
+    losses = build_objective(pd.loss_metrics, model.site_names)
     persistent = persistent_configs(losses.recon)
     term_coeff_by_state_key = {
         entry.sources.state_key: term.coeff

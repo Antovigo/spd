@@ -47,6 +47,7 @@ from param_decomp.core.configs import (
     ChunkwiseSubsetReconLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
+    KeepLastNCheckpoints,
     PersistentPGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
@@ -56,10 +57,11 @@ from param_decomp.core.init_placed import (
     init_sources_sharded,
 )
 from param_decomp.core.model import Positioned
+from param_decomp.core.objective import build_objective
 from param_decomp.core.placement import from_config
-from param_decomp.core.recon import build_loss_terms, persistent_configs
+from param_decomp.core.recon import persistent_configs
 from param_decomp.core.run import _ensure_global
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
@@ -79,7 +81,7 @@ def _persistent_cfg(name: str | None) -> PersistentPGDReconLossConfig:
         source_shape="sc",
         optimizer=AdamPGDConfig(
             beta1=0.5, beta2=0.99,
-            lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            lr_schedule=ScheduleConfig(max_val=0.01, points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0))),
         ),
         n_warmup_steps=1,
     )  # fmt: skip
@@ -156,11 +158,11 @@ def _build_sharded(seed: int):
     state = _ensure_global(state, mesh)
     assert isinstance(state, TrainState)
 
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
-                coeff=5e-6, pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                coeff=5e-6, pnorm=ScheduleConfig(max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))),
             ),
             ChunkwiseSubsetReconLossConfig(routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1),
             *ppgd_cfgs,
@@ -174,7 +176,7 @@ def _build_sharded(seed: int):
         losses=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh,
+        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh, compiler_options={},
     )  # fmt: skip
     tokens = jax.device_put(
         jax.random.randint(jax.random.PRNGKey(9), (4, seq), 0, cfg.vocab_size),
@@ -209,7 +211,7 @@ def test_sharded_roundtrip_persists_source_moments(tmp_path: Path):
     # The ascents must have advanced each term's Adam counter before we save.
     _assert_moments_present(state.training.adversaries)
 
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, state)
 
     # Restore onto a DIFFERENTLY-seeded reference at the same (sharded) placement: every

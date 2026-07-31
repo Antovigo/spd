@@ -7,12 +7,18 @@ gathered); the shared-ordering prefix property across thresholds; n_alive / n_dr
 scalars; and the renderer emits valid CI + activation PNGs over the shared active set.
 """
 
+from functools import cache
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.arithmetic_eval import (
+from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid
+from param_decomp.core.components import init_component_stacks
+from param_decomp.core.tests.test_slow_eval import _build_ci_fn
+from param_decomp.core.train import COMPUTE_DT, cast_floating
+from param_decomp.experiments.lm.arithmetic_eval import (
     ArithmeticGrid,
     ArithmeticSelection,
     ComponentActivationModel,
@@ -23,10 +29,6 @@ from param_decomp.core.arithmetic_eval import (
     render_arithmetic_figures,
     select_active,
 )
-from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid
-from param_decomp.core.components import init_component_stacks
-from param_decomp.core.tests.test_slow_eval import _build_ci_fn
-from param_decomp.core.train import COMPUTE_DT, cast_floating
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
 
@@ -36,6 +38,7 @@ ANSWER_POSITION = T - 1
 SITE = "layers.4.mlp.gate_proj"
 
 
+@cache
 def _tiny_setup():
     cfg = tiny_glu_cfg()
     C = 8
@@ -43,6 +46,14 @@ def _tiny_setup():
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
     return cfg, model, ci_fn, C
+
+
+@cache
+def _grid_step():
+    """One trace shared by every test: the step is a pure function of the (cached) model,
+    the answer position, and the row count, all of which are fixed for this file."""
+    _, model, _, _ = _tiny_setup()
+    return make_arithmetic_grid_step(model, ANSWER_POSITION, n_valid_rows=N_A * N_B)
 
 
 def _grid() -> ArithmeticGrid:
@@ -55,7 +66,7 @@ def test_grid_step_ci_xv_and_masked_max_match_hand_rolled():
     vu = init_component_stacks(model.sites, jax.random.PRNGKey(1))
     n_pad = N_A * N_B + 2  # two garbage tail rows, as the sharding pad would append
     tokens = jax.random.randint(jax.random.PRNGKey(4), (n_pad, T), 0, cfg.vocab_size)
-    step = make_arithmetic_grid_step(model, ANSWER_POSITION, n_valid_rows=N_A * N_B)
+    step = _grid_step()
     ci_grids, xv_grids, max_ci = step(model, vu, ci_fn, tokens)
 
     names = model.site_names
@@ -93,7 +104,7 @@ def test_compute_arithmetic_selection_gathers_only_shown_columns():
     assert isinstance(model, ComponentActivationModel)
     vu = init_component_stacks(model.sites, jax.random.PRNGKey(1))
     tokens = jax.random.randint(jax.random.PRNGKey(4), (N_A * N_B, T), 0, cfg.vocab_size)
-    step = make_arithmetic_grid_step(model, ANSWER_POSITION, n_valid_rows=N_A * N_B)
+    step = _grid_step()
     top_k = 3
     selection = compute_arithmetic_selection(
         step, model, vu, ci_fn, tokens, N_A * N_B, thresholds=(0.0,), top_k=top_k

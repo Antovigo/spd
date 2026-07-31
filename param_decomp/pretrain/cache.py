@@ -39,7 +39,14 @@ def write_pretrain_cache(
 
 def torch_model_config_dict(cfg: PretrainConfig) -> dict[str, object]:
     """The `model_config.yaml` shape `param_decomp.core.llama_simple_mlp` parses — the torch
-    `LlamaSimpleMLPConfig` field names, with the rotary/GQA fields the loader asserts on."""
+    `LlamaSimpleMLPConfig` field names, with the rotary/GQA fields the loader asserts on.
+
+    The bias / merged-QKV / rotary-variant keys are literals, not config reads: this port only
+    builds bias-free GQA attention with rotate-half rotary over the whole head_dim, so
+    they describe the weights beside them rather than anything that was requested. The
+    loader keeps asserting on them because torch-era caches, where they varied, are still
+    loadable after conversion.
+    """
     model = cfg.model
     base: dict[str, object] = {
         "model_type": model.model_type,
@@ -48,24 +55,20 @@ def torch_model_config_dict(cfg: PretrainConfig) -> dict[str, object]:
         "n_layer": model.n_layer,
         "n_head": model.n_head,
         "n_embd": model.n_embd,
+        "n_intermediate": model.n_intermediate,
     }
     match model.model_type:
         case "GPT2Simple":
-            return base | {
-                "n_intermediate": model.n_intermediate,
-                "flash_attention": model.flash_attention,
-            }
+            return base
         case "LlamaSimple" | "LlamaSimpleMLP":
             return base | {
-                "n_intermediate": model.n_intermediate,
-                "mlp_bias": model.mlp_bias,
-                "attn_bias": model.attn_bias,
-                "rotary_adjacent_pairs": model.rotary_adjacent_pairs,
-                "rotary_dim": model.rotary_dim,
                 "rotary_base": model.rotary_base,
                 "n_ctx": model.n_ctx,
                 "n_key_value_heads": model.n_key_value_heads,
-                "use_grouped_query_attention": model.use_grouped_query_attention,
-                "flash_attention": model.flash_attention,
                 "rms_norm_eps": model.rms_norm_eps,
+                "mlp_bias": False,
+                "attn_bias": False,
+                "use_grouped_query_attention": True,
+                "rotary_adjacent_pairs": False,
+                "rotary_dim": model.head_dim,
             }

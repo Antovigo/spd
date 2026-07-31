@@ -50,7 +50,7 @@ letters are stored size-1 broadcast axes, rank always matches the waist. Batch-B
 (`bc`/`bsc`) are batch-sharded, no cross-replica sync; batch-1 shapes are shared across
 the batch (SPEC S16/D1). `sc`/`bsc` on a positionless target raise; per-step (fresh) PGD
 rejects `sc` at validation; legacy spellings (`scope: {type: ...}`, `mask_scope`, the
-verbose value names) load via config alias. Every (positions x source_shape) persistent
+verbose value names) are rejected at parse — no config aliases remain. Every (positions x source_shape) persistent
 shape is written out in `init_sources_sharded`, so persistent PGD runs on the toys too.
 Batch size is `pd.batch_size` uniformly — `DataConfig` carries no batch.
 `CIHiddenActsReconLoss` / `StochasticHiddenActsReconLoss` are standalone eval metrics
@@ -103,27 +103,28 @@ NATIVELY in JAX (`slow_eval.py`) — no torch export round-trip (the torch offli
 bridge `jsp-export` / `pd-offline-eval` was retired). They run IN-LOOP ONLY on
 `eval.slow_every` next to the fast pass (SPEC S28/S29; there is NO offline/retrospective
 CLI — `slow_eval.py` is a pure library): the collective
-forward + device→host pull in lockstep on all ranks, the matplotlib render + `wandb.log`
-on a rank-0 background thread (`run.py::BackgroundRenderer`), reusing the fast pass's eval
-batches and logging on the live `_step` axis. The config-gated position-CI metrics
+forward + device→host pull in lockstep on all ranks, then a pure matplotlib renderer on a
+rank-0 background thread (`run.py::BackgroundRenderer`). The renderer returns encoded media
+plus its semantic step; the shared `MetricsSink` serializes W&B transport against the dedicated
+`slow_eval/figure_step` axis, so late renders are not rejected by W&B's monotonic `_step`. The config-gated position-CI metrics
 (`PermutedCIPlots` / CI heatmaps + `IdentityCIError`) ALSO run in-loop off the cheap
 `(T, C)` position-CI matrix (`accumulate_position_ci`, collective; the heatmap figures on
 the background thread, the `IdentityCIError` scalars synchronously on `_step`). `UVPlots`
 is a config-gated figure metric usable for ANY decomposition (the torch `Metric` pattern —
-returns a wandb figure): for the LM in-loop tier the LM composition's `eval_fn` does a
+returns a wandb figure): for the LM in-loop tier the LM composition's `UVPlots` operation does a
 NAIVE host gather of the C-sharded V/U (gated on `want_uv_plots`) and passes `components` to
 `render_permutation_figures` — it OOMs / breaks at production C BY DESIGN (per Oli), no
-special handling; for the positionless toys (TMS/ResidMLP) `toy_uv_eval.log_uv_figure`
+special handling; for the positionless toys (TMS/ResidMLP) `toy_uv_eval.render_uv_metric`
 renders it off the small on-host V/U + the probe CI as permutation source (cheap, no
 gather), sharing `slow_eval.render_uv_figure` / `plot_uv_matrices` with the LM path.
 
-`arithmetic_eval.py` is a config-gated LM-only figure tier (`ArithmeticCIGrid`, on
+`experiments/lm/arithmetic_eval.py` is a config-gated LM-only figure tier (`ArithmeticCIGrid`, on
 `eval.slow_every`) for inspecting how the decomposition reconstructs a `target model`'s
 modular-arithmetic mechanism (Feucht et al.'s L18 addition neurons). The probe is a FIXED
 `a x b` operand grid of `"<a><op><b>="` prompts (one prompt per row, all one token length,
 the `=` answer at a constant position) — NOT the streaming corpus, so it brings its own
 batch. The probe is a SPEC (`operation` + `a_range`/`b_range` on the metric config), not a
-filesystem artifact: `experiments/lm/run.py::_make_arithmetic_eval` builds it in-memory at
+filesystem artifact: `experiments/lm/arithmetic_eval_operation.py::make_arithmetic_operation` builds it in-memory at
 startup from the target's tokenizer (`experiments/lm/arithmetic_probe.py`, deterministic —
 every rank builds the identical grid, no rank-0 write or barrier), so configs stay
 cluster-portable. The ONE fused `make_arithmetic_grid_step` slices, at the answer position with
@@ -138,49 +139,52 @@ selected columns are gathered. The active set per threshold (max CI > threshold)
 ONCE (`select_active`, one stable descending ordering per site, so a higher threshold's set
 is a PREFIX of a lower's) and drives both the `n_alive` scalars and the CI + activation
 heatmaps; figures render off-loop on rank 0 (`run.py::BackgroundRenderer`). The probe's
-CE/KL/L0/PGD scalars come from a dedicated `make_eval_step` instance with
-`n_valid_rows=n_prompts`, so pad rows carry zero weight. Wired LM-side by
-`experiments/lm/run.py::_make_arithmetic_eval` (a `_ArithmeticEval` bundle).
+CE/KL/L0/PGD scalars compose the independent kernels from `experiments/lm/eval.py`
+with `n_valid_rows=n_prompts`, so pad rows carry zero weight. The complete typed
+operation lives in `experiments/lm/arithmetic_eval_operation.py`.
 
 **Every target lives in `param_decomp.targets` — the toys (TMS, ResidMLP) included.**
 The core trainer carries ZERO target-specific code — the toy *targets*
 (`DecomposedModel`s, pretrain, identity-CI eval) are `param_decomp/targets/{tms,resid_mlp}.py`,
-peers of the LM slices; their composition roots (`pd-tms` / `pd-resid-mlp`) stay
+peers of the LM slices; their composition roots (`experiments/{tms,resid_mlp}/run.py`) stay
 composition-side. CI-fn *architectures* are NOT toy-specific code: core owns every CI-fn arch
 regardless of which experiments use it. The positionless MLPs and the sequence transformer
 are peers in `ci_fn.py` (differing by domain, not status), not a toy carve-out. The
 generic engine is `run.py::run_decomposition_training(pd, cadence, run, model, ci_fn,
-positions, remat_recon_forwards, remat_ci_fn, ascend_replicate, compiler_options, profile,
-sample_batch, eval_fn, eval_every, mesh)` — the ONE train loop every target runs through (init/restore/finetune/faith-warmup
+positions, remat_recon_forwards, remat_ci_fn, ascend_replicate, compiler_options,
+sample_batch, evaluation, mesh)` — the ONE train loop every target runs through (init/restore/finetune/faith-warmup
 via `_init_or_restore_state`, the recon-grid step factory, orbax checkpointing, schedules,
 SIGTERM-save). It reads the pydantic `PDConfig` / `Cadence` (`param_decomp.core.configs`)
 DIRECTLY — optimizers / loss metrics / faith warmup / seed / steps — so there is
 NO flattened mirror dataclass; the run identity rides in
 `built_run.RunInstance`, and the composition-built objects (`ci_fn` arch, `data`, the decomposed target)
 pass alongside. A target injects exactly three seams: the data source
-(`sample_batch(step) -> residual`), the eval metric (`eval_fn(state, now_step) -> dict`, run
-every `eval_every`), and (for the LM) the perf token count.
+(`sample_batch(step) -> residual`), the domain-bound `Evaluation` (typed operations + context factory, scheduled directly by core), and (for the LM) the perf token count.
 `param_decomp/experiments/lm/run.py::train` is the thin LM caller (parquet
-`sample_batch` + the CEandKL/CI-L0/PGD/attn-patterns `eval_fn` in `_make_lm_eval_fn`); that
+`sample_batch` + domain-bound CEandKL/CI-L0/PGD/attention operations; that
 LM composition root is LM-ONLY (`experiments.lm.config.build_from_schema` validates
 `LMExperimentConfig` and returns a `config.BuiltRun`; `main`'s `match built.target` covers
 only `TargetConfig` / `LlamaSimpleMLPTargetConfig`). `BuiltRun.target` is typed by the core
-`built_run.TargetSites` protocol (just `.sites`), `BuiltRun.data` is `DataConfig | None` (None
-for a toy run). The shared schema validation + run-identity / CI-fn-arch helpers are public
-composition-side for the toys to reuse: `experiments.config.assert_canonical_algorithm_config` /
-`run_instance` / `ci_arch`.
+`built_run.TargetSites` protocol (just `.sites`), `BuiltRun.data` is generic; LM binds it to `experiments.lm.built.DataConfig | None` (None
+for a toy run). The shared run-identity / CI-fn-arch helpers are public
+composition-side for the toys to reuse: `experiments.config.run_instance` / `ci_arch`.
 
 The TMS + ResidMLP targets live at `param_decomp/targets/{tms,resid_mlp}.py` (the JAX
 `DecomposedModel` + frozen target + in-process pretrain + identity-CI eval); each
-`param_decomp/experiments/{tms,resid_mlp}/run.py` is the `pd-tms` / `pd-resid-mlp`
-CPU CLI that builds the `ExperimentConfig` from the canonical schema and calls
+`param_decomp/experiments/{tms,resid_mlp}/run.py` is the toy CPU composition root
+(a module main) that builds the `ExperimentConfig` from the canonical schema and calls
 `run_decomposition_training`. They are positionless and use the MLP CI fns. All CI-fn architectures live together in
 `ci_fn.py`: `LayerwiseMLPCIFn` (positionless, one independent MLP per site mapping
 `site_input [B,d_in] -> [B,C]`), `GlobalMLPCIFn` (positionless, one shared MLP over all
 sites jointly, concat/split in canonical site order), and the LM `ChunkwiseTransformerCIFn`
 (positioned, per-chunk transformers reading residual taps, stacked +
 `lax.scan`'d with per-chunk remat, and **N per-site output heads** (one `[d_model, C_j]` per
-site-slot). The mesh is `(replicate, fsdp, tp)`: `replicate` spans nodes, while each
+site-slot). `n_blocks=0` degenerates that arch to `RMS-normed taps → in_proj → heads`:
+position-LOCAL and attention-free, still `has_position_axis=True`, but affine on the NORMALIZED
+tap — no hidden layer and blind to tap magnitude. A positioned target whose position count
+makes O(P²) attention infeasible (pairwise positions) should take
+`LayerwiseMLPCIArch(has_position_axis=True)`; the blockless chunk is a baseline.
+The mesh is `(replicate, fsdp, tp)`: `replicate` spans nodes, while each
 node is an `(fsdp, tp)` plane. `tp` shards declared target dimensions and the CI output C
 axis; the per-site heads keep site boundaries explicit rather than slicing a glued-ΣC head
 mid-site. **Persistence layouts (÷N)**: the trainable V/U masters AND their
@@ -191,8 +195,8 @@ muon NS node-local — matrix d dims ÷`fsdp`, C ÷`tp`; SPEC D4 amendments 2026
 per-group fallback to intra-matrix data sharding is the config-opt-in `owner+zero1`
 preset / an explicit table's `params.zero1` row. The per-group assignment is resolved
 ONCE, at `placement.from_config(spec, mesh, sites)` during config build — bidirectional
-claim included: declaring `zero1` when every group tiles is equally an error, refused at
-config build for a `dp: N` launch, before submission — and flows down as data; the consumer boundary
+claim included: declaring `zero1` when every group tiles is equally an error, refused
+during config build for `dp: N` — and flows down as data; the consumer boundary
 (`placement.component_stacks_shardings`) only validates the received assignment, never
 re-decides. See PLACEMENT_DESIGN.md "Decision at build time"). The CI-fn
 masters + moments keep intra-matrix ZeRO-1 (`("fsdp","replicate")` on d_model — fsdp-major,
@@ -206,11 +210,11 @@ per-chunk scan), landing a SMALL ÷fsdp-resident stack; the scan body then gathe
 `fsdp` shard to full d_in transiently (NVLink, freed each iteration) — NEVER a
 full-model `[n_layer, full_d_in, C]` weight stack resident.
 `run_state.init_train_state` dispatches CI-fn construction on `cfg.ci_fn`
-(`MLPCIArch` / `GlobalMLPCIArch` / `ChunkwiseTransformerCIArch`) and uses replicated (not
+(`LayerwiseMLPCIArch` / `GlobalMLPCIArch` / `ChunkwiseTransformerCIArch`) and uses replicated (not
 C-sharded) V/U + CI for the tiny toys; the core `ci_fn.CIFnArch` admits all three and the
 composition-side `experiments.config.ci_arch` builds the layerwise / global arch from the toy
 `decomposition.ci` (validated end-to-end on CPU via
-`pd-resid-mlp`). Harvest / slow-eval / export over the toys are NOT wired
+the ResidMLP composition root). Harvest / slow-eval / export over the toys are NOT wired
 (`experiments.lm.load_run.build_target` / `run_metadata` are LM-only).
 
 ## The HLO-baking rule (filter_jit discipline)
@@ -282,7 +286,7 @@ and populated is not core's business — see `experiments/CLAUDE.md` and the roo
 CLAUDE.md. Training
 NEVER streams or tokenizes at run time: the pure-function batch schedule needs a fixed,
 enumerable local artifact, and startup keeps external services out of the N-rank
-collective bring-up (learned from a 2026-06-09 launch incident). The batch schedule is a pure
+collective bring-up (history: the 2026-06-09 thunderherd docs in lore). The batch schedule is a pure
 function of `(seed, step)` (O(1) resume, no replay); checkpoints are orbax sharded
 saves (no on-loop full-gather), TWO items per step — `decomposition` (V/U + ci_fn, the
 product every consumer restores alone) and `training` (opt states + adversaries + step,
@@ -293,12 +297,15 @@ MUST exercise save AND resume at the production per-rank shape.
 
 A run config is ONE self-contained yaml: the experiment schema
 (`param_decomp.experiments.config.ExperimentConfig` over the core
-`param_decomp.core.configs` pieces — `pd`/`data`/`eval`/`cadence`/`runtime`/`target`/`wandb`)
+`param_decomp.core.configs` pieces — `pd`/`data`/`eval`/`cadence`/`target`/`wandb`, plus
+`runtime` on `LMExperimentConfig`: the compute substrate is per-domain, and a toy — single
+device by construction — declares no `runtime:` section at all)
 plus the run-instance fields
 the schema now also carries — top-level `run_name`/`run_id`/`out_dir`, the
 `runtime.remat_recon_forwards` memory/compute knob, and `wandb.group`/`wandb.tags`.
-`run_id`/`out_dir` are absent in a hand-authored config; a deployment's submitter mints +
-stamps them (a bare module run mints its own).
+`run_id`/`out_dir` are absent in a hand-authored config; the composition root mints and
+pins them at startup (a launcher may stamp them in beforehand instead, and pass
+`--run-id`).
 
 **Fine-tune from a parent checkpoint** (`resume_provenance`, SPEC S33, LM-only). A fresh
 run can initialize its trained decomposition (V/U + ci_fn) from a PARENT run's checkpoint
@@ -307,8 +314,8 @@ NOT changed C / sites / ci-fn arch). Add to the config:
 
 ```yaml
 resume_provenance:
-  # ABSOLUTE path — the trainer runs with cwd = the node workspace (a repo checkout), so
-  # a relative path would resolve under the workspace, not the output runs dir.
+  # ABSOLUTE path — the trainer's cwd is the code it was launched from, not the output
+  # root, so a relative path would resolve against the wrong directory.
   parent_run_dir: /abs/path/to/runs/p-xxxxxxxx
   parent_step: 175000
 ```
@@ -320,7 +327,7 @@ p-anneal schedule recomputes over the new `cfg.steps` from 0. A subsequent SLURM
 (own `ckpts/` now non-empty) resumes from the run's own dir and ignores provenance.
 `run.py::assert_finetune_structural_compat` reads the parent's pinned `launch_config.yaml` and
 asserts matching sites (names + C) + ci-fn arch before the restore. Provenance flows into
-`config.yaml` + `wandb.config`. Launch as usual.
+`config.yaml` + `wandb.config`. Run it exactly like any other config.
 
 **Topology is CONFIG-DERIVED; submission is a verb.** `runtime.dp` + `runtime.gpus_per_node`
 fully determine process bring-up — there is no launch field:
@@ -332,14 +339,13 @@ fully determine process bring-up — there is no launch field:
   up via `jax.distributed`'s own cluster auto-detection (`init_distributed` — the jax
   ecosystem's contract). Multiple processes on one node is deliberately unrepresentable.
 
-You choose submission by what you run: a deployment's submitter SUBMITS — mints the
-`p-` run id, pins the config as `<data_root>/runs/<id>/launch_config.yaml`, and sbatches
-one process per node running
-`python -m param_decomp.experiments.lm.run <launch_config> --run-id <id> --data-root …`.
 `python -m param_decomp.experiments.lm.run <config> [--data-root …]` runs HERE, in the
-current allocation, minting and pinning its own identity when `--run-id` is absent.
+current allocation, minting and pinning its own identity when `--run-id` is absent. A
+launcher that wants to own the identity mints the `p-` run id itself, stages
+`<data_root>/runs/<id>/` with the pinned config, and passes `--run-id <id>`.
 
-Requeues re-read the pinned launch config, never the live checkout.
+A restart re-reads the run's PINNED launch config, never the live checkout — so a
+requeued job resumes the run it started, whatever the working tree says by then.
 
 `main` enables JAX's persistent compilation cache
 (`_enable_persistent_compilation_cache`) at `<data_root>/xla_compilation_cache`

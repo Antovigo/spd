@@ -27,8 +27,6 @@ from pathlib import Path
 import jax.numpy as jnp
 import numpy as np
 
-from param_decomp.core.built_run import DataConfig
-from param_decomp.core.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.core.log import logger
 from param_decomp.experiments.lm.load_run import HarvestForward, LoadedJaxRun, open_jax_run
 from param_decomp.harvest.accumulator import Harvester
@@ -37,6 +35,7 @@ from param_decomp.harvest.repo import HarvestRepo
 from param_decomp.harvest.schemas import HarvestBatch, get_harvest_subrun_dir
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.infra.paths import DEFAULT_DATA_ROOT
+from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
 
 
 def harvest_batch_from_forward(
@@ -68,7 +67,6 @@ def harvest_jax_run(
     )
     activation_threshold = method_config.activation_threshold
     data, seed = run.config.data, run.config.pd.seed
-    assert isinstance(data, DataConfig), f"JAX harvest is LM-only, got {type(data).__name__}"
     rank, world_size = rank_world_size if rank_world_size is not None else (0, 1)
     schedule = BatchSchedule(scan_shards(data.dir), config.batch_size, seed)
     server = ShardServer(

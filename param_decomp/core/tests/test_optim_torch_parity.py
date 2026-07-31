@@ -21,7 +21,7 @@ from param_decomp.core.run_state import (
     optax_schedule,
     stacked_muon_dimension_numbers,
 )
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.schedule import Knot, ScheduleConfig
 
 
 def _scalar(value: ArrayLike) -> float:
@@ -50,12 +50,17 @@ def test_cosine_schedule_matches_torch_denominator():
     peak_lr = 1.5e-4
     total_steps = 400_000
     alpha = 0.1
-    config = ScheduleConfig(start_val=peak_lr, fn_type="cosine", final_val_frac=alpha)
+    config = ScheduleConfig(
+        max_val=peak_lr, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=alpha, interp="cosine"))
+    )
     sched = optax_schedule(config, total_steps)
     for step in (0, total_steps // 2, total_steps - 1):
         jax_value = _scalar(sched(jnp.int32(step)))
         torch_value = torch_cosine_reference(peak_lr, total_steps, alpha, step)
-        assert jax_value == pytest.approx(torch_value, rel=1e-7), f"step {step}"
+        # rel 1e-6: the traced evaluator runs in fp32 and associates the cosine
+        # interpolation differently than torch's float64 formula; the S20 contract is
+        # the step placement (endpoints exact below), not mid-curve bit-parity.
+        assert jax_value == pytest.approx(torch_value, rel=1e-6), f"step {step}"
     assert _scalar(sched(jnp.int32(total_steps - 1))) == pytest.approx(alpha * peak_lr, rel=1e-6)
 
 
@@ -68,7 +73,11 @@ def test_cosine_schedule_differs_from_optax():
     total_steps = 10
     optax_sched = optax.cosine_decay_schedule(peak_lr, total_steps, alpha=0.1)
     ours = optax_schedule(
-        ScheduleConfig(start_val=peak_lr, fn_type="cosine", final_val_frac=0.1), total_steps
+        ScheduleConfig(
+            max_val=peak_lr,
+            points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1, interp="cosine")),
+        ),
+        total_steps,
     )
     endpoint = total_steps - 1
     assert _scalar(ours(jnp.int32(endpoint))) == pytest.approx(0.1 * peak_lr, rel=1e-6)
@@ -112,7 +121,7 @@ def test_muon_orthogonalizes_2d_leaves_and_adam_falls_back_elsewhere():
     muon_cfg = MuonOptimizerConfig(
         type="muon",
         lr_schedule=ScheduleConfig(
-            fn_type="cosine", start_val=1e-3, final_val_frac=0.1, warmup_pct=0.0
+            max_val=1e-3, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1, interp="cosine"))
         ),
         grad_clip_norm=0.01,
     )
@@ -152,7 +161,7 @@ def test_muon_chunk_stacked_dimension_numbers_orthogonalize_3d_and_adam_2d_bias_
     muon_cfg = MuonOptimizerConfig(
         type="muon",
         lr_schedule=ScheduleConfig(
-            fn_type="cosine", start_val=1e-3, final_val_frac=0.1, warmup_pct=0.0
+            max_val=1e-3, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1, interp="cosine"))
         ),
         grad_clip_norm=None,
     )
@@ -192,7 +201,9 @@ def test_stacked_muon_update_matches_optax_muon():
     per-leaf `optax.contrib.muon` (same momentum, same partition, same post-NS chain) up to
     float reassociation — on a tree mixing 2D matrices (shared-shape group + a transposed
     member), a 3D chunk stack, and Adam-fallback leaves."""
-    schedule = ScheduleConfig(fn_type="cosine", start_val=1e-3, final_val_frac=0.1, warmup_pct=0.0)
+    schedule = ScheduleConfig(
+        max_val=1e-3, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1, interp="cosine"))
+    )
     lr = lambda count: jnp.float32(1e-3)
     key = jax.random.key(7)
     params = {
@@ -385,7 +396,10 @@ def test_stacked_muon_dim_numbers_fail_closed():
 
 
 def test_optimizer_config_type_discriminator():
-    schedule = {"fn_type": "cosine", "start_val": 5e-5, "final_val_frac": 0.1}
+    schedule = {
+        "max_val": 5e-5,
+        "points": [{"at": 0.0, "frac": 1.0}, {"at": 1.0, "frac": 0.1, "interp": "cosine"}],
+    }
     adapter = TypeAdapter(AnyOptimizerConfig)
     default = adapter.validate_python({"lr_schedule": schedule})
     assert isinstance(default, AdamWOptimizerConfig), "untyped configs stay canonical AdamW"

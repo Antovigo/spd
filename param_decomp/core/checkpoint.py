@@ -31,8 +31,14 @@ from typing import cast
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
+from orbax.checkpoint.checkpoint_managers import PreservationPolicy, preservation_policy
 from orbax.checkpoint.type_handlers import ArrayHandler, register_type_handler
 
+from param_decomp.core.configs import (
+    CheckpointRetention,
+    KeepAllCheckpoints,
+    KeepLastNCheckpoints,
+)
 from param_decomp.core.train import Decomposition, TrainState
 
 # Replica-parallel writes (multiple hosts cooperatively writing a REPLICATED array)
@@ -42,13 +48,35 @@ from param_decomp.core.train import Decomposition, TrainState
 register_type_handler(jax.Array, ArrayHandler(use_replica_parallel=False), override=True)
 
 
-def make_checkpoint_manager(ckpt_dir: Path, keep_last: int) -> ocp.CheckpointManager:
+def _preservation_policy(retention: CheckpointRetention) -> PreservationPolicy:
+    match retention:
+        case KeepLastNCheckpoints(n=n):
+            return preservation_policy.LatestN(n=n)
+        case KeepAllCheckpoints():
+            return preservation_policy.PreserveAll()
+
+
+def make_checkpoint_manager(
+    ckpt_dir: Path, retention: CheckpointRetention
+) -> ocp.CheckpointManager:
+    """The WRITING manager (the trainer's). Every save prunes `ckpt_dir` down to
+    `retention`'s surviving set."""
     return ocp.CheckpointManager(
         ckpt_dir.resolve(),
         options=ocp.CheckpointManagerOptions(
-            max_to_keep=keep_last,
+            preservation_policy=_preservation_policy(retention),
             enable_async_checkpointing=False,
         ),
+    )
+
+
+def make_read_only_checkpoint_manager(ckpt_dir: Path) -> ocp.CheckpointManager:
+    """A manager for consumers that only restore (fine-tune parent init, `open_jax_run`,
+    harvest/autointerp/...). `read_only` makes orbax refuse both saves and deletes, so no
+    retention question arises: a reader of someone else's run has no say in what that run
+    keeps on disk."""
+    return ocp.CheckpointManager(
+        ckpt_dir.resolve(), options=ocp.CheckpointManagerOptions(read_only=True)
     )
 
 
@@ -138,7 +166,7 @@ def init_from_parent(parent_ckpt_dir: Path, parent_step: int, reference: TrainSt
     point. The parent's optimizer/adversary state is never read, so it may differ freely.
     `reference.step` is kept as-is: it is already a GLOBAL replicated zero
     (`_ensure_global`); re-creating it host-local would break the multi-host save."""
-    parent_mgr = make_checkpoint_manager(parent_ckpt_dir, keep_last=1)
+    parent_mgr = make_read_only_checkpoint_manager(parent_ckpt_dir)
     assert parent_step in parent_mgr.all_steps(), (
         f"parent step {parent_step} not in {parent_ckpt_dir} (have {sorted(parent_mgr.all_steps())})"
     )

@@ -24,11 +24,3 @@ def matching_dist_vec(
     matches: Bool[np.ndarray, "s n n"] = X[:, :, None] == X[:, None, :]
     diffs: Bool[np.ndarray, "s s n n"] = matches[:, None, :, :] ^ matches[None, :, :, :]
     return diffs.sum(axis=(-1, -2)).astype(np.float32)
-
-
-def matching_dist_np(X: Int[np.ndarray, "s n"]) -> Float[np.ndarray, "s s"]:
-    return matching_dist(X)
-
-
-def matching_dist_vec_np(X: Int[np.ndarray, "s n"]) -> Float[np.ndarray, "s s"]:
-    return matching_dist_vec(X)

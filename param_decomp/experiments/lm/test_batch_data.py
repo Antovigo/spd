@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from param_decomp.core.data import BatchSchedule, ShardServer, scan_shards
+from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
 
 SEQ = 8
 

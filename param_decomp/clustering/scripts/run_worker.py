@@ -7,7 +7,7 @@ component model, no safetensors bridge.
 The run is opened with `param_decomp.experiments.lm.load_run.open_jax_run` (the reusable JAX
 "open a run for consumption" pattern); the lower-leaky CI from its frozen forward is
 sampled per token position and streamed — as a numpy-array dict — into the
-`MembershipBuilder`, producing the `ProcessedMemberships` snapshot `pd-cluster-merge`
+`MembershipBuilder`, producing the `ProcessedMemberships` snapshot the merge script
 consumes unchanged.
 
 The JAX forward runs in jax (CPU or one GPU); the `MembershipBuilder` accumulator is
@@ -24,12 +24,11 @@ import numpy as np
 from param_decomp.clustering.harvest_config import HarvestConfig
 from param_decomp.clustering.memberships import MembershipBuilder, flatten_lm_activations
 from param_decomp.clustering.paths import clustering_harvest_dir, new_harvest_id
-from param_decomp.core.built_run import DataConfig
-from param_decomp.core.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.core.log import logger
 from param_decomp.experiments.lm.load_run import LoadedJaxRun, open_jax_run
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.infra.paths import DEFAULT_DATA_ROOT
+from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
 
 
 def sampled_ci_from_forward(
@@ -62,7 +61,6 @@ def harvest_jax_run(run: LoadedJaxRun, config: HarvestConfig, output_dir: Path) 
     )
 
     data = run.config.data
-    assert isinstance(data, DataConfig), f"JAX clustering is LM-only, got {type(data).__name__}"
     schedule = BatchSchedule(scan_shards(data.dir), config.batch_size, config.dataset_seed)
     server = ShardServer(
         schedule, read_dataset_meta(data.dir).seq_len, process_index=0, process_count=1

@@ -8,9 +8,10 @@ SLOW tier is the heavy plot metrics: `CIHistograms`, `ComponentActivationDensity
 is a reduction over the per-site causal-importance arrays from a masked-free forward, then
 a numpy/matplotlib plot. The forward + reduction is JAX; the plotting is framework-agnostic
 (it mirrors the torch `param_decomp/eval_metrics/plotting.py` reductions on numpy
-arrays, no torch). `accumulate_site_reductions` / `render_slow_eval_figures` /
-`compute_hidden_acts_metrics` are the LM in-loop tier's interface (`run.py`); the toys
-use only the UV figure helpers (`render_uv_figure` / `plot_uv_matrices`).
+arrays, no torch). `accumulate_site_reductions` / `render_slow_eval_figures` / `accumulate_position_ci` /
+`render_permutation_figures` are what the LM slow-tier operations bind
+(`experiments/lm/diagnostic_eval_operations.py`); the toys use only the UV figure helpers
+(`render_uv_figure` / `plot_uv_matrices`).
 
 The slow tier runs IN-LOOP on `eval.slow_every` next to the fast pass (`run.py`,
 SPEC S28/S29), reusing the fast pass's eval batches and logging `slow_eval/*` on the live
@@ -35,8 +36,7 @@ keys (`<ClassName>/<site>` + a combined `<ClassName>`).
 
 The three CONFIG-GATED permutation metrics (`PermutedCIPlots`, `UVPlots`,
 `IdentityCIError`) are recomputed natively too, off the run's `eval.metrics` block
-(re-validated from `config.yaml`, since the trainer's `EvalConfig` drops the raw metric
-list). They share one column permutation per site — identity (scipy
+from the resolved domain eval plan. They share one column permutation per site — identity (scipy
 `linear_sum_assignment` on `-CI`) or dense (by column mass) — derived from a per-site
 upper-leaky CI matrix. `PermutedCIPlots` and `IdentityCIError` use the LM batch-mean
 `(position, C)` matrix (`make_position_ci_step` / `accumulate_position_ci`) and are LM-only
@@ -53,18 +53,16 @@ import io
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal
 
 import jax.numpy as jnp
 import numpy as np
-from jax import random
 from jax.experimental import multihost_utils
 from jaxtyping import Array, Float
-from matplotlib import pyplot as plt
+from matplotlib import colormaps
+from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 
-from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
 from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid, upper_leaky_hard_sigmoid
 from param_decomp.core.configs import (
     DenseCITargetSpec,
@@ -72,11 +70,6 @@ from param_decomp.core.configs import (
     IdentityCITargetSpec,
     PermutedCIPlotsConfig,
     UVPlotsConfig,
-)
-from param_decomp.core.hidden_acts_eval import (
-    HiddenActsStep,
-    accumulate_hidden_acts,
-    hidden_acts_log_entries,
 )
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.model import DecomposedModel
@@ -150,7 +143,7 @@ def make_slow_eval_step(
     model_static: DecomposedModel,
     ci_alive_threshold: float,
     density_heatmap_n_bins: int | None,
-    compiler_options: dict[str, bool | int | str] | None = None,
+    compiler_options: dict[str, bool | int | str],
 ) -> SlowEvalStep:
     """Build the jit'd per-batch reduction `slow_eval_step(model, ci_fn, residual) ->
     ({site: density_counts}, {site: ci_sums}, n_positions, {site: flat lower},
@@ -265,7 +258,7 @@ the per-batch CI summed over the batch leading axis, position axis kept. Pairs w
 
 
 def make_position_ci_step(
-    model_static: DecomposedModel, compiler_options: dict[str, bool | int | str] | None = None
+    model_static: DecomposedModel, compiler_options: dict[str, bool | int | str]
 ) -> PositionCIStep:
     """Per-batch CI reduction that KEEPS the position axis (the `(T, C)` matrix the
     permutation/heatmap metrics plot), summing only over the batch leading axis. LM-only:
@@ -471,9 +464,16 @@ def resolve_permutation_metrics(
 
 
 def _render_figure(fig: Figure) -> bytes:
+    """Encode a standalone `Figure` to PNG bytes.
+
+    Every figure here is built with the object-oriented `Figure` API, never `pyplot`: these
+    renders run on `BackgroundRenderer`'s worker thread, and pyplot's global figure registry
+    is both unsynchronized (two figure tiers can render concurrently) and backed by whatever
+    interactive backend the host resolves — a GUI backend refuses to build a figure manager
+    off the main thread. A canvas-less `Figure` sidesteps both: `savefig` picks the Agg
+    writer from the format, and the figure is garbage — not registry — collected."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
     return buf.getvalue()
 
 
@@ -486,7 +486,8 @@ def _grid_dims(n: int, max_rows: int = 6) -> tuple[int, int]:
 def plot_ci_value_histograms(samples: dict[str, np.ndarray], bins: int = 100) -> bytes:
     """Per-site histogram of flattened CI values (torch `plot_ci_values_histograms`)."""
     n_rows, n_cols = _grid_dims(len(samples))
-    fig, axs = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows), squeeze=False)
+    fig = Figure(figsize=(6 * n_cols, 5 * n_rows))
+    axs = fig.subplots(n_rows, n_cols, squeeze=False)
     flat_axes = axs.T.ravel()
     for ax in flat_axes[len(samples) :]:
         ax.set_visible(False)
@@ -504,7 +505,8 @@ def plot_component_activation_density(densities: dict[str, np.ndarray], bins: in
     """Per-site histogram of per-component activation density (torch
     `plot_component_activation_density`)."""
     n_rows, n_cols = _grid_dims(len(densities))
-    fig, axs = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+    fig = Figure(figsize=(5 * n_cols, 5 * n_rows))
+    axs = fig.subplots(n_rows, n_cols, squeeze=False)
     flat_axes = axs.T.ravel()
     for ax in flat_axes[len(densities) :]:
         ax.set_visible(False)
@@ -527,7 +529,8 @@ def plot_mean_component_cis_both_scales(
     n_rows, n_cols = _grid_dims(len(sorted_data))
     images: list[bytes] = []
     for log_y in (False, True):
-        fig, axs = plt.subplots(n_rows, n_cols, figsize=(8 * n_cols, 3 * n_rows), squeeze=False)
+        fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
+        axs = fig.subplots(n_rows, n_cols, squeeze=False)
         flat_axes = axs.T.ravel()
         for ax in flat_axes[len(sorted_data) :]:
             ax.set_visible(False)
@@ -547,11 +550,12 @@ def _plot_ci_matrices(matrices: dict[str, np.ndarray], colormap: str, title_pref
     """Per-site `(rows, C)` CI heatmaps stacked vertically with a shared colorbar (torch
     `_plot_causal_importances_figure`). `rows` is the position axis for the LM path."""
     n = len(matrices)
-    fig, axs = plt.subplots(n, 1, figsize=(5, 5 * n), constrained_layout=True, squeeze=False)
+    fig = Figure(figsize=(5, 5 * n), layout="constrained")
+    axs = fig.subplots(n, 1, squeeze=False)
     flat_axes = axs[:, 0]
     vmin = min(float(m.min()) for m in matrices.values())
     vmax = max(float(m.max()) for m in matrices.values())
-    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+    norm = Normalize(vmin=vmin, vmax=vmax)
     images = []
     for ax, (name, matrix) in zip(flat_axes, matrices.items(), strict=True):
         im = ax.matshow(matrix, aspect="auto", cmap=colormap, norm=norm)
@@ -612,9 +616,10 @@ def plot_uv_matrices(
     shared colorbar."""
     names = sorted(components)
     n = len(names)
-    fig, axs = plt.subplots(n, 2, figsize=(10, 5 * n), constrained_layout=True, squeeze=False)
+    fig = Figure(figsize=(10, 5 * n), layout="constrained")
+    axs = fig.subplots(n, 2, squeeze=False)
     all_vals = [m for name in names for m in components[name]]
-    norm = plt.Normalize(
+    norm = Normalize(
         vmin=min(float(m.min()) for m in all_vals), vmax=max(float(m.max()) for m in all_vals)
     )
     images = []
@@ -723,9 +728,8 @@ def plot_ci_density_heatmap(
     The sorted per-component mean CI is overlaid on a twin log axis. `density_hists[s]` is
     `(C, n_bins + 1)` (column 0 = underflow)."""
     names = list(density_hists)
-    fig, axs = plt.subplots(
-        len(names), 1, figsize=(9, 3.6 * len(names)), squeeze=False, constrained_layout=True
-    )
+    fig = Figure(figsize=(9, 3.6 * len(names)), layout="constrained")
+    axs = fig.subplots(len(names), 1, squeeze=False)
     mesh = None
     for ax, name in zip(axs[:, 0], names, strict=True):
         hist = density_hists[name]
@@ -742,11 +746,11 @@ def plot_ci_density_heatmap(
         col_max = np.where(visible_band, density, 0.0).max(axis=1, keepdims=True)
         plot_density = np.divide(density, col_max, out=np.zeros_like(density), where=col_max > 0)
         x_edges = np.linspace(0, c, n_cols + 1)
-        cmap = plt.get_cmap("magma").copy()
+        cmap = colormaps["magma"].copy()
         cmap.set_bad(cmap(0.0))
         masked = np.ma.masked_where(plot_density <= 0, plot_density)
         mesh = ax.pcolormesh(
-            x_edges, y_edges, masked.T, cmap=cmap, norm=plt.Normalize(0.0, 1.0), shading="flat"
+            x_edges, y_edges, masked.T, cmap=cmap, norm=Normalize(0.0, 1.0), shading="flat"
         )
         ax.set_yscale("log")
         ax.set_ylim(CI_DENSITY_HEATMAP_Y_DISPLAY_FLOOR, 1.0)
@@ -794,69 +798,3 @@ def render_slow_eval_figures(
         assert len(density_hists) == len(reductions), "density_hist must be all-sites or none"
         figures["figures/ci_density_heatmap"] = plot_ci_density_heatmap(density_hists, mean_cis)
     return figures
-
-
-def compute_hidden_acts_metrics(
-    ci_step: HiddenActsStep,
-    stoch_step: HiddenActsStep,
-    model: DecomposedModel,
-    state: Any,
-    input_batches: list[Any],
-    base_key: Array,
-) -> dict[str, float]:
-    """Both hidden-acts recon eval metrics over the eval batches (`input_batches` holds
-    the model's target-specific inputs — an LM's token ids), keyed by the torch
-    `<ClassName>[/<site>]` log keys. `ci_step` / `stoch_step` are the PREBUILT jitted
-    steps (`make_ci_hidden_acts_step` / `make_stochastic_hidden_acts_step`), built once
-    per run next to the other slow-eval steps — rebuilding them per call would retrace +
-    recompile every slow-eval cycle. `state.decomposition.components`/
-    `state.decomposition.ci_fn` are the restored trajectory; `base_key` seeds the
-    stochastic variant's per-batch draws."""
-    ci_key, stoch_key = random.split(base_key)
-    ci_reductions = accumulate_hidden_acts(
-        ci_step,
-        model,
-        state.decomposition.components,
-        state.decomposition.ci_fn,
-        input_batches,
-        ci_key,
-    )
-    stoch_reductions = accumulate_hidden_acts(
-        stoch_step,
-        model,
-        state.decomposition.components,
-        state.decomposition.ci_fn,
-        input_batches,
-        stoch_key,
-    )
-    return {
-        **hidden_acts_log_entries("CIHiddenActsReconLoss", ci_reductions),
-        **hidden_acts_log_entries("StochasticHiddenActsReconLoss", stoch_reductions),
-    }
-
-
-def eval_metrics_from_run_dir(run_dir: Path) -> list[Any]:
-    """The typed `eval.metrics` configs from the run's pinned launch config. The trainer's
-    `EvalConfig` keeps only scalar-tier fields, so the plot/permutation metric configs are
-    re-validated here from the raw block. The in-loop slow tier (`run.py`) reads the metric
-    list this way to resolve the config-gated permutation/UV/identity metrics."""
-    import yaml
-    from pydantic import TypeAdapter
-
-    from param_decomp.core.configs import AnyEvalMetricConfig
-
-    raw = yaml.safe_load((run_dir / LAUNCH_CONFIG_FILENAME).read_text())
-    adapter = TypeAdapter(AnyEvalMetricConfig)
-    return [adapter.validate_python(m) for m in raw["eval"]["metrics"]]
-
-
-def stochastic_hidden_acts_n_mask_samples(eval_metrics: list[Any]) -> int:
-    """The `n_mask_samples` for the stochastic hidden-acts slow-eval metric, read off its
-    `StochasticHiddenActsReconLossConfig` in the run's `eval.metrics` (1 when the config
-    omits it). The slow tier always computes hidden-acts; absent the metric, the count is
-    moot but defaults to 1."""
-    from param_decomp.core.configs import StochasticHiddenActsReconLossConfig
-
-    matches = [m for m in eval_metrics if isinstance(m, StochasticHiddenActsReconLossConfig)]
-    assert len(matches) <= 1, f"multiple StochasticHiddenActsReconLoss eval metrics: {matches}"
-    return matches[0].n_mask_samples if matches else 1

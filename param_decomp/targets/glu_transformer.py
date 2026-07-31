@@ -50,13 +50,11 @@ from param_decomp.core.components import (
     ComponentStacks,
     SiteC,
     SiteSpec,
-    dequantize_fp8,
-    quantize_fp8,
     site_out,
 )
 from param_decomp.core.family import ArchFamily
-from param_decomp.core.losses import kl_per_position
 from param_decomp.core.sharding import assert_divisible
+from param_decomp.targets.losses import kl_per_position
 from param_decomp.targets.transformer_taps import resid_tap_key
 from param_decomp.vendored_jax.llama import (
     apply_rope,
@@ -586,7 +584,6 @@ def _attach_per_kind_stochastic(
 
 def _reconstruct_compute_weights(
     per_kind: dict[str, dict[str, Array]],
-    fp8: bool,
 ) -> dict[str, dict[str, Array]]:
     """The ZeRO-1 weight reconstruction (pure-HSDP backup layout). The stacked
     `[n_layer, d_in, C]` / `[n_layer, C, d_out]` compute weights arrive with their FSDP dim
@@ -611,25 +608,15 @@ def _reconstruct_compute_weights(
     out: dict[str, dict[str, Array]] = {}
     for kind, entry in per_kind.items():
         pinned = dict(entry)
-        # optimization_barrier forces the cast/quant to materialize BEFORE the ÷N→÷fsdp gather,
+        # optimization_barrier forces the bf16 cast to materialize BEFORE the ÷N→÷fsdp gather,
         # so the collective moves the compute dtype — XLA otherwise sinks the convert past the
         # all-gather and gathers the f32 master (2x the comm; the convert gathers in the HLO).
-        if fp8:
-            # Quantized All-Gather: the ÷fsdp compute weights are fp8; the per-layer ÷fsdp→full
-            # gather then moves fp8 (½ the bf16 bytes), dequantized to bf16 in `masked_site`.
-            # Per-tensor scalar scale rides alongside (replicated, survives the gather).
-            vq, vs = quantize_fp8(entry["V"])
-            uq, us = quantize_fp8(entry["U"])
-            pinned["V"] = jax.lax.with_sharding_constraint(jax.lax.optimization_barrier(vq), v_spec)
-            pinned["U"] = jax.lax.with_sharding_constraint(jax.lax.optimization_barrier(uq), u_spec)
-            pinned["V_scale"], pinned["U_scale"] = vs, us
-        else:
-            pinned["V"] = jax.lax.with_sharding_constraint(
-                jax.lax.optimization_barrier(entry["V"].astype(jnp.bfloat16)), v_spec
-            )
-            pinned["U"] = jax.lax.with_sharding_constraint(
-                jax.lax.optimization_barrier(entry["U"].astype(jnp.bfloat16)), u_spec
-            )
+        pinned["V"] = jax.lax.with_sharding_constraint(
+            jax.lax.optimization_barrier(entry["V"].astype(jnp.bfloat16)), v_spec
+        )
+        pinned["U"] = jax.lax.with_sharding_constraint(
+            jax.lax.optimization_barrier(entry["U"].astype(jnp.bfloat16)), u_spec
+        )
         out[kind] = pinned
     return out
 
@@ -680,11 +667,6 @@ class GLUDecomposedModel(eqx.Module):
     sites: tuple[SiteSpec, ...] = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
     eps: float = eqx.field(static=True)
-    scan_unroll: int = eqx.field(static=True, default=1)
-    """`lax.scan(unroll=)` factor over the block stack (`RuntimeConfig.scan_unroll`); 1 =
-    plain per-layer scan."""
-    gather_fp8: bool = eqx.field(static=True, default=False)
-    """Quantized all-gather of the ÷fsdp compute V/U (`RuntimeConfig.gather_fp8`)."""
 
     @property
     def site_names(self) -> tuple[str, ...]:
@@ -890,34 +872,11 @@ class GLUDecomposedModel(eqx.Module):
             first_live = last_live = 0
 
         def decomp_site(x_in: Array, W: Array, e: dict[str, Array]) -> Array:
-            v, u = e["V"], e["U"]
-            if "V_scale" in e:  # fp8 QAG: gather the fp8 ÷fsdp weight to full d (½ bytes on the
-                # wire), THEN dequant to bf16 — the barrier keeps the convert after the gather so
-                # the collective moves fp8, not bf16.
-                v = checkpoint_name(
-                    dequantize_fp8(
-                        jax.lax.optimization_barrier(
-                            jax.lax.with_sharding_constraint(v, P(None, "tp"))
-                        ),
-                        e["V_scale"],
-                    ),
-                    GATHERED_WEIGHTS_CHECKPOINT_NAME,
-                )
-                u = checkpoint_name(
-                    dequantize_fp8(
-                        jax.lax.optimization_barrier(
-                            jax.lax.with_sharding_constraint(u, P("tp", None))
-                        ),
-                        e["U_scale"],
-                    ),
-                    GATHERED_WEIGHTS_CHECKPOINT_NAME,
-                )
-            else:
-                # bf16: the same in-body ÷fsdp→full gather anchor the fp8 path has (full on d,
-                # C stays ÷tp) — the per-layer gather lives INSIDE the checkpointed body, so it
-                # is transient in the forward and re-run in the remat'd backward.
-                v = _gather_full_weight(v, P(None, "tp"))
-                u = _gather_full_weight(u, P("tp", None))
+            # In-body ÷fsdp→full gather (full on d, C stays ÷tp) — the per-layer gather lives
+            # INSIDE the checkpointed body, so it is transient in the forward and re-run in
+            # the remat'd backward.
+            v = _gather_full_weight(e["V"], P(None, "tp"))
+            u = _gather_full_weight(e["U"], P("tp", None))
             if "ci" in e:  # stochastic recompute: draw source from the per-layer key and build the
                 # mask INLINE (recomputed in the backward, not held — the shared `ci` stack + tiny
                 # key replace the per-forward mask stack).
@@ -1004,8 +963,6 @@ class GLUDecomposedModel(eqx.Module):
         #   remat=False → dots_saveable: SAVE the activation matmuls (no batch dims here → they
         #     qualify) but still recompute the gather + cheap elementwise. Pure recompute either
         #     way; zero numerics change.
-        # `scan_unroll` (native `lax.scan(unroll=k)`) emits k iterations straight-line so XLA can
-        # prefetch gather(L+1) under matmul(L) — the overlap a 1-layer while-body denies.
         base_policy = (
             jax.checkpoint_policies.nothing_saveable
             if remat
@@ -1021,9 +978,7 @@ class GLUDecomposedModel(eqx.Module):
             )
 
         def run_scan(body: Any, carry: Array, xs: Any) -> tuple[Array, Any]:
-            return jax.lax.scan(
-                jax.checkpoint(body, policy=policy), carry, xs, unroll=self.scan_unroll
-            )
+            return jax.lax.scan(jax.checkpoint(body, policy=policy), carry, xs)
 
         def slice_layers(lo: int, hi: int) -> GLULayer:
             return jax.tree.map(lambda a: a[lo:hi], self.stacked)
@@ -1063,7 +1018,7 @@ class GLUDecomposedModel(eqx.Module):
         `masked_output` / `masked_site_outputs` calls — the cross-node gather then runs ONCE per
         step (ENTRY) instead of once per forward (the per-forward re-gather was ~10 co-resident
         copies of the ÷fsdp stack at peak)."""
-        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.n_layer), self.gather_fp8)
+        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.n_layer))
 
     def masked_output(
         self,
@@ -1228,12 +1183,9 @@ def build_decomposed_lm(
     inv_freq: Array,
     cfg: GLUArch,
     sites: tuple[SiteSpec, ...],
-    scan_unroll: int = 1,
-    gather_fp8: bool = False,
 ) -> GLUDecomposedModel:
     """Assemble a `GLUDecomposedModel` from the frozen full-model arrays + decomposition
-    config. `sites` must be canonical-ordered with dims matching `cfg`. `scan_unroll` /
-    `gather_fp8` are the `RuntimeConfig` compute knobs (1 / off = the default forward)."""
+    config. `sites` must be canonical-ordered with dims matching `cfg`."""
     site_cs = tuple(SiteC(s.name, s.C) for s in sites)
     assert sites == glu_site_specs(cfg, canonical_site_cs(site_cs)), (
         f"sites are not the canonical specs for this config: {sites}"
@@ -1248,8 +1200,6 @@ def build_decomposed_lm(
         sites=sites,
         has_position_axis=True,
         eps=cfg.rms_norm_eps,
-        scan_unroll=scan_unroll,
-        gather_fp8=gather_fp8,
     )
 
 
@@ -1260,14 +1210,11 @@ def load_decomposed_glu_from_hf(
     load_attn: AttnLoader,
     inv_freq: Array,
     weights_dtype: DTypeLike,
-    scan_unroll: int = 1,
-    gather_fp8: bool = False,
 ) -> GLUDecomposedModel:
     """Load a GLU-transformer `DecomposedModel` from the cached HF snapshot: the full
     frozen model (embedding, all blocks, final norm, lm_head) as fields plus the static
     decomposition config (`sites`). The FAMILY contributes `load_attn` + `inv_freq` (its
-    RoPE flavor); blocks without a decomposed site run the plain frozen path.
-    `scan_unroll` / `gather_fp8` are the `RuntimeConfig` compute knobs."""
+    RoPE flavor); blocks without a decomposed site run the plain frozen path."""
     w = HFWeights(hf_snapshot_dir(model_name), weights_dtype)
     return build_decomposed_lm(
         embed=w.get("model.embed_tokens.weight"),
@@ -1277,6 +1224,4 @@ def load_decomposed_glu_from_hf(
         inv_freq=inv_freq,
         cfg=cfg,
         sites=sites,
-        scan_unroll=scan_unroll,
-        gather_fp8=gather_fp8,
     )

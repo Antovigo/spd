@@ -37,7 +37,7 @@ jobs:
       - name: Import smoke
         run: |
           uv run python -c "import param_decomp.core.built_run; from param_decomp.core.components import SiteSpec"
-          uv run pd-tms --help > /dev/null
+          uv run python -c "import param_decomp.experiments.lm.run, param_decomp.pretrain.train"
 
   build:
     # The test suite is sharded across parallel jobs (an exact partition — see the
@@ -89,19 +89,17 @@ jobs:
           restore-keys: |
             hf-
 
-      # Compiled executables are content-addressed by HLO + backend + jax/xla version
-      # (conftest.py pins the CPU ISA ceiling to AVX2 so a cache entry stays valid across
-      # any runner), so a stale, cross-lockfile, or cross-shard hit is a safe no-op miss,
-      # not a wrong answer — restore-keys lets a uv.lock bump or a fresh shard degrade to
-      # a partial hit instead of cold. The key is per-shard because a cache key is
-      # immutable once saved: on a shared key only the first shard to finish would ever
-      # persist its compiles.
-      - name: Cache JAX compilation cache
-        uses: actions/cache@v6
+      # JAX's disk cache is content-addressed by HLO, backend, and JAX/XLA version;
+      # conftest.py caps CPU ISA at AVX2, so the broad restore prefixes are safe. GitHub
+      # cache keys are immutable: one key per shard avoids concurrent writers, while the
+      # commit sha lets each run publish newly compiled HLOs.
+      - name: Restore JAX compilation cache
+        uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/.jax_test_cache
-          key: jax-test-cache-${{ matrix.shard }}-${{ hashFiles('uv.lock') }}
+          key: jax-test-cache-${{ matrix.shard }}-${{ hashFiles('uv.lock') }}-${{ github.sha }}
           restore-keys: |
+            jax-test-cache-${{ matrix.shard }}-${{ hashFiles('uv.lock') }}-
             jax-test-cache-${{ matrix.shard }}-
             jax-test-cache-
 
@@ -121,3 +119,11 @@ jobs:
           OMPI_ALLOW_RUN_AS_ROOT: 1
           OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
           HF_HOME: ${{ github.workspace }}/.hf-cache
+
+      # Retain compiles completed before a test failure.
+      - name: Save JAX compilation cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.jax_test_cache
+          key: jax-test-cache-${{ matrix.shard }}-${{ hashFiles('uv.lock') }}-${{ github.sha }}

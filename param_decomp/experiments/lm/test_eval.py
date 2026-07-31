@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from param_decomp.core.built_run import EvalPGDConfig
 from param_decomp.core.ci_fn import (
     Chunk,
     ChunkwiseTransformerCIArch,
@@ -21,8 +20,9 @@ from param_decomp.core.ci_fn import (
     build_ci_fn,
 )
 from param_decomp.core.components import SiteSpec
-from param_decomp.core.eval import make_eval_step, next_token_cross_entropy
 from param_decomp.core.model import DecomposedModel, run_stochastic_masked_output
+from param_decomp.core.recon_eval import FreshPGDReconEval
+from param_decomp.experiments.lm.eval import make_eval_step, next_token_cross_entropy
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import (
     tiny_glu_cfg,
@@ -175,9 +175,10 @@ def test_eval_step_keys_identities_and_determinism():
         rounding_threshold=-1.0,
         ci_alive_threshold=-1.0,
         l0_group_patterns=None,
-        pgd=None,
+        fresh_pgd=None,
         mesh=None,
         n_valid_rows=None,
+        compiler_options={},
     )
     out = eval_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
 
@@ -214,9 +215,10 @@ def test_eval_step_keys_identities_and_determinism():
         rounding_threshold=-1.0,
         ci_alive_threshold=1.5,
         l0_group_patterns=None,
-        pgd=None,
+        fresh_pgd=None,
         mesh=None,
         n_valid_rows=None,
+        compiler_options={},
     )
     out_dead = eval_step_dead(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     for site in model.site_names:
@@ -243,31 +245,34 @@ def test_eval_step_fresh_pgd_probe():
         rounding_threshold=0.0,
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
-        pgd=EvalPGDConfig(n_steps=8, step_size=0.1),
+        fresh_pgd=FreshPGDReconEval(name="fresh_probe", n_steps=8, step_size=0.1),
         mesh=None,
         n_valid_rows=None,
+        compiler_options={},
     )
     unascended = make_eval_step(
         model,
         rounding_threshold=0.0,
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
-        pgd=EvalPGDConfig(n_steps=0, step_size=0.1),
+        fresh_pgd=FreshPGDReconEval(name="fresh_probe", n_steps=0, step_size=0.1),
         mesh=None,
         n_valid_rows=None,
+        compiler_options={},
     )
     out = ascended(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     out0 = unascended(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
 
-    assert "loss/PGDReconLoss" in out
-    assert jnp.isfinite(out["loss/PGDReconLoss"])
-    assert float(out["loss/PGDReconLoss"]) >= float(out0["loss/PGDReconLoss"]), (
+    assert "loss/fresh_probe" in out
+    assert jnp.isfinite(out["loss/fresh_probe"])
+    assert float(out["loss/fresh_probe"]) >= float(out0["loss/fresh_probe"]), (
         "8 sign-ascent steps must not be less adversarial than the raw random source"
     )
     out_same = ascended(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
-    assert jnp.array_equal(out["loss/PGDReconLoss"], out_same["loss/PGDReconLoss"])
+    assert jnp.array_equal(out["loss/fresh_probe"], out_same["loss/fresh_probe"])
 
 
+@pytest.mark.slow
 def test_eval_step_fresh_pgd_probe_device_count_invariant():
     """R-7 (eval facet): the fresh `c` PGD probe's KL must be invariant to device
     count up to float reassociation.
@@ -300,11 +305,11 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
 
     single_step = make_eval_step(
         model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=None, n_valid_rows=None,
+        l0_group_patterns=None, fresh_pgd=FreshPGDReconEval(n_steps=8, step_size=0.1), mesh=None, n_valid_rows=None, compiler_options={},
     )  # fmt: skip
     sharded_step = make_eval_step(
         model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, pgd=EvalPGDConfig(n_steps=8, step_size=0.1), mesh=mesh, n_valid_rows=None,
+        l0_group_patterns=None, fresh_pgd=FreshPGDReconEval(n_steps=8, step_size=0.1), mesh=mesh, n_valid_rows=None, compiler_options={},
     )  # fmt: skip
 
     out_single = single_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -337,7 +342,7 @@ def test_eval_step_l0_groups_sum_member_sites():
     groups = {"layer_4": ("layers.4.*",), "total": ("*",)}
     eval_step = make_eval_step(
         model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=groups, pgd=None, mesh=None, n_valid_rows=None,
+        l0_group_patterns=groups, fresh_pgd=None, mesh=None, n_valid_rows=None, compiler_options={},
     )  # fmt: skip
     out = eval_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     layer4_sites = [s for s in model.site_names if s.startswith("layers.4.")]
@@ -349,7 +354,7 @@ def test_eval_step_l0_groups_sum_member_sites():
     with pytest.raises(AssertionError, match="matches no sites"):
         make_eval_step(
             model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-            l0_group_patterns={"ghost": ("layers.99.*",)}, pgd=None, mesh=None, n_valid_rows=None,
+            l0_group_patterns={"ghost": ("layers.99.*",)}, fresh_pgd=None, mesh=None, n_valid_rows=None, compiler_options={},
         )  # fmt: skip
 
 
@@ -361,10 +366,11 @@ def test_make_eval_step_rejects_positionless_target():
     with pytest.raises(AssertionError, match="LM-only"):
         make_eval_step(
             model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-            l0_group_patterns=None, pgd=None, mesh=None, n_valid_rows=None,
+            l0_group_patterns=None, fresh_pgd=None, mesh=None, n_valid_rows=None, compiler_options={},
         )  # fmt: skip
 
 
+@pytest.mark.slow
 def test_eval_step_n_valid_rows_masks_pad_tail():
     """A batch with garbage tail rows + `n_valid_rows` reproduces the unpadded scalars for
     every key-independent metric (pad rows carry zero weight, including inside the PGD
@@ -385,11 +391,11 @@ def test_eval_step_n_valid_rows_masks_pad_tail():
 
     reference_step = make_eval_step(
         model, rounding_threshold=0.5, ci_alive_threshold=0.0, l0_group_patterns=None,
-        pgd=EvalPGDConfig(n_steps=4, step_size=0.1), mesh=None, n_valid_rows=None,
+        fresh_pgd=FreshPGDReconEval(n_steps=4, step_size=0.1), mesh=None, n_valid_rows=None, compiler_options={},
     )  # fmt: skip
     masked_step = make_eval_step(
         model, rounding_threshold=0.5, ci_alive_threshold=0.0, l0_group_patterns=None,
-        pgd=EvalPGDConfig(n_steps=4, step_size=0.1), mesh=None, n_valid_rows=b,
+        fresh_pgd=FreshPGDReconEval(n_steps=4, step_size=0.1), mesh=None, n_valid_rows=b, compiler_options={},
     )  # fmt: skip
     reference = reference_step(model, vu, ci_fn, tokens, jax.random.PRNGKey(5))
     masked = masked_step(model, vu, ci_fn, padded, jax.random.PRNGKey(5))

@@ -3,7 +3,6 @@
 import math
 from collections.abc import Callable
 
-import jax
 import jax.numpy as jnp
 from beartype import beartype
 from jaxtyping import Array, Float, jaxtyped
@@ -13,57 +12,43 @@ from param_decomp.core.configs import (
     ImportanceMinimalityLossConfig,
     SmoothL0ImportanceMinimalityLossConfig,
 )
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.schedule import Knot, ScheduleConfig
+
+
+def _interval_frac_traced(prev: Knot, knot: Knot, t: Array) -> Array:
+    u = (t - prev.at) / (knot.at - prev.at)
+    match knot.interp:
+        case "linear":
+            return prev.frac + (knot.frac - prev.frac) * u
+        case "cosine":
+            return prev.frac + (knot.frac - prev.frac) * 0.5 * (1 - jnp.cos(jnp.pi * u))
+        case "hold":
+            return jnp.where(u >= 1.0, knot.frac, prev.frac)
 
 
 def scheduled_value_traced(step_f32: Array, total_steps: int, config: ScheduleConfig) -> Array:
     """jnp twin of `schedule.get_scheduled_value` for a traced `step_f32` (inside the
     jitted step, or as an optax schedule over the update count). Same values pointwise
-    (`test_schedule.py` pins the pair); only the warmup gate becomes a `jnp.where`. Lives
-    here rather than next to its host twin so the config schema stays jax-free.
+    (`test_schedule.py` pins the pair); the knot structure is static (from config), only
+    `t` is traced, so interval selection is a `jnp.where` chain. Lives here rather than
+    next to its host twin so the config schema stays jax-free.
 
-    The `decay_steps - 1` denominator is canonical-torch: the decay reaches
-    `final_val_frac ×` at `step = total_steps - 1` (SPEC S20). Plain
-    `optax.cosine_decay_schedule` divides by `decay_steps` and gets there one update
-    later — a genuine ~O(1/steps) per-step divergence this fn must avoid."""
+    The `total_steps - 1` denominator in `t` is canonical-torch: the `at = 1.0` knot is
+    reached AT `step = total_steps - 1` (SPEC S20). Plain `optax.cosine_decay_schedule`
+    divides by `steps` and gets there one update later — a genuine ~O(1/steps) per-step
+    divergence this fn must avoid."""
     assert total_steps > 0, f"total_steps must be positive, got {total_steps}"
 
-    warmup_steps = int(total_steps * config.warmup_pct)
-    decay_steps = total_steps - warmup_steps
-
-    if decay_steps <= 1:
-        decayed = jnp.asarray(config.start_val, jnp.float32)
+    if total_steps == 1:
+        t = jnp.zeros((), jnp.float32)
     else:
-        progress = (step_f32 - warmup_steps) / (decay_steps - 1)
-        match config.fn_type:
-            case "constant":
-                multiplier = jnp.asarray(1.0, jnp.float32)
-            case "linear":
-                multiplier = config.final_val_frac + (1 - config.final_val_frac) * (1 - progress)
-            case "cosine":
-                multiplier = config.final_val_frac + (1 - config.final_val_frac) * 0.5 * (
-                    1 + jnp.cos(jnp.pi * progress)
-                )
-        decayed = config.start_val * multiplier
+        t = jnp.minimum(step_f32 / (total_steps - 1), 1.0)
 
-    if warmup_steps == 0:
-        return decayed
-    return jnp.where(step_f32 < warmup_steps, config.start_val * (step_f32 / warmup_steps), decayed)
-
-
-@jaxtyped(typechecker=beartype)
-def kl_per_position(
-    masked_output: Float[Array, "*leading vocab"], clean_output: Float[Array, "*leading vocab"]
-) -> Float[Array, ""]:
-    """`Σ_{*leading} KL(softmax(clean) ‖ softmax(masked)) / Π(*leading)` in fp32
-    (SPEC §2.3, N3); `*leading` is every axis but the final logit axis."""
-    masked_output = masked_output.astype(jnp.float32)
-    clean_output = clean_output.astype(jnp.float32)
-    log_q = jax.nn.log_softmax(masked_output, axis=-1)
-    log_p = jax.nn.log_softmax(clean_output, axis=-1)
-    p = jnp.exp(log_p)
-    n_positions = math.prod(masked_output.shape[:-1])
-    return jnp.sum(p * (log_p - log_q)) / n_positions
+    points = config.points
+    frac = _interval_frac_traced(points[0], points[1], t)
+    for prev, knot in zip(points[1:], points[2:], strict=False):
+        frac = jnp.where(t >= prev.at, _interval_frac_traced(prev, knot, t), frac)
+    return jnp.asarray(config.max_val * frac, jnp.float32)
 
 
 @jaxtyped(typechecker=beartype)

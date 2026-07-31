@@ -1,9 +1,15 @@
-# The representative full L18-MLP config (SPEC §2 production constants = lr_mid,
-# 32 GPU / 4 nodes): pre-tokenized fineweb, vendored Llama, one 3-site chunk at L18 —
-# where StochasticReconSubsetLoss is exactly the chunkwise-subset recon. This is the
-# config-suite fixture the core config/resume tests load (see CONFIGS.md).
+# The shared-config route: this wrapper carries only what the torch schema can't
+# express (run identity + the jax-runtime remat knob); everything else comes from the
+# referenced torch LMExperimentConfig yaml via param-decomp-config. Semantically the
+# same run as llama8b_l18_b128_cmp32.yaml — the converter test asserts that.
 run_name: jax-l18-b128-cmp32-from-torch
-# Launch (dp 32): python -m param_decomp.experiments.lm.run param_decomp/core/configs/llama8b_l18_b128_cmp32.yaml
+# torch leg of the torch-vs-JAX same-config comparison (32 GPU / 4 nodes each side).
+# Single-pool core Trainer (param_decomp/optimize.py) with the SPEC §2 production
+# constants (= lr_mid), full-model forward (no residual-start on this path), vendored
+# Llama, pre-tokenized fineweb (no HF at run time). JAX leg:
+# pd-nano-jax param_decomp/configs/llama8b_l18_b128_cmp32.yaml — same constants,
+# same wandb keys (train/loss/*). At L18 (one 3-site chunk) StochasticReconSubsetLoss
+# is exactly the JAX chunkwise-subset recon.
 decomposition:
   sites:
     kind: glu_transformer
@@ -30,10 +36,10 @@ pd:
   seed: 0
   components_optimizer:
     lr_schedule:
-      start_val: 1.5e-04
-      warmup_pct: 0.0
-      final_val_frac: 0.1
-      fn_type: cosine
+      max_val: 1.5e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
     grad_clip_norm: 0.01
     betas:
     - 0.9
@@ -41,10 +47,10 @@ pd:
     weight_decay: 0.0
   ci_fn_optimizer:
     lr_schedule:
-      start_val: 5.0e-05
-      warmup_pct: 0.0
-      final_val_frac: 0.1
-      fn_type: cosine
+      max_val: 5.0e-05
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
     grad_clip_norm: null
     betas:
     - 0.9
@@ -61,9 +67,10 @@ pd:
   - type: ImportanceMinimalityLoss
     coeff: 5.0e-06
     pnorm:
-      start_val: 2.0
-      fn_type: linear
-      final_val_frac: 0.2
+      max_val: 2.0
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.2}
     frequency:
       coeff: 1.0e-06
       reference_token_count: 262144
@@ -81,26 +88,31 @@ pd:
       beta2: 0.99
       eps: 1.0e-08
       lr_schedule:
-        start_val: 0.01
-        warmup_pct: 0.025
-        final_val_frac: 1.0
-        fn_type: constant
+        max_val: 0.01
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.025, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
     source_shape: sc
 cadence:
   train_log_every: 20
   save_every: 1000
-  keep_last_n_checkpoints: 2
+  checkpoint_retention:
+    kind: keep_last
+    n: 2
 target:
   spec:
     kind: hf_weights_in_vendored
     model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama
     model_name: meta-llama/Llama-3.1-8B
-  output_extract: 0
-  activation_checkpointing: true
   weights_dtype: bfloat16
 data:
-  kind: name
-  name: fineweb_llama_tok_2048
+  train:
+    kind: name
+    name: fineweb_llama_tok_2048
+  eval:
+    kind: name
+    name: fineweb_llama_tok_2048_eval
 runtime:
   remat_recon_forwards: true
   dp: 1

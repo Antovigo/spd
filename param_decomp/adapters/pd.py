@@ -3,10 +3,16 @@ from pathlib import Path
 
 from param_decomp.autointerp.schemas import ModelMetadata
 from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
-from param_decomp.experiments.lm.config import DatasetDir, LMExperimentConfig, NamedDataset
+from param_decomp.experiments.lm.config import LMExperimentConfig
 from param_decomp.experiments.lm.load_run import RunMetadata, run_metadata
 from param_decomp.harvest.schemas import get_harvest_dir
-from param_decomp.infra.dataset_store import DatasetMeta, dataset_dir, read_dataset_meta
+from param_decomp.infra.dataset_store import (
+    DatasetDir,
+    DatasetMeta,
+    NamedDataset,
+    read_dataset_meta,
+    resolve_dataset_ref,
+)
 from param_decomp.topology.path_schemas import path_schema_for_model_type
 
 
@@ -57,11 +63,7 @@ class PDAdapter:
 
     @cached_property
     def _dataset_meta(self) -> DatasetMeta:
-        match self.cfg.data:
-            case NamedDataset(name=name):
-                return read_dataset_meta(dataset_dir(self._data_root, name))
-            case DatasetDir(dir=dir):
-                return read_dataset_meta(dir)
+        return read_dataset_meta(resolve_dataset_ref(self.cfg.data.train, self._data_root))
 
     @property
     def tokenizer_name(self) -> str:
@@ -83,7 +85,7 @@ class PDAdapter:
     def _dataset_name(self) -> str:
         """The corpus identity for `DATASET_DESCRIPTIONS` (an ad-hoc dir's basename
         stands in for a name)."""
-        match self.cfg.data:
+        match self.cfg.data.train:
             case NamedDataset(name=name):
                 return name
             case DatasetDir(dir=dir):

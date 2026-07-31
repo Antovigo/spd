@@ -41,8 +41,8 @@ import numpy as np
 import pytest
 
 import param_decomp.core.adversary as adversary_mod
-import param_decomp.core.losses as losses_mod
 import param_decomp.core.train as train_mod
+import param_decomp.targets.losses as losses_mod
 from param_decomp.core.adversary import source_masks
 from param_decomp.targets.tests.equivalence.jax_equivalence import (
     chunk_plan_static_gate_kl,

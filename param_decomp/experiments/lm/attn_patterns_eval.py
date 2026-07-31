@@ -149,7 +149,7 @@ def _assert_position_axis(model_static: DecomposedModel) -> None:
 
 def make_ci_attn_patterns_step(
     model_static: DecomposedModel,
-    compiler_options: dict[str, bool | int | str] | None = None,
+    compiler_options: dict[str, bool | int | str],
 ) -> AttnPatternsStep:
     """Deterministic CI-mask attn-patterns step: `lower_leaky` CI, no delta, one masked
     forward + one clean (all-false) forward."""
@@ -189,7 +189,7 @@ def make_ci_attn_patterns_step(
 def make_stochastic_attn_patterns_step(
     model_static: DecomposedModel,
     n_mask_samples: int,
-    compiler_options: dict[str, bool | int | str] | None = None,
+    compiler_options: dict[str, bool | int | str],
 ) -> AttnPatternsStep:
     """Stochastic-mask attn-patterns step: `n_mask_samples` draws of `mask = ci + (1−ci)·s`
     (with weight deltas), per-draw per-layer pattern KL summed. RNG via per-draw / per-site

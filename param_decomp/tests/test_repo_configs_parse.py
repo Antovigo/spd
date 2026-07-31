@@ -1,19 +1,18 @@
-"""Every config yaml the repo maintains must parse at tip (CONFIGS.md rule 1) — the
-LM seats against `LMExperimentConfig`, the toy seats against their domain schemas.
+"""Every maintained config YAML parses, round-trips, and ships in the built package.
 
-A schema PR that breaks a config here migrates it in the same PR, with an
-executed in-repo migration — never a script attached to a PR comment (a migration
-that lives outside the repo never runs; see CONFIGS.md's migration registry).
+A schema PR that breaks a seat migrates it in the same PR, with an executed in-repo
+migration — never a script attached to a PR comment (see CONFIGS.md).
 """
 
+import subprocess
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 import pytest
 import yaml
-from pydantic import ValidationError
 
-from param_decomp.experiments.config import assert_canonical_algorithm_config
+from param_decomp.core.base_config import BaseConfig
 from param_decomp.experiments.lm.config import (
     LMExperimentConfig,
     PretrainedTarget,
@@ -21,18 +20,25 @@ from param_decomp.experiments.lm.config import (
 )
 from param_decomp.experiments.resid_mlp.config import ResidMLPExperimentConfig
 from param_decomp.experiments.tms.config import TMSExperimentConfig
+from param_decomp.infra.dataset_store import DatasetDir, NamedDataset, resolve_dataset_ref
+from param_decomp.pretrain.config import PretrainConfig
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Archetype seats predating the modern schema, awaiting migration (see
-# CONFIGS.md registry). When you fix one, remove it here — the gate then
-# covers it; this list must only ever shrink.
-KNOWN_BROKEN = {
-    "param_decomp/experiments/lm/ss_llama_simple_mlp-2L.yaml",
+LM_CONFIG_PATHS = sorted(REPO.glob("param_decomp/experiments/lm/configs/*.yaml"))
+PRETRAIN_CONFIG_PATHS = sorted(REPO.glob("param_decomp/pretrain/configs/*.yaml"))
+PUBLIC_SCHEMA_BY_DIR: dict[str, type[BaseConfig]] = {
+    "param_decomp/experiments/lm/configs": LMExperimentConfig,
+    "param_decomp/experiments/tms/configs": TMSExperimentConfig,
+    "param_decomp/experiments/resid_mlp/configs": ResidMLPExperimentConfig,
+    "param_decomp/pretrain/configs": PretrainConfig,
 }
-
-_CONFIG_GLOBS = ("param_decomp/core/configs/**/*.yaml", "param_decomp/experiments/lm/*.yaml")
-CONFIG_PATHS = sorted(path for pattern in _CONFIG_GLOBS for path in REPO.glob(pattern))
+PUBLIC_CONFIG_CASES = sorted(
+    (path, schema)
+    for rel_dir, schema in PUBLIC_SCHEMA_BY_DIR.items()
+    for path in REPO.glob(f"{rel_dir}/*.yaml")
+)
+PUBLIC_CONFIG_PATHS = [path for path, _ in PUBLIC_CONFIG_CASES]
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -40,69 +46,87 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def test_gate_collects_the_seat_registry() -> None:
-    """Anti-vacuity: a broken glob (moved roots, renamed dirs) collects zero files and
-    every per-config test silently vanishes green. Pin the collected set to the
-    CONFIGS.md seat policy: non-empty, and within the 10-LM-config registry cap."""
-    for pattern in _CONFIG_GLOBS:
-        assert list(REPO.glob(pattern)), (
-            f"config glob {pattern!r} collected nothing — did that config root move?"
-        )
-    assert len(CONFIG_PATHS) <= 10, (
-        f"{len(CONFIG_PATHS)} LM configs exceed the CONFIGS.md registry cap of 10 — "
+    """Moved roots must not silently make a domain disappear from the parametrized tests."""
+    collected_dirs = {str(path.parent.relative_to(REPO)) for path in PUBLIC_CONFIG_PATHS}
+    assert collected_dirs == set(PUBLIC_SCHEMA_BY_DIR), (
+        f"config glob collected {collected_dirs or 'nothing'} — did a configs dir move?"
+    )
+    assert len(LM_CONFIG_PATHS) <= 10, (
+        f"{len(LM_CONFIG_PATHS)} LM configs exceed the CONFIGS.md registry cap of 10 — "
         "adding a seat requires an eviction (or this is an uncommitted one-off, see rule 2)"
     )
 
 
-@pytest.mark.parametrize("path", CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO)))
-def test_config_parses_and_is_canonical(path: Path) -> None:
-    rel = str(path.relative_to(REPO))
-    if rel in KNOWN_BROKEN:
-        with pytest.raises(ValidationError):
-            LMExperimentConfig.model_validate(_load(path))
-        pytest.skip(f"{rel}: known-broken seat awaiting migration (CONFIGS.md)")
-    cfg = LMExperimentConfig.model_validate(_load(path))
-    assert_canonical_algorithm_config(cfg)
+@pytest.mark.parametrize("path", LM_CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO)))
+def test_lm_config_builds_placement_claims(path: Path) -> None:
+    config = LMExperimentConfig.model_validate(_load(path))
     # The placement gate resolves the site set from config + arch, so every maintained
-    # config's sharding claim is exercised at its pinned dp (the pre-sbatch check). A
-    # `kind: pretrained` target is the enumerated gap: its resolution reads the pretrain
-    # cache from the cluster FS, which this gate cannot assume.
-    if not isinstance(cfg.target.spec, PretrainedTarget):
-        assert_placement_claims(cfg, Path("out"))
+    # config's sharding claim is exercised at its pinned dp. A pretrained target is the
+    # enumerated gap: resolving it reads a cluster-local pretrain cache.
+    if not isinstance(config.target.spec, PretrainedTarget):
+        assert_placement_claims(config, Path("out"))
 
 
-def test_known_broken_entries_still_exist() -> None:
-    missing = [rel for rel in KNOWN_BROKEN if not (REPO / rel).exists()]
-    assert not missing, f"KNOWN_BROKEN lists deleted files, prune it: {missing}"
-
-
-TOY_SCHEMA_BY_DIR = {
-    "param_decomp/experiments/tms/configs": TMSExperimentConfig,
-    "param_decomp/experiments/resid_mlp/configs": ResidMLPExperimentConfig,
-}
-
-TOY_CONFIG_PATHS = sorted(
-    path for rel_dir in TOY_SCHEMA_BY_DIR for path in REPO.glob(f"{rel_dir}/*.yaml")
+@pytest.mark.parametrize(
+    ("path", "schema"),
+    PUBLIC_CONFIG_CASES,
+    ids=[str(path.relative_to(REPO)) for path, _ in PUBLIC_CONFIG_CASES],
 )
+def test_public_config_round_trips(path: Path, schema: type[BaseConfig], tmp_path: Path) -> None:
+    """Every maintained public seat survives both BaseConfig persistence formats."""
+    config = schema.from_file(path)
+    assert schema.model_validate(config.model_dump(mode="json")) == config
+    for suffix in (".yaml", ".json"):
+        persisted = tmp_path / f"config{suffix}"
+        config.to_file(persisted)
+        assert schema.from_file(persisted) == config
 
 
-@pytest.mark.parametrize("path", TOY_CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO)))
-def test_toy_config_parses_and_is_canonical(path: Path) -> None:
-    schema = TOY_SCHEMA_BY_DIR[str(path.parent.relative_to(REPO))]
-    cfg = schema.model_validate(_load(path))
-    assert_canonical_algorithm_config(cfg)
+@pytest.mark.parametrize("path", PRETRAIN_CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO)))
+def test_pretrain_seat_resolves_to_the_dataset_store(path: Path) -> None:
+    """Every pretrain seat resolves its dataset name under the caller's data root."""
+    data = PretrainConfig.model_validate(_load(path)).data
+    data_root = Path("/any/data/root")
+    match data:
+        case NamedDataset(name=name):
+            assert resolve_dataset_ref(data, data_root) == data_root / "datasets" / name
+        case DatasetDir(dir=dir):
+            pytest.fail(f"{path.name} seats an ad-hoc shard dir ({dir}); a seat carries a name")
 
 
-def test_toy_gate_collects_both_domains() -> None:
-    """Anti-vacuity: a moved configs dir would silently drop its whole domain from the gate."""
-    collected_dirs = {str(p.parent.relative_to(REPO)) for p in TOY_CONFIG_PATHS}
-    assert collected_dirs == set(TOY_SCHEMA_BY_DIR), (
-        f"toy config glob collected {collected_dirs or 'nothing'} — did a configs dir move?"
+def test_wheel_contains_every_public_config(tmp_path: Path) -> None:
+    """A source checkout can hide missing package-data: inspect the built wheel itself."""
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(tmp_path)],
+        cwd=REPO,
+        check=True,
     )
+    [wheel] = tmp_path.glob("param_decomp-*.whl")
+    with ZipFile(wheel) as archive:
+        packaged = set(archive.namelist())
+    expected = {str(path.relative_to(REPO)) for path in PUBLIC_CONFIG_PATHS}
+    # Derived from the tree rather than named: the public cut drops configs whose schema
+    # lives outside this package, so a hardcoded path asserts a fact about this checkout
+    # instead of one about packaging, and fails on a tree that legitimately lacks it.
+    expected |= {
+        str(path.relative_to(REPO)) for path in REPO.glob("param_decomp/clustering/configs/*.yaml")
+    }
+    assert expected <= packaged, sorted(expected - packaged)
+
+
+def test_toy_sweep_uses_the_public_module_surface() -> None:
+    """The public package has no console scripts or former `param_decomp_lab` package."""
+    script = (REPO / "param_decomp/experiments/run_toy_sweep.sh").read_text()
+    assert "param_decomp_lab" not in script
+    assert "pd-tms" not in script
+    assert "pd-resid-mlp" not in script
+    assert 'python -m "$runner"' in script
+    assert "param_decomp.experiments.tms.run" in script
+    assert "param_decomp.experiments.resid_mlp.run" in script
 
 
 def _absolute_path_leaks(node: object, key: str | None = None, exempt: bool = False) -> list[str]:
-    """Strings starting with `/` anywhere in a raw config tree, except the `dir` value
-    of a tagged `kind: dir` escape arm."""
+    """Strings starting with `/`, except the `dir` value of a tagged `kind: dir` arm."""
     match node:
         case str() if node.startswith("/") and not exempt:
             return [f"{key}: {node}"]
@@ -119,13 +143,8 @@ def _absolute_path_leaks(node: object, key: str | None = None, exempt: bool = Fa
             return []
 
 
-@pytest.mark.parametrize(
-    "path", CONFIG_PATHS + TOY_CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO))
-)
+@pytest.mark.parametrize("path", PUBLIC_CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO)))
 def test_seats_carry_names_never_locations(path: Path) -> None:
-    """CONFIGS.md rule 5 / the portability principle (root CLAUDE.md, "Configs are
-    portable"): a committed seat references the world through names; an absolute path is
-    representable only inside a tagged `kind: dir` escape arm. Catches a mount-root path
-    the day it's committed."""
+    """Committed seats do not hard-code an absolute machine path outside an escape arm."""
     leaks = _absolute_path_leaks(_load(path))
     assert not leaks, f"absolute paths outside tagged `kind: dir` arms: {leaks}"

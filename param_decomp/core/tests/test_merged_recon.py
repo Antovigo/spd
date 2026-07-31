@@ -21,8 +21,9 @@ from param_decomp.core.configs import (
     SourceShape,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.core.recon import MixedPersistentStochasticSources, build_loss_terms
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.recon import MixedPersistentStochasticSources
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 from param_decomp.targets.llama_simple_mlp import site_specs
 from param_decomp.targets.testing import (
@@ -40,34 +41,45 @@ def _merged_cfg(
 ) -> MergedStochasticSubsetPPGDReconLossConfig:
     return MergedStochasticSubsetPPGDReconLossConfig(
         coeff=1.0,
-        adv_fraction=adv_fraction or ScheduleConfig(start_val=0.5),
+        adv_fraction=adv_fraction or ScheduleConfig.constant(0.5),
         routing=UniformKSubsetRoutingConfig(),
         source_shape=source_shape,
         optimizer=AdamPGDConfig(
-            beta1=0.5, beta2=0.99, lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025)
+            beta1=0.5,
+            beta2=0.99,
+            lr_schedule=ScheduleConfig(
+                max_val=0.01,
+                points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0)),
+            ),
         ),
         n_warmup_steps=n_warmup,
     )
 
 
 def test_adv_fraction_ramp_accepted_and_bounded():
-    ramp_to_one = ScheduleConfig(start_val=0.1, fn_type="linear", final_val_frac=10.0)
+    ramp_to_one = ScheduleConfig(
+        max_val=1.0, points=(Knot(at=0.0, frac=0.1), Knot(at=1.0, frac=1.0))
+    )
     cfg = _merged_cfg(n_warmup=0, adv_fraction=ramp_to_one)
-    assert cfg.adv_fraction.final_val_frac == 10.0
+    assert cfg.adv_fraction.max_val == 1.0
 
-    escapes_probability_range = ScheduleConfig(start_val=0.5, fn_type="linear", final_val_frac=4.0)
+    escapes_probability_range = ScheduleConfig(
+        max_val=2.0, points=(Knot(at=0.0, frac=0.25), Knot(at=1.0, frac=1.0))
+    )
     with pytest.raises(ValidationError, match="adv_fraction"):
         _merged_cfg(n_warmup=0, adv_fraction=escapes_probability_range)
 
 
 def test_merged_term_builds_one_entry():
     cfg = _merged_cfg(n_warmup=1)
-    losses = build_loss_terms(
+    losses = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                ),
             ),
             cfg,
         ),
@@ -80,6 +92,7 @@ def test_merged_term_builds_one_entry():
     assert entry.has_delta
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "source_shape,src_leading",
     [("c", (1, 1)), ("bc", (2, 1)), ("sc", (1, 16)), ("bsc", (2, 16))],
@@ -125,12 +138,14 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
             step=jnp.zeros((), jnp.int32),
         ),
     )
-    losses = build_loss_terms(
+    losses = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                ),
             ),
             merged,
         ),
@@ -145,6 +160,7 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
         remat_recon_forwards=True,
         remat_ci_fn=False,
         mesh=None,
+        compiler_options={},
     )
 
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)

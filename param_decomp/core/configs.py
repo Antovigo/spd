@@ -2,22 +2,22 @@
 
 Every algorithm-level config class lives here (or in the sibling `base_config` /
 `schedule` modules): routing, the explicit (toy) site spec, loss-metric configs,
-eval-metric configs, the top-level `PDConfig` / `RuntimeConfig` / `Cadence`, and the
-`wandb.config` shaping helpers. Depends only on pydantic / numpy / pyyaml /
-annotated-types (via `base_config`), so non-trainer consumers validate the same
-YAML run configs without pulling jax/wandb.
+eval-metric configs, the top-level `PDConfig` / `Cadence`, the placement table the
+engine resolves, and the `wandb.config` shaping helpers. Depends only on pydantic /
+numpy / pyyaml / annotated-types (via `base_config`), so non-trainer consumers validate
+the same YAML run configs without pulling jax/wandb.
 
 Experiment-level schema (the `ExperimentConfig` base and its LM / TMS / ResidMLP
 subclasses, each binding concrete `target`/`decomposition`/`data` sections) lives
 lab-side under `param_decomp/experiments/` — including the authored
-`decomposition.ci` configs AND the tiled LM site specs, which speak each domain's
-vocabulary. Core carries only the RESOLVED CI-fn arches (`ci_fn.py`) and the
-resolved flat sites.
+`decomposition.ci` configs, the tiled LM site specs, and the LM's compute substrate
+(`runtime:`), which speak each domain's vocabulary. Core carries only the RESOLVED CI-fn
+arches (`ci_fn.py`) and the resolved flat sites.
 """
 
 import copy
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 from pydantic import (
     BeforeValidator,
@@ -87,8 +87,10 @@ class ExplicitCSpec(BaseConfig):
 class LossMetricConfig(BaseConfig):
     """Pydantic config for a metric that can also be used as a training loss.
 
-    `coeff` is required when this metric is listed under `loss_metrics` (asserted by
-    `PDConfig`'s field validator); ignored for eval-only instances.
+    `coeff` is required when this metric is listed under `loss_metrics` and must be null
+    when listed under `eval.metrics` — both directions are asserted
+    (`PDConfig.validate_loss_metrics_have_coeff`;
+    `param_decomp.experiments.eval_config.validate_eval_metrics`).
 
     `name` overrides the class name as this instance's identity (`Metric.instance_key`),
     letting the same metric class appear under both `loss_metrics` and `eval.metrics`
@@ -124,11 +126,11 @@ class FrequencyMinimalityConfig(BaseConfig):
 class ImportanceMinimalityLossConfig(LossMetricConfig):
     """Config for the `L_p`-style importance-minimality penalty on upper-leaky CI values.
 
-    `pnorm` is the exponent's full schedule (SPEC S9; canonical is linear `2.0 → 0.4`:
-    `start_val=2.0, fn_type=linear, final_val_frac=0.2`; constant-`p` is
-    `fn_type=constant`). Warmup is refused where the term is built — a `p` ramping from 0
-    is never intended. `frequency` (when present) adds the batch-invariant
-    frequency-minimality penalty over the same `(c + eps)^p` per-component sums.
+    `pnorm` is the exponent's full schedule (SPEC S9; canonical is the linear anneal
+    `2.0 → 0.4`: `max_val=2.0` over knots `frac 1.0 → 0.2`). Its knots must keep
+    `frac > 0` (asserted where the term is built) — a `p` touching 0 is never intended.
+    `frequency` (when present) adds the batch-invariant frequency-minimality penalty over
+    the same `(c + eps)^p` per-component sums.
     """
 
     type: Literal["ImportanceMinimalityLoss"] = "ImportanceMinimalityLoss"
@@ -148,9 +150,9 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     floor, no aggressive grad clip) — the gradient is localized on the threshold band
     `c ~ gamma/sqrt(3)` and redescends for clearly-on components.
 
-    `gamma` is the width's full schedule (SPEC S9′); annealing it down (e.g.
-    `fn_type=linear, final_val_frac < 1`) sharpens the count. Warmup is refused where
-    the term is built.
+    `gamma` is the width's full schedule (SPEC S9′); annealing it down (knots with
+    decreasing `frac`) sharpens the count. Its knots must keep `frac > 0` (asserted
+    where the term is built) — a `gamma` touching 0 is never intended.
     """
 
     type: Literal["SmoothL0ImportanceMinimalityLoss"] = "SmoothL0ImportanceMinimalityLoss"
@@ -200,6 +202,7 @@ class StochasticReconSubsetLossConfig(LossMetricConfig):
 
 
 class StochasticHiddenActsReconLossConfig(LossMetricConfig):
+    slow: ClassVar[bool] = True
     type: Literal["StochasticHiddenActsReconLoss"] = "StochasticHiddenActsReconLoss"
     n_mask_samples: PositiveInt = 1
 
@@ -218,10 +221,12 @@ class ChunkwiseSubsetReconLossConfig(LossMetricConfig):
     total is the mean over all chunk forwards of `recon_loss / n_positions`, matching the
     2-pool's per-step recon.
 
-    The JAX single-pool trainer implements this natively: `recon.build_loss_terms`
-    maps this `type` onto `recon.subset_chunk_plan` (a parameterization of the one
-    `chunkwise_plan` builder), and the jitted step runs the chunk forwards directly —
-    no vendored `LMComponentModel` or lab recon-plan machinery is involved.
+    The JAX single-pool trainer implements this natively: `objective.build_objective`
+    maps this `type` onto `recon.make_plan(live_groups(sites, sites_per_chunk), routing,
+    StochasticSources(), n_samples)`, and the jitted step runs the chunk forwards
+    directly — no vendored `LMComponentModel` or lab recon-plan machinery is involved.
+    `routing` is honoured as authored; `recon.subset_chunk_plan` is the uniform-k
+    parameterization the parity fixtures pin, not the path this config takes.
     """
 
     type: Literal["ChunkwiseSubsetReconLoss"] = "ChunkwiseSubsetReconLoss"
@@ -249,28 +254,8 @@ One vocabulary for BOTH adversaries: persistent PGD implements all four; per-ste
 (fresh) PGD implements `c`/`bc`/`bsc` and rejects `sc` at validation."""
 
 
-# Stored run configs carry older generations of the per-step field: `mask_scope` (with
-# the original verbose value names before that). Alias exactly the forms that exist in
-# stored data so old runs keep loading (`unique_per_datapoint` occurs only in LM runs,
-# hence `bsc`). Delete once stored runs are migrated.
-_LEGACY_MASK_SCOPE_VALUES = {
-    "shared_across_batch": "c",
-    "unique_per_datapoint": "bsc",
-}
-
-
-def _alias_legacy_mask_scope_field(data: Any) -> Any:
-    if isinstance(data, dict) and "mask_scope" in data and "source_shape" not in data:
-        data = dict(data)
-        value = data.pop("mask_scope")
-        data["source_shape"] = _LEGACY_MASK_SCOPE_VALUES.get(value, value)
-    return data
-
-
 class PGDConfig(LossMetricConfig):
     """Shared base for per-step PGD loss configs."""
-
-    _alias_legacy_mask_scope = model_validator(mode="before")(_alias_legacy_mask_scope_field)
 
     init: PGDInitStrategy
     step_size: PositiveFloat
@@ -285,6 +270,7 @@ class PGDConfig(LossMetricConfig):
 
 
 class PGDReconLossConfig(PGDConfig):
+    slow: ClassVar[bool] = False
     type: Literal["PGDReconLoss"] = "PGDReconLoss"
 
 
@@ -309,32 +295,10 @@ class AdamPGDConfig(BaseConfig):
     lr_schedule: ScheduleConfig
 
 
-# Stored run configs carry two older generations of the field: `scope` as a nested
-# `{type: ...}` object (`sc`/`bsc`) and before that verbose type names. Alias exactly
-# the forms that exist in stored data so old runs keep loading. Delete once stored runs
-# are migrated.
-_LEGACY_SCOPE_VALUES = {
-    "broadcast_across_batch": "sc",
-    "per_batch_per_position": "bsc",
-}
-
-
-def _alias_legacy_scope_field(data: Any) -> Any:
-    if isinstance(data, dict) and "scope" in data and "source_shape" not in data:
-        data = dict(data)
-        scope = data.pop("scope")
-        if isinstance(scope, dict):
-            scope = scope["type"]
-        data["source_shape"] = _LEGACY_SCOPE_VALUES.get(scope, scope)
-    return data
-
-
 class PersistentPGDLossConfig(LossMetricConfig):
     """Shared adversary fields for the persistent-PGD loss terms (SPEC §4.4–4.5): the
     Adam-ascended source bundle's optimizer, stored shape, dtype, and warmup. Sources are
     clamped to `[0, 1]` after each step — the only implemented parameterization."""
-
-    _alias_legacy_scope = model_validator(mode="before")(_alias_legacy_scope_field)
 
     optimizer: AdamPGDConfig
     source_shape: SourceShape
@@ -358,24 +322,6 @@ class PersistentPGDReconLossConfig(PersistentPGDLossConfig):
     """Persistent-PGD recon loss: the adversary's masks routed to all sites every
     forward."""
 
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_removed_fields(cls, data: object) -> object:
-        # Shared-storage shim: stored run configs carry removed fields whose only
-        # supported value was inlined. Strip them so those configs still load; any
-        # other value never had an implementation -> reject.
-        if isinstance(data, dict):
-            if "use_sigmoid_parameterization" in data:
-                assert not data.pop("use_sigmoid_parameterization"), (
-                    "use_sigmoid_parameterization was removed (clamp-only)"
-                )
-            if "n_samples" in data:
-                assert data.pop("n_samples") == 1, (
-                    "n_samples was removed (route-all + one persistent source bundle make"
-                    " every draw identical, so only 1 was ever meaningful)"
-                )
-        return data
-
     type: Literal["PersistentPGDReconLoss"] = "PersistentPGDReconLoss"
 
 
@@ -398,26 +344,27 @@ class MergedStochasticSubsetPPGDReconLossConfig(PersistentPGDLossConfig):
 
     @model_validator(mode="after")
     def validate_adv_fraction_is_probability(self) -> Self:
-        start = self.adv_fraction.start_val
-        end = start * self.adv_fraction.final_val_frac
-        if not (start <= 1.0 and end <= 1.0):
+        # `frac` knots live in [0, 1] with the peak frac=1.0 attained, so the curve's
+        # range is exactly [min_frac, 1.0] · max_val — the peak check is sufficient.
+        if self.adv_fraction.max_val > 1.0:
             raise ValueError(f"adv_fraction must stay within [0, 1]: {self.adv_fraction}")
         return self
 
 
 # ---------------------------------------------------------------------------
 # Eval-metric configs
+#
+# Every eval metric declares `slow: ClassVar[bool]` beside its own definition. An eval
+# costs what it costs wherever it is bound, so the tier travels WITH the metric rather
+# than being assigned by whichever family binds it. `ClassVar` is what makes it
+# unauthorable: pydantic ignores it, and `extra="forbid"` then refuses a YAML `slow:` key.
+# No default, so a new metric cannot skip the decision — swept at import in
+# `experiments.eval_config`, which also refuses a tier that is merely inherited.
 # ---------------------------------------------------------------------------
 
 
-class CEandKLLossesConfig(BaseConfig):
-    """`rounding_threshold` binarises CI for the `*_rounded_masked` variant (`ci > threshold`)."""
-
-    type: Literal["CEandKLLosses"] = "CEandKLLosses"
-    rounding_threshold: float
-
-
 class CIHiddenActsReconLossConfig(BaseConfig):
+    slow: ClassVar[bool] = True
     type: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
 
 
@@ -427,6 +374,7 @@ class CIHistogramsConfig(BaseConfig):
     many log-spaced `[1e-9, 1]` bands sharing the same forward, accumulated over EVERY batch);
     `None` disables it."""
 
+    slow: ClassVar[bool] = True
     type: Literal["CIHistograms"] = "CIHistograms"
     n_batches_accum: PositiveInt | None
     density_heatmap_n_bins: PositiveInt | None = None
@@ -438,50 +386,19 @@ class CI_L0Config(BaseConfig):
     Matching layers' L0s are summed into the group and logged under the group's name.
     """
 
+    slow: ClassVar[bool] = False
     type: Literal["CI_L0"] = "CI_L0"
     groups: dict[str, list[str]] | None
     ci_alive_threshold: float = 0.0
 
 
-class _AttnPatternsBaseConfig(BaseConfig):
-    """Shared config for attention-pattern recon metrics.
-
-    Supports standard attention and RoPE (auto-detected from the parent attention
-    module). ALiBi / QK-norm / sliding window are not supported.
-
-    Either `(q_proj_path, k_proj_path)` or `c_attn_path` must be set (combined QKV with
-    output split as `[Q | K | V]` along the last dim) — not both, not neither.
-    """
-
-    n_heads: PositiveInt
-    q_proj_path: str | None = None
-    k_proj_path: str | None = None
-    c_attn_path: str | None = None
-
-    @model_validator(mode="after")
-    def _validate_paths(self) -> Self:
-        has_separate = self.q_proj_path is not None and self.k_proj_path is not None
-        has_combined = self.c_attn_path is not None
-        assert has_separate != has_combined, (
-            "Specify either (q_proj_path, k_proj_path) or c_attn_path, not both/neither"
-        )
-        return self
-
-
-class CIMaskedAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
-    type: Literal["CIMaskedAttnPatternsReconLoss"] = "CIMaskedAttnPatternsReconLoss"
-
-
-class StochasticAttnPatternsReconLossConfig(_AttnPatternsBaseConfig):
-    type: Literal["StochasticAttnPatternsReconLoss"] = "StochasticAttnPatternsReconLoss"
-    n_mask_samples: PositiveInt = 1
-
-
 class CIMeanPerComponentConfig(BaseConfig):
+    slow: ClassVar[bool] = True
     type: Literal["CIMeanPerComponent"] = "CIMeanPerComponent"
 
 
 class ComponentActivationDensityConfig(BaseConfig):
+    slow: ClassVar[bool] = True
     type: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
     ci_alive_threshold: float = 0.0
 
@@ -503,6 +420,7 @@ class DenseCITargetSpec(BaseConfig):
 class IdentityCIErrorConfig(BaseConfig):
     """`identity_ci` / `dense_ci` list layers expected to produce Identity / Dense patterns."""
 
+    slow: ClassVar[bool] = True
     type: Literal["IdentityCIError"] = "IdentityCIError"
     identity_ci: list[IdentityCITargetSpec] | None
     dense_ci: list[DenseCITargetSpec] | None
@@ -519,49 +437,13 @@ class _PermutationPlotsBaseConfig(BaseConfig):
 
 
 class PermutedCIPlotsConfig(_PermutationPlotsBaseConfig):
+    slow: ClassVar[bool] = True
     type: Literal["PermutedCIPlots"] = "PermutedCIPlots"
 
 
 class UVPlotsConfig(_PermutationPlotsBaseConfig):
+    slow: ClassVar[bool] = True
     type: Literal["UVPlots"] = "UVPlots"
-
-
-class ArithmeticCIGridConfig(BaseConfig):
-    """Per-component causal-importance heatmaps over an `a x b` arithmetic operand grid.
-
-    The probe is a SPEC, not a filesystem artifact: the `[a_range] x [b_range]` grid of
-    `"<a><op><b>="` prompts is built in-memory at startup from the target's tokenizer
-    (`experiments/lm/arithmetic_probe.py`), so configs stay cluster-portable. For each
-    threshold in `thresholds`, every component alive on the probe (max CI over the grid
-    `>` threshold) is counted in n_alive, and the `top_k` most-active (by max CI) get
-    `a x b` CI + activation heatmaps. A figure tier — renders on `eval.slow_every`. Any
-    alive beyond `top_k` are reported via n_dropped (not silently cut)."""
-
-    type: Literal["ArithmeticCIGrid"] = "ArithmeticCIGrid"
-    operation: Literal["add", "sub", "mul"] = "add"
-    a_range: tuple[int, int] = (1, 100)
-    b_range: tuple[int, int] = (1, 100)
-    thresholds: list[float] = Field(default_factory=lambda: [0.1])
-    top_k: PositiveInt = 24
-
-
-AnyEvalMetricConfig = Annotated[
-    ArithmeticCIGridConfig
-    | CEandKLLossesConfig
-    | CIHiddenActsReconLossConfig
-    | CIHistogramsConfig
-    | CI_L0Config
-    | CIMaskedAttnPatternsReconLossConfig
-    | CIMeanPerComponentConfig
-    | ComponentActivationDensityConfig
-    | IdentityCIErrorConfig
-    | PermutedCIPlotsConfig
-    | PGDReconLossConfig
-    | StochasticAttnPatternsReconLossConfig
-    | StochasticHiddenActsReconLossConfig
-    | UVPlotsConfig,
-    Discriminator("type"),
-]
 
 
 # ---------------------------------------------------------------------------
@@ -667,104 +549,6 @@ AnyLossMetricConfig = Annotated[
 ]
 
 
-class ProfileConfig(BaseConfig):
-    """Profiling/instrumentation toggles the trainer (`run.py`) reads DIRECTLY off the config.
-
-    A profiling run is a CONFIG, not an env hack: the trainer parses its `launch_config.yaml` and
-    reads these fields, so the pinned config records exactly which hooks ran. All hooks are
-    DEFAULT-OFF; the empty `ProfileConfig()` enables nothing.
-
-    `mem_profile` (static + runtime memory analysis, then exits), `time_steps` (per-step wall
-    breakdown), `trace` (perfetto trace over `trace_start`..`trace_start+trace_steps`),
-    `profile_max_events` (raise the perfetto GPU-activity event cap), `async_test`,
-    `leaf_bench`, `no_checkpoint` (skip ALL saves — throwaway profiling only).
-    """
-
-    mem_profile: bool = False
-    time_steps: bool = False
-    trace: bool = False
-    trace_start: PositiveInt | None = None
-    """First step of the perfetto trace window; `None` lets `run.py` default it to the first
-    post-warmup step. Only meaningful when `trace` is set."""
-    trace_steps: PositiveInt | None = None
-    """Number of steps to trace; `None` lets `run.py` default it (3). Only with `trace`."""
-    profile_max_events: PositiveInt | None = None
-    """Raise the perfetto GPU-activity event cap (`gpu_max_activity_api_events`) so a full
-    step's kernels fit under the exporter's 1M-event limit. `None` leaves the default. Only
-    with `trace`."""
-    async_test: bool = False
-    leaf_bench: bool = False
-    no_checkpoint: bool = False
-
-
-class LaunchEnv(BaseConfig):
-    """The process-environment surface a SLURM-launched rank runs with — the XLA *client*
-    knobs (mem fraction / allocator / host-memory limit), NCCL/glibc tuning, and a free-form
-    env escape hatch — lifted into the run config so a run's `launch_config.yaml` fully captures its
-    environment (tracking + repro), and A/B-ing a knob is a config edit, not a launcher edit.
-
-    XLA *compiler* flags are NOT here — they go through `RuntimeConfig.compiler_options`
-    (passed natively to each jit, no env round-trip; see that field). This class is only the
-    env that must exist before the process starts (read at backend/NCCL init).
-
-    The launcher (`experiments/lm/launch.py`) renders this into the rank env it exports;
-    `LD_LIBRARY_PATH` is NOT here (it is computed at submit time from the workspace venv's
-    nvidia libs — machine-specific, not a tracked decision). Defaults mirror the values the
-    launcher used to hardcode; they are the single source of truth.
-    """
-
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_xla_flags(cls, data: object) -> object:
-        # Shared-storage shim: XLA compiler flags moved off `launch_env.xla_flags` (env) onto
-        # `RuntimeConfig.compiler_options` (native, in-process). Drop the stored env-form key
-        # so old run configs still load; the run picks up the current `compiler_options`.
-        if isinstance(data, dict):
-            data.pop("xla_flags", None)
-        return data
-
-    xla_python_client_mem_fraction: PositiveFloat = 0.92
-    """`XLA_PYTHON_CLIENT_MEM_FRACTION` — the BFC pool cap as a fraction of HBM."""
-    xla_python_client_allocator: str | None = None
-    """`XLA_PYTHON_CLIENT_ALLOCATOR` — e.g. `platform` for the on-demand cudaMalloc allocator
-    (avoids BFC fragmentation OOMs near the HBM cap, at some per-alloc cost). `None` leaves
-    the XLA default (BFC)."""
-    xla_pjrt_gpu_host_memory_limit_gb: PositiveInt = 1024
-    """`XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB` — cap on XLA's pinned host-staging pool
-    (allocated on demand)."""
-    nccl_debug: str = "WARN"
-    """`NCCL_DEBUG` — overrides the cluster default (INFO + SUBSYS=ALL), which logs every
-    collective and bloats slurm logs to tens of GB per run."""
-    malloc_arena_max: PositiveInt = 2
-    """`MALLOC_ARENA_MAX` — caps glibc malloc arenas to bound host RSS under many threads."""
-    env: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Arbitrary extra exports merged into the rank env LAST (after the typed knobs), "
-            "so it can override any of them. The escape hatch for a one-off var without a "
-            "schema field."
-        ),
-    )
-    profile: ProfileConfig = Field(default_factory=ProfileConfig)
-
-    def as_env(self) -> dict[str, str]:
-        """Render the ordered `{VAR: value}` map the launcher exports (sans the
-        submit-time-computed `LD_LIBRARY_PATH`). Only the env that must exist before
-        backend/NCCL init — XLA *compiler* flags are passed natively via
-        `RuntimeConfig.compiler_options`, not here. Later keys override earlier, so the
-        free-form `env` block wins last."""
-        rendered: dict[str, str] = {
-            "NCCL_DEBUG": self.nccl_debug,
-            "MALLOC_ARENA_MAX": str(self.malloc_arena_max),
-            "XLA_PYTHON_CLIENT_MEM_FRACTION": str(self.xla_python_client_mem_fraction),
-            "XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB": str(self.xla_pjrt_gpu_host_memory_limit_gb),
-        }
-        if self.xla_python_client_allocator is not None:
-            rendered["XLA_PYTHON_CLIENT_ALLOCATOR"] = self.xla_python_client_allocator
-        rendered |= self.env
-        return rendered
-
-
 RuleConfig = dict[str, str | list[str] | None]
 """One placement row as configured: semantic axis name -> mesh axis, ordered mesh axes,
 or null (replicate). Axis-name keys are free-form — semantic names are declared by the
@@ -793,248 +577,15 @@ class PlacementTableConfig(BaseConfig):
     activations: RuleConfig
 
 
-class RuntimeConfig(BaseConfig):
-    """Compute substrate: launch mode, world size, rematerialization, and the launch-time
-    env/XLA-flag surface (`launch_env`).
-
-    Perturbs numerics but doesn't change the algorithm.
-    """
-
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_removed_torch_runtime_fields(cls, data: object) -> object:
-        # Shared-storage shim (provenance): stored run config.yamls carry torch-trainer
-        # runtime fields the JAX trainer no longer has (`device`, `autocast_bf16` — bf16 is
-        # unconditional, device is JAX-managed). Strip them so existing runs still load;
-        # reject a non-supported value loudly.
-        if not isinstance(data, dict):
-            return data
-        data.pop("device", None)
-        # `launch: slurm | inline` was deleted (bring-up derives from dp vs gpus_per_node;
-        # submission is the wrapper's business) — stored pins from its one day still parse.
-        if "launch" in data:
-            assert data.pop("launch") in ("slurm", "inline"), data
-        if "autocast_bf16" in data:
-            assert data.pop("autocast_bf16") is True, (
-                "autocast_bf16 was removed (the JAX trainer always computes in bf16)"
-            )
-        return data
-
-    dp: PositiveInt = Field(
-        description=(
-            "World size — the total device count, THE single source of truth for topology, "
-            "NEVER inferred from ambient env (`SLURM_PROCID` is present in every process on "
-            "a SLURM box). Process bring-up DERIVES from it: `dp <= gpus_per_node` → ONE "
-            "process over exactly `dp` local devices, asserted at startup "
-            "(`sharding.assert_inline_topology`) — `dp: 1` is the single-device smoke, "
-            "`dp: 8` a run inside an external scheduler's own whole-node job. "
-            "`dp > gpus_per_node` → one process per node, brought up via `jax.distributed`'s "
-            "own cluster auto-detection (`init_distributed` — the jax ecosystem's contract; "
-            "SLURM/MPI/TPU), asserted against the realized `jax.device_count()`. Multiple "
-            "processes on one node is deliberately unrepresentable. The batch shards "
-            "data-parallel across all `dp` devices."
-        ),
-    )
-    gpus_per_node: PositiveInt = Field(
-        default=8,
-        description=(
-            "GPUs per node — the size of the intra-node NVLink group the mesh's `fsdp*tp` "
-            "plane is carved from, and the launcher's node math (`nodes = dp / gpus_per_node`). "
-            "A property of the cluster, carried in the config so the pinned launch_config "
-            "fully determines the topology. Default 8 (H100/H200/B200 nodes)."
-        ),
-    )
-    tp: int = Field(
-        default=1,
-        ge=1,
-        le=8,
-        description=(
-            "Tensor-parallel (Megatron) degree, carved from the intra-node GPUs so "
-            "`fsdp * tp = GPUS_PER_NODE` — both stay on NVLink. Shards the component C axis "
-            "(V/U, CI-fn output heads) and the CI-fn MLP hidden, halving the per-layer weight "
-            "all-gather. `tp = 1` (default) is the pure-HSDP layout (degenerate tp axis, "
-            "behaviour-preserving). Must divide both the device count and GPUS_PER_NODE."
-        ),
-    )
-    sharding: Literal["owner", "owner+zero1", "zero1", "ddp"] | PlacementTableConfig = Field(
-        description=(
-            "Placement policy for the trainable state (placement.py). REQUIRED, no "
-            "default — a layout this consequential is written down per config. Presets: "
-            "`zero1` = intra-matrix ZeRO-1 over the full data mesh "
-            "(~equivalent comms to `owner` under "
-            "elementwise optimizers); `owner` = whole-matrix ownership (stack ÷replicate, "
-            "d ÷fsdp, C ÷tp) — the muon-motivated layout (Newton-Schulz stays "
-            "node-local); STRICT — a shape group whose stack does "
-            "not tile ÷replicate is an error; `owner+zero1` = `owner` plus the "
-            "`params.zero1` opt-in row, ZeRO-1-ing exactly those non-tiling groups "
-            "intra-matrix; `ddp` = fully replicated. Each value is a BIDIRECTIONAL claim "
-            "checked at config build (placement.from_config, pre-submission for a submitted run): "
-            "`owner` claims every group tiles; `owner+zero1` claims at least one does "
-            "not — all-tiling under it is equally an error. Or an explicit "
-            "`PlacementTableConfig` table (nested `params: {persist, zero1?, forward}` + "
-            "`activations`, each row a semantic-axis -> mesh-axes rule; list order is "
-            "semantics). Same math under every value — layouts differ only by float "
-            "reassociation (SPEC D4)."
-        ),
-    )
-    remat_recon_forwards: bool = Field(
-        default=False,
-        description=(
-            "JAX trainer memory/compute trade: rematerialize the recon-loss masked "
-            "forwards under the full model (deep targets need it to fit). Compute "
-            "substrate knob, no algorithm effect."
-        ),
-    )
-    remat_ci_fn: bool = Field(
-        default=False,
-        description=(
-            "JAX trainer memory/compute trade: rematerialize the CI-fn forward "
-            "(recompute it in the backward instead of storing its activations). The "
-            "CI-fn activations scale with batch, so this is the main lever for larger "
-            "batch on big targets. Compute substrate knob, no algorithm effect."
-        ),
-    )
-    scan_unroll: PositiveInt = Field(
-        default=1,
-        description=(
-            "`lax.scan(unroll=k)` over the layer block stack: emit k iterations as "
-            "straight-line code so XLA can prefetch gather(L+1) under matmul(L) (the "
-            "cross-iteration overlap a 1-layer while-body denies). Per-layer remat is "
-            "unchanged, so it is memory-neutral. 1 = plain per-layer scan. Compute substrate."
-        ),
-    )
-    gather_fp8: bool = Field(
-        default=False,
-        description=(
-            "Quantized all-gather: cast the ÷fsdp compute V/U to fp8 before the per-layer "
-            "÷fsdp→full gather (½ the bf16 bytes on the wire), dequantized to bf16 in the "
-            "block. Documented net-negative at b128 (fp8 on the wire was slower); kept as a "
-            "gated experiment. Compute substrate."
-        ),
-    )
-    ascend_replicate: bool = Field(
-        default=False,
-        description=(
-            "Replicate the ÷fsdp compute weights once before the adversary ascents so the "
-            "n_warmup ascend forwards skip the per-layer ÷fsdp→full gather (mask-independent "
-            "and detached, so the re-gather is pure redundancy). Numerics-identical. Trades "
-            "the full V/U resident during the ascend phase for the eliminated re-gathers."
-        ),
-    )
-    compiler_options: dict[str, bool | int | str] = Field(
-        default_factory=lambda: {
-            "xla_gpu_enable_latency_hiding_scheduler": True,
-            "xla_gpu_enable_triton_gemm": False,
-            "xla_gpu_enable_command_buffer": "",
-            "xla_gpu_enable_highest_priority_async_stream": True,
-            "xla_gpu_all_reduce_combine_threshold_bytes": 1073741824,
-            "xla_gpu_all_gather_combine_threshold_bytes": 1073741824,
-            "xla_gpu_reduce_scatter_combine_threshold_bytes": 134217728,
-            "xla_gpu_enable_pipelined_all_gather": True,
-            "xla_gpu_enable_pipelined_reduce_scatter": True,
-            "xla_gpu_enable_pipelined_all_reduce": True,
-            "xla_gpu_enable_while_loop_double_buffering": True,
-            "xla_gpu_enable_all_gather_combine_by_dim": False,
-            "xla_gpu_enable_reduce_scatter_combine_by_dim": False,
-        },
-        description=(
-            "XLA compiler flags passed NATIVELY to every jit's `compiler_options` — no "
-            "`XLA_FLAGS` env round-trip, and (unlike env) they ARE in the compile-cache key, "
-            "so changing one actually recompiles. Full `xla_*` flag names, typed values "
-            "(True/int/str, not 'true'). Default = the tuned MaxText set (latency-hiding "
-            "scheduler + 1 GiB combine thresholds + pipelined collectives + double-buffering; "
-            "`command_buffer:''` disables CUDA-graph capture, a correctness guard). Add "
-            "`xla_disable_hlo_passes: rematerialization` to opt into the disable-XLA-remat win "
-            "(validate save/resume first). On CPU (toys/tests) the GPU flags are ignored."
-        ),
-    )
-    launch_env: LaunchEnv = Field(default_factory=LaunchEnv)
-    """The pre-process env the SLURM launcher exports into each rank (XLA *client* / NCCL /
-    glibc knobs — the env that must exist before backend init; NOT compiler flags, which go
-    via `compiler_options`). Only a SLURM submitter renders it — a run inside an
-    external scheduler's allocation inherits the caller's environment."""
-
-    @property
-    def distributed(self) -> bool:
-        """Derived, never authored: a world larger than one node is multi-process (one per
-        node); anything else is one process over `dp` local devices."""
-        return self.dp > self.gpus_per_node
-
-    @model_validator(mode="after")
-    def validate_topology(self) -> Self:
-        if self.dp > self.gpus_per_node:
-            assert self.dp % self.gpus_per_node == 0, (
-                f"a multi-node world allocates whole {self.gpus_per_node}-GPU nodes — "
-                f"dp={self.dp} must be a multiple of gpus_per_node={self.gpus_per_node} "
-                f"(a sub-node world runs as one process inside an existing allocation)"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def validate_gather_reshape(self) -> Self:
-        assert not (self.ascend_replicate and self.gather_fp8), (
-            "ascend_replicate and gather_fp8 both re-pin the compute-weight gather — pick one"
-        )
-        return self
-
-
 class PDConfig(BaseConfig):
     """Algorithm specification: seed, losses, optimizers, faithfulness warmup.
 
     Domain-agnostic — the target-coupled apparatus (which sites to decompose + the CI-fn
     arch) lives in the per-domain `decomposition` section, not here. Flipping any field here
-    changes what algorithm runs. Pair with `RuntimeConfig` (substrate), `Cadence` (when to
-    emit) and `RunSink` (where output goes) when running the trainer (`param_decomp.core.run`).
+    changes what algorithm runs. Pair with `Cadence` (when to emit) and `RunSink` (where
+    output goes) when running the trainer (`param_decomp.core.run`); the compute substrate
+    reaches the engine unpacked into primitives, never as a config object.
     """
-
-    @model_validator(mode="before")
-    @classmethod
-    def _strip_removed_jax_unsupported_fields(cls, data: object) -> object:
-        # Shared-storage shim (provenance): stored run config.yamls carry fields the JAX
-        # trainer no longer has — each only ever had ONE supported value. Strip them so
-        # existing runs still load (harvest / autointerp / fine-tune / run_metadata); reject
-        # a non-supported value loudly.
-        if not isinstance(data, dict):
-            return data
-        if "sigmoid_type" in data:
-            assert data.pop("sigmoid_type") == "leaky_hard", (
-                "sigmoid_type was removed (only leaky_hard is implemented)"
-            )
-        if "use_delta_component" in data:
-            assert data.pop("use_delta_component") is True, (
-                "use_delta_component was removed (always on in the JAX trainer)"
-            )
-        if "tied_weights" in data:
-            assert not data.pop("tied_weights"), (
-                "tied_weights was removed (obviated by the JAX design)"
-            )
-        if "identity_decomposition_targets" in data:
-            assert not data.pop("identity_decomposition_targets"), (
-                "identity_decomposition_targets was removed (identity insertion is not in the JAX trainer)"
-            )
-        if "sampling" in data:
-            assert data.pop("sampling") == "continuous", (
-                "sampling was removed (continuous-only); binomial mask sampling is gone"
-            )
-        if "n_mask_samples" in data:
-            # `n_mask_samples` moved from a trainer-level knob onto the stochastic loss
-            # configs that actually draw samples. Push the stored value down onto every
-            # stochastic recon entry that does not set its own, so existing run configs
-            # keep their sample count; entries with an explicit value win.
-            n = data.pop("n_mask_samples")
-            stochastic_types = {
-                "StochasticReconLoss",
-                "StochasticReconLayerwiseLoss",
-                "StochasticReconSubsetLoss",
-            }
-            for entry in data.get("loss_metrics", []):
-                if (
-                    isinstance(entry, dict)
-                    and entry.get("type") in stochastic_types
-                    and "n_mask_samples" not in entry
-                ):
-                    entry["n_mask_samples"] = n
-        return data
 
     # --- General ---
     seed: int = Field(
@@ -1096,6 +647,26 @@ class DenseLogPhase(BaseConfig):
     until_step: PositiveInt
 
 
+class KeepLastNCheckpoints(BaseConfig):
+    """Keep only the `n` most recent `ckpts/<step>/` directories; every save deletes
+    whatever falls out of that window."""
+
+    kind: Literal["keep_last"] = "keep_last"
+    n: PositiveInt
+
+
+class KeepAllCheckpoints(BaseConfig):
+    """Keep every checkpoint the run writes — the whole trajectory stays on disk."""
+
+    kind: Literal["keep_all"] = "keep_all"
+
+
+CheckpointRetention = Annotated[KeepLastNCheckpoints | KeepAllCheckpoints, Discriminator("kind")]
+"""Which of a run's written checkpoints survive on disk. The trainer always checkpoints — on
+`Cadence.save_every`, on SIGTERM, and at the final step — so this axis only prunes what has
+already been written, and there is deliberately no keep-nothing arm."""
+
+
 class Cadence(BaseConfig):
     """Rhythm of non-eval loop emissions: train-log and checkpoint periods.
 
@@ -1106,25 +677,18 @@ class Cadence(BaseConfig):
     """
 
     train_log_every: PositiveInt
+    save_every: PositiveInt
+    checkpoint_retention: CheckpointRetention
+    """Which orbax `ckpts/<step>/` checkpoints survive each checkpoint write. Under
+    `keep_last` the retained window always contains the newest checkpoint, so the
+    final-step one is never pruned."""
     dense_log_phase: DenseLogPhase | None = None
     """Optional denser logging for early training; `None` means a flat `train_log_every`."""
-    save_every: PositiveInt | None = None
-    keep_last_n_checkpoints: PositiveInt | None = None
-    """How many of the most-recent orbax `ckpts/<step>/` checkpoints to keep on disk
-    after each checkpoint write. `None` (the default) keeps all checkpoints — the
-    conservative choice for research where prior steps may matter. Opt in to e.g. `3`
-    for long jobs where disk pressure outweighs the value of intermediate checkpoints;
-    the final-step checkpoint is always included in the retained set."""
 
     def should_log_train(self, step: int) -> bool:
         if self.dense_log_phase is not None and step < self.dense_log_phase.until_step:
             return step % self.dense_log_phase.every == 0
         return step % self.train_log_every == 0
-
-    def should_save(self, step: int) -> bool:
-        if self.save_every is None or step == 0:
-            return False
-        return step % self.save_every == 0
 
 
 # ---------------------------------------------------------------------------

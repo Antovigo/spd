@@ -1,7 +1,7 @@
 """`python -m param_decomp.pretrain.train <config.yaml>` — JAX next-token-CE pretraining of an in-house target LM.
 
 The composition root and only I/O layer for pretraining; the step stays pure. Reuses the
-decomposition trainer's substrate — `param_decomp.core.data` (offline pre-tokenized parquet,
+decomposition trainer's substrate — `param_decomp.pretrain.batch_data` (offline pre-tokenized parquet,
 never streamed), `param_decomp.core.sharding` (`init_distributed` / `hsdp_mesh`) — but the
 trajectory is a plain LM: fp32 master params, AdamW (weight-decay on 2D weights only,
 matching the torch `configure_optimizers` grouping), cosine LR + warmup, grad clip,
@@ -34,16 +34,23 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float, Int
+from orbax.checkpoint.checkpoint_managers import preservation_policy
 from orbax.checkpoint.type_handlers import ArrayHandler, register_type_handler
 
-from param_decomp.core.data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.core.sharding import hsdp_mesh, init_distributed
+from param_decomp.infra.dataset_store import resolve_dataset_ref
+from param_decomp.infra.paths import DEFAULT_DATA_ROOT
+from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
 from param_decomp.pretrain.cache import (
     cache_dir_for,
     torch_model_config_dict,
     write_pretrain_cache,
 )
-from param_decomp.pretrain.config import PretrainConfig, load_pretrain_config
+from param_decomp.pretrain.config import (
+    PretrainConfig,
+    PretrainRunPaths,
+    load_pretrain_config,
+)
 from param_decomp.pretrain.models import PretrainModel, init_model, model_logits
 
 register_type_handler(jax.Array, ArrayHandler(use_replica_parallel=False), override=True)
@@ -174,7 +181,8 @@ def _make_checkpoint_manager(ckpt_dir: Path, keep_last: int) -> ocp.CheckpointMa
     return ocp.CheckpointManager(
         ckpt_dir.resolve(),
         options=ocp.CheckpointManagerOptions(
-            max_to_keep=keep_last, enable_async_checkpointing=False
+            preservation_policy=preservation_policy.LatestN(n=keep_last),
+            enable_async_checkpointing=False,
         ),
     )
 
@@ -202,7 +210,7 @@ class MetricsSink:
         self._jsonl = None
         if not is_main:
             return
-        self._jsonl = open(cfg.run_dir / "metrics.jsonl", "a")  # noqa: SIM115 — sink lives the whole run
+        self._jsonl = open(cfg.paths.run_dir / "metrics.jsonl", "a")  # noqa: SIM115 — sink lives the whole run
         if cfg.wandb is not None:
             import wandb
 
@@ -248,7 +256,8 @@ def train(cfg: PretrainConfig) -> None:
     assert cfg.global_batch % ndev == 0, (cfg.global_batch, ndev)
     assert cfg.global_batch % n_proc == 0, (cfg.global_batch, n_proc)
 
-    run_dir = cfg.run_dir
+    paths = cfg.paths
+    run_dir = paths.run_dir
     if is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
         print(
@@ -274,16 +283,17 @@ def train(cfg: PretrainConfig) -> None:
     # The shards are `block_size + 1` wide (the extra token is the final label); serve the
     # full row and split x/y inside the step.
     seq_plus1 = cfg.block_size + 1
-    schedule = BatchSchedule(scan_shards(cfg.data.dir), cfg.global_batch, cfg.seed)
+    shards = scan_shards(resolve_dataset_ref(cfg.data, paths.data_root))
+    schedule = BatchSchedule(shards, cfg.global_batch, cfg.seed)
     server = ShardServer(schedule, seq_plus1, jax.process_index(), n_proc)
-    eval_schedule = BatchSchedule(scan_shards(cfg.data.dir), cfg.global_batch, cfg.seed + 1)
+    eval_schedule = BatchSchedule(shards, cfg.global_batch, cfg.seed + 1)
     eval_server = ShardServer(eval_schedule, seq_plus1, jax.process_index(), n_proc)
 
     step_fn = make_train_step(cfg, optimizer)
     eval_fn = make_eval_step(cfg)
     sink = MetricsSink(cfg, is_main)
     model_config = torch_model_config_dict(cfg)
-    cache_dir = _cache_dir(cfg) if is_main else None
+    cache_dir = _cache_dir(cfg, paths) if is_main else None
 
     tokens_per_step = cfg.global_batch * cfg.block_size
     window_t0 = time.time()
@@ -367,37 +377,34 @@ def _lr_at(cfg: PretrainConfig, step: int) -> float:
     return min_lr + 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) * (peak - min_lr)
 
 
-def _cache_dir(cfg: PretrainConfig) -> Path:
+def _cache_dir(cfg: PretrainConfig, paths: PretrainRunPaths) -> Path:
     """`<data_root>/pretrain_cache/<project>-<run_id>` — the exact dir
-    `param_decomp.infra.pretrain_cache.cache_dir_for_run` resolves. `out_dir` is the runs
-    dir (`<data_root>/runs`), so the cache ROOT is its parent."""
-    assert cfg.out_dir is not None and cfg.run_id is not None
+    `param_decomp.infra.pretrain_cache.cache_dir_for_run` resolves."""
     project = cfg.wandb.project if cfg.wandb is not None else "pretrain"
-    return cache_dir_for(cfg.out_dir.parent, project, cfg.run_id)
+    return cache_dir_for(paths.data_root, project, paths.run_id)
 
 
 def main(config: Path) -> None:
-    cfg = load_pretrain_config(Path(config))
-    if cfg.out_dir is None or cfg.run_id is None:
-        # Local hand-run without the launcher: mint an ephemeral identity under cwd.
-        cfg = _mint_local_identity(cfg)
-    _maybe_enable_compilation_cache(cfg)
+    cfg = _stamp_local_identity(load_pretrain_config(Path(config)))
+    _enable_compilation_cache(cfg.paths)
     train(cfg)
 
 
-def _mint_local_identity(cfg: PretrainConfig) -> PretrainConfig:
+def _stamp_local_identity(cfg: PretrainConfig) -> PretrainConfig:
+    """A hand-run carries no launcher stamp: mint an ephemeral identity under the default
+    data root."""
     import secrets
 
-    out_dir = cfg.out_dir or Path("out/runs")
-    run_id = cfg.run_id or f"t-{secrets.token_hex(4)}"
-    return cfg.model_copy(update={"out_dir": out_dir, "run_id": run_id})
+    return cfg.model_copy(
+        update={
+            "data_root": cfg.data_root or DEFAULT_DATA_ROOT,
+            "run_id": cfg.run_id or f"t-{secrets.token_hex(4)}",
+        }
+    )
 
 
-def _maybe_enable_compilation_cache(cfg: PretrainConfig) -> None:
-    if cfg.out_dir is None:
-        return
-    cache = cfg.out_dir.parent / "xla_compilation_cache"
-    jax.config.update("jax_compilation_cache_dir", str(cache))
+def _enable_compilation_cache(paths: PretrainRunPaths) -> None:
+    jax.config.update("jax_compilation_cache_dir", str(paths.compilation_cache_dir))
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 60)
 
 

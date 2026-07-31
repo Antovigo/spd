@@ -23,14 +23,15 @@ def init_distributed(dp: int, gpus_per_node: int) -> None:
     SLURM env — `SLURM_PROCID` is present in every process on a SLURM box (incl. a pytest
     worker), so sniffing it would wrongly fire `jax.distributed.initialize` mid-test.
 
-    The cluster recipe: ONE process per node, each owning all its local GPUs (mirrors the
-    torch torchrun model — the launcher runs srun `--ntasks-per-node=1`). jax auto-detects
-    the SLURM topology (process_id = node rank, num_processes = node count) but its SLURM
-    cluster env claims only ONE device per process by default, so we pass the full local
-    device list explicitly (`CUDA_VISIBLE_DEVICES`, set to all 8 by `--gpus-per-node=8`).
-    The realized total device count must equal `dp`. This avoids the 8-tasks-per-node srun
-    placement that the cluster's `CR_Pack_Nodes` selection packs onto one node. `dp` /
-    `dp` (config) decide distributedness and world size; SLURM env only supplies the rank.
+    The recipe: ONE process per node, each owning all its local GPUs (mirrors the torch
+    torchrun model — under SLURM, srun `--ntasks-per-node=1`). jax auto-detects the SLURM
+    topology (process_id = node rank, num_processes = node count) but its SLURM cluster
+    env claims only ONE device per process by default, so we pass the full local device
+    list explicitly (`CUDA_VISIBLE_DEVICES`, set to all 8 by `--gpus-per-node=8`). The
+    realized total device count must equal `dp`. This also rules out the 8-tasks-per-node
+    placement that a packing node-selection policy (`CR_Pack_Nodes`) would land on one
+    node. `dp` (config) decides distributedness and world size; SLURM env only supplies
+    the rank.
     """
     assert dp % gpus_per_node == 0, f"dp={dp} must be a multiple of {gpus_per_node} (GPUs/node)"
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -89,6 +90,18 @@ def hsdp_mesh(tp: int = 1, gpus_per_node: int = 8) -> Mesh:
     return Mesh(devices.reshape(replicate, fsdp, tp), axis_names=("replicate", "fsdp", "tp"))
 
 
+def single_device_mesh() -> Mesh:
+    """The degenerate `(1, 1, 1)` mesh for a domain that is single-device BY CONSTRUCTION
+    (the toys: one CPU process, seconds of training, so no `dp` to author). Asserts the
+    world it assumes rather than absorbing whatever devices happen to be visible — a toy
+    started inside someone's 8-GPU allocation is a mis-targeted job, not a free speedup."""
+    assert jax.process_count() == 1 and jax.device_count() == 1, (
+        f"single-device by construction, found {jax.process_count()} processes × "
+        f"{jax.local_device_count()} local devices"
+    )
+    return hsdp_mesh()
+
+
 def hsdp_abstract_mesh(dp: int, tp: int, gpus_per_node: int) -> AbstractMesh:
     """The mesh SHAPE a run config implies, with no devices — exactly the `hsdp_mesh` a
     run realizing `dp` devices builds, since `dp` declares the device count under BOTH
@@ -103,14 +116,15 @@ def place_via_shardings[T](tree: T, shardings: T) -> T:
     leaves pass through. The apply path for an already-loaded frozen model (vs the jitted
     `out_shardings` init path for freshly-seeded params).
 
-    Replicated leaves go through `make_array_from_callback`, not `device_put` (which runs a
-    cross-host equality allgather on a replicated multi-process sharding). The leaf is
-    identical on every host, so the local copy IS the global one."""
+    Every leaf goes through `make_array_from_callback`, never `device_put`. Each process
+    loaded the same complete frozen leaf, so the callback can serve its addressable shards
+    directly. `device_put(local, multi-process sharding)` first checks cross-host replica
+    equality; for an FSDP target leaf replicated across the process axis that check gathers
+    the full leaf on every process before slicing it (56 GiB for full32L's stacked MLP
+    weights)."""
     is_array = lambda x: hasattr(x, "shape") and hasattr(x, "dtype")  # noqa: E731
-    place = lambda a, s: (  # noqa: E731
-        jax.make_array_from_callback(a.shape, s, lambda _idx: a)
-        if s.is_fully_replicated
-        else jax.device_put(a, s)
+    place = lambda a, s: jax.make_array_from_callback(  # noqa: E731
+        a.shape, s, lambda index: a[index]
     )
     return jax.tree.map(
         lambda a, s: place(a, s) if is_array(a) else a,

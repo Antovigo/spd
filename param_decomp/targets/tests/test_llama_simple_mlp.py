@@ -30,8 +30,8 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.core.recon import build_loss_terms
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
     TrainingItem,
@@ -273,7 +273,10 @@ def test_step_trains_and_has_vpd_signature():
         optimizer=AdamPGDConfig(
             beta1=0.5,
             beta2=0.99,
-            lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            lr_schedule=ScheduleConfig(
+                max_val=0.01,
+                points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0)),
+            ),
         ),
         n_warmup_steps=n_warmup,
     )
@@ -296,15 +299,20 @@ def test_step_trains_and_has_vpd_signature():
             step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                ),
             ),
             ChunkwiseSubsetReconLossConfig(
-                routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=2, n_samples=1
+                routing=UniformKSubsetRoutingConfig(),
+                coeff=0.5,
+                sites_per_chunk=2,
+                n_samples=1,
             ),
             ppgd_cfg,
         ),
@@ -319,6 +327,7 @@ def test_step_trains_and_has_vpd_signature():
         remat_recon_forwards=True,
         remat_ci_fn=False,
         mesh=None,
+        compiler_options={},
     )
 
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
@@ -352,7 +361,7 @@ def test_faith_warmup_decreases_faith():
     model = tiny_simple_mlp_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt)
+    wstep = make_faith_warmup_step(opt, compiler_options={})
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss: float | None = None
     loss = None
@@ -380,7 +389,7 @@ def test_component_stacks_shapes_fp32():
     assert all(a.dtype == jnp.float32 for pair in vu.stacks.values() for a in pair)
 
 
-_REAL_CACHE_DIR = Path("out/pretrain_cache/spd-t-9d2b8f02")
+_REAL_CACHE_DIR = Path("/mnt/data/artifacts/mechanisms/param-decomp/pretrain_cache/spd-t-9d2b8f02")
 _PRODUCTION_CS = {
     "c_fc": 3072,
     "down_proj": 3584,
@@ -398,14 +407,16 @@ def test_pretrained_target_converts_with_all_layers():
     c-spec over the checkpoint's n_layer (4)."""
     import yaml
 
-    from param_decomp.core.built_run import DataConfig
     from param_decomp.experiments.lm.config import (
         LlamaSimpleMLPTargetConfig,
         LMExperimentConfig,
         build_experiment_config,
     )
+    from param_decomp.experiments.lm.resolved import ResolvedLMData
 
-    reference_yaml = Path(__file__).parent.parent / "configs" / "llama8b_l18_b128_cmp32.yaml"
+    reference_yaml = (
+        Path(__file__).parents[2] / "experiments" / "lm" / "configs" / "llama8b_l18_b128_cmp32.yaml"
+    )
     raw = yaml.safe_load(reference_yaml.read_text())
     raw["target"]["spec"] = {
         "kind": "pretrained",
@@ -436,12 +447,12 @@ def test_pretrained_target_converts_with_all_layers():
         assert by_name[f"h.{layer}.attn.v_proj"] == 1024
     assert target.sites[0] == SiteC("h.0.attn.q_proj", 768)
     # StochasticReconSubsetLoss = one all-sites entry
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         cfg.pd.loss_metrics,
         tuple(sc.name for sc in target.sites),
     )
     (stoch_term,) = [t for t in loss_terms.recon if t.name == "StochasticReconSubsetLoss"]
     (stoch_entry,) = stoch_term.plan
     assert len(stoch_entry.live_sites) == 24
-    assert isinstance(cfg.data, DataConfig)
+    assert isinstance(cfg.data, ResolvedLMData)
     assert cfg.data.dir.name == "fineweb_llama_tok_2048"

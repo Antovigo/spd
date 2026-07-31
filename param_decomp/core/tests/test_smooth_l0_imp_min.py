@@ -19,7 +19,7 @@ from param_decomp.core.losses import (
     imp_min_terms,
     smooth_l0_importance_minimality_terms,
 )
-from param_decomp.core.schedule import ScheduleConfig, get_scheduled_value
+from param_decomp.core.schedule import Knot, ScheduleConfig, get_scheduled_value
 
 
 def _phi(c: jax.Array, gamma: float) -> jax.Array:
@@ -73,7 +73,7 @@ def test_terms_match_manual_per_site_structure():
 def test_anneal_and_dispatch():
     cfg = SmoothL0ImportanceMinimalityLossConfig(
         coeff=2e-4,
-        gamma=ScheduleConfig(start_val=1.0, fn_type="linear", final_val_frac=0.1),
+        gamma=ScheduleConfig(max_val=1.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1))),
         frequency=FrequencyMinimalityConfig(coeff=1e-4, reference_token_count=64),
     )
     total = 100

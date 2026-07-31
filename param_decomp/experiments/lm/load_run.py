@@ -34,10 +34,14 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Int
 
 from param_decomp.core import placement
-from param_decomp.core.built_run import BuiltRun
-from param_decomp.core.checkpoint import make_checkpoint_manager, restore_decomposition_to_host
+from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
+from param_decomp.core.checkpoint import (
+    make_read_only_checkpoint_manager,
+    restore_decomposition_to_host,
+)
 from param_decomp.core.ci_fn import ChunkwiseTransformerCIFn
 from param_decomp.core.components import ComponentStacks
+from param_decomp.core.configs import PlacementTableConfig
 from param_decomp.core.model import DecomposedModel
 from param_decomp.core.run_state import init_decomposition
 from param_decomp.core.sharding import hsdp_mesh, place_target, place_via_shardings
@@ -46,8 +50,9 @@ from param_decomp.experiments.lm.config import (
     LlamaSimpleMLPTargetConfig,
     TargetConfig,
     hf_model_family,
-    load_run_dir_config,
+    load_config,
 )
+from param_decomp.experiments.lm.resolved import LMRun, weights_jnp_dtype
 from param_decomp.infra import pretrain_cache
 from param_decomp.infra.paths import DEFAULT_DATA_ROOT
 from param_decomp.targets import llama_simple_mlp
@@ -65,13 +70,14 @@ class HarvestForward:
 
 
 def build_target(
-    cfg: BuiltRun, mesh: jax.sharding.Mesh, data_root: Path
+    cfg: LMRun, mesh: jax.sharding.Mesh, data_root: Path
 ) -> tuple[DecomposedModel, int]:
     """`(model, vocab_size)` for the run's target config. The `model` (an `eqx.Module`) IS the
     frozen target — it carries the full model weights (embedding included) as fields and
     embeds its token input internally. SimpleMLP reads its pretrain cache under `data_root`
-    (no network); the HF families read the HF snapshot (frozen bf16 weights + fp32-compute,
-    matching `run.py::main`).
+    (no network); the HF families read the HF snapshot. Both cast their weights to the
+    config's `target.weights_dtype` on read — this is the ONLY place that dtype is applied,
+    so train and consume load the same target.
 
     LM-only: harvest/slow-eval over the toy (TMS/ResidMLP) targets is not wired — those
     validate via their in-loop target-CI metric in the lab provider, not this path."""
@@ -81,7 +87,7 @@ def build_target(
             simple_cfg = llama_simple_mlp.load_model_config(cache_dir)
             sites = llama_simple_mlp.site_specs(simple_cfg, cfg.target.sites)
             loaded_model = llama_simple_mlp.load_decomposed_lm_from_pretrain_cache(
-                cache_dir, simple_cfg, sites, jnp.bfloat16
+                cache_dir, simple_cfg, sites, weights_jnp_dtype(cfg.target.weights_dtype)
             )
             model = place_via_shardings(loaded_model, loaded_model.shardings(mesh))
             return model, simple_cfg.vocab_size
@@ -89,17 +95,13 @@ def build_target(
             family = hf_model_family(cfg.target.model_name)
             arch_cfg = family.arch_config()
             sites = glu_site_specs(arch_cfg, cfg.target.sites)
-            model = place_target(
-                family.load(
-                    cfg.target.model_name,
-                    arch_cfg,
-                    sites,
-                    scan_unroll=cfg.runtime.scan_unroll,
-                    gather_fp8=cfg.runtime.gather_fp8,
-                ),
-                mesh,
+            loaded_model = family.load(
+                cfg.target.model_name,
+                arch_cfg,
+                sites,
+                weights_jnp_dtype(cfg.target.weights_dtype),
             )
-            return model, arch_cfg.vocab_size
+            return place_target(loaded_model, mesh), arch_cfg.vocab_size
         case _:
             raise AssertionError(f"build_target is LM-only; got target {type(cfg.target).__name__}")
 
@@ -124,7 +126,7 @@ class LoadedJaxRun:
     run_id: str
     step: int
     model: DecomposedModel
-    config: BuiltRun
+    config: LMRun
     vocab_size: int
     _decomposition: Decomposition
     _forward: Callable[
@@ -158,7 +160,12 @@ class LoadedJaxRun:
 
 
 def _restore_decomposition(
-    cfg: BuiltRun, model: DecomposedModel, mesh: jax.sharding.Mesh, run_dir: Path, step: int | None
+    cfg: LMRun,
+    sharding: str | PlacementTableConfig,
+    model: DecomposedModel,
+    mesh: jax.sharding.Mesh,
+    run_dir: Path,
+    step: int | None,
 ) -> tuple[Decomposition, int]:
     """Restore ONLY the trained decomposition from the run's checkpoint.
 
@@ -173,11 +180,10 @@ def _restore_decomposition(
     # Consumer construction: this mesh is the CONSUMER's topology (often one device), not
     # the run's launch topology, so the launch claims don't bind — a zero1 row declared
     # for dp=N is legitimately unreachable here.
-    rules = placement.from_config_for_consumer(cfg.runtime.sharding, mesh, model.sites)
+    rules = placement.from_config_for_consumer(sharding, mesh, model.sites)
     abstract = jax.eval_shape(lambda: init_decomposition(model, cfg.ci_fn, init_key, mesh, rules))
 
-    assert cfg.cadence.keep_last_n_checkpoints is not None, cfg.cadence
-    manager = make_checkpoint_manager(run_dir / "ckpts", cfg.cadence.keep_last_n_checkpoints)
+    manager = make_read_only_checkpoint_manager(run_dir / "ckpts")
     resolved_step = manager.latest_step() if step is None else step
     assert resolved_step is not None, f"no checkpoints under {run_dir / 'ckpts'}"
     decomposition = jax.device_put(restore_decomposition_to_host(manager, resolved_step, abstract))
@@ -190,10 +196,12 @@ def open_jax_run(
     """Open the run at `run_dir`; restore checkpoint `step` (latest if None). Restores
     only the trained decomposition (see `_restore_decomposition`). `data_root` resolves a
     `kind: pretrained` target's cache (`<data_root>/pretrain_cache/...`)."""
-    cfg = load_run_dir_config(run_dir, data_root)
+    cfg, authored = load_config(run_dir / LAUNCH_CONFIG_FILENAME, run_dir.name, data_root)
     mesh = hsdp_mesh()
     target_model, vocab_size = build_target(cfg, mesh, data_root)
-    decomposition, resolved_step = _restore_decomposition(cfg, target_model, mesh, run_dir, step)
+    decomposition, resolved_step = _restore_decomposition(
+        cfg, authored.runtime.sharding, target_model, mesh, run_dir, step
+    )
     assert isinstance(decomposition.components, ComponentStacks)
 
     site_names = target_model.site_names
@@ -258,7 +266,7 @@ class RunMetadata:
 def run_metadata(run_dir: Path, *, data_root: Path = DEFAULT_DATA_ROOT) -> RunMetadata:
     """Target topology for `run_dir`, derived from the pinned config (+ the SimpleMLP
     pretrain cache's `model_config.yaml` for `n_layer`/`vocab_size`). No orbax restore."""
-    cfg = load_run_dir_config(run_dir, data_root)
+    cfg, _ = load_config(run_dir / LAUNCH_CONFIG_FILENAME, run_dir.name, data_root)
     match cfg.target:
         case LlamaSimpleMLPTargetConfig():
             cache_dir = pretrain_cache.resolved_cache_dir(data_root, cfg.target.pretrain_run_path)
@@ -279,7 +287,4 @@ def run_metadata(run_dir: Path, *, data_root: Path = DEFAULT_DATA_ROOT) -> RunMe
                 layer_activation_sizes=[(s.name, s.C) for s in cfg.target.sites],
             )
         case _:
-            raise AssertionError(
-                "run_metadata is the LM-consumer path only (toys are not harvested); "
-                f"got target {type(cfg.target).__name__}"
-            )
+            raise AssertionError(f"run_metadata is LM-only; got target {type(cfg.target).__name__}")

@@ -20,11 +20,10 @@ model:
   n_layer: 2
   n_head: 4
   n_embd: 128
-  flash_attention: false
 
 data:
-  dir: out/datasets/pile_neox_tok_512
-  tokenizer_name: EleutherAI/gpt-neox-20b
+  kind: name
+  name: pile_neox_tok_512
 
 wandb:
   project: param-decomp

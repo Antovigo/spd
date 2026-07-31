@@ -10,7 +10,7 @@ SPMD-correctness contract: sharding layout must be semantically invisible.
 Simulated multi-device CPU run:
 
   XLA_FLAGS="--xla_force_host_platform_device_count=4" \
-    python -m param_decomp.core.experiments.invariance_check --steps 3
+    python -m param_decomp.targets.invariance_check --steps 3
 
 (JAX's counter-based RNG is value-deterministic for a fixed key regardless of
 sharding, so the stochastic terms draw identical values — only summation order
@@ -46,8 +46,8 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
-from param_decomp.core.recon import build_loss_terms
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh, shard_batch
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 from param_decomp.targets.glu_transformer import (
@@ -91,7 +91,10 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         source_shape="sc",
         optimizer=AdamPGDConfig(
             beta1=0.5, beta2=0.99,
-            lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            lr_schedule=ScheduleConfig(
+                max_val=0.01,
+                points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0)),
+            ),
         ),
         n_warmup_steps=2,
     )  # fmt: skip
@@ -114,11 +117,12 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
             step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
-                coeff=5e-6, pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                coeff=5e-6,
+                pnorm=ScheduleConfig(max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))),
                 frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=128),
             ),
             ChunkwiseSubsetReconLossConfig(routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1),
@@ -131,7 +135,7 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         losses=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh,
+        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh, compiler_options={},
     )  # fmt: skip
 
     out = []

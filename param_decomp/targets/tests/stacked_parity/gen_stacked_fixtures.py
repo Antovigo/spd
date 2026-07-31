@@ -43,7 +43,7 @@ from param_decomp.core.configs import (  # noqa: E402
     PersistentPGDReconLossConfig,
 )
 from param_decomp.core.recon import subset_chunk_plan  # noqa: E402
-from param_decomp.core.schedule import ScheduleConfig  # noqa: E402
+from param_decomp.core.schedule import Knot, ScheduleConfig  # noqa: E402
 from param_decomp.core.train import TrainState, make_train_step  # noqa: E402
 from param_decomp.targets.llama8b import (  # noqa: E402
     KINDS,
@@ -178,7 +178,9 @@ def main() -> None:
         stoch_coeff=0.5,
         imp_min=ImportanceMinimalityLossConfig(
             coeff=5e-6,
-            pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+            pnorm=ScheduleConfig(
+                max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+            ),
             frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=32),
         ),
         adversary=PersistentPGDReconLossConfig(
@@ -187,7 +189,14 @@ def main() -> None:
             optimizer=AdamPGDConfig(
                 beta1=0.5,
                 beta2=0.99,
-                lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+                lr_schedule=ScheduleConfig(
+                    max_val=0.01,
+                    points=(
+                        Knot(at=0.0, frac=0.0),
+                        Knot(at=0.025, frac=1.0),
+                        Knot(at=1.0, frac=1.0),
+                    ),
+                ),
             ),
             n_warmup_steps=N_WARMUP,
         ),

@@ -5,12 +5,14 @@ mean-CI per component are exact under micro-batching), the `pre_sigmoid`-vs-`low
 distinction, the `n_batches_accum` cap on the histogram sample, and that the renderer
 emits valid PNGs under the exact torch `slow_eval/figures/*` keys. Also covers the in-loop
 slow tier (SPEC S28/S29): the `slow_every` / `slow_on_first_step` cadence and the rank-0
-background `BackgroundRenderer` logging figures on the live `_step` axis.
+background `BackgroundRenderer` logging figures on a deferred semantic step axis.
 """
 
+import base64
 import sys
 import types
-from functools import partial
+from functools import cache, partial
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -25,14 +27,21 @@ from param_decomp.core.ci_fn import (
     build_ci_fn,
     lower_leaky_hard_sigmoid,
 )
+from param_decomp.core.components import SiteC
 from param_decomp.core.configs import (
     IdentityCIErrorConfig,
     IdentityCITargetSpec,
     PermutedCIPlotsConfig,
     UVPlotsConfig,
 )
+from param_decomp.core.eval_schedule import FirstThenEvery, eval_due
 from param_decomp.core.model import DecomposedModel
-from param_decomp.core.run import BackgroundRenderer, render_and_log_slow_eval, slow_eval_due
+from param_decomp.core.run import (
+    BackgroundRenderer,
+    DeferredMediaRecord,
+    MetricsSink,
+    _combine_step_records,
+)
 from param_decomp.core.slow_eval import (
     PermutationMetricSpec,
     accumulate_position_ci,
@@ -49,14 +58,31 @@ from param_decomp.core.slow_eval import (
     resolve_permutation_metrics,
 )
 from param_decomp.core.train import COMPUTE_DT, cast_floating
-from param_decomp.targets.glu_transformer import (
-    glu_site_specs,
-    mlp_family_site_cs,
-)
+from param_decomp.targets.glu_transformer import glu_site_specs
 from param_decomp.targets.testing import (
     tiny_glu_cfg,
     tiny_glu_decomposed_lm,
 )
+
+
+def _slow_eval_media(
+    reductions: dict[str, Any],
+    perm_spec: PermutationMetricSpec,
+    position_ci: dict[str, Any] | None,
+    components: dict[str, tuple[np.ndarray, np.ndarray]] | None,
+    now_step: int,
+) -> DeferredMediaRecord:
+    """A slow-tier figure payload, assembled as the operations in
+    `experiments/lm/diagnostic_eval_operations.py` assemble theirs — the whole figure set at
+    once, so one render exercises every key the deferred axis has to carry."""
+    figures = render_slow_eval_figures(reductions)
+    if position_ci is not None:
+        figures |= render_permutation_figures(perm_spec, position_ci, components)
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={f"slow_eval/{key}": value for key, value in figures.items()},
+    )
 
 
 def _build_ci_fn(model: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
@@ -77,14 +103,24 @@ def _build_ci_fn(model: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
     return build_ci_fn(arch, model.sites, key)
 
 
+_C = 4
+_SITE_CS = (SiteC("layers.4.mlp.down_proj", _C), SiteC("layers.5.mlp.gate_proj", _C))
+"""Two sites over two layers and two MLP kinds — the smallest set that still exercises
+multi-site reduction dicts, cross-layer site names, and both the `*gate_proj` /
+`*down_proj` metric patterns. The renderer lays out one subplot per SITE and matplotlib
+dominates these tests, so growing this grows every render-bearing test in the file."""
+
+
+@cache
 def _tiny_setup(threshold: float, density_heatmap_n_bins: int | None = None):
+    """Shared across tests: everything returned is frozen (a pydantic config, equinox
+    modules, a `filter_jit` over them), so there is nothing for a test to mutate."""
     cfg = tiny_glu_cfg()
-    C = 8
-    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, C))
+    sites = glu_site_specs(cfg, _SITE_CS)
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
-    step = make_slow_eval_step(model, threshold, density_heatmap_n_bins)
-    return cfg, model, ci_fn, step, C
+    step = make_slow_eval_step(model, threshold, density_heatmap_n_bins, compiler_options={})
+    return cfg, model, ci_fn, step, _C
 
 
 def test_reductions_match_hand_rolled_per_component():
@@ -144,8 +180,8 @@ def test_n_batches_accum_caps_histogram_sample_only():
     for site in model.site_names:
         # the cap only limits the histogram raw-value sample; counts/sums span all batches
         assert capped[site].n_positions == full[site].n_positions == 3 * 2 * 16
-        assert capped[site].lower_sample.size == 2 * 16 * 8  # one batch
-        assert full[site].lower_sample.size == 3 * 2 * 16 * 8
+        assert capped[site].lower_sample.size == 2 * 16 * _C  # one batch
+        assert full[site].lower_sample.size == 3 * 2 * 16 * _C
 
 
 def test_pre_sigmoid_differs_from_lower():
@@ -217,7 +253,7 @@ def test_density_hist_accumulates_over_all_batches_uncapped():
     # n_batches_accum caps only the raw sample; the density hist spans every batch regardless
     capped = accumulate_site_reductions(step, model, ci_fn, batches, n_batches_accum=1)
     for r in capped.values():
-        assert r.lower_sample.size == 2 * 16 * 8  # one batch (capped)
+        assert r.lower_sample.size == 2 * 16 * _C  # one batch (capped)
         assert r.density_hist is not None
         assert r.density_hist.sum(1)[0] == 3 * 2 * 16  # all three batches
 
@@ -310,21 +346,28 @@ def test_resolve_permutation_metrics_empty_when_unconfigured():
     assert not spec.any_plots and not spec.any_identity_error and not spec.want_uv_plots
 
 
+@cache
+def _position_ci_step():
+    """One trace for the file: `_SITE_CS` fixes the only model these tests use."""
+    return make_position_ci_step(_tiny_setup(threshold=0.0)[1], compiler_options={})
+
+
+@cache
 def _tiny_position_ci():
     cfg = tiny_glu_cfg()
-    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
+    sites = glu_site_specs(cfg, _SITE_CS)
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
     residual = jax.random.randint(jax.random.PRNGKey(4), (3, 12), 0, cfg.vocab_size)
-    position_ci = accumulate_position_ci(make_position_ci_step(model), model, ci_fn, [residual])
+    position_ci = accumulate_position_ci(_position_ci_step(), model, ci_fn, [residual])
     return model, position_ci
 
 
 def test_position_ci_keeps_position_axis_and_batch_means():
     _, position_ci = _tiny_position_ci()
     for pci in position_ci.values():
-        assert pci.lower.shape == (12, 8)  # (T, C), batch axis reduced away
-        assert pci.upper.shape == (12, 8)
+        assert pci.lower.shape == (12, _C)  # (T, C), batch axis reduced away
+        assert pci.upper.shape == (12, _C)
         assert np.all(np.isfinite(pci.lower)) and np.all(np.isfinite(pci.upper))
         assert pci.lower.min() >= 0.0 and pci.lower.max() <= 1.0  # lower-leaky clamps to [0, 1]
 
@@ -336,7 +379,7 @@ def test_render_permutation_figures_emits_pngs():
         UVPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"]),
     ]
     spec = resolve_permutation_metrics(model.site_names, metrics)
-    components = {name: (np.zeros((4, 8)), np.zeros((8, 4))) for name in model.site_names}
+    components = {name: (np.zeros((4, _C)), np.zeros((_C, 4))) for name in model.site_names}
     figures = render_permutation_figures(spec, position_ci, components)
     assert set(figures) == {
         "figures/causal_importances",
@@ -378,16 +421,20 @@ def test_compute_identity_ci_errors_empty_when_unconfigured():
     assert compute_identity_ci_errors(spec, position_ci, tolerance=0.1) == {}
 
 
-def test_slow_eval_due_fires_on_cadence_and_first_step():
-    # multiples of slow_every fire; non-multiples don't
-    assert slow_eval_due(now_step=10000, every=1000, slow_every=10000, slow_on_first_step=False)
-    assert not slow_eval_due(now_step=2000, every=1000, slow_every=10000, slow_on_first_step=False)
-    assert slow_eval_due(now_step=20000, every=1000, slow_every=10000, slow_on_first_step=False)
-    # slow_on_first_step additionally fires at the first eval step (now_step == every)
-    assert slow_eval_due(now_step=1000, every=1000, slow_every=10000, slow_on_first_step=True)
-    assert not slow_eval_due(now_step=1000, every=1000, slow_every=10000, slow_on_first_step=False)
-    # the first eval step is the ONLY extra one slow_on_first_step adds
-    assert not slow_eval_due(now_step=2000, every=1000, slow_every=10000, slow_on_first_step=True)
+def test_train_and_eval_share_one_transport_record_per_model_step():
+    combined = _combine_step_records(
+        {"train/loss/total": 1.0},
+        {"eval/loss/PGDReconLoss_20step": 0.25},
+    )
+    assert combined == {
+        "train/loss/total": 1.0,
+        "eval/loss/PGDReconLoss_20step": 0.25,
+    }
+
+
+def test_train_and_eval_key_collision_fails_closed():
+    with pytest.raises(AssertionError, match="colliding keys"):
+        _combine_step_records({"same": 1.0}, {"same": 2.0})
 
 
 class _FakeWandb(types.ModuleType):
@@ -399,16 +446,32 @@ class _FakeWandb(types.ModuleType):
 
     def __init__(self):
         super().__init__("wandb")
-        self.logged: list[tuple[dict[str, Any], int]] = []
+        self.logged: list[tuple[dict[str, Any], int | None, bool | None]] = []
+        self.dropped: list[dict[str, Any]] = []
+        self._step = 0
+        self.defined_metrics: list[tuple[str, str | None]] = []
+
+    def define_metric(self, name: str, step_metric: str | None = None) -> None:
+        self.defined_metrics.append((name, step_metric))
 
     def Image(self, img: Any) -> Any:  # noqa: N802 — mirrors `wandb.Image`
         return img
 
-    def log(self, payload: dict[str, Any], step: int) -> None:
-        self.logged.append((payload, step))
+    def log(
+        self,
+        payload: dict[str, Any],
+        step: int | None = None,
+        commit: bool | None = None,
+    ) -> None:
+        if step is not None and step < self._step:
+            self.dropped.append(payload)
+            return
+        self.logged.append((payload, step, commit))
+        if commit:
+            self._step = (step if step is not None else self._step) + 1
 
 
-def test_renderer_logs_figures_on_live_step_axis(monkeypatch: pytest.MonkeyPatch):
+def test_renderer_logs_figures_on_deferred_semantic_step_axis(monkeypatch: pytest.MonkeyPatch):
     cfg, model, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
     reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
@@ -418,20 +481,72 @@ def test_renderer_logs_figures_on_live_step_axis(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
 
     spec = resolve_permutation_metrics(model.site_names, [])
-    renderer = BackgroundRenderer(is_main=True)
-    renderer.submit(partial(render_and_log_slow_eval, reductions, spec, None, None, 4242))
+    renderer = BackgroundRenderer(MetricsSink(None, fake))
+    renderer.submit(partial(_slow_eval_media, reductions, spec, None, None, 4242))
     renderer.join()  # flush the background render
 
+    assert fake.defined_metrics == [
+        (key, "slow_eval/figure_step")
+        for key in (
+            "slow_eval/figures/causal_importance_values",
+            "slow_eval/figures/causal_importance_values_pre_sigmoid",
+            "slow_eval/figures/component_activation_density",
+            "slow_eval/figures/ci_mean_per_component",
+            "slow_eval/figures/ci_mean_per_component_log",
+        )
+    ]
     assert len(fake.logged) == 1
-    payload, logged_step = fake.logged[0]
-    assert logged_step == 4242  # on the live `_step` axis at the eval step
+    payload, logged_step, commit = fake.logged[0]
+    assert logged_step is None  # never attempts an out-of-order W&B `_step`
+    assert commit is False  # deferred media must not advance W&B before same-step scalars
+    assert payload["slow_eval/figure_step"] == 4242.0
     assert set(payload) == {
+        "slow_eval/figure_step",
         "slow_eval/figures/causal_importance_values",
         "slow_eval/figures/causal_importance_values_pre_sigmoid",
         "slow_eval/figures/component_activation_density",
         "slow_eval/figures/ci_mean_per_component",
         "slow_eval/figures/ci_mean_per_component_log",
     }
+
+
+def test_metrics_sink_rejects_a_second_committed_record_at_the_same_step(tmp_path: Path):
+    sink = MetricsSink((tmp_path / "metrics.jsonl").open("a"), None)
+    sink.log(100, {"train/loss/total": 1.0})
+
+    with pytest.raises(AssertionError, match="metrics steps must be strictly increasing"):
+        sink.log(100, {"eval/loss/PGDReconLoss_20step": 0.25})
+
+
+def test_deferred_media_cannot_advance_wandb_past_same_step_scalars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A completed background render may land between eval operations and scalar logging.
+
+    Deferred media stays in W&B's pending row (`commit=False`), so the synchronous eval
+    record at the same explicit step remains monotonic and commits both records.
+    """
+    cfg, model, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
+    reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
+    spec = resolve_permutation_metrics(model.site_names, [])
+
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
+    sink = MetricsSink((tmp_path / "metrics.jsonl").open("a"), fake)
+    renderer = BackgroundRenderer(sink)
+
+    renderer.submit(partial(_slow_eval_media, reductions, spec, None, None, 100))
+    renderer.join()
+    sink.log(100, {"eval/loss/PGDReconLoss_20step": 0.25})
+
+    assert fake.dropped == []
+    assert fake.logged[-1] == (
+        {"eval/loss/PGDReconLoss_20step": 0.25},
+        100,
+        True,
+    )
 
 
 def test_in_loop_renderer_includes_permutation_heatmaps_and_uv_when_gathered(
@@ -444,7 +559,7 @@ def test_in_loop_renderer_includes_permutation_heatmaps_and_uv_when_gathered(
     cfg, model, ci_fn, step, C = _tiny_setup(threshold=0.0)
     residual = jax.random.randint(jax.random.PRNGKey(4), (3, 12), 0, cfg.vocab_size)
     reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
-    position_ci = accumulate_position_ci(make_position_ci_step(model), model, ci_fn, [residual])
+    position_ci = accumulate_position_ci(_position_ci_step(), model, ci_fn, [residual])
 
     metrics = [
         PermutedCIPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"]),
@@ -467,20 +582,21 @@ def test_in_loop_renderer_includes_permutation_heatmaps_and_uv_when_gathered(
     monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
 
     components = {name: (np.zeros((4, C)), np.zeros((C, 5))) for name in model.site_names}
-    renderer = BackgroundRenderer(is_main=True)
-    renderer.submit(
-        partial(render_and_log_slow_eval, reductions, spec, position_ci, components, 7000)
-    )
+    renderer = BackgroundRenderer(MetricsSink(None, fake))
+    renderer.submit(partial(_slow_eval_media, reductions, spec, position_ci, components, 7000))
     renderer.join()
 
     assert len(fake.logged) == 1
-    payload, logged_step = fake.logged[0]
-    assert logged_step == 7000  # figures on the live `_step` axis
+    payload, logged_step, commit = fake.logged[0]
+    assert logged_step is None
+    assert commit is False
+    assert payload["slow_eval/figure_step"] == 7000.0
     assert "slow_eval/figures/causal_importances" in payload
     assert "slow_eval/figures/causal_importances_upper_leaky" in payload
     assert "slow_eval/figures/uv_matrices" in payload  # gathered V/U -> UVPlots renders
-    # no scalar leaks onto the figure (background) payload — scalars ride the sync path
-    assert all(k.startswith("slow_eval/figures/") for k in payload)
+    # No scientific scalar leaks onto the background payload; only the semantic step axis
+    # accompanies the figures. Scalar eval remains synchronous on W&B `_step`.
+    assert all(k == "slow_eval/figure_step" or k.startswith("slow_eval/figures/") for k in payload)
 
 
 def test_in_loop_renderer_skips_uv_when_components_not_gathered(
@@ -491,7 +607,7 @@ def test_in_loop_renderer_skips_uv_when_components_not_gathered(
     cfg, model, ci_fn, step, _ = _tiny_setup(threshold=0.0)
     residual = jax.random.randint(jax.random.PRNGKey(4), (3, 12), 0, cfg.vocab_size)
     reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
-    position_ci = accumulate_position_ci(make_position_ci_step(model), model, ci_fn, [residual])
+    position_ci = accumulate_position_ci(_position_ci_step(), model, ci_fn, [residual])
 
     spec = resolve_permutation_metrics(
         model.site_names,
@@ -503,11 +619,11 @@ def test_in_loop_renderer_skips_uv_when_components_not_gathered(
     monkeypatch.setitem(sys.modules, "wandb", fake)
     monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
 
-    renderer = BackgroundRenderer(is_main=True)
-    renderer.submit(partial(render_and_log_slow_eval, reductions, spec, position_ci, None, 7000))
+    renderer = BackgroundRenderer(MetricsSink(None, fake))
+    renderer.submit(partial(_slow_eval_media, reductions, spec, position_ci, None, 7000))
     renderer.join()
 
-    payload, _ = fake.logged[0]
+    payload, _, _ = fake.logged[0]
     assert "slow_eval/figures/causal_importances" in payload
     assert "slow_eval/figures/uv_matrices" not in payload
 
@@ -522,16 +638,57 @@ def test_renderer_noop_off_main_rank(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
 
     spec = resolve_permutation_metrics(model.site_names, [])
-    renderer = BackgroundRenderer(is_main=False)
-    renderer.submit(partial(render_and_log_slow_eval, reductions, spec, None, None, 4242))
+    renderer = BackgroundRenderer(MetricsSink.silent())
+    renderer.submit(partial(_slow_eval_media, reductions, spec, None, None, 4242))
     renderer.join()
     assert fake.logged == []  # non-main ranks do the collective pull but never render/log
 
 
+def test_figure_rendering_never_enters_the_pyplot_registry():
+    """Figures are rendered on `BackgroundRenderer`'s worker thread, where pyplot's global
+    figure registry is unsynchronized across the concurrent figure tiers and an interactive
+    backend cannot build a figure manager at all. An empty registry after a full render is
+    the portable, backend-independent evidence that the renderers use the OO `Figure` API."""
+    from matplotlib import pyplot as plt
+
+    cfg, model, ci_fn, step, _ = _tiny_setup(threshold=0.0)
+    residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
+    reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
+    position_ci = accumulate_position_ci(
+        make_position_ci_step(model, compiler_options={}), model, ci_fn, [residual]
+    )
+    spec = resolve_permutation_metrics(
+        model.site_names,
+        [PermutedCIPlotsConfig(identity_patterns=["*gate_proj"], dense_patterns=["*down_proj"])],
+    )
+
+    assert plt.get_fignums() == []
+    _slow_eval_media(reductions, spec, position_ci, None, 4242)
+    assert plt.get_fignums() == []
+
+
+def test_renderer_surfaces_a_failed_render_on_join(monkeypatch: pytest.MonkeyPatch):
+    """A render that dies must not leave the tier quietly figure-less for the rest of the run."""
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
+    renderer = BackgroundRenderer(MetricsSink(None, fake))
+
+    def failing_render() -> DeferredMediaRecord:
+        raise ValueError("render exploded")
+
+    renderer.submit(failing_render)
+    with pytest.raises(RuntimeError, match="background figure render failed") as raised:
+        renderer.join()
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert fake.logged == []
+    renderer.join()  # the failure is reported once, not latched into every later join
+
+
 def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest.MonkeyPatch):
     """Smoke: drive the in-loop slow-tier block (collective accumulate -> background
-    render) over a sequence of eval steps and assert figures land ONLY on slow steps, on
-    the live `_step` axis, and the main loop never blocks waiting on a render."""
+    render) over a sequence of eval steps and assert figures land ONLY on slow steps, carry
+    their semantic eval step, and never block the main loop waiting on a render."""
     import time
 
     cfg, model, ci_fn, step, _ = _tiny_setup(threshold=0.0)
@@ -543,27 +700,53 @@ def test_in_loop_slow_tier_fires_on_cadence_without_stalling(monkeypatch: pytest
 
     spec = resolve_permutation_metrics(model.site_names, [])
     every, slow_every = 1000, 3000
-    renderer = BackgroundRenderer(is_main=True)
+    renderer = BackgroundRenderer(MetricsSink(None, fake))
     # Time only the dispatch the loop pays (accumulate + submit), not the off-thread render.
     # Joining between submits, outside the timed window, recreates the real loop's gap of
     # `slow_every` train steps where the render finishes before the next submit (so submit's
     # one-in-flight `join` is a no-op).
     dispatch_s = 0.0
     for now_step in range(every, 10 * every + 1, every):  # 1000, 2000, ..., 10000
-        if slow_eval_due(now_step, every, slow_every, slow_on_first_step=True):
+        if eval_due(FirstThenEvery(every, slow_every), now_step):
             t0 = time.time()
             reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
-            renderer.submit(
-                partial(render_and_log_slow_eval, reductions, spec, None, None, now_step)
-            )
+            renderer.submit(partial(_slow_eval_media, reductions, spec, None, None, now_step))
             dispatch_s += time.time() - t0
             renderer.join()
     renderer.join()  # flush
 
-    logged_steps = sorted(s for _, s in fake.logged)
+    assert all(step is None and commit is False for _, step, commit in fake.logged)
     # slow_on_first_step adds 1000; multiples of 3000 add 3000, 6000, 9000
-    assert logged_steps == [1000, 3000, 6000, 9000]
-    for payload, _ in fake.logged:
-        assert all(k.startswith("slow_eval/figures/") for k in payload)
+    assert sorted(payload["slow_eval/figure_step"] for payload, _, _ in fake.logged) == [
+        1000.0,
+        3000.0,
+        6000.0,
+        9000.0,
+    ]
+    for payload, _, _ in fake.logged:
+        assert all(
+            k == "slow_eval/figure_step" or k.startswith("slow_eval/figures/") for k in payload
+        )
     # the dispatch loop itself must not block on rendering — accumulate + submit are quick
     assert dispatch_s < 30.0, dispatch_s
+
+
+def test_deferred_media_rejects_duplicate_semantic_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setitem(sys.modules, "wandb.errors", fake.errors)
+    sink = MetricsSink((tmp_path / "metrics.jsonl").open("a"), fake)
+    encoded = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    record = DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=100,
+        media={"slow_eval/figures/uv_matrices": encoded},
+    )
+    sink.log_deferred_media(record)
+
+    with pytest.raises(AssertionError, match="colliding semantic keys"):
+        sink.log_deferred_media(record)

@@ -22,16 +22,14 @@ model:
   n_head: 6
   n_embd: 768
   n_intermediate: 2048
-  rotary_dim: 128
   rotary_base: 10000
   n_ctx: 512
   n_key_value_heads: 6
   rms_norm_eps: 1.0e-06
-  flash_attention: false
 
 data:
-  dir: out/datasets/pile_neox_tok_512
-  tokenizer_name: EleutherAI/gpt-neox-20b
+  kind: name
+  name: pile_neox_tok_512
 
 wandb:
   project: param-decomp

@@ -12,8 +12,9 @@ import pyarrow.parquet as pq
 import pytest
 
 import param_decomp.targets.llama_simple_mlp as lsm
+from param_decomp.infra.dataset_store import NamedDataset, dataset_dir
 from param_decomp.pretrain.cache import torch_model_config_dict, write_pretrain_cache
-from param_decomp.pretrain.config import PretrainConfig, PretrainDataConfig
+from param_decomp.pretrain.config import PretrainConfig
 from param_decomp.pretrain.models import (
     GPT2SimpleConfig,
     LlamaSimpleConfig,
@@ -33,7 +34,6 @@ def _tiny_mlp_cfg() -> LlamaSimpleMLPConfig:
         n_head=4,
         n_embd=32,
         n_intermediate=128,
-        rotary_dim=8,
         n_ctx=16,
         n_key_value_heads=2,
         rms_norm_eps=1e-6,
@@ -55,7 +55,6 @@ def test_all_archs_forward():
             n_head=4,
             n_embd=32,
             n_intermediate=80,
-            rotary_dim=8,
             n_ctx=16,
             n_key_value_heads=2,
         ),
@@ -74,7 +73,7 @@ def test_cache_round_trip_matches_decomposition_loader():
     model = init_model(mc, jax.random.PRNGKey(1))
     cfg = PretrainConfig(
         model=mc,
-        data=PretrainDataConfig(dir=Path("/tmp"), tokenizer_name="x"),
+        data=NamedDataset(name="unused"),
         global_batch=2,
         num_iterations=1,
         learning_rate=1e-3,
@@ -95,6 +94,37 @@ def test_cache_round_trip_matches_decomposition_loader():
         assert jnp.allclose(loaded_logits, model(idx), atol=1e-4)
 
 
+_LEGACY_MODEL_CONFIG_YAML = """\
+attn_bias: false
+block_size: 512
+flash_attention: false
+mlp_bias: false
+model_type: LlamaSimpleMLP
+n_ctx: 512
+n_embd: 768
+n_head: 6
+n_intermediate: 3072
+n_key_value_heads: 6
+n_layer: 4
+rms_norm_eps: 1.0e-06
+rotary_adjacent_pairs: false
+rotary_base: 10000
+rotary_dim: 128
+use_grouped_query_attention: true
+vocab_size: 50277
+"""
+"""Verbatim output of the pre-change writer for `pile_llama_simple_mlp-4L-768`, including
+`flash_attention`, which is no longer emitted. Cache entries written in this shape are
+permanent — they outlive the run — so the loader must keep ignoring the stale keys."""
+
+
+def test_legacy_cache_model_config_still_loads(tmp_path: Path):
+    (tmp_path / "model_config.yaml").write_text(_LEGACY_MODEL_CONFIG_YAML)
+    cfg = lsm.load_model_config(tmp_path)
+    assert (cfg.n_layer, cfg.n_head, cfg.n_kv_head, cfg.n_embd) == (4, 6, 6, 768)
+    assert cfg.head_dim == 128
+
+
 def _write_token_shards(data_dir: Path, n_shards: int, rows: int, seq_plus1: int, vocab: int):
     """Learnable synthetic data: each row is the `+1 mod vocab` successor sequence from a
     random start, so next-token prediction is a deterministic rule the model can fit (loss
@@ -110,13 +140,13 @@ def _write_token_shards(data_dir: Path, n_shards: int, rows: int, seq_plus1: int
 def test_training_smoke_loss_decreases():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        data_dir = root / "data"
-        data_dir.mkdir()
+        data_dir = dataset_dir(root, "toy")
+        data_dir.mkdir(parents=True)
         mc = _tiny_mlp_cfg()
         _write_token_shards(data_dir, n_shards=2, rows=64, seq_plus1=mc.block_size + 1, vocab=64)
         cfg = PretrainConfig(
             model=mc,
-            data=PretrainDataConfig(dir=data_dir, tokenizer_name="x"),
+            data=NamedDataset(name="toy"),
             global_batch=8,
             num_iterations=15,
             learning_rate=1e-2,
@@ -132,7 +162,7 @@ def test_training_smoke_loss_decreases():
             keep_last=1,
             run_id="t-smoke",
             run_name="smoke",
-            out_dir=root / "runs",
+            data_root=root,
         )
         train(cfg)
         records = (root / "runs" / "t-smoke" / "metrics.jsonl").read_text().splitlines()

@@ -18,12 +18,17 @@ drives the actual `make_train_step` through a couple of steps and asserts the lo
 finite and the trainable state moves — locking the genericity against silent regression
 to LM-only. The LM neutrality of these edges is proved separately by the stacked-parity /
 equivalence goldens passing unchanged.
+
+The same target is POSITIONED, so it also pins the shipped fast-tier eval kernels over the
+positioned non-categorical combination — the one neither the LM binder (KL over logits)
+nor the toy binder (positionless) covers.
 """
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 from jax import random
 from jaxtyping import Array, Float
 
@@ -33,6 +38,7 @@ from param_decomp.core.ci_fn import (
     MHACIAttention,
     build_ci_fn,
 )
+from param_decomp.core.ci_l0_eval import make_ci_l0_eval_step
 from param_decomp.core.components import ComponentStacks, SiteSpec, component_stacks_from_sites
 from param_decomp.core.configs import (
     FaithfulnessLossConfig,
@@ -40,8 +46,10 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
 )
 from param_decomp.core.model import DecomposedModel, run_stochastic_masked_output
-from param_decomp.core.recon import build_loss_terms
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.recon_eval import FreshPGDReconEval, make_fresh_pgd_eval_step
+from param_decomp.core.schedule import Knot, ScheduleConfig
+from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 
 B, T, D, C = 2, 3, 8, 5
@@ -190,6 +198,19 @@ def _synthetic_vu(key: jax.Array) -> ComponentStacks:
     return component_stacks_from_sites({SITE: (V, U)})
 
 
+def _synthetic_ci_arch() -> ChunkwiseTransformerCIArch:
+    return ChunkwiseTransformerCIArch(
+        chunks=(Chunk(input_taps=(SITE,), output_sites=(SITE,)),),
+        input_dim=D,
+        d_model=8,
+        n_blocks=1,
+        attention=MHACIAttention(n_heads=2),
+        ffn_hidden=16,
+        ffn_kind="gelu",
+        learned_norm_scale=False,
+    )
+
+
 def _synthetic_inputs(key: jax.Array) -> dict[str, Array]:
     return {
         "feat": random.normal(random.fold_in(key, 5), (B, T, D)),
@@ -240,32 +261,29 @@ def _initial_state(
     return state, opt_vu, opt_ci
 
 
-def test_train_step_runs_through_generic_target():
+@pytest.mark.parametrize("with_mesh", [False, True])
+def test_train_step_runs_through_generic_target(with_mesh: bool):
     """End-to-end: the real `make_train_step` drives the synthetic dict-in/tuple-out/MSE
-    target for two steps; the loss stays finite and the trainable V/U actually move."""
+    target for two steps; the loss stays finite and the trainable V/U actually move.
+
+    Run with AND without a mesh: the sharding constraints are no-ops off-mesh, so a
+    meshless run cannot see whether the batch/output edges survive being sharded — which
+    is how an array-only `batch_sharded` passed CI while dying on every real run."""
     key = random.PRNGKey(2)
     model = _synthetic_lm(key)
     components = _synthetic_vu(key)
     inputs = _synthetic_inputs(key)
 
-    ci_arch = ChunkwiseTransformerCIArch(
-        chunks=(Chunk(input_taps=(SITE,), output_sites=(SITE,)),),
-        input_dim=D,
-        d_model=8,
-        n_blocks=1,
-        attention=MHACIAttention(n_heads=2),
-        ffn_hidden=16,
-        ffn_kind="gelu",
-        learned_norm_scale=False,
-    )
-    state, opt_vu, opt_ci = _initial_state(model, components, ci_arch)
+    state, opt_vu, opt_ci = _initial_state(model, components, _synthetic_ci_arch())
 
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1.0),
             ImportanceMinimalityLossConfig(
                 coeff=1e-4,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.5),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.5))
+                ),
             ),
             StochasticReconLossConfig(coeff=1.0),
         ),
@@ -279,7 +297,8 @@ def test_train_step_runs_through_generic_target():
         total_steps=10,
         remat_recon_forwards=False,
         remat_ci_fn=False,
-        mesh=None,
+        mesh=hsdp_mesh(gpus_per_node=1) if with_mesh else None,
+        compiler_options={},
     )
 
     V_before = jax.device_get(
@@ -294,3 +313,31 @@ def test_train_step_runs_through_generic_target():
     assert not jnp.allclose(state.decomposition.components.site(SITE)[0], V_before), (
         "V did not move — step is a no-op"
     )
+
+
+def test_fast_eval_metrics_bind_to_positioned_non_categorical_target():
+    """The shipped fast tier serves a target that is POSITIONED and NON-categorical at once
+    — the combination the LM kernels (KL over logits) and the toy kernels (positionless)
+    each exclude. `PGDReconLoss` scores through the target's own MSE `recon_loss_fn`;
+    `CI_L0` reads the CI envelope alone, so both drop in with no target-side authoring."""
+    key = random.PRNGKey(4)
+    model = _synthetic_lm(key)
+    assert model.has_position_axis
+    components = _synthetic_vu(key)
+    inputs = _synthetic_inputs(key)
+    ci_fn = build_ci_fn(_synthetic_ci_arch(), model.sites, random.PRNGKey(11))
+
+    pgd_step = make_fresh_pgd_eval_step(
+        model, FreshPGDReconEval(n_steps=2, step_size=0.1), mesh=None, compiler_options={}
+    )
+    pgd = pgd_step(model, components, ci_fn, inputs, random.PRNGKey(5))
+    assert pgd.shape == ()
+    assert jnp.isfinite(pgd) and pgd >= 0.0
+
+    l0_step = make_ci_l0_eval_step(
+        model, 0.5, {"block": ("block.*",)}, mesh=None, compiler_options={}
+    )
+    l0 = l0_step(model, components, ci_fn, inputs, random.PRNGKey(6))
+    assert set(l0) == {f"l0/0.5_{SITE}", "l0/0.5_block"}
+    assert all(value.shape == () and 0.0 <= value <= C for value in l0.values())
+    assert l0["l0/0.5_block"] == l0[f"l0/0.5_{SITE}"], "single-member group sums to its site"

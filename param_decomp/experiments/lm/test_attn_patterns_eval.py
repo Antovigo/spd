@@ -12,12 +12,6 @@ import jax
 import numpy as np
 import pytest
 
-from param_decomp.core.attn_patterns_eval import (
-    accumulate_attn_patterns,
-    attn_patterns_log_entries,
-    make_ci_attn_patterns_step,
-    make_stochastic_attn_patterns_step,
-)
 from param_decomp.core.ci_fn import (
     Chunk,
     ChunkwiseTransformerCIArch,
@@ -27,6 +21,12 @@ from param_decomp.core.ci_fn import (
 )
 from param_decomp.core.components import SiteC, SiteSpec, init_component_stacks
 from param_decomp.core.model import DecomposedModel, run_stochastic_masked_output
+from param_decomp.experiments.lm.attn_patterns_eval import (
+    accumulate_attn_patterns,
+    attn_patterns_log_entries,
+    make_ci_attn_patterns_step,
+    make_stochastic_attn_patterns_step,
+)
 from param_decomp.targets.glu_transformer import glu_site_specs
 from param_decomp.targets.llama_simple_mlp import (
     canonical_site_cs as simple_canonical,
@@ -118,7 +118,7 @@ def _llama_attn_setup():
 
 def test_ci_step_clean_equals_masked_when_ci_all_one_gives_finite_kl():
     cfg, model, components, ci_fn = _llama_attn_setup()
-    step = make_ci_attn_patterns_step(model)
+    step = make_ci_attn_patterns_step(model, compiler_options={})
     b, t = 2, 12
     residual = jax.random.randint(jax.random.PRNGKey(4), (b, t), 0, cfg.vocab_size)
 
@@ -134,7 +134,7 @@ def test_ci_step_clean_equals_masked_when_ci_all_one_gives_finite_kl():
 
 def test_accumulate_is_token_weighted_and_combines():
     cfg, model, components, ci_fn = _llama_attn_setup()
-    step = make_ci_attn_patterns_step(model)
+    step = make_ci_attn_patterns_step(model, compiler_options={})
     res_a = jax.random.randint(jax.random.PRNGKey(4), (2, 10), 0, cfg.vocab_size)
     res_b = jax.random.randint(jax.random.PRNGKey(5), (2, 10), 0, cfg.vocab_size)
 
@@ -165,7 +165,7 @@ def test_accumulate_is_token_weighted_and_combines():
 def test_stochastic_step_runs_and_scales_n_by_draws():
     cfg, model, components, ci_fn = _llama_attn_setup()
     n_draws = 3
-    step = make_stochastic_attn_patterns_step(model, n_draws)
+    step = make_stochastic_attn_patterns_step(model, n_draws, compiler_options={})
     b, t = 2, 8
     residual = jax.random.randint(jax.random.PRNGKey(4), (b, t), 0, cfg.vocab_size)
 
@@ -182,7 +182,7 @@ def test_simple_mlp_step_runs_end_to_end():
     model = _simple_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     components = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
-    step = make_ci_attn_patterns_step(model)
+    step = make_ci_attn_patterns_step(model, compiler_options={})
     b, t = 2, 10
     residual = jax.random.randint(jax.random.PRNGKey(4), (b, t), 0, cfg.vocab_size)
 
@@ -290,6 +290,6 @@ def test_attn_patterns_steps_reject_positionless_target():
     )
     assert not model.has_position_axis
     with pytest.raises(AssertionError, match="LM-only"):
-        make_ci_attn_patterns_step(model)
+        make_ci_attn_patterns_step(model, compiler_options={})
     with pytest.raises(AssertionError, match="LM-only"):
-        make_stochastic_attn_patterns_step(model, 1)
+        make_stochastic_attn_patterns_step(model, 1, compiler_options={})

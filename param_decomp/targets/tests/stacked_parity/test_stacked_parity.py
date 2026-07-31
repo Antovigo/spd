@@ -44,8 +44,9 @@ from param_decomp.core.configs import (
     UniformKSubsetRoutingConfig,
 )
 from param_decomp.core.model import DecomposedModel
-from param_decomp.core.recon import StochasticSources, build_loss_terms, subset_chunk_plan
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.objective import build_objective
+from param_decomp.core.recon import StochasticSources, subset_chunk_plan
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 from param_decomp.targets.glu_transformer import (
     FrozenAttn,
@@ -250,7 +251,10 @@ def test_train_trajectory_matches():
         optimizer=AdamPGDConfig(
             beta1=0.5,
             beta2=0.99,
-            lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            lr_schedule=ScheduleConfig(
+                max_val=0.01,
+                points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0)),
+            ),
         ),
         n_warmup_steps=n_warmup,
     )
@@ -273,16 +277,21 @@ def test_train_trajectory_matches():
             step=jnp.zeros((), jnp.int32),
         ),
     )  # fmt: skip
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
-                pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                pnorm=ScheduleConfig(
+                    max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
+                ),
                 frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=32),
             ),
             ChunkwiseSubsetReconLossConfig(
-                routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1
+                routing=UniformKSubsetRoutingConfig(),
+                coeff=0.5,
+                sites_per_chunk=3,
+                n_samples=1,
             ),
             ppgd_cfg,
         ),
@@ -297,6 +306,7 @@ def test_train_trajectory_matches():
         remat_recon_forwards=False,
         remat_ci_fn=False,
         mesh=None,
+        compiler_options={},
     )
     run_key = random.PRNGKey(7)
     for step_idx in range(n_train_steps):

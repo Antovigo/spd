@@ -3,6 +3,7 @@ trainer state (SPEC S22): a restored `TrainState` must continue the EXACT trajec
 including the persistent adversary's sources and Adam moments."""
 
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 
 import equinox as eqx
@@ -21,6 +22,7 @@ from param_decomp.core.adversary import (
 from param_decomp.core.checkpoint import (
     init_from_parent,
     make_checkpoint_manager,
+    make_read_only_checkpoint_manager,
     restore_decomposition_to_host,
     restore_latest,
     restore_step,
@@ -38,6 +40,8 @@ from param_decomp.core.configs import (
     ChunkwiseSubsetReconLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
+    KeepAllCheckpoints,
+    KeepLastNCheckpoints,
     PersistentPGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
@@ -48,10 +52,10 @@ from param_decomp.core.init_placed import (
 )
 from param_decomp.core.model import DecomposedModel, Positioned
 from param_decomp.core.muon_stacked import stacked_muon
+from param_decomp.core.objective import build_objective
 from param_decomp.core.placement import from_config
-from param_decomp.core.recon import build_loss_terms
 from param_decomp.core.run_state import stacked_muon_dimension_numbers
-from param_decomp.core.schedule import ScheduleConfig
+from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 from param_decomp.targets.glu_transformer import (
@@ -68,7 +72,7 @@ def _ppgd_cfg(n_warmup: int) -> PersistentPGDReconLossConfig:
         source_shape="sc",
         optimizer=AdamPGDConfig(
             beta1=0.5, beta2=0.99,
-            lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025),
+            lr_schedule=ScheduleConfig(max_val=0.01, points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0))),
         ),
         n_warmup_steps=n_warmup,
     )  # fmt: skip
@@ -103,15 +107,21 @@ def _chunkwise_arch(model: DecomposedModel, cfg: LlamaConfig) -> ChunkwiseTransf
     )
 
 
-def _build(
-    seed: int, muon_components: bool = False, muon_ci_fn: bool = False, stacked_impl: bool = False
-):
+_C, _SEQ = 8, 16
+
+
+@cache
+def _optimizers_and_step(muon_components: bool, muon_ci_fn: bool, stacked_impl: bool):
+    """Everything in `_build` that the seed cannot reach.
+
+    The step is built from statics only — the model, the loss terms, and the two
+    optimizers — while the seed reaches it as array VALUES inside the state passed at call
+    time, so it cannot change the HLO. JAX's persistent cache stores the compiled
+    executable but nothing caches the trace, so one step per optimizer configuration is
+    the distinction worth keeping."""
     cfg = tiny_glu_cfg()
-    C, seq = 8, 16
-    sites = glu_site_specs(cfg, mlp_family_site_cs(3, 4, C))
+    sites = glu_site_specs(cfg, mlp_family_site_cs(3, 4, _C))
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
-    vu = init_component_stacks(sites, jax.random.PRNGKey(seed))
-    ci_fn = build_ci_fn(_chunkwise_arch(model, cfg), model.sites, jax.random.PRNGKey(seed + 1))
 
     def muon_impl(dim_nums: "Callable[[optax.Params], optax.Params] | None"):
         if stacked_impl:
@@ -141,28 +151,12 @@ def _build(
         if muon_ci_fn
         else optax.adamw(1e-3, weight_decay=0.0)
     )
-    src = init_persistent_sources(
-        model.site_names,
-        tuple(s.C for s in model.sites),
-        (1, seq),
-        jnp.float32,
-        jax.random.PRNGKey(seed + 2),
-    )
     ppgd_cfg = _ppgd_cfg(n_warmup=1)
-    state = TrainState(
-        decomposition=Decomposition(components=vu, ci_fn=ci_fn),
-        training=TrainingItem(
-            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
-            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
-            adversaries={ppgd_cfg.type: _adversary(src, ppgd_cfg)},
-            step=jnp.zeros((), jnp.int32),
-        ),
-    )  # fmt: skip
-    loss_terms = build_loss_terms(
+    loss_terms = build_objective(
         (
             FaithfulnessLossConfig(coeff=1e5),
             ImportanceMinimalityLossConfig(
-                coeff=5e-6, pnorm=ScheduleConfig(start_val=2.0, fn_type="linear", final_val_frac=0.2),
+                coeff=5e-6, pnorm=ScheduleConfig(max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))),
             ),
             ChunkwiseSubsetReconLossConfig(routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1),
             ppgd_cfg,
@@ -174,9 +168,36 @@ def _build(
         losses=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, remat_ci_fn=False, mesh=None,
+        remat_recon_forwards=True, remat_ci_fn=False, mesh=None, compiler_options={},
     )  # fmt: skip
-    resid = jax.random.randint(jax.random.PRNGKey(9), (2, seq), 0, cfg.vocab_size)
+    resid = jax.random.randint(jax.random.PRNGKey(9), (2, _SEQ), 0, cfg.vocab_size)
+    return cfg, sites, model, opt_vu, opt_ci, ppgd_cfg, step, resid
+
+
+def _build(
+    seed: int, muon_components: bool = False, muon_ci_fn: bool = False, stacked_impl: bool = False
+):
+    cfg, sites, model, opt_vu, opt_ci, ppgd_cfg, step, resid = _optimizers_and_step(
+        muon_components, muon_ci_fn, stacked_impl
+    )
+    vu = init_component_stacks(sites, jax.random.PRNGKey(seed))
+    ci_fn = build_ci_fn(_chunkwise_arch(model, cfg), model.sites, jax.random.PRNGKey(seed + 1))
+    src = init_persistent_sources(
+        model.site_names,
+        tuple(s.C for s in model.sites),
+        (1, _SEQ),
+        jnp.float32,
+        jax.random.PRNGKey(seed + 2),
+    )
+    state = TrainState(
+        decomposition=Decomposition(components=vu, ci_fn=ci_fn),
+        training=TrainingItem(
+            components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
+            ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
+            adversaries={ppgd_cfg.type: _adversary(src, ppgd_cfg)},
+            step=jnp.zeros((), jnp.int32),
+        ),
+    )  # fmt: skip
     return model, state, step, resid
 
 
@@ -189,7 +210,7 @@ def _roundtrip_and_exact_resume(
     for i in range(2):
         state, _ = step(model, state, resid, jax.random.PRNGKey(i))
 
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, state)
 
     # Restore onto a DIFFERENTLY-seeded reference: every leaf must come from disk.
@@ -227,10 +248,12 @@ def _roundtrip_and_exact_resume(
         assert jnp.array_equal(jnp.asarray(a), jnp.asarray(b))
 
 
+@pytest.mark.slow
 def test_roundtrip_and_exact_resume(tmp_path: Path):
     _roundtrip_and_exact_resume(tmp_path, muon_components=False)
 
 
+@pytest.mark.slow
 def test_muon_roundtrip_and_exact_resume(tmp_path: Path):
     """SPEC S20 amendment: the muon components opt state (optax-partitioned muon/adam
     masked trees) must ALSO restore onto a rebuilt reference and continue exactly —
@@ -238,6 +261,7 @@ def test_muon_roundtrip_and_exact_resume(tmp_path: Path):
     _roundtrip_and_exact_resume(tmp_path, muon_components=True)
 
 
+@pytest.mark.slow
 def test_muon_ci_fn_roundtrip_and_exact_resume(tmp_path: Path):
     """SPEC S20 amendment (2026-07-11): same guarantee with muon on BOTH groups, the ci-fn
     partitioned by `stacked_muon_dimension_numbers` (3D chunk stacks muon'd, 2D bias
@@ -245,6 +269,7 @@ def test_muon_ci_fn_roundtrip_and_exact_resume(tmp_path: Path):
     _roundtrip_and_exact_resume(tmp_path, muon_components=True, muon_ci_fn=True)
 
 
+@pytest.mark.slow
 def test_stacked_muon_roundtrip_and_exact_resume(tmp_path: Path):
     """SPEC S20 `impl: stacked`: the stacked-NS muon state is optax's `MuonState` pytree
     verbatim, so the same roundtrip + exact-resume guarantee holds — and a checkpoint
@@ -267,7 +292,7 @@ def test_muon_cross_impl_checkpoint_roundtrip(tmp_path: Path, save_impl: str, re
     )
     for i in range(2):
         state, _ = save_step(model, state, resid, jax.random.PRNGKey(i))
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, state)
 
     # The reference — and the continuation step — are built under the OTHER impl.
@@ -318,7 +343,7 @@ def test_persistent_adam_step_count_roundtrip_and_post_resume_bias_correction(tm
     # Each train step runs n_warmup_steps (1) supplemental ascents + 1 final ascent.
     assert n_ascents == 3 * (1 + 1)
 
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 3, state)
 
     _, fresh, _, _ = _build(seed=7)
@@ -340,7 +365,12 @@ def test_persistent_adam_step_count_roundtrip_and_post_resume_bias_correction(tm
 
     # (b) the first post-resume ascent applies bias-correction for count N+1.
     adam_cfg = AdamPGDConfig(
-        beta1=beta1, beta2=beta2, lr_schedule=ScheduleConfig(start_val=0.01, warmup_pct=0.025)
+        beta1=beta1,
+        beta2=beta2,
+        lr_schedule=ScheduleConfig(
+            max_val=0.01,
+            points=(Knot(at=0.0, frac=0.0), Knot(at=0.025, frac=1.0), Knot(at=1.0, frac=1.0)),
+        ),
     )
     loaded_sources = loaded.training.adversaries[state_key].sources
     grads = {site: jnp.ones_like(v) for site, v in loaded_sources.items()}
@@ -361,7 +391,7 @@ def test_persistent_adam_step_count_roundtrip_and_post_resume_bias_correction(tm
 
 def test_no_checkpoint_returns_none(tmp_path: Path):
     _, fresh, _, _ = _build(seed=7)
-    mgr = make_checkpoint_manager(tmp_path / "empty", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "empty", KeepLastNCheckpoints(n=2))
     assert restore_latest(mgr, fresh) is None
 
 
@@ -369,12 +399,48 @@ def test_saved_layout_is_two_items(tmp_path: Path):
     """The on-disk item names are the cross-version contract every consumer keys on —
     pin them."""
     _, state, _, _ = _build(seed=1)
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 0, state)
     step_dir = tmp_path / "ckpts" / "0"
     assert (step_dir / "decomposition").is_dir()
     assert (step_dir / "training").is_dir()
     assert not (step_dir / "default").exists()
+
+
+@pytest.mark.parametrize(
+    ("retention", "surviving_steps"),
+    [(KeepLastNCheckpoints(n=2), [3, 4]), (KeepAllCheckpoints(), [0, 1, 2, 3, 4])],
+)
+def test_retention_decides_what_survives_on_disk(
+    tmp_path: Path, retention: KeepLastNCheckpoints | KeepAllCheckpoints, surviving_steps: list[int]
+):
+    """`Cadence.checkpoint_retention` is a claim about the FILESYSTEM, so assert the
+    filesystem: after five saves, exactly these `ckpts/<step>/` directories remain (and
+    orbax agrees via `all_steps`). Deletion is synchronous — no post-save settling."""
+    _, state, _, _ = _build(seed=1)
+    ckpt_dir = tmp_path / "ckpts"
+    mgr = make_checkpoint_manager(ckpt_dir, retention)
+    for step in range(5):
+        save_state(mgr, step, state)
+
+    on_disk = sorted(int(p.name) for p in ckpt_dir.iterdir() if p.is_dir())
+    assert on_disk == surviving_steps
+    assert sorted(mgr.all_steps()) == surviving_steps
+
+
+def test_read_only_manager_never_prunes(tmp_path: Path):
+    """A consumer opening someone else's run must not garbage-collect it: the read-only
+    manager carries no retention policy at all, so every step survives being read."""
+    _, state, _, _ = _build(seed=1)
+    ckpt_dir = tmp_path / "ckpts"
+    writer = make_checkpoint_manager(ckpt_dir, KeepAllCheckpoints())
+    for step in range(3):
+        save_state(writer, step, state)
+
+    reader = make_read_only_checkpoint_manager(ckpt_dir)
+    abstract = jax.eval_shape(lambda: state.decomposition)
+    restore_decomposition_to_host(reader, 0, abstract)
+    assert sorted(int(p.name) for p in ckpt_dir.iterdir() if p.is_dir()) == [0, 1, 2]
 
 
 def test_consumer_restores_decomposition_to_host(tmp_path: Path):
@@ -384,12 +450,12 @@ def test_consumer_restores_decomposition_to_host(tmp_path: Path):
     model, state, step, resid = _build(seed=1)
     for i in range(2):
         state, _ = step(model, state, resid, jax.random.PRNGKey(i))
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, state)
 
     # A FRESH manager, as every real consumer opens: orbax pins an item's handler per
     # manager instance, so the saving manager can't PyTreeRestore what it StandardSave'd.
-    consumer_mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    consumer_mgr = make_read_only_checkpoint_manager(tmp_path / "ckpts")
     abstract = jax.eval_shape(lambda: state.decomposition)
     restored = restore_decomposition_to_host(consumer_mgr, 2, abstract)
     for a, b in zip(
@@ -408,7 +474,7 @@ def test_init_from_parent_restores_decomposition_only(tmp_path: Path):
     model, parent, step, resid = _build(seed=1)
     for i in range(2):
         parent, _ = step(model, parent, resid, jax.random.PRNGKey(i))
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 2, parent)
 
     # A fresh reference from a DIFFERENT seed: its components/ci_fn, optimizer state and
@@ -495,7 +561,7 @@ def test_sharded_roundtrip_bit_equal(tmp_path: Path):
     n_named = sum(isinstance(x.sharding, NamedSharding) for x in jax.tree.leaves(state))
     assert n_named >= len(jax.tree.leaves(state.decomposition.components)), n_named
 
-    mgr = make_checkpoint_manager(tmp_path / "ckpts", keep_last=2)
+    mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
     save_state(mgr, 3, state)
 
     # Restore onto a DIFFERENTLY-seeded sharded reference: every leaf comes from disk,
