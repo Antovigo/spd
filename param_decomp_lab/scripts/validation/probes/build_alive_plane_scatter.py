@@ -1,11 +1,14 @@
-"""Applet: residual stream on the probe planes, for the real model and two alive-only circuits.
+"""Applet: residual stream on the probe planes, for the real model and alive-only circuits.
 
-Extends `final_plane_scatter` with two extra data sources computed fresh alongside the
-original: the model with only hidden-alive components active (delta off), and with only
-output-alive components active (delta off) — the same "components must do the work" masking
-`find_alive_subcomponents.py` uses for its sweep. All three sources are captured over the
-*same* sampled `a<op>b=` grid points in one run, so per-point comparisons across sources are
-exact.
+Extends `final_plane_scatter` with extra data sources computed fresh alongside the original:
+the model with only output-alive components active (delta off), and — on a `dual_hidden_ci`
+checkpoint — with only hidden-alive components active too, the same "components must do the
+work" masking `find_alive_subcomponents.py` uses for its sweep. On a non-dual checkpoint
+there's no hidden-alive list, so only two sources are shipped (real model, output-alive-only);
+on a dual checkpoint all three are — always captured over the *same* sampled `a<op>b=` grid
+points in one run, so per-point comparisons across sources are exact. Running this on both a
+baseline (non-dual) and a dual run of the same decomposition is how you see what adding the
+hidden-CI net actually changed.
 
 Two rows (`a @ layer`, `b @ layer`, the layer-of-interest's own probes) plus the fixed
 `--probe-layer` result row — the `<result> @ layer` own-probe row of `final_plane_scatter` is
@@ -25,7 +28,7 @@ projecting fresh activations through their stored `w_cos`/`w_sin` weights stays 
 Only the projected 2D (or 1D) points are ever written out — never the underlying `d_model`
 activations — plus per-position full-resid-norm deltas (scalars) and CI (base64 uint8, one
 byte per shown point per selected component), so `data.js` stays commensurate with
-`final_plane_scatter`'s even with three sources instead of one.
+`final_plane_scatter`'s even with two or three sources instead of one.
 
 An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-GPU SLURM job.
 
@@ -36,8 +39,8 @@ Usage:
         [--output-dir=DIR] [--slurm [--gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
 
 Output (default `alive_plane_scatter/` under the run's `analysis/`): `index.html` + `data.js`.
-Requires a `dual_hidden_ci` checkpoint with `find_alive_subcomponents` already run (reads
-`analysis/datasets/alive_subcomponents.tsv` + `_hidden.tsv`). Smoke-test with the parent
+Requires `find_alive_subcomponents` already run (reads `analysis/datasets/alive_subcomponents.tsv`,
+plus `_hidden.tsv` when the checkpoint has a hidden CI net). Smoke-test with the parent
 folder's `headless_check.py`.
 """
 
@@ -74,7 +77,6 @@ from param_decomp_lab.scripts.validation.probes.plot_probe_projections import _p
 
 _MODULE = "param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter"
 _TEMPLATE = Path(__file__).with_name("alive_plane_scatter_app.html")
-_SOURCES = ("original", "hidden_alive", "output_alive")
 _OWN_VARIABLES = ("a", "b")
 _RESULT_VARIABLE = {"add": "a+b", "sub": "a-b"}
 Role = Literal["output", "hidden"]
@@ -164,15 +166,17 @@ def build_alive_plane_scatter(
 
     run = load_lm_run(model_path)
     model, cfg, device, tokenizer = run.model, run.cfg, run.device, run.tokenizer
-    assert model.ci_fn_hidden is not None, (
-        "build_alive_plane_scatter needs a dual_hidden_ci checkpoint (no hidden CI net here)"
-    )
+    dual = model.ci_fn_hidden is not None
 
     data_dir = analysis_datasets_dir(run.run_dir)
     alive: dict[Role, list[AliveComponent]] = {
         "output": read_alive_components(data_dir / "alive_subcomponents.tsv"),
-        "hidden": read_alive_components(data_dir / "alive_subcomponents_hidden.tsv"),
     }
+    if dual:
+        alive["hidden"] = read_alive_components(data_dir / "alive_subcomponents_hidden.tsv")
+    sources: tuple[str, ...] = (
+        ("original", "hidden_alive", "output_alive") if dual else ("original", "output_alive")
+    )
 
     modules = sorted(model.components.keys())
     n_comp = {m: model.components[m].V.shape[1] for m in modules}
@@ -229,7 +233,7 @@ def build_alive_plane_scatter(
         for local_i, ids in enumerate(token_ids):
             buckets.setdefault(len(ids), []).append(local_i)
 
-        captured_by_source: dict[str, dict[str, np.ndarray]] = {s: {} for s in _SOURCES}
+        captured_by_source: dict[str, dict[str, np.ndarray]] = {s: {} for s in sources}
         ci_raw: dict[Role, dict[tuple[str, int], np.ndarray]] = {
             role: {(ac.module, ac.component): np.zeros(n_shown, np.float32) for ac in acs}
             for role, acs in alive.items()
@@ -244,7 +248,7 @@ def build_alive_plane_scatter(
                     )
                     b = chunk.shape[0]
 
-                    for source in _SOURCES:
+                    for source in sources:
                         if source == "original":
                             with _capture_positions(model.target_model, layers) as captured:
                                 out = model(chunk, cache_type="input")
@@ -288,7 +292,7 @@ def build_alive_plane_scatter(
                             store[pos][idxs] = arr
 
         sources_out: dict[str, Any] = {}
-        for source in _SOURCES:
+        for source in sources:
             own: dict[str, Any] = {
                 v: {
                     str(t): {
@@ -369,7 +373,9 @@ def build_alive_plane_scatter(
             "sources": sources_out,
             "ci": ci_out,
         }
-        logger.info(f"{op}: captured {n_shown} prompts x {len(layer_keys)} positions x 3 sources")
+        logger.info(
+            f"{op}: captured {n_shown} prompts x {len(layer_keys)} positions x {len(sources)} sources"
+        )
 
     out_dir = (
         Path(output_dir).expanduser()
@@ -383,7 +389,7 @@ def build_alive_plane_scatter(
             "probe_layer": probe_layer,
             "n_show": n_show,
             "max_value": max_value,
-            "sources": list(_SOURCES),
+            "sources": list(sources),
             "alive_components": alive_components_meta,
         },
         "ops": ops_data,
