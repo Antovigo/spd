@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from jaxtyping import Float
 from matplotlib import pyplot as plt
+from matplotlib.colors import LogNorm
 from PIL import Image
 from torch import Tensor
 
@@ -97,52 +98,94 @@ def _plot_causal_importances_figure(
     return img
 
 
+def _split_layer_and_matrix_type(module_name: str) -> tuple[str, str]:
+    """Split `model.layers.18.mlp.gate_proj` into layer `"18"` and matrix type
+    `"mlp.gate_proj"` (the constant `model.layers.` prefix is dropped). Falls back to
+    an empty layer (single column) for module names with no numeric path segment, e.g.
+    TMS's `linear1`."""
+    parts = module_name.split(".")
+    for idx, part in enumerate(parts):
+        if part.isdigit():
+            matrix_type = ".".join(parts[:idx] + parts[idx + 1 :])
+            return part, matrix_type.removeprefix("model.layers.")
+    return "", module_name
+
+
+_WEIGHT_MAGNITUDE_CI_FLOOR = 1e-3
+
+
 def plot_weight_magnitude(
     weight_magnitudes: dict[str, Float[Tensor, " C"]],
-    max_ci_per_component: dict[str, Float[Tensor, " C"]],
+    mean_ci_per_component: dict[str, Float[Tensor, " C"]],
 ) -> Image.Image:
-    """Per-layer scatter of `‖V_c‖·‖U_c‖` per component, sorted descending.
+    """Grid of `‖V_c‖·‖U_c‖` scatterplots per component, sorted descending.
 
-    All subplots share a linear y-axis from 0 to the global max magnitude. Each point is
-    coloured by that subcomponent's max CI over the eval batch (shared 0..1 colour scale).
+    Layer index runs across columns, matrix type runs down rows (e.g. `mlp.gate_proj`
+    at layer 18 vs layer 19). All subplots share a linear y-axis from 0 to the global
+    max magnitude. Each point is coloured by that subcomponent's mean CI over the eval
+    batch, on a shared log colour scale (values below `_WEIGHT_MAGNITUDE_CI_FLOOR` are
+    clipped to the floor so exact zeros still render).
     """
-    assert set(weight_magnitudes) == set(max_ci_per_component)
-    n_modules = len(weight_magnitudes)
-    max_rows = 6
-    n_cols = (n_modules + max_rows - 1) // max_rows  # Ceiling division
-    n_rows = min(n_modules, max_rows)
-    fig, axs = plt.subplots(
-        n_rows, n_cols, figsize=(8 * n_cols, 3 * n_rows), dpi=200, squeeze=False
+    assert set(weight_magnitudes) == set(mean_ci_per_component)
+    layer_and_type = {name: _split_layer_and_matrix_type(name) for name in weight_magnitudes}
+
+    layers = sorted(
+        {layer for layer, _ in layer_and_type.values()},
+        key=lambda layer: (0, int(layer)) if layer.isdigit() else (1, layer),
     )
-    axs = np.array(axs)
-    # Hide unused subplots (column-major fill).
-    for i in range(n_modules, n_rows * n_cols):
-        axs[i % n_rows, i // n_rows].set_visible(False)
+    matrix_types = sorted({matrix_type for _, matrix_type in layer_and_type.values()})
+    layer_col = {layer: j for j, layer in enumerate(layers)}
+    matrix_row = {matrix_type: i for i, matrix_type in enumerate(matrix_types)}
+
+    n_rows, n_cols = len(matrix_types), len(layers)
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=(6 * n_cols, 3 * n_rows), dpi=200, squeeze=False
+    )
+    for ax in axs.ravel():
+        ax.set_visible(False)
+
     global_max_mag = max(mags.max().item() for mags in weight_magnitudes.values())
+    ci_norm = LogNorm(vmin=_WEIGHT_MAGNITUDE_CI_FLOOR, vmax=1.0, clip=True)
     scatters = []
-    for i, (module_name, magnitudes) in enumerate(weight_magnitudes.items()):
+    for module_name, magnitudes in weight_magnitudes.items():
+        layer, matrix_type = layer_and_type[module_name]
+        i, j = matrix_row[matrix_type], layer_col[layer]
+        ax = axs[i, j]
+        ax.set_visible(True)
         sort_idx = torch.sort(magnitudes, descending=True)[1]
         sorted_mags = magnitudes[sort_idx].detach().cpu().numpy()
-        sorted_max_ci = max_ci_per_component[module_name][sort_idx].detach().cpu().numpy()
-        ax = axs[i % n_rows, i // n_rows]
+        sorted_mean_ci = mean_ci_per_component[module_name][sort_idx].detach().cpu().numpy()
         sc = ax.scatter(
             range(len(sorted_mags)),
             sorted_mags,
-            c=sorted_max_ci,
+            c=sorted_mean_ci,
             cmap="viridis",
-            vmin=0.0,
-            vmax=1.0,
+            norm=ci_norm,
             marker="x",
             s=10,
         )
         scatters.append(sc)
         ax.set_ylim(0, global_max_mag)
         ax.ticklabel_format(axis="y", style="plain")
-        if i % n_rows == n_rows - 1 or i == n_modules - 1:
+        if i == n_rows - 1:
             ax.set_xlabel("Component")
-        ax.set_ylabel("‖V_c‖·‖U_c‖")
-        ax.set_title(module_name, fontsize=10)
-    fig.colorbar(scatters[0], ax=axs.ravel().tolist(), label="max CI over batch")
+        if j == 0:
+            ax.set_ylabel("‖V_c‖·‖U_c‖")
+            ax.annotate(
+                matrix_type,
+                xy=(0, 0.5),
+                xycoords="axes fraction",
+                xytext=(-45, 0),
+                textcoords="offset points",
+                ha="right",
+                va="center",
+                rotation=90,
+                fontsize=10,
+                fontweight="bold",
+            )
+        if i == 0:
+            ax.set_title(f"layer {layer}" if layer else matrix_type, fontsize=10, fontweight="bold")
+    fig.colorbar(scatters[0], ax=axs.ravel().tolist(), label="mean CI over batch (log scale)")
     img = _render_figure(fig)
     plt.close(fig)
     return img
