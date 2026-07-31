@@ -23,31 +23,37 @@
   #tooltip { position: fixed; pointer-events: none; background: #222; color: #fff; padding: 4px 8px;
              border-radius: 4px; font-size: 12px; display: none; z-index: 5; white-space: pre; }
   #cicontrols { display: none; }
+  #layerctrl { display: none; }
 </style>
 </head>
 <body>
 <h1 id="apptitle">Residual stream on the probe planes — real vs. alive-only circuits</h1>
-<div class="sub">Each point is one prompt at the <code>=</code> token; columns are stream
-positions — block outputs (<b>after N</b>) interleaved with post-attention states
-(<b>attn N</b>). Rows 1–2: the stream projected on <b>that layer's own</b> probes for a and
-b — the data each block works with. Row 3: every position on the fixed
-<b id="probelayer">final</b>-layer result probe — the final state being constructed.
-<b>data</b> picks which of three sources is shown: the real model, or a circuit with only
-hidden-alive / only output-alive components active (delta off, everything else hard zero —
-the same masking `find_alive_subcomponents` uses). All three are captured over the exact same
-sampled points, so they're directly comparable. <b>distortion</b> colours by each point's
-plane-projected distance from the real model (meaningless — and disabled — while viewing the
-real model itself). <b>causal importance</b> colours every panel by one selected alive
-subcomponent's CI on that prompt (read from the real model, so it doesn't depend on which
-source is shown).</div>
+<div class="sub">Each point is one prompt at the <code>=</code> token. <b>view</b> picks the
+layout: <b>all layers</b> columns are stream positions — block outputs (<b>after N</b>)
+interleaved with post-attention states (<b>attn N</b>) — for one chosen period; <b>all
+periods</b> columns are periods instead, for one chosen layer. Rows 1–2: the stream
+projected on <b>that layer's own</b> probes for a and b — the data each block works with.
+Row 3: the fixed <b id="probelayer">final</b>-layer result probe, evaluated at whichever
+layer each column implies. <b>data</b> picks which source is shown: the real model, or a
+circuit with only output-alive (or, on a dual-CI checkpoint, only hidden-alive) components
+active (delta off, everything else hard zero — the same masking
+`find_alive_subcomponents` uses). Every source is captured over the exact same sampled
+points, so they're directly comparable.
+<b>distortion</b> colours by each point's plane-projected distance from the real model
+(meaningless — and disabled — while viewing the real model itself). <b>causal
+importance</b> colours every panel by one selected alive subcomponent's CI on that prompt
+(read from the real model, so it doesn't depend on which source is shown). The
+Δ-from-previous-position colour modes and displacement arrows only make sense across
+stream positions, so they're disabled in the all-periods view.</div>
 <div class="controls">
   <span><label>op</label><select id="op"></select></span>
-  <span><label>period</label><select id="period"></select></span>
-  <span><label>data</label><select id="source">
-    <option value="original">real model</option>
-    <option value="hidden_alive">hidden-alive only</option>
-    <option value="output_alive">output-alive only</option>
+  <span><label>view</label><select id="view">
+    <option value="layers">all layers (pick period)</option>
+    <option value="periods">all periods (pick layer)</option>
   </select></span>
+  <span id="periodctrl"><label>period</label><select id="period"></select></span>
+  <span id="layerctrl"><label>layer</label><select id="layer"></select></span>
+  <span><label>data</label><select id="source"></select></span>
   <span><label>color by</label><select id="colorby">
     <option value="value">value mod T</option>
     <option value="plane">Δ in panel plane (vs prev)</option>
@@ -56,14 +62,11 @@ source is shown).</div>
     <option value="ci">causal importance</option>
   </select></span>
   <span id="cicontrols">
-    <label>role</label><select id="cirole">
-      <option value="output">output</option>
-      <option value="hidden">hidden</option>
-    </select>
+    <label>role</label><select id="cirole"></select>
     <label>matrix</label><select id="cimatrix"></select>
     <label>component</label><select id="cicomponent"></select>
   </span>
-  <span><label><input type="checkbox" id="arrows"> arrows from previous position</label></span>
+  <span id="arrowsctrl"><label><input type="checkbox" id="arrows"> arrows from previous position</label></span>
 </div>
 <div id="legend">
   <span id="stats"></span>
@@ -77,6 +80,7 @@ source is shown).</div>
 "use strict";
 const D = window.ALIVE_PLANE_DATA;
 const LAYERS = D.meta.positions;              // ["L14", "L15att", "L15", ..., "L20"]
+const PERIODS = D.meta.periods;               // [2, 5, 10, ...]
 const N_ROWS = 3;
 const posLabel = p => p.endsWith("att") ? "attn " + p.slice(1, -3) : "after " + p.slice(1);
 const VIRIDIS = [[68,1,84],[70,7,90],[71,13,96],[71,19,101],[72,24,106],[72,29,111],[72,35,116],
@@ -92,15 +96,15 @@ const PANEL = 158;                            // CSS px; 7 columns fit one displ
 const DPR = window.devicePixelRatio || 1;
 const $ = id => document.getElementById(id);
 const state = {
-  op: null, period: null, colorby: "value", arrows: false,
+  op: null, view: "layers", period: null, layer: null, colorby: "value", arrows: false,
   source: "original", ciRole: "output", ciMatrix: null, ciComponent: null,
 };
 
-function fillSelect(sel, items) {
+function fillSelect(sel, items, labels) {
   sel.innerHTML = "";
-  for (const v of items) {
+  for (let i = 0; i < items.length; i++) {
     const o = document.createElement("option");
-    o.value = v; o.textContent = v;
+    o.value = items[i]; o.textContent = labels ? labels[i] : items[i];
     sel.appendChild(o);
   }
 }
@@ -114,8 +118,16 @@ function b64ToUint8(b64) {
 $("probelayer").textContent = "L" + D.meta.probe_layer;
 fillSelect($("op"), Object.keys(D.ops));
 state.op = $("op").value;
-fillSelect($("period"), D.meta.periods.map(String));
+fillSelect($("period"), PERIODS.map(String));
 state.period = $("period").value;
+fillSelect($("layer"), LAYERS, LAYERS.map(posLabel));
+state.layer = "L" + D.meta.probe_layer;
+$("layer").value = state.layer;
+state.view = $("view").value;
+// Non-dual checkpoints ship only ["original", "output_alive"] — no hidden-alive circuit.
+const SOURCE_LABEL = { original: "real model", hidden_alive: "hidden-alive only", output_alive: "output-alive only" };
+fillSelect($("source"), D.meta.sources, D.meta.sources.map(s => SOURCE_LABEL[s] || s));
+state.source = $("source").value;
 
 function lut(t) {
   const x = Math.min(0.999999, Math.max(0, t)) * (VIRIDIS.length - 1);
@@ -134,13 +146,20 @@ function rowDefs() {
   ];
 }
 function sourceData(src) { return D.ops[state.op].sources[src]; }
-function cellData(row, src) {
+function cellForPeriod(row, period, src) {
   const o = sourceData(src || state.source);
-  return row.kind === "own" ? o.own[row.variable][state.period]
-                            : o.planes[row.variable][state.period];
+  return row.kind === "own" ? o.own[row.variable][period] : o.planes[row.variable][period];
+}
+// One column per displayed panel: {layer, period, label}. "layers" view fixes the period
+// and sweeps layers; "periods" view fixes the layer and sweeps periods.
+function columns() {
+  if (state.view === "layers")
+    return LAYERS.map(lk => ({ layer: lk, period: state.period, label: posLabel(lk) }));
+  return PERIODS.map(p => ({ layer: state.layer, period: String(p), label: "T=" + p }));
 }
 function nPoints() {
-  const c = sourceData("original").planes[D.ops[state.op].result_variable][state.period];
+  // n_show is constant across every (layer, period, source) cell; any valid one will do.
+  const c = sourceData("original").planes[D.ops[state.op].result_variable][String(PERIODS[0])];
   return c.one_d ? c.layers[LAYERS[0]].length : c.layers[LAYERS[0]].length / 2;
 }
 function jitterY(i) { return (((i * 2654435761) >>> 0) % 1000) / 1000 - 0.5; }
@@ -150,36 +169,43 @@ function getXY(flatArr, oneD, i, f) {
   return [flatArr[2 * i], flatArr[2 * i + 1]];
 }
 
-// coords of row's panel at layer index li; prev=true -> previous state in the SAME plane.
-function rowCoords(row, li, prev, src) {
-  const cd = cellData(row, src), lk = LAYERS[li];
-  if (!prev) return cd.layers[lk];
-  if (row.kind === "own") return li > 0 ? cd.prev[lk] : null;
-  return li > 0 ? cd.layers[LAYERS[li - 1]] : null;   // final row: same plane at prev position
+// coords of row's panel at column ci; prev=true -> previous stream position in the SAME
+// plane. Only defined in the "layers" view (moving between periods isn't "previous").
+function rowCoords(row, ci, prev, src) {
+  const col = columns()[ci];
+  const cd = cellForPeriod(row, col.period, src);
+  if (!prev) return cd.layers[col.layer];
+  if (state.view !== "layers") return null;
+  const li = LAYERS.indexOf(col.layer);
+  if (li === 0) return null;
+  if (row.kind === "own") return cd.prev[col.layer];
+  return cd.layers[LAYERS[li - 1]];               // final row: same plane at prev position
 }
 
 const frameCache = {};
 function rowFrame(row) {
-  // Shared across all 3 sources so panels are visually comparable when switching `data`.
-  const key = [row.key, state.op, state.period].join("|");
+  // Shared across every source so panels are visually comparable when switching `data`.
+  const key = [row.key, state.op, state.view, state.period, state.layer].join("|");
   if (frameCache[key]) return frameCache[key];
   let xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
-  const scan = arr => {
-    const cd = cellData(row);
+  let oneD = false;
+  const cols = columns();
+  const scan = (arr, cdOneD) => {
+    oneD = cdOneD;
     for (let j = 0; j < arr.length; j++) {
-      const isX = cd.one_d || j % 2 === 0;
+      const isX = cdOneD || j % 2 === 0;
       if (isX) { if (arr[j] < xmin) xmin = arr[j]; if (arr[j] > xmax) xmax = arr[j]; }
       else { if (arr[j] < ymin) ymin = arr[j]; if (arr[j] > ymax) ymax = arr[j]; }
     }
   };
   for (const src of D.meta.sources)
-    for (let li = 0; li < LAYERS.length; li++) {
-      scan(rowCoords(row, li, false, src));
-      const p = rowCoords(row, li, true, src);
-      if (p) scan(p);
+    for (let ci = 0; ci < cols.length; ci++) {
+      const cd = cellForPeriod(row, cols[ci].period, src);
+      scan(cd.layers[cols[ci].layer], cd.one_d);
+      const p = rowCoords(row, ci, true, src);
+      if (p) scan(p, cd.one_d);
     }
-  const cd0 = cellData(row);
-  if (cd0.one_d) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
+  if (oneD) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
   const px = 0.06 * (xmax - xmin), py = 0.06 * (ymax - ymin);
   const f = { xmin: xmin - px, xmax: xmax + px, ymin: ymin - py, ymax: ymax + py };
   const w = f.xmax - f.xmin, h = f.ymax - f.ymin, s = Math.max(w, h);  // square, equal scale
@@ -189,11 +215,12 @@ function rowFrame(row) {
 }
 
 const magCache = {};
-function planeDeltas(row, li) {                // Δ from position li-1 into li, in this row's plane
-  const key = ["plane", row.key, state.op, state.period, state.source, li].join("|");
+function planeDeltas(row, ci) {                // Δ from the previous stream position, in this row's plane
+  const key = ["plane", row.key, state.op, state.period, state.source, ci].join("|");
   if (magCache[key]) return magCache[key];
-  const cd = cellData(row), f = rowFrame(row);
-  const cur = rowCoords(row, li, false), prev = rowCoords(row, li, true);
+  const col = columns()[ci];
+  const cd = cellForPeriod(row, col.period), f = rowFrame(row);
+  const cur = rowCoords(row, ci, false), prev = rowCoords(row, ci, true);
   const n = nPoints();
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -203,12 +230,13 @@ function planeDeltas(row, li) {                // Δ from position li-1 into li,
   magCache[key] = out;
   return out;
 }
-function distortionDeltas(row, li) {           // Δ from the real model, in this row's plane
-  const key = ["distort", row.key, state.op, state.period, state.source, li].join("|");
+function distortionDeltas(row, ci) {           // Δ from the real model, in this row's plane
+  const key = ["distort", row.key, state.op, state.view, state.period, state.layer, state.source, ci].join("|");
   if (magCache[key]) return magCache[key];
-  const cd = cellData(row), f = rowFrame(row);
-  const cur = rowCoords(row, li, false, state.source);
-  const orig = rowCoords(row, li, false, "original");
+  const col = columns()[ci];
+  const cd = cellForPeriod(row, col.period), f = rowFrame(row);
+  const cur = rowCoords(row, ci, false, state.source);
+  const orig = rowCoords(row, ci, false, "original");
   const n = nPoints();
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -218,14 +246,16 @@ function distortionDeltas(row, li) {           // Δ from the real model, in thi
   magCache[key] = out;
   return out;
 }
-function deltas(row, li) {
+function deltas(row, ci) {
   switch (state.colorby) {
     case "resid":
-      return li === 0 ? null : sourceData(state.source).resid_delta[LAYERS[li]];
+      if (state.view !== "layers" || ci === 0) return null;
+      return sourceData(state.source).resid_delta[columns()[ci].layer];
     case "distortion":
-      return state.source === "original" ? null : distortionDeltas(row, li);
+      return state.source === "original" ? null : distortionDeltas(row, ci);
     case "plane":
-      return li === 0 ? null : planeDeltas(row, li);
+      if (state.view !== "layers" || ci === 0) return null;
+      return planeDeltas(row, ci);
     default:
       return null;                             // "value" / "ci" don't use a Δ magnitude
   }
@@ -233,9 +263,10 @@ function deltas(row, li) {
 
 function sharedQ95() {                        // one Δ scale across every displayed panel
   const all = [];
+  const cols = columns();
   for (const row of rowDefs())
-    for (let li = 1; li < LAYERS.length; li++) {
-      const d = deltas(row, li);
+    for (let ci = 0; ci < cols.length; ci++) {
+      const d = deltas(row, ci);
       if (d) all.push(...d);
     }
   all.sort((a, b) => a - b);
@@ -266,67 +297,77 @@ function pointColor(row, i, mags, q95, values) {
 }
 
 const grid = $("grid");
-grid.style.gridTemplateColumns = `auto repeat(${LAYERS.length}, ${PANEL}px)`;
-grid.appendChild(document.createElement("div"));
-for (const lk of LAYERS) {
-  const h = document.createElement("div");
-  h.className = "colhead";
-  h.textContent = posLabel(lk);
-  grid.appendChild(h);
-}
-const canvases = [];                          // [rowIdx][li]
-const rowLabelDivs = [];
-for (let r = 0; r < N_ROWS; r++) {
-  const lab = document.createElement("div");
-  lab.className = "rowlabel";
-  grid.appendChild(lab);
-  rowLabelDivs.push(lab);
-  const rowCvs = [];
-  for (let li = 0; li < LAYERS.length; li++) {
-    const cv = document.createElement("canvas");
-    cv.className = "plot";
-    cv.width = PANEL * DPR; cv.height = PANEL * DPR;
-    cv.style.width = PANEL + "px"; cv.style.height = PANEL + "px";
-    cv.dataset.row = r; cv.dataset.li = li;
-    grid.appendChild(cv);
-    rowCvs.push(cv);
+let canvases = [];                            // [rowIdx][ci]
+let rowLabelDivs = [];
+function buildGrid() {                        // column count/labels differ by view; rebuild the DOM
+  grid.innerHTML = "";
+  const cols = columns();
+  grid.style.gridTemplateColumns = `auto repeat(${cols.length}, ${PANEL}px)`;
+  grid.appendChild(document.createElement("div"));
+  for (const col of cols) {
+    const h = document.createElement("div");
+    h.className = "colhead";
+    h.textContent = col.label;
+    grid.appendChild(h);
   }
-  canvases.push(rowCvs);
+  canvases = [];
+  rowLabelDivs = [];
+  for (let r = 0; r < N_ROWS; r++) {
+    const lab = document.createElement("div");
+    lab.className = "rowlabel";
+    grid.appendChild(lab);
+    rowLabelDivs.push(lab);
+    const rowCvs = [];
+    for (let ci = 0; ci < cols.length; ci++) {
+      const cv = document.createElement("canvas");
+      cv.className = "plot";
+      cv.width = PANEL * DPR; cv.height = PANEL * DPR;
+      cv.style.width = PANEL + "px"; cv.style.height = PANEL + "px";
+      cv.dataset.row = r; cv.dataset.li = ci;
+      grid.appendChild(cv);
+      rowCvs.push(cv);
+    }
+    canvases.push(rowCvs);
+  }
 }
+buildGrid();
 
 function toPx(p, f) {
   return [ (p[0] - f.xmin) / (f.xmax - f.xmin) * PANEL,
            PANEL - (p[1] - f.ymin) / (f.ymax - f.ymin) * PANEL ];
 }
 
-let lastPx = [];   // [rowIdx][li] -> point pixel positions, for hover
+let lastPx = [];   // [rowIdx][ci] -> point pixel positions, for hover
 let lastQ95 = 1;
-let snapshots = [];  // [rowIdx][li] -> clean ImageData, restored under the hover marker
+let snapshots = [];  // [rowIdx][ci] -> clean ImageData, restored under the hover marker
 let hoverIdx = null;
 function drawAll() {
   const rows = rowDefs();
+  const cols = columns();
   const q95 = (state.colorby === "value" || state.colorby === "ci") ? 1 : sharedQ95();
   lastQ95 = q95;
-  lastPx = rows.map(() => new Array(LAYERS.length));
-  snapshots = rows.map(() => new Array(LAYERS.length));
+  lastPx = rows.map(() => new Array(cols.length));
+  snapshots = rows.map(() => new Array(cols.length));
   hoverIdx = null;
   const n = nPoints();
   rows.forEach((row, r) => {
     rowLabelDivs[r].textContent = row.label;
-    const cd = cellData(row), f = rowFrame(row);
+    const f = rowFrame(row);
     const values = D.ops[state.op].values[row.variable];
-    for (let li = 0; li < LAYERS.length; li++) {
-      const cv = canvases[r][li], ctx = cv.getContext("2d");
+    for (let ci = 0; ci < cols.length; ci++) {
+      const col = cols[ci];
+      const cd = cellForPeriod(row, col.period);
+      const cv = canvases[r][ci], ctx = cv.getContext("2d");
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
       ctx.clearRect(0, 0, PANEL, PANEL);
-      const mags = deltas(row, li);
+      const mags = deltas(row, ci);
       if (!cd.one_d) {                        // unit circle reference
         ctx.strokeStyle = "#d8d8dc"; ctx.setLineDash([2, 3]); ctx.beginPath();
         const c0 = toPx([0, 0], f), rad = 1 / (f.xmax - f.xmin) * PANEL;
         ctx.arc(c0[0], c0[1], rad, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
       }
-      const cur = rowCoords(row, li, false), prev = rowCoords(row, li, true);
-      if (state.arrows && prev) {
+      const cur = rowCoords(row, ci, false), prev = rowCoords(row, ci, true);
+      if (state.arrows && state.view === "layers" && prev) {
         ctx.strokeStyle = "rgba(120,120,130,0.3)"; ctx.lineWidth = 0.7;
         for (let i = 0; i < Math.min(n, 250); i++) {
           const a = toPx(getXY(prev, cd.one_d, i, f), f), b = toPx(getXY(cur, cd.one_d, i, f), f);
@@ -342,12 +383,12 @@ function drawAll() {
         ctx.beginPath(); ctx.arc(p[0], p[1], 1.3, 0, 2 * Math.PI); ctx.fill();
       }
       ctx.globalAlpha = 1;
-      const s = row.kind === "own" ? cd.stats[LAYERS[li]] : cd.l20;
+      const s = row.kind === "own" ? cd.stats[col.layer] : cd.l20;
       ctx.font = "9px sans-serif";
       ctx.fillStyle = s.accepted ? "#555" : "#b00020";
       ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
-      lastPx[r][li] = px;
-      snapshots[r][li] = ctx.getImageData(0, 0, cv.width, cv.height);
+      lastPx[r][ci] = px;
+      snapshots[r][ci] = ctx.getImageData(0, 0, cv.width, cv.height);
     }
   });
   drawLegend(q95);
@@ -357,11 +398,11 @@ function setHover(idx) {                      // mark the homologous point on ev
   if (idx === hoverIdx) return;
   hoverIdx = idx;
   for (let r = 0; r < canvases.length; r++)
-    for (let li = 0; li < LAYERS.length; li++) {
-      const cv = canvases[r][li], ctx = cv.getContext("2d");
-      ctx.putImageData(snapshots[r][li], 0, 0);
+    for (let ci = 0; ci < canvases[r].length; ci++) {
+      const cv = canvases[r][ci], ctx = cv.getContext("2d");
+      ctx.putImageData(snapshots[r][ci], 0, 0);
       if (idx === null) continue;
-      const p = lastPx[r][li][idx];
+      const p = lastPx[r][ci][idx];
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
       ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
       ctx.lineWidth = 3; ctx.strokeStyle = "#ffffff"; ctx.stroke();
@@ -371,8 +412,9 @@ function setHover(idx) {                      // mark the homologous point on ev
 }
 
 function drawLegend(q95) {
-  const srcLabel = { original: "real model", hidden_alive: "hidden-alive only", output_alive: "output-alive only" }[state.source];
-  $("stats").innerHTML = `<b>${state.op} / T=${state.period} / ${srcLabel}</b>` +
+  const srcLabel = SOURCE_LABEL[state.source] || state.source;
+  const axisLabel = state.view === "layers" ? `T=${state.period}` : posLabel(state.layer);
+  $("stats").innerHTML = `<b>${state.op} / ${axisLabel} / ${srcLabel}</b>` +
     ` — panel tag: that probe's cv R² (red = fails the null gate)`;
   const cb = $("cbar"), cctx = cb.getContext("2d");
   for (let x = 0; x < cb.width; x++) {
@@ -380,7 +422,9 @@ function drawLegend(q95) {
     cctx.fillRect(x, 0, 1, cb.height);
   }
   if (state.colorby === "value") {
-    $("cbarlabel").textContent = `value mod ${state.period} (per row's variable): 0 → ${state.period - 1}`;
+    $("cbarlabel").textContent = state.view === "layers"
+      ? `value mod ${state.period} (per row's variable): 0 → ${state.period - 1}`
+      : "value mod T varies per column — see each panel's own period";
   } else if (state.colorby === "ci") {
     $("cbarlabel").textContent = state.ciComponent === null
       ? "no alive components for this role"
@@ -396,10 +440,10 @@ grid.addEventListener("mousemove", e => {
   const t = e.target;
   const tip = $("tooltip");
   if (t.tagName !== "CANVAS") { tip.style.display = "none"; setHover(null); return; }
-  const r = +t.dataset.row, li = +t.dataset.li;
+  const r = +t.dataset.row, ci = +t.dataset.li;
   const rect = t.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  const px = lastPx[r] && lastPx[r][li];
+  const px = lastPx[r] && lastPx[r][ci];
   if (!px) return;
   let best = -1, bd = 100;
   for (let i = 0; i < px.length; i++) {
@@ -409,9 +453,10 @@ grid.addEventListener("mousemove", e => {
   if (best < 0) { tip.style.display = "none"; setHover(null); return; }
   setHover(best);
   const row = rowDefs()[r];
+  const col = columns()[ci];
   const ab = D.ops[state.op].ab, v = D.ops[state.op].values[row.variable][best];
-  const T = +state.period;
-  const mags = deltas(row, li);
+  const T = +col.period;
+  const mags = deltas(row, ci);
   const ciArr = state.colorby === "ci" ? ciArray() : null;
   tip.textContent = `a=${ab[2 * best]}  b=${ab[2 * best + 1]}\n${row.variable}=${v}` +
     `  mod ${T} = ${((v % T) + T) % T}` +
@@ -436,10 +481,36 @@ function populateCiSelectors() {
   state.ciMatrix = matrices.length ? matrices[0] : null;
   populateCiComponents();
 }
+// Non-dual checkpoints only ship an "output" CI net -- no "hidden" role to pick.
+fillSelect($("cirole"), Object.keys(D.meta.alive_components));
+state.ciRole = $("cirole").value;
 populateCiSelectors();
 
-for (const id of ["op", "period", "source"])
+function applyViewVisibility() {
+  const layersMode = state.view === "layers";
+  $("periodctrl").style.display = layersMode ? "inline-flex" : "none";
+  $("layerctrl").style.display = layersMode ? "none" : "inline-flex";
+  $("arrowsctrl").style.display = layersMode ? "inline-flex" : "none";
+  const planeOpt = $("colorby").querySelector('option[value="plane"]');
+  const residOpt = $("colorby").querySelector('option[value="resid"]');
+  planeOpt.disabled = !layersMode;
+  residOpt.disabled = !layersMode;
+  if (!layersMode && (state.colorby === "plane" || state.colorby === "resid")) {
+    state.colorby = "value";
+    $("colorby").value = "value";
+    $("cicontrols").style.display = "none";
+  }
+}
+applyViewVisibility();
+
+for (const id of ["op", "period", "layer", "source"])
   $(id).addEventListener("change", () => { state[id] = $(id).value; drawAll(); });
+$("view").addEventListener("change", () => {
+  state.view = $("view").value;
+  applyViewVisibility();
+  buildGrid();
+  drawAll();
+});
 $("colorby").addEventListener("change", () => {
   state.colorby = $("colorby").value;
   $("cicontrols").style.display = state.colorby === "ci" ? "inline-flex" : "none";
