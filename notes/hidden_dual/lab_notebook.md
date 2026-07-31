@@ -247,3 +247,52 @@ marginal shared components), so no unit conversion balances the two losses. What
 coefficient is that the *value* distribution is bimodal in the same place — bulk surplus ~200x
 above its keep-threshold, marginal fringe at ~2x — making `lambda_hidden: 5e-5 -> 1e-4`
 surgical. Full numbers and cross-checks in `report.md`.
+
+## 2026-07-31 — numpy/pandas Pile-4L replication + dual-CI sibling, C probe
+
+Two new in-repo configs for the anomaly-rate / logit-lens investigation on the small
+Pile-4L numpy/pandas target (`param_decomp_lab/experiments/lm/numpy_pandas_4L_targeted_{replication,dual_ci}.yaml`):
+config (a) is `numpy_pandas_4L_targeted.yaml` unchanged apart from C and a new eval metric;
+config (b) adds `pd.dual_hidden_ci: true` plus a hidden-net mirror of every output-net loss
+and eval metric (`StochasticHiddenReconSubsetLoss` 1.0 + `PersistentPGDHiddenActsReconLoss`
+0.5, matching `addsub-L18-09-dual-ppgd`'s "Stochastic + PPGD" shape). New eval metrics:
+`RoundedLogitLens` (pre-`ln_f` projection onto `" np"`/`" pd"` at every block's last-position
+residual, original model vs CI>0.01-rounded circuit-only model — always the *output* net,
+in both configs, since "circuit-only" means output-causally-important) and `CIAnomalyRate`
+(dual-CI only: fraction of components with `ci_output > 0.5` and `ci_hidden <= 0.5`).
+
+**Bug found and fixed, unrelated to C.** First dual-CI probe (any C, including the
+unmodified original C=64) crashed deterministically at step 0:
+`AssertionError: non-finite loss from metric 'StochasticHiddenReconSubsetLoss': nan`.
+Root cause: the numpy/pandas target pool is only 2 prompts x 3 tokens = 6 positions total
+(`data.prompts_file`, not a streamed dataset). `StochasticHiddenReconSubsetLoss`'s
+`uniform_k_subset` routing gives each of the 24 decomposed sites only ~50% inclusion odds
+*per position*; over just 6 positions, some site landing with zero routed positions on a
+given step is a real, non-negligible probability (confirmed via debug instrumentation:
+`h.3.attn.v_proj`, `routing_mask.sum=0` — not a dead weight, checked the checkpoint's
+per-layer attn norms directly, all healthy). A site with zero routed positions divides
+`sq_err/sq_target` as `0/0` in `mean_relative_error` (`param_decomp/metrics/hidden_acts.py`),
+which the docstring already flags as an unguarded possible outcome. The *output* net's
+`StochasticReconSubsetLoss` never hits this because it compares whole final logits, not a
+per-site ratio. Fix, scoped to config (b) only (no core code changed): switched
+`StochasticHiddenReconSubsetLoss`'s `routing` from `uniform_k_subset` to
+`{type: static_probability, p: 1.0}` (route every position to every site — `torch.rand(...)
+< 1.0` is always true, so this is exactly "no subset routing", not a probabilistic
+approximation). `PersistentPGDHiddenActsReconLoss` and `CIHiddenActsReconLoss` were never at
+risk — both route via the `AllLayersRouter`/`"all"` sentinel unconditionally, never a subset
+router. Reproduced identically at C=64 and C=8192 before the fix (proving it's C-independent),
+confirmed gone after the fix at C=64/512/2048.
+
+**Memory probe** (2x L40, 3 steps, no wandb, `slow_on_first_step: true` so the full eval
+suite — including both new metrics — runs at step 0; cluster is heterogeneous, cards are
+44.32 GiB or 46068 MiB): C is a weak lever here too, same as the 8B finding — C=64 and C=512
+gave an *identical* 39435 MiB peak on config (b), so the floor is fixed overhead (dual CI
+nets, both PPGD adversaries' persistent state, the eval suite), not per-component tensors.
+Binary search from there: C=2048 fits (41650 MiB, ~3.7 GiB headroom on the 44.32 GiB card);
+C=3072 and C=8192 both OOM (`Tried to allocate 1.5-2 GiB... 39-733 MiB free`). Settled on
+**C=2048 uniformly across all 4 attention matrix types**, applied identically to configs (a)
+and (b) for apples-to-apples (a 32x increase over the original 64; also merges q/k/v's
+original 64 and o_proj's original 96 into one value, a minor deviation from the source
+config's split). Confirmed end-to-end on the actual final config files: config (a) at
+C=2048 peaks 39437 MiB, config (b) at C=2048 peaks 41650 MiB (the latter is more expensive
+as expected — second CI net, hidden PPGD, hidden stochastic loss).
