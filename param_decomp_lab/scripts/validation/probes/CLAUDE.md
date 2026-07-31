@@ -57,12 +57,12 @@ per alive list with only that role's components active everywhere (delta off —
 `find_alive_subcomponents`'s masking) — so every source is exactly point-aligned. Running it
 on both a baseline and a dual run of the same decomposition is how you see what adding the
 hidden-CI net actually changed. The `<result> @ layer` own-probe row is dropped (own rows:
-`a`, `b` only; the fixed-`--probe-layer` result row stays). Extra colorby modes beyond
-`final_plane_scatter`'s: **distortion** (plane-projected distance from the real model;
-disabled while viewing the real model itself) and **causal importance** (role + matrix +
-component pickers, gated by that role's alive list; CI is one value per prompt from the
-real-model forward, so it colors every panel identically regardless of which source is
-shown).
+`a`, `b` only; the result row is fixed to one probe layer at a time). Extra colorby modes
+beyond `final_plane_scatter`'s: **distortion** (plane-projected distance from the real
+model; disabled while viewing the real model itself) and **causal importance** (role +
+matrix + component pickers, gated by that role's alive list; CI is one value per prompt
+from the real-model forward, so it colors every panel identically regardless of which
+source is shown).
 
 **view** (client-side only, no data regeneration needed — everything is already in
 `data.js`) toggles the grid's column axis: **all layers** (default) fixes one period and
@@ -72,6 +72,14 @@ comparing a single position across every period at a glance. The Δ-from-previou
 colorby modes (`plane`/`resid`) and displacement arrows are layers-view-only — there's no
 "previous" position when columns are periods — and get disabled (auto-falling back to
 `value`) when switching to the periods view.
+
+**`--probe-layers`** (default `20`, comma-separated for more — e.g. `18,19,20`) picks
+which layer(s)' probe the result row is fixed to. The ridge-CV fit already has a probe per
+layer, so adding more probe layers costs only extra CPU-side projection of the *already
+captured* activations, not extra GPU forward passes. The applet always shows a `probe
+layer` dropdown (defaulting to L20 when it's among the prepared layers), populated from
+whatever `data.js` was actually built with — a single-option dropdown when only one probe
+layer was prepared, several when more were.
 
 Batches are grouped by each sampled prompt's natural (non-zero-padded) token length rather
 than padded, since `ComponentModel`'s masked forward has no attention-mask support — this
