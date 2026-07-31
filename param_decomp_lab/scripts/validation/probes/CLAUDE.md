@@ -42,6 +42,37 @@ applet for watching the final state get constructed: position slider + play, col
 norm precomputed as `resid_delta`), displacement arrows, hover tooltips. Vanilla-JS
 canvas, `file://`, smoke-test with the parent folder's `headless_check.py`.
 
+### `build_alive_plane_scatter.py` — real model vs. alive-only circuits
+
+Decomposition-aware variant of `build_final_plane_scatter`, dropped in
+`<run>/analysis/alive_plane_scatter/` (template `alive_plane_scatter_app.html`). Requires a
+`dual_hidden_ci` checkpoint with `find_alive_subcomponents` already run (reads
+`alive_subcomponents.tsv` + `_hidden.tsv`). Takes the checkpoint **and** the
+`ridge_cv_probes_<op>.json`(s) (positional, after the checkpoint) — the probe planes are
+decomposition-independent and reused as-is.
+
+Recomputes fresh activations for **three sources** over one sampled `a<op>b=` grid — the real
+model, and two circuits with only hidden-alive / only output-alive components active
+everywhere (delta off — `find_alive_subcomponents`'s masking) — so all three are exactly
+point-aligned. The `<result> @ layer` own-probe row is dropped (own rows: `a`, `b` only; the
+fixed-`--probe-layer` result row stays). Extra colorby modes beyond `final_plane_scatter`'s:
+**distortion** (plane-projected distance from the real model; disabled while viewing the real
+model itself) and **causal importance** (role + matrix + component pickers, gated by that
+role's alive list; CI is one value per prompt from the real-model forward, so it colors every
+panel identically regardless of which source is shown).
+
+Batches are grouped by each sampled prompt's natural (non-zero-padded) token length rather
+than padded, since `ComponentModel`'s masked forward has no attention-mask support — this
+also keeps tokenization identical to what `collect_resid_stream.py` used to fit the probes,
+so reusing their weights on freshly captured activations stays valid. Only 2D/1D projected
+points + scalar deltas + CI (base64 uint8) are ever serialized, never raw `d_model`
+activations.
+
+```bash
+uv run python -m param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter \
+    "$MODEL_PATH" ~/out/runs/fourier_probes/ridge_cv_probes_{add,sub}.json --slurm
+```
+
 `export_ridge_cv_planes` is a pure format transform (the shipped weights are the fit's
 full-range refit; `r2_cos = r2_sin = cv_r2`, with `cv_r2` / `p_value` / `lambda_rel` /
 `accepted` riding along). `plot_probe_projections` scatters a prompt subsample on each
