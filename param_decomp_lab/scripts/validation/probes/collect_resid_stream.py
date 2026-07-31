@@ -1,7 +1,6 @@
 """Collect the residual stream around layers 15-20 at the `=` token, one grid per position.
 
-Generalises `collect_resid_activations` (four sites around L18's MLP) to the stream itself:
-one forward pass per batch captures, at the last token, every requested stream *position*
+One forward pass per batch captures, at the last token, every requested stream *position*
 for the full `a<op>b=` grid (`a, b` in `1..max_value`), one output file per op:
 
 - `L<i>` — block `i`'s output (`out[0]`), the stream after block `i` = input to block `i+1`;

@@ -145,8 +145,8 @@ If two scripts need the same thing, it belongs here.
 
 ## Subfolders
 
-- **`probes/`** — Feucht-faithful Fourier probing of the residual sites around L18's MLP
-  (own CLAUDE.md).
+- **`probes/`** — ridge-CV, null-gated Fourier probing of the residual stream around L18's
+  MLP, layers 14-20 (own CLAUDE.md).
 - **`neurons/`** — the L18 neuron/subcomponent census over the 0..200 `a<op>b=` grids:
   activations + answer baselines, measured last-position ablation KL (hand-rolled
   layers-19..31 KV-cache patched tail; per-neuron and per-rank-1-subcomponent),
