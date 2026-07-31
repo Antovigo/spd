@@ -33,8 +33,9 @@ layout: <b>all layers</b> columns are stream positions — block outputs (<b>aft
 interleaved with post-attention states (<b>attn N</b>) — for one chosen period; <b>all
 periods</b> columns are periods instead, for one chosen layer. Rows 1–2: the stream
 projected on <b>that layer's own</b> probes for a and b — the data each block works with.
-Row 3: the fixed <b id="probelayer">final</b>-layer result probe, evaluated at whichever
-layer each column implies. <b>data</b> picks which source is shown: the real model, or a
+Row 3: the result probe fixed to one picked layer (<b>probe layer</b>, default
+<b id="probelayerbadge">final</b>), evaluated at whichever stream layer each column
+implies. <b>data</b> picks which source is shown: the real model, or a
 circuit with only output-alive (or, on a dual-CI checkpoint, only hidden-alive) components
 active (delta off, everything else hard zero — the same masking
 `find_alive_subcomponents` uses). Every source is captured over the exact same sampled
@@ -53,6 +54,7 @@ stream positions, so they're disabled in the all-periods view.</div>
   </select></span>
   <span id="periodctrl"><label>period</label><select id="period"></select></span>
   <span id="layerctrl"><label>layer</label><select id="layer"></select></span>
+  <span><label>probe layer</label><select id="probelayer"></select></span>
   <span><label>data</label><select id="source"></select></span>
   <span><label>color by</label><select id="colorby">
     <option value="value">value mod T</option>
@@ -96,8 +98,8 @@ const PANEL = 158;                            // CSS px; 7 columns fit one displ
 const DPR = window.devicePixelRatio || 1;
 const $ = id => document.getElementById(id);
 const state = {
-  op: null, view: "layers", period: null, layer: null, colorby: "value", arrows: false,
-  source: "original", ciRole: "output", ciMatrix: null, ciComponent: null,
+  op: null, view: "layers", period: null, layer: null, probeLayer: null, colorby: "value",
+  arrows: false, source: "original", ciRole: "output", ciMatrix: null, ciComponent: null,
 };
 
 function fillSelect(sel, items, labels) {
@@ -115,14 +117,20 @@ function b64ToUint8(b64) {
   return arr;
 }
 
-$("probelayer").textContent = "L" + D.meta.probe_layer;
+// Default probe layer: L20 when available (matches the generator's own --probe-layers
+// default), else whichever the run was actually prepared with.
+const DEFAULT_PROBE_LAYER = D.meta.probe_layers.includes(20) ? 20 : D.meta.probe_layers[0];
 fillSelect($("op"), Object.keys(D.ops));
 state.op = $("op").value;
 fillSelect($("period"), PERIODS.map(String));
 state.period = $("period").value;
 fillSelect($("layer"), LAYERS, LAYERS.map(posLabel));
-state.layer = "L" + D.meta.probe_layer;
+state.layer = "L" + DEFAULT_PROBE_LAYER;
 $("layer").value = state.layer;
+fillSelect($("probelayer"), D.meta.probe_layers.map(String), D.meta.probe_layers.map(p => "L" + p));
+state.probeLayer = String(DEFAULT_PROBE_LAYER);
+$("probelayer").value = state.probeLayer;
+$("probelayerbadge").textContent = "L" + state.probeLayer;
 state.view = $("view").value;
 // Non-dual checkpoints ship only ["original", "output_alive"] — no hidden-alive circuit.
 const SOURCE_LABEL = { original: "real model", hidden_alive: "hidden-alive only", output_alive: "output-alive only" };
@@ -142,13 +150,15 @@ function rowDefs() {
   return [
     { key: "own_a", kind: "own", variable: "a", label: "a @ layer" },
     { key: "own_b", kind: "own", variable: "b", label: "b @ layer" },
-    { key: "final", kind: "final", variable: res, label: res + " @ L" + D.meta.probe_layer },
+    { key: "final", kind: "final", variable: res, label: res + " @ L" + state.probeLayer },
   ];
 }
 function sourceData(src) { return D.ops[state.op].sources[src]; }
 function cellForPeriod(row, period, src) {
   const o = sourceData(src || state.source);
-  return row.kind === "own" ? o.own[row.variable][period] : o.planes[row.variable][period];
+  return row.kind === "own"
+    ? o.own[row.variable][period]
+    : o.planes[state.probeLayer][row.variable][period];
 }
 // One column per displayed panel: {layer, period, label}. "layers" view fixes the period
 // and sweeps layers; "periods" view fixes the layer and sweeps periods.
@@ -158,8 +168,9 @@ function columns() {
   return PERIODS.map(p => ({ layer: state.layer, period: String(p), label: "T=" + p }));
 }
 function nPoints() {
-  // n_show is constant across every (layer, period, source) cell; any valid one will do.
-  const c = sourceData("original").planes[D.ops[state.op].result_variable][String(PERIODS[0])];
+  // n_show is constant across every (layer, period, probe layer, source) cell; any valid
+  // one will do.
+  const c = sourceData("original").planes[state.probeLayer][D.ops[state.op].result_variable][String(PERIODS[0])];
   return c.one_d ? c.layers[LAYERS[0]].length : c.layers[LAYERS[0]].length / 2;
 }
 function jitterY(i) { return (((i * 2654435761) >>> 0) % 1000) / 1000 - 0.5; }
@@ -185,7 +196,7 @@ function rowCoords(row, ci, prev, src) {
 const frameCache = {};
 function rowFrame(row) {
   // Shared across every source so panels are visually comparable when switching `data`.
-  const key = [row.key, state.op, state.view, state.period, state.layer].join("|");
+  const key = [row.key, state.op, state.view, state.period, state.layer, state.probeLayer].join("|");
   if (frameCache[key]) return frameCache[key];
   let xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
   let oneD = false;
@@ -216,7 +227,7 @@ function rowFrame(row) {
 
 const magCache = {};
 function planeDeltas(row, ci) {                // Δ from the previous stream position, in this row's plane
-  const key = ["plane", row.key, state.op, state.period, state.source, ci].join("|");
+  const key = ["plane", row.key, state.op, state.period, state.probeLayer, state.source, ci].join("|");
   if (magCache[key]) return magCache[key];
   const col = columns()[ci];
   const cd = cellForPeriod(row, col.period), f = rowFrame(row);
@@ -231,7 +242,7 @@ function planeDeltas(row, ci) {                // Δ from the previous stream po
   return out;
 }
 function distortionDeltas(row, ci) {           // Δ from the real model, in this row's plane
-  const key = ["distort", row.key, state.op, state.view, state.period, state.layer, state.source, ci].join("|");
+  const key = ["distort", row.key, state.op, state.view, state.period, state.layer, state.probeLayer, state.source, ci].join("|");
   if (magCache[key]) return magCache[key];
   const col = columns()[ci];
   const cd = cellForPeriod(row, col.period), f = rowFrame(row);
@@ -383,7 +394,7 @@ function drawAll() {
         ctx.beginPath(); ctx.arc(p[0], p[1], 1.3, 0, 2 * Math.PI); ctx.fill();
       }
       ctx.globalAlpha = 1;
-      const s = row.kind === "own" ? cd.stats[col.layer] : cd.l20;
+      const s = row.kind === "own" ? cd.stats[col.layer] : cd.stats;
       ctx.font = "9px sans-serif";
       ctx.fillStyle = s.accepted ? "#555" : "#b00020";
       ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
@@ -505,6 +516,11 @@ applyViewVisibility();
 
 for (const id of ["op", "period", "layer", "source"])
   $(id).addEventListener("change", () => { state[id] = $(id).value; drawAll(); });
+$("probelayer").addEventListener("change", () => {
+  state.probeLayer = $("probelayer").value;
+  $("probelayerbadge").textContent = "L" + state.probeLayer;
+  drawAll();
+});
 $("view").addEventListener("change", () => {
   state.view = $("view").value;
   applyViewVisibility();

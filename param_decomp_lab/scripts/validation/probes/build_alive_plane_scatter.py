@@ -10,9 +10,14 @@ points in one run, so per-point comparisons across sources are exact. Running th
 baseline (non-dual) and a dual run of the same decomposition is how you see what adding the
 hidden-CI net actually changed.
 
-Two rows (`a @ layer`, `b @ layer`, the layer-of-interest's own probes) plus the fixed
-`--probe-layer` result row — the `<result> @ layer` own-probe row of `final_plane_scatter` is
-dropped. Color by `value mod T`, Δ from the previous position (in-plane or full-resid), by
+Two rows (`a @ layer`, `b @ layer`, the layer-of-interest's own probes) plus a result row
+fixed to one probe layer at a time (`--probe-layers`, default `20`; pass a comma-separated
+list — e.g. `18,19,20` — to prepare more than one, and the applet gets a dropdown to switch
+between them, defaulting to L20 when present) — the `<result> @ layer` own-probe row of
+`final_plane_scatter` is dropped. Every requested probe layer's projection is derived from
+the *same* captured activations (the ridge-CV fit already has a probe per layer; adding more
+probe layers costs extra CPU-side projection, not extra GPU forward passes). Color by `value
+mod T`, Δ from the previous position (in-plane or full-resid), by
 **distortion** — a point's plane-projected distance between the selected source and the
 `original` source (disabled while viewing `original` itself, where it is trivially zero) — or
 by the **causal importance** of one selected alive subcomponent (role + matrix + component
@@ -35,8 +40,9 @@ An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter \
         <model_path> <ridge_cv_probes_add.json> [<ridge_cv_probes_sub.json> ...] \
-        [--probe-layer=20] [--n-show=2000] [--seed=0] [--alpha=0.05] [--batch-size=256] \
-        [--output-dir=DIR] [--slurm [--gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
+        [--probe-layers=20|18,19,20] [--n-show=2000] [--seed=0] [--alpha=0.05] \
+        [--batch-size=256] [--output-dir=DIR] \
+        [--slurm [--gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
 
 Output (default `alive_plane_scatter/` under the run's `analysis/`): `index.html` + `data.js`.
 Requires `find_alive_subcomponents` already run (reads `analysis/datasets/alive_subcomponents.tsv`,
@@ -127,7 +133,7 @@ def _flat(p: np.ndarray) -> list[float]:
 def build_alive_plane_scatter(
     model_path: ModelPath,
     *ridge_cv_jsons: str,
-    probe_layer: int = 20,
+    probe_layers: str = "20",
     n_show: int = 2000,
     seed: int = 0,
     alpha: float = 0.05,
@@ -146,7 +152,7 @@ def build_alive_plane_scatter(
         argv = [
             str(Path(model_path).expanduser()),
             *[str(p) for p in json_paths],
-            f"--probe-layer={probe_layer}",
+            f"--probe-layers={probe_layers}",
             f"--n-show={n_show}",
             f"--seed={seed}",
             f"--alpha={alpha}",
@@ -183,6 +189,9 @@ def build_alive_plane_scatter(
     weight_deltas = model.calc_weight_deltas()
     dtype = next(model.parameters()).dtype
 
+    probe_layer_list = sorted({int(x) for x in probe_layers.split(",")})
+    probe_keys = [f"L{pl}" for pl in probe_layer_list]
+
     # Load probe jsons; every op must share the same grid (positions/periods/max_value).
     shared_meta: dict[str, Any] | None = None
     op_payloads: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
@@ -191,8 +200,8 @@ def build_alive_plane_scatter(
         payload = json.loads(json_path.read_text())
         meta, results = payload["meta"], payload["results"]
         layer_keys = [str(p) for p in meta["positions"]]
-        probe_key = f"L{probe_layer}"
-        assert probe_key in layer_keys, f"probe layer {probe_key} not in {layer_keys}"
+        for pk in probe_keys:
+            assert pk in layer_keys, f"probe layer {pk} not in {layer_keys}"
         grid = {"positions": layer_keys, "periods": meta["periods"], "max_value": meta["max_value"]}
         if shared_meta is None:
             shared_meta = grid
@@ -203,7 +212,6 @@ def build_alive_plane_scatter(
     layer_keys = cast(list[str], shared_meta["positions"])
     periods = cast(list[int], shared_meta["periods"])
     max_value = cast(int, shared_meta["max_value"])
-    probe_key = f"L{probe_layer}"
     layers = _layers_from_positions(layer_keys)
 
     alive_components_meta = {
@@ -296,7 +304,9 @@ def build_alive_plane_scatter(
             own: dict[str, Any] = {
                 v: {
                     str(t): {
-                        "one_d": results[probe_key][v][str(t)]["w_sin"] is None,
+                        # `w_sin is None` (period-2 probes) is a property of the period, not
+                        # the layer, so any valid layer key gives the same answer here.
+                        "one_d": results[layer_keys[0]][v][str(t)]["w_sin"] is None,
                         "layers": {},
                         "prev": {},
                         "stats": {
@@ -316,21 +326,24 @@ def build_alive_plane_scatter(
                 for v in _OWN_VARIABLES
             }
             planes: dict[str, Any] = {
-                result_variable: {
-                    str(t): {
-                        "one_d": results[probe_key][result_variable][str(t)]["w_sin"] is None,
-                        "l20": {
-                            "cv_r2": results[probe_key][result_variable][str(t)]["cv_r2"],
-                            "p_value": results[probe_key][result_variable][str(t)]["p_value"],
-                            "accepted": bool(
-                                results[probe_key][result_variable][str(t)]["p_value"] <= alpha
-                                and results[probe_key][result_variable][str(t)]["cv_r2"] > 0
-                            ),
-                        },
-                        "layers": {},
+                str(pl): {
+                    result_variable: {
+                        str(t): {
+                            "one_d": results[pk][result_variable][str(t)]["w_sin"] is None,
+                            "stats": {
+                                "cv_r2": results[pk][result_variable][str(t)]["cv_r2"],
+                                "p_value": results[pk][result_variable][str(t)]["p_value"],
+                                "accepted": bool(
+                                    results[pk][result_variable][str(t)]["p_value"] <= alpha
+                                    and results[pk][result_variable][str(t)]["cv_r2"] > 0
+                                ),
+                            },
+                            "layers": {},
+                        }
+                        for t in periods
                     }
-                    for t in periods
                 }
+                for pl, pk in zip(probe_layer_list, probe_keys, strict=True)
             }
             resid_delta: dict[str, list[float]] = {}
             prev_x: np.ndarray | None = None
@@ -340,9 +353,12 @@ def build_alive_plane_scatter(
                     resid_delta[lk] = [
                         round(float(d), 2) for d in np.linalg.norm(x - prev_x, axis=1)
                     ]
-                for t in periods:
-                    pcell = results[probe_key][result_variable][str(t)]
-                    planes[result_variable][str(t)]["layers"][lk] = _flat(_project(x, pcell))
+                for pl, pk in zip(probe_layer_list, probe_keys, strict=True):
+                    for t in periods:
+                        pcell = results[pk][result_variable][str(t)]
+                        planes[str(pl)][result_variable][str(t)]["layers"][lk] = _flat(
+                            _project(x, pcell)
+                        )
                 for v in _OWN_VARIABLES:
                     for t in periods:
                         ocell = results[lk][v][str(t)]
@@ -386,7 +402,7 @@ def build_alive_plane_scatter(
         "meta": {
             "positions": layer_keys,
             "periods": periods,
-            "probe_layer": probe_layer,
+            "probe_layers": probe_layer_list,
             "n_show": n_show,
             "max_value": max_value,
             "sources": list(sources),
