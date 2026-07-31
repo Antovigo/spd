@@ -16,7 +16,7 @@ class WeightMagnitudeConfig(BaseConfig):
 
 
 class WeightMagnitude(Metric[WeightMagnitudeConfig]):
-    """Per-layer plot of `‖V_c‖·‖U_c‖` per component, points coloured by max CI over the batch."""
+    """Per-layer plot of `‖V_c‖·‖U_c‖` per component, points coloured by mean CI over the batch (log scale)."""
 
     log_namespace = "figures"
     slow = True
@@ -24,17 +24,22 @@ class WeightMagnitude(Metric[WeightMagnitudeConfig]):
 
     @override
     def reset(self) -> None:
-        self.max_ci_per_component: dict[str, Tensor] = {
+        self.ci_sum_per_component: dict[str, Tensor] = {
             module_name: torch.zeros(self.model.module_to_c[module_name], device=self.device)
+            for module_name in self.model.components
+        }
+        self.examples_seen: dict[str, Tensor] = {
+            module_name: torch.zeros((), device=self.device, dtype=torch.long)
             for module_name in self.model.components
         }
 
     @override
     def update(self, ctx: MetricContext) -> None:
         for module_name, ci_vals in ctx.ci.lower_leaky.items():
-            batch_max = ci_vals.detach().amax(dim=tuple(range(ci_vals.ndim - 1)))
-            self.max_ci_per_component[module_name] = torch.maximum(
-                self.max_ci_per_component[module_name], batch_max
+            n_leading_dims = ci_vals.ndim - 1
+            self.examples_seen[module_name] += ci_vals.shape[:n_leading_dims].numel()
+            self.ci_sum_per_component[module_name] += ci_vals.detach().sum(
+                dim=tuple(range(n_leading_dims))
             )
         return None
 
@@ -44,8 +49,9 @@ class WeightMagnitude(Metric[WeightMagnitudeConfig]):
             name: torch.linalg.norm(comp.V, dim=0) * torch.linalg.norm(comp.U, dim=1)
             for name, comp in self.model.components.items()
         }
-        max_ci_per_component = {
-            module_name: all_reduce(max_ci, op=ReduceOp.MAX)
-            for module_name, max_ci in self.max_ci_per_component.items()
+        mean_ci_per_component = {
+            module_name: all_reduce(ci_sum, op=ReduceOp.SUM)
+            / all_reduce(self.examples_seen[module_name], op=ReduceOp.SUM)
+            for module_name, ci_sum in self.ci_sum_per_component.items()
         }
-        return {"weight_magnitude": plot_weight_magnitude(weight_magnitudes, max_ci_per_component)}
+        return {"weight_magnitude": plot_weight_magnitude(weight_magnitudes, mean_ci_per_component)}
