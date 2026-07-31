@@ -616,3 +616,39 @@ def plot_ci_values_histograms(
     plt.close(fig)
 
     return fig_img
+
+
+def plot_rounded_logit_lens(
+    mean_logits: dict[str, Float[Tensor, "layer token"]],
+    tokens: list[str],
+) -> Image.Image:
+    """Per-layer pre-RMSNorm logit trajectory, original vs rounded (circuit-only) model.
+
+    One line per (forward_type, token): solid for the original model, dashed for the
+    rounded model; colour keyed by token.
+    """
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=150)
+    cmap = plt.get_cmap("tab10")
+    linestyles = {"original": "-", "rounded": "--"}
+    for token_idx, token in enumerate(tokens):
+        color = cmap(token_idx)
+        for forward_type, logits in mean_logits.items():
+            n_layer = logits.shape[0]
+            ax.plot(
+                range(n_layer),
+                logits[:, token_idx].detach().cpu().numpy(),
+                label=f"{forward_type} {token.strip()!r}",
+                color=color,
+                linestyle=linestyles[forward_type],
+                marker="o",
+            )
+    ax.set_xlabel("Layer (post-block residual, pre-ln_f)")
+    ax.set_ylabel("Pre-RMSNorm logit")
+    ax.set_title("Logit lens: original vs rounded (circuit-only) model")
+    ax.legend()
+    fig.tight_layout()
+
+    fig_img = _render_figure(fig)
+    plt.close(fig)
+
+    return fig_img

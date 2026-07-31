@@ -118,6 +118,12 @@ def mean_relative_error(errors: SiteErrors) -> Float[Tensor, ""]:
     catches that without a per-step device sync here.
     """
     assert errors, "no sites measured"
+    for _site, (_sq_err, _sq_target) in errors.items():
+        if not torch.isfinite(_sq_err / _sq_target):
+            print(
+                f"DEBUG_NAN site={_site} sq_err={_sq_err.item()} sq_target={_sq_target.item()}",
+                flush=True,
+            )
     return torch.stack([sq_err / sq_target for sq_err, sq_target in errors.values()]).mean()
 
 
