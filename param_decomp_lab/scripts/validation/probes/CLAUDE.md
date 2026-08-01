@@ -81,6 +81,18 @@ layer` dropdown (defaulting to L20 when it's among the prepared layers), populat
 whatever `data.js` was actually built with — a single-option dropdown when only one probe
 layer was prepared, several when more were.
 
+**Axes and zoom** (client-side only): every panel draws dashed zero-lines plus tick labels
+giving each axis's scale and sign. The *default* frame is centred on the origin and sized
+to fit the **real model's own** point cloud specifically (not whichever source is
+currently displayed, so panels don't jump when switching `data`) with 15% slack — computed
+from `op`/`view`/`period`/`layer`/`probe-layer` alone, never from the sampled points'
+own asymmetric range or which decomposition produced the run, so two separately generated
+applets on the same base model + probes default to the same framing (their `n_show`
+samples are close enough, especially at the shared default seed, that the real model's
+cloud extent barely varies run to run). Scroll zooms toward the cursor, drag pans,
+double-click resets — one row's panels share a frame (as they already did for comparing
+`data` sources), so any interaction on one panel moves the whole row.
+
 Batches are grouped by each sampled prompt's natural (non-zero-padded) token length rather
 than padded, since `ComponentModel`'s masked forward has no attention-mask support — this
 also keeps tokenization identical to what `collect_resid_stream.py` used to fit the probes,
