@@ -181,6 +181,39 @@ output net's activity is a near-subset of the hidden net's in attention, and lea
 the MLP — concentrated in `down_proj`, the site the exchange-rate study found carries 97%
 of the joint KL.
 
+## Why this baseline is not comparable to `-10-dual-ppgd` in absolute terms
+
+The series baseline ends ~9% worse on `kl_ci_masked` and ~23% worse on `PGDReconLoss` than
+`addsub-L18-10-dual-ppgd`'s final. That is a schedule artefact, not a regression. Three
+things differ: 15000 steps instead of 20000 (which also makes the cosine LR decay 1.33x
+faster), gamma annealed over the last 5000 steps instead of the last 10000 — both anneals
+start at step 10000 and end at gamma 0.01, so this one is twice as fast — and C raised 4x.
+
+| metric | -10 @10k | -10 @15k | -10 @20k | -11 @10k | -11 @15k |
+|---|---|---|---|---|---|
+| kl_ci_masked | 0.004094 | 0.003720 | 0.003633 | **0.003993** | 0.003953 |
+| kl_unmasked | 0.002637 | 0.002011 | 0.001755 | **0.002306** | 0.001546 |
+| PGDReconLoss | 0.006582 | 0.005232 | 0.004429 | **0.006173** | 0.005469 |
+| hidErr_outCI | 0.2423 | 0.2397 | 0.2484 | **0.2345** | 0.2625 |
+| hidErr_hidCI | 0.0365 | 0.03377 | 0.03425 | **0.0349** | 0.0334 |
+| CI_L0 output | 39.95 | 31.66 | 23.87 | 47.72 | 25.42 |
+
+**At matched step 10000 the new baseline is better on every output and hidden metric**, so
+4x C does not cost quality — it helps at matched training. The endpoint gap is the missing
+5000 steps: in `-10` those steps alone moved `PGDReconLoss` 0.005232 -> 0.004429 (16%).
+
+Two traps when eyeballing this:
+
+- Raw alive counts are not comparable. 1906 hidden-alive here vs 1461 in `-10` looks worse
+  but is 31% of 6144 against 95% of 1536 — the old figure was pinned to a ceiling. The
+  unclipped density measure, `CI_L0`, has the new run *sparser* at 15k than `-10` was at 15k
+  (25.4 vs 31.66).
+- `report.md`'s 0.2238 / 0.0518 come from the CPU exchange-rate probe (256 prompts, fp32,
+  different mask), not the eval loop. The logged eval at step 20000 is 0.2484 / 0.03425.
+
+All four arms share this schedule, so the cross-arm comparison — the point of the series —
+is unaffected. `-10` is a historical reference here, not a control.
+
 ## Open, pending the runs
 
 1. Per-matrix active (`CI_L0`) and alive counts for both nets, with the ceiling lifted.
