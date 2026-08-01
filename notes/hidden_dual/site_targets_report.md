@@ -20,9 +20,20 @@ Four runs, everything but the measured site set held identical to
 | `addsub-L18-11-module-out` | `o_proj` + `down_proj` | what the modules *add* to the stream, excluding their internals |
 | `addsub-L18-11-resid` | the residual stream, post-attn and post-MLP | what the model actually carries forward |
 | `addsub-L18-11-down-only` | `down_proj` alone | floor: the site carrying 97% of the joint KL |
+| `addsub-L18-11-mlp-only` | `gate_proj` + `up_proj` + `down_proj` | drops attention entirely, keeps the MLP whole |
 
-15000 steps, gamma annealed over the last 5000, C raised 4x (total 6144), two lanes of
-2 GPUs chained so at most two run concurrently.
+15000 steps, gamma annealed over the last 5000, C raised 4x (total 6144), 2 GPUs per arm.
+
+`mlp-only` was added after the baseline landed, and is the sharpest test of that arm's main
+finding. The baseline showed the hidden net's surplus over the output net is ~4.4x per
+position in attention against ~1.6x in the MLP, while the anomaly census showed almost none
+of the attention surplus is visible to the output objective. `mlp-only` differs from
+`baseline` in exactly the four attention-internal sites, so the pair prices that surplus
+directly: if attention hidden signal is doing real work, dropping it should cost output
+quality; if it is inert, it should not.
+
+The five arms bracket attention cleanly — `baseline` has all four attention sites,
+`module-out` keeps only `o_proj`, and `mlp-only` / `down-only` have none.
 
 **Every arm declares the same two residual readout sites and differs only in the training
 losses' `site_patterns`.** So every arm logs the same eval panel — hidden error at all 7

@@ -320,3 +320,20 @@ The -10 baseline was at its alive-count ceiling (hidden net: `q_proj` and `k_pro
 4x the components costs 2.5 GB — C really is a weak memory lever here, as the -09 series
 found. Stopped at 4x rather than 6x: extrapolation puts 6x near 43.2 GB, the same knife-edge
 that OOM'd earlier 8B runs on this node's smaller cards, and a mid-run OOM costs 13 h.
+
+## 2026-08-01 — fifth arm: `mlp-only`, and the wandb rename
+
+Added `addsub-L18-11-mlp-only` (hidden objective on `*.mlp.*` — gate, up, down; no
+attention) as a third concurrent lane, GPU budget raised to 6. Config diffs from
+`baseline` in exactly three lines: the label and the two training losses' `site_patterns`.
+
+It exists because of the baseline result. The hidden net's per-position surplus over the
+output net is ~4.4x in attention but only ~1.6x in the MLP, and the anomaly census puts
+essentially zero magenta in `k_proj`/`v_proj` — so the attention surplus is real activity
+that the output objective cannot see. `baseline` vs `mlp-only` differ in exactly the four
+attention-internal sites and therefore price that surplus against output quality directly.
+
+The first two arms were launched without `--run_id`, so their run dirs and wandb runs took
+auto-generated `p-*` names. Local dirs renamed to their labels; wandb display names renamed
+from each run's own `config.label` (asserting rather than guessing when absent). Wandb run
+*ids* are immutable, so those two keep `p-*` in their URLs. Later arms pass `--run_id`.
