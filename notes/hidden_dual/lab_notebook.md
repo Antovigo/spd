@@ -247,3 +247,76 @@ marginal shared components), so no unit conversion balances the two losses. What
 coefficient is that the *value* distribution is bimodal in the same place — bulk surplus ~200x
 above its keep-threshold, marginal fringe at ~2x — making `lambda_hidden: 5e-5 -> 1e-4`
 surgical. Full numbers and cross-checks in `report.md`.
+
+## 2026-08-01 — which hidden activations? the addsub-L18-11-* site-target series
+
+Asked which *part* of the hidden activations the second CI net should reconstruct. Four
+arms, everything but the measured site set held identical to `addsub-L18-10-dual-ppgd`:
+
+| arm | hidden objective measured at |
+|---|---|
+| `addsub-L18-11-baseline` | all 7 decomposed matrices (the status quo) |
+| `addsub-L18-11-module-out` | `o_proj` + `down_proj` — what the modules add to the stream |
+| `addsub-L18-11-resid` | the residual stream itself, post-attn and post-MLP |
+| `addsub-L18-11-down-only` | `down_proj` alone |
+
+15000 steps, gamma annealed over the last 5000 (`gamma_anneal_start_frac` 2/3). Two lanes
+of 2 GPUs, chained `afterok` so at most two run at once.
+
+### Readout sites
+
+The stream is not any matrix's output, so measuring there needed a new concept:
+`pd.hidden_readout_sites`, a `{name: module_path}` map whose module *input* is captured —
+clean and masked — and joined to the decomposed sites in `ComponentModel.measurement_sites`.
+`site_patterns` then selects it like anything else, so all four hidden-acts metrics gained
+residual support with no per-metric code. In a Llama block the two capture points are
+`layers.18.post_attention_layernorm` (post-attention stream) and `layers.19.input_layernorm`
+(post-MLP stream).
+
+A readout is measured at **every position**, unlike a decomposed site, which is restricted
+to the positions its routing mask selects. That restriction is sound at a matrix output — an
+unrouted position ran the frozen module and its error is identically zero — but false on the
+stream: attention mixes positions, so a position routed to nothing still receives error from
+the routed positions it attends to.
+
+**All four arms declare the same two readout sites** and differ only in the *training*
+losses' `site_patterns`. Every arm therefore logs the same eval panel — hidden error at all
+7 matrices and at both stream points, under both CI nets — which is what makes questions
+like "does training on `down_proj` alone also fix the stream?" answerable.
+
+### One bug, found by the probe
+
+The global CI-fn wrapper transforms *every* key of the activation cache rather than indexing
+by its own layer list, so the extra readout entries crashed it with
+`KeyError: 'resid_post_attn'`. `calc_causal_importances` now selects the decomposition
+targets explicitly. Pinned by a test; the assumption that "extra keys are inert" was checked
+against `get_all_component_acts` (which does skip unknown keys) and wrongly generalised.
+
+### The residual objective needed recalibrating — by 2830x
+
+Measured at step 0, the same CI mask gives hidden error **0.942** at the matrices and
+**0.000333** at the stream: a 2830x ratio, because the stream's `Σ tgt²` denominator is
+dominated by the frozen incoming residual. Left at `coeff: 1.0` the resid arm's objective
+would sit ~2830x below the sparsity penalty it competes with, and the run would have
+measured "hidden objective switched off" rather than "the stream is a worse target".
+
+The arm's coefficients are therefore scaled by 2830 (stochastic 1.0 -> 2830, PPGD 0.5 ->
+1415), equalising the two objectives at step 0. The reported quantity stays the true
+relative error; only the arm's weight changes, so the variable under test is *which*
+activations rather than *how strongly*. Note the calibration is probe-dependent: the
+CI-masked ratio is 2830, the stochastic-masked one ~2100. The 35% gap is immaterial against
+the correction itself, but the number is not a constant of nature.
+
+### C raised 4x — measured, not guessed
+
+The -10 baseline was at its alive-count ceiling (hidden net: `q_proj` and `k_proj` at exactly
+128/128), which would have clipped the very readout the series is about. Probes at 10 steps:
+
+| C factor | total C | peak / GPU (of 46068) | headroom |
+|---|---|---|---|
+| 1x | 1536 | 39002 | 7.0 GB |
+| 4x | 6144 | 41546 | 4.4 GB |
+
+4x the components costs 2.5 GB — C really is a weak memory lever here, as the -09 series
+found. Stopped at 4x rather than 6x: extrapolation puts 6x near 43.2 GB, the same knife-edge
+that OOM'd earlier 8B runs on this node's smaller cards, and a mid-run OOM costs 13 h.
