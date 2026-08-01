@@ -164,17 +164,27 @@ Worst-saturated matrix is `v_proj` at 35.5% (hidden net). Output quality: `kl_ci
 
 ### The hidden net's extra components are overwhelmingly attention
 
-| matrix | alive out / hid | CI_L0 out / hid | hidden/output L0 |
-|---|---|---|---|
-| mlp.gate_proj | 201 / 263 | 5.3 / 8.3 | 1.6x |
-| mlp.up_proj | 240 / 319 | 5.8 / 10.7 | 1.8x |
-| mlp.down_proj | 264 / 292 | 6.7 / 10.6 | 1.6x |
-| attn.q_proj | 72 / 172 | 1.5 / 6.9 | **4.6x** |
-| attn.k_proj | 51 / 158 | 1.7 / 7.0 | **4.1x** |
-| attn.v_proj | 175 / 364 | 2.1 / 9.5 | **4.5x** |
-| attn.o_proj | 226 / 338 | 2.3 / 9.8 | **4.3x** |
+Absolute counts per locus. `alive` is the number of distinct components reaching CI 0.1
+anywhere in the eval pass; `CI_L0` is the mean number active at a single position.
 
-The two nets differ by ~1.6x per position in the MLP and ~4.4x in attention. Whatever the
+| locus | C | alive output | alive hidden | CI_L0 output | CI_L0 hidden | hid/out L0 |
+|---|---|---|---|---|---|---|
+| mlp.gate_proj | 1024 | 201 | 263 | 5.3 | 8.3 | 1.6x |
+| mlp.up_proj | 1024 | 240 | 319 | 5.8 | 10.7 | 1.8x |
+| mlp.down_proj | 1024 | 264 | 292 | 6.7 | 10.6 | 1.6x |
+| attn.q_proj | 512 | 72 | 172 | 1.5 | 6.9 | **4.6x** |
+| attn.k_proj | 512 | 51 | 158 | 1.7 | 7.0 | **4.1x** |
+| attn.v_proj | 1024 | 175 | 364 | 2.1 | 9.5 | **4.5x** |
+| attn.o_proj | 1024 | 226 | 338 | 2.3 | 9.8 | **4.3x** |
+| **MLP subtotal** | **3072** | **705** | **874** | **17.8** | **29.6** | 1.7x |
+| **attention subtotal** | **3072** | **524** | **1032** | **7.6** | **33.2** | **4.4x** |
+| **total** | **6144** | **1229** | **1906** | **25.4** | **62.8** | 2.5x |
+
+The two nets differ by ~1.6x per position in the MLP and ~4.4x in attention. In absolute
+terms the hidden net keeps 1032 attention components alive against the output net's 524,
+and is active on 33.2 attention components per position against 7.6 — so attention accounts
+for 25.6 of the hidden net's 37.4 extra active components per position, from half the
+component budget. Whatever the
 hidden objective is buying, it is mostly buying it in attention — where, per the anomaly
 census below, essentially none of it is visible to the output objective. This is the
 quantitative form of the prediction that motivated the series, and it is what the
