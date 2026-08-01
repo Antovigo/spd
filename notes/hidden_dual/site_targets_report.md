@@ -1,7 +1,7 @@
 # Which hidden activations should the second CI net reconstruct?
 
-Status as of 2026-08-01: **implemented, calibrated, four runs launched.** No cross-arm
-results yet — the first arm is training. Design and chronology in `lab_notebook.md`; the
+Status as of 2026-08-01: **1 of 4 arms complete.** Cross-arm
+comparison pending. Design and chronology in `lab_notebook.md`; the
 dual-CI scheme itself is described in `report.md`.
 
 The dual-CI scheme trains a second CI net to reconstruct the *decomposed sites'
@@ -135,6 +135,51 @@ So "output-important implies hidden-important" holds almost perfectly in attenti
 leaks only in the MLP. This is the baseline the four arms are measured against, and it
 already suggests the attention matrices' hidden signal is nearly pure surplus — which is
 what the `module-out` and `down-only` arms probe directly.
+
+## Arm 1 of 4: `baseline` (all 7 matrices), final at step 15000
+
+The reference the other three are judged against. C=4x did its job — nothing is near the
+ceiling, so every count below is a measurement rather than a clip.
+
+| | output net | hidden net |
+|---|---|---|
+| alive / 6144 | 1229 (20.0%) | 1906 (31.0%) |
+| CI_L0 (mean active per position) | 25.4 | 62.8 |
+| hidden recon error, 7 matrices | 0.2625 | 0.0334 |
+| hidden recon error, resid stream | 5.838e-05 | 1.983e-05 |
+
+Worst-saturated matrix is `v_proj` at 35.5% (hidden net). Output quality: `kl_ci_masked`
+0.003953, `kl_unmasked` 0.001546, `PGDReconLoss` 0.005470.
+
+### The hidden net's extra components are overwhelmingly attention
+
+| matrix | alive out / hid | CI_L0 out / hid | hidden/output L0 |
+|---|---|---|---|
+| mlp.gate_proj | 201 / 263 | 5.3 / 8.3 | 1.6x |
+| mlp.up_proj | 240 / 319 | 5.8 / 10.7 | 1.8x |
+| mlp.down_proj | 264 / 292 | 6.7 / 10.6 | 1.6x |
+| attn.q_proj | 72 / 172 | 1.5 / 6.9 | **4.6x** |
+| attn.k_proj | 51 / 158 | 1.7 / 7.0 | **4.1x** |
+| attn.v_proj | 175 / 364 | 2.1 / 9.5 | **4.5x** |
+| attn.o_proj | 226 / 338 | 2.3 / 9.8 | **4.3x** |
+
+The two nets differ by ~1.6x per position in the MLP and ~4.4x in attention. Whatever the
+hidden objective is buying, it is mostly buying it in attention — where, per the anomaly
+census below, essentially none of it is visible to the output objective. This is the
+quantitative form of the prediction that motivated the series, and it is what the
+`module-out` and `down-only` arms test directly: both drop all four attention-internal
+sites from the objective, and `module-out` keeps only `o_proj`.
+
+### Anomalies, again MLP-only
+
+1.00% of active cells are magenta (21854 magenta vs 1444261 green vs 720683 both), 6
+anomalous components, **0** output-only components. By matrix: gate 5299, up 4093, down
+12375, q_proj 4, k_proj 0, v_proj 0, o_proj 83.
+
+The pattern from the reference run survives a 4x change in C and the full anneal: the
+output net's activity is a near-subset of the hidden net's in attention, and leaks only in
+the MLP — concentrated in `down_proj`, the site the exchange-rate study found carries 97%
+of the joint KL.
 
 ## Open, pending the runs
 
