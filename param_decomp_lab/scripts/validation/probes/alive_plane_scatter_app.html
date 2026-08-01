@@ -348,6 +348,32 @@ function toPx(p, f) {
            PANEL - (p[1] - f.ymin) / (f.ymax - f.ymin) * PANEL ];
 }
 
+// A map-style scale bar in the bottom-left of every panel: a round data-unit length (1/2/5
+// x 10^k), so cloud spread is comparable across panels/rows/sources -- and across separate
+// applet files, since it reads off in absolute data units, not relative auto-fit pixels.
+function niceScale(dataWidth) {
+  const target = dataWidth * 0.28;
+  const mag = Math.pow(10, Math.floor(Math.log10(target)));
+  const norm = target / mag;
+  const nice = norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10;
+  return nice * mag;
+}
+function drawScaleBar(ctx, f) {
+  const dataWidth = f.xmax - f.xmin;
+  const barLen = niceScale(dataWidth);
+  const barPx = (barLen / dataWidth) * PANEL;
+  const x0 = 5, y = PANEL - 5;
+  ctx.strokeStyle = "#555"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, y); ctx.lineTo(x0 + barPx, y);
+  ctx.moveTo(x0, y - 3); ctx.lineTo(x0, y + 3);
+  ctx.moveTo(x0 + barPx, y - 3); ctx.lineTo(x0 + barPx, y + 3);
+  ctx.stroke();
+  ctx.font = "8px sans-serif";
+  ctx.fillStyle = "#555";
+  ctx.fillText(barLen.toPrecision(2), x0, y - 5);
+}
+
 let lastPx = [];   // [rowIdx][ci] -> point pixel positions, for hover
 let lastQ95 = 1;
 let snapshots = [];  // [rowIdx][ci] -> clean ImageData, restored under the hover marker
@@ -398,6 +424,7 @@ function drawAll() {
       ctx.font = "9px sans-serif";
       ctx.fillStyle = s.accepted ? "#555" : "#b00020";
       ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
+      drawScaleBar(ctx, f);
       lastPx[r][ci] = px;
       snapshots[r][ci] = ctx.getImageData(0, 0, cv.width, cv.height);
     }
