@@ -45,7 +45,12 @@ points, so they're directly comparable.
 importance</b> colours every panel by one selected alive subcomponent's CI on that prompt
 (read from the real model, so it doesn't depend on which source is shown). The
 Δ-from-previous-position colour modes and displacement arrows only make sense across
-stream positions, so they're disabled in the all-periods view.</div>
+stream positions, so they're disabled in the all-periods view. Dashed lines mark each
+panel's zero; tick labels give the axes' scale and sign. Panels default to centred on the
+origin, sized to fit the <b>real model's own</b> cloud (with slack) — reproducible across
+separate renderings of this applet on the same base model and probes, regardless of which
+source is currently shown. Scroll to zoom toward the cursor, drag to pan, double-click to
+reset — one row's panels share a frame, so zooming any of them zooms the whole row.</div>
 <div class="controls">
   <span><label>op</label><select id="op"></select></span>
   <span><label>view</label><select id="view">
@@ -193,36 +198,52 @@ function rowCoords(row, ci, prev, src) {
   return cd.layers[LAYERS[li - 1]];               // final row: same plane at prev position
 }
 
-const frameCache = {};
-function rowFrame(row) {
-  // Shared across every source so panels are visually comparable when switching `data`.
+const SLACK = 1.15;                    // 15% headroom beyond the real model's own extent
+const defaultFrameCache = {};
+// Origin-centred frame sized to fit the REAL MODEL's own point cloud (not whichever source
+// is currently displayed) -- so panels stay comparable when switching `data`, and the
+// default framing is reproducible across separately generated applets on the same base
+// model + probes (op/period/layer/probe-layer determine it, never the sampled points'
+// own asymmetric range or which decomposition produced this run).
+function defaultRowFrame(row) {
   const key = [row.key, state.op, state.view, state.period, state.layer, state.probeLayer].join("|");
-  if (frameCache[key]) return frameCache[key];
-  let xmin = 1e9, xmax = -1e9, ymin = 1e9, ymax = -1e9;
+  if (defaultFrameCache[key]) return defaultFrameCache[key];
+  let maxAbs = 0;
   let oneD = false;
   const cols = columns();
   const scan = (arr, cdOneD) => {
     oneD = cdOneD;
     for (let j = 0; j < arr.length; j++) {
-      const isX = cdOneD || j % 2 === 0;
-      if (isX) { if (arr[j] < xmin) xmin = arr[j]; if (arr[j] > xmax) xmax = arr[j]; }
-      else { if (arr[j] < ymin) ymin = arr[j]; if (arr[j] > ymax) ymax = arr[j]; }
+      const v = Math.abs(arr[j]);
+      if (v > maxAbs) maxAbs = v;
     }
   };
-  for (const src of D.meta.sources)
-    for (let ci = 0; ci < cols.length; ci++) {
-      const cd = cellForPeriod(row, cols[ci].period, src);
-      scan(cd.layers[cols[ci].layer], cd.one_d);
-      const p = rowCoords(row, ci, true, src);
-      if (p) scan(p, cd.one_d);
-    }
-  if (oneD) { const h = 0.4 * (xmax - xmin); ymin = -h; ymax = h; }
-  const px = 0.06 * (xmax - xmin), py = 0.06 * (ymax - ymin);
-  const f = { xmin: xmin - px, xmax: xmax + px, ymin: ymin - py, ymax: ymax + py };
-  const w = f.xmax - f.xmin, h = f.ymax - f.ymin, s = Math.max(w, h);  // square, equal scale
-  f.xmin -= (s - w) / 2; f.xmax += (s - w) / 2; f.ymin -= (s - h) / 2; f.ymax += (s - h) / 2;
-  frameCache[key] = f;
+  for (let ci = 0; ci < cols.length; ci++) {
+    const cd = cellForPeriod(row, cols[ci].period, "original");
+    scan(cd.layers[cols[ci].layer], cd.one_d);
+    const p = rowCoords(row, ci, true, "original");
+    if (p) scan(p, cd.one_d);
+  }
+  let half = (maxAbs || 1) * SLACK;
+  let yHalf = oneD ? 0.4 * (2 * half) : half;   // 1D: same cosmetic jitter-strip convention
+  const f = { xmin: -half, xmax: half, ymin: -yHalf, ymax: yHalf };
+  defaultFrameCache[key] = f;
   return f;
+}
+
+// Per-row (shared across columns/sources) pan+zoom on top of the default frame. Wheel
+// zooms toward the cursor, drag pans, double-click resets -- see the grid event listeners.
+const zoom = {};
+function zoomFor(rowKey) {
+  if (!zoom[rowKey]) zoom[rowKey] = { scale: 1, cx: 0, cy: 0 };
+  return zoom[rowKey];
+}
+function rowFrame(row) {
+  const f0 = defaultRowFrame(row);
+  const z = zoomFor(row.key);
+  const cx = (f0.xmin + f0.xmax) / 2 + z.cx, cy = (f0.ymin + f0.ymax) / 2 + z.cy;
+  const halfW = (f0.xmax - f0.xmin) / 2 / z.scale, halfH = (f0.ymax - f0.ymin) / 2 / z.scale;
+  return { xmin: cx - halfW, xmax: cx + halfW, ymin: cy - halfH, ymax: cy + halfH };
 }
 
 const magCache = {};
@@ -348,9 +369,10 @@ function toPx(p, f) {
            PANEL - (p[1] - f.ymin) / (f.ymax - f.ymin) * PANEL ];
 }
 
-// A map-style scale bar in the bottom-left of every panel: a round data-unit length (1/2/5
-// x 10^k), so cloud spread is comparable across panels/rows/sources -- and across separate
-// applet files, since it reads off in absolute data units, not relative auto-fit pixels.
+// Zero-line + tick-marked axes on every panel: shows where the probe's projected origin
+// sits and each axis's scale and sign, in absolute data units -- comparable across
+// panels/rows/sources within one applet, and across separately generated applet files
+// (unlike the panel's own auto-fit pixel scale, which varies panel to panel).
 function niceScale(dataWidth) {
   const target = dataWidth * 0.28;
   const mag = Math.pow(10, Math.floor(Math.log10(target)));
@@ -358,20 +380,48 @@ function niceScale(dataWidth) {
   const nice = norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10;
   return nice * mag;
 }
-function drawScaleBar(ctx, f) {
-  const dataWidth = f.xmax - f.xmin;
-  const barLen = niceScale(dataWidth);
-  const barPx = (barLen / dataWidth) * PANEL;
-  const x0 = 5, y = PANEL - 5;
-  ctx.strokeStyle = "#555"; ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x0, y); ctx.lineTo(x0 + barPx, y);
-  ctx.moveTo(x0, y - 3); ctx.lineTo(x0, y + 3);
-  ctx.moveTo(x0 + barPx, y - 3); ctx.lineTo(x0 + barPx, y + 3);
-  ctx.stroke();
-  ctx.font = "8px sans-serif";
-  ctx.fillStyle = "#555";
-  ctx.fillText(barLen.toPrecision(2), x0, y - 5);
+function fmtTick(v) {
+  return Math.abs(v) >= 10 ? String(Math.round(v)) : v.toPrecision(2);
+}
+function drawAxes(ctx, f, oneD) {
+  const tick = niceScale(f.xmax - f.xmin);
+  const xZeroVisible = f.xmin <= 0 && 0 <= f.xmax;
+  const yZeroVisible = !oneD && f.ymin <= 0 && 0 <= f.ymax;   // 1D's y is jitter, not data
+  ctx.save();
+  ctx.strokeStyle = "#c7c7cc";
+  ctx.lineWidth = 0.75;
+  ctx.setLineDash([2, 2]);
+  if (yZeroVisible) {
+    const y0 = toPx([0, 0], f)[1];
+    ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(PANEL, y0); ctx.stroke();
+  }
+  if (xZeroVisible) {
+    const x0 = toPx([0, 0], f)[0];
+    ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, PANEL); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "#8a8a90";
+  ctx.fillStyle = "#8a8a90";
+  ctx.font = "7px sans-serif";
+  if (xZeroVisible) {
+    const y0 = yZeroVisible ? toPx([0, 0], f)[1] : PANEL - 4;
+    for (const v of [tick, -tick]) {
+      if (v < f.xmin || v > f.xmax) continue;
+      const x = toPx([v, 0], f)[0];
+      ctx.beginPath(); ctx.moveTo(x, y0 - 2); ctx.lineTo(x, y0 + 2); ctx.stroke();
+      if (v > 0) ctx.fillText(fmtTick(v), x + 2, y0 - 3);
+    }
+  }
+  if (yZeroVisible) {
+    const x0 = xZeroVisible ? toPx([0, 0], f)[0] : 4;
+    for (const v of [tick, -tick]) {
+      if (v < f.ymin || v > f.ymax) continue;
+      const y = toPx([0, v], f)[1];
+      ctx.beginPath(); ctx.moveTo(x0 - 2, y); ctx.lineTo(x0 + 2, y); ctx.stroke();
+      if (v > 0) ctx.fillText(fmtTick(v), x0 + 3, y - 2);
+    }
+  }
+  ctx.restore();
 }
 
 let lastPx = [];   // [rowIdx][ci] -> point pixel positions, for hover
@@ -397,6 +447,7 @@ function drawAll() {
       const cv = canvases[r][ci], ctx = cv.getContext("2d");
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
       ctx.clearRect(0, 0, PANEL, PANEL);
+      drawAxes(ctx, f, cd.one_d);
       const mags = deltas(row, ci);
       if (!cd.one_d) {                        // unit circle reference
         ctx.strokeStyle = "#d8d8dc"; ctx.setLineDash([2, 3]); ctx.beginPath();
@@ -424,7 +475,6 @@ function drawAll() {
       ctx.font = "9px sans-serif";
       ctx.fillStyle = s.accepted ? "#555" : "#b00020";
       ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
-      drawScaleBar(ctx, f);
       lastPx[r][ci] = px;
       snapshots[r][ci] = ctx.getImageData(0, 0, cv.width, cv.height);
     }
@@ -477,6 +527,7 @@ function drawLegend(q95) {
 grid.addEventListener("mousemove", e => {
   const t = e.target;
   const tip = $("tooltip");
+  if (dragState) { tip.style.display = "none"; return; }   // panning, not hovering
   if (t.tagName !== "CANVAS") { tip.style.display = "none"; setHover(null); return; }
   const r = +t.dataset.row, ci = +t.dataset.li;
   const rect = t.getBoundingClientRect();
@@ -505,6 +556,59 @@ grid.addEventListener("mousemove", e => {
   tip.style.top = (e.clientY + 8) + "px";
 });
 grid.addEventListener("mouseleave", () => { $("tooltip").style.display = "none"; setHover(null); });
+
+// Zoom (wheel, toward the cursor), pan (drag), reset (double-click) -- per row, shared
+// across that row's columns/sources since they already share one frame.
+grid.addEventListener("wheel", e => {
+  const t = e.target;
+  if (t.tagName !== "CANVAS") return;
+  e.preventDefault();
+  const row = rowDefs()[+t.dataset.row];
+  const rect = t.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const f = rowFrame(row);
+  const dataX = f.xmin + (mx / PANEL) * (f.xmax - f.xmin);
+  const dataY = f.ymin + ((PANEL - my) / PANEL) * (f.ymax - f.ymin);
+  const z = zoomFor(row.key);
+  z.scale = Math.min(50, Math.max(0.2, z.scale * Math.exp(-e.deltaY * 0.0015)));
+  const f0 = defaultRowFrame(row);
+  const cx0 = (f0.xmin + f0.xmax) / 2, cy0 = (f0.ymin + f0.ymax) / 2;
+  const halfW = (f0.xmax - f0.xmin) / 2 / z.scale, halfH = (f0.ymax - f0.ymin) / 2 / z.scale;
+  z.cx = dataX - cx0 + halfW - (mx / PANEL) * 2 * halfW;
+  z.cy = dataY - cy0 + halfH - ((PANEL - my) / PANEL) * 2 * halfH;
+  drawAll();
+}, { passive: false });
+
+let dragState = null;
+grid.addEventListener("mousedown", e => {
+  const t = e.target;
+  if (t.tagName !== "CANVAS") return;
+  const row = rowDefs()[+t.dataset.row];
+  const f = rowFrame(row);
+  dragState = {
+    rowKey: row.key,
+    startX: e.clientX, startY: e.clientY,
+    origCx: zoomFor(row.key).cx, origCy: zoomFor(row.key).cy,
+    dxToData: (f.xmax - f.xmin) / PANEL, dyToData: (f.ymax - f.ymin) / PANEL,
+  };
+  $("tooltip").style.display = "none";
+  setHover(null);
+  e.preventDefault();
+});
+window.addEventListener("mousemove", e => {
+  if (!dragState) return;
+  const z = zoomFor(dragState.rowKey);
+  z.cx = dragState.origCx - (e.clientX - dragState.startX) * dragState.dxToData;
+  z.cy = dragState.origCy + (e.clientY - dragState.startY) * dragState.dyToData;
+  drawAll();
+});
+window.addEventListener("mouseup", () => { dragState = null; });
+grid.addEventListener("dblclick", e => {
+  const t = e.target;
+  if (t.tagName !== "CANVAS") return;
+  zoom[rowDefs()[+t.dataset.row].key] = { scale: 1, cx: 0, cy: 0 };
+  drawAll();
+});
 
 function populateCiComponents() {
   const comps = (D.meta.alive_components[state.ciRole] || []).filter(c => c.matrix === state.ciMatrix);
