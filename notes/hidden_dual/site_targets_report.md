@@ -1,0 +1,145 @@
+# Which hidden activations should the second CI net reconstruct?
+
+Status as of 2026-08-01: **implemented, calibrated, four runs launched.** No cross-arm
+results yet — the first arm is training. Design and chronology in `lab_notebook.md`; the
+dual-CI scheme itself is described in `report.md`.
+
+The dual-CI scheme trains a second CI net to reconstruct the *decomposed sites'
+activations*. "The decomposed sites" is a choice, not a given — it happens to be every
+matrix we decompose, which is an artefact of where components live rather than a claim
+about where reconstruction signal is most useful. This series asks which choice is best.
+
+## The arms
+
+Four runs, everything but the measured site set held identical to
+`addsub-L18-10-dual-ppgd`:
+
+| arm | hidden objective measured at | rationale |
+|---|---|---|
+| `addsub-L18-11-baseline` | all 7 decomposed matrices | the status quo |
+| `addsub-L18-11-module-out` | `o_proj` + `down_proj` | what the modules *add* to the stream, excluding their internals |
+| `addsub-L18-11-resid` | the residual stream, post-attn and post-MLP | what the model actually carries forward |
+| `addsub-L18-11-down-only` | `down_proj` alone | floor: the site carrying 97% of the joint KL |
+
+15000 steps, gamma annealed over the last 5000, C raised 4x (total 6144), two lanes of
+2 GPUs chained so at most two run concurrently.
+
+**Every arm declares the same two residual readout sites and differs only in the training
+losses' `site_patterns`.** So every arm logs the same eval panel — hidden error at all 7
+matrices *and* at both stream points, under both CI nets. Questions like "does training on
+`down_proj` alone also repair the stream?" are then read straight off the panel rather than
+inferred.
+
+## Reading the residual stream at all
+
+The stream is not any matrix's output, so measuring there needed a new concept:
+`pd.hidden_readout_sites`, a `{name: module_path}` map whose module *input* is captured —
+clean and masked — and joined to the decomposed sites in `ComponentModel.measurement_sites`.
+Existing `site_patterns` then selects it like anything else. In a Llama block the two
+capture points are `layers.18.post_attention_layernorm` (post-attention stream) and
+`layers.19.input_layernorm` (post-MLP stream).
+
+One semantic difference is load-bearing. A decomposed site's error is measured only at the
+positions its routing mask selects, which is sound because an unrouted position ran the
+frozen module and its error is identically zero. That argument fails on the stream:
+attention mixes positions, so a position routed to nothing still receives error from the
+routed positions it attends to. Readout sites are therefore measured at **every position**.
+
+## The residual objective is 2830x smaller, and had to be recalibrated
+
+Measured at step 0, the same CI mask gives:
+
+| measured at | relative error |
+|---|---|
+| the 7 matrices | 0.942 |
+| the residual stream | 0.000333 |
+
+The stream's `Σ tgt²` denominator is dominated by the frozen incoming residual, so the same
+physical perturbation reads ~2830x smaller. Left at `coeff: 1.0`, the resid arm's objective
+would have sat far below the sparsity penalty it competes with, and the run would have
+measured "hidden objective switched off" rather than "the stream is a worse target".
+
+That arm's coefficients are therefore scaled by 2830 (stochastic 1.0 -> 2830, PPGD
+0.5 -> 1415), equalising the two objectives at step 0. The reported quantity remains the
+true relative error; only the arm's weight changes, so the variable under test stays *which*
+activations rather than *how strongly*. Two caveats worth carrying into the analysis:
+
+- The calibration is probe-dependent — 2830 CI-masked, ~2100 stochastic-masked. The 35% gap
+  is immaterial against the correction itself, but this is not a constant of nature.
+- It equalises at step 0 only. If the two objectives fall at different rates the arms drift
+  apart in effective weight; the logged panel makes that visible rather than hidden.
+
+## C was at its ceiling, and is now 4x
+
+The -10 baseline was saturated at step 10000 — the hidden net had `q_proj` and `k_proj` at
+exactly 128/128 — which would have clipped the very readout this series is about. Probes:
+
+| C factor | total C | peak / GPU (of 46068 MiB) | headroom |
+|---|---|---|---|
+| 1x | 1536 | 39002 | 7.0 GB |
+| 4x | 6144 | 41546 | 4.4 GB |
+
+Quadrupling the components costs 2.5 GB: C is a weak memory lever here, as the -09 series
+also found (the weight-delta tensors dominate and are full-weight-shaped regardless of C).
+Stopped at 4x rather than 6x, which extrapolates to ~43.2 GB — the knife-edge that OOM'd
+earlier 8B runs on this node's smaller cards, and a mid-run OOM costs 13 h.
+
+## The anomaly census
+
+The (a,b) grids encode both nets' CI per (component, position, op, a, b) cell. In the
+applet's subtractive merge, **magenta = output-active but hidden-inactive** — the case the
+scheme says should not happen, since a component mattering for the logits must matter for
+the activations producing them. Green (hidden-only) is expected and common.
+
+Counting is done offline from `ab_grids/step_*.js`, calling a cell active at CI >= 0.5.
+
+The two counts do **not** have the same robustness, which matters for how hard each can be
+leaned on. Sweeping the cut on the reference run at step 10000:
+
+| cut | magenta cells | green cells | anomalous components | output-only components |
+|---|---|---|---|---|
+| 0.1 | 43920 | 2357110 | 4 | 0 |
+| 0.3 | 40284 | 1802205 | 9 | 0 |
+| 0.5 | 42415 | 1465776 | 13 | 2 |
+| 0.7 | 47676 | 1202344 | 21 | 2 |
+| 0.9 | 57910 | 957161 | 28 | 3 |
+
+Magenta *cells* move by 1.4x over a 9x range of threshold — the saturation of CI makes the
+count essentially cut-independent, so it is safe to compare across arms. The *component*
+count moves 7x over the same range, because "more magenta than green cells" is a near-tie
+for many components and the tie breaks differently as the cut moves. Component counts are
+therefore reported at a stated cut (0.5) and read as an ordering, never as a magnitude.
+
+### Reference run: anomalies are an MLP phenomenon
+
+From `addsub-L18-10-dual-ppgd` at step 10000 (the pre-anneal state, so directly comparable
+to this series' mid-training):
+
+| matrix | saved | magenta cells | green cells | both | anomalous components |
+|---|---|---|---|---|---|
+| mlp.gate_proj | 68 | 11380 | 117922 | 190829 | 3 |
+| mlp.up_proj | 88 | 14095 | 205333 | 193147 | 2 |
+| mlp.down_proj | 93 | 16525 | 213517 | 240278 | 8 |
+| attn.q_proj | 43 | 52 | 179576 | 47125 | 0 |
+| attn.k_proj | 18 | **0** | 107368 | 239 | 0 |
+| attn.v_proj | 60 | **0** | 241384 | 321 | 0 |
+| attn.o_proj | 178 | 363 | 400676 | 83557 | 0 |
+| **total** | 548 | 42415 | 1465776 | 755496 | 13 |
+
+Magenta is 1.9% of active cells and lives almost entirely in the MLP. Attention is
+essentially anomaly-free — `k_proj` and `v_proj` are at exactly zero, and their tiny
+`both` counts show the output net barely uses them at all while the hidden net uses them
+heavily. Of the 13 anomalous components, 2 are magenta with no green cells whatsoever.
+
+So "output-important implies hidden-important" holds almost perfectly in attention and
+leaks only in the MLP. This is the baseline the four arms are measured against, and it
+already suggests the attention matrices' hidden signal is nearly pure surplus — which is
+what the `module-out` and `down-only` arms probe directly.
+
+## Open, pending the runs
+
+1. Per-matrix active (`CI_L0`) and alive counts for both nets, with the ceiling lifted.
+2. Saturation ratio at 4x C — whether alive counts are now genuinely measured.
+3. Whether a narrower target degrades the *output* decomposition (the ranking criterion).
+4. Whether training on a subset repairs the sites it never measures.
+5. Whether the anomaly rate is a property of the scheme or of the target set.
