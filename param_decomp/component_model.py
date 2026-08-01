@@ -3,7 +3,7 @@
 Emits gradient-aware cached forward passes consumed by the loss metrics.
 """
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -79,6 +79,7 @@ class ComponentModel(nn.Module):
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,
         dual_hidden_ci: bool = False,
+        hidden_readout_sites: Mapping[str, str] | None = None,
     ):
         """Wrap `target_model` with parameter-component machinery.
 
@@ -97,6 +98,13 @@ class ComponentModel(nn.Module):
                 architecture, scoring importance for reconstructing the decomposed sites'
                 activations rather than the model output. Both nets score the same pool of
                 subcomponents; select between them with `CIRole`.
+            hidden_readout_sites: Extra measurement points for the hidden-activation
+                losses, as `{measurement_name: module_path}`. The *input* of each listed
+                module is captured — both clean (`forward(cache_type="input")`) and masked
+                (`site_outputs`) — and joins the decomposed sites in `measurement_sites`,
+                so a metric's `site_patterns` can select it. Lets the hidden objective
+                target activations that are not themselves a decomposed matrix's output,
+                the residual stream being the motivating case.
         """
         super().__init__()
         self._run_batch: RunBatch = run_batch
@@ -110,6 +118,20 @@ class ComponentModel(nn.Module):
         self.target_model = target_model
         self.module_to_c = {target.module_path: target.C for target in decomposition_targets}
         self.target_module_paths = list(self.module_to_c.keys())
+
+        self.hidden_readout_sites = dict(hidden_readout_sites) if hidden_readout_sites else {}
+        collisions = set(self.hidden_readout_sites) & set(self.target_module_paths)
+        assert not collisions, f"readout names collide with decomposed sites: {sorted(collisions)}"
+        readout_paths = list(self.hidden_readout_sites.values())
+        assert len(set(readout_paths)) == len(readout_paths), (
+            f"two readout sites hook the same module: {readout_paths}"
+        )
+        assert not set(readout_paths) & set(self.target_module_paths), (
+            "a readout site may not hook a decomposed module — its input is already cached "
+            f"as a pre-weight activation: {sorted(set(readout_paths) & set(self.target_module_paths))}"
+        )
+        for module_path in readout_paths:
+            target_model.get_submodule(module_path)
 
         self.components = make_components(target_model, self.module_to_c)
         self._components = nn.ModuleDict(
@@ -140,6 +162,16 @@ class ComponentModel(nn.Module):
             # For other sigmoid types, use the same function for both
             self.lower_leaky_fn = SIGMOID_TYPES[sigmoid_type]
             self.upper_leaky_fn = SIGMOID_TYPES[sigmoid_type]
+
+    @property
+    def measurement_sites(self) -> list[str]:
+        """Everything the hidden-activation losses can measure at.
+
+        Decomposed sites are measured at their (component-replaced) output; readout sites
+        at the captured input of their module. Both are addressed by the same
+        `site_patterns` fnmatch in the metric configs.
+        """
+        return self.target_module_paths + list(self.hidden_readout_sites)
 
     def target_weight(self, module_name: str) -> Float[Tensor, "rows cols"]:
         """Weight matrix of a target module in PD's `[d_out, d_in]` row-major convention.
@@ -243,6 +275,11 @@ class ComponentModel(nn.Module):
                 stop_when_cached=None,
             )
 
+        # Readout sites ride the clean input-caching pass: that is where the hidden-acts
+        # losses get their frozen targets from, and it costs nothing beyond the capture.
+        if cache_type == "input":
+            hooks |= self._readout_hooks(cache, stop_when_cached=None)
+
         with self._attach_forward_hooks(hooks):
             out: Tensor = self._run_batch(self.target_model, batch)
 
@@ -268,6 +305,7 @@ class ComponentModel(nn.Module):
         would have propagated onward is discarded.
         """
         cache: dict[str, Tensor] = {}
+        n_expected = len(mask_infos) + len(self.hidden_readout_sites)
         hooks: dict[str, Callable[..., Any]] = {
             module_name: partial(
                 self._components_and_cache_hook,
@@ -276,19 +314,35 @@ class ComponentModel(nn.Module):
                 mask_info=mask_info,
                 cache_type="output",
                 cache=cache,
-                stop_when_cached=len(mask_infos),
+                stop_when_cached=n_expected,
             )
             for module_name, mask_info in mask_infos.items()
         }
+        hooks |= self._readout_hooks(cache, stop_when_cached=n_expected)
         try:
             with self._attach_forward_hooks(hooks):
                 self._run_batch(self.target_model, batch)
         except _SiteCacheComplete:
             pass
-        assert cache.keys() == mask_infos.keys(), (
-            f"site_outputs cached {sorted(cache)}, expected {sorted(mask_infos)}"
+        expected = set(mask_infos) | set(self.hidden_readout_sites)
+        assert cache.keys() == expected, (
+            f"site_outputs cached {sorted(cache)}, expected {sorted(expected)}"
         )
         return cache
+
+    def _readout_hooks(
+        self, cache: dict[str, Tensor], stop_when_cached: int | None
+    ) -> dict[str, Callable[..., Any]]:
+        """Input-capturing hooks for every readout site, keyed by the module to hook."""
+        return {
+            module_path: partial(
+                self._readout_cache_hook,
+                readout_name=readout_name,
+                cache=cache,
+                stop_when_cached=stop_when_cached,
+            )
+            for readout_name, module_path in self.hidden_readout_sites.items()
+        }
 
     def _components_and_cache_hook(
         self,
@@ -356,6 +410,32 @@ class ComponentModel(nn.Module):
             cache[module_name] = output
         assert stop_when_cached is None, "site_outputs always replaces components at every site"
         return None
+
+    def _readout_cache_hook(
+        self,
+        _module: nn.Module,
+        args: list[Any],
+        kwargs: dict[Any, Any],
+        _output: Any,
+        readout_name: str,
+        cache: dict[str, Tensor],
+        stop_when_cached: int | None,
+    ) -> None:
+        """Cache a readout site's input, leaving the module's own output untouched.
+
+        Returns `None` so PyTorch keeps the original output — a readout site is observed,
+        never replaced.
+        """
+        assert len(args) == 1, f"{readout_name}: expected 1 positional argument, got {len(args)}"
+        assert len(kwargs) == 0, f"{readout_name}: expected no keyword arguments"
+        x = args[0]
+        assert isinstance(x, Tensor), f"{readout_name}: expected input tensor, got {type(x)}"
+        assert readout_name not in cache, (
+            f"{readout_name} ran twice in one forward; readout sites must execute exactly once"
+        )
+        cache[readout_name] = x
+        if stop_when_cached is not None and len(cache) == stop_when_cached:
+            raise _SiteCacheComplete
 
     @contextmanager
     def _attach_forward_hooks(self, hooks: dict[str, Callable[..., Any]]) -> Generator[None]:

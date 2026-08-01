@@ -473,6 +473,7 @@ class Trainer:
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
             dual_hidden_ci=pd_config.dual_hidden_ci,
+            hidden_readout_sites=pd_config.hidden_readout_sites,
         )
         model.to(device)
 

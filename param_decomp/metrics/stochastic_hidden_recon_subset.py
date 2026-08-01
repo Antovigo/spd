@@ -32,7 +32,8 @@ class StochasticHiddenReconSubsetLossConfig(LossMetricConfig):
 
     `site_patterns` restricts which sites the error is *measured* at (fnmatch, e.g.
     `["*.mlp.down_proj", "*.self_attn.o_proj"]` for the residual-stream writes only);
-    `None` measures every decomposed site. Masking always covers every decomposed site
+    `None` measures every site in `ComponentModel.measurement_sites` — every decomposed
+    site plus any `pd.hidden_readout_sites`. Masking always covers every decomposed site
     regardless — only measurement is filtered.
     """
 
@@ -62,7 +63,7 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
         self.router = get_subset_router(self.cfg.routing, device)
-        self.measured_sites = select_sites(model.target_module_paths, self.cfg.site_patterns)
+        self.measured_sites = select_sites(model.measurement_sites, self.cfg.site_patterns)
 
     @override
     def reset(self) -> None:

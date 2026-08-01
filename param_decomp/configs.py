@@ -145,6 +145,16 @@ class PDConfig(BaseConfig):
         "net via their `ci_role` field. Required by any loss or eval with "
         "`ci_role: hidden`.",
     )
+    hidden_readout_sites: dict[str, str] = Field(
+        default={},
+        description="Extra measurement points for the hidden-activation losses, as "
+        "`{measurement_name: module_path}`. The listed module's *input* is captured clean "
+        "and masked, and joins the decomposed sites in the set a metric's `site_patterns` "
+        "selects from — letting the hidden objective target activations that are not a "
+        "decomposed matrix's output. The residual stream is the motivating case: hook "
+        "`post_attention_layernorm` for the post-attention stream and the next block's "
+        "`input_layernorm` for the post-MLP one.",
+    )
     sampling: SamplingType = Field(
         default="continuous",
         description="Sampling mode for stochastic elements: 'continuous' (default) or 'binomial'",

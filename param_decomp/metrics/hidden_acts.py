@@ -44,14 +44,18 @@ def clean_site_outputs(
     pre_weight_acts: dict[str, Float[Tensor, "... d_in"]],
     sites: list[str],
 ) -> dict[str, Float[Tensor, "..."]]:
-    """Frozen per-site outputs `x @ W.T + b`, recomputed from the cached clean input acts.
+    """Frozen per-site targets, recomputed from the cached clean input acts.
 
-    These are what the target model itself produces at each site, so they cost no extra
-    forward pass — the clean `cache_type="input"` pass every step already runs has all the
-    inputs. Detached: targets, never a gradient path.
+    A decomposed site's target is its own output `x @ W.T + b`; a readout site's target is
+    the captured clean tensor itself, which the same `cache_type="input"` pass already put
+    in `pre_weight_acts`. Either way this costs no extra forward pass. Detached: targets,
+    never a gradient path.
     """
     targets: dict[str, Float[Tensor, ...]] = {}
     for site in sites:
+        if site in model.hidden_readout_sites:
+            targets[site] = pre_weight_acts[site].detach()
+            continue
         components = model.components[site]
         assert isinstance(components, LinearComponents), (
             f"hidden-acts reconstruction supports linear sites only, got "
@@ -71,12 +75,16 @@ def site_squared_errors(
 
     Positions not routed to components ran the frozen module untouched, so their error is
     identically zero; including them would only dilute the ratio.
+
+    A readout site has no routing mask and is measured over every position. It must be:
+    attention mixes positions, so a position routed to nothing still sees error arriving
+    from the routed positions it attends to, and restricting would discard it.
     """
     out: SiteErrors = {}
     for site, target in targets.items():
         predicted = site_outputs[site]
         assert predicted.shape == target.shape, f"{site}: {predicted.shape} vs {target.shape}"
-        routing_mask = mask_infos[site].routing_mask
+        routing_mask = mask_infos[site].routing_mask if site in mask_infos else "all"
         if isinstance(routing_mask, Tensor):
             predicted = predicted[routing_mask]
             target = target[routing_mask]
