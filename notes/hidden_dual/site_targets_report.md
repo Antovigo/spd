@@ -1,7 +1,7 @@
 # Which hidden activations should the second CI net reconstruct?
 
-Status as of 2026-08-01: **1 of 4 arms complete.** Cross-arm
-comparison pending. Design and chronology in `lab_notebook.md`; the
+Status as of 2026-08-02: **phase 1 complete (5 arms), phase 2 launched.** Full generated
+tables in `site_targets_tables.md`. Design and chronology in `lab_notebook.md`; the
 dual-CI scheme itself is described in `report.md`.
 
 The dual-CI scheme trains a second CI net to reconstruct the *decomposed sites'
@@ -289,6 +289,83 @@ completeness, not weighted.
 single alive component each — and reinvests in `down_proj`. It reaches nearly the same
 total cost as `baseline` by a very different allocation, and pays 26% more adversarial
 output error for it.
+
+## Phase 1 result: all five arms, ranked
+
+Winner: **`baseline` — all 7 decomposed matrices.** Narrowing the hidden objective does not
+pay.
+
+| arm | PGDRecon (nats) | alive either | **nats / alive** | vs best |
+|---|---|---|---|---|
+| **baseline** | **0.00547** | 374 | **1.4624e-05** | — |
+| module-out | 0.00602 | 406 | 1.4820e-05 | +1.3% |
+| resid | 0.00692 | 367 | 1.8854e-05 | +28.9% |
+| down-only | 0.00627 | 315 | 1.9889e-05 | +36.0% |
+| mlp-only | 0.00596 | 298 | 1.9995e-05 | +36.7% |
+
+`baseline` and `module-out` are within 1.3% on the ratio, which alone would be a coin-flip
+at n=1 with no seed replication. They are not tied: `baseline` **Pareto-dominates** —
+strictly lower adversarial error *and* strictly fewer alive components. The ratio understates
+the gap precisely because it credits `module-out` for its larger denominator. Read the two
+factors separately before trusting a near-tie in the ratio.
+
+**Narrow targets buy sparsity and lose more than they gain.** `mlp-only` (298) and
+`down-only` (315) are the two sparsest decompositions in the series and rank last: dropping
+attention from the objective saves ~20% of components but costs 9-15% more adversarial
+output error, which the metric prices as a net loss.
+
+### The module writes beat the residual stream at reconstructing the residual stream
+
+| arm | hidden error at the resid stream (hidden CI) |
+|---|---|
+| module-out | **1.173e-05** |
+| resid | 1.511e-05 |
+| baseline | 1.983e-05 |
+| down-only | 7.05e-05 |
+| mlp-only | 7.234e-05 |
+
+`module-out` reconstructs the stream 29% better than `resid` does, despite `resid` training
+on the stream directly and `module-out` never measuring it. Targeting `o_proj` + `down_proj`
+— the two writes — is a better-conditioned proxy for the stream than the stream itself,
+whose relative error is dominated by the frozen incoming residual in the denominator.
+
+Note also `baseline`, which never measures the stream, is within 2x of `resid`, which trains
+on it at a 2830x calibration. Little of the stream's structure is absent from the matrices.
+
+### Anomalies fall when the objective narrows, but not usefully
+
+| arm | magenta cells | % of active | anomalous comps |
+|---|---|---|---|
+| baseline | 21854 | 1.00% | 6 |
+| module-out | 7750 | 0.28% | 2 |
+| resid | 6012 | 0.28% | 2 |
+| down-only | 3931 | 0.18% | 1 |
+| mlp-only | 9370 | 0.54% | 1 |
+
+Every narrower arm has fewer anomalies than `baseline`, but they also reconstruct worse — the
+anomaly rate tracks how much the hidden net is doing, not how well. `k_proj` and `v_proj` are
+at exactly zero magenta in **all five arms**, the most robust structural fact in the series.
+The one informative deviation is `mlp-only`'s `q_proj` (374 magenta against 4 for `baseline`):
+with attention absent from the hidden objective, output-only attention activity appears
+exactly where the hidden net stopped looking.
+
+### Containment holds everywhere
+
+In all five arms `alive-either` equals `alive-hidden` exactly. The output net's alive set is
+a strict subset of the hidden net's, without exception — so the dual scheme never costs a
+component beyond what the hidden objective already keeps.
+
+## Phase 2: the winner at 20k under increased pressure
+
+`addsub-L18-12-press3` and `-press10`: the winning locus (all 7 matrices), back on the
+`-10-dual-ppgd` schedule — 20000 steps, gamma annealed over the last 10000 — with C kept at
+4x, since reverting it would reintroduce the alive-count ceiling. The hidden reconstruction
+coefficients are scaled 3x and 10x (stochastic 1.0 -> 3.0 / 10.0, PPGD 0.5 -> 1.5 / 5.0);
+everything else is byte-identical to the phase-1 baseline config.
+
+The question is whether the hidden objective is currently underweighted. Phase 1 says
+*where* the signal is (everywhere, including attention internals); phase 2 asks how hard to
+push on it.
 
 ## Open, pending the runs
 
