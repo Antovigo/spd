@@ -11,7 +11,7 @@ about where reconstruction signal is most useful. This series asks which choice 
 
 ## The arms
 
-Four runs, everything but the measured site set held identical to
+Five runs, everything but the measured site set held identical to
 `addsub-L18-10-dual-ppgd`:
 
 | arm | hidden objective measured at | rationale |
