@@ -452,3 +452,27 @@ any scalar score should be read against the two factors separately.
 
 Phase 2 relaunched on `mlp-only` (jobs 6641 / 6642); the earlier pair based on `baseline`
 was cancelled under 2 minutes in.
+
+## 2026-08-02 — phase 2, third run: the all-matrices locus at highest pressure
+
+Added `addsub-L18-12-press10-allmat` — the `baseline` locus (all 7 matrix outputs) at the
+10x hidden-recon coefficient. Three runs, 6 GPUs.
+
+| run | locus | hidden coeff multiplier |
+|---|---|---|
+| `addsub-L18-12-press3` | `mlp-only` (`*.mlp.*`) | 3x |
+| `addsub-L18-12-press10` | `mlp-only` (`*.mlp.*`) | 10x |
+| `addsub-L18-12-press10-allmat` | `baseline` (all 7 matrices) | 10x |
+
+Its config differs from the running `press10` in exactly two places, the label and
+`site_patterns`, so `press10` vs `press10-allmat` is a clean single-variable pair at the
+pressure where any locus effect should be largest. That matters because the phase-1 loci were
+separated by only 13% on `nats x alive`, and both survivors were on the Pareto frontier —
+the ordering could plausibly change once the hidden objective is weighted 10x, and this pair
+detects that directly rather than by extrapolation.
+
+It also probes the phase-1 mechanism from the other side. Per-site gradient weight is
+`1/n_sites`, so the `mlp-only` arm already gives each MLP site 1/3 against `baseline`'s 1/7 —
+a 2.3x concentration. A 10x global multiplier on `baseline` overshoots that concentration
+while keeping attention in the objective, which separates "concentrate the pressure" from
+"increase the pressure".
