@@ -235,6 +235,61 @@ Two traps when eyeballing this:
 All four arms share this schedule, so the cross-arm comparison — the point of the series —
 is unaffected. `-10` is a historical reference here, not a control.
 
+## Selection metric and standings
+
+The arm is chosen by **output-PGD nats per total alive component**:
+`PGDReconLoss / alive-either`, lower is better. `PGDReconLoss` is the adversarial probe on
+the model output; the denominator counts components alive under *either* CI net.
+
+The denominator must be a **union**, not a sum — both nets score the same shared
+subcomponent pool, so summing the two `NAlive` values double-counts everything both keep.
+Neither logged count exposes the overlap, so it is computed from `ab_grids`, which stores
+per-component mean CI for both roles over all C: alive means the per-position mean CI
+reaches 0.1 under either net. Stricter than the `NAlive` eval metric (mean over the prompt
+pool rather than max over examples), so these counts run lower than the logged ones, but
+identical across arms — which is what a ranking needs.
+
+| arm | PGDRecon (nats) | alive output | alive hidden | alive either | **nats / alive** |
+|---|---|---|---|---|---|
+| baseline | 0.00547 | 93 | 374 | 374 | **1.4624e-05** |
+| resid | 0.00692 | 91 | 367 | 367 | 1.8854e-05 |
+
+### The output net's alive set is a strict subset of the hidden net's
+
+In both arms `alive-either` equals `alive-hidden` **exactly** (374 and 367). Every component
+the output objective keeps alive is also kept by the hidden objective — the containment the
+scheme predicts, now at component granularity rather than the cell granularity of the
+anomaly census. It also means the hidden net's count *is* the decomposition's total cost:
+the output objective never pays for a component the hidden objective was not already
+keeping.
+
+### The rate-distortion cross-check is degenerate here
+
+`recovered / alive` (nats of KL recovered against `kl_zero_masked` per component) nominally
+prefers `resid` by 1.3%, disagreeing with the primary metric's 29% preference for
+`baseline`. Discount it: `kl_zero_masked` = 0.24215 dwarfs `PGDReconLoss` ~ 0.005-0.007, so
+the numerator is nearly constant and the ratio collapses to ~0.242/alive — it ranks by
+fewest components while being almost blind to reconstruction quality. Reported for
+completeness, not weighted.
+
+### Alive-either per locus
+
+| locus | C | baseline | resid |
+|---|---|---|---|
+| mlp.gate_proj | 1024 | 46 | 57 |
+| mlp.up_proj | 1024 | 59 | 76 |
+| mlp.down_proj | 1024 | 77 | 130 |
+| attn.q_proj | 512 | 33 | 11 |
+| attn.k_proj | 512 | 23 | **1** |
+| attn.v_proj | 1024 | 40 | **1** |
+| attn.o_proj | 1024 | 96 | 91 |
+| **total** | **6144** | **374** | **367** |
+
+`resid` all but abandons attention-internal sites — `k_proj` and `v_proj` collapse to a
+single alive component each — and reinvests in `down_proj`. It reaches nearly the same
+total cost as `baseline` by a very different allocation, and pays 26% more adversarial
+output error for it.
+
 ## Open, pending the runs
 
 1. Per-matrix active (`CI_L0`) and alive counts for both nets, with the ceiling lifted.

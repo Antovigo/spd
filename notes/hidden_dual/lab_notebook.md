@@ -401,3 +401,21 @@ First two arms — all four framings agree, so the ambiguity is not load-bearing
 
 `resid` is 14% worse. If a later arm splits the two framings, that gets reported rather
 than resolved silently.
+
+### Correction: denominator is the union over both nets
+
+The metric is **output-PGD nats per total alive component**, where "total alive" counts
+components alive under *either* CI net. The two nets score the **same** shared pool of
+subcomponents, so the sum of the two logged `NAlive` values double-counts every component
+both nets keep — which is most of them. It has to be a union.
+
+Neither logged count gives the union, since `NAlive` reduces to a scalar per net. The
+overlap is recoverable from `ab_grids`, which stores per-component mean CI for both roles
+over all C, so the union is computed there: a component counts as alive if its
+per-position mean CI reaches 0.1 under either net.
+
+That definition is stricter than the `NAlive` eval metric — mean over the prompt pool
+rather than max over individual examples — so these counts run lower than the logged ones.
+They are computed identically for every arm, which is what the ranking needs, and they are
+the only place the per-net overlap exists at all. The `NAlive` figures stay in the report
+as the headline absolute counts; the union is what the selection metric divides by.
