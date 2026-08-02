@@ -1,5 +1,12 @@
 # Which hidden activations should the second CI net reconstruct?
 
+> **Superseded 2026-08-02.** The runs behind this report were purged (407 GB) and the
+> `-11` name reused for a different series — see `pressure_report.md`. The findings below
+> stand as measured; `metrics.jsonl`, `experiment_config.yaml` and `run_metadata.json` for
+> every arm are archived under `~/pd_scratch/hidden_site_targets/archive/`, so every number
+> here remains checkable. The checkpoints and `ab_grids` payloads are gone, so the anomaly
+> census cannot be recomputed at a different threshold.
+
 Status as of 2026-08-02: **phase 1 complete (5 arms), phase 2 launched.** Full generated
 tables in `site_targets_tables.md`. Design and chronology in `lab_notebook.md`; the
 dual-CI scheme itself is described in `report.md`.

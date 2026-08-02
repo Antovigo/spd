@@ -476,3 +476,35 @@ It also probes the phase-1 mechanism from the other side. Per-site gradient weig
 a 2.3x concentration. A 10x global multiplier on `baseline` overshoots that concentration
 while keeping attention in the objective, which separates "concentrate the pressure" from
 "increase the pressure".
+
+## 2026-08-02 — the `-11` name reused: C scaling and hidden pressure
+
+Cancelled the site-target work (the running `-12` pressure runs) and purged the `-11`
+series: 407 GB across five completed `-11` arms and two partial `-12` runs. Before deleting,
+copied every run's `metrics.jsonl`, `experiment_config.yaml` and `run_metadata.json` into
+`~/pd_scratch/hidden_site_targets/archive/` (8.9 MB total), so every number in
+`site_targets_report.md` stays checkable. Checkpoints and `ab_grids` payloads are gone, so
+the anomaly census cannot be recomputed at a different threshold — that is the one
+irreversible loss. The wandb runs were left in place; say the word to delete those too.
+
+The new `-11` is three exact replications of `addsub-L18-10-dual-ppgd` at 4x C:
+
+| run | C | hidden recon coeffs |
+|---|---|---|
+| `addsub-L18-11-bigc` | 6144 | 1.0 / 0.5 (unchanged) |
+| `addsub-L18-11-press2` | 6144 | 2.0 / 1.0 |
+| `addsub-L18-11-press5` | 6144 | 5.0 / 2.5 |
+
+Generated from the reference's own YAML rather than from any descendant, so exactness is by
+construction rather than by inspection. Diffs confirm it: `bigc` differs from the reference
+in the label and seven C values only; each pressure run differs from `bigc` in the label and
+two coefficients only. Output-side hyperparameters — the three output recon losses and both
+importance-minimality coefficients — are byte-identical throughout, which is what makes the
+comparison a pressure comparison rather than a rebalancing.
+
+Deliberately **no `hidden_readout_sites`** here. They would not have hurt, but with
+`site_patterns: null` the hidden objective is "every measurement site", so declaring readouts
+would have widened it from 7 matrices to 9 and quietly broken the replication.
+
+Reference schedule already anneals gamma over the second half (`start_frac: 0.5`, 20000
+steps), so nothing there changed.
