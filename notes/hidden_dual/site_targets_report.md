@@ -237,9 +237,14 @@ is unaffected. `-10` is a historical reference here, not a control.
 
 ## Selection metric and standings
 
-The arm is chosen by **output-PGD nats per total alive component**:
-`PGDReconLoss / alive-either`, lower is better. `PGDReconLoss` is the adversarial probe on
-the model output; the denominator counts components alive under *either* CI net.
+The arm is chosen by **output-PGD nats against total alive components**, both minimised:
+`PGDReconLoss * alive-either`, lower is better. `PGDReconLoss` is the adversarial probe on
+the model output; `alive-either` counts components alive under *either* CI net.
+
+They combine as a **product, not a ratio**. Both are costs, so `nats / alive` is
+wrong-signed in its denominator — it scores an arm better for keeping *more* components.
+This was the metric's first form here and it inverted the ranking, putting the densest
+Pareto-optimal arm on top; the corrected ranking is in the phase-1 result section.
 
 The denominator must be a **union**, not a sum — both nets score the same shared
 subcomponent pool, so summing the two `NAlive` values double-counts everything both keep.
@@ -249,28 +254,14 @@ reaches 0.1 under either net. Stricter than the `NAlive` eval metric (mean over 
 pool rather than max over examples), so these counts run lower than the logged ones, but
 identical across arms — which is what a ranking needs.
 
-| arm | PGDRecon (nats) | alive output | alive hidden | alive either | **nats / alive** |
-|---|---|---|---|---|---|
-| baseline | 0.00547 | 93 | 374 | 374 | **1.4624e-05** |
-| resid | 0.00692 | 91 | 367 | 367 | 1.8854e-05 |
-
 ### The output net's alive set is a strict subset of the hidden net's
 
-In both arms `alive-either` equals `alive-hidden` **exactly** (374 and 367). Every component
+In every arm `alive-either` equals `alive-hidden` **exactly**. Every component
 the output objective keeps alive is also kept by the hidden objective — the containment the
 scheme predicts, now at component granularity rather than the cell granularity of the
 anomaly census. It also means the hidden net's count *is* the decomposition's total cost:
 the output objective never pays for a component the hidden objective was not already
 keeping.
-
-### The rate-distortion cross-check is degenerate here
-
-`recovered / alive` (nats of KL recovered against `kl_zero_masked` per component) nominally
-prefers `resid` by 1.3%, disagreeing with the primary metric's 29% preference for
-`baseline`. Discount it: `kl_zero_masked` = 0.24215 dwarfs `PGDReconLoss` ~ 0.005-0.007, so
-the numerator is nearly constant and the ratio collapses to ~0.242/alive — it ranks by
-fewest components while being almost blind to reconstruction quality. Reported for
-completeness, not weighted.
 
 ### Alive-either per locus
 
@@ -292,27 +283,31 @@ output error for it.
 
 ## Phase 1 result: all five arms, ranked
 
-Winner: **`baseline` — all 7 decomposed matrices.** Narrowing the hidden objective does not
-pay.
+Winner: **`mlp-only` — `gate_proj` + `up_proj` + `down_proj`, no attention.**
 
-| arm | PGDRecon (nats) | alive either | **nats / alive** | vs best |
+Both quantities are costs and are therefore combined as a **product**. Dividing nats by
+alive components is wrong-signed in the denominator — it credits an arm for keeping *more*
+components, which is the opposite of the goal. Pareto status is reported alongside, because
+the product fixes one particular exchange rate between the two costs while domination is
+exchange-rate-free.
+
+| arm | PGDRecon (nats) | alive either | **nats x alive** | Pareto |
 |---|---|---|---|---|
-| **baseline** | **0.00547** | 374 | **1.4624e-05** | — |
-| module-out | 0.00602 | 406 | 1.4820e-05 | +1.3% |
-| resid | 0.00692 | 367 | 1.8854e-05 | +28.9% |
-| down-only | 0.00627 | 315 | 1.9889e-05 | +36.0% |
-| mlp-only | 0.00596 | 298 | 1.9995e-05 | +36.7% |
+| **mlp-only** | 0.00596 | **298** | **1.7756** | **optimal** |
+| down-only | 0.00627 | 315 | 1.9735 | dominated by mlp-only |
+| baseline | **0.00547** | 374 | 2.0456 | **optimal** |
+| module-out | 0.00602 | 406 | 2.4429 | dominated by baseline, mlp-only |
+| resid | 0.00692 | 367 | 2.5394 | dominated by down-only, mlp-only |
 
-`baseline` and `module-out` are within 1.3% on the ratio, which alone would be a coin-flip
-at n=1 with no seed replication. They are not tied: `baseline` **Pareto-dominates** —
-strictly lower adversarial error *and* strictly fewer alive components. The ratio understates
-the gap precisely because it credits `module-out` for its larger denominator. Read the two
-factors separately before trusting a near-tie in the ratio.
+The frontier has exactly two points: `mlp-only`, the sparsest, and `baseline`, the most
+faithful. `mlp-only` buys **20% fewer components for 9% more adversarial error** and wins
+the product by 13%. The three arms between them are strictly dominated — `module-out` and
+`resid` are beaten on *both* axes at once.
 
-**Narrow targets buy sparsity and lose more than they gain.** `mlp-only` (298) and
-`down-only` (315) are the two sparsest decompositions in the series and rank last: dropping
-attention from the objective saves ~20% of components but costs 9-15% more adversarial
-output error, which the metric prices as a net loss.
+**Dropping attention from the hidden objective is the single best move available.** It is
+also the one the phase-1 mid-analysis argued against: the baseline's attention surplus
+(4.4x the output net's per-position activity) is real activity, but it is expensive activity
+— removing it costs little output fidelity and saves a fifth of the component budget.
 
 ### The module writes beat the residual stream at reconstructing the residual stream
 
@@ -357,7 +352,8 @@ component beyond what the hidden objective already keeps.
 
 ## Phase 2: the winner at 20k under increased pressure
 
-`addsub-L18-12-press3` and `-press10`: the winning locus (all 7 matrices), back on the
+`addsub-L18-12-press3` and `-press10`: the winning locus (`mlp-only` — the three MLP
+matrices, no attention), back on the
 `-10-dual-ppgd` schedule — 20000 steps, gamma annealed over the last 10000 — with C kept at
 4x, since reverting it would reintroduce the alive-count ceiling. The hidden reconstruction
 coefficients are scaled 3x and 10x (stochastic 1.0 -> 3.0 / 10.0, PPGD 0.5 -> 1.5 / 5.0);

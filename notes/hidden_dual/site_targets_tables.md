@@ -75,17 +75,17 @@
 | down-only | 24.9% | 28.7% | mlp.down_proj 81.6% |
 | mlp-only | 21.6% | 26.9% | mlp.down_proj 53.9% |
 
-### Selection metric: output-PGD nats per total alive component
+### Selection metric: output-PGD nats x total alive components (both minimised)
 
-| arm | PGDRecon (nats) | alive output | alive hidden | alive **either** | **nats / alive-either** | recovered / alive-either |
+| arm | PGDRecon (nats) | alive output | alive hidden | alive **either** | **nats x alive** | Pareto |
 |---|---|---|---|---|---|---|
-| baseline | 0.00547 | 93 | 374 | **374** | **1.4624e-05** | 6.3284e-04 |
-| module-out | 0.00602 | 78 | 406 | **406** | **1.4820e-05** | 5.8162e-04 |
-| resid | 0.00692 | 91 | 367 | **367** | **1.8854e-05** | 6.4096e-04 |
-| down-only | 0.00627 | 86 | 315 | **315** | **1.9889e-05** | 7.4885e-04 |
-| mlp-only | 0.00596 | 82 | 298 | **298** | **1.9995e-05** | 7.9260e-04 |
+| baseline | 0.00547 | 93 | 374 | **374** | **2.0456** | **optimal** |
+| module-out | 0.00602 | 78 | 406 | **406** | **2.4429** | dominated by baseline, mlp-only |
+| resid | 0.00692 | 91 | 367 | **367** | **2.5394** | dominated by down-only, mlp-only |
+| down-only | 0.00627 | 86 | 315 | **315** | **1.9735** | dominated by mlp-only |
+| mlp-only | 0.00596 | 82 | 298 | **298** | **1.7756** | **optimal** |
 
-Denominator is the union over both CI nets, not the sum — the two nets score the same subcomponent pool. Lower `nats / alive-either` is better.
+Lower `nats x alive` is better. Both factors are costs, so they multiply — a ratio would credit an arm for keeping more components. The union denominator is over both CI nets, never the sum: they score the same subcomponent pool.
 
 #### Alive-either per locus (union over both CI nets)
 

@@ -419,3 +419,36 @@ rather than max over individual examples — so these counts run lower than the 
 They are computed identically for every arm, which is what the ranking needs, and they are
 the only place the per-net overlap exists at all. The `NAlive` figures stay in the report
 as the headline absolute counts; the union is what the selection metric divides by.
+
+## 2026-08-02 — metric correction: the ranking was inverted
+
+`nats / alive` is wrong-signed. Both quantities are costs — we want few nats *and* few
+components — so dividing one by the other credits an arm for keeping more components. Under
+that ratio the densest arm on the Pareto frontier came out on top; the correct combination
+is the **product**, `PGDReconLoss * alive-either`.
+
+Corrected ranking:
+
+| arm | PGD | alive either | nats x alive | Pareto |
+|---|---|---|---|---|
+| **mlp-only** | 0.00596 | **298** | **1.7756** | optimal |
+| down-only | 0.00627 | 315 | 1.9735 | dominated by mlp-only |
+| baseline | **0.00547** | 374 | 2.0456 | optimal |
+| module-out | 0.00602 | 406 | 2.4429 | dominated by baseline, mlp-only |
+| resid | 0.00692 | 367 | 2.5394 | dominated by down-only, mlp-only |
+
+The frontier is exactly `{mlp-only, baseline}`. `mlp-only` trades 9% more adversarial error
+for 20% fewer components and wins the product by 13%. `module-out` and `resid` are beaten on
+both axes at once, which no exchange rate rescues.
+
+This inverts the earlier conclusion. **Dropping attention from the hidden objective is the
+best move**, not the worst — the attention surplus the baseline analysis identified (4.4x
+the output net's per-position activity) is real but expensive, and buying it back costs a
+fifth of the component budget for ~9% output fidelity.
+
+Domination is now reported alongside the product, because the product fixes one particular
+exchange rate between two costs while domination is exchange-rate-free — and a near-tie in
+any scalar score should be read against the two factors separately.
+
+Phase 2 relaunched on `mlp-only` (jobs 6641 / 6642); the earlier pair based on `baseline`
+was cancelled under 2 minutes in.
