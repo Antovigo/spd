@@ -371,3 +371,33 @@ Pressure: the winning arm's hidden recon coefficients (stochastic 1.0 / PPGD 0.5
 baseline weighting) scaled by two multipliers. These multiply whatever the arm's own
 calibration already is — for `resid` that is on top of the 2830x, which is a unit
 conversion rather than a pressure choice.
+
+## 2026-08-02 — selection metric fixed: PGD nats per active component
+
+The arm is chosen by **PGD reconstruction nats per active component** —
+`PGDReconLoss / CI_L0_output`, lower is better. This supersedes the matched-sparsity
+reading-off written above; it is the same idea reduced to one number, which removes the
+judgement call about what "matched" means when no two arms land at the same sparsity.
+
+Two definitional forks, both reported because they can in principle disagree:
+
+- **Literal**: adversarial recon error carried per active component. An arm with more error
+  *and* many more components can score well here, which is the failure mode to watch.
+- **Rate-distortion**: nats of KL recovered against the fully-ablated reference
+  (`kl_zero_masked` = 0.24215) per active component, higher is better. Immune to that
+  failure mode.
+
+Denominator reported both as `CI_L0_output` (mean active per position) and `n_alive_output`
+(distinct components alive). The output net's count is the denominator because
+`PGDReconLoss` is the output objective under an output-CI mask; the hidden net's components
+are the *cost* being tested, and enter through their effect on the output net.
+
+First two arms — all four framings agree, so the ambiguity is not load-bearing so far:
+
+| arm | PGDRecon | CI_L0 out | alive out | nats/active | recovered/active |
+|---|---|---|---|---|---|
+| baseline | 0.00547 | 25.4 | 1229 | **2.151e-04** | **0.0093** |
+| resid | 0.00692 | 28.2 | 1421 | 2.452e-04 | 0.0083 |
+
+`resid` is 14% worse. If a later arm splits the two framings, that gets reported rather
+than resolved silently.
