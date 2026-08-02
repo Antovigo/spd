@@ -337,3 +337,37 @@ The first two arms were launched without `--run_id`, so their run dirs and wandb
 auto-generated `p-*` names. Local dirs renamed to their labels; wandb display names renamed
 from each run's own `config.label` (asserting rather than guessing when absent). Wandb run
 *ids* are immutable, so those two keep `p-*` in their URLs. Later arms pass `--run_id`.
+
+## 2026-08-02 — phase 2 plan, fixed before the results are in
+
+Once the five arms land: pick the best-performing locus, return to the 20000-step formula,
+and re-test it there under **increased** hidden-acts reconstruction pressure — two
+different increases, 2 GPUs each, 4 total.
+
+Writing the selection rule down now, before seeing arms 3-5, so it cannot be fitted to
+whichever answer arrives. The stated criterion is *best output decomposition*, so the
+primary key is output quality, and the tie-breaks are the readouts the series exists to
+produce:
+
+1. **Output quality at matched sparsity.** `kl_ci_masked` and `PGDReconLoss` read against
+   `CI_L0_output`, not raw. The arms will not land at equal sparsity — the hidden loss is a
+   mean over sites, so narrowing the site set multiplies the per-site gradient weight
+   (7 sites -> 2 sites is 3.5x) and buys more components. Comparing raw KL across arms would
+   reward whichever arm happened to end least sparse.
+2. **Hidden reconstruction where it was never trained.** Each arm logs the full panel, so
+   generalisation off the trained sites is directly visible. An arm that repairs sites it
+   never measured is doing something structural rather than fitting its own objective.
+3. **Anomaly rate** (magenta cells, cut 0.5) — cell counts only, which are cut-robust;
+   component counts are an ordering, not a magnitude.
+4. **Saturation** — any arm near the ceiling is disqualified from the comparison rather
+   than ranked, since its counts are clipped.
+
+Phase-2 shape: 20000 steps, `gamma_anneal_start_frac` 0.5 (annealed over the last 10000, as
+in `-10-dual-ppgd`), C kept at 4x — it is strictly better at matched step count and is what
+lifted the alive-count ceiling, so reverting it would reintroduce the clip. Only the
+schedule returns to the 20k formula.
+
+Pressure: the winning arm's hidden recon coefficients (stochastic 1.0 / PPGD 0.5 at
+baseline weighting) scaled by two multipliers. These multiply whatever the arm's own
+calibration already is — for `resid` that is on top of the 2830x, which is a unit
+conversion rather than a pressure choice.
