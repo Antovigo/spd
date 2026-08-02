@@ -370,3 +370,50 @@ push on it.
 3. Whether a narrower target degrades the *output* decomposition (the ranking criterion).
 4. Whether training on a subset repairs the sites it never measures.
 5. Whether the anomaly rate is a property of the scheme or of the target set.
+
+## Anomalies restricted to MLP components
+
+The full-model census mixes two populations whose behaviour is opposite, so it is worth
+splitting. MLP components only (gate + up + down):
+
+| arm | MLP saved | magenta | green | both | mag % of active | magenta/saved | anom comps |
+|---|---|---|---|---|---|---|---|
+| down-only | 592 | 3424 | 1363662 | 721736 | **0.16%** | 5.8 | 1 |
+| resid | 433 | 5864 | 934288 | 685818 | 0.36% | 13.5 | 2 |
+| module-out | 410 | 7711 | 801387 | 660246 | 0.52% | 18.8 | 2 |
+| mlp-only | 406 | 8759 | 968114 | 680049 | 0.53% | 21.6 | **0** |
+| baseline | 203 | 21767 | 536951 | 608400 | **1.87%** | **107.2** | 6 |
+
+**`baseline` is the worst arm on MLP anomalies** — 3.5-12x the rate of every other arm — even
+though it is the only one measuring every MLP site. The cause is the mean-over-sites
+normalisation: per-site gradient weight is `1/n_sites`, so `baseline` gives each MLP site
+1/7, `mlp-only` gives 1/3, and `down-only` gives `down_proj` the whole objective. The MLP
+anomaly rate orders exactly by that weight, which is the same mechanism that makes a narrow
+arm recruit *more* components.
+
+`down-only` is lowest on all three MLP matrices — 1034 / 675 / 1715 against `baseline`'s
+5299 / 4093 / 12375 — including `gate_proj` and `up_proj`, which it never measures.
+Constraining `down_proj`'s output forces the gated activation feeding it to be right, so the
+pressure propagates upstream through the block.
+
+### Anomalies migrate to wherever the hidden net stops looking
+
+Attention components, same arms:
+
+| arm | attention saved | magenta | mag % of active |
+|---|---|---|---|
+| module-out | 335 | 39 | 0.00% |
+| baseline | 323 | 87 | 0.01% |
+| resid | 183 | 148 | 0.03% |
+| down-only | 25 | 507 | 0.47% |
+| mlp-only | 18 | 611 | **0.94%** |
+
+The two tables are near mirror images. `baseline` and `module-out`, which keep attention in
+the objective, are essentially anomaly-free there and pay for it in the MLP; `mlp-only` and
+`down-only` are the reverse. `mlp-only` — the phase-1 winner on nats x alive — has the
+highest attention anomaly rate in the series and simultaneously the only zero MLP
+anomalous-component count. It buys its 20% component saving by not modelling attention, and
+the anomalies surface precisely there.
+
+Whether that trade is acceptable depends on what the decomposition is for: it is the best
+value per component, but it is also the arm least able to say anything about attention.
