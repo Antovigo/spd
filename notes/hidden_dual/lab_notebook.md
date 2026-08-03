@@ -566,3 +566,17 @@ convention, now automatic rather than hand-set.
 
 All 63 jobs are queued; the GPU roots sit on `QOSMaxGRESPerUser` behind the three training
 runs holding all 6 GPUs, and start as those finish.
+
+## 2026-08-03 — per-matrix alive / active plots in the report
+
+Added `~/pd_scratch/hidden_site_targets/plot_alive_active.py` (reads `metrics.jsonl` only, no
+checkpoint, no GPU; submitted via SLURM per convention). Two figures in
+`notes/hidden_dual/figures/`, embedded in `pressure_report.md`: alive components per matrix
+and `CI_L0` per matrix, one panel per CI net, bars grouped by matrix and labelled with the
+full run id. Each alive bar carries a tick at that run's own C, since C differs 4x between the
+reference and the -11 arms.
+
+Only runs at step 20000 are plotted — gamma annealing runs over the second half and roughly
+halves the alive count, so a mid-training arm beside a finished one would mislead. Currently
+`addsub-L18-10-dual-ppgd`, `addsub-L18-11-bigc`, `addsub-L18-11-press2`; re-run the script as
+the other arms finish.

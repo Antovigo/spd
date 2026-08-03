@@ -146,6 +146,45 @@ is `torch.rand` per position (`masks.py::calc_stochastic_component_mask_info`), 
 is partially ablated every step and the output is wrong unless the components carry the
 weight.
 
+## Per-matrix component counts
+
+Run ids in full, so the artifacts are findable:
+`addsub-L18-10-dual-ppgd` (reference, C 256/128 per matrix), `addsub-L18-11-bigc` and
+`addsub-L18-11-press2` (both 4x C, 1024/512). Checkpoints at
+`~/out/runs/<run id>/model_20000.pth`. Regenerate with
+`~/pd_scratch/hidden_site_targets/plot_alive_active.py <run ids> --outdir=notes/hidden_dual/figures`,
+which reads `metrics.jsonl` only and plots any run that has reached step 20000.
+
+**Alive components** — distinct subcomponents whose CI clears 0.1 somewhere. The horizontal
+tick on each bar is that run's own C for that matrix, so saturation is readable per bar.
+
+![Alive components per matrix](figures/alive_per_matrix.png)
+
+**Active components** — `CI_L0`, the number active per position: the density rather than the
+inventory.
+
+![Active components per position, per matrix](figures/active_per_matrix.png)
+
+Three things the pair makes obvious that the scalar totals hide:
+
+- **The reference is pinned at its ceiling on the attention Q/K matrices.** `q_proj` and
+  `k_proj` sit at 125 and 124 of C=128 under the hidden net — essentially saturated, which is
+  what motivated raising C. Every other reference matrix is at 175-252 of 256. At 4x C nothing
+  is near its ceiling: `press2`'s worst is `up_proj` at 579/1024.
+- **Alive counts grow while density barely moves.** From reference to `bigc` the alive bars
+  rise everywhere, but the `CI_L0` bars are nearly unchanged (output net: 4.9 -> 5.3 on
+  `gate_proj`, 6.3 -> 6.3 on `down_proj`). That is the fragmentation result, localised: the
+  same per-position computation spread over a larger inventory.
+- **The pressure arm splits the two nets.** `press2` raises hidden-net density substantially
+  (`up_proj` 9.7 -> 14.5, `o_proj` 9.2 -> 13.4) while its output-net density is flat against
+  `bigc` (`down_proj` 6.3 -> 7.1, `q_proj` 1.4 -> 1.6). The extra hidden pressure is being
+  paid for in hidden-net activity, not by disturbing the output net — which is what the
+  matched output-side hyperparameters were meant to guarantee.
+
+Attention Q/K stay the sparsest matrices under the output net in every arm (1.4-1.9 active per
+position against 5.3-7.1 for the MLP), but under the hidden net they are comparable to the MLP
+(6.6-9.9). The two nets genuinely disagree about what attention Q/K are for.
+
 ## What the earlier series established
 
 The predecessor under this name (now superseded, see `site_targets_report.md`) compared
