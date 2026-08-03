@@ -330,8 +330,34 @@ The checkpoints are gone; these plots come from the preserved
 
 ![Active components per position, site-targets arms](figures/site_targets_active_per_matrix.png)
 
-The plots make the ranking above mechanical rather than mysterious — **the alive budget moves
-between matrices, it does not shrink**:
+**These five arms are not a clean single-variable comparison, and the plots should not be read
+as one.** A field-by-field diff of the archived configs shows everything matched — C, steps,
+gamma schedule, seed, both optimizers, every output-side loss, both impmin instances, the data,
+the nontarget block, and the readout-site declarations (all five declare the same two resid
+readouts; `site_patterns` only selects within that shared 9-site pool) — with two exceptions:
+
+- **`resid` runs at coefficients 2830.0 / 1415.0** against 1.0 / 0.5 everywhere else, the
+  deliberate magnitude-matching described above. It is objective-magnitude-matched, not
+  hyperparameter-identical, and the calibration was fixed from a ratio measured at one point in
+  training. Its ranking is the least trustworthy of the five.
+- **Per-site gradient weight varies ~7x by construction.** The hidden loss is a mean over
+  measured sites, and `n_sites` is 7 / 2 / 2 / 1 / 3 across the arms, so per-site weight is
+  1/7, 1/2, 1/2, 1/1, 1/3. Locus and per-site pressure move together and cannot be separated
+  here. `down-only` is not "baseline measured at one site" but "one site pushed 7x harder".
+  This is precisely the confound the successor series avoids by varying the coefficient at a
+  fixed site set (see `pressure_report.md`).
+
+Code was identical: the five ran on four different commits, but those differ only in `notes/` —
+no `param_decomp/` change across the span. All five are flagged `uncommitted_changes: true`
+and that field is a bare boolean, so the working tree is not recoverable; they must all have
+carried the `calc_causal_importances` readout fix, since every arm declares
+`hidden_readout_sites` and would otherwise have raised `KeyError` instead of finishing.
+
+One bar is near its ceiling: `down-only`'s hidden `down_proj` at 836/1024 (82%). That count is
+plausibly clipped, so the concentration effect there is if anything understated.
+
+With those caveats, the plots make the ranking above mechanical rather than mysterious —
+**the alive budget moves between matrices, it does not shrink**:
 
 - **Attention dies when the hidden objective stops covering it.** Under the hidden net,
   `q_proj` goes 172 (`baseline`) -> 53 (`module-out`) -> 38 (`resid`) -> 6 (`down-only`) -> 4

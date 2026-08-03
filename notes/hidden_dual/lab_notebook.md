@@ -599,3 +599,22 @@ The output net is nearly untouched across all five arms.
 Figure filenames are prefixed `site_targets_` so they coexist with the `-11` series plots,
 and the caption flags that these arms reuse the `addsub-L18-11-*` prefix the current series
 also uses.
+
+## 2026-08-03 — comparability audit of the five site-targets arms
+
+Diffed the archived configs field by field. Only two real departures from apples-to-apples:
+`resid`'s coefficients (2830.0 / 1415.0 vs 1.0 / 0.5 — the deliberate magnitude match), and
+the `1/n_sites` per-site gradient weight, which varies 7x across the arms (n_sites 7/2/2/1/3)
+so locus and per-site pressure are entangled by construction. Everything else matches,
+including the readout-site declarations: all five declare the same two resid readouts, so the
+9-site measurement pool is shared and `site_patterns` only selects within it.
+
+The five ran on four commits, differing only in `notes/` — no `param_decomp/` change across
+the span, so training code was identical. `uncommitted_changes` is stored as a bare boolean,
+so the working tree at run time is not recoverable; all five must have carried the
+`calc_causal_importances` readout fix, since each declares `hidden_readout_sites` and would
+otherwise have raised `KeyError` rather than finishing 15000 steps.
+
+Also noted `down-only`'s hidden `down_proj` at 836/1024 (82% of C) — the only bar near its
+ceiling, so that concentration number is plausibly clipped low. Caveats written into the
+plot section of `site_targets_report.md`.
