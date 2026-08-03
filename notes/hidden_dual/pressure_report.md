@@ -22,6 +22,7 @@ Two questions, both asked against `addsub-L18-10-dual-ppgd` as the control:
 | `addsub-L18-11-press2` | 6144 | 2.0 / 1.0 |
 | `addsub-L18-11-press5` | 6144 | 5.0 / 2.5 |
 | `addsub-L18-11-bigc-mlp` | 6144 | 1.0 / 0.5, measured on `*.mlp.*` only |
+| `addsub-L18-11-bigc-zeroinit` | 6144 | 1.0 / 0.5, `weight_init: coupled_zero_u` |
 
 `bigc-mlp` is `bigc` with the hidden objective restricted to the three MLP matrices; it
 differs from `bigc` in the label and the two `site_patterns` fields, nothing else.
@@ -53,6 +54,64 @@ Note this series carries **no `hidden_readout_sites`** and no residual-stream ev
 Both would have been harmless additions, but `site_patterns: null` means "every measurement
 site", so declaring readout sites would silently widen the hidden objective from 7 matrices
 to 9 and break the exact replication.
+
+## `bigc` is worse under the fresh PGD probe — and why that is mostly a probe artifact
+
+`bigc` finished first. Against the reference at step 20000:
+
+| metric | reference | `bigc` | |
+|---|---|---|---|
+| `UnmaskedReconLoss` (clean) | 0.001755 | 0.001484 | -15%, `bigc` better |
+| `PersistentPGDReconLoss/output_recon` (trained-against adversary) | 0.003593 | 0.003600 | identical |
+| `PGDReconLoss` (fresh eval adversary) | 0.004429 | 0.004977 | +12%, `bigc` worse |
+| `PGDHiddenActsReconLoss` | 0.03386 | 0.03223 | `bigc` better |
+| `CI_L0` output / hidden | 23.87 / 57.79 | 24.62 / 59.25 | +3.2% / +2.5% |
+| `NAlive` output / hidden | 1107 / 1387 | 1253 / 1899 | +13% / **+37%** |
+
+Every objective the run is actually optimized against is flat or better. The whole
+regression sits in the headroom between the persistent adversary and a fresh one.
+
+`PGDReconLoss` is **not a C-invariant yardstick**, for two compounding reasons:
+
+1. The eval mask is `ci + (1 - ci) * s` with `s` in `[0, 1]`, so the adversary can only push
+   components *up* from their CI value. Its playground is exactly the near-zero-CI
+   components: 1536 - 1107 = **429** of them in the reference, 6144 - 1253 = **4891** in
+   `bigc`. An 11.4x larger attack surface buys a 12% worse number.
+2. It is sign-PGD (`pgd_utils.py::_run_pgd_loop`) with a per-coordinate `L_inf` step and no
+   budget on total injected mask mass. 20 steps at 0.1 saturates any coordinate, so the
+   reachable set is the whole hypercube `[ci, 1]^C` — its dimension grows linearly with C.
+
+Two further signs this is surface rather than quality: the gap **shrinks** over training
+(1.28x at step 2000, 1.12x at 20000), and the fresh-vs-persistent ratio widens with C (1.23x
+reference, 1.38x `bigc`) — the signature of a training adversary that under-covers a larger
+mask space, not of a worse decomposition.
+
+The one genuine cost, which should be tracked separately from PGD: **fragmentation**.
+Per-position density is flat (+2.5%) while the hidden-net alive set grows 37%. Alive per
+unit of `CI_L0` goes 24.0 -> 32.1: the same computation, spread over more and rarer
+components.
+
+### `bigc-zeroinit` — the direct test
+
+`weight_init: coupled_zero_u` is `coupled` with `U` zeroed, added in `optimize.py`. The
+component sum is exactly zero at init and the delta carries all of W; subcomponents acquire
+norm only as the reconstruction losses demand it.
+
+Zeroing both sides is a dead fixed point — `U`'s gradient is proportional to the component
+acts `x @ V` and `V`'s is proportional to `U`, so both vanish. Zeroing `U` alone is the only
+workable form, and it is also the right one: `V` is untouched, so `get_component_acts` still
+feeds the CI nets a live signal, and `U` has a nonzero gradient from step 0.
+
+This attacks the attack surface at its root. Under `coupled`, a subcomponent that is never
+needed keeps W-natural norm forever — nothing decays it — so the adversary switching it on
+injects real garbage. Under `coupled_zero_u` an unused subcomponent sits at exactly zero and
+switching it on injects nothing. If the C-dependence of `PGDReconLoss` is the surface effect
+diagnosed above, `bigc-zeroinit` should recover the reference's PGD number at 4x C.
+
+The degenerate "components stay at zero forever" fixed point is not stable: the delta's mask
+is `torch.rand` per position (`masks.py::calc_stochastic_component_mask_info`), so the delta
+is partially ablated every step and the output is wrong unless the components carry the
+weight.
 
 ## What the earlier series established
 

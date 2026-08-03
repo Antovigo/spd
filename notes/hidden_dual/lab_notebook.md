@@ -521,3 +521,18 @@ opposite directions: `press2` raises the weight everywhere, `bigc-mlp` raises it
 MLP by dropping attention from the objective. Comparing them separates concentrating
 pressure from increasing it, which the superseded series confounded by never varying the
 site set and the coefficient independently.
+
+## 2026-08-03 — `bigc` costs PGD only under a fresh adversary; zero-U init queued
+
+`addsub-L18-11-bigc` finished. Clean recon and hidden recon both improve over the
+reference, the persistent adversary reports no change at all (0.003593 vs 0.003600), and
+only the fresh 20-step eval probe is worse (+12%). Traced to `PGDReconLoss` being an
+increasing function of C by construction: the mask is `ci + (1 - ci) * s`, so the adversary
+can only switch near-zero-CI components *on*, and `bigc` has 4891 of those against the
+reference's 429. Details and the supporting numbers in `pressure_report.md`.
+
+Added `weight_init: "coupled_zero_u"` (`optimize.py::init_coupled_zero_u_`) — `coupled` with
+`U` zeroed, so components start silent and unused ones keep zero norm instead of W-scale
+junk. Zeroing both sides is a dead fixed point, so it has to be `U`: `V` stays live for the
+CI nets and carries `U`'s gradient. Launched `addsub-L18-11-bigc-zeroinit` (job 6685),
+identical to `bigc` apart from that one field.
