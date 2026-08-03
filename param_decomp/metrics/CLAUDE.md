@@ -230,8 +230,10 @@ Three things follow from a readout's target being the stream rather than a write
   required, not a shortcut: attention mixes positions, so a position routed to no
   component still receives error from the routed positions it attends to.
 - Readout sites are cached on the clean `cache_type="input"` pass, so they land in
-  `pre_weight_acts` alongside the pre-weight activations. CI fns index that dict by their
-  own layer names, so the extra keys are inert.
+  `pre_weight_acts` alongside the pre-weight activations. The CI fn is defined over the
+  decomposition targets only, so `calc_causal_importances` selects those entries rather
+  than consuming the whole cache — the global CI-fn wrapper transforms every key it is
+  handed and would otherwise `KeyError` on a readout name.
 
 Cadence: the CI-masked and stochastic probes cost one truncated forward per eval batch and
 run on the **fast** cadence (`eval.every`). `PGDHiddenActsReconLoss` costs `n_steps + 1`

@@ -143,6 +143,17 @@ def test_readout_error_covers_every_position() -> None:
     torch.testing.assert_close(sq_target_all, clean_cache["resid_post_mlp"].float().pow(2).sum())
 
 
+def test_ci_fn_ignores_the_readout_entries() -> None:
+    """The CI fn is defined over decomposition targets; the clean cache carries more."""
+    model = _model()
+    x = torch.randn(3, 4)
+    clean_cache = model(x, cache_type="input").cache
+    assert set(clean_cache) > set(model.target_module_paths)
+
+    ci = model.calc_causal_importances(clean_cache, sampling="continuous")
+    assert set(ci.lower_leaky) == set(model.target_module_paths)
+
+
 def test_readout_config_is_validated() -> None:
     with pytest.raises(AssertionError, match="collide"):
         _model({"attn": "post_attn_norm"})

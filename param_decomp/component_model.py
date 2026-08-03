@@ -467,7 +467,8 @@ class ComponentModel(nn.Module):
         Args:
             pre_weight_acts: Per-module input activations (or token-id tensors for
                 embedding targets), typically the cache from a `cache_type="input"`
-                forward pass.
+                forward pass. Only the decomposition targets' entries are read, so a
+                cache also carrying `hidden_readout_sites` is accepted as-is.
             sampling: Selects the stochastic mask regime; gates the noise injection on
                 the lower-leaky branch.
             detach_inputs: When true, gradients do not flow from CI back into
@@ -476,10 +477,11 @@ class ComponentModel(nn.Module):
             role: Which CI net to run. `"hidden"` requires the model to have been built
                 with `dual_hidden_ci`.
         """
+        ci_inputs = {path: pre_weight_acts[path] for path in self.target_module_paths}
         if detach_inputs:
-            pre_weight_acts = {k: v.detach() for k, v in pre_weight_acts.items()}
+            ci_inputs = {k: v.detach() for k, v in ci_inputs.items()}
 
-        ci_fn_outputs = self.ci_fn_for(role)(pre_weight_acts)
+        ci_fn_outputs = self.ci_fn_for(role)(ci_inputs)
         return self._apply_sigmoid_to_ci_outputs(ci_fn_outputs, sampling)
 
     def ci_fn_for(self, role: CIRole) -> nn.Module:
