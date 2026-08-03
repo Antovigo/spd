@@ -548,3 +548,21 @@ Also noted: `PersistentPGDReconLoss/output_recon` is 0.00359 / 0.00360 / 0.00359
 reference, `bigc` and `press2`. Identical to three significant figures across configs that
 differ a lot means it is self-equilibrating and not a quality discriminator — I had leaned
 on it too hard in the `bigc` writeup. Corrected in `pressure_report.md`.
+
+## 2026-08-03 — subspace-scatter + alive-plane-scatter for the whole 20k series
+
+`build_alive_plane_scatter` lived only on `origin/worktree-dual-alive-lists`; cherry-picked
+its two commits (469fed76c, 1d38d3c20) onto this branch — three self-contained files, no
+conflicts. Submitted the per-run DAG (`find_alive_subcomponents` -> hidden/inner activation
+collection -> periods -> `build_subspace_scatter`, plus `build_alive_plane_scatter` off the
+alive list) for every 20k-step run after `addsub-L18-10-dual-ppgd`, which already has both
+applets. Submitter: `~/pd_scratch/hidden_site_targets/submit_applets.py`.
+
+Finished runs submitted directly (`nobeta2.5`, `nobeta2.5-ppgd`, `bigc`, `press2`); the three
+still training (`press5`, `bigc-mlp`, `bigc-zeroinit`) are chained `afterok` on their training
+jobs, so their DAGs fire on completion and never fire if a run dies. `--kl-thr` left at its
+default `rounded`, which computes the run's own in-sweep rounded-circuit anchor — the per-run
+convention, now automatic rather than hand-set.
+
+All 63 jobs are queued; the GPU roots sit on `QOSMaxGRESPerUser` behind the three training
+runs holding all 6 GPUs, and start as those finish.
