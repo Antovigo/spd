@@ -618,3 +618,25 @@ otherwise have raised `KeyError` rather than finishing 15000 steps.
 Also noted `down-only`'s hidden `down_proj` at 836/1024 (82% of C) — the only bar near its
 ceiling, so that concentration number is plausibly clipped low. Caveats written into the
 plot section of `site_targets_report.md`.
+
+## 2026-08-03 — per-matrix anomaly plot for the site-targets arms
+
+The `ab_grids` payloads were purged with the runs, but `~/pd_scratch/hidden_site_targets/
+results.json` kept the full census (per matrix, per arm, cut 0.5), so the plot is built from
+that. `plot_anomalies.py` -> `figures/site_targets_anomalies_per_matrix.png`, absolute magenta
+cells plus magenta-share-of-active, since `n_saved` varies 0..328 across (arm, matrix) and
+only the share is comparable. Bars with `n_saved < 5` are hatched, `n_saved == 0` draws
+nothing. Component-level counts stay out: cells move ~1.4x over a 9x cut change, components
+~7x.
+
+Two additions over the aggregate tables already in the report. Within attention the anomalies
+sit almost entirely on `o_proj` (`down-only` 501/507 there, `mlp-only` 237/611) rather than
+being spread — `mlp-only`'s other 374 are on `q_proj` off 3 saved components, hatched and not
+to be leaned on.
+
+More important: **magenta count is partly a restatement of hidden-net density.** A cell is
+magenta only if the hidden net calls it inactive, so a denser hidden net mechanically yields
+fewer. `down-only` has the densest hidden `down_proj` (25.7/position) and the lowest MLP
+anomaly rate (0.16%); `baseline` has 10.6 and 1.87%. The anomaly ordering *is* the hidden
+density ordering, both driven by `1/n_sites`. So anomaly rate is not a clean cross-arm measure
+of disagreement between the nets — worth remembering before using it as a selection criterion.

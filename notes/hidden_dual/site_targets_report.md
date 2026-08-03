@@ -443,6 +443,49 @@ push on it.
 4. Whether training on a subset repairs the sites it never measures.
 5. Whether the anomaly rate is a property of the scheme or of the target set.
 
+## The anomaly census per matrix
+
+The two aggregate tables below split components into MLP and attention. This is the same
+census resolved per matrix — absolute magenta cells on the left, magenta as a share of active
+cells on the right, since the `ab_grids` saved very different numbers of components per
+(arm, matrix) and only the share is comparable across them.
+
+![CI anomalies per matrix, site-targets arms](figures/site_targets_anomalies_per_matrix.png)
+
+Regenerate with `plot_anomalies.py --results=<archive>/../results.json --prefix=site_targets_`.
+Component-level anomaly counts are deliberately not plotted: the threshold sweep found magenta
+*cells* move only ~1.4x over a 9x change in cut, while *component* counts move ~7x, so only
+cell counts survive a change of cut.
+
+`n_saved` per (arm, matrix) — every bar is only as trustworthy as this, and bars resting on
+fewer than 5 saved components are hatched:
+
+| run id | gate | up | down | q | k | v | o |
+|---|---|---|---|---|---|---|---|
+| `addsub-L18-11-baseline` | 52 | 68 | 83 | 55 | 27 | 47 | 194 |
+| `addsub-L18-11-module-out` | 69 | 96 | 245 | 25 | 1 | 4 | 305 |
+| `addsub-L18-11-resid` | 84 | 100 | 249 | 19 | 1 | 1 | 162 |
+| `addsub-L18-11-down-only` | 113 | 151 | 328 | 3 | 0 | 0 | 22 |
+| `addsub-L18-11-mlp-only` | 102 | 129 | 175 | 3 | 0 | 0 | 15 |
+
+Two things the per-matrix view adds to the aggregates:
+
+- **Within attention the anomalies are not spread, they sit on `o_proj`.** `down-only` puts
+  501 of its 507 attention magenta cells there (0.8% of active) and `mlp-only` 237 of 611
+  (0.6%), against ~0.0% for `baseline` and `module-out`. `mlp-only`'s remaining 374 land on
+  `q_proj`, but that bar rests on 3 saved components and is hatched accordingly — the 1.7%
+  share is not a number to lean on. The attention story is an `o_proj` story.
+- **The magenta count is partly a restatement of hidden-net density, not an independent
+  measure of disagreement.** A cell is magenta only if the hidden net calls it *inactive*, so
+  an arm whose hidden net is dense at a site mechanically has fewer magenta cells there.
+  Cross-reading the `CI_L0` plot above makes this concrete: `down-only` runs `down_proj` at
+  25.7 active per position, the densest hidden bar in the series, and posts the lowest MLP
+  anomaly rate (0.16%); `baseline` runs it at 10.6 and posts the highest (1.87%). The anomaly
+  ordering and the hidden-density ordering are the same ordering, both driven by the
+  `1/n_sites` weight. Anomaly rate is therefore not a clean cross-arm measure of how much the
+  two nets *disagree* — comparing it across arms whose hidden nets differ in density compares
+  the densities as much as the disagreement.
+
 ## Anomalies restricted to MLP components
 
 The full-model census mixes two populations whose behaviour is opposite, so it is worth
