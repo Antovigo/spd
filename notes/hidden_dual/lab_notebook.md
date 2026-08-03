@@ -580,3 +580,22 @@ Only runs at step 20000 are plotted — gamma annealing runs over the second hal
 halves the alive count, so a mid-training arm beside a finished one would mislead. Currently
 `addsub-L18-10-dual-ppgd`, `addsub-L18-11-bigc`, `addsub-L18-11-press2`; re-run the script as
 the other arms finish.
+
+## 2026-08-03 — same plots for the superseded site-targets series
+
+Generalised `plot_alive_active.py` with `--root` / `--step` / `--prefix` / `--label`, so it
+also runs against `~/pd_scratch/hidden_site_targets/archive/` — the purged locus series kept
+its `metrics.jsonl` + `experiment_config.yaml`, which is all these plots need. Five arms at
+step 15000 added to `site_targets_report.md`; the `-12` press runs are excluded (cancelled at
+step 5000/6000 when the series was dropped).
+
+The plots make the phase-1 ranking mechanical: the alive budget *moves between matrices*
+rather than shrinking. Attention collapses when the hidden objective stops covering it
+(hidden `q_proj` 172 -> 4 from `baseline` to `mlp-only`), and the freed pressure reappears
+concentrated on whatever remains (`down-only` puts 25.7 components per position on
+`down_proj` vs `baseline`'s 10.6) — the `1/n_sites` gradient weight showing up as counts.
+The output net is nearly untouched across all five arms.
+
+Figure filenames are prefixed `site_targets_` so they coexist with the `-11` series plots,
+and the caption flags that these arms reuse the `addsub-L18-11-*` prefix the current series
+also uses.

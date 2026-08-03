@@ -316,6 +316,45 @@ also the one the phase-1 mid-analysis argued against: the baseline's attention s
 (4.4x the output net's per-position activity) is real activity, but it is expensive activity
 — removing it costs little output fidelity and saves a fifth of the component budget.
 
+### Per-matrix component counts, all five arms
+
+Run ids in full — note they reuse the `addsub-L18-11-*` prefix that the **current** series
+also uses, so `addsub-L18-11-baseline` here is the purged locus arm, not anything in
+`pressure_report.md`: `addsub-L18-11-baseline`, `-module-out`, `-resid`, `-down-only`,
+`-mlp-only`, all at C 1024 (MLP, `v_proj`, `o_proj`) / 512 (`q_proj`, `k_proj`), step 15000.
+The checkpoints are gone; these plots come from the preserved
+`~/pd_scratch/hidden_site_targets/archive/<run id>/metrics.jsonl`. Regenerate with
+`plot_alive_active.py <run ids> --root=<archive> --step=15000 --prefix=site_targets_`.
+
+![Alive components per matrix, site-targets arms](figures/site_targets_alive_per_matrix.png)
+
+![Active components per position, site-targets arms](figures/site_targets_active_per_matrix.png)
+
+The plots make the ranking above mechanical rather than mysterious — **the alive budget moves
+between matrices, it does not shrink**:
+
+- **Attention dies when the hidden objective stops covering it.** Under the hidden net,
+  `q_proj` goes 172 (`baseline`) -> 53 (`module-out`) -> 38 (`resid`) -> 6 (`down-only`) -> 4
+  (`mlp-only`); `o_proj` goes 338 -> 554 -> 278 -> 37 -> 30. Per-position activity collapses
+  the same way (`o_proj` 9.8 -> 1.4). This is the entire source of `mlp-only`'s 20% component
+  saving — it is not a sparser decomposition of the same thing, it is the same decomposition
+  with attention abandoned.
+- **The pressure it saves reappears on whatever the objective does cover.** `down-only` puts
+  **25.7** components per position on `down_proj` against `baseline`'s 10.6, and 836 alive
+  against 292. `module-out` puts 20.0 per position on `o_proj` against 9.8. Concentrating the
+  objective on fewer sites does not reduce total work; it relocates and amplifies it, which is
+  the `1/n_sites` gradient-weight effect showing up in the counts.
+- **The output net barely notices any of it.** Its MLP bars sit at 5.3-8.4 active per position
+  across all five arms, and its `q_proj`/`k_proj` at 0.9-2.0. Choosing the hidden locus
+  reshapes the hidden net almost exclusively — which is what makes the arms comparable on
+  output metrics at all.
+
+The one arm that breaks the pattern is `module-out`, whose hidden `o_proj` (554 alive, 20.0
+per position) exceeds even `baseline`'s. Measuring at exactly two sites (`o_proj` +
+`down_proj`) gives each 3.5x the per-site gradient weight the baseline's seven sites get, and
+`o_proj` absorbs it. That is the same mechanism behind the importance-minimality anomaly noted
+earlier in this report, visible here directly as a component count.
+
 ### The module writes beat the residual stream at reconstructing the residual stream
 
 | arm | hidden error at the resid stream (hidden CI) |
