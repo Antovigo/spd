@@ -508,3 +508,16 @@ would have widened it from 7 matrices to 9 and quietly broken the replication.
 
 Reference schedule already anneals gamma over the second half (`start_frac: 0.5`, 20000
 steps), so nothing there changed.
+
+### Fourth run: `bigc-mlp`
+
+Queued `addsub-L18-11-bigc-mlp` — `bigc` with the hidden objective measured on `*.mlp.*`
+only. Differs from `bigc` in the label and the two `site_patterns` fields.
+
+Worth being explicit that this is not a pure locus change. The hidden loss is a mean over
+sites, so cutting 7 sites to 3 multiplies the per-site gradient weight by 7/3 = 2.33x —
+close to `press2`'s uniform 2x. The two runs therefore ask nearly the same question from
+opposite directions: `press2` raises the weight everywhere, `bigc-mlp` raises it only on the
+MLP by dropping attention from the objective. Comparing them separates concentrating
+pressure from increasing it, which the superseded series confounded by never varying the
+site set and the coefficient independently.

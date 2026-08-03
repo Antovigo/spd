@@ -21,6 +21,17 @@ Two questions, both asked against `addsub-L18-10-dual-ppgd` as the control:
 | `addsub-L18-11-bigc` | 6144 | 1.0 / 0.5 |
 | `addsub-L18-11-press2` | 6144 | 2.0 / 1.0 |
 | `addsub-L18-11-press5` | 6144 | 5.0 / 2.5 |
+| `addsub-L18-11-bigc-mlp` | 6144 | 1.0 / 0.5, measured on `*.mlp.*` only |
+
+`bigc-mlp` is `bigc` with the hidden objective restricted to the three MLP matrices; it
+differs from `bigc` in the label and the two `site_patterns` fields, nothing else.
+
+It is not purely a locus change, and the interaction is the interesting part. The hidden
+loss is a **mean over sites**, so restricting 7 sites to 3 raises the per-site gradient
+weight by 7/3 = 2.33x. `bigc-mlp` therefore applies roughly `press2`-level pressure, but
+concentrated on the MLP instead of spread across all seven matrices. The pair separates
+*concentrating* pressure from *increasing* it — a confound the superseded series could not
+untangle, because there the site set and the coefficient were never varied independently.
 
 Each config is generated from the reference run's own YAML rather than from a descendant, so
 the replication is exact by construction. Verified by diff:
