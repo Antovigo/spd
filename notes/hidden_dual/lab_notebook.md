@@ -536,3 +536,15 @@ Added `weight_init: "coupled_zero_u"` (`optimize.py::init_coupled_zero_u_`) — 
 junk. Zeroing both sides is a dead fixed point, so it has to be `U`: `V` stays live for the
 CI nets and carries `U`'s gradient. Launched `addsub-L18-11-bigc-zeroinit` (job 6685),
 identical to `bigc` apart from that one field.
+
+## 2026-08-03 (later) — `press2` finished; it weakens the attack-surface account
+
+`press2` at 20000: `PGDReconLoss` 0.00540 (worse than `bigc`'s 0.00498) with *fewer*
+near-zero-CI components (4291 vs 4891). So attack surface cannot be the whole story. Hidden
+recon is much better (0.02290 vs 0.03386 reference, -32%), bought with +46% `CI_L0_hidden`
+and +61% alive — a real competition between the two objectives over one shared pool.
+
+Also noted: `PersistentPGDReconLoss/output_recon` is 0.00359 / 0.00360 / 0.00359 across the
+reference, `bigc` and `press2`. Identical to three significant figures across configs that
+differ a lot means it is self-equilibrating and not a quality discriminator — I had leaned
+on it too hard in the `bigc` writeup. Corrected in `pressure_report.md`.

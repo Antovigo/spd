@@ -81,10 +81,43 @@ regression sits in the headroom between the persistent adversary and a fresh one
    budget on total injected mask mass. 20 steps at 0.1 saturates any coordinate, so the
    reachable set is the whole hypercube `[ci, 1]^C` — its dimension grows linearly with C.
 
-Two further signs this is surface rather than quality: the gap **shrinks** over training
-(1.28x at step 2000, 1.12x at 20000), and the fresh-vs-persistent ratio widens with C (1.23x
-reference, 1.38x `bigc`) — the signature of a training adversary that under-covers a larger
-mask space, not of a worse decomposition.
+A further sign this is surface rather than quality: the gap **shrinks** over training (1.28x
+at step 2000, 1.12x at 20000).
+
+### `press2` partly falsifies the attack-surface story
+
+`press2` finished next, and it does not fit the surface account:
+
+| | reference | `bigc` | `press2` |
+|---|---|---|---|
+| `PGDReconLoss` | 0.00443 | 0.00498 | 0.00540 |
+| `UnmaskedReconLoss` | 0.00175 | 0.00148 | 0.00141 |
+| `PersistentPGDReconLoss/output_recon` | 0.00359 | 0.00360 | 0.00359 |
+| `PGDHiddenActsReconLoss` | 0.03386 | 0.03223 | 0.02290 |
+| `CI_L0` output / hidden | 23.87 / 57.79 | 24.62 / 59.25 | 27.21 / 85.04 |
+| `NAlive` output / hidden | 1107 / 1387 | 1253 / 1899 | 1853 / 3064 |
+| near-zero-CI components (output net) | 429 | 4891 | 4291 |
+
+`press2` has **fewer** near-zero-CI components than `bigc` (4291 vs 4891) and a **worse**
+`PGDReconLoss` (0.00540 vs 0.00498). Attack surface alone therefore cannot be the whole
+explanation. The likelier reading for `press2` specifically is a genuine trade-off: the two
+objectives compete for one shared subcomponent pool, and buying -32% hidden reconstruction
+costs output robustness under worst-case masking.
+
+Two claims from the `bigc` analysis above have to be weakened accordingly:
+
+- `PersistentPGDReconLoss/output_recon` is **0.00359 / 0.00360 / 0.00359** across three
+  configurations that differ substantially. A quantity identical to three significant
+  figures across all of them is almost certainly self-equilibrating — the minimax game
+  between the persistent adversary and the model settles at a level set by its loss
+  coefficient, not by decomposition quality. It is not evidence that `bigc` is unharmed; it
+  is not a quality discriminator at all.
+- What survives for `bigc` is the 11.4x dead-component count and the shrinking
+  fresh-vs-persistent gap over training. Suggestive, no longer close to conclusive.
+
+`bigc-zeroinit` is now the decisive test rather than a confirmatory one: it removes the
+W-scale junk from unused subcomponents while changing nothing else, so it isolates that one
+mechanism directly.
 
 The one genuine cost, which should be tracked separately from PGD: **fragmentation**.
 Per-position density is flat (+2.5%) while the hidden-net alive set grows 37%. Alive per
