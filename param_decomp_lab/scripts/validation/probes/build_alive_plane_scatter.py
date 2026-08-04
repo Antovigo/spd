@@ -24,6 +24,17 @@ by the **causal importance** of one selected alive subcomponent (role + matrix +
 pickers; CI is a single value per prompt, read at the `=` token from the *original* forward,
 so it colors every panel identically regardless of which source is displayed).
 
+**Component arrows** overlay each alive subcomponent's own direction on the plane, drawn from
+the origin as the displacement it contributes (`dir·w_cos, dir·w_sin`, bias-free). A dropdown
+picks the `U` vectors of the components that write to the stream or the `V` vectors of those
+that read from it; directions are gauge-invariant (`V·‖U‖` / `U·‖V‖`, as in
+`build_direction_scatter`) and reads absorb their RMSNorm gain, since the component sees the
+normalised stream while the panels plot the raw one. Candidates are the **union** of the alive
+lists. Each arrow is gated to the single stream position its matrix actually touches —
+`_arrow_site` derives that from `(layer, matrix)`, so decompositions spanning many layers work
+— and two sliders control a `|proj|` floor and a shared length multiplier. Hovering an
+arrowhead names the subcomponent and gives its in-plane length and angle to the plane.
+
 Every batch is built from prompts of identical token length (no padding / attention mask —
 `ComponentModel`'s masked forward doesn't support either), so the sampled grid is bucketed by
 each prompt's natural (non-zero-padded) token length before batching. This keeps tokenization
@@ -31,9 +42,11 @@ identical to what `collect_resid_stream.py` used to fit the probes being reused 
 projecting fresh activations through their stored `w_cos`/`w_sin` weights stays valid.
 
 Only the projected 2D (or 1D) points are ever written out — never the underlying `d_model`
-activations — plus per-position full-resid-norm deltas (scalars) and CI (base64 uint8, one
-byte per shown point per selected component), so `data.js` stays commensurate with
-`final_plane_scatter`'s even with two or three sources instead of one.
+activations — plus per-position full-resid-norm deltas (scalars), CI (base64 uint8, one byte
+per shown point per selected component), and the arrows' own 2D projections (base64 float16),
+so `data.js` stays commensurate with `final_plane_scatter`'s even with two or three sources
+instead of one. Site gating keeps the arrow block small: a component only needs the planes its
+own column can display, not one per stream position.
 
 An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-GPU SLURM job.
 
@@ -54,14 +67,17 @@ import json
 import shutil
 from collections.abc import Generator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import fire
 import numpy as np
 import torch
+from numpy.typing import NDArray
 from torch import Tensor, nn
 
+from param_decomp.component_model import ComponentModel
 from param_decomp.log import logger
 from param_decomp.masks import make_mask_infos
 from param_decomp.torch_helpers import bf16_autocast
@@ -72,9 +88,11 @@ from param_decomp_lab.scripts.validation.common import (
     SlurmOptions,
     analysis_datasets_dir,
     analysis_dir,
+    b64_f16,
     b64_u8,
     load_lm_run,
     op_symbol,
+    probe_plane_basis,
     read_alive_components,
     submit_self_to_slurm,
 )
@@ -88,6 +106,7 @@ _RESULT_VARIABLE = {"add": "a+b", "sub": "a-b"}
 # Periods the fitted grid has but this applet doesn't show.
 _EXCLUDED_PERIODS = (25, 33)
 Role = Literal["output", "hidden"]
+ArrowRole = Literal["read", "write"]
 
 
 def _layers_from_positions(positions: list[str]) -> list[int]:
@@ -139,6 +158,122 @@ def _comma_list(x: str | tuple[Any, ...]) -> list[str]:
     (see the identical guard around `--ks` in `find_alive_subcomponents.py`).
     """
     return x.split(",") if isinstance(x, str) else [str(v) for v in x]
+
+
+def _arrow_site(layer: int, proj: str) -> tuple[str, str | None, ArrowRole]:
+    """The one captured stream position a decomposed matrix touches, its RMSNorm, and its role.
+
+    Positions follow `_capture_positions`: `L{i}` is block `i`'s output, `L{i}att` the residual
+    after block `i`'s attention (the pre-MLP-norm input). A read also names the RMSNorm whose
+    gain it sees before the weight; a write applies none.
+    """
+    match proj:
+        case "gate_proj" | "up_proj":
+            return f"L{layer}att", f"model.layers.{layer}.post_attention_layernorm", "read"
+        case "q_proj" | "k_proj" | "v_proj":
+            return f"L{layer - 1}", f"model.layers.{layer}.input_layernorm", "read"
+        case "down_proj":
+            return f"L{layer}", None, "write"
+        case "o_proj":
+            return f"L{layer}att", None, "write"
+        case _:
+            raise AssertionError(f"no residual-stream site known for matrix {proj!r}")
+
+
+@dataclass(frozen=True)
+class ArrowCandidate:
+    component: AliveComponent
+    role: ArrowRole
+    site: str
+    norm_module: str | None
+    alive_roles: tuple[Role, ...]
+
+
+def _arrow_candidates(
+    alive: dict[Role, list[AliveComponent]], stream_positions: list[str]
+) -> list[ArrowCandidate]:
+    """The union of the alive lists, each tagged with the stream position it can touch.
+
+    A component whose site falls outside the captured positions has no panel to draw on and is
+    dropped. `alive_roles` records which lists it came from, in `alive`'s order.
+    """
+    roles: dict[tuple[int, str, int], list[Role]] = {}
+    components: dict[tuple[int, str, int], AliveComponent] = {}
+    for role, acs in alive.items():
+        for ac in acs:
+            key = (ac.layer, ac.matrix, ac.component)
+            components[key] = ac
+            roles.setdefault(key, []).append(role)
+    out: list[ArrowCandidate] = []
+    for key in sorted(components):
+        ac = components[key]
+        site, norm_module, arrow_role = _arrow_site(ac.layer, ac.proj)
+        if site not in stream_positions:
+            continue
+        out.append(ArrowCandidate(ac, arrow_role, site, norm_module, tuple(roles[key])))
+    return out
+
+
+def _arrow_directions(
+    model: ComponentModel, candidates: list[ArrowCandidate], d_model: int
+) -> NDArray[np.float32]:
+    """`[n_candidates, d_model]` residual-space direction per candidate.
+
+    Reads use `V[:, c]·‖U[c]‖`, writes `U[c]·‖V[:, c]‖` — `build_direction_scatter`'s product
+    form, invariant to the rank-1 gauge `u → αu, v → v/α` and equal to the residual move per
+    one std of the unit's activation. A read absorbs its RMSNorm gain (`γ ⊙ V`), since the
+    component sees the normalised stream while the panels plot the raw one.
+    """
+    positions_by_module: dict[str, list[int]] = {}
+    for i, candidate in enumerate(candidates):
+        positions_by_module.setdefault(candidate.component.module, []).append(i)
+    out = np.zeros((len(candidates), d_model), np.float32)
+    for module, positions in positions_by_module.items():
+        candidate = candidates[positions[0]]
+        components = model.components[module]
+        v, u = components.V.detach().float(), components.U.detach().float()
+        cs = torch.tensor([candidates[i].component.component for i in positions], device=v.device)
+        if candidate.role == "read":
+            assert candidate.norm_module is not None
+            norm_layer = model.target_model.get_submodule(candidate.norm_module)
+            gain = norm_layer.get_parameter("weight").detach().float()
+            dirs = v[:, cs].T * u[cs].norm(dim=1)[:, None] * gain
+        else:
+            dirs = u[cs] * v[:, cs].norm(dim=0)[:, None]
+        assert dirs.shape == (len(positions), d_model), (
+            f"{module} {candidate.role} directions are {tuple(dirs.shape)}, "
+            f"expected [{len(positions)}, {d_model}]"
+        )
+        out[positions] = dirs.cpu().numpy()
+    return out
+
+
+def _plane_arrows(
+    dirs: NDArray[np.float32], cell: dict[str, Any]
+) -> tuple[dict[str, str], NDArray[np.float32]]:
+    """Per-direction `(cos, sin)` increment on this probe's plane, its angle to it, and its norm.
+
+    The probe bias is deliberately dropped: a panel plots `x·w + b`, so adding `dir` to `x`
+    moves the point by `dir·w` — the arrow is that displacement, drawn from the panel origin.
+    `sin` is all-zero for a 1-D (period-2) probe, matching how the panel draws it. The angle is
+    taken against the plane's orthonormal basis, so it is 0° for a direction lying in the plane
+    and 90° for one orthogonal to it, independent of the probe's scale.
+    """
+    w_cos = np.asarray(cell["w_cos"], np.float32)
+    w_sin = None if cell["w_sin"] is None else np.asarray(cell["w_sin"], np.float32)
+    cos = dirs @ w_cos
+    sin = np.zeros_like(cos) if w_sin is None else dirs @ w_sin
+    e1, e2 = probe_plane_basis(w_cos, w_sin)
+    in_plane = np.hypot(dirs @ e1, dirs @ e2)
+    angle = np.degrees(
+        np.arccos(np.clip(in_plane / np.maximum(np.linalg.norm(dirs, axis=1), 1e-12), 0.0, 1.0))
+    )
+    payload = {"cs": b64_f16(np.stack([cos, sin], axis=1)), "ang": b64_f16(angle)}
+    return payload, np.hypot(cos, sin)
+
+
+def _sig(x: float) -> float:
+    return float(f"{x:.4g}")
 
 
 def build_alive_plane_scatter(
@@ -229,6 +364,20 @@ def build_alive_plane_scatter(
         role: [{"matrix": ac.matrix, "component": ac.component, "layer": ac.layer} for ac in acs]
         for role, acs in alive.items()
     }
+
+    arrow_candidates = _arrow_candidates(alive, layer_keys)
+    # The probe weights define the space the arrows are projected into, so they set `d_model`.
+    a_probe = op_payloads[0][2][layer_keys[0]][_OWN_VARIABLES[0]][str(periods[0])]
+    d_model = len(cast(list[float], a_probe["w_cos"]))
+    arrow_dirs = _arrow_directions(model, arrow_candidates, d_model)
+    arrow_sites: dict[str, list[int]] = {}
+    for i, candidate in enumerate(arrow_candidates):
+        arrow_sites.setdefault(candidate.site, []).append(i)
+    logger.info(
+        f"arrows: {len(arrow_candidates)} alive subcomponents over "
+        f"{ {site: len(idxs) for site, idxs in sorted(arrow_sites.items())} }"
+    )
+    arrow_norms: list[NDArray[np.float32]] = []
 
     rng = np.random.default_rng(seed)
     ops_data: dict[str, Any] = {}
@@ -379,6 +528,25 @@ def build_alive_plane_scatter(
                 prev_x = x
             sources_out[source] = {"own": own, "planes": planes, "resid_delta": resid_delta}
 
+        # Arrows are gated to the one stream position each component touches, so a site only
+        # needs the planes its own column can display: that position's own `a`/`b` probes, and
+        # the result probe of every prepared probe layer.
+        arrows_out: dict[str, dict[str, dict[str, str]]] = {}
+        for site, positions in arrow_sites.items():
+            site_dirs = arrow_dirs[positions]
+            site_planes: dict[str, dict[str, str]] = {}
+            for v in _OWN_VARIABLES:
+                for t in periods:
+                    cell = results[site][v][str(t)]
+                    site_planes[f"{v}|{t}"], norms = _plane_arrows(site_dirs, cell)
+                    arrow_norms.append(norms)
+            for pl, pk in zip(probe_layer_list, probe_keys, strict=True):
+                for t in periods:
+                    cell = results[pk][result_variable][str(t)]
+                    site_planes[f"res|{pl}|{t}"], norms = _plane_arrows(site_dirs, cell)
+                    arrow_norms.append(norms)
+            arrows_out[site] = site_planes
+
         ci_out: dict[str, str] = {}
         for role, acs in alive.items():
             for ac in acs:
@@ -399,6 +567,7 @@ def build_alive_plane_scatter(
             },
             "sources": sources_out,
             "ci": ci_out,
+            "arrows": arrows_out,
         }
         logger.info(
             f"{op}: captured {n_shown} prompts x {len(layer_keys)} positions x {len(sources)} sources"
@@ -409,6 +578,10 @@ def build_alive_plane_scatter(
         if output_dir
         else analysis_dir(run.run_dir) / "alive_plane_scatter"
     )
+    # Arrow projections are orders of magnitude shorter than the cloud (a probe maps a
+    # `d_model` activation to a ~unit cosine, so `‖w‖` is tiny). `mult_default` puts the 99th
+    # percentile arrow at one data unit — roughly the ring radius — as the slider's midpoint.
+    all_arrow_norms = np.concatenate(arrow_norms)
     payload_js = {
         "meta": {
             "positions": layer_keys,
@@ -418,6 +591,23 @@ def build_alive_plane_scatter(
             "max_value": max_value,
             "sources": list(sources),
             "alive_components": alive_components_meta,
+            "arrows": {
+                "components": [
+                    {
+                        "layer": c.component.layer,
+                        "matrix": c.component.matrix,
+                        "component": c.component.component,
+                        "role": c.role,
+                        "site": c.site,
+                        "alive": "+".join(c.alive_roles),
+                    }
+                    for c in arrow_candidates
+                ],
+                "sites": arrow_sites,
+                "norm_hi": _sig(float(np.quantile(all_arrow_norms, 0.999))),
+                "norm_default": _sig(float(np.quantile(all_arrow_norms, 0.9))),
+                "mult_default": _sig(1.0 / max(float(np.quantile(all_arrow_norms, 0.99)), 1e-12)),
+            },
         },
         "ops": ops_data,
     }

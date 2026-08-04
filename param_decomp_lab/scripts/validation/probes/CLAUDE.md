@@ -64,6 +64,39 @@ matrix + component pickers, gated by that role's alive list; CI is one value per
 from the real-model forward, so it colors every panel identically regardless of which
 source is shown).
 
+**Component arrows** overlay each alive subcomponent's own direction on the panel's plane,
+drawn from the origin as the displacement it contributes (`dir·w_cos, dir·w_sin`; the probe
+bias is dropped, since a panel plots `x·w + b` and adding `dir` to `x` moves the point by
+`dir·w`). A dropdown picks the **U** vectors of the components that *write* to the stream or
+the **V** vectors of those that *read* from it. Directions use the same gauge-invariant
+product form as `build_direction_scatter` (`V[:,c]·‖U[c]‖` read, `U[c]·‖V[:,c]‖` write), and a
+read absorbs its RMSNorm gain (`γ ⊙ V`) because the component sees the normalised stream while
+the panels plot the raw one. Candidates are the **union** of the output- and hidden-alive
+lists; the tooltip says which lists each came from.
+
+Each arrow is drawn **only in the column whose stream position that component actually
+touches** — `_arrow_site` derives that from `(layer, matrix)`, so a decomposition spanning
+many layers works without changes:
+
+| matrix | role | site |
+|---|---|---|
+| `mlp.down_proj` | write (U) | `L{ℓ}` |
+| `self_attn.o_proj` | write (U) | `L{ℓ}att` |
+| `mlp.{gate,up}_proj` | read (V) | `L{ℓ}att` |
+| `self_attn.{q,k,v}_proj` | read (V) | `L{ℓ-1}` |
+
+A component whose site isn't among the captured positions has no panel to draw on and is
+dropped; for a single-layer decomposition most columns stay empty. Two sliders: **min |proj|**
+(a floor on the in-plane 2D norm, in data units, defaulting to the 90th percentile of the
+shipped norms) and **length** (a shared multiplier, ±2 decades around `mult_default`, which
+puts the 99th-percentile arrow at one data unit — a probe maps a `d_model` activation to a
+~unit cosine, so `‖w‖` is tiny and raw `dir·w` projections are orders of magnitude shorter
+than the cloud). Relative lengths are always preserved, so arrows stay comparable. Hovering an
+arrowhead — the outer half of the shaft is the hit target, since every arrow starts at the
+origin and the inner half is an unresolvable pile-up — names the subcomponent and gives
+`|proj|` plus the angle to the plane (0° = it lies in the plane, 90° = orthogonal), taken
+against the plane's orthonormal basis via the shared `common.probe_plane_basis`.
+
 **view** (client-side only, no data regeneration needed — everything is already in
 `data.js`) toggles the grid's column axis: **all layers** (default) fixes one period and
 sweeps stream positions, matching `final_plane_scatter`; **all periods** fixes one layer
@@ -98,8 +131,11 @@ Batches are grouped by each sampled prompt's natural (non-zero-padded) token len
 than padded, since `ComponentModel`'s masked forward has no attention-mask support — this
 also keeps tokenization identical to what `collect_resid_stream.py` used to fit the probes,
 so reusing their weights on freshly captured activations stays valid. Only 2D/1D projected
-points + scalar deltas + CI (base64 uint8) are ever serialized, never raw `d_model`
-activations.
+points + scalar deltas + CI (base64 uint8) + the arrows' 2D projections and angles (base64
+float16) are ever serialized, never raw `d_model` activations. Site gating keeps the arrow
+block small — a component only needs the planes its own column can display (that position's
+own `a`/`b` probes plus each prepared probe layer's result probe), not one per stream
+position.
 
 ```bash
 uv run python -m param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter \

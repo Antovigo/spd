@@ -65,6 +65,7 @@ from param_decomp_lab.scripts.validation.common import (
     b64_u8,
     load_component_uv,
     load_target_mlp_weights,
+    probe_plane_basis,
     read_alive_components,
 )
 
@@ -152,15 +153,10 @@ def _write_candidates(
 
 
 def _ortho_plane(probe: dict[str, Any]) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-    """Orthonormal basis `(e1, e2)` of the probe plane `span(w_cos, w_sin)`, for the direction→plane
-    angle. `e2 = 0` when the plane is degenerate (period-2 `sin ≡ 0`), collapsing to the cos axis."""
-    w_cos = np.asarray(probe["w_cos"], np.float32)
-    w_sin = np.asarray(probe["w_sin"], np.float32)
-    e1 = w_cos / max(float(np.linalg.norm(w_cos)), 1e-12)
-    perp = w_sin - (w_sin @ e1) * e1
-    n_perp = float(np.linalg.norm(perp))
-    e2 = perp / n_perp if n_perp > 1e-6 else np.zeros_like(e1)
-    return e1, e2
+    """Orthonormal basis of this probe's plane, for the direction→plane angle."""
+    return probe_plane_basis(
+        np.asarray(probe["w_cos"], np.float32), np.asarray(probe["w_sin"], np.float32)
+    )
 
 
 def _subcomp_dirs(

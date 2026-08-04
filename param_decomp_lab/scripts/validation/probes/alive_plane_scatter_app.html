@@ -24,6 +24,9 @@
              border-radius: 4px; font-size: 12px; display: none; z-index: 5; white-space: pre; }
   #cicontrols { display: none; }
   #layerctrl { display: none; }
+  #dirarrowsctrl input[type=range] { width: 96px; vertical-align: middle; }
+  #dirarrowsctrl > * { margin-right: 4px; }
+  .dirnum { color: #666; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -45,7 +48,19 @@ points, so they're directly comparable.
 importance</b> colours every panel by one selected alive subcomponent's CI on that prompt
 (read from the real model, so it doesn't depend on which source is shown). The
 Δ-from-previous-position colour modes and displacement arrows only make sense across
-stream positions, so they're disabled in the all-periods view. Dashed lines mark each
+stream positions, so they're disabled in the all-periods view.
+<b>component arrows</b> overlays each alive subcomponent's own direction on the plane,
+drawn from the origin as the displacement it contributes: <b>U</b> shows the components
+that <i>write</i> to the stream, <b>V</b> those that <i>read</i> from it (read directions
+include their RMSNorm gain). Each arrow appears only in the column whose stream position
+that component actually touches — a layer-ℓ <code>down_proj</code> write at
+<b>after ℓ</b>, a <code>gate</code>/<code>up</code> read at <b>attn ℓ</b>, a
+<code>q</code>/<code>k</code>/<code>v</code> read at <b>after ℓ−1</b> — so most columns
+stay empty for a single-layer decomposition. <b>min |proj|</b> hides arrows whose
+in-plane length is below the threshold; <b>length</b> scales every arrow by a common
+factor (relative lengths are preserved, so arrows stay comparable). Hover an arrowhead
+for the subcomponent's name, in-plane length, and angle to the plane (0° = it lies in the
+plane, 90° = orthogonal to it). Dashed lines mark each
 panel's zero; tick labels give the axes' scale and sign. Panels default to centred on the
 origin, sized to fit the <b>real model's own</b> cloud (with slack) — reproducible across
 separate renderings of this applet on the same base model and probes, regardless of which
@@ -75,6 +90,20 @@ reset — one row's panels share a frame, so zooming any of them zooms the whole
   </span>
   <span id="arrowsctrl"><label><input type="checkbox" id="arrows"> arrows from previous position</label></span>
 </div>
+<div class="controls">
+  <span id="dirarrowsctrl">
+    <label><input type="checkbox" id="dirarrows"> component arrows</label>
+    <select id="dirrole">
+      <option value="write">U — components writing to the plane</option>
+      <option value="read">V — components reading from the plane</option>
+    </select>
+    <label>min |proj|</label><input type="range" id="dirthr" min="0" max="1" step="0.002">
+    <span id="dirthrlabel" class="dirnum"></span>
+    <label>length</label><input type="range" id="dirscale" min="-2" max="2" step="0.05" value="0">
+    <span id="dirscalelabel" class="dirnum"></span>
+    <span id="dircount" class="dirnum"></span>
+  </span>
+</div>
 <div id="legend">
   <span id="stats"></span>
   <canvas id="cbar" width="200" height="13"></canvas>
@@ -102,9 +131,12 @@ const VIRIDIS = [[68,1,84],[70,7,90],[71,13,96],[71,19,101],[72,24,106],[72,29,1
 const PANEL = 158;                            // CSS px; 7 columns fit one display row
 const DPR = window.devicePixelRatio || 1;
 const $ = id => document.getElementById(id);
+const ARROWS = D.meta.arrows;
+const ARROW_COLOR = { write: "#c1121f", read: "#1d4e89" };
 const state = {
   op: null, view: "layers", period: null, layer: null, probeLayer: null, colorby: "value",
   arrows: false, source: "original", ciRole: "output", ciMatrix: null, ciComponent: null,
+  dirArrows: false, dirRole: "write", dirThrFrac: 0, dirScale: 0,
 };
 
 function fillSelect(sel, items, labels) {
@@ -120,6 +152,21 @@ function b64ToUint8(b64) {
   const arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return arr;
+}
+function decodeF16(b64) {
+  const bin = atob(b64), n = bin.length / 2, out = new Float32Array(n);
+  const dv = new DataView(new ArrayBuffer(2));
+  for (let i = 0; i < n; i++) {
+    dv.setUint8(0, bin.charCodeAt(2 * i)); dv.setUint8(1, bin.charCodeAt(2 * i + 1));
+    const h = dv.getUint16(0, true);
+    const s = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, f = h & 0x03ff;
+    let v;
+    if (e === 0) v = (s ? -1 : 1) * Math.pow(2, -14) * (f / 1024);
+    else if (e === 0x1f) v = f ? NaN : (s ? -Infinity : Infinity);
+    else v = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+    out[i] = v;
+  }
+  return out;
 }
 
 // Default probe layer: L20 when available (matches the generator's own --probe-layers
@@ -424,18 +471,95 @@ function drawAxes(ctx, f, oneD) {
   ctx.restore();
 }
 
+// ---- component arrows -----------------------------------------------------------------
+// One subcomponent's residual-space direction projected on the panel's probe plane, drawn
+// from the origin as the displacement it contributes. Gated to the single column whose
+// stream position that component reads from / writes to (meta.arrows.sites).
+const arrowCache = {};
+function arrowsFor(site, planeKey) {
+  const bySite = D.ops[state.op].arrows[site];
+  const rec = bySite && bySite[planeKey];
+  if (!rec) return null;
+  const key = [state.op, site, planeKey].join("|");
+  if (!arrowCache[key]) arrowCache[key] = { cs: decodeF16(rec.cs), ang: decodeF16(rec.ang) };
+  return arrowCache[key];
+}
+function arrowMult() { return ARROWS.mult_default * Math.pow(10, state.dirScale); }
+function arrowThreshold() { return state.dirThrFrac * ARROWS.norm_hi; }
+function planeKeyFor(row, col) {
+  return row.kind === "own" ? `${row.variable}|${col.period}`
+                            : `res|${state.probeLayer}|${col.period}`;
+}
+function drawArrowhead(ctx, x0, y0, x1, y1) {
+  const a = Math.atan2(y1 - y0, x1 - x0), h = 5;
+  ctx.beginPath(); ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - h * Math.cos(a - 0.45), y1 - h * Math.sin(a - 0.45));
+  ctx.lineTo(x1 - h * Math.cos(a + 0.45), y1 - h * Math.sin(a + 0.45));
+  ctx.closePath(); ctx.fill();
+}
+// Returns the drawn arrows' geometry, for hover hit-testing.
+function drawComponentArrows(ctx, row, ci, f) {
+  const col = columns()[ci];
+  const idxs = ARROWS.sites[col.layer];
+  if (!idxs) return [];
+  const rec = arrowsFor(col.layer, planeKeyFor(row, col));
+  if (!rec) return [];
+  const thr = arrowThreshold(), mult = arrowMult();
+  const origin = toPx([0, 0], f);
+  const drawn = [];
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = ARROW_COLOR[state.dirRole];
+  ctx.fillStyle = ARROW_COLOR[state.dirRole];
+  ctx.globalAlpha = 0.8;
+  for (let k = 0; k < idxs.length; k++) {
+    if (ARROWS.components[idxs[k]].role !== state.dirRole) continue;
+    const c = rec.cs[2 * k], s = rec.cs[2 * k + 1];
+    const norm = Math.hypot(c, s);
+    if (norm < thr) continue;
+    const tip = toPx([c * mult, s * mult], f);
+    ctx.beginPath(); ctx.moveTo(origin[0], origin[1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
+    drawArrowhead(ctx, origin[0], origin[1], tip[0], tip[1]);
+    drawn.push({ comp: idxs[k], x0: origin[0], y0: origin[1], x: tip[0], y: tip[1],
+                 norm: norm, ang: rec.ang[k] });
+  }
+  ctx.restore();
+  return drawn;
+}
+// Hit-test the outer half of each arrow: every arrow starts at the origin, so the inner half
+// is a pile-up that can't be disambiguated by the cursor.
+function nearestArrow(r, ci, mx, my) {
+  const arr = lastArrows[r] && lastArrows[r][ci];
+  if (!arr) return null;
+  let best = null, bd = 25;                    // within 5px
+  for (let i = 0; i < arr.length; i++) {
+    const a = arr[i];
+    const hx = (a.x0 + a.x) / 2, hy = (a.y0 + a.y) / 2;
+    const vx = a.x - hx, vy = a.y - hy, len2 = vx * vx + vy * vy;
+    let t = len2 > 0 ? ((mx - hx) * vx + (my - hy) * vy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const dx = mx - (hx + t * vx), dy = my - (hy + t * vy);
+    const d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+
 let lastPx = [];   // [rowIdx][ci] -> point pixel positions, for hover
+let lastArrows = [];  // [rowIdx][ci] -> drawn component arrows, for hover
 let lastQ95 = 1;
 let snapshots = [];  // [rowIdx][ci] -> clean ImageData, restored under the hover marker
-let hoverIdx = null;
+let hover = null;    // {kind:"point", idx} | {kind:"arrow", r, ci, ai}
 function drawAll() {
   const rows = rowDefs();
   const cols = columns();
   const q95 = (state.colorby === "value" || state.colorby === "ci") ? 1 : sharedQ95();
   lastQ95 = q95;
   lastPx = rows.map(() => new Array(cols.length));
+  lastArrows = rows.map(() => new Array(cols.length));
   snapshots = rows.map(() => new Array(cols.length));
-  hoverIdx = null;
+  hover = null;
+  let nArrowsDrawn = 0;
   const n = nPoints();
   rows.forEach((row, r) => {
     rowLabelDivs[r].textContent = row.label;
@@ -471,31 +595,52 @@ function drawAll() {
         ctx.beginPath(); ctx.arc(p[0], p[1], 1.3, 0, 2 * Math.PI); ctx.fill();
       }
       ctx.globalAlpha = 1;
+      const drawn = state.dirArrows ? drawComponentArrows(ctx, row, ci, f) : [];
+      nArrowsDrawn += drawn.length;
       const s = row.kind === "own" ? cd.stats[col.layer] : cd.stats;
       ctx.font = "9px sans-serif";
       ctx.fillStyle = s.accepted ? "#555" : "#b00020";
       ctx.fillText(s.accepted ? `R²=${s.cv_r2.toFixed(2)}` : "gated", 4, 11);
       lastPx[r][ci] = px;
+      lastArrows[r][ci] = drawn;
       snapshots[r][ci] = ctx.getImageData(0, 0, cv.width, cv.height);
     }
   });
+  $("dircount").textContent = state.dirArrows
+    ? `${nArrowsDrawn} arrow${nArrowsDrawn === 1 ? "" : "s"} shown`
+    : "";
   drawLegend(q95);
 }
 
-function setHover(idx) {                      // mark the homologous point on every panel
-  if (idx === hoverIdx) return;
-  hoverIdx = idx;
+// A point hover marks the homologous point on every panel; an arrow hover highlights that one
+// arrow on its own panel. Both restore the clean snapshot first, so they never stack up.
+function hoverKey(h) {
+  if (!h) return null;
+  return h.kind === "point" ? `p${h.idx}` : `a${h.r}|${h.ci}|${h.ai}`;
+}
+function setHover(h) {
+  if (hoverKey(h) === hoverKey(hover)) return;
+  hover = h;
   for (let r = 0; r < canvases.length; r++)
     for (let ci = 0; ci < canvases[r].length; ci++) {
       const cv = canvases[r][ci], ctx = cv.getContext("2d");
       ctx.putImageData(snapshots[r][ci], 0, 0);
-      if (idx === null) continue;
-      const p = lastPx[r][ci][idx];
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
-      ctx.lineWidth = 3; ctx.strokeStyle = "#ffffff"; ctx.stroke();
-      ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
-      ctx.lineWidth = 1.5; ctx.strokeStyle = "#ff3b30"; ctx.stroke();
+      if (!h) continue;
+      if (h.kind === "point") {
+        const p = lastPx[r][ci][h.idx];
+        ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
+        ctx.lineWidth = 3; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+        ctx.beginPath(); ctx.arc(p[0], p[1], 4.5, 0, 2 * Math.PI);
+        ctx.lineWidth = 1.5; ctx.strokeStyle = "#ff3b30"; ctx.stroke();
+      } else if (h.r === r && h.ci === ci) {
+        const a = lastArrows[r][ci][h.ai];
+        ctx.beginPath(); ctx.moveTo(a.x0, a.y0); ctx.lineTo(a.x, a.y);
+        ctx.lineWidth = 3.5; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+        ctx.lineWidth = 2; ctx.strokeStyle = "#ff9500";
+        ctx.fillStyle = "#ff9500"; ctx.stroke();
+        drawArrowhead(ctx, a.x0, a.y0, a.x, a.y);
+      }
     }
 }
 
@@ -534,13 +679,26 @@ grid.addEventListener("mousemove", e => {
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
   const px = lastPx[r] && lastPx[r][ci];
   if (!px) return;
+  const ai = state.dirArrows ? nearestArrow(r, ci, mx, my) : null;
+  if (ai !== null) {
+    const a = lastArrows[r][ci][ai], comp = ARROWS.components[a.comp];
+    setHover({ kind: "arrow", r, ci, ai });
+    tip.textContent = `L${comp.layer} ${comp.matrix}[${comp.component}]` +
+      `\n${comp.role === "write" ? "U — writes to" : "V — reads from"} ${posLabel(comp.site)}` +
+      `\n|proj| = ${a.norm.toPrecision(3)}   ${a.ang.toFixed(0)}° to plane` +
+      `\nalive: ${comp.alive}`;
+    tip.style.display = "block";
+    tip.style.left = (e.clientX + 14) + "px";
+    tip.style.top = (e.clientY + 8) + "px";
+    return;
+  }
   let best = -1, bd = 100;
   for (let i = 0; i < px.length; i++) {
     const d = (px[i][0] - mx) ** 2 + (px[i][1] - my) ** 2;
     if (d < bd) { bd = d; best = i; }
   }
   if (best < 0) { tip.style.display = "none"; setHover(null); return; }
-  setHover(best);
+  setHover({ kind: "point", idx: best });
   const row = rowDefs()[r];
   const col = columns()[ci];
   const ab = D.ops[state.op].ab, v = D.ops[state.op].values[row.variable][best];
@@ -667,6 +825,31 @@ $("cirole").addEventListener("change", () => { state.ciRole = $("cirole").value;
 $("cimatrix").addEventListener("change", () => { state.ciMatrix = $("cimatrix").value; populateCiComponents(); drawAll(); });
 $("cicomponent").addEventListener("change", () => { state.ciComponent = $("cicomponent").value; drawAll(); });
 $("arrows").addEventListener("change", () => { state.arrows = $("arrows").checked; drawAll(); });
+
+// Component arrows: threshold rides on the shipped in-plane norms (0 .. norm_hi), and the
+// length slider is a decade either side of the data-derived default multiplier.
+state.dirThrFrac = ARROWS.norm_hi > 0 ? ARROWS.norm_default / ARROWS.norm_hi : 0;
+$("dirthr").value = state.dirThrFrac;
+function updateArrowLabels() {
+  $("dirthrlabel").textContent = arrowThreshold().toPrecision(3);
+  $("dirscalelabel").textContent = "×" + arrowMult().toPrecision(3);
+}
+updateArrowLabels();
+$("dirarrows").addEventListener("change", () => {
+  state.dirArrows = $("dirarrows").checked;
+  drawAll();
+});
+$("dirrole").addEventListener("change", () => { state.dirRole = $("dirrole").value; drawAll(); });
+$("dirthr").addEventListener("input", () => {
+  state.dirThrFrac = +$("dirthr").value;
+  updateArrowLabels();
+  drawAll();
+});
+$("dirscale").addEventListener("input", () => {
+  state.dirScale = +$("dirscale").value;
+  updateArrowLabels();
+  drawAll();
+});
 drawAll();
 </script>
 </body>

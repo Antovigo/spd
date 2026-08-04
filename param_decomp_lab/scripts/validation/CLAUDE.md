@@ -135,6 +135,8 @@ reimplementing. Implemented so far:
   (optionally filtered to given proj names); `read_mean_ci` reads an `alive_filtered_<op>.tsv`
   into a `(proj, component) -> mean CI` map; `read_subcomp_periods` reads a `subcomp_periods`
   TSV; `square_grid_size` returns the grid side `n` while asserting full unique coverage;
+  `probe_plane_basis` returns a Fourier probe plane's orthonormal basis (zero second axis when
+  the plane is degenerate), for direction-to-plane angles;
   `load_component_uv` mmap-loads per-matrix `(V, U)` from a checkpoint; `load_target_mlp_weights`
   mmap-loads the frozen target MLP weights `W [d_out, d_in]` (a neuron's read row / write column).
 
