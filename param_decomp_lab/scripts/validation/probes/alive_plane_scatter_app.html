@@ -124,7 +124,7 @@ function b64ToUint8(b64) {
 
 // Default probe layer: L20 when available (matches the generator's own --probe-layers
 // default), else whichever the run was actually prepared with.
-const DEFAULT_PROBE_LAYER = D.meta.probe_layers.includes(20) ? 20 : D.meta.probe_layers[0];
+const DEFAULT_PROBE_LAYER = D.meta.probe_layers.includes(18) ? 18 : D.meta.probe_layers[0];
 fillSelect($("op"), Object.keys(D.ops));
 state.op = $("op").value;
 fillSelect($("period"), PERIODS.map(String));

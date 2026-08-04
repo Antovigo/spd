@@ -11,9 +11,9 @@ baseline (non-dual) and a dual run of the same decomposition is how you see what
 hidden-CI net actually changed.
 
 Two rows (`a @ layer`, `b @ layer`, the layer-of-interest's own probes) plus a result row
-fixed to one probe layer at a time (`--probe-layers`, default `20`; pass a comma-separated
-list — e.g. `18,19,20` — to prepare more than one, and the applet gets a dropdown to switch
-between them, defaulting to L20 when present) — the `<result> @ layer` own-probe row of
+fixed to one probe layer at a time (`--probe-layers`, default `18`, the decomposed layer;
+pass a comma-separated list — e.g. `18,20` — to prepare more than one, and the applet gets a dropdown to switch
+between them, defaulting to L18 when present) — the `<result> @ layer` own-probe row of
 `final_plane_scatter` is dropped. Every requested probe layer's projection is derived from
 the *same* captured activations (the ridge-CV fit already has a probe per layer; adding more
 probe layers costs extra CPU-side projection, not extra GPU forward passes). Color by `value
@@ -40,7 +40,7 @@ An 8B forward needs a GPU; pass `--slurm` to submit this invocation as a single-
 Usage:
     python -m param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter \
         <model_path> <ridge_cv_probes_add.json> [<ridge_cv_probes_sub.json> ...] \
-        [--probe-layers=20|18,19,20] [--n-show=2000] [--seed=0] [--alpha=0.05] \
+        [--probe-layers=18|18,20] [--n-show=2000] [--seed=0] [--alpha=0.05] \
         [--batch-size=256] [--output-dir=DIR] \
         [--slurm [--gpus=1 --slurm-time=2:00:00 --slurm-mem=...]]
 
@@ -144,7 +144,7 @@ def _comma_list(x: str | tuple[Any, ...]) -> list[str]:
 def build_alive_plane_scatter(
     model_path: ModelPath,
     *ridge_cv_jsons: str,
-    probe_layers: str = "20",
+    probe_layers: str = "18",
     n_show: int = 2000,
     seed: int = 0,
     alpha: float = 0.05,

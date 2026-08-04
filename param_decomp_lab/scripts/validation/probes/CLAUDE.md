@@ -73,7 +73,8 @@ colorby modes (`plane`/`resid`) and displacement arrows are layers-view-only —
 "previous" position when columns are periods — and get disabled (auto-falling back to
 `value`) when switching to the periods view.
 
-**`--probe-layers`** (default `20`, comma-separated for more — e.g. `18,19,20`) picks
+**`--probe-layers`** (default `18`, the decomposed layer; comma-separated for more — e.g.
+`18,20`) picks
 which layer(s)' probe the result row is fixed to. The ridge-CV fit already has a probe per
 layer, so adding more probe layers costs only extra CPU-side projection of the *already
 captured* activations, not extra GPU forward passes. The applet always shows a `probe
