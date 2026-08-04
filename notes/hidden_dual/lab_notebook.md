@@ -722,3 +722,28 @@ misleading cross-C one; quote it beside C, or switch to an L1-budgeted attack.
 big-C's clean reconstruction (0.00160 vs reference 0.00175) with the smallest alive set of the
 three, i.e. the fragmentation cost of raising C disappears. It costs a little hidden
 reconstruction (0.03572 vs 0.03386).
+
+## 2026-08-04 — applet audit + the DAG was over-serialised
+
+Audit of the `-11` series against both applets (`subspace_scatter`, `alive_plane_scatter`):
+`bigc`, `press2` and `bigc-mlp` have both, all built after the dual-role-alive-list fix landed
+at 03:00 (48-50 MB subspace, ~80 MB plane `data.js`). `bigc-zeroinit`'s DAG is running now;
+`press5` is chained behind its resume.
+
+**`collect_hidden_activations` takes no alive list** — no `alive_tsv` argument, no reference to
+one — so chaining it on `find_alive_subcomponents` in `submit_applets.py` was pure
+over-serialisation. Its only real precondition is the checkpoint existing. Fixed: it now
+depends on the *training* job (or nothing, for a finished run), which puts three GPU jobs in
+flight from the start instead of one. Only `collect_inner_activations` genuinely needs the
+alive list.
+
+Rewired `bigc-zeroinit` mid-flight to prove it: its two hidden collectors now run alongside the
+alive sweep rather than after it, so the node went from 1 GPU busy to 3.
+
+**press5 cannot be resumed on more GPUs.** The obvious throughput lever — resume on 4 GPUs
+instead of 2 — is blocked: with `scope: per_batch_per_position` the PPGD source shape carries
+the per-rank batch dim, and `PersistentPGDState.load_state_dict` documents "Shapes must already
+match" and does a bare `copy_`. Going 2 -> 4 GPUs changes per-rank batch 64 -> 32 and the restore
+would fail. Optimizer state survives a topology change (it is keyed by parameter name); PPGD
+state does not. So press5's ~10 h tail is irreducible, and 4 GPUs will sit idle through it
+unless unrelated work is queued.
