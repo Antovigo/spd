@@ -640,3 +640,33 @@ fewer. `down-only` has the densest hidden `down_proj` (25.7/position) and the lo
 anomaly rate (0.16%); `baseline` has 10.6 and 1.87%. The anomaly ordering *is* the hidden
 density ordering, both driven by `1/n_sites`. So anomaly rate is not a clean cross-arm measure
 of disagreement between the nets — worth remembering before using it as a selection criterion.
+
+## 2026-08-04 — paused press5 at 10k to free GPUs for the applet DAGs
+
+All 6 GPUs were held by the three training runs, so the ~60 queued applet jobs could not
+start. Paused `addsub-L18-11-press5` at exactly step 10000 (`training_10000.pth`, 17.9 GB,
+already on disk) rather than waiting ~9.5 h for it to finish. Both `press2`'s and `bigc`'s
+`find_alive_subcomponents` started on the freed pair within seconds.
+
+Resume is safe and automatic: `TrainingState` carries optimizer *and* PersistentPGD adversary
+state, and `_resume_main` **continues the parent run in place** when no `--run_id` is passed —
+same folder, same wandb run — so `model_20000.pth` still lands in `addsub-L18-11-press5/`.
+Job 6755 (`resume_ddp.sbatch` + `resume_press5.yaml`) is chained `afterany` on press2's six
+GPU applet jobs, so press5 restarts by itself once those are done. Cost of the pause: under
+500 steps, since press5 was between evals at 10000 and 10500.
+
+Gotcha worth remembering: cancelling the training job strands anything chained on it.
+press5's own applet DAG (6722-6730) went `DependencyNeverSatisfied` the moment 6656 was
+cancelled; cancelled and resubmitted as 6756-6764, chained on the resume job instead.
+
+**The two `addsub-L18-10-dual-nobeta2.5*` run directories have been deleted** — checkpoints,
+metrics, configs, all gone. That is why their applet DAGs (18 jobs, 6704-6721) vanished from
+the queue: the roots failed once their checkpoints disappeared. They cannot be resubmitted.
+`sacct` has no accounting DB on this cluster and `MinJobAge=300`, so vanished jobs leave no
+trace — worth knowing when a submitted DAG silently thins out. Disk is at 90% (3.8 T free).
+
+Also confirmed a cluster quirk the hard way: **`--gpus=0` SLURM jobs still see every GPU on
+the node**, so anything calling `load_lm_run` resolves to cuda and contends with the training
+runs (an ad-hoc CPU benchmark OOMed against one and was cancelled; no harm to the run). The
+real CPU-only validation scripts — `build_subspace_scatter`, `compute_subcomp_periods` — carry
+no cuda or model-loading references at all, so they are unaffected.
