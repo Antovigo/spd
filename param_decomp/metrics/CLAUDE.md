@@ -44,6 +44,14 @@ Two interchangeable CI-sparsity penalties, same `sum + beta·entropy` shape:
   Geman–McClure `c²/(c²+γ²)`: flat at 0, saturating to 1, bounded gradient `~0.65/γ` near
   `c≈γ`. Drop-in alternative avoiding the `L_p` cliff; `γ` anneals like `p`. Self-contained.
 
+Both also carry the same **coefficient schedule** (`coeff_warmup_frac`,
+`coeff_peak_multiplier`, `coeff_anneal_start_frac`, `coeff_anneal_end_frac`): ramp
+`0 → peak` over the warmup, hold, then ramp `peak → 1.0` across the anneal window.
+Defaults are a no-op. It scales the **live training loss only** — `compute()`'s logged
+sparsity proxy is unscaled, so train and eval log keys differ by the multiplier while the
+schedule is above 1.0. `build_nontarget_loss_configs` copies the whole config, so a
+targeted run's nontarget impmin inherits the same schedule on top of its `impmin_ratio`.
+
 Both are registered eval-side (`EVAL_METRIC_CLASSES` + `AnyEvalMetricConfig`), so a run driven
 by one can log the other as an eval-only sparsity proxy. The directly comparable cross-run
 sparsity number is `CI_L0`; each penalty's own `_no_beta` proxy is on its own scale.
