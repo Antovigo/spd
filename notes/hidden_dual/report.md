@@ -352,3 +352,61 @@ measured 1.25x ratio is therefore a floor on both ends.
 
 Next C allocation should give attention room to breathe — q/k 256, v/o 512 — before the
 output-vs-hidden ratio is quoted as a number rather than a bound.
+
+## Active components at the answer position (addsub-L18-11-bigc, step 20000)
+
+The counts above are whole-sequence. At the **last position** — the `=` token, where the
+answer is produced — the picture is much sparser and the two nets diverge far more.
+
+![Active components at the last position](figures/active_at_last_position_bigc.png)
+
+Components with lower-leaky CI > 0.1 at position 4 of each 5-token prompt, counted per
+prompt over all 20000 addsub prompts. Nothing is filtered to the alive set — every
+component is counted (see caveat below).
+
+| site | C | out mean | out median [q25,q75] | hid mean | hid median [q25,q75] |
+|---|---|---|---|---|---|
+| attn.q_proj | 512 | 2.26 | 2 [2,2] | 11.02 | 11 [10,12] |
+| attn.k_proj | 512 | 0.01 | 0 [0,0] | 6.41 | 6 [5,8] |
+| attn.v_proj | 1024 | 0.00 | 0 [0,0] | 11.75 | 12 [10,13] |
+| attn.o_proj | 1024 | 4.40 | 4 [3,6] | 24.84 | 24 [21,27] |
+| **attention** | **3072** | **6.67** | | **54.02** | |
+| mlp.gate_proj | 1024 | 10.89 | 11 [9,13] | 16.64 | 17 [14,19] |
+| mlp.up_proj | 1024 | 11.33 | 11 [9,14] | 20.60 | 21 [18,23] |
+| mlp.down_proj | 1024 | 13.59 | 14 [11,16] | 23.71 | 24 [21,27] |
+| **MLP** | **3072** | **35.81** | | **60.94** | |
+| **total** | **6144** | **42.47** | 42 [37,48] | **114.97** | 116 [106,125] |
+
+At the answer position the output circuit is 42 components wide out of 6144, and 36 of
+those 42 are MLP. Attention contributes 6.67 on average, and two of its four matrices
+contribute essentially nothing: `k_proj` fires 0.01 components per prompt and `v_proj`
+0.00 — over 20000 prompts their medians and both quartiles are 0. `q_proj` is rigid rather
+than absent: 2 components on virtually every prompt (q25 = q75 = min = 2).
+
+The hidden net needs 2.71x more (114.97 vs 42.47), and again the surplus is attention:
+6.67 -> 54.02 (8.1x) against 35.81 -> 60.94 (1.7x) for the MLP. `k_proj` and `v_proj` go
+from ~0 to 6.41 and 11.75.
+
+The k/v result has a mechanical reading that should be checked before it is treated as
+evidence for the hidden-importance claim: under causal attention the last token's own keys
+and values are consumed only by the last token's own query, so their contribution to the
+output at that position is nearly self-attention alone. Output CI ~0 is then expected, and
+the interesting quantity is the hidden count being non-zero — the site activations still
+require components that the logits do not. Distinguishing "hidden-only mechanism" from
+"the output objective has no gradient here" needs the k/v counts at *earlier* positions,
+where those keys and values actually get attended to. Not measured yet.
+
+### Caveat on the existing per-position dataset
+
+`datasets/alive_subcomponents_per_position.json` records CI > 0.1 per (prompt, position)
+and looks like the natural source for this, but `find_alive_subcomponents.py` filters those
+lists to the KL-selected alive set before writing (656 of 6144 components for this run), so
+counting it answers a different question and undercounts by roughly an order of magnitude.
+The numbers above come from a fresh forward pass; the script is
+`pd_scratch/hidden_dual/plot_last_pos_active.py` and the per-site summary is written to
+`datasets/active_at_last_position.tsv`.
+
+Note the -11 runs were trained on `feature/hidden_site_targets`, whose `PDConfig` carries a
+`hidden_readout_sites` field absent from `feature/dual_hidden_acts`. Loading any -11
+checkpoint therefore has to run from the `hidden-site-targets` worktree — pydantic rejects
+the extra key otherwise.
