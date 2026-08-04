@@ -747,3 +747,23 @@ match" and does a bare `copy_`. Going 2 -> 4 GPUs changes per-rank batch 64 -> 3
 would fail. Optimizer state survives a topology change (it is keyed by parameter name); PPGD
 state does not. So press5's ~10 h tail is irreducible, and 4 GPUs will sit idle through it
 unless unrelated work is queued.
+
+## 2026-08-04 — alive_plane_scatter: L18 probes, and L18 as the default
+
+`alive_plane_scatter` was projecting only onto layer 20's probes — inherited from the Feucht
+readout setup, not from anything about these runs. The ridge-CV probes cover
+`L14 … L18att, L18, … L20`, so L18 (the decomposed layer itself) was available all along;
+`--probe-layers` just defaulted past it.
+
+Changed the default from `20` to `18` in `build_alive_plane_scatter`, and the applet's
+dropdown (`DEFAULT_PROBE_LAYER` in `alive_plane_scatter_app.html`) now opens on L18 when
+present — the flag default and the applet default were set independently and would otherwise
+disagree. `submit_applets.py` passes `--probe-layers=18,20` so both panels ship.
+
+Rebuilt for `addsub-L18-11-press2` only, on instruction: payload confirms
+`probe_layers: [18, 20]` with all three sources (`original`, `hidden_alive`, `output_alive`),
+107.6 MB. The other four keep their L20-only applets for now; rerun
+`build_alive_plane_scatter` per run to upgrade them.
+
+press5's resume started once the outstanding applet jobs cleared and is ~9 h from step 20000.
+Its own DAG (6863-6870 plus plane 6879, already set to `18,20`) is chained behind it.
