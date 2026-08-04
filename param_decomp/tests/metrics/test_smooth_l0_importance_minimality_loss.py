@@ -2,11 +2,14 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
 import torch
+from pydantic import ValidationError
 
 from param_decomp.metrics.smooth_l0_importance_minimality import (
     SmoothL0ImportanceMinimalityLoss,
     SmoothL0ImportanceMinimalityLossConfig,
+    _get_coeff_multiplier,
     _get_linear_annealed_gamma,
     smooth_l0_importance_minimality_loss,
 )
@@ -203,3 +206,84 @@ class TestSmoothL0Update:
         assert torch.allclose(
             out["SmoothL0ImportanceMinimalityLoss"], torch.tensor(expected_with_beta)
         )
+
+
+class TestCoeffMultiplier:
+    def test_default_is_noop(self) -> None:
+        for frac in (0.0, 0.5, 1.0):
+            assert (
+                _get_coeff_multiplier(
+                    current_frac_of_training=frac,
+                    coeff_warmup_frac=0.0,
+                    coeff_peak_multiplier=1.0,
+                    coeff_anneal_start_frac=1.0,
+                    coeff_anneal_end_frac=1.0,
+                )
+                == 1.0
+            )
+
+    def test_warmup_ramps_linearly_to_peak(self) -> None:
+        assert _get_coeff_multiplier(
+            current_frac_of_training=0.2,
+            coeff_warmup_frac=0.4,
+            coeff_peak_multiplier=10.0,
+            coeff_anneal_start_frac=1.0,
+            coeff_anneal_end_frac=1.0,
+        ) == pytest.approx(5.0)
+
+    def test_anneals_from_peak_to_one(self) -> None:
+        # Halfway through the [0.025, 0.25) decay from 5.0 => 3.0.
+        schedule = {
+            "coeff_warmup_frac": 0.025,
+            "coeff_peak_multiplier": 5.0,
+            "coeff_anneal_start_frac": 0.025,
+            "coeff_anneal_end_frac": 0.25,
+        }
+        assert _get_coeff_multiplier(current_frac_of_training=0.025, **schedule) == pytest.approx(
+            5.0
+        )
+        assert _get_coeff_multiplier(current_frac_of_training=0.1375, **schedule) == pytest.approx(
+            3.0
+        )
+        assert _get_coeff_multiplier(current_frac_of_training=0.25, **schedule) == pytest.approx(
+            1.0
+        )
+        assert _get_coeff_multiplier(current_frac_of_training=1.0, **schedule) == pytest.approx(1.0)
+
+    def test_multiplier_scales_the_loss(self) -> None:
+        ci_upper_leaky = {"layer1": torch.tensor([[1.0, 1.0]], dtype=torch.float32)}
+        unscaled = _loss(ci_upper_leaky, gamma=1.0)
+        scaled = smooth_l0_importance_minimality_loss(
+            ci_upper_leaky=ci_upper_leaky,
+            current_frac_of_training=0.5,
+            gamma=1.0,
+            beta=0.0,
+            gamma_anneal_start_frac=1.0,
+            gamma_final=None,
+            gamma_anneal_end_frac=1.0,
+            coeff_warmup_frac=0.0,
+            coeff_peak_multiplier=3.0,
+            coeff_anneal_start_frac=1.0,
+            coeff_anneal_end_frac=1.0,
+        )
+        assert torch.allclose(scaled, unscaled * 3.0)
+
+    def test_coeff_warmup_after_anneal_start_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SmoothL0ImportanceMinimalityLossConfig(
+                coeff=1.0,
+                gamma=1.0,
+                beta=0.0,
+                coeff_warmup_frac=0.6,
+                coeff_anneal_start_frac=0.5,
+            )
+
+    def test_coeff_anneal_end_before_start_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SmoothL0ImportanceMinimalityLossConfig(
+                coeff=1.0,
+                gamma=1.0,
+                beta=0.0,
+                coeff_anneal_start_frac=0.8,
+                coeff_anneal_end_frac=0.5,
+            )
