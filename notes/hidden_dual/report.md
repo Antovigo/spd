@@ -1,7 +1,7 @@
 # Dual CI networks: output-importance vs hidden-activation-importance
 
-Status as of 2026-07-29: **implemented, verified, three runs launched.** No scientific
-results yet — first substantive snapshot at step 5000. Spec in `plan.md`, chronology in
+Status as of 2026-08-01: **implemented, verified; `addsub-L18-10-dual-ppgd` complete at
+20000 steps**, two -10 nobeta variants running. Spec in `plan.md`, chronology in
 `lab_notebook.md`.
 
 ## What was built
@@ -301,3 +301,54 @@ adjacency would separate them; `ABGridDataset` already carries the structure.
 Cross-checks that passed to <=1%: frac=1.0 surplus ablation (0.22298) vs the logged
 `CIHiddenActsRecon_outputCI` (0.224859); surplus entries / positions (17.10) vs the logged
 `Phi_hidden - Phi_output` (17.08); injection at alpha=1 vs the path-1 k=0 baseline (exact).
+
+## Components required: output vs hidden (addsub-L18-10-dual-ppgd, step 20000)
+
+First completed run of the -10 series (C raised on attention: q/k 72->128, v/o 128->256;
+MLP lowered 456->256). 20001 steps, 17h32m, peak 39.5/46 GiB.
+
+![Components required for output vs hidden-acts reconstruction](figures/n_alive_per_matrix.png)
+
+`n_alive` counts components exceeding CI 0.1 at *any* position of the eval batch (a running
+max — "ever used"); `L0` is the mean count active per token at threshold 0. Absolute counts,
+against the C available at each site:
+
+| site | C | alive (out) | alive (hid) | L0 (out) | L0 (hid) |
+|---|---|---|---|---|---|
+| attn.q_proj | 128 | 61 | 125 | 1.48 | 6.56 |
+| attn.k_proj | 128 | 53 | 124 | 1.63 | 6.08 |
+| attn.v_proj | 256 | 161 | 252 | 1.99 | 8.95 |
+| attn.o_proj | 256 | 204 | 238 | 2.28 | 9.21 |
+| **attention** | **768** | **479** | **739** | **7.38** | **30.79** |
+| mlp.gate_proj | 256 | 175 | 181 | 4.90 | 7.66 |
+| mlp.up_proj | 256 | 207 | 221 | 5.31 | 9.66 |
+| mlp.down_proj | 256 | 246 | 246 | 6.28 | 9.68 |
+| **MLP** | **768** | **628** | **648** | **16.49** | **27.00** |
+| **total** | **1536** | **1107** | **1387** | **23.87** | **57.79** |
+
+Hidden-acts reconstruction costs more components than output reconstruction everywhere —
+1387 vs 1107 alive, 57.79 vs 23.87 per token. Direction is what the setup predicts.
+
+The gap is almost entirely attention. MLP needs +20 alive (628 -> 648, +3%); attention needs
++260 (479 -> 739, +54%). Per token the split is starker: MLP 16.49 -> 27.00 (+64%),
+attention 7.38 -> 30.79 (+317%). Output-side attention is genuinely cheap — 7.38 components
+per token across four matrices, against 16.49 for the MLP — and that cheapness is what the
+hidden objective refuses to accept.
+
+### The hidden counts are censored
+
+Hidden `n_alive` sits at the C ceiling on four sites: q_proj 125/128, k_proj 124/128,
+v_proj 252/256, down_proj 246/256, with o_proj 238/256 close behind. The hidden net is using
+essentially every component it is given on attention, so 739/768 is a **lower bound** — the
+-10 increase (72->128, 128->256) did not buy enough headroom to find where the hidden
+requirement actually saturates. Output-side attention is not ceiling-bound (61/128, 53/128,
+161/256) and those numbers can be read at face value. `down_proj` is at the ceiling for both
+nets and is the one site where neither count is trustworthy.
+
+Total alive over training (out / hid): 1281/1430 at 5000, 1351/1461 at 10000, 1267/1412 at
+15000, 1181/1388 at 17500, 1107/1387 at 20000. Hidden is flat from 15000; output was still
+falling at the final step, so 1107 is an upper bound that more steps would reduce. The
+measured 1.25x ratio is therefore a floor on both ends.
+
+Next C allocation should give attention room to breathe — q/k 256, v/o 512 — before the
+output-vs-hidden ratio is quoted as a number rather than a bound.
