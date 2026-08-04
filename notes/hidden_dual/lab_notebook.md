@@ -698,3 +698,27 @@ fine-tune legs.
 
 press5 stays paused at step 10000 until **every** applet job is done (6731-6748 plus the
 6785-6788 reruns), per instruction; resume job 6789, with press5's own DAG chained behind it.
+
+## 2026-08-04 — bigc-zeroinit: fragmentation fixed, PGD gap untouched
+
+`addsub-L18-11-bigc-zeroinit` finished 20000 steps. The `coupled_zero_u` intervention worked
+exactly as designed and the hypothesis it was built to test is **falsified**.
+
+Alive counts prove the mechanism fired: 1055 alive under the output net at 4x C, *fewer than
+the reference at 1x C* (1107), and hidden-net alive down from `bigc`'s 1899 to 1436 (reference
+1387). Unused subcomponents stayed at zero instead of accruing W-scale norm.
+
+And `PGDReconLoss` did not move: 0.00494 vs `bigc`'s 0.00498, still 12% above the reference's
+0.00443. Removing every scrap of dead-component junk changed the PGD number by 0.8%. So the
+attack-surface story I proposed is wrong — and `press2` already pointed the same way, being
+worse on PGD with *fewer* near-zero-CI components.
+
+What is left is granularity: at 4x C the same function is carved finer, and a per-coordinate
+attack over a finer partition has more freedom to assemble a bad mask from *live* components.
+No init scheme touches that. Practical upshot: `PGDReconLoss` is a fair within-C ranking and a
+misleading cross-C one; quote it beside C, or switch to an L1-budgeted attack.
+
+`coupled_zero_u` is still worth keeping, for a different reason than it was built: it gives
+big-C's clean reconstruction (0.00160 vs reference 0.00175) with the smallest alive set of the
+three, i.e. the fragmentation cost of raising C disappears. It costs a little hidden
+reconstruction (0.03572 vs 0.03386).

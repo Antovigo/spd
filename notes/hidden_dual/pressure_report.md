@@ -119,6 +119,48 @@ Two claims from the `bigc` analysis above have to be weakened accordingly:
 W-scale junk from unused subcomponents while changing nothing else, so it isolates that one
 mechanism directly.
 
+### Verdict: the attack-surface explanation is wrong
+
+`bigc-zeroinit` finished. At step 20000:
+
+| | reference (C 1536) | `bigc` (C 6144) | `bigc-zeroinit` (C 6144) |
+|---|---|---|---|
+| `PGDReconLoss` | 0.00443 | 0.00498 | **0.00494** |
+| `PersistentPGDReconLoss/output_recon` | 0.00359 | 0.00360 | 0.00377 |
+| `UnmaskedReconLoss` | 0.00175 | 0.00148 | 0.00160 |
+| `PGDHiddenActsReconLoss` | 0.03386 | 0.03223 | 0.03572 |
+| `NAlive` output | 1107 | 1253 | **1055** |
+| `NAlive` hidden | 1387 | 1899 | **1436** |
+
+The intervention did exactly what it was designed to do and **the PGD gap did not move**:
+0.00494 against `bigc`'s 0.00498, still 12% above the reference. Zero-init is not a
+near-miss on the PGD question, it is a null result.
+
+That it worked mechanically is not in doubt — the alive counts prove it. `bigc-zeroinit` ends
+with **1055 alive components under the output net at 4x C, fewer than the reference manages at
+1x C** (1107), and its hidden-net alive count falls from `bigc`'s 1899 to 1436, essentially the
+reference's 1387. Unused subcomponents really did stay at zero instead of accumulating W-scale
+norm. The dead-component junk was removed, and `PGDReconLoss` was indifferent to its removal.
+
+So the attack surface was never the cause. Taken with `press2` — worse PGD on *fewer*
+near-zero-CI components — two independent lines now say the same thing: **the C-dependence of
+`PGDReconLoss` is not an artifact of dead components.** The remaining explanation is that it is
+intrinsic to granularity. At 4x C the same function is carved into finer pieces, and a
+per-coordinate attack over a finer partition has strictly more freedom to assemble a bad mask
+out of *live* components. That is a property of the decomposition, not of junk hanging off it,
+and no initialisation scheme will remove it.
+
+Two consequences worth acting on:
+
+- **Stop treating `PGDReconLoss` as comparable across C.** It is a fair within-C ranking and a
+  misleading cross-C one. Comparisons in this series should quote it beside C, or move to an
+  L1-budgeted attack whose strength does not scale with the coordinate count.
+- **`coupled_zero_u` is worth keeping on its own merits, for a different reason than it was
+  built.** It buys big-C's clean reconstruction (0.00160 vs the reference's 0.00175) while
+  ending with the smallest alive set of the three — the fragmentation cost of raising C
+  disappears entirely. It costs a little hidden reconstruction (0.03572 vs 0.03386). As an
+  interpretability lever it is a clear win; as a PGD fix it is a dead end.
+
 The one genuine cost, which should be tracked separately from PGD: **fragmentation**.
 Per-position density is flat (+2.5%) while the hidden-net alive set grows 37%. Alive per
 unit of `CI_L0` goes 24.0 -> 32.1: the same computation, spread over more and rarer
