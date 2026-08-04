@@ -670,3 +670,31 @@ the node**, so anything calling `load_lm_run` resolves to cuda and contends with
 runs (an ad-hoc CPU benchmark OOMed against one and was cancelled; no harm to the run). The
 real CPU-only validation scripts — `build_subspace_scatter`, `compute_subcomp_periods` — carry
 no cuda or model-loading references at all, so they are unaffected.
+
+## 2026-08-04 — alive_plane_scatter was failing; missing the dual-role alive lists
+
+`alive_plane_scatter` (the Fourier-probe applet — it consumes the `ridge_cv_probes_<op>.json`
+planes) failed for every `-11` run with `missing alive-components TSV:
+alive_subcomponents_hidden.tsv`. On a dual-CI checkpoint it needs the hidden net's alive list
+as well as the output net's, and the version of `find_alive_subcomponents` on this branch only
+wrote the output one. `subspace_scatter` succeeded throughout, which is why the gap was easy to
+miss — the run's `analysis/` looked populated.
+
+Cause: when porting the applet from `origin/worktree-dual-alive-lists` I cherry-picked only the
+two `build_alive_plane_scatter` commits and not `730bc1482 feat(validation): dual-role alive
+lists in find_alive_subcomponents`, which sits *before* them and is what produces the
+`_hidden`-suffixed outputs. Cherry-picked it plus the seven later applet refinements
+(view toggle, multi-probe-layer, period colouring, axes/zoom), all clean.
+
+`find_alive_subcomponents` now writes the `_hidden` files automatically whenever the checkpoint
+has a hidden CI net, so the still-queued DAGs pick this up with no change. Re-ran the two
+failed stages for `bigc` and `press2`.
+
+Also fixed the resume path: press5's first resume attempt died in `init_wandb` because W&B pins
+config keys on first write and the resumed config carried `hidden_readout_sites`, a `PDConfig`
+field added after press5's first leg started. `init_wandb` now passes `allow_val_change` when
+resuming — correct in general, since `ResumeConfig.pd` exists to change the config for
+fine-tune legs.
+
+press5 stays paused at step 10000 until **every** applet job is done (6731-6748 plus the
+6785-6788 reruns), per instruction; resume job 6789, with press5's own DAG chained behind it.
