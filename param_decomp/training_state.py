@@ -32,3 +32,6 @@ class TrainingState:
     components_optimizer: dict[str, dict[str, Any]]
     ci_fn_optimizer: dict[str, dict[str, Any]]
     loss_metrics: dict[str, dict[str, Any]]
+    # Targeted runs only; empty until `Trainer.run` builds the nontarget pass. Separate from
+    # `loss_metrics` because the two sets share `instance_key`s.
+    nontarget_loss_metrics: dict[str, dict[str, Any]]

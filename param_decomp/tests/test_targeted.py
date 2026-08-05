@@ -3,14 +3,21 @@
 import pytest
 import torch
 
+from param_decomp.component_model import ComponentModel
 from param_decomp.masks import AllLayersRouter, calc_stochastic_component_mask_info, make_mask_infos
-from param_decomp.metrics.persistent_pgd_state import get_ppgd_mask_infos
+from param_decomp.metrics.persistent_pgd_state import (
+    PerBatchPerPositionScope,
+    PersistentPGDState,
+    SignPGDConfig,
+    get_ppgd_mask_infos,
+)
 from param_decomp.metrics.pgd_utils import (
     PGDConfig,
-    _construct_mask_infos_from_adv_sources,
     _init_adv_sources,
+    construct_mask_infos_from_adv_sources,
     pgd_masked_recon_loss_update,
 )
+from param_decomp.schedule import ScheduleConfig
 from param_decomp.targeted import delta_override, get_delta_override
 from param_decomp.tests.metrics.fixtures import (
     make_one_layer_component_model,
@@ -24,6 +31,21 @@ class _PGDTestConfig(PGDConfig):
 
 def _mse_sum_and_n(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, int]:
     return ((pred - target) ** 2).sum(), pred.shape[0]
+
+
+def _ppgd_state(model: ComponentModel, *, include_delta_source: bool) -> PersistentPGDState:
+    return PersistentPGDState(
+        module_to_c=model.module_to_c,
+        batch_dims=(8,),
+        device="cpu",
+        include_delta_source=include_delta_source,
+        optimizer_cfg=SignPGDConfig(lr_schedule=ScheduleConfig(fn_type="constant", start_val=0.1)),
+        scope=PerBatchPerPositionScope(),
+        use_sigmoid_parameterization=False,
+        n_warmup_steps=0,
+        n_samples=1,
+        router=AllLayersRouter(),
+    )
 
 
 class TestDeltaOverride:
@@ -114,9 +136,7 @@ class TestPGDOverride:
         weight_deltas = {"fc": torch.randn(4, 5)}
         adv_sources = {"fc": torch.rand(8, 3)}
         with delta_override(1.0):
-            infos = _construct_mask_infos_from_adv_sources(
-                adv_sources, ci, weight_deltas, "all", (8,)
-            )
+            infos = construct_mask_infos_from_adv_sources(adv_sources, ci, weight_deltas, "all")
         assert infos["fc"].weight_delta_and_mask is not None
         _, delta_mask = infos["fc"].weight_delta_and_mask
         assert torch.equal(delta_mask, torch.ones(8))
@@ -143,12 +163,23 @@ class TestPGDOverride:
         assert torch.isfinite(sum_loss)
         assert n == 8
 
-    def test_ppgd_raises_under_override(self):
+    def test_ppgd_construction_pins_delta(self):
         ci = {"fc": torch.rand(8, 3)}
         weight_deltas = {"fc": torch.randn(4, 5)}
-        ppgd_sources = {"fc": torch.rand(1, 4)}
-        with pytest.raises(AssertionError, match="PPGD"), delta_override(1.0):
-            get_ppgd_mask_infos(ci, weight_deltas, ppgd_sources, "all", (8,))
+        # One channel per component and none for the delta: under the override the
+        # adversary attacks components only.
+        ppgd_sources = {"fc": torch.rand(1, 3)}
+        with delta_override(1.0):
+            infos = get_ppgd_mask_infos(ci, weight_deltas, ppgd_sources, "all", (8,))
+        assert infos["fc"].weight_delta_and_mask is not None
+        _, delta_mask = infos["fc"].weight_delta_and_mask
+        assert torch.equal(delta_mask, torch.ones(8))
+        assert infos["fc"].component_mask.shape == (8, 3)
+
+    def test_ppgd_state_drops_delta_source_under_override(self):
+        model = make_one_layer_component_model(torch.randn(4, 5), C=3)
+        assert _ppgd_state(model, include_delta_source=True).sources["fc"].shape == (8, 4)
+        assert _ppgd_state(model, include_delta_source=False).sources["fc"].shape == (8, 3)
 
 
 class TestFaithfulnessInvariant:

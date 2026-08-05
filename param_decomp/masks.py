@@ -189,6 +189,24 @@ def interpolate_component_mask(
     return component_masks
 
 
+def pinned_delta_masks(
+    weight_deltas: dict[str, Float[Tensor, "d_out d_in"]],
+    causal_importances: dict[str, Float[Tensor, "*batch_dims C"]],
+    value: float | None,
+) -> dict[str, WeightDeltaAndMask] | None:
+    """Every weight delta paired with a constant mask of `value`, or `None` to ablate them.
+
+    The two settings a targeted run cares about: `1.0` on nontarget data (the residual
+    carries the output) and `None` on target data (the components must do the work). One
+    tensor is shared across modules — it is read-only.
+    """
+    if value is None:
+        return None
+    ci_sample = next(iter(causal_importances.values()))
+    mask = torch.full(ci_sample.shape[:-1], value, device=ci_sample.device, dtype=ci_sample.dtype)
+    return {layer: (weight_deltas[layer], mask) for layer in causal_importances}
+
+
 def make_mask_infos(
     component_masks: dict[str, Float[Tensor, "... C"]],
     routing_masks: RoutingMasks = "all",

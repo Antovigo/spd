@@ -130,7 +130,10 @@ components inactive on a broad distribution. Core surface: `param_decomp/targete
 on `ExperimentConfig` — plus `build_nontarget_loss_configs` / `split_eval_metrics`).
 Targeted eval metrics in `param_decomp_lab/eval_metrics/`: `TargetReconLoss`,
 `NontargetReconLoss`, `NontargetCIMeanPerComponent`, `TargetedCIHeatmap`,
-`WeightMagnitude`. Example configs:
+`WeightMagnitude`, plus the worst-case probes `NontargetPGDReconLoss`,
+`NontargetPGDHiddenActsReconLoss` and `NontargetCIHiddenActsReconLoss`. A PPGD loss joins
+the nontarget *training* pass by setting `nontarget_coeff` (see
+`param_decomp/metrics/CLAUDE.md`). Example configs:
 `param_decomp_lab/experiments/tms/tms_40-10-id_targeted_config.yaml`,
 `param_decomp_lab/experiments/resid_mlp/resid_mlp1_targeted_config.yaml`.
 

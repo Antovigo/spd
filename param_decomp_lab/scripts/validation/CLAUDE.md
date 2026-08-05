@@ -126,6 +126,12 @@ reimplementing. Implemented so far:
   datasets), and the inverse that recovers the run dir from a dataset path (for scripts
   taking a dataset as their first positional arg). See **Output** above.
 - **`escape_tsv_value`** — reversible backslash-escaping for TSV cells.
+- **`param_decomp.optimize.build_metric_context`** — not in `common.py`, but the piece a
+  script needs to drive real `Metric` classes over a checkpoint instead of reimplementing
+  their maths (`pgd_recon_probe` does this). Pass the `ComponentModel` as both
+  `wrapped_model` and `component_model`, and mirror the trainer's eval pass:
+  `with torch.no_grad(), bf16_autocast(...)`, plus `delta_override(1.0)` around the
+  nontarget half.
 - **`SlurmOptions` + `submit_self_to_slurm`** — the `--slurm` self-resubmission path (see
   above).
 - **Arithmetic-analysis helpers** (`roadmap_addition_analysis`): `op_symbol` /

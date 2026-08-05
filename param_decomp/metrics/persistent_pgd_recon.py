@@ -11,7 +11,7 @@ from typing import Annotated, Any, ClassVar, Literal, override
 
 import torch
 from jaxtyping import Float
-from pydantic import Field, NonNegativeInt, PositiveInt
+from pydantic import Field, NonNegativeFloat, NonNegativeInt, PositiveInt
 from torch import Tensor
 
 from param_decomp.base_config import Probability
@@ -51,6 +51,7 @@ from param_decomp.metrics.stochastic_hidden_acts_recon import (
     calc_hidden_acts_mse,
     compute_per_module_metrics,
 )
+from param_decomp.targeted import get_delta_override
 
 
 class _PersistentPGDBaseConfig(LossMetricConfig):
@@ -76,6 +77,13 @@ class _PersistentPGDBaseConfig(LossMetricConfig):
     ci_role: CIRole = "output"
     """Which CI net the adversary attacks. A dual-CI run gives each reconstruction
     objective its own instance, and therefore its own persistent sources."""
+    nontarget_coeff: NonNegativeFloat | None = Field(
+        default=None,
+        description=(
+            "Coefficient for this loss on the targeted-decomposition nontarget pass; `None`"
+            " keeps it off that pass. See `param_decomp/metrics/CLAUDE.md`."
+        ),
+    )
 
 
 class PersistentPGDReconLossConfig(_PersistentPGDBaseConfig):
@@ -165,7 +173,7 @@ class _PersistentPGDReconBase[TConfig: _PersistentPGDBaseConfig](Metric[TConfig]
             module_to_c=self.model.module_to_c,
             batch_dims=batch_dims,
             device=self.device,
-            use_delta_component=ctx.use_delta_component,
+            include_delta_source=ctx.use_delta_component and get_delta_override() is None,
             optimizer_cfg=self.cfg.optimizer,
             scope=self.cfg.scope,
             use_sigmoid_parameterization=self.cfg.use_sigmoid_parameterization,

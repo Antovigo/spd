@@ -155,7 +155,7 @@ class EvalLoop:
         return step % self.slow_every == 0
 
 
-def _build_metric_context(
+def build_metric_context(
     batch: Any,
     *,
     step: int,
@@ -167,6 +167,12 @@ def _build_metric_context(
     reconstruction_loss: ReconstructionLoss,
     weight_deltas: dict[str, Tensor],
 ) -> MetricContext:
+    """The per-batch bundle every `Metric.update` consumes: one clean cached forward + CI.
+
+    Public so offline drivers (validation scripts probing a saved checkpoint) can feed the
+    same metric classes the trainer does. `wrapped_model` is the DDP-wrapped model in
+    training and the `ComponentModel` itself outside it.
+    """
     # The wrapped_model(...) call here is what registers DDP gradient hooks for this step.
     # Required even if no metric uses the DDP wrapper directly.
     batch = move_batch_to_device(batch, device)
@@ -464,6 +470,10 @@ class Trainer:
             else reconstruction_loss
         )
         self.step = 0
+        # Nontarget losses are instantiated by `run`, so a resumed snapshot's state for them
+        # waits here until it can be loaded into them.
+        self._nontarget_metrics: dict[str, Metric[Any]] = {}
+        self._resumed_nontarget_metric_states: dict[str, dict[str, Any]] = {}
 
         dist_state = get_distributed_state()
         device = runtime_config.device
@@ -662,6 +672,7 @@ class Trainer:
                 self.ci_fn_optimizer, self._ci_fn_optimizer_named_params()
             ),
             loss_metrics={n: m.state_dict() for n, m in self.loss_metrics.items()},
+            nontarget_loss_metrics={n: m.state_dict() for n, m in self._nontarget_metrics.items()},
         )
 
     @classmethod
@@ -712,6 +723,7 @@ class Trainer:
         )
         for name, m in self.loss_metrics.items():
             m.load_state_dict(state.loss_metrics[name])
+        self._resumed_nontarget_metric_states = state.nontarget_loss_metrics
 
     # ============================ Training loop ============================
 
@@ -759,6 +771,16 @@ class Trainer:
         if nontarget is not None:
             nt_pd = self.pd_config.model_copy(update={"loss_metrics": list(nontarget.loss_configs)})
             nontarget_metrics, _ = instantiate_metrics(nt_pd, self.component_model, device)
+            self._nontarget_metrics = nontarget_metrics
+            if self._resumed_nontarget_metric_states:
+                assert set(self._resumed_nontarget_metric_states) == set(nontarget_metrics), (
+                    "resumed nontarget metric state does not match the configured nontarget "
+                    f"losses: {set(self._resumed_nontarget_metric_states)} vs "
+                    f"{set(nontarget_metrics)}"
+                )
+                for name, m in nontarget_metrics.items():
+                    m.load_state_dict(self._resumed_nontarget_metric_states[name])
+                self._resumed_nontarget_metric_states = {}
             nontarget_iterator = loop_dataloader(nontarget.loader)
 
         # Loader replay: if we're starting from non-zero step, advance the iterator to
@@ -803,7 +825,7 @@ class Trainer:
             weight_deltas = self.component_model.calc_weight_deltas()
 
             with bf16_autocast(enabled=runtime_config.autocast_bf16):
-                ctx = _build_metric_context(
+                ctx = build_metric_context(
                     next(train_iterator),
                     step=step,
                     is_eval=False,
@@ -870,7 +892,7 @@ class Trainer:
                 assert nontarget_iterator is not None
                 nt_weight_deltas = self.component_model.calc_weight_deltas()
                 with bf16_autocast(enabled=runtime_config.autocast_bf16):
-                    nt_ctx = _build_metric_context(
+                    nt_ctx = build_metric_context(
                         next(nontarget_iterator),
                         step=step,
                         is_eval=False,
@@ -903,7 +925,11 @@ class Trainer:
                 assert torch.isfinite(nt_total).all(), (
                     f"nontarget total loss is non-finite at step {step}: {nt_total}"
                 )
+                for metric_name, m in nontarget_metrics.items():
+                    m.before_backward(nt_losses[metric_name])
                 nt_total.backward()
+                for m in nontarget_metrics.values():
+                    m.after_backward()
                 # Only sync loss scalars to the host on steps we actually log.
                 if cadence.should_log_train(step):
                     for metric_name, loss_val in nt_active_losses.items():
@@ -944,7 +970,7 @@ class Trainer:
                     for m in active:
                         m.reset()
                     for _ in range(eval_loop.n_steps):
-                        ctx = _build_metric_context(
+                        ctx = build_metric_context(
                             next(eval_iterator),
                             step=step,
                             is_eval=True,
@@ -975,7 +1001,7 @@ class Trainer:
                                 m.reset()
                             with delta_override(1.0):
                                 for _ in range(eval_loop.n_steps):
-                                    nt_eval_ctx = _build_metric_context(
+                                    nt_eval_ctx = build_metric_context(
                                         next(nt_eval_iterator),
                                         step=step,
                                         is_eval=True,

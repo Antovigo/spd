@@ -22,12 +22,9 @@ from param_decomp.masks import (
     ComponentsMaskInfo,
     Router,
     RoutingMasks,
-    interpolate_component_mask,
-    make_mask_infos,
 )
-from param_decomp.metrics.pgd_utils import PGDObjective
+from param_decomp.metrics.pgd_utils import PGDObjective, construct_mask_infos_from_adv_sources
 from param_decomp.schedule import ScheduleConfig, get_scheduled_value
-from param_decomp.targeted import get_delta_override
 
 
 class SignPGDConfig(BaseConfig):
@@ -203,7 +200,9 @@ class PersistentPGDState:
     """Per-module adversarial sources that persist across training steps.
 
     Source shape depends on scope (`SingleSourceScope`, `BroadcastAcrossBatchScope`,
-    `RepeatAcrossBatchScope`, `PerBatchPerPositionScope`).
+    `RepeatAcrossBatchScope`, `PerBatchPerPositionScope`). `include_delta_source` adds the
+    trailing weight-delta channel; it is off on the nontarget pass, where the delta is
+    pinned by `delta_override` rather than attacked.
     """
 
     def __init__(
@@ -212,7 +211,7 @@ class PersistentPGDState:
         module_to_c: dict[str, int],
         batch_dims: tuple[int, ...],
         device: torch.device | str,
-        use_delta_component: bool,
+        include_delta_source: bool,
         optimizer_cfg: PGDOptimizerConfig,
         scope: PersistentPGDSourceScope,
         use_sigmoid_parameterization: bool,
@@ -247,7 +246,7 @@ class PersistentPGDState:
 
         init_fn = torch.randn if use_sigmoid_parameterization else torch.rand
         for module_name, module_c in module_to_c.items():
-            source_c = module_c + 1 if use_delta_component else module_c
+            source_c = module_c + 1 if include_delta_source else module_c
             source_shape = source_leading_dims + [source_c]
             source_data = init_fn(source_shape, device=device)
             if not self._skip_all_reduce:
@@ -373,8 +372,6 @@ def get_ppgd_mask_infos(
     the weight-delta source channel when present, and interpolates
     `mask = ci + (1 - ci) * source`.
     """
-    assert get_delta_override() is None, "delta override must not reach the PPGD mask path"
-
     expanded_adv_sources: dict[str, Float[Tensor, "*batch_dims source_c"]] = {}
     for module_name, source in ppgd_sources.items():
         B = batch_dims[0]
@@ -386,24 +383,9 @@ def get_ppgd_mask_infos(
             repeat_dims = (B // N,) + (1,) * (source.ndim - 1)
             expanded_adv_sources[module_name] = source.repeat(*repeat_dims)
 
-    adv_sources_components: dict[str, Float[Tensor, "*batch_dims C"]]
-    weight_deltas_and_masks: (
-        dict[str, tuple[Float[Tensor, "d_out d_in"], Float[Tensor, ...]]] | None
-    )
-    match weight_deltas:
-        case None:
-            weight_deltas_and_masks = None
-            adv_sources_components = expanded_adv_sources
-        case dict():
-            weight_deltas_and_masks = {
-                k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
-            }
-            adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
-
-    component_masks = interpolate_component_mask(ci, adv_sources_components)
-
-    return make_mask_infos(
-        component_masks=component_masks,
-        weight_deltas_and_masks=weight_deltas_and_masks,
+    return construct_mask_infos_from_adv_sources(
+        expanded_adv_sources=expanded_adv_sources,
+        ci=ci,
+        weight_deltas=weight_deltas,
         routing_masks=routing_masks,
     )

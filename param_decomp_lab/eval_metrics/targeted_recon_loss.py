@@ -12,9 +12,9 @@ from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     AllLayersRouter,
     ComponentsMaskInfo,
-    WeightDeltaAndMask,
     calc_stochastic_component_mask_info,
     make_mask_infos,
+    pinned_delta_masks,
 )
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -65,17 +65,7 @@ class _TargetedReconLossBase[TConfig: TargetReconLossConfig | NontargetReconLoss
     def update(self, ctx: MetricContext) -> None:
         assert ctx.use_delta_component, "targeted recon evals require use_delta_component"
         ci = ctx.ci.lower_leaky
-        ci_sample = next(iter(ci.values()))
-        leading_dims = ci_sample.shape[:-1]
-
-        def pinned_deltas(value: float) -> dict[str, WeightDeltaAndMask]:
-            return {
-                layer: (
-                    ctx.weight_deltas[layer],
-                    torch.full(leading_dims, value, device=ci_sample.device, dtype=ci_sample.dtype),
-                )
-                for layer in ci
-            }
+        leading_dims = next(iter(ci.values())).shape[:-1]
 
         def accumulate(strategy: str, mask_infos: dict[str, ComponentsMaskInfo]) -> None:
             out = self.model(ctx.batch, mask_infos=mask_infos)
@@ -96,20 +86,23 @@ class _TargetedReconLossBase[TConfig: TargetReconLossConfig | NontargetReconLoss
                 )
         accumulate(
             "ci_masked",
-            make_mask_infos(ci, weight_deltas_and_masks=pinned_deltas(self.delta_value)),
+            make_mask_infos(
+                ci,
+                weight_deltas_and_masks=pinned_delta_masks(ctx.weight_deltas, ci, self.delta_value),
+            ),
         )
         accumulate(
             "rounded",
             make_mask_infos(
                 {k: (v > self.cfg.rounding_threshold).float() for k, v in ci.items()},
-                weight_deltas_and_masks=pinned_deltas(self.delta_value),
+                weight_deltas_and_masks=pinned_delta_masks(ctx.weight_deltas, ci, self.delta_value),
             ),
         )
         accumulate(
             "delta_only",
             make_mask_infos(
                 {k: torch.zeros_like(v) for k, v in ci.items()},
-                weight_deltas_and_masks=pinned_deltas(1.0),
+                weight_deltas_and_masks=pinned_delta_masks(ctx.weight_deltas, ci, 1.0),
             ),
         )
 

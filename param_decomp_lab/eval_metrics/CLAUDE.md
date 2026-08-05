@@ -51,11 +51,15 @@ union or were constructed by hand.
 ## Targeted (tPD) eval metrics
 
 `TargetReconLoss`, `NontargetReconLoss`, `NontargetCIMeanPerComponent`,
-`TargetedCIHeatmap`, and `WeightMagnitude` support targeted decomposition runs. The
-three nontarget-data metrics are partitioned out of `EvalLoop.metrics` into
-`EvalLoop.nontarget` by `param_decomp_lab/targeted.py::split_eval_metrics` and are fed
+`TargetedCIHeatmap`, and `WeightMagnitude` support targeted decomposition runs, as do the
+three worst-case probes `NontargetPGDReconLoss`, `NontargetPGDHiddenActsReconLoss`, and
+`NontargetCIHiddenActsReconLoss` (the last two live next to their target-pass twins and
+differ only in the marker and, for the CI-masked one, in pinning the delta on rather than
+ablating it). Every nontarget-data metric is partitioned out of `EvalLoop.metrics` into
+`EvalLoop.nontarget` by `param_decomp_lab/targeted.py::split_eval_metrics` and is fed
 by the trainer's mirror nontarget eval loop under `delta_override(1.0)`; the rest stay
-in the normal target eval pass.
+in the normal target eval pass. Routing is by the `eval_distribution` class marker, so a
+new nontarget metric needs no edit to `split_eval_metrics`.
 
 ## `ABGridDataset` — (a,b)-grid snapshots + applet
 

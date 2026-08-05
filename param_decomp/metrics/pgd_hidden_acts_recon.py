@@ -28,7 +28,7 @@ from param_decomp.metrics.hidden_acts import (
 from param_decomp.metrics.pgd_utils import PGDConfig, pgd_masked_objective_update
 
 
-class PGDHiddenActsReconLossConfig(PGDConfig, EvalCadenceConfig):
+class _PGDHiddenActsReconLossConfigBase(PGDConfig, EvalCadenceConfig):
     """Config for the PGD-attacked per-site hidden-activation error.
 
     `site_patterns` filters which sites the error is measured at, as on
@@ -38,12 +38,19 @@ class PGDHiddenActsReconLossConfig(PGDConfig, EvalCadenceConfig):
     20-step one is better placed on the slow cadence.
     """
 
-    type: Literal["PGDHiddenActsReconLoss"] = "PGDHiddenActsReconLoss"
     ci_role: CIRole = "hidden"
     site_patterns: list[str] | None = None
 
 
-class PGDHiddenActsReconLoss(Metric[PGDHiddenActsReconLossConfig]):
+class PGDHiddenActsReconLossConfig(_PGDHiddenActsReconLossConfigBase):
+    type: Literal["PGDHiddenActsReconLoss"] = "PGDHiddenActsReconLoss"
+
+
+class NontargetPGDHiddenActsReconLossConfig(_PGDHiddenActsReconLossConfigBase):
+    type: Literal["NontargetPGDHiddenActsReconLoss"] = "NontargetPGDHiddenActsReconLoss"
+
+
+class _PGDHiddenActsReconLossBase[TConfig: _PGDHiddenActsReconLossConfigBase](Metric[TConfig]):
     """Relative per-site activation error under adversarially-optimised masks.
 
     Runs `cfg.n_steps` of sign-PGD on fresh adversarial sources each batch (no cross-batch
@@ -57,7 +64,6 @@ class PGDHiddenActsReconLoss(Metric[PGDHiddenActsReconLossConfig]):
     # sampled masks is the point of having this probe. Set `slow: true` in the config for a
     # high-`n_steps` instance.
     slow = False
-    short_name = "PGDHiddenRecon"
 
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
@@ -101,3 +107,20 @@ class PGDHiddenActsReconLoss(Metric[PGDHiddenActsReconLossConfig]):
     @override
     def compute(self) -> MetricResult:
         return reduced_relative_errors(self._accum, self.instance_key)
+
+
+class PGDHiddenActsReconLoss(_PGDHiddenActsReconLossBase[PGDHiddenActsReconLossConfig]):
+    short_name = "PGDHiddenRecon"
+
+
+class NontargetPGDHiddenActsReconLoss(
+    _PGDHiddenActsReconLossBase[NontargetPGDHiddenActsReconLossConfig]
+):
+    """Worst-case per-site activation error on the *nontarget* distribution, delta pinned on.
+
+    The hidden-acts counterpart of `NontargetPGDReconLoss`: how much site-level drift the
+    components can be made to cause on data they are supposed to be inactive on.
+    """
+
+    eval_distribution = "nontarget"
+    short_name = "NontargetPGDHiddenRecon"

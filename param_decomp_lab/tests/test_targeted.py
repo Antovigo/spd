@@ -48,11 +48,12 @@ from param_decomp_lab.targeted import build_nontarget_loss_configs, split_eval_m
 # =========================== build_nontarget_loss_configs ===========================
 
 
-def _ppgd_config() -> PersistentPGDReconLossConfig:
+def _ppgd_config(nontarget_coeff: float | None = None) -> PersistentPGDReconLossConfig:
     return PersistentPGDReconLossConfig(
         coeff=1.0,
         optimizer=SignPGDConfig(lr_schedule=ScheduleConfig(start_val=0.1)),
         scope=SingleSourceScope(),
+        nontarget_coeff=nontarget_coeff,
     )
 
 
@@ -79,6 +80,14 @@ class TestBuildNontargetLossConfigs:
             [StochasticReconLossConfig(coeff=3.0)], 1.0, nontarget_batch_size=4
         )
         assert len(out) == 1 and out[0].coeff == 3.0
+
+    def test_ppgd_carried_over_at_its_nontarget_coeff(self):
+        configs: list[Any] = [StochasticReconLossConfig(coeff=1.0), _ppgd_config(0.5)]
+        out = build_nontarget_loss_configs(configs, 1.0, nontarget_batch_size=16)
+        types = [type(c).__name__ for c in out]
+        assert types == ["StochasticReconLossConfig", "PersistentPGDReconLossConfig"]
+        assert out[1].coeff == 0.5
+        assert configs[1].coeff == 1.0  # original untouched
 
 
 # =========================== validators ===========================
@@ -288,7 +297,7 @@ class TestSplitEvalMetrics:
 
 
 def _tiny_tms_setup(
-    tmp_path: Path, *, targeted: bool
+    tmp_path: Path, *, targeted: bool, extra_loss_metrics: list[Any] | None = None
 ) -> tuple[Trainer, Any, Any, EvalLoop, NontargetTrainPass | None]:
     set_seed(0)
     device = "cpu"
@@ -314,6 +323,10 @@ def _tiny_tms_setup(
         batch_size=16,
         steps=3,
     )
+    if extra_loss_metrics is not None:
+        pd_config = pd_config.model_copy(
+            update={"loss_metrics": [*pd_config.loss_metrics, *extra_loss_metrics]}
+        )
 
     def loader(active: list[int] | None, batch_size: int) -> Any:
         from torch.utils.data import DataLoader
@@ -398,6 +411,19 @@ class TestTargetedTrainSmoke:
         assert any(
             name.startswith("eval_figures_nontarget_ci_mean_per_component") for name in figures
         )
+
+    def test_nontarget_ppgd_trains_and_snapshots_its_own_adversary(self, tmp_path: Path):
+        trainer, train_loader, sink, eval_loop, nontarget = _tiny_tms_setup(
+            tmp_path, targeted=True, extra_loss_metrics=[_ppgd_config(nontarget_coeff=0.5)]
+        )
+        trainer.run(train_loader, sink, Cadence(train_log_every=1), eval_loop, nontarget=nontarget)
+        assert "train/nontarget/loss/PersistentPGDReconLoss" in _logged_keys(tmp_path)
+
+        state = trainer.snapshot()
+        target_sources = state.loss_metrics["PersistentPGDReconLoss"]["sources"]
+        nontarget_sources = state.nontarget_loss_metrics["PersistentPGDReconLoss"]["sources"]
+        # The nontarget adversary attacks components only, the delta being pinned on.
+        assert target_sources["linear1"].shape[-1] == nontarget_sources["linear1"].shape[-1] + 1
 
     def test_nontargeted_run_has_no_nontarget_keys(self, tmp_path: Path):
         trainer, train_loader, sink, eval_loop, _ = _tiny_tms_setup(tmp_path, targeted=False)

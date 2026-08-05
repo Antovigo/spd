@@ -36,13 +36,24 @@ class NontargetConfig[D: BaseConfig](BaseConfig):
     impmin_coeff_ratio: NonNegativeFloat = 1.0
 
 
-_EXCLUDED_NONTARGET_LOSS_CONFIGS = (
-    UnmaskedReconLossConfig,
-    PersistentPGDReconLossConfig,
-    PersistentPGDReconSubsetLossConfig,
-    PersistentPGDHiddenActsReconLossConfig,
-    StochasticHiddenActsReconLossConfig,
-)
+def _nontarget_variant(cfg: AnyLossMetricConfig, impmin_ratio: float) -> AnyLossMetricConfig | None:
+    """The nontarget-pass form of one target-pass loss config, or `None` to drop it."""
+    match cfg:
+        case UnmaskedReconLossConfig() | StochasticHiddenActsReconLossConfig():
+            return None
+        case (
+            PersistentPGDReconLossConfig()
+            | PersistentPGDReconSubsetLossConfig()
+            | PersistentPGDHiddenActsReconLossConfig()
+        ):
+            if cfg.nontarget_coeff is None:
+                return None
+            return cfg.model_copy(update={"coeff": cfg.nontarget_coeff})
+        case ImportanceMinimalityLossConfig() | SmoothL0ImportanceMinimalityLossConfig():
+            assert cfg.coeff is not None
+            return cfg.model_copy(update={"coeff": cfg.coeff * impmin_ratio})
+        case _:
+            return cfg.model_copy()
 
 
 def build_nontarget_loss_configs(
@@ -53,26 +64,18 @@ def build_nontarget_loss_configs(
 ) -> list[AnyLossMetricConfig]:
     """Derive the nontarget-pass loss set from the target-pass loss configs.
 
-    Drops losses that are meaningless or unsafe with a forced-on delta (unmasked recon, every
-    PPGD loss, and the legacy `StochasticHiddenActsReconLoss`); scales every
-    importance-minimality coeff by `impmin_ratio`, so a dual-CI run scales one instance per
-    CI net. `StochasticHiddenReconSubsetLoss` is deliberately kept: with the delta forced on
-    it drives the components to be inactive at each *site* on the nontarget distribution,
-    which is a more local version of the same pressure the output recon applies. The result must retain a full-model recon loss so the nontarget
-    backward grads every parameter (a DDP requirement under the default reducer).
+    Per-loss handling is in `_nontarget_variant`. Two things it encodes that aren't obvious:
+    `StochasticHiddenReconSubsetLoss` is deliberately kept, because with the delta forced on
+    it drives the components to be inactive at each *site* on the nontarget distribution — a
+    more local version of the pressure the output recon applies; and the result must retain a
+    full-model recon loss so the nontarget backward grads every parameter (a DDP requirement
+    under the default reducer).
     """
-    out: list[AnyLossMetricConfig] = []
-    for cfg in loss_metrics:
-        if isinstance(cfg, _EXCLUDED_NONTARGET_LOSS_CONFIGS):
-            continue
-        if (
-            isinstance(cfg, ImportanceMinimalityLossConfig | SmoothL0ImportanceMinimalityLossConfig)
-            and cfg.coeff is not None
-        ):
-            cfg = cfg.model_copy(update={"coeff": cfg.coeff * impmin_ratio})
-        else:
-            cfg = cfg.model_copy()
-        out.append(cfg)
+    out = [
+        variant
+        for cfg in loss_metrics
+        if (variant := _nontarget_variant(cfg, impmin_ratio)) is not None
+    ]
 
     dist_state = get_distributed_state()
     validate_pgd_scope(

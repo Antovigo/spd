@@ -131,8 +131,21 @@ carry `ci_role`, so each adversary attacks the CI net that owns its objective �
 that, the output net would face a persistent adversary while the hidden net faced only
 stochastic masks, which would confound any comparison of their densities.
 
-All PPGD losses are excluded from the nontarget pass: with the delta forced fully on, the
-adversary's objective is degenerate.
+**PPGD on the nontarget pass** is opt-in per loss via `nontarget_coeff` (`None`, the
+default, keeps that loss off the pass). The nontarget instance is separate from the target
+one — its own persistent sources, its own optimizer moments, its own `state_dict` — because
+`Trainer.run` instantiates the nontarget losses from their own `PDConfig`; that state rides
+in `TrainingState.nontarget_loss_metrics` rather than `loss_metrics`, whose keys it would
+collide with.
+
+Under `delta_override` the adversary attacks components only: `PersistentPGDState` is built
+with `include_delta_source=False` and `get_ppgd_mask_infos` pins the delta mask to the
+override value (shared with per-step PGD via `pgd_utils.split_component_and_delta_sources`).
+With the delta pinned on, `mask = ci + (1 - ci) * source` ranges over `[ci, 1]` and `mask=1`
+restores the target model exactly — so the adversary is searching for the most damaging
+*partial ablation* of the components, and the CI-masked error is a floor on what it finds.
+That makes the nontarget PPGD loss a worst-case sharpening of the CI-masked nontarget
+pressure rather than a qualitatively new objective; expect the two numbers to sit close.
 
 ## Hidden-acts recon: fused aux vs standalone
 
@@ -180,6 +193,12 @@ Three metrics measure the same quantity — the **relative** per-site error
 | `StochasticHiddenReconSubsetLoss` | stochastic subset ablation | core, training loss |
 | `CIHiddenActsReconLoss` | CI itself | lab, eval only |
 | `PGDHiddenActsReconLoss` | adversarial (`n_steps` of sign-PGD) | core, eval only |
+
+`NontargetCIHiddenActsReconLoss` and `NontargetPGDHiddenActsReconLoss` are the same two
+probes measured on the nontarget distribution (`eval_distribution = "nontarget"`, delta
+pinned on). Same for output recon: `NontargetPGDReconLoss` against `NontargetReconLoss`'s
+`ci_masked` strategy. `param_decomp_lab/scripts/validation/pgd_recon_probe.py` runs all
+four cells offline against a saved checkpoint.
 
 Relative rather than raw MSE so that sites with very different activation scales (an MLP
 `down_proj` against an attention `q_proj`) weigh equally and the coefficient transfers

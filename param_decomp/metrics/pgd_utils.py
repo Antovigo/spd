@@ -13,6 +13,7 @@ from param_decomp.masks import (
     ComponentsMaskInfo,
     Router,
     RoutingMasks,
+    WeightDeltaAndMask,
     interpolate_component_mask,
     make_mask_infos,
 )
@@ -100,33 +101,38 @@ def _run_pgd_loop(
     return fwd_fn()
 
 
-def _construct_mask_infos_from_adv_sources(
-    adv_sources: dict[str, Float[Tensor, "*batch_dim_or_ones mask_c"]],
+def construct_mask_infos_from_adv_sources(
+    expanded_adv_sources: dict[str, Float[Tensor, "*batch_dims mask_c"]],
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
     routing_masks: RoutingMasks,
-    batch_dims: tuple[int, ...],
 ) -> dict[str, ComponentsMaskInfo]:
-    expanded_adv_sources = {k: v.expand(*batch_dims, -1) for k, v in adv_sources.items()}
+    """Turn adversarial sources already broadcast to the batch shape into mask infos.
+
+    Under a `delta_override` the delta mask is pinned to the override value and the sources
+    carry no delta channel at all: on the nontarget pass the residual has to stay fully on
+    for the pass to mean anything, so the adversary attacks components only. Shared with
+    PPGD, which differs only in how its persistent sources reach the batch shape.
+    """
+    batch_dims = next(iter(expanded_adv_sources.values())).shape[:-1]
     adv_sources_components: dict[str, Float[Tensor, "*batch_dims C"]]
-    override = get_delta_override()
+    weight_deltas_and_masks: dict[str, WeightDeltaAndMask] | None
     match weight_deltas:
         case None:
-            weight_deltas_and_masks = None
-            adv_sources_components = expanded_adv_sources
+            adv_sources_components, weight_deltas_and_masks = expanded_adv_sources, None
         case dict():
+            override = get_delta_override()
             if override is not None:
-                device = next(iter(expanded_adv_sources.values())).device
-                weight_deltas_and_masks = {
-                    k: (weight_deltas[k], torch.full(batch_dims, override, device=device))
-                    for k in weight_deltas
-                }
+                pinned = torch.full(
+                    batch_dims, override, device=next(iter(expanded_adv_sources.values())).device
+                )
                 adv_sources_components = expanded_adv_sources
+                weight_deltas_and_masks = {k: (weight_deltas[k], pinned) for k in weight_deltas}
             else:
+                adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
                 weight_deltas_and_masks = {
                     k: (weight_deltas[k], expanded_adv_sources[k][..., -1]) for k in weight_deltas
                 }
-                adv_sources_components = {k: v[..., :-1] for k, v in expanded_adv_sources.items()}
 
     return make_mask_infos(
         component_masks=interpolate_component_mask(ci, adv_sources_components),
@@ -164,12 +170,11 @@ def pgd_masked_objective_update(
 
     def forward_at_current_sources() -> tuple[Float[Tensor, ""], int]:
         return objective(
-            _construct_mask_infos_from_adv_sources(
-                adv_sources=adv_sources,
+            construct_mask_infos_from_adv_sources(
+                expanded_adv_sources={k: v.expand(*batch_dims, -1) for k, v in adv_sources.items()},
                 ci=ci,
                 weight_deltas=weight_deltas,
                 routing_masks=routing_masks,
-                batch_dims=batch_dims,
             )
         )
 

@@ -44,13 +44,13 @@ def _ppgd_state_from_cfg(
     module_to_c: dict[str, int],
     batch_dims: tuple[int, ...],
     device: str,
-    use_delta_component: bool,
+    include_delta_source: bool,
 ) -> PersistentPGDState:
     return PersistentPGDState(
         module_to_c=module_to_c,
         batch_dims=batch_dims,
         device=device,
-        use_delta_component=use_delta_component,
+        include_delta_source=include_delta_source,
         optimizer_cfg=cfg.optimizer,
         scope=cfg.scope,
         use_sigmoid_parameterization=cfg.use_sigmoid_parameterization,
@@ -815,7 +815,7 @@ class TestPersistentPGDReconLoss:
             module_to_c=model.module_to_c,
             batch_dims=batch.shape[:2],
             device="cpu",
-            use_delta_component=False,
+            include_delta_source=False,
         )
 
         # Store initial mask values
@@ -866,7 +866,7 @@ class TestPersistentPGDReconLoss:
             module_to_c=model.module_to_c,
             batch_dims=batch.shape[:2],
             device="cpu",
-            use_delta_component=False,
+            include_delta_source=False,
         )
 
         # Run multiple steps
@@ -919,7 +919,7 @@ class TestPersistentPGDReconLoss:
             module_to_c=model.module_to_c,
             batch_dims=batch_dims,
             device="cpu",
-            use_delta_component=True,
+            include_delta_source=True,
         )
 
         # Masks should have C+1 elements when using delta component
@@ -981,7 +981,7 @@ class TestPersistentPGDReconLoss:
             module_to_c=model.module_to_c,
             batch_dims=batch_dims,
             device="cpu",
-            use_delta_component=False,
+            include_delta_source=False,
         )
 
         # Masks should have shape (1, 1, C) for single_mask scope - single mask shared across batch
@@ -1022,7 +1022,7 @@ class TestPersistentPGDReconLoss:
             module_to_c=model.module_to_c,
             batch_dims=batch.shape[:2],
             device="cpu",
-            use_delta_component=False,
+            include_delta_source=False,
         )
 
         sum_loss, n = state.compute_sum_and_n(

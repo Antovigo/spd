@@ -15,10 +15,17 @@ from param_decomp.metrics.importance_minimality import (
     ImportanceMinimalityLossConfig,
 )
 from param_decomp.metrics.pgd_hidden_acts_recon import (
+    NontargetPGDHiddenActsReconLoss,
+    NontargetPGDHiddenActsReconLossConfig,
     PGDHiddenActsReconLoss,
     PGDHiddenActsReconLossConfig,
 )
-from param_decomp.metrics.pgd_masked_recon import PGDReconLoss, PGDReconLossConfig
+from param_decomp.metrics.pgd_masked_recon import (
+    NontargetPGDReconLoss,
+    NontargetPGDReconLossConfig,
+    PGDReconLoss,
+    PGDReconLossConfig,
+)
 from param_decomp.metrics.smooth_l0_importance_minimality import (
     SmoothL0ImportanceMinimalityLoss,
     SmoothL0ImportanceMinimalityLossConfig,
@@ -38,6 +45,8 @@ from param_decomp_lab.eval_metrics.ce_and_kl_losses import CEandKLLosses, CEandK
 from param_decomp_lab.eval_metrics.ci_hidden_acts_recon_loss import (
     CIHiddenActsReconLoss,
     CIHiddenActsReconLossConfig,
+    NontargetCIHiddenActsReconLoss,
+    NontargetCIHiddenActsReconLossConfig,
 )
 from param_decomp_lab.eval_metrics.ci_histograms import CIHistograms, CIHistogramsConfig
 from param_decomp_lab.eval_metrics.ci_l0 import CI_L0, CI_L0Config
@@ -85,7 +94,10 @@ AnyEvalMetricConfig = Annotated[
     | IdentityCIErrorConfig
     | ImportanceMinimalityLossConfig
     | NAliveConfig
+    | NontargetCIHiddenActsReconLossConfig
     | NontargetCIMeanPerComponentConfig
+    | NontargetPGDHiddenActsReconLossConfig
+    | NontargetPGDReconLossConfig
     | NontargetReconLossConfig
     | PeriodSeparationConfig
     | PermutedCIPlotsConfig
@@ -115,7 +127,10 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         IdentityCIError,
         ImportanceMinimalityLoss,
         NAlive,
+        NontargetCIHiddenActsReconLoss,
         NontargetCIMeanPerComponent,
+        NontargetPGDHiddenActsReconLoss,
+        NontargetPGDReconLoss,
         NontargetReconLoss,
         PeriodSeparation,
         PermutedCIPlots,
