@@ -184,6 +184,23 @@ def square_grid_size(ab: list[tuple[int, int]]) -> int:
     return n
 
 
+def probe_plane_basis(
+    w_cos: NDArray[np.float32], w_sin: "NDArray[np.float32] | None"
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Orthonormal basis `(e1, e2)` of the probe plane `span(w_cos, w_sin)`.
+
+    `e2` is all-zero when the plane is degenerate — a period-2 probe (`w_sin is None`, since
+    `sin ≡ 0`), or a `w_sin` numerically parallel to `w_cos` — collapsing it to the cos axis,
+    so an in-plane norm taken against this basis stays correct without a special case.
+    """
+    e1 = w_cos / max(float(np.linalg.norm(w_cos)), 1e-12)
+    if w_sin is None:
+        return e1, np.zeros_like(e1)
+    perp = w_sin - (w_sin @ e1) * e1
+    n_perp = float(np.linalg.norm(perp))
+    return e1, perp / n_perp if n_perp > 1e-6 else np.zeros_like(e1)
+
+
 def load_component_uv(
     checkpoint: Path, layer: int, projs: tuple[str, ...]
 ) -> dict[str, tuple[NDArray[np.float32], NDArray[np.float32]]]:

@@ -145,6 +145,16 @@ class PDConfig(BaseConfig):
         "net via their `ci_role` field. Required by any loss or eval with "
         "`ci_role: hidden`.",
     )
+    hidden_readout_sites: dict[str, str] = Field(
+        default={},
+        description="Extra measurement points for the hidden-activation losses, as "
+        "`{measurement_name: module_path}`. The listed module's *input* is captured clean "
+        "and masked, and joins the decomposed sites in the set a metric's `site_patterns` "
+        "selects from — letting the hidden objective target activations that are not a "
+        "decomposed matrix's output. The residual stream is the motivating case: hook "
+        "`post_attention_layernorm` for the post-attention stream and the next block's "
+        "`input_layernorm` for the post-MLP one.",
+    )
     sampling: SamplingType = Field(
         default="continuous",
         description="Sampling mode for stochastic elements: 'continuous' (default) or 'binomial'",
@@ -161,16 +171,19 @@ class PDConfig(BaseConfig):
         default=None,
         description="List of identity module patterns with C values.",
     )
-    weight_init: Literal["kaiming", "coupled", "within_span"] = Field(
+    weight_init: Literal["kaiming", "coupled", "coupled_zero_u", "within_span"] = Field(
         default="kaiming",
         description="How component V/U are initialized. 'kaiming': iid normal "
         "(init_param_), ignores W. 'coupled': unit-norm seed on the narrow side, wide "
         "side its raw W-image (U_c from (W v_c)^T when d_in <= d_out, else V_c from "
         "W^T u_c) — W-natural scale, component sum ~ W on a rank-C subspace. "
+        "'coupled_zero_u': 'coupled' with U zeroed, so every subcomponent starts silent "
+        "and the delta carries all of W; V still feeds the CI nets, and a subcomponent "
+        "that is never needed keeps zero norm instead of W-scale junk. "
         "'within_span': coupled with the coupling broken — each side is the W-image of "
         "its own independent Gaussian (unit-norm narrow side, raw-W-image-scale wide "
         "side), so both sides lie in W's row/col spaces but are statistically "
-        "independent. 'coupled' and 'within_span' require no tied weights.",
+        "independent. All but 'kaiming' require no tied weights.",
     )
 
     @cached_property

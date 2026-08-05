@@ -346,7 +346,7 @@ class PersistentPGDHiddenActsReconLoss(
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.measured_sites = select_sites(model.target_module_paths, self.cfg.site_patterns)
+        self.measured_sites = select_sites(model.measurement_sites, self.cfg.site_patterns)
 
     @override
     def reset(self) -> None:

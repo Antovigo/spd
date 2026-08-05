@@ -297,6 +297,26 @@ def init_coupled_(
                 comp.V.copy_(w.T @ u.T)
 
 
+def init_coupled_zero_u_(
+    components: dict[str, Components],
+    target_weights: dict[str, Tensor],
+    seed: int,
+) -> None:
+    """In place: `init_coupled_` for `V`, then `U` zeroed so every subcomponent starts silent.
+
+    The component sum is exactly zero at init and the delta carries all of W. Subcomponents
+    acquire norm only as the reconstruction losses demand it, so one that is never needed
+    stays at exactly zero rather than holding W-scale junk that a mask adversary could
+    switch on. `V` is left as `init_coupled_` wrote it, so `get_component_acts` still feeds
+    the CI nets a live signal and `U` has a nonzero gradient from step 0 — `V`'s gradient is
+    zero until `U` moves off zero.
+    """
+    init_coupled_(components, target_weights, seed)
+    with torch.no_grad():
+        for comp in components.values():
+            comp.U.zero_()
+
+
 def init_within_span_(
     components: dict[str, Components],
     target_weights: dict[str, Tensor],
@@ -473,6 +493,7 @@ class Trainer:
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
             dual_hidden_ci=pd_config.dual_hidden_ci,
+            hidden_readout_sites=pd_config.hidden_readout_sites,
         )
         model.to(device)
 
@@ -535,6 +556,8 @@ class Trainer:
             match pd_config.weight_init:
                 case "coupled":
                     init_coupled_(component_model.components, target_weights, pd_config.seed)
+                case "coupled_zero_u":
+                    init_coupled_zero_u_(component_model.components, target_weights, pd_config.seed)
                 case "within_span":
                     init_within_span_(component_model.components, target_weights, pd_config.seed)
                 case _:

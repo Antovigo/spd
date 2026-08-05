@@ -199,6 +199,42 @@ to stop). Everything past the last decomposition target would otherwise be waste
 `site_patterns` (fnmatch, e.g. `["*.mlp.down_proj", "*.self_attn.o_proj"]`) restricts which
 sites the error is *measured* at; masking always covers every decomposed site.
 
+### Readout sites — measuring off the decomposed matrices
+
+`pd.hidden_readout_sites` (`{measurement_name: module_path}`) adds measurement points that
+are not a decomposed matrix's output. The named module's **input** is captured, clean and
+masked, and joins the decomposed sites in `ComponentModel.measurement_sites` — the set
+`site_patterns` selects from. Nothing else changes: the same targets / squared-error /
+DDP-reduction path serves both kinds.
+
+The residual stream is the motivating case. In a Llama block, hook
+`post_attention_layernorm` for the post-attention stream and the *next* block's
+`input_layernorm` for the post-MLP one:
+
+```yaml
+pd:
+  hidden_readout_sites:
+    resid_post_attn: model.layers.18.post_attention_layernorm
+    resid_post_mlp: model.layers.19.input_layernorm
+  loss_metrics:
+    - type: StochasticHiddenReconSubsetLoss
+      site_patterns: ["resid_*"]
+```
+
+Three things follow from a readout's target being the stream rather than a write:
+
+- Its denominator `Σ tgt²` is dominated by the frozen incoming stream, so the same relative
+  error is numerically far smaller than at a matrix output — which reprices that site
+  against the shared importance-minimality coefficient.
+- It is measured at **every position**, having no routing mask of its own. This is
+  required, not a shortcut: attention mixes positions, so a position routed to no
+  component still receives error from the routed positions it attends to.
+- Readout sites are cached on the clean `cache_type="input"` pass, so they land in
+  `pre_weight_acts` alongside the pre-weight activations. The CI fn is defined over the
+  decomposition targets only, so `calc_causal_importances` selects those entries rather
+  than consuming the whole cache — the global CI-fn wrapper transforms every key it is
+  handed and would otherwise `KeyError` on a readout name.
+
 Cadence: the CI-masked and stochastic probes cost one truncated forward per eval batch and
 run on the **fast** cadence (`eval.every`). `PGDHiddenActsReconLoss` costs `n_steps + 1`
 truncated forwards *per eval batch* — note the site count does **not** multiply this, since

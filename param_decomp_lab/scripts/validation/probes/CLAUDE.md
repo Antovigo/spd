@@ -42,6 +42,106 @@ applet for watching the final state get constructed: position slider + play, col
 norm precomputed as `resid_delta`), displacement arrows, hover tooltips. Vanilla-JS
 canvas, `file://`, smoke-test with the parent folder's `headless_check.py`.
 
+### `build_alive_plane_scatter.py` — real model vs. alive-only circuits
+
+Decomposition-aware variant of `build_final_plane_scatter`, dropped in
+`<run>/analysis/alive_plane_scatter/` (template `alive_plane_scatter_app.html`). Requires
+`find_alive_subcomponents` already run (reads `alive_subcomponents.tsv`, plus `_hidden.tsv`
+when the checkpoint has a hidden CI net). Takes the checkpoint **and** the
+`ridge_cv_probes_<op>.json`(s) (positional, after the checkpoint) — the probe planes are
+decomposition-independent and reused as-is.
+
+Recomputes fresh activations for **two or three sources** (three on a `dual_hidden_ci`
+checkpoint, two otherwise) over one sampled `a<op>b=` grid — the real model, and one circuit
+per alive list with only that role's components active everywhere (delta off —
+`find_alive_subcomponents`'s masking) — so every source is exactly point-aligned. Running it
+on both a baseline and a dual run of the same decomposition is how you see what adding the
+hidden-CI net actually changed. The `<result> @ layer` own-probe row is dropped (own rows:
+`a`, `b` only; the result row is fixed to one probe layer at a time). Extra colorby modes
+beyond `final_plane_scatter`'s: **distortion** (plane-projected distance from the real
+model; disabled while viewing the real model itself) and **causal importance** (role +
+matrix + component pickers, gated by that role's alive list; CI is one value per prompt
+from the real-model forward, so it colors every panel identically regardless of which
+source is shown).
+
+**Component arrows** overlay each alive subcomponent's own direction on the panel's plane,
+drawn from the origin as the displacement it contributes (`dir·w_cos, dir·w_sin`; the probe
+bias is dropped, since a panel plots `x·w + b` and adding `dir` to `x` moves the point by
+`dir·w`). A dropdown picks the **U** vectors of the components that *write* to the stream or
+the **V** vectors of those that *read* from it. Directions use the same gauge-invariant
+product form as `build_direction_scatter` (`V[:,c]·‖U[c]‖` read, `U[c]·‖V[:,c]‖` write), and a
+read absorbs its RMSNorm gain (`γ ⊙ V`) because the component sees the normalised stream while
+the panels plot the raw one. Candidates are the **union** of the output- and hidden-alive
+lists; the tooltip says which lists each came from.
+
+Each arrow is drawn **only in the column whose stream position that component actually
+touches** — `_arrow_site` derives that from `(layer, matrix)`, so a decomposition spanning
+many layers works without changes:
+
+| matrix | role | site |
+|---|---|---|
+| `mlp.down_proj` | write (U) | `L{ℓ}` |
+| `self_attn.o_proj` | write (U) | `L{ℓ}att` |
+| `mlp.{gate,up}_proj` | read (V) | `L{ℓ}att` |
+| `self_attn.{q,k,v}_proj` | read (V) | `L{ℓ-1}` |
+
+A component whose site isn't among the captured positions has no panel to draw on and is
+dropped; for a single-layer decomposition most columns stay empty. Two sliders: **min |proj|**
+(a floor on the in-plane 2D norm, in data units, defaulting to the 90th percentile of the
+shipped norms) and **length** (a shared multiplier, ±2 decades around `mult_default`, which
+puts the 99th-percentile arrow at one data unit — a probe maps a `d_model` activation to a
+~unit cosine, so `‖w‖` is tiny and raw `dir·w` projections are orders of magnitude shorter
+than the cloud). Relative lengths are always preserved, so arrows stay comparable. Hovering an
+arrowhead — the outer half of the shaft is the hit target, since every arrow starts at the
+origin and the inner half is an unresolvable pile-up — names the subcomponent and gives
+`|proj|` plus the angle to the plane (0° = it lies in the plane, 90° = orthogonal), taken
+against the plane's orthonormal basis via the shared `common.probe_plane_basis`.
+
+**view** (client-side only, no data regeneration needed — everything is already in
+`data.js`) toggles the grid's column axis: **all layers** (default) fixes one period and
+sweeps stream positions, matching `final_plane_scatter`; **all periods** fixes one layer
+(a new `layer` picker replaces the `period` picker) and sweeps periods instead, useful for
+comparing a single position across every period at a glance. The Δ-from-previous-position
+colorby modes (`plane`/`resid`) and displacement arrows are layers-view-only — there's no
+"previous" position when columns are periods — and get disabled (auto-falling back to
+`value`) when switching to the periods view.
+
+**`--probe-layers`** (default `18`, the decomposed layer; comma-separated for more — e.g.
+`18,20`) picks
+which layer(s)' probe the result row is fixed to. The ridge-CV fit already has a probe per
+layer, so adding more probe layers costs only extra CPU-side projection of the *already
+captured* activations, not extra GPU forward passes. The applet always shows a `probe
+layer` dropdown (defaulting to L20 when it's among the prepared layers), populated from
+whatever `data.js` was actually built with — a single-option dropdown when only one probe
+layer was prepared, several when more were.
+
+**Axes and zoom** (client-side only): every panel draws dashed zero-lines plus tick labels
+giving each axis's scale and sign. The *default* frame is centred on the origin and sized
+to fit the **real model's own** point cloud specifically (not whichever source is
+currently displayed, so panels don't jump when switching `data`) with 15% slack — computed
+from `op`/`view`/`period`/`layer`/`probe-layer` alone, never from the sampled points'
+own asymmetric range or which decomposition produced the run, so two separately generated
+applets on the same base model + probes default to the same framing (their `n_show`
+samples are close enough, especially at the shared default seed, that the real model's
+cloud extent barely varies run to run). Scroll zooms toward the cursor, drag pans,
+double-click resets — one row's panels share a frame (as they already did for comparing
+`data` sources), so any interaction on one panel moves the whole row.
+
+Batches are grouped by each sampled prompt's natural (non-zero-padded) token length rather
+than padded, since `ComponentModel`'s masked forward has no attention-mask support — this
+also keeps tokenization identical to what `collect_resid_stream.py` used to fit the probes,
+so reusing their weights on freshly captured activations stays valid. Only 2D/1D projected
+points + scalar deltas + CI (base64 uint8) + the arrows' 2D projections and angles (base64
+float16) are ever serialized, never raw `d_model` activations. Site gating keeps the arrow
+block small — a component only needs the planes its own column can display (that position's
+own `a`/`b` probes plus each prepared probe layer's result probe), not one per stream
+position.
+
+```bash
+uv run python -m param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter \
+    "$MODEL_PATH" ~/out/runs/fourier_probes/ridge_cv_probes_{add,sub}.json --slurm
+```
+
 `export_ridge_cv_planes` is a pure format transform (the shipped weights are the fit's
 full-range refit; `r2_cos = r2_sin = cv_r2`, with `cv_r2` / `p_value` / `lambda_rel` /
 `accepted` riding along). `plot_probe_projections` scatters a prompt subsample on each

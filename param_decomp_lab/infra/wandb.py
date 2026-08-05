@@ -210,7 +210,13 @@ def init_wandb(
     `view_meta/` prefix so the UI can group runs by researcher-facing axes. `resume`
     (e.g. `"allow"`) is forwarded to `wandb.init` so a leg reusing `run_id` appends to
     the existing run rather than erroring.
+
+    A resuming leg logs its config with `allow_val_change`: W&B pins config keys on first
+    write, and a later leg legitimately differs — `ResumeConfig.pd` exists to change it for
+    fine-tune legs, and a `PDConfig` field added since the first leg ran appears as a new
+    key. Without this a resume dies after the run is already re-initialised.
     """
+    allow_val_change = resume is not None
     wandb.init(
         id=run_id,
         project=project,
@@ -225,11 +231,14 @@ def init_wandb(
 
     cfg_dict = config.model_dump(mode="json")
     flattened = flatten_typed_lists(cfg_dict)
-    wandb.config.update(cfg_dict)
-    wandb.config.update(flattened)
+    wandb.config.update(cfg_dict, allow_val_change=allow_val_change)
+    wandb.config.update(flattened, allow_val_change=allow_val_change)
 
     if view_meta:
-        wandb.config.update({f"view_meta/{k}": v for k, v in view_meta.items()})
+        wandb.config.update(
+            {f"view_meta/{k}": v for k, v in view_meta.items()},
+            allow_val_change=allow_val_change,
+        )
 
 
 _n_try_wandb_comm_errors = 0

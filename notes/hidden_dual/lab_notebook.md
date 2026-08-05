@@ -247,3 +247,523 @@ marginal shared components), so no unit conversion balances the two losses. What
 coefficient is that the *value* distribution is bimodal in the same place — bulk surplus ~200x
 above its keep-threshold, marginal fringe at ~2x — making `lambda_hidden: 5e-5 -> 1e-4`
 surgical. Full numbers and cross-checks in `report.md`.
+
+## 2026-08-01 — which hidden activations? the addsub-L18-11-* site-target series
+
+Asked which *part* of the hidden activations the second CI net should reconstruct. Four
+arms, everything but the measured site set held identical to `addsub-L18-10-dual-ppgd`:
+
+| arm | hidden objective measured at |
+|---|---|
+| `addsub-L18-11-baseline` | all 7 decomposed matrices (the status quo) |
+| `addsub-L18-11-module-out` | `o_proj` + `down_proj` — what the modules add to the stream |
+| `addsub-L18-11-resid` | the residual stream itself, post-attn and post-MLP |
+| `addsub-L18-11-down-only` | `down_proj` alone |
+
+15000 steps, gamma annealed over the last 5000 (`gamma_anneal_start_frac` 2/3). Two lanes
+of 2 GPUs, chained `afterok` so at most two run at once.
+
+### Readout sites
+
+The stream is not any matrix's output, so measuring there needed a new concept:
+`pd.hidden_readout_sites`, a `{name: module_path}` map whose module *input* is captured —
+clean and masked — and joined to the decomposed sites in `ComponentModel.measurement_sites`.
+`site_patterns` then selects it like anything else, so all four hidden-acts metrics gained
+residual support with no per-metric code. In a Llama block the two capture points are
+`layers.18.post_attention_layernorm` (post-attention stream) and `layers.19.input_layernorm`
+(post-MLP stream).
+
+A readout is measured at **every position**, unlike a decomposed site, which is restricted
+to the positions its routing mask selects. That restriction is sound at a matrix output — an
+unrouted position ran the frozen module and its error is identically zero — but false on the
+stream: attention mixes positions, so a position routed to nothing still receives error from
+the routed positions it attends to.
+
+**All four arms declare the same two readout sites** and differ only in the *training*
+losses' `site_patterns`. Every arm therefore logs the same eval panel — hidden error at all
+7 matrices and at both stream points, under both CI nets — which is what makes questions
+like "does training on `down_proj` alone also fix the stream?" answerable.
+
+### One bug, found by the probe
+
+The global CI-fn wrapper transforms *every* key of the activation cache rather than indexing
+by its own layer list, so the extra readout entries crashed it with
+`KeyError: 'resid_post_attn'`. `calc_causal_importances` now selects the decomposition
+targets explicitly. Pinned by a test; the assumption that "extra keys are inert" was checked
+against `get_all_component_acts` (which does skip unknown keys) and wrongly generalised.
+
+### The residual objective needed recalibrating — by 2830x
+
+Measured at step 0, the same CI mask gives hidden error **0.942** at the matrices and
+**0.000333** at the stream: a 2830x ratio, because the stream's `Σ tgt²` denominator is
+dominated by the frozen incoming residual. Left at `coeff: 1.0` the resid arm's objective
+would sit ~2830x below the sparsity penalty it competes with, and the run would have
+measured "hidden objective switched off" rather than "the stream is a worse target".
+
+The arm's coefficients are therefore scaled by 2830 (stochastic 1.0 -> 2830, PPGD 0.5 ->
+1415), equalising the two objectives at step 0. The reported quantity stays the true
+relative error; only the arm's weight changes, so the variable under test is *which*
+activations rather than *how strongly*. Note the calibration is probe-dependent: the
+CI-masked ratio is 2830, the stochastic-masked one ~2100. The 35% gap is immaterial against
+the correction itself, but the number is not a constant of nature.
+
+### C raised 4x — measured, not guessed
+
+The -10 baseline was at its alive-count ceiling (hidden net: `q_proj` and `k_proj` at exactly
+128/128), which would have clipped the very readout the series is about. Probes at 10 steps:
+
+| C factor | total C | peak / GPU (of 46068) | headroom |
+|---|---|---|---|
+| 1x | 1536 | 39002 | 7.0 GB |
+| 4x | 6144 | 41546 | 4.4 GB |
+
+4x the components costs 2.5 GB — C really is a weak memory lever here, as the -09 series
+found. Stopped at 4x rather than 6x: extrapolation puts 6x near 43.2 GB, the same knife-edge
+that OOM'd earlier 8B runs on this node's smaller cards, and a mid-run OOM costs 13 h.
+
+## 2026-08-01 — fifth arm: `mlp-only`, and the wandb rename
+
+Added `addsub-L18-11-mlp-only` (hidden objective on `*.mlp.*` — gate, up, down; no
+attention) as a third concurrent lane, GPU budget raised to 6. Config diffs from
+`baseline` in exactly three lines: the label and the two training losses' `site_patterns`.
+
+It exists because of the baseline result. The hidden net's per-position surplus over the
+output net is ~4.4x in attention but only ~1.6x in the MLP, and the anomaly census puts
+essentially zero magenta in `k_proj`/`v_proj` — so the attention surplus is real activity
+that the output objective cannot see. `baseline` vs `mlp-only` differ in exactly the four
+attention-internal sites and therefore price that surplus against output quality directly.
+
+The first two arms were launched without `--run_id`, so their run dirs and wandb runs took
+auto-generated `p-*` names. Local dirs renamed to their labels; wandb display names renamed
+from each run's own `config.label` (asserting rather than guessing when absent). Wandb run
+*ids* are immutable, so those two keep `p-*` in their URLs. Later arms pass `--run_id`.
+
+## 2026-08-02 — phase 2 plan, fixed before the results are in
+
+Once the five arms land: pick the best-performing locus, return to the 20000-step formula,
+and re-test it there under **increased** hidden-acts reconstruction pressure — two
+different increases, 2 GPUs each, 4 total.
+
+Writing the selection rule down now, before seeing arms 3-5, so it cannot be fitted to
+whichever answer arrives. The stated criterion is *best output decomposition*, so the
+primary key is output quality, and the tie-breaks are the readouts the series exists to
+produce:
+
+1. **Output quality at matched sparsity.** `kl_ci_masked` and `PGDReconLoss` read against
+   `CI_L0_output`, not raw. The arms will not land at equal sparsity — the hidden loss is a
+   mean over sites, so narrowing the site set multiplies the per-site gradient weight
+   (7 sites -> 2 sites is 3.5x) and buys more components. Comparing raw KL across arms would
+   reward whichever arm happened to end least sparse.
+2. **Hidden reconstruction where it was never trained.** Each arm logs the full panel, so
+   generalisation off the trained sites is directly visible. An arm that repairs sites it
+   never measured is doing something structural rather than fitting its own objective.
+3. **Anomaly rate** (magenta cells, cut 0.5) — cell counts only, which are cut-robust;
+   component counts are an ordering, not a magnitude.
+4. **Saturation** — any arm near the ceiling is disqualified from the comparison rather
+   than ranked, since its counts are clipped.
+
+Phase-2 shape: 20000 steps, `gamma_anneal_start_frac` 0.5 (annealed over the last 10000, as
+in `-10-dual-ppgd`), C kept at 4x — it is strictly better at matched step count and is what
+lifted the alive-count ceiling, so reverting it would reintroduce the clip. Only the
+schedule returns to the 20k formula.
+
+Pressure: the winning arm's hidden recon coefficients (stochastic 1.0 / PPGD 0.5 at
+baseline weighting) scaled by two multipliers. These multiply whatever the arm's own
+calibration already is — for `resid` that is on top of the 2830x, which is a unit
+conversion rather than a pressure choice.
+
+## 2026-08-02 — selection metric fixed: PGD nats per active component
+
+The arm is chosen by **PGD reconstruction nats per active component** —
+`PGDReconLoss / CI_L0_output`, lower is better. This supersedes the matched-sparsity
+reading-off written above; it is the same idea reduced to one number, which removes the
+judgement call about what "matched" means when no two arms land at the same sparsity.
+
+Two definitional forks, both reported because they can in principle disagree:
+
+- **Literal**: adversarial recon error carried per active component. An arm with more error
+  *and* many more components can score well here, which is the failure mode to watch.
+- **Rate-distortion**: nats of KL recovered against the fully-ablated reference
+  (`kl_zero_masked` = 0.24215) per active component, higher is better. Immune to that
+  failure mode.
+
+Denominator reported both as `CI_L0_output` (mean active per position) and `n_alive_output`
+(distinct components alive). The output net's count is the denominator because
+`PGDReconLoss` is the output objective under an output-CI mask; the hidden net's components
+are the *cost* being tested, and enter through their effect on the output net.
+
+First two arms — all four framings agree, so the ambiguity is not load-bearing so far:
+
+| arm | PGDRecon | CI_L0 out | alive out | nats/active | recovered/active |
+|---|---|---|---|---|---|
+| baseline | 0.00547 | 25.4 | 1229 | **2.151e-04** | **0.0093** |
+| resid | 0.00692 | 28.2 | 1421 | 2.452e-04 | 0.0083 |
+
+`resid` is 14% worse. If a later arm splits the two framings, that gets reported rather
+than resolved silently.
+
+### Correction: denominator is the union over both nets
+
+The metric is **output-PGD nats per total alive component**, where "total alive" counts
+components alive under *either* CI net. The two nets score the **same** shared pool of
+subcomponents, so the sum of the two logged `NAlive` values double-counts every component
+both nets keep — which is most of them. It has to be a union.
+
+Neither logged count gives the union, since `NAlive` reduces to a scalar per net. The
+overlap is recoverable from `ab_grids`, which stores per-component mean CI for both roles
+over all C, so the union is computed there: a component counts as alive if its
+per-position mean CI reaches 0.1 under either net.
+
+That definition is stricter than the `NAlive` eval metric — mean over the prompt pool
+rather than max over individual examples — so these counts run lower than the logged ones.
+They are computed identically for every arm, which is what the ranking needs, and they are
+the only place the per-net overlap exists at all. The `NAlive` figures stay in the report
+as the headline absolute counts; the union is what the selection metric divides by.
+
+## 2026-08-02 — metric correction: the ranking was inverted
+
+`nats / alive` is wrong-signed. Both quantities are costs — we want few nats *and* few
+components — so dividing one by the other credits an arm for keeping more components. Under
+that ratio the densest arm on the Pareto frontier came out on top; the correct combination
+is the **product**, `PGDReconLoss * alive-either`.
+
+Corrected ranking:
+
+| arm | PGD | alive either | nats x alive | Pareto |
+|---|---|---|---|---|
+| **mlp-only** | 0.00596 | **298** | **1.7756** | optimal |
+| down-only | 0.00627 | 315 | 1.9735 | dominated by mlp-only |
+| baseline | **0.00547** | 374 | 2.0456 | optimal |
+| module-out | 0.00602 | 406 | 2.4429 | dominated by baseline, mlp-only |
+| resid | 0.00692 | 367 | 2.5394 | dominated by down-only, mlp-only |
+
+The frontier is exactly `{mlp-only, baseline}`. `mlp-only` trades 9% more adversarial error
+for 20% fewer components and wins the product by 13%. `module-out` and `resid` are beaten on
+both axes at once, which no exchange rate rescues.
+
+This inverts the earlier conclusion. **Dropping attention from the hidden objective is the
+best move**, not the worst — the attention surplus the baseline analysis identified (4.4x
+the output net's per-position activity) is real but expensive, and buying it back costs a
+fifth of the component budget for ~9% output fidelity.
+
+Domination is now reported alongside the product, because the product fixes one particular
+exchange rate between two costs while domination is exchange-rate-free — and a near-tie in
+any scalar score should be read against the two factors separately.
+
+Phase 2 relaunched on `mlp-only` (jobs 6641 / 6642); the earlier pair based on `baseline`
+was cancelled under 2 minutes in.
+
+## 2026-08-02 — phase 2, third run: the all-matrices locus at highest pressure
+
+Added `addsub-L18-12-press10-allmat` — the `baseline` locus (all 7 matrix outputs) at the
+10x hidden-recon coefficient. Three runs, 6 GPUs.
+
+| run | locus | hidden coeff multiplier |
+|---|---|---|
+| `addsub-L18-12-press3` | `mlp-only` (`*.mlp.*`) | 3x |
+| `addsub-L18-12-press10` | `mlp-only` (`*.mlp.*`) | 10x |
+| `addsub-L18-12-press10-allmat` | `baseline` (all 7 matrices) | 10x |
+
+Its config differs from the running `press10` in exactly two places, the label and
+`site_patterns`, so `press10` vs `press10-allmat` is a clean single-variable pair at the
+pressure where any locus effect should be largest. That matters because the phase-1 loci were
+separated by only 13% on `nats x alive`, and both survivors were on the Pareto frontier —
+the ordering could plausibly change once the hidden objective is weighted 10x, and this pair
+detects that directly rather than by extrapolation.
+
+It also probes the phase-1 mechanism from the other side. Per-site gradient weight is
+`1/n_sites`, so the `mlp-only` arm already gives each MLP site 1/3 against `baseline`'s 1/7 —
+a 2.3x concentration. A 10x global multiplier on `baseline` overshoots that concentration
+while keeping attention in the objective, which separates "concentrate the pressure" from
+"increase the pressure".
+
+## 2026-08-02 — the `-11` name reused: C scaling and hidden pressure
+
+Cancelled the site-target work (the running `-12` pressure runs) and purged the `-11`
+series: 407 GB across five completed `-11` arms and two partial `-12` runs. Before deleting,
+copied every run's `metrics.jsonl`, `experiment_config.yaml` and `run_metadata.json` into
+`~/pd_scratch/hidden_site_targets/archive/` (8.9 MB total), so every number in
+`site_targets_report.md` stays checkable. Checkpoints and `ab_grids` payloads are gone, so
+the anomaly census cannot be recomputed at a different threshold — that is the one
+irreversible loss. The wandb runs were left in place; say the word to delete those too.
+
+The new `-11` is three exact replications of `addsub-L18-10-dual-ppgd` at 4x C:
+
+| run | C | hidden recon coeffs |
+|---|---|---|
+| `addsub-L18-11-bigc` | 6144 | 1.0 / 0.5 (unchanged) |
+| `addsub-L18-11-press2` | 6144 | 2.0 / 1.0 |
+| `addsub-L18-11-press5` | 6144 | 5.0 / 2.5 |
+
+Generated from the reference's own YAML rather than from any descendant, so exactness is by
+construction rather than by inspection. Diffs confirm it: `bigc` differs from the reference
+in the label and seven C values only; each pressure run differs from `bigc` in the label and
+two coefficients only. Output-side hyperparameters — the three output recon losses and both
+importance-minimality coefficients — are byte-identical throughout, which is what makes the
+comparison a pressure comparison rather than a rebalancing.
+
+Deliberately **no `hidden_readout_sites`** here. They would not have hurt, but with
+`site_patterns: null` the hidden objective is "every measurement site", so declaring readouts
+would have widened it from 7 matrices to 9 and quietly broken the replication.
+
+Reference schedule already anneals gamma over the second half (`start_frac: 0.5`, 20000
+steps), so nothing there changed.
+
+### Fourth run: `bigc-mlp`
+
+Queued `addsub-L18-11-bigc-mlp` — `bigc` with the hidden objective measured on `*.mlp.*`
+only. Differs from `bigc` in the label and the two `site_patterns` fields.
+
+Worth being explicit that this is not a pure locus change. The hidden loss is a mean over
+sites, so cutting 7 sites to 3 multiplies the per-site gradient weight by 7/3 = 2.33x —
+close to `press2`'s uniform 2x. The two runs therefore ask nearly the same question from
+opposite directions: `press2` raises the weight everywhere, `bigc-mlp` raises it only on the
+MLP by dropping attention from the objective. Comparing them separates concentrating
+pressure from increasing it, which the superseded series confounded by never varying the
+site set and the coefficient independently.
+
+## 2026-08-03 — `bigc` costs PGD only under a fresh adversary; zero-U init queued
+
+`addsub-L18-11-bigc` finished. Clean recon and hidden recon both improve over the
+reference, the persistent adversary reports no change at all (0.003593 vs 0.003600), and
+only the fresh 20-step eval probe is worse (+12%). Traced to `PGDReconLoss` being an
+increasing function of C by construction: the mask is `ci + (1 - ci) * s`, so the adversary
+can only switch near-zero-CI components *on*, and `bigc` has 4891 of those against the
+reference's 429. Details and the supporting numbers in `pressure_report.md`.
+
+Added `weight_init: "coupled_zero_u"` (`optimize.py::init_coupled_zero_u_`) — `coupled` with
+`U` zeroed, so components start silent and unused ones keep zero norm instead of W-scale
+junk. Zeroing both sides is a dead fixed point, so it has to be `U`: `V` stays live for the
+CI nets and carries `U`'s gradient. Launched `addsub-L18-11-bigc-zeroinit` (job 6685),
+identical to `bigc` apart from that one field.
+
+## 2026-08-03 (later) — `press2` finished; it weakens the attack-surface account
+
+`press2` at 20000: `PGDReconLoss` 0.00540 (worse than `bigc`'s 0.00498) with *fewer*
+near-zero-CI components (4291 vs 4891). So attack surface cannot be the whole story. Hidden
+recon is much better (0.02290 vs 0.03386 reference, -32%), bought with +46% `CI_L0_hidden`
+and +61% alive — a real competition between the two objectives over one shared pool.
+
+Also noted: `PersistentPGDReconLoss/output_recon` is 0.00359 / 0.00360 / 0.00359 across the
+reference, `bigc` and `press2`. Identical to three significant figures across configs that
+differ a lot means it is self-equilibrating and not a quality discriminator — I had leaned
+on it too hard in the `bigc` writeup. Corrected in `pressure_report.md`.
+
+## 2026-08-03 — subspace-scatter + alive-plane-scatter for the whole 20k series
+
+`build_alive_plane_scatter` lived only on `origin/worktree-dual-alive-lists`; cherry-picked
+its two commits (469fed76c, 1d38d3c20) onto this branch — three self-contained files, no
+conflicts. Submitted the per-run DAG (`find_alive_subcomponents` -> hidden/inner activation
+collection -> periods -> `build_subspace_scatter`, plus `build_alive_plane_scatter` off the
+alive list) for every 20k-step run after `addsub-L18-10-dual-ppgd`, which already has both
+applets. Submitter: `~/pd_scratch/hidden_site_targets/submit_applets.py`.
+
+Finished runs submitted directly (`nobeta2.5`, `nobeta2.5-ppgd`, `bigc`, `press2`); the three
+still training (`press5`, `bigc-mlp`, `bigc-zeroinit`) are chained `afterok` on their training
+jobs, so their DAGs fire on completion and never fire if a run dies. `--kl-thr` left at its
+default `rounded`, which computes the run's own in-sweep rounded-circuit anchor — the per-run
+convention, now automatic rather than hand-set.
+
+All 63 jobs are queued; the GPU roots sit on `QOSMaxGRESPerUser` behind the three training
+runs holding all 6 GPUs, and start as those finish.
+
+## 2026-08-03 — per-matrix alive / active plots in the report
+
+Added `~/pd_scratch/hidden_site_targets/plot_alive_active.py` (reads `metrics.jsonl` only, no
+checkpoint, no GPU; submitted via SLURM per convention). Two figures in
+`notes/hidden_dual/figures/`, embedded in `pressure_report.md`: alive components per matrix
+and `CI_L0` per matrix, one panel per CI net, bars grouped by matrix and labelled with the
+full run id. Each alive bar carries a tick at that run's own C, since C differs 4x between the
+reference and the -11 arms.
+
+Only runs at step 20000 are plotted — gamma annealing runs over the second half and roughly
+halves the alive count, so a mid-training arm beside a finished one would mislead. Currently
+`addsub-L18-10-dual-ppgd`, `addsub-L18-11-bigc`, `addsub-L18-11-press2`; re-run the script as
+the other arms finish.
+
+## 2026-08-03 — same plots for the superseded site-targets series
+
+Generalised `plot_alive_active.py` with `--root` / `--step` / `--prefix` / `--label`, so it
+also runs against `~/pd_scratch/hidden_site_targets/archive/` — the purged locus series kept
+its `metrics.jsonl` + `experiment_config.yaml`, which is all these plots need. Five arms at
+step 15000 added to `site_targets_report.md`; the `-12` press runs are excluded (cancelled at
+step 5000/6000 when the series was dropped).
+
+The plots make the phase-1 ranking mechanical: the alive budget *moves between matrices*
+rather than shrinking. Attention collapses when the hidden objective stops covering it
+(hidden `q_proj` 172 -> 4 from `baseline` to `mlp-only`), and the freed pressure reappears
+concentrated on whatever remains (`down-only` puts 25.7 components per position on
+`down_proj` vs `baseline`'s 10.6) — the `1/n_sites` gradient weight showing up as counts.
+The output net is nearly untouched across all five arms.
+
+Figure filenames are prefixed `site_targets_` so they coexist with the `-11` series plots,
+and the caption flags that these arms reuse the `addsub-L18-11-*` prefix the current series
+also uses.
+
+## 2026-08-03 — comparability audit of the five site-targets arms
+
+Diffed the archived configs field by field. Only two real departures from apples-to-apples:
+`resid`'s coefficients (2830.0 / 1415.0 vs 1.0 / 0.5 — the deliberate magnitude match), and
+the `1/n_sites` per-site gradient weight, which varies 7x across the arms (n_sites 7/2/2/1/3)
+so locus and per-site pressure are entangled by construction. Everything else matches,
+including the readout-site declarations: all five declare the same two resid readouts, so the
+9-site measurement pool is shared and `site_patterns` only selects within it.
+
+The five ran on four commits, differing only in `notes/` — no `param_decomp/` change across
+the span, so training code was identical. `uncommitted_changes` is stored as a bare boolean,
+so the working tree at run time is not recoverable; all five must have carried the
+`calc_causal_importances` readout fix, since each declares `hidden_readout_sites` and would
+otherwise have raised `KeyError` rather than finishing 15000 steps.
+
+Also noted `down-only`'s hidden `down_proj` at 836/1024 (82% of C) — the only bar near its
+ceiling, so that concentration number is plausibly clipped low. Caveats written into the
+plot section of `site_targets_report.md`.
+
+## 2026-08-03 — per-matrix anomaly plot for the site-targets arms
+
+The `ab_grids` payloads were purged with the runs, but `~/pd_scratch/hidden_site_targets/
+results.json` kept the full census (per matrix, per arm, cut 0.5), so the plot is built from
+that. `plot_anomalies.py` -> `figures/site_targets_anomalies_per_matrix.png`, absolute magenta
+cells plus magenta-share-of-active, since `n_saved` varies 0..328 across (arm, matrix) and
+only the share is comparable. Bars with `n_saved < 5` are hatched, `n_saved == 0` draws
+nothing. Component-level counts stay out: cells move ~1.4x over a 9x cut change, components
+~7x.
+
+Two additions over the aggregate tables already in the report. Within attention the anomalies
+sit almost entirely on `o_proj` (`down-only` 501/507 there, `mlp-only` 237/611) rather than
+being spread — `mlp-only`'s other 374 are on `q_proj` off 3 saved components, hatched and not
+to be leaned on.
+
+More important: **magenta count is partly a restatement of hidden-net density.** A cell is
+magenta only if the hidden net calls it inactive, so a denser hidden net mechanically yields
+fewer. `down-only` has the densest hidden `down_proj` (25.7/position) and the lowest MLP
+anomaly rate (0.16%); `baseline` has 10.6 and 1.87%. The anomaly ordering *is* the hidden
+density ordering, both driven by `1/n_sites`. So anomaly rate is not a clean cross-arm measure
+of disagreement between the nets — worth remembering before using it as a selection criterion.
+
+## 2026-08-04 — paused press5 at 10k to free GPUs for the applet DAGs
+
+All 6 GPUs were held by the three training runs, so the ~60 queued applet jobs could not
+start. Paused `addsub-L18-11-press5` at exactly step 10000 (`training_10000.pth`, 17.9 GB,
+already on disk) rather than waiting ~9.5 h for it to finish. Both `press2`'s and `bigc`'s
+`find_alive_subcomponents` started on the freed pair within seconds.
+
+Resume is safe and automatic: `TrainingState` carries optimizer *and* PersistentPGD adversary
+state, and `_resume_main` **continues the parent run in place** when no `--run_id` is passed —
+same folder, same wandb run — so `model_20000.pth` still lands in `addsub-L18-11-press5/`.
+Job 6755 (`resume_ddp.sbatch` + `resume_press5.yaml`) is chained `afterany` on press2's six
+GPU applet jobs, so press5 restarts by itself once those are done. Cost of the pause: under
+500 steps, since press5 was between evals at 10000 and 10500.
+
+Gotcha worth remembering: cancelling the training job strands anything chained on it.
+press5's own applet DAG (6722-6730) went `DependencyNeverSatisfied` the moment 6656 was
+cancelled; cancelled and resubmitted as 6756-6764, chained on the resume job instead.
+
+**The two `addsub-L18-10-dual-nobeta2.5*` run directories have been deleted** — checkpoints,
+metrics, configs, all gone. That is why their applet DAGs (18 jobs, 6704-6721) vanished from
+the queue: the roots failed once their checkpoints disappeared. They cannot be resubmitted.
+`sacct` has no accounting DB on this cluster and `MinJobAge=300`, so vanished jobs leave no
+trace — worth knowing when a submitted DAG silently thins out. Disk is at 90% (3.8 T free).
+
+Also confirmed a cluster quirk the hard way: **`--gpus=0` SLURM jobs still see every GPU on
+the node**, so anything calling `load_lm_run` resolves to cuda and contends with the training
+runs (an ad-hoc CPU benchmark OOMed against one and was cancelled; no harm to the run). The
+real CPU-only validation scripts — `build_subspace_scatter`, `compute_subcomp_periods` — carry
+no cuda or model-loading references at all, so they are unaffected.
+
+## 2026-08-04 — alive_plane_scatter was failing; missing the dual-role alive lists
+
+`alive_plane_scatter` (the Fourier-probe applet — it consumes the `ridge_cv_probes_<op>.json`
+planes) failed for every `-11` run with `missing alive-components TSV:
+alive_subcomponents_hidden.tsv`. On a dual-CI checkpoint it needs the hidden net's alive list
+as well as the output net's, and the version of `find_alive_subcomponents` on this branch only
+wrote the output one. `subspace_scatter` succeeded throughout, which is why the gap was easy to
+miss — the run's `analysis/` looked populated.
+
+Cause: when porting the applet from `origin/worktree-dual-alive-lists` I cherry-picked only the
+two `build_alive_plane_scatter` commits and not `730bc1482 feat(validation): dual-role alive
+lists in find_alive_subcomponents`, which sits *before* them and is what produces the
+`_hidden`-suffixed outputs. Cherry-picked it plus the seven later applet refinements
+(view toggle, multi-probe-layer, period colouring, axes/zoom), all clean.
+
+`find_alive_subcomponents` now writes the `_hidden` files automatically whenever the checkpoint
+has a hidden CI net, so the still-queued DAGs pick this up with no change. Re-ran the two
+failed stages for `bigc` and `press2`.
+
+Also fixed the resume path: press5's first resume attempt died in `init_wandb` because W&B pins
+config keys on first write and the resumed config carried `hidden_readout_sites`, a `PDConfig`
+field added after press5's first leg started. `init_wandb` now passes `allow_val_change` when
+resuming — correct in general, since `ResumeConfig.pd` exists to change the config for
+fine-tune legs.
+
+press5 stays paused at step 10000 until **every** applet job is done (6731-6748 plus the
+6785-6788 reruns), per instruction; resume job 6789, with press5's own DAG chained behind it.
+
+## 2026-08-04 — bigc-zeroinit: fragmentation fixed, PGD gap untouched
+
+`addsub-L18-11-bigc-zeroinit` finished 20000 steps. The `coupled_zero_u` intervention worked
+exactly as designed and the hypothesis it was built to test is **falsified**.
+
+Alive counts prove the mechanism fired: 1055 alive under the output net at 4x C, *fewer than
+the reference at 1x C* (1107), and hidden-net alive down from `bigc`'s 1899 to 1436 (reference
+1387). Unused subcomponents stayed at zero instead of accruing W-scale norm.
+
+And `PGDReconLoss` did not move: 0.00494 vs `bigc`'s 0.00498, still 12% above the reference's
+0.00443. Removing every scrap of dead-component junk changed the PGD number by 0.8%. So the
+attack-surface story I proposed is wrong — and `press2` already pointed the same way, being
+worse on PGD with *fewer* near-zero-CI components.
+
+What is left is granularity: at 4x C the same function is carved finer, and a per-coordinate
+attack over a finer partition has more freedom to assemble a bad mask from *live* components.
+No init scheme touches that. Practical upshot: `PGDReconLoss` is a fair within-C ranking and a
+misleading cross-C one; quote it beside C, or switch to an L1-budgeted attack.
+
+`coupled_zero_u` is still worth keeping, for a different reason than it was built: it gives
+big-C's clean reconstruction (0.00160 vs reference 0.00175) with the smallest alive set of the
+three, i.e. the fragmentation cost of raising C disappears. It costs a little hidden
+reconstruction (0.03572 vs 0.03386).
+
+## 2026-08-04 — applet audit + the DAG was over-serialised
+
+Audit of the `-11` series against both applets (`subspace_scatter`, `alive_plane_scatter`):
+`bigc`, `press2` and `bigc-mlp` have both, all built after the dual-role-alive-list fix landed
+at 03:00 (48-50 MB subspace, ~80 MB plane `data.js`). `bigc-zeroinit`'s DAG is running now;
+`press5` is chained behind its resume.
+
+**`collect_hidden_activations` takes no alive list** — no `alive_tsv` argument, no reference to
+one — so chaining it on `find_alive_subcomponents` in `submit_applets.py` was pure
+over-serialisation. Its only real precondition is the checkpoint existing. Fixed: it now
+depends on the *training* job (or nothing, for a finished run), which puts three GPU jobs in
+flight from the start instead of one. Only `collect_inner_activations` genuinely needs the
+alive list.
+
+Rewired `bigc-zeroinit` mid-flight to prove it: its two hidden collectors now run alongside the
+alive sweep rather than after it, so the node went from 1 GPU busy to 3.
+
+**press5 cannot be resumed on more GPUs.** The obvious throughput lever — resume on 4 GPUs
+instead of 2 — is blocked: with `scope: per_batch_per_position` the PPGD source shape carries
+the per-rank batch dim, and `PersistentPGDState.load_state_dict` documents "Shapes must already
+match" and does a bare `copy_`. Going 2 -> 4 GPUs changes per-rank batch 64 -> 32 and the restore
+would fail. Optimizer state survives a topology change (it is keyed by parameter name); PPGD
+state does not. So press5's ~10 h tail is irreducible, and 4 GPUs will sit idle through it
+unless unrelated work is queued.
+
+## 2026-08-04 — alive_plane_scatter: L18 probes, and L18 as the default
+
+`alive_plane_scatter` was projecting only onto layer 20's probes — inherited from the Feucht
+readout setup, not from anything about these runs. The ridge-CV probes cover
+`L14 … L18att, L18, … L20`, so L18 (the decomposed layer itself) was available all along;
+`--probe-layers` just defaulted past it.
+
+Changed the default from `20` to `18` in `build_alive_plane_scatter`, and the applet's
+dropdown (`DEFAULT_PROBE_LAYER` in `alive_plane_scatter_app.html`) now opens on L18 when
+present — the flag default and the applet default were set independently and would otherwise
+disagree. `submit_applets.py` passes `--probe-layers=18,20` so both panels ship.
+
+Rebuilt for `addsub-L18-11-press2` only, on instruction: payload confirms
+`probe_layers: [18, 20]` with all three sources (`original`, `hidden_alive`, `output_alive`),
+107.6 MB. The other four keep their L20-only applets for now; rerun
+`build_alive_plane_scatter` per run to upgrade them.
+
+press5's resume started once the outstanding applet jobs cleared and is ~9 h from step 20000.
+Its own DAG (6863-6870 plus plane 6879, already set to `18,20`) is chained behind it.

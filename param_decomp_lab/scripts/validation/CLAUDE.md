@@ -135,6 +135,8 @@ reimplementing. Implemented so far:
   (optionally filtered to given proj names); `read_mean_ci` reads an `alive_filtered_<op>.tsv`
   into a `(proj, component) -> mean CI` map; `read_subcomp_periods` reads a `subcomp_periods`
   TSV; `square_grid_size` returns the grid side `n` while asserting full unique coverage;
+  `probe_plane_basis` returns a Fourier probe plane's orthonormal basis (zero second axis when
+  the plane is degenerate), for direction-to-plane angles;
   `load_component_uv` mmap-loads per-matrix `(V, U)` from a checkpoint; `load_target_mlp_weights`
   mmap-loads the frozen target MLP weights `W [d_out, d_in]` (a neuron's read row / write column).
 
@@ -164,6 +166,14 @@ If two scripts need the same thing, it belongs here.
   (`alive_subcomponents.tsv` + per-position CI JSON); every downstream script consumes it.
   Decouple an expensive full pass from cheap re-filtering by writing an intermediate
   summary TSV, so tweaking a threshold doesn't force another pass over the big file.
+  On a `dual_hidden_ci` checkpoint, `find_alive_subcomponents` additionally writes an
+  `_hidden`-suffixed sibling of every output file (`alive_subcomponents_hidden.tsv`, ...),
+  ranked and swept against the hidden CI net's own reconstruction target (decomposed-site
+  relative error, not output KL) instead of the output net's. The unsuffixed files keep
+  their original meaning and are written unconditionally, so existing downstream scripts
+  need no changes. Output-alive is assumed to be a subset of hidden-alive, so the hidden
+  list is the hidden sweep's own cut unioned with the output-alive set, not an
+  independent threshold — see the module docstring for why.
 - Keep a **`commands.md`** (or `commands.sh`) in this folder with self-contained, runnable
   example invocations — a setup block that defines `$MODEL_PATH` / `$RUN_DIR`, then one
   pasteable block per script with real paths. It doubles as living documentation of how
