@@ -14,7 +14,10 @@ source .venv/bin/activate
 In a worktree, run `uv sync` first so the worktree has its own `.venv`. Do NOT `cd` to
 the main repo — all commands (including git) run in the worktree.
 
-`.env` file with WandB credentials required (see `.env.example`).
+`.env` file with WandB credentials required (see `.env.example`). It is gitignored, so a
+fresh worktree has none — copy it from a sibling worktree before submitting a run. The
+SLURM launcher copies `<repo>/.env` into the job workspace, so a missing one surfaces as a
+wandb `AuthenticationError` a minute into the job, not at submit time.
 
 ## Project overview
 
