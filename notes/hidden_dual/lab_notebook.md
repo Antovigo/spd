@@ -767,3 +767,64 @@ Rebuilt for `addsub-L18-11-press2` only, on instruction: payload confirms
 
 press5's resume started once the outstanding applet jobs cleared and is ~9 h from step 20000.
 Its own DAG (6863-6870 plus plane 6879, already set to `18,20`) is chained behind it.
+
+## 2026-08-07 — shared trunk for the two CI nets
+
+The dual-CI runs so far give each role its own transformer end to end. `press2` at the L18
+shape carries **71.3M** CI parameters across the pair; the two nets read the same activations
+and score the same subcomponent pool, so most of that is a duplicated way of asking "what is
+happening at this position".
+
+`pd.dual_hidden_ci_shared_trunk` collapses it to **one trunk, two readout heads**. Shared: the
+per-site RMS norm, the concat (38912 wide), the input projector (19.9M) and all four blocks
+(12.6M). Private: only the `512 -> 6144` head (3.15M each). Pair goes 71.3M -> **38.8M**.
+
+Split point chosen deliberately. The head is the only part that *must* be private — it is where
+"how much does subcomponent c matter **for this objective**" lives. Everything before it is
+"read the model's state", which is plausibly role-independent, and that is exactly the
+hypothesis this run tests. Per-role expressivity is unchanged (each role was already a linear
+readout of a 512-d representation); what is given up is the ability of the two *representations*
+to specialise.
+
+### `addsub-L18-11-press2-trunk` (job 7405, 2 GPU, ~18.7 h)
+
+Derived from `press2`'s own saved `experiment_config.yaml` by a script that asserts the diff is
+exactly three lines: the label, and `dual_hidden_ci_shared_trunk: true`. Same C (6144), same
+2.0/1.0 vs 1.0/0.5 coefficients, same seed, same everything else — the CI trunk is the only
+moving part.
+
+**The asymmetry to watch.** `press2` weights the hidden objective 2x the output one. With
+independent nets that is just per-net pressure; with a shared trunk the hidden gradient also
+shapes the representation the *output* head reads. Kept as-is, on the argument that a
+hidden-dominated trunk is a property to observe rather than pre-empt — but it is the first
+thing to check if the output net degrades relative to `press2`.
+
+No `CI_hidden >= CI_output` constraint: deliberately out of scope for this run.
+
+### Verified before launch, not assumed
+
+At real L18 shapes, on the actual module: trunk shared by object identity and heads not; one
+backward reaches the trunk from both objectives with the two head gradients differing; the
+trunk's grad equals the output-objective grad plus the hidden-objective grad exactly; and — the
+one that could have silently corrupted DDP — the trunk's `AccumulateGrad` fires **once** per
+backward, so it is allreduced once. Step-100 logs confirm the topology live: 38 CI-fn grad-norm
+tensors, of which 34 are trunk logged once under the output-net name and the only `hidden.`
+entries are `_output_head.W/b`. `press2` logs 72.
+
+### Two traps this created
+
+**State dicts are key-identical either way.** Submodule names do not change, so a shared trunk
+is stored under *both* nets' names and the keys cannot distinguish the topologies. Loading an
+independent-net checkpoint under the flag would succeed silently, with the hidden net's trunk
+landing on the shared parameters and the output net quietly scoring off the wrong
+representation. `_validate_checkpoint_trunk_sharing` compares the two nets' trunk *values* on
+load and refuses the mismatch.
+
+**Every parameter must be collected once.** The CI optimizer's param group and the grad-norm
+sums each used to concatenate the two nets by hand, which would double-count a shared tensor —
+two sets of Adam moments on one parameter, and an inflated `clip_grad_norm_`.
+`ComponentModel.ci_fn_named_parameters` now leans on `nn.Module.named_parameters`' own dedupe
+and is the single source for both.
+
+Code on `feature/dual_ci_shared_trunk`; the run uses `run_ddp_trunk.sbatch`, which points at the
+`shared-trunk` worktree because the main checkout does not carry this code yet.
