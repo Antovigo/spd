@@ -493,6 +493,7 @@ class Trainer:
             ci_config=pd_config.ci_config,
             sigmoid_type=pd_config.sigmoid_type,
             dual_hidden_ci=pd_config.dual_hidden_ci,
+            dual_hidden_ci_shared_trunk=pd_config.dual_hidden_ci_shared_trunk,
             hidden_readout_sites=pd_config.hidden_readout_sites,
         )
         model.to(device)
@@ -524,9 +525,11 @@ class Trainer:
         assert component_model.ci_fn is not None, (
             "single-pool Trainer assumes a ComponentModel with the CI fn intact"
         )
-        # Both CI nets share one optimizer: Adam is per-parameter and the nets have
-        # disjoint parameters, so a shared optimizer is identical to two with the same
-        # hyperparameters — splitting would only buy per-net LR/betas.
+        # Both CI nets share one optimizer: Adam is per-parameter, so with independent
+        # nets this is identical to two optimizers on the same hyperparameters and
+        # splitting would only buy per-net LR/betas. Under `dual_hidden_ci_shared_trunk`
+        # splitting is not available at all — the trunk belongs to both nets, and the
+        # deduped param list keeps it to one set of Adam moments.
         self._ci_fn_params = [p for _, p in self._ci_fn_optimizer_named_params()]
         assert len(self._component_params) > 0, "No parameters found in components to optimize"
 
@@ -585,15 +588,10 @@ class Trainer:
         checkpoint's ``ci_fn.*`` optimizer state still loads into a dual-CI run, with the
         hidden net's moments simply starting fresh. (The *model* state dict is a separate
         matter — that load is strict, so a single-CI checkpoint cannot be resumed straight
-        into a dual-CI config.)
+        into a dual-CI config.) Under a shared trunk the trunk parameters appear once,
+        under their ``ci_fn.`` names.
         """
-        out = [(f"ci_fn.{n}", p) for n, p in self.component_model.ci_fn.named_parameters()]
-        if self.component_model.ci_fn_hidden is not None:
-            out += [
-                (f"ci_fn_hidden.{n}", p)
-                for n, p in self.component_model.ci_fn_hidden.named_parameters()
-            ]
-        return out
+        return self.component_model.ci_fn_named_parameters()
 
     def _build_all_metric_instances(
         self,

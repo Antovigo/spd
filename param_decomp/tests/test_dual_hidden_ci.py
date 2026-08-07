@@ -7,7 +7,13 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from param_decomp.ci_fns import LayerwiseCiConfig
+from param_decomp.ci_fns import (
+    AttnConfig,
+    GlobalCiConfig,
+    GlobalSharedTransformerCiConfig,
+    LayerwiseCiConfig,
+    share_transformer_trunk,
+)
 from param_decomp.component_model import ComponentModel
 from param_decomp.decomposition_targets import DecompositionTarget
 from param_decomp.masks import ComponentsMaskInfo, make_mask_infos
@@ -32,6 +38,7 @@ from param_decomp.metrics.pgd_hidden_acts_recon import (
 from param_decomp.schedule import ScheduleConfig
 from param_decomp.tests.metrics.fixtures import make_two_layer_component_model
 from param_decomp_lab.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
+from param_decomp_lab.component_model_io import _validate_checkpoint_trunk_sharing
 
 
 def _ones_mask_infos(model: ComponentModel) -> dict[str, ComponentsMaskInfo]:
@@ -92,6 +99,129 @@ class TestDualCINets:
         keys = self._model(dual=True).state_dict().keys()
         assert any(k.startswith("ci_fn_hidden.") for k in keys)
         assert not any(k.startswith("ci_fn_hidden.") for k in self._model(dual=False).state_dict())
+
+
+def _transformer_dual_model(*, shared_trunk: bool) -> ComponentModel:
+    target = nn.Linear(3, 4, bias=False)
+    target.requires_grad_(False)
+
+    class Wrapper(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = target
+
+        @override
+        def forward(self, x: Tensor) -> Tensor:
+            return self.fc(x)
+
+    return ComponentModel(
+        target_model=Wrapper(),
+        run_batch=run_batch_passthrough,
+        decomposition_targets=[DecompositionTarget(module_path="fc", C=2)],
+        ci_config=GlobalCiConfig(
+            fn_type="global_shared_transformer",
+            simple_transformer_ci_cfg=GlobalSharedTransformerCiConfig(
+                d_model=8,
+                n_blocks=2,
+                mlp_hidden_dim=[16],
+                attn_config=AttnConfig(n_heads=2, max_len=4),
+            ),
+        ),
+        sigmoid_type="leaky_hard",
+        dual_hidden_ci=True,
+        dual_hidden_ci_shared_trunk=shared_trunk,
+    )
+
+
+class TestSharedTrunk:
+    """One trunk, one readout head per role — `pd.dual_hidden_ci_shared_trunk`."""
+
+    def _heads_and_trunk(self, model: ComponentModel) -> tuple[set[int], set[int], set[int]]:
+        assert model.ci_fn_hidden is not None
+        output_head = {id(p) for n, p in model.ci_fn.named_parameters() if "_output_head" in n}
+        hidden_head = {
+            id(p) for n, p in model.ci_fn_hidden.named_parameters() if "_output_head" in n
+        }
+        trunk = {id(p) for n, p in model.ci_fn.named_parameters() if "_output_head" not in n}
+        return output_head, hidden_head, trunk
+
+    def test_trunk_is_one_set_of_parameters_and_heads_are_private(self):
+        model = _transformer_dual_model(shared_trunk=True)
+        assert model.ci_fn_hidden is not None
+        output_head, hidden_head, trunk = self._heads_and_trunk(model)
+        hidden_trunk = {
+            id(p) for n, p in model.ci_fn_hidden.named_parameters() if "_output_head" not in n
+        }
+        assert trunk == hidden_trunk, "the two nets must reach the very same trunk parameters"
+        assert not (output_head & hidden_head), "readout heads must stay private per role"
+        assert trunk, "test is vacuous without trunk parameters"
+
+    def test_independent_nets_share_nothing(self):
+        model = _transformer_dual_model(shared_trunk=False)
+        assert model.ci_fn_hidden is not None
+        assert not (
+            {id(p) for p in model.ci_fn.parameters()}
+            & {id(p) for p in model.ci_fn_hidden.parameters()}
+        )
+
+    def test_optimizer_sees_each_parameter_once(self):
+        shared = _transformer_dual_model(shared_trunk=True)
+        named = shared.ci_fn_named_parameters()
+        assert len({id(p) for _, p in named}) == len(named), "a shared parameter was counted twice"
+        assert any(n.startswith("ci_fn_hidden.") for n, _ in named), "hidden head must be trainable"
+
+        independent = _transformer_dual_model(shared_trunk=False)
+        _, _, trunk = self._heads_and_trunk(shared)
+        assert len(independent.ci_fn_named_parameters()) == len(named) + len(trunk)
+
+    def test_both_objectives_reach_the_trunk_but_only_their_own_head(self):
+        model = _transformer_dual_model(shared_trunk=True)
+        assert model.ci_fn_hidden is not None
+        acts = {"fc": torch.randn(2, 4, 3)}
+        # Zero-init readouts make the trunk gradient vanish at step 0, so perturb first.
+        for _, param in model.ci_fn_named_parameters():
+            with torch.no_grad():
+                param.add_(torch.randn_like(param) * 0.1)
+
+        model.calc_causal_importances(
+            pre_weight_acts=acts, sampling="continuous", role="hidden"
+        ).lower_leaky["fc"].sum().backward()
+
+        def grads(module: nn.Module, head: bool) -> list[Tensor | None]:
+            return [p.grad for n, p in module.named_parameters() if ("_output_head" in n) is head]
+
+        assert all(g is not None and g.abs().sum() > 0 for g in grads(model.ci_fn, head=False)), (
+            "the hidden objective must train the shared trunk"
+        )
+        assert all(g is not None for g in grads(model.ci_fn_hidden, head=True)), (
+            "the hidden objective must train its own head"
+        )
+        assert all(g is None for g in grads(model.ci_fn, head=True)), (
+            "the hidden objective must not touch the output net's head"
+        )
+
+    def test_state_dict_keys_match_independent_nets(self):
+        """A shared trunk must stay checkpoint-key-compatible with an independent pair."""
+        shared = _transformer_dual_model(shared_trunk=True).state_dict()
+        independent = _transformer_dual_model(shared_trunk=False).state_dict()
+        assert shared.keys() == independent.keys()
+
+    def test_loading_an_independent_checkpoint_under_the_flag_is_refused(self):
+        """Key-identical state dicts make this the only thing standing between a
+        mismatched flag and the output net silently running the hidden net's trunk."""
+        _validate_checkpoint_trunk_sharing(
+            _transformer_dual_model(shared_trunk=True).state_dict(), shared_trunk=True
+        )
+        with pytest.raises(AssertionError, match="different trunk weights"):
+            _validate_checkpoint_trunk_sharing(
+                _transformer_dual_model(shared_trunk=False).state_dict(), shared_trunk=True
+            )
+
+    def test_layerwise_ci_fns_have_no_trunk_to_share(self):
+        layerwise = TestDualCINets()._model(dual=True)
+        assert layerwise.ci_fn_hidden is not None
+        with pytest.raises(AssertionError, match="global CI fns"):
+            share_transformer_trunk(source=layerwise.ci_fn, target=layerwise.ci_fn_hidden)
 
 
 class TestSiteOutputs:

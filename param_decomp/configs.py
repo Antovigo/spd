@@ -18,7 +18,7 @@ from pydantic import (
 )
 
 from param_decomp.base_config import BaseConfig, Probability
-from param_decomp.ci_fns import CiConfig
+from param_decomp.ci_fns import CiConfig, GlobalCiConfig
 from param_decomp.decomposition_targets import DecompositionTargetConfig
 from param_decomp.masks import SamplingType
 from param_decomp.metrics.ci_masked_recon import CIMaskedReconLossConfig
@@ -145,6 +145,14 @@ class PDConfig(BaseConfig):
         "net via their `ci_role` field. Required by any loss or eval with "
         "`ci_role: hidden`.",
     )
+    dual_hidden_ci_shared_trunk: bool = Field(
+        default=False,
+        description="Give the two CI nets one shared trunk instead of two independent "
+        "ones: the input projector and every transformer block are a single set of "
+        "parameters, and only the readout head is private per role. Both objectives then "
+        "shape one representation. Requires `dual_hidden_ci` and a "
+        "`global_shared_transformer` CI fn.",
+    )
     hidden_readout_sites: dict[str, str] = Field(
         default={},
         description="Extra measurement points for the hidden-activation losses, as "
@@ -265,6 +273,20 @@ class PDConfig(BaseConfig):
         assert self.loss_metrics, "loss_metrics must contain at least one training loss"
         for cfg in self.loss_metrics:
             assert cfg.coeff is not None, f"loss_metrics.{cfg.type!r} must set `coeff`"
+        return self
+
+    @model_validator(mode="after")
+    def validate_shared_trunk_is_buildable(self) -> Self:
+        """Catch both preconditions at parse time, before a target model is ever loaded."""
+        if self.dual_hidden_ci_shared_trunk:
+            assert self.dual_hidden_ci, (
+                "dual_hidden_ci_shared_trunk needs a second CI net to share with; "
+                "set dual_hidden_ci"
+            )
+            assert (
+                isinstance(self.ci_config, GlobalCiConfig)
+                and self.ci_config.fn_type == "global_shared_transformer"
+            ), "dual_hidden_ci_shared_trunk needs ci_config.fn_type=global_shared_transformer"
         return self
 
 

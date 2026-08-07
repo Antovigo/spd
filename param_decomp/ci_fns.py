@@ -269,6 +269,10 @@ class TargetLayerConfig:
     C: int
 
 
+def _param_shapes(module: nn.Module) -> list[torch.Size]:
+    return [p.shape for p in module.parameters()]
+
+
 class GlobalSharedTransformerCiFn(nn.Module):
     """Global transformer attending over sequence to produce per-component CI.
 
@@ -279,6 +283,9 @@ class GlobalSharedTransformerCiFn(nn.Module):
     `[..., C]` slices in sorted-name order. For 2D inputs (e.g. TMS, resid_mlp — no
     sequence axis) a singleton sequence dim is added before the transformer and
     squeezed out after.
+
+    Everything up to the readout head is the *trunk*; `adopt_trunk` hands one net's trunk
+    to another so both read one representation.
     """
 
     def __init__(
@@ -309,7 +316,6 @@ class GlobalSharedTransformerCiFn(nn.Module):
         total_input_dim = sum(config.input_dim for config in target_model_layer_configs.values())
         total_c = sum(config.C for config in target_model_layer_configs.values())
 
-        self._input_projector = Linear(total_input_dim, d_model, nonlinearity="relu")
         self._output_head = Linear(d_model, total_c, nonlinearity="linear")
         if zero_init_readout:
             # Logits start at exactly 0.5: mid-window in the hard sigmoid's linear
@@ -317,6 +323,7 @@ class GlobalSharedTransformerCiFn(nn.Module):
             nn.init.zeros_(self._output_head.W)
             nn.init.constant_(self._output_head.b, 0.5)
 
+        self._input_projector = Linear(total_input_dim, d_model, nonlinearity="relu")
         self._blocks = nn.ModuleList(
             [
                 TransformerBlock(
@@ -329,6 +336,32 @@ class GlobalSharedTransformerCiFn(nn.Module):
                 for _ in range(n_layers)
             ]
         )
+
+    def adopt_trunk(self, source: "GlobalSharedTransformerCiFn") -> None:
+        """Read through `source`'s input projector and blocks — the same parameters, not copies.
+
+        Leaves this net's readout head private, so the two nets score the same inputs off
+        one representation. This net's own trunk is discarded. Submodule names don't
+        change, so a shared-trunk state dict stays key-identical to an independent pair's
+        (both names address the one tensor).
+        """
+        assert self.layer_order == source.layer_order, (
+            "a shared trunk must read the same sites in the same order: "
+            f"{source.layer_order} vs {self.layer_order}"
+        )
+        assert self.n_heads == source.n_heads, (
+            f"shared trunk has {source.n_heads} heads, this net was built for {self.n_heads}"
+        )
+        assert _param_shapes(self._input_projector) == _param_shapes(source._input_projector), (
+            "shared trunk's input projector has a different shape — the two nets disagree "
+            "on d_model or on the concatenated site width"
+        )
+        assert _param_shapes(self._blocks) == _param_shapes(source._blocks), (
+            "shared trunk's blocks have different shapes — the two nets disagree on "
+            "n_blocks, d_model or mlp_hidden_dim"
+        )
+        self._input_projector = source._input_projector
+        self._blocks = source._blocks
 
     @override
     def forward(
@@ -429,6 +462,10 @@ class GlobalCiFnWrapper(nn.Module):
         super().__init__()
         self._global_ci_fn = global_ci_fn
         self.components = components
+
+    @property
+    def global_ci_fn(self) -> GlobalSharedMLPCiFn | GlobalSharedTransformerCiFn:
+        return self._global_ci_fn
 
     @override
     def forward(
@@ -555,3 +592,23 @@ def make_ci_fn_wrapper(
                 ci_config=ci_config,
             )
             return GlobalCiFnWrapper(global_ci_fn=raw_global, components=components)
+
+
+def share_transformer_trunk(
+    source: LayerwiseCiFnWrapper | GlobalCiFnWrapper,
+    target: LayerwiseCiFnWrapper | GlobalCiFnWrapper,
+) -> None:
+    """Point `target`'s CI fn at `source`'s trunk, leaving both readout heads private.
+
+    The two nets then score the same inputs off one representation, and every objective
+    training either of them shapes it. Only `global_shared_transformer` has a trunk to
+    share.
+    """
+    assert isinstance(source, GlobalCiFnWrapper) and isinstance(target, GlobalCiFnWrapper), (
+        "a shared trunk needs global CI fns, not layerwise ones"
+    )
+    source_ci_fn, target_ci_fn = source.global_ci_fn, target.global_ci_fn
+    assert isinstance(source_ci_fn, GlobalSharedTransformerCiFn) and isinstance(
+        target_ci_fn, GlobalSharedTransformerCiFn
+    ), f"a shared trunk needs global_shared_transformer, not {type(source_ci_fn).__name__}"
+    target_ci_fn.adopt_trunk(source_ci_fn)

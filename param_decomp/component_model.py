@@ -17,7 +17,7 @@ from transformers.pytorch_utils import Conv1D as RadfordConv1D
 
 from param_decomp.base_config import runtime_cast
 from param_decomp.batch_and_loss_fns import RunBatch
-from param_decomp.ci_fns import CiConfig, CIRole, make_ci_fn_wrapper
+from param_decomp.ci_fns import CiConfig, CIRole, make_ci_fn_wrapper, share_transformer_trunk
 from param_decomp.ci_sigmoids import SIGMOID_TYPES, SigmoidType
 from param_decomp.components import Components, make_components
 from param_decomp.decomposition_targets import DecompositionTarget, Identity
@@ -79,6 +79,7 @@ class ComponentModel(nn.Module):
         ci_config: CiConfig,
         sigmoid_type: SigmoidType,
         dual_hidden_ci: bool = False,
+        dual_hidden_ci_shared_trunk: bool = False,
         hidden_readout_sites: Mapping[str, str] | None = None,
     ):
         """Wrap `target_model` with parameter-component machinery.
@@ -98,6 +99,11 @@ class ComponentModel(nn.Module):
                 architecture, scoring importance for reconstructing the decomposed sites'
                 activations rather than the model output. Both nets score the same pool of
                 subcomponents; select between them with `CIRole`.
+            dual_hidden_ci_shared_trunk: Build the second CI fn on the first one's input
+                projector and transformer blocks — the same parameters, not copies — so
+                only the readout head is private per role and both objectives shape one
+                representation. Requires `dual_hidden_ci` and a
+                `global_shared_transformer` CI fn.
             hidden_readout_sites: Extra measurement points for the hidden-activation
                 losses, as `{measurement_name: module_path}`. The *input* of each listed
                 module is captured — both clean (`forward(cache_type="input")`) and masked
@@ -154,6 +160,11 @@ class ComponentModel(nn.Module):
             if dual_hidden_ci
             else None
         )
+        if dual_hidden_ci_shared_trunk:
+            assert self.ci_fn_hidden is not None, (
+                "dual_hidden_ci_shared_trunk needs a second CI net; set dual_hidden_ci"
+            )
+            share_transformer_trunk(source=self.ci_fn, target=self.ci_fn_hidden)
 
         if sigmoid_type == "leaky_hard":
             self.lower_leaky_fn = SIGMOID_TYPES["lower_leaky_hard"]
@@ -484,6 +495,19 @@ class ComponentModel(nn.Module):
         ci_fn_outputs = self.ci_fn_for(role)(ci_inputs)
         return self._apply_sigmoid_to_ci_outputs(ci_fn_outputs, sampling)
 
+    def ci_fn_named_parameters(self) -> list[tuple[str, nn.Parameter]]:
+        """Every CI-fn parameter exactly once, named `ci_fn.<...>` / `ci_fn_hidden.<...>`.
+
+        Under a shared trunk the two nets reach the trunk parameters under both names;
+        `nn.Module.named_parameters` dedupes each to the `ci_fn.` one it meets first, so
+        optimizer param groups and grad-norm sums never count a shared parameter twice.
+        """
+        return [
+            (name, param)
+            for name, param in self.named_parameters()
+            if name.startswith(("ci_fn.", "ci_fn_hidden."))
+        ]
+
     def ci_fn_for(self, role: CIRole) -> nn.Module:
         """The CI fn scoring importance for `role`."""
         match role:
@@ -540,6 +564,17 @@ class ComponentModel(nn.Module):
         return weight_deltas
 
 
+def _grad_norm_key(qualified_ci_fn_param: str) -> str:
+    """`ci_fn.W` -> `ci_fns/W`; `ci_fn_hidden.W` -> `ci_fns/hidden.W`.
+
+    The output net keeps the unprefixed names single-CI runs have always logged, so these
+    keys stay comparable across runs whether or not a hidden net exists.
+    """
+    if qualified_ci_fn_param.startswith("ci_fn_hidden."):
+        return f"ci_fns/hidden.{qualified_ci_fn_param.removeprefix('ci_fn_hidden.')}"
+    return f"ci_fns/{qualified_ci_fn_param.removeprefix('ci_fn.')}"
+
+
 def component_grad_norms(
     component_model: ComponentModel, device: torch.device | str
 ) -> dict[str, float]:
@@ -551,7 +586,8 @@ def component_grad_norms(
       gradient. `NaN` if its grad was never populated.
     - `ci_fns/<param>` — L2 norm of each CI-fn parameter's gradient. `NaN` if its grad
       was never populated. The hidden CI net (when present) reports under
-      `ci_fns/hidden.<param>`, so per-net norms stay separable.
+      `ci_fns/hidden.<param>`, so per-net norms stay separable. Trunk parameters shared
+      between the two nets report once, under the unprefixed output-net name.
     - `summary/components`, `summary/ci_fns`, `summary/total` — aggregate L2 norms over
       each pool and over both pools. `NaN` if any contributing grad was missing.
     """
@@ -573,13 +609,8 @@ def component_grad_norms(
 
     ci_fn_grad_norm_sq_sum: Float[Tensor, ""] = torch.zeros((), device=device)
     missing_ci_fn_grad = False
-    ci_fn_params = list(component_model.ci_fn.named_parameters())
-    if component_model.ci_fn_hidden is not None:
-        ci_fn_params += [
-            (f"hidden.{n}", p) for n, p in component_model.ci_fn_hidden.named_parameters()
-        ]
-    for local_param_name, local_param in ci_fn_params:
-        key = f"ci_fns/{local_param_name}"
+    for qualified_name, local_param in component_model.ci_fn_named_parameters():
+        key = _grad_norm_key(qualified_name)
         assert key not in out, f"Key {key} already exists in grad norms log"
         if local_param.grad is None:
             missing_ci_fn_grad = True

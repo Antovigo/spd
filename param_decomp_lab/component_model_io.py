@@ -45,6 +45,34 @@ def _validate_checkpoint_ci_config_compatibility(
             )
 
 
+def _validate_checkpoint_trunk_sharing(state_dict: dict[str, Tensor], shared_trunk: bool) -> None:
+    """Assert the checkpoint's two CI nets agree with `shared_trunk` about their trunk.
+
+    A shared-trunk state dict stores the one trunk under both nets' names, so the keys
+    alone can't distinguish the two topologies — but the *values* can. Loading an
+    independent-net checkpoint under `dual_hidden_ci_shared_trunk` would otherwise
+    succeed silently, with the hidden net's trunk landing on the shared parameters and
+    the output net quietly scoring off the wrong representation.
+    """
+    if not shared_trunk:
+        return
+    trunk_keys = [
+        k for k in state_dict if k.startswith("ci_fn._global_ci_fn.") and "_output_head" not in k
+    ]
+    assert trunk_keys, "shared trunk configured but the checkpoint has no global CI trunk"
+    mismatched = [
+        k
+        for k in trunk_keys
+        if not torch.equal(state_dict[k], state_dict[k.replace("ci_fn.", "ci_fn_hidden.", 1)])
+    ]
+    assert not mismatched, (
+        "dual_hidden_ci_shared_trunk is set but this checkpoint's two CI nets have "
+        f"different trunk weights ({len(mismatched)}/{len(trunk_keys)} tensors differ) — "
+        "it was trained with independent trunks, so loading it here would silently "
+        "overwrite the output net's trunk with the hidden net's"
+    )
+
+
 def load_component_model(
     pd_config: PDConfig,
     checkpoint_path: Path,
@@ -80,11 +108,13 @@ def load_component_model(
         ci_config=pd_config.ci_config,
         sigmoid_type=pd_config.sigmoid_type,
         dual_hidden_ci=pd_config.dual_hidden_ci,
+        dual_hidden_ci_shared_trunk=pd_config.dual_hidden_ci_shared_trunk,
         hidden_readout_sites=pd_config.hidden_readout_sites,
     )
 
     comp_model_weights = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     _validate_checkpoint_ci_config_compatibility(comp_model_weights, pd_config.ci_config)
+    _validate_checkpoint_trunk_sharing(comp_model_weights, pd_config.dual_hidden_ci_shared_trunk)
     comp_model.load_state_dict(comp_model_weights)
 
     if pd_config.tied_weights is not None:

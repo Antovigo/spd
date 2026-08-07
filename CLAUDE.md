@@ -140,9 +140,29 @@ Targeted eval metrics in `param_decomp_lab/eval_metrics/`: `TargetReconLoss`,
 reconstructing the *decomposed sites' activations*, alongside the existing net scoring
 importance for the final output. One shared pool of subcomponents, two reconstruction
 losses. Core surface: `CIRole` in `param_decomp/ci_fns.py`, `ComponentModel.ci_fn_hidden` /
-`ci_fn_for` / `site_outputs` (early-exit forward), `MetricContext.ci_for`, and the
-`hidden_acts.py` relative-error helpers. Metrics select a net via `ci_role`. Full
-description in `param_decomp/metrics/CLAUDE.md`; experiment notes in `notes/hidden_dual/`.
+`ci_fn_for` / `ci_fn_named_parameters` / `site_outputs` (early-exit forward),
+`MetricContext.ci_for`, and the `hidden_acts.py` relative-error helpers. Metrics select a
+net via `ci_role`. Full description in `param_decomp/metrics/CLAUDE.md`; experiment notes
+in `notes/hidden_dual/`.
+
+`pd.dual_hidden_ci_shared_trunk` makes the two nets one trunk with two readout heads
+instead of two independent nets: the input projector and every transformer block become a
+single set of parameters, and only the `d_model -> total_C` head is private per role. Both
+objectives then shape one representation. Requires `dual_hidden_ci` and
+`global_shared_transformer` — a `PDConfig` validator enforces both at parse time.
+Implemented by `share_transformer_trunk` / `GlobalSharedTransformerCiFn.adopt_trunk`
+(`ci_fns.py`), called from `ComponentModel.__init__` after both nets are built.
+
+Two consequences worth knowing:
+
+- **State dicts are key-identical either way** — submodule names don't change, so a shared
+  trunk is stored under both nets' names. `_validate_checkpoint_trunk_sharing`
+  (`param_decomp_lab/component_model_io.py`) compares the two nets' trunk *values* on load,
+  because otherwise loading an independent-net checkpoint under the flag would silently
+  overwrite the output net's trunk with the hidden net's.
+- **Each parameter must be collected once.** `ComponentModel.ci_fn_named_parameters` leans
+  on `nn.Module.named_parameters`' dedupe so the optimizer, `clip_grad_norm_` and the
+  grad-norm sums never count a shared parameter twice.
 
 ## Saved-run layout
 
