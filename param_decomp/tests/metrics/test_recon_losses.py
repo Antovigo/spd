@@ -11,6 +11,8 @@ from torch import Tensor
 from param_decomp.component_model import CIOutputs, ComponentModel
 from param_decomp.masks import make_mask_infos
 from param_decomp.metrics.ci_masked_recon import ci_masked_recon_loss
+from param_decomp.metrics.context import MetricContext
+from param_decomp.metrics.hidden_acts import SiteInputs
 from param_decomp.metrics.persistent_pgd_recon import (
     PersistentPGDReconLoss,
     PersistentPGDReconLossConfig,
@@ -20,6 +22,10 @@ from param_decomp.metrics.persistent_pgd_state import (
     SignPGDConfig,
     SingleSourceScope,
     get_ppgd_mask_infos,
+)
+from param_decomp.metrics.pgd_hidden_acts_recon import (
+    PGDHiddenActsReconLoss,
+    PGDHiddenActsReconLossConfig,
 )
 from param_decomp.metrics.pgd_masked_recon import pgd_recon_loss
 from param_decomp.metrics.pgd_utils import PGDConfig
@@ -215,8 +221,6 @@ def test_per_module_recon_manual_calculation() -> None:
 
 def test_per_module_recon_metric_keys() -> None:
     """CIHiddenActsReconLoss.compute() returns per-module + total keys."""
-    from param_decomp.metrics.context import MetricContext
-
     torch.manual_seed(42)
 
     model = make_two_layer_component_model(weight1=torch.randn(3, 2), weight2=torch.randn(2, 3))
@@ -265,8 +269,6 @@ def test_local_site_inputs_differ_only_downstream() -> None:
     forward has perturbed, so the two must disagree — that difference is the inherited
     error the local formulation exists to exclude.
     """
-    from param_decomp.metrics.context import MetricContext
-
     torch.manual_seed(0)
     model = make_two_layer_component_model(weight1=torch.randn(3, 2), weight2=torch.randn(2, 3))
     batch = torch.randn(4, 2)
@@ -278,10 +280,8 @@ def test_local_site_inputs_differ_only_downstream() -> None:
         {path: torch.full((4, 1), 0.5) for path in model.target_module_paths},
     )
 
-    def per_site_errors(site_inputs: str) -> dict[str, float]:
-        metric = CIHiddenActsReconLoss(
-            CIHiddenActsReconLossConfig(name=site_inputs, site_inputs=site_inputs)  # pyright: ignore[reportArgumentType]
-        )
+    def per_site_errors(site_inputs: SiteInputs) -> dict[str, float]:
+        metric = CIHiddenActsReconLoss(CIHiddenActsReconLossConfig(site_inputs=site_inputs))
         metric.bind(model=model, device="cpu")
         metric.update(
             MetricContext(
@@ -311,6 +311,36 @@ def test_local_site_inputs_differ_only_downstream() -> None:
     assert chained["fc2"] != pytest.approx(local["fc2"], rel=1e-6)
 
 
+def test_local_site_inputs_rejects_narrowed_pgd() -> None:
+    """A `"clean"` PGD instance must measure every decomposed site, and says so at bind.
+
+    PGD allocates one adversarial source per decomposed site and differentiates the
+    objective w.r.t. all of them at once. Chained, a source at an unmeasured site still
+    reaches the loss through the sites downstream of it; locally the sites are independent,
+    so it reaches nothing and `torch.autograd.grad` raises mid-step. Failing at bind turns
+    that into a config error.
+    """
+    model = make_two_layer_component_model(weight1=torch.randn(3, 2), weight2=torch.randn(2, 3))
+    cfg = PGDHiddenActsReconLossConfig(
+        init="random",
+        step_size=0.1,
+        n_steps=1,
+        mask_scope="shared_across_batch",
+        site_patterns=["fc2"],
+        site_inputs="clean",
+    )
+    with pytest.raises(AssertionError, match="fc1"):
+        PGDHiddenActsReconLoss(cfg).bind(model=model, device="cpu")
+
+    # The same narrowing is fine chained, and fine locally once every site is measured.
+    PGDHiddenActsReconLoss(cfg.model_copy(update={"site_inputs": "masked_forward"})).bind(
+        model=model, device="cpu"
+    )
+    PGDHiddenActsReconLoss(cfg.model_copy(update={"site_patterns": None})).bind(
+        model=model, device="cpu"
+    )
+
+
 def _make_ci_outputs(ci: dict[str, Tensor]) -> CIOutputs:
     return CIOutputs(
         lower_leaky=ci,
@@ -322,8 +352,6 @@ def _make_ci_outputs(ci: dict[str, Tensor]) -> CIOutputs:
 def test_ppgd_recon_eval_metric_keys() -> None:
     """PersistentPGDReconLoss.compute() returns hidden_acts (total + per-module) and output_recon
     keys when run in eval mode."""
-    from param_decomp.metrics.context import MetricContext
-
     torch.manual_seed(42)
 
     model = make_two_layer_component_model(weight1=torch.randn(3, 2), weight2=torch.randn(2, 3))

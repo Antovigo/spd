@@ -158,18 +158,35 @@ Two further savings fall out:
 
 ### The arithmetic, for `addsub-L18-11-bigc`
 
-Seven matrices on layer 18, batch 128 x 16 tokens = 2048 tokens.
+Seven matrices on layer 18, batch 128 x 16 tokens = 2048 tokens. Multiply-adds per token,
+summed over the seven matrices:
 
-| work | multiply-adds | approx |
-|---|---|---|
-| today: one truncated forward, **per mask sample** (embeddings + 19 of 32 blocks) | — | **~17 TFLOP** |
-| local: `V x` for all seven matrices, **once per step** | 35.6 M per token | ~0.15 TFLOP |
-| local: masked output for all seven matrices, **per mask sample** | 41.4 M per token | ~0.17 TFLOP |
+| work | MACs/token | mask-dependent |
+|---|---:|---|
+| `V x` | 35.6 M | no |
+| masked output `(acts · mask) @ U` | 41.4 M | yes |
+| leftover-weight term `x @ delta.T` | 218.1 M | no |
+| **local, per mask sample** | **295.1 M** | |
+| today: one truncated forward, per mask sample (19 of 32 blocks + the component work) | 4439 M | |
 
-Roughly **a hundred times less arithmetic per mask sample**. Treat it as an order of magnitude
-rather than a precise figure — it counts multiply-adds only, and these small multiplies are
-more limited by memory bandwidth than by arithmetic. Even so: eight local mask samples cost
-about 1.5 TFLOP, still an order of magnitude below *one* sample today.
+**~15x less arithmetic per mask sample.** An earlier draft of this note said ~100x; that was
+wrong, and the correction matters. With `use_delta_component: true` — every LM config here —
+each matrix still computes `x @ delta.T`, a dense `d_in x d_out` matmul that costs exactly what
+running the frozen matrix costs, and it dominates the local path at 218 of its 295 MACs/token.
+"No forward pass through the model" is true; "almost no arithmetic" is not.
+
+Two optimisations would recover the rest, and neither is taken yet:
+
+- **The delta term is redundant.** `target = x W^T + b` is already computed, and
+  `delta = W - (VU)^T`, so `x @ delta.T == (target - bias) - acts @ U` — one `C x d_out` matmul
+  instead of a `d_in x d_out` one, 13x cheaper on that term. Exact, and gradient-exact, since
+  `W` and `b` are frozen and the `V, U` derivative comes through `-acts @ U` either way.
+- **Everything except `(acts · mask) @ U` is mask-independent** and can be hoisted out of the
+  `n_mask_samples` loop and the PGD inner loop.
+
+Together: ~37x on the first sample, ~107x per additional one — which is the version the "~100x"
+was accidentally describing. Worth doing before raising `n_mask_samples` or moving the adversary
+into training; pointless before, since at `n_mask_samples: 1` the hoist saves nothing.
 
 ## 5. What the cheapness is for
 
@@ -317,20 +334,29 @@ for _ in range(ctx.n_mask_samples):
 
 Notes:
 
-- Prefer a new metric class over a flag on the existing one. The two differ by an entire
-  forward pass, and the intended configuration runs both at once with different
-  `site_patterns` — which a single instance cannot express.
+- **A config field, not a new metric class per flavour.** This note originally argued the
+  opposite; the field is right. Four classes measure this error, two of them need both
+  flavours in the same run, and `Metric.instance_key` / `name` already exists for running one
+  class several times under distinct log keys. Separate classes would have duplicated the site
+  selection, the accumulation and the DDP reduction — most of the code — and made it a
+  4-to-8 Cartesian blow-up. `CIRole` is the same shape and was solved the same way.
 - Restrict to linear matrices, as `clean_site_outputs` already asserts. Readout points are not
-  valid measurement targets here and should be rejected loudly rather than silently scoring
-  zero.
-- **Do not hoist `V x` out of the loop in the first version.** `LinearComponents.forward`
-  recomputes it per sample, which wastes roughly half the local cost — irrelevant next to
-  removing a 17 TFLOP pass, and it keeps the first version to a straightforward reuse of the
-  existing forward. Hoisting only starts to matter once mask samples go up or an adversary is
-  added, and it is a contained follow-up (a `forward_from_acts` entry point on
-  `LinearComponents`).
+  valid measurement targets here and are rejected loudly rather than silently scoring zero.
+- **Do not hoist the mask-independent work in the first version.** It saves nothing at
+  `n_mask_samples: 1`, and the local path is already ~15x cheaper without it. See §4 for the
+  two optimisations and when they start to pay.
 - The loss never reads `ctx.batch`, only `ctx.pre_weight_acts`. Worth keeping true — it is what
   makes offline analysis possible.
+
+Implemented in `086ea1953` + follow-up. One thing the design missed, found in review and worth
+recording because it is not obvious: **a `"clean"` PGD or PPGD instance must measure every
+decomposed site.** Those metrics allocate one adversarial source per decomposed site and
+differentiate w.r.t. all of them at once with `allow_unused=False`. Chained, a source at an
+unmeasured site still reaches the loss through the sites downstream of it; locally the sites
+are independent, so it reaches nothing and `torch.autograd.grad` raises mid-training. It is now
+a bind-time assert. Note this is exactly the configuration §7 recommends for readout sites, so
+the two restrictions interact: narrow the `"clean"` instance to *all* the decomposed sites (not
+a subset) and put the readouts on a separate chained instance.
 
 ### Sequencing
 

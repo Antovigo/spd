@@ -157,6 +157,46 @@ Changes against press2:
 5. Launch on 2 GPUs via `run_ddp.sbatch` (repo path pointed at this worktree), `-J
    addsub-L18-11-local`.
 
+## Review outcome
+
+Five reviewers over the diff: the four `simplify` angles plus a correctness pass (the
+`simplify` skill excludes correctness by design, and correctness was the priority here).
+
+**One real defect, reproduced and fixed.** With `site_inputs="clean"` *and* a `site_patterns`
+that excludes some decomposed site, every PGD/PPGD hidden-acts metric dies mid-step:
+`torch.autograd.grad(loss, sources)` runs with `allow_unused=False`, sources are allocated per
+decomposed site, and locally an excluded site's components never enter the loss at all.
+Chained, such a source still reaches the loss by perturbing the sites downstream of it. Now a
+bind-time assert (`assert_sources_reach_every_site`) with a test. The plan's own advice —
+"restrict readouts to a separate `masked_forward` instance via `site_patterns`" — was the
+fastest route into it.
+
+**The cost claim was wrong.** "~100x cheaper per mask sample" ignored the leftover-weight term.
+With `use_delta_component` on, each site computes `x @ delta.T`, a dense `d_in x d_out` matmul
+costing exactly what running the frozen matrix costs: 218.1 of the local path's 295.1
+MACs/token. Real figure is **~15x**. Corrected in `metrics/CLAUDE.md` and
+`notes/streamline_dual_obj/report.md`, along with the two optimisations that would reach ~37x /
+~107x (deriving the delta term from the target; hoisting the mask-independent work).
+
+**Verified clean** by the correctness pass, by reading and by CPU experiment: bias cancels on
+both sides in both paths; the routing-mask asymmetry is invisible to the loss because
+`site_squared_errors` scores only routed positions in both paths (raw tensors differ by up to
+1.78, scored numerators by 0.00); `weight_delta_and_mask` is forwarded verbatim and behaves
+identically under `delta_override`; nothing consumed the dropped keys of the narrowed return
+dict; the PPGD source state machine, `_accumulate_eval` and the source gradient path are
+undisturbed when all sites are measured; `pre_weight_acts` is the right tensor, bit-identical
+under bf16 autocast.
+
+**Cleanups applied:** a `HiddenActsSitesConfig` mixin so the two fields are declared once
+rather than four times; `masked_site_outputs` takes `ctx` instead of three of its fields and
+absorbs the local branch; the duplicated `LinearComponents` assert moved to bind time; stale
+class docstrings on the PGD and CI probes; test scaffolding tidied.
+
+**Skipped:** a full `HiddenActsErrorMetric` base owning `bind`/`reset`/`compute` for the four
+metrics — a genuine observation, but it restructures pre-existing code well outside this diff.
+Adding `.detach()` to the local path's input — verified to be a no-op, since the frozen model's
+cache never requires grad.
+
 ## Explicitly not in this change
 
 - The shared CI trunk (deferred by decision above).

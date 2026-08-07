@@ -211,16 +211,49 @@ ask PyTorch to stop). Everything past the last decomposition target would otherw
 wasted compute *and* retained-for-backward activations.
 
 `"clean"` needs **no forward pass at all**: with every site handed its own cached input the
-sites are independent, so it is a pair of matmuls per site over tensors
-`_build_metric_context` already produced. That is roughly two orders of magnitude cheaper per
-mask sample, which is what puts `n_mask_samples > 1` and a training-time adversary in budget.
-It also retains nothing through the frozen model for backward. Only the measured sites are
-computed, since with no chain there is no reason to evaluate a site nobody reads.
+sites are independent, so it is matmuls per site over tensors `_build_metric_context` already
+produced. It also retains nothing through the frozen model for backward, and computes only
+the measured sites.
 
-`"clean"` **cannot measure readout sites** and `resolve_measured_sites` asserts rather than
-letting it: a readout target is a point in the residual stream, so feeding every matrix its
-clean input leaves it unchanged and its error identically zero. Split them off into a
-separate `"masked_forward"` instance via `site_patterns`.
+Measured on the `addsub-L18-11` shape (7 sites on one Llama-3.1-8B block, 2048 tokens),
+MACs/token summed over the sites:
+
+| | MACs/token | mask-dependent |
+|---|---:|---|
+| `V^T x` | 35.6 M | no |
+| `(acts · mask) @ U` | 41.4 M | yes |
+| `x @ delta.T` (only with `use_delta_component`) | 218.1 M | no |
+| **`"clean"` total** | **295.1 M** | |
+| `"masked_forward"` (19 blocks + the component work) | 4439 M | |
+
+So **~15x cheaper per mask sample**, not the order of magnitude a naive "no forward pass"
+reading suggests: with the delta component on, `x @ delta.T` is a dense `d_in x d_out` matmul —
+as expensive as running the frozen matrix — and dominates the local path. Two optimisations
+are available and not yet taken: the delta term is derivable from the target already in hand
+(`x @ delta.T == (target - bias) - acts @ U`, exact and gradient-exact since `W` is frozen),
+and everything except `(acts · mask) @ U` is mask-independent and so hoistable out of the
+`n_mask_samples` and PGD loops. Together they would give ~37x on the first sample and ~107x
+per extra one. Worth doing before `n_mask_samples` is raised or the adversary moves into
+training, and not before: at `n_mask_samples: 1` the hoist buys nothing.
+
+Two restrictions come with `"clean"`, both asserted at bind:
+
+- **It cannot measure readout sites** (`resolve_measured_sites`): a readout target is a point
+  in the residual stream, so feeding every matrix its clean input leaves it unchanged and its
+  error identically zero. Give the `"clean"` instance a `site_patterns` covering the
+  decomposed sites and read the readouts from a separate `"masked_forward"` instance.
+- **A PGD or PPGD instance must measure every decomposed site**
+  (`assert_sources_reach_every_site`). Those metrics allocate one adversarial source per
+  decomposed site and differentiate w.r.t. all of them at once (`allow_unused=False`).
+  Chained, a source at an unmeasured site still reaches the loss by perturbing the sites
+  downstream of it; locally the sites are independent, so it reaches nothing and
+  `torch.autograd.grad` raises mid-step. The stochastic and CI-masked probes never
+  differentiate w.r.t. sources and so may narrow freely.
+
+One semantic shift worth knowing: under `"clean"` a subset router no longer routes anything —
+with no chain it only decides which positions `site_squared_errors` scores. A `"clean"`
+instance on `uniform_k_subset` therefore scores the same position count as its chained
+counterpart (which is what keeps the two comparable) but gains nothing from the subsetting.
 
 ### Readout sites — measuring off the decomposed matrices
 

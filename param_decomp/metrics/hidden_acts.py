@@ -5,7 +5,7 @@ hidden-acts eval probes, so all of them measure the same quantity.
 """
 
 from fnmatch import fnmatch
-from typing import Any, Literal
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -13,10 +13,12 @@ from jaxtyping import Float
 from torch import Tensor
 from torch.distributed import ReduceOp
 
+from param_decomp.base_config import BaseConfig
 from param_decomp.component_model import ComponentModel
 from param_decomp.components import LinearComponents
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import ComponentsMaskInfo
+from param_decomp.metrics.context import MetricContext
 
 SiteErrors = dict[str, tuple[Float[Tensor, ""], Float[Tensor, ""]]]
 """Per site: `(summed squared error, summed squared target)`.
@@ -40,6 +42,19 @@ subtractable: `masked_forward - clean` is the inherited (compounding) part of th
 """
 
 
+class HiddenActsSitesConfig(BaseConfig):
+    """Where a hidden-activation metric measures, and on which inputs.
+
+    Mixed into every metric in the family so the pair is declared once. `site_patterns`
+    (fnmatch, e.g. `["*.mlp.down_proj"]`) filters `ComponentModel.measurement_sites`;
+    `None` measures all of them. Masking always covers every decomposed site regardless —
+    only measurement is filtered.
+    """
+
+    site_patterns: list[str] | None = None
+    site_inputs: SiteInputs = "masked_forward"
+
+
 def select_sites(all_sites: list[str], patterns: list[str] | None) -> list[str]:
     """Sites matching any fnmatch pattern, or all of them when `patterns` is `None`.
 
@@ -53,33 +68,60 @@ def select_sites(all_sites: list[str], patterns: list[str] | None) -> list[str]:
     return selected
 
 
-def resolve_measured_sites(
-    model: ComponentModel,
-    patterns: list[str] | None,
-    site_inputs: SiteInputs,
-) -> list[str]:
-    """`select_sites` plus the restriction that `"clean"` cannot measure a readout site.
+def resolve_measured_sites(model: ComponentModel, cfg: HiddenActsSitesConfig) -> list[str]:
+    """`select_sites` plus the two restrictions `"clean"` carries.
 
     A readout site's target is a point in the residual stream, whose value is a property of
-    the whole chain rather than of any one matrix. Hand every matrix its clean input and the
-    stream is unchanged by construction, so the readout's error would be identically zero —
-    a silently meaningless measurement, hence the assert.
+    the whole chain rather than of any one matrix, so feeding every matrix its clean input
+    leaves it unchanged and its error identically zero. Silently measuring nothing is the
+    dangerous outcome, hence the assert.
+
+    Every measured site must also be linear, which `clean_site_outputs` needs for the target
+    anyway; failing here reports it at bind rather than on the first step.
     """
-    sites = select_sites(model.measurement_sites, patterns)
-    if site_inputs == "clean":
+    sites = select_sites(model.measurement_sites, cfg.site_patterns)
+    if cfg.site_inputs == "clean":
         readouts = [site for site in sites if site in model.hidden_readout_sites]
         assert not readouts, (
             f"site_inputs='clean' cannot measure readout sites {sorted(readouts)}: their "
             "error is identically zero when every matrix is fed its clean input. Restrict "
-            "them to a separate site_inputs='masked_forward' instance via site_patterns."
+            "this instance to the decomposed sites with site_patterns, and read the "
+            "readouts from a separate site_inputs='masked_forward' instance."
+        )
+    for site in sites:
+        if site in model.hidden_readout_sites:
+            continue
+        components = model.components[site]
+        assert isinstance(components, LinearComponents), (
+            f"hidden-acts reconstruction supports linear sites only, got "
+            f"{type(components).__name__} for {site}"
         )
     return sites
 
 
+def assert_sources_reach_every_site(model: ComponentModel, sites: list[str], why: str) -> None:
+    """Guard the PGD metrics against `"clean"` leaving an adversarial source out of the graph.
+
+    PGD and PPGD allocate one adversarial source per *decomposed* site and differentiate the
+    objective with respect to all of them at once (`allow_unused=False`). Chained, a source
+    at an unmeasured site still reaches the loss by perturbing measured sites downstream of
+    it. Locally the sites are independent, so a source at a site this instance does not
+    measure reaches nothing and `torch.autograd.grad` raises mid-step.
+
+    Called by the PGD metrics only: the stochastic and CI-masked probes never differentiate
+    with respect to sources, so they are free to narrow `site_patterns` under `"clean"`.
+    """
+    unmeasured = [path for path in model.target_module_paths if path not in set(sites)]
+    assert not unmeasured, (
+        f"{why} measures {sorted(sites)} under site_inputs='clean', leaving decomposed "
+        f"sites {sorted(unmeasured)} with adversarial sources that cannot reach the loss. "
+        "Widen site_patterns to cover every decomposed site, or use "
+        "site_inputs='masked_forward' for this instance."
+    )
+
+
 def masked_site_outputs(
-    model: ComponentModel,
-    batch: Any,
-    pre_weight_acts: dict[str, Float[Tensor, "... d_in"]],
+    ctx: MetricContext,
     mask_infos: dict[str, ComponentsMaskInfo],
     sites: list[str],
     site_inputs: SiteInputs,
@@ -88,45 +130,26 @@ def masked_site_outputs(
 
     Masking always covers every decomposed site — `mask_infos` is unfiltered — while only
     `sites` are returned, since those are the ones an error is read at.
+
+    The `"clean"` branch runs no forward: with every site handed the frozen model's own input
+    to it, no site depends on any other, so this is a pair of matmuls per site over tensors
+    the step's `cache_type="input"` pass already produced. Positions the routing mask excludes
+    are computed and then dropped by `site_squared_errors`, exactly as in the chained path,
+    where they are likewise scored only over routed positions.
     """
     match site_inputs:
         case "masked_forward":
-            cache = model.site_outputs(batch, mask_infos)
+            cache = ctx.model.site_outputs(ctx.batch, mask_infos)
             return {site: cache[site] for site in sites}
         case "clean":
-            return _local_site_outputs(model, pre_weight_acts, mask_infos, sites)
-
-
-def _local_site_outputs(
-    model: ComponentModel,
-    pre_weight_acts: dict[str, Float[Tensor, "... d_in"]],
-    mask_infos: dict[str, ComponentsMaskInfo],
-    sites: list[str],
-) -> dict[str, Float[Tensor, "..."]]:
-    """Each site's components run on its own cached clean input — no forward pass.
-
-    With every site fed the frozen model's own input to it, no site depends on any other, so
-    there is nothing to run *through*: this is a pair of matmuls per site over tensors the
-    step's `cache_type="input"` pass already produced.
-
-    Positions the routing mask excludes are computed and then dropped by
-    `site_squared_errors`, exactly as in the chained path, where they are likewise scored
-    only over routed positions.
-    """
-    outputs: dict[str, Float[Tensor, ...]] = {}
-    for site in sites:
-        components = model.components[site]
-        assert isinstance(components, LinearComponents), (
-            f"hidden-acts reconstruction supports linear sites only, got "
-            f"{type(components).__name__} for {site}"
-        )
-        mask_info = mask_infos[site]
-        outputs[site] = components(
-            pre_weight_acts[site],
-            mask=mask_info.component_mask,
-            weight_delta_and_mask=mask_info.weight_delta_and_mask,
-        )
-    return outputs
+            return {
+                site: ctx.model.components[site](
+                    ctx.pre_weight_acts[site],
+                    mask=mask_infos[site].component_mask,
+                    weight_delta_and_mask=mask_infos[site].weight_delta_and_mask,
+                )
+                for site in sites
+            }
 
 
 def clean_site_outputs(

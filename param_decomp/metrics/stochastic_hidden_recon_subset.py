@@ -16,8 +16,8 @@ from param_decomp.masks import (
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
+    HiddenActsSitesConfig,
     SiteErrors,
-    SiteInputs,
     add_site_errors,
     clean_site_outputs,
     detached_site_errors,
@@ -29,26 +29,14 @@ from param_decomp.metrics.hidden_acts import (
 )
 
 
-class StochasticHiddenReconSubsetLossConfig(LossMetricConfig):
-    """Config for the stochastic per-site hidden-activation reconstruction loss.
-
-    `site_patterns` restricts which sites the error is *measured* at (fnmatch, e.g.
-    `["*.mlp.down_proj", "*.self_attn.o_proj"]` for the residual-stream writes only);
-    `None` measures every site in `ComponentModel.measurement_sites` — every decomposed
-    site plus any `pd.hidden_readout_sites`. Masking always covers every decomposed site
-    regardless — only measurement is filtered.
-
-    `site_inputs` selects whether each site is judged on the chained masked forward's input
-    or on its own clean one; see `SiteInputs`.
-    """
+class StochasticHiddenReconSubsetLossConfig(LossMetricConfig, HiddenActsSitesConfig):
+    """Config for the stochastic per-site hidden-activation reconstruction loss."""
 
     type: Literal["StochasticHiddenReconSubsetLoss"] = "StochasticHiddenReconSubsetLoss"
     ci_role: CIRole = "hidden"
     routing: Annotated[
         SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
-    site_patterns: list[str] | None = None
-    site_inputs: SiteInputs = "masked_forward"
 
 
 class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConfig]):
@@ -71,9 +59,7 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
         self.router = get_subset_router(self.cfg.routing, device)
-        self.measured_sites = resolve_measured_sites(
-            model, self.cfg.site_patterns, self.cfg.site_inputs
-        )
+        self.measured_sites = resolve_measured_sites(model, self.cfg)
 
     @override
     def reset(self) -> None:
@@ -94,12 +80,7 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
                 router=self.router,
             )
             site_outputs = masked_site_outputs(
-                model=self.model,
-                batch=ctx.batch,
-                pre_weight_acts=ctx.pre_weight_acts,
-                mask_infos=mask_infos,
-                sites=self.measured_sites,
-                site_inputs=self.cfg.site_inputs,
+                ctx, mask_infos, self.measured_sites, self.cfg.site_inputs
             )
             add_site_errors(batch_errors, site_squared_errors(site_outputs, targets, mask_infos))
 

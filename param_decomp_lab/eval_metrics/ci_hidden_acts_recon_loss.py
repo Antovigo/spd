@@ -11,8 +11,8 @@ from param_decomp.metrics.base import (
 )
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
+    HiddenActsSitesConfig,
     SiteErrors,
-    SiteInputs,
     add_site_errors,
     clean_site_outputs,
     detached_site_errors,
@@ -23,16 +23,11 @@ from param_decomp.metrics.hidden_acts import (
 )
 
 
-class CIHiddenActsReconLossConfig(NamedMetricConfig, EvalCadenceConfig):
-    """`ci_role` picks which CI net supplies the mask; `site_patterns` filters the sites.
-
-    `site_inputs` selects the chained or the local formulation; see `SiteInputs`.
-    """
+class CIHiddenActsReconLossConfig(NamedMetricConfig, EvalCadenceConfig, HiddenActsSitesConfig):
+    """`ci_role` picks which CI net supplies the mask."""
 
     type: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
     ci_role: CIRole = "output"
-    site_patterns: list[str] | None = None
-    site_inputs: SiteInputs = "masked_forward"
 
 
 class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
@@ -45,17 +40,15 @@ class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
     """
 
     log_namespace = "loss"
-    # One truncated forward per eval batch since it moved to `site_outputs` — cheaper than
-    # `CEandKLLosses`, which is not slow either. It was slow when it ran two full forwards.
+    # One truncated forward per eval batch under `site_inputs="masked_forward"` — cheaper
+    # than `CEandKLLosses`, which is not slow either — and none at all under `"clean"`.
     slow = False
     short_name = "CIHiddenActRecon"
 
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.measured_sites = resolve_measured_sites(
-            model, self.cfg.site_patterns, self.cfg.site_inputs
-        )
+        self.measured_sites = resolve_measured_sites(model, self.cfg)
 
     @override
     def reset(self) -> None:
@@ -68,12 +61,7 @@ class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
             ctx.ci_for(self.cfg.ci_role).lower_leaky, weight_deltas_and_masks=None
         )
         site_outputs = masked_site_outputs(
-            model=self.model,
-            batch=ctx.batch,
-            pre_weight_acts=ctx.pre_weight_acts,
-            mask_infos=mask_infos,
-            sites=self.measured_sites,
-            site_inputs=self.cfg.site_inputs,
+            ctx, mask_infos, self.measured_sites, self.cfg.site_inputs
         )
         add_site_errors(
             self._accum,
