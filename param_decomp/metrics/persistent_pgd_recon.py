@@ -30,12 +30,14 @@ from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
     SiteErrors,
+    SiteInputs,
     add_site_errors,
     clean_site_outputs,
     detached_site_errors,
+    masked_site_outputs,
     mean_relative_error,
     reduced_relative_errors,
-    select_sites,
+    resolve_measured_sites,
     site_squared_errors,
 )
 from param_decomp.metrics.persistent_pgd_state import (
@@ -94,12 +96,15 @@ class PersistentPGDHiddenActsReconLossConfig(_PersistentPGDBaseConfig):
 
     Defaults `ci_role` to `"hidden"`: this exists to give the hidden-acts objective the same
     persistent adversarial pressure the output objective already gets, attacking the net that
-    owns it. `site_patterns` filters the measured sites as elsewhere.
+    owns it. `site_patterns` filters the measured sites as elsewhere, and `site_inputs`
+    selects which error the adversary attacks (see `SiteInputs`) — the adversary itself,
+    its sources and its optimizer are the same either way.
     """
 
     type: Literal["PersistentPGDHiddenActsReconLoss"] = "PersistentPGDHiddenActsReconLoss"
     ci_role: CIRole = "hidden"
     site_patterns: list[str] | None = None
+    site_inputs: SiteInputs = "masked_forward"
 
 
 def _router_for_cfg(cfg: _PersistentPGDBaseConfig, device: torch.device | str) -> Router:
@@ -337,8 +342,8 @@ class PersistentPGDHiddenActsReconLoss(
     face the same kind of pressure. Each is a separate metric instance, so each owns its own
     `PersistentPGDState` — separate sources, separate optimizer moments, separately
     checkpointed under its own `instance_key`. The objective is the same relative per-site
-    error the stochastic loss and the eval probes report, measured through the truncated
-    `site_outputs` forward.
+    error the stochastic loss and the eval probes report, under whichever `site_inputs` the
+    config selects.
     """
 
     short_name = "PersistPGDHiddenRecon"
@@ -346,7 +351,9 @@ class PersistentPGDHiddenActsReconLoss(
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.measured_sites = select_sites(model.measurement_sites, self.cfg.site_patterns)
+        self.measured_sites = resolve_measured_sites(
+            model, self.cfg.site_patterns, self.cfg.site_inputs
+        )
 
     @override
     def reset(self) -> None:
@@ -361,10 +368,17 @@ class PersistentPGDHiddenActsReconLoss(
         def site_error(
             mask_infos: dict[str, ComponentsMaskInfo],
         ) -> tuple[Float[Tensor, ""], int]:
-            site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
+            site_outputs = masked_site_outputs(
+                model=self.model,
+                batch=ctx.batch,
+                pre_weight_acts=ctx.pre_weight_acts,
+                mask_infos=mask_infos,
+                sites=self.measured_sites,
+                site_inputs=self.cfg.site_inputs,
+            )
             # Stashed for `_accumulate_eval`: the last call is always the one at the final
             # sources (warmup runs first, and is skipped entirely on eval batches), so this
-            # spares a second identical truncated forward just to recover the breakdown.
+            # spares a second identical evaluation just to recover the breakdown.
             self._last_site_errors = site_squared_errors(site_outputs, targets, mask_infos)
             return mean_relative_error(self._last_site_errors), 1
 

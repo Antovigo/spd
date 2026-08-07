@@ -17,7 +17,7 @@ core library. For eval metrics (user-extensible, lab-side), see
 | `<loss_name>.py` | One file per metric: `<Name>Loss` class + `<Name>LossConfig` config side-by-side |
 | `persistent_pgd_state.py` | PPGD adversarial-source state machine (shared by `persistent_pgd_recon.py`) |
 | `pgd_utils.py` | Shared PGD helpers; `pgd_masked_objective_update` runs PGD against any mask-consuming objective (output recon and per-site activation error are two such) |
-| `hidden_acts.py` | Shared per-site (hidden-activation) relative-error machinery: clean targets, squared-error accumulation, DDP reduction, site filtering |
+| `hidden_acts.py` | Shared per-site (hidden-activation) relative-error machinery: clean targets, squared-error accumulation, DDP reduction, site filtering, and the `SiteInputs` chained/local dispatch |
 | `output.py` | Shared output-extraction helpers used across recon losses |
 
 ## Adding a loss metric
@@ -187,17 +187,40 @@ across blocks. Numerator and denominator are accumulated and DDP-reduced separat
 result is a ratio of sums, never a mean of per-batch or per-rank ratios.
 
 Targets are the frozen model's own site outputs, recomputed as `F.linear(x_clean, W, b)`
-from the clean input activations the step already cached: **no extra forward pass**, and it
-measures accumulated drift from the target model rather than each site's local error given
-an already-perturbed input.
-
-All three use `ComponentModel.site_outputs`, which aborts the forward once every hooked
-site has been cached (a private sentinel exception, since a forward hook cannot ask PyTorch
-to stop). Everything past the last decomposition target would otherwise be wasted compute
-*and* retained-for-backward activations.
+from the clean input activations the step already cached: **no extra forward pass**.
 
 `site_patterns` (fnmatch, e.g. `["*.mlp.down_proj", "*.self_attn.o_proj"]`) restricts which
 sites the error is *measured* at; masking always covers every decomposed site.
+
+### `site_inputs` — chained vs local
+
+An orthogonal axis, on all four of the above plus `PersistentPGDHiddenActsReconLoss`:
+
+| `site_inputs` | each site's components run on | its error is |
+|---|---|---|
+| `"masked_forward"` (default) | the input the masked forward produced | its own error **+** what it inherited from upstream sites |
+| `"clean"` | the input the frozen model gave it | its own error alone |
+
+Both compare against the same frozen targets, so the two are subtractable:
+`masked_forward − clean` is the inherited (compounding) part, per site. Running one instance
+of each — distinguished by `name`, as everywhere else — is how that gets logged.
+
+`"masked_forward"` goes through `ComponentModel.site_outputs`, which aborts the forward once
+every hooked site has been cached (a private sentinel exception, since a forward hook cannot
+ask PyTorch to stop). Everything past the last decomposition target would otherwise be
+wasted compute *and* retained-for-backward activations.
+
+`"clean"` needs **no forward pass at all**: with every site handed its own cached input the
+sites are independent, so it is a pair of matmuls per site over tensors
+`_build_metric_context` already produced. That is roughly two orders of magnitude cheaper per
+mask sample, which is what puts `n_mask_samples > 1` and a training-time adversary in budget.
+It also retains nothing through the frozen model for backward. Only the measured sites are
+computed, since with no chain there is no reason to evaluate a site nobody reads.
+
+`"clean"` **cannot measure readout sites** and `resolve_measured_sites` asserts rather than
+letting it: a readout target is a point in the residual stream, so feeding every matrix its
+clean input leaves it unchanged and its error identically zero. Split them off into a
+separate `"masked_forward"` instance via `site_patterns`.
 
 ### Readout sites — measuring off the decomposed matrices
 

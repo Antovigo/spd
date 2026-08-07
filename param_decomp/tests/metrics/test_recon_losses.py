@@ -257,6 +257,60 @@ def test_per_module_recon_metric_keys() -> None:
         assert v.item() >= 0
 
 
+def test_local_site_inputs_differ_only_downstream() -> None:
+    """`site_inputs="clean"` changes a site's error only if a decomposed site precedes it.
+
+    `fc1` reads the batch, which no replacement has touched, so both formulations hand it
+    the same input and must agree exactly. `fc2` reads `fc1`'s output, which the chained
+    forward has perturbed, so the two must disagree — that difference is the inherited
+    error the local formulation exists to exclude.
+    """
+    from param_decomp.metrics.context import MetricContext
+
+    torch.manual_seed(0)
+    model = make_two_layer_component_model(weight1=torch.randn(3, 2), weight2=torch.randn(2, 3))
+    batch = torch.randn(4, 2)
+    target_output = model(batch, cache_type="input")
+
+    # A mask that genuinely ablates, so `fc1`'s replacement really does perturb `fc2`'s
+    # input. CI *is* the mask for this metric, so both instances see identical masks.
+    ci = _make_ci_outputs(
+        {path: torch.full((4, 1), 0.5) for path in model.target_module_paths},
+    )
+
+    def per_site_errors(site_inputs: str) -> dict[str, float]:
+        metric = CIHiddenActsReconLoss(
+            CIHiddenActsReconLossConfig(name=site_inputs, site_inputs=site_inputs)  # pyright: ignore[reportArgumentType]
+        )
+        metric.bind(model=model, device="cpu")
+        metric.update(
+            MetricContext(
+                model=model,
+                batch=batch,
+                target_out=target_output.output,
+                pre_weight_acts=target_output.cache,
+                ci=ci,
+                ci_hidden=None,
+                weight_deltas={},
+                step=0,
+                total_steps=1,
+                use_delta_component=False,
+                sampling="continuous",
+                n_mask_samples=1,
+                reconstruction_loss=recon_loss_mse,
+                is_eval=True,
+            )
+        )
+        result = cast(dict[str, Tensor], metric.compute())
+        return {k.split("/")[-1]: v.item() for k, v in result.items() if "/" in k}
+
+    chained = per_site_errors("masked_forward")
+    local = per_site_errors("clean")
+
+    assert chained["fc1"] == pytest.approx(local["fc1"], rel=1e-6)
+    assert chained["fc2"] != pytest.approx(local["fc2"], rel=1e-6)
+
+
 def _make_ci_outputs(ci: dict[str, Tensor]) -> CIOutputs:
     return CIOutputs(
         lower_leaky=ci,

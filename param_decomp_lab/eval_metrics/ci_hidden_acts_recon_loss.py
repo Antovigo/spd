@@ -12,21 +12,27 @@ from param_decomp.metrics.base import (
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
     SiteErrors,
+    SiteInputs,
     add_site_errors,
     clean_site_outputs,
     detached_site_errors,
+    masked_site_outputs,
     reduced_relative_errors,
-    select_sites,
+    resolve_measured_sites,
     site_squared_errors,
 )
 
 
 class CIHiddenActsReconLossConfig(NamedMetricConfig, EvalCadenceConfig):
-    """`ci_role` picks which CI net supplies the mask; `site_patterns` filters the sites."""
+    """`ci_role` picks which CI net supplies the mask; `site_patterns` filters the sites.
+
+    `site_inputs` selects the chained or the local formulation; see `SiteInputs`.
+    """
 
     type: Literal["CIHiddenActsReconLoss"] = "CIHiddenActsReconLoss"
     ci_role: CIRole = "output"
     site_patterns: list[str] | None = None
+    site_inputs: SiteInputs = "masked_forward"
 
 
 class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
@@ -47,7 +53,9 @@ class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.measured_sites = select_sites(model.measurement_sites, self.cfg.site_patterns)
+        self.measured_sites = resolve_measured_sites(
+            model, self.cfg.site_patterns, self.cfg.site_inputs
+        )
 
     @override
     def reset(self) -> None:
@@ -59,7 +67,14 @@ class CIHiddenActsReconLoss(Metric[CIHiddenActsReconLossConfig]):
         mask_infos = make_mask_infos(
             ctx.ci_for(self.cfg.ci_role).lower_leaky, weight_deltas_and_masks=None
         )
-        site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
+        site_outputs = masked_site_outputs(
+            model=self.model,
+            batch=ctx.batch,
+            pre_weight_acts=ctx.pre_weight_acts,
+            mask_infos=mask_infos,
+            sites=self.measured_sites,
+            site_inputs=self.cfg.site_inputs,
+        )
         add_site_errors(
             self._accum,
             detached_site_errors(site_squared_errors(site_outputs, targets, mask_infos)),

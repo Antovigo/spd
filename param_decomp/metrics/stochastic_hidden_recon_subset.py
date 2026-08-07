@@ -17,12 +17,14 @@ from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.hidden_acts import (
     SiteErrors,
+    SiteInputs,
     add_site_errors,
     clean_site_outputs,
     detached_site_errors,
+    masked_site_outputs,
     mean_relative_error,
     reduced_relative_errors,
-    select_sites,
+    resolve_measured_sites,
     site_squared_errors,
 )
 
@@ -35,6 +37,9 @@ class StochasticHiddenReconSubsetLossConfig(LossMetricConfig):
     `None` measures every site in `ComponentModel.measurement_sites` — every decomposed
     site plus any `pd.hidden_readout_sites`. Masking always covers every decomposed site
     regardless — only measurement is filtered.
+
+    `site_inputs` selects whether each site is judged on the chained masked forward's input
+    or on its own clean one; see `SiteInputs`.
     """
 
     type: Literal["StochasticHiddenReconSubsetLoss"] = "StochasticHiddenReconSubsetLoss"
@@ -43,6 +48,7 @@ class StochasticHiddenReconSubsetLossConfig(LossMetricConfig):
         SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
     site_patterns: list[str] | None = None
+    site_inputs: SiteInputs = "masked_forward"
 
 
 class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConfig]):
@@ -51,9 +57,11 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
     Same masks and same subset routing as `StochasticReconSubsetLoss`, but the error is
     read at the decomposed sites against the frozen model's own site outputs instead of at
     the logits — so each layer gets signal from immediately downstream rather than
-    backpropagated from the output. The forward stops after the last decomposed site
-    (`ComponentModel.site_outputs`), which is what keeps this cheap: nothing past that point
-    is computed, and none of it is retained for backward.
+    backpropagated from the output.
+
+    Under `site_inputs="masked_forward"` the forward stops after the last decomposed site
+    (`ComponentModel.site_outputs`), so nothing past that point is computed or retained for
+    backward. Under `site_inputs="clean"` there is no forward at all.
     """
 
     log_namespace = "loss"
@@ -63,7 +71,9 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
         self.router = get_subset_router(self.cfg.routing, device)
-        self.measured_sites = select_sites(model.measurement_sites, self.cfg.site_patterns)
+        self.measured_sites = resolve_measured_sites(
+            model, self.cfg.site_patterns, self.cfg.site_inputs
+        )
 
     @override
     def reset(self) -> None:
@@ -83,7 +93,14 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
                 weight_deltas=weight_deltas,
                 router=self.router,
             )
-            site_outputs = self.model.site_outputs(ctx.batch, mask_infos)
+            site_outputs = masked_site_outputs(
+                model=self.model,
+                batch=ctx.batch,
+                pre_weight_acts=ctx.pre_weight_acts,
+                mask_infos=mask_infos,
+                sites=self.measured_sites,
+                site_inputs=self.cfg.site_inputs,
+            )
             add_site_errors(batch_errors, site_squared_errors(site_outputs, targets, mask_infos))
 
         if ctx.is_eval:  # `compute()` is eval-only, and each eval pass `reset()`s first
