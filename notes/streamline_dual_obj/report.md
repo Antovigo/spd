@@ -1,518 +1,359 @@
-# Streamlining the dual CI objective
+# Giving each decomposed matrix its own clean inputs
 
-Design study, 2026-08-06. Three proposals for the dual-CI scheme before scale-up: **share a
-trunk** between the two CI networks (§1–§3), **enforce `CI_hidden >= CI_output` by
-construction** (§4), and **feed each decomposed matrix its clean input** so the hidden
-objective becomes local and per-matrix (§9). The first two are one change and are treated
-together through §8; the third is independent of both and can land on its own. Written
-against `feature/dual_hidden_acts` at `af9212b00`; the empirical inputs are
-`notes/hidden_dual/report.md` and the `addsub-L18-{09,10,11}` runs.
+Design study, 2026-08-06, against `feature/dual_hidden_acts` at `f417a94c4`. Empirical inputs
+are `notes/hidden_dual/report.md` and the `addsub-L18-{09,10,11}` runs.
 
-## Recommendation up front
+The question: today the hidden-activation loss judges each decomposed matrix on an input that
+earlier decomposed matrices have already damaged. Should it instead give every matrix the
+input the real model would have given it? This report works through what changes, what it
+costs, what it buys, and what it stops being able to see.
 
-On the CI networks — do both, as one change, in this shape:
-
-```
-                        ┌── base head ───────────────► logit_output
-inputs ──► shared trunk ┤
-                        └── surplus head ─► softplus ─┐
-                                                      ├──► logit_hidden
-                        clamp(logit_output.detach()) ─┘
-```
-
-One trunk (input projector + transformer blocks), two readout heads, hidden derived from
-the *detached* output logit plus a non-negative surplus. That is `-46%` CI-fn parameters at
-the current L18 config, exact monotonicity in all three CI branches, and it makes the
-**surplus** — the quantity the whole experiment is about — a directly parameterized,
-directly readable object rather than a difference of two independent estimates.
-
-Three things gate it, all measurable before writing training code (§5), and one thing must
-be conceded honestly: both proposals trade *measurement independence* for cost (§6).
-
-On the hidden objective — **add** a local, teacher-forced reconstruction loss that feeds each
-matrix its clean input (§9). It needs no target-model forward at all, which makes it ~100x
-cheaper per mask sample than the chained loss and finally puts a 20-step adversary and
-`n_mask_samples > 1` inside the hidden objective's budget. Add rather than replace: the
-difference between the two losses **is** the compounding term, which is the quantity the
-three-block scale-up exists to measure. This is independent of the CI-net changes and is
-probably the larger lever of the two.
+Short answer: **yes, add it — and it is a much bigger change than it looks, because it removes
+a forward pass through the model entirely.** But add it alongside the current loss rather than
+replacing it, because the difference between the two is itself the measurement we most want.
 
 ---
 
-## 1. Where the cost actually is
+## 1. What the hidden-activation objective is for
 
-`addsub-L18-11-bigc`: 7 sites on L18, `total_C = 6144`, global transformer CI fn with
-`d_model 512`, `n_blocks 4`, `mlp_hidden 2048`. Concatenated input dim is
-`6 x 4096 + 14336 = 38912` (`down_proj` alone contributes 37% of it).
+A decomposed matrix is split into many small pieces (subcomponents). For each token, a
+causal-importance network decides which pieces are needed; the rest are switched off. Two
+different questions can be asked about "needed":
 
-| part of one CI net | params | share |
-|---|---:|---:|
-| input projector (`38912 -> 512`) | 19.92 M | 56% |
-| 4 transformer blocks | 12.59 M | 35% |
-| output head (`512 -> 6144`) | 3.15 M | 9% |
-| **one net** | **35.66 M** | |
-| **two independent nets (today)** | **71.3 M** | |
+- **Needed for the output.** Switch the pieces off, run the whole model, and check the logits
+  are unchanged. This is the original objective.
+- **Needed for the activations.** Switch the pieces off and check that each decomposed matrix
+  still produces the numbers it used to produce.
 
-Sharing the trunk and keeping two heads gives **38.8 M — a 46% cut**, i.e. 32.5 M
-parameters, or roughly **0.5 GB** of the training footprint once gradients (4 B/param) and
-Adam moments (8 B/param) are counted. That matches the `~0.55 GB per extra CI net` recorded
-in `notes/hidden_dual/report.md`.
+The second exists because a piece can matter internally while its effect cancels out before
+the logits. The output objective is happy to switch such a piece off; the activation objective
+is not. That is the whole point of the second causal-importance network.
 
-Two facts make this matter more at scale, not less:
+The error is measured as a fraction, not as raw squared error: for each matrix, the summed
+squared difference divided by the summed squared true value. So a matrix with large
+activations and a matrix with small ones count equally, and a coefficient tuned on one block
+transfers to another.
 
-- **The input projector — the dominant term — scales linearly in the number of decomposed
-  sites.** At 3 blocks (21 sites) it is 59.8 M per net, so two nets cost ~151 M and a shared
-  trunk ~79 M: **~1.2 GB saved**. The `addsub-L18to20-01-dual` run peaked at 42.2 GiB of a
-  46 GiB card, and `addsub-L18-09-dual` was *rejected* at 427 MiB headroom. This saving is
-  the same order as the decisions that were already forced (batch 128 → 96; 3 GPUs → 4).
-- **C is a weak memory lever** (established: 304 → 228 bought under 1 GB, because the
-  weight-delta tensors are full-weight-shaped). The CI nets are one of the few levers left
-  that does not cost components or batch.
+## 2. How it works today
 
-**Compute is not the argument.** One CI net costs ~0.44 TFLOP fwd+bwd per step here
-(35.7 M params, 128 x 16 = 2048 tokens) against ~33 TFLOP for a *single* 8 B target forward,
-of which the step runs several — so the second net is around 1% of the step and trunk sharing
-recovers about half of that. The measured dual-vs-reference step time already showed the
-scheme costing nothing. Do not sell this on speed.
+One training step, in order:
 
-## 2. The sharing spectrum
+1. **Clean pass.** Run the frozen model once on the batch and cache the input that arrives at
+   every decomposed matrix. This pass is needed for the output objective anyway, so it is free
+   for our purposes. Call the cached input to matrix `i` its **clean input**.
+2. **Importance.** Both causal-importance networks read those clean inputs and produce an
+   importance value for every piece of every matrix.
+3. **Output reconstruction.** Masked passes through the whole model, comparing logits.
+4. **Activation reconstruction.** A *separate* masked pass through the model. At each
+   decomposed matrix the frozen matrix is swapped out for the masked pieces. This pass stops
+   early — as soon as the last decomposed matrix has been reached, the rest of the model is
+   skipped. Each matrix's output from that pass is compared against what the frozen matrix
+   would have produced **on the clean input**.
 
-Ordered by how much is shared. Each row is a real design; the prediction column is what §3
-argues.
+Step 4 has an asymmetry that is easy to miss and matters a lot:
 
-| # | design | params (L18) | monotone for free? | prediction |
-|---|---|---:|---|---|
-| A | one net, one logit, per-site learned offset `tau >= 0` per role | 35.7 M | yes | **fails** — needs the two nets to agree on component *ranking* |
-| B | shared trunk, two independent heads | 38.8 M | no | **works**, recommended |
-| C | shared trunk, base head + non-negative surplus head | 38.8 M | yes | **works**, recommended |
-| D | shared input projector, split blocks + heads | 51.4 M | no | fallback if B/C underfit |
-| E | fully separate (today) | 71.3 M | no | the measurement instrument |
+> The **prediction** is computed on a damaged input. The **target** is computed on the clean
+> input.
 
-Note the degenerate endpoints. Sharing *everything* including the readout collapses to a
-single CI net with two losses — which is the pre-dual setup (`addsub-L18-04-hidden`,
-`StochasticReconSubsetLossConfig.hidden_acts_recon`) that the dual scheme was built to
-replace because it conflates the two objectives. A is one scalar away from that collapse.
+So the error at a matrix mixes two things that have nothing to do with each other:
 
-Monotonicity is a **separate axis** from sharing: C = B + constraint. They compose, and
-option C is the joint implementation. But they can be landed and evaluated independently,
-and if you want to attribute a result to one of them you should.
+- the damage this matrix's own switched-off pieces caused, and
+- the damage it inherited, because matrices upstream of it were switched off too.
 
-## 3. What the existing runs already say about which sharing works
+### This is not hypothetical even within a single block
 
-The decisive evidence is in `notes/hidden_dual/report.md`:
+Decomposing only layer 18 gives seven matrices, and they are not independent. Inside one
+transformer block:
 
-- **Nesting is high but not from a common ranking.** Output-active implies hidden-active for
-  97.7% of (component, position) entries; the converse fails for 46%. A pure threshold model
-  (design A) predicts exactly that nesting — hidden = a looser cut of the same ranking. So
-  nesting alone does *not* discriminate A from B.
-- **k/v kills A.** At the answer position on `addsub-L18-11-bigc`, `k_proj` fires 0.01
-  output components per prompt and `v_proj` 0.00 — medians and both quartiles are 0 over
-  20 000 prompts — while the hidden net fires 6.41 and 11.75 there. Where the output net has
-  no gradient signal, its *ranking is arbitrary*, and a threshold on an arbitrary ranking
-  cannot reproduce a specific set of 6–12 components. Design A must fail on exactly the
-  sites where the dual scheme's most interesting finding lives.
-- **But the two nets need the same input features.** Both read the identical cached
-  `pre_weight_acts`; both must answer "which components does *this* token/context engage".
-  The featurization is objective-agnostic; only the scoring is not. That is precisely the
-  trunk/head split.
+| matrix | reads | so its input is damaged by |
+|---|---|---|
+| `q_proj`, `k_proj`, `v_proj` | the block input | nothing |
+| `o_proj` | the attention output | q, k, v |
+| `gate_proj`, `up_proj` | the stream after attention is added back | q, k, v, o |
+| `down_proj` | the gate/up product | q, k, v, o, gate, up |
 
-So the evidence points at B/C: share the featurizer, let the heads re-rank freely. It also
-predicts *where* B would show strain — attention q/k/v, where the two nets' answers are most
-dissimilar — which is the thing to watch in the first shared-trunk run.
+`q_proj`, `k_proj` and `v_proj` read the block's input, which nothing has touched. But
+`o_proj` reads the attention output, which depends on all three of them; and `gate_proj`,
+`up_proj`, `down_proj` sit after the attention output has been added back into the residual
+stream, so they depend on all four attention matrices as well as on each other.
 
-Additional argument for sharing that is easy to miss: the two nets currently learn their own
-internal bases, and **the analysis compares them**. A shared trunk makes the comparison
-happen in one representation. It also plausibly improves the hidden net's sample efficiency,
-since it no longer relearns the featurization from scratch.
+**Four of the seven matrices already receive damaged inputs today.** Only q, k and v are
+judged fairly.
 
-## 4. The monotonicity constraint
+## 3. The proposal
 
-### 4.1 What it should mean
+The three-step sketch under discussion:
 
-The falsifiable claim is *output-important implies hidden-important*. The clean encoding of
-that is at the level of **supports**: the hidden mask must be a superset of the output mask.
-The pointwise inequality `CI_hidden >= CI_output` is strictly stronger — it also orders the
-intermediate values, and CI values are not calibrated across nets (one is a mask coefficient
-for a KL in nats, the other for a dimensionless relative activation error). In principle
-that is an overreach.
+1. Clean pass, cache activations, compute both sets of importance values.
+2. Masked passes for output reconstruction (stochastic and adversarial), compute those losses.
+3. For activation reconstruction, hand each matrix its **original** input and compare the
+   masked matrix's output against the true output.
 
-In practice it is nearly vacuous: measured on `addsub-L18-09-dual/model_20000.pth`, CI is
-97.8–98.8% exactly 0 and 1.0–1.9% exactly 1 under `leaky_hard`, with 0.086–0.111% of entries
-in `(0.01, 0.5)`. There is no usable middle band for the extra ordering to distort. Take the
-pointwise version — it is far easier to enforce exactly and buys support nesting as a
-corollary.
+Step 3 is the change. Written out for one matrix: instead of comparing
+`masked_matrix(damaged input)` against `true_matrix(clean input)`, compare
+`masked_matrix(clean input)` against `true_matrix(clean input)`. Same input on both sides.
 
-### 4.2 Direction: which net is free
+Three notes on the sketch as stated:
 
-**Make the output net free and derive the hidden net from it.** Two reasons:
+**(a) Step 3 needs no forward pass at all.** This is the part worth dwelling on, and §4 is
+about it. Once every matrix reads its own clean input, the matrices stop depending on each
+other, and there is nothing left to run *through*. The chain is the only reason a forward pass
+was ever needed here.
 
-- The 607 output-only entries are 2.3% of the output mask but carry 15% of output
-  reconstruction quality (KL 0.004000 without vs 0.003401 with) — about 7x an average entry.
-  These are the violations of the claim, and they are systematically high-value, not
-  leakage. If the *hidden* net were free and the output net derived, the constraint would
-  force those entries off in the output net (or drag the hidden net up to cover them by a
-  path with no gradient reason to do so). Forcing them *on* in the hidden net instead costs
-  the hidden objective 607 entries against 47 458 already-on — **1.3%**, negligible.
-- The output objective is the one with an external anchor (KL against the target model).
-  Constrain the derived quantity, not the anchored one.
+**(b) The target should be "what this matrix would have produced", not "the input to the next
+decomposed matrix".** The sketch says compare `W_masked · x_i` against `x_{i+1}`, which is
+right if `x_{i+1}` just means matrix `i`'s true output — and that is exactly what the code
+already computes (`clean_site_outputs` builds `W · x_clean + b` from the cached input). It
+would be wrong if it meant the cached input of the *next* decomposed matrix: in a transformer
+those are different tensors with attention, a residual add and a normalisation sitting in
+between, and often different widths (`gate_proj` outputs 14336 numbers, `down_proj` reads
+14336, but `q_proj` outputs 4096 and the next matrix along reads the block input, not that).
+No change needed here — just worth being explicit, because this distinction is exactly what
+`hidden_readout_sites` was invented for (§7).
 
-### 4.3 Parameterization
+**(c) Keep one backward pass.** The sketch has the output loss backpropagated in step 2 and
+the activation loss in step 3. Today there is a single summed `total_loss.backward()`
+(`optimize.py:863`). Two separate backward passes would give the same gradients only if no
+optimizer step happens in between, and both share the importance-network computation from step
+1, so the first backward would free a graph the second still needs unless it is explicitly
+retained. There is no benefit to pay for that; keep the single summed backward.
 
-Work in **logit space**, before the sigmoids:
+### An intermediate option worth knowing about
+
+The motivation splits into two separable complaints, and there is a cheap fix for only the
+first:
+
+| complaint | fixed by |
+|---|---|
+| a matrix receives *gradient* for damage it did not cause | detaching each matrix's input inside the current chained pass |
+| a matrix's *error number* includes damage it did not cause | only the local formulation |
+
+Detaching the input in the chained pass keeps the forward exactly as it is — drift still flows
+downstream and is still measured — but stops gradients from flowing backwards between
+matrices, so each matrix's pieces are only trained on their own error. It is a two-line change
+and it saves nothing. If the goal were purely "each matrix should get signal about its own
+effect", that would be enough. The local formulation is worth more because of §4.
+
+## 4. Why this is much cheaper: the forward pass disappears
+
+Everything the local loss needs is already cached. For one matrix, with `x` its clean input:
+
+```
+true output    = W x + b                                    (already built, from the cache)
+masked output  = U^T ( mask ⊙ (V x) )  +  δ_mask · (Δ x)  + b
+```
+
+`V x` turns the input into one number per piece; the mask switches pieces off; `U^T` projects
+back out. `Δ x` is the leftover-weight term. There is no model in any of that — just two
+matrix multiplies on a tensor already sitting in memory.
+
+Two further savings fall out:
+
+- **`V x` does not depend on the mask.** Neither does `Δ x`. Compute them once per step and
+  every extra mask sample, and every step of an adversarial mask search, costs only the second
+  multiply.
+- **Nothing has to be kept for the backward pass.** Today, gradient flows from an early matrix
+  through the frozen attention and normalisation ops into a later one, so all those
+  intermediates must be retained. Locally there is nothing between matrices to retain.
+
+### The arithmetic, for `addsub-L18-11-bigc`
+
+Seven matrices on layer 18, batch 128 x 16 tokens = 2048 tokens.
+
+| work | multiply-adds | approx |
+|---|---|---|
+| today: one truncated forward, **per mask sample** (embeddings + 19 of 32 blocks) | — | **~17 TFLOP** |
+| local: `V x` for all seven matrices, **once per step** | 35.6 M per token | ~0.15 TFLOP |
+| local: masked output for all seven matrices, **per mask sample** | 41.4 M per token | ~0.17 TFLOP |
+
+Roughly **a hundred times less arithmetic per mask sample**. Treat it as an order of magnitude
+rather than a precise figure — it counts multiply-adds only, and these small multiplies are
+more limited by memory bandwidth than by arithmetic. Even so: eight local mask samples cost
+about 1.5 TFLOP, still an order of magnitude below *one* sample today.
+
+## 5. What the cheapness is for
+
+The saving is only worth having if it is spent. Three things it buys:
+
+- **More than one mask sample.** `n_mask_samples` is 1 in every current config, and the reason
+  is structural: the truncated forward sits *inside* that loop
+  (`stochastic_hidden_recon_subset.py:79-88`), so each extra sample costs a whole pass.
+  Locally, sixteen samples cost less than one sample does today. A single random mask per step
+  is a noisy estimate of "how much does switching pieces off hurt"; more samples is a directly
+  better gradient.
+- **An adversary during training, not just at evaluation.** The adversarial probe searches for
+  the mask that hurts most. At 20 search steps it costs 21 truncated passes per batch today,
+  which is why it is evaluation-only and on the slow cadence. Locally those 20 steps are 20
+  cheap multiplies. There is a second reason it should work better: locally, a matrix's output
+  is a **straight-line function of the mask** with fixed coefficients, so the search is over a
+  simple bowl-shaped landscape rather than through a deep non-linear model. The existing PGD
+  helper already accepts any mask-consuming objective, so it plugs straight in.
+- **Analysis without the 8B model.** The local loss never touches the target model — it reads
+  cached activations. So it can be evaluated offline, on CPU, from harvested activations,
+  which is how much of the analysis tooling already works.
+
+## 6. What it gives up, and why that is the interesting part
+
+Judging every matrix on clean inputs means the loss can no longer see errors **compounding**.
+The failure it becomes blind to is specific and plausible: every matrix reproduces its own
+output well when handed the true input, yet when the masked model is actually run end to end
+the small errors feed into each other and the internal state drifts a long way from the target
+model's.
+
+That is not a hypothetical worry. It is the exact phenomenon the three-block `L18to20`
+experiment was set up to study, and it is why the current loss compares a damaged-input
+prediction against a clean-input target in the first place.
+
+So: **do not replace, add.** And then the two losses together are worth more than either alone,
+because they are the same formula, at the same matrices, against the same targets, differing
+only in which input the prediction was computed from. Subtract them and what is left is
+exactly the part of each matrix's error that was inherited rather than caused.
+
+```
+chained error  −  local error   =   inherited (compounding) error, per matrix
+```
+
+That number does not exist today, it costs almost nothing to produce, and it is per-matrix, so
+it says where drift is *created* and where it is *amplified*. For the three-block scale-up it
+is close to being the headline measurement.
+
+## 7. What has to stay chained regardless
+
+`hidden_readout_sites` — the residual-stream measurement points added on
+`feature/hidden_site_targets` — cannot be done locally, and not by accident. A readout point is
+not a decomposed matrix's output; it is a place in the stream whose value is a property of the
+whole chain. Feed every matrix its clean input and the stream is unchanged by construction, so
+a readout's error would be exactly zero and would measure nothing.
+
+This gives a clean division of labour:
+
+| measured at | by |
+|---|---|
+| the decomposed matrices | the local loss — cheap, many samples, its own adversary |
+| the residual stream | the chained loss — the only thing that can see it |
+
+## 8. Predictions, including one that is a free correctness test
+
+**q, k and v must give identical chained and local errors** on a single-block run. Their input
+is the block input, which nothing upstream has touched, so the two formulations are handed the
+same tensor. Compute both from the same mask draw and assert equality at those three matrices:
+if they differ, the implementation is wrong. (On the three-block run this holds only for layer
+18's q/k/v; layers 19 and 20 inherit.)
+
+**The gap should concentrate on `o_proj` and `down_proj`.** They are the two matrices furthest
+downstream inside the block — `o_proj` behind q/k/v, `down_proj` behind everything. If
+compounding matters at all at one block, it should show up there.
+
+**Part of the hidden network's density may be compensation, not necessity.** In
+`addsub-L18-10-dual-ppgd` the hidden network's alive counts were pinned at the ceiling of the
+components available on four matrices — q 125/128, k 124/128, v 252/256, down 246/256, with o
+238/256 just behind. Some of that could be pieces switched on to *correct* inherited error
+rather than because the matrix's own output needs them. If so, the local objective should need
+fewer pieces at `o_proj` and `down_proj`. Note the prediction cannot extend to q/k/v — their
+input is already clean, so whatever is saturating them is genuine local difficulty.
+
+**The gap may be small at one block.** The existing report found per-matrix errors summing
+almost exactly to the joint error (0.05184 against 0.05183), which suggests cross-matrix
+interaction is weak at L18. If so, chained and local will nearly agree there and the difference
+only opens up across blocks — which is itself worth knowing before spending the scale-up budget.
+
+## 9. What stays exactly the same
+
+Worth stating, because it is most of the machinery and it bounds the size of the change:
+
+- the targets (`clean_site_outputs`, already built from the cached clean inputs);
+- the relative-error formula, and the rule that numerator and denominator are summed
+  separately across the whole pass and across GPUs before dividing;
+- matrix selection by pattern (`select_sites`);
+- the mask sampling and subset routing;
+- the leftover-weight (delta) handling, and the bias, which appears on both sides and cancels.
+
+Two small differences in meaning to be aware of:
+
+- **Positions not routed to components.** The error is measured only where components replaced
+  the frozen matrix. The code justifies this by saying the untouched positions ran the frozen
+  matrix, so their error is zero — which is exactly true only at the *first* matrix in a chain.
+  Further downstream the untouched matrix ran on a drifted input, so today's measurement is
+  already quietly discarding some inherited error. Locally the claim becomes exactly true
+  everywhere. This matters when reading `chained − local` as the complete compounding term: it
+  is a lower bound.
+- **The local error has an exactly attainable zero.** Switch every piece on with the leftover
+  weight included and the masked matrix reproduces the frozen one exactly, so the loss measures
+  purely the cost of switching things off.
+
+## 10. Recommended shape
+
+**Add a local loss carrying most of the activation objective's weight; keep the chained loss.**
+
+- New `StochasticLocalHiddenReconLoss` (`ci_role: hidden`) becomes the workhorse: several mask
+  samples, and once it is settled, its own adversarial variant.
+- Keep `StochasticHiddenReconSubsetLoss` at a smaller coefficient. Consider narrowing it to
+  `site_patterns: ["resid_*"]` — the readout points, where it is the only thing that can see
+  anything. This is not the "measure only the residual-stream writes" idea previously ruled out:
+  that one discarded attention from the activation objective altogether, whereas here the local
+  loss covers every matrix and the chained loss is specialised to what only it can reach.
+- Log both from step 0 of the next run even before rebalancing coefficients. `chained − local`
+  is worth having immediately.
+
+### Implementation
+
+Small. Everything in `metrics/hidden_acts.py` applies unchanged; the new code is a per-matrix
+loop replacing the one call to `model.site_outputs(...)`:
 
 ```python
-base = clamp(logit_output.detach(), min=0.0)          # detach: see 4.4
-logit_hidden = base + softplus(surplus_head_out)
+targets = clean_site_outputs(self.model, ctx.pre_weight_acts, self.measured_sites)
+for _ in range(ctx.n_mask_samples):
+    mask_infos = calc_stochastic_component_mask_info(...)          # unchanged
+    outputs = {
+        site: self.model.components[site](
+            ctx.pre_weight_acts[site],
+            mask=mask_infos[site].component_mask,
+            weight_delta_and_mask=mask_infos[site].weight_delta_and_mask,
+        )
+        for site in self.measured_sites
+    }
+    add_site_errors(batch_errors, site_squared_errors(outputs, targets, mask_infos))
 ```
 
-Then squash exactly as today. Four properties fall out:
+Notes:
 
-- **Exact `>=` in every branch.** Both `lower_leaky_hard` (forward `clamp(x, 0, 1)`) and
-  `upper_leaky_hard` are monotone non-decreasing, so ordering in the logit implies ordering
-  in `lower_leaky`, `upper_leaky`, and `pre_sigmoid` alike. One parameterization covers all
-  three fields of `CIOutputs`; no per-branch special-casing.
-- **The clamp is free and is not a violation.** `clamp(o, min=0) >= o` always, so
-  `logit_hidden >= logit_output` still holds; and below 0 the lower branch is already
-  saturated at CI 0, so nothing is lost. Without it, an output logit that has drifted to −20
-  would demand a surplus of 20 before the hidden CI could switch on — a scale mismatch that
-  makes the surplus head's job artificially hard. (The impmin gradient dies at `x <= 0`
-  under `upper_leaky_hard`, so logits are not driven arbitrarily negative — but the clamp
-  costs nothing and removes the failure mode.)
-- **bf16-safe.** `a + b` with `b >= 0` never rounds below `a` under round-to-nearest, so the
-  inequality survives autocast. Assert it anyway, next to the existing
-  `assert (lower_leaky_output <= 1.0).all()` — same style, one reduction.
-- **The surplus is the object of study.** `softplus(surplus)` *is* "how much more important
-  this component is for the activations than for the logits", available per (component,
-  position) without differencing two independent estimates.
+- Prefer a new metric class over a flag on the existing one. The two differ by an entire
+  forward pass, and the intended configuration runs both at once with different
+  `site_patterns` — which a single instance cannot express.
+- Restrict to linear matrices, as `clean_site_outputs` already asserts. Readout points are not
+  valid measurement targets here and should be rejected loudly rather than silently scoring
+  zero.
+- **Do not hoist `V x` out of the loop in the first version.** `LinearComponents.forward`
+  recomputes it per sample, which wastes roughly half the local cost — irrelevant next to
+  removing a 17 TFLOP pass, and it keeps the first version to a straightforward reuse of the
+  existing forward. Hoisting only starts to matter once mask samples go up or an adversary is
+  added, and it is a contained follow-up (a `forward_from_acts` entry point on
+  `LinearComponents`).
+- The loss never reads `ctx.batch`, only `ctx.pre_weight_acts`. Worth keeping true — it is what
+  makes offline analysis possible.
 
-**Share the binomial noise draw.** `sampling: binomial` is live in the -11 configs, and
-`_apply_sigmoid_to_ci_outputs` mixes `1.05 * x - 0.05 * rand_like(x)` into the lower-leaky
-branch. Independent draws per role break the inequality by up to 0.05 even with identical
-logits. `f(x) = 1.05x - 0.05u` is monotone in `x` for *fixed* `u`, so drawing `u` once and
-reusing it for both roles restores exactness. This is the one silent-corruption trap in the
-whole design.
+### Sequencing
 
-**Init.** `zero_init_readout` currently starts both nets at logit exactly 0.5, so they emit
-identical CI until gradients separate them — which is what makes the step-0 diagnostic table
-readable. Under this parameterization exact equality at init needs `softplus(b) = 0`, i.e.
-`b = -inf`. Pick a small positive initial surplus instead: `b = -3` gives `softplus = 0.049`
-(hidden logit 0.549). Slightly denser at init, in the direction the run goes anyway. Record
-it; the step-0 identity check changes meaning.
+1. Land the local loss, run it alongside the chained one at a small coefficient, and check the
+   q/k/v identity (§8). Read `chained − local` per matrix on the single-block config.
+2. Shift the coefficient weight onto the local loss, raise `n_mask_samples`, narrow the chained
+   loss to the readout points.
+3. Add the local adversary. Then reconsider whether the chained loss needs an adversary at all,
+   given it is by then only watching the stream.
 
-### 4.4 Why the detach is load-bearing
+## 11. Things that will change in the logs
 
-Without `.detach()` on the base, the hidden net's importance-minimality term penalizes
-`upper_leaky(base + surplus)` — and it can reduce that by pushing **the output logit down**.
-That is a first-order, direct incentive for the hidden objective to make the output net
-sparser than the output objective wants. It would silently corrupt the very comparison the
-run exists to make. Detaching kills that channel through the head.
+- **Activation-error numbers will drop and are not comparable to earlier runs.** The local loss
+  is a strictly easier objective — it never charges a matrix for inherited damage. Do not
+  overlay the new curves on `addsub-L18-{09,10,11}`. (This is the second time this metric has
+  changed definition; the first was raw squared error to relative error.)
+- **The coefficient will need retuning**, for the same reason.
+- **`n_alive` for the hidden network may fall**, if the compensation hypothesis in §8 holds.
+  That is a result, not a regression.
 
-Note that trunk sharing leaves a weaker version of the same coupling through the shared
-features, which is unavoidable and is one of the costs of §2 option B. The head-level channel
-is the one that is both first-order and free to remove.
+---
 
-Consequence for logging: `Phi_hidden` now structurally includes the base's contribution, so
-its absolute value gains an uninformative offset (no gradient flows through it — only the
-number moves). The meaningful quantity is `Phi_hidden - Phi_output`, which is already how
-`notes/hidden_dual/report.md` reads it. Log the surplus explicitly.
-
-### 4.5 Alternative: interpolation in CI space
-
-`ci_hidden = ci_output + (1 - ci_output) * s`, `s in [0, 1]` — algebraically the same shape
-as the PGD source→mask interpolation already in `pgd_utils.py`, bounded automatically, and
-`s` reads as "fraction of the remaining headroom". Where `ci_output = 0` (98% of entries) the
-hidden net is completely free, which is exactly where you want freedom.
-
-Rejected because `lower_leaky` and `upper_leaky` are *different* functions of the logit, so
-the interpolation has to be done twice with two different meanings, and `pre_sigmoid` for the
-hidden role becomes ill-defined — breaking every downstream consumer that reads it. Logit
-space is uniform across all three.
-
-### 4.6 Soft variant, if the hard one disturbs training
-
-Add `coeff * mean(relu(ci_output - ci_hidden))` to the loss and keep the nets structurally
-independent. Pros: violations stay *measurable* (the residual hinge value is the violation
-rate), no reparameterization, tunable pressure. Cons: another coefficient, no exact
-guarantee, and it does not streamline anything — it adds a term. Keep it in the back pocket;
-it is the right move only if the hard constraint visibly hurts the hidden objective.
-
-### 4.7 Knock-on simplifications the constraint buys
-
-- `ci_scaled_component_weight_decay` currently takes `torch.maximum` over both nets'
-  per-component batch CI max (`optimize.py:829-836`). Under the constraint the hidden max
-  dominates pointwise, so the `maximum` is a provable no-op. Keep the code, turn it into an
-  assertion — it is a live check that the constraint is actually holding end-to-end.
-- The `ab_grids` two-colour heatmaps **cannot** show magenta (output-important,
-  hidden-unimportant). That was the primary step-5000 sanity check; it becomes a tautology.
-  Replace it with the *binding rate*: the fraction of entries where the surplus is pinned at
-  its floor while the hidden objective is still pushing down. That is the constraint's cost,
-  and it is the honest replacement for the check you gave up.
-- Alive sets nest by construction, so `find_alive_subcomponents`' dual-role lists and the
-  `alive_plane_scatter` panels get a guaranteed containment structure instead of an empirical
-  one.
-
-## 5. Three measurements to make first — all cheap, none need a training run
-
-**(1) Is a shared trunk expressive enough?** Decisive, and it needs no training. On
-`addsub-L18-10-dual-ppgd/model_20000.pth` (or `-11-bigc`), hook the input of each net's
-`_output_head` to cache the `d_model = 512` trunk representation over a few eval batches,
-then least-squares fit a linear map from **net A's trunk** to **net B's logits**, per site.
-If the shared trunk with separate heads is viable, a linear head on A's features recovers B's
-answer. Report per-site R² and, more usefully, mask agreement at CI > 0.1. Pass ≈ agreement
-> 95%; failure on q/k/v specifically is the predicted failure mode and would argue for
-option D (split the last block) rather than E.
-
-Caveat: this tests whether a *converged* trunk can express the other role, not whether joint
-training finds such a trunk. A pass is good evidence; a failure is decisive.
-
-**(2) Is the hidden mask just a lower threshold on the output ranking?** Per-site rank
-correlation between `pre_sigmoid` logits of the two nets, plus AUC of the output logit as a
-classifier for the hidden mask. Expect high on MLP, near-chance on `k_proj`/`v_proj`. If it
-came out high *everywhere*, option A becomes viable and the second net collapses to one
-scalar per site — a much stronger streamlining result, and worth 20 minutes to rule out.
-
-**(3) What is the gradient-scale ratio between the two objectives?** This is already logged:
-`component_grad_norms` runs every `train_log_every` (100) steps and namespaces the hidden
-net under `grad_norms/ci_fns/hidden.*`. Pull `ci_fns/_input_projector.W` against
-`ci_fns/hidden._input_projector.W` from any completed dual run. It matters because today the
-two nets are disjoint and **Adam makes each net's updates invariant to its own loss scale**;
-a shared trunk receives the *sum* of the two gradients through a single `total_loss.backward()`
-(`optimize.py:863`), so the ratio suddenly sets which objective steers the shared features.
-Within ~3x: proceed as-is. At ~30x: rescale, or normalize per objective before the trunk.
-
-There is reassurance here already — the *components* pool has always received both losses'
-gradients summed and it works — but the components are anchored by faithfulness while the
-trunk is not.
-
-## 6. Risks, stated plainly
-
-- **Both proposals cost measurement independence.** Sharing a trunk correlates the two nets'
-  outputs architecturally, so the 97.7% nesting statistic is no longer an independent
-  measurement of it. The constraint converts that measurement into an assumption outright.
-  This is acceptable *because the measurement has already been made* on L18 with independent
-  nets — but any nesting claim at the new scale must either be caveated or checked against a
-  separate-net control arm.
-- **The "output net identical to a single-CI run" property is lost** under any trunk sharing,
-  since hidden-loss gradients reach the trunk. The detach preserves it only at the head. The
-  `addsub-L18to20-01-dual` vs `-ctrl` pair is the existing clean comparison; a shared-trunk
-  run is not directly comparable to it.
-- **Checkpoints break.** State-dict keys change. Per repo policy no migration shim, but land
-  the change when nothing needs to resume: `pd.dual_hidden_ci` going from `bool` to a config
-  object also breaks snapshot `pd_config` deserialization on resume, which has bitten before.
-- **DDP unused-parameter hazard.** Harmless today because both losses fire every step. If the
-  hidden loss ever gets a `start_frac` or a schedule, the *heads* become the unused
-  parameters instead of a whole net — a smaller but still real trap.
-- **The constraint does not fix the C ceiling.** Hidden `n_alive` was censored at C on four
-  of seven sites in `addsub-L18-10-dual-ppgd`; that is a C-allocation problem (already
-  addressed in `-11-bigc` at q/k 512, v/o 1024) and is orthogonal to everything here.
-- **Expect to re-touch `ci_fn` LR.** Currently 1.6e-4 against 3.2e-4 for components. A shared
-  trunk moves once under a summed gradient rather than twice independently; watch the CI L0
-  curves in the first run rather than pre-emptively halving it.
-
-## 7. Implementation shape
-
-Config — replace the bool, keeping the two axes separable:
-
-```yaml
-pd:
-  dual_hidden_ci:
-    share_trunk: true
-    monotone: true
-```
-
-`dual_hidden_ci: DualHiddenCIConfig | None = None` in `PDConfig`; omitted means single net.
-
-Code:
-
-- `make_ci_fn_wrapper(..., n_roles: int)`. Every CI fn already has the shape
-  `input -> [..., C]` per layer, so "two roles" is a second readout on the same body. For
-  `GlobalSharedTransformerCiFn` that is a second `Linear(d_model, total_c)` (prefer a second
-  head module over widening the existing one to `2 * total_c`: cleaner state dict, and it
-  lets `separate` / `shared_trunk` / `monotone` all live behind the one config). `MLPCiFn`'s
-  final `ParallelLinear` goes to `n_roles` outputs instead of 1 — but the LM runs are all
-  `global_shared_transformer`, so implement that path and assert on the others.
-- The trunk must be run **once** for both roles. `_build_metric_context`
-  (`optimize.py:174-191`) currently calls `calc_causal_importances` twice, which would
-  recompute the shared trunk. Add a both-roles entrypoint returning
-  `dict[CIRole, CIOutputs]` and use it there; keep the existing single-role
-  `calc_causal_importances(role=...)` for the ~15 lab call sites, almost all of which want
-  `"output"` only. `ComponentModel.ci_fn_for(role)` stays the public seam so nothing
-  downstream — app, harvest, `find_alive_subcomponents`, `ab_grid_dataset` — changes.
-  (`detach_inputs` must match across roles for a single trunk pass; it does today.)
-- Monotonicity lands inside that both-roles path, before `_apply_sigmoid_to_ci_outputs`, and
-  the shared binomial noise draw lands inside `_apply_sigmoid_to_ci_outputs`.
-- Assertions: `logit_hidden >= logit_output` elementwise; `maximum` in the CI-scaled weight
-  decay is a no-op under `monotone`.
-
-Docs to update: `param_decomp/metrics/CLAUDE.md` (the *Dual CI networks (`CIRole`)* section,
-including the weight-decay rule which the constraint changes), the root `CLAUDE.md` dual-CI
-paragraph, and `notes/hidden_dual/report.md` with a pointer here.
-
-## 8. Validation plan
-
-Run at the smallest configuration you still trust the science on — `addsub-L18-11-bigc`'s
-shape — before spending the scale-up budget:
-
-| arm | `share_trunk` | `monotone` | purpose |
-|---|---|---|---|
-| control | false | false | reproduces `-11-bigc`; the reference |
-| shared | true | false | isolates trunk sharing |
-| both | true | true | the production instrument |
-
-Compare on: output KL, `CIHiddenActsRecon_{outputCI,hiddenCI}`, `PGDHiddenActsReconLoss`,
-per-site `n_alive` and `CI_L0` for both roles, and peak memory. What would send you back:
-output KL degrading materially in `shared` (trunk contention — go to option D), or the hidden
-net's relative error rising in `both` (the constraint is binding harder than the 1.3%-of-entries
-estimate predicts — check the binding rate, consider the soft variant).
-
-Then keep **one** separate-net arm alive at the scale-up config so nesting remains an
-independently measured fact rather than an architectural assumption.
-
-## 9. Local (teacher-forced) hidden reconstruction
-
-A separate and, on the numbers below, larger lever: feed each decomposed matrix its
-**clean** input activation instead of the perturbed one carried down the masked forward, so
-every matrix gets training signal about its own effect alone.
-
-### 9.1 Three formulations, not two
-
-Write `x_i` for site `i`'s clean input and `x̃_i` for its input in the masked forward.
-
-| | prediction | target | measures |
-|---|---|---|---|
-| (a) **today** | `C_i(x̃_i, m)` | `W_i x_i` | local approximation error **+** accumulated upstream drift |
-| (b) rejected in `metrics/CLAUDE.md` | `C_i(x̃_i, m)` | `W_i x̃_i` | local error, conditioned on a drifted input, against a moving target |
-| (c) **proposed** | `C_i(x_i, m)` | `W_i x_i` | local error alone, fixed target |
-
-The existing rejection — "each site's local error given an already-perturbed input would be
-blind to exactly the chained-block failure the experiment is about" — is aimed at (b), and
-(c) is strictly better than (b): same isolation, a target that does not move, and no forward
-pass at all. But the *substance* of the objection does transfer: **(c) is also blind to
-compounding.** That is the whole trade, and it is why the recommendation below is *add*,
-not *replace*.
-
-### 9.2 The compute win is roughly two orders of magnitude
-
-Under (c) the sites become independent and the loss needs **no target-model forward
-whatsoever** — every input it wants is already in `ctx.pre_weight_acts` from the
-`cache_type="input"` pass, and `clean_site_outputs` already builds the targets from exactly
-those tensors. `model.site_outputs(...)` disappears from this loss.
-
-Better: the mask-independent work factors out of the sampling loop. `LinearComponents.forward`
-computes `component_acts = V^T x` and then `einsum(acts * mask, U)`; with `x` fixed, `V^T x`
-(and the weight-delta term `Δ x`) are constant across mask samples and across PGD steps.
-Hoist them and each additional mask costs one `[B, S, C] @ [C, d_out]` matmul per site.
-
-For `addsub-L18-11-bigc` (7 sites, batch 128 x seq 16 = 2048 tokens):
-
-| per step | FLOPs |
-|---|---:|
-| one truncated forward, today, **per mask sample** (≈19/32 of the 8 B model) | ~19.4 TFLOP |
-| (c) one-time `V^T x` for all 7 sites | ~0.15 TFLOP |
-| (c) **per additional mask sample**, all 7 sites | ~0.17 TFLOP |
-
-Call it **~100x per mask sample**, and treat it as an order-of-magnitude estimate — it counts
-matmul FLOPs only and small matmuls are bandwidth-bound. Three consequences follow, and they
-are the real answer to "how to take advantage of this":
-
-- **`n_mask_samples` for the hidden loss stops being pinned at 1.** It is 1 today because
-  `site_outputs` sits *inside* that loop (`stochastic_hidden_recon_subset.py:79-88`). Sixteen
-  samples under (c) cost less than one sample under (a).
-- **The adversary becomes affordable in training.** `PGDHiddenActsReconLoss` at `n_steps: 20`
-  costs 21 truncated forwards per eval batch today, which is why it is eval-only and slow-cadence.
-  Under (c) the same 20 steps are 20 hoisted matmuls. `pgd_masked_objective_update` already
-  runs PGD against "any mask-consuming objective", so the local objective plugs straight in.
-- **Memory: no autograd retention through the model.** Today the masked forward flows gradient
-  from an early site through the frozen ops to a later one, so those intermediates are retained.
-  Under (c) nothing between sites is retained. Minor at one block, real at three — and the
-  scale-up is memory-bound.
-
-There is also a structural simplification worth noting: under (c) the site output is
-**linear in the mask** with fixed per-token coefficients, so the local loss is an exact
-quadratic form in `m`. The adversary is then maximizing a quadratic over a box, which is
-much better behaved than attacking a deep nonlinear forward.
-
-### 9.3 The measurement it unlocks: (a) − (c) is the compounding term
-
-Both are the same relative error `Σ(out − tgt)² / Σ tgt²` at the same sites against the same
-targets, so **their difference is exactly the part of the hidden error that a site inherited
-rather than caused**. That is a new observable, it is nearly free (one extra cheap loss), and
-it is precisely the quantity the `L18to20` chaining experiment exists to produce. Per-site, it
-says where drift is *generated* and where it is *amplified*.
-
-Two immediate uses:
-
-- **Principled C allocation.** Local error is a clean per-matrix difficulty measure, uncontaminated
-  by inherited drift; today per-site error confounds the two. This bears directly on the
-  censoring problem — hidden `n_alive` pinned at C on `q/k/v/down` in `addsub-L18-10-dual-ppgd`
-  — where the open question is which sites genuinely need more components.
-- **A prediction to test.** Part of the hidden net's density may be drift *compensation* rather
-  than local necessity: `o_proj` and `down_proj` sit downstream of the other five sites within
-  the block, and they are the two at the C ceiling for both nets (246/256 and 238/256). If so,
-  the local objective should need **fewer** components there, and `(a) − (c)` should be
-  concentrated on exactly those two sites. Worth checking on an existing checkpoint before
-  building anything: the report's per-site rel-err additivity (0.05184 vs 0.05183) hints that
-  cross-site interaction is small at one block, in which case (a) ≈ (c) at L18 and the
-  difference only opens up at three.
-
-### 9.4 What (c) cannot do
-
-- **It cannot measure the residual stream.** `hidden_readout_sites` targets are not a decomposed
-  matrix's output; their value is a property of the whole chain. Feed every matrix its clean
-  input and the stream is unchanged by construction, so a readout site's error is identically
-  zero. Readouts must stay on (a). This partitions the sites cleanly: **local for the matrices,
-  chained for the stream.**
-- **Components never learn to absorb upstream error.** Under (a) the hidden loss backprops
-  through the masked forward into *upstream* sites' components; under (c) each site's loss
-  touches only its own. That is the credit-assignment win, and it is also textbook exposure
-  bias: every local error small, the free-running trajectory still drifting. This is the failure
-  mode to watch, and it is the same failure the three-block scale-up is designed to expose.
-- **A caveat on the comparison.** `site_squared_errors` drops positions not routed to components,
-  on the stated grounds that "the frozen module ran untouched, so their error is identically
-  zero". Under (a) that is exactly true only at the *first* site in a chain — downstream, the
-  untouched module ran on a drifted input, so today's measurement already discards some inherited
-  error. Under (c) the claim becomes exactly true everywhere. Do not read `(a) − (c)` as the
-  complete compounding term without accounting for this.
-
-### 9.5 Recommended shape
-
-**Add, at a meaningful coefficient; do not replace.**
-
-- New `StochasticLocalHiddenReconLoss` becomes the workhorse of the hidden objective: cheap,
-  many mask samples, its own PGD/PPGD adversary, `ci_role: hidden`.
-- Keep `StochasticHiddenReconSubsetLoss` (chained) at a smaller coefficient, and consider
-  narrowing it to `site_patterns: ["resid_*"]` — the readout sites, where it is uniquely
-  informative and where local cannot reach. Note this is *not* the "narrow to residual-stream
-  writes" move ruled out in §10: that was about discarding attention from the hidden objective
-  altogether, whereas here the local loss covers every matrix and the chained loss is
-  specialized to what only it can see.
-- Log both unconditionally, even before rebalancing coefficients. `(a) − (c)` is worth having
-  from step 0 of the next run.
-
-Implementation is small — perhaps 60 lines. `clean_site_outputs`, `site_squared_errors`,
-`add_site_errors`, `reduced_relative_errors` and `select_sites` in `metrics/hidden_acts.py` all
-apply unchanged; the only new code is the per-site loop that calls
-`model.components[site](x_clean, mask=..., weight_delta_and_mask=...)` in place of
-`model.site_outputs(...)`, plus the hoist of `get_component_acts` out of the sampling loop.
-Prefer a new metric class over a flag on the existing one: the code path differs by an entire
-forward pass, and a `site_patterns` split across the two losses is the intended configuration.
-
-A curriculum (train on (c) early, anneal toward (a)) is the obvious further move and is what
-the seq-model literature does about exposure bias. Hold it in reserve — running both losses at
-fixed coefficients is simpler, and until `(a) − (c)` has been measured there is no basis for
-choosing an anneal schedule.
-
-## 10. Things not to do
-
-- **Do not collapse to one head with a per-site threshold** (option A) without measurement
-  (2) passing — the k/v evidence predicts it fails exactly where the interesting result is.
-- **Do not narrow `site_patterns` to the residual-stream writes** as part of this. Already
-  settled: attention carries 47% of the hidden error at kappa 0.035–0.074 and is the most
-  distinctively-hidden signal; narrowing would align the hidden objective with output
-  relevance and discard it.
-- **Do not try to unify the two importance-minimality coefficients** via the exchange rate.
-  Already settled: `kappa` spans 200x by direction, and unit conversion prices the hidden-only
-  surplus at ~0, which drives `lambda_hidden` to infinity and reproduces the output net. The
-  standing recommendation is `lambda_hidden 5e-5 -> 1e-4` (surgical: shaves the near-threshold
-  fringe at ~2x its keep-threshold, cannot touch the bulk at ~200x), `lambda_out` unchanged.
-  Both are still 5e-5 in the -11 configs — worth applying independently of this work.
+*The earlier version of this document analysed two unrelated proposals for the causal-importance
+networks themselves — sharing a trunk between the two networks, and forcing the activation
+importance to be at least the output importance. Both are independent of everything above and
+neither is superseded by it; they are preserved in commit `d3716702f`.*
