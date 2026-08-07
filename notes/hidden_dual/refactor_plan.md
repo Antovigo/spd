@@ -197,6 +197,35 @@ metrics — a genuine observation, but it restructures pre-existing code well ou
 Adding `.detach()` to the local path's input — verified to be a no-op, since the frozen model's
 cache never requires grad.
 
+## Probe result: the q/k/v identity holds exactly
+
+3-step probe (`probe_addsub-L18-11-local.yaml`, job 7408), `CIHiddenActsRecon_hiddenCI`
+chained against local, per site, at the last eval:
+
+| site | chained | local | chained − local |
+|---|---:|---:|---:|
+| `self_attn.q_proj` | 0.835663 | 0.835663 | **0.000e+00** |
+| `self_attn.k_proj` | 0.736249 | 0.736249 | **0.000e+00** |
+| `self_attn.v_proj` | 0.784129 | 0.784129 | **0.000e+00** |
+| `mlp.gate_proj` | 0.762764 | 0.764863 | −2.1e-03 |
+| `mlp.up_proj` | 0.898317 | 0.897145 | +1.2e-03 |
+| `mlp.down_proj` | 0.999104 | 0.913550 | +8.6e-02 |
+| `self_attn.o_proj` | 0.993997 | 0.903993 | +9.0e-02 |
+
+Exactly the predicted structure. `q/k/v` read the block input, which nothing upstream
+touches, and agree bit-for-bit — the correctness check the implementation was built around.
+The gap is concentrated on the two most-downstream sites, `o_proj` (behind q/k/v) and
+`down_proj` (behind everything), at ~0.09 against ~0.001 for `gate`/`up`.
+
+Note `gate_proj`'s gap is slightly *negative*: inherited drift is not obliged to increase a
+site's error, it can cancel against the local error. At an essentially untrained step-3 model
+these small signed gaps are noise; the two large positive ones are not.
+
+Cluster note: two earlier probe attempts (7404, 7406) died on GPUs SLURM believed were free.
+Another user's interactive job reserves 2 GPUs but runs 3 processes, so SLURM hands out GPUs
+that are already occupied. The sbatch guard now fails fast (exit 75) instead of proceeding
+into an opaque OOM inside `set_device`; resubmitting is the remedy.
+
 ## Explicitly not in this change
 
 - The shared CI trunk (deferred by decision above).
