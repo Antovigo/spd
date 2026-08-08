@@ -13,7 +13,7 @@ from typing import Literal, override
 
 import torch
 from jaxtyping import Float
-from pydantic import NonNegativeFloat, PositiveFloat
+from pydantic import NonNegativeFloat, PositiveFloat, model_validator
 from torch import Tensor
 from torch.distributed import ReduceOp
 
@@ -33,6 +33,14 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     `gamma_anneal_end_frac` of training (no-op when `gamma_final is None` or
     `gamma_anneal_start_frac == 1.0`).
 
+    The training loss is scaled by a coefficient multiplier with a warmup-then-anneal
+    schedule (`_get_coeff_multiplier`), mirroring the `L_p` variant: ramp
+    `0 -> coeff_peak_multiplier` over `coeff_warmup_frac`, hold at the peak, then ramp
+    `coeff_peak_multiplier -> 1.0` between `coeff_anneal_start_frac` and
+    `coeff_anneal_end_frac`. Defaults are a no-op (constant multiplier of `1.0`). The
+    multiplier scales the live loss only; the value logged by `compute()` (the sparsity
+    proxy) is unaffected.
+
     `ci_role` picks which CI net is penalised; a dual-CI run lists this loss twice, once per
     net, with distinct `name`s.
     """
@@ -47,6 +55,55 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     normalize_at_one: bool = False
     """Rescale `φ` by `(1 + γ²)` so a fully-active component (`c = 1`) always contributes
     exactly 1, removing the implicit ~2x coefficient ramp across the γ anneal."""
+    coeff_warmup_frac: Probability = 0.0
+    coeff_peak_multiplier: NonNegativeFloat = 1.0
+    coeff_anneal_start_frac: Probability = 1.0
+    coeff_anneal_end_frac: Probability = 1.0
+
+    @model_validator(mode="after")
+    def validate_scheduling_fracs(self) -> "SmoothL0ImportanceMinimalityLossConfig":
+        assert self.coeff_warmup_frac <= self.coeff_anneal_start_frac, (
+            f"coeff_warmup_frac ({self.coeff_warmup_frac}) must be <= "
+            f"coeff_anneal_start_frac ({self.coeff_anneal_start_frac})"
+        )
+        assert self.coeff_anneal_end_frac >= self.coeff_anneal_start_frac, (
+            f"coeff_anneal_end_frac ({self.coeff_anneal_end_frac}) must be >= "
+            f"coeff_anneal_start_frac ({self.coeff_anneal_start_frac})"
+        )
+        assert self.gamma_anneal_end_frac >= self.gamma_anneal_start_frac, (
+            f"gamma_anneal_end_frac ({self.gamma_anneal_end_frac}) must be >= "
+            f"gamma_anneal_start_frac ({self.gamma_anneal_start_frac})"
+        )
+        return self
+
+
+def _get_coeff_multiplier(
+    current_frac_of_training: float,
+    coeff_warmup_frac: float,
+    coeff_peak_multiplier: float,
+    coeff_anneal_start_frac: float,
+    coeff_anneal_end_frac: float,
+) -> float:
+    """Coefficient multiplier with warmup then anneal-to-1.0.
+
+    - `[0, coeff_warmup_frac)`: linearly ramp `0 -> coeff_peak_multiplier`
+    - `[coeff_warmup_frac, coeff_anneal_start_frac)`: constant `coeff_peak_multiplier`
+    - `[coeff_anneal_start_frac, coeff_anneal_end_frac)`: linearly ramp `coeff_peak_multiplier -> 1.0`
+    - `[coeff_anneal_end_frac, 1.0]`: constant `1.0`
+    """
+    if current_frac_of_training < coeff_warmup_frac:
+        return coeff_peak_multiplier * current_frac_of_training / coeff_warmup_frac
+
+    if current_frac_of_training < coeff_anneal_start_frac:
+        return coeff_peak_multiplier
+
+    if current_frac_of_training >= coeff_anneal_end_frac:
+        return 1.0
+
+    progress = (current_frac_of_training - coeff_anneal_start_frac) / (
+        coeff_anneal_end_frac - coeff_anneal_start_frac
+    )
+    return coeff_peak_multiplier + (1.0 - coeff_peak_multiplier) * progress
 
 
 def _get_linear_annealed_gamma(
@@ -129,6 +186,10 @@ def smooth_l0_importance_minimality_loss(
     gamma_final: float | None,
     gamma_anneal_end_frac: float,
     normalize_at_one: bool = False,
+    coeff_warmup_frac: float = 0.0,
+    coeff_peak_multiplier: float = 1.0,
+    coeff_anneal_start_frac: float = 1.0,
+    coeff_anneal_end_frac: float = 1.0,
 ) -> Float[Tensor, ""]:
     """Compute the smooth-L0 importance-minimality loss directly (helper for external callers)."""
     annealed_gamma = _get_linear_annealed_gamma(
@@ -143,12 +204,20 @@ def smooth_l0_importance_minimality_loss(
     )
     dist_state = get_distributed_state()
     world_size = dist_state.world_size if dist_state is not None else 1
-    return _finalize(
+    loss = _finalize(
         per_component_sums=per_component_sums,
         n_examples=n_examples,
         beta=beta,
         world_size=world_size,
     )
+    coeff_multiplier = _get_coeff_multiplier(
+        current_frac_of_training=current_frac_of_training,
+        coeff_warmup_frac=coeff_warmup_frac,
+        coeff_peak_multiplier=coeff_peak_multiplier,
+        coeff_anneal_start_frac=coeff_anneal_start_frac,
+        coeff_anneal_end_frac=coeff_anneal_end_frac,
+    )
+    return loss * coeff_multiplier
 
 
 class SmoothL0ImportanceMinimalityLoss(Metric[SmoothL0ImportanceMinimalityLossConfig]):
@@ -188,12 +257,20 @@ class SmoothL0ImportanceMinimalityLoss(Metric[SmoothL0ImportanceMinimalityLossCo
 
         dist_state = get_distributed_state()
         world_size = dist_state.world_size if dist_state is not None else 1
-        return _finalize(
+        loss = _finalize(
             per_component_sums=per_component_sums,
             n_examples=n,
             beta=self.cfg.beta,
             world_size=world_size,
         )
+        coeff_multiplier = _get_coeff_multiplier(
+            current_frac_of_training=ctx.current_frac_of_training,
+            coeff_warmup_frac=self.cfg.coeff_warmup_frac,
+            coeff_peak_multiplier=self.cfg.coeff_peak_multiplier,
+            coeff_anneal_start_frac=self.cfg.coeff_anneal_start_frac,
+            coeff_anneal_end_frac=self.cfg.coeff_anneal_end_frac,
+        )
+        return loss * coeff_multiplier
 
     @override
     def compute(self) -> MetricResult:

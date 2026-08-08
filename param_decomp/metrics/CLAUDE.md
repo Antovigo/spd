@@ -17,7 +17,7 @@ core library. For eval metrics (user-extensible, lab-side), see
 | `<loss_name>.py` | One file per metric: `<Name>Loss` class + `<Name>LossConfig` config side-by-side |
 | `persistent_pgd_state.py` | PPGD adversarial-source state machine (shared by `persistent_pgd_recon.py`) |
 | `pgd_utils.py` | Shared PGD helpers; `pgd_masked_objective_update` runs PGD against any mask-consuming objective (output recon and per-site activation error are two such) |
-| `hidden_acts.py` | Shared per-site (hidden-activation) relative-error machinery: clean targets, squared-error accumulation, DDP reduction, site filtering |
+| `hidden_acts.py` | Shared per-site (hidden-activation) relative-error machinery: clean targets, squared-error accumulation, DDP reduction, site filtering, and the `SiteInputs` chained/local dispatch |
 | `output.py` | Shared output-extraction helpers used across recon losses |
 
 ## Adding a loss metric
@@ -43,6 +43,14 @@ Two interchangeable CI-sparsity penalties, same `sum + beta·entropy` shape:
 - `SmoothL0ImportanceMinimalityLoss` (`smooth_l0_importance_minimality.py`) — bounded
   Geman–McClure `c²/(c²+γ²)`: flat at 0, saturating to 1, bounded gradient `~0.65/γ` near
   `c≈γ`. Drop-in alternative avoiding the `L_p` cliff; `γ` anneals like `p`. Self-contained.
+
+Both also carry the same **coefficient schedule** (`coeff_warmup_frac`,
+`coeff_peak_multiplier`, `coeff_anneal_start_frac`, `coeff_anneal_end_frac`): ramp
+`0 → peak` over the warmup, hold, then ramp `peak → 1.0` across the anneal window.
+Defaults are a no-op. It scales the **live training loss only** — `compute()`'s logged
+sparsity proxy is unscaled, so train and eval log keys differ by the multiplier while the
+schedule is above 1.0. `build_nontarget_loss_configs` copies the whole config, so a
+targeted run's nontarget impmin inherits the same schedule on top of its `impmin_ratio`.
 
 Both are registered eval-side (`EVAL_METRIC_CLASSES` + `AnyEvalMetricConfig`), so a run driven
 by one can log the other as an eval-only sparsity proxy. The directly comparable cross-run
@@ -187,17 +195,73 @@ across blocks. Numerator and denominator are accumulated and DDP-reduced separat
 result is a ratio of sums, never a mean of per-batch or per-rank ratios.
 
 Targets are the frozen model's own site outputs, recomputed as `F.linear(x_clean, W, b)`
-from the clean input activations the step already cached: **no extra forward pass**, and it
-measures accumulated drift from the target model rather than each site's local error given
-an already-perturbed input.
-
-All three use `ComponentModel.site_outputs`, which aborts the forward once every hooked
-site has been cached (a private sentinel exception, since a forward hook cannot ask PyTorch
-to stop). Everything past the last decomposition target would otherwise be wasted compute
-*and* retained-for-backward activations.
+from the clean input activations the step already cached: **no extra forward pass**.
 
 `site_patterns` (fnmatch, e.g. `["*.mlp.down_proj", "*.self_attn.o_proj"]`) restricts which
 sites the error is *measured* at; masking always covers every decomposed site.
+
+### `site_inputs` — chained vs local
+
+An orthogonal axis, on all four of the above plus `PersistentPGDHiddenActsReconLoss`:
+
+| `site_inputs` | each site's components run on | its error is |
+|---|---|---|
+| `"masked_forward"` (default) | the input the masked forward produced | its own error **+** what it inherited from upstream sites |
+| `"clean"` | the input the frozen model gave it | its own error alone |
+
+Both compare against the same frozen targets, so the two are subtractable:
+`masked_forward − clean` is the inherited (compounding) part, per site. Running one instance
+of each — distinguished by `name`, as everywhere else — is how that gets logged.
+
+`"masked_forward"` goes through `ComponentModel.site_outputs`, which aborts the forward once
+every hooked site has been cached (a private sentinel exception, since a forward hook cannot
+ask PyTorch to stop). Everything past the last decomposition target would otherwise be
+wasted compute *and* retained-for-backward activations.
+
+`"clean"` needs **no forward pass at all**: with every site handed its own cached input the
+sites are independent, so it is matmuls per site over tensors `_build_metric_context` already
+produced. It also retains nothing through the frozen model for backward, and computes only
+the measured sites.
+
+Measured on the `addsub-L18-11` shape (7 sites on one Llama-3.1-8B block, 2048 tokens),
+MACs/token summed over the sites:
+
+| | MACs/token | mask-dependent |
+|---|---:|---|
+| `V^T x` | 35.6 M | no |
+| `(acts · mask) @ U` | 41.4 M | yes |
+| `x @ delta.T` (only with `use_delta_component`) | 218.1 M | no |
+| **`"clean"` total** | **295.1 M** | |
+| `"masked_forward"` (19 blocks + the component work) | 4439 M | |
+
+So **~15x cheaper per mask sample**, not the order of magnitude a naive "no forward pass"
+reading suggests: with the delta component on, `x @ delta.T` is a dense `d_in x d_out` matmul —
+as expensive as running the frozen matrix — and dominates the local path. Two optimisations
+are available and not yet taken: the delta term is derivable from the target already in hand
+(`x @ delta.T == (target - bias) - acts @ U`, exact and gradient-exact since `W` is frozen),
+and everything except `(acts · mask) @ U` is mask-independent and so hoistable out of the
+`n_mask_samples` and PGD loops. Together they would give ~37x on the first sample and ~107x
+per extra one. Worth doing before `n_mask_samples` is raised or the adversary moves into
+training, and not before: at `n_mask_samples: 1` the hoist buys nothing.
+
+Two restrictions come with `"clean"`, both asserted at bind:
+
+- **It cannot measure readout sites** (`resolve_measured_sites`): a readout target is a point
+  in the residual stream, so feeding every matrix its clean input leaves it unchanged and its
+  error identically zero. Give the `"clean"` instance a `site_patterns` covering the
+  decomposed sites and read the readouts from a separate `"masked_forward"` instance.
+- **A PGD or PPGD instance must measure every decomposed site**
+  (`assert_sources_reach_every_site`). Those metrics allocate one adversarial source per
+  decomposed site and differentiate w.r.t. all of them at once (`allow_unused=False`).
+  Chained, a source at an unmeasured site still reaches the loss by perturbing the sites
+  downstream of it; locally the sites are independent, so it reaches nothing and
+  `torch.autograd.grad` raises mid-step. The stochastic and CI-masked probes never
+  differentiate w.r.t. sources and so may narrow freely.
+
+One semantic shift worth knowing: under `"clean"` a subset router no longer routes anything —
+with no chain it only decides which positions `site_squared_errors` scores. A `"clean"`
+instance on `uniform_k_subset` therefore scores the same position count as its chained
+counterpart (which is what keeps the two comparable) but gains nothing from the subsetting.
 
 ### Readout sites — measuring off the decomposed matrices
 
