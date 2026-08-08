@@ -226,6 +226,42 @@ Another user's interactive job reserves 2 GPUs but runs 3 processes, so SLURM ha
 that are already occupied. The sbatch guard now fails fast (exit 75) instead of proceeding
 into an opaque OOM inside `set_device`; resubmitting is the remedy.
 
+## Arms launched
+
+All from `feature/trunk_plus_local` (`da5361a95`), the merge of `feature/dual_ci_shared_trunk`
+into `feature/dual_hidden_acts`. The merge was clean — the two branches diverged from
+`af9212b00` and touched disjoint files — and it also picked up the SmoothL0 coefficient
+schedule another session had pushed to `dual_hidden_acts` in the meantime, which is what makes
+the impmin sweep below expressible. That schedule is on *neither* single-feature branch, so the
+merged tree is the only one that can run all three arms.
+
+| run | trunk | hidden inputs | impmin | job |
+|---|---|---|---|---|
+| `addsub-L18-11-press2` | no | chained | 5e-5 | (done, the baseline) |
+| `addsub-L18-11-press2-trunk` | yes | chained | 5e-5 | 7405 |
+| `addsub-L18-11-local` | no | **clean** | 5e-5 | 7409 |
+| `addsub-L18-11-trunk-local` | yes | **clean** | 7.5e-5 | 7417 |
+| `addsub-L18-11-{trunk,local,trunk-local}-imp{2,5}x` | — | — | ×2 / ×5 peak | 7418–7423 |
+
+`trunk-local` carries a deliberate coefficient rebalance, agreed with the user: every output
+recon coeff to 1.0 (from 1.0 / 0.5 / 0.5) and both hidden recon coeffs equal at 2.25 (from
+2.0 / 1.0), which holds press2's hidden:output recon ratio of 1.5 with the output total now at
+3.0. Both impmin instances scale by the same 1.5 to 7.5e-5 so the recon:sparsity balance is
+preserved too — without that, the 1.5x larger recon mass would have made both nets denser for
+a reason unrelated to either variable. It does mean this arm differs from press2 in three
+things, not one; the sweep rows inherit each arm's own base, so every {1x, 2x, 5x} triple stays
+internally clean.
+
+The sweep's peak is a real peak: held from step 0, then annealed back to the base coefficient
+over the last 30% (`coeff_anneal_start_frac 0.7`, `coeff_anneal_end_frac 1.0`), applied to both
+the output and hidden impmin instances. Note it overlaps the existing gamma anneal (0.5 → 1.0),
+so in the final stretch the coefficient falls while gamma sharpens.
+
+The trunk+local probe reproduced the q/k/v identity exactly (q 0.834938, k 0.742744, v 0.777202
+in both formulations; gap 0.000e+00), with the same concentration on `o_proj` (0.096) and
+`down_proj` (0.088) — so the shared trunk does not disturb it. Peak 41106 MiB on one GPU at the
+2-GPU per-rank batch, against press2's 41710.
+
 ## Explicitly not in this change
 
 - The shared CI trunk (deferred by decision above).
