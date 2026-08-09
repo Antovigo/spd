@@ -40,10 +40,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import param_decomp.core.adversary as adversary_mod
+import param_decomp.core.losses as core_losses_mod
+import param_decomp.core.masking as masking_mod
 import param_decomp.core.train as train_mod
 import param_decomp.targets.losses as losses_mod
-from param_decomp.core.adversary import source_masks
+from param_decomp.core.masking import masks_from_sources
+from param_decomp.targets.testing import run_masked
 from param_decomp.targets.tests.equivalence.jax_equivalence import (
     chunk_plan_static_gate_kl,
     compute_jax_terms,
@@ -100,11 +102,18 @@ def test_chunk_plan_static_live_gate() -> None:
 def test_structure_stoch_is_per_chunk() -> None:
     """SPEC S10: one forward per (chunk, sample), normalized by `n_chunks · n_samples`
     — matching the torch chunkwise pool, not one fused forward over all sites."""
-    src = inspect.getsource(train_mod.make_train_step)
+    src = inspect.getsource(train_mod._StepAtoms)
     assert "for entry_idx, entry in enumerate(term.plan)" in src, (
         "each recon term must loop its plan's entries"
     )
-    assert "/ len(draws)" in src, "each term must average over ALL forwards (every draw)"
+    assert "mean_reconstruction_losses" in src
+    reducer_src = inspect.getsource(core_losses_mod.mean_reconstruction_losses)
+    assert "jax.tree.map(scalar_mean, *values)" in reducer_src, (
+        "each breakdown leaf must be averaged over every masked draw"
+    )
+    assert "/ len(scalars)" in reducer_src, (
+        "each breakdown leaf must be normalized by every masked draw"
+    )
 
 
 def test_structure_recon_is_kl_not_mse() -> None:
@@ -117,7 +126,7 @@ def test_structure_recon_is_kl_not_mse() -> None:
 def test_structure_ppgd_has_delta_channel() -> None:
     """SPEC S1: PPGD masks interpolate `ci + (1-ci)*src[:, :C]`; the trailing channel
     is the raw weight-delta mask (no ci interpolation)."""
-    src = inspect.getsource(adversary_mod.source_masks)
+    src = inspect.getsource(masking_mod.masks_from_sources)
     assert "[..., :-1]" in src and "[..., -1]" in src, "ppgd source needs the delta channel"
     assert "ci_lower[site] + (1.0 - ci_lower[site]) * source[..., :-1]" in src, (
         "ppgd must interpolate mask=ci+(1-ci)*source"
@@ -139,7 +148,7 @@ def test_sc_scope_broadcast_axis_matches_torch() -> None:
     ci_lower_np = rng.uniform(0.0, 1.0, (B, T, C)).astype(np.float32)
     source_np = rng.uniform(0.0, 1.0, (1, T, C + 1)).astype(np.float32)
 
-    masks, delta_masks = source_masks(
+    masks, delta_masks = masks_from_sources(
         {site: jnp.asarray(ci_lower_np)}, {site: jnp.asarray(source_np)}, (site,)
     )
     mask = np.asarray(masks[site])
@@ -204,13 +213,14 @@ def test_sc_source_broadcasts_over_batch_in_masked_forward() -> None:
     for s in model.site_names:
         assert source[s].shape == (1, T, source[s].shape[-1]), source[s].shape
 
-    masks, delta_masks = source_masks(ci_lower, source, model.site_names)
+    masks, delta_masks = masks_from_sources(ci_lower, source, model.site_names)
     # `ci + (1-ci)*src` lifts the sc mask to the CI's batch dim; delta stays sc.
     for s in model.site_names:
         assert masks[s].shape[0] == B and masks[s].shape[1] == T, masks[s].shape
         assert delta_masks[s].shape == (1, T), delta_masks[s].shape
 
-    pred = model.masked_output(
+    pred = run_masked(
+        model,
         model.prepare_compute_weights(vu),
         resid,
         masks,
@@ -228,8 +238,9 @@ def test_sc_source_broadcasts_over_batch_in_masked_forward() -> None:
     for s in model.site_names:
         assert bt_transposed[s].shape == (1, B, source[s].shape[-1]), bt_transposed[s].shape
     with pytest.raises(Exception):  # noqa: B017 — broadcast error, framework-specific type
-        bad_masks, bad_delta = source_masks(ci_lower, bt_transposed, model.site_names)
-        model.masked_output(
+        bad_masks, bad_delta = masks_from_sources(ci_lower, bt_transposed, model.site_names)
+        run_masked(
+            model,
             model.prepare_compute_weights(vu),
             resid,
             bad_masks,

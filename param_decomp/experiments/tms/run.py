@@ -42,6 +42,7 @@ from param_decomp.core.run import (
 from param_decomp.core.sharding import single_device_mesh
 from param_decomp.experiments import toy_uv_eval
 from param_decomp.experiments.config import (
+    apply_wandb_cli_overrides,
     pin_launch_config,
     run_instance,
 )
@@ -66,6 +67,13 @@ def build_tms_built_run(cfg: TMSExperimentConfig, run_id: str, data_root: Path) 
         cfg.pd.loss_metrics,
         tuple(sc.name for sc in site_cs),
     )
+    tms_cfg = tms.TMSConfig(
+        n_features=cfg.target.n_features,
+        n_hidden=cfg.target.n_hidden,
+        n_hidden_layers=cfg.target.n_hidden_layers,
+        hidden_layer_init=cfg.target.hidden_layer_init,
+        init_bias_to_zero=cfg.target.init_bias_to_zero,
+    )
     target = tms.TMSTargetConfig(
         n_features=cfg.target.n_features,
         n_hidden=cfg.target.n_hidden,
@@ -87,21 +95,20 @@ def build_tms_built_run(cfg: TMSExperimentConfig, run_id: str, data_root: Path) 
         run=run_instance(cfg, run_id, data_root, None),
         target=target,
         data=None,
-        ci_fn=build_toy_ci_arch(cfg.decomposition.ci),
+        ci_fn=build_toy_ci_arch(
+            cfg.decomposition.ci,
+            tms.site_input_tap_keys(tuple(sc.name for sc in site_cs)),
+            tms.site_specs(tms_cfg, site_cs),
+        ),
     )
 
 
-def run_tms_decomposition(built: TMSRun, eval_config: EvalConfig | None, mesh: Mesh) -> None:
-    """Build + pretrain the TMS target, then decompose it through the generic engine.
-
-    The batch entering the decomposed model IS the raw input `x`. Its native eval
-    operation reads the `lower_leaky` CI of the single-feature probe and logs the
-    ground-truth `IdentityCIError` per site every train-log step, plus the
-    per-site-permuted CI heatmap image alongside each checkpoint (`toy_uv_eval.render_permuted_ci_heatmap` — the
-    frozen `hidden_layers.*` sites permute toward dense, not identity)."""
-    target_cfg = built.target
-    is_main = jax.process_index() == 0
-
+def pretrained_tms_model(
+    target_cfg: tms.TMSTargetConfig, mesh: Mesh, is_main: bool
+) -> tms.TMSDecomposedModel:
+    """Build + from-scratch-pretrain the frozen TMS target and wrap it as the decomposed
+    model — one `eqx.Module` carrying the TMS weights as a field and the decomposition
+    contract as methods."""
     tms_cfg = tms.TMSConfig(
         n_features=target_cfg.n_features,
         n_hidden=target_cfg.n_hidden,
@@ -120,44 +127,52 @@ def run_tms_decomposition(built: TMSRun, eval_config: EvalConfig | None, mesh: M
         target_cfg.pretrain_lr,
         target_cfg.pretrain_seed,
     )
-    # The model IS the frozen target: one `eqx.Module` carries the TMS weights as a field and
-    # the decomposition contract as methods.
-    model = tms.replicate_target(
+    return tms.replicate_target(
         tms.tms_decomposed_model(tms_cfg, target, tms.site_specs(tms_cfg, target_cfg.sites)), mesh
     )
 
-    data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
 
-    def make_sampler(batch_size: int):
-        @jax.jit
-        def sample(step_key: jax.Array) -> jax.Array:
-            x = tms.sample_sparse_features(
-                step_key,
-                batch_size,
-                target_cfg.n_features,
-                target_cfg.feature_probability,
-                target_cfg.data_generation_type,
-            )
-            return jax.lax.with_sharding_constraint(
-                x, NamedSharding(mesh, P(("replicate", "fsdp")))
-            )
+def sparse_feature_sampler(
+    mesh: Mesh,
+    batch_size: int,
+    n_features: int,
+    feature_probability: float,
+    generation_type: tms.TMSGenerationType,
+):
+    """A jitted `sample(step_key) -> [batch, n_features]` batch-sharded sparse-feature
+    draw; the caller owns the per-step key derivation."""
 
-        return sample
+    @jax.jit
+    def sample(step_key: jax.Array) -> jax.Array:
+        x = tms.sample_sparse_features(
+            step_key, batch_size, n_features, feature_probability, generation_type
+        )
+        return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, P(("replicate", "fsdp"))))
 
-    sample_train = make_sampler(target_cfg.global_batch)
+    return sample
 
-    def sample_batch(step: int) -> jax.Array:
-        return sample_train(random.fold_in(data_key, step))
 
-    # `model` is the filter_jit ARG (frozen TMS weights traced, not baked) — closing over an
-    # array-bearing eqx model would bake its weights into the HLO.
-    @eqx.filter_jit
-    def single_feature_ci(
-        model: tms.TMSDecomposedModel, ci_fn: CIFn
-    ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
-        probe = tms.single_feature_probe(target_cfg.n_features)
-        ci = ci_fn(model.read_activations(probe, ci_fn.input_names), remat=False)
-        return ci.lower, ci.upper
+# `model` is the filter_jit ARG (frozen TMS weights traced, not baked) — closing over an
+# array-bearing eqx model would bake its weights into the HLO; `n_features` is static.
+@eqx.filter_jit
+def single_feature_ci(
+    model: tms.TMSDecomposedModel, ci_fn: CIFn, n_features: int
+) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
+    probe = tms.single_feature_probe(n_features)
+    ci = ci_fn(model.clean_forward(probe, ci_fn.capture_keys).captures, remat=False)
+    return ci.lower, ci.upper
+
+
+def tms_ground_truth_operation(
+    model: tms.TMSDecomposedModel,
+    n_features: int,
+    total_steps: int,
+    save_every: int,
+    train_log_every: int,
+) -> EvalOperation[EvalInvocation]:
+    """The TMS-native ground-truth pass: the `lower_leaky` CI of the single-feature probe
+    scored as per-site `IdentityCIError` every train-log step, plus the per-site-permuted
+    CI heatmap image alongside each checkpoint."""
 
     # The frozen `hidden_layers.*` sites (the `-id` variant) target DENSE recovery — every
     # direction stays live — not identity; canonical torch parity (`tms_40-10-id_config.yaml`
@@ -169,9 +184,9 @@ def run_tms_decomposition(built: TMSRun, eval_config: EvalConfig | None, mesh: M
 
     def ground_truth_eval(context: EvalInvocation) -> LogRecord:
         state, now_step = context.state, context.now_step
-        ci_lower, ci_upper = single_feature_ci(model, state.decomposition.ci_fn)
+        ci_lower, ci_upper = single_feature_ci(model, state.decomposition.ci_fn, n_features)
         figures: LogRecord = {}
-        if toy_uv_eval.permuted_ci_heatmap_due(now_step, built.pd.steps, built.cadence.save_every):
+        if toy_uv_eval.permuted_ci_heatmap_due(now_step, total_steps, save_every):
             figures = toy_uv_eval.render_permuted_ci_heatmap(
                 ci_lower,
                 ci_upper,
@@ -187,8 +202,41 @@ def run_tms_decomposition(built: TMSRun, eval_config: EvalConfig | None, mesh: M
         )
         return metrics
 
+    return EvalOperation(schedule=Every(train_log_every), run=ground_truth_eval)
+
+
+def run_tms_decomposition(built: TMSRun, eval_config: EvalConfig | None, mesh: Mesh) -> None:
+    """Build + pretrain the TMS target, then decompose it through the generic engine.
+
+    The batch entering the decomposed model IS the raw input `x`."""
+    target_cfg = built.target
+    is_main = jax.process_index() == 0
+    model = pretrained_tms_model(target_cfg, mesh, is_main)
+
+    data_key = random.fold_in(random.PRNGKey(built.pd.seed), 17)
+
+    def make_sampler(batch_size: int):
+        return sparse_feature_sampler(
+            mesh,
+            batch_size,
+            target_cfg.n_features,
+            target_cfg.feature_probability,
+            target_cfg.data_generation_type,
+        )
+
+    sample_train = make_sampler(target_cfg.global_batch)
+
+    def sample_batch(step: int) -> jax.Array:
+        return sample_train(random.fold_in(data_key, step))
+
     operations = [
-        EvalOperation(schedule=Every(built.cadence.train_log_every), run=ground_truth_eval)
+        tms_ground_truth_operation(
+            model,
+            target_cfg.n_features,
+            built.pd.steps,
+            built.cadence.save_every,
+            built.cadence.train_log_every,
+        )
     ]
     if eval_config is not None:
         eval_sampler = make_sampler(eval_config.batch_size)
@@ -198,11 +246,14 @@ def run_tms_decomposition(built: TMSRun, eval_config: EvalConfig | None, mesh: M
                 built.pd.seed,
                 compiler_options={},
                 model=model,
+                ci_capture_keys=built.ci_fn.capture_keys,
                 mesh=mesh,
                 sample_eval_batch=lambda index: eval_sampler(
                     random.fold_in(data_key, built.pd.steps + index)
                 ),
-                probe_ci=lambda state: single_feature_ci(model, state.decomposition.ci_fn)[1],
+                probe_ci=lambda state: single_feature_ci(
+                    model, state.decomposition.ci_fn, target_cfg.n_features
+                )[1],
                 wandb_configured=built.run.wandb is not None,
             )
         )
@@ -245,19 +296,7 @@ def main(
         # Fresh invocation: mint a new identity; resume an existing run's checkpoints by
         # passing --run-id, exactly as the LM trainer does.
         run_id = generate_run_id("param_decomp")
-    if group is not None or tags is not None:
-        wandb_cfg = dict(schema_raw.get("wandb") or {})
-        if group is not None:
-            wandb_cfg["group"] = group
-        if tags is not None:
-            # Fire parses a comma-separated `--tags a,b,c` into a tuple, but keeps a value
-            # with a hyphen (e.g. `a,b,c-d`) as a string — normalize both to a list.
-            wandb_cfg["tags"] = (
-                [s.strip() for s in tags.split(",") if s.strip()]
-                if isinstance(tags, str)
-                else [str(t).strip() for t in tags]
-            )
-        schema_raw["wandb"] = wandb_cfg
+    apply_wandb_cli_overrides(schema_raw, group, tags)
     cfg = TMSExperimentConfig(**schema_raw)
     built = build_tms_built_run(cfg, run_id, data_root)
     built.run.run_dir.mkdir(parents=True, exist_ok=True)

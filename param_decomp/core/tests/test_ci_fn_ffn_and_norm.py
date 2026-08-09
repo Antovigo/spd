@@ -61,8 +61,8 @@ def test_learned_norm_scale_inits_to_ones_so_step_zero_is_unchanged():
         for s in b.norm_scales:
             assert jnp.array_equal(s, jnp.ones_like(s))
     assert jnp.allclose(
-        scaled(_taps(), remat=False).logits[SITES[0].name],
-        weightless(_taps(), remat=False).logits[SITES[0].name],
+        scaled(_taps(), remat=False).preactivations[SITES[0].name],
+        weightless(_taps(), remat=False).preactivations[SITES[0].name],
         rtol=1e-6,
         atol=1e-6,
     )
@@ -88,7 +88,7 @@ def test_swiglu_is_the_gated_product_not_a_gelu():
     import equinox as eqx
 
     swiglu = _build("swiglu", False)
-    base = swiglu(_taps(), remat=False).logits[SITES[0].name]
+    base = swiglu(_taps(), remat=False).preactivations[SITES[0].name]
     blocks = swiglu.chunks.blocks
     assert blocks[0].gate is not None
     scrambled = eqx.tree_at(
@@ -96,12 +96,12 @@ def test_swiglu_is_the_gated_product_not_a_gelu():
         swiglu,
         jnp.full_like(blocks[0].gate[0], 5.0),
     )
-    assert not jnp.allclose(base, scrambled(_taps(), remat=False).logits[SITES[0].name])
+    assert not jnp.allclose(base, scrambled(_taps(), remat=False).preactivations[SITES[0].name])
 
 
 def test_swiglu_and_gelu_differ():
-    a = _build("gelu", False)(_taps(), remat=False).logits[SITES[0].name]
-    b = _build("swiglu", False)(_taps(), remat=False).logits[SITES[0].name]
+    a = _build("gelu", False)(_taps(), remat=False).preactivations[SITES[0].name]
+    b = _build("swiglu", False)(_taps(), remat=False).preactivations[SITES[0].name]
     assert not jnp.allclose(a, b)
 
 

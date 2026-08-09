@@ -69,6 +69,16 @@ def build_resid_mlp_built_run(
         cfg.pd.loss_metrics,
         tuple(sc.name for sc in site_cs),
     )
+    resid_cfg = resid_mlp.ResidMLPConfig(
+        n_features=cfg.target.n_features,
+        d_embed=cfg.target.d_embed,
+        d_mlp=cfg.target.d_mlp,
+        n_layers=cfg.target.n_layers,
+        act_fn_name=cfg.target.act_fn_name,
+        in_bias=cfg.target.in_bias,
+        out_bias=cfg.target.out_bias,
+        fixed_identity_embedding=cfg.target.fixed_identity_embedding,
+    )
     target = resid_mlp.ResidMLPTargetConfig(
         n_features=cfg.target.n_features,
         d_embed=cfg.target.d_embed,
@@ -97,7 +107,11 @@ def build_resid_mlp_built_run(
         run=run_instance(cfg, run_id, data_root, None),
         target=target,
         data=None,
-        ci_fn=build_toy_ci_arch(cfg.decomposition.ci),
+        ci_fn=build_toy_ci_arch(
+            cfg.decomposition.ci,
+            tuple(sc.name for sc in site_cs),
+            resid_mlp.site_specs(resid_cfg, site_cs),
+        ),
     )
 
 
@@ -181,7 +195,7 @@ def run_resid_mlp_decomposition(
         model: resid_mlp.ResidMLPDecomposedModel, ci_fn: CIFn
     ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
         resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ model.target.W_E
-        ci = ci_fn(model.read_activations(resid, ci_fn.input_names), remat=False)
+        ci = ci_fn(model.clean_forward(resid, ci_fn.capture_keys).captures, remat=False)
         return ci.lower, ci.upper
 
     # `mlp_out` targets DENSE recovery (every d_mlp direction stays live), not identity —
@@ -234,6 +248,7 @@ def run_resid_mlp_decomposition(
                 built.pd.seed,
                 compiler_options={},
                 model=model,
+                ci_capture_keys=built.ci_fn.capture_keys,
                 mesh=mesh,
                 sample_eval_batch=lambda index: eval_sampler(
                     model.target, random.fold_in(data_key, built.pd.steps + index)

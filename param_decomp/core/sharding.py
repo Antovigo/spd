@@ -14,7 +14,7 @@ import numpy as np
 from jax.sharding import AbstractMesh, Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import BATCH_AXES, DecomposedModel
 
 
 def init_distributed(dp: int, gpus_per_node: int) -> None:
@@ -59,10 +59,6 @@ def assert_inline_topology(dp: int) -> None:
         f"runs one process over exactly the devices the config declares; an ambient "
         f"mismatch is a mis-sized allocation, never absorbed"
     )
-
-
-BATCH_AXES = ("replicate", "fsdp")
-"""The full-mesh batch sharding: data shards over BOTH axes (per-rank batch = B/N)."""
 
 
 def _hsdp_shape(n_devices: int, tp: int, gpus_per_node: int) -> tuple[int, int, int]:

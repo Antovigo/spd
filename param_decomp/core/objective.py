@@ -1,8 +1,11 @@
-"""The closed VPD training objective.
+"""The closed VPD training objectives — plain and targeted.
 
-Authored loss metrics become exactly one faithfulness term, one importance-minimality term,
-and a non-empty ordered tuple of recon terms. Recon planning lives in `recon.py`; this module
-alone composes those plans with the other objective roles.
+Authored loss metrics become explicit objective roles: the plain objective is exactly one
+faithfulness term, one importance-minimality term, and a non-empty ordered tuple of recon
+terms; the targeted (tPD, SPEC §11) objective is a faithfulness-free target-pass surface
+plus a directly-authored non-target pass (delta-pinned recon + importance-minimality at
+its own coefficient). Recon planning lives in `recon.py`; this module alone composes those
+plans with the other objective roles.
 """
 
 from collections.abc import Sequence
@@ -12,32 +15,43 @@ from param_decomp.core.configs import (
     AllRoutingConfig,
     AnyImportanceMinimalityLossConfig,
     AnyLossMetricConfig,
+    AnyReconLossMetricConfig,
     ChunkwiseSubsetReconLossConfig,
     CIMaskedReconLayerwiseLossConfig,
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     FaithfulnessLossConfig,
     ImportanceMinimalityLossConfig,
+    LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
+    NontargetConfig,
+    NontargetReconLossMetricConfig,
     PersistentPGDReconLossConfig,
     PGDReconLayerwiseLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
     SmoothL0ImportanceMinimalityLossConfig,
-    StochasticHiddenActsReconLossConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
     StochasticReconSubsetLossConfig,
+    SubsetRoutingType,
+    TargetedLossMetricConfig,
+    UnmaskedNoDeltaReconLossConfig,
     UnmaskedReconLossConfig,
 )
 from param_decomp.core.recon import (
+    AnyReconLossTerm,
     ConstantSources,
     FreshPGDSources,
+    LiveSet,
+    MaskSourceStrategy,
     MixedPersistentStochasticSources,
     PersistentSources,
+    ReconForward,
     ReconLossTerm,
     ReconPlan,
     StochasticSources,
+    UnmaskedNoDeltaSources,
     all_sites_live,
     each_site_live,
     live_groups,
@@ -50,7 +64,7 @@ class FaithfulnessTerm:
     """Weight-space term: `Σ_s ‖Δ_s‖² / Σ_s numel`."""
 
     name: str
-    coeff: float
+    coeff: LossCoeff
 
 
 @dataclass(frozen=True)
@@ -58,7 +72,7 @@ class ImportanceMinimalityTerm:
     """CI-space importance-minimality plus optional frequency penalty."""
 
     name: str
-    coeff: float
+    coeff: LossCoeff
     cfg: AnyImportanceMinimalityLossConfig
 
 
@@ -68,21 +82,61 @@ class LossSurface:
 
     faith: FaithfulnessTerm
     imp: ImportanceMinimalityTerm
-    recon: tuple[ReconLossTerm, ...]
+    recon: tuple[AnyReconLossTerm, ...]
 
 
-def build_objective(
+@dataclass(frozen=True)
+class TargetPass:
+    """The tPD target-pass surface (SPEC T3/T7): the full decomposition objective minus
+    faithfulness — the delta is the off-target escape valve and must never be penalized,
+    so a targeted objective has no faithfulness role at all."""
+
+    imp: ImportanceMinimalityTerm
+    recon: tuple[AnyReconLossTerm, ...]
+
+
+@dataclass(frozen=True)
+class NontargetPass:
+    """The tPD non-target-pass surface, complete (SPEC T4/T5): with the delta mask pinned
+    fully on, the broad stream judges only what the components must not disturb — so its
+    whole objective is delta-pinned reconstruction against the frozen output plus
+    importance-minimality at its own coefficient (T4's one enumerated exception is the
+    unmasked-no-delta term, whose delta is pinned OFF). `imp.cfg` IS the target pass's
+    config (penalty shape, anneal, frequency block shared by construction); only the
+    coefficient is the non-target pass's own."""
+
+    recon: tuple[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources], ...]
+    """The enumerated non-target strategies ONLY, in the type (SPEC T5): the delta-pinned
+    stochastic/constant pair plus the delta-off unmasked arm — a plan carrying an
+    adversarial or mixed strategy is unrepresentable here, not filtered out."""
+    impmin_coeff: LossCoeff
+    """The non-target pass's importance-minimality COEFFICIENT — the penalty config
+    (shape, anneal, frequency block) is the target pass's, structurally: this pass
+    cannot carry its own (SPEC T6)."""
+
+
+@dataclass(frozen=True)
+class TargetedObjective:
+    """The complete two-pass tPD objective; both passes sum into ONE backward (SPEC §11)."""
+
+    target: TargetPass
+    nontarget: NontargetPass
+
+
+def _collect_terms(
     loss_metrics: Sequence[AnyLossMetricConfig],
     site_names: tuple[str, ...],
-) -> LossSurface:
-    """Build the closed objective, rejecting unsupported or incomplete authored surfaces.
+) -> tuple[FaithfulnessTerm | None, ImportanceMinimalityTerm | None, tuple[AnyReconLossTerm, ...]]:
+    """One pass over an authored loss list into its objective roles, names unique across
+    all roles. Completeness (which roles must be present) is each objective builder's own
+    claim, not this walk's.
 
     Recon-term order follows the authored list and is semantically load-bearing: per-term
     RNG keys derive from the recon index (SPEC R1).
     """
     faith: FaithfulnessTerm | None = None
     imp: ImportanceMinimalityTerm | None = None
-    recon_terms: list[ReconLossTerm] = []
+    recon_terms: list[AnyReconLossTerm] = []
 
     def unique_name(cfg: AnyLossMetricConfig) -> str:
         # Only committed terms are in `taken`, so persistent terms may call this once for
@@ -96,9 +150,22 @@ def build_objective(
         assert name not in taken, f"duplicate loss instance_key {name!r}"
         return name
 
-    def recon(cfg: AnyLossMetricConfig, plan: ReconPlan) -> ReconLossTerm:
+    def recon[S: MaskSourceStrategy](
+        cfg: AnyReconLossMetricConfig, plan: ReconPlan[S]
+    ) -> AnyReconLossTerm:
         assert cfg.coeff is not None
-        return ReconLossTerm(unique_name(cfg), cfg.coeff, plan)
+        # Storage is width-erased; dataclass type params are invariant (3.13 synthesizes
+        # `__replace__`), so widening is an explicit rebuild rather than an upcast.
+        wide_plan: ReconPlan[MaskSourceStrategy] = tuple(
+            ReconForward[MaskSourceStrategy](e.live_sites, e.sample_routing, e.sources)
+            for e in plan
+        )
+        return ReconLossTerm(
+            unique_name(cfg),
+            cfg.coeff,
+            wide_plan,
+            cfg.hidden_acts_reconstruction,
+        )
 
     for cfg in loss_metrics:
         assert cfg.coeff is not None, f"{cfg.type}: training losses need a coeff"
@@ -120,61 +187,24 @@ def build_objective(
                     "width collapses the smooth-L0 threshold band the gradient lives on"
                 )
                 imp = ImportanceMinimalityTerm(unique_name(cfg), cfg.coeff, cfg)
-            case UnmaskedReconLossConfig() | CIMaskedReconLossConfig():
-                value = 1.0 if isinstance(cfg, UnmaskedReconLossConfig) else 0.0
+            case UnmaskedReconLossConfig():
                 plan = make_plan(
                     all_sites_live(site_names),
                     AllRoutingConfig(),
-                    ConstantSources(value),
+                    ConstantSources(1.0),
                     n_samples=1,
                 )
                 recon_terms.append(recon(cfg, plan))
-            case CIMaskedReconSubsetLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names), cfg.routing, ConstantSources(0.0), n_samples=1
-                )
-                recon_terms.append(recon(cfg, plan))
-            case CIMaskedReconLayerwiseLossConfig():
-                plan = make_plan(
-                    each_site_live(site_names), AllRoutingConfig(), ConstantSources(0.0), 1
-                )
-                recon_terms.append(recon(cfg, plan))
-            case StochasticHiddenActsReconLossConfig():
-                # Deliberately eval-only / keep-on-bridge (SPEC S31); this is a known
-                # unsupported training arm, not an unrecognized config variant.
-                raise AssertionError(f"{cfg.type} is an eval metric, not a JAX training loss")
-            case StochasticReconLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    AllRoutingConfig(),
-                    StochasticSources(),
-                    n_samples=cfg.n_mask_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case StochasticReconSubsetLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    cfg.routing,
-                    StochasticSources(),
-                    n_samples=cfg.n_mask_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case StochasticReconLayerwiseLossConfig():
-                plan = make_plan(
-                    each_site_live(site_names),
-                    AllRoutingConfig(),
-                    StochasticSources(),
-                    n_samples=cfg.n_mask_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
-            case ChunkwiseSubsetReconLossConfig():
-                plan = make_plan(
-                    live_groups(site_names, cfg.sites_per_chunk),
-                    cfg.routing,
-                    StochasticSources(),
-                    n_samples=cfg.n_samples,
-                )
-                recon_terms.append(recon(cfg, plan))
+            case (
+                CIMaskedReconLossConfig()
+                | CIMaskedReconSubsetLossConfig()
+                | CIMaskedReconLayerwiseLossConfig()
+                | StochasticReconLossConfig()
+                | StochasticReconSubsetLossConfig()
+                | StochasticReconLayerwiseLossConfig()
+                | ChunkwiseSubsetReconLossConfig()
+            ):
+                recon_terms.append(recon(cfg, _nontarget_recon_plan(cfg, site_names)))
             case PGDReconLossConfig() | PGDReconSubsetLossConfig():
                 sources = FreshPGDSources(cfg.init, cfg.n_steps, cfg.step_size, cfg.source_shape)
                 routing = (
@@ -214,11 +244,123 @@ def build_objective(
                     )
                 )
 
+    for term in recon_terms:
+        for entry in term.plan:
+            assert entry.live_sites and set(entry.live_sites) <= set(site_names), entry
+    return faith, imp, tuple(recon_terms)
+
+
+def build_objective(
+    loss_metrics: Sequence[AnyLossMetricConfig],
+    site_names: tuple[str, ...],
+) -> LossSurface:
+    """Build the closed plain-VPD objective, rejecting incomplete authored surfaces."""
+    faith, imp, recon_terms = _collect_terms(loss_metrics, site_names)
     assert faith is not None and imp is not None, (
         f"need FaithfulnessLoss + ImportanceMinimalityLoss, got {[m.type for m in loss_metrics]}"
     )
     assert recon_terms, "no recon loss terms configured"
-    for term in recon_terms:
-        for entry in term.plan:
-            assert entry.live_sites and set(entry.live_sites) <= set(site_names), entry
-    return LossSurface(faith, imp, tuple(recon_terms))
+    return LossSurface(faith, imp, recon_terms)
+
+
+def build_recon_terms(
+    loss_metrics: Sequence[AnyLossMetricConfig],
+    site_names: tuple[str, ...],
+) -> tuple[AnyReconLossTerm, ...]:
+    """Just the recon Σ of an authored loss list — the persistent-source layout derives
+    from these (`recon.persistent_configs`), so state init shares this walk with both
+    objective builders instead of demanding one builder's completeness rules."""
+    return _collect_terms(loss_metrics, site_names)[2]
+
+
+def build_targeted_objective(
+    loss_metrics: Sequence[TargetedLossMetricConfig],
+    nontarget: NontargetConfig,
+    site_names: tuple[str, ...],
+) -> TargetedObjective:
+    """Build the closed two-pass tPD objective (SPEC §11).
+
+    `loss_metrics` authors the TARGET pass — typed by `TargetedLossMetricConfig`, which
+    has no faithfulness member (T3: the delta is the unpenalized off-target escape valve,
+    so a targeted config cannot spell a faithfulness role). The non-target pass is
+    authored directly on `nontarget` — never derived from the target list — and its
+    importance-minimality shares the target's penalty config (shape + anneal) by
+    construction, at the non-target pass's own coefficient."""
+    faith, imp, recon_terms = _collect_terms(loss_metrics, site_names)
+    # The library boundary for lists built outside the schema; unreachable for a parsed
+    # TargetedPDConfig.
+    assert faith is None, "a targeted loss list carried a FaithfulnessLossConfig (SPEC T3)"
+    assert imp is not None, (
+        f"need an ImportanceMinimalityLoss, got {[m.type for m in loss_metrics]}"
+    )
+    assert recon_terms, "no recon loss terms configured"
+
+    nt_terms: list[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]] = []
+    for cfg in nontarget.recon:
+        assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
+        name = cfg.name if cfg.name is not None else cfg.type
+        assert name not in {t.name for t in nt_terms}, f"duplicate non-target loss {name!r}"
+        plan = _nontarget_recon_plan(cfg, site_names)
+        # `hidden_acts_reconstruction=None` structurally: the rider is target-pass-only
+        # vocabulary (SPEC T5), refused at parse by `NontargetConfig`.
+        nt_terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
+    return TargetedObjective(
+        target=TargetPass(imp=imp, recon=recon_terms),
+        nontarget=NontargetPass(recon=tuple(nt_terms), impmin_coeff=nontarget.impmin_coeff),
+    )
+
+
+def _nontarget_recon_plan(
+    cfg: NontargetReconLossMetricConfig, site_names: tuple[str, ...]
+) -> ReconPlan[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]:
+    """Plan construction for the recon types the non-target pass admits (SPEC T5): the
+    stochastic/constant-source types — shared verbatim with the plain objective's arms,
+    which widen via `recon` — plus the non-target-only unmasked-no-delta term (T4's one
+    delta-off exception)."""
+
+    def narrow(
+        live_sets: list[LiveSet],
+        routing: SubsetRoutingType,
+        sources: StochasticSources | ConstantSources | UnmaskedNoDeltaSources,
+        n_samples: int,
+    ) -> ReconPlan[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]:
+        # The parameter annotation solves `make_plan`'s SourcesT at the pass's width —
+        # values widen into parameters; invariant containers don't.
+        return make_plan(live_sets, routing, sources, n_samples)
+
+    match cfg:
+        case CIMaskedReconLossConfig():
+            return narrow(all_sites_live(site_names), AllRoutingConfig(), ConstantSources(0.0), 1)
+        case CIMaskedReconSubsetLossConfig():
+            return narrow(all_sites_live(site_names), cfg.routing, ConstantSources(0.0), 1)
+        case CIMaskedReconLayerwiseLossConfig():
+            return narrow(each_site_live(site_names), AllRoutingConfig(), ConstantSources(0.0), 1)
+        case StochasticReconLossConfig():
+            return narrow(
+                all_sites_live(site_names),
+                AllRoutingConfig(),
+                StochasticSources(),
+                cfg.n_mask_samples,
+            )
+        case StochasticReconSubsetLossConfig():
+            return narrow(
+                all_sites_live(site_names), cfg.routing, StochasticSources(), cfg.n_mask_samples
+            )
+        case StochasticReconLayerwiseLossConfig():
+            return narrow(
+                each_site_live(site_names),
+                AllRoutingConfig(),
+                StochasticSources(),
+                cfg.n_mask_samples,
+            )
+        case ChunkwiseSubsetReconLossConfig():
+            return narrow(
+                live_groups(site_names, cfg.sites_per_chunk),
+                cfg.routing,
+                StochasticSources(),
+                cfg.n_samples,
+            )
+        case UnmaskedNoDeltaReconLossConfig():
+            return narrow(
+                all_sites_live(site_names), AllRoutingConfig(), UnmaskedNoDeltaSources(), 1
+            )

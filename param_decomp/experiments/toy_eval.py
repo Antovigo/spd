@@ -7,16 +7,24 @@ read the toy's single-feature CI probe.
 
 from collections.abc import Callable
 
+import jax
 from jax.sharding import Mesh
 from jaxtyping import Array
 
 from param_decomp.core.built_run import BuiltRun, TargetSites
-from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig, UVPlotsConfig
+from param_decomp.core.configs import (
+    CI_L0Config,
+    PDConfig,
+    PGDReconLossConfig,
+    UVPlotsConfig,
+    WellTemperednessConfig,
+)
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import CaptureKeys, DecomposedModel
 from param_decomp.core.run import EvalInvocation, EvalOperation
 from param_decomp.core.train import TrainState
+from param_decomp.core.well_temperedness_eval import make_well_temperedness_operation
 from param_decomp.experiments import toy_uv_eval
 from param_decomp.experiments.eval_config import EvalConfig, schedule_for
 from param_decomp.experiments.fast_eval_operations import (
@@ -25,7 +33,7 @@ from param_decomp.experiments.fast_eval_operations import (
 )
 from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
 
-type ToyRun[TargetT: TargetSites] = BuiltRun[None, TargetT]
+type ToyRun[TargetT: TargetSites] = BuiltRun[None, TargetT, PDConfig]
 type ProbeCI = Callable[[TrainState], dict[str, Array]]
 
 
@@ -54,6 +62,7 @@ def make_toy_evaluation_operations(
     seed: int,
     compiler_options: dict[str, bool | int | str],
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     mesh: Mesh,
     sample_eval_batch: Callable[[int], Array],
     probe_ci: ProbeCI,
@@ -61,6 +70,15 @@ def make_toy_evaluation_operations(
 ) -> tuple[EvalOperation[EvalInvocation], ...]:
     """Exhaustively bind each authored toy metric to one executable operation."""
     operations: list[EvalOperation[EvalInvocation]] = []
+    well_temperedness_base_key = jax.random.PRNGKey(seed + 2)
+
+    def well_temperedness_inputs(context: EvalInvocation) -> tuple[Array, jax.Array]:
+        pass_index = context.now_step // eval_config.every
+        return (
+            sample_eval_batch(pass_index * eval_config.n_steps),
+            jax.random.fold_in(well_temperedness_base_key, pass_index),
+        )
+
     for metric in eval_config.metrics:
         schedule = schedule_for(metric, eval_config)
         match metric:
@@ -72,6 +90,7 @@ def make_toy_evaluation_operations(
                     seed,
                     compiler_options,
                     model,
+                    ci_capture_keys,
                     mesh,
                     sample_eval_batch,
                 )
@@ -83,12 +102,24 @@ def make_toy_evaluation_operations(
                     seed,
                     compiler_options,
                     model,
+                    ci_capture_keys,
                     mesh,
                     sample_eval_batch,
                 )
             case UVPlotsConfig():
                 operation = _make_uv_plots_operation(
                     metric, schedule, model, probe_ci, wandb_configured
+                )
+            case WellTemperednessConfig():
+                operation = make_well_temperedness_operation(
+                    metric,
+                    schedule,
+                    model,
+                    ci_capture_keys,
+                    mesh,
+                    compiler_options,
+                    inputs_for_context=well_temperedness_inputs,
+                    figure_rendering="synchronous" if wandb_configured else None,
                 )
             case CEandKLLossesConfig():
                 raise AssertionError(

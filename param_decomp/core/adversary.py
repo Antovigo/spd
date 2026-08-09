@@ -1,7 +1,7 @@
-"""The recon adversary: source state, ascent updates, and source→mask materialization.
+"""Adversarial source state, initialization, and optimization.
 
-Two semantically distinct adversaries share the source/mask machinery but nothing
-else (SPEC §3):
+Two semantically distinct adversaries share source initialization and optimization but
+nothing else (SPEC §3):
 
 - **Persistent PGD (PPGD)** — `PersistentPGDReconLossConfig`. Per-site sources + their
   Adam moments live in `TrainState` across steps, stored per `source_shape`
@@ -185,72 +185,6 @@ def sources_adam_ascend_project(
     return new_sources, SourcesAdamState(m=m, v=v, step_count=step_count)
 
 
-def source_masks(
-    ci_lower: dict[str, Array], sources: dict[str, Array], site_names: tuple[str, ...]
-) -> tuple[dict[str, Array], dict[str, Array]]:
-    """`mask = ci + (1−ci)·source[:, :C]`; delta mask = raw trailing channel (SPEC S1).
-    Shared by both adversaries; sources broadcast over whatever leading dims their
-    `source_shape` left singleton. The fp32 source state is cast to the CI dtype here
-    (torch-under-autocast behavior); the source gradient flows back through the cast."""
-    masks = {}
-    delta_masks = {}
-    for site in site_names:
-        source = sources[site].astype(ci_lower[site].dtype)
-        masks[site] = ci_lower[site] + (1.0 - ci_lower[site]) * source[..., :-1]
-        delta_masks[site] = source[..., -1]
-    return masks, delta_masks
-
-
-def per_sample_adversarial_assignment(
-    key: PRNGKeyArray, adv_fraction: Array, leading: tuple[int, ...]
-) -> Array:
-    """One Bernoulli(`adv_fraction`) bit per batch element, shaped to broadcast over the
-    position axes — a whole sample takes one mask family (SPEC S34)."""
-    one_flag_per_sample = (leading[0], *(1,) * (len(leading) - 1))
-    return random.bernoulli(key, adv_fraction, one_flag_per_sample)
-
-
-def mixed_persistent_stochastic_masks(
-    key: PRNGKeyArray,
-    ci_lower: dict[str, Array],
-    persistent_sources: dict[str, Array],
-    live_sites: tuple[str, ...],
-    components_per_site: dict[str, int],
-    leading: tuple[int, ...],
-    adv_fraction: Array,
-    stochastic_routes: dict[str, Array] | None,
-) -> tuple[dict[str, Array], dict[str, Array], dict[str, Array] | None]:
-    """Forward inputs for the merged stochastic+PPGD term (SPEC S34). Adversarial-assigned
-    samples take the persistent bundle's masks and route every live site; the rest take
-    fresh `U[0,1]` masks with `stochastic_routes`. The persistent sources stay live graph
-    leaves — the per-sample `where` gates their gradient to adversarial samples, and the
-    S14' final ascent rides this term's backward."""
-    assignment_key, uniform_key = random.split(key)
-    adversarial = per_sample_adversarial_assignment(assignment_key, adv_fraction, leading)
-    fresh_uniform_sources = {
-        site: random.uniform(
-            random.fold_in(uniform_key, site_idx),
-            (*leading, components_per_site[site] + 1),
-        )
-        for site_idx, site in enumerate(live_sites)
-    }
-    adv_masks, adv_deltas = source_masks(ci_lower, persistent_sources, live_sites)
-    stoch_masks, stoch_deltas = source_masks(ci_lower, fresh_uniform_sources, live_sites)
-    masks = {
-        site: jnp.where(adversarial[..., None], adv_masks[site], stoch_masks[site])
-        for site in live_sites
-    }
-    delta_masks = {
-        site: jnp.where(adversarial, adv_deltas[site], stoch_deltas[site]) for site in live_sites
-    }
-    routes = (
-        None
-        if stochastic_routes is None
-        else {site: jnp.logical_or(adversarial, stochastic_routes[site]) for site in live_sites}
-    )
-    return masks, delta_masks, routes
-
-
 class PersistentAdversary(eqx.Module):
     """One persistent-PGD adversary (SPEC §3): the per-site sources + their Adam moments
     that persist across steps, plus the lifecycle the trainer drives around the shared
@@ -258,13 +192,12 @@ class PersistentAdversary(eqx.Module):
 
     Per step: `warmup_ascend` (n_warmup supplemental ascents vs a scoring forward, params
     + CI detached) → the warmed sources enter the main `value_and_grad` as leaves →
-    `final_ascend` (one more ascent from the SAME backward's source-grad, unscaled by the
-    term's `coeff` — exact since one source bundle feeds exactly one term, SPEC S23)."""
+    `final_ascend` (one more ascent from the SAME backward's source-grad — which IS
+    `dL_term/d(sources)`: the source path is never coeff-scaled, SPEC S14'/S23)."""
 
     sources: dict[str, Array]  # site -> source in [0,1], `(*source_leading, C+1)`
     opt_state: SourcesAdamState
     state_key: str = eqx.field(static=True)
-    coeff: float = eqx.field(static=True)
     adam: AdamPGDConfig = eqx.field(static=True)
     n_warmup: int = eqx.field(static=True)
 
@@ -294,15 +227,22 @@ class PersistentAdversary(eqx.Module):
             lambda a: (a.sources, a.opt_state), self, (jax.lax.stop_gradient(warmed), warmed_opt)
         )
 
-    def final_ascend(
-        self, source_grad_scaled: dict[str, Array], step_f32: Array, total_steps: int
+    def after_one_adam_ascent(
+        self, grad: dict[str, Array], step_f32: Array, total_steps: int
     ) -> "PersistentAdversary":
-        """One final ascent from the shared backward's source-grad (SPEC S13'/S14'). The
-        backward saw `coeff·L_term`, so the grad is unscaled by `coeff` to ascend on
-        `L_term` itself (exact: each source bundle feeds exactly one term, SPEC S23)."""
+        """The adversary one Adam ascent-and-project (SPEC S13/S15) further along `grad`."""
         lr = self.source_lr(step_f32, total_steps)
-        grad = {s: g / self.coeff for s, g in source_grad_scaled.items()}
-        ascended, ascended_opt = sources_adam_ascend_project(
+        sources, opt_state = sources_adam_ascend_project(
             self.sources, grad, self.opt_state, lr, self.adam
         )
-        return eqx.tree_at(lambda a: (a.sources, a.opt_state), self, (ascended, ascended_opt))
+        return eqx.tree_at(lambda a: (a.sources, a.opt_state), self, (sources, opt_state))
+
+    def final_ascend(
+        self, source_grad: dict[str, Array], step_f32: Array, total_steps: int
+    ) -> "PersistentAdversary":
+        """One final ascent recycled from the shared backward (SPEC S13'/S14'): the
+        source path enters the backward UNSCALED — the term's coeff scales only the
+        model-side cotangents (`train.model_cotangents_scaled`) — so `source_grad` IS
+        `dL_term/d(sources)`, with nothing to unscale, at every step of any coeff
+        schedule, activation gates included."""
+        return self.after_one_adam_ascent(source_grad, step_f32, total_steps)

@@ -17,6 +17,7 @@ from param_decomp.core.configs import (
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
     UVPlotsConfig,
+    WellTemperednessConfig,
 )
 from param_decomp.core.model import DecomposedModel
 from param_decomp.core.run import (
@@ -26,6 +27,7 @@ from param_decomp.core.run import (
     MetricsSink,
 )
 from param_decomp.core.train import TrainState
+from param_decomp.core.well_temperedness_eval import make_well_temperedness_operation
 from param_decomp.experiments.eval_config import AnyEvalMetricConfig, EvalConfig, schedule_for
 from param_decomp.experiments.lm.arithmetic_eval_operation import make_arithmetic_operation
 from param_decomp.experiments.lm.diagnostic_eval_operations import (
@@ -41,7 +43,8 @@ from param_decomp.experiments.lm.eval_config import (
     StochasticAttnPatternsReconLossConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
-from param_decomp.experiments.lm.resolved import LMRun
+from param_decomp.experiments.lm.eval_keys import EvalKeyStream
+from param_decomp.experiments.lm.resolved import LMAnyRun
 from param_decomp.experiments.lm.scalar_eval_operations import (
     make_ce_kl_operation,
     make_ci_l0_operation,
@@ -57,7 +60,7 @@ def global_token_batch(local: np.ndarray, mesh: Mesh, global_batch: int) -> jax.
 
 
 def make_lm_evaluation(
-    built: LMRun,
+    built: LMAnyRun,
     eval: EvalConfig,
     model: DecomposedModel,
     run_key: PRNGKeyArray,
@@ -68,11 +71,11 @@ def make_lm_evaluation(
 ) -> Evaluation[LMEvalContext]:
     """Construct one executable operation for every authored LM metric."""
     pd = built.pd
+    capture_inputs = built.ci_fn.capture_keys
     data = built.data
     schedule = BatchSchedule(scan_shards(data.eval_dir), eval.batch_size, pd.seed + 1)
-    server = ShardServer(
-        schedule, read_dataset_meta(data.eval_dir).seq_len, jax.process_index(), n_proc
-    )
+    seq_len = read_dataset_meta(data.eval_dir).seq_len
+    server = ShardServer(schedule, seq_len, jax.process_index(), n_proc)
     assert server.per_process % jax.local_device_count() == 0
     renderer = BackgroundRenderer(sink)
 
@@ -84,6 +87,13 @@ def make_lm_evaluation(
             for j in range(eval.n_steps)
         ]
 
+    def well_temperedness_inputs(
+        context: LMEvalContext,
+    ) -> tuple[jax.Array, PRNGKeyArray]:
+        return context.batches[0], jax.random.fold_in(
+            run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + context.pass_index
+        )
+
     def make_operation(metric: AnyEvalMetricConfig) -> EvalOperation[LMEvalContext]:
         schedule = schedule_for(metric, eval)
         match metric:
@@ -92,6 +102,7 @@ def make_lm_evaluation(
                     metric,
                     schedule,
                     model,
+                    capture_inputs,
                     run_key,
                     pd.steps,
                     eval.n_steps,
@@ -103,6 +114,7 @@ def make_lm_evaluation(
                     metric,
                     schedule,
                     model,
+                    capture_inputs,
                     run_key,
                     pd.steps,
                     eval.n_steps,
@@ -114,6 +126,7 @@ def make_lm_evaluation(
                     metric,
                     schedule,
                     model,
+                    capture_inputs,
                     run_key,
                     pd.steps,
                     eval.n_steps,
@@ -123,11 +136,11 @@ def make_lm_evaluation(
 
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
                 return make_attention_operation(
-                    metric, schedule, model, run_key, pd.steps, compiler_options
+                    metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
                 )
             case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
                 return make_hidden_acts_operation(
-                    metric, schedule, model, run_key, pd.steps, compiler_options
+                    metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
                 )
             case (
                 CIHistogramsConfig()
@@ -135,11 +148,23 @@ def make_lm_evaluation(
                 | CIMeanPerComponentConfig()
             ):
                 return make_site_figures_operation(
-                    metric, schedule, model, compiler_options, renderer
+                    metric, schedule, model, capture_inputs, compiler_options, renderer
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
                 return make_permutation_operation(
-                    metric, schedule, model, compiler_options, renderer
+                    metric, schedule, model, capture_inputs, compiler_options, renderer
+                )
+
+            case WellTemperednessConfig():
+                return make_well_temperedness_operation(
+                    metric,
+                    schedule,
+                    model,
+                    capture_inputs,
+                    mesh,
+                    compiler_options,
+                    inputs_for_context=well_temperedness_inputs,
+                    figure_rendering=renderer if sink.accepts_deferred_media else None,
                 )
 
             case ArithmeticCIGridConfig():
@@ -148,6 +173,7 @@ def make_lm_evaluation(
                     schedule,
                     built.target,
                     model,
+                    capture_inputs,
                     mesh,
                     n_proc,
                     sink,

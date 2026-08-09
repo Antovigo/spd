@@ -24,7 +24,7 @@ from param_decomp.core.hidden_acts_eval import (
     make_stochastic_hidden_acts_step,
 )
 from param_decomp.core.metrics import LogRecord
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import CaptureKeys, DecomposedModel
 from param_decomp.core.run import (
     BackgroundRenderer,
     DeferredMediaRecord,
@@ -55,6 +55,7 @@ from param_decomp.experiments.lm.eval_config import (
     StochasticAttnPatternsReconLossConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
+from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
 
 def _render_selected_figures(
@@ -89,16 +90,17 @@ def make_attention_operation(
     metric: CIMaskedAttnPatternsReconLossConfig | StochasticAttnPatternsReconLossConfig,
     schedule: EvalSchedule,
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIMaskedAttnPatternsReconLossConfig():
-            step = make_ci_attn_patterns_step(model, compiler_options)
+            step = make_ci_attn_patterns_step(model, ci_capture_keys, compiler_options)
         case StochasticAttnPatternsReconLossConfig():
             step = make_stochastic_attn_patterns_step(
-                model, metric.n_mask_samples, compiler_options
+                model, ci_capture_keys, metric.n_mask_samples, compiler_options
             )
 
     def run(context: LMEvalContext) -> LogRecord:
@@ -108,7 +110,9 @@ def make_attention_operation(
             context.state.decomposition.components,
             context.state.decomposition.ci_fn,
             list(context.batches),
-            jax.random.fold_in(run_key, 2 * train_steps + context.pass_index),
+            jax.random.fold_in(
+                run_key, EvalKeyStream.ATTENTION_PATTERNS * train_steps + context.pass_index
+            ),
         )
         return {
             f"eval/loss/{name}": value
@@ -122,15 +126,18 @@ def make_hidden_acts_operation(
     metric: CIHiddenActsReconLossConfig | StochasticHiddenActsReconLossConfig,
     schedule: EvalSchedule,
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHiddenActsReconLossConfig():
-            step = make_ci_hidden_acts_step(model, compiler_options)
+            step = make_ci_hidden_acts_step(model, ci_capture_keys, compiler_options)
         case StochasticHiddenActsReconLossConfig():
-            step = make_stochastic_hidden_acts_step(model, metric.n_mask_samples, compiler_options)
+            step = make_stochastic_hidden_acts_step(
+                model, ci_capture_keys, metric.n_mask_samples, compiler_options
+            )
 
     def run(context: LMEvalContext) -> LogRecord:
         reductions = accumulate_hidden_acts(
@@ -139,7 +146,9 @@ def make_hidden_acts_operation(
             context.state.decomposition.components,
             context.state.decomposition.ci_fn,
             list(context.batches),
-            jax.random.fold_in(run_key, 3 * train_steps + context.pass_index),
+            jax.random.fold_in(
+                run_key, EvalKeyStream.HIDDEN_ACTS * train_steps + context.pass_index
+            ),
         )
         return {
             f"eval/slow/loss/{name}": value
@@ -153,6 +162,7 @@ def make_site_figures_operation(
     metric: CIHistogramsConfig | ComponentActivationDensityConfig | CIMeanPerComponentConfig,
     schedule: EvalSchedule,
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
 ) -> EvalOperation[LMEvalContext]:
@@ -179,7 +189,7 @@ def make_site_figures_operation(
                 "figures/ci_mean_per_component",
                 "figures/ci_mean_per_component_log",
             }
-    step = make_slow_eval_step(model, threshold, bins, compiler_options)
+    step = make_slow_eval_step(model, ci_capture_keys, threshold, bins, compiler_options)
 
     def run(context: LMEvalContext) -> LogRecord:
         reductions = accumulate_site_reductions(
@@ -199,11 +209,12 @@ def make_permutation_operation(
     metric: PermutedCIPlotsConfig | UVPlotsConfig | IdentityCIErrorConfig,
     schedule: EvalSchedule,
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
 ) -> EvalOperation[LMEvalContext]:
     spec = resolve_permutation_metrics(model.site_names, [metric])
-    position_step = make_position_ci_step(model, compiler_options)
+    position_step = make_position_ci_step(model, ci_capture_keys, compiler_options)
 
     def run(context: LMEvalContext) -> LogRecord:
         position_ci = accumulate_position_ci(
@@ -219,8 +230,8 @@ def make_permutation_operation(
             case UVPlotsConfig():
                 include_ci_heatmaps = False
                 components = {
-                    name: (np.asarray(v), np.asarray(u))
-                    for name, (v, u) in context.state.decomposition.components.sites_items()
+                    name: (np.asarray(site_components.V), np.asarray(site_components.U))
+                    for name, site_components in context.state.decomposition.components.sites_items()
                 }
             case PermutedCIPlotsConfig():
                 include_ci_heatmaps = True

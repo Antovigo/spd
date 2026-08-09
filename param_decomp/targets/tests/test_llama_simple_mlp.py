@@ -30,6 +30,7 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
+from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.objective import build_objective
 from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import (
@@ -40,6 +41,7 @@ from param_decomp.core.train import (
     make_train_step,
 )
 from param_decomp.targets.llama_simple_mlp import (
+    SimpleMLPDecomposedModel,
     canonical_site_cs,
     parse_site_name,
     site_name,
@@ -47,10 +49,43 @@ from param_decomp.targets.llama_simple_mlp import (
 )
 from param_decomp.targets.testing import (
     SIMPLE_MLP_MIXED_SITE_CS,
+    capture_clean,
+    capture_site_outputs,
+    run_clean,
+    run_masked,
     tiny_simple_mlp_cfg,
     tiny_simple_mlp_chunkwise_ci_fn,
     tiny_simple_mlp_decomposed_model,
 )
+from param_decomp.targets.transformer_taps import (
+    attention_input_tap_key,
+    attention_output_tap_key,
+    mlp_hidden_tap_key,
+    mlp_input_tap_key,
+)
+
+
+def _site_input_key(site: str) -> str:
+    layer, kind = parse_site_name(site)
+    match kind:
+        case "q_proj" | "k_proj" | "v_proj":
+            return attention_input_tap_key(layer)
+        case "o_proj":
+            return attention_output_tap_key(layer)
+        case "c_fc":
+            return mlp_input_tap_key(layer)
+        case "down_proj":
+            return mlp_hidden_tap_key(layer)
+        case _:
+            raise AssertionError(kind)
+
+
+def _capture_site_inputs(
+    model: SimpleMLPDecomposedModel, tokens: jax.Array, sites: tuple[str, ...]
+) -> dict[str, jax.Array]:
+    input_keys = tuple(_site_input_key(site) for site in sites)
+    captures = capture_clean(model, tokens, tuple(dict.fromkeys(input_keys)))
+    return dict(zip(sites, (captures[key] for key in input_keys), strict=True))
 
 
 def test_site_name_helpers():
@@ -106,14 +141,15 @@ def test_clean_path_and_masked_identity():
     # per-site heterogeneous C is preserved end to end
     assert {s.name: s.C for s in model.sites} == {s.name: s.C for s in SIMPLE_MLP_MIXED_SITE_CS}
     for spec in model.sites:
-        V, U = vu.site(spec.name)
-        assert V.shape == (spec.d_in, spec.C) and U.shape == (spec.C, spec.d_out)
+        site_components = vu.site(spec.name)
+        assert site_components.V.shape == (spec.d_in, spec.C)
+        assert site_components.U.shape == (spec.C, spec.d_out)
 
-    clean = model.clean_output(tokens)
+    clean = run_clean(model, tokens)
     assert clean.shape == (b, t, cfg.vocab_size)
 
     # SPEC S2: a masked forward with NO live sites is the frozen path — bit-identical.
-    none_masked = model.masked_output(vu, tokens, {}, {}, None, (), True, remat=False)
+    none_masked = run_masked(model, vu, tokens, {}, {}, None, (), True, remat=False)
     assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
 
     # All-live, masks=1, delta=1, route-everywhere reconstructs the frozen path up to
@@ -121,15 +157,15 @@ def test_clean_path_and_masked_identity():
     names = model.site_names
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in model.sites}
     ones_delta = {s: jnp.ones((b, t)) for s in names}
-    full = model.masked_output(vu, tokens, ones_masks, ones_delta, None, names, True, remat=False)
+    full = run_masked(model, vu, tokens, ones_masks, ones_delta, None, names, True, remat=False)
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
-    site_in = model.read_activations(tokens, model.site_names)
-    assert set(site_in) == set(names)
-    # q and v read the same post-LN1 residual; down_proj reads the post-GELU acts
-    assert jnp.array_equal(site_in["h.2.attn.q_proj"], site_in["h.2.attn.v_proj"])
-    assert site_in["h.3.mlp.down_proj"].shape == (b, t, cfg.n_intermediate)
-    assert site_in["h.2.mlp.c_fc"].shape == (b, t, cfg.n_embd)
+    input_keys = model._capture_grammar().block_tap_keys((2, 3))
+    site_in = capture_clean(model, tokens, input_keys)
+    assert set(site_in) == set(input_keys)
+    assert attention_input_tap_key(2) in site_in
+    assert site_in[mlp_hidden_tap_key(3)].shape == (b, t, cfg.n_intermediate)
+    assert site_in[mlp_input_tap_key(2)].shape == (b, t, cfg.n_embd)
 
     deltas = model.weight_deltas(vu)
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
@@ -151,9 +187,9 @@ def test_zero_masking_one_site_changes_logits(ablated_site: str):
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    clean = model.clean_output(tokens)
+    clean = run_clean(model, tokens)
     C = {s.name: s.C for s in SIMPLE_MLP_MIXED_SITE_CS}[ablated_site]
-    ablated = model.masked_output(
+    ablated = run_masked(model,
         vu, tokens,
         {ablated_site: jnp.zeros((b, t, C))}, {ablated_site: jnp.zeros((b, t))},
         None, (ablated_site,), True, remat=False,
@@ -174,20 +210,24 @@ def test_masked_site_outputs_frozen_when_routed_false_or_unmasked():
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    site_in = model.read_activations(tokens, model.site_names)
+    site_in = _capture_site_inputs(model, tokens, model.site_names)
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in model.sites}
-    zeros_delta = {s: jnp.zeros((b, t)) for s in names}
     false_routes = {s: jnp.zeros((b, t), bool) for s in names}
 
-    clean_outs = model.masked_site_outputs(
-        vu, tokens, ones_masks, zeros_delta, false_routes, names, False
+    clean_outs = capture_site_outputs(
+        model,
+        vu,
+        tokens,
+        MaterializedMasking(component_masks=ones_masks, routes=false_routes),
     )
     assert set(clean_outs) == set(names)
     # frozen `x @ W` per site, reconstructed independently from weight_deltas + V@U.
     deltas = model.weight_deltas(vu)
     for s in names:
-        V, U = vu.site(s)
-        W = (V.astype(jnp.float32) @ U.astype(jnp.float32)).T + deltas[s]  # (d_out, d_in)
+        site_components = vu.site(s)
+        W = (
+            site_components.V.astype(jnp.float32) @ site_components.U.astype(jnp.float32)
+        ).T + deltas[s]  # (d_out, d_in)
         expected = site_in[s].astype(jnp.float32) @ W.T
         assert jnp.allclose(clean_outs[s].astype(jnp.float32), expected, atol=1e-3), s
 
@@ -202,30 +242,39 @@ def test_masked_site_outputs_match_hand_computed_masked_linear(site_name_str: st
     sites = site_specs(cfg, sites_cs)
     model = tiny_simple_mlp_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
-    names = model.site_names
-    s = site_name_str
+    site = site_name_str
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    x_in = model.read_activations(tokens, (s,))[s]
-    V, U = vu.site(s)
+    input_key = _site_input_key(site)
+    x_in = capture_clean(model, tokens, (input_key,))[input_key]
+    site_components = vu.site(site)
     mask = jax.random.uniform(jax.random.PRNGKey(7), (b, t, sites_cs[0].C))
 
-    no_delta = model.masked_site_outputs(
-        vu, tokens, {s: mask}, {s: jnp.zeros((b, t))}, None, names, False
+    no_delta = capture_site_outputs(
+        model,
+        vu,
+        tokens,
+        MaterializedMasking(component_masks={site: mask}),
     )
-    hand = ((x_in @ V) * mask) @ U
-    assert jnp.allclose(no_delta[s], hand, atol=1e-4), s
+    hand = ((x_in @ site_components.V) * mask) @ site_components.U
+    assert jnp.allclose(no_delta[site], hand, atol=1e-4), site
 
     # delta path: + delta_mask · (x @ Δ), Δ = W − V@U == model.weight_deltas (fp32 oracle)
-    delta_in = model.weight_deltas(vu)[s]
+    delta_in = model.weight_deltas(vu)[site]
     delta_mask = jax.random.uniform(jax.random.PRNGKey(9), (b, t))
-    with_delta = model.masked_site_outputs(
-        vu, tokens, {s: mask}, {s: delta_mask}, None, names, True
+    with_delta = capture_site_outputs(
+        model,
+        vu,
+        tokens,
+        MaterializedMasking(
+            component_masks={site: mask},
+            weight_delta_masks={site: delta_mask},
+        ),
     )
     hand_delta = delta_mask[..., None] * (x_in.astype(jnp.float32) @ delta_in.T)
     expected = hand.astype(jnp.float32) + hand_delta
-    assert jnp.allclose(with_delta[s].astype(jnp.float32), expected, atol=1e-3), s
+    assert jnp.allclose(with_delta[site].astype(jnp.float32), expected, atol=1e-3), site
 
 
 def test_o_site_masks_attention_output():
@@ -237,14 +286,14 @@ def test_o_site_masks_attention_output():
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    clean = model.clean_output(tokens)
-    ones = model.masked_output(
+    clean = run_clean(model, tokens)
+    ones = run_masked(model,
         vu, tokens, {o_site: jnp.ones((b, t, 8))}, {o_site: jnp.ones((b, t))}, None,
         (o_site,), True, remat=False,
     )  # fmt: skip
     assert jnp.allclose(clean, ones, atol=1e-4)
     # o's clean site input is the pre-o_proj attention output, shape (b, t, qd)
-    site_in = model.read_activations(tokens, model.site_names)
+    site_in = _capture_site_inputs(model, tokens, model.site_names)
     assert site_in[o_site].shape == (b, t, cfg.n_head * cfg.head_dim)
 
 
@@ -291,7 +340,6 @@ def test_step_trains_and_has_vpd_signature():
                     sources=src,
                     opt_state=init_sources_adam_state(src),
                     state_key=ppgd_cfg.type,
-                    coeff=ppgd_cfg.coeff,
                     adam=ppgd_cfg.optimizer,
                     n_warmup=ppgd_cfg.n_warmup_steps,
                 )
@@ -326,8 +374,7 @@ def test_step_trains_and_has_vpd_signature():
         total_steps=100,
         remat_recon_forwards=True,
         remat_ci_fn=False,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
 
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
@@ -349,8 +396,9 @@ def test_step_trains_and_has_vpd_signature():
     assert losses[-1]["p_imp"] < 2.0
     # fp32 masters preserved through updates (SPEC N1).
     assert isinstance(state.decomposition.components, ComponentStacks)
-    for _, (V, U) in state.decomposition.components.sites_items():
-        assert V.dtype == jnp.float32 and U.dtype == jnp.float32
+    for _, site_components in state.decomposition.components.sites_items():
+        assert site_components.V.dtype == jnp.float32
+        assert site_components.U.dtype == jnp.float32
     assert isinstance(state.decomposition.ci_fn, ChunkwiseTransformerCIFn)
     assert state.decomposition.ci_fn.chunks.in_proj_w.dtype == jnp.float32
 
@@ -361,7 +409,7 @@ def test_faith_warmup_decreases_faith():
     model = tiny_simple_mlp_decomposed_model(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt, compiler_options={})
+    wstep = make_faith_warmup_step(opt)
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss: float | None = None
     loss = None
@@ -378,14 +426,14 @@ def test_component_stacks_shapes_fp32():
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
-    V_q, U_q = vu.site("h.2.attn.q_proj")
-    V_v, U_v = vu.site("h.2.attn.v_proj")
-    V_fc, U_fc = vu.site("h.2.mlp.c_fc")
-    V_dn, U_dn = vu.site("h.3.mlp.down_proj")
-    assert V_q.shape == (d, 8) and U_q.shape == (8, qd)
-    assert V_v.shape == (d, 12) and U_v.shape == (12, kvd)
-    assert V_fc.shape == (d, 8) and U_fc.shape == (8, di)
-    assert V_dn.shape == (di, 16) and U_dn.shape == (16, d)
+    q = vu.site("h.2.attn.q_proj")
+    v = vu.site("h.2.attn.v_proj")
+    fc = vu.site("h.2.mlp.c_fc")
+    down = vu.site("h.3.mlp.down_proj")
+    assert q.V.shape == (d, 8) and q.U.shape == (8, qd)
+    assert v.V.shape == (d, 12) and v.U.shape == (12, kvd)
+    assert fc.V.shape == (d, 8) and fc.U.shape == (8, di)
+    assert down.V.shape == (di, 16) and down.U.shape == (16, d)
     assert all(a.dtype == jnp.float32 for pair in vu.stacks.values() for a in pair)
 
 
@@ -408,11 +456,10 @@ def test_pretrained_target_converts_with_all_layers():
     import yaml
 
     from param_decomp.experiments.lm.config import (
-        LlamaSimpleMLPTargetConfig,
         LMExperimentConfig,
         build_experiment_config,
     )
-    from param_decomp.experiments.lm.resolved import ResolvedLMData
+    from param_decomp.experiments.lm.resolved import LlamaSimpleMLPTargetConfig, ResolvedLMData
 
     reference_yaml = (
         Path(__file__).parents[2] / "experiments" / "lm" / "configs" / "llama8b_l18_b128_cmp32.yaml"

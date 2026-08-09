@@ -27,22 +27,23 @@ import jax
 import jax.numpy as jnp
 from jax import random
 
-from param_decomp.core.adversary import init_fresh_pgd_sources, source_masks
+from param_decomp.core.adversary import init_fresh_pgd_sources
 from param_decomp.core.components import init_component_stacks
+from param_decomp.core.masking import masks_from_sources
 from param_decomp.core.sharding import hsdp_mesh, shard_batch
 from param_decomp.targets.glu_transformer import (
     glu_site_specs,
     mlp_family_site_cs,
 )
 from param_decomp.targets.losses import kl_per_position
-from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.testing import run_clean, run_masked, tiny_glu_cfg, tiny_glu_decomposed_lm
 
 
 def _ascend_c_source(
     sharded: bool, n_steps: int, step_size: float
 ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
     """Run the fresh-PGD `c`-source sign-ascent on a fixed batch+seed and return the
-    ascended sources plus their materialized masks (`source_masks`).
+    ascended sources plus their materialized masks (`masks_from_sources`).
 
     Mirrors `train.py` `sign_ascend_body`: a batch-reduced KL ascent loss, grad w.r.t.
     a `(1, 1, C+1)` `c` source, `step_size * sign(grad)`, clamp to [0,1]. When
@@ -62,7 +63,7 @@ def _ascend_c_source(
     if mesh is not None:
         residual = shard_batch(residual, mesh, batch_axis=0)
 
-    clean_output = jax.lax.stop_gradient(model.clean_output(residual))
+    clean_output = jax.lax.stop_gradient(run_clean(model, residual))
     # ci_lower = 0 so the mask is just the `c` source — the cleanest probe of the
     # sign-ascent. Shapes match the masked forward's per-site (B, T, C) expectation.
     ci_lower = {s.name: jnp.zeros((gbatch, seq, s.C), jnp.float32) for s in sites}
@@ -70,8 +71,9 @@ def _ascend_c_source(
     init = init_fresh_pgd_sources(sites, "random", "c", (gbatch, seq), random.PRNGKey(5))
 
     def ascent_loss(sources: dict[str, jax.Array]) -> jax.Array:
-        masks, delta_masks = source_masks(ci_lower, sources, model.site_names)
-        masked = model.masked_output(
+        masks, delta_masks = masks_from_sources(ci_lower, sources, model.site_names)
+        masked = run_masked(
+            model,
             model.prepare_compute_weights(components),
             residual,
             masks,
@@ -93,7 +95,7 @@ def _ascend_c_source(
         }, None
 
     ascended, _ = jax.lax.scan(sign_ascend_body, init, None, length=n_steps)
-    masks, _ = source_masks(ci_lower, ascended, model.site_names)
+    masks, _ = masks_from_sources(ci_lower, ascended, model.site_names)
     return ascended, masks
 
 

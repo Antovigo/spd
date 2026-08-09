@@ -25,6 +25,7 @@ from param_decomp.core.ci_fn import (
     LayerwiseMLPCIFn,
     MHACIAttention,
     build_ci_fn,
+    evaluate_ci,
 )
 from param_decomp.core.components import SiteSpec, component_stacks_from_sites
 from param_decomp.core.configs import (
@@ -33,6 +34,7 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
 )
 from param_decomp.core.objective import build_objective
+from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.tests.test_generic_model_io import SyntheticDecomposedModel
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
@@ -44,7 +46,13 @@ SITES = (SiteSpec(name=SITE, d_in=D, d_out=D, C=C),)
 
 def _positioned_mlp_ci_fn() -> LayerwiseMLPCIFn:
     ci_fn = build_ci_fn(
-        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=True), SITES, random.PRNGKey(0)
+        LayerwiseMLPCIArch(
+            hidden_dims=(16,),
+            has_position_axis=True,
+            input_names=tuple(s.name for s in SITES),
+        ),
+        SITES,
+        random.PRNGKey(0),
     )
     assert isinstance(ci_fn, LayerwiseMLPCIFn)
     return ci_fn
@@ -76,8 +84,16 @@ def test_mlp_arch_serves_a_positioned_target():
     assert ci_fn.has_position_axis is True
 
     ci = ci_fn(_taps(), remat=False)
-    assert ci.logits[SITE].shape == (B, T, C)
+    assert ci.preactivations[SITE].shape == (B, T, C)
     assert bool(jnp.isfinite(ci.lower[SITE]).all())
+
+
+def test_evaluate_ci_casts_fp32_taps_to_compute_precision():
+    ci_fn = _positioned_mlp_ci_fn()
+    taps = _taps()
+    assert taps[SITE].dtype == jnp.float32
+    assert ci_fn(taps, remat=False).preactivations[SITE].dtype == jnp.float32
+    assert evaluate_ci(ci_fn, taps, remat=False).preactivations[SITE].dtype == COMPUTE_DT
 
 
 def test_positioned_mlp_is_position_local():
@@ -88,7 +104,8 @@ def test_positioned_mlp_is_position_local():
     perturbed = {SITE: taps[SITE].at[:, 2, :].add(100.0)}
 
     moved = jnp.abs(
-        ci_fn(taps, remat=False).logits[SITE] - ci_fn(perturbed, remat=False).logits[SITE]
+        ci_fn(taps, remat=False).preactivations[SITE]
+        - ci_fn(perturbed, remat=False).preactivations[SITE]
     ).max(axis=(0, 2))
 
     assert float(moved[2]) > 0.0, "the perturbed position must move at all"
@@ -107,7 +124,7 @@ def test_positioned_mlp_reads_tap_magnitude_where_the_blockless_chunk_cannot():
 
     def scale_gap(ci_fn: CIFn) -> float:
         x = _taps(1)[SITE]
-        f = lambda t: ci_fn({SITE: t}, remat=False).logits[SITE]  # noqa: E731
+        f = lambda t: ci_fn({SITE: t}, remat=False).preactivations[SITE]  # noqa: E731
         return float(jnp.abs(f(x) - f(x * 7.0)).max())
 
     assert scale_gap(_positioned_mlp_ci_fn()) > 1.0, "the MLP CI fn ignored tap magnitude"
@@ -173,8 +190,7 @@ def test_positioned_mlp_trains_a_positioned_target():
         total_steps=10,
         remat_recon_forwards=False,
         remat_ci_fn=True,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
 
     first_before = jax.device_get(ci_fn.site_mlps[SITE].weights[0])  # survives step donation

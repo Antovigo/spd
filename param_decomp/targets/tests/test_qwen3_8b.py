@@ -21,6 +21,11 @@ from param_decomp.targets.glu_transformer import (
     parse_site_name,
 )
 from param_decomp.targets.qwen3_8b import Qwen3FrozenAttn
+from param_decomp.targets.testing import capture_clean, run_clean, run_masked
+from param_decomp.targets.transformer_taps import (
+    attention_input_tap_key,
+    attention_output_tap_key,
+)
 
 
 def _tiny_qwen_cfg() -> GLUConfig:
@@ -90,12 +95,12 @@ def test_clean_path_and_masked_identity():
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    clean = model.clean_output(tokens)
+    clean = run_clean(model, tokens)
     assert clean.shape == (b, t, cfg.vocab_size)
 
     # SPEC S2: a masked forward with NO live sites is the frozen path — bit-identical.
-    none_masked = model.masked_output(
-        model.prepare_compute_weights(vu), tokens, {}, {}, None, (), True, remat=False
+    none_masked = run_masked(
+        model, model.prepare_compute_weights(vu), tokens, {}, {}, None, (), True, remat=False
     )
     assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
 
@@ -103,7 +108,7 @@ def test_clean_path_and_masked_identity():
     names = model.site_names
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in model.sites}
     ones_delta = {s: jnp.ones((b, t)) for s in names}
-    full = model.masked_output(
+    full = run_masked(model,
         model.prepare_compute_weights(vu), tokens, ones_masks, ones_delta, None, names, True,
         remat=False,
     )  # fmt: skip
@@ -113,7 +118,7 @@ def test_clean_path_and_masked_identity():
     # live on the attention path ahead of QK-norm/RoPE/SDPA).
     zero_mask = {s.name: jnp.zeros((b, t, s.C)) for s in model.sites}
     zero_delta = {s: jnp.zeros((b, t)) for s in names}
-    ablated = model.masked_output(
+    ablated = run_masked(model,
         model.prepare_compute_weights(vu), tokens, zero_mask, zero_delta, None, names, True,
         remat=False,
     )  # fmt: skip
@@ -135,19 +140,19 @@ def test_qk_norm_is_load_bearing():
     assert attn.q_norm.shape == (cfg.n_layer, cfg.head_dim)
     # scale ONLY layer 4's q_norm so the residual ENTERING layer 4 stays untouched
     scaled = eqx.tree_at(lambda m: m.stacked.attn.q_norm, model, attn.q_norm.at[4].mul(2.0))
-    assert not jnp.allclose(model.clean_output(tokens), scaled.clean_output(tokens), atol=1e-4)
+    assert not jnp.allclose(run_clean(model, tokens), run_clean(scaled, tokens), atol=1e-4)
 
-    q_site = "layers.4.self_attn.q_proj"
-    taps = model.read_activations(tokens, model.site_names)
-    scaled_taps = scaled.read_activations(tokens, model.site_names)
-    assert jnp.array_equal(taps[q_site], scaled_taps[q_site])
-    o_site = "layers.4.self_attn.o_proj"
-    o_tap = model.read_activations(tokens, (o_site,))[o_site]
-    o_tap_scaled = scaled.read_activations(tokens, (o_site,))[o_site]
+    qkv_input = attention_input_tap_key(4)
+    taps = capture_clean(model, tokens, (qkv_input,))
+    scaled_taps = capture_clean(scaled, tokens, (qkv_input,))
+    assert jnp.array_equal(taps[qkv_input], scaled_taps[qkv_input])
+    attention_output = attention_output_tap_key(4)
+    o_tap = capture_clean(model, tokens, (attention_output,))[attention_output]
+    o_tap_scaled = capture_clean(scaled, tokens, (attention_output,))[attention_output]
     assert not jnp.allclose(o_tap, o_tap_scaled)
 
 
-def test_attn_pattern_applies_that_layers_qk_norm():
+def test_attention_pattern_from_qk_applies_that_layers_qk_norm():
     """The target-owned attn-pattern recipe uses the site's LAYER norms: the same q/k
     flats produce different patterns for two layers whose q_norm weights differ."""
     cfg = _tiny_qwen_cfg()
@@ -167,8 +172,8 @@ def test_attn_pattern_applies_that_layers_qk_norm():
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
     q = jax.random.normal(jax.random.PRNGKey(1), (b, t, qd))
     k = jax.random.normal(jax.random.PRNGKey(2), (b, t, kvd))
-    p4 = model.attn_pattern("layers.4.self_attn.q_proj", q, k)
-    p5 = model.attn_pattern("layers.5.self_attn.q_proj", q, k)
+    p4 = model.attention_pattern_from_qk("layers.4.self_attn.q_proj", q, k)
+    p5 = model.attention_pattern_from_qk("layers.5.self_attn.q_proj", q, k)
     assert p4.shape == (b, cfg.n_head, t, t)
     assert not jnp.allclose(p4, p5)
     assert parse_site_name("layers.5.self_attn.q_proj") == (5, "q")
@@ -232,8 +237,7 @@ def test_step_trains():
         total_steps=100,
         remat_recon_forwards=True,
         remat_ci_fn=False,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
     state, metrics = step(model, state, tokens, jax.random.PRNGKey(100))

@@ -88,7 +88,9 @@ Each `experiments/{tms,resid_mlp}/` carries:
   column-permutation source and their small on-host V/U, sharing `slow_eval.render_uv_figure`
   / `plot_uv_matrices` with the LM in-loop tier (SPEC S28). Toy `eval:` is a domain-specific
   closed schema: fresh `PGDReconLoss` runs against the target's own `recon_loss_fn` on
-  independent synthetic batches, and optional `UVPlots` runs on the slow cadence — read off
+  independent synthetic batches; optional `UVPlots` and target-generic `WellTemperedness`
+  operations run on the slow cadence (the latter samples the actual eval distribution, not the
+  single-feature probe) — read off
   its own `slow` declaration, the same one the LM binder reads (`eval_config.schedule_for`;
   SPEC S29), never a per-family choice. LM-only
   token metrics refuse when toy evaluator construction reaches them. Ground-truth identity/dense CI scoring remains the
@@ -108,9 +110,10 @@ remaining Phase-3 bucket.
 ## Picking a CI-fn arch — and `n_blocks: 0`
 
 `CIFn.has_position_axis` must equal the target's (`core.run_state.init_decomposition` asserts
-it), and `ChunkwiseTransformerCIArch` is the ONLY arch that declares `True` — both MLP arches
-are positionless. So a positioned target has exactly one arch available, and that arch's blocks
-self-attend OVER the position axis.
+it). The chunkwise transformer is the positioned arch whose blocks self-attend OVER the
+position axis; the LM schema also admits `type: global_mlp` (the tPD paper's LM CI net) —
+ONE shared MLP over every decomposed block's `input_tap` taps, pointwise per token, so it
+is positioned with no cross-position read at all.
 
 For a sequence target that is the point. It is fatal when the position axis is large and
 derived: a pair-shaped target (an AF2-style pair representation, where a position is a residue
@@ -143,8 +146,10 @@ The `ExperimentConfig` schema base (domain subclasses bind concrete
 run-identity helpers live in `experiments/config.py` (`WandbConfig` / `ResumeProvenance` are
 core, in `param_decomp.core.configs`; the engine's `BuiltRun` bundle is core, in
 `param_decomp.core.built_run`); the LM schema + LM build (`LMExperimentConfig`, `LMTargetConfig`,
-`LMDataConfig`, the `target.spec` union, the authored chunkwise CI config
-(`ChunkwiseTransformerCiConfig` + its `attention`/`ffn` unions and `ChunkInputTap`) AND the
+`LMDataConfig`, the `target.spec` union, the authored LM CI union (`LMCiConfig`:
+`ChunkwiseTransformerCiConfig` + its `attention`/`ffn` unions, and the LM `GlobalMlpCiConfig`
+— its own class, not the toy one: it selects taps via `ChunkInputTap`, resolved by
+`resolve_lm_ci_arch` over ALL decomposed blocks) AND the
 tiled site specs + their resolution (`GluTransformerCSpec`/`SimpleMlpCSpec` over
 `LayerSelection`, keys typed by each target family's matrix vocabulary;
 `resolve_site_tree` → the block-structured `SiteTree` the chunkwise CI resolver consumes) —
@@ -166,7 +171,7 @@ experiments/
 │   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
 │   ├── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
 │   └── arithmetic_probe.py    # a x b arithmetic grid spec -> in-memory eval probe (ArithmeticCIGrid)
-├── tms/                     # TMS (CPU): run.py + configs/ + test_tms.py (target: param_decomp/targets/tms.py)
+├── tms/                     # TMS (CPU): run.py + configs/ + tests (target: param_decomp/targets/tms.py; also the tPD engine's test fixture — no shipped toy tPD shape)
 └── resid_mlp/               # ResidMLP (CPU): run.py + configs/ + test (target: param_decomp/targets/resid_mlp.py)
 ```
 

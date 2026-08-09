@@ -84,7 +84,6 @@ def _adversary(src: dict[str, jax.Array], cfg: PersistentPGDReconLossConfig) -> 
         sources=src,
         opt_state=init_sources_adam_state(src),
         state_key=cfg.type,
-        coeff=cfg.coeff,
         adam=cfg.optimizer,
         n_warmup=cfg.n_warmup_steps,
     )
@@ -168,7 +167,8 @@ def _optimizers_and_step(muon_components: bool, muon_ci_fn: bool, stacked_impl: 
         losses=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, remat_ci_fn=False, mesh=None, compiler_options={},
+        remat_recon_forwards=True, remat_ci_fn=False,
+        ci_capture_keys=_chunkwise_arch(model, cfg).capture_keys,
     )  # fmt: skip
     resid = jax.random.randint(jax.random.PRNGKey(9), (2, _SEQ), 0, cfg.vocab_size)
     return cfg, sites, model, opt_vu, opt_ci, ppgd_cfg, step, resid

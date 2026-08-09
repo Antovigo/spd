@@ -16,12 +16,14 @@ from param_decomp.core.configs import (
     CIHistogramsConfig,
     CIMeanPerComponentConfig,
     ComponentActivationDensityConfig,
+    HiddenActsReconstructionMixin,
     IdentityCIErrorConfig,
     LossMetricConfig,
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
     UVPlotsConfig,
+    WellTemperednessConfig,
 )
 from param_decomp.core.eval_schedule import EvalSchedule, Every, FirstThenEvery
 from param_decomp.experiments.lm.eval_config import (
@@ -45,7 +47,8 @@ AnyEvalMetricConfig = Annotated[
     | PGDReconLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
-    | UVPlotsConfig,
+    | UVPlotsConfig
+    | WellTemperednessConfig,
     Discriminator("type"),
 ]
 
@@ -83,6 +86,14 @@ def validate_eval_metrics(metrics: list[AnyEvalMetricConfig]) -> None:
             identities.append(metric.name or metric.type)
         else:
             identities.append(metric.type)
+        if (
+            isinstance(metric, HiddenActsReconstructionMixin)
+            and metric.hidden_acts_reconstruction is not None
+        ):
+            assert isinstance(metric.hidden_acts_reconstruction.coeff, float), (
+                f"eval metric {metric.type}: hidden_acts_reconstruction.coeff must be a "
+                "constant float — an eval probe has no training step for a schedule to read"
+            )
     assert len(identities) == len(set(identities)), (
         f"eval.metrics contains metrics sharing a logged identity: {identities}. Give one a "
         "distinct `name` if you meant to run the same metric twice."

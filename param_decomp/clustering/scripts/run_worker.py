@@ -59,7 +59,7 @@ def harvest_jax_run(run: LoadedJaxRun, config: HarvestConfig, output_dir: Path) 
         "n_tokens_per_seq required when use_all_tokens_per_seq is False"
     )
 
-    data = run.config.data
+    data = run.deliverable.data
     schedule = BatchSchedule(scan_shards(data.dir), config.batch_size, config.dataset_seed)
     server = ShardServer(
         schedule, read_dataset_meta(data.dir).seq_len, process_index=0, process_count=1
@@ -80,7 +80,7 @@ def harvest_jax_run(run: LoadedJaxRun, config: HarvestConfig, output_dir: Path) 
         batch_size, n_ctx = tokens.shape
         fwd = run.forward(jnp.asarray(tokens))
         sampled = sampled_ci_from_forward(
-            fwd.lower_leaky_ci,
+            fwd.lower_leaky_ci_by_site,
             n_tokens_per_seq=config.n_tokens_per_seq,
             use_all_tokens_per_seq=config.use_all_tokens_per_seq,
             rng=rng,

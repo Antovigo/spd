@@ -7,6 +7,9 @@ the concrete target behind the `DecomposedModel` protocol; the per-target suites
 GPU.
 """
 
+from collections.abc import Iterable
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 
@@ -18,7 +21,7 @@ from param_decomp.core.ci_fn import (
     build_ci_fn,
 )
 from param_decomp.core.components import SiteC, SiteSpec
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import DecomposedModel, MaterializedMasking
 from param_decomp.targets import llama_simple_mlp
 from param_decomp.targets.glu_transformer import (
     FrozenAttn,
@@ -186,3 +189,71 @@ def tiny_simple_mlp_chunkwise_ci_fn(
 ) -> ChunkwiseTransformerCIFn:
     first_block = min(llama_simple_mlp.parse_site_name(n)[0] for n in model.site_names)
     return _tiny_chunkwise_ci_fn(model, key, first_block, tiny_simple_mlp_cfg().n_embd, 2)
+
+
+def run_clean(model: DecomposedModel, inputs: Any) -> Any:
+    """Test-only output projection of the new capture-aware forward."""
+    return model.clean_forward(inputs).output
+
+
+def capture_clean(model: DecomposedModel, inputs: Any, keys: Iterable[str]) -> dict[str, jax.Array]:
+    return model.clean_forward(inputs, frozenset(keys)).captures
+
+
+def _explicit_masking_for_test(
+    masks: dict[str, jax.Array],
+    delta_masks: dict[str, jax.Array],
+    routes: dict[str, jax.Array] | None,
+    live_sites: tuple[str, ...],
+    uses_weight_deltas: bool,
+) -> MaterializedMasking:
+    component_masks = {site: masks[site] for site in live_sites}
+    weight_delta_masks = (
+        {site: delta_masks[site] for site in live_sites} if uses_weight_deltas else None
+    )
+    selected_routes = None if routes is None else {site: routes[site] for site in live_sites}
+    return MaterializedMasking(
+        component_masks=component_masks,
+        weight_delta_masks=weight_delta_masks,
+        routes=selected_routes,
+    )
+
+
+def run_masked[PreparedT](
+    model: DecomposedModel[PreparedT],
+    prepared_weights: PreparedT,
+    inputs: Any,
+    masks: dict[str, jax.Array],
+    delta_masks: dict[str, jax.Array],
+    routes: dict[str, jax.Array] | None,
+    live: tuple[str, ...],
+    uses_weight_deltas: bool,
+    *,
+    remat: bool,
+) -> Any:
+    return model.masked_forward(
+        prepared_weights,
+        inputs,
+        masking=_explicit_masking_for_test(masks, delta_masks, routes, live, uses_weight_deltas),
+        remat=remat,
+    ).output
+
+
+def capture_site_outputs[PreparedT](
+    model: DecomposedModel[PreparedT],
+    prepared_weights: PreparedT,
+    inputs: Any,
+    masking: MaterializedMasking,
+) -> dict[str, jax.Array]:
+    site_output_keys = model.site_output_keys(masking.live_sites)
+    masked_forward_result = model.masked_forward(
+        prepared_weights,
+        inputs,
+        masking=masking,
+        capture_keys=frozenset(site_output_keys),
+        remat=False,
+    )
+    return {
+        site: masked_forward_result.captures[key]
+        for site, key in zip(masking.live_sites, site_output_keys, strict=True)
+    }

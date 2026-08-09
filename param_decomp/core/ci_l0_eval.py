@@ -19,22 +19,21 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn
+from param_decomp.core.ci_fn import CIFn, evaluate_ci
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import CaptureKeys, DecomposedModel
 from param_decomp.core.sharding import batch_shard_leading
-from param_decomp.core.train import COMPUTE_DT, cast_floating
 
 type CI_L0Step = Callable[
     [DecomposedModel, ComponentStacks, CIFn, Any, PRNGKeyArray], dict[str, Array]
 ]
 
 
-def resolve_l0_groups(
+def resolve_site_groups(
     site_names: tuple[str, ...], patterns_by_group: dict[str, tuple[str, ...]] | None
 ) -> dict[str, tuple[str, ...]]:
-    """Expand each authored group's fnmatch patterns into the sites it sums over."""
+    """Expand each authored group's fnmatch patterns into matching site names."""
     if patterns_by_group is None:
         return {}
     groups: dict[str, tuple[str, ...]] = {}
@@ -42,7 +41,7 @@ def resolve_l0_groups(
         members = tuple(
             site for site in site_names if any(fnmatch(site, pattern) for pattern in patterns)
         )
-        assert members, f"CI_L0 group {name!r} matches no sites: {patterns}"
+        assert members, f"site group {name!r} matches no sites: {patterns}"
         groups[name] = members
     return groups
 
@@ -73,15 +72,16 @@ def ci_l0_scalars(
 
 def make_ci_l0_eval_step(
     model_static: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     ci_alive_threshold: float,
     groups: dict[str, tuple[str, ...]] | None,
-    mesh: Mesh | None,
-    compiler_options: dict[str, bool | int | str],
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> CI_L0Step:
     """Build `CI_L0` for ANY target: the CI envelope is all it reads, so only the taps
     forward is target-specific. No clean output, no masked re-forward, no recon metric."""
     site_names = model_static.site_names
-    resolved_groups = resolve_l0_groups(site_names, groups)
+    resolved_groups = resolve_site_groups(site_names, groups)
     leading_rank = 2 if model_static.has_position_axis else 1
 
     def eval_step(
@@ -92,9 +92,9 @@ def make_ci_l0_eval_step(
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         del components, key  # L0 reads the CI envelope alone
-        inputs = jax.tree.map(lambda x: batch_shard_leading(x, mesh), inputs)
-        taps = model.read_activations(inputs, ci_fn.input_names)
-        ci_lower = cast_floating(ci_fn, COMPUTE_DT)(taps, remat=False).lower
+        sharded_inputs = jax.tree.map(lambda x: batch_shard_leading(x, mesh), inputs)
+        ci_input_activations = model.clean_forward(sharded_inputs, ci_capture_keys).captures
+        ci_lower = evaluate_ci(ci_fn, ci_input_activations, remat=False).lower
         leading = next(iter(ci_lower.values())).shape[:-1]
         assert len(leading) == leading_rank, (leading, model_static.has_position_axis)
         return ci_l0_scalars(ci_lower, site_names, ci_alive_threshold, resolved_groups, jnp.mean)

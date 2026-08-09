@@ -49,14 +49,29 @@ from param_decomp.core.checkpoint import (
 )
 from param_decomp.core.ci_fn import CIFnArch
 from param_decomp.core.components import init_component_stacks
-from param_decomp.core.configs import Cadence, PDConfig, flatten_typed_lists
+from param_decomp.core.configs import (
+    AnyPDConfig,
+    Cadence,
+    NontargetConfig,
+    PDConfig,
+    PDConfigBase,
+    TargetedPDConfig,
+    flatten_typed_lists,
+)
 from param_decomp.core.eval_schedule import EvalSchedule, eval_due
 from param_decomp.core.metrics import BarChart, LogRecord, PNGImage
 from param_decomp.core.model import DecomposedModel, PositionAxis
-from param_decomp.core.objective import build_objective
+from param_decomp.core.objective import build_objective, build_targeted_objective
 from param_decomp.core.placement import PlacementRules, component_stacks_audit
 from param_decomp.core.run_state import build_optimizers, init_train_state
-from param_decomp.core.train import TrainState, make_faith_warmup_step, make_train_step
+from param_decomp.core.train import (
+    CIScaledWeightDecay,
+    TrainState,
+    make_faith_warmup_step,
+    make_targeted_train_step,
+    make_train_step,
+    uv_norm_ratio_metrics,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -224,8 +239,13 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def _is_verbose_grad_norm(key: str) -> bool:
-    return key.startswith("train/grad_norms/") and not key.startswith("train/grad_norms/summary/")
+def _is_verbose(key: str) -> bool:
+    """Per-item metric families that belong in wandb but would swamp the console line — one
+    scalar per trainable leaf, one per hidden-activation reconstruction point. Their aggregates
+    (`grad_norms/summary/*`, `loss/<name>/hidden_acts_reconstruction`) stay."""
+    if key.startswith("train/grad_norms/"):
+        return not key.startswith("train/grad_norms/summary/")
+    return "/hidden_acts_reconstruction/" in key
 
 
 def _grad_norm_summary_window_stats(window: list[dict[str, jax.Array]]) -> dict[str, float]:
@@ -324,7 +344,7 @@ class MetricsSink:
         self._jsonl.flush()
         # The console line drops the per-param grad norms — the full breakdown still rides to
         # wandb + jsonl.
-        console = {k: v for k, v in scalars.items() if not _is_verbose_grad_norm(k)}
+        console = {k: v for k, v in scalars.items() if not _is_verbose(k)}
         head = f"[step {step}]"
         if "train/perf/eta_s" in console:  # train logs carry the paired timing; eval logs don't
             elapsed, eta = console.pop("train/perf/elapsed_s"), console.pop("train/perf/eta_s")
@@ -453,8 +473,19 @@ class BackgroundRenderer:
         self._thread.start()
 
 
+@dataclasses.dataclass(frozen=True)
+class FaithfulnessWarmup:
+    """SPEC S21's warmup phase as the engine consumes it — built by the PLAIN entry from
+    `PDConfig`'s fields. A targeted run has no faithfulness role to warm (T3): its config
+    shape carries no warmup fields, and its entry passes no warmup by construction."""
+
+    steps: int
+    lr: float
+    weight_decay: float
+
+
 def _init_or_restore_state(
-    pd: PDConfig,
+    pd: AnyPDConfig,
     ci_fn_arch: CIFnArch,
     positions: PositionAxis,
     run: RunInstance,
@@ -468,6 +499,7 @@ def _init_or_restore_state(
     checkpoint_manager: ocp.CheckpointManager,
     is_main: bool,
     compiler_options: dict[str, bool | int | str],
+    faith_warmup: FaithfulnessWarmup | None,
 ) -> tuple[TrainState, int] | None:
     """The shared init/restore/finetune/faith-warmup phase (SPEC S21/S22/S33).
 
@@ -516,9 +548,9 @@ def _init_or_restore_state(
             )
         return state, 0
 
-    if pd.faithfulness_warmup_steps > 0:
+    if faith_warmup is not None:
         faith_warmup_optimizer = optax.adamw(
-            pd.faithfulness_warmup_lr, weight_decay=pd.faithfulness_warmup_weight_decay
+            faith_warmup.lr, weight_decay=faith_warmup.weight_decay
         )
         faith_warmup_opt_state = faith_warmup_optimizer.init(
             eqx.filter(state.decomposition.components, eqx.is_array)
@@ -527,7 +559,7 @@ def _init_or_restore_state(
         warmed_components = state.decomposition.components
         t0 = time.time()
         faith_warmup_loss = None
-        for _ in range(pd.faithfulness_warmup_steps):
+        for _ in range(faith_warmup.steps):
             warmed_components, faith_warmup_opt_state, faith_warmup_loss = faith_warmup_step(
                 model, warmed_components, faith_warmup_opt_state
             )
@@ -549,12 +581,90 @@ def _init_or_restore_state(
         )
         if is_main:
             print(
-                f"faith warmup: {pd.faithfulness_warmup_steps} steps in {time.time() - t0:.0f}s, "
+                f"faith warmup: {faith_warmup.steps} steps in {time.time() - t0:.0f}s, "
                 f"final faith {float(faith_warmup_loss):.3e}",
                 flush=True,
             )
     save_state(checkpoint_manager, 0, state)
     return state, 0
+
+
+@dataclasses.dataclass(frozen=True)
+class _PreparedRun:
+    """The generic pre-loop phase's outputs, shared by both engine entries: the built
+    optimizer pair + their schedule fns (re-read at log time so the reported LR is the
+    applied one), the per-step batch/RNG key root, the checkpoint manager, and the
+    initialized-or-restored state."""
+
+    opt_vu: optax.GradientTransformation
+    opt_ci: optax.GradientTransformation
+    sched_vu: Callable[[Any], jax.Array]
+    sched_ci: Callable[[Any], jax.Array]
+    run_key: PRNGKeyArray
+    checkpoint_manager: ocp.CheckpointManager
+    state: TrainState
+    start_step: int
+
+
+def _prepare_run(
+    pd: AnyPDConfig,
+    cadence: Cadence,
+    run: RunInstance,
+    model: DecomposedModel,
+    ci_fn: CIFnArch,
+    positions: PositionAxis,
+    compiler_options: dict[str, bool | int | str],
+    mesh: Mesh,
+    placement_rules: PlacementRules,
+    is_main: bool,
+    faith_warmup: FaithfulnessWarmup | None,
+) -> _PreparedRun | None:
+    """Everything before the train loop: mesh activation, optimizers, keys, checkpoint
+    manager, the placement audit, and init/restore/finetune/faith-warmup. Returns `None`
+    when a SIGTERM landed mid-warmup (the caller exits cleanly for requeue)."""
+    # Activate the mesh so bare-PartitionSpec `with_sharding_constraint`s inside the forward
+    # resolve (the attn q/k/v batch-sharding pin in `FrozenAttn.core`, needed for cuDNN
+    # flash attention under the scan+cond masked forward). Explicit NamedShardings elsewhere
+    # are unaffected.
+    jax.set_mesh(mesh)
+    run.run_dir.mkdir(parents=True, exist_ok=True)
+    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(pd, ci_fn, mesh)
+
+    key = random.PRNGKey(pd.seed)
+    init_key, src_key, run_key = random.split(key, 3)
+
+    checkpoint_manager = make_checkpoint_manager(
+        run.run_dir / "ckpts", cadence.checkpoint_retention
+    )
+    rules = placement_rules
+    if is_main:
+        audit = component_stacks_audit(
+            eqx.filter_eval_shape(_partial(init_component_stacks, model.sites), init_key), rules
+        )
+        print(
+            rules.describe(
+                tensors=audit,
+                not_audited=("ci_fn", "frozen target", "persistent sources", "opt state"),
+            ),
+            flush=True,
+        )
+    init = _init_or_restore_state(
+        pd, ci_fn, positions, run, model, opt_vu, opt_ci, init_key, src_key, mesh, rules,
+        checkpoint_manager, is_main, compiler_options, faith_warmup,
+    )  # fmt: skip
+    if init is None:
+        return None  # SIGTERM mid-warmup: clean exit for requeue
+    state, start_step = init
+    return _PreparedRun(
+        opt_vu=opt_vu,
+        opt_ci=opt_ci,
+        sched_vu=sched_vu,
+        sched_ci=sched_ci,
+        run_key=run_key,
+        checkpoint_manager=checkpoint_manager,
+        state=state,
+        start_step=start_step,
+    )
 
 
 def run_decomposition_training[EvalContextT](
@@ -598,64 +708,141 @@ def run_decomposition_training[EvalContextT](
     Everything generic — `init_train_state`, fine-tune init, faith warmup, the recon-grid
     step factory, orbax checkpointing, schedules, SIGTERM-save — lives here. The step
     numerics are identical across targets; only the data source and the eval metric differ.
+
+    The targeted (tPD) twin is `run_targeted_decomposition_training`; both entries compose
+    the same `_prepare_run` / `_run_loop` core.
     """
     is_main = jax.process_index() == 0
-    # Activate the mesh so bare-PartitionSpec `with_sharding_constraint`s inside the forward
-    # resolve (the attn q/k/v batch-sharding pin in `FrozenAttn.core`, needed for cuDNN
-    # flash attention under the scan+cond masked forward). Explicit NamedShardings elsewhere
-    # are unaffected.
-    jax.set_mesh(mesh)
-    save_every = cadence.save_every
-
-    run.run_dir.mkdir(parents=True, exist_ok=True)
-    opt_vu, opt_ci, (sched_vu, sched_ci) = build_optimizers(pd, ci_fn, mesh)
-
-    key = random.PRNGKey(pd.seed)
-    init_key, src_key, run_key = random.split(key, 3)
-
-    checkpoint_manager = make_checkpoint_manager(
-        run.run_dir / "ckpts", cadence.checkpoint_retention
+    faith_warmup = (
+        FaithfulnessWarmup(
+            steps=pd.faithfulness_warmup_steps,
+            lr=pd.faithfulness_warmup_lr,
+            weight_decay=pd.faithfulness_warmup_weight_decay,
+        )
+        if pd.faithfulness_warmup_steps > 0
+        else None
     )
-    rules = placement_rules
-    if is_main:
-        audit = component_stacks_audit(
-            eqx.filter_eval_shape(_partial(init_component_stacks, model.sites), init_key), rules
-        )
-        print(
-            rules.describe(
-                tensors=audit,
-                not_audited=("ci_fn", "frozen target", "persistent sources", "opt state"),
-            ),
-            flush=True,
-        )
-    init = _init_or_restore_state(
-        pd, ci_fn, positions, run, model, opt_vu, opt_ci, init_key, src_key, mesh, rules,
-        checkpoint_manager, is_main, compiler_options,
+    prepared = _prepare_run(
+        pd, cadence, run, model, ci_fn, positions, compiler_options, mesh, placement_rules,
+        is_main, faith_warmup,
     )  # fmt: skip
-    if init is None:
-        return  # SIGTERM mid-warmup: clean exit for requeue
-    state, start_step = init
+    if prepared is None:
+        return
 
     step_fn = make_train_step(
         model_static=model,
         losses=build_objective(pd.loss_metrics, model.site_names),
-        components_optimizer=opt_vu,
-        ci_fn_optimizer=opt_ci,
+        components_optimizer=prepared.opt_vu,
+        ci_fn_optimizer=prepared.opt_ci,
         total_steps=pd.steps,
         remat_recon_forwards=remat_recon_forwards,
         remat_ci_fn=remat_ci_fn,
+        ci_capture_keys=prepared.state.decomposition.ci_fn.capture_keys,
         ascend_replicate=ascend_replicate,
         compiler_options=compiler_options,
         mesh=mesh,
     )
+
+    def run_step(state: TrainState, step: int) -> tuple[TrainState, dict[str, jax.Array]]:
+        return step_fn(model, state, sample_batch(step), random.fold_in(prepared.run_key, step))
+
+    _run_loop(pd, cadence, evaluation, sink, prepared, is_main, run_step)
+
+
+def run_targeted_decomposition_training[EvalContextT](
+    pd: TargetedPDConfig,
+    nontarget: NontargetConfig,
+    cadence: Cadence,
+    run: RunInstance,
+    model: DecomposedModel,
+    ci_fn: CIFnArch,
+    positions: PositionAxis,
+    remat_recon_forwards: bool,
+    remat_ci_fn: bool,
+    ascend_replicate: bool,
+    compiler_options: dict[str, bool | int | str],
+    sample_target_batch: Callable[[int], Any],
+    sample_nontarget_batch: Callable[[int], Any],
+    evaluation: Evaluation[EvalContextT] | None,
+    sink: MetricsSink,
+    mesh: Mesh,
+    placement_rules: PlacementRules,
+) -> None:
+    """The targeted-PD (tPD) engine entry (SPEC §11) — `run_decomposition_training`'s twin
+    over the same `_prepare_run` / `_run_loop` core, stepping the two-pass
+    `make_targeted_train_step`.
+
+    Two data seams instead of one: `sample_target_batch(step)` feeds the narrow TARGET
+    stream (global batch `pd.batch_size` — the pass the persistent adversaries and every
+    other decomposition loss run on), and `sample_nontarget_batch(step)` the broad
+    NON-TARGET stream (global batch `nontarget.batch_size`, delta pinned fully on save
+    T4's one unmasked-no-delta exception). `positions` is the TARGET stream's waist
+    geometry — persistent sources live in the target pass; each stream runs at its own
+    natural sequence length (SPEC T2/T8).
+
+    tPD has no faithfulness role (T3): `TargetedPDConfig` admits no faithfulness loss
+    member and carries no warmup fields, so neither exists to refuse here."""
+    is_main = jax.process_index() == 0
+    prepared = _prepare_run(
+        pd, cadence, run, model, ci_fn, positions, compiler_options, mesh, placement_rules,
+        is_main, None,
+    )  # fmt: skip
+    if prepared is None:
+        return
+
+    step_fn = make_targeted_train_step(
+        model_static=model,
+        objective=build_targeted_objective(pd.loss_metrics, nontarget, model.site_names),
+        ci_scaled_weight_decay=(
+            CIScaledWeightDecay(pd.ci_scaled_weight_decay, prepared.sched_vu)
+            if pd.ci_scaled_weight_decay is not None
+            else None
+        ),
+        components_optimizer=prepared.opt_vu,
+        ci_fn_optimizer=prepared.opt_ci,
+        total_steps=pd.steps,
+        remat_recon_forwards=remat_recon_forwards,
+        remat_ci_fn=remat_ci_fn,
+        ci_capture_keys=prepared.state.decomposition.ci_fn.capture_keys,
+        ascend_replicate=ascend_replicate,
+        compiler_options=compiler_options,
+        mesh=mesh,
+    )
+
+    def run_step(state: TrainState, step: int) -> tuple[TrainState, dict[str, jax.Array]]:
+        return step_fn(
+            model,
+            state,
+            sample_target_batch(step),
+            sample_nontarget_batch(step),
+            random.fold_in(prepared.run_key, step),
+        )
+
+    _run_loop(pd, cadence, evaluation, sink, prepared, is_main, run_step)
+
+
+def _run_loop[EvalContextT](
+    pd: PDConfigBase,
+    cadence: Cadence,
+    evaluation: Evaluation[EvalContextT] | None,
+    sink: MetricsSink,
+    prepared: _PreparedRun,
+    is_main: bool,
+    run_step: Callable[[TrainState, int], tuple[TrainState, dict[str, jax.Array]]],
+) -> None:
+    """The generic train loop over one already-built `run_step(state, step)`: log cadence,
+    eval scheduling, checkpointing, and SIGTERM-save — identical for both engine entries."""
+    save_every = cadence.save_every
+    checkpoint_manager = prepared.checkpoint_manager
+    sched_vu, sched_ci = prepared.sched_vu, prepared.sched_ci
+    state, start_step = prepared.state, prepared.start_step
 
     window_t0 = loop_t0 = time.time()
     last_logged = start_step
     grad_norm_summary_window: list[dict[str, jax.Array]] = []
 
     for step in range(start_step, pd.steps):
-        batch = sample_batch(step)
-        state, metrics = step_fn(model, state, batch, random.fold_in(run_key, step))
+        state, metrics = run_step(state, step)
 
         grad_norm_summary_window.append(
             {k: v for k, v in metrics.items() if k.startswith("grad_norms/summary/")}
@@ -700,6 +887,14 @@ def run_decomposition_training[EvalContextT](
             if evaluation is not None and not sigterm
             else None
         )
+        if eval_record is not None:
+            factor_record = {
+                f"eval/{key}": float(value)
+                for key, value in uv_norm_ratio_metrics(state.decomposition.components).items()
+            }
+            overlap = eval_record.keys() & factor_record.keys()
+            assert not overlap, f"U/V norm-ratio metrics collided with eval keys: {sorted(overlap)}"
+            eval_record = {**eval_record, **factor_record}
         step_record = _combine_step_records(train_record, eval_record)
         if step_record is not None:
             sink.log(now_step, step_record)

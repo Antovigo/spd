@@ -106,12 +106,14 @@ def make_optimizer(cfg: PretrainConfig, model: PretrainModel) -> optax.GradientT
 
 
 def _next_token_ce(
-    logits: Float[Array, "b t1 vocab"], tokens: Int[Array, "b tplus1"]
+    logits: Float[Array, "b t1 vocab"], tokens: Int[Array, "b t"]
 ) -> Float[Array, ""]:
-    """Mean cross-entropy of position-`i` logits predicting token `i+1`. `tokens` is one
-    token wider than the model context (the staged shards are `block_size + 1` wide)."""
+    """Mean cross-entropy of position-`i` logits predicting token `i+1`, truncating the
+    logits to the shifted targets' width: train rows carry a final-label extra token
+    (`block_size + 1` wide); a val row may be `block_size` wide, leaving the last logit
+    targetless."""
     targets = tokens[:, 1:]
-    logp = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+    logp = jax.nn.log_softmax(logits[:, : targets.shape[1]].astype(jnp.float32), axis=-1)
     picked = jnp.take_along_axis(logp, targets[..., None], axis=-1)[..., 0]
     return -picked.mean()
 
@@ -285,8 +287,15 @@ def train(cfg: PretrainConfig) -> None:
     shards = scan_shards(resolve_dataset_ref(cfg.data, paths.data_root))
     schedule = BatchSchedule(shards, cfg.global_batch, cfg.seed)
     server = ShardServer(schedule, seq_plus1, jax.process_index(), n_proc)
-    eval_schedule = BatchSchedule(shards, cfg.global_batch, cfg.seed + 1)
-    eval_server = ShardServer(eval_schedule, seq_plus1, jax.process_index(), n_proc)
+    if cfg.val_data is not None:
+        # A held-out split may be staged exactly `block_size` wide; `_next_token_ce`
+        # pairs that width with its shifted targets.
+        eval_shards = scan_shards(resolve_dataset_ref(cfg.val_data, paths.data_root))
+        eval_width = cfg.block_size
+    else:
+        eval_shards, eval_width = shards, seq_plus1
+    eval_schedule = BatchSchedule(eval_shards, cfg.global_batch, cfg.seed + 1)
+    eval_server = ShardServer(eval_schedule, eval_width, jax.process_index(), n_proc)
 
     step_fn = make_train_step(cfg, optimizer)
     eval_fn = make_eval_step(cfg)

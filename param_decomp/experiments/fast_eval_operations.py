@@ -20,7 +20,8 @@ from param_decomp.core.ci_l0_eval import make_ci_l0_eval_step
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import CaptureKeys, DecomposedModel
+from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval, make_fresh_pgd_eval_step
 from param_decomp.core.run import EvalInvocation, EvalOperation
 from param_decomp.experiments.eval_config import EvalConfig
@@ -67,6 +68,7 @@ def make_fresh_pgd_operation(
     seed: int,
     compiler_options: dict[str, bool | int | str],
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     mesh: Mesh | None,
     sample_eval_batch: Callable[[int], Any],
 ) -> EvalOperation[EvalInvocation]:
@@ -75,8 +77,11 @@ def make_fresh_pgd_operation(
         name=metric.name or metric.type,
         n_steps=metric.n_steps,
         step_size=metric.step_size,
+        reconstruction=resolve_reconstruction_spec(metric.hidden_acts_reconstruction),
     )
-    pgd_step = make_fresh_pgd_eval_step(model, probe, mesh, compiler_options=compiler_options)
+    pgd_step = make_fresh_pgd_eval_step(
+        model, probe, ci_capture_keys, mesh, compiler_options=compiler_options
+    )
 
     def step(
         model: DecomposedModel,
@@ -97,6 +102,7 @@ def make_ci_l0_operation(
     seed: int,
     compiler_options: dict[str, bool | int | str],
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     mesh: Mesh | None,
     sample_eval_batch: Callable[[int], Any],
 ) -> EvalOperation[EvalInvocation]:
@@ -106,6 +112,11 @@ def make_ci_l0_operation(
         else None
     )
     step = make_ci_l0_eval_step(
-        model, metric.ci_alive_threshold, groups, mesh, compiler_options=compiler_options
+        model,
+        ci_capture_keys,
+        metric.ci_alive_threshold,
+        groups,
+        mesh,
+        compiler_options=compiler_options,
     )
     return _averaged_over_eval_batches(step, eval_config, schedule, seed, model, sample_eval_batch)

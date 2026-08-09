@@ -79,7 +79,7 @@ def test_zero_blocks_forward_shape_and_finiteness():
     ci_fn = _ci_fn(0)
     for remat in (False, True):
         ci = ci_fn(_taps(), remat=remat)
-        assert ci.logits[SITE].shape == (B, T, C)
+        assert ci.preactivations[SITE].shape == (B, T, C)
         assert ci.lower[SITE].shape == (B, T, C)
         assert bool(jnp.isfinite(ci.lower[SITE]).all())
 
@@ -93,8 +93,8 @@ def test_zero_blocks_is_exactly_position_local():
 
     def moved(n_blocks: int) -> jax.Array:
         ci_fn = _ci_fn(n_blocks)
-        base = ci_fn(taps, remat=False).logits[SITE]
-        pert = ci_fn(perturbed, remat=False).logits[SITE]
+        base = ci_fn(taps, remat=False).preactivations[SITE]
+        pert = ci_fn(perturbed, remat=False).preactivations[SITE]
         return jnp.abs(base - pert).max(axis=(0, 2))  # per-position
 
     local = moved(0)
@@ -168,8 +168,7 @@ def test_zero_blocks_trains_a_positioned_target():
         total_steps=10,
         remat_recon_forwards=False,
         remat_ci_fn=True,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
 
     in_proj_before = jax.device_get(ci_fn.chunks.in_proj_w)  # host copy survives step donation
@@ -182,5 +181,5 @@ def test_zero_blocks_trains_a_positioned_target():
     assert not jnp.allclose(trained.chunks.in_proj_w, in_proj_before), (
         "the CI fn did not move — with no blocks there is nothing else left to train"
     )
-    final_ci = trained(model.read_activations(inputs, ci_fn.input_names), remat=False)
+    final_ci = trained(model.clean_forward(inputs, ci_fn.capture_keys).captures, remat=False)
     assert final_ci.lower[SITE].shape == (B, T, C)

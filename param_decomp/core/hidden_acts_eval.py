@@ -15,11 +15,11 @@ combined `"<ClassName>"` (= Σ_sites sum_mse / Σ_sites n_elements).
   draws are NOT seed-aligned to torch, so exact bitwise parity is impossible for this one
   (expected); the deterministic CI variant is tight.
 
-The clean (target) per-site output is the frozen `x @ W`: `masked_site_outputs` with
-every site live but routed FALSE everywhere falls onto `site_out`'s frozen `x @ W.T`
-branch — reusing the one seam instead of a separate frozen-W accessor. Masked and clean
-both run in COMPUTE_DT (bf16, matching the trained model, mirroring `load_run.py`); the
-MSE reduction is fp32.
+The target supplies each linear output's canonical activation key. One clean-forward
+request unions those keys with the CI inputs, so frozen `x @ W.T` references and CI taps
+come from one forward; the masked forward requests the same keys.
+Masked and clean run in COMPUTE_DT (bf16, matching the trained model, mirroring
+`load_run.py`); the MSE reduction is fp32.
 """
 
 from collections.abc import Callable
@@ -31,10 +31,16 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, PRNGKeyArray
 
+from param_decomp.core.ci_fn import evaluate_ci
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
-from param_decomp.core.model import DecomposedModel, all_false_routes
-from param_decomp.core.train import COMPUTE_DT, cast_floating
+from param_decomp.core.model import (
+    CaptureKeys,
+    DecomposedModel,
+    MaterializedMasking,
+    prepare_compute_weights,
+)
+from param_decomp.core.precision import COMPUTE_DT
 
 
 @dataclass(frozen=True)
@@ -47,11 +53,19 @@ class SiteMSEReduction:
 
 
 def _per_site_sum_mse(
-    masked: dict[str, Array], clean: dict[str, Array], site_names: tuple[str, ...]
+    masked_site_outputs_by_site: dict[str, Array],
+    clean_site_outputs_by_site: dict[str, Array],
+    site_names: tuple[str, ...],
 ) -> dict[str, Array]:
     """`Σ (masked − clean)^2` per site in fp32 (torch `F.mse_loss(reduction="sum")`)."""
     return {
-        s: jnp.sum((masked[s].astype(jnp.float32) - clean[s].astype(jnp.float32)) ** 2)
+        s: jnp.sum(
+            (
+                masked_site_outputs_by_site[s].astype(jnp.float32)
+                - clean_site_outputs_by_site[s].astype(jnp.float32)
+            )
+            ** 2
+        )
         for s in site_names
     }
 
@@ -63,7 +77,7 @@ HiddenActsStep = Callable[
 """`(model, components, ci_fn, inputs, key) -> ({site: sum_mse}, {site: n_elements})`
 — one batch's per-site summed MSE (fp32) and element counts (the host folds these into
 `SiteMSEReduction`s). `inputs` is the model's target-specific input (an LM's `[batch, seq]`
-token ids), exactly as `read_activations` / `masked_site_outputs` take it. `key` is unused
+token ids), exactly as the unified clean/masked forwards take it. `key` is unused
 by the deterministic CI step. `model` (frozen-weight-bearing) is the jit ARG."""
 
 
@@ -75,10 +89,16 @@ def _waist_leading(ci_lower: dict[str, Array], site_names: tuple[str, ...]) -> t
 
 
 def make_ci_hidden_acts_step(
-    model_static: DecomposedModel, compiler_options: dict[str, bool | int | str]
+    model_static: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> HiddenActsStep:
     """Deterministic CI-mask hidden-acts step: `lower_leaky` CI, no delta, one forward."""
     site_names = model_static.site_names
+    site_output_keys = model_static.site_output_keys(site_names)
+    clean_capture_keys = ci_capture_keys | frozenset(site_output_keys)
+
+    output_key_by_site = dict(zip(site_names, site_output_keys, strict=True))
 
     def step(
         model: DecomposedModel,
@@ -87,24 +107,28 @@ def make_ci_hidden_acts_step(
         inputs: Any,
         _key: PRNGKeyArray,
     ) -> tuple[dict[str, Array], dict[str, int]]:
-        taps = model.read_activations(inputs, ci_fn.input_names)
-        components_bf16 = cast_floating(components, COMPUTE_DT)
-        prepared = model.prepare_compute_weights(components_bf16)
-        ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        ci_lower = ci_fn_bf16(taps, remat=False).lower
+        clean_captures_by_key = model.clean_forward(inputs, clean_capture_keys).captures
+        clean_ci_inputs_by_key = {key: clean_captures_by_key[key] for key in ci_capture_keys}
+        clean_site_outputs_by_site = {
+            site: clean_captures_by_key[key] for site, key in output_key_by_site.items()
+        }
+        prepared_weights = prepare_compute_weights(model, components)
+        ci_lower = evaluate_ci(ci_fn, clean_ci_inputs_by_key, remat=False).lower
 
-        leading = _waist_leading(ci_lower, site_names)
-        zeros_delta = {s: jnp.zeros(leading, COMPUTE_DT) for s in site_names}
-        clean = model.masked_site_outputs(
-            prepared, inputs,
-            {s: jnp.ones_like(ci_lower[s]) for s in site_names}, zeros_delta,
-            all_false_routes(site_names, leading), site_names, False,
-        )  # fmt: skip
-        masked = model.masked_site_outputs(
-            prepared, inputs, ci_lower, zeros_delta, None, site_names, False
+        masked_captures_by_key = model.masked_forward(
+            prepared_weights,
+            inputs,
+            masking=MaterializedMasking(component_masks=ci_lower),
+            capture_keys=frozenset(site_output_keys),
+            remat=False,
+        ).captures
+        masked_site_outputs_by_site = {
+            site: masked_captures_by_key[key] for site, key in output_key_by_site.items()
+        }
+        sum_mse = _per_site_sum_mse(
+            masked_site_outputs_by_site, clean_site_outputs_by_site, site_names
         )
-        sum_mse = _per_site_sum_mse(masked, clean, site_names)
-        n_elements = {s: clean[s].size for s in site_names}
+        n_elements = {site: clean_site_outputs_by_site[site].size for site in site_names}
         return sum_mse, n_elements
 
     return filter_jit(step, compiler_options=compiler_options)
@@ -112,14 +136,19 @@ def make_ci_hidden_acts_step(
 
 def make_stochastic_hidden_acts_step(
     model_static: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     n_mask_samples: int,
-    compiler_options: dict[str, bool | int | str],
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> HiddenActsStep:
     """Stochastic-mask hidden-acts step: `n_mask_samples` draws of `mask = ci + (1−ci)·s`
     (with weight deltas), per-draw per-site MSE summed. RNG via per-draw / per-site
     `fold_in` (the eval-step discipline)."""
     assert n_mask_samples >= 1, n_mask_samples
     site_names = model_static.site_names
+    site_output_keys = model_static.site_output_keys(site_names)
+    clean_capture_keys = ci_capture_keys | frozenset(site_output_keys)
+
+    output_key_by_site = dict(zip(site_names, site_output_keys, strict=True))
 
     def step(
         model: DecomposedModel,
@@ -128,19 +157,15 @@ def make_stochastic_hidden_acts_step(
         inputs: Any,
         key: PRNGKeyArray,
     ) -> tuple[dict[str, Array], dict[str, int]]:
-        taps = model.read_activations(inputs, ci_fn.input_names)
-        components_bf16 = cast_floating(components, COMPUTE_DT)
-        prepared = model.prepare_compute_weights(components_bf16)
-        ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        ci_lower = ci_fn_bf16(taps, remat=False).lower
+        clean_captures_by_key = model.clean_forward(inputs, clean_capture_keys).captures
+        clean_ci_inputs_by_key = {key: clean_captures_by_key[key] for key in ci_capture_keys}
+        clean_site_outputs_by_site = {
+            site: clean_captures_by_key[key] for site, key in output_key_by_site.items()
+        }
+        prepared_weights = prepare_compute_weights(model, components)
+        ci_lower = evaluate_ci(ci_fn, clean_ci_inputs_by_key, remat=False).lower
 
         leading = _waist_leading(ci_lower, site_names)
-        clean = model.masked_site_outputs(
-            prepared, inputs,
-            {s: jnp.ones_like(ci_lower[s]) for s in site_names},
-            {s: jnp.zeros(leading, COMPUTE_DT) for s in site_names},
-            all_false_routes(site_names, leading), site_names, False,
-        )  # fmt: skip
 
         sum_mse = {s: jnp.zeros((), jnp.float32) for s in site_names}
         for draw_idx in range(n_mask_samples):
@@ -155,13 +180,24 @@ def make_stochastic_hidden_acts_step(
                 delta_masks[site] = random.uniform(
                     random.fold_in(delta_key, site_idx), leading, COMPUTE_DT
                 )
-            masked = model.masked_site_outputs(
-                prepared, inputs, masks, delta_masks, None, site_names, True
+            masked_captures_by_key = model.masked_forward(
+                prepared_weights,
+                inputs,
+                masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
+                capture_keys=frozenset(site_output_keys),
+                remat=False,
+            ).captures
+            masked_site_outputs_by_site = {
+                site: masked_captures_by_key[key] for site, key in output_key_by_site.items()
+            }
+            draw_sum = _per_site_sum_mse(
+                masked_site_outputs_by_site, clean_site_outputs_by_site, site_names
             )
-            draw_sum = _per_site_sum_mse(masked, clean, site_names)
             sum_mse = {s: sum_mse[s] + draw_sum[s] for s in site_names}
 
-        n_elements = {s: clean[s].size * n_mask_samples for s in site_names}
+        n_elements = {
+            site: clean_site_outputs_by_site[site].size * n_mask_samples for site in site_names
+        }
         return sum_mse, n_elements
 
     return filter_jit(step, compiler_options=compiler_options)
@@ -198,8 +234,11 @@ def hidden_acts_log_entries(
     `compute_per_module_metrics`): per-site is `sum_mse/n`, combined is `Σ sum_mse / Σ n`
     over all sites."""
     assert reductions, "no hidden-acts data accumulated"
-    out = {f"{class_name}/{s}": r.sum_mse / r.n_elements for s, r in reductions.items()}
+    log_entries = {
+        f"{class_name}/{site}": reduction.sum_mse / reduction.n_elements
+        for site, reduction in reductions.items()
+    }
     total_sum = sum(r.sum_mse for r in reductions.values())
     total_n = sum(r.n_elements for r in reductions.values())
-    out[class_name] = total_sum / total_n
-    return out
+    log_entries[class_name] = total_sum / total_n
+    return log_entries

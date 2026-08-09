@@ -78,7 +78,7 @@ def _setup():
 
 def test_ci_step_per_site_sums_and_counts():
     model, components, ci_fn, tokens, site_d_out = _setup()
-    step = make_ci_hidden_acts_step(model, compiler_options={})
+    step = make_ci_hidden_acts_step(model, ci_fn.capture_keys)
 
     sum_mse, n_elements = step(model, components, ci_fn, tokens, jax.random.PRNGKey(0))
 
@@ -92,7 +92,7 @@ def test_ci_step_per_site_sums_and_counts():
 def test_stochastic_step_per_site_sums_and_counts():
     model, components, ci_fn, tokens, site_d_out = _setup()
     n_mask_samples = 3
-    step = make_stochastic_hidden_acts_step(model, n_mask_samples, compiler_options={})
+    step = make_stochastic_hidden_acts_step(model, ci_fn.capture_keys, n_mask_samples)
 
     sum_mse, n_elements = step(model, components, ci_fn, tokens, jax.random.PRNGKey(0))
 
@@ -105,7 +105,7 @@ def test_stochastic_step_per_site_sums_and_counts():
 
 def test_accumulate_and_log_entries_token_weighted():
     model, components, ci_fn, tokens, _ = _setup()
-    step = make_ci_hidden_acts_step(model, compiler_options={})
+    step = make_ci_hidden_acts_step(model, ci_fn.capture_keys)
 
     one = accumulate_hidden_acts(step, model, components, ci_fn, [tokens], jax.random.PRNGKey(0))
     two = accumulate_hidden_acts(

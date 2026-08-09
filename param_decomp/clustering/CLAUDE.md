@@ -18,11 +18,13 @@ many times with different configs.
 ```bash
 # 1. Harvest a JAX single-pool run (orbax checkpoint) into a membership snapshot.
 python -m param_decomp.clustering.scripts.run_worker \
-    --run_dir runs/p-761bc061 --n_tokens 50000 --batch_size 16 --n_tokens_per_seq 16
+    --run_dir runs/p-761bc061 --data_root <data-root> \
+    --n_tokens 50000 --batch_size 16 --n_tokens_per_seq 16
 # → <data_root>/clustering/harvests/ch-<id>/
 
 # 2. Merge from the snapshot (CPU-only).
-python -m param_decomp.clustering.scripts.run_merge /path/to/ch-<id>/ merge_config.json --run-id c-<id> --seed 0 [--plot]
+python -m param_decomp.clustering.scripts.run_merge /path/to/ch-<id>/ merge_config.json \
+    --data-root <data-root> --run-id c-<id> --seed 0 [--plot]
 # → <data_root>/clustering/runs/c-<id>/
 ```
 

@@ -112,7 +112,7 @@ pd:
         - {at: 1.0, frac: 0.01}
     frequency:
       coeff: 0.000316
-      reference_token_count: 32768
+      reference_datapoint_count: 32768
   - type: MergedStochasticSubsetPPGDReconLoss
     coeff: 1.0
     adv_fraction: 0.5

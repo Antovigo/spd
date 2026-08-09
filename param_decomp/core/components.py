@@ -1,8 +1,8 @@
 """The decomposition representation, shared by every target (LM and toy alike).
 
-`SiteC` / `SiteSpec` are the per-site shape primitives (config-level name+C, and the
-shape-carrying spec); `ComponentStacks` is the trainable master pytree, persisted as same-shape
-STACKS (owner-partitioned layout); `init_component_stacks` seeds it; `site_out` is the one
+`SiteC` / `SiteDims` / `SiteSpec` are the per-site shape primitives (configured name+C,
+matrix dimensions, and the combined shape-carrying spec); `ComponentStacks` is the trainable
+master pytree, persisted as same-shape STACKS (owner-partitioned layout); `init_component_stacks` seeds it; `site_out` is the one
 decomposed-linear primitive (SPEC §4.1, `((x@V)*m)@U + (x@Δ)*d`). These are domain-neutral
 — they depend only on the site shapes and the V/U/W arrays — so they live here rather than
 inside `model.py` (whose `DecomposedModel` Protocol references `ComponentStacks`/`SiteSpec`) or any
@@ -32,12 +32,26 @@ class SiteC:
     C: int
 
 
+@dataclass(frozen=True, kw_only=True)
+class SiteDims:
+    d_in: int
+    d_out: int
+
+
 @dataclass(frozen=True)
 class SiteSpec:
     name: str
     d_in: int
     d_out: int
     C: int
+
+
+@dataclass(frozen=True)
+class SiteComponents:
+    """The two rank-one factor matrices for one decomposed site."""
+
+    V: Array
+    U: Array
 
 
 VUShape = tuple[int, int, int]  # (d_in, d_out, C)
@@ -93,17 +107,17 @@ class ComponentStacks(eqx.Module, Generic[VULeaf]):
     stacks: dict[VUShape, tuple[VULeaf, VULeaf]]
     site_slots: SiteSlots = eqx.field(static=True)
 
-    def site(self: "ComponentStacks[Array]", name: str) -> tuple[Array, Array]:
+    def site(self: "ComponentStacks[Array]", name: str) -> SiteComponents:
         shape, slot = _slot_index(self.site_slots)[name]
         Vs, Us = self.stacks[shape]
-        return Vs[slot], Us[slot]
+        return SiteComponents(V=Vs[slot], U=Us[slot])
 
     @property
     def site_names(self) -> tuple[str, ...]:
         return tuple(name for name, _, _ in self.site_slots)
 
-    def sites_items(self: "ComponentStacks[Array]") -> Iterator[tuple[str, tuple[Array, Array]]]:
-        """`(name, (V, U))` in canonical site order — the per-site view of the stacks."""
+    def sites_items(self: "ComponentStacks[Array]") -> Iterator[tuple[str, SiteComponents]]:
+        """Named site components in canonical site order."""
         for name, _, _ in self.site_slots:
             yield name, self.site(name)
 

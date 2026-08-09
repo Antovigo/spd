@@ -28,11 +28,11 @@ def test_bootstrap_applies_launch_env_before_loading_training(
             }
         )
     )
-    monkeypatch.setattr(sys, "argv", ["run.py", str(config), "--run-id", "p-00000000"])
     observed: list[tuple[str, str]] = []
     training = ModuleType("param_decomp.experiments.lm.training")
 
-    def cli() -> None:
+    def train_main(config: object, data_root: object, run_id: object = None) -> None:
+        del config, data_root, run_id
         observed.append(
             (
                 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"],
@@ -40,10 +40,10 @@ def test_bootstrap_applies_launch_env_before_loading_training(
             )
         )
 
-    training.__dict__["cli"] = cli
+    training.__dict__["main"] = train_main
     monkeypatch.setitem(sys.modules, training.__name__, training)
 
-    run.main()
+    run.main(config, Path("/tmp/unused-data-root"), "p-00000000")
 
     assert observed == [("0.5", "present")]
 

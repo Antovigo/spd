@@ -30,9 +30,8 @@ raw-value host transfer), rendered as `figures/ci_density_heatmap`
 It also computes the two SCALAR hidden-acts recon eval metrics (`CIHiddenActsReconLoss`,
 `StochasticHiddenActsReconLoss`) natively — per decomposed site, the summed MSE between
 the masked-model and target-model site OUTPUT activations, divided once by the element
-count (`hidden_acts_eval.py`). Those ride the `masked_site_outputs` model seam (SPEC S31,
-amended 2026-06-16 from keep-on-bridge) and are emitted as scalars under the torch log
-keys (`<ClassName>/<site>` + a combined `<ClassName>`).
+count (`hidden_acts_eval.py`). Those request the same canonical output keys from clean and masked forwards (SPEC S31)
+and are emitted as scalars under the torch log keys (`<ClassName>/<site>` + a combined `<ClassName>`).
 
 The three CONFIG-GATED permutation metrics (`PermutedCIPlots`, `UVPlots`,
 `IdentityCIError`) are recomputed natively too, off the run's `eval.metrics` block
@@ -63,7 +62,12 @@ from matplotlib import colormaps
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 
-from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid, upper_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import (
+    CIFn,
+    ci_preactivations,
+    lower_leaky_hard_sigmoid,
+    upper_leaky_hard_sigmoid,
+)
 from param_decomp.core.configs import (
     DenseCITargetSpec,
     IdentityCIErrorConfig,
@@ -72,8 +76,7 @@ from param_decomp.core.configs import (
     UVPlotsConfig,
 )
 from param_decomp.core.jit_util import filter_jit
-from param_decomp.core.model import DecomposedModel
-from param_decomp.core.train import COMPUTE_DT, cast_floating
+from param_decomp.core.model import CaptureKeys, DecomposedModel
 
 IDENTITY_CI_ERROR_TOLERANCE = 0.1
 """Torch `IdentityCIPattern.distance_from` / `compute_target_metrics` default tolerance —
@@ -86,7 +89,7 @@ class SiteReduction:
 
     `density_counts[c]` = #(positions where `lower_leaky > threshold`); `ci_sums[c]` =
     Σ positions `lower_leaky`; `n_positions` = total positions seen (shared count for
-    both means). `lower_sample` / `logits_sample` are flattened raw values from the first
+    both means). `lower_sample` / `preactivations_sample` are flattened raw values from the first
     `n_batches_accum` batches, for the two `CIHistograms` histograms. `density_hist` is the
     opt-in per-token CI density histogram `(C, n_bins + 1)`: column 0 = underflow (CI below
     `CI_DENSITY_HEATMAP_FLOOR`, including exact-zero inactive tokens), columns `1..n_bins` =
@@ -98,7 +101,7 @@ class SiteReduction:
     ci_sums: np.ndarray
     n_positions: int
     lower_sample: np.ndarray
-    logits_sample: np.ndarray
+    preactivations_sample: np.ndarray
     density_hist: np.ndarray | None
 
 
@@ -114,7 +117,7 @@ SlowEvalStep = Callable[
     ],
 ]
 """`(model, ci_fn, residual) -> (density_counts, ci_sums, n_positions, flat_lower,
-flat_logits, density_hist)` — the per-batch reduction, pre-reduced over positions.
+flat_preactivations, density_hist)` — the per-batch reduction, pre-reduced over positions.
 `density_hist` maps site -> `(C, n_bins + 1)` counts (empty when the density heatmap is off).
 The slow plot metrics read only the CI arrays, so V/U (`components`) is not an input. `model`
 (frozen-weight-bearing) is the jit ARG."""
@@ -141,20 +144,21 @@ def _per_component_ci_hist(lower: Array, n_bins: int) -> Array:
 
 def make_slow_eval_step(
     model_static: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     ci_alive_threshold: float,
     density_heatmap_n_bins: int | None,
-    compiler_options: dict[str, bool | int | str],
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> SlowEvalStep:
     """Build the jit'd per-batch reduction `slow_eval_step(model, ci_fn, residual) ->
     ({site: density_counts}, {site: ci_sums}, n_positions, {site: flat lower},
-    {site: flat logits}, {site: density_hist})`. `lower`/`logits` are returned whole (the
+    {site: flat preactivations}, {site: density_hist})`. `lower`/`preactivations` are returned whole (the
     host caps the histogram sample); counts/sums are pre-reduced over positions.
     `density_heatmap_n_bins` opts into the per-component CI density histogram (empty dict
     when None); it shares this forward's `lower`, adding only an on-device bincount."""
     site_names = model_static.site_names
 
     def slow_eval_step(
-        model: DecomposedModel, ci_fn: Any, residual: Float[Array, "*leading d"]
+        model: DecomposedModel, ci_fn: CIFn, residual: Float[Array, "*leading d"]
     ) -> tuple[
         dict[str, Array],
         dict[str, Array],
@@ -165,13 +169,12 @@ def make_slow_eval_step(
     ]:
         # Read the CI fn in training precision (bf16), like train.py / eval.py: the readout
         # reflects the deployed model, and cuDNN flash attention rejects fp32.
-        ci_fn = cast_floating(ci_fn, COMPUTE_DT)
-        taps = {
-            k: x.astype(COMPUTE_DT)
-            for k, x in model.read_activations(residual, ci_fn.input_names).items()
-        }
-        logits = {s: v.astype(jnp.float32) for s, v in ci_fn(taps, remat=False).logits.items()}
-        lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in site_names}
+        preactivations = ci_preactivations(
+            ci_fn,
+            model.clean_forward(residual, ci_capture_keys).captures,
+            remat=False,
+        )
+        lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
 
         density_counts = {
             s: (lower[s] > ci_alive_threshold)
@@ -184,13 +187,13 @@ def make_slow_eval_step(
         first = lower[site_names[0]]
         n_positions = jnp.asarray(math.prod(first.shape[:-1]), jnp.int32)
         flat_lower = {s: lower[s].reshape(-1) for s in site_names}
-        flat_logits = {s: logits[s].reshape(-1) for s in site_names}
+        flat_preactivations = {s: preactivations[s].reshape(-1) for s in site_names}
         density_hist = (
             {s: _per_component_ci_hist(lower[s], density_heatmap_n_bins) for s in site_names}
             if density_heatmap_n_bins is not None
             else {}
         )
-        return density_counts, ci_sums, n_positions, flat_lower, flat_logits, density_hist
+        return density_counts, ci_sums, n_positions, flat_lower, flat_preactivations, density_hist
 
     return filter_jit(slow_eval_step, compiler_options=compiler_options)
 
@@ -198,7 +201,7 @@ def make_slow_eval_step(
 def accumulate_site_reductions(
     slow_eval_step: SlowEvalStep,
     model: DecomposedModel,
-    ci_fn: Any,
+    ci_fn: CIFn,
     residual_batches: list[Float[Array, "*leading d"]],
     n_batches_accum: int | None,
 ) -> dict[str, SiteReduction]:
@@ -211,10 +214,12 @@ def accumulate_site_reductions(
     sums: dict[str, np.ndarray] = {}
     hist: dict[str, np.ndarray] = {}
     lower_chunks: dict[str, list[np.ndarray]] = {}
-    logits_chunks: dict[str, list[np.ndarray]] = {}
+    preactivations_chunks: dict[str, list[np.ndarray]] = {}
     total_positions = 0
     for batch_idx, residual in enumerate(residual_batches):
-        d, s, n_pos, flat_lower, flat_logits, density_hist = slow_eval_step(model, ci_fn, residual)
+        d, s, n_pos, flat_lower, flat_preactivations, density_hist = slow_eval_step(
+            model, ci_fn, residual
+        )
         total_positions += int(n_pos)
         keep_sample = n_batches_accum is None or batch_idx < n_batches_accum
         for site in d:
@@ -230,8 +235,10 @@ def accumulate_site_reductions(
                 lower_chunks.setdefault(site, []).append(
                     np.asarray(multihost_utils.process_allgather(flat_lower[site], tiled=True))
                 )
-                logits_chunks.setdefault(site, []).append(
-                    np.asarray(multihost_utils.process_allgather(flat_logits[site], tiled=True))
+                preactivations_chunks.setdefault(site, []).append(
+                    np.asarray(
+                        multihost_utils.process_allgather(flat_preactivations[site], tiled=True)
+                    )
                 )
 
     return {
@@ -240,7 +247,7 @@ def accumulate_site_reductions(
             ci_sums=sums[site],
             n_positions=total_positions,
             lower_sample=np.concatenate(lower_chunks[site]),
-            logits_sample=np.concatenate(logits_chunks[site]),
+            preactivations_sample=np.concatenate(preactivations_chunks[site]),
             density_hist=hist.get(site),
         )
         for site in density
@@ -258,7 +265,9 @@ the per-batch CI summed over the batch leading axis, position axis kept. Pairs w
 
 
 def make_position_ci_step(
-    model_static: DecomposedModel, compiler_options: dict[str, bool | int | str]
+    model_static: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> PositionCIStep:
     """Per-batch CI reduction that KEEPS the position axis (the `(T, C)` matrix the
     permutation/heatmap metrics plot), summing only over the batch leading axis. LM-only:
@@ -266,17 +275,16 @@ def make_position_ci_step(
     site_names = model_static.site_names
 
     def position_ci_step(
-        model: DecomposedModel, ci_fn: Any, residual: Float[Array, "*leading d"]
+        model: DecomposedModel, ci_fn: CIFn, residual: Float[Array, "*leading d"]
     ) -> tuple[dict[str, Array], dict[str, Array], Array]:
-        # Training precision (bf16) readout — see make_slow_eval_step; logits upcast to fp32.
-        ci_fn = cast_floating(ci_fn, COMPUTE_DT)
-        taps = {
-            k: x.astype(COMPUTE_DT)
-            for k, x in model.read_activations(residual, ci_fn.input_names).items()
-        }
-        logits = {s: v.astype(jnp.float32) for s, v in ci_fn(taps, remat=False).logits.items()}
-        lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in site_names}
-        upper = {s: upper_leaky_hard_sigmoid(logits[s]) for s in site_names}
+        # Training precision (bf16) readout — see make_slow_eval_step; preactivations upcast to fp32.
+        preactivations = ci_preactivations(
+            ci_fn,
+            model.clean_forward(residual, ci_capture_keys).captures,
+            remat=False,
+        )
+        lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
+        upper = {s: upper_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
         first = lower[site_names[0]]
         assert first.ndim == 3, f"position CI metrics are LM-only ((B, T, C)); got {first.shape}"
         n_batch = jnp.asarray(first.shape[0], jnp.int32)
@@ -298,7 +306,7 @@ class PositionCI:
 def accumulate_position_ci(
     position_ci_step: PositionCIStep,
     model: DecomposedModel,
-    ci_fn: Any,
+    ci_fn: CIFn,
     residual_batches: list[Float[Array, "*leading d"]],
 ) -> dict[str, PositionCI]:
     """Fold `position_ci_step` over the eval batches into a batch-mean `(T, C)` CI matrix
@@ -780,7 +788,9 @@ def render_slow_eval_figures(
     into the per-token CI density heatmap (`density_hist` present), it is added under
     `figures/ci_density_heatmap`."""
     lower_hist = plot_ci_value_histograms({s: r.lower_sample for s, r in reductions.items()})
-    logits_hist = plot_ci_value_histograms({s: r.logits_sample for s, r in reductions.items()})
+    preactivations_hist = plot_ci_value_histograms(
+        {s: r.preactivations_sample for s, r in reductions.items()}
+    )
     assert all(r.n_positions > 0 for r in reductions.values())
     densities = {s: r.density_counts / r.n_positions for s, r in reductions.items()}
     mean_cis = {s: r.ci_sums / r.n_positions for s, r in reductions.items()}
@@ -788,7 +798,7 @@ def render_slow_eval_figures(
     mean_linear, mean_log = plot_mean_component_cis_both_scales(mean_cis)
     figures = {
         "figures/causal_importance_values": lower_hist,
-        "figures/causal_importance_values_pre_sigmoid": logits_hist,
+        "figures/causal_importance_values_pre_sigmoid": preactivations_hist,
         "figures/component_activation_density": density_fig,
         "figures/ci_mean_per_component": mean_linear,
         "figures/ci_mean_per_component_log": mean_log,

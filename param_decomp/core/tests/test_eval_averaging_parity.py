@@ -10,25 +10,42 @@ This file is the recorded per-metric verdict required by the acceptance criteria
 checks the averaging math directly (the per-batch step itself is covered by
 `test_eval.py`), and pins the Jensen caveat that makes the equivalence metric-specific:
 
-  PRODUCTION FAST SET — all exact under `sum/n_steps`, all per-position means:
+  PRODUCTION FAST SET:
     - `ce_kl/kl_<variant>`            mean per-position KL  (mean)
     - `ce_kl/ce_difference_<variant>` mean CE minus target mean CE (affine in means -> mean)
     - `l0/<thr>_<site>` / `l0/<thr>_<group>` mean L0 per example (group = per-batch
         sum of member means, then averaged) (mean)
-    - `loss/PGDReconLoss`             mean per-position KL at the final source (mean)
+    - `loss/PGDReconLoss[/e2e]`       mean per-position KL at the final source when the
+        probe has no residual auxiliary (mean)
+    - `loss/PGDReconLoss/hidden_acts_reconstruction[/<point>]` and the combined loss when configured:
+        the same per-batch energy ratio/objective used by training, then averaged over eval
+        batches (mean-of-batch-objectives, deliberately not a globally pooled energy ratio)
 
-  NON-MEAN (hypothetical, NOT in the production set): any metric that is a nonlinear
-    function of a GLOBAL accumulated sum — e.g. `log2(Σ_batches L0)` — is Jensen-
-    divergent: torch's accumulate-then-compute differs from JAX's
-    per-batch-mean-then-average. `test_nonmean_metric_is_jensen_divergent` exhibits the
-    gap. If such a metric is ever added to the in-loop fast set it MUST accumulate then
-    compute (and the JAX side must mirror that), not ride the `sum/n_steps` path.
+  Any other metric that is a nonlinear function of a GLOBAL accumulated sum — e.g.
+    `log2(Σ_batches L0)` — is Jensen-divergent: torch's accumulate-then-compute differs
+    from JAX's per-batch-mean-then-average. `test_nonmean_metric_is_jensen_divergent`
+    exhibits the gap. If such a metric is ever added to the in-loop fast set it MUST
+    either accumulate then compute or explicitly specify batch-objective semantics like
+    hidden-activation reconstruction.
 """
 
 import math
+from types import SimpleNamespace
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-import pytest
+from jaxtyping import Array, PRNGKeyArray
+
+from param_decomp.core.ci_fn import CIFn
+from param_decomp.core.components import ComponentStacks
+from param_decomp.core.eval_schedule import Every
+from param_decomp.core.model import DecomposedModel
+from param_decomp.core.run import EvalInvocation
+from param_decomp.experiments.eval_config import EvalConfig
+from param_decomp.experiments.fast_eval_operations import _averaged_over_eval_batches
+from param_decomp.experiments.lm.eval_context import LMEvalContext
+from param_decomp.experiments.lm.scalar_eval_operations import _make_scalar_operation
 
 
 def _jax_average(per_batch_values: list[float], n_steps: int) -> float:
@@ -81,19 +98,71 @@ def test_nonmean_metric_is_jensen_divergent():
     assert not math.isclose(accumulate_then_compute, mean_of_per_batch_compute, rel_tol=1e-3)
 
 
-@pytest.mark.parametrize(
-    "metric_key, kind",
-    [
-        ("ce_kl/kl_ci_masked", "mean"),
-        ("ce_kl/ce_difference_ci_masked", "mean"),
-        ("l0/0.0_site", "mean"),
-        ("l0/0.0_group", "mean"),
-        ("loss/PGDReconLoss", "mean"),
-    ],
-)
-def test_production_fast_set_classification(metric_key: str, kind: str):
-    """The recorded verdict: every production in-loop fast metric is mean (exact under
-    `sum/n_steps`). None is a nonlinear fn of a global accumulated sum, so all are exact
-    under fixed (B,T). This list is the closing artifact for #715 — adding a metric here
-    that is `nonmean` must accompany an accumulate-then-compute impl."""
-    assert kind == "mean", f"{metric_key}: production fast metrics must be exact under sum/n_steps"
+def test_hidden_acts_reconstruction_averages_batch_objectives_instead_of_pooling_energy():
+    """Hidden-activation reconstruction deliberately evaluates the training objective on each batch, then
+    averages those ratios. Pooling numerator/denominator across eval batches is a different
+    weighting (batches with more clean energy count more) and must not be substituted."""
+    numerators = [1.0, 9.0]
+    denominators = [1.0, 3.0]
+    mean_of_batch_ratios = sum(n / d for n, d in zip(numerators, denominators, strict=True)) / 2
+    globally_pooled_ratio = sum(numerators) / sum(denominators)
+    assert mean_of_batch_ratios == 2.0
+    assert globally_pooled_ratio == 2.5
+
+
+def _state_stub() -> SimpleNamespace:
+    return SimpleNamespace(decomposition=SimpleNamespace(components=None, ci_fn=None))
+
+
+def test_lm_scalar_operation_averages_residual_batch_objectives():
+    def step(
+        _model: DecomposedModel,
+        _components: ComponentStacks,
+        _ci_fn: CIFn,
+        value: jax.Array,
+        _key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        return {"loss/probe/hidden_acts_reconstruction": value}
+
+    operation = _make_scalar_operation(
+        Every(1),
+        step,
+        ("loss/probe/",),
+        object(),  # pyright: ignore[reportArgumentType]
+        jnp.array([0, 0], dtype=jnp.uint32),
+        train_steps=0,
+        eval_steps=2,
+    )
+    context = LMEvalContext(
+        state=_state_stub(),  # pyright: ignore[reportArgumentType]
+        now_step=0,
+        pass_index=0,
+        batches=(jnp.asarray(1.0), jnp.asarray(3.0)),
+    )
+    assert operation.run(context)["eval/loss/probe/hidden_acts_reconstruction"] == 2.0
+
+
+def test_generic_scalar_operation_averages_residual_batch_objectives():
+    def step(
+        _model: DecomposedModel,
+        _components: ComponentStacks,
+        _ci_fn: CIFn,
+        value: jax.Array,
+        _key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        return {"loss/probe/hidden_acts_reconstruction": value}
+
+    eval_config = EvalConfig(batch_size=1, n_steps=2, every=1, slow_every=1)
+    operation = _averaged_over_eval_batches(
+        step,
+        eval_config,
+        Every(1),
+        seed=0,
+        model=object(),  # pyright: ignore[reportArgumentType]
+        sample_eval_batch=lambda index: jnp.asarray((1.0, 3.0)[index]),
+    )
+    context = EvalInvocation(
+        state=_state_stub(),  # pyright: ignore[reportArgumentType]
+        now_step=0,
+    )
+    assert operation.run(context)["eval/loss/probe/hidden_acts_reconstruction"] == 2.0

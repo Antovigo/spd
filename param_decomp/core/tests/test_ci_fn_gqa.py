@@ -145,7 +145,7 @@ def test_gqa_ci_fn_runs_end_to_end():
     taps = {"resid.0": jax.random.normal(jax.random.PRNGKey(1), (2, 6, 12))}
     ci = ci_fn(taps, remat=False)
     for site in SITES:
-        for squashed in (ci.logits[site.name], ci.lower[site.name], ci.upper[site.name]):
+        for squashed in (ci.preactivations[site.name], ci.lower[site.name], ci.upper[site.name]):
             assert squashed.shape == (2, 6, site.C), squashed.shape
             assert jnp.isfinite(squashed).all()
 

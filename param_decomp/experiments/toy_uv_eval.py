@@ -10,6 +10,7 @@ from typing import Literal
 import numpy as np
 from jaxtyping import Array
 
+from param_decomp.core.components import SiteComponents
 from param_decomp.core.configs import UVPlotsConfig
 from param_decomp.core.metrics import LogRecord, PNGImage
 from param_decomp.core.model import DecomposedModel
@@ -29,12 +30,15 @@ def toy_uv_spec(model: DecomposedModel, metric: UVPlotsConfig | None) -> Permuta
 
 def render_uv_metric(
     spec: PermutationMetricSpec,
-    components_vu: dict[str, tuple[Array, Array]],
+    components_vu: dict[str, SiteComponents],
     probe_ci_upper: dict[str, Array],
 ) -> LogRecord:
     """Render the authored ``UVPlots`` operation into typed PNG values."""
     assert spec.want_uv_plots, "UVPlots renderer requires an authored UVPlots metric"
-    components = {name: (np.asarray(v), np.asarray(u)) for name, (v, u) in components_vu.items()}
+    components = {
+        name: (np.asarray(site_components.V), np.asarray(site_components.U))
+        for name, site_components in components_vu.items()
+    }
     perm_source = {name: np.asarray(probe_ci_upper[name]) for name in spec.permutation}
     return {
         f"slow_eval/{key}": PNGImage(encoded)

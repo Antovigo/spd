@@ -127,7 +127,7 @@ pd:
   loss_metrics:
   - frequency:
       coeff: 1.0e-06
-      reference_token_count: 65536
+      reference_datapoint_count: 65536
     coeff: 5.0e-06
     eps: 1.0e-06
     pnorm:

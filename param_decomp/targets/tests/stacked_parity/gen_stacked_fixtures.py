@@ -181,7 +181,7 @@ def main() -> None:
             pnorm=ScheduleConfig(
                 max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
             ),
-            frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=32),
+            frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_datapoint_count=32),
         ),
         adversary=PersistentPGDReconLossConfig(
             coeff=0.5,

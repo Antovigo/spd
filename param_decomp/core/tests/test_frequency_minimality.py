@@ -2,7 +2,7 @@
 
 `importance_minimality_terms` returns `(lp, freq)`: `lp = Σ_c f_c` (the bare per-token
 firing-rate mean) and `freq` the batch-invariant frequency penalty with `a' =
-reference_token_count`. These pin the properties that motivate the split from the old
+reference_datapoint_count`. These pin the properties that motivate the split from the old
 rolled `lp + beta·log2(1 + B·T·f_c)`: batch-invariance, the `f=0 → 0` cutoff, and that
 `a' = B·T` reproduces the old implicit-`B·T` value exactly (so coefficients transfer).
 """
@@ -23,10 +23,21 @@ from param_decomp.core.losses import (
 from param_decomp.core.schedule import ScheduleConfig
 
 
+def test_legacy_reference_token_count_alias():
+    cfg = FrequencyMinimalityConfig.model_validate({"coeff": 0.5, "reference_token_count": 32768})
+    assert cfg.reference_datapoint_count == 32768
+    assert cfg.model_dump() == {
+        "coeff": 0.5,
+        "reference_datapoint_count": 32768,
+    }
+
+
 def test_closed_form():
     # pnorm=1, eps=0: per_component_sums = column sums; f = sums / n; a' = 8.
     ci = {"a": jnp.array([[1.0, 2.0], [3.0, 4.0]])}  # n=2, sums=[4,6], f=[2,3]
-    lp, freq = importance_minimality_terms(ci, jnp.asarray(1.0), eps=0.0, reference_token_count=8)
+    lp, freq = importance_minimality_terms(
+        ci, jnp.asarray(1.0), eps=0.0, reference_datapoint_count=8
+    )
     assert math.isclose(float(lp), 2.0 + 3.0, rel_tol=1e-6)
     expected = 2.0 * math.log2(1 + 8 * 2.0) + 3.0 * math.log2(1 + 8 * 3.0)
     assert math.isclose(float(freq), expected, rel_tol=1e-6)
@@ -35,7 +46,9 @@ def test_closed_form():
 def test_zero_frequency_zero_contribution():
     # A component that never fires (f=0) contributes exactly 0 to freq.
     ci = {"a": jnp.array([[0.0, 5.0], [0.0, 5.0]])}  # f = [0, 5]
-    _, freq = importance_minimality_terms(ci, jnp.asarray(1.0), eps=0.0, reference_token_count=16)
+    _, freq = importance_minimality_terms(
+        ci, jnp.asarray(1.0), eps=0.0, reference_datapoint_count=16
+    )
     expected = 0.0 + 5.0 * math.log2(1 + 16 * 5.0)
     assert math.isclose(float(freq), expected, rel_tol=1e-6)
 
@@ -46,10 +59,10 @@ def test_batch_invariance():
     small = {"a": jnp.tile(base, (4, 1))}  # n=4
     large = {"a": jnp.tile(base, (64, 1))}  # n=64, identical f_c
     _, freq_small = importance_minimality_terms(
-        small, jnp.asarray(1.0), 0.0, reference_token_count=1024
+        small, jnp.asarray(1.0), 0.0, reference_datapoint_count=1024
     )
     _, freq_large = importance_minimality_terms(
-        large, jnp.asarray(1.0), 0.0, reference_token_count=1024
+        large, jnp.asarray(1.0), 0.0, reference_datapoint_count=1024
     )
     assert jnp.allclose(freq_small, freq_large, rtol=1e-5)
 
@@ -68,14 +81,14 @@ def test_a_prime_bt_reproduces_old_rolled_log_term():
         mean = sums / n
         old = old + (mean + beta * mean * jnp.log2(1 + sums)).sum()
 
-    lp, freq = importance_minimality_terms(ci, jnp.asarray(p), eps=eps, reference_token_count=n)
+    lp, freq = importance_minimality_terms(ci, jnp.asarray(p), eps=eps, reference_datapoint_count=n)
     assert jnp.allclose(lp + beta * freq, old, rtol=1e-6)
 
 
-def test_lp_independent_of_reference_token_count():
+def test_lp_independent_of_reference_datapoint_count():
     ci = {"a": jnp.array([[0.5, 1.5], [2.5, 3.5]])}
-    lp_a, _ = importance_minimality_terms(ci, jnp.asarray(1.5), 1e-6, reference_token_count=32)
-    lp_b, _ = importance_minimality_terms(ci, jnp.asarray(1.5), 1e-6, reference_token_count=999)
+    lp_a, _ = importance_minimality_terms(ci, jnp.asarray(1.5), 1e-6, reference_datapoint_count=32)
+    lp_b, _ = importance_minimality_terms(ci, jnp.asarray(1.5), 1e-6, reference_datapoint_count=999)
     assert jnp.allclose(lp_a, lp_b)
 
 
@@ -93,11 +106,11 @@ def test_dispatch_with_frequency_matches_direct():
     cfg = ImportanceMinimalityLossConfig(
         coeff=1.0,
         pnorm=ScheduleConfig.constant(2.0),
-        frequency=FrequencyMinimalityConfig(coeff=0.5, reference_token_count=128),
+        frequency=FrequencyMinimalityConfig(coeff=0.5, reference_datapoint_count=128),
     )
     ci = {"a": jnp.array([[0.1, 0.9], [0.4, 0.6]])}
     param = annealed_imp_min_param(jnp.asarray(0.0), 100, cfg)
     lp, freq = imp_min_terms(ci, cfg, param)
-    lp_d, freq_d = importance_minimality_terms(ci, param, cfg.eps, reference_token_count=128)
+    lp_d, freq_d = importance_minimality_terms(ci, param, cfg.eps, reference_datapoint_count=128)
     assert jnp.allclose(lp, lp_d)
     assert jnp.allclose(freq, freq_d)

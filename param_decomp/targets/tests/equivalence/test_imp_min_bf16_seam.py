@@ -45,7 +45,7 @@ def test_imp_min_bf16_input_seam_within_tolerance():
         ci_upper,
         jnp.asarray(reference["pnorm"]),
         reference["eps"],
-        reference_token_count=n_positions,
+        reference_datapoint_count=n_positions,
     )
 
     worst_rel = 0.0

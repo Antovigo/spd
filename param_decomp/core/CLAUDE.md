@@ -11,7 +11,9 @@ layering (core imports NO target, targets import core only) is pinned by
 
 Open items: the persistent-source shape `nsc` and sigmoid parameterization are
 deliberately refused. SPEC S24's two torch-parity quirks (PPGD warmup route-all,
-fresh-PGD single routing draw) are pinned pending a team decision.
+fresh-PGD single routing draw) are pinned pending a team decision. tPD's target-pass
+delta polarity (SPEC T10) and whether T3's faithfulness exclusion is definitional await
+the algorithm's author-definition.
 
 ## The one rule
 
@@ -21,29 +23,40 @@ never silently diverge. Cite IDs (`S14`, `N1`, …) in commit messages and revie
 
 ## Architecture in one breath
 
-`model.py` defines `DecomposedModel` — a `@runtime_checkable Protocol`: ordered `sites` +
-`has_position_axis` + the methods `clean_output`, `read_activations`,
-`clean_output_and_activations` (both from ONE frozen forward — the GLU target emits
-the taps as ys of its clean-forward `lax.scan`; what the train + fast-eval steps call),
-`masked_output`, `masked_site_outputs`, `weight_deltas`, and a `recon_loss_fn`
-(LM: `kl_per_position`). The
-concrete impl per target is an `eqx.Module` (`GLUDecomposedModel`,
+`model.py` defines `DecomposedModel[PreparedT]` — a `@runtime_checkable Protocol` with
+ordered `sites`, `has_position_axis`, `site_output_keys`, one `clean_forward`, one
+`masked_forward`, `component_activation_forward`, `weight_deltas`, and `recon_loss_fn` (LM:
+`kl_per_position`). Activation identity is target-owned: core passes immutable frozensets of
+canonical names, and each target parses and deterministically orders them into its private
+sparse slot layout on first trace. No capture-plan type crosses the protocol, and core never
+imports or
+interprets a residual/block/matrix vocabulary. `ForwardResult.captures` carries one array per
+requested physical activation. Transformer site names are not aliases for matrix inputs;
+consumers ask directly for the vectors they need. An empty key set takes the target's
+untouched no-capture path. Both forwards return one `ForwardResult`; masked execution receives
+the exhaustive
+`MaterializedMasking | StochasticMasking` union, preserving in-block stochastic mask
+rebuilds without a deterministic/stochastic method grid. `PreparedT` is the target-private
+compute layout returned by `prepare_compute_weights`; generic code may transport it only
+back into that same target's methods, so cross-target prepared-weight mixing is type-invalid.
+
+The concrete implementation per target is an `eqx.Module` (`GLUDecomposedModel`,
 `SimpleMLPDecomposedModel`, `TMSDecomposedModel`, `ResidMLPDecomposedModel`) carrying its
-FROZEN target weights as ARRAY FIELDS; the TRAINABLE V/U (`vu: ComponentStacks`) stays an explicit
-METHOD ARG (separate lifecycle — own optimizer + checkpoint, C-sharded while the frozen
-weights replicate). Flat site-name-keyed dicts at the boundary; the model threads into the
-jitted step as a pytree ARG (never a jit-closure constant — an 8B target becomes a multi-GB
-HLO constant; see "HLO-baking rule" below). The activation waist comes in EXACTLY TWO
-shapes — positionless `[B, d]` (masks/CI `[B, C]`; the toys) or one position axis
-`[B, P, d]` (masks/CI `[B, P, C]`; an LM, whose position axis is the token sequence).
-`DecomposedModel.has_position_axis` declares which; the run threads the extents as
-`positions: Positionless | Positioned(n_positions)` (matched exhaustively wherever
-shapes are built — never a rank branch). Inside the step, masking / routing / sources /
-imp-min read an opaque `leading = residual.shape[:-1]`; reductions are
+FROZEN target weights as ARRAY FIELDS; the TRAINABLE V/U (`vu: ComponentStacks`) stays an
+explicit METHOD ARG (separate lifecycle — own optimizer + checkpoint, C-sharded while the
+frozen weights replicate). Flat site-name-keyed dicts remain the decomposition boundary;
+the model threads into the jitted step as a pytree ARG (never a jit-closure constant — an
+8B target becomes a multi-GB HLO constant; see "HLO-baking rule" below). The activation
+waist comes in EXACTLY TWO shapes — positionless `[B, d]` (masks/CI `[B, C]`; the toys) or
+one position axis `[B, P, d]` (masks/CI `[B, P, C]`; an LM, whose position axis is the
+token sequence). `DecomposedModel.has_position_axis` declares which; the run threads the
+extents as `positions: Positionless | Positioned(n_positions)` (matched exhaustively
+wherever shapes are built — never a rank branch). Inside the step, masking / routing /
+sources / imp-min read an opaque `leading = residual.shape[:-1]`; reductions are
 `math.prod(shape[:-1])` / `axis=tuple(range(ndim-1))`. CI is independent over every
-leading axis. `CIFn.has_position_axis` mirrors the model's, and `init_train_state`
-asserts they're equal (early fail) so the CI fn stays per-domain (RoPE over positions)
-without the core adapting.
+leading axis. `CIFn.has_position_axis` mirrors the model's, and `init_train_state` asserts
+they're equal (early fail) so the CI fn stays per-domain (RoPE over positions) without the
+core adapting.
 Adversarial sources (both adversaries) are configured by `source_shape: c | bc | sc | bsc`
 (`configs.SourceShape`): each letter names a waist axis the source keeps full, missing
 letters are stored size-1 broadcast axes, rank always matches the waist. Batch-B shapes
@@ -54,15 +67,20 @@ verbose value names) are rejected at parse — no config aliases remain. Every (
 shape is written out in `init_sources_sharded`, so persistent PGD runs on the toys too.
 Batch size is `pd.batch_size` uniformly — `DataConfig` carries no batch.
 `CIHiddenActsReconLoss` / `StochasticHiddenActsReconLoss` are standalone eval metrics
-(`hidden_acts_eval.py`, in-loop on `eval.slow_every`) over a fifth model fn
-`masked_site_outputs` — NOT recon-grid training terms (the recon loss stays
-KL-on-final-logits; SPEC S31). CI-fn numerics: GELU is exact-erf (`approximate=False`),
+(`hidden_acts_eval.py`, in-loop on `eval.slow_every`) over canonical site-output keys on the
+same clean/masked forward seam — NOT standalone recon-grid training terms (SPEC S31).
+Each configured recon term retains its end-to-end comparison and may add S35's
+`HiddenActsReconstruction` at explicit target-owned capture points, currently measured as
+positive-coefficient relative MSE. The clean forward
+captures the order-preserving union of CI inputs and every term's points; each masked draw
+captures only its own points, and every adversary ascends that same combined scalar. CI-fn
+numerics: GELU is exact-erf (`approximate=False`),
 RMSNorm eps is `finfo(fp32).eps` (`CI_FN_RMS_EPS`) — SPEC §4.6. The
 three EDGES are generic so non-LM (bio-style) targets fit (#828): the model INPUT
-(the opaque batch `clean_output` / `read_activations` / `masked_output` consume, typed
-`Any` — token ids for an LM, a dict for bio), the model OUTPUT (`clean_output`/`masked_output` return `Any` — logits, a tuple
-of heads, coords; field NAMES stay `*_logits` pending a deferred rename), and the recon
-comparison (`recon_loss_fn(clean_output, masked_output) -> scalar`, default
+(the opaque batch `clean_forward` / `masked_forward` consume, typed `Any` — token ids for
+an LM, a dict for bio), the model OUTPUT (`ForwardResult.output: Any` — logits, a tuple of
+heads, coords; field NAMES stay `*_logits` pending a deferred rename), and the recon
+comparison (`recon_loss_fn(masked_output, clean_output) -> scalar`, default
 `kl_per_position` so the LM path is byte-identical). The waist shape contract (all per-site
 tensors in one forward share one `*leading` prefix) is enforced at trace time by
 `@jaxtyped(typechecker=beartype)` on the core `step`, `masked_forward`, and the loss fns.
@@ -74,9 +92,9 @@ mask-source strategy: a live-set helper (`all_sites_live`/`each_site_live`/`live
 feeds the single `make_plan` constructor, built from the shared configs by
 `recon.build_loss_terms`;
 see LOSS_PARITY_DESIGN.md),
-consuming `losses.py` (pure loss terms + schedules) and `adversary.py` (persistent
-vs fresh source machinery — semantically distinct adversaries sharing only
-`source_masks`); `ci_fn.py` the shared CI transformer. The targets are the sibling
+consuming `losses.py` (pure loss terms + schedules), `adversary.py` (persistent
+adversarial state and optimization), and `masking.py` (mask construction shared across
+source strategies and targets); `ci_fn.py` the shared CI transformer. The targets are the sibling
 distribution: `param_decomp/targets/glu_transformer.py` the SHARED HF GLU-transformer
 target machinery (site grammar, `FrozenAttn`/`GLULayer`/`GLUDecomposedModel`, the
 scan/masked-forward engine, HF loading, and the target's own placement via
@@ -117,6 +135,11 @@ NAIVE host gather of the C-sharded V/U (gated on `want_uv_plots`) and passes `co
 special handling; for the positionless toys (TMS/ResidMLP) `toy_uv_eval.render_uv_metric`
 renders it off the small on-host V/U + the probe CI as permutation source (cheap, no
 gather), sharing `slow_eval.render_uv_figure` / `plot_uv_matrices` with the LM path.
+
+`well_temperedness.py` measures whether components with higher causal importance
+preactivations have a greater effect on reconstruction loss when ablated one at a time. It
+compares components across all heads and layers, separately below 0, between 0 and 1, and
+above 1. Named groups add the same measurement for subsets such as attention and MLP sites.
 
 `experiments/lm/arithmetic_eval.py` is a config-gated LM-only figure tier (`ArithmeticCIGrid`, on
 `eval.slow_every`) for inspecting how the decomposition reconstructs a `target model`'s
@@ -175,8 +198,10 @@ The TMS + ResidMLP targets live at `param_decomp/targets/{tms,resid_mlp}.py` (th
 (a module main) that builds the `ExperimentConfig` from the canonical schema and calls
 `run_decomposition_training`. They are positionless and use the MLP CI fns. All CI-fn architectures live together in
 `ci_fn.py`: `LayerwiseMLPCIFn` (positionless, one independent MLP per site mapping
-`site_input [B,d_in] -> [B,C]`), `GlobalMLPCIFn` (positionless, one shared MLP over all
-sites jointly, concat/split in canonical site order), and the LM `ChunkwiseTransformerCIFn`
+`site_input [B,d_in] -> [B,C]`), `GlobalMLPCIFn` (one shared MLP over explicit input taps —
+`TapSpec` keys + widths, DECOUPLED from the output sites, so several sites may share one
+physical tap — concat/split pointwise over every leading axis: positionless on the toys,
+per-token on an LM), and the LM `ChunkwiseTransformerCIFn`
 (positioned, per-chunk transformers reading residual taps, stacked +
 `lax.scan`'d with per-chunk remat, and **N per-site output heads** (one `[d_model, C_j]` per
 site-slot). `n_blocks=0` degenerates that arch to `RMS-normed taps → in_proj → heads`:
@@ -240,8 +265,9 @@ Llama-8B target is multi-GB. Therefore:
 
 ## Invariants with sharp teeth (the ones that have actually bitten)
 
-- **S3**: the recon target is the FROZEN-path forward (`clean_output`), never the
-  `mask=1` decomposed identity (bf16 rounding + V/U in the stopped graph).
+- **S3**: the recon target is the FROZEN-path `clean_forward(...).output`, never the
+  `mask=1` decomposed identity (bf16 rounding + V/U in the stopped graph). An empty
+  capture-key set selects the target's compact no-capture path.
 - **S13/S15**: source updates go through the persistent Adam AND project to [0,1]
   after EVERY ascent — an unprojected drift past 1 has zero `clip` gradient and the
   entry dies.

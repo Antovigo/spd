@@ -32,13 +32,37 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
 from param_decomp.core.ci_fn import CI
-from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, site_out
-from param_decomp.core.model import run_stochastic_masked_output
+from param_decomp.core.components import ComponentStacks, SiteC, SiteDims, SiteSpec, site_out
+from param_decomp.core.masking import materialize_masking
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    ForwardResult,
+    Masking,
+)
+from param_decomp.targets.linear_site_capture import site_output_key
 
 LINEAR1 = "linear1"
 LINEAR2 = "linear2"
 
 HiddenLayerInit = Literal["identity", "random"]
+
+TMSGenerationType = Literal[
+    "exactly_one_active",
+    "exactly_two_active",
+    "exactly_three_active",
+    "exactly_four_active",
+    "exactly_five_active",
+    "at_least_zero_active",
+]
+
+_EXACTLY_N_ACTIVE: dict[str, int] = {
+    "exactly_one_active": 1,
+    "exactly_two_active": 2,
+    "exactly_three_active": 3,
+    "exactly_four_active": 4,
+    "exactly_five_active": 5,
+}
 
 
 def hidden_layer_name(i: int) -> str:
@@ -52,11 +76,50 @@ def site_names_for(n_hidden_layers: int) -> tuple[str, ...]:
     return (LINEAR1, *hidden, LINEAR2)
 
 
+TMSCaptureSources = tuple[int, ...]
+
+
+def site_input_tap_keys(sites: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the input taps for the sites in computation order."""
+    assert sites, "TMS requires at least one site"
+    return (sites[0], *(site_output_key(site) for site in sites[:-1]))
+
+
+def _resolve_capture(sites: tuple[str, ...], keys: tuple[str, ...]) -> TMSCaptureSources:
+    assert sites, "TMS requires at least one site"
+    source_index = {sites[0]: 0} | {
+        site_output_key(site): index + 1 for index, site in enumerate(sites)
+    }
+    try:
+        sources = tuple(source_index[key] for key in keys)
+    except KeyError as error:
+        raise AssertionError(f"unknown TMS activation {error.args[0]!r}") from error
+    assert len(set(sources)) == len(sources), (
+        "multiple capture keys name one physical activation",
+        keys,
+        sources,
+    )
+    return sources
+
+
+def _capture_key_by_index(keys: tuple[str, ...], sources: TMSCaptureSources) -> dict[int, str]:
+    return dict(zip(sources, keys, strict=True))
+
+
+def _record_capture(
+    captures: dict[str, Array], requested: dict[int, str], index: int, value: Array
+) -> None:
+    key = requested.get(index)
+    if key is not None:
+        captures[key] = value
+
+
 class CIFnCallable(Protocol):
     """The CI-fn surface the TMS target-CI probe needs: `__call__(taps) -> CI` plus the
-    `input_names` the probe feeds (satisfied by `ci_fn.LayerwiseMLPCIFn` / `GlobalMLPCIFn`)."""
+    `capture_keys` the probe feeds (satisfied by `ci_fn.LayerwiseMLPCIFn` / `GlobalMLPCIFn`)."""
 
-    input_names: tuple[str, ...]
+    @property
+    def capture_keys(self) -> CaptureKeys: ...
 
     def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI: ...
 
@@ -86,7 +149,7 @@ class TMSTargetConfig:
     pretrain_lr: float
     pretrain_seed: int
     feature_probability: float
-    data_generation_type: str
+    data_generation_type: TMSGenerationType
     global_batch: int
     n_hidden_layers: int = 0
     hidden_layer_init: HiddenLayerInit = "identity"
@@ -112,15 +175,15 @@ def _parse_hidden_layer_index(name: str) -> int | None:
     return int(name[len(prefix) :])
 
 
-def site_dims(cfg: TMSConfig, name: str) -> tuple[int, int]:
-    """(d_in, d_out) right-mult orientation."""
+def site_dims(cfg: TMSConfig, name: str) -> SiteDims:
+    """Matrix dimensions in right-mult orientation."""
     if name == LINEAR1:
-        return cfg.n_features, cfg.n_hidden
+        return SiteDims(d_in=cfg.n_features, d_out=cfg.n_hidden)
     if name == LINEAR2:
-        return cfg.n_hidden, cfg.n_features
+        return SiteDims(d_in=cfg.n_hidden, d_out=cfg.n_features)
     i = _parse_hidden_layer_index(name)
     assert i is not None and 0 <= i < cfg.n_hidden_layers, f"unknown TMS site {name!r}"
-    return cfg.n_hidden, cfg.n_hidden
+    return SiteDims(d_in=cfg.n_hidden, d_out=cfg.n_hidden)
 
 
 def canonical_site_cs(site_cs: tuple[SiteC, ...]) -> tuple[SiteC, ...]:
@@ -147,8 +210,8 @@ def site_specs(cfg: TMSConfig, site_cs: tuple[SiteC, ...]) -> tuple[SiteSpec, ..
     specs = []
     for site in site_cs:
         assert site.C >= 1, site
-        d_in, d_out = site_dims(cfg, site.name)
-        specs.append(SiteSpec(site.name, d_in, d_out, site.C))
+        dims = site_dims(cfg, site.name)
+        specs.append(SiteSpec(name=site.name, d_in=dims.d_in, d_out=dims.d_out, C=site.C))
     return tuple(specs)
 
 
@@ -189,101 +252,128 @@ def site_inputs(target: TMSTarget, resid: Float[Array, "B n_features"]) -> dict[
     return inputs
 
 
-def _masked_site_out(
+def clean_forward(
+    target: TMSTarget,
+    resid: Float[Array, "B n_features"],
+    capture_keys: tuple[str, ...],
+    capture_sources: TMSCaptureSources,
+) -> ForwardResult:
+    if not capture_keys:
+        return ForwardResult.from_producer(
+            output=clean_output(target, resid), capture_keys=(), capture_values=()
+        )
+    requested = _capture_key_by_index(capture_keys, capture_sources)
+    captures: dict[str, Array] = {}
+
+    _record_capture(captures, requested, 0, resid)
+    hidden = resid @ target.W1.T
+    _record_capture(captures, requested, 1, hidden)
+    for i, W in enumerate(target.hidden):
+        hidden = hidden @ W.T
+        _record_capture(captures, requested, i + 2, hidden)
+    linear2 = hidden @ target.W2.T
+    _record_capture(captures, requested, len(target.hidden) + 2, linear2)
+    assert set(captures) == set(capture_keys), (sorted(captures), sorted(capture_keys))
+    return ForwardResult.from_producer(
+        output=jax.nn.relu(linear2 + target.b2),
+        capture_keys=capture_keys,
+        capture_values=tuple(captures[key] for key in capture_keys),
+    )
+
+
+def _decomposed_or_frozen_site_output(
     components: ComponentStacks,
     site: str,
-    W: Array,
-    x_in: Array,
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
+    frozen_weight: Array,
+    site_input: Array,
+    component_masks: dict[str, Array],
+    weight_delta_masks: dict[str, Array] | None,
     routes: dict[str, Array] | None,
-    live_set: frozenset[str],
-    has_delta: bool,
-    collect: dict[str, Array] | None,
+    live_sites: frozenset[str],
 ) -> Array:
-    if site not in live_set:
-        return x_in @ W.T
-    V, U = components.site(site)
-    out = site_out(
-        x_in, V, U, W, masks[site], delta_masks[site] if has_delta else None,
+    if site not in live_sites:
+        return site_input @ frozen_weight.T
+    site_components = components.site(site)
+    site_output = site_out(
+        site_input,
+        site_components.V,
+        site_components.U,
+        frozen_weight,
+        component_masks[site],
+        None if weight_delta_masks is None else weight_delta_masks[site],
         None if routes is None else routes[site],
     )  # fmt: skip
-    if collect is not None:
-        collect[site] = out
-    return out
+    return site_output
 
 
 def _run_masked(
     target: TMSTarget,
     components: ComponentStacks,
     resid: Float[Array, "B n_features"],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
+    component_masks: dict[str, Array],
+    weight_delta_masks: dict[str, Array] | None,
     routes: dict[str, Array] | None,
-    live: tuple[str, ...],
-    has_delta: bool,
-    collect: dict[str, Array] | None,
-) -> Array:
-    """The masked decomposed forward (SPEC §4.1, S2): sites in `live` run their decomposed
-    forward; the rest run the frozen `x @ W.T` path. Each downstream site reads the
-    (possibly masked) output of the site before it, so a masked site propagates."""
-    live_set = frozenset(live)
-    site_args = (masks, delta_masks, routes, live_set, has_delta, collect)
-    hidden = _masked_site_out(components, LINEAR1, target.W1, resid, *site_args)
+    capture_keys: tuple[str, ...],
+    capture_sources: TMSCaptureSources,
+) -> ForwardResult:
+    """Masked forward plus requested captures; every downstream site sees prior changes."""
+    live_sites = frozenset(component_masks)
+    requested = _capture_key_by_index(capture_keys, capture_sources)
+    captures: dict[str, Array] = {}
+    _record_capture(captures, requested, 0, resid)
+
+    def masked_site_output(site_name: str, W: Array, site_input: Array) -> Array:
+        return _decomposed_or_frozen_site_output(
+            components,
+            site_name,
+            W,
+            site_input,
+            component_masks,
+            weight_delta_masks,
+            routes,
+            live_sites,
+        )
+
+    hidden = masked_site_output(LINEAR1, target.W1, resid)
+    _record_capture(captures, requested, 1, hidden)
     for i, W in enumerate(target.hidden):
-        hidden = _masked_site_out(components, hidden_layer_name(i), W, hidden, *site_args)
-    pre_relu = _masked_site_out(components, LINEAR2, target.W2, hidden, *site_args) + target.b2
-    return jax.nn.relu(pre_relu)
-
-
-def masked_output(
-    target: TMSTarget,
-    components: ComponentStacks,
-    resid: Float[Array, "B n_features"],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
-    routes: dict[str, Array] | None,
-    live: tuple[str, ...],
-    has_delta: bool,
-) -> Array:
-    return _run_masked(target, components, resid, masks, delta_masks, routes, live, has_delta, None)
-
-
-def masked_site_outputs(
-    target: TMSTarget,
-    components: ComponentStacks,
-    resid: Float[Array, "B n_features"],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
-    routes: dict[str, Array] | None,
-    live: tuple[str, ...],
-    has_delta: bool,
-) -> dict[str, Array]:
-    """Per-`live`-site decomposed output of the masked forward (SPEC S31)."""
-    collect: dict[str, Array] = {}
-    _run_masked(target, components, resid, masks, delta_masks, routes, live, has_delta, collect)
-    assert set(collect) == set(live), (sorted(collect), sorted(live))
-    return collect
+        hidden = masked_site_output(hidden_layer_name(i), W, hidden)
+        _record_capture(captures, requested, i + 2, hidden)
+    pre_relu = masked_site_output(LINEAR2, target.W2, hidden)
+    _record_capture(captures, requested, len(target.hidden) + 2, pre_relu)
+    pre_relu = pre_relu + target.b2
+    assert set(captures) == set(capture_keys), (sorted(captures), sorted(capture_keys))
+    return ForwardResult.from_producer(
+        output=jax.nn.relu(pre_relu),
+        capture_keys=capture_keys,
+        capture_values=tuple(captures[key] for key in capture_keys),
+    )
 
 
 def weight_deltas_fp32(
     target: TMSTarget, components: ComponentStacks, sites: tuple[SiteSpec, ...]
 ) -> dict[str, Array]:
     """fp32 `W − V@U` per site from fp32 masters (SPEC N2; faithfulness input)."""
-    out: dict[str, Array] = {}
+    weight_deltas: dict[str, Array] = {}
     for spec in sites:
         W = _frozen_site_weight(target, spec.name)
-        V, U = components.site(spec.name)
-        out[spec.name] = W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
-    return out
+        site_components = components.site(spec.name)
+        weight_deltas[spec.name] = (
+            W.astype(jnp.float32)
+            - (site_components.V.astype(jnp.float32) @ site_components.U.astype(jnp.float32)).T
+        )
+    return weight_deltas
 
 
-def tms_mse(masked: Float[Array, "B n_features"], clean: Float[Array, "B n_features"]) -> Array:
+def tms_mse(
+    masked_output: Float[Array, "B n_features"],
+    clean_output: Float[Array, "B n_features"],
+) -> Array:
     """MSE recon over the post-ReLU output, mean over batch × features (torch
     `recon_loss_mse`: `sum((pred-target)^2) / pred.numel()`), fp32."""
-    masked = masked.astype(jnp.float32)
-    clean = clean.astype(jnp.float32)
-    return jnp.mean((masked - clean) ** 2)
+    masked_output = masked_output.astype(jnp.float32)
+    clean_output = clean_output.astype(jnp.float32)
+    return jnp.mean((masked_output - clean_output) ** 2)
 
 
 class TMSDecomposedModel(eqx.Module):
@@ -312,81 +402,79 @@ class TMSDecomposedModel(eqx.Module):
     ) -> Array:
         return tms_mse(masked_output, clean_output)
 
-    def clean_output(self, resid: Float[Array, "B n_features"]) -> Array:
-        return clean_output(self.target, resid)
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        assert set(sites) <= set(self.site_names), (sites, self.site_names)
+        return tuple(site_output_key(site) for site in sites)
 
-    def read_activations(
-        self, resid: Float[Array, "B n_features"], wanted: tuple[str, ...]
-    ) -> dict[str, Array]:
-        inputs = site_inputs(self.target, resid)
-        return {k: inputs[k] for k in wanted}
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        _resolve_capture(self.site_names, keys)
 
-    def clean_output_and_activations(
-        self, resid: Float[Array, "B n_features"], wanted: tuple[str, ...]
-    ) -> tuple[Array, dict[str, Array]]:
-        return self.clean_output(resid), self.read_activations(resid, wanted)
+    def clean_forward(
+        self, resid: Float[Array, "B n_features"], capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        ordered_capture_keys = tuple(sorted(capture_keys))
+        capture_sources = _resolve_capture(self.site_names, ordered_capture_keys)
+        return clean_forward(self.target, resid, ordered_capture_keys, capture_sources)
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> ComponentStacks:
         """Identity: TMS weights are tiny + replicated, nothing to stack/gather/share."""
         return vu
 
-    def masked_output(
+    def component_activation_forward(
         self,
-        prepared: ComponentStacks,
-        resid: Float[Array, "B n_features"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        prepared_weights: ComponentStacks,
+        inputs: Array,
+        /,
         *,
-        remat: bool,
-    ) -> Array:
-        def forward(
-            vu: ComponentStacks,
-            resid: Array,
-            masks: dict[str, Array],
-            delta_masks: dict[str, Array],
-            routes: dict[str, Array] | None,
-        ) -> Array:
-            return masked_output(
-                self.target, vu, resid, masks, delta_masks, routes, live, has_delta
-            )
-
-        forward = jax.checkpoint(forward) if remat else forward
-        return forward(prepared, resid, masks, delta_masks, routes)
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        del prepared_weights, inputs, capture_keys
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support component-activation harvest"
+        )
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
         return ci_lower
 
-    def masked_output_stochastic(
+    def masked_forward(
         self,
-        prepared: ComponentStacks,
+        prepared_weights: ComponentStacks,
         resid: Float[Array, "B n_features"],
-        ci_stacked: dict[str, Array],
-        draw_key: Array,
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> Array:
-        return run_stochastic_masked_output(
-            self, prepared, resid, ci_stacked, draw_key, routes, live, has_delta, remat=remat
-        )
+    ) -> ForwardResult:
+        ordered_capture_keys = tuple(sorted(capture_keys))
+        capture_sources = _resolve_capture(self.site_names, ordered_capture_keys)
+        explicit_masking = materialize_masking(masking)
 
-    def masked_site_outputs(
-        self,
-        prepared: ComponentStacks,
-        resid: Float[Array, "B n_features"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, Array]:
-        return masked_site_outputs(
-            self.target, prepared, resid, masks, delta_masks, routes, live, has_delta
+        def forward(
+            vu: ComponentStacks,
+            resid: Array,
+            component_masks: dict[str, Array],
+            weight_delta_masks: dict[str, Array] | None,
+            routes: dict[str, Array] | None,
+        ) -> ForwardResult:
+            return _run_masked(
+                self.target,
+                vu,
+                resid,
+                component_masks,
+                weight_delta_masks,
+                routes,
+                ordered_capture_keys,
+                capture_sources,
+            )
+
+        forward = jax.checkpoint(forward) if remat else forward
+        return forward(
+            prepared_weights,
+            resid,
+            explicit_masking.component_masks,
+            explicit_masking.weight_delta_masks,
+            explicit_masking.routes,
         )
 
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Array]:
@@ -449,21 +537,12 @@ def init_tms_target(cfg: TMSConfig, key: Array) -> TMSTarget:
     return TMSTarget(W1=W1, hidden=_init_hidden_layers(cfg, hidden_key), W2=W1.T, b2=b2)
 
 
-_EXACTLY_N_ACTIVE: dict[str, int] = {
-    "exactly_one_active": 1,
-    "exactly_two_active": 2,
-    "exactly_three_active": 3,
-    "exactly_four_active": 4,
-    "exactly_five_active": 5,
-}
-
-
 def sample_sparse_features(
     key: Array,
     batch: int,
     n_features: int,
     feature_probability: float,
-    generation_type: str,
+    generation_type: TMSGenerationType,
 ) -> Float[Array, "B n_features"]:
     """Synthetic sparse-feature batch (torch `SparseFeatureDataset`, `value_range=(0,1)`):
     `at_least_zero_active` gates each feature independently by `feature_probability`;
@@ -478,8 +557,7 @@ def sample_sparse_features(
     if generation_type == "at_least_zero_active":
         mask = jax.random.uniform(gate_key, (batch, n_features)) < feature_probability
         return values * mask
-    n = _EXACTLY_N_ACTIVE.get(generation_type)
-    assert n is not None, f"unsupported TMS generation type {generation_type!r}"
+    n = _EXACTLY_N_ACTIVE[generation_type]
     assert n <= n_features, f"cannot activate {n} of {n_features} features"
     sort_key = jax.random.uniform(gate_key, (batch, n_features))
     active = jnp.argsort(sort_key, axis=-1)[:, :n]  # n distinct features per row
@@ -487,10 +565,27 @@ def sample_sparse_features(
     return values * one_hot
 
 
+def scatter_features(
+    x_active: Float[Array, "B n_active"], active_indices: tuple[int, ...], n_features: int
+) -> Float[Array, "B n_features"]:
+    """Embed a batch sampled over ONLY the target features into full feature width — a
+    targeted (tPD) run's TARGET stream (SPEC T2). The generator runs at `n_active` width
+    so its generation type means what it says over the target features ("exactly one
+    active" = one active TARGET feature; restricting a full-width sample after the fact
+    would mostly produce empty rows). Non-target columns are identically zero."""
+    assert active_indices == tuple(sorted(set(active_indices))), active_indices
+    assert active_indices[0] >= 0 and active_indices[-1] < n_features, (
+        f"active_indices {active_indices} out of range for n_features={n_features}"
+    )
+    assert x_active.shape[-1] == len(active_indices), (x_active.shape, active_indices)
+    out = jnp.zeros((*x_active.shape[:-1], n_features), x_active.dtype)
+    return out.at[..., jnp.array(active_indices)].set(x_active)
+
+
 def pretrain_tms_target(
     cfg: TMSConfig,
     feature_probability: float,
-    generation_type: str,
+    generation_type: TMSGenerationType,
     steps: int,
     batch_size: int,
     lr: float,
@@ -617,7 +712,7 @@ def single_feature_ci(
     """Feed the single-feature probe and read the `lower_leaky` CI per site,
     `{site: [n_features, C]}`."""
     probe = single_feature_probe(n_features)
-    return ci_fn(model.read_activations(probe, ci_fn.input_names), remat=False).lower
+    return ci_fn(model.clean_forward(probe, ci_fn.capture_keys).captures, remat=False).lower
 
 
 # ----------------------------- visualizations -----------------------------

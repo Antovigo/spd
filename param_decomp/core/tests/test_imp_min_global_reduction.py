@@ -46,7 +46,7 @@ def test_imp_min_global_reduction_invariant_to_device_count():
     n_positions = sample.shape[0] * sample.shape[1]
 
     lp_single, freq_single = importance_minimality_terms(
-        ci_upper, pnorm, eps, reference_token_count=n_positions
+        ci_upper, pnorm, eps, reference_datapoint_count=n_positions
     )
 
     mesh = hsdp_mesh()
@@ -59,7 +59,7 @@ def test_imp_min_global_reduction_invariant_to_device_count():
             )
             for site, v in ci.items()
         }
-        return importance_minimality_terms(ci, pnorm, eps, reference_token_count=n_positions)
+        return importance_minimality_terms(ci, pnorm, eps, reference_datapoint_count=n_positions)
 
     ci_sharded = {site: shard_batch(v, mesh, batch_axis=0) for site, v in ci_upper.items()}
     lp_sharded, freq_sharded = sharded_terms(ci_sharded)

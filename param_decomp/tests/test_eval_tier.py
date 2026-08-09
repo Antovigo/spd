@@ -43,6 +43,7 @@ SLOW_METRICS = {
     "PermutedCIPlotsConfig",
     "StochasticHiddenActsReconLossConfig",
     "UVPlotsConfig",
+    "WellTemperednessConfig",
 }
 
 

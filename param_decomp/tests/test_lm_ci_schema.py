@@ -1,7 +1,7 @@
-"""The authored chunkwise-CI schema (`experiments.lm.config`): the `attention` and `ffn`
-discriminated unions, validated from dicts — the shape a run yaml actually arrives as, so
-these exercise the discriminators the way a config file hits them, not the typed
-constructor."""
+"""The authored LM CI schema (`experiments.lm.config`): the `decomposition.ci` union and
+the chunkwise arm's `attention` / `ffn` discriminated unions, validated from dicts — the
+shape a run yaml actually arrives as, so these exercise the discriminators the way a
+config file hits them, not the typed constructor."""
 
 import pytest
 from pydantic import ValidationError
@@ -9,7 +9,9 @@ from pydantic import ValidationError
 from param_decomp.experiments.lm.config import (
     ChunkwiseTransformerCiConfig,
     GeluCiFfnConfig,
+    GlobalMlpCiConfig,
     GQACiAttentionConfig,
+    LMDecompositionConfig,
     MHACiAttentionConfig,
     SwigluCiFfnConfig,
 )
@@ -90,3 +92,69 @@ def test_ffn_requires_a_hidden_width():
 def test_unknown_ffn_kind_refuses():
     with pytest.raises(ValidationError):
         _cfg(ffn={"kind": "geglu", "hidden": 32})
+
+
+# ----------------------------- the decomposition.ci union -----------------------------
+
+
+def _decomposition(ci: dict[str, object]) -> LMDecompositionConfig:
+    return LMDecompositionConfig.model_validate(
+        {
+            "sites": {
+                "kind": "glu_transformer",
+                "layers": {"kind": "list", "indices": [18]},
+                "cs": {"gate": 8},
+            },
+            "ci": ci,
+        }
+    )
+
+
+def test_ci_union_parses_the_chunkwise_arm():
+    cfg = _decomposition(
+        {
+            "type": "chunkwise_transformer",
+            "blocks_per_chunk": 1,
+            "d_model": 16,
+            "n_blocks": 1,
+            "attention": {"kind": "mha", "n_heads": 4},
+            "ffn": {"kind": "gelu", "hidden": 32},
+        }
+    )
+    assert isinstance(cfg.ci, ChunkwiseTransformerCiConfig)
+
+
+def test_ci_union_parses_the_global_mlp_arm():
+    cfg = _decomposition(
+        {"type": "global_mlp", "hidden_dims": [512], "input_tap": "all_block_taps"}
+    )
+    assert isinstance(cfg.ci, GlobalMlpCiConfig)
+    assert cfg.ci.hidden_dims == (512,)
+    assert cfg.ci.input_tap == "all_block_taps"
+
+
+def test_ci_union_refuses_an_unknown_type():
+    with pytest.raises(ValidationError):
+        _decomposition({"type": "layerwise_mlp", "hidden_dims": [512]})
+
+
+def test_global_mlp_arm_refuses_chunkwise_fields():
+    with pytest.raises(ValidationError, match="d_model"):
+        _decomposition(
+            {
+                "type": "global_mlp",
+                "hidden_dims": [512],
+                "input_tap": "all_block_taps",
+                "d_model": 16,
+            }
+        )
+
+
+def test_global_mlp_arm_requires_a_hidden_layer():
+    with pytest.raises(ValidationError, match="hidden_dims"):
+        _decomposition({"type": "global_mlp", "hidden_dims": [], "input_tap": "all_block_taps"})
+
+
+def test_global_mlp_arm_requires_an_input_tap():
+    with pytest.raises(ValidationError, match="input_tap"):
+        _decomposition({"type": "global_mlp", "hidden_dims": [512]})

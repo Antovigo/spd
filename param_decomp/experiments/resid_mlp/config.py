@@ -22,8 +22,11 @@ from param_decomp.experiments.toy_config import (
     ToyDecompositionConfig,
     ToyExperimentConfig,
 )
+from param_decomp.targets.resid_mlp import ResidMLPGenerationType
 
-ResidMLPDataGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
+ResidMLPDataGenerationType = ResidMLPGenerationType
+"""The schema spells the target's own generation vocabulary — one Literal, defined next
+to the sampler match it enumerates (`targets/resid_mlp.py`)."""
 ResidMLPActFn = Literal["gelu", "relu"]
 ResidMLPLabelType = Literal["act_plus_resid", "abs"]
 ResidMLPLossType = Literal["readoff", "resid"]

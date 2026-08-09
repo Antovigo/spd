@@ -12,7 +12,8 @@ from jaxtyping import PRNGKeyArray
 from param_decomp.core.built_run import TargetSites
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import CaptureKeys, DecomposedModel
+from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.core.run import (
     BackgroundRenderer,
@@ -32,10 +33,11 @@ from param_decomp.experiments.lm.arithmetic_eval import (
     render_arithmetic_figures,
 )
 from param_decomp.experiments.lm.arithmetic_probe import build_arithmetic_probe
-from param_decomp.experiments.lm.config import TargetConfig
 from param_decomp.experiments.lm.eval import ScalarStep, make_eval_step
 from param_decomp.experiments.lm.eval_config import ArithmeticCIGridConfig
 from param_decomp.experiments.lm.eval_context import LMEvalContext
+from param_decomp.experiments.lm.eval_keys import EvalKeyStream
+from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.targets.glu_transformer import hf_snapshot_dir
 
 
@@ -112,6 +114,7 @@ def make_arithmetic_operation(
     schedule: EvalSchedule,
     target: TargetSites,
     model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
     mesh: Mesh,
     n_proc: int,
     sink: MetricsSink,
@@ -145,14 +148,16 @@ def make_arithmetic_operation(
             name=pgd.name or "PGDReconLoss",
             n_steps=pgd.n_steps,
             step_size=pgd.step_size,
+            reconstruction=resolve_reconstruction_spec(pgd.hidden_acts_reconstruction),
         )
         if pgd is not None
         else None
     )
     operation = ArithmeticOperation(
-        step=make_arithmetic_grid_step(model, probe.answer_position, n_prompts),
+        step=make_arithmetic_grid_step(model, ci_capture_keys, probe.answer_position, n_prompts),
         probe_eval_step=make_eval_step(
             model,
+            ci_capture_keys,
             ce.rounding_threshold,
             l0.ci_alive_threshold,
             l0_groups,
@@ -171,7 +176,9 @@ def make_arithmetic_operation(
     )
 
     def run(context: LMEvalContext) -> LogRecord:
-        key = jax.random.fold_in(run_key, 4 * train_steps + context.pass_index)
+        key = jax.random.fold_in(
+            run_key, EvalKeyStream.ARITHMETIC * train_steps + context.pass_index
+        )
         return operation.run(context.state, key, context.now_step)
 
     return EvalOperation(schedule, run)

@@ -266,35 +266,36 @@ inherits the scope (`c`-scope fresh PGD ⇒ one delta scalar for everything;
 `sc` PPGD ⇒ per-position shared across batch — exactly torch's
 `expanded_adv_sources[k][..., -1]`). Two real notes: (i) torch's CI-masked and
 unmasked losses pass `weight_deltas_and_masks=None` — the delta path is *absent*,
-not zero-masked. `delta_mask=0` is mathematically identical (`y += (x@Δ)·0`) but
-pays the `x@Δ` matmul; the in-loop eval already accepts this (`eval.py`
-`zeros_delta`). If it matters, add a static `has_delta: bool` per entry so XLA
-skips the delta matmul — static, retrace-safe. (ii) Stochastic delta masks are
-always full `(B,T)` fresh draws regardless of anything — consistent with torch.
+not zero-masked. JAX represents that arm directly as
+`MaterializedMasking(weight_delta_masks=None)`, so no `x@Δ` matmul enters the graph and
+no separate boolean can contradict the data. (ii) Stochastic delta masks are always
+full `(B,T)` fresh draws regardless of anything — consistent with torch.
 
-**(c) Hidden-acts losses.** `StochasticHiddenActsReconLoss.update` calls
-`model.forward_with_output_acts(batch)` twice (target acts, then masked acts) and
-MSEs per module — it needs every target module's *output activation*, which
-`DecomposedModel` deliberately does not expose (the fn-table returns final logits
-only). The seam would be a fifth fn,
-`masked_site_outputs(frozen, vu, residual, masks, delta_masks, routes, live) ->
-dict[site, (B,T,d_out)]`, implemented per target. That is mechanical but it (i)
-adds a per-target implementation burden ×2 targets, (ii) normalizes per-element
-(MSE over numel), a different reduction from every other term, and (iii) as a
-*training* loss it is exactly the "site-local recon" this trainer's CLAUDE.md
-calls a conceptual no-no. Oli's stance (hidden-acts ≈ eval metric) matches the
-plumbing reality: it is already in `OFFLINE_EVAL_METRIC_TYPES` and `pd-offline-eval`
-computes it bit-faithfully on exported checkpoints. **Decided (SPEC S31):
-keep-on-bridge; do not build the seam unless a training-loss use case appears, and
-then as an explicit amendment to S31.** (Note: PPGD's eval-time hidden-acts extras
-in `_accum_hidden_acts` are eval-only decoration on the metric, not part of the
-training loss — they ride the same bridge.)
+**(c) Hidden-acts losses.** `StochasticHiddenActsReconLoss.update` compares each
+selected site's linear output under the frozen and masked forwards. The policy remains:
+these are standalone eval metrics, not training recon terms; making site-local MSE a
+training objective still requires an explicit S31 policy amendment. **Plumbing amended
+2026-07-30:** the former fifth `masked_site_outputs` method is retired. A target now
+provides canonical keys for site outputs and returns those values from the same
+`masked_forward` used for logits. One clean-forward request obtains frozen site-output
+references and CI taps; the masked pass requests the same keys. This is a generic capture refactor, not
+authorization for a new loss.
+
+**Update (SPEC S35):** a training use case DID appear: `HiddenActsReconstruction` as an
+auxiliary inside an existing end-to-end recon term, currently measured by relative MSE. It uses the unified target-owned capture
+plan rather than a loss-specific model seam: the clean plan unions CI plus every term's points,
+and each masked draw requests only its term's points. S31's named hidden-acts metrics remain
+eval-only as standalone objectives; S35 authorizes hidden-activation reconstruction only as an
+auxiliary that cannot replace the term's end-to-end comparison. The fresh-PGD eval probe configures and ascends the
+same combined objective.
+
 
 **(d) Attn-pattern losses.** `CIMaskedAttnPatternsReconLoss` /
-`StochasticAttnPatternsReconLoss` are **eval-only** (lab `eval_metrics`, not in
-`LOSS_METRIC_CLASSES`) — no training-parity obligation exists. They need pre-RoPE
-q/k site outputs + RoPE + masked-softmax patterns, strictly deeper internals than
-(c). Keep-on-bridge, unconditionally.
+`StochasticAttnPatternsReconLoss` remain eval-only. Their Q/K projection values now use
+the same target-owned site-output keys; RoPE, GQA, and pattern reconstruction
+remain a separate target-owned diagnostic because flash attention does not materialize a
+`[B,H,T,T]` value that could honestly be captured. This eval consumer did not determine
+the core capture API.
 
 **(e) `use_fused_kl` and normalization mismatches.** Audited every recon `update`:
 all return `(Σ sum_kl, Σ n_positions)` accumulated across forwards; live loss
@@ -368,7 +369,7 @@ divisibility for `nsc`) becomes a converter assert.
 | `StochasticReconSubsetLoss` (uniform_k) | **already-runnable** | converted today as 1-chunk plan |
 | `PersistentPGDReconLoss` (sc/bsc, Adam, clamp) | **already-runnable** | the production adversary; `bsc` is batch-sharded (`P("dp", None, None)`), no replica sync |
 | `PGDReconLoss` (as the single adversary; as eval probe) | **already-runnable** | both paths exist |
-| `UnmaskedReconLoss` | **composition-only** | `ConstantSources(1.0)`; optional `has_delta` static flag |
+| `UnmaskedReconLoss` | **composition-only** | `ConstantSources(1.0)`; `MaterializedMasking.weight_delta_masks=None` |
 | `CIMaskedReconLoss` / `Subset` / `Layerwise` | **composition-only** | `ConstantSources(0.0)` × plan shape; `static_probability` routing sampler is ~5 lines |
 | `StochasticReconLoss` / `Layerwise` | **composition-only** | plan shapes; `binomial` sampling = one `random.bernoulli` branch |
 | `PGDReconSubsetLoss` / `Layerwise` | **composition-only** | `FreshPGDSources` per entry + Q2 routing-draw sharing; `bc` scope shape exists in `init_fresh_pgd_sources` already |
@@ -377,8 +378,8 @@ divisibility for `nsc`) becomes a converter assert.
 | PPGD `sign` SRC_STEP, sigmoid parameterization, `n_samples>1` | **composition-only** | SPEC §6 already names them as variation points |
 | multiple simultaneous loss/adversary terms | **composition-only** | §2.2 TrainState dicts + per-term S14 |
 | PPGD `start_frac > 0` | **implemented (2026-06-16)** | Q3 — `term_active` `where`-gating, SPEC S32 |
-| `StochasticHiddenActsReconLoss` | **needs-new-seam → keep-on-bridge (decided, SPEC S31)** | `masked_site_outputs` fn per target; conflicts with the one-recon-semantics rule; already offline (§4c) |
-| attn-pattern eval losses | **keep-on-bridge** | eval-only in torch too (§4d) |
+| `StochasticHiddenActsReconLoss` | **eval-only (decided, SPEC S31); plumbing implemented** | target-owned site-output capture on the ordinary clean/masked forward; still refused as a training term (§4c) |
+| attn-pattern eval losses | **eval-only; plumbing implemented** | Q/K site-output capture plus a target-owned derived pattern recipe (§4d) |
 
 **`torch_config.py` converter changes:** `_losses` stops slotting into
 `(faith, stoch, imp, adversary)` and emits `(loss_metrics_passthrough, …)`;
@@ -426,10 +427,9 @@ for `loss_metrics + n_mask_samples + sampling` (`remat_forwards` stays).
    route-all plan, per-term S14 unscaling, scopes `c`/`nsc`/`bsc`, `sign` SRC_STEP,
    sigmoid parameterization, `n_samples>1`. SPEC amendments S13′/S14′/S23/S24 +
    §6 land in the same PR as the code, cited by ID.
-4. **Stage 4 — only on demand.** `start_frac` step-gating (Q3); the
-   `masked_site_outputs` seam for hidden-acts *iff* someone actually wants it as a
-   training loss — otherwise it stays on `jsp-export` → `pd-offline-eval`
-   permanently, alongside the attn-pattern metrics.
+4. **Stage 4 — amended 2026-07-30.** `start_frac` step-gating (Q3) remains
+   independent. The generic target-owned capture surface now serves hidden-acts and Q/K
+   eval without a fifth model method; their eval-only policy remains unchanged.
 
 Each stage keeps the step a single jit'd function with static structure; nothing
 in the design introduces per-step Python branching on traced values.

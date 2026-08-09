@@ -20,7 +20,7 @@ from param_decomp.core.configs import (
 )
 
 
-class ExperimentConfig(BaseConfig):
+class ExperimentConfigBase(BaseConfig):
     """The domain-AGNOSTIC sections of an in-repo experiment YAML.
 
     The domain-specific, co-varying config — `target`, the `decomposition` apparatus
@@ -45,16 +45,24 @@ class ExperimentConfig(BaseConfig):
     run_name: str
     """Human-readable display name (the wandb run NAME)."""
 
-    pd: PDConfig
     cadence: Cadence
     wandb: WandbConfig | None = None
+
+
+class ExperimentConfig(ExperimentConfigBase):
+    """The plain-VPD run shape's shared base: the identity/rhythm sections + the plain
+    algorithm config. A targeted (tPD) run shape subclasses `ExperimentConfigBase`
+    directly and declares `pd: TargetedPDConfig` — the run shapes are siblings, never a
+    mode of one another."""
+
+    pd: PDConfig
 
 
 _RUN_ID_PATTERN = re.compile(r"^p-[0-9a-f]{8}$")
 
 
 def run_instance(
-    cfg: ExperimentConfig,
+    cfg: ExperimentConfigBase,
     run_id: str,
     data_root: Path,
     resume_provenance: ResumeProvenance | None,
@@ -70,6 +78,28 @@ def run_instance(
         wandb=cfg.wandb,
         resume_provenance=resume_provenance,
     )
+
+
+def apply_wandb_cli_overrides(
+    schema_raw: dict[str, object], group: str | None, tags: str | tuple[str, ...] | None
+) -> None:
+    """Merge the `--group` / `--tags` CLI flags into the raw schema's `wandb:` block
+    (in place, pre-validation) — shared by every toy module main."""
+    if group is None and tags is None:
+        return
+    raw_wandb = schema_raw.get("wandb")
+    wandb_cfg: dict[str, object] = dict(raw_wandb) if isinstance(raw_wandb, dict) else {}
+    if group is not None:
+        wandb_cfg["group"] = group
+    if tags is not None:
+        # Fire parses a comma-separated `--tags a,b,c` into a tuple, but keeps a value
+        # with a hyphen (e.g. `a,b,c-d`) as a string — normalize both to a list.
+        wandb_cfg["tags"] = (
+            [s.strip() for s in tags.split(",") if s.strip()]
+            if isinstance(tags, str)
+            else [str(t).strip() for t in tags]
+        )
+    schema_raw["wandb"] = wandb_cfg
 
 
 def pin_launch_config(run_dir: Path, resolved_yaml: str) -> None:

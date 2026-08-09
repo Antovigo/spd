@@ -1,26 +1,23 @@
 """Bootstrap the LM process environment before importing JAX."""
 
 import os
-import sys
 from pathlib import Path
 
+import fire
 import yaml
 
 from param_decomp.experiments.lm.runtime import RuntimeConfig
 
 
-def main() -> None:
-    assert len(sys.argv) >= 2 and not sys.argv[1].startswith("-"), (
-        "usage: python -m param_decomp.experiments.lm.run <config.yaml>"
-        " --data-root <path> [--run-id ...]"
-    )
-    raw = yaml.safe_load(Path(sys.argv[1]).read_text())
-    runtime = RuntimeConfig.model_validate(raw["runtime"])
+def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
+    """Set the process env from the config's `runtime.launch_env`, then run the trainer
+    — imported only afterwards: the env must be in place before anything imports jax."""
+    runtime = RuntimeConfig.model_validate(yaml.safe_load(Path(config).read_text())["runtime"])
     os.environ.update(runtime.launch_env.as_env())
-    from param_decomp.experiments.lm.training import cli
+    from param_decomp.experiments.lm.training import main as train
 
-    cli()
+    train(config, data_root, run_id)
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)

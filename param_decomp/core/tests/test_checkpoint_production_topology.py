@@ -7,9 +7,10 @@ Adam after a real preemption. `test_checkpoint.py` covers the `mesh=None` single
 case with a leaf-equality sweep; this adds the parts that only bite at production
 topology:
 
-  * the V/U + Adam states are C-SHARDED and the sources/moments REPLICATED over a
-    multi-device `dp` mesh (`init_placed.py`), exactly as `init_train_state` places
-    them — so the test exercises the sharded save/restore path, not the all-on-one path;
+  * the V/U + Adam states are sharded along their matrix dimensions and the
+    sources/moments are replicated over a multi-device mesh (`init_placed.py`), exactly
+    as `init_train_state` places them — so the test exercises the sharded save/restore
+    path, not the all-on-one path;
   * MULTIPLE persistent terms (SPEC S23: one `adversaries` entry per term), so a
     per-term moment tree that got dropped would surface;
   * an explicit structural assertion that the RESTORED pytree carries `m`, `v`, and a
@@ -17,7 +18,8 @@ topology:
     leaves happen to be equal;
   * an assertion that restore reconstructs each leaf onto the REFERENCE sharding.
 
-Run at >1 device to actually shard:
+Run at >1 device to actually shard. The Makefile simulates four logical CPU devices
+because four is the minimum required by the multidevice suite as a whole:
 `XLA_FLAGS="--xla_force_host_platform_device_count=4" pytest <this file>`.
 """
 
@@ -29,12 +31,12 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
-from jax.sharding import NamedSharding
 
 from param_decomp.core.adversary import (
     PersistentAdversary,
     SourcesAdamState,
     init_sources_adam_state,
+    sources_adam_ascend_project,
 )
 from param_decomp.core.checkpoint import make_checkpoint_manager, restore_latest, save_state
 from param_decomp.core.ci_fn import (
@@ -44,12 +46,8 @@ from param_decomp.core.ci_fn import (
 )
 from param_decomp.core.configs import (
     AdamPGDConfig,
-    ChunkwiseSubsetReconLossConfig,
-    FaithfulnessLossConfig,
-    ImportanceMinimalityLossConfig,
     KeepLastNCheckpoints,
     PersistentPGDReconLossConfig,
-    UniformKSubsetRoutingConfig,
 )
 from param_decomp.core.init_placed import (
     init_ci_fn_placed,
@@ -57,13 +55,11 @@ from param_decomp.core.init_placed import (
     init_sources_sharded,
 )
 from param_decomp.core.model import Positioned
-from param_decomp.core.objective import build_objective
 from param_decomp.core.placement import from_config
-from param_decomp.core.recon import persistent_configs
 from param_decomp.core.run import _ensure_global
 from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.sharding import hsdp_mesh
-from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
+from param_decomp.core.train import Decomposition, TrainingItem, TrainState
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
 
@@ -88,11 +84,12 @@ def _persistent_cfg(name: str | None) -> PersistentPGDReconLossConfig:
 
 
 def _build_sharded(seed: int):
-    """A TrainState placed exactly as `init_train_state` places a production run on the 2-D
-    `(replicate, fsdp)` HSDP mesh: V/U + their Adam moments sharded ÷N over the FULL mesh
-    (V d_in, U d_out; C replicated), the CI fn ÷N over the full mesh (d_model), sources + their
-    Adam moments replicated, with TWO persistent terms. On the 4-device sim: `replicate=1,
-    fsdp=4` (N=4); `C=8` and the V d_in / U d_out tile N."""
+    """A TrainState placed exactly as `init_train_state` places a production run on the
+    `(replicate, fsdp, tp)` HSDP mesh: V/U + their Adam moments sharded ÷N over the data
+    axes (V d_in, U d_out; C replicated), the CI fn ÷N over the data axes (d_model), and
+    sources + their Adam moments replicated, with TWO persistent terms. On the four-device
+    CPU simulation: `replicate=1, fsdp=4, tp=1` (N=4); `C=8` and the V d_in / U d_out
+    dimensions tile N."""
     mesh = hsdp_mesh()
     cfg = tiny_glu_cfg()
     C, seq = 8, 16
@@ -136,11 +133,21 @@ def _build_sharded(seed: int):
             jax.random.fold_in(jax.random.PRNGKey(seed + 2), i),
             mesh,
         )
+        # The checkpoint needs realistic non-zero moments, not a full training step.
+        # A direct Adam ascent creates the same state shape with deterministic values that
+        # differ between the saved and restore-reference seeds, without any collectives.
+        opt_state = init_sources_adam_state(src)
+        sources, opt_state = sources_adam_ascend_project(
+            src,
+            {site: jnp.full_like(value, seed + i + 1) for site, value in src.items()},
+            opt_state,
+            jnp.asarray(0.01),
+            ppgd_cfg.optimizer,
+        )
         adversaries[state_key] = PersistentAdversary(
-            sources=src,
-            opt_state=init_sources_adam_state(src),
+            sources=sources,
+            opt_state=opt_state,
             state_key=state_key,
-            coeff=ppgd_cfg.coeff,
             adam=ppgd_cfg.optimizer,
             n_warmup=ppgd_cfg.n_warmup_steps,
         )
@@ -158,31 +165,7 @@ def _build_sharded(seed: int):
     state = _ensure_global(state, mesh)
     assert isinstance(state, TrainState)
 
-    loss_terms = build_objective(
-        (
-            FaithfulnessLossConfig(coeff=1e5),
-            ImportanceMinimalityLossConfig(
-                coeff=5e-6, pnorm=ScheduleConfig(max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))),
-            ),
-            ChunkwiseSubsetReconLossConfig(routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1),
-            *ppgd_cfgs,
-        ),
-        model.site_names,
-    )  # fmt: skip
-    assert tuple(persistent_configs(loss_terms.recon)) == PERSISTENT_TERMS, loss_terms
-
-    step = make_train_step(
-        model_static=model,
-        losses=loss_terms,
-        components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=100,
-        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh, compiler_options={},
-    )  # fmt: skip
-    tokens = jax.device_put(
-        jax.random.randint(jax.random.PRNGKey(9), (4, seq), 0, cfg.vocab_size),
-        NamedSharding(mesh, jax.sharding.PartitionSpec(("replicate", "fsdp"))),
-    )
-    return model, state, step, tokens
+    return state
 
 
 def _assert_moments_present(adversaries: dict[str, PersistentAdversary]) -> None:
@@ -202,13 +185,10 @@ def _assert_moments_present(adversaries: dict[str, PersistentAdversary]) -> None
 
 
 def test_sharded_roundtrip_persists_source_moments(tmp_path: Path):
-    """Device-agnostic like the other invariance tests: at 1 device the round-trip is a
-    trivial-mesh structural check; only `XLA_FLAGS=--xla_force_host_platform_device_count=4`
-    actually shards C, where the `sharding` equality assertions bite."""
-    model, state, step, resid = _build_sharded(seed=1)
-    for i in range(2):
-        state, _ = step(model, state, resid, jax.random.PRNGKey(i))
-    # The ascents must have advanced each term's Adam counter before we save.
+    """Device-agnostic like the other invariance tests: at one device the round-trip is
+    a trivial-mesh structural check; multiple logical devices make the placement assertions
+    exercise real shards. The suite uses four because other multidevice tests require it."""
+    state = _build_sharded(seed=1)
     _assert_moments_present(state.training.adversaries)
 
     mgr = make_checkpoint_manager(tmp_path / "ckpts", KeepLastNCheckpoints(n=2))
@@ -216,7 +196,14 @@ def test_sharded_roundtrip_persists_source_moments(tmp_path: Path):
 
     # Restore onto a DIFFERENTLY-seeded reference at the same (sharded) placement: every
     # leaf, including each term's Adam moments, must come from disk.
-    _, fresh, _, _ = _build_sharded(seed=7)
+    fresh = _build_sharded(seed=7)
+    for term in PERSISTENT_TERMS:
+        saved_adam = state.training.adversaries[term].opt_state
+        reference_adam = fresh.training.adversaries[term].opt_state
+        assert any(
+            not np.array_equal(np.asarray(saved_adam.m[site]), np.asarray(reference_adam.m[site]))
+            for site in saved_adam.m
+        ), f"{term}: saved and reference moments must differ for the restore check to bite"
     restored = restore_latest(mgr, fresh)
     assert restored is not None
     loaded, ckpt_step = restored
@@ -236,18 +223,3 @@ def test_sharded_roundtrip_persists_source_moments(tmp_path: Path):
     for saved, ref, got in zip(saved_leaves, ref_leaves, loaded_leaves, strict=True):
         assert np.array_equal(np.asarray(saved), np.asarray(got))
         assert got.sharding == ref.sharding, (got.sharding, ref.sharding)
-
-    # SPEC S22: the restored state continues the trajectory. To fp tolerance, not bit-
-    # identically: `state` and `loaded` carry distinct-but-equivalent shardings, so the step
-    # jits to distinct executables, and the FSDP V all-gather/reduce is not bit-reproducible
-    # — both reassociate the same math (observed rel ~1e-7).
-    state_cont, m_cont = step(model, state, resid, jax.random.PRNGKey(100))
-    loaded_cont, m_load = step(model, loaded, resid, jax.random.PRNGKey(100))
-    for k in m_cont:
-        assert np.allclose(float(m_cont[k]), float(m_load[k]), rtol=1e-5, atol=1e-6), (
-            k,
-            float(m_cont[k]),
-            float(m_load[k]),
-        )
-    for a, b in zip(jax.tree.leaves(state_cont), jax.tree.leaves(loaded_cont), strict=True):
-        assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)

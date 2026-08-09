@@ -55,6 +55,11 @@ class PretrainConfig(BaseConfig):
     """The shards to train on: a store name, or a tagged ad-hoc dir. Resolved against
     `data_root`; the dataset's own facts ride with its shards as `meta.json`."""
 
+    val_data: DatasetRef | None = None
+    """A held-out split for `val_loss`. `None` falls back to a reseeded schedule over the
+    TRAIN shards: in-distribution monitoring, not validation. Val rows may be one token
+    narrower than train rows (`block_size` vs `block_size + 1`); the eval CE handles both."""
+
     gpus_per_node: PositiveInt = Field(
         default=8,
         description="GPUs per node — the launcher's node math and the trainer's topology assert.",

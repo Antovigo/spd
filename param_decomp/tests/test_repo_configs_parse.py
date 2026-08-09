@@ -15,6 +15,7 @@ import yaml
 from param_decomp.core.base_config import BaseConfig
 from param_decomp.experiments.lm.config import (
     LMExperimentConfig,
+    LMTargetedExperimentConfig,
     PretrainedTarget,
     assert_placement_claims,
 )
@@ -27,15 +28,31 @@ REPO = Path(__file__).resolve().parents[2]
 
 LM_CONFIG_PATHS = sorted(REPO.glob("param_decomp/experiments/lm/configs/*.yaml"))
 PRETRAIN_CONFIG_PATHS = sorted(REPO.glob("param_decomp/pretrain/configs/*.yaml"))
-PUBLIC_SCHEMA_BY_DIR: dict[str, type[BaseConfig]] = {
-    "param_decomp/experiments/lm/configs": LMExperimentConfig,
-    "param_decomp/experiments/tms/configs": TMSExperimentConfig,
-    "param_decomp/experiments/resid_mlp/configs": ResidMLPExperimentConfig,
-    "param_decomp/pretrain/configs": PretrainConfig,
+PUBLIC_SCHEMA_BY_DIR: dict[str, tuple[type[BaseConfig], type[BaseConfig] | None]] = {
+    "param_decomp/experiments/lm/configs": (LMExperimentConfig, LMTargetedExperimentConfig),
+    "param_decomp/experiments/tms/configs": (TMSExperimentConfig, None),
+    "param_decomp/experiments/resid_mlp/configs": (ResidMLPExperimentConfig, None),
+    "param_decomp/pretrain/configs": (PretrainConfig, None),
 }
+
+
+def _is_targeted_seat(path: Path) -> bool:
+    """Test-local parametrization label only — production consumers read the deliverable
+    projection and never dispatch on run shape; the roots each parse their own shape."""
+    return "nontarget" in yaml.safe_load(path.read_text())
+
+
+def _seat_schema(path: Path, rel_dir: str) -> type[BaseConfig]:
+    plain, targeted = PUBLIC_SCHEMA_BY_DIR[rel_dir]
+    if not _is_targeted_seat(path):
+        return plain
+    assert targeted is not None, f"{path} is a targeted seat but {rel_dir} has no targeted shape"
+    return targeted
+
+
 PUBLIC_CONFIG_CASES = sorted(
-    (path, schema)
-    for rel_dir, schema in PUBLIC_SCHEMA_BY_DIR.items()
+    (path, _seat_schema(path, rel_dir))
+    for rel_dir in PUBLIC_SCHEMA_BY_DIR
     for path in REPO.glob(f"{rel_dir}/*.yaml")
 )
 PUBLIC_CONFIG_PATHS = [path for path, _ in PUBLIC_CONFIG_CASES]
@@ -59,7 +76,11 @@ def test_gate_collects_the_seat_registry() -> None:
 
 @pytest.mark.parametrize("path", LM_CONFIG_PATHS, ids=lambda p: str(p.relative_to(REPO)))
 def test_lm_config_builds_placement_claims(path: Path) -> None:
-    config = LMExperimentConfig.model_validate(_load(path))
+    config = (
+        LMTargetedExperimentConfig.model_validate(_load(path))
+        if _is_targeted_seat(path)
+        else LMExperimentConfig.model_validate(_load(path))
+    )
     # The placement gate resolves the site set from config + arch, so every maintained
     # config's sharding claim is exercised at its pinned dp. A pretrained target is the
     # enumerated gap: resolving it reads a cluster-local pretrain cache.

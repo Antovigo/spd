@@ -31,7 +31,7 @@ pd:
   loss_metrics:
   - frequency:
       coeff: 1.0e-06
-      reference_token_count: 32768
+      reference_datapoint_count: 32768
     coeff: 2.0e-06
     type: SmoothL0ImportanceMinimalityLoss
     gamma:

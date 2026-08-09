@@ -16,15 +16,11 @@ from param_decomp.experiments.toy_config import (
     ToyDecompositionConfig,
     ToyExperimentConfig,
 )
+from param_decomp.targets.tms import TMSGenerationType
 
-TMSDataGenerationType = Literal[
-    "exactly_one_active",
-    "exactly_two_active",
-    "exactly_three_active",
-    "exactly_four_active",
-    "exactly_five_active",
-    "at_least_zero_active",
-]
+TMSDataGenerationType = TMSGenerationType
+"""The schema spells the target's own generation vocabulary — one Literal, defined next
+to the count table it enumerates (`targets/tms.py`)."""
 
 TMSHiddenLayerInit = Literal["identity", "random"]
 

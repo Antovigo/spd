@@ -5,7 +5,7 @@ against the pre-restructure `feature/jax-single-pool-pd` code (stacked `DecompVU
 contiguous-MLP-only `llama_decomposed_lm`). This test rebuilds the identical model in
 the per-site representation and checks, for the same MLP-family site set:
 
-  * `clean_output` / per-site INPUTS (served by `model.read_activations` for site-name keys) /
+  * clean output / per-site INPUTS (requested by target-owned canonical activation keys) /
     `weight_deltas` / `masked_output` — to a portable fp32 reassociation tolerance (SPEC D4),
     not bit-exact: float32 matmul reduction order differs across CPU microarchitectures, so
     the same op sequence diverges by ~1 ULP between the fixture-generating host and a given
@@ -50,12 +50,20 @@ from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
 from param_decomp.targets.glu_transformer import (
     FrozenAttn,
+    GLUDecomposedModel,
     GLULayer,
     build_decomposed_lm,
     glu_site_specs,
     mlp_family_site_cs,
+    parse_site_name,
 )
-from param_decomp.targets.testing import tiny_glu_cfg
+from param_decomp.targets.testing import capture_clean, run_clean, run_masked, tiny_glu_cfg
+from param_decomp.targets.transformer_taps import (
+    attention_input_tap_key,
+    attention_output_tap_key,
+    mlp_hidden_tap_key,
+    mlp_input_tap_key,
+)
 from param_decomp.vendored_jax.llama import llama3_inv_freq
 
 FIXTURES = Path(__file__).resolve().parent / "stacked_fixtures.npz"
@@ -83,7 +91,7 @@ old fixed names. The stored arrays themselves are untouched — only the lookup 
 the live metrics dict is remapped."""
 
 
-def _load() -> tuple[dict[str, np.ndarray], DecomposedModel, ComponentStacks, jnp.ndarray]:
+def _load() -> tuple[dict[str, np.ndarray], GLUDecomposedModel, ComponentStacks, jnp.ndarray]:
     assert FIXTURES.exists(), "regenerate via gen_stacked_fixtures.py on the base branch"
     f = dict(np.load(FIXTURES))
     cfg = tiny_glu_cfg()
@@ -157,16 +165,32 @@ def _build_trajectory_ci_fn(model: DecomposedModel, key: jnp.ndarray):
 @_PENDING_REGEN
 def test_clean_output_matches():
     f, model, _vu, resid = _load()
-    clean = model.clean_output(resid)
+    clean = run_clean(model, resid)
     _assert_close(clean, f["out::clean"], "clean logits")
 
 
 @_PENDING_REGEN
 def test_site_inputs_and_weight_deltas_match():
     f, model, vu, resid = _load()
-    site_inputs = model.read_activations(resid, model.site_names)
-    for name in model.site_names:
-        _assert_close(site_inputs[name], f[f"out::site_input::{name}"], f"site_input {name}")
+
+    def site_input_key(site: str) -> str:
+        layer, kind = parse_site_name(site)
+        match kind:
+            case "q" | "k" | "v":
+                return attention_input_tap_key(layer)
+            case "o":
+                return attention_output_tap_key(layer)
+            case "gate" | "up":
+                return mlp_input_tap_key(layer)
+            case "down":
+                return mlp_hidden_tap_key(layer)
+            case _:
+                raise AssertionError(kind)
+
+    input_keys = tuple(site_input_key(site) for site in model.site_names)
+    captures = capture_clean(model, resid, tuple(dict.fromkeys(input_keys)))
+    for name, input_key in zip(model.site_names, input_keys, strict=True):
+        _assert_close(captures[input_key], f[f"out::site_input::{name}"], f"site_input {name}")
     deltas = model.weight_deltas(vu)
     for name in model.site_names:
         _assert_close(deltas[name], f[f"out::wd::{name}"], f"weight_delta {name}")
@@ -177,15 +201,24 @@ def test_masked_output_match():
     f, model, vu, resid = _load()
     masks = {s: jnp.asarray(f[f"mask::{s}"]) for s in model.site_names}
     delta_masks = {s: jnp.asarray(f[f"delta_mask::{s}"]) for s in model.site_names}
-    masked_all = model.masked_output(
-        vu, resid, masks, delta_masks, None, model.site_names, True, remat=False
+    prepared_weights = model.prepare_compute_weights(vu)
+    masked_all = run_masked(
+        model,
+        prepared_weights,
+        resid,
+        masks,
+        delta_masks,
+        None,
+        model.site_names,
+        True,
+        remat=False,
     )
     _assert_close(masked_all, f["out::masked_all"], "masked_output (all live)")
 
     chunk0 = model.site_names[:3]
     routes0 = {s: jnp.asarray(f[f"route0::{s}"]) for s in chunk0}
-    masked_subset = model.masked_output(
-        vu, resid,
+    masked_subset = run_masked(model,
+        prepared_weights, resid,
         {s: masks[s] for s in chunk0}, {s: delta_masks[s] for s in chunk0}, routes0, chunk0, True,
         remat=False,
     )  # fmt: skip
@@ -213,8 +246,17 @@ def test_chunk_plan_static_live_set_matches():
     masks = {s: jnp.asarray(f[f"mask::{s}"]) for s in chunk0}
     delta_masks = {s: jnp.asarray(f[f"delta_mask::{s}"]) for s in chunk0}
     routes = {s: jnp.asarray(f[f"route0::{s}"]) for s in chunk0}
-    masked = model.masked_output(
-        vu, resid, masks, delta_masks, routes, plan[0].live_sites, plan[0].has_delta, remat=False
+    prepared_weights = model.prepare_compute_weights(vu)
+    masked = run_masked(
+        model,
+        prepared_weights,
+        resid,
+        masks,
+        delta_masks,
+        routes,
+        plan[0].live_sites,
+        plan[0].uses_weight_deltas,
+        remat=False,
     )
     _assert_close(masked, f["out::masked_subset"], "chunk-plan static-live-set forward")
 
@@ -269,7 +311,6 @@ def test_train_trajectory_matches():
                     sources=sources,
                     opt_state=init_sources_adam_state(sources),
                     state_key=ppgd_cfg.type,
-                    coeff=ppgd_cfg.coeff,
                     adam=ppgd_cfg.optimizer,
                     n_warmup=ppgd_cfg.n_warmup_steps,
                 )
@@ -285,7 +326,7 @@ def test_train_trajectory_matches():
                 pnorm=ScheduleConfig(
                     max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))
                 ),
-                frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=32),
+                frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_datapoint_count=32),
             ),
             ChunkwiseSubsetReconLossConfig(
                 routing=UniformKSubsetRoutingConfig(),
@@ -305,8 +346,7 @@ def test_train_trajectory_matches():
         total_steps=100,
         remat_recon_forwards=False,
         remat_ci_fn=False,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
     run_key = random.PRNGKey(7)
     for step_idx in range(n_train_steps):
@@ -321,9 +361,9 @@ def test_train_trajectory_matches():
 
     assert isinstance(state.decomposition.components, ComponentStacks)
     for name in model.site_names:
-        V, U = state.decomposition.components.site(name)
-        _assert_close(V, f[f"out::final_V::{name}"], f"final V {name}")
-        _assert_close(U, f[f"out::final_U::{name}"], f"final U {name}")
+        site_components = state.decomposition.components.site(name)
+        _assert_close(site_components.V, f[f"out::final_V::{name}"], f"final V {name}")
+        _assert_close(site_components.U, f[f"out::final_U::{name}"], f"final U {name}")
     final_sources = state.training.adversaries["PersistentPGDReconLoss"].sources
     for name in model.site_names:
         _assert_close(final_sources[name], f[f"out::final_src::{name}"], f"final src {name}")

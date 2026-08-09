@@ -31,12 +31,14 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol, get_args
+from typing import Any, Literal, Protocol, cast, get_args
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -48,13 +50,34 @@ from param_decomp.core import family
 from param_decomp.core.components import (
     ComponentStacks,
     SiteC,
+    SiteDims,
     SiteSpec,
     site_out,
 )
 from param_decomp.core.family import ArchFamily
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    ForwardResult,
+    Masking,
+    MaterializedMasking,
+    StochasticMasking,
+)
 from param_decomp.core.sharding import assert_divisible
 from param_decomp.targets.losses import kl_per_position
-from param_decomp.targets.transformer_taps import resid_tap_key
+from param_decomp.targets.transformer_taps import (
+    BlockTap,
+    PostAttentionResidual,
+    ResidualBoundary,
+    SiteOutput,
+    TransformerPoint,
+    TransformerTapGrammar,
+    attention_input_tap_key,
+    attention_output_tap_key,
+    mlp_hidden_tap_key,
+    mlp_input_tap_key,
+    site_output_tap_key,
+)
 from param_decomp.vendored_jax.llama import (
     apply_rope,
     causal_sdpa,
@@ -129,6 +152,43 @@ ATTN_KINDS = ("q", "k", "v", "o")
 MLP_KINDS = ("gate", "up", "down")
 assert KIND_ORDER == ATTN_KINDS + MLP_KINDS, KIND_ORDER
 
+
+def _hidden_acts_reconstruction_dependencies(point: TransformerPoint) -> frozenset[str]:
+    """Same-block decomposed kinds whose output can influence ``point``."""
+    match point:
+        case ResidualBoundary():
+            return frozenset()
+        case PostAttentionResidual():
+            return frozenset(ATTN_KINDS)
+        case BlockTap(name=name):
+            match name:
+                case "attn_in":
+                    return frozenset()
+                case "attn_out":
+                    return frozenset(("q", "k", "v"))
+                case "mlp_in":
+                    return frozenset(ATTN_KINDS)
+                case "mlp_hidden":
+                    return frozenset((*ATTN_KINDS, "gate", "up"))
+                case _:
+                    raise AssertionError(name)
+        case SiteOutput(name=name):
+            _block, kind = parse_site_name(name)
+            match kind:
+                case "q" | "k" | "v":
+                    return frozenset((kind,))
+                case "o":
+                    return frozenset(ATTN_KINDS)
+                case "gate":
+                    return frozenset((*ATTN_KINDS, "gate"))
+                case "up":
+                    return frozenset((*ATTN_KINDS, "up"))
+                case "down":
+                    return frozenset(KIND_ORDER)
+                case _:
+                    raise AssertionError(kind)
+
+
 SITE_NAME_PATTERN = re.compile(
     r"^layers\.(\d+)\.(?:self_attn\.(q|k|v|o)|mlp\.(gate|up|down))_proj$"
 )
@@ -157,22 +217,22 @@ FAMILY = ArchFamily("glu_transformer", KIND_ORDER, site_name, parse_site_name)
 `glu_transformer` c-specs resolve against."""
 
 
-def site_dims(cfg: GLUArch, kind: str) -> tuple[int, int]:
-    """(d_in, d_out) of one per-layer matrix, right-mult orientation."""
+def site_dims(cfg: GLUArch, kind: str) -> SiteDims:
+    """Dimensions of one per-layer matrix in right-mult orientation."""
     d, di = cfg.n_embd, cfg.n_intermediate
     qd = cfg.n_head * cfg.head_dim
     kvd = cfg.n_kv_head * cfg.head_dim
     match kind:
         case "q":
-            return d, qd
+            return SiteDims(d_in=d, d_out=qd)
         case "k" | "v":
-            return d, kvd
+            return SiteDims(d_in=d, d_out=kvd)
         case "o":
-            return qd, d
+            return SiteDims(d_in=qd, d_out=d)
         case "gate" | "up":
-            return d, di
+            return SiteDims(d_in=d, d_out=di)
         case "down":
-            return di, d
+            return SiteDims(d_in=di, d_out=d)
         case _:
             raise AssertionError(f"unknown kind {kind!r}")
 
@@ -285,7 +345,7 @@ class FrozenAttn(eqx.Module):
         self, q_flat: Float[Array, "b t qd"], k_flat: Float[Array, "b t kvd"], inv_freq: Array
     ) -> Float[Array, "b h t t"]:
         """Post-softmax causal attention map from flat Q/K projections — the target-owned
-        recipe behind the attn-patterns eval (`GLUDecomposedModel.attn_pattern`). Same
+        recipe behind the attn-patterns eval (`GLUDecomposedModel.attention_pattern_from_qk`). Same
         `_prep_qk`/RoPE/GQA math as `core`; scores in fp32, scaled by `1/√head_dim`,
         causal-masked, softmaxed (no score materialization concerns — eval-only)."""
         b, t, _ = q_flat.shape
@@ -363,6 +423,11 @@ def _clean_mlp_out(layer: GLULayer, mlp_in: Array) -> Array:
     return (jax.nn.silu(mlp_in @ layer.Wg.T) * (mlp_in @ layer.Wu.T)) @ layer.Wd.T
 
 
+def _clean_block(layer: GLULayer, x: Array, inv_freq: Array, eps: float) -> Array:
+    x = x + layer.attn(rms_norm(x, layer.ln1, eps), inv_freq)
+    return x + _clean_mlp_out(layer, rms_norm(x, layer.ln2, eps))
+
+
 def _stack_layers(layers: list[GLULayer]) -> GLULayer:
     """Stack a per-layer `GLULayer` list into one whose array leaves carry a leading
     layer axis — the `xs` for a `lax.scan` over the (homogeneous) block stack. Static
@@ -370,38 +435,215 @@ def _stack_layers(layers: list[GLULayer]) -> GLULayer:
     return jax.tree.map(lambda *per_layer: jnp.stack(per_layer), *layers)
 
 
-_TAP_CLASS_BY_KIND = {
-    "q": "h1", "k": "h1", "v": "h1", "o": "attn_y",
-    "gate": "mlp_in", "up": "mlp_in", "down": "down_in",
-}  # fmt: skip
-"""The block intermediate a site kind's tap reads — the activation entering that site's
-weight on the frozen path (`_clean_forward`'s per-class scan-ys stacks are keyed by
-these)."""
-assert set(_TAP_CLASS_BY_KIND) == set(KIND_ORDER), (
-    "every GluMatrix kind needs a tap class",
-    _TAP_CLASS_BY_KIND.keys(),
-    KIND_ORDER,
-)
+class _GLUTap(Enum):
+    RESIDUAL_IN = "residual_in"
+    QKV_INPUT = "qkv_input"
+    Q_OUTPUT = "q_output"
+    K_OUTPUT = "k_output"
+    V_OUTPUT = "v_output"
+    ATTENTION_OUTPUT = "attention_output"
+    O_OUTPUT = "o_output"
+    POST_ATTENTION_RESIDUAL = "post_attention_residual"
+    GATE_UP_INPUT = "gate_up_input"
+    GATE_OUTPUT = "gate_output"
+    UP_OUTPUT = "up_output"
+    DOWN_INPUT = "down_input"
+    DOWN_OUTPUT = "down_output"
+    RESIDUAL_OUT = "residual_out"
 
 
-@dataclass(frozen=True)
-class _TapReader:
-    intermediate: str  # the `_clean_forward` scan-ys stack this tap indexes into
+@dataclass(frozen=True, kw_only=True)
+class _GLUCaptureSource:
     block: int
+    tap: _GLUTap
 
 
-def _tap_readers(n_layer: int) -> dict[str, _TapReader]:
-    """Every tap key an `n_layer` target serves -> where it reads: a residual tap reads the
-    `resid` intermediate of the block it enters; a site tap reads the activation entering
-    that site's weight. The vocabulary is ENUMERATED from the mints — a key outside it
-    (unknown form, out-of-range block) fails membership; nothing is parsed."""
-    resid = {resid_tap_key(block): _TapReader("resid", block) for block in range(n_layer)}
-    sites = {
-        site_name(block, kind): _TapReader(_TAP_CLASS_BY_KIND[kind], block)
-        for block in range(n_layer)
-        for kind in KIND_ORDER
+GLUCaptureSources = tuple[_GLUCaptureSource, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _GLUBlockActivations:
+    """The target's capturable activations for one block; never returned wholesale."""
+
+    residual_in: Array
+    qkv_input: Array
+    q_output: Array
+    k_output: Array
+    v_output: Array
+    attention_output: Array
+    o_output: Array
+    post_attention_residual: Array
+    gate_up_input: Array
+    gate_output: Array
+    up_output: Array
+    down_input: Array
+    down_output: Array
+    residual_out: Array
+
+
+_UNUSED_CAPTURE_SLOT = -1
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ScanCaptureLayout:
+    """One exact-size scan-carry buffer for each requested value kind."""
+
+    slot_by_block_per_tap: tuple[tuple[_GLUTap, tuple[int, ...]], ...]
+    sources: tuple[_GLUCaptureSource, ...]
+
+
+def _capture_source_for_point(point: TransformerPoint) -> _GLUCaptureSource:
+    match point:
+        case ResidualBoundary(boundary=0):
+            return _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
+        case ResidualBoundary(boundary=boundary):
+            return _GLUCaptureSource(block=boundary - 1, tap=_GLUTap.RESIDUAL_OUT)
+        case PostAttentionResidual(block=block):
+            return _GLUCaptureSource(block=block, tap=_GLUTap.POST_ATTENTION_RESIDUAL)
+        case BlockTap(name=name, block=block):
+            value_by_name = {
+                "attn_in": _GLUTap.QKV_INPUT,
+                "attn_out": _GLUTap.ATTENTION_OUTPUT,
+                "mlp_in": _GLUTap.GATE_UP_INPUT,
+                "mlp_hidden": _GLUTap.DOWN_INPUT,
+            }
+            return _GLUCaptureSource(block=block, tap=value_by_name[name])
+        case SiteOutput(name=name, block=block):
+            _layer, kind = parse_site_name(name)
+            match kind:
+                case "q":
+                    value = _GLUTap.Q_OUTPUT
+                case "k":
+                    value = _GLUTap.K_OUTPUT
+                case "v":
+                    value = _GLUTap.V_OUTPUT
+                case "o":
+                    value = _GLUTap.O_OUTPUT
+                case "gate":
+                    value = _GLUTap.GATE_OUTPUT
+                case "up":
+                    value = _GLUTap.UP_OUTPUT
+                case "down":
+                    value = _GLUTap.DOWN_OUTPUT
+                case _:
+                    raise AssertionError(f"unknown GLU site kind {kind!r}")
+            return _GLUCaptureSource(block=block, tap=value)
+
+
+def _scan_capture_layout(sources: GLUCaptureSources, n_layer: int) -> _ScanCaptureLayout:
+    tap_slots: list[tuple[_GLUTap, tuple[int, ...]]] = []
+    for tap in _GLUTap:
+        blocks = tuple(source.block for source in sources if source.tap is tap)
+        if not blocks or tap is _GLUTap.RESIDUAL_IN:
+            continue
+        slot_by_block = [_UNUSED_CAPTURE_SLOT] * n_layer
+        for slot, block in enumerate(blocks):
+            slot_by_block[block] = slot
+        tap_slots.append((tap, tuple(slot_by_block)))
+    return _ScanCaptureLayout(slot_by_block_per_tap=tuple(tap_slots), sources=sources)
+
+
+def _captured_activation(block_activations: _GLUBlockActivations, tap: _GLUTap) -> Array:
+    match tap:
+        case _GLUTap.RESIDUAL_IN:
+            return block_activations.residual_in
+        case _GLUTap.QKV_INPUT:
+            return block_activations.qkv_input
+        case _GLUTap.Q_OUTPUT:
+            return block_activations.q_output
+        case _GLUTap.K_OUTPUT:
+            return block_activations.k_output
+        case _GLUTap.V_OUTPUT:
+            return block_activations.v_output
+        case _GLUTap.ATTENTION_OUTPUT:
+            return block_activations.attention_output
+        case _GLUTap.O_OUTPUT:
+            return block_activations.o_output
+        case _GLUTap.POST_ATTENTION_RESIDUAL:
+            return block_activations.post_attention_residual
+        case _GLUTap.GATE_UP_INPUT:
+            return block_activations.gate_up_input
+        case _GLUTap.GATE_OUTPUT:
+            return block_activations.gate_output
+        case _GLUTap.UP_OUTPUT:
+            return block_activations.up_output
+        case _GLUTap.DOWN_INPUT:
+            return block_activations.down_input
+        case _GLUTap.DOWN_OUTPUT:
+            return block_activations.down_output
+        case _GLUTap.RESIDUAL_OUT:
+            return block_activations.residual_out
+
+
+def _allocate_capture_buffers(
+    layout: _ScanCaptureLayout,
+    residual: Array,
+    width_of: Callable[[_GLUTap], int],
+) -> dict[str, Array]:
+    return {
+        tap.value: jnp.zeros(
+            (
+                sum(slot >= 0 for slot in slots),
+                *residual.shape[:-1],
+                width_of(tap),
+            ),
+            residual.dtype,
+        )
+        for tap, slots in layout.slot_by_block_per_tap
     }
-    return resid | sites
+
+
+def _slot_index_arrays(layout: _ScanCaptureLayout) -> dict[str, Array]:
+    return {
+        tap.value: jnp.asarray(slots, dtype=jnp.int32)
+        for tap, slots in layout.slot_by_block_per_tap
+    }
+
+
+def _write_block_captures(
+    layout: _ScanCaptureLayout,
+    buffers: dict[str, Array],
+    slot_indices: dict[str, Array],
+    block_activations: _GLUBlockActivations,
+) -> dict[str, Array]:
+    updated_buffers = dict(buffers)
+    for tap, _slot_tuple in layout.slot_by_block_per_tap:
+        buffer_key = tap.value
+        slot_index = slot_indices[buffer_key]
+        captured_value = _captured_activation(block_activations, tap)
+        updated_buffers[buffer_key] = jax.lax.cond(
+            slot_index != _UNUSED_CAPTURE_SLOT,
+            lambda buffer, value=captured_value, index=slot_index: (
+                jax.lax.dynamic_update_index_in_dim(buffer, value, index, axis=0)
+            ),
+            lambda buffer: buffer,
+            buffers[buffer_key],
+        )
+    return updated_buffers
+
+
+def _read_capture_buffers(
+    captured_by_source: dict[_GLUCaptureSource, Array],
+    layout: _ScanCaptureLayout,
+    buffers: dict[str, Array],
+) -> None:
+    """Index scan-buffer values by capture source after the layer scan.
+
+    The embedding residual is recorded directly by the caller before the scan.
+    """
+    slot_by_block_per_tap = dict(layout.slot_by_block_per_tap)
+    for source in layout.sources:
+        if source.tap is not _GLUTap.RESIDUAL_IN:
+            captured_by_source[source] = buffers[source.tap.value][
+                slot_by_block_per_tap[source.tap][source.block]
+            ]
+
+
+def _captures_in_request_order(
+    sources: GLUCaptureSources, captured_by_source: dict[_GLUCaptureSource, Array]
+) -> tuple[Array, ...]:
+    assert set(captured_by_source) == set(sources), (captured_by_source.keys(), sources)
+    return tuple(captured_by_source[source] for source in sources)
 
 
 def _per_kind_dims(components: ComponentStacks) -> dict[str, tuple[int, int, int]]:
@@ -456,13 +698,13 @@ def _stack_per_kind_vu(components: ComponentStacks, n_layers: int) -> dict[str, 
         else:
             Vs = jnp.stack(
                 [
-                    components.site(n)[0] if n in slot_of else jnp.zeros((d_in, C), vu_dt)
+                    components.site(n).V if n in slot_of else jnp.zeros((d_in, C), vu_dt)
                     for n in names
                 ]
             )
             Us = jnp.stack(
                 [
-                    components.site(n)[1] if n in slot_of else jnp.zeros((C, d_out), vu_dt)
+                    components.site(n).U if n in slot_of else jnp.zeros((C, d_out), vu_dt)
                     for n in names
                 ]
             )
@@ -471,47 +713,57 @@ def _stack_per_kind_vu(components: ComponentStacks, n_layers: int) -> dict[str, 
 
 
 def _attach_per_kind_masks(
-    prepared: dict[str, dict[str, Array]],
+    prepared_weights: dict[str, dict[str, Array]],
     n_layers: int,
     leading: tuple[int, ...],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
+    component_masks: dict[str, Array],
+    weight_delta_masks: dict[str, Array] | None,
     routes: dict[str, Array] | None,
-    live_set: frozenset[str],
-    has_delta: bool,
+    live_sites: frozenset[str],
 ) -> dict[str, dict[str, Array]]:
     """Attach the per-forward `(live, mask[, delta][, route])` stacks to the shared, already
-    stacked + ÷fsdp-reconstructed `prepared` per-kind `(V, U)` weights. Sites absent from
-    `live` get dummy mask/delta/route (the `cond` frozen branch ignores them); `masks`/
-    `delta_masks`/`routes` exist only for live sites (recon builds them per-chunk)."""
+    stacked + ÷fsdp-reconstructed `prepared_weights` per-kind `(V, U)` weights. The
+    homogeneous layer stacks include dummy mask/delta/route values outside the live segment;
+    segmentation excludes those layers from this masked block. The explicit mappings exist
+    only for live sites (recon builds them per chunk)."""
     # Dummy mask/delta/route shapes match the REAL entries (the source scope sets the leading
     # shape: `sc` broadcasts over batch as `(1, T)`, not the full `(B, T)`).
-    a_mask = next(iter(masks.values())) if masks else None
+    a_mask = next(iter(component_masks.values())) if component_masks else None
     mask_lead = a_mask.shape[:-1] if a_mask is not None else leading
-    a_delta = next(iter(delta_masks.values())) if (has_delta and delta_masks) else None
+    a_delta = (
+        next(iter(weight_delta_masks.values()), None) if weight_delta_masks is not None else None
+    )
     a_route = next(iter(routes.values())) if (routes and len(routes)) else None
 
     per_kind: dict[str, dict[str, Array]] = {}
-    for kind, vu_entry in prepared.items():
+    for kind, vu_entry in prepared_weights.items():
         C = vu_entry["V"].shape[-1]
         mask_dt = a_mask.dtype if a_mask is not None else vu_entry["V"].dtype
         names = [site_name(layer, kind) for layer in range(n_layers)]
-        live_flags = jnp.array([n in live_set for n in names])
+        live_flags = jnp.array([name in live_sites for name in names])
         masks_k = jnp.stack(
-            [masks[n] if n in live_set else jnp.ones((*mask_lead, C), mask_dt) for n in names]
+            [
+                component_masks[name] if name in live_sites else jnp.ones((*mask_lead, C), mask_dt)
+                for name in names
+            ]
         )
         entry: dict[str, Array] = {**vu_entry, "live": live_flags, "mask": masks_k}
-        if has_delta:
-            d_shape = a_delta.shape if a_delta is not None else leading
-            d_dt = a_delta.dtype if a_delta is not None else mask_dt
+        if weight_delta_masks is not None:
+            delta_shape = a_delta.shape if a_delta is not None else leading
+            delta_dtype = a_delta.dtype if a_delta is not None else mask_dt
             entry["delta"] = jnp.stack(
-                [delta_masks[n] if n in live_set else jnp.zeros(d_shape, d_dt) for n in names]
+                [
+                    weight_delta_masks[name]
+                    if name in live_sites
+                    else jnp.zeros(delta_shape, delta_dtype)
+                    for name in names
+                ]
             )
         if routes is not None:
             r_shape = a_route.shape if a_route is not None else leading
             r_dt = a_route.dtype if a_route is not None else jnp.bool_
             entry["route"] = jnp.stack(
-                [routes[n] if n in live_set else jnp.zeros(r_shape, r_dt) for n in names]
+                [routes[name] if name in live_sites else jnp.zeros(r_shape, r_dt) for name in names]
             )
         per_kind[kind] = entry
     return per_kind
@@ -528,22 +780,22 @@ def _stack_ci_per_kind(ci_lower: dict[str, Array], n_layers: int) -> dict[str, A
     for kind, sample in sample_by_kind.items():
         names = [site_name(layer, kind) for layer in range(n_layers)]
         kinds[kind] = jnp.stack(
-            [ci_lower[n] if n in ci_lower else jnp.zeros_like(sample) for n in names]
+            [ci_lower[name] if name in ci_lower else jnp.zeros_like(sample) for name in names]
         )
     return kinds
 
 
 def _attach_per_kind_stochastic(
-    prepared: dict[str, dict[str, Array]],
+    prepared_weights: dict[str, dict[str, Array]],
     n_layers: int,
     leading: tuple[int, ...],
     ci_stacked: dict[str, Array],
     draw_key: Array,
     routes: dict[str, Array] | None,
-    live_set: frozenset[str],
+    live_sites: frozenset[str],
 ) -> dict[str, dict[str, Array]]:
     """Stochastic recon: attach the SHARED per-kind `ci` stack + per-(layer,kind) RNG keys
-    instead of pre-built mask/delta stacks. `masked_site` draws `source = uniform(key)` and
+    instead of pre-built mask/delta stacks. `site_output_and_component_activation` draws `source = uniform(key)` and
     builds `mask = ci + (1−ci)·source` INSIDE the checkpointed block, so the per-forward mask
     is recomputed in the backward (faithful by checkpoint determinism — same key fwd+bwd) and
     never held. Only the (tiny) keys + live-flags are per-forward; the `[n_layer,*,C]` ci stack
@@ -551,9 +803,9 @@ def _attach_per_kind_stochastic(
     src_base, delta_base = jax.random.split(draw_key)
     a_route = next(iter(routes.values())) if (routes and len(routes)) else None
     per_kind: dict[str, dict[str, Array]] = {}
-    for kind, vu_entry in prepared.items():
+    for kind, vu_entry in prepared_weights.items():
         names = [site_name(layer, kind) for layer in range(n_layers)]
-        live_flags = jnp.array([n in live_set for n in names])
+        live_flags = jnp.array([name in live_sites for name in names])
         kind_idx = KIND_ORDER.index(kind)
         src_keys = jnp.stack(
             [
@@ -575,7 +827,7 @@ def _attach_per_kind_stochastic(
             r_shape = a_route.shape if a_route is not None else leading
             r_dt = a_route.dtype if a_route is not None else jnp.bool_
             entry["route"] = jnp.stack(
-                [routes[n] if n in live_set else jnp.zeros(r_shape, r_dt) for n in names]
+                [routes[name] if name in live_sites else jnp.zeros(r_shape, r_dt) for name in names]
             )
         per_kind[kind] = entry
     return per_kind
@@ -677,7 +929,7 @@ class GLUDecomposedModel(eqx.Module):
         consumers (equivalence harness); the forwards use `stacked`."""
         return [jax.tree.map(lambda a, idx=i: a[idx], self.stacked) for i in range(self.n_layer)]
 
-    def attn_pattern(
+    def attention_pattern_from_qk(
         self,
         q_site: str,
         q_flat: Float[Array, "b t qd"],
@@ -713,151 +965,225 @@ class GLUDecomposedModel(eqx.Module):
     def embed_tokens(self, tokens: Int[Array, "b t"]) -> Float[Array, "b t d"]:
         return self.embed[tokens]
 
-    def clean_output(self, inputs: Int[Array, "b t"]) -> Array:
-        """The all-frozen forward — the recon target (SPEC S3). A `lax.scan` over the block
-        stack so XLA compiles one block body instead of unrolling all 32 layers (the compile
-        fix for the full model; the scan reassociates float ops vs an unrolled loop, within
-        fp32 tolerance)."""
-        logits, _ = self._clean_forward(inputs, (), to_logits=True)
-        assert logits is not None
-        return logits
+    def _capture_grammar(self) -> TransformerTapGrammar:
+        def site_dimensions(name: str) -> tuple[int, int]:
+            _layer, kind = parse_site_name(name)
+            match kind:
+                case "q":
+                    weight = self.stacked.attn.wq
+                case "k":
+                    weight = self.stacked.attn.wk
+                case "v":
+                    weight = self.stacked.attn.wv
+                case "o":
+                    weight = self.stacked.attn.wo
+                case "gate":
+                    weight = self.stacked.Wg
+                case "up":
+                    weight = self.stacked.Wu
+                case "down":
+                    weight = self.stacked.Wd
+                case _:
+                    raise AssertionError(f"unknown GLU site kind {kind!r}")
+            return weight.shape[2], weight.shape[1]
 
-    def read_activations(
-        self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
-    ) -> dict[str, Array]:
-        """Frozen-path activation accessor (CI input side, SPEC S4; harvest's per-site
-        matrix inputs).
-
-        `wanted` keys are either `resid.{layer}` (residual stream ENTERING that block — the
-        chunkwise CI fn's `input_names`) or a decomposed SITE NAME (the activation entering
-        that site's weight on the frozen path: `q/k/v_proj` ← post-LN1 residual, `o_proj` ←
-        the attention output, `gate/up_proj` ← post-LN2 residual, `down_proj` ←
-        `silu(gate)·up`). The residual is threaded identically to `clean_output`; the
-        per-site intermediates come from the same RMSNorm/attn/MLP math. The scan covers
-        only the blocks up to the last requested key's (no wasted block compute past it)."""
-        assert wanted, "read_activations with no wanted taps"
-        _, taps = self._clean_forward(inputs, wanted, to_logits=False)
-        return taps
-
-    def clean_output_and_activations(
-        self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
-    ) -> tuple[Array, dict[str, Array]]:
-        logits, taps = self._clean_forward(inputs, wanted, to_logits=True)
-        assert logits is not None
-        return logits, taps
-
-    def _clean_forward(
-        self, inputs: Int[Array, "b t"], wanted: tuple[str, ...], *, to_logits: bool
-    ) -> tuple[Array | None, dict[str, Array]]:
-        """The frozen-path `lax.scan` behind `clean_output` / `read_activations` /
-        `clean_output_and_activations`. Taps ride out as scan ys — one stacked
-        `[tapped_depth, b, t, d]` array per block INTERMEDIATE `wanted` reads (see
-        `_tap_class`) — and the flat tap dict is indexed out of the stacks after the scan
-        (the `_run_masked_forward` per-kind-ys pattern; no per-layer `lax.cond`). Only the
-        block prefix up to the last tapped layer emits ys; the remaining depth (run only
-        when `to_logits`) scans the same body emitting nothing — so an unread intermediate
-        or an untapped layer stacks nothing."""
-
-        def block_body(emit: frozenset[str]):
-            def block(x: Array, layer: GLULayer) -> tuple[Array, dict[str, Array]]:
-                # `FrozenAttn.__call__` / `_clean_mlp_out` expanded — identical math
-                # (family behavior rides in `attn.core`'s `_prep_qk`), with the tap
-                # intermediates in scope.
-                attn = layer.attn
-                h1 = rms_norm(x, layer.ln1, self.eps)
-                attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, self.inv_freq)
-                post_attn = x + attn_y @ attn.wo.T
-                mlp_in = rms_norm(post_attn, layer.ln2, self.eps)
-                down_in = jax.nn.silu(mlp_in @ layer.Wg.T) * (mlp_in @ layer.Wu.T)
-                intermediates = {
-                    "resid": x, "h1": h1, "attn_y": attn_y,
-                    "mlp_in": mlp_in, "down_in": down_in,
-                }  # fmt: skip
-                return post_attn + down_in @ layer.Wd.T, {c: intermediates[c] for c in emit}
-
-            return block
-
-        def slice_layers(lo: int, hi: int) -> GLULayer:
-            return jax.tree.map(lambda a: a[lo:hi], self.stacked)
-
-        readers = _tap_readers(self.n_layer)
-        unknown = tuple(key for key in wanted if key not in readers)
-        assert not unknown, (
-            f"unknown taps {unknown}: this target serves resid.{{block}} and family site "
-            f"names for blocks 0..{self.n_layer - 1}"
+        return TransformerTapGrammar(
+            family=FAMILY,
+            n_layer=self.n_layer,
+            d_resid=self.embed.shape[1],
+            d_attention_output=site_dimensions(FAMILY.name_of(0, "o"))[0],
+            d_mlp_hidden=site_dimensions(FAMILY.name_of(0, "down"))[0],
+            d_out_of=lambda name: site_dimensions(name)[1],
         )
-        tapped_depth = 1 + max((readers[key].block for key in wanted), default=-1)
-        x = self.embed_tokens(inputs)
-        stacks: dict[str, Array] = {}
-        if tapped_depth:
-            emit = frozenset(readers[key].intermediate for key in wanted)
-            x, stacks = jax.lax.scan(block_body(emit), x, slice_layers(0, tapped_depth))
-        taps = {key: stacks[readers[key].intermediate][readers[key].block] for key in wanted}
-        if not to_logits:
-            return None, taps
-        if tapped_depth < self.n_layer:
-            x, _ = jax.lax.scan(
-                block_body(frozenset()), x, slice_layers(tapped_depth, self.n_layer)
+
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(site_output_tap_key(site) for site in sites)
+
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        self._capture_grammar().assert_hidden_acts_reconstruction_points(
+            keys, self.site_names, _hidden_acts_reconstruction_dependencies
+        )
+
+    def _block_activations(self, residual_in: Array, layer: GLULayer) -> _GLUBlockActivations:
+        attn = layer.attn
+        h1 = rms_norm(residual_in, layer.ln1, self.eps)
+        q = h1 @ attn.wq.T
+        k = h1 @ attn.wk.T
+        v = h1 @ attn.wv.T
+        attention_output = attn.core(q, k, v, self.inv_freq)
+        o = attention_output @ attn.wo.T
+        post_attention = residual_in + o
+        h2 = rms_norm(post_attention, layer.ln2, self.eps)
+        gate = h2 @ layer.Wg.T
+        up = h2 @ layer.Wu.T
+        down_input = jax.nn.silu(gate) * up
+        down = down_input @ layer.Wd.T
+        residual_out = post_attention + down
+        return _GLUBlockActivations(
+            residual_in=residual_in,
+            qkv_input=h1,
+            q_output=q,
+            k_output=k,
+            v_output=v,
+            attention_output=attention_output,
+            o_output=o,
+            post_attention_residual=post_attention,
+            gate_up_input=h2,
+            gate_output=gate,
+            up_output=up,
+            down_input=down_input,
+            down_output=down,
+            residual_out=residual_out,
+        )
+
+    def _value_width(self, value: _GLUTap) -> int:
+        d = self.embed.shape[1]
+        match value:
+            case (
+                _GLUTap.RESIDUAL_IN
+                | _GLUTap.QKV_INPUT
+                | _GLUTap.O_OUTPUT
+                | _GLUTap.POST_ATTENTION_RESIDUAL
+                | _GLUTap.GATE_UP_INPUT
+                | _GLUTap.DOWN_OUTPUT
+                | _GLUTap.RESIDUAL_OUT
+            ):
+                return d
+            case _GLUTap.Q_OUTPUT:
+                return self.stacked.attn.wq.shape[1]
+            case _GLUTap.K_OUTPUT:
+                return self.stacked.attn.wk.shape[1]
+            case _GLUTap.V_OUTPUT:
+                return self.stacked.attn.wv.shape[1]
+            case _GLUTap.ATTENTION_OUTPUT:
+                return self.stacked.attn.wo.shape[2]
+            case _GLUTap.GATE_OUTPUT:
+                return self.stacked.Wg.shape[1]
+            case _GLUTap.UP_OUTPUT:
+                return self.stacked.Wu.shape[1]
+            case _GLUTap.DOWN_INPUT:
+                return self.stacked.Wd.shape[2]
+
+    def _clean_output(self, inputs: Int[Array, "b t"]) -> Array:
+        """Untouched graph used when no captures are requested."""
+
+        def block(residual: Array, layer: GLULayer) -> tuple[Array, None]:
+            return _clean_block(layer, residual, self.inv_freq, self.eps), None
+
+        residual = self.embed_tokens(inputs)
+        residual, _ = jax.lax.scan(block, residual, self.stacked)
+        residual = rms_norm(residual, self.norm, self.eps)
+        return residual @ self.lm_head.T
+
+    def clean_forward(
+        self, inputs: Int[Array, "b t"], capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        if not capture_keys:
+            return ForwardResult.from_producer(
+                output=self._clean_output(inputs), capture_keys=(), capture_values=()
             )
-        x = rms_norm(x, self.norm, self.eps)
-        return x @ self.lm_head.T, taps
+        ordered_capture_keys = tuple(sorted(capture_keys))
+        capture_sources = self._capture_grammar().resolve(
+            ordered_capture_keys, _capture_source_for_point
+        )
+
+        residual = self.embed_tokens(inputs)
+        captured_by_source: dict[_GLUCaptureSource, Array] = {}
+        embedding_residual_source = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
+        if embedding_residual_source in capture_sources:
+            captured_by_source[embedding_residual_source] = residual
+
+        layout = _scan_capture_layout(capture_sources, self.n_layer)
+        buffers = _allocate_capture_buffers(layout, residual, self._value_width)
+        slot_indices_by_tap = _slot_index_arrays(layout)
+
+        def block(
+            state: tuple[Array, dict[str, Array]],
+            layer_and_slots: tuple[GLULayer, dict[str, Array]],
+        ) -> tuple[tuple[Array, dict[str, Array]], None]:
+            x, buffers_ = state
+            layer, slots = layer_and_slots
+            block_activations = self._block_activations(x, layer)
+            return (
+                block_activations.residual_out,
+                _write_block_captures(layout, buffers_, slots, block_activations),
+            ), None
+
+        (residual, buffers), _ = jax.lax.scan(
+            block, (residual, buffers), (self.stacked, slot_indices_by_tap)
+        )
+        _read_capture_buffers(captured_by_source, layout, buffers)
+        residual = rms_norm(residual, self.norm, self.eps)
+        return ForwardResult.from_producer(
+            output=residual @ self.lm_head.T,
+            capture_keys=ordered_capture_keys,
+            capture_values=_captures_in_request_order(capture_sources, captured_by_source),
+        )
 
     def _run_masked_forward(
         self,
-        prepared: dict[str, dict[str, Array]],
+        prepared_weights: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        masking: Masking,
         remat: bool,
-        collect: dict[str, Array] | None,
-        stochastic: tuple[dict[str, Array], Array] | None = None,
-        collect_activations: dict[str, Array] | None = None,
-    ) -> Array:
-        """The masked decomposed forward shared by `masked_output` / `masked_output_stochastic`
-        / `masked_site_outputs` / `masked_component_activations` (SPEC §1.3, S2). `live_set` is
-        static at trace, so the forward runs as `[frozen prefix] → [live block] → [frozen suffix]`
-        static sub-scans (no per-site `lax.cond`): only the live block carries + gathers V/U.
-        `live`/`has_delta` are static; a non-None `collect` gathers per-live-site decomposed
-        OUTPUTS (`(x@V)*m@U + …`, SPEC S31), and a non-None `collect_activations` gathers
-        per-live-site component ACTIVATIONS `x@V` (`[*leading, C]`, mask-independent — the
-        pre-mask coefficient the arithmetic CI-grid eval visualizes). Assumes layer-aligned,
-        contiguous chunks (asserted below).
+        capture_keys: tuple[str, ...],
+        *,
+        collect_component_activations: bool,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        """One segmented masked forward for output, captures and optional ``x@V`` diagnostics.
 
-        `prepared` is the shared, stacked + ÷fsdp-reconstructed per-kind `(V, U)` from
-        `prepare_compute_weights` (built ONCE per step) — this fn only ATTACHES the per-forward
-        masks, so the ÷N→÷fsdp cross-node gather is not re-run here (SPEC unchanged; numerics
-        identical — the reconstruction is mask-independent and the same for every forward)."""
-        live_set = frozenset(live)
-        resid = self.embed_tokens(inputs)
-        leading = resid.shape[:-1]
-        if stochastic is not None:
-            ci_stacked, draw_key = stochastic
-            per_kind = _attach_per_kind_stochastic(
-                prepared, self.n_layer, leading, ci_stacked, draw_key, routes, live_set
-            )
-        else:
-            per_kind = _attach_per_kind_masks(
-                prepared, self.n_layer, leading, masks, delta_masks, routes, live_set, has_delta
-            )
+        Empty capture keys keep the compact frozen blocks; non-empty keys allocate only
+        their exact-size capture slots.
+        """
+        capture_sources = (
+            self._capture_grammar().resolve(capture_keys, _capture_source_for_point)
+            if capture_keys
+            else ()
+        )
+        residual = self.embed_tokens(inputs)
+        leading = residual.shape[:-1]
+        match masking:
+            case StochasticMasking(
+                ci_stacked=ci_stacked,
+                draw_key=draw_key,
+                live_sites=live_site_names,
+                routes=routes,
+            ):
+                live_sites = frozenset(live_site_names)
+                uses_weight_deltas = True
+                per_kind = _attach_per_kind_stochastic(
+                    prepared_weights,
+                    self.n_layer,
+                    leading,
+                    ci_stacked,
+                    draw_key,
+                    routes,
+                    live_sites,
+                )
+            case MaterializedMasking(
+                component_masks=component_masks,
+                weight_delta_masks=weight_delta_masks,
+                routes=routes,
+            ):
+                live_site_names = masking.live_sites
+                live_sites = frozenset(live_site_names)
+                uses_weight_deltas = weight_delta_masks is not None
+                per_kind = _attach_per_kind_masks(
+                    prepared_weights,
+                    self.n_layer,
+                    leading,
+                    component_masks,
+                    weight_delta_masks,
+                    routes,
+                    live_sites,
+                )
         decomposed_kinds = frozenset(per_kind)
-        want_collect = collect is not None
-        want_collect_acts = collect_activations is not None
 
-        # STATIC liveness. `live_set` is known at trace, so the live/frozen choice per site needs
-        # NO runtime `lax.cond` — and removing it lets XLA pack + prefetch the V/U gathers (the
-        # cond was a scheduling/packing barrier). We assume LAYER-ALIGNED, CONTIGUOUS live-sets
-        # (`live_groups` with sites_per_chunk % n_decomposed_kinds == 0, and `all_sites_live`
-        # satisfy this); both are asserted below. The forward is then
-        # [frozen prefix] → [live block] → [frozen suffix], each a static sub-scan; only the live
-        # block carries V/U and gathers them.
         def layer_is_live(layer: int) -> bool:
-            flags = {site_name(layer, kind) in live_set for kind in decomposed_kinds}
+            flags = {site_name(layer, kind) in live_sites for kind in decomposed_kinds}
             assert len(flags) == 1, (
-                f"layer {layer} is partially live ({flags}); the segmented masked forward assumes "
-                f"layer-aligned chunks (sites_per_chunk % {len(decomposed_kinds)} == 0)"
+                f"layer {layer} is partially live ({flags}); the segmented masked forward "
+                f"requires layer-aligned chunks across {len(decomposed_kinds)} kinds"
             )
             return flags.pop()
 
@@ -870,98 +1196,111 @@ class GLUDecomposedModel(eqx.Module):
         else:
             first_live = last_live = 0
 
-        def decomp_site(x_in: Array, W: Array, e: dict[str, Array]) -> Array:
-            # In-body ÷fsdp→full gather (full on d, C stays ÷tp) — the per-layer gather lives
-            # INSIDE the checkpointed body, so it is transient in the forward and re-run in
-            # the remat'd backward.
-            v = _gather_full_weight(e["V"], P(None, "tp"))
-            u = _gather_full_weight(e["U"], P("tp", None))
-            if "ci" in e:  # stochastic recompute: draw source from the per-layer key and build the
-                # mask INLINE (recomputed in the backward, not held — the shared `ci` stack + tiny
-                # key replace the per-forward mask stack).
-                ci = e["ci"]
-                source = jax.random.uniform(e["src_key"], ci.shape, dtype=ci.dtype)
-                mask = ci + (1.0 - ci) * source
-                delta = (
-                    jax.random.uniform(e["delta_key"], ci.shape[:-1], dtype=ci.dtype)
-                    if has_delta
+        def decomposed_site_output(
+            site_input: Array,
+            frozen_weight: Array,
+            decomposition_inputs: dict[str, Array],
+        ) -> Array:
+            v = _gather_full_weight(decomposition_inputs["V"], P(None, "tp"))
+            u = _gather_full_weight(decomposition_inputs["U"], P("tp", None))
+            if "ci" in decomposition_inputs:
+                ci_lower = decomposition_inputs["ci"]
+                random_source = jax.random.uniform(
+                    decomposition_inputs["src_key"], ci_lower.shape, dtype=ci_lower.dtype
+                )
+                component_mask = ci_lower + (1.0 - ci_lower) * random_source
+                weight_delta_mask = (
+                    jax.random.uniform(
+                        decomposition_inputs["delta_key"],
+                        ci_lower.shape[:-1],
+                        dtype=ci_lower.dtype,
+                    )
+                    if uses_weight_deltas
                     else None
                 )
-                return site_out(x_in, v, u, W, mask, delta, e.get("route"))
-            return site_out(x_in, v, u, W, e["mask"], e.get("delta"), e.get("route"))
+                return site_out(
+                    site_input,
+                    v,
+                    u,
+                    frozen_weight,
+                    component_mask,
+                    weight_delta_mask,
+                    decomposition_inputs.get("route"),
+                )
+            return site_out(
+                site_input,
+                v,
+                u,
+                frozen_weight,
+                decomposition_inputs["mask"],
+                decomposition_inputs.get("delta"),
+                decomposition_inputs.get("route"),
+            )
 
-        def masked_site(
-            x_in: Array, kind: str, W: Array, pk: dict[str, dict[str, Array]]
-        ) -> tuple[Array, Array | None, Array | None]:
-            # LIVE block only: every decomposed kind decomps (static — no cond); a kind absent
-            # from the decomposition stays frozen.
+        def site_output_and_component_activation(
+            site_input: Array,
+            kind: str,
+            frozen_weight: Array,
+            per_kind_inputs: dict[str, dict[str, Array]],
+        ) -> tuple[Array, Array | None]:
             if kind not in decomposed_kinds:
-                return x_in @ W.T, None, None
-            e = pk[kind]
-            out = decomp_site(x_in, W, e)
-            act = (
-                (x_in @ e["V"]) if want_collect_acts else None
-            )  # pre-mask coeff; see masked_component_activations
-            return out, (out if want_collect else None), act
+                return site_input @ frozen_weight.T, None
+            decomposition_inputs = per_kind_inputs[kind]
+            site_output = decomposed_site_output(site_input, frozen_weight, decomposition_inputs)
+            component_activation = (
+                site_input @ decomposition_inputs["V"] if collect_component_activations else None
+            )
+            return site_output, component_activation
 
-        def live_block(
-            x: Array, layer_in: tuple[GLULayer, dict[str, dict[str, Array]]]
-        ) -> tuple[Array, tuple[dict[str, Array] | None, dict[str, Array] | None]]:
-            sl, pk = layer_in
-            attn = sl.attn
-            h1 = rms_norm(x, sl.ln1, self.eps)
-            q, qc, qa = masked_site(h1, "q", attn.wq, pk)
-            k, kc, ka = masked_site(h1, "k", attn.wk, pk)
-            v, vc, va = masked_site(h1, "v", attn.wv, pk)
-            attn_y = attn.core(q, k, v, self.inv_freq)
-            o, oc, oa = masked_site(attn_y, "o", attn.wo, pk)
-            post_attn = x + o
-            h2 = rms_norm(post_attn, sl.ln2, self.eps)
-            g, gc, ga = masked_site(h2, "gate", sl.Wg, pk)
-            u, uc, ua = masked_site(h2, "up", sl.Wu, pk)
-            d, dc, da = masked_site(jax.nn.silu(g) * u, "down", sl.Wd, pk)
-            x = post_attn + d
+        def compute_live_block_activations(
+            residual_in: Array,
+            layer: GLULayer,
+            per_kind_inputs: dict[str, dict[str, Array]],
+        ) -> tuple[_GLUBlockActivations, dict[str, Array] | None]:
+            attn = layer.attn
+            h1 = rms_norm(residual_in, layer.ln1, self.eps)
+            q, qa = site_output_and_component_activation(h1, "q", attn.wq, per_kind_inputs)
+            k, ka = site_output_and_component_activation(h1, "k", attn.wk, per_kind_inputs)
+            v, va = site_output_and_component_activation(h1, "v", attn.wv, per_kind_inputs)
+            attention_output = attn.core(q, k, v, self.inv_freq)
+            o, oa = site_output_and_component_activation(
+                attention_output, "o", attn.wo, per_kind_inputs
+            )
+            post_attention = residual_in + o
+            h2 = rms_norm(post_attention, layer.ln2, self.eps)
+            gate, ga = site_output_and_component_activation(h2, "gate", layer.Wg, per_kind_inputs)
+            up, ua = site_output_and_component_activation(h2, "up", layer.Wu, per_kind_inputs)
+            down_input = jax.nn.silu(gate) * up
+            down, da = site_output_and_component_activation(
+                down_input, "down", layer.Wd, per_kind_inputs
+            )
+            residual_out = post_attention + down
+            block_activations = _GLUBlockActivations(
+                residual_in=residual_in,
+                qkv_input=h1,
+                q_output=q,
+                k_output=k,
+                v_output=v,
+                attention_output=attention_output,
+                o_output=o,
+                post_attention_residual=post_attention,
+                gate_up_input=h2,
+                gate_output=gate,
+                up_output=up,
+                down_input=down_input,
+                down_output=down,
+                residual_out=residual_out,
+            )
+            if not collect_component_activations:
+                return block_activations, None
             kinds = ("q", "k", "v", "o", "gate", "up", "down")
-            collected = (
-                {
-                    n: c
-                    for n, c in zip(kinds, (qc, kc, vc, oc, gc, uc, dc), strict=True)
-                    if c is not None
-                }
-                if want_collect
-                else None
-            )
-            collected_acts = (
-                {
-                    n: a
-                    for n, a in zip(kinds, (qa, ka, va, oa, ga, ua, da), strict=True)
-                    if a is not None
-                }
-                if want_collect_acts
-                else None
-            )
-            return x, (collected, collected_acts)
+            component_activations_by_kind = {
+                kind: activation
+                for kind, activation in zip(kinds, (qa, ka, va, oa, ga, ua, da), strict=True)
+                if activation is not None
+            }
+            return block_activations, component_activations_by_kind
 
-        def frozen_block(x: Array, sl: GLULayer) -> tuple[Array, None]:
-            # Bit-identical to a frozen `masked_site` branch (`x @ Wᵀ` per site), shared with
-            # `clean_output`. Carries NO V/U → a frozen segment gathers nothing.
-            x = x + sl.attn(rms_norm(x, sl.ln1, self.eps), self.inv_freq)
-            x = x + _clean_mlp_out(sl, rms_norm(x, sl.ln2, self.eps))
-            return x, None
-
-        # Per-LAYER checkpoint of the scan BODY in BOTH modes — `remat` controls ONLY whether the
-        # layer ACTIVATIONS are recomputed; it NEVER controls the ÷fsdp→full V/U gather. The
-        # gather is anchored INSIDE this checkpointed body (`_gather_full_weight`) and its
-        # outputs carry the GATHERED_WEIGHTS_CHECKPOINT_NAME tag, which the policy excludes
-        # from the save set in BOTH modes — so the gathered full weights are transient one
-        # layer at a time in the forward and RE-gathered in the backward, never a per-forward
-        # fwd→bwd resident (without the in-body anchor GSPMD hoists the whole-chunk V/U gather
-        # out of the while-loop, where it is saved once per recon forward — the dominant temp
-        # class of the full32L step).
-        #   remat=True  → nothing_saveable: recompute activations AND the gather (min memory).
-        #   remat=False → dots_saveable: SAVE the activation matmuls (no batch dims here → they
-        #     qualify) but still recompute the gather + cheap elementwise. Pure recompute either
-        #     way; zero numerics change.
         base_policy = (
             jax.checkpoint_policies.nothing_saveable
             if remat
@@ -976,146 +1315,217 @@ class GLUDecomposedModel(eqx.Module):
                 never_save_gathered(prim, *args, **params)
             )
 
-        def run_scan(body: Any, carry: Array, xs: Any) -> tuple[Array, Any]:
+        def run_scan(body: Any, carry: Any, xs: Any) -> tuple[Any, Any]:
             return jax.lax.scan(jax.checkpoint(body, policy=policy), carry, xs)
 
         def slice_layers(lo: int, hi: int) -> GLULayer:
             return jax.tree.map(lambda a: a[lo:hi], self.stacked)
 
-        x = resid
-        ys: tuple[dict[str, Array] | None, dict[str, Array] | None] | None = None
-        if first_live > 0:
-            x, _ = run_scan(frozen_block, x, slice_layers(0, first_live))
-        if last_live > first_live:
-            pk_live = {
-                kind: {k: v[first_live:last_live] for k, v in e.items()}
-                for kind, e in per_kind.items()
-            }
-            x, ys = run_scan(live_block, x, (slice_layers(first_live, last_live), pk_live))
-        if last_live < self.n_layer:
-            x, _ = run_scan(frozen_block, x, slice_layers(last_live, self.n_layer))
+        captured_by_source: dict[_GLUCaptureSource, Array] = {}
+        initial = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
+        if initial in capture_sources:
+            captured_by_source[initial] = residual
 
-        x = rms_norm(x, self.norm, self.eps)
-        logits = x @ self.lm_head.T
-        if collect is not None or collect_activations is not None:
-            assert ys is not None  # requested -> the live block emitted the per-kind stacks
-            ys_out, ys_acts = ys
-            for sink, stacked in ((collect, ys_out), (collect_activations, ys_acts)):
-                if sink is None:
-                    continue
-                assert stacked is not None  # sink requested -> the live block emitted this stack
-                for site in live:
-                    layer, kind = parse_site_name(site)
-                    sink[site] = stacked[kind][layer - first_live]
-        return logits
+        layout = _scan_capture_layout(capture_sources, self.n_layer) if capture_sources else None
+        buffers = (
+            {} if layout is None else _allocate_capture_buffers(layout, residual, self._value_width)
+        )
+        slot_indices_by_tap = {} if layout is None else _slot_index_arrays(layout)
+        component_activation_segments: list[dict[str, Array]] = []
+        bounds = sorted({0, first_live, last_live, self.n_layer})
+
+        for lo, hi in zip(bounds, bounds[1:], strict=False):
+            if lo == hi:
+                continue
+            segment_live = first_live <= lo and hi <= last_live and first_live < last_live
+            if segment_live:
+                per_kind_segment_inputs = {
+                    kind: {key: value[lo:hi] for key, value in entry.items()}
+                    for kind, entry in per_kind.items()
+                }
+                xs: Any = (slice_layers(lo, hi), per_kind_segment_inputs)
+            else:
+                xs = slice_layers(lo, hi)
+
+            if layout is not None:
+                segment_slots = {key: value[lo:hi] for key, value in slot_indices_by_tap.items()}
+                xs = (*xs, segment_slots) if segment_live else (xs, segment_slots)
+
+                def captured_block(
+                    state: tuple[Array, dict[str, Array]],
+                    layer_input: Any,
+                    segment_live: bool = segment_live,
+                    layout: _ScanCaptureLayout = layout,
+                ) -> tuple[tuple[Array, dict[str, Array]], dict[str, Array] | None]:
+                    x, buffers_ = state
+                    if segment_live:
+                        layer, per_kind_layer_inputs, slots = layer_input
+                        block_activations, block_component_activations = (
+                            compute_live_block_activations(x, layer, per_kind_layer_inputs)
+                        )
+                    else:
+                        layer, slots = layer_input
+                        block_activations = self._block_activations(x, layer)
+                        block_component_activations = None
+                    updated_buffers = _write_block_captures(
+                        layout, buffers_, slots, block_activations
+                    )
+                    return (
+                        block_activations.residual_out,
+                        updated_buffers,
+                    ), block_component_activations
+
+                (residual, buffers), segment_component_activations = run_scan(
+                    captured_block, (residual, buffers), xs
+                )
+            else:
+
+                def plain_block(
+                    x: Array,
+                    layer_input: Any,
+                    segment_live: bool = segment_live,
+                ) -> tuple[Array, dict[str, Array] | None]:
+                    if segment_live:
+                        layer, per_kind_layer_inputs = layer_input
+                        block_activations, block_component_activations = (
+                            compute_live_block_activations(x, layer, per_kind_layer_inputs)
+                        )
+                        return block_activations.residual_out, block_component_activations
+                    return _clean_block(layer_input, x, self.inv_freq, self.eps), None
+
+                residual, segment_component_activations = run_scan(plain_block, residual, xs)
+
+            if segment_component_activations is not None:
+                component_activation_segments.append(segment_component_activations)
+
+        if layout is not None:
+            _read_capture_buffers(captured_by_source, layout, buffers)
+
+        captures = _captures_in_request_order(capture_sources, captured_by_source)
+        component_activations: dict[str, Array] = {}
+        if collect_component_activations:
+            assert component_activation_segments, (
+                "component activations require a non-empty live segment"
+            )
+            stacks = {
+                kind: jnp.concatenate(
+                    [part[kind] for part in component_activation_segments], axis=0
+                )
+                for kind in component_activation_segments[0]
+            }
+            for site in live_site_names:
+                layer, kind = parse_site_name(site)
+                component_activations[site] = stacks[kind][layer - first_live]
+            assert set(component_activations) == set(live_site_names), (
+                sorted(component_activations),
+                sorted(live_site_names),
+            )
+
+        residual = rms_norm(residual, self.norm, self.eps)
+        forward_result = ForwardResult.from_producer(
+            output=residual @ self.lm_head.T,
+            capture_keys=capture_keys,
+            capture_values=captures,
+        )
+        return forward_result, component_activations
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> dict[str, dict[str, Array]]:
-        """Build the shared per-kind compute weights ONCE per step (SPEC unchanged): stack the
-        per-site V/U into the layer-stacked `[n_layer, …]` form and run the ÷N→÷fsdp cross-node
-        reconstruction + bf16 cast. The result is mask-independent and identical for every
-        forward in the step, so the engine builds it once and threads it into all
-        `masked_output` / `masked_site_outputs` calls — the cross-node gather then runs ONCE per
-        step (ENTRY) instead of once per forward (the per-forward re-gather was ~10 co-resident
-        copies of the ÷fsdp stack at peak)."""
         return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.n_layer))
 
-    def masked_output(
+    def component_activation_forward(
         self,
-        prepared: dict[str, dict[str, Array]],
+        prepared_weights: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
-        remat: bool,
-    ) -> Array:
-        return self._run_masked_forward(
-            prepared, inputs, masks, delta_masks, routes, live, has_delta, remat, None, None
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        """Run one frozen forward for requested captures and every decomposed site's ``x @ V``."""
+        component_input_keys: list[str] = []
+        site_locations = tuple(parse_site_name(site) for site in self.site_names)
+        for layer, kind in site_locations:
+            match kind:
+                case "q" | "k" | "v":
+                    component_input_keys.append(attention_input_tap_key(layer))
+                case "o":
+                    component_input_keys.append(attention_output_tap_key(layer))
+                case "gate" | "up":
+                    component_input_keys.append(mlp_input_tap_key(layer))
+                case "down":
+                    component_input_keys.append(mlp_hidden_tap_key(layer))
+                case _:
+                    raise AssertionError(kind)
+
+        full_forward_result = self.clean_forward(
+            inputs,
+            capture_keys | frozenset(component_input_keys),
         )
+        component_activations: dict[str, Array] = {}
+        for site, key, (layer, kind) in zip(
+            self.site_names, component_input_keys, site_locations, strict=True
+        ):
+            V = prepared_weights[kind]["V"][layer]
+            component_activations[site] = full_forward_result.captures[key].astype(V.dtype) @ V
+        requested_forward_result = ForwardResult(
+            output=full_forward_result.output,
+            captures={key: full_forward_result.captures[key] for key in sorted(capture_keys)},
+        )
+        return requested_forward_result, component_activations
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
-        """Per-kind `[n_layer, *leading, C]` stack of the CI envelope, built ONCE per step and
-        shared across all stochastic recon forwards (`masked_output_stochastic`). The
-        StochasticReconCapable capability (SPEC unchanged — pure recompute restructuring)."""
         return _stack_ci_per_kind(ci_lower, self.n_layer)
 
-    def masked_output_stochastic(
+    def masked_forward(
         self,
-        prepared: dict[str, dict[str, Array]],
+        prepared_weights: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
-        ci_stacked: dict[str, Array],
-        draw_key: Array,
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> Array:
-        """Stochastic recon forward that RECOMPUTES masks in-block (memory win): the shared
-        `ci_stacked` + per-layer keys from `draw_key` replace the per-forward mask stack; each
-        live site draws `source = uniform(key)` and forms `mask = ci + (1−ci)·source` inside the
-        checkpointed block (faithful by checkpoint determinism). Same forward semantics as
-        `masked_output` with stochastic sources — only the masks' liverange changes."""
-        return self._run_masked_forward(
-            prepared, inputs, {}, {}, routes, live, has_delta, remat, None, (ci_stacked, draw_key)
+    ) -> ForwardResult:
+        masked_forward_result, _component_activations = self._run_masked_forward(
+            prepared_weights,
+            inputs,
+            masking,
+            remat,
+            tuple(sorted(capture_keys)),
+            collect_component_activations=False,
         )
-
-    def masked_site_outputs(
-        self,
-        prepared: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, Array]:
-        """Per-`live`-site decomposed output of the masked forward (SPEC S31). Runs the
-        exact `masked_output` forward, discards the logits, returns the collected outputs."""
-        collect: dict[str, Array] = {}
-        self._run_masked_forward(
-            prepared, inputs, masks, delta_masks, routes, live, has_delta, False, collect, None
-        )
-        assert set(collect) == set(live), (sorted(collect), sorted(live))
-        return collect
+        return masked_forward_result
 
     def masked_component_activations(
         self,
-        prepared: dict[str, dict[str, Array]],
+        prepared_weights: dict[str, dict[str, Array]],
         inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        masking: MaterializedMasking,
     ) -> dict[str, Array]:
-        """Per-`live`-site component activation `x@V` (`[*leading, C]`, the coefficient
-        BEFORE the per-component `*mask`) from the masked forward. A site's OWN mask does not
-        enter its `x@V`, but the masks passed still shape a downstream site's input (e.g.
-        `down`'s input is the masked `silu(gate)*up`) — so pass the masks the visualization
-        wants the forward to run under. For the arithmetic CI-grid eval's activation heatmaps;
-        LM-only, off the recon path."""
-        collect_activations: dict[str, Array] = {}
-        self._run_masked_forward(
-            prepared, inputs, masks, delta_masks, routes, live, has_delta, False, None,
-            collect_activations=collect_activations,
-        )  # fmt: skip
-        assert set(collect_activations) == set(live), (sorted(collect_activations), sorted(live))
-        return collect_activations
+        _forward_result, activations = self._run_masked_forward(
+            prepared_weights,
+            inputs,
+            masking,
+            False,
+            (),
+            collect_component_activations=True,
+        )
+        return activations
 
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Array]:
         """fp32 `W − V@U` per site from fp32 masters (SPEC N2; faithfulness input)."""
-        out: dict[str, Array] = {}
+        weight_deltas: dict[str, Array] = {}
         for spec in self.sites:
             layer, kind = parse_site_name(spec.name)
-            W = _frozen_site_weight(jax.tree.map(lambda a, li=layer: a[li], self.stacked), kind)
-            V, U = vu.site(spec.name)
-            out[spec.name] = (
-                W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
+            frozen_weight = _frozen_site_weight(
+                jax.tree.map(lambda array, layer_index=layer: array[layer_index], self.stacked),
+                kind,
             )
-        return out
+            site_components = vu.site(spec.name)
+            weight_deltas[spec.name] = (
+                frozen_weight.astype(jnp.float32)
+                - (site_components.V.astype(jnp.float32) @ site_components.U.astype(jnp.float32)).T
+            )
+        return weight_deltas
 
 
 # ----------------------------- HF weight loading -----------------------------
@@ -1150,15 +1560,9 @@ class HFWeights:
     def get(self, key: str) -> Array:
         fname = self._key_to_file[key]
         if fname not in self._open:
-            # framework="flax", not "numpy": the numpy backend resolves dtypes by name
-            # through numpy, where bfloat16 exists only if ml_dtypes registration has
-            # run as an import side effect — flax requires jax, which guarantees it.
-            self._open[fname] = safe_open(str(self._snapshot / fname), framework="flax")
-        # Stage on host CPU: get_tensor materializes on the JAX default device, and a
-        # multi-GB checkpoint must not pass through a single accelerator before its
-        # placement onto the mesh (`place_via_shardings` serves shards from host).
-        with jax.default_device(jax.devices("cpu")[0]):
-            return jnp.asarray(self._open[fname].get_tensor(key), dtype=self._dtype)
+            self._open[fname] = safe_open(str(self._snapshot / fname), framework="numpy")
+        host_array = np.asarray(self._open[fname].get_tensor(key), dtype=self._dtype)
+        return cast(Array, cast(object, host_array))
 
 
 AttnLoader = Callable[[HFWeights, int], FrozenAttn]

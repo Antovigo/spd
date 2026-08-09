@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import jax.numpy as jnp
+import numpy as np
 from safetensors.flax import save_file
 
 from param_decomp.targets.glu_transformer import HFWeights
@@ -54,10 +55,10 @@ def test_hf_weights_casts_bf16_up_to_fp32(tmp_path: Path):
     assert jnp.array_equal(w.get(_NORM_KEY), norm)
 
 
-def test_hf_weights_stages_reads_on_host_cpu(tmp_path: Path):
+def test_hf_weights_stages_reads_in_host_memory(tmp_path: Path):
     """Loaded leaves must be host-resident: `place_via_shardings` serves device shards
     from the loaded copy, and a multi-GB checkpoint must not pass through a single
     accelerator first."""
     _write_snapshot(tmp_path)
     got = HFWeights(tmp_path, jnp.bfloat16).get(_EMBED_KEY)
-    assert all(d.platform == "cpu" for d in got.devices())
+    assert isinstance(got, np.ndarray)

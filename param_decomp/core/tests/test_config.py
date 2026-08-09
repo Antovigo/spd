@@ -146,19 +146,37 @@ def test_eval_data_resolves_to_a_separate_holdout():
         build_experiment_config(LMExperimentConfig(**dict(raw, data=same_both)), RUN_ID, DATA_ROOT)
 
 
+def test_eval_pgd_threads_hidden_acts_reconstruction_into_built_probe():
+    raw = _reference_lm_raw()
+    raw["eval"] = {
+        "batch_size": 1,
+        "n_steps": 1,
+        "every": 1,
+        "slow_every": 1,
+        "metrics": [
+            {"type": "CEandKLLosses", "rounding_threshold": 0.0},
+            {"type": "CI_L0", "groups": None, "ci_alive_threshold": 0.0},
+            {
+                "type": "PGDReconLoss",
+                "init": "random",
+                "source_shape": "c",
+                "n_steps": 1,
+                "step_size": 0.1,
+                "hidden_acts_reconstruction": {"coeff": 1.0, "points": ["resid.19"]},
+            },
+        ],
+    }
+    authored = LMExperimentConfig(**raw)
+    assert authored.eval is not None
+    [metric] = [m for m in authored.eval.metrics if isinstance(m, PGDReconLossConfig)]
+    assert metric.hidden_acts_reconstruction is not None
+    assert metric.hidden_acts_reconstruction.coeff == 1.0
+    assert metric.hidden_acts_reconstruction.points == ("resid.19",)
+    build_experiment_config(authored, RUN_ID, DATA_ROOT)
+
+
 def test_unsupported_settings_refuse():
     raw = _reference_lm_raw()
-
-    hidden_acts_training_loss = dict(
-        raw,
-        pd=dict(
-            raw["pd"],
-            loss_metrics=raw["pd"]["loss_metrics"]
-            + [{"type": "StochasticHiddenActsReconLoss", "coeff": 1.0}],
-        ),
-    )
-    with pytest.raises(AssertionError, match="eval metric, not a JAX training loss"):
-        build_experiment_config(LMExperimentConfig(**hidden_acts_training_loss), RUN_ID, DATA_ROOT)
 
     # Non-matrix / cross-family site names are unrepresentable in the tiled spec: the cs
     # keys are the family's Literal matrix vocabulary, so these are rejected at PARSE, not
@@ -197,7 +215,7 @@ def test_unsupported_model_family_refuses_and_supported_families_dispatch():
     time. The schema's `LMTargetSpec` discriminated union still validates a GPT-2 spec
     (it's a well-formed `kind`), so the refusal must come from `_resolve_target`'s
     per-family asserts, not pydantic."""
-    from param_decomp.experiments.lm.config import LlamaSimpleMLPTargetConfig, TargetConfig
+    from param_decomp.experiments.lm.resolved import LlamaSimpleMLPTargetConfig, TargetConfig
 
     raw = _reference_lm_raw()
 
@@ -387,16 +405,26 @@ def test_all_block_resids_concatenates_one_tap_per_block():
     )
     assert all_taps_cfg.ci_fn.input_dim == 4096 * 2
 
-    # `all_site_inputs`: tap widths are per-site d_in, not d_resid — a down_proj tap is the
-    # MLP intermediate (14336 on llama8b), and the wire keys are the site names themselves.
-    site_inputs_cfg = build_experiment_config(
-        LMExperimentConfig(**_two_block_cfg("all_site_inputs")), RUN_ID, DATA_ROOT
+    taps_cfg = build_experiment_config(
+        LMExperimentConfig(**_two_block_cfg("all_block_taps")), RUN_ID, DATA_ROOT
     )
-    assert isinstance(site_inputs_cfg.ci_fn, ChunkwiseTransformerCIArch)
-    assert site_inputs_cfg.ci_fn.chunks == (
-        Chunk(input_taps=output_sites, output_sites=output_sites),
+    assert isinstance(taps_cfg.ci_fn, ChunkwiseTransformerCIArch)
+    assert taps_cfg.ci_fn.chunks == (
+        Chunk(
+            input_taps=(
+                "attn_in.18",
+                "attn_out.18",
+                "mlp_in.18",
+                "mlp_hidden.18",
+                "attn_in.19",
+                "attn_out.19",
+                "mlp_in.19",
+                "mlp_hidden.19",
+            ),
+            output_sites=output_sites,
+        ),
     )
-    assert site_inputs_cfg.ci_fn.input_dim == 14336 * 2
+    assert taps_cfg.ci_fn.input_dim == (4096 + 4096 + 4096 + 14336) * 2
 
 
 def test_c49k_config_converts():

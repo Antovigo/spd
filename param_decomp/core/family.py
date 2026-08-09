@@ -6,7 +6,7 @@ LAYER-INDEXED — `layers.{i}.self_attn.q_proj` for the GLU family,
 the family's own; `name_of(layer, matrix)` renders it and `parse(name)` inverts it,
 asserting on anything malformed (a site name is never string-manipulated elsewhere).
 
-`ArchFamily` is the ordered, exhaustive matrix set (canonical within-block order) + the
+`ArchFamily` is the ordered, exhaustive matrix set (canonical within-block order) plus the
 `(layer, matrix) -> site name` renderer. Each target module builds its OWN family
 (`glu_transformer.FAMILY`, `llama_simple_mlp.FAMILY`), with `matrices` derived from the
 `Literal` matrix vocabulary the target module itself owns — the same vocabulary the
@@ -31,7 +31,7 @@ space) — the third naming system, out of scope here.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from param_decomp.core.components import SiteC, SiteSpec
+from param_decomp.core.components import SiteC, SiteDims, SiteSpec
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ def canonical_site_cs(family: ArchFamily, site_cs: tuple[SiteC, ...]) -> tuple[S
 def site_specs(
     family: ArchFamily,
     site_cs: tuple[SiteC, ...],
-    dims_of: Callable[[str], tuple[int, int]],
+    dims_of: Callable[[str], SiteDims],
     n_layer: int,
 ) -> tuple[SiteSpec, ...]:
     """Shape-resolved specs in canonical order (input must already be canonical);
@@ -77,5 +77,6 @@ def site_specs(
         layer, kind = family.parse(site.name)
         assert 0 <= layer < n_layer, (site.name, n_layer)
         assert site.C >= 1, site
-        specs.append(SiteSpec(site.name, *dims_of(kind), site.C))
+        dims = dims_of(kind)
+        specs.append(SiteSpec(name=site.name, d_in=dims.d_in, d_out=dims.d_out, C=site.C))
     return tuple(specs)

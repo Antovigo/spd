@@ -15,9 +15,9 @@ def test_harvest_batch_from_forward_semantics() -> None:
     acts = rng.normal(size=(2, 5, 3)).astype(np.float32)
     probs = rng.uniform(size=(2, 5, 100)).astype(np.float32)
     fwd = HarvestForward(
-        lower_leaky_ci={"h.0.mlp.c_fc": jnp.asarray(ci)},
-        component_acts={"h.0.mlp.c_fc": jnp.asarray(acts)},
-        output_probs=jnp.asarray(probs),
+        lower_leaky_ci_by_site={"h.0.mlp.c_fc": jnp.asarray(ci)},
+        component_activations_by_site={"h.0.mlp.c_fc": jnp.asarray(acts)},
+        output_probabilities=jnp.asarray(probs),
     )
 
     hb = harvest_batch_from_forward(tokens, fwd, activation_threshold=0.3)

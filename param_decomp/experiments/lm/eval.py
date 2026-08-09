@@ -42,7 +42,6 @@ what keeps it correct when `n_steps` is raised.
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -51,14 +50,28 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn
-from param_decomp.core.ci_l0_eval import ci_l0_scalars, resolve_l0_groups
+from param_decomp.core.ci_fn import CIFn, evaluate_ci
+from param_decomp.core.ci_l0_eval import ci_l0_scalars, resolve_site_groups
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
-from param_decomp.core.model import DecomposedModel
-from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_loss
+from param_decomp.core.losses import (
+    ReconstructionLoss,
+    reconstruction_loss,
+    reconstruction_loss_metrics,
+)
+from param_decomp.core.masking import masks_from_sources
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    DecomposedModel,
+    MaterializedMasking,
+    prepare_compute_weights,
+    select_captures,
+)
+from param_decomp.core.precision import COMPUTE_DT
+from param_decomp.core.recon import ForwardObservations, reconstruction_observations
+from param_decomp.core.recon_eval import FreshPGDReconEval, fresh_pgd_recon_sources
 from param_decomp.core.sharding import batch_shard_leading
-from param_decomp.core.train import COMPUTE_DT, cast_floating
 from param_decomp.targets.losses import kl_per_position
 
 type ScalarStep = Callable[
@@ -111,84 +124,92 @@ def _row_masked_cross_entropy(
 
 
 @dataclass(frozen=True)
-class _PreparedLMBatch:
+class _PreparedLMBatch[PreparedT]:
     tokens: Array
-    clean_output: Array
-    prepared_weights: Any
-    ci: dict[str, Array]
-    row_mask: Array | None
+    clean: ForwardObservations
+    prepared_weights: PreparedT
+    ci_lower: dict[str, Array]
+    valid_row_mask: Array | None
 
 
-def _prepare_lm_batch(
-    model: DecomposedModel,
+def _prepare_lm_batch[PreparedT](
+    model: DecomposedModel[PreparedT],
     components: ComponentStacks,
-    ci_fn: Any,
+    ci_fn: CIFn,
     token_ids: Int[Array, "B T"],
     mesh: Mesh | None,
     n_valid_rows: int | None,
-) -> _PreparedLMBatch:
+    ci_capture_keys: CaptureKeys,
+    activation_capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
+) -> _PreparedLMBatch[PreparedT]:
     """Pure shared preparation required by independent LM metric kernels."""
     tokens = batch_shard_leading(token_ids, mesh)
-    clean_output, taps = model.clean_output_and_activations(tokens, ci_fn.input_names)
-    clean_output = batch_shard_leading(clean_output, mesh)
-    ci = cast_floating(ci_fn, COMPUTE_DT)(taps, remat=False).lower
+    capture_keys = ci_capture_keys | activation_capture_keys
+    clean_forward_result = model.clean_forward(tokens, capture_keys)
+    ci_input_activations = select_captures(clean_forward_result.captures, ci_capture_keys)
+    clean = reconstruction_observations(
+        clean_forward_result,
+        hidden_acts_capture_keys=activation_capture_keys,
+        mesh=mesh,
+    )
+    ci_lower = evaluate_ci(ci_fn, ci_input_activations, remat=False).lower
     if mesh is not None:
         sharding = NamedSharding(
             mesh, P(("replicate", "fsdp"), *((None,) * (tokens.ndim - 1)), None)
         )
-        ci = {site: jax.lax.with_sharding_constraint(value, sharding) for site, value in ci.items()}
-    row_mask = None
+        ci_lower = {
+            site: jax.lax.with_sharding_constraint(value, sharding)
+            for site, value in ci_lower.items()
+        }
+    valid_row_mask = None
     if n_valid_rows is not None:
         assert n_valid_rows <= tokens.shape[0], (n_valid_rows, tokens.shape)
-        row_mask = (jnp.arange(tokens.shape[0]) < n_valid_rows).astype(jnp.float32)
+        valid_row_mask = (jnp.arange(tokens.shape[0]) < n_valid_rows).astype(jnp.float32)
     return _PreparedLMBatch(
         tokens=tokens,
-        clean_output=clean_output,
-        prepared_weights=model.prepare_compute_weights(cast_floating(components, COMPUTE_DT)),
-        ci=ci,
-        row_mask=row_mask,
+        clean=clean,
+        prepared_weights=prepare_compute_weights(model, components),
+        ci_lower=ci_lower,
+        valid_row_mask=valid_row_mask,
     )
 
 
-def _masked_forward(
-    model: DecomposedModel,
-    batch: _PreparedLMBatch,
+def _compute_masked_output[PreparedT](
+    model: DecomposedModel[PreparedT],
+    batch: _PreparedLMBatch[PreparedT],
     masks: dict[str, Array],
     delta_masks: dict[str, Array],
     mesh: Mesh | None,
+    capture_keys: CaptureKeys,
 ) -> Array:
-    return batch_shard_leading(
-        model.masked_output(
-            batch.prepared_weights,
-            batch.tokens,
-            masks,
-            delta_masks,
-            None,
-            model.site_names,
-            True,
-            remat=False,
-        ),
-        mesh,
+    masked_forward_result = model.masked_forward(
+        batch.prepared_weights,
+        batch.tokens,
+        masking=MaterializedMasking(component_masks=masks, weight_delta_masks=delta_masks),
+        capture_keys=capture_keys,
+        remat=False,
     )
+    return batch_shard_leading(masked_forward_result.output, mesh)
 
 
-def _kl(batch: _PreparedLMBatch, logits: Array) -> Array:
-    if batch.row_mask is None:
-        return kl_per_position(logits, batch.clean_output)
-    return _row_masked_kl(logits, batch.clean_output, batch.row_mask)
+def _kl[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
+    if batch.valid_row_mask is None:
+        return kl_per_position(logits, batch.clean.output)
+    return _row_masked_kl(logits, batch.clean.output, batch.valid_row_mask)
 
 
-def _ce(batch: _PreparedLMBatch, logits: Array) -> Array:
-    if batch.row_mask is None:
+def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
+    if batch.valid_row_mask is None:
         return next_token_cross_entropy(logits, batch.tokens)
-    return _row_masked_cross_entropy(logits, batch.tokens, batch.row_mask)
+    return _row_masked_cross_entropy(logits, batch.tokens, batch.valid_row_mask)
 
 
-def make_ce_kl_step(
-    model_static: DecomposedModel,
+def make_ce_kl_step[PreparedT](
+    model_static: DecomposedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
     rounding_threshold: float,
-    mesh: Mesh | None,
-    compiler_options: dict[str, bool | int | str],
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
@@ -196,19 +217,21 @@ def make_ce_kl_step(
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
 
     def eval_step(
-        model: DecomposedModel,
+        model: DecomposedModel[PreparedT],
         components: ComponentStacks,
         ci_fn: CIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
-        batch = _prepare_lm_batch(model, components, ci_fn, token_ids, mesh, n_valid_rows)
+        batch = _prepare_lm_batch(
+            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+        )
         zeros_delta = {site: jnp.zeros(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
         stoch_key, random_key, _ = random.split(key, 3)
         stochastic_masks: dict[str, Array] = {}
         stochastic_deltas: dict[str, Array] = {}
         for site_idx, site in enumerate(model.site_names):
-            ci = batch.ci[site]
+            ci = batch.ci_lower[site]
             source = random.uniform(random.fold_in(stoch_key, site_idx), ci.shape, COMPUTE_DT)
             stochastic_masks[site] = ci + (1.0 - ci) * source
             stochastic_deltas[site] = random.uniform(
@@ -217,16 +240,16 @@ def make_ce_kl_step(
                 COMPUTE_DT,
             )
         variants = {
-            "ci_masked": (batch.ci, zeros_delta),
+            "ci_masked": (batch.ci_lower, zeros_delta),
             "unmasked": (
-                {site: jnp.ones_like(batch.ci[site]) for site in model.site_names},
+                {site: jnp.ones_like(batch.ci_lower[site]) for site in model.site_names},
                 zeros_delta,
             ),
             "stoch_masked": (stochastic_masks, stochastic_deltas),
             "random_masked": (
                 {
                     site: random.uniform(
-                        random.fold_in(random_key, site_idx), batch.ci[site].shape, COMPUTE_DT
+                        random.fold_in(random_key, site_idx), batch.ci_lower[site].shape, COMPUTE_DT
                     )
                     for site_idx, site in enumerate(model.site_names)
                 },
@@ -234,119 +257,183 @@ def make_ce_kl_step(
             ),
             "rounded_masked": (
                 {
-                    site: (batch.ci[site] > rounding_threshold).astype(COMPUTE_DT)
+                    site: (batch.ci_lower[site] > rounding_threshold).astype(COMPUTE_DT)
                     for site in model.site_names
                 },
                 zeros_delta,
             ),
             "zero_masked": (
-                {site: jnp.zeros_like(batch.ci[site]) for site in model.site_names},
+                {site: jnp.zeros_like(batch.ci_lower[site]) for site in model.site_names},
                 zeros_delta,
             ),
         }
         variant_logits = {
-            name: _masked_forward(model, batch, masks, deltas, mesh)
+            name: _compute_masked_output(model, batch, masks, deltas, mesh, frozenset())
             for name, (masks, deltas) in variants.items()
         }
-        target_ce = _ce(batch, batch.clean_output)
-        out = {f"ce_kl/kl_{name}": _kl(batch, logits) for name, logits in variant_logits.items()}
-        out.update(
+        target_ce = _ce(batch, batch.clean.output)
+        metrics = {
+            f"ce_kl/kl_{name}": _kl(batch, logits) for name, logits in variant_logits.items()
+        }
+        metrics.update(
             {
                 f"ce_kl/ce_difference_{name}": _ce(batch, variant_logits[name]) - target_ce
                 for name in variants
                 if name != "zero_masked"
             }
         )
-        return out
+        return metrics
 
     return filter_jit(eval_step, compiler_options=compiler_options)
 
 
-def make_ci_l0_step(
-    model_static: DecomposedModel,
+def make_ci_l0_step[PreparedT](
+    model_static: DecomposedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
     ci_alive_threshold: float,
     groups: dict[str, tuple[str, ...]] | None,
-    mesh: Mesh | None,
-    compiler_options: dict[str, bool | int | str],
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
     """Bind the generic `CI_L0` arithmetic (`core.ci_l0_eval`) to the LM batch: the shared
     `_prepare_lm_batch` CI and, for the padded arithmetic probes, the row-masked mean."""
     assert model_static.has_position_axis, "CI_L0 is LM-only and requires a position axis"
-    resolved_groups = resolve_l0_groups(model_static.site_names, groups)
+    resolved_groups = resolve_site_groups(model_static.site_names, groups)
 
     def eval_step(
-        model: DecomposedModel,
+        model: DecomposedModel[PreparedT],
         components: ComponentStacks,
         ci_fn: CIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         del key
-        batch = _prepare_lm_batch(model, components, ci_fn, token_ids, mesh, n_valid_rows)
+        batch = _prepare_lm_batch(
+            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+        )
 
         def mean(value: Array) -> Array:
-            if batch.row_mask is None:
+            if batch.valid_row_mask is None:
                 return value.mean()
-            return _row_masked_mean(value, batch.row_mask)
+            return _row_masked_mean(value, batch.valid_row_mask)
 
-        return ci_l0_scalars(batch.ci, model.site_names, ci_alive_threshold, resolved_groups, mean)
+        return ci_l0_scalars(
+            batch.ci_lower, model.site_names, ci_alive_threshold, resolved_groups, mean
+        )
 
     return filter_jit(eval_step, compiler_options=compiler_options)
 
 
-def make_fresh_pgd_step(
-    model_static: DecomposedModel,
+def make_fresh_pgd_step[PreparedT](
+    model_static: DecomposedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
     fresh_pgd: FreshPGDReconEval,
-    mesh: Mesh | None,
-    compiler_options: dict[str, bool | int | str],
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
-    """Build the single-purpose fresh-mask PGD reconstruction evaluator."""
+    """Build fresh-PGD evaluation for end-to-end reconstruction and optional hidden-activation reconstruction."""
     assert model_static.has_position_axis, "LM PGDReconLoss requires a position axis"
+    reconstruction_capture_keys = fresh_pgd.hidden_acts_capture_keys
+    model_static.assert_hidden_acts_reconstruction_points(
+        tuple(sorted(reconstruction_capture_keys))
+    )
 
     def eval_step(
-        model: DecomposedModel,
+        model: DecomposedModel[PreparedT],
         components: ComponentStacks,
         ci_fn: CIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
-        batch = _prepare_lm_batch(model, components, ci_fn, token_ids, mesh, n_valid_rows)
+        batch = _prepare_lm_batch(
+            model,
+            components,
+            ci_fn,
+            token_ids,
+            mesh,
+            n_valid_rows,
+            ci_capture_keys,
+            reconstruction_capture_keys,
+        )
         _, _, pgd_key = random.split(key, 3)
 
-        def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
-            return _kl(batch, _masked_forward(model, batch, masks, delta_masks, mesh))
+        def end_to_end_error(masked: Array, clean_value: Array) -> Array:
+            if batch.valid_row_mask is None:
+                return model.recon_loss_fn(masked, clean_value)
+            return _row_masked_kl(masked, clean_value, batch.valid_row_mask)
 
-        loss = fresh_pgd_recon_loss(
+        def objective_with_breakdown(
+            masks: dict[str, Array], delta_masks: dict[str, Array]
+        ) -> ReconstructionLoss:
+            masked_forward_result = model.masked_forward(
+                batch.prepared_weights,
+                batch.tokens,
+                masking=MaterializedMasking(
+                    component_masks=masks,
+                    weight_delta_masks=delta_masks,
+                ),
+                capture_keys=reconstruction_capture_keys,
+                remat=False,
+            )
+            masked = reconstruction_observations(
+                masked_forward_result,
+                hidden_acts_capture_keys=reconstruction_capture_keys,
+                mesh=mesh,
+            )
+            return reconstruction_loss(
+                end_to_end_error,
+                masked=masked,
+                clean=batch.clean,
+                reconstruction=fresh_pgd.reconstruction,
+                valid_row_mask=batch.valid_row_mask,
+            )
+
+        def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:
+            return objective_with_breakdown(masks, delta_masks).total
+
+        sources = fresh_pgd_recon_sources(
             model.sites,
-            batch.ci,
+            batch.ci_lower,
             batch.tokens.shape,
             pgd_key,
             fresh_pgd,
             loss_at_masks,
         )
-        return {f"loss/{fresh_pgd.name}": loss}
+        masks, delta_masks = masks_from_sources(
+            batch.ci_lower, sources, tuple(site.name for site in model.sites)
+        )
+        breakdown = objective_with_breakdown(masks, delta_masks)
+        prefix = f"loss/{fresh_pgd.name}"
+        metrics = {prefix: breakdown.total}
+        metrics |= {
+            f"{prefix}/{suffix}": value
+            for suffix, value in reconstruction_loss_metrics(breakdown).items()
+        }
+        return metrics
 
     return filter_jit(eval_step, compiler_options=compiler_options)
 
 
-def make_eval_step(
-    model_static: DecomposedModel,
+def make_eval_step[PreparedT](
+    model_static: DecomposedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
     rounding_threshold: float,
     ci_alive_threshold: float,
     l0_group_patterns: dict[str, tuple[str, ...]] | None,
     fresh_pgd: FreshPGDReconEval | None,
-    mesh: Mesh | None,
+    mesh: Mesh | None = None,
     *,
     n_valid_rows: int | None,
-    compiler_options: dict[str, bool | int | str],
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> ScalarStep:
     """Compose independent metric kernels for arithmetic probes and parity tests."""
     ce_kl = make_ce_kl_step(
         model_static,
+        ci_capture_keys,
         rounding_threshold,
         mesh,
         compiler_options,
@@ -354,6 +441,7 @@ def make_eval_step(
     )
     ci_l0 = make_ci_l0_step(
         model_static,
+        ci_capture_keys,
         ci_alive_threshold,
         l0_group_patterns,
         mesh,
@@ -363,6 +451,7 @@ def make_eval_step(
     pgd = (
         make_fresh_pgd_step(
             model_static,
+            ci_capture_keys,
             fresh_pgd,
             mesh,
             compiler_options,
@@ -373,7 +462,7 @@ def make_eval_step(
     )
 
     def evaluate(
-        model: DecomposedModel,
+        model: DecomposedModel[PreparedT],
         components: ComponentStacks,
         ci_fn: CIFn,
         token_ids: Array,

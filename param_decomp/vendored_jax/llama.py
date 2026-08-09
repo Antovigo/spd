@@ -112,10 +112,14 @@ def repeat_kv(x: Float[Array, "b kvh t hd"], n_rep: int) -> Float[Array, "b h t 
     return x.reshape(b, kvh * n_rep, t, hd)
 
 
-def attn_implementation(backend: str, dtype: jnp.dtype) -> Literal["cudnn", "xla"]:
+def attn_implementation(backend: str, dtype: jnp.dtype, seq_len: int) -> Literal["cudnn", "xla"]:
     """cuDNN flash attention on GPU for the half precisions it supports (its SDPA rejects
-    fp32, so fp32 parity harnesses take the XLA composite); XLA elsewhere (CPU tests)."""
-    return "cudnn" if backend == "gpu" and dtype in (jnp.float16, jnp.bfloat16) else "xla"
+    fp32, so fp32 parity harnesses take the XLA composite) and for the sequence-length
+    family we run through it — multiples of 64, the corpus shapes. Everything else takes
+    the XLA composite: cuDNN's flash kernel rejects small/odd lengths (`check_is_flash_
+    attention`), which the tPD target stream's natural prompt lengths hit (SPEC T8)."""
+    supported = backend == "gpu" and dtype in (jnp.float16, jnp.bfloat16)
+    return "cudnn" if supported and seq_len % 64 == 0 and seq_len > 0 else "xla"
 
 
 def causal_sdpa(q: Array, k: Array, v: Array) -> Array:
@@ -126,7 +130,7 @@ def causal_sdpa(q: Array, k: Array, v: Array) -> Array:
         kt,
         vt,
         is_causal=True,
-        implementation=attn_implementation(jax.default_backend(), q.dtype),
+        implementation=attn_implementation(jax.default_backend(), q.dtype, qt.shape[1]),
     )
     return out.transpose(0, 2, 1, 3)
 

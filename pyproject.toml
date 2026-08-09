@@ -53,13 +53,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# CUDA jaxlib wheels for GPU hosts; a GPU install takes one of these extras. The CPU
-# venv takes the base CPU jax above.
-cuda = ["jax[cuda12]==0.10.1"]
-# CUDA-13 wheel track: same jax, newer runtime libs. cuBLAS >= 13.2 fixes a Blackwell TMEM
-# double-free (silent-corruption hazard; cuBLAS 12.9 warns on B200). Needs driver >= r580,
-# so a host picks cuda13 vs cuda off its own driver (older drivers fall back to the cu12
-# extra).
+# Pre-r580 driver arm. Keep the exact NVIDIA pins on one coherent CUDA 12.8.1
+# release train: component versions do not encode the toolkit minor.
+cuda = [
+    "jax[cuda12]==0.10.1",
+    "nvidia-cublas-cu12==12.8.4.1",
+    "nvidia-cuda-cccl-cu12==12.8.90",
+    "nvidia-cuda-cupti-cu12==12.8.90",
+    "nvidia-cuda-nvcc-cu12==12.8.93",
+    "nvidia-cuda-nvrtc-cu12==12.8.93",
+    "nvidia-cuda-runtime-cu12==12.8.90",
+    "nvidia-cudnn-cu12==9.8.0.87",
+    "nvidia-cufft-cu12==11.3.3.83",
+    "nvidia-cusolver-cu12==11.7.3.90",
+    "nvidia-cusparse-cu12==12.5.8.93",
+    "nvidia-nccl-cu12==2.25.1",
+    "nvidia-nvjitlink-cu12==12.8.93",
+    "nvidia-nvshmem-cu12==3.2.5",
+]
+# r580+ driver arm. cuBLAS >= 13.2 avoids a Blackwell TMEM double-free.
 cuda13 = ["jax[cuda13]==0.10.1", "nvidia-cublas>=13.2.0.9"]
 
 # No [project.scripts]: this library ships no console commands. Every runnable surface is

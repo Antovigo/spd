@@ -26,12 +26,15 @@ the whole workspace into the one venv with `make install-dev`.
 | `model.py` | `DecomposedModel` — the interface a vendored LM target implements (ordered sites, flat site-keyed dicts, frozen pytree as runtime arg) + generic chunking |
 | `train.py` | the step factory: one fused jit step over faith + imp-min + the recon loss TERMS, per-persistent-term fused final ascents, fp32 masters + bf16 compute |
 | `losses.py` | the pure loss terms (KL/(B·T), faithfulness, imp-min lp+entropy split) + `scheduled_value_traced`, the jnp schedule evaluator every in-step scheduled quantity uses |
-| `adversary.py` | adversarial source machinery: persistent state + Adam ascents, fresh sign-PGD init, `source_masks` |
+| `adversary.py` | adversarial source machinery: persistent state + Adam ascents, fresh sign-PGD init |
+| `masking.py` | construction and materialization of explicit/stochastic component and weight-delta masks |
 | `recon.py` | the flat loss surface (LOSS_PARITY_DESIGN.md): the self-describing `LossTerm` union (`FaithfulnessTerm` / `ImportanceMinimalityTerm` / `ReconLossTerm`), mask-source strategies × plans × routing samplers, and `build_loss_terms` — the shared torch loss configs mapped onto a flat tuple of terms |
 | `ci_fn.py` | shared-transformer CI fn over ordered site specs; the two leaky-hard squashings (SPEC §4.6, S5/S6) |
 | `checkpoint.py` | orbax sharded save/resume of `TrainState` (adversary sources + moments included, no full-gather on the loop, SPEC S22) |
 | `recon_eval.py` | target-generic fresh-PGD reconstruction eval: opaque model inputs/outputs, model-owned `recon_loss_fn`, arbitrary leading axes |
 | `slow_eval.py` | LIBRARY for the in-loop slow (plot) tier (SPEC S28, in-loop only — no offline CLI): the `CIHistograms` / `ComponentActivationDensity` / `CIMeanPerComponent` reductions + renders, the config-gated `PermutedCIPlots` / `IdentityCIError` (off the `(T, C)` position CI), the `UVPlots` figure (`render_uv_figure` / `plot_uv_matrices`, shared by the LM in-loop naive-gather path and the toy `toy_uv_eval` cheap path), and the hidden-acts recon scalars. Torch-free numpy/matplotlib; logged under `slow_eval/figures/*` |
+| `well_temperedness.py` | whether higher causal importance preactivations mean larger reconstruction-loss changes when components are ablated one at a time, compared across all heads and layers |
+| `well_temperedness_eval.py` | target-generic eval operation and rendering for the well-temperedness measurement |
 | `components.py` | the decomposition representation: `ComponentStacks` — V/U masters persisted as same-shape STACKS (owner-partitioned, SPEC D4 amendment 2026-07-15), `site(name)` per-site views, `site_out` the decomposed-linear primitive |
 | `run_state.py` | optimizer + initial-`TrainState` construction (`init_train_state(pd, model, ci_fn_arch, positions, …)`; orbax restores onto this reference) |
 | `tools/` | debug tools (`liverange_peak.py`, `memreport.py`) |
@@ -62,11 +65,14 @@ XLA_FLAGS="--xla_force_host_platform_device_count=4" \
 ## Design
 
 - **Generic over vendored targets.** The trainer sees only the `DecomposedModel` fn-table
-  (`model.py`): ordered `sites`, `clean_output`, `read_activations`, `masked_output`,
-  `masked_site_outputs` (the hidden-acts eval seam, SPEC S31), `weight_deltas` — all
-  pure, all taking the frozen pytree as a *runtime arg* (a frozen
-  8B target closed over as a jit constant bakes multi-GB weights into the HLO). Adding
-  a target (e.g. GPT-2) = implementing that table; no TMS/ResidMLP-style generality.
+  (`model.py`): ordered `sites`, one `clean_forward`, one `masked_forward`, and
+  `weight_deltas`. Both forwards accept an immutable frozenset of canonical activation keys
+  and return `ForwardResult`; its `.captures` dictionary contains exactly one value per
+  requested physical activation. Each target validates and deterministically orders those
+  keys privately on first trace;
+  core owns no activation grammar or capture-plan type. Every method is pure and the frozen
+  pytree remains a *runtime arg* (a frozen 8B target closed over as a jit constant bakes
+  multi-GB weights into the HLO). An empty key set takes the untouched no-capture path.
 - **One jit'd step, functional minimax.** The persistent adversary (per-site sources +
   their Adam moments) lives in `TrainState` and is threaded through; `n_warmup`
   supplemental ascents + one final ascent whose gradient comes from the same backward

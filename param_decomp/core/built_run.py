@@ -19,7 +19,7 @@ from param_decomp.core.ci_fn import CIFnArch
 from param_decomp.core.components import SiteC
 from param_decomp.core.configs import (
     Cadence,
-    PDConfig,
+    PDConfigBase,
     ResumeProvenance,
     WandbConfig,
 )
@@ -59,7 +59,7 @@ class RunInstance:
 
 
 @dataclass(frozen=True)
-class BuiltRun[DataT, TargetT: TargetSites]:
+class BuiltRun[DataT, TargetT: TargetSites, PDT: PDConfigBase]:
     """Everything the generic engine needs for one decomposition run: the pydantic
     algorithm config (read DIRECTLY) plus the lab-built objects.
 
@@ -76,7 +76,7 @@ class BuiltRun[DataT, TargetT: TargetSites]:
     has none (the single-device toys) carries none, rather than carrying a field it must
     fill with lies."""
 
-    pd: PDConfig
+    pd: PDT
     cadence: Cadence
     run: RunInstance
     target: TargetT

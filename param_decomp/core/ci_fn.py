@@ -1,16 +1,16 @@
 """CI-fn interface + the chunkwise-transformer impl.
 
 A CI fn maps named INPUT taps to a `CI` bundle over OUTPUT sites:
-`dict[InputTap, Array] -> CI` (logits + the two squashings). The input keyspace (opaque
-tap keys — the lab authors them, the target's `read_activations` produces them) is
+`dict[InputTap, Array] -> CI` (preactivations + the two squashings). The input keyspace (opaque
+tap keys — the lab authors them, the target resolves and captures them) is
 independent of the output keyspace (the decomposition sites). The output sites MUST
 partition the model's sites — every site needs exactly one CI value — asserted at
 construction. Core treats both keyspaces as OPAQUE dict keys: look up inputs, scatter
 outputs, validate the partition. It never parses a key.
 
-The SAME logits are squashed two ways (SPEC S5/S6) in ONE place (`CI.from_logits`):
+The SAME preactivations are squashed two ways (SPEC S5/S6) in ONE place (`CI.from_preactivations`):
 `lower` (clip[0,1], leaky-below) feeds recon / PPGD / routing masks; `upper`
-(leaky-above-1) feeds importance-minimality. `logits` is kept too — the CI histograms /
+(leaky-above-1) feeds importance-minimality. `preactivations` is kept too — the CI histograms /
 heatmaps plot the pre-squash view. Params are fp32 masters (SPEC N1); the trainer casts
 for bf16 compute.
 
@@ -39,6 +39,8 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from param_decomp.core.components import SiteSpec
+from param_decomp.core.model import CaptureKeys
+from param_decomp.core.precision import COMPUTE_DT, cast_floating
 from param_decomp.vendored_jax.llama import (
     apply_rope,
     attn_implementation,
@@ -87,20 +89,20 @@ def upper_leaky_hard_sigmoid(x: Float[Array, "..."]) -> Float[Array, "..."]:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class CI:
-    """The CI fn output: raw logits + both squashings, all keyed by output site. `logits`
+    """The CI fn output: raw preactivations + both squashings, all keyed by output site. `preactivations`
     is kept (a consumed view — the histograms / heatmaps plot pre-squash). The squashing
-    lives only in `from_logits`, so no impl re-triplicates it."""
+    lives only in `from_preactivations`, so no impl re-triplicates it."""
 
-    logits: SiteDict
+    preactivations: SiteDict
     lower: SiteDict
     upper: SiteDict
 
     @staticmethod
-    def from_logits(logits: SiteDict) -> "CI":
+    def from_preactivations(preactivations: SiteDict) -> "CI":
         return CI(
-            logits=logits,
-            lower={k: lower_leaky_hard_sigmoid(v) for k, v in logits.items()},
-            upper={k: upper_leaky_hard_sigmoid(v) for k, v in logits.items()},
+            preactivations=preactivations,
+            lower={k: lower_leaky_hard_sigmoid(v) for k, v in preactivations.items()},
+            upper={k: upper_leaky_hard_sigmoid(v) for k, v in preactivations.items()},
         )
 
 
@@ -110,7 +112,9 @@ class CIFn(Protocol):
     construction); input taps are unconstrained. `has_position_axis` must equal the
     paired `DecomposedModel.has_position_axis` (asserted at trainer construction)."""
 
-    input_names: tuple[str, ...]
+    @property
+    def capture_keys(self) -> CaptureKeys: ...
+
     output_names: tuple[str, ...]
     has_position_axis: bool
 
@@ -121,6 +125,18 @@ class CIFn(Protocol):
         → a `NamedSharding`; `P()` to replicate). Asserts every declared shard axis tiles
         the mesh. Applied via `jax.jit(init, out_shardings=...)`."""
         ...
+
+
+def evaluate_ci(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool) -> CI:
+    """Run fp32-master CI parameters and their captured inputs in compute precision."""
+    compute_ci_fn = cast_floating(ci_fn, COMPUTE_DT)
+    compute_taps = cast_floating(taps, COMPUTE_DT)
+    return compute_ci_fn(compute_taps, remat=remat)
+
+
+def ci_preactivations(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool) -> SiteDict:
+    """Evaluate CI in compute precision and expose fp32 preactivations for metric reductions."""
+    return cast_floating(evaluate_ci(ci_fn, taps, remat=remat).preactivations, jnp.float32)
 
 
 # ----------------------------- transformer building blocks -----------------------------
@@ -284,7 +300,7 @@ class CIBlock(eqx.Module):
         # cuDNN flash on GPU (its partitioner requires device-local heads — true here, no
         # head-sharding); XLA elsewhere (CPU tests have no cuDNN). Bidirectional. Fewer K/V
         # heads than query heads is GQA, grouped natively by dot_product_attention.
-        impl = attn_implementation(jax.default_backend(), qt.dtype)
+        impl = attn_implementation(jax.default_backend(), qt.dtype, t)
         y = jax.nn.dot_product_attention(qt, kt, vt, is_causal=False, implementation=impl)
         x = x + einops.einsum(
             einops.rearrange(y, "b t nh hd -> b t (nh hd)"), self.wo, "b t i, o i -> b t o"
@@ -351,10 +367,15 @@ class ChunkwiseTransformerCIArch:
     ffn_kind: CIFfnKind
     learned_norm_scale: bool
 
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        """The activation taps consumed by any chunk."""
+        return frozenset(tap for chunk in self.chunks for tap in chunk.input_taps)
+
 
 class ChunkTransformer(eqx.Module):
     """ONE chunk: its (already RMS-normed, concatenated) input `[*leading, total_d_in]` →
-    a TUPLE of per-output-site logits (`out` of `[*leading, C_j]` per site-slot j), via
+    a TUPLE of per-output-site preactivations (`out` of `[*leading, C_j]` per site-slot j), via
     in_proj → RoPE blocks → one output head PER site-slot.
 
     One head per site-slot (`out_ws[j] [d_model, C_j]` / `out_bs[j] [C_j]`) instead of a
@@ -420,7 +441,9 @@ class ChunkTransformer(eqx.Module):
         )
 
     def __call__(
-        self, x: Float[Array, "*leading total_d_in"], inv_freq: Array
+        self,
+        x: Float[Array, "*leading total_d_in"],
+        inv_freq: Array,
     ) -> tuple[Float[Array, "*leading _C"], ...]:
         x = einops.einsum(x, self.in_proj_w, "... i, i o -> ... o") + self.in_proj_b
         for block in self.blocks:
@@ -506,7 +529,7 @@ class ChunkwiseTransformerCIFn(eqx.Module):
     chunks: ChunkTransformer  # arrays stacked along leading n_chunks
     inv_freq: Array  # shared across chunks (RoPE buffer); NOT mapped
 
-    input_names: tuple[str, ...] = eqx.field(static=True)  # dedup union (for read_activations)
+    capture_keys: CaptureKeys = eqx.field(static=True)
     output_names: tuple[str, ...] = eqx.field(static=True)  # all sites, flat
     chunk_meta: tuple[_ChunkMeta, ...] = eqx.field(static=True)  # per-chunk routing
     eps: float = eqx.field(static=True)
@@ -575,11 +598,11 @@ class ChunkwiseTransformerCIFn(eqx.Module):
 
         body = jax.checkpoint(run_chunk, policy=policy)
         _, stacked_per_slot = jax.lax.scan(body, None, (chunk_arrays, stacked_in))
-        logits: SiteDict = {}
+        preactivations: SiteDict = {}
         for chunk_idx, m in enumerate(self.chunk_meta):
             for slot, site in enumerate(m.output_sites):
-                logits[site] = stacked_per_slot[slot][chunk_idx]
-        return CI.from_logits(logits)
+                preactivations[site] = stacked_per_slot[slot][chunk_idx]
+        return CI.from_preactivations(preactivations)
 
 
 def _init_chunk_transformer(
@@ -696,7 +719,7 @@ def init_chunkwise_transformer_ci_fn(
     return ChunkwiseTransformerCIFn(
         chunks=stacked,
         inv_freq=inv_freq,
-        input_names=tuple(sorted({tap for ch in arch.chunks for tap in ch.input_taps})),
+        capture_keys=arch.capture_keys,
         output_names=tuple(name for ch in arch.chunks for name in ch.output_sites),
         chunk_meta=tuple(_ChunkMeta(ch.input_taps, ch.output_sites) for ch in arch.chunks),
         eps=CI_FN_RMS_EPS,
@@ -704,13 +727,13 @@ def init_chunkwise_transformer_ci_fn(
     )
 
 
-# ---------------- per-site / global MLPs (positionless, no position axis) ----------------
+# ------------- per-site / global MLPs (pointwise over every leading axis) -------------
 
 
-# The MLP arches below mirror their pydantic configs (`LayerwiseMlpCiConfig` /
-# `GlobalMlpCiConfig`) field-for-field by design: the lab's `ci_arch` converter is a trivial
-# `type`-strip + list→tuple. The duplication is deliberate — it keeps a uniform `CIFnArch`
-# union for `build_ci_fn` (vs the chunkwise arch, which genuinely resolves against a target).
+# The MLP arches bind their config to a target at the composition root. Their input taps
+# (`input_names` / `input_taps`) are therefore resolved exactly once, like the chunkwise
+# architecture's authored tap union, and every downstream consumer reads the same
+# authoritative field.
 @dataclass(frozen=True)
 class LayerwiseMLPCIArch:
     """Hidden widths shared by every per-site MLP.
@@ -722,6 +745,11 @@ class LayerwiseMLPCIArch:
 
     hidden_dims: tuple[int, ...]
     has_position_axis: bool
+    input_names: tuple[str, ...]
+
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        return frozenset(self.input_names)
 
 
 class SiteMLP(eqx.Module):
@@ -760,13 +788,16 @@ class SiteMLP(eqx.Module):
 
 
 class LayerwiseMLPCIFn(eqx.Module):
-    """One MLP per site behind the `CIFn` protocol. Each site reads its own tap, so
-    `input_names == output_names`."""
+    """One MLP per site, with input taps aligned to output sites by position."""
 
     site_mlps: dict[str, SiteMLP]
     input_names: tuple[str, ...] = eqx.field(static=True)
     output_names: tuple[str, ...] = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
+
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        return frozenset(self.input_names)
 
     def shardings(self, mesh: Mesh) -> "LayerwiseMLPCIFn":
         return eqx.tree_at(
@@ -775,15 +806,18 @@ class LayerwiseMLPCIFn(eqx.Module):
             {name: mlp.shardings(mesh) for name, mlp in self.site_mlps.items()},
         )
 
-    def site_logits(self, taps: dict[str, Array]) -> dict[str, Array]:
+    def site_preactivations(self, taps: dict[str, Array]) -> dict[str, Array]:
         assert set(taps) == set(self.input_names), (
             f"tap keys {sorted(taps)} != CI fn inputs {sorted(self.input_names)}"
         )
-        return {name: self.site_mlps[name](taps[name]) for name in self.output_names}
+        return {
+            output_name: self.site_mlps[output_name](taps[input_name])
+            for input_name, output_name in zip(self.input_names, self.output_names, strict=True)
+        }
 
     def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI:
         del remat  # single-shot (no scan to bound) -> remat is a no-op for the MLP CI fns
-        return CI.from_logits(self.site_logits(taps))
+        return CI.from_preactivations(self.site_preactivations(taps))
 
 
 def _init_mlp_stack(dims: tuple[int, ...], key: PRNGKeyArray) -> SiteMLP:
@@ -811,77 +845,100 @@ def init_layerwise_mlp_ci_fn(
         )
         for site_idx, spec in enumerate(sites)
     }
-    names = tuple(s.name for s in sites)
+    output_names = tuple(s.name for s in sites)
+    assert len(arch.input_names) == len(output_names), (arch.input_names, output_names)
+    assert len(set(arch.input_names)) == len(arch.input_names), arch.input_names
     return LayerwiseMLPCIFn(
         site_mlps=site_mlps,
-        input_names=names,
-        output_names=names,
+        input_names=arch.input_names,
+        output_names=output_names,
         has_position_axis=arch.has_position_axis,
     )
 
 
 @dataclass(frozen=True)
+class TapSpec:
+    """One input tap: its capture key and feature width. The key is opaque to core (the
+    lab authors it, the target resolves it); the width rides alongside so the consumer
+    can size and assert its input without deriving it from a site."""
+
+    key: str
+    width: int
+
+
+@dataclass(frozen=True)
 class GlobalMLPCIArch:
-    """Hidden widths of the single global MLP shared across ALL sites."""
+    """Hidden widths of the single global MLP shared across ALL sites, plus the input
+    taps it concatenates. The taps are DECOUPLED from the output sites: several sites may
+    read one physical tap (an LM block's q/k/v share its attention input), so the taps
+    are unique keys with explicit widths, never a per-site alignment
+    (`LayerwiseMLPCIArch` keeps that alignment — there it is real)."""
 
     hidden_dims: tuple[int, ...]
     has_position_axis: bool
+    input_taps: tuple[TapSpec, ...]
+
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        return frozenset(tap.key for tap in self.input_taps)
 
 
 class GlobalMLPCIFn(eqx.Module):
-    """ONE shared MLP over all sites behind the `CIFn` protocol. Per-site inputs are
-    concatenated in `input_names` order into `[*leading, Σ d_in]`, mapped to `[*leading,
-    Σ C]`, and split back per output site by `c_sizes` in `output_names` order — so a
-    site's logits depend on every site's input."""
+    """ONE shared MLP over all sites behind the `CIFn` protocol. The taps are
+    concatenated in `input_taps` order into `[*leading, Σ width]`, mapped to `[*leading,
+    Σ C]`, and split back per output site by `c_sizes` in `output_names` order — so every
+    site's preactivations depend on every tap."""
 
     mlp: SiteMLP
-    input_names: tuple[str, ...] = eqx.field(static=True)
+    input_taps: tuple[TapSpec, ...] = eqx.field(static=True)
     output_names: tuple[str, ...] = eqx.field(static=True)
-    in_sizes: tuple[int, ...] = eqx.field(static=True)
     c_sizes: tuple[int, ...] = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
+
+    @property
+    def capture_keys(self) -> CaptureKeys:
+        return frozenset(tap.key for tap in self.input_taps)
 
     def shardings(self, mesh: Mesh) -> "GlobalMLPCIFn":
         return eqx.tree_at(lambda f: f.mlp, self, self.mlp.shardings(mesh))
 
-    def site_logits(self, taps: dict[str, Array]) -> dict[str, Array]:
-        assert set(taps) == set(self.input_names), (
-            f"tap keys {sorted(taps)} != CI fn inputs {sorted(self.input_names)}"
+    def site_preactivations(self, taps: dict[str, Array]) -> dict[str, Array]:
+        assert set(taps) == {tap.key for tap in self.input_taps}, (
+            f"tap keys {sorted(taps)} != CI fn inputs {sorted(t.key for t in self.input_taps)}"
         )
-        for name, in_size in zip(self.input_names, self.in_sizes, strict=True):
-            assert taps[name].shape[-1] == in_size, (
-                f"tap {name} d_in {taps[name].shape[-1]} != expected {in_size}"
+        for tap in self.input_taps:
+            assert taps[tap.key].shape[-1] == tap.width, (
+                f"tap {tap.key} width {taps[tap.key].shape[-1]} != expected {tap.width}"
             )
-        concatenated = jnp.concatenate([taps[n] for n in self.input_names], axis=-1)
-        logits = self.mlp(concatenated)
+        concatenated = jnp.concatenate([taps[tap.key] for tap in self.input_taps], axis=-1)
+        preactivations = self.mlp(concatenated)
         offsets = [0]
         for c in self.c_sizes:
             offsets.append(offsets[-1] + c)
         return {
-            name: logits[..., offsets[i] : offsets[i + 1]]
+            name: preactivations[..., offsets[i] : offsets[i + 1]]
             for i, name in enumerate(self.output_names)
         }
 
     def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI:
         del remat  # single-shot (no scan to bound) -> remat is a no-op for the MLP CI fns
-        return CI.from_logits(self.site_logits(taps))
+        return CI.from_preactivations(self.site_preactivations(taps))
 
 
 def init_global_mlp_ci_fn(
     arch: GlobalMLPCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray
 ) -> GlobalMLPCIFn:
-    """Global MLP init: one stack `Σ d_in -> hidden_dims... -> Σ C`, same Kaiming scheme
-    as the per-site MLP."""
+    """Global MLP init: one stack `Σ tap width -> hidden_dims... -> Σ C`, same Kaiming
+    scheme as the per-site MLP."""
     assert arch.hidden_dims, "global MLP CI fn needs at least one hidden layer"
-    in_sizes = tuple(s.d_in for s in sites)
+    tap_keys = tuple(tap.key for tap in arch.input_taps)
+    assert tap_keys and len(set(tap_keys)) == len(tap_keys), tap_keys
     c_sizes = tuple(s.C for s in sites)
-    names = tuple(s.name for s in sites)
-    dims = (sum(in_sizes), *arch.hidden_dims, sum(c_sizes))
+    dims = (sum(tap.width for tap in arch.input_taps), *arch.hidden_dims, sum(c_sizes))
     return GlobalMLPCIFn(
         mlp=_init_mlp_stack(dims, key),
-        input_names=names,
-        output_names=names,
-        in_sizes=in_sizes,
+        input_taps=arch.input_taps,
+        output_names=tuple(s.name for s in sites),
         c_sizes=c_sizes,
         has_position_axis=arch.has_position_axis,
     )

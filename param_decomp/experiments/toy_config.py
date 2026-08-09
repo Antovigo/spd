@@ -5,7 +5,8 @@ from typing import Annotated, Literal
 from pydantic import Field, PositiveInt
 
 from param_decomp.core.base_config import BaseConfig
-from param_decomp.core.ci_fn import CIFnArch, GlobalMLPCIArch, LayerwiseMLPCIArch
+from param_decomp.core.ci_fn import CIFnArch, GlobalMLPCIArch, LayerwiseMLPCIArch, TapSpec
+from param_decomp.core.components import SiteSpec
 from param_decomp.core.configs import ExplicitCSpec
 from param_decomp.experiments.config import ExperimentConfig
 from param_decomp.experiments.eval_config import EvalConfig
@@ -45,13 +46,24 @@ class ToyExperimentConfig(ExperimentConfig):
 
 def build_toy_ci_arch(
     ci_config: LayerwiseMlpCiConfig | GlobalMlpCiConfig,
+    input_names: tuple[str, ...],
+    sites: tuple[SiteSpec, ...],
 ) -> CIFnArch:
+    """`input_names[i]` is the tap feeding `sites[i]` (the toy one-tap-per-site
+    alignment), so the global arm reads each tap's width off its site's `d_in`."""
     match ci_config:
         case LayerwiseMlpCiConfig():
             return LayerwiseMLPCIArch(
-                hidden_dims=tuple(ci_config.hidden_dims), has_position_axis=False
+                hidden_dims=tuple(ci_config.hidden_dims),
+                has_position_axis=False,
+                input_names=input_names,
             )
         case GlobalMlpCiConfig():
             return GlobalMLPCIArch(
-                hidden_dims=tuple(ci_config.hidden_dims), has_position_axis=False
+                hidden_dims=tuple(ci_config.hidden_dims),
+                has_position_axis=False,
+                input_taps=tuple(
+                    TapSpec(key=name, width=site.d_in)
+                    for name, site in zip(input_names, sites, strict=True)
+                ),
             )

@@ -5,6 +5,7 @@ from typing import ClassVar, Literal
 from pydantic import Field, NonNegativeInt, PositiveFloat, PositiveInt
 
 from param_decomp.core.base_config import BaseConfig
+from param_decomp.core.configs import HiddenActsReconstruction
 
 
 class CEandKLLossesConfig(BaseConfig):
@@ -39,6 +40,7 @@ class ArithmeticFreshPGDConfig(BaseConfig):
     name: str | None = None
     n_steps: NonNegativeInt
     step_size: PositiveFloat
+    hidden_acts_reconstruction: HiddenActsReconstruction | None = None
 
 
 class ArithmeticProbeMetrics(BaseConfig):

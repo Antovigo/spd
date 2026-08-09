@@ -25,6 +25,7 @@ from param_decomp.core.ci_fn import (
     CIFn,
     MHACIAttention,
     build_ci_fn,
+    ci_preactivations,
     lower_leaky_hard_sigmoid,
 )
 from param_decomp.core.components import SiteC
@@ -57,9 +58,9 @@ from param_decomp.core.slow_eval import (
     render_slow_eval_figures,
     resolve_permutation_metrics,
 )
-from param_decomp.core.train import COMPUTE_DT, cast_floating
 from param_decomp.targets.glu_transformer import glu_site_specs
 from param_decomp.targets.testing import (
+    capture_clean,
     tiny_glu_cfg,
     tiny_glu_decomposed_lm,
 )
@@ -119,7 +120,7 @@ def _tiny_setup(threshold: float, density_heatmap_n_bins: int | None = None):
     sites = glu_site_specs(cfg, _SITE_CS)
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
-    step = make_slow_eval_step(model, threshold, density_heatmap_n_bins, compiler_options={})
+    step = make_slow_eval_step(model, ci_fn.capture_keys, threshold, density_heatmap_n_bins)
     return cfg, model, ci_fn, step, _C
 
 
@@ -131,13 +132,10 @@ def test_reductions_match_hand_rolled_per_component():
     reductions = accumulate_site_reductions(step, model, ci_fn, [residual], n_batches_accum=None)
 
     # Mirror slow_eval_step's training-precision (bf16) readout.
-    ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-    taps = {
-        k: x.astype(COMPUTE_DT)
-        for k, x in model.read_activations(residual, ci_fn.input_names).items()
-    }
-    logits = {s: v.astype("float32") for s, v in ci_fn_bf16(taps, remat=False).logits.items()}
-    lower = {s: lower_leaky_hard_sigmoid(logits[s]) for s in model.site_names}
+    preactivations = ci_preactivations(
+        ci_fn, capture_clean(model, residual, ci_fn.capture_keys), remat=False
+    )
+    lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in model.site_names}
     for site in model.site_names:
         flat = np.asarray(lower[site]).reshape(-1, C).astype(np.float32)
         r = reductions[site]
@@ -189,9 +187,9 @@ def test_pre_sigmoid_differs_from_lower():
     residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
     reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
     for r in reductions.values():
-        # lower is clamped to [0, 1]; logits are unbounded — they cannot be identical
+        # lower is clamped to [0, 1]; preactivations are unbounded — they cannot be identical
         assert r.lower_sample.min() >= 0.0 and r.lower_sample.max() <= 1.0
-        assert not np.allclose(r.lower_sample, r.logits_sample)
+        assert not np.allclose(r.lower_sample, r.preactivations_sample)
 
 
 def test_render_emits_torch_keyed_pngs():
@@ -218,7 +216,7 @@ def test_finite_reductions():
         assert np.all(np.isfinite(r.density_counts))
         assert np.all(np.isfinite(r.ci_sums))
         assert np.all(np.isfinite(r.lower_sample))
-        assert np.all(np.isfinite(r.logits_sample))
+        assert np.all(np.isfinite(r.preactivations_sample))
 
 
 def test_density_hist_disabled_by_default():
@@ -349,7 +347,8 @@ def test_resolve_permutation_metrics_empty_when_unconfigured():
 @cache
 def _position_ci_step():
     """One trace for the file: `_SITE_CS` fixes the only model these tests use."""
-    return make_position_ci_step(_tiny_setup(threshold=0.0)[1], compiler_options={})
+    _, model, ci_fn, _, _ = _tiny_setup(threshold=0.0)
+    return make_position_ci_step(model, ci_fn.capture_keys)
 
 
 @cache
@@ -655,7 +654,10 @@ def test_figure_rendering_never_enters_the_pyplot_registry():
     residual = jax.random.randint(jax.random.PRNGKey(4), (2, 16), 0, cfg.vocab_size)
     reductions = accumulate_site_reductions(step, model, ci_fn, [residual], None)
     position_ci = accumulate_position_ci(
-        make_position_ci_step(model, compiler_options={}), model, ci_fn, [residual]
+        make_position_ci_step(model, ci_fn.capture_keys),
+        model,
+        ci_fn,
+        [residual],
     )
     spec = resolve_permutation_metrics(
         model.site_names,

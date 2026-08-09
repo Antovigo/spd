@@ -26,12 +26,14 @@ safetensors by `tools/convert_llama_simple_mlp_checkpoint.py` (torch venv).
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import yaml
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -40,12 +42,30 @@ from jaxtyping import Array, Float, Int
 from safetensors import safe_open
 
 from param_decomp.core import family
-from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, site_out
+from param_decomp.core.components import ComponentStacks, SiteC, SiteDims, SiteSpec, site_out
 from param_decomp.core.family import ArchFamily
-from param_decomp.core.model import run_stochastic_masked_output
+from param_decomp.core.masking import materialize_masking
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    ForwardResult,
+    Masking,
+)
 from param_decomp.targets.glu_transformer import FrozenAttn
 from param_decomp.targets.losses import kl_per_position
-from param_decomp.targets.transformer_taps import resid_tap_key
+from param_decomp.targets.transformer_taps import (
+    BlockTap,
+    PostAttentionResidual,
+    ResidualBoundary,
+    SiteOutput,
+    TransformerPoint,
+    TransformerTapGrammar,
+    attention_input_tap_key,
+    attention_output_tap_key,
+    mlp_hidden_tap_key,
+    mlp_input_tap_key,
+    site_output_tap_key,
+)
 from param_decomp.vendored_jax.llama import rms_norm
 
 # Plain-GELU MLP (LlamaSimpleMLP). The family's matrix vocabulary — the authored c-spec
@@ -58,6 +78,41 @@ vocabulary. The canonical site order (`site_specs`) is layer-ascending, then thi
 ATTN_KINDS = ("q_proj", "k_proj", "v_proj", "o_proj")
 MLP_KINDS = ("c_fc", "down_proj")
 assert KIND_ORDER == ATTN_KINDS + MLP_KINDS, KIND_ORDER
+
+
+def _hidden_acts_reconstruction_dependencies(point: TransformerPoint) -> frozenset[str]:
+    """Same-block decomposed kinds whose output can influence ``point``."""
+    match point:
+        case ResidualBoundary():
+            return frozenset()
+        case PostAttentionResidual():
+            return frozenset(ATTN_KINDS)
+        case BlockTap(name=name):
+            match name:
+                case "attn_in":
+                    return frozenset()
+                case "attn_out":
+                    return frozenset(("q_proj", "k_proj", "v_proj"))
+                case "mlp_in":
+                    return frozenset(ATTN_KINDS)
+                case "mlp_hidden":
+                    return frozenset((*ATTN_KINDS, "c_fc"))
+                case _:
+                    raise AssertionError(name)
+        case SiteOutput(name=name):
+            _block, kind = parse_site_name(name)
+            match kind:
+                case "q_proj" | "k_proj" | "v_proj":
+                    return frozenset((kind,))
+                case "o_proj":
+                    return frozenset(ATTN_KINDS)
+                case "c_fc":
+                    return frozenset((*ATTN_KINDS, "c_fc"))
+                case "down_proj":
+                    return frozenset(KIND_ORDER)
+                case _:
+                    raise AssertionError(kind)
+
 
 SITE_NAME_PATTERN = re.compile(
     r"^h\.(\d+)\.(?:attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(c_fc|down_proj))$"
@@ -143,22 +198,22 @@ FAMILY = ArchFamily("simple_mlp", KIND_ORDER, site_name, parse_site_name)
 `simple_mlp` c-specs resolve against."""
 
 
-def site_dims(cfg: LlamaSimpleMLPConfig, kind: str) -> tuple[int, int]:
-    """(d_in, d_out) of one per-layer matrix, right-mult orientation."""
+def site_dims(cfg: LlamaSimpleMLPConfig, kind: str) -> SiteDims:
+    """Dimensions of one per-layer matrix in right-mult orientation."""
     d, di = cfg.n_embd, cfg.n_intermediate
     qd = cfg.n_head * cfg.head_dim
     kvd = cfg.n_kv_head * cfg.head_dim
     match kind:
         case "q_proj":
-            return d, qd
+            return SiteDims(d_in=d, d_out=qd)
         case "k_proj" | "v_proj":
-            return d, kvd
+            return SiteDims(d_in=d, d_out=kvd)
         case "o_proj":
-            return qd, d
+            return SiteDims(d_in=qd, d_out=d)
         case "c_fc":
-            return d, di
+            return SiteDims(d_in=d, d_out=di)
         case "down_proj":
-            return di, d
+            return SiteDims(d_in=di, d_out=d)
         case _:
             raise AssertionError(f"unknown kind {kind!r}")
 
@@ -224,31 +279,149 @@ def _clean_block(layer: SimpleMLPLayer, x: Array, inv_freq: Array, eps: float) -
     return x + _clean_mlp_out(layer, rms_norm(x, layer.ln2, eps))
 
 
-def _masked_site_out(
+class _SimpleTap(Enum):
+    RESIDUAL_IN = "residual_in"
+    QKV_INPUT = "qkv_input"
+    Q_OUTPUT = "q_output"
+    K_OUTPUT = "k_output"
+    V_OUTPUT = "v_output"
+    ATTENTION_OUTPUT = "attention_output"
+    O_OUTPUT = "o_output"
+    POST_ATTENTION_RESIDUAL = "post_attention_residual"
+    MLP_INPUT = "mlp_input"
+    FC_OUTPUT = "fc_output"
+    DOWN_INPUT = "down_input"
+    DOWN_OUTPUT = "down_output"
+    RESIDUAL_OUT = "residual_out"
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SimpleCaptureSource:
+    block: int
+    tap: _SimpleTap
+
+
+SimpleCaptureSources = tuple[_SimpleCaptureSource, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SimpleMLPBlockActivations:
+    residual_in: Array
+    qkv_input: Array
+    q_output: Array
+    k_output: Array
+    v_output: Array
+    attention_output: Array
+    o_output: Array
+    post_attention_residual: Array
+    mlp_input: Array
+    fc_output: Array
+    down_input: Array
+    down_output: Array
+    residual_out: Array
+
+
+def _capture_source_for_point(point: TransformerPoint) -> _SimpleCaptureSource:
+    match point:
+        case ResidualBoundary(boundary=0):
+            return _SimpleCaptureSource(block=0, tap=_SimpleTap.RESIDUAL_IN)
+        case ResidualBoundary(boundary=boundary):
+            return _SimpleCaptureSource(block=boundary - 1, tap=_SimpleTap.RESIDUAL_OUT)
+        case PostAttentionResidual(block=block):
+            return _SimpleCaptureSource(block=block, tap=_SimpleTap.POST_ATTENTION_RESIDUAL)
+        case BlockTap(name=name, block=block):
+            value_by_name = {
+                "attn_in": _SimpleTap.QKV_INPUT,
+                "attn_out": _SimpleTap.ATTENTION_OUTPUT,
+                "mlp_in": _SimpleTap.MLP_INPUT,
+                "mlp_hidden": _SimpleTap.DOWN_INPUT,
+            }
+            return _SimpleCaptureSource(block=block, tap=value_by_name[name])
+        case SiteOutput(name=name, block=block):
+            _layer, kind = parse_site_name(name)
+            match kind:
+                case "q_proj":
+                    value = _SimpleTap.Q_OUTPUT
+                case "k_proj":
+                    value = _SimpleTap.K_OUTPUT
+                case "v_proj":
+                    value = _SimpleTap.V_OUTPUT
+                case "o_proj":
+                    value = _SimpleTap.O_OUTPUT
+                case "c_fc":
+                    value = _SimpleTap.FC_OUTPUT
+                case "down_proj":
+                    value = _SimpleTap.DOWN_OUTPUT
+                case _:
+                    raise AssertionError(f"unknown simple-MLP site kind {kind!r}")
+            return _SimpleCaptureSource(block=block, tap=value)
+
+
+def _captured_activation(block_activations: _SimpleMLPBlockActivations, tap: _SimpleTap) -> Array:
+    match tap:
+        case _SimpleTap.RESIDUAL_IN:
+            return block_activations.residual_in
+        case _SimpleTap.QKV_INPUT:
+            return block_activations.qkv_input
+        case _SimpleTap.Q_OUTPUT:
+            return block_activations.q_output
+        case _SimpleTap.K_OUTPUT:
+            return block_activations.k_output
+        case _SimpleTap.V_OUTPUT:
+            return block_activations.v_output
+        case _SimpleTap.ATTENTION_OUTPUT:
+            return block_activations.attention_output
+        case _SimpleTap.O_OUTPUT:
+            return block_activations.o_output
+        case _SimpleTap.POST_ATTENTION_RESIDUAL:
+            return block_activations.post_attention_residual
+        case _SimpleTap.MLP_INPUT:
+            return block_activations.mlp_input
+        case _SimpleTap.FC_OUTPUT:
+            return block_activations.fc_output
+        case _SimpleTap.DOWN_INPUT:
+            return block_activations.down_input
+        case _SimpleTap.DOWN_OUTPUT:
+            return block_activations.down_output
+        case _SimpleTap.RESIDUAL_OUT:
+            return block_activations.residual_out
+
+
+def _record_block_captures(
+    block: int,
+    block_activations: _SimpleMLPBlockActivations,
+    sources: tuple[_SimpleCaptureSource, ...],
+    captured: dict[_SimpleCaptureSource, Array],
+) -> None:
+    for source in sources:
+        if source.block == block:
+            captured[source] = _captured_activation(block_activations, source.tap)
+
+
+def _decomposed_or_frozen_site_output(
     components: ComponentStacks,
     site: str,
-    W: Array,
-    x_in: Array,
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
+    frozen_weight: Array,
+    site_input: Array,
+    component_masks: dict[str, Array],
+    weight_delta_masks: dict[str, Array] | None,
     routes: dict[str, Array] | None,
-    live_set: frozenset[str],
-    has_delta: bool,
-    collect: dict[str, Array] | None,
+    live_sites: frozenset[str],
 ) -> Array:
-    """One site's output in the masked forward; if `collect` is given, the per-`live`-site
-    decomposed output is recorded there (the hidden-acts recon material, SPEC S31).
-    Non-live sites take the frozen `x @ W` path and are NOT collected."""
-    if site not in live_set:
-        return x_in @ W.T
-    V, U = components.site(site)
-    out = site_out(
-        x_in, V, U, W, masks[site], delta_masks[site] if has_delta else None,
+    """One site's masked output; non-live sites take the frozen `x @ W` path."""
+    if site not in live_sites:
+        return site_input @ frozen_weight.T
+    site_components = components.site(site)
+    site_output = site_out(
+        site_input,
+        site_components.V,
+        site_components.U,
+        frozen_weight,
+        component_masks[site],
+        None if weight_delta_masks is None else weight_delta_masks[site],
         None if routes is None else routes[site],
     )  # fmt: skip
-    if collect is not None:
-        collect[site] = out
-    return out
+    return site_output
 
 
 class SimpleMLPDecomposedModel(eqx.Module):
@@ -279,7 +452,7 @@ class SimpleMLPDecomposedModel(eqx.Module):
         repl = NamedSharding(mesh, P())
         return jax.tree.map(lambda _a: repl, self)
 
-    def attn_pattern(
+    def attention_pattern_from_qk(
         self,
         q_site: str,
         q_flat: Float[Array, "b t qd"],
@@ -297,8 +470,31 @@ class SimpleMLPDecomposedModel(eqx.Module):
     def embed_tokens(self, tokens: Int[Array, "b t"]) -> Float[Array, "b t d"]:
         return self.embed[tokens]
 
-    def clean_output(self, inputs: Int[Array, "b t"]) -> Array:
-        """The all-frozen forward — the recon target (SPEC S3)."""
+    def _capture_grammar(self) -> TransformerTapGrammar:
+        def site_dimensions(name: str) -> tuple[int, int]:
+            layer, kind = parse_site_name(name)
+            W = _frozen_site_weight(self.layers[layer], kind)
+            return W.shape[1], W.shape[0]
+
+        return TransformerTapGrammar(
+            family=FAMILY,
+            n_layer=len(self.layers),
+            d_resid=self.embed.shape[1],
+            d_attention_output=site_dimensions(FAMILY.name_of(0, "o_proj"))[0],
+            d_mlp_hidden=site_dimensions(FAMILY.name_of(0, "down_proj"))[0],
+            d_out_of=lambda name: site_dimensions(name)[1],
+        )
+
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(site_output_tap_key(site) for site in sites)
+
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        self._capture_grammar().assert_hidden_acts_reconstruction_points(
+            keys, self.site_names, _hidden_acts_reconstruction_dependencies
+        )
+
+    def _clean_output(self, inputs: Int[Array, "b t"]) -> Array:
+        """The untouched all-frozen forward used when no captures are requested."""
         assert inputs.shape[1] <= self.n_ctx, (inputs.shape, self.n_ctx)
         x = self.embed_tokens(inputs)
         for layer in self.layers:
@@ -306,199 +502,279 @@ class SimpleMLPDecomposedModel(eqx.Module):
         x = rms_norm(x, self.norm, self.eps)
         return x @ self.lm_head.T
 
-    def read_activations(
-        self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
-    ) -> dict[str, Array]:
-        """Frozen-path activation accessor (CI input side, SPEC S4; harvest's per-site
-        matrix inputs).
-
-        `wanted` keys are either `resid.{global_layer}` (residual stream ENTERING that block
-        — the chunkwise CI fn's `input_names`) or a decomposed SITE NAME (the activation
-        entering that site's weight on the frozen path: `q/k/v_proj` ← post-LN1 residual,
-        `o_proj` ← the attention output, `c_fc` ← post-LN2 residual, `down_proj` ←
-        `gelu_tanh(mlp_in @ Wfc)`). The residual is threaded identically to `clean_output`;
-        the per-site intermediates come from the same RMSNorm/attn/MLP math."""
-        assert inputs.shape[1] <= self.n_ctx, (inputs.shape, self.n_ctx)
-        wanted_set = frozenset(wanted)
-        n_layer = len(self.layers)
-        block_of = {resid_tap_key(block): block for block in range(n_layer)} | {
-            site_name(block, kind): block for block in range(n_layer) for kind in KIND_ORDER
-        }
-        unknown = tuple(key for key in wanted if key not in block_of)
-        assert not unknown, (
-            f"unknown taps {unknown}: this target serves resid.{{block}} and family site "
-            f"names for blocks 0..{n_layer - 1}"
+    def clean_forward(
+        self, inputs: Int[Array, "b t"], capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        if not capture_keys:
+            return ForwardResult.from_producer(
+                output=self._clean_output(inputs), capture_keys=(), capture_values=()
+            )
+        ordered_capture_keys = tuple(sorted(capture_keys))
+        capture_sources = self._capture_grammar().resolve(
+            ordered_capture_keys, _capture_source_for_point
         )
-        last = max(block_of[key] for key in wanted)
-        out: dict[str, Array] = {}
+        assert inputs.shape[1] <= self.n_ctx, (inputs.shape, self.n_ctx)
+        captured_by_source: dict[_SimpleCaptureSource, Array] = {}
         x = self.embed_tokens(inputs)
-        for layer_idx, layer in enumerate(self.layers):
-            resid_key = resid_tap_key(layer_idx)
-            if resid_key in wanted_set:
-                out[resid_key] = x
+        for block, layer in enumerate(self.layers):
+            residual_in = x
             attn = layer.attn
-            h1 = rms_norm(x, layer.ln1, self.eps)
-            attn_y = attn.core(h1 @ attn.wq.T, h1 @ attn.wk.T, h1 @ attn.wv.T, self.inv_freq)
-            post_attn = x + attn_y @ attn.wo.T
+            h1 = rms_norm(residual_in, layer.ln1, self.eps)
+            q = h1 @ attn.wq.T
+            k = h1 @ attn.wk.T
+            v = h1 @ attn.wv.T
+            attn_y = attn.core(q, k, v, self.inv_freq)
+            o = attn_y @ attn.wo.T
+            post_attn = residual_in + o
             mlp_in = rms_norm(post_attn, layer.ln2, self.eps)
-            down_in = _gelu_tanh(mlp_in @ layer.Wfc.T)
-            for kind, site_input in (
-                ("q_proj", h1), ("k_proj", h1), ("v_proj", h1), ("o_proj", attn_y),
-                ("c_fc", mlp_in), ("down_proj", down_in),
-            ):  # fmt: skip
-                name = site_name(layer_idx, kind)
-                if name in wanted_set:
-                    out[name] = site_input
-            x = post_attn + down_in @ layer.Wdown.T
-            if layer_idx == last:
-                break
-        assert set(out) == wanted_set, (sorted(out), sorted(wanted))
-        return out
-
-    def clean_output_and_activations(
-        self, inputs: Int[Array, "b t"], wanted: tuple[str, ...]
-    ) -> tuple[Array, dict[str, Array]]:
-        # Two frozen passes: the blocks are an unstacked Python loop over few layers, so
-        # there is no scan to emit the taps from and no compile pressure to fuse.
-        return self.clean_output(inputs), self.read_activations(inputs, wanted)
+            fc = mlp_in @ layer.Wfc.T
+            down_in = _gelu_tanh(fc)
+            down = down_in @ layer.Wdown.T
+            x = post_attn + down
+            _record_block_captures(
+                block,
+                _SimpleMLPBlockActivations(
+                    residual_in=residual_in,
+                    qkv_input=h1,
+                    q_output=q,
+                    k_output=k,
+                    v_output=v,
+                    attention_output=attn_y,
+                    o_output=o,
+                    post_attention_residual=post_attn,
+                    mlp_input=mlp_in,
+                    fc_output=fc,
+                    down_input=down_in,
+                    down_output=down,
+                    residual_out=x,
+                ),
+                capture_sources,
+                captured_by_source,
+            )
+        assert set(captured_by_source) == set(capture_sources), (
+            captured_by_source.keys(),
+            capture_sources,
+        )
+        x = rms_norm(x, self.norm, self.eps)
+        return ForwardResult.from_producer(
+            output=x @ self.lm_head.T,
+            capture_keys=ordered_capture_keys,
+            capture_values=tuple(captured_by_source[source] for source in capture_sources),
+        )
 
     def _run_masked_forward(
         self,
         vu: ComponentStacks,
         inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
+        component_masks: dict[str, Array],
+        weight_delta_masks: dict[str, Array] | None,
         routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-        collect: dict[str, Array] | None,
-    ) -> Array:
-        """The masked decomposed forward shared by `masked_output` and
-        `masked_site_outputs` (SPEC §4.1, S2): sites in `live` run their decomposed forward
-        with `masks[s]` / `delta_masks[s]` / `routes[s]`; every other site — and every site
-        absent from the decomposition entirely — runs the frozen `x @ W` path. `live` and
-        `has_delta` are static under jit; `has_delta` False skips the `x @ Δ` matmul
-        (LOSS_PARITY_DESIGN §4b). A non-None `collect` gathers per-site decomposed
-        outputs."""
+        capture_keys: tuple[str, ...],
+    ) -> ForwardResult:
+        """Masked forward plus exactly the requested captures.
+
+        Empty keys retain the compact frozen attention/MLP calls; non-empty keys expand
+        only the operations whose semantic values must be bound.
+        """
         assert inputs.shape[1] <= self.n_ctx, (inputs.shape, self.n_ctx)
-        live_set = frozenset(live)
+        capture_sources = (
+            self._capture_grammar().resolve(capture_keys, _capture_source_for_point)
+            if capture_keys
+            else ()
+        )
+        live_sites = frozenset(component_masks)
+        captured_by_source: dict[_SimpleCaptureSource, Array] = {}
         x = self.embed_tokens(inputs)
         for layer_idx, layer in enumerate(self.layers):
-            live_kinds = {kind for kind in KIND_ORDER if site_name(layer_idx, kind) in live_set}
+            live_kinds = {kind for kind in KIND_ORDER if site_name(layer_idx, kind) in live_sites}
+            residual_in = x
             attn = layer.attn
-            site_args = (masks, delta_masks, routes, live_set, has_delta, collect)
-            h1 = rms_norm(x, layer.ln1, self.eps)
-            if not live_kinds & set(ATTN_KINDS):
-                attn_out = attn(h1, self.inv_freq)
-            else:
-                q = _masked_site_out(vu, site_name(layer_idx, "q_proj"), attn.wq, h1, *site_args)
-                k = _masked_site_out(vu, site_name(layer_idx, "k_proj"), attn.wk, h1, *site_args)
-                v = _masked_site_out(vu, site_name(layer_idx, "v_proj"), attn.wv, h1, *site_args)
-                attn_y = attn.core(q, k, v, self.inv_freq)
-                attn_out = _masked_site_out(
-                    vu, site_name(layer_idx, "o_proj"), attn.wo, attn_y, *site_args
-                )
-            post_attn = x + attn_out
+            h1 = rms_norm(residual_in, layer.ln1, self.eps)
+            site_args = (component_masks, weight_delta_masks, routes, live_sites)
+            if not capture_keys:
+                if not live_kinds & set(ATTN_KINDS):
+                    attn_out = attn(h1, self.inv_freq)
+                else:
+                    q = _decomposed_or_frozen_site_output(
+                        vu, site_name(layer_idx, "q_proj"), attn.wq, h1, *site_args
+                    )
+                    k = _decomposed_or_frozen_site_output(
+                        vu, site_name(layer_idx, "k_proj"), attn.wk, h1, *site_args
+                    )
+                    v = _decomposed_or_frozen_site_output(
+                        vu, site_name(layer_idx, "v_proj"), attn.wv, h1, *site_args
+                    )
+                    attn_y = attn.core(q, k, v, self.inv_freq)
+                    attn_out = _decomposed_or_frozen_site_output(
+                        vu, site_name(layer_idx, "o_proj"), attn.wo, attn_y, *site_args
+                    )
+                post_attn = residual_in + attn_out
+                mlp_in = rms_norm(post_attn, layer.ln2, self.eps)
+                if not live_kinds & set(MLP_KINDS):
+                    mlp_out = _clean_mlp_out(layer, mlp_in)
+                else:
+                    fc = _decomposed_or_frozen_site_output(
+                        vu, site_name(layer_idx, "c_fc"), layer.Wfc, mlp_in, *site_args
+                    )
+                    mlp_out = _decomposed_or_frozen_site_output(
+                        vu,
+                        site_name(layer_idx, "down_proj"),
+                        layer.Wdown,
+                        _gelu_tanh(fc),
+                        *site_args,
+                    )
+                x = post_attn + mlp_out
+                continue
+
+            q = _decomposed_or_frozen_site_output(
+                vu, site_name(layer_idx, "q_proj"), attn.wq, h1, *site_args
+            )
+            k = _decomposed_or_frozen_site_output(
+                vu, site_name(layer_idx, "k_proj"), attn.wk, h1, *site_args
+            )
+            v = _decomposed_or_frozen_site_output(
+                vu, site_name(layer_idx, "v_proj"), attn.wv, h1, *site_args
+            )
+            attn_y = attn.core(q, k, v, self.inv_freq)
+            o = _decomposed_or_frozen_site_output(
+                vu, site_name(layer_idx, "o_proj"), attn.wo, attn_y, *site_args
+            )
+            post_attn = residual_in + o
             mlp_in = rms_norm(post_attn, layer.ln2, self.eps)
-            if not live_kinds & set(MLP_KINDS):
-                mlp_out = _clean_mlp_out(layer, mlp_in)
-            else:
-                fc = _masked_site_out(
-                    vu, site_name(layer_idx, "c_fc"), layer.Wfc, mlp_in, *site_args
-                )
-                mlp_out = _masked_site_out(
-                    vu, site_name(layer_idx, "down_proj"), layer.Wdown, _gelu_tanh(fc),
-                    *site_args,
-                )  # fmt: skip
-            x = post_attn + mlp_out
+            fc = _decomposed_or_frozen_site_output(
+                vu, site_name(layer_idx, "c_fc"), layer.Wfc, mlp_in, *site_args
+            )
+            down_in = _gelu_tanh(fc)
+            down = _decomposed_or_frozen_site_output(
+                vu, site_name(layer_idx, "down_proj"), layer.Wdown, down_in, *site_args
+            )
+            x = post_attn + down
+            _record_block_captures(
+                layer_idx,
+                _SimpleMLPBlockActivations(
+                    residual_in=residual_in,
+                    qkv_input=h1,
+                    q_output=q,
+                    k_output=k,
+                    v_output=v,
+                    attention_output=attn_y,
+                    o_output=o,
+                    post_attention_residual=post_attn,
+                    mlp_input=mlp_in,
+                    fc_output=fc,
+                    down_input=down_in,
+                    down_output=down,
+                    residual_out=x,
+                ),
+                capture_sources,
+                captured_by_source,
+            )
         x = rms_norm(x, self.norm, self.eps)
-        return x @ self.lm_head.T
+        if not capture_keys:
+            return ForwardResult.from_producer(
+                output=x @ self.lm_head.T,
+                capture_keys=capture_keys,
+                capture_values=(),
+            )
+        assert set(captured_by_source) == set(capture_sources), (
+            captured_by_source.keys(),
+            capture_sources,
+        )
+        return ForwardResult.from_producer(
+            output=x @ self.lm_head.T,
+            capture_keys=capture_keys,
+            capture_values=tuple(captured_by_source[source] for source in capture_sources),
+        )
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> ComponentStacks:
-        """Identity: this arch reads `vu` per-site in its unrolled forward (no layer-stacked
-        ÷N→÷fsdp reconstruction to share), so there is nothing to hoist — the per-step
-        compute weights ARE the (already bf16) `vu`."""
         return vu
 
-    def masked_output(
+    def component_activation_forward(
         self,
-        prepared: ComponentStacks,
+        prepared_weights: ComponentStacks,
         inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        """Run one frozen forward for requested captures and every decomposed site's ``x @ V``."""
+        component_input_keys: list[str] = []
+        for site in self.site_names:
+            layer, kind = parse_site_name(site)
+            match kind:
+                case "q_proj" | "k_proj" | "v_proj":
+                    component_input_keys.append(attention_input_tap_key(layer))
+                case "o_proj":
+                    component_input_keys.append(attention_output_tap_key(layer))
+                case "c_fc":
+                    component_input_keys.append(mlp_input_tap_key(layer))
+                case "down_proj":
+                    component_input_keys.append(mlp_hidden_tap_key(layer))
+                case _:
+                    raise AssertionError(kind)
+
+        full_forward_result = self.clean_forward(
+            inputs,
+            capture_keys | frozenset(component_input_keys),
+        )
+        component_activations: dict[str, Array] = {}
+        for site, key in zip(self.site_names, component_input_keys, strict=True):
+            V = prepared_weights.site(site).V
+            component_activations[site] = full_forward_result.captures[key].astype(V.dtype) @ V
+        requested_forward_result = ForwardResult(
+            output=full_forward_result.output,
+            captures={key: full_forward_result.captures[key] for key in sorted(capture_keys)},
+        )
+        return requested_forward_result, component_activations
+
+    def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
+        return ci_lower
+
+    def masked_forward(
+        self,
+        prepared_weights: ComponentStacks,
+        inputs: Int[Array, "b t"],
+        /,
+        *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> Array:
-        # This arch's forward is an unrolled Python loop (heterogeneous per-layer live sites),
-        # not a scan, so its natural remat granularity is the whole forward: recompute it in
-        # the backward rather than store its activations. `live`/`has_delta` are closed over
-        # (static); the checkpoint sees only array/pytree leaves.
+    ) -> ForwardResult:
+        explicit_masking = materialize_masking(masking)
+        ordered_capture_keys = tuple(sorted(capture_keys))
+
         def forward(
             vu: ComponentStacks,
             inputs: Array,
-            masks: dict[str, Array],
-            delta_masks: dict[str, Array],
+            component_masks: dict[str, Array],
+            weight_delta_masks: dict[str, Array] | None,
             routes: dict[str, Array] | None,
-        ) -> Array:
+        ) -> ForwardResult:
             return self._run_masked_forward(
-                vu, inputs, masks, delta_masks, routes, live, has_delta, None
+                vu, inputs, component_masks, weight_delta_masks, routes, ordered_capture_keys
             )
 
         forward = jax.checkpoint(forward) if remat else forward
-        return forward(prepared, inputs, masks, delta_masks, routes)
-
-    def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
-        return ci_lower  # unrolled-loop target: no scan to share a stack across; identity
-
-    def masked_output_stochastic(
-        self,
-        prepared: ComponentStacks,
-        inputs: Int[Array, "b t"],
-        ci_stacked: dict[str, Array],
-        draw_key: Array,
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-        *,
-        remat: bool,
-    ) -> Array:
-        return run_stochastic_masked_output(
-            self, prepared, inputs, ci_stacked, draw_key, routes, live, has_delta, remat=remat
+        return forward(
+            prepared_weights,
+            inputs,
+            explicit_masking.component_masks,
+            explicit_masking.weight_delta_masks,
+            explicit_masking.routes,
         )
-
-    def masked_site_outputs(
-        self,
-        prepared: ComponentStacks,
-        inputs: Int[Array, "b t"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, Array]:
-        """Per-`live`-site decomposed output of the masked forward (SPEC S31). Runs the
-        exact `masked_output` forward, discards the logits, returns the collected outputs."""
-        collect: dict[str, Array] = {}
-        self._run_masked_forward(
-            prepared, inputs, masks, delta_masks, routes, live, has_delta, collect
-        )
-        assert set(collect) == set(live), (sorted(collect), sorted(live))
-        return collect
 
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Array]:
         """fp32 `W − V@U` per site from fp32 masters (SPEC N2; faithfulness input)."""
-        out: dict[str, Array] = {}
+        weight_deltas: dict[str, Array] = {}
         for spec in self.sites:
             layer_idx, kind = parse_site_name(spec.name)
             W = _frozen_site_weight(self.layers[layer_idx], kind)
-            V, U = vu.site(spec.name)
-            out[spec.name] = (
-                W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
+            site_components = vu.site(spec.name)
+            weight_deltas[spec.name] = (
+                W.astype(jnp.float32)
+                - (site_components.V.astype(jnp.float32) @ site_components.U.astype(jnp.float32)).T
             )
-        return out
+        return weight_deltas
 
 
 # ----------------------------- weight loading -----------------------------
@@ -526,12 +802,11 @@ key — the head is tied to `wte.weight`."""
 
 
 def _checkpoint_weight_getter(cache_dir: Path, dtype: DTypeLike) -> WeightGetter:
-    # framework="flax" + host staging: see `glu_transformer.HFWeights.get`.
-    handle = safe_open(str(checkpoint_safetensors_path(cache_dir)), framework="flax")
+    handle = safe_open(str(checkpoint_safetensors_path(cache_dir)), framework="numpy")
 
     def get(key: str) -> Array:
-        with jax.default_device(jax.devices("cpu")[0]):
-            return jnp.asarray(handle.get_tensor(key), dtype=dtype)
+        host_array = np.asarray(handle.get_tensor(key), dtype=dtype)
+        return cast(Array, cast(object, host_array))
 
     return get
 
@@ -595,8 +870,8 @@ def all_site_specs(cfg: LlamaSimpleMLPConfig) -> tuple[SiteSpec, ...]:
 
 def target_from_weights(get: WeightGetter, cfg: LlamaSimpleMLPConfig) -> SimpleMLPDecomposedModel:
     """Build a forward-only decomposed model from checkpoint-keyed weights, with the full
-    decomposable site set. Used by the torch-parity equivalence test (it only calls
-    `clean_output`, which is independent of the site config)."""
+    decomposable site set. Used by the torch-parity equivalence test (it calls the no-capture
+    clean forward, which is independent of the site config)."""
     return build_decomposed_simple_mlp(
         embed=get("wte.weight"),
         layers=[_layer_from_weights(get, i, cfg) for i in range(cfg.n_layer)],

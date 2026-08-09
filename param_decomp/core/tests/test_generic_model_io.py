@@ -1,8 +1,8 @@
 """Forcing function for the generic model-I/O seam (issue #828).
 
 The trainer's `[B,T,d]` residual is the fixed waist; only three EDGES are generic — the
-model INPUT (the opaque batch `clean_output` / `read_activations` / `masked_output`
-consume), the model OUTPUT (`clean_output` / `masked_output` return `Any`), and the recon
+model INPUT (the opaque batch `clean_forward` / `masked_forward`
+consume), the model OUTPUT (`ForwardResult.output` is `Any`), and the recon
 comparison (`DecomposedModel.recon_loss_fn`).
 The trainable components are NOT a generic edge: every target carries the universal
 `ComponentStacks` V/U pytree, so this synthetic target uses it too. This builds a tiny non-LM
@@ -46,8 +46,18 @@ from param_decomp.core.configs import (
     ImportanceMinimalityLossConfig,
     StochasticReconLossConfig,
 )
-from param_decomp.core.model import DecomposedModel, run_stochastic_masked_output
+from param_decomp.core.masking import all_live_masking_no_delta, materialize_masking
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    DecomposedModel,
+    ForwardResult,
+    Masking,
+    MaterializedMasking,
+    prepare_compute_weights,
+)
 from param_decomp.core.objective import build_objective
+from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.core.recon_eval import FreshPGDReconEval, make_fresh_pgd_eval_step
 from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import Decomposition, TrainingItem, TrainState, make_train_step
@@ -95,90 +105,109 @@ class SyntheticDecomposedModel(eqx.Module):
         """Input edge: the loader's native DICT batch -> the `[B,T,D]` residual (not token ids)."""
         return (inputs["feat"] @ self.feat_proj.T) * inputs["gain"][..., None]
 
-    def clean_output(self, inputs: dict[str, Array]) -> tuple[Array, Array]:
-        return self._heads(self._residual(inputs) @ self.W.T)
+    def _ordered_capture_keys(self, keys: CaptureKeys) -> tuple[str, ...]:
+        allowed = {SITE, f"{SITE}.out"}
+        assert keys <= allowed, (keys, allowed)
+        return tuple(sorted(keys))
 
-    def read_activations(
-        self, inputs: dict[str, Array], wanted: tuple[str, ...]
-    ) -> dict[str, Array]:
-        assert wanted == (SITE,), wanted
-        return {SITE: self._residual(inputs)}
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        assert sites == (SITE,), sites
+        return (f"{SITE}.out",)
 
-    def clean_output_and_activations(
-        self, inputs: dict[str, Array], wanted: tuple[str, ...]
-    ) -> tuple[tuple[Array, Array], dict[str, Array]]:
-        return self.clean_output(inputs), self.read_activations(inputs, wanted)
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        self._ordered_capture_keys(frozenset(keys))
+
+    def clean_forward(
+        self, inputs: dict[str, Array], capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        ordered_capture_keys = self._ordered_capture_keys(capture_keys)
+        residual = self._residual(inputs)
+        if not ordered_capture_keys:
+            return ForwardResult.from_producer(
+                output=self._heads(residual @ self.W.T),
+                capture_keys=ordered_capture_keys,
+                capture_values=(),
+            )
+        hidden = residual @ self.W.T
+        values = {SITE: residual, f"{SITE}.out": hidden}
+        return ForwardResult.from_producer(
+            output=self._heads(hidden),
+            capture_keys=ordered_capture_keys,
+            capture_values=tuple(values[key] for key in ordered_capture_keys),
+        )
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> ComponentStacks:
         return vu
 
-    def masked_output(
+    def component_activation_forward(
         self,
-        vu: ComponentStacks,
+        prepared_weights: ComponentStacks,
         inputs: dict[str, Array],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
-        remat: bool,
-    ) -> tuple[Array, Array]:
-        del remat  # single-site stub forward; nothing to checkpoint
-        assert live == (SITE,) and routes is None, (live, routes)
-        resid = self._residual(inputs)
-        V, U = vu.site(SITE)
-        W = self.W
-        hidden = (resid @ V) * masks[SITE] @ U
-        if has_delta:
-            delta = W - (V @ U).T
-            hidden = hidden + delta_masks[SITE][..., None] * (resid @ delta.T)
-        return self._heads(hidden)
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        del prepared_weights, inputs, capture_keys
+        raise NotImplementedError
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
         return ci_lower
 
-    def masked_output_stochastic(
+    def masked_forward(
         self,
         vu: ComponentStacks,
         inputs: dict[str, Array],
-        ci_stacked: dict[str, Array],
-        draw_key: Array,
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> tuple[Array, Array]:
-        return run_stochastic_masked_output(
-            self, vu, inputs, ci_stacked, draw_key, routes, live, has_delta, remat=remat
+    ) -> ForwardResult:
+        del remat
+        ordered_capture_keys = self._ordered_capture_keys(capture_keys)
+        explicit_masking = materialize_masking(masking)
+        assert explicit_masking.live_sites == (SITE,)
+        assert explicit_masking.routes is None
+        residual = self._residual(inputs)
+        site_components = vu.site(SITE)
+        hidden = (
+            (residual @ site_components.V)
+            * explicit_masking.component_masks[SITE]
+            @ site_components.U
+        )
+        if explicit_masking.weight_delta_masks is not None:
+            delta = self.W - (site_components.V @ site_components.U).T
+            hidden = hidden + explicit_masking.weight_delta_masks[SITE][..., None] * (
+                residual @ delta.T
+            )
+        if not ordered_capture_keys:
+            return ForwardResult.from_producer(
+                output=self._heads(hidden), capture_keys=ordered_capture_keys, capture_values=()
+            )
+        values = {SITE: residual, f"{SITE}.out": hidden}
+        return ForwardResult.from_producer(
+            output=self._heads(hidden),
+            capture_keys=ordered_capture_keys,
+            capture_values=tuple(values[key] for key in ordered_capture_keys),
         )
 
-    def masked_site_outputs(
-        self,
-        vu: ComponentStacks,
-        inputs: dict[str, Array],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, Array]:
-        assert live == (SITE,) and routes is None, (live, routes)
-        resid = self._residual(inputs)
-        V, U = vu.site(SITE)
-        W = self.W
-        hidden = (resid @ V) * masks[SITE] @ U
-        if has_delta:
-            delta = W - (V @ U).T
-            hidden = hidden + delta_masks[SITE][..., None] * (resid @ delta.T)
-        return {SITE: hidden}
-
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Array]:
-        V, U = vu.site(SITE)
+        site_components = vu.site(SITE)
         return {
-            SITE: self.W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
+            SITE: self.W.astype(jnp.float32)
+            - (site_components.V.astype(jnp.float32) @ site_components.U.astype(jnp.float32)).T
         }
+
+
+def test_all_live_masking_uses_each_site_component_count() -> None:
+    sites = (SiteSpec("a", 3, 4, 2), SiteSpec("b", 4, 5, 7))
+    masking = all_live_masking_no_delta(sites, leading_shape=(2, 3), dtype=jnp.bfloat16)
+
+    assert masking.live_sites == ("a", "b")
+    assert masking.component_masks["a"].shape == (2, 3, 2)
+    assert masking.component_masks["b"].shape == (2, 3, 7)
+    assert all(mask.dtype == jnp.bfloat16 for mask in masking.component_masks.values())
+    assert all(bool(jnp.all(mask == 1)) for mask in masking.component_masks.values())
 
 
 def _synthetic_lm(key: jax.Array) -> SyntheticDecomposedModel:
@@ -196,6 +225,13 @@ def _synthetic_vu(key: jax.Array) -> ComponentStacks:
     V = random.normal(random.fold_in(key, 3), (D, C)) * 0.1
     U = random.normal(random.fold_in(key, 4), (C, D)) * 0.1
     return component_stacks_from_sites({SITE: (V, U)})
+
+
+def test_prepare_compute_weights_owns_the_compute_dtype_boundary() -> None:
+    components = _synthetic_vu(random.PRNGKey(0))
+    prepared_weights = prepare_compute_weights(_synthetic_lm(random.PRNGKey(1)), components)
+
+    assert {leaf.dtype for leaf in jax.tree.leaves(prepared_weights)} == {jnp.dtype(COMPUTE_DT)}
 
 
 def _synthetic_ci_arch() -> ChunkwiseTransformerCIArch:
@@ -225,26 +261,32 @@ def _one_device_mesh() -> jax.sharding.Mesh:
 
 def test_dict_input_tuple_output_and_geometric_loss_flow():
     """The model consumes the loader's native DICT batch (not token ids);
-    `clean_output`/`masked_output` emit a tuple; `recon_loss_fn` (MSE) contracts it."""
+    clean/masked `ForwardResult.output` is a tuple; `recon_loss_fn` contracts it."""
     key = random.PRNGKey(1)
     model = _synthetic_lm(key)
     components = _synthetic_vu(key)
     inputs = _synthetic_inputs(key)
 
-    assert model.read_activations(inputs, (SITE,))[SITE].shape == (B, T, D)
+    assert model.clean_forward(inputs, frozenset({SITE})).captures[SITE].shape == (
+        B,
+        T,
+        D,
+    )
 
-    clean = model.clean_output(inputs)
-    assert isinstance(clean, tuple) and len(clean) == 2
-    assert clean[0].shape == (B, T, K_COORDS) and clean[1].shape == (B, T, M_AUX)
+    clean_output = model.clean_forward(inputs).output
+    assert isinstance(clean_output, tuple) and len(clean_output) == 2
+    assert clean_output[0].shape == (B, T, K_COORDS) and clean_output[1].shape == (B, T, M_AUX)
 
     masks = {SITE: jnp.ones((B, T, C))}
-    delta_masks = {SITE: jnp.zeros((B, T))}
-    masked = model.masked_output(
-        components, inputs, masks, delta_masks, None, (SITE,), False, remat=False
-    )
-    assert isinstance(masked, tuple) and len(masked) == 2
+    masked_output = model.masked_forward(
+        components,
+        inputs,
+        masking=MaterializedMasking(component_masks=masks),
+        remat=False,
+    ).output
+    assert isinstance(masked_output, tuple) and len(masked_output) == 2
 
-    loss = model.recon_loss_fn(masked, clean)
+    loss = model.recon_loss_fn(masked_output, clean_output)
     assert loss.shape == () and jnp.isfinite(loss)
 
 
@@ -302,12 +344,12 @@ def test_train_step_runs_through_generic_target(with_mesh: bool):
         total_steps=10,
         remat_recon_forwards=False,
         remat_ci_fn=False,
+        ci_capture_keys=frozenset({SITE}),
         mesh=_one_device_mesh() if with_mesh else None,
-        compiler_options={},
     )
 
     V_before = jax.device_get(
-        state.decomposition.components.site(SITE)[0]
+        state.decomposition.components.site(SITE).V
     )  # host copy survives step donation
     run_key = random.PRNGKey(3)
     for step_idx in range(2):
@@ -315,7 +357,7 @@ def test_train_step_runs_through_generic_target(with_mesh: bool):
         assert jnp.isfinite(metrics["total"]), (step_idx, metrics["total"])
         assert "loss/StochasticReconLoss" in metrics
 
-    assert not jnp.allclose(state.decomposition.components.site(SITE)[0], V_before), (
+    assert not jnp.allclose(state.decomposition.components.site(SITE).V, V_before), (
         "V did not move — step is a no-op"
     )
 
@@ -333,15 +375,15 @@ def test_fast_eval_metrics_bind_to_positioned_non_categorical_target():
     ci_fn = build_ci_fn(_synthetic_ci_arch(), model.sites, random.PRNGKey(11))
 
     pgd_step = make_fresh_pgd_eval_step(
-        model, FreshPGDReconEval(n_steps=2, step_size=0.1), mesh=None, compiler_options={}
+        model,
+        FreshPGDReconEval(n_steps=2, step_size=0.1),
+        ci_fn.capture_keys,
     )
     pgd = pgd_step(model, components, ci_fn, inputs, random.PRNGKey(5))
     assert pgd.shape == ()
     assert jnp.isfinite(pgd) and pgd >= 0.0
 
-    l0_step = make_ci_l0_eval_step(
-        model, 0.5, {"block": ("block.*",)}, mesh=None, compiler_options={}
-    )
+    l0_step = make_ci_l0_eval_step(model, ci_fn.capture_keys, 0.5, {"block": ("block.*",)})
     l0 = l0_step(model, components, ci_fn, inputs, random.PRNGKey(6))
     assert set(l0) == {f"l0/0.5_{SITE}", "l0/0.5_block"}
     assert all(value.shape == () and 0.0 <= value <= C for value in l0.values())

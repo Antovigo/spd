@@ -99,8 +99,7 @@ def _build_step_and_args():
         total_steps=10,
         remat_recon_forwards=False,
         remat_ci_fn=False,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
     return step_fn, model, state, inputs
 

@@ -42,15 +42,15 @@ def harvest_batch_from_forward(
 ) -> HarvestBatch:
     """JAX forward outputs -> the NumPy `HarvestBatch` (lower-leaky CI as
     `causal_importance`, ‖U‖·(x@V) as `component_activation`, firing = CI > threshold)."""
-    ci = {site: np.asarray(v) for site, v in fwd.lower_leaky_ci.items()}
-    acts = {site: np.asarray(v) for site, v in fwd.component_acts.items()}
+    ci = {site: np.asarray(v) for site, v in fwd.lower_leaky_ci_by_site.items()}
+    acts = {site: np.asarray(v) for site, v in fwd.component_activations_by_site.items()}
     return HarvestBatch(
         tokens=np.asarray(tokens).astype(np.int64),
         firings={site: ci[site] > activation_threshold for site in ci},
         activations={
             site: {"causal_importance": ci[site], "component_activation": acts[site]} for site in ci
         },
-        output_probs=np.asarray(fwd.output_probs),
+        output_probs=np.asarray(fwd.output_probabilities),
     )
 
 
@@ -65,7 +65,7 @@ def harvest_jax_run(
         "JAX harvest path requires a ParamDecompHarvestConfig"
     )
     activation_threshold = method_config.activation_threshold
-    data, seed = run.config.data, run.config.pd.seed
+    data, seed = run.deliverable.data, run.deliverable.seed
     rank, world_size = rank_world_size if rank_world_size is not None else (0, 1)
     schedule = BatchSchedule(scan_shards(data.dir), config.batch_size, seed)
     server = ShardServer(

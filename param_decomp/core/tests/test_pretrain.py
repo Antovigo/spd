@@ -23,6 +23,7 @@ from param_decomp.pretrain.models import (
     model_logits,
 )
 from param_decomp.pretrain.train import train
+from param_decomp.targets.testing import run_clean
 
 
 def _tiny_mlp_cfg() -> LlamaSimpleMLPConfig:
@@ -90,7 +91,7 @@ def test_cache_round_trip_matches_decomposition_loader():
         loaded_cfg = lsm.load_model_config(cache)
         target = lsm.load_target_from_pretrain_cache(cache, loaded_cfg, jnp.float32)
         idx = jnp.arange(2 * 16, dtype=jnp.int32).reshape(2, 16) % mc.vocab_size
-        loaded_logits = target.clean_output(idx)
+        loaded_logits = run_clean(target, idx)
         assert jnp.allclose(loaded_logits, model(idx), atol=1e-4)
 
 

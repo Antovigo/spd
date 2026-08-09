@@ -25,11 +25,11 @@ restore).
 ```bash
 # single process
 python -m param_decomp.harvest.scripts.run_worker \
-    --run_dir runs/p-761bc061 --n_batches 50 --batch_size 16
+    --run_dir runs/p-761bc061 --data_root <data-root> --n_batches 50 --batch_size 16
 
 # one rank of a sharded run (saves worker_states/worker_<rank>.npz; merge combines them)
 python -m param_decomp.harvest.scripts.run_worker \
-    --run_dir runs/p-761bc061 --n_batches 50 --batch_size 16 \
+    --run_dir runs/p-761bc061 --data_root <data-root> --n_batches 50 --batch_size 16 \
     --rank 0 --world_size 4 --subrun_id h-20260617_120000
 ```
 
@@ -43,7 +43,7 @@ dominates; pass `--no_cooccurrence` for a quick spot-check (drops only
 
 ### The reusable run-loading pattern (for clustering / autointerp / slow-eval / app)
 
-`param_decomp.experiments.lm.load_run.open_jax_run(run_dir, step=None) -> LoadedJaxRun` is the single
+`param_decomp.experiments.lm.load_run.open_jax_run(run_dir, step=None, *, data_root) -> LoadedJaxRun` is the single
 entry point any consumer of a JAX run should use. It rebuilds the frozen target +
 `DecomposedModel` from the run's pinned config (`load_run_dir_config`), restores the orbax
 checkpoint onto a reference `TrainState`, and exposes `run.forward(token_ids) ->
@@ -62,17 +62,18 @@ consume the entire training set.
 ```bash
 # Single process (auto-generates subrun ID)
 python -m param_decomp.harvest.scripts.run_worker \
-    --run_dir runs/<run_id> --n_batches 1000 --batch_size 16
+    --run_dir runs/<run_id> --data_root <data-root> --n_batches 1000 --batch_size 16
 
 # Multi-rank: all workers + merge must share the same --subrun_id
 SUBRUN="h-$(date +%Y%m%d_%H%M%S)"
 for r in 0 1 2 3; do
   python -m param_decomp.harvest.scripts.run_worker \
-      --run_dir runs/<run_id> --n_batches 1000 --batch_size 16 \
+      --run_dir runs/<run_id> --data_root <data-root> --n_batches 1000 --batch_size 16 \
       --rank $r --world_size 4 --subrun_id $SUBRUN &
 done
 wait
-python -m param_decomp.harvest.scripts.run_merge --subrun_id $SUBRUN --config_json "$CFG"
+python -m param_decomp.harvest.scripts.run_merge \
+    --subrun_id $SUBRUN --data_root <data-root> --config_json "$CFG"
 ```
 
 ## Data Storage
@@ -123,7 +124,7 @@ The only worker. Opens a JAX run, runs its frozen forward, accumulates into the 
 ### Merge Script (`scripts/run_merge.py`)
 
 Combines `worker_states/*.npz` from each rank into the final harvest artefacts. Args:
-- `--config_json`, `--subrun_id` (must match the workers').
+- `--config_json`, `--data_root`, `--subrun_id` (must match the workers').
 
 ### Config (`config.py`)
 

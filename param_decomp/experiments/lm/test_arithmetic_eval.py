@@ -14,10 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import ci_preactivations, lower_leaky_hard_sigmoid
 from param_decomp.core.components import init_component_stacks
+from param_decomp.core.model import MaterializedMasking, prepare_compute_weights
+from param_decomp.core.precision import COMPUTE_DT
 from param_decomp.core.tests.test_slow_eval import _build_ci_fn
-from param_decomp.core.train import COMPUTE_DT, cast_floating
 from param_decomp.experiments.lm.arithmetic_eval import (
     ArithmeticGrid,
     ArithmeticSelection,
@@ -30,7 +31,12 @@ from param_decomp.experiments.lm.arithmetic_eval import (
     select_active,
 )
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
-from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.testing import (
+    capture_clean,
+    capture_site_outputs,
+    tiny_glu_cfg,
+    tiny_glu_decomposed_lm,
+)
 
 N_A, N_B = 3, 4
 T = 5
@@ -52,8 +58,10 @@ def _tiny_setup():
 def _grid_step():
     """One trace shared by every test: the step is a pure function of the (cached) model,
     the answer position, and the row count, all of which are fixed for this file."""
-    _, model, _, _ = _tiny_setup()
-    return make_arithmetic_grid_step(model, ANSWER_POSITION, n_valid_rows=N_A * N_B)
+    _, model, ci_fn, _ = _tiny_setup()
+    return make_arithmetic_grid_step(
+        model, ci_fn.capture_keys, ANSWER_POSITION, n_valid_rows=N_A * N_B
+    )
 
 
 def _grid() -> ArithmeticGrid:
@@ -71,30 +79,30 @@ def test_grid_step_ci_xv_and_masked_max_match_hand_rolled():
 
     names = model.site_names
     # CI hand-roll: bf16 readout, slice the answer position.
-    ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-    taps = {
-        k: x.astype(COMPUTE_DT)
-        for k, x in model.read_activations(tokens, ci_fn.input_names).items()
-    }
-    logits = {s: v.astype("float32") for s, v in ci_fn_bf16(taps, remat=False).logits.items()}
+    preactivations = ci_preactivations(
+        ci_fn, capture_clean(model, tokens, ci_fn.capture_keys), remat=False
+    )
     # xV hand-roll: all-ones masks -> site output == (x@V) @ U, so x@V projected through U
-    # reproduces masked_site_outputs at the answer position.
-    prepared = model.prepare_compute_weights(cast_floating(vu, COMPUTE_DT))
-    leading = tokens.shape
-    ones = {s: jnp.ones((*leading, C), COMPUTE_DT) for s in names}
-    zeros_delta = {s: jnp.zeros(leading, COMPUTE_DT) for s in names}
-    outputs = model.masked_site_outputs(prepared, tokens, ones, zeros_delta, None, names, False)
+    # reproduces the captured masked site output at the answer position.
+    prepared_weights = prepare_compute_weights(model, vu)
+    component_masks = {site: jnp.ones((*tokens.shape, C), COMPUTE_DT) for site in names}
+    outputs = capture_site_outputs(
+        model,
+        prepared_weights,
+        tokens,
+        MaterializedMasking(component_masks=component_masks),
+    )
     for site in names:
         ci = np.asarray(ci_grids[site])
-        ci_exp = np.asarray(lower_leaky_hard_sigmoid(logits[site]))[:, ANSWER_POSITION, :]
+        ci_exp = np.asarray(lower_leaky_hard_sigmoid(preactivations[site]))[:, ANSWER_POSITION, :]
         assert ci.shape == (n_pad, C)
         assert ci.min() >= 0.0 and ci.max() <= 1.0
         np.testing.assert_allclose(ci, ci_exp, rtol=1e-4, atol=1e-4)
         xv = np.asarray(xv_grids[site])
         assert xv.shape == (n_pad, C) and np.all(np.isfinite(xv))
-        _, u = vu.site(site)
+        U = vu.site(site).U
         out_got = np.asarray(outputs[site])[:, ANSWER_POSITION, :].astype(np.float32)
-        np.testing.assert_allclose(out_got, xv @ np.asarray(u, np.float32), atol=1e-2)
+        np.testing.assert_allclose(out_got, xv @ np.asarray(U, np.float32), atol=1e-2)
         # max CI is over the REAL rows only — the garbage tail must not decide liveness
         np.testing.assert_allclose(np.asarray(max_ci[site]), ci[: N_A * N_B].max(axis=0), rtol=1e-6)
 

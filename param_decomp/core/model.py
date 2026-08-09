@@ -15,11 +15,12 @@ a mask's leading axes match only in RANK, and are size 1 wherever the adversary'
 `source_shape` says so (`SiteMasks`). Batch is ever-present and
 semantics-free (the data/shard axis); CI is always independent over every leading axis.
 Masking, routing, source scopes, imp-min, and normalization all operate over the opaque
-leading prefix. The three EDGES are generic too — the model's
-INPUT (whatever `read_activations`/`clean_output`/`masked_output` read upstream of the
-residual; tokens for an LM, a dict for a bio target), the model's OUTPUT
-(`clean_output`/`masked_output` return `Any` — logits, a tuple of heads, coords), and the
-recon comparison (`recon_loss_fn`, `kl_per_position` for an LM).
+leading prefix. The three EDGES are generic too — the model INPUT consumed by
+`clean_forward` / `masked_forward` (tokens for an LM, a dict for a bio target), the model
+OUTPUT carried by `ForwardResult.output` (`Any` — logits, a tuple of heads, coords), and
+the recon comparison (`recon_loss_fn`, `kl_per_position` for an LM). Activation identity
+and capture lowering are target-owned. Core passes immutable canonical names into the
+forward and receives a strict one-key-to-one-array capture dictionary back.
 
 The frozen weights ride on the model `eqx.Module` and reach the jitted step as a pytree
 ARG (`eqx.filter_jit` traces the array leaves). Never close over the model in a jit: a
@@ -27,14 +28,20 @@ frozen 8B target captured as a constant bakes multi-GB weights into the HLO.
 """
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Protocol, runtime_checkable
 
-import jax.numpy as jnp
-from jax import random as jax_random
+import jax
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Bool, Float
+from typing_extensions import TypeVar
 
 from param_decomp.core.components import ComponentStacks, SiteSpec
+from param_decomp.core.precision import COMPUTE_DT, cast_floating
+
+BATCH_AXES = ("replicate", "fsdp")
+"""Mesh axes that jointly shard the always-leading batch dimension."""
 
 
 @dataclass(frozen=True)
@@ -75,37 +82,137 @@ SiteRoutes = dict[str, Bool[Array, "*leading"]] | None
 (SPEC §1.3). Positions routing False take the frozen `x @ W` path."""
 
 
-def all_false_routes(site_names: tuple[str, ...], leading: tuple[int, ...]) -> dict[str, Array]:
-    """Route every position to the frozen path so `masked_site_outputs` returns the
-    target `x @ W` per site (the clean recon target used by the hidden-acts / attn-pattern
-    eval metrics)."""
-    return {s: jnp.zeros(leading, bool) for s in site_names}
+@dataclass(frozen=True, kw_only=True)
+class MaterializedMasking:
+    """A masked forward driven by concrete per-site mask arrays.
+
+    Adversarial masks use this arm after optimized sources are converted to arrays; their
+    provenance does not change target execution. The component-mask keys define the live sites. ``weight_delta_masks=None`` means the
+    frozen-weight correction is disabled; a mapping enables it for every live site.
+    Routes, when present, must cover the same sites. These constraints make the previous
+    contradictory ``zero delta masks + has_delta=False`` state unrepresentable.
+    """
+
+    component_masks: SiteMasks
+    weight_delta_masks: SiteDeltaMasks | None = None
+    routes: SiteRoutes = None
+
+    def __post_init__(self) -> None:
+        live_sites = set(self.component_masks)
+        if self.weight_delta_masks is not None:
+            assert set(self.weight_delta_masks) == live_sites, (
+                self.weight_delta_masks.keys(),
+                self.component_masks.keys(),
+            )
+        if self.routes is not None:
+            assert set(self.routes) == live_sites, (self.routes.keys(), self.component_masks.keys())
+
+    @property
+    def live_sites(self) -> tuple[str, ...]:
+        return tuple(self.component_masks)
+
+
+@dataclass(frozen=True, kw_only=True)
+class StochasticMasking:
+    """A recipe for sampling component and weight-delta masks inside checkpointed blocks.
+
+    Scan targets consume the shared CI activations and key directly, discard each layer's
+    masks after its forward block, and deterministically redraw them during backward
+    recomputation instead of storing a full layer-by-layer mask stack.
+    """
+
+    ci_stacked: Any
+    draw_key: Array
+    live_sites: tuple[str, ...]
+    routes: SiteRoutes
+
+    def __post_init__(self) -> None:
+        assert self.live_sites, "stochastic masking requires at least one live site"
+        assert len(set(self.live_sites)) == len(self.live_sites), self.live_sites
+        if self.routes is not None:
+            assert set(self.routes) == set(self.live_sites), (self.routes.keys(), self.live_sites)
+
+
+Masking = MaterializedMasking | StochasticMasking
+"""The two complete, non-contradictory descriptions of a masked forward."""
+
+
+type CaptureKeys = frozenset[str]
+"""An orderless, immutable request for named activations from a forward."""
+
+EMPTY_CAPTURE_KEYS: CaptureKeys = frozenset()
+
+
+def select_captures(captures: dict[str, Array], capture_keys: CaptureKeys) -> dict[str, Array]:
+    """Project a capture result onto one deterministic requested view."""
+    return {key: captures[key] for key in sorted(capture_keys)}
+
+
+PreparedT = TypeVar("PreparedT", default=Any)
+
+
+@partial(
+    jax.tree_util.register_dataclass,
+    data_fields=("output", "captures"),
+    meta_fields=(),
+)
+@dataclass(frozen=True)
+class ForwardResult:
+    """A target output and its captured activations, keyed one-to-one."""
+
+    output: Any
+    captures: dict[str, Array]
+
+    @classmethod
+    def from_producer(
+        cls,
+        *,
+        output: Any,
+        capture_keys: tuple[str, ...],
+        capture_values: tuple[Array, ...],
+    ) -> "ForwardResult":
+        """Label a target's private capture slots and pin their shared device layout.
+
+        A target resolves public activation names into a private slot layout while tracing,
+        then produces arrays in that layout's order. This constructor is the single boundary
+        that checks the canonical names and produced arrays agree, labels the arrays, and
+        fixes their device layout before any consumer uses them.
+
+        Captures always lead with the batch axis. Without the constraint below, GSPMD may
+        independently feature-shard captures in different compiled consumers; cuDNN
+        attention then rejects derived Q/K/V tensors whose layouts disagree. The runtime
+        installs the HSDP mesh before tracing, while off-mesh targets and empty plans need
+        no constraint.
+
+        This must be an explicit producer constructor rather than ``__post_init__``. JAX
+        pytree transformations reconstruct this registered dataclass with abstract or
+        non-array leaves; reconstruction must not relabel values or apply device placement
+        as a side effect.
+        """
+        assert len(capture_values) == len(capture_keys), (
+            len(capture_values),
+            capture_keys,
+        )
+        captures = dict(zip(capture_keys, capture_values, strict=True))
+        if captures and not jax.sharding.get_abstract_mesh().empty:
+            captures = {
+                key: jax.lax.with_sharding_constraint(
+                    value,
+                    P(BATCH_AXES, *((None,) * (value.ndim - 1))),
+                )
+                for key, value in captures.items()
+            }
+        return cls(output, captures)
 
 
 @runtime_checkable
-class DecomposedModel(Protocol):
-    """The interface a vendored target implements for the generic trainer (see module
-    docstring). The concrete impl is an `eqx.Module` carrying its FROZEN target weights as
-    array fields — so it threads into the jitted step as a pytree arg (array leaves traced,
-    static fields baked), never as a closed-over multi-GB constant. The methods below take
-    only the *runtime-varying* arguments; the frozen weights ride on `self`.
+class DecomposedModel(Protocol[PreparedT]):
+    """The target interface consumed by the generic trainer.
 
-    The TRAINABLE V/U (`vu`) stay an explicit method arg, NOT a `self` field: they have a
-    different lifecycle (fp32 masters, their own optimizer + checkpoint, C-sharded while the
-    frozen weights replicate), and the step casts/details them independently of the model.
-
-    `sites` fixes the canonical site order — chunking (SPEC S10) and the CI fn's
-    input/output concatenation both follow it.
-
-    `has_position_axis` declares the waist geometry (batch is implicit and always
-    present): True for an LM (`[B, P, d]`), False for a TMS-style target (`[B, d]`). At
-    trainer construction it must equal the CI fn's `has_position_axis` (early fail) so
-    the CI fn stays per-domain without the generic loop adapting.
-
-    `recon_loss_fn(masked_output, clean_output) -> scalar` is the recon comparison the step
-    minimizes (SPEC §2.3): the LM uses `kl_per_position`; a non-LM target supplies its own
-    (e.g. MSE/geometric). It must reduce to a scalar and contract whatever shape the model
-    emits. It is a static method/attr on the concrete model, not a forward over `self`.
+    Core passes an immutable set of canonical activation names into each forward. The target
+    validates, orders, and lowers those names into its private capture layout when JAX first
+    traces that forward; no plan representation crosses this protocol. An empty set must take
+    the target's untouched no-capture computation.
     """
 
     sites: tuple[SiteSpec, ...]
@@ -114,170 +221,74 @@ class DecomposedModel(Protocol):
     @property
     def site_names(self) -> tuple[str, ...]: ...
 
-    def shardings(self, mesh: Mesh) -> "DecomposedModel":
-        """Per-leaf `dp` placement of the frozen target weights, matching this model's
-        pytree structure (each array leaf → a `NamedSharding`). The frozen target is
-        REPLICATED on every device (small relative to activations; replicating avoids
-        all-gathering it every forward). Applied via `jax.jit(..., out_shardings=...)`."""
+    def shardings(self, mesh: Mesh) -> "DecomposedModel[PreparedT]": ...
+
+    def recon_loss_fn(self, masked_output: Any, clean_output: Any) -> Float[Array, ""]: ...
+
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        """Return each site's canonical linear-output key in request order."""
         ...
 
-    def recon_loss_fn(self, masked_output: Any, clean_output: Any) -> Float[Array, ""]:
-        """Recon comparison the step minimizes (SPEC §2.3). LM: `kl_per_position`."""
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        """Refuse capture points that masking can never change."""
         ...
 
-    def clean_output(self, inputs: Any, /) -> Any:
-        """All-frozen forward — the recon target (SPEC S3); never the `mask=1` decomposed
-        identity. `inputs` is positional-only and target-specific (an LM's token ids → embed;
-        a toy's feature vector, which already is the waist). `Any` return: an LM emits
-        `[*leading, vocab]` logits, a bio target a tuple of heads or coordinates."""
+    def clean_forward(
+        self, inputs: Any, /, capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        """All-frozen forward plus exactly `capture_keys`. The same key has the same meaning
+        here and in `masked_forward`."""
         ...
 
-    def read_activations(
-        self, inputs: Any, /, wanted: tuple[str, ...]
-    ) -> dict[str, Float[Array, "*leading d_tap"]]:
-        """The CI fn's activation accessor. `wanted` is the CI fn's static `input_names` —
-        OPAQUE keys the target knows how to produce (an LM's residual-stream taps; a
-        positionless toy's per-site inputs). The target is the only key→activation
-        interpreter; core just routes by key."""
+    def prepare_compute_weights(self, vu: ComponentStacks) -> PreparedT:
+        """Relayout compute-dtype components into the target-private per-step view."""
         ...
 
-    def clean_output_and_activations(
-        self, inputs: Any, /, wanted: tuple[str, ...]
-    ) -> tuple[Any, dict[str, Float[Array, "*leading d_tap"]]]:
-        """`(clean_output(inputs), read_activations(inputs, wanted))` — SPEC S3+S4
-        unchanged, evaluated in ONE frozen forward where the target can (a scan target
-        emits the taps as ys of its clean-forward scan; XLA does not CSE the two passes
-        apart). Targets without that structure just call both. For the steps that need
-        both on the same batch (train, fast eval)."""
-        ...
-
-    def prepare_compute_weights(self, vu: ComponentStacks) -> Any:
-        """Build the per-step COMPUTE weights from the fp32 ÷N master `vu`, ONCE per step
-        (SPEC unchanged — a read-only compute view). Mask-INDEPENDENT, so the result is shared
-        by every forward in the step: the engine calls this once and passes the result as the
-        `prepared` arg to all `masked_output` / `masked_site_outputs` calls. For a sharded LM
-        target this is where the ÷N→÷fsdp cross-node gather (+ bf16 cast) happens — once, off
-        the hot path, instead of once per forward. For an unsharded toy it is identity (returns
-        `vu`). The opaque return type is the target's own — only it consumes it."""
-        ...
-
-    def masked_output(
+    def component_activation_forward(
         self,
-        prepared: Any,
+        prepared_weights: PreparedT,
         inputs: Any,
         /,
-        masks: SiteMasks,
-        delta_masks: SiteDeltaMasks,
-        routes: SiteRoutes,
-        live: tuple[str, ...],
-        has_delta: bool,
         *,
-        remat: bool,
-    ) -> Any:
-        """The masked decomposed forward (SPEC §1.3, S2). `prepared` is the output of
-        `prepare_compute_weights` (the shared per-step compute weights). `live` (static under
-        jit) lists the sites running their decomposed forward; all other sites run the frozen
-        `x @ W` path. `masks`/`delta_masks` may be size 1 on ANY leading axis, per the
-        adversary's `source_shape` — broadcast them, never reshape (`SiteMasks`).
-        `has_delta` (static) False skips the `x @ Δ` matmul for constant-source entries
-        whose delta mask is a constant 0 (LOSS_PARITY_DESIGN §4b). `remat` (static) gates
-        gradient-checkpointing the forward at the model's natural granularity (a deep target
-        rematerializes per-layer, recomputing one layer at a time in the backward instead of
-        storing every layer's activations — the dominant step-memory term at depth)."""
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        """Run the frozen target once, returning requested captures and each site's ``x @ V``.
+
+        Targets that do not support offline component-activation harvest must raise
+        ``NotImplementedError`` explicitly.
+        """
         ...
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> Any:
-        """Build the target-specific SHARED CI form (opaque, like `prepare_compute_weights`):
-        the CI envelope reshaped ONCE per step so the stochastic recon forwards can reuse it.
-        A scan target stacks the per-site CI into its per-layer scan layout (shared, so N
-        forwards' mask stacks collapse to one — the memory win); a target without that structure
-        returns `ci_lower` unchanged. Consumed only by `masked_output_stochastic`."""
+        """Build the target-private CI form shared by stochastic masked forwards."""
         ...
 
-    def masked_output_stochastic(
+    def masked_forward(
         self,
-        prepared: Any,
+        prepared_weights: PreparedT,
         inputs: Any,
         /,
-        ci_stacked: Any,
-        draw_key: Array,
-        routes: SiteRoutes,
-        live: tuple[str, ...],
-        has_delta: bool,
         *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> Any:
-        """Stochastic recon forward that builds masks INTERNALLY from the shared `ci_stacked`
-        (`= stack_ci(ci.lower)`) + per-position draws from `draw_key`, rather than taking
-        pre-built masks. A scan target RECOMPUTES the masks inside its checkpointed block (the
-        per-forward mask is never held — a memory win, faithful by checkpoint determinism);
-        targets without that structure delegate to `run_stochastic_masked_output` (build masks,
-        then `masked_output`). Same forward semantics as `masked_output` with stochastic sources;
-        the random draw need not match any other path's (only fwd==bwd faithfulness matters)."""
+    ) -> ForwardResult:
+        """Masked decomposed forward plus exactly `capture_keys`.
+
+        `masking` carries the complete masking policy: explicit masks, or shared CI plus
+        a draw key for rebuilding stochastic masks inside checkpointed blocks. The target
+        validates unsupported capture keys fail-closed when this method is first traced.
+        """
         ...
 
-    def masked_site_outputs(
-        self,
-        prepared: Any,
-        inputs: Any,
-        /,
-        masks: SiteMasks,
-        delta_masks: SiteDeltaMasks,
-        routes: SiteRoutes,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, Float[Array, "*leading d_out"]]:
-        """Per-`live`-site decomposed LINEAR OUTPUT of `masked_output`'s forward
-        (`((x@V)*m)@U + (x@Δ)*d`), keyed by site (SPEC S31). `prepared` is the output of
-        `prepare_compute_weights`. For the offline hidden-acts recon eval metrics only — never
-        the recon traversal, which stays KL-on-final-logits."""
-        ...
-
-    def weight_deltas(self, vu: ComponentStacks) -> dict[str, Float[Array, "d_out d_in"]]:
-        """fp32 `W − V@U` per site from the fp32 master `vu` (SPEC N2)."""
-        ...
+    def weight_deltas(self, vu: ComponentStacks) -> dict[str, Float[Array, "d_out d_in"]]: ...
 
 
-def stochastic_site_masks(
-    ci_lower: dict[str, Array], live: tuple[str, ...], draw_key: Array, has_delta: bool
-) -> tuple[dict[str, Array], dict[str, Array]]:
-    """Per-live-site stochastic masks `ci + (1−ci)·U[0,1]` (+ delta `U[0,1]`), keyed per site
-    from `draw_key`. The generic stochastic-source formula (SPEC S12 stochastic), shared by the
-    non-recompute `masked_output_stochastic` fallback."""
-    mask_key, delta_key = jax_random.split(draw_key)
-    masks: dict[str, Array] = {}
-    delta_masks: dict[str, Array] = {}
-    for site_idx, site in enumerate(live):
-        ci = ci_lower[site]
-        masks[site] = ci + (1.0 - ci) * jax_random.uniform(
-            jax_random.fold_in(mask_key, site_idx), ci.shape, ci.dtype
-        )
-        if has_delta:
-            delta_masks[site] = jax_random.uniform(
-                jax_random.fold_in(delta_key, site_idx), ci.shape[:-1], ci.dtype
-            )
-    return masks, delta_masks
-
-
-def run_stochastic_masked_output(
-    model: "DecomposedModel",
-    prepared: Any,
-    inputs: Any,
-    ci_lower: dict[str, Array],
-    draw_key: Array,
-    routes: SiteRoutes,
-    live: tuple[str, ...],
-    has_delta: bool,
-    *,
-    remat: bool,
-) -> Any:
-    """Default `masked_output_stochastic` for targets without an in-block recompute: build the
-    stochastic masks here (no shared-CI reuse — `stack_ci` was identity), then run the standard
-    `masked_output`. Correct + uniform; only scan targets override for the memory win."""
-    masks, delta_masks = stochastic_site_masks(ci_lower, live, draw_key, has_delta)
-    return model.masked_output(
-        prepared, inputs, masks, delta_masks, routes, live, has_delta, remat=remat
-    )
+def prepare_compute_weights[PreparedT](
+    model: DecomposedModel[PreparedT], components: ComponentStacks
+) -> PreparedT:
+    """Cast fp32 master components once, then build the target-private compute layout."""
+    return model.prepare_compute_weights(cast_floating(components, COMPUTE_DT))
 
 
 def chunk_sites(site_names: tuple[str, ...], sites_per_chunk: int) -> tuple[tuple[str, ...], ...]:

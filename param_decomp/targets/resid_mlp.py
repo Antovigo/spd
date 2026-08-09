@@ -38,8 +38,21 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
 from param_decomp.core.ci_fn import CI
-from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, site_out
-from param_decomp.core.model import run_stochastic_masked_output
+from param_decomp.core.components import ComponentStacks, SiteC, SiteDims, SiteSpec, site_out
+from param_decomp.core.masking import materialize_masking
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    ForwardResult,
+    Masking,
+)
+from param_decomp.targets.linear_site_capture import (
+    SiteCaptureGrammar,
+    SiteCaptureSources,
+    capture_keys_by_site,
+    record_requested_value,
+    site_output_key,
+)
 
 MLP_IN = "mlp_in"
 MLP_OUT = "mlp_out"
@@ -53,6 +66,8 @@ EmbeddingMode = Literal["fixed_identity", "fixed_random", "learned"]
 - `learned` — `W_E`/`W_U` are trained alongside the MLP blocks (torch trainable embedding).
 """
 
+ResidMLPGenerationType = Literal["exactly_one_active", "at_least_zero_active"]
+
 LabelType = Literal["act_plus_resid", "abs"]
 """The pretrain read-off label (torch `label_type`): `act_fn(coeffs·x) + x` (the canonical
 read-off) or `abs(coeffs·x)` (the |·| target)."""
@@ -65,9 +80,10 @@ read-off labels (`readoff`), or the pre-unembed RESIDUAL against the embedded la
 
 class CIFnCallable(Protocol):
     """The CI-fn surface the ResidMLP target-CI probe needs: `__call__(taps) -> CI` plus the
-    `input_names` the probe feeds (satisfied by `ci_fn.LayerwiseMLPCIFn` / `GlobalMLPCIFn`)."""
+    `capture_keys` the probe feeds (satisfied by `ci_fn.LayerwiseMLPCIFn` / `GlobalMLPCIFn`)."""
 
-    input_names: tuple[str, ...]
+    @property
+    def capture_keys(self) -> CaptureKeys: ...
 
     def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI: ...
 
@@ -125,7 +141,7 @@ class ResidMLPTargetConfig:
     pretrain_use_trivial_label_coeffs: bool
     pretrain_importance_val: float
     feature_probability: float
-    data_generation_type: str
+    data_generation_type: ResidMLPGenerationType
     global_batch: int
 
 
@@ -186,13 +202,13 @@ def canonical_site_cs(site_cs: tuple[SiteC, ...]) -> tuple[SiteC, ...]:
     return tuple(sorted(site_cs, key=order_key))
 
 
-def site_dims(cfg: ResidMLPConfig, kind: str) -> tuple[int, int]:
-    """(d_in, d_out) right-mult orientation."""
+def site_dims(cfg: ResidMLPConfig, kind: str) -> SiteDims:
+    """Matrix dimensions in right-mult orientation."""
     match kind:
         case "mlp_in":
-            return cfg.d_embed, cfg.d_mlp
+            return SiteDims(d_in=cfg.d_embed, d_out=cfg.d_mlp)
         case "mlp_out":
-            return cfg.d_mlp, cfg.d_embed
+            return SiteDims(d_in=cfg.d_mlp, d_out=cfg.d_embed)
         case _:
             raise AssertionError(f"unknown ResidMLP kind {kind!r}")
 
@@ -208,7 +224,8 @@ def site_specs(cfg: ResidMLPConfig, site_cs: tuple[SiteC, ...]) -> tuple[SiteSpe
     for site in site_cs:
         assert site.C >= 1, site
         _, kind = parse_site_name(site.name)
-        specs.append(SiteSpec(site.name, *site_dims(cfg, kind), site.C))
+        dims = site_dims(cfg, kind)
+        specs.append(SiteSpec(name=site.name, d_in=dims.d_in, d_out=dims.d_out, C=site.C))
     return tuple(specs)
 
 
@@ -248,113 +265,142 @@ def site_inputs(target: ResidMLPTarget, resid: Float[Array, "B d_embed"]) -> dic
     return inputs
 
 
-def _decomposed_or_frozen(
+def clean_forward(
+    target: ResidMLPTarget,
+    resid: Float[Array, "B d_embed"],
+    requested_keys: tuple[str, ...],
+    capture_sources: SiteCaptureSources,
+) -> ForwardResult:
+    if not requested_keys:
+        return ForwardResult.from_producer(
+            output=clean_output(target, resid), capture_keys=(), capture_values=()
+        )
+    capture_keys = capture_keys_by_site(requested_keys, capture_sources)
+    captures: dict[str, Array] = {}
+    act = _act_fn(target.act_fn_name)
+    for layer, block in enumerate(target.layers):
+        in_site = site_name(layer, MLP_IN)
+        record_requested_value(captures, capture_keys.input_key_by_site.get(in_site), resid)
+        pre = resid @ block.W_in.T
+        record_requested_value(captures, capture_keys.output_key_by_site.get(in_site), pre)
+        if block.b_in is not None:
+            pre = pre + block.b_in
+        hidden = act(pre)
+
+        out_site = site_name(layer, MLP_OUT)
+        record_requested_value(captures, capture_keys.input_key_by_site.get(out_site), hidden)
+        out = hidden @ block.W_out.T
+        record_requested_value(captures, capture_keys.output_key_by_site.get(out_site), out)
+        if block.b_out is not None:
+            out = out + block.b_out
+        resid = resid + out
+    assert set(captures) == set(requested_keys), (sorted(captures), sorted(requested_keys))
+    return ForwardResult.from_producer(
+        output=resid @ target.W_U,
+        capture_keys=requested_keys,
+        capture_values=tuple(captures[key] for key in requested_keys),
+    )
+
+
+def _decomposed_or_frozen_site_output(
     components: ComponentStacks,
     site: str,
-    W: Array,
-    x_in: Array,
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
+    frozen_weight: Array,
+    site_input: Array,
+    component_masks: dict[str, Array],
+    weight_delta_masks: dict[str, Array] | None,
     routes: dict[str, Array] | None,
-    live_set: frozenset[str],
-    has_delta: bool,
-    collect: dict[str, Array] | None,
+    live_sites: frozenset[str],
 ) -> Array:
     """One site's output: the decomposed `site_out` if live, else the frozen `x @ Wᵀ`."""
-    if site not in live_set:
-        return x_in @ W.T
-    V, U = components.site(site)
-    out = site_out(
-        x_in, V, U, W, masks[site], delta_masks[site] if has_delta else None,
+    if site not in live_sites:
+        return site_input @ frozen_weight.T
+    site_components = components.site(site)
+    site_output = site_out(
+        site_input,
+        site_components.V,
+        site_components.U,
+        frozen_weight,
+        component_masks[site],
+        None if weight_delta_masks is None else weight_delta_masks[site],
         None if routes is None else routes[site],
     )  # fmt: skip
-    if collect is not None:
-        collect[site] = out
-    return out
+    return site_output
 
 
 def _run_masked(
     target: ResidMLPTarget,
     components: ComponentStacks,
     resid: Float[Array, "B d_embed"],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
+    component_masks: dict[str, Array],
+    weight_delta_masks: dict[str, Array] | None,
     routes: dict[str, Array] | None,
-    live: tuple[str, ...],
-    has_delta: bool,
-    collect: dict[str, Array] | None,
-) -> Array:
-    """The masked decomposed forward (SPEC §4.1, S2): each layer's `mlp_in`/`mlp_out` runs
-    its decomposed forward if live, else the frozen path. The biases are added AFTER the
-    site output (they live outside the decomposed matrix), the residual accumulates as in
-    the frozen forward, and the readout `resid @ W_U` is frozen."""
+    requested_keys: tuple[str, ...],
+    capture_sources: SiteCaptureSources,
+) -> ForwardResult:
+    """Masked residual-MLP forward plus exactly the requested captures."""
     act = _act_fn(target.act_fn_name)
-    site_args = (masks, delta_masks, routes, frozenset(live), has_delta, collect)
-    for layer, block in enumerate(target.layers):
-        pre = _decomposed_or_frozen(
-            components, site_name(layer, MLP_IN), block.W_in, resid, *site_args
+    live_sites = frozenset(component_masks)
+    capture_keys = capture_keys_by_site(requested_keys, capture_sources)
+    captures: dict[str, Array] = {}
+
+    def masked_site_output(site_name_: str, W: Array, site_input: Array) -> Array:
+        record_requested_value(captures, capture_keys.input_key_by_site.get(site_name_), site_input)
+        site_output = _decomposed_or_frozen_site_output(
+            components,
+            site_name_,
+            W,
+            site_input,
+            component_masks,
+            weight_delta_masks,
+            routes,
+            live_sites,
         )
+        record_requested_value(
+            captures, capture_keys.output_key_by_site.get(site_name_), site_output
+        )
+        return site_output
+
+    for layer, block in enumerate(target.layers):
+        pre = masked_site_output(site_name(layer, MLP_IN), block.W_in, resid)
         if block.b_in is not None:
             pre = pre + block.b_in
         hidden = act(pre)
-        out = _decomposed_or_frozen(
-            components, site_name(layer, MLP_OUT), block.W_out, hidden, *site_args
-        )
+        out = masked_site_output(site_name(layer, MLP_OUT), block.W_out, hidden)
         if block.b_out is not None:
             out = out + block.b_out
         resid = resid + out
-    return resid @ target.W_U
-
-
-def masked_output(
-    target: ResidMLPTarget,
-    components: ComponentStacks,
-    resid: Float[Array, "B d_embed"],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
-    routes: dict[str, Array] | None,
-    live: tuple[str, ...],
-    has_delta: bool,
-) -> Array:
-    return _run_masked(target, components, resid, masks, delta_masks, routes, live, has_delta, None)
-
-
-def masked_site_outputs(
-    target: ResidMLPTarget,
-    components: ComponentStacks,
-    resid: Float[Array, "B d_embed"],
-    masks: dict[str, Array],
-    delta_masks: dict[str, Array],
-    routes: dict[str, Array] | None,
-    live: tuple[str, ...],
-    has_delta: bool,
-) -> dict[str, Array]:
-    """Per-`live`-site decomposed output of the masked forward (SPEC S31)."""
-    collect: dict[str, Array] = {}
-    _run_masked(target, components, resid, masks, delta_masks, routes, live, has_delta, collect)
-    assert set(collect) == set(live), (sorted(collect), sorted(live))
-    return collect
+    assert set(captures) == set(requested_keys), (sorted(captures), sorted(requested_keys))
+    return ForwardResult.from_producer(
+        output=resid @ target.W_U,
+        capture_keys=requested_keys,
+        capture_values=tuple(captures[key] for key in requested_keys),
+    )
 
 
 def weight_deltas_fp32(
     target: ResidMLPTarget, components: ComponentStacks, sites: tuple[SiteSpec, ...]
 ) -> dict[str, Array]:
     """fp32 `W − (V@U)ᵀ` per site from fp32 masters (SPEC N2; faithfulness input)."""
-    out: dict[str, Array] = {}
+    weight_deltas: dict[str, Array] = {}
     for spec in sites:
         W = _frozen_site_weight(target, spec.name)
-        V, U = components.site(spec.name)
-        out[spec.name] = W.astype(jnp.float32) - (V.astype(jnp.float32) @ U.astype(jnp.float32)).T
-    return out
+        site_components = components.site(spec.name)
+        weight_deltas[spec.name] = (
+            W.astype(jnp.float32)
+            - (site_components.V.astype(jnp.float32) @ site_components.U.astype(jnp.float32)).T
+        )
+    return weight_deltas
 
 
 def resid_mlp_mse(
-    masked: Float[Array, "B n_features"], clean: Float[Array, "B n_features"]
+    masked_output: Float[Array, "B n_features"],
+    clean_output: Float[Array, "B n_features"],
 ) -> Array:
     """MSE recon over the model output, mean over batch × features (fp32)."""
-    masked = masked.astype(jnp.float32)
-    clean = clean.astype(jnp.float32)
-    return jnp.mean((masked - clean) ** 2)
+    masked_output = masked_output.astype(jnp.float32)
+    clean_output = clean_output.astype(jnp.float32)
+    return jnp.mean((masked_output - clean_output) ** 2)
 
 
 class ResidMLPDecomposedModel(eqx.Module):
@@ -384,81 +430,82 @@ class ResidMLPDecomposedModel(eqx.Module):
     ) -> Array:
         return resid_mlp_mse(masked_output, clean_output)
 
-    def clean_output(self, resid: Float[Array, "B d_embed"]) -> Array:
-        return clean_output(self.target, resid)
+    def _capture_grammar(self) -> SiteCaptureGrammar:
+        return SiteCaptureGrammar(sites=self.site_names, physical_source_of=lambda point: point)
 
-    def read_activations(
-        self, resid: Float[Array, "B d_embed"], wanted: tuple[str, ...]
-    ) -> dict[str, Array]:
-        inputs = site_inputs(self.target, resid)
-        return {k: inputs[k] for k in wanted}
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        assert set(sites) <= set(self.site_names), (sites, self.site_names)
+        return tuple(site_output_key(site) for site in sites)
 
-    def clean_output_and_activations(
-        self, resid: Float[Array, "B d_embed"], wanted: tuple[str, ...]
-    ) -> tuple[Array, dict[str, Array]]:
-        return self.clean_output(resid), self.read_activations(resid, wanted)
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        self._capture_grammar().resolve(keys)
+
+    def clean_forward(
+        self, resid: Float[Array, "B d_embed"], capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        ordered_capture_keys = tuple(sorted(capture_keys))
+        capture_sources = self._capture_grammar().resolve(ordered_capture_keys)
+        return clean_forward(self.target, resid, ordered_capture_keys, capture_sources)
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> ComponentStacks:
-        """Identity: ResidMLP weights are tiny + replicated, nothing to stack/gather/share."""
+        """Identity: ResidMLP weights are tiny + replicated."""
         return vu
 
-    def masked_output(
+    def component_activation_forward(
         self,
-        prepared: ComponentStacks,
-        resid: Float[Array, "B d_embed"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        prepared_weights: ComponentStacks,
+        inputs: Array,
+        /,
         *,
-        remat: bool,
-    ) -> Array:
-        def forward(
-            vu: ComponentStacks,
-            resid: Array,
-            masks: dict[str, Array],
-            delta_masks: dict[str, Array],
-            routes: dict[str, Array] | None,
-        ) -> Array:
-            return masked_output(
-                self.target, vu, resid, masks, delta_masks, routes, live, has_delta
-            )
-
-        forward = jax.checkpoint(forward) if remat else forward
-        return forward(prepared, resid, masks, delta_masks, routes)
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, Array]]:
+        del prepared_weights, inputs, capture_keys
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support component-activation harvest"
+        )
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
         return ci_lower
 
-    def masked_output_stochastic(
+    def masked_forward(
         self,
-        prepared: ComponentStacks,
+        prepared_weights: ComponentStacks,
         resid: Float[Array, "B d_embed"],
-        ci_stacked: dict[str, Array],
-        draw_key: Array,
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        /,
         *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> Array:
-        return run_stochastic_masked_output(
-            self, prepared, resid, ci_stacked, draw_key, routes, live, has_delta, remat=remat
-        )
+    ) -> ForwardResult:
+        ordered_capture_keys = tuple(sorted(capture_keys))
+        capture_sources = self._capture_grammar().resolve(ordered_capture_keys)
+        explicit_masking = materialize_masking(masking)
 
-    def masked_site_outputs(
-        self,
-        prepared: ComponentStacks,
-        resid: Float[Array, "B d_embed"],
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, Array]:
-        return masked_site_outputs(
-            self.target, prepared, resid, masks, delta_masks, routes, live, has_delta
+        def forward(
+            vu: ComponentStacks,
+            resid: Array,
+            component_masks: dict[str, Array],
+            weight_delta_masks: dict[str, Array] | None,
+            routes: dict[str, Array] | None,
+        ) -> ForwardResult:
+            return _run_masked(
+                self.target,
+                vu,
+                resid,
+                component_masks,
+                weight_delta_masks,
+                routes,
+                ordered_capture_keys,
+                capture_sources,
+            )
+
+        forward = jax.checkpoint(forward) if remat else forward
+        return forward(
+            prepared_weights,
+            resid,
+            explicit_masking.component_masks,
+            explicit_masking.weight_delta_masks,
+            explicit_masking.routes,
         )
 
     def weight_deltas(self, vu: ComponentStacks) -> dict[str, Array]:
@@ -551,7 +598,7 @@ def sample_sparse_features(
     batch: int,
     n_features: int,
     feature_probability: float,
-    generation_type: str,
+    generation_type: ResidMLPGenerationType,
 ) -> Float[Array, "B n_features"]:
     """Synthetic sparse-feature batch (torch `SparseFeatureDataset` with ResidMLP's
     `value_range=(-1, 1)`): each feature takes a `U[-1, 1]` value, gated by
@@ -566,8 +613,6 @@ def sample_sparse_features(
         case "exactly_one_active":
             active = jax.random.randint(gate_key, (batch,), 0, n_features)
             return values * jax.nn.one_hot(active, n_features)
-        case _:
-            raise AssertionError(f"unsupported ResidMLP generation type {generation_type!r}")
 
 
 def label_coeffs(n_features: int, use_trivial: bool, key: Array) -> Float[Array, " n_features"]:
@@ -641,7 +686,7 @@ def _trainable_target(trainable: "_ResidMLPTrainable", target: ResidMLPTarget) -
 def pretrain_resid_mlp_target(
     cfg: ResidMLPConfig,
     feature_probability: float,
-    generation_type: str,
+    generation_type: ResidMLPGenerationType,
     steps: int,
     batch_size: int,
     lr: float,
@@ -755,4 +800,4 @@ def single_feature_ci(
     """Feed the single-feature probe (embedded through `W_E`) and read the `lower_leaky`
     CI per site, `{site: [n_features, C]}`."""
     resid = single_feature_probe(n_features) @ model.target.W_E
-    return ci_fn(model.read_activations(resid, ci_fn.input_names), remat=False).lower
+    return ci_fn(model.clean_forward(resid, ci_fn.capture_keys).captures, remat=False).lower

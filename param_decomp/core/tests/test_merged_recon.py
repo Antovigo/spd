@@ -16,6 +16,7 @@ from param_decomp.core.components import ComponentStacks, init_component_stacks
 from param_decomp.core.configs import (
     AdamPGDConfig,
     FaithfulnessLossConfig,
+    HiddenActsReconstruction,
     ImportanceMinimalityLossConfig,
     MergedStochasticSubsetPPGDReconLossConfig,
     SourceShape,
@@ -38,6 +39,7 @@ def _merged_cfg(
     n_warmup: int,
     adv_fraction: ScheduleConfig | None = None,
     source_shape: SourceShape = "sc",
+    hidden_acts_reconstruction: HiddenActsReconstruction | None = None,
 ) -> MergedStochasticSubsetPPGDReconLossConfig:
     return MergedStochasticSubsetPPGDReconLossConfig(
         coeff=1.0,
@@ -53,6 +55,7 @@ def _merged_cfg(
             ),
         ),
         n_warmup_steps=n_warmup,
+        hidden_acts_reconstruction=hidden_acts_reconstruction,
     )
 
 
@@ -89,7 +92,7 @@ def test_merged_term_builds_one_entry():
     (entry,) = term.plan
     assert isinstance(entry.sources, MixedPersistentStochasticSources)
     assert entry.live_sites == ("a", "b")
-    assert entry.has_delta
+    assert entry.uses_weight_deltas
 
 
 @pytest.mark.slow
@@ -111,7 +114,14 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
 
-    merged = _merged_cfg(n_warmup, source_shape=source_shape)
+    merged = _merged_cfg(
+        n_warmup,
+        source_shape=source_shape,
+        hidden_acts_reconstruction=HiddenActsReconstruction(
+            coeff=0.2,
+            points=("resid.3", "resid.4", "resid.5", "resid.6"),
+        ),
+    )
     src = init_persistent_sources(
         model.site_names,
         tuple(s.C for s in model.sites),
@@ -130,7 +140,6 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
                     sources=src,
                     opt_state=init_sources_adam_state(src),
                     state_key=merged.type,
-                    coeff=merged.coeff,
                     adam=merged.optimizer,
                     n_warmup=merged.n_warmup_steps,
                 )
@@ -159,8 +168,7 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
         total_steps=100,
         remat_recon_forwards=True,
         remat_ci_fn=False,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=ci_fn.capture_keys,
     )
 
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
@@ -169,6 +177,7 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
         state, metrics = step(model, state, tokens, jax.random.PRNGKey(100 + i))
         assert all(bool(jnp.isfinite(v).all()) for v in metrics.values())
         assert "loss/MergedStochasticSubsetPPGDReconLoss" in metrics
+        assert "loss/MergedStochasticSubsetPPGDReconLoss/hidden_acts_reconstruction" in metrics
     assert int(state.training.step) == n_steps
 
     adv = state.training.adversaries[merged.type]
@@ -176,5 +185,6 @@ def test_merged_train_step_end_to_end(source_shape: SourceShape, src_leading: tu
     for v in adv.sources.values():
         assert float(v.min()) >= 0.0 and float(v.max()) <= 1.0
     assert isinstance(state.decomposition.components, ComponentStacks)
-    for _, (V, U) in state.decomposition.components.sites_items():
-        assert V.dtype == jnp.float32 and U.dtype == jnp.float32
+    for _, site_components in state.decomposition.components.sites_items():
+        assert site_components.V.dtype == jnp.float32
+        assert site_components.U.dtype == jnp.float32

@@ -10,9 +10,9 @@ Term wiring (all `param_decomp.core.train` + the `DecomposedModel` boundary):
   * faith — `faithfulness_loss(model.weight_deltas(frozen, vu))`
   * imp   — `importance_minimality_terms(ci_upper, p, beta, eps)` (per-site dicts)
   * stoch — per chunk: `mask = ci+(1-ci)*u`, fixed delta mask, fixed route over the
-            chunk's 3 sites; `model.masked_output(..., live=chunk)`; `kl_per_position`
+            chunk's 3 sites; `run_masked(model, ..., live=chunk)`; `kl_per_position`
             vs `model.clean_output` (the frozen path, SPEC S3). Mean over chunks.
-  * ppgd  — `source_masks` + `model.masked_output(..., live=all)`.
+  * ppgd  — `masks_from_sources` + `run_masked(model, ..., live=all)`.
 
 Bit-identical is impossible across RNG/FP backends; we assert each term within
 `RTOL`/`ATOL` of the torch value.
@@ -27,7 +27,6 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", False)
 
-from param_decomp.core.adversary import source_masks  # noqa: E402
 from param_decomp.core.components import (  # noqa: E402
     ComponentStacks,
     component_stacks_from_sites,
@@ -37,6 +36,7 @@ from param_decomp.core.losses import (  # noqa: E402
     faithfulness_loss,
     importance_minimality_terms,
 )
+from param_decomp.core.masking import masks_from_sources  # noqa: E402
 from param_decomp.targets.glu_transformer import (  # noqa: E402
     MLP_KINDS,
     FrozenAttn,
@@ -49,6 +49,7 @@ from param_decomp.targets.glu_transformer import (  # noqa: E402
     site_name,
 )
 from param_decomp.targets.losses import kl_per_position  # noqa: E402
+from param_decomp.targets.testing import run_clean, run_masked  # noqa: E402
 from param_decomp.vendored_jax.llama import LlamaConfig, rms_norm  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -148,7 +149,7 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
     model, vu, n_layers = _build(f)
     resid = jnp.asarray(f["resid"], dtype=FP)
 
-    clean = jax.lax.stop_gradient(model.clean_output(resid))
+    clean = jax.lax.stop_gradient(run_clean(model, resid))
 
     # fixtures key CI per kind as (B, T, L, C); the trainer keys per site.
     def per_site(prefix: str) -> dict[str, jnp.ndarray]:
@@ -169,7 +170,7 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
         ci_upper,
         jnp.asarray(float(f["_scalar_IMP_P"])),
         float(f["_scalar_IMP_EPS"]),
-        reference_token_count=n_positions,
+        reference_datapoint_count=n_positions,
     )
     imp = float(imp_lp + float(f["_scalar_IMP_BETA"]) * imp_freq)
 
@@ -182,7 +183,8 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
         masks = {s: ci_lower[s] + (1.0 - ci_lower[s]) * stoch_u[s] for s in chunk}
         delta_masks = {s: stoch_delta[s] for s in chunk}
         routes = {site_name(i, k): jnp.asarray(f[f"route_chunk{i}_{k}"]) for k in MLP_KINDS}
-        pred = model.masked_output(
+        pred = run_masked(
+            model,
             model.prepare_compute_weights(vu),
             resid,
             masks,
@@ -197,8 +199,9 @@ def compute_jax_terms(f: dict[str, np.ndarray]) -> dict[str, float]:
 
     # ---- ppgd (FIXED sources) ----
     source = per_site("ppgd_source")  # {site: (1, T, C+1)}
-    masks, delta_masks = source_masks(ci_lower, source, model.site_names)
-    pred = model.masked_output(
+    masks, delta_masks = masks_from_sources(ci_lower, source, model.site_names)
+    pred = run_masked(
+        model,
         model.prepare_compute_weights(vu),
         resid,
         masks,
@@ -240,8 +243,16 @@ def _suffix_with_split_mlp(
                 site = site_name(live_layer, kind)
                 if kind not in live_kinds:
                     return x_in @ W.T
-                V, U = vu.site(site)
-                return site_out(x_in, V, U, W, masks[site], delta_masks[site], None)
+                site_components = vu.site(site)
+                return site_out(
+                    x_in,
+                    site_components.V,
+                    site_components.U,
+                    W,
+                    masks[site],
+                    delta_masks[site],
+                    None,
+                )
 
             gate = frozen_or_live("gate", block.Wg, mlp_in)
             up = frozen_or_live("up", block.Wu, mlp_in)
@@ -261,7 +272,7 @@ def chunk_plan_static_gate_kl(f: dict[str, np.ndarray]) -> tuple[float, float]:
     KL); the test asserts they agree to fp32 tolerance."""
     model, vu, n_layers = _build(f)
     resid = jnp.asarray(f["resid"], dtype=FP)
-    clean = jax.lax.stop_gradient(model.clean_output(resid))
+    clean = jax.lax.stop_gradient(run_clean(model, resid))
 
     def per_site(prefix: str) -> dict[str, jnp.ndarray]:
         by_kind = {k: jnp.asarray(f[f"{prefix}_{k}"], dtype=FP) for k in MLP_KINDS}
@@ -277,8 +288,16 @@ def chunk_plan_static_gate_kl(f: dict[str, np.ndarray]) -> tuple[float, float]:
     masks = {s: ci_lower[s] + (1.0 - ci_lower[s]) * stoch_u[s] for s in live}
     delta_masks = {s: stoch_delta[s] for s in live}
 
-    gate_pred = model.masked_output(
-        model.prepare_compute_weights(vu), resid, masks, delta_masks, None, live, True, remat=False
+    gate_pred = run_masked(
+        model,
+        model.prepare_compute_weights(vu),
+        resid,
+        masks,
+        delta_masks,
+        None,
+        live,
+        True,
+        remat=False,
     )
     ref_pred = _suffix_with_split_mlp(
         model, vu, resid, live_layer, live_kinds, masks, delta_masks, n_layers

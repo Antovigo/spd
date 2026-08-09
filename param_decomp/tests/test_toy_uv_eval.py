@@ -9,10 +9,12 @@ from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import UVPlotsConfig
 from param_decomp.core.metrics import PNGImage
 from param_decomp.experiments import toy_uv_eval
+from param_decomp.targets.testing import capture_clean
 from param_decomp.targets.tms import (
     TMSConfig,
     init_tms_target,
     single_feature_probe,
+    site_input_tap_keys,
     site_specs,
     tms_decomposed_model,
 )
@@ -24,11 +26,17 @@ def _toy_setup():
     target = init_tms_target(cfg, jax.random.PRNGKey(3))
     model = tms_decomposed_model(cfg, target, sites)
     ci_fn = init_layerwise_mlp_ci_fn(
-        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(0)
+        LayerwiseMLPCIArch(
+            hidden_dims=(16,),
+            has_position_axis=False,
+            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        ),
+        sites,
+        jax.random.PRNGKey(0),
     )
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     probe = single_feature_probe(cfg.n_features)
-    ci = ci_fn(model.read_activations(probe, ci_fn.input_names), remat=False)
+    ci = ci_fn(capture_clean(model, probe, ci_fn.capture_keys), remat=False)
     return model, vu, ci.lower, ci.upper
 
 

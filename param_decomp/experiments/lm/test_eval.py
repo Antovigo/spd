@@ -5,6 +5,7 @@ Checks the torch-parity key set, the variant identities (rounded-at-impossible-t
 against a hand-rolled computation, and determinism in the key.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 import equinox as eqx
@@ -20,14 +21,33 @@ from param_decomp.core.ci_fn import (
     build_ci_fn,
 )
 from param_decomp.core.components import SiteSpec
-from param_decomp.core.model import DecomposedModel, run_stochastic_masked_output
+from param_decomp.core.losses import relative_squared_error
+from param_decomp.core.model import (
+    EMPTY_CAPTURE_KEYS,
+    CaptureKeys,
+    DecomposedModel,
+    ForwardResult,
+    Masking,
+)
+from param_decomp.core.recon import OutputAndHiddenActsReconstruction
 from param_decomp.core.recon_eval import FreshPGDReconEval
-from param_decomp.experiments.lm.eval import make_eval_step, next_token_cross_entropy
+from param_decomp.experiments.lm.eval import (
+    make_eval_step,
+    next_token_cross_entropy,
+)
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import (
     tiny_glu_cfg,
     tiny_glu_decomposed_lm,
 )
+
+
+def test_row_masked_relative_squared_error_excludes_padding_from_both_sums():
+    clean = jnp.array([[[1.0, 2.0]], [[100.0, 200.0]]])
+    masked = jnp.array([[[2.0, 0.0]], [[-300.0, 400.0]]])
+    row_mask = jnp.array([1.0, 0.0])
+    # Valid row only: numerator = 1 + 4; denominator = 1 + 4.
+    assert float(relative_squared_error(masked, clean, valid_row_mask=row_mask)) == 1.0
 
 
 def _build_ci_fn(model: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
@@ -67,68 +87,47 @@ class _PositionlessStub(eqx.Module):
         del masked_output, clean_output
         raise AssertionError("positionless stub fn must not be called")
 
-    def clean_output(self, resid: Any) -> Any:
-        del resid
+    def site_output_keys(self, sites: tuple[str, ...]) -> tuple[str, ...]:
+        del sites
         raise AssertionError("positionless stub fn must not be called")
 
-    def read_activations(self, resid: Any, wanted: tuple[str, ...]) -> dict[str, jax.Array]:
-        del resid, wanted
-        raise AssertionError("positionless stub fn must not be called")
+    def assert_hidden_acts_reconstruction_points(self, keys: tuple[str, ...]) -> None:
+        del keys
 
-    def clean_output_and_activations(
-        self, resid: Any, wanted: tuple[str, ...]
-    ) -> tuple[Any, dict[str, jax.Array]]:
-        del resid, wanted
+    def clean_forward(
+        self, resid: Any, capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+    ) -> ForwardResult:
+        del resid, capture_keys
         raise AssertionError("positionless stub fn must not be called")
 
     def prepare_compute_weights(self, vu: Any) -> Any:
         return vu
 
-    def masked_output(
+    def component_activation_forward(
         self,
-        vu: Any,
-        resid: Any,
-        masks: Any,
-        delta_masks: Any,
-        routes: Any,
-        live: tuple[str, ...],
-        has_delta: bool,
+        prepared_weights: Any,
+        inputs: Any,
+        /,
         *,
-        remat: bool,
-    ) -> Any:
-        del vu, resid, masks, delta_masks, routes, live, has_delta, remat
-        raise AssertionError("positionless stub fn must not be called")
+        capture_keys: CaptureKeys,
+    ) -> tuple[ForwardResult, dict[str, jax.Array]]:
+        del prepared_weights, inputs, capture_keys
+        raise NotImplementedError
 
     def stack_ci(self, ci_lower: dict[str, Any]) -> dict[str, Any]:
         return ci_lower
 
-    def masked_output_stochastic(
+    def masked_forward(
         self,
-        prepared: Any,
-        resid: Any,
-        ci_stacked: Any,
-        draw_key: Any,
-        routes: Any,
-        live: tuple[str, ...],
-        has_delta: bool,
+        prepared_weights: Any,
+        inputs: Any,
+        /,
         *,
+        masking: Masking,
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         remat: bool,
-    ) -> Any:
-        return run_stochastic_masked_output(
-            self, prepared, resid, ci_stacked, draw_key, routes, live, has_delta, remat=remat
-        )
-
-    def masked_site_outputs(
-        self,
-        vu: Any,
-        resid: Any,
-        masks: Any,
-        delta_masks: Any,
-        routes: Any,
-        live: tuple[str, ...],
-        has_delta: bool,
-    ) -> dict[str, jax.Array]:
-        del vu, resid, masks, delta_masks, routes, live, has_delta
+    ) -> ForwardResult:
+        del prepared_weights, inputs, masking, capture_keys, remat
         raise AssertionError("positionless stub fn must not be called")
 
     def weight_deltas(self, vu: Any) -> dict[str, jax.Array]:
@@ -172,13 +171,12 @@ def test_eval_step_keys_identities_and_determinism():
     # ci_alive_threshold=-1 makes every component alive -> L0 == C exactly.
     eval_step = make_eval_step(
         model,
+        ci_fn.capture_keys,
         rounding_threshold=-1.0,
         ci_alive_threshold=-1.0,
         l0_group_patterns=None,
         fresh_pgd=None,
-        mesh=None,
         n_valid_rows=None,
-        compiler_options={},
     )
     out = eval_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
 
@@ -212,13 +210,12 @@ def test_eval_step_keys_identities_and_determinism():
 
     eval_step_dead = make_eval_step(
         model,
+        ci_fn.capture_keys,
         rounding_threshold=-1.0,
         ci_alive_threshold=1.5,
         l0_group_patterns=None,
         fresh_pgd=None,
-        mesh=None,
         n_valid_rows=None,
-        compiler_options={},
     )
     out_dead = eval_step_dead(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     for site in model.site_names:
@@ -242,23 +239,21 @@ def test_eval_step_fresh_pgd_probe():
 
     ascended = make_eval_step(
         model,
+        ci_fn.capture_keys,
         rounding_threshold=0.0,
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
         fresh_pgd=FreshPGDReconEval(name="fresh_probe", n_steps=8, step_size=0.1),
-        mesh=None,
         n_valid_rows=None,
-        compiler_options={},
     )
     unascended = make_eval_step(
         model,
+        ci_fn.capture_keys,
         rounding_threshold=0.0,
         ci_alive_threshold=0.0,
         l0_group_patterns=None,
         fresh_pgd=FreshPGDReconEval(name="fresh_probe", n_steps=0, step_size=0.1),
-        mesh=None,
         n_valid_rows=None,
-        compiler_options={},
     )
     out = ascended(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     out0 = unascended(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -270,6 +265,81 @@ def test_eval_step_fresh_pgd_probe():
     )
     out_same = ascended(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     assert jnp.array_equal(out["loss/fresh_probe"], out_same["loss/fresh_probe"])
+
+
+def test_eval_step_fresh_pgd_hidden_acts_reconstruction_uses_and_logs_combined_objective():
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 4, 8))
+    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+
+    from param_decomp.core.components import init_component_stacks
+
+    vu = init_component_stacks(sites, jax.random.PRNGKey(1))
+    ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
+    hidden_acts_reconstruction = OutputAndHiddenActsReconstruction(
+        coeff=3.0, points=("resid.5", "resid.8")
+    )
+    eval_step = make_eval_step(
+        model,
+        ci_fn.capture_keys,
+        rounding_threshold=0.0,
+        ci_alive_threshold=0.0,
+        l0_group_patterns=None,
+        fresh_pgd=FreshPGDReconEval(
+            n_steps=2, step_size=0.1, reconstruction=hidden_acts_reconstruction
+        ),
+        n_valid_rows=None,
+    )
+    out = eval_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
+
+    name = "loss/PGDReconLoss"
+    per_point = [
+        float(out[f"{name}/hidden_acts_reconstruction/{point}"])
+        for point in hidden_acts_reconstruction.points
+    ]
+    aggregate = float(out[f"{name}/hidden_acts_reconstruction"])
+    assert aggregate == pytest.approx(sum(per_point) / len(per_point), rel=1e-6)
+    assert float(out[name]) == pytest.approx(
+        float(out[f"{name}/e2e"]) + hidden_acts_reconstruction.coeff * aggregate, rel=1e-6
+    )
+
+
+def test_eval_step_fresh_pgd_ascends_hidden_acts_reconstruction_objective():
+    """Changing only the auxiliary coefficient changes a one-step PGD trajectory."""
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 4, 8))
+    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+
+    from param_decomp.core.components import init_component_stacks
+
+    vu = init_component_stacks(sites, jax.random.PRNGKey(1))
+    ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
+    points = ("resid.5", "resid.8")
+
+    def run(coeff: float) -> Mapping[str, jax.Array]:
+        step = make_eval_step(
+            model,
+            ci_fn.capture_keys,
+            rounding_threshold=0.0,
+            ci_alive_threshold=0.0,
+            l0_group_patterns=None,
+            fresh_pgd=FreshPGDReconEval(
+                n_steps=1,
+                step_size=0.2,
+                reconstruction=OutputAndHiddenActsReconstruction(coeff=coeff, points=points),
+            ),
+            n_valid_rows=None,
+        )
+        return step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
+
+    low = run(1e-12)
+    high = run(100.0)
+    keys = ("loss/PGDReconLoss/e2e", "loss/PGDReconLoss/hidden_acts_reconstruction")
+    assert any(not jnp.array_equal(low[key], high[key]) for key in keys), (
+        "hidden-activation reconstruction coefficient did not change the one-step PGD trajectory"
+    )
 
 
 @pytest.mark.slow
@@ -304,12 +374,12 @@ def test_eval_step_fresh_pgd_probe_device_count_invariant():
     token_ids = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
 
     single_step = make_eval_step(
-        model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, fresh_pgd=FreshPGDReconEval(n_steps=8, step_size=0.1), mesh=None, n_valid_rows=None, compiler_options={},
+        model, ci_fn.capture_keys, rounding_threshold=0.0, ci_alive_threshold=0.0,
+        l0_group_patterns=None, fresh_pgd=FreshPGDReconEval(n_steps=8, step_size=0.1), n_valid_rows=None,
     )  # fmt: skip
     sharded_step = make_eval_step(
-        model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=None, fresh_pgd=FreshPGDReconEval(n_steps=8, step_size=0.1), mesh=mesh, n_valid_rows=None, compiler_options={},
+        model, ci_fn.capture_keys, rounding_threshold=0.0, ci_alive_threshold=0.0,
+        l0_group_patterns=None, fresh_pgd=FreshPGDReconEval(n_steps=8, step_size=0.1), mesh=mesh, n_valid_rows=None,
     )  # fmt: skip
 
     out_single = single_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
@@ -341,8 +411,8 @@ def test_eval_step_l0_groups_sum_member_sites():
 
     groups = {"layer_4": ("layers.4.*",), "total": ("*",)}
     eval_step = make_eval_step(
-        model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-        l0_group_patterns=groups, fresh_pgd=None, mesh=None, n_valid_rows=None, compiler_options={},
+        model, ci_fn.capture_keys, rounding_threshold=0.0, ci_alive_threshold=0.0,
+        l0_group_patterns=groups, fresh_pgd=None, n_valid_rows=None,
     )  # fmt: skip
     out = eval_step(model, vu, ci_fn, token_ids, jax.random.PRNGKey(5))
     layer4_sites = [s for s in model.site_names if s.startswith("layers.4.")]
@@ -353,8 +423,8 @@ def test_eval_step_l0_groups_sum_member_sites():
 
     with pytest.raises(AssertionError, match="matches no sites"):
         make_eval_step(
-            model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-            l0_group_patterns={"ghost": ("layers.99.*",)}, fresh_pgd=None, mesh=None, n_valid_rows=None, compiler_options={},
+            model, ci_fn.capture_keys, rounding_threshold=0.0, ci_alive_threshold=0.0,
+            l0_group_patterns={"ghost": ("layers.99.*",)}, fresh_pgd=None, n_valid_rows=None,
         )  # fmt: skip
 
 
@@ -365,8 +435,8 @@ def test_make_eval_step_rejects_positionless_target():
     assert not model.has_position_axis
     with pytest.raises(AssertionError, match="LM-only"):
         make_eval_step(
-            model, rounding_threshold=0.0, ci_alive_threshold=0.0,
-            l0_group_patterns=None, fresh_pgd=None, mesh=None, n_valid_rows=None, compiler_options={},
+            model, frozenset(("linear1",)), rounding_threshold=0.0, ci_alive_threshold=0.0,
+            l0_group_patterns=None, fresh_pgd=None, n_valid_rows=None,
         )  # fmt: skip
 
 
@@ -389,13 +459,18 @@ def test_eval_step_n_valid_rows_masks_pad_tail():
     tokens = jax.random.randint(jax.random.PRNGKey(3), (b, t), 0, cfg.vocab_size)
     padded = jnp.concatenate([tokens, jnp.zeros((pad, t), tokens.dtype)], axis=0)
 
+    fresh_pgd = FreshPGDReconEval(
+        n_steps=4,
+        step_size=0.1,
+        reconstruction=OutputAndHiddenActsReconstruction(coeff=2.0, points=("resid.5", "resid.8")),
+    )
     reference_step = make_eval_step(
-        model, rounding_threshold=0.5, ci_alive_threshold=0.0, l0_group_patterns=None,
-        fresh_pgd=FreshPGDReconEval(n_steps=4, step_size=0.1), mesh=None, n_valid_rows=None, compiler_options={},
+        model, ci_fn.capture_keys, rounding_threshold=0.5, ci_alive_threshold=0.0, l0_group_patterns=None,
+        fresh_pgd=fresh_pgd, n_valid_rows=None,
     )  # fmt: skip
     masked_step = make_eval_step(
-        model, rounding_threshold=0.5, ci_alive_threshold=0.0, l0_group_patterns=None,
-        fresh_pgd=FreshPGDReconEval(n_steps=4, step_size=0.1), mesh=None, n_valid_rows=b, compiler_options={},
+        model, ci_fn.capture_keys, rounding_threshold=0.5, ci_alive_threshold=0.0, l0_group_patterns=None,
+        fresh_pgd=fresh_pgd, n_valid_rows=b,
     )  # fmt: skip
     reference = reference_step(model, vu, ci_fn, tokens, jax.random.PRNGKey(5))
     masked = masked_step(model, vu, ci_fn, padded, jax.random.PRNGKey(5))

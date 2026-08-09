@@ -28,11 +28,13 @@ from param_decomp.core.configs import (
     AdamPGDConfig,
     ChunkwiseSubsetReconLossConfig,
     FaithfulnessLossConfig,
+    HiddenActsReconstruction,
     ImportanceMinimalityLossConfig,
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
     UniformKSubsetRoutingConfig,
 )
+from param_decomp.core.model import MaterializedMasking
 from param_decomp.core.objective import build_objective
 from param_decomp.core.schedule import Knot, ScheduleConfig
 from param_decomp.core.train import (
@@ -43,6 +45,7 @@ from param_decomp.core.train import (
     make_train_step,
 )
 from param_decomp.targets.glu_transformer import (
+    GLUDecomposedModel,
     canonical_site_cs,
     glu_site_specs,
     mlp_family_site_cs,
@@ -50,9 +53,19 @@ from param_decomp.targets.glu_transformer import (
     site_name,
 )
 from param_decomp.targets.testing import (
+    capture_clean,
+    capture_site_outputs,
+    run_clean,
+    run_masked,
     tiny_glu_cfg,
     tiny_glu_chunkwise_ci_fn,
     tiny_glu_decomposed_lm,
+)
+from param_decomp.targets.transformer_taps import (
+    attention_input_tap_key,
+    attention_output_tap_key,
+    mlp_hidden_tap_key,
+    mlp_input_tap_key,
 )
 from param_decomp.vendored_jax.llama import LlamaConfig
 
@@ -67,6 +80,29 @@ _QVDOWN_SITE_CS = (
     SiteC("layers.4.mlp.down_proj", 8),
 )
 """Attention + MLP sites on one layer with heterogeneous per-site C."""
+
+
+def _site_input_key(site: str) -> str:
+    layer, kind = parse_site_name(site)
+    match kind:
+        case "q" | "k" | "v":
+            return attention_input_tap_key(layer)
+        case "o":
+            return attention_output_tap_key(layer)
+        case "gate" | "up":
+            return mlp_input_tap_key(layer)
+        case "down":
+            return mlp_hidden_tap_key(layer)
+        case _:
+            raise AssertionError(kind)
+
+
+def _capture_site_inputs(
+    model: GLUDecomposedModel, tokens: jax.Array, sites: tuple[str, ...]
+) -> dict[str, jax.Array]:
+    input_keys = tuple(_site_input_key(site) for site in sites)
+    captures = capture_clean(model, tokens, tuple(dict.fromkeys(input_keys)))
+    return dict(zip(sites, (captures[key] for key in input_keys), strict=True))
 
 
 def test_site_name_helpers():
@@ -127,24 +163,42 @@ def test_masked_component_activations_pre_mask_and_matches_outputs():
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
     names = model.site_names
-    prepared = model.prepare_compute_weights(vu)
-    zeros_delta = {s: jnp.zeros((b, t)) for s in names}
-    ones = {s: jnp.ones((b, t, C)) for s in names}
+    prepared_weights = model.prepare_compute_weights(vu)
+    component_masks = {site: jnp.ones((b, t, C)) for site in names}
+    masking = MaterializedMasking(component_masks=component_masks)
 
-    acts = model.masked_component_activations(
-        prepared, tokens, ones, zeros_delta, None, names, False
-    )
+    component_activations = model.masked_component_activations(prepared_weights, tokens, masking)
     # `acts[s]` is `x@V` BEFORE the per-component `*mask` (shape (b, t, C)). With all-ones
     # masks and no delta the site OUTPUT is exactly `(x@V) @ U`, so projecting the collected
-    # activation through U reproduces `masked_site_outputs` — pinning that we collected the
+    # activation through U reproduces the captured site output — pinning that we collected the
     # pre-mask coefficient, not the post-mask/post-U output.
-    outputs = model.masked_site_outputs(prepared, tokens, ones, zeros_delta, None, names, False)
+    outputs = capture_site_outputs(model, prepared_weights, tokens, masking)
     for s in names:
-        assert acts[s].shape == (b, t, C)
-        assert jnp.all(jnp.isfinite(acts[s]))
-        _, u = vu.site(s)
-        expected = acts[s].astype(jnp.float32) @ u.astype(jnp.float32)
+        assert component_activations[s].shape == (b, t, C)
+        assert jnp.all(jnp.isfinite(component_activations[s]))
+        U = vu.site(s).U
+        expected = component_activations[s].astype(jnp.float32) @ U.astype(jnp.float32)
         assert jnp.allclose(outputs[s].astype(jnp.float32), expected, atol=1e-2), s
+
+
+def test_frozen_component_activations_match_captured_inputs_times_v():
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, _QVDOWN_SITE_CS)
+    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    components = init_component_stacks(sites, jax.random.PRNGKey(1))
+    prepared_weights = model.prepare_compute_weights(components)
+    tokens = jax.random.randint(jax.random.PRNGKey(2), (2, 16), 0, cfg.vocab_size)
+
+    requested_keys = ("resid.0", attention_input_tap_key(4))
+    forward_result, actual = model.component_activation_forward(
+        prepared_weights, tokens, capture_keys=frozenset(requested_keys)
+    )
+    assert set(forward_result.captures) == set(requested_keys)
+    site_inputs = _capture_site_inputs(model, tokens, model.site_names)
+    for site in model.site_names:
+        layer, kind = parse_site_name(site)
+        expected = site_inputs[site] @ prepared_weights[kind]["V"][layer]
+        assert jnp.array_equal(actual[site], expected), site
 
 
 @pytest.mark.parametrize("first,last", [(4, 4), (3, 6)])
@@ -157,13 +211,13 @@ def test_clean_path_and_masked_identity(first: int, last: int):
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    clean = model.clean_output(tokens)
+    clean = run_clean(model, tokens)
     assert clean.shape == (b, t, cfg.vocab_size)
 
     # SPEC S2: a masked forward with NO live sites is the frozen path — bit-identical
     # to the clean target.
-    none_masked = model.masked_output(
-        model.prepare_compute_weights(vu), tokens, {}, {}, None, (), True, remat=False
+    none_masked = run_masked(
+        model, model.prepare_compute_weights(vu), tokens, {}, {}, None, (), True, remat=False
     )
     assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
 
@@ -172,7 +226,8 @@ def test_clean_path_and_masked_identity(first: int, last: int):
     names = model.site_names
     ones_masks = {s: jnp.ones((b, t, C)) for s in names}
     ones_delta = {s: jnp.ones((b, t)) for s in names}
-    full = model.masked_output(
+    full = run_masked(
+        model,
         model.prepare_compute_weights(vu),
         tokens,
         ones_masks,
@@ -184,7 +239,7 @@ def test_clean_path_and_masked_identity(first: int, last: int):
     )
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
-    site_in = model.read_activations(tokens, model.site_names)
+    site_in = _capture_site_inputs(model, tokens, model.site_names)
     assert set(site_in) == set(names)
     deltas = model.weight_deltas(vu)
     d, di = cfg.n_embd, cfg.n_intermediate
@@ -204,19 +259,21 @@ def test_attention_sites_clean_and_masked_identity():
     # per-site heterogeneous C is preserved end to end
     assert {s.name: s.C for s in model.sites} == {sc.name: sc.C for sc in _QVDOWN_SITE_CS}
     for spec in model.sites:
-        V, U = vu.site(spec.name)
-        assert V.shape == (spec.d_in, spec.C) and U.shape == (spec.C, spec.d_out)
+        site_components = vu.site(spec.name)
+        assert site_components.V.shape == (spec.d_in, spec.C)
+        assert site_components.U.shape == (spec.C, spec.d_out)
 
-    clean = model.clean_output(tokens)
-    none_masked = model.masked_output(
-        model.prepare_compute_weights(vu), tokens, {}, {}, None, (), True, remat=False
+    clean = run_clean(model, tokens)
+    none_masked = run_masked(
+        model, model.prepare_compute_weights(vu), tokens, {}, {}, None, (), True, remat=False
     )
     assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
 
     names = model.site_names
     ones_masks = {s.name: jnp.ones((b, t, s.C)) for s in model.sites}
     ones_delta = {s: jnp.ones((b, t)) for s in names}
-    full = model.masked_output(
+    full = run_masked(
+        model,
         model.prepare_compute_weights(vu),
         tokens,
         ones_masks,
@@ -237,7 +294,8 @@ def test_attention_sites_clean_and_masked_identity():
     assert q_site in layer4
     zero_mask = {n: jnp.zeros((b, t, site_c[n])) for n in layer4}
     zero_delta = {n: jnp.zeros((b, t)) for n in layer4}
-    ablated = model.masked_output(
+    ablated = run_masked(
+        model,
         model.prepare_compute_weights(vu),
         tokens,
         zero_mask,
@@ -249,11 +307,11 @@ def test_attention_sites_clean_and_masked_identity():
     )
     assert not jnp.allclose(clean, ablated, atol=1e-4), "ablating layer 4 did nothing"
 
-    site_in = model.read_activations(tokens, model.site_names)
-    assert set(site_in) == set(names)
-    # q and v read the same post-LN1 residual; down reads the (di,) MLP inner acts
-    assert jnp.array_equal(site_in[q_site], site_in["layers.4.self_attn.v_proj"])
-    assert site_in["layers.4.mlp.down_proj"].shape == (b, t, cfg.n_intermediate)
+    input_keys = model._capture_grammar().block_tap_keys((4,))
+    site_in = capture_clean(model, tokens, input_keys)
+    assert set(site_in) == set(input_keys)
+    assert attention_input_tap_key(4) in site_in
+    assert site_in[mlp_hidden_tap_key(4)].shape == (b, t, cfg.n_intermediate)
 
     deltas = model.weight_deltas(vu)
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
@@ -263,7 +321,7 @@ def test_attention_sites_clean_and_masked_identity():
 
 def test_clean_output_and_activations_shares_the_forward():
     """The fused accessor must be exactly the two separate calls (SPEC S3+S4): taps
-    bit-equal to `read_activations`, and — when the taps reach the last block, every
+    bit-equal to clean capture, and — when the taps reach the last block, every
     production config — clean logits bit-equal to `clean_output` (one full-depth scan,
     no tail; a mid-stack tap cutoff may recompile the tail within fp32 tolerance).
     Also pins tap invariance to the `wanted` set (a tap can't depend on its neighbors)."""
@@ -272,17 +330,19 @@ def test_clean_output_and_activations_shares_the_forward():
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     tokens = jax.random.randint(jax.random.PRNGKey(2), (2, 16), 0, cfg.vocab_size)
 
-    resid_taps = tuple(f"resid.{i}" for i in range(cfg.n_layer))
-    wanted = resid_taps + model.site_names
-    logits, taps = model.clean_output_and_activations(tokens, wanted)
-    assert jnp.array_equal(logits, model.clean_output(tokens)), "fused clean logits drifted"
-    separate = model.read_activations(tokens, wanted)
+    resid_taps = tuple(f"resid.{i}" for i in range(cfg.n_layer + 1))
+    wanted = resid_taps + model._capture_grammar().block_tap_keys((3, 4, 5, 6))
+    clean_forward_result = model.clean_forward(tokens, frozenset(wanted))
+    logits = clean_forward_result.output
+    taps = clean_forward_result.captures
+    assert jnp.array_equal(logits, run_clean(model, tokens)), "fused clean logits drifted"
+    separate = capture_clean(model, tokens, wanted)
     assert set(taps) == set(wanted)
     for key in wanted:
         assert jnp.array_equal(taps[key], separate[key]), key
 
-    subset = ("resid.0", "resid.5", site_name(4, "gate"))
-    for key, tap in model.read_activations(tokens, subset).items():
+    subset = ("resid.0", "resid.5", mlp_input_tap_key(4))
+    for key, tap in capture_clean(model, tokens, subset).items():
         assert jnp.array_equal(tap, separate[key]), key
 
 
@@ -295,8 +355,9 @@ def test_o_site_masks_attention_output():
     b, t = 2, 16
     tokens = jax.random.randint(jax.random.PRNGKey(2), (b, t), 0, cfg.vocab_size)
 
-    clean = model.clean_output(tokens)
-    ones = model.masked_output(
+    clean = run_clean(model, tokens)
+    ones = run_masked(
+        model,
         model.prepare_compute_weights(vu),
         tokens,
         {o_site: jnp.ones((b, t, 8))},
@@ -308,7 +369,7 @@ def test_o_site_masks_attention_output():
     )
     assert jnp.allclose(clean, ones, atol=1e-4)
     # o's clean site input is the pre-o_proj attention output, shape (b, t, qd)
-    site_in = model.read_activations(tokens, model.site_names)
+    site_in = _capture_site_inputs(model, tokens, model.site_names)
     assert site_in[o_site].shape == (b, t, cfg.n_head * cfg.head_dim)
 
 
@@ -327,6 +388,10 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
     ci_fn = tiny_glu_chunkwise_ci_fn(model, jax.random.PRNGKey(2), n_blocks=2)
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
+    first_decomposed = min(parse_site_name(site.name)[0] for site in sites)
+    hidden_acts_reconstruction_points = tuple(
+        f"resid.{block}" for block in range(first_decomposed + 1, cfg.n_layer + 1)
+    )
 
     src = init_persistent_sources(
         model.site_names,
@@ -359,7 +424,6 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
                     sources=src,
                     opt_state=init_sources_adam_state(src),
                     state_key=ppgd_cfg.type,
-                    coeff=ppgd_cfg.coeff,
                     adam=ppgd_cfg.optimizer,
                     n_warmup=ppgd_cfg.n_warmup_steps,
                 )
@@ -381,6 +445,9 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
                 coeff=0.5,
                 sites_per_chunk=3,
                 n_samples=1,
+                hidden_acts_reconstruction=HiddenActsReconstruction(
+                    coeff=0.2, points=hidden_acts_reconstruction_points
+                ),
             ),
             ppgd_cfg,
         ),
@@ -394,8 +461,7 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
         total_steps=100,
         remat_recon_forwards=True,
         remat_ci_fn=False,
-        mesh=None,
-        compiler_options={},
+        ci_capture_keys=state.decomposition.ci_fn.capture_keys,
     )
 
     tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
@@ -406,6 +472,11 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
         losses.append({k: float(v) for k, v in m.items()})
 
     assert all(jnp.isfinite(jnp.array(list(m.values()))).all() for m in losses)
+    assert "loss/ChunkwiseSubsetReconLoss/hidden_acts_reconstruction" in losses[-1]
+    for point in hidden_acts_reconstruction_points:
+        assert jnp.isfinite(
+            losses[-1][f"loss/ChunkwiseSubsetReconLoss/hidden_acts_reconstruction/{point}"]
+        )
     assert int(state.training.step) == n_steps
     # SPEC S13: n_warmup + 1 source-Adam updates per training step, moments persist.
     ppgd_adv = state.training.adversaries["PersistentPGDReconLoss"]
@@ -417,8 +488,9 @@ def test_step_trains_and_has_vpd_signature(site_cs: tuple[SiteC, ...]):
     assert losses[-1]["p_imp"] < 2.0
     # fp32 masters preserved through updates (SPEC N1).
     assert isinstance(state.decomposition.components, ComponentStacks)
-    for _, (V, U) in state.decomposition.components.sites_items():
-        assert V.dtype == jnp.float32 and U.dtype == jnp.float32
+    for _, site_components in state.decomposition.components.sites_items():
+        assert site_components.V.dtype == jnp.float32
+        assert site_components.U.dtype == jnp.float32
     assert isinstance(state.decomposition.ci_fn, ChunkwiseTransformerCIFn)
     assert state.decomposition.ci_fn.chunks.in_proj_w.dtype == jnp.float32
 
@@ -429,7 +501,7 @@ def test_faith_warmup_decreases_faith():
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt, compiler_options={})
+    wstep = make_faith_warmup_step(opt)
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss: float | None = None
     loss = None
@@ -446,12 +518,12 @@ def test_component_stacks_shapes_fp32():
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     d, di = cfg.n_embd, cfg.n_intermediate
     qd, kvd = cfg.n_head * cfg.head_dim, cfg.n_kv_head * cfg.head_dim
-    V_q, U_q = vu.site("layers.4.self_attn.q_proj")
-    V_v, U_v = vu.site("layers.4.self_attn.v_proj")
-    V_d, U_d = vu.site("layers.4.mlp.down_proj")
-    assert V_q.shape == (d, 8) and U_q.shape == (8, qd)
-    assert V_v.shape == (d, 12) and U_v.shape == (12, kvd)
-    assert V_d.shape == (di, 8) and U_d.shape == (8, d)
+    q = vu.site("layers.4.self_attn.q_proj")
+    v = vu.site("layers.4.self_attn.v_proj")
+    down = vu.site("layers.4.mlp.down_proj")
+    assert q.V.shape == (d, 8) and q.U.shape == (8, qd)
+    assert v.V.shape == (d, 12) and v.U.shape == (12, kvd)
+    assert down.V.shape == (di, 8) and down.U.shape == (8, d)
     assert isinstance(vu, ComponentStacks)
     assert all(a.dtype == jnp.float32 for pair in vu.stacks.values() for a in pair)
 
@@ -490,6 +562,7 @@ def test_fresh_pgd_adversary_step():
         )  # fmt: skip
 
     def run_step(n_ascent_steps: int) -> tuple[TrainState, dict[str, jax.Array]]:
+        state = make_state()
         loss_terms = build_objective(
             (
                 FaithfulnessLossConfig(coeff=1e7),
@@ -523,11 +596,10 @@ def test_fresh_pgd_adversary_step():
             total_steps=100,
             remat_recon_forwards=False,
             remat_ci_fn=False,
-            mesh=None,
-            compiler_options={},
+            ci_capture_keys=state.decomposition.ci_fn.capture_keys,
         )
         tokens = jax.random.randint(jax.random.PRNGKey(4), (2, seq), 0, cfg.vocab_size)
-        return step(model, make_state(), tokens, jax.random.PRNGKey(100))
+        return step(model, state, tokens, jax.random.PRNGKey(100))
 
     state, metrics = run_step(n_ascent_steps=1)
     assert "loss/PGDReconLoss" in metrics

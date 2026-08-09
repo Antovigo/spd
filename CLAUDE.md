@@ -125,10 +125,14 @@ JAX **conforms** to it). For the real entry points, read `param_decomp/core/CLAU
 and `param_decomp/core/SPEC.md`. In one breath:
 
 - **`DecomposedModel`** (`param_decomp/core/model.py`) — THE model interface: ordered `sites` +
-  pure fns (`clean_output` / `read_activations` / `masked_output` / `weight_deltas`) on an
-  `eqx.Module` carrying the frozen target weights as fields (the trainable `vu` is an
-  explicit method arg). Generic over vendored LM targets. There is one recon
-  semantics: chunkwise masking through the full token-input forward, KL on final logits.
+  pure `clean_forward` / `masked_forward` / `prepare_compute_weights` / `weight_deltas`
+  methods on an `eqx.Module` carrying frozen target weights as fields (trainable `vu` is an
+  explicit method arg). Core passes immutable capture-key frozensets into the forwards; the
+  target validates and canonicalizes them into its private slot layout when JAX first traces
+  the call. Every capture key names exactly one physical activation, and
+  `ForwardResult.captures` carries that one-to-one dictionary directly. Generic over LM and
+  toy targets. There is one recon semantics:
+  chunkwise masking through the full target-input forward, compared at the target output.
 - **`run_decomposition_training(...)`** (`param_decomp/core/run.py`) — the generic ENGINE: the
   one train loop every target runs through (init/restore/finetune/faith-warmup, the
   recon-grid step factory, orbax checkpointing, schedules, metrics, in-loop slow eval,
@@ -293,6 +297,7 @@ entry point).
 |---|---|---|
 | `python -m param_decomp.experiments.lm.run` | `param_decomp/experiments/lm/run.py` | The LM decomposition composition root (reads YAML, builds the target, calls the core engine) |
 | `python -m param_decomp.pretrain.train` | `param_decomp/pretrain/train.py` | The core in-house target-LM pretrainer |
+| `python -m param_decomp.experiments.lm.run_targeted` | `param_decomp/experiments/lm/run_targeted.py` | The TARGETED (tPD, SPEC §11) LM decomposition root — takes the targeted run shape (`prompts:` + `nontarget:`); refuses a plain config |
 | `python -m param_decomp.experiments.{tms,resid_mlp}.run` | `experiments/{tms,resid_mlp}/run.py` | The CPU toy decomposition composition roots |
 | `python -m param_decomp.harvest.scripts.{run_worker,run_merge,run_intruder}` | `harvest/scripts/` | Component-statistics harvest: per-rank worker, merge, intruder eval |
 | `python -m param_decomp.autointerp.scripts.run_interpret` | `autointerp/scripts/` | LLM interpretation of harvested components |

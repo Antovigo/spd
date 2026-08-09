@@ -9,9 +9,9 @@ business and is never touched), and exposes the pure forward a consumer needs:
 
     run = open_jax_run(run_dir, data_root=data_root)   # latest checkpoint
     fwd = run.forward(token_ids)                # one frozen, forward-only pass
-    fwd.lower_leaky_ci[site]                    # (B, T, C) leaky CI per site
-    fwd.component_acts[site]                    # (B, T, C) ‖U_c‖ · (x @ V) per site
-    fwd.output_probs                            # (B, T, vocab) softmax of clean logits
+    fwd.lower_leaky_ci_by_site[site]            # (B, T, C) leaky CI per site
+    fwd.component_activations_by_site[site]     # (B, T, C) ‖U_c‖ · (x @ V) per site
+    fwd.output_probabilities                    # (B, T, vocab) softmax of clean logits
 
 No torch, no safetensors bridge: the V/U + CI fn come straight from the
 orbax checkpoint and the target is built from its own config. CPU-friendly (jax falls
@@ -19,13 +19,16 @@ back to CPU); a single device is enough for a small harvest.
 
 `forward` mirrors the forward-only subset of `eval.make_eval_step`: clean logits +
 the CI fn's residual taps + lower-leaky CI, plus per-component acts (the harvest extra,
-from the frozen per-site matrix inputs `model.read_activations` serves for site-name keys). bf16
-compute on the components / CI fn (training's `COMPUTE_DT`) so consumed CI matches the
-trained model's; output probs are fp32 from the fp32-upcast frozen forward.
+from the target-owned component-activation forward). That target method combines these
+needs into one frozen pass, capturing only the requested CI taps plus the distinct matrix
+inputs needed for the decomposed sites. bf16 compute on the components / CI fn (training's
+`COMPUTE_DT`) so consumed CI matches the trained model's; output probs are fp32 from the
+fp32-upcast frozen forward.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import equinox as eqx
@@ -34,75 +37,93 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Int
 
 from param_decomp.core import placement
-from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
 from param_decomp.core.checkpoint import (
     make_read_only_checkpoint_manager,
     restore_decomposition_to_host,
 )
-from param_decomp.core.ci_fn import ChunkwiseTransformerCIFn
+from param_decomp.core.ci_fn import (
+    ChunkwiseTransformerCIFn,
+    GlobalMLPCIFn,
+    evaluate_ci,
+)
 from param_decomp.core.components import ComponentStacks
-from param_decomp.core.configs import PlacementTableConfig
-from param_decomp.core.model import DecomposedModel
+from param_decomp.core.model import DecomposedModel, prepare_compute_weights
 from param_decomp.core.run_state import init_decomposition
 from param_decomp.core.sharding import hsdp_mesh, place_target, place_via_shardings
-from param_decomp.core.train import COMPUTE_DT, Decomposition, cast_floating
-from param_decomp.experiments.lm.config import (
+from param_decomp.core.train import Decomposition
+from param_decomp.experiments.lm.config import LMCIFnArch, hf_model_family
+from param_decomp.experiments.lm.deliverable import ResolvedDeliverable, load_deliverable
+from param_decomp.experiments.lm.resolved import (
+    AnyLMTargetConfig,
     LlamaSimpleMLPTargetConfig,
     TargetConfig,
-    hf_model_family,
-    load_config,
+    weights_jnp_dtype,
 )
-from param_decomp.experiments.lm.resolved import LMRun, weights_jnp_dtype
 from param_decomp.infra import pretrain_cache
 from param_decomp.targets import llama_simple_mlp
-from param_decomp.targets.glu_transformer import glu_site_specs
+from param_decomp.targets.glu_transformer import GLUDecomposedModel, glu_site_specs
+
+type TransformerDecomposedModel = GLUDecomposedModel | llama_simple_mlp.SimpleMLPDecomposedModel
+
+LMCIFn = ChunkwiseTransformerCIFn | GlobalMLPCIFn
+"""The CI fns an LM deliverable resolves to (`LMCIFnArch`, built). A plain union (not a
+`type` alias) so the narrowing isinstance in `LoadedJaxRun.forward` can consume it."""
 
 
+@partial(
+    jax.tree_util.register_dataclass,
+    data_fields=(
+        "lower_leaky_ci_by_site",
+        "component_activations_by_site",
+        "output_probabilities",
+    ),
+    meta_fields=(),
+)
 @dataclass(frozen=True)
 class HarvestForward:
     """One frozen forward-only pass over a token batch, the raw material every harvest
     fn turns into per-component statistics. Site-name-keyed; `(B, T, C_site)`."""
 
-    lower_leaky_ci: dict[str, Float[Array, "B T C"]]
-    component_acts: dict[str, Float[Array, "B T C"]]
-    output_probs: Float[Array, "B T vocab"]
+    lower_leaky_ci_by_site: dict[str, Float[Array, "B T C"]]
+    component_activations_by_site: dict[str, Float[Array, "B T C"]]
+    output_probabilities: Float[Array, "B T vocab"]
 
 
 def build_target(
-    cfg: LMRun, mesh: jax.sharding.Mesh, data_root: Path
-) -> tuple[DecomposedModel, int]:
-    """`(model, vocab_size)` for the run's target config. The `model` (an `eqx.Module`) IS the
-    frozen target — it carries the full model weights (embedding included) as fields and
-    embeds its token input internally. SimpleMLP reads its pretrain cache under `data_root`
-    (no network); the HF families read the HF snapshot. Both cast their weights to the
-    config's `target.weights_dtype` on read — this is the ONLY place that dtype is applied,
-    so train and consume load the same target.
+    target: AnyLMTargetConfig, mesh: jax.sharding.Mesh, data_root: Path
+) -> tuple[TransformerDecomposedModel, int]:
+    """`(model, vocab_size)` for one target config — the SECTION, not a whole run config,
+    so every run shape (plain, targeted) and every stored-run consumer shares this one
+    loader. The `model` (an `eqx.Module`) IS the frozen target — it carries the full model
+    weights (embedding included) as fields and embeds its token input internally.
+    SimpleMLP reads its pretrain cache under `data_root` (no network); the HF families
+    read the HF snapshot. Both cast their weights to the config's `weights_dtype` on
+    read — this is the ONLY place that dtype is applied, so train and consume load the
+    same target.
 
-    LM-only: harvest/slow-eval over the toy (TMS/ResidMLP) targets is not wired — those
-    validate via their in-loop target-CI metric in the lab provider, not this path."""
-    match cfg.target:
+    LM-only by type: the toy targets satisfy only the core `TargetSites` protocol and
+    cannot reach this loader — they validate via their in-loop target-CI metric."""
+    match target:
         case LlamaSimpleMLPTargetConfig():
-            cache_dir = pretrain_cache.resolved_cache_dir(data_root, cfg.target.pretrain_run_path)
+            cache_dir = pretrain_cache.resolved_cache_dir(data_root, target.pretrain_run_path)
             simple_cfg = llama_simple_mlp.load_model_config(cache_dir)
-            sites = llama_simple_mlp.site_specs(simple_cfg, cfg.target.sites)
+            sites = llama_simple_mlp.site_specs(simple_cfg, target.sites)
             loaded_model = llama_simple_mlp.load_decomposed_lm_from_pretrain_cache(
-                cache_dir, simple_cfg, sites, weights_jnp_dtype(cfg.target.weights_dtype)
+                cache_dir, simple_cfg, sites, weights_jnp_dtype(target.weights_dtype)
             )
             model = place_via_shardings(loaded_model, loaded_model.shardings(mesh))
             return model, simple_cfg.vocab_size
         case TargetConfig():
-            family = hf_model_family(cfg.target.model_name)
+            family = hf_model_family(target.model_name)
             arch_cfg = family.arch_config()
-            sites = glu_site_specs(arch_cfg, cfg.target.sites)
+            sites = glu_site_specs(arch_cfg, target.sites)
             loaded_model = family.load(
-                cfg.target.model_name,
+                target.model_name,
                 arch_cfg,
                 sites,
-                weights_jnp_dtype(cfg.target.weights_dtype),
+                weights_jnp_dtype(target.weights_dtype),
             )
             return place_target(loaded_model, mesh), arch_cfg.vocab_size
-        case _:
-            raise AssertionError(f"build_target is LM-only; got target {type(cfg.target).__name__}")
 
 
 def _u_norms(
@@ -111,7 +132,7 @@ def _u_norms(
     """Per-component output-direction magnitude ‖U_c‖ — the harvest `component_activation`
     scale (torch `harvest_fn/param_decomp.core.py`: `component.U.norm(dim=1)`)."""
     return {
-        site: jnp.linalg.norm(components.site(site)[1].astype(jnp.float32), axis=1)
+        site: jnp.linalg.norm(components.site(site).U.astype(jnp.float32), axis=1)
         for site in site_names
     }
 
@@ -124,13 +145,13 @@ class LoadedJaxRun:
 
     run_id: str
     step: int
-    model: DecomposedModel
-    config: LMRun
+    model: TransformerDecomposedModel
+    deliverable: ResolvedDeliverable
     vocab_size: int
     _decomposition: Decomposition
     _forward: Callable[
-        [DecomposedModel, ComponentStacks, ChunkwiseTransformerCIFn, Int[Array, "B T"]],
-        tuple[dict[str, Array], dict[str, Array], Array],
+        [DecomposedModel, ComponentStacks, LMCIFn, Int[Array, "B T"]],
+        HarvestForward,
     ]
 
     @property
@@ -145,23 +166,13 @@ class LoadedJaxRun:
 
     def forward(self, token_ids: Int[Array, "B T"]) -> HarvestForward:
         ci_fn = self._decomposition.ci_fn
-        assert isinstance(ci_fn, ChunkwiseTransformerCIFn), (
-            "harvest is the transformer-CI-fn (LM) path only"
-        )
-        lower_leaky_ci, component_acts, output_probs = self._forward(
-            self.model, self._decomposition.components, ci_fn, token_ids
-        )
-        return HarvestForward(
-            lower_leaky_ci=lower_leaky_ci,
-            component_acts=component_acts,
-            output_probs=output_probs,
-        )
+        assert isinstance(ci_fn, LMCIFn), "harvest is the LM path only"
+        return self._forward(self.model, self._decomposition.components, ci_fn, token_ids)
 
 
 def _restore_decomposition(
-    cfg: LMRun,
-    sharding: str | PlacementTableConfig,
-    model: DecomposedModel,
+    ci_fn: LMCIFnArch,
+    model: TransformerDecomposedModel,
     mesh: jax.sharding.Mesh,
     run_dir: Path,
     step: int | None,
@@ -174,13 +185,16 @@ def _restore_decomposition(
     wedges/OOMs one GPU. `jax.eval_shape` over `init_decomposition` yields the saved
     decomposition's structure with ZERO allocation (and zero knowledge of training's
     optimizers); leaves restore as host numpy, then `device_put` onto the consumer's
-    single default device."""
-    init_key, _ = jax.random.split(jax.random.PRNGKey(cfg.pd.seed))
-    # Consumer construction: this mesh is the CONSUMER's topology (often one device), not
-    # the run's launch topology, so the launch claims don't bind — a zero1 row declared
-    # for dp=N is legitimately unreachable here.
-    rules = placement.from_config_for_consumer(sharding, mesh, model.sites)
-    abstract = jax.eval_shape(lambda: init_decomposition(model, cfg.ci_fn, init_key, mesh, rules))
+    single default device.
+
+    The reference is placement- and key-invariant under `eval_shape` (treedef, shapes,
+    dtypes derive from sites + CI arch alone), so nothing from the run's process record
+    enters: `ddp` and a constant key stand in for the launch values a consumer never
+    needed."""
+    rules = placement.from_config_for_consumer("ddp", mesh, model.sites)
+    abstract = jax.eval_shape(
+        lambda: init_decomposition(model, ci_fn, jax.random.PRNGKey(0), mesh, rules)
+    )
 
     manager = make_read_only_checkpoint_manager(run_dir / "ckpts")
     resolved_step = manager.latest_step() if step is None else step
@@ -193,11 +207,11 @@ def open_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> 
     """Open the run at `run_dir`; restore checkpoint `step` (latest if None). Restores
     only the trained decomposition (see `_restore_decomposition`). `data_root` resolves a
     `kind: pretrained` target's cache (`<data_root>/pretrain_cache/...`)."""
-    cfg, authored = load_config(run_dir / LAUNCH_CONFIG_FILENAME, run_dir.name, data_root)
+    deliverable = load_deliverable(run_dir, data_root)
     mesh = hsdp_mesh()
-    target_model, vocab_size = build_target(cfg, mesh, data_root)
+    target_model, vocab_size = build_target(deliverable.target, mesh, data_root)
     decomposition, resolved_step = _restore_decomposition(
-        cfg, authored.runtime.sharding, target_model, mesh, run_dir, step
+        deliverable.ci_fn, target_model, mesh, run_dir, step
     )
     assert isinstance(decomposition.components, ComponentStacks)
 
@@ -211,36 +225,40 @@ def open_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> 
     def forward(
         model: DecomposedModel,
         components: ComponentStacks,
-        ci_fn: ChunkwiseTransformerCIFn,
+        ci_fn: LMCIFn,
         token_ids: Int[Array, "B T"],
-    ) -> tuple[dict[str, Array], dict[str, Array], Array]:
-        clean_output, all_taps = model.clean_output_and_activations(
-            token_ids, ci_fn.input_names + site_names
+    ) -> HarvestForward:
+        prepared_weights = prepare_compute_weights(model, components)
+        clean_forward_result, raw_component_activations_by_site = (
+            model.component_activation_forward(
+                prepared_weights,
+                token_ids,
+                capture_keys=ci_fn.capture_keys,
+            )
         )
-        taps = {k: all_taps[k] for k in ci_fn.input_names}
-        site_inputs = {k: all_taps[k] for k in site_names}
+        ci_input_activations_by_key = clean_forward_result.captures
 
-        components_bf16 = cast_floating(components, COMPUTE_DT)
-        ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-        lower_ci = ci_fn_bf16(taps, remat=False).lower
+        ci = evaluate_ci(ci_fn, ci_input_activations_by_key, remat=False)
+        lower_leaky_ci_by_site = {site: ci.lower[site].astype(jnp.float32) for site in site_names}
+        component_activations_by_site = {
+            site: raw_component_activations_by_site[site].astype(jnp.float32) * u_norms[site]
+            for site in site_names
+        }
+        output_probabilities = jax.nn.softmax(
+            clean_forward_result.output.astype(jnp.float32), axis=-1
+        )
 
-        component_acts = {}
-        for site in site_names:
-            V = components_bf16.site(site)[0]
-            acts = site_inputs[site].astype(COMPUTE_DT) @ V  # (B, T, C): x @ V
-            component_acts[site] = acts.astype(jnp.float32) * u_norms[site]
-
-        return (
-            {site: lower_ci[site].astype(jnp.float32) for site in site_names},
-            component_acts,
-            jax.nn.softmax(clean_output.astype(jnp.float32), axis=-1),
+        return HarvestForward(
+            lower_leaky_ci_by_site=lower_leaky_ci_by_site,
+            component_activations_by_site=component_activations_by_site,
+            output_probabilities=output_probabilities,
         )
 
     return LoadedJaxRun(
         run_id=run_dir.name,
         step=resolved_step,
         model=target_model,
-        config=cfg,
+        deliverable=deliverable,
         vocab_size=vocab_size,
         _decomposition=decomposition,
         _forward=forward,
@@ -261,27 +279,25 @@ class RunMetadata:
 
 
 def run_metadata(run_dir: Path, *, data_root: Path) -> RunMetadata:
-    """Target topology for `run_dir`, derived from the pinned config (+ the SimpleMLP
+    """Target topology for `run_dir`, derived from the run's deliverable (+ the SimpleMLP
     pretrain cache's `model_config.yaml` for `n_layer`/`vocab_size`). No orbax restore."""
-    cfg, _ = load_config(run_dir / LAUNCH_CONFIG_FILENAME, run_dir.name, data_root)
-    match cfg.target:
+    target = load_deliverable(run_dir, data_root).target
+    match target:
         case LlamaSimpleMLPTargetConfig():
-            cache_dir = pretrain_cache.resolved_cache_dir(data_root, cfg.target.pretrain_run_path)
+            cache_dir = pretrain_cache.resolved_cache_dir(data_root, target.pretrain_run_path)
             simple_cfg = llama_simple_mlp.load_model_config(cache_dir)
             return RunMetadata(
                 model_type="LlamaSimpleMLP",
                 n_blocks=simple_cfg.n_layer,
                 vocab_size=simple_cfg.vocab_size,
-                layer_activation_sizes=[(s.name, s.C) for s in cfg.target.sites],
+                layer_activation_sizes=[(s.name, s.C) for s in target.sites],
             )
         case TargetConfig():
-            family = hf_model_family(cfg.target.model_name)
+            family = hf_model_family(target.model_name)
             arch_cfg = family.arch_config()
             return RunMetadata(
                 model_type=family.model_type,
                 n_blocks=arch_cfg.n_layer,
                 vocab_size=arch_cfg.vocab_size,
-                layer_activation_sizes=[(s.name, s.C) for s in cfg.target.sites],
+                layer_activation_sizes=[(s.name, s.C) for s in target.sites],
             )
-        case _:
-            raise AssertionError(f"run_metadata is LM-only; got target {type(cfg.target).__name__}")

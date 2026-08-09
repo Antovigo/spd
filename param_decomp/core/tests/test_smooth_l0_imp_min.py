@@ -56,7 +56,7 @@ def test_terms_match_manual_per_site_structure():
     gamma = 0.1
     n_positions = 2  # both sites have 2 rows; a' = B·T reproduces the old `log2(1 + sum)`
     lp, freq = smooth_l0_importance_minimality_terms(
-        ci, jnp.asarray(gamma), reference_token_count=n_positions
+        ci, jnp.asarray(gamma), reference_datapoint_count=n_positions
     )
 
     exp_lp = jnp.zeros(())
@@ -74,7 +74,7 @@ def test_anneal_and_dispatch():
     cfg = SmoothL0ImportanceMinimalityLossConfig(
         coeff=2e-4,
         gamma=ScheduleConfig(max_val=1.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.1))),
-        frequency=FrequencyMinimalityConfig(coeff=1e-4, reference_token_count=64),
+        frequency=FrequencyMinimalityConfig(coeff=1e-4, reference_datapoint_count=64),
     )
     total = 100
     for step in (0, 50, total - 1):
@@ -88,6 +88,6 @@ def test_anneal_and_dispatch():
     ci = {"a": jnp.array([[0.0, 0.5, 1.0], [0.2, 0.0, 0.9]])}
     param = annealed_imp_min_param(jnp.asarray(float(last)), total, cfg)
     via_dispatch = imp_min_terms(ci, cfg, param)
-    direct = smooth_l0_importance_minimality_terms(ci, param, reference_token_count=64)
+    direct = smooth_l0_importance_minimality_terms(ci, param, reference_datapoint_count=64)
     assert jnp.allclose(via_dispatch[0], direct[0])
     assert jnp.allclose(via_dispatch[1], direct[1])

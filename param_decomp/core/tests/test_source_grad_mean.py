@@ -37,22 +37,30 @@ from jax import random
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from param_decomp.core.adversary import init_persistent_sources, source_masks
+from param_decomp.core.adversary import init_persistent_sources
 from param_decomp.core.ci_fn import (
     Chunk,
     ChunkwiseTransformerCIArch,
     MHACIAttention,
     build_ci_fn,
+    evaluate_ci,
 )
 from param_decomp.core.components import init_component_stacks
+from param_decomp.core.masking import masks_from_sources
+from param_decomp.core.precision import COMPUTE_DT, cast_floating
 from param_decomp.core.sharding import hsdp_mesh, shard_batch
-from param_decomp.core.train import COMPUTE_DT, cast_floating
 from param_decomp.targets.glu_transformer import (
     glu_site_specs,
     mlp_family_site_cs,
 )
 from param_decomp.targets.losses import kl_per_position
-from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
+from param_decomp.targets.testing import (
+    capture_clean,
+    run_clean,
+    run_masked,
+    tiny_glu_cfg,
+    tiny_glu_decomposed_lm,
+)
 
 
 def _source_grad(sharded: bool) -> dict[str, jax.Array]:
@@ -89,14 +97,14 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
         src = {name: jax.device_put(v, NamedSharding(mesh, P())) for name, v in src.items()}
 
     components_bf16 = cast_floating(vu, COMPUTE_DT)
-    ci_fn_bf16 = cast_floating(ci_fn, COMPUTE_DT)
-    taps = model.read_activations(resid, ci_fn.input_names)
-    ci_lower = ci_fn_bf16(taps, remat=False).lower
-    clean_output = jax.lax.stop_gradient(model.clean_output(resid))
+    taps = capture_clean(model, resid, ci_fn.capture_keys)
+    ci_lower = evaluate_ci(ci_fn, taps, remat=False).lower
+    clean_output = jax.lax.stop_gradient(run_clean(model, resid))
 
     def source_loss(sources: dict[str, jax.Array]) -> jax.Array:
-        masks, delta_masks = source_masks(ci_lower, sources, model.site_names)
-        masked = model.masked_output(
+        masks, delta_masks = masks_from_sources(ci_lower, sources, model.site_names)
+        masked = run_masked(
+            model,
             model.prepare_compute_weights(components_bf16),
             resid,
             masks,

@@ -109,7 +109,6 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
                     sources=src,
                     opt_state=init_sources_adam_state(src),
                     state_key=ppgd_cfg.type,
-                    coeff=ppgd_cfg.coeff,
                     adam=ppgd_cfg.optimizer,
                     n_warmup=ppgd_cfg.n_warmup_steps,
                 )
@@ -123,7 +122,7 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
             ImportanceMinimalityLossConfig(
                 coeff=5e-6,
                 pnorm=ScheduleConfig(max_val=2.0, points=(Knot(at=0.0, frac=1.0), Knot(at=1.0, frac=0.2))),
-                frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_token_count=128),
+                frequency=FrequencyMinimalityConfig(coeff=1e-6, reference_datapoint_count=128),
             ),
             ChunkwiseSubsetReconLossConfig(routing=UniformKSubsetRoutingConfig(), coeff=0.5, sites_per_chunk=3, n_samples=1),
             ppgd_cfg,
@@ -135,7 +134,10 @@ def _run(steps: int, sharded: bool) -> list[dict[str, float]]:
         losses=loss_terms,
         components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
         total_steps=100,
-        remat_recon_forwards=True, remat_ci_fn=False, mesh=mesh, compiler_options={},
+        remat_recon_forwards=True,
+        remat_ci_fn=False,
+        ci_capture_keys=ci_fn.capture_keys,
+        mesh=mesh,
     )  # fmt: skip
 
     out = []

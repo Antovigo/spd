@@ -22,7 +22,6 @@ and contributing its local batch slice; `inline` → this one process, over exac
 import os
 from pathlib import Path
 
-import fire
 import jax
 from jax import random
 from jax.sharding import Mesh
@@ -50,7 +49,7 @@ from param_decomp.infra.run_files import generate_run_id
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
 
 
-def _enable_persistent_compilation_cache(out_dir: Path) -> Path:
+def enable_persistent_compilation_cache(out_dir: Path) -> Path:
     """Cache compiled XLA executables to a shared-FS dir reused across runs/requeues.
 
     The ~24-min compile of the chunkwise step is keyed by HLO + backend + topology +
@@ -68,7 +67,7 @@ def _enable_persistent_compilation_cache(out_dir: Path) -> Path:
     return cache_dir
 
 
-def _enable_hlo_dump(run_dir: Path) -> None:
+def enable_hlo_dump(run_dir: Path) -> None:
     """Dump the step modules' optimized HLO + buffer assignment to `<run_dir>/hlo` (rank 0).
 
     Must run BEFORE `init_distributed` — XLA reads `XLA_FLAGS` when the backend initializes,
@@ -186,7 +185,7 @@ def train(
     )
 
 
-def _pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
+def pin_config_copy(run_dir: Path, name: str, source: Path) -> None:
     """First run copies `source` into the run dir; resumes byte-compare against it."""
     copy = run_dir / name
     if copy.exists():
@@ -202,14 +201,14 @@ def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
     data_root = Path(data_root)
     if run_id is None:
         # Ad-hoc run-here invocation (`python -m param_decomp.experiments.lm.run <config>`):
-        # mint a fresh identity; `_pin_config_copy` below stages the config into the run
+        # mint a fresh identity; `pin_config_copy` below stages the config into the run
         # dir exactly as a launcher would (resume an existing run by passing --run-id).
         run_id = generate_run_id("param_decomp")
     built, authored = load_config(config, run_id, data_root)
     runtime = authored.runtime
 
     install_sigterm_flag()
-    _enable_hlo_dump(built.run.run_dir)
+    enable_hlo_dump(built.run.run_dir)
     if runtime.distributed:
         init_distributed(runtime.dp, runtime.gpus_per_node)
     else:
@@ -222,14 +221,14 @@ def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
     if built.run.resume_provenance is not None:
         assert_finetune_structural_compat(built, built.run.resume_provenance, data_root)
 
-    cache_dir = _enable_persistent_compilation_cache(built.run.out_dir)
+    cache_dir = enable_persistent_compilation_cache(built.run.out_dir)
 
     is_main = jax.process_index() == 0
     if is_main:
         cache_dir.mkdir(parents=True, exist_ok=True)
         built.run.run_dir.mkdir(parents=True, exist_ok=True)
         setup_logger(built.run.run_dir / "logs.log")
-        _pin_config_copy(built.run.run_dir, LAUNCH_CONFIG_FILENAME, config)
+        pin_config_copy(built.run.run_dir, LAUNCH_CONFIG_FILENAME, config)
         print(f"persistent XLA compilation cache: {cache_dir}", flush=True)
         site_kind_counts: dict[str, int] = {}
         for s in built.target.sites:
@@ -245,7 +244,7 @@ def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
 
     # The `lm` (an eqx model) IS the frozen target — it carries the frozen weights as fields,
     # so the function-table era's separate `frozen` object is gone.
-    model, _vocab_size = build_target(built, mesh, data_root)
+    model, _vocab_size = build_target(built.target, mesh, data_root)
 
     train(built, runtime, authored.eval, model, mesh)
 
@@ -254,11 +253,3 @@ def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
 
         mhu.sync_global_devices("train_done")
         jax.distributed.shutdown()
-
-
-def cli() -> None:
-    fire.Fire(main)
-
-
-if __name__ == "__main__":
-    cli()

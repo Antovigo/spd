@@ -19,9 +19,9 @@ def filter_jit[**P, T](
     fn: Callable[P, T],
     *,
     donate: DonateMode = "none",
-    compiler_options: dict[str, bool | int | str],
+    compiler_options: dict[str, bool | int | str] | None = None,
 ) -> Callable[P, T]:
     """`eqx.filter_jit(fn, donate=…, compiler_options=…)` — `compiler_options` is forwarded
-    to `jax.jit` (XLA compiler flags, native + in the compile-cache key). An empty dict =
-    no options. CPU backends accept and ignore GPU flags."""
-    return eqx.filter_jit(fn, donate=donate, compiler_options=compiler_options)  # pyright: ignore[reportCallIssue]
+    to `jax.jit` (XLA compiler flags, native + in the compile-cache key). `None` or an
+    empty dict means no options. CPU backends accept and ignore GPU flags."""
+    return eqx.filter_jit(fn, donate=donate, compiler_options=compiler_options or {})  # pyright: ignore[reportCallIssue]

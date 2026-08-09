@@ -14,15 +14,24 @@ import numpy as np
 from jax.experimental import multihost_utils
 from jaxtyping import Array, Float, Int
 from matplotlib.figure import Figure
+from typing_extensions import TypeVar
 
-from param_decomp.core.ci_fn import lower_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import ci_preactivations, lower_leaky_hard_sigmoid
 from param_decomp.core.components import ComponentStacks
-from param_decomp.core.model import DecomposedModel
-from param_decomp.core.train import COMPUTE_DT, cast_floating
+from param_decomp.core.masking import all_live_masking_no_delta
+from param_decomp.core.model import (
+    CaptureKeys,
+    DecomposedModel,
+    MaterializedMasking,
+    prepare_compute_weights,
+)
+from param_decomp.core.precision import COMPUTE_DT
+
+PreparedT = TypeVar("PreparedT", default=Any)
 
 
 @runtime_checkable
-class ComponentActivationModel(DecomposedModel, Protocol):
+class ComponentActivationModel(DecomposedModel[PreparedT], Protocol[PreparedT]):
     """A `DecomposedModel` that also exposes per-component activations `x@V`. The arithmetic
     activation heatmaps need this seam; it is LM-only (currently `GLUDecomposedModel`), so
     the eval narrows to it with an `isinstance` check rather than widening the core
@@ -30,13 +39,9 @@ class ComponentActivationModel(DecomposedModel, Protocol):
 
     def masked_component_activations(
         self,
-        prepared: Any,
+        prepared_weights: PreparedT,
         inputs: Any,
-        masks: dict[str, Array],
-        delta_masks: dict[str, Array],
-        routes: dict[str, Array] | None,
-        live: tuple[str, ...],
-        has_delta: bool,
+        masking: MaterializedMasking,
     ) -> dict[str, Array]: ...
 
 
@@ -78,8 +83,11 @@ host-gathered — see `compute_arithmetic_selection`); max CI is `(C,)` replicat
 over the REAL (`< n_valid_rows`) rows only. `model` (frozen-weight-bearing) is the jit ARG."""
 
 
-def make_arithmetic_grid_step(
-    model_static: ComponentActivationModel, answer_position: int, n_valid_rows: int
+def make_arithmetic_grid_step[PreparedT](
+    model_static: ComponentActivationModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
+    answer_position: int,
+    n_valid_rows: int,
 ) -> ArithmeticGridStep:
     """Build the jit'd step returning, at `answer_position` with the batch axis KEPT as the
     grid, BOTH per-component lower-leaky CI (from the CI fn) and the pre-mask activation `x@V`
@@ -88,39 +96,51 @@ def make_arithmetic_grid_step(
     garbage prompts must not decide liveness). One step so the grids come from one call; a
     site's own mask never enters its `x@V`."""
     site_names = model_static.site_names
-    site_component_counts = {s.name: s.C for s in model_static.sites}
 
     # HLO-baking rule: read STATIC config (site_names, Cs) off the closed-over `model_static`; all array
     # access goes through the traced `model` arg.
     @eqx.filter_jit
     def step(
-        model: ComponentActivationModel,
+        model: ComponentActivationModel[PreparedT],
         components: ComponentStacks,
         ci_fn: Any,
         tokens: Int[Array, "n_pad T"],
     ) -> tuple[dict[str, Array], dict[str, Array], dict[str, Array]]:
-        ci_fn = cast_floating(ci_fn, COMPUTE_DT)
-        taps = {
-            k: x.astype(COMPUTE_DT)
-            for k, x in model.read_activations(tokens, ci_fn.input_names).items()
+        preactivations = ci_preactivations(
+            ci_fn,
+            model.clean_forward(tokens, ci_capture_keys).captures,
+            remat=False,
+        )
+        assert preactivations[site_names[0]].ndim == 3, (
+            f"arithmetic grid is LM-only ((n_prompts, T, C)); got {preactivations[site_names[0]].shape}"
+        )
+        answer_position_ci = {
+            site: lower_leaky_hard_sigmoid(preactivations[site])[:, answer_position, :]
+            for site in site_names
         }
-        logits = {s: v.astype(jnp.float32) for s, v in ci_fn(taps, remat=False).logits.items()}
-        assert logits[site_names[0]].ndim == 3, (
-            f"arithmetic grid is LM-only ((n_prompts, T, C)); got {logits[site_names[0]].shape}"
-        )
-        ci = {s: lower_leaky_hard_sigmoid(logits[s])[:, answer_position, :] for s in site_names}
 
-        prepared = model.prepare_compute_weights(cast_floating(components, COMPUTE_DT))
-        leading = tokens.shape
-        ones = {s: jnp.ones((*leading, site_component_counts[s]), COMPUTE_DT) for s in site_names}
-        zeros_delta = {s: jnp.zeros(leading, COMPUTE_DT) for s in site_names}
-        acts = model.masked_component_activations(
-            prepared, tokens, ones, zeros_delta, None, site_names, False
+        prepared_weights = prepare_compute_weights(model, components)
+        component_activations = model.masked_component_activations(
+            prepared_weights,
+            tokens,
+            all_live_masking_no_delta(
+                model_static.sites, leading_shape=tokens.shape, dtype=COMPUTE_DT
+            ),
         )
-        xv = {s: acts[s][:, answer_position, :].astype(jnp.float32) for s in site_names}
-        valid = (jnp.arange(tokens.shape[0]) < n_valid_rows)[:, None]
-        max_ci = {s: jnp.where(valid, ci[s], -jnp.inf).max(axis=0) for s in site_names}
-        return ci, xv, max_ci
+        answer_position_component_activations = {
+            site: component_activations[site][:, answer_position, :].astype(jnp.float32)
+            for site in site_names
+        }
+        valid_rows = (jnp.arange(tokens.shape[0]) < n_valid_rows)[:, None]
+        max_ci_by_component = {
+            site: jnp.where(valid_rows, answer_position_ci[site], -jnp.inf).max(axis=0)
+            for site in site_names
+        }
+        return (
+            answer_position_ci,
+            answer_position_component_activations,
+            max_ci_by_component,
+        )
 
     return step
 

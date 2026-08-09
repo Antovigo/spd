@@ -33,7 +33,7 @@ from param_decomp.core.configs import (
     UnmaskedReconLossConfig,
 )
 from param_decomp.core.objective import build_objective
-from param_decomp.core.recon import ReconLossTerm
+from param_decomp.core.recon import AnyReconLossTerm
 from param_decomp.core.schedule import ScheduleConfig
 
 SITE_NAMES = ("h.0.mlp.c_fc", "h.0.mlp.down_proj")
@@ -86,7 +86,7 @@ def _non_recon_configs() -> tuple[FaithfulnessLossConfig, ImportanceMinimalityLo
     )
 
 
-def _recon_terms(recon_configs: tuple[object, ...]) -> tuple[ReconLossTerm, ...]:
+def _recon_terms(recon_configs: tuple[object, ...]) -> tuple[AnyReconLossTerm, ...]:
     terms = build_objective(
         (*_non_recon_configs(), *recon_configs),  # pyright: ignore[reportArgumentType]
         site_names=SITE_NAMES,

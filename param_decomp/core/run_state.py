@@ -23,8 +23,9 @@ from param_decomp.core.ci_fn import ChunkwiseTransformerCIArch, CIFnArch
 from param_decomp.core.configs import (
     AdamPGDConfig,
     AdamWOptimizerConfig,
+    AnyPDConfig,
     MuonOptimizerConfig,
-    PDConfig,
+    PDConfigBase,
 )
 from param_decomp.core.init_placed import (
     init_ci_fn_placed,
@@ -34,7 +35,7 @@ from param_decomp.core.init_placed import (
 from param_decomp.core.losses import scheduled_value_traced
 from param_decomp.core.model import DecomposedModel, PositionAxis, Positioned
 from param_decomp.core.muon_stacked import stacked_muon
-from param_decomp.core.objective import build_objective
+from param_decomp.core.objective import build_recon_terms
 from param_decomp.core.placement import PlacementRules
 from param_decomp.core.recon import (
     MixedPersistentStochasticSources,
@@ -135,7 +136,7 @@ def _optimizer_with_clip(
     return optax.chain(clip_by_global_norm_with_eps(opt.grad_clip_norm, eps=1e-6), inner)
 
 
-def build_optimizers(pd: PDConfig, ci_fn_arch: CIFnArch, mesh: Mesh | None):
+def build_optimizers(pd: PDConfigBase, ci_fn_arch: CIFnArch, mesh: Mesh | None):
     """Returns (opt_vu, opt_ci, schedules): the schedule fns are returned too so the
     log path reports the exact LR the optimizer applies (single source of truth).
 
@@ -179,7 +180,7 @@ def init_decomposition(
 
 
 def init_train_state(
-    pd: PDConfig,
+    pd: AnyPDConfig,
     model: DecomposedModel,
     ci_fn_arch: CIFnArch,
     positions: PositionAxis,
@@ -196,11 +197,13 @@ def init_train_state(
     )
     decomposition = init_decomposition(model, ci_fn_arch, init_key, mesh, rules)
     components, ci_fn = decomposition.components, decomposition.ci_fn
-    losses = build_objective(pd.loss_metrics, model.site_names)
-    persistent = persistent_configs(losses.recon)
+    # Recon terms only — persistent adversaries derive from these, and a targeted run's
+    # loss list carries no faithfulness role for a full objective build to demand.
+    recon_terms = build_recon_terms(pd.loss_metrics, model.site_names)
+    persistent = persistent_configs(recon_terms)
     term_coeff_by_state_key = {
         entry.sources.state_key: term.coeff
-        for term in losses.recon
+        for term in recon_terms
         for entry in term.plan
         if isinstance(entry.sources, (PersistentSources, MixedPersistentStochasticSources))
     }
@@ -224,7 +227,6 @@ def init_train_state(
                 sources=sources,
                 opt_state=init_sources_adam_state(sources),
                 state_key=state_key,
-                coeff=term_coeff_by_state_key[state_key],
                 adam=cfg.optimizer,
                 n_warmup=cfg.n_warmup_steps,
             )

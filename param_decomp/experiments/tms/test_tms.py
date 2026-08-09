@@ -2,7 +2,7 @@
 positionless core.
 
 Covers the `DecomposedModel` contract (clean == all-frozen masked forward, masked
-identity, MSE recon), the MLP CI fn (positionless, per-site logits), the full SPEC
+identity, MSE recon), the MLP CI fn (positionless, per-site preactivations), the full SPEC
 step trains, and the ground-truth target-CI eval — including an end-to-end
 pretrain → decompose → recovers-identity-structure validation on a tiny 5→2 TMS.
 """
@@ -25,6 +25,7 @@ from param_decomp.core.configs import (
 )
 from param_decomp.core.model import DecomposedModel
 from param_decomp.core.objective import build_objective
+from param_decomp.core.recon import OutputAndHiddenActsReconstruction
 from param_decomp.core.recon_eval import FreshPGDReconEval, make_fresh_pgd_eval_step
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
@@ -34,9 +35,11 @@ from param_decomp.core.train import (
     make_faith_warmup_step,
     make_train_step,
 )
+from param_decomp.targets.testing import capture_clean, run_clean, run_masked
 from param_decomp.targets.tms import (
     HiddenLayerInit,
     TMSConfig,
+    TMSGenerationType,
     TMSTarget,
     canonical_site_cs,
     dense_ci_error,
@@ -46,6 +49,7 @@ from param_decomp.targets.tms import (
     pretrain_tms_target,
     sample_sparse_features,
     single_feature_ci,
+    site_input_tap_keys,
     site_inputs,
     site_specs,
     tms_decomposed_model,
@@ -84,7 +88,13 @@ def test_positionless_and_ci_fn_position_kind_match():
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
     model = tms_decomposed_model(cfg, target, sites)
     ci_fn = init_layerwise_mlp_ci_fn(
-        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(0)
+        LayerwiseMLPCIArch(
+            hidden_dims=(16,),
+            has_position_axis=False,
+            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        ),
+        sites,
+        jax.random.PRNGKey(0),
     )
     assert not model.has_position_axis
     assert not ci_fn.has_position_axis
@@ -101,19 +111,19 @@ def test_clean_path_and_masked_identity():
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
 
-    clean = model.clean_output(x)
+    clean = run_clean(model, x)
     assert clean.shape == (b, cfg.n_features)
     assert jnp.all(clean >= 0.0), "TMS output is post-ReLU, non-negative"
 
     # SPEC S2: live=() is the exact frozen path.
-    none_masked = model.masked_output(vu, x, {}, {}, None, (), True, remat=False)
+    none_masked = run_masked(model, vu, x, {}, {}, None, (), True, remat=False)
     assert jnp.array_equal(clean, none_masked), "live=() must be the exact frozen path"
 
     # All-live, masks=1, delta=1 reconstructs the frozen path up to decomposition rounding.
     names = model.site_names
     ones_masks = {s.name: jnp.ones((b, s.C)) for s in model.sites}
     ones_delta = {s: jnp.ones((b,)) for s in names}
-    full = model.masked_output(vu, x, ones_masks, ones_delta, None, names, True, remat=False)
+    full = run_masked(model, vu, x, ones_masks, ones_delta, None, names, True, remat=False)
     assert jnp.allclose(clean, full, atol=1e-4), "mask=1 identity drifted"
 
     # site_inputs: linear1 reads x, linear2 reads frozen linear1(x).
@@ -140,28 +150,34 @@ def test_zero_masking_one_site_changes_output():
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.5, "at_least_zero_active"
     )
-    clean = model.clean_output(x)
+    clean = run_clean(model, x)
     C = {s.name: s.C for s in sites}["linear1"]
-    ablated = model.masked_output(
+    ablated = run_masked(model,
         vu, x, {"linear1": jnp.zeros((b, C))}, {"linear1": jnp.zeros((b,))},
         None, ("linear1",), True, remat=False,
     )  # fmt: skip
     assert not jnp.allclose(clean, ablated, atol=1e-5), "ablating linear1 did nothing"
 
 
-def test_mlp_ci_fn_per_site_logits_and_values():
+def test_mlp_ci_fn_per_site_preactivations_and_values():
     cfg = _tiny_cfg()
     sites = site_specs(cfg, _site_cs())
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
     model = tms_decomposed_model(cfg, target, sites)
     ci_fn = init_layerwise_mlp_ci_fn(
-        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(3)
+        LayerwiseMLPCIArch(
+            hidden_dims=(16,),
+            has_position_axis=False,
+            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        ),
+        sites,
+        jax.random.PRNGKey(3),
     )
     b = 7
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
-    inputs = model.read_activations(x, ci_fn.input_names)
+    inputs = capture_clean(model, x, ci_fn.capture_keys)
     values = ci_fn(inputs, remat=False)
     assert isinstance(values, CI)
     assert values.lower["linear1"].shape == (b, 8)
@@ -204,7 +220,13 @@ def _make_state_and_step(
     model = tms_decomposed_model(cfg, target, sites)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = init_layerwise_mlp_ci_fn(
-        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(2)
+        LayerwiseMLPCIArch(
+            hidden_dims=(16,),
+            has_position_axis=False,
+            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        ),
+        sites,
+        jax.random.PRNGKey(2),
     )
     opt_vu = optax.chain(optax.clip_by_global_norm(0.01), optax.adamw(1e-3, weight_decay=0.0))
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
@@ -219,7 +241,8 @@ def _make_state_and_step(
     loss_terms = build_objective(_loss_metrics(), model.site_names)
     step = make_train_step(
         model_static=model, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None, compiler_options={},
+        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False,
+        ci_capture_keys=ci_fn.capture_keys,
     )  # fmt: skip
     return model, state, step
 
@@ -233,7 +256,15 @@ def test_fresh_pgd_eval_runs_on_positionless_tms() -> None:
         jax.random.PRNGKey(3), 16, cfg.n_features, 0.3, "at_least_zero_active"
     )
     eval_step = make_fresh_pgd_eval_step(
-        model, FreshPGDReconEval(n_steps=2, step_size=0.1), mesh=None, compiler_options={}
+        model,
+        FreshPGDReconEval(
+            n_steps=2,
+            step_size=0.1,
+            reconstruction=OutputAndHiddenActsReconstruction(
+                coeff=1.0, points=(f"{model.site_names[0]}.out",)
+            ),
+        ),
+        state.decomposition.ci_fn.capture_keys,
     )
 
     value = eval_step(
@@ -268,8 +299,9 @@ def test_step_trains_positionless_no_persistent_sources():
     assert state.training.adversaries == {}
     # fp32 masters preserved
     assert isinstance(state.decomposition.components, ComponentStacks)
-    for _, (V, U) in state.decomposition.components.sites_items():
-        assert V.dtype == jnp.float32 and U.dtype == jnp.float32
+    for _, site_components in state.decomposition.components.sites_items():
+        assert site_components.V.dtype == jnp.float32
+        assert site_components.U.dtype == jnp.float32
 
 
 def test_faith_warmup_decreases_faith():
@@ -279,7 +311,7 @@ def test_faith_warmup_decreases_faith():
     model = tms_decomposed_model(cfg, target, sites)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(opt, compiler_options={})
+    wstep = make_faith_warmup_step(opt)
     ostate = opt.init(eqx.filter(vu, eqx.is_array))
     first_loss = None
     loss = None
@@ -328,10 +360,16 @@ def _faith_warmed_state(
     far from `W`), then return state + step factory."""
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = init_layerwise_mlp_ci_fn(
-        LayerwiseMLPCIArch(hidden_dims=(16,), has_position_axis=False), sites, jax.random.PRNGKey(2)
+        LayerwiseMLPCIArch(
+            hidden_dims=(16,),
+            has_position_axis=False,
+            input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+        ),
+        sites,
+        jax.random.PRNGKey(2),
     )
     warm_opt = optax.adamw(1e-2, weight_decay=0.0)
-    wstep = make_faith_warmup_step(warm_opt, compiler_options={})
+    wstep = make_faith_warmup_step(warm_opt)
     warm_state = warm_opt.init(eqx.filter(vu, eqx.is_array))
     for _ in range(warmup_steps):
         vu, warm_state, _ = wstep(model, vu, warm_state)
@@ -348,7 +386,8 @@ def _faith_warmed_state(
     loss_terms = build_objective(_recovery_loss_metrics(), model.site_names)
     step = make_train_step(
         model_static=model, losses=loss_terms, components_optimizer=opt_vu, ci_fn_optimizer=opt_ci,
-        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False, mesh=None, compiler_options={},
+        total_steps=total_steps, remat_recon_forwards=False, remat_ci_fn=False,
+        ci_capture_keys=ci_fn.capture_keys,
     )  # fmt: skip
     return state, step
 
@@ -374,7 +413,7 @@ def test_end_to_end_pretrain_decompose_recovers_identity():
     )  # fmt: skip
     x = sample_sparse_features(jax.random.PRNGKey(7), 1024, 5, 0.05, "at_least_zero_active")
     model = tms_decomposed_model(cfg, target, sites)
-    recon = jnp.mean((jnp.abs(x) - model.clean_output(x)) ** 2)
+    recon = jnp.mean((jnp.abs(x) - run_clean(model, x)) ** 2)
     assert float(recon) < 0.05, f"pretrained TMS recon too high: {recon}"
 
     state, step = _faith_warmed_state(model, sites, total_steps=3000, warmup_steps=150)
@@ -437,6 +476,33 @@ def test_deeper_canonical_order_and_dims():
     assert dims["linear2"] == (3, 5, 5)
 
 
+def test_capture_uses_one_key_per_chain_activation():
+    cfg = _tiny_cfg()
+    model = tms_decomposed_model(
+        cfg,
+        init_tms_target(cfg, jax.random.PRNGKey(0)),
+        site_specs(cfg, _site_cs()),
+    )
+    assert site_input_tap_keys(model.site_names) == ("linear1", "linear1.out")
+    with pytest.raises(AssertionError, match="unknown TMS activation"):
+        model.clean_forward(jnp.ones((1, cfg.n_features)), frozenset(("linear2",)))
+
+    cfg = _deeper_cfg()
+    model = tms_decomposed_model(
+        cfg,
+        init_tms_target(cfg, jax.random.PRNGKey(0)),
+        site_specs(cfg, _deeper_site_cs()),
+    )
+    assert site_input_tap_keys(model.site_names) == (
+        "linear1",
+        "linear1.out",
+        "hidden_layers.0.out",
+        "hidden_layers.1.out",
+    )
+    with pytest.raises(AssertionError, match="unknown TMS activation"):
+        model.clean_forward(jnp.ones((1, cfg.n_features)), frozenset(("hidden_layers.0",)))
+
+
 def test_deeper_clean_and_masked_forward_with_identity_hidden_layers():
     cfg = _deeper_cfg("identity")
     sites = site_specs(cfg, _deeper_site_cs())
@@ -448,7 +514,7 @@ def test_deeper_clean_and_masked_forward_with_identity_hidden_layers():
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
 
-    clean = model.clean_output(x)
+    clean = run_clean(model, x)
     assert clean.shape == (b, cfg.n_features)
     # Identity hidden layers must be no-ops in the frozen path: 5->2... here 5->3 with
     # n_hidden==n_features=5? no — n_hidden=3, so just check it equals a 2-layer reference.
@@ -457,7 +523,7 @@ def test_deeper_clean_and_masked_forward_with_identity_hidden_layers():
     assert jnp.allclose(clean, ref, atol=1e-5), "identity hidden layers changed the frozen path"
 
     # SPEC S2: live=() is the exact frozen path.
-    none_masked = model.masked_output(vu, x, {}, {}, None, (), True, remat=False)
+    none_masked = run_masked(model, vu, x, {}, {}, None, (), True, remat=False)
     assert jnp.array_equal(clean, none_masked)
 
     # site_inputs threads through the hidden layers: each hidden-layer site reads the chain
@@ -525,7 +591,7 @@ def test_dense_ci_error_perfect_and_imperfect():
         ("exactly_five_active", 5),
     ],
 )
-def test_exactly_n_active_shape_and_count(gen_type: str, n: int):
+def test_exactly_n_active_shape_and_count(gen_type: TMSGenerationType, n: int):
     b, n_features = 64, 8
     x = sample_sparse_features(jax.random.PRNGKey(0), b, n_features, 0.5, gen_type)
     assert x.shape == (b, n_features)
