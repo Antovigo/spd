@@ -8,10 +8,10 @@ from torch import Tensor
 from param_decomp.ci_fns import CIRole
 from param_decomp.component_model import ComponentModel
 from param_decomp.masks import (
-    SubsetRoutingType,
+    RoutingType,
     UniformKSubsetRoutingConfig,
     calc_stochastic_component_mask_info,
-    get_subset_router,
+    get_router,
 )
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -35,7 +35,7 @@ class StochasticHiddenReconSubsetLossConfig(LossMetricConfig, HiddenActsSitesCon
     type: Literal["StochasticHiddenReconSubsetLoss"] = "StochasticHiddenReconSubsetLoss"
     ci_role: CIRole = "hidden"
     routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
+        RoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
 
 
@@ -50,6 +50,12 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
     Under `site_inputs="masked_forward"` the forward stops after the last decomposed site
     (`ComponentModel.site_outputs`), so nothing past that point is computed or retained for
     backward. Under `site_inputs="clean"` there is no forward at all.
+
+    `routing` decides how far ablation damage travels: under a subsetting router a site is
+    scored only where it is itself routed, and each upstream site is frozen at a good
+    fraction of those positions, so the compounding is heavily diluted. `{type: all}`
+    replaces every site everywhere, which is what the adversarial sibling
+    (`PersistentPGDHiddenActsReconLoss`) has always done.
     """
 
     log_namespace = "loss"
@@ -58,7 +64,7 @@ class StochasticHiddenReconSubsetLoss(Metric[StochasticHiddenReconSubsetLossConf
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.router = get_subset_router(self.cfg.routing, device)
+        self.router = get_router(self.cfg.routing, device)
         self.measured_sites = resolve_measured_sites(model, self.cfg)
 
     @override

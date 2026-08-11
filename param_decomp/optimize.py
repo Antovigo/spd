@@ -223,6 +223,17 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
         assert ctx.ci.lower_leaky.keys() == ctx.ci_hidden.lower_leaky.keys(), (
             f"the two CI nets disagree on modules at step {step}"
         )
+        if ctx.model.hidden_ci_floor is not None:
+            # Checked on the logits, where the guarantee is exact. On `lower_leaky` under
+            # `sampling="binomial"` the two nets draw independent jitter, which can invert
+            # the order when the gap is under 0.0476 — mask noise, not a broken floor.
+            ordered = torch.stack(
+                [
+                    (ctx.ci_hidden.pre_sigmoid[name] >= ctx.ci.pre_sigmoid[name]).all()
+                    for name in ctx.ci.pre_sigmoid
+                ]
+            ).all()
+            assert ordered, f"hidden_ci_floor violated: hidden logit below output at step {step}"
     cis = {"ci": ctx.ci} | ({"ci_hidden": ctx.ci_hidden} if ctx.ci_hidden is not None else {})
     for label, ci in cis.items():
         assert ci.lower_leaky, f"empty {label}.lower_leaky dict at step {step}"
@@ -494,6 +505,7 @@ class Trainer:
             sigmoid_type=pd_config.sigmoid_type,
             dual_hidden_ci=pd_config.dual_hidden_ci,
             dual_hidden_ci_shared_trunk=pd_config.dual_hidden_ci_shared_trunk,
+            hidden_ci_floor=pd_config.hidden_ci_floor,
             hidden_readout_sites=pd_config.hidden_readout_sites,
         )
         model.to(device)

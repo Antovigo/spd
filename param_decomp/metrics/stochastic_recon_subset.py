@@ -12,11 +12,11 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     Router,
+    RoutingType,
     SamplingType,
-    SubsetRoutingType,
     UniformKSubsetRoutingConfig,
     calc_stochastic_component_mask_info,
-    get_subset_router,
+    get_router,
 )
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -41,7 +41,7 @@ class HiddenActsReconAux(BaseConfig):
 class StochasticReconSubsetLossConfig(LossMetricConfig):
     type: Literal["StochasticReconSubsetLoss"] = "StochasticReconSubsetLoss"
     routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
+        RoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
     hidden_acts_recon: HiddenActsReconAux | None = None
 
@@ -102,7 +102,7 @@ def stochastic_recon_subset_loss(
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],
     weight_deltas: dict[str, Float[Tensor, "d_out d_in"]] | None,
-    routing: SubsetRoutingType,
+    routing: RoutingType,
     reconstruction_loss: ReconstructionLoss,
 ) -> Float[Tensor, ""]:
     """Compute stochastic subset recon loss directly (helper for tests/notebooks)."""
@@ -114,7 +114,7 @@ def stochastic_recon_subset_loss(
         target_out=target_out,
         ci=ci,
         weight_deltas=weight_deltas,
-        router=get_subset_router(routing, device=get_obj_device(model)),
+        router=get_router(routing, device=get_obj_device(model)),
         reconstruction_loss=reconstruction_loss,
     )
     return sum_loss / n
@@ -132,7 +132,7 @@ class StochasticReconSubsetLoss(Metric[StochasticReconSubsetLossConfig]):
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.router = get_subset_router(self.cfg.routing, device)
+        self.router = get_router(self.cfg.routing, device)
 
     @override
     def reset(self) -> None:

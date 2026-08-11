@@ -11,9 +11,9 @@ from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import all_reduce
 from param_decomp.masks import (
     Router,
-    SubsetRoutingType,
+    RoutingType,
     UniformKSubsetRoutingConfig,
-    get_subset_router,
+    get_router,
     make_mask_infos,
 )
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
@@ -23,7 +23,7 @@ from param_decomp.metrics.context import MetricContext
 class CIMaskedReconSubsetLossConfig(LossMetricConfig):
     type: Literal["CIMaskedReconSubsetLoss"] = "CIMaskedReconSubsetLoss"
     routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
+        RoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
 
 
@@ -53,7 +53,7 @@ def ci_masked_recon_subset_loss(
     batch: Any,
     target_out: Tensor,
     ci: dict[str, Float[Tensor, "... C"]],
-    routing: SubsetRoutingType,
+    routing: RoutingType,
     reconstruction_loss: ReconstructionLoss,
 ) -> Float[Tensor, ""]:
     """Compute CI-masked subset recon loss directly (helper for tests/notebooks)."""
@@ -64,7 +64,7 @@ def ci_masked_recon_subset_loss(
         batch=batch,
         target_out=target_out,
         ci=ci,
-        router=get_subset_router(routing, device=get_obj_device(model)),
+        router=get_router(routing, device=get_obj_device(model)),
         reconstruction_loss=reconstruction_loss,
     )
     return sum_loss / n
@@ -83,7 +83,7 @@ class CIMaskedReconSubsetLoss(Metric[CIMaskedReconSubsetLossConfig]):
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.router = get_subset_router(self.cfg.routing, device)
+        self.router = get_router(self.cfg.routing, device)
 
     @override
     def reset(self) -> None:

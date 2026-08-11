@@ -7,7 +7,7 @@ from torch.distributed import ReduceOp
 
 from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import all_reduce
-from param_decomp.masks import SubsetRoutingType, UniformKSubsetRoutingConfig, get_subset_router
+from param_decomp.masks import RoutingType, UniformKSubsetRoutingConfig, get_router
 from param_decomp.metrics.base import Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
 from param_decomp.metrics.pgd_utils import PGDConfig, pgd_masked_recon_loss_update
@@ -16,7 +16,7 @@ from param_decomp.metrics.pgd_utils import PGDConfig, pgd_masked_recon_loss_upda
 class PGDReconSubsetLossConfig(PGDConfig):
     type: Literal["PGDReconSubsetLoss"] = "PGDReconSubsetLoss"
     routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
+        RoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
 
 
@@ -33,7 +33,7 @@ class PGDReconSubsetLoss(Metric[PGDReconSubsetLossConfig]):
     @override
     def bind(self, *, model: ComponentModel, device: str) -> None:
         super().bind(model=model, device=device)
-        self.router = get_subset_router(self.cfg.routing, device)
+        self.router = get_router(self.cfg.routing, device)
 
     @override
     def reset(self) -> None:

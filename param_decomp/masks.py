@@ -50,8 +50,20 @@ class StaticProbabilityRoutingConfig(BaseConfig):
     p: Probability
 
 
-# Discriminated union over the subset-routing configs (keyed by ``type``).
-SubsetRoutingType = UniformKSubsetRoutingConfig | StaticProbabilityRoutingConfig
+class AllRoutingConfig(BaseConfig):
+    """Route every position to every module — no site is left running frozen weights.
+
+    What the two subsetting configs cost, and why a loss might not want to pay it: a site
+    downstream of another only inherits that site's damage at positions where the upstream
+    site was itself routed. Under `uniform_k_subset` that is `E[k]/n_modules` of them, so
+    most of the chain is frozen and ablation effects barely compound.
+    """
+
+    type: Literal["all"] = "all"
+
+
+# Discriminated union over the routing configs (keyed by ``type``).
+RoutingType = UniformKSubsetRoutingConfig | StaticProbabilityRoutingConfig | AllRoutingConfig
 
 
 # ``"continuous"`` draws uniform [0, 1) sources; ``"binomial"`` draws Bernoulli sources.
@@ -168,12 +180,14 @@ def sample_uniform_k_subset_routing_masks(
     return {mod: perms[i] < k_modules_to_route for i, mod in enumerate(module_names)}
 
 
-def get_subset_router(routing: SubsetRoutingType, device: torch.device | str) -> Router:
+def get_router(routing: RoutingType, device: torch.device | str) -> Router:
     match routing:
         case UniformKSubsetRoutingConfig():
             return UniformKSubsetRouter(device=device)
         case StaticProbabilityRoutingConfig(p=p):
             return StaticProbabilityRouter(p=p, device=device)
+        case AllRoutingConfig():
+            return AllLayersRouter()
 
 
 def interpolate_component_mask(

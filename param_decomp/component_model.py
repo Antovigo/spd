@@ -17,7 +17,14 @@ from transformers.pytorch_utils import Conv1D as RadfordConv1D
 
 from param_decomp.base_config import runtime_cast
 from param_decomp.batch_and_loss_fns import RunBatch
-from param_decomp.ci_fns import CiConfig, CIRole, make_ci_fn_wrapper, share_transformer_trunk
+from param_decomp.ci_fns import (
+    CiConfig,
+    CIRole,
+    HiddenCIFloorConfig,
+    floor_hidden_ci_logits,
+    make_ci_fn_wrapper,
+    share_transformer_trunk,
+)
 from param_decomp.ci_sigmoids import SIGMOID_TYPES, SigmoidType
 from param_decomp.components import Components, make_components
 from param_decomp.decomposition_targets import DecompositionTarget, Identity
@@ -80,6 +87,7 @@ class ComponentModel(nn.Module):
         sigmoid_type: SigmoidType,
         dual_hidden_ci: bool = False,
         dual_hidden_ci_shared_trunk: bool = False,
+        hidden_ci_floor: HiddenCIFloorConfig | None = None,
         hidden_readout_sites: Mapping[str, str] | None = None,
     ):
         """Wrap `target_model` with parameter-component machinery.
@@ -104,6 +112,10 @@ class ComponentModel(nn.Module):
                 only the readout head is private per role and both objectives shape one
                 representation. Requires `dual_hidden_ci` and a
                 `global_shared_transformer` CI fn.
+            hidden_ci_floor: When set, the hidden net's CI is floored at the output net's,
+                so a subcomponent can never be scored less important for the sites'
+                activations than for the model's output. Costs one extra output-net
+                forward on every `role="hidden"` CI call. Requires `dual_hidden_ci`.
             hidden_readout_sites: Extra measurement points for the hidden-activation
                 losses, as `{measurement_name: module_path}`. The *input* of each listed
                 module is captured — both clean (`forward(cache_type="input")`) and masked
@@ -165,6 +177,12 @@ class ComponentModel(nn.Module):
                 "dual_hidden_ci_shared_trunk needs a second CI net; set dual_hidden_ci"
             )
             share_transformer_trunk(source=self.ci_fn, target=self.ci_fn_hidden)
+
+        self.hidden_ci_floor = hidden_ci_floor
+        if hidden_ci_floor is not None:
+            assert self.ci_fn_hidden is not None, (
+                "hidden_ci_floor needs a hidden CI net to constrain; set dual_hidden_ci"
+            )
 
         if sigmoid_type == "leaky_hard":
             self.lower_leaky_fn = SIGMOID_TYPES["lower_leaky_hard"]
@@ -486,13 +504,24 @@ class ComponentModel(nn.Module):
                 `pre_weight_acts`. Used by metrics that want to optimise CI without
                 perturbing the upstream graph.
             role: Which CI net to run. `"hidden"` requires the model to have been built
-                with `dual_hidden_ci`.
+                with `dual_hidden_ci`. Under `hidden_ci_floor` this role additionally runs
+                the output net, so that every caller — trainer, eval metrics, and the
+                analysis tools alike — sees the floored value the model actually masks with.
         """
         ci_inputs = {path: pre_weight_acts[path] for path in self.target_module_paths}
         if detach_inputs:
             ci_inputs = {k: v.detach() for k, v in ci_inputs.items()}
 
         ci_fn_outputs = self.ci_fn_for(role)(ci_inputs)
+        if role == "hidden" and self.hidden_ci_floor is not None:
+            # `no_grad`, not `.detach()`: the floor must not become a path from the hidden
+            # objective back into the output net, and there is no reason to build the graph
+            # only to throw it away.
+            with torch.no_grad():
+                output_logits = self.ci_fn(ci_inputs)
+            ci_fn_outputs = floor_hidden_ci_logits(
+                ci_fn_outputs, output_logits, self.hidden_ci_floor
+            )
         return self._apply_sigmoid_to_ci_outputs(ci_fn_outputs, sampling)
 
     def ci_fn_named_parameters(self) -> list[tuple[str, nn.Parameter]]:

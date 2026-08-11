@@ -109,6 +109,7 @@ def load_component_model(
         sigmoid_type=pd_config.sigmoid_type,
         dual_hidden_ci=pd_config.dual_hidden_ci,
         dual_hidden_ci_shared_trunk=pd_config.dual_hidden_ci_shared_trunk,
+        hidden_ci_floor=pd_config.hidden_ci_floor,
         hidden_readout_sites=pd_config.hidden_readout_sites,
     )
 

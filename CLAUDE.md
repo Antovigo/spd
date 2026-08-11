@@ -153,6 +153,12 @@ objectives then shape one representation. Requires `dual_hidden_ci` and
 Implemented by `share_transformer_trunk` / `GlobalSharedTransformerCiFn.adopt_trunk`
 (`ci_fns.py`), called from `ComponentModel.__init__` after both nets are built.
 
+`pd.hidden_ci_floor` goes one step further and makes `CI_hidden >= CI_output` structural: the
+hidden net's logits are floored at the output net's by a smooth max, so both sigmoid branches
+inherit the ordering. `HiddenCIShortfallLoss` is the soft alternative — it penalises
+`relu(CI_out - CI_hidden)` instead of forbidding it — and doubles as the eval-only diagnostic
+on runs that enforce nothing. Details in `param_decomp/metrics/CLAUDE.md`.
+
 Two consequences worth knowing:
 
 - **State dicts are key-identical either way** — submodule names don't change, so a shared

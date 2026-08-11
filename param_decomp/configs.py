@@ -18,13 +18,14 @@ from pydantic import (
 )
 
 from param_decomp.base_config import BaseConfig, Probability
-from param_decomp.ci_fns import CiConfig, GlobalCiConfig
+from param_decomp.ci_fns import CiConfig, GlobalCiConfig, HiddenCIFloorConfig
 from param_decomp.decomposition_targets import DecompositionTargetConfig
 from param_decomp.masks import SamplingType
 from param_decomp.metrics.ci_masked_recon import CIMaskedReconLossConfig
 from param_decomp.metrics.ci_masked_recon_layerwise import CIMaskedReconLayerwiseLossConfig
 from param_decomp.metrics.ci_masked_recon_subset import CIMaskedReconSubsetLossConfig
 from param_decomp.metrics.faithfulness import FaithfulnessLossConfig
+from param_decomp.metrics.hidden_ci_shortfall import HiddenCIShortfallLossConfig
 from param_decomp.metrics.importance_minimality import ImportanceMinimalityLossConfig
 from param_decomp.metrics.persistent_pgd_recon import (
     PersistentPGDHiddenActsReconLossConfig,
@@ -65,6 +66,7 @@ AnyLossMetricConfig = Annotated[
     | CIMaskedReconLossConfig
     | CIMaskedReconSubsetLossConfig
     | FaithfulnessLossConfig
+    | HiddenCIShortfallLossConfig
     | ImportanceMinimalityLossConfig
     | PersistentPGDHiddenActsReconLossConfig
     | PersistentPGDReconLossConfig
@@ -152,6 +154,15 @@ class PDConfig(BaseConfig):
         "parameters, and only the readout head is private per role. Both objectives then "
         "shape one representation. Requires `dual_hidden_ci` and a "
         "`global_shared_transformer` CI fn.",
+    )
+    hidden_ci_floor: HiddenCIFloorConfig | None = Field(
+        default=None,
+        description="Floor the hidden CI net's output at the output CI net's, so no "
+        "subcomponent is ever scored less important for the decomposed sites' activations "
+        "than for the model's final output. Enforced structurally, in logit space, rather "
+        "than by a penalty — see `HiddenCIShortfallLoss` for the soft alternative, which "
+        "can also be listed as an eval-only diagnostic alongside this. Requires "
+        "`dual_hidden_ci`.",
     )
     hidden_readout_sites: dict[str, str] = Field(
         default={},
@@ -287,6 +298,15 @@ class PDConfig(BaseConfig):
                 isinstance(self.ci_config, GlobalCiConfig)
                 and self.ci_config.fn_type == "global_shared_transformer"
             ), "dual_hidden_ci_shared_trunk needs ci_config.fn_type=global_shared_transformer"
+        return self
+
+    @model_validator(mode="after")
+    def validate_hidden_ci_floor_has_a_hidden_net(self) -> Self:
+        if self.hidden_ci_floor is not None:
+            assert self.dual_hidden_ci, (
+                "hidden_ci_floor constrains the hidden CI net against the output one; "
+                "set dual_hidden_ci"
+            )
         return self
 
 

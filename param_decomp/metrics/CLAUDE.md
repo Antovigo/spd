@@ -169,6 +169,45 @@ and go through `ctx.ci_for(role)`, which asserts the net exists. Both nets' para
 in the single `ci_fn_optimizer` — Adam is per-parameter and the nets are disjoint, so a
 shared optimizer is mathematically identical to two with the same hyperparameters.
 
+### Ordering the two nets: `hidden_ci_floor` and `HiddenCIShortfallLoss`
+
+A subcomponent reaches the model's output only through the output of the matrix it lives in
+— exactly what the hidden objective measures — so output-important should imply
+hidden-important, while the converse rightly fails for a component cancelled downstream. Two
+ways to act on that, one structural and one as a penalty:
+
+| | `pd.hidden_ci_floor` | `HiddenCIShortfallLoss` |
+|---|---|---|
+| where | `ComponentModel.calc_causal_importances` | a loss metric (also registered eval-side) |
+| effect | `CI_hidden >= CI_output` by construction | penalises `relu(CI_out - CI_hidden)` |
+| diagnostic left | none — the shortfall is ~0 by design | the shortfall itself, still logged |
+
+The floor is a smooth `max` **in logit space** (`floor_hidden_ci_logits`, `ci_fns.py`):
+`z_hidden = z_out.detach() + softplus(z_hidden_raw - z_out.detach(), beta=sharpness)`. Logit
+space is the right place because both squashes are monotone, so one ordering there is
+inherited by the mask *and* the minimality penalty at once. The smooth max rather than a hard
+one because a hard max zeroes the gradient wherever the floor binds; rather than a plain
+`z_out + softplus(h)` because both readout heads init to logit 0.5, which that form would turn
+into a hidden CI pinned at 1 with no mask gradient before step 1. Its limits are recorded in
+`floor_hidden_ci_logits`' docstring and in `test_hidden_ci_floor.py`: the escape gradient
+decays as `exp(beta*gap)` and is effectively gone past `gap ≈ -2`.
+
+`z_out` is detached in both mechanisms. Otherwise the hidden objective's own sparsity pressure
+would satisfy the constraint by pushing the *output* net's logits down — the hidden impmin
+acting on the output CI, confounding the comparison the dual setup exists to make.
+
+The floor lives on the model, not in the trainer, so `role="hidden"` returns the floored value
+to every caller — eval metrics, `find_alive_subcomponents`, harvest, the app. It costs one
+extra output-net forward per hidden CI call, run under `no_grad`; on the L18 shape that is
+~0.25% of one target-model forward.
+
+`HiddenCIShortfallLoss` is normalised like the importance-minimality losses (sum over
+subcomponents, mean over positions, summed over sites) rather than as a plain mean, so its
+coefficient is directly comparable to impmin's. That is not cosmetic: violations occupy well
+under 1% of entries on the `addsub-L18-11` runs, so a mean over all entries would divide the
+signal by the ~6000 non-violating subcomponents and leave a per-entry gradient orders of
+magnitude below the sparsity pressure it has to overcome.
+
 Two knock-on rules:
 
 - `ci_scaled_component_weight_decay` takes the **max over both nets'** batch CI max. A
@@ -199,6 +238,27 @@ from the clean input activations the step already cached: **no extra forward pas
 
 `site_patterns` (fnmatch, e.g. `["*.mlp.down_proj", "*.self_attn.o_proj"]`) restricts which
 sites the error is *measured* at; masking always covers every decomposed site.
+
+### `routing` — how far ablation damage travels
+
+`StochasticHiddenReconSubsetLoss.routing` selects a `Router` (`masks.py`). The choice decides
+how much *compounding* the chained formulation actually sees, which is easy to miss:
+
+- `uniform_k_subset` / `static_probability` — each position routes to a subset of the
+  matrices, the rest running frozen. A site is scored only where it is itself routed, and at
+  those positions each upstream site is routed only `E[k]/n_modules` of the time (4/7 on the
+  seven-site L18 shape). So roughly 43% of the upstream chain is frozen wherever the error is
+  read, and a downstream matrix mostly sees clean inputs.
+- `{type: all}` — every position routes to every matrix. Nothing runs frozen weights, so a
+  downstream site inherits the full damage of everything above it. This is already what
+  `PersistentPGDHiddenActsReconLoss` does (`_router_for_cfg`'s `case _` is `AllLayersRouter`),
+  so before this option existed the adversarial and stochastic halves of the hidden objective
+  disagreed about the routing regime.
+
+Switching a hidden loss from a subsetting router to `all` raises the measured error — most at
+the sites furthest downstream — and scores every position instead of the routed subset, so its
+numbers are **not** comparable across the change. It costs nothing extra: the forward pass ran
+in full either way.
 
 ### `site_inputs` — chained vs local
 

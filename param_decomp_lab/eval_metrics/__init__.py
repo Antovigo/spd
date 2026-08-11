@@ -10,6 +10,10 @@ from typing import Annotated, Any
 from pydantic import Discriminator
 
 from param_decomp.metrics.base import Metric
+from param_decomp.metrics.hidden_ci_shortfall import (
+    HiddenCIShortfallLoss,
+    HiddenCIShortfallLossConfig,
+)
 from param_decomp.metrics.importance_minimality import (
     ImportanceMinimalityLoss,
     ImportanceMinimalityLossConfig,
@@ -82,6 +86,7 @@ AnyEvalMetricConfig = Annotated[
     | CIMaskedAttnPatternsReconLossConfig
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
+    | HiddenCIShortfallLossConfig
     | IdentityCIErrorConfig
     | ImportanceMinimalityLossConfig
     | NAliveConfig
@@ -112,6 +117,7 @@ EVAL_METRIC_CLASSES: dict[str, type[Metric[Any]]] = {
         CIMaskedAttnPatternsReconLoss,
         CIMeanPerComponent,
         ComponentActivationDensity,
+        HiddenCIShortfallLoss,
         IdentityCIError,
         ImportanceMinimalityLoss,
         NAlive,

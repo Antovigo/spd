@@ -7,7 +7,7 @@ import einops
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float
-from pydantic import Field, PositiveInt, model_validator
+from pydantic import Field, PositiveFloat, PositiveInt, model_validator
 from torch import Tensor, nn
 
 from param_decomp.base_config import BaseConfig
@@ -26,6 +26,66 @@ decomposed sites' activations. A run only has the latter under `pd.dual_hidden_c
 two nets share one pool of subcomponents and differ only in the reconstruction loss that
 trains them.
 """
+
+
+class HiddenCIFloorConfig(BaseConfig):
+    """Parameterize the hidden CI net so its CI can never fall below the output net's.
+
+    A subcomponent reaches the model's output only through the output of the matrix it
+    lives in, which is exactly what the hidden objective measures — so output-important
+    implies hidden-important, while the converse rightly fails for a component whose
+    contribution is cancelled downstream. This makes that implication structural instead
+    of something the two nets have to rediscover.
+
+    Applied in logit space by `floor_hidden_ci_logits`: both sigmoid branches are monotone,
+    so one ordering there is inherited by the mask and the minimality penalty at once.
+
+    Lives here rather than in `configs.py` because `component_model` consumes it and is
+    itself reachable from `configs`; see the config placement rule in `metrics/CLAUDE.md`.
+    """
+
+    sharpness: PositiveFloat = Field(
+        default=10.0,
+        description="Softness of the floor, in logit units: the smooth max deviates from a "
+        "hard max by at most `ln(2)/sharpness` (0.069 at the default, against a sigmoid "
+        "window of width 1). Lower values blur the floor and let the hidden CI sit "
+        "measurably below the output CI; higher values approach a hard max, whose gradient "
+        "to the hidden head vanishes wherever the floor binds.",
+    )
+
+
+def floor_hidden_ci_logits(
+    hidden_logits: dict[str, Float[Tensor, "... C"]],
+    output_logits: dict[str, Float[Tensor, "... C"]],
+    cfg: HiddenCIFloorConfig,
+) -> dict[str, Float[Tensor, "... C"]]:
+    """Smooth `max(hidden_logits, output_logits)`, per module.
+
+    `softplus(x, beta)` is `log(1 + exp(beta x)) / beta`, so adding it to the floor gives a
+    max that is above both arguments by at most `ln(2)/beta`, and whose gradient w.r.t. the
+    hidden logit is `sigmoid(beta * gap)` rather than the hard max's zero — a hidden logit
+    that has fallen under the floor can still climb back out. Torch's own linear-regime
+    threshold handles the large-gap tail, so no overflow guard is needed here.
+
+    That escape is not unconditional. The gradient decays as `exp(beta * gap)` and reaches
+    fp32 underflow at `gap ≈ -87/beta` (-8.7 at the default); well before that, around
+    `gap ≈ -2`, it drops under Adam's `eps` and the step size collapses even though the
+    gradient is nominally nonzero. Logits sit near the `[0, 1]` sigmoid window in practice,
+    so those gaps are far outside the operating range — but a subcomponent driven that far
+    below the floor is pinned to the output net's CI for good. Lower `sharpness` widens the
+    escapable band at the cost of a larger init offset.
+
+    `output_logits` are detached by the caller: this constrains the hidden net, and must not
+    become a path by which the hidden objective's sparsity pressure drags the output CI down.
+    """
+    assert hidden_logits.keys() == output_logits.keys(), (
+        f"floor needs one output logit per hidden logit: {sorted(hidden_logits)} vs "
+        f"{sorted(output_logits)}"
+    )
+    return {
+        name: output_logits[name] + F.softplus(logits - output_logits[name], beta=cfg.sharpness)
+        for name, logits in hidden_logits.items()
+    }
 
 
 class LayerwiseCiConfig(BaseConfig):

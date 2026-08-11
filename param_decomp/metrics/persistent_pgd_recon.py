@@ -22,9 +22,9 @@ from param_decomp.masks import (
     AllLayersRouter,
     ComponentsMaskInfo,
     Router,
-    SubsetRoutingType,
+    RoutingType,
     UniformKSubsetRoutingConfig,
-    get_subset_router,
+    get_router,
 )
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -88,7 +88,7 @@ class PersistentPGDReconLossConfig(_PersistentPGDBaseConfig):
 class PersistentPGDReconSubsetLossConfig(_PersistentPGDBaseConfig):
     type: Literal["PersistentPGDReconSubsetLoss"] = "PersistentPGDReconSubsetLoss"
     routing: Annotated[
-        SubsetRoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
+        RoutingType, Field(discriminator="type", default=UniformKSubsetRoutingConfig())
     ]
 
 
@@ -109,7 +109,7 @@ class PersistentPGDHiddenActsReconLossConfig(_PersistentPGDBaseConfig, HiddenAct
 def _router_for_cfg(cfg: _PersistentPGDBaseConfig, device: torch.device | str) -> Router:
     match cfg:
         case PersistentPGDReconSubsetLossConfig(routing=routing):
-            return get_subset_router(routing, device)
+            return get_router(routing, device)
         case _:
             return AllLayersRouter()
 
