@@ -1,5 +1,5 @@
 """The Qwen3-8B-Base family target over the shared GLU-transformer machinery
-(`targets/glu_transformer.py`). Qwen3's one structural delta vs Llama is QK-norm:
+(`glu_transformer.py`). Qwen3's one structural delta vs Llama is QK-norm:
 per-head RMSNorm on q/k between the projection and RoPE (HF `Qwen3Attention.q_norm` /
 `k_norm`) — `Qwen3FrozenAttn` carries the norm weights as REQUIRED fields (never an
 optional flag) and applies them in the `_prep_qk` hook. Decomposition semantics are
@@ -10,12 +10,12 @@ JAX↔HF parity is pinned directly by `param_decomp/tests/qwen3_hf_parity/`."""
 from typing import override
 
 import equinox as eqx
-import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.typing import DTypeLike
 from jaxtyping import Array, Float
 
-from param_decomp.components import SiteSpec
+from param_decomp.core.components import SiteSpec
 from param_decomp.targets.glu_transformer import (
     FrozenAttn,
     GLUConfig,
@@ -24,7 +24,7 @@ from param_decomp.targets.glu_transformer import (
     default_inv_freq,
     load_decomposed_glu_from_hf,
 )
-from vendored_jax.llama import rms_norm
+from param_decomp.vendored_jax.llama import rms_norm
 
 
 def qwen3_8b_config() -> GLUConfig:
@@ -91,8 +91,7 @@ def load_decomposed_qwen3_from_hf(
     model_name: str,
     cfg: GLUConfig,
     sites: tuple[SiteSpec, ...],
-    scan_unroll: int = 1,
-    gather_fp8: bool = False,
+    weights_dtype: DTypeLike,
 ) -> GLUDecomposedModel:
     """The Qwen3 family HF load: QK-norm attention + plain RoPE frequencies."""
     return load_decomposed_glu_from_hf(
@@ -100,8 +99,6 @@ def load_decomposed_qwen3_from_hf(
         cfg,
         sites,
         load_attn=lambda w, i: _load_attn(w, i, cfg),
-        weights_dtype=jnp.bfloat16,  # the family is bf16-only (TargetConfig.supported_weights_dtypes)
+        weights_dtype=weights_dtype,
         inv_freq=default_inv_freq(cfg.head_dim, cfg.rope_theta),
-        scan_unroll=scan_unroll,
-        gather_fp8=gather_fp8,
     )

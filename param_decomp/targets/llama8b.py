@@ -1,17 +1,17 @@
 """The Llama-3.1-8B family target: its arch config (the vendored `LlamaConfig`, llama3
 rope scaling) and its HF loader over the shared GLU-transformer machinery
-(`targets/glu_transformer.py` — plain `FrozenAttn`, no pre-RoPE extras)."""
+(`glu_transformer.py` — plain `FrozenAttn`, no pre-RoPE extras)."""
 
-import jax.numpy as jnp
+from jax.typing import DTypeLike
 
-from param_decomp.components import SiteSpec
+from param_decomp.core.components import SiteSpec
 from param_decomp.targets.glu_transformer import (
     FrozenAttn,
     GLUDecomposedModel,
     HFWeights,
     load_decomposed_glu_from_hf,
 )
-from vendored_jax.llama import LlamaConfig, llama3_inv_freq
+from param_decomp.vendored_jax.llama import LlamaConfig, llama3_inv_freq
 
 
 def llama31_8b_config() -> LlamaConfig:
@@ -50,8 +50,7 @@ def load_decomposed_llama_from_hf(
     model_name: str,
     cfg: LlamaConfig,
     sites: tuple[SiteSpec, ...],
-    scan_unroll: int = 1,
-    gather_fp8: bool = False,
+    weights_dtype: DTypeLike,
 ) -> GLUDecomposedModel:
     """The Llama family HF load: plain attention + llama3-rescaled RoPE frequencies."""
     return load_decomposed_glu_from_hf(
@@ -59,8 +58,6 @@ def load_decomposed_llama_from_hf(
         cfg,
         sites,
         load_attn=lambda w, i: _load_attn(w, i, cfg),
-        weights_dtype=jnp.bfloat16,  # the family is bf16-only (TargetConfig.supported_weights_dtypes)
+        weights_dtype=weights_dtype,
         inv_freq=llama3_inv_freq(cfg),
-        scan_unroll=scan_unroll,
-        gather_fp8=gather_fp8,
     )

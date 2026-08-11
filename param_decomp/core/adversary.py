@@ -1,0 +1,248 @@
+"""Adversarial source state, initialization, and optimization.
+
+Two semantically distinct adversaries share source initialization and optimization but
+nothing else (SPEC §3):
+
+- **Persistent PGD (PPGD)** — `PersistentPGDReconLossConfig`. Per-site sources + their
+  Adam moments live in `TrainState` across steps, stored per `source_shape`
+  (`configs.SourceShape`).
+  Each step runs `n_warmup_steps` supplemental Adam ascents plus one final ascent from
+  the main backward (SPEC S13/S14), projecting to [0,1] after every update (S15).
+- **Fresh PGD** — `PGDReconLossConfig` (torch `PGDReconLoss` as a TRAINING loss).
+  Sources are re-initialized every step, ascended `n_steps` times by
+  `step_size * sign(grad)` with clamp to [0,1], and carry NO state across steps —
+  `TrainState.adversaries` stays empty for this variant.
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+from jax import random
+from jax.typing import DTypeLike
+from jaxtyping import Array, Float, PRNGKeyArray
+
+from param_decomp.core.components import SiteSpec
+from param_decomp.core.configs import AdamPGDConfig, PGDInitStrategy, SourceShape
+from param_decomp.core.losses import scheduled_value_traced
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class SourcesAdamState:
+    m: dict[str, Array]
+    v: dict[str, Array]
+    step_count: Float[Array, ""]
+
+
+def init_persistent_sources(
+    site_names: tuple[str, ...],
+    site_component_counts: tuple[int, ...],
+    leading_shape: tuple[int, ...],
+    source_dtype: DTypeLike,
+    key: PRNGKeyArray,
+) -> dict[str, Array]:
+    """Per-site PPGD sources `(*leading_shape, C+1)`, init U[0,1] (SPEC S15; clamp
+    parameterization); trailing channel = the weight-delta source. `leading_shape` spells
+    the `source_shape` over the model's leading axes (SPEC §1.6), rank matching the
+    waist with size-1 broadcast axes — e.g. an LM's `(1, T)` for `sc` (shared across
+    batch, free per position), `(B, 1)` for `bc` (per batch element, shared over
+    positions).
+
+    `source_dtype` is the resident storage dtype (SPEC N1 fp32 for oracle parity; bf16 to
+    halve footprint). Drawing in fp32 then casting keeps the U[0,1] draw dtype-stable."""
+    keys = random.split(key, len(site_names))
+    return {
+        name: random.uniform(k, (*leading_shape, c + 1), jnp.float32).astype(source_dtype)
+        for name, c, k in zip(site_names, site_component_counts, keys, strict=True)
+    }
+
+
+def sources_c_groups(
+    site_names: tuple[str, ...], site_component_counts: tuple[int, ...]
+) -> dict[int, tuple[str, ...]]:
+    """Site names grouped by C, site order preserved within a group."""
+    groups: dict[int, list[str]] = {}
+    for name, c in zip(site_names, site_component_counts, strict=True):
+        groups.setdefault(c, []).append(name)
+    return {c: tuple(names) for c, names in groups.items()}
+
+
+def init_persistent_sources_stacked(
+    site_names: tuple[str, ...],
+    site_component_counts: tuple[int, ...],
+    leading_shape: tuple[int, ...],
+    source_dtype: DTypeLike,
+    key: PRNGKeyArray,
+) -> dict[int, Array]:
+    """`init_persistent_sources` computed as same-C stacks `{C: [n, *leading, C+1]}`,
+    vmapped over the SAME per-site keys — `unstack_persistent_sources` recovers the
+    per-site dict BIT-IDENTICALLY. Under jit the graph has n_C_groups sharded outputs
+    instead of n_sites (the per-site form was a ~55s XLA compile at 224 sites)."""
+    keys = random.split(key, len(site_names))
+    site_index = {name: idx for idx, name in enumerate(site_names)}
+    stacked: dict[int, Array] = {}
+    for c, names in sources_c_groups(site_names, site_component_counts).items():
+        idxs = jnp.array([site_index[n] for n in names])
+        draws = jax.vmap(lambda k, s=(*leading_shape, c + 1): random.uniform(k, s, jnp.float32))(
+            keys[idxs]
+        )
+        stacked[c] = draws.astype(source_dtype)
+    return stacked
+
+
+def unstack_persistent_sources(
+    site_names: tuple[str, ...],
+    site_component_counts: tuple[int, ...],
+    stacked: dict[int, Array],
+) -> dict[str, Array]:
+    """Slice `init_persistent_sources_stacked`'s per-C stacks back into the per-site dict."""
+    sources: dict[str, Array] = {}
+    for c, names in sources_c_groups(site_names, site_component_counts).items():
+        assert stacked[c].shape[0] == len(names), (stacked[c].shape, len(names))
+        for j, name in enumerate(names):
+            sources[name] = stacked[c][j]
+    return {name: sources[name] for name in site_names}
+
+
+def init_fresh_pgd_sources(
+    sites: tuple[SiteSpec, ...],
+    init: PGDInitStrategy,
+    source_shape: SourceShape,
+    leading: tuple[int, ...],
+    key: PRNGKeyArray,
+) -> dict[str, Array]:
+    """Per-site fresh adversarial sources (torch `_init_adv_sources`): trailing channel
+    is the weight-delta source; `leading = (B,) + position axes`. The source's leading
+    shape spells `source_shape` (`configs.SourceShape`) over those axes: `bsc` keeps the
+    full leading, `bc` collapses every position axis to 1 (`(B, 1)`), `c` collapses every
+    axis to 1 (`(1, 1)`). The persistent counterpart enumerates its config-time shapes in
+    `init_sources_sharded`."""
+    batch, *positions = leading
+    match source_shape:
+        case "bsc":
+            source_leading = leading
+        case "bc":
+            source_leading = (batch, *(1 for _ in positions))
+        case "c":
+            source_leading = tuple(1 for _ in leading)
+        case "sc":
+            raise AssertionError("unreachable: PGDConfig validation rejects `sc`")
+    keys = random.split(key, len(sites))
+    sources = {}
+    for site, site_key in zip(sites, keys, strict=True):
+        shape = (*source_leading, site.C + 1)
+        match init:
+            case "random":
+                sources[site.name] = random.uniform(site_key, shape, jnp.float32)
+            case "ones":
+                sources[site.name] = jnp.ones(shape, jnp.float32)
+            case "zeroes":
+                sources[site.name] = jnp.zeros(shape, jnp.float32)
+    return sources
+
+
+def init_sources_adam_state(sources: dict[str, Array]) -> SourcesAdamState:
+    return SourcesAdamState(
+        m={site: jnp.zeros_like(v) for site, v in sources.items()},
+        v={site: jnp.zeros_like(v) for site, v in sources.items()},
+        step_count=jnp.zeros(()),
+    )
+
+
+def sources_adam_ascend_project(
+    sources: dict[str, Array],
+    sources_grad: dict[str, Array],
+    adam_state: SourcesAdamState,
+    lr: Array,
+    adam: AdamPGDConfig,
+) -> tuple[dict[str, Array], SourcesAdamState]:
+    """One Adam ASCENT on the persistent sources, then project to [0,1] (SPEC S13/S15).
+
+    The variation point `SRC_STEP` (SPEC §6): a `sign` variant would replace the Adam
+    update with `lr * sign(grad)` (stateless) — same projection contract."""
+    step_count = adam_state.step_count + 1.0
+    # `sources_grad` arrives in the masked-forward compute dtype (bf16); cast to the moment
+    # dtype so the persistent `m`/`v` keep their declared storage dtype across steps.
+    grad = {s: sources_grad[s].astype(adam_state.m[s].dtype) for s in sources}
+    m = {s: adam.beta1 * adam_state.m[s] + (1 - adam.beta1) * grad[s] for s in sources}
+    v = {s: adam.beta2 * adam_state.v[s] + (1 - adam.beta2) * grad[s] * grad[s] for s in sources}
+    bias_correction1 = 1 - adam.beta1**step_count
+    bias_correction2 = 1 - adam.beta2**step_count
+    new_sources = {
+        s: jnp.clip(
+            sources[s]
+            + (
+                lr * (m[s] / bias_correction1) / (jnp.sqrt(v[s] / bias_correction2) + adam.eps)
+            ).astype(sources[s].dtype),
+            0.0,
+            1.0,
+        )
+        for s in sources
+    }
+    return new_sources, SourcesAdamState(m=m, v=v, step_count=step_count)
+
+
+class PersistentAdversary(eqx.Module):
+    """One persistent-PGD adversary (SPEC §3): the per-site sources + their Adam moments
+    that persist across steps, plus the lifecycle the trainer drives around the shared
+    backward. `sources` / `opt_state` are dynamic state; the rest is static config.
+
+    Per step: `warmup_ascend` (n_warmup supplemental ascents vs a scoring forward, params
+    + CI detached) → the warmed sources enter the main `value_and_grad` as leaves →
+    `final_ascend` (one more ascent from the SAME backward's source-grad — which IS
+    `dL_term/d(sources)`: the source path is never coeff-scaled, SPEC S14'/S23)."""
+
+    sources: dict[str, Array]  # site -> source in [0,1], `(*source_leading, C+1)`
+    opt_state: SourcesAdamState
+    state_key: str = eqx.field(static=True)
+    adam: AdamPGDConfig = eqx.field(static=True)
+    n_warmup: int = eqx.field(static=True)
+
+    def source_lr(self, step_f32: Array, total_steps: int) -> Array:
+        return scheduled_value_traced(step_f32, total_steps, self.adam.lr_schedule)
+
+    def warmup_ascend(
+        self, scoring_loss: Callable[[dict[str, Array]], Array], step_f32: Array, total_steps: int
+    ) -> "PersistentAdversary":
+        """`n_warmup` supplemental Adam ascents on the sources vs `scoring_loss` (the
+        route-all all-sites recon forward, params/CI detached — provided by the step). The
+        warmed sources are `stop_gradient`'d: they enter the main backward as leaves, so
+        the main graph differentiates w.r.t. them, not back through this scan."""
+        lr = self.source_lr(step_f32, total_steps)
+
+        def body(
+            carry: tuple[dict[str, Array], SourcesAdamState], _: None
+        ) -> tuple[tuple[dict[str, Array], SourcesAdamState], None]:
+            sources, opt = carry
+            grad = jax.grad(scoring_loss)(sources)
+            return sources_adam_ascend_project(sources, grad, opt, lr, self.adam), None
+
+        (warmed, warmed_opt), _ = jax.lax.scan(
+            body, (self.sources, self.opt_state), None, length=self.n_warmup
+        )
+        return eqx.tree_at(
+            lambda a: (a.sources, a.opt_state), self, (jax.lax.stop_gradient(warmed), warmed_opt)
+        )
+
+    def after_one_adam_ascent(
+        self, grad: dict[str, Array], step_f32: Array, total_steps: int
+    ) -> "PersistentAdversary":
+        """The adversary one Adam ascent-and-project (SPEC S13/S15) further along `grad`."""
+        lr = self.source_lr(step_f32, total_steps)
+        sources, opt_state = sources_adam_ascend_project(
+            self.sources, grad, self.opt_state, lr, self.adam
+        )
+        return eqx.tree_at(lambda a: (a.sources, a.opt_state), self, (sources, opt_state))
+
+    def final_ascend(
+        self, source_grad: dict[str, Array], step_f32: Array, total_steps: int
+    ) -> "PersistentAdversary":
+        """One final ascent recycled from the shared backward (SPEC S13'/S14'): the
+        source path enters the backward UNSCALED — the term's coeff scales only the
+        model-side cotangents (`train.model_cotangents_scaled`) — so `source_grad` IS
+        `dL_term/d(sources)`, with nothing to unscale, at every step of any coeff
+        schedule, activation gates included."""
+        return self.after_one_adam_ascent(source_grad, step_f32, total_steps)

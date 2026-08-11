@@ -1,0 +1,116 @@
+# TMS 40->10 PD decomposition — the larger superposition toy (40 features in 10 hidden
+# dims). The JAX counterpart of the torch `tms_40-10_config.yaml`: target pretrained from
+# scratch in-process (no wandb run_path), FaithfulnessLoss in the loss list, UNTIED
+# decomposition (linear1/linear2 two sites with independent V/U), tied
+# target. CI fn: layerwise per-site MLP (type=layerwise_mlp, hidden_dims=[200]). Validates via the
+# in-loop ground-truth target-CI metric (eval/identity_ci_error/<site>). Runs on CPU, single-process.
+run_name: jax-tms-40-10
+decomposition:
+  sites:
+    kind: explicit
+    sites:
+    - name: linear1
+      C: 100
+    - name: linear2
+      C: 100
+  ci:
+    type: layerwise_mlp
+    hidden_dims:
+    - 200
+pd:
+  seed: 0
+  loss_metrics:
+  - frequency:
+      coeff: 3.0e-05
+      reference_datapoint_count: 32768
+    coeff: 6.0e-05
+    type: SmoothL0ImportanceMinimalityLoss
+    gamma:
+      max_val: 1.0
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.01}
+  - type: MergedStochasticSubsetPPGDReconLoss
+    coeff: 1.0
+    adv_fraction: 0.5
+    n_warmup_steps: 2
+    routing:
+      type: uniform_k_subset
+    optimizer:
+      beta1: 0.01
+      beta2: 0.99
+      eps: 1.0e-08
+      lr_schedule:
+        max_val: 0.01
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.025, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      type: adam
+    source_shape: bc
+  - type: FaithfulnessLoss
+    coeff: 1.0
+  batch_size: 4096
+  steps: 20000
+  ci_fn_optimizer:
+    betas:
+    - 0.9
+    - 0.999
+    grad_clip_norm: 1.0
+    lr_schedule:
+      max_val: 1e-03
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    weight_decay: 0.0
+  components_optimizer:
+    betas:
+    - 0.9
+    - 0.999
+    grad_clip_norm: 1.0
+    lr_schedule:
+      max_val: 1e-03
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    weight_decay: 0.0
+  faithfulness_warmup_steps: 200
+  faithfulness_warmup_lr: 0.01
+  faithfulness_warmup_weight_decay: 0.0
+cadence:
+  train_log_every: 200
+  save_every: 5000
+  checkpoint_retention:
+    kind: keep_last
+    n: 2
+target:
+  n_features: 40
+  n_hidden: 10
+  n_hidden_layers: 0
+  init_bias_to_zero: true
+  pretrain:
+    steps: 10000
+    batch_size: 8192
+    lr: 5e-3
+    seed: 0
+data:
+  feature_probability: 0.05
+  data_generation_type: at_least_zero_active
+eval:
+  # Fresh-PGD recon runs on synthetic eval batches. Ground-truth CI metrics are native
+  # to the toy runner and log independently on the train-log cadence.
+  batch_size: 4096
+  n_steps: 1
+  every: 1000
+  slow_every: 5000
+  slow_on_first_step: true
+  metrics:
+  - type: PGDReconLoss
+    coeff: null
+    init: random
+    source_shape: c
+    n_steps: 20
+    step_size: 0.1
+wandb:
+  project: param-decomp-toys
+  entity: null

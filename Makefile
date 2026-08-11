@@ -1,20 +1,14 @@
 # setup
-# ONE venv for the whole workspace: the JAX trainer core (`param_decomp` + `pretrain` +
-# `vendored_jax`) is the root distribution and carries jax as a normal dependency, so a
-# single `uv sync --all-packages` installs core + config + lab into one `.venv`. The CPU
-# jax wheel is the base; the CUDA wheel is the `[cuda]` extra the per-run launch workspace
-# installs.
+# ONE venv: `param_decomp` carries jax as a normal dependency, so a single `uv sync`
+# installs everything into `.venv`. The CPU jax wheel is the base; a GPU host adds the
+# `[cuda]` (or `[cuda13]`) extra.
 .PHONY: install
 install:
 	uv sync --no-dev
 
-.PHONY: install-lab
-install-lab:
-	uv sync --all-packages --no-dev
-
 .PHONY: install-dev
 install-dev:
-	uv sync --all-packages
+	uv sync
 	uv run --no-sync pre-commit install
 
 # special install for CI (GitHub Actions) that reduces disk usage and install time
@@ -22,13 +16,12 @@ install-dev:
 # 2. install with `uv sync` but with some special options:
 #  > `--frozen` to enforce using the lock file for consistent dependency versions
 #  > `--link-mode copy` because symlinks/hardlinks dont work half the time anyway
-# Note: explored the `--compile-bytecode` option for test speedups, nothing came of it.
+# Note: explored the `--compile-bytecode` option for test speedups, nothing came of it. see https://github.com/goodfire-ai/param-decomp/pull/187/commits/740f6a28f4d3378078c917125356b6466f155e71
 .PHONY: install-ci
 install-ci:
 	uv venv --python 3.13 --clear
 	uv sync \
 		--frozen \
-		--all-packages \
 		--link-mode copy
 
 # checks
@@ -51,17 +44,20 @@ check-pre-commit:
 
 # tests
 
-# `param_decomp/tests/` is the JAX trainer core suite (incl. the LM equivalence goldens);
-# `param_decomp_lab/{tests,experiments}/` the lab suites (the toy TMS/ResidMLP tests live
-# beside their models under experiments/).
-TEST_PATHS = param_decomp/tests/ param_decomp_lab/tests/ param_decomp_lab/experiments/
+# `param_decomp/core/tests/` is the engine suite; `param_decomp/targets/tests/` the
+# per-target parity/golden suites (incl. the LM equivalence goldens);
+# `param_decomp/{tests,experiments}/` the library-level + composition suites (the toy
+# TMS/ResidMLP experiment tests live beside their composition roots under experiments/).
+TEST_PATHS = param_decomp/core/tests/ param_decomp/targets/tests/ param_decomp/tests/ param_decomp/experiments/
+
+# min(16, nproc). XLA already threads within each test, so once the workers saturate the
+# box another one buys nothing — the cap only stops a large workstation spawning dozens for
+# no gain. testmon is compatible: it ships its own xdist controller/worker sync.
+NUM_PROCESSES ?= $(shell (nproc 2>/dev/null || sysctl -n hw.ncpu) | awk '{print ($$1<16?$$1:16)}')
 
 .PHONY: test
 test:
-	uv run pytest $(TEST_PATHS) --testmon --durations 10
-
-# Use min(4, nproc) for numprocesses. Any more and it slows down the tests.
-NUM_PROCESSES ?= $(shell nproc | awk '{print ($$1<4?$$1:4)}')
+	uv run pytest $(TEST_PATHS) --testmon --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 
 .PHONY: test-all
 test-all:
@@ -74,7 +70,7 @@ test-all:
 # JAX compile cache and every later run repeats the compile cost. The llama goldens
 # split off because they dominate one xdist worker for ~8 min and co-schedule the
 # heaviest memory peaks next to the recon end-to-end tests on a 16GB runner.
-LLAMA_GOLDEN_TEST_PATHS = param_decomp/tests/test_llama8b.py param_decomp/tests/test_llama_simple_mlp.py
+LLAMA_GOLDEN_TEST_PATHS = param_decomp/targets/tests/test_llama8b.py param_decomp/targets/tests/test_llama_simple_mlp.py
 
 .PHONY: test-ci-llama-goldens
 test-ci-llama-goldens:
@@ -82,26 +78,26 @@ test-ci-llama-goldens:
 
 .PHONY: test-ci-core
 test-ci-core:
-	uv run pytest param_decomp/tests/ $(addprefix --ignore=,$(LLAMA_GOLDEN_TEST_PATHS)) --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
+	uv run pytest param_decomp/core/tests/ param_decomp/targets/tests/ $(addprefix --ignore=,$(LLAMA_GOLDEN_TEST_PATHS)) --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 
 .PHONY: test-ci-lab-multidevice
 test-ci-lab-multidevice:
-	uv run pytest param_decomp_lab/tests/ param_decomp_lab/experiments/ --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
+	uv run pytest param_decomp/tests/ param_decomp/experiments/ --runslow --durations 10 --numprocesses $(NUM_PROCESSES) --dist worksteal
 	$(MAKE) test-multidevice
 
-# Tests needing >1 device (sharding / checkpoint topology). They hang at the default 1
-# device, so they're skipped in the 1-device passes and run here under SIMULATED CPU
-# devices (XLA_FLAGS). `make test-all` runs this automatically as a second pass; invoke it
-# directly only to run the subset alone (e.g. iterating on sharding/checkpoint).
+# Tests needing >1 device hang at the default 1, so run them on logical CPU devices.
+# Four is the suite-wide minimum: some tests require a 2 x 2 mesh or explicitly need >=4.
+MULTIDEVICE_CPU_DEVICE_COUNT = 4
+
 .PHONY: test-multidevice
 test-multidevice:
-	XLA_FLAGS="--xla_force_host_platform_device_count=4" uv run pytest $(TEST_PATHS) -m multidevice --runmultidevice --durations 10
+	XLA_FLAGS="--xla_force_host_platform_device_count=$(MULTIDEVICE_CPU_DEVICE_COUNT)" uv run pytest $(TEST_PATHS) -m multidevice --runmultidevice --durations 10 --capture=tee-sys
 
 COVERAGE_DIR=docs/coverage
 
 .PHONY: coverage
 coverage:
-	uv run pytest $(TEST_PATHS) --cov=param_decomp --cov=param_decomp_lab --runslow
+	uv run pytest $(TEST_PATHS) --cov=param_decomp --runslow
 	mkdir -p $(COVERAGE_DIR)
 	uv run python -m coverage report -m > $(COVERAGE_DIR)/coverage.txt
 	uv run python -m coverage html --directory=$(COVERAGE_DIR)/html/
