@@ -22,7 +22,21 @@ chained-minus-local difference remains the only direct read of the inherited err
 `site_inputs: masked_forward` is already the default, so the new arms simply do not
 mention the field.
 
-## Part A — let the ablations compound
+## Part A — dropped from the recipe
+
+**Superseded.** The reasoning below is kept because the `{type: all}` routing option it
+produced is real and merged, but it is *not* used by the runs. Subset routing is an
+optimization aid, not a different objective: a site's expected error is the same either
+way, subsetting just conditions the gradient. So "the ablations don't compound far enough"
+was not a problem to fix, and adding all-routing would only have moved every hidden-recon
+number onto a new scale — forcing a fresh baseline run for no gain.
+
+Concretely, this is why the current series needs **no baseline arm**: with routing left
+alone, the finished `addsub-L18-11-trunk-imp2x` is already the matched control.
+
+The option stays available for a run that deliberately wants maximal compounding.
+
+## Part A as originally reasoned (not in use)
 
 The chained formulation runs a real forward pass and lets each site see the damage its
 upstream neighbours did. But *how much* damage reaches a site is set by the **routing**,
@@ -198,17 +212,32 @@ the right form, because it permits equality where `z_out + softplus(h)` would fo
 
 ### Which to run
 
-Both, plus a baseline, all on top of Part A:
+Three arms on the trunk + 2x-impmin-peak recipe (`addsub-L18-13-imp2x-*`), each differing
+from `addsub-L18-11-trunk-imp2x` by exactly one field:
 
-| arm | Part A | hard floor | shortfall penalty |
-|---|---|---|---|
-| `chained` | yes | — | eval-only |
-| `soft` | yes | — | loss |
-| `hard` | yes | yes | eval-only |
+| arm | hard floor | shortfall penalty |
+|---|---|---|
+| `floor` | yes | eval-only (should read 0 — the self-check) |
+| `sf1e-3` | — | loss, coeff 1e-3 |
+| `sf1e-2` | — | loss, coeff 1e-2 |
 
-Three runs at ~20 h and 2 GPUs each fits the GPU cap concurrently. The baseline is not
-optional: Part A changes the hidden loss's numbers, so neither of the constrained arms is
-comparable to any existing run.
+**The control is the finished `addsub-L18-11-trunk-imp2x` run**, not a fourth arm: routing
+is untouched, so nothing about the base recipe moved. Three runs at 2 GPUs each is exactly
+the per-user cap, so all three run concurrently.
+
+One caveat on reusing that control. The code has since changed so the two CI roles share
+one binomial jitter draw, where the control drew independently per role. That changes only
+the *correlation* between the two nets' mask dither, not either net's marginal distribution
+— and the two objectives run on separate forward passes whose stochastic sources are drawn
+independently regardless — so each loss is distributionally unchanged. The one place it is
+visible is `ci_scaled_component_weight_decay`, which takes a max over both nets' batch CI;
+the effect there is far below the noise floor.
+
+Coefficients are set against this recipe's hidden impmin, whose per-entry gradient
+(`coeff * peak_mult * 0.65/gamma`) runs 6.5e-5 early, peaks near 6.5e-3 around 70% of
+training, and settles at 3.3e-3. Both losses share a normalisation, so `1e-3` outweighs
+impmin early and yields to it late, while `1e-2` stays above it throughout and should
+approach the hard floor.
 
 Both losses normalise the same way (sum over subcomponents, mean over positions), so their
 coefficients compare directly. The hidden impmin's per-entry gradient is
