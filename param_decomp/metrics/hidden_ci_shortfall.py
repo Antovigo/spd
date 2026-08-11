@@ -7,6 +7,7 @@ from jaxtyping import Float
 from torch import Tensor
 from torch.distributed import ReduceOp
 
+from param_decomp.component_model import ComponentModel
 from param_decomp.distributed import all_reduce
 from param_decomp.metrics.base import LossMetricConfig, Metric, MetricResult
 from param_decomp.metrics.context import MetricContext
@@ -71,65 +72,83 @@ class HiddenCIShortfallLoss(Metric[HiddenCIShortfallLossConfig]):
 
     Also registered as an eval metric, so runs that do not penalise the shortfall can still
     log it — the unconstrained baseline, and `pd.hidden_ci_floor` runs where it should read
-    ~0 and is a self-check on the floor.
+    exactly 0 and is a self-check on the floor. That self-check is only meaningful because
+    the two roles share one binomial jitter draw
+    (`ComponentModel.calc_causal_importances_both_roles`); with independent draws this metric
+    reads the noise floor rather than the violation, which on the L18 shape is `6144 * 0.0083
+    ≈ 51` — two orders above the real signal.
     """
 
     log_namespace = "loss"
     short_name = "HiddenCIShortfall"
 
     @override
+    def bind(self, *, model: ComponentModel, device: str) -> None:
+        assert model.ci_fn_hidden is not None, (
+            "HiddenCIShortfallLoss compares the two CI nets; set pd.dual_hidden_ci"
+        )
+        super().bind(model=model, device=device)
+
+    @override
     def reset(self) -> None:
-        self._shortfall_sums: dict[str, Tensor] = {}
-        self._violating: dict[str, Tensor] = {}
+        # Sorted so every rank builds the same layout and issues identically ordered
+        # collectives; fixed at reset, so `compute()` needs no agreement protocol.
+        self._sites = sorted(self.model.target_module_paths)
+        self._n_components = torch.tensor(
+            [self.model.module_to_c[site] for site in self._sites], device=self.device
+        )
+        # fp32 regardless of the CI dtype: under autocast these are bf16 sums of ~1e-5 terms
+        # over millions of near-zero entries, which bf16 accumulation would quantise away.
+        self._shortfall_sum = torch.zeros(len(self._sites), device=self.device)
+        self._violating = torch.zeros(len(self._sites), device=self.device, dtype=torch.long)
         self._n_positions = torch.zeros((), device=self.device, dtype=torch.long)
 
     @override
     def update(self, ctx: MetricContext) -> Tensor:
         shortfall = _shortfall(ctx.ci_for("output").lower_leaky, ctx.ci_for("hidden").lower_leaky)
         n_positions = next(iter(shortfall.values())).shape[:-1].numel()
-        per_component_sums = {
-            name: values.sum(dim=tuple(range(values.dim() - 1)))
-            for name, values in shortfall.items()
-        }
+        per_site = torch.stack([shortfall[site].sum() for site in self._sites])
 
         if ctx.is_eval:  # `compute()` is eval-only, and each eval pass `reset()`s first
-            for name, sums in per_component_sums.items():
-                if name not in self._shortfall_sums:
-                    self._shortfall_sums[name] = torch.zeros_like(sums)
-                    self._violating[name] = torch.zeros((), device=self.device)
-                self._shortfall_sums[name] += sums.detach()
-                self._violating[name] += (
-                    shortfall[name].detach() > self.cfg.violation_threshold
-                ).sum()
+            self._shortfall_sum += per_site.detach().float()
+            self._violating += torch.stack(
+                [
+                    (shortfall[site].detach() > self.cfg.violation_threshold).sum()
+                    for site in self._sites
+                ]
+            )
             self._n_positions += n_positions
 
-        return torch.stack([sums.sum() for sums in per_component_sums.values()]).sum() / n_positions
+        return per_site.sum() / n_positions
 
     @override
     def compute(self) -> MetricResult:
-        assert self._shortfall_sums, "no batches accumulated"
-        sites = sorted(self._shortfall_sums)  # sorted: every rank issues the same collectives
-        # Numerators and the position count reduce separately and divide only afterwards, so
-        # each result is a ratio over all ranks' data, not an average of per-rank ratios.
-        n_positions = all_reduce(self._n_positions, op=ReduceOp.SUM)
-        stacked = torch.stack(
+        assert self._n_positions > 0, "no batches accumulated"
+        # One collective over a fresh tensor: `all_reduce` is in place, and reducing the
+        # accumulators directly would double-count them on a second `compute()`.
+        packed = torch.cat(
             [
-                torch.stack([self._shortfall_sums[site].sum(), self._violating[site]])
-                for site in sites
+                self._shortfall_sum,
+                self._violating.float(),
+                self._n_positions.float().reshape(1),
             ]
-        )  # [n_sites, 2]
-        reduced = all_reduce(stacked, op=ReduceOp.SUM)
-        n_components = torch.tensor(
-            [self._shortfall_sums[site].numel() for site in sites], device=self.device
         )
-        per_site_summed = reduced[:, 0] / n_positions
-        per_site_violating = reduced[:, 1] / (n_positions * n_components)
+        reduced = all_reduce(packed, op=ReduceOp.SUM)
+        n = len(self._sites)
+        # Sums and the position count reduce together and divide only afterwards, so each
+        # result is a ratio over all ranks' data, not an average of per-rank ratios.
+        n_positions = reduced[-1]
+        per_site_summed = reduced[:n] / n_positions
+        # Pooled over entries rather than an unweighted mean of per-site rates: sites carry
+        # different subcomponent counts (1024 vs 512 on the L18 shape), so a mean of rates
+        # would over-weight the small ones and disagree with the summed headline above it.
+        violating_frac = reduced[n : 2 * n].sum() / (n_positions * self._n_components.sum())
 
         name = self.instance_key
         out: dict[str, Float[Tensor, ""]] = {
             name: per_site_summed.sum(),
-            f"{name}/violating_frac": per_site_violating.mean(),
+            f"{name}/violating_frac": violating_frac,
         }
-        for i, site in enumerate(sites):
+        for i, site in enumerate(self._sites):
             out[f"{name}/{site}"] = per_site_summed[i]
         return out

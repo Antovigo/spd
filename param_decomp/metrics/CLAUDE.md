@@ -100,7 +100,9 @@ Configs currently kept next to their implementation for this reason:
 - `DecompositionTargetConfig` → `param_decomp.decomposition_targets`
 - `CiConfig` family (`LayerwiseCiConfig`, `AttnConfig`, `GlobalSharedTransformerCiConfig`,
   `GlobalCiConfig`) → `param_decomp.ci_fns`
-- `SamplingType`, `SubsetRoutingType` + members → `param_decomp.masks`
+- `SamplingType`, `RoutingType` + members → `param_decomp.masks`
+- `HiddenCIFloorConfig` → `param_decomp.ci_fns` (next to `floor_hidden_ci_logits`, which
+  `component_model` calls; `configs` reaches `component_model` through the metric union)
 - Each loss metric's `LossMetricConfig` subclass → `param_decomp/metrics/<name>.py`
 
 Never use `if TYPE_CHECKING:` + forward-reference strings to paper over a cycle. If
@@ -180,7 +182,7 @@ ways to act on that, one structural and one as a penalty:
 |---|---|---|
 | where | `ComponentModel.calc_causal_importances` | a loss metric (also registered eval-side) |
 | effect | `CI_hidden >= CI_output` by construction | penalises `relu(CI_out - CI_hidden)` |
-| diagnostic left | none — the shortfall is ~0 by design | the shortfall itself, still logged |
+| diagnostic left | none — the shortfall reads 0, which is then a self-check | the shortfall itself, still logged |
 
 The floor is a smooth `max` **in logit space** (`floor_hidden_ci_logits`, `ci_fns.py`):
 `z_hidden = z_out.detach() + softplus(z_hidden_raw - z_out.detach(), beta=sharpness)`. Logit
@@ -194,12 +196,28 @@ decays as `exp(beta*gap)` and is effectively gone past `gap ≈ -2`.
 
 `z_out` is detached in both mechanisms. Otherwise the hidden objective's own sparsity pressure
 would satisfy the constraint by pushing the *output* net's logits down — the hidden impmin
-acting on the output CI, confounding the comparison the dual setup exists to make.
+acting on the output CI, confounding the comparison the dual setup exists to make. Note this
+detach only protects the output net's *readout head*: under `dual_hidden_ci_shared_trunk` the
+hidden objective still trains the shared trunk through its own forward, which is the point of
+sharing it.
+
+**The two roles must be computed together for the ordering to reach the mask.** Under
+`sampling: binomial` the lower-leaky branch mixes in `-0.05 * rand_like` before squashing.
+Drawn independently per role, that noise inverts the order whenever the logit gap is under
+`0.0476` — which is exactly where the floor binds, so the guarantee would fail precisely on
+the entries it exists for, and a floored run's shortfall diagnostic would read the noise floor
+(`6144 components x 0.0083 ≈ 51` on the L18 shape, measured) instead of ~0.
+`ComponentModel.calc_causal_importances_both_roles` hands both roles one shared draw, and the
+trainer uses it; single-role `calc_causal_importances` keeps its own draw, which is harmless
+because every analysis caller passes `sampling="continuous"`.
 
 The floor lives on the model, not in the trainer, so `role="hidden"` returns the floored value
-to every caller — eval metrics, `find_alive_subcomponents`, harvest, the app. It costs one
-extra output-net forward per hidden CI call, run under `no_grad`; on the L18 shape that is
-~0.25% of one target-model forward.
+to every caller. In practice only four callers ask for that role — the trainer,
+`ABGridDataset`, `find_alive_subcomponents` and `build_alive_plane_scatter`; harvest, the app,
+`dataset_attributions` and `editable_model` all take the default `"output"` — but the point is
+that nothing *can* read an unfloored hidden CI. The single-role path costs one extra
+output-net forward, run under `no_grad`; the joint path costs none, reusing the output logits
+it already computed.
 
 `HiddenCIShortfallLoss` is normalised like the importance-minimality losses (sum over
 subcomponents, mean over positions, summed over sites) rather than as a plain mean, so its

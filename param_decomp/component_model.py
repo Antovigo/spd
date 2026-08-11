@@ -507,11 +507,12 @@ class ComponentModel(nn.Module):
                 with `dual_hidden_ci`. Under `hidden_ci_floor` this role additionally runs
                 the output net, so that every caller — trainer, eval metrics, and the
                 analysis tools alike — sees the floored value the model actually masks with.
-        """
-        ci_inputs = {path: pre_weight_acts[path] for path in self.target_module_paths}
-        if detach_inputs:
-            ci_inputs = {k: v.detach() for k, v in ci_inputs.items()}
 
+        A caller that wants *both* roles should use `calc_causal_importances_both_roles`,
+        which shares one binomial jitter draw between them and so preserves the
+        `hidden_ci_floor` ordering on the lower-leaky branch as well.
+        """
+        ci_inputs = self._ci_inputs(pre_weight_acts, detach_inputs)
         ci_fn_outputs = self.ci_fn_for(role)(ci_inputs)
         if role == "hidden" and self.hidden_ci_floor is not None:
             # `no_grad`, not `.detach()`: the floor must not become a path from the hidden
@@ -522,7 +523,64 @@ class ComponentModel(nn.Module):
             ci_fn_outputs = floor_hidden_ci_logits(
                 ci_fn_outputs, output_logits, self.hidden_ci_floor
             )
-        return self._apply_sigmoid_to_ci_outputs(ci_fn_outputs, sampling)
+        return self._apply_sigmoid_to_ci_outputs(
+            ci_fn_outputs, sampling, jitter=self._binomial_jitter(ci_fn_outputs, sampling)
+        )
+
+    def calc_causal_importances_both_roles(
+        self,
+        pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "... pos"]],
+        sampling: SamplingType,
+        detach_inputs: bool,
+    ) -> tuple[CIOutputs, CIOutputs]:
+        """`(output, hidden)` CI from one pass, sharing the binomial jitter draw.
+
+        Sharing that draw is what makes `hidden_ci_floor` hold on `lower_leaky` — the branch
+        that actually masks components. The floor orders the *logits*, and both squashes are
+        monotone, but under `sampling="binomial"` the lower-leaky branch first mixes in
+        `-0.05 * rand_like`. Drawn independently per role, that noise inverts the order
+        whenever the logit gap is under 0.0476 — which is exactly where the floor binds, so
+        the mechanism would fail precisely on the entries it exists for. One shared draw is
+        a monotone transform of both, and the ordering survives it exactly.
+
+        Also removes a redundant output-net forward: the floor needs the output logits, and
+        this way they are the same tensor the output role returns rather than a second
+        evaluation of the same net.
+        """
+        assert self.ci_fn_hidden is not None, (
+            "calc_causal_importances_both_roles needs a model built with dual_hidden_ci"
+        )
+        ci_inputs = self._ci_inputs(pre_weight_acts, detach_inputs)
+        output_logits = self.ci_fn(ci_inputs)
+        hidden_logits = self.ci_fn_hidden(ci_inputs)
+        if self.hidden_ci_floor is not None:
+            hidden_logits = floor_hidden_ci_logits(
+                hidden_logits,
+                {name: logits.detach() for name, logits in output_logits.items()},
+                self.hidden_ci_floor,
+            )
+        jitter = self._binomial_jitter(output_logits, sampling)
+        return (
+            self._apply_sigmoid_to_ci_outputs(output_logits, sampling, jitter=jitter),
+            self._apply_sigmoid_to_ci_outputs(hidden_logits, sampling, jitter=jitter),
+        )
+
+    def _ci_inputs(
+        self,
+        pre_weight_acts: dict[str, Float[Tensor, "... d_in"] | Int[Tensor, "... pos"]],
+        detach_inputs: bool,
+    ) -> dict[str, Tensor]:
+        ci_inputs = {path: pre_weight_acts[path] for path in self.target_module_paths}
+        return {k: v.detach() for k, v in ci_inputs.items()} if detach_inputs else ci_inputs
+
+    @staticmethod
+    def _binomial_jitter(
+        ci_fn_outputs: dict[str, Float[Tensor, "... C"]], sampling: SamplingType
+    ) -> dict[str, Float[Tensor, "... C"]] | None:
+        """One uniform draw per module, or `None` outside the binomial regime."""
+        if sampling != "binomial":
+            return None
+        return {name: torch.rand_like(logits) for name, logits in ci_fn_outputs.items()}
 
     def ci_fn_named_parameters(self) -> list[tuple[str, nn.Parameter]]:
         """Every CI-fn parameter exactly once, named `ci_fn.<...>` / `ci_fn_hidden.<...>`.
@@ -552,16 +610,25 @@ class ComponentModel(nn.Module):
         self,
         ci_fn_outputs: dict[str, Float[Tensor, "... C"]],
         sampling: SamplingType,
+        jitter: dict[str, Float[Tensor, "... C"]] | None,
     ) -> CIOutputs:
-        """Squash raw CI-fn outputs through the lower- and upper-leaky sigmoids."""
+        """Squash raw CI-fn outputs through the lower- and upper-leaky sigmoids.
+
+        `jitter` supplies the binomial regime's uniform draw. Passing the *same* jitter for
+        both CI roles keeps a logit-space ordering intact through the lower-leaky branch;
+        see `calc_causal_importances_both_roles`.
+        """
         causal_importances_lower_leaky = {}
         causal_importances_upper_leaky = {}
         pre_sigmoid = {}
+        assert (jitter is None) == (sampling != "binomial"), (
+            f"jitter is {'absent' if jitter is None else 'present'} under sampling={sampling!r}"
+        )
 
         for target_module_name, ci_fn_output in ci_fn_outputs.items():
-            if sampling == "binomial":
-                ci_fn_output_for_lower_leaky = 1.05 * ci_fn_output - 0.05 * torch.rand_like(
-                    ci_fn_output
+            if jitter is not None:
+                ci_fn_output_for_lower_leaky = (
+                    1.05 * ci_fn_output - 0.05 * jitter[target_module_name]
                 )
             else:
                 ci_fn_output_for_lower_leaky = ci_fn_output

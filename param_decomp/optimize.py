@@ -13,7 +13,7 @@ import signal
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Self, assert_never, cast
+from typing import Any, NoReturn, Self, assert_never, cast
 
 import torch
 import torch.nn as nn
@@ -30,7 +30,12 @@ from param_decomp.batch_and_loss_fns import (
     RunBatch,
     move_batch_to_device,
 )
-from param_decomp.component_model import ComponentModel, OutputWithCache, component_grad_norms
+from param_decomp.component_model import (
+    CIOutputs,
+    ComponentModel,
+    OutputWithCache,
+    component_grad_norms,
+)
 from param_decomp.components import Components
 from param_decomp.configs import Cadence, PDConfig, RuntimeConfig
 from param_decomp.decomposition_targets import (
@@ -171,24 +176,24 @@ def _build_metric_context(
     # Required even if no metric uses the DDP wrapper directly.
     batch = move_batch_to_device(batch, device)
     target_model_output: OutputWithCache = wrapped_model(batch, cache_type="input")
-    ci = component_model.calc_causal_importances(
-        pre_weight_acts=target_model_output.cache,
-        detach_inputs=False,
-        sampling=config.sampling,
-        role="output",
-    )
     # Both CI nets read the same cached clean activations, so the second net costs one
-    # CI-fn forward and no extra pass over the target model.
-    ci_hidden = (
-        component_model.calc_causal_importances(
+    # CI-fn forward and no extra pass over the target model. They are computed together so
+    # they share one binomial jitter draw, which is what preserves a `hidden_ci_floor`
+    # ordering through the lower-leaky branch.
+    if component_model.ci_fn_hidden is not None:
+        ci, ci_hidden = component_model.calc_causal_importances_both_roles(
             pre_weight_acts=target_model_output.cache,
             detach_inputs=False,
             sampling=config.sampling,
-            role="hidden",
         )
-        if component_model.ci_fn_hidden is not None
-        else None
-    )
+    else:
+        ci = component_model.calc_causal_importances(
+            pre_weight_acts=target_model_output.cache,
+            detach_inputs=False,
+            sampling=config.sampling,
+            role="output",
+        )
+        ci_hidden = None
     return MetricContext(
         model=component_model,
         batch=batch,
@@ -223,18 +228,8 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
         assert ctx.ci.lower_leaky.keys() == ctx.ci_hidden.lower_leaky.keys(), (
             f"the two CI nets disagree on modules at step {step}"
         )
-        if ctx.model.hidden_ci_floor is not None:
-            # Checked on the logits, where the guarantee is exact. On `lower_leaky` under
-            # `sampling="binomial"` the two nets draw independent jitter, which can invert
-            # the order when the gap is under 0.0476 — mask noise, not a broken floor.
-            ordered = torch.stack(
-                [
-                    (ctx.ci_hidden.pre_sigmoid[name] >= ctx.ci.pre_sigmoid[name]).all()
-                    for name in ctx.ci.pre_sigmoid
-                ]
-            ).all()
-            assert ordered, f"hidden_ci_floor violated: hidden logit below output at step {step}"
     cis = {"ci": ctx.ci} | ({"ci_hidden": ctx.ci_hidden} if ctx.ci_hidden is not None else {})
+    device_checks: list[Tensor] = []
     for label, ci in cis.items():
         assert ci.lower_leaky, f"empty {label}.lower_leaky dict at step {step}"
         assert ci.upper_leaky.keys() == ci.lower_leaky.keys(), (
@@ -245,9 +240,35 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
                 f"{label}.lower_leaky[{name!r}] device mismatch at step {step}: "
                 f"{t.device} vs {device}"
             )
-        # One sync per net rather than one per module: this is a per-step path.
-        finite = torch.stack([t.isfinite().all() for t in ci.lower_leaky.values()]).all()
-        assert finite, f"non-finite {label}.lower_leaky at step {step}"
+        device_checks += [t.isfinite().all() for t in ci.lower_leaky.values()]
+
+    if ctx.ci_hidden is not None and ctx.model.hidden_ci_floor is not None:
+        # Exact on every branch: the floor orders the logits, both squashes are monotone,
+        # and `calc_causal_importances_both_roles` hands the two roles one shared jitter
+        # draw — so `lower_leaky`, the branch that actually masks, is ordered too.
+        device_checks += [
+            (ctx.ci_hidden.lower_leaky[name] >= ctx.ci.lower_leaky[name]).all()
+            for name in ctx.ci.lower_leaky
+        ]
+
+    # One sync for every device-side check rather than one per net: this is a per-step path.
+    if not torch.stack(device_checks).all():
+        _raise_ci_check_failure(cis, ctx, step)
+
+
+def _raise_ci_check_failure(cis: dict[str, CIOutputs], ctx: MetricContext, step: int) -> NoReturn:
+    """Name the failing tensor. Only reached once, on the way to aborting the run, so the
+    per-module syncs it costs are irrelevant — the fast path pays one sync for all of them."""
+    for label, ci in cis.items():
+        for name, t in ci.lower_leaky.items():
+            assert t.isfinite().all(), f"non-finite {label}.lower_leaky[{name!r}] at step {step}"
+    assert ctx.ci_hidden is not None
+    for name, hidden in ctx.ci_hidden.lower_leaky.items():
+        assert (hidden >= ctx.ci.lower_leaky[name]).all(), (
+            f"hidden_ci_floor violated at step {step}: hidden CI below output CI for {name!r}, "
+            f"by up to {(ctx.ci.lower_leaky[name] - hidden).max().item():.3e}"
+        )
+    raise AssertionError(f"CI invariant check failed at step {step} but no cause was isolated")
 
 
 def _apply_ci_scaled_weight_decay(

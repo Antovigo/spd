@@ -38,7 +38,9 @@ class HiddenCIFloorConfig(BaseConfig):
     of something the two nets have to rediscover.
 
     Applied in logit space by `floor_hidden_ci_logits`: both sigmoid branches are monotone,
-    so one ordering there is inherited by the mask and the minimality penalty at once.
+    so one ordering there is inherited by the mask and the minimality penalty at once. The
+    mask branch additionally requires the two roles to share their binomial jitter draw —
+    see `ComponentModel.calc_causal_importances_both_roles`.
 
     Lives here rather than in `configs.py` because `component_model` consumes it and is
     itself reachable from `configs`; see the config placement rule in `metrics/CLAUDE.md`.
@@ -77,6 +79,16 @@ def floor_hidden_ci_logits(
 
     `output_logits` are detached by the caller: this constrains the hidden net, and must not
     become a path by which the hidden objective's sparsity pressure drags the output CI down.
+    That detach also drops the floor's true dependence on its own inputs — the exact Jacobian
+    carries a `(1 - sigmoid(beta * gap)) * d z_out / d acts` term — so where the floor binds
+    hard, the hidden CI is treated as independent of the activations that produced it. Nothing
+    consumes that gradient today (the trainer's `pre_weight_acts` come from a frozen model),
+    but a caller differentiating CI w.r.t. activations under `role="hidden"` would be misled.
+
+    Under `autocast_bf16` the forward is a *hard* max well before the gradient dies: bf16's
+    ULP near 0.5 is ~0.002, which `softplus(gap, beta=10)` drops below at `gap ≈ -0.4`. The
+    escape gradient survives regardless, autograd differentiating softplus analytically rather
+    than through the rounded forward.
     """
     assert hidden_logits.keys() == output_logits.keys(), (
         f"floor needs one output logit per hidden logit: {sorted(hidden_logits)} vs "

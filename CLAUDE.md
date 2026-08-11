@@ -155,9 +155,12 @@ Implemented by `share_transformer_trunk` / `GlobalSharedTransformerCiFn.adopt_tr
 
 `pd.hidden_ci_floor` goes one step further and makes `CI_hidden >= CI_output` structural: the
 hidden net's logits are floored at the output net's by a smooth max, so both sigmoid branches
-inherit the ordering. `HiddenCIShortfallLoss` is the soft alternative — it penalises
-`relu(CI_out - CI_hidden)` instead of forbidding it — and doubles as the eval-only diagnostic
-on runs that enforce nothing. Details in `param_decomp/metrics/CLAUDE.md`.
+inherit the ordering — provided the two roles are computed by
+`calc_causal_importances_both_roles`, which shares their binomial jitter draw (independent
+draws would break the ordering on the masking branch exactly where the floor binds).
+`HiddenCIShortfallLoss` is the soft alternative — it penalises `relu(CI_out - CI_hidden)`
+instead of forbidding it — and doubles as the eval-only diagnostic on runs that enforce
+nothing. Details in `param_decomp/metrics/CLAUDE.md`.
 
 Two consequences worth knowing:
 
