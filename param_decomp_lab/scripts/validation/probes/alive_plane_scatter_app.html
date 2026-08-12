@@ -60,7 +60,20 @@ stay empty for a single-layer decomposition. <b>min |proj|</b> hides arrows whos
 in-plane length is below the threshold; <b>length</b> scales every arrow by a common
 factor (relative lengths are preserved, so arrows stay comparable). Hover an arrowhead
 for the subcomponent's name, in-plane length, and angle to the plane (0° = it lies in the
-plane, 90° = orthogonal to it). Dashed lines mark each
+plane, 90° = orthogonal to it).
+<b>frame</b> sets what the origin means. <b>activation plane</b> (default) projects onto the
+probe plane's <i>orthonormal</i> basis and drops the probe bias, so the origin is the
+<i>true</i> activation-space zero: a ring that is off-centre here is genuinely off-centre in
+the model. This is the frame the arrows mean something in — the target model has no biases,
+so a component's read <code>x·V</code> vanishes on a hyperplane through that zero (RMSNorm
+rescales but never recentres), and the angle an arrow makes with a point is the real in-plane
+angle between the activation and that component's direction. <b>probe prediction</b> plots
+the probe's predicted (cos, sin) instead: its origin is the <i>mean</i> activation, and its
+axes are skewed, because <code>w_cos</code> and <code>w_sin</code> are neither orthogonal nor
+equal-norm — so angles there are not in-plane angles. It keeps the ring near unit radius
+(dashed circle) and is the better view for judging probe fit. Both are computed from the same
+shipped data, so switching is instant.
+Dashed lines mark each
 panel's zero; tick labels give the axes' scale and sign. Panels default to centred on the
 origin, sized to fit the <b>real model's own</b> cloud (with slack) — reproducible across
 separate renderings of this applet on the same base model and probes, regardless of which
@@ -75,6 +88,10 @@ reset — one row's panels share a frame, so zooming any of them zooms the whole
   <span id="periodctrl"><label>period</label><select id="period"></select></span>
   <span id="layerctrl"><label>layer</label><select id="layer"></select></span>
   <span><label>probe layer</label><select id="probelayer"></select></span>
+  <span><label>frame</label><select id="frame">
+    <option value="plane">activation plane (true zero)</option>
+    <option value="pred">probe prediction (cos, sin)</option>
+  </select></span>
   <span><label>data</label><select id="source"></select></span>
   <span><label>color by</label><select id="colorby">
     <option value="value">value mod T</option>
@@ -135,8 +152,8 @@ const ARROWS = D.meta.arrows;
 const ARROW_COLOR = { write: "#c1121f", read: "#1d4e89" };
 const state = {
   op: null, view: "layers", period: null, layer: null, probeLayer: null, colorby: "value",
-  arrows: false, source: "original", ciRole: "output", ciMatrix: null, ciComponent: null,
-  dirArrows: false, dirRole: "write", dirThrFrac: 0, dirScale: 0,
+  frame: "plane", arrows: false, source: "original", ciRole: "output", ciMatrix: null,
+  ciComponent: null, dirArrows: false, dirRole: "write", dirThrFrac: 0, dirScale: 0,
 };
 
 function fillSelect(sel, items, labels) {
@@ -184,6 +201,7 @@ state.probeLayer = String(DEFAULT_PROBE_LAYER);
 $("probelayer").value = state.probeLayer;
 $("probelayerbadge").textContent = "L" + state.probeLayer;
 state.view = $("view").value;
+state.frame = $("frame").value;
 // Non-dual checkpoints ship only ["original", "output_alive"] — no hidden-alive circuit.
 const SOURCE_LABEL = { original: "real model", hidden_alive: "hidden-alive only", output_alive: "output-alive only" };
 fillSelect($("source"), D.meta.sources, D.meta.sources.map(s => SOURCE_LABEL[s] || s));
@@ -232,17 +250,49 @@ function getXY(flatArr, oneD, i, f) {
   return [flatArr[2 * i], flatArr[2 * i + 1]];
 }
 
+// The shipped coords are the plane's ORTHONORMAL basis with no probe bias, so the origin is
+// the true activation-space zero. The "pred" frame rebuilds the probe's predicted (cos, sin)
+// from them -- `pred_cos = k*p1 + bc`, `pred_sin = m1*p1 + m2*p2 + bs` -- which is exact,
+// since w_cos = k*e1 and w_sin lies in the plane. Shipping one projection instead of two
+// keeps data.js from doubling.
+function xfFor(row, col) {
+  return D.ops[state.op].xf[row.kind === "own"
+    ? `${row.variable}|${col.layer}|${col.period}`
+    : `res|${state.probeLayer}|${col.period}`];
+}
+function toPredFrame(flat, oneD, xf) {
+  const out = new Float32Array(flat.length);
+  if (oneD) {
+    for (let i = 0; i < flat.length; i++) out[i] = xf.k * flat[i] + xf.bc;
+    return out;
+  }
+  for (let i = 0; i < flat.length; i += 2) {
+    out[i] = xf.k * flat[i] + xf.bc;
+    out[i + 1] = xf.m1 * flat[i] + xf.m2 * flat[i + 1] + xf.bs;
+  }
+  return out;
+}
 // coords of row's panel at column ci; prev=true -> previous stream position in the SAME
 // plane. Only defined in the "layers" view (moving between periods isn't "previous").
+// Cached in the "pred" frame -- every render path (points, deltas, framing) reads through here.
+let coordCache = new Map();
 function rowCoords(row, ci, prev, src) {
   const col = columns()[ci];
   const cd = cellForPeriod(row, col.period, src);
-  if (!prev) return cd.layers[col.layer];
-  if (state.view !== "layers") return null;
-  const li = LAYERS.indexOf(col.layer);
-  if (li === 0) return null;
-  if (row.kind === "own") return cd.prev[col.layer];
-  return cd.layers[LAYERS[li - 1]];               // final row: same plane at prev position
+  let raw;
+  if (!prev) raw = cd.layers[col.layer];
+  else if (state.view !== "layers") return null;
+  else {
+    const li = LAYERS.indexOf(col.layer);
+    if (li === 0) return null;
+    raw = row.kind === "own" ? cd.prev[col.layer]   // final row: same plane at prev position
+                             : cd.layers[LAYERS[li - 1]];
+  }
+  if (state.frame !== "pred") return raw;
+  const key = [state.op, row.key, state.probeLayer, col.layer, col.period, src || state.source, state.frame, prev ? 1 : 0].join("|");
+  let hit = coordCache.get(key);
+  if (!hit) { hit = toPredFrame(raw, cd.one_d, xfFor(row, col)); coordCache.set(key, hit); }
+  return hit;
 }
 
 const SLACK = 1.15;                    // 15% headroom beyond the real model's own extent
@@ -253,7 +303,7 @@ const defaultFrameCache = {};
 // model + probes (op/period/layer/probe-layer determine it, never the sampled points'
 // own asymmetric range or which decomposition produced this run).
 function defaultRowFrame(row) {
-  const key = [row.key, state.op, state.view, state.period, state.layer, state.probeLayer].join("|");
+  const key = [row.key, state.op, state.view, state.period, state.layer, state.probeLayer, state.frame].join("|");
   if (defaultFrameCache[key]) return defaultFrameCache[key];
   let maxAbs = 0;
   let oneD = false;
@@ -267,7 +317,7 @@ function defaultRowFrame(row) {
   };
   for (let ci = 0; ci < cols.length; ci++) {
     const cd = cellForPeriod(row, cols[ci].period, "original");
-    scan(cd.layers[cols[ci].layer], cd.one_d);
+    scan(rowCoords(row, ci, false, "original"), cd.one_d);
     const p = rowCoords(row, ci, true, "original");
     if (p) scan(p, cd.one_d);
   }
@@ -281,9 +331,14 @@ function defaultRowFrame(row) {
 // Per-row (shared across columns/sources) pan+zoom on top of the default frame. Wheel
 // zooms toward the cursor, drag pans, double-click resets -- see the grid event listeners.
 const zoom = {};
+// Keyed by frame as well as row: cx/cy are pans in DATA units, and the two frames' units
+// differ by orders of magnitude, so carrying one frame's pan into the other would throw the
+// cloud off-screen. Each frame keeps its own view instead, so toggling back is lossless.
+function zoomKey(rowKey) { return rowKey + "|" + state.frame; }
 function zoomFor(rowKey) {
-  if (!zoom[rowKey]) zoom[rowKey] = { scale: 1, cx: 0, cy: 0 };
-  return zoom[rowKey];
+  const k = zoomKey(rowKey);
+  if (!zoom[k]) zoom[k] = { scale: 1, cx: 0, cy: 0 };
+  return zoom[k];
 }
 function rowFrame(row) {
   const f0 = defaultRowFrame(row);
@@ -295,7 +350,7 @@ function rowFrame(row) {
 
 const magCache = {};
 function planeDeltas(row, ci) {                // Δ from the previous stream position, in this row's plane
-  const key = ["plane", row.key, state.op, state.period, state.probeLayer, state.source, ci].join("|");
+  const key = ["plane", row.key, state.op, state.period, state.probeLayer, state.source, state.frame, ci].join("|");
   if (magCache[key]) return magCache[key];
   const col = columns()[ci];
   const cd = cellForPeriod(row, col.period), f = rowFrame(row);
@@ -310,7 +365,7 @@ function planeDeltas(row, ci) {                // Δ from the previous stream po
   return out;
 }
 function distortionDeltas(row, ci) {           // Δ from the real model, in this row's plane
-  const key = ["distort", row.key, state.op, state.view, state.period, state.layer, state.probeLayer, state.source, ci].join("|");
+  const key = ["distort", row.key, state.op, state.view, state.period, state.layer, state.probeLayer, state.source, state.frame, ci].join("|");
   if (magCache[key]) return magCache[key];
   const col = columns()[ci];
   const cd = cellForPeriod(row, col.period), f = rowFrame(row);
@@ -475,17 +530,32 @@ function drawAxes(ctx, f, oneD) {
 // One subcomponent's residual-space direction projected on the panel's probe plane, drawn
 // from the origin as the displacement it contributes. Gated to the single column whose
 // stream position that component reads from / writes to (meta.arrows.sites).
+// Arrows ship in the same orthonormal frame as the points, so in "plane" a drawn arrow IS
+// the direction's true in-plane increment. The "pred" frame applies only the LINEAR part of
+// the transform: an arrow is a displacement, and the probe bias cancels in a difference.
 const arrowCache = {};
-function arrowsFor(site, planeKey) {
+function arrowsFor(site, planeKey, xf) {
   const bySite = D.ops[state.op].arrows[site];
   const rec = bySite && bySite[planeKey];
   if (!rec) return null;
-  const key = [state.op, site, planeKey].join("|");
-  if (!arrowCache[key]) arrowCache[key] = { cs: decodeF16(rec.cs), ang: decodeF16(rec.ang) };
+  const key = [state.op, site, planeKey, state.frame].join("|");
+  if (!arrowCache[key]) {
+    let cs = decodeF16(rec.cs);
+    if (state.frame === "pred") {
+      const out = new Float32Array(cs.length);
+      for (let i = 0; i < cs.length; i += 2) {
+        out[i] = xf.k * cs[i];
+        out[i + 1] = (xf.m1 || 0) * cs[i] + (xf.m2 || 0) * cs[i + 1];
+      }
+      cs = out;
+    }
+    arrowCache[key] = { cs: cs, ang: decodeF16(rec.ang) };
+  }
   return arrowCache[key];
 }
-function arrowMult() { return ARROWS.mult_default * Math.pow(10, state.dirScale); }
-function arrowThreshold() { return state.dirThrFrac * ARROWS.norm_hi; }
+function arrowCalib() { return ARROWS.calib[state.frame]; }
+function arrowMult() { return arrowCalib().mult_default * Math.pow(10, state.dirScale); }
+function arrowThreshold() { return state.dirThrFrac * arrowCalib().norm_hi; }
 function planeKeyFor(row, col) {
   return row.kind === "own" ? `${row.variable}|${col.period}`
                             : `res|${state.probeLayer}|${col.period}`;
@@ -502,7 +572,7 @@ function drawComponentArrows(ctx, row, ci, f) {
   const col = columns()[ci];
   const idxs = ARROWS.sites[col.layer];
   if (!idxs) return [];
-  const rec = arrowsFor(col.layer, planeKeyFor(row, col));
+  const rec = arrowsFor(col.layer, planeKeyFor(row, col), xfFor(row, col));
   if (!rec) return [];
   const thr = arrowThreshold(), mult = arrowMult();
   const origin = toPx([0, 0], f);
@@ -573,7 +643,9 @@ function drawAll() {
       ctx.clearRect(0, 0, PANEL, PANEL);
       drawAxes(ctx, f, cd.one_d);
       const mags = deltas(row, ci);
-      if (!cd.one_d) {                        // unit circle reference
+      // Unit circle reference -- only meaningful where the axes ARE the predicted cosines;
+      // in the activation frame radius 1 is an arbitrary length.
+      if (!cd.one_d && state.frame === "pred") {
         ctx.strokeStyle = "#d8d8dc"; ctx.setLineDash([2, 3]); ctx.beginPath();
         const c0 = toPx([0, 0], f), rad = 1 / (f.xmax - f.xmin) * PANEL;
         ctx.arc(c0[0], c0[1], rad, 0, 2 * Math.PI); ctx.stroke(); ctx.setLineDash([]);
@@ -764,7 +836,7 @@ window.addEventListener("mouseup", () => { dragState = null; });
 grid.addEventListener("dblclick", e => {
   const t = e.target;
   if (t.tagName !== "CANVAS") return;
-  zoom[rowDefs()[+t.dataset.row].key] = { scale: 1, cx: 0, cy: 0 };
+  zoom[zoomKey(rowDefs()[+t.dataset.row].key)] = { scale: 1, cx: 0, cy: 0 };
   drawAll();
 });
 
@@ -816,6 +888,16 @@ $("view").addEventListener("change", () => {
   buildGrid();
   drawAll();
 });
+// The two frames have their own arrow calibration (lengths differ by orders of magnitude),
+// so rescale the threshold slider to keep the same relative cut when switching.
+$("frame").addEventListener("change", () => {
+  state.frame = $("frame").value;
+  coordCache = new Map();
+  state.dirThrFrac = arrowCalib().norm_hi > 0 ? arrowCalib().norm_default / arrowCalib().norm_hi : 0;
+  $("dirthr").value = state.dirThrFrac;
+  updateArrowLabels();
+  drawAll();
+});
 $("colorby").addEventListener("change", () => {
   state.colorby = $("colorby").value;
   $("cicontrols").style.display = state.colorby === "ci" ? "inline-flex" : "none";
@@ -828,7 +910,7 @@ $("arrows").addEventListener("change", () => { state.arrows = $("arrows").checke
 
 // Component arrows: threshold rides on the shipped in-plane norms (0 .. norm_hi), and the
 // length slider is a decade either side of the data-derived default multiplier.
-state.dirThrFrac = ARROWS.norm_hi > 0 ? ARROWS.norm_default / ARROWS.norm_hi : 0;
+state.dirThrFrac = arrowCalib().norm_hi > 0 ? arrowCalib().norm_default / arrowCalib().norm_hi : 0;
 $("dirthr").value = state.dirThrFrac;
 function updateArrowLabels() {
   $("dirthrlabel").textContent = arrowThreshold().toPrecision(3);

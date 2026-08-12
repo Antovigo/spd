@@ -24,8 +24,20 @@ by the **causal importance** of one selected alive subcomponent (role + matrix +
 pickers; CI is a single value per prompt, read at the `=` token from the *original* forward,
 so it colors every panel identically regardless of which source is displayed).
 
+**Frame** picks what a panel's origin means. `plane` (default) projects onto the probe
+plane's *orthonormal* basis with the probe bias dropped, so the origin is the true
+activation-space zero and panel angles are in-plane angles; `pred` reproduces the probe's
+predicted `(cos, sin)`, whose origin is the *mean* activation and whose axes are skewed by
+`w_cos`/`w_sin` being neither orthogonal nor equal-norm. `plane` is the frame the arrows
+mean something in — the target model is bias-free, so a component's read `x·V` vanishes on a
+hyperplane through the true zero (RMSNorm rescales but never recentres), and an arrow drawn
+from that zero makes the honest angle with each point. `pred` keeps the ring ~unit-radius
+and is the better view for judging probe fit. Both come from one shipped projection: the
+per-plane transform in `ops[op].xf` rebuilds `pred` client-side, since duplicating the
+points would double an already ~100 MB `data.js`. Switching frames needs no regeneration.
+
 **Component arrows** overlay each alive subcomponent's own direction on the plane, drawn from
-the origin as the displacement it contributes (`dir·w_cos, dir·w_sin`, bias-free). A dropdown
+the origin as the displacement it contributes (`dir·e1, dir·e2`, bias-free). A dropdown
 picks the `U` vectors of the components that write to the stream or the `V` vectors of those
 that read from it; directions are gauge-invariant (`V·‖U‖` / `U·‖V‖`, as in
 `build_direction_scatter`) and reads absorb their RMSNorm gain, since the component sees the
@@ -97,7 +109,6 @@ from param_decomp_lab.scripts.validation.common import (
     submit_self_to_slurm,
 )
 from param_decomp_lab.scripts.validation.probes.fit_ridge_cv_probes import _variable_values
-from param_decomp_lab.scripts.validation.probes.plot_probe_projections import _project
 
 _MODULE = "param_decomp_lab.scripts.validation.probes.build_alive_plane_scatter"
 _TEMPLATE = Path(__file__).with_name("alive_plane_scatter_app.html")
@@ -148,7 +159,53 @@ def _capture_positions(hf_model: nn.Module, layers: list[int]) -> Generator[dict
 
 
 def _flat(p: np.ndarray) -> list[float]:
-    return [round(float(c), 4) for c in (p[:, 0] if p.shape[1] == 1 else p.reshape(-1))]
+    """Flattened, at ~6 significant digits.
+
+    Decimals come from the array's own scale rather than a fixed count: activation-frame
+    coords carry whatever scale the residual stream happens to have in that plane, unlike
+    the probe's predictions, which were always ~unit.
+    """
+    flat = p[:, 0] if p.shape[1] == 1 else p.reshape(-1)
+    peak = float(np.abs(flat).max())
+    decimals = 6 if peak == 0.0 else int(np.clip(6 - np.floor(np.log10(peak)) - 1, 0, 12))
+    return [round(float(c), decimals) for c in flat]
+
+
+def _project_plane(x: NDArray[np.float32], cell: dict[str, Any]) -> NDArray[np.float32]:
+    """`[n, 2]` activation on the probe plane's orthonormal basis — `[n, 1]` when degenerate.
+
+    Linear, not affine: the probe bias is *not* applied, so the panel origin is the
+    activation-space zero. That is the only origin the arrows can honestly start from —
+    the target model is bias-free, so a subcomponent's read `x·V` vanishes on a hyperplane
+    through the true zero, and RMSNorm (which rescales but never recentres) preserves it.
+    An orthonormal basis additionally makes panel angles equal in-plane angles, which the
+    raw `(w_cos, w_sin)` frame does not: those two are neither orthogonal nor equal-norm.
+    """
+    w_cos = np.asarray(cell["w_cos"], np.float32)
+    w_sin = None if cell["w_sin"] is None else np.asarray(cell["w_sin"], np.float32)
+    e1, e2 = probe_plane_basis(w_cos, w_sin)
+    p1 = x @ e1
+    return p1[:, None] if w_sin is None else np.stack([p1, x @ e2], axis=1)
+
+
+def _frame_transform(cell: dict[str, Any]) -> dict[str, float]:
+    """Coefficients taking orthonormal plane coords back to the probe's predicted (cos, sin).
+
+    `pred_cos = k·p1 + bc`, `pred_sin = m1·p1 + m2·p2 + bs`. Exact, because `w_cos = k·e1`
+    and `w_sin` lies in the plane by construction — so shipping one projection is enough
+    for the applet to offer both frames, instead of doubling an already ~100 MB `data.js`.
+
+    Kept at full precision, unlike the calibration scalars: these multiply every point, and
+    `m1·p1` can cancel against `m2·p2` on a near-degenerate plane, so rounding them shows up
+    in the reconstructed frame. There are only a handful per plane.
+    """
+    w_cos = np.asarray(cell["w_cos"], np.float32)
+    w_sin = None if cell["w_sin"] is None else np.asarray(cell["w_sin"], np.float32)
+    e1, e2 = probe_plane_basis(w_cos, w_sin)
+    out = {"k": float(np.linalg.norm(w_cos)), "bc": cell["b_cos"]}
+    if w_sin is not None:
+        out |= {"m1": float(w_sin @ e1), "m2": float(w_sin @ e2), "bs": cell["b_sin"]}
+    return out
 
 
 def _comma_list(x: str | tuple[Any, ...]) -> list[str]:
@@ -250,26 +307,29 @@ def _arrow_directions(
 
 def _plane_arrows(
     dirs: NDArray[np.float32], cell: dict[str, Any]
-) -> tuple[dict[str, str], NDArray[np.float32]]:
-    """Per-direction `(cos, sin)` increment on this probe's plane, its angle to it, and its norm.
+) -> tuple[dict[str, str], dict[str, NDArray[np.float32]]]:
+    """Per-direction in-plane increment, its angle to the plane, and its norm in each frame.
 
-    The probe bias is deliberately dropped: a panel plots `x·w + b`, so adding `dir` to `x`
-    moves the point by `dir·w` — the arrow is that displacement, drawn from the panel origin.
-    `sin` is all-zero for a 1-D (period-2) probe, matching how the panel draws it. The angle is
-    taken against the plane's orthonormal basis, so it is 0° for a direction lying in the plane
-    and 90° for one orthogonal to it, independent of the probe's scale.
+    Shipped in the same orthonormal frame as the points, so an arrow's drawn length *is* its
+    true in-plane norm and the angle it makes with a point *is* the in-plane angle between
+    that direction and the activation. The probe bias never applies to an arrow whichever
+    frame is displayed: it is a displacement, and a panel maps `x → x·w + b`, so adding
+    `dir` to `x` moves the point by `dir·w` regardless of `b`. The second axis is all-zero
+    on a degenerate (period-2) plane, matching how the panel draws it. The angle is 0° for a
+    direction lying in the plane and 90° for one orthogonal to it, independent of scale.
     """
     w_cos = np.asarray(cell["w_cos"], np.float32)
     w_sin = None if cell["w_sin"] is None else np.asarray(cell["w_sin"], np.float32)
-    cos = dirs @ w_cos
-    sin = np.zeros_like(cos) if w_sin is None else dirs @ w_sin
     e1, e2 = probe_plane_basis(w_cos, w_sin)
-    in_plane = np.hypot(dirs @ e1, dirs @ e2)
+    a1, a2 = dirs @ e1, dirs @ e2
+    in_plane = np.hypot(a1, a2)
     angle = np.degrees(
         np.arccos(np.clip(in_plane / np.maximum(np.linalg.norm(dirs, axis=1), 1e-12), 0.0, 1.0))
     )
-    payload = {"cs": b64_f16(np.stack([cos, sin], axis=1)), "ang": b64_f16(angle)}
-    return payload, np.hypot(cos, sin)
+    payload = {"cs": b64_f16(np.stack([a1, a2], axis=1)), "ang": b64_f16(angle)}
+    xf = _frame_transform(cell)
+    pred_sin = np.zeros_like(a1) if w_sin is None else xf["m1"] * a1 + xf["m2"] * a2
+    return payload, {"plane": in_plane, "pred": np.hypot(xf["k"] * a1, pred_sin)}
 
 
 def _sig(x: float) -> float:
@@ -377,7 +437,7 @@ def build_alive_plane_scatter(
         f"arrows: {len(arrow_candidates)} alive subcomponents over "
         f"{ {site: len(idxs) for site, idxs in sorted(arrow_sites.items())} }"
     )
-    arrow_norms: list[NDArray[np.float32]] = []
+    arrow_norms: dict[str, list[NDArray[np.float32]]] = {"plane": [], "pred": []}
 
     rng = np.random.default_rng(seed)
     ops_data: dict[str, Any] = {}
@@ -517,16 +577,28 @@ def build_alive_plane_scatter(
                     for t in periods:
                         pcell = results[pk][result_variable][str(t)]
                         planes[str(pl)][result_variable][str(t)]["layers"][lk] = _flat(
-                            _project(x, pcell)
+                            _project_plane(x, pcell)
                         )
                 for v in _OWN_VARIABLES:
                     for t in periods:
                         ocell = results[lk][v][str(t)]
-                        own[v][str(t)]["layers"][lk] = _flat(_project(x, ocell))
+                        own[v][str(t)]["layers"][lk] = _flat(_project_plane(x, ocell))
                         if prev_x is not None:
-                            own[v][str(t)]["prev"][lk] = _flat(_project(prev_x, ocell))
+                            own[v][str(t)]["prev"][lk] = _flat(_project_plane(prev_x, ocell))
                 prev_x = x
             sources_out[source] = {"own": own, "planes": planes, "resid_delta": resid_delta}
+
+        # One transform per displayed plane, shared by every source (it depends only on the
+        # probe), letting the applet rebuild the predicted-(cos, sin) frame client-side. Own
+        # rows read their own layer's probe, so those are keyed by layer too.
+        xf_out: dict[str, dict[str, float]] = {}
+        for lk in layer_keys:
+            for v in _OWN_VARIABLES:
+                for t in periods:
+                    xf_out[f"{v}|{lk}|{t}"] = _frame_transform(results[lk][v][str(t)])
+        for pl, pk in zip(probe_layer_list, probe_keys, strict=True):
+            for t in periods:
+                xf_out[f"res|{pl}|{t}"] = _frame_transform(results[pk][result_variable][str(t)])
 
         # Arrows are gated to the one stream position each component touches, so a site only
         # needs the planes its own column can display: that position's own `a`/`b` probes, and
@@ -539,12 +611,14 @@ def build_alive_plane_scatter(
                 for t in periods:
                     cell = results[site][v][str(t)]
                     site_planes[f"{v}|{t}"], norms = _plane_arrows(site_dirs, cell)
-                    arrow_norms.append(norms)
+                    for frame, vals in norms.items():
+                        arrow_norms[frame].append(vals)
             for pl, pk in zip(probe_layer_list, probe_keys, strict=True):
                 for t in periods:
                     cell = results[pk][result_variable][str(t)]
                     site_planes[f"res|{pl}|{t}"], norms = _plane_arrows(site_dirs, cell)
-                    arrow_norms.append(norms)
+                    for frame, vals in norms.items():
+                        arrow_norms[frame].append(vals)
             arrows_out[site] = site_planes
 
         ci_out: dict[str, str] = {}
@@ -568,6 +642,7 @@ def build_alive_plane_scatter(
             "sources": sources_out,
             "ci": ci_out,
             "arrows": arrows_out,
+            "xf": xf_out,
         }
         logger.info(
             f"{op}: captured {n_shown} prompts x {len(layer_keys)} positions x {len(sources)} sources"
@@ -578,10 +653,18 @@ def build_alive_plane_scatter(
         if output_dir
         else analysis_dir(run.run_dir) / "alive_plane_scatter"
     )
-    # Arrow projections are orders of magnitude shorter than the cloud (a probe maps a
-    # `d_model` activation to a ~unit cosine, so `‖w‖` is tiny). `mult_default` puts the 99th
-    # percentile arrow at one data unit — roughly the ring radius — as the slider's midpoint.
-    all_arrow_norms = np.concatenate(arrow_norms)
+    # Calibrated per frame, since an arrow's length is frame-dependent and the two differ by
+    # orders of magnitude: in `pred` a probe maps a `d_model` activation to a ~unit cosine, so
+    # `‖w‖` is tiny and raw projections are far shorter than the cloud. `mult_default` puts the
+    # 99th-percentile arrow at one data unit as the slider's midpoint.
+    arrow_calib = {
+        frame: {
+            "norm_hi": _sig(float(np.quantile(cat, 0.999))),
+            "norm_default": _sig(float(np.quantile(cat, 0.9))),
+            "mult_default": _sig(1.0 / max(float(np.quantile(cat, 0.99)), 1e-12)),
+        }
+        for frame, cat in ((f, np.concatenate(v)) for f, v in arrow_norms.items())
+    }
     payload_js = {
         "meta": {
             "positions": layer_keys,
@@ -604,9 +687,7 @@ def build_alive_plane_scatter(
                     for c in arrow_candidates
                 ],
                 "sites": arrow_sites,
-                "norm_hi": _sig(float(np.quantile(all_arrow_norms, 0.999))),
-                "norm_default": _sig(float(np.quantile(all_arrow_norms, 0.9))),
-                "mult_default": _sig(1.0 / max(float(np.quantile(all_arrow_norms, 0.99)), 1e-12)),
+                "calib": arrow_calib,
             },
         },
         "ops": ops_data,

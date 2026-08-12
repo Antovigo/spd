@@ -64,10 +64,41 @@ matrix + component pickers, gated by that role's alive list; CI is one value per
 from the real-model forward, so it colors every panel identically regardless of which
 source is shown).
 
+**frame** (client-side only) sets what a panel's origin means, and is the difference between
+a picture the arrows are meaningful in and one they are not.
+
+- **activation plane** (default) — points are `(x·e1, x·e2)` on the plane's *orthonormal*
+  basis (`common.probe_plane_basis`), with the probe bias **dropped**. The origin is then the
+  true activation-space zero, so a ring that looks off-centre *is* off-centre in the model.
+  Because the target is bias-free (Llama has no `attention_bias`/`mlp_bias`, and RMSNorm
+  rescales but never recentres), a component's read `x·V` vanishes on a hyperplane through
+  that zero — so an arrow drawn from it makes the honest angle with every point, and since
+  the default frame is square in data units on a square panel, screen angles *are* in-plane
+  angles.
+- **probe prediction** — the old view: `(x·w_cos + b_cos, x·w_sin + b_sin)`. Its origin is
+  the *mean* activation (ridge's unpenalised intercept pins mean prediction to the mean
+  target, which is ~0 on a period-commensurate value grid), and its axes are skewed, since
+  `w_cos`/`w_sin` are neither orthogonal nor equal-norm. Angles there are not in-plane
+  angles. Keeps the ring near unit radius (the dashed unit circle is drawn only here) and
+  is the better view for judging probe fit.
+
+Both come from **one** shipped projection: `ops[op].xf` carries the per-plane transform
+(`pred_cos = k·p1 + bc`, `pred_sin = m1·p1 + m2·p2 + bs`, exact since `w_cos = k·e1` and
+`w_sin` lies in the plane), so `pred` is rebuilt in-browser rather than doubling a ~100 MB
+`data.js`. Those coefficients are shipped at full precision — rounding them to 4 significant
+figures like the calibration scalars puts a ~1e-3 relative error into the reconstructed
+frame, because `m1·p1` can cancel against `m2·p2`. Arrow lengths differ by orders of
+magnitude between frames, so `meta.arrows.calib` holds a `norm_hi`/`norm_default`/
+`mult_default` triple per frame and the threshold slider rescales on switch.
+
+Empirically the two origins are *far* apart: measured against L18's own probes, the ring's
+centroid sits **0.17–1.07 ring radii** from the true zero depending on the cell (`a+b` T=10
+is 1.07 — the true zero lies roughly on the ring). So this is not a cosmetic change.
+
 **Component arrows** overlay each alive subcomponent's own direction on the panel's plane,
-drawn from the origin as the displacement it contributes (`dir·w_cos, dir·w_sin`; the probe
-bias is dropped, since a panel plots `x·w + b` and adding `dir` to `x` moves the point by
-`dir·w`). A dropdown picks the **U** vectors of the components that *write* to the stream or
+drawn from the origin as the displacement it contributes (`dir·e1, dir·e2`; the probe bias
+never applies to an arrow in either frame, since a panel maps `x → x·w + b` and adding `dir`
+to `x` moves the point by `dir·w` regardless of `b`). A dropdown picks the **U** vectors of the components that *write* to the stream or
 the **V** vectors of those that *read* from it. Directions use the same gauge-invariant
 product form as `build_direction_scatter` (`V[:,c]·‖U[c]‖` read, `U[c]·‖V[:,c]‖` write), and a
 read absorbs its RMSNorm gain (`γ ⊙ V`) because the component sees the normalised stream while
@@ -118,7 +149,9 @@ layer was prepared, several when more were.
 **Axes and zoom** (client-side only): every panel draws dashed zero-lines plus tick labels
 giving each axis's scale and sign. The *default* frame is centred on the origin and sized
 to fit the **real model's own** point cloud specifically (not whichever source is
-currently displayed, so panels don't jump when switching `data`) with 15% slack — computed
+currently displayed, so panels don't jump when switching `data`) with 15% slack — in the
+activation-plane frame that deliberately leaves the cloud sitting off-centre by however far
+it really is from zero, with the origin at the panel's middle. Computed
 from `op`/`view`/`period`/`layer`/`probe-layer` alone, never from the sampled points'
 own asymmetric range or which decomposition produced the run, so two separately generated
 applets on the same base model + probes default to the same framing (their `n_show`
