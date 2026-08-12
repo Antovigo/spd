@@ -107,7 +107,9 @@ prompts:
   kind: prompts_file
   path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
 nontarget:
-  batch_size: 96  # 128 OOMed the 45GB L40s under torch; re-probe before raising
+  batch_size: 48  # sets the logit-space peak: 48x64 positions x 128256 vocab in the
+  # fused two-pass backward. 96 OOMed a 45GB L40 asking for 3.50GiB. Raise only
+  # against a fresh smoke.
   impmin_coeff: 6.67e-05  # the reference's 2x target ratio, authored absolute
   recon:
     - type: StochasticReconSubsetLoss
@@ -115,7 +117,9 @@ nontarget:
       routing:
         type: uniform_k_subset
 eval:
-  batch_size: 96
+  # Tracks nontarget.batch_size: the broad-stream probes run at the same geometry,
+  # and the 20-step PGD probe ascends through its own backward.
+  batch_size: 48
   n_steps: 10
   every: 500
   slow_every: 1000
@@ -171,5 +175,6 @@ runtime:
   tp: 1  # L40s are PCIe, not NVLink — tensor parallel would pay a fabric cost for nothing
   sharding: zero1
   remat_recon_forwards: true
+  remat_ci_fn: true
 wandb:
   project: param-decomp-llama
