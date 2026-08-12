@@ -33,9 +33,11 @@ from param_decomp.core.components import (
     ComponentStacks,
     SiteSpec,
     init_component_stacks,
+    init_component_stacks_coupled,
+    zero_component_stacks,
 )
 from param_decomp.core.configs import SourceShape
-from param_decomp.core.model import PositionAxis, Positioned, Positionless
+from param_decomp.core.model import DecomposedModel, PositionAxis, Positioned, Positionless
 from param_decomp.core.placement import PlacementRules, component_stacks_shardings
 
 
@@ -49,6 +51,31 @@ def init_component_stacks_placed(
     abstract = eqx.filter_eval_shape(partial(init_component_stacks, sites), key)
     placement = component_stacks_shardings(abstract, rules)
     return jax.jit(partial(init_component_stacks, sites), out_shardings=placement)(key)
+
+
+def init_component_stacks_coupled_placed(
+    model: DecomposedModel,
+    key: PRNGKeyArray,
+    rules: PlacementRules,
+    *,
+    zero_u: bool,
+) -> ComponentStacks:
+    """The target-coupled V/U inits, placed like `init_component_stacks_placed`.
+
+    The model is a TRACED arg (HLO-baking rule) and the frozen `W` read happens INSIDE the
+    jit, so only V/U crosses the boundary — a full-precision copy of every decomposed
+    matrix never materializes outside the init graph."""
+
+    model_arrays, model_static = eqx.partition(model, eqx.is_array)
+
+    def init(arrays: DecomposedModel, init_key: PRNGKeyArray) -> ComponentStacks:
+        traced_model: DecomposedModel = eqx.combine(arrays, model_static)
+        weights = traced_model.weight_deltas(zero_component_stacks(traced_model.sites))
+        return init_component_stacks_coupled(traced_model.sites, weights, init_key, zero_u=zero_u)
+
+    abstract = eqx.filter_eval_shape(init, model_arrays, key)
+    placement = component_stacks_shardings(abstract, rules)
+    return jax.jit(init, out_shardings=placement)(model_arrays, key)
 
 
 def init_ci_fn_placed(

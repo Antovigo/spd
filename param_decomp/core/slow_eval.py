@@ -68,6 +68,7 @@ from param_decomp.core.ci_fn import (
     lower_leaky_hard_sigmoid,
     upper_leaky_hard_sigmoid,
 )
+from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import (
     DenseCITargetSpec,
     IdentityCIErrorConfig,
@@ -526,6 +527,92 @@ def plot_component_activation_density(densities: dict[str, np.ndarray], bins: in
         ax.set_ylabel("Frequency")
     fig.tight_layout()
     return _render_figure(fig)
+
+
+@filter_jit
+def _component_weight_magnitudes(components: ComponentStacks) -> dict[str, Array]:
+    def per_component(Vs: Float[Array, "g d_in C"], Us: Float[Array, "g C d_out"]) -> Array:
+        v_norm = jnp.linalg.norm(Vs.astype(jnp.float32), axis=1)  # [g, C]
+        u_norm = jnp.linalg.norm(Us.astype(jnp.float32), axis=2)  # [g, C]
+        return v_norm * u_norm
+
+    by_shape = {shape: per_component(Vs, Us) for shape, (Vs, Us) in components.stacks.items()}
+    return {name: by_shape[shape][slot] for name, shape, slot in components.site_slots}
+
+
+def weight_magnitudes(components: ComponentStacks) -> dict[str, np.ndarray]:
+    """Per-site `‖V_c‖·‖U_c‖` as host `(C,)` vectors. The norms reduce ON DEVICE, so only
+    C floats per site cross the boundary — never the V/U matrices themselves."""
+    return {
+        name: np.asarray(value) for name, value in _component_weight_magnitudes(components).items()
+    }
+
+
+def plot_weight_magnitudes(magnitudes: dict[str, np.ndarray]) -> bytes:
+    """Per-site `‖V_c‖·‖U_c‖` against component index, log y. Unsorted so a point's x IS
+    its component id and the figure cross-references every other per-component readout."""
+    n_rows, n_cols = _grid_dims(len(magnitudes))
+    fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
+    axs = fig.subplots(n_rows, n_cols, squeeze=False)
+    flat_axes = axs.T.ravel()
+    for ax in flat_axes[len(magnitudes) :]:
+        ax.set_visible(False)
+    for ax, (name, values) in zip(flat_axes, magnitudes.items(), strict=False):
+        ax.scatter(range(len(values)), values, marker="x", s=10)
+        ax.set_yscale("log")
+        ax.set_xlabel("Component")
+        ax.set_ylabel("‖V‖·‖U‖")
+        ax.set_title(name, fontsize=10)
+    fig.tight_layout()
+    return _render_figure(fig)
+
+
+TARGET_STREAM_COLOR = "#1f77b4"
+NONTARGET_STREAM_COLOR = "#d62728"
+
+
+def plot_mean_component_cis_two_streams(
+    target_mean_cis: dict[str, np.ndarray],
+    nontarget_mean_cis: dict[str, np.ndarray],
+) -> tuple[bytes, bytes]:
+    """Both streams' mean CI on one axis per site, ordered by DESCENDING TARGET mean.
+
+    The non-target series is reordered by the same permutation rather than sorted on its
+    own, so a component's two bars line up vertically — the whole point is reading, per
+    component, how much on-target importance comes with off-target importance."""
+    assert target_mean_cis.keys() == nontarget_mean_cis.keys(), (
+        sorted(target_mean_cis),
+        sorted(nontarget_mean_cis),
+    )
+    n_rows, n_cols = _grid_dims(len(target_mean_cis))
+    images: list[bytes] = []
+    for log_y in (False, True):
+        fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
+        axs = fig.subplots(n_rows, n_cols, squeeze=False)
+        flat_axes = axs.T.ravel()
+        for ax in flat_axes[len(target_mean_cis) :]:
+            ax.set_visible(False)
+        for ax, (name, target) in zip(flat_axes, target_mean_cis.items(), strict=False):
+            order = np.argsort(target)[::-1]
+            x = range(len(order))
+            if log_y:
+                ax.set_yscale("log")
+            ax.bar(x, target[order], color=TARGET_STREAM_COLOR, label="target", width=1.0)
+            ax.bar(
+                x,
+                nontarget_mean_cis[name][order],
+                color=NONTARGET_STREAM_COLOR,
+                label="non-target",
+                width=1.0,
+                alpha=0.6,
+            )
+            ax.set_xlabel("Component (sorted by target mean CI)")
+            ax.set_ylabel("mean CI")
+            ax.set_title(name, fontsize=10)
+            ax.legend(fontsize=7)
+        fig.tight_layout()
+        images.append(_render_figure(fig))
+    return images[0], images[1]
 
 
 def plot_mean_component_cis_both_scales(

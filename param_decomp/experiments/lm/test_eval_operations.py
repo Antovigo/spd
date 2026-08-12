@@ -93,6 +93,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
         n_proc=1,
         sink=cast(Any, SimpleNamespace(accepts_deferred_media=True)),
         compiler_options={},
+        target_pool_batches_for=None,
     )
     batch = jnp.arange(4)
     _, key = captured["inputs_for_context"](
@@ -100,6 +101,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
             state=cast(Any, None),
             now_step=30,
             pass_index=3,
+            target_batches=None,
             batches=(batch,),
         )
     )

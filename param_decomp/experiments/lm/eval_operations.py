@@ -1,5 +1,7 @@
 """LM evaluation operation binding and execution."""
 
+from collections.abc import Callable
+
 import jax
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
@@ -16,7 +18,9 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
+    UnmaskedReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
     WellTemperednessConfig,
 )
 from param_decomp.core.model import DecomposedModel
@@ -35,12 +39,16 @@ from param_decomp.experiments.lm.diagnostic_eval_operations import (
     make_hidden_acts_operation,
     make_permutation_operation,
     make_site_figures_operation,
+    make_two_stream_ci_mean_operation,
+    make_weight_magnitude_operation,
 )
 from param_decomp.experiments.lm.eval_config import (
     ArithmeticCIGridConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
+    TargetPoolScalarsConfig,
+    TwoStreamCIMeanPerComponentConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
@@ -49,6 +57,8 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
     make_ce_kl_operation,
     make_ci_l0_operation,
     make_fresh_pgd_operation,
+    make_target_pool_scalars_operation,
+    make_unmasked_recon_operation,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
@@ -68,8 +78,14 @@ def make_lm_evaluation(
     n_proc: int,
     sink: MetricsSink,
     compiler_options: dict[str, bool | int | str],
+    target_pool_batches_for: Callable[[int, int], list[jax.Array]] | None,
 ) -> Evaluation[LMEvalContext]:
-    """Construct one executable operation for every authored LM metric."""
+    """Construct one executable operation for every authored LM metric.
+
+    `target_pool_batches_for(pass_index, n_batches)` supplies the tPD target stream, which
+    `data.eval` cannot: the prompt pool has no held-out split, so the targeted root draws
+    pool batches the same way training does. `None` on a plain run; the target-stream
+    metrics then refuse at first use."""
     pd = built.pd
     capture_inputs = built.ci_fn.capture_keys
     data = built.data
@@ -182,6 +198,45 @@ def make_lm_evaluation(
                     compiler_options,
                 )
 
+            case UnmaskedReconLossConfig():
+                return make_unmasked_recon_operation(
+                    metric,
+                    schedule,
+                    model,
+                    capture_inputs,
+                    run_key,
+                    pd.steps,
+                    eval.n_steps,
+                    mesh,
+                    compiler_options,
+                )
+            case TargetPoolScalarsConfig():
+                return make_target_pool_scalars_operation(
+                    metric,
+                    schedule,
+                    model,
+                    capture_inputs,
+                    run_key,
+                    pd.steps,
+                    eval.n_steps,
+                    mesh,
+                    compiler_options,
+                )
+            case TwoStreamCIMeanPerComponentConfig():
+                return make_two_stream_ci_mean_operation(
+                    metric, schedule, model, capture_inputs, compiler_options, renderer
+                )
+            case WeightMagnitudeConfig():
+                return make_weight_magnitude_operation(metric, schedule, renderer)
+
+    needs_target_stream = tuple(
+        metric.type
+        for metric in eval.metrics
+        if isinstance(metric, TargetPoolScalarsConfig | TwoStreamCIMeanPerComponentConfig)
+    )
+    assert not needs_target_stream or target_pool_batches_for is not None, (
+        f"{needs_target_stream} measure the tPD target stream; a plain run has no prompt pool"
+    )
     operations = tuple(make_operation(metric) for metric in eval.metrics)
 
     def make_context(state: TrainState, now_step: int) -> LMEvalContext:
@@ -191,6 +246,11 @@ def make_lm_evaluation(
             now_step=now_step,
             pass_index=pass_index,
             batches=tuple(batches(pass_index)),
+            target_batches=(
+                None
+                if target_pool_batches_for is None
+                else tuple(target_pool_batches_for(pass_index, eval.n_steps))
+            ),
         )
 
     return Evaluation(operations, make_context)

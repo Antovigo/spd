@@ -22,7 +22,9 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
+    UnmaskedReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
     WellTemperednessConfig,
 )
 from param_decomp.core.eval_schedule import EvalSchedule, Every, FirstThenEvery
@@ -31,6 +33,8 @@ from param_decomp.experiments.lm.eval_config import (
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
+    TargetPoolScalarsConfig,
+    TwoStreamCIMeanPerComponentConfig,
 )
 
 AnyEvalMetricConfig = Annotated[
@@ -47,7 +51,11 @@ AnyEvalMetricConfig = Annotated[
     | PGDReconLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
+    | TargetPoolScalarsConfig
+    | TwoStreamCIMeanPerComponentConfig
+    | UnmaskedReconLossConfig
     | UVPlotsConfig
+    | WeightMagnitudeConfig
     | WellTemperednessConfig,
     Discriminator("type"),
 ]

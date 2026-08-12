@@ -222,6 +222,14 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     type: Literal["SmoothL0ImportanceMinimalityLoss"] = "SmoothL0ImportanceMinimalityLoss"
     gamma: ScheduleConfig
     frequency: FrequencyMinimalityConfig | None = None
+    normalize_at_one: bool = Field(
+        default=False,
+        description=(
+            "Rescale `phi` by `(1 + gamma^2)` so a fully-active component (`c = 1`) always "
+            "contributes exactly 1, removing the implicit ~2x coefficient ramp the bare "
+            "form applies across the gamma anneal."
+        ),
+    )
 
 
 # The two imp-min penalties share the `coeff` + optional `frequency` surface and the
@@ -272,6 +280,11 @@ class StochasticHiddenActsReconLossConfig(LossMetricConfig):
 
 
 class UnmaskedReconLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
+    slow: ClassVar[bool] = False
+    """Authorable as an eval too: one all-ones masked forward per batch, no ascent — the
+    cheapest recon probe there is, and the only read on whether the component sum alone
+    still reconstructs when the term is not being trained."""
+
     type: Literal["UnmaskedReconLoss"] = "UnmaskedReconLoss"
 
 
@@ -465,6 +478,16 @@ class ComponentActivationDensityConfig(BaseConfig):
     slow: ClassVar[bool] = True
     type: Literal["ComponentActivationDensity"] = "ComponentActivationDensity"
     ci_alive_threshold: float = 0.0
+
+
+class WeightMagnitudeConfig(BaseConfig):
+    """Per-site `‖V_c‖·‖U_c‖` scatter against component index, log y.
+
+    Reads the trained V/U alone — no forward pass and no eval batch, so it costs two norm
+    reductions and a plot. The norms reduce on device; only `C` floats per site are pulled."""
+
+    slow: ClassVar[bool] = True
+    type: Literal["WeightMagnitude"] = "WeightMagnitude"
 
 
 class IdentityCITargetSpec(BaseConfig):
@@ -745,6 +768,21 @@ class PlacementTableConfig(BaseConfig):
     activations: RuleConfig
 
 
+WeightInit = Literal["default", "coupled", "zero_u"]
+"""How the subcomponent V/U masters are seeded.
+
+`default`: `V ~ N(0, d_in^-0.5)`, `U ~ N(0, C^-0.5)` — target-blind small random.
+`coupled`: unit-norm seed on the narrow side, the wide side its raw `W`-image, so the
+component sum approximates `W` restricted to a rank-C random subspace and the delta
+carries the complement.
+`zero_u`: `coupled`'s `V` with `U` zeroed — the component sum is exactly zero at init and
+the delta carries all of `W`. Subcomponents acquire norm only as the reconstruction losses
+demand it, so one that is never needed stays at exactly zero rather than holding `W`-scale
+junk a mask adversary could switch on. `V` still feeds the CI nets a live signal, and `U`
+has a nonzero gradient from step 0 (`V`'s is zero until `U` moves off zero).
+"""
+
+
 class PDConfigBase(BaseConfig):
     """The algorithm sections shared by every run shape: seed, losses, optimizers, sizes.
 
@@ -775,6 +813,13 @@ class PDConfigBase(BaseConfig):
             "Global batch size (may be divided across multiple devices). For a targeted "
             "run this is the TARGET stream's batch (T2); the broad stream's lives on "
             "`nontarget.batch_size`."
+        ),
+    )
+    weight_init: WeightInit = Field(
+        default="default",
+        description=(
+            "Subcomponent V/U seeding. The two target-coupled arms read each site's frozen "
+            "`W`, so they cost one extra device-resident weight read at init."
         ),
     )
 

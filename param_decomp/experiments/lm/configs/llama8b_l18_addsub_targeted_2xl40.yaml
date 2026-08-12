@@ -1,0 +1,188 @@
+# TARGETED (tPD, SPEC §11) Llama-3.1-8B layer-18 decomposition on the 1..100 a+b / a-b
+# prompt pool — the JAX port of the torch reference run `addsub-L18-09-one-im`.
+# Runs via `python -m param_decomp.experiments.lm.run_targeted`.
+#
+# Sized for 2x L40 (dp 2). Deltas from the torch reference, all deliberate:
+#   - recon: ONE MergedStochasticSubsetPPGDReconLoss instead of the separate stochastic +
+#     PPGD pair, with upstream's coefficient shape (0.5 stochastic + PPGD gated in over
+#     20%->30%) folded into the merged term's two schedules. No UnmaskedReconLoss in
+#     training (it rides as an eval probe instead).
+#   - imp-min rescaled 5e-5 -> 3.33e-5 to hold the reference's imp-min : (stochastic+PPGD)
+#     ratio now that the recon coefficients sum to 1.0 instead of 1.5.
+#   - `frequency` replaces the reference's rolled `beta: 0.5`: coeff = imp coeff x beta,
+#     `reference_datapoint_count` = the TARGET stream's B*T (128 x 5, unpadded — T8).
+#   - weight_init: zero_u (the reference ran `coupled`).
+#   - the target stream runs UNPADDED at the pool's own 5 tokens (T8), not padded to 16.
+run_name: jax-l18-addsub-targeted
+decomposition:
+  sites:
+    kind: glu_transformer
+    layers:
+      kind: list
+      indices:
+        - 18
+    cs:
+      q: 72
+      k: 72
+      v: 128
+      o: 128
+      gate: 456
+      up: 456
+      down: 456
+  ci:
+    # The reference's `global_shared_transformer` over layer 18's seven sites: one decomposed
+    # block at blocks_per_chunk 1 IS one chunk, and `all_block_taps` is the same set of
+    # physical vectors (attn in/out, MLP in, MLP hidden) it concatenated.
+    type: chunkwise_transformer
+    blocks_per_chunk: 1
+    input_tap: all_block_taps
+    d_model: 512
+    n_blocks: 4
+    attention:
+      kind: mha
+      n_heads: 8
+    ffn:
+      kind: gelu
+      hidden: 2048
+pd:
+  seed: 0
+  steps: 20000
+  batch_size: 128
+  weight_init: zero_u
+  ci_scaled_weight_decay: 0.3
+  components_optimizer:
+    lr_schedule:
+      max_val: 3.2e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      max_val: 1.6e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: null
+  loss_metrics:
+    - type: SmoothL0ImportanceMinimalityLoss
+      coeff: 3.33e-05
+      normalize_at_one: true
+      gamma:
+        max_val: 1.0
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 1.0}
+          - {at: 1.0, frac: 0.01}
+      frequency:
+        coeff: 1.67e-05
+        reference_datapoint_count: 640  # pd.batch_size 128 x the pool's 5 tokens
+    - type: MergedStochasticSubsetPPGDReconLoss
+      # Upstream's `0.5 stochastic + g(t)*0.5 PPGD` in expectation, merged into one forward:
+      # solving coeff*(1-f) = 0.5 and coeff*f = 0.5*g gives coeff = 0.5*(1+g) and
+      # f = g/(1+g), so both knobs ride the same 20%->30% activation ramp.
+      coeff:
+        max_val: 1.0
+        points:
+          - {at: 0.0, frac: 0.5}
+          - {at: 0.2, frac: 0.5}
+          - {at: 0.3, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      adv_fraction:
+        max_val: 0.5
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.2, frac: 0.0}
+          - {at: 0.3, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      routing:
+        type: uniform_k_subset
+      n_warmup_steps: 2
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      source_shape: bsc
+prompts:
+  kind: prompts_file
+  path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
+nontarget:
+  batch_size: 96  # 128 OOMed the 45GB L40s under torch; re-probe before raising
+  impmin_coeff: 6.67e-05  # the reference's 2x target ratio, authored absolute
+  recon:
+    - type: StochasticReconSubsetLoss
+      coeff: 1.0
+      routing:
+        type: uniform_k_subset
+eval:
+  batch_size: 96
+  n_steps: 10
+  every: 500
+  slow_every: 1000
+  slow_on_first_step: true
+  metrics:
+    # --- broad (non-target) stream: `data.eval` is the only source the eval loop reads
+    - type: CEandKLLosses
+      rounding_threshold: 0.0
+    - type: CI_L0
+      ci_alive_threshold: 0.0
+      groups:
+        total: ["*"]
+    - type: PGDReconLoss
+      init: random
+      source_shape: c
+      n_steps: 20
+      step_size: 0.1
+    - type: UnmaskedReconLoss
+    - type: CIHistograms
+      n_batches_accum: 1
+    - type: CIHiddenActsReconLoss
+    # --- target stream: the run's own prompt pool
+    - type: TargetPoolScalars
+      ci_alive_threshold: 0.0
+      ci_l0_groups:
+        total: ["*"]
+      fresh_pgd:
+        n_steps: 20
+        step_size: 0.1
+    # --- both streams in one figure (supersedes a bare CIMeanPerComponent)
+    - type: TwoStreamCIMeanPerComponent
+    - type: WeightMagnitude
+cadence:
+  train_log_every: 100
+  save_every: 5000
+  checkpoint_retention:
+    kind: keep_last
+    n: 2
+target:
+  spec:
+    kind: hf_weights_in_vendored
+    model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+  weights_dtype: bfloat16
+data:
+  train:
+    kind: name
+    name: fineweb_llama_tok_64
+  eval:
+    kind: name
+    name: fineweb_llama_tok_64_eval
+runtime:
+  dp: 2
+  gpus_per_node: 2
+  tp: 1  # L40s are PCIe, not NVLink — tensor parallel would pay a fabric cost for nothing
+  sharding: zero1
+  remat_recon_forwards: true
+wandb:
+  project: param-decomp-llama

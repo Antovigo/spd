@@ -193,7 +193,9 @@ def _restore_decomposition(
     needed."""
     rules = placement.from_config_for_consumer("ddp", mesh, model.sites)
     abstract = jax.eval_shape(
-        lambda: init_decomposition(model, ci_fn, jax.random.PRNGKey(0), mesh, rules)
+        # `weight_init` cannot change the tree, so the cheapest arm stands in for the
+        # run's own, like `ddp` and the constant key above.
+        lambda: init_decomposition(model, ci_fn, jax.random.PRNGKey(0), mesh, rules, "default")
     )
 
     manager = make_read_only_checkpoint_manager(run_dir / "ckpts")

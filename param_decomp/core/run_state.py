@@ -26,9 +26,11 @@ from param_decomp.core.configs import (
     AnyPDConfig,
     MuonOptimizerConfig,
     PDConfigBase,
+    WeightInit,
 )
 from param_decomp.core.init_placed import (
     init_ci_fn_placed,
+    init_component_stacks_coupled_placed,
     init_component_stacks_placed,
     init_sources_sharded,
 )
@@ -163,14 +165,23 @@ def init_decomposition(
     init_key: PRNGKeyArray,
     mesh: Mesh,
     rules: PlacementRules,
+    weight_init: WeightInit,
 ) -> Decomposition:
     """The trained-product half of `init_train_state`, factored out so a consumer can
     `jax.eval_shape` it to recover the saved `decomposition` item's tree structure
-    without building (or knowing about) the optimizers/adversaries."""
+    without building (or knowing about) the optimizers/adversaries. `weight_init` selects
+    the V/U seeding; it does not affect the tree structure, so a structure-only consumer
+    may pass any arm."""
     ci_key = random.fold_in(init_key, 1)
     # V/U placement derives from the rules table; the CI fn still declares its own
     # per-leaf shardings (PLACEMENT_DESIGN.md migration stage 3).
-    components = init_component_stacks_placed(model.sites, init_key, rules)
+    match weight_init:
+        case "default":
+            components = init_component_stacks_placed(model.sites, init_key, rules)
+        case "coupled" | "zero_u":
+            components = init_component_stacks_coupled_placed(
+                model, init_key, rules, zero_u=weight_init == "zero_u"
+            )
     ci_fn = init_ci_fn_placed(ci_fn_arch, model.sites, ci_key, mesh)
     assert ci_fn.has_position_axis == model.has_position_axis, (
         f"CI fn has_position_axis={ci_fn.has_position_axis} but model declares "
@@ -195,7 +206,7 @@ def init_train_state(
     assert isinstance(positions, Positioned) == model.has_position_axis, (
         f"{positions} does not match the model's has_position_axis={model.has_position_axis}"
     )
-    decomposition = init_decomposition(model, ci_fn_arch, init_key, mesh, rules)
+    decomposition = init_decomposition(model, ci_fn_arch, init_key, mesh, rules, pd.weight_init)
     components, ci_fn = decomposition.components, decomposition.ci_fn
     # Recon terms only — persistent adversaries derive from these, and a targeted run's
     # loss list carries no faithfulness role for a full objective build to demand.

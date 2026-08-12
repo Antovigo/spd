@@ -6,6 +6,7 @@ import jax
 import numpy as np
 from jaxtyping import PRNGKeyArray
 
+from param_decomp.core.ci_fn import CIFn
 from param_decomp.core.configs import (
     CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
@@ -15,6 +16,7 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     StochasticHiddenActsReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
 )
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.hidden_acts_eval import (
@@ -40,9 +42,12 @@ from param_decomp.core.slow_eval import (
     compute_identity_ci_errors,
     make_position_ci_step,
     make_slow_eval_step,
+    plot_mean_component_cis_two_streams,
+    plot_weight_magnitudes,
     render_permutation_figures,
     render_slow_eval_figures,
     resolve_permutation_metrics,
+    weight_magnitudes,
 )
 from param_decomp.experiments.lm.attn_patterns_eval import (
     accumulate_attn_patterns,
@@ -53,9 +58,14 @@ from param_decomp.experiments.lm.attn_patterns_eval import (
 from param_decomp.experiments.lm.eval_config import (
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
+    TwoStreamCIMeanPerComponentConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
+from param_decomp.experiments.lm.scalar_eval_operations import (
+    broad_stream_batches,
+    target_pool_batches,
+)
 
 
 def _render_selected_figures(
@@ -154,6 +164,80 @@ def make_hidden_acts_operation(
             f"eval/slow/loss/{name}": value
             for name, value in hidden_acts_log_entries(metric.type, reductions).items()
         }
+
+    return EvalOperation(schedule, run)
+
+
+def _render_weight_magnitudes(
+    magnitudes: dict[str, np.ndarray], now_step: int
+) -> DeferredMediaRecord:
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={"slow_eval/figures/weight_magnitude": plot_weight_magnitudes(magnitudes)},
+    )
+
+
+def make_weight_magnitude_operation(
+    metric: WeightMagnitudeConfig,
+    schedule: EvalSchedule,
+    renderer: BackgroundRenderer,
+) -> EvalOperation[LMEvalContext]:
+    """`‖V_c‖·‖U_c‖` per site. Reads the trained V/U only — no model, no batch, no step."""
+    del metric
+
+    def run(context: LMEvalContext) -> LogRecord:
+        magnitudes = weight_magnitudes(context.state.decomposition.components)
+        renderer.submit(partial(_render_weight_magnitudes, magnitudes, context.now_step))
+        return {}
+
+    return EvalOperation(schedule, run)
+
+
+def _render_two_stream_ci_means(
+    target: dict[str, np.ndarray],
+    nontarget: dict[str, np.ndarray],
+    now_step: int,
+) -> DeferredMediaRecord:
+    linear, log = plot_mean_component_cis_two_streams(target, nontarget)
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={
+            "slow_eval/figures/ci_mean_per_component_two_stream": linear,
+            "slow_eval/figures/ci_mean_per_component_two_stream_log": log,
+        },
+    )
+
+
+def make_two_stream_ci_mean_operation(
+    metric: TwoStreamCIMeanPerComponentConfig,
+    schedule: EvalSchedule,
+    model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
+    compiler_options: dict[str, bool | int | str],
+    renderer: BackgroundRenderer,
+) -> EvalOperation[LMEvalContext]:
+    """Both streams' mean CI per component in one figure, ordered by the target mean."""
+    del metric
+    step = make_slow_eval_step(model, ci_capture_keys, 0.0, None, compiler_options)
+
+    def mean_cis(ci_fn: CIFn, batches: tuple[jax.Array, ...]) -> dict[str, np.ndarray]:
+        reductions = accumulate_site_reductions(step, model, ci_fn, list(batches), None)
+        assert all(r.n_positions > 0 for r in reductions.values())
+        return {site: r.ci_sums / r.n_positions for site, r in reductions.items()}
+
+    def run(context: LMEvalContext) -> LogRecord:
+        ci_fn = context.state.decomposition.ci_fn
+        renderer.submit(
+            partial(
+                _render_two_stream_ci_means,
+                mean_cis(ci_fn, target_pool_batches(context)),
+                mean_cis(ci_fn, broad_stream_batches(context)),
+                context.now_step,
+            )
+        )
+        return {}
 
     return EvalOperation(schedule, run)
 

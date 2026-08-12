@@ -136,8 +136,35 @@ def train_targeted(
             "eval must land on a train-log step: the tok/s window resets after eval, so a "
             "mid-window eval would corrupt the next step-time estimate"
         )
+        eval_target_batch = eval_config.batch_size
+        assert eval_target_batch % n_dev == 0 and eval_target_batch >= n_dev, (
+            f"eval.batch_size {eval_target_batch} must be a positive multiple of {n_dev}"
+        )
+        per_process_eval = eval_target_batch // n_proc
+
+        def eval_target_pool_batches(pass_index: int, n_batches: int) -> list[jax.Array]:
+            """The eval pass's TARGET stream: the same pure `(seed, step)` pool sampler
+            training uses, on the `seed + 1` stream the broad eval split already draws
+            from — so an eval never scores the exact rows the step just trained on."""
+            batches = []
+            for j in range(n_batches):
+                rows = pool_batch(
+                    pool, built.pd.seed + 1, pass_index * n_batches + j, eval_target_batch
+                )
+                local = rows[jax.process_index() * per_process_eval :][:per_process_eval]
+                batches.append(global_token_batch(local, mesh, eval_target_batch))
+            return batches
+
         evaluation = make_lm_evaluation(
-            built, eval_config, model, run_key, mesh, n_proc, sink, cfg.runtime.compiler_options
+            built,
+            eval_config,
+            model,
+            run_key,
+            mesh,
+            n_proc,
+            sink,
+            cfg.runtime.compiler_options,
+            target_pool_batches_for=eval_target_pool_batches,
         )
 
     run_targeted_decomposition_training(

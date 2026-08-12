@@ -56,7 +56,7 @@ def test_terms_match_manual_per_site_structure():
     gamma = 0.1
     n_positions = 2  # both sites have 2 rows; a' = B·T reproduces the old `log2(1 + sum)`
     lp, freq = smooth_l0_importance_minimality_terms(
-        ci, jnp.asarray(gamma), reference_datapoint_count=n_positions
+        ci, jnp.asarray(gamma), reference_datapoint_count=n_positions, normalize_at_one=False
     )
 
     exp_lp = jnp.zeros(())
@@ -88,6 +88,23 @@ def test_anneal_and_dispatch():
     ci = {"a": jnp.array([[0.0, 0.5, 1.0], [0.2, 0.0, 0.9]])}
     param = annealed_imp_min_param(jnp.asarray(float(last)), total, cfg)
     via_dispatch = imp_min_terms(ci, cfg, param)
-    direct = smooth_l0_importance_minimality_terms(ci, param, reference_datapoint_count=64)
+    direct = smooth_l0_importance_minimality_terms(
+        ci, param, reference_datapoint_count=64, normalize_at_one=False
+    )
     assert jnp.allclose(via_dispatch[0], direct[0])
     assert jnp.allclose(via_dispatch[1], direct[1])
+
+
+def test_normalize_at_one_pins_a_full_component_to_one():
+    """`c = 1` contributes exactly 1 at every gamma, so the anneal stops carrying an
+    implicit coefficient ramp."""
+    ci = {"a": jnp.ones((1, 1))}
+    for gamma in (1.0, 0.1, 0.01):
+        lp, _ = smooth_l0_importance_minimality_terms(
+            ci, jnp.asarray(gamma), reference_datapoint_count=None, normalize_at_one=True
+        )
+        assert abs(float(lp) - 1.0) < 1e-6, gamma
+    bare, _ = smooth_l0_importance_minimality_terms(
+        ci, jnp.asarray(1.0), reference_datapoint_count=None, normalize_at_one=False
+    )
+    assert abs(float(bare) - 0.5) < 1e-6

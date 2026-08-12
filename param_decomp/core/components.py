@@ -178,6 +178,73 @@ def init_component_stacks(sites: tuple[SiteSpec, ...], key: Array) -> ComponentS
     return ComponentStacks(stacks=init_stack_arrays(sites, key), site_slots=site_slots_for(sites))
 
 
+def zero_component_stacks(sites: tuple[SiteSpec, ...]) -> ComponentStacks:
+    """All-zero V/U in the stacked layout. `weight_deltas` is `W − (V@U)^T`, so passing this
+    reads each site's frozen `W` back through the model protocol without widening it."""
+    return ComponentStacks(
+        stacks={
+            (d_in, d_out, c): (
+                jnp.zeros((len(specs), d_in, c), jnp.float32),
+                jnp.zeros((len(specs), c, d_out), jnp.float32),
+            )
+            for (d_in, d_out, c), specs in vu_shape_groups(sites).items()
+        },
+        site_slots=site_slots_for(sites),
+    )
+
+
+def _coupled_site_vu(W: Array, key: Array, d_in: int, d_out: int, C: int) -> tuple[Array, Array]:
+    """One site's coupled V/U: a unit-norm Gaussian seed on the NARROW side, the wide side
+    its raw `W`-image. No C-dependent rescale — components sit at `W`'s natural scale."""
+    if d_in <= d_out:
+        v = jax.random.normal(key, (d_in, C))
+        V = v / jnp.linalg.norm(v, axis=0, keepdims=True)
+        return V, (W @ V).T
+    u = jax.random.normal(key, (C, d_out))
+    U = u / jnp.linalg.norm(u, axis=1, keepdims=True)
+    return W.T @ U.T, U
+
+
+def init_stack_arrays_coupled(
+    sites: tuple[SiteSpec, ...],
+    target_weights: dict[str, Array],
+    key: Array,
+    *,
+    zero_u: bool,
+) -> dict[VUShape, tuple[Array, Array]]:
+    """Coupled seeded stack init, vmapped over each shape group's (key, frozen `W`) pairs.
+
+    `zero_u` zeroes U AFTER the coupled draw, so V is whatever the coupled scheme wrote —
+    the component sum is exactly zero while the CI nets still see a live `x @ V`.
+    `target_weights[name]` is `[d_out, d_in]`, matching `DecomposedModel.weight_deltas`.
+    """
+    keys = jax.random.split(key, len(sites))
+    site_index = {spec.name: idx for idx, spec in enumerate(sites)}
+    stacked: dict[VUShape, tuple[Array, Array]] = {}
+    for (d_in, d_out, c), specs in vu_shape_groups(sites).items():
+        idxs = jnp.array([site_index[spec.name] for spec in specs])
+        Ws = jnp.stack([target_weights[spec.name].astype(jnp.float32) for spec in specs])
+        assert Ws.shape[1:] == (d_out, d_in), (Ws.shape, (d_out, d_in))
+        Vs, Us = jax.vmap(lambda W, k, dims=(d_in, d_out, c): _coupled_site_vu(W, k, *dims))(
+            Ws, keys[idxs]
+        )
+        stacked[(d_in, d_out, c)] = (Vs, jnp.zeros_like(Us) if zero_u else Us)
+    return stacked
+
+
+def init_component_stacks_coupled(
+    sites: tuple[SiteSpec, ...],
+    target_weights: dict[str, Array],
+    key: Array,
+    *,
+    zero_u: bool,
+) -> ComponentStacks:
+    return ComponentStacks(
+        stacks=init_stack_arrays_coupled(sites, target_weights, key, zero_u=zero_u),
+        site_slots=site_slots_for(sites),
+    )
+
+
 def site_out(
     x: Array,
     V: Array,
