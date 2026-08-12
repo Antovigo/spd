@@ -1,4 +1,9 @@
-"""The `hidden_ci_floor` parameterization and the `HiddenCIShortfallLoss` that measures it."""
+"""The two CI-ordering constraints and the `HiddenCIShortfallLoss` that measures them.
+
+`hidden_ci_floor` and `output_ci_cap` enforce the same inequality (`CI_hidden >= CI_output`)
+but move different nets, so the tests here care as much about *where the gradient goes* as
+about the inequality holding.
+"""
 
 from typing import override
 
@@ -14,6 +19,8 @@ from param_decomp.ci_fns import (
     GlobalSharedTransformerCiConfig,
     HiddenCIFloorConfig,
     LayerwiseCiConfig,
+    OutputCICapConfig,
+    cap_output_ci_logits,
     floor_hidden_ci_logits,
 )
 from param_decomp.component_model import CIOutputs, ComponentModel
@@ -55,8 +62,10 @@ def _model(*, floor: HiddenCIFloorConfig | None, dual: bool) -> ComponentModel:
     )
 
 
-def _shared_trunk_model(*, floor: HiddenCIFloorConfig | None) -> ComponentModel:
-    """One trunk, two private readout heads — the configuration the floor ships with.
+def _shared_trunk_model(
+    *, floor: HiddenCIFloorConfig | None, cap: OutputCICapConfig | None = None
+) -> ComponentModel:
+    """One trunk, two private readout heads — the configuration these constraints ship with.
 
     The transformer CI fn needs a sequence axis, so callers must feed `[batch, pos, d_in]`.
     """
@@ -77,6 +86,7 @@ def _shared_trunk_model(*, floor: HiddenCIFloorConfig | None) -> ComponentModel:
         dual_hidden_ci=True,
         dual_hidden_ci_shared_trunk=True,
         hidden_ci_floor=floor,
+        output_ci_cap=cap,
     )
 
 
@@ -118,6 +128,80 @@ class TestFloorLogits:
         equal = torch.full((3,), 0.5)
         floored = floor_hidden_ci_logits({"m": equal}, {"m": equal}, HiddenCIFloorConfig())
         assert (floored["m"] - equal).max() < 0.07
+
+
+class TestCapLogits:
+    def test_result_never_exceeds_the_cap(self):
+        torch.manual_seed(0)
+        output = {"m": torch.randn(64) * 3}
+        hidden = {"m": torch.randn(64) * 3}
+        capped = cap_output_ci_logits(output, hidden, OutputCICapConfig())
+        assert (capped["m"] <= hidden["m"]).all()
+
+    def test_passes_through_well_below_the_cap(self):
+        output = {"m": torch.tensor([-4.0, -1.0])}
+        hidden = {"m": torch.tensor([3.0, 5.0])}
+        capped = cap_output_ci_logits(output, hidden, OutputCICapConfig(sharpness=10.0))
+        torch.testing.assert_close(capped["m"], output["m"], atol=1e-5, rtol=0)
+
+    def test_binding_redirects_gradient_into_the_hidden_logit(self):
+        """The mechanism. Where the output net asks for more than the hidden net supports,
+        its gradient must reach the *hidden* logit — that is what forces the output
+        reconstruction to justify a subcomponent at the site level before it can use it."""
+        output = torch.tensor([5.0], requires_grad=True)  # far above the cap: binding
+        hidden = torch.tensor([0.0], requires_grad=True)
+        cap_output_ci_logits({"m": output}, {"m": hidden}, OutputCICapConfig())[
+            "m"
+        ].sum().backward()
+        assert output.grad is not None and hidden.grad is not None
+        assert output.grad.item() < 1e-3, (
+            f"gradient should not stay on the output logit: {output.grad}"
+        )
+        assert hidden.grad.item() > 0.99, (
+            f"gradient should transfer to the hidden logit: {hidden.grad}"
+        )
+
+    def test_slack_cap_leaves_gradient_on_the_output_logit(self):
+        output = torch.tensor([-5.0], requires_grad=True)  # far below the cap: slack
+        hidden = torch.tensor([0.0], requires_grad=True)
+        cap_output_ci_logits({"m": output}, {"m": hidden}, OutputCICapConfig())[
+            "m"
+        ].sum().backward()
+        assert output.grad is not None and hidden.grad is not None
+        assert output.grad.item() > 0.99
+        assert hidden.grad.item() < 1e-3
+
+
+class TestCapOnTheModel:
+    def test_ordering_holds_under_the_cap(self):
+        torch.manual_seed(0)
+        model = _shared_trunk_model(floor=None, cap=OutputCICapConfig())
+        out, hidden = model.calc_causal_importances_both_roles(
+            {"fc": torch.randn(4, 8, 3)}, sampling="binomial", detach_inputs=False
+        )
+        assert (hidden.lower_leaky["fc"] >= out.lower_leaky["fc"]).all()
+        assert (hidden.upper_leaky["fc"] >= out.upper_leaky["fc"]).all()
+
+    def test_output_backward_reaches_the_hidden_head(self):
+        """Under a shared trunk the trunk is trained by both roles anyway, so the invariant
+        worth asserting is that the *hidden head* — private to the hidden role — receives
+        gradient from an output-role backward. That path exists only via the cap."""
+        torch.manual_seed(0)
+        model = _shared_trunk_model(floor=None, cap=OutputCICapConfig())
+        assert model.ci_fn_hidden is not None
+        out, _ = model.calc_causal_importances_both_roles(
+            {"fc": torch.randn(4, 8, 3)}, sampling="continuous", detach_inputs=False
+        )
+        out.lower_leaky["fc"].sum().backward()
+        hidden_head = [p for n, p in model.ci_fn_hidden.named_parameters() if "_output_head" in n]
+        assert hidden_head, "expected a private hidden readout head"
+        assert any(p.grad is not None for p in hidden_head), (
+            "the cap must carry output-role gradient into the hidden net"
+        )
+
+    def test_floor_and_cap_together_are_rejected(self):
+        with pytest.raises(AssertionError, match="circular|same inequality"):
+            _shared_trunk_model(floor=HiddenCIFloorConfig(), cap=OutputCICapConfig())
 
 
 class TestFloorOnTheModel:
@@ -279,13 +363,27 @@ class TestShortfallLoss:
         loss = metric.update(_ctx(model, ci_out, ci_hidden))
         assert loss.item() == pytest.approx(0.3 * 5)
 
-    def test_gradient_pushes_the_hidden_ci_up_and_leaves_the_output_ci_alone(self):
+    def test_gradient_pushes_hidden_up_and_output_down(self):
+        """Both directions, deliberately. A violation is evidence about both nets, and the
+        reading worth having is that the output reconstruction should stop leaning on a
+        subcomponent the hidden net says does no work — so the penalty must be able to lower
+        `ci_out`, not only raise `ci_hidden`."""
         metric, model = self._metric()
         ci_out = torch.full((4, 5), 0.5, requires_grad=True)
         ci_hidden = torch.full((4, 5), 0.2, requires_grad=True)
         metric.update(_ctx(model, ci_out, ci_hidden)).backward()
-        assert ci_out.grad is None or torch.count_nonzero(ci_out.grad) == 0
-        assert ci_hidden.grad is not None and (ci_hidden.grad < 0).all()
+        assert ci_out.grad is not None and (ci_out.grad > 0).all(), "should push ci_out down"
+        assert ci_hidden.grad is not None and (ci_hidden.grad < 0).all(), "should push ci_hidden up"
+        # Equal and opposite: the correction is split evenly between the two nets.
+        torch.testing.assert_close(ci_out.grad, -ci_hidden.grad)
+
+    def test_no_gradient_where_the_ordering_already_holds(self):
+        metric, model = self._metric()
+        ci_out = torch.full((4, 5), 0.2, requires_grad=True)
+        ci_hidden = torch.full((4, 5), 0.5, requires_grad=True)
+        metric.update(_ctx(model, ci_out, ci_hidden)).backward()
+        assert ci_out.grad is not None and torch.count_nonzero(ci_out.grad) == 0
+        assert ci_hidden.grad is not None and torch.count_nonzero(ci_hidden.grad) == 0
 
     def test_compute_divides_by_the_pooled_position_and_entry_counts(self):
         """`compute()` carries the only non-obvious arithmetic in this metric: two different

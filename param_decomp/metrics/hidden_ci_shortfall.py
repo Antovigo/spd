@@ -32,16 +32,19 @@ def _shortfall(
 ) -> dict[str, Float[Tensor, "... C"]]:
     """Elementwise `relu(CI_out - CI_hidden)`, per module.
 
-    `ci_out` is detached here rather than by the caller: every use of this shortfall — loss
-    and diagnostic alike — wants the constraint to act on the hidden net only, never to pull
-    the output CI down to meet it.
+    Neither side is detached. A violation is evidence about *both* nets, so the penalty is
+    allowed to resolve it either way: raise the hidden CI, or lower the output CI. Detaching
+    `ci_out` would force the first reading — every violation resolved by declaring the
+    subcomponent hidden-important — which papers over the anomaly instead of removing it. The
+    second reading is the one worth having: the output reconstruction should stop leaning on a
+    subcomponent that does no work at its own matrix's output. The output reconstruction loss
+    keeps `ci_out` up wherever the subcomponent genuinely earns it, so the penalty can only
+    pull it down where the hidden net says there is nothing there.
     """
     assert ci_out.keys() == ci_hidden.keys(), (
         f"the two CI nets disagree on modules: {sorted(ci_out)} vs {sorted(ci_hidden)}"
     )
-    return {
-        name: (ci_out[name].detach() - hidden).clamp(min=0) for name, hidden in ci_hidden.items()
-    }
+    return {name: (ci_out[name] - hidden).clamp(min=0) for name, hidden in ci_hidden.items()}
 
 
 class HiddenCIShortfallLoss(Metric[HiddenCIShortfallLossConfig]):

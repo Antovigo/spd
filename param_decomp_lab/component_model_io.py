@@ -110,6 +110,7 @@ def load_component_model(
         dual_hidden_ci=pd_config.dual_hidden_ci,
         dual_hidden_ci_shared_trunk=pd_config.dual_hidden_ci_shared_trunk,
         hidden_ci_floor=pd_config.hidden_ci_floor,
+        output_ci_cap=pd_config.output_ci_cap,
         hidden_readout_sites=pd_config.hidden_readout_sites,
     )
 

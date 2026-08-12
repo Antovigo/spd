@@ -21,6 +21,8 @@ from param_decomp.ci_fns import (
     CiConfig,
     CIRole,
     HiddenCIFloorConfig,
+    OutputCICapConfig,
+    cap_output_ci_logits,
     floor_hidden_ci_logits,
     make_ci_fn_wrapper,
     share_transformer_trunk,
@@ -88,6 +90,7 @@ class ComponentModel(nn.Module):
         dual_hidden_ci: bool = False,
         dual_hidden_ci_shared_trunk: bool = False,
         hidden_ci_floor: HiddenCIFloorConfig | None = None,
+        output_ci_cap: OutputCICapConfig | None = None,
         hidden_readout_sites: Mapping[str, str] | None = None,
     ):
         """Wrap `target_model` with parameter-component machinery.
@@ -116,6 +119,10 @@ class ComponentModel(nn.Module):
                 so a subcomponent can never be scored less important for the sites'
                 activations than for the model's output. Costs one extra output-net
                 forward on every `role="hidden"` CI call. Requires `dual_hidden_ci`.
+            output_ci_cap: The same ordering routed the other way — the output net's CI is
+                capped at the hidden net's, so the output reconstruction can only rely on a
+                subcomponent the hidden reconstruction also supports. Mutually exclusive with
+                `hidden_ci_floor`. Requires `dual_hidden_ci`.
             hidden_readout_sites: Extra measurement points for the hidden-activation
                 losses, as `{measurement_name: module_path}`. The *input* of each listed
                 module is captured — both clean (`forward(cache_type="input")`) and masked
@@ -179,10 +186,16 @@ class ComponentModel(nn.Module):
             share_transformer_trunk(source=self.ci_fn, target=self.ci_fn_hidden)
 
         self.hidden_ci_floor = hidden_ci_floor
-        if hidden_ci_floor is not None:
-            assert self.ci_fn_hidden is not None, (
-                "hidden_ci_floor needs a hidden CI net to constrain; set dual_hidden_ci"
-            )
+        self.output_ci_cap = output_ci_cap
+        assert not (hidden_ci_floor is not None and output_ci_cap is not None), (
+            "hidden_ci_floor and output_ci_cap are the same inequality routed in opposite "
+            "directions; enabling both is circular"
+        )
+        assert (
+            hidden_ci_floor is None and output_ci_cap is None
+        ) or self.ci_fn_hidden is not None, (
+            "a CI ordering constraint needs a hidden CI net; set dual_hidden_ci"
+        )
 
         if sigmoid_type == "leaky_hard":
             self.lower_leaky_fn = SIGMOID_TYPES["lower_leaky_hard"]
@@ -523,6 +536,15 @@ class ComponentModel(nn.Module):
             ci_fn_outputs = floor_hidden_ci_logits(
                 ci_fn_outputs, output_logits, self.hidden_ci_floor
             )
+        if role == "output" and self.output_ci_cap is not None:
+            # Deliberately *not* under `no_grad`: for the cap the gradient into the hidden net
+            # is the mechanism. This path is analysis-only on a dual run (the trainer uses
+            # `calc_causal_importances_both_roles`), so the graph usually costs nothing —
+            # callers evaluating under `torch.no_grad()` build none.
+            assert self.ci_fn_hidden is not None
+            ci_fn_outputs = cap_output_ci_logits(
+                ci_fn_outputs, self.ci_fn_hidden(ci_inputs), self.output_ci_cap
+            )
         return self._apply_sigmoid_to_ci_outputs(
             ci_fn_outputs, sampling, jitter=self._binomial_jitter(ci_fn_outputs, sampling)
         )
@@ -559,6 +581,10 @@ class ComponentModel(nn.Module):
                 {name: logits.detach() for name, logits in output_logits.items()},
                 self.hidden_ci_floor,
             )
+        if self.output_ci_cap is not None:
+            # Attached, unlike the floor: where the cap binds, the output objective's gradient
+            # flows into the hidden logit, which is exactly the guidance being tested.
+            output_logits = cap_output_ci_logits(output_logits, hidden_logits, self.output_ci_cap)
         jitter = self._binomial_jitter(output_logits, sampling)
         return (
             self._apply_sigmoid_to_ci_outputs(output_logits, sampling, jitter=jitter),

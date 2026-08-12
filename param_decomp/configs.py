@@ -18,7 +18,12 @@ from pydantic import (
 )
 
 from param_decomp.base_config import BaseConfig, Probability
-from param_decomp.ci_fns import CiConfig, GlobalCiConfig, HiddenCIFloorConfig
+from param_decomp.ci_fns import (
+    CiConfig,
+    GlobalCiConfig,
+    HiddenCIFloorConfig,
+    OutputCICapConfig,
+)
 from param_decomp.decomposition_targets import DecompositionTargetConfig
 from param_decomp.masks import SamplingType
 from param_decomp.metrics.ci_masked_recon import CIMaskedReconLossConfig
@@ -164,6 +169,16 @@ class PDConfig(BaseConfig):
         "can also be listed as an eval-only diagnostic alongside this. Requires "
         "`dual_hidden_ci`.",
     )
+    output_ci_cap: OutputCICapConfig | None = Field(
+        default=None,
+        description="Cap the output CI net at the hidden net's — the same ordering as "
+        "`hidden_ci_floor`, routed the other way. Where it binds, the output objective's "
+        "gradient is redirected into the hidden net, so the output reconstruction can only "
+        "rely on a subcomponent whose importance the hidden reconstruction also supports "
+        "(and must pay the hidden sparsity penalty to raise it). This is the direction that "
+        "makes the hidden objective *guide* the output decomposition rather than merely agree "
+        "with it. Mutually exclusive with `hidden_ci_floor`; requires `dual_hidden_ci`.",
+    )
     hidden_readout_sites: dict[str, str] = Field(
         default={},
         description="Extra measurement points for the hidden-activation losses, as "
@@ -301,11 +316,14 @@ class PDConfig(BaseConfig):
         return self
 
     @model_validator(mode="after")
-    def validate_hidden_ci_floor_has_a_hidden_net(self) -> Self:
-        if self.hidden_ci_floor is not None:
+    def validate_ci_ordering_constraint(self) -> Self:
+        assert not (self.hidden_ci_floor is not None and self.output_ci_cap is not None), (
+            "hidden_ci_floor and output_ci_cap enforce the same inequality in opposite "
+            "directions; pick one"
+        )
+        if self.hidden_ci_floor is not None or self.output_ci_cap is not None:
             assert self.dual_hidden_ci, (
-                "hidden_ci_floor constrains the hidden CI net against the output one; "
-                "set dual_hidden_ci"
+                "a CI ordering constraint relates the two CI nets; set dual_hidden_ci"
             )
         return self
 

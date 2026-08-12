@@ -100,6 +100,61 @@ def floor_hidden_ci_logits(
     }
 
 
+class OutputCICapConfig(BaseConfig):
+    """Cap the output CI net at the hidden net's — the same ordering as `HiddenCIFloorConfig`,
+    routed the other way.
+
+    Both enforce `CI_hidden >= CI_output`. They differ in which net absorbs the correction,
+    and that difference is the whole point:
+
+    - **Floor** modifies the *hidden* net (`CI_hidden = max(raw, CI_output)`). Where it binds,
+      a violation is resolved by declaring the subcomponent hidden-important. The ordering
+      holds, but the anomaly it was meant to surface is papered over.
+    - **Cap** modifies the *output* net (`CI_output = min(raw, CI_hidden)`). Where it binds,
+      the output objective's gradient is redirected into the hidden logit: to rely on a
+      subcomponent, the output reconstruction must first convince the hidden net that the
+      subcomponent does real work at its own matrix's output — and the hidden
+      importance-minimality penalty makes it pay for that. A component that moves the logits
+      through something other than its own site's activations cannot be bought.
+
+    So the cap is the direction that makes the hidden reconstruction *guide* the output
+    reconstruction toward mechanistically faithful components, rather than merely agree with
+    it. Mutually exclusive with `hidden_ci_floor`; the two are the same inequality.
+    """
+
+    sharpness: PositiveFloat = Field(
+        default=10.0,
+        description="Softness of the cap, in logit units; the smooth min deviates from a hard "
+        "min by at most `ln(2)/sharpness`. Same role as `HiddenCIFloorConfig.sharpness`.",
+    )
+
+
+def cap_output_ci_logits(
+    output_logits: dict[str, Float[Tensor, "... C"]],
+    hidden_logits: dict[str, Float[Tensor, "... C"]],
+    cfg: OutputCICapConfig,
+) -> dict[str, Float[Tensor, "... C"]]:
+    """Smooth `min(output_logits, hidden_logits)`, per module.
+
+    The mirror of `floor_hidden_ci_logits`: `min(a, b) = b - softplus(b - a, beta)`. Gradient
+    w.r.t. the output logit is `sigmoid(beta * (hidden - output))` — ~1 while the cap is slack,
+    fading to 0 once it binds — and w.r.t. the hidden logit it is exactly the complement. So
+    the output objective's pressure transfers to the hidden net precisely where the cap binds.
+
+    `hidden_logits` are **not** detached, and must not be: that gradient path is the mechanism,
+    not a leak. Contrast `floor_hidden_ci_logits`, where detaching the output logits keeps the
+    hidden objective's sparsity pressure off the output net.
+    """
+    assert output_logits.keys() == hidden_logits.keys(), (
+        f"cap needs one hidden logit per output logit: {sorted(output_logits)} vs "
+        f"{sorted(hidden_logits)}"
+    )
+    return {
+        name: hidden_logits[name] - F.softplus(hidden_logits[name] - logits, beta=cfg.sharpness)
+        for name, logits in output_logits.items()
+    }
+
+
 class LayerwiseCiConfig(BaseConfig):
     """Layerwise CI fns — one independent CI fn per decomposition target."""
 

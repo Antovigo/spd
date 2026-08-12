@@ -242,10 +242,13 @@ def _assert_ctx_invariants(ctx: MetricContext, device: str, step: int) -> None:
             )
         device_checks += [t.isfinite().all() for t in ci.lower_leaky.values()]
 
-    if ctx.ci_hidden is not None and ctx.model.hidden_ci_floor is not None:
-        # Exact on every branch: the floor orders the logits, both squashes are monotone,
-        # and `calc_causal_importances_both_roles` hands the two roles one shared jitter
-        # draw — so `lower_leaky`, the branch that actually masks, is ordered too.
+    constrained = ctx.model.hidden_ci_floor is not None or ctx.model.output_ci_cap is not None
+    if ctx.ci_hidden is not None and constrained:
+        # `CI_hidden >= CI_output` either way — the floor raises the hidden net to meet the
+        # output net, the cap lowers the output net to meet the hidden one. Exact on every
+        # branch: both squashes are monotone and `calc_causal_importances_both_roles` hands
+        # the two roles one shared jitter draw, so `lower_leaky` — the branch that actually
+        # masks — is ordered too.
         device_checks += [
             (ctx.ci_hidden.lower_leaky[name] >= ctx.ci.lower_leaky[name]).all()
             for name in ctx.ci.lower_leaky
@@ -265,7 +268,7 @@ def _raise_ci_check_failure(cis: dict[str, CIOutputs], ctx: MetricContext, step:
     assert ctx.ci_hidden is not None
     for name, hidden in ctx.ci_hidden.lower_leaky.items():
         assert (hidden >= ctx.ci.lower_leaky[name]).all(), (
-            f"hidden_ci_floor violated at step {step}: hidden CI below output CI for {name!r}, "
+            f"CI ordering violated at step {step}: hidden CI below output CI for {name!r}, "
             f"by up to {(ctx.ci.lower_leaky[name] - hidden).max().item():.3e}"
         )
     raise AssertionError(f"CI invariant check failed at step {step} but no cause was isolated")
@@ -527,6 +530,7 @@ class Trainer:
             dual_hidden_ci=pd_config.dual_hidden_ci,
             dual_hidden_ci_shared_trunk=pd_config.dual_hidden_ci_shared_trunk,
             hidden_ci_floor=pd_config.hidden_ci_floor,
+            output_ci_cap=pd_config.output_ci_cap,
             hidden_readout_sites=pd_config.hidden_readout_sites,
         )
         model.to(device)
