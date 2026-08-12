@@ -1,18 +1,6 @@
 # TARGETED (tPD, SPEC §11) Llama-3.1-8B layer-18 decomposition on the 1..100 a+b / a-b
-# prompt pool — the JAX port of the torch reference run `addsub-L18-09-one-im`.
+# prompt pool, sized for 2x L40 (dp 2).
 # Runs via `python -m param_decomp.experiments.lm.run_targeted`.
-#
-# Sized for 2x L40 (dp 2). Deltas from the torch reference, all deliberate:
-#   - recon: ONE MergedStochasticSubsetPPGDReconLoss instead of the separate stochastic +
-#     PPGD pair, with upstream's coefficient shape (0.5 stochastic + PPGD gated in over
-#     20%->30%) folded into the merged term's two schedules. No UnmaskedReconLoss in
-#     training (it rides as an eval probe instead).
-#   - imp-min rescaled 5e-5 -> 3.33e-5 to hold the reference's imp-min : (stochastic+PPGD)
-#     ratio now that the recon coefficients sum to 1.0 instead of 1.5.
-#   - `frequency` replaces the reference's rolled `beta: 0.5`: coeff = imp coeff x beta,
-#     `reference_datapoint_count` = the TARGET stream's B*T (128 x 5, unpadded — T8).
-#   - weight_init: zero_u (the reference ran `coupled`).
-#   - the target stream runs UNPADDED at the pool's own 5 tokens (T8), not padded to 16.
 run_name: jax-l18-addsub-targeted
 decomposition:
   sites:
@@ -30,9 +18,9 @@ decomposition:
       up: 456
       down: 456
   ci:
-    # The reference's `global_shared_transformer` over layer 18's seven sites: one decomposed
-    # block at blocks_per_chunk 1 IS one chunk, and `all_block_taps` is the same set of
-    # physical vectors (attn in/out, MLP in, MLP hidden) it concatenated.
+    # One decomposed block at blocks_per_chunk 1 is a single chunk spanning all seven
+    # sites; `all_block_taps` feeds it their input activations (attn in/out, MLP in,
+    # MLP hidden).
     type: chunkwise_transformer
     blocks_per_chunk: 1
     input_tap: all_block_taps
@@ -82,9 +70,10 @@ pd:
         coeff: 1.67e-05
         reference_datapoint_count: 640  # pd.batch_size 128 x the pool's 5 tokens
     - type: MergedStochasticSubsetPPGDReconLoss
-      # Upstream's `0.5 stochastic + g(t)*0.5 PPGD` in expectation, merged into one forward:
-      # solving coeff*(1-f) = 0.5 and coeff*f = 0.5*g gives coeff = 0.5*(1+g) and
-      # f = g/(1+g), so both knobs ride the same 20%->30% activation ramp.
+      # `0.5 stochastic + g(t)*0.5 PPGD` in expectation, one forward: coeff*(1-f) = 0.5
+      # and coeff*f = 0.5*g give coeff = 0.5*(1+g), f = g/(1+g) — hence BOTH knobs
+      # scheduled on the same 20%->30% activation ramp. Editing one alone breaks the
+      # identity.
       coeff:
         max_val: 1.0
         points:
@@ -132,7 +121,7 @@ eval:
   slow_every: 1000
   slow_on_first_step: true
   metrics:
-    # --- broad (non-target) stream: `data.eval` is the only source the eval loop reads
+    # --- broad (NON-TARGET) stream: `data.eval` is the only source the eval loop reads
     - type: CEandKLLosses
       rounding_threshold: 0.0
     - type: CI_L0
@@ -144,7 +133,6 @@ eval:
       source_shape: c
       n_steps: 20
       step_size: 0.1
-    - type: UnmaskedReconLoss
     - type: CIHistograms
       n_batches_accum: 1
     - type: CIHiddenActsReconLoss
@@ -156,7 +144,6 @@ eval:
       fresh_pgd:
         n_steps: 20
         step_size: 0.1
-    # --- both streams in one figure (supersedes a bare CIMeanPerComponent)
     - type: TwoStreamCIMeanPerComponent
     - type: WeightMagnitude
 cadence:

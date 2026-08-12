@@ -34,6 +34,7 @@ from param_decomp.core.components import (
     SiteSpec,
     init_component_stacks,
     init_component_stacks_coupled,
+    with_silenced_u,
     zero_component_stacks,
 )
 from param_decomp.core.configs import SourceShape
@@ -71,7 +72,8 @@ def init_component_stacks_coupled_placed(
     def init(arrays: DecomposedModel, init_key: PRNGKeyArray) -> ComponentStacks:
         traced_model: DecomposedModel = eqx.combine(arrays, model_static)
         weights = traced_model.weight_deltas(zero_component_stacks(traced_model.sites))
-        return init_component_stacks_coupled(traced_model.sites, weights, init_key, zero_u=zero_u)
+        coupled = init_component_stacks_coupled(traced_model.sites, weights, init_key)
+        return with_silenced_u(coupled) if zero_u else coupled
 
     abstract = eqx.filter_eval_shape(init, model_arrays, key)
     placement = component_stacks_shardings(abstract, rules)

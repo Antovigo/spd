@@ -9,6 +9,7 @@ import jax.numpy as jnp
 
 from param_decomp.core.components import (
     init_component_stacks_coupled,
+    with_silenced_u,
     zero_component_stacks,
 )
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
@@ -40,7 +41,7 @@ def test_zero_components_read_back_the_frozen_weights():
 
 def test_coupled_init_couples_the_wide_side_to_w():
     _model, sites, weights = _tiny_model_and_weights()
-    vu = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1), zero_u=False)
+    vu = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1))
     for spec in sites:
         site = vu.site(spec.name)
         W = weights[spec.name]
@@ -57,8 +58,8 @@ def test_zero_u_silences_every_component_but_keeps_v_live():
     """The component sum is exactly zero at init, so the delta carries all of `W`; `V` is
     untouched so `x @ V` still feeds the CI nets."""
     model, sites, weights = _tiny_model_and_weights()
-    vu = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1), zero_u=True)
-    coupled = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1), zero_u=False)
+    coupled = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1))
+    vu = with_silenced_u(coupled)
     for spec in sites:
         assert jnp.all(vu.site(spec.name).U == 0.0), spec.name
         assert jnp.any(vu.site(spec.name).V != 0.0), spec.name
@@ -82,7 +83,8 @@ def test_placed_init_matches_the_eager_values():
         placed = init_component_stacks_coupled_placed(
             model, jax.random.PRNGKey(1), rules, zero_u=zero_u
         )
-        eager = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1), zero_u=zero_u)
+        coupled = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1))
+        eager = with_silenced_u(coupled) if zero_u else coupled
         for spec in sites:
             placed_site, eager_site = placed.site(spec.name), eager.site(spec.name)
             assert jnp.allclose(placed_site.V, eager_site.V, atol=1e-5), spec.name

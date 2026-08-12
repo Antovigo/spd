@@ -45,10 +45,7 @@ from param_decomp.core.run import EvalInvocation
 from param_decomp.experiments.eval_config import EvalConfig
 from param_decomp.experiments.fast_eval_operations import _averaged_over_eval_batches
 from param_decomp.experiments.lm.eval_context import LMEvalContext
-from param_decomp.experiments.lm.scalar_eval_operations import (
-    _make_scalar_operation,
-    broad_stream_batches,
-)
+from param_decomp.experiments.lm.scalar_eval_operations import _make_scalar_operation
 
 
 def _jax_average(per_batch_values: list[float], n_steps: int) -> float:
@@ -135,8 +132,7 @@ def test_lm_scalar_operation_averages_residual_batch_objectives():
         jnp.array([0, 0], dtype=jnp.uint32),
         train_steps=0,
         eval_steps=2,
-        batches_of=broad_stream_batches,
-        log_prefix="eval/",
+        stream="broad",
     )
     context = LMEvalContext(
         state=_state_stub(),  # pyright: ignore[reportArgumentType]

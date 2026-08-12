@@ -16,7 +16,6 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     StochasticHiddenActsReconLossConfig,
     UVPlotsConfig,
-    WeightMagnitudeConfig,
 )
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.hidden_acts_eval import (
@@ -42,6 +41,7 @@ from param_decomp.core.slow_eval import (
     compute_identity_ci_errors,
     make_position_ci_step,
     make_slow_eval_step,
+    mean_cis,
     plot_mean_component_cis_two_streams,
     plot_weight_magnitudes,
     render_permutation_figures,
@@ -58,25 +58,22 @@ from param_decomp.experiments.lm.attn_patterns_eval import (
 from param_decomp.experiments.lm.eval_config import (
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
-    TwoStreamCIMeanPerComponentConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
-from param_decomp.experiments.lm.scalar_eval_operations import (
-    broad_stream_batches,
-    target_pool_batches,
-)
+from param_decomp.experiments.lm.scalar_eval_operations import stream_batches
+
+
+def _figure_record(now_step: int, media: dict[str, bytes]) -> DeferredMediaRecord:
+    """A slow-tier figure batch on the dedicated figure-step axis (SPEC S28)."""
+    return DeferredMediaRecord(step_key="slow_eval/figure_step", step=now_step, media=media)
 
 
 def _render_selected_figures(
     reductions: dict[str, SiteReduction], wanted: set[str], now_step: int
 ) -> DeferredMediaRecord:
     figures = render_slow_eval_figures(reductions)
-    return DeferredMediaRecord(
-        step_key="slow_eval/figure_step",
-        step=now_step,
-        media={f"slow_eval/{name}": figures[name] for name in wanted},
-    )
+    return _figure_record(now_step, {f"slow_eval/{name}": figures[name] for name in wanted})
 
 
 def _render_permutation(
@@ -89,11 +86,7 @@ def _render_permutation(
     figures = render_permutation_figures(spec, position_ci, components)
     if not include_ci_heatmaps:
         figures = {key: value for key, value in figures.items() if key == "figures/uv_matrices"}
-    return DeferredMediaRecord(
-        step_key="slow_eval/figure_step",
-        step=now_step,
-        media={f"slow_eval/{name}": value for name, value in figures.items()},
-    )
+    return _figure_record(now_step, {f"slow_eval/{name}": value for name, value in figures.items()})
 
 
 def make_attention_operation(
@@ -171,20 +164,15 @@ def make_hidden_acts_operation(
 def _render_weight_magnitudes(
     magnitudes: dict[str, np.ndarray], now_step: int
 ) -> DeferredMediaRecord:
-    return DeferredMediaRecord(
-        step_key="slow_eval/figure_step",
-        step=now_step,
-        media={"slow_eval/figures/weight_magnitude": plot_weight_magnitudes(magnitudes)},
+    return _figure_record(
+        now_step, {"slow_eval/figures/weight_magnitude": plot_weight_magnitudes(magnitudes)}
     )
 
 
 def make_weight_magnitude_operation(
-    metric: WeightMagnitudeConfig,
-    schedule: EvalSchedule,
-    renderer: BackgroundRenderer,
+    schedule: EvalSchedule, renderer: BackgroundRenderer
 ) -> EvalOperation[LMEvalContext]:
     """`‖V_c‖·‖U_c‖` per site. Reads the trained V/U only — no model, no batch, no step."""
-    del metric
 
     def run(context: LMEvalContext) -> LogRecord:
         magnitudes = weight_magnitudes(context.state.decomposition.components)
@@ -200,10 +188,9 @@ def _render_two_stream_ci_means(
     now_step: int,
 ) -> DeferredMediaRecord:
     linear, log = plot_mean_component_cis_two_streams(target, nontarget)
-    return DeferredMediaRecord(
-        step_key="slow_eval/figure_step",
-        step=now_step,
-        media={
+    return _figure_record(
+        now_step,
+        {
             "slow_eval/figures/ci_mean_per_component_two_stream": linear,
             "slow_eval/figures/ci_mean_per_component_two_stream_log": log,
         },
@@ -211,7 +198,6 @@ def _render_two_stream_ci_means(
 
 
 def make_two_stream_ci_mean_operation(
-    metric: TwoStreamCIMeanPerComponentConfig,
     schedule: EvalSchedule,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
@@ -219,21 +205,20 @@ def make_two_stream_ci_mean_operation(
     renderer: BackgroundRenderer,
 ) -> EvalOperation[LMEvalContext]:
     """Both streams' mean CI per component in one figure, ordered by the target mean."""
-    del metric
     step = make_slow_eval_step(model, ci_capture_keys, 0.0, None, compiler_options)
 
-    def mean_cis(ci_fn: CIFn, batches: tuple[jax.Array, ...]) -> dict[str, np.ndarray]:
-        reductions = accumulate_site_reductions(step, model, ci_fn, list(batches), None)
-        assert all(r.n_positions > 0 for r in reductions.values())
-        return {site: r.ci_sums / r.n_positions for site, r in reductions.items()}
+    def stream_mean_cis(ci_fn: CIFn, batches: tuple[jax.Array, ...]) -> dict[str, np.ndarray]:
+        # `n_batches_accum=0`: this metric reads only `ci_sums`, and the raw-value sample
+        # would gather every position's CI to the host (~430MB/pass here) to be discarded.
+        return mean_cis(accumulate_site_reductions(step, model, ci_fn, list(batches), 0))
 
     def run(context: LMEvalContext) -> LogRecord:
         ci_fn = context.state.decomposition.ci_fn
         renderer.submit(
             partial(
                 _render_two_stream_ci_means,
-                mean_cis(ci_fn, target_pool_batches(context)),
-                mean_cis(ci_fn, broad_stream_batches(context)),
+                stream_mean_cis(ci_fn, stream_batches("target_pool", context)),
+                stream_mean_cis(ci_fn, stream_batches("broad", context)),
                 context.now_step,
             )
         )

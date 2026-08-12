@@ -222,14 +222,8 @@ class SmoothL0ImportanceMinimalityLossConfig(LossMetricConfig):
     type: Literal["SmoothL0ImportanceMinimalityLoss"] = "SmoothL0ImportanceMinimalityLoss"
     gamma: ScheduleConfig
     frequency: FrequencyMinimalityConfig | None = None
-    normalize_at_one: bool = Field(
-        default=False,
-        description=(
-            "Rescale `phi` by `(1 + gamma^2)` so a fully-active component (`c = 1`) always "
-            "contributes exactly 1, removing the implicit ~2x coefficient ramp the bare "
-            "form applies across the gamma anneal."
-        ),
-    )
+    normalize_at_one: bool = False
+    """Rescale `phi` so `c = 1` contributes exactly 1 at every gamma (`losses.py`)."""
 
 
 # The two imp-min penalties share the `coeff` + optional `frequency` surface and the
@@ -280,11 +274,6 @@ class StochasticHiddenActsReconLossConfig(LossMetricConfig):
 
 
 class UnmaskedReconLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
-    slow: ClassVar[bool] = False
-    """Authorable as an eval too: one all-ones masked forward per batch, no ascent — the
-    cheapest recon probe there is, and the only read on whether the component sum alone
-    still reconstructs when the term is not being trained."""
-
     type: Literal["UnmaskedReconLoss"] = "UnmaskedReconLoss"
 
 
@@ -815,13 +804,8 @@ class PDConfigBase(BaseConfig):
             "`nontarget.batch_size`."
         ),
     )
-    weight_init: WeightInit = Field(
-        default="default",
-        description=(
-            "Subcomponent V/U seeding. The two target-coupled arms read each site's frozen "
-            "`W`, so they cost one extra device-resident weight read at init."
-        ),
-    )
+    weight_init: WeightInit = "default"
+    """Subcomponent V/U seeding; the target-coupled arms read each site's frozen `W`."""
 
 
 class PDConfig(PDConfigBase):

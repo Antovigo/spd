@@ -119,12 +119,20 @@ def train_targeted(
         server.per_process,
         jax.local_device_count(),
     )
-    per_process_target = target_batch // n_proc
+
+    def pool_global_batch(seed: int, step: int, batch: int) -> jax.Array:
+        """One global batch drawn from the prompt pool, sliced to this process's share.
+
+        ONE copy of the process-slice arithmetic: training and eval differ only in
+        `(seed, batch)`, and a skew between two hand-written copies would be silently
+        wrong data rather than a crash."""
+        per_process = batch // n_proc
+        rows = pool_batch(pool, seed, step, batch)
+        local = rows[jax.process_index() * per_process :][:per_process]
+        return global_token_batch(local, mesh, batch)
 
     def sample_target_batch(step: int) -> jax.Array:
-        rows = pool_batch(pool, built.pd.seed, step, target_batch)
-        local = rows[jax.process_index() * per_process_target :][:per_process_target]
-        return global_token_batch(local, mesh, target_batch)
+        return pool_global_batch(built.pd.seed, step, target_batch)
 
     def sample_nontarget_batch(step: int) -> jax.Array:
         return global_token_batch(server.local_batch(step), mesh, nontarget_batch)
@@ -137,23 +145,16 @@ def train_targeted(
             "mid-window eval would corrupt the next step-time estimate"
         )
         eval_target_batch = eval_config.batch_size
-        assert eval_target_batch % n_dev == 0 and eval_target_batch >= n_dev, (
-            f"eval.batch_size {eval_target_batch} must be a positive multiple of {n_dev}"
-        )
-        per_process_eval = eval_target_batch // n_proc
 
-        def eval_target_pool_batches(pass_index: int, n_batches: int) -> list[jax.Array]:
+        def eval_target_pool_batches(pass_index: int) -> list[jax.Array]:
             """The eval pass's TARGET stream: the same pure `(seed, step)` pool sampler
             training uses, on the `seed + 1` stream the broad eval split already draws
             from — so an eval never scores the exact rows the step just trained on."""
-            batches = []
-            for j in range(n_batches):
-                rows = pool_batch(
-                    pool, built.pd.seed + 1, pass_index * n_batches + j, eval_target_batch
-                )
-                local = rows[jax.process_index() * per_process_eval :][:per_process_eval]
-                batches.append(global_token_batch(local, mesh, eval_target_batch))
-            return batches
+            n_batches = eval_config.n_steps
+            return [
+                pool_global_batch(built.pd.seed + 1, pass_index * n_batches + j, eval_target_batch)
+                for j in range(n_batches)
+            ]
 
         evaluation = make_lm_evaluation(
             built,

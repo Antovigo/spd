@@ -18,7 +18,6 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
-    UnmaskedReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
     WellTemperednessConfig,
@@ -58,7 +57,6 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
     make_ci_l0_operation,
     make_fresh_pgd_operation,
     make_target_pool_scalars_operation,
-    make_unmasked_recon_operation,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
@@ -78,11 +76,11 @@ def make_lm_evaluation(
     n_proc: int,
     sink: MetricsSink,
     compiler_options: dict[str, bool | int | str],
-    target_pool_batches_for: Callable[[int, int], list[jax.Array]] | None,
+    target_pool_batches_for: Callable[[int], list[jax.Array]] | None,
 ) -> Evaluation[LMEvalContext]:
     """Construct one executable operation for every authored LM metric.
 
-    `target_pool_batches_for(pass_index, n_batches)` supplies the tPD target stream, which
+    `target_pool_batches_for(pass_index)` supplies the tPD target stream, which
     `data.eval` cannot: the prompt pool has no held-out split, so the targeted root draws
     pool batches the same way training does. `None` on a plain run; the target-stream
     metrics then refuse at first use."""
@@ -117,6 +115,7 @@ def make_lm_evaluation(
                 return make_ce_kl_operation(
                     metric,
                     schedule,
+                    "broad",
                     model,
                     capture_inputs,
                     run_key,
@@ -129,6 +128,7 @@ def make_lm_evaluation(
                 return make_ci_l0_operation(
                     metric,
                     schedule,
+                    "broad",
                     model,
                     capture_inputs,
                     run_key,
@@ -141,6 +141,7 @@ def make_lm_evaluation(
                 return make_fresh_pgd_operation(
                     metric,
                     schedule,
+                    "broad",
                     model,
                     capture_inputs,
                     run_key,
@@ -198,18 +199,6 @@ def make_lm_evaluation(
                     compiler_options,
                 )
 
-            case UnmaskedReconLossConfig():
-                return make_unmasked_recon_operation(
-                    metric,
-                    schedule,
-                    model,
-                    capture_inputs,
-                    run_key,
-                    pd.steps,
-                    eval.n_steps,
-                    mesh,
-                    compiler_options,
-                )
             case TargetPoolScalarsConfig():
                 return make_target_pool_scalars_operation(
                     metric,
@@ -224,10 +213,10 @@ def make_lm_evaluation(
                 )
             case TwoStreamCIMeanPerComponentConfig():
                 return make_two_stream_ci_mean_operation(
-                    metric, schedule, model, capture_inputs, compiler_options, renderer
+                    schedule, model, capture_inputs, compiler_options, renderer
                 )
             case WeightMagnitudeConfig():
-                return make_weight_magnitude_operation(metric, schedule, renderer)
+                return make_weight_magnitude_operation(schedule, renderer)
 
     needs_target_stream = tuple(
         metric.type
@@ -249,7 +238,7 @@ def make_lm_evaluation(
             target_batches=(
                 None
                 if target_pool_batches_for is None
-                else tuple(target_pool_batches_for(pass_index, eval.n_steps))
+                else tuple(target_pool_batches_for(pass_index))
             ),
         )
 

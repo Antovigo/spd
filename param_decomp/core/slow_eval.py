@@ -199,6 +199,11 @@ def make_slow_eval_step(
     return filter_jit(slow_eval_step, compiler_options=compiler_options)
 
 
+def _joined(chunks: list[np.ndarray] | None) -> np.ndarray:
+    """The gathered raw sample, or an empty array under `n_batches_accum=0`."""
+    return np.concatenate(chunks) if chunks else np.empty(0, np.float32)
+
+
 def accumulate_site_reductions(
     slow_eval_step: SlowEvalStep,
     model: DecomposedModel,
@@ -208,7 +213,9 @@ def accumulate_site_reductions(
 ) -> dict[str, SiteReduction]:
     """Drive `slow_eval_step` over the eval batches and fold the per-batch reductions
     into one `SiteReduction` per site. `n_batches_accum` caps how many batches feed the
-    `CIHistograms` raw-value sample (torch `n_batches_accum`); None keeps all. The opt-in
+    `CIHistograms` raw-value sample (torch `n_batches_accum`); None keeps all, and 0 keeps
+    NONE — the sums-only path for callers that read `ci_sums` / `density_counts` alone,
+    which skips a `process_allgather` of every position's CI per batch. The opt-in
     `density_hist` (when the step emits it) accumulates over EVERY batch, uncapped."""
     assert residual_batches, "slow eval needs at least one batch"
     density: dict[str, np.ndarray] = {}
@@ -247,8 +254,8 @@ def accumulate_site_reductions(
             density_counts=density[site],
             ci_sums=sums[site],
             n_positions=total_positions,
-            lower_sample=np.concatenate(lower_chunks[site]),
-            preactivations_sample=np.concatenate(preactivations_chunks[site]),
+            lower_sample=_joined(lower_chunks.get(site)),
+            preactivations_sample=_joined(preactivations_chunks.get(site)),
             density_hist=hist.get(site),
         )
         for site in density
@@ -531,13 +538,11 @@ def plot_component_activation_density(densities: dict[str, np.ndarray], bins: in
 
 @filter_jit
 def _component_weight_magnitudes(components: ComponentStacks) -> dict[str, Array]:
-    def per_component(Vs: Float[Array, "g d_in C"], Us: Float[Array, "g C d_out"]) -> Array:
-        v_norm = jnp.linalg.norm(Vs.astype(jnp.float32), axis=1)  # [g, C]
-        u_norm = jnp.linalg.norm(Us.astype(jnp.float32), axis=2)  # [g, C]
-        return v_norm * u_norm
-
-    by_shape = {shape: per_component(Vs, Us) for shape, (Vs, Us) in components.stacks.items()}
-    return {name: by_shape[shape][slot] for name, shape, slot in components.site_slots}
+    return {
+        name: jnp.linalg.norm(sc.V.astype(jnp.float32), axis=0)
+        * jnp.linalg.norm(sc.U.astype(jnp.float32), axis=1)
+        for name, sc in components.sites_items()
+    }
 
 
 def weight_magnitudes(components: ComponentStacks) -> dict[str, np.ndarray]:
@@ -546,6 +551,12 @@ def weight_magnitudes(components: ComponentStacks) -> dict[str, np.ndarray]:
     return {
         name: np.asarray(value) for name, value in _component_weight_magnitudes(components).items()
     }
+
+
+def mean_cis(reductions: dict[str, SiteReduction]) -> dict[str, np.ndarray]:
+    """Per-site token-weighted mean CI, with the zero-position guard in ONE place."""
+    assert all(r.n_positions > 0 for r in reductions.values())
+    return {site: r.ci_sums / r.n_positions for site, r in reductions.items()}
 
 
 def plot_weight_magnitudes(magnitudes: dict[str, np.ndarray]) -> bytes:
@@ -565,10 +576,6 @@ def plot_weight_magnitudes(magnitudes: dict[str, np.ndarray]) -> bytes:
         ax.set_title(name, fontsize=10)
     fig.tight_layout()
     return _render_figure(fig)
-
-
-TARGET_STREAM_COLOR = "#1f77b4"
-NONTARGET_STREAM_COLOR = "#d62728"
 
 
 def plot_mean_component_cis_two_streams(
@@ -597,11 +604,11 @@ def plot_mean_component_cis_two_streams(
             x = range(len(order))
             if log_y:
                 ax.set_yscale("log")
-            ax.bar(x, target[order], color=TARGET_STREAM_COLOR, label="target", width=1.0)
+            ax.bar(x, target[order], color="#1f77b4", label="target", width=1.0)
             ax.bar(
                 x,
                 nontarget_mean_cis[name][order],
-                color=NONTARGET_STREAM_COLOR,
+                color="#d62728",
                 label="non-target",
                 width=1.0,
                 alpha=0.6,
@@ -880,9 +887,9 @@ def render_slow_eval_figures(
     )
     assert all(r.n_positions > 0 for r in reductions.values())
     densities = {s: r.density_counts / r.n_positions for s, r in reductions.items()}
-    mean_cis = {s: r.ci_sums / r.n_positions for s, r in reductions.items()}
+    means = mean_cis(reductions)
     density_fig = plot_component_activation_density(densities)
-    mean_linear, mean_log = plot_mean_component_cis_both_scales(mean_cis)
+    mean_linear, mean_log = plot_mean_component_cis_both_scales(means)
     figures = {
         "figures/causal_importance_values": lower_hist,
         "figures/causal_importance_values_pre_sigmoid": preactivations_hist,
@@ -893,5 +900,5 @@ def render_slow_eval_figures(
     density_hists = {s: r.density_hist for s, r in reductions.items() if r.density_hist is not None}
     if density_hists:
         assert len(density_hists) == len(reductions), "density_hist must be all-sites or none"
-        figures["figures/ci_density_heatmap"] = plot_ci_density_heatmap(density_hists, mean_cis)
+        figures["figures/ci_density_heatmap"] = plot_ci_density_heatmap(density_hists, means)
     return figures

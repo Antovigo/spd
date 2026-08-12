@@ -181,21 +181,22 @@ def init_component_stacks(sites: tuple[SiteSpec, ...], key: Array) -> ComponentS
 def zero_component_stacks(sites: tuple[SiteSpec, ...]) -> ComponentStacks:
     """All-zero V/U in the stacked layout. `weight_deltas` is `W − (V@U)^T`, so passing this
     reads each site's frozen `W` back through the model protocol without widening it."""
-    return ComponentStacks(
-        stacks={
-            (d_in, d_out, c): (
-                jnp.zeros((len(specs), d_in, c), jnp.float32),
-                jnp.zeros((len(specs), c, d_out), jnp.float32),
+    return component_stacks_from_sites(
+        {
+            spec.name: (
+                jnp.zeros((spec.d_in, spec.C), jnp.float32),
+                jnp.zeros((spec.C, spec.d_out), jnp.float32),
             )
-            for (d_in, d_out, c), specs in vu_shape_groups(sites).items()
-        },
-        site_slots=site_slots_for(sites),
+            for spec in sites
+        }
     )
 
 
-def _coupled_site_vu(W: Array, key: Array, d_in: int, d_out: int, C: int) -> tuple[Array, Array]:
-    """One site's coupled V/U: a unit-norm Gaussian seed on the NARROW side, the wide side
-    its raw `W`-image. No C-dependent rescale — components sit at `W`'s natural scale."""
+def _coupled_site_vu(W: Array, key: Array, C: int) -> tuple[Array, Array]:
+    """One site's coupled V/U from its frozen `W [d_out, d_in]`: a unit-norm Gaussian seed on
+    the NARROW side, the wide side its raw `W`-image. No C-dependent rescale — components sit
+    at `W`'s natural scale."""
+    d_out, d_in = W.shape
     if d_in <= d_out:
         v = jax.random.normal(key, (d_in, C))
         V = v / jnp.linalg.norm(v, axis=0, keepdims=True)
@@ -205,43 +206,38 @@ def _coupled_site_vu(W: Array, key: Array, d_in: int, d_out: int, C: int) -> tup
     return W.T @ U.T, U
 
 
-def init_stack_arrays_coupled(
-    sites: tuple[SiteSpec, ...],
-    target_weights: dict[str, Array],
-    key: Array,
-    *,
-    zero_u: bool,
-) -> dict[VUShape, tuple[Array, Array]]:
-    """Coupled seeded stack init, vmapped over each shape group's (key, frozen `W`) pairs.
+def init_component_stacks_coupled(
+    sites: tuple[SiteSpec, ...], target_weights: dict[str, Array], key: Array
+) -> ComponentStacks:
+    """Coupled seeded init: per site, `_coupled_site_vu` against its own frozen `W`.
 
-    `zero_u` zeroes U AFTER the coupled draw, so V is whatever the coupled scheme wrote —
-    the component sum is exactly zero while the CI nets still see a live `x @ V`.
-    `target_weights[name]` is `[d_out, d_in]`, matching `DecomposedModel.weight_deltas`.
+    Per-SITE, not vmapped over a shape group: vmap would need the group's `W`s stacked into
+    one contiguous buffer (`[2, 14336, 4096]` fp32 = 470MB for llama8b's gate+up alone) and
+    would keep every matrix in the group simultaneously live. The draw here is one matmul
+    and one norm — there is no RNG fan-out to amortize — so the loop costs nothing and lets
+    XLA free each `W` before the next. Outputs still stack per shape group, so the graph
+    keeps `init_stack_arrays`' 2×n_shapes shape.
     """
     keys = jax.random.split(key, len(sites))
-    site_index = {spec.name: idx for idx, spec in enumerate(sites)}
-    stacked: dict[VUShape, tuple[Array, Array]] = {}
-    for (d_in, d_out, c), specs in vu_shape_groups(sites).items():
-        idxs = jnp.array([site_index[spec.name] for spec in specs])
-        Ws = jnp.stack([target_weights[spec.name].astype(jnp.float32) for spec in specs])
-        assert Ws.shape[1:] == (d_out, d_in), (Ws.shape, (d_out, d_in))
-        Vs, Us = jax.vmap(lambda W, k, dims=(d_in, d_out, c): _coupled_site_vu(W, k, *dims))(
-            Ws, keys[idxs]
-        )
-        stacked[(d_in, d_out, c)] = (Vs, jnp.zeros_like(Us) if zero_u else Us)
-    return stacked
+    return component_stacks_from_sites(
+        {
+            spec.name: _coupled_site_vu(
+                target_weights[spec.name].astype(jnp.float32), keys[idx], spec.C
+            )
+            for idx, spec in enumerate(sites)
+        }
+    )
 
 
-def init_component_stacks_coupled(
-    sites: tuple[SiteSpec, ...],
-    target_weights: dict[str, Array],
-    key: Array,
-    *,
-    zero_u: bool,
-) -> ComponentStacks:
+def with_silenced_u(components: ComponentStacks) -> ComponentStacks:
+    """U zeroed, V untouched — the `zero_u` arm's one post-transform over any seeded init.
+
+    The component sum is then exactly zero and the delta carries all of `W`, while `x @ V`
+    still feeds the CI nets a live signal and `U` has a nonzero gradient from step 0 (`V`'s
+    is zero until `U` moves off zero)."""
     return ComponentStacks(
-        stacks=init_stack_arrays_coupled(sites, target_weights, key, zero_u=zero_u),
-        site_slots=site_slots_for(sites),
+        stacks={shape: (Vs, jnp.zeros_like(Us)) for shape, (Vs, Us) in components.stacks.items()},
+        site_slots=components.site_slots,
     )
 
 

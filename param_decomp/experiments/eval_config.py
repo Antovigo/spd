@@ -22,7 +22,6 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
-    UnmaskedReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
     WellTemperednessConfig,
@@ -53,7 +52,6 @@ AnyEvalMetricConfig = Annotated[
     | StochasticHiddenActsReconLossConfig
     | TargetPoolScalarsConfig
     | TwoStreamCIMeanPerComponentConfig
-    | UnmaskedReconLossConfig
     | UVPlotsConfig
     | WeightMagnitudeConfig
     | WellTemperednessConfig,

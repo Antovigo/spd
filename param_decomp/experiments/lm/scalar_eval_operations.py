@@ -1,17 +1,13 @@
 """Independent CE/KL, causal-L0, and fresh-PGD LM operations."""
 
-from collections.abc import Callable
+from typing import Literal
 
 import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jaxtyping import Array, PRNGKeyArray
 
-from param_decomp.core.configs import (
-    CI_L0Config,
-    PGDReconLossConfig,
-    UnmaskedReconLossConfig,
-)
+from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import BarChart, LogRecord, PNGImage
 from param_decomp.core.model import CaptureKeys, DecomposedModel
@@ -23,7 +19,6 @@ from param_decomp.experiments.lm.eval import (
     make_ce_kl_step,
     make_ci_l0_step,
     make_fresh_pgd_step,
-    make_unmasked_recon_step,
 )
 from param_decomp.experiments.lm.eval_config import (
     CEandKLLossesConfig,
@@ -32,16 +27,29 @@ from param_decomp.experiments.lm.eval_config import (
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
+type Stream = Literal["broad", "target_pool"]
+"""Which stream an eval operation measures. ONE value, not a (batch source, log prefix)
+pair: the two always covary, and nothing should be able to spell target-pool batches under
+the broad stream's log keys."""
 
-def broad_stream_batches(context: LMEvalContext) -> tuple[Array, ...]:
-    return context.batches
+
+def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
+    match stream:
+        case "broad":
+            return context.batches
+        case "target_pool":
+            assert context.target_batches is not None, (
+                "target-stream metrics need a tPD run's prompt pool; a plain run has none"
+            )
+            return context.target_batches
 
 
-def target_pool_batches(context: LMEvalContext) -> tuple[Array, ...]:
-    assert context.target_batches is not None, (
-        "target-stream metrics need a tPD run's prompt pool; a plain run has no target stream"
-    )
-    return context.target_batches
+def stream_log_prefix(stream: Stream) -> str:
+    match stream:
+        case "broad":
+            return "eval/"
+        case "target_pool":
+            return "eval/target_pool/"
 
 
 def _make_scalar_operation(
@@ -52,12 +60,13 @@ def _make_scalar_operation(
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
-    batches_of: Callable[[LMEvalContext], tuple[Array, ...]],
-    log_prefix: str,
+    stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
+    log_prefix = stream_log_prefix(stream)
+
     def run(context: LMEvalContext) -> LogRecord:
         sums: dict[str, Array] = {}
-        for batch_index, tokens in enumerate(batches_of(context)):
+        for batch_index, tokens in enumerate(stream_batches(stream, context)):
             key = random.fold_in(
                 run_key,
                 EvalKeyStream.SCALARS * train_steps + context.pass_index * eval_steps + batch_index,
@@ -80,6 +89,7 @@ def _make_scalar_operation(
 def make_ce_kl_operation(
     metric: CEandKLLossesConfig,
     schedule: EvalSchedule,
+    stream: Stream,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
@@ -96,8 +106,7 @@ def make_ce_kl_operation(
         run_key,
         train_steps,
         eval_steps,
-        broad_stream_batches,
-        "eval/",
+        stream,
     )
 
     return scalars
@@ -106,6 +115,7 @@ def make_ce_kl_operation(
 def make_ci_l0_operation(
     metric: CI_L0Config,
     schedule: EvalSchedule,
+    stream: Stream,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
@@ -129,14 +139,13 @@ def make_ci_l0_operation(
         run_key,
         train_steps,
         eval_steps,
-        broad_stream_batches,
-        "eval/",
+        stream,
     )
 
     def run(context: LMEvalContext) -> LogRecord:
         record = dict(scalars.run(context))
-        prefix = f"eval/l0/{metric.ci_alive_threshold}_"
-        record["eval/l0/bar_chart"] = BarChart(
+        prefix = f"{stream_log_prefix(stream)}l0/{metric.ci_alive_threshold}_"
+        record[f"{stream_log_prefix(stream)}l0/bar_chart"] = BarChart(
             rows=tuple(
                 (name.removeprefix(prefix), value)
                 for name, value in record.items()
@@ -151,33 +160,6 @@ def make_ci_l0_operation(
     return EvalOperation(schedule, run)
 
 
-def make_unmasked_recon_operation(
-    metric: UnmaskedReconLossConfig,
-    schedule: EvalSchedule,
-    model: DecomposedModel,
-    ci_capture_keys: CaptureKeys,
-    run_key: PRNGKeyArray,
-    train_steps: int,
-    eval_steps: int,
-    mesh: Mesh,
-    compiler_options: dict[str, bool | int | str],
-) -> EvalOperation[LMEvalContext]:
-    assert metric.hidden_acts_reconstruction is None, (
-        "the S35 rider belongs on a TRAINING term; the unmasked probe reports e2e recon only"
-    )
-    return _make_scalar_operation(
-        schedule,
-        make_unmasked_recon_step(model, ci_capture_keys, mesh, compiler_options),
-        ("UnmaskedReconLoss",),
-        model,
-        run_key,
-        train_steps,
-        eval_steps,
-        broad_stream_batches,
-        "eval/",
-    )
-
-
 def make_target_pool_scalars_operation(
     metric: TargetPoolScalarsConfig,
     schedule: EvalSchedule,
@@ -189,46 +171,42 @@ def make_target_pool_scalars_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
-    """CI-L0 (+ optional fresh PGD) over the tPD prompt pool, logged under
-    `eval/target_pool/` so the broad-stream twins stay readable side by side."""
-    groups = (
-        {name: tuple(patterns) for name, patterns in metric.ci_l0_groups.items()}
-        if metric.ci_l0_groups is not None
-        else None
-    )
+    """The broad-stream CI-L0 and fresh-PGD operations, rebound to the target pool.
+
+    Composed from the same two builders rather than re-derived, so the target stream gets
+    every readout the broad one does (the L0 bar chart included) and neither drifts."""
     parts = [
-        _make_scalar_operation(
+        make_ci_l0_operation(
+            CI_L0Config(ci_alive_threshold=metric.ci_alive_threshold, groups=metric.ci_l0_groups),
             schedule,
-            make_ci_l0_step(
-                model, ci_capture_keys, metric.ci_alive_threshold, groups, mesh, compiler_options
-            ),
-            ("l0/",),
+            "target_pool",
             model,
+            ci_capture_keys,
             run_key,
             train_steps,
             eval_steps,
-            target_pool_batches,
-            "eval/target_pool/",
+            mesh,
+            compiler_options,
         )
     ]
     if metric.fresh_pgd is not None:
-        probe = FreshPGDReconEval(
-            name="PGDReconLoss",
-            n_steps=metric.fresh_pgd.n_steps,
-            step_size=metric.fresh_pgd.step_size,
-            reconstruction=resolve_reconstruction_spec(None),
-        )
         parts.append(
-            _make_scalar_operation(
+            make_fresh_pgd_operation(
+                PGDReconLossConfig(
+                    init="random",
+                    source_shape="c",
+                    n_steps=metric.fresh_pgd.n_steps,
+                    step_size=metric.fresh_pgd.step_size,
+                ),
                 schedule,
-                make_fresh_pgd_step(model, ci_capture_keys, probe, mesh, compiler_options),
-                (f"loss/{probe.name}",),
+                "target_pool",
                 model,
+                ci_capture_keys,
                 run_key,
                 train_steps,
                 eval_steps,
-                target_pool_batches,
-                "eval/target_pool/",
+                mesh,
+                compiler_options,
             )
         )
 
@@ -244,6 +222,7 @@ def make_target_pool_scalars_operation(
 def make_fresh_pgd_operation(
     metric: PGDReconLossConfig,
     schedule: EvalSchedule,
+    stream: Stream,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
@@ -267,6 +246,5 @@ def make_fresh_pgd_operation(
         run_key,
         train_steps,
         eval_steps,
-        broad_stream_batches,
-        "eval/",
+        stream,
     )

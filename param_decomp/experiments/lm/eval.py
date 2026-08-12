@@ -326,41 +326,6 @@ def make_ci_l0_step[PreparedT](
     return filter_jit(eval_step, compiler_options=compiler_options)
 
 
-def make_unmasked_recon_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
-    ci_capture_keys: CaptureKeys,
-    mesh: Mesh | None = None,
-    compiler_options: dict[str, bool | int | str] | None = None,
-    *,
-    n_valid_rows: int | None = None,
-) -> ScalarStep:
-    """`UnmaskedReconLoss` as a probe: every component mask 1.0 and every weight-delta mask
-    0.0 (`ConstantSources(1.0)`'s masking, SPEC T4), so the FULL component sum alone must
-    reconstruct the frozen output. One masked forward, no ascent."""
-    assert model_static.has_position_axis, "LM UnmaskedReconLoss requires a position axis"
-
-    def eval_step(
-        model: DecomposedModel[PreparedT],
-        components: ComponentStacks,
-        ci_fn: CIFn,
-        token_ids: Array,
-        key: PRNGKeyArray,
-    ) -> dict[str, Array]:
-        del key
-        batch = _prepare_lm_batch(
-            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
-        )
-        # `ci_lower[site]` is `[*leading, C]`, so it carries both shapes the masks need.
-        masks = {site: jnp.ones_like(ci) for site, ci in batch.ci_lower.items()}
-        delta_masks = {
-            site: jnp.zeros(ci.shape[:-1], ci.dtype) for site, ci in batch.ci_lower.items()
-        }
-        logits = _compute_masked_output(model, batch, masks, delta_masks, mesh, EMPTY_CAPTURE_KEYS)
-        return {"UnmaskedReconLoss": _kl(batch, logits)}
-
-    return filter_jit(eval_step, compiler_options=compiler_options)
-
-
 def make_fresh_pgd_step[PreparedT](
     model_static: DecomposedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
