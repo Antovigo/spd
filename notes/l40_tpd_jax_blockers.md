@@ -11,6 +11,29 @@ userspace is what causes the first bug, and it is worth keeping in mind througho
 
 Fixes live in `a7b2636ce` (code and dependency) and `381ea3c71` (run-config sizing).
 
+One practical warning before the rest: when these runs fail, they often don't exit. Multi-GPU
+steps are synchronised — each GPU's worker blocks inside a communication step until all the
+others reach it — so when one worker dies, typically on an out-of-memory, the survivors wait
+for a partner that will never arrive, with no timeout. The job then looks alive while doing
+nothing: no output, no CPU, and still holding every byte of its GPU memory. Worse, `scancel`
+does not reliably reap it; you have to find the PID and `srun … kill -9` it by hand, and until
+you do that memory is unavailable to everyone else on the node.
+
+XLA will not rescue you here. It notices within ten seconds and logs `... Acquire clique ...
+and may be stuck`, but the matching terminate timeouts
+(`--xla_gpu_executable_terminate_timeout`,
+`--xla_gpu_first_collective_call_terminate_timeout_seconds`) cover collective *execution*,
+not the clique-acquire rendezvous, and the rendezvous path has only `warn_stuck` variants.
+Setting them is accepted and changes nothing — measured: a deliberately over-budget dp2 run
+still hung for the full 1200 s.
+
+So the launcher has to do it. Wrap the trainer in `timeout --signal=KILL <secs>` to bound the
+waste — the timeout fires from inside the job's own cgroup, where signalling the process is
+permitted — and, better, have a watchdog kill the moment `ran out of memory trying to
+allocate` appears in the log. That line is written at the instant of failure, ten seconds
+before the stuck warning, so you reap in seconds with the cause already recorded, instead of
+inferring a stall from log silence much later.
+
 ## The error that hides its own cause
 
 Almost everything below first shows up as this, naming a different kernel each time:
@@ -109,8 +132,9 @@ running `dp > 1` on this extra hits it.
 ## What fits, and why the batch size barely matters
 
 Once it runs, memory decides the scale. The binding constraint is the executable's temp arena
-— XLA's single buffer for all of an executable's intermediates — sitting on top of the 16 GiB
-replicated frozen target. The surprise is how little the arena responds to batch size:
+— XLA's single buffer for all of an executable's intermediates — sitting on top of the
+resident frozen target, which is already FSDP-sharded to roughly 9 GiB per card (see the
+correction below). The surprise is how little the arena responds to batch size:
 
 | non-target batch | temp arena | fits the 41.4 GiB pool? |
 |---|---|---|
