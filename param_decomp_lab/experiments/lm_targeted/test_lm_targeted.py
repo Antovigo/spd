@@ -16,12 +16,16 @@ from param_decomp.configs import (
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
     SCScope,
+    SmoothL0ImportanceMinimalityLossConfig,
     StochasticReconSubsetLossConfig,
 )
 from param_decomp.run import TargetPromptGeometry
 from param_decomp.schedule import ScheduleConfig
 from param_decomp_lab.experiments.config import build_nontarget_loss_metrics
-from param_decomp_lab.experiments.lm_targeted.config import LMTargetedExperimentConfig
+from param_decomp_lab.experiments.lm_targeted.config import (
+    LMTargetedExperimentConfig,
+    _targeted_data,
+)
 from param_decomp_lab.experiments.lm_targeted.data import load_prompt_tokens
 
 _NEOX = "EleutherAI/gpt-neox-20b"
@@ -73,6 +77,27 @@ def test_nontarget_loss_set_drops_both_pgd_variants():
     assert PGDReconLossConfig.__name__ not in kinds  # fresh-PGD excluded from non-target (S35)
     assert StochasticReconSubsetLossConfig.__name__ in kinds  # full-model recon retained
     assert FaithfulnessLossConfig.__name__ in kinds
+
+
+def test_nontarget_loss_set_scales_smooth_l0_impmin_coeff():
+    target: list[AnyLossMetricConfig] = [
+        FaithfulnessLossConfig(coeff=0.0),
+        SmoothL0ImportanceMinimalityLossConfig(coeff=1e-5, gamma=1.0),
+        StochasticReconSubsetLossConfig(coeff=1.0),
+    ]
+    out = build_nontarget_loss_metrics(target, impmin_coeff_ratio=2.0)
+    (impmin,) = [m for m in out if isinstance(m, SmoothL0ImportanceMinimalityLossConfig)]
+    assert impmin.coeff == 2e-5  # S37 applies to both imp-min penalty shapes
+
+
+def test_targeted_data_global_batch_is_the_global_target_batch():
+    ref = Path(__file__).parent / "configs" / "numpy_pandas_4L_targeted.yaml"
+    raw = yaml.safe_load(ref.read_text())
+    raw["nontarget"]["batch_size"] = raw["pd"]["batch_size"] // 2
+    cfg = LMTargetedExperimentConfig(**raw)
+    # pd.batch_size is the GLOBAL target batch (plain-LM `_data` convention);
+    # nontarget.batch_size is PER-PROCESS (scaled by n_proc in `_nontarget_sample_batch`).
+    assert _targeted_data(cfg).global_batch == cfg.pd.batch_size
 
 
 def _persistent_pgd() -> PersistentPGDReconLossConfig:

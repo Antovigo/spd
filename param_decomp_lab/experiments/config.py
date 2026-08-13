@@ -25,13 +25,13 @@ from param_decomp.ci_fn import (
 )
 from param_decomp.configs import (
     AnyEvalMetricConfig,
+    AnyImportanceMinimalityLossConfig,
     AnyLossMetricConfig,
     Cadence,
     ChunkwiseTransformerCiConfig,
     CiConfig,
     FaithfulnessLossConfig,
     GlobalMlpCiConfig,
-    ImportanceMinimalityLossConfig,
     LayerwiseMlpCiConfig,
     OptimizerConfig,
     PDConfig,
@@ -86,7 +86,7 @@ def build_nontarget_loss_metrics(
     for cfg in loss_metrics:
         if isinstance(cfg, EXCLUDED_NONTARGET_LOSS_CONFIGS):
             continue
-        if isinstance(cfg, ImportanceMinimalityLossConfig) and cfg.coeff is not None:
+        if isinstance(cfg, AnyImportanceMinimalityLossConfig) and cfg.coeff is not None:
             out.append(cfg.model_copy(update={"coeff": cfg.coeff * impmin_coeff_ratio}))
         else:
             out.append(cfg.model_copy())

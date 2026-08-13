@@ -70,11 +70,13 @@ def _targeted_data(cfg: LMTargetedExperimentConfig) -> DataConfig:
     via the `sample_batch` seam, so it doesn't ride on `data` — persistent-PGD sources size
     off `TargetPromptGeometry.seq_len` instead of `data.seq_len` (SPEC S39). `global_batch`
     doubles as the TARGET batch (`make_prompt_sample_batch` reads it), which is what a `bsc`
-    persistent scope sizes against."""
+    persistent scope sizes against — so it is `pd.batch_size` (GLOBAL, the same convention as
+    the plain-LM `_data`), NOT `nontarget.batch_size` (per-process, scaled by `n_proc` in
+    `_nontarget_sample_batch`)."""
     return DataConfig(
         dir=nontarget_parquet_dir(cfg),
         seq_len=cfg.nontarget.data.max_seq_len,
-        global_batch=cfg.nontarget.batch_size,
+        global_batch=cfg.pd.batch_size,
     )
 
 
