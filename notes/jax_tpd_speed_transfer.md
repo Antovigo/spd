@@ -1,8 +1,13 @@
 # Making JAX tPD fast on 2× L40
 
-The tPD JAX run on `l40-worker` sat at ~10 s/step, putting a 20 000-step run at roughly 56
-hours — three requeue segments against the 24-hour QOS cap. It now runs at **~1.15 s/step**.
-This records why, because neither cause is visible on the hardware the code was designed for.
+The tPD JAX run on `l40-worker` was slow enough that a 20 000-step run meant multiple requeue
+segments against the 24-hour QOS cap. It now runs at **~1.15 s/step**. This records why,
+because neither cause is visible on the hardware the code was designed for.
+
+How slow it actually was is less certain than it looked: `l40_tpd_jax_blockers.md` records
+~10 s/step, but the A/B below measures ~40 s/step for that layout even with prefix reuse
+helping, which the old figure cannot be reconciled with (see "Which fix did what"). Treat the
+~10 as unverified.
 
 An earlier attempt at the same problem, in July, had already taken a comparable run from 250
 to 3.0 s/step, and that work was never committed — it lived as uncommitted modifications in
@@ -178,6 +183,35 @@ So the note above is wrong where it says the non-target batch cut to 24 is force
 forced by an arena sized for 32-block forwards. Raising it back toward the torch reference's
 96 is now the obvious next move, and `remat_recon_forwards: false` is the second — that flag
 trades against an activation peak far smaller than when it was set.
+
+## Which fix did what
+
+Prefix reuse is unconditional in the code, so an A/B on `runtime.fsdp` alone isolates the
+mesh knob. `addsub-L18-jax-ab-fsdp2` is the identical code and config with `fsdp` reverted to
+the derived shape, logging every step:
+
+| variant | frozen target | s/step | GB/rank |
+|---|---|---|---|
+| `fsdp` derived (=2) | sharded, gathered per layer | **40.3** (median, n=12) | 24.5 |
+| `fsdp: 1` | replicated | **1.15** | 32.9 |
+
+**The mesh knob alone is worth ~35× here, for +8.4 GB/rank.** The sharded figure is the
+median of steps 3–14 (mean 39.5, range 35.2–43.5); steps 1–2 read 95 and 99 s, which is the
+PPGD warmup (`n_warmup_steps: 2`), not settling.
+
+One honest caveat: the probe shared `l40-worker` with the 5000-step run, and this host routes
+all GPU↔GPU traffic over shared memory, so the sharded figure carries some cross-job
+contention and should be read as an upper bound on that layout's cost.
+
+**A discrepancy worth resolving before anyone trusts the old number.** `l40_tpd_jax_blockers.md`
+records ~10 s/step for the sharded layout at this config. That cannot be reconciled with this
+measurement: prefix reuse strictly *removes* work, so the pre-change branch — sharded AND
+without prefix reuse — must be no faster than ~38 s/step, not 10. The ~38 figure sits much
+closer to July's 250 s/step for the same layout (250 / 38 ≈ 6.5, of which prefix reuse
+explains ~2× and config differences the rest). The peaks disagree too: that note reports 30.9
+GiB for the sharded path where this probe measures 24.5. So the honest claim for the end-to-end
+speedup is **at least the ~8.7× implied by the recorded baseline, and the A/B suggests
+substantially more**; the recorded baseline itself should be re-measured rather than quoted.
 
 ## What this leaves open
 
