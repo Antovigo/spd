@@ -112,11 +112,15 @@ GPU traffic over shared memory, so read it as an upper bound.
 
 Memory came out better than expected. Replicating the frozen model costs ~7 GiB/card, which
 should have pushed the peak to ~38 of 41.4 GiB. It sits at **32.9 GB/rank against ~43.6 GiB**,
-because change 2 shrinks the executable's temp arena at the same time — every grid forward is
+because change 2 also shrinks the executable's **temp buffer** — the single contiguous block XLA
+sizes at compile time to hold every intermediate the program computes. Every grid forward is
 14 blocks instead of 32. About 10 GiB is spare.
 
+(The temp buffer shrinking is inferred from the peak coming in ~5 GiB under prediction, not
+read off directly — if you need the real figure for sizing, take it from an HLO dump.)
+
 That spare capacity is worth spending. The non-target batch is currently 24, cut down from the
-torch reference's 96 to fit an arena sized for 32-block forwards. Raising it back up is the
+torch reference's 96 to fit a temp buffer sized for 32-block forwards. Raising it back up is the
 obvious next move, and turning `remat_recon_forwards` off is the second — it now trades against
 a much smaller activation peak.
 

@@ -108,9 +108,10 @@ prompts:
   path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
 nontarget:
   batch_size: 24  # sets the logit-space peak: 24x64 positions x 128256 vocab in the fused
-  # two-pass backward. The binding constraint is the executable's temp arena, which is mostly
-  # batch-INDEPENDENT, so batch is a weak lever on memory. 24 was chosen against an arena
-  # sized for 32-block forwards; the prefix-reuse split makes every grid forward 14 blocks,
+  # two-pass backward. The binding constraint is the executable's temp buffer (XLA's single
+  # compile-time-sized block for every intermediate), which grows far slower than linearly in
+  # batch — 17.93GiB at 24, 22.27 at 32, 23.05 at 48 — so batch is a weak memory lever. 24 was
+  # chosen against a temp buffer sized for 32-block forwards; the prefix-reuse split makes every grid forward 14 blocks,
   # and the measured peak is now 32.9 of ~43.6GiB, so there is room to raise this back toward
   # the torch reference's 96. An OOM here does not raise — rank 0 dies mid-allocation while
   # rank 1 waits on the clique, so the job HANGS. Raise only against a fresh smoke.
