@@ -1,11 +1,22 @@
 # Speeding up targeted PD on 2× L40
 
-A 20 000-step tPD run on `l40-worker` took upwards of 60 hours. With the changes below it
-takes **about 7.5 hours** — comfortably inside one allocation, against a 24-hour QOS cap.
+A 20 000-step tPD run on `l40-worker` took upwards of 60 hours. Two changes fixed that, and
+the recovered headroom then went into a 5× larger non-target batch. The shipped config now
+runs 20 000 steps in **roughly 13 hours** at **five times** the broad-stream data it had
+before — comfortably inside one allocation against a 24-hour QOS cap.
 
-That is wall clock, extrapolated from a completed 5000-step run that took 1 h 53 m end to end
-including compile, evals and checkpoints, at the config's usual eval cadence. Pure step time
-is 1.147 s/step, or 6.4 h for 20 000 steps; the difference is what the eval tiers cost.
+Those are two separate results, and it is worth keeping them apart:
+
+- **The speed fixes**, at matched batch: **39.9 s/step → 1.147 s/step**. That is the honest
+  measure of the changes themselves, and 6.4 h of step time for 20 000 steps. A completed
+  5000-step run at that setting took 1 h 53 m end to end, so the eval tiers and compile add
+  roughly 20%.
+- **Spending the headroom**: the non-target batch went from 24 back up to 128 (below), which
+  costs about 2× step time — ~2.32 s/step, or ~13 h of step time for 20 000 steps. Eval
+  overhead at this batch has not been measured, so budget somewhat above that.
+
+If you want the run *fast* rather than *wide*, the batch is the knob: 24 gives 1.147 s/step,
+96 gives ~1.95, 128 gives ~2.32.
 
 Both changes address the same thing: the trainer's default layout assumes the GPUs share a
 fast fabric. On this host they do not. `nvidia-smi topo -p2p r` reports **CNS between every
@@ -108,8 +119,9 @@ Same code, same config, batch 128 target / 24 non-target, `dp: 2`. The only diff
 | sharded across both cards (`fsdp` unset) | 39.9 | ~220 h | 24.5 |
 | replicated (`fsdp: 1`) | **1.147** | **6.4 h** | 32.9 |
 
-(20k-step column is pure step time, so it is comparable between rows; add the eval tiers for
-wall clock — ~7.5 h for the replicated row at this config's cadence.)
+(Both rows are at non-target batch 24, so the comparison isolates the layout change. The
+20k-step column is pure step time; add ~20% for the eval tiers and compile. The shipped config
+now runs batch 128 at ~2.32 s/step — see below.)
 
 Medians over every post-warmup step: 39.9 from a 20-step probe (mean 39.7, range 35.2–44.1);
 1.147 from the completed 5000-step run (mean 1.149, range 1.13–1.17, n=49). The first two steps of any
@@ -134,10 +146,14 @@ measured rather than guessed:
 |---|---|---|---|---|---|---|
 | peak GB/rank | 32.9 | 33.3 | 33.6 | 34.9 | **36.9** | 42.7 |
 
-Everything up to 128 fits with room; 192 leaves under 1 GiB against the ~43.6 GiB pool, which
-is inside run-to-run variation and not worth the risk given an OOM hangs rather than fails.
-Note how little the peak tracks batch — 4 GiB across a 5× increase — which is the temp buffer
-being dominated by things other than the logit-space term.
+Everything up to 192 passed the probe, but 192 leaves under 1 GiB against the ~43.6 GiB pool,
+which is inside run-to-run variation and not worth it given an OOM hangs rather than fails —
+hence 128. Note how little the peak tracks batch — 4 GiB across a 5× increase — which is the
+temp buffer being dominated by things other than the logit-space term.
+
+Step time does track batch, roughly linearly above 48: 1.147 s at 24, ~1.95 at 96, ~2.32 at
+128. So this is a real trade of speed for broad-stream data, not a free win; 128 was chosen
+because ~13 h still fits one allocation comfortably.
 
 Probe those changes with **both eval tiers live**. `eval.batch_size` tracks the non-target
 batch, and the 20-step PGD probe ascends through its own backward at that size, so a batch that
