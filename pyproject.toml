@@ -67,7 +67,11 @@ cuda = [
     "nvidia-cufft-cu12==11.3.3.83",
     "nvidia-cusolver-cu12==11.7.3.90",
     "nvidia-cusparse-cu12==12.5.8.93",
-    "nvidia-nccl-cu12==2.25.1",
+    # OFF the 12.8.1 train deliberately: 2.25.1 (the train's NCCL) predates ncclAlltoAll,
+    # which this jaxlib emits when lowering a reshard, so any dp>1 targeted run dies with
+    # "NCCL operation ncclAlltoAll ... unhandled system error". Symbol absent in 2.25.1,
+    # present from 2.28.
+    "nvidia-nccl-cu12>=2.28",
     "nvidia-nvjitlink-cu12==12.8.93",
     "nvidia-nvshmem-cu12==3.2.5",
 ]

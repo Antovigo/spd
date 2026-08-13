@@ -113,13 +113,18 @@ def repeat_kv(x: Float[Array, "b kvh t hd"], n_rep: int) -> Float[Array, "b h t 
 
 
 def attn_implementation(backend: str, dtype: jnp.dtype, seq_len: int) -> Literal["cudnn", "xla"]:
-    """cuDNN flash attention on GPU for the half precisions it supports (its SDPA rejects
-    fp32, so fp32 parity harnesses take the XLA composite) and for the sequence-length
-    family we run through it — multiples of 64, the corpus shapes. Everything else takes
-    the XLA composite: cuDNN's flash kernel rejects small/odd lengths (`check_is_flash_
-    attention`), which the tPD target stream's natural prompt lengths hit (SPEC T8)."""
-    supported = backend == "gpu" and dtype in (jnp.float16, jnp.bfloat16)
-    return "cudnn" if supported and seq_len % 64 == 0 and seq_len > 0 else "xla"
+    """Always the XLA composite: cuDNN's graph API is unusable against a pre-CUDA-12.8
+    driver. XLA's `CuDnnThunk::Initialize` deserializes the graph and warms it up, whose
+    `run_auxiliary_kernels` fails in `cudaMemcpyAsync` with `cudaErrorInvalidValue`.
+    Nothing checks that return, so CUDA stays sticky and the error resurfaces at an
+    unrelated later `cuModuleGetFunction` — naming an innocent kernel.
+
+    Only lengths that are a multiple of 64 selected cuDNN, so the tPD target stream (SPEC
+    T8 prompt lengths) never hit it and the non-target stream at seq 64 always did.
+
+    Args are kept so restoring the capability check is a one-line edit."""
+    del backend, dtype, seq_len
+    return "xla"
 
 
 def causal_sdpa(q: Array, k: Array, v: Array) -> Array:

@@ -32,6 +32,7 @@ FAST_METRICS = {
     "CI_L0Config",
     "PGDReconLossConfig",
     "StochasticAttnPatternsReconLossConfig",
+    "TargetPoolScalarsConfig",
 }
 SLOW_METRICS = {
     "ArithmeticCIGridConfig",
@@ -42,7 +43,9 @@ SLOW_METRICS = {
     "IdentityCIErrorConfig",
     "PermutedCIPlotsConfig",
     "StochasticHiddenActsReconLossConfig",
+    "TwoStreamCIMeanPerComponentConfig",
     "UVPlotsConfig",
+    "WeightMagnitudeConfig",
     "WellTemperednessConfig",
 }
 
