@@ -1,7 +1,11 @@
 # Speeding up targeted PD on 2× L40
 
 A 20 000-step tPD run on `l40-worker` took upwards of 60 hours. With the changes below it
-takes **6.4 hours** — 1.147 s/step, measured over a 5000-step run.
+takes **about 7.5 hours** — comfortably inside one allocation, against a 24-hour QOS cap.
+
+That is wall clock, extrapolated from a completed 5000-step run that took 1 h 53 m end to end
+including compile, evals and checkpoints, at the config's usual eval cadence. Pure step time
+is 1.147 s/step, or 6.4 h for 20 000 steps; the difference is what the eval tiers cost.
 
 Both changes address the same thing: the trainer's default layout assumes the GPUs share a
 fast fabric. On this host they do not. `nvidia-smi topo -p2p r` reports **CNS between every
@@ -104,8 +108,11 @@ Same code, same config, batch 128 target / 24 non-target, `dp: 2`. The only diff
 | sharded across both cards (`fsdp` unset) | 39.9 | ~220 h | 24.5 |
 | replicated (`fsdp: 1`) | **1.147** | **6.4 h** | 32.9 |
 
+(20k-step column is pure step time, so it is comparable between rows; add the eval tiers for
+wall clock — ~7.5 h for the replicated row at this config's cadence.)
+
 Medians over every post-warmup step: 39.9 from a 20-step probe (mean 39.7, range 35.2–44.1);
-1.147 from the 5000-step run (mean 1.149, range 1.13–1.17, n=46). The first two steps of any
+1.147 from the completed 5000-step run (mean 1.149, range 1.13–1.17, n=49). The first two steps of any
 run read much higher because `n_warmup_steps: 2` gives the PPGD adversary extra work — that is
 not the model settling. The 39.9 probe shared the node with the other run, and this host routes
 GPU traffic over shared memory, so read it as an upper bound.
@@ -124,8 +131,9 @@ torch reference's 96 to fit a temp buffer sized for 32-block forwards. Raising i
 obvious next move, and turning `remat_recon_forwards` off is the second — it now trades against
 a much smaller activation peak.
 
-The full training loop is unaffected: eval, the slow-eval figure tier, and checkpointing
-(587 MB, both items) all work unchanged, and losses track the configured schedules.
+The full training loop is unaffected: the run completed all 5000 steps clean, with eval, the
+slow-eval figure tier and both checkpoints (586 MB each, both items) working unchanged, and
+losses tracking the configured schedules.
 
 ## One thing to settle before merging
 
