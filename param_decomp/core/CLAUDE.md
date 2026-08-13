@@ -268,6 +268,13 @@ Llama-8B target is multi-GB. Therefore:
 - **S3**: the recon target is the FROZEN-path `clean_forward(...).output`, never the
   `mask=1` decomposed identity (bf16 rounding + V/U in the stopped graph). An empty
   capture-key set selects the target's compact no-capture path.
+- **S3/S18 prefix reuse** (`model.ResidualStart`, PENDING OLI): a target reporting
+  `split_layer > 0` runs the frozen blocks below its first decomposed site ONCE per stream
+  per step (`prep_stream` substitutes the result for the batch) instead of once per forward.
+  Numerically identical, not merely close — `targets/tests/test_prefix_reuse.py` pins
+  bit-equality of output and every capture against the token path. The one restriction: a
+  `ResidualStart` has consumed the prefix, so captures BELOW `split_layer` need token inputs
+  (the target serves them by running the prefix through the capture machinery).
 - **S13/S15**: source updates go through the persistent Adam AND project to [0,1]
   after EVERY ascent — an unprojected drift past 1 has zero `clip` gradient and the
   entry dies.

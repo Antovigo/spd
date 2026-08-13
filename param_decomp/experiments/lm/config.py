@@ -702,7 +702,7 @@ def _assert_placement_claims(resolved: _ResolvedDecomposition, runtime: RuntimeC
     concrete mesh is the same construction; nothing decides later or deeper."""
     placement.from_config(
         runtime.sharding,
-        hsdp_abstract_mesh(runtime.dp, runtime.tp, runtime.gpus_per_node),
+        hsdp_abstract_mesh(runtime.dp, runtime.tp, runtime.gpus_per_node, runtime.fsdp),
         resolved.site_specs,
     )
 

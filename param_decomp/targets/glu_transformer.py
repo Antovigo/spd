@@ -61,6 +61,7 @@ from param_decomp.core.model import (
     ForwardResult,
     Masking,
     MaterializedMasking,
+    ResidualStart,
     StochasticMasking,
 )
 from param_decomp.core.sharding import assert_divisible
@@ -490,6 +491,9 @@ class _ScanCaptureLayout:
 
     slot_by_block_per_tap: tuple[tuple[_GLUTap, tuple[int, ...]], ...]
     sources: tuple[_GLUCaptureSource, ...]
+    layers: range
+    """The scanned block range these slot tables are indexed against — global block
+    `b` sits at table position `b - layers.start`."""
 
 
 def _capture_source_for_point(point: TransformerPoint) -> _GLUCaptureSource:
@@ -530,17 +534,24 @@ def _capture_source_for_point(point: TransformerPoint) -> _GLUCaptureSource:
             return _GLUCaptureSource(block=block, tap=value)
 
 
-def _scan_capture_layout(sources: GLUCaptureSources, n_layer: int) -> _ScanCaptureLayout:
+def _scan_capture_layout(sources: GLUCaptureSources, layers: range) -> _ScanCaptureLayout:
+    """Slot tables indexed by the SCANNED position, not the global block: `layers` is the
+    block range the scan actually runs, so a prefix-reusing forward's tables cover only its
+    suffix. Sources outside `layers` are served pre-scan by the caller (the start residual)
+    and must not reach here."""
     tap_slots: list[tuple[_GLUTap, tuple[int, ...]]] = []
     for tap in _GLUTap:
         blocks = tuple(source.block for source in sources if source.tap is tap)
         if not blocks or tap is _GLUTap.RESIDUAL_IN:
             continue
-        slot_by_block = [_UNUSED_CAPTURE_SLOT] * n_layer
+        slot_by_block = [_UNUSED_CAPTURE_SLOT] * len(layers)
         for slot, block in enumerate(blocks):
-            slot_by_block[block] = slot
+            assert block in layers, f"capture at block {block} outside the scanned {layers}"
+            slot_by_block[block - layers.start] = slot
         tap_slots.append((tap, tuple(slot_by_block)))
-    return _ScanCaptureLayout(slot_by_block_per_tap=tuple(tap_slots), sources=sources)
+    return _ScanCaptureLayout(
+        slot_by_block_per_tap=tuple(tap_slots), sources=sources, layers=layers
+    )
 
 
 def _captured_activation(block_activations: _GLUBlockActivations, tap: _GLUTap) -> Array:
@@ -629,13 +640,14 @@ def _read_capture_buffers(
 ) -> None:
     """Index scan-buffer values by capture source after the layer scan.
 
-    The embedding residual is recorded directly by the caller before the scan.
+    The start residual (the embedding, or a reused prefix) is recorded directly by the
+    caller before the scan; only sources the scan itself produced arrive here.
     """
     slot_by_block_per_tap = dict(layout.slot_by_block_per_tap)
     for source in layout.sources:
         if source.tap is not _GLUTap.RESIDUAL_IN:
             captured_by_source[source] = buffers[source.tap.value][
-                slot_by_block_per_tap[source.tap][source.block]
+                slot_by_block_per_tap[source.tap][source.block - layout.layers.start]
             ]
 
 
@@ -661,7 +673,7 @@ def _per_kind_dims(components: ComponentStacks) -> dict[str, tuple[int, int, int
     return kind_dims
 
 
-def _stack_per_kind_vu(components: ComponentStacks, n_layers: int) -> dict[str, dict[str, Array]]:
+def _stack_per_kind_vu(components: ComponentStacks, layers: range) -> dict[str, dict[str, Array]]:
     """Per decomposed KIND, the layer-stacked `(V, U)` arrays — the MASK-INDEPENDENT part of
     the scan inputs (a leading layer axis, one homogeneous body across layers). Mask/live/
     delta/route are attached per-forward by `_attach_per_kind_masks`; the V/U stack +
@@ -673,7 +685,7 @@ def _stack_per_kind_vu(components: ComponentStacks, n_layers: int) -> dict[str, 
     vu_dt = next(iter(components.stacks.values()))[0].dtype
     per_kind: dict[str, dict[str, Array]] = {}
     for kind, (d_in, C, d_out) in kind_dims.items():
-        names = [site_name(layer, kind) for layer in range(n_layers)]
+        names = [site_name(layer, kind) for layer in layers]
         present = [slot_of[n] for n in names if n in slot_of]
         shapes = {shape for shape, _ in present}
         slots = [slot for _, slot in present]
@@ -714,7 +726,7 @@ def _stack_per_kind_vu(components: ComponentStacks, n_layers: int) -> dict[str, 
 
 def _attach_per_kind_masks(
     prepared_weights: dict[str, dict[str, Array]],
-    n_layers: int,
+    layers: range,
     leading: tuple[int, ...],
     component_masks: dict[str, Array],
     weight_delta_masks: dict[str, Array] | None,
@@ -739,7 +751,7 @@ def _attach_per_kind_masks(
     for kind, vu_entry in prepared_weights.items():
         C = vu_entry["V"].shape[-1]
         mask_dt = a_mask.dtype if a_mask is not None else vu_entry["V"].dtype
-        names = [site_name(layer, kind) for layer in range(n_layers)]
+        names = [site_name(layer, kind) for layer in layers]
         live_flags = jnp.array([name in live_sites for name in names])
         masks_k = jnp.stack(
             [
@@ -769,7 +781,7 @@ def _attach_per_kind_masks(
     return per_kind
 
 
-def _stack_ci_per_kind(ci_lower: dict[str, Array], n_layers: int) -> dict[str, Array]:
+def _stack_ci_per_kind(ci_lower: dict[str, Array], layers: range) -> dict[str, Array]:
     """Stack the per-site CI envelope into per-kind `[n_layer, *leading, C]` — built ONCE per
     step and SHARED across every stochastic recon forward (the CI envelope is identical for
     all). Mirrors `_stack_per_kind_vu`: the shared stack replaces N per-forward mask stacks."""
@@ -778,7 +790,7 @@ def _stack_ci_per_kind(ci_lower: dict[str, Array], n_layers: int) -> dict[str, A
     for name, v in ci_lower.items():
         sample_by_kind.setdefault(parse_site_name(name)[1], v)
     for kind, sample in sample_by_kind.items():
-        names = [site_name(layer, kind) for layer in range(n_layers)]
+        names = [site_name(layer, kind) for layer in layers]
         kinds[kind] = jnp.stack(
             [ci_lower[name] if name in ci_lower else jnp.zeros_like(sample) for name in names]
         )
@@ -787,7 +799,7 @@ def _stack_ci_per_kind(ci_lower: dict[str, Array], n_layers: int) -> dict[str, A
 
 def _attach_per_kind_stochastic(
     prepared_weights: dict[str, dict[str, Array]],
-    n_layers: int,
+    layers: range,
     leading: tuple[int, ...],
     ci_stacked: dict[str, Array],
     draw_key: Array,
@@ -804,19 +816,16 @@ def _attach_per_kind_stochastic(
     a_route = next(iter(routes.values())) if (routes and len(routes)) else None
     per_kind: dict[str, dict[str, Array]] = {}
     for kind, vu_entry in prepared_weights.items():
-        names = [site_name(layer, kind) for layer in range(n_layers)]
+        names = [site_name(layer, kind) for layer in layers]
         live_flags = jnp.array([name in live_sites for name in names])
         kind_idx = KIND_ORDER.index(kind)
         src_keys = jnp.stack(
-            [
-                jax.random.fold_in(jax.random.fold_in(src_base, kind_idx), layer)
-                for layer in range(n_layers)
-            ]
+            [jax.random.fold_in(jax.random.fold_in(src_base, kind_idx), layer) for layer in layers]
         )
         delta_keys = jnp.stack(
             [
                 jax.random.fold_in(jax.random.fold_in(delta_base, kind_idx), layer)
-                for layer in range(n_layers)
+                for layer in layers
             ]
         )
         entry: dict[str, Array] = {
@@ -909,8 +918,15 @@ class GLUDecomposedModel(eqx.Module):
     `sites` / `has_position_axis` are static config."""
 
     embed: Float[Array, "vocab d"]
-    stacked: GLULayer  # the per-layer weights stacked on a leading layer axis (the scan
-    # `xs`), stored pre-stacked: a saved jit input, never re-stacked inside a forward.
+    stacked: GLULayer  # blocks `[split_layer, n_layer)` stacked on a leading layer axis (the
+    # scan `xs`) — the SUFFIX from the first decomposed block on, and the whole model when
+    # `split_layer == 0`. Stored pre-stacked: a saved jit input, never re-stacked inside a
+    # forward. Kept a SEPARATE FIELD from `stacked_prefix` rather than sliced per forward:
+    # an in-graph slice of a multi-GB stack materializes copies and breaks command-buffer
+    # capture (measured ~8x slower).
+    stacked_prefix: GLULayer | None
+    """Blocks `[0, split_layer)` — the frozen, mask-independent lead every forward would
+    otherwise re-run. `None` when `split_layer == 0`."""
     n_layer: int = eqx.field(static=True)
     norm: Float[Array, " d"]
     lm_head: Float[Array, "vocab d"]
@@ -918,16 +934,139 @@ class GLUDecomposedModel(eqx.Module):
     sites: tuple[SiteSpec, ...] = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
     eps: float = eqx.field(static=True)
+    split_layer: int = eqx.field(static=True, default=0)
+    """First decomposed block (min over `sites`). Masking is inert below it, so the scanned
+    forward covers `[split_layer, n_layer)` and the lead is reusable across forwards
+    (`prefix_residual` + `ResidualStart`). 0 means no prefix."""
 
     @property
     def site_names(self) -> tuple[str, ...]:
         return tuple(s.name for s in self.sites)
 
     @property
+    def scan_layers(self) -> range:
+        """The block range the forwards scan — `stacked`'s coordinates, in GLOBAL block
+        numbering. Every layer-indexed lookup into `stacked` goes through this."""
+        return range(self.split_layer, self.n_layer)
+
+    @property
     def layers(self) -> list[GLULayer]:
-        """Per-layer view of `stacked` (slices the leading layer axis). For non-hot
-        consumers (equivalence harness); the forwards use `stacked`."""
-        return [jax.tree.map(lambda a, idx=i: a[idx], self.stacked) for i in range(self.n_layer)]
+        """Per-layer view over the FULL block range (prefix then suffix, global order). For
+        non-hot consumers (equivalence harness); the forwards use the stacked fields."""
+        views: list[GLULayer] = []
+        for stack in (self.stacked_prefix, self.stacked):
+            if stack is None:
+                continue
+            count = jax.tree_util.tree_leaves(stack)[0].shape[0]
+            views += [jax.tree.map(lambda a, idx=i: a[idx], stack) for i in range(count)]
+        assert len(views) == self.n_layer, (len(views), self.n_layer)
+        return views
+
+    def _captured_clean_scan(
+        self,
+        residual: Array,
+        stack: GLULayer,
+        layers: range,
+        sources: GLUCaptureSources,
+    ) -> tuple[Array, dict[_GLUCaptureSource, Array]]:
+        """Scan `stack` over `layers` on the all-frozen path, accumulating `sources`.
+
+        The scan body is a local closure, NOT a bound method: `lax.scan` hashes its body, and
+        a bound method's hash reaches `self` — a traced, unhashable module."""
+        layout = _scan_capture_layout(sources, layers)
+        buffers = _allocate_capture_buffers(layout, residual, self._value_width)
+        slot_indices_by_tap = _slot_index_arrays(layout)
+
+        def block(
+            state: tuple[Array, dict[str, Array]],
+            layer_and_slots: tuple[GLULayer, dict[str, Array]],
+        ) -> tuple[tuple[Array, dict[str, Array]], None]:
+            x, buffers_ = state
+            layer, slots = layer_and_slots
+            block_activations = self._block_activations(x, layer)
+            return (
+                block_activations.residual_out,
+                _write_block_captures(layout, buffers_, slots, block_activations),
+            ), None
+
+        (residual, buffers), _ = jax.lax.scan(
+            block, (residual, buffers), (stack, slot_indices_by_tap)
+        )
+        captured: dict[_GLUCaptureSource, Array] = {}
+        _read_capture_buffers(captured, layout, buffers)
+        return residual, captured
+
+    def _start(
+        self,
+        inputs: "Int[Array, 'b t'] | ResidualStart",
+        sources: GLUCaptureSources = (),
+    ) -> tuple[Array, dict[_GLUCaptureSource, Array], GLUCaptureSources]:
+        """The activation entering block `split_layer` (the scan's carry init), whatever of
+        `sources` the prefix answers, and the sources still owed by the caller's own scan.
+
+        A `ResidualStart` IS the start activation; token ids are embedded and run through the
+        clean prefix. Two spellings name the start itself — block `split_layer`'s input, and
+        (with a prefix) block `split_layer - 1`'s output, which is what `ResidualBoundary(k)`
+        lowers to — and both are answered here, exactly as the embedding always was.
+
+        Sources strictly BELOW the start are answered by running the prefix through the
+        capture machinery, so a prefix-split model captures everything an unsplit one did.
+        That path exists for capability, not speed: no training capture point lives below the
+        first decomposed block (masking cannot reach it), so the production forward takes the
+        plain uncaptured prefix scan, or skips it entirely given a `ResidualStart`."""
+        boundary = {_GLUCaptureSource(block=self.split_layer, tap=_GLUTap.RESIDUAL_IN)}
+        if self.split_layer > 0:
+            boundary.add(_GLUCaptureSource(block=self.split_layer - 1, tap=_GLUTap.RESIDUAL_OUT))
+        scanned = tuple(source for source in sources if source not in boundary)
+        below = tuple(source for source in scanned if source.block < self.split_layer)
+        served: dict[_GLUCaptureSource, Array] = {}
+
+        if isinstance(inputs, ResidualStart):
+            assert self.split_layer > 0, "ResidualStart passed to a model with no prefix"
+            assert not below, (
+                f"capture requested below block {self.split_layer} from a ResidualStart: "
+                f"{sorted(source.block for source in below)}. The prefix was consumed into "
+                f"the start activation, so its internals are gone — pass token inputs to "
+                f"capture there."
+            )
+            residual = inputs.resid
+        else:
+            residual = self.embed_tokens(inputs)
+            embedding = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
+            # RESIDUAL_IN never reaches a scan buffer (`_scan_capture_layout` skips it), so
+            # the embedding is always served here.
+            prefix_sources = tuple(source for source in below if source != embedding)
+            if embedding in below:
+                served[embedding] = residual
+            if self.stacked_prefix is not None:
+                if prefix_sources:
+                    residual, prefix_captured = self._captured_clean_scan(
+                        residual, self.stacked_prefix, range(self.split_layer), prefix_sources
+                    )
+                    served |= prefix_captured
+                else:
+
+                    def plain(residual_: Array, layer: GLULayer) -> tuple[Array, None]:
+                        return _clean_block(layer, residual_, self.inv_freq, self.eps), None
+
+                    residual, _ = jax.lax.scan(plain, residual, self.stacked_prefix)
+            else:
+                assert not prefix_sources, prefix_sources
+
+        served |= {source: residual for source in sources if source in boundary}
+        return (
+            residual,
+            served,
+            tuple(source for source in scanned if source.block >= self.split_layer),
+        )
+
+    def prefix_residual(self, inputs: Int[Array, "b t"]) -> Array:
+        """Stop-gradient activation entering block `split_layer`: embed + the frozen lead,
+        run ONCE per batch and shared by every forward in the step. The lead is
+        mask-independent and no gradient can reach it (every site is at or past
+        `split_layer`), so re-running it inside each forward is pure waste."""
+        assert self.split_layer > 0, "no frozen prefix to reuse (a site lives in block 0)"
+        return jax.lax.stop_gradient(self._start(inputs)[0])
 
     def attention_pattern_from_qk(
         self,
@@ -940,22 +1079,33 @@ class GLUDecomposedModel(eqx.Module):
         `AttnPatternModel` protocol). Delegates to that LAYER's own attention module, so
         family behavior (Qwen3's per-layer QK-norm) comes along for free."""
         layer = parse_site_name(q_site)[0]
-        attn = jax.tree.map(lambda a, idx=layer: a[idx], self.stacked.attn)
+        attn = jax.tree.map(lambda a, idx=layer - self.split_layer: a[idx], self.stacked.attn)
         return attn.pattern(q_flat, k_flat, self.inv_freq)
 
     def shardings(self, mesh: Mesh) -> "GLUDecomposedModel":
         """FSDP-on-`fsdp` the per-layer weights (`stacked.shardings` — `d` on `fsdp`,
         head/intermediate replicated; the ~14 GB layer bulk shards `/fsdp`, gathered per layer
-        inside the scan, on NVLink). embed / lm_head / norm / inv_freq REPLICATE — the ~2 GB
+        inside the scan). That gather is cheap only on a fast intra-node fabric — it is the
+        step's dominant cost on a host with no peer-to-peer, where `runtime.fsdp: 1`
+        degenerates the axis and this sharding replicates instead. embed / lm_head / norm /
+        inv_freq REPLICATE — the ~2 GB
         embed+head is small and vocab-parallel logits/lookup aren't worth the complexity. (The
         old all-replicate justification — "the target is small vs activations" — is stale: at
         the full 32-layer model the replicated target + its backward/remat copies dominate the
         step's peak, which is what this shards away.)"""
         repl = NamedSharding(mesh, P())
         return eqx.tree_at(
-            lambda m: (m.embed, m.norm, m.lm_head, m.inv_freq, m.stacked),
+            lambda m: (m.embed, m.norm, m.lm_head, m.inv_freq, m.stacked, m.stacked_prefix),
             self,
-            (repl, repl, repl, repl, self.stacked.shardings(mesh)),
+            (
+                repl,
+                repl,
+                repl,
+                repl,
+                self.stacked.shardings(mesh),
+                None if self.stacked_prefix is None else self.stacked_prefix.shardings(mesh),
+            ),
+            is_leaf=lambda x: x is None,
         )
 
     @staticmethod
@@ -1064,19 +1214,20 @@ class GLUDecomposedModel(eqx.Module):
             case _GLUTap.DOWN_INPUT:
                 return self.stacked.Wd.shape[2]
 
-    def _clean_output(self, inputs: Int[Array, "b t"]) -> Array:
+    def _clean_output(self, inputs: "Int[Array, 'b t'] | ResidualStart") -> Array:
         """Untouched graph used when no captures are requested."""
 
         def block(residual: Array, layer: GLULayer) -> tuple[Array, None]:
             return _clean_block(layer, residual, self.inv_freq, self.eps), None
 
-        residual = self.embed_tokens(inputs)
-        residual, _ = jax.lax.scan(block, residual, self.stacked)
+        residual, _ = jax.lax.scan(block, self._start(inputs)[0], self.stacked)
         residual = rms_norm(residual, self.norm, self.eps)
         return residual @ self.lm_head.T
 
     def clean_forward(
-        self, inputs: Int[Array, "b t"], capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS
+        self,
+        inputs: "Int[Array, 'b t'] | ResidualStart",
+        capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
     ) -> ForwardResult:
         if not capture_keys:
             return ForwardResult.from_producer(
@@ -1087,13 +1238,9 @@ class GLUDecomposedModel(eqx.Module):
             ordered_capture_keys, _capture_source_for_point
         )
 
-        residual = self.embed_tokens(inputs)
-        captured_by_source: dict[_GLUCaptureSource, Array] = {}
-        embedding_residual_source = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
-        if embedding_residual_source in capture_sources:
-            captured_by_source[embedding_residual_source] = residual
+        residual, captured_by_source, scan_sources = self._start(inputs, capture_sources)
 
-        layout = _scan_capture_layout(capture_sources, self.n_layer)
+        layout = _scan_capture_layout(scan_sources, self.scan_layers)
         buffers = _allocate_capture_buffers(layout, residual, self._value_width)
         slot_indices_by_tap = _slot_index_arrays(layout)
 
@@ -1123,7 +1270,7 @@ class GLUDecomposedModel(eqx.Module):
     def _run_masked_forward(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         masking: Masking,
         remat: bool,
         capture_keys: tuple[str, ...],
@@ -1140,7 +1287,7 @@ class GLUDecomposedModel(eqx.Module):
             if capture_keys
             else ()
         )
-        residual = self.embed_tokens(inputs)
+        residual, start_captures, scan_sources = self._start(inputs, capture_sources)
         leading = residual.shape[:-1]
         match masking:
             case StochasticMasking(
@@ -1153,7 +1300,7 @@ class GLUDecomposedModel(eqx.Module):
                 uses_weight_deltas = True
                 per_kind = _attach_per_kind_stochastic(
                     prepared_weights,
-                    self.n_layer,
+                    self.scan_layers,
                     leading,
                     ci_stacked,
                     draw_key,
@@ -1170,7 +1317,7 @@ class GLUDecomposedModel(eqx.Module):
                 uses_weight_deltas = weight_delta_masks is not None
                 per_kind = _attach_per_kind_masks(
                     prepared_weights,
-                    self.n_layer,
+                    self.scan_layers,
                     leading,
                     component_masks,
                     weight_delta_masks,
@@ -1187,14 +1334,14 @@ class GLUDecomposedModel(eqx.Module):
             )
             return flags.pop()
 
-        live_layers = [layer for layer in range(self.n_layer) if layer_is_live(layer)]
+        live_layers = [layer for layer in self.scan_layers if layer_is_live(layer)]
         if live_layers:
             first_live, last_live = live_layers[0], live_layers[-1] + 1
             assert live_layers == list(range(first_live, last_live)), (
                 f"live layers must be contiguous, got {live_layers}"
             )
         else:
-            first_live = last_live = 0
+            first_live = last_live = self.split_layer
 
         def decomposed_site_output(
             site_input: Array,
@@ -1318,21 +1465,22 @@ class GLUDecomposedModel(eqx.Module):
         def run_scan(body: Any, carry: Any, xs: Any) -> tuple[Any, Any]:
             return jax.lax.scan(jax.checkpoint(body, policy=policy), carry, xs)
 
+        # Every stack below — `self.stacked`, the per-kind entries, the capture slot tables —
+        # is indexed from `split_layer`, while the segment bounds are global block numbers.
+        start = self.split_layer
+
         def slice_layers(lo: int, hi: int) -> GLULayer:
-            return jax.tree.map(lambda a: a[lo:hi], self.stacked)
+            return jax.tree.map(lambda a: a[lo - start : hi - start], self.stacked)
 
-        captured_by_source: dict[_GLUCaptureSource, Array] = {}
-        initial = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
-        if initial in capture_sources:
-            captured_by_source[initial] = residual
+        captured_by_source: dict[_GLUCaptureSource, Array] = dict(start_captures)
 
-        layout = _scan_capture_layout(capture_sources, self.n_layer) if capture_sources else None
+        layout = _scan_capture_layout(scan_sources, self.scan_layers) if scan_sources else None
         buffers = (
             {} if layout is None else _allocate_capture_buffers(layout, residual, self._value_width)
         )
         slot_indices_by_tap = {} if layout is None else _slot_index_arrays(layout)
         component_activation_segments: list[dict[str, Array]] = []
-        bounds = sorted({0, first_live, last_live, self.n_layer})
+        bounds = sorted({start, first_live, last_live, self.n_layer})
 
         for lo, hi in zip(bounds, bounds[1:], strict=False):
             if lo == hi:
@@ -1340,7 +1488,7 @@ class GLUDecomposedModel(eqx.Module):
             segment_live = first_live <= lo and hi <= last_live and first_live < last_live
             if segment_live:
                 per_kind_segment_inputs = {
-                    kind: {key: value[lo:hi] for key, value in entry.items()}
+                    kind: {key: value[lo - start : hi - start] for key, value in entry.items()}
                     for kind, entry in per_kind.items()
                 }
                 xs: Any = (slice_layers(lo, hi), per_kind_segment_inputs)
@@ -1348,7 +1496,10 @@ class GLUDecomposedModel(eqx.Module):
                 xs = slice_layers(lo, hi)
 
             if layout is not None:
-                segment_slots = {key: value[lo:hi] for key, value in slot_indices_by_tap.items()}
+                segment_slots = {
+                    key: value[lo - start : hi - start]
+                    for key, value in slot_indices_by_tap.items()
+                }
                 xs = (*xs, segment_slots) if segment_live else (xs, segment_slots)
 
                 def captured_block(
@@ -1430,12 +1581,12 @@ class GLUDecomposedModel(eqx.Module):
         return forward_result, component_activations
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> dict[str, dict[str, Array]]:
-        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.n_layer))
+        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.scan_layers))
 
     def component_activation_forward(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         /,
         *,
         capture_keys: CaptureKeys,
@@ -1464,7 +1615,7 @@ class GLUDecomposedModel(eqx.Module):
         for site, key, (layer, kind) in zip(
             self.site_names, component_input_keys, site_locations, strict=True
         ):
-            V = prepared_weights[kind]["V"][layer]
+            V = prepared_weights[kind]["V"][layer - self.split_layer]
             component_activations[site] = full_forward_result.captures[key].astype(V.dtype) @ V
         requested_forward_result = ForwardResult(
             output=full_forward_result.output,
@@ -1473,12 +1624,12 @@ class GLUDecomposedModel(eqx.Module):
         return requested_forward_result, component_activations
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
-        return _stack_ci_per_kind(ci_lower, self.n_layer)
+        return _stack_ci_per_kind(ci_lower, self.scan_layers)
 
     def masked_forward(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         /,
         *,
         masking: Masking,
@@ -1498,7 +1649,7 @@ class GLUDecomposedModel(eqx.Module):
     def masked_component_activations(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         masking: MaterializedMasking,
     ) -> dict[str, Array]:
         _forward_result, activations = self._run_masked_forward(
@@ -1517,7 +1668,10 @@ class GLUDecomposedModel(eqx.Module):
         for spec in self.sites:
             layer, kind = parse_site_name(spec.name)
             frozen_weight = _frozen_site_weight(
-                jax.tree.map(lambda array, layer_index=layer: array[layer_index], self.stacked),
+                jax.tree.map(
+                    lambda array, layer_index=layer - self.split_layer: array[layer_index],
+                    self.stacked,
+                ),
                 kind,
             )
             site_components = vu.site(spec.name)
@@ -1600,10 +1754,15 @@ def build_decomposed_lm(
     assert sites == glu_site_specs(cfg, canonical_site_cs(site_cs)), (
         f"sites are not the canonical specs for this config: {sites}"
     )
+    # No sites (the parity harnesses build the frozen model alone) means nothing to reuse a
+    # prefix for, so the whole model stays the scanned range.
+    split_layer = min((parse_site_name(s.name)[0] for s in sites), default=0)
     return GLUDecomposedModel(
         embed=embed,
-        stacked=_stack_layers(layers),
+        stacked=_stack_layers(layers[split_layer:]),
+        stacked_prefix=_stack_layers(layers[:split_layer]) if split_layer > 0 else None,
         n_layer=len(layers),
+        split_layer=split_layer,
         norm=norm,
         lm_head=lm_head,
         inv_freq=inv_freq,

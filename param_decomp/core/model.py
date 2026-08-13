@@ -63,6 +63,39 @@ PositionAxis = Positionless | Positioned
 shapes are built. Must agree with the model's `has_position_axis`."""
 
 
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class ResidualStart:
+    """A precomputed frozen-prefix activation standing in for a target's usual `inputs`.
+
+    A target whose decomposed sites all live past some frozen lead computes that lead once
+    per batch and passes the result here; forwards receiving one resume from it instead of
+    re-running the lead. The lead is mask-independent and identical across every forward in
+    a step, so re-running it per forward is pure waste — at an L18-only decomposition of a
+    32-block model that is 18 of every forward's 32 blocks, plus their remat replays.
+
+    Only valid for a model reporting `split_layer > 0`, and only carrying a residual
+    produced by that same model's `prefix_residual`."""
+
+    resid: Float[Array, "*leading d"]
+
+
+@runtime_checkable
+class SupportsPrefixResidual(Protocol):
+    """Optional target capability: a frozen lead worth computing once per step.
+
+    Detect it by DUCK TYPE (`getattr(model, "split_layer", 0) > 0`), never `isinstance`
+    against this runtime Protocol — a runtime-checkable Protocol check walks an
+    array-bearing `eqx.Module`'s internals and trips over them."""
+
+    split_layer: int
+
+    def prefix_residual(self, inputs: Any, /) -> Float[Array, "*leading d"]:
+        """The stop-gradient activation entering block `split_layer`. Wrap in
+        `ResidualStart` to feed it back into this model's forwards."""
+        ...
+
+
 SiteMasks = dict[str, Float[Array, "*leading C"]]
 """Per-site component masks. `*leading` always has the WAIST's RANK, but ANY leading axis
 may arrive size 1: an adversarial mask is materialized from a source stored per

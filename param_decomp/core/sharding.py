@@ -61,29 +61,48 @@ def assert_inline_topology(dp: int) -> None:
     )
 
 
-def _hsdp_shape(n_devices: int, tp: int, gpus_per_node: int) -> tuple[int, int, int]:
+def _hsdp_shape(
+    n_devices: int, tp: int, gpus_per_node: int, fsdp: int | None = None
+) -> tuple[int, int, int]:
     """`(replicate, fsdp, tp)` for a world of `n_devices` — the ONE shape rule both the
     concrete and abstract mesh constructors share. A multiple-of-`gpus_per_node` world
     splits into in-node blocks; a smaller world (an inline sub-node run, or CPU sim at a
     non-multiple count) IS one in-node block (so the divisibility asserts still bite on
-    the real shard dims)."""
+    the real shard dims).
+
+    An explicit `fsdp` pins the parameter-sharding plane to `fsdp * tp` devices instead of
+    deriving it from `gpus_per_node`, moving the rest of the world onto `replicate`."""
     assert n_devices % tp == 0, f"device count {n_devices} not divisible by tp={tp}"
-    in_node = gpus_per_node if n_devices % gpus_per_node == 0 else n_devices
+    in_node = (
+        (gpus_per_node if n_devices % gpus_per_node == 0 else n_devices)
+        if fsdp is None
+        else fsdp * tp
+    )
     assert in_node % tp == 0, f"in-node block {in_node} not divisible by tp={tp}"
+    assert n_devices % in_node == 0, (
+        f"device count {n_devices} not divisible by the {in_node}-device (fsdp × tp) plane"
+    )
     return (n_devices // in_node, in_node // tp, tp)
 
 
-def hsdp_mesh(tp: int = 1, gpus_per_node: int = 8) -> Mesh:
+def hsdp_mesh(tp: int = 1, gpus_per_node: int = 8, fsdp: int | None = None) -> Mesh:
     """The 3-D HSDP+TP device mesh `(replicate, fsdp, tp)`. Both `fsdp` and `tp` are
     intra-node NVLink axes carved from a node's GPUs (`fsdp * tp = GPUS_PER_NODE`); `tp` is
     the FAST-VARYING / minor axis so a tp group is adjacent GPUs, and a node's contiguous
     block in `jax.devices()` becomes one `(fsdp, tp)` plane. `replicate` (= n_devices //
     GPUS_PER_NODE) is the across-node axis. `tp = 1` is a degenerate `(replicate, fsdp, 1)`
     mesh — identical to the old 2-D mesh for any `("replicate","fsdp")`-only sharding, so
-    behaviour-preserving."""
+    behaviour-preserving.
+
+    `fsdp` overrides the derived plane width (`runtime.fsdp`). `fsdp=1` degenerates the
+    parameter-sharding axis, so every `P(..., "fsdp", ...)` spec — the frozen target's layer
+    stack above all — replicates instead of gathering per layer, and the world lands entirely
+    on `replicate`. That trades HBM for collectives, which is the right trade only where the
+    fabric between those devices is slow (`RuntimeConfig.fsdp` carries the reasoning);
+    `None` keeps the derived shape, so no existing run changes."""
     devices = np.array(jax.devices())
-    replicate, fsdp, tp = _hsdp_shape(devices.size, tp, gpus_per_node)
-    return Mesh(devices.reshape(replicate, fsdp, tp), axis_names=("replicate", "fsdp", "tp"))
+    replicate, fsdp_size, tp = _hsdp_shape(devices.size, tp, gpus_per_node, fsdp)
+    return Mesh(devices.reshape(replicate, fsdp_size, tp), axis_names=("replicate", "fsdp", "tp"))
 
 
 def single_device_mesh() -> Mesh:
@@ -98,12 +117,14 @@ def single_device_mesh() -> Mesh:
     return hsdp_mesh()
 
 
-def hsdp_abstract_mesh(dp: int, tp: int, gpus_per_node: int) -> AbstractMesh:
+def hsdp_abstract_mesh(
+    dp: int, tp: int, gpus_per_node: int, fsdp: int | None = None
+) -> AbstractMesh:
     """The mesh SHAPE a run config implies, with no devices — exactly the `hsdp_mesh` a
     run realizing `dp` devices builds, since `dp` declares the device count under BOTH
     launch modes. What config-build placement validation (`placement.from_config`) runs
     against, so a config refuses at submit validation, before any allocation."""
-    return AbstractMesh(_hsdp_shape(dp, tp, gpus_per_node), ("replicate", "fsdp", "tp"))
+    return AbstractMesh(_hsdp_shape(dp, tp, gpus_per_node, fsdp), ("replicate", "fsdp", "tp"))
 
 
 def place_via_shardings[T](tree: T, shardings: T) -> T:

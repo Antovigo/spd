@@ -109,6 +109,23 @@ class RuntimeConfig(BaseConfig):
             "fully determines the topology. Default 8 (H100/H200/B200 nodes)."
         ),
     )
+    fsdp: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "Width of the parameter-sharding plane, in devices. `None` (default) derives it "
+            "from `gpus_per_node` — the layout every NVLink node wants, and the only "
+            "behaviour any existing run has seen. Set it to pin the plane narrower and put "
+            "the remaining devices on `replicate` instead. `fsdp: 1` degenerates the axis "
+            "entirely, so every `P(..., 'fsdp', ...)` spec replicates — most consequentially "
+            "the frozen target's layer stack, which otherwise gathers one layer's shard per "
+            "block per forward. That gather is nearly free on NVLink and dominates the step "
+            "without it: `l40-worker` reports CNS (no peer-to-peer) between every GPU pair, "
+            "so NCCL routes it over shared memory, and replicating there measured ~4.5x. "
+            "Costs the full frozen target resident per device, so it is a capacity decision "
+            "as much as a speed one. Same math under either value — layouts differ only by "
+            "float reassociation (SPEC D4)."
+        ),
+    )
     tp: int = Field(
         default=1,
         ge=1,
@@ -215,5 +232,11 @@ class RuntimeConfig(BaseConfig):
                 f"a multi-node world allocates whole {self.gpus_per_node}-GPU nodes — "
                 f"dp={self.dp} must be a multiple of gpus_per_node={self.gpus_per_node} "
                 f"(a sub-node world runs as one process inside an existing allocation)"
+            )
+        if self.fsdp is not None:
+            plane = self.fsdp * self.tp
+            assert self.dp % plane == 0, (
+                f"dp={self.dp} must be a multiple of the pinned fsdp × tp plane "
+                f"({self.fsdp} × {self.tp} = {plane})"
             )
         return self

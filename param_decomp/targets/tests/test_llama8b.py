@@ -197,7 +197,7 @@ def test_frozen_component_activations_match_captured_inputs_times_v():
     site_inputs = _capture_site_inputs(model, tokens, model.site_names)
     for site in model.site_names:
         layer, kind = parse_site_name(site)
-        expected = site_inputs[site] @ prepared_weights[kind]["V"][layer]
+        expected = site_inputs[site] @ prepared_weights[kind]["V"][layer - model.split_layer]
         assert jnp.array_equal(actual[site], expected), site
 
 

@@ -177,8 +177,18 @@ runtime:
   dp: 2
   gpus_per_node: 2
   tp: 1  # L40s are PCIe, not NVLink — tensor parallel would pay a fabric cost for nothing
+  fsdp: 1  # degenerate the parameter-sharding axis: both cards go on `replicate` and the
+  # frozen target stops being gathered a layer at a time inside every scan. `nvidia-smi topo
+  # -p2p r` reports CNS between every GPU pair here, so that gather runs over shared memory,
+  # not NVLink, and it dominates the step. Costs the full ~16GiB target resident per card
+  # instead of ~9 (2.1 embed+head replicated either way, 14 of blocks). Subsumes
+  # `ascend_replicate`, whose whole job is hoisting the same gather off the ascents.
   sharding: zero1
-  remat_recon_forwards: true
+  remat_recon_forwards: true  # next lever: prefix reuse makes every grid forward 14 blocks
+  # instead of 32, so the activation peak this trades against is much lower than when it was
+  # set. Worth an A/B once the memory picture is remeasured.
   remat_ci_fn: true
+  launch_env:
+    xla_python_client_mem_fraction: 0.97  # headroom for the replicated target
 wandb:
   project: param-decomp-llama

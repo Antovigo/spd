@@ -181,13 +181,23 @@ def test_no_capture_wrapper_lowers_to_the_compact_clean_graph():
     _cfg, model = _model()
     tokens = jnp.ones((1, 4), jnp.int32)
 
+    # Two separately-defined bodies, not one reused closure: the model runs the prefix from
+    # `_start` and the suffix from `_clean_output`, and sharing one function here emits a
+    # different symbol set for an otherwise identical graph.
     def compact_clean(m: GLUDecomposedModel, x: Array) -> Array:
+        def prefix_block(residual: Array, layer: GLULayer) -> tuple[Array, None]:
+            residual = residual + layer.attn(rms_norm(residual, layer.ln1, m.eps), m.inv_freq)
+            residual = residual + _clean_mlp_out(layer, rms_norm(residual, layer.ln2, m.eps))
+            return residual, None
+
         def block(residual: Array, layer: GLULayer) -> tuple[Array, None]:
             residual = residual + layer.attn(rms_norm(residual, layer.ln1, m.eps), m.inv_freq)
             residual = residual + _clean_mlp_out(layer, rms_norm(residual, layer.ln2, m.eps))
             return residual, None
 
         residual = m.embed_tokens(x)
+        if m.stacked_prefix is not None:
+            residual, _ = jax.lax.scan(prefix_block, residual, m.stacked_prefix)
         residual, _ = jax.lax.scan(block, residual, m.stacked)
         residual = rms_norm(residual, m.norm, m.eps)
         return residual @ m.lm_head.T

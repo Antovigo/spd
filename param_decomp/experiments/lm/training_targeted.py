@@ -208,7 +208,7 @@ def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
     else:
         assert_inline_topology(runtime.dp)
     configure_hf_http_retries()
-    mesh = hsdp_mesh(runtime.tp, runtime.gpus_per_node)
+    mesh = hsdp_mesh(runtime.tp, runtime.gpus_per_node, runtime.fsdp)
 
     cache_dir = enable_persistent_compilation_cache(built.run.out_dir)
 

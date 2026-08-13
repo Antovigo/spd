@@ -25,7 +25,7 @@ mirrored body.
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import equinox as eqx
 import jax
@@ -66,7 +66,9 @@ from param_decomp.core.model import (
     DecomposedModel,
     Masking,
     MaterializedMasking,
+    ResidualStart,
     StochasticMasking,
+    SupportsPrefixResidual,
     prepare_compute_weights,
     select_captures,
 )
@@ -403,8 +405,20 @@ class _StepAtoms[PreparedT]:
     ) -> StreamInputs:
         """Shard one stream's batch, run its detached clean forward, and pull the CI taps +
         recon observations. `hidden_acts_keys` is the stream's own union — a stream whose
-        grid carries no hidden-acts reconstruction captures none."""
+        grid carries no hidden-acts reconstruction captures none.
+
+        A target with a frozen lead (`split_layer > 0`) has that lead run ONCE here and the
+        result substituted for the batch, so every downstream forward in this stream's step —
+        clean, taps, each recon-grid draw, each adversary ascent — resumes from it instead of
+        recomputing it. The substitution is the whole optimization: `StreamInputs.batch` is
+        the single value every one of those forwards receives."""
         batch = self.shard_batch_tree(batch)
+        if getattr(model, "split_layer", 0) > 0:
+            # Duck-typed, not `isinstance` against the runtime Protocol — that check walks an
+            # array-bearing eqx.Module's internals and trips over them.
+            prefix_model = cast(SupportsPrefixResidual, cast(object, model))
+            with jax.named_scope("pd_prefix_fwd"):
+                batch = ResidualStart(self.shard_batch_tree(prefix_model.prefix_residual(batch)))
         with jax.named_scope("pd_clean_fwd_and_taps"):
             clean_forward_result = jax.tree.map(
                 jax.lax.stop_gradient,
