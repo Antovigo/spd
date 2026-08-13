@@ -126,12 +126,21 @@ Watch `xla_python_client_mem_fraction`, which defaults to 0.92. Dropping it to 0
 at roughly 34 of 45 GB and turns a config that fits into one that hangs.
 
 Two consequences worth weighing. The torch reference ran non-target 96 on this same hardware,
-so 24 is a fourfold cut to the broad stream — a real fidelity loss, not a free win. The lever
-nobody has pulled is the frozen target itself: it's replicated at 16 GiB per card and sits
-outside the placement policy, which every log announces as `NOT AUDITED (legacy
-mesh-vocabulary .shardings): ci_fn, frozen target, …`. Sharding it would buy back the most
-room by far. Separately, at ~10 s/step a 20 000-step run is about 56 hours against a 24-hour
-QOS cap, so plan on roughly three requeue segments.
+so 24 is a fourfold cut to the broad stream — a real fidelity loss, not a free win. And at
+~10 s/step a 20 000-step run is about 56 hours against a 24-hour QOS cap, so plan on roughly
+three requeue segments.
+
+**Correction (2026-08-13).** An earlier revision of this section claimed the frozen target was
+replicated at 16 GiB per card and proposed sharding it as the untouched lever. That is
+backwards on both counts. `build_target` already runs the target through
+`place_target(model, mesh)`, and `GLUDecomposedModel.shardings` FSDPs the ~14 GiB layer bulk
+on the `fsdp` axis; at `dp: 2, gpus_per_node: 2, tp: 1` the mesh is `(replicate 1, fsdp 2,
+tp 1)`, so the target is *already* split across the two cards at roughly 9 GiB each (7 GiB of
+sharded blocks plus the 2.1 GiB replicated embed and head). The memory arithmetic corroborates
+it: peak 30.9 GiB minus a 17.93 GiB arena leaves ~13 GiB of resident state, which cannot
+contain a 16 GiB target. Sharding is not available to be pulled, and pulling it further is the
+wrong direction anyway — see `jax_tpd_speed_transfer.md`, where that same sharding turns out to
+be the dominant cost on a host with no P2P.
 
 ## A multi-GPU OOM hangs instead of raising
 
