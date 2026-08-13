@@ -17,9 +17,22 @@ others reach it — so when one worker dies, typically on an out-of-memory, the 
 for a partner that will never arrive, with no timeout. The job then looks alive while doing
 nothing: no output, no CPU, and still holding every byte of its GPU memory. Worse, `scancel`
 does not reliably reap it; you have to find the PID and `srun … kill -9` it by hand, and until
-you do that memory is unavailable to everyone else on the node. Wrapping the trainer in
-`timeout --signal=KILL <secs>` inside the sbatch avoids the whole problem, because the timeout
-fires from inside the job's own cgroup, where signalling the process is permitted.
+you do that memory is unavailable to everyone else on the node.
+
+XLA will not rescue you here. It notices within ten seconds and logs `... Acquire clique ...
+and may be stuck`, but the matching terminate timeouts
+(`--xla_gpu_executable_terminate_timeout`,
+`--xla_gpu_first_collective_call_terminate_timeout_seconds`) cover collective *execution*,
+not the clique-acquire rendezvous, and the rendezvous path has only `warn_stuck` variants.
+Setting them is accepted and changes nothing — measured: a deliberately over-budget dp2 run
+still hung for the full 1200 s.
+
+So the launcher has to do it. Wrap the trainer in `timeout --signal=KILL <secs>` to bound the
+waste — the timeout fires from inside the job's own cgroup, where signalling the process is
+permitted — and, better, have a watchdog kill the moment `ran out of memory trying to
+allocate` appears in the log. That line is written at the instant of failure, ten seconds
+before the stuck warning, so you reap in seconds with the cause already recorded, instead of
+inferring a stall from log silence much later.
 
 ## The error that hides its own cause
 
