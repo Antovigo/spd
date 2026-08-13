@@ -11,6 +11,13 @@ userspace is what causes the first bug, and it is worth keeping in mind througho
 
 Fixes live in `a7b2636ce` (code and dependency) and `381ea3c71` (run-config sizing).
 
+One practical warning before the rest: when these runs fail they don't exit. A rank wedged in
+a collective survives `scancel` — SLURM's signals never reach it — so it sits on the node
+holding its GPU memory until you find the PID and `srun … kill -9` it by hand, and until you
+do, that memory is gone for everyone. Wrapping the trainer in `timeout --signal=KILL <secs>`
+inside the sbatch solves it, because the timeout fires from within the job's own cgroup,
+where signalling the process is permitted.
+
 ## The error that hides its own cause
 
 Almost everything below first shows up as this, naming a different kernel each time:
