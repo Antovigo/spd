@@ -116,8 +116,9 @@ running `dp > 1` on this extra hits it.
 ## What fits, and why the batch size barely matters
 
 Once it runs, memory decides the scale. The binding constraint is the executable's temp arena
-— XLA's single buffer for all of an executable's intermediates — sitting on top of the 16 GiB
-replicated frozen target. The surprise is how little the arena responds to batch size:
+— XLA's single buffer for all of an executable's intermediates — sitting on top of the
+resident frozen target, which is already FSDP-sharded to roughly 9 GiB per card (see the
+correction below). The surprise is how little the arena responds to batch size:
 
 | non-target batch | temp arena | fits the 41.4 GiB pool? |
 |---|---|---|
