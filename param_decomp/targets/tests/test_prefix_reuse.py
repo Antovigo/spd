@@ -137,6 +137,35 @@ def test_capture_below_the_prefix_is_refused_from_a_residual_start():
         model.clean_forward(start, frozenset(("resid.1",)))
 
 
+def test_live_chunk_above_the_split_offsets_every_segment():
+    """The three-segment masked forward when the live chunk starts ABOVE `split_layer`.
+
+    Chunkwise recon makes each draw live over a subset of the sites, so `first_live` can sit
+    strictly inside the suffix — and then the segment bounds (global block numbers) and the
+    stacks they slice (indexed from `split_layer`) disagree by exactly the split. A
+    single-decomposed-block config never exercises that, because there `first_live` is the
+    split; a multi-layer chunkwise one does on every draw."""
+    cfg, model = _model((3, 4, 5))
+    assert model.split_layer == 3
+    tokens = _tokens(cfg)
+    components = init_component_stacks(model.sites, jax.random.PRNGKey(4))
+    prepared = model.prepare_compute_weights(components)
+    live = tuple(site_name(5, kind) for kind in KINDS)  # frozen 0-4, live 5, frozen 6-7
+    masking = MaterializedMasking(component_masks={site: jnp.ones((2, 8, 4)) for site in live})
+    keys = frozenset((f"resid.{cfg.n_layer}", *(site_output_tap_key(site) for site in live)))
+    start = ResidualStart(model.prefix_residual(tokens))
+
+    from_tokens = model.masked_forward(
+        prepared, tokens, masking=masking, capture_keys=keys, remat=True
+    )
+    from_start = model.masked_forward(
+        prepared, start, masking=masking, capture_keys=keys, remat=True
+    )
+    assert jnp.array_equal(from_start.output, from_tokens.output)
+    for key in keys:
+        assert jnp.array_equal(from_start.captures[key], from_tokens.captures[key]), key
+
+
 def test_weight_deltas_index_the_suffix_stack():
     _cfg, model = _model((3, 4))
     components = init_component_stacks(model.sites, jax.random.PRNGKey(3))
