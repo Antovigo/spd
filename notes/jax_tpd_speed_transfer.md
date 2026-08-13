@@ -1,233 +1,132 @@
 # Making JAX tPD fast on 2× L40
 
-The tPD JAX run on `l40-worker` was slow enough that a 20 000-step run meant multiple requeue
-segments against the 24-hour QOS cap. It now runs at **~1.15 s/step**. This records why,
-because neither cause is visible on the hardware the code was designed for.
+The targeted (tPD) JAX trainer was painfully slow on `l40-worker` — slow enough that a
+20 000-step run meant babysitting several requeue segments against the 24-hour QOS cap. Two
+changes took it to **1.15 s/step**, and a 20 000-step run now fits in about six and a half
+hours, inside a single allocation.
 
-How slow it actually was is less certain than it looked: `l40_tpd_jax_blockers.md` records
-~10 s/step, but the A/B below measures ~40 s/step for that layout even with prefix reuse
-helping, which the old figure cannot be reconciled with (see "Which fix did what"). Treat the
-~10 as unverified.
+Both problems come from the same blind spot: the trainer's layout was designed for an NVLink
+node, and neither cause is visible there. An earlier attempt at this in July had found both
+and measured the same kind of win, but that work was never committed. It is now preserved at
+`ac7d1ce0c` on `experiment/8B_targeted_jax`, and the fixes below were rebuilt from it against
+the current tree.
 
-An earlier attempt at the same problem, in July, had already taken a comparable run from 250
-to 3.0 s/step, and that work was never committed — it lived as uncommitted modifications in
-the `8B_targeted_jax` worktree, on a branch whose tip predated it by two weeks. It is now
-preserved at `ac7d1ce0c` on `experiment/8B_targeted_jax`; the findings below were
-reconstructed from it before anything else happened.
+## Problem 1: the frozen model was split across two cards that cannot talk to each other
 
-The July recipe had five parts. Three already held on `experiment/tpd_jax_tests`, either
-because they were ported properly or because the tree evolved into them. Two had not
-transferred, and they were the two that produced almost all of the speedup.
+`build_target` runs the loaded 8B through `place_target`, and `GLUDecomposedModel.shardings`
+splits the ~14 GiB of stacked layer weights across the `fsdp` mesh axis. Every block of the
+frozen model then has to be re-gathered from the other card on every pass through the scan —
+in every forward, of every step.
 
-## What already transferred
+That is a fine trade on a machine where the cards share NVLink. This one is not that machine.
+`nvidia-smi topo -p2p r` reports CNS between every GPU pair — no peer-to-peer at all — and
+`libibverbs` fails to load, so NCCL routes every one of those gathers over shared memory. The
+docstring for that sharding actually asserted the gather happens "on NVLink", which is simply
+false here, and the cost is enormous: **~40 s/step of the step time was those gathers.**
 
-The **latency-hiding scheduler** is on: `RuntimeConfig.compiler_options` ships
-`xla_gpu_enable_latency_hiding_scheduler: True` as a tuned default, so no config has to ask.
+## Problem 2: every forward re-ran the frozen first half of the model
 
-**CUDA graphs are on**, though by accident rather than intent. The same default map carries
-`xla_gpu_enable_command_buffer: ""`, documented in the schema as a correctness guard that
-disables graph capture. It does not: the empty string does not survive serialisation into
-native compiler options, XLA falls back to its own default, and graphs get captured anyway.
-July found that leaving graphs on was worth a large part of the 55 → 5–10 s/step step, so the
-inert flag is currently doing the right thing for the wrong reason. It should be asserted or
-deleted rather than left as a default that lies.
+The addsub config decomposes layer 18 of a 32-block model. Blocks 0–17 are frozen, no gradient
+can reach them, and no mask touches them — so they compute exactly the same thing in every
+forward of a step. But each forward embedded the tokens and ran all 32 blocks anyway: the
+clean forward, the tap read, every recon-grid draw, every PPGD ascent. With
+`remat_recon_forwards: true`, the backward then replayed those 18 wasted blocks as well.
 
-The **poisoned autotune cache** is handled. `~/out/xla_compilation_cache.poisoned-2026-07-13`
-is quarantined and the live cache is clean, and no committed config sets
-`gpu_autotune_level: "0"`. One loose end: the YAML example in
-`param_decomp/experiments/CLAUDE.md` still shows `xla_flags: { gpu_enable_command_buffer: "",
-gpu_autotune_level: "0" }`. Given that a single autotune-0 compile poisons the shared
-per-fusion cache for every later full-autotune compile — silently, with flag changes becoming
-no-ops — that example is a live footgun and should go.
+## The fixes
 
-## What did not transfer
+**`runtime.fsdp`** is a new field controlling how wide the parameter-sharding plane is. It
+defaults to `None`, meaning "derive it from `gpus_per_node`" — exactly today's behaviour, so
+nothing on an NVLink node changes. Setting `fsdp: 1` collapses that axis, which makes every
+`P(..., "fsdp", ...)` spec replicate rather than shard, and moves the devices onto the
+`replicate` axis instead. Batch sharding is unaffected, so the run is still data-parallel
+across both cards.
 
-### The frozen target is FSDP-sharded across two cards that cannot talk to each other
+Putting this in the mesh rather than in the target is what keeps it simple: no target code
+knows about it, and the frozen model, the CI function and the V/U compute weights all stop
+gathering at once. (July used an environment variable for the same effect; a config field is
+the right shape here, since the library deliberately reads no ambient environment.)
 
-This is the same root cause July found behind 250 s/step, and it is back in full.
+**Prefix reuse** teaches the target that it has a frozen lead worth computing once. A model
+whose decomposed sites all sit past block *k* reports `split_layer = k`, keeps blocks `[0, k)`
+in a separate `stacked_prefix` field, and accepts a `ResidualStart` — the activation entering
+block *k* — in place of token inputs. The engine computes that once per stream per step in
+`prep_stream` and substitutes it for the batch, so every downstream forward resumes from it.
+At the L18 config that removes 18 of every forward's 32 blocks.
 
-`build_target` places the loaded 8B through `place_target(model, mesh)`, and
-`GLUDecomposedModel.shardings` shards the ~14 GiB stacked layer bulk on the `fsdp` mesh axis,
-gathering one layer at a time inside the `lax.scan`. With `dp: 2, gpus_per_node: 2, tp: 1`,
-`_hsdp_shape(2, 1, 2)` yields `(replicate 1, fsdp 2, tp 1)` — every block of the frozen target
-is split across the two L40s and re-gathered on every pass through the scan, in every forward
-of every step.
+This is numerically identical, not merely close: the output and every captured activation are
+bit-equal to the token path, which `targets/tests/test_prefix_reuse.py` pins directly. It also
+costs no capability — given token inputs the prefix still runs through the normal capture
+machinery, so activations below `split_layer` resolve exactly as before.
 
-The docstring justifies this with "gathered per layer inside the scan, on NVLink". There is no
-NVLink on this host. `nvidia-smi topo -p2p r` reports CNS between every GPU pair — no
-peer-to-peer at all — and `libibverbs` fails to load, so NCCL routes every one of those
-gathers over shared memory. The assumption is written into the code as a statement of fact and
-is false here. It is true on the H100 nodes the layout was designed for, which is why it went
-unnoticed.
+Two implementation details are worth remembering, because both were found the expensive way:
 
-July's fix was a `PD_SUBNODE_REPLICATE=1` env gate inside `hsdp_mesh` forcing `fsdp = 1` for
-sub-node worlds, measured at 250 → 55 s/step. On this tree an env gate is the wrong shape —
-the library reads no ambient environment, and `runtime.sharding` is already an authored
-placement policy — but note that `sharding: zero1` governs the *trainable* state only; the
-frozen target sits outside the placement table entirely, which is what the
-`NOT AUDITED (legacy mesh-vocabulary .shardings): ci_fn, frozen target, …` banner in every log
-is telling you. So this wants either a mesh-shape knob or a frozen-target row in the table.
-
-The cost is memory. Today the target occupies ~9.1 GiB per card (7.0 GiB of sharded blocks
-plus 2.1 GiB of replicated embed and head); full replication takes that to ~16.1 GiB, so
-+7.0 GiB against roughly 10.5 GiB of headroom at the current peak of 30.9 of 41.4 GiB. It
-fits, but not comfortably — July ran `xla_python_client_mem_fraction: 0.97` for exactly this
-reason, against the 0.92 default here.
-
-### Prefix reuse does not exist at all
-
-For an L18-only decomposition of a 32-block model, blocks 0–17 are frozen, mask-independent,
-and identical across every forward in the step. Nothing can flow back into them: all seven
-decomposed sites live at block 18. Yet every forward in the step — the clean forward, the tap
-read, each recon-grid forward, each PPGD ascent — currently embeds tokens and runs all 32
-blocks, and `remat_recon_forwards: true` then replays those 18 wasted blocks in the backward
-as well.
-
-July restored the torch-era residual-start as a pure performance optimisation: a `ResidualStart`
-wrapper carrying the stop-gradient residual entering block `split_layer`, computed once per
-stream per step and accepted by every forward in place of token inputs. The arithmetic is
-`F × 32` blocks becoming `18 + F × 14`, which at six to ten forwards per step is a 1.9–2.0×
-reduction — matching the measured 5.9 → 3.0 s/step exactly.
-
-Two implementation details from that work are worth more than the diff itself, because both
-were found the expensive way:
-
-- **The prefix and suffix stacks must be separate model fields** (`stacked_prefix` and
-  `stacked`, split at build time), never an in-graph `stacked[split:]` slice. The slice
-  materialises copies of a 16 GiB stack and breaks command-buffer capture; it regressed the
-  step from 3.0 to 25 s.
+- The prefix and suffix must be **separate model fields**, never an in-graph `stacked[split:]`
+  slice. Slicing a multi-GB stack per forward materialises copies and breaks command-buffer
+  capture — July measured that regression at roughly 8×.
 - **Never pass a bound method as a `lax.scan` body.** `lax.scan` hashes its body function, and
-  a bound method's hash reaches `self` — the traced, unhashable module — so it raises
-  `TypeError`. Use a local closure.
+  a bound method's hash reaches `self` — the traced, unhashable module. Use a local closure.
 
-Porting is a reimplementation rather than a patch application. `targets/glu_transformer.py` is
-the direct descendant of the old `targets/llama8b.py` and keeps the same skeleton — `stacked`,
-`_stack_per_kind_vu`, `_attach_per_kind_masks`, `_reconstruct_compute_weights` — but it has
-since grown the capture-key grammar (`_scan_capture_layout`), the per-kind CI envelope stack
-(`_stack_ci_per_kind`), and the unified `clean_forward` / `masked_forward` pair that replaced
-the old `clean_output` / `read_activations` / `masked_output` grid in the 2026-07-30 amendment.
-The July diff is still the best map of *which* layer-indexed lookups need a `- split_layer`
-offset: the `collect` dictionary, the capture `sink`, `weight_deltas`, and the tap loop in
-`read_activations`.
+## What it bought
 
-There is also a SPEC question to settle first. S3 and S18 were amended on 2026-06-24, with
-Oli's approval, specifically to *remove* residual-start in favour of a whole-model token-input
-engine. The reasoning lives in `REMOVE_RESIDUAL_START_DESIGN.md`, which SPEC still cites but
-which was deleted from the tree in `edb299119` — read it there. July's re-add is marked
-"pending Oli" and is a narrower claim than the thing that was removed — an optional target
-capability gated on `split_layer > 0`, semantically transparent, rather than a return to a
-separately harvested prefix. That distinction is what makes it arguable, and it should be
-argued before the code lands.
+Measured on the addsub L18 tPD config at its usual batch sizes (128 target / 24 non-target,
+`dp: 2`), so the comparison is clean:
 
-## Doing better than either branch
+| frozen model | s/step | GB/rank |
+|---|---|---|
+| sharded across both cards (`fsdp` derived) | **39.9** | 24.5 |
+| replicated (`fsdp: 1`) | **1.15** | 32.9 |
 
-The two fixes interact in a way neither branch exploited. Once the prefix is reused, its
-weights are needed for exactly one forward per stream per step — so keeping the prefix FSDP-ed
-costs one gather per step instead of one per forward, while the suffix, which every forward
-touches, is what actually wants replicating.
+Prefix reuse is unconditional in the code, so reverting only `runtime.fsdp` isolates the mesh
+knob: **it is worth ~35× on its own**, for +8.4 GB per card. Both figures are medians over
+every post-warmup step of their runs — 39.9 from a completed 20-step probe (mean 39.7, range
+35.2–44.1), and 1.15 from the 5000-step run (mean 1.151, range 1.13–1.17). The first two steps
+of any run read much higher because `n_warmup_steps: 2` gives the PPGD adversary extra work;
+that is not the model settling.
 
-That hybrid layout — prefix ÷fsdp, suffix replicated — puts roughly 12.1 GiB per card
-(2.1 replicated embed and head, 3.9 of sharded prefix, 6.1 of replicated suffix) against
-today's 9.1 and July's 16.1. It buys the full speedup for +3.0 GiB rather than +7.0, which
-matters directly: the non-target batch is currently cut to 24 against the torch reference's 96,
-and that headroom is the only way back toward it.
+Prefix reuse is what separates the 39.9 above from July's 250 s/step for the same sharded
+layout. It is the smaller of the two wins here, but it is the one that also shrinks the
+executable's temp arena, and that turned out to matter for memory.
 
-## What was built
+**Memory came out better than the arithmetic predicted.** Replicating the frozen model costs
+about 7 GiB per card, which should have pushed the peak to roughly 38 of 41.4 GiB. Instead the
+run sits at **32.9 GB/rank against ~43.6 GiB** at `mem_fraction: 0.97`, because prefix reuse
+shrinks the arena at the same time — every grid forward is now 14 blocks instead of 32. About
+10 GiB is spare.
 
-Both fixes are on `perf/jax-tpd-2xl40-speed`, and the shapes differ from July's in two ways
-that matter.
+That matters more than it sounds. The non-target batch was cut from the torch reference's 96
+down to 24 to fit, and the notes blamed the config. It was really an arena sized for 32-block
+forwards. Raising that batch back up is now the obvious next move, and turning
+`remat_recon_forwards` off is the second — it trades against an activation peak far smaller
+than when it was set.
 
-The frozen-target fix is **`runtime.fsdp`**, a mesh-shape knob, not July's
-`PD_SUBNODE_REPLICATE` environment gate — the library reads no ambient environment, and the
-mesh is where this decision actually lives. It defaults to `None` (the `gpus_per_node`-derived
-shape), so no NVLink run changes; `fsdp: 1` degenerates the parameter-sharding axis, which
-replicates every `P(..., "fsdp", ...)` spec and moves the world onto `replicate`, leaving
-batch sharding intact.
+The run itself is healthy end to end: eval, the slow-eval figure tier, and the step-2500
+checkpoint (587 MB, both items on disk) all work unchanged, and the losses track the
+configured schedules — including the expected bump when the PPGD adversary ramps in between
+steps 1000 and 1500.
 
-**Prefix reuse** is the July design — `split_layer`, `stacked_prefix`, `ResidualStart`, hoisted
-once per stream in `prep_stream` — reimplemented against the current `glu_transformer`, whose
-capture-key grammar and unified forwards did not exist in `llama8b`. Both of July's hard-won
-details carried over: separate stack FIELDS rather than an in-graph slice, and a local closure
-rather than a bound method as the `lax.scan` body.
+## A bug found on the way
 
-The port turned up a latent bug worth noting on its own: `component_activation_forward` indexed
-the per-kind V stack by GLOBAL layer, which is wrong for any decomposition not starting at
-block 0 — including the L18 seat.
+`component_activation_forward` indexed the per-kind V stack by *global* layer number. That is
+wrong for any decomposition that does not start at block 0 — including the L18 config it ships
+with. Fixed as part of this work, with a test covering the case where a live chunk starts above
+`split_layer`, which is what the multi-layer chunkwise configs hit on every draw.
 
-## Measured, 2026-08-13
+## What is still open
 
-Both fixes landed on `perf/jax-tpd-2xl40-speed` (`189c403c0`) and ran as
-`addsub-L18-jax-speed-01`, 5000 steps at the seat's own batch sizes so the comparison is
-clean — only the two perf knobs differ from the config that measured ~10 s/step.
+The SPEC amendment is **pending Oli**. S3 and S18 were amended on 2026-06-24 specifically to
+*remove* residual-start, and prefix reuse contradicts the letter of S18. It does not reinstate
+what was removed — nothing is harvested, nothing is stored, nothing crosses a step boundary,
+and the shared value is bit-identical to recomputing it — but that is a conversation to have
+before this merges, which is why the code sits on a branch.
 
-| step | elapsed | s/step | peak GB/rank |
-|---|---|---|---|
-| 100 | 2:54 | 1.736 (includes warmup) | 32.93 |
-| 200 | 4:49 | 1.139 | 32.93 |
-| 300 | 6:45 | 1.159 | 32.93 |
-| 400 | 8:41 | 1.159 | 32.93 |
-
-**~1.15 s/step steady state against ~10 s/step: about 8.7×.** That is well past the ~2×
-the block arithmetic predicted for prefix reuse and past July's best of 3.0 s/step, which
-says the per-layer gather over shared memory was costing more than the July numbers alone
-implied. A 20 000-step run drops from about 56 hours — three requeue segments against the
-24-hour QOS cap — to roughly six, inside a single allocation.
-
-Memory landed better than feared. Replicating the frozen target adds ~7 GiB/card, and the
-estimate was 37.9 of a 41.4 GiB pool; the run sits at **32.9 GB/rank** against ~43.6 GiB at
-`mem_fraction: 0.97`. Prefix reuse shrinks the temp arena at the same time it saves compute
-— every grid forward is 14 blocks instead of 32 — and the two effects nearly cancel the
-replication cost. About 10 GiB is spare.
-
-So the note above is wrong where it says the non-target batch cut to 24 is forced. It was
-forced by an arena sized for 32-block forwards. Raising it back toward the torch reference's
-96 is now the obvious next move, and `remat_recon_forwards: false` is the second — that flag
-trades against an activation peak far smaller than when it was set.
-
-## Which fix did what
-
-Prefix reuse is unconditional in the code, so an A/B on `runtime.fsdp` alone isolates the
-mesh knob. `addsub-L18-jax-ab-fsdp2` is the identical code and config with `fsdp` reverted to
-the derived shape, logging every step:
-
-| variant | frozen target | s/step | GB/rank |
-|---|---|---|---|
-| `fsdp` derived (=2) | sharded, gathered per layer | **39.9** (median, n=18) | 24.5 |
-| `fsdp: 1` | replicated | **1.15** | 32.9 |
-
-**The mesh knob alone is worth ~35× here, for +8.4 GB/rank.** The sharded figure is the median
-of every post-warmup step of a completed 20-step probe (mean 39.7, range 35.2–44.1); steps 1–2
-read 95 and 99 s, which is the PPGD warmup (`n_warmup_steps: 2`), not settling.
-
-One honest caveat: the probe shared `l40-worker` with the 5000-step run, and this host routes
-all GPU↔GPU traffic over shared memory, so the sharded figure carries some cross-job
-contention and should be read as an upper bound on that layout's cost.
-
-**A discrepancy worth resolving before anyone trusts the old number.** `l40_tpd_jax_blockers.md`
-records ~10 s/step for the sharded layout at this config. That cannot be reconciled with this
-measurement: prefix reuse strictly *removes* work, so the pre-change branch — sharded AND
-without prefix reuse — must be no faster than ~38 s/step, not 10. The ~38 figure sits much
-closer to July's 250 s/step for the same layout (250 / 38 ≈ 6.5, of which prefix reuse
-explains ~2× and config differences the rest). The peaks disagree too: that note reports 30.9
-GiB for the sharded path where this probe measures 24.5. So the honest claim for the end-to-end
-speedup is **at least the ~8.7× implied by the recorded baseline, and the A/B suggests
-substantially more**; the recorded baseline itself should be re-measured rather than quoted.
-
-## What this leaves open
-
-`ascend_replicate` was never measured: under `fsdp: 1` the compute weights are already
-replicated, so it is a no-op there and setting both is redundant. It stays the right first
+`ascend_replicate` was never measured. Under `fsdp: 1` the compute weights are already
+replicated, so it is a no-op there and setting both is redundant. It remains the right first
 lever on any run that keeps a real `fsdp` axis.
 
-The SPEC amendment is **pending Oli**. S3/S18 were amended on 2026-06-24 specifically to
-remove residual-start, and prefix reuse contradicts the letter of S18 even though it does
-not reinstate what was removed — nothing is harvested, stored, or crosses a step boundary,
-and the shared value is bit-identical to recomputing it. That conversation should happen
-before this merges to main.
-
-One capability note, since it is easy to misread the code: splitting the stack costs
-nothing. From token inputs the prefix still runs through the capture machinery, so points
-below `split_layer` resolve exactly as before (pinned against an unsplit model with
-identical weights). Only a `ResidualStart` cannot answer them, because it has already
-consumed the prefix — and no training capture point lives below the first decomposed block,
-since masking cannot reach one.
+One number in `l40_tpd_jax_blockers.md` does not survive this work: it records ~10 s/step for
+the sharded layout at this config. That cannot be right, because prefix reuse only removes work
+and the sharded path still measures ~40 s/step *with* prefix reuse helping. The peak memory in
+that note disagrees too (30.9 GiB where this probe measures 24.5). Treat the ~10 as unverified.
+One caveat in the other direction: the 39.9 s/step probe shared the node with the 5000-step
+run, and this host routes GPU traffic over shared memory, so it carries some cross-job
+contention and should be read as an upper bound.
