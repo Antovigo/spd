@@ -11,12 +11,15 @@ userspace is what causes the first bug, and it is worth keeping in mind througho
 
 Fixes live in `a7b2636ce` (code and dependency) and `381ea3c71` (run-config sizing).
 
-One practical warning before the rest: when these runs fail they don't exit. A rank wedged in
-a collective survives `scancel` — SLURM's signals never reach it — so it sits on the node
-holding its GPU memory until you find the PID and `srun … kill -9` it by hand, and until you
-do, that memory is gone for everyone. Wrapping the trainer in `timeout --signal=KILL <secs>`
-inside the sbatch solves it, because the timeout fires from within the job's own cgroup,
-where signalling the process is permitted.
+One practical warning before the rest: when these runs fail, they often don't exit. Multi-GPU
+steps are synchronised — each GPU's worker blocks inside a communication step until all the
+others reach it — so when one worker dies, typically on an out-of-memory, the survivors wait
+for a partner that will never arrive, with no timeout. The job then looks alive while doing
+nothing: no output, no CPU, and still holding every byte of its GPU memory. Worse, `scancel`
+does not reliably reap it; you have to find the PID and `srun … kill -9` it by hand, and until
+you do that memory is unavailable to everyone else on the node. Wrapping the trainer in
+`timeout --signal=KILL <secs>` inside the sbatch avoids the whole problem, because the timeout
+fires from inside the job's own cgroup, where signalling the process is permitted.
 
 ## The error that hides its own cause
 
