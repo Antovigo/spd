@@ -74,20 +74,21 @@ class ArithmeticGrid:
 
 
 ArithmeticGridStep = Callable[
-    [ComponentActivationModel, ComponentStacks, Any, Int[Array, "n_pad T"]],
+    [ComponentActivationModel, ComponentStacks, Any, Int[Array, "n_pad T"], Array],
     tuple[dict[str, Array], dict[str, Array], dict[str, Array]],
 ]
-"""`(model, components, ci_fn, tokens) -> ({site: CI}, {site: x@V}, {site: max CI})`. CI and
-`x@V` are `(n_pad, C)` at the answer position, batch-sharded ON DEVICE (never fully
-host-gathered — see `compute_arithmetic_selection`); max CI is `(C,)` replicated, the max
-over the REAL (`< n_valid_rows`) rows only. `model` (frozen-weight-bearing) is the jit ARG."""
+"""`(model, components, ci_fn, tokens, n_valid_rows) -> ({site: CI}, {site: x@V}, {site: max
+CI})`. CI and `x@V` are `(n_pad, C)` at the answer position, batch-sharded ON DEVICE (never
+fully host-gathered — see `compute_arithmetic_selection`); max CI is `(C,)` replicated, the
+max over the REAL (`< n_valid_rows`) rows only. `model` (frozen-weight-bearing) is the jit
+ARG. `n_valid_rows` is a TRACED scalar, not static, so every chunk of a chunked pass shares
+one compiled step even though the last chunk carries fewer real rows."""
 
 
 def make_arithmetic_grid_step[PreparedT](
     model_static: ComponentActivationModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     answer_position: int,
-    n_valid_rows: int,
 ) -> ArithmeticGridStep:
     """Build the jit'd step returning, at `answer_position` with the batch axis KEPT as the
     grid, BOTH per-component lower-leaky CI (from the CI fn) and the pre-mask activation `x@V`
@@ -105,6 +106,7 @@ def make_arithmetic_grid_step[PreparedT](
         components: ComponentStacks,
         ci_fn: Any,
         tokens: Int[Array, "n_pad T"],
+        n_valid_rows: Array,
     ) -> tuple[dict[str, Array], dict[str, Array], dict[str, Array]]:
         preactivations = ci_preactivations(
             ci_fn,
@@ -173,7 +175,7 @@ def compute_arithmetic_selection(
     model: ComponentActivationModel,
     components: ComponentStacks,
     ci_fn: Any,
-    tokens: Int[Array, "n_pad T"],
+    chunks: tuple[tuple[Int[Array, "n_pad T"], int], ...],
     n_prompts: int,
     thresholds: tuple[float, ...],
     top_k: int,
@@ -182,29 +184,59 @@ def compute_arithmetic_selection(
     `(n_prompts, C)` grids (they scale as n_prompts x C per site). Phase 1: the step's replicated
     per-component max CI comes to host (a `(C,)` vector per site) and drives the selection,
     identically on every rank. Phase 2: only the selected columns are host-gathered (the
-    index padded to `top_k` so the gather compiles once; `n_prompts` trims the sharding pad
-    rows off the END). Both the step and the column gather are COLLECTIVE — all ranks join."""
-    ci, xv, max_ci_replicated = step(model, components, ci_fn, tokens)
-    max_ci = {s: np.asarray(v) for s, v in max_ci_replicated.items()}
+    index padded to `top_k` so the gather compiles once; each chunk's real-row count trims its
+    sharding pad off the END). Both the step and the column gather are COLLECTIVE — all ranks
+    join, and every rank walks the same chunks in the same order.
+
+    `chunks` is `((tokens, n_valid_rows), ...)`: the grid split so ONE forward never carries
+    the whole operand sweep. The per-chunk CI / x@V grids stay on device between the phases
+    (a few tens of MB total, unlike the forward that produced them), so chunking costs no
+    extra forward. The max is a running max over chunks and the columns concatenate in chunk
+    order, so the SELECTION is chunk-count-invariant exactly; the gathered values match a
+    single-chunk pass up to float reassociation (SPEC D4 — a different batch shape
+    reassociates the `x@V` reduction, ~1 fp32 ULP)."""
+    per_chunk: list[tuple[dict[str, Array], dict[str, Array], int]] = []
+    max_ci: dict[str, np.ndarray] = {}
+    for chunk_tokens, chunk_valid_rows in chunks:
+        ci, xv, chunk_max_replicated = step(
+            model, components, ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
+        )
+        per_chunk.append((ci, xv, chunk_valid_rows))
+        for site, value in chunk_max_replicated.items():
+            chunk_max = np.asarray(value)
+            max_ci[site] = chunk_max if site not in max_ci else np.maximum(max_ci[site], chunk_max)
+
     active = select_active(max_ci, thresholds)
     shown = {s: active[min(thresholds)][s][:top_k] for s in max_ci}
 
     ci_columns: dict[str, np.ndarray] = {}
     xv_columns: dict[str, np.ndarray] = {}
-    to_gather: dict[str, tuple[Array, Array]] = {}
-    for site, idx in shown.items():
-        if idx.size == 0:
-            ci_columns[site] = np.zeros((n_prompts, 0), np.float32)
-            xv_columns[site] = np.zeros((n_prompts, 0), np.float32)
-            continue
-        padded_idx = jnp.asarray(np.pad(idx, (0, top_k - idx.size), mode="edge"))
-        to_gather[site] = (_take_columns(ci[site], padded_idx), _take_columns(xv[site], padded_idx))
-    if to_gather:
+    empty = {site for site, idx in shown.items() if idx.size == 0}
+    for site in empty:
+        ci_columns[site] = np.zeros((n_prompts, 0), np.float32)
+        xv_columns[site] = np.zeros((n_prompts, 0), np.float32)
+
+    ci_parts: dict[str, list[np.ndarray]] = {s: [] for s in shown if s not in empty}
+    xv_parts: dict[str, list[np.ndarray]] = {s: [] for s in shown if s not in empty}
+    for ci, xv, chunk_valid_rows in per_chunk:
+        to_gather: dict[str, tuple[Array, Array]] = {}
+        for site in ci_parts:
+            idx = shown[site]
+            padded_idx = jnp.asarray(np.pad(idx, (0, top_k - idx.size), mode="edge"))
+            to_gather[site] = (
+                _take_columns(ci[site], padded_idx),
+                _take_columns(xv[site], padded_idx),
+            )
+        if not to_gather:
+            break
         gathered = multihost_utils.process_allgather(to_gather, tiled=True)
         for site, (ci_cols, xv_cols) in gathered.items():
             k = shown[site].size
-            ci_columns[site] = np.asarray(ci_cols)[:n_prompts, :k]
-            xv_columns[site] = np.asarray(xv_cols)[:n_prompts, :k]
+            ci_parts[site].append(np.asarray(ci_cols)[:chunk_valid_rows, :k])
+            xv_parts[site].append(np.asarray(xv_cols)[:chunk_valid_rows, :k])
+    for site in ci_parts:
+        ci_columns[site] = np.concatenate(ci_parts[site], axis=0)[:n_prompts]
+        xv_columns[site] = np.concatenate(xv_parts[site], axis=0)[:n_prompts]
     return ArithmeticSelection(
         active=active, shown=shown, ci_columns=ci_columns, xv_columns=xv_columns
     )

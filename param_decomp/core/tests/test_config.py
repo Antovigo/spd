@@ -507,6 +507,7 @@ def test_arithmetic_ci_grid_metric_builds_to_arithmetic_eval_config():
     assert arithmetic.b_range == (1, 100)
     assert arithmetic.thresholds == [0.1]
     assert arithmetic.top_k == 24
+    assert arithmetic.probe_metrics is not None
     assert arithmetic.probe_metrics.ce_kl.rounding_threshold == 0.0
     assert arithmetic.probe_metrics.ci_l0.ci_alive_threshold == 0.0
     assert arithmetic.probe_metrics.fresh_pgd is not None

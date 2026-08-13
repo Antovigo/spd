@@ -56,12 +56,11 @@ def _tiny_setup():
 
 @cache
 def _grid_step():
-    """One trace shared by every test: the step is a pure function of the (cached) model,
-    the answer position, and the row count, all of which are fixed for this file."""
+    """One trace shared by every test: the step is a pure function of the (cached) model and
+    the answer position, both fixed for this file. The row count is a traced arg, so a
+    chunked pass reuses this same trace."""
     _, model, ci_fn, _ = _tiny_setup()
-    return make_arithmetic_grid_step(
-        model, ci_fn.capture_keys, ANSWER_POSITION, n_valid_rows=N_A * N_B
-    )
+    return make_arithmetic_grid_step(model, ci_fn.capture_keys, ANSWER_POSITION)
 
 
 def _grid() -> ArithmeticGrid:
@@ -75,7 +74,7 @@ def test_grid_step_ci_xv_and_masked_max_match_hand_rolled():
     n_pad = N_A * N_B + 2  # two garbage tail rows, as the sharding pad would append
     tokens = jax.random.randint(jax.random.PRNGKey(4), (n_pad, T), 0, cfg.vocab_size)
     step = _grid_step()
-    ci_grids, xv_grids, max_ci = step(model, vu, ci_fn, tokens)
+    ci_grids, xv_grids, max_ci = step(model, vu, ci_fn, tokens, jnp.asarray(N_A * N_B))
 
     names = model.site_names
     # CI hand-roll: bf16 readout, slice the answer position.
@@ -115,9 +114,9 @@ def test_compute_arithmetic_selection_gathers_only_shown_columns():
     step = _grid_step()
     top_k = 3
     selection = compute_arithmetic_selection(
-        step, model, vu, ci_fn, tokens, N_A * N_B, thresholds=(0.0,), top_k=top_k
+        step, model, vu, ci_fn, ((tokens, N_A * N_B),), N_A * N_B, thresholds=(0.0,), top_k=top_k
     )
-    full_ci, full_xv, _ = step(model, vu, ci_fn, tokens)
+    full_ci, full_xv, _ = step(model, vu, ci_fn, tokens, jnp.asarray(N_A * N_B))
     for site in model.site_names:
         shown = selection.shown[site]
         assert shown.size == min(top_k, selection.active[0.0][site].size)
@@ -127,6 +126,46 @@ def test_compute_arithmetic_selection_gathers_only_shown_columns():
         )
         np.testing.assert_allclose(
             selection.xv_columns[site], np.asarray(full_xv[site])[:, shown], rtol=1e-6
+        )
+
+
+def test_chunking_the_grid_changes_nothing():
+    """Chunking bounds the forward, not the result: the running max over chunks and the
+    chunk-order column concatenation reproduce the single-forward pass up to float
+    reassociation (SPEC D4) — a different batch shape reassociates the `x@V` reduction, seen
+    at ~1 fp32 ULP. The SELECTION (which components, in which order) must match exactly:
+    that is the part a chunking bug would break."""
+    cfg, model, ci_fn, _ = _tiny_setup()
+    assert isinstance(model, ComponentActivationModel)
+    vu = init_component_stacks(model.sites, jax.random.PRNGKey(1))
+    n_prompts = N_A * N_B
+    tokens = jax.random.randint(jax.random.PRNGKey(4), (n_prompts, T), 0, cfg.vocab_size)
+    step = _grid_step()
+
+    whole = compute_arithmetic_selection(
+        step, model, vu, ci_fn, ((tokens, n_prompts),), n_prompts, thresholds=(0.0,), top_k=3
+    )
+    split = n_prompts // 2
+    chunked = compute_arithmetic_selection(
+        step,
+        model,
+        vu,
+        ci_fn,
+        ((tokens[:split], split), (tokens[split:], n_prompts - split)),
+        n_prompts,
+        thresholds=(0.0,),
+        top_k=3,
+    )
+
+    for site in model.site_names:
+        np.testing.assert_array_equal(chunked.shown[site], whole.shown[site])
+        np.testing.assert_array_equal(chunked.active[0.0][site], whole.active[0.0][site])
+        assert chunked.ci_columns[site].shape == whole.ci_columns[site].shape
+        np.testing.assert_allclose(
+            chunked.ci_columns[site], whole.ci_columns[site], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            chunked.xv_columns[site], whole.xv_columns[site], rtol=1e-5, atol=1e-6
         )
 
 

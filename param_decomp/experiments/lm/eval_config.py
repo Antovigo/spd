@@ -56,12 +56,24 @@ class ArithmeticCIGridConfig(BaseConfig):
 
     slow: ClassVar[bool] = True
     type: Literal["ArithmeticCIGrid"] = "ArithmeticCIGrid"
-    probe_metrics: ArithmeticProbeMetrics
+    probe_metrics: ArithmeticProbeMetrics | None
+    """`null` runs the heatmaps ALONE. The scalar probes cost a second full-grid forward
+    (logits over every prompt), which is what makes a 100x100 grid unaffordable on a 45GB
+    card. On a targeted run `TargetPoolScalars` already reports CE/KL and CI-L0 over the
+    run's own prompt pool, so these are redundant there."""
     operation: Literal["add", "sub", "mul"] = "add"
     a_range: tuple[int, int] = (1, 100)
     b_range: tuple[int, int] = (1, 100)
     thresholds: list[float] = Field(default_factory=lambda: [0.1])
     top_k: PositiveInt = 24
+    chunk_prompts: PositiveInt | None = None
+    """Rows per forward through the grid. `null` sends all `|a_range| x |b_range|` prompts
+    in ONE forward, which is what the grid step did unconditionally — 10000 prompts needs
+    ~20GiB and OOMs a 45GB L40. Chunking bounds the forward without shrinking the grid; the
+    CI / x@V columns are concatenated across chunks and the per-component max is a running
+    max, so which components are plotted is chunk-count-invariant and their values match the
+    unchunked pass up to float reassociation (SPEC D4). Prefer a multiple of the device count
+    so no chunk carries sharding pad."""
 
 
 class TargetPoolFreshPGDConfig(BaseConfig):

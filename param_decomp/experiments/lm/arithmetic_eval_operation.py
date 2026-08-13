@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import partial
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -72,9 +73,9 @@ def _render(
 @dataclass(frozen=True)
 class ArithmeticOperation:
     step: ArithmeticGridStep
-    probe_eval_step: ScalarStep
+    probe_eval_step: ScalarStep | None
     model: ComponentActivationModel
-    tokens: jax.Array
+    chunks: tuple[tuple[jax.Array, int], ...]
     grid: ArithmeticGrid
     n_prompts: int
     thresholds: tuple[float, ...]
@@ -87,26 +88,33 @@ class ArithmeticOperation:
             self.model,
             state.decomposition.components,
             state.decomposition.ci_fn,
-            self.tokens,
+            self.chunks,
             self.n_prompts,
             self.thresholds,
             self.top_k,
+        )
+        self.renderer.submit(partial(_render, selection, self.grid, self.top_k, now_step))
+        record = {
+            f"eval/arithmetic/{name}": value
+            for name, value in n_alive_scalars(selection.active, self.top_k).items()
+        }
+        if self.probe_eval_step is None:
+            return record
+        # The scalar probes take the WHOLE grid in one forward (logits over every prompt);
+        # they are not chunked, so authoring them re-imposes the memory cost chunking removed.
+        whole_grid = (
+            self.chunks[0][0]
+            if len(self.chunks) == 1
+            else jnp.concatenate([tokens for tokens, _ in self.chunks], axis=0)
         )
         scalars = self.probe_eval_step(
             self.model,
             state.decomposition.components,
             state.decomposition.ci_fn,
-            self.tokens,
+            whole_grid,
             key,
         )
-        self.renderer.submit(partial(_render, selection, self.grid, self.top_k, now_step))
-        return {
-            **{
-                f"eval/arithmetic/{name}": value
-                for name, value in n_alive_scalars(selection.active, self.top_k).items()
-            },
-            **{f"eval/arithmetic/{name}": float(value) for name, value in scalars.items()},
-        }
+        return record | {f"eval/arithmetic/{name}": float(value) for name, value in scalars.items()}
 
 
 def make_arithmetic_operation(
@@ -135,27 +143,33 @@ def make_arithmetic_operation(
     )
     probe = build_arithmetic_probe(config.operation, config.a_range, config.b_range, tokenizer)
     n_prompts = probe.tokens.shape[0]
-    ce = config.probe_metrics.ce_kl
-    l0 = config.probe_metrics.ci_l0
-    pgd = config.probe_metrics.fresh_pgd
-    l0_groups = (
-        {name: tuple(patterns) for name, patterns in l0.groups.items()}
-        if l0.groups is not None
-        else None
+    chunk_prompts = config.chunk_prompts or n_prompts
+    chunks = tuple(
+        (global_arithmetic_probe(probe.tokens[start : start + chunk_prompts], mesh, n_proc), rows)
+        for start in range(0, n_prompts, chunk_prompts)
+        if (rows := min(chunk_prompts, n_prompts - start))
     )
-    fresh_pgd = (
-        FreshPGDReconEval(
-            name=pgd.name or "PGDReconLoss",
-            n_steps=pgd.n_steps,
-            step_size=pgd.step_size,
-            reconstruction=resolve_reconstruction_spec(pgd.hidden_acts_reconstruction),
+    probe_eval_step = None
+    if config.probe_metrics is not None:
+        ce = config.probe_metrics.ce_kl
+        l0 = config.probe_metrics.ci_l0
+        pgd = config.probe_metrics.fresh_pgd
+        l0_groups = (
+            {name: tuple(patterns) for name, patterns in l0.groups.items()}
+            if l0.groups is not None
+            else None
         )
-        if pgd is not None
-        else None
-    )
-    operation = ArithmeticOperation(
-        step=make_arithmetic_grid_step(model, ci_capture_keys, probe.answer_position, n_prompts),
-        probe_eval_step=make_eval_step(
+        fresh_pgd = (
+            FreshPGDReconEval(
+                name=pgd.name or "PGDReconLoss",
+                n_steps=pgd.n_steps,
+                step_size=pgd.step_size,
+                reconstruction=resolve_reconstruction_spec(pgd.hidden_acts_reconstruction),
+            )
+            if pgd is not None
+            else None
+        )
+        probe_eval_step = make_eval_step(
             model,
             ci_capture_keys,
             ce.rounding_threshold,
@@ -165,9 +179,12 @@ def make_arithmetic_operation(
             mesh,
             n_valid_rows=n_prompts,
             compiler_options=compiler_options,
-        ),
+        )
+    operation = ArithmeticOperation(
+        step=make_arithmetic_grid_step(model, ci_capture_keys, probe.answer_position),
+        probe_eval_step=probe_eval_step,
         model=model,
-        tokens=global_arithmetic_probe(probe.tokens, mesh, n_proc),
+        chunks=chunks,
         grid=probe.grid,
         n_prompts=n_prompts,
         thresholds=tuple(config.thresholds),
