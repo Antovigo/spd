@@ -190,7 +190,40 @@ so SHM size is never the issue.
 
 ---
 
-## 5. Also on this branch (not fixes)
+## 5. Open: `ArithmeticCIGrid` does not fit in-loop
+
+**Unresolved.** The CI-heatmap tier cannot run alongside training on a 45GB L40 at dp2. The
+pass wants a single **~19.4–19.8GiB** allocation; BFC's largest servable here is
+**17.98GiB**. Note what that is and is not:
+
+```
+Pool limit   40.78 GiB      In use at failure   9.01 GiB
+Peak in use  27.00 GiB      Largest ever served 17.98 GiB
+```
+
+Only 9GiB was in use when a 19.77GiB request failed against a 40.78GiB pool — a
+**contiguous-region** ceiling, not capacity. The training step's arena carves the pool
+first, and what is left cannot host one region that large.
+
+The request is invariant to every lever tried:
+
+| lever | request |
+|---|---|
+| baseline, 100x100 grid in one forward | 19.77 GiB |
+| `chunk_prompts: 1000` + `probe_metrics: null` | 19.77 GiB (identical) |
+| `chunk_prompts: 100` | 19.77 GiB (identical) |
+| `xla_python_client_allocator: platform` | 17.98 GiB |
+| non-target 24 -> 16 | 19.38 GiB |
+
+Chunking is committed (`1499ab721`) and does bound the forward — it just is not what sizes
+this allocation, and **what does is still unidentified**. It is not the prompt axis.
+
+The untried alternative, and probably the right one: run the grid **offline against a saved
+checkpoint**, where it owns the whole card and competes with no training arena. That also
+matches how the torch `ab_grids` applet worked. Everything else in `eval.metrics` runs fine
+in-loop.
+
+## 6. Also on this branch (not fixes)
 
 Ported from the torch reference so the run mirrors `addsub-L18-09-one-im`: `coupled` /
 `zero_u` component init, `normalize_at_one` on smooth-L0 importance minimality, the
