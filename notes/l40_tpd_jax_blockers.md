@@ -1,20 +1,53 @@
-# JAX tPD on a pre-12.8 driver: bugs, mechanisms, and what generalizes
+# Running JAX tPD on a pre-12.8 driver
 
-Reference environment: NVIDIA L40 (sm_89, 45 GB), driver **535.247.01 / CUDA 12.2**, venv on
-the `cuda` extra (CUDA **12.8** userspace, cuDNN 9.8, jax 0.10.1), single VM node, 8 GPUs.
+Two bugs stopped the targeted root from executing a single step on `l40-worker`, and a third
+constraint decides how large the run can be. This note covers what they are, how they work,
+and which of them you'd hit on other hardware.
 
-Fixes in `a7b2636ce` (code + dependency), `381ea3c71` (run-config sizing).
+Our setup: L40 cards (sm_89, 45–48 GB depending on the card), driver **535.247.01 / CUDA
+12.2**, and a venv on the `cuda` extra — which means a CUDA **12.8** userspace with cuDNN 9.8
+and jax 0.10.1. One VM node, eight GPUs. The gap between the 12.2 driver and the 12.8
+userspace is what causes the first bug, and it is worth keeping in mind throughout.
 
----
+Fixes live in `a7b2636ce` (code and dependency) and `381ea3c71` (run-config sizing).
 
-## 1. cuDNN attention fails against a pre-12.8 driver
+## The error that hides its own cause
 
-**Generalizes** to any host whose driver predates the venv's CUDA userspace. Not L40- or
-tPD-specific; tPD merely selects the failing path more often.
+Almost everything below first shows up as this, naming a different kernel each time:
 
-`vendored_jax/llama.py::attn_implementation` requested
-`jax.nn.dot_product_attention(..., implementation="cudnn")` whenever `seq_len % 64 == 0` on
-GPU in fp16/bf16. cuDNN 9's graph API cannot run against driver 535:
+```
+INTERNAL: [0] There was an error before calling cuModuleGetFunction (1):
+cudaErrorInvalidValue : invalid argument [executable_name='jit_targeted_step']
+```
+
+It is tempting to read that as "this kernel failed to load". It isn't. XLA's phrasing is
+literal — the message comes from a `cudaPeekAtLastError` guard, so CUDA was *already* in an
+error state and this is simply the first place XLA looks. In practice that's hundreds of
+kernel loads after whatever actually went wrong. The kernel it names is a bystander, and
+debugging it leads nowhere.
+
+Three things follow. The traceback tells you nothing about where the fault is.
+`CUDA_LAUNCH_BLOCKING=1` won't move it, because it synchronises kernel *launches* and the
+failing call is an ordinary synchronous API call. And shrinking the batch or `C` to simplify
+the reproducer won't make it go away — these faults are structural — though it does buy you a
+hundred-second repro instead of a fifteen-minute one.
+
+To find the real origin, run under the sanitizer that matches your **driver**, not your venv:
+
+```bash
+/usr/local/cuda-12.2/bin/compute-sanitizer --tool memcheck \
+  --report-api-errors all --target-processes all \
+  python -m param_decomp.experiments.lm.run_targeted --config ... --data_root ...
+```
+
+`--report-api-errors all` prints every CUDA API call that returns an error, with a host
+backtrace. It named the cause below in about ninety seconds. Reach for it early.
+
+## cuDNN attention doesn't work on this driver
+
+`attn_implementation` in `vendored_jax/llama.py` asked for
+`jax.nn.dot_product_attention(..., implementation="cudnn")` whenever the sequence length was
+a multiple of 64, on GPU, in fp16 or bf16. cuDNN 9's graph API can't run against driver 535:
 
 ```
 xla::gpu::CuDnnThunk::Initialize
@@ -24,183 +57,150 @@ xla::gpu::CuDnnThunk::Initialize
         -> cudaMemcpyAsync  =>  cudaErrorInvalidValue
 ```
 
-The return is unchecked, so CUDA stays sticky and the error surfaces later (§5).
+Nobody checks that return value, so CUDA stays poisoned and the error resurfaces later as the
+message above.
 
-**Why targeted runs hit it and plain runs may not:** the tPD target stream's prompt length
-is 5 (SPEC T8) and never selects cuDNN; the non-target stream at seq 64 always does. Any run
-whose sequence length is a multiple of 64 is exposed.
+This looked like a targeted-only bug for a while, but it isn't. The tPD target stream uses
+prompts five tokens long (SPEC T8), which never selects cuDNN; the non-target stream runs at
+seq 64, which always does. Any run at a multiple of 64 is exposed, plain or targeted — and
+any host whose driver predates its CUDA userspace will hit it.
 
-**Fix:** `attn_implementation` returns the XLA composite unconditionally. Args are retained
-so restoring the capability check is one line here and one in
-`param_decomp/tests/test_attn_implementation.py`.
+The fix makes `attn_implementation` always return the XLA composite. Its arguments are still
+there, so restoring the capability check on a newer driver is a one-line edit, plus one in
+`param_decomp/tests/test_attn_implementation.py` where the contract is pinned.
 
-**Open:** this disables cuDNN flash attention globally, including where it works. The
-upstream-worthy form is a `runtime:` field (`attention_implementation: auto | xla`,
-defaulting to `auto`), matching the `remat_ci_fn` pattern.
+That does mean cuDNN flash attention is now off everywhere, including on machines where it
+works fine. The better long-term shape is a `runtime:` field —
+`attention_implementation: auto | xla`, defaulting to `auto` — following the `remat_ci_fn`
+pattern, so the choice is visible in the pinned `launch_config.yaml` and healthy hardware
+keeps the fast path.
 
-**Does not help:** XLA's cuDNN flags (`--xla_gpu_cudnn_gemm_fusion_level=0`,
-`--xla_gpu_enable_cudnn_fmha=false`). Those govern XLA's pattern-matching passes; this is an
-explicit JAX-level custom call and is invisible to them.
+One dead end worth flagging: XLA's own cuDNN flags
+(`--xla_gpu_cudnn_gemm_fusion_level=0`, `--xla_gpu_enable_cudnn_fmha=false`) do nothing here.
+They control XLA's pattern-matching passes, and this is an explicit JAX-level custom call
+they never see.
 
----
+## The pinned NCCL is too old for this jaxlib
 
-## 2. The pinned NCCL predates `ncclAlltoAll`
-
-**Generalizes** — a repo packaging bug, independent of host. Affects every `dp > 1` run.
+With attention fixed, every multi-GPU run died on:
 
 ```
 NCCL operation ncclAlltoAll(...) failed: unhandled system error
 ```
 
-`pyproject.toml`'s `cuda` extra pinned `nvidia-nccl-cu12==2.25.1` to keep NVIDIA components
-on one CUDA 12.8.1 train. XLA in jax 0.10.1 emits `ncclAlltoAll` when lowering a reshard,
-and that entry point first exists in NCCL 2.28:
+`pyproject.toml`'s `cuda` extra pinned `nvidia-nccl-cu12==2.25.1` to keep the NVIDIA
+components on a single CUDA 12.8.1 release train. But XLA in jax 0.10.1 emits `ncclAlltoAll`
+when it lowers a reshard, and that entry point doesn't exist before NCCL 2.28:
 
 ```console
 $ nm -D .../nvidia/nccl/lib/libnccl.so.2 | grep -iE 'ncclAlltoAll|ncclAllGather'
-ncclAllGather        # 2.25.1: AllGather present, AlltoAll absent
+ncclAllGather        # 2.25.1: AllGather is there, AlltoAll isn't
 ```
 
-**Not a transport problem.** `NCCL_SHM_DISABLE`, `NCCL_P2P_DISABLE`, `NCCL_CUMEM_ENABLE=0`
-and `zero1` vs `ddp` change nothing — the operation is not implemented, and "unhandled
-system error" is how NCCL reports that.
+Nothing about the transport is involved, which is worth knowing because the error message
+invites you to go looking there. `NCCL_SHM_DISABLE`, `NCCL_P2P_DISABLE`,
+`NCCL_CUMEM_ENABLE=0`, and switching `sharding` between `zero1` and `ddp` all change nothing.
+The operation simply isn't implemented, and "unhandled system error" is how NCCL says so.
 
-**Fix:** `nvidia-nccl-cu12>=2.28` (resolves 2.31.2), deliberately off the 12.8.1 train.
+The fix bumps the pin to `nvidia-nccl-cu12>=2.28` (resolving to 2.31.2), deliberately off the
+12.8.1 train. This is a packaging bug rather than anything to do with our hardware — anyone
+running `dp > 1` on this extra hits it.
 
----
+## What fits, and why the batch size barely matters
 
-## 3. Memory: the temp arena is batch-independent
+Once it runs, memory decides the scale. The binding constraint is the executable's temp arena
+— XLA's single buffer for all of an executable's intermediates — sitting on top of the 16 GiB
+replicated frozen target. The surprise is how little the arena responds to batch size:
 
-**Mechanism generalizes; the numbers are 45 GB-L40-specific.**
-
-The binding constraint is the executable's **temp arena** (XLA's single buffer for an
-executable's intermediates), stacked on the **16 GiB replicated frozen target**. The arena
-barely responds to batch, so batch is a weak lever:
-
-| non-target batch | temp arena | fits 41.4 GiB pool? |
+| non-target batch | temp arena | fits the 41.4 GiB pool? |
 |---|---|---|
 | 48 | 23.05 GiB | no |
 | 32 | 22.27 GiB | no |
-| 24 | **17.93 GiB** | **yes** — peak 30.9 GiB, ~10 s/step |
+| 24 | 17.93 GiB | yes — peak 30.9 GiB, ~10 s/step |
 
-Halving target *and* non-target (64/16) moved the arena 17.93 → 17.83 GiB. Both remat flags
-were already on.
+Halving *both* streams (target 64, non-target 16) moved the arena from 17.93 to 17.83 GiB.
+Both remat flags were already on. So if you're over budget, shrinking the batch is a weak
+lever and you should expect to give up a lot of it for very little.
 
-`xla_python_client_mem_fraction` defaults to **0.92**; lowering it to 0.75 caps BFC at ~34 GB
-of 45 and turns a fitting config into a hang.
+Watch `xla_python_client_mem_fraction`, which defaults to 0.92. Dropping it to 0.75 caps BFC
+at roughly 34 of 45 GB and turns a config that fits into one that hangs.
 
-**Cost of the 24 setting:** the torch reference ran non-target 96 on the same hardware, so
-this is a 4× reduction in the broad stream. The untouched lever is the frozen target —
-replicated at 16 GiB/card and outside the placement policy (`NOT AUDITED (legacy
-mesh-vocabulary .shardings): ci_fn, frozen target, …`). Sharding it would buy back the most.
+Two consequences worth weighing. The torch reference ran non-target 96 on this same hardware,
+so 24 is a fourfold cut to the broad stream — a real fidelity loss, not a free win. The lever
+nobody has pulled is the frozen target itself: it's replicated at 16 GiB per card and sits
+outside the placement policy, which every log announces as `NOT AUDITED (legacy
+mesh-vocabulary .shardings): ci_fn, frozen target, …`. Sharding it would buy back the most
+room by far. Separately, at ~10 s/step a 20 000-step run is about 56 hours against a 24-hour
+QOS cap, so plan on roughly three requeue segments.
 
-At ~10 s/step, 20000 steps ≈ 56 h against a 24 h QOS cap: about three requeue segments.
+## A multi-GPU OOM hangs instead of raising
 
----
+This one is general JAX/XLA behaviour and worth internalising. When one rank runs out of
+memory mid-allocation, it dies quietly while the other blocks in
+`Acquire clique: devices=2:[0,1]`, and the job sits there until the wall clock kills it. So a
+"clique deadlock" is far more often an out-of-memory condition than a rendezvous fault.
 
-## 4. A `dp > 1` OOM hangs instead of raising
+On any `dp > 1` hang, grep the log for `ran out of memory trying to allocate` before you go
+near NCCL.
 
-**Generalizes** — JAX/XLA multi-device behaviour.
+## XLA flags don't behave the way the schema suggests
 
-Rank 0 dies mid-allocation while rank 1 blocks in `Acquire clique: devices=2:[0,1]`; the job
-sits until the wall clock. A "clique deadlock" is therefore far more often an OOM than a
-rendezvous fault. **On any dp>1 hang, grep for `ran out of memory trying to allocate` before
-suspecting NCCL.**
+Three gotchas, all general.
 
----
+`xla_gpu_enable_command_buffer: ''` in `compiler_options` silently does nothing. The schema
+documents it as a correctness guard that disables CUDA-graph capture, but with it set,
+`TF_CPP_VMODULE=cuda_executor=5` still logs `Create CUDA command buffer (CUDA graph)`. The
+empty string doesn't survive serialisation into native compiler options. Only
+`XLA_FLAGS=--xla_gpu_enable_command_buffer=` actually disables them — verified by the count
+dropping to zero. Any run that assumed graphs were off has been running with them on.
 
-## 5. Diagnosing sticky CUDA errors
+`compiler_options` and `XLA_FLAGS` accept different sets of flags. cuDNN and other *debug*
+options are rejected outright by `compiler_options` (`No such compile option:
+'xla_gpu_enable_cudnn_fmha'`). Both paths reject unknown names loudly; the empty-string case
+above is the one silent failure.
 
-**Generalizes.**
+Finally, `compiler_options` are part of the compile-cache key and `XLA_FLAGS` are not. An A/B
+driven by `XLA_FLAGS` will happily load a cached executable compiled without them and tell
+you nothing. Clear `<data_root>/xla_compilation_cache/jit_targeted_step-*` first.
 
-```
-INTERNAL: [0] There was an error before calling cuModuleGetFunction (1):
-cudaErrorInvalidValue : invalid argument [executable_name='jit_targeted_step']
-```
+## About this node specifically
 
-This is **not** a module-load failure. XLA's wording is literal: a `cudaPeekAtLastError`
-guard. CUDA was already in an error state and this is the first place XLA checks, typically
-hundreds of kernel loads after the offending call. The named kernel is a bystander.
+`nvidia-smi topo -p2p r` reports `CNS` between every GPU pair, and `libibverbs` fails to load
+— no peer-to-peer, no InfiniBand — so NCCL routes GPU-to-GPU traffic over shared memory. On a
+tiny config that costs a lot: dp2 measured 51 s/step against dp1's 1.6 s. At realistic batch
+sizes the penalty is much smaller (~10 s/step), but the shape of the tradeoff stands. We run
+two cards because one can't hold the working set, not because two are faster.
 
-- The traceback location says nothing about the fault location.
-- `CUDA_LAUNCH_BLOCKING=1` does not help — it synchronises *launches*; the failing call is
-  an ordinary synchronous API call.
-- The fault is structural, so shrinking batch/C reproduces it identically — useful only as a
-  fast reproducer.
+`/dev/shm` is 229 GB, so shared-memory size is never the problem here.
 
-Name the true origin with the sanitizer matching the **driver** (not the venv):
+## Still open: the CI grid doesn't fit in-loop
 
-```bash
-/usr/local/cuda-12.2/bin/compute-sanitizer --tool memcheck \
-  --report-api-errors all --target-processes all \
-  python -m param_decomp.experiments.lm.run_targeted --config ... --data_root ...
-```
-
-`--report-api-errors all` reports every CUDA API call returning an error, with a host
-backtrace.
-
----
-
-## 6. XLA flag plumbing
-
-**Generalizes.**
-
-- **`xla_gpu_enable_command_buffer: ''` in `compiler_options` silently does nothing.** The
-  schema documents it as a correctness guard disabling CUDA-graph capture; with it set,
-  `TF_CPP_VMODULE=cuda_executor=5` still logs `Create CUDA command buffer (CUDA graph)`. The
-  empty string does not survive serialisation into native compiler options. Only
-  `XLA_FLAGS=--xla_gpu_enable_command_buffer=` disables them (verified: count → 0).
-- **`compiler_options` and `XLA_FLAGS` accept different flag sets.** cuDNN and other *debug*
-  options are rejected by `compiler_options` (`No such compile option:
-  'xla_gpu_enable_cudnn_fmha'`). Both reject unknown names loudly; only the empty-string case
-  fails silently.
-- **`compiler_options` are in the compile-cache key; `XLA_FLAGS` are not.** An `XLA_FLAGS`
-  A/B will reuse a cached executable compiled without them. Clear
-  `<data_root>/xla_compilation_cache/jit_targeted_step-*` first.
-
----
-
-## 7. Node interconnect
-
-**Specific to `l40-worker`.**
-
-`nvidia-smi topo -p2p r` reports `CNS` between every GPU pair and `libibverbs` fails to load:
-no P2P, no InfiniBand, so NCCL routes GPU↔GPU `via SHM/direct`. At tiny configs dp2 measured
-51 s/step against dp1's 1.6 s; at real batch ~10 s/step. **dp2 here is for capacity, not
-speed** — two cards because one cannot hold the working set. `/dev/shm` is 229 GB, never the
-constraint.
-
----
-
-## 8. Open: `ArithmeticCIGrid` does not fit in-loop
-
-**Unresolved. Generalization unknown** — the sizing driver has not been identified.
-
-The pass wants a single **~19.4–19.8 GiB** allocation; BFC's largest servable here is
-**17.98 GiB**.
+`ArithmeticCIGrid` can't run alongside training. It wants a single allocation of about
+19.4–19.8 GiB, and the largest BFC will serve on this card is 17.98 GiB.
 
 ```
 Pool limit   40.78 GiB      In use at failure   9.01 GiB
 Peak in use  27.00 GiB      Largest ever served 17.98 GiB
 ```
 
-With only 9 GiB in use against a 40.78 GiB pool, this is a **contiguous-region** ceiling, not
-capacity: the training step's arena carves the pool first and what remains cannot host one
-region that large.
+Note that only 9 GiB was in use when a 19.77 GiB request failed against a 40.78 GiB pool. This
+is a contiguous-region ceiling rather than a capacity problem: the training step's arena
+carves up the pool first, and what's left can't host one region that large.
 
-The request is invariant to every lever tried:
+What's frustrating is that the request doesn't move:
 
-| lever | request |
+| what was tried | request |
 |---|---|
 | 100×100 grid, one forward | 19.77 GiB |
-| `chunk_prompts: 1000` + `probe_metrics: null` | 19.77 GiB |
+| `chunk_prompts: 1000` plus `probe_metrics: null` | 19.77 GiB |
 | `chunk_prompts: 100` | 19.77 GiB |
 | `xla_python_client_allocator: platform` | 17.98 GiB |
 | non-target 24 → 16 | 19.38 GiB |
 
-`chunk_prompts` and nullable `probe_metrics` are committed (`1499ab721`) and do bound the
-forward, but neither is what sizes this allocation — **it is not the prompt axis**.
+`chunk_prompts` and the nullable `probe_metrics` are committed in `1499ab721` and do bound the
+forward, but neither is what sizes this allocation. Whatever does, it isn't the prompt axis,
+and it hasn't been identified — so there's no telling yet whether other setups hit this.
 
-Untried alternative: run the grid **offline against a saved checkpoint**, where it owns the
-card and competes with no training arena. Everything else in `eval.metrics` runs fine
-in-loop.
+The obvious untried route is to compute the grid offline against a saved checkpoint, where it
+has the card to itself and no training arena to compete with. Everything else in
+`eval.metrics` runs fine in-loop.
