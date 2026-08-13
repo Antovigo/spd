@@ -1,17 +1,18 @@
-# Making JAX tPD fast on 2× L40: what the earlier attempt found, and what still hasn't transferred
+# Making JAX tPD fast on 2× L40
 
-The tPD JAX run on `l40-worker` currently sits at ~10 s/step, which puts a 20 000-step run at
-roughly 56 hours. An earlier attempt at the same problem, in July, took a comparable run from
-250 s/step to 3.0 s/step on the same two cards. That work was never committed: it lives as
-uncommitted modifications in the `8B_targeted_jax` worktree (eleven modified files plus an
-untracked `param_decomp/tests/test_prefix_reuse.py`), on a branch whose tip predates it by two
-weeks. It is not on any branch and not pushed. **Preserve it before anything else** — a
-`git stash` or a WIP commit in that worktree costs nothing and the findings below are
-reconstructed from it.
+The tPD JAX run on `l40-worker` sat at ~10 s/step, putting a 20 000-step run at roughly 56
+hours — three requeue segments against the 24-hour QOS cap. It now runs at **~1.15 s/step**.
+This records why, because neither cause is visible on the hardware the code was designed for.
 
-The July recipe had five parts. Three of them already hold on `experiment/tpd_jax_tests`,
-either because they were ported properly or because the tree evolved into them. Two did not
-transfer, and they are the two that produced almost all of the speedup.
+An earlier attempt at the same problem, in July, had already taken a comparable run from 250
+to 3.0 s/step, and that work was never committed — it lived as uncommitted modifications in
+the `8B_targeted_jax` worktree, on a branch whose tip predated it by two weeks. It is now
+preserved at `ac7d1ce0c` on `experiment/8B_targeted_jax`; the findings below were
+reconstructed from it before anything else happened.
+
+The July recipe had five parts. Three already held on `experiment/tpd_jax_tests`, either
+because they were ported properly or because the tree evolved into them. Two had not
+transferred, and they were the two that produced almost all of the speedup.
 
 ## What already transferred
 
@@ -126,27 +127,73 @@ today's 9.1 and July's 16.1. It buys the full speedup for +3.0 GiB rather than +
 matters directly: the non-target batch is currently cut to 24 against the torch reference's 96,
 and that headroom is the only way back toward it.
 
-## Suggested order
+## What was built
 
-Start with **`ascend_replicate: true`**, which is already implemented
-(`runtime.ascend_replicate`, `train.py::replicate_for_ascend`), defaults to false, and is not
-set in `llama8b_l18_addsub_targeted_2xl40.yaml`. It gathers the ÷fsdp compute weights once
-before the adversary ascents so the `n_warmup` ascend forwards skip their per-layer gathers,
-collapsing `n_warmup × n_layer × (fwd + bwd)` collectives into one. It is the same family of
-win as the frozen-target fix, applied to V/U instead, the numerics are bit-identical, and it is
-a one-line config edit. Free information about how much the collectives are actually costing.
+Both fixes are on `perf/jax-tpd-2xl40-speed`, and the shapes differ from July's in two ways
+that matter.
 
-Then **un-shard the frozen target** for sub-node worlds. Biggest single win on the July
-measurement, moderate implementation, moderate memory risk.
+The frozen-target fix is **`runtime.fsdp`**, a mesh-shape knob, not July's
+`PD_SUBNODE_REPLICATE` environment gate — the library reads no ambient environment, and the
+mesh is where this decision actually lives. It defaults to `None` (the `gpus_per_node`-derived
+shape), so no NVLink run changes; `fsdp: 1` degenerates the parameter-sharding axis, which
+replicates every `P(..., "fsdp", ...)` spec and moves the world onto `replicate`, leaving
+batch sharding intact.
 
-Then **prefix reuse**, which is worth about another 2× but needs the SPEC conversation, a real
-port into `glu_transformer.py`, and a parity test in the shape of July's `test_prefix_reuse.py`
-(it bit-matched step-100 losses against the slow baseline, which is the bar).
+**Prefix reuse** is the July design — `split_layer`, `stacked_prefix`, `ResidualStart`, hoisted
+once per stream in `prep_stream` — reimplemented against the current `glu_transformer`, whose
+capture-key grammar and unified forwards did not exist in `llama8b`. Both of July's hard-won
+details carried over: separate stack FIELDS rather than an in-graph slice, and a local closure
+rather than a bound method as the `lax.scan` body.
 
-## Caveat
+The port turned up a latent bug worth noting on its own: `component_activation_forward` indexed
+the per-kind V stack by GLOBAL layer, which is wrong for any decomposition not starting at
+block 0 — including the L18 seat.
 
-None of this is measured on the current tree. The ~10 s/step figure is from
-`l40_tpd_jax_blockers.md`; the 250 / 55 / 5.9 / 3.0 figures are July's, on a differently-sized
-config (non-target batch 64, `max_seq_len` 6, `remat_recon_forwards` off). The ranking comes
-from reading the code and the memory record, not from benchmarking, and the first action above
-is chosen partly because it is the cheapest way to start replacing it with data.
+## Measured, 2026-08-13
+
+Both fixes landed on `perf/jax-tpd-2xl40-speed` (`189c403c0`) and ran as
+`addsub-L18-jax-speed-01`, 5000 steps at the seat's own batch sizes so the comparison is
+clean — only the two perf knobs differ from the config that measured ~10 s/step.
+
+| step | elapsed | s/step | peak GB/rank |
+|---|---|---|---|
+| 100 | 2:54 | 1.736 (includes warmup) | 32.93 |
+| 200 | 4:49 | 1.139 | 32.93 |
+| 300 | 6:45 | 1.159 | 32.93 |
+| 400 | 8:41 | 1.159 | 32.93 |
+
+**~1.15 s/step steady state against ~10 s/step: about 8.7×.** That is well past the ~2×
+the block arithmetic predicted for prefix reuse and past July's best of 3.0 s/step, which
+says the per-layer gather over shared memory was costing more than the July numbers alone
+implied. A 20 000-step run drops from about 56 hours — three requeue segments against the
+24-hour QOS cap — to roughly six, inside a single allocation.
+
+Memory landed better than feared. Replicating the frozen target adds ~7 GiB/card, and the
+estimate was 37.9 of a 41.4 GiB pool; the run sits at **32.9 GB/rank** against ~43.6 GiB at
+`mem_fraction: 0.97`. Prefix reuse shrinks the temp arena at the same time it saves compute
+— every grid forward is 14 blocks instead of 32 — and the two effects nearly cancel the
+replication cost. About 10 GiB is spare.
+
+So the note above is wrong where it says the non-target batch cut to 24 is forced. It was
+forced by an arena sized for 32-block forwards. Raising it back toward the torch reference's
+96 is now the obvious next move, and `remat_recon_forwards: false` is the second — that flag
+trades against an activation peak far smaller than when it was set.
+
+## What this leaves open
+
+`ascend_replicate` was never measured: under `fsdp: 1` the compute weights are already
+replicated, so it is a no-op there and setting both is redundant. It stays the right first
+lever on any run that keeps a real `fsdp` axis.
+
+The SPEC amendment is **pending Oli**. S3/S18 were amended on 2026-06-24 specifically to
+remove residual-start, and prefix reuse contradicts the letter of S18 even though it does
+not reinstate what was removed — nothing is harvested, stored, or crosses a step boundary,
+and the shared value is bit-identical to recomputing it. That conversation should happen
+before this merges to main.
+
+One capability note, since it is easy to misread the code: splitting the stack costs
+nothing. From token inputs the prefix still runs through the capture machinery, so points
+below `split_layer` resolve exactly as before (pinned against an unsplit model with
+identical weights). Only a `ResidualStart` cannot answer them, because it has already
+consumed the prefix — and no training capture point lives below the first decomposed block,
+since masking cannot reach one.
