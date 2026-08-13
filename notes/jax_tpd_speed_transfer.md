@@ -126,10 +126,28 @@ sizes at compile time to hold every intermediate the program computes. Every gri
 (The temp buffer shrinking is inferred from the peak coming in ~5 GiB under prediction, not
 read off directly — if you need the real figure for sizing, take it from an HLO dump.)
 
-That spare capacity is worth spending. The non-target batch is currently 24, cut down from the
-torch reference's 96 to fit a temp buffer sized for 32-block forwards. Raising it back up is the
-obvious next move, and turning `remat_recon_forwards` off is the second — it now trades against
-a much smaller activation peak.
+That spare capacity has been spent on the non-target batch, which was 24 — cut down from the
+torch reference's 96 to fit a temp buffer sized for 32-block forwards. It is now **128**,
+measured rather than guessed:
+
+| non-target batch | 24 | 48 | 64 | 96 | 128 | 192 |
+|---|---|---|---|---|---|---|
+| peak GB/rank | 32.9 | 33.3 | 33.6 | 34.9 | **36.9** | 42.7 |
+
+Everything up to 128 fits with room; 192 leaves under 1 GiB against the ~43.6 GiB pool, which
+is inside run-to-run variation and not worth the risk given an OOM hangs rather than fails.
+Note how little the peak tracks batch — 4 GiB across a 5× increase — which is the temp buffer
+being dominated by things other than the logit-space term.
+
+Probe those changes with **both eval tiers live**. `eval.batch_size` tracks the non-target
+batch, and the 20-step PGD probe ascends through its own backward at that size, so a batch that
+trains happily can still die at the first eval 500 steps in.
+
+Two things to weigh at 128. It is more non-target data per step than the torch reference's 96,
+so the balance between the broad and target streams is no longer the reference's — worth a look
+at `impmin_coeff` if the decomposition behaves differently. And turning `remat_recon_forwards`
+off is the remaining untried lever; it now trades against a much smaller activation peak, but
+it has not been probed at this batch.
 
 The full training loop is unaffected: the run completed all 5000 steps clean, with eval, the
 slow-eval figure tier and both checkpoints (586 MB each, both items) working unchanged, and

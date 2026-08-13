@@ -107,14 +107,15 @@ prompts:
   kind: prompts_file
   path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
 nontarget:
-  batch_size: 24  # sets the logit-space peak: 24x64 positions x 128256 vocab in the fused
-  # two-pass backward. The binding constraint is the executable's temp buffer (XLA's single
-  # compile-time-sized block for every intermediate), which grows far slower than linearly in
-  # batch — 17.93GiB at 24, 22.27 at 32, 23.05 at 48 — so batch is a weak memory lever. 24 was
-  # chosen against a temp buffer sized for 32-block forwards; the prefix-reuse split makes every grid forward 14 blocks,
-  # and the measured peak is now 32.9 of ~43.6GiB, so there is room to raise this back toward
-  # the torch reference's 96. An OOM here does not raise — rank 0 dies mid-allocation while
-  # rank 1 waits on the clique, so the job HANGS. Raise only against a fresh smoke.
+  batch_size: 128  # measured ceiling, not a guess: probed at 48/64/96/128/192 with BOTH eval
+  # tiers live (the 20-step PGD probe ascends through its own backward at this same size, so a
+  # batch that trains can still die at the first eval). Peak GB/rank was 33.3 / 33.6 / 34.9 /
+  # 36.9 / 42.7 against a ~43.6GiB pool — so 128 keeps ~6.7GiB of margin and 192 keeps under 1,
+  # which is inside run-to-run variation. The peak barely tracks batch because the binding
+  # constraint is the executable's temp buffer (XLA's single compile-time-sized block for every
+  # intermediate), and the prefix-reuse split cut every grid forward from 32 blocks to 14.
+  # An OOM here does not raise — rank 0 dies mid-allocation while rank 1 waits on the clique,
+  # so the job HANGS. Re-probe before raising.
   impmin_coeff: 6.67e-05  # the reference's 2x target ratio, authored absolute
   recon:
     - type: StochasticReconSubsetLoss
@@ -124,7 +125,7 @@ nontarget:
 eval:
   # Tracks nontarget.batch_size: the broad-stream probes run at the same geometry,
   # and the 20-step PGD probe ascends through its own backward.
-  batch_size: 24
+  batch_size: 128
   n_steps: 10
   every: 500
   slow_every: 1000
