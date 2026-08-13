@@ -192,12 +192,12 @@ the derived shape, logging every step:
 
 | variant | frozen target | s/step | GB/rank |
 |---|---|---|---|
-| `fsdp` derived (=2) | sharded, gathered per layer | **40.3** (median, n=12) | 24.5 |
+| `fsdp` derived (=2) | sharded, gathered per layer | **39.9** (median, n=18) | 24.5 |
 | `fsdp: 1` | replicated | **1.15** | 32.9 |
 
-**The mesh knob alone is worth ~35× here, for +8.4 GB/rank.** The sharded figure is the
-median of steps 3–14 (mean 39.5, range 35.2–43.5); steps 1–2 read 95 and 99 s, which is the
-PPGD warmup (`n_warmup_steps: 2`), not settling.
+**The mesh knob alone is worth ~35× here, for +8.4 GB/rank.** The sharded figure is the median
+of every post-warmup step of a completed 20-step probe (mean 39.7, range 35.2–44.1); steps 1–2
+read 95 and 99 s, which is the PPGD warmup (`n_warmup_steps: 2`), not settling.
 
 One honest caveat: the probe shared `l40-worker` with the 5000-step run, and this host routes
 all GPU↔GPU traffic over shared memory, so the sharded figure carries some cross-job
