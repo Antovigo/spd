@@ -40,7 +40,11 @@ from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 from param_decomp.core.adversary import PersistentAdversary, init_fresh_pgd_sources
 from param_decomp.core.ci_fn import CI, CIFn, evaluate_ci
 from param_decomp.core.components import ComponentStacks, VUShape
-from param_decomp.core.configs import LossCoeff, SmoothL0ImportanceMinimalityLossConfig
+from param_decomp.core.configs import (
+    IMP_MIN_METRIC_NAMES,
+    LossCoeff,
+    SmoothL0ImportanceMinimalityLossConfig,
+)
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.losses import (
     ReconstructionLoss,
@@ -1360,8 +1364,10 @@ def make_targeted_train_step[PreparedT](
             nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, atoms.imp_min, imp_min_param)
             nt_total = nt_imp_coeff * nt_imp_lp + freq_coeff * nt_imp_freq
             nt_aux = {
-                f"loss/nontarget/{atoms.imp_loss_key}": nt_imp_lp,
-                "loss/nontarget/freq": nt_imp_freq,
+                # Same spelling as the target stream's keys (which `run._METRIC_KEYS`
+                # expands from the same map), so one quantity is not two names.
+                f"loss/nontarget/{IMP_MIN_METRIC_NAMES[atoms.imp_loss_key]}": nt_imp_lp,
+                f"loss/nontarget/{IMP_MIN_METRIC_NAMES['freq']}": nt_imp_freq,
             }
             nt_breakdowns = atoms.grid_losses(
                 nt_terms,
