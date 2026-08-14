@@ -44,12 +44,23 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
             return context.target_batches
 
 
-def stream_log_prefix(stream: Stream) -> str:
+def stream_log_prefix(stream: Stream, context: LMEvalContext) -> str:
+    """The log namespace for `stream`, given what kind of run this is.
+
+    ONE rule: the data the run is optimizing for is unlabelled, and anything else carries
+    its stream. A plain run has a single stream, so it stays `eval/` exactly as before —
+    `context.target_batches is None` is what says so. A tPD run adds a second stream, so
+    its broad corpus moves under `eval/nontarget_data/` and the target pool takes the bare
+    namespace. The consequence is deliberate: `eval/l0/...` means "the data of interest"
+    in both run kinds, which is what makes the two comparable as objectives — but it is
+    NOT the same data, so a corpus-vs-corpus comparison across run kinds must read
+    `eval/nontarget_data/` on the tPD side."""
+    targeted = context.target_batches is not None
     match stream:
         case "broad":
-            return "eval/"
+            return "eval/nontarget_data/" if targeted else "eval/"
         case "target_data":
-            return "eval/target_data/"
+            return "eval/"
 
 
 def _make_scalar_operation(
@@ -62,9 +73,8 @@ def _make_scalar_operation(
     eval_steps: int,
     stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
-    log_prefix = stream_log_prefix(stream)
-
     def run(context: LMEvalContext) -> LogRecord:
+        log_prefix = stream_log_prefix(stream, context)
         sums: dict[str, Array] = {}
         for batch_index, tokens in enumerate(stream_batches(stream, context)):
             key = random.fold_in(
@@ -144,8 +154,8 @@ def make_ci_l0_operation(
 
     def run(context: LMEvalContext) -> LogRecord:
         record = dict(scalars.run(context))
-        prefix = f"{stream_log_prefix(stream)}l0/{metric.ci_alive_threshold}_"
-        record[f"{stream_log_prefix(stream)}l0/bar_chart"] = BarChart(
+        prefix = f"{stream_log_prefix(stream, context)}l0/{metric.ci_alive_threshold}_"
+        record[f"{stream_log_prefix(stream, context)}l0/bar_chart"] = BarChart(
             rows=tuple(
                 (name.removeprefix(prefix), value)
                 for name, value in record.items()

@@ -61,7 +61,7 @@ from param_decomp.experiments.lm.eval_config import (
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
-from param_decomp.experiments.lm.scalar_eval_operations import stream_batches
+from param_decomp.experiments.lm.scalar_eval_operations import stream_batches, stream_log_prefix
 
 
 def _figure_record(now_step: int, media: dict[str, bytes]) -> DeferredMediaRecord:
@@ -118,7 +118,7 @@ def make_attention_operation(
             ),
         )
         return {
-            f"eval/loss/{name}": value
+            f"{stream_log_prefix('broad', context)}loss/{name}": value
             for name, value in attn_patterns_log_entries(metric.type, reductions).items()
         }
 
@@ -154,7 +154,7 @@ def make_hidden_acts_operation(
             ),
         )
         return {
-            f"eval/slow/loss/{name}": value
+            f"{stream_log_prefix('broad', context)}slow/loss/{name}": value
             for name, value in hidden_acts_log_entries(metric.type, reductions).items()
         }
 
@@ -295,7 +295,8 @@ def make_permutation_operation(
         match metric:
             case IdentityCIErrorConfig():
                 errors = compute_identity_ci_errors(spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE)
-                return {f"eval/slow/{name}": value for name, value in errors.items()}
+                prefix = stream_log_prefix("broad", context)
+                return {f"{prefix}slow/{name}": value for name, value in errors.items()}
             case UVPlotsConfig():
                 include_ci_heatmaps = False
                 components = {
