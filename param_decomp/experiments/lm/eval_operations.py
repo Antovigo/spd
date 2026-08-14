@@ -1,7 +1,6 @@
 """LM evaluation operation binding and execution."""
 
 from collections.abc import Callable
-from functools import partial
 
 import jax
 import numpy as np
@@ -25,6 +24,7 @@ from param_decomp.core.configs import (
     WeightMagnitudeConfig,
     WellTemperednessConfig,
 )
+from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.model import DecomposedModel
 from param_decomp.core.run import (
     BackgroundRenderer,
@@ -109,96 +109,63 @@ def make_lm_evaluation(
         ]
 
     targeted = target_pool_batches_for is not None
+    # Every stream a metric authored for BOTH measures; a plain run has exactly one.
     data_streams: tuple[Stream, ...] = ("broad", "target_data") if targeted else ("broad",)
-    """Every stream a metric authored for BOTH measures. A plain run has exactly one."""
-    optimized_stream: tuple[Stream, ...] = ("target_data",) if targeted else ("broad",)
-    """The stream the run optimizes for, and the DEFAULT for any single-stream eval: a
-    diagnostic you read once should describe the data you are interpreting. On a plain run
-    this IS the broad stream, so every such metric keeps the keys and the data it had."""
-    single_stream = optimized_stream[0]
+    # The stream the run optimizes for, and the DEFAULT for any single-stream eval: a
+    # diagnostic you read once should describe the data you are interpreting. On a plain run
+    # this IS the broad stream, so every such metric keeps the keys and the data it had.
+    optimized_stream: Stream = "target_data" if targeted else "broad"
 
     def well_temperedness_inputs(
         context: LMEvalContext,
     ) -> tuple[jax.Array, PRNGKeyArray]:
-        return stream_batches(single_stream, context)[0], jax.random.fold_in(
+        return stream_batches(optimized_stream, context)[0], jax.random.fold_in(
             run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + context.pass_index
+        )
+
+    def per_stream(
+        maker: Callable[..., EvalOperation[LMEvalContext]],
+        metric: object,
+        schedule: EvalSchedule,
+        streams: tuple[Stream, ...],
+    ) -> tuple[EvalOperation[LMEvalContext], ...]:
+        """One operation per stream. The scalar makers share a signature exactly so the
+        stream can be the only thing that varies between a metric's two readouts."""
+        return tuple(
+            maker(
+                metric,
+                schedule,
+                stream,
+                model,
+                capture_inputs,
+                run_key,
+                pd.steps,
+                eval.n_steps,
+                mesh,
+                compiler_options,
+            )
+            for stream in streams
         )
 
     def make_operations(metric: AnyEvalMetricConfig) -> tuple[EvalOperation[LMEvalContext], ...]:
         schedule = schedule_for(metric, eval)
         match metric:
             case CEandKLLossesConfig():
-                return tuple(
-                    make_ce_kl_operation(
-                        metric,
-                        schedule,
-                        stream,
-                        model,
-                        capture_inputs,
-                        run_key,
-                        pd.steps,
-                        eval.n_steps,
-                        mesh,
-                        compiler_options,
-                    )
-                    for stream in data_streams
+                return per_stream(make_ce_kl_operation, metric, schedule, data_streams)
+            case CIMaskedReconLossConfig():
+                return per_stream(
+                    make_single_variant_kl_operation, "ci_masked", schedule, data_streams
                 )
-            case CIMaskedReconLossConfig() | UnmaskedNoDeltaReconLossConfig():
-                # The unmasked arm is the non-target pass's OWN training term, already
-                # reported as a train loss there; measuring it again off-target would
-                # restate the objective, so it binds to the optimized stream alone.
-                streams = (
-                    optimized_stream
-                    if isinstance(metric, UnmaskedNoDeltaReconLossConfig)
-                    else data_streams
-                )
-                return tuple(
-                    make_single_variant_kl_operation(
-                        metric,
-                        schedule,
-                        stream,
-                        model,
-                        capture_inputs,
-                        run_key,
-                        pd.steps,
-                        eval.n_steps,
-                        mesh,
-                        compiler_options,
-                    )
-                    for stream in streams
+            case UnmaskedNoDeltaReconLossConfig():
+                # The non-target pass's OWN training term, already reported as a train loss
+                # there; measuring it again off-target would restate the objective.
+                return per_stream(
+                    make_single_variant_kl_operation, "unmasked", schedule, (optimized_stream,)
                 )
             case CI_L0Config():
-                return tuple(
-                    make_ci_l0_operation(
-                        metric,
-                        schedule,
-                        stream,
-                        model,
-                        capture_inputs,
-                        run_key,
-                        pd.steps,
-                        eval.n_steps,
-                        mesh,
-                        compiler_options,
-                    )
-                    for stream in data_streams
-                )
+                return per_stream(make_ci_l0_operation, metric, schedule, data_streams)
             case PGDReconLossConfig():
-                return tuple(
-                    make_fresh_pgd_operation(
-                        metric,
-                        schedule,
-                        stream,
-                        model,
-                        capture_inputs,
-                        run_key,
-                        pd.steps,
-                        eval.n_steps,
-                        mesh,
-                        compiler_options,
-                    )
-                    for stream in data_streams
-                )
+                return per_stream(make_fresh_pgd_operation, metric, schedule, data_streams)
 
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
                 return (
@@ -210,7 +177,7 @@ def make_lm_evaluation(
                         run_key,
                         pd.steps,
                         compiler_options,
-                        single_stream,
+                        optimized_stream,
                     ),
                 )
             case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
@@ -223,7 +190,7 @@ def make_lm_evaluation(
                         run_key,
                         pd.steps,
                         compiler_options,
-                        single_stream,
+                        optimized_stream,
                     ),
                 )
             case (
@@ -239,7 +206,7 @@ def make_lm_evaluation(
                         capture_inputs,
                         compiler_options,
                         renderer,
-                        single_stream,
+                        optimized_stream,
                     ),
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
@@ -251,7 +218,7 @@ def make_lm_evaluation(
                         capture_inputs,
                         compiler_options,
                         renderer,
-                        single_stream,
+                        optimized_stream,
                     ),
                 )
 
@@ -265,7 +232,7 @@ def make_lm_evaluation(
                         mesh,
                         compiler_options,
                         inputs_for_context=well_temperedness_inputs,
-                        log_prefix_for_context=partial(stream_log_prefix, single_stream),
+                        log_prefix=stream_log_prefix(optimized_stream, targeted),
                         figure_rendering=renderer if sink.accepts_deferred_media else None,
                     ),
                 )
@@ -302,6 +269,11 @@ def make_lm_evaluation(
     )
     assert not needs_target_stream or targeted, (
         f"{needs_target_stream} measure the tPD target stream; a plain run has no prompt pool"
+    )
+    authored = {type(metric) for metric in eval.metrics}
+    assert not {TwoStreamCIMeanPerComponentConfig, CIMeanPerComponentConfig} <= authored, (
+        "TwoStreamCIMeanPerComponent already computes the broad-stream reduction "
+        "CIMeanPerComponent does, so authoring both pays for that pass twice"
     )
     # The single-arm evals ARE arms of `CEandKLLosses`, under the same keys. Authoring both
     # is a duplicate measurement that `_run_due_evaluation`'s collision assert would catch

@@ -119,7 +119,7 @@ def make_well_temperedness_operation[ContextT: EvalInvocation](
     mesh: Mesh | None,
     compiler_options: dict[str, bool | int | str],
     inputs_for_context: Callable[[ContextT], tuple[Array, PRNGKeyArray]],
-    log_prefix_for_context: Callable[[ContextT], str],
+    log_prefix: str,
     figure_rendering: FigureRendering,
 ) -> EvalOperation[ContextT]:
     if figure_rendering is not None:
@@ -131,6 +131,10 @@ def make_well_temperedness_operation[ContextT: EvalInvocation](
     measure_ablations = make_well_temperedness_step(
         model, ci_capture_keys, metric, mesh, compiler_options
     )
+    # Which stream this operation measures is fixed when it is bound, so the namespace is a
+    # constant here rather than something to re-derive from every context.
+    prefix = f"{log_prefix}{_NAMESPACE}"
+    figure_key = f"{prefix}figures/preactivation_vs_ablation_damage"
 
     def run(context: ContextT) -> LogRecord:
         inputs, sampling_key = inputs_for_context(context)
@@ -142,8 +146,6 @@ def make_well_temperedness_operation[ContextT: EvalInvocation](
             sampling_key,
         )
         ablations = jax.device_get(device_ablations)
-        prefix = f"{log_prefix_for_context(context)}{_NAMESPACE}"
-        figure_key = f"{prefix}figures/preactivation_vs_ablation_damage"
         log_record: dict[str, float | PNGImage] = {
             f"{prefix}{name}": value
             for name, value in well_temperedness_log_entries(ablations, site_groups).items()

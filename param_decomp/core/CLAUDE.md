@@ -418,7 +418,9 @@ OBJECTIVE, but it is not the same DATA, so a corpus-vs-corpus comparison must re
 **A plain run has ONE stream and therefore never emits the segment** — every plain-run and
 toy key is exactly what it was before targeted runs existed. That is a COMPATIBILITY
 GUARANTEE, not an accident: `scalar_eval_operations.stream_log_prefix` keys off
-`context.target_batches is None`, and `experiments/lm/test_stream_log_namespace.py` pins it.
+`context.target_batches is None`: on a plain run there is no second stream to name, so the
+prefix is the same literal it always was. Nothing pins this in a test — if you change
+`stream_log_prefix`, check the plain arm by hand.
 Two consequences when adding a metric:
 
 - An eval that reads data must take BOTH its batches and its prefix from the same `Stream`

@@ -42,6 +42,7 @@ what keeps it correct when `n_steps` is raised.
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Literal, get_args
 
 import jax
 import jax.numpy as jnp
@@ -204,39 +205,40 @@ def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
     return _row_masked_cross_entropy(logits, batch.tokens, batch.valid_row_mask)
 
 
-CE_KL_VARIANTS: tuple[str, ...] = (
-    "ci_masked",
-    "unmasked",
-    "stoch_masked",
-    "random_masked",
-    "rounded_masked",
-    "zero_masked",
-)
-"""Every masking arm `make_ce_kl_step` can evaluate. Each costs ONE masked forward, so a
-caller that wants a single number asks for a single arm rather than filtering the record
-afterwards."""
+type CEKLVariant = Literal[
+    "ci_masked", "unmasked", "stoch_masked", "random_masked", "rounded_masked", "zero_masked"
+]
+"""One masking arm of the CE/KL evaluator. Each costs ONE masked forward, so a caller that
+wants a single number asks for a single arm rather than filtering the record afterwards."""
+
+CE_KL_VARIANTS: tuple[CEKLVariant, ...] = get_args(CEKLVariant.__value__)
+"""Every arm, in the order the full-fidelity `CEandKLLosses` reports them."""
 
 
 def make_ce_kl_step[PreparedT](
     model_static: DecomposedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
-    rounding_threshold: float,
-    variants: tuple[str, ...],
-    emit_ce_difference: bool,
+    variants: tuple[CEKLVariant, ...],
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
+    emit_ce_difference: bool,
+    rounding_threshold: float | None = None,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
-    """Build the single-purpose CE/KL evaluator over `variants` (a subset of
-    `CE_KL_VARIANTS`).
+    """Build the single-purpose CE/KL evaluator over `variants`.
 
     The masks for EVERY arm are drawn whether or not the arm is selected, so a narrowed
     evaluator's numbers are bit-identical to the full one's — only the forwards are
     skipped, and XLA drops the unused draws. `emit_ce_difference` adds the CE-vs-target
-    delta for each selected arm (free: same logits, no extra forward)."""
+    delta for each selected arm (free: same logits, no extra forward). `rounding_threshold`
+    belongs to the rounded arm alone, so it is present exactly when that arm is."""
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
-    assert variants and set(variants) <= set(CE_KL_VARIANTS), variants
+    assert variants, "a CE/KL evaluator with no arms measures nothing"
+    assert ("rounded_masked" in variants) == (rounding_threshold is not None), (
+        variants,
+        rounding_threshold,
+    )
 
     def eval_step(
         model: DecomposedModel[PreparedT],
@@ -277,18 +279,19 @@ def make_ce_kl_step[PreparedT](
                 },
                 zeros_delta,
             ),
-            "rounded_masked": (
-                {
-                    site: (batch.ci_lower[site] > rounding_threshold).astype(COMPUTE_DT)
-                    for site in model.site_names
-                },
-                zeros_delta,
-            ),
             "zero_masked": (
                 {site: jnp.zeros_like(batch.ci_lower[site]) for site in model.site_names},
                 zeros_delta,
             ),
         }
+        if rounding_threshold is not None:
+            variant_masks["rounded_masked"] = (
+                {
+                    site: (batch.ci_lower[site] > rounding_threshold).astype(COMPUTE_DT)
+                    for site in model.site_names
+                },
+                zeros_delta,
+            )
         variant_logits = {
             name: _compute_masked_output(model, batch, masks, deltas, mesh, frozenset())
             for name, (masks, deltas) in variant_masks.items()
@@ -458,11 +461,11 @@ def make_eval_step[PreparedT](
     ce_kl = make_ce_kl_step(
         model_static,
         ci_capture_keys,
-        rounding_threshold,
         CE_KL_VARIANTS,
-        True,
         mesh,
         compiler_options,
+        emit_ce_difference=True,
+        rounding_threshold=rounding_threshold,
         n_valid_rows=n_valid_rows,
     )
     ci_l0 = make_ci_l0_step(
