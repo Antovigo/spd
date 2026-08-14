@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -198,13 +198,20 @@ def faithfulness_loss(weight_deltas: dict[str, Float[Array, "_ _"]]) -> Float[Ar
 def _imp_min_terms(
     ci_upper: dict[str, Float[Array, "*leading _"]],
     per_value_penalty: Callable[[Float[Array, "*leading _"]], Float[Array, "*leading _"]],
-    reference_datapoint_count: int | None,
+    reference_datapoint_count: int | Literal["auto"] | None,
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """`(lp, freq)` for any per-value penalty `psi`, with per-site grouping (SPEC S7/S8):
 
     - `lp = Σ_s Σ_c f_c`, the bare per-component mean firing rate `f_c = (Σ_{b,t} psi(c)) / B·T`.
     - `freq = Σ_s Σ_c f_c · log2(1 + a' · f_c)`, the batch-invariant frequency penalty with
       `a' = reference_datapoint_count`; `0.0` when `reference_datapoint_count is None`.
+
+    `"auto"` resolves `a'` to this call's own `B·T`, making `a' · f_c` the raw firing COUNT
+    — the torch oracle's `log2(1 + layer_sums * world_size)` exactly, with no constant to
+    keep in sync. It is the only spelling that is correct on BOTH tPD passes at once: a
+    literal `a'` is right for whichever stream's `B·T` it names and off by that stream's
+    ratio on the other (SPEC T6 shares one frequency block across both passes), which puts
+    the other stream's penalty knee at `k = B·T / a'` firing tokens instead of 1.
 
     The two imp-min penalties (`L_p`, smooth-L0) differ ONLY in `psi`. Under GSPMD the
     `*leading` axes are the global batch, so `jnp.sum` IS the exact global per-component
@@ -220,9 +227,11 @@ def _imp_min_terms(
         per_component_means = per_component_sums / n_positions  # f_c
         lp = lp + jnp.sum(per_component_means)
         if reference_datapoint_count is not None:
+            a_prime = (
+                n_positions if reference_datapoint_count == "auto" else reference_datapoint_count
+            )
             freq = freq + jnp.sum(
-                per_component_means
-                * jnp.log2(1.0 + reference_datapoint_count * per_component_means)
+                per_component_means * jnp.log2(1.0 + a_prime * per_component_means)
             )
     return lp, freq
 
@@ -232,7 +241,7 @@ def importance_minimality_terms(
     ci_upper: dict[str, Float[Array, "*leading _"]],
     pnorm: Float[Array, ""],
     eps: float,
-    reference_datapoint_count: int | None,
+    reference_datapoint_count: int | Literal["auto"] | None,
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """`L_p` imp-min terms: per-value penalty `(c + eps)^pnorm`, singular at `c=0` for
     `pnorm < 1` (the `eps` floor caps the gradient there)."""
@@ -243,7 +252,7 @@ def importance_minimality_terms(
 def smooth_l0_importance_minimality_terms(
     ci_upper: dict[str, Float[Array, "*leading _"]],
     gamma: Float[Array, ""],
-    reference_datapoint_count: int | None,
+    reference_datapoint_count: int | Literal["auto"] | None,
     normalize_at_one: bool,
 ) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """Geman–McClure smooth-L0 imp-min terms: per-value penalty `c^2 / (c^2 + gamma^2)`.

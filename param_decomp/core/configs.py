@@ -182,9 +182,15 @@ class FrequencyMinimalityConfig(BaseConfig):
     """
 
     coeff: NonNegativeFloat | ScheduleConfig
-    reference_datapoint_count: PositiveInt = Field(
+    reference_datapoint_count: PositiveInt | Literal["auto"] = Field(
         validation_alias=AliasChoices("reference_datapoint_count", "reference_token_count")
     )
+    """`"auto"` resolves `a'` to each pass's OWN `B·T`, so `a' · f_c` is the raw firing
+    count — the torch oracle's form, and the only spelling correct on both tPD passes at
+    once: SPEC T6 shares one frequency block across the target and non-target passes, whose
+    `B·T` differ (a 5-token prompt stream vs a 64-token corpus stream), so any literal is
+    right for one and off by their ratio on the other. Prefer it over restating the
+    arithmetic, which also goes stale the moment a batch size changes."""
 
 
 class ImportanceMinimalityLossConfig(LossMetricConfig):

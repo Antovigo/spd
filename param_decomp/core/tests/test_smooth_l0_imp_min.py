@@ -108,3 +108,37 @@ def test_normalize_at_one_pins_a_full_component_to_one():
         ci, jnp.asarray(1.0), reference_datapoint_count=None, normalize_at_one=False
     )
     assert abs(float(bare) - 0.5) < 1e-6
+
+
+def test_auto_reference_count_is_the_raw_firing_count_on_any_geometry():
+    """`"auto"` resolves `a'` to each call's own `B·T`, so `a' · f_c` is the raw firing
+    count — the torch oracle's `log2(1 + layer_sums * world_size)`. The point is that ONE
+    config is correct on both tPD passes (SPEC T6 shares the frequency block) even though
+    their `B·T` differ; a literal `a'` is right for one stream and off by their ratio on
+    the other."""
+    gamma = jnp.asarray(0.1)
+    target = {"a": jnp.array([[0.0, 0.5, 1.0], [0.2, 0.0, 0.9]])}  # B·T = 2
+    nontarget = {"a": jnp.array([[0.4, 0.1, 0.8]] * 8)}  # B·T = 8
+
+    for ci in (target, nontarget):
+        rows = next(iter(ci.values())).shape[0]
+        auto = smooth_l0_importance_minimality_terms(
+            ci, gamma, reference_datapoint_count="auto", normalize_at_one=False
+        )[1]
+        literal = smooth_l0_importance_minimality_terms(
+            ci, gamma, reference_datapoint_count=rows, normalize_at_one=False
+        )[1]
+        assert jnp.allclose(auto, literal), "auto must equal that stream's own B·T"
+
+        sums = _phi(next(iter(ci.values())), 0.1).sum(axis=0)  # the raw-count form
+        assert jnp.allclose(auto, (sums / rows * jnp.log2(1.0 + sums)).sum())
+
+    # one literal cannot serve both passes: correct for the target, wrong for the other
+    assert not jnp.allclose(
+        smooth_l0_importance_minimality_terms(
+            nontarget, gamma, reference_datapoint_count=2, normalize_at_one=False
+        )[1],
+        smooth_l0_importance_minimality_terms(
+            nontarget, gamma, reference_datapoint_count="auto", normalize_at_one=False
+        )[1],
+    )
