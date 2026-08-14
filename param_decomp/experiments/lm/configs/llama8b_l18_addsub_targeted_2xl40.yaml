@@ -70,23 +70,19 @@ pd:
         coeff: 1.67e-05
         reference_datapoint_count: 640  # pd.batch_size 128 x the pool's 5 tokens
     - type: MergedStochasticSubsetPPGDReconLoss
-      # `0.5 stochastic + g(t)*0.5 PPGD` in expectation, one forward: coeff*(1-f) = 0.5
-      # and coeff*f = 0.5*g give coeff = 0.5*(1+g), f = g/(1+g) — hence BOTH knobs
-      # scheduled on the same 20%->30% activation ramp. Editing one alone breaks the
-      # identity.
-      coeff:
+      # Hand the recon pressure over from stochastic to persistent-PGD without changing how
+      # hard it pulls. `coeff` IS the total (see the config class docstring) and
+      # `adv_fraction` is the per-batch-element probability of drawing the adversarial
+      # family, so a CONSTANT coeff with adv_fraction 0 -> 1 swaps WHICH family supplies the
+      # pressure while holding the amount fixed: 100% stochastic at step 0, 100% PGD from
+      # `at: 0.05` — step 1000 of 20000. That knot is a FRACTION of training, so it moves if
+      # `pd.steps` changes; at 10k steps the same knot lands at step 500.
+      coeff: 1.0
+      adv_fraction:
         max_val: 1.0
         points:
-          - {at: 0.0, frac: 0.5}
-          - {at: 0.2, frac: 0.5}
-          - {at: 0.3, frac: 1.0}
-          - {at: 1.0, frac: 1.0}
-      adv_fraction:
-        max_val: 0.5
-        points:
           - {at: 0.0, frac: 0.0}
-          - {at: 0.2, frac: 0.0}
-          - {at: 0.3, frac: 1.0}
+          - {at: 0.05, frac: 1.0}
           - {at: 1.0, frac: 1.0}
       routing:
         type: uniform_k_subset
@@ -100,7 +96,10 @@ pd:
           max_val: 0.01
           points:
             - {at: 0.0, frac: 0.0}
-            - {at: 0.025, frac: 1.0}
+            # Full source LR by step 100 (of 20000), where adv_fraction has only reached
+            # 0.1: the adversary must be genuinely ascended before the handover gives it
+            # real weight, or the early "adversarial" elements are near-init sources.
+            - {at: 0.005, frac: 1.0}
             - {at: 1.0, frac: 1.0}
       source_shape: bsc
 prompts:
