@@ -204,17 +204,39 @@ def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
     return _row_masked_cross_entropy(logits, batch.tokens, batch.valid_row_mask)
 
 
+CE_KL_VARIANTS: tuple[str, ...] = (
+    "ci_masked",
+    "unmasked",
+    "stoch_masked",
+    "random_masked",
+    "rounded_masked",
+    "zero_masked",
+)
+"""Every masking arm `make_ce_kl_step` can evaluate. Each costs ONE masked forward, so a
+caller that wants a single number asks for a single arm rather than filtering the record
+afterwards."""
+
+
 def make_ce_kl_step[PreparedT](
     model_static: DecomposedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     rounding_threshold: float,
+    variants: tuple[str, ...],
+    emit_ce_difference: bool,
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
-    """Build the single-purpose CE/KL evaluator."""
+    """Build the single-purpose CE/KL evaluator over `variants` (a subset of
+    `CE_KL_VARIANTS`).
+
+    The masks for EVERY arm are drawn whether or not the arm is selected, so a narrowed
+    evaluator's numbers are bit-identical to the full one's — only the forwards are
+    skipped, and XLA drops the unused draws. `emit_ce_difference` adds the CE-vs-target
+    delta for each selected arm (free: same logits, no extra forward)."""
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
+    assert variants and set(variants) <= set(CE_KL_VARIANTS), variants
 
     def eval_step(
         model: DecomposedModel[PreparedT],
@@ -239,7 +261,7 @@ def make_ce_kl_step[PreparedT](
                 batch.tokens.shape,
                 COMPUTE_DT,
             )
-        variants = {
+        variant_masks = {
             "ci_masked": (batch.ci_lower, zeros_delta),
             "unmasked": (
                 {site: jnp.ones_like(batch.ci_lower[site]) for site in model.site_names},
@@ -269,19 +291,21 @@ def make_ce_kl_step[PreparedT](
         }
         variant_logits = {
             name: _compute_masked_output(model, batch, masks, deltas, mesh, frozenset())
-            for name, (masks, deltas) in variants.items()
+            for name, (masks, deltas) in variant_masks.items()
+            if name in variants
         }
-        target_ce = _ce(batch, batch.clean.output)
         metrics = {
             f"ce_kl/kl_{name}": _kl(batch, logits) for name, logits in variant_logits.items()
         }
-        metrics.update(
-            {
-                f"ce_kl/ce_difference_{name}": _ce(batch, variant_logits[name]) - target_ce
-                for name in variants
-                if name != "zero_masked"
-            }
-        )
+        if emit_ce_difference:
+            target_ce = _ce(batch, batch.clean.output)
+            metrics.update(
+                {
+                    f"ce_kl/ce_difference_{name}": _ce(batch, variant_logits[name]) - target_ce
+                    for name in variant_logits
+                    if name != "zero_masked"
+                }
+            )
         return metrics
 
     return filter_jit(eval_step, compiler_options=compiler_options)
@@ -435,6 +459,8 @@ def make_eval_step[PreparedT](
         model_static,
         ci_capture_keys,
         rounding_threshold,
+        CE_KL_VARIANTS,
+        True,
         mesh,
         compiler_options,
         n_valid_rows=n_valid_rows,

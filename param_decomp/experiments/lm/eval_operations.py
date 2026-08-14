@@ -1,5 +1,8 @@
 """LM evaluation operation binding and execution."""
 
+from collections.abc import Callable
+from functools import partial
+
 import jax
 import numpy as np
 from jax.sharding import Mesh, NamedSharding
@@ -10,13 +13,16 @@ from param_decomp.core.configs import (
     CI_L0Config,
     CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
+    CIMaskedReconLossConfig,
     CIMeanPerComponentConfig,
     ComponentActivationDensityConfig,
     IdentityCIErrorConfig,
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
+    UnmaskedNoDeltaReconLossConfig,
     UVPlotsConfig,
+    WeightMagnitudeConfig,
     WellTemperednessConfig,
 )
 from param_decomp.core.model import DecomposedModel
@@ -35,20 +41,26 @@ from param_decomp.experiments.lm.diagnostic_eval_operations import (
     make_hidden_acts_operation,
     make_permutation_operation,
     make_site_figures_operation,
+    make_two_stream_ci_mean_operation,
+    make_weight_magnitude_operation,
 )
 from param_decomp.experiments.lm.eval_config import (
     ArithmeticCIGridConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
+    TwoStreamCIMeanPerComponentConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 from param_decomp.experiments.lm.resolved import LMAnyRun
 from param_decomp.experiments.lm.scalar_eval_operations import (
+    Stream,
     make_ce_kl_operation,
     make_ci_l0_operation,
     make_fresh_pgd_operation,
+    make_single_variant_kl_operation,
+    stream_log_prefix,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
@@ -68,8 +80,16 @@ def make_lm_evaluation(
     n_proc: int,
     sink: MetricsSink,
     compiler_options: dict[str, bool | int | str],
+    target_pool_batches_for: Callable[[int], list[jax.Array]] | None,
 ) -> Evaluation[LMEvalContext]:
-    """Construct one executable operation for every authored LM metric."""
+    """Construct the executable operations for every authored LM metric — one PER STREAM
+    the metric measures.
+
+    `target_pool_batches_for(pass_index)` supplies the tPD target stream, which `data.eval`
+    cannot: the prompt pool has no held-out split, so the targeted root draws pool batches
+    the same way training does. `None` on a plain run, and that is what makes a plain run's
+    metric set — and every one of its log keys — exactly what it was before targeted runs
+    existed: `data_streams` collapses to the single broad stream."""
     pd = built.pd
     capture_inputs = built.ci_fn.capture_keys
     data = built.data
@@ -94,95 +114,183 @@ def make_lm_evaluation(
             run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + context.pass_index
         )
 
-    def make_operation(metric: AnyEvalMetricConfig) -> EvalOperation[LMEvalContext]:
+    targeted = target_pool_batches_for is not None
+    data_streams: tuple[Stream, ...] = ("broad", "target_data") if targeted else ("broad",)
+    """Every stream a data-dependent metric measures. A plain run has exactly one."""
+    optimized_stream: tuple[Stream, ...] = ("target_data",) if targeted else ("broad",)
+    """Just the stream the run optimizes for — what a metric that is only meaningful there
+    binds to. On a plain run that IS the broad stream, so such a metric stays authorable."""
+
+    def make_operations(metric: AnyEvalMetricConfig) -> tuple[EvalOperation[LMEvalContext], ...]:
         schedule = schedule_for(metric, eval)
         match metric:
             case CEandKLLossesConfig():
-                return make_ce_kl_operation(
-                    metric,
-                    schedule,
-                    model,
-                    capture_inputs,
-                    run_key,
-                    pd.steps,
-                    eval.n_steps,
-                    mesh,
-                    compiler_options,
+                return tuple(
+                    make_ce_kl_operation(
+                        metric,
+                        schedule,
+                        stream,
+                        model,
+                        capture_inputs,
+                        run_key,
+                        pd.steps,
+                        eval.n_steps,
+                        mesh,
+                        compiler_options,
+                    )
+                    for stream in data_streams
+                )
+            case CIMaskedReconLossConfig() | UnmaskedNoDeltaReconLossConfig():
+                # The unmasked arm is the non-target pass's OWN training term, already
+                # reported as a train loss there; measuring it again off-target would
+                # restate the objective, so it binds to the optimized stream alone.
+                streams = (
+                    optimized_stream
+                    if isinstance(metric, UnmaskedNoDeltaReconLossConfig)
+                    else data_streams
+                )
+                return tuple(
+                    make_single_variant_kl_operation(
+                        metric,
+                        schedule,
+                        stream,
+                        model,
+                        capture_inputs,
+                        run_key,
+                        pd.steps,
+                        eval.n_steps,
+                        mesh,
+                        compiler_options,
+                    )
+                    for stream in streams
                 )
             case CI_L0Config():
-                return make_ci_l0_operation(
-                    metric,
-                    schedule,
-                    model,
-                    capture_inputs,
-                    run_key,
-                    pd.steps,
-                    eval.n_steps,
-                    mesh,
-                    compiler_options,
+                return tuple(
+                    make_ci_l0_operation(
+                        metric,
+                        schedule,
+                        stream,
+                        model,
+                        capture_inputs,
+                        run_key,
+                        pd.steps,
+                        eval.n_steps,
+                        mesh,
+                        compiler_options,
+                    )
+                    for stream in data_streams
                 )
             case PGDReconLossConfig():
-                return make_fresh_pgd_operation(
-                    metric,
-                    schedule,
-                    model,
-                    capture_inputs,
-                    run_key,
-                    pd.steps,
-                    eval.n_steps,
-                    mesh,
-                    compiler_options,
+                return tuple(
+                    make_fresh_pgd_operation(
+                        metric,
+                        schedule,
+                        stream,
+                        model,
+                        capture_inputs,
+                        run_key,
+                        pd.steps,
+                        eval.n_steps,
+                        mesh,
+                        compiler_options,
+                    )
+                    for stream in data_streams
                 )
 
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
-                return make_attention_operation(
-                    metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
+                return (
+                    make_attention_operation(
+                        metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
+                    ),
                 )
             case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
-                return make_hidden_acts_operation(
-                    metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
+                return (
+                    make_hidden_acts_operation(
+                        metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
+                    ),
                 )
             case (
                 CIHistogramsConfig()
                 | ComponentActivationDensityConfig()
                 | CIMeanPerComponentConfig()
             ):
-                return make_site_figures_operation(
-                    metric, schedule, model, capture_inputs, compiler_options, renderer
+                return (
+                    make_site_figures_operation(
+                        metric, schedule, model, capture_inputs, compiler_options, renderer
+                    ),
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
-                return make_permutation_operation(
-                    metric, schedule, model, capture_inputs, compiler_options, renderer
+                return (
+                    make_permutation_operation(
+                        metric, schedule, model, capture_inputs, compiler_options, renderer
+                    ),
                 )
 
             case WellTemperednessConfig():
-                return make_well_temperedness_operation(
-                    metric,
-                    schedule,
-                    model,
-                    capture_inputs,
-                    mesh,
-                    compiler_options,
-                    inputs_for_context=well_temperedness_inputs,
-                    figure_rendering=renderer if sink.accepts_deferred_media else None,
+                return (
+                    make_well_temperedness_operation(
+                        metric,
+                        schedule,
+                        model,
+                        capture_inputs,
+                        mesh,
+                        compiler_options,
+                        inputs_for_context=well_temperedness_inputs,
+                        # It samples `context.batches` — the broad stream — so it carries
+                        # that stream's namespace rather than the bare one.
+                        log_prefix_for_context=partial(stream_log_prefix, "broad"),
+                        figure_rendering=renderer if sink.accepts_deferred_media else None,
+                    ),
                 )
 
             case ArithmeticCIGridConfig():
-                return make_arithmetic_operation(
-                    metric,
-                    schedule,
-                    built.target,
-                    model,
-                    capture_inputs,
-                    mesh,
-                    n_proc,
-                    sink,
-                    run_key,
-                    pd.steps,
-                    compiler_options,
+                return (
+                    make_arithmetic_operation(
+                        metric,
+                        schedule,
+                        built.target,
+                        model,
+                        capture_inputs,
+                        mesh,
+                        n_proc,
+                        sink,
+                        run_key,
+                        pd.steps,
+                        compiler_options,
+                    ),
                 )
+            case TwoStreamCIMeanPerComponentConfig():
+                return (
+                    make_two_stream_ci_mean_operation(
+                        schedule, model, capture_inputs, compiler_options, renderer
+                    ),
+                )
+            case WeightMagnitudeConfig():
+                return (make_weight_magnitude_operation(schedule, renderer),)
 
-    operations = tuple(make_operation(metric) for metric in eval.metrics)
+    needs_target_stream = tuple(
+        metric.type
+        for metric in eval.metrics
+        if isinstance(metric, TwoStreamCIMeanPerComponentConfig)
+    )
+    assert not needs_target_stream or targeted, (
+        f"{needs_target_stream} measure the tPD target stream; a plain run has no prompt pool"
+    )
+    # The single-arm evals ARE arms of `CEandKLLosses`, under the same keys. Authoring both
+    # is a duplicate measurement that `_run_due_evaluation`'s collision assert would catch
+    # at the first eval pass — hours into a run. Catch it while reading the config.
+    single_arm = tuple(
+        metric.type
+        for metric in eval.metrics
+        if isinstance(metric, CIMaskedReconLossConfig | UnmaskedNoDeltaReconLossConfig)
+    )
+    assert not (single_arm and any(isinstance(m, CEandKLLossesConfig) for m in eval.metrics)), (
+        f"{single_arm} emit arms CEandKLLosses already emits, under the same `ce_kl/kl_*` "
+        "keys: author the narrow metrics OR CEandKLLosses, not both"
+    )
+    operations = tuple(
+        operation for metric in eval.metrics for operation in make_operations(metric)
+    )
 
     def make_context(state: TrainState, now_step: int) -> LMEvalContext:
         pass_index = now_step // eval.every
@@ -191,6 +299,11 @@ def make_lm_evaluation(
             now_step=now_step,
             pass_index=pass_index,
             batches=tuple(batches(pass_index)),
+            target_batches=(
+                None
+                if target_pool_batches_for is None
+                else tuple(target_pool_batches_for(pass_index))
+            ),
         )
 
     return Evaluation(operations, make_context)

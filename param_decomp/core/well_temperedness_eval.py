@@ -32,8 +32,13 @@ from param_decomp.core.well_temperedness import (
     well_temperedness_log_entries,
 )
 
-_PREFIX = "eval/slow/well_temperedness/"
-_FIGURE_KEY = f"{_PREFIX}figures/preactivation_vs_ablation_damage"
+_NAMESPACE = "slow/well_temperedness/"
+"""The part of the key BELOW the stream namespace. The stream itself is the caller's to
+supply: this metric samples the eval distribution, so on a two-stream run it belongs to
+whichever stream those batches came from."""
+_FIGURE_STEP_KEY = f"eval/{_NAMESPACE}figure_step"
+"""The figure step AXIS, deliberately stream-independent — a second stream must not fork
+the axis W&B serializes these renders against (SPEC S28)."""
 _MAX_FIGURE_LOCATIONS = 48
 type FigureRendering = BackgroundRenderer | Literal["synchronous"] | None
 
@@ -98,11 +103,11 @@ def _plot_preactivation_vs_damage(ablations: Ablations) -> bytes:
     return png_buffer.getvalue()
 
 
-def _render_deferred(ablations: Ablations, now_step: int) -> DeferredMediaRecord:
+def _render_deferred(ablations: Ablations, figure_key: str, now_step: int) -> DeferredMediaRecord:
     return DeferredMediaRecord(
-        step_key=f"{_PREFIX}figure_step",
+        step_key=_FIGURE_STEP_KEY,
         step=now_step,
-        media={_FIGURE_KEY: _plot_preactivation_vs_damage(ablations)},
+        media={figure_key: _plot_preactivation_vs_damage(ablations)},
     )
 
 
@@ -114,6 +119,7 @@ def make_well_temperedness_operation[ContextT: EvalInvocation](
     mesh: Mesh | None,
     compiler_options: dict[str, bool | int | str],
     inputs_for_context: Callable[[ContextT], tuple[Array, PRNGKeyArray]],
+    log_prefix_for_context: Callable[[ContextT], str],
     figure_rendering: FigureRendering,
 ) -> EvalOperation[ContextT]:
     if figure_rendering is not None:
@@ -136,17 +142,19 @@ def make_well_temperedness_operation[ContextT: EvalInvocation](
             sampling_key,
         )
         ablations = jax.device_get(device_ablations)
+        prefix = f"{log_prefix_for_context(context)}{_NAMESPACE}"
+        figure_key = f"{prefix}figures/preactivation_vs_ablation_damage"
         log_record: dict[str, float | PNGImage] = {
-            f"{_PREFIX}{name}": value
+            f"{prefix}{name}": value
             for name, value in well_temperedness_log_entries(ablations, site_groups).items()
         }
         match figure_rendering:
             case None:
                 pass
             case "synchronous":
-                log_record[_FIGURE_KEY] = PNGImage(_plot_preactivation_vs_damage(ablations))
+                log_record[figure_key] = PNGImage(_plot_preactivation_vs_damage(ablations))
             case BackgroundRenderer() as renderer:
-                renderer.submit(partial(_render_deferred, ablations, context.now_step))
+                renderer.submit(partial(_render_deferred, ablations, figure_key, context.now_step))
         return log_record
 
     return EvalOperation(schedule, run)

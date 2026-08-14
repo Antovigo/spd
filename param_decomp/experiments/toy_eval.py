@@ -119,6 +119,9 @@ def make_toy_evaluation_operations(
                     mesh,
                     compiler_options,
                     inputs_for_context=well_temperedness_inputs,
+                    # A toy has ONE stream, so its keys carry no stream segment — the same
+                    # `eval/slow/well_temperedness/*` a plain LM run logs.
+                    log_prefix_for_context=lambda _context: "eval/",
                     figure_rendering="synchronous" if wandb_configured else None,
                 )
             case CEandKLLossesConfig():
