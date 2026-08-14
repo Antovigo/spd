@@ -186,11 +186,17 @@ so a plain run's operations and keys are untouched. The namespace rule itself is
 | authored metric | streams it binds to |
 |---|---|
 | `CI_L0`, `PGDReconLoss`, `CIMaskedReconLoss`, `CEandKLLosses` | both on tPD, broad on plain |
-| `UnmaskedNoDeltaReconLoss` | the OPTIMIZED stream only |
-| attn-patterns / hidden-acts recon, `IdentityCIError`, `WellTemperedness`, the site figures | broad only (labelled `nontarget_data/` on tPD) |
+| `UnmaskedNoDeltaReconLoss`, attn-patterns / hidden-acts recon, `WellTemperedness`, the site figures, the permutation plots, `IdentityCIError` | the OPTIMIZED stream only |
 | `WeightMagnitude` | none — reads V/U, no batch |
 | `TwoStreamCIMeanPerComponent` | both, in one figure; refuses on a plain run |
 | `ArithmeticCIGrid` | none — brings its own probe grid |
+
+**A single-stream eval defaults to the OPTIMIZED stream** (`optimized_stream`, hence
+`single_stream`): a diagnostic you read once should describe the data you are interpreting,
+which on a tPD run is the prompt pool. On a plain run that tuple IS `("broad",)`, so those
+metrics keep both the data and the keys they had. The consequence on a tPD run is that
+`eval/nontarget_data/` appears ONLY for metrics deliberately bound to both streams — a
+figure or scalar with no stream segment is target-pool data.
 
 `CIMaskedReconLoss` and `UnmaskedNoDeltaReconLoss` are authorable under `eval.metrics` as
 well as `loss_metrics` — the `PGDReconLoss` dual-role pattern (`coeff` null in the eval

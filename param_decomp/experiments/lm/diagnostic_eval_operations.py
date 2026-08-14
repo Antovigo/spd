@@ -61,7 +61,11 @@ from param_decomp.experiments.lm.eval_config import (
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
-from param_decomp.experiments.lm.scalar_eval_operations import stream_batches, stream_log_prefix
+from param_decomp.experiments.lm.scalar_eval_operations import (
+    Stream,
+    stream_batches,
+    stream_log_prefix,
+)
 
 
 def _figure_record(now_step: int, media: dict[str, bytes]) -> DeferredMediaRecord:
@@ -97,6 +101,7 @@ def make_attention_operation(
     run_key: PRNGKeyArray,
     train_steps: int,
     compiler_options: dict[str, bool | int | str],
+    stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIMaskedAttnPatternsReconLossConfig():
@@ -112,13 +117,13 @@ def make_attention_operation(
             model,
             context.state.decomposition.components,
             context.state.decomposition.ci_fn,
-            list(context.batches),
+            list(stream_batches(stream, context)),
             jax.random.fold_in(
                 run_key, EvalKeyStream.ATTENTION_PATTERNS * train_steps + context.pass_index
             ),
         )
         return {
-            f"{stream_log_prefix('broad', context)}loss/{name}": value
+            f"{stream_log_prefix(stream, context)}loss/{name}": value
             for name, value in attn_patterns_log_entries(metric.type, reductions).items()
         }
 
@@ -133,6 +138,7 @@ def make_hidden_acts_operation(
     run_key: PRNGKeyArray,
     train_steps: int,
     compiler_options: dict[str, bool | int | str],
+    stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHiddenActsReconLossConfig():
@@ -148,13 +154,13 @@ def make_hidden_acts_operation(
             model,
             context.state.decomposition.components,
             context.state.decomposition.ci_fn,
-            list(context.batches),
+            list(stream_batches(stream, context)),
             jax.random.fold_in(
                 run_key, EvalKeyStream.HIDDEN_ACTS * train_steps + context.pass_index
             ),
         )
         return {
-            f"{stream_log_prefix('broad', context)}slow/loss/{name}": value
+            f"{stream_log_prefix(stream, context)}slow/loss/{name}": value
             for name, value in hidden_acts_log_entries(metric.type, reductions).items()
         }
 
@@ -234,6 +240,7 @@ def make_site_figures_operation(
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
+    stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHistogramsConfig():
@@ -265,7 +272,7 @@ def make_site_figures_operation(
             step,
             model,
             context.state.decomposition.ci_fn,
-            list(context.batches),
+            list(stream_batches(stream, context)),
             limit,
         )
         renderer.submit(partial(_render_selected_figures, reductions, wanted, context.now_step))
@@ -281,6 +288,7 @@ def make_permutation_operation(
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
+    stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
     spec = resolve_permutation_metrics(model.site_names, [metric])
     position_step = make_position_ci_step(model, ci_capture_keys, compiler_options)
@@ -290,12 +298,12 @@ def make_permutation_operation(
             position_step,
             model,
             context.state.decomposition.ci_fn,
-            list(context.batches),
+            list(stream_batches(stream, context)),
         )
         match metric:
             case IdentityCIErrorConfig():
                 errors = compute_identity_ci_errors(spec, position_ci, IDENTITY_CI_ERROR_TOLERANCE)
-                prefix = stream_log_prefix("broad", context)
+                prefix = stream_log_prefix(stream, context)
                 return {f"{prefix}slow/{name}": value for name, value in errors.items()}
             case UVPlotsConfig():
                 include_ci_heatmaps = False

@@ -60,6 +60,7 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
     make_ci_l0_operation,
     make_fresh_pgd_operation,
     make_single_variant_kl_operation,
+    stream_batches,
     stream_log_prefix,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
@@ -107,19 +108,21 @@ def make_lm_evaluation(
             for j in range(eval.n_steps)
         ]
 
+    targeted = target_pool_batches_for is not None
+    data_streams: tuple[Stream, ...] = ("broad", "target_data") if targeted else ("broad",)
+    """Every stream a metric authored for BOTH measures. A plain run has exactly one."""
+    optimized_stream: tuple[Stream, ...] = ("target_data",) if targeted else ("broad",)
+    """The stream the run optimizes for, and the DEFAULT for any single-stream eval: a
+    diagnostic you read once should describe the data you are interpreting. On a plain run
+    this IS the broad stream, so every such metric keeps the keys and the data it had."""
+    single_stream = optimized_stream[0]
+
     def well_temperedness_inputs(
         context: LMEvalContext,
     ) -> tuple[jax.Array, PRNGKeyArray]:
-        return context.batches[0], jax.random.fold_in(
+        return stream_batches(single_stream, context)[0], jax.random.fold_in(
             run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + context.pass_index
         )
-
-    targeted = target_pool_batches_for is not None
-    data_streams: tuple[Stream, ...] = ("broad", "target_data") if targeted else ("broad",)
-    """Every stream a data-dependent metric measures. A plain run has exactly one."""
-    optimized_stream: tuple[Stream, ...] = ("target_data",) if targeted else ("broad",)
-    """Just the stream the run optimizes for — what a metric that is only meaningful there
-    binds to. On a plain run that IS the broad stream, so such a metric stays authorable."""
 
     def make_operations(metric: AnyEvalMetricConfig) -> tuple[EvalOperation[LMEvalContext], ...]:
         schedule = schedule_for(metric, eval)
@@ -200,13 +203,27 @@ def make_lm_evaluation(
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
                 return (
                     make_attention_operation(
-                        metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
+                        metric,
+                        schedule,
+                        model,
+                        capture_inputs,
+                        run_key,
+                        pd.steps,
+                        compiler_options,
+                        single_stream,
                     ),
                 )
             case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
                 return (
                     make_hidden_acts_operation(
-                        metric, schedule, model, capture_inputs, run_key, pd.steps, compiler_options
+                        metric,
+                        schedule,
+                        model,
+                        capture_inputs,
+                        run_key,
+                        pd.steps,
+                        compiler_options,
+                        single_stream,
                     ),
                 )
             case (
@@ -216,13 +233,25 @@ def make_lm_evaluation(
             ):
                 return (
                     make_site_figures_operation(
-                        metric, schedule, model, capture_inputs, compiler_options, renderer
+                        metric,
+                        schedule,
+                        model,
+                        capture_inputs,
+                        compiler_options,
+                        renderer,
+                        single_stream,
                     ),
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
                 return (
                     make_permutation_operation(
-                        metric, schedule, model, capture_inputs, compiler_options, renderer
+                        metric,
+                        schedule,
+                        model,
+                        capture_inputs,
+                        compiler_options,
+                        renderer,
+                        single_stream,
                     ),
                 )
 
@@ -236,9 +265,7 @@ def make_lm_evaluation(
                         mesh,
                         compiler_options,
                         inputs_for_context=well_temperedness_inputs,
-                        # It samples `context.batches` — the broad stream — so it carries
-                        # that stream's namespace rather than the bare one.
-                        log_prefix_for_context=partial(stream_log_prefix, "broad"),
+                        log_prefix_for_context=partial(stream_log_prefix, single_stream),
                         figure_rendering=renderer if sink.accepts_deferred_media else None,
                     ),
                 )
