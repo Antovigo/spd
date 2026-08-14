@@ -50,6 +50,8 @@ from param_decomp.core.checkpoint import (
 from param_decomp.core.ci_fn import CIFnArch
 from param_decomp.core.components import init_component_stacks
 from param_decomp.core.configs import (
+    IMP_MIN_METRIC_NAMES,
+    NONTARGET_STREAM,
     AnyPDConfig,
     Cadence,
     NontargetConfig,
@@ -221,9 +223,7 @@ def _ensure_global[T](tree: T, mesh: Mesh) -> T:
 _METRIC_KEYS = {
     "total": "train/loss/total",
     "faith": "train/loss/FaithfulnessLoss",
-    "imp": "train/loss/ImportanceMinimalityLoss",
-    "imp_smooth_l0": "train/loss/SmoothL0ImportanceMinimalityLoss",
-    "freq": "train/loss/FrequencyMinimalityLoss",
+    **{short: f"train/loss/{name}" for short, name in IMP_MIN_METRIC_NAMES.items()},
     "p_imp": "train/schedules/p_imp",
     "gamma_imp": "train/schedules/gamma_imp",
     "src_lr": "train/schedules/lr/src",
@@ -333,7 +333,10 @@ class MetricsSink:
         self._last_committed_step = step
         record = {
             _METRIC_KEYS.get(
-                k, f"train/{k}" if k.startswith(("grad_norms/", "loss/", "schedules/")) else k
+                k,
+                f"train/{k}"
+                if k.startswith(("grad_norms/", "loss/", "schedules/", f"{NONTARGET_STREAM}/"))
+                else k,
             ): v
             for k, v in record.items()
         }  # keys already starting "train/" or "eval/" pass through verbatim

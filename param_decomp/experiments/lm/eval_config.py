@@ -62,3 +62,15 @@ class ArithmeticCIGridConfig(BaseConfig):
     b_range: tuple[int, int] = (1, 100)
     thresholds: list[float] = Field(default_factory=lambda: [0.1])
     top_k: PositiveInt = 24
+
+
+class TwoStreamCIMeanPerComponentConfig(BaseConfig):
+    """Both streams' mean CI per component on ONE axis per site, ordered by descending
+    TARGET mean and coloured by stream.
+
+    Supersedes authoring `CIMeanPerComponent` on a targeted run: it computes the same
+    broad-stream reduction plus the target-pool one, so authoring both would pay for the
+    broad pass twice. Refuses on a plain run, which has no target stream."""
+
+    slow: ClassVar[bool] = True
+    type: Literal["TwoStreamCIMeanPerComponent"] = "TwoStreamCIMeanPerComponent"

@@ -1,11 +1,19 @@
 """Independent CE/KL, causal-L0, and fresh-PGD LM operations."""
 
+from typing import Literal
+
 import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jaxtyping import Array, PRNGKeyArray
 
-from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
+from param_decomp.core.configs import (
+    NONTARGET_STREAM,
+    CI_L0Config,
+    CIMaskedReconLossConfig,
+    PGDReconLossConfig,
+    UnmaskedNoDeltaReconLossConfig,
+)
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import BarChart, LogRecord
 from param_decomp.core.model import CaptureKeys, DecomposedModel
@@ -13,6 +21,7 @@ from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.core.run import EvalOperation
 from param_decomp.experiments.lm.eval import (
+    CE_KL_VARIANTS,
     ScalarStep,
     make_ce_kl_step,
     make_ci_l0_step,
@@ -21,6 +30,41 @@ from param_decomp.experiments.lm.eval import (
 from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
+
+type Stream = Literal["broad", "target_data"]
+"""Which DATA an eval operation measures. ONE value, not a (batch source, log prefix) pair:
+the two always covary, and nothing should be able to spell target-pool batches under the
+broad stream's log keys."""
+
+
+def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
+    match stream:
+        case "broad":
+            return context.batches
+        case "target_data":
+            assert context.target_batches is not None, (
+                "target-stream metrics need a tPD run's prompt pool; a plain run has none"
+            )
+            return context.target_batches
+
+
+def stream_log_prefix(stream: Stream, context: LMEvalContext) -> str:
+    """The log namespace for `stream`, given what kind of run this is.
+
+    ONE rule: the data the run is optimizing for is unlabelled, and anything else carries
+    its stream. A plain run has a single stream, so it stays `eval/` exactly as before —
+    `context.target_batches is None` is what says so. A tPD run adds a second stream, so its
+    broad corpus moves under `eval/nontarget_data/` and the target pool takes the bare
+    namespace. The consequence is deliberate: `eval/l0/...` means "the data of interest" in
+    both run kinds, which is what makes the two comparable as objectives — but it is NOT the
+    same data, so a corpus-vs-corpus comparison across run kinds must read
+    `eval/nontarget_data/` on the tPD side."""
+    targeted = context.target_batches is not None
+    match stream:
+        case "broad":
+            return f"eval/{NONTARGET_STREAM}/" if targeted else "eval/"
+        case "target_data":
+            return "eval/"
 
 
 def _make_scalar_operation(
@@ -31,10 +75,12 @@ def _make_scalar_operation(
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
+    stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
     def run(context: LMEvalContext) -> LogRecord:
+        log_prefix = stream_log_prefix(stream, context)
         sums: dict[str, Array] = {}
-        for batch_index, tokens in enumerate(context.batches):
+        for batch_index, tokens in enumerate(stream_batches(stream, context)):
             key = random.fold_in(
                 run_key,
                 EvalKeyStream.SCALARS * train_steps + context.pass_index * eval_steps + batch_index,
@@ -49,7 +95,7 @@ def _make_scalar_operation(
             for name, value in values.items():
                 if name.startswith(prefixes):
                     sums[name] = sums.get(name, jnp.zeros(())) + value
-        return {f"eval/{name}": float(value) / eval_steps for name, value in sums.items()}
+        return {f"{log_prefix}{name}": float(value) / eval_steps for name, value in sums.items()}
 
     return EvalOperation(schedule, run)
 
@@ -57,6 +103,7 @@ def _make_scalar_operation(
 def make_ce_kl_operation(
     metric: CEandKLLossesConfig,
     schedule: EvalSchedule,
+    stream: Stream,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
@@ -65,22 +112,74 @@ def make_ce_kl_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
-    scalars = _make_scalar_operation(
+    return _make_scalar_operation(
         schedule,
-        make_ce_kl_step(model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options),
+        make_ce_kl_step(
+            model,
+            ci_capture_keys,
+            metric.rounding_threshold,
+            CE_KL_VARIANTS,
+            True,
+            mesh,
+            compiler_options,
+        ),
         ("ce_kl/",),
         model,
         run_key,
         train_steps,
         eval_steps,
+        stream,
     )
 
-    return scalars
+
+def make_single_variant_kl_operation(
+    metric: CIMaskedReconLossConfig | UnmaskedNoDeltaReconLossConfig,
+    schedule: EvalSchedule,
+    stream: Stream,
+    model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
+    run_key: PRNGKeyArray,
+    train_steps: int,
+    eval_steps: int,
+    mesh: Mesh,
+    compiler_options: dict[str, bool | int | str],
+) -> EvalOperation[LMEvalContext]:
+    """ONE masking arm of the CE/KL evaluator, authored as the loss config that names the
+    same construction.
+
+    These two recon configs are authorable as evals exactly as `PGDReconLoss` already is —
+    the eval measures the quantity the loss optimizes. The key keeps the `ce_kl/kl_<arm>`
+    spelling a plain run's `CEandKLLosses` logs it under, so the same number is one name
+    across run kinds; the config type is what names the construction explicitly."""
+    match metric:
+        case CIMaskedReconLossConfig():
+            variant = "ci_masked"
+        case UnmaskedNoDeltaReconLossConfig():
+            variant = "unmasked"
+    return _make_scalar_operation(
+        schedule,
+        make_ce_kl_step(
+            model,
+            ci_capture_keys,
+            0.0,  # unused: the rounded arm is not among the selected variants
+            (variant,),
+            False,
+            mesh,
+            compiler_options,
+        ),
+        (f"ce_kl/kl_{variant}",),
+        model,
+        run_key,
+        train_steps,
+        eval_steps,
+        stream,
+    )
 
 
 def make_ci_l0_operation(
     metric: CI_L0Config,
     schedule: EvalSchedule,
+    stream: Stream,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
@@ -104,12 +203,14 @@ def make_ci_l0_operation(
         run_key,
         train_steps,
         eval_steps,
+        stream,
     )
 
     def run(context: LMEvalContext) -> LogRecord:
         record = dict(scalars.run(context))
-        prefix = f"eval/l0/{metric.ci_alive_threshold}_"
-        record["eval/l0/bar_chart"] = BarChart(
+        log_prefix = stream_log_prefix(stream, context)
+        prefix = f"{log_prefix}l0/{metric.ci_alive_threshold}_"
+        record[f"{log_prefix}l0/bar_chart"] = BarChart(
             rows=tuple(
                 (name.removeprefix(prefix), value)
                 for name, value in record.items()
@@ -127,6 +228,7 @@ def make_ci_l0_operation(
 def make_fresh_pgd_operation(
     metric: PGDReconLossConfig,
     schedule: EvalSchedule,
+    stream: Stream,
     model: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
@@ -150,4 +252,5 @@ def make_fresh_pgd_operation(
         run_key,
         train_steps,
         eval_steps,
+        stream,
     )

@@ -47,6 +47,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
         compiler_options: dict[str, bool | int | str],
         *,
         inputs_for_context: Any,
+        log_prefix_for_context: Any,
         figure_rendering: Any,
     ) -> EvalOperation[Any]:
         captured.update(
@@ -56,6 +57,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
             mesh=mesh,
             compiler_options=compiler_options,
             inputs_for_context=inputs_for_context,
+            log_prefix_for_context=log_prefix_for_context,
             figure_rendering=figure_rendering,
         )
         return EvalOperation(schedule, lambda _context: {})
@@ -93,6 +95,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
         n_proc=1,
         sink=cast(Any, SimpleNamespace(accepts_deferred_media=True)),
         compiler_options={},
+        target_pool_batches_for=None,
     )
     batch = jnp.arange(4)
     _, key = captured["inputs_for_context"](
@@ -101,6 +104,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
             now_step=30,
             pass_index=3,
             batches=(batch,),
+            target_batches=None,
         )
     )
 

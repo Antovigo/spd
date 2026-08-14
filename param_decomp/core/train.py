@@ -40,7 +40,12 @@ from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 from param_decomp.core.adversary import PersistentAdversary, init_fresh_pgd_sources
 from param_decomp.core.ci_fn import CI, CIFn, evaluate_ci
 from param_decomp.core.components import ComponentStacks, VUShape
-from param_decomp.core.configs import LossCoeff, SmoothL0ImportanceMinimalityLossConfig
+from param_decomp.core.configs import (
+    IMP_MIN_METRIC_NAMES,
+    NONTARGET_STREAM,
+    LossCoeff,
+    SmoothL0ImportanceMinimalityLossConfig,
+)
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.losses import (
     ReconstructionLoss,
@@ -193,12 +198,18 @@ def uv_norm_ratio_metrics(components: ComponentStacks) -> dict[str, Array]:
 
 
 def _scheduled_coeff_metrics(
-    step_f32: Array, total_steps: int, coeffs: dict[str, LossCoeff]
+    step_f32: Array, total_steps: int, stream_prefix: str, coeffs: dict[str, LossCoeff]
 ) -> dict[str, Array]:
     """Per-step values of the SCHEDULED coefficients only — a constant would be log
-    noise, and a moving coefficient invisible in wandb is a debugging trap."""
+    noise, and a moving coefficient invisible in wandb is a debugging trap.
+
+    `stream_prefix` is `""` for the data the run optimizes for and `"nontarget_data/"` for a
+    targeted run's corpus stream, so the stream segment leads the key exactly as it does on
+    the loss keys."""
     return {
-        f"schedules/coeff/{name}": scheduled_value_traced(step_f32, total_steps, coeff)
+        f"{stream_prefix}schedules/coeff/{name}": scheduled_value_traced(
+            step_f32, total_steps, coeff
+        )
         for name, coeff in coeffs.items()
         if isinstance(coeff, ScheduleConfig)
     }
@@ -1080,7 +1091,7 @@ def make_train_step[PreparedT](
                 step_f32=step_f32,
             )
             | {"faith": faith_loss}
-            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, coeff_schedules)
+            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, "", coeff_schedules)
         )
         return new_state, metrics
 
@@ -1185,13 +1196,18 @@ def make_targeted_train_step[PreparedT](
             for term in objective.target.recon
             if term.hidden_acts_reconstruction is not None
         },
-        "nontarget/impmin": objective.nontarget.impmin_coeff,
-        **{f"nontarget/{term.name}": term.coeff for term in nt_terms},
     }
     if objective.target.imp.cfg.frequency is not None:
         coeff_schedules[f"{objective.target.imp.name}/frequency"] = (
             objective.target.imp.cfg.frequency.coeff
         )
+    # The non-target imp-min coefficient scales the SAME term the target stream spells by
+    # name, so it is spelled that way here too — the two streams' coefficients for one
+    # quantity must be readable as a pair.
+    nontarget_coeff_schedules: dict[str, LossCoeff] = {
+        objective.target.imp.name: objective.nontarget.impmin_coeff,
+        **{term.name: term.coeff for term in nt_terms},
+    }
 
     def nontarget_draw_loss(
         model: DecomposedModel[PreparedT],
@@ -1360,8 +1376,10 @@ def make_targeted_train_step[PreparedT](
             nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, atoms.imp_min, imp_min_param)
             nt_total = nt_imp_coeff * nt_imp_lp + freq_coeff * nt_imp_freq
             nt_aux = {
-                f"loss/nontarget/{atoms.imp_loss_key}": nt_imp_lp,
-                "loss/nontarget/freq": nt_imp_freq,
+                # Same spelling as the target stream's keys (which `run._METRIC_KEYS` expands
+                # from the same map), so one quantity is not two names.
+                f"{NONTARGET_STREAM}/loss/{IMP_MIN_METRIC_NAMES[atoms.imp_loss_key]}": nt_imp_lp,
+                f"{NONTARGET_STREAM}/loss/{IMP_MIN_METRIC_NAMES['freq']}": nt_imp_freq,
             }
             nt_breakdowns = atoms.grid_losses(
                 nt_terms,
@@ -1374,8 +1392,8 @@ def make_targeted_train_step[PreparedT](
                 nt_terms, nt_recon_coeffs, nt_breakdowns, strict=True
             ):
                 nt_total = nt_total + coeff * breakdown.total
-                nt_aux[f"loss/nontarget/{term.name}"] = breakdown.total
-            nt_aux["loss/nontarget/total"] = nt_total
+                nt_aux[f"{NONTARGET_STREAM}/loss/{term.name}"] = breakdown.total
+            nt_aux[f"{NONTARGET_STREAM}/loss/total"] = nt_total
             total_loss = total_loss + nt_total
             reported_total = reported_total + nt_total
             return total_loss, (reported_total, imp_lp, imp_freq, term_breakdowns, nt_aux)
@@ -1445,7 +1463,10 @@ def make_targeted_train_step[PreparedT](
             )
             | nt_aux
             | wd_metrics
-            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, coeff_schedules)
+            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, "", coeff_schedules)
+            | _scheduled_coeff_metrics(
+                step_f32, atoms.total_steps, f"{NONTARGET_STREAM}/", nontarget_coeff_schedules
+            )
         )
         return new_state, metrics
 
