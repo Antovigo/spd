@@ -421,10 +421,12 @@ GUARANTEE, not an accident: `scalar_eval_operations.stream_log_prefix` keys off
 `context.target_batches is None`, and `experiments/lm/test_stream_log_namespace.py` pins it.
 Two consequences when adding a metric:
 
-- An eval that reads `context.batches` measures the BROAD stream and must take its prefix
-  from `stream_log_prefix("broad", context)` — never a hardcoded `"eval/"`, which would
-  claim to be target data on a tPD run. Core-side metrics shared with the toys take a
-  `log_prefix_for_context` callback instead (`well_temperedness_eval`).
+- An eval that reads data must take BOTH its batches and its prefix from the same `Stream`
+  value (`stream_batches` / `stream_log_prefix`) — never a hardcoded `context.batches` or
+  `"eval/"`, which on a tPD run would read the corpus while claiming to be target data.
+  Core-side metrics shared with the toys take a `log_prefix_for_context` callback instead
+  (`well_temperedness_eval`). A single-stream eval binds to the OPTIMIZED stream by
+  default; only a metric authored for both takes `data_streams`.
 - An eval that reads no batch at all (`WeightMagnitude`, the U/V norm ratios) has no stream
   and keeps the bare namespace on both run kinds.
 
