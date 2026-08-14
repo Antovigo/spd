@@ -1189,8 +1189,8 @@ def make_targeted_train_step[PreparedT](
             for term in objective.target.recon
             if term.hidden_acts_reconstruction is not None
         },
-        "nontarget/impmin": objective.nontarget.impmin_coeff,
-        **{f"nontarget/{term.name}": term.coeff for term in nt_terms},
+        "nontarget_data/impmin": objective.nontarget.impmin_coeff,
+        **{f"nontarget_data/{term.name}": term.coeff for term in nt_terms},
     }
     if objective.target.imp.cfg.frequency is not None:
         coeff_schedules[f"{objective.target.imp.name}/frequency"] = (
@@ -1366,8 +1366,8 @@ def make_targeted_train_step[PreparedT](
             nt_aux = {
                 # Same spelling as the target stream's keys (which `run._METRIC_KEYS`
                 # expands from the same map), so one quantity is not two names.
-                f"loss/nontarget/{IMP_MIN_METRIC_NAMES[atoms.imp_loss_key]}": nt_imp_lp,
-                f"loss/nontarget/{IMP_MIN_METRIC_NAMES['freq']}": nt_imp_freq,
+                f"loss/nontarget_data/{IMP_MIN_METRIC_NAMES[atoms.imp_loss_key]}": nt_imp_lp,
+                f"loss/nontarget_data/{IMP_MIN_METRIC_NAMES['freq']}": nt_imp_freq,
             }
             nt_breakdowns = atoms.grid_losses(
                 nt_terms,
@@ -1380,8 +1380,8 @@ def make_targeted_train_step[PreparedT](
                 nt_terms, nt_recon_coeffs, nt_breakdowns, strict=True
             ):
                 nt_total = nt_total + coeff * breakdown.total
-                nt_aux[f"loss/nontarget/{term.name}"] = breakdown.total
-            nt_aux["loss/nontarget/total"] = nt_total
+                nt_aux[f"loss/nontarget_data/{term.name}"] = breakdown.total
+            nt_aux["loss/nontarget_data/total"] = nt_total
             total_loss = total_loss + nt_total
             reported_total = reported_total + nt_total
             return total_loss, (reported_total, imp_lp, imp_freq, term_breakdowns, nt_aux)
