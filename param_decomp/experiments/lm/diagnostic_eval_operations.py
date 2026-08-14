@@ -217,7 +217,7 @@ def make_two_stream_ci_mean_operation(
         renderer.submit(
             partial(
                 _render_two_stream_ci_means,
-                stream_mean_cis(ci_fn, stream_batches("target_pool", context)),
+                stream_mean_cis(ci_fn, stream_batches("target_data", context)),
                 stream_mean_cis(ci_fn, stream_batches("broad", context)),
                 context.now_step,
             )
