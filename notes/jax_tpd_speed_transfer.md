@@ -151,9 +151,24 @@ which is inside run-to-run variation and not worth it given an OOM hangs rather 
 hence 128. Note how little the peak tracks batch — 4 GiB across a 5× increase — which is the
 temp buffer being dominated by things other than the logit-space term.
 
-Step time does track batch, roughly linearly above 48: 1.147 s at 24, ~1.95 at 96, ~2.32 at
-128. So this is a real trade of speed for broad-stream data, not a free win; 128 was chosen
+### Speed versus batch size
+
+Step time, unlike memory, does track the batch:
+
+| non-target batch | 24 | 48 | 64 | 96 | 128 | 192 |
+|---|---|---|---|---|---|---|
+| s/step | 1.147 | ~1.79 | ~1.95 | ~1.95 | ~2.32 | ~3.70 |
+| peak GB/rank | 32.9 | 33.3 | 33.6 | 34.9 | 36.9 | 42.7 |
+| 20k steps (step time only) | 6.4 h | 9.9 h | 10.8 h | 10.8 h | 12.9 h | 20.6 h |
+
+So this is a real trade of speed for broad-stream data, not a free win. 128 was chosen
 because ~13 h still fits one allocation comfortably.
+
+Read the middle of that row with some caution: only the batch-24 figure comes from a run
+with the node to itself. The probes at 48/64/96 ran three-up and those at 128/192 two-up, and
+since this host routes GPU traffic over shared memory, co-tenancy inflates them — which is
+also why 64 and 96 came out indistinguishable. The shape is trustworthy; the absolute values
+are upper bounds.
 
 Probe those changes with **both eval tiers live**. `eval.batch_size` tracks the non-target
 batch, and the 20-step PGD probe ascends through its own backward at that size, so a batch that
