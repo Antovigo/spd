@@ -1007,6 +1007,17 @@ class ResumeProvenance(BaseConfig):
 # wandb.config shaping
 # ---------------------------------------------------------------------------
 
+IMP_MIN_METRIC_NAMES: dict[str, str] = {
+    "imp": "ImportanceMinimalityLoss",
+    "imp_smooth_l0": "SmoothL0ImportanceMinimalityLoss",
+    "freq": "FrequencyMinimalityLoss",
+}
+"""Step-record short key -> logged loss name, for the terms whose record key is not
+already the term's class name. Shared so the target stream (expanded by `run._METRIC_KEYS`)
+and the non-target stream (keyed in `train.make_targeted_train_step`) cannot drift apart:
+both streams must spell the same quantity the same way."""
+
+
 METRIC_SHORT_NAMES: dict[str, str] = {
     "CIMaskedReconLayerwiseLoss": "CIMaskReconLayer",
     "CIMaskedReconLoss": "CIMaskRecon",
