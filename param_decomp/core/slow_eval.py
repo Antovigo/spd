@@ -242,13 +242,19 @@ def accumulate_site_reductions(
                     )
                 )
 
+    def sample(chunks: dict[str, list[np.ndarray]], site: str) -> np.ndarray:
+        """`n_batches_accum=0` asks for NO raw sample, so a site has no chunks at all: a
+        caller that reads only `ci_sums` (the two-stream CI mean) would otherwise pay a
+        host gather of every position's CI just to discard it."""
+        return np.concatenate(chunks[site]) if site in chunks else np.empty(0, np.float32)
+
     return {
         site: SiteReduction(
             density_counts=density[site],
             ci_sums=sums[site],
             n_positions=total_positions,
-            lower_sample=np.concatenate(lower_chunks[site]),
-            preactivations_sample=np.concatenate(preactivations_chunks[site]),
+            lower_sample=sample(lower_chunks, site),
+            preactivations_sample=sample(preactivations_chunks, site),
             density_hist=hist.get(site),
         )
         for site in density
@@ -635,26 +641,29 @@ def plot_mean_component_cis_two_streams(
         sorted(nontarget_mean_cis),
     )
     n_rows, n_cols = _grid_dims(len(target_mean_cis))
+    # One permutation per site, not one per scale: the log figure plots the same ordering.
+    ordered = {
+        name: (target[order], nontarget_mean_cis[name][order])
+        for name, target in target_mean_cis.items()
+        for order in [np.argsort(target)[::-1]]
+    }
     images: list[bytes] = []
     for log_y in (False, True):
         fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
         axs = fig.subplots(n_rows, n_cols, squeeze=False)
         flat_axes = axs.T.ravel()
-        for ax in flat_axes[len(target_mean_cis) :]:
+        for ax in flat_axes[len(ordered) :]:
             ax.set_visible(False)
-        for ax, (name, target) in zip(flat_axes, target_mean_cis.items(), strict=False):
-            order = np.argsort(target)[::-1]
-            x = range(len(order))
+        for ax, (name, (target, nontarget)) in zip(flat_axes, ordered.items(), strict=False):
+            # `fill_between`, not `bar`: at production C a bar per component is one matplotlib
+            # patch each, ~25x the render time of the equivalent filled step for the same
+            # picture — and this renders on a thread that contends with the train loop.
+            x = np.arange(len(target))
             if log_y:
                 ax.set_yscale("log")
-            ax.bar(x, target[order], color="#1f77b4", label="target", width=1.0)
-            ax.bar(
-                x,
-                nontarget_mean_cis[name][order],
-                color="#d62728",
-                label="non-target",
-                width=1.0,
-                alpha=0.6,
+            ax.fill_between(x, target, step="mid", color="#1f77b4", label="target")
+            ax.fill_between(
+                x, nontarget, step="mid", color="#d62728", label="non-target", alpha=0.6
             )
             ax.set_xlabel("Component (sorted by target mean CI)")
             ax.set_ylabel("mean CI")
