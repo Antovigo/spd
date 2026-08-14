@@ -89,7 +89,7 @@ class TargetPoolScalarsConfig(BaseConfig):
     same kernels over pool batches drawn exactly like a training target batch. Unlike
     `ArithmeticCIGrid`, which builds its own single-operation grid, this reads the run's
     authored pool, so a mixed add/sub pool is measured whole. Logged under
-    `eval/target_pool/`. Refuses on a plain (non-targeted) run, which has no pool."""
+    `eval/target_data/`. Refuses on a plain (non-targeted) run, which has no pool."""
 
     slow: ClassVar[bool] = False
     type: Literal["TargetPoolScalars"] = "TargetPoolScalars"

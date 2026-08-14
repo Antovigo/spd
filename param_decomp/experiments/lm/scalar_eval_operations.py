@@ -27,7 +27,7 @@ from param_decomp.experiments.lm.eval_config import (
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
-type Stream = Literal["broad", "target_pool"]
+type Stream = Literal["broad", "target_data"]
 """Which stream an eval operation measures. ONE value, not a (batch source, log prefix)
 pair: the two always covary, and nothing should be able to spell target-pool batches under
 the broad stream's log keys."""
@@ -37,7 +37,7 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
     match stream:
         case "broad":
             return context.batches
-        case "target_pool":
+        case "target_data":
             assert context.target_batches is not None, (
                 "target-stream metrics need a tPD run's prompt pool; a plain run has none"
             )
@@ -48,8 +48,8 @@ def stream_log_prefix(stream: Stream) -> str:
     match stream:
         case "broad":
             return "eval/"
-        case "target_pool":
-            return "eval/target_pool/"
+        case "target_data":
+            return "eval/target_data/"
 
 
 def _make_scalar_operation(
@@ -179,7 +179,7 @@ def make_target_pool_scalars_operation(
         make_ci_l0_operation(
             CI_L0Config(ci_alive_threshold=metric.ci_alive_threshold, groups=metric.ci_l0_groups),
             schedule,
-            "target_pool",
+            "target_data",
             model,
             ci_capture_keys,
             run_key,
@@ -199,7 +199,7 @@ def make_target_pool_scalars_operation(
                     step_size=metric.fresh_pgd.step_size,
                 ),
                 schedule,
-                "target_pool",
+                "target_data",
                 model,
                 ci_capture_keys,
                 run_key,
