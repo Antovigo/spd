@@ -82,11 +82,9 @@ def make_lm_evaluation(
     compiler_options: dict[str, bool | int | str],
     target_pool_batches_for: Callable[[int], list[jax.Array]] | None = None,
 ) -> Evaluation[LMEvalContext]:
-    """Construct the executable operations for every authored LM metric — one PER STREAM
-    the metric measures.
-
-    `target_pool_batches_for(pass_index)` supplies the tPD target stream, which `data.eval`
-    cannot. `None` on a plain run, which collapses every metric to the one stream it has."""
+    """Construct one executable operation for every authored LM metric (for tPD, one per
+    stream the metric measures; `target_pool_batches_for` draws the target stream, and
+    `None` marks a plain run)."""
     pd = built.pd
     capture_inputs = built.ci_fn.capture_keys
     data = built.data
@@ -121,8 +119,6 @@ def make_lm_evaluation(
         schedule: EvalSchedule,
         streams: tuple[Stream, ...],
     ) -> tuple[EvalOperation[LMEvalContext], ...]:
-        """One operation per stream; the scalar makers share a signature so the stream is the
-        only thing that varies between a metric's readouts."""
         return tuple(
             maker(
                 metric,
@@ -147,7 +143,6 @@ def make_lm_evaluation(
             case CIMaskedReconLossConfig():
                 return per_stream(make_masked_kl_operation, "ci_masked", schedule, data_streams)
             case UnmaskedNoDeltaReconLossConfig():
-                # The nontarget pass's own training term, already reported there as a loss.
                 return per_stream(
                     make_masked_kl_operation, "unmasked", schedule, (optimized_stream,)
                 )
