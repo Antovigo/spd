@@ -9,35 +9,35 @@ from jaxtyping import Array, PRNGKeyArray
 
 from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
-from param_decomp.core.metrics import BarChart, LogRecord, PNGImage
+from param_decomp.core.metrics import BarChart, LogRecord
 from param_decomp.core.model import CaptureKeys, DecomposedModel
 from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.core.run import EvalOperation
 from param_decomp.experiments.lm.eval import (
+    MaskingArm,
     ScalarStep,
     make_ce_kl_step,
     make_ci_l0_step,
     make_fresh_pgd_step,
+    make_masked_kl_step,
 )
 from param_decomp.experiments.lm.eval_config import (
     CEandKLLossesConfig,
-    TargetPoolScalarsConfig,
 )
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
-type Stream = Literal["broad", "target_data"]
-"""Which stream an eval operation measures. ONE value, not a (batch source, log prefix)
-pair: the two always covary, and nothing should be able to spell target-pool batches under
-the broad stream's log keys."""
+type Stream = Literal["nontarget", "target"]
+"""Which STREAM an eval operation measures. ONE value, not a (batch source, log prefix)
+pair, so target-stream batches cannot be spelled under the nontarget stream's log keys."""
 
 
 def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
     match stream:
-        case "broad":
+        case "nontarget":
             return context.batches
-        case "target_data":
+        case "target":
             assert context.target_batches is not None, (
                 "target-stream metrics need a tPD run's prompt pool; a plain run has none"
             )
@@ -45,21 +45,11 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
 
 
 def stream_log_prefix(stream: Stream, context: LMEvalContext) -> str:
-    """The log namespace for `stream`, given what kind of run this is.
-
-    ONE rule: the data the run is optimizing for is unlabelled, and anything else carries
-    its stream. A plain run has a single stream, so it stays `eval/` exactly as before —
-    `context.target_batches is None` is what says so. A tPD run adds a second stream, so
-    its broad corpus moves under `eval/nontarget_data/` and the target pool takes the bare
-    namespace. The consequence is deliberate: `eval/l0/...` means "the data of interest"
-    in both run kinds, which is what makes the two comparable as objectives — but it is
-    NOT the same data, so a corpus-vs-corpus comparison across run kinds must read
-    `eval/nontarget_data/` on the tPD side."""
     targeted = context.target_batches is not None
     match stream:
-        case "broad":
+        case "nontarget":
             return "eval/nontarget_data/" if targeted else "eval/"
-        case "target_data":
+        case "target":
             return "eval/"
 
 
@@ -108,7 +98,7 @@ def make_ce_kl_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
-    scalars = _make_scalar_operation(
+    return _make_scalar_operation(
         schedule,
         make_ce_kl_step(model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options),
         ("ce_kl/",),
@@ -119,7 +109,31 @@ def make_ce_kl_operation(
         stream,
     )
 
-    return scalars
+
+def make_masked_kl_operation(
+    arm: MaskingArm,
+    schedule: EvalSchedule,
+    stream: Stream,
+    model: DecomposedModel,
+    ci_capture_keys: CaptureKeys,
+    run_key: PRNGKeyArray,
+    train_steps: int,
+    eval_steps: int,
+    mesh: Mesh,
+    compiler_options: dict[str, bool | int | str],
+) -> EvalOperation[LMEvalContext]:
+    """ONE masking arm, authored as the loss config that names the same construction —
+    `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss`, as `PGDReconLoss` already is."""
+    return _make_scalar_operation(
+        schedule,
+        make_masked_kl_step(model, ci_capture_keys, arm, mesh, compiler_options),
+        (f"ce_kl/kl_{arm}",),
+        model,
+        run_key,
+        train_steps,
+        eval_steps,
+        stream,
+    )
 
 
 def make_ci_l0_operation(
@@ -154,8 +168,9 @@ def make_ci_l0_operation(
 
     def run(context: LMEvalContext) -> LogRecord:
         record = dict(scalars.run(context))
-        prefix = f"{stream_log_prefix(stream, context)}l0/{metric.ci_alive_threshold}_"
-        record[f"{stream_log_prefix(stream, context)}l0/bar_chart"] = BarChart(
+        log_prefix = stream_log_prefix(stream, context)
+        prefix = f"{log_prefix}l0/{metric.ci_alive_threshold}_"
+        record[f"{log_prefix}l0/bar_chart"] = BarChart(
             rows=tuple(
                 (name.removeprefix(prefix), value)
                 for name, value in record.items()
@@ -165,65 +180,6 @@ def make_ci_l0_operation(
             y_label="l0",
             title=f"L0_{metric.ci_alive_threshold}",
         )
-        return record
-
-    return EvalOperation(schedule, run)
-
-
-def make_target_pool_scalars_operation(
-    metric: TargetPoolScalarsConfig,
-    schedule: EvalSchedule,
-    model: DecomposedModel,
-    ci_capture_keys: CaptureKeys,
-    run_key: PRNGKeyArray,
-    train_steps: int,
-    eval_steps: int,
-    mesh: Mesh,
-    compiler_options: dict[str, bool | int | str],
-) -> EvalOperation[LMEvalContext]:
-    """The broad-stream CI-L0 and fresh-PGD operations, rebound to the target pool.
-
-    Composed from the same two builders rather than re-derived, so the target stream gets
-    every readout the broad one does (the L0 bar chart included) and neither drifts."""
-    parts = [
-        make_ci_l0_operation(
-            CI_L0Config(ci_alive_threshold=metric.ci_alive_threshold, groups=metric.ci_l0_groups),
-            schedule,
-            "target_data",
-            model,
-            ci_capture_keys,
-            run_key,
-            train_steps,
-            eval_steps,
-            mesh,
-            compiler_options,
-        )
-    ]
-    if metric.fresh_pgd is not None:
-        parts.append(
-            make_fresh_pgd_operation(
-                PGDReconLossConfig(
-                    init="random",
-                    source_shape="c",
-                    n_steps=metric.fresh_pgd.n_steps,
-                    step_size=metric.fresh_pgd.step_size,
-                ),
-                schedule,
-                "target_data",
-                model,
-                ci_capture_keys,
-                run_key,
-                train_steps,
-                eval_steps,
-                mesh,
-                compiler_options,
-            )
-        )
-
-    def run(context: LMEvalContext) -> LogRecord:
-        record: dict[str, float | BarChart | PNGImage] = {}
-        for part in parts:
-            record.update(part.run(context))
         return record
 
     return EvalOperation(schedule, run)

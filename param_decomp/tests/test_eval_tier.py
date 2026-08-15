@@ -29,10 +29,11 @@ from param_decomp.experiments.eval_config import (
 FAST_METRICS = {
     "CEandKLLossesConfig",
     "CIMaskedAttnPatternsReconLossConfig",
+    "CIMaskedReconLossConfig",
     "CI_L0Config",
     "PGDReconLossConfig",
     "StochasticAttnPatternsReconLossConfig",
-    "TargetPoolScalarsConfig",
+    "UnmaskedNoDeltaReconLossConfig",
 }
 SLOW_METRICS = {
     "ArithmeticCIGridConfig",

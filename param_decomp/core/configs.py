@@ -241,6 +241,7 @@ AnyImportanceMinimalityLossConfig = (
 
 
 class CIMaskedReconLossConfig(LossMetricConfig, HiddenActsReconstructionMixin):
+    slow: ClassVar[bool] = False
     type: Literal["CIMaskedReconLoss"] = "CIMaskedReconLoss"
 
 
@@ -476,10 +477,9 @@ class ComponentActivationDensityConfig(BaseConfig):
 
 
 class WeightMagnitudeConfig(BaseConfig):
-    """Per-site `‖V_c‖·‖U_c‖` scatter against component index, log y.
+    """Per-site `‖V_c‖·‖U_c‖` scatter in descending magnitude order, log y.
 
-    Reads the trained V/U alone — no forward pass and no eval batch, so it costs two norm
-    reductions and a plot. The norms reduce on device; only `C` floats per site are pulled."""
+    Reads the trained V/U alone — no forward pass and no eval batch."""
 
     slow: ClassVar[bool] = True
     type: Literal["WeightMagnitude"] = "WeightMagnitude"
@@ -675,6 +675,7 @@ class UnmaskedNoDeltaReconLossConfig(LossMetricConfig):
     exists here, and it is non-target-only — the plain and target-pass unions have no
     member for it."""
 
+    slow: ClassVar[bool] = False
     type: Literal["UnmaskedNoDeltaReconLoss"] = "UnmaskedNoDeltaReconLoss"
 
 

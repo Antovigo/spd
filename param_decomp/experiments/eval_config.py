@@ -14,6 +14,7 @@ from param_decomp.core.configs import (
     CI_L0Config,
     CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
+    CIMaskedReconLossConfig,
     CIMeanPerComponentConfig,
     ComponentActivationDensityConfig,
     HiddenActsReconstructionMixin,
@@ -22,6 +23,7 @@ from param_decomp.core.configs import (
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
     StochasticHiddenActsReconLossConfig,
+    UnmaskedNoDeltaReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
     WellTemperednessConfig,
@@ -32,7 +34,6 @@ from param_decomp.experiments.lm.eval_config import (
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
-    TargetPoolScalarsConfig,
     TwoStreamCIMeanPerComponentConfig,
 )
 
@@ -43,6 +44,7 @@ AnyEvalMetricConfig = Annotated[
     | CIHistogramsConfig
     | CI_L0Config
     | CIMaskedAttnPatternsReconLossConfig
+    | CIMaskedReconLossConfig
     | CIMeanPerComponentConfig
     | ComponentActivationDensityConfig
     | IdentityCIErrorConfig
@@ -50,8 +52,8 @@ AnyEvalMetricConfig = Annotated[
     | PGDReconLossConfig
     | StochasticAttnPatternsReconLossConfig
     | StochasticHiddenActsReconLossConfig
-    | TargetPoolScalarsConfig
     | TwoStreamCIMeanPerComponentConfig
+    | UnmaskedNoDeltaReconLossConfig
     | UVPlotsConfig
     | WeightMagnitudeConfig
     | WellTemperednessConfig,

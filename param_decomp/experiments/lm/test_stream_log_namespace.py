@@ -29,25 +29,25 @@ def context(target_batches: tuple[jnp.ndarray, ...] | None) -> LMEvalContext:
 
 
 def test_plain_run_keys_are_unchanged_by_the_two_stream_rule():
-    assert stream_log_prefix("broad", context(None)) == "eval/"
+    assert stream_log_prefix("nontarget", context(None)) == "eval/"
 
 
 def test_targeted_run_labels_the_broad_stream_and_leaves_the_target_bare():
     targeted = context(TARGET_BATCHES)
-    assert stream_log_prefix("target_data", targeted) == "eval/"
-    assert stream_log_prefix("broad", targeted) == "eval/nontarget_data/"
+    assert stream_log_prefix("target", targeted) == "eval/"
+    assert stream_log_prefix("nontarget", targeted) == "eval/nontarget_data/"
 
 
 def test_the_bare_namespace_is_always_the_data_of_interest():
     """What makes the run kinds comparable AS OBJECTIVES — and the trap that comes with it:
     the bare namespace is not the same DATA in both."""
     plain, targeted = context(None), context(TARGET_BATCHES)
-    assert stream_log_prefix("broad", plain) == stream_log_prefix("target_data", targeted)
-    assert stream_log_prefix("broad", targeted) != stream_log_prefix("broad", plain)
+    assert stream_log_prefix("nontarget", plain) == stream_log_prefix("target", targeted)
+    assert stream_log_prefix("nontarget", targeted) != stream_log_prefix("nontarget", plain)
 
 
 def test_every_stream_resolves_under_both_run_kinds():
-    for stream in cast(tuple[Stream, ...], ("broad", "target_data")):
+    for stream in cast(tuple[Stream, ...], ("nontarget", "target")):
         for target_batches in (None, TARGET_BATCHES):
             prefix = stream_log_prefix(stream, context(target_batches))
             assert prefix.startswith("eval/") and prefix.endswith("/")

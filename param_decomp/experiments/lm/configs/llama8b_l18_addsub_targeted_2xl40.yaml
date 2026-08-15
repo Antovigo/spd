@@ -146,13 +146,6 @@ eval:
       n_batches_accum: 1
     - type: CIHiddenActsReconLoss
     # --- target stream: the run's own prompt pool
-    - type: TargetPoolScalars
-      ci_alive_threshold: 0.0
-      ci_l0_groups:
-        total: ["*"]
-      fresh_pgd:
-        n_steps: 20
-        step_size: 0.1
     - type: TwoStreamCIMeanPerComponent
     - type: WeightMagnitude
 cadence:
