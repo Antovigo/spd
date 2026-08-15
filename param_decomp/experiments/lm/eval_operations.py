@@ -90,7 +90,7 @@ def make_lm_evaluation(
     cannot: the prompt pool has no held-out split, so the targeted root draws pool batches
     the same way training does. `None` on a plain run, and that is what makes a plain run's
     metric set — and every one of its log keys — exactly what it was before targeted runs
-    existed: `data_streams` collapses to the single broad stream."""
+    existed: `data_streams` collapses to the single nontarget stream."""
     pd = built.pd
     capture_inputs = built.ci_fn.capture_keys
     data = built.data
@@ -110,11 +110,11 @@ def make_lm_evaluation(
 
     targeted = target_pool_batches_for is not None
     # Every stream a metric authored for BOTH measures; a plain run has exactly one.
-    data_streams: tuple[Stream, ...] = ("broad", "target_data") if targeted else ("broad",)
+    data_streams: tuple[Stream, ...] = ("nontarget", "target") if targeted else ("nontarget",)
     # The stream the run optimizes for, and the DEFAULT for any single-stream eval: a
     # diagnostic you read once should describe the data you are interpreting. On a plain run
-    # this IS the broad stream, so every such metric keeps the keys and the data it had.
-    optimized_stream: Stream = "target_data" if targeted else "broad"
+    # this IS the nontarget stream, so every such metric keeps the keys and data it had.
+    optimized_stream: Stream = "target" if targeted else "nontarget"
 
     def well_temperedness_inputs(
         context: LMEvalContext,
@@ -272,7 +272,7 @@ def make_lm_evaluation(
     )
     authored = {type(metric) for metric in eval.metrics}
     assert not {TwoStreamCIMeanPerComponentConfig, CIMeanPerComponentConfig} <= authored, (
-        "TwoStreamCIMeanPerComponent already computes the broad-stream reduction "
+        "TwoStreamCIMeanPerComponent already computes the nontarget-stream reduction "
         "CIMeanPerComponent does, so authoring both pays for that pass twice"
     )
     # The single-arm evals ARE arms of `CEandKLLosses`, under the same keys. Authoring both

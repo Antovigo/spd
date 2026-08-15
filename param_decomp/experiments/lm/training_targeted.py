@@ -143,7 +143,7 @@ def train_targeted(
 
         def eval_target_pool_batches(pass_index: int) -> list[jax.Array]:
             """The eval pass's TARGET stream: the same pure `(seed, step)` pool sampler
-            training uses, on the `seed + 1` stream the broad eval split already draws
+            training uses, on the `seed + 1` stream the nontarget eval split already draws
             from — so an eval never scores the exact rows the step just trained on."""
             n_batches = eval_config.n_steps
             return [
