@@ -103,13 +103,13 @@ def make_lm_evaluation(
         ]
 
     targeted = target_pool_batches_for is not None
-    data_streams: tuple[Stream, ...] = ("nontarget", "target") if targeted else ("nontarget",)
-    optimized_stream: Stream = "target" if targeted else "nontarget"
+    all_streams: tuple[Stream, ...] = ("nontarget", "target") if targeted else ("nontarget",)
+    primary_stream: Stream = "target" if targeted else "nontarget"
 
     def well_temperedness_inputs(
         context: LMEvalContext,
     ) -> tuple[jax.Array, PRNGKeyArray]:
-        return stream_batches(optimized_stream, context)[0], jax.random.fold_in(
+        return stream_batches(primary_stream, context)[0], jax.random.fold_in(
             run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + context.pass_index
         )
 
@@ -139,17 +139,15 @@ def make_lm_evaluation(
         schedule = schedule_for(metric, eval)
         match metric:
             case CEandKLLossesConfig():
-                return per_stream(make_ce_kl_operation, metric, schedule, data_streams)
+                return per_stream(make_ce_kl_operation, metric, schedule, all_streams)
             case CIMaskedReconLossConfig():
-                return per_stream(make_masked_kl_operation, "ci_masked", schedule, data_streams)
+                return per_stream(make_masked_kl_operation, "ci_masked", schedule, all_streams)
             case UnmaskedNoDeltaReconLossConfig():
-                return per_stream(
-                    make_masked_kl_operation, "unmasked", schedule, (optimized_stream,)
-                )
+                return per_stream(make_masked_kl_operation, "unmasked", schedule, (primary_stream,))
             case CI_L0Config():
-                return per_stream(make_ci_l0_operation, metric, schedule, data_streams)
+                return per_stream(make_ci_l0_operation, metric, schedule, all_streams)
             case PGDReconLossConfig():
-                return per_stream(make_fresh_pgd_operation, metric, schedule, data_streams)
+                return per_stream(make_fresh_pgd_operation, metric, schedule, all_streams)
 
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
                 return (
@@ -161,7 +159,7 @@ def make_lm_evaluation(
                         run_key,
                         pd.steps,
                         compiler_options,
-                        optimized_stream,
+                        primary_stream,
                     ),
                 )
             case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
@@ -174,7 +172,7 @@ def make_lm_evaluation(
                         run_key,
                         pd.steps,
                         compiler_options,
-                        optimized_stream,
+                        primary_stream,
                     ),
                 )
             case (
@@ -190,7 +188,7 @@ def make_lm_evaluation(
                         capture_inputs,
                         compiler_options,
                         renderer,
-                        optimized_stream,
+                        primary_stream,
                     ),
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
@@ -202,7 +200,7 @@ def make_lm_evaluation(
                         capture_inputs,
                         compiler_options,
                         renderer,
-                        optimized_stream,
+                        primary_stream,
                     ),
                 )
 
