@@ -26,17 +26,17 @@ from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
-type Stream = Literal["broad", "target_data"]
-"""Which DATA an eval operation measures. ONE value, not a (batch source, log prefix) pair:
-the two always covary, and nothing should be able to spell target-pool batches under the
-broad stream's log keys."""
+type Stream = Literal["nontarget", "target"]
+"""Which STREAM an eval operation measures. ONE value, not a (batch source, log prefix)
+pair: the two always covary, and nothing should be able to spell target-stream batches
+under the nontarget stream's log keys."""
 
 
 def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
     match stream:
-        case "broad":
+        case "nontarget":
             return context.batches
-        case "target_data":
+        case "target":
             assert context.target_batches is not None, (
                 "target-stream metrics need a tPD run's prompt pool; a plain run has none"
             )
@@ -46,17 +46,17 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
 def stream_log_prefix(stream: Stream, targeted: bool) -> str:
     """The log namespace for `stream` on a run of this kind.
 
-    ONE rule: the data the run is optimizing for is unlabelled, and anything else carries
-    its stream. A plain run has a single stream, so it stays `eval/` exactly as before. A
-    tPD run adds a second stream, so its broad corpus moves under `eval/nontarget_data/`
-    and the target pool takes the bare namespace. The consequence is deliberate:
-    `eval/l0/...` means "the data of interest" in both run kinds, which is what makes the
-    two comparable as objectives — but it is NOT the same data, so a corpus-vs-corpus
-    comparison across run kinds must read `eval/nontarget_data/` on the tPD side."""
+    ONE rule: the stream the run is optimizing for is unlabelled, and anything else carries
+    its name. A plain run has a single stream, so it stays `eval/` exactly as before. A tPD
+    run adds a second, so its nontarget stream moves under `eval/nontarget_data/` and its
+    target stream takes the bare namespace. The consequence is deliberate: `eval/l0/...`
+    means "the stream of interest" in both run kinds, which is what makes the two comparable
+    as objectives — but it is NOT the same data, so comparing like for like across run kinds
+    must read `eval/nontarget_data/` on the tPD side."""
     match stream:
-        case "broad":
+        case "nontarget":
             return f"eval/{NONTARGET_STREAM}/" if targeted else "eval/"
-        case "target_data":
+        case "target":
             return "eval/"
 
 

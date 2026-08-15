@@ -989,7 +989,7 @@ class ResumeProvenance(BaseConfig):
 
 
 NONTARGET_STREAM = "nontarget_data"
-"""The log-namespace segment for a tPD run's broad (non-target) stream.
+"""The log-namespace segment for a tPD run's nontarget stream.
 
 ONE rule across `train/` and `eval/`: the data a run OPTIMIZES FOR is unlabelled, and
 anything else carries its stream, as the segment immediately after the tier — so

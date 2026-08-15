@@ -69,8 +69,8 @@ class TwoStreamCIMeanPerComponentConfig(BaseConfig):
     TARGET mean and coloured by stream.
 
     Supersedes authoring `CIMeanPerComponent` on a targeted run: it computes the same
-    broad-stream reduction plus the target-pool one, so authoring both would pay for the
-    broad pass twice. Refuses on a plain run, which has no target stream."""
+    nontarget-stream reduction plus the target-stream one, so authoring both would pay
+    for the nontarget pass twice. Refuses on a plain run, which has no target stream."""
 
     slow: ClassVar[bool] = True
     type: Literal["TwoStreamCIMeanPerComponent"] = "TwoStreamCIMeanPerComponent"
