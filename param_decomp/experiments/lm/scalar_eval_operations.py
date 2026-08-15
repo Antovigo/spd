@@ -28,8 +28,7 @@ from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
 type Stream = Literal["nontarget", "target"]
 """Which STREAM an eval operation measures. ONE value, not a (batch source, log prefix)
-pair: the two always covary, and nothing should be able to spell target-stream batches
-under the nontarget stream's log keys."""
+pair, so target-stream batches cannot be spelled under the nontarget stream's log keys."""
 
 
 def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
@@ -44,16 +43,6 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
 
 
 def stream_log_prefix(stream: Stream, context: LMEvalContext) -> str:
-    """The log namespace for `stream`, given what kind of run this is.
-
-    ONE rule: the stream the run is optimizing for is unlabelled, and anything else carries
-    its name. A plain run has a single stream, so it stays `eval/` exactly as before —
-    `context.target_batches is None` is what says so. A tPD run adds a second, so its
-    nontarget stream moves under `eval/nontarget_data/` and its target stream takes the bare
-    namespace. The consequence is deliberate: `eval/l0/...` means "the stream of interest" in
-    both run kinds, which is what makes the two comparable as objectives — but it is NOT the
-    same data, so comparing like for like across run kinds must read `eval/nontarget_data/`
-    on the tPD side."""
     targeted = context.target_batches is not None
     match stream:
         case "nontarget":
@@ -131,10 +120,8 @@ def make_masked_kl_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
-    """ONE masking arm, authored as the loss config that names the same construction.
-
-    `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss` are authorable as evals exactly as
-    `PGDReconLoss` already is — the eval measures the quantity the loss optimizes."""
+    """ONE masking arm, authored as the loss config that names the same construction —
+    `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss`, as `PGDReconLoss` already is."""
     return _make_scalar_operation(
         schedule,
         make_masked_kl_step(model, ci_capture_keys, arm, mesh, compiler_options),
