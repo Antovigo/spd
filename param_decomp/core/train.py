@@ -193,18 +193,12 @@ def uv_norm_ratio_metrics(components: ComponentStacks) -> dict[str, Array]:
 
 
 def _scheduled_coeff_metrics(
-    step_f32: Array, total_steps: int, stream_prefix: str, coeffs: dict[str, LossCoeff]
+    step_f32: Array, total_steps: int, coeffs: dict[str, LossCoeff]
 ) -> dict[str, Array]:
     """Per-step values of the SCHEDULED coefficients only — a constant would be log
-    noise, and a moving coefficient invisible in wandb is a debugging trap.
-
-    `stream_prefix` is `""` for the data the run optimizes for and `"nontarget_data/"` for a
-    targeted run's corpus stream, so the stream segment leads the key exactly as it does on
-    the loss keys."""
+    noise, and a moving coefficient invisible in wandb is a debugging trap."""
     return {
-        f"{stream_prefix}schedules/coeff/{name}": scheduled_value_traced(
-            step_f32, total_steps, coeff
-        )
+        f"schedules/coeff/{name}": scheduled_value_traced(step_f32, total_steps, coeff)
         for name, coeff in coeffs.items()
         if isinstance(coeff, ScheduleConfig)
     }
@@ -1086,7 +1080,7 @@ def make_train_step[PreparedT](
                 step_f32=step_f32,
             )
             | {"faith": faith_loss}
-            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, "", coeff_schedules)
+            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, coeff_schedules)
         )
         return new_state, metrics
 
@@ -1183,15 +1177,11 @@ def make_targeted_train_step[PreparedT](
         ascend_replicate=ascend_replicate,
     )
     nt_terms = objective.nontarget.recon
-    # The non-target pass runs the TARGET pass's imp-min term under its own coefficient, so
-    # it logs the same loss name the target side does (`run._METRIC_KEYS`).
-    nt_imp_name = (
-        "SmoothL0ImportanceMinimalityLoss"
-        if atoms.imp_loss_key == "imp_smooth_l0"
-        else "ImportanceMinimalityLoss"
-    )
+    # Both passes run the same imp-min term, each under its own coefficient, so both log it
+    # under that term's name.
+    imp_name = objective.target.imp.name
     coeff_schedules: dict[str, LossCoeff] = {
-        objective.target.imp.name: objective.target.imp.coeff,
+        imp_name: objective.target.imp.coeff,
         **{term.name: term.coeff for term in objective.target.recon},
         **{
             f"{term.name}/hidden_acts_reconstruction": term.hidden_acts_reconstruction.coeff
@@ -1200,14 +1190,9 @@ def make_targeted_train_step[PreparedT](
         },
     }
     if objective.target.imp.cfg.frequency is not None:
-        coeff_schedules[f"{objective.target.imp.name}/frequency"] = (
-            objective.target.imp.cfg.frequency.coeff
-        )
-    # The non-target imp-min coefficient scales the SAME term the target stream spells by
-    # name, so it is spelled that way here too — the two streams' coefficients for one
-    # quantity must be readable as a pair.
+        coeff_schedules[f"{imp_name}/frequency"] = objective.target.imp.cfg.frequency.coeff
     nontarget_coeff_schedules: dict[str, LossCoeff] = {
-        objective.target.imp.name: objective.nontarget.impmin_coeff,
+        imp_name: objective.nontarget.impmin_coeff,
         **{term.name: term.coeff for term in nt_terms},
     }
 
@@ -1378,7 +1363,7 @@ def make_targeted_train_step[PreparedT](
             nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, atoms.imp_min, imp_min_param)
             nt_total = nt_imp_coeff * nt_imp_lp + freq_coeff * nt_imp_freq
             nt_aux = {
-                f"nontarget_data/loss/{nt_imp_name}": nt_imp_lp,
+                f"nontarget_data/loss/{imp_name}": nt_imp_lp,
                 "nontarget_data/loss/FrequencyMinimalityLoss": nt_imp_freq,
             }
             nt_breakdowns = atoms.grid_losses(
@@ -1463,10 +1448,13 @@ def make_targeted_train_step[PreparedT](
             )
             | nt_aux
             | wd_metrics
-            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, "", coeff_schedules)
-            | _scheduled_coeff_metrics(
-                step_f32, atoms.total_steps, "nontarget_data/", nontarget_coeff_schedules
-            )
+            | _scheduled_coeff_metrics(step_f32, atoms.total_steps, coeff_schedules)
+            | {
+                f"nontarget_data/{key}": value
+                for key, value in _scheduled_coeff_metrics(
+                    step_f32, atoms.total_steps, nontarget_coeff_schedules
+                ).items()
+            }
         )
         return new_state, metrics
 
