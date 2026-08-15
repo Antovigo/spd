@@ -61,7 +61,6 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
     make_fresh_pgd_operation,
     make_single_variant_kl_operation,
     stream_batches,
-    stream_log_prefix,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
@@ -232,7 +231,6 @@ def make_lm_evaluation(
                         mesh,
                         compiler_options,
                         inputs_for_context=well_temperedness_inputs,
-                        log_prefix=stream_log_prefix(optimized_stream, targeted),
                         figure_rendering=renderer if sink.accepts_deferred_media else None,
                     ),
                 )

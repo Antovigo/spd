@@ -43,27 +43,23 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
             return context.target_batches
 
 
-def stream_log_prefix(stream: Stream, targeted: bool) -> str:
-    """The log namespace for `stream` on a run of this kind.
+def stream_log_prefix(stream: Stream, context: LMEvalContext) -> str:
+    """The log namespace for `stream`, given what kind of run this is.
 
     ONE rule: the stream the run is optimizing for is unlabelled, and anything else carries
-    its name. A plain run has a single stream, so it stays `eval/` exactly as before. A tPD
-    run adds a second, so its nontarget stream moves under `eval/nontarget_data/` and its
-    target stream takes the bare namespace. The consequence is deliberate: `eval/l0/...`
-    means "the stream of interest" in both run kinds, which is what makes the two comparable
-    as objectives — but it is NOT the same data, so comparing like for like across run kinds
-    must read `eval/nontarget_data/` on the tPD side."""
+    its name. A plain run has a single stream, so it stays `eval/` exactly as before —
+    `context.target_batches is None` is what says so. A tPD run adds a second, so its
+    nontarget stream moves under `eval/nontarget_data/` and its target stream takes the bare
+    namespace. The consequence is deliberate: `eval/l0/...` means "the stream of interest" in
+    both run kinds, which is what makes the two comparable as objectives — but it is NOT the
+    same data, so comparing like for like across run kinds must read `eval/nontarget_data/`
+    on the tPD side."""
+    targeted = context.target_batches is not None
     match stream:
         case "nontarget":
             return "eval/nontarget_data/" if targeted else "eval/"
         case "target":
             return "eval/"
-
-
-def context_log_prefix(stream: Stream, context: LMEvalContext) -> str:
-    """`stream_log_prefix` for an operation already running: `target_batches is None` is
-    what tells a bound operation which run kind it landed in."""
-    return stream_log_prefix(stream, context.target_batches is not None)
 
 
 def _make_scalar_operation(
@@ -77,7 +73,7 @@ def _make_scalar_operation(
     stream: Stream,
 ) -> EvalOperation[LMEvalContext]:
     def run(context: LMEvalContext) -> LogRecord:
-        log_prefix = context_log_prefix(stream, context)
+        log_prefix = stream_log_prefix(stream, context)
         sums: dict[str, Array] = {}
         for batch_index, tokens in enumerate(stream_batches(stream, context)):
             key = random.fold_in(
@@ -196,7 +192,7 @@ def make_ci_l0_operation(
 
     def run(context: LMEvalContext) -> LogRecord:
         record = dict(scalars.run(context))
-        log_prefix = context_log_prefix(stream, context)
+        log_prefix = stream_log_prefix(stream, context)
         prefix = f"{log_prefix}l0/{metric.ci_alive_threshold}_"
         record[f"{log_prefix}l0/bar_chart"] = BarChart(
             rows=tuple(
