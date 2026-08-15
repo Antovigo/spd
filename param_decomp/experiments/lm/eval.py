@@ -42,7 +42,7 @@ what keeps it correct when `n_steps` is raised.
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal, get_args
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -205,39 +205,62 @@ def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
     return _row_masked_cross_entropy(logits, batch.tokens, batch.valid_row_mask)
 
 
-type CEKLVariant = Literal[
-    "ci_masked", "unmasked", "stoch_masked", "random_masked", "rounded_masked", "zero_masked"
-]
-"""One masking arm of the CE/KL evaluator. Each costs ONE masked forward, so a caller that
-wants a single number asks for a single arm rather than filtering the record afterwards."""
+type MaskingArm = Literal["ci_masked", "unmasked"]
+"""A masking arm authorable as an eval on its own (`CIMaskedReconLoss` /
+`UnmaskedNoDeltaReconLoss`). Both pin every weight-delta mask to zero."""
 
-CE_KL_VARIANTS: tuple[CEKLVariant, ...] = get_args(CEKLVariant.__value__)
-"""Every arm, in the order the full-fidelity `CEandKLLosses` reports them."""
+
+def make_masked_kl_step[PreparedT](
+    model_static: DecomposedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
+    arm: MaskingArm,
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
+    *,
+    n_valid_rows: int | None = None,
+) -> ScalarStep:
+    """KL against the target output under ONE masking arm — one clean forward, one masked.
+
+    `CEandKLLosses` reports the same number for this arm among ten others, at one masked
+    forward each; a targeted run wants a single arm, so it gets a step that computes only
+    that one rather than a wider evaluator narrowed after the fact. The key is the spelling
+    `CEandKLLosses` uses, so the two runs' numbers meet under one name."""
+    assert model_static.has_position_axis, "masked KL is LM-only and requires a position axis"
+
+    def eval_step(
+        model: DecomposedModel[PreparedT],
+        components: ComponentStacks,
+        ci_fn: CIFn,
+        token_ids: Array,
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        del key  # neither arm draws masks
+        batch = _prepare_lm_batch(
+            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+        )
+        match arm:
+            case "ci_masked":
+                masks = batch.ci_lower
+            case "unmasked":
+                masks = {site: jnp.ones_like(batch.ci_lower[site]) for site in model.site_names}
+        zeros_delta = {site: jnp.zeros(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
+        logits = _compute_masked_output(model, batch, masks, zeros_delta, mesh, frozenset())
+        return {f"ce_kl/kl_{arm}": _kl(batch, logits)}
+
+    return filter_jit(eval_step, compiler_options=compiler_options)
 
 
 def make_ce_kl_step[PreparedT](
     model_static: DecomposedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
-    variants: tuple[CEKLVariant, ...],
+    rounding_threshold: float,
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
-    rounding_threshold: float | None = None,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
-    """Build the single-purpose CE/KL evaluator over `variants`.
-
-    The masks for EVERY arm are drawn whether or not the arm is selected, so a narrowed
-    evaluator's numbers are bit-identical to the full one's — only the forwards are
-    skipped, and XLA drops the unused draws. `emit_ce_difference` adds the CE-vs-target
-    `rounding_threshold` belongs to the
-    rounded arm alone, so it is present exactly when that arm is."""
+    """Build the single-purpose CE/KL evaluator."""
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
-    assert variants, "a CE/KL evaluator with no arms measures nothing"
-    assert ("rounded_masked" in variants) == (rounding_threshold is not None), (
-        variants,
-        rounding_threshold,
-    )
 
     def eval_step(
         model: DecomposedModel[PreparedT],
@@ -262,7 +285,7 @@ def make_ce_kl_step[PreparedT](
                 batch.tokens.shape,
                 COMPUTE_DT,
             )
-        variant_masks = {
+        variants = {
             "ci_masked": (batch.ci_lower, zeros_delta),
             "unmasked": (
                 {site: jnp.ones_like(batch.ci_lower[site]) for site in model.site_names},
@@ -278,23 +301,21 @@ def make_ce_kl_step[PreparedT](
                 },
                 zeros_delta,
             ),
-            "zero_masked": (
-                {site: jnp.zeros_like(batch.ci_lower[site]) for site in model.site_names},
-                zeros_delta,
-            ),
-        }
-        if rounding_threshold is not None:
-            variant_masks["rounded_masked"] = (
+            "rounded_masked": (
                 {
                     site: (batch.ci_lower[site] > rounding_threshold).astype(COMPUTE_DT)
                     for site in model.site_names
                 },
                 zeros_delta,
-            )
+            ),
+            "zero_masked": (
+                {site: jnp.zeros_like(batch.ci_lower[site]) for site in model.site_names},
+                zeros_delta,
+            ),
+        }
         variant_logits = {
             name: _compute_masked_output(model, batch, masks, deltas, mesh, frozenset())
-            for name, (masks, deltas) in variant_masks.items()
-            if name in variants
+            for name, (masks, deltas) in variants.items()
         }
         target_ce = _ce(batch, batch.clean.output)
         metrics = {
@@ -303,7 +324,7 @@ def make_ce_kl_step[PreparedT](
         metrics.update(
             {
                 f"ce_kl/ce_difference_{name}": _ce(batch, variant_logits[name]) - target_ce
-                for name in variant_logits
+                for name in variants
                 if name != "zero_masked"
             }
         )
@@ -459,10 +480,9 @@ def make_eval_step[PreparedT](
     ce_kl = make_ce_kl_step(
         model_static,
         ci_capture_keys,
-        CE_KL_VARIANTS,
+        rounding_threshold,
         mesh,
         compiler_options,
-        rounding_threshold=rounding_threshold,
         n_valid_rows=n_valid_rows,
     )
     ci_l0 = make_ci_l0_step(

@@ -15,12 +15,12 @@ from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.core.run import EvalOperation
 from param_decomp.experiments.lm.eval import (
-    CE_KL_VARIANTS,
-    CEKLVariant,
+    MaskingArm,
     ScalarStep,
     make_ce_kl_step,
     make_ci_l0_step,
     make_fresh_pgd_step,
+    make_masked_kl_step,
 )
 from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
 from param_decomp.experiments.lm.eval_context import LMEvalContext
@@ -109,14 +109,7 @@ def make_ce_kl_operation(
 ) -> EvalOperation[LMEvalContext]:
     return _make_scalar_operation(
         schedule,
-        make_ce_kl_step(
-            model,
-            ci_capture_keys,
-            CE_KL_VARIANTS,
-            mesh,
-            compiler_options,
-            rounding_threshold=metric.rounding_threshold,
-        ),
+        make_ce_kl_step(model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options),
         ("ce_kl/",),
         model,
         run_key,
@@ -126,8 +119,8 @@ def make_ce_kl_operation(
     )
 
 
-def make_single_variant_kl_operation(
-    variant: CEKLVariant,
+def make_masked_kl_operation(
+    arm: MaskingArm,
     schedule: EvalSchedule,
     stream: Stream,
     model: DecomposedModel,
@@ -138,17 +131,14 @@ def make_single_variant_kl_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
 ) -> EvalOperation[LMEvalContext]:
-    """ONE masking arm of the CE/KL evaluator, authored as the loss config that names the
-    same construction.
+    """ONE masking arm, authored as the loss config that names the same construction.
 
     `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss` are authorable as evals exactly as
-    `PGDReconLoss` already is — the eval measures the quantity the loss optimizes. The key
-    keeps the `ce_kl/kl_<arm>` spelling a plain run's `CEandKLLosses` logs it under, so the
-    same number is one name across run kinds; the config type names the construction."""
+    `PGDReconLoss` already is — the eval measures the quantity the loss optimizes."""
     return _make_scalar_operation(
         schedule,
-        make_ce_kl_step(model, ci_capture_keys, (variant,), mesh, compiler_options),
-        (f"ce_kl/kl_{variant}",),
+        make_masked_kl_step(model, ci_capture_keys, arm, mesh, compiler_options),
+        (f"ce_kl/kl_{arm}",),
         model,
         run_key,
         train_steps,
