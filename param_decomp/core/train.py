@@ -1177,8 +1177,6 @@ def make_targeted_train_step[PreparedT](
         ascend_replicate=ascend_replicate,
     )
     nt_terms = objective.nontarget.recon
-    # Both passes run the same imp-min term, each under its own coefficient, so both log it
-    # under that term's name.
     imp_name = objective.target.imp.name
     coeff_schedules: dict[str, LossCoeff] = {
         imp_name: objective.target.imp.coeff,

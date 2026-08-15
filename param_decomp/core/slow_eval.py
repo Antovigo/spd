@@ -199,6 +199,13 @@ def make_slow_eval_step(
     return filter_jit(slow_eval_step, compiler_options=compiler_options)
 
 
+def _raw_sample(chunks: dict[str, list[np.ndarray]], site: str) -> np.ndarray:
+    """A site's kept raw values, or empty when none were kept: `n_batches_accum=0` asks for
+    NO sample, and a caller that reads only `ci_sums` (the two-stream CI mean) would
+    otherwise pay a host gather of every position's CI just to discard it."""
+    return np.concatenate(chunks[site]) if site in chunks else np.empty(0, np.float32)
+
+
 def accumulate_site_reductions(
     slow_eval_step: SlowEvalStep,
     model: DecomposedModel,
@@ -242,19 +249,13 @@ def accumulate_site_reductions(
                     )
                 )
 
-    def sample(chunks: dict[str, list[np.ndarray]], site: str) -> np.ndarray:
-        """`n_batches_accum=0` asks for NO raw sample, so a site has no chunks at all: a
-        caller that reads only `ci_sums` (the two-stream CI mean) would otherwise pay a
-        host gather of every position's CI just to discard it."""
-        return np.concatenate(chunks[site]) if site in chunks else np.empty(0, np.float32)
-
     return {
         site: SiteReduction(
             density_counts=density[site],
             ci_sums=sums[site],
             n_positions=total_positions,
-            lower_sample=sample(lower_chunks, site),
-            preactivations_sample=sample(preactivations_chunks, site),
+            lower_sample=_raw_sample(lower_chunks, site),
+            preactivations_sample=_raw_sample(preactivations_chunks, site),
             density_hist=hist.get(site),
         )
         for site in density
