@@ -250,28 +250,14 @@ def make_lm_evaluation(
             case WeightMagnitudeConfig():
                 return (make_weight_magnitude_operation(schedule, renderer),)
 
-    needs_target_stream = tuple(
-        metric.type
-        for metric in eval.metrics
-        if isinstance(metric, TwoStreamCIMeanPerComponentConfig)
-    )
-    assert not needs_target_stream or targeted, (
-        f"{needs_target_stream} measure the tPD target stream; a plain run has no prompt pool"
-    )
     authored = {type(metric) for metric in eval.metrics}
-    assert not {TwoStreamCIMeanPerComponentConfig, CIMeanPerComponentConfig} <= authored, (
-        "TwoStreamCIMeanPerComponent already computes the nontarget-stream reduction "
-        "CIMeanPerComponent does, so authoring both pays for that pass twice"
+    assert targeted or TwoStreamCIMeanPerComponentConfig not in authored, (
+        "TwoStreamCIMeanPerComponent measures the target stream; a plain run has none"
     )
-    single_arm = tuple(
-        metric.type
-        for metric in eval.metrics
-        if isinstance(metric, CIMaskedReconLossConfig | UnmaskedNoDeltaReconLossConfig)
-    )
-    assert not (single_arm and any(isinstance(m, CEandKLLossesConfig) for m in eval.metrics)), (
-        f"{single_arm} emit arms CEandKLLosses already emits, under the same `ce_kl/kl_*` "
-        "keys: author the narrow metrics OR CEandKLLosses, not both"
-    )
+    assert not (
+        authored & {CIMaskedReconLossConfig, UnmaskedNoDeltaReconLossConfig}
+        and CEandKLLossesConfig in authored
+    ), "the single-arm KL evals emit keys CEandKLLosses also emits; author one or the other"
     operations = tuple(
         operation for metric in eval.metrics for operation in make_operations(metric)
     )
