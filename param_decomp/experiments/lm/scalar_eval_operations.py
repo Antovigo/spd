@@ -7,7 +7,7 @@ from jax import random
 from jax.sharding import Mesh
 from jaxtyping import Array, PRNGKeyArray
 
-from param_decomp.core.configs import NONTARGET_STREAM, CI_L0Config, PGDReconLossConfig
+from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import BarChart, LogRecord
 from param_decomp.core.model import CaptureKeys, DecomposedModel
@@ -55,7 +55,7 @@ def stream_log_prefix(stream: Stream, targeted: bool) -> str:
     must read `eval/nontarget_data/` on the tPD side."""
     match stream:
         case "nontarget":
-            return f"eval/{NONTARGET_STREAM}/" if targeted else "eval/"
+            return "eval/nontarget_data/" if targeted else "eval/"
         case "target":
             return "eval/"
 

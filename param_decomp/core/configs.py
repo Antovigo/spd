@@ -473,8 +473,7 @@ class WeightMagnitudeConfig(BaseConfig):
 
     Reads the trained V/U alone — no forward pass and no eval batch, so it costs two norm
     reductions and a plot. The norms reduce on device; only `C` floats per site are pulled.
-    Stream-independent by construction: it never touches a batch, so it carries no stream
-    segment on either run kind."""
+    """
 
     slow: ClassVar[bool] = True
     type: Literal["WeightMagnitude"] = "WeightMagnitude"
@@ -986,28 +985,6 @@ class ResumeProvenance(BaseConfig):
 
     parent_step: int
     """The parent's orbax `ckpts/<step>/` checkpoint step to initialize V/U + ci_fn from."""
-
-
-NONTARGET_STREAM = "nontarget_data"
-"""The log-namespace segment for a tPD run's nontarget stream.
-
-ONE rule across `train/` and `eval/`: the data a run OPTIMIZES FOR is unlabelled, and
-anything else carries its stream, as the segment immediately after the tier — so
-`train/loss/X` / `eval/X` mean "the data of interest" in both run kinds, and the corpus
-stream of a targeted run reads `train/nontarget_data/loss/X` / `eval/nontarget_data/X`. A
-plain run has ONE stream and therefore never emits this segment: every plain-run key is
-what it was before targeted runs existed."""
-
-
-IMP_MIN_METRIC_NAMES: dict[str, str] = {
-    "imp": "ImportanceMinimalityLoss",
-    "imp_smooth_l0": "SmoothL0ImportanceMinimalityLoss",
-    "freq": "FrequencyMinimalityLoss",
-}
-"""Step-record short key -> logged loss name, for the terms whose record key is not already
-the term's class name. Shared so the target stream (expanded by `run._METRIC_KEYS`) and the
-non-target stream (keyed in `train.make_targeted_train_step`) cannot drift apart: both
-streams must spell the same quantity the same way."""
 
 
 # ---------------------------------------------------------------------------
