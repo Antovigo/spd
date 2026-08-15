@@ -200,9 +200,7 @@ def make_slow_eval_step(
 
 
 def _raw_sample(chunks: dict[str, list[np.ndarray]], site: str) -> np.ndarray:
-    """A site's kept raw values, or empty when none were kept: `n_batches_accum=0` asks for
-    NO sample, and a caller that reads only `ci_sums` (the two-stream CI mean) would
-    otherwise pay a host gather of every position's CI just to discard it."""
+    """A site's kept raw values, or empty when `n_batches_accum` kept none."""
     return np.concatenate(chunks[site]) if site in chunks else np.empty(0, np.float32)
 
 
@@ -603,15 +601,14 @@ def weight_magnitudes(components: ComponentStacks) -> dict[str, np.ndarray]:
 
 
 def mean_cis(reductions: dict[str, SiteReduction]) -> dict[str, np.ndarray]:
-    """Per-site token-weighted mean CI, with the zero-position guard in ONE place."""
+    """Per-site token-weighted mean CI."""
     assert all(r.n_positions > 0 for r in reductions.values())
     return {site: r.ci_sums / r.n_positions for site, r in reductions.items()}
 
 
 def plot_weight_magnitudes(magnitudes: dict[str, np.ndarray]) -> bytes:
-    """Per-site `‖V_c‖·‖U_c‖` in DESCENDING magnitude order, log y. x is a component's rank
-    within its site, NOT its component id: the readable quantity is the spectrum's shape —
-    how fast magnitude falls off, and where it knees — which component order destroys."""
+    """Per-site `‖V_c‖·‖U_c‖` in descending magnitude order, log y. x is a component's rank
+    within its site, NOT its component id."""
     n_rows, n_cols = _grid_dims(len(magnitudes))
     fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
     axs = fig.subplots(n_rows, n_cols, squeeze=False)
@@ -632,17 +629,15 @@ def plot_mean_component_cis_two_streams(
     target_mean_cis: dict[str, np.ndarray],
     nontarget_mean_cis: dict[str, np.ndarray],
 ) -> tuple[bytes, bytes]:
-    """Both streams' mean CI on one axis per site, ordered by DESCENDING TARGET mean.
+    """Both streams' mean CI on one axis per site, ordered by descending TARGET mean.
 
-    The non-target series is reordered by the same permutation rather than sorted on its
-    own, so a component's two bars line up vertically — the whole point is reading, per
-    component, how much on-target importance comes with off-target importance."""
+    The nontarget series takes the same permutation rather than its own, so a component's
+    two series line up vertically."""
     assert target_mean_cis.keys() == nontarget_mean_cis.keys(), (
         sorted(target_mean_cis),
         sorted(nontarget_mean_cis),
     )
     n_rows, n_cols = _grid_dims(len(target_mean_cis))
-    # One permutation per site, not one per scale: the log figure plots the same ordering.
     ordered = {
         name: (target[order], nontarget_mean_cis[name][order])
         for name, target in target_mean_cis.items()
@@ -656,9 +651,6 @@ def plot_mean_component_cis_two_streams(
         for ax in flat_axes[len(ordered) :]:
             ax.set_visible(False)
         for ax, (name, (target, nontarget)) in zip(flat_axes, ordered.items(), strict=False):
-            # `fill_between`, not `bar`: at production C a bar per component is one matplotlib
-            # patch each, ~25x the render time of the equivalent filled step for the same
-            # picture — and this renders on a thread that contends with the train loop.
             x = np.arange(len(target))
             if log_y:
                 ax.set_yscale("log")

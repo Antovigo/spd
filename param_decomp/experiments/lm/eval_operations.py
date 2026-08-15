@@ -86,10 +86,7 @@ def make_lm_evaluation(
     the metric measures.
 
     `target_pool_batches_for(pass_index)` supplies the tPD target stream, which `data.eval`
-    cannot: the prompt pool has no held-out split, so the targeted root draws pool batches
-    the same way training does. `None` on a plain run, and that is what makes a plain run's
-    metric set — and every one of its log keys — exactly what it was before targeted runs
-    existed: `data_streams` collapses to the single nontarget stream."""
+    cannot. `None` on a plain run, which collapses every metric to the one stream it has."""
     pd = built.pd
     capture_inputs = built.ci_fn.capture_keys
     data = built.data
@@ -108,11 +105,7 @@ def make_lm_evaluation(
         ]
 
     targeted = target_pool_batches_for is not None
-    # Every stream a metric authored for BOTH measures; a plain run has exactly one.
     data_streams: tuple[Stream, ...] = ("nontarget", "target") if targeted else ("nontarget",)
-    # The stream the run optimizes for, and the DEFAULT for any single-stream eval: a
-    # diagnostic you read once should describe the data you are interpreting. On a plain run
-    # this IS the nontarget stream, so every such metric keeps the keys and data it had.
     optimized_stream: Stream = "target" if targeted else "nontarget"
 
     def well_temperedness_inputs(
@@ -128,8 +121,8 @@ def make_lm_evaluation(
         schedule: EvalSchedule,
         streams: tuple[Stream, ...],
     ) -> tuple[EvalOperation[LMEvalContext], ...]:
-        """One operation per stream. The scalar makers share a signature exactly so the
-        stream can be the only thing that varies between a metric's two readouts."""
+        """One operation per stream; the scalar makers share a signature so the stream is the
+        only thing that varies between a metric's readouts."""
         return tuple(
             maker(
                 metric,
@@ -154,8 +147,7 @@ def make_lm_evaluation(
             case CIMaskedReconLossConfig():
                 return per_stream(make_masked_kl_operation, "ci_masked", schedule, data_streams)
             case UnmaskedNoDeltaReconLossConfig():
-                # The non-target pass's OWN training term, already reported as a train loss
-                # there; measuring it again off-target would restate the objective.
+                # The nontarget pass's own training term, already reported there as a loss.
                 return per_stream(
                     make_masked_kl_operation, "unmasked", schedule, (optimized_stream,)
                 )
@@ -271,9 +263,6 @@ def make_lm_evaluation(
         "TwoStreamCIMeanPerComponent already computes the nontarget-stream reduction "
         "CIMeanPerComponent does, so authoring both pays for that pass twice"
     )
-    # The single-arm evals ARE arms of `CEandKLLosses`, under the same keys. Authoring both
-    # is a duplicate measurement that `_run_due_evaluation`'s collision assert would catch
-    # at the first eval pass — hours into a run. Catch it while reading the config.
     single_arm = tuple(
         metric.type
         for metric in eval.metrics

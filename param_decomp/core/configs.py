@@ -471,9 +471,7 @@ class ComponentActivationDensityConfig(BaseConfig):
 class WeightMagnitudeConfig(BaseConfig):
     """Per-site `‖V_c‖·‖U_c‖` scatter in descending magnitude order, log y.
 
-    Reads the trained V/U alone — no forward pass and no eval batch, so it costs two norm
-    reductions and a plot. The norms reduce on device; only `C` floats per site are pulled.
-    """
+    Reads the trained V/U alone — no forward pass and no eval batch."""
 
     slow: ClassVar[bool] = True
     type: Literal["WeightMagnitude"] = "WeightMagnitude"

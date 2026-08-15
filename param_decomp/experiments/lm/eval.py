@@ -206,8 +206,8 @@ def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
 
 
 type MaskingArm = Literal["ci_masked", "unmasked"]
-"""A masking arm authorable as an eval on its own (`CIMaskedReconLoss` /
-`UnmaskedNoDeltaReconLoss`). Both pin every weight-delta mask to zero."""
+"""A masking arm authorable as an eval on its own. Both pin every weight-delta mask to
+zero."""
 
 
 def make_masked_kl_step[PreparedT](
@@ -221,10 +221,8 @@ def make_masked_kl_step[PreparedT](
 ) -> ScalarStep:
     """KL against the target output under ONE masking arm — one clean forward, one masked.
 
-    `CEandKLLosses` reports the same number for this arm among ten others, at one masked
-    forward each; a targeted run wants a single arm, so it gets a step that computes only
-    that one rather than a wider evaluator narrowed after the fact. The key is the spelling
-    `CEandKLLosses` uses, so the two runs' numbers meet under one name."""
+    The key is the spelling `CEandKLLosses` reports this arm under, so the two are one
+    quantity under one name."""
     assert model_static.has_position_axis, "masked KL is LM-only and requires a position axis"
 
     def eval_step(

@@ -222,9 +222,9 @@ def make_two_stream_ci_mean_operation(
     step = make_slow_eval_step(model, ci_capture_keys, 0.0, None, compiler_options)
 
     def stream_mean_cis(ci_fn: CIFn, batches: tuple[jax.Array, ...]) -> dict[str, np.ndarray]:
-        # `n_batches_accum=0`: this metric reads only `ci_sums`, and the raw-value sample
-        # would gather every position's CI to the host (~430MB/pass here) to be discarded.
-        return mean_cis(accumulate_site_reductions(step, model, ci_fn, list(batches), 0))
+        return mean_cis(
+            accumulate_site_reductions(step, model, ci_fn, list(batches), n_batches_accum=0)
+        )
 
     def run(context: LMEvalContext) -> LogRecord:
         ci_fn = context.state.decomposition.ci_fn
