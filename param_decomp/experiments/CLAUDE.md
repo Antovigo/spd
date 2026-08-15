@@ -175,38 +175,6 @@ experiments/
 └── resid_mlp/               # ResidMLP (CPU): run.py + configs/ + test (target: param_decomp/targets/resid_mlp.py)
 ```
 
-## `eval.metrics` on a targeted run — one operation PER STREAM
-
-`make_lm_evaluation` binds each authored metric to every stream it measures, so a metric is
-authored ONCE and a tPD run gets both readouts. The stream set comes from
-`target_pool_batches_for`: `None` (the plain root) collapses it to the single broad stream,
-so a plain run's operations and keys are untouched. The namespace rule itself is in
-`param_decomp/core/CLAUDE.md`.
-
-| authored metric | streams it binds to |
-|---|---|
-| `CI_L0`, `PGDReconLoss`, `CIMaskedReconLoss`, `CEandKLLosses` | both on tPD, broad on plain |
-| `UnmaskedNoDeltaReconLoss`, attn-patterns / hidden-acts recon, `WellTemperedness`, the site figures, the permutation plots, `IdentityCIError` | the OPTIMIZED stream only |
-| `WeightMagnitude` | none — reads V/U, no batch |
-| `TwoStreamCIMeanPerComponent` | both, in one figure; refuses on a plain run |
-| `ArithmeticCIGrid` | none — brings its own probe grid |
-
-**A single-stream eval defaults to the OPTIMIZED stream** (`optimized_stream`, hence
-`single_stream`): a diagnostic you read once should describe the data you are interpreting,
-which on a tPD run is the prompt pool. On a plain run that tuple IS `("broad",)`, so those
-metrics keep both the data and the keys they had. The consequence on a tPD run is that
-`eval/nontarget_data/` appears ONLY for metrics deliberately bound to both streams — a
-figure or scalar with no stream segment is target-pool data.
-
-`CIMaskedReconLoss` and `UnmaskedNoDeltaReconLoss` are authorable under `eval.metrics` as
-well as `loss_metrics` — the `PGDReconLoss` dual-role pattern (`coeff` null in the eval
-seat). As evals they are ONE arm of the CE/KL evaluator (`ce_kl/kl_ci_masked`,
-`ce_kl/kl_unmasked`), which is how you get those two numbers without `CEandKLLosses`'s full
-11-scalar record — and at one masked forward each instead of six. `UnmaskedNoDeltaReconLoss`
-binds to the optimized stream alone deliberately: it is the non-target pass's OWN training
-term, already reported there as a train loss, so an eval of it off-target would restate the
-objective.
-
 ## Sites and the family grammar
 
 Read `param_decomp/core/family.py`'s module docstring before authoring a

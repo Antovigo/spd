@@ -399,43 +399,6 @@ on one.
   priority-fusion). Don't chase graph-shrink refactors for compile time without new
   evidence.
 
-## Metric namespaces: the data a run optimizes for is unlabelled
-
-Every logged key is `<tier>/[<stream>/]<family>/<name>` — `tier` is `train`/`eval`, and the
-STREAM segment sits immediately after it (the only position that works uniformly, since
-`eval` has several families: `ce_kl/`, `l0/`, `loss/`). The one rule:
-
-- The data the run OPTIMIZES FOR carries no stream segment.
-- Anything else carries `nontarget_data/` (`configs.NONTARGET_STREAM`).
-
-So `train/loss/total` and `eval/l0/...` mean "the data of interest" in BOTH run kinds — a
-plain run's corpus, a tPD run's prompt pool — while a targeted run's broad corpus reads
-`train/nontarget_data/loss/total` / `eval/nontarget_data/l0/...`. The consequence is
-deliberate and is the trap: the bare namespace is comparable across run kinds AS AN
-OBJECTIVE, but it is not the same DATA, so a corpus-vs-corpus comparison must read
-`eval/nontarget_data/` on the tPD side.
-
-**A plain run has ONE stream and therefore never emits the segment** — every plain-run and
-toy key is exactly what it was before targeted runs existed. That is a COMPATIBILITY
-GUARANTEE, not an accident: `scalar_eval_operations.stream_log_prefix` keys off
-`context.target_batches is None`: on a plain run there is no second stream to name, so the
-prefix is the same literal it always was. Nothing pins this in a test — if you change
-`stream_log_prefix`, check the plain arm by hand.
-Two consequences when adding a metric:
-
-- An eval that reads data must take BOTH its batches and its prefix from the same `Stream`
-  value (`stream_batches` / `stream_log_prefix`) — never a hardcoded `context.batches` or
-  `"eval/"`, which on a tPD run would read the corpus while claiming to be target data.
-  Core-side metrics shared with the toys take a `log_prefix_for_context` callback instead
-  (`well_temperedness_eval`). A single-stream eval binds to the OPTIMIZED stream by
-  default; only a metric authored for both takes `data_streams`.
-- An eval that reads no batch at all (`WeightMagnitude`, the U/V norm ratios) has no stream
-  and keeps the bare namespace on both run kinds.
-
-One quantity gets ONE name across streams: `IMP_MIN_METRIC_NAMES` is shared by the target
-stream (expanded in `run._METRIC_KEYS`) and the non-target stream (keyed in
-`train.make_targeted_train_step`) so the two cannot drift apart.
-
 ## Gotchas
 
 - **Process bring-up is config-derived, NEVER SLURM-sniffing** (`sharding.py`): the LM
