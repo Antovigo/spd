@@ -40,12 +40,7 @@ from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 from param_decomp.core.adversary import PersistentAdversary, init_fresh_pgd_sources
 from param_decomp.core.ci_fn import CI, CIFn, evaluate_ci
 from param_decomp.core.components import ComponentStacks, VUShape
-from param_decomp.core.configs import (
-    IMP_MIN_METRIC_NAMES,
-    NONTARGET_STREAM,
-    LossCoeff,
-    SmoothL0ImportanceMinimalityLossConfig,
-)
+from param_decomp.core.configs import LossCoeff, SmoothL0ImportanceMinimalityLossConfig
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.losses import (
     ReconstructionLoss,
@@ -1188,6 +1183,13 @@ def make_targeted_train_step[PreparedT](
         ascend_replicate=ascend_replicate,
     )
     nt_terms = objective.nontarget.recon
+    # The non-target pass runs the TARGET pass's imp-min term under its own coefficient, so
+    # it logs the same loss name the target side does (`run._METRIC_KEYS`).
+    nt_imp_name = (
+        "SmoothL0ImportanceMinimalityLoss"
+        if atoms.imp_loss_key == "imp_smooth_l0"
+        else "ImportanceMinimalityLoss"
+    )
     coeff_schedules: dict[str, LossCoeff] = {
         objective.target.imp.name: objective.target.imp.coeff,
         **{term.name: term.coeff for term in objective.target.recon},
@@ -1376,10 +1378,8 @@ def make_targeted_train_step[PreparedT](
             nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, atoms.imp_min, imp_min_param)
             nt_total = nt_imp_coeff * nt_imp_lp + freq_coeff * nt_imp_freq
             nt_aux = {
-                # Same spelling as the target stream's keys (which `run._METRIC_KEYS` expands
-                # from the same map), so one quantity is not two names.
-                f"{NONTARGET_STREAM}/loss/{IMP_MIN_METRIC_NAMES[atoms.imp_loss_key]}": nt_imp_lp,
-                f"{NONTARGET_STREAM}/loss/{IMP_MIN_METRIC_NAMES['freq']}": nt_imp_freq,
+                f"nontarget_data/loss/{nt_imp_name}": nt_imp_lp,
+                "nontarget_data/loss/FrequencyMinimalityLoss": nt_imp_freq,
             }
             nt_breakdowns = atoms.grid_losses(
                 nt_terms,
@@ -1392,8 +1392,8 @@ def make_targeted_train_step[PreparedT](
                 nt_terms, nt_recon_coeffs, nt_breakdowns, strict=True
             ):
                 nt_total = nt_total + coeff * breakdown.total
-                nt_aux[f"{NONTARGET_STREAM}/loss/{term.name}"] = breakdown.total
-            nt_aux[f"{NONTARGET_STREAM}/loss/total"] = nt_total
+                nt_aux[f"nontarget_data/loss/{term.name}"] = breakdown.total
+            nt_aux["nontarget_data/loss/total"] = nt_total
             total_loss = total_loss + nt_total
             reported_total = reported_total + nt_total
             return total_loss, (reported_total, imp_lp, imp_freq, term_breakdowns, nt_aux)
@@ -1465,7 +1465,7 @@ def make_targeted_train_step[PreparedT](
             | wd_metrics
             | _scheduled_coeff_metrics(step_f32, atoms.total_steps, "", coeff_schedules)
             | _scheduled_coeff_metrics(
-                step_f32, atoms.total_steps, f"{NONTARGET_STREAM}/", nontarget_coeff_schedules
+                step_f32, atoms.total_steps, "nontarget_data/", nontarget_coeff_schedules
             )
         )
         return new_state, metrics
