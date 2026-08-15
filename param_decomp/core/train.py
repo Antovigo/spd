@@ -1190,8 +1190,7 @@ def make_targeted_train_step[PreparedT](
         coeff_schedules[f"{objective.target.imp.name}/frequency"] = (
             objective.target.imp.cfg.frequency.coeff
         )
-    # Both passes run the same imp-min term, each under its own coefficient, so both log it
-    # under that term's name.
+
     imp_name = objective.target.imp.name
     nontarget_coeff_schedules: dict[str, LossCoeff] = {
         imp_name: objective.nontarget.impmin_coeff,

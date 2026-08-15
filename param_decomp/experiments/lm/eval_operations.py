@@ -59,7 +59,7 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
     make_ce_kl_operation,
     make_ci_l0_operation,
     make_fresh_pgd_operation,
-    make_single_variant_kl_operation,
+    make_masked_kl_operation,
     stream_batches,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
@@ -152,14 +152,12 @@ def make_lm_evaluation(
             case CEandKLLossesConfig():
                 return per_stream(make_ce_kl_operation, metric, schedule, data_streams)
             case CIMaskedReconLossConfig():
-                return per_stream(
-                    make_single_variant_kl_operation, "ci_masked", schedule, data_streams
-                )
+                return per_stream(make_masked_kl_operation, "ci_masked", schedule, data_streams)
             case UnmaskedNoDeltaReconLossConfig():
                 # The non-target pass's OWN training term, already reported as a train loss
                 # there; measuring it again off-target would restate the objective.
                 return per_stream(
-                    make_single_variant_kl_operation, "unmasked", schedule, (optimized_stream,)
+                    make_masked_kl_operation, "unmasked", schedule, (optimized_stream,)
                 )
             case CI_L0Config():
                 return per_stream(make_ci_l0_operation, metric, schedule, data_streams)
