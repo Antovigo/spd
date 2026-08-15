@@ -80,7 +80,7 @@ def make_lm_evaluation(
     n_proc: int,
     sink: MetricsSink,
     compiler_options: dict[str, bool | int | str],
-    target_pool_batches_for: Callable[[int], list[jax.Array]] | None,
+    target_pool_batches_for: Callable[[int], list[jax.Array]] | None = None,
 ) -> Evaluation[LMEvalContext]:
     """Construct the executable operations for every authored LM metric — one PER STREAM
     the metric measures.

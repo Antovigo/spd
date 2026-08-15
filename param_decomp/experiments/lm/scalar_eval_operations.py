@@ -115,7 +115,6 @@ def make_ce_kl_operation(
             CE_KL_VARIANTS,
             mesh,
             compiler_options,
-            emit_ce_difference=True,
             rounding_threshold=metric.rounding_threshold,
         ),
         ("ce_kl/",),
@@ -148,9 +147,7 @@ def make_single_variant_kl_operation(
     same number is one name across run kinds; the config type names the construction."""
     return _make_scalar_operation(
         schedule,
-        make_ce_kl_step(
-            model, ci_capture_keys, (variant,), mesh, compiler_options, emit_ce_difference=False
-        ),
+        make_ce_kl_step(model, ci_capture_keys, (variant,), mesh, compiler_options),
         (f"ce_kl/kl_{variant}",),
         model,
         run_key,

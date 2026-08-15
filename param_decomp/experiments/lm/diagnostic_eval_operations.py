@@ -68,16 +68,15 @@ from param_decomp.experiments.lm.scalar_eval_operations import (
 )
 
 
-def _figure_record(now_step: int, media: dict[str, bytes]) -> DeferredMediaRecord:
-    """A slow-tier figure batch on the dedicated figure-step axis (SPEC S28)."""
-    return DeferredMediaRecord(step_key="slow_eval/figure_step", step=now_step, media=media)
-
-
 def _render_selected_figures(
     reductions: dict[str, SiteReduction], wanted: set[str], now_step: int
 ) -> DeferredMediaRecord:
     figures = render_slow_eval_figures(reductions)
-    return _figure_record(now_step, {f"slow_eval/{name}": figures[name] for name in wanted})
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={f"slow_eval/{name}": figures[name] for name in wanted},
+    )
 
 
 def _render_permutation(
@@ -90,7 +89,11 @@ def _render_permutation(
     figures = render_permutation_figures(spec, position_ci, components)
     if not include_ci_heatmaps:
         figures = {key: value for key, value in figures.items() if key == "figures/uv_matrices"}
-    return _figure_record(now_step, {f"slow_eval/{name}": value for name, value in figures.items()})
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={f"slow_eval/{name}": value for name, value in figures.items()},
+    )
 
 
 def make_attention_operation(
@@ -172,8 +175,10 @@ def make_hidden_acts_operation(
 def _render_weight_magnitudes(
     magnitudes: dict[str, np.ndarray], now_step: int
 ) -> DeferredMediaRecord:
-    return _figure_record(
-        now_step, {"slow_eval/figures/weight_magnitude": plot_weight_magnitudes(magnitudes)}
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={"slow_eval/figures/weight_magnitude": plot_weight_magnitudes(magnitudes)},
     )
 
 
@@ -196,9 +201,10 @@ def _render_two_stream_ci_means(
     now_step: int,
 ) -> DeferredMediaRecord:
     linear, log = plot_mean_component_cis_two_streams(target, nontarget)
-    return _figure_record(
-        now_step,
-        {
+    return DeferredMediaRecord(
+        step_key="slow_eval/figure_step",
+        step=now_step,
+        media={
             "slow_eval/figures/ci_mean_per_component_two_streams": linear,
             "slow_eval/figures/ci_mean_per_component_two_streams_log": log,
         },

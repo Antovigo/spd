@@ -163,15 +163,7 @@ def train(
             "mid-window eval would corrupt the next step-time estimate"
         )
         evaluation = make_lm_evaluation(
-            built,
-            eval_config,
-            model,
-            run_key,
-            mesh,
-            n_proc,
-            sink,
-            runtime.compiler_options,
-            target_pool_batches_for=None,  # a plain run has ONE stream
+            built, eval_config, model, run_key, mesh, n_proc, sink, runtime.compiler_options
         )
 
     run_decomposition_training(

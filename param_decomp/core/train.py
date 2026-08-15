@@ -1177,9 +1177,8 @@ def make_targeted_train_step[PreparedT](
         ascend_replicate=ascend_replicate,
     )
     nt_terms = objective.nontarget.recon
-    imp_name = objective.target.imp.name
     coeff_schedules: dict[str, LossCoeff] = {
-        imp_name: objective.target.imp.coeff,
+        objective.target.imp.name: objective.target.imp.coeff,
         **{term.name: term.coeff for term in objective.target.recon},
         **{
             f"{term.name}/hidden_acts_reconstruction": term.hidden_acts_reconstruction.coeff
@@ -1188,7 +1187,12 @@ def make_targeted_train_step[PreparedT](
         },
     }
     if objective.target.imp.cfg.frequency is not None:
-        coeff_schedules[f"{imp_name}/frequency"] = objective.target.imp.cfg.frequency.coeff
+        coeff_schedules[f"{objective.target.imp.name}/frequency"] = (
+            objective.target.imp.cfg.frequency.coeff
+        )
+    # Both passes run the same imp-min term, each under its own coefficient, so both log it
+    # under that term's name.
+    imp_name = objective.target.imp.name
     nontarget_coeff_schedules: dict[str, LossCoeff] = {
         imp_name: objective.nontarget.impmin_coeff,
         **{term.name: term.coeff for term in nt_terms},

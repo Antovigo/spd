@@ -222,7 +222,6 @@ def make_ce_kl_step[PreparedT](
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
-    emit_ce_difference: bool,
     rounding_threshold: float | None = None,
     n_valid_rows: int | None = None,
 ) -> ScalarStep:
@@ -231,8 +230,8 @@ def make_ce_kl_step[PreparedT](
     The masks for EVERY arm are drawn whether or not the arm is selected, so a narrowed
     evaluator's numbers are bit-identical to the full one's — only the forwards are
     skipped, and XLA drops the unused draws. `emit_ce_difference` adds the CE-vs-target
-    delta for each selected arm (free: same logits, no extra forward). `rounding_threshold`
-    belongs to the rounded arm alone, so it is present exactly when that arm is."""
+    `rounding_threshold` belongs to the
+    rounded arm alone, so it is present exactly when that arm is."""
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
     assert variants, "a CE/KL evaluator with no arms measures nothing"
     assert ("rounded_masked" in variants) == (rounding_threshold is not None), (
@@ -297,18 +296,17 @@ def make_ce_kl_step[PreparedT](
             for name, (masks, deltas) in variant_masks.items()
             if name in variants
         }
+        target_ce = _ce(batch, batch.clean.output)
         metrics = {
             f"ce_kl/kl_{name}": _kl(batch, logits) for name, logits in variant_logits.items()
         }
-        if emit_ce_difference:
-            target_ce = _ce(batch, batch.clean.output)
-            metrics.update(
-                {
-                    f"ce_kl/ce_difference_{name}": _ce(batch, variant_logits[name]) - target_ce
-                    for name in variant_logits
-                    if name != "zero_masked"
-                }
-            )
+        metrics.update(
+            {
+                f"ce_kl/ce_difference_{name}": _ce(batch, variant_logits[name]) - target_ce
+                for name in variant_logits
+                if name != "zero_masked"
+            }
+        )
         return metrics
 
     return filter_jit(eval_step, compiler_options=compiler_options)
@@ -464,7 +462,6 @@ def make_eval_step[PreparedT](
         CE_KL_VARIANTS,
         mesh,
         compiler_options,
-        emit_ce_difference=True,
         rounding_threshold=rounding_threshold,
         n_valid_rows=n_valid_rows,
     )
