@@ -46,7 +46,6 @@ def test_disabled_figure_rendering_never_builds_a_png(monkeypatch: pytest.Monkey
         mesh=None,
         compiler_options={},
         inputs_for_context=lambda _context: (jnp.zeros((1,)), jax.random.PRNGKey(0)),
-        log_prefix="eval/",
         figure_rendering=None,
     )
     state = SimpleNamespace(decomposition=SimpleNamespace(components=object(), ci_fn=object()))

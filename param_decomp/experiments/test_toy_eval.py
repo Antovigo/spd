@@ -46,7 +46,6 @@ def test_well_temperedness_uses_its_own_rng_domain_and_skips_untransported_figur
         compiler_options: dict[str, bool | int | str],
         *,
         inputs_for_context: Any,
-        log_prefix: Any,
         figure_rendering: Any,
     ) -> EvalOperation[Any]:
         captured.update(
@@ -56,7 +55,6 @@ def test_well_temperedness_uses_its_own_rng_domain_and_skips_untransported_figur
             mesh=mesh,
             compiler_options=compiler_options,
             inputs_for_context=inputs_for_context,
-            log_prefix=log_prefix,
             figure_rendering=figure_rendering,
         )
         return EvalOperation(schedule, lambda _context: {})
