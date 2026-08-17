@@ -17,7 +17,7 @@ from param_decomp.core.configs import (
     PGDReconLossConfig,
     UVPlotsConfig,
 )
-from param_decomp.core.eval_schedule import Every, FirstThenEvery
+from param_decomp.core.eval_schedule import Every, EveryAfterFirst, FirstThenEvery, eval_due
 from param_decomp.experiments.eval_config import (
     EVAL_METRIC_CONFIG_TYPES,
     AnyEvalMetricConfig,
@@ -25,6 +25,7 @@ from param_decomp.experiments.eval_config import (
     assert_every_metric_declares_its_tier,
     schedule_for,
 )
+from param_decomp.experiments.lm.eval_config import ABGridDatasetConfig
 
 FAST_METRICS = {
     "CEandKLLossesConfig",
@@ -36,7 +37,7 @@ FAST_METRICS = {
     "UnmaskedNoDeltaReconLossConfig",
 }
 SLOW_METRICS = {
-    "ArithmeticCIGridConfig",
+    "ABGridDatasetConfig",
     "CIHiddenActsReconLossConfig",
     "CIHistogramsConfig",
     "CIMeanPerComponentConfig",
@@ -80,6 +81,24 @@ def test_a_fast_and_a_slow_metric_authored_together_get_different_schedules() ->
 def test_the_slow_tier_skips_the_first_pass_when_unasked() -> None:
     slow = CIHistogramsConfig(n_batches_accum=None)
     assert schedule_for(slow, _eval_config(slow, slow_on_first_step=False)) == Every(5000)
+
+
+def test_the_ab_grid_snapshot_never_runs_on_the_first_pass() -> None:
+    """An untrained decomposition puts every component above the floor, so the first-pass
+    snapshot is enormous and uninformative. The opt-out is the metric's, not the seat's:
+    it holds whether or not the callback asked for a slow first pass."""
+    ab_grid = ABGridDatasetConfig(mean_ci_floor=0.05)
+    assert schedule_for(ab_grid, _eval_config(ab_grid)) == EveryAfterFirst(1000, 5000)
+    assert schedule_for(ab_grid, _eval_config(ab_grid, slow_on_first_step=False)) == (
+        EveryAfterFirst(1000, 5000)
+    )
+
+    schedule = schedule_for(ab_grid, _eval_config(ab_grid))
+    assert not eval_due(schedule, 1000)  # the first eval pass: skipped
+    assert eval_due(schedule, 5000) and eval_due(schedule, 10000)
+    # a sibling slow metric on the same callback still takes the first pass
+    histograms = CIHistogramsConfig(n_batches_accum=None)
+    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 1000)
 
 
 def test_the_tier_travels_with_the_metric_across_families() -> None:

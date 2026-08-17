@@ -1041,7 +1041,7 @@ METRIC_SHORT_NAMES: dict[str, str] = {
     "StochasticReconLoss": "StochRecon",
     "StochasticReconSubsetLoss": "StochReconSub",
     "UnmaskedReconLoss": "UnmaskedRecon",
-    "ArithmeticCIGrid": "ArithCIGrid",
+    "ABGridDataset": "ABGrids",
     "CEandKLLosses": "CEandKL",
     "CIHiddenActsReconLoss": "CIHiddenActRecon",
     "CIHistograms": "CIHist",

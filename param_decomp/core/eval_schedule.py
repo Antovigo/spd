@@ -19,7 +19,17 @@ class FirstThenEvery:
     steps: int
 
 
-type EvalSchedule = Every | FirstThenEvery
+@dataclasses.dataclass(frozen=True)
+class EveryAfterFirst:
+    """`Every`, minus the first eval pass — for an operation whose output at an untrained
+    decomposition is not worth what it costs, whatever the callback's `slow_on_first_step`
+    says."""
+
+    first: int
+    steps: int
+
+
+type EvalSchedule = Every | FirstThenEvery | EveryAfterFirst
 
 
 def eval_due(schedule: EvalSchedule, step: int) -> bool:
@@ -28,3 +38,5 @@ def eval_due(schedule: EvalSchedule, step: int) -> bool:
             return step % steps == 0
         case FirstThenEvery(first, steps):
             return step == first or step % steps == 0
+        case EveryAfterFirst(first, steps):
+            return step != first and step % steps == 0

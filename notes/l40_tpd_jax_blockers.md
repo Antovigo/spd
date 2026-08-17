@@ -208,6 +208,12 @@ two cards because one can't hold the working set, not because two are faster.
 
 ## Still open: the CI grid doesn't fit in-loop
 
+> Measured against `ArithmeticCIGrid`, which `ABGridDataset` has since replaced. The new
+> metric runs ONE frozen `component_activation_forward` per chunk where the old tier ran a
+> clean forward plus a masked one, and never gathers the full `(n_prompts, C)` grids — so
+> the numbers below are an upper bound on what it asks for. Whether that clears the
+> contiguous-region ceiling on this card is unmeasured.
+
 `ArithmeticCIGrid` can't run alongside training. It wants a single allocation of about
 19.4–19.8 GiB, and the largest BFC will serve on this card is 17.98 GiB.
 

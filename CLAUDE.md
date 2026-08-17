@@ -219,7 +219,7 @@ and returns JAX-native as the #10 torch->jax adapter.
   plus the shared YAML→`ExperimentConfig` conversion). `experiments/lm/`: `run.py` (pre-JAX environment bootstrap —
   `python -m param_decomp.experiments.lm.run`), `training.py` (the LM composition root), `config.py`
   (LM schema + LM build), `resolved.py` (resolved LM data/run types), `load_run.py` (open a finished
-  JAX run), `eval.py` / `attn_patterns_eval.py` / `arithmetic_eval.py` / `data.py` /
+  JAX run), `eval.py` / `attn_patterns_eval.py` / `ab_grid_dataset.py` / `data.py` /
   `hf_http.py`, `data.py` / `prestage_tokenized.py` (offline tokenize → parquet shards).
   The TMS and ResidualMLP domains live under `experiments/{tms,resid_mlp}/`
   (`run.py` + `config.py`; module mains), calling the core engine as a

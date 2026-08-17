@@ -1,9 +1,9 @@
-"""Build the in-memory `a x b` modular-arithmetic eval probe (the `ArithmeticCIGrid` metric).
+"""Build the in-memory `a x b` modular-arithmetic eval probe (the `ABGridDataset` metric).
 
 The probe is the `[a_range] x [b_range]` grid of `"<a><symbol><b>="` prompts, tokenized
 with the target's tokenizer — one prompt per row, all rows one shared token length, so the
 `=` answer token sits at a fixed position and per-component CI / activation vectors
-reshape into `a x b` heatmaps (row-major `(a, b)`). Unlike the streaming corpus there is
+reshape into `a x b` grids (row-major `(a, b)`). Unlike the streaming corpus there is
 no packing and no offline artifact: the probe is a pure function of the metric spec + the
 tokenizer, so every rank builds the identical grid at startup with no coordination.
 
@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
-
-from param_decomp.experiments.lm.arithmetic_eval import ArithmeticGrid
 
 # Operation -> (display symbol, result fn). Only addition is exercised today; subtraction
 # (negative results) and multiplication tokenize differently and must re-clear the
@@ -34,6 +32,35 @@ class PromptEncoder(Protocol):
     """The slice of a HF tokenizer the probe needs (`PreTrainedTokenizer.encode`)."""
 
     def encode(self, text: str, /, *, add_special_tokens: bool) -> Sequence[int] | np.ndarray: ...
+
+
+@dataclass(frozen=True)
+class ArithmeticGrid:
+    """The probe's grid geometry: row-major `(a, b)` order, `n_a * n_b == n_prompts`.
+    Both axes are contiguous ascending integer ranges (asserted) — the snapshot payload
+    stores `(a_min, n_a)` / `(b_min, n_b)` rather than the operand lists, so unit spacing
+    is what lets the applet name a cell's operands."""
+
+    a_values: tuple[int, ...]
+    b_values: tuple[int, ...]
+    symbol: str
+
+    def __post_init__(self) -> None:
+        for values in (self.a_values, self.b_values):
+            assert values == tuple(range(values[0], values[-1] + 1)), values
+
+    @property
+    def n_a(self) -> int:
+        return len(self.a_values)
+
+    @property
+    def n_b(self) -> int:
+        return len(self.b_values)
+
+    def to_grid(self, per_prompt: np.ndarray) -> np.ndarray:
+        """Reshape a `(n_prompts, ...)` array (row-major `(a, b)`) to `(n_a, n_b, ...)`."""
+        assert per_prompt.shape[0] == self.n_a * self.n_b, (per_prompt.shape, self.n_a, self.n_b)
+        return per_prompt.reshape(self.n_a, self.n_b, *per_prompt.shape[1:])
 
 
 @dataclass(frozen=True)

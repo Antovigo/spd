@@ -32,7 +32,7 @@ from param_decomp.experiments.lm.config import (
     load_config,
 )
 from param_decomp.experiments.lm.eval_config import (
-    ArithmeticCIGridConfig,
+    ABGridDatasetConfig,
     CEandKLLossesConfig,
 )
 from param_decomp.experiments.lm.resolved import ResolvedLMData
@@ -486,46 +486,36 @@ def test_run_id_drives_identity_and_rejects_malformed():
         load_config(config, "run42", DATA_ROOT)
 
 
-def test_arithmetic_ci_grid_metric_builds_to_arithmetic_eval_config():
-    # In-tree coverage of the ArithmeticCIGrid authored-operation path (C49k enables
+def test_ab_grid_dataset_metric_builds_to_ab_grid_eval_config():
+    # In-tree coverage of the ABGridDataset authored-operation path (C49k enables
     # it by default; drop that entry and inject a known one so the assert is config-independent).
     raw = yaml.safe_load((CONFIGS / "llama8b_l18_C49k_200k.yaml").read_text())
-    arithmetic_raw = next(
-        metric for metric in raw["eval"]["metrics"] if metric["type"] == "ArithmeticCIGrid"
+    ab_grid_raw = next(
+        metric for metric in raw["eval"]["metrics"] if metric["type"] == "ABGridDataset"
     )
     raw["eval"]["metrics"] = [
-        metric for metric in raw["eval"]["metrics"] if metric["type"] != "ArithmeticCIGrid"
+        metric for metric in raw["eval"]["metrics"] if metric["type"] != "ABGridDataset"
     ]
-    raw["eval"]["metrics"].append(arithmetic_raw | {"a_range": [1, 50]})
+    raw["eval"]["metrics"].append(ab_grid_raw | {"a_range": [1, 50], "positions": [0, -1]})
     authored = LMExperimentConfig(**raw)
     assert authored.eval is not None
-    arithmetic = next(
-        metric for metric in authored.eval.metrics if isinstance(metric, ArithmeticCIGridConfig)
+    ab_grid = next(
+        metric for metric in authored.eval.metrics if isinstance(metric, ABGridDatasetConfig)
     )
-    assert arithmetic.operation == "add"
-    assert arithmetic.a_range == (1, 50)
-    assert arithmetic.b_range == (1, 100)
-    assert arithmetic.thresholds == [0.1]
-    assert arithmetic.top_k == 24
-    assert arithmetic.probe_metrics is not None
-    assert arithmetic.probe_metrics.ce_kl.rounding_threshold == 0.0
-    assert arithmetic.probe_metrics.ci_l0.ci_alive_threshold == 0.0
-    assert arithmetic.probe_metrics.fresh_pgd is not None
-    assert arithmetic.probe_metrics.fresh_pgd.n_steps == 20
+    assert ab_grid.operation == "add"
+    assert ab_grid.a_range == (1, 50)
+    assert ab_grid.b_range == (1, 100)
+    assert ab_grid.mean_ci_floor == 0.05
+    assert ab_grid.positions == [0, -1]
+    assert ab_grid.chunk_prompts == 1000
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (("coeff", None), ("init", "random"), ("source_shape", "c"), ("type", "PGDReconLoss")),
-)
-def test_arithmetic_probe_rejects_unexecuted_fresh_pgd_fields(field: str, value: object):
+def test_ab_grid_dataset_mean_ci_floor_is_a_probability():
     raw = yaml.safe_load((CONFIGS / "llama8b_l18_C49k_200k.yaml").read_text())
-    arithmetic = next(
-        metric for metric in raw["eval"]["metrics"] if metric["type"] == "ArithmeticCIGrid"
-    )
-    arithmetic["probe_metrics"]["fresh_pgd"][field] = value
+    ab_grid = next(metric for metric in raw["eval"]["metrics"] if metric["type"] == "ABGridDataset")
+    ab_grid["mean_ci_floor"] = 1.5
 
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+    with pytest.raises(ValidationError):
         LMExperimentConfig.model_validate(raw)
 
 

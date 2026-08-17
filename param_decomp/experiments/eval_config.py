@@ -28,9 +28,9 @@ from param_decomp.core.configs import (
     WeightMagnitudeConfig,
     WellTemperednessConfig,
 )
-from param_decomp.core.eval_schedule import EvalSchedule, Every, FirstThenEvery
+from param_decomp.core.eval_schedule import EvalSchedule, Every, EveryAfterFirst, FirstThenEvery
 from param_decomp.experiments.lm.eval_config import (
-    ArithmeticCIGridConfig,
+    ABGridDatasetConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
@@ -38,7 +38,7 @@ from param_decomp.experiments.lm.eval_config import (
 )
 
 AnyEvalMetricConfig = Annotated[
-    ArithmeticCIGridConfig
+    ABGridDatasetConfig
     | CEandKLLossesConfig
     | CIHiddenActsReconLossConfig
     | CIHistogramsConfig
@@ -81,7 +81,7 @@ def validate_eval_metrics(metrics: list[AnyEvalMetricConfig]) -> None:
 
     Metrics are distinguished by their LOGGED identity, not their type: the binders key
     emitted metrics on `name or type` (`fast_eval_operations`, `lm.scalar_eval_operations`,
-    `lm.arithmetic_eval_operation`), so a named instance is already distinct downstream.
+    `lm.ab_grid_operation`), so a named instance is already distinct downstream.
     Two `PGDReconLoss` probes at different `n_steps` — the case `LossMetricConfig.name`
     exists for — are therefore authorable, while two unnamed metrics of one type still
     refuse. Only the `LossMetricConfig` descendants can carry a name; every other metric's
@@ -137,6 +137,12 @@ def schedule_for(metric: AnyEvalMetricConfig, eval_config: EvalConfig) -> EvalSc
     """When `metric` fires: its own declared tier read against this callback's cadences."""
     if not metric.slow:
         return Every(eval_config.every)
+    if isinstance(metric, ABGridDatasetConfig):
+        # At the first eval pass the decomposition is untrained, so every component clears
+        # any floor worth setting: the snapshot is enormous and shows nothing. This is the
+        # one metric whose first-pass output is not worth writing, so it opts out of
+        # `slow_on_first_step` rather than the callback opting out for every slow metric.
+        return EveryAfterFirst(eval_config.every, eval_config.slow_every)
     return (
         FirstThenEvery(eval_config.every, eval_config.slow_every)
         if eval_config.slow_on_first_step

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
-from param_decomp.experiments.lm.arithmetic_eval_operation import global_arithmetic_probe
+from param_decomp.experiments.lm.ab_grid_operation import global_arithmetic_probe
 from param_decomp.experiments.lm.arithmetic_probe import build_arithmetic_probe
 
 BOS = 7

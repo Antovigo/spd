@@ -9,5 +9,4 @@ class EvalKeyStream(IntEnum):
     SCALARS = 1
     ATTENTION_PATTERNS = 2
     HIDDEN_ACTS = 3
-    ARITHMETIC = 4
     WELL_TEMPEREDNESS = 5

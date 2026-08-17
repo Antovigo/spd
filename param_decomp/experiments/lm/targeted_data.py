@@ -16,7 +16,7 @@ from param_decomp.experiments.lm.arithmetic_probe import PromptEncoder, build_ar
 
 class ArithmeticGridPromptsConfig(BaseConfig):
     """The `[a_range] x [b_range]` grid of `"<a><op><b>="` prompts — the same in-memory
-    construction as the `ArithmeticCIGrid` eval probe, reused as a training pool."""
+    construction as the `ABGridDataset` eval probe, reused as a training pool."""
 
     kind: Literal["arithmetic_grid"] = "arithmetic_grid"
     operation: Literal["add", "sub", "mul"]

@@ -110,6 +110,7 @@ include-package-data = false
 [tool.setuptools.package-data]
 param_decomp = [
     "experiments/**/*.yaml",
+    "experiments/**/*.html",  # the ab-grid applet a snapshot ships next to
     "pretrain/configs/**/*.yaml",
 ]
 

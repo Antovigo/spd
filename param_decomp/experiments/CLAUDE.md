@@ -166,11 +166,11 @@ experiments/
 │   ├── run.py               # python -m param_decomp.experiments.lm.run — pre-JAX env bootstrap deferring to training.py, the LM composition root
 │   ├── resolved.py          # LM-only resolved data/run types (ResolvedLMData, LMRun)
 │   ├── eval.py              # token CE/KL + CI-L0 fast pass
-│   ├── attn_patterns_eval.py / arithmetic_eval.py
+│   ├── attn_patterns_eval.py / ab_grid_dataset.py + ab_grid_operation.py + ab_grids_app.html
 │   ├── data.py / hf_http.py
 │   ├── data.py              # tokenize_and_concatenate (offline helper for prestage)
 │   ├── prestage_tokenized.py  # HF text -> int32 parquet shards for the JAX trainer
-│   └── arithmetic_probe.py    # a x b arithmetic grid spec -> in-memory eval probe (ArithmeticCIGrid)
+│   └── arithmetic_probe.py    # a x b arithmetic grid spec -> in-memory eval probe (ABGridDataset)
 ├── tms/                     # TMS (CPU): run.py + configs/ + tests (target: param_decomp/targets/tms.py; also the tPD engine's test fixture — no shipped toy tPD shape)
 └── resid_mlp/               # ResidMLP (CPU): run.py + configs/ + test (target: param_decomp/targets/resid_mlp.py)
 ```

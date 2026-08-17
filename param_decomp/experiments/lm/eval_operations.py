@@ -35,7 +35,7 @@ from param_decomp.core.run import (
 from param_decomp.core.train import TrainState
 from param_decomp.core.well_temperedness_eval import make_well_temperedness_operation
 from param_decomp.experiments.eval_config import AnyEvalMetricConfig, EvalConfig, schedule_for
-from param_decomp.experiments.lm.arithmetic_eval_operation import make_arithmetic_operation
+from param_decomp.experiments.lm.ab_grid_operation import make_ab_grid_operation
 from param_decomp.experiments.lm.diagnostic_eval_operations import (
     make_attention_operation,
     make_hidden_acts_operation,
@@ -45,7 +45,7 @@ from param_decomp.experiments.lm.diagnostic_eval_operations import (
     make_weight_magnitude_operation,
 )
 from param_decomp.experiments.lm.eval_config import (
-    ArithmeticCIGridConfig,
+    ABGridDatasetConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
@@ -225,9 +225,9 @@ def make_lm_evaluation(
                     ),
                 )
 
-            case ArithmeticCIGridConfig():
+            case ABGridDatasetConfig():
                 return (
-                    make_arithmetic_operation(
+                    make_ab_grid_operation(
                         metric,
                         schedule,
                         built.target,
@@ -235,10 +235,7 @@ def make_lm_evaluation(
                         capture_inputs,
                         mesh,
                         n_proc,
-                        sink,
-                        run_key,
-                        pd.steps,
-                        compiler_options,
+                        built.run.run_dir,
                     ),
                 )
             case TwoStreamCIMeanPerComponentConfig():

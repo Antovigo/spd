@@ -141,30 +141,37 @@ preactivations have a greater effect on reconstruction loss when ablated one at 
 compares components across all heads and layers, separately below 0, between 0 and 1, and
 above 1. Named groups add the same measurement for subsets such as attention and MLP sites.
 
-`experiments/lm/arithmetic_eval.py` is a config-gated LM-only figure tier (`ArithmeticCIGrid`, on
-`eval.slow_every`) for inspecting how the decomposition reconstructs a `target model`'s
+`experiments/lm/ab_grid_dataset.py` is a config-gated LM-only DATASET tier (`ABGridDataset`,
+on `eval.slow_every`) for inspecting how the decomposition reconstructs a `target model`'s
 modular-arithmetic mechanism (Feucht et al.'s L18 addition neurons). The probe is a FIXED
 `a x b` operand grid of `"<a><op><b>="` prompts (one prompt per row, all one token length,
 the `=` answer at a constant position) — NOT the streaming corpus, so it brings its own
 batch. The probe is a SPEC (`operation` + `a_range`/`b_range` on the metric config), not a
-filesystem artifact: `experiments/lm/arithmetic_eval_operation.py::make_arithmetic_operation` builds it in-memory at
-startup from the target's tokenizer (`experiments/lm/arithmetic_probe.py`, deterministic —
-every rank builds the identical grid, no rank-0 write or barrier), so configs stay
-cluster-portable. The ONE fused `make_arithmetic_grid_step` slices, at the answer position with
-the BATCH axis KEPT as the grid, each component's lower-leaky CI (from the CI fn) and its
-pre-mask activation `x@V` (from the decomposed forward under all-ones masks — the
-`masked_component_activations` seam, GLU-target-only, narrowed via the `ComponentActivationModel`
-Protocol). The device→host pull is TWO-PHASE (`compute_arithmetic_selection`), sized to what
-the figures need — never the full `(n_prompts, C)` grids (~GBs/site at production C): the
-step's replicated per-component max CI (over REAL rows only — the sharding-pad tail is
-masked) drives the host-side selection, identically on every rank, then only the ≤`top_k`
-selected columns are gathered. The active set per threshold (max CI > threshold) is selected
-ONCE (`select_active`, one stable descending ordering per site, so a higher threshold's set
-is a PREFIX of a lower's) and drives both the `n_alive` scalars and the CI + activation
-heatmaps; figures render off-loop on rank 0 (`run.py::BackgroundRenderer`). The probe's
-CE/KL/L0/PGD scalars compose the independent kernels from `experiments/lm/eval.py`
-with `n_valid_rows=n_prompts`, so pad rows carry zero weight. The complete typed
-operation lives in `experiments/lm/arithmetic_eval_operation.py`.
+filesystem artifact: `experiments/lm/ab_grid_operation.py::make_ab_grid_operation` builds it
+in-memory at startup from the target's tokenizer (`experiments/lm/arithmetic_probe.py`,
+deterministic — every rank builds the identical grid, no rank-0 write or barrier), so configs
+stay cluster-portable. The ONE fused `make_ab_grid_step` slices, at each configured position
+with the BATCH axis KEPT as the grid, each component's lower-leaky CI (from the CI fn) and its
+normalized inner activation `(x · V_c) / ‖V_c‖` — both off a SINGLE frozen
+`component_activation_forward` (the protocol seam harvest uses), so a snapshot costs no
+masked pass. The device→host pull is TWO-PHASE (`collect_ab_grid_snapshot`), sized to what
+the snapshot stores — never the full `(n_prompts, n_pos, C)` grids (~GBs/site at production
+C): the step's per-position CI SUMS over REAL rows (the sharding-pad tail is masked) come to
+host and drive the `mean_ci_floor` cut, identically on every rank, then only the saved
+columns are gathered (the index padded to a `GATHER_INDEX_MULTIPLE` boundary so the gather
+retraces rarely). Process 0 writes `<run_dir>/ab_grids/step_<n>.js` — per-component CI (u8)
+and inner activations (f16) over `[comp, pos, op, a, b]`, plus the fp32 mean-CI vector for
+EVERY component so the cut stays visible — alongside `index.html`, the self-contained
+`file://`-openable applet (`ab_grids_app.html`, shipped next to the metric) with
+step/position/op selectors and a log-scale mean-CI threshold slider, and regenerates
+`manifest.js` so the applet discovers every snapshot. It is the one slow metric that opts
+OUT of `eval.slow_on_first_step` (`EveryAfterFirst`, resolved in
+`experiments.eval_config.schedule_for`): at an untrained decomposition every component clears
+any floor, so the first-pass snapshot is enormous and shows nothing. The payload is
+byte-compatible with the
+torch `ABGridDataset`'s, minus the dual-CI half (JAX has one CI net; the applet falls back to
+its single-colour rendering). The complete typed operation lives in
+`experiments/lm/ab_grid_operation.py`.
 
 **Every target lives in `param_decomp.targets` — the toys (TMS, ResidMLP) included.**
 The core trainer carries ZERO target-specific code — the toy *targets*
