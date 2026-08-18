@@ -76,7 +76,7 @@ Two implementation details matter a great deal:
 
 ## The config change
 
-Starting from the shipped `llama8b_l18_addsub_targeted_2xl40.yaml`, only the `runtime:` block
+Starting from the shipped `addsub-L18-dual-obj.yaml`, only the `runtime:` block
 changes:
 
 ```yaml
