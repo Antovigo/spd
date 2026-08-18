@@ -75,7 +75,7 @@ def test_a_fast_and_a_slow_metric_authored_together_get_different_schedules() ->
     eval_config = _eval_config(fast, slow)
 
     assert schedule_for(fast, eval_config) == Every(1000)
-    assert schedule_for(slow, eval_config) == FirstThenEvery(1000, 5000)
+    assert schedule_for(slow, eval_config) == FirstThenEvery(0, 5000)
 
 
 def test_the_slow_tier_skips_the_first_pass_when_unasked() -> None:
@@ -83,22 +83,22 @@ def test_the_slow_tier_skips_the_first_pass_when_unasked() -> None:
     assert schedule_for(slow, _eval_config(slow, slow_on_first_step=False)) == Every(5000)
 
 
-def test_the_ab_grid_snapshot_never_runs_on_the_first_pass() -> None:
-    """An untrained decomposition puts every component above the floor, so the first-pass
+def test_the_ab_grid_snapshot_never_runs_on_the_baseline_pass() -> None:
+    """An untrained decomposition puts every component above the floor, so the step-0
     snapshot is enormous and uninformative. The opt-out is the metric's, not the seat's:
-    it holds whether or not the callback asked for a slow first pass."""
+    it holds whether or not the callback asked for a slow baseline."""
     ab_grid = ABGridDatasetConfig(mean_ci_floor=0.05)
-    assert schedule_for(ab_grid, _eval_config(ab_grid)) == EveryAfterFirst(1000, 5000)
+    assert schedule_for(ab_grid, _eval_config(ab_grid)) == EveryAfterFirst(0, 5000)
     assert schedule_for(ab_grid, _eval_config(ab_grid, slow_on_first_step=False)) == (
-        EveryAfterFirst(1000, 5000)
+        EveryAfterFirst(0, 5000)
     )
 
     schedule = schedule_for(ab_grid, _eval_config(ab_grid))
-    assert not eval_due(schedule, 1000)  # the first eval pass: skipped
+    assert not eval_due(schedule, 0)  # the baseline: skipped
     assert eval_due(schedule, 5000) and eval_due(schedule, 10000)
-    # a sibling slow metric on the same callback still takes the first pass
+    # a sibling slow metric on the same callback still takes the baseline
     histograms = CIHistogramsConfig(n_batches_accum=None)
-    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 1000)
+    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 0)
 
 
 def test_the_tier_travels_with_the_metric_across_families() -> None:
@@ -142,3 +142,22 @@ def test_a_metric_that_does_not_state_its_tier_refuses(metric_type: type[BaseCon
 
 def test_the_sweep_accepts_a_metric_that_states_its_own_tier() -> None:
     assert_every_metric_declares_its_tier([_RedeclaringConfig])
+
+
+def test_the_baseline_pass_is_step_zero_and_only_the_slow_tier_asks_for_it() -> None:
+    """`slow_on_first_step` means the decomposition as initialized, before any optimizer
+    step — so the slow tier names step 0 and the fast tier does not fire there."""
+    fast = CI_L0Config(ci_alive_threshold=0.0, groups=None)
+    slow = CIHistogramsConfig(n_batches_accum=None)
+    asked = _eval_config(fast, slow)
+    unasked = _eval_config(fast, slow, slow_on_first_step=False)
+
+    assert eval_due(schedule_for(slow, asked), 0)
+    assert not eval_due(schedule_for(slow, unasked), 0)
+    assert not eval_due(schedule_for(fast, asked), 0)
+
+    # Every step after 0 is untouched by the change.
+    for step in (1000, 5000, 10000):
+        assert eval_due(schedule_for(fast, asked), step) == (step % 1000 == 0)
+        assert eval_due(schedule_for(slow, asked), step) == (step % 5000 == 0)
+        assert eval_due(schedule_for(slow, unasked), step) == (step % 5000 == 0)

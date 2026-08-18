@@ -112,8 +112,8 @@ class EvalConfig(BaseConfig):
     """One evaluation callback's data cadence and requested operations.
 
     Two cadences, one per tier: `every` for the metrics that declare themselves fast,
-    `slow_every` for the rest. `slow_on_first_step` fires the slow tier once at the first
-    eval pass as well, for a baseline against the trained end state.
+    `slow_every` for the rest. `slow_on_first_step` fires the slow tier once at step 0
+    as well — the decomposition as initialized, a baseline against the trained end state.
     """
 
     batch_size: PositiveInt
@@ -138,13 +138,13 @@ def schedule_for(metric: AnyEvalMetricConfig, eval_config: EvalConfig) -> EvalSc
     if not metric.slow:
         return Every(eval_config.every)
     if isinstance(metric, ABGridDatasetConfig):
-        # At the first eval pass the decomposition is untrained, so every component clears
-        # any floor worth setting: the snapshot is enormous and shows nothing. This is the
-        # one metric whose first-pass output is not worth writing, so it opts out of
+        # At step 0 the decomposition is untrained, so every component clears any floor
+        # worth setting: the snapshot is enormous and shows nothing. This is the one metric
+        # whose baseline output is not worth writing, so it opts out of
         # `slow_on_first_step` rather than the callback opting out for every slow metric.
-        return EveryAfterFirst(eval_config.every, eval_config.slow_every)
+        return EveryAfterFirst(0, eval_config.slow_every)
     return (
-        FirstThenEvery(eval_config.every, eval_config.slow_every)
+        FirstThenEvery(0, eval_config.slow_every)
         if eval_config.slow_on_first_step
         else Every(eval_config.slow_every)
     )

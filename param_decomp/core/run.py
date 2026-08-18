@@ -134,6 +134,22 @@ def _run_due_evaluation[ContextT](
     return record
 
 
+def _evaluate[ContextT](
+    evaluation: Evaluation[ContextT], state: TrainState, now_step: int
+) -> LogRecord | None:
+    """The operations due at `now_step`, plus the U/V norm ratios that ride every pass."""
+    record = _run_due_evaluation(evaluation, state, now_step)
+    if record is None:
+        return None
+    factor_record = {
+        f"eval/{key}": float(value)
+        for key, value in uv_norm_ratio_metrics(state.decomposition.components).items()
+    }
+    overlap = record.keys() & factor_record.keys()
+    assert not overlap, f"U/V norm-ratio metrics collided with eval keys: {sorted(overlap)}"
+    return {**record, **factor_record}
+
+
 @dataclasses.dataclass(frozen=True)
 class DeferredMediaRecord:
     """Pure-renderer output. ``media`` contains encoded images; the metrics sink alone
@@ -839,6 +855,14 @@ def _run_loop[EvalContextT](
     sched_vu, sched_ci = prepared.sched_vu, prepared.sched_ci
     state, start_step = prepared.state, prepared.start_step
 
+    # The untrained baseline: step 0 is the decomposition as initialized, before any
+    # optimizer step. Fresh runs only — a resume has logged past it, and the sink requires
+    # strictly increasing steps.
+    if evaluation is not None and start_step == 0:
+        baseline = _evaluate(evaluation, state, 0)
+        if baseline is not None:
+            sink.log(0, baseline)
+
     window_t0 = loop_t0 = time.time()
     last_logged = start_step
     grad_norm_summary_window: list[dict[str, jax.Array]] = []
@@ -885,18 +909,10 @@ def _run_loop[EvalContextT](
             train_record = record
 
         eval_record = (
-            _run_due_evaluation(evaluation, state, now_step)
+            _evaluate(evaluation, state, now_step)
             if evaluation is not None and not sigterm
             else None
         )
-        if eval_record is not None:
-            factor_record = {
-                f"eval/{key}": float(value)
-                for key, value in uv_norm_ratio_metrics(state.decomposition.components).items()
-            }
-            overlap = eval_record.keys() & factor_record.keys()
-            assert not overlap, f"U/V norm-ratio metrics collided with eval keys: {sorted(overlap)}"
-            eval_record = {**eval_record, **factor_record}
         step_record = _combine_step_records(train_record, eval_record)
         if step_record is not None:
             sink.log(now_step, step_record)
