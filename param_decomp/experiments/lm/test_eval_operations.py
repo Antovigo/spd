@@ -80,7 +80,7 @@ def test_well_temperedness_uses_named_rng_stream(monkeypatch: pytest.MonkeyPatch
     built = SimpleNamespace(
         pd=SimpleNamespace(steps=train_steps, seed=3),
         data=SimpleNamespace(eval_dir=Path("unused")),
-        ci_fn=SimpleNamespace(capture_keys=frozenset()),
+        ci_fn=SimpleNamespace(capture_keys=frozenset(), dual=False),
         target=cast(Any, None),
     )
 

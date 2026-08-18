@@ -178,6 +178,7 @@ def train_targeted(
         remat_recon_forwards=cfg.runtime.remat_recon_forwards,
         remat_ci_fn=cfg.runtime.remat_ci_fn,
         ascend_replicate=cfg.runtime.ascend_replicate,
+        sequential_passes=cfg.runtime.sequential_passes,
         compiler_options=cfg.runtime.compiler_options,
         sample_target_batch=sample_target_batch,
         sample_nontarget_batch=sample_nontarget_batch,

@@ -327,6 +327,19 @@ class ChunkwiseTransformerCiConfig(BaseConfig):
     n_blocks: PositiveInt
     attention: CiAttentionConfig
     ffn: CiFfnConfig
+    dual: bool = Field(
+        default=False,
+        description=(
+            "Give the CI fn a SECOND readout head on this same trunk (SPEC S36): the input "
+            "projector and every block stay ONE set of parameters and only the "
+            "`d_model -> C` head is private per role, so both reconstruction objectives "
+            "shape one representation. The head is the only part that MUST be private — it "
+            'is where "how much does this subcomponent matter FOR THIS OBJECTIVE" lives; '
+            'everything before it is "read the model\'s state", which is plausibly '
+            "role-independent, and that is the hypothesis a dual run tests. Requires "
+            "`pd.hidden`, which authors what the second head answers to."
+        ),
+    )
     learned_norm_scale: bool = Field(
         default=False,
         description="Learned per-channel scale on the block RMSNorms (the per-tap input norms "
@@ -350,6 +363,14 @@ class GlobalMlpCiConfig(BaseConfig):
     type: Literal["global_mlp"] = "global_mlp"
     hidden_dims: tuple[PositiveInt, ...] = Field(..., min_length=1)
     input_tap: ChunkInputTap
+    dual: bool = Field(
+        default=False,
+        description=(
+            "Give the CI fn a SECOND readout head on this same trunk (SPEC S36): the "
+            "GELU stack stays ONE set of parameters and only the final linear head is "
+            "private per role. Requires `pd.hidden`."
+        ),
+    )
 
 
 LMCiConfig = Annotated[
@@ -622,6 +643,7 @@ def _resolve_chunkwise_ci_arch(
         ffn_hidden=ci.ffn.hidden,
         ffn_kind=ci.ffn.kind,
         learned_norm_scale=ci.learned_norm_scale,
+        dual=ci.dual,
     )
 
 
@@ -640,6 +662,7 @@ def _resolve_global_mlp_ci_arch(
         hidden_dims=ci.hidden_dims,
         has_position_axis=True,
         input_taps=tuple(TapSpec(key=key, width=grammar.width_of(key)) for key in tap_keys),
+        dual=ci.dual,
     )
 
 
@@ -661,6 +684,20 @@ def resolve_lm_ci_arch(
             return _resolve_chunkwise_ci_arch(tree, ci, grammar)
         case GlobalMlpCiConfig():
             return _resolve_global_mlp_ci_arch(tree, ci, grammar)
+
+
+def _assert_hidden_pass_has_a_head(cfg: LMTargetedExperimentConfig) -> None:
+    """The two halves of a dual run must agree, refused at CONVERT time rather than at the
+    trace on the GPUs: `pd.hidden` authors an objective for a second CI head, and
+    `decomposition.ci.dual` builds one. Either alone is a misconfiguration — a hidden pass
+    with no head has nothing to mask with, and a second head with no hidden pass trains
+    against nothing while costing its parameters and its share of every step."""
+    dual = cfg.decomposition.ci.dual
+    hidden = cfg.pd.hidden is not None
+    assert dual == hidden, (
+        "decomposition.ci.dual and pd.hidden must be set together (SPEC S36/T12): "
+        f"ci.dual={dual}, pd.hidden={'set' if hidden else 'unset'}"
+    )
 
 
 def _assert_losses_supported(cfg: LMExperimentConfig, site_names: tuple[str, ...]) -> None:
@@ -746,8 +783,12 @@ def build_targeted_experiment_config(
     bundle stays the shared `BuiltRun`."""
     resolved = resolve_decomposition(cfg.target, cfg.decomposition, data_root)
     target = resolved.target
+    _assert_hidden_pass_has_a_head(cfg)
     build_targeted_objective(
-        cfg.pd.loss_metrics, cfg.nontarget, tuple(sc.name for sc in target.sites)
+        cfg.pd.loss_metrics,
+        cfg.nontarget,
+        tuple(sc.name for sc in target.sites),
+        hidden=cfg.pd.hidden,
     )
     _assert_supported_weights_dtype(target)
     _assert_placement_claims(resolved, cfg.runtime)

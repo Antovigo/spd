@@ -7,6 +7,7 @@ from jax import random
 from jax.sharding import Mesh
 from jaxtyping import Array, PRNGKeyArray
 
+from param_decomp.core.ci_fn import CIRole
 from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import BarChart, LogRecord
@@ -44,13 +45,25 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
             return context.target_batches
 
 
-def stream_log_prefix(stream: Stream, context: LMEvalContext) -> str:
+def role_log_segment(role: CIRole) -> str:
+    """The CI-role namespace segment. EMPTY for `output`, so a single-role run's keys — and a
+    dual run's output-role keys — are exactly what every previous run logged; the hidden role
+    lands under `hidden_ci/`, the same segment the training metrics use."""
+    match role:
+        case "output":
+            return ""
+        case "hidden":
+            return "hidden_ci/"
+
+
+def stream_log_prefix(stream: Stream, context: LMEvalContext, role: CIRole = "output") -> str:
     targeted = context.target_batches is not None
+    role_segment = role_log_segment(role)
     match stream:
         case "nontarget":
-            return "eval/nontarget_data/" if targeted else "eval/"
+            return f"eval/nontarget_data/{role_segment}" if targeted else f"eval/{role_segment}"
         case "target":
-            return "eval/"
+            return f"eval/{role_segment}"
 
 
 def _make_scalar_operation(
@@ -62,9 +75,10 @@ def _make_scalar_operation(
     train_steps: int,
     eval_steps: int,
     stream: Stream,
+    role: CIRole = "output",
 ) -> EvalOperation[LMEvalContext]:
     def run(context: LMEvalContext) -> LogRecord:
-        log_prefix = stream_log_prefix(stream, context)
+        log_prefix = stream_log_prefix(stream, context, role)
         sums: dict[str, Array] = {}
         for batch_index, tokens in enumerate(stream_batches(stream, context)):
             key = random.fold_in(
@@ -121,18 +135,20 @@ def make_masked_kl_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
+    role: CIRole = "output",
 ) -> EvalOperation[LMEvalContext]:
     """ONE masking arm, authored as the loss config that names the same construction —
     `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss`, as `PGDReconLoss` already is."""
     return _make_scalar_operation(
         schedule,
-        make_masked_kl_step(model, ci_capture_keys, arm, mesh, compiler_options),
+        make_masked_kl_step(model, ci_capture_keys, arm, mesh, compiler_options, role=role),
         (f"ce_kl/kl_{arm}",),
         model,
         run_key,
         train_steps,
         eval_steps,
         stream,
+        role,
     )
 
 
@@ -147,6 +163,7 @@ def make_ci_l0_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
+    role: CIRole = "output",
 ) -> EvalOperation[LMEvalContext]:
     groups = (
         {name: tuple(patterns) for name, patterns in metric.groups.items()}
@@ -156,7 +173,13 @@ def make_ci_l0_operation(
     scalars = _make_scalar_operation(
         schedule,
         make_ci_l0_step(
-            model, ci_capture_keys, metric.ci_alive_threshold, groups, mesh, compiler_options
+            model,
+            ci_capture_keys,
+            metric.ci_alive_threshold,
+            groups,
+            mesh,
+            compiler_options,
+            role=role,
         ),
         ("l0/",),
         model,
@@ -164,11 +187,12 @@ def make_ci_l0_operation(
         train_steps,
         eval_steps,
         stream,
+        role,
     )
 
     def run(context: LMEvalContext) -> LogRecord:
         record = dict(scalars.run(context))
-        log_prefix = stream_log_prefix(stream, context)
+        log_prefix = stream_log_prefix(stream, context, role)
         prefix = f"{log_prefix}l0/{metric.ci_alive_threshold}_"
         record[f"{log_prefix}l0/bar_chart"] = BarChart(
             rows=tuple(
@@ -196,6 +220,7 @@ def make_fresh_pgd_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
+    role: CIRole = "output",
 ) -> EvalOperation[LMEvalContext]:
     assert metric.init == "random" and metric.source_shape == "c", metric
     probe = FreshPGDReconEval(
@@ -206,11 +231,12 @@ def make_fresh_pgd_operation(
     )
     return _make_scalar_operation(
         schedule,
-        make_fresh_pgd_step(model, ci_capture_keys, probe, mesh, compiler_options),
+        make_fresh_pgd_step(model, ci_capture_keys, probe, mesh, compiler_options, role=role),
         (f"loss/{probe.name}",),
         model,
         run_key,
         train_steps,
         eval_steps,
         stream,
+        role,
     )

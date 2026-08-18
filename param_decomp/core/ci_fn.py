@@ -458,6 +458,11 @@ class ChunkwiseTransformerCIArch:
     ffn_hidden: int
     ffn_kind: CIFfnKind
     learned_norm_scale: bool
+    dual: bool = False
+    """Build a SECOND readout head on this same trunk (SPEC S36), so the CI fn scores both
+    the output and the hidden reconstruction objectives. An ARCH property, not a build-time
+    flag: it changes the parameter tree, so it must ride the arch through checkpointing and
+    the run bundle rather than being re-supplied at every construction site."""
 
     @property
     def capture_keys(self) -> CaptureKeys:
@@ -909,6 +914,11 @@ class LayerwiseMLPCIArch:
     hidden_dims: tuple[int, ...]
     has_position_axis: bool
     input_names: tuple[str, ...]
+    dual: bool = False
+    """Build a SECOND readout head on this same trunk (SPEC S36), so the CI fn scores both
+    the output and the hidden reconstruction objectives. An ARCH property, not a build-time
+    flag: it changes the parameter tree, so it must ride the arch through checkpointing and
+    the run bundle rather than being re-supplied at every construction site."""
 
     @property
     def capture_keys(self) -> CaptureKeys:
@@ -1094,6 +1104,11 @@ class GlobalMLPCIArch:
     hidden_dims: tuple[int, ...]
     has_position_axis: bool
     input_taps: tuple[TapSpec, ...]
+    dual: bool = False
+    """Build a SECOND readout head on this same trunk (SPEC S36), so the CI fn scores both
+    the output and the hidden reconstruction objectives. An ARCH property, not a build-time
+    flag: it changes the parameter tree, so it must ride the arch through checkpointing and
+    the run bundle rather than being re-supplied at every construction site."""
 
     @property
     def capture_keys(self) -> CaptureKeys:
@@ -1181,19 +1196,18 @@ CIFnArch = ChunkwiseTransformerCIArch | LayerwiseMLPCIArch | GlobalMLPCIArch
 a separate, scale-driven concern (see `init_placed`), never coupled to arch type."""
 
 
-def build_ci_fn(
-    arch: CIFnArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray, *, dual: bool = False
-) -> CIFn:
+def build_ci_fn(arch: CIFnArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray) -> CIFn:
     """Construct the CI fn for `arch`, host-side and unsharded. Placement is applied by the
     caller by SCALE (mesh × C-divisibility), never by which arch this is.
 
-    `dual` builds the second readout head off the SAME trunk (SPEC S36). It is an arch-wide
-    property, not a per-arch one: every impl splits at its own final readout, so a dual run
-    can use any of them."""
+    `arch.dual` builds the second readout head off the SAME trunk (SPEC S36) — every impl
+    splits at its own final readout, so a dual run can use any of them. It rides the ARCH
+    rather than being a build-time flag because it changes the parameter tree: the run bundle
+    and the checkpoint must agree on it without anyone re-supplying it."""
     match arch:
         case ChunkwiseTransformerCIArch():
-            return init_chunkwise_transformer_ci_fn(arch, sites, key, dual=dual)
+            return init_chunkwise_transformer_ci_fn(arch, sites, key, dual=arch.dual)
         case LayerwiseMLPCIArch():
-            return init_layerwise_mlp_ci_fn(arch, sites, key, dual=dual)
+            return init_layerwise_mlp_ci_fn(arch, sites, key, dual=arch.dual)
         case GlobalMLPCIArch():
-            return init_global_mlp_ci_fn(arch, sites, key, dual=dual)
+            return init_global_mlp_ci_fn(arch, sites, key, dual=arch.dual)

@@ -619,6 +619,7 @@ def test_targeted_engine_end_to_end(tmp_path: Path):
         remat_recon_forwards=False,
         remat_ci_fn=False,
         ascend_replicate=False,
+        sequential_passes=False,
         compiler_options={},
         sample_target_batch=sample_target_batch,
         sample_nontarget_batch=sample_nontarget_batch,

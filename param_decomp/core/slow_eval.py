@@ -64,6 +64,7 @@ from matplotlib.figure import Figure
 
 from param_decomp.core.ci_fn import (
     CIFn,
+    CIRole,
     ci_preactivations,
     lower_leaky_hard_sigmoid,
     upper_leaky_hard_sigmoid,
@@ -149,6 +150,7 @@ def make_slow_eval_step(
     ci_alive_threshold: float,
     density_heatmap_n_bins: int | None,
     compiler_options: dict[str, bool | int | str] | None = None,
+    role: CIRole = "output",
 ) -> SlowEvalStep:
     """Build the jit'd per-batch reduction `slow_eval_step(model, ci_fn, residual) ->
     ({site: density_counts}, {site: ci_sums}, n_positions, {site: flat lower},
@@ -174,6 +176,7 @@ def make_slow_eval_step(
             ci_fn,
             model.clean_forward(residual, ci_capture_keys).captures,
             remat=False,
+            role=role,
         )
         lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
 

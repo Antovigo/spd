@@ -26,6 +26,7 @@ from param_decomp.core.configs import (
     AnyPDConfig,
     MuonOptimizerConfig,
     PDConfigBase,
+    TargetedPDConfig,
     WeightInit,
 )
 from param_decomp.core.init_placed import (
@@ -210,7 +211,13 @@ def init_train_state(
     components, ci_fn = decomposition.components, decomposition.ci_fn
     # Recon terms only — persistent adversaries derive from these, and a targeted run's
     # loss list carries no faithfulness role for a full objective build to demand.
-    recon_terms = build_recon_terms(pd.loss_metrics, model.site_names)
+    recon_terms = build_recon_terms(
+        pd.loss_metrics,
+        model.site_names,
+        # A hidden pass's terms carry adversaries of their own (they run on the TARGET
+        # stream, T7), so their bundles must be allocated here too.
+        hidden=pd.hidden if isinstance(pd, TargetedPDConfig) else None,
+    )
     persistent = persistent_configs(recon_terms)
     term_coeff_by_state_key = {
         entry.sources.state_key: term.coeff

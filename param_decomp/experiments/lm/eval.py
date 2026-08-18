@@ -221,6 +221,7 @@ def make_masked_kl_step[PreparedT](
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
+    role: CIRole = "output",
 ) -> ScalarStep:
     """KL against the target output under ONE masking arm — one clean forward, one masked.
 
@@ -237,7 +238,7 @@ def make_masked_kl_step[PreparedT](
     ) -> dict[str, Array]:
         del key  # neither arm draws masks
         batch = _prepare_lm_batch(
-            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys, role=role
         )
         match arm:
             case "ci_masked":
@@ -343,6 +344,7 @@ def make_ci_l0_step[PreparedT](
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
+    role: CIRole = "output",
 ) -> ScalarStep:
     """Bind the generic `CI_L0` arithmetic (`core.ci_l0_eval`) to the LM batch: the shared
     `_prepare_lm_batch` CI and, for the padded arithmetic probes, the row-masked mean."""
@@ -358,7 +360,7 @@ def make_ci_l0_step[PreparedT](
     ) -> dict[str, Array]:
         del key
         batch = _prepare_lm_batch(
-            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys, role=role
         )
 
         def mean(value: Array) -> Array:
@@ -381,6 +383,7 @@ def make_fresh_pgd_step[PreparedT](
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
+    role: CIRole = "output",
 ) -> ScalarStep:
     """Build fresh-PGD evaluation for end-to-end reconstruction and optional hidden-activation reconstruction."""
     assert model_static.has_position_axis, "LM PGDReconLoss requires a position axis"
@@ -405,6 +408,7 @@ def make_fresh_pgd_step[PreparedT](
             n_valid_rows,
             ci_capture_keys,
             reconstruction_capture_keys,
+            role=role,
         )
         _, _, pgd_key = random.split(key, 3)
 

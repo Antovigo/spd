@@ -8,6 +8,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import PRNGKeyArray
 
+from param_decomp.core.ci_fn import DUAL_CI_ROLES, CIRole
 from param_decomp.core.configs import (
     CI_L0Config,
     CIHiddenActsReconLossConfig,
@@ -107,6 +108,12 @@ def make_lm_evaluation(
     targeted = target_pool_batches_for is not None
     data_streams: tuple[Stream, ...] = ("nontarget", "target") if targeted else ("nontarget",)
     optimized_stream: Stream = "target" if targeted else "nontarget"
+    # A dual CI fn (SPEC S36) answers every CI-reading metric TWICE — once per readout
+    # head — because the two heads are the experiment: a component important for the
+    # output objective and not the hidden one (or the reverse) is exactly what a dual run
+    # is looking for, and reporting one head would hide it. A single-role run keeps one
+    # readout under unchanged keys.
+    ci_roles: tuple[CIRole, ...] = DUAL_CI_ROLES if built.ci_fn.dual else ("output",)
 
     def well_temperedness_inputs(
         context: LMEvalContext,
@@ -120,9 +127,10 @@ def make_lm_evaluation(
         metric: object,
         schedule: EvalSchedule,
         streams: tuple[Stream, ...],
+        roles: tuple[CIRole, ...] = ("output",),
     ) -> tuple[EvalOperation[LMEvalContext], ...]:
-        """One operation per stream; the scalar makers share a signature so the stream is the
-        only thing that varies between a metric's readouts."""
+        """One operation per (stream, CI role); the scalar makers share a signature so those
+        two are the only things that vary between a metric's readouts."""
         return tuple(
             maker(
                 metric,
@@ -135,8 +143,10 @@ def make_lm_evaluation(
                 eval.n_steps,
                 mesh,
                 compiler_options,
+                role,
             )
             for stream in streams
+            for role in roles
         )
 
     def make_operations(metric: AnyEvalMetricConfig) -> tuple[EvalOperation[LMEvalContext], ...]:
@@ -145,16 +155,20 @@ def make_lm_evaluation(
             case CEandKLLossesConfig():
                 return per_stream(make_ce_kl_operation, metric, schedule, data_streams)
             case CIMaskedReconLossConfig():
-                return per_stream(make_masked_kl_operation, "ci_masked", schedule, data_streams)
+                return per_stream(
+                    make_masked_kl_operation, "ci_masked", schedule, data_streams, ci_roles
+                )
             case UnmaskedNoDeltaReconLossConfig():
                 # The nontarget pass's own training term, already reported there as a loss.
                 return per_stream(
                     make_masked_kl_operation, "unmasked", schedule, (optimized_stream,)
                 )
             case CI_L0Config():
-                return per_stream(make_ci_l0_operation, metric, schedule, data_streams)
+                return per_stream(make_ci_l0_operation, metric, schedule, data_streams, ci_roles)
             case PGDReconLossConfig():
-                return per_stream(make_fresh_pgd_operation, metric, schedule, data_streams)
+                return per_stream(
+                    make_fresh_pgd_operation, metric, schedule, data_streams, ci_roles
+                )
 
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
                 return (
@@ -170,7 +184,7 @@ def make_lm_evaluation(
                     ),
                 )
             case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
-                return (
+                return tuple(
                     make_hidden_acts_operation(
                         metric,
                         schedule,
@@ -180,14 +194,16 @@ def make_lm_evaluation(
                         pd.steps,
                         compiler_options,
                         optimized_stream,
-                    ),
+                        role,
+                    )
+                    for role in ci_roles
                 )
             case (
                 CIHistogramsConfig()
                 | ComponentActivationDensityConfig()
                 | CIMeanPerComponentConfig()
             ):
-                return (
+                return tuple(
                     make_site_figures_operation(
                         metric,
                         schedule,
@@ -196,7 +212,9 @@ def make_lm_evaluation(
                         compiler_options,
                         renderer,
                         optimized_stream,
-                    ),
+                        role,
+                    )
+                    for role in ci_roles
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
                 return (

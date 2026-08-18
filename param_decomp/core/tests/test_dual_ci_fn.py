@@ -39,7 +39,7 @@ SITES = (
 )
 
 
-def _chunkwise_arch() -> ChunkwiseTransformerCIArch:
+def _chunkwise_arch(dual: bool = False) -> ChunkwiseTransformerCIArch:
     return ChunkwiseTransformerCIArch(
         chunks=(Chunk(input_taps=("t0",), output_sites=("s0", "s1")),),
         input_dim=D_TAP,
@@ -49,14 +49,17 @@ def _chunkwise_arch() -> ChunkwiseTransformerCIArch:
         ffn_hidden=16,
         ffn_kind="gelu",
         learned_norm_scale=False,
+        dual=dual,
     )
 
 
-def _mlp_arch() -> LayerwiseMLPCIArch:
-    return LayerwiseMLPCIArch(hidden_dims=(6,), has_position_axis=False, input_names=("t0", "t1"))
+def _mlp_arch(dual: bool = False) -> LayerwiseMLPCIArch:
+    return LayerwiseMLPCIArch(
+        hidden_dims=(6,), has_position_axis=False, input_names=("t0", "t1"), dual=dual
+    )
 
 
-ArchOf = Callable[[], ChunkwiseTransformerCIArch | LayerwiseMLPCIArch]
+ArchOf = Callable[..., ChunkwiseTransformerCIArch | LayerwiseMLPCIArch]
 TapsOf = Callable[[], dict[str, Array]]
 
 
@@ -97,7 +100,7 @@ def test_single_role_returns_bare_ci_and_refuses_the_hidden_head(
 def test_dual_returns_two_distinct_bundles_over_every_site(
     arch_of: ArchOf, taps_of: TapsOf
 ) -> None:
-    ci_fn = build_ci_fn(arch_of(), SITES, jax.random.key(0), dual=True)
+    ci_fn = build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
     assert is_dual(ci_fn) and ci_fn.roles == DUAL_CI_ROLES
     ci = ci_fn(taps_of(), remat=False)
     assert isinstance(ci, DualCI)
@@ -119,8 +122,8 @@ def test_trunk_gradient_is_the_sum_of_the_two_objectives(arch_of: ArchOf, taps_o
     """The load-bearing property. One pullback with a `DualCI` cotangent must equal the sum of
     the two single-head pullbacks — that is what makes running the objectives sequentially and
     adding their gradients identical to fusing them, and what makes the trunk see both."""
-    arch, taps = arch_of(), taps_of()
-    ci_fn = build_ci_fn(arch, SITES, jax.random.key(0), dual=True)
+    arch, taps = arch_of(dual=True), taps_of()
+    ci_fn = build_ci_fn(arch, SITES, jax.random.key(0))
 
     def run(cf: CIFn) -> DualCI:
         result = cf(taps, remat=False)
@@ -170,7 +173,7 @@ def test_dual_init_leaves_the_trunk_and_output_head_bit_identical(
     two topologies are comparable from step 0, and existing goldens do not move."""
     arch, taps = arch_of(), taps_of()
     single = build_ci_fn(arch, SITES, jax.random.key(0))
-    dual = build_ci_fn(arch, SITES, jax.random.key(0), dual=True)
+    dual = build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
 
     single_ci = single(taps, remat=False)
     dual_ci = dual(taps, remat=False)

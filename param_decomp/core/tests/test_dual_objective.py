@@ -90,10 +90,10 @@ def _setup(*, dual: bool, sequential: bool, with_nontarget_hidden: bool = True):
             hidden_dims=(16,),
             has_position_axis=False,
             input_names=site_input_tap_keys(tuple(s.name for s in sites)),
+            dual=dual,
         ),
         sites,
         jax.random.PRNGKey(2),
-        dual=dual,
     )
     opt_vu = optax.adamw(1e-3, weight_decay=0.0)
     opt_ci = optax.adamw(1e-3, weight_decay=0.0)
@@ -257,10 +257,10 @@ def test_hidden_pass_and_dual_ci_must_agree():
             hidden_dims=(16,),
             has_position_axis=False,
             input_names=site_input_tap_keys(("linear1", "linear2")),
+            dual=True,
         ),
         site_specs(TMSConfig(n_features=5, n_hidden=2), (SiteC("linear1", 8), SiteC("linear2", 6))),
         jax.random.PRNGKey(2),
-        dual=True,
     )
     mismatched = TrainState(
         decomposition=Decomposition(components=state.decomposition.components, ci_fn=dual_fn),

@@ -138,6 +138,20 @@ class RuntimeConfig(BaseConfig):
             "behaviour-preserving). Must divide both the device count and GPUS_PER_NODE."
         ),
     )
+    sequential_passes: bool = Field(
+        default=False,
+        description=(
+            "Score the tPD passes ONE AT A TIME and add their gradients, instead of fusing "
+            "them into a single backward (SPEC T1). Identical arithmetic — summing per-pass "
+            "gradients is what the fused backward does internally — so this is a memory/speed "
+            "trade and nothing else: peak activation memory holds ONE pass's masked forwards "
+            "rather than every pass's, at the cost of a params-sized gradient accumulator and "
+            "the overlap XLA gives up at each `optimization_barrier`. Worth it when a hidden "
+            "pass (T12) doubles the forwards; pointless without one, since a two-pass run "
+            "already fits wherever it fit before. At bf16 compute the two paths differ by "
+            "backward rounding (~1e-3 on gradient norms, none on the losses)."
+        ),
+    )
     sharding: Literal["owner", "owner+zero1", "zero1", "ddp"] | PlacementTableConfig = Field(
         description=(
             "Placement policy for the trainable state (placement.py). REQUIRED, no "

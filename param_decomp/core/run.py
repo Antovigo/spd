@@ -762,6 +762,7 @@ def run_targeted_decomposition_training[EvalContextT](
     remat_recon_forwards: bool,
     remat_ci_fn: bool,
     ascend_replicate: bool,
+    sequential_passes: bool,
     compiler_options: dict[str, bool | int | str],
     sample_target_batch: Callable[[int], Any],
     sample_nontarget_batch: Callable[[int], Any],
@@ -794,7 +795,9 @@ def run_targeted_decomposition_training[EvalContextT](
 
     step_fn = make_targeted_train_step(
         model_static=model,
-        objective=build_targeted_objective(pd.loss_metrics, nontarget, model.site_names),
+        objective=build_targeted_objective(
+            pd.loss_metrics, nontarget, model.site_names, hidden=pd.hidden
+        ),
         ci_scaled_weight_decay=(
             CIScaledWeightDecay(pd.ci_scaled_weight_decay, prepared.sched_vu)
             if pd.ci_scaled_weight_decay is not None
@@ -807,6 +810,7 @@ def run_targeted_decomposition_training[EvalContextT](
         remat_ci_fn=remat_ci_fn,
         ci_capture_keys=prepared.state.decomposition.ci_fn.capture_keys,
         ascend_replicate=ascend_replicate,
+        sequential_passes=sequential_passes,
         compiler_options=compiler_options,
         mesh=mesh,
     )

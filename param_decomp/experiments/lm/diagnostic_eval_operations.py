@@ -6,7 +6,7 @@ import jax
 import numpy as np
 from jaxtyping import PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn
+from param_decomp.core.ci_fn import CIFn, CIRole
 from param_decomp.core.configs import (
     CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
@@ -63,6 +63,7 @@ from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 from param_decomp.experiments.lm.scalar_eval_operations import (
     Stream,
+    role_log_segment,
     stream_batches,
     stream_log_prefix,
 )
@@ -74,10 +75,12 @@ def _figure_record(now_step: int, media: dict[str, bytes]) -> DeferredMediaRecor
 
 
 def _render_selected_figures(
-    reductions: dict[str, SiteReduction], wanted: set[str], now_step: int
+    reductions: dict[str, SiteReduction], wanted: set[str], now_step: int, role_segment: str = ""
 ) -> DeferredMediaRecord:
     figures = render_slow_eval_figures(reductions)
-    return _figure_record(now_step, {f"slow_eval/{name}": figures[name] for name in wanted})
+    return _figure_record(
+        now_step, {f"slow_eval/{role_segment}{name}": figures[name] for name in wanted}
+    )
 
 
 def _render_permutation(
@@ -140,13 +143,14 @@ def make_hidden_acts_operation(
     train_steps: int,
     compiler_options: dict[str, bool | int | str],
     stream: Stream,
+    role: CIRole = "output",
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHiddenActsReconLossConfig():
-            step = make_ci_hidden_acts_step(model, ci_capture_keys, compiler_options)
+            step = make_ci_hidden_acts_step(model, ci_capture_keys, compiler_options, role=role)
         case StochasticHiddenActsReconLossConfig():
             step = make_stochastic_hidden_acts_step(
-                model, ci_capture_keys, metric.n_mask_samples, compiler_options
+                model, ci_capture_keys, metric.n_mask_samples, compiler_options, role=role
             )
 
     def run(context: LMEvalContext) -> LogRecord:
@@ -160,7 +164,7 @@ def make_hidden_acts_operation(
                 run_key, EvalKeyStream.HIDDEN_ACTS * train_steps + context.pass_index
             ),
         )
-        prefix = stream_log_prefix(stream, context)
+        prefix = stream_log_prefix(stream, context, role)
         return {
             f"{prefix}slow/loss/{name}": value
             for name, value in hidden_acts_log_entries(metric.type, reductions).items()
@@ -246,6 +250,7 @@ def make_site_figures_operation(
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
     stream: Stream,
+    role: CIRole = "output",
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHistogramsConfig():
@@ -270,7 +275,7 @@ def make_site_figures_operation(
                 "figures/ci_mean_per_component",
                 "figures/ci_mean_per_component_log",
             }
-    step = make_slow_eval_step(model, ci_capture_keys, threshold, bins, compiler_options)
+    step = make_slow_eval_step(model, ci_capture_keys, threshold, bins, compiler_options, role=role)
 
     def run(context: LMEvalContext) -> LogRecord:
         reductions = accumulate_site_reductions(
@@ -280,7 +285,15 @@ def make_site_figures_operation(
             list(stream_batches(stream, context)),
             limit,
         )
-        renderer.submit(partial(_render_selected_figures, reductions, wanted, context.now_step))
+        renderer.submit(
+            partial(
+                _render_selected_figures,
+                reductions,
+                wanted,
+                context.now_step,
+                role_log_segment(role),
+            )
+        )
         return {}
 
     return EvalOperation(schedule, run)
