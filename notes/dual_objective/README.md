@@ -85,13 +85,46 @@ Recorded so the comparison is read correctly, not silently.
   default. **This is the one place where the implementation goes against a written SPEC
   rationale, and it was an explicit instruction rather than a derivation.**
 
+## Measured (smoke, job 10018 — 30 steps at production shape, 2x L40, rc=0)
+
+Against the single-objective `addsub-L18-jax-mirror-01` on the same hardware:
+
+| | mirror (2 passes) | dual (4 passes, sequential) |
+|---|---|---|
+| step time (steady) | ~3.35 s | ~4.2 s (**1.25x**) |
+| peak memory / rank | 36.7 GB | 40.4 GB (**+10%**) |
+
+Doubling the passes costs 25% time and 10% memory, not 2x, because: the clean forward runs
+ONCE per stream with its captures unioned across passes, so the hidden passes reuse it; the
+target stream is unpadded arithmetic prompts (~6-8 tokens) against the non-target's 64, so the
+target-hidden pass is cheap; the hidden passes never call `recon_loss_fn`, keeping the
+full-vocabulary KL out of their graphs; and the CI trunk runs once per stream whatever the head
+count. Memory stays flat because `sequential_passes` holds one pass's masked-forward residuals
+at a time — that is what the flag is for.
+
+Beware the first logged `step_time_s` (~34 s at step 5): it amortizes the multi-minute XLA
+compile of the four-pass graph. Read the steady-state value, not the first one.
+
+**Wall clock.** 4.27 s x 20000 = 23.7 h of stepping, plus ~2 h of eval passes. The mirror run's
+`-t 23:00:00` does not fit it; the full-run sbatch is set to `-t 32:00:00`.
+
+Verified in the smoke beyond "it runs": all four passes log under their own namespaces
+(`loss/*`, `hidden_ci/loss/*`, `nontarget_data/loss/*`, `nontarget_data/hidden_ci/loss/*`); both
+PPGD adversaries get their own source-LR stream; every CI-reading eval reports both roles; and
+the checkpoint carries `hidden_out_ws`/`hidden_out_bs` beside `out_ws`, so the dual head
+persists. Early signal worth watching: the hidden head runs a HIGHER L0 than the output head
+(418 vs 382 alive at step 10, 322 vs 275 at step 20) on both streams.
+
 ## Not done
 
 - **`ABGridDataset` still emits the single-CI payload.** The torch applet's dual half (the
   green/magenta output-alive vs hidden-alive overlay) is not ported, so the applet falls back
   to single-colour rendering as it does today.
-- **No GPU run has been executed.** The config and sbatch are staged; nothing has been
-  launched.
+- **The 20k-step run has not been launched.** The 30-step smoke (job 10018) passed at the
+  production per-rank shape; the full run is staged and not started.
+- **Resume-under-requeue is not exercised by the smoke** (it ran to completion, and the
+  sbatch mints a fresh run id per submission). Checkpoint SAVE is exercised, and the dual
+  head is present in the saved tree.
 
 ## Launching
 
@@ -99,7 +132,7 @@ Recorded so the comparison is read correctly, not silently.
 sbatch ~/pd_scratch/dual_obj_jax/addsub-L18-jax-dual-01.sbatch
 ```
 
-2× L40, 20000 steps, 23 h wall clock, SIGTERM-save at 10 min remaining. The sbatch points at
+2x L40, 20000 steps, 32 h wall clock, SIGTERM-save at 10 min remaining. The sbatch points at
 this worktree and at the staged config. `derive_dual_config.py` regenerates that config from
 `addsub-L18-jax-mirror-01.yaml`, so the diff against the single-objective run stays exactly the
 dual-objective change — the same discipline the torch `press2-trunk` launch used.
