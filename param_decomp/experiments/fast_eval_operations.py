@@ -38,14 +38,20 @@ def _averaged_over_eval_batches(
     seed: int,
     model: DecomposedModel,
     sample_eval_batch: Callable[[int], Any],
+    max_batches: int | None = None,
 ) -> EvalOperation[EvalInvocation]:
-    """Run `step` over the pass's eval batches and average each scalar it emits."""
+    """Run `step` over the pass's eval batches (the first `max_batches` when capped) and
+    average each scalar it emits. `flat_index` stays keyed off the full `n_steps` stride,
+    so a cap changes which batches run, never which key a batch index draws."""
     eval_key = jax.random.PRNGKey(seed + 1)
+    n_batches = (
+        eval_config.n_steps if max_batches is None else min(max_batches, eval_config.n_steps)
+    )
 
     def run(context: EvalInvocation) -> dict[str, float]:
         pass_index = context.now_step // eval_config.every
         sums: dict[str, Array] = {}
-        for batch_index in range(eval_config.n_steps):
+        for batch_index in range(n_batches):
             flat_index = pass_index * eval_config.n_steps + batch_index
             values = step(
                 model,
@@ -56,7 +62,7 @@ def _averaged_over_eval_batches(
             )
             for name, value in values.items():
                 sums[name] = sums.get(name, jnp.zeros(())) + value
-        return {f"eval/{name}": float(value) / eval_config.n_steps for name, value in sums.items()}
+        return {f"eval/{name}": float(value) / n_batches for name, value in sums.items()}
 
     return EvalOperation(schedule, run)
 
@@ -92,7 +98,9 @@ def make_fresh_pgd_operation(
     ) -> dict[str, Array]:
         return {f"loss/{probe.name}": pgd_step(model, components, ci_fn, inputs, key)}
 
-    return _averaged_over_eval_batches(step, eval_config, schedule, seed, model, sample_eval_batch)
+    return _averaged_over_eval_batches(
+        step, eval_config, schedule, seed, model, sample_eval_batch, max_batches=metric.n_batches
+    )
 
 
 def make_ci_l0_operation(
