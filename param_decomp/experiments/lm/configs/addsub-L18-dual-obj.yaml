@@ -2,10 +2,13 @@
 # decomposition on the 1..100 a+b / a-b prompt pool, sized for 2x L40 (dp 2).
 # Runs via `python -m param_decomp.experiments.lm.run_targeted`.
 #
-# The current state of the art for this target: the JAX counterpart of the torch
-# reference addsub-L18-11-trunk-imp2x, at torch step-time parity (~3.35 s/step on
-# 2x L40, measured 2026-08-18). Update this seat when the recipe advances.
-run_name: jax-l18-addsub-targeted
+# The current state of the art for this target: the 2026-08-18 CE/KL-metric revision
+# plus minimality/frequency warm-start scheduling — every importance-minimality
+# coefficient (target output + hidden, nontarget output + hidden) and the shared
+# frequency coefficient (one block across both passes, SPEC T6) starts at 2x its
+# final value and decays linearly to it over the first 50% of training, then holds
+# (run addsub-L18-14, p-53a5ebaf). Update this seat when the recipe advances.
+run_name: addsub-L18-14
 decomposition:
   sites:
     kind: glu_transformer
@@ -66,7 +69,13 @@ pd:
     grad_clip_norm: null
   loss_metrics:
     - type: SmoothL0ImportanceMinimalityLoss
-      coeff: 5.0e-05  # the torch reference's 2x-imp arm (addsub-L18-11-trunk-imp2x)
+      # Warm start: 2x the final 5.0e-05 at step 0, linear decay to it at 50%, then held.
+      coeff:
+        max_val: 1.0e-04
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 0.5}
+          - {at: 1.0, frac: 0.5}
       normalize_at_one: true
       gamma:
         max_val: 1.0
@@ -75,7 +84,14 @@ pd:
           - {at: 0.5, frac: 1.0}
           - {at: 1.0, frac: 0.01}
       frequency:
-        coeff: 2.5e-05
+        # Warm start: 2x the final 2.5e-05 at step 0, linear decay to it at 50%, then held.
+        # ONE frequency block shared across target and nontarget passes (SPEC T6).
+        coeff:
+          max_val: 5.0e-05
+          points:
+            - {at: 0.0, frac: 1.0}
+            - {at: 0.5, frac: 0.5}
+            - {at: 1.0, frac: 0.5}
         reference_datapoint_count: auto
     - type: StochasticReconSubsetLoss
       coeff: 1.0
@@ -117,7 +133,13 @@ pd:
       - layers.29.mlp.down_proj.out
       - layers.30.mlp.down_proj.out
       - layers.31.mlp.down_proj.out
-    impmin_coeff: 5.0e-05
+    # Warm start: 2x the final 5.0e-05 at step 0, linear decay to it at 50%, then held.
+    impmin_coeff:
+      max_val: 1.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.5, frac: 0.5}
+        - {at: 1.0, frac: 0.5}
     recon:
       - type: StochasticReconSubsetLoss
         name: HiddenStochasticReconSubset
@@ -149,14 +171,26 @@ nontarget:
   # step from 4.27 to 3.35 s on 2x L40 (2026-08-18). Peak 39.7 GB/rank of ~43.6 — an OOM here
   # does not raise (rank 0 dies mid-allocation, rank 1 waits on the clique, the job HANGS);
   # re-probe before raising.
-  impmin_coeff: 1.0e-04
+  # Warm start: 2x the final 1.0e-04 at step 0, linear decay to it at 50%, then held.
+  impmin_coeff:
+    max_val: 2.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.5, frac: 0.5}
+      - {at: 1.0, frac: 0.5}
   recon:
     - type: StochasticReconSubsetLoss
       coeff: 1.0
       routing:
         type: uniform_k_subset
   hidden:
-    impmin_coeff: 1.0e-04
+    # Warm start: 2x the final 1.0e-04 at step 0, linear decay to it at 50%, then held.
+    impmin_coeff:
+      max_val: 2.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.5, frac: 0.5}
+        - {at: 1.0, frac: 0.5}
     recon:
       - type: StochasticReconSubsetLoss
         name: NontargetHiddenStochasticReconSubset
