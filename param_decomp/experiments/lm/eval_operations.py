@@ -254,6 +254,9 @@ def make_lm_evaluation(
                         mesh,
                         n_proc,
                         built.run.run_dir,
+                        # ONE operation, every role: the grids come off a single frozen
+                        # forward, so the second head costs its readout and nothing else.
+                        ci_roles,
                     ),
                 )
             case TwoStreamCIMeanPerComponentConfig():

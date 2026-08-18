@@ -117,14 +117,30 @@ persists. Early signal worth watching: the hidden head runs a HIGHER L0 than the
 
 ## Not done
 
-- **`ABGridDataset` still emits the single-CI payload.** The torch applet's dual half (the
-  green/magenta output-alive vs hidden-alive overlay) is not ported, so the applet falls back
-  to single-colour rendering as it does today.
+- (nothing outstanding on the ab grids — see below)
 - **The 20k-step run has not been launched.** The 30-step smoke (job 10018) passed at the
   production per-rank shape; the full run is staged and not started.
 - **Resume-under-requeue is not exercised by the smoke** (it ran to completion, and the
   sbatch mints a fresh run id per submission). Checkpoint SAVE is exercised, and the dual
   head is present in the saved tree.
+
+## The ab-grid dual payload
+
+`ab_grids_app.html` already shipped the whole dual half — it reads `ci_roles`, `mean_ci_hidden`
+and `ci_hidden`, renders a hidden pane, and merges the two subtractively on white (white =
+neither, green = hidden-only "expected", magenta = output-only "the anomaly", black = both).
+Only the JAX writer was single-role, so enabling it meant emitting the fields, not touching the
+applet.
+
+Both roles come off the ONE frozen `component_activation_forward` the snapshot already ran —
+the trunk runs once and the heads are separate readouts (S36) — so a dual snapshot costs the
+second head's `[d_model, C]` matmul and its grids, not a second forward.
+
+The load-bearing detail is the saved-index cut: `saved` is ONE list shared by both roles,
+because the applet walks it once and indexes both roles' grids by it. It is cut on the MAX over
+roles, so a subcomponent only the hidden head cares about is not filtered away — which is the
+whole point of looking at the overlay. A single-role payload is unchanged byte-for-byte, so
+pre-S36 snapshots still render through the applet's own no-`ci_roles` fallback.
 
 ## Launching
 

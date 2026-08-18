@@ -86,7 +86,7 @@ def _slow_eval_media(
     )
 
 
-def _build_ci_fn(model: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
+def _build_ci_fn(model: DecomposedModel, n_embd: int, key: jax.Array, dual: bool = False) -> CIFn:
     """One transformer chunk over all sites, reading the residual entering the first
     decomposed block. The old `CIArch(16, 1, 2, 32)` dims map onto the chunk arch."""
     site_names = model.site_names
@@ -100,6 +100,7 @@ def _build_ci_fn(model: DecomposedModel, n_embd: int, key: jax.Array) -> CIFn:
         ffn_hidden=32,
         ffn_kind="gelu",
         learned_norm_scale=False,
+        dual=dual,
     )
     return build_ci_fn(arch, model.sites, key)
 

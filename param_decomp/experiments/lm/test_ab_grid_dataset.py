@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.ci_fn import ci_preactivations, lower_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import CIFn, CIRole, ci_preactivations, lower_leaky_hard_sigmoid
 from param_decomp.core.components import init_component_stacks
 from param_decomp.core.model import prepare_compute_weights
 from param_decomp.core.tests.test_slow_eval import _build_ci_fn
@@ -52,12 +52,18 @@ def _tiny_setup():
 
 
 @cache
-def _grid_step():
+def _grid_step(roles: tuple[CIRole, ...] = ("output",)):
     """One trace shared by every test: the step is a pure function of the (cached) model and
     the recorded positions, both fixed for this file. The row count is a traced arg, so a
     chunked pass reuses this same trace."""
     _, model, ci_fn, _ = _tiny_setup()
-    return make_ab_grid_step(model, ci_fn.capture_keys, POSITIONS)
+    return make_ab_grid_step(model, ci_fn.capture_keys, POSITIONS, roles)
+
+
+def _dual_ci_fn() -> CIFn:
+    """The same arch with a second readout head (S36)."""
+    cfg, model, _ci_fn, _C = _tiny_setup()
+    return _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2), dual=True)
 
 
 def _grid() -> ArithmeticGrid:
@@ -88,7 +94,7 @@ def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
         prepare_compute_weights(model, vu), tokens, capture_keys=ci_fn.capture_keys
     )
     for site in model.site_names:
-        ci = np.asarray(ci_grids[site])
+        ci = np.asarray(ci_grids["output"][site])
         assert ci.shape == (n_pad, len(POSITIONS), C)
         assert ci.min() >= 0.0 and ci.max() <= 1.0
         ci_expected = np.asarray(lower_leaky_hard_sigmoid(preactivations[site]), np.float32)
@@ -101,7 +107,7 @@ def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
 
         # the sums are over the REAL rows only — the garbage tail must not move a mean
         np.testing.assert_allclose(
-            np.asarray(ci_sums[site]), ci[:n_prompts].sum(axis=0), rtol=1e-5, atol=1e-5
+            np.asarray(ci_sums["output"][site]), ci[:n_prompts].sum(axis=0), rtol=1e-5, atol=1e-5
         )
 
 
@@ -114,23 +120,27 @@ def test_collect_snapshot_saves_only_components_above_the_floor():
         _grid_step(), model, vu, ci_fn, ((tokens, n_prompts),), n_prompts, mean_ci_floor=0.0
     )
     for site in model.site_names:
-        mean_ci = everything.mean_ci[site]
+        mean_ci = everything.mean_ci["output"][site]
         assert mean_ci.shape == (len(POSITIONS), C)
         assert everything.saved[site].tolist() == list(range(C))  # floor 0 saves everything
-        assert everything.ci_columns[site].shape == (n_prompts, len(POSITIONS), C)
+        assert everything.ci_columns["output"][site].shape == (n_prompts, len(POSITIONS), C)
         assert everything.inner_columns[site].shape == (n_prompts, len(POSITIONS), C)
 
-    floor = float(np.median([m.max() for m in everything.mean_ci.values()]))
+    floor = float(np.median([m.max() for m in everything.mean_ci["output"].values()]))
     cut = collect_ab_grid_snapshot(
         _grid_step(), model, vu, ci_fn, ((tokens, n_prompts),), n_prompts, mean_ci_floor=floor
     )
     for site in model.site_names:
-        expected = saved_indices(everything.mean_ci[site], floor)
+        expected = saved_indices(everything.mean_ci["output"][site], floor)
         np.testing.assert_array_equal(cut.saved[site], expected)
         # the mean-CI vector is kept for EVERY component even when its grids are cut
-        np.testing.assert_allclose(cut.mean_ci[site], everything.mean_ci[site], rtol=1e-6)
         np.testing.assert_allclose(
-            cut.ci_columns[site], everything.ci_columns[site][:, :, expected], rtol=1e-6
+            cut.mean_ci["output"][site], everything.mean_ci["output"][site], rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            cut.ci_columns["output"][site],
+            everything.ci_columns["output"][site][:, :, expected],
+            rtol=1e-6,
         )
     assert any(cut.saved[site].size < C for site in model.site_names)
 
@@ -161,9 +171,14 @@ def test_chunking_the_grid_changes_nothing():
     )
     for site in model.site_names:
         np.testing.assert_array_equal(chunked.saved[site], whole.saved[site])
-        np.testing.assert_allclose(chunked.mean_ci[site], whole.mean_ci[site], rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(
-            chunked.ci_columns[site], whole.ci_columns[site], rtol=1e-5, atol=1e-6
+            chunked.mean_ci["output"][site], whole.mean_ci["output"][site], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            chunked.ci_columns["output"][site],
+            whole.ci_columns["output"][site],
+            rtol=1e-5,
+            atol=1e-6,
         )
         np.testing.assert_allclose(
             chunked.inner_columns[site], whole.inner_columns[site], rtol=1e-5, atol=1e-6
@@ -196,9 +211,9 @@ def _synthetic_snapshot(n_pos: int, saved: list[int], C: int) -> ABGridSnapshot:
     mean_ci = np.zeros((n_pos, C), np.float32)
     mean_ci[:, saved] = 1.0
     return ABGridSnapshot(
-        mean_ci={SITE: mean_ci},
+        mean_ci={"output": {SITE: mean_ci}},
         saved={SITE: np.asarray(saved)},
-        ci_columns={SITE: ci},
+        ci_columns={"output": {SITE: ci}},
         inner_columns={SITE: ci * -2.0},
     )
 
@@ -230,9 +245,9 @@ def test_payload_is_comp_major_with_a_length_one_op_axis():
 
 def test_payload_omits_grids_for_a_module_with_nothing_saved():
     snapshot = ABGridSnapshot(
-        mean_ci={SITE: np.zeros((1, 4), np.float32)},
+        mean_ci={"output": {SITE: np.zeros((1, 4), np.float32)}},
         saved={SITE: np.asarray([], dtype=int)},
-        ci_columns={SITE: np.zeros((N_A * N_B, 1, 0), np.float32)},
+        ci_columns={"output": {SITE: np.zeros((N_A * N_B, 1, 0), np.float32)}},
         inner_columns={SITE: np.zeros((N_A * N_B, 1, 0), np.float32)},
     )
     module = ab_grid_payload(snapshot, _grid(), (T - 1,), T, 1000, 0.05)["modules"][0]
@@ -263,3 +278,89 @@ def test_resolve_positions():
         resolve_positions([T], T)
     with pytest.raises(AssertionError, match="duplicates"):
         resolve_positions([-1, T - 1], T)
+
+
+def test_dual_payload_carries_both_roles_and_one_shared_index():
+    """SPEC S36: a dual run's snapshot feeds the applet's output-vs-hidden overlay.
+
+    The `saved` list is ONE index set for both roles — the applet walks it once and indexes
+    both roles' grids by it — and `collect_ab_grid_snapshot` cuts it on the MAX over roles, so
+    a subcomponent only the hidden head cares about survives the floor.
+    """
+    n_pos, C = 1, 4
+    saved = [0, 1]
+    ci = np.zeros((N_A * N_B, n_pos, len(saved)), np.float32)
+    ci[:, :, 0] = 1.0
+    output_mean = np.zeros((n_pos, C), np.float32)
+    output_mean[:, 0] = 1.0  # component 0 alive for the output head only
+    hidden_mean = np.zeros((n_pos, C), np.float32)
+    hidden_mean[:, 1] = 1.0  # component 1 alive for the hidden head only
+    snapshot = ABGridSnapshot(
+        mean_ci={"output": {SITE: output_mean}, "hidden": {SITE: hidden_mean}},
+        saved={SITE: np.asarray(saved)},
+        ci_columns={"output": {SITE: ci}, "hidden": {SITE: ci * 0.5}},
+        inner_columns={SITE: ci * -2.0},
+    )
+    payload = ab_grid_payload(snapshot, _grid(), (T - 1,), T, 1000, 0.05)
+    assert payload["ci_roles"] == ["output", "hidden"]
+    module = payload["modules"][0]
+    assert {"mean_ci", "mean_ci_hidden", "ci", "ci_hidden"} <= set(module)
+    assert module["saved"] == saved, "both roles are indexed by ONE saved list"
+    assert module["ci"] != module["ci_hidden"], "the two heads' grids must not be the same bytes"
+
+    # A single-role snapshot stays byte-compatible with every pre-S36 payload, so the applet's
+    # own no-`ci_roles` fallback still applies to older snapshots.
+    single = ab_grid_payload(
+        ABGridSnapshot(
+            mean_ci={"output": {SITE: output_mean}},
+            saved={SITE: np.asarray(saved)},
+            ci_columns={"output": {SITE: ci}},
+            inner_columns={SITE: ci * -2.0},
+        ),
+        _grid(),
+        (T - 1,),
+        T,
+        1000,
+        0.05,
+    )
+    assert single["ci_roles"] == ["output"]
+    assert "mean_ci_hidden" not in single["modules"][0]
+    assert "ci_hidden" not in single["modules"][0]
+    assert single["modules"][0]["ci"] == module["ci"], "the output half is unchanged by dual"
+
+
+def test_dual_snapshot_floor_keeps_hidden_only_components():
+    """The floor cut is over the MAX across roles, end to end through the real collector."""
+    _cfg, model, _ci_fn, _C = _tiny_setup()
+    vu = _components()
+    n_prompts = N_A * N_B
+    tokens = _tokens(n_prompts)
+    dual_ci_fn = _dual_ci_fn()
+    snapshot = collect_ab_grid_snapshot(
+        _grid_step(roles=("output", "hidden")),
+        model,
+        vu,
+        dual_ci_fn,
+        ((tokens, n_prompts),),
+        n_prompts,
+        mean_ci_floor=0.0,
+    )
+    assert set(snapshot.mean_ci) == {"output", "hidden"}
+    assert set(snapshot.ci_columns) == {"output", "hidden"}
+    for site in model.site_names:
+        # One shared index set, and it is at least the union of what either role would keep.
+        both = np.maximum(snapshot.mean_ci["output"][site], snapshot.mean_ci["hidden"][site])
+        floor = float(np.median(both.max(axis=0)))
+        cut = collect_ab_grid_snapshot(
+            _grid_step(roles=("output", "hidden")),
+            model,
+            vu,
+            dual_ci_fn,
+            ((tokens, n_prompts),),
+            n_prompts,
+            mean_ci_floor=floor,
+        )
+        expected = saved_indices(both, floor)
+        assert cut.saved[site].tolist() == expected.tolist()
+        for role in ("output", "hidden"):
+            assert cut.ci_columns[role][site].shape[-1] == expected.size

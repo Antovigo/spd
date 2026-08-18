@@ -15,7 +15,7 @@ import numpy as np
 from jax.experimental import multihost_utils
 from jaxtyping import Array, Float, Int
 
-from param_decomp.core.ci_fn import ci_preactivations, lower_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import CIRole, ci_preactivations, lower_leaky_hard_sigmoid
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.model import CaptureKeys, DecomposedModel, prepare_compute_weights
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
@@ -31,7 +31,7 @@ GATHER_INDEX_MULTIPLE = 64
 
 ABGridStep = Callable[
     [DecomposedModel, ComponentStacks, Any, Int[Array, "n_pad T"], Array],
-    tuple[dict[str, Array], dict[str, Array], dict[str, Array]],
+    tuple[dict[CIRole, dict[str, Array]], dict[str, Array], dict[CIRole, dict[str, Array]]],
 ]
 """`(model, components, ci_fn, tokens, n_valid_rows) -> ({site: CI}, {site: inner}, {site:
 summed CI})`. CI and inner activations are `(n_pad, n_pos, C)` at the recorded positions,
@@ -46,6 +46,7 @@ def make_ab_grid_step[PreparedT](
     model_static: DecomposedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     positions: tuple[int, ...],
+    roles: tuple[CIRole, ...] = ("output",),
 ) -> ABGridStep:
     """Build the jit'd step returning, at each recorded position with the batch axis KEPT as
     the grid, BOTH per-component lower-leaky CI (from the CI fn) and the normalized inner
@@ -66,24 +67,31 @@ def make_ab_grid_step[PreparedT](
         ci_fn: Any,
         tokens: Int[Array, "n_pad T"],
         n_valid_rows: Array,
-    ) -> tuple[dict[str, Array], dict[str, Array], dict[str, Array]]:
+    ) -> tuple[dict[CIRole, dict[str, Array]], dict[str, Array], dict[CIRole, dict[str, Array]]]:
         prepared_weights = prepare_compute_weights(model, components)
         clean_forward_result, component_activations = model.component_activation_forward(
             prepared_weights, tokens, capture_keys=ci_capture_keys
         )
-        # OUTPUT role explicitly: the ab-grid payload is still the single-CI one. Porting the
-        # torch applet's dual half (the output-alive vs hidden-alive overlay) is deliberately
-        # not done — see notes/dual_objective/README.md.
-        preactivations = ci_preactivations(
-            ci_fn, clean_forward_result.captures, remat=False, role="output"
-        )
-        assert preactivations[site_names[0]].ndim == 3, (
-            f"the ab grid is LM-only ((n_prompts, T, C)); got {preactivations[site_names[0]].shape}"
+        # Every role off the ONE frozen forward: the CI fn's trunk runs once and the heads
+        # are separate readouts of it (S36), so a dual snapshot costs no extra forward — only
+        # the second head's `[d_model, C]` matmul and its grids.
+        preactivations_by_role: dict[CIRole, dict[str, Array]] = {
+            role: ci_preactivations(ci_fn, clean_forward_result.captures, remat=False, role=role)
+            for role in roles
+        }
+        first = preactivations_by_role[roles[0]]
+        assert first[site_names[0]].ndim == 3, (
+            f"the ab grid is LM-only ((n_prompts, T, C)); got {first[site_names[0]].shape}"
         )
         recorded = jnp.asarray(position_index)
-        ci = {
-            site: lower_leaky_hard_sigmoid(preactivations[site])[:, recorded, :].astype(jnp.float32)
-            for site in site_names
+        ci: dict[CIRole, dict[str, Array]] = {
+            role: {
+                site: lower_leaky_hard_sigmoid(preactivations[site])[:, recorded, :].astype(
+                    jnp.float32
+                )
+                for site in site_names
+            }
+            for role, preactivations in preactivations_by_role.items()
         }
         inner = {}
         for site in site_names:
@@ -92,9 +100,12 @@ def make_ab_grid_step[PreparedT](
                 jnp.float32
             ) / jnp.maximum(v_norm, 1e-12)
         valid_rows = (jnp.arange(tokens.shape[0]) < n_valid_rows)[:, None, None]
-        ci_sum = {
-            site: jnp.where(valid_rows, ci[site], 0.0).sum(axis=0, dtype=jnp.float32)
-            for site in site_names
+        ci_sum: dict[CIRole, dict[str, Array]] = {
+            role: {
+                site: jnp.where(valid_rows, role_ci[site], 0.0).sum(axis=0, dtype=jnp.float32)
+                for site in site_names
+            }
+            for role, role_ci in ci.items()
         }
         return ci, inner, ci_sum
 
@@ -119,13 +130,16 @@ class ABGridSnapshot:
     """Host-side result of one grid pass: the full per-position mean-CI vectors, and the
     per-prompt columns of the components that cleared the floor."""
 
-    mean_ci: dict[str, np.ndarray]
-    """`{site: (n_pos, C)}` fp32, the prompt-mean lower-leaky CI."""
+    mean_ci: dict[CIRole, dict[str, np.ndarray]]
+    """`{role: {site: (n_pos, C)}}` fp32, the prompt-mean lower-leaky CI per readout head."""
     saved: dict[str, np.ndarray]
-    """`{site: component ids whose grids were gathered}`, ascending."""
-    ci_columns: dict[str, np.ndarray]
-    """`{site: (n_prompts, n_pos, len(saved[site]))}` fp32, row-major `(a, b)` order."""
+    """`{site: component ids whose grids were gathered}`, ascending — ONE index set shared by
+    every role. The floor is applied to the MAX over roles, so a subcomponent only the hidden
+    head cares about is not filtered away (the applet indexes both roles' grids by this list)."""
+    ci_columns: dict[CIRole, dict[str, np.ndarray]]
+    """`{role: {site: (n_prompts, n_pos, len(saved[site]))}}` fp32, row-major `(a, b)` order."""
     inner_columns: dict[str, np.ndarray]
+    """Role-INDEPENDENT: the inner activation is `(x · V_c) / ‖V_c‖`, which no CI head enters."""
 
 
 def collect_ab_grid_snapshot(
@@ -152,49 +166,70 @@ def collect_ab_grid_snapshot(
     costs no extra forward. The sums add over chunks and the columns concatenate in chunk
     order, so WHICH components are saved is chunk-count-invariant exactly; the gathered
     values match a single-chunk pass up to float reassociation (SPEC D4)."""
-    per_chunk: list[tuple[dict[str, Array], dict[str, Array], int]] = []
-    ci_totals: dict[str, np.ndarray] = {}
+    per_chunk: list[tuple[dict[CIRole, dict[str, Array]], dict[str, Array], int]] = []
+    ci_totals: dict[CIRole, dict[str, np.ndarray]] = {}
     for chunk_tokens, chunk_valid_rows in chunks:
         ci, inner, chunk_sum = step(
             model, components, ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
         )
         per_chunk.append((ci, inner, chunk_valid_rows))
-        for site, value in chunk_sum.items():
-            summed = np.asarray(value)
-            ci_totals[site] = summed if site not in ci_totals else ci_totals[site] + summed
+        for role, role_sum in chunk_sum.items():
+            totals = ci_totals.setdefault(role, {})
+            for site, value in role_sum.items():
+                summed = np.asarray(value)
+                totals[site] = summed if site not in totals else totals[site] + summed
 
-    mean_ci = {site: total / n_prompts for site, total in ci_totals.items()}
-    saved = {site: saved_indices(value, mean_ci_floor) for site, value in mean_ci.items()}
+    roles: tuple[CIRole, ...] = tuple(ci_totals)
+    mean_ci: dict[CIRole, dict[str, np.ndarray]] = {
+        role: {site: total / n_prompts for site, total in totals.items()}
+        for role, totals in ci_totals.items()
+    }
+    # ONE index set for every role, cut on the MAX across them: a subcomponent that only the
+    # hidden head cares about must not be filtered away, and the applet indexes both roles'
+    # grids by this same list.
+    sites = tuple(mean_ci[roles[0]])
+    saved = {
+        site: saved_indices(
+            np.maximum.reduce([mean_ci[role][site] for role in roles]), mean_ci_floor
+        )
+        for site in sites
+    }
 
-    ci_columns: dict[str, np.ndarray] = {}
+    ci_columns: dict[CIRole, dict[str, np.ndarray]] = {role: {} for role in roles}
     inner_columns: dict[str, np.ndarray] = {}
-    n_pos = next(iter(mean_ci.values())).shape[0]
+    n_pos = next(iter(mean_ci[roles[0]].values())).shape[0]
     empty = {site for site, idx in saved.items() if idx.size == 0}
     for site in empty:
-        ci_columns[site] = np.zeros((n_prompts, n_pos, 0), np.float32)
+        for role in roles:
+            ci_columns[role][site] = np.zeros((n_prompts, n_pos, 0), np.float32)
         inner_columns[site] = np.zeros((n_prompts, n_pos, 0), np.float32)
 
-    ci_parts: dict[str, list[np.ndarray]] = {s: [] for s in saved if s not in empty}
-    inner_parts: dict[str, list[np.ndarray]] = {s: [] for s in saved if s not in empty}
+    live = [site for site in sites if site not in empty]
+    ci_parts: dict[CIRole, dict[str, list[np.ndarray]]] = {
+        role: {site: [] for site in live} for role in roles
+    }
+    inner_parts: dict[str, list[np.ndarray]] = {site: [] for site in live}
     for ci, inner, chunk_valid_rows in per_chunk:
-        to_gather: dict[str, tuple[Array, Array]] = {}
-        for site in ci_parts:
+        to_gather: dict[str, tuple[tuple[Array, ...], Array]] = {}
+        for site in live:
             idx = saved[site]
             width = -(-idx.size // GATHER_INDEX_MULTIPLE) * GATHER_INDEX_MULTIPLE
             padded_idx = jnp.asarray(np.pad(idx, (0, width - idx.size), mode="edge"))
             to_gather[site] = (
-                _take_columns(ci[site], padded_idx),
+                tuple(_take_columns(ci[role][site], padded_idx) for role in roles),
                 _take_columns(inner[site], padded_idx),
             )
         if not to_gather:
             break
         gathered = multihost_utils.process_allgather(to_gather, tiled=True)
-        for site, (ci_cols, inner_cols) in gathered.items():
+        for site, (ci_cols_per_role, inner_cols) in gathered.items():
             k = saved[site].size
-            ci_parts[site].append(np.asarray(ci_cols)[:chunk_valid_rows, :, :k])
+            for role, ci_cols in zip(roles, ci_cols_per_role, strict=True):
+                ci_parts[role][site].append(np.asarray(ci_cols)[:chunk_valid_rows, :, :k])
             inner_parts[site].append(np.asarray(inner_cols)[:chunk_valid_rows, :, :k])
-    for site in ci_parts:
-        ci_columns[site] = np.concatenate(ci_parts[site], axis=0)[:n_prompts]
+    for site in live:
+        for role in roles:
+            ci_columns[role][site] = np.concatenate(ci_parts[role][site], axis=0)[:n_prompts]
         inner_columns[site] = np.concatenate(inner_parts[site], axis=0)[:n_prompts]
     return ABGridSnapshot(
         mean_ci=mean_ci, saved=saved, ci_columns=ci_columns, inner_columns=inner_columns
@@ -230,8 +265,14 @@ def ab_grid_payload(
 ) -> dict[str, Any]:
     """The applet's snapshot document. CI grids are quantized to u8 (1/255 steps) and inner
     activations to f16; the mean-CI vectors stay fp32."""
+    # The applet keys the OUTPUT role's arrays on the historical names (`mean_ci`, `ci`) and
+    # the hidden role's on `*_hidden`, so a single-role payload stays byte-compatible with
+    # every snapshot written before S36 and the applet's own pre-dual fallback still applies.
+    roles = tuple(snapshot.mean_ci)
+    output_mean = snapshot.mean_ci["output"]
+    hidden_mean = snapshot.mean_ci.get("hidden")
     modules_payload: list[dict[str, Any]] = []
-    for site, mean_ci in snapshot.mean_ci.items():
+    for site, mean_ci in output_mean.items():
         saved = snapshot.saved[site]
         entry: dict[str, Any] = {
             "name": site,
@@ -239,8 +280,14 @@ def ab_grid_payload(
             "saved": [int(c) for c in saved],
             "mean_ci": _b64(mean_ci.astype(np.float32)),
         }
+        if hidden_mean is not None:
+            entry["mean_ci_hidden"] = _b64(hidden_mean[site].astype(np.float32))
         if saved.size > 0:
-            entry["ci"] = _b64(encode_ci_u8(_comp_major(snapshot.ci_columns[site], grid)))
+            entry["ci"] = _b64(encode_ci_u8(_comp_major(snapshot.ci_columns["output"][site], grid)))
+            if hidden_mean is not None:
+                entry["ci_hidden"] = _b64(
+                    encode_ci_u8(_comp_major(snapshot.ci_columns["hidden"][site], grid))
+                )
             entry["inner"] = _b64(
                 _comp_major(snapshot.inner_columns[site], grid).astype(np.float16)
             )
@@ -255,7 +302,7 @@ def ab_grid_payload(
         "b_min": grid.b_values[0],
         "n_b": grid.n_b,
         "mean_ci_floor": mean_ci_floor,
-        "ci_roles": ["output"],
+        "ci_roles": list(roles),
         "modules": modules_payload,
     }
 

@@ -9,6 +9,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.core.built_run import TargetSites
+from param_decomp.core.ci_fn import CIRole
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
 from param_decomp.core.model import CaptureKeys, DecomposedModel
@@ -114,6 +115,7 @@ def make_ab_grid_operation(
     mesh: Mesh,
     n_proc: int,
     run_dir: Path,
+    roles: tuple[CIRole, ...] = ("output",),
 ) -> EvalOperation[LMEvalContext]:
     assert isinstance(target, TargetConfig), (
         f"the ab grid needs an HF tokenizer; {type(target).__name__} has no model_name"
@@ -133,7 +135,7 @@ def make_ab_grid_operation(
         if (rows := min(chunk_prompts, n_prompts - start))
     )
     operation = ABGridOperation(
-        step=make_ab_grid_step(model, ci_capture_keys, positions),
+        step=make_ab_grid_step(model, ci_capture_keys, positions, roles),
         model=model,
         chunks=chunks,
         grid=probe.grid,
