@@ -15,7 +15,12 @@ import numpy as np
 from jax.experimental import multihost_utils
 from jaxtyping import Array, Float, Int
 
-from param_decomp.core.ci_fn import CIRole, ci_preactivations, lower_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import (
+    DUAL_CI_ROLES,
+    CIRole,
+    ci_preactivations,
+    lower_leaky_hard_sigmoid,
+)
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.model import CaptureKeys, DecomposedModel, prepare_compute_weights
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
@@ -268,7 +273,10 @@ def ab_grid_payload(
     # The applet keys the OUTPUT role's arrays on the historical names (`mean_ci`, `ci`) and
     # the hidden role's on `*_hidden`, so a single-role payload stays byte-compatible with
     # every snapshot written before S36 and the applet's own pre-dual fallback still applies.
-    roles = tuple(snapshot.mean_ci)
+    # Canonical role ORDER, not the snapshot dict's: JAX sorts dict keys when it flattens a
+    # pytree, so the step's `{output, hidden}` comes back from the jit alphabetized. The
+    # payload fields are keyed explicitly either way, but `ci_roles` is read by eye.
+    roles = tuple(role for role in DUAL_CI_ROLES if role in snapshot.mean_ci)
     output_mean = snapshot.mean_ci["output"]
     hidden_mean = snapshot.mean_ci.get("hidden")
     modules_payload: list[dict[str, Any]] = []

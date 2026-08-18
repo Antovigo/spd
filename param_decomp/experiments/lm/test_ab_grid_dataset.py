@@ -295,10 +295,12 @@ def test_dual_payload_carries_both_roles_and_one_shared_index():
     output_mean[:, 0] = 1.0  # component 0 alive for the output head only
     hidden_mean = np.zeros((n_pos, C), np.float32)
     hidden_mean[:, 1] = 1.0  # component 1 alive for the hidden head only
+    # Deliberately built HIDDEN-FIRST: JAX sorts dict keys when flattening a pytree, so the
+    # jitted step's roles come back alphabetized. `ci_roles` must still read canonically.
     snapshot = ABGridSnapshot(
-        mean_ci={"output": {SITE: output_mean}, "hidden": {SITE: hidden_mean}},
+        mean_ci={"hidden": {SITE: hidden_mean}, "output": {SITE: output_mean}},
         saved={SITE: np.asarray(saved)},
-        ci_columns={"output": {SITE: ci}, "hidden": {SITE: ci * 0.5}},
+        ci_columns={"hidden": {SITE: ci * 0.5}, "output": {SITE: ci}},
         inner_columns={SITE: ci * -2.0},
     )
     payload = ab_grid_payload(snapshot, _grid(), (T - 1,), T, 1000, 0.05)
