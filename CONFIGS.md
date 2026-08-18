@@ -23,6 +23,7 @@ ids, and the run dirs carry the exact configs.
 | seat | file | purpose |
 |---|---|---|
 | llama8b L18 | `param_decomp/experiments/lm/configs/llama8b_l18_C49k_200k.yaml` | the L18-MLP decomposition flagship recipe |
+| llama8b L18 addsub tPD | `param_decomp/experiments/lm/configs/llama8b_l18_addsub_targeted_2xl40.yaml` | the CURRENT STATE OF THE ART for the JAX targeted (dual-objective) addsub decomposition — tracks the best-known recipe, updated as it advances (lineage: torch addsub-L18-11-trunk-imp2x → jax-dual-01 → 2026-08-18 eval/batch/init/seq-passes revision) |
 | llama8b full-model | `param_decomp/experiments/lm/configs/llama8b_full32L_HSDP_b64_dp64.yaml` | the full-32L production recipe (HSDP tp=1, dp64 — the tp>1/dp128 seats died with the tp=8 PPGD-source pathology; validated on H100s) |
 | save-path smoke | `param_decomp/experiments/lm/configs/llama8b_full32L_HSDP_b32_dp32_SAVESMOKE.yaml` | cheap end-to-end save/resume smoke launch |
 | config-suite fixture | `param_decomp/experiments/lm/configs/llama8b_l18_b128_cmp32.yaml` | the representative full config the core config/resume tests load (`test_config.py`, `test_finetune_resume.py`, `test_llama_simple_mlp.py`) |

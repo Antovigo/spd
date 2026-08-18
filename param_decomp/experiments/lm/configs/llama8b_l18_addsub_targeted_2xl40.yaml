@@ -1,6 +1,10 @@
-# TARGETED (tPD, SPEC §11) Llama-3.1-8B layer-18 decomposition on the 1..100 a+b / a-b
-# prompt pool, sized for 2x L40 (dp 2).
+# TARGETED (tPD, SPEC §11) DUAL-OBJECTIVE (SPEC S36/T12) Llama-3.1-8B layer-18
+# decomposition on the 1..100 a+b / a-b prompt pool, sized for 2x L40 (dp 2).
 # Runs via `python -m param_decomp.experiments.lm.run_targeted`.
+#
+# The current state of the art for this target: the JAX counterpart of the torch
+# reference addsub-L18-11-trunk-imp2x, at torch step-time parity (~3.35 s/step on
+# 2x L40, measured 2026-08-18). Update this seat when the recipe advances.
 run_name: jax-l18-addsub-targeted
 decomposition:
   sites:
@@ -18,10 +22,10 @@ decomposition:
       up: 456
       down: 456
   ci:
+    type: chunkwise_transformer
     # One decomposed block at blocks_per_chunk 1 is a single chunk spanning all seven
     # sites; `all_block_taps` feeds it their input activations (attn in/out, MLP in,
     # MLP hidden).
-    type: chunkwise_transformer
     blocks_per_chunk: 1
     input_tap: all_block_taps
     d_model: 512
@@ -32,11 +36,15 @@ decomposition:
     ffn:
       kind: gelu
       hidden: 2048
+    # The torch trainer's default init, replicated: every readout head starts W=0,
+    # bias 0.5 — all CI logits mid-window, within gradient reach of both losses.
+    zero_init_readout: true
+    dual: true
 pd:
   seed: 0
   steps: 20000
   batch_size: 128
-  weight_init: zero_u
+  weight_init: coupled
   ci_scaled_weight_decay: 0.3
   components_optimizer:
     lr_schedule:
@@ -58,7 +66,7 @@ pd:
     grad_clip_norm: null
   loss_metrics:
     - type: SmoothL0ImportanceMinimalityLoss
-      coeff: 3.33e-05
+      coeff: 5.0e-05  # the torch reference's 2x-imp arm (addsub-L18-11-trunk-imp2x)
       normalize_at_one: true
       gamma:
         max_val: 1.0
@@ -67,25 +75,16 @@ pd:
           - {at: 0.5, frac: 1.0}
           - {at: 1.0, frac: 0.01}
       frequency:
-        coeff: 1.67e-05
-        reference_datapoint_count: 640  # pd.batch_size 128 x the pool's 5 tokens
-    - type: MergedStochasticSubsetPPGDReconLoss
-      # Hand the recon pressure over from stochastic to persistent-PGD without changing how
-      # hard it pulls. `coeff` IS the total (see the config class docstring) and
-      # `adv_fraction` is the per-batch-element probability of drawing the adversarial
-      # family, so a CONSTANT coeff with adv_fraction 0 -> 1 swaps WHICH family supplies the
-      # pressure while holding the amount fixed: 100% stochastic at step 0, 100% PGD from
-      # `at: 0.05` — step 1000 of 20000. That knot is a FRACTION of training, so it moves if
-      # `pd.steps` changes; at 10k steps the same knot lands at step 500.
+        coeff: 2.5e-05
+        reference_datapoint_count: auto
+    - type: StochasticReconSubsetLoss
       coeff: 1.0
-      adv_fraction:
-        max_val: 1.0
-        points:
-          - {at: 0.0, frac: 0.0}
-          - {at: 0.05, frac: 1.0}
-          - {at: 1.0, frac: 1.0}
       routing:
         type: uniform_k_subset
+    - type: UnmaskedReconLoss
+      coeff: 0.5
+    - type: PersistentPGDReconLoss
+      coeff: 0.5
       n_warmup_steps: 2
       optimizer:
         type: adam
@@ -96,58 +95,113 @@ pd:
           max_val: 0.01
           points:
             - {at: 0.0, frac: 0.0}
-            # Full source LR by step 100 (of 20000), where adv_fraction has only reached
-            # 0.1: the adversary must be genuinely ascended before the handover gives it
-            # real weight, or the early "adversarial" elements are near-init sources.
-            - {at: 0.005, frac: 1.0}
+            - {at: 0.025, frac: 1.0}
             - {at: 1.0, frac: 1.0}
       source_shape: bsc
+  # The dual objective's HIDDEN pass (SPEC S36): the CI fn's second head scored at the
+  # post-L18 MLP outputs instead of the model logits, so components stay important for
+  # what layer 18 writes, not only for what survives to the unembed.
+  hidden:
+    points:
+      - layers.18.mlp.down_proj.out
+      - layers.19.mlp.down_proj.out
+      - layers.20.mlp.down_proj.out
+      - layers.21.mlp.down_proj.out
+      - layers.22.mlp.down_proj.out
+      - layers.23.mlp.down_proj.out
+      - layers.24.mlp.down_proj.out
+      - layers.25.mlp.down_proj.out
+      - layers.26.mlp.down_proj.out
+      - layers.27.mlp.down_proj.out
+      - layers.28.mlp.down_proj.out
+      - layers.29.mlp.down_proj.out
+      - layers.30.mlp.down_proj.out
+      - layers.31.mlp.down_proj.out
+    impmin_coeff: 5.0e-05
+    recon:
+      - type: StochasticReconSubsetLoss
+        name: HiddenStochasticReconSubset
+        coeff: 2.0
+        routing:
+          type: uniform_k_subset
+      - type: PersistentPGDReconLoss
+        name: HiddenPersistentPGDRecon
+        coeff: 1.0
+        n_warmup_steps: 2
+        optimizer:
+          type: adam
+          beta1: 0.5
+          beta2: 0.99
+          eps: 1.0e-08
+          lr_schedule:
+            max_val: 0.01
+            points:
+              - {at: 0.0, frac: 0.0}
+              - {at: 0.025, frac: 1.0}
+              - {at: 1.0, frac: 1.0}
+        source_shape: bsc
 prompts:
   kind: prompts_file
   path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
 nontarget:
-  batch_size: 128  # measured ceiling, not a guess: probed at 48/64/96/128/192 with BOTH eval
-  # tiers live (the 20-step PGD probe ascends through its own backward at this same size, so a
-  # batch that trains can still die at the first eval). Peak GB/rank was 33.3 / 33.6 / 34.9 /
-  # 36.9 / 42.7 against a ~43.6GiB pool — so 128 keeps ~6.7GiB of margin and 192 keeps under 1,
-  # which is inside run-to-run variation. The peak barely tracks batch because the binding
-  # constraint is the executable's temp buffer (XLA's single compile-time-sized block for every
-  # intermediate), and the prefix-reuse split cut every grid forward from 32 blocks to 14.
-  # An OOM here does not raise — rank 0 dies mid-allocation while rank 1 waits on the clique,
-  # so the job HANGS. Re-probe before raising.
-  impmin_coeff: 6.67e-05  # the reference's 2x target ratio, authored absolute
+  batch_size: 96  # torch-reference parity, and what buys step-time parity: the broad-stream
+  # passes dominate the step (seq 64 vs the pool's 5 tokens), so 128 -> 96 took the measured
+  # step from 4.27 to 3.35 s on 2x L40 (2026-08-18). Peak 39.7 GB/rank of ~43.6 — an OOM here
+  # does not raise (rank 0 dies mid-allocation, rank 1 waits on the clique, the job HANGS);
+  # re-probe before raising.
+  impmin_coeff: 1.0e-04
   recon:
     - type: StochasticReconSubsetLoss
       coeff: 1.0
       routing:
         type: uniform_k_subset
+  hidden:
+    impmin_coeff: 1.0e-04
+    recon:
+      - type: StochasticReconSubsetLoss
+        name: NontargetHiddenStochasticReconSubset
+        coeff: 1.0
+        routing:
+          type: uniform_k_subset
 eval:
-  # Tracks nontarget.batch_size: the broad-stream probes run at the same geometry,
-  # and the 20-step PGD probe ascends through its own backward.
+  # Tracks nontarget.batch_size's geometry on the broad stream; the target-stream probes
+  # run at the pool's own (unpadded) geometry.
   batch_size: 128
   n_steps: 10
   every: 500
   slow_every: 1000
   slow_on_first_step: true
   metrics:
-    # --- broad (NON-TARGET) stream: `data.eval` is the only source the eval loop reads
+    - type: CIMaskedReconLoss
+    - type: UnmaskedNoDeltaReconLoss
     - type: CEandKLLosses
       rounding_threshold: 0.0
     - type: CI_L0
       ci_alive_threshold: 0.0
       groups:
         total: ["*"]
+    # Slow-tier by declaration, and capped: on a targeted dual run this probe fans out
+    # over stream x CI-role (4 ops), each 20 full fwd+bwd ascents per batch — uncapped at
+    # the fast cadence it was ~10 min of every eval pass (the 2026-08-18 finding that
+    # moved it to the slow tier).
     - type: PGDReconLoss
       init: random
       source_shape: c
       n_steps: 20
       step_size: 0.1
+      n_batches: 4
     - type: CIHistograms
       n_batches_accum: 1
     - type: CIHiddenActsReconLoss
-    # --- target stream: the run's own prompt pool
     - type: TwoStreamCIMeanPerComponent
     - type: WeightMagnitude
+    - type: ABGridDataset
+      mean_ci_floor: 0.05
+      operation: add
+      a_range: [1, 100]
+      b_range: [1, 100]
+      positions: null
+      chunk_prompts: 1000
 cadence:
   train_log_every: 100
   save_every: 5000
@@ -180,6 +234,9 @@ runtime:
   sharding: zero1
   remat_recon_forwards: true
   remat_ci_fn: true
+  # A/B'd 2026-08-18 at this exact shape: sequential 3.35 s/step / 39.7 GB peak vs fused
+  # 3.38 / 40.1 — the serialization costs nothing here and the memory savings come free.
+  sequential_passes: true
   launch_env:
     xla_python_client_mem_fraction: 0.97  # headroom for the replicated target
 wandb:
