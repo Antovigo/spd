@@ -113,7 +113,9 @@ def make_ce_kl_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
+    assert role == "output", "CE/KL's step reads the output head's CI; it has no hidden-role form"
     return _make_scalar_operation(
         schedule,
         make_ce_kl_step(model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options),
@@ -123,7 +125,7 @@ def make_ce_kl_operation(
         train_steps,
         eval_steps,
         stream,
-        "output",  # CE/KL reads no CI, so it takes no role segment
+        role,
     )
 
 
