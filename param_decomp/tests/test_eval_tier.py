@@ -17,7 +17,7 @@ from param_decomp.core.configs import (
     PGDReconLossConfig,
     UVPlotsConfig,
 )
-from param_decomp.core.eval_schedule import Every, FirstThenEvery
+from param_decomp.core.eval_schedule import Every, FirstThenEvery, eval_due
 from param_decomp.experiments.eval_config import (
     EVAL_METRIC_CONFIG_TYPES,
     AnyEvalMetricConfig,
@@ -70,7 +70,7 @@ def test_a_fast_and_a_slow_metric_authored_together_get_different_schedules() ->
     eval_config = _eval_config(fast, slow)
 
     assert schedule_for(fast, eval_config) == Every(1000)
-    assert schedule_for(slow, eval_config) == FirstThenEvery(1000, 5000)
+    assert schedule_for(slow, eval_config) == FirstThenEvery(0, 5000)
 
 
 def test_the_slow_tier_skips_the_first_pass_when_unasked() -> None:
@@ -119,3 +119,22 @@ def test_a_metric_that_does_not_state_its_tier_refuses(metric_type: type[BaseCon
 
 def test_the_sweep_accepts_a_metric_that_states_its_own_tier() -> None:
     assert_every_metric_declares_its_tier([_RedeclaringConfig])
+
+
+def test_the_baseline_pass_is_step_zero_and_only_the_slow_tier_asks_for_it() -> None:
+    """`slow_on_first_step` means the decomposition as initialized, before any optimizer
+    step — so the slow tier names step 0 and the fast tier does not fire there."""
+    fast = CI_L0Config(ci_alive_threshold=0.0, groups=None)
+    slow = CIHistogramsConfig(n_batches_accum=None)
+    asked = _eval_config(fast, slow)
+    unasked = _eval_config(fast, slow, slow_on_first_step=False)
+
+    assert eval_due(schedule_for(slow, asked), 0)
+    assert not eval_due(schedule_for(slow, unasked), 0)
+    assert not eval_due(schedule_for(fast, asked), 0)
+
+    # Every step after 0 is untouched by the change.
+    for step in (1000, 5000, 10000):
+        assert eval_due(schedule_for(fast, asked), step) == (step % 1000 == 0)
+        assert eval_due(schedule_for(slow, asked), step) == (step % 5000 == 0)
+        assert eval_due(schedule_for(slow, unasked), step) == (step % 5000 == 0)

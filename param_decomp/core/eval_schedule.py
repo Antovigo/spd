@@ -10,6 +10,9 @@ import dataclasses
 
 @dataclasses.dataclass(frozen=True)
 class Every:
+    """Every `steps` steps, NOT at step 0 — the baseline pass belongs to whatever asks
+    for it by name (`FirstThenEvery(0, ...)`)."""
+
     steps: int
 
 
@@ -25,6 +28,6 @@ type EvalSchedule = Every | FirstThenEvery
 def eval_due(schedule: EvalSchedule, step: int) -> bool:
     match schedule:
         case Every(steps):
-            return step % steps == 0
+            return step > 0 and step % steps == 0
         case FirstThenEvery(first, steps):
             return step == first or step % steps == 0
