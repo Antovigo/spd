@@ -19,6 +19,7 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
     ab_grid_payload,
     collect_ab_grid_snapshot,
     make_ab_grid_step,
+    read_applet,
     write_ab_grid_snapshot,
 )
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid, build_arithmetic_probe
@@ -68,6 +69,7 @@ class ABGridOperation:
     seq_len: int
     mean_ci_floor: float
     run_dir: Path
+    applet: bytes
     writes_snapshots: bool
     """Process 0 writes the snapshot; every rank joins the collective pass and reports the
     same scalars."""
@@ -94,6 +96,7 @@ class ABGridOperation:
                     now_step,
                     self.mean_ci_floor,
                 ),
+                self.applet,
             )
         record: LogRecord = {
             f"eval/ab_grids/saved_components/{site}": float(idx.size)
@@ -142,6 +145,7 @@ def make_ab_grid_operation(
         seq_len=seq_len,
         mean_ci_floor=config.mean_ci_floor,
         run_dir=run_dir,
+        applet=read_applet(),
         writes_snapshots=jax.process_index() == 0,
     )
 

@@ -255,14 +255,23 @@ def ab_grid_payload(
     }
 
 
-def write_ab_grid_snapshot(run_dir: Path, step: int, payload: dict[str, Any]) -> None:
+def read_applet() -> bytes:
+    """The applet shipped beside this module. Read when the operation is BOUND, not when a
+    snapshot is written: a missing asset is a startup error, not something to discover an
+    hour into a run."""
+    return (Path(__file__).parent / APPLET_FILENAME).read_bytes()
+
+
+def write_ab_grid_snapshot(
+    run_dir: Path, step: int, payload: dict[str, Any], applet: bytes
+) -> None:
     """Write `<run_dir>/ab_grids/step_<n>.js` next to the applet, regenerating `manifest.js`
     so a `file://`-opened `index.html` discovers every snapshot written so far. Process-0
     only — the caller owns that gate."""
     target = run_dir / AB_GRIDS_DIR
     target.mkdir(parents=True, exist_ok=True)
     (target / f"step_{step}.js").write_text(f"window.registerABGrids({json.dumps(payload)});")
-    (target / "index.html").write_bytes((Path(__file__).parent / APPLET_FILENAME).read_bytes())
+    (target / "index.html").write_bytes(applet)
     snapshots = sorted(target.glob("step_*.js"), key=lambda p: int(p.stem.removeprefix("step_")))
     listing = json.dumps([p.name for p in snapshots])
     (target / "manifest.js").write_text(f"window.{MANIFEST_VAR} = {listing};\n")

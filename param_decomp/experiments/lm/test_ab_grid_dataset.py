@@ -21,12 +21,12 @@ from param_decomp.core.components import init_component_stacks
 from param_decomp.core.model import prepare_compute_weights
 from param_decomp.core.tests.test_slow_eval import _build_ci_fn
 from param_decomp.experiments.lm.ab_grid_dataset import (
-    APPLET_FILENAME,
     ABGridSnapshot,
     ab_grid_payload,
     collect_ab_grid_snapshot,
     encode_ci_u8,
     make_ab_grid_step,
+    read_applet,
     saved_indices,
     write_ab_grid_snapshot,
 )
@@ -243,8 +243,8 @@ def test_payload_omits_grids_for_a_module_with_nothing_saved():
 def test_write_snapshot_ships_the_applet_and_orders_the_manifest_by_step(tmp_path: Path):
     snapshot = _synthetic_snapshot(len(POSITIONS), [0, 3], 8)
     payload = ab_grid_payload(snapshot, _grid(), POSITIONS, T, step=1000, mean_ci_floor=0.05)
-    write_ab_grid_snapshot(tmp_path, 1000, payload)
-    write_ab_grid_snapshot(tmp_path, 200, payload | {"step": 200})
+    write_ab_grid_snapshot(tmp_path, 1000, payload, read_applet())
+    write_ab_grid_snapshot(tmp_path, 200, payload | {"step": 200}, read_applet())
 
     out = tmp_path / "ab_grids"
     manifest = (out / "manifest.js").read_text()
@@ -252,8 +252,7 @@ def test_write_snapshot_ships_the_applet_and_orders_the_manifest_by_step(tmp_pat
     js = (out / "step_1000.js").read_text()
     assert js.startswith("window.registerABGrids(") and js.endswith(");")
     assert json.loads(js[len("window.registerABGrids(") : -2])["step"] == 1000
-    applet = Path(__file__).parent / APPLET_FILENAME
-    assert (out / "index.html").read_bytes() == applet.read_bytes()
+    assert (out / "index.html").read_bytes() == read_applet()
 
 
 def test_resolve_positions():
