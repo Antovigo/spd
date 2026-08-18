@@ -114,6 +114,7 @@ def make_lm_evaluation(
     # is looking for, and reporting one head would hide it. A single-role run keeps one
     # readout under unchanged keys.
     ci_roles: tuple[CIRole, ...] = DUAL_CI_ROLES if built.ci_fn.dual else ("output",)
+    ce_kl_authored = any(isinstance(m, CEandKLLossesConfig) for m in eval.metrics)
 
     def well_temperedness_inputs(
         context: LMEvalContext,
@@ -155,8 +156,15 @@ def make_lm_evaluation(
             case CEandKLLossesConfig():
                 return per_stream(make_ce_kl_operation, metric, schedule, data_streams)
             case CIMaskedReconLossConfig():
+                # CEandKLLosses already emits the output-role arm under the same
+                # `ce_kl/kl_ci_masked` key; keep only the roles it cannot measure.
+                masked_roles: tuple[CIRole, ...] = (
+                    tuple(role for role in ci_roles if role != "output")
+                    if ce_kl_authored
+                    else ci_roles
+                )
                 return per_stream(
-                    make_masked_kl_operation, "ci_masked", schedule, data_streams, ci_roles
+                    make_masked_kl_operation, "ci_masked", schedule, data_streams, masked_roles
                 )
             case UnmaskedNoDeltaReconLossConfig():
                 # The nontarget pass's own training term, already reported there as a loss.
@@ -281,15 +289,19 @@ def make_lm_evaluation(
         "TwoStreamCIMeanPerComponent already computes the nontarget-stream reduction "
         "CIMeanPerComponent does, so authoring both pays for that pass twice"
     )
-    single_arm = tuple(
-        metric.type
-        for metric in eval.metrics
-        if isinstance(metric, CIMaskedReconLossConfig | UnmaskedNoDeltaReconLossConfig)
-    )
-    assert not (single_arm and any(isinstance(m, CEandKLLossesConfig) for m in eval.metrics)), (
-        f"{single_arm} emit arms CEandKLLosses already emits, under the same `ce_kl/kl_*` "
-        "keys: author the narrow metrics OR CEandKLLosses, not both"
-    )
+    if ce_kl_authored:
+        assert not any(isinstance(m, UnmaskedNoDeltaReconLossConfig) for m in eval.metrics), (
+            "UnmaskedNoDeltaReconLoss emits the arm CEandKLLosses already emits, under the "
+            "same `ce_kl/kl_unmasked` key: author it OR CEandKLLosses, not both"
+        )
+        assert not (
+            any(isinstance(m, CIMaskedReconLossConfig) for m in eval.metrics)
+            and ci_roles == ("output",)
+        ), (
+            "in a single-role run CIMaskedReconLoss emits only the arm CEandKLLosses already "
+            "emits, under the same `ce_kl/kl_ci_masked` key: author it OR CEandKLLosses, not "
+            "both (a dual run keeps it for the hidden-role arm)"
+        )
     operations = tuple(
         operation for metric in eval.metrics for operation in make_operations(metric)
     )

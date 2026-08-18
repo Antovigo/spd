@@ -172,8 +172,9 @@ eval:
   slow_every: 1000
   slow_on_first_step: true
   metrics:
+    # Alongside CEandKLLosses this contributes only the hidden-role arm
+    # (`hidden_ci/ce_kl/kl_ci_masked`); the output arm is CEandKLLosses's.
     - type: CIMaskedReconLoss
-    - type: UnmaskedNoDeltaReconLoss
     - type: CEandKLLosses
       rounding_threshold: 0.0
     - type: CI_L0
