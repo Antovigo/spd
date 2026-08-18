@@ -24,9 +24,8 @@ mirrored body.
 """
 
 import functools
-import operator
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, cast
 
 import equinox as eqx
@@ -103,6 +102,7 @@ from param_decomp.core.recon import (
     Routes,
     StochasticSources,
     UnmaskedNoDeltaSources,
+    index_persistent_terms,
     reconstruction_observations,
     resolve_reconstruction_terms,
 )
@@ -384,20 +384,11 @@ class _StepAtoms[PreparedT]:
         ADVERSARY state keys ARE a global namespace (they index `TrainState.adversaries`), so
         those do merge here. Only target-stream passes carry any (T7), and
         `TargetedPDConfig.validate_hidden_pass` refuses an identity shared between them."""
-        table: dict[str, CaptureKeys] = {}
-        for term in terms:
-            table[term.name] = capture_keys if capture_keys else term.hidden_acts_capture_keys
-            for entry in term.plan:
-                match entry.sources:
-                    case (
-                        PersistentSources(state_key=key)
-                        | MixedPersistentStochasticSources(state_key=key)
-                    ):
-                        previous = self.persistent_term_by_key.setdefault(key, term)
-                        assert previous is term, f"persistent source {key!r} feeds multiple terms"
-                    case _:
-                        pass
-        return table
+        index_persistent_terms(terms, into=self.persistent_term_by_key)
+        return {
+            term.name: capture_keys if capture_keys else term.hidden_acts_capture_keys
+            for term in terms
+        }
 
     def shard_batch_tree[T](self, x: T) -> T:
         """Pin the leading (batch) axis of every array in the pytree. The batch and the
@@ -576,10 +567,9 @@ class _StepAtoms[PreparedT]:
         ci_lower: dict[str, Array],
         stream: StreamInputs,
         reconstruction: ReconstructionSpec,
-        capture_keys_by_term: dict[str, CaptureKeys] | None = None,
+        capture_keys_by_term: dict[str, CaptureKeys],
     ) -> Array:
         """Mean of one adversarial entry's fixed-source objective across its draws."""
-        keys_by_term = capture_keys_by_term or self.hidden_acts_capture_keys_by_term
         masks, delta_masks = masks_from_sources(ci_lower, sources, entry.live_sites)
         total = jnp.zeros((), jnp.float32)
         for routes in routes_per_draw:
@@ -590,7 +580,7 @@ class _StepAtoms[PreparedT]:
                 masking=MaterializedMasking(
                     component_masks=masks, weight_delta_masks=delta_masks, routes=routes
                 ),
-                capture_keys=keys_by_term[term.name],
+                capture_keys=capture_keys_by_term[term.name],
                 reconstruction=reconstruction,
                 clean=stream.clean,
             )
@@ -1256,12 +1246,6 @@ class _PassPlan:
     label: str
     """Short identity, used as a dict key and in the named scope: `target`, `hidden`,
     `nontarget`, `nontarget_hidden`."""
-    metric_prefix: str
-    """The pass's metric namespace, composed over the two axes this branch already
-    established: the STREAM prefix (`nontarget_data/`) and the CI-ROLE prefix
-    (`hidden_ci/`). The target-OUTPUT pass keeps the EMPTY prefix — its keys are the
-    unprefixed ones every tPD run has always logged, so a run's curves stay comparable
-    whether or not it carries a hidden pass."""
     role: CIRole
     on_target_stream: bool
     terms: tuple[AnyReconLossTerm, ...]
@@ -1275,6 +1259,17 @@ class _PassPlan:
     and non-target passes) and mean different comparisons by it."""
     adversary_keys: tuple[str, ...]
     """The persistent bundles this pass's terms carry; empty off-target (SPEC T7)."""
+
+    @property
+    def metric_prefix(self) -> str:
+        """The pass's metric namespace, DERIVED from its two axes so the two cannot
+        disagree: the STREAM prefix (`nontarget_data/`) composed with the CI-ROLE prefix
+        (`hidden_ci/`). The target-OUTPUT pass therefore keeps the EMPTY prefix — its keys
+        are the unprefixed ones every tPD run has always logged, so a run's curves stay
+        comparable whether or not it carries a hidden pass."""
+        stream = "" if self.on_target_stream else "nontarget_data/"
+        role = "" if self.role == "output" else "hidden_ci/"
+        return f"{stream}{role}"
 
 
 def make_targeted_train_step[PreparedT](
@@ -1361,34 +1356,41 @@ def make_targeted_train_step[PreparedT](
 
     def add_pass(
         label: str,
-        metric_prefix: str,
         role: CIRole,
         on_target_stream: bool,
         terms: tuple[AnyReconLossTerm, ...],
         impmin_coeff: LossCoeff,
         points: tuple[str, ...],
     ) -> None:
+        """Resolve one pass and append it. The per-term tables resolve HERE rather than in a
+        second pass over the plans: `register_pass_terms` is idempotent for the target-output
+        pass (its `points` are empty, so it rebuilds the table `_StepAtoms.__init__` already
+        made, and the persistent registration re-inserts the same objects), so every pass can
+        go through one path instead of the first needing a special case."""
         nonlocal key_offset
+        capture_keys_by_term = atoms.register_pass_terms(terms, capture_keys=frozenset(points))
         plans.append(
             _PassPlan(
                 label=label,
-                metric_prefix=metric_prefix,
                 role=role,
                 on_target_stream=on_target_stream,
                 terms=terms,
                 impmin_coeff=impmin_coeff,
                 points=points,
                 key_offset=key_offset,
-                capture_keys_by_term={},
-                adversary_keys=(),
+                capture_keys_by_term=capture_keys_by_term,
+                adversary_keys=tuple(
+                    state_key
+                    for state_key, term in atoms.persistent_term_by_key.items()
+                    if term in terms
+                ),
             )
         )
         key_offset += len(terms)
 
-    add_pass("target", "", "output", True, objective.target.recon, objective.target.imp.coeff, ())
+    add_pass("target", "output", True, objective.target.recon, objective.target.imp.coeff, ())
     add_pass(
         "nontarget",
-        "nontarget_data/",
         "output",
         False,
         cast("tuple[AnyReconLossTerm, ...]", objective.nontarget.recon),
@@ -1398,7 +1400,6 @@ def make_targeted_train_step[PreparedT](
     if objective.hidden is not None:
         add_pass(
             "hidden",
-            "hidden_ci/",
             "hidden",
             True,
             objective.hidden.recon,
@@ -1408,7 +1409,6 @@ def make_targeted_train_step[PreparedT](
     if objective.nontarget_hidden is not None:
         add_pass(
             "nontarget_hidden",
-            "nontarget_data/hidden_ci/",
             "hidden",
             False,
             cast("tuple[AnyReconLossTerm, ...]", objective.nontarget_hidden.recon),
@@ -1416,28 +1416,7 @@ def make_targeted_train_step[PreparedT](
             objective.nontarget_hidden.points,
         )
 
-    # Each pass resolves its own per-term capture keys and registers its adversaries; the
-    # FIRST pass is `atoms.recon_terms`, already resolved in `_StepAtoms.__init__`.
-    # `adversary_keys` scopes the ascent phase to the bundles this pass's own terms carry
-    # (T7: only target-stream passes have any), resolved statically so the step never
-    # scans the state dict.
-    def resolved(plan: _PassPlan, first: bool) -> _PassPlan:
-        table = (
-            atoms.hidden_acts_capture_keys_by_term
-            if first
-            else atoms.register_pass_terms(plan.terms, capture_keys=frozenset(plan.points))
-        )
-        return replace(
-            plan,
-            capture_keys_by_term=table,
-            adversary_keys=tuple(
-                state_key
-                for state_key, term in atoms.persistent_term_by_key.items()
-                if term in plan.terms
-            ),
-        )
-
-    passes = tuple(resolved(plan, first=i == 0) for i, plan in enumerate(plans))
+    passes = tuple(plans)
     for plan in passes:
         assert plan.on_target_stream or not plan.adversary_keys, (
             f"pass {plan.label!r} runs off-target but carries adversaries (SPEC T7)"
@@ -1557,11 +1536,18 @@ def make_targeted_train_step[PreparedT](
         }
 
         def specs_for(plan: _PassPlan) -> dict[str, ReconstructionSpec]:
-            """A hidden pass compares ONLY its points — no e2e term at all (T12); an output
-            pass keeps each term's own S35 rider resolution."""
-            if plan.points:
-                return {term.name: HiddenActsOnlyReconstruction(plan.points) for term in plan.terms}
-            return atoms.reconstruction_specs_at(plan.terms, step_f32)
+            """What a pass's recon compares against, keyed on its ROLE — the fact that decides
+            it — rather than on whether `points` happens to be non-empty. A hidden pass compares
+            ONLY its points, with no e2e term at all (T12); an output pass keeps each term's own
+            S35 rider resolution."""
+            match plan.role:
+                case "hidden":
+                    assert plan.points, f"hidden pass {plan.label!r} has no points to score"
+                    return {
+                        term.name: HiddenActsOnlyReconstruction(plan.points) for term in plan.terms
+                    }
+                case "output":
+                    return atoms.reconstruction_specs_at(plan.terms, step_f32)
 
         pass_specs = {plan.label: specs_for(plan) for plan in passes}
 
@@ -1600,11 +1586,12 @@ def make_targeted_train_step[PreparedT](
                 capture_keys_by_term=plan.capture_keys_by_term,
             )
 
-        warmed_sources = {
-            state_key: adv.sources
+        warmed_advs = {
+            state_key: adv
             for ascended in ascended_by_label.values()
             for state_key, adv in ascended.warmed.items()
         }
+        warmed_sources = {state_key: adv.sources for state_key, adv in warmed_advs.items()}
         draws_by_label = {
             plan.label: [
                 atoms.term_draws(
@@ -1612,9 +1599,7 @@ def make_targeted_train_step[PreparedT](
                     plan.key_offset,
                     term_idx,
                     term,
-                    ascended_by_label[plan.label].fixed_routes
-                    if plan.label in ascended_by_label
-                    else {},
+                    ascended_by_label[plan.label].fixed_routes if plan.on_target_stream else {},
                     (stream if plan.on_target_stream else nt_stream).leading,
                 )
                 for term_idx, term in enumerate(plan.terms)
@@ -1736,11 +1721,6 @@ def make_targeted_train_step[PreparedT](
             nt_ci_vjp(nt_ci_grad)[0],
         )
 
-        warmed_advs = {
-            state_key: adv
-            for ascended in ascended_by_label.values()
-            for state_key, adv in ascended.warmed.items()
-        }
         new_state, grad_norm_metrics = atoms.apply_gradients(
             decomposition,
             training,
@@ -1784,8 +1764,8 @@ def make_targeted_train_step[PreparedT](
         # comparable whether or not a hidden pass exists; every other pass logs under
         # `loss/<label>/…`, the shape the non-target pass has always used.
         target_aux = aux_by_label["target"]
-        reported_total = functools.reduce(
-            operator.add, (aux.reported for aux in aux_by_label.values())
+        reported_total = sum(
+            (aux.reported for aux in aux_by_label.values()), start=jnp.zeros((), jnp.float32)
         )
         extra_metrics: dict[str, Array] = {}
         for plan in passes[1:]:

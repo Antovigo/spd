@@ -133,7 +133,7 @@ def test_reductions_match_hand_rolled_per_component():
 
     # Mirror slow_eval_step's training-precision (bf16) readout.
     preactivations = ci_preactivations(
-        ci_fn, capture_clean(model, residual, ci_fn.capture_keys), remat=False
+        ci_fn, capture_clean(model, residual, ci_fn.capture_keys), remat=False, role="output"
     )
     lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in model.site_names}
     for site in model.site_names:

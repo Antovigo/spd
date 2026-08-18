@@ -267,6 +267,34 @@ class ResolvedReconstructionTerms:
     persistent_term_by_key: dict[str, AnyReconLossTerm]
 
 
+def index_persistent_terms(
+    terms: tuple[AnyReconLossTerm, ...], *, into: dict[str, AnyReconLossTerm]
+) -> None:
+    """Index each term's persistent bundles by state key, into a table that may already hold
+    other passes' (SPEC S23). Adversary state keys are a GLOBAL namespace — they index
+    `TrainState.adversaries` — so a multi-pass objective accumulates into one table and the
+    "one key feeds one term" invariant is checked across all of them.
+
+    Exhaustive over the source union on purpose: a new mask-source strategy must be classified
+    here deliberately rather than fall through a catch-all and silently lose its bundle."""
+    for term in terms:
+        for entry in term.plan:
+            match entry.sources:
+                case (
+                    PersistentSources(state_key=state_key)
+                    | MixedPersistentStochasticSources(state_key=state_key)
+                ):
+                    previous = into.setdefault(state_key, term)
+                    assert previous is term, f"persistent source {state_key!r} feeds multiple terms"
+                case (
+                    StochasticSources()
+                    | ConstantSources()
+                    | UnmaskedNoDeltaSources()
+                    | FreshPGDSources()
+                ):
+                    pass
+
+
 def resolve_reconstruction_terms(
     model: DecomposedModel, terms: tuple[AnyReconLossTerm, ...]
 ) -> ResolvedReconstructionTerms:
@@ -278,22 +306,7 @@ def resolve_reconstruction_terms(
     model.assert_hidden_acts_reconstruction_points(tuple(sorted(hidden_acts_capture_keys)))
 
     persistent_term_by_key: dict[str, AnyReconLossTerm] = {}
-    for term in terms:
-        for entry in term.plan:
-            match entry.sources:
-                case (
-                    PersistentSources(state_key=state_key)
-                    | MixedPersistentStochasticSources(state_key=state_key)
-                ):
-                    previous = persistent_term_by_key.setdefault(state_key, term)
-                    assert previous is term, f"persistent source {state_key!r} feeds multiple terms"
-                case (
-                    StochasticSources()
-                    | ConstantSources()
-                    | UnmaskedNoDeltaSources()
-                    | FreshPGDSources()
-                ):
-                    pass
+    index_persistent_terms(terms, into=persistent_term_by_key)
 
     return ResolvedReconstructionTerms(
         terms, hidden_acts_capture_keys_by_term, hidden_acts_capture_keys, persistent_term_by_key

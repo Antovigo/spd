@@ -279,6 +279,7 @@ def make_position_ci_step(
     model_static: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str] | None = None,
+    role: CIRole = "output",
 ) -> PositionCIStep:
     """Per-batch CI reduction that KEEPS the position axis (the `(T, C)` matrix the
     permutation/heatmap metrics plot), summing only over the batch leading axis. LM-only:
@@ -293,6 +294,7 @@ def make_position_ci_step(
             ci_fn,
             model.clean_forward(residual, ci_capture_keys).captures,
             remat=False,
+            role=role,
         )
         lower = {s: lower_leaky_hard_sigmoid(preactivations[s]) for s in site_names}
         upper = {s: upper_leaky_hard_sigmoid(preactivations[s]) for s in site_names}

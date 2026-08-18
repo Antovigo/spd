@@ -625,7 +625,7 @@ AnyOptimizerConfig = Annotated[
 ]
 
 
-type AnyReconLossMetricConfig = (
+ReconLossMetricConfigs = (
     ChunkwiseSubsetReconLossConfig
     | CIMaskedReconLayerwiseLossConfig
     | CIMaskedReconLossConfig
@@ -640,6 +640,12 @@ type AnyReconLossMetricConfig = (
     | StochasticReconSubsetLossConfig
     | UnmaskedReconLossConfig
 )
+"""The full recon vocabulary as a PLAIN assignment union. A PEP 695 `type` alias is not a
+runtime Union, and pydantic's `Discriminator` keys on one — so the members are spelled here
+once and both the `type` alias below and every `Annotated[..., Discriminator]` use point at
+this, rather than a second copy of the member list drifting out of sync."""
+
+type AnyReconLossMetricConfig = ReconLossMetricConfigs
 
 
 AnyLossMetricConfig = Annotated[
@@ -696,27 +702,11 @@ no meaning there — so those types are unrepresentable in the non-target schema
 than filtered out of it."""
 
 
-HiddenReconLossMetricConfig = (
-    ChunkwiseSubsetReconLossConfig
-    | CIMaskedReconLayerwiseLossConfig
-    | CIMaskedReconLossConfig
-    | CIMaskedReconSubsetLossConfig
-    | MergedStochasticSubsetPPGDReconLossConfig
-    | PersistentPGDReconLossConfig
-    | PGDReconLayerwiseLossConfig
-    | PGDReconLossConfig
-    | PGDReconSubsetLossConfig
-    | StochasticReconLayerwiseLossConfig
-    | StochasticReconLossConfig
-    | StochasticReconSubsetLossConfig
-    | UnmaskedReconLossConfig
-)
+HiddenReconLossMetricConfig = ReconLossMetricConfigs
 """The recon types the hidden pass admits on the TARGET stream (SPEC T12): the same full
 vocabulary as the output pass, adversaries included — the hidden objective is an ordinary
 reconstruction objective that happens to be measured at internal activations rather than at
-the output, so nothing about the mask-source algebra changes. Spelled as an explicit union
-(not via the `AnyReconLossMetricConfig` alias) because a PEP 695 `type` alias is not a
-runtime Union and `Discriminator` keys on one."""
+the output, so nothing about the mask-source algebra changes."""
 
 
 class HiddenPassConfig(BaseConfig):

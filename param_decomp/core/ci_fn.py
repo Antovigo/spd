@@ -116,6 +116,12 @@ DUAL_CI_ROLES: tuple[CIRole, ...] = ("output", "hidden")
 """Role order — the head order in a dual CI fn and the pass order in a dual objective."""
 
 
+def roles_for(dual: bool) -> tuple[CIRole, ...]:
+    """The readout vocabulary a `dual` flag implies — the ONE place that correspondence
+    lives, so the arches, the inits and the eval fan-out cannot drift apart on it."""
+    return DUAL_CI_ROLES if dual else ("output",)
+
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class DualCI:
@@ -130,13 +136,6 @@ class DualCI:
 
     output: CI
     hidden: CI
-
-    def role(self, role: CIRole) -> CI:
-        match role:
-            case "output":
-                return self.output
-            case "hidden":
-                return self.hidden
 
 
 AnyCI = CI | DualCI
@@ -171,7 +170,11 @@ def ci_for_role(ci: AnyCI, role: CIRole) -> CI:
     single-role run for the hidden bundle is a wiring bug, not a fallback."""
     match ci:
         case DualCI():
-            return ci.role(role)
+            match role:
+                case "output":
+                    return ci.output
+                case "hidden":
+                    return ci.hidden
         case CI():
             assert role == "output", (
                 f"a single-role CI fn has no {role!r} head; set `decomposition.ci.dual` to build one"
@@ -224,9 +227,13 @@ def evaluate_ci_role(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool, role: 
 
 
 def ci_preactivations(
-    ci_fn: CIFn, taps: dict[str, Array], *, remat: bool, role: CIRole = "output"
+    ci_fn: CIFn, taps: dict[str, Array], *, remat: bool, role: CIRole
 ) -> SiteDict:
-    """Evaluate CI in compute precision and expose fp32 preactivations for metric reductions."""
+    """Evaluate CI in compute precision and expose fp32 preactivations for metric reductions.
+
+    `role` is REQUIRED, unlike the step-builder seams that default it: this is the lowest
+    CI read in the tree, so a default here is how a dual run ends up reporting one head's
+    numbers under both names — the exact failure S36 names."""
     ci = evaluate_ci_role(ci_fn, taps, remat=remat, role=role)
     return cast_floating(ci.preactivations, jnp.float32)
 
@@ -737,17 +744,10 @@ class ChunkwiseTransformerCIFn(eqx.Module):
                     preactivations[site] = stacked_per_slot[slot][chunk_idx]
             return preactivations
 
-        output_stacked, hidden_stacked = stacked_per_role
-        match self.roles:
-            case ("output",):
-                return CI.from_preactivations(scatter(output_stacked))
-            case _:
-                # ONE scan produced both heads: the trunk ran once, and the two heads' slot
-                # tuples come back stacked side by side.
-                return DualCI(
-                    output=CI.from_preactivations(scatter(output_stacked)),
-                    hidden=CI.from_preactivations(scatter(hidden_stacked)),
-                )
+        # ONE scan produced every head: the trunk ran once, and the heads' slot tuples come
+        # back stacked side by side. `_bundle` is the single place that decides what a role
+        # tuple maps to, so this impl cannot drift from the MLP ones.
+        return _bundle(self.roles, tuple(scatter(s) for s in stacked_per_role[: len(self.roles)]))
 
 
 def _init_chunk_transformer(
@@ -891,7 +891,7 @@ def init_chunkwise_transformer_ci_fn(
         chunk_meta=tuple(_ChunkMeta(ch.input_taps, ch.output_sites) for ch in arch.chunks),
         eps=CI_FN_RMS_EPS,
         has_position_axis=True,
-        roles=DUAL_CI_ROLES if dual else ("output",),
+        roles=roles_for(dual),
     )
 
 
@@ -1079,7 +1079,7 @@ def init_layerwise_mlp_ci_fn(
         input_names=arch.input_names,
         output_names=output_names,
         has_position_axis=arch.has_position_axis,
-        roles=DUAL_CI_ROLES if dual else ("output",),
+        roles=roles_for(dual),
     )
 
 
@@ -1184,7 +1184,7 @@ def init_global_mlp_ci_fn(
         output_names=tuple(s.name for s in sites),
         c_sizes=c_sizes,
         has_position_axis=arch.has_position_axis,
-        roles=DUAL_CI_ROLES if dual else ("output",),
+        roles=roles_for(dual),
     )
 
 

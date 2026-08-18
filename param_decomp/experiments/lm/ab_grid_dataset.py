@@ -71,7 +71,12 @@ def make_ab_grid_step[PreparedT](
         clean_forward_result, component_activations = model.component_activation_forward(
             prepared_weights, tokens, capture_keys=ci_capture_keys
         )
-        preactivations = ci_preactivations(ci_fn, clean_forward_result.captures, remat=False)
+        # OUTPUT role explicitly: the ab-grid payload is still the single-CI one. Porting the
+        # torch applet's dual half (the output-alive vs hidden-alive overlay) is deliberately
+        # not done — see notes/dual_objective/README.md.
+        preactivations = ci_preactivations(
+            ci_fn, clean_forward_result.captures, remat=False, role="output"
+        )
         assert preactivations[site_names[0]].ndim == 3, (
             f"the ab grid is LM-only ((n_prompts, T, C)); got {preactivations[site_names[0]].shape}"
         )

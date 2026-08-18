@@ -141,7 +141,7 @@ class HiddenPass[S: MaskSourceStrategy]:
 class TargetedObjective:
     """The complete tPD objective. Every pass sums into ONE gradient (SPEC T1) — whether that
     is one `value_and_grad` or a sequence of per-pass ones whose gradients are added is a
-    scheduling choice with identical arithmetic (`runtime.sequential_dual_backward`).
+    scheduling choice with identical arithmetic (`runtime.sequential_passes`).
 
     Up to FOUR passes, the cartesian product of {target, non-target} x {output, hidden}. The
     two hidden passes are `None` in an ordinary single-objective tPD run, which is then exactly
@@ -348,15 +348,7 @@ def build_targeted_objective(
     )
     assert recon_terms, "no recon loss terms configured"
 
-    nt_terms: list[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]] = []
-    for cfg in nontarget.recon:
-        assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
-        name = cfg.name if cfg.name is not None else cfg.type
-        assert name not in {t.name for t in nt_terms}, f"duplicate non-target loss {name!r}"
-        plan = _nontarget_recon_plan(cfg, site_names)
-        # `hidden_acts_reconstruction=None` structurally: the rider is target-pass-only
-        # vocabulary (SPEC T5), refused at parse by `NontargetConfig`.
-        nt_terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
+    nt_terms = _nontarget_terms(nontarget.recon, site_names, "non-target")
 
     hidden_pass = None
     nontarget_hidden_pass = None
@@ -376,20 +368,8 @@ def build_targeted_objective(
             recon=h_recon, impmin_coeff=hidden.impmin_coeff, points=hidden.points
         )
         if nontarget.hidden is not None:
-            nt_h_terms: list[
-                ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]
-            ] = []
-            for cfg in nontarget.hidden.recon:
-                assert cfg.coeff is not None  # non-None at parse; narrows the type
-                name = cfg.name if cfg.name is not None else cfg.type
-                assert name not in {t.name for t in nt_h_terms}, (
-                    f"duplicate non-target hidden loss {name!r}"
-                )
-                nt_h_terms.append(
-                    ReconLossTerm(name, cfg.coeff, _nontarget_recon_plan(cfg, site_names), None)
-                )
             nontarget_hidden_pass = HiddenPass(
-                recon=tuple(nt_h_terms),
+                recon=_nontarget_terms(nontarget.hidden.recon, site_names, "non-target hidden"),
                 impmin_coeff=nontarget.hidden.impmin_coeff,
                 points=hidden.points,
             )
@@ -401,10 +381,28 @@ def build_targeted_objective(
 
     return TargetedObjective(
         target=TargetPass(imp=imp, recon=recon_terms),
-        nontarget=NontargetPass(recon=tuple(nt_terms), impmin_coeff=nontarget.impmin_coeff),
+        nontarget=NontargetPass(recon=nt_terms, impmin_coeff=nontarget.impmin_coeff),
         hidden=hidden_pass,
         nontarget_hidden=nontarget_hidden_pass,
     )
+
+
+def _nontarget_terms(
+    cfgs: Sequence[NontargetReconLossMetricConfig], site_names: tuple[str, ...], what: str
+) -> tuple[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources], ...]:
+    """Build one non-target-stream pass's recon terms. Both non-target passes (output and
+    hidden, T5/T12) are authored from the same closed vocabulary under the same rules, so they
+    are built here rather than twice — `what` only names the pass in the error."""
+    terms: list[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]] = []
+    for cfg in cfgs:
+        assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
+        name = cfg.name if cfg.name is not None else cfg.type
+        assert name not in {t.name for t in terms}, f"duplicate {what} loss {name!r}"
+        # `hidden_acts_reconstruction=None` structurally: the S35 rider is refused on every
+        # non-target term at parse — an output pass has no points, and a hidden pass's are the
+        # pass's own (T5/T12).
+        terms.append(ReconLossTerm(name, cfg.coeff, _nontarget_recon_plan(cfg, site_names), None))
+    return tuple(terms)
 
 
 def _nontarget_recon_plan(

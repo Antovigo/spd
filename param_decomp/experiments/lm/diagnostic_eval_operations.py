@@ -143,7 +143,7 @@ def make_hidden_acts_operation(
     train_steps: int,
     compiler_options: dict[str, bool | int | str],
     stream: Stream,
-    role: CIRole = "output",
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHiddenActsReconLossConfig():
@@ -250,7 +250,7 @@ def make_site_figures_operation(
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
     stream: Stream,
-    role: CIRole = "output",
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
     match metric:
         case CIHistogramsConfig():

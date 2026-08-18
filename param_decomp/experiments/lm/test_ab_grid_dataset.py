@@ -82,7 +82,7 @@ def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
     ci_grids, inner_grids, ci_sums = _grid_step()(model, vu, ci_fn, tokens, jnp.asarray(n_prompts))
 
     preactivations = ci_preactivations(
-        ci_fn, capture_clean(model, tokens, ci_fn.capture_keys), remat=False
+        ci_fn, capture_clean(model, tokens, ci_fn.capture_keys), remat=False, role="output"
     )
     _clean, raw_activations = model.component_activation_forward(
         prepare_compute_weights(model, vu), tokens, capture_keys=ci_fn.capture_keys

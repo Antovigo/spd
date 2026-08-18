@@ -133,6 +133,7 @@ def test_lm_scalar_operation_averages_residual_batch_objectives():
         train_steps=0,
         eval_steps=2,
         stream="nontarget",
+        role="output",
     )
     context = LMEvalContext(
         state=_state_stub(),  # pyright: ignore[reportArgumentType]

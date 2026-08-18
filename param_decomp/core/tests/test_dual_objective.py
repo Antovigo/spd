@@ -58,7 +58,7 @@ def _loss_metrics() -> tuple[TargetedLossMetricConfig, ...]:
     )
 
 
-def _hidden(with_nontarget: bool) -> tuple[HiddenPassConfig, NontargetConfig]:
+def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
     hidden = HiddenPassConfig(
         points=HIDDEN_POINTS,
         impmin_coeff=5e-3,
@@ -72,14 +72,12 @@ def _hidden(with_nontarget: bool) -> tuple[HiddenPassConfig, NontargetConfig]:
         recon=[StochasticReconLossConfig(coeff=1.0)],
         hidden=NontargetHiddenConfig(
             impmin_coeff=6e-3, recon=[StochasticReconLossConfig(coeff=1.0)]
-        )
-        if with_nontarget
-        else None,
+        ),
     )
     return hidden, nontarget
 
 
-def _setup(*, dual: bool, sequential: bool, with_nontarget_hidden: bool = True):
+def _setup(*, dual: bool, sequential: bool):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
@@ -107,7 +105,7 @@ def _setup(*, dual: bool, sequential: bool, with_nontarget_hidden: bool = True):
         ),
     )
     if dual:
-        hidden, nontarget = _hidden(with_nontarget_hidden)
+        hidden, nontarget = _hidden()
     else:
         hidden, nontarget = (
             None,

@@ -75,7 +75,7 @@ def _make_scalar_operation(
     train_steps: int,
     eval_steps: int,
     stream: Stream,
-    role: CIRole = "output",
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
     def run(context: LMEvalContext) -> LogRecord:
         log_prefix = stream_log_prefix(stream, context, role)
@@ -121,6 +121,7 @@ def make_ce_kl_operation(
         train_steps,
         eval_steps,
         stream,
+        "output",  # CE/KL reads no CI, so it takes no role segment
     )
 
 
@@ -135,7 +136,7 @@ def make_masked_kl_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
-    role: CIRole = "output",
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
     """ONE masking arm, authored as the loss config that names the same construction —
     `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss`, as `PGDReconLoss` already is."""
@@ -163,7 +164,7 @@ def make_ci_l0_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
-    role: CIRole = "output",
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
     groups = (
         {name: tuple(patterns) for name, patterns in metric.groups.items()}
@@ -220,7 +221,7 @@ def make_fresh_pgd_operation(
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
-    role: CIRole = "output",
+    role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
     assert metric.init == "random" and metric.source_shape == "c", metric
     probe = FreshPGDReconEval(
