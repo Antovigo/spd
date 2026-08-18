@@ -11,6 +11,7 @@ from param_decomp.core.ci_fn import (
     GlobalMLPCIFn,
     TapSpec,
     build_ci_fn,
+    output_ci,
 )
 from param_decomp.experiments.lm.config import (
     ChunkwiseTransformerCiConfig,
@@ -124,7 +125,7 @@ def test_built_ci_fn_gives_per_site_ci_per_position():
         tap.key: jax.random.normal(jax.random.fold_in(jax.random.PRNGKey(1), i), (b, t, tap.width))
         for i, tap in enumerate(arch.input_taps)
     }
-    ci = ci_fn(taps, remat=False)
+    ci = output_ci(ci_fn(taps, remat=False))
     assert set(ci.lower) == {s.name for s in sites}
     for site in sites:
         assert ci.lower[site.name].shape == (b, t, site.C), site.name
@@ -133,7 +134,7 @@ def test_built_ci_fn_gives_per_site_ci_per_position():
     perturbed = dict(taps)
     first_key = arch.input_taps[0].key
     perturbed[first_key] = taps[first_key].at[:, 3, :].add(1.0)
-    moved = ci_fn(perturbed, remat=False)
+    moved = output_ci(ci_fn(perturbed, remat=False))
     for site in sites:
         base, new = ci.preactivations[site.name], moved.preactivations[site.name]
         others = jnp.delete(new - base, 3, axis=1)

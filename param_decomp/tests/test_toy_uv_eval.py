@@ -4,7 +4,7 @@ from typing import Literal
 
 import jax
 
-from param_decomp.core.ci_fn import LayerwiseMLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.core.ci_fn import LayerwiseMLPCIArch, init_layerwise_mlp_ci_fn, output_ci
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import UVPlotsConfig
 from param_decomp.core.metrics import PNGImage
@@ -36,7 +36,7 @@ def _toy_setup():
     )
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     probe = single_feature_probe(cfg.n_features)
-    ci = ci_fn(capture_clean(model, probe, ci_fn.capture_keys), remat=False)
+    ci = output_ci(ci_fn(capture_clean(model, probe, ci_fn.capture_keys), remat=False))
     return model, vu, ci.lower, ci.upper
 
 

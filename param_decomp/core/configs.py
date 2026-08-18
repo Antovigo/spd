@@ -696,6 +696,110 @@ no meaning there — so those types are unrepresentable in the non-target schema
 than filtered out of it."""
 
 
+HiddenReconLossMetricConfig = (
+    ChunkwiseSubsetReconLossConfig
+    | CIMaskedReconLayerwiseLossConfig
+    | CIMaskedReconLossConfig
+    | CIMaskedReconSubsetLossConfig
+    | MergedStochasticSubsetPPGDReconLossConfig
+    | PersistentPGDReconLossConfig
+    | PGDReconLayerwiseLossConfig
+    | PGDReconLossConfig
+    | PGDReconSubsetLossConfig
+    | StochasticReconLayerwiseLossConfig
+    | StochasticReconLossConfig
+    | StochasticReconSubsetLossConfig
+    | UnmaskedReconLossConfig
+)
+"""The recon types the hidden pass admits on the TARGET stream (SPEC T12): the same full
+vocabulary as the output pass, adversaries included — the hidden objective is an ordinary
+reconstruction objective that happens to be measured at internal activations rather than at
+the output, so nothing about the mask-source algebra changes. Spelled as an explicit union
+(not via the `AnyReconLossMetricConfig` alias) because a PEP 695 `type` alias is not a
+runtime Union and `Discriminator` keys on one."""
+
+
+class HiddenPassConfig(BaseConfig):
+    """The hidden role's surface (SPEC T12): a second reconstruction objective, scored at named
+    internal activations instead of the model output, whose masks come from the CI fn's SECOND
+    readout head (S36).
+
+    `points` lives HERE rather than on each term — the pass IS "reconstruct these activations",
+    so per-term points would be re-authoring the objective per term. It is also shared with the
+    non-target stream's hidden surface, the same way T6 shares one importance-minimality config
+    across passes: WHAT is being reconstructed is a property of the experiment, not of a stream.
+    Only coefficients differ per pass.
+
+    Requires `decomposition.ci.dual` — without a second head there is no hidden CI to shape."""
+
+    points: tuple[str, ...] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Activations the hidden objective reconstructs, in the TARGET's own tap "
+            "vocabulary — e.g. `layers.19.mlp.down_proj.out` for block 19's MLP output. Each "
+            "point's error is normalized by its own clean squared scale and the pass takes the "
+            "mean, so points of different magnitude and width stay comparable. No default: "
+            "which activations matter is the experiment's question."
+        ),
+    )
+    impmin_coeff: NonNegativeFloat | ScheduleConfig = Field(
+        ...,
+        description=(
+            "The hidden head's importance-minimality COEFFICIENT. The penalty's shape and "
+            "anneal are the target pass's, shared by construction (T6's rule extended to the "
+            "hidden role) — only the strength is authored here."
+        ),
+    )
+    recon: list[Annotated[HiddenReconLossMetricConfig, Discriminator("type")]] = Field(
+        ..., min_length=1
+    )
+
+    @model_validator(mode="after")
+    def validate_hidden_entries(self) -> Self:
+        seen: set[str] = set()
+        assert len(set(self.points)) == len(self.points), f"duplicate points: {self.points}"
+        for cfg in self.recon:
+            assert cfg.coeff is not None, f"hidden.recon {cfg.type!r} must set `coeff`"
+            name = cfg.name if cfg.name is not None else cfg.type
+            assert name not in seen, f"duplicate hidden loss {name!r}"
+            seen.add(name)
+            assert cfg.hidden_acts_reconstruction is None, (
+                f"hidden.recon {cfg.type!r}: the S35 rider has no place on a hidden-pass term — "
+                "the pass already scores exactly these activations via `hidden.points`, and a "
+                "rider would add a SECOND hidden-acts term on top of its own"
+            )
+        return self
+
+
+class NontargetHiddenConfig(BaseConfig):
+    """The hidden role on the NON-TARGET stream (SPEC T12/T5-amended).
+
+    Structurally the non-target pass's twin: its own coefficients, the closed non-target recon
+    vocabulary (no adversaries — T7 keeps those target-only), and the measurement points of the
+    target-stream `hidden:` block. Delta pinned fully on, as every non-target forward is (T4)."""
+
+    impmin_coeff: NonNegativeFloat | ScheduleConfig
+    recon: list[Annotated[NontargetReconLossMetricConfig, Discriminator("type")]] = Field(
+        ..., min_length=1
+    )
+
+    @model_validator(mode="after")
+    def validate_nontarget_hidden_entries(self) -> Self:
+        seen: set[str] = set()
+        for cfg in self.recon:
+            assert cfg.coeff is not None, f"nontarget.hidden.recon {cfg.type!r} must set `coeff`"
+            name = cfg.name if cfg.name is not None else cfg.type
+            assert name not in seen, f"duplicate non-target hidden loss {name!r}"
+            seen.add(name)
+            if not isinstance(cfg, UnmaskedNoDeltaReconLossConfig):
+                assert cfg.hidden_acts_reconstruction is None, (
+                    f"nontarget.hidden.recon {cfg.type!r}: the S35 rider has no place here — "
+                    "the hidden pass already scores `hidden.points`"
+                )
+        return self
+
+
 class NontargetConfig(BaseConfig):
     """The tPD non-target pass, authored directly (SPEC T5) — never derived from the
     target pass's loss list.
@@ -711,6 +815,14 @@ class NontargetConfig(BaseConfig):
     impmin_coeff: NonNegativeFloat | ScheduleConfig
     recon: list[Annotated[NontargetReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
+    )
+    hidden: NontargetHiddenConfig | None = Field(
+        default=None,
+        description=(
+            "The hidden role on this stream (SPEC T12). Requires `pd.hidden`, whose `points` "
+            "it measures at. None (the default) leaves the hidden head shaped by the target "
+            "stream alone."
+        ),
     )
 
     @model_validator(mode="after")
@@ -865,6 +977,16 @@ class TargetedPDConfig(PDConfigBase):
         ),
     )
 
+    hidden: HiddenPassConfig | None = Field(
+        default=None,
+        description=(
+            "The hidden role's TARGET-stream surface (SPEC T12): a second reconstruction "
+            "objective scored at internal activations, whose masks come from the CI fn's "
+            "second readout head. Requires `decomposition.ci.dual`. None (the default) is an "
+            "ordinary single-objective tPD run, byte-inert."
+        ),
+    )
+
     ci_scaled_weight_decay: PositiveFloat | None = Field(
         default=None,
         description=(
@@ -879,6 +1001,22 @@ class TargetedPDConfig(PDConfigBase):
     @model_validator(mode="after")
     def validate_loss_metrics(self) -> Self:
         _validate_training_losses(self.loss_metrics)
+        return self
+
+    @model_validator(mode="after")
+    def validate_hidden_pass(self) -> Self:
+        """Identities are unique ACROSS passes: every term's log key is `loss/<name>`, so a
+        hidden term sharing a target term's default name (its type literal) would silently
+        overwrite it in the metrics. Refuse at parse rather than lose a curve."""
+        if self.hidden is None:
+            return self
+        target_names = {cfg.name if cfg.name is not None else cfg.type for cfg in self.loss_metrics}
+        for cfg in self.hidden.recon:
+            name = cfg.name if cfg.name is not None else cfg.type
+            assert name not in target_names, (
+                f"hidden.recon {name!r} collides with a target-pass loss identity: both log "
+                f"under `loss/{name}`. Give one of them an explicit `name`."
+            )
         return self
 
 

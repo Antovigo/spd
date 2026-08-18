@@ -31,7 +31,7 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, PRNGKeyArray
 
-from param_decomp.core.ci_fn import evaluate_ci
+from param_decomp.core.ci_fn import CIRole, evaluate_ci_role
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.model import (
@@ -92,8 +92,14 @@ def make_ci_hidden_acts_step(
     model_static: DecomposedModel,
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str] | None = None,
+    role: CIRole = "output",
 ) -> HiddenActsStep:
-    """Deterministic CI-mask hidden-acts step: `lower_leaky` CI, no delta, one forward."""
+    """Deterministic CI-mask hidden-acts step: `lower_leaky` CI, no delta, one forward.
+
+    `role` picks which CI head scores this metric. In a dual (shared-trunk) run the two
+    heads answer different questions, so the eval surface reports the metric once per
+    role rather than silently choosing one; a single-role run has only `"output"`.
+    """
     site_names = model_static.site_names
     site_output_keys = model_static.site_output_keys(site_names)
     clean_capture_keys = ci_capture_keys | frozenset(site_output_keys)
@@ -113,7 +119,7 @@ def make_ci_hidden_acts_step(
             site: clean_captures_by_key[key] for site, key in output_key_by_site.items()
         }
         prepared_weights = prepare_compute_weights(model, components)
-        ci_lower = evaluate_ci(ci_fn, clean_ci_inputs_by_key, remat=False).lower
+        ci_lower = evaluate_ci_role(ci_fn, clean_ci_inputs_by_key, remat=False, role=role).lower
 
         masked_captures_by_key = model.masked_forward(
             prepared_weights,
@@ -139,6 +145,7 @@ def make_stochastic_hidden_acts_step(
     ci_capture_keys: CaptureKeys,
     n_mask_samples: int,
     compiler_options: dict[str, bool | int | str] | None = None,
+    role: CIRole = "output",
 ) -> HiddenActsStep:
     """Stochastic-mask hidden-acts step: `n_mask_samples` draws of `mask = ci + (1−ci)·s`
     (with weight deltas), per-draw per-site MSE summed. RNG via per-draw / per-site
@@ -163,7 +170,7 @@ def make_stochastic_hidden_acts_step(
             site: clean_captures_by_key[key] for site, key in output_key_by_site.items()
         }
         prepared_weights = prepare_compute_weights(model, components)
-        ci_lower = evaluate_ci(ci_fn, clean_ci_inputs_by_key, remat=False).lower
+        ci_lower = evaluate_ci_role(ci_fn, clean_ci_inputs_by_key, remat=False, role=role).lower
 
         leading = _waist_leading(ci_lower, site_names)
 

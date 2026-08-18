@@ -44,7 +44,7 @@ from param_decomp.core.checkpoint import (
 from param_decomp.core.ci_fn import (
     ChunkwiseTransformerCIFn,
     GlobalMLPCIFn,
-    evaluate_ci,
+    evaluate_ci_role,
 )
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.model import DecomposedModel, prepare_compute_weights
@@ -240,7 +240,9 @@ def open_jax_run(run_dir: Path, step: int | None = None, *, data_root: Path) -> 
         )
         ci_input_activations_by_key = clean_forward_result.captures
 
-        ci = evaluate_ci(ci_fn, ci_input_activations_by_key, remat=False)
+        # Output role explicitly: harvest exports the output-reconstruction CI, the one
+        # every downstream consumer of a harvested run has always meant by "CI".
+        ci = evaluate_ci_role(ci_fn, ci_input_activations_by_key, remat=False, role="output")
         lower_leaky_ci_by_site = {site: ci.lower[site].astype(jnp.float32) for site in site_names}
         component_activations_by_site = {
             site: raw_component_activations_by_site[site].astype(jnp.float32) * u_norms[site]

@@ -51,7 +51,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn, evaluate_ci
+from param_decomp.core.ci_fn import CIFn, CIRole, evaluate_ci_role
 from param_decomp.core.ci_l0_eval import ci_l0_scalars, resolve_site_groups
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
@@ -142,8 +142,11 @@ def _prepare_lm_batch[PreparedT](
     n_valid_rows: int | None,
     ci_capture_keys: CaptureKeys,
     activation_capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
+    role: CIRole = "output",
 ) -> _PreparedLMBatch[PreparedT]:
-    """Pure shared preparation required by independent LM metric kernels."""
+    """Pure shared preparation required by independent LM metric kernels.
+
+    `role` picks which CI head builds the mask; a single-role run has only `"output"`."""
     tokens = batch_shard_leading(token_ids, mesh)
     capture_keys = ci_capture_keys | activation_capture_keys
     clean_forward_result = model.clean_forward(tokens, capture_keys)
@@ -153,7 +156,7 @@ def _prepare_lm_batch[PreparedT](
         hidden_acts_capture_keys=activation_capture_keys,
         mesh=mesh,
     )
-    ci_lower = evaluate_ci(ci_fn, ci_input_activations, remat=False).lower
+    ci_lower = evaluate_ci_role(ci_fn, ci_input_activations, remat=False, role=role).lower
     if mesh is not None:
         sharding = NamedSharding(
             mesh, P(("replicate", "fsdp"), *((None,) * (tokens.ndim - 1)), None)

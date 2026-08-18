@@ -22,6 +22,7 @@ from param_decomp.core.ci_fn import (
     TapSpec,
     init_global_mlp_ci_fn,
     init_layerwise_mlp_ci_fn,
+    output_ci,
 )
 from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, init_component_stacks
 from param_decomp.core.configs import (
@@ -226,7 +227,7 @@ def test_mlp_ci_fn_per_site_preactivations_and_values():
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
     inputs = capture_clean(model, x @ target.W_E, ci_fn.capture_keys)
-    values = ci_fn(inputs, remat=False)
+    values = output_ci(ci_fn(inputs, remat=False))
     assert isinstance(values, CI)
     assert values.lower["layers.0.mlp_in"].shape == (b, 6)
     assert values.lower["layers.0.mlp_out"].shape == (b, 7)
@@ -480,7 +481,7 @@ def test_global_ci_fn_shapes_and_range():
     x = sample_sparse_features(
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
-    values = ci_fn(capture_clean(model, x @ target.W_E, ci_fn.capture_keys), remat=False)
+    values = output_ci(ci_fn(capture_clean(model, x @ target.W_E, ci_fn.capture_keys), remat=False))
     assert isinstance(values, CI)
     assert values.lower["layers.0.mlp_in"].shape == (b, 6)
     assert values.lower["layers.0.mlp_out"].shape == (b, 7)
@@ -506,15 +507,15 @@ def test_global_ci_fn_concat_split_order_is_canonical():
     b = 5
     inputs = {s.name: jax.random.normal(jax.random.fold_in(jax.random.PRNGKey(9), i), (b, s.d_in))
               for i, s in enumerate(sites)}  # fmt: skip
-    base = ci_fn(inputs, remat=False)
+    base = output_ci(ci_fn(inputs, remat=False))
     reordered = {name: inputs[name] for name in reversed(list(inputs))}
     assert list(reordered) != list(inputs)
-    same = ci_fn(reordered, remat=False)
+    same = output_ci(ci_fn(reordered, remat=False))
     for name in inputs:
         assert jnp.array_equal(base.lower[name], same.lower[name]), name
     perturbed = dict(inputs)
     perturbed["layers.1.mlp_out"] = perturbed["layers.1.mlp_out"] + 1.0
-    cross = ci_fn(perturbed, remat=False)
+    cross = output_ci(ci_fn(perturbed, remat=False))
     assert not jnp.allclose(cross.lower["layers.0.mlp_in"], base.lower["layers.0.mlp_in"]), (
         "global MLP must couple sites: an mlp_out perturbation should move mlp_in preactivations"
     )

@@ -43,7 +43,7 @@ from param_decomp.core.ci_fn import (
     ChunkwiseTransformerCIArch,
     MHACIAttention,
     build_ci_fn,
-    evaluate_ci,
+    evaluate_ci_role,
 )
 from param_decomp.core.components import init_component_stacks
 from param_decomp.core.masking import masks_from_sources
@@ -98,7 +98,7 @@ def _source_grad(sharded: bool) -> dict[str, jax.Array]:
 
     components_bf16 = cast_floating(vu, COMPUTE_DT)
     taps = capture_clean(model, resid, ci_fn.capture_keys)
-    ci_lower = evaluate_ci(ci_fn, taps, remat=False).lower
+    ci_lower = evaluate_ci_role(ci_fn, taps, remat=False, role="output").lower
     clean_output = jax.lax.stop_gradient(run_clean(model, resid))
 
     def source_loss(sources: dict[str, jax.Array]) -> jax.Array:

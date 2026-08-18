@@ -162,7 +162,24 @@ class OutputAndHiddenActsReconstruction:
     points: tuple[str, ...]
 
 
-type ReconstructionSpec = OutputOnlyReconstruction | OutputAndHiddenActsReconstruction
+@dataclass(frozen=True)
+class HiddenActsOnlyReconstruction:
+    """A reconstruction specification that compares ONLY named hidden activations — no
+    end-to-end output term at all (SPEC T12).
+
+    This is the hidden pass's whole comparison, and it is why the hidden role is a PASS rather
+    than S35's per-term rider: the rider adds `coeff · hidden` ON TOP of a term's e2e loss, so
+    its CI is still shaped mostly by the output objective. The hidden pass instead asks its own
+    question — "which subcomponents matter for reproducing these internal activations?" — and
+    carries no output term to dilute it. There is no `coeff` here either: the pass's strength
+    lives on its recon terms' own coefficients, one level up, exactly like the output pass's."""
+
+    points: tuple[str, ...]
+
+
+type ReconstructionSpec = (
+    OutputOnlyReconstruction | OutputAndHiddenActsReconstruction | HiddenActsOnlyReconstruction
+)
 
 
 class ForwardObservations(NamedTuple):
@@ -206,7 +223,10 @@ def hidden_acts_capture_keys(reconstruction: ReconstructionSpec) -> CaptureKeys:
     match reconstruction:
         case OutputOnlyReconstruction():
             return frozenset()
-        case OutputAndHiddenActsReconstruction(points=points):
+        case (
+            OutputAndHiddenActsReconstruction(points=points)
+            | HiddenActsOnlyReconstruction(points=points)
+        ):
             return frozenset(points)
 
 

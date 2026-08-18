@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from param_decomp.core.ci_fn import CI, LayerwiseMLPCIArch, init_layerwise_mlp_ci_fn
+from param_decomp.core.ci_fn import CI, LayerwiseMLPCIArch, init_layerwise_mlp_ci_fn, output_ci
 from param_decomp.core.components import ComponentStacks, SiteC, SiteSpec, init_component_stacks
 from param_decomp.core.configs import (
     FaithfulnessLossConfig,
@@ -178,7 +178,7 @@ def test_mlp_ci_fn_per_site_preactivations_and_values():
         jax.random.PRNGKey(2), b, cfg.n_features, 0.3, "at_least_zero_active"
     )
     inputs = capture_clean(model, x, ci_fn.capture_keys)
-    values = ci_fn(inputs, remat=False)
+    values = output_ci(ci_fn(inputs, remat=False))
     assert isinstance(values, CI)
     assert values.lower["linear1"].shape == (b, 8)
     assert values.lower["linear2"].shape == (b, 6)

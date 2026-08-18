@@ -25,6 +25,7 @@ from param_decomp.core.ci_fn import (
     MHACIAttention,
     build_ci_fn,
     init_chunkwise_transformer_ci_fn,
+    output_ci,
 )
 from param_decomp.core.components import SiteSpec, component_stacks_from_sites
 from param_decomp.core.configs import (
@@ -78,7 +79,7 @@ def test_zero_blocks_is_in_proj_plus_heads_and_nothing_else():
 def test_zero_blocks_forward_shape_and_finiteness():
     ci_fn = _ci_fn(0)
     for remat in (False, True):
-        ci = ci_fn(_taps(), remat=remat)
+        ci = output_ci(ci_fn(_taps(), remat=remat))
         assert ci.preactivations[SITE].shape == (B, T, C)
         assert ci.lower[SITE].shape == (B, T, C)
         assert bool(jnp.isfinite(ci.lower[SITE]).all())
@@ -93,8 +94,8 @@ def test_zero_blocks_is_exactly_position_local():
 
     def moved(n_blocks: int) -> jax.Array:
         ci_fn = _ci_fn(n_blocks)
-        base = ci_fn(taps, remat=False).preactivations[SITE]
-        pert = ci_fn(perturbed, remat=False).preactivations[SITE]
+        base = output_ci(ci_fn(taps, remat=False)).preactivations[SITE]
+        pert = output_ci(ci_fn(perturbed, remat=False)).preactivations[SITE]
         return jnp.abs(base - pert).max(axis=(0, 2))  # per-position
 
     local = moved(0)
@@ -181,5 +182,7 @@ def test_zero_blocks_trains_a_positioned_target():
     assert not jnp.allclose(trained.chunks.in_proj_w, in_proj_before), (
         "the CI fn did not move — with no blocks there is nothing else left to train"
     )
-    final_ci = trained(model.clean_forward(inputs, ci_fn.capture_keys).captures, remat=False)
+    final_ci = output_ci(
+        trained(model.clean_forward(inputs, ci_fn.capture_keys).captures, remat=False)
+    )
     assert final_ci.lower[SITE].shape == (B, T, C)

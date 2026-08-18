@@ -37,7 +37,7 @@ import numpy as np
 from jax import random
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.core.ci_fn import evaluate_ci
+from param_decomp.core.ci_fn import evaluate_ci_role
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.model import (
@@ -177,7 +177,9 @@ def make_ci_attn_patterns_step(
         }
         target_patterns = _attention_patterns(model, layer_pairs, clean_site_outputs_by_site)
         prepared_weights = prepare_compute_weights(model, components)
-        ci_lower = evaluate_ci(ci_fn, clean_ci_inputs_by_key, remat=False).lower
+        # Output role explicitly: the attention-pattern probe measures how the OUTPUT-
+        # reconstruction mask perturbs attention, matching the mask the recon grid uses.
+        ci_lower = evaluate_ci_role(ci_fn, clean_ci_inputs_by_key, remat=False, role="output").lower
 
         masked_captures_by_key = model.masked_forward(
             prepared_weights,
@@ -233,7 +235,7 @@ def make_stochastic_attn_patterns_step(
         }
         target_patterns = _attention_patterns(model, layer_pairs, clean_site_outputs_by_site)
         prepared_weights = prepare_compute_weights(model, components)
-        ci_lower = evaluate_ci(ci_fn, clean_ci_inputs_by_key, remat=False).lower
+        ci_lower = evaluate_ci_role(ci_fn, clean_ci_inputs_by_key, remat=False, role="output").lower
 
         leading = tokens.shape
 

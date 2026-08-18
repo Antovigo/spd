@@ -18,6 +18,7 @@ from param_decomp.core.configs import (
 )
 from param_decomp.core.recon import (
     ForwardObservations,
+    HiddenActsOnlyReconstruction,
     OutputAndHiddenActsReconstruction,
     OutputOnlyReconstruction,
     ReconstructionSpec,
@@ -121,7 +122,19 @@ class OutputAndHiddenActsReconstructionLoss(NamedTuple):
     hidden_acts_by_point: dict[str, Array]
 
 
-type ReconstructionLoss = OutputOnlyReconstructionLoss | OutputAndHiddenActsReconstructionLoss
+class HiddenActsOnlyReconstructionLoss(NamedTuple):
+    """The hidden pass's result (SPEC T12): `total` IS the point mean — there is no e2e
+    component to separate out, so unlike the rider's result this carries no `output` field."""
+
+    total: Array
+    hidden_acts_by_point: dict[str, Array]
+
+
+type ReconstructionLoss = (
+    OutputOnlyReconstructionLoss
+    | OutputAndHiddenActsReconstructionLoss
+    | HiddenActsOnlyReconstructionLoss
+)
 
 
 def reconstruction_loss(
@@ -132,23 +145,34 @@ def reconstruction_loss(
     reconstruction: ReconstructionSpec,
     valid_row_mask: Array | None = None,
 ) -> ReconstructionLoss:
-    """The closed forms of one recon comparison (SPEC S35)."""
-    output_loss = recon_loss_fn(masked.output, clean.output)
+    """The closed forms of one recon comparison (SPEC S35 / T12)."""
+
+    def per_point_errors(points: tuple[str, ...]) -> dict[str, Array]:
+        return {
+            point: relative_squared_error(
+                masked.hidden_acts_by_point[point],
+                clean.hidden_acts_by_point[point],
+                valid_row_mask=valid_row_mask,
+            )
+            for point in points
+        }
+
     match reconstruction:
         case OutputOnlyReconstruction():
-            return OutputOnlyReconstructionLoss(output_loss)
+            return OutputOnlyReconstructionLoss(recon_loss_fn(masked.output, clean.output))
         case OutputAndHiddenActsReconstruction(coeff=coeff, points=points):
-            per_point = {
-                point: relative_squared_error(
-                    masked.hidden_acts_by_point[point],
-                    clean.hidden_acts_by_point[point],
-                    valid_row_mask=valid_row_mask,
-                )
-                for point in points
-            }
+            output_loss = recon_loss_fn(masked.output, clean.output)
+            per_point = per_point_errors(points)
             aggregate = jnp.mean(jnp.stack(tuple(per_point.values())))
             return OutputAndHiddenActsReconstructionLoss(
                 output_loss + coeff * aggregate, output_loss, per_point
+            )
+        case HiddenActsOnlyReconstruction(points=points):
+            # `recon_loss_fn` is NOT called: the hidden pass has no e2e term, so the KL over
+            # the full vocabulary (and its backward) never enters this pass's graph.
+            per_point = per_point_errors(points)
+            return HiddenActsOnlyReconstructionLoss(
+                jnp.mean(jnp.stack(tuple(per_point.values()))), per_point
             )
 
 
@@ -157,6 +181,13 @@ def reconstruction_loss_metrics(loss: ReconstructionLoss) -> dict[str, Array]:
     match loss:
         case OutputOnlyReconstructionLoss():
             return {}
+        case HiddenActsOnlyReconstructionLoss(hidden_acts_by_point=hidden_acts_by_point):
+            # No `e2e` key: this pass has no end-to-end term, and emitting a zero for it would
+            # read as "the output loss is zero" rather than "there is no output loss here".
+            return {
+                f"hidden_acts_reconstruction/{point}": value
+                for point, value in hidden_acts_by_point.items()
+            }
         case OutputAndHiddenActsReconstructionLoss(
             output=output, hidden_acts_by_point=hidden_acts_by_point
         ):

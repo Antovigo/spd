@@ -11,7 +11,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from param_decomp.core.adversary import init_fresh_pgd_sources
-from param_decomp.core.ci_fn import CIFn, evaluate_ci
+from param_decomp.core.ci_fn import CIFn, CIRole, evaluate_ci_role
 from param_decomp.core.components import ComponentStacks, SiteSpec
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.losses import reconstruction_loss
@@ -102,8 +102,14 @@ def make_fresh_pgd_eval_step(
     ci_capture_keys: CaptureKeys,
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
+    role: CIRole = "output",
 ) -> FreshPGDStep:
-    """Build fresh-PGD reconstruction eval for any target."""
+    """Build fresh-PGD reconstruction eval for any target.
+
+    `role` picks which CI head scores this metric. In a dual (shared-trunk) run the two
+    heads answer different questions, so the eval surface reports the metric once per
+    role rather than silently choosing one; a single-role run has only `"output"`.
+    """
     sites = model_static.sites
     recon_loss_fn = model_static.recon_loss_fn
     leading_rank = 2 if model_static.has_position_axis else 1
@@ -144,7 +150,9 @@ def make_fresh_pgd_eval_step(
         prepared_weights = prepare_compute_weights(model, components)
         ci_lower = {
             site: shard_ci_array(value)
-            for site, value in evaluate_ci(ci_fn, ci_input_activations, remat=False).lower.items()
+            for site, value in evaluate_ci_role(
+                ci_fn, ci_input_activations, remat=False, role=role
+            ).lower.items()
         }
 
         def loss_at_masks(masks: dict[str, Array], delta_masks: dict[str, Array]) -> Array:

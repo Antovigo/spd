@@ -26,7 +26,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 from numpy.typing import NDArray
 
-from param_decomp.core.ci_fn import CIFn, evaluate_ci
+from param_decomp.core.ci_fn import CIFn, evaluate_ci_role
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import WellTemperednessConfig
 from param_decomp.core.jit_util import filter_jit
@@ -152,7 +152,11 @@ def make_well_temperedness_step(
         sampling_key: PRNGKeyArray,
     ) -> Ablations:
         ci_inputs = model.clean_forward(inputs, ci_capture_keys).captures
-        ci_preactivations = evaluate_ci(ci_fn, ci_inputs, remat=False).preactivations
+        # Output role explicitly: well-temperedness asks whether a HIGHER CI predicts a larger
+        # ablation effect on the RECON loss, which is the output objective's own question.
+        ci_preactivations = evaluate_ci_role(
+            ci_fn, ci_inputs, remat=False, role="output"
+        ).preactivations
         location_shape = ci_preactivations[site_names[0]].shape[:-1]
         expected_location_rank = 2 if has_position_axis else 1
         assert len(location_shape) == expected_location_rank, location_shape

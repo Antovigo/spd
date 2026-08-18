@@ -37,7 +37,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float
 
-from param_decomp.core.ci_fn import CI
+from param_decomp.core.ci_fn import AnyCI, output_ci
 from param_decomp.core.components import ComponentStacks, SiteC, SiteDims, SiteSpec, site_out
 from param_decomp.core.masking import materialize_masking
 from param_decomp.core.model import (
@@ -85,7 +85,7 @@ class CIFnCallable(Protocol):
     @property
     def capture_keys(self) -> CaptureKeys: ...
 
-    def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI: ...
+    def __call__(self, taps: dict[str, Array], *, remat: bool) -> AnyCI: ...
 
 
 @dataclass(frozen=True)
@@ -800,4 +800,7 @@ def single_feature_ci(
     """Feed the single-feature probe (embedded through `W_E`) and read the `lower_leaky`
     CI per site, `{site: [n_features, C]}`."""
     resid = single_feature_probe(n_features) @ model.target.W_E
-    return ci_fn(model.clean_forward(resid, ci_fn.capture_keys).captures, remat=False).lower
+    # Output role: the probe's claim is about reconstructing the target's OUTPUT.
+    return output_ci(
+        ci_fn(model.clean_forward(resid, ci_fn.capture_keys).captures, remat=False)
+    ).lower

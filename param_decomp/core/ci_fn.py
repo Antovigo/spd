@@ -106,19 +106,98 @@ class CI:
         )
 
 
+CIRole = Literal["output", "hidden"]
+"""Which reconstruction objective a CI value scores for (SPEC S36). `output` is the
+model-output reconstruction every VPD run has always had; `hidden` scores the SAME pool of
+subcomponents for reconstructing named internal activations instead. A single-role run has
+only `output` and never mentions the vocabulary."""
+
+DUAL_CI_ROLES: tuple[CIRole, ...] = ("output", "hidden")
+"""Role order — the head order in a dual CI fn and the pass order in a dual objective."""
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class DualCI:
+    """Two `CI` bundles read off ONE trunk (SPEC S36): `output` feeds the output-reconstruction
+    objective, `hidden` the hidden-acts one. Both score the same subcomponent pool over the same
+    inputs — only the readout head differs, so a component can be important for one objective and
+    not the other.
+
+    A pytree whose leaves are the two bundles', so `eqx.filter_vjp` over the CI fn takes a
+    `DualCI` cotangent and the trunk's parameter gradient is the SUM of the two heads'
+    contributions in ONE pullback — the trunk is never forward- or backward-run twice."""
+
+    output: CI
+    hidden: CI
+
+    def role(self, role: CIRole) -> CI:
+        match role:
+            case "output":
+                return self.output
+            case "hidden":
+                return self.hidden
+
+
+AnyCI = CI | DualCI
+"""What a CI fn returns: single-role runs keep the bare `CI` they always had."""
+
+
+def output_ci(ci: AnyCI) -> CI:
+    """The output-role bundle of whatever a CI fn returned. The spelling exists so a
+    single-role consumer SAYS which role it means instead of reaching through a union — a dual
+    fn's `.lower` is otherwise an easy silent mistake (it would have to pick a head for you)."""
+    return ci_for_role(ci, "output")
+
+
+def _bundle(roles: tuple[CIRole, ...], per_role: tuple[SiteDict, ...]) -> AnyCI:
+    """Squash each role's preactivations into its bundle, returning the shape `roles` implies —
+    a bare `CI` for a single-role fn, so nothing downstream of a plain run ever sees `DualCI`."""
+    assert len(roles) == len(per_role), (roles, len(per_role))
+    match roles:
+        case ("output",):
+            return CI.from_preactivations(per_role[0])
+        case ("output", "hidden"):
+            return DualCI(
+                output=CI.from_preactivations(per_role[0]),
+                hidden=CI.from_preactivations(per_role[1]),
+            )
+        case _:
+            raise AssertionError(f"unknown CI role tuple {roles}")
+
+
+def ci_for_role(ci: AnyCI, role: CIRole) -> CI:
+    """The bundle scoring `role`. A single-role `CI` answers only to `output` — asking a
+    single-role run for the hidden bundle is a wiring bug, not a fallback."""
+    match ci:
+        case DualCI():
+            return ci.role(role)
+        case CI():
+            assert role == "output", (
+                f"a single-role CI fn has no {role!r} head; set `decomposition.ci.dual` to build one"
+            )
+            return ci
+
+
 @runtime_checkable
 class CIFn(Protocol):
-    """`dict[InputTap, Array] -> CI`. `output_names` partition the model sites (asserted at
-    construction); input taps are unconstrained. `has_position_axis` must equal the
-    paired `DecomposedModel.has_position_axis` (asserted at trainer construction)."""
+    """`dict[InputTap, Array] -> CI | DualCI`. `output_names` partition the model sites (asserted
+    at construction); input taps are unconstrained. `has_position_axis` must equal the
+    paired `DecomposedModel.has_position_axis` (asserted at trainer construction).
+
+    `roles` is the readout vocabulary: `("output",)` for the single-head CI fn every plain run
+    uses — which returns a bare `CI` — and `DUAL_CI_ROLES` for a shared-trunk dual fn, which
+    returns `DualCI`. The role count is STATIC (it selects the return type), so a step traced
+    against a dual fn never branches on it."""
 
     @property
     def capture_keys(self) -> CaptureKeys: ...
 
     output_names: tuple[str, ...]
     has_position_axis: bool
+    roles: tuple[CIRole, ...]
 
-    def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI: ...
+    def __call__(self, taps: dict[str, Array], *, remat: bool) -> AnyCI: ...
 
     def shardings(self, mesh: Mesh) -> "CIFn":
         """Per-leaf `dp` placement matching this CI fn's pytree structure (each array leaf
@@ -127,16 +206,29 @@ class CIFn(Protocol):
         ...
 
 
-def evaluate_ci(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool) -> CI:
+def is_dual(ci_fn: CIFn) -> bool:
+    """Whether this CI fn reads two roles off one trunk — a STATIC property of the built fn."""
+    return len(ci_fn.roles) > 1
+
+
+def evaluate_ci(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool) -> AnyCI:
     """Run fp32-master CI parameters and their captured inputs in compute precision."""
     compute_ci_fn = cast_floating(ci_fn, COMPUTE_DT)
     compute_taps = cast_floating(taps, COMPUTE_DT)
     return compute_ci_fn(compute_taps, remat=remat)
 
 
-def ci_preactivations(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool) -> SiteDict:
+def evaluate_ci_role(ci_fn: CIFn, taps: dict[str, Array], *, remat: bool, role: CIRole) -> CI:
+    """One role's bundle — the seam for consumers (evals, probes) that score a single role."""
+    return ci_for_role(evaluate_ci(ci_fn, taps, remat=remat), role)
+
+
+def ci_preactivations(
+    ci_fn: CIFn, taps: dict[str, Array], *, remat: bool, role: CIRole = "output"
+) -> SiteDict:
     """Evaluate CI in compute precision and expose fp32 preactivations for metric reductions."""
-    return cast_floating(evaluate_ci(ci_fn, taps, remat=remat).preactivations, jnp.float32)
+    ci = evaluate_ci_role(ci_fn, taps, remat=remat, role=role)
+    return cast_floating(ci.preactivations, jnp.float32)
 
 
 # ----------------------------- transformer building blocks -----------------------------
@@ -393,6 +485,16 @@ class ChunkTransformer(eqx.Module):
     blocks: list[CIBlock]
     out_ws: tuple[Float[Array, "d_model _C"], ...]
     out_bs: tuple[Float[Array, " _C"], ...]
+    hidden_out_ws: tuple[Float[Array, "d_model _C"], ...]
+    hidden_out_bs: tuple[Float[Array, " _C"], ...]
+    """The SECOND readout head (SPEC S36), empty tuples in a single-role fn. `in_proj_*` and
+    `blocks` — everything before the readout — are the TRUNK and are shared by construction:
+    there is one set of trunk arrays in the pytree, so both roles read one representation and
+    one `eqx.filter_vjp` pullback sums both heads' trunk gradients. This is the JAX analogue of
+    the torch `GlobalSharedTransformerCiFn.adopt_trunk` module-identity sharing, minus its two
+    traps: the trunk cannot be double-counted by an optimizer (it appears once in the tree) and
+    a shared-trunk checkpoint cannot be confused with an independent-pair one (the pytree shape
+    differs), so no load-time value comparison is needed."""
 
     def shardings(self, mesh: Mesh) -> "ChunkTransformer":
         """True ÷N ZeRO-1 PERSISTENCE layout (master + Adam shard over the FULL mesh); leading
@@ -421,15 +523,24 @@ class ChunkTransformer(eqx.Module):
         assert self.in_proj_w.shape[2] % n_data == 0, (
             f"ChunkTransformer in_proj_w d_model {self.in_proj_w.shape[2]} not ÷ {n_data}"
         )
-        for slot, w in enumerate(self.out_ws):
-            assert w.shape[1] % n_data == 0, (
-                f"ChunkTransformer out_ws[{slot}] d_model {w.shape[1]} not ÷ {n_data}"
-            )
-            assert w.shape[2] % n_tp == 0, (
-                f"ChunkTransformer out_ws[{slot}] C {w.shape[2]} not ÷ tp={n_tp}"
-            )
+        for head, ws in (("out_ws", self.out_ws), ("hidden_out_ws", self.hidden_out_ws)):
+            for slot, w in enumerate(ws):
+                assert w.shape[1] % n_data == 0, (
+                    f"ChunkTransformer {head}[{slot}] d_model {w.shape[1]} not ÷ {n_data}"
+                )
+                assert w.shape[2] % n_tp == 0, (
+                    f"ChunkTransformer {head}[{slot}] C {w.shape[2]} not ÷ tp={n_tp}"
+                )
         return eqx.tree_at(
-            lambda ct: (ct.in_proj_w, ct.in_proj_b, ct.blocks, ct.out_ws, ct.out_bs),
+            lambda ct: (
+                ct.in_proj_w,
+                ct.in_proj_b,
+                ct.blocks,
+                ct.out_ws,
+                ct.out_bs,
+                ct.hidden_out_ws,
+                ct.hidden_out_bs,
+            ),
             self,
             (
                 in_proj_sh,
@@ -437,6 +548,10 @@ class ChunkTransformer(eqx.Module):
                 [b.shardings(mesh) for b in self.blocks],
                 tuple(out_ws_sh for _ in self.out_ws),
                 tuple(repl for _ in self.out_bs),
+                # The hidden head shards exactly like the output head: both are
+                # `[nc, d_model, C_j]` readouts off the same trunk.
+                tuple(out_ws_sh for _ in self.hidden_out_ws),
+                tuple(repl for _ in self.hidden_out_bs),
             ),
         )
 
@@ -444,14 +559,21 @@ class ChunkTransformer(eqx.Module):
         self,
         x: Float[Array, "*leading total_d_in"],
         inv_freq: Array,
-    ) -> tuple[Float[Array, "*leading _C"], ...]:
+    ) -> tuple[tuple[Float[Array, "*leading _C"], ...], ...]:
+        """`(per-slot output preacts, per-slot hidden preacts)` — the hidden tuple EMPTY in a
+        single-role fn. The trunk below runs ONCE; the heads are the only per-role work."""
         x = einops.einsum(x, self.in_proj_w, "... i, i o -> ... o") + self.in_proj_b
         for block in self.blocks:
             x = block(x, inv_freq)
-        return tuple(
-            einops.einsum(x, w, "... i, i o -> ... o") + b
-            for w, b in zip(self.out_ws, self.out_bs, strict=True)
-        )
+
+        def readout(
+            ws: tuple[Array, ...], bs: tuple[Array, ...]
+        ) -> tuple[Float[Array, "*leading _C"], ...]:
+            return tuple(
+                einops.einsum(x, w, "... i, i o -> ... o") + b for w, b in zip(ws, bs, strict=True)
+            )
+
+        return (readout(self.out_ws, self.out_bs), readout(self.hidden_out_ws, self.hidden_out_bs))
 
 
 def _reconstruct_ci_compute_weights(chunks: "ChunkTransformer") -> "ChunkTransformer":
@@ -508,12 +630,15 @@ def _reconstruct_ci_compute_weights(chunks: "ChunkTransformer") -> "ChunkTransfo
 
     pinned_blocks = [pin_block(blk) for blk in chunks.blocks]
     return eqx.tree_at(
-        lambda ct: (ct.in_proj_w, ct.blocks, ct.out_ws),
+        lambda ct: (ct.in_proj_w, ct.blocks, ct.out_ws, ct.hidden_out_ws),
         chunks,
         (
             pin(chunks.in_proj_w, in_proj_c),  # [nc, total_d_in÷tp, d_model÷fsdp] — row-parallel
             pinned_blocks,
             tuple(pin(w, out_ws_axis) for w in chunks.out_ws),  # [nc, d_model÷fsdp, C÷tp]
+            # The hidden head is a readout like the output head — same layout, same reason.
+            # Empty in a single-role fn, where this is a no-op on an empty tuple.
+            tuple(pin(w, out_ws_axis) for w in chunks.hidden_out_ws),
         ),
     )
 
@@ -534,6 +659,7 @@ class ChunkwiseTransformerCIFn(eqx.Module):
     chunk_meta: tuple[_ChunkMeta, ...] = eqx.field(static=True)  # per-chunk routing
     eps: float = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
+    roles: tuple[CIRole, ...] = eqx.field(static=True)
 
     def shardings(self, mesh: Mesh) -> "ChunkwiseTransformerCIFn":
         """The stacked per-chunk transformer's HSDP layout (`ChunkTransformer.shardings`,
@@ -544,7 +670,7 @@ class ChunkwiseTransformerCIFn(eqx.Module):
             (self.chunks.shardings(mesh), NamedSharding(mesh, P())),
         )
 
-    def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI:
+    def __call__(self, taps: dict[str, Array], *, remat: bool) -> AnyCI:
         per_chunk_in = [
             jnp.concatenate(
                 [_weightless_rms_norm(taps[k], self.eps) for k in m.input_taps], axis=-1
@@ -568,7 +694,7 @@ class ChunkwiseTransformerCIFn(eqx.Module):
 
         def run_chunk(
             _: None, scanned: tuple[ChunkTransformer, Array]
-        ) -> tuple[None, tuple[Array, ...]]:
+        ) -> tuple[None, tuple[tuple[Array, ...], ...]]:
             chunk_array, chunk_input = scanned
             chunk = eqx.combine(chunk_array, chunk_static)
             return None, chunk(chunk_input, inv_freq)
@@ -597,12 +723,26 @@ class ChunkwiseTransformerCIFn(eqx.Module):
         )
 
         body = jax.checkpoint(run_chunk, policy=policy)
-        _, stacked_per_slot = jax.lax.scan(body, None, (chunk_arrays, stacked_in))
-        preactivations: SiteDict = {}
-        for chunk_idx, m in enumerate(self.chunk_meta):
-            for slot, site in enumerate(m.output_sites):
-                preactivations[site] = stacked_per_slot[slot][chunk_idx]
-        return CI.from_preactivations(preactivations)
+        _, stacked_per_role = jax.lax.scan(body, None, (chunk_arrays, stacked_in))
+
+        def scatter(stacked_per_slot: tuple[Array, ...]) -> SiteDict:
+            preactivations: SiteDict = {}
+            for chunk_idx, m in enumerate(self.chunk_meta):
+                for slot, site in enumerate(m.output_sites):
+                    preactivations[site] = stacked_per_slot[slot][chunk_idx]
+            return preactivations
+
+        output_stacked, hidden_stacked = stacked_per_role
+        match self.roles:
+            case ("output",):
+                return CI.from_preactivations(scatter(output_stacked))
+            case _:
+                # ONE scan produced both heads: the trunk ran once, and the two heads' slot
+                # tuples come back stacked side by side.
+                return DualCI(
+                    output=CI.from_preactivations(scatter(output_stacked)),
+                    hidden=CI.from_preactivations(scatter(hidden_stacked)),
+                )
 
 
 def _init_chunk_transformer(
@@ -610,6 +750,8 @@ def _init_chunk_transformer(
     total_d_in: int,
     slot_cs: tuple[int, ...],
     key: PRNGKeyArray,
+    *,
+    dual: bool = False,
 ) -> ChunkTransformer:
     """One chunk's params, same Kaiming scheme as the old global transformer: relu-gain
     (√2) on in_proj / MLP-in, linear gain (1) on out / MLP-out, PyTorch-default
@@ -658,22 +800,42 @@ def _init_chunk_transformer(
 
     in_key, out_key, *block_keys = jax.random.split(key, arch.n_blocks + 2)
     c_chunk = sum(slot_cs)
-    glued_w = kaiming(out_key, (d, c_chunk), d, 1.0)
-    glued_b = jnp.zeros((c_chunk,))
     offsets = [0]
     for c in slot_cs:
         offsets.append(offsets[-1] + c)
+
+    def head(head_key: PRNGKeyArray) -> tuple[tuple[Array, ...], tuple[Array, ...]]:
+        glued_w = kaiming(head_key, (d, c_chunk), d, 1.0)
+        glued_b = jnp.zeros((c_chunk,))
+        return (
+            tuple(glued_w[:, offsets[j] : offsets[j + 1]] for j in range(len(slot_cs))),
+            tuple(glued_b[offsets[j] : offsets[j + 1]] for j in range(len(slot_cs))),
+        )
+
+    out_ws, out_bs = head(out_key)
+    # The hidden head folds off `out_key` rather than widening the split: the split COUNT
+    # determines every derived key, so taking one more would redraw the trunk and move the
+    # equivalence goldens. Folding leaves a single-role fn bit-identical AND makes a dual
+    # run's trunk and output head bit-identical to a single-role run at the same seed — so
+    # the two topologies are comparable from step 0.
+    hidden_out_ws, hidden_out_bs = head(jax.random.fold_in(out_key, 1)) if dual else ((), ())
     return ChunkTransformer(
         in_proj_w=kaiming(in_key, (total_d_in, d), total_d_in, relu_gain),
         in_proj_b=jnp.zeros((d,)),
         blocks=[block(bk) for bk in block_keys],
-        out_ws=tuple(glued_w[:, offsets[j] : offsets[j + 1]] for j in range(len(slot_cs))),
-        out_bs=tuple(glued_b[offsets[j] : offsets[j + 1]] for j in range(len(slot_cs))),
+        out_ws=out_ws,
+        out_bs=out_bs,
+        hidden_out_ws=hidden_out_ws,
+        hidden_out_bs=hidden_out_bs,
     )
 
 
 def init_chunkwise_transformer_ci_fn(
-    arch: ChunkwiseTransformerCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray
+    arch: ChunkwiseTransformerCIArch,
+    sites: tuple[SiteSpec, ...],
+    key: PRNGKeyArray,
+    *,
+    dual: bool = False,
 ) -> ChunkwiseTransformerCIFn:
     """Validate the output partition + chunk homogeneity, then build STACKED chunk params.
 
@@ -713,7 +875,7 @@ def init_chunkwise_transformer_ci_fn(
     # with chunk count (multi-minute at tens of chunks).
     chunk_keys = jax.vmap(lambda i: jax.random.fold_in(key, i))(jnp.arange(len(arch.chunks)))
     stacked: ChunkTransformer = eqx.filter_vmap(
-        lambda k: _init_chunk_transformer(arch, arch.input_dim, slot_cs, k)
+        lambda k: _init_chunk_transformer(arch, arch.input_dim, slot_cs, k, dual=dual)
     )(chunk_keys)
 
     return ChunkwiseTransformerCIFn(
@@ -724,6 +886,7 @@ def init_chunkwise_transformer_ci_fn(
         chunk_meta=tuple(_ChunkMeta(ch.input_taps, ch.output_sites) for ch in arch.chunks),
         eps=CI_FN_RMS_EPS,
         has_position_axis=True,
+        roles=DUAL_CI_ROLES if dual else ("output",),
     )
 
 
@@ -758,6 +921,13 @@ class SiteMLP(eqx.Module):
 
     weights: list[Float[Array, "d_in d_out"]]
     biases: list[Float[Array, " d_out"]]
+    hidden_head: tuple[Float[Array, "d_in C"], Float[Array, " C"]] | None
+    """The SECOND readout head (SPEC S36) — a replacement for the FINAL layer only, `None` in a
+    single-role fn. The GELU stack up to it is the TRUNK and is shared by construction: it
+    appears once in the pytree, so both roles read one representation and one pullback sums
+    both heads' trunk gradients. Mirrors `ChunkTransformer`'s split — the head is the only
+    part that must be private, because it is where "how much does this subcomponent matter FOR
+    THIS OBJECTIVE" lives."""
 
     def shardings(self, mesh: Mesh) -> "SiteMLP":
         """Each `[d_in, d_out]` weight shards its OUTPUT axis (axis 1) ÷N over the FULL mesh
@@ -772,19 +942,41 @@ class SiteMLP(eqx.Module):
             assert w.shape[1] % n == 0, (
                 f"SiteMLP.weights[{layer_idx}].d_out {w.shape[1]} not ÷ N={n}"
             )
-        return eqx.tree_at(
+        sharded = eqx.tree_at(
             lambda m: (m.weights, m.biases),
             self,
             ([shard_out] * len(self.weights), [repl] * len(self.biases)),
         )
+        if self.hidden_head is not None:
+            assert self.hidden_head[0].shape[1] % n == 0, (
+                f"SiteMLP.hidden_head C {self.hidden_head[0].shape[1]} not ÷ N={n}"
+            )
+            sharded = eqx.tree_at(
+                lambda m: m.hidden_head, sharded, (shard_out, repl), is_leaf=lambda x: x is None
+            )
+        return sharded
 
     def __call__(self, x: Float[Array, "*leading d_in"]) -> Float[Array, "*leading C"]:
+        return self.role_preactivations(x)[0]
+
+    def role_preactivations(
+        self, x: Float[Array, "*leading d_in"]
+    ) -> tuple[Float[Array, "*leading C"], ...]:
+        """One preactivation per role: `(output,)`, or `(output, hidden)` when a hidden head
+        exists. The trunk runs ONCE and both heads read its output."""
         n_hidden = len(self.weights) - 1
-        for layer_idx, (w, b) in enumerate(zip(self.weights, self.biases, strict=True)):
+        for layer_idx, (w, b) in enumerate(zip(self.weights[:-1], self.biases[:-1], strict=True)):
             x = einops.einsum(x, w, "... i, i o -> ... o") + b
             if layer_idx < n_hidden:
                 x = jax.nn.gelu(x, approximate=False)
-        return x
+
+        def readout(w: Array, b: Array) -> Array:
+            return einops.einsum(x, w, "... i, i o -> ... o") + b
+
+        output = readout(self.weights[-1], self.biases[-1])
+        if self.hidden_head is None:
+            return (output,)
+        return (output, readout(*self.hidden_head))
 
 
 class LayerwiseMLPCIFn(eqx.Module):
@@ -794,6 +986,7 @@ class LayerwiseMLPCIFn(eqx.Module):
     input_names: tuple[str, ...] = eqx.field(static=True)
     output_names: tuple[str, ...] = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
+    roles: tuple[CIRole, ...] = eqx.field(static=True)
 
     @property
     def capture_keys(self) -> CaptureKeys:
@@ -807,22 +1000,34 @@ class LayerwiseMLPCIFn(eqx.Module):
         )
 
     def site_preactivations(self, taps: dict[str, Array]) -> dict[str, Array]:
+        return self.role_site_preactivations(taps)[0]
+
+    def role_site_preactivations(self, taps: dict[str, Array]) -> tuple[dict[str, Array], ...]:
+        """One site-dict per role, in `roles` order. Each site's trunk runs once."""
         assert set(taps) == set(self.input_names), (
             f"tap keys {sorted(taps)} != CI fn inputs {sorted(self.input_names)}"
         )
-        return {
-            output_name: self.site_mlps[output_name](taps[input_name])
+        per_site = {
+            output_name: self.site_mlps[output_name].role_preactivations(taps[input_name])
             for input_name, output_name in zip(self.input_names, self.output_names, strict=True)
         }
+        return tuple(
+            {name: roles[role_idx] for name, roles in per_site.items()}
+            for role_idx in range(len(self.roles))
+        )
 
-    def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI:
+    def __call__(self, taps: dict[str, Array], *, remat: bool) -> AnyCI:
         del remat  # single-shot (no scan to bound) -> remat is a no-op for the MLP CI fns
-        return CI.from_preactivations(self.site_preactivations(taps))
+        return _bundle(self.roles, self.role_site_preactivations(taps))
 
 
-def _init_mlp_stack(dims: tuple[int, ...], key: PRNGKeyArray) -> SiteMLP:
+def _init_mlp_stack(dims: tuple[int, ...], key: PRNGKeyArray, *, dual: bool = False) -> SiteMLP:
     """One `Linear+GELU` stack `dims[0] -> ... -> dims[-1]`: Kaiming `relu`-gain (`√2`) on
-    the hidden layers, linear gain (`1`) on the final head, zero biases."""
+    the hidden layers, linear gain (`1`) on the final head, zero biases.
+
+    A dual stack adds a SECOND final head drawn off a fold of the final head's own key, so the
+    trunk and the output head stay bit-identical to a single-role stack at the same seed (the
+    split count is unchanged) — same rationale as `_init_chunk_transformer`."""
     relu_gain = 2.0**0.5
     layer_keys = jax.random.split(key, len(dims) - 1)
     weights: list[Array] = []
@@ -831,17 +1036,28 @@ def _init_mlp_stack(dims: tuple[int, ...], key: PRNGKeyArray) -> SiteMLP:
         gain = relu_gain if layer_idx < len(dims) - 2 else 1.0
         weights.append(jax.random.normal(layer_keys[layer_idx], (d_in, d_out)) * (gain / d_in**0.5))
         biases.append(jnp.zeros((d_out,)))
-    return SiteMLP(weights=weights, biases=biases)
+    hidden_head = None
+    if dual:
+        d_in, d_out = dims[-2], dims[-1]
+        hidden_w = (
+            jax.random.normal(jax.random.fold_in(layer_keys[-1], 1), (d_in, d_out)) / d_in**0.5
+        )
+        hidden_head = (hidden_w, jnp.zeros((d_out,)))
+    return SiteMLP(weights=weights, biases=biases, hidden_head=hidden_head)
 
 
 def init_layerwise_mlp_ci_fn(
-    arch: LayerwiseMLPCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray
+    arch: LayerwiseMLPCIArch,
+    sites: tuple[SiteSpec, ...],
+    key: PRNGKeyArray,
+    *,
+    dual: bool = False,
 ) -> LayerwiseMLPCIFn:
     """Per-site MLP init: each site's MLP maps `d_in -> hidden_dims... -> C`."""
     assert arch.hidden_dims, "MLP CI fn needs at least one hidden layer"
     site_mlps = {
         spec.name: _init_mlp_stack(
-            (spec.d_in, *arch.hidden_dims, spec.C), jax.random.fold_in(key, site_idx)
+            (spec.d_in, *arch.hidden_dims, spec.C), jax.random.fold_in(key, site_idx), dual=dual
         )
         for site_idx, spec in enumerate(sites)
     }
@@ -853,6 +1069,7 @@ def init_layerwise_mlp_ci_fn(
         input_names=arch.input_names,
         output_names=output_names,
         has_position_axis=arch.has_position_axis,
+        roles=DUAL_CI_ROLES if dual else ("output",),
     )
 
 
@@ -894,6 +1111,7 @@ class GlobalMLPCIFn(eqx.Module):
     output_names: tuple[str, ...] = eqx.field(static=True)
     c_sizes: tuple[int, ...] = eqx.field(static=True)
     has_position_axis: bool = eqx.field(static=True)
+    roles: tuple[CIRole, ...] = eqx.field(static=True)
 
     @property
     def capture_keys(self) -> CaptureKeys:
@@ -903,6 +1121,10 @@ class GlobalMLPCIFn(eqx.Module):
         return eqx.tree_at(lambda f: f.mlp, self, self.mlp.shardings(mesh))
 
     def site_preactivations(self, taps: dict[str, Array]) -> dict[str, Array]:
+        return self.role_site_preactivations(taps)[0]
+
+    def role_site_preactivations(self, taps: dict[str, Array]) -> tuple[dict[str, Array], ...]:
+        """One site-dict per role, in `roles` order. The shared MLP trunk runs once."""
         assert set(taps) == {tap.key for tap in self.input_taps}, (
             f"tap keys {sorted(taps)} != CI fn inputs {sorted(t.key for t in self.input_taps)}"
         )
@@ -911,22 +1133,28 @@ class GlobalMLPCIFn(eqx.Module):
                 f"tap {tap.key} width {taps[tap.key].shape[-1]} != expected {tap.width}"
             )
         concatenated = jnp.concatenate([taps[tap.key] for tap in self.input_taps], axis=-1)
-        preactivations = self.mlp(concatenated)
         offsets = [0]
         for c in self.c_sizes:
             offsets.append(offsets[-1] + c)
-        return {
-            name: preactivations[..., offsets[i] : offsets[i + 1]]
-            for i, name in enumerate(self.output_names)
-        }
+        return tuple(
+            {
+                name: preactivations[..., offsets[i] : offsets[i + 1]]
+                for i, name in enumerate(self.output_names)
+            }
+            for preactivations in self.mlp.role_preactivations(concatenated)
+        )
 
-    def __call__(self, taps: dict[str, Array], *, remat: bool) -> CI:
+    def __call__(self, taps: dict[str, Array], *, remat: bool) -> AnyCI:
         del remat  # single-shot (no scan to bound) -> remat is a no-op for the MLP CI fns
-        return CI.from_preactivations(self.site_preactivations(taps))
+        return _bundle(self.roles, self.role_site_preactivations(taps))
 
 
 def init_global_mlp_ci_fn(
-    arch: GlobalMLPCIArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray
+    arch: GlobalMLPCIArch,
+    sites: tuple[SiteSpec, ...],
+    key: PRNGKeyArray,
+    *,
+    dual: bool = False,
 ) -> GlobalMLPCIFn:
     """Global MLP init: one stack `Σ tap width -> hidden_dims... -> Σ C`, same Kaiming
     scheme as the per-site MLP."""
@@ -936,11 +1164,12 @@ def init_global_mlp_ci_fn(
     c_sizes = tuple(s.C for s in sites)
     dims = (sum(tap.width for tap in arch.input_taps), *arch.hidden_dims, sum(c_sizes))
     return GlobalMLPCIFn(
-        mlp=_init_mlp_stack(dims, key),
+        mlp=_init_mlp_stack(dims, key, dual=dual),
         input_taps=arch.input_taps,
         output_names=tuple(s.name for s in sites),
         c_sizes=c_sizes,
         has_position_axis=arch.has_position_axis,
+        roles=DUAL_CI_ROLES if dual else ("output",),
     )
 
 
@@ -952,13 +1181,19 @@ CIFnArch = ChunkwiseTransformerCIArch | LayerwiseMLPCIArch | GlobalMLPCIArch
 a separate, scale-driven concern (see `init_placed`), never coupled to arch type."""
 
 
-def build_ci_fn(arch: CIFnArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray) -> CIFn:
+def build_ci_fn(
+    arch: CIFnArch, sites: tuple[SiteSpec, ...], key: PRNGKeyArray, *, dual: bool = False
+) -> CIFn:
     """Construct the CI fn for `arch`, host-side and unsharded. Placement is applied by the
-    caller by SCALE (mesh × C-divisibility), never by which arch this is."""
+    caller by SCALE (mesh × C-divisibility), never by which arch this is.
+
+    `dual` builds the second readout head off the SAME trunk (SPEC S36). It is an arch-wide
+    property, not a per-arch one: every impl splits at its own final readout, so a dual run
+    can use any of them."""
     match arch:
         case ChunkwiseTransformerCIArch():
-            return init_chunkwise_transformer_ci_fn(arch, sites, key)
+            return init_chunkwise_transformer_ci_fn(arch, sites, key, dual=dual)
         case LayerwiseMLPCIArch():
-            return init_layerwise_mlp_ci_fn(arch, sites, key)
+            return init_layerwise_mlp_ci_fn(arch, sites, key, dual=dual)
         case GlobalMLPCIArch():
-            return init_global_mlp_ci_fn(arch, sites, key)
+            return init_global_mlp_ci_fn(arch, sites, key, dual=dual)

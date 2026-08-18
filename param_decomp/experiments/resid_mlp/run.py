@@ -25,7 +25,7 @@ from jax.sharding import PartitionSpec as P
 
 from param_decomp.core import placement
 from param_decomp.core.built_run import BuiltRun
-from param_decomp.core.ci_fn import CIFn
+from param_decomp.core.ci_fn import CIFn, ci_for_role
 from param_decomp.core.components import SiteC
 from param_decomp.core.eval_schedule import Every
 from param_decomp.core.log import setup_logger
@@ -195,7 +195,11 @@ def run_resid_mlp_decomposition(
         model: resid_mlp.ResidMLPDecomposedModel, ci_fn: CIFn
     ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
         resid = resid_mlp.single_feature_probe(target_cfg.n_features) @ model.target.W_E
-        ci = ci_fn(model.clean_forward(resid, ci_fn.capture_keys).captures, remat=False)
+        # The toy identity-CI probe reads the OUTPUT role: it asks whether a single input feature
+        # lights exactly one component for RECONSTRUCTING THE OUTPUT, the toy's whole claim.
+        ci = ci_for_role(
+            ci_fn(model.clean_forward(resid, ci_fn.capture_keys).captures, remat=False), "output"
+        )
         return ci.lower, ci.upper
 
     # `mlp_out` targets DENSE recovery (every d_mlp direction stays live), not identity —

@@ -23,9 +23,11 @@ body from — so a second factory (a tPD two-pass step) shares the machinery wit
 mirrored body.
 """
 
+import functools
+import operator
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Literal, cast
+from dataclasses import dataclass, replace
+from typing import Any, Literal, NamedTuple, cast
 
 import equinox as eqx
 import jax
@@ -38,7 +40,17 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 
 from param_decomp.core.adversary import PersistentAdversary, init_fresh_pgd_sources
-from param_decomp.core.ci_fn import CI, CIFn, evaluate_ci
+from param_decomp.core.ci_fn import (
+    CI,
+    AnyCI,
+    CIFn,
+    CIRole,
+    DualCI,
+    ci_for_role,
+    evaluate_ci,
+    is_dual,
+    output_ci,
+)
 from param_decomp.core.components import ComponentStacks, VUShape
 from param_decomp.core.configs import (
     LossCoeff,
@@ -81,6 +93,7 @@ from param_decomp.core.recon import (
     ConstantSources,
     ForwardObservations,
     FreshPGDSources,
+    HiddenActsOnlyReconstruction,
     MaskSourceStrategy,
     MixedPersistentStochasticSources,
     PersistentSources,
@@ -357,6 +370,35 @@ class _StepAtoms[PreparedT]:
         self.imp_loss_key = "imp_smooth_l0" if is_smooth_l0 else "imp"
         self.imp_min_param_key = "gamma_imp" if is_smooth_l0 else "p_imp"
 
+    def register_pass_terms(
+        self, terms: tuple[AnyReconLossTerm, ...], *, capture_keys: CaptureKeys
+    ) -> dict[str, CaptureKeys]:
+        """Resolve ANOTHER pass's per-term capture keys, and index its adversaries (SPEC T12).
+
+        Returns the pass's OWN name->keys table rather than merging into a shared one: loss
+        identities are unique WITHIN a pass, not across passes — the target and non-target
+        passes have always both spelled `StochasticReconLoss`, and their metrics do not collide
+        because every non-target key is pass-prefixed. `capture_keys` is the pass's: a hidden
+        pass's terms all capture its `points`, a property of the pass rather than of the term.
+
+        ADVERSARY state keys ARE a global namespace (they index `TrainState.adversaries`), so
+        those do merge here. Only target-stream passes carry any (T7), and
+        `TargetedPDConfig.validate_hidden_pass` refuses an identity shared between them."""
+        table: dict[str, CaptureKeys] = {}
+        for term in terms:
+            table[term.name] = capture_keys if capture_keys else term.hidden_acts_capture_keys
+            for entry in term.plan:
+                match entry.sources:
+                    case (
+                        PersistentSources(state_key=key)
+                        | MixedPersistentStochasticSources(state_key=key)
+                    ):
+                        previous = self.persistent_term_by_key.setdefault(key, term)
+                        assert previous is term, f"persistent source {key!r} feeds multiple terms"
+                    case _:
+                        pass
+        return table
+
     def shard_batch_tree[T](self, x: T) -> T:
         """Pin the leading (batch) axis of every array in the pytree. The batch and the
         model output are opaque protocol edges (`Any` — tokens for an LM, a dict or tuple
@@ -371,17 +413,28 @@ class _StepAtoms[PreparedT]:
         spec = (("replicate", "fsdp"), *((None,) * (x.ndim - 1)))
         return jax.lax.with_sharding_constraint(x, NamedSharding(self.mesh, P(*spec)))
 
-    def shard_ci(self, ci: CI) -> CI:
+    def shard_ci[T: AnyCI](self, ci: T) -> T:
         """Pin the CI-fn output batch over the full mesh, C REPLICATED — the layout `site_out`
         pins `x@V` to (SPEC §4.1), so the downstream mask multiply `xV * mask` needs no
         reshard. The explicit constraint stops GSPMD re-deciding it in the backward (same
         rationale as `site_out`'s activation pin, bf072ef01). `preactivations` is passed through
-        (unused in the step — only the squashings are; DCE drops it)."""
-        return CI(
-            preactivations=ci.preactivations,
-            lower={site: self._shard_ci_array(v) for site, v in ci.lower.items()},
-            upper={site: self._shard_ci_array(v) for site, v in ci.upper.items()},
-        )
+        (unused in the step — only the squashings are; DCE drops it).
+
+        A dual bundle pins BOTH heads: they are the same shape and feed the same mask
+        multiply, one per objective."""
+
+        def pin(bundle: CI) -> CI:
+            return CI(
+                preactivations=bundle.preactivations,
+                lower={site: self._shard_ci_array(v) for site, v in bundle.lower.items()},
+                upper={site: self._shard_ci_array(v) for site, v in bundle.upper.items()},
+            )
+
+        match ci:
+            case DualCI():
+                return cast("T", DualCI(output=pin(ci.output), hidden=pin(ci.hidden)))
+            case CI():
+                return cast("T", pin(ci))
 
     def replicate_for_ascend(self, prepared_weights: PreparedT) -> PreparedT:
         """Lever #5 (`runtime.ascend_replicate`): gather the ÷fsdp compute weights to
@@ -447,7 +500,7 @@ class _StepAtoms[PreparedT]:
 
     def ci_forward_vjp(
         self, ci_fn: CIFn, taps: dict[str, Array]
-    ) -> tuple[CI, Callable[[CI], tuple[Any]]]:
+    ) -> tuple[AnyCI, Callable[[AnyCI], tuple[Any]]]:
         """The CI envelope's value + vjp. The CI envelope is a pure fn of the taps, so it is
         forward-evaluated ONCE per stream — the ascents use the stop_gradient'd value; the
         loss takes the live value and its ci-fn grad is pulled back through the vjp."""
@@ -523,8 +576,10 @@ class _StepAtoms[PreparedT]:
         ci_lower: dict[str, Array],
         stream: StreamInputs,
         reconstruction: ReconstructionSpec,
+        capture_keys_by_term: dict[str, CaptureKeys] | None = None,
     ) -> Array:
         """Mean of one adversarial entry's fixed-source objective across its draws."""
+        keys_by_term = capture_keys_by_term or self.hidden_acts_capture_keys_by_term
         masks, delta_masks = masks_from_sources(ci_lower, sources, entry.live_sites)
         total = jnp.zeros((), jnp.float32)
         for routes in routes_per_draw:
@@ -535,7 +590,7 @@ class _StepAtoms[PreparedT]:
                 masking=MaterializedMasking(
                     component_masks=masks, weight_delta_masks=delta_masks, routes=routes
                 ),
-                capture_keys=self.hidden_acts_capture_keys_by_term[term.name],
+                capture_keys=keys_by_term[term.name],
                 reconstruction=reconstruction,
                 clean=stream.clean,
             )
@@ -552,8 +607,17 @@ class _StepAtoms[PreparedT]:
         key: PRNGKeyArray,
         step_f32: Array,
         reconstruction_specs: dict[str, ReconstructionSpec],
+        recon_terms: tuple[AnyReconLossTerm, ...] | None = None,
+        key_offset: int = 1,
+        capture_keys_by_term: dict[str, CaptureKeys] | None = None,
     ) -> AscendedAdversaries:
         """The step's whole ascent phase, params + CI detached (SPEC §4.5).
+
+        `recon_terms` / `adversaries` scope the phase to ONE pass: a tPD run with a hidden
+        pass (T12) ascends each pass's adversaries against ITS OWN CI head and ITS OWN
+        objective, so the two never share a source bundle. `key_offset` is that pass's RNG
+        offset (T9), keeping fresh-PGD draws disjoint across passes. The defaults are the
+        single-pass values, so a plain run's trace is byte-identical.
 
         Persistent adversaries each run their supplemental ascents vs the route-ALL
         all-sites forward (SPEC S24 — torch warmup parity, NOT the term's loss plan); the
@@ -561,6 +625,8 @@ class _StepAtoms[PreparedT]:
         lives in `PersistentAdversary`. Fresh-PGD entries draw routing ONCE per step,
         shared by all ascents and the main loss forward (SPEC S24); sign-ascend `n_steps`,
         then the sources are constants in the main backward (torch parity)."""
+
+        keys_by_term = capture_keys_by_term or self.hidden_acts_capture_keys_by_term
 
         def warmup_scoring_loss(term: AnyReconLossTerm) -> Callable[[dict[str, Array]], Array]:
             def objective(sources: dict[str, Array]) -> Array:
@@ -572,7 +638,7 @@ class _StepAtoms[PreparedT]:
                     masking=MaterializedMasking(
                         component_masks=masks, weight_delta_masks=delta_masks, routes=None
                     ),
-                    capture_keys=self.hidden_acts_capture_keys_by_term[term.name],
+                    capture_keys=keys_by_term[term.name],
                     reconstruction=reconstruction_specs[term.name],
                     clean=stream.clean,
                 ).total
@@ -591,8 +657,9 @@ class _StepAtoms[PreparedT]:
 
         fresh_sources: dict[tuple[int, int], dict[str, Array]] = {}
         fixed_routes: dict[tuple[int, int], tuple[Routes, ...]] = {}
-        for term_idx, term in enumerate(self.recon_terms):
-            term_key = random.fold_in(key, 1 + term_idx)
+        terms = self.recon_terms if recon_terms is None else recon_terms
+        for term_idx, term in enumerate(terms):
+            term_key = random.fold_in(key, key_offset + term_idx)
             for entry_idx, entry in enumerate(term.plan):
                 if not isinstance(entry.sources, FreshPGDSources):
                     continue
@@ -625,6 +692,7 @@ class _StepAtoms[PreparedT]:
                         ci_lower=ci_lower_detached,
                         stream=stream,
                         reconstruction=reconstruction_specs[term.name],
+                        capture_keys_by_term=keys_by_term,
                     )
 
                 def sign_ascend_body(
@@ -713,6 +781,7 @@ class _StepAtoms[PreparedT]:
         step_f32: Array,
         reconstruction_specs: dict[str, ReconstructionSpec],
         term_coeffs: dict[str, Array | float],
+        capture_keys_by_term: dict[str, CaptureKeys] | None = None,
     ) -> DrawLoss[MaskSourceStrategy]:
         """The main grid's per-draw dispatcher over the trainables: match the entry's
         mask-source strategy, run the masked forward, score against the stream's clean
@@ -721,6 +790,7 @@ class _StepAtoms[PreparedT]:
         Persistent(-carrying) draws take the coeff on their MODEL-SIDE inputs
         (`model_cotangents_scaled`) and enter the total at weight 1, so the fused
         backward hands each adversary `dL/ds` unscaled (SPEC S14')."""
+        keys_by_term = capture_keys_by_term or self.hidden_acts_capture_keys_by_term
 
         def draw_loss(
             term_idx: int,
@@ -811,7 +881,7 @@ class _StepAtoms[PreparedT]:
                     prepared_weights=draw_prepared,
                     batch=stream.batch,
                     masking=masking,
-                    capture_keys=self.hidden_acts_capture_keys_by_term[term.name],
+                    capture_keys=keys_by_term[term.name],
                     reconstruction=reconstruction_specs[term.name],
                     clean=stream.clean,
                 )
@@ -994,7 +1064,15 @@ def make_train_step[PreparedT](
         # value; `loss_fn` takes the live value and its ci-fn grad is pulled back through
         # `ci_vjp`. So the (≈10x-the-target) CI fn is forward-evaluated ONCE, not once detached
         # for the ascend + once inside the main backward.
-        ci, ci_vjp = atoms.ci_forward_vjp(decomposition.ci_fn, stream.taps)
+        # A PLAIN (non-targeted) run is single-role by construction — it has no hidden
+        # objective to score, so a dual CI fn here would train a head nothing reads. Refuse
+        # it at TRACE time (`roles` is a static field) rather than silently dropping it.
+        assert not is_dual(decomposition.ci_fn), (
+            "a plain decomposition objective was handed a DUAL CI fn: its hidden head has no "
+            "loss to answer to. Use the targeted (tPD) entry point, which owns the hidden pass."
+        )
+        ci_any, ci_vjp = atoms.ci_forward_vjp(decomposition.ci_fn, stream.taps)
+        ci = output_ci(ci_any)
         ci_lower_detached = jax.lax.stop_gradient(ci).lower
 
         ascended = atoms.ascend_adversaries(
@@ -1146,6 +1224,59 @@ def _scale_subcomponents(
     return ComponentStacks(stacks=stacks, site_slots=components.site_slots)
 
 
+type _NontargetSources = StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+"""The mask sources a non-target pass admits (SPEC T5), named so the grid's narrowing casts
+say which vocabulary they are narrowing to."""
+
+type _Trainable[PreparedT] = tuple[PreparedT, AnyCI, AnyCI, dict[str, dict[str, Array]]]
+"""What the tPD passes differentiate through: the compute weights, the target and non-target
+CI bundles (dual when the run has a hidden pass), and the persistent adversaries' warmed
+sources. EVERY pass sees the whole tuple; a pass that does not read a leaf simply yields a
+zero cotangent for it, which is what makes per-pass gradients sum to the fused gradient."""
+
+
+class _PassAux(NamedTuple):
+    """One pass's reportable results, carried out of its `value_and_grad` as aux."""
+
+    reported: Array
+    imp_lp: Array
+    imp_freq: Array
+    breakdowns: tuple[ReconstructionLoss, ...]
+
+
+@dataclass(frozen=True)
+class _PassPlan:
+    """One of the up-to-four tPD passes, as static description (SPEC T1/T12).
+
+    The cartesian product of {target, non-target} stream x {output, hidden} CI role. A pass is
+    fully described by which stream it reads, which CI head masks it, its recon terms, its
+    importance-minimality coefficient, and what its recon compares against — `points` empty
+    means the model output, non-empty means exactly those activations and nothing else."""
+
+    label: str
+    """Short identity, used as a dict key and in the named scope: `target`, `hidden`,
+    `nontarget`, `nontarget_hidden`."""
+    metric_prefix: str
+    """The pass's metric namespace, composed over the two axes this branch already
+    established: the STREAM prefix (`nontarget_data/`) and the CI-ROLE prefix
+    (`hidden_ci/`). The target-OUTPUT pass keeps the EMPTY prefix — its keys are the
+    unprefixed ones every tPD run has always logged, so a run's curves stay comparable
+    whether or not it carries a hidden pass."""
+    role: CIRole
+    on_target_stream: bool
+    terms: tuple[AnyReconLossTerm, ...]
+    impmin_coeff: LossCoeff
+    points: tuple[str, ...]
+    key_offset: int
+    """This pass's per-term RNG offset (SPEC T9/R1), disjoint from every other pass's."""
+    capture_keys_by_term: dict[str, CaptureKeys]
+    """What each of THIS pass's terms captures. Per pass, not global: two passes may
+    legitimately carry the same loss identity (`StochasticReconLoss` on both the target
+    and non-target passes) and mean different comparisons by it."""
+    adversary_keys: tuple[str, ...]
+    """The persistent bundles this pass's terms carry; empty off-target (SPEC T7)."""
+
+
 def make_targeted_train_step[PreparedT](
     model_static: DecomposedModel[PreparedT],
     *,
@@ -1159,27 +1290,47 @@ def make_targeted_train_step[PreparedT](
     ci_capture_keys: CaptureKeys,
     mesh: Mesh | None = None,
     ascend_replicate: bool = False,
+    sequential_passes: bool = False,
     compiler_options: dict[str, bool | int | str] | None = None,
 ):
-    """Build the tPD `step(model, state, batch, nontarget_batch, key)` (SPEC §11).
+    """Build the tPD `step(model, state, batch, nontarget_batch, key)` (SPEC §11 / T12).
 
-    Two passes over one shared `_StepAtoms` vocabulary, summed into ONE `value_and_grad`:
-    the TARGET pass runs the full decomposition objective (recon grid + adversary
-    ascents) on the narrow stream, and the NON-TARGET pass runs its delta-pinned grid +
-    importance-minimality on the broad stream. Each stream runs at its own natural
-    geometry (SPEC T8) and every position is scored. There is no faithfulness role
-    anywhere in it — `objective` cannot carry one.
+    Up to FOUR passes over one shared `_StepAtoms` vocabulary — {target, non-target} streams
+    x {output, hidden} CI roles — whose gradients SUM into one optimizer step (T1). The
+    TARGET-OUTPUT pass is the full decomposition objective (recon grid + adversary ascents)
+    on the narrow stream; the NON-TARGET pass runs its delta-pinned grid + importance-
+    minimality on the broad stream; the two HIDDEN passes (present only when the objective
+    carries them) repeat that structure against the CI fn's SECOND readout head, scored at
+    internal activations instead of the model output. Each stream runs at its own natural
+    geometry (T8). There is no faithfulness role anywhere in it.
 
-    The batch args are the streams in pass order: `batch` the target stream (whose global
-    batch is `pd.batch_size` — persistent sources size from it), `nontarget_batch` the
-    broad stream."""
-    # The library boundary behind `NontargetPass.recon`'s narrow type, for objectives
-    # built outside it (SPEC T5).
-    for term in objective.nontarget.recon:
+    `sequential_passes` chooses HOW the passes reach one gradient, not WHAT that gradient is:
+
+    - fused (default): one `value_and_grad` over the sum of every pass.
+    - sequential: one `value_and_grad` PER PASS, gradients added, with an
+      `optimization_barrier` threading the trainables through the accumulator between passes
+      so XLA cannot hoist the next pass's forwards ahead of the previous pass's backward.
+
+    The two are identical in exact arithmetic — summing per-pass gradients is precisely what
+    the fused backward does internally, and each pass's `value_and_grad` sees the same tuple
+    (a pass that does not read a leaf contributes a zero cotangent for it). They differ only in
+    buffer lifetime: the sequential form holds ONE pass's masked-forward residuals at a time
+    instead of every pass's at once, which is what keeps peak memory flat as passes are added.
+    `core/tests/test_dual_objective.py` pins the equality.
+
+    The batch args are the streams: `batch` the target stream (whose global batch is
+    `pd.batch_size` — persistent sources size from it), `nontarget_batch` the broad stream."""
+    # The library boundary behind the non-target passes' narrow types, for objectives built
+    # outside them (SPEC T5).
+    nontarget_pass_terms = objective.nontarget.recon + (
+        objective.nontarget_hidden.recon if objective.nontarget_hidden is not None else ()
+    )
+    for term in nontarget_pass_terms:
         for entry in term.plan:
             assert isinstance(
                 entry.sources, StochasticSources | ConstantSources | UnmaskedNoDeltaSources
             ), term.name
+
     atoms = _StepAtoms(
         model_static,
         recon_terms=objective.target.recon,
@@ -1193,7 +1344,112 @@ def make_targeted_train_step[PreparedT](
         mesh=mesh,
         ascend_replicate=ascend_replicate,
     )
-    nt_terms = objective.nontarget.recon
+
+    if objective.hidden_points:
+        # The same refusal the S35 rider's points get: a point no masking can reach would
+        # contribute guaranteed zeros to the pass's point mean and silently weaken it.
+        model_static.assert_hidden_acts_reconstruction_points(
+            tuple(sorted(objective.hidden_points))
+        )
+
+    # Pass ORDER is load-bearing for RNG only (T9): each pass's per-term keys derive from its
+    # `key_offset`, and the offsets run in this order. Target-output then non-target keeps a
+    # run WITHOUT hidden passes byte-identical to the pre-T12 step; the hidden passes offset
+    # past both, so adding them does not move an existing run's draws.
+    plans: list[_PassPlan] = []
+    key_offset = 1
+
+    def add_pass(
+        label: str,
+        metric_prefix: str,
+        role: CIRole,
+        on_target_stream: bool,
+        terms: tuple[AnyReconLossTerm, ...],
+        impmin_coeff: LossCoeff,
+        points: tuple[str, ...],
+    ) -> None:
+        nonlocal key_offset
+        plans.append(
+            _PassPlan(
+                label=label,
+                metric_prefix=metric_prefix,
+                role=role,
+                on_target_stream=on_target_stream,
+                terms=terms,
+                impmin_coeff=impmin_coeff,
+                points=points,
+                key_offset=key_offset,
+                capture_keys_by_term={},
+                adversary_keys=(),
+            )
+        )
+        key_offset += len(terms)
+
+    add_pass("target", "", "output", True, objective.target.recon, objective.target.imp.coeff, ())
+    add_pass(
+        "nontarget",
+        "nontarget_data/",
+        "output",
+        False,
+        cast("tuple[AnyReconLossTerm, ...]", objective.nontarget.recon),
+        objective.nontarget.impmin_coeff,
+        (),
+    )
+    if objective.hidden is not None:
+        add_pass(
+            "hidden",
+            "hidden_ci/",
+            "hidden",
+            True,
+            objective.hidden.recon,
+            objective.hidden.impmin_coeff,
+            objective.hidden.points,
+        )
+    if objective.nontarget_hidden is not None:
+        add_pass(
+            "nontarget_hidden",
+            "nontarget_data/hidden_ci/",
+            "hidden",
+            False,
+            cast("tuple[AnyReconLossTerm, ...]", objective.nontarget_hidden.recon),
+            objective.nontarget_hidden.impmin_coeff,
+            objective.nontarget_hidden.points,
+        )
+
+    # Each pass resolves its own per-term capture keys and registers its adversaries; the
+    # FIRST pass is `atoms.recon_terms`, already resolved in `_StepAtoms.__init__`.
+    # `adversary_keys` scopes the ascent phase to the bundles this pass's own terms carry
+    # (T7: only target-stream passes have any), resolved statically so the step never
+    # scans the state dict.
+    def resolved(plan: _PassPlan, first: bool) -> _PassPlan:
+        table = (
+            atoms.hidden_acts_capture_keys_by_term
+            if first
+            else atoms.register_pass_terms(plan.terms, capture_keys=frozenset(plan.points))
+        )
+        return replace(
+            plan,
+            capture_keys_by_term=table,
+            adversary_keys=tuple(
+                state_key
+                for state_key, term in atoms.persistent_term_by_key.items()
+                if term in plan.terms
+            ),
+        )
+
+    passes = tuple(resolved(plan, first=i == 0) for i, plan in enumerate(plans))
+    for plan in passes:
+        assert plan.on_target_stream or not plan.adversary_keys, (
+            f"pass {plan.label!r} runs off-target but carries adversaries (SPEC T7)"
+        )
+
+    target_stream_capture_keys = atoms.hidden_acts_capture_keys | frozenset(
+        point for plan in passes if plan.on_target_stream for point in plan.points
+    )
+    nontarget_stream_capture_keys = frozenset(
+        point for plan in passes if not plan.on_target_stream for point in plan.points
+    )
+
     coeff_schedules: dict[str, LossCoeff] = {
         objective.target.imp.name: objective.target.imp.coeff,
         **{term.name: term.coeff for term in objective.target.recon},
@@ -1209,10 +1465,15 @@ def make_targeted_train_step[PreparedT](
         )
 
     imp_name = objective.target.imp.name
-    nontarget_coeff_schedules: dict[str, LossCoeff] = {
-        imp_name: objective.nontarget.impmin_coeff,
-        **{term.name: term.coeff for term in nt_terms},
-    }
+    # Each non-target-output pass's schedules live under its OWN namespace, the same
+    # mapping the non-target pass has always used.
+    other_pass_schedules: list[tuple[str, dict[str, LossCoeff]]] = [
+        (
+            plan.metric_prefix,
+            {imp_name: plan.impmin_coeff, **{t.name: t.coeff for t in plan.terms}},
+        )
+        for plan in plans[1:]
+    ]
 
     def nontarget_draw_loss(
         model: DecomposedModel[PreparedT],
@@ -1220,10 +1481,11 @@ def make_targeted_train_step[PreparedT](
         nt_ci: CI,
         nt_stream: StreamInputs,
         nt_reconstruction_specs: dict[str, ReconstructionSpec],
+        capture_keys_by_term: dict[str, CaptureKeys],
     ) -> DrawLoss[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]:
         """The non-target grid's per-draw dispatcher: every delta mask pinned to 1.0 —
-        except the unmasked-no-delta arm, which pins it to 0.0 (SPEC T4) — scored
-        against the broad stream's frozen output."""
+        except the unmasked-no-delta arm, which pins it to 0.0 (SPEC T4) — scored against the
+        broad stream's frozen output, or (non-target HIDDEN pass) its frozen activations."""
 
         def draw_loss(
             term_idx: int,
@@ -1257,7 +1519,7 @@ def make_targeted_train_step[PreparedT](
                         weight_delta_masks=delta_masks,
                         routes=routes,
                     ),
-                    capture_keys=frozenset(),
+                    capture_keys=capture_keys_by_term[term.name],
                     reconstruction=nt_reconstruction_specs[term.name],
                     clean=nt_stream.clean,
                 )
@@ -1275,153 +1537,214 @@ def make_targeted_train_step[PreparedT](
         decomposition = state.decomposition
         training = state.training
         step_f32 = training.step.astype(jnp.float32)
+        assert is_dual(decomposition.ci_fn) == any(plan.role == "hidden" for plan in passes), (
+            "the CI fn's head count and the objective's pass roles disagree: a hidden pass "
+            "needs `decomposition.ci.dual`, and a dual CI fn needs a hidden pass — otherwise "
+            "its second head would train against nothing"
+        )
         imp_min_param = annealed_imp_min_param(step_f32, atoms.total_steps, atoms.imp_min)
         # Every coefficient's per-step value, resolved once at the top of the step: the
         # loss math below sees only scalars, never schedule objects.
-        imp_coeff = coeff_at(step_f32, atoms.total_steps, atoms.imp_coeff)
         freq_coeff = coeff_at(step_f32, atoms.total_steps, atoms.freq_coeff)
-        recon_coeffs = tuple(
-            coeff_at(step_f32, atoms.total_steps, term.coeff) for term in atoms.recon_terms
-        )
-        term_coeffs: dict[str, Array | float] = {
-            term.name: coeff for term, coeff in zip(atoms.recon_terms, recon_coeffs, strict=True)
+        pass_impmin_coeff = {
+            plan.label: coeff_at(step_f32, atoms.total_steps, plan.impmin_coeff) for plan in passes
         }
-        nt_imp_coeff = coeff_at(step_f32, atoms.total_steps, objective.nontarget.impmin_coeff)
-        nt_recon_coeffs = tuple(
-            coeff_at(step_f32, atoms.total_steps, term.coeff) for term in nt_terms
-        )
-        reconstruction_specs = atoms.reconstruction_specs_at(atoms.recon_terms, step_f32)
-        nt_reconstruction_specs = atoms.reconstruction_specs_at(nt_terms, step_f32)
+        pass_term_coeffs = {
+            plan.label: {
+                term.name: coeff_at(step_f32, atoms.total_steps, term.coeff) for term in plan.terms
+            }
+            for plan in passes
+        }
 
-        stream = atoms.prep_stream(model, batch, atoms.hidden_acts_capture_keys)
-        nt_stream = atoms.prep_stream(model, nontarget_batch, frozenset())
+        def specs_for(plan: _PassPlan) -> dict[str, ReconstructionSpec]:
+            """A hidden pass compares ONLY its points — no e2e term at all (T12); an output
+            pass keeps each term's own S35 rider resolution."""
+            if plan.points:
+                return {term.name: HiddenActsOnlyReconstruction(plan.points) for term in plan.terms}
+            return atoms.reconstruction_specs_at(plan.terms, step_f32)
 
-        # ── adversary ascents: TARGET pass only, params + CI detached (SPEC §4.5/§11) ──
+        pass_specs = {plan.label: specs_for(plan) for plan in passes}
+
+        stream = atoms.prep_stream(model, batch, target_stream_capture_keys)
+        nt_stream = atoms.prep_stream(model, nontarget_batch, nontarget_stream_capture_keys)
+
         prepared_weights, recon_vjp = atoms.component_weights_vjp(model, decomposition.components)
         detached_prepared_weights = jax.lax.stop_gradient(prepared_weights)
         ascend_prepared_weights = atoms.replicate_for_ascend(detached_prepared_weights)
-        ci, ci_vjp = atoms.ci_forward_vjp(decomposition.ci_fn, stream.taps)
-        nt_ci, nt_ci_vjp = atoms.ci_forward_vjp(decomposition.ci_fn, nt_stream.taps)
-        ci_lower_detached = jax.lax.stop_gradient(ci).lower
+        # ONE CI forward per stream whatever the head count: the trunk is shared, so both roles
+        # come out of a single evaluation behind a single saved pullback (S36).
+        ci_any, ci_vjp = atoms.ci_forward_vjp(decomposition.ci_fn, stream.taps)
+        nt_ci_any, nt_ci_vjp = atoms.ci_forward_vjp(decomposition.ci_fn, nt_stream.taps)
 
-        ascended = atoms.ascend_adversaries(
-            model,
-            stream,
-            ascend_prepared_weights,
-            ci_lower_detached,
-            training.adversaries,
-            key,
-            step_f32,
-            reconstruction_specs,
-        )
+        def bundle_for(plan: _PassPlan, target: AnyCI, nontarget: AnyCI) -> CI:
+            return ci_for_role(target if plan.on_target_stream else nontarget, plan.role)
 
-        warmed_sources = {k: a.sources for k, a in ascended.warmed.items()}
-        draws_per_term = [
-            atoms.term_draws(key, 1, term_idx, term, ascended.fixed_routes, stream.leading)
-            for term_idx, term in enumerate(atoms.recon_terms)
-        ]
-        # The non-target grid's per-term RNG offsets past the target grid's, so the two
-        # grids' draws stay disjoint under the one step key (SPEC R1).
-        nt_draws_per_term = [
-            atoms.term_draws(key, 1 + len(atoms.recon_terms), term_idx, term, {}, nt_stream.leading)
-            for term_idx, term in enumerate(nt_terms)
-        ]
+        # ── adversary ascents: TARGET-stream passes only, params + CI detached (§4.5/T7) ──
+        # Each pass ascends against ITS OWN head and objective, so the output pass's adversary
+        # never chases the hidden loss or vice versa.
+        ascended_by_label: dict[str, AscendedAdversaries] = {}
+        for plan in passes:
+            if not plan.on_target_stream:
+                continue
+            ascended_by_label[plan.label] = atoms.ascend_adversaries(
+                model,
+                stream,
+                ascend_prepared_weights,
+                jax.lax.stop_gradient(bundle_for(plan, ci_any, nt_ci_any)).lower,
+                {k: training.adversaries[k] for k in plan.adversary_keys},
+                key,
+                step_f32,
+                pass_specs[plan.label],
+                recon_terms=plan.terms,
+                key_offset=plan.key_offset,
+                capture_keys_by_term=plan.capture_keys_by_term,
+            )
 
-        def loss_fn(
-            trainable: tuple[PreparedT, CI, CI, dict[str, dict[str, Array]]],
-        ) -> tuple[
-            Array,
-            tuple[
-                Array,
-                Array,
-                Array,
-                tuple[ReconstructionLoss, ...],
-                dict[str, Array],
-            ],
-        ]:
-            prepared_weights, ci, nt_ci, persistent_sources = trainable
-            ci_stacked = model.stack_ci(ci.lower)
+        warmed_sources = {
+            state_key: adv.sources
+            for ascended in ascended_by_label.values()
+            for state_key, adv in ascended.warmed.items()
+        }
+        draws_by_label = {
+            plan.label: [
+                atoms.term_draws(
+                    key,
+                    plan.key_offset,
+                    term_idx,
+                    term,
+                    ascended_by_label[plan.label].fixed_routes
+                    if plan.label in ascended_by_label
+                    else {},
+                    (stream if plan.on_target_stream else nt_stream).leading,
+                )
+                for term_idx, term in enumerate(plan.terms)
+            ]
+            for plan in passes
+        }
+
+        def pass_loss(plan: _PassPlan, trainable: _Trainable[PreparedT]) -> tuple[Array, _PassAux]:
+            """ONE pass's scalar loss: importance-minimality on ITS head plus ITS recon grid.
+
+            The differentiated total and the reported one differ only for persistent-carrying
+            terms, whose coeff rides their model-side cotangents so the adversary receives an
+            unscaled `dL/ds` (SPEC S14')."""
+            prepared, ci_target, ci_nontarget, persistent_sources = trainable
+            ci = bundle_for(plan, ci_target, ci_nontarget)
             imp_lp, imp_freq = imp_min_terms(ci.upper, atoms.imp_min, imp_min_param)
+            base = pass_impmin_coeff[plan.label] * imp_lp + freq_coeff * imp_freq
 
-            term_breakdowns = atoms.grid_losses(
-                atoms.recon_terms,
-                draws_per_term,
-                atoms.main_draw_loss(
+            if plan.on_target_stream:
+                draw_loss = atoms.main_draw_loss(
                     model,
-                    prepared_weights=prepared_weights,
+                    prepared_weights=prepared,
                     ci=ci,
-                    ci_stacked=ci_stacked,
+                    ci_stacked=model.stack_ci(ci.lower),
                     persistent_sources=persistent_sources,
-                    ascended=ascended,
+                    ascended=ascended_by_label[plan.label],
                     stream=stream,
                     step_f32=step_f32,
-                    reconstruction_specs=reconstruction_specs,
-                    term_coeffs=term_coeffs,
-                ),
-            )
-            base = imp_coeff * imp_lp + freq_coeff * imp_freq
-            # Differentiated total vs reported total: see the plain factory — a
-            # persistent-carrying term's coeff rides its model-side cotangents, so it
-            # enters the total at weight 1 and its adversary receives dL/ds (SPEC S14').
-            total_loss = base
-            reported_total = base
-            for term, coeff, breakdown in zip(
-                atoms.recon_terms, recon_coeffs, term_breakdowns, strict=True
-            ):
+                    reconstruction_specs=pass_specs[plan.label],
+                    term_coeffs=pass_term_coeffs[plan.label],
+                    capture_keys_by_term=plan.capture_keys_by_term,
+                )
+                breakdowns = atoms.grid_losses(plan.terms, draws_by_label[plan.label], draw_loss)
+            else:
+                nt_draw_loss = nontarget_draw_loss(
+                    model,
+                    prepared,
+                    ci,
+                    nt_stream,
+                    pass_specs[plan.label],
+                    plan.capture_keys_by_term,
+                )
+                breakdowns = atoms.grid_losses(
+                    cast("tuple[ReconLossTerm[_NontargetSources], ...]", plan.terms),
+                    cast("list[TermDraws[_NontargetSources]]", draws_by_label[plan.label]),
+                    nt_draw_loss,
+                )
+
+            total = base
+            reported = base
+            for term, breakdown in zip(plan.terms, breakdowns, strict=True):
+                coeff = pass_term_coeffs[plan.label][term.name]
                 match coeff_application(term):
                     case "scales_loss":
-                        total_loss = total_loss + coeff * breakdown.total
+                        total = total + coeff * breakdown.total
                     case "scales_model_cotangents":
-                        total_loss = total_loss + breakdown.total
-                reported_total = reported_total + coeff * breakdown.total
+                        total = total + breakdown.total
+                reported = reported + coeff * breakdown.total
+            return total, _PassAux(reported=reported, imp_lp=imp_lp, imp_freq=imp_freq,
+                                   breakdowns=breakdowns)  # fmt: skip
 
-            # ── the non-target pass: its imp-min (the shared annealed param, its own
-            # coeff) + its delta-pinned grid, added to the SAME total so one backward
-            # grads both passes (SPEC T1). ──
-            nt_imp_lp, nt_imp_freq = imp_min_terms(nt_ci.upper, atoms.imp_min, imp_min_param)
-            nt_total = nt_imp_coeff * nt_imp_lp + freq_coeff * nt_imp_freq
-            nt_aux = {
-                f"nontarget_data/loss/{imp_name}": nt_imp_lp,
-                "nontarget_data/loss/FrequencyMinimalityLoss": nt_imp_freq,
-            }
-            nt_breakdowns = atoms.grid_losses(
-                nt_terms,
-                nt_draws_per_term,
-                nontarget_draw_loss(
-                    model, prepared_weights, nt_ci, nt_stream, nt_reconstruction_specs
-                ),
-            )
-            for term, coeff, breakdown in zip(
-                nt_terms, nt_recon_coeffs, nt_breakdowns, strict=True
-            ):
-                nt_total = nt_total + coeff * breakdown.total
-                nt_aux[f"nontarget_data/loss/{term.name}"] = breakdown.total
-            nt_aux["nontarget_data/loss/total"] = nt_total
-            total_loss = total_loss + nt_total
-            reported_total = reported_total + nt_total
-            return total_loss, (reported_total, imp_lp, imp_freq, term_breakdowns, nt_aux)
+        trainable: _Trainable[PreparedT] = (
+            prepared_weights,
+            ci_any,
+            nt_ci_any,
+            warmed_sources,
+        )
 
-        with jax.named_scope("pd_value_and_grad"):
-            (_, (reported_total, imp_lp, imp_freq, term_breakdowns, nt_aux)), grads = (
-                eqx.filter_value_and_grad(loss_fn, has_aux=True)(
-                    (prepared_weights, ci, nt_ci, warmed_sources)
+        if sequential_passes:
+            grads = None
+            aux_by_label: dict[str, _PassAux] = {}
+            for plan in passes:
+                with jax.named_scope(f"pd_value_and_grad_{plan.label}"):
+                    (_, aux), pass_grads = eqx.filter_value_and_grad(
+                        lambda t, plan=plan: pass_loss(plan, t), has_aux=True
+                    )(trainable)
+                grads = (
+                    pass_grads
+                    if grads is None
+                    else jax.tree.map(lambda a, b: a + b, grads, pass_grads)
                 )
-            )
+                # Thread the TRAINABLES through the barrier alongside the accumulator: the next
+                # pass's inputs then carry a data dependency on this pass's gradient, so XLA
+                # cannot start its forwards before this pass's backward has released its
+                # activations. A barrier on the accumulator alone would NOT order them — the
+                # next pass's forwards never read it.
+                arrays, static = eqx.partition((trainable, grads), eqx.is_array)
+                trainable, grads = eqx.combine(jax.lax.optimization_barrier(arrays), static)
+                aux_by_label[plan.label] = aux
+            assert grads is not None, "a targeted objective always has at least two passes"
+        else:
+
+            def fused_loss(
+                t: _Trainable[PreparedT],
+            ) -> tuple[Array, dict[str, _PassAux]]:
+                total = jnp.zeros((), jnp.float32)
+                aux: dict[str, _PassAux] = {}
+                for plan in passes:
+                    pass_total, pass_aux = pass_loss(plan, t)
+                    total = total + pass_total
+                    aux[plan.label] = pass_aux
+                return total, aux
+
+            with jax.named_scope("pd_value_and_grad"):
+                (_, aux_by_label), grads = eqx.filter_value_and_grad(fused_loss, has_aux=True)(
+                    trainable
+                )
+
         prepared_grad, ci_grad, nt_ci_grad, persistent_source_grads = grads
         # No faithfulness role ⇒ the components' whole gradient arrives through the
         # compute-weights pullback.
         components_grad = recon_vjp(prepared_grad)[0]
-        # The CI fn saw both streams; its total gradient is the sum of the two pullbacks.
+        # The CI fn saw both streams; its total gradient is the sum of the two pullbacks. Under
+        # a shared trunk each pullback already carries BOTH heads' cotangents, so the trunk is
+        # backward-run once per stream however many passes read it (S36).
         ci_fn_grad = jax.tree.map(
             lambda target_g, nt_g: target_g + nt_g,
             ci_vjp(ci_grad)[0],
             nt_ci_vjp(nt_ci_grad)[0],
         )
 
+        warmed_advs = {
+            state_key: adv
+            for ascended in ascended_by_label.values()
+            for state_key, adv in ascended.warmed.items()
+        }
         new_state, grad_norm_metrics = atoms.apply_gradients(
             decomposition,
             training,
-            ascended.warmed,
+            warmed_advs,
             components_grad,
             ci_fn_grad,
             persistent_source_grads,
@@ -1430,13 +1753,16 @@ def make_targeted_train_step[PreparedT](
         wd_metrics: dict[str, Array] = {}
         if ci_scaled_weight_decay is not None:
             # T11: an update rule on the post-step component masters, not a loss term —
-            # nothing differentiates through it. Off the step's own pre-update forward
-            # CIs, maxed over BOTH streams: a component important on either is not dead.
-            batch_max_ci = _per_component_batch_max(ci.lower)
-            nt_batch_max_ci = _per_component_batch_max(nt_ci.lower)
+            # nothing differentiates through it. Off the step's own pre-update forward CIs,
+            # maxed over every pass: a component important on either stream OR either head is
+            # not dead, so a hidden-only-important component is never decayed away.
+            per_pass_max = [
+                _per_component_batch_max(bundle_for(plan, ci_any, nt_ci_any).lower)
+                for plan in passes
+            ]
             rate = ci_scaled_weight_decay.components_lr(step_f32) * ci_scaled_weight_decay.coeff
             decay = {
-                site: rate * (1.0 - jnp.maximum(batch_max_ci[site], nt_batch_max_ci[site]))
+                site: rate * (1.0 - functools.reduce(jnp.maximum, (m[site] for m in per_pass_max)))
                 for site in atoms.site_names
             }
             decayed = _scale_subcomponents(
@@ -1453,24 +1779,45 @@ def make_targeted_train_step[PreparedT](
                 "ci_scaled_weight_decay/mean": jnp.mean(decay_all),
                 "ci_scaled_weight_decay/max": jnp.max(decay_all),
             }
+
+        # The TARGET-OUTPUT pass keeps `train_metrics`' unprefixed keys, so a run's curves stay
+        # comparable whether or not a hidden pass exists; every other pass logs under
+        # `loss/<label>/…`, the shape the non-target pass has always used.
+        target_aux = aux_by_label["target"]
+        reported_total = functools.reduce(
+            operator.add, (aux.reported for aux in aux_by_label.values())
+        )
+        extra_metrics: dict[str, Array] = {}
+        for plan in passes[1:]:
+            aux = aux_by_label[plan.label]
+            prefix = plan.metric_prefix
+            extra_metrics[f"{prefix}loss/{imp_name}"] = aux.imp_lp
+            extra_metrics[f"{prefix}loss/FrequencyMinimalityLoss"] = aux.imp_freq
+            extra_metrics[f"{prefix}loss/total"] = aux.reported
+            for term, breakdown in zip(plan.terms, aux.breakdowns, strict=True):
+                extra_metrics[f"{prefix}loss/{term.name}"] = breakdown.total
+                for suffix, value in reconstruction_loss_metrics(breakdown).items():
+                    extra_metrics[f"{prefix}loss/{term.name}/{suffix}"] = value
+
         metrics = (
             atoms.train_metrics(
                 total_loss=reported_total,
-                imp_lp=imp_lp,
-                imp_freq=imp_freq,
+                imp_lp=target_aux.imp_lp,
+                imp_freq=target_aux.imp_freq,
                 imp_min_param=imp_min_param,
-                term_breakdowns=term_breakdowns,
+                term_breakdowns=target_aux.breakdowns,
                 grad_norm_metrics=grad_norm_metrics,
                 adversaries=training.adversaries,
                 step_f32=step_f32,
             )
-            | nt_aux
+            | extra_metrics
             | wd_metrics
             | _scheduled_coeff_metrics(step_f32, atoms.total_steps, coeff_schedules)
             | {
-                f"nontarget_data/{key}": value
+                f"{prefix}{key}": value
+                for prefix, schedules in other_pass_schedules
                 for key, value in _scheduled_coeff_metrics(
-                    step_f32, atoms.total_steps, nontarget_coeff_schedules
+                    step_f32, atoms.total_steps, schedules
                 ).items()
             }
         )

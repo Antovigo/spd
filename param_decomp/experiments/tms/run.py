@@ -25,7 +25,7 @@ from jax.sharding import PartitionSpec as P
 
 from param_decomp.core import placement
 from param_decomp.core.built_run import BuiltRun
-from param_decomp.core.ci_fn import CIFn
+from param_decomp.core.ci_fn import CIFn, ci_for_role
 from param_decomp.core.components import SiteC
 from param_decomp.core.eval_schedule import Every
 from param_decomp.core.log import setup_logger
@@ -159,7 +159,11 @@ def single_feature_ci(
     model: tms.TMSDecomposedModel, ci_fn: CIFn, n_features: int
 ) -> tuple[dict[str, jax.Array], dict[str, jax.Array]]:
     probe = tms.single_feature_probe(n_features)
-    ci = ci_fn(model.clean_forward(probe, ci_fn.capture_keys).captures, remat=False)
+    # The toy identity-CI probe reads the OUTPUT role: it asks whether a single input feature
+    # lights exactly one component for RECONSTRUCTING THE OUTPUT, the toy's whole claim.
+    ci = ci_for_role(
+        ci_fn(model.clean_forward(probe, ci_fn.capture_keys).captures, remat=False), "output"
+    )
     return ci.lower, ci.upper
 
 

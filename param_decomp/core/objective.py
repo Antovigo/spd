@@ -21,6 +21,7 @@ from param_decomp.core.configs import (
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     FaithfulnessLossConfig,
+    HiddenPassConfig,
     ImportanceMinimalityLossConfig,
     LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
@@ -116,11 +117,53 @@ class NontargetPass:
 
 
 @dataclass(frozen=True)
+class HiddenPass[S: MaskSourceStrategy]:
+    """The HIDDEN role's surface on one stream (SPEC T12).
+
+    Structurally a pass like any other — importance-minimality at its own coefficient plus a
+    recon grid — differing in exactly two ways: its masks come from the CI fn's SECOND readout
+    head (S36), and its recon comparison is `HiddenActsOnlyReconstruction(points)` rather than
+    the model output, so it carries no end-to-end term at all.
+
+    `points` is the pass's, not each term's: the pass IS "reconstruct these activations". The
+    imp-min CONFIG (penalty shape, anneal, frequency block) is the target pass's, shared by
+    construction — T6's rule extended to the hidden role; only the coefficient is this pass's.
+
+    Generic over `S` so the non-target stream's hidden pass keeps T5/T7's narrowing in the
+    TYPE (no adversarial or mixed sources off-target), exactly as `NontargetPass.recon` does."""
+
+    recon: tuple[ReconLossTerm[S], ...]
+    impmin_coeff: LossCoeff
+    points: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TargetedObjective:
-    """The complete two-pass tPD objective; both passes sum into ONE backward (SPEC §11)."""
+    """The complete tPD objective. Every pass sums into ONE gradient (SPEC T1) — whether that
+    is one `value_and_grad` or a sequence of per-pass ones whose gradients are added is a
+    scheduling choice with identical arithmetic (`runtime.sequential_dual_backward`).
+
+    Up to FOUR passes, the cartesian product of {target, non-target} x {output, hidden}. The
+    two hidden passes are `None` in an ordinary single-objective tPD run, which is then exactly
+    the pre-T12 objective."""
 
     target: TargetPass
     nontarget: NontargetPass
+    hidden: HiddenPass[MaskSourceStrategy] | None = None
+    nontarget_hidden: (
+        HiddenPass[StochasticSources | ConstantSources | UnmaskedNoDeltaSources] | None
+    ) = None
+
+    def __post_init__(self) -> None:
+        assert self.nontarget_hidden is None or self.hidden is not None, (
+            "a non-target hidden pass needs the target-stream hidden pass, whose `points` it "
+            "measures at (SPEC T12)"
+        )
+
+    @property
+    def hidden_points(self) -> tuple[str, ...]:
+        """The activations BOTH hidden passes reconstruct; empty when there is no hidden pass."""
+        return () if self.hidden is None else self.hidden.points
 
 
 def _collect_terms(
@@ -266,17 +309,27 @@ def build_objective(
 def build_recon_terms(
     loss_metrics: Sequence[AnyLossMetricConfig],
     site_names: tuple[str, ...],
+    hidden: HiddenPassConfig | None = None,
 ) -> tuple[AnyReconLossTerm, ...]:
     """Just the recon Σ of an authored loss list — the persistent-source layout derives
     from these (`recon.persistent_configs`), so state init shares this walk with both
-    objective builders instead of demanding one builder's completeness rules."""
-    return _collect_terms(loss_metrics, site_names)[2]
+    objective builders instead of demanding one builder's completeness rules.
+
+    A hidden pass's terms are included: they carry adversaries of their own (T7 keeps
+    adversaries on the target STREAM, and the hidden pass is a target-stream pass), so their
+    persistent bundles must be allocated alongside the output pass's or the state would be
+    missing the keys the step asks for."""
+    terms = _collect_terms(loss_metrics, site_names)[2]
+    if hidden is not None:
+        terms = terms + _collect_terms(hidden.recon, site_names)[2]
+    return terms
 
 
 def build_targeted_objective(
     loss_metrics: Sequence[TargetedLossMetricConfig],
     nontarget: NontargetConfig,
     site_names: tuple[str, ...],
+    hidden: HiddenPassConfig | None = None,
 ) -> TargetedObjective:
     """Build the closed two-pass tPD objective (SPEC §11).
 
@@ -304,9 +357,53 @@ def build_targeted_objective(
         # `hidden_acts_reconstruction=None` structurally: the rider is target-pass-only
         # vocabulary (SPEC T5), refused at parse by `NontargetConfig`.
         nt_terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
+
+    hidden_pass = None
+    nontarget_hidden_pass = None
+    if hidden is not None:
+        # The hidden pass's terms go through the SAME walk as the target pass's: a hidden recon
+        # term is an ordinary recon term whose comparison happens to be internal activations,
+        # so the mask-source algebra (stochastic, PPGD, mixed) is unchanged. What makes it
+        # hidden is the pass it lives in — the step reads its mask off the hidden CI head and
+        # scores it against `points` (T12).
+        h_faith, h_imp, h_recon = _collect_terms(hidden.recon, site_names)
+        assert h_faith is None and h_imp is None, (
+            "a hidden pass authors recon terms only: its importance-minimality is the "
+            "`impmin_coeff` scalar (the penalty config is the target pass's, T6/T12)"
+        )
+        assert h_recon, "hidden pass has no recon terms"
+        hidden_pass = HiddenPass(
+            recon=h_recon, impmin_coeff=hidden.impmin_coeff, points=hidden.points
+        )
+        if nontarget.hidden is not None:
+            nt_h_terms: list[
+                ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]
+            ] = []
+            for cfg in nontarget.hidden.recon:
+                assert cfg.coeff is not None  # non-None at parse; narrows the type
+                name = cfg.name if cfg.name is not None else cfg.type
+                assert name not in {t.name for t in nt_h_terms}, (
+                    f"duplicate non-target hidden loss {name!r}"
+                )
+                nt_h_terms.append(
+                    ReconLossTerm(name, cfg.coeff, _nontarget_recon_plan(cfg, site_names), None)
+                )
+            nontarget_hidden_pass = HiddenPass(
+                recon=tuple(nt_h_terms),
+                impmin_coeff=nontarget.hidden.impmin_coeff,
+                points=hidden.points,
+            )
+    else:
+        assert nontarget.hidden is None, (
+            "nontarget.hidden needs pd.hidden — the non-target hidden pass measures at the "
+            "target-stream hidden pass's `points` (SPEC T12)"
+        )
+
     return TargetedObjective(
         target=TargetPass(imp=imp, recon=recon_terms),
         nontarget=NontargetPass(recon=tuple(nt_terms), impmin_coeff=nontarget.impmin_coeff),
+        hidden=hidden_pass,
+        nontarget_hidden=nontarget_hidden_pass,
     )
 
 

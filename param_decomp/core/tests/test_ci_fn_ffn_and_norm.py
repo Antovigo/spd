@@ -9,6 +9,7 @@ from param_decomp.core.ci_fn import (
     ChunkwiseTransformerCIArch,
     MHACIAttention,
     init_chunkwise_transformer_ci_fn,
+    output_ci,
 )
 from param_decomp.core.components import SiteSpec
 
@@ -61,8 +62,8 @@ def test_learned_norm_scale_inits_to_ones_so_step_zero_is_unchanged():
         for s in b.norm_scales:
             assert jnp.array_equal(s, jnp.ones_like(s))
     assert jnp.allclose(
-        scaled(_taps(), remat=False).preactivations[SITES[0].name],
-        weightless(_taps(), remat=False).preactivations[SITES[0].name],
+        output_ci(scaled(_taps(), remat=False)).preactivations[SITES[0].name],
+        output_ci(weightless(_taps(), remat=False)).preactivations[SITES[0].name],
         rtol=1e-6,
         atol=1e-6,
     )
@@ -88,7 +89,7 @@ def test_swiglu_is_the_gated_product_not_a_gelu():
     import equinox as eqx
 
     swiglu = _build("swiglu", False)
-    base = swiglu(_taps(), remat=False).preactivations[SITES[0].name]
+    base = output_ci(swiglu(_taps(), remat=False)).preactivations[SITES[0].name]
     blocks = swiglu.chunks.blocks
     assert blocks[0].gate is not None
     scrambled = eqx.tree_at(
@@ -100,15 +101,15 @@ def test_swiglu_is_the_gated_product_not_a_gelu():
 
 
 def test_swiglu_and_gelu_differ():
-    a = _build("gelu", False)(_taps(), remat=False).preactivations[SITES[0].name]
-    b = _build("swiglu", False)(_taps(), remat=False).preactivations[SITES[0].name]
+    a = output_ci(_build("gelu", False)(_taps(), remat=False)).preactivations[SITES[0].name]
+    b = output_ci(_build("swiglu", False)(_taps(), remat=False)).preactivations[SITES[0].name]
     assert not jnp.allclose(a, b)
 
 
 @pytest.mark.parametrize("ffn_kind", ["gelu", "swiglu"])
 @pytest.mark.parametrize("learned_norm_scale", [False, True])
 def test_every_combination_runs_end_to_end(ffn_kind: str, learned_norm_scale: bool):
-    ci = _build(ffn_kind, learned_norm_scale)(_taps(), remat=True)
+    ci = output_ci(_build(ffn_kind, learned_norm_scale)(_taps(), remat=True))
     for site in SITES:
         assert ci.lower[site.name].shape == (2, 6, site.C)
         assert jnp.isfinite(ci.lower[site.name]).all()

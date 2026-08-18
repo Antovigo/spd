@@ -13,7 +13,7 @@ from param_decomp.core.ci_fn import (
     LayerwiseMLPCIArch,
     MHACIAttention,
     build_ci_fn,
-    evaluate_ci,
+    evaluate_ci_role,
 )
 from param_decomp.core.components import ComponentStacks, SiteC, init_component_stacks
 from param_decomp.core.configs import WellTemperednessConfig
@@ -191,10 +191,11 @@ def _expected_component_selection(
     batch_indices: jax.Array,
     position_indices: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    preactivations_by_site = evaluate_ci(
+    preactivations_by_site = evaluate_ci_role(
         ci_fn,
         model.clean_forward(tokens, ci_fn.capture_keys).captures,
         remat=False,
+        role="output",
     ).preactivations
     preactivations_at_locations = jnp.concatenate(
         [

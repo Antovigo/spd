@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn, evaluate_ci
+from param_decomp.core.ci_fn import CIFn, CIRole, evaluate_ci_role
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.model import CaptureKeys, DecomposedModel
@@ -77,9 +77,15 @@ def make_ci_l0_eval_step(
     groups: dict[str, tuple[str, ...]] | None,
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
+    role: CIRole = "output",
 ) -> CI_L0Step:
     """Build `CI_L0` for ANY target: the CI envelope is all it reads, so only the taps
-    forward is target-specific. No clean output, no masked re-forward, no recon metric."""
+    forward is target-specific. No clean output, no masked re-forward, no recon metric.
+
+    `role` picks which CI head scores this metric. In a dual (shared-trunk) run the two
+    heads answer different questions, so the eval surface reports the metric once per
+    role rather than silently choosing one; a single-role run has only `"output"`.
+    """
     site_names = model_static.site_names
     resolved_groups = resolve_site_groups(site_names, groups)
     leading_rank = 2 if model_static.has_position_axis else 1
@@ -94,7 +100,7 @@ def make_ci_l0_eval_step(
         del components, key  # L0 reads the CI envelope alone
         sharded_inputs = jax.tree.map(lambda x: batch_shard_leading(x, mesh), inputs)
         ci_input_activations = model.clean_forward(sharded_inputs, ci_capture_keys).captures
-        ci_lower = evaluate_ci(ci_fn, ci_input_activations, remat=False).lower
+        ci_lower = evaluate_ci_role(ci_fn, ci_input_activations, remat=False, role=role).lower
         leading = next(iter(ci_lower.values())).shape[:-1]
         assert len(leading) == leading_rank, (leading, model_static.has_position_axis)
         return ci_l0_scalars(ci_lower, site_names, ci_alive_threshold, resolved_groups, jnp.mean)

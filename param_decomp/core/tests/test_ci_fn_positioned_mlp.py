@@ -25,7 +25,8 @@ from param_decomp.core.ci_fn import (
     LayerwiseMLPCIFn,
     MHACIAttention,
     build_ci_fn,
-    evaluate_ci,
+    evaluate_ci_role,
+    output_ci,
 )
 from param_decomp.core.components import SiteSpec, component_stacks_from_sites
 from param_decomp.core.configs import (
@@ -83,7 +84,7 @@ def test_mlp_arch_serves_a_positioned_target():
     ci_fn = _positioned_mlp_ci_fn()
     assert ci_fn.has_position_axis is True
 
-    ci = ci_fn(_taps(), remat=False)
+    ci = output_ci(ci_fn(_taps(), remat=False))
     assert ci.preactivations[SITE].shape == (B, T, C)
     assert bool(jnp.isfinite(ci.lower[SITE]).all())
 
@@ -92,8 +93,11 @@ def test_evaluate_ci_casts_fp32_taps_to_compute_precision():
     ci_fn = _positioned_mlp_ci_fn()
     taps = _taps()
     assert taps[SITE].dtype == jnp.float32
-    assert ci_fn(taps, remat=False).preactivations[SITE].dtype == jnp.float32
-    assert evaluate_ci(ci_fn, taps, remat=False).preactivations[SITE].dtype == COMPUTE_DT
+    assert output_ci(ci_fn(taps, remat=False)).preactivations[SITE].dtype == jnp.float32
+    assert (
+        evaluate_ci_role(ci_fn, taps, remat=False, role="output").preactivations[SITE].dtype
+        == COMPUTE_DT
+    )
 
 
 def test_positioned_mlp_is_position_local():
@@ -104,8 +108,8 @@ def test_positioned_mlp_is_position_local():
     perturbed = {SITE: taps[SITE].at[:, 2, :].add(100.0)}
 
     moved = jnp.abs(
-        ci_fn(taps, remat=False).preactivations[SITE]
-        - ci_fn(perturbed, remat=False).preactivations[SITE]
+        output_ci(ci_fn(taps, remat=False)).preactivations[SITE]
+        - output_ci(ci_fn(perturbed, remat=False)).preactivations[SITE]
     ).max(axis=(0, 2))
 
     assert float(moved[2]) > 0.0, "the perturbed position must move at all"
@@ -124,7 +128,7 @@ def test_positioned_mlp_reads_tap_magnitude_where_the_blockless_chunk_cannot():
 
     def scale_gap(ci_fn: CIFn) -> float:
         x = _taps(1)[SITE]
-        f = lambda t: ci_fn({SITE: t}, remat=False).preactivations[SITE]  # noqa: E731
+        f = lambda t: output_ci(ci_fn({SITE: t}, remat=False)).preactivations[SITE]  # noqa: E731
         return float(jnp.abs(f(x) - f(x * 7.0)).max())
 
     assert scale_gap(_positioned_mlp_ci_fn()) > 1.0, "the MLP CI fn ignored tap magnitude"
