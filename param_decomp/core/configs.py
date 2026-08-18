@@ -343,8 +343,15 @@ class PGDConfig(LossMetricConfig, HiddenActsReconstructionMixin):
 
 
 class PGDReconLossConfig(PGDConfig):
-    slow: ClassVar[bool] = False
+    """Slow-tier by declaration: each evaluation is `n_steps` full forward+backward
+    ascents per batch, and a targeted dual run fans it out over stream x CI-role — at the
+    fast cadence it dominated eval wall-clock (~10 min per eval on the L18 8B runs)."""
+
+    slow: ClassVar[bool] = True
     type: Literal["PGDReconLoss"] = "PGDReconLoss"
+    n_batches: PositiveInt | None = None
+    """Cap on how many eval batches the probe consumes (None = all `eval.n_steps`).
+    The reported loss averages over the batches actually run."""
 
 
 class PGDReconLayerwiseLossConfig(PGDConfig):

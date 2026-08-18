@@ -32,7 +32,6 @@ FAST_METRICS = {
     "CIMaskedAttnPatternsReconLossConfig",
     "CIMaskedReconLossConfig",
     "CI_L0Config",
-    "PGDReconLossConfig",
     "StochasticAttnPatternsReconLossConfig",
     "UnmaskedNoDeltaReconLossConfig",
 }
@@ -43,6 +42,7 @@ SLOW_METRICS = {
     "CIMeanPerComponentConfig",
     "ComponentActivationDensityConfig",
     "IdentityCIErrorConfig",
+    "PGDReconLossConfig",
     "PermutedCIPlotsConfig",
     "StochasticHiddenActsReconLossConfig",
     "TwoStreamCIMeanPerComponentConfig",
@@ -104,7 +104,7 @@ def test_the_ab_grid_snapshot_never_runs_on_the_first_pass() -> None:
 def test_the_tier_travels_with_the_metric_across_families() -> None:
     """UVPlots is slow wherever it is bound; the toy and LM binders read the same
     declaration rather than each assigning a tier of their own."""
-    assert UVPlotsConfig.slow and not PGDReconLossConfig.slow
+    assert UVPlotsConfig.slow and PGDReconLossConfig.slow and not CI_L0Config.slow
 
 
 def test_a_seat_cannot_author_its_own_tier() -> None:

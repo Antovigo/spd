@@ -76,11 +76,13 @@ def _make_scalar_operation(
     eval_steps: int,
     stream: Stream,
     role: CIRole,
+    max_batches: int | None = None,
 ) -> EvalOperation[LMEvalContext]:
     def run(context: LMEvalContext) -> LogRecord:
         log_prefix = stream_log_prefix(stream, context, role)
+        batches = stream_batches(stream, context)[:max_batches]
         sums: dict[str, Array] = {}
-        for batch_index, tokens in enumerate(stream_batches(stream, context)):
+        for batch_index, tokens in enumerate(batches):
             key = random.fold_in(
                 run_key,
                 EvalKeyStream.SCALARS * train_steps + context.pass_index * eval_steps + batch_index,
@@ -95,7 +97,7 @@ def _make_scalar_operation(
             for name, value in values.items():
                 if name.startswith(prefixes):
                     sums[name] = sums.get(name, jnp.zeros(())) + value
-        return {f"{log_prefix}{name}": float(value) / eval_steps for name, value in sums.items()}
+        return {f"{log_prefix}{name}": float(value) / len(batches) for name, value in sums.items()}
 
     return EvalOperation(schedule, run)
 
@@ -240,4 +242,5 @@ def make_fresh_pgd_operation(
         eval_steps,
         stream,
         role,
+        max_batches=metric.n_batches,
     )

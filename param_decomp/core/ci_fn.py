@@ -465,6 +465,10 @@ class ChunkwiseTransformerCIArch:
     ffn_hidden: int
     ffn_kind: CIFfnKind
     learned_norm_scale: bool
+    zero_init_readout: bool = False
+    """Zero-init every readout head (`W = 0`, bias 0.5): all CI logits start mid-window,
+    the torch trainer's default. Head-only — the trunk keeps its Kaiming draws (and its
+    RNG consumption). False keeps the Kaiming heads the equivalence goldens pin."""
     dual: bool = False
     """Build a SECOND readout head on this same trunk (SPEC S36), so the CI fn scores both
     the output and the hidden reconstruction objectives. An ARCH property, not a build-time
@@ -810,8 +814,15 @@ def _init_chunk_transformer(
         offsets.append(offsets[-1] + c)
 
     def head(head_key: PRNGKeyArray) -> tuple[tuple[Array, ...], tuple[Array, ...]]:
-        glued_w = kaiming(head_key, (d, c_chunk), d, 1.0)
-        glued_b = jnp.zeros((c_chunk,))
+        if arch.zero_init_readout:
+            # Logits start at exactly 0.5: mid-window in the sigmoid's linear region,
+            # within gradient reach of both losses (the torch trainer's default init).
+            # The key is deliberately unconsumed so the trunk draws are unchanged.
+            glued_w = jnp.zeros((d, c_chunk))
+            glued_b = jnp.full((c_chunk,), 0.5)
+        else:
+            glued_w = kaiming(head_key, (d, c_chunk), d, 1.0)
+            glued_b = jnp.zeros((c_chunk,))
         return (
             tuple(glued_w[:, offsets[j] : offsets[j + 1]] for j in range(len(slot_cs))),
             tuple(glued_b[offsets[j] : offsets[j + 1]] for j in range(len(slot_cs))),

@@ -327,6 +327,14 @@ class ChunkwiseTransformerCiConfig(BaseConfig):
     n_blocks: PositiveInt
     attention: CiAttentionConfig
     ffn: CiFfnConfig
+    zero_init_readout: bool = Field(
+        default=False,
+        description=(
+            "Zero-init every readout head (W = 0, bias 0.5) so all CI logits start "
+            "mid-window — the torch trainer's default. Head-only: the trunk keeps its "
+            "Kaiming draws. False keeps the Kaiming heads."
+        ),
+    )
     dual: bool = Field(
         default=False,
         description=(
@@ -643,6 +651,7 @@ def _resolve_chunkwise_ci_arch(
         ffn_hidden=ci.ffn.hidden,
         ffn_kind=ci.ffn.kind,
         learned_norm_scale=ci.learned_norm_scale,
+        zero_init_readout=ci.zero_init_readout,
         dual=ci.dual,
     )
 
