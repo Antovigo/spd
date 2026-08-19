@@ -2,9 +2,13 @@
 # decomposition on the 1..100 a+b / a-b prompt pool, sized for 2x L40 (dp 2).
 # Runs via `python -m param_decomp.experiments.lm.run_targeted`.
 #
-# The current state of the art for this target: the JAX counterpart of the torch
-# reference addsub-L18-11-trunk-imp2x, at torch step-time parity (~3.35 s/step on
-# 2x L40, measured 2026-08-18). Update this seat when the recipe advances.
+# The current state of the art for this target: addsub-L18-14-4x's recipe — every
+# importance-minimality coefficient and the shared frequency coefficient warm-starts
+# at 4x its final value and decays linearly to the final value over the first 50% of
+# training, then holds — with the nontarget imp-min coefficients set EQUAL to the
+# target's (final 5.0e-05, as in addsub-L18-14-equal) rather than the 2-fold nontarget
+# increase the 14 line inherited — and the o/down sites widened (o 128 -> 256,
+# down 456 -> 512). Update this seat when the recipe advances.
 run_name: jax-l18-addsub-targeted
 decomposition:
   sites:
@@ -17,10 +21,10 @@ decomposition:
       q: 72
       k: 72
       v: 128
-      o: 128
+      o: 256
       gate: 456
       up: 456
-      down: 456
+      down: 512
   ci:
     type: chunkwise_transformer
     # One decomposed block at blocks_per_chunk 1 is a single chunk spanning all seven
@@ -66,7 +70,13 @@ pd:
     grad_clip_norm: null
   loss_metrics:
     - type: SmoothL0ImportanceMinimalityLoss
-      coeff: 5.0e-05  # the torch reference's 2x-imp arm (addsub-L18-11-trunk-imp2x)
+      # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+      coeff:
+        max_val: 2.0e-04
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 0.25}
+          - {at: 1.0, frac: 0.25}
       normalize_at_one: true
       gamma:
         max_val: 1.0
@@ -75,7 +85,14 @@ pd:
           - {at: 0.5, frac: 1.0}
           - {at: 1.0, frac: 0.01}
       frequency:
-        coeff: 2.5e-05
+        # 4x the final 2.5e-05 at step 0, linear to 2.5e-05 at 50%, then held.
+        # ONE frequency block shared across target and nontarget passes (SPEC T6).
+        coeff:
+          max_val: 1.0e-04
+          points:
+            - {at: 0.0, frac: 1.0}
+            - {at: 0.5, frac: 0.25}
+            - {at: 1.0, frac: 0.25}
         reference_datapoint_count: auto
     - type: StochasticReconSubsetLoss
       coeff: 1.0
@@ -117,7 +134,13 @@ pd:
       - layers.29.mlp.down_proj.out
       - layers.30.mlp.down_proj.out
       - layers.31.mlp.down_proj.out
-    impmin_coeff: 5.0e-05
+    # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+    impmin_coeff:
+      max_val: 2.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.5, frac: 0.25}
+        - {at: 1.0, frac: 0.25}
     recon:
       - type: StochasticReconSubsetLoss
         name: HiddenStochasticReconSubset
@@ -149,14 +172,26 @@ nontarget:
   # step from 4.27 to 3.35 s on 2x L40 (2026-08-18). Peak 39.7 GB/rank of ~43.6 — an OOM here
   # does not raise (rank 0 dies mid-allocation, rank 1 waits on the clique, the job HANGS);
   # re-probe before raising.
-  impmin_coeff: 1.0e-04
+  # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+  impmin_coeff:
+    max_val: 2.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.5, frac: 0.25}
+      - {at: 1.0, frac: 0.25}
   recon:
     - type: StochasticReconSubsetLoss
       coeff: 1.0
       routing:
         type: uniform_k_subset
   hidden:
-    impmin_coeff: 1.0e-04
+    # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+    impmin_coeff:
+      max_val: 2.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.5, frac: 0.25}
+        - {at: 1.0, frac: 0.25}
     recon:
       - type: StochasticReconSubsetLoss
         name: NontargetHiddenStochasticReconSubset
@@ -169,11 +204,11 @@ eval:
   batch_size: 128
   n_steps: 10
   every: 500
-  slow_every: 1000
+  slow_every: 4000
   slow_on_first_step: true
   metrics:
-    # Alongside CEandKLLosses this contributes only the hidden-role arm
-    # (`hidden_ci/ce_kl/kl_ci_masked`); the output arm is CEandKLLosses's.
+    # No UnmaskedNoDeltaReconLoss next to CEandKLLosses (same `ce_kl/kl_*` arms — the
+    # evaluator refuses the pair); CIMaskedReconLoss stays for hidden_ci coverage.
     - type: CIMaskedReconLoss
     - type: CEandKLLosses
       rounding_threshold: 0.0
