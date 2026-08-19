@@ -22,6 +22,7 @@ from jax.sharding import Mesh
 
 from param_decomp.core import placement
 from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
+from param_decomp.core.configs import ResumeProvenance
 from param_decomp.core.model import DecomposedModel, Positioned
 from param_decomp.core.run import (
     MetricsSink,
@@ -71,6 +72,27 @@ def _pool_tokenizer(target: AnyLMTargetConfig, dataset_tokenizer_name: str) -> P
         case LlamaSimpleMLPTargetConfig():
             loaded = AutoTokenizer.from_pretrained(dataset_tokenizer_name)
     return cast(PromptEncoder, cast(object, loaded))
+
+
+def assert_targeted_finetune_structural_compat(
+    built: LMTargetedRun, prov: ResumeProvenance, data_root: Path
+) -> None:
+    """The targeted twin of `training.assert_finetune_structural_compat` (S33): same
+    sites (names + C) and ci-fn arch, read from the parent's pinned launch config. The
+    parent must itself be a TARGETED run — its pinned config is parsed under
+    `LMTargetedExperimentConfig`, so a plain parent fails the parse loudly instead of
+    loading a decomposition trained under a different objective shape."""
+    raw = yaml.safe_load((prov.parent_run_dir / LAUNCH_CONFIG_FILENAME).read_text())
+    parent_cfg = LMTargetedExperimentConfig.model_validate(raw)
+    parent = build_targeted_experiment_config(parent_cfg, prov.parent_run_dir.name, data_root)
+    parent_sites = tuple((s.name, s.C) for s in parent.target.sites)
+    new_sites = tuple((s.name, s.C) for s in built.target.sites)
+    assert parent_sites == new_sites, (
+        f"fine-tune sites mismatch: parent {parent_sites} != new {new_sites}"
+    )
+    assert parent.ci_fn == built.ci_fn, (
+        f"fine-tune ci-fn arch mismatch: parent {parent.ci_fn} != new {built.ci_fn}"
+    )
 
 
 def train_targeted(
@@ -210,6 +232,9 @@ def main(config: Path, data_root: Path, run_id: str | None = None) -> None:
         assert_inline_topology(runtime.dp)
     configure_hf_http_retries()
     mesh = hsdp_mesh(runtime.tp, runtime.gpus_per_node, runtime.fsdp)
+
+    if built.run.resume_provenance is not None:
+        assert_targeted_finetune_structural_compat(built, built.run.resume_provenance, data_root)
 
     cache_dir = enable_persistent_compilation_cache(built.run.out_dir)
 

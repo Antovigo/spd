@@ -418,9 +418,11 @@ class LMTargetedExperimentConfig(ExperimentConfigBase):
     `experiments.lm.run`) chooses the algorithm, and each shape refuses the other's
     sections at parse. `pd.loss_metrics` authors the TARGET pass at `pd.batch_size`
     over the `prompts:` pool; `data:` is the broad NON-TARGET stream at
-    `nontarget.batch_size` (T2). No `resume_provenance`: fine-tune semantics for a
-    targeted run (whose parent may be plain OR targeted) are undefined, so the field is
-    unrepresentable rather than accepted and wrong.
+    `nontarget.batch_size` (T2). `resume_provenance` fine-tunes from a TARGETED parent
+    only (S33 semantics: parent decomposition restored, fresh optimizers/adversaries/
+    step): the compat check parses the parent's pinned config under THIS schema, so a
+    plain parent refuses loudly rather than loading a decomposition trained under a
+    different objective shape.
 
     `eval:` stays available, unlike the toy targeted shape: the LM operations are
     forward-only diagnostics on the broad eval split, and an unobservable 8B run is worse
@@ -429,6 +431,7 @@ class LMTargetedExperimentConfig(ExperimentConfigBase):
     pd: TargetedPDConfig
     runtime: RuntimeConfig
     eval: EvalConfig | None = None
+    resume_provenance: ResumeProvenance | None = None
     target: LMTargetConfig
     decomposition: LMDecompositionConfig
     data: LMDataConfig
@@ -807,7 +810,7 @@ def build_targeted_experiment_config(
     return BuiltRun(
         pd=cfg.pd,
         cadence=cfg.cadence,
-        run=run_instance(cfg, run_id, data_root, None),
+        run=run_instance(cfg, run_id, data_root, cfg.resume_provenance),
         target=target,
         data=data,
         ci_fn=ci_fn,
