@@ -169,3 +169,14 @@ The cheap levers, in increasing overhead:
   Configs staged in `~/pd_scratch/dual_obj_jax/addsub-L18-15-ntadv-ft{,-SMOKE}.yaml`,
   frozen worktree `~/pd_scratch/worktrees/nt-ppgd-ft` @ 601c9a756. SMOKE (60 steps,
   save/resume shape) submitted as job 10089.
+- 2026-08-19: SMOKE GREEN. Job 10089 (p-bbd77143): fine-tune init from p-bdf13b20 @
+  20000 clean; the merged non-target term trains; **step time 3.29–3.36 s vs the
+  parent's 3.39, peak 39.7 GB/rank unchanged** — the zero-extra-forward claim holds.
+  Save/resume leg (p-b94c5896, jobs 10090/10092): scancel exercised the SIGTERM-save
+  fast path (saved mid-flight @ 26), resume picked it up, completed rc=0. One hiccup
+  worth knowing: an immediate resubmit after scancel hit the GPU-contention guard
+  (leg 1's process still held ~47 GB while dying) — wait for release before requeueing.
+- 2026-08-19: E2 FULL RUN launched, job 10093 (2000 steps, ~2.2 h). Readout: eval
+  nontarget PGD at steps 0 (parent baseline under this probe) / 1000 / 2000 vs the
+  0.270 parent final; target-stream regression watch on kl_ci_masked (0.0033) and
+  target PGD (0.0043).
