@@ -50,7 +50,8 @@ at production C BY DESIGN: no special handling, the gather is the cost.
 import fnmatch
 import io
 import math
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -504,6 +505,25 @@ def _grid_dims(n: int, max_rows: int = 6) -> tuple[int, int]:
     return n_rows, n_cols
 
 
+_BLOCK_SITE_PATTERN = re.compile(r"^.+?\.(\d+)\.(.+)$")
+
+
+def _block_grid_layout(names: Iterable[str]) -> tuple[int, int, dict[str, tuple[int, int]]]:
+    """(n_rows, n_cols, name -> (row, col)) placing block-structured sites on a semantic grid:
+    one column per block (ascending), one row per matrix kind (first-appearance order, which
+    is canonical site order — e.g. `self_attn.q_proj` above `mlp.gate_proj`). Names that don't
+    all parse as `<prefix>.<block>.<kind>` (the toys) fall back to the generic `_grid_dims`
+    column-major fill."""
+    matches = {name: _BLOCK_SITE_PATTERN.match(name) for name in names}
+    if all(m is not None for m in matches.values()):
+        parsed = {name: (int(m.group(1)), m.group(2)) for name, m in matches.items() if m}
+        col = {block: j for j, block in enumerate(sorted({b for b, _ in parsed.values()}))}
+        row = {kind: i for i, kind in enumerate(dict.fromkeys(k for _, k in parsed.values()))}
+        return len(row), len(col), {name: (row[k], col[b]) for name, (b, k) in parsed.items()}
+    n_rows, n_cols = _grid_dims(len(matches))
+    return n_rows, n_cols, {name: (i % n_rows, i // n_rows) for i, name in enumerate(matches)}
+
+
 def plot_ci_value_histograms(samples: dict[str, np.ndarray], bins: int = 100) -> bytes:
     """Per-site histogram of flattened CI values (torch `plot_ci_values_histograms`)."""
     n_rows, n_cols = _grid_dims(len(samples))
@@ -614,15 +634,20 @@ def mean_cis(reductions: dict[str, SiteReduction]) -> dict[str, np.ndarray]:
 
 
 def plot_weight_magnitudes(magnitudes: dict[str, np.ndarray]) -> bytes:
-    """Per-site `‖V_c‖·‖U_c‖` in descending magnitude order, log y. x is a component's rank
-    within its site, NOT its component id."""
-    n_rows, n_cols = _grid_dims(len(magnitudes))
+    """Per-site `‖V_c‖·‖U_c‖` in descending magnitude order, log y, on the block grid
+    (`_block_grid_layout`: blocks horizontally, matrix kinds vertically). x is a component's
+    rank within its site, NOT its component id."""
+    n_rows, n_cols, spots = _block_grid_layout(magnitudes)
     fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
     axs = fig.subplots(n_rows, n_cols, squeeze=False)
-    flat_axes = axs.T.ravel()
-    for ax in flat_axes[len(magnitudes) :]:
-        ax.set_visible(False)
-    for ax, (name, values) in zip(flat_axes, magnitudes.items(), strict=False):
+    flat_axes = axs.ravel()
+    occupied = {r * n_cols + c for r, c in spots.values()}
+    for i, ax in enumerate(flat_axes):
+        if i not in occupied:
+            ax.set_visible(False)
+    for name, values in magnitudes.items():
+        row, col = spots[name]
+        ax = flat_axes[row * n_cols + col]
         ax.scatter(range(len(values)), np.sort(values)[::-1], marker="x", s=10)
         ax.set_yscale("log")
         ax.set_xlabel("Component (descending ‖V‖·‖U‖)")
@@ -636,7 +661,8 @@ def plot_mean_component_cis_two_streams(
     target_mean_cis: dict[str, np.ndarray],
     nontarget_mean_cis: dict[str, np.ndarray],
 ) -> tuple[bytes, bytes]:
-    """Both streams' mean CI on one axis per site, ordered by descending TARGET mean.
+    """Both streams' mean CI on one axis per site, ordered by descending TARGET mean, on the
+    block grid (`_block_grid_layout`: blocks horizontally, matrix kinds vertically).
 
     The nontarget series takes the same permutation rather than its own, so a component's
     two series line up vertically."""
@@ -644,7 +670,7 @@ def plot_mean_component_cis_two_streams(
         sorted(target_mean_cis),
         sorted(nontarget_mean_cis),
     )
-    n_rows, n_cols = _grid_dims(len(target_mean_cis))
+    n_rows, n_cols, spots = _block_grid_layout(target_mean_cis)
     ordered = {
         name: (target[order], nontarget_mean_cis[name][order])
         for name, target in target_mean_cis.items()
@@ -654,10 +680,14 @@ def plot_mean_component_cis_two_streams(
     for log_y in (False, True):
         fig = Figure(figsize=(8 * n_cols, 3 * n_rows))
         axs = fig.subplots(n_rows, n_cols, squeeze=False)
-        flat_axes = axs.T.ravel()
-        for ax in flat_axes[len(ordered) :]:
-            ax.set_visible(False)
-        for ax, (name, (target, nontarget)) in zip(flat_axes, ordered.items(), strict=False):
+        flat_axes = axs.ravel()
+        occupied = {r * n_cols + c for r, c in spots.values()}
+        for i, ax in enumerate(flat_axes):
+            if i not in occupied:
+                ax.set_visible(False)
+        for name, (target, nontarget) in ordered.items():
+            row, col = spots[name]
+            ax = flat_axes[row * n_cols + col]
             x = np.arange(len(target))
             if log_y:
                 ax.set_yscale("log")
