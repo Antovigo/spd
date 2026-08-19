@@ -154,3 +154,18 @@ The cheap levers, in increasing overhead:
 ## Status log
 
 - 2026-08-19: plan written. Baselines harvested (table above). E1 started.
+- 2026-08-19: E1 LANDED (b9062f642): persistent + merged adversarial recon admitted on
+  the non-target OUTPUT pass, delta-pinned, bundles sized per-pass; SPEC T2/T5/T7
+  amended (pending sign-off); pinned by `core/tests/test_nontarget_adversary.py`; full
+  core+targets suites, 4-sim-device variant, parse gate, and basedpyright all green.
+  14-4x finished (rc=0): final eval nontarget PGD 0.270 output / 0.270 hidden vs
+  target 0.0043 / 0.0033.
+- 2026-08-19: targeted runs gained `resume_provenance` (601c9a756) — the schema had
+  deliberately refused it ("semantics undefined"); E2 defines them: targeted parent
+  only, compat-checked by parsing the parent's pin under the targeted schema.
+- 2026-08-19: E2 deviation from the sketch above: the fine-tune keeps the PARENT's
+  final coefficients (nontarget imp-min 1.0e-04, the 2x arm), NOT 14-equal's equal
+  choice — one change at a time; the equal question belongs to the from-scratch E3.
+  Configs staged in `~/pd_scratch/dual_obj_jax/addsub-L18-15-ntadv-ft{,-SMOKE}.yaml`,
+  frozen worktree `~/pd_scratch/worktrees/nt-ppgd-ft` @ 601c9a756. SMOKE (60 steps,
+  save/resume shape) submitted as job 10089.
