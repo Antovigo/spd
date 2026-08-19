@@ -175,6 +175,7 @@ def train_targeted(
         model=model,
         ci_fn=built.ci_fn,
         positions=Positioned(n_positions=prompt_len),
+        nontarget_positions=Positioned(n_positions=seq_len),
         remat_recon_forwards=cfg.runtime.remat_recon_forwards,
         remat_ci_fn=cfg.runtime.remat_ci_fn,
         ascend_replicate=cfg.runtime.ascend_replicate,

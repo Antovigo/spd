@@ -25,15 +25,13 @@ from param_decomp.core.configs import (
 )
 from param_decomp.core.model import MaterializedMasking, prepare_compute_weights
 from param_decomp.core.objective import (
+    NontargetOutputSources,
     NontargetPass,
     TargetedObjective,
     build_targeted_objective,
 )
 from param_decomp.core.recon import (
-    ConstantSources,
     ReconLossTerm,
-    StochasticSources,
-    UnmaskedNoDeltaSources,
 )
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
@@ -386,7 +384,7 @@ def test_targeted_factory_refuses_adversarial_nontarget_surface():
         target=objective.target,
         nontarget=NontargetPass(
             recon=cast(
-                "tuple[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources], ...]",
+                "tuple[ReconLossTerm[NontargetOutputSources], ...]",
                 (adversarial_term,),
             ),
             impmin_coeff=objective.nontarget.impmin_coeff,
@@ -605,6 +603,7 @@ def test_targeted_engine_end_to_end(tmp_path: Path):
     run_targeted_decomposition_training(
         pd=pd,
         nontarget=nontarget,
+        nontarget_positions=None,
         cadence=Cadence.model_validate(
             {
                 "train_log_every": 2,

@@ -116,6 +116,63 @@ def unmasked_no_delta_masks(
     return masks, delta_masks
 
 
+def persistent_delta_pinned_masks(
+    ci_lower: dict[str, Array], sources: dict[str, Array], live_sites: tuple[str, ...]
+) -> tuple[dict[str, Array], dict[str, Array]]:
+    """Component masks from a persistent bundle's COMPONENT channels with every
+    weight-delta mask pinned to 1.0 — the tPD non-target adversarial arm (SPEC T4, T5/T7
+    amended 2026-08-19). The source's trailing delta channel is ignored: with the delta
+    pinned fully on off-target, the adversary attacks components only, so the probed
+    worst case is a partial ablation of components on data they should be inactive on."""
+    masks: dict[str, Array] = {}
+    delta_masks: dict[str, Array] = {}
+    for site in live_sites:
+        ci = ci_lower[site]
+        source = sources[site].astype(ci.dtype)
+        masks[site] = ci + (1.0 - ci) * source[..., :-1]
+        delta_masks[site] = jnp.ones(ci.shape[:-1], ci.dtype)
+    return masks, delta_masks
+
+
+def mixed_persistent_stochastic_delta_pinned_masks(
+    key: PRNGKeyArray,
+    ci_lower: dict[str, Array],
+    persistent_sources: dict[str, Array],
+    live_sites: tuple[str, ...],
+    components_per_site: dict[str, int],
+    leading: tuple[int, ...],
+    adv_fraction: Array,
+    stochastic_routes: dict[str, Array] | None,
+) -> tuple[dict[str, Array], dict[str, Array], dict[str, Array] | None]:
+    """`mixed_persistent_stochastic_masks` with BOTH families' weight-delta masks pinned
+    to 1.0 — the S34 merge on the tPD non-target pass (T4; T5/T7 amended 2026-08-19).
+    Component masks and routing compose exactly as the plain merge; only the delta
+    polarity differs, and it rides this constructor rather than a flag."""
+    assignment_key, uniform_key = random.split(key)
+    adversarial = _per_sample_adversarial_assignment(assignment_key, adv_fraction, leading)
+    fresh_uniform_components = {
+        site: random.uniform(
+            random.fold_in(uniform_key, site_idx),
+            (*leading, components_per_site[site]),
+        )
+        for site_idx, site in enumerate(live_sites)
+    }
+    adv_masks, _ = persistent_delta_pinned_masks(ci_lower, persistent_sources, live_sites)
+    masks: dict[str, Array] = {}
+    delta_masks: dict[str, Array] = {}
+    for site in live_sites:
+        ci = ci_lower[site]
+        stoch = ci + (1.0 - ci) * fresh_uniform_components[site].astype(ci.dtype)
+        masks[site] = jnp.where(adversarial[..., None], adv_masks[site], stoch)
+        delta_masks[site] = jnp.ones(ci.shape[:-1], ci.dtype)
+    routes = (
+        None
+        if stochastic_routes is None
+        else {site: jnp.logical_or(adversarial, stochastic_routes[site]) for site in live_sites}
+    )
+    return masks, delta_masks, routes
+
+
 def masks_from_sources(
     ci_lower: dict[str, Array], sources: dict[str, Array], site_names: tuple[str, ...]
 ) -> tuple[dict[str, Array], dict[str, Array]]:

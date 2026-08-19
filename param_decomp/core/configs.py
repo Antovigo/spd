@@ -702,11 +702,25 @@ NontargetReconLossMetricConfig = (
     | StochasticReconSubsetLossConfig
     | UnmaskedNoDeltaReconLossConfig
 )
-"""The recon types a tPD non-target pass admits (SPEC T5): the stochastic/constant-source
-ones (delta pinned fully ON, T4) plus `UnmaskedNoDeltaReconLoss` — T4's one enumerated
-delta-OFF exception. With the delta pinned on, an adversarially-chosen or mixed source has
-no meaning there — so those types are unrepresentable in the non-target schema rather
-than filtered out of it."""
+"""The CLOSED non-target recon set (SPEC T5): the stochastic/constant-source ones
+(delta pinned fully ON, T4) plus `UnmaskedNoDeltaReconLoss` — T4's one enumerated
+delta-OFF exception. The non-target HIDDEN pass admits exactly this set; the OUTPUT
+pass's union below additionally admits the persistent adversarial types (T5/T7
+amended 2026-08-19)."""
+
+
+NontargetOutputReconLossMetricConfig = (
+    NontargetReconLossMetricConfig
+    | PersistentPGDReconLossConfig
+    | MergedStochasticSubsetPPGDReconLossConfig
+)
+"""The non-target OUTPUT pass's vocabulary (SPEC T5/T7 amended 2026-08-19): the closed
+non-target set plus the two persistent-source-carrying recon types. Their masks compose
+from the bundle's COMPONENT channels with every weight-delta mask pinned to 1.0 (T4 —
+the source's delta channel is ignored), so the probed worst case is a partial ablation
+of components on data they should be inactive on. Each such term gets its own bundle
+(S23), sized off the BROAD stream's geometry. The hidden non-target pass keeps the
+closed set: hidden-acts robustness off-target is out of scope by decision."""
 
 
 HiddenReconLossMetricConfig = ReconLossMetricConfigs
@@ -802,15 +816,16 @@ class NontargetConfig(BaseConfig):
     target pass's loss list.
 
     `batch_size` is the broad stream's GLOBAL batch; `pd.batch_size` stays the target
-    stream's (persistent adversaries run in the target pass only, so everything core
-    sizes off `pd.batch_size` is target-pass geometry). `impmin_coeff` is the non-target
+    stream's. A non-target OUTPUT recon term may carry a persistent adversary (T5/T7
+    amended 2026-08-19), whose bundle sizes off THIS pass's geometry — `batch_size` x
+    the broad dataset's own seq len — never `pd.batch_size`. `impmin_coeff` is the non-target
     pass's own importance-minimality coefficient (a bare float or a step-evaluated
     schedule) — the penalty's shape and anneal are the target pass's, shared by
     construction (`objective.build_targeted_objective`)."""
 
     batch_size: PositiveInt
     impmin_coeff: NonNegativeFloat | ScheduleConfig
-    recon: list[Annotated[NontargetReconLossMetricConfig, Discriminator("type")]] = Field(
+    recon: list[Annotated[NontargetOutputReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
     )
     hidden: NontargetHiddenConfig | None = Field(

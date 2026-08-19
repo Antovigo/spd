@@ -8,6 +8,7 @@ optimizer-state structure.
 """
 
 from collections.abc import Callable
+from typing import cast
 
 import equinox as eqx
 import jax
@@ -25,6 +26,7 @@ from param_decomp.core.configs import (
     AdamWOptimizerConfig,
     AnyPDConfig,
     MuonOptimizerConfig,
+    NontargetConfig,
     PDConfigBase,
     TargetedPDConfig,
     WeightInit,
@@ -38,9 +40,10 @@ from param_decomp.core.init_placed import (
 from param_decomp.core.losses import scheduled_value_traced
 from param_decomp.core.model import DecomposedModel, PositionAxis, Positioned
 from param_decomp.core.muon_stacked import stacked_muon
-from param_decomp.core.objective import build_recon_terms
+from param_decomp.core.objective import build_nontarget_output_terms, build_recon_terms
 from param_decomp.core.placement import PlacementRules
 from param_decomp.core.recon import (
+    AnyReconLossTerm,
     MixedPersistentStochasticSources,
     PersistentSources,
     persistent_configs,
@@ -202,8 +205,14 @@ def init_train_state(
     src_key: PRNGKeyArray,
     mesh: Mesh,
     rules: PlacementRules,
+    nontarget: NontargetConfig | None = None,
+    nontarget_positions: PositionAxis | None = None,
 ) -> TrainState:
-    """Persistent sources are shaped from `positions` (the run's waist geometry)."""
+    """Persistent sources are shaped from `positions` (the run's waist geometry) — except
+    a non-target OUTPUT term's bundle (T5/T7 amended 2026-08-19), which sizes off ITS
+    pass's geometry: `nontarget.batch_size` x `nontarget_positions`, the broad stream's
+    own (T2). `nontarget_positions` is required exactly when `nontarget` carries a
+    persistent term."""
     assert isinstance(positions, Positioned) == model.has_position_axis, (
         f"{positions} does not match the model's has_position_axis={model.has_position_axis}"
     )
@@ -226,17 +235,42 @@ def init_train_state(
         if isinstance(entry.sources, (PersistentSources, MixedPersistentStochasticSources))
     }
     assert set(term_coeff_by_state_key) == set(persistent)
+    # Each bundle sizes off ITS pass's geometry: target-stream bundles (the target-output
+    # and hidden passes') off the run's waist, a non-target OUTPUT bundle off the broad
+    # stream's (T2 as amended 2026-08-19). `src_key` folding stays index-ordered with the
+    # target bundles first, so a run without non-target adversaries draws byte-identically.
+    geometry_by_state_key = {state_key: (positions, pd.batch_size) for state_key in persistent}
+    if nontarget is not None:
+        nt_persistent = persistent_configs(
+            cast(
+                "tuple[AnyReconLossTerm, ...]",
+                build_nontarget_output_terms(nontarget.recon, model.site_names),
+            )
+        )
+        if nt_persistent:
+            assert nontarget_positions is not None, (
+                "non-target adversarial terms size their bundles off the broad stream's "
+                "geometry — pass `nontarget_positions` (SPEC T2, amended 2026-08-19)"
+            )
+            collisions = set(nt_persistent) & set(persistent)
+            assert not collisions, collisions  # 'nontarget/' prefix keeps the namespace split
+            geometry_by_state_key |= {
+                state_key: (nontarget_positions, nontarget.batch_size)
+                for state_key in nt_persistent
+            }
+            persistent |= nt_persistent
     adversaries: dict[str, PersistentAdversary] = {}
     if persistent:
         for term_idx, state_key in enumerate(persistent):
             cfg = persistent[state_key]
             assert isinstance(cfg.optimizer, AdamPGDConfig)
+            bundle_positions, bundle_batch = geometry_by_state_key[state_key]
             sources = init_sources_sharded(
                 model.site_names,
                 tuple(s.C for s in model.sites),
-                positions,
+                bundle_positions,
                 cfg.source_shape,
-                pd.batch_size,
+                bundle_batch,
                 jnp.dtype(cfg.source_dtype),
                 random.fold_in(src_key, term_idx),
                 mesh,

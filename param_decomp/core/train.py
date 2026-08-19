@@ -71,7 +71,9 @@ from param_decomp.core.losses import (
 from param_decomp.core.masking import (
     constant_delta_pinned_masks,
     masks_from_sources,
+    mixed_persistent_stochastic_delta_pinned_masks,
     mixed_persistent_stochastic_masks,
+    persistent_delta_pinned_masks,
     stochastic_delta_pinned_masks,
     unmasked_no_delta_masks,
 )
@@ -600,6 +602,7 @@ class _StepAtoms[PreparedT]:
         recon_terms: tuple[AnyReconLossTerm, ...] | None = None,
         key_offset: int = 1,
         capture_keys_by_term: dict[str, CaptureKeys] | None = None,
+        delta_pinned: bool = False,
     ) -> AscendedAdversaries:
         """The step's whole ascent phase, params + CI detached (SPEC §4.5).
 
@@ -608,6 +611,11 @@ class _StepAtoms[PreparedT]:
         objective, so the two never share a source bundle. `key_offset` is that pass's RNG
         offset (T9), keeping fresh-PGD draws disjoint across passes. The defaults are the
         single-pass values, so a plain run's trace is byte-identical.
+
+        `delta_pinned` is the tPD NON-TARGET pass's polarity (T4; T5/T7 amended
+        2026-08-19): warmup scoring forwards compose the bundle's component channels with
+        every weight-delta mask pinned to 1.0, and `stream` is then the BROAD stream.
+        Fresh-PGD has no delta-pinned form — it stays unrepresentable off-target.
 
         Persistent adversaries each run their supplemental ascents vs the route-ALL
         all-sites forward (SPEC S24 — torch warmup parity, NOT the term's loss plan); the
@@ -620,7 +628,14 @@ class _StepAtoms[PreparedT]:
 
         def warmup_scoring_loss(term: AnyReconLossTerm) -> Callable[[dict[str, Array]], Array]:
             def objective(sources: dict[str, Array]) -> Array:
-                masks, delta_masks = masks_from_sources(ci_lower_detached, sources, self.site_names)
+                if delta_pinned:
+                    masks, delta_masks = persistent_delta_pinned_masks(
+                        ci_lower_detached, sources, self.site_names
+                    )
+                else:
+                    masks, delta_masks = masks_from_sources(
+                        ci_lower_detached, sources, self.site_names
+                    )
                 return self.masked_recon(
                     model,
                     prepared_weights=ascend_prepared_weights,
@@ -648,6 +663,10 @@ class _StepAtoms[PreparedT]:
         fresh_sources: dict[tuple[int, int], dict[str, Array]] = {}
         fixed_routes: dict[tuple[int, int], tuple[Routes, ...]] = {}
         terms = self.recon_terms if recon_terms is None else recon_terms
+        if delta_pinned:
+            assert not any(isinstance(e.sources, FreshPGDSources) for t in terms for e in t.plan), (
+                "fresh-PGD is unrepresentable on the non-target pass (SPEC T5)"
+            )
         for term_idx, term in enumerate(terms):
             term_key = random.fold_in(key, key_offset + term_idx)
             for entry_idx, entry in enumerate(term.plan):
@@ -1214,7 +1233,13 @@ def _scale_subcomponents(
     return ComponentStacks(stacks=stacks, site_slots=components.site_slots)
 
 
-type _NontargetSources = StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+type _NontargetSources = (
+    StochasticSources
+    | ConstantSources
+    | UnmaskedNoDeltaSources
+    | PersistentSources
+    | MixedPersistentStochasticSources
+)
 """The mask sources a non-target pass admits (SPEC T5), named so the grid's narrowing casts
 say which vocabulary they are narrowing to."""
 
@@ -1316,15 +1341,24 @@ def make_targeted_train_step[PreparedT](
     The batch args are the streams: `batch` the target stream (whose global batch is
     `pd.batch_size` — persistent sources size from it), `nontarget_batch` the broad stream."""
     # The library boundary behind the non-target passes' narrow types, for objectives built
-    # outside them (SPEC T5).
-    nontarget_pass_terms = objective.nontarget.recon + (
-        objective.nontarget_hidden.recon if objective.nontarget_hidden is not None else ()
-    )
-    for term in nontarget_pass_terms:
+    # outside them (SPEC T5, amended 2026-08-19: the OUTPUT pass admits the persistent
+    # adversarial strategies; the hidden pass keeps the closed set).
+    for term in objective.nontarget.recon:
         for entry in term.plan:
             assert isinstance(
-                entry.sources, StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+                entry.sources,
+                StochasticSources
+                | ConstantSources
+                | UnmaskedNoDeltaSources
+                | PersistentSources
+                | MixedPersistentStochasticSources,
             ), term.name
+    if objective.nontarget_hidden is not None:
+        for term in objective.nontarget_hidden.recon:
+            for entry in term.plan:
+                assert isinstance(
+                    entry.sources, StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+                ), term.name
 
     atoms = _StepAtoms(
         model_static,
@@ -1418,8 +1452,11 @@ def make_targeted_train_step[PreparedT](
 
     passes = tuple(plans)
     for plan in passes:
-        assert plan.on_target_stream or not plan.adversary_keys, (
-            f"pass {plan.label!r} runs off-target but carries adversaries (SPEC T7)"
+        # T7 as amended 2026-08-19: the non-target OUTPUT pass may carry persistent
+        # adversaries (ascended against its own stream, delta pinned per T4); the
+        # non-target HIDDEN pass stays adversary-free.
+        assert plan.on_target_stream or plan.role == "output" or not plan.adversary_keys, (
+            f"pass {plan.label!r} is a non-target hidden pass but carries adversaries (SPEC T5/T7)"
         )
 
     target_stream_capture_keys = atoms.hidden_acts_capture_keys | frozenset(
@@ -1461,20 +1498,35 @@ def make_targeted_train_step[PreparedT](
         nt_stream: StreamInputs,
         nt_reconstruction_specs: dict[str, ReconstructionSpec],
         capture_keys_by_term: dict[str, CaptureKeys],
-    ) -> DrawLoss[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]:
+        persistent_sources: dict[str, dict[str, Array]],
+        term_coeffs: dict[str, Array | float],
+        step_f32: Array,
+    ) -> DrawLoss[_NontargetSources]:
         """The non-target grid's per-draw dispatcher: every delta mask pinned to 1.0 —
         except the unmasked-no-delta arm, which pins it to 0.0 (SPEC T4) — scored against the
-        broad stream's frozen output, or (non-target HIDDEN pass) its frozen activations."""
+        broad stream's frozen output, or (non-target HIDDEN pass) its frozen activations.
+        The persistent/mixed arms (OUTPUT pass only, T5/T7 amended 2026-08-19) compose the
+        bundle's component channels delta-pinned, take the term's coeff on their model-side
+        cotangents, and enter the total at weight 1 so the backward hands the adversary an
+        unscaled `dL/ds` (S14')."""
 
         def draw_loss(
             term_idx: int,
             entry_idx: int,
-            term: ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources],
-            entry: ReconForward[StochasticSources | ConstantSources | UnmaskedNoDeltaSources],
+            term: ReconLossTerm[_NontargetSources],
+            entry: ReconForward[_NontargetSources],
             draw_key: PRNGKeyArray,
             routes: Routes,
         ) -> ReconstructionLoss:
             del term_idx, entry_idx
+            match coeff_application(cast("AnyReconLossTerm", term)):
+                case "scales_model_cotangents":
+                    draw_prepared = model_cotangents_scaled(
+                        prepared_weights, term_coeffs[term.name]
+                    )
+                    draw_ci_lower = model_cotangents_scaled(nt_ci.lower, term_coeffs[term.name])
+                case "scales_loss":
+                    draw_prepared, draw_ci_lower = prepared_weights, nt_ci.lower
             with jax.named_scope("pd_nontarget_masked_fwd"):
                 match entry.sources:
                     case StochasticSources():
@@ -1489,9 +1541,29 @@ def make_targeted_train_step[PreparedT](
                         component_masks, delta_masks = unmasked_no_delta_masks(
                             nt_ci.lower, entry.live_sites
                         )
+                    case PersistentSources(state_key=state_key):
+                        component_masks, delta_masks = persistent_delta_pinned_masks(
+                            draw_ci_lower, persistent_sources[state_key], entry.live_sites
+                        )
+                    case MixedPersistentStochasticSources(state_key=state_key):
+                        adv_fraction = scheduled_value_traced(
+                            step_f32, atoms.total_steps, entry.sources.cfg.adv_fraction
+                        )
+                        component_masks, delta_masks, routes = (
+                            mixed_persistent_stochastic_delta_pinned_masks(
+                                key=draw_key,
+                                ci_lower=draw_ci_lower,
+                                persistent_sources=persistent_sources[state_key],
+                                live_sites=entry.live_sites,
+                                components_per_site=atoms.c_by_site,
+                                leading=nt_stream.leading,
+                                adv_fraction=adv_fraction,
+                                stochastic_routes=routes,
+                            )
+                        )
                 return atoms.masked_recon(
                     model,
-                    prepared_weights=prepared_weights,
+                    prepared_weights=draw_prepared,
                     batch=nt_stream.batch,
                     masking=MaterializedMasking(
                         component_masks=component_masks,
@@ -1565,16 +1637,18 @@ def make_targeted_train_step[PreparedT](
         def bundle_for(plan: _PassPlan, target: AnyCI, nontarget: AnyCI) -> CI:
             return ci_for_role(target if plan.on_target_stream else nontarget, plan.role)
 
-        # ── adversary ascents: TARGET-stream passes only, params + CI detached (§4.5/T7) ──
-        # Each pass ascends against ITS OWN head and objective, so the output pass's adversary
-        # never chases the hidden loss or vice versa.
+        # ── adversary ascents: each pass against ITS OWN stream, head, and objective ──
+        # (§4.5; T7 amended 2026-08-19). Target-stream passes always take the phase (their
+        # fresh-PGD entries need it even with no persistent bundle); an off-target pass
+        # takes it only when it carries adversaries — then on the BROAD stream, warmup
+        # scoring delta-pinned per T4.
         ascended_by_label: dict[str, AscendedAdversaries] = {}
         for plan in passes:
-            if not plan.on_target_stream:
+            if not plan.on_target_stream and not plan.adversary_keys:
                 continue
             ascended_by_label[plan.label] = atoms.ascend_adversaries(
                 model,
-                stream,
+                stream if plan.on_target_stream else nt_stream,
                 ascend_prepared_weights,
                 jax.lax.stop_gradient(bundle_for(plan, ci_any, nt_ci_any)).lower,
                 {k: training.adversaries[k] for k in plan.adversary_keys},
@@ -1584,6 +1658,7 @@ def make_targeted_train_step[PreparedT](
                 recon_terms=plan.terms,
                 key_offset=plan.key_offset,
                 capture_keys_by_term=plan.capture_keys_by_term,
+                delta_pinned=not plan.on_target_stream,
             )
 
         warmed_advs = {
@@ -1599,7 +1674,9 @@ def make_targeted_train_step[PreparedT](
                     plan.key_offset,
                     term_idx,
                     term,
-                    ascended_by_label[plan.label].fixed_routes if plan.on_target_stream else {},
+                    ascended_by_label[plan.label].fixed_routes
+                    if plan.label in ascended_by_label
+                    else {},
                     (stream if plan.on_target_stream else nt_stream).leading,
                 )
                 for term_idx, term in enumerate(plan.terms)
@@ -1641,6 +1718,9 @@ def make_targeted_train_step[PreparedT](
                     nt_stream,
                     pass_specs[plan.label],
                     plan.capture_keys_by_term,
+                    persistent_sources,
+                    pass_term_coeffs[plan.label],
+                    step_f32,
                 )
                 breakdowns = atoms.grid_losses(
                     cast("tuple[ReconLossTerm[_NontargetSources], ...]", plan.terms),

@@ -26,6 +26,7 @@ from param_decomp.core.configs import (
     LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
     NontargetConfig,
+    NontargetOutputReconLossMetricConfig,
     NontargetReconLossMetricConfig,
     PersistentPGDReconLossConfig,
     PGDReconLayerwiseLossConfig,
@@ -96,6 +97,18 @@ class TargetPass:
     recon: tuple[AnyReconLossTerm, ...]
 
 
+NontargetHiddenSources = StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+"""The CLOSED non-target strategy set (SPEC T5) — the hidden non-target pass's whole
+vocabulary, and the non-adversarial arms of the output pass's."""
+
+NontargetOutputSources = (
+    NontargetHiddenSources | PersistentSources | MixedPersistentStochasticSources
+)
+"""The non-target OUTPUT pass's strategies (T5/T7 amended 2026-08-19): the closed set
+plus the persistent adversarial pair, whose masks the step composes DELTA-PINNED (T4 —
+the bundle's delta channel is ignored)."""
+
+
 @dataclass(frozen=True)
 class NontargetPass:
     """The tPD non-target-pass surface, complete (SPEC T4/T5): with the delta mask pinned
@@ -106,10 +119,11 @@ class NontargetPass:
     config (penalty shape, anneal, frequency block shared by construction); only the
     coefficient is the non-target pass's own."""
 
-    recon: tuple[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources], ...]
-    """The enumerated non-target strategies ONLY, in the type (SPEC T5): the delta-pinned
-    stochastic/constant pair plus the delta-off unmasked arm — a plan carrying an
-    adversarial or mixed strategy is unrepresentable here, not filtered out."""
+    recon: tuple[ReconLossTerm[NontargetOutputSources], ...]
+    """The non-target OUTPUT vocabulary in the type (SPEC T5, amended 2026-08-19): the
+    delta-pinned stochastic/constant pair, the delta-off unmasked arm, and the two
+    persistent adversarial strategies — every arm delta-pinned per T4, the persistent
+    bundles' delta channels ignored. Fresh-PGD stays unrepresentable off-target."""
     impmin_coeff: LossCoeff
     """The non-target pass's importance-minimality COEFFICIENT — the penalty config
     (shape, anneal, frequency block) is the target pass's, structurally: this pass
@@ -129,8 +143,9 @@ class HiddenPass[S: MaskSourceStrategy]:
     imp-min CONFIG (penalty shape, anneal, frequency block) is the target pass's, shared by
     construction — T6's rule extended to the hidden role; only the coefficient is this pass's.
 
-    Generic over `S` so the non-target stream's hidden pass keeps T5/T7's narrowing in the
-    TYPE (no adversarial or mixed sources off-target), exactly as `NontargetPass.recon` does."""
+    Generic over `S` so the non-target stream's hidden pass keeps T5's narrowing in the
+    TYPE: the CLOSED set, no adversarial or mixed sources — the 2026-08-19 amendment
+    admits those on the non-target OUTPUT pass only."""
 
     recon: tuple[ReconLossTerm[S], ...]
     impmin_coeff: LossCoeff
@@ -150,9 +165,7 @@ class TargetedObjective:
     target: TargetPass
     nontarget: NontargetPass
     hidden: HiddenPass[MaskSourceStrategy] | None = None
-    nontarget_hidden: (
-        HiddenPass[StochasticSources | ConstantSources | UnmaskedNoDeltaSources] | None
-    ) = None
+    nontarget_hidden: HiddenPass[NontargetHiddenSources] | None = None
 
     def __post_init__(self) -> None:
         assert self.nontarget_hidden is None or self.hidden is not None, (
@@ -348,7 +361,7 @@ def build_targeted_objective(
     )
     assert recon_terms, "no recon loss terms configured"
 
-    nt_terms = _nontarget_terms(nontarget.recon, site_names, "non-target")
+    nt_terms = build_nontarget_output_terms(nontarget.recon, site_names)
 
     hidden_pass = None
     nontarget_hidden_pass = None
@@ -387,13 +400,48 @@ def build_targeted_objective(
     )
 
 
+def build_nontarget_output_terms(
+    cfgs: Sequence[NontargetOutputReconLossMetricConfig], site_names: tuple[str, ...]
+) -> tuple[ReconLossTerm[NontargetOutputSources], ...]:
+    """Build the non-target OUTPUT pass's recon terms (SPEC T5/T7 amended 2026-08-19):
+    the closed non-target vocabulary plus the persistent adversarial types, whose masks
+    the step composes delta-pinned (T4 — the bundle's delta channel is ignored). Public
+    because state init shares this walk: each bundle here sizes off the BROAD stream's
+    geometry (T2), so `init_train_state` must see the same state keys the step will ask
+    for. The `nontarget/` key prefix keeps the global adversary namespace disjoint from
+    the target-stream passes', whose keys are bare loss names."""
+    terms: list[ReconLossTerm[NontargetOutputSources]] = []
+    for cfg in cfgs:
+        assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
+        name = cfg.name if cfg.name is not None else cfg.type
+        assert name not in {t.name for t in terms}, f"duplicate non-target loss {name!r}"
+        plan: ReconPlan[NontargetOutputSources]
+        match cfg:
+            case PersistentPGDReconLossConfig():
+                sources: NontargetOutputSources = PersistentSources(
+                    state_key=f"nontarget/{name}", cfg=cfg
+                )
+                plan = make_plan(all_sites_live(site_names), AllRoutingConfig(), sources, 1)
+            case MergedStochasticSubsetPPGDReconLossConfig():
+                sources = MixedPersistentStochasticSources(state_key=f"nontarget/{name}", cfg=cfg)
+                plan = make_plan(all_sites_live(site_names), cfg.routing, sources, 1)
+            case _:
+                # Width-erased rebuild, as `_collect_terms.recon` does: dataclass type
+                # params are invariant, so the closed-set plan widens explicitly.
+                plan = tuple(
+                    ReconForward[NontargetOutputSources](e.live_sites, e.sample_routing, e.sources)
+                    for e in _nontarget_recon_plan(cfg, site_names)
+                )
+        terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
+    return tuple(terms)
+
+
 def _nontarget_terms(
     cfgs: Sequence[NontargetReconLossMetricConfig], site_names: tuple[str, ...], what: str
-) -> tuple[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources], ...]:
-    """Build one non-target-stream pass's recon terms. Both non-target passes (output and
-    hidden, T5/T12) are authored from the same closed vocabulary under the same rules, so they
-    are built here rather than twice — `what` only names the pass in the error."""
-    terms: list[ReconLossTerm[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]] = []
+) -> tuple[ReconLossTerm[NontargetHiddenSources], ...]:
+    """Build the non-target HIDDEN pass's recon terms from the CLOSED vocabulary (T5/T12);
+    `what` only names the pass in the error."""
+    terms: list[ReconLossTerm[NontargetHiddenSources]] = []
     for cfg in cfgs:
         assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
         name = cfg.name if cfg.name is not None else cfg.type

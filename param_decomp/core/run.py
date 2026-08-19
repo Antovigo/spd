@@ -502,6 +502,8 @@ def _init_or_restore_state(
     is_main: bool,
     compiler_options: dict[str, bool | int | str],
     faith_warmup: FaithfulnessWarmup | None,
+    nontarget: NontargetConfig | None = None,
+    nontarget_positions: PositionAxis | None = None,
 ) -> tuple[TrainState, int] | None:
     """The shared init/restore/finetune/faith-warmup phase (SPEC S21/S22/S33).
 
@@ -509,8 +511,19 @@ def _init_or_restore_state(
     must exit cleanly for requeue — no valid checkpoint exists pre-step-0)."""
     state = _ensure_global(
         init_train_state(
-            pd, model, ci_fn_arch, positions, opt_vu, opt_ci, init_key, src_key, mesh, rules
-        ),
+            pd,
+            model,
+            ci_fn_arch,
+            positions,
+            opt_vu,
+            opt_ci,
+            init_key,
+            src_key,
+            mesh,
+            rules,
+            nontarget=nontarget,
+            nontarget_positions=nontarget_positions,
+        ),  # fmt: skip
         mesh,
     )
 
@@ -620,6 +633,8 @@ def _prepare_run(
     placement_rules: PlacementRules,
     is_main: bool,
     faith_warmup: FaithfulnessWarmup | None,
+    nontarget: NontargetConfig | None = None,
+    nontarget_positions: PositionAxis | None = None,
 ) -> _PreparedRun | None:
     """Everything before the train loop: mesh activation, optimizers, keys, checkpoint
     manager, the placement audit, and init/restore/finetune/faith-warmup. Returns `None`
@@ -653,6 +668,7 @@ def _prepare_run(
     init = _init_or_restore_state(
         pd, ci_fn, positions, run, model, opt_vu, opt_ci, init_key, src_key, mesh, rules,
         checkpoint_manager, is_main, compiler_options, faith_warmup,
+        nontarget=nontarget, nontarget_positions=nontarget_positions,
     )  # fmt: skip
     if init is None:
         return None  # SIGTERM mid-warmup: clean exit for requeue
@@ -759,6 +775,7 @@ def run_targeted_decomposition_training[EvalContextT](
     model: DecomposedModel,
     ci_fn: CIFnArch,
     positions: PositionAxis,
+    nontarget_positions: PositionAxis | None,
     remat_recon_forwards: bool,
     remat_ci_fn: bool,
     ascend_replicate: bool,
@@ -780,15 +797,17 @@ def run_targeted_decomposition_training[EvalContextT](
     other decomposition loss run on), and `sample_nontarget_batch(step)` the broad
     NON-TARGET stream (global batch `nontarget.batch_size`, delta pinned fully on save
     T4's one unmasked-no-delta exception). `positions` is the TARGET stream's waist
-    geometry — persistent sources live in the target pass; each stream runs at its own
-    natural sequence length (SPEC T2/T8).
+    geometry; `nontarget_positions` the broad stream's own, required exactly when a
+    non-target OUTPUT term carries a persistent adversary (T5/T7 amended 2026-08-19) —
+    its bundle sizes off that geometry. Each stream runs at its own natural sequence
+    length (SPEC T2/T8).
 
     tPD has no faithfulness role (T3): `TargetedPDConfig` admits no faithfulness loss
     member and carries no warmup fields, so neither exists to refuse here."""
     is_main = jax.process_index() == 0
     prepared = _prepare_run(
         pd, cadence, run, model, ci_fn, positions, compiler_options, mesh, placement_rules,
-        is_main, None,
+        is_main, None, nontarget=nontarget, nontarget_positions=nontarget_positions,
     )  # fmt: skip
     if prepared is None:
         return
