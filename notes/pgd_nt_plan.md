@@ -330,3 +330,10 @@ The cheap levers, in increasing overhead:
   derived -SMOKE configs (regenerable via derive_*_smoke), and the abgrid-smoke
   frozen worktree all removed. Kept: both sc runs (comparison data), the
   L18-16-merged worktree (still backing jobs 10123/10137 until the evalfix cycle).
+- 2026-08-20: stub cleanup — the cancelled w3 run (p-afa6ccd9: run dir, by-name link,
+  slurm log; no cloud wandb existed) and the guard-stub job logs (10104/10105/10122/
+  10124) were removed (partly by a concurrent sweep from the owner's side); this
+  session removed the last leftover: p-83b757e5 + its job-10096 log — an E2a requeue
+  leg that minted a fresh run id instead of resuming (no ckpts, superseded by
+  p-bb64cede). runs/ now holds exactly the nine real runs, each with its by-name
+  link. The w3 config/sbatch stay in ~/pd_scratch as the deferred n_warmup-3 recipe.
