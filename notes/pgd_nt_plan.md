@@ -197,6 +197,11 @@ The cheap levers, in increasing overhead:
   higher adv_fraction / source LR, warmup on the fine-tune only); E2c ~matches E2b ->
   the free adversary suffices once aimed right; both weak -> the fine-tune framing is
   suspect, move the pressure into the from-scratch E3.
+- 2026-08-20: E2c CANCELLED by Antoine at ~step 350 (job 10099, p-cdcf88d4; removed
+  from disk and W&B). Its only readout: 0.2543 @250 — indistinguishable from the other
+  arms at that horizon. The c-shape hypothesis is untested at the 1k/2k horizon, not
+  refuted. E2b (job 10098) continues; the 16-line from-scratch merged runs are queued
+  separately.
 - 2026-08-20: E2b LAUNCHED (job 10098, run per runs/by-name/addsub-L18-15-ntppgd-ft):
   the STRONG-adversary comparison arm — canonical separate PersistentPGDReconLoss on
   the nontarget output pass (coeff 0.5, n_warmup 2, bsc, next to the stochastic term),
