@@ -226,6 +226,8 @@ def make_fresh_pgd_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
     role: CIRole,
+    *,
+    targeted: bool,
 ) -> EvalOperation[LMEvalContext]:
     assert metric.init == "random" and metric.source_shape == "c", metric
     probe = FreshPGDReconEval(
@@ -234,9 +236,22 @@ def make_fresh_pgd_operation(
         step_size=metric.step_size,
         reconstruction=resolve_reconstruction_spec(metric.hidden_acts_reconstruction),
     )
+    # A targeted run's NON-TARGET stream probe is delta-pinned (SPEC T4, amended
+    # 2026-08-20): every non-target forward keeps the delta escape valve fully on, so
+    # the worst case measured is the component-only one training actually defends. On a
+    # plain run, "nontarget" IS the ordinary stream and the delta stays attackable.
+    delta_pinned = targeted and stream == "nontarget"
     return _make_scalar_operation(
         schedule,
-        make_fresh_pgd_step(model, ci_capture_keys, probe, mesh, compiler_options, role=role),
+        make_fresh_pgd_step(
+            model,
+            ci_capture_keys,
+            probe,
+            mesh,
+            compiler_options,
+            role=role,
+            delta_pinned=delta_pinned,
+        ),  # fmt: skip
         (f"loss/{probe.name}",),
         model,
         run_key,

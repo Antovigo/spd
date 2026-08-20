@@ -60,7 +60,7 @@ from param_decomp.core.losses import (
     reconstruction_loss,
     reconstruction_loss_metrics,
 )
-from param_decomp.core.masking import masks_from_sources
+from param_decomp.core.masking import masks_from_sources, persistent_delta_pinned_masks
 from param_decomp.core.model import (
     EMPTY_CAPTURE_KEYS,
     CaptureKeys,
@@ -384,8 +384,14 @@ def make_fresh_pgd_step[PreparedT](
     *,
     n_valid_rows: int | None = None,
     role: CIRole = "output",
+    delta_pinned: bool = False,
 ) -> ScalarStep:
-    """Build fresh-PGD evaluation for end-to-end reconstruction and optional hidden-activation reconstruction."""
+    """Build fresh-PGD evaluation for end-to-end reconstruction and optional hidden-activation reconstruction.
+
+    `delta_pinned` composes every weight-delta mask as 1.0 (SPEC T4, amended 2026-08-20):
+    a targeted run's NON-TARGET stream probe must not attack the delta escape valve the
+    training forwards pin shut — unpinned, the probe's dominant move off-target is
+    delta->0 (>= the CSS-only floor), which no component-side training can defend."""
     assert model_static.has_position_axis, "LM PGDReconLoss requires a position axis"
     reconstruction_capture_keys = fresh_pgd.hidden_acts_capture_keys
     model_static.assert_hidden_acts_reconstruction_points(
@@ -453,8 +459,10 @@ def make_fresh_pgd_step[PreparedT](
             pgd_key,
             fresh_pgd,
             loss_at_masks,
+            delta_pinned,
         )
-        masks, delta_masks = masks_from_sources(
+        mask_fn = persistent_delta_pinned_masks if delta_pinned else masks_from_sources
+        masks, delta_masks = mask_fn(
             batch.ci_lower, sources, tuple(site.name for site in model.sites)
         )
         breakdown = objective_with_breakdown(masks, delta_masks)

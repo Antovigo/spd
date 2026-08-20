@@ -1,6 +1,7 @@
 """LM evaluation operation binding and execution."""
 
 from collections.abc import Callable
+from functools import partial
 
 import jax
 import numpy as np
@@ -175,7 +176,11 @@ def make_lm_evaluation(
                 return per_stream(make_ci_l0_operation, metric, schedule, data_streams, ci_roles)
             case PGDReconLossConfig():
                 return per_stream(
-                    make_fresh_pgd_operation, metric, schedule, data_streams, ci_roles
+                    partial(make_fresh_pgd_operation, targeted=targeted),
+                    metric,
+                    schedule,
+                    data_streams,
+                    ci_roles,
                 )
 
             case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
