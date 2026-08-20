@@ -224,20 +224,26 @@ The cheap levers, in increasing overhead:
   configs in `~/pd_scratch/dual_obj_jax/addsub-L18-16-{ntmerged,allmerged}.yaml`; NO
   smokes — deliberate deviation from the smoke rule, owner's call, to take the freeing
   slots immediately):
-  - **addsub-L18-16-ntmerged (job 10100, variant 2 = E3 proper)**: target stream
-    UNCHANGED; non-target output AND hidden stochastic terms each -> Merged coeff 1.0,
+  - **addsub-L18-16-ntmerged (job 10104, variant 2 = E3 proper; resubmitted over
+    10100 pre-start)**: target stream's loss structure unchanged, but its PPGD bundles
+    re-shaped bsc -> sc (owner's call, post-submit): both arms now share sc on the
+    target stream, so the {ntmerged, allmerged} pair differs ONLY in merged-vs-separate
+    terms — the sc-vs-seat change is common-mode, read against the 14-4x/seat history
+    instead. Non-target output AND hidden stochastic terms each -> Merged coeff 1.0,
     `adv_fraction` ramp 0 -> 0.5 over the first 100 steps (idea f, revised from
     "first half"), `n_warmup 0`, `source_shape: c` (E2c's threat-model-match choice).
     Step time should hold at ~3.35 s.
-  - **addsub-L18-16-allmerged (job 10101, variant 1)**: every stochastic/PPGD pair
-    collapsed into the merged term. Target output 1.5 / target hidden 3.0 (matching
-    the pairs' totals; adv_fraction 0.5 const evens the split to 0.75+0.75 and
-    1.5+1.5 vs the seat's 1.0+0.5 / 2.0+1.0 — a deliberate rounding), `n_warmup 2`
-    kept on the target terms, `source_shape: sc` on the target stream (owner's choice;
-    CAVEAT: sc is a batch-shared, weaker per-sample adversary AND a second deviation
-    from the seat's bsc — if target metrics move, merged-vs-sc attribution is
-    confounded). Non-target side identical to ntmerged. Expect a mild step-time WIN
-    (the target PPGD's extra masked forward folds into the merged one).
+  - **addsub-L18-16-allmerged (job 10105, variant 1; resubmitted over 10101 to keep
+    ntmerged first in the FIFO)**: every stochastic/PPGD pair collapsed into the
+    merged term. Target output 1.5 / target hidden 3.0 (matching the pairs' totals;
+    adv_fraction 0.5 const evens the split to 0.75+0.75 and 1.5+1.5 vs the seat's
+    1.0+0.5 / 2.0+1.0 — a deliberate rounding), `n_warmup 2` kept on the target
+    terms, `source_shape: sc` on the target stream (sc is a batch-shared, weaker
+    per-sample adversary than the seat's bsc; with ntmerged now also sc, that change
+    is common to both arms rather than a confound between them). Non-target side
+    identical to ntmerged. Expect a mild step-time WIN (the target PPGD's extra
+    masked forward folds into the merged one).
   - Possible next step, deliberately deferred: `n_warmup 0` on the target merged
     terms (true zero-extra-forward recipe everywhere; risks a staler target adversary).
   - Both queued behind E2b (10098) / E2c (10099); slots free over the next ~2-3 h.
+    ntmerged (10104) takes the first slot, allmerged (10105) the second.
