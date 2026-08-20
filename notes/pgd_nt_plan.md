@@ -300,3 +300,11 @@ The cheap levers, in increasing overhead:
   pool geometry is nil (~15 MB/bundle, no step-time effect; 14-4x ran 3.39 s with
   it). The sc runs (p-b62de0d9, p-ae980ca6) are kept as the sc datapoints. Swap
   watchers automate ckpt-wait -> scancel -> guard-retry relaunch.
+- 2026-08-20: SWAP EXECUTED. sc arms stopped at their step-5000 checkpoints (ntmerged
+  p-b62de0d9: ckpts 5000+5132; allmerged p-ae980ca6: ckpts 5000+5128 — the sc
+  datapoints for the shape comparison). -bsc twins running: ntmerged-bsc job 10123,
+  allmerged-bsc job 10137 (each first submit died on the GPU release-lag contention
+  guard; the retry launcher got both through). **sc diagnosis CONFIRMED**: ntmerged-bsc
+  eval target PGD @500 = 0.0308, back in the 14-4x band (0.0354) vs the sc arm's
+  0.328 — a 10x recovery from the shape change alone; step time 3.383 s (parity) and
+  peak 39.84 GB, so bsc costs nothing here, as expected. allmerged-bsc peak 36.65 GB.
