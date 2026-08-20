@@ -323,3 +323,10 @@ The cheap levers, in increasing overhead:
 - 2026-08-20: NEW ARM launched — addsub-L18-16-allmerged-bsc-w3: allmerged-bsc with
   the two TARGET merged terms at n_warmup 3 (one extra ascent), probing whether the
   merged arm's small target-PGD lag is warmup-limited. Non-target unchanged.
+- 2026-08-20: cleanup — the abandoned w3 arm (p-afa6ccd9, job 10154) deleted from
+  disk, by-name, local wandb, W&B cloud, and its staged config/sbatch; the
+  contention-guard stub slurm logs (10104/10105/10122/10124), the historical smoke
+  logs (smoke-abgrid-bindtime-*, tpd-jax-smoke*, jax-dual-01-smoke, seat-smoke), the
+  derived -SMOKE configs (regenerable via derive_*_smoke), and the abgrid-smoke
+  frozen worktree all removed. Kept: both sc runs (comparison data), the
+  L18-16-merged worktree (still backing jobs 10123/10137 until the evalfix cycle).
