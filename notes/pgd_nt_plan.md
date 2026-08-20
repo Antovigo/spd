@@ -337,3 +337,7 @@ The cheap levers, in increasing overhead:
   leg that minted a fresh run id instead of resuming (no ckpts, superseded by
   p-bb64cede). runs/ now holds exactly the nine real runs, each with its by-name
   link. The w3 config/sbatch stay in ~/pd_scratch as the deferred n_warmup-3 recipe.
+- 2026-08-20: sc runs REMOVED too (owner): p-b62de0d9 / p-ae980ca6 deleted from disk,
+  by-name, local wandb, W&B cloud, slurm logs, and their staged configs. Their key
+  numbers survive in this log (sc target PGD 0.328@500 / 0.082@4000; ckpt-5000
+  freeze); the {bsc twin, 14-4x} pair carries the shape comparison from here.
