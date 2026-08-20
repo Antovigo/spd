@@ -274,5 +274,7 @@ The cheap levers, in increasing overhead:
     with the seat (3.35-3.39) holds with merged adversaries on BOTH non-target
     passes; its nontarget merged train losses open ~3-4x the stochastic-only
     counterpart's (output 0.0058 / hidden 0.0091 @ step 1600 vs E2a's ~0.002) — the
-    free adversary bites from scratch too. allmerged peak 36.45 GB/rank (folding the
-    separate PPGD forwards saves memory); steady-state step time TBD.
+    free adversary bites from scratch too. allmerged 3.581 s/step @ peak 36.45 GB/rank —
+    ~6% over the seat despite one fewer masked forward per pair (folding the
+    separate PPGD forwards does save 3.3 GB/rank); suspects: the sc bundles'
+    different broadcast, and warmup ascents now scoring the merged plan.
