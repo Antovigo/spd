@@ -1341,8 +1341,9 @@ def make_targeted_train_step[PreparedT](
     The batch args are the streams: `batch` the target stream (whose global batch is
     `pd.batch_size` — persistent sources size from it), `nontarget_batch` the broad stream."""
     # The library boundary behind the non-target passes' narrow types, for objectives built
-    # outside them (SPEC T5, amended 2026-08-19: the OUTPUT pass admits the persistent
-    # adversarial strategies; the hidden pass keeps the closed set).
+    # outside them (SPEC T5, amended 2026-08-19/20: the OUTPUT pass admits both persistent
+    # adversarial strategies; the HIDDEN pass admits the merged one only — the standalone
+    # bundle would be an extra forward, which the amendment deliberately excludes).
     for term in objective.nontarget.recon:
         for entry in term.plan:
             assert isinstance(
@@ -1357,7 +1358,11 @@ def make_targeted_train_step[PreparedT](
         for term in objective.nontarget_hidden.recon:
             for entry in term.plan:
                 assert isinstance(
-                    entry.sources, StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+                    entry.sources,
+                    StochasticSources
+                    | ConstantSources
+                    | UnmaskedNoDeltaSources
+                    | MixedPersistentStochasticSources,
                 ), term.name
 
     atoms = _StepAtoms(
@@ -1451,13 +1456,10 @@ def make_targeted_train_step[PreparedT](
         )
 
     passes = tuple(plans)
-    for plan in passes:
-        # T7 as amended 2026-08-19: the non-target OUTPUT pass may carry persistent
-        # adversaries (ascended against its own stream, delta pinned per T4); the
-        # non-target HIDDEN pass stays adversary-free.
-        assert plan.on_target_stream or plan.role == "output" or not plan.adversary_keys, (
-            f"pass {plan.label!r} is a non-target hidden pass but carries adversaries (SPEC T5/T7)"
-        )
+    # T7 as amended 2026-08-19/20: any pass may carry persistent adversaries, each
+    # ascended against ITS OWN stream (off-target: delta pinned per T4). Which TYPES an
+    # off-target pass may carry is the boundary asserts' job above — the hidden pass
+    # admits the merged strategy only.
 
     target_stream_capture_keys = atoms.hidden_acts_capture_keys | frozenset(
         point for plan in passes if plan.on_target_stream for point in plan.points

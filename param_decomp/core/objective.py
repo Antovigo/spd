@@ -26,6 +26,7 @@ from param_decomp.core.configs import (
     LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
     NontargetConfig,
+    NontargetHiddenReconLossMetricConfig,
     NontargetOutputReconLossMetricConfig,
     NontargetReconLossMetricConfig,
     PersistentPGDReconLossConfig,
@@ -97,13 +98,17 @@ class TargetPass:
     recon: tuple[AnyReconLossTerm, ...]
 
 
-NontargetHiddenSources = StochasticSources | ConstantSources | UnmaskedNoDeltaSources
-"""The CLOSED non-target strategy set (SPEC T5) — the hidden non-target pass's whole
-vocabulary, and the non-adversarial arms of the output pass's."""
+NontargetClosedSources = StochasticSources | ConstantSources | UnmaskedNoDeltaSources
+"""The CLOSED non-target strategy set (SPEC T5) — the non-adversarial arms of both
+non-target passes."""
 
-NontargetOutputSources = (
-    NontargetHiddenSources | PersistentSources | MixedPersistentStochasticSources
-)
+NontargetHiddenSources = NontargetClosedSources | MixedPersistentStochasticSources
+"""The non-target HIDDEN pass's strategies (T5/T12 amended 2026-08-20): the closed set
+plus the MERGED strategy only — the one adversarial arm that rides an existing masked
+forward (S34), so it costs the broad stream nothing. The standalone persistent bundle
+stays unrepresentable here (it would be an extra forward per step)."""
+
+NontargetOutputSources = NontargetHiddenSources | PersistentSources
 """The non-target OUTPUT pass's strategies (T5/T7 amended 2026-08-19): the closed set
 plus the persistent adversarial pair, whose masks the step composes DELTA-PINNED (T4 —
 the bundle's delta channel is ignored)."""
@@ -144,8 +149,8 @@ class HiddenPass[S: MaskSourceStrategy]:
     construction — T6's rule extended to the hidden role; only the coefficient is this pass's.
 
     Generic over `S` so the non-target stream's hidden pass keeps T5's narrowing in the
-    TYPE: the CLOSED set, no adversarial or mixed sources — the 2026-08-19 amendment
-    admits those on the non-target OUTPUT pass only."""
+    TYPE: the closed set plus the merged strategy only (T5/T12 amended 2026-08-20) — a
+    standalone persistent bundle stays representable on the non-target OUTPUT pass alone."""
 
     recon: tuple[ReconLossTerm[S], ...]
     impmin_coeff: LossCoeff
@@ -382,7 +387,7 @@ def build_targeted_objective(
         )
         if nontarget.hidden is not None:
             nontarget_hidden_pass = HiddenPass(
-                recon=_nontarget_terms(nontarget.hidden.recon, site_names, "non-target hidden"),
+                recon=build_nontarget_hidden_terms(nontarget.hidden.recon, site_names),
                 impmin_coeff=nontarget.hidden.impmin_coeff,
                 points=hidden.points,
             )
@@ -436,20 +441,36 @@ def build_nontarget_output_terms(
     return tuple(terms)
 
 
-def _nontarget_terms(
-    cfgs: Sequence[NontargetReconLossMetricConfig], site_names: tuple[str, ...], what: str
+def build_nontarget_hidden_terms(
+    cfgs: Sequence[NontargetHiddenReconLossMetricConfig], site_names: tuple[str, ...]
 ) -> tuple[ReconLossTerm[NontargetHiddenSources], ...]:
-    """Build the non-target HIDDEN pass's recon terms from the CLOSED vocabulary (T5/T12);
-    `what` only names the pass in the error."""
+    """Build the non-target HIDDEN pass's recon terms (T5/T12 amended 2026-08-20): the
+    closed vocabulary plus the zero-extra-forward MERGED term, delta-pinned like every
+    non-target forward (T4). Public because state init shares this walk (as it does the
+    output pass's): a merged bundle here sizes off the BROAD stream's geometry (T2). The
+    `nontarget_hidden/` key prefix keeps the namespace disjoint from the output pass's
+    `nontarget/` and the target-stream passes' bare names."""
     terms: list[ReconLossTerm[NontargetHiddenSources]] = []
     for cfg in cfgs:
-        assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
+        assert cfg.coeff is not None  # non-None at parse (NontargetHiddenConfig); narrows the type
         name = cfg.name if cfg.name is not None else cfg.type
-        assert name not in {t.name for t in terms}, f"duplicate {what} loss {name!r}"
+        assert name not in {t.name for t in terms}, f"duplicate non-target hidden loss {name!r}"
+        plan: ReconPlan[NontargetHiddenSources]
+        match cfg:
+            case MergedStochasticSubsetPPGDReconLossConfig():
+                sources: NontargetHiddenSources = MixedPersistentStochasticSources(
+                    state_key=f"nontarget_hidden/{name}", cfg=cfg
+                )
+                plan = make_plan(all_sites_live(site_names), cfg.routing, sources, 1)
+            case _:
+                # Width-erased rebuild, as `build_nontarget_output_terms` does.
+                plan = tuple(
+                    ReconForward[NontargetHiddenSources](e.live_sites, e.sample_routing, e.sources)
+                    for e in _nontarget_recon_plan(cfg, site_names)
+                )
         # `hidden_acts_reconstruction=None` structurally: the S35 rider is refused on every
-        # non-target term at parse — an output pass has no points, and a hidden pass's are the
-        # pass's own (T5/T12).
-        terms.append(ReconLossTerm(name, cfg.coeff, _nontarget_recon_plan(cfg, site_names), None))
+        # non-target term at parse — a hidden pass's points are the pass's own (T5/T12).
+        terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
     return tuple(terms)
 
 

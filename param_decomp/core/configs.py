@@ -719,8 +719,20 @@ non-target set plus the two persistent-source-carrying recon types. Their masks 
 from the bundle's COMPONENT channels with every weight-delta mask pinned to 1.0 (T4 —
 the source's delta channel is ignored), so the probed worst case is a partial ablation
 of components on data they should be inactive on. Each such term gets its own bundle
-(S23), sized off the BROAD stream's geometry. The hidden non-target pass keeps the
-closed set: hidden-acts robustness off-target is out of scope by decision."""
+(S23), sized off the BROAD stream's geometry."""
+
+
+NontargetHiddenReconLossMetricConfig = (
+    NontargetReconLossMetricConfig | MergedStochasticSubsetPPGDReconLossConfig
+)
+"""The non-target HIDDEN pass's vocabulary (SPEC T5/T12 amended 2026-08-20): the closed
+set plus the MERGED term ONLY — the one adversarial type whose masked forward REPLACES a
+stochastic term's (S34), so admitting it costs zero extra forwards on the broad stream.
+The standalone persistent-PGD type stays refused here: it would add a masked forward per
+step, and hidden-acts robustness off-target is not worth dedicated compute (the
+pgd_nt_plan scope decision — this amendment admits only the free adversary). Delta
+pinned per T4 like every non-target forward; own bundle per term (S23), sized off the
+BROAD stream's geometry like the output pass's."""
 
 
 HiddenReconLossMetricConfig = ReconLossMetricConfigs
@@ -787,11 +799,12 @@ class NontargetHiddenConfig(BaseConfig):
     """The hidden role on the NON-TARGET stream (SPEC T12/T5-amended).
 
     Structurally the non-target pass's twin: its own coefficients, the closed non-target recon
-    vocabulary (no adversaries — T7 keeps those target-only), and the measurement points of the
-    target-stream `hidden:` block. Delta pinned fully on, as every non-target forward is (T4)."""
+    vocabulary plus the zero-extra-forward MERGED adversarial term (T5/T12 amended
+    2026-08-20), and the measurement points of the target-stream `hidden:` block. Delta
+    pinned fully on, as every non-target forward is (T4)."""
 
     impmin_coeff: NonNegativeFloat | ScheduleConfig
-    recon: list[Annotated[NontargetReconLossMetricConfig, Discriminator("type")]] = Field(
+    recon: list[Annotated[NontargetHiddenReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
     )
 

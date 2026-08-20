@@ -40,7 +40,11 @@ from param_decomp.core.init_placed import (
 from param_decomp.core.losses import scheduled_value_traced
 from param_decomp.core.model import DecomposedModel, PositionAxis, Positioned
 from param_decomp.core.muon_stacked import stacked_muon
-from param_decomp.core.objective import build_nontarget_output_terms, build_recon_terms
+from param_decomp.core.objective import (
+    build_nontarget_hidden_terms,
+    build_nontarget_output_terms,
+    build_recon_terms,
+)
 from param_decomp.core.placement import PlacementRules
 from param_decomp.core.recon import (
     AnyReconLossTerm,
@@ -236,24 +240,29 @@ def init_train_state(
     }
     assert set(term_coeff_by_state_key) == set(persistent)
     # Each bundle sizes off ITS pass's geometry: target-stream bundles (the target-output
-    # and hidden passes') off the run's waist, a non-target OUTPUT bundle off the broad
-    # stream's (T2 as amended 2026-08-19). `src_key` folding stays index-ordered with the
-    # target bundles first, so a run without non-target adversaries draws byte-identically.
+    # and hidden passes') off the run's waist, a non-target bundle — output pass (T2 as
+    # amended 2026-08-19) or hidden pass (2026-08-20, merged term only) — off the broad
+    # stream's. `src_key` folding stays index-ordered with the target bundles first, so a
+    # run without non-target adversaries draws byte-identically.
     geometry_by_state_key = {state_key: (positions, pd.batch_size) for state_key in persistent}
     if nontarget is not None:
-        nt_persistent = persistent_configs(
-            cast(
-                "tuple[AnyReconLossTerm, ...]",
-                build_nontarget_output_terms(nontarget.recon, model.site_names),
-            )
+        nt_terms = cast(
+            "tuple[AnyReconLossTerm, ...]",
+            build_nontarget_output_terms(nontarget.recon, model.site_names),
         )
+        if nontarget.hidden is not None:
+            nt_terms += cast(
+                "tuple[AnyReconLossTerm, ...]",
+                build_nontarget_hidden_terms(nontarget.hidden.recon, model.site_names),
+            )
+        nt_persistent = persistent_configs(nt_terms)
         if nt_persistent:
             assert nontarget_positions is not None, (
                 "non-target adversarial terms size their bundles off the broad stream's "
                 "geometry — pass `nontarget_positions` (SPEC T2, amended 2026-08-19)"
             )
             collisions = set(nt_persistent) & set(persistent)
-            assert not collisions, collisions  # 'nontarget/' prefix keeps the namespace split
+            assert not collisions, collisions  # 'nontarget*/' prefixes keep the namespace split
             geometry_by_state_key |= {
                 state_key: (nontarget_positions, nontarget.batch_size)
                 for state_key in nt_persistent

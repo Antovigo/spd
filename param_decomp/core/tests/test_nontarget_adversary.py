@@ -6,8 +6,10 @@ The amendment's load-bearing claims, each pinned here on the TMS fixture:
   builds, steps, and REPORTS under the non-target namespace;
 - the bundle actually trains: sources move and the SRC_STEP moments advance by
   `n_warmup + 1` per step (S13'), through the shared backward's final ascent (S14');
-- the non-target HIDDEN vocabulary stays closed — a persistent type there is a parse
-  error, not a filtered no-op (T5);
+- the non-target HIDDEN vocabulary admits the MERGED term only (T5/T12 amended
+  2026-08-20 — the zero-extra-forward adversary): a standalone persistent type there is
+  a parse error, not a filtered no-op, while a merged term builds, trains its
+  `nontarget_hidden/`-prefixed bundle, and reports under the composed namespace;
 - fused and sequential schedulings still score the same objective with the new arms in
   the graph (T1).
 """
@@ -32,6 +34,7 @@ from param_decomp.core.ci_fn import LayerwiseMLPCIArch, build_ci_fn
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
     AdamPGDConfig,
+    HiddenPassConfig,
     ImportanceMinimalityLossConfig,
     MergedStochasticSubsetPPGDReconLossConfig,
     NontargetConfig,
@@ -93,7 +96,9 @@ def _loss_metrics() -> tuple[TargetedLossMetricConfig, ...]:
     )
 
 
-def _setup(nontarget: NontargetConfig, *, sequential: bool = False):
+def _setup(
+    nontarget: NontargetConfig, *, sequential: bool = False, hidden: HiddenPassConfig | None = None
+):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, SITES)
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
@@ -104,16 +109,21 @@ def _setup(nontarget: NontargetConfig, *, sequential: bool = False):
             hidden_dims=(16,),
             has_position_axis=False,
             input_names=site_input_tap_keys(tuple(s.name for s in sites)),
-            dual=False,
+            dual=hidden is not None,
         ),
         sites,
         jax.random.PRNGKey(2),
     )
-    objective = build_targeted_objective(_loss_metrics(), nontarget, model.site_names, hidden=None)
+    objective = build_targeted_objective(
+        _loss_metrics(), nontarget, model.site_names, hidden=hidden
+    )
     # The step asks TrainState.adversaries for every plan's state keys — build each
     # non-target bundle at ITS pass's geometry: positionless `c` is `(1, C+1)` (T2).
+    nt_terms = objective.nontarget.recon + (
+        objective.nontarget_hidden.recon if objective.nontarget_hidden is not None else ()
+    )
     adversaries: dict[str, PersistentAdversary] = {}
-    for term in objective.nontarget.recon:
+    for term in nt_terms:
         for entry in term.plan:
             match entry.sources:
                 case PersistentSources() | MixedPersistentStochasticSources():
@@ -254,8 +264,10 @@ def test_sequential_and_fused_agree_with_nontarget_adversaries(
         assert fused_metrics[name] == seq_metrics[name], name
 
 
-def test_nontarget_hidden_refuses_adversarial_types():
-    """T5: the non-target HIDDEN vocabulary is still closed — refused at parse."""
+def test_nontarget_hidden_refuses_standalone_persistent_type():
+    """T5/T12 as amended 2026-08-20: the non-target HIDDEN vocabulary admits the merged
+    term only — the standalone persistent type (an extra forward per step) stays a parse
+    error, while the merged config (same adversary, zero extra forwards) parses."""
     with pytest.raises(ValidationError):
         NontargetHiddenConfig.model_validate(
             {
@@ -273,3 +285,96 @@ def test_nontarget_hidden_refuses_adversarial_types():
                 ],
             }
         )
+    parsed = NontargetHiddenConfig.model_validate(
+        {
+            "impmin_coeff": 6e-3,
+            "recon": [
+                {
+                    "type": "MergedStochasticSubsetPPGDReconLoss",
+                    "coeff": 1.0,
+                    "adv_fraction": 0.5,
+                    "n_warmup_steps": 0,
+                    "optimizer": {
+                        "type": "adam",
+                        "lr_schedule": {
+                            "max_val": 0.05,
+                            "points": [{"at": 0.0, "frac": 1.0}, {"at": 1.0, "frac": 1.0}],
+                        },
+                    },
+                    "source_shape": "c",
+                }
+            ],
+        }
+    )
+    assert isinstance(parsed.recon[0], MergedStochasticSubsetPPGDReconLossConfig)
+
+
+HIDDEN_POINTS = ("linear1.out", "linear2.out")
+"""Both decomposed sites' linear outputs — downstream of the masking, so the pass has a
+gradient to give (as in `test_dual_objective`)."""
+
+
+def _target_hidden() -> HiddenPassConfig:
+    return HiddenPassConfig(
+        points=HIDDEN_POINTS,
+        impmin_coeff=5e-3,
+        recon=[StochasticReconLossConfig(coeff=2.0, name="HiddenStochasticRecon")],
+    )
+
+
+def test_nontarget_hidden_merged_term_trains_its_adversary():
+    """The S34 merge on the non-target HIDDEN pass (T5/T12 amended 2026-08-20): the
+    `nontarget_hidden/`-prefixed bundle updates through the S14' final ascent alone
+    (n_warmup 0), stays projected (S15), and reports under the composed
+    stream x role namespace."""
+    nontarget = NontargetConfig(
+        batch_size=16,
+        impmin_coeff=6e-3,
+        recon=[StochasticReconLossConfig(coeff=1.0)],
+        hidden=NontargetHiddenConfig(impmin_coeff=6e-3, recon=[_merged_cfg()]),
+    )
+    cfg, state, step = _setup(nontarget, hidden=_target_hidden())
+    state_key = "nontarget_hidden/MergedStochasticSubsetPPGDReconLoss"
+    before = jax.tree.map(np.asarray, state.training.adversaries[state_key].sources)
+
+    target_batch, broad = _batches(cfg)
+    new_state, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+    adv = new_state.training.adversaries[state_key]
+
+    assert int(adv.opt_state.step_count) == 1  # final ascent only: n_warmup == 0
+    moved = any(
+        not np.allclose(before[site], np.asarray(adv.sources[site]))
+        for site in ("linear1", "linear2")
+    )
+    assert moved, "the non-target hidden adversary's sources never moved"
+    for site in ("linear1", "linear2"):
+        arr = np.asarray(adv.sources[site])
+        assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
+    assert "nontarget_data/hidden_ci/loss/MergedStochasticSubsetPPGDReconLoss" in metrics
+
+
+def test_sequential_and_fused_agree_with_nontarget_hidden_merged_term():
+    """T1 with the hidden-pass merged arm in the graph: identical loss scalars either
+    scheduling. Every per-term and per-pass loss is compared for EXACT equality; the one
+    cross-pass composite (`total`) gets a ~1-ULP fp32 tolerance — with this graph shape
+    the fused scheduling's cross-pass fusion clusters round the target pass's (unlogged)
+    contribution one bit differently under the suite's pinned `--xla_cpu_max_isa=AVX2`
+    codegen, while every logged component stays bit-equal (a dropped or double-counted
+    pass would move `total` by far more than rounding)."""
+    nontarget = NontargetConfig(
+        batch_size=16,
+        impmin_coeff=6e-3,
+        recon=[StochasticReconLossConfig(coeff=1.0)],
+        hidden=NontargetHiddenConfig(impmin_coeff=6e-3, recon=[_merged_cfg()]),
+    )
+    cfg, state_a, fused = _setup(nontarget, sequential=False, hidden=_target_hidden())
+    _, state_b, seq = _setup(nontarget, sequential=True, hidden=_target_hidden())
+    target_batch, broad = _batches(cfg)
+    _, fused_metrics = fused(_model_of(), state_a, target_batch, broad, jax.random.PRNGKey(7))
+    _, seq_metrics = seq(_model_of(), state_b, target_batch, broad, jax.random.PRNGKey(7))
+    assert set(fused_metrics) == set(seq_metrics)
+    for name in sorted(k for k in fused_metrics if not k.startswith("grad_norms/")):
+        if name == "total":
+            assert np.isclose(fused_metrics[name], seq_metrics[name], rtol=1e-6, atol=0.0), name
+        else:
+            assert fused_metrics[name] == seq_metrics[name], name
