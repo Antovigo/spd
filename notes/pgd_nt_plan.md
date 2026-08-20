@@ -202,6 +202,21 @@ The cheap levers, in increasing overhead:
   arms at that horizon. The c-shape hypothesis is untested at the 1k/2k horizon, not
   refuted. E2b (job 10098) continues; the 16-line from-scratch merged runs are queued
   separately.
+- 2026-08-20: E2b VERDICT (p-579bacee) — the strong adversary buys NOTHING over the
+  free one at this horizon: 0.2530 (@250) -> 0.2240 (@1000) -> 0.2303 (@2000), within
+  noise of E2a's 0.2535 -> 0.2207 -> 0.2307, at +76% step time. **E2 synthesis: both
+  arms plateau at ~0.23 regardless of adversary strength, while E2b's TRAIN adversary
+  demonstrably bites (3.5x-worse-than-stochastic masks from step 1) and the train-side
+  merged/PPGD losses do fall. So the residual ~0.23 eval worst case is structural to
+  the PARENT decomposition — 2000 steps at final LR cannot reshape V/U + CI enough to
+  remove it, whatever the training adversary. The fine-tune patch-up framing (idea a)
+  is the weak link, not the adversary.** For scale: the plateau (~0.23) sits ~2x the
+  zero-masked KL (0.123), i.e. PGD still finds single masks worse than ablating every
+  component. Next lever per the decision tree: the pressure belongs in from-scratch
+  training (E3 — the 16-line merged runs, queued), where the adversary shapes the
+  decomposition while it forms. Open fine-tune variants if wanted later: higher
+  component/CI LR (a real re-training, not a patch), or the untested c-shape at full
+  horizon.
 - 2026-08-20: E2b LAUNCHED (job 10098, run per runs/by-name/addsub-L18-15-ntppgd-ft):
   the STRONG-adversary comparison arm — canonical separate PersistentPGDReconLoss on
   the nontarget output pass (coeff 0.5, n_warmup 2, bsc, next to the stochastic term),
