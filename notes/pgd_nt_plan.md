@@ -292,3 +292,11 @@ The cheap levers, in increasing overhead:
   within ~1.5x (widened-C-sized), so the regression is worst-case-specific.
   Implication: bsc's per-sample parallelism is load-bearing for target robustness;
   sc is a bad training shape here even though it strictly contains the c eval space.
+- 2026-08-20: SWAP DECISION (owner): let each sc arm reach its step-5000 checkpoint
+  (save_every 5000 — first comparison point on disk, plus the scancel SIGTERM-save
+  adds a ~51xx snapshot; keep_last 2 retains both), then cancel it and launch its
+  -bsc twin: `addsub-L18-16-{ntmerged,allmerged}-bsc` — byte-identical configs
+  except target-stream sources sc -> bsc (nontarget stays c). Cost of bsc on the
+  pool geometry is nil (~15 MB/bundle, no step-time effect; 14-4x ran 3.39 s with
+  it). The sc runs (p-b62de0d9, p-ae980ca6) are kept as the sc datapoints. Swap
+  watchers automate ckpt-wait -> scancel -> guard-retry relaunch.
