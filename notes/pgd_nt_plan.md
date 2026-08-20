@@ -278,3 +278,17 @@ The cheap levers, in increasing overhead:
     ~6% over the seat despite one fewer masked forward per pair (folding the
     separate PPGD forwards does save 3.3 GB/rank); suspects: the sc bundles'
     different broadcast, and warmup ascents now scoring the merged plan.
+- 2026-08-20 (in-flight finding, jobs 10106/10107): TARGET-stream eval PGD is ~10x
+  worse than the 14-line at matched steps (ntmerged 0.328@500 / 0.082@4000 vs 14-4x
+  0.035 / 0.0086; 14-equal matches 14-4x, so equal-impmin is exonerated). NOT the
+  metric: `recon_eval.py` is byte-identical since the 14-4x commit (2b0018d38), the
+  slow_eval diff is figure layout, and the E2 fine-tunes reproduced the parent's
+  0.0043 under the post-E1 code. The smoking gun is the sc-shaped TARGET sources
+  (the one target-side change common to both arms): ntmerged's persistent adversary
+  reports a BETTER loss than 14-4x's (train PPGD 0.0052@4000 vs 0.0070) while fresh
+  eval PGD finds 16x worse — one batch-shared source is a single tracked attack
+  point (vs bsc's 128 parallel per-sample attacks), so it undercovers and certifies
+  robustness the decomposition doesn't have. Stochastic recon / kl_ci_masked stay
+  within ~1.5x (widened-C-sized), so the regression is worst-case-specific.
+  Implication: bsc's per-sample parallelism is load-bearing for target robustness;
+  sc is a bad training shape here even though it strictly contains the c eval space.
