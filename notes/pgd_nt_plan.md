@@ -308,3 +308,18 @@ The cheap levers, in increasing overhead:
   eval target PGD @500 = 0.0308, back in the 14-4x band (0.0354) vs the sc arm's
   0.328 — a 10x recovery from the shape change alone; step time 3.383 s (parity) and
   peak 39.84 GB, so bsc costs nothing here, as expected. allmerged-bsc peak 36.65 GB.
+- 2026-08-20: 8000-STEP READOUT, bsc twins vs 14-4x. Target side healthy (output PGD
+  0.0061 ntmerged-bsc = 14-4x; allmerged-bsc 0.0069, ~13% behind and closing; hidden
+  similar; target L0s slightly better than baseline). **Non-target side: the free c
+  adversary is NOT delivering** — nt output PGD 0.254 (ntmerged-bsc) / 0.269
+  (allmerged-bsc) vs 0.268 baseline, and the trend is non-monotone (0.24 -> 0.19 @4k
+  -> 0.25 @8k: the early dent evaporates). Same undercoverage pathology as sc on
+  target: the persistent c bundle's own train loss reads ~0.006 while fresh PGD finds
+  0.25 — one shared source cannot track the broad stream's worst case; per-sample
+  parallelism (bc/bsc, the thing that makes the target adversary honest) is the
+  obvious next lever, at ~90 MB/rank for bsc. ALSO: nontarget L0 inflates under the
+  weak pressure (output 6.2 -> 13-15, hidden 6.9 -> 38-48) — the decomposition buys
+  off the adversary with active components rather than robustness.
+- 2026-08-20: NEW ARM launched — addsub-L18-16-allmerged-bsc-w3: allmerged-bsc with
+  the two TARGET merged terms at n_warmup 3 (one extra ascent), probing whether the
+  merged arm's small target-PGD lag is warmup-limited. Non-target unchanged.
