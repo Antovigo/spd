@@ -212,3 +212,32 @@ The cheap levers, in increasing overhead:
 - 2026-08-20: smoke cleanup — both ntadv-ft-SMOKE runs (p-bbd77143, p-b94c5896) and
   the ntppgd-ft smoke (p-8506002e) deleted from disk, local wandb dirs, W&B cloud,
   and slurm logs.
+- 2026-08-20: E1-BIS LANDED (40a52a516): the MERGED term admitted on the non-target
+  HIDDEN pass too (T5/T12 amended, pending sign-off) — it rides the one masked forward
+  the stochastic term already ran, so the hidden adversary is compute-free by the same
+  argument as the output pass's; the standalone PPGD type stays refused there. State
+  keys `nontarget_hidden/<name>`, bundles off broad geometry, delta pinned. Pinned in
+  `test_nontarget_adversary.py`; full core+targets (629), 4-sim-device, basedpyright,
+  Codex review all green.
+- 2026-08-20: E3 SPLIT INTO TWO FROM-SCRATCH ARMS and LAUNCHED (both 20k, SOTA seat
+  base, seed 0, frozen worktree `~/pd_scratch/worktrees/L18-16-merged` @ 40a52a516,
+  configs in `~/pd_scratch/dual_obj_jax/addsub-L18-16-{ntmerged,allmerged}.yaml`; NO
+  smokes — deliberate deviation from the smoke rule, owner's call, to take the freeing
+  slots immediately):
+  - **addsub-L18-16-ntmerged (job 10100, variant 2 = E3 proper)**: target stream
+    UNCHANGED; non-target output AND hidden stochastic terms each -> Merged coeff 1.0,
+    `adv_fraction` ramp 0 -> 0.5 over the first 100 steps (idea f, revised from
+    "first half"), `n_warmup 0`, `source_shape: c` (E2c's threat-model-match choice).
+    Step time should hold at ~3.35 s.
+  - **addsub-L18-16-allmerged (job 10101, variant 1)**: every stochastic/PPGD pair
+    collapsed into the merged term. Target output 1.5 / target hidden 3.0 (matching
+    the pairs' totals; adv_fraction 0.5 const evens the split to 0.75+0.75 and
+    1.5+1.5 vs the seat's 1.0+0.5 / 2.0+1.0 — a deliberate rounding), `n_warmup 2`
+    kept on the target terms, `source_shape: sc` on the target stream (owner's choice;
+    CAVEAT: sc is a batch-shared, weaker per-sample adversary AND a second deviation
+    from the seat's bsc — if target metrics move, merged-vs-sc attribution is
+    confounded). Non-target side identical to ntmerged. Expect a mild step-time WIN
+    (the target PPGD's extra masked forward folds into the merged one).
+  - Possible next step, deliberately deferred: `n_warmup 0` on the target merged
+    terms (true zero-extra-forward recipe everywhere; risks a staler target adversary).
+  - Both queued behind E2b (10098) / E2c (10099); slots free over the next ~2-3 h.
