@@ -265,5 +265,14 @@ The cheap levers, in increasing overhead:
     masked forward folds into the merged one).
   - Possible next step, deliberately deferred: `n_warmup 0` on the target merged
     terms (true zero-extra-forward recipe everywhere; risks a staler target adversary).
-  - Both queued behind E2b (10098) / E2c (10099); slots free over the next ~2-3 h.
-    ntmerged (10104) takes the first slot, allmerged (10105) the second.
+  - Launch churn: E2c was cancelled by its owner; jobs 10104/10105 started onto its
+    freshly-freed GPUs and died on the contention guard (exit 75 — the release-lag
+    hiccup the E2 smoke recorded). Relaunched sequentially (each arm submitted only
+    after the previous one is stepping): ntmerged = **job 10106**, allmerged =
+    **job 10107**, both RUNNING 2026-08-20.
+  - First readings: ntmerged 3.374 s/step @ peak 39.74 GB/rank — step-time parity
+    with the seat (3.35-3.39) holds with merged adversaries on BOTH non-target
+    passes; its nontarget merged train losses open ~3-4x the stochastic-only
+    counterpart's (output 0.0058 / hidden 0.0091 @ step 1600 vs E2a's ~0.002) — the
+    free adversary bites from scratch too. allmerged peak 36.45 GB/rank (folding the
+    separate PPGD forwards saves memory); steady-state step time TBD.
