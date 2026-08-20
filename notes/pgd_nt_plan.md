@@ -180,3 +180,18 @@ The cheap levers, in increasing overhead:
   nontarget PGD at steps 0 (parent baseline under this probe) / 1000 / 2000 vs the
   0.270 parent final; target-stream regression watch on kl_ci_masked (0.0033) and
   target PGD (0.0043).
+- 2026-08-20: E2b LAUNCHED (job 10098, run per runs/by-name/addsub-L18-15-ntppgd-ft):
+  the STRONG-adversary comparison arm — canonical separate PersistentPGDReconLoss on
+  the nontarget output pass (coeff 0.5, n_warmup 2, bsc, next to the stochastic term),
+  same parent/steps/constant schedules as E2. Its 60-step smoke measured the cost the
+  merged arm avoids: 5.89 s/step vs 3.35 (+76%), peak 41.1 GB/rank (2.5 GB headroom);
+  the nontarget PPGD train loss opened at ~3.5x the stochastic term's (0.0067 vs
+  0.0019) — the adversary bites immediately. The {ntadv, ntppgd} pair reads out
+  adversary strength per unit compute, and whether components trained without
+  nontarget PGD are fixable at all.
+- 2026-08-20: E2 first in-flight readout (step 250 slow eval): nontarget output PGD
+  0.2535 vs 0.270 parent baseline — the free adversary dents it only slightly so far;
+  target metrics unregressed (PGD 0.0045 / hidden 0.0035).
+- 2026-08-20: smoke cleanup — both ntadv-ft-SMOKE runs (p-bbd77143, p-b94c5896) and
+  the ntppgd-ft smoke (p-8506002e) deleted from disk, local wandb dirs, W&B cloud,
+  and slurm logs.
