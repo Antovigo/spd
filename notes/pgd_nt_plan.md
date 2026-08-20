@@ -180,6 +180,23 @@ The cheap levers, in increasing overhead:
   nontarget PGD at steps 0 (parent baseline under this probe) / 1000 / 2000 vs the
   0.270 parent final; target-stream regression watch on kl_ci_masked (0.0033) and
   target PGD (0.0043).
+- 2026-08-20: E2a (merged, bsc) VERDICT — NOT EFFECTIVE as a 2k-step patch. p-bb64cede:
+  nontarget PGD 0.270 -> 0.2535 (@250) -> 0.2207 (@1000) -> 0.2307 (@2000): a ~15%
+  dent that plateaued and bounced. Target stream fully unregressed (PGD 0.0041,
+  kl_ci_masked 0.0031). The free adversary's pressure is real but far too weak at this
+  horizon. Two hypotheses now under test side by side:
+  - STRENGTH: E2b (job 10098, sibling session): canonical PPGD term, n_warmup 2,
+    5.89 s/step (+76%); its train adversary found 3.5x-worse-than-stochastic masks
+    immediately.
+  - THREAT-MODEL MATCH: E2c (job 10099, p-? see by-name/addsub-L18-15-ntadv-c-ft):
+    E2a with the nontarget bundle C-SHAPED — the eval probe is `source_shape: c`, so
+    bsc slot-persistence against streaming data may be optimizing the wrong worst case;
+    the c bundle accumulates the probe's own dataset-level attack, still at zero extra
+    forwards.
+  Decision tree: E2b strong + E2c weak -> pay for strength (or recover it cheaply:
+  higher adv_fraction / source LR, warmup on the fine-tune only); E2c ~matches E2b ->
+  the free adversary suffices once aimed right; both weak -> the fine-tune framing is
+  suspect, move the pressure into the from-scratch E3.
 - 2026-08-20: E2b LAUNCHED (job 10098, run per runs/by-name/addsub-L18-15-ntppgd-ft):
   the STRONG-adversary comparison arm — canonical separate PersistentPGDReconLoss on
   the nontarget output pass (coeff 0.5, n_warmup 2, bsc, next to the stochastic term),
