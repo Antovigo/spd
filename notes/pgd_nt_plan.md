@@ -389,3 +389,21 @@ The cheap levers, in increasing overhead:
   the corrected metric (e.g. "<= untreated baseline - X%" rather than the artifact-era
   0.05-vs-0.26 framing); the L0-inflation trade (nt out 6->13-15, hid 7->38-48)
   is now the main open cost question for the adversarial terms.
+- 2026-08-21: CAMPAIGN CLOSE-OUT — both bsc twins finished 20k (rc=0). Final panels
+  vs 14-4x (14-4x's nt-PGD cell is its OLD unpinned in-loop value; its corrected
+  number is the backfill's 0.0168):
+  | @20000 | 14-4x | ntmerged-bsc | allmerged-bsc |
+  | PGD target out / hid        | 0.0043 / 0.0032 | 0.0043 / 0.0037 | 0.0048 / 0.0034 |
+  | PGD nt out / hid CORRECTED  | (0.0168/0.0157) | 0.0091 / 0.0092 | 0.0098 / 0.0094 |
+  | kl_ci_masked target         | 0.0033 | 0.0035 | 0.0034 |
+  | L0 target out / hid         | 19.7 / 32.2 | 19.9 / 32.2 | 22.3 / 35.5 |
+  | L0 nt out / hid             | 0.35 / 0.39 | 0.77 / 0.83 | 0.88 / 0.87 |
+  VERDICT: the merged nontarget adversary (out + hid, c-shape, adv ramp 0->0.5/100,
+  n_warmup 0) tightens the corrected nontarget worst case ~45% below the untreated
+  baseline at ZERO step-time cost, with the target stream at full parity (ntmerged) —
+  and the mid-training nt-L0 inflation (6->15/48 at 8k) anneals away to a negligible
+  +0.4-0.5 absolute by 20k. ntmerged-bsc is the seat-worthy recipe; allmerged-bsc
+  trades a hair of target PGD/L0 and +6% step for -3.3 GB/rank. Remaining decisions
+  for Oli: T4/T5/T7/T12 amendment sign-offs (incl. the eval delta-pinning), whether
+  0.009-vs-0.017 justifies seat promotion, and the E2b-style strong arm's 2x-faster
+  fine-tune path as the patch-up recipe for existing runs.
