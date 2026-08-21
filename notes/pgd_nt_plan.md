@@ -369,3 +369,23 @@ The cheap levers, in increasing overhead:
     baseline ~6% in 1000 steps; more panels (E2a@2000, E2b, 14-equal, twins) pending.
   - OPEN QUESTION reframed: do the adversarial terms tighten an already-acceptable
     0.017 (and at what L0 cost off-target), rather than "can 0.26 be fixed".
+- 2026-08-21: BACKFILL COMPLETE (job 10159, rc=0; all panels in
+  `pgd_backfill_results.json` + per-run `<id>-pgdfix-backfill` wandb siblings). The
+  corrected (delta-pinned) nontarget PGD picture, output/hidden:
+  | run | step | pinned | (unpinned control) |
+  | 14-4x untreated (2x nt impmin)  | 20000 | 0.0168 / 0.0157 | 0.222 |
+  | 14-equal untreated (equal)      | 20000 | 0.0159 / 0.0159 | ~0.22 |
+  | E2a free merged ft              | 2000  | 0.0149 / 0.0150 | 0.249 |
+  | E2b strong PPGD ft (+76% step)  | 2000  | 0.0133 / 0.0137 | ~0.25 |
+  | ntmerged-bsc from-scratch       | 10000 | 0.0139 / 0.0136 | 0.248 |
+  | allmerged-bsc from-scratch      | 10000 | 0.0137 / 0.0140 | 0.265 |
+  READINGS: (1) the component-only worst case was ~0.017 even untreated — inside the
+  <=0.05 bar; the campaign's 0.259 premise was the delta-channel artifact entirely.
+  (2) Fine-tuning DOES tighten it: -11% free / -21% strong in 2k steps — adversary
+  strength buys ~2x speed at +76% compute. (3) The from-scratch merged arms reach the
+  strong fine-tune's level by 10k steps at zero step-time cost, both variants
+  equivalent by 10k. (4) 14-equal slightly tighter than 14-4x — heavier nt imp-min
+  correlates with a looser worst case. Success criterion should be restated against
+  the corrected metric (e.g. "<= untreated baseline - X%" rather than the artifact-era
+  0.05-vs-0.26 framing); the L0-inflation trade (nt out 6->13-15, hid 7->38-48)
+  is now the main open cost question for the adversarial terms.
