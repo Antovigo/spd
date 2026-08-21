@@ -407,3 +407,19 @@ The cheap levers, in increasing overhead:
   for Oli: T4/T5/T7/T12 amendment sign-offs (incl. the eval delta-pinning), whether
   0.009-vs-0.017 justifies seat promotion, and the E2b-style strong arm's 2x-faster
   fine-tune path as the patch-up recipe for existing runs.
+- 2026-08-21: SUBSPACE SCATTER PORTED TO JAX RUNS (jobs 10228/10235/10236/10237).
+  Scratch-side pipeline (`~/pd_scratch/dual_obj_jax/subspace_{export,build}.py` +
+  `subspace_applet.sbatch`, per CONFIGS.md one-off convention): a JAX exporter
+  (open_jax_run + clean_forward captures `post_attn/mlp_in/mlp_hidden/site .out`,
+  output-role CI, x.V-hat inner acts) writes the torch validation pipeline's exact
+  artifact formats; the torch-era `compute_subcomp_periods` + `build_subspace_scatter`
+  then run UNCHANGED from the probe-linear-frame worktree venv, with only
+  `load_component_uv` shimmed to an exported `uv_directions.npz`. Deliberate v1
+  deviation: the alive candidate list is the mean-CI>0.1 filter alone — the
+  `find_alive_subcomponents` KL-sweep gate is not reproduced (a few extra pick cards
+  possible). Applets (self-contained index.html):
+  - ntmerged-bsc  (p-5b7fa697): analysis/subspace_scatter/ — 85 add / 71 sub alive
+  - allmerged-bsc (p-07eaa3d1): analysis/subspace_scatter/ — 93 add / 81 sub alive
+  - 14-4x         (p-bdf13b20): analysis/subspace_scatter/ — 91 add / 76 sub alive
+  Plane scatter (alive_plane_scatter) remains unported (needs a JAX collection pass;
+  ridge_cv_probes jsons are base-model and reusable).
