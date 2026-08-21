@@ -341,3 +341,31 @@ The cheap levers, in increasing overhead:
   by-name, local wandb, W&B cloud, slurm logs, and their staged configs. Their key
   numbers survive in this log (sc target PGD 0.328@500 / 0.082@4000; ckpt-5000
   freeze); the {bsc twin, 14-4x} pair carries the shape comparison from here.
+- 2026-08-20/21: ROOT CAUSE FOUND — the nontarget PGD eval was attacking the DELTA
+  CHANNEL. `masks_from_sources` hands the probe the sources' trailing channel as the
+  weight-delta mask, while every non-target TRAINING forward pins delta to 1.0 (T4).
+  On the broad stream the delta escape valve carries the reconstruction BY DESIGN
+  (CSS-only floor ~0.113 KL), so the probe's dominant move was delta->0 + component
+  steering (~0.25-0.27, even beating full-layer ablation's 0.119) — an attack space no
+  component-side training can enter. This, not adversary weakness, is why E2a = E2b =
+  E2c = both 16-line arms sat flat. The "free adversary too weak" reading above is
+  RETRACTED for the output metric (the L0-inflation observation stands).
+- 2026-08-21: EVAL FIX LANDED (b05904f3e, SPEC T4 amended, pending sign-off): a
+  targeted run's nontarget-stream fresh-PGD probes (both roles) now compose
+  delta-pinned; plain runs/target stream unchanged. Both bsc twins cycled onto the fix
+  (jobs 10157/10158, resumed from own ckpts @14204/11514; corrected in-loop numbers
+  from their next slow evals). Backfill of retained ckpts via
+  `~/pd_scratch/dual_obj_jax/pgd_backfill*.{py,sbatch}` (one process per (run, ckpt) —
+  job 10155's in-process double-restore wedged on BFC pressure + NCCL stall; ckpts
+  preserved under `~/pd_scratch/ckpt_preserve`), logged to `<run>-pgdfix-backfill`
+  sibling wandb runs.
+- 2026-08-21: CORRECTED-METRIC READOUT (delta-pinned nontarget PGD, output/hidden):
+  - 14-4x @20000 (UNTREATED baseline): 0.0168 / 0.0157 (unpinned control 0.222) —
+    the component-only worst case was ALREADY ~0.017, inside the <=0.05 bar: the plain
+    stochastic nontarget term defends it. The campaign's 0.259 premise was the
+    delta-channel artifact end to end.
+  - ntmerged-bsc @5000: 0.0172 / 0.0172 (unpinned 0.261).
+  - E2a ntadv-ft @1000: 0.0158 / 0.0156 — the free merged fine-tune trims the
+    baseline ~6% in 1000 steps; more panels (E2a@2000, E2b, 14-equal, twins) pending.
+  - OPEN QUESTION reframed: do the adversarial terms tighten an already-acceptable
+    0.017 (and at what L0 cost off-target), rather than "can 0.26 be fixed".
