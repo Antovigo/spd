@@ -918,16 +918,26 @@ class GLUDecomposedModel(eqx.Module):
     `sites` / `has_position_axis` are static config."""
 
     embed: Float[Array, "vocab d"]
-    stacked: GLULayer  # blocks `[split_layer, n_layer)` stacked on a leading layer axis (the
-    # scan `xs`) — the SUFFIX from the first decomposed block on, and the whole model when
-    # `split_layer == 0`. Stored pre-stacked: a saved jit input, never re-stacked inside a
+    stacked: GLULayer  # blocks `[split_layer, tail_layer)` stacked on a leading layer axis (the
+    # scan `xs`) — the DECOMPOSED SPAN, and the whole model when there are no sites. Stored
+    # pre-stacked: a saved jit input, never re-stacked inside a
     # forward. Kept a SEPARATE FIELD from `stacked_prefix` rather than sliced per forward:
     # an in-graph slice of a multi-GB stack materializes copies and breaks command-buffer
     # capture (measured ~8x slower).
     stacked_prefix: GLULayer | None
     """Blocks `[0, split_layer)` — the frozen, mask-independent lead every forward would
     otherwise re-run. `None` when `split_layer == 0`."""
+    stacked_tail: GLULayer | None
+    """Blocks `[tail_layer, n_layer)` — the frozen blocks ABOVE the last decomposed one.
+    Mask-DEPENDENT (masked residuals flow through them), so unlike the prefix every forward
+    re-runs it; a separate field for the same reason the prefix is one — slicing it out of a
+    combined stack materializes a multi-GB copy PER FORWARD, and with ~10 forwards a step
+    those copies, not the compute, are what exhausts HBM at several decomposed blocks.
+    `None` when the last decomposed block is the last block."""
     n_layer: int = eqx.field(static=True)
+    tail_layer: int = eqx.field(static=True)
+    """First block above the decomposed span (max decomposed block + 1); `n_layer` when
+    there is no tail. `stacked` covers `[split_layer, tail_layer)`."""
     norm: Float[Array, " d"]
     lm_head: Float[Array, "vocab d"]
     inv_freq: Float[Array, " hd2"]
@@ -945,16 +955,29 @@ class GLUDecomposedModel(eqx.Module):
 
     @property
     def scan_layers(self) -> range:
-        """The block range the forwards scan — `stacked`'s coordinates, in GLOBAL block
-        numbering. Every layer-indexed lookup into `stacked` goes through this."""
+        """The block range the forwards scan — `stacked` then `stacked_tail`, in GLOBAL block
+        numbering. Capture slot tables are indexed against this whole range; the per-stack
+        coordinates are `span_layers` / `tail_layers`."""
         return range(self.split_layer, self.n_layer)
 
     @property
+    def span_layers(self) -> range:
+        """`stacked`'s coordinates: the decomposed span. Every decomposed site lives here, so
+        this — not `scan_layers` — sizes the per-kind V/U, CI and mask stacks (a stack over
+        the whole scan range would be mostly zero-filled dummies for the frozen tail)."""
+        return range(self.split_layer, self.tail_layer)
+
+    @property
+    def tail_layers(self) -> range:
+        """`stacked_tail`'s coordinates; empty when there is no tail."""
+        return range(self.tail_layer, self.n_layer)
+
+    @property
     def layers(self) -> list[GLULayer]:
-        """Per-layer view over the FULL block range (prefix then suffix, global order). For
+        """Per-layer view over the FULL block range (prefix, span, tail — global order). For
         non-hot consumers (equivalence harness); the forwards use the stacked fields."""
         views: list[GLULayer] = []
-        for stack in (self.stacked_prefix, self.stacked):
+        for stack in (self.stacked_prefix, self.stacked, self.stacked_tail):
             if stack is None:
                 continue
             count = jax.tree_util.tree_leaves(stack)[0].shape[0]
@@ -1095,7 +1118,15 @@ class GLUDecomposedModel(eqx.Module):
         step's peak, which is what this shards away.)"""
         repl = NamedSharding(mesh, P())
         return eqx.tree_at(
-            lambda m: (m.embed, m.norm, m.lm_head, m.inv_freq, m.stacked, m.stacked_prefix),
+            lambda m: (
+                m.embed,
+                m.norm,
+                m.lm_head,
+                m.inv_freq,
+                m.stacked,
+                m.stacked_prefix,
+                m.stacked_tail,
+            ),
             self,
             (
                 repl,
@@ -1104,6 +1135,7 @@ class GLUDecomposedModel(eqx.Module):
                 repl,
                 self.stacked.shardings(mesh),
                 None if self.stacked_prefix is None else self.stacked_prefix.shardings(mesh),
+                None if self.stacked_tail is None else self.stacked_tail.shardings(mesh),
             ),
             is_leaf=lambda x: x is None,
         )
@@ -1221,6 +1253,8 @@ class GLUDecomposedModel(eqx.Module):
             return _clean_block(layer, residual, self.inv_freq, self.eps), None
 
         residual, _ = jax.lax.scan(block, self._start(inputs)[0], self.stacked)
+        if self.stacked_tail is not None:
+            residual, _ = jax.lax.scan(block, residual, self.stacked_tail)
         residual = rms_norm(residual, self.norm, self.eps)
         return residual @ self.lm_head.T
 
@@ -1256,9 +1290,21 @@ class GLUDecomposedModel(eqx.Module):
                 _write_block_captures(layout, buffers_, slots, block_activations),
             ), None
 
+        span = len(self.span_layers)
         (residual, buffers), _ = jax.lax.scan(
-            block, (residual, buffers), (self.stacked, slot_indices_by_tap)
+            block,
+            (residual, buffers),
+            (self.stacked, {tap: slots[:span] for tap, slots in slot_indices_by_tap.items()}),
         )
+        if self.stacked_tail is not None:
+            (residual, buffers), _ = jax.lax.scan(
+                block,
+                (residual, buffers),
+                (
+                    self.stacked_tail,
+                    {tap: slots[span:] for tap, slots in slot_indices_by_tap.items()},
+                ),
+            )
         _read_capture_buffers(captured_by_source, layout, buffers)
         residual = rms_norm(residual, self.norm, self.eps)
         return ForwardResult.from_producer(
@@ -1300,7 +1346,7 @@ class GLUDecomposedModel(eqx.Module):
                 uses_weight_deltas = True
                 per_kind = _attach_per_kind_stochastic(
                     prepared_weights,
-                    self.scan_layers,
+                    self.span_layers,
                     leading,
                     ci_stacked,
                     draw_key,
@@ -1317,7 +1363,7 @@ class GLUDecomposedModel(eqx.Module):
                 uses_weight_deltas = weight_delta_masks is not None
                 per_kind = _attach_per_kind_masks(
                     prepared_weights,
-                    self.scan_layers,
+                    self.span_layers,
                     leading,
                     component_masks,
                     weight_delta_masks,
@@ -1334,7 +1380,7 @@ class GLUDecomposedModel(eqx.Module):
             )
             return flags.pop()
 
-        live_layers = [layer for layer in self.scan_layers if layer_is_live(layer)]
+        live_layers = [layer for layer in self.span_layers if layer_is_live(layer)]
         if live_layers:
             first_live, last_live = live_layers[0], live_layers[-1] + 1
             assert live_layers == list(range(first_live, last_live)), (
@@ -1468,9 +1514,7 @@ class GLUDecomposedModel(eqx.Module):
         # Every stack below — `self.stacked`, the per-kind entries, the capture slot tables —
         # is indexed from `split_layer`, while the segment bounds are global block numbers.
         start = self.split_layer
-
-        def slice_layers(lo: int, hi: int) -> GLULayer:
-            return jax.tree.map(lambda a: a[lo - start : hi - start], self.stacked)
+        whole_span = (self.span_layers.start, self.span_layers.stop)
 
         captured_by_source: dict[_GLUCaptureSource, Array] = dict(start_captures)
 
@@ -1480,20 +1524,42 @@ class GLUDecomposedModel(eqx.Module):
         )
         slot_indices_by_tap = {} if layout is None else _slot_index_arrays(layout)
         component_activation_segments: list[dict[str, Array]] = []
-        bounds = sorted({start, first_live, last_live, self.n_layer})
 
-        for lo, hi in zip(bounds, bounds[1:], strict=False):
+        # Segments in global block order: the decomposed span (sub-segmented when a chunked
+        # plan leaves part of it frozen), then the frozen tail as its OWN stored stack. Nothing
+        # slices a multi-GB frozen stack per forward — that copy, times the ~10 forwards a step
+        # runs, is what exhausted HBM before `stacked_tail` existed.
+        segments: list[tuple[GLULayer, int, int, bool]] = []
+        span_bounds = sorted({start, first_live, last_live, self.tail_layer})
+        for lo, hi in zip(span_bounds, span_bounds[1:], strict=False):
             if lo == hi:
                 continue
-            segment_live = first_live <= lo and hi <= last_live and first_live < last_live
+            live = first_live <= lo and hi <= last_live and first_live < last_live
+            span_stack = (
+                self.stacked
+                if (lo, hi) == whole_span
+                else jax.tree.map(lambda a, lo=lo, hi=hi: a[lo - start : hi - start], self.stacked)
+            )
+            segments.append((span_stack, lo, hi, live))
+        if self.stacked_tail is not None:
+            segments.append((self.stacked_tail, self.tail_layer, self.n_layer, False))
+
+        for layer_stack, lo, hi, segment_live in segments:
             if segment_live:
-                per_kind_segment_inputs = {
-                    kind: {key: value[lo - start : hi - start] for key, value in entry.items()}
-                    for kind, entry in per_kind.items()
-                }
-                xs: Any = (slice_layers(lo, hi), per_kind_segment_inputs)
+                # Identity slices are skipped, not merely elided: at the common all-sites-live
+                # shape the per-kind entries carry the whole (V, U, mask, ...) span stack, and
+                # re-slicing it per forward materializes that copy again.
+                per_kind_segment_inputs = (
+                    per_kind
+                    if (lo, hi) == whole_span
+                    else {
+                        kind: {key: value[lo - start : hi - start] for key, value in entry.items()}
+                        for kind, entry in per_kind.items()
+                    }
+                )
+                xs: Any = (layer_stack, per_kind_segment_inputs)
             else:
-                xs = slice_layers(lo, hi)
+                xs = layer_stack
 
             if layout is not None:
                 segment_slots = {
@@ -1581,7 +1647,7 @@ class GLUDecomposedModel(eqx.Module):
         return forward_result, component_activations
 
     def prepare_compute_weights(self, vu: ComponentStacks) -> dict[str, dict[str, Array]]:
-        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.scan_layers))
+        return _reconstruct_compute_weights(_stack_per_kind_vu(vu, self.span_layers))
 
     def component_activation_forward(
         self,
@@ -1624,7 +1690,7 @@ class GLUDecomposedModel(eqx.Module):
         return requested_forward_result, component_activations
 
     def stack_ci(self, ci_lower: dict[str, Array]) -> dict[str, Array]:
-        return _stack_ci_per_kind(ci_lower, self.scan_layers)
+        return _stack_ci_per_kind(ci_lower, self.span_layers)
 
     def masked_forward(
         self,
@@ -1755,13 +1821,16 @@ def build_decomposed_lm(
         f"sites are not the canonical specs for this config: {sites}"
     )
     # No sites (the parity harnesses build the frozen model alone) means nothing to reuse a
-    # prefix for, so the whole model stays the scanned range.
+    # prefix for and no span to bound, so the whole model stays one scanned stack.
     split_layer = min((parse_site_name(s.name)[0] for s in sites), default=0)
+    tail_layer = max((parse_site_name(s.name)[0] for s in sites), default=len(layers) - 1) + 1
     return GLUDecomposedModel(
         embed=embed,
-        stacked=_stack_layers(layers[split_layer:]),
+        stacked=_stack_layers(layers[split_layer:tail_layer]),
         stacked_prefix=_stack_layers(layers[:split_layer]) if split_layer > 0 else None,
+        stacked_tail=_stack_layers(layers[tail_layer:]) if tail_layer < len(layers) else None,
         n_layer=len(layers),
+        tail_layer=tail_layer,
         split_layer=split_layer,
         norm=norm,
         lm_head=lm_head,

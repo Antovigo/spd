@@ -282,6 +282,19 @@ Llama-8B target is multi-GB. Therefore:
   bit-equality of output and every capture against the token path. The one restriction: a
   `ResidualStart` has consumed the prefix, so captures BELOW `split_layer` need token inputs
   (the target serves them by running the prefix through the capture machinery).
+- **The GLU target stores THREE frozen stacks**, not one: `stacked_prefix` `[0, split_layer)`,
+  `stacked` the DECOMPOSED SPAN `[split_layer, tail_layer)`, and `stacked_tail`
+  `[tail_layer, n_layer)`. The tail is mask-DEPENDENT (masked residuals flow through it), so
+  unlike the prefix every forward re-runs it — it is a separate field purely so no forward
+  SLICES it out of a shared stack. That slice is a multi-GB copy, and a step runs ~10 masked
+  forwards: at 4 decomposed blocks the copies alone were ~15 GiB and OOM'd every batch and
+  every `fsdp` width (the arena was block-count- AND fsdp-invariant, which is what fingered
+  the slices rather than the compute). Fixing it took 4 blocks on 4 L40s from
+  not-runnable to 31.8 GB / 2.8 s per step at `fsdp: 1`, vs 25.5 s at `fsdp: 4`. The per-kind
+  V/U + mask stacks size to `span_layers` for the same reason (a scan-range stack is mostly
+  zero-filled dummies) and pass WHOLE when every site is live. Layout only — the scans run the
+  same layers in the same order, so the equivalence goldens and the prefix bit-equality test
+  hold unchanged.
 - **S13/S15**: source updates go through the persistent Adam AND project to [0,1]
   after EVERY ascent — an unprojected drift past 1 has zero `clip` gradient and the
   entry dies.

@@ -198,7 +198,11 @@ def test_no_capture_wrapper_lowers_to_the_compact_clean_graph():
         residual = m.embed_tokens(x)
         if m.stacked_prefix is not None:
             residual, _ = jax.lax.scan(prefix_block, residual, m.stacked_prefix)
+        # Span then tail, sharing ONE body — `_clean_output` reuses its `block` across both
+        # stacks, and a second definition here would emit a different symbol set.
         residual, _ = jax.lax.scan(block, residual, m.stacked)
+        if m.stacked_tail is not None:
+            residual, _ = jax.lax.scan(block, residual, m.stacked_tail)
         residual = rms_norm(residual, m.norm, m.eps)
         return residual @ m.lm_head.T
 

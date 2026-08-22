@@ -50,7 +50,12 @@ def test_split_layer_is_the_first_decomposed_block():
     assert model.split_layer == 3
     assert model.stacked_prefix is not None
     assert jax.tree_util.tree_leaves(model.stacked_prefix)[0].shape[0] == 3
-    assert jax.tree_util.tree_leaves(model.stacked)[0].shape[0] == cfg.n_layer - 3
+    # `stacked` is the DECOMPOSED SPAN (blocks 3-4 here), not everything above the prefix:
+    # the frozen tail is its own field so no forward slices it out of a shared stack.
+    assert model.tail_layer == 5
+    assert jax.tree_util.tree_leaves(model.stacked)[0].shape[0] == 2
+    assert model.stacked_tail is not None
+    assert jax.tree_util.tree_leaves(model.stacked_tail)[0].shape[0] == cfg.n_layer - 5
     # The per-layer view still spans the whole model, in global order.
     assert len(model.layers) == cfg.n_layer
 
