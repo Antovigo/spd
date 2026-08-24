@@ -1363,10 +1363,28 @@ def _scale_subcomponents(
         rows = rows_by_group.setdefault(group, [])
         assert slot == len(rows), (name, group, slot)
         rows.append(scale[name])
+
+    def matching(x: Array, keep: Array, c_axis: int) -> Array:
+        """`keep [g, C]` re-typed to `x`'s own `(g, C)` assignment before the multiply.
+
+        The factor is derived from CI, whose C axis carries the ACTIVATION layout (`tp`),
+        while the component stacks carry the PERSISTENCE layout (C over `('tp',
+        'replicate')` under owner partitioning). Broadcasting an elementwise factor across
+        that difference is a `ShardingTypeError` under explicit axes, and the two layouts
+        need not agree for `V [g, d_in, C]` and `U [g, C, d_out]` either — so the re-type is
+        per operand, off that operand's own spec. Pure typing: the value is unchanged."""
+        if jax.sharding.get_abstract_mesh().empty:
+            return keep
+        spec = jax.typeof(x).sharding.spec
+        return jax.sharding.reshard(keep, P(spec[0], spec[c_axis]))
+
     stacks = {}
     for group, (vs, us) in components.stacks.items():
         keep = jnp.stack(rows_by_group[group])  # [g, C]
-        stacks[group] = (vs * keep[:, None, :], us * keep[:, :, None])
+        stacks[group] = (
+            vs * matching(vs, keep, 2)[:, None, :],
+            us * matching(us, keep, 1)[:, :, None],
+        )
     return ComponentStacks(stacks=stacks, site_slots=components.site_slots)
 
 
