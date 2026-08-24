@@ -23,6 +23,7 @@ from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
+    NonlinearityLocalityLossConfig,
     NontargetConfig,
     NontargetHiddenConfig,
     StochasticReconLossConfig,
@@ -60,6 +61,16 @@ def _loss_metrics() -> tuple[TargetedLossMetricConfig, ...]:
     )
 
 
+def _nonlinearity_cfg(coeff: float = 0.25) -> NonlinearityLocalityLossConfig:
+    """TMS declares a `Neurons` partition on `linear2` only, so `neuron` is the one unit
+    kind the coefficients may name."""
+    return NonlinearityLocalityLossConfig(
+        coeff=coeff,
+        relative_threshold=ScheduleConfig.constant(4.0),
+        unit_kind_coefficients={"neuron": 1.0},
+    )
+
+
 def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
     hidden = HiddenPassConfig(
         points=HIDDEN_POINTS,
@@ -79,7 +90,7 @@ def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
     return hidden, nontarget
 
 
-def _setup(*, dual: bool, sequential: bool):
+def _setup(*, dual: bool, sequential: bool, nonlinearity_coeff: float | None = None):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
@@ -116,9 +127,10 @@ def _setup(*, dual: bool, sequential: bool):
                 batch_size=32, impmin_coeff=6e-3, recon=[StochasticReconLossConfig(coeff=1.0)]
             ),
         )
-    objective = build_targeted_objective(
-        _loss_metrics(), nontarget, model.site_names, hidden=hidden
-    )
+    loss_metrics = _loss_metrics()
+    if nonlinearity_coeff is not None:
+        loss_metrics = (*loss_metrics, _nonlinearity_cfg(nonlinearity_coeff))
+    objective = build_targeted_objective(loss_metrics, nontarget, model.site_names, hidden=hidden)
     step = make_targeted_train_step(
         model_static=model,
         substrate=ForwardSubstrate.of(
@@ -292,3 +304,44 @@ def test_nontarget_hidden_requires_the_target_hidden_pass():
     )
     with pytest.raises(AssertionError, match="nontarget.hidden needs pd.hidden"):
         build_targeted_objective(_loss_metrics(), nontarget, ("linear1", "linear2"))
+
+
+def test_the_nonlinearity_prior_is_scored_once_whatever_the_pass_count() -> None:
+    """SPEC S36 as amended for tPD: the prior is weight-space and belongs to no pass, so a
+    four-pass run must charge it exactly once — not once per pass.
+
+    Measured as the term's own contribution (total WITH minus total WITHOUT) rather than by
+    counting passes: a per-pass application would make that contribution scale with the pass
+    count, so comparing the two-pass and four-pass shapes is what catches it."""
+
+    def contribution(coeff: float, *, dual: bool) -> float:
+        cfg, state, step = _setup(dual=dual, sequential=False)
+        target_batch, broad = _batches(cfg)
+        _, without = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(3))
+        _cfg, state, step = _setup(dual=dual, sequential=False, nonlinearity_coeff=coeff)
+        _, with_term = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(3))
+        return float(with_term["total"]) - float(without["total"])
+
+    two_pass = contribution(0.25, dual=False)
+    four_pass = contribution(0.25, dual=True)
+    assert two_pass > 0.0, two_pass
+    # It reads `U` alone, so its contribution does not depend on how many passes exist.
+    assert two_pass == pytest.approx(four_pass, rel=1e-5), (two_pass, four_pass)
+    # ... and it is linear in the coefficient, i.e. charged exactly once.
+    assert contribution(0.5, dual=True) == pytest.approx(2.0 * four_pass, rel=1e-5)
+
+
+def test_a_hidden_pass_cannot_spell_the_nonlinearity_prior() -> None:
+    """It is authored on the ONE target loss list; a hidden pass carrying it would imply a
+    per-pass weight-space term, which S36 says does not exist. Refused at PARSE — the
+    hidden pass's recon union is the recon vocabulary only — with a library-boundary assert
+    in `build_targeted_objective` behind it for programmatically-built passes."""
+    hidden, _nontarget = _hidden()
+    with pytest.raises(Exception, match="NonlinearityLocalityLoss"):
+        HiddenPassConfig(
+            points=HIDDEN_POINTS,
+            impmin_coeff=hidden.impmin_coeff,
+            # The type error IS the claim: the union has no nonlinearity member, so this
+            # is unrepresentable statically as well as at parse.
+            recon=[*hidden.recon, _nonlinearity_cfg()],  # pyright: ignore[reportArgumentType]
+        )
