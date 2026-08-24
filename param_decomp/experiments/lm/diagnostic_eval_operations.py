@@ -1,12 +1,13 @@
 """Attention, hidden-activation, and causal-importance diagnostic operations."""
 
+from collections.abc import Callable, Mapping
 from functools import partial
 
 import jax
 import numpy as np
 from jaxtyping import PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn, CIRole
+from param_decomp.core.ci_fn import CIRole, PlacedCIFn
 from param_decomp.core.configs import (
     CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
@@ -25,7 +26,12 @@ from param_decomp.core.hidden_acts_eval import (
     make_stochastic_hidden_acts_step,
 )
 from param_decomp.core.metrics import LogRecord
-from param_decomp.core.model import CaptureKeys, DecomposedModel
+from param_decomp.core.model import CaptureKeys, PlacedModel
+from param_decomp.core.nonlinearity import NonlinearityPartition
+from param_decomp.core.nonlinearity_eval import (
+    make_nonlinearity_eval_step,
+    nonlinearity_log_entries,
+)
 from param_decomp.core.run import (
     BackgroundRenderer,
     DeferredMediaRecord,
@@ -33,6 +39,7 @@ from param_decomp.core.run import (
 )
 from param_decomp.core.slow_eval import (
     IDENTITY_CI_ERROR_TOLERANCE,
+    VALUE_HISTOGRAM_N_BINS,
     PermutationMetricSpec,
     PositionCI,
     SiteReduction,
@@ -96,10 +103,27 @@ def _render_permutation(
     return _figure_record(now_step, {f"slow_eval/{name}": value for name, value in figures.items()})
 
 
+def make_nonlinearity_operation(
+    schedule: EvalSchedule,
+    partitions: Mapping[str, NonlinearityPartition],
+    compiler_options: dict[str, bool | int | str],
+) -> EvalOperation[LMEvalContext]:
+    nonlinearity_step = make_nonlinearity_eval_step(partitions, compiler_options)
+
+    def run(context: LMEvalContext) -> LogRecord:
+        reductions = context.shared_ci_reductions()
+        ci_means = {name: value.ci_sums / value.n_positions for name, value in reductions.items()}
+        return nonlinearity_log_entries(
+            nonlinearity_step(context.state.decomposition.components), ci_means, partitions
+        )
+
+    return EvalOperation(schedule, run)
+
+
 def make_attention_operation(
     metric: CIMaskedAttnPatternsReconLossConfig | StochasticAttnPatternsReconLossConfig,
     schedule: EvalSchedule,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
@@ -111,7 +135,10 @@ def make_attention_operation(
             step = make_ci_attn_patterns_step(model, ci_capture_keys, compiler_options)
         case StochasticAttnPatternsReconLossConfig():
             step = make_stochastic_attn_patterns_step(
-                model, ci_capture_keys, metric.n_mask_samples, compiler_options
+                model,
+                ci_capture_keys,
+                metric.n_mask_samples,
+                compiler_options,
             )
 
     def run(context: LMEvalContext) -> LogRecord:
@@ -119,7 +146,7 @@ def make_attention_operation(
             step,
             model,
             context.state.decomposition.components,
-            context.state.decomposition.ci_fn,
+            context.placed_ci_fn,
             list(stream_batches(stream, context)),
             jax.random.fold_in(
                 run_key, EvalKeyStream.ATTENTION_PATTERNS * train_steps + context.pass_index
@@ -137,7 +164,7 @@ def make_attention_operation(
 def make_hidden_acts_operation(
     metric: CIHiddenActsReconLossConfig | StochasticHiddenActsReconLossConfig,
     schedule: EvalSchedule,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
@@ -150,7 +177,11 @@ def make_hidden_acts_operation(
             step = make_ci_hidden_acts_step(model, ci_capture_keys, compiler_options, role=role)
         case StochasticHiddenActsReconLossConfig():
             step = make_stochastic_hidden_acts_step(
-                model, ci_capture_keys, metric.n_mask_samples, compiler_options, role=role
+                model,
+                ci_capture_keys,
+                metric.n_mask_samples,
+                compiler_options,
+                role=role,
             )
 
     def run(context: LMEvalContext) -> LogRecord:
@@ -158,7 +189,7 @@ def make_hidden_acts_operation(
             step,
             model,
             context.state.decomposition.components,
-            context.state.decomposition.ci_fn,
+            context.placed_ci_fn,
             list(stream_batches(stream, context)),
             jax.random.fold_in(
                 run_key, EvalKeyStream.HIDDEN_ACTS * train_steps + context.pass_index
@@ -214,26 +245,27 @@ def _render_two_stream_ci_means(
 
 def make_two_stream_ci_mean_operation(
     schedule: EvalSchedule,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
 ) -> EvalOperation[LMEvalContext]:
     """Both streams' mean CI per component in one figure, ordered by the target mean."""
-    step = make_slow_eval_step(model, ci_capture_keys, 0.0, None, compiler_options)
+    # `value_histogram_n_bins=None`: this operation reads the `(C,)` means only.
+    step = make_slow_eval_step(model, ci_capture_keys, 0.0, None, None, compiler_options)
 
-    def stream_mean_cis(ci_fn: CIFn, batches: tuple[jax.Array, ...]) -> dict[str, np.ndarray]:
-        return mean_cis(
-            accumulate_site_reductions(step, model, ci_fn, list(batches), n_batches_accum=0)
-        )
+    def stream_mean_cis(
+        placed_ci_fn: PlacedCIFn, batches: tuple[jax.Array, ...]
+    ) -> dict[str, np.ndarray]:
+        return mean_cis(accumulate_site_reductions(step, model, placed_ci_fn, list(batches)))
 
     def run(context: LMEvalContext) -> LogRecord:
-        ci_fn = context.state.decomposition.ci_fn
+        placed_ci_fn = context.placed_ci_fn
         renderer.submit(
             partial(
                 _render_two_stream_ci_means,
-                stream_mean_cis(ci_fn, stream_batches("target", context)),
-                stream_mean_cis(ci_fn, stream_batches("nontarget", context)),
+                stream_mean_cis(placed_ci_fn, stream_batches("target", context)),
+                stream_mean_cis(placed_ci_fn, stream_batches("nontarget", context)),
                 context.now_step,
             )
         )
@@ -245,50 +277,62 @@ def make_two_stream_ci_mean_operation(
 def make_site_figures_operation(
     metric: CIHistogramsConfig | ComponentActivationDensityConfig | CIMeanPerComponentConfig,
     schedule: EvalSchedule,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
     stream: Stream,
     role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
+    def own_reductions(
+        threshold: float, bins: int | None, value_histogram_n_bins: int | None
+    ) -> Callable[[LMEvalContext], dict[str, SiteReduction]]:
+        step = make_slow_eval_step(
+            model,
+            ci_capture_keys,
+            threshold,
+            bins,
+            value_histogram_n_bins,
+            compiler_options,
+            role=role,
+        )
+
+        def reductions_of(context: LMEvalContext) -> dict[str, SiteReduction]:
+            return accumulate_site_reductions(
+                step, model, context.placed_ci_fn, list(stream_batches(stream, context))
+            )
+
+        return reductions_of
+
     match metric:
         case CIHistogramsConfig():
-            threshold = 0.0
+            assert metric.n_batches_accum in (None, 1), (
+                "CIHistograms bins its values exactly over one eval batch (the counts from "
+                f"different batches sit on different edges), so n_batches_accum="
+                f"{metric.n_batches_accum} cannot be honoured"
+            )
             bins = metric.density_heatmap_n_bins
-            limit = metric.n_batches_accum
             wanted = {
                 "figures/causal_importance_values",
                 "figures/causal_importance_values_pre_sigmoid",
                 *({"figures/ci_density_heatmap"} if bins is not None else set()),
             }
+            reductions_of = own_reductions(0.0, bins, VALUE_HISTOGRAM_N_BINS)
         case ComponentActivationDensityConfig():
-            threshold = metric.ci_alive_threshold
-            bins = None
-            limit = None
             wanted = {"figures/component_activation_density"}
+            reductions_of = own_reductions(metric.ci_alive_threshold, None, None)
         case CIMeanPerComponentConfig():
-            threshold = 0.0
-            bins = None
-            limit = None
             wanted = {
                 "figures/ci_mean_per_component",
                 "figures/ci_mean_per_component_log",
             }
-    step = make_slow_eval_step(model, ci_capture_keys, threshold, bins, compiler_options, role=role)
+            reductions_of = own_reductions(0.0, None, None)
 
     def run(context: LMEvalContext) -> LogRecord:
-        reductions = accumulate_site_reductions(
-            step,
-            model,
-            context.state.decomposition.ci_fn,
-            list(stream_batches(stream, context)),
-            limit,
-        )
         renderer.submit(
             partial(
                 _render_selected_figures,
-                reductions,
+                reductions_of(context),
                 wanted,
                 context.now_step,
                 role_log_segment(role),
@@ -302,7 +346,7 @@ def make_site_figures_operation(
 def make_permutation_operation(
     metric: PermutedCIPlotsConfig | UVPlotsConfig | IdentityCIErrorConfig,
     schedule: EvalSchedule,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     compiler_options: dict[str, bool | int | str],
     renderer: BackgroundRenderer,
@@ -315,7 +359,7 @@ def make_permutation_operation(
         position_ci = accumulate_position_ci(
             position_step,
             model,
-            context.state.decomposition.ci_fn,
+            context.placed_ci_fn,
             list(stream_batches(stream, context)),
         )
         match metric:

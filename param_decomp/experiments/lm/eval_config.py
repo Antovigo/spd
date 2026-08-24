@@ -2,9 +2,10 @@
 
 from typing import ClassVar, Literal
 
-from pydantic import PositiveInt
+from pydantic import Field, NonNegativeInt, PositiveFloat, PositiveInt
 
 from param_decomp.core.base_config import BaseConfig, Probability
+from param_decomp.core.configs import HiddenActsReconstruction
 
 
 class CEandKLLossesConfig(BaseConfig):
@@ -24,6 +25,47 @@ class StochasticAttnPatternsReconLossConfig(BaseConfig):
     slow: ClassVar[bool] = False
     type: Literal["StochasticAttnPatternsReconLoss"] = "StochasticAttnPatternsReconLoss"
     n_mask_samples: PositiveInt = 1
+
+
+class ArithmeticCEKLConfig(BaseConfig):
+    rounding_threshold: float
+
+
+class ArithmeticCIL0Config(BaseConfig):
+    ci_alive_threshold: float
+    groups: dict[str, list[str]] | None
+
+
+class ArithmeticFreshPGDConfig(BaseConfig):
+    name: str | None = None
+    n_steps: NonNegativeInt
+    step_size: PositiveFloat
+    hidden_acts_reconstruction: HiddenActsReconstruction | None = None
+
+
+class ArithmeticProbeMetrics(BaseConfig):
+    """Scalar operations evaluated on the arithmetic grid rather than corpus batches."""
+
+    ce_kl: ArithmeticCEKLConfig
+    ci_l0: ArithmeticCIL0Config
+    fresh_pgd: ArithmeticFreshPGDConfig | None
+
+
+class ArithmeticCIGridConfig(BaseConfig):
+    """Per-component causal-importance heatmaps over an arithmetic operand grid.
+
+    The upstream arithmetic probe, kept alongside this branch's `ABGridDataset` — the two
+    answer different questions (scalar metrics ON the grid vs a browsable per-component
+    CI + inner-activation snapshot), so a config may author either or both."""
+
+    slow: ClassVar[bool] = True
+    type: Literal["ArithmeticCIGrid"] = "ArithmeticCIGrid"
+    probe_metrics: ArithmeticProbeMetrics
+    operation: Literal["add", "sub", "mul"] = "add"
+    a_range: tuple[int, int] = (1, 100)
+    b_range: tuple[int, int] = (1, 100)
+    thresholds: list[float] = Field(default_factory=lambda: [0.1])
+    top_k: PositiveInt = 24
 
 
 class ABGridDatasetConfig(BaseConfig):

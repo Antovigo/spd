@@ -28,10 +28,12 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
 )
+from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
+    ForwardSubstrate,
     TrainingItem,
     TrainState,
     make_targeted_train_step,
@@ -81,7 +83,7 @@ def _setup(*, dual: bool, sequential: bool):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
-    model = tms_decomposed_model(cfg, target, sites)
+    model = PlacedModel(model=tms_decomposed_model(cfg, target, sites), placement=None)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = build_ci_fn(
         LayerwiseMLPCIArch(
@@ -101,6 +103,7 @@ def _setup(*, dual: bool, sequential: bool):
             components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
             ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
             adversaries={},
+            freq_ema=None,
             step=jnp.zeros((), jnp.int32),
         ),
     )
@@ -118,14 +121,18 @@ def _setup(*, dual: bool, sequential: bool):
     )
     step = make_targeted_train_step(
         model_static=model,
+        substrate=ForwardSubstrate.of(
+            model,
+            remat_recon_forwards=False,
+            remat_ci_fn=False,
+            ci_capture_keys=ci_fn.capture_keys,
+            ci_placement=None,
+        ),
         objective=objective,
         ci_scaled_weight_decay=None,
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=20,
-        remat_recon_forwards=False,
-        remat_ci_fn=False,
-        ci_capture_keys=ci_fn.capture_keys,
         sequential_passes=sequential,
     )
     return cfg, state, step
@@ -203,12 +210,15 @@ def test_sequential_and_fused_passes_give_the_same_step():
 def _model_of():
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
-    return tms_decomposed_model(cfg, init_tms_target(cfg, jax.random.PRNGKey(0)), sites)
+    return PlacedModel(
+        model=tms_decomposed_model(cfg, init_tms_target(cfg, jax.random.PRNGKey(0)), sites),
+        placement=None,
+    )
 
 
 @pytest.mark.parametrize("sequential", [False, True])
 def test_hidden_pass_trains_the_hidden_head_and_reports_its_own_losses(sequential: bool):
-    """T12/S36: the hidden pass moves the hidden head, and logs under its own namespace."""
+    """T12/S37: the hidden pass moves the hidden head, and logs under its own namespace."""
     cfg, state, step = _setup(dual=True, sequential=sequential)
     target_batch, broad = _batches(cfg)
     before = state.decomposition.ci_fn
@@ -231,7 +241,7 @@ def test_hidden_pass_trains_the_hidden_head_and_reports_its_own_losses(sequentia
         assert not np.allclose(before_heads[site], np.asarray(head_after[0])), (
             f"the hidden head at {site} did not move — the hidden pass reached nothing"
         )
-        # And the trunk moved too: both objectives shape one representation (S36).
+        # And the trunk moved too: both objectives shape one representation (S37).
         assert not np.allclose(before_trunks[site], np.asarray(after.site_mlps[site].weights[0]))
 
     assert "hidden_ci/loss/total" in metrics

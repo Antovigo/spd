@@ -10,6 +10,7 @@ from typing import cast
 
 import jax.numpy as jnp
 
+from param_decomp.core.ci_fn import PlacedCIFn
 from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.scalar_eval_operations import Stream, stream_log_prefix
@@ -22,8 +23,10 @@ def context(target_batches: tuple[jnp.ndarray, ...] | None) -> LMEvalContext:
     return LMEvalContext(
         state=cast(TrainState, cast(object, None)),
         now_step=0,
+        placed_ci_fn=cast(PlacedCIFn, cast(object, None)),
         pass_index=0,
         batches=(),
+        shared_ci_reductions=lambda: {},
         target_batches=target_batches,
     )
 

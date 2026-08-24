@@ -16,9 +16,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.ci_fn import CIFn, CIRole, ci_preactivations, lower_leaky_hard_sigmoid
+from param_decomp.core.ci_fn import (
+    CIRole,
+    PlacedCIFn,
+    ci_preactivations,
+    lower_leaky_hard_sigmoid,
+)
 from param_decomp.core.components import init_component_stacks
-from param_decomp.core.model import prepare_compute_weights
+from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.tests.test_slow_eval import _build_ci_fn
 from param_decomp.experiments.lm.ab_grid_dataset import (
     APPLET_FILENAME,
@@ -46,7 +51,9 @@ def _tiny_setup():
     cfg = tiny_glu_cfg()
     C = 8
     sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, C))
-    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    model = PlacedModel(
+        model=tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0)), placement=None
+    )
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
     return cfg, model, ci_fn, C
 
@@ -60,8 +67,8 @@ def _grid_step(roles: tuple[CIRole, ...] = ("output",)):
     return make_ab_grid_step(model, ci_fn.capture_keys, POSITIONS, roles)
 
 
-def _dual_ci_fn() -> CIFn:
-    """The same arch with a second readout head (S36)."""
+def _dual_ci_fn() -> PlacedCIFn:
+    """The same arch with a second readout head (S37)."""
     cfg, model, _ci_fn, _C = _tiny_setup()
     return _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2), dual=True)
 
@@ -88,7 +95,10 @@ def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
     ci_grids, inner_grids, ci_sums = _grid_step()(model, vu, ci_fn, tokens, jnp.asarray(n_prompts))
 
     preactivations = ci_preactivations(
-        ci_fn, capture_clean(model, tokens, ci_fn.capture_keys), remat=False, role="output"
+        ci_fn,
+        capture_clean(model.model, tokens, ci_fn.capture_keys),
+        remat=False,
+        role="output",
     )
     _clean, raw_activations = model.component_activation_forward(
         prepare_compute_weights(model, vu), tokens, capture_keys=ci_fn.capture_keys
@@ -281,7 +291,7 @@ def test_resolve_positions():
 
 
 def test_dual_payload_carries_both_roles_and_one_shared_index():
-    """SPEC S36: a dual run's snapshot feeds the applet's output-vs-hidden overlay.
+    """SPEC S37: a dual run's snapshot feeds the applet's output-vs-hidden overlay.
 
     The `saved` list is ONE index set for both roles — the applet walks it once and indexes
     both roles' grids by it — and `collect_ab_grid_snapshot` cuts it on the MAX over roles, so
@@ -310,7 +320,7 @@ def test_dual_payload_carries_both_roles_and_one_shared_index():
     assert module["saved"] == saved, "both roles are indexed by ONE saved list"
     assert module["ci"] != module["ci_hidden"], "the two heads' grids must not be the same bytes"
 
-    # A single-role snapshot stays byte-compatible with every pre-S36 payload, so the applet's
+    # A single-role snapshot stays byte-compatible with every pre-S37 payload, so the applet's
     # own no-`ci_roles` fallback still applies to older snapshots.
     single = ab_grid_payload(
         ABGridSnapshot(

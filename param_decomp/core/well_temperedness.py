@@ -26,16 +26,17 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 from numpy.typing import NDArray
 
-from param_decomp.core.ci_fn import CIFn, evaluate_ci_role
+from param_decomp.core.ci_fn import PlacedCIFn, evaluate_ci_role
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import WellTemperednessConfig
 from param_decomp.core.jit_util import filter_jit
+from param_decomp.core.linear_plan import value_mesh
 from param_decomp.core.masking import all_live_masking_no_delta
 from param_decomp.core.model import (
     BATCH_AXES,
     CaptureKeys,
-    DecomposedModel,
     MaterializedMasking,
+    PlacedModel,
     prepare_compute_weights,
 )
 from param_decomp.core.precision import COMPUTE_DT
@@ -56,7 +57,7 @@ class Ablations:
 
 
 type WellTemperednessStep = Callable[
-    [DecomposedModel, ComponentStacks, CIFn, Any, PRNGKeyArray], Ablations
+    [PlacedModel, ComponentStacks, PlacedCIFn, Any, PRNGKeyArray], Ablations
 ]
 
 
@@ -95,7 +96,7 @@ def _components_to_ablate(
 
 
 def make_well_temperedness_step(
-    model_static: DecomposedModel,
+    model_static: PlacedModel,
     ci_capture_keys: CaptureKeys,
     config: WellTemperednessConfig,
     mesh: Mesh | None = None,
@@ -137,6 +138,14 @@ def make_well_temperedness_step(
         batch_indices: Int[Array, " n_locations"],
         position_indices: Int[Array, " n_locations"],
     ) -> Float[Array, "n_locations d"]:
+        # A batch-typed operand's location gather has no inferable output sharding
+        # (n_locations does not follow the batch axes); the tiny selected slab is
+        # replicated, like every downstream ablation quantity.
+        if not value_mesh(values).empty:
+            values = jax.sharding.reshard(
+                values,
+                NamedSharding(value_mesh(values), P(*([None] * values.ndim))),
+            )
         selected_values = (
             values[batch_indices, position_indices] if has_position_axis else values[batch_indices]
         )
@@ -145,17 +154,20 @@ def make_well_temperedness_step(
     # `model` is the filter_jit ARG: frozen array fields stay traced instead of becoming HLO
     # constants. Only static topology and the array-free recon loss close over the factory.
     def step(
-        model: DecomposedModel,
+        model: PlacedModel,
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         inputs: Any,
         sampling_key: PRNGKeyArray,
     ) -> Ablations:
         ci_inputs = model.clean_forward(inputs, ci_capture_keys).captures
         # Output role explicitly: well-temperedness asks whether a HIGHER CI predicts a larger
         # ablation effect on the RECON loss, which is the output objective's own question.
+        # Through `evaluate_ci_role`, i.e. the step's CI lifecycle: it materializes the compute
+        # residents first — evaluating persistence-layout weights leaves their gathers (and,
+        # under Explicit typing, ambiguous weight-grad contractions) inside the chunk scan.
         ci_preactivations = evaluate_ci_role(
-            ci_fn, ci_inputs, remat=False, role="output"
+            placed_ci_fn, ci_inputs, remat=False, role="output"
         ).preactivations
         location_shape = ci_preactivations[site_names[0]].shape[:-1]
         expected_location_rank = 2 if has_position_axis else 1
@@ -232,12 +244,21 @@ def make_well_temperedness_step(
             ],
         ) -> Float[Array, " ablations_per_forward"]:
             location_indices, site_indices, component_indices = ablation_indices
-            inputs_for_ablations = jax.tree.map(
-                lambda values: batch_shard_leading(
+
+            def take_locations(values: Array) -> Array:
+                # Location gathers off batch-typed inputs have no inferable output
+                # sharding; the tiny per-forward subset materializes replicated and
+                # batch_shard_leading re-pins it.
+                if not value_mesh(values).empty:
+                    values = jax.sharding.reshard(
+                        values,
+                        NamedSharding(value_mesh(values), P(*([None] * values.ndim))),
+                    )
+                return batch_shard_leading(
                     jnp.take(values, batch_indices[location_indices], axis=0), mesh
-                ),
-                inputs,
-            )
+                )
+
+            inputs_for_ablations = jax.tree.map(take_locations, inputs)
             ablated_outputs = model.masked_forward(
                 prepared_components,
                 inputs_for_ablations,
@@ -246,6 +267,13 @@ def make_well_temperedness_step(
                 ),
                 remat=False,
             ).output
+            if not value_mesh(ablated_outputs).empty:
+                # Same as `select_locations`: the per-location gather off the
+                # batch-typed output replicates the tiny selected slab.
+                ablated_outputs = jax.sharding.reshard(
+                    ablated_outputs,
+                    NamedSharding(value_mesh(ablated_outputs), P(*([None] * ablated_outputs.ndim))),
+                )
             ablated_outputs_at_locations = (
                 ablated_outputs[indices_within_forward, position_indices[location_indices]]
                 if has_position_axis
@@ -271,9 +299,7 @@ def make_well_temperedness_step(
         if mesh is None:
             return ablations
         replicated = NamedSharding(mesh, P())
-        return jax.tree.map(
-            lambda value: jax.lax.with_sharding_constraint(value, replicated), ablations
-        )
+        return jax.tree.map(lambda value: jax.sharding.reshard(value, replicated), ablations)
 
     return filter_jit(step, compiler_options=compiler_options)
 

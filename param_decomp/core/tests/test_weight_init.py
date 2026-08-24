@@ -12,6 +12,7 @@ from param_decomp.core.components import (
     with_silenced_u,
     zero_component_stacks,
 )
+from param_decomp.core.model import PlacedModel, site_weight_delta
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import tiny_glu_cfg, tiny_glu_decomposed_lm
 
@@ -20,7 +21,10 @@ def _tiny_model_and_weights():
     cfg = tiny_glu_cfg()
     sites = glu_site_specs(cfg, mlp_family_site_cs(0, 1, 4))
     model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
-    return model, sites, model.weight_deltas(zero_component_stacks(sites))
+    # `weight_deltas` is per persistence STACK since #1000; these tests reason per SITE.
+    zero = zero_component_stacks(sites)
+    stacked = model.weight_deltas(zero)
+    return model, sites, {s.name: site_weight_delta(stacked, zero, s.name) for s in sites}
 
 
 def test_zero_components_read_back_the_frozen_weights():
@@ -33,10 +37,13 @@ def test_zero_components_read_back_the_frozen_weights():
         assert jnp.all(jnp.isfinite(weights[spec.name]))
     # A nonzero V/U must move the delta away from W, or the read-back is vacuous.
     nonzero = zero_component_stacks(sites)
-    shape, (Vs, Us) = next(iter(nonzero.stacks.items()))
-    perturbed = nonzero.stacks | {shape: (Vs + 1.0, Us + 1.0)}
-    moved = model.weight_deltas(type(nonzero)(stacks=perturbed, site_slots=nonzero.site_slots))
-    assert any(not jnp.allclose(moved[s.name], weights[s.name]) for s in sites)
+    group, (Vs, Us) = next(iter(nonzero.stacks.items()))
+    perturbed = nonzero.stacks | {group: (Vs + 1.0, Us + 1.0)}
+    bumped = type(nonzero)(stacks=perturbed, site_slots=nonzero.site_slots)
+    moved = model.weight_deltas(bumped)
+    assert any(
+        not jnp.allclose(site_weight_delta(moved, bumped, s.name), weights[s.name]) for s in sites
+    )
 
 
 def test_coupled_init_couples_the_wide_side_to_w():
@@ -66,22 +73,22 @@ def test_zero_u_silences_every_component_but_keeps_v_live():
         assert jnp.array_equal(vu.site(spec.name).V, coupled.site(spec.name).V), spec.name
     deltas = model.weight_deltas(vu)
     for spec in sites:
-        assert jnp.allclose(deltas[spec.name], weights[spec.name]), spec.name
+        assert jnp.allclose(site_weight_delta(deltas, vu, spec.name), weights[spec.name]), spec.name
 
 
 def test_placed_init_matches_the_eager_values():
     """The jitted, sharding-placed path reads `W` inside the graph; same values up to fp32
     reassociation in the `W`-image matmul (XLA picks its own layout)."""
     from param_decomp.core.init_placed import init_component_stacks_coupled_placed
-    from param_decomp.core.placement import from_config_for_consumer
+    from param_decomp.core.placement import from_config
     from param_decomp.core.sharding import single_device_mesh
 
     model, sites, weights = _tiny_model_and_weights()
     mesh = single_device_mesh()
-    rules = from_config_for_consumer("ddp", mesh, sites)
+    rules = from_config("ddp", mesh, sites)
     for zero_u in (False, True):
         placed = init_component_stacks_coupled_placed(
-            model, jax.random.PRNGKey(1), rules, zero_u=zero_u
+            PlacedModel(model=model, placement=rules), jax.random.PRNGKey(1), rules, zero_u=zero_u
         )
         coupled = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1))
         eager = with_silenced_u(coupled) if zero_u else coupled

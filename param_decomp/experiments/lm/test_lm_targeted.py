@@ -79,11 +79,15 @@ def test_shipped_targeted_config_validates():
     )
 
 
-def test_targeted_shape_refuses_plain_only_sections():
+def test_targeted_shape_admits_resume_provenance():
+    """`resume_provenance` is NOT plain-only on this branch: targeted fine-tune init
+    (SPEC S33, `601c9a756`) is how the addsub campaign warm-starts a tPD run from a
+    parent checkpoint, so the targeted shape carries the section rather than refusing it."""
     raw = yaml.safe_load((_CONFIGS_DIR / "llama8b_l18_arith_targeted.yaml").read_text())
     raw["resume_provenance"] = {"parent_run_dir": "/abs/run", "parent_step": 100}
-    with pytest.raises(Exception, match="resume_provenance"):
-        LMTargetedExperimentConfig.model_validate(raw)
+    cfg = LMTargetedExperimentConfig.model_validate(raw)
+    assert cfg.resume_provenance is not None
+    assert cfg.resume_provenance.parent_step == 100
 
 
 def test_plain_shape_refuses_targeted_sections():

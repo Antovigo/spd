@@ -6,20 +6,20 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from param_decomp.core.adversary import init_fresh_pgd_sources
-from param_decomp.core.ci_fn import CIFn, CIRole, evaluate_ci_role
+from param_decomp.core.adversary import Sources, init_fresh_pgd_sources
+from param_decomp.core.ci_fn import CIRole, PlacedCIFn, evaluate_ci_role
 from param_decomp.core.components import ComponentStacks, SiteSpec
+from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.losses import reconstruction_loss
 from param_decomp.core.masking import masks_from_sources, persistent_delta_pinned_masks
 from param_decomp.core.model import (
     CaptureKeys,
-    DecomposedModel,
     MaterializedMasking,
+    PlacedModel,
     prepare_compute_weights,
     select_captures,
 )
@@ -32,7 +32,7 @@ from param_decomp.core.recon import (
 from param_decomp.core.sharding import batch_shard_leading
 
 type FreshPGDStep = Callable[
-    [DecomposedModel, ComponentStacks, CIFn, Any, PRNGKeyArray], Float[Array, ""]
+    [PlacedModel, ComponentStacks, PlacedCIFn, Any, PRNGKeyArray], Float[Array, ""]
 ]
 """One batch's fresh-PGD reconstruction scalar. `inputs` is the target's own opaque batch
 (token ids, a feature matrix, a dict of tensors) — exactly what `masked_forward` takes."""
@@ -61,7 +61,7 @@ def fresh_pgd_recon_sources(
     fresh_pgd: FreshPGDReconEval,
     loss_at_masks: Callable[[dict[str, Array], dict[str, Array]], Array],
     delta_pinned: bool = False,
-) -> dict[str, Array]:
+) -> Sources:
     """Ascend fresh sources against a caller-owned recon objective.
 
     `delta_pinned` composes every weight-delta mask as 1.0 and ignores the sources'
@@ -70,21 +70,24 @@ def fresh_pgd_recon_sources(
     the probe must not attack it either; amended 2026-08-20). Default False: the plain
     and target-stream probes attack the delta channel as always."""
     initial_sources = init_fresh_pgd_sources(sites, "random", "c", leading, key)
-    site_names = tuple(site.name for site in sites)
-    mask_fn = persistent_delta_pinned_masks if delta_pinned else masks_from_sources
 
-    def loss_at_sources(sources: dict[str, Array]) -> Array:
-        masks, delta_masks = mask_fn(ci_lower, sources, site_names)
+    def loss_at_sources(sources: Sources) -> Array:
+        masks, delta_masks = (
+            persistent_delta_pinned_masks(ci_lower, sources)
+            if delta_pinned
+            else masks_from_sources(ci_lower, sources)
+        )
         return loss_at_masks(masks, delta_masks)
 
-    def ascend(sources: dict[str, Array], _: None) -> tuple[dict[str, Array], None]:
+    def ascend(sources: Sources, _: None) -> tuple[Sources, None]:
         gradients = jax.grad(loss_at_sources)(sources)
-        return {
-            site: jnp.clip(
-                sources[site] + fresh_pgd.step_size * jnp.sign(gradients[site]), 0.0, 1.0
-            )
-            for site in sources
-        }, None
+        return jax.tree.map(
+            lambda source, gradient: jnp.clip(
+                source + fresh_pgd.step_size * jnp.sign(gradient), 0.0, 1.0
+            ),
+            sources,
+            gradients,
+        ), None
 
     final_sources, _ = jax.lax.scan(ascend, initial_sources, None, length=fresh_pgd.n_steps)
     return final_sources
@@ -103,13 +106,16 @@ def fresh_pgd_recon_loss(
     sources = fresh_pgd_recon_sources(
         sites, ci_lower, leading, key, fresh_pgd, loss_at_masks, delta_pinned
     )
-    mask_fn = persistent_delta_pinned_masks if delta_pinned else masks_from_sources
-    masks, delta_masks = mask_fn(ci_lower, sources, tuple(site.name for site in sites))
+    masks, delta_masks = (
+        persistent_delta_pinned_masks(ci_lower, sources)
+        if delta_pinned
+        else masks_from_sources(ci_lower, sources)
+    )
     return loss_at_masks(masks, delta_masks)
 
 
 def make_fresh_pgd_eval_step(
-    model_static: DecomposedModel,
+    model_static: PlacedModel,
     fresh_pgd: FreshPGDReconEval,
     ci_capture_keys: CaptureKeys,
     mesh: Mesh | None = None,
@@ -124,6 +130,7 @@ def make_fresh_pgd_eval_step(
     """
     sites = model_static.sites
     recon_loss_fn = model_static.recon_loss_fn
+    placement = model_static.placement
     leading_rank = 2 if model_static.has_position_axis else 1
     reconstruction_capture_keys = fresh_pgd.hidden_acts_capture_keys
     model_static.assert_hidden_acts_reconstruction_points(
@@ -134,17 +141,10 @@ def make_fresh_pgd_eval_step(
     def shard_batch_tree[T](tree: T) -> T:
         return jax.tree.map(lambda x: batch_shard_leading(x, mesh), tree)
 
-    def shard_ci_array(x: Array) -> Array:
-        if mesh is None:
-            return x
-        return jax.lax.with_sharding_constraint(
-            x, NamedSharding(mesh, P(("replicate", "fsdp"), *((None,) * (x.ndim - 1))))
-        )
-
     def eval_step(
-        model: DecomposedModel,
+        model: PlacedModel,
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         inputs: Any,
         key: PRNGKeyArray,
     ) -> Array:
@@ -161,9 +161,9 @@ def make_fresh_pgd_eval_step(
 
         prepared_weights = prepare_compute_weights(model, components)
         ci_lower = {
-            site: shard_ci_array(value)
+            site: constrain_component_activation(value, placement)
             for site, value in evaluate_ci_role(
-                ci_fn, ci_input_activations, remat=False, role=role
+                placed_ci_fn, ci_input_activations, remat=False, role=role
             ).lower.items()
         }
 

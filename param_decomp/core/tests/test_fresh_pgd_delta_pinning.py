@@ -38,7 +38,7 @@ def _ascended(delta_pinned: bool) -> tuple[dict[str, Array], dict[str, Array]]:
         SITES, ci, (4,), jax.random.PRNGKey(0), PROBE, _ablation_reward, delta_pinned
     )
     mask_fn = persistent_delta_pinned_masks if delta_pinned else masks_from_sources
-    return mask_fn(ci, sources, tuple(s.name for s in SITES))
+    return mask_fn(ci, sources)
 
 
 def test_unpinned_probe_attacks_the_delta_channel():

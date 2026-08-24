@@ -6,8 +6,14 @@ import jax
 
 from param_decomp.core.ci_fn import LayerwiseMLPCIArch, init_layerwise_mlp_ci_fn, output_ci
 from param_decomp.core.components import SiteC, init_component_stacks
-from param_decomp.core.configs import UVPlotsConfig
+from param_decomp.core.configs import (
+    KeepAllCheckpoints,
+    NoCheckpointing,
+    PeriodicCheckpointing,
+    UVPlotsConfig,
+)
 from param_decomp.core.metrics import PNGImage
+from param_decomp.core.model import PlacedModel
 from param_decomp.experiments import toy_uv_eval
 from param_decomp.targets.testing import capture_clean
 from param_decomp.targets.tms import (
@@ -24,7 +30,7 @@ def _toy_setup():
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
     target = init_tms_target(cfg, jax.random.PRNGKey(3))
-    model = tms_decomposed_model(cfg, target, sites)
+    model = PlacedModel(model=tms_decomposed_model(cfg, target, sites), placement=None)
     ci_fn = init_layerwise_mlp_ci_fn(
         LayerwiseMLPCIArch(
             hidden_dims=(16,),
@@ -36,7 +42,9 @@ def _toy_setup():
     )
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     probe = single_feature_probe(cfg.n_features)
-    ci = output_ci(ci_fn(capture_clean(model, probe, ci_fn.capture_keys), remat=False))
+    ci = output_ci(
+        ci_fn(capture_clean(model.model, probe, ci_fn.capture_keys), remat=False, placement=None)
+    )
     return model, vu, ci.lower, ci.upper
 
 
@@ -60,9 +68,15 @@ def test_render_uv_metric_returns_transport_independent_png():
 
 
 def test_permuted_ci_heatmap_due_fires_on_save_every_and_final_step():
-    assert toy_uv_eval.permuted_ci_heatmap_due(5000, 20000, save_every=5000) is True
-    assert toy_uv_eval.permuted_ci_heatmap_due(5001, 20000, save_every=5000) is False
-    assert toy_uv_eval.permuted_ci_heatmap_due(20000, 20000, save_every=5000) is True
+    periodic = PeriodicCheckpointing(save_every=5000, retention=KeepAllCheckpoints())
+    assert toy_uv_eval.permuted_ci_heatmap_due(5000, 20000, periodic) is True
+    assert toy_uv_eval.permuted_ci_heatmap_due(5001, 20000, periodic) is False
+    assert toy_uv_eval.permuted_ci_heatmap_due(20000, 20000, periodic) is True
+
+
+def test_permuted_ci_heatmap_due_fires_only_at_the_final_step_without_checkpointing():
+    assert toy_uv_eval.permuted_ci_heatmap_due(5000, 20000, NoCheckpointing()) is False
+    assert toy_uv_eval.permuted_ci_heatmap_due(20000, 20000, NoCheckpointing()) is True
 
 
 def test_render_permuted_ci_heatmap_returns_both_leaky_views():

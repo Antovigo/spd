@@ -1,4 +1,4 @@
-"""The dual-objective (SPEC S36/T12) LM config surface.
+"""The dual-objective (SPEC S37/T12) LM config surface.
 
 The run config itself is NOT committed — `CONFIGS.md` caps the repo's LM seats and keeps
 one-offs in the launcher's workspace, and a launched run's provenance already lives in its

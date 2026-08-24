@@ -11,7 +11,7 @@ from param_decomp.core.ci_fn import CIRole
 from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import BarChart, LogRecord
-from param_decomp.core.model import CaptureKeys, DecomposedModel
+from param_decomp.core.model import CaptureKeys, PlacedModel
 from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.core.run import EvalOperation
@@ -66,11 +66,60 @@ def stream_log_prefix(stream: Stream, context: LMEvalContext, role: CIRole = "ou
             return f"eval/{role_segment}"
 
 
+type AnyScalarMetricConfig = CEandKLLossesConfig | CI_L0Config | PGDReconLossConfig
+
+
+def fresh_pgd_probe(metric: PGDReconLossConfig) -> FreshPGDReconEval:
+    assert metric.init == "random" and metric.source_shape == "c", metric
+    return FreshPGDReconEval(
+        name=metric.name or metric.type,
+        n_steps=metric.n_steps,
+        step_size=metric.step_size,
+        reconstruction=resolve_reconstruction_spec(metric.hidden_acts_reconstruction),
+    )
+
+
+def scalar_step_for(
+    metric: AnyScalarMetricConfig,
+    model: PlacedModel,
+    ci_capture_keys: CaptureKeys,
+    mesh: Mesh,
+    compiler_options: dict[str, bool | int | str] | None,
+    role: CIRole = "output",
+) -> ScalarStep:
+    """THE config→kernel binding for the scalar tier — the operations below and the AOT
+    eval fit check compile the identical step from one spelling."""
+    match metric:
+        case CEandKLLossesConfig():
+            return make_ce_kl_step(
+                model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options
+            )
+        case CI_L0Config():
+            groups = (
+                {name: tuple(patterns) for name, patterns in metric.groups.items()}
+                if metric.groups is not None
+                else None
+            )
+            return make_ci_l0_step(
+                model,
+                ci_capture_keys,
+                metric.ci_alive_threshold,
+                groups,
+                mesh,
+                compiler_options,
+                role=role,
+            )
+        case PGDReconLossConfig():
+            return make_fresh_pgd_step(
+                model, ci_capture_keys, fresh_pgd_probe(metric), mesh, compiler_options, role=role
+            )
+
+
 def _make_scalar_operation(
     schedule: EvalSchedule,
     step: ScalarStep,
     prefixes: tuple[str, ...],
-    model: DecomposedModel,
+    model: PlacedModel,
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
@@ -90,7 +139,7 @@ def _make_scalar_operation(
             values = step(
                 model,
                 context.state.decomposition.components,
-                context.state.decomposition.ci_fn,
+                context.placed_ci_fn,
                 tokens,
                 key,
             )
@@ -106,7 +155,7 @@ def make_ce_kl_operation(
     metric: CEandKLLossesConfig,
     schedule: EvalSchedule,
     stream: Stream,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
@@ -118,7 +167,7 @@ def make_ce_kl_operation(
     assert role == "output", "CE/KL's step reads the output head's CI; it has no hidden-role form"
     return _make_scalar_operation(
         schedule,
-        make_ce_kl_step(model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options),
+        scalar_step_for(metric, model, ci_capture_keys, mesh, compiler_options),
         ("ce_kl/",),
         model,
         run_key,
@@ -133,7 +182,7 @@ def make_masked_kl_operation(
     arm: MaskingArm,
     schedule: EvalSchedule,
     stream: Stream,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
@@ -161,7 +210,7 @@ def make_ci_l0_operation(
     metric: CI_L0Config,
     schedule: EvalSchedule,
     stream: Stream,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
@@ -170,22 +219,9 @@ def make_ci_l0_operation(
     compiler_options: dict[str, bool | int | str],
     role: CIRole,
 ) -> EvalOperation[LMEvalContext]:
-    groups = (
-        {name: tuple(patterns) for name, patterns in metric.groups.items()}
-        if metric.groups is not None
-        else None
-    )
     scalars = _make_scalar_operation(
         schedule,
-        make_ci_l0_step(
-            model,
-            ci_capture_keys,
-            metric.ci_alive_threshold,
-            groups,
-            mesh,
-            compiler_options,
-            role=role,
-        ),
+        scalar_step_for(metric, model, ci_capture_keys, mesh, compiler_options, role=role),
         ("l0/",),
         model,
         run_key,
@@ -218,7 +254,7 @@ def make_fresh_pgd_operation(
     metric: PGDReconLossConfig,
     schedule: EvalSchedule,
     stream: Stream,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,

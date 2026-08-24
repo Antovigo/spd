@@ -12,7 +12,7 @@ from param_decomp.core.built_run import TargetSites
 from param_decomp.core.ci_fn import CIRole
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
-from param_decomp.core.model import CaptureKeys, DecomposedModel
+from param_decomp.core.model import CaptureKeys, PlacedModel
 from param_decomp.core.run import EvalOperation
 from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
@@ -61,7 +61,7 @@ def resolve_positions(authored: list[int] | None, seq_len: int) -> tuple[int, ..
 @dataclass(frozen=True)
 class ABGridOperation:
     step: ABGridStep
-    model: DecomposedModel
+    model: PlacedModel
     chunks: tuple[tuple[jax.Array, int], ...]
     grid: ArithmeticGrid
     n_prompts: int
@@ -110,7 +110,7 @@ def make_ab_grid_operation(
     config: ABGridDatasetConfig,
     schedule: EvalSchedule,
     target: TargetSites,
-    model: DecomposedModel,
+    model: PlacedModel,
     ci_capture_keys: CaptureKeys,
     mesh: Mesh,
     n_proc: int,
