@@ -76,6 +76,7 @@ from param_decomp.core.model import (
     ForwardResult,
     Masking,
     MaterializedMasking,
+    ResidualStart,
     StochasticMasking,
 )
 from param_decomp.core.nonlinearity import (
@@ -1193,6 +1194,59 @@ class GLUDecomposedModel(eqx.Module):
         off = self.split_layer
         return jax.tree.map(lambda a: a[lo - off : hi - off], self.stacked)
 
+    def _entry(
+        self,
+        inputs: "Int[Array, 'b t'] | ResidualStart",
+        placement: PlacementRules | None,
+        capture_sources: GLUCaptureSources = (),
+    ) -> tuple[Array, int, dict[_GLUCaptureSource, Array]]:
+        """`(activation, first block still to run, captures the start itself answers)`.
+
+        Token ids embed and enter at block 0. A `ResidualStart` IS the activation entering
+        `split_layer`: the frozen lead was already run — once for the whole step — so every
+        forward given one skips it.
+
+        TWO spellings name that activation — block `split_layer`'s input, and block
+        `split_layer - 1`'s output, which is what a `resid.<split_layer>` point lowers to —
+        and both are answered here, exactly as the embedding always was. Anything strictly
+        below is refused rather than silently missing: that prefix was consumed into the
+        start activation and its internals are gone."""
+        if not isinstance(inputs, ResidualStart):
+            return self.embed_tokens(inputs, placement), 0, {}
+        assert self.split_layer > 0, "ResidualStart passed to a model with no frozen prefix"
+        boundary = {
+            _GLUCaptureSource(block=self.split_layer, tap=_GLUTap.RESIDUAL_IN),
+            _GLUCaptureSource(block=self.split_layer - 1, tap=_GLUTap.RESIDUAL_OUT),
+        }
+        below = sorted(
+            source.block
+            for source in capture_sources
+            if source.block < self.split_layer and source not in boundary
+        )
+        assert not below, (
+            f"capture requested below block {self.split_layer} from a ResidualStart: {below}. "
+            "The prefix was consumed into the start activation — pass token inputs to capture "
+            "there."
+        )
+        served = {source: inputs.resid for source in capture_sources if source in boundary}
+        return inputs.resid, self.split_layer, served
+
+    def prefix_residual(self, inputs: Int[Array, "b t"], placement: PlacementRules | None) -> Array:
+        """Stop-gradient activation entering block `split_layer`: embed + the frozen lead, run
+        ONCE per batch and shared by every forward in the step. The lead is mask-independent
+        and no gradient can reach it (every site is at or past `split_layer`), so re-running
+        it inside each forward is pure waste."""
+        assert self.stacked_prefix is not None, (
+            "no frozen prefix to reuse (a site lives in block 0)"
+        )
+
+        def plain(residual: Array, layer: GLULayer) -> tuple[Array, None]:
+            return _clean_block(layer, residual, self.inv_freq, self.eps, placement), None
+
+        residual = self.embed_tokens(inputs, placement)
+        residual, _ = jax.lax.scan(plain, residual, self.stacked_prefix)
+        return jax.lax.stop_gradient(residual)
+
     @property
     def site_names(self) -> tuple[str, ...]:
         return tuple(s.name for s in self.sites)
@@ -1438,21 +1492,25 @@ class GLUDecomposedModel(eqx.Module):
                     case PlainMLP(Wdown=Wdown):
                         return Wdown.shape[2]
 
-    def _clean_output(self, inputs: Int[Array, "b t"], placement: PlacementRules | None) -> Array:
+    def _clean_output(
+        self, inputs: "Int[Array, 'b t'] | ResidualStart", placement: PlacementRules | None
+    ) -> Array:
         """Untouched graph used when no captures are requested."""
 
         def block(residual: Array, layer: GLULayer) -> tuple[Array, None]:
             return _clean_block(layer, residual, self.inv_freq, self.eps, placement), None
 
-        residual = self.embed_tokens(inputs, placement)
-        for stack, _lo, _hi in self._frozen_spans():
+        residual, entry, _ = self._entry(inputs, placement)
+        for stack, lo, _hi in self._frozen_spans():
+            if lo < entry:
+                continue
             residual, _ = jax.lax.scan(block, residual, stack)
         residual = rms_norm(residual, self.norm, self.eps)
         return self._output_logits(residual, placement)
 
     def clean_forward(
         self,
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
         *,
         placement: PlacementRules | None,
@@ -1466,13 +1524,16 @@ class GLUDecomposedModel(eqx.Module):
             ordered_capture_keys, lambda point: _capture_source_for_point(self.anatomy, point)
         )
 
-        residual = self.embed_tokens(inputs, placement)
-        captured_by_source: dict[_GLUCaptureSource, Array] = {}
+        residual, entry, captured_by_source = self._entry(inputs, placement, capture_sources)
+        # As in the masked forward: the layout covers only what the scan must produce.
+        scan_sources = tuple(
+            source for source in capture_sources if source not in captured_by_source
+        )
         embedding_residual_source = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
         if embedding_residual_source in capture_sources:
             captured_by_source[embedding_residual_source] = residual
 
-        layout = _scan_capture_layout(capture_sources, self.n_layer)
+        layout = _scan_capture_layout(scan_sources, self.n_layer)
         buffers = _allocate_capture_buffers(layout, residual, self._value_width)
         slot_indices_by_tap = _slot_index_arrays(layout)
 
@@ -1491,6 +1552,8 @@ class GLUDecomposedModel(eqx.Module):
         # One scan per stored stack, each taking ITS slice of the (absolute) slot tables —
         # the capture layout is indexed by global block, so the split is invisible to it.
         for stack, lo, hi in self._frozen_spans():
+            if lo < entry:
+                continue
             span_slots = {key: value[lo:hi] for key, value in slot_indices_by_tap.items()}
             (residual, buffers), _ = jax.lax.scan(block, (residual, buffers), (stack, span_slots))
         _read_capture_buffers(captured_by_source, layout, buffers)
@@ -1504,7 +1567,7 @@ class GLUDecomposedModel(eqx.Module):
     def _run_masked_forward(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         masking: Masking,
         remat: bool,
         capture_keys: tuple[str, ...],
@@ -1524,7 +1587,15 @@ class GLUDecomposedModel(eqx.Module):
             if capture_keys
             else ()
         )
-        residual = self.embed_tokens(inputs, placement)
+        residual, entry, start_captures = self._entry(inputs, placement, capture_sources)
+        # Drop what the start already answered: leaving it in the layout would allocate a
+        # scan buffer for a block this forward never runs, and the empty buffer would
+        # overwrite the served value on read-back.
+        # The layout covers only what the SCAN must produce; the start already answered the
+        # rest. Leaving those in would allocate a buffer for a block this forward never runs,
+        # and the empty buffer would overwrite the served value on read-back. The requested
+        # set is unchanged — the final assembly still checks against it.
+        scan_sources = tuple(source for source in capture_sources if source not in start_captures)
         leading = residual.shape[:-1]
         site_set = frozenset(self.site_names)
         match masking:
@@ -1807,12 +1878,12 @@ class GLUDecomposedModel(eqx.Module):
                 return self.stacked_prefix
             return self._span_slice(lo, hi)
 
-        captured_by_source: dict[_GLUCaptureSource, Array] = {}
+        captured_by_source: dict[_GLUCaptureSource, Array] = dict(start_captures)
         initial = _GLUCaptureSource(block=0, tap=_GLUTap.RESIDUAL_IN)
         if initial in capture_sources:
             captured_by_source[initial] = residual
 
-        layout = _scan_capture_layout(capture_sources, self.n_layer) if capture_sources else None
+        layout = _scan_capture_layout(scan_sources, self.n_layer) if scan_sources else None
         buffers = (
             {} if layout is None else _allocate_capture_buffers(layout, residual, self._value_width)
         )
@@ -1829,7 +1900,9 @@ class GLUDecomposedModel(eqx.Module):
         bounds = sorted({0, first_decomposed, last_decomposed, self.n_layer})
 
         for lo, hi in zip(bounds, bounds[1:], strict=False):
-            if lo == hi:
+            if lo == hi or hi <= entry:
+                # `hi <= entry`: a `ResidualStart` already carries this segment's output, so
+                # the prefix that every masked forward used to re-run is simply not run.
                 continue
             segment_decomposed = (
                 first_decomposed <= lo
@@ -1958,7 +2031,7 @@ class GLUDecomposedModel(eqx.Module):
     def component_activation_forward(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         /,
         *,
         capture_keys: CaptureKeys,
@@ -2015,7 +2088,7 @@ class GLUDecomposedModel(eqx.Module):
     def masked_forward(
         self,
         prepared_weights: dict[str, dict[str, Array]],
-        inputs: Int[Array, "b t"],
+        inputs: "Int[Array, 'b t'] | ResidualStart",
         /,
         *,
         masking: Masking,

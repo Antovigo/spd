@@ -74,9 +74,6 @@ shapes are built. Must agree with the model's `has_position_axis`."""
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
-# DORMANT since the 2026-08-24 upstream merge: `glu_transformer` no longer carries the
-# `stacked_prefix` split, so no target implements `SupportsPrefixResidual` today. The
-# vocabulary is kept because re-adding the frozen-stack split is the next commit.
 class ResidualStart:
     """A precomputed frozen-prefix activation standing in for a target's usual `inputs`.
 
@@ -102,7 +99,9 @@ class SupportsPrefixResidual(Protocol):
 
     split_layer: int
 
-    def prefix_residual(self, inputs: Any, /) -> Float[Array, "*leading d"]:
+    def prefix_residual(
+        self, inputs: Any, placement: "PlacementRules | None", /
+    ) -> Float[Array, "*leading d"]:
         """The stop-gradient activation entering block `split_layer`. Wrap in
         `ResidualStart` to feed it back into this model's forwards."""
         ...
