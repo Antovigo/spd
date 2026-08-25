@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import multihost_utils
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
 from param_decomp.core.ci_fn import (
@@ -122,7 +124,19 @@ def make_ab_grid_step[PreparedT](
 
 @eqx.filter_jit
 def _take_columns(per_prompt: Float[Array, "n_pad n_pos C"], idx: Int[Array, " k"]) -> Array:
-    return jnp.take(per_prompt, idx, axis=2)
+    """The saved columns off the component axis.
+
+    Under explicit axes the component axis carries `tp` while the prompt axis carries
+    `('replicate', 'fsdp')`, and a gather ALONG a sharded axis has no output sharding JAX
+    can infer -- serving it needs collectives, so it refuses rather than guess. Declare the
+    result instead: keep the prompt and position layout, replicate the gathered axis. What
+    comes back goes straight to the host through `process_allgather`, and it is the saved
+    columns only (a few hundred KB), so the all-gather this implies costs nothing next to
+    the forward that produced it."""
+    if jax.sharding.get_abstract_mesh().empty:
+        return jnp.take(per_prompt, idx, axis=2)
+    spec = jax.typeof(per_prompt).sharding.spec
+    return per_prompt.at[:, :, idx].get(out_sharding=P(spec[0], spec[1], None))
 
 
 def saved_indices(mean_ci: np.ndarray, mean_ci_floor: float) -> np.ndarray:
