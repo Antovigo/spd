@@ -54,6 +54,7 @@ from param_decomp.core.placement import (
 )
 from param_decomp.core.precision import COMPUTE_DT, cast_floating
 from param_decomp.vendored_jax.llama import (
+    AttentionImplementation,
     apply_rope,
     attn_implementation,
     rms_norm,
@@ -358,6 +359,16 @@ class MHACIAttention:
     """Every query head carries its own K/V head."""
 
     n_heads: int
+    attention_implementation: AttentionImplementation = "auto"
+    """SDPA backend for the CI fn's OWN attention, authored per run like the target's.
+
+    It is a separate field from `target.attention_implementation` because it is a separate
+    attention: the CI trunk runs at the stream's sequence length over `d_model`, so a run
+    could reasonably want cuDNN for one and not the other. `auto` (upstream's behaviour,
+    and the default) picks cuDNN wherever its flash kernel accepts the shape — which the
+    non-target stream's 64-token length does. On a host whose driver cannot run cuDNN's
+    graph API, that is a hard crash inside `jit_targeted_step`, and setting the TARGET's
+    knob alone does not prevent it: this call chose independently."""
 
     @property
     def n_kv_heads(self) -> int:
@@ -372,6 +383,8 @@ class GQACIAttention:
 
     n_heads: int
     n_kv_heads: int
+    attention_implementation: AttentionImplementation = "auto"
+    """SDPA backend for the CI fn's own attention — see `MHACIAttention`."""
 
     def __post_init__(self) -> None:
         assert self.n_heads % self.n_kv_heads == 0, (
@@ -509,7 +522,9 @@ class CIBlock(eqx.Module):
         # cuDNN flash on GPU (its partitioner requires device-local heads — true here, no
         # head-sharding); XLA elsewhere (CPU tests have no cuDNN). Bidirectional. Fewer K/V
         # heads than query heads is GQA, grouped natively by dot_product_attention.
-        impl = attn_implementation("auto", jax.default_backend(), qt.dtype, t)
+        impl = attn_implementation(
+            self.attention.attention_implementation, jax.default_backend(), qt.dtype, t
+        )
         y = jax.nn.dot_product_attention(qt, kt, vt, is_causal=False, implementation=impl)
         x = x + _ci_linear(
             einops.rearrange(y, "b t nh hd -> b t (nh hd)"),

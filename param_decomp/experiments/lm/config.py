@@ -265,6 +265,11 @@ class MHACiAttentionConfig(BaseConfig):
 
     kind: Literal["mha"] = "mha"
     n_heads: PositiveInt
+    attention_implementation: AttentionImplementation = "auto"
+    """SDPA backend for the CI fn's OWN attention (`target.attention_implementation` is the
+    frozen model's, and does not reach here). `auto` picks cuDNN wherever its flash kernel
+    accepts the shape; a host whose driver cannot run cuDNN's graph API must say `xla` in
+    BOTH places or the step crashes inside `jit_targeted_step`."""
 
 
 class GQACiAttentionConfig(BaseConfig):
@@ -275,6 +280,8 @@ class GQACiAttentionConfig(BaseConfig):
     kind: Literal["gqa"] = "gqa"
     n_heads: PositiveInt
     n_kv_heads: PositiveInt
+    attention_implementation: AttentionImplementation = "auto"
+    """SDPA backend for the CI fn's own attention — see `MHACiAttentionConfig`."""
 
     @model_validator(mode="after")
     def validate_grouping(self) -> Self:
@@ -668,10 +675,15 @@ def _resolve_chunkwise_ci_arch(
     input_dim = sum(grammar.width_of(key) for key in first_chunk_taps)
     match ci.attention:
         case MHACiAttentionConfig():
-            attention = MHACIAttention(n_heads=ci.attention.n_heads)
+            attention = MHACIAttention(
+                n_heads=ci.attention.n_heads,
+                attention_implementation=ci.attention.attention_implementation,
+            )
         case GQACiAttentionConfig():
             attention = GQACIAttention(
-                n_heads=ci.attention.n_heads, n_kv_heads=ci.attention.n_kv_heads
+                n_heads=ci.attention.n_heads,
+                n_kv_heads=ci.attention.n_kv_heads,
+                attention_implementation=ci.attention.attention_implementation,
             )
     return ChunkwiseTransformerCIArch(
         chunks=_resolved_chunks(tree, ci.blocks_per_chunk, ci.input_tap, grammar),
