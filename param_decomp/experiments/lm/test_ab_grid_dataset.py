@@ -8,8 +8,10 @@ layout (a pos/comp axis swap is the bug this catches); and the snapshot write + 
 
 import base64
 import json
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -22,9 +24,10 @@ from param_decomp.core.ci_fn import (
     ci_preactivations,
     lower_leaky_hard_sigmoid,
 )
-from param_decomp.core.components import init_component_stacks
+from param_decomp.core.components import ComponentStacks, init_component_stacks
 from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.tests.test_slow_eval import _build_ci_fn
+from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
     APPLET_FILENAME,
     ABGridSnapshot,
@@ -35,7 +38,7 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
     saved_indices,
     write_ab_grid_snapshot,
 )
-from param_decomp.experiments.lm.ab_grid_operation import resolve_positions
+from param_decomp.experiments.lm.ab_grid_operation import ABGridOperation, resolve_positions
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import capture_clean, tiny_glu_cfg, tiny_glu_decomposed_lm
@@ -376,3 +379,65 @@ def test_dual_snapshot_floor_keeps_hidden_only_components():
         assert cut.saved[site].tolist() == expected.tolist()
         for role in ("output", "hidden"):
             assert cut.ci_columns[role][site].shape[-1] == expected.size
+
+
+class _PoisonedCIFn:
+    """Stands in for `state.decomposition.ci_fn`. Any read at all is the regression."""
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(
+            "the ab-grid operation read state.decomposition.ci_fn; it must consume the eval "
+            f"invocation's placed_ci_fn instead (attribute {name!r})"
+        )
+
+
+@dataclass(frozen=True)
+class _StubDecomposition:
+    components: ComponentStacks
+    ci_fn: object
+
+
+@dataclass(frozen=True)
+class _StubState:
+    decomposition: _StubDecomposition
+
+
+def test_the_grid_operation_consumes_the_invocation_s_placed_ci_fn() -> None:
+    """Regression for run 10631, which died after 3900 healthy steps.
+
+    `ci_preactivations` goes through the CI compute lifecycle, and
+    `materialize_ci_compute_weights` reads `.fn` / `.placement` off a `PlacedCIFn` to
+    rebuild a chunkwise fn's compute weights. The operation used to reach past the eval
+    invocation to `state.decomposition.ci_fn` and hand the RAW fn down, so the first
+    snapshot raised `'ChunkwiseTransformerCIFn' object has no attribute 'fn'`. The grid's
+    schedule carries a `step > 0` guard, so its first firing is `slow_every` — never step
+    0 — which is why a short smoke cannot see it and why this test exists instead.
+
+    The dataset-level tests above all pass a correctly-built `PlacedCIFn`, so they were
+    green both before and after the fix: the untested seam was the OPERATION's wiring.
+    Poisoning the state's raw fn is what pins it — the run must succeed while any read of
+    `state.decomposition.ci_fn` fails loudly.
+    """
+    _cfg, model, ci_fn, C = _tiny_setup()
+    vu = _components()
+    n_prompts = N_A * N_B
+    tokens = jax.random.randint(jax.random.PRNGKey(4), (n_prompts, T), 0, 64)
+    operation = ABGridOperation(
+        step=_grid_step(),
+        model=model,
+        chunks=((tokens, n_prompts),),
+        grid=_grid(),
+        n_prompts=n_prompts,
+        positions=POSITIONS,
+        seq_len=T,
+        mean_ci_floor=0.0,
+        run_dir=Path("/nonexistent"),
+        writes_snapshots=False,
+    )
+    state = _StubState(decomposition=_StubDecomposition(components=vu, ci_fn=_PoisonedCIFn()))
+
+    record = operation.run(cast(TrainState, cast(object, state)), 0, ci_fn)
+
+    assert record["eval/ab_grids/saved_components/total"] == float(len(model.site_names) * C), (
+        "a zero floor keeps every component, so the total is the full component count"
+    )
