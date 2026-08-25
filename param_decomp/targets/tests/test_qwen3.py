@@ -195,9 +195,11 @@ def test_qk_norm_is_load_bearing():
 
     attn = model.stacked.attn
     assert isinstance(attn, Qwen3FrozenAttn)
-    assert attn.q_norm.shape == (cfg.n_layer, cfg.head_dim)
+    assert attn.q_norm.shape == (len(model.span_layers), cfg.head_dim)
     # scale ONLY layer 4's q_norm so the residual ENTERING layer 4 stays untouched
-    scaled = eqx.tree_at(lambda m: m.stacked.attn.q_norm, model, attn.q_norm.at[4].mul(2.0))
+    # `stacked` holds the decomposed SPAN, so index layer 4 relative to its first block.
+    span_idx = 4 - model.split_layer
+    scaled = eqx.tree_at(lambda m: m.stacked.attn.q_norm, model, attn.q_norm.at[span_idx].mul(2.0))
     assert not jnp.allclose(run_clean(model, tokens), run_clean(scaled, tokens), atol=1e-4)
 
     qkv_input = attention_input_tap_key(4)

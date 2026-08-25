@@ -38,7 +38,7 @@ from param_decomp.experiments.lm.resolved import (
 )
 from param_decomp.infra import pretrain_cache
 from param_decomp.targets import llama_simple_mlp
-from param_decomp.targets.glu_transformer import GLUDecomposedModel, glu_site_specs
+from param_decomp.targets.glu_transformer import GLUDecomposedModel, GLULayer, glu_site_specs
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
 LMCIFn = ChunkwiseTransformerCIFn | GlobalMLPCIFn
@@ -48,8 +48,20 @@ def _with_attention_implementation(
     model: GLUDecomposedModel,
     implementation: AttentionImplementation,
 ) -> GLUDecomposedModel:
-    attn = replace(model.stacked.attn, implementation=implementation)
-    return replace(model, stacked=replace(model.stacked, attn=attn))
+    def retarget(stack: GLULayer | None) -> GLULayer | None:
+        if stack is None:
+            return None
+        return replace(stack, attn=replace(stack.attn, implementation=implementation))
+
+    # All three frozen stacks: the prefix and tail run the same attention as the span, and
+    # a backend set on only one of them is a mixed model that fails where it is least
+    # expected (the prefix, before any decomposed block).
+    return replace(
+        model,
+        stacked=retarget(model.stacked),
+        stacked_prefix=retarget(model.stacked_prefix),
+        stacked_tail=retarget(model.stacked_tail),
+    )
 
 
 def load_target(target: AnyLMTargetConfig, data_root: Path) -> GLUDecomposedModel:

@@ -284,7 +284,12 @@ def test_no_capture_wrapper_lowers_to_the_compact_clean_graph():
             return residual, None
 
         residual = m.embed_tokens(x, None)
-        residual, _ = jax.lax.scan(block, residual, m.stacked)
+        # The same stored stacks, in the same order — the frozen weights live in up to
+        # three (prefix / span / tail), so a one-scan oracle would lower differently for
+        # a reason that has nothing to do with capture wrapping.
+        for stack in (m.stacked_prefix, m.stacked, m.stacked_tail):
+            if stack is not None:
+                residual, _ = jax.lax.scan(block, residual, stack)
         residual = rms_norm(residual, m.norm, m.eps)
         return residual @ m.head_weight.T
 
