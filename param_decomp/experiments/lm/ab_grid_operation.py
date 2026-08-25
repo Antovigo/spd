@@ -9,7 +9,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from param_decomp.core.built_run import TargetSites
-from param_decomp.core.ci_fn import CIRole
+from param_decomp.core.ci_fn import CIRole, PlacedCIFn
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
 from param_decomp.core.model import CaptureKeys, PlacedModel
@@ -73,12 +73,12 @@ class ABGridOperation:
     """Process 0 writes the snapshot; every rank joins the collective pass and reports the
     same scalars."""
 
-    def run(self, state: TrainState, now_step: int) -> LogRecord:
+    def run(self, state: TrainState, now_step: int, placed_ci_fn: PlacedCIFn) -> LogRecord:
         snapshot = collect_ab_grid_snapshot(
             self.step,
             self.model,
             state.decomposition.components,
-            state.decomposition.ci_fn,
+            placed_ci_fn,
             self.chunks,
             self.n_prompts,
             self.mean_ci_floor,
@@ -148,6 +148,11 @@ def make_ab_grid_operation(
     )
 
     def run(context: LMEvalContext) -> LogRecord:
-        return operation.run(context.state, context.now_step)
+        # `placed_ci_fn`, never `state.decomposition.ci_fn`: post-#1000 the CI compute
+        # lifecycle (`materialize_ci_compute_weights`) needs the resolved placement to
+        # reconstruct chunk weights, and `EvalInvocation` is what carries it. Reaching past
+        # it to the raw fn is what killed run 10631 at step 4000 —
+        # `'ChunkwiseTransformerCIFn' object has no attribute 'fn'`.
+        return operation.run(context.state, context.now_step, context.placed_ci_fn)
 
     return EvalOperation(schedule=schedule, run=run)
