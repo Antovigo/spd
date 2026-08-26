@@ -31,6 +31,7 @@ from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
     APPLET_FILENAME,
     ABGridSnapshot,
+    _take_columns,
     ab_grid_payload,
     collect_ab_grid_snapshot,
     encode_ci_u8,
@@ -441,3 +442,39 @@ def test_the_grid_operation_consumes_the_invocation_s_placed_ci_fn() -> None:
     assert record["eval/ab_grids/saved_components/total"] == float(len(model.site_names) * C), (
         "a zero floor keeps every component, so the total is the full component count"
     )
+
+
+@pytest.mark.multidevice
+def test_take_columns_gathers_across_a_tp_sharded_component_axis() -> None:
+    """Regression for the second failure of run 10654, and the one CPU test that can see it.
+
+    The snapshot's per-prompt grids are sharded with the prompt axis over
+    `('replicate', 'fsdp')` and the COMPONENT axis over `tp`. The saved-column gather runs
+    along that component axis, and a gather along a sharded axis needs collectives, so
+    under explicit axes JAX refuses to infer an output sharding rather than guess:
+
+        ShardingTypeError: Use `.at[...].get(out_sharding=)` ...
+        Got operand=ShapedArray(float32[1000@(replicate,fsdp),1,512@tp]),
+            indices=ShapedArray(int32[128,1])
+
+    Every other test in this file runs unsharded, where `jnp.take` is perfectly happy, so
+    this class of bug is invisible to them — it reached production twice. Run it with
+    `make test-multidevice`.
+    """
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    from param_decomp.core.sharding import hsdp_mesh
+
+    n = jax.device_count()
+    assert n % 2 == 0, f"needs an even device count, got {n}"
+    mesh = hsdp_mesh(n // 2, 1, 2)  # tp=2 is what puts the component axis on a sharded axis
+    n_pad, n_pos, C = 4 * (n // 2), 2, 8
+    data = jnp.arange(n_pad * n_pos * C, dtype=jnp.float32).reshape(n_pad, n_pos, C)
+    idx = jnp.asarray([1, 5, 2, 2])  # unsorted, with a repeat, as `np.pad(..., "edge")` gives
+    expected = np.take(np.asarray(data), np.asarray(idx), axis=2)
+
+    with jax.set_mesh(mesh):
+        sharded = jax.device_put(data, NamedSharding(mesh, P(("replicate", "fsdp"), None, "tp")))
+        out = _take_columns(sharded, idx)
+        np.testing.assert_array_equal(np.asarray(out), expected)
