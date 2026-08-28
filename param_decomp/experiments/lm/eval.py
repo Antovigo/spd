@@ -11,8 +11,12 @@ permutation/UV figures) ride the in-loop SLOW tier instead — natively in JAX
 Variant semantics mirror `param_decomp/eval_metrics/ce_and_kl_losses.py`: each
 variant is a masked forward with ALL sites live and no routing; only `stoch_masked`
 carries a weight-delta mask (torch `make_mask_infos` without weight deltas drops the
-delta term — delta mask 0 here). CE is next-token cross-entropy with the first label
-ignored; KL is per-position vs the clean (frozen) logits.
+delta term — delta mask 0 here). On a targeted run's NON-TARGET stream the steps are
+built `delta_pinned` instead (SPEC T4): every variant composes its weight-delta masks
+fully on — except `unmasked`, the enumerated delta-off exception — matching the
+training forwards that pin the delta escape valve open off-target. CE is next-token
+cross-entropy with the first label ignored; KL is per-position vs the clean (frozen)
+logits.
 
 Cross-batch aggregation (the multi-`n_steps` eval pass in `run.py`): every key this
 function returns is a per-BATCH scalar that the caller averages uniformly over the
@@ -209,8 +213,10 @@ def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
 
 
 type MaskingArm = Literal["ci_masked", "unmasked"]
-"""A masking arm authorable as an eval on its own. Both pin every weight-delta mask to
-zero."""
+"""A masking arm authorable as an eval on its own. `unmasked` pins every weight-delta
+mask to zero unconditionally — it names the `UnmaskedNoDeltaReconLoss` construction,
+SPEC T4's enumerated delta-off exception. `ci_masked` pins to zero under plain
+semantics and to one when built `delta_pinned`."""
 
 
 def make_masked_kl_step[PreparedT](
@@ -222,11 +228,14 @@ def make_masked_kl_step[PreparedT](
     *,
     n_valid_rows: int | None = None,
     role: CIRole = "output",
+    delta_pinned: bool = False,
 ) -> ScalarStep:
     """KL against the target output under ONE masking arm — one clean forward, one masked.
 
     The key is the spelling `CEandKLLosses` reports this arm under, so the two are one
-    quantity under one name."""
+    quantity under one name. `delta_pinned` (SPEC T4, amended 2026-08-28: a targeted
+    run's non-target stream) composes the `ci_masked` arm's weight-delta masks as 1.0;
+    the `unmasked` arm is T4's enumerated delta-off exception and ignores it."""
     assert model_static.has_position_axis, "masked KL is LM-only and requires a position axis"
 
     def eval_step(
@@ -243,10 +252,14 @@ def make_masked_kl_step[PreparedT](
         match arm:
             case "ci_masked":
                 masks = batch.ci_lower
+                delta_value = 1.0 if delta_pinned else 0.0
             case "unmasked":
                 masks = {site: jnp.ones_like(batch.ci_lower[site]) for site in model.site_names}
-        zeros_delta = {site: jnp.zeros(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
-        logits = _compute_masked_output(model, batch, masks, zeros_delta, mesh, frozenset())
+                delta_value = 0.0
+        delta = {
+            site: jnp.full(batch.tokens.shape, delta_value, COMPUTE_DT) for site in model.site_names
+        }
+        logits = _compute_masked_output(model, batch, masks, delta, mesh, frozenset())
         return {f"ce_kl/kl_{arm}": _kl(batch, logits)}
 
     return filter_jit(eval_step, compiler_options=compiler_options)
@@ -260,8 +273,14 @@ def make_ce_kl_step[PreparedT](
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
+    delta_pinned: bool = False,
 ) -> ScalarStep:
-    """Build the single-purpose CE/KL evaluator."""
+    """Build the single-purpose CE/KL evaluator.
+
+    `delta_pinned` (SPEC T4, amended 2026-08-28: a targeted run's non-target stream)
+    composes every variant's weight-delta masks as 1.0 — `stoch_masked` pins instead of
+    drawing `U[0,1]` — except `unmasked`, the enumerated delta-off exception, whose
+    component sum must reconstruct alone."""
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
 
     def eval_step(
@@ -275,6 +294,8 @@ def make_ce_kl_step[PreparedT](
             model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
         )
         zeros_delta = {site: jnp.zeros(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
+        ones_delta = {site: jnp.ones(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
+        variant_delta = ones_delta if delta_pinned else zeros_delta
         stoch_key, random_key, _ = random.split(key, 3)
         stochastic_masks: dict[str, Array] = {}
         stochastic_deltas: dict[str, Array] = {}
@@ -282,13 +303,17 @@ def make_ce_kl_step[PreparedT](
             ci = batch.ci_lower[site]
             source = random.uniform(random.fold_in(stoch_key, site_idx), ci.shape, COMPUTE_DT)
             stochastic_masks[site] = ci + (1.0 - ci) * source
-            stochastic_deltas[site] = random.uniform(
-                random.fold_in(stoch_key, len(model.site_names) + site_idx),
-                batch.tokens.shape,
-                COMPUTE_DT,
+            stochastic_deltas[site] = (
+                ones_delta[site]
+                if delta_pinned
+                else random.uniform(
+                    random.fold_in(stoch_key, len(model.site_names) + site_idx),
+                    batch.tokens.shape,
+                    COMPUTE_DT,
+                )
             )
         variants = {
-            "ci_masked": (batch.ci_lower, zeros_delta),
+            "ci_masked": (batch.ci_lower, variant_delta),
             "unmasked": (
                 {site: jnp.ones_like(batch.ci_lower[site]) for site in model.site_names},
                 zeros_delta,
@@ -301,18 +326,18 @@ def make_ce_kl_step[PreparedT](
                     )
                     for site_idx, site in enumerate(model.site_names)
                 },
-                zeros_delta,
+                variant_delta,
             ),
             "rounded_masked": (
                 {
                     site: (batch.ci_lower[site] > rounding_threshold).astype(COMPUTE_DT)
                     for site in model.site_names
                 },
-                zeros_delta,
+                variant_delta,
             ),
             "zero_masked": (
                 {site: jnp.zeros_like(batch.ci_lower[site]) for site in model.site_names},
-                zeros_delta,
+                variant_delta,
             ),
         }
         variant_logits = {

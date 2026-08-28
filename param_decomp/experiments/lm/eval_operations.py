@@ -155,7 +155,9 @@ def make_lm_evaluation(
         schedule = schedule_for(metric, eval)
         match metric:
             case CEandKLLossesConfig():
-                return per_stream(make_ce_kl_operation, metric, schedule, data_streams)
+                return per_stream(
+                    partial(make_ce_kl_operation, targeted=targeted), metric, schedule, data_streams
+                )
             case CIMaskedReconLossConfig():
                 # CEandKLLosses already emits the output-role arm under the same
                 # `ce_kl/kl_ci_masked` key; keep only the roles it cannot measure.
@@ -165,12 +167,19 @@ def make_lm_evaluation(
                     else ci_roles
                 )
                 return per_stream(
-                    make_masked_kl_operation, "ci_masked", schedule, data_streams, masked_roles
+                    partial(make_masked_kl_operation, targeted=targeted),
+                    "ci_masked",
+                    schedule,
+                    data_streams,
+                    masked_roles,
                 )
             case UnmaskedNoDeltaReconLossConfig():
                 # The nontarget pass's own training term, already reported there as a loss.
                 return per_stream(
-                    make_masked_kl_operation, "unmasked", schedule, (optimized_stream,)
+                    partial(make_masked_kl_operation, targeted=targeted),
+                    "unmasked",
+                    schedule,
+                    (optimized_stream,),
                 )
             case CI_L0Config():
                 return per_stream(make_ci_l0_operation, metric, schedule, data_streams, ci_roles)

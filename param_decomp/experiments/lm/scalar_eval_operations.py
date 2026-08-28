@@ -45,6 +45,15 @@ def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
             return context.target_batches
 
 
+def nontarget_delta_pinned(*, targeted: bool, stream: Stream) -> bool:
+    """A targeted run's NON-TARGET stream recon evals compose delta-pinned (SPEC T4,
+    amended 2026-08-20 for the fresh-PGD probe, 2026-08-28 for the CE/KL family): every
+    non-target forward keeps the delta escape valve fully on, so what is measured is the
+    component-only quantity training actually defends. On a plain run, "nontarget" IS
+    the ordinary stream and the plain delta semantics stand."""
+    return targeted and stream == "nontarget"
+
+
 def role_log_segment(role: CIRole) -> str:
     """The CI-role namespace segment. EMPTY for `output`, so a single-role run's keys — and a
     dual run's output-role keys — are exactly what every previous run logged; the hidden role
@@ -114,11 +123,20 @@ def make_ce_kl_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
     role: CIRole,
+    *,
+    targeted: bool,
 ) -> EvalOperation[LMEvalContext]:
     assert role == "output", "CE/KL's step reads the output head's CI; it has no hidden-role form"
     return _make_scalar_operation(
         schedule,
-        make_ce_kl_step(model, ci_capture_keys, metric.rounding_threshold, mesh, compiler_options),
+        make_ce_kl_step(
+            model,
+            ci_capture_keys,
+            metric.rounding_threshold,
+            mesh,
+            compiler_options,
+            delta_pinned=nontarget_delta_pinned(targeted=targeted, stream=stream),
+        ),
         ("ce_kl/",),
         model,
         run_key,
@@ -141,12 +159,22 @@ def make_masked_kl_operation(
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
     role: CIRole,
+    *,
+    targeted: bool,
 ) -> EvalOperation[LMEvalContext]:
     """ONE masking arm, authored as the loss config that names the same construction —
     `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss`, as `PGDReconLoss` already is."""
     return _make_scalar_operation(
         schedule,
-        make_masked_kl_step(model, ci_capture_keys, arm, mesh, compiler_options, role=role),
+        make_masked_kl_step(
+            model,
+            ci_capture_keys,
+            arm,
+            mesh,
+            compiler_options,
+            role=role,
+            delta_pinned=nontarget_delta_pinned(targeted=targeted, stream=stream),
+        ),
         (f"ce_kl/kl_{arm}",),
         model,
         run_key,
@@ -236,11 +264,9 @@ def make_fresh_pgd_operation(
         step_size=metric.step_size,
         reconstruction=resolve_reconstruction_spec(metric.hidden_acts_reconstruction),
     )
-    # A targeted run's NON-TARGET stream probe is delta-pinned (SPEC T4, amended
-    # 2026-08-20): every non-target forward keeps the delta escape valve fully on, so
-    # the worst case measured is the component-only one training actually defends. On a
-    # plain run, "nontarget" IS the ordinary stream and the delta stays attackable.
-    delta_pinned = targeted and stream == "nontarget"
+    # Unpinned (plain run / target stream), the probe's ascent owns a live delta channel
+    # it can drive to 0 — pinned, it measures the component-only worst case.
+    delta_pinned = nontarget_delta_pinned(targeted=targeted, stream=stream)
     return _make_scalar_operation(
         schedule,
         make_fresh_pgd_step(
