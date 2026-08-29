@@ -636,9 +636,27 @@ def _init_or_restore_state(
         # parent↔new structural-compat check (sites + ci-fn arch) runs lab-side in the LM
         # composition root before this engine is entered.
         prov = run.resume_provenance
+
+        def _mem(tag: str) -> None:
+            # DIAGNOSTIC for the fine-tune OOM (runs 10721/10846/10849): name the init
+            # phase that carries the extra ~15.3 GiB the from-scratch path does not.
+            if is_main:
+                st = jax.local_devices()[0].memory_stats() or {}
+                used = st.get("bytes_in_use", 0) / 2**30
+                peak = st.get("peak_bytes_in_use", 0) / 2**30
+                lim = st.get("bytes_limit", 0) / 2**30
+                print(
+                    f"[ft-mem] {tag}: in_use={used:.2f}GiB peak={peak:.2f}GiB limit={lim:.2f}GiB",
+                    flush=True,
+                )
+
+        _mem("before init_from_parent")
         state = init_from_parent(prov.parent_run_dir / "ckpts", prov.parent_step, state)
+        jax.block_until_ready(state.decomposition)
+        _mem("after init_from_parent")
         if checkpoint_manager is not None and not isinstance(profiling, JaxProfilerTrace):
             save_state(checkpoint_manager, 0, state)
+        _mem("after step-0 save")
         if is_main:
             print(
                 f"fine-tune: initialized V/U + ci_fn from {prov.parent_run_dir} "
