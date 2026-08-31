@@ -310,8 +310,15 @@ eval:
       n_steps: 20
       step_size: 0.1
       n_batches: 4
-    - type: CIHistograms
-      n_batches_accum: 1
+    # NO CIHistograms. Upstream #1000 added an assertion in `slow_eval.py`
+    # (`accumulate_site_reductions`) that its two value histograms bin against each batch's
+    # own min/max, so counts from more than ONE eval batch cannot be summed — and
+    # `n_batches_accum: 1` does NOT cap the batch list that function receives; it only
+    # constrains what the op may accumulate. At `eval.n_steps: 10` the metric therefore
+    # kills the run in its FIRST slow eval pass. p-5b7fa697 carried it happily pre-merge,
+    # where the assertion did not exist. Dropping it is the same call the migrated
+    # nlcontrol config made. To keep it, `eval.n_steps` must be 1, which would rewrite
+    # every other metric's statistics — not worth it for two histograms.
     - type: CIHiddenActsReconLoss
     - type: TwoStreamCIMeanPerComponent
     - type: WeightMagnitude
