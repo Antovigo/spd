@@ -10,19 +10,22 @@ from pathlib import Path
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import multihost_utils
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Array, Float, Int
 
 from param_decomp.core.ci_fn import (
     DUAL_CI_ROLES,
     CIRole,
+    PlacedCIFn,
     ci_preactivations,
     lower_leaky_hard_sigmoid,
 )
 from param_decomp.core.components import ComponentStacks
-from param_decomp.core.model import CaptureKeys, DecomposedModel, prepare_compute_weights
+from param_decomp.core.model import CaptureKeys, PlacedModel, prepare_compute_weights
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
 
 AB_GRIDS_DIR = "ab_grids"
@@ -35,7 +38,7 @@ MANIFEST_VAR = "AB_GRIDS_MANIFEST"
 GATHER_INDEX_MULTIPLE = 64
 
 ABGridStep = Callable[
-    [DecomposedModel, ComponentStacks, Any, Int[Array, "n_pad T"], Array],
+    [PlacedModel, ComponentStacks, PlacedCIFn, Int[Array, "n_pad T"], Array],
     tuple[dict[CIRole, dict[str, Array]], dict[str, Array], dict[CIRole, dict[str, Array]]],
 ]
 """`(model, components, ci_fn, tokens, n_valid_rows) -> ({site: CI}, {site: inner}, {site:
@@ -48,7 +51,7 @@ fewer real rows."""
 
 
 def make_ab_grid_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
+    model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     positions: tuple[int, ...],
     roles: tuple[CIRole, ...] = ("output",),
@@ -67,9 +70,9 @@ def make_ab_grid_step[PreparedT](
     # `model_static`; all array access goes through the traced `model` arg.
     @eqx.filter_jit
     def step(
-        model: DecomposedModel[PreparedT],
+        model: PlacedModel[PreparedT],
         components: ComponentStacks,
-        ci_fn: Any,
+        placed_ci_fn: PlacedCIFn,
         tokens: Int[Array, "n_pad T"],
         n_valid_rows: Array,
     ) -> tuple[dict[CIRole, dict[str, Array]], dict[str, Array], dict[CIRole, dict[str, Array]]]:
@@ -78,10 +81,12 @@ def make_ab_grid_step[PreparedT](
             prepared_weights, tokens, capture_keys=ci_capture_keys
         )
         # Every role off the ONE frozen forward: the CI fn's trunk runs once and the heads
-        # are separate readouts of it (S36), so a dual snapshot costs no extra forward — only
+        # are separate readouts of it (S37), so a dual snapshot costs no extra forward — only
         # the second head's `[d_model, C]` matmul and its grids.
         preactivations_by_role: dict[CIRole, dict[str, Array]] = {
-            role: ci_preactivations(ci_fn, clean_forward_result.captures, remat=False, role=role)
+            role: ci_preactivations(
+                placed_ci_fn, clean_forward_result.captures, remat=False, role=role
+            )
             for role in roles
         }
         first = preactivations_by_role[roles[0]]
@@ -119,7 +124,19 @@ def make_ab_grid_step[PreparedT](
 
 @eqx.filter_jit
 def _take_columns(per_prompt: Float[Array, "n_pad n_pos C"], idx: Int[Array, " k"]) -> Array:
-    return jnp.take(per_prompt, idx, axis=2)
+    """The saved columns off the component axis.
+
+    Under explicit axes the component axis carries `tp` while the prompt axis carries
+    `('replicate', 'fsdp')`, and a gather ALONG a sharded axis has no output sharding JAX
+    can infer -- serving it needs collectives, so it refuses rather than guess. Declare the
+    result instead: keep the prompt and position layout, replicate the gathered axis. What
+    comes back goes straight to the host through `process_allgather`, and it is the saved
+    columns only (a few hundred KB), so the all-gather this implies costs nothing next to
+    the forward that produced it."""
+    if jax.sharding.get_abstract_mesh().empty:
+        return jnp.take(per_prompt, idx, axis=2)
+    spec = jax.typeof(per_prompt).sharding.spec
+    return per_prompt.at[:, :, idx].get(out_sharding=P(spec[0], spec[1], None))
 
 
 def saved_indices(mean_ci: np.ndarray, mean_ci_floor: float) -> np.ndarray:
@@ -149,9 +166,9 @@ class ABGridSnapshot:
 
 def collect_ab_grid_snapshot(
     step: ABGridStep,
-    model: DecomposedModel,
+    model: PlacedModel,
     components: ComponentStacks,
-    ci_fn: Any,
+    placed_ci_fn: PlacedCIFn,
     chunks: tuple[tuple[Int[Array, "n_pad T"], int], ...],
     n_prompts: int,
     mean_ci_floor: float,
@@ -175,7 +192,7 @@ def collect_ab_grid_snapshot(
     ci_totals: dict[CIRole, dict[str, np.ndarray]] = {}
     for chunk_tokens, chunk_valid_rows in chunks:
         ci, inner, chunk_sum = step(
-            model, components, ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
+            model, components, placed_ci_fn, chunk_tokens, jnp.asarray(chunk_valid_rows)
         )
         per_chunk.append((ci, inner, chunk_valid_rows))
         for role, role_sum in chunk_sum.items():
@@ -272,7 +289,7 @@ def ab_grid_payload(
     activations to f16; the mean-CI vectors stay fp32."""
     # The applet keys the OUTPUT role's arrays on the historical names (`mean_ci`, `ci`) and
     # the hidden role's on `*_hidden`, so a single-role payload stays byte-compatible with
-    # every snapshot written before S36 and the applet's own pre-dual fallback still applies.
+    # every snapshot written before S37 and the applet's own pre-dual fallback still applies.
     # Canonical role ORDER, not the snapshot dict's: JAX sorts dict keys when it flattens a
     # pytree, so the step's `{output, hidden}` comes back from the jit alphabetized. The
     # payload fields are keyed explicitly either way, but `ci_roles` is read by eye.

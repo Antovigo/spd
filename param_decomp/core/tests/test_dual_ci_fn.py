@@ -1,4 +1,4 @@
-"""The dual (shared-trunk) CI fn: two readout heads over ONE trunk (SPEC S36).
+"""The dual (shared-trunk) CI fn: two readout heads over ONE trunk (SPEC S37).
 
 The claim these pin is that the trunk is shared BY CONSTRUCTION — it appears once in the
 pytree, so one `eqx.filter_vjp` pullback with a `DualCI` cotangent returns a trunk gradient
@@ -34,8 +34,8 @@ from param_decomp.core.components import SiteSpec
 
 D_TAP = 8
 SITES = (
-    SiteSpec(name="s0", d_in=D_TAP, d_out=4, C=3),
-    SiteSpec(name="s1", d_in=D_TAP, d_out=4, C=5),
+    SiteSpec(name="s0", d_in=D_TAP, d_out=4, C=3, group="s0"),
+    SiteSpec(name="s1", d_in=D_TAP, d_out=4, C=5, group="s1"),
 )
 
 
@@ -89,7 +89,7 @@ def test_single_role_returns_bare_ci_and_refuses_the_hidden_head(
     wiring bug rather than a silent fallback to the output one."""
     ci_fn = build_ci_fn(arch_of(), SITES, jax.random.key(0))
     assert not is_dual(ci_fn) and ci_fn.roles == ("output",)
-    ci = ci_fn(taps_of(), remat=False)
+    ci = ci_fn(taps_of(), remat=False, placement=None)
     assert isinstance(ci, CI)
     assert ci_for_role(ci, "output") is ci
     with pytest.raises(AssertionError, match="no 'hidden' head"):
@@ -102,7 +102,7 @@ def test_dual_returns_two_distinct_bundles_over_every_site(
 ) -> None:
     ci_fn = build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
     assert is_dual(ci_fn) and ci_fn.roles == DUAL_CI_ROLES
-    ci = ci_fn(taps_of(), remat=False)
+    ci = ci_fn(taps_of(), remat=False, placement=None)
     assert isinstance(ci, DualCI)
     for role in DUAL_CI_ROLES:
         bundle = ci_for_role(ci, role)
@@ -126,7 +126,7 @@ def test_trunk_gradient_is_the_sum_of_the_two_objectives(arch_of: ArchOf, taps_o
     ci_fn = build_ci_fn(arch, SITES, jax.random.key(0))
 
     def run(cf: CIFn) -> DualCI:
-        result = cf(taps, remat=False)
+        result = cf(taps, remat=False, placement=None)
         assert isinstance(result, DualCI)
         return result
 
@@ -175,8 +175,8 @@ def test_dual_init_leaves_the_trunk_and_output_head_bit_identical(
     single = build_ci_fn(arch, SITES, jax.random.key(0))
     dual = build_ci_fn(arch_of(dual=True), SITES, jax.random.key(0))
 
-    single_ci = single(taps, remat=False)
-    dual_ci = dual(taps, remat=False)
+    single_ci = single(taps, remat=False, placement=None)
+    dual_ci = dual(taps, remat=False, placement=None)
     assert isinstance(single_ci, CI) and isinstance(dual_ci, DualCI)
     for site in SITES:
         assert jnp.array_equal(

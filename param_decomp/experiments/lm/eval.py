@@ -51,14 +51,15 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIFn, CIRole, evaluate_ci_role
+from param_decomp.core.ci_fn import CIRole, PlacedCIFn, evaluate_ci_role
 from param_decomp.core.ci_l0_eval import ci_l0_scalars, resolve_site_groups
 from param_decomp.core.components import ComponentStacks
+from param_decomp.core.decomposed_linear import constrain_component_activation
 from param_decomp.core.jit_util import filter_jit
+from param_decomp.core.linear_plan import uniform_like
 from param_decomp.core.losses import (
     ReconstructionLoss,
     reconstruction_loss,
@@ -68,8 +69,8 @@ from param_decomp.core.masking import masks_from_sources, persistent_delta_pinne
 from param_decomp.core.model import (
     EMPTY_CAPTURE_KEYS,
     CaptureKeys,
-    DecomposedModel,
     MaterializedMasking,
+    PlacedModel,
     prepare_compute_weights,
     select_captures,
 )
@@ -80,7 +81,7 @@ from param_decomp.core.sharding import batch_shard_leading
 from param_decomp.targets.losses import kl_per_position
 
 type ScalarStep = Callable[
-    [DecomposedModel, ComponentStacks, CIFn, Array, PRNGKeyArray], Mapping[str, Array]
+    [PlacedModel, ComponentStacks, PlacedCIFn, Array, PRNGKeyArray], Mapping[str, Array]
 ]
 
 
@@ -138,9 +139,9 @@ class _PreparedLMBatch[PreparedT]:
 
 
 def _prepare_lm_batch[PreparedT](
-    model: DecomposedModel[PreparedT],
+    model: PlacedModel[PreparedT],
     components: ComponentStacks,
-    ci_fn: CIFn,
+    placed_ci_fn: PlacedCIFn,
     token_ids: Int[Array, "B T"],
     mesh: Mesh | None,
     n_valid_rows: int | None,
@@ -160,30 +161,27 @@ def _prepare_lm_batch[PreparedT](
         hidden_acts_capture_keys=activation_capture_keys,
         mesh=mesh,
     )
-    ci_lower = evaluate_ci_role(ci_fn, ci_input_activations, remat=False, role=role).lower
-    if mesh is not None:
-        sharding = NamedSharding(
-            mesh, P(("replicate", "fsdp"), *((None,) * (tokens.ndim - 1)), None)
-        )
-        ci_lower = {
-            site: jax.lax.with_sharding_constraint(value, sharding)
-            for site, value in ci_lower.items()
-        }
+    ci_lower = evaluate_ci_role(placed_ci_fn, ci_input_activations, remat=False, role=role).lower
+    ci_lower = {
+        site: constrain_component_activation(value, model.placement)
+        for site, value in ci_lower.items()
+    }
     valid_row_mask = None
     if n_valid_rows is not None:
         assert n_valid_rows <= tokens.shape[0], (n_valid_rows, tokens.shape)
         valid_row_mask = (jnp.arange(tokens.shape[0]) < n_valid_rows).astype(jnp.float32)
+    prepared_weights = prepare_compute_weights(model, components)
     return _PreparedLMBatch(
         tokens=tokens,
         clean=clean,
-        prepared_weights=prepare_compute_weights(model, components),
+        prepared_weights=prepared_weights,
         ci_lower=ci_lower,
         valid_row_mask=valid_row_mask,
     )
 
 
 def _compute_masked_output[PreparedT](
-    model: DecomposedModel[PreparedT],
+    model: PlacedModel[PreparedT],
     batch: _PreparedLMBatch[PreparedT],
     masks: dict[str, Array],
     delta_masks: dict[str, Array],
@@ -220,7 +218,7 @@ semantics and to one when built `delta_pinned`."""
 
 
 def make_masked_kl_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
+    model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     arm: MaskingArm,
     mesh: Mesh | None = None,
@@ -239,15 +237,22 @@ def make_masked_kl_step[PreparedT](
     assert model_static.has_position_axis, "masked KL is LM-only and requires a position axis"
 
     def eval_step(
-        model: DecomposedModel[PreparedT],
+        model: PlacedModel[PreparedT],
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         del key  # neither arm draws masks
         batch = _prepare_lm_batch(
-            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys, role=role
+            model,
+            components,
+            placed_ci_fn,
+            token_ids,
+            mesh,
+            n_valid_rows,
+            ci_capture_keys,
+            role=role,
         )
         match arm:
             case "ci_masked":
@@ -266,7 +271,7 @@ def make_masked_kl_step[PreparedT](
 
 
 def make_ce_kl_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
+    model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     rounding_threshold: float,
     mesh: Mesh | None = None,
@@ -284,32 +289,49 @@ def make_ce_kl_step[PreparedT](
     assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
 
     def eval_step(
-        model: DecomposedModel[PreparedT],
+        model: PlacedModel[PreparedT],
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         batch = _prepare_lm_batch(
-            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+            model,
+            components,
+            placed_ci_fn,
+            token_ids,
+            mesh,
+            n_valid_rows,
+            ci_capture_keys,
         )
-        zeros_delta = {site: jnp.zeros(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
-        ones_delta = {site: jnp.ones(batch.tokens.shape, COMPUTE_DT) for site in model.site_names}
+        # Every mask source draws via `uniform_like` (never a bare `random.uniform`): a
+        # bare draw lowers REPLICATED under the Explicit mesh, and the masked forward
+        # stacks masks per kind into `[n_layers, B, T, C]` scan inputs — replicated, that
+        # stack held the FULL eval batch on every rank (112 GiB per big kind at the 32L
+        # production shape). Threefry is counter-based, so the sharded draw is
+        # value-identical (SPEC D4). The delta constants follow the same rule via
+        # `*_like` on the (sharded) token array.
+        zeros_delta = {
+            site: jnp.zeros_like(batch.tokens, dtype=COMPUTE_DT) for site in model.site_names
+        }
+        ones_delta = {
+            site: jnp.ones_like(batch.tokens, dtype=COMPUTE_DT) for site in model.site_names
+        }
         variant_delta = ones_delta if delta_pinned else zeros_delta
         stoch_key, random_key, _ = random.split(key, 3)
         stochastic_masks: dict[str, Array] = {}
         stochastic_deltas: dict[str, Array] = {}
         for site_idx, site in enumerate(model.site_names):
             ci = batch.ci_lower[site]
-            source = random.uniform(random.fold_in(stoch_key, site_idx), ci.shape, COMPUTE_DT)
+            source = uniform_like(random.fold_in(stoch_key, site_idx), ci)
             stochastic_masks[site] = ci + (1.0 - ci) * source
             stochastic_deltas[site] = (
                 ones_delta[site]
                 if delta_pinned
-                else random.uniform(
+                else uniform_like(
                     random.fold_in(stoch_key, len(model.site_names) + site_idx),
-                    batch.tokens.shape,
-                    COMPUTE_DT,
+                    ci,
+                    drop_last_axis=True,
                 )
             )
         variants = {
@@ -321,9 +343,7 @@ def make_ce_kl_step[PreparedT](
             "stoch_masked": (stochastic_masks, stochastic_deltas),
             "random_masked": (
                 {
-                    site: random.uniform(
-                        random.fold_in(random_key, site_idx), batch.ci_lower[site].shape, COMPUTE_DT
-                    )
+                    site: uniform_like(random.fold_in(random_key, site_idx), batch.ci_lower[site])
                     for site_idx, site in enumerate(model.site_names)
                 },
                 variant_delta,
@@ -361,7 +381,7 @@ def make_ce_kl_step[PreparedT](
 
 
 def make_ci_l0_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
+    model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     ci_alive_threshold: float,
     groups: dict[str, tuple[str, ...]] | None,
@@ -377,15 +397,22 @@ def make_ci_l0_step[PreparedT](
     resolved_groups = resolve_site_groups(model_static.site_names, groups)
 
     def eval_step(
-        model: DecomposedModel[PreparedT],
+        model: PlacedModel[PreparedT],
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         del key
         batch = _prepare_lm_batch(
-            model, components, ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys, role=role
+            model,
+            components,
+            placed_ci_fn,
+            token_ids,
+            mesh,
+            n_valid_rows,
+            ci_capture_keys,
+            role=role,
         )
 
         def mean(value: Array) -> Array:
@@ -401,7 +428,7 @@ def make_ci_l0_step[PreparedT](
 
 
 def make_fresh_pgd_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
+    model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     fresh_pgd: FreshPGDReconEval,
     mesh: Mesh | None = None,
@@ -424,16 +451,16 @@ def make_fresh_pgd_step[PreparedT](
     )
 
     def eval_step(
-        model: DecomposedModel[PreparedT],
+        model: PlacedModel[PreparedT],
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         batch = _prepare_lm_batch(
             model,
             components,
-            ci_fn,
+            placed_ci_fn,
             token_ids,
             mesh,
             n_valid_rows,
@@ -486,9 +513,10 @@ def make_fresh_pgd_step[PreparedT](
             loss_at_masks,
             delta_pinned,
         )
-        mask_fn = persistent_delta_pinned_masks if delta_pinned else masks_from_sources
-        masks, delta_masks = mask_fn(
-            batch.ci_lower, sources, tuple(site.name for site in model.sites)
+        masks, delta_masks = (
+            persistent_delta_pinned_masks(batch.ci_lower, sources)
+            if delta_pinned
+            else masks_from_sources(batch.ci_lower, sources)
         )
         breakdown = objective_with_breakdown(masks, delta_masks)
         prefix = f"loss/{fresh_pgd.name}"
@@ -503,7 +531,7 @@ def make_fresh_pgd_step[PreparedT](
 
 
 def make_eval_step[PreparedT](
-    model_static: DecomposedModel[PreparedT],
+    model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
     rounding_threshold: float,
     ci_alive_threshold: float,
@@ -546,16 +574,16 @@ def make_eval_step[PreparedT](
     )
 
     def evaluate(
-        model: DecomposedModel[PreparedT],
+        model: PlacedModel[PreparedT],
         components: ComponentStacks,
-        ci_fn: CIFn,
+        placed_ci_fn: PlacedCIFn,
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
-        record = dict(ce_kl(model, components, ci_fn, token_ids, key))
-        record.update(ci_l0(model, components, ci_fn, token_ids, key))
+        record = dict(ce_kl(model, components, placed_ci_fn, token_ids, key))
+        record.update(ci_l0(model, components, placed_ci_fn, token_ids, key))
         if pgd is not None:
-            record.update(pgd(model, components, ci_fn, token_ids, key))
+            record.update(pgd(model, components, placed_ci_fn, token_ids, key))
         return record
 
     return evaluate

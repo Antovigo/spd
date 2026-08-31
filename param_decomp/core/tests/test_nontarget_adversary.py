@@ -43,11 +43,13 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
 )
+from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
 from param_decomp.core.recon import MixedPersistentStochasticSources, PersistentSources
 from param_decomp.core.schedule import ScheduleConfig
 from param_decomp.core.train import (
     Decomposition,
+    ForwardSubstrate,
     TrainingItem,
     TrainState,
     make_targeted_train_step,
@@ -102,7 +104,7 @@ def _setup(
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, SITES)
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
-    model = tms_decomposed_model(cfg, target, sites)
+    model = PlacedModel(model=tms_decomposed_model(cfg, target, sites), placement=None)
     vu = init_component_stacks(sites, jax.random.PRNGKey(1))
     ci_fn = build_ci_fn(
         LayerwiseMLPCIArch(
@@ -124,10 +126,10 @@ def _setup(
     )
     adversaries: dict[str, PersistentAdversary] = {}
     for term in nt_terms:
-        for entry in term.plan:
-            match entry.sources:
+        if True:  # one family per term since the dechunk (upstream #1000)
+            match term.sources:
                 case PersistentSources() | MixedPersistentStochasticSources():
-                    strategy = entry.sources
+                    strategy = term.sources
                 case _:
                     continue
             sources = init_persistent_sources(
@@ -152,19 +154,24 @@ def _setup(
             components_opt_state=opt_vu.init(eqx.filter(vu, eqx.is_array)),
             ci_fn_opt_state=opt_ci.init(eqx.filter(ci_fn, eqx.is_array)),
             adversaries=adversaries,
+            freq_ema=None,
             step=jnp.zeros((), jnp.int32),
         ),
     )
     step = make_targeted_train_step(
         model_static=model,
+        substrate=ForwardSubstrate.of(
+            model,
+            remat_recon_forwards=False,
+            remat_ci_fn=False,
+            ci_capture_keys=ci_fn.capture_keys,
+            ci_placement=None,
+        ),
         objective=objective,
         ci_scaled_weight_decay=None,
         components_optimizer=opt_vu,
         ci_fn_optimizer=opt_ci,
         total_steps=20,
-        remat_recon_forwards=False,
-        remat_ci_fn=False,
-        ci_capture_keys=ci_fn.capture_keys,
         sequential_passes=sequential,
     )
     return cfg, state, step
@@ -173,7 +180,10 @@ def _setup(
 def _model_of():
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, SITES)
-    return tms_decomposed_model(cfg, init_tms_target(cfg, jax.random.PRNGKey(0)), sites)
+    return PlacedModel(
+        model=tms_decomposed_model(cfg, init_tms_target(cfg, jax.random.PRNGKey(0)), sites),
+        placement=None,
+    )
 
 
 def _batches(cfg: TMSConfig, i: int = 0) -> tuple[Array, Array]:
@@ -205,13 +215,18 @@ def test_nontarget_persistent_term_trains_its_adversary():
 
     assert int(adv.opt_state.step_count) == N_WARMUP + 1
     moved = any(
-        not np.allclose(before[site], np.asarray(adv.sources[site]))
+        # `Sources` is a SiteSource(components, delta) record since #1000 — compare channels.
+        not np.allclose(before[site].components, np.asarray(adv.sources[site].components))
+        or not np.allclose(before[site].delta, np.asarray(adv.sources[site].delta))
         for site in ("linear1", "linear2")
     )
     assert moved, "the non-target adversary's sources never moved"
     for site in ("linear1", "linear2"):
-        arr = np.asarray(adv.sources[site])
-        assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
+        for arr in (
+            np.asarray(adv.sources[site].components),
+            np.asarray(adv.sources[site].delta),
+        ):
+            assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
     assert "nontarget_data/loss/PersistentPGDReconLoss" in metrics
     assert "nontarget_data/loss/StochasticReconLoss" in metrics
 
@@ -235,7 +250,9 @@ def test_nontarget_merged_term_steps_with_zero_warmup():
 
     assert int(adv.opt_state.step_count) == 1  # final ascent only: n_warmup == 0
     moved = any(
-        not np.allclose(before[site], np.asarray(adv.sources[site]))
+        # `Sources` is a SiteSource(components, delta) record since #1000 — compare channels.
+        not np.allclose(before[site].components, np.asarray(adv.sources[site].components))
+        or not np.allclose(before[site].delta, np.asarray(adv.sources[site].delta))
         for site in ("linear1", "linear2")
     )
     assert moved
@@ -343,13 +360,18 @@ def test_nontarget_hidden_merged_term_trains_its_adversary():
 
     assert int(adv.opt_state.step_count) == 1  # final ascent only: n_warmup == 0
     moved = any(
-        not np.allclose(before[site], np.asarray(adv.sources[site]))
+        # `Sources` is a SiteSource(components, delta) record since #1000 — compare channels.
+        not np.allclose(before[site].components, np.asarray(adv.sources[site].components))
+        or not np.allclose(before[site].delta, np.asarray(adv.sources[site].delta))
         for site in ("linear1", "linear2")
     )
     assert moved, "the non-target hidden adversary's sources never moved"
     for site in ("linear1", "linear2"):
-        arr = np.asarray(adv.sources[site])
-        assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
+        for arr in (
+            np.asarray(adv.sources[site].components),
+            np.asarray(adv.sources[site].delta),
+        ):
+            assert arr.min() >= 0.0 and arr.max() <= 1.0, "S15: sources must stay projected"
     assert "nontarget_data/hidden_ci/loss/MergedStochasticSubsetPPGDReconLoss" in metrics
 
 

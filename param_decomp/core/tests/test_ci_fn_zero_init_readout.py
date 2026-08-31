@@ -25,7 +25,7 @@ _ARCH = ChunkwiseTransformerCIArch(
     zero_init_readout=True,
     dual=True,
 )
-_SITES = tuple(SiteSpec(name=f"s{i}", C=8, d_in=16, d_out=16) for i in range(2))
+_SITES = tuple(SiteSpec(name=f"s{i}", C=8, d_in=16, d_out=16, group=f"s{i}") for i in range(2))
 
 
 def test_zero_init_readout_heads_are_zero_with_half_bias() -> None:

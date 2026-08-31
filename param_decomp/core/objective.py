@@ -1,23 +1,25 @@
 """The closed VPD training objectives — plain and targeted.
 
 Authored loss metrics become explicit objective roles: the plain objective is exactly one
-faithfulness term, one importance-minimality term, and a non-empty ordered tuple of recon
-terms; the targeted (tPD, SPEC §11) objective is a faithfulness-free target-pass surface
-plus a directly-authored non-target pass (delta-pinned recon + importance-minimality at
-its own coefficient). Recon planning lives in `recon.py`; this module alone composes those
-plans with the other objective roles.
+faithfulness term, one importance-minimality term, a non-empty ordered tuple of recon
+terms, and at most one nonlinearity-locality term; the targeted (tPD, SPEC §11)
+objective is a faithfulness-free target-pass surface plus a directly-authored
+non-target pass (delta-pinned recon + importance-minimality at its own coefficient).
+The recon vocabulary (routing samplers, mask-source strategies) lives in `recon.py`;
+this module alone composes it with the other objective roles.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from jaxtyping import Array
+
+from param_decomp.core.components import ComponentStacks, SiteSpec, nonlinearity_partitions
 from param_decomp.core.configs import (
     AllRoutingConfig,
     AnyImportanceMinimalityLossConfig,
     AnyLossMetricConfig,
     AnyReconLossMetricConfig,
-    ChunkwiseSubsetReconLossConfig,
-    CIMaskedReconLayerwiseLossConfig,
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     FaithfulnessLossConfig,
@@ -25,16 +27,15 @@ from param_decomp.core.configs import (
     ImportanceMinimalityLossConfig,
     LossCoeff,
     MergedStochasticSubsetPPGDReconLossConfig,
+    NonlinearityLocalityLossConfig,
     NontargetConfig,
     NontargetHiddenReconLossMetricConfig,
     NontargetOutputReconLossMetricConfig,
     NontargetReconLossMetricConfig,
     PersistentPGDReconLossConfig,
-    PGDReconLayerwiseLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
     SmoothL0ImportanceMinimalityLossConfig,
-    StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
     StochasticReconSubsetLossConfig,
     SubsetRoutingType,
@@ -42,30 +43,24 @@ from param_decomp.core.configs import (
     UnmaskedNoDeltaReconLossConfig,
     UnmaskedReconLossConfig,
 )
+from param_decomp.core.losses import coeff_at, nonlinearity_loss, scheduled_value_at
+from param_decomp.core.nonlinearity import NonlinearityPartition, NonlinearityUnitKind
 from param_decomp.core.recon import (
     AnyReconLossTerm,
     ConstantSources,
     FreshPGDSources,
-    LiveSet,
     MaskSourceStrategy,
     MixedPersistentStochasticSources,
     PersistentSources,
-    ReconForward,
     ReconLossTerm,
-    ReconPlan,
     StochasticSources,
     UnmaskedNoDeltaSources,
-    all_sites_live,
-    each_site_live,
-    live_groups,
-    make_plan,
+    routing_sampler_from_config,
 )
 
 
 @dataclass(frozen=True)
 class FaithfulnessTerm:
-    """Weight-space term: `Σ_s ‖Δ_s‖² / Σ_s numel`."""
-
     name: str
     coeff: LossCoeff
 
@@ -78,14 +73,89 @@ class ImportanceMinimalityTerm:
     coeff: LossCoeff
     cfg: AnyImportanceMinimalityLossConfig
 
+    @property
+    def imp_loss_key(self) -> str:
+        """Penalty-kind-specific metric name for the loss value."""
+        return (
+            "imp_smooth_l0"
+            if isinstance(self.cfg, SmoothL0ImportanceMinimalityLossConfig)
+            else "imp"
+        )
+
+    @property
+    def imp_min_param_key(self) -> str:
+        """Penalty-kind-specific metric name for its annealed parameter."""
+        return (
+            "gamma_imp" if isinstance(self.cfg, SmoothL0ImportanceMinimalityLossConfig) else "p_imp"
+        )
+
+
+@dataclass(frozen=True)
+class NonlinearityTerm:
+    """Weight-space concentration over authored nonlinearity-facing output units."""
+
+    name: str
+    coeff: LossCoeff
+    cfg: NonlinearityLocalityLossConfig
+
+
+@dataclass(frozen=True)
+class ResolvedNonlinearity:
+    """A `NonlinearityTerm` joined with the target's declared partitions: the closed
+    unit-kind check happens at `resolve`, once, and `None`-weighted kinds are filtered
+    out here so no loss math ever sees an excluded kind."""
+
+    term: NonlinearityTerm
+    trained_partitions: dict[str, NonlinearityPartition]
+    kind_coefficients: dict[NonlinearityUnitKind, float]
+
+    @staticmethod
+    def resolve(
+        term: NonlinearityTerm | None, sites: tuple[SiteSpec, ...]
+    ) -> "ResolvedNonlinearity | None":
+        if term is None:
+            return None
+        partitions = nonlinearity_partitions(sites)
+        assert partitions, "NonlinearityLocalityLoss needs a partitioned site"
+        declared_kinds = {p.unit_kind for p in partitions.values()}
+        authored = term.cfg.unit_kind_coefficients
+        assert authored.keys() == declared_kinds, (
+            f"unit_kind_coefficients must name exactly the target's partitioned kinds: "
+            f"authored {sorted(authored)}, declared {sorted(declared_kinds)}"
+        )
+        kind_coefficients: dict[NonlinearityUnitKind, float] = {
+            kind: w for kind, w in authored.items() if w is not None
+        }
+        return ResolvedNonlinearity(
+            term,
+            {name: p for name, p in partitions.items() if p.unit_kind in kind_coefficients},
+            kind_coefficients,
+        )
+
+    def weighted_loss_and_metrics(
+        self, train_frac: Array, components: ComponentStacks
+    ) -> tuple[Array, dict[str, Array]]:
+        """The term's coefficient-weighted step value plus its ready-to-log metrics."""
+        threshold = scheduled_value_at(train_frac, self.term.cfg.relative_threshold)
+        value, by_kind = nonlinearity_loss(
+            components, self.trained_partitions, threshold, self.kind_coefficients
+        )
+        metrics: dict[str, Array] = {
+            f"loss/{self.term.name}": value,
+            "nonlinearity_relative_threshold": threshold,
+            **{f"loss/{self.term.name}_{kind}": v for kind, v in by_kind.items()},
+        }
+        return coeff_at(train_frac, self.term.coeff) * value, metrics
+
 
 @dataclass(frozen=True)
 class LossSurface:
-    """`L = c·faith + c·importance + Σ c·recon`, with every role explicit."""
+    """`L = c·faith + c·importance + Σ c·recon [+ c·nonlinearity]`."""
 
     faith: FaithfulnessTerm
     imp: ImportanceMinimalityTerm
     recon: tuple[AnyReconLossTerm, ...]
+    nonlinearity: NonlinearityTerm | None
 
 
 @dataclass(frozen=True)
@@ -141,7 +211,7 @@ class HiddenPass[S: MaskSourceStrategy]:
 
     Structurally a pass like any other — importance-minimality at its own coefficient plus a
     recon grid — differing in exactly two ways: its masks come from the CI fn's SECOND readout
-    head (S36), and its recon comparison is `HiddenActsOnlyReconstruction(points)` rather than
+    head (S37), and its recon comparison is `HiddenActsOnlyReconstruction(points)` rather than
     the model output, so it carries no end-to-end term at all.
 
     `points` is the pass's, not each term's: the pass IS "reconstruct these activations". The
@@ -171,6 +241,10 @@ class TargetedObjective:
     nontarget: NontargetPass
     hidden: HiddenPass[MaskSourceStrategy] | None = None
     nontarget_hidden: HiddenPass[NontargetHiddenSources] | None = None
+    nonlinearity: NonlinearityTerm | None = None
+    """The optional weight-space concentration prior (SPEC S36). Deliberately NOT a member
+    of any pass: it reads `U` alone — no CI, no activations, no stream — so it is scored
+    once per step and added once to the total, whatever the pass count."""
 
     def __post_init__(self) -> None:
         assert self.nontarget_hidden is None or self.hidden is not None, (
@@ -187,7 +261,12 @@ class TargetedObjective:
 def _collect_terms(
     loss_metrics: Sequence[AnyLossMetricConfig],
     site_names: tuple[str, ...],
-) -> tuple[FaithfulnessTerm | None, ImportanceMinimalityTerm | None, tuple[AnyReconLossTerm, ...]]:
+) -> tuple[
+    FaithfulnessTerm | None,
+    ImportanceMinimalityTerm | None,
+    tuple[AnyReconLossTerm, ...],
+    NonlinearityTerm | None,
+]:
     """One pass over an authored loss list into its objective roles, names unique across
     all roles. Completeness (which roles must be present) is each objective builder's own
     claim, not this walk's.
@@ -198,6 +277,7 @@ def _collect_terms(
     faith: FaithfulnessTerm | None = None
     imp: ImportanceMinimalityTerm | None = None
     recon_terms: list[AnyReconLossTerm] = []
+    nonlinearity: NonlinearityTerm | None = None
 
     def unique_name(cfg: AnyLossMetricConfig) -> str:
         # Only committed terms are in `taken`, so persistent terms may call this once for
@@ -208,23 +288,25 @@ def _collect_terms(
             taken.add(faith.name)
         if imp is not None:
             taken.add(imp.name)
+        if nonlinearity is not None:
+            taken.add(nonlinearity.name)
         assert name not in taken, f"duplicate loss instance_key {name!r}"
         return name
 
-    def recon[S: MaskSourceStrategy](
-        cfg: AnyReconLossMetricConfig, plan: ReconPlan[S]
+    def recon(
+        cfg: AnyReconLossMetricConfig,
+        routing: SubsetRoutingType,
+        sources: MaskSourceStrategy,
+        n_samples: int,
     ) -> AnyReconLossTerm:
+        # `sources` sits in parameter position, so the term is built width-erased
+        # directly (storage is width-erased; narrower widths are the builders' concern).
         assert cfg.coeff is not None
-        # Storage is width-erased; dataclass type params are invariant (3.13 synthesizes
-        # `__replace__`), so widening is an explicit rebuild rather than an upcast.
-        wide_plan: ReconPlan[MaskSourceStrategy] = tuple(
-            ReconForward[MaskSourceStrategy](e.live_sites, e.sample_routing, e.sources)
-            for e in plan
-        )
         return ReconLossTerm(
             unique_name(cfg),
             cfg.coeff,
-            wide_plan,
+            routing_sampler_from_config(routing, site_names, n_samples),
+            sources,
             cfg.hidden_acts_reconstruction,
         )
 
@@ -249,66 +331,36 @@ def _collect_terms(
                 )
                 imp = ImportanceMinimalityTerm(unique_name(cfg), cfg.coeff, cfg)
             case UnmaskedReconLossConfig():
-                plan = make_plan(
-                    all_sites_live(site_names),
-                    AllRoutingConfig(),
-                    ConstantSources(1.0),
-                    n_samples=1,
+                recon_terms.append(
+                    recon(cfg, AllRoutingConfig(), ConstantSources(1.0), n_samples=1)
                 )
-                recon_terms.append(recon(cfg, plan))
             case (
                 CIMaskedReconLossConfig()
                 | CIMaskedReconSubsetLossConfig()
-                | CIMaskedReconLayerwiseLossConfig()
                 | StochasticReconLossConfig()
                 | StochasticReconSubsetLossConfig()
-                | StochasticReconLayerwiseLossConfig()
-                | ChunkwiseSubsetReconLossConfig()
             ):
-                recon_terms.append(recon(cfg, _nontarget_recon_plan(cfg, site_names)))
+                routing, sources, n_samples = _nontarget_recon_parts(cfg)
+                recon_terms.append(recon(cfg, routing, sources, n_samples))
             case PGDReconLossConfig() | PGDReconSubsetLossConfig():
                 sources = FreshPGDSources(cfg.init, cfg.n_steps, cfg.step_size, cfg.source_shape)
                 routing = (
                     cfg.routing if isinstance(cfg, PGDReconSubsetLossConfig) else AllRoutingConfig()
                 )
-                recon_terms.append(
-                    recon(cfg, make_plan(all_sites_live(site_names), routing, sources, n_samples=1))
-                )
-            case PGDReconLayerwiseLossConfig():
-                sources = FreshPGDSources(cfg.init, cfg.n_steps, cfg.step_size, cfg.source_shape)
-                recon_terms.append(
-                    recon(
-                        cfg,
-                        make_plan(
-                            each_site_live(site_names), AllRoutingConfig(), sources, n_samples=1
-                        ),
-                    )
-                )
+                recon_terms.append(recon(cfg, routing, sources, n_samples=1))
             case MergedStochasticSubsetPPGDReconLossConfig():
                 key = unique_name(cfg)
                 sources = MixedPersistentStochasticSources(state_key=key, cfg=cfg)
-                recon_terms.append(
-                    recon(
-                        cfg,
-                        make_plan(all_sites_live(site_names), cfg.routing, sources, n_samples=1),
-                    )
-                )
+                recon_terms.append(recon(cfg, cfg.routing, sources, n_samples=1))
             case PersistentPGDReconLossConfig():
                 key = unique_name(cfg)
                 sources = PersistentSources(state_key=key, cfg=cfg)
-                recon_terms.append(
-                    recon(
-                        cfg,
-                        make_plan(
-                            all_sites_live(site_names), AllRoutingConfig(), sources, n_samples=1
-                        ),
-                    )
-                )
+                recon_terms.append(recon(cfg, AllRoutingConfig(), sources, n_samples=1))
+            case NonlinearityLocalityLossConfig():
+                assert nonlinearity is None
+                nonlinearity = NonlinearityTerm(unique_name(cfg), cfg.coeff, cfg)
 
-    for term in recon_terms:
-        for entry in term.plan:
-            assert entry.live_sites and set(entry.live_sites) <= set(site_names), entry
-    return faith, imp, tuple(recon_terms)
+    return faith, imp, tuple(recon_terms), nonlinearity
 
 
 def build_objective(
@@ -316,12 +368,12 @@ def build_objective(
     site_names: tuple[str, ...],
 ) -> LossSurface:
     """Build the closed plain-VPD objective, rejecting incomplete authored surfaces."""
-    faith, imp, recon_terms = _collect_terms(loss_metrics, site_names)
+    faith, imp, recon_terms, nonlinearity = _collect_terms(loss_metrics, site_names)
     assert faith is not None and imp is not None, (
         f"need FaithfulnessLoss + ImportanceMinimalityLoss, got {[m.type for m in loss_metrics]}"
     )
     assert recon_terms, "no recon loss terms configured"
-    return LossSurface(faith, imp, recon_terms)
+    return LossSurface(faith, imp, recon_terms, nonlinearity)
 
 
 def build_recon_terms(
@@ -357,12 +409,16 @@ def build_targeted_objective(
     authored directly on `nontarget` — never derived from the target list — and its
     importance-minimality shares the target's penalty config (shape + anneal) by
     construction, at the non-target pass's own coefficient."""
-    faith, imp, recon_terms = _collect_terms(loss_metrics, site_names)
+    faith, imp, recon_terms, nonlinearity = _collect_terms(loss_metrics, site_names)
     # The library boundary for lists built outside the schema; unreachable for a parsed
     # TargetedPDConfig.
     assert faith is None, "a targeted loss list carried a FaithfulnessLossConfig (SPEC T3)"
     assert imp is not None, (
         f"need an ImportanceMinimalityLoss, got {[m.type for m in loss_metrics]}"
+    )
+    assert imp.cfg.frequency is None or imp.cfg.frequency.ema_halflife_steps is None, (
+        "frequency.ema_halflife_steps is not implemented for the targeted (tPD) objective "
+        "(SPEC S8'' — plain PD only; the TargetedPDConfig validator carries the why)"
     )
     assert recon_terms, "no recon loss terms configured"
 
@@ -376,7 +432,11 @@ def build_targeted_objective(
         # so the mask-source algebra (stochastic, PPGD, mixed) is unchanged. What makes it
         # hidden is the pass it lives in — the step reads its mask off the hidden CI head and
         # scores it against `points` (T12).
-        h_faith, h_imp, h_recon = _collect_terms(hidden.recon, site_names)
+        h_faith, h_imp, h_recon, h_nonlinearity = _collect_terms(hidden.recon, site_names)
+        assert h_nonlinearity is None, (
+            "the nonlinearity prior is weight-space and pass-less (SPEC S36): author it once "
+            "on the target loss list, never on a hidden pass"
+        )
         assert h_faith is None and h_imp is None, (
             "a hidden pass authors recon terms only: its importance-minimality is the "
             "`impmin_coeff` scalar (the penalty config is the target pass's, T6/T12)"
@@ -402,6 +462,7 @@ def build_targeted_objective(
         nontarget=NontargetPass(recon=nt_terms, impmin_coeff=nontarget.impmin_coeff),
         hidden=hidden_pass,
         nontarget_hidden=nontarget_hidden_pass,
+        nonlinearity=nonlinearity,
     )
 
 
@@ -420,24 +481,30 @@ def build_nontarget_output_terms(
         assert cfg.coeff is not None  # non-None at parse (NontargetConfig); narrows the type
         name = cfg.name if cfg.name is not None else cfg.type
         assert name not in {t.name for t in terms}, f"duplicate non-target loss {name!r}"
-        plan: ReconPlan[NontargetOutputSources]
+        sources: NontargetOutputSources
+        routing: SubsetRoutingType
         match cfg:
             case PersistentPGDReconLossConfig():
-                sources: NontargetOutputSources = PersistentSources(
-                    state_key=f"nontarget/{name}", cfg=cfg
-                )
-                plan = make_plan(all_sites_live(site_names), AllRoutingConfig(), sources, 1)
+                routing = AllRoutingConfig()
+                sources = PersistentSources(state_key=f"nontarget/{name}", cfg=cfg)
+                n_samples = 1
             case MergedStochasticSubsetPPGDReconLossConfig():
+                routing = cfg.routing
                 sources = MixedPersistentStochasticSources(state_key=f"nontarget/{name}", cfg=cfg)
-                plan = make_plan(all_sites_live(site_names), cfg.routing, sources, 1)
+                n_samples = 1
             case _:
-                # Width-erased rebuild, as `_collect_terms.recon` does: dataclass type
-                # params are invariant, so the closed-set plan widens explicitly.
-                plan = tuple(
-                    ReconForward[NontargetOutputSources](e.live_sites, e.sample_routing, e.sources)
-                    for e in _nontarget_recon_plan(cfg, site_names)
-                )
-        terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
+                # Width-erased rebuild: dataclass type params are invariant, so the
+                # closed-set family widens explicitly through the annotations above.
+                routing, sources, n_samples = _nontarget_recon_parts(cfg)
+        terms.append(
+            ReconLossTerm(
+                name,
+                cfg.coeff,
+                routing_sampler_from_config(routing, site_names, n_samples),
+                sources,
+                None,
+            )
+        )
     return tuple(terms)
 
 
@@ -455,76 +522,47 @@ def build_nontarget_hidden_terms(
         assert cfg.coeff is not None  # non-None at parse (NontargetHiddenConfig); narrows the type
         name = cfg.name if cfg.name is not None else cfg.type
         assert name not in {t.name for t in terms}, f"duplicate non-target hidden loss {name!r}"
-        plan: ReconPlan[NontargetHiddenSources]
+        sources: NontargetHiddenSources
+        routing: SubsetRoutingType
         match cfg:
             case MergedStochasticSubsetPPGDReconLossConfig():
-                sources: NontargetHiddenSources = MixedPersistentStochasticSources(
+                routing = cfg.routing
+                sources = MixedPersistentStochasticSources(
                     state_key=f"nontarget_hidden/{name}", cfg=cfg
                 )
-                plan = make_plan(all_sites_live(site_names), cfg.routing, sources, 1)
+                n_samples = 1
             case _:
                 # Width-erased rebuild, as `build_nontarget_output_terms` does.
-                plan = tuple(
-                    ReconForward[NontargetHiddenSources](e.live_sites, e.sample_routing, e.sources)
-                    for e in _nontarget_recon_plan(cfg, site_names)
-                )
+                routing, sources, n_samples = _nontarget_recon_parts(cfg)
         # `hidden_acts_reconstruction=None` structurally: the S35 rider is refused on every
         # non-target term at parse — a hidden pass's points are the pass's own (T5/T12).
-        terms.append(ReconLossTerm(name, cfg.coeff, plan, None))
+        terms.append(
+            ReconLossTerm(
+                name,
+                cfg.coeff,
+                routing_sampler_from_config(routing, site_names, n_samples),
+                sources,
+                None,
+            )
+        )
     return tuple(terms)
 
 
-def _nontarget_recon_plan(
-    cfg: NontargetReconLossMetricConfig, site_names: tuple[str, ...]
-) -> ReconPlan[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]:
-    """Plan construction for the recon types the non-target pass admits (SPEC T5): the
-    stochastic/constant-source types — shared verbatim with the plain objective's arms,
-    which widen via `recon` — plus the non-target-only unmasked-no-delta term (T4's one
-    delta-off exception)."""
-
-    def narrow(
-        live_sets: list[LiveSet],
-        routing: SubsetRoutingType,
-        sources: StochasticSources | ConstantSources | UnmaskedNoDeltaSources,
-        n_samples: int,
-    ) -> ReconPlan[StochasticSources | ConstantSources | UnmaskedNoDeltaSources]:
-        # The parameter annotation solves `make_plan`'s SourcesT at the pass's width —
-        # values widen into parameters; invariant containers don't.
-        return make_plan(live_sets, routing, sources, n_samples)
-
+def _nontarget_recon_parts(
+    cfg: NontargetReconLossMetricConfig,
+) -> tuple[SubsetRoutingType, StochasticSources | ConstantSources | UnmaskedNoDeltaSources, int]:
+    """The `(routing, sources, n_samples)` family of one recon config the non-target pass
+    admits (SPEC T5): the stochastic/constant-source types — shared verbatim with the
+    plain objective's arms, which widen through `recon` — plus the non-target-only
+    unmasked-no-delta term (T4's one delta-off exception)."""
     match cfg:
         case CIMaskedReconLossConfig():
-            return narrow(all_sites_live(site_names), AllRoutingConfig(), ConstantSources(0.0), 1)
+            return AllRoutingConfig(), ConstantSources(0.0), 1
         case CIMaskedReconSubsetLossConfig():
-            return narrow(all_sites_live(site_names), cfg.routing, ConstantSources(0.0), 1)
-        case CIMaskedReconLayerwiseLossConfig():
-            return narrow(each_site_live(site_names), AllRoutingConfig(), ConstantSources(0.0), 1)
+            return cfg.routing, ConstantSources(0.0), 1
         case StochasticReconLossConfig():
-            return narrow(
-                all_sites_live(site_names),
-                AllRoutingConfig(),
-                StochasticSources(),
-                cfg.n_mask_samples,
-            )
+            return AllRoutingConfig(), StochasticSources(), cfg.n_mask_samples
         case StochasticReconSubsetLossConfig():
-            return narrow(
-                all_sites_live(site_names), cfg.routing, StochasticSources(), cfg.n_mask_samples
-            )
-        case StochasticReconLayerwiseLossConfig():
-            return narrow(
-                each_site_live(site_names),
-                AllRoutingConfig(),
-                StochasticSources(),
-                cfg.n_mask_samples,
-            )
-        case ChunkwiseSubsetReconLossConfig():
-            return narrow(
-                live_groups(site_names, cfg.sites_per_chunk),
-                cfg.routing,
-                StochasticSources(),
-                cfg.n_samples,
-            )
+            return cfg.routing, StochasticSources(), cfg.n_mask_samples
         case UnmaskedNoDeltaReconLossConfig():
-            return narrow(
-                all_sites_live(site_names), AllRoutingConfig(), UnmaskedNoDeltaSources(), 1
-            )
+            return AllRoutingConfig(), UnmaskedNoDeltaSources(), 1

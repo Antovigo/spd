@@ -8,21 +8,30 @@ layout (a pos/comp axis swap is the bug this catches); and the snapshot write + 
 
 import base64
 import json
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from typing import cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from param_decomp.core.ci_fn import CIFn, CIRole, ci_preactivations, lower_leaky_hard_sigmoid
-from param_decomp.core.components import init_component_stacks
-from param_decomp.core.model import prepare_compute_weights
+from param_decomp.core.ci_fn import (
+    CIRole,
+    PlacedCIFn,
+    ci_preactivations,
+    lower_leaky_hard_sigmoid,
+)
+from param_decomp.core.components import ComponentStacks, init_component_stacks
+from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.tests.test_slow_eval import _build_ci_fn
+from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
     APPLET_FILENAME,
     ABGridSnapshot,
+    _take_columns,
     ab_grid_payload,
     collect_ab_grid_snapshot,
     encode_ci_u8,
@@ -30,7 +39,7 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
     saved_indices,
     write_ab_grid_snapshot,
 )
-from param_decomp.experiments.lm.ab_grid_operation import resolve_positions
+from param_decomp.experiments.lm.ab_grid_operation import ABGridOperation, resolve_positions
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
 from param_decomp.targets.testing import capture_clean, tiny_glu_cfg, tiny_glu_decomposed_lm
@@ -46,7 +55,9 @@ def _tiny_setup():
     cfg = tiny_glu_cfg()
     C = 8
     sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, C))
-    model = tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0))
+    model = PlacedModel(
+        model=tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0)), placement=None
+    )
     ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
     return cfg, model, ci_fn, C
 
@@ -60,8 +71,8 @@ def _grid_step(roles: tuple[CIRole, ...] = ("output",)):
     return make_ab_grid_step(model, ci_fn.capture_keys, POSITIONS, roles)
 
 
-def _dual_ci_fn() -> CIFn:
-    """The same arch with a second readout head (S36)."""
+def _dual_ci_fn() -> PlacedCIFn:
+    """The same arch with a second readout head (S37)."""
     cfg, model, _ci_fn, _C = _tiny_setup()
     return _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2), dual=True)
 
@@ -88,7 +99,10 @@ def test_grid_step_ci_inner_and_pad_masked_sums_match_hand_rolled():
     ci_grids, inner_grids, ci_sums = _grid_step()(model, vu, ci_fn, tokens, jnp.asarray(n_prompts))
 
     preactivations = ci_preactivations(
-        ci_fn, capture_clean(model, tokens, ci_fn.capture_keys), remat=False, role="output"
+        ci_fn,
+        capture_clean(model.model, tokens, ci_fn.capture_keys),
+        remat=False,
+        role="output",
     )
     _clean, raw_activations = model.component_activation_forward(
         prepare_compute_weights(model, vu), tokens, capture_keys=ci_fn.capture_keys
@@ -281,7 +295,7 @@ def test_resolve_positions():
 
 
 def test_dual_payload_carries_both_roles_and_one_shared_index():
-    """SPEC S36: a dual run's snapshot feeds the applet's output-vs-hidden overlay.
+    """SPEC S37: a dual run's snapshot feeds the applet's output-vs-hidden overlay.
 
     The `saved` list is ONE index set for both roles — the applet walks it once and indexes
     both roles' grids by it — and `collect_ab_grid_snapshot` cuts it on the MAX over roles, so
@@ -310,7 +324,7 @@ def test_dual_payload_carries_both_roles_and_one_shared_index():
     assert module["saved"] == saved, "both roles are indexed by ONE saved list"
     assert module["ci"] != module["ci_hidden"], "the two heads' grids must not be the same bytes"
 
-    # A single-role snapshot stays byte-compatible with every pre-S36 payload, so the applet's
+    # A single-role snapshot stays byte-compatible with every pre-S37 payload, so the applet's
     # own no-`ci_roles` fallback still applies to older snapshots.
     single = ab_grid_payload(
         ABGridSnapshot(
@@ -366,3 +380,101 @@ def test_dual_snapshot_floor_keeps_hidden_only_components():
         assert cut.saved[site].tolist() == expected.tolist()
         for role in ("output", "hidden"):
             assert cut.ci_columns[role][site].shape[-1] == expected.size
+
+
+class _PoisonedCIFn:
+    """Stands in for `state.decomposition.ci_fn`. Any read at all is the regression."""
+
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(
+            "the ab-grid operation read state.decomposition.ci_fn; it must consume the eval "
+            f"invocation's placed_ci_fn instead (attribute {name!r})"
+        )
+
+
+@dataclass(frozen=True)
+class _StubDecomposition:
+    components: ComponentStacks
+    ci_fn: object
+
+
+@dataclass(frozen=True)
+class _StubState:
+    decomposition: _StubDecomposition
+
+
+def test_the_grid_operation_consumes_the_invocation_s_placed_ci_fn() -> None:
+    """Regression for run 10631, which died after 3900 healthy steps.
+
+    `ci_preactivations` goes through the CI compute lifecycle, and
+    `materialize_ci_compute_weights` reads `.fn` / `.placement` off a `PlacedCIFn` to
+    rebuild a chunkwise fn's compute weights. The operation used to reach past the eval
+    invocation to `state.decomposition.ci_fn` and hand the RAW fn down, so the first
+    snapshot raised `'ChunkwiseTransformerCIFn' object has no attribute 'fn'`. The grid's
+    schedule carries a `step > 0` guard, so its first firing is `slow_every` — never step
+    0 — which is why a short smoke cannot see it and why this test exists instead.
+
+    The dataset-level tests above all pass a correctly-built `PlacedCIFn`, so they were
+    green both before and after the fix: the untested seam was the OPERATION's wiring.
+    Poisoning the state's raw fn is what pins it — the run must succeed while any read of
+    `state.decomposition.ci_fn` fails loudly.
+    """
+    _cfg, model, ci_fn, C = _tiny_setup()
+    vu = _components()
+    n_prompts = N_A * N_B
+    tokens = jax.random.randint(jax.random.PRNGKey(4), (n_prompts, T), 0, 64)
+    operation = ABGridOperation(
+        step=_grid_step(),
+        model=model,
+        chunks=((tokens, n_prompts),),
+        grid=_grid(),
+        n_prompts=n_prompts,
+        positions=POSITIONS,
+        seq_len=T,
+        mean_ci_floor=0.0,
+        run_dir=Path("/nonexistent"),
+        writes_snapshots=False,
+    )
+    state = _StubState(decomposition=_StubDecomposition(components=vu, ci_fn=_PoisonedCIFn()))
+
+    record = operation.run(cast(TrainState, cast(object, state)), 0, ci_fn)
+
+    assert record["eval/ab_grids/saved_components/total"] == float(len(model.site_names) * C), (
+        "a zero floor keeps every component, so the total is the full component count"
+    )
+
+
+@pytest.mark.multidevice
+def test_take_columns_gathers_across_a_tp_sharded_component_axis() -> None:
+    """Regression for the second failure of run 10654, and the one CPU test that can see it.
+
+    The snapshot's per-prompt grids are sharded with the prompt axis over
+    `('replicate', 'fsdp')` and the COMPONENT axis over `tp`. The saved-column gather runs
+    along that component axis, and a gather along a sharded axis needs collectives, so
+    under explicit axes JAX refuses to infer an output sharding rather than guess:
+
+        ShardingTypeError: Use `.at[...].get(out_sharding=)` ...
+        Got operand=ShapedArray(float32[1000@(replicate,fsdp),1,512@tp]),
+            indices=ShapedArray(int32[128,1])
+
+    Every other test in this file runs unsharded, where `jnp.take` is perfectly happy, so
+    this class of bug is invisible to them — it reached production twice. Run it with
+    `make test-multidevice`.
+    """
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    from param_decomp.core.sharding import hsdp_mesh
+
+    n = jax.device_count()
+    assert n % 2 == 0, f"needs an even device count, got {n}"
+    mesh = hsdp_mesh(n // 2, 1, 2)  # tp=2 is what puts the component axis on a sharded axis
+    n_pad, n_pos, C = 4 * (n // 2), 2, 8
+    data = jnp.arange(n_pad * n_pos * C, dtype=jnp.float32).reshape(n_pad, n_pos, C)
+    idx = jnp.asarray([1, 5, 2, 2])  # unsorted, with a repeat, as `np.pad(..., "edge")` gives
+    expected = np.take(np.asarray(data), np.asarray(idx), axis=2)
+
+    with jax.set_mesh(mesh):
+        sharded = jax.device_put(data, NamedSharding(mesh, P(("replicate", "fsdp"), None, "tp")))
+        out = _take_columns(sharded, idx)
+        np.testing.assert_array_equal(np.asarray(out), expected)

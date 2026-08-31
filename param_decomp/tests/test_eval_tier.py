@@ -75,7 +75,7 @@ def test_a_fast_and_a_slow_metric_authored_together_get_different_schedules() ->
     eval_config = _eval_config(fast, slow)
 
     assert schedule_for(fast, eval_config) == Every(1000)
-    assert schedule_for(slow, eval_config) == FirstThenEvery(1000, 5000)
+    assert schedule_for(slow, eval_config) == FirstThenEvery(0, 5000)
 
 
 def test_the_slow_tier_skips_the_first_pass_when_unasked() -> None:
@@ -96,9 +96,25 @@ def test_the_ab_grid_snapshot_never_runs_on_the_first_pass() -> None:
     schedule = schedule_for(ab_grid, _eval_config(ab_grid))
     assert not eval_due(schedule, 1000)  # the first eval pass: skipped
     assert eval_due(schedule, 5000) and eval_due(schedule, 10000)
-    # a sibling slow metric on the same callback still takes the first pass
+    # A sibling slow metric keeps the callback's own cadence — which, since #1000, means
+    # the untrained step-0 baseline rather than the first `every` pass (see
+    # `test_slow_on_first_step_is_the_untrained_baseline_not_the_first_eval_pass`).
     histograms = CIHistogramsConfig(n_batches_accum=None)
-    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 1000)
+    assert eval_due(schedule_for(histograms, _eval_config(histograms)), 0)
+
+
+def test_slow_on_first_step_is_the_untrained_baseline_not_the_first_eval_pass() -> None:
+    """The flag's whole point is a pre-training readout; landing it on the first `every`
+    pass instead would report an already-trained model and defer any eval-path blowup by
+    `every` steps."""
+    slow = CIHistogramsConfig(n_batches_accum=None)
+    schedule = schedule_for(slow, _eval_config(slow))
+
+    assert eval_due(schedule, 0)
+    assert not eval_due(schedule, 1000)
+    assert eval_due(schedule, 5000)
+    assert not eval_due(Every(1000), 0)
+    assert not eval_due(schedule_for(slow, _eval_config(slow, slow_on_first_step=False)), 0)
 
 
 def test_the_tier_travels_with_the_metric_across_families() -> None:
