@@ -296,4 +296,4 @@ conflict-free merge is not evidence of a correct merge.
 ---
 
 Fuller technical detail, including the measurement runs behind item 4 and the failure
-timeline behind item 6, is in `../report.md`, sections 7 and 8.
+timeline behind item 6, is in `report.md`, sections 7 and 8.

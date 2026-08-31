@@ -873,7 +873,7 @@ Fine-tune pair (nlft-keep / nlft-drop, §8.13 questions) starts on the freed car
 
 ### 8.16 Plots: nlpenalty dose-response (2026-08-29)
 
-All figures in `notes/plots/nlpenalty/`. Apples-to-apples throughout: the L18 family is
+All figures in `plots/nlpenalty/`. Apples-to-apples throughout: the L18 family is
 control/0.5x/1x/2x (p-cbb66ad1 / p-55ee815f / p-43e77281 / p-3c8c727c), all merged code,
 same seed/recipe/batch, values at step 20000. The 4L family is the matched merged pair
 (p-b7fd77f3 / p-78852086); the confounded pre-merge baseline appears in NO figure.
@@ -898,10 +898,10 @@ Soft neuron count per component: **2179 -> 29 at the SMALLEST dose (74x)**, then
 and 18 (2x) — the census saturation of §8.14 was the tail of an effect that is nearly
 complete at 5e-4. Attention heads: ~14 -> ~1-2 per component. Same shape at 4L (2206 -> 40).
 
-![L18 neurons/component](notes/plots/nlpenalty/l18_nonlinearity_neuron.png)
-![L18 heads/component](notes/plots/nlpenalty/l18_nonlinearity_attn.png)
-![4L neurons/component](notes/plots/nlpenalty/4l_nonlinearity_neuron.png)
-![4L heads/component](notes/plots/nlpenalty/4l_nonlinearity_attn.png)
+![L18 neurons/component](plots/nlpenalty/l18_nonlinearity_neuron.png)
+![L18 heads/component](plots/nlpenalty/l18_nonlinearity_attn.png)
+![4L neurons/component](plots/nlpenalty/4l_nonlinearity_neuron.png)
+![4L heads/component](plots/nlpenalty/4l_nonlinearity_attn.png)
 
 **1) L0 — per stream, and the streams disagree.** Target stream: total L0 22 -> 24-25
 (~10%, confined to gate_proj 4.9 -> 7.7). NON-target stream: gate/up L0 rises 4-5x with
@@ -909,33 +909,33 @@ the coefficient (gate 0.17 -> 0.82, up 0.16 -> 0.53 at 2x) while every unpenaliz
 matrix is flat — off the target distribution, the penalized components fire far more
 promiscuously. This was invisible in the combined view.
 
-![L18 L0 target](notes/plots/nlpenalty/l18_l0_target.png)
-![L18 L0 non-target](notes/plots/nlpenalty/l18_l0_nontarget.png)
-![4L L0 target](notes/plots/nlpenalty/4l_l0_target.png)
-![4L L0 non-target](notes/plots/nlpenalty/4l_l0_nontarget.png)
+![L18 L0 target](plots/nlpenalty/l18_l0_target.png)
+![L18 L0 non-target](plots/nlpenalty/l18_l0_nontarget.png)
+![4L L0 target](plots/nlpenalty/4l_l0_target.png)
+![4L L0 non-target](plots/nlpenalty/4l_l0_nontarget.png)
 
 **2) Alive components: the familiar census dip, ~9-11%**, on the penalized MLP sites
 (grid census, stream-independent — the arithmetic-prompt grid).
 
-![L18 alive](notes/plots/nlpenalty/l18_alive.png)
-![4L alive](notes/plots/nlpenalty/4l_alive.png)
+![L18 alive](plots/nlpenalty/l18_alive.png)
+![4L alive](plots/nlpenalty/4l_alive.png)
 
 **3) Rounded-mask reconstruction: mild on target, ZERO on non-target.** Target-stream
 rounded KL rises 11%/18%/22% at 0.5x/1x/2x; the non-target rounded KL is flat to four
 significant figures in both families.
 
-![L18 rounded KL target](notes/plots/nlpenalty/l18_rounded_kl_target.png)
-![L18 rounded KL non-target](notes/plots/nlpenalty/l18_rounded_kl_nontarget.png)
-![4L rounded KL target](notes/plots/nlpenalty/4l_rounded_kl_target.png)
-![4L rounded KL non-target](notes/plots/nlpenalty/4l_rounded_kl_nontarget.png)
+![L18 rounded KL target](plots/nlpenalty/l18_rounded_kl_target.png)
+![L18 rounded KL non-target](plots/nlpenalty/l18_rounded_kl_nontarget.png)
+![4L rounded KL target](plots/nlpenalty/4l_rounded_kl_target.png)
+![4L rounded KL non-target](plots/nlpenalty/4l_rounded_kl_nontarget.png)
 
 **4) PGD — per stream: target nearly flat until 2x; non-target carries the cost**
 (+60-90% across both roles).
 
-![L18 PGD target](notes/plots/nlpenalty/l18_pgd_target.png)
-![L18 PGD non-target](notes/plots/nlpenalty/l18_pgd_nontarget.png)
-![4L PGD target](notes/plots/nlpenalty/4l_pgd_target.png)
-![4L PGD non-target](notes/plots/nlpenalty/4l_pgd_nontarget.png)
+![L18 PGD target](plots/nlpenalty/l18_pgd_target.png)
+![L18 PGD non-target](plots/nlpenalty/l18_pgd_nontarget.png)
+![4L PGD target](plots/nlpenalty/4l_pgd_target.png)
+![4L PGD non-target](plots/nlpenalty/4l_pgd_nontarget.png)
 
 **Answer to the key question:** on the TARGET distribution the penalty is nearly free —
 L0 ~flat, rounded KL +11-22%, PGD flat until 2x. Its entire cost lives OFF-distribution:
