@@ -1,0 +1,389 @@
+# REFERENCE CONFIG — the current state of the art for the JAX targeted
+# (dual-objective) addsub decomposition. This is NOT a canonical seat: it lives
+# outside `param_decomp/experiments/lm/configs/`, so the CONFIGS.md registry cap
+# does not count it and `test_repo_configs_parse.py` does NOT gate it. Nothing
+# migrates it for you — a schema change can rot this file silently. It parsed
+# against tip when written (2026-08-31, post-#1000 merge d514a2f5e); re-check it
+# before launching, and update it when the recipe advances.
+#
+# TARGETED (tPD, SPEC §11) DUAL-OBJECTIVE (SPEC S36/T12) Llama-3.1-8B layer-18
+# decomposition on the 1..100 a+b / a-b prompt pool, sized for 2x L40 (replicate 2).
+# Runs via `python -m param_decomp.experiments.lm.run_targeted`.
+#
+# The recipe is that of addsub-L18-16-ntmerged-bsc
+# (p-5b7fa697, 20k steps, 2026-08-21 campaign close-out). It keeps the whole
+# addsub-L18-14-4x recipe on the TARGET stream — every importance-minimality
+# coefficient and the shared frequency coefficient warm-starts at 4x its final value
+# and decays linearly to the final value over the first 50% of training, then holds;
+# the nontarget imp-min coefficients set EQUAL to the target's (final 5.0e-05, as in
+# addsub-L18-14-equal); the o/down sites widened (o 128 -> 256, down 456 -> 512) —
+# and replaces each of the NON-TARGET stream's stochastic recon terms (output AND
+# hidden — the hidden admission is the T5/T12 2026-08-20 amendment) with the MERGED
+# stochastic+PPGD term (S34). The target stream is deliberately UNCHANGED: the
+# allmerged-bsc twin, which merges the target terms too, trades a hair of target
+# PGD/L0 and +6% step time for -3.3 GB/rank, and lost.
+#
+# What the merged nontarget adversary buys, at 20k, against 14-4x's corrected numbers:
+# nontarget PGD out/hid 0.0091/0.0092 vs 0.0168/0.0157 — the corrected nontarget worst
+# case tightens ~45% — at ZERO step-time cost and full target-stream parity (target PGD
+# out/hid 0.0043/0.0037 vs 0.0043/0.0032, kl_ci_masked 0.0035 vs 0.0033). The mid-training
+# nontarget-L0 inflation (6 -> 15/48 at 8k) anneals back to +0.4-0.5 absolute by 20k.
+#
+# Source shapes on the target stream are `bsc`, NOT `sc`: the sc arms showed a ~10x
+# target eval-PGD regression by step 4000 — one batch-shared source is a single tracked
+# attack point and undercovers, while bsc's 128 parallel per-sample attacks are
+# load-bearing for target robustness, at negligible cost on the 5-token pool geometry.
+#
+# The pinned run's own immutable `launch_config.yaml` remains the authority on what
+# actually ran (`~/out/runs/p-5b7fa697/`); this file is that recipe carried onto the
+# post-#1000 schema, differing from the pin only in `run_name` and the six migrations
+# that merge forced: `attention_implementation: xla` on both the CI fn's attention and
+# the target, the folded `cadence.checkpointing` block, the required
+# `runtime.compilation_cache_dir` + `compiler_options`, the explicit `replicate` mesh
+# axis in place of `dp`/`gpus_per_node`, and `sharding: ddp` in place of `zero1`.
+#
+# `run_name` is left at the generic seat name deliberately: `addsub-L18-16-ntmerged-bsc`
+# already owns a `runs/by-name/` symlink, and reusing it would collide.
+run_name: jax-l18-addsub-targeted
+decomposition:
+  sites:
+    kind: glu_transformer
+    layers:
+      kind: list
+      indices:
+        - 18
+    cs:
+      q: 72
+      k: 72
+      v: 128
+      o: 256
+      gate: 456
+      up: 456
+      down: 512
+  ci:
+    type: chunkwise_transformer
+    # One decomposed block at blocks_per_chunk 1 is a single chunk spanning all seven
+    # sites; `all_block_taps` feeds it their input activations (attn in/out, MLP in,
+    # MLP hidden).
+    blocks_per_chunk: 1
+    input_tap: all_block_taps
+    d_model: 512
+    n_blocks: 4
+    attention:
+      kind: mha
+      n_heads: 8
+      # `xla`, NOT `auto`: cuDNN's graph API cannot run against this box's pre-CUDA-12.8
+      # driver. #1000 turned this branch's hard-coded cuDNN-off into this knob.
+      attention_implementation: xla
+    ffn:
+      kind: gelu
+      hidden: 2048
+    # The torch trainer's default init, replicated: every readout head starts W=0,
+    # bias 0.5 — all CI logits mid-window, within gradient reach of both losses.
+    zero_init_readout: true
+    dual: true
+pd:
+  seed: 0
+  steps: 20000
+  batch_size: 128
+  weight_init: coupled
+  ci_scaled_weight_decay: 0.3
+  components_optimizer:
+    lr_schedule:
+      max_val: 3.2e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: 0.01
+  ci_fn_optimizer:
+    lr_schedule:
+      max_val: 1.6e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 1.0, frac: 0.1, interp: cosine}
+    betas: [0.9, 0.999]
+    weight_decay: 0.0
+    grad_clip_norm: null
+  loss_metrics:
+    - type: SmoothL0ImportanceMinimalityLoss
+      # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+      coeff:
+        max_val: 2.0e-04
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 0.25}
+          - {at: 1.0, frac: 0.25}
+      normalize_at_one: true
+      gamma:
+        max_val: 1.0
+        points:
+          - {at: 0.0, frac: 1.0}
+          - {at: 0.5, frac: 1.0}
+          - {at: 1.0, frac: 0.01}
+      frequency:
+        # 4x the final 2.5e-05 at step 0, linear to 2.5e-05 at 50%, then held.
+        # ONE frequency block shared across target and nontarget passes (SPEC T6).
+        coeff:
+          max_val: 1.0e-04
+          points:
+            - {at: 0.0, frac: 1.0}
+            - {at: 0.5, frac: 0.25}
+            - {at: 1.0, frac: 0.25}
+        reference_datapoint_count: auto
+    - type: StochasticReconSubsetLoss
+      coeff: 1.0
+      routing:
+        type: uniform_k_subset
+    - type: UnmaskedReconLoss
+      coeff: 0.5
+    - type: PersistentPGDReconLoss
+      coeff: 0.5
+      n_warmup_steps: 2
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      source_shape: bsc
+  # The dual objective's HIDDEN pass (SPEC S36): the CI fn's second head scored at the
+  # post-L18 MLP outputs instead of the model logits, so components stay important for
+  # what layer 18 writes, not only for what survives to the unembed.
+  hidden:
+    points:
+      - layers.18.mlp.down_proj.out
+      - layers.19.mlp.down_proj.out
+      - layers.20.mlp.down_proj.out
+      - layers.21.mlp.down_proj.out
+      - layers.22.mlp.down_proj.out
+      - layers.23.mlp.down_proj.out
+      - layers.24.mlp.down_proj.out
+      - layers.25.mlp.down_proj.out
+      - layers.26.mlp.down_proj.out
+      - layers.27.mlp.down_proj.out
+      - layers.28.mlp.down_proj.out
+      - layers.29.mlp.down_proj.out
+      - layers.30.mlp.down_proj.out
+      - layers.31.mlp.down_proj.out
+    # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+    impmin_coeff:
+      max_val: 2.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.5, frac: 0.25}
+        - {at: 1.0, frac: 0.25}
+    recon:
+      - type: StochasticReconSubsetLoss
+        name: HiddenStochasticReconSubset
+        coeff: 2.0
+        routing:
+          type: uniform_k_subset
+      - type: PersistentPGDReconLoss
+        name: HiddenPersistentPGDRecon
+        coeff: 1.0
+        n_warmup_steps: 2
+        optimizer:
+          type: adam
+          beta1: 0.5
+          beta2: 0.99
+          eps: 1.0e-08
+          lr_schedule:
+            max_val: 0.01
+            points:
+              - {at: 0.0, frac: 0.0}
+              - {at: 0.025, frac: 1.0}
+              - {at: 1.0, frac: 1.0}
+        source_shape: bsc
+prompts:
+  kind: prompts_file
+  path: param_decomp/experiments/lm/prompts/addition_subtraction_1-100.txt
+nontarget:
+  batch_size: 96  # torch-reference parity, and what buys step-time parity: the broad-stream
+  # passes dominate the step (seq 64 vs the pool's 5 tokens), so 128 -> 96 took the measured
+  # step from 4.27 to 3.35 s on 2x L40 (2026-08-18). Peak 39.7 GB/rank of ~43.6 — an OOM here
+  # does not raise (rank 0 dies mid-allocation, rank 1 waits on the clique, the job HANGS);
+  # re-probe before raising.
+  # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+  impmin_coeff:
+    max_val: 2.0e-04
+    points:
+      - {at: 0.0, frac: 1.0}
+      - {at: 0.5, frac: 0.25}
+      - {at: 1.0, frac: 0.25}
+  recon:
+    # Replaces the 14-4x seat's StochasticReconSubsetLoss 1.0: same TOTAL coeff; the
+    # adversarial share ramps 0 -> 0.5 over the first 100 steps (the untrained
+    # decomposition isn't worth attacking). n_warmup 0: the bundle's one update per step
+    # is the S14' final ascent — zero extra broad-stream forwards, so step time holds.
+    # source_shape c matches the eval probe's threat model exactly.
+    - type: MergedStochasticSubsetPPGDReconLoss
+      coeff: 1.0
+      adv_fraction:
+        max_val: 0.5
+        points:
+          - {at: 0.0, frac: 0.0}
+          - {at: 0.005, frac: 1.0}
+          - {at: 1.0, frac: 1.0}
+      n_warmup_steps: 0
+      routing:
+        type: uniform_k_subset
+      optimizer:
+        type: adam
+        beta1: 0.5
+        beta2: 0.99
+        eps: 1.0e-08
+        lr_schedule:
+          max_val: 0.01
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.025, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+      source_shape: c
+  hidden:
+    # Matched to the target stream: 4x 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
+    impmin_coeff:
+      max_val: 2.0e-04
+      points:
+        - {at: 0.0, frac: 1.0}
+        - {at: 0.5, frac: 0.25}
+        - {at: 1.0, frac: 0.25}
+    recon:
+      # Replaces NontargetHiddenStochasticReconSubset 1.0 — the T5/T12 2026-08-20
+      # admission: the merged term rides the same one masked forward the stochastic term
+      # used, so the hidden adversary is compute-free too.
+      - type: MergedStochasticSubsetPPGDReconLoss
+        name: NontargetHiddenMergedStochasticPPGDRecon
+        coeff: 1.0
+        adv_fraction:
+          max_val: 0.5
+          points:
+            - {at: 0.0, frac: 0.0}
+            - {at: 0.005, frac: 1.0}
+            - {at: 1.0, frac: 1.0}
+        n_warmup_steps: 0
+        routing:
+          type: uniform_k_subset
+        optimizer:
+          type: adam
+          beta1: 0.5
+          beta2: 0.99
+          eps: 1.0e-08
+          lr_schedule:
+            max_val: 0.01
+            points:
+              - {at: 0.0, frac: 0.0}
+              - {at: 0.025, frac: 1.0}
+              - {at: 1.0, frac: 1.0}
+        source_shape: c
+eval:
+  # Tracks nontarget.batch_size's geometry on the broad stream; the target-stream probes
+  # run at the pool's own (unpadded) geometry.
+  batch_size: 128
+  n_steps: 10
+  every: 500
+  slow_every: 4000
+  slow_on_first_step: true
+  metrics:
+    # No UnmaskedNoDeltaReconLoss next to CEandKLLosses (same `ce_kl/kl_*` arms — the
+    # evaluator refuses the pair); CIMaskedReconLoss stays for hidden_ci coverage.
+    - type: CIMaskedReconLoss
+    - type: CEandKLLosses
+      rounding_threshold: 0.0
+    - type: CI_L0
+      ci_alive_threshold: 0.0
+      groups:
+        total: ["*"]
+    # Slow-tier by declaration, and capped: on a targeted dual run this probe fans out
+    # over stream x CI-role (4 ops), each 20 full fwd+bwd ascents per batch — uncapped at
+    # the fast cadence it was ~10 min of every eval pass (the 2026-08-18 finding that
+    # moved it to the slow tier).
+    - type: PGDReconLoss
+      init: random
+      source_shape: c
+      n_steps: 20
+      step_size: 0.1
+      n_batches: 4
+    - type: CIHistograms
+      n_batches_accum: 1
+    - type: CIHiddenActsReconLoss
+    - type: TwoStreamCIMeanPerComponent
+    - type: WeightMagnitude
+    - type: ABGridDataset
+      mean_ci_floor: 0.05
+      operation: add
+      a_range: [1, 100]
+      b_range: [1, 100]
+      positions: null
+      chunk_prompts: 1000
+cadence:
+  train_log_every: 100
+  # #1000 folded `save_every` + `checkpoint_retention` into one `checkpointing` block.
+  checkpointing:
+    kind: periodic
+    save_every: 5000
+    retention:
+      kind: keep_last
+      n: 2
+target:
+  # `xla`, NOT `auto`: cuDNN's graph API cannot run against this box's pre-CUDA-12.8
+  # driver — `CuDnnThunk::Initialize` fails inside `run_auxiliary_kernels`'
+  # `cudaMemcpyAsync` with an unchecked `cudaErrorInvalidValue`, resurfacing later at an
+  # unrelated `cuModuleGetFunction` that names an innocent kernel. It blocked every
+  # dp>=1 targeted run. #1000 turned this branch's hard-coded cuDNN-off into this knob,
+  # so the workaround is authored per run instead of patched in.
+  attention_implementation: xla
+  spec:
+    kind: hf_weights_in_vendored
+    model_class: param_decomp.experiments.lm.vendored.llama_3_1.model.VendoredLlama
+    model_name: meta-llama/Llama-3.1-8B
+  weights_dtype: bfloat16
+data:
+  train:
+    kind: name
+    name: fineweb_llama_tok_64
+  eval:
+    kind: name
+    name: fineweb_llama_tok_64_eval
+runtime:
+  # Upstream #1000 made these two required and un-defaulted.
+  compilation_cache_dir: ~/.cache/param-decomp/xla
+  compiler_options: tuned-v1
+  # The explicit `(replicate, fsdp, tp)` mesh (#1000) — the old
+  # `dp: 2 / gpus_per_node: 2 / fsdp: 1` derivation spells exactly this.
+  replicate: 2
+  tp: 1  # L40s are PCIe, not NVLink — tensor parallel would pay a fabric cost for nothing
+  fsdp: 1  # degenerate the parameter-sharding axis: both cards go on `replicate` and the
+  # frozen target stops being gathered a layer at a time inside every scan. `nvidia-smi topo
+  # -p2p r` reports CNS between every GPU pair here, so that gather runs over shared memory,
+  # not NVLink, and it dominates the step. Costs the full ~16GiB target resident per card
+  # instead of ~9 (2.1 embed+head replicated either way, 14 of blocks). Subsumes
+  # `ascend_replicate`, whose whole job is hoisting the same gather off the ascents.
+  # `ddp`, NOT `zero1`. #1000 changed what `zero1` means (SPEC D4 amendment 2026-08-18:
+  # its faithfulness rows became the intra-matrix master layout for ALL groups), and at
+  # this config — one decomposed block, replicate 2, fsdp 1 — the new layout emits ~8.0 GB
+  # of cross-replicate all-reduce PER STEP against 0.30 GB before. On a box whose GPUs have
+  # no peer-to-peer (CNS between every pair, so NCCL routes over shared memory) that is the
+  # whole cost: 69 all-reduces/step vs 13. Measured, 60-step smokes:
+  #   pre-merge zero1  3.10 s/step, 21.16 GB, 13 all-reduce,  299.7 MB
+  #   merged   zero1   6.32 s/step, 28.23 GB, 69 all-reduce, 7968.9 MB
+  #   merged   ddp     2.83 s/step, 26.79 GB, 12 all-reduce,  356.1 MB
+  # `owner` is not available here: it shards the component stack axis over `replicate`, and
+  # a single-block decomposition gives every semantic group stack length 1, which cannot
+  # tile 2 — it refuses at config build. Layout-only change; SPEC D4 covers the numerics.
+  sharding: ddp
+  remat_recon_forwards: true
+  remat_ci_fn: true
+  # A/B'd 2026-08-18 at this exact shape: sequential 3.35 s/step / 39.7 GB peak vs fused
+  # 3.38 / 40.1 — the serialization costs nothing here and the memory savings come free.
+  sequential_passes: true
+  launch_env:
+    xla_python_client_mem_fraction: 0.97  # headroom for the replicated target
+wandb:
+  project: param-decomp-llama

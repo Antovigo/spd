@@ -423,3 +423,18 @@ The cheap levers, in increasing overhead:
   - 14-4x         (p-bdf13b20): analysis/subspace_scatter/ — 91 add / 76 sub alive
   Plane scatter (alive_plane_scatter) remains unported (needs a JAX collection pass;
   ridge_cv_probes jsons are base-model and reusable).
+- 2026-08-31: SOTA RECIPE COMMITTED as a reference config. The 2026-08-21 verdict
+  ("ntmerged-bsc is the seat-worthy recipe") is now carried in the tree at
+  `notes/dual_objective/addsub-L18-sota.yaml`, migrated onto the post-#1000 schema.
+  It is deliberately NOT a canonical seat: the upstream merge left the LM registry at
+  its cap of 10, and the recipe did not need to displace one. Consequence to know —
+  it sits outside `param_decomp/experiments/lm/configs/`, so
+  `test_repo_configs_parse.py` does not gate it and a schema change will not migrate
+  it. It was validated by hand against tip when written (parse + placement gate +
+  both round-trips). It differs from p-5b7fa697's immutable pin only in `run_name`
+  and the six migrations #1000 forced (xla attention on the CI fn and the target, the
+  folded `cadence.checkpointing`, required `compilation_cache_dir`/`compiler_options`,
+  the explicit `replicate` mesh axis, and `sharding: ddp` for `zero1`).
+  Recovered in the same pass: the addsub seat had been silently LOST from the tree by
+  the upstream merge `4616e8ce1`, which resolved CONFIGS.md and the configs dir wholly
+  in upstream's favour — it was the only purely-local file that merge dropped.

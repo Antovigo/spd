@@ -19,6 +19,7 @@ mirrors the torch run field-for-field.
 | hidden-only comparison | `param_decomp/core/recon.py` / `losses.py` — `HiddenActsOnlyReconstruction` |
 | config surface | `pd.hidden`, `nontarget.hidden`, `decomposition.ci.dual`, `runtime.sequential_passes` |
 | the run (NOT in-repo, per CONFIGS.md) | `~/pd_scratch/dual_obj_jax/` — config, sbatch, and the derivation script |
+| current SOTA recipe (reference, ungated) | `notes/dual_objective/addsub-L18-sota.yaml` — addsub-L18-16-ntmerged-bsc (p-5b7fa697) on the post-#1000 schema; outside the capped seat registry, so nothing migrates it |
 | SPEC | S36 (dual CI), T12 (the hidden pass); T1 and T5 amended |
 
 ## Three decisions worth knowing
