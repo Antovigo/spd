@@ -34,7 +34,10 @@ from param_decomp.core.placement import PlacementRules
 from param_decomp.core.recon import OutputAndHiddenActsReconstruction
 from param_decomp.core.recon_eval import FreshPGDReconEval
 from param_decomp.experiments.lm.eval import (
+    MaskingArm,
+    make_ce_kl_step,
     make_eval_step,
+    make_masked_kl_step,
     next_token_cross_entropy,
 )
 from param_decomp.targets.glu_transformer import glu_site_specs, mlp_family_site_cs
@@ -495,6 +498,66 @@ def test_eval_step_l0_groups_sum_member_sites():
             fresh_pgd=None,
             n_valid_rows=None,
         )
+
+
+def test_ce_kl_delta_pinning_composes_delta_on_except_unmasked():
+    """SPEC T4 (amended 2026-08-28): a delta-pinned CE/KL step keeps the delta escape
+    valve fully on. All-ones component masks + a pinned delta rebuild the frozen weights
+    exactly (rounding_threshold=-1 makes `rounded_masked` that variant), so its KL
+    collapses, while `unmasked` — the enumerated delta-off exception — is untouched by
+    pinning and still measures the bare component sum."""
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
+    model = PlacedModel(
+        model=tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0)), placement=None
+    )
+    from param_decomp.core.components import init_component_stacks
+
+    vu = init_component_stacks(sites, jax.random.PRNGKey(1))
+    ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
+    key = jax.random.PRNGKey(5)
+
+    def run(delta_pinned: bool) -> Mapping[str, jax.Array]:
+        step = make_ce_kl_step(model, ci_fn.capture_keys, -1.0, delta_pinned=delta_pinned)
+        return step(model, vu, ci_fn, token_ids, key)
+
+    plain, pinned = run(delta_pinned=False), run(delta_pinned=True)
+    assert set(pinned) == set(plain)
+
+    assert float(pinned["ce_kl/kl_rounded_masked"]) < 1e-3 * float(plain["ce_kl/kl_rounded_masked"])
+    assert jnp.array_equal(pinned["ce_kl/kl_unmasked"], plain["ce_kl/kl_unmasked"])
+    assert float(pinned["ce_kl/kl_unmasked"]) > 10 * float(pinned["ce_kl/kl_rounded_masked"])
+    # Every other variant's forward changes once the delta turns on.
+    for variant in ("ci_masked", "stoch_masked", "random_masked", "zero_masked"):
+        assert not jnp.array_equal(pinned[f"ce_kl/kl_{variant}"], plain[f"ce_kl/kl_{variant}"]), (
+            variant
+        )
+
+
+def test_masked_kl_delta_pinning_moves_ci_masked_arm_only():
+    """The standalone masked-KL arms under SPEC T4's amendment: `ci_masked` composes its
+    delta masks at 1.0 when pinned; `unmasked` is the delta-off exception either way."""
+    cfg = tiny_glu_cfg()
+    sites = glu_site_specs(cfg, mlp_family_site_cs(4, 5, 8))
+    model = PlacedModel(
+        model=tiny_glu_decomposed_lm(cfg, sites, jax.random.PRNGKey(0)), placement=None
+    )
+    from param_decomp.core.components import init_component_stacks
+
+    vu = init_component_stacks(sites, jax.random.PRNGKey(1))
+    ci_fn = _build_ci_fn(model, cfg.n_embd, jax.random.PRNGKey(2))
+    token_ids = jax.random.randint(jax.random.PRNGKey(3), (2, 16), 0, cfg.vocab_size)
+    key = jax.random.PRNGKey(5)
+
+    def run(arm: MaskingArm, delta_pinned: bool) -> jax.Array:
+        step = make_masked_kl_step(model, ci_fn.capture_keys, arm, delta_pinned=delta_pinned)
+        return step(model, vu, ci_fn, token_ids, key)[f"ce_kl/kl_{arm}"]
+
+    assert not jnp.array_equal(
+        run("ci_masked", delta_pinned=True), run("ci_masked", delta_pinned=False)
+    )
+    assert jnp.array_equal(run("unmasked", delta_pinned=True), run("unmasked", delta_pinned=False))
 
 
 def test_make_eval_step_rejects_positionless_target():
