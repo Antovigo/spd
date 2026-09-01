@@ -1069,3 +1069,52 @@ reasonable band; 1.25e-4 gives up census effect entirely for no faithfulness sav
 is NOT recommended. A seed replicate is the missing evidence: every statement here rests
 on one seed per dose, and the noise floor measured above is uncomfortably close to the
 between-dose differences on the cost metrics.
+
+### 8.21 Penalized decompositions are markedly more attack-init sensitive (2026-09-01)
+
+Prompted by a suspicion that the PGD endpoints were noisy. Design: each finished L18
+checkpoint re-evaluated with the PRODUCTION probe (`make_fresh_pgd_step`, unmodified),
+16 fresh-PGD inits, on ONE batch held fixed across every init AND every checkpoint
+(pass 40, the production endpoint pass). Model fixed, batch fixed — the whole spread is
+attack-init sensitivity. Harness: `pgd_replicates.py` / `pgd_replicates.sbatch`.
+
+**First, the noise decomposition** (control, 4-batch production metric): init alone gives
+cv 1.9-2.3% on the non-target arms, against cv 20.8-24.7% when the batch draw is also
+allowed to vary. So the eval noise that made single-firing dose rankings unsound (§8.20)
+is BATCH noise, not init noise, and the fix for cross-run comparisons is a shared batch,
+not more inits.
+
+**Then the finding.** cv over 16 inits, single fixed batch (95% chi-square CI, n=16):
+
+| coeff (×1e-3) | target/out | target/hidden | nontgt/out | nontgt/hidden |
+|---|---|---|---|---|
+| 0 | 4.5% | 5.6% | 3.2% | 3.4% |
+| 0.125 | 15.2% | 15.5% | 7.7% | 14.7% |
+| 0.25 | 16.4% | 18.8% | 12.5% | 11.3% |
+| 0.5 | 17.4% | 17.2% | 21.5% | 14.7% |
+| 1 | 14.5% | 15.0% | 14.3% | 20.2% |
+| 2 | 19.7% | 20.0% | 38.9% | 33.5% |
+
+Full table with CIs: `plots/nlpenalty/init_sensitivity_table.md`.
+
+1. **Penalized vs unpenalized is a step change, not a gradient.** The control's cv
+   (3.2-5.6%) sits below every penalized arm's 95% CI lower bound on all four arms. Even
+   the smallest dose triples-to-quadruples it. This is a property of the MODEL, not the
+   measurement: identical batch, identical probe.
+2. **Among penalized arms, the trend is dose-dependent only OFF-distribution.**
+   Spearman cv-vs-coefficient over the five penalized doses: non-target/output rho=+0.90
+   (p=0.037), non-target/hidden rho=+0.90 (p=0.037); target arms rho=+0.40/+0.30
+   (p=0.51/0.62, i.e. flat within noise at 15-20%).
+3. **Interpretation.** The prior appears to roughen the adversarial landscape: with
+   component writes concentrated on few nonlinearities, where the attack starts matters
+   much more, and off-distribution it matters progressively more with dose. Practical
+   consequence: for a penalized decomposition a single-init PGD number is a sample from a
+   wide distribution — at 2e-3 the non-target arm ranges 0.0197-0.0594 across inits, a
+   3x spread. Report a multi-init mean, or the max if the worst case is what matters.
+
+![L18 init sensitivity, target](plots/nlpenalty/l18_init_sensitivity_target.png)
+![L18 init sensitivity, non-target](plots/nlpenalty/l18_init_sensitivity_nontarget.png)
+
+Caveat: one batch, one seed per dose. The control-vs-penalized step is far larger than
+the CIs and is safe; the within-penalized trend rests on 5 points and one Spearman test
+per arm, so treat p=0.037 as suggestive rather than established.
