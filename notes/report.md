@@ -1210,3 +1210,52 @@ of the adversarial cost while keeping the 8.16 locality gain.
 
 Caveat: n=6 checkpoints, one seed each; the correlations above have 4 dof and cannot
 separate dead/alive/total norm (they are collinear, all rho=+0.89).
+
+### 8.24 The L18-17 series: the divergence is the PENALTY, not the hidden pass (2026-09-02)
+
+Replication of 8.22 on the ntmerged-based L18-17 series, plus the output-only run.
+Output-role arms throughout (`ci.dual: false` runs have no hidden readout), same fixed
+init and batches as 8.22, `pgd_trajectory.py`. Values:
+`plots/nlpenalty/l1817_adv_steps_table.md`.
+
+![L18-17 adversarial steps, target](plots/nlpenalty/l1817_adv_steps_target.png)
+![L18-17 adversarial steps, non-target](plots/nlpenalty/l1817_adv_steps_nontarget.png)
+
+Non-target/output, ratio to the L18-16 control at each k:
+
+| run | hidden role | penalty | k=20 | k=80 | x ctrl @80 |
+|---|---|---|---|---|---|
+| L18-16 control | dual | — | 0.0113 | 0.0119 | 1.00x |
+| L18-16 0.5x (allmerged) | dual | 5e-4 | 0.0212 | 0.0416 | 3.51x |
+| L18-17 nl5e4 | dual | 5e-4 | 0.0133 | **0.0732** | **6.16x** |
+| L18-17 output-only | single | — | 0.0100 | 0.0113 | 0.95x |
+| L18-17 output-only + 5e-4 | single | 5e-4 | 0.0151 | 0.0483 | 4.07x |
+
+1. **The 8.22 divergence replicates across recipes.** ntmerged + 5e-4 shows the same
+   flat-then-explode shape and ends at 6.2x control, above the allmerged 0.5x arm's
+   3.5x. Not an artifact of the merged stochastic+PPGD recipe.
+2. **The hidden pass is NOT the cause.** Output-only + 5e-4 still diverges (4.1x,
+   0.0151 -> 0.0483 from k=20 to k=80) with no hidden CI role at all. The penalty alone
+   suffices — consistent with 8.23's norm-inflation mechanism, which is weight-space and
+   role-independent.
+3. **Output-only WITHOUT the penalty is the most adversarially stable decomposition
+   measured**: 0.95x control on the non-target arm, saturated by k=40 — flatter than the
+   control itself. Dropping the hidden role costs target-stream reconstruction (worst at
+   low budget, 0.0061 at k=5 vs control 0.0034) but that curve then converges (+68% at
+   k=80) instead of running away.
+4. **Target stream: penalty and role both cost, and they add.** At k=80: control 0.00454,
+   output-only 0.00761 (+68%), nl5e4 0.00798 (+76%), output-only + 5e-4 0.01039
+   (**+129%**, the worst of the five).
+
+**Reading.** The off-distribution runaway tracks the penalty in every configuration
+tested (5 runs, 2 recipes, 2 role settings) and never appears without it. Output-only
+trades a uniformly higher but BOUNDED target-stream error for the elimination of
+non-target fragility — the opposite trade from the penalty, which buys locality at the
+price of an unbounded-looking off-distribution tail.
+
+Caveats: one init and one batch set per curve (8.21 init cv 15-39% on penalized
+non-target arms); recompilation alone moves a repeated measurement ~4.5% (the L18-16
+control's k=20 read 0.00431 here vs 0.00422 in 8.22). The 6.16x vs 4.07x vs 3.51x
+ordering among penalized runs is within that combined uncertainty; the
+penalized-vs-unpenalized separation is not. No merged-code ntmerged run WITHOUT the
+penalty exists, so L18-17 nl5e4's baseline is borrowed from the L18-16 line.
