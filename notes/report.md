@@ -1162,3 +1162,51 @@ Caveat: one init, one batch set per point (per the requested design), so a singl
 carries the 8.21 init spread (cv 15-39% on penalized non-target arms). The control-vs-
 penalized separation at k>=40 is far larger than that; between-dose ordering at high k
 is not.
+
+### 8.23 Why penalized runs diverge under a stronger adversary: norm inflation, not deadness or cancellation (2026-09-02)
+
+Antoine's hypothesis: dead components keep non-zero weights when the penalty is on, so
+the adversary can switch them on and is effectively stronger. Two weight-space tests over
+all six L18 checkpoints (`dead_component_norms.py`, `component_geometry.py`; both are
+checkpoint arithmetic, the first plus one forward for CI).
+
+Per component the switchable scale is `||V_c|| * ||U_c||` — the rank-1 update the mask can
+turn on. DEAD = max CI over batch x positions < 0.1, i.e. never fires (a MEAN-CI threshold
+is useless here: CI is sparse, L0 ~22 of thousands, so it marks ~99% dead).
+
+| coeff (×1e-3) | dead norm | alive norm | total | dead share | MLP coherence | PGD nt/hidden @k=80 |
+|---|---|---|---|---|---|---|
+| 0 | 372 | 1014 | 1386 | 26.8% | 0.051 | 0.0120 |
+| 0.125 | 937 | 1817 | 2754 | 34.0% | 0.046 | 0.0422 |
+| 0.25 | 1042 | 1973 | 3015 | 34.6% | 0.048 | 0.0303 |
+| 0.5 | 1104 | 2159 | 3263 | 33.8% | 0.050 | 0.0455 |
+| 1 | 1196 | 2340 | 3536 | 33.8% | 0.052 | 0.0806 |
+| 2 | 1214 | 2519 | 3733 | 32.5% | 0.056 | 0.0752 |
+
+1. **Dead components DO carry much more weight — 372 -> 1214, a 3.3x increase.** The
+   hypothesis is directly supported in absolute terms, and it correlates with the
+   divergence (Pearson r=+0.83, p=0.042 vs PGD at k=80).
+2. **But it is not SPECIFIC to dead components.** The dead SHARE is flat at 32-35% for
+   every penalized dose (up from the control's 27%, then no trend), and alive norm grows
+   in lockstep (1014 -> 2519, 2.5x) with an equal-or-better correlation to the divergence
+   (r=+0.89, p=0.019). What the penalty does is inflate the WHOLE switchable norm ~2.7x;
+   dead components inherit their usual ~1/3 of it.
+3. **Cancellation fragility is ruled out.** Coherence
+   `||sum_c V_c U_c^T|| / sum_c ||V_c U_c^T||` is flat at 0.046-0.056 across all six runs
+   with no trend — penalized decompositions are no more cancellation-dependent than the
+   control.
+
+**Mechanism this supports.** The penalty is SCALE-INVARIANT by construction (S36 divides
+by `||U_c||^2`), so it exerts no shrinking pressure, while forcing each component's write
+onto few units makes reconstructing a dense `W` need more total norm. The adversary's
+budget is proportional to that norm, so a bigger-normed decomposition is a strictly
+stronger attack surface — and finding the useful subset takes ascent steps, which is
+exactly the k>=20 divergence of 8.22.
+
+**Testable follow-up if this matters:** pair the prior with an explicit norm penalty (or
+raise `ci_scaled_weight_decay`) so locality is bought without inflating `||V||*||U||`. If
+the PGD divergence tracks total norm rather than locality per se, that should remove most
+of the adversarial cost while keeping the 8.16 locality gain.
+
+Caveat: n=6 checkpoints, one seed each; the correlations above have 4 dof and cannot
+separate dead/alive/total norm (they are collinear, all rho=+0.89).
