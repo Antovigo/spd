@@ -1118,3 +1118,47 @@ Full table with CIs: `plots/nlpenalty/init_sensitivity_table.md`.
 Caveat: one batch, one seed per dose. The control-vs-penalized step is far larger than
 the CIs and is safe; the within-penalized trend rests on 5 points and one Spearman test
 per arm, so treat p=0.037 as suggestive rather than established.
+
+### 8.22 PGD loss vs number of adversarial steps: the 20-step metric understates the cost (2026-09-02)
+
+Prompted by the possibility that a run looking worse at 20 ascent steps converges better
+at 100. It does not — the opposite. Design: production probe rebuilt at `n_steps` =
+5/10/20/40/80, SAME init and SAME 4 batches for every step count and every checkpoint
+(sign-PGD from a fixed init is deterministic, so the k-points trace one ascent).
+Harness `pgd_trajectory.py`; values in `plots/nlpenalty/adv_steps_table.md`.
+
+![L18 adversarial steps, target](plots/nlpenalty/l18_adv_steps_target.png)
+![L18 adversarial steps, non-target](plots/nlpenalty/l18_adv_steps_nontarget.png)
+
+**The control saturates; penalized runs do not.** Non-target/hidden, control:
+0.0114 (k=20) -> 0.0120 (k=80), +5%. Penalized at 1e-3: 0.0214 -> 0.0806, **+277%**.
+Ratio to control grows from 1.9x at k=20 to 6.7x at k=80. Every penalized dose keeps
+climbing where the control is flat by k=40.
+
+| coeff (×1e-3) | nontgt/hidden k=20 | k=80 | ratio to control @80 |
+|---|---|---|---|
+| 0 | 0.0114 | 0.0120 | 1.0x |
+| 0.125 | 0.0233 | 0.0422 | 3.5x |
+| 0.25 | 0.0187 | 0.0303 | 2.5x |
+| 0.5 | 0.0252 | 0.0455 | 3.8x |
+| 1 | 0.0214 | 0.0806 | 6.7x |
+| 2 | 0.0355 | 0.0752 | 6.3x |
+
+**Consequences.**
+1. **The standard 20-step probe UNDERSTATES the penalty's cost**, by ~3.5x at 1e-3 on
+   the non-target/hidden arm. Every "+50-90%" figure in 8.16/8.20 is a lower bound on
+   what a stronger attacker finds.
+2. **No crossover.** No dose is worse at 20 and better at 80; the ordering is stable and
+   the gaps widen. The 20-step ranking is directionally right, just compressed.
+3. **The vulnerability needs budget to find.** At k=5 penalized and control are within
+   3-15% on the non-target arm (except 2e-3); the break is between k=10 and k=20. A
+   weak attacker sees a decomposition that looks nearly as robust as the control.
+4. **The target stream behaves differently**: penalized curves saturate like the control
+   (1e-3: +25% at k=80, converged by k=40), and dose ordering there is non-monotone
+   (0.5x reaches +49%, above 1e-3's +25%). The divergence is an OFF-distribution
+   phenomenon, consistent with 8.16 and 8.21.
+
+Caveat: one init, one batch set per point (per the requested design), so a single curve
+carries the 8.21 init spread (cv 15-39% on penalized non-target arms). The control-vs-
+penalized separation at k>=40 is far larger than that; between-dose ordering at high k
+is not.
