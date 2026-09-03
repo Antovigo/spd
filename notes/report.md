@@ -1310,3 +1310,44 @@ single curve can land in a much worse or much better basin. The QUALITATIVE clai
 measurement; the specific high-k ratios (6.16x etc.) should be treated as one draw, not
 a point estimate. Quantifying this properly needs the 8.21 multi-init treatment applied
 at k=80.
+
+### 8.26 CORRECTION: "non-target stream" in 8.16-8.23 means the HIDDEN CI head (2026-09-03)
+
+Antoine flagged that the arm labels were ambiguous. To be exact about what those numbers
+are, and what was re-measured:
+
+`make_fresh_pgd_step(..., role=...)` picks **which CI readout head builds the mask floor**
+(`mask = ci_lower(role) + (1 - ci_lower(role)) * source`). It does NOT change what is
+reconstructed: `hidden_acts_reconstruction` is unset in every sweep config, so the loss is
+always end-to-end OUTPUT KL. So `nontarget/hidden` = *output reconstruction, non-target
+stream, masks gated by the hidden head* — never hidden-activation reconstruction.
+
+Still, gating by a differently-trained head is a different adversarial problem, and 8.22's
+figures mixed heads across doses (control and 0.5x on the output head, the rest on the
+hidden head). Those figures are WITHDRAWN. Re-harvested with `pgd_curve.py`, output head
+only, both streams, and the conclusion is unchanged and now clean:
+
+| penalty (×10⁻³) | PGD general text, k=20 | k=80 | ×control @80 |
+|---|---|---|---|
+| 0 | 0.0111 | 0.0119 | 1.00x |
+| 0.125 | 0.0182 | 0.0452 | 3.79x |
+| 0.25 | 0.0188 | 0.0309 | 2.60x |
+| 0.5 | 0.0192 | 0.0540 | 4.53x |
+| 1 | 0.0197 | 0.0722 | 6.06x |
+| 2 | 0.0279 | 0.0784 | 6.58x |
+
+Baseline saturates (+7% from k=20 to k=80), every penalised dose keeps climbing, and the
+ratio is now monotone in dose — cleaner than the hidden-gated version.
+
+Two infrastructure findings from the re-harvest:
+1. `open_jax_run` builds its OWN mesh — `hsdp_mesh(1, n_devices, 1)` with `zero1` —
+   regardless of how the run trained. On this box that layout needs ~26.5 GiB plus a
+   ~21.9 GiB transient and OOMs on 2 cards, while the run's own `ddp` / fsdp-1 layout ran
+   the same probe in its slow eval at 26.8 GiB and is ~4x faster per step. Forcing the
+   training layout is what made 2-GPU (and hence parallel) harvesting possible. Consumer
+   memory does NOT follow from training memory — this bit three times.
+2. Recording the loss inside the ascent (one 80-step run yielding every k) is illegal
+   under SPMD: `io_callback` cannot carry a replicated sharding. Hence the per-k sweep,
+   which costs sum(k) rather than max(k).
+
+The shareable write-up built on this data is `notes/nonlinearity_penalty.md`.
