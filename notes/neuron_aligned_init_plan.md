@@ -244,7 +244,29 @@ iff the literal is set (pydantic model validator; fail closed both ways).
 - Whether the harvest should also emit the centred-variance ranking as a second `rank_var_{b}`
   array in the same artifact (free; keeps the ranking-rule A/B one flag away). Proposal: yes.
 
-## 7. First experiments
+## 7. Status (2026-09-03)
+
+Implemented and committed (`86ad80b9a`, Codex-reviewed: one P2 on a diagnostic index, fixed).
+Harvested on the SOTA config's target + pool (Llama-3.1-8B, addsub 1..100, 20000×5 tokens),
+all 32 layers, both BOS arms, ~1 min each on one L40:
+`~/out/neuron_ranks/addsub1-100_llama31-8b_we_bos-{excl,incl}`.
+
+- L18 coverage: C=456 carries 0.480 (excl) / 0.485 (incl) of the block's target-pool write
+  energy, C=512 0.489 / 0.494. The top-1 neuron alone is 3% — no single dominant neuron.
+- BOS is nearly moot at L18: the two arms' top-456 sets share 447 neurons, top-512 share 506.
+  It matters at blocks 0-1 and 29-31 (BOS-included coverage@64 ≈ 1.0 at blocks 0/1: pure
+  BOS massive-activation neurons).
+- Twin runs launched, SOTA recipe with only `weight_init`+`neuron_ranks` changed, same seed:
+  `addsub-L18-18-neuronaligned-bosexcl` = p-88249b35 (job 11034) and `-bosincl` = p-222d379b
+  (job 11035); ~3.2 s/step on 2× L40 → one 20k leg. Configs/sbatch in
+  `~/pd_scratch/dual_obj_jax/addsub-L18-18-neuronaligned-*`, frozen worktree
+  `~/pd_scratch/worktrees/neuron-aligned-init`.
+- First eval (step 500, `eval.every: 500`), bosexcl / bosincl vs the baseline p-5b7fa697 at the
+  same step: target `kl_ci_masked` 0.0122 / 0.0123 vs 0.0150; target CI L0 34.6 / 34.1 vs 49.9;
+  hidden-role L0 76.9 / 71.7 vs 117.6; **non-target** `kl_ci_masked` 0.0052 / 0.0051 vs 0.1248
+  and non-target L0 11.8 / 6.5 vs 31.1. One eval point, not a verdict — read again at 4k/20k.
+
+## 8. First experiments (as planned)
 
 1. Harvest twice from the SOTA config: `--bos exclude` and `--bos include`. Read the two
    `cum_{18}` curves at C=456/512 — if the top-C sets differ by a handful of neurons the BOS
