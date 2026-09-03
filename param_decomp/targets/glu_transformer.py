@@ -1184,6 +1184,17 @@ class GLUDecomposedModel(eqx.Module):
             spans.append((self.stacked_tail, self.tail_layer, self.n_layer))
         return spans
 
+    def frozen_block(self, block: int) -> GLULayer:
+        """One block's frozen weights out of whichever stored stack holds it (global
+        numbering) — an offline read (the neuron-ranking harvest), not a forward-time
+        slice: it is the per-block `wrapped_slice` the three-stack layout keeps out of the
+        step."""
+        assert 0 <= block < self.n_layer, (block, self.n_layer)
+        for stack, lo, hi in self._frozen_spans():
+            if lo <= block < hi:
+                return jax.tree.map(lambda a, i=block - lo: a[i], stack)
+        raise AssertionError(block)
+
     def _span_slice(self, lo: int, hi: int) -> GLULayer:
         """Blocks `[lo, hi)` out of the DECOMPOSED SPAN, in global coordinates. The whole
         span returns the stored stack itself — the identity slice is what the split exists

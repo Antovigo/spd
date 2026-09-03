@@ -20,6 +20,7 @@ mirrors the torch run field-for-field.
 | config surface | `pd.hidden`, `nontarget.hidden`, `decomposition.ci.dual`, `runtime.sequential_passes` |
 | the run (NOT in-repo, per CONFIGS.md) | `~/pd_scratch/dual_obj_jax/` — config, sbatch, and the derivation script |
 | current SOTA recipe (reference, ungated) | `notes/dual_objective/addsub-L18-sota.yaml` — addsub-L18-16-ntmerged-bsc (p-5b7fa697) on the post-#1000 schema; outside the capped seat registry, so nothing migrates it |
+| neuron-aligned init (SPEC T13) | `pd.weight_init: neuron_aligned_targeted` + `pd.neuron_ranks` — `targets/neuron_alignment.py`, `experiments/lm/harvest_neuron_ranks.py`; plan and rationale in `notes/neuron_aligned_init_plan.md` |
 | SPEC | S36 (dual CI), T12 (the hidden pass); T1 and T5 amended |
 
 ## Three decisions worth knowing

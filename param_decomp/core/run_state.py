@@ -27,6 +27,7 @@ from param_decomp.core.ci_fn import (
     CIFnArch,
     ns_compute_shardings,
 )
+from param_decomp.core.components import NeuronAlignment
 from param_decomp.core.configs import (
     AdamPGDConfig,
     AdamWOptimizerConfig,
@@ -43,6 +44,7 @@ from param_decomp.core.configs import (
 from param_decomp.core.init_placed import (
     init_ci_fn_placed,
     init_component_stacks_coupled_placed,
+    init_component_stacks_neuron_aligned_placed,
     init_component_stacks_placed,
     init_sources_sharded,
 )
@@ -238,12 +240,15 @@ def init_decomposition(
     ci_fn_arch: CIFnArch,
     init_key: PRNGKeyArray,
     weight_init: WeightInit = "default",
+    neuron_alignment: NeuronAlignment | None = None,
 ) -> Decomposition:
     """The trained-product half of `init_train_state`, factored out so a consumer can
     `jax.eval_shape` it to recover the saved `decomposition` item's tree structure
     without building (or knowing about) the optimizers/adversaries. `weight_init` selects
     the V/U seeding; it does not affect the tree structure, so a structure-only consumer
-    may pass any arm."""
+    may pass any data-free arm (the default). `neuron_alignment` is the
+    `neuron_aligned_targeted` arm's harvested neuron choice (SPEC T13), required by that
+    arm alone."""
     rules, mesh = _placed_init_geometry(model)
     ci_key = random.fold_in(init_key, 1)
     # V/U placement derives from the rules table; the CI fn still declares its own
@@ -254,6 +259,13 @@ def init_decomposition(
         case "coupled" | "zero_u":
             components = init_component_stacks_coupled_placed(
                 model, init_key, rules, zero_u=weight_init == "zero_u"
+            )
+        case "neuron_aligned_targeted":
+            assert neuron_alignment is not None, (
+                "weight_init: neuron_aligned_targeted needs the harvested neuron alignment"
+            )
+            components = init_component_stacks_neuron_aligned_placed(
+                model, init_key, rules, neuron_alignment
             )
     ci_fn = init_ci_fn_placed(ci_fn_arch, model.sites, ci_key, mesh, rules)
     assert ci_fn.has_position_axis == model.has_position_axis, (
@@ -283,6 +295,7 @@ def init_train_state(
     src_key: PRNGKeyArray,
     nontarget: NontargetConfig | None = None,
     nontarget_positions: PositionAxis | None = None,
+    neuron_alignment: NeuronAlignment | None = None,
 ) -> TrainState:
     """Persistent sources are shaped from `positions` (the run's waist geometry) — except
     a non-target OUTPUT term's bundle (T5/T7 amended 2026-08-19), which sizes off ITS
@@ -293,7 +306,9 @@ def init_train_state(
     assert isinstance(positions, Positioned) == model.has_position_axis, (
         f"{positions} does not match the model's has_position_axis={model.has_position_axis}"
     )
-    decomposition = init_decomposition(model, ci_fn_arch, init_key, pd.weight_init)
+    decomposition = init_decomposition(
+        model, ci_fn_arch, init_key, pd.weight_init, neuron_alignment
+    )
     components, ci_fn = decomposition.components, decomposition.ci_fn
     freq_role = resolve_frequency(_imp_min_config(pd).frequency)
     # Recon terms only — persistent adversaries derive from these, and a targeted run's

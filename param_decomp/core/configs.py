@@ -994,7 +994,7 @@ class PlacementTableConfig(BaseConfig):
     target: TargetPlacementConfig
 
 
-WeightInit = Literal["default", "coupled", "zero_u"]
+WeightInit = Literal["default", "coupled", "zero_u", "neuron_aligned_targeted"]
 """How the subcomponent V/U masters are seeded.
 
 `default`: `V ~ N(0, d_in^-0.5)`, `U ~ N(0, C^-0.5)` — target-blind small random.
@@ -1006,7 +1006,42 @@ the delta carries all of `W`. Subcomponents acquire norm only as the reconstruct
 demand it, so one that is never needed stays at exactly zero rather than holding `W`-scale
 junk a mask adversary could switch on. `V` still feeds the CI nets a live signal, and `U`
 has a nonzero gradient from step 0 (`V`'s is zero until `U` moves off zero).
+`neuron_aligned_targeted` (tPD only, SPEC T13): every MLP site's subcomponent `i` starts
+as ONE neuron — the `i`-th of the block's neurons ranked by write energy on the target
+prompt pool (a harvested artifact, `TargetedPDConfig.neuron_ranks`); every other site
+takes the `zero_u` values. Trainable, unfrozen, C free per site.
 """
+
+
+class NamedNeuronRanks(BaseConfig):
+    """A neuron-ranking artifact in the store: `<data_root>/neuron_ranks/<name>`. Names
+    are immutable versions — a re-harvest is a new name."""
+
+    kind: Literal["name"] = "name"
+    name: str
+
+    @model_validator(mode="after")
+    def _flat_name(self) -> Self:
+        assert self.name and "/" not in self.name and "*" not in self.name, (
+            f"neuron-ranks names are flat store names: {self.name!r}"
+        )
+        return self
+
+
+class NeuronRanksDir(BaseConfig):
+    """Ad-hoc escape hatch: an explicit artifact directory. Machine-specific by nature,
+    so the path must be absolute; a named store artifact is the portable form."""
+
+    kind: Literal["dir"] = "dir"
+    dir: Path
+
+    @model_validator(mode="after")
+    def _absolute(self) -> Self:
+        assert self.dir.is_absolute(), f"ad-hoc neuron-ranks dirs are absolute paths: {self.dir}"
+        return self
+
+
+NeuronRanksRef = Annotated[NamedNeuronRanks | NeuronRanksDir, Field(discriminator="kind")]
 
 
 class PDConfigBase(BaseConfig):
@@ -1079,6 +1114,10 @@ class PDConfig(PDConfigBase):
         _validate_training_losses(self.loss_metrics)
         faith_terms = [cfg for cfg in self.loss_metrics if isinstance(cfg, FaithfulnessLossConfig)]
         assert len(faith_terms) == 1, f"need exactly one FaithfulnessLoss, got {len(faith_terms)}"
+        # The ranking is a statistic of the TARGET prompt pool, which a plain run does not have.
+        assert self.weight_init != "neuron_aligned_targeted", (
+            "weight_init: neuron_aligned_targeted is a targeted-run (tPD) init"
+        )
         return self
 
 
@@ -1117,6 +1156,26 @@ class TargetedPDConfig(PDConfigBase):
             "disables (the default; the term is an optional auxiliary)."
         ),
     )
+
+    neuron_ranks: NeuronRanksRef | None = Field(
+        default=None,
+        description=(
+            "The harvested neuron-ranking artifact `weight_init: neuron_aligned_targeted` "
+            "starts from (SPEC T13; `harvest_neuron_ranks` writes it). Required iff that "
+            "init is selected; its provenance (target model, prompt pool) is checked against "
+            "this run's at load."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_neuron_ranks(self) -> Self:
+        aligned = self.weight_init == "neuron_aligned_targeted"
+        assert aligned == (self.neuron_ranks is not None), (
+            "`pd.neuron_ranks` is required by, and only by, "
+            f"`weight_init: neuron_aligned_targeted` (weight_init={self.weight_init!r}, "
+            f"neuron_ranks={self.neuron_ranks!r})"
+        )
+        return self
 
     @model_validator(mode="after")
     def validate_loss_metrics(self) -> Self:

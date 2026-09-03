@@ -55,7 +55,7 @@ from param_decomp.core.ci_fn import (
     PlacedCIFn,
     resolve_ci_placement,
 )
-from param_decomp.core.components import init_component_stacks
+from param_decomp.core.components import NeuronAlignment, init_component_stacks
 from param_decomp.core.configs import (
     IMP_MIN_METRIC_NAMES,
     AnyPDConfig,
@@ -586,6 +586,7 @@ def _init_or_restore_state(
     profiling: ProfilingMode | None,
     nontarget: NontargetConfig | None = None,
     nontarget_positions: PositionAxis | None = None,
+    neuron_alignment: NeuronAlignment | None = None,
 ) -> tuple[TrainState, int] | None:
     """The shared init/restore/finetune/faith-warmup phase (SPEC S21/S22/S33).
 
@@ -606,6 +607,7 @@ def _init_or_restore_state(
             src_key,
             nontarget=nontarget,
             nontarget_positions=nontarget_positions,
+            neuron_alignment=neuron_alignment,
         ),  # fmt: skip
         mesh,
     )
@@ -782,6 +784,7 @@ def _prepare_run(
     profiling: ProfilingMode | None,
     nontarget: NontargetConfig | None = None,
     nontarget_positions: PositionAxis | None = None,
+    neuron_alignment: NeuronAlignment | None = None,
 ) -> _PreparedRun | None:
     """Everything before the train loop: mesh activation, optimizers, keys, checkpoint
     manager, the placement audit, and init/restore/finetune/faith-warmup. Returns `None`
@@ -836,6 +839,7 @@ def _prepare_run(
         profiling=profiling,
         nontarget=nontarget,
         nontarget_positions=nontarget_positions,
+        neuron_alignment=neuron_alignment,
     )
     if init is None:
         return None  # SIGTERM mid-warmup: clean exit for requeue
@@ -973,6 +977,7 @@ def run_targeted_decomposition_training[EvalContextT](
     evaluation: Evaluation[EvalContextT] | None,
     sink: MetricsSink,
     profiling: ProfilingMode | None,
+    neuron_alignment: NeuronAlignment | None = None,
 ) -> None:
     """The targeted-PD (tPD) engine entry (SPEC §11) — `run_decomposition_training`'s twin
     over the same `_prepare_run` / `_run_loop` core, stepping the two-pass
@@ -1004,6 +1009,7 @@ def run_targeted_decomposition_training[EvalContextT](
         profiling=profiling,
         nontarget=nontarget,
         nontarget_positions=nontarget_positions,
+        neuron_alignment=neuron_alignment,
     )
     if prepared is None:
         return

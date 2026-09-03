@@ -34,6 +34,7 @@ from param_decomp.experiments.lm.config import (
 )
 from param_decomp.experiments.lm.eval_operations import global_token_batch, make_lm_evaluation
 from param_decomp.experiments.lm.load_run import build_target
+from param_decomp.experiments.lm.neuron_ranks import load_neuron_alignment
 from param_decomp.experiments.lm.resolved import (
     AnyLMTargetConfig,
     LlamaSimpleMLPTargetConfig,
@@ -53,7 +54,7 @@ from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_sh
 from param_decomp.targets.glu_transformer import hf_snapshot_dir
 
 
-def _pool_tokenizer(target: AnyLMTargetConfig, dataset_tokenizer_name: str) -> PromptEncoder:
+def pool_tokenizer(target: AnyLMTargetConfig, dataset_tokenizer_name: str) -> PromptEncoder:
     """The tokenizer the prompt pool encodes with — necessarily the SAME vocabulary the
     model and the broad stream use. An HF-family target reads its local snapshot (the
     weights load already staged it); the lab-pretrained target names its tokenizer via
@@ -97,10 +98,12 @@ def train_targeted(
     eval_config: EvalConfig | None,
     model: PlacedModel,
     mesh: Mesh,
+    data_root: Path,
 ) -> None:
     """The targeted LM composition over the engine: the prompt-pool TARGET seam, the
     parquet NON-TARGET seam, and the same domain-bound eval operations as the plain root
-    (forward-only diagnostics on the broad eval split)."""
+    (forward-only diagnostics on the broad eval split). `data_root` resolves the
+    `neuron_aligned_targeted` init's store artifact (SPEC T13)."""
     data = built.data
     train_meta = read_dataset_meta(data.dir)
     eval_meta = read_dataset_meta(data.eval_dir)
@@ -122,11 +125,25 @@ def train_targeted(
             f"{name} {batch} must be a positive multiple of data-parallel size {n_data}"
         )
 
-    tokenizer = _pool_tokenizer(built.target, train_meta.tokenizer_name)
+    tokenizer = pool_tokenizer(built.target, train_meta.tokenizer_name)
     pool = build_prompt_pool(cfg.prompts, tokenizer)
     n_prompts, prompt_len = pool.tokens.shape
     if is_main:
         print(f"target prompt pool: {n_prompts} prompts x {prompt_len} positions", flush=True)
+
+    # The neuron-aligned init's harvested ranking (SPEC T13): a file read, taken on every
+    # entry — a requeue / fine-tune restore simply overwrites the aligned reference.
+    neuron_alignment = (
+        load_neuron_alignment(
+            built,
+            model,
+            pool.tokens,
+            data_root,
+            write_summary_to=built.run.run_dir if is_main else None,
+        )
+        if built.pd.weight_init == "neuron_aligned_targeted"
+        else None
+    )
 
     key = random.PRNGKey(built.pd.seed)
     _, _, run_key = random.split(key, 3)
@@ -205,6 +222,7 @@ def train_targeted(
         evaluation=evaluation,
         sink=sink,
         profiling=engine_profiling(cfg.runtime.profiling),
+        neuron_alignment=neuron_alignment,
     )
 
 
@@ -252,7 +270,7 @@ def main(
 
     model = build_target(built.target, mesh, data_root, runtime.sharding)
 
-    train_targeted(built, cfg, cfg.eval, model, mesh)
+    train_targeted(built, cfg, cfg.eval, model, mesh, data_root)
 
     if jax.process_count() > 1:
         import jax.experimental.multihost_utils as mhu

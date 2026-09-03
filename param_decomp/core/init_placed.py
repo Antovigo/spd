@@ -41,9 +41,12 @@ from param_decomp.core.ci_fn import (
 )
 from param_decomp.core.components import (
     ComponentStacks,
+    NeuronAlignment,
     SiteSpec,
     init_component_stacks,
     init_component_stacks_coupled,
+    init_component_stacks_neuron_aligned,
+    validate_neuron_alignment,
     with_silenced_u,
     zero_component_stacks,
 )
@@ -102,6 +105,42 @@ def init_component_stacks_coupled_placed(
     abstract = eqx.filter_eval_shape(init, model_arrays, key)
     placement = component_stacks_shardings(abstract, rules)
     return jax.jit(init, out_shardings=placement)(model_arrays, key)
+
+
+def _site_weights_in_graph(traced_model: PlacedModel) -> dict[str, jax.Array]:
+    """Every site's frozen `W`, read INSIDE the init graph through the zero-stacks
+    `weight_deltas` identity (`W − 0`), so no full-precision copy crosses the jit."""
+    zero = zero_component_stacks(traced_model.sites)
+    stacked_deltas = traced_model.model.weight_deltas(zero)
+    return {
+        spec.name: site_weight_delta(stacked_deltas, zero, spec.name) for spec in traced_model.sites
+    }
+
+
+def init_component_stacks_neuron_aligned_placed(
+    model: PlacedModel,
+    key: PRNGKeyArray,
+    rules: PlacementRules,
+    alignment: NeuronAlignment,
+) -> ComponentStacks:
+    """The `neuron_aligned_targeted` init placed like the coupled one (SPEC T13). The
+    alignment's index arrays are small traced jit args; the host-side value checks run
+    first, since a traced index cannot be asserted."""
+    validate_neuron_alignment(model.sites, alignment)
+    model_arrays, model_static = eqx.partition(model, eqx.is_array)
+
+    def init(
+        arrays: PlacedModel, init_key: PRNGKeyArray, alignment_: NeuronAlignment
+    ) -> ComponentStacks:
+        traced_model: PlacedModel = eqx.combine(arrays, model_static)
+        weights = _site_weights_in_graph(traced_model)
+        return init_component_stacks_neuron_aligned(
+            traced_model.sites, weights, alignment_, init_key
+        )
+
+    abstract = eqx.filter_eval_shape(init, model_arrays, key, alignment)
+    placement = component_stacks_shardings(abstract, rules)
+    return jax.jit(init, out_shardings=placement)(model_arrays, key, alignment)
 
 
 def ci_fn_shardings(abstract: CIFn, mesh: Mesh, rules: PlacementRules) -> CIFn:
