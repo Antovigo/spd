@@ -1259,3 +1259,54 @@ control's k=20 read 0.00431 here vs 0.00422 in 8.22). The 6.16x vs 4.07x vs 3.51
 ordering among penalized runs is within that combined uncertainty; the
 penalized-vs-unpenalized separation is not. No merged-code ntmerged run WITHOUT the
 penalty exists, so L18-17 nl5e4's baseline is borrowed from the L18-16 line.
+
+### 8.25 Dead vs alive breakdown: the divergence is an INTERACTION (2026-09-03)
+
+Restricting the fresh-PGD adversary to one component group and re-measuring the
+loss-vs-adversarial-steps curve. Masks compose as `mask = ci + (1-ci)*source`, so a
+component frozen at source 0 keeps its natural CI and is effectively unattacked; DEAD =
+max CI over the fixed batches < 0.1. Same init/batches as 8.22/8.24
+(`pgd_group_ablation.py`); the `all` setting reproduces the production probe as a check.
+Non-target/output arm. Values: `plots/nlpenalty/groupabl_table.md`.
+
+![control](plots/nlpenalty/l18_groupabl_cbb66ad1.png)
+![nl5e4](plots/nlpenalty/l18_groupabl_118386d3.png)
+![output-only + 5e-4](plots/nlpenalty/l18_groupabl_204fa1bc.png)
+
+| run | alive/total | setting | k=20 | k=80 | k20->k80 |
+|---|---|---|---|---|---|
+| control | 832/1952 | all | 0.0118 | 0.0122 | 1.04x |
+| | | alive | 0.0076 | 0.0080 | 1.05x |
+| | | dead | 0.0062 | 0.0063 | 1.01x |
+| nl5e4 (dual) | 670/1952 | all | 0.0132 | 0.0285 | **2.15x** |
+| | | alive | 0.0087 | 0.0093 | 1.07x |
+| | | dead | 0.0066 | 0.0067 | 1.01x |
+| output-only + 5e-4 | 1104/1952 | all | 0.0146 | 0.0619 | **4.24x** |
+| | | alive | 0.0068 | 0.0071 | 1.04x |
+| | | dead | 0.0076 | 0.0139 | 1.83x |
+
+1. **Neither group alone reproduces the divergence.** In both penalized runs the
+   alive-only attack saturates by k=20 (1.04-1.07x from k=20 to k=80) — flat, exactly
+   like the control. Dead-only is flat too for nl5e4 (1.01x); it grows somewhat for
+   output-only + 5e-4 (1.83x) but still reaches only 0.0139 against 0.0619 unrestricted.
+2. **The effect is super-additive, and the excess tracks the divergence.** At k=80,
+   alive+dead summed vs the joint attack: control 0.0143 vs 0.0122 (**0.86x** — SUB-additive,
+   the two groups partly substitute), nl5e4 0.0160 vs 0.0285 (**1.78x**), output-only +
+   5e-4 0.0210 vs 0.0619 (**2.95x**). The penalty turns a sub-additive attack surface
+   into a strongly super-additive one, and the super-additivity ranks the runs the same
+   way the divergence does.
+3. **Reading.** The adversary must switch dead components ON *while* perturbing the live
+   circuit; neither move alone is damaging. That explains why the divergence needs many
+   ascent steps (8.22) — a coordinated subset is a harder search — and it refines 8.23:
+   the extra dead-component norm is a necessary ingredient, not a sufficient one.
+
+**Caveat, and a correction to 8.24's error budget.** The `all` curves here reproduce
+8.24 at k=20 (within 0.6-3%) but NOT at k=80: nl5e4 reads 0.0285 here vs 0.0732 there
+(2.6x), output-only + 5e-4 0.0619 vs 0.0483 (1.28x). Same model, batches and init seed —
+only the compilation differs. So the penalized k>=40 measurements are far less stable
+than 8.24's stated ~4.5%: at high budget the attack appears to be multi-modal, and a
+single curve can land in a much worse or much better basin. The QUALITATIVE claims
+(penalized diverges, control saturates, restricted attacks saturate) hold in every
+measurement; the specific high-k ratios (6.16x etc.) should be treated as one draw, not
+a point estimate. Quantifying this properly needs the 8.21 multi-init treatment applied
+at k=80.
