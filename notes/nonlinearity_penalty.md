@@ -19,6 +19,10 @@ Three things to know before reading the plots:
   measures internal-activation reconstruction.
 - **Every adversarial curve is drawn twice**, from two different attacker start points,
   in side-by-side panels. If a pattern only appears in one panel, don't believe it.
+- **The sweep is a clean control.** All six runs share one seed and one configuration; a
+  line-by-line diff of their launch configs turns up exactly one substantive difference,
+  the penalty coefficient. Section 7 brings in runs from a *second* configuration, and
+  says so where it does.
 
 ---
 
@@ -113,27 +117,39 @@ activate on text they don't explain, and that is what the adversary gets to use.
 
 ## 7. Is this an artefact of the hidden-activation objective?
 
-The runs above are trained on two reconstruction objectives at once: the model's final
-output, and its internal activations. A reasonable worry is that the penalty only misbehaves
-because it is fighting the second one.
+The sweep trains two reconstruction objectives at once: the model's final output, and its
+internal activations. A reasonable worry is that the penalty only misbehaves because it is
+fighting the second one.
 
-It isn't.
+To check, we need a penalty-off/penalty-on pair trained *without* the internal-activation
+objective. One exists, but it comes from a different configuration than the sweep — a
+different set of reconstruction losses — so its loss **levels** are not comparable to the
+sweep's. Within each pair, though, only the penalty differs. So we divide each pair by its
+own penalty-off control: the configuration cancels, and what is left is the thing we want,
+namely what the penalty costs.
 
-![output-only, general text](plots/penalty_share/12_outputonly_nontarget.png)
+![penalty cost, general text](plots/penalty_share/12_penalty_cost_nontarget.png)
 
-Drop the internal-activation objective entirely and repeat the pair. The two penalty-off
-runs lie on top of each other and stay flat; both penalty-on runs climb. At 80 steps the
+The two pairs land on top of each other, at both attacker start points. At 80 steps the
 penalty costs **5.0× / 3.1× without the hidden-activation objective, against 4.5× / 3.2×
-with it** (the two numbers are the two attacker start points). Same effect, not a smaller
-one — and the start point moves both pairs together, which is what you want to see from a
-nuisance parameter.
+with it.** Same cost, same shape, same onset between 10 and 20 steps. The runaway is not
+about the second objective.
 
-![output-only, task](plots/penalty_share/11_outputonly_target.png)
+![penalty cost, task](plots/penalty_share/11_penalty_cost_target.png)
 
-On the task distribution there *is* a difference, but it is about the objective, not the
-penalty: output-only decompositions are less adversarially robust to begin with (0.0070
-against 0.0043 at 20 steps). The hidden-activation objective buys on-task robustness. It
-does not protect you from the penalty's off-distribution cost.
+Same y-scale as the figure above, deliberately. On the task distribution both pairs sit
+between 1.2× and 1.4× at every step count and go nowhere. Again: the cost is
+off-distribution, whichever objectives you trained.
+
+### What the hidden-activation objective *does* buy
+
+Separately from the penalty, the same configuration lets us turn the internal-activation
+objective off on its own, holding everything else — seed, losses, penalty dose — fixed.
+Doing so makes the decomposition **1.4–1.8× easier to attack on the task distribution**
+(0.0065 → 0.0098 and 0.0052 → 0.0092 at 20 steps, at the two start points).
+
+So it is worth training. It just does not protect you from the penalty's off-distribution
+cost.
 
 ---
 
@@ -154,19 +170,27 @@ The scatter figures in section 5 use a *different* protocol — 16 starts on one
 
 ### With and without the hidden-activation objective
 
-| condition | PGD task, 20 st | PGD task, 80 st | PGD general, 20 st | PGD general, 80 st |
-|---|---|---|---|---|
-| both objectives, penalty off | 0.0043 / 0.0043 | 0.0045 / 0.0045 | 0.0111 / 0.0115 | 0.0119 / 0.0120 |
-| both objectives, penalty on (5×10⁻⁴) | 0.0055 / 0.0052 | 0.0064 / 0.0053 | 0.0192 / 0.0175 | 0.0540 / 0.0384 |
-| both objectives, penalty on — separate training run | 0.0065 / 0.0052 | 0.0075 / 0.0054 | 0.0131 / 0.0135 | 0.0448 / 0.0239 |
-| output only, penalty off | 0.0070 / 0.0069 | 0.0075 / 0.0070 | 0.0095 / 0.0095 | 0.0107 / 0.0108 |
-| output only, penalty on (5×10⁻⁴) | 0.0098 / 0.0092 | 0.0102 / 0.0093 | 0.0181 / 0.0145 | 0.0531 / 0.0332 |
+Rows are grouped by configuration. **Compare within a group, not across** — the two groups
+train different sets of reconstruction losses, so their levels sit on different scales.
+Every run here shares the same seed and the same penalty dose where the penalty is on.
 
-The third row is a second training run at the same setting as the second, from a different
-seed and configuration lineage — the only cross-run training-seed check here. It climbs
-too, but less far: 3.8× / 2.0× the penalty-off baseline at 80 steps on general text, against
-4.5× / 3.2× for the first. **Training seed moves the magnitude about as much as attacker
-start does.** The direction is robust; the size of the effect is a range, not a number.
+| configuration | condition | PGD task, 20 st | PGD task, 80 st | PGD general, 20 st | PGD general, 80 st |
+|---|---|---|---|---|---|
+| A (the sweep) | both objectives, penalty off | 0.0043 / 0.0043 | 0.0045 / 0.0045 | 0.0111 / 0.0115 | 0.0119 / 0.0120 |
+| A (the sweep) | both objectives, penalty on (5×10⁻⁴) | 0.0055 / 0.0052 | 0.0064 / 0.0053 | 0.0192 / 0.0175 | 0.0540 / 0.0384 |
+| B | both objectives, penalty on (5×10⁻⁴) | 0.0065 / 0.0052 | 0.0075 / 0.0054 | 0.0131 / 0.0135 | 0.0448 / 0.0239 |
+| B | output only, penalty off | 0.0070 / 0.0069 | 0.0075 / 0.0070 | 0.0095 / 0.0095 | 0.0107 / 0.0108 |
+| B | output only, penalty on (5×10⁻⁴) | 0.0098 / 0.0092 | 0.0102 / 0.0093 | 0.0181 / 0.0145 | 0.0531 / 0.0332 |
+
+The two rows that isolate the penalty are `A off → A on` and `B output-only off → on`;
+that pair of ratios is what figure 12 plots. The two `B both objectives` and
+`B output only` penalty-on rows isolate the hidden-activation objective instead.
+
+Note what rows 2 and 3 say together: the *same* penalty dose at the *same* seed, trained
+with a different set of reconstruction losses, lands at 0.0540 / 0.0384 versus
+0.0448 / 0.0239 on general text at 80 steps. **The training recipe moves the magnitude
+about as much as the attacker start point does.** The direction is robust; the size is a
+range, not a number.
 
 ## Choosing a coefficient
 
@@ -180,13 +204,13 @@ start does.** The direction is robust; the size of the effect is a range, not a 
 
 ## Caveats
 
-- One training seed per coefficient. The locality effect dwarfs any noise we measured; the
-  ordering *among* penalised runs on the adversarial metrics does not — two attacker start
-  points already reorder them, and the one repeated training run moves the magnitude by a
-  similar amount again.
+- One training seed throughout, so nothing here separates the penalty from seed noise. The
+  locality effect dwarfs any noise we measured; the ordering *among* penalised runs on the
+  adversarial metrics does not — two attacker start points already reorder them.
 - Two attacker start points is enough to confirm the shape and not enough to put error bars
   on individual doses. Quote the adversarial cost as "3–6×", never as a single figure.
-- The output-only pair comes from a different configuration lineage than the sweep, so read
-  it as *penalty-on against penalty-off within that pair*, not against the sweep's numbers.
+- Section 7's pairs come from two different configurations. Every comparison drawn there is
+  *within* a configuration or a ratio of two such comparisons; no raw level is compared
+  across them, and none should be.
 - One decomposed block, one task. Multi-block runs show the same locality effect; their
   adversarial curves are not measured yet.

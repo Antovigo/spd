@@ -1397,3 +1397,51 @@ point estimate; 8.24's single-init ratios should be read the same way.
 Share doc `notes/nonlinearity_penalty.md` rewritten around this: 7 sections, 12 figures,
 every adversarial figure a two-panel start-point-1 / start-point-2 comparison, and the
 caveat list now states the seed and lineage limits explicitly.
+
+### 8.28 Config audit of every within-figure comparison (2026-09-04)
+
+Antoine asked whether the runs sharing a plot differ *only* by the nonlinearity penalty. Ran
+a full launch-config diff (list-of-dicts re-keyed by `type` first — a naive index-based diff
+is useless here, because inserting `NonlinearityLocalityLoss` into `pd.loss_metrics` shifts
+every later index and manufactures ~35 phantom diffs).
+
+**Sweep, figures 01-10 (p-cbb66ad1 / 240775bb / 54078d02 / 55ee815f / 43e77281 / 3c8c727c):
+CLEAN.** 20 differing keys, all accounted for: 18 are the `NonlinearityLocalityLoss` block
+(absent in the control; byte-identical across the five penalised runs apart from
+`coeff.max_val`, which IS the swept variable), plus `run_name`, plus
+`cadence.checkpointing.save_every` (1000 on the control, 2500 on the rest). save_every is
+checkpoint cadence only and 20000 is a multiple of both, so it touches nothing. seed=0
+everywhere; all nine runs harvested at step 20000, n_batches 4, pass_index 40.
+
+**Output-only pair (p-f9417595 / p-204fa1bc): CLEAN.** 19 diffs = the penalty block +
+run_name.
+
+**Dual-vs-output-only WITHIN the -17 lineage (p-118386d3 / p-204fa1bc): CLEAN.** 75 diffs,
+every one of them `decomposition.ci.dual` or machinery that only exists when it is true
+(`pd.hidden.*`, `nontarget.hidden.*`, the two hidden eval metrics). This is a valid
+isolation of the hidden-acts objective.
+
+**BUT -16 vs -17 is NOT a seed replicate, and the doc said it was.** The two lineages train
+DIFFERENT reconstruction losses:
+  -16: `MergedStochasticSubsetPPGDReconLoss` (output 1.5, hidden 3.0) + Unmasked 0.5
+  -17: `PersistentPGDReconLoss` (0.5 / 1.0) + `StochasticReconSubsetLoss` (1.0 / 2.0) + Unmasked 0.5
+Seeds are identical (0) across all nine. So 8.27's claim that "training seed moves the
+magnitude about as much as attacker start does" was **wrong on attribution** — the training
+RECIPE does. Corrected in the share doc.
+
+Two consequences, both fixed:
+
+1. Old figures 11/12 plotted -16 and -17 curves on shared axes, inviting a level comparison
+   that the recipe difference does not license. Replaced with **self-normalised cost curves**
+   — each pair divided by its own penalty-off control, so the recipe cancels. The two pairs
+   then land on top of each other (80 steps, general text: 4.53x/3.19x dual vs 4.98x/3.06x
+   output-only), which is a strictly stronger statement of the section's claim than the raw
+   curves were. Figures 11 and 12 now share a y-range so flat-vs-runaway reads at a glance.
+2. The old claim "output-only decompositions are less adversarially robust to begin with
+   (0.0070 vs 0.0043)" compared p-f9417595 (-17) against p-cbb66ad1 (-16) — confounded by
+   recipe. Restated using the clean within-lineage pair p-118386d3 vs p-204fa1bc, both 5e-4,
+   both -17: dropping the hidden-acts objective costs **1.49x / 1.76x** at k=20 on the task
+   stream (0.0065 -> 0.0098, 0.0052 -> 0.0092). The claim survives with a valid comparison.
+
+Lesson for the next write-up: run the type-keyed config diff BEFORE asserting "everything
+else is identical". The sweep earned that sentence; the cross-lineage runs never did.
