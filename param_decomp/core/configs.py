@@ -994,7 +994,7 @@ class PlacementTableConfig(BaseConfig):
     target: TargetPlacementConfig
 
 
-WeightInit = Literal["default", "coupled", "zero_u", "neuron_aligned_targeted"]
+WeightInit = Literal["default", "coupled", "zero_u", "zero_v", "neuron_aligned_targeted"]
 """How the subcomponent V/U masters are seeded.
 
 `default`: `V ~ N(0, d_in^-0.5)`, `U ~ N(0, C^-0.5)` — target-blind small random.
@@ -1006,11 +1006,18 @@ the delta carries all of `W`. Subcomponents acquire norm only as the reconstruct
 demand it, so one that is never needed stays at exactly zero rather than holding `W`-scale
 junk a mask adversary could switch on. `V` still feeds the CI nets a live signal, and `U`
 has a nonzero gradient from step 0 (`V`'s is zero until `U` moves off zero).
+`zero_v`: `zero_u`'s mirror — `coupled`'s `U` with `V` zeroed. Same zero component sum and
+full-`W` delta; `x @ V` is zero at init (the CI nets read the taps, not `x @ V`), and it is
+`V` that has the nonzero gradient from step 0.
 `neuron_aligned_targeted` (tPD only, SPEC T13): every MLP site's subcomponent `i` starts
 as ONE neuron — the `i`-th of the block's neurons ranked by write energy on the target
 prompt pool (a harvested artifact, `TargetedPDConfig.neuron_ranks`); every other site
 takes the `zero_u` values. Trainable, unfrozen, C free per site.
 """
+
+
+SilencedFactor = Literal["u", "v"]
+"""Which V/U factor a `zero_*` arm zeroes over the coupled seed."""
 
 
 class NamedNeuronRanks(BaseConfig):

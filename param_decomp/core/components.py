@@ -284,6 +284,19 @@ def with_silenced_u(components: ComponentStacks) -> ComponentStacks:
     )
 
 
+def with_silenced_v(components: ComponentStacks) -> ComponentStacks:
+    """V zeroed, U untouched — `with_silenced_u`'s mirror, the `zero_v` arm.
+
+    The component sum is again exactly zero and the delta carries all of `W`, but now
+    `x @ V` is zero at init (the CI nets read the taps, not `x @ V`, so they still see the
+    model), and it is `V` that has a nonzero gradient from step 0 (`U`'s is zero until `V`
+    moves off zero)."""
+    return ComponentStacks(
+        stacks={shape: (jnp.zeros_like(Vs), Us) for shape, (Vs, Us) in components.stacks.items()},
+        site_slots=components.site_slots,
+    )
+
+
 NeuronAxis = Literal["d_out", "d_in"]
 """Which axis of a site's frozen `W [d_out, d_in]` indexes nonlinearity units (neurons):
 `d_out` for a hidden WRITER (`x @ W.T` lands on neurons), `d_in` for the READER (`W`

@@ -1,4 +1,4 @@
-"""The target-coupled V/U inits (`pd.weight_init`: `coupled` / `zero_u` /
+"""The target-coupled V/U inits (`pd.weight_init`: `coupled` / `zero_u` / `zero_v` /
 `neuron_aligned_targeted`).
 
 The coupling claim is checked against each site's own frozen `W`, read back through
@@ -17,6 +17,7 @@ from param_decomp.core.components import (
     init_component_stacks_neuron_aligned,
     validate_neuron_alignment,
     with_silenced_u,
+    with_silenced_v,
     zero_component_stacks,
 )
 from param_decomp.core.model import PlacedModel, site_weight_delta
@@ -87,6 +88,21 @@ def test_zero_u_silences_every_component_but_keeps_v_live():
         assert jnp.allclose(site_weight_delta(deltas, vu, spec.name), weights[spec.name]), spec.name
 
 
+def test_zero_v_silences_every_component_but_keeps_u_live():
+    """`zero_u`'s mirror: `V` is zero so the component sum is exactly zero and the delta
+    carries all of `W`; `U` is untouched, so `V` has a nonzero gradient from step 0."""
+    model, sites, weights = _tiny_model_and_weights()
+    coupled = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1))
+    vu = with_silenced_v(coupled)
+    for spec in sites:
+        assert jnp.all(vu.site(spec.name).V == 0.0), spec.name
+        assert jnp.any(vu.site(spec.name).U != 0.0), spec.name
+        assert jnp.array_equal(vu.site(spec.name).U, coupled.site(spec.name).U), spec.name
+    deltas = model.weight_deltas(vu)
+    for spec in sites:
+        assert jnp.allclose(site_weight_delta(deltas, vu, spec.name), weights[spec.name]), spec.name
+
+
 def test_placed_init_matches_the_eager_values():
     """The jitted, sharding-placed path reads `W` inside the graph; same values up to fp32
     reassociation in the `W`-image matmul (XLA picks its own layout)."""
@@ -97,12 +113,14 @@ def test_placed_init_matches_the_eager_values():
     model, sites, weights = _tiny_model_and_weights()
     mesh = single_device_mesh()
     rules = from_config("ddp", mesh, sites)
-    for zero_u in (False, True):
+    for silence in (None, "u", "v"):
         placed = init_component_stacks_coupled_placed(
-            PlacedModel(model=model, placement=rules), jax.random.PRNGKey(1), rules, zero_u=zero_u
+            PlacedModel(model=model, placement=rules), jax.random.PRNGKey(1), rules, silence=silence
         )
         coupled = init_component_stacks_coupled(sites, weights, jax.random.PRNGKey(1))
-        eager = with_silenced_u(coupled) if zero_u else coupled
+        eager = {None: coupled, "u": with_silenced_u(coupled), "v": with_silenced_v(coupled)}[
+            silence
+        ]
         for spec in sites:
             placed_site, eager_site = placed.site(spec.name), eager.site(spec.name)
             assert jnp.allclose(placed_site.V, eager_site.V, atol=1e-5), spec.name

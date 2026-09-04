@@ -256,9 +256,16 @@ def init_decomposition(
     match weight_init:
         case "default":
             components = init_component_stacks_placed(model.sites, init_key, rules)
-        case "coupled" | "zero_u":
+        case "coupled" | "zero_u" | "zero_v":
             components = init_component_stacks_coupled_placed(
-                model, init_key, rules, zero_u=weight_init == "zero_u"
+                model,
+                init_key,
+                rules,
+                silence=None
+                if weight_init == "coupled"
+                else "u"
+                if weight_init == "zero_u"
+                else "v",
             )
         case "neuron_aligned_targeted":
             assert neuron_alignment is not None, (

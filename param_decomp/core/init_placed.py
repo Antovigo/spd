@@ -48,9 +48,10 @@ from param_decomp.core.components import (
     init_component_stacks_neuron_aligned,
     validate_neuron_alignment,
     with_silenced_u,
+    with_silenced_v,
     zero_component_stacks,
 )
-from param_decomp.core.configs import SourceShape
+from param_decomp.core.configs import SilencedFactor, SourceShape
 from param_decomp.core.model import (
     BATCH_AXES,
     PlacedModel,
@@ -79,7 +80,7 @@ def init_component_stacks_coupled_placed(
     key: PRNGKeyArray,
     rules: PlacementRules,
     *,
-    zero_u: bool,
+    silence: SilencedFactor | None,
 ) -> ComponentStacks:
     """The target-coupled V/U inits, placed like `init_component_stacks_placed`.
 
@@ -100,7 +101,13 @@ def init_component_stacks_coupled_placed(
             for spec in traced_model.sites
         }
         coupled = init_component_stacks_coupled(traced_model.sites, weights, init_key)
-        return with_silenced_u(coupled) if zero_u else coupled
+        match silence:
+            case None:
+                return coupled
+            case "u":
+                return with_silenced_u(coupled)
+            case "v":
+                return with_silenced_v(coupled)
 
     abstract = eqx.filter_eval_shape(init, model_arrays, key)
     placement = component_stacks_shardings(abstract, rules)
