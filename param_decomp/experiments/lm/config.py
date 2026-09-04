@@ -16,7 +16,7 @@ of a site name — which the CI-arch resolvers (`resolve_lm_ci_arch`) consume di
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, cast
 
 import yaml
 from pydantic import (
@@ -42,6 +42,7 @@ from param_decomp.core.ci_fn import (
 from param_decomp.core.components import SiteC, SiteDims, SiteSpec
 from param_decomp.core.configs import (
     MuonOptimizerConfig,
+    NeuronRanksRef,
     NontargetConfig,
     PDConfigBase,
     PlacementTableConfig,
@@ -62,6 +63,7 @@ from param_decomp.experiments.config import (
 from param_decomp.experiments.eval_config import EvalConfig
 from param_decomp.experiments.lm.resolved import (
     AnyLMTargetConfig,
+    ComponentInitialization,
     LlamaSimpleMLPTargetConfig,
     LMRun,
     LMTargetedRun,
@@ -190,6 +192,21 @@ class GluTransformerCSpec(BaseConfig):
     kind: Literal["glu_transformer"] = "glu_transformer"
     layers: LayerSelection
     cs: dict[GluMatrix, PositiveInt] = Field(..., min_length=1)
+    initialization: ComponentInitialization = "random"
+    neuron_ranks: NeuronRanksRef | None = None
+    """The harvested ranking artifact (`harvest_neuron_ranks` writes it), required by — and
+    only by — `initialization: neuron_aligned_targeted`; its provenance (target model, prompt
+    pool) is checked against the run's at load."""
+
+    @model_validator(mode="after")
+    def validate_neuron_ranks(self) -> Self:
+        aligned = self.initialization == "neuron_aligned_targeted"
+        assert aligned == (self.neuron_ranks is not None), (
+            "`neuron_ranks` is required by, and only by, `initialization: "
+            f"neuron_aligned_targeted` (initialization={self.initialization!r}, "
+            f"neuron_ranks={self.neuron_ranks!r})"
+        )
+        return self
 
 
 class SimpleMlpCSpec(BaseConfig):
@@ -198,6 +215,21 @@ class SimpleMlpCSpec(BaseConfig):
     kind: Literal["simple_mlp"] = "simple_mlp"
     layers: LayerSelection
     cs: dict[SimpleMlpMatrix, PositiveInt] = Field(..., min_length=1)
+    initialization: ComponentInitialization = "random"
+    neuron_ranks: NeuronRanksRef | None = None
+    """The harvested ranking artifact (`harvest_neuron_ranks` writes it), required by — and
+    only by — `initialization: neuron_aligned_targeted`; its provenance (target model, prompt
+    pool) is checked against the run's at load."""
+
+    @model_validator(mode="after")
+    def validate_neuron_ranks(self) -> Self:
+        aligned = self.initialization == "neuron_aligned_targeted"
+        assert aligned == (self.neuron_ranks is not None), (
+            "`neuron_ranks` is required by, and only by, `initialization: "
+            f"neuron_aligned_targeted` (initialization={self.initialization!r}, "
+            f"neuron_ranks={self.neuron_ranks!r})"
+        )
+        return self
 
 
 @dataclass(frozen=True)
@@ -420,6 +452,8 @@ class LMDecompositionConfig(BaseConfig):
 
 
 class LMExperimentConfig(ExperimentConfig):
+    """The plain (VPD) LM run shape."""
+
     runtime: RuntimeConfig
     """The LM's compute substrate. Declared HERE, not on the shared base: an LM run is the
     only domain that spans devices, nodes and a launcher, so it is the only one with a
@@ -429,6 +463,15 @@ class LMExperimentConfig(ExperimentConfig):
     resume_provenance: ResumeProvenance | None = None
     target: LMTargetConfig
     decomposition: LMDecompositionConfig
+
+    @model_validator(mode="after")
+    def validate_initialization(self) -> Self:
+        # The rankings are a statistic of the TARGET prompt pool, which a plain run lacks.
+        assert self.decomposition.sites.initialization != "neuron_aligned_targeted", (
+            "initialization: neuron_aligned_targeted is a targeted-run (tPD) init"
+        )
+        return self
+
     data: LMDataConfig
 
 
@@ -564,6 +607,7 @@ def resolve_decomposition(
     sites = decomposition.sites
     match spec:
         case HFWeightsInVendored() | HFTarget():
+            glu_sites = cast(GluTransformerCSpec, sites)
             match spec:
                 case HFWeightsInVendored():
                     assert spec.model_class.rsplit(".", 1)[-1] == "VendoredLlama", spec.model_class
@@ -582,6 +626,8 @@ def resolve_decomposition(
                 sites=tree.site_cs(glu_transformer.FAMILY.name_of),
                 weights_dtype=target_config.weights_dtype,
                 attention_implementation=target_config.attention_implementation,
+                component_initialization=glu_sites.initialization,
+                neuron_ranks=glu_sites.neuron_ranks,
             )
             grammar = _build_tap_grammar(
                 family=glu_transformer.FAMILY,
@@ -592,17 +638,23 @@ def resolve_decomposition(
                 dims_of=lambda kind: glu_transformer.site_dims(arch, kind),
             )
             site_specs = glu_transformer.glu_site_specs(arch, target.sites)
+            _validate_initialization_capacity(
+                glu_sites.initialization, glu_transformer.GLU_ANATOMY, site_specs
+            )
             return _ResolvedDecomposition(target, tree, grammar, site_specs)
         case PretrainedTarget():
             assert spec.model_class.rsplit(".", 1)[-1] == "LlamaSimpleMLP", spec.model_class
             cache_dir = pretrain_cache.resolved_cache_dir(data_root, spec.run_path)
             arch = llama_simple_mlp.load_model_config(cache_dir)
             tree = resolve_site_tree(sites, llama_simple_mlp.FAMILY, arch.n_layer)
+            simple_mlp_sites = cast(SimpleMlpCSpec, sites)
             target = LlamaSimpleMLPTargetConfig(
                 pretrain_run_path=spec.run_path,
                 sites=tree.site_cs(llama_simple_mlp.FAMILY.name_of),
                 weights_dtype=target_config.weights_dtype,
                 attention_implementation=target_config.attention_implementation,
+                component_initialization=simple_mlp_sites.initialization,
+                neuron_ranks=simple_mlp_sites.neuron_ranks,
             )
             grammar = _build_tap_grammar(
                 family=llama_simple_mlp.FAMILY,
@@ -613,7 +665,33 @@ def resolve_decomposition(
                 dims_of=lambda kind: llama_simple_mlp.site_dims(arch, kind),
             )
             site_specs = llama_simple_mlp.site_specs(arch, target.sites)
+            _validate_initialization_capacity(
+                simple_mlp_sites.initialization, llama_simple_mlp.SIMPLE_MLP_ANATOMY, site_specs
+            )
             return _ResolvedDecomposition(target, tree, grammar, site_specs)
+
+
+def _validate_initialization_capacity(
+    initialization: ComponentInitialization,
+    anatomy: glu_transformer.Anatomy,
+    site_specs: tuple[SiteSpec, ...],
+) -> None:
+    """The aligned inits' C bounds, decided at resolve time (free, on CPU): `neuron_aligned`
+    needs every component a nonempty support; `neuron_aligned_targeted` copies C DISTINCT
+    ranked coordinates, so C may not exceed the site's coordinate count."""
+    match initialization:
+        case "random":
+            return
+        case "neuron_aligned":
+            for site_spec in site_specs:
+                glu_transformer.validate_neuron_aligned_capacity(anatomy, site_spec)
+        case "neuron_aligned_targeted":
+            for site_spec in site_specs:
+                n = glu_transformer.neuron_aligned_component_count(anatomy, site_spec)
+                assert n >= site_spec.C, (
+                    f"{site_spec.name}: neuron_aligned_targeted needs C <= {n} distinct "
+                    f"coordinates, got C={site_spec.C}"
+                )
 
 
 def _chunk_input_taps(

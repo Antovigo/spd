@@ -1,5 +1,31 @@
 # Neuron-aligned component init (`neuron_aligned_targeted`) — implementation plan
 
+> **SUPERSEDED IN PART, 2026-09-04 (upstream #1001 merge).** This document still describes
+> the recipe's derivation and the harvest's design faithfully, but three of its decisions no
+> longer hold. Read it for the *why*; read `param_decomp/core/SPEC.md` T13 and
+> `param_decomp/targets/neuron_alignment.py` for what the code does.
+>
+> 1. **Every site kind is aligned now, not just the MLP.** The "non-MLP sites take `zero_u`"
+>    row is dead: q/k/v/o subcomponents start as attention-head channels ranked by their own
+>    energy. The harvest therefore produces FIVE rankings per block (`mlp`, `q`, `k`, `v`,
+>    `o`) instead of one, its statistic is `unit_energy` rather than `write_energy`, and the
+>    2026-09-03 artifacts (`addsub1-100_llama31-8b_we`, `..._bos-incl`) are unreadable by the
+>    current code — it refuses a mismatched statistic rather than misaligning silently. The
+>    replacement is `addsub1-100_llama31-8b_unit-energy`.
+> 2. **The config surface moved and `pd.weight_init` is gone.** The init is now
+>    `decomposition.sites.initialization: neuron_aligned_targeted` with the artifact at
+>    `decomposition.sites.neuron_ranks`, alongside upstream's `random` and data-free
+>    `neuron_aligned` arms. `default`/`coupled`/`zero_u`/`zero_v` were retired outright
+>    (Antoine's call: none beat the alternatives), so the "bit-identical to a `zero_u` run"
+>    key-discipline argument no longer has a referent.
+> 3. **Implementation shape.** The init is a `ComponentInitializer` — upstream #1001's own
+>    seam for target-aware V/U seeding — not a `weight_init` enum arm in `run_state`. The
+>    per-coordinate factorization is `glu_transformer.selected_unit_factors`, shared with the
+>    data-free `neuron_aligned` init.
+>
+> The cross-code caveat from the 2026-09-04 findings below still stands and now applies
+> twice over: do not compare `nontarget_data/ce_kl/kl_ci_masked` across either merge.
+
 Branch: `feature/neuron-aligned-init` (off `feature/dual_obj_jax`). Written 2026-09-03, before
 implementation. Revision 2: after a Codex plan-review (five findings, folded in) and the
 decisions of the second discussion round — the ranking is now a **cached artifact produced by

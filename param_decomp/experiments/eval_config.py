@@ -12,7 +12,6 @@ from pydantic import Discriminator, Field, PositiveInt, model_validator
 from param_decomp.core.base_config import BaseConfig
 from param_decomp.core.configs import (
     CI_L0Config,
-    CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
     CIMaskedReconLossConfig,
     CIMeanPerComponentConfig,
@@ -22,7 +21,6 @@ from param_decomp.core.configs import (
     LossMetricConfig,
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
-    StochasticHiddenActsReconLossConfig,
     UnmaskedNoDeltaReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
@@ -31,6 +29,7 @@ from param_decomp.core.configs import (
 from param_decomp.core.eval_schedule import EvalSchedule, Every, EveryAfterFirst, FirstThenEvery
 from param_decomp.experiments.lm.eval_config import (
     ABGridDatasetConfig,
+    ArithmeticCIGridConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
@@ -39,8 +38,8 @@ from param_decomp.experiments.lm.eval_config import (
 
 AnyEvalMetricConfig = Annotated[
     ABGridDatasetConfig
+    | ArithmeticCIGridConfig
     | CEandKLLossesConfig
-    | CIHiddenActsReconLossConfig
     | CIHistogramsConfig
     | CI_L0Config
     | CIMaskedAttnPatternsReconLossConfig
@@ -51,7 +50,6 @@ AnyEvalMetricConfig = Annotated[
     | PermutedCIPlotsConfig
     | PGDReconLossConfig
     | StochasticAttnPatternsReconLossConfig
-    | StochasticHiddenActsReconLossConfig
     | TwoStreamCIMeanPerComponentConfig
     | UnmaskedNoDeltaReconLossConfig
     | UVPlotsConfig

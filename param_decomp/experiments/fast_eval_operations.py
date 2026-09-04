@@ -23,7 +23,7 @@ from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.model import CaptureKeys, PlacedModel
 from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval, make_fresh_pgd_eval_step
-from param_decomp.core.run import EvalInvocation, EvalOperation
+from param_decomp.core.run import EvalInvocation, PassOperation
 from param_decomp.experiments.eval_config import EvalConfig
 
 type ScalarStep = Callable[
@@ -39,7 +39,7 @@ def _averaged_over_eval_batches(
     model: PlacedModel,
     sample_eval_batch: Callable[[int], Any],
     max_batches: int | None = None,
-) -> EvalOperation[EvalInvocation]:
+) -> PassOperation[EvalInvocation]:
     """Run `step` over the pass's eval batches (the first `max_batches` when capped) and
     average each scalar it emits. `flat_index` stays keyed off the full `n_steps` stride,
     so a cap changes which batches run, never which key a batch index draws."""
@@ -64,7 +64,7 @@ def _averaged_over_eval_batches(
                 sums[name] = sums.get(name, jnp.zeros(())) + value
         return {f"eval/{name}": float(value) / n_batches for name, value in sums.items()}
 
-    return EvalOperation(schedule, run)
+    return PassOperation(schedule, run)
 
 
 def make_fresh_pgd_operation(
@@ -77,7 +77,7 @@ def make_fresh_pgd_operation(
     ci_capture_keys: CaptureKeys,
     mesh: Mesh | None,
     sample_eval_batch: Callable[[int], Any],
-) -> EvalOperation[EvalInvocation]:
+) -> PassOperation[EvalInvocation]:
     assert metric.init == "random" and metric.source_shape == "c", metric
     probe = FreshPGDReconEval(
         name=metric.name or metric.type,
@@ -117,7 +117,7 @@ def make_ci_l0_operation(
     ci_capture_keys: CaptureKeys,
     mesh: Mesh | None,
     sample_eval_batch: Callable[[int], Any],
-) -> EvalOperation[EvalInvocation]:
+) -> PassOperation[EvalInvocation]:
     groups = (
         {name: tuple(patterns) for name, patterns in metric.groups.items()}
         if metric.groups is not None

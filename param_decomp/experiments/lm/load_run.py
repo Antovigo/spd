@@ -23,6 +23,7 @@ from param_decomp.core.ci_fn import (
 )
 from param_decomp.core.components import ComponentStacks
 from param_decomp.core.configs import PlacementTableConfig
+from param_decomp.core.init_placed import ComponentInitializer, random_component_initializer
 from param_decomp.core.model import PlacedModel, prepare_compute_weights
 from param_decomp.core.precision import COMPUTE_DT, cast_floating
 from param_decomp.core.run_state import init_decomposition
@@ -37,8 +38,12 @@ from param_decomp.experiments.lm.resolved import (
     weights_jnp_dtype,
 )
 from param_decomp.infra import pretrain_cache
-from param_decomp.targets import llama_simple_mlp
+from param_decomp.targets import glu_transformer, llama_simple_mlp
 from param_decomp.targets.glu_transformer import GLUDecomposedModel, GLULayer, glu_site_specs
+from param_decomp.targets.neuron_alignment import (
+    NeuronAlignment,
+    neuron_aligned_targeted_component_initializer,
+)
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
 LMCIFn = ChunkwiseTransformerCIFn | GlobalMLPCIFn
@@ -91,6 +96,36 @@ def load_target(target: AnyLMTargetConfig, data_root: Path) -> GLUDecomposedMode
                 weights_jnp_dtype(target.weights_dtype),
             )
     return _with_attention_implementation(loaded_model, target.attention_implementation)
+
+
+def component_initializer_for(
+    target: AnyLMTargetConfig, alignment: NeuronAlignment | None = None
+) -> ComponentInitializer:
+    """Resolve the one run-start V/U initializer from the authored target family config.
+    `alignment` is the `neuron_aligned_targeted` init's loaded rankings
+    (`neuron_ranks.load_neuron_alignment`), required by — and only by — that init."""
+    assert (alignment is not None) == (
+        target.component_initialization == "neuron_aligned_targeted"
+    ), (target.component_initialization, alignment is not None)
+    match target:
+        case (
+            TargetConfig(component_initialization="random")
+            | LlamaSimpleMLPTargetConfig(component_initialization="random")
+        ):
+            return random_component_initializer
+        case (
+            TargetConfig(component_initialization="neuron_aligned")
+            | LlamaSimpleMLPTargetConfig(component_initialization="neuron_aligned")
+        ):
+            return cast(ComponentInitializer, glu_transformer.neuron_aligned_component_initializer)
+        case (
+            TargetConfig(component_initialization="neuron_aligned_targeted")
+            | LlamaSimpleMLPTargetConfig(component_initialization="neuron_aligned_targeted")
+        ):
+            assert alignment is not None
+            return neuron_aligned_targeted_component_initializer(alignment)
+        case _:
+            raise AssertionError(target)
 
 
 def build_target(

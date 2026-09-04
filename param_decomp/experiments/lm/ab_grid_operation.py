@@ -13,7 +13,7 @@ from param_decomp.core.ci_fn import CIRole, PlacedCIFn
 from param_decomp.core.eval_schedule import EvalSchedule
 from param_decomp.core.metrics import LogRecord
 from param_decomp.core.model import CaptureKeys, PlacedModel
-from param_decomp.core.run import EvalOperation
+from param_decomp.core.run import PassOperation
 from param_decomp.core.train import TrainState
 from param_decomp.experiments.lm.ab_grid_dataset import (
     ABGridStep,
@@ -24,7 +24,7 @@ from param_decomp.experiments.lm.ab_grid_dataset import (
 )
 from param_decomp.experiments.lm.arithmetic_probe import ArithmeticGrid, build_arithmetic_probe
 from param_decomp.experiments.lm.eval_config import ABGridDatasetConfig
-from param_decomp.experiments.lm.eval_context import LMEvalContext
+from param_decomp.experiments.lm.eval_context import LMEvalPass
 from param_decomp.experiments.lm.resolved import TargetConfig
 from param_decomp.targets.glu_transformer import hf_snapshot_dir
 
@@ -116,7 +116,7 @@ def make_ab_grid_operation(
     n_proc: int,
     run_dir: Path,
     roles: tuple[CIRole, ...] = ("output",),
-) -> EvalOperation[LMEvalContext]:
+) -> PassOperation[LMEvalPass]:
     assert isinstance(target, TargetConfig), (
         f"the ab grid needs an HF tokenizer; {type(target).__name__} has no model_name"
     )
@@ -147,12 +147,12 @@ def make_ab_grid_operation(
         writes_snapshots=jax.process_index() == 0,
     )
 
-    def run(context: LMEvalContext) -> LogRecord:
+    def run(eval_pass: LMEvalPass) -> LogRecord:
         # `placed_ci_fn`, never `state.decomposition.ci_fn`: post-#1000 the CI compute
         # lifecycle (`materialize_ci_compute_weights`) needs the resolved placement to
         # reconstruct chunk weights, and `EvalInvocation` is what carries it. Reaching past
         # it to the raw fn is what killed run 10631 at step 4000 —
         # `'ChunkwiseTransformerCIFn' object has no attribute 'fn'`.
-        return operation.run(context.state, context.now_step, context.placed_ci_fn)
+        return operation.run(eval_pass.state, eval_pass.now_step, eval_pass.placed_ci_fn)
 
-    return EvalOperation(schedule=schedule, run=run)
+    return PassOperation(schedule=schedule, run=run)

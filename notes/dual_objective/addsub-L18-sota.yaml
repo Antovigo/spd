@@ -42,6 +42,24 @@
 # `runtime.compilation_cache_dir` + `compiler_options`, the explicit `replicate` mesh
 # axis in place of `dp`/`gpus_per_node`, and `sharding: ddp` in place of `zero1`.
 #
+# MIGRATED AGAIN 2026-09-04 for the upstream #1001 merge, three edits — the recipe's
+# NUMBERS are untouched, but one of them is not a pure rename:
+#   1. `SmoothL0ImportanceMinimalityLoss` -> `ImportanceMinimalityLoss`. #1001 deleted the
+#      L_p penalty and gave its name to the smooth-L0 one; same fields, same math, and the
+#      wandb key `train/loss/SmoothL0ImportanceMinimalityLoss` becomes
+#      `train/loss/ImportanceMinimalityLoss` (do not compare that curve across the merge
+#      by key alone).
+#   2. `CIHiddenActsReconLoss` dropped from `eval.metrics`: #1001 deleted
+#      `core/hidden_acts_eval.py` and both hidden-acts eval metrics outright. The
+#      hidden-role coverage that remains is `CIMaskedReconLoss` plus the per-role PGD probe.
+#   3. `pd.weight_init: coupled` REMOVED — and this one CHANGES WHAT RUNS. The whole
+#      `pd.weight_init` field is gone (`default`/`coupled`/`zero_u` retired 2026-09-04,
+#      Antoine's call: none beat the alternatives); V/U seeding is now
+#      `decomposition.sites.initialization`, whose default `random` is #1001's
+#      target-blind init, NOT this run's `coupled`. p-5b7fa697 ran `coupled`; a run of
+#      this file as it now stands does not. Set `initialization: neuron_aligned_targeted`
+#      (+ `neuron_ranks`) for the aligned arm; there is no way to spell `coupled` again.
+#
 # `run_name` is left at the generic seat name deliberately: `addsub-L18-16-ntmerged-bsc`
 # already owns a `runs/by-name/` symlink, and reusing it would collide.
 run_name: jax-l18-addsub-targeted
@@ -86,7 +104,6 @@ pd:
   seed: 0
   steps: 20000
   batch_size: 128
-  weight_init: coupled
   ci_scaled_weight_decay: 0.3
   components_optimizer:
     lr_schedule:
@@ -107,7 +124,7 @@ pd:
     weight_decay: 0.0
     grad_clip_norm: null
   loss_metrics:
-    - type: SmoothL0ImportanceMinimalityLoss
+    - type: ImportanceMinimalityLoss
       # 4x the final 5.0e-05 at step 0, linear to 5.0e-05 at 50%, then held.
       coeff:
         max_val: 2.0e-04
@@ -319,7 +336,6 @@ eval:
     # where the assertion did not exist. Dropping it is the same call the migrated
     # nlcontrol config made. To keep it, `eval.n_steps` must be 1, which would rewrite
     # every other metric's statistics — not worth it for two histograms.
-    - type: CIHiddenActsReconLoss
     - type: TwoStreamCIMeanPerComponent
     - type: WeightMagnitude
     - type: ABGridDataset

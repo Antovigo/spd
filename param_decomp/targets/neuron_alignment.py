@@ -1,25 +1,33 @@
-"""Neuron-aligned init support for the transformer targets (SPEC T13).
+"""Neuron-aligned targeted init support for the transformer targets (SPEC T13).
 
-The `neuron_aligned_targeted` init starts every MLP subcomponent as one neuron of its
-block — the top-C by **write energy** on the target prompt pool:
+`initialization: neuron_aligned_targeted` starts every subcomponent of every decomposed
+site as ONE architectural coordinate of its matrix — the top-C by activity on the target
+prompt pool. Which coordinate a site's components align to is the matrix's structural
+role (`unit_kind_of`), and each role has its own ranking per block:
 
-    score_i = E_tokens[ h_i² ] · ‖W_down[:, i]‖²
+    mlp (gate/up | fc, down):  score_i = E[h_i²] · ‖W_down[:, i]‖²   write energy of neuron i
+    q:                         score_j = E[q_j²]                      the projection's own energy
+    k:                         score_j = E[k_j²]
+    o:                         score_j = E[z_j²] · ‖W_o[:, j]‖²      write energy of attention channel j
+    v:                         score_(g,d) = Σ_{h ∈ group g} score_o[(h, d)]
 
-with `h` the post-nonlinearity hidden activation the block's down projection consumes
-(`mlp_hidden` tap: `silu(gate)·up` on the gated anatomy, the post-GELU `fc` output on the
-plain one) and the expectation over every position of every pool prompt exactly once (an
-exhaustive sweep, not the trainer's with-replacement sampler). Uncentred on purpose: a
-neuron that fires the same on every prompt of a narrow pool is exactly one the
-decomposition must reconstruct. The down column norm turns hidden-unit scale into
-residual-stream effect, and one block score serves the block's writers and reader alike, so
-a site's top-C is a PREFIX of one ranking.
+with `h` the post-nonlinearity hidden activation the down projection consumes (`mlp_hidden`
+tap), `q`/`k` the projections' raw outputs (their `.out` taps, pre-RoPE), and `z` the
+attention-core output the o projection consumes (`attention_output` tap). Attention mixes
+across positions, never across channels, so `q_j` and `k_j` interact only inside their
+head's dot product and rank independently; `v` channel `(g, d)` IS attention-output channel
+`(h, d)` for every query head `h` of kv group `g`, so v and o share the write-energy ranking
+(v's summed over its group). Expectations run over every position of every pool prompt
+exactly once (an exhaustive sweep, not the trainer's with-replacement sampler). Uncentred
+on purpose: a coordinate that fires the same on every prompt of a narrow pool is exactly
+one the decomposition must reconstruct. One ranking per (block, kind) serves every site of
+that kind, so a site's top-C is a PREFIX of one ranking.
 
-The ranking depends on the target model and the pool only — never on the decomposition —
-so it is harvested once (`experiments.lm.harvest_neuron_ranks`) into an artifact this
-module reads and writes, and a run's provenance is checked against it at load.
-
-Core stays anatomy-blind (`core.components.SiteNeuronAlignment` carries the neuron axis
-and the indices); everything anatomy-aware lives here. Targets import core only.
+The rankings depend on the target model and the pool only — never on the decomposition —
+so they are harvested once (`experiments.lm.harvest_neuron_ranks`) into an artifact this
+module reads and writes, and a run's provenance is checked against it at load. The init
+itself is a `ComponentInitializer` (`neuron_aligned_targeted_component_initializer`), the
+same seam the data-free `neuron_aligned` init uses.
 """
 
 import hashlib
@@ -27,7 +35,7 @@ import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import equinox as eqx
 import jax
@@ -35,60 +43,78 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, PRNGKeyArray
 from pydantic import Field
 
 from param_decomp.core.base_config import BaseConfig
-from param_decomp.core.components import NeuronAlignment, SiteNeuronAlignment, SiteSpec
+from param_decomp.core.components import (
+    ComponentStacks,
+    SiteSpec,
+    component_stacks_from_site_arrays,
+)
 from param_decomp.core.configs import NamedNeuronRanks, NeuronRanksDir, NeuronRanksRef
-from param_decomp.core.model import PlacedModel
+from param_decomp.core.init_placed import ComponentInitializer
+from param_decomp.core.model import DecomposedModel, PlacedModel
 from param_decomp.targets.glu_transformer import (
     Anatomy,
     GatedMLP,
     GLUDecomposedModel,
     PlainMLP,
+    _frozen_site_weight,
+    neuron_aligned_component_count,
+    selected_unit_factors,
 )
-from param_decomp.targets.transformer_taps import mlp_hidden_tap_key
+from param_decomp.targets.transformer_taps import (
+    attention_output_tap_key,
+    mlp_hidden_tap_key,
+    site_output_tap_key,
+)
 
-STATISTIC = "write_energy"
+STATISTIC = "unit_energy"
 NEURON_RANKS_FILENAME = "neuron_ranks.npz"
 NEURON_RANKS_META_FILENAME = "meta.json"
 
+UnitKind = Literal["mlp", "q", "k", "v", "o"]
+"""The ranking families: one per structural role a decomposed matrix can have."""
+UNIT_KINDS: tuple[UnitKind, ...] = get_args(UnitKind)
 
-# ----------------------------- sites ↔ blocks -----------------------------
-
-
-@dataclass(frozen=True)
-class MLPBlockSites:
-    """One block's decomposed MLP sites: the hidden writers (gate/up | fc) and the reader
-    (down). Either side may be absent — a writer-only or reader-only decomposition still
-    ranks, since the score reads the frozen down matrix, not the site."""
-
-    block: int
-    writers: tuple[str, ...]
-    reader: str | None
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return self.writers + ((self.reader,) if self.reader is not None else ())
+NeuronAlignment = dict[str, np.ndarray]
+"""Site name -> `int32[C]` distinct unit indices in rank order (slot `i` = the `i`-th
+ranked coordinate of the site's kind), for EVERY decomposed site."""
 
 
-def mlp_blocks_of(sites: tuple[SiteSpec, ...], anatomy: Anatomy) -> dict[int, MLPBlockSites]:
-    """The blocks holding at least one decomposed MLP site, by block; attention-only
-    blocks have no entry."""
-    writers: dict[int, list[str]] = {}
-    readers: dict[int, str] = {}
+# ----------------------------- sites ↔ rankings -----------------------------
+
+
+def unit_kind_of(anatomy: Anatomy, kind: str) -> UnitKind:
+    """Which ranking a matrix kind aligns to."""
+    if kind in anatomy.mlp.hidden or kind == anatomy.mlp.down:
+        return "mlp"
+    if kind == anatomy.q:
+        return "q"
+    if kind == anatomy.k:
+        return "k"
+    if kind == anatomy.v:
+        return "v"
+    if kind == anatomy.o:
+        return "o"
+    raise AssertionError(f"{kind!r} is not a matrix kind of {anatomy.family}")
+
+
+def site_unit_kinds(
+    sites: tuple[SiteSpec, ...], anatomy: Anatomy
+) -> dict[str, tuple[int, UnitKind]]:
+    """Site name -> (block, ranking family)."""
+    out: dict[str, tuple[int, UnitKind]] = {}
     for spec in sites:
         block, kind = anatomy.family.parse(spec.name)
-        if kind in anatomy.mlp.hidden:
-            writers.setdefault(block, []).append(spec.name)
-        elif kind == anatomy.mlp.down:
-            assert block not in readers, (block, readers[block], spec.name)
-            readers[block] = spec.name
-    return {
-        block: MLPBlockSites(block, tuple(writers.get(block, ())), readers.get(block))
-        for block in sorted(set(writers) | set(readers))
-    }
+        out[spec.name] = (block, unit_kind_of(anatomy, kind))
+    return out
+
+
+def ranked_blocks(sites: tuple[SiteSpec, ...], anatomy: Anatomy) -> tuple[int, ...]:
+    """The blocks holding at least one decomposed site, ascending."""
+    return tuple(sorted({block for block, _ in site_unit_kinds(sites, anatomy).values()}))
 
 
 def frozen_mlp_down_weight(model: GLUDecomposedModel, block: int) -> Float[Array, "d n"]:
@@ -101,10 +127,22 @@ def frozen_mlp_down_weight(model: GLUDecomposedModel, block: int) -> Float[Array
             return Wd
 
 
-def down_column_sq_norms(model: GLUDecomposedModel, block: int) -> np.ndarray:
-    """`‖W_down[:, i]‖²` per neuron, fp32."""
-    Wd = frozen_mlp_down_weight(model, block).astype(jnp.float32)
-    return np.asarray(jnp.sum(Wd * Wd, axis=0), dtype=np.float32)
+def _column_sq_norms(weight: Array) -> np.ndarray:
+    """`‖W[:, j]‖²` per column, fp32."""
+    w = weight.astype(jnp.float32)
+    return np.asarray(jnp.sum(w * w, axis=0), dtype=np.float32)
+
+
+def unit_counts(model: GLUDecomposedModel) -> dict[UnitKind, int]:
+    """Coordinates per ranking family — the same for every block of one architecture."""
+    attn = model.frozen_block(0).attn
+    return {
+        "mlp": int(frozen_mlp_down_weight(model, 0).shape[1]),
+        "q": attn.n_head * attn.head_dim,
+        "k": attn.n_kv_head * attn.head_dim,
+        "v": attn.n_kv_head * attn.head_dim,
+        "o": attn.n_head * attn.head_dim,
+    }
 
 
 # ----------------------------- the sweep -----------------------------
@@ -127,35 +165,55 @@ def pool_slices(tokens: np.ndarray, batch: int) -> Iterator[tuple[np.ndarray, np
         yield rows, mask
 
 
-class NeuronMoments(eqx.Module):
-    """Per-neuron `Σh²` and the token count it sums over, fp32 on device."""
+_MOMENT_TAPS = ("mlp", "q", "k", "z")
+"""The captured activations one block's rankings need: the MLP hidden, the q and k
+projection outputs, and the attention-core output `z` (which serves BOTH v and o)."""
 
-    sum_h2: Float[Array, " n"]
+
+class BlockMoments(eqx.Module):
+    """Per-coordinate `Σ x²` for each of one block's captured taps, and the token count
+    they sum over — fp32 on device."""
+
+    sum_sq: dict[str, Float[Array, " n"]]
     n_tokens: Float[Array, ""]
 
 
-MomentsStep = Callable[[Array, Array], dict[int, NeuronMoments]]
+MomentsStep = Callable[[Array, Array], dict[int, BlockMoments]]
+
+
+def block_tap_keys(anatomy: Anatomy, block: int) -> dict[str, str]:
+    """`_MOMENT_TAPS` name -> capture key for one block."""
+    return {
+        "mlp": mlp_hidden_tap_key(block),
+        "q": site_output_tap_key(anatomy.family.name_of(block, anatomy.q)),
+        "k": site_output_tap_key(anatomy.family.name_of(block, anatomy.k)),
+        "z": attention_output_tap_key(block),
+    }
 
 
 def make_moments_step(model: PlacedModel, blocks: tuple[int, ...]) -> MomentsStep:
     """One jitted `(tokens [B, T], row_mask [B]) -> {block: moments}` over the frozen
-    forward with the blocks' `mlp_hidden` taps captured, every position counted. The
-    outputs are declared FULLY REPLICATED, so the batch reduction's collective happens
-    inside the graph and every device (and process) holds the complete `[n]` vectors."""
+    forward with the blocks' taps captured, every position counted. The outputs are
+    declared FULLY REPLICATED, so the batch reduction's collective happens inside the
+    graph and every device (and process) holds the complete vectors."""
     assert len(set(blocks)) == len(blocks) and blocks, blocks
-    keys = frozenset(mlp_hidden_tap_key(block) for block in blocks)
+    glu = model.model
+    assert isinstance(glu, GLUDecomposedModel), type(glu)
+    keys_by_block = {block: block_tap_keys(glu.anatomy, block) for block in blocks}
+    keys = frozenset(key for taps in keys_by_block.values() for key in taps.values())
     model_arrays, model_static = eqx.partition(model, eqx.is_array)
 
-    def step(arrays: PlacedModel, tokens: Array, row_mask: Array) -> dict[int, NeuronMoments]:
+    def step(arrays: PlacedModel, tokens: Array, row_mask: Array) -> dict[int, BlockMoments]:
         placed: PlacedModel = eqx.combine(arrays, model_static)
         captures = placed.clean_forward(tokens, keys).captures
         weight = jnp.broadcast_to(row_mask[:, None], tokens.shape).astype(jnp.float32)
-        moments: dict[int, NeuronMoments] = {}
+        moments: dict[int, BlockMoments] = {}
         for block in blocks:
-            h = captures[mlp_hidden_tap_key(block)].astype(jnp.float32)
-            moments[block] = NeuronMoments(
-                sum_h2=jnp.einsum("bt,btn->n", weight, h * h), n_tokens=jnp.sum(weight)
-            )
+            sum_sq: dict[str, Array] = {}
+            for tap, key in keys_by_block[block].items():
+                x = captures[key].astype(jnp.float32)
+                sum_sq[tap] = jnp.einsum("bt,btn->n", weight, x * x)
+            moments[block] = BlockMoments(sum_sq=sum_sq, n_tokens=jnp.sum(weight))
         return moments
 
     if model.placement is None:
@@ -170,26 +228,33 @@ def make_moments_step(model: PlacedModel, blocks: tuple[int, ...]) -> MomentsSte
 class HostMoments:
     """The float64 host accumulators one block's sweep lands in."""
 
-    sum_h2: np.ndarray
+    sum_sq: dict[str, np.ndarray]
     n_tokens: float
 
     @classmethod
-    def zeros(cls, n_neurons: int) -> "HostMoments":
-        return cls(np.zeros(n_neurons, np.float64), 0.0)
+    def zeros(cls, widths: dict[str, int]) -> "HostMoments":
+        return cls({tap: np.zeros(n, np.float64) for tap, n in widths.items()}, 0.0)
 
-    def add(self, device: NeuronMoments) -> None:
-        self.sum_h2 += np.asarray(device.sum_h2, dtype=np.float64)
+    def add(self, device: BlockMoments) -> None:
+        assert set(device.sum_sq) == set(self.sum_sq), (set(device.sum_sq), set(self.sum_sq))
+        for tap, value in device.sum_sq.items():
+            self.sum_sq[tap] += np.asarray(value, dtype=np.float64)
         self.n_tokens += float(device.n_tokens)
+
+
+def tap_widths(counts: dict[UnitKind, int]) -> dict[str, int]:
+    """Captured width per `_MOMENT_TAPS` entry, from the ranking-family unit counts."""
+    return {"mlp": counts["mlp"], "q": counts["q"], "k": counts["k"], "z": counts["o"]}
 
 
 def accumulate_neuron_moments(
     step: MomentsStep,
     blocks: tuple[int, ...],
-    n_neurons: int,
+    widths: dict[str, int],
     slices: Iterator[tuple[Array, Array]],
 ) -> dict[int, HostMoments]:
     """Drive one `make_moments_step` over already-placed `(tokens, row_mask)` slices."""
-    totals = {block: HostMoments.zeros(n_neurons) for block in blocks}
+    totals = {block: HostMoments.zeros(widths) for block in blocks}
     for tokens, row_mask in slices:
         for block, moments in step(tokens, row_mask).items():
             totals[block].add(moments)
@@ -197,27 +262,42 @@ def accumulate_neuron_moments(
 
 
 def capture_groups(
-    blocks: tuple[int, ...], batch: int, n_positions: int, n_neurons: int, budget_bytes: int
+    blocks: tuple[int, ...], batch: int, n_positions: int, captured_width: int, budget_bytes: int
 ) -> tuple[tuple[int, ...], ...]:
-    """Blocks to capture per forward: the forward retains one fp32 `[B, T, n]` slot per
-    REQUESTED block, so a many-block harvest is cut into groups under a byte budget."""
-    per_block = batch * n_positions * n_neurons * 4
+    """Blocks to capture per forward: the forward retains one fp32 `[B, T, width]` slot per
+    REQUESTED block (`captured_width` = the sum of its tap widths), so a many-block harvest
+    is cut into groups under a byte budget."""
+    per_block = batch * n_positions * captured_width * 4
     per_group = max(1, budget_bytes // per_block)
     return tuple(blocks[i : i + per_group] for i in range(0, len(blocks), per_group))
 
 
-# ----------------------------- score → ranking -----------------------------
+# ----------------------------- moments → scores → rankings -----------------------------
 
 
-def write_energy(moments: HostMoments, down_sq_norms: np.ndarray) -> np.ndarray:
-    """`E[h²] · ‖W_down[:, i]‖²` per neuron, float64."""
+def block_scores(
+    model: GLUDecomposedModel, block: int, moments: HostMoments
+) -> dict[UnitKind, np.ndarray]:
+    """Every ranking family's per-coordinate score for one block, float64 (module docstring)."""
     assert moments.n_tokens > 0, "the sweep counted no tokens"
-    return moments.sum_h2 / moments.n_tokens * down_sq_norms.astype(np.float64)
+    mean_sq = {tap: value / moments.n_tokens for tap, value in moments.sum_sq.items()}
+    attn = model.frozen_block(block).attn
+    o_score = mean_sq["z"] * _column_sq_norms(attn.wo).astype(np.float64)
+    n_rep = attn.n_head // attn.n_kv_head
+    v_score = o_score.reshape(attn.n_kv_head, n_rep, attn.head_dim).sum(axis=1).reshape(-1)
+    return {
+        "mlp": mean_sq["mlp"]
+        * _column_sq_norms(frozen_mlp_down_weight(model, block)).astype(np.float64),
+        "q": mean_sq["q"],
+        "k": mean_sq["k"],
+        "v": v_score,
+        "o": o_score,
+    }
 
 
-def rank_neurons(score: np.ndarray) -> np.ndarray:
-    """Neuron indices by DESCENDING score, ties broken by ascending index — deterministic
-    on every host."""
+def rank_units(score: np.ndarray) -> np.ndarray:
+    """Coordinate indices by DESCENDING score, ties broken by ascending index —
+    deterministic on every host."""
     assert score.ndim == 1 and np.all(np.isfinite(score)), score.shape
     return np.lexsort((np.arange(score.shape[0]), -score)).astype(np.int32)
 
@@ -227,7 +307,7 @@ def rank_neurons(score: np.ndarray) -> np.ndarray:
 
 class NeuronRanksMeta(BaseConfig):
     """The artifact's provenance — what a run is checked against before it may start from
-    the ranking. `tokens_sha256` fingerprints the pool's token matrix itself, so two pool
+    the rankings. `tokens_sha256` fingerprints the pool's token matrix itself, so two pool
     specs that tokenize identically share an artifact and any drift refuses."""
 
     target: str = Field(min_length=1)
@@ -236,20 +316,20 @@ class NeuronRanksMeta(BaseConfig):
     prompt_len: int
     statistic: str
     layers: list[int]
-    n_neurons: int
+    n_units: dict[UnitKind, int]
 
 
 @dataclass(frozen=True)
 class NeuronRanks:
     meta: NeuronRanksMeta
-    rank: dict[int, np.ndarray]
-    """block -> `int32[n]` neuron indices by descending score."""
-    score: dict[int, np.ndarray]
-    """block -> `float32[n]` scores in rank order."""
+    rank: dict[UnitKind, dict[int, np.ndarray]]
+    """kind -> block -> `int32[n]` coordinate indices by descending score."""
+    score: dict[UnitKind, dict[int, np.ndarray]]
+    """kind -> block -> `float32[n]` scores in rank order."""
 
-    def coverage(self, block: int, C: int) -> float:
-        """The fraction of the block's total write energy its top-C neurons carry."""
-        score = self.score[block].astype(np.float64)
+    def coverage(self, kind: UnitKind, block: int, C: int) -> float:
+        """The fraction of the (block, kind) total score its top-C coordinates carry."""
+        score = self.score[kind][block].astype(np.float64)
         total = float(score.sum())
         return float(score[:C].sum() / total) if total > 0 else 0.0
 
@@ -276,19 +356,27 @@ def resolve_neuron_ranks_ref(ref: NeuronRanksRef, data_root: Path) -> Path:
             return dir
 
 
+def _array_key(prefix: str, kind: UnitKind, block: int) -> str:
+    return f"{prefix}_{kind}_{block}"
+
+
 def write_neuron_ranks(
     out_dir: Path,
     meta: NeuronRanksMeta,
-    rank: dict[int, np.ndarray],
-    score: dict[int, np.ndarray],
+    rank: dict[UnitKind, dict[int, np.ndarray]],
+    score: dict[UnitKind, dict[int, np.ndarray]],
 ) -> None:
-    assert set(rank) == set(score) == set(meta.layers), (set(rank), set(score), meta.layers)
+    assert set(rank) == set(score) == set(UNIT_KINDS), (set(rank), set(score))
+    assert set(meta.n_units) == set(UNIT_KINDS), meta.n_units
     out_dir.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {}
-    for block in meta.layers:
-        assert rank[block].shape == score[block].shape == (meta.n_neurons,), block
-        arrays[f"rank_{block}"] = rank[block].astype(np.int32)
-        arrays[f"score_{block}"] = score[block].astype(np.float32)
+    for kind in UNIT_KINDS:
+        assert set(rank[kind]) == set(score[kind]) == set(meta.layers), (kind, meta.layers)
+        for block in meta.layers:
+            n = meta.n_units[kind]
+            assert rank[kind][block].shape == score[kind][block].shape == (n,), (kind, block)
+            arrays[_array_key("rank", kind, block)] = rank[kind][block].astype(np.int32)
+            arrays[_array_key("score", kind, block)] = score[kind][block].astype(np.float32)
     np.savez(out_dir / NEURON_RANKS_FILENAME, **arrays)  # pyright: ignore[reportArgumentType]
     (out_dir / NEURON_RANKS_META_FILENAME).write_text(meta.model_dump_json(indent=2) + "\n")
 
@@ -297,16 +385,25 @@ def read_neuron_ranks(artifact_dir: Path) -> NeuronRanks:
     meta_path = artifact_dir / NEURON_RANKS_META_FILENAME
     assert meta_path.exists(), f"no neuron-ranks artifact at {artifact_dir}: {meta_path} missing"
     meta = NeuronRanksMeta.model_validate(json.loads(meta_path.read_text()))
+    assert meta.statistic == STATISTIC, (
+        f"neuron ranks at {artifact_dir} carry statistic {meta.statistic!r}; this code reads "
+        f"{STATISTIC!r} (every ranking family, attention included) — re-harvest"
+    )
+    rank: dict[UnitKind, dict[int, np.ndarray]] = {kind: {} for kind in UNIT_KINDS}
+    score: dict[UnitKind, dict[int, np.ndarray]] = {kind: {} for kind in UNIT_KINDS}
     with np.load(artifact_dir / NEURON_RANKS_FILENAME) as arrays:
-        rank = {block: np.asarray(arrays[f"rank_{block}"]) for block in meta.layers}
-        score = {block: np.asarray(arrays[f"score_{block}"]) for block in meta.layers}
-    for block in meta.layers:
-        assert rank[block].shape == score[block].shape == (meta.n_neurons,), block
-        # A permutation of 0..n-1, checked rather than trusted: a negative index would
-        # silently fancy-index from the end.
-        assert np.array_equal(np.sort(rank[block]), np.arange(meta.n_neurons)), (
-            f"block {block}: rank is not a permutation of 0..{meta.n_neurons - 1}"
-        )
+        for kind in UNIT_KINDS:
+            n = meta.n_units[kind]
+            for block in meta.layers:
+                r = np.asarray(arrays[_array_key("rank", kind, block)])
+                s = np.asarray(arrays[_array_key("score", kind, block)])
+                assert r.shape == s.shape == (n,), (kind, block, r.shape, s.shape, n)
+                # A permutation of 0..n-1, checked rather than trusted: a negative index
+                # would silently fancy-index from the end.
+                assert np.array_equal(np.sort(r), np.arange(n)), (
+                    f"{kind} block {block}: rank is not a permutation of 0..{n - 1}"
+                )
+                rank[kind][block], score[kind][block] = r, s
     return NeuronRanks(meta, rank, score)
 
 
@@ -329,38 +426,82 @@ def assert_neuron_ranks_provenance(
     assert not missing, f"neuron ranks cover layers {meta.layers}; the run decomposes {missing} too"
 
 
-# ----------------------------- ranking → alignment -----------------------------
+# ----------------------------- rankings → alignment → init -----------------------------
 
 
 def neuron_alignment_from_ranks(
     ranks: NeuronRanks, sites: tuple[SiteSpec, ...], anatomy: Anatomy
 ) -> NeuronAlignment:
-    """Every MLP site's top-C: writers select on `d_out`, the reader on `d_in`; slot `i`
-    is the block's `i`-th ranked neuron. Attention sites are absent (they take `zero_u`)."""
-    by_name = {spec.name: spec for spec in sites}
+    """Every decomposed site's top-C of its (block, kind) ranking: slot `i` is the `i`-th
+    ranked coordinate, so two sites of one kind in one block take nested prefixes."""
     alignment: NeuronAlignment = {}
-    for block, block_sites in mlp_blocks_of(sites, anatomy).items():
-        rank = ranks.rank[block]
-        for name in block_sites.names:
-            spec = by_name[name]
-            axis: Literal["d_out", "d_in"] = "d_out" if name in block_sites.writers else "d_in"
-            n = spec.d_out if axis == "d_out" else spec.d_in
-            assert n == rank.shape[0], (name, n, rank.shape)
-            assert n >= spec.C, (name, spec.C, n)
-            alignment[name] = SiteNeuronAlignment(
-                neurons=jnp.asarray(rank[: spec.C], dtype=jnp.int32), neuron_axis=axis
-            )
+    for spec in sites:
+        block, kind = anatomy.family.parse(spec.name)
+        rank = ranks.rank[unit_kind_of(anatomy, kind)][block]
+        n = neuron_aligned_component_count(anatomy, spec)
+        assert n == rank.shape[0], (spec.name, n, rank.shape)
+        assert n >= spec.C, (
+            f"{spec.name}: neuron_aligned_targeted needs C <= {n} distinct coordinates, got C={spec.C}"
+        )
+        alignment[spec.name] = rank[: spec.C].astype(np.int32)
     return alignment
 
 
 def alignment_coverage(
     ranks: NeuronRanks, sites: tuple[SiteSpec, ...], anatomy: Anatomy
 ) -> dict[str, float]:
-    """Per aligned site, the write-energy fraction its C covers — the step-0 number that
-    says whether C is enough for the pool."""
+    """Per site, the score fraction its C covers — the step-0 number that says whether C
+    is enough for the pool."""
     return {
-        name: ranks.coverage(block, spec.C)
-        for block, block_sites in mlp_blocks_of(sites, anatomy).items()
-        for name in block_sites.names
-        for spec in (next(s for s in sites if s.name == name),)
+        spec.name: ranks.coverage(kind, block, spec.C)
+        for spec in sites
+        for block, kind in (site_unit_kinds((spec,), anatomy)[spec.name],)
     }
+
+
+def validate_neuron_alignment(
+    sites: tuple[SiteSpec, ...], anatomy: Anatomy, alignment: NeuronAlignment
+) -> None:
+    """Host-side checks the traced init cannot make: every decomposed site is aligned, with
+    exactly `C` DISTINCT indices inside its unit axis."""
+    assert set(alignment) == {spec.name for spec in sites}, sorted(
+        set(alignment) ^ {spec.name for spec in sites}
+    )
+    for spec in sites:
+        units = np.asarray(alignment[spec.name])
+        n = neuron_aligned_component_count(anatomy, spec)
+        assert units.shape == (spec.C,) and units.dtype.kind == "i", (
+            spec.name,
+            units.shape,
+            spec.C,
+        )
+        assert len(set(units.tolist())) == spec.C, f"{spec.name}: repeated unit indices"
+        assert units.min() >= 0 and units.max() < n, (spec.name, units.min(), units.max(), n)
+
+
+def neuron_aligned_targeted_component_initializer(
+    alignment: NeuronAlignment,
+) -> ComponentInitializer:
+    """The `neuron_aligned_targeted` init (SPEC T13) as a `ComponentInitializer`: every
+    site's subcomponents ARE its aligned coordinates (`selected_unit_factors`), read from
+    the frozen weights inside the init graph. Consumes no randomness."""
+
+    def initialize(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
+        del key
+        assert isinstance(model, GLUDecomposedModel), (
+            f"neuron_aligned_targeted needs a transformer target, got {type(model)}"
+        )
+        validate_neuron_alignment(model.sites, model.anatomy, alignment)
+        site_arrays: dict[str, tuple[Array, Array]] = {}
+        for spec in model.sites:
+            layer, kind = model.anatomy.family.parse(spec.name)
+            weight = _frozen_site_weight(model.anatomy, model.frozen_block(layer), kind)
+            site_arrays[spec.name] = selected_unit_factors(
+                weight,
+                spec,
+                kind in model.anatomy.row_kinds,
+                jnp.asarray(alignment[spec.name], dtype=jnp.int32),
+            )
+        return component_stacks_from_site_arrays(model.sites, site_arrays)
+
+    return initialize

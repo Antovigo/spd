@@ -27,26 +27,22 @@ from param_decomp.core.ci_fn import (
     CIFnArch,
     ns_compute_shardings,
 )
-from param_decomp.core.components import NeuronAlignment
 from param_decomp.core.configs import (
     AdamPGDConfig,
     AdamWOptimizerConfig,
-    AnyImportanceMinimalityLossConfig,
     AnyPDConfig,
     ImportanceMinimalityLossConfig,
     MuonOptimizerConfig,
     NontargetConfig,
     PDConfigBase,
-    SmoothL0ImportanceMinimalityLossConfig,
     TargetedPDConfig,
-    WeightInit,
 )
 from param_decomp.core.init_placed import (
+    ComponentInitializer,
     init_ci_fn_placed,
-    init_component_stacks_coupled_placed,
-    init_component_stacks_neuron_aligned_placed,
-    init_component_stacks_placed,
+    init_model_component_stacks_placed,
     init_sources_sharded,
+    random_component_initializer,
 )
 from param_decomp.core.losses import EmaFrequency, resolve_frequency, scheduled_value_traced
 from param_decomp.core.model import PlacedModel, PositionAxis, Positioned
@@ -239,34 +235,16 @@ def init_decomposition(
     model: PlacedModel,
     ci_fn_arch: CIFnArch,
     init_key: PRNGKeyArray,
-    weight_init: WeightInit = "default",
-    neuron_alignment: NeuronAlignment | None = None,
+    component_initializer: ComponentInitializer = random_component_initializer,
 ) -> Decomposition:
     """The trained-product half of `init_train_state`, factored out so a consumer can
     `jax.eval_shape` it to recover the saved `decomposition` item's tree structure
-    without building (or knowing about) the optimizers/adversaries. `weight_init` selects
-    the V/U seeding; it does not affect the tree structure, so a structure-only consumer
-    may pass any data-free arm (the default). `neuron_alignment` is the
-    `neuron_aligned_targeted` arm's harvested neuron choice (SPEC T13), required by that
-    arm alone."""
+    without building (or knowing about) the optimizers/adversaries. `component_initializer`
+    selects the V/U seeding; it does not affect the tree structure, so a structure-only
+    consumer may leave the data-free default."""
     rules, mesh = _placed_init_geometry(model)
     ci_key = random.fold_in(init_key, 1)
-    # V/U placement derives from the rules table; the CI fn still declares its own
-    # per-leaf shardings (PLACEMENT_DESIGN.md migration stage 3).
-    match weight_init:
-        case "default":
-            components = init_component_stacks_placed(model.sites, init_key, rules)
-        case "coupled" | "zero_u":
-            components = init_component_stacks_coupled_placed(
-                model, init_key, rules, zero_u=weight_init == "zero_u"
-            )
-        case "neuron_aligned_targeted":
-            assert neuron_alignment is not None, (
-                "weight_init: neuron_aligned_targeted needs the harvested neuron alignment"
-            )
-            components = init_component_stacks_neuron_aligned_placed(
-                model, init_key, rules, neuron_alignment
-            )
+    components = init_model_component_stacks_placed(model, init_key, rules, component_initializer)
     ci_fn = init_ci_fn_placed(ci_fn_arch, model.sites, ci_key, mesh, rules)
     assert ci_fn.has_position_axis == model.has_position_axis, (
         f"CI fn has_position_axis={ci_fn.has_position_axis} but model declares "
@@ -275,12 +253,8 @@ def init_decomposition(
     return Decomposition(components=components, ci_fn=ci_fn)
 
 
-def _imp_min_config(pd: AnyPDConfig) -> AnyImportanceMinimalityLossConfig:
-    [imp_cfg] = [
-        m
-        for m in pd.loss_metrics
-        if isinstance(m, ImportanceMinimalityLossConfig | SmoothL0ImportanceMinimalityLossConfig)
-    ]
+def _imp_min_config(pd: AnyPDConfig) -> ImportanceMinimalityLossConfig:
+    [imp_cfg] = [m for m in pd.loss_metrics if isinstance(m, ImportanceMinimalityLossConfig)]
     return imp_cfg
 
 
@@ -295,7 +269,7 @@ def init_train_state(
     src_key: PRNGKeyArray,
     nontarget: NontargetConfig | None = None,
     nontarget_positions: PositionAxis | None = None,
-    neuron_alignment: NeuronAlignment | None = None,
+    component_initializer: ComponentInitializer = random_component_initializer,
 ) -> TrainState:
     """Persistent sources are shaped from `positions` (the run's waist geometry) — except
     a non-target OUTPUT term's bundle (T5/T7 amended 2026-08-19), which sizes off ITS
@@ -306,11 +280,13 @@ def init_train_state(
     assert isinstance(positions, Positioned) == model.has_position_axis, (
         f"{positions} does not match the model's has_position_axis={model.has_position_axis}"
     )
-    decomposition = init_decomposition(
-        model, ci_fn_arch, init_key, pd.weight_init, neuron_alignment
-    )
+    decomposition = init_decomposition(model, ci_fn_arch, init_key, component_initializer)
     components, ci_fn = decomposition.components, decomposition.ci_fn
-    freq_role = resolve_frequency(_imp_min_config(pd).frequency)
+    match _imp_min_config(pd).frequency:
+        case None:
+            freq_role = None
+        case freq_cfg:
+            freq_role = resolve_frequency(freq_cfg)
     # Recon terms only — persistent adversaries derive from these, and a targeted run's
     # loss list carries no faithfulness role for a full objective build to demand.
     recon_terms = build_recon_terms(

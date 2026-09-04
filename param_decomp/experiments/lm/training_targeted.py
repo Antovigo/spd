@@ -33,7 +33,7 @@ from param_decomp.experiments.lm.config import (
     build_targeted_experiment_config,
 )
 from param_decomp.experiments.lm.eval_operations import global_token_batch, make_lm_evaluation
-from param_decomp.experiments.lm.load_run import build_target
+from param_decomp.experiments.lm.load_run import build_target, component_initializer_for
 from param_decomp.experiments.lm.neuron_ranks import load_neuron_alignment
 from param_decomp.experiments.lm.resolved import (
     AnyLMTargetConfig,
@@ -131,7 +131,7 @@ def train_targeted(
     if is_main:
         print(f"target prompt pool: {n_prompts} prompts x {prompt_len} positions", flush=True)
 
-    # The neuron-aligned init's harvested ranking (SPEC T13): a file read, taken on every
+    # The neuron-aligned init's harvested rankings (SPEC T13): a file read, taken on every
     # entry — a requeue / fine-tune restore simply overwrites the aligned reference.
     neuron_alignment = (
         load_neuron_alignment(
@@ -141,9 +141,10 @@ def train_targeted(
             data_root,
             write_summary_to=built.run.run_dir if is_main else None,
         )
-        if built.pd.weight_init == "neuron_aligned_targeted"
+        if built.target.component_initialization == "neuron_aligned_targeted"
         else None
     )
+    component_initializer = component_initializer_for(built.target, neuron_alignment)
 
     key = random.PRNGKey(built.pd.seed)
     _, _, run_key = random.split(key, 3)
@@ -222,7 +223,7 @@ def train_targeted(
         evaluation=evaluation,
         sink=sink,
         profiling=engine_profiling(cfg.runtime.profiling),
-        neuron_alignment=neuron_alignment,
+        component_initializer=component_initializer,
     )
 
 

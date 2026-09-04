@@ -12,20 +12,20 @@ business, above: `decomposed_linear.site_forward`.
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cache
-from typing import ClassVar, Generic, Literal
+from typing import ClassVar, Generic
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jaxtyping import Array
 from typing_extensions import TypeVar
 
 from param_decomp.core.axes import Axes, SemanticAxis
 from param_decomp.core.nonlinearity import (
-    AttentionHeads,
+    KVHeads,
     Neurons,
     NonlinearityPartition,
+    QueryHeads,
 )
 
 
@@ -71,7 +71,7 @@ class SiteSpec:
 
     def __post_init__(self) -> None:
         match self.nonlinearity_partition:
-            case AttentionHeads(head_count=head_count):
+            case QueryHeads(head_count=head_count) | KVHeads(head_count=head_count):
                 assert self.d_out % head_count == 0, self
             case Neurons() | None:
                 pass
@@ -217,157 +217,3 @@ def init_component_stacks(sites: tuple[SiteSpec, ...], key: Array) -> ComponentS
     the stacked persistence layout; the weight-delta channel carries the faithfulness
     residual at init (before faithfulness warmup)."""
     return ComponentStacks(stacks=init_stack_arrays(sites, key), site_slots=site_slots_for(sites))
-
-
-def zero_component_stacks(sites: tuple[SiteSpec, ...]) -> ComponentStacks:
-    """All-zero V/U in the stacked layout. `weight_deltas` is `W − (V@U)^T`, so passing this
-    reads each site's frozen `W` back through the model protocol without widening it."""
-    return component_stacks_from_site_arrays(
-        sites,
-        {
-            spec.name: (
-                jnp.zeros((spec.d_in, spec.C), jnp.float32),
-                jnp.zeros((spec.C, spec.d_out), jnp.float32),
-            )
-            for spec in sites
-        },
-    )
-
-
-def _coupled_site_vu(W: Array, key: Array, C: int) -> tuple[Array, Array]:
-    """One site's coupled V/U from its frozen `W [d_out, d_in]`: a unit-norm Gaussian seed on
-    the NARROW side, the wide side its raw `W`-image. No C-dependent rescale — components sit
-    at `W`'s natural scale."""
-    d_out, d_in = W.shape
-    if d_in <= d_out:
-        v = jax.random.normal(key, (d_in, C))
-        V = v / jnp.linalg.norm(v, axis=0, keepdims=True)
-        return V, (W @ V).T
-    u = jax.random.normal(key, (C, d_out))
-    U = u / jnp.linalg.norm(u, axis=1, keepdims=True)
-    return W.T @ U.T, U
-
-
-def init_component_stacks_coupled(
-    sites: tuple[SiteSpec, ...], target_weights: dict[str, Array], key: Array
-) -> ComponentStacks:
-    """Coupled seeded init: per site, `_coupled_site_vu` against its own frozen `W`.
-
-    Per-SITE, not vmapped over a shape group: vmap would need the group's `W`s stacked into
-    one contiguous buffer (`[2, 14336, 4096]` fp32 = 470MB for llama8b's gate+up alone) and
-    would keep every matrix in the group simultaneously live. The draw here is one matmul
-    and one norm — there is no RNG fan-out to amortize — so the loop costs nothing and lets
-    XLA free each `W` before the next. Outputs still stack per shape group, so the graph
-    keeps `init_stack_arrays`' 2×n_shapes shape.
-    """
-    keys = jax.random.split(key, len(sites))
-    return component_stacks_from_site_arrays(
-        sites,
-        {
-            spec.name: _coupled_site_vu(
-                target_weights[spec.name].astype(jnp.float32), keys[idx], spec.C
-            )
-            for idx, spec in enumerate(sites)
-        },
-    )
-
-
-def with_silenced_u(components: ComponentStacks) -> ComponentStacks:
-    """U zeroed, V untouched — the `zero_u` arm's one post-transform over any seeded init.
-
-    The component sum is then exactly zero and the delta carries all of `W`, while `x @ V`
-    still feeds the CI nets a live signal and `U` has a nonzero gradient from step 0 (`V`'s
-    is zero until `U` moves off zero)."""
-    return ComponentStacks(
-        stacks={shape: (Vs, jnp.zeros_like(Us)) for shape, (Vs, Us) in components.stacks.items()},
-        site_slots=components.site_slots,
-    )
-
-
-NeuronAxis = Literal["d_out", "d_in"]
-"""Which axis of a site's frozen `W [d_out, d_in]` indexes nonlinearity units (neurons):
-`d_out` for a hidden WRITER (`x @ W.T` lands on neurons), `d_in` for the READER (`W`
-consumes neurons). Core never knows which site kind is which — the target says."""
-
-
-class SiteNeuronAlignment(eqx.Module):
-    """One site's neuron-aligned start: subcomponent `i` IS neuron `neurons[i]`
-    (SPEC T13). `neurons` is `int32[C]`, distinct, in the caller's rank order (slot `i` =
-    the `i`-th ranked neuron), traced through the placed init; the axis is static."""
-
-    neurons: Array
-    neuron_axis: NeuronAxis = eqx.field(static=True)
-
-
-NeuronAlignment = dict[str, SiteNeuronAlignment]
-"""Site name -> alignment, for the ALIGNED sites only. A site absent here takes the
-`zero_u` values (`init_component_stacks_neuron_aligned`)."""
-
-
-def validate_neuron_alignment(sites: tuple[SiteSpec, ...], alignment: NeuronAlignment) -> None:
-    """Host-side checks the traced init cannot make: every aligned site exists, its
-    `neurons` has exactly `C` DISTINCT indices inside the neuron axis."""
-    by_name = {spec.name: spec for spec in sites}
-    for name, site in alignment.items():
-        assert name in by_name, f"neuron alignment names an undecomposed site {name!r}"
-        spec = by_name[name]
-        neurons = np.asarray(site.neurons)
-        n = spec.d_out if site.neuron_axis == "d_out" else spec.d_in
-        assert neurons.shape == (spec.C,) and neurons.dtype.kind == "i", (
-            name,
-            neurons.shape,
-            spec.C,
-        )
-        assert len(set(neurons.tolist())) == spec.C, f"{name}: repeated neuron indices"
-        assert neurons.min() >= 0 and neurons.max() < n, (name, neurons.min(), neurons.max(), n)
-
-
-def _neuron_aligned_site_vu(W: Array, site: SiteNeuronAlignment, C: int) -> tuple[Array, Array]:
-    """One site's neuron-aligned V/U from its frozen `W [d_out, d_in]` and its `C` chosen
-    neurons `S` (SPEC T13). With `E [C, n]` the selection matrix (`E[i, S_i] = 1`):
-
-        writer (neuron axis d_out):  V = W[S, :]ᵀ  [d_in, C],   U = E        [C, d_out]
-        reader (neuron axis d_in):   V = Eᵀ        [d_in, C],   U = W[:, S]ᵀ [C, d_out]
-
-    so `(V@U)ᵀ` is `W` restricted to the selected rows (writer) / columns (reader) and the
-    delta carries the other `n − C` neurons exactly. Per subcomponent `‖v_i‖·‖u_i‖` is the
-    neuron's own weight norm; `x @ V` is its pre-activation (writer) or its
-    post-nonlinearity activation (reader). Nothing is frozen and nothing is perturbed:
-    one-hot `U`/`V` is the gauge in which each subcomponent IS one neuron, and both
-    factors have a dense nonzero gradient from step 0."""
-    d_out, d_in = W.shape
-    neurons = site.neurons
-    assert neurons.shape == (C,), (neurons.shape, C)
-    match site.neuron_axis:
-        case "d_out":
-            return W[neurons, :].T, jax.nn.one_hot(neurons, d_out, dtype=W.dtype)
-        case "d_in":
-            return jax.nn.one_hot(neurons, d_in, dtype=W.dtype).T, W[:, neurons].T
-
-
-def init_component_stacks_neuron_aligned(
-    sites: tuple[SiteSpec, ...],
-    target_weights: dict[str, Array],
-    alignment: NeuronAlignment,
-    key: Array,
-) -> ComponentStacks:
-    """The `neuron_aligned_targeted` init (SPEC T13): every site in `alignment` takes
-    `_neuron_aligned_site_vu`; every other site takes the `zero_u` values.
-
-    Key discipline: the per-site keys are split exactly as `init_component_stacks_coupled`
-    splits them and indexed by site position, and an aligned site simply does not consume
-    its key — so every non-aligned site is bit-identical to a `zero_u` run at the same
-    seed (pinned by `test_weight_init`)."""
-    assert set(alignment) <= {spec.name for spec in sites}, set(alignment) - {
-        spec.name for spec in sites
-    }
-    keys = jax.random.split(key, len(sites))
-    vu: dict[str, tuple[Array, Array]] = {}
-    for idx, spec in enumerate(sites):
-        W = target_weights[spec.name].astype(jnp.float32)
-        if spec.name in alignment:
-            vu[spec.name] = _neuron_aligned_site_vu(W, alignment[spec.name], spec.C)
-        else:
-            V, U = _coupled_site_vu(W, keys[idx], spec.C)
-            vu[spec.name] = (V, jnp.zeros_like(U))
-    return component_stacks_from_site_arrays(sites, vu)

@@ -11,7 +11,7 @@ permutation/UV figures) ride the in-loop SLOW tier instead — natively in JAX
 Variant semantics mirror `param_decomp/eval_metrics/ce_and_kl_losses.py`: each
 variant is a masked forward with ALL sites live and no routing; only `stoch_masked`
 carries a weight-delta mask (torch `make_mask_infos` without weight deltas drops the
-delta term — delta mask 0 here). On a targeted run's NON-TARGET stream the steps are
+delta term — delta mask 0 here). On a targeted run's NON-TARGET stream the scorers are
 built `delta_pinned` instead (SPEC T4): every variant composes its weight-delta masks
 fully on — except `unmasked`, the enumerated delta-off exception — matching the
 training forwards that pin the delta escape valve open off-target. CE is next-token
@@ -46,7 +46,7 @@ what keeps it correct when `n_steps` is raised.
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
@@ -83,6 +83,11 @@ from param_decomp.targets.losses import kl_per_position
 type ScalarStep = Callable[
     [PlacedModel, ComponentStacks, PlacedCIFn, Array, PRNGKeyArray], Mapping[str, Array]
 ]
+
+type ScalarScorer = Callable[[PlacedModel, "PreparedLMBatch[Any]", PRNGKeyArray], dict[str, Array]]
+"""The pure scoring half of a scalar kernel over an already-prepared batch — jitted by
+the caller: the shared-context eval path jits it alone (the batch comes from the pass's
+one context step), the fused `make_*_step` path jits it composed with `prepare_lm_batch`."""
 
 
 def next_token_cross_entropy(
@@ -129,8 +134,13 @@ def _row_masked_cross_entropy(
     return _row_masked_mean(-label_log_probs, row_mask)
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
-class _PreparedLMBatch[PreparedT]:
+class PreparedLMBatch[PreparedT]:
+    """The shared per-batch values every scalar kernel scores against — built either by
+    `prepare_lm_batch` (the fused arithmetic/parity path) or from the pass's one
+    `LMBatchContext` (the corpus eval path). A pytree, so it crosses jit boundaries."""
+
     tokens: Array
     clean: ForwardObservations
     prepared_weights: PreparedT
@@ -138,7 +148,7 @@ class _PreparedLMBatch[PreparedT]:
     valid_row_mask: Array | None
 
 
-def _prepare_lm_batch[PreparedT](
+def prepare_lm_batch[PreparedT](
     model: PlacedModel[PreparedT],
     components: ComponentStacks,
     placed_ci_fn: PlacedCIFn,
@@ -148,7 +158,7 @@ def _prepare_lm_batch[PreparedT](
     ci_capture_keys: CaptureKeys,
     activation_capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
     role: CIRole = "output",
-) -> _PreparedLMBatch[PreparedT]:
+) -> PreparedLMBatch[PreparedT]:
     """Pure shared preparation required by independent LM metric kernels.
 
     `role` picks which CI head builds the mask; a single-role run has only `"output"`."""
@@ -171,7 +181,7 @@ def _prepare_lm_batch[PreparedT](
         assert n_valid_rows <= tokens.shape[0], (n_valid_rows, tokens.shape)
         valid_row_mask = (jnp.arange(tokens.shape[0]) < n_valid_rows).astype(jnp.float32)
     prepared_weights = prepare_compute_weights(model, components)
-    return _PreparedLMBatch(
+    return PreparedLMBatch(
         tokens=tokens,
         clean=clean,
         prepared_weights=prepared_weights,
@@ -182,7 +192,7 @@ def _prepare_lm_batch[PreparedT](
 
 def _compute_masked_output[PreparedT](
     model: PlacedModel[PreparedT],
-    batch: _PreparedLMBatch[PreparedT],
+    batch: PreparedLMBatch[PreparedT],
     masks: dict[str, Array],
     delta_masks: dict[str, Array],
     mesh: Mesh | None,
@@ -198,13 +208,13 @@ def _compute_masked_output[PreparedT](
     return batch_shard_leading(masked_forward_result.output, mesh)
 
 
-def _kl[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
+def _kl[PreparedT](batch: PreparedLMBatch[PreparedT], logits: Array) -> Array:
     if batch.valid_row_mask is None:
         return kl_per_position(logits, batch.clean.output)
     return _row_masked_kl(logits, batch.clean.output, batch.valid_row_mask)
 
 
-def _ce[PreparedT](batch: _PreparedLMBatch[PreparedT], logits: Array) -> Array:
+def _ce[PreparedT](batch: PreparedLMBatch[PreparedT], logits: Array) -> Array:
     if batch.valid_row_mask is None:
         return next_token_cross_entropy(logits, batch.tokens)
     return _row_masked_cross_entropy(logits, batch.tokens, batch.valid_row_mask)
@@ -217,18 +227,15 @@ SPEC T4's enumerated delta-off exception. `ci_masked` pins to zero under plain
 semantics and to one when built `delta_pinned`."""
 
 
-def make_masked_kl_step[PreparedT](
+def make_masked_kl_scorer[PreparedT](
     model_static: PlacedModel[PreparedT],
-    ci_capture_keys: CaptureKeys,
     arm: MaskingArm,
     mesh: Mesh | None = None,
-    compiler_options: dict[str, bool | int | str] | None = None,
     *,
-    n_valid_rows: int | None = None,
-    role: CIRole = "output",
     delta_pinned: bool = False,
-) -> ScalarStep:
-    """KL against the target output under ONE masking arm — one clean forward, one masked.
+) -> ScalarScorer:
+    """KL against the target output under ONE masking arm — one masked forward over the
+    prepared batch's clean side.
 
     The key is the spelling `CEandKLLosses` reports this arm under, so the two are one
     quantity under one name. `delta_pinned` (SPEC T4, amended 2026-08-28: a targeted
@@ -236,24 +243,12 @@ def make_masked_kl_step[PreparedT](
     the `unmasked` arm is T4's enumerated delta-off exception and ignores it."""
     assert model_static.has_position_axis, "masked KL is LM-only and requires a position axis"
 
-    def eval_step(
+    def score(
         model: PlacedModel[PreparedT],
-        components: ComponentStacks,
-        placed_ci_fn: PlacedCIFn,
-        token_ids: Array,
+        batch: PreparedLMBatch[PreparedT],
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
         del key  # neither arm draws masks
-        batch = _prepare_lm_batch(
-            model,
-            components,
-            placed_ci_fn,
-            token_ids,
-            mesh,
-            n_valid_rows,
-            ci_capture_keys,
-            role=role,
-        )
         match arm:
             case "ci_masked":
                 masks = batch.ci_lower
@@ -267,26 +262,22 @@ def make_masked_kl_step[PreparedT](
         logits = _compute_masked_output(model, batch, masks, delta, mesh, frozenset())
         return {f"ce_kl/kl_{arm}": _kl(batch, logits)}
 
-    return filter_jit(eval_step, compiler_options=compiler_options)
+    return score
 
 
-def make_ce_kl_step[PreparedT](
+def make_masked_kl_step[PreparedT](
     model_static: PlacedModel[PreparedT],
     ci_capture_keys: CaptureKeys,
-    rounding_threshold: float,
+    arm: MaskingArm,
     mesh: Mesh | None = None,
     compiler_options: dict[str, bool | int | str] | None = None,
     *,
     n_valid_rows: int | None = None,
+    role: CIRole = "output",
     delta_pinned: bool = False,
 ) -> ScalarStep:
-    """Build the single-purpose CE/KL evaluator.
-
-    `delta_pinned` (SPEC T4, amended 2026-08-28: a targeted run's non-target stream)
-    composes every variant's weight-delta masks as 1.0 — `stoch_masked` pins instead of
-    drawing `U[0,1]` — except `unmasked`, the enumerated delta-off exception, whose
-    component sum must reconstruct alone."""
-    assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
+    """The fused masked-KL evaluator (own preparation) for probes and parity tests."""
+    score = make_masked_kl_scorer(model_static, arm, mesh, delta_pinned=delta_pinned)
 
     def eval_step(
         model: PlacedModel[PreparedT],
@@ -295,7 +286,7 @@ def make_ce_kl_step[PreparedT](
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
-        batch = _prepare_lm_batch(
+        batch = prepare_lm_batch(
             model,
             components,
             placed_ci_fn,
@@ -303,7 +294,33 @@ def make_ce_kl_step[PreparedT](
             mesh,
             n_valid_rows,
             ci_capture_keys,
+            role=role,
         )
+        return score(model, batch, key)
+
+    return filter_jit(eval_step, compiler_options=compiler_options)
+
+
+def make_ce_kl_scorer[PreparedT](
+    model_static: PlacedModel[PreparedT],
+    rounding_threshold: float,
+    mesh: Mesh | None = None,
+    *,
+    delta_pinned: bool = False,
+) -> ScalarScorer:
+    """Build the pure CE/KL scorer over a prepared batch.
+
+    `delta_pinned` (SPEC T4, amended 2026-08-28: a targeted run's non-target stream)
+    composes every variant's weight-delta masks as 1.0 — `stoch_masked` pins instead of
+    drawing `U[0,1]` — except `unmasked`, the enumerated delta-off exception, whose
+    component sum must reconstruct alone."""
+    assert model_static.has_position_axis, "CEandKLLosses is LM-only and requires a position axis"
+
+    def score(
+        model: PlacedModel[PreparedT],
+        batch: PreparedLMBatch[PreparedT],
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
         # Every mask source draws via `uniform_like` (never a bare `random.uniform`): a
         # bare draw lowers REPLICATED under the Explicit mesh, and the masked forward
         # stacks masks per kind into `[n_layers, B, T, C]` scan inputs — replicated, that
@@ -377,7 +394,64 @@ def make_ce_kl_step[PreparedT](
         )
         return metrics
 
+    return score
+
+
+def make_ce_kl_step[PreparedT](
+    model_static: PlacedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
+    rounding_threshold: float,
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
+    *,
+    n_valid_rows: int | None = None,
+    delta_pinned: bool = False,
+) -> ScalarStep:
+    """The fused CE/KL evaluator (own preparation) for probes and parity tests."""
+    score = make_ce_kl_scorer(model_static, rounding_threshold, mesh, delta_pinned=delta_pinned)
+
+    def eval_step(
+        model: PlacedModel[PreparedT],
+        components: ComponentStacks,
+        placed_ci_fn: PlacedCIFn,
+        token_ids: Array,
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        batch = prepare_lm_batch(
+            model, components, placed_ci_fn, token_ids, mesh, n_valid_rows, ci_capture_keys
+        )
+        return score(model, batch, key)
+
     return filter_jit(eval_step, compiler_options=compiler_options)
+
+
+def make_ci_l0_scorer[PreparedT](
+    model_static: PlacedModel[PreparedT],
+    ci_alive_threshold: float,
+    groups: dict[str, tuple[str, ...]] | None,
+) -> ScalarScorer:
+    """Bind the generic `CI_L0` arithmetic (`core.ci_l0_eval`) to a prepared LM batch
+    (row-masked mean for the padded arithmetic probes)."""
+    assert model_static.has_position_axis, "CI_L0 is LM-only and requires a position axis"
+    resolved_groups = resolve_site_groups(model_static.site_names, groups)
+
+    def score(
+        model: PlacedModel[PreparedT],
+        batch: PreparedLMBatch[PreparedT],
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        del key
+
+        def mean(value: Array) -> Array:
+            if batch.valid_row_mask is None:
+                return value.mean()
+            return _row_masked_mean(value, batch.valid_row_mask)
+
+        return ci_l0_scalars(
+            batch.ci_lower, model.site_names, ci_alive_threshold, resolved_groups, mean
+        )
+
+    return score
 
 
 def make_ci_l0_step[PreparedT](
@@ -391,10 +465,8 @@ def make_ci_l0_step[PreparedT](
     n_valid_rows: int | None = None,
     role: CIRole = "output",
 ) -> ScalarStep:
-    """Bind the generic `CI_L0` arithmetic (`core.ci_l0_eval`) to the LM batch: the shared
-    `_prepare_lm_batch` CI and, for the padded arithmetic probes, the row-masked mean."""
-    assert model_static.has_position_axis, "CI_L0 is LM-only and requires a position axis"
-    resolved_groups = resolve_site_groups(model_static.site_names, groups)
+    """The fused CI-L0 evaluator (own preparation) for probes and parity tests."""
+    score = make_ci_l0_scorer(model_static, ci_alive_threshold, groups)
 
     def eval_step(
         model: PlacedModel[PreparedT],
@@ -403,8 +475,7 @@ def make_ci_l0_step[PreparedT](
         token_ids: Array,
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
-        del key
-        batch = _prepare_lm_batch(
+        batch = prepare_lm_batch(
             model,
             components,
             placed_ci_fn,
@@ -414,31 +485,20 @@ def make_ci_l0_step[PreparedT](
             ci_capture_keys,
             role=role,
         )
-
-        def mean(value: Array) -> Array:
-            if batch.valid_row_mask is None:
-                return value.mean()
-            return _row_masked_mean(value, batch.valid_row_mask)
-
-        return ci_l0_scalars(
-            batch.ci_lower, model.site_names, ci_alive_threshold, resolved_groups, mean
-        )
+        return score(model, batch, key)
 
     return filter_jit(eval_step, compiler_options=compiler_options)
 
 
-def make_fresh_pgd_step[PreparedT](
+def make_fresh_pgd_scorer[PreparedT](
     model_static: PlacedModel[PreparedT],
-    ci_capture_keys: CaptureKeys,
     fresh_pgd: FreshPGDReconEval,
     mesh: Mesh | None = None,
-    compiler_options: dict[str, bool | int | str] | None = None,
     *,
-    n_valid_rows: int | None = None,
-    role: CIRole = "output",
     delta_pinned: bool = False,
-) -> ScalarStep:
-    """Build fresh-PGD evaluation for end-to-end reconstruction and optional hidden-activation reconstruction.
+) -> ScalarScorer:
+    """Build the fresh-PGD scorer (end-to-end + optional hidden-acts reconstruction) over
+    a prepared batch whose `clean` carries the probe's hidden-act points.
 
     `delta_pinned` composes every weight-delta mask as 1.0 (SPEC T4, amended 2026-08-20):
     a targeted run's NON-TARGET stream probe must not attack the delta escape valve the
@@ -450,24 +510,11 @@ def make_fresh_pgd_step[PreparedT](
         tuple(sorted(reconstruction_capture_keys))
     )
 
-    def eval_step(
+    def score(
         model: PlacedModel[PreparedT],
-        components: ComponentStacks,
-        placed_ci_fn: PlacedCIFn,
-        token_ids: Array,
+        batch: PreparedLMBatch[PreparedT],
         key: PRNGKeyArray,
     ) -> dict[str, Array]:
-        batch = _prepare_lm_batch(
-            model,
-            components,
-            placed_ci_fn,
-            token_ids,
-            mesh,
-            n_valid_rows,
-            ci_capture_keys,
-            reconstruction_capture_keys,
-            role=role,
-        )
         _, _, pgd_key = random.split(key, 3)
 
         def end_to_end_error(masked: Array, clean_value: Array) -> Array:
@@ -526,6 +573,43 @@ def make_fresh_pgd_step[PreparedT](
             for suffix, value in reconstruction_loss_metrics(breakdown).items()
         }
         return metrics
+
+    return score
+
+
+def make_fresh_pgd_step[PreparedT](
+    model_static: PlacedModel[PreparedT],
+    ci_capture_keys: CaptureKeys,
+    fresh_pgd: FreshPGDReconEval,
+    mesh: Mesh | None = None,
+    compiler_options: dict[str, bool | int | str] | None = None,
+    *,
+    n_valid_rows: int | None = None,
+    role: CIRole = "output",
+    delta_pinned: bool = False,
+) -> ScalarStep:
+    """The fused fresh-PGD evaluator (own preparation) for probes and parity tests."""
+    score = make_fresh_pgd_scorer(model_static, fresh_pgd, mesh, delta_pinned=delta_pinned)
+
+    def eval_step(
+        model: PlacedModel[PreparedT],
+        components: ComponentStacks,
+        placed_ci_fn: PlacedCIFn,
+        token_ids: Array,
+        key: PRNGKeyArray,
+    ) -> dict[str, Array]:
+        batch = prepare_lm_batch(
+            model,
+            components,
+            placed_ci_fn,
+            token_ids,
+            mesh,
+            n_valid_rows,
+            ci_capture_keys,
+            fresh_pgd.hidden_acts_capture_keys,
+            role=role,
+        )
+        return score(model, batch, key)
 
     return filter_jit(eval_step, compiler_options=compiler_options)
 

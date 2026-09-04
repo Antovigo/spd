@@ -1,6 +1,6 @@
 """The LM composition's read side of the neuron-ranking artifact (SPEC T13): resolve the
-run's `pd.neuron_ranks`, check its provenance against THIS run's target and prompt pool,
-and turn the ranking into the engine's `NeuronAlignment`. The write side is
+run's `decomposition.sites.neuron_ranks`, check its provenance against THIS run's target
+and prompt pool, and turn the rankings into the init's `NeuronAlignment`. The write side is
 `neuron_ranks_harvest`."""
 
 import json
@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 
-from param_decomp.core.components import NeuronAlignment
 from param_decomp.core.model import PlacedModel
 from param_decomp.experiments.lm.resolved import (
     AnyLMTargetConfig,
@@ -18,10 +17,11 @@ from param_decomp.experiments.lm.resolved import (
 )
 from param_decomp.targets.glu_transformer import GLUDecomposedModel
 from param_decomp.targets.neuron_alignment import (
+    NeuronAlignment,
     alignment_coverage,
     assert_neuron_ranks_provenance,
-    mlp_blocks_of,
     neuron_alignment_from_ranks,
+    ranked_blocks,
     read_neuron_ranks,
     resolve_neuron_ranks_ref,
 )
@@ -50,27 +50,24 @@ def load_neuron_alignment(
     """The `neuron_aligned_targeted` run's alignment from its artifact, provenance-checked.
     Cheap (a file read), so every entry — fresh, requeue, fine-tune — takes it; a restore
     simply overwrites the aligned reference. `write_summary_to` (rank 0's run dir) gets
-    `neuron_alignment.json`: the artifact, each site's C and the write-energy fraction it
-    covers."""
-    assert built.pd.neuron_ranks is not None, "validated at parse"
+    `neuron_alignment.json`: the artifact, each site's C and the score fraction it covers."""
+    assert built.target.neuron_ranks is not None, "validated at parse"
     glu = model.model
     assert isinstance(glu, GLUDecomposedModel), (
-        f"neuron_aligned_targeted needs a transformer target with MLP blocks, got {type(glu)}"
+        f"neuron_aligned_targeted needs a transformer target, got {type(glu)}"
     )
-    artifact_dir = resolve_neuron_ranks_ref(built.pd.neuron_ranks, data_root)
+    artifact_dir = resolve_neuron_ranks_ref(built.target.neuron_ranks, data_root)
     ranks = read_neuron_ranks(artifact_dir)
-    blocks = tuple(mlp_blocks_of(glu.sites, glu.anatomy))
-    assert blocks, "neuron_aligned_targeted: the decomposition has no MLP site to align"
+    blocks = ranked_blocks(glu.sites, glu.anatomy)
+    assert blocks, "neuron_aligned_targeted: the decomposition has no site to align"
     assert_neuron_ranks_provenance(ranks.meta, target_identity(built.target), pool_tokens, blocks)
     alignment = neuron_alignment_from_ranks(ranks, glu.sites, glu.anatomy)
     coverage = alignment_coverage(ranks, glu.sites, glu.anatomy)
-    cs = {spec.name: spec.C for spec in glu.sites if spec.name in alignment}
+    cs = {spec.name: spec.C for spec in glu.sites}
     summary = {
         "artifact": str(artifact_dir),
         "meta": ranks.meta.model_dump(),
-        "sites": {
-            name: {"C": cs[name], "covered_write_energy": coverage[name]} for name in alignment
-        },
+        "sites": {name: {"C": cs[name], "covered_energy": coverage[name]} for name in alignment},
     }
     print(
         "neuron_aligned_targeted: "

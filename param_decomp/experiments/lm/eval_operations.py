@@ -1,7 +1,14 @@
-"""LM evaluation operation binding and execution."""
+"""LM evaluation operation binding and execution.
+
+Binding is two closed passes over the authored metrics: first each metric declares its
+clean-capture demand on the shared batch context (`_clean_capture_demand`), then each
+binds its operations — one PER STREAM the metric measures, and per CI role on a dual
+run. The pass's one context step captures the union of those demands, so every batched
+operation reads one clean forward + CI envelope per batch of each stream.
+"""
 
 from collections.abc import Callable
-from functools import cache, partial
+from functools import partial
 
 import jax
 import numpy as np
@@ -13,7 +20,6 @@ from param_decomp.core.ci_fn import DUAL_CI_ROLES, CIRole
 from param_decomp.core.components import nonlinearity_partitions
 from param_decomp.core.configs import (
     CI_L0Config,
-    CIHiddenActsReconLossConfig,
     CIHistogramsConfig,
     CIMaskedReconLossConfig,
     CIMeanPerComponentConfig,
@@ -21,14 +27,13 @@ from param_decomp.core.configs import (
     IdentityCIErrorConfig,
     PermutedCIPlotsConfig,
     PGDReconLossConfig,
-    StochasticHiddenActsReconLossConfig,
     UnmaskedNoDeltaReconLossConfig,
     UVPlotsConfig,
     WeightMagnitudeConfig,
     WellTemperednessConfig,
 )
 from param_decomp.core.eval_schedule import EvalSchedule
-from param_decomp.core.model import BATCH_AXES, PlacedModel
+from param_decomp.core.model import BATCH_AXES, EMPTY_CAPTURE_KEYS, CaptureKeys, PlacedModel
 from param_decomp.core.run import (
     BackgroundRenderer,
     EvalInvocation,
@@ -37,7 +42,6 @@ from param_decomp.core.run import (
     MetricsSink,
 )
 from param_decomp.core.sharding import local_data_parallel_size
-from param_decomp.core.slow_eval import accumulate_site_reductions, make_slow_eval_step
 from param_decomp.core.well_temperedness_eval import make_well_temperedness_operation
 from param_decomp.experiments.eval_config import (
     AnyEvalMetricConfig,
@@ -46,9 +50,10 @@ from param_decomp.experiments.eval_config import (
     slow_schedule,
 )
 from param_decomp.experiments.lm.ab_grid_operation import make_ab_grid_operation
+from param_decomp.experiments.lm.arithmetic_eval_operation import make_arithmetic_operation
+from param_decomp.experiments.lm.attn_patterns_eval import attn_output_key_by_site
 from param_decomp.experiments.lm.diagnostic_eval_operations import (
     make_attention_operation,
-    make_hidden_acts_operation,
     make_nonlinearity_operation,
     make_permutation_operation,
     make_site_figures_operation,
@@ -57,24 +62,33 @@ from param_decomp.experiments.lm.diagnostic_eval_operations import (
 )
 from param_decomp.experiments.lm.eval_config import (
     ABGridDatasetConfig,
+    ArithmeticCIGridConfig,
     CEandKLLossesConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
     TwoStreamCIMeanPerComponentConfig,
 )
-from param_decomp.experiments.lm.eval_context import LMEvalContext
+from param_decomp.experiments.lm.eval_context import (
+    LMBatchContext,
+    LMEvalPass,
+    Stream,
+    make_lm_batch_context_step,
+    make_lm_batch_contexts,
+    stream_batches,
+)
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 from param_decomp.experiments.lm.resolved import LMAnyRun
 from param_decomp.experiments.lm.scalar_eval_operations import (
-    Stream,
+    fresh_pgd_probe,
     make_ce_kl_operation,
     make_ci_l0_operation,
     make_fresh_pgd_operation,
     make_masked_kl_operation,
-    stream_batches,
 )
 from param_decomp.infra.dataset_store import read_dataset_meta
 from param_decomp.pretrain.batch_data import BatchSchedule, ShardServer, scan_shards
+
+type LMOperation = EvalOperation[LMEvalPass, LMBatchContext]
 
 
 def global_token_batch(local: np.ndarray, mesh: Mesh, global_batch: int) -> jax.Array:
@@ -92,7 +106,7 @@ def make_lm_evaluation(
     sink: MetricsSink,
     compiler_options: dict[str, bool | int | str],
     target_pool_batches_for: Callable[[int], list[jax.Array]] | None = None,
-) -> Evaluation[LMEvalContext]:
+) -> Evaluation[LMEvalPass, LMBatchContext]:
     """Construct the executable operations for every authored LM metric — one PER STREAM
     the metric measures.
 
@@ -127,19 +141,29 @@ def make_lm_evaluation(
     ce_kl_authored = any(isinstance(m, CEandKLLossesConfig) for m in eval.metrics)
 
     def well_temperedness_inputs(
-        context: LMEvalContext,
+        eval_pass: LMEvalPass,
     ) -> tuple[jax.Array, PRNGKeyArray]:
-        return stream_batches(optimized_stream, context)[0], jax.random.fold_in(
-            run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + context.pass_index
+        return stream_batches(optimized_stream, eval_pass)[0], jax.random.fold_in(
+            run_key, EvalKeyStream.WELL_TEMPEREDNESS * pd.steps + eval_pass.pass_index
         )
 
+    def _clean_capture_demand(metric: AnyEvalMetricConfig) -> CaptureKeys:
+        """What this metric reads off the shared clean forward beyond the CI taps."""
+        match metric:
+            case CIMaskedAttnPatternsReconLossConfig() | StochasticAttnPatternsReconLossConfig():
+                return frozenset(attn_output_key_by_site(model).values())
+            case PGDReconLossConfig():
+                return fresh_pgd_probe(metric).hidden_acts_capture_keys
+            case _:
+                return EMPTY_CAPTURE_KEYS
+
     def per_stream(
-        maker: Callable[..., EvalOperation[LMEvalContext]],
+        maker: Callable[..., LMOperation],
         metric: object,
         schedule: EvalSchedule,
         streams: tuple[Stream, ...],
         roles: tuple[CIRole, ...] = ("output",),
-    ) -> tuple[EvalOperation[LMEvalContext], ...]:
+    ) -> tuple[LMOperation, ...]:
         """One operation per (stream, CI role); the scalar makers share a signature so those
         two are the only things that vary between a metric's readouts."""
         return tuple(
@@ -148,7 +172,6 @@ def make_lm_evaluation(
                 schedule,
                 stream,
                 model,
-                capture_inputs,
                 run_key,
                 pd.steps,
                 eval.n_steps,
@@ -160,7 +183,7 @@ def make_lm_evaluation(
             for role in roles
         )
 
-    def make_operations(metric: AnyEvalMetricConfig) -> tuple[EvalOperation[LMEvalContext], ...]:
+    def make_operations(metric: AnyEvalMetricConfig) -> tuple[LMOperation, ...]:
         schedule = schedule_for(metric, eval)
         match metric:
             case CEandKLLossesConfig():
@@ -207,27 +230,11 @@ def make_lm_evaluation(
                         metric,
                         schedule,
                         model,
-                        capture_inputs,
                         run_key,
                         pd.steps,
                         compiler_options,
                         optimized_stream,
                     ),
-                )
-            case CIHiddenActsReconLossConfig() | StochasticHiddenActsReconLossConfig():
-                return tuple(
-                    make_hidden_acts_operation(
-                        metric,
-                        schedule,
-                        model,
-                        capture_inputs,
-                        run_key,
-                        pd.steps,
-                        compiler_options,
-                        optimized_stream,
-                        role,
-                    )
-                    for role in ci_roles
                 )
             case (
                 CIHistogramsConfig()
@@ -236,27 +243,14 @@ def make_lm_evaluation(
             ):
                 return tuple(
                     make_site_figures_operation(
-                        metric,
-                        schedule,
-                        model,
-                        capture_inputs,
-                        compiler_options,
-                        renderer,
-                        optimized_stream,
-                        role,
+                        metric, schedule, compiler_options, renderer, optimized_stream, role
                     )
                     for role in ci_roles
                 )
             case PermutedCIPlotsConfig() | UVPlotsConfig() | IdentityCIErrorConfig():
                 return (
                     make_permutation_operation(
-                        metric,
-                        schedule,
-                        model,
-                        capture_inputs,
-                        compiler_options,
-                        renderer,
-                        optimized_stream,
+                        metric, schedule, model, compiler_options, renderer, optimized_stream
                     ),
                 )
 
@@ -274,6 +268,22 @@ def make_lm_evaluation(
                     ),
                 )
 
+            case ArithmeticCIGridConfig():
+                return (
+                    make_arithmetic_operation(
+                        metric,
+                        schedule,
+                        built.target,
+                        model,
+                        capture_inputs,
+                        mesh,
+                        n_proc,
+                        sink,
+                        run_key,
+                        pd.steps,
+                        compiler_options,
+                    ),
+                )
             case ABGridDatasetConfig():
                 return (
                     make_ab_grid_operation(
@@ -291,11 +301,7 @@ def make_lm_evaluation(
                     ),
                 )
             case TwoStreamCIMeanPerComponentConfig():
-                return (
-                    make_two_stream_ci_mean_operation(
-                        schedule, model, capture_inputs, compiler_options, renderer
-                    ),
-                )
+                return (make_two_stream_ci_mean_operation(schedule, compiler_options, renderer),)
             case WeightMagnitudeConfig():
                 return (make_weight_magnitude_operation(schedule, renderer),)
 
@@ -336,34 +342,26 @@ def make_lm_evaluation(
         + standing_operations
     )
 
-    ci_reduction_step = make_slow_eval_step(
-        model,
-        capture_inputs,
-        ci_alive_threshold=0.0,
-        density_heatmap_n_bins=None,
-        value_histogram_n_bins=None,
-        compiler_options=compiler_options,
+    operation_capture_keys = frozenset().union(
+        *(_clean_capture_demand(metric) for metric in eval.metrics), EMPTY_CAPTURE_KEYS
+    )
+    context_step = make_lm_batch_context_step(
+        model, capture_inputs, operation_capture_keys, mesh, compiler_options
     )
 
-    def make_context(invocation: EvalInvocation) -> LMEvalContext:
+    def make_pass(invocation: EvalInvocation) -> LMEvalPass:
         pass_index = invocation.now_step // eval.every
-        pass_batches = tuple(batches(pass_index))
-        return LMEvalContext(
+        return LMEvalPass(
             state=invocation.state,
             now_step=invocation.now_step,
             placed_ci_fn=invocation.placed_ci_fn,
             pass_index=pass_index,
-            batches=pass_batches,
+            batches=tuple(batches(pass_index)),
             target_batches=(
                 None
                 if target_pool_batches_for is None
                 else tuple(target_pool_batches_for(pass_index))
             ),
-            shared_ci_reductions=cache(
-                lambda: accumulate_site_reductions(
-                    ci_reduction_step, model, invocation.placed_ci_fn, list(pass_batches)
-                )
-            ),
         )
 
-    return Evaluation(operations, make_context)
+    return Evaluation(operations, make_pass, make_lm_batch_contexts(context_step, model))

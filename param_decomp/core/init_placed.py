@@ -14,6 +14,7 @@ values), then fan out with a trivial slice jit. `init_component_stacks_placed` i
 template; `init_ci_fn_placed` / `init_sources_sharded` follow it.
 """
 
+from collections.abc import Callable
 from functools import partial
 
 import equinox as eqx
@@ -41,106 +42,52 @@ from param_decomp.core.ci_fn import (
 )
 from param_decomp.core.components import (
     ComponentStacks,
-    NeuronAlignment,
     SiteSpec,
     init_component_stacks,
-    init_component_stacks_coupled,
-    init_component_stacks_neuron_aligned,
-    validate_neuron_alignment,
-    with_silenced_u,
-    zero_component_stacks,
 )
 from param_decomp.core.configs import SourceShape
 from param_decomp.core.model import (
     BATCH_AXES,
+    DecomposedModel,
     PlacedModel,
     PositionAxis,
     Positioned,
     Positionless,
-    site_weight_delta,
 )
 from param_decomp.core.placement import PlacementRules, component_stacks_shardings
+
+type ComponentInitializer = Callable[[DecomposedModel, PRNGKeyArray], ComponentStacks]
+"""A target-aware, unplaced V/U initializer. The placed wrapper below owns sharding."""
+
+
+def random_component_initializer(model: DecomposedModel, key: PRNGKeyArray) -> ComponentStacks:
+    """The domain-neutral random initializer used unless a composition root selects another."""
+    return init_component_stacks(model.sites, key)
 
 
 def init_component_stacks_placed(
     sites: tuple[SiteSpec, ...], key: PRNGKeyArray, rules: PlacementRules
 ) -> ComponentStacks:
-    """Seeded V/U init placed by `component_stacks_shardings(_, rules)` (the run's placement
-    policy), values bit-identical to the retired per-site init (pinned by `test_sharding`).
-    One jit, 2×n_shapes sharded outputs — the persistence layout IS the stacked layout, so
-    the old two-stage stack-then-unstack fan-out (and its transient extra copy) is gone."""
+    """Seed random V/U directly into the component persistence layout."""
     abstract = eqx.filter_eval_shape(partial(init_component_stacks, sites), key)
     placement = component_stacks_shardings(abstract, rules)
     return jax.jit(partial(init_component_stacks, sites), out_shardings=placement)(key)
 
 
-def init_component_stacks_coupled_placed(
+def init_model_component_stacks_placed(
     model: PlacedModel,
     key: PRNGKeyArray,
     rules: PlacementRules,
-    *,
-    zero_u: bool,
+    initializer: ComponentInitializer,
 ) -> ComponentStacks:
-    """The target-coupled V/U inits, placed like `init_component_stacks_placed`.
+    """Run a target-aware initializer directly into the component persistence layout.
 
-    The model is a TRACED arg (HLO-baking rule) and the frozen `W` read happens INSIDE the
-    jit, so only V/U crosses the boundary — a full-precision copy of every decomposed
-    matrix never materializes outside the init graph."""
-
-    model_arrays, model_static = eqx.partition(model, eqx.is_array)
-
-    def init(arrays: PlacedModel, init_key: PRNGKeyArray) -> ComponentStacks:
-        traced_model: PlacedModel = eqx.combine(arrays, model_static)
-        # `weight_deltas` is per persistence STACK since #1000; the coupled init wants one
-        # site's frozen `W` at a time, which is what `site_weight_delta` reads out.
-        zero = zero_component_stacks(traced_model.sites)
-        stacked_deltas = traced_model.model.weight_deltas(zero)
-        weights = {
-            spec.name: site_weight_delta(stacked_deltas, zero, spec.name)
-            for spec in traced_model.sites
-        }
-        coupled = init_component_stacks_coupled(traced_model.sites, weights, init_key)
-        return with_silenced_u(coupled) if zero_u else coupled
-
-    abstract = eqx.filter_eval_shape(init, model_arrays, key)
+    The frozen model stays a traced argument: an aligned initializer may read target weights.
+    Initializers return semantic-group stacks, preserving the no-host-full-tree contract.
+    """
+    abstract = eqx.filter_eval_shape(initializer, model.model, key)
     placement = component_stacks_shardings(abstract, rules)
-    return jax.jit(init, out_shardings=placement)(model_arrays, key)
-
-
-def _site_weights_in_graph(traced_model: PlacedModel) -> dict[str, jax.Array]:
-    """Every site's frozen `W`, read INSIDE the init graph through the zero-stacks
-    `weight_deltas` identity (`W − 0`), so no full-precision copy crosses the jit."""
-    zero = zero_component_stacks(traced_model.sites)
-    stacked_deltas = traced_model.model.weight_deltas(zero)
-    return {
-        spec.name: site_weight_delta(stacked_deltas, zero, spec.name) for spec in traced_model.sites
-    }
-
-
-def init_component_stacks_neuron_aligned_placed(
-    model: PlacedModel,
-    key: PRNGKeyArray,
-    rules: PlacementRules,
-    alignment: NeuronAlignment,
-) -> ComponentStacks:
-    """The `neuron_aligned_targeted` init placed like the coupled one (SPEC T13). The
-    alignment's index arrays are small traced jit args; the host-side value checks run
-    first, since a traced index cannot be asserted."""
-    validate_neuron_alignment(model.sites, alignment)
-    model_arrays, model_static = eqx.partition(model, eqx.is_array)
-
-    def init(
-        arrays: PlacedModel, init_key: PRNGKeyArray, alignment_: NeuronAlignment
-    ) -> ComponentStacks:
-        traced_model: PlacedModel = eqx.combine(arrays, model_static)
-        weights = _site_weights_in_graph(traced_model)
-        return init_component_stacks_neuron_aligned(
-            traced_model.sites, weights, alignment_, init_key
-        )
-
-    abstract = eqx.filter_eval_shape(init, model_arrays, key, alignment)
-    placement = component_stacks_shardings(abstract, rules)
-    return jax.jit(init, out_shardings=placement)(model_arrays, key, alignment)
+    return jax.jit(initializer, out_shardings=placement)(model.model, key)
 
 
 def ci_fn_shardings(abstract: CIFn, mesh: Mesh, rules: PlacementRules) -> CIFn:

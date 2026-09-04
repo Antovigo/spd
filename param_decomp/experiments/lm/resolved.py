@@ -9,10 +9,15 @@ from jax.typing import DTypeLike
 
 from param_decomp.core.built_run import BuiltRun
 from param_decomp.core.components import SiteC
-from param_decomp.core.configs import PDConfig, TargetedPDConfig
+from param_decomp.core.configs import NeuronRanksRef, PDConfig, TargetedPDConfig
 from param_decomp.vendored_jax.llama import AttentionImplementation
 
 WeightsDtype = Literal["float32", "bfloat16"]
+ComponentInitialization = Literal["random", "neuron_aligned", "neuron_aligned_targeted"]
+"""How the subcomponent V/U masters are seeded. `random`: target-blind small random.
+`neuron_aligned`: every site along its own architectural coordinates, chosen without
+data. `neuron_aligned_targeted` (tPD only, SPEC T13): the top-C coordinates by activity on
+the target prompt pool, from the harvested artifact `neuron_ranks` names."""
 
 
 def weights_jnp_dtype(dtype: WeightsDtype) -> DTypeLike:
@@ -44,6 +49,9 @@ class TargetConfig:
     weights_dtype: WeightsDtype
     """The authored `target.weights_dtype`, carried to the composition root's target load."""
     attention_implementation: AttentionImplementation
+    component_initialization: ComponentInitialization
+    neuron_ranks: NeuronRanksRef | None = None
+    """The ranking artifact `neuron_aligned_targeted` reads; `None` for every other init."""
 
     supported_weights_dtypes: ClassVar[frozenset[WeightsDtype]] = frozenset({"bfloat16", "float32"})
     """Frozen-target weight dtypes the loader supports. `HFWeights` casts every tensor on
@@ -65,6 +73,9 @@ class LlamaSimpleMLPTargetConfig:
     weights_dtype: WeightsDtype
     """The authored `target.weights_dtype`, carried to the composition root's target load."""
     attention_implementation: AttentionImplementation
+    component_initialization: ComponentInitialization
+    neuron_ranks: NeuronRanksRef | None = None
+    """The ranking artifact `neuron_aligned_targeted` reads; `None` for every other init."""
 
     supported_weights_dtypes: ClassVar[frozenset[WeightsDtype]] = frozenset({"bfloat16", "float32"})
     """Frozen-target weight dtypes the loader supports — `_checkpoint_weight_getter` casts

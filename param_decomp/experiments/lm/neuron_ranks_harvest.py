@@ -1,22 +1,24 @@
-"""Harvest the neuron-ranking artifact `weight_init: neuron_aligned_targeted` starts from
-(SPEC T13) — the write side of `neuron_ranks`.
+"""Harvest the neuron-ranking artifact `initialization: neuron_aligned_targeted` starts
+from (SPEC T13) — the write side of `neuron_ranks`.
 
 Reads a targeted run YAML for its TARGET (`target`, `decomposition.sites`) and its PROMPT
 POOL (`prompts`, tokenized through the run's own tokenizer) only; every other section is
 ignored, so one artifact serves every decomposition config over that (model, pool) pair —
 any C, any seed, any subset of the harvested layers. Sweeps the whole pool exactly once
-through the frozen model, capturing each harvested block's `mlp_hidden` tap, and ranks
-every neuron of every block by write energy `E[h²]·‖W_down[:, i]‖²`.
+through the frozen model, capturing each harvested block's MLP hidden, q/k projection
+outputs and attention-core output, and ranks every coordinate of every ranking family
+(`targets.neuron_alignment.UNIT_KINDS`) by its energy score.
 
 Single process by design (the sweep is seconds); devices within the process form a pure
 data-parallel mesh, and the reductions land fully replicated. Blocks are captured in
-groups under a byte budget — the forward retains one fp32 `[B, T, n]` slot per requested
-block.
+groups under a byte budget — the forward retains one fp32 `[B, T, width]` slot per
+requested block.
 
-Output: `<out_dir>/neuron_ranks.npz` (`rank_<b>` int32, `score_<b>` float32 per block) +
-`meta.json` (provenance: target, pool fingerprint, statistic, layers).
-Publish the dir into the store as `<data_root>/neuron_ranks/<name>` and reference it as
-`pd.neuron_ranks: {kind: name, name: <name>}`, or point `{kind: dir, dir: <out_dir>}` at it.
+Output: `<out_dir>/neuron_ranks.npz` (`rank_<kind>_<b>` int32, `score_<kind>_<b>` float32
+per block and family) + `meta.json` (provenance: target, pool fingerprint, statistic,
+layers, unit counts). Publish the dir into the store as `<data_root>/neuron_ranks/<name>`
+and reference it as `decomposition.sites.neuron_ranks: {kind: name, name: <name>}`, or
+point `{kind: dir, dir: <out_dir>}` at it.
 
 Run: `python -m param_decomp.experiments.lm.harvest_neuron_ranks --config <run.yaml>
 --data_root <root> --out_dir <abs> --local_device_count N [--layers all|"18,19"]
@@ -46,15 +48,18 @@ from param_decomp.infra.dataset_store import read_dataset_meta, resolve_dataset_
 from param_decomp.targets.glu_transformer import GLUDecomposedModel
 from param_decomp.targets.neuron_alignment import (
     STATISTIC,
+    UNIT_KINDS,
     NeuronRanksMeta,
+    UnitKind,
     accumulate_neuron_moments,
+    block_scores,
     capture_groups,
-    down_column_sq_norms,
     make_moments_step,
     pool_slices,
     pool_tokens_sha256,
-    rank_neurons,
-    write_energy,
+    rank_units,
+    tap_widths,
+    unit_counts,
     write_neuron_ranks,
 )
 
@@ -104,16 +109,19 @@ def harvest(
     glu = model.model
     assert isinstance(glu, GLUDecomposedModel), type(glu)
     blocks = _layers(layers, glu.n_layer)
-    n_neurons = int(down_column_sq_norms(glu, blocks[0]).shape[0])
-    groups = capture_groups(blocks, batch_size, prompt_len, n_neurons, capture_budget_bytes)
+    counts = unit_counts(glu)
+    widths = tap_widths(counts)
+    groups = capture_groups(
+        blocks, batch_size, prompt_len, sum(widths.values()), capture_budget_bytes
+    )
     print(
         f"harvest: target={target_identity(target)} pool={n_prompts}x{prompt_len} "
-        f"layers={blocks} n={n_neurons} batch={batch_size} groups={[len(g) for g in groups]}",
+        f"layers={blocks} units={counts} batch={batch_size} groups={[len(g) for g in groups]}",
         flush=True,
     )
 
-    rank: dict[int, np.ndarray] = {}
-    score: dict[int, np.ndarray] = {}
+    rank: dict[UnitKind, dict[int, np.ndarray]] = {kind: {} for kind in UNIT_KINDS}
+    score: dict[UnitKind, dict[int, np.ndarray]] = {kind: {} for kind in UNIT_KINDS}
     for group in groups:
         t0 = time.time()
         step = make_moments_step(model, group)
@@ -121,18 +129,20 @@ def harvest(
             (global_token_batch(rows, mesh, batch_size), jnp.asarray(mask))
             for rows, mask in pool_slices(pool.tokens, batch_size)
         )
-        totals = accumulate_neuron_moments(step, group, n_neurons, placed)
+        totals = accumulate_neuron_moments(step, group, widths, placed)
         for block in group:
-            block_score = write_energy(totals[block], down_column_sq_norms(glu, block))
-            block_rank = rank_neurons(block_score)
-            rank[block] = block_rank
-            score[block] = block_score[block_rank].astype(np.float32)
-            cum = np.cumsum(score[block].astype(np.float64)) / score[block].sum()
-            at = {k: cum[min(k, n_neurons) - 1] for k in (64, 256, 512)}
+            scores = block_scores(glu, block, totals[block])
+            summary: list[str] = []
+            for kind in UNIT_KINDS:
+                block_rank = rank_units(scores[kind])
+                rank[kind][block] = block_rank
+                score[kind][block] = scores[kind][block_rank].astype(np.float32)
+                cum = np.cumsum(score[kind][block].astype(np.float64)) / score[kind][block].sum()
+                n = counts[kind]
+                at = {k: cum[min(k, n) - 1] for k in (64, 256, 512)}
+                summary.append(f"{kind}: " + " ".join(f"cov@{k}={v:.3f}" for k, v in at.items()))
             print(
-                f"  block {block}: tokens={totals[block].n_tokens:.0f} "
-                f"top5={block_rank[:5].tolist()} "
-                + " ".join(f"coverage@{k}={v:.3f}" for k, v in at.items()),
+                f"  block {block}: tokens={totals[block].n_tokens:.0f} " + " | ".join(summary),
                 flush=True,
             )
         print(f"  group {group[0]}..{group[-1]}: {time.time() - t0:.1f}s", flush=True)
@@ -144,7 +154,7 @@ def harvest(
         prompt_len=int(prompt_len),
         statistic=STATISTIC,
         layers=list(blocks),
-        n_neurons=n_neurons,
+        n_units=counts,
     )
     write_neuron_ranks(out_dir, meta, rank, score)
     print(f"wrote {out_dir} ({len(blocks)} blocks)", flush=True)

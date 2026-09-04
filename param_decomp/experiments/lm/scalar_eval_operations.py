@@ -1,6 +1,10 @@
-"""Independent CE/KL, causal-L0, and fresh-PGD LM operations."""
+"""Independent CE/KL, causal-L0, and fresh-PGD LM operations over the shared batch context.
 
-from typing import Literal
+Every operation is bound to ONE `(stream, CI role)`: it folds only the pass's contexts on
+its stream, reads its role's head of the shared CI envelope, and reports under that
+stream's namespace (`stream_log_prefix`). A targeted run's non-target stream composes
+its recon scorers delta-pinned (`nontarget_delta_pinned`, SPEC T4).
+"""
 
 import jax.numpy as jnp
 from jax import random
@@ -10,70 +14,50 @@ from jaxtyping import Array, PRNGKeyArray
 from param_decomp.core.ci_fn import CIRole
 from param_decomp.core.configs import CI_L0Config, PGDReconLossConfig
 from param_decomp.core.eval_schedule import EvalSchedule
+from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.metrics import BarChart, LogRecord
-from param_decomp.core.model import CaptureKeys, PlacedModel
+from param_decomp.core.model import EMPTY_CAPTURE_KEYS, CaptureKeys, PlacedModel
 from param_decomp.core.recon import resolve_reconstruction_spec
 from param_decomp.core.recon_eval import FreshPGDReconEval
-from param_decomp.core.run import EvalOperation
+from param_decomp.core.run import BatchedOperation, batched_operation
 from param_decomp.experiments.lm.eval import (
     MaskingArm,
+    ScalarScorer,
     ScalarStep,
+    make_ce_kl_scorer,
     make_ce_kl_step,
+    make_ci_l0_scorer,
     make_ci_l0_step,
+    make_fresh_pgd_scorer,
     make_fresh_pgd_step,
-    make_masked_kl_step,
+    make_masked_kl_scorer,
 )
-from param_decomp.experiments.lm.eval_config import (
-    CEandKLLossesConfig,
+from param_decomp.experiments.lm.eval_config import CEandKLLossesConfig
+from param_decomp.experiments.lm.eval_context import (
+    LMBatchContext,
+    LMEvalPass,
+    Stream,
+    nontarget_delta_pinned,
+    prepared_batch_from_context,
+    role_log_segment,
+    stream_batches,
+    stream_log_prefix,
 )
-from param_decomp.experiments.lm.eval_context import LMEvalContext
 from param_decomp.experiments.lm.eval_keys import EvalKeyStream
 
-type Stream = Literal["nontarget", "target"]
-"""Which STREAM an eval operation measures. ONE value, not a (batch source, log prefix)
-pair, so target-stream batches cannot be spelled under the nontarget stream's log keys."""
-
-
-def stream_batches(stream: Stream, context: LMEvalContext) -> tuple[Array, ...]:
-    match stream:
-        case "nontarget":
-            return context.batches
-        case "target":
-            assert context.target_batches is not None, (
-                "target-stream metrics need a tPD run's prompt pool; a plain run has none"
-            )
-            return context.target_batches
-
-
-def nontarget_delta_pinned(*, targeted: bool, stream: Stream) -> bool:
-    """A targeted run's NON-TARGET stream recon evals compose delta-pinned (SPEC T4,
-    amended 2026-08-20 for the fresh-PGD probe, 2026-08-28 for the CE/KL family): every
-    non-target forward keeps the delta escape valve fully on, so what is measured is the
-    component-only quantity training actually defends. On a plain run, "nontarget" IS
-    the ordinary stream and the plain delta semantics stand."""
-    return targeted and stream == "nontarget"
-
-
-def role_log_segment(role: CIRole) -> str:
-    """The CI-role namespace segment. EMPTY for `output`, so a single-role run's keys — and a
-    dual run's output-role keys — are exactly what every previous run logged; the hidden role
-    lands under `hidden_ci/`, the same segment the training metrics use."""
-    match role:
-        case "output":
-            return ""
-        case "hidden":
-            return "hidden_ci/"
-
-
-def stream_log_prefix(stream: Stream, context: LMEvalContext, role: CIRole = "output") -> str:
-    targeted = context.target_batches is not None
-    role_segment = role_log_segment(role)
-    match stream:
-        case "nontarget":
-            return f"eval/nontarget_data/{role_segment}" if targeted else f"eval/{role_segment}"
-        case "target":
-            return f"eval/{role_segment}"
-
+__all__ = [
+    "Stream",
+    "fresh_pgd_probe",
+    "make_ce_kl_operation",
+    "make_ci_l0_operation",
+    "make_fresh_pgd_operation",
+    "make_masked_kl_operation",
+    "nontarget_delta_pinned",
+    "role_log_segment",
+    "scalar_step_for",
+    "stream_batches",
+    "stream_log_prefix",
+]
 
 type AnyScalarMetricConfig = CEandKLLossesConfig | CI_L0Config | PGDReconLossConfig
 
@@ -97,8 +81,8 @@ def scalar_step_for(
     role: CIRole = "output",
     delta_pinned: bool = False,
 ) -> ScalarStep:
-    """THE config→kernel binding for the scalar tier — the operations below and the AOT
-    eval fit check compile the identical step from one spelling.
+    """THE config→kernel binding for the fused scalar steps — the AOT eval fit check
+    compiles the same kernels the batched operations below score with, from one spelling.
 
     `delta_pinned` (SPEC T4) reaches only the CE/KL family; the fit check leaves it at
     the default, which is also the memory-conservative arm — pinning REPLACES the
@@ -114,16 +98,11 @@ def scalar_step_for(
                 delta_pinned=delta_pinned,
             )
         case CI_L0Config():
-            groups = (
-                {name: tuple(patterns) for name, patterns in metric.groups.items()}
-                if metric.groups is not None
-                else None
-            )
             return make_ci_l0_step(
                 model,
                 ci_capture_keys,
                 metric.ci_alive_threshold,
-                groups,
+                _l0_groups(metric),
                 mesh,
                 compiler_options,
                 role=role,
@@ -134,40 +113,60 @@ def scalar_step_for(
             )
 
 
+def _l0_groups(metric: CI_L0Config) -> dict[str, tuple[str, ...]] | None:
+    return (
+        {name: tuple(patterns) for name, patterns in metric.groups.items()}
+        if metric.groups is not None
+        else None
+    )
+
+
 def _make_scalar_operation(
     schedule: EvalSchedule,
-    step: ScalarStep,
+    scorer: ScalarScorer,
     prefixes: tuple[str, ...],
     model: PlacedModel,
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
+    compiler_options: dict[str, bool | int | str],
     stream: Stream,
     role: CIRole,
+    hidden_acts_capture_keys: CaptureKeys = EMPTY_CAPTURE_KEYS,
     max_batches: int | None = None,
-) -> EvalOperation[LMEvalContext]:
-    def run(context: LMEvalContext) -> LogRecord:
-        log_prefix = stream_log_prefix(stream, context, role)
-        batches = stream_batches(stream, context)[:max_batches]
-        sums: dict[str, Array] = {}
-        for batch_index, tokens in enumerate(batches):
-            key = random.fold_in(
-                run_key,
-                EvalKeyStream.SCALARS * train_steps + context.pass_index * eval_steps + batch_index,
-            )
-            values = step(
-                model,
-                context.state.decomposition.components,
-                context.placed_ci_fn,
-                tokens,
-                key,
-            )
-            for name, value in values.items():
-                if name.startswith(prefixes):
-                    sums[name] = sums.get(name, jnp.zeros(())) + value
-        return {f"{log_prefix}{name}": float(value) / len(batches) for name, value in sums.items()}
+) -> BatchedOperation[LMEvalPass, LMBatchContext]:
+    """Fold `scorer` over the pass's contexts on `stream` (the first `max_batches` when
+    capped) and average each scalar it emits. The RNG key stays keyed off the full
+    `eval_steps` stride, so a cap changes which batches run, never which key a batch draws."""
+    score_step = filter_jit(scorer, compiler_options=compiler_options)
+    n_batches = eval_steps if max_batches is None else min(max_batches, eval_steps)
 
-    return EvalOperation(schedule, run)
+    def init() -> dict[str, Array]:
+        return {}
+
+    def update(sums: dict[str, Array], context: LMBatchContext) -> dict[str, Array]:
+        if context.stream != stream or context.batch_index >= n_batches:
+            return sums
+        key = random.fold_in(
+            run_key,
+            EvalKeyStream.SCALARS * train_steps
+            + context.pass_index * eval_steps
+            + context.batch_index,
+        )
+        values = score_step(
+            model, prepared_batch_from_context(context, role, hidden_acts_capture_keys), key
+        )
+        folded = dict(sums)
+        for name, value in values.items():
+            if name.startswith(prefixes):
+                folded[name] = folded.get(name, jnp.zeros(())) + value
+        return folded
+
+    def finish(eval_pass: LMEvalPass, sums: dict[str, Array]) -> LogRecord:
+        log_prefix = stream_log_prefix(stream, eval_pass.targeted, role)
+        return {f"{log_prefix}{name}": float(value) / n_batches for name, value in sums.items()}
+
+    return batched_operation(schedule, init, update, finish)
 
 
 def make_ce_kl_operation(
@@ -175,7 +174,6 @@ def make_ce_kl_operation(
     schedule: EvalSchedule,
     stream: Stream,
     model: PlacedModel,
-    ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
@@ -184,16 +182,14 @@ def make_ce_kl_operation(
     role: CIRole,
     *,
     targeted: bool,
-) -> EvalOperation[LMEvalContext]:
+) -> BatchedOperation[LMEvalPass, LMBatchContext]:
     assert role == "output", "CE/KL's step reads the output head's CI; it has no hidden-role form"
     return _make_scalar_operation(
         schedule,
-        scalar_step_for(
-            metric,
+        make_ce_kl_scorer(
             model,
-            ci_capture_keys,
+            metric.rounding_threshold,
             mesh,
-            compiler_options,
             delta_pinned=nontarget_delta_pinned(targeted=targeted, stream=stream),
         ),
         ("ce_kl/",),
@@ -201,6 +197,7 @@ def make_ce_kl_operation(
         run_key,
         train_steps,
         eval_steps,
+        compiler_options,
         stream,
         role,
     )
@@ -211,7 +208,6 @@ def make_masked_kl_operation(
     schedule: EvalSchedule,
     stream: Stream,
     model: PlacedModel,
-    ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
@@ -220,25 +216,20 @@ def make_masked_kl_operation(
     role: CIRole,
     *,
     targeted: bool,
-) -> EvalOperation[LMEvalContext]:
+) -> BatchedOperation[LMEvalPass, LMBatchContext]:
     """ONE masking arm, authored as the loss config that names the same construction —
     `CIMaskedReconLoss` / `UnmaskedNoDeltaReconLoss`, as `PGDReconLoss` already is."""
     return _make_scalar_operation(
         schedule,
-        make_masked_kl_step(
-            model,
-            ci_capture_keys,
-            arm,
-            mesh,
-            compiler_options,
-            role=role,
-            delta_pinned=nontarget_delta_pinned(targeted=targeted, stream=stream),
+        make_masked_kl_scorer(
+            model, arm, mesh, delta_pinned=nontarget_delta_pinned(targeted=targeted, stream=stream)
         ),
         (f"ce_kl/kl_{arm}",),
         model,
         run_key,
         train_steps,
         eval_steps,
+        compiler_options,
         stream,
         role,
     )
@@ -249,29 +240,30 @@ def make_ci_l0_operation(
     schedule: EvalSchedule,
     stream: Stream,
     model: PlacedModel,
-    ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
     mesh: Mesh,
     compiler_options: dict[str, bool | int | str],
     role: CIRole,
-) -> EvalOperation[LMEvalContext]:
+) -> BatchedOperation[LMEvalPass, LMBatchContext]:
+    del mesh  # CI L0 is a reduction of the shared envelope; nothing to shard
     scalars = _make_scalar_operation(
         schedule,
-        scalar_step_for(metric, model, ci_capture_keys, mesh, compiler_options, role=role),
+        make_ci_l0_scorer(model, metric.ci_alive_threshold, _l0_groups(metric)),
         ("l0/",),
         model,
         run_key,
         train_steps,
         eval_steps,
+        compiler_options,
         stream,
         role,
     )
 
-    def run(context: LMEvalContext) -> LogRecord:
-        record = dict(scalars.run(context))
-        log_prefix = stream_log_prefix(stream, context, role)
+    def finish(eval_pass: LMEvalPass, sums: dict[str, Array]) -> LogRecord:
+        record = dict(scalars.finish(eval_pass, sums))
+        log_prefix = stream_log_prefix(stream, eval_pass.targeted, role)
         prefix = f"{log_prefix}l0/{metric.ci_alive_threshold}_"
         record[f"{log_prefix}l0/bar_chart"] = BarChart(
             rows=tuple(
@@ -285,7 +277,7 @@ def make_ci_l0_operation(
         )
         return record
 
-    return EvalOperation(schedule, run)
+    return BatchedOperation(schedule, scalars.init, scalars.update, finish)
 
 
 def make_fresh_pgd_operation(
@@ -293,7 +285,6 @@ def make_fresh_pgd_operation(
     schedule: EvalSchedule,
     stream: Stream,
     model: PlacedModel,
-    ci_capture_keys: CaptureKeys,
     run_key: PRNGKeyArray,
     train_steps: int,
     eval_steps: int,
@@ -302,34 +293,22 @@ def make_fresh_pgd_operation(
     role: CIRole,
     *,
     targeted: bool,
-) -> EvalOperation[LMEvalContext]:
-    assert metric.init == "random" and metric.source_shape == "c", metric
-    probe = FreshPGDReconEval(
-        name=metric.name or metric.type,
-        n_steps=metric.n_steps,
-        step_size=metric.step_size,
-        reconstruction=resolve_reconstruction_spec(metric.hidden_acts_reconstruction),
-    )
+) -> BatchedOperation[LMEvalPass, LMBatchContext]:
+    probe = fresh_pgd_probe(metric)
     # Unpinned (plain run / target stream), the probe's ascent owns a live delta channel
     # it can drive to 0 — pinned, it measures the component-only worst case.
     delta_pinned = nontarget_delta_pinned(targeted=targeted, stream=stream)
     return _make_scalar_operation(
         schedule,
-        make_fresh_pgd_step(
-            model,
-            ci_capture_keys,
-            probe,
-            mesh,
-            compiler_options,
-            role=role,
-            delta_pinned=delta_pinned,
-        ),  # fmt: skip
+        make_fresh_pgd_scorer(model, probe, mesh, delta_pinned=delta_pinned),
         (f"loss/{probe.name}",),
         model,
         run_key,
         train_steps,
         eval_steps,
+        compiler_options,
         stream,
         role,
+        hidden_acts_capture_keys=probe.hidden_acts_capture_keys,
         max_batches=metric.n_batches,
     )

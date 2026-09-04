@@ -17,7 +17,6 @@ from jaxtyping import Array
 from param_decomp.core.components import ComponentStacks, SiteSpec, nonlinearity_partitions
 from param_decomp.core.configs import (
     AllRoutingConfig,
-    AnyImportanceMinimalityLossConfig,
     AnyLossMetricConfig,
     AnyReconLossMetricConfig,
     CIMaskedReconLossConfig,
@@ -35,7 +34,6 @@ from param_decomp.core.configs import (
     PersistentPGDReconLossConfig,
     PGDReconLossConfig,
     PGDReconSubsetLossConfig,
-    SmoothL0ImportanceMinimalityLossConfig,
     StochasticReconLossConfig,
     StochasticReconSubsetLossConfig,
     SubsetRoutingType,
@@ -71,23 +69,7 @@ class ImportanceMinimalityTerm:
 
     name: str
     coeff: LossCoeff
-    cfg: AnyImportanceMinimalityLossConfig
-
-    @property
-    def imp_loss_key(self) -> str:
-        """Penalty-kind-specific metric name for the loss value."""
-        return (
-            "imp_smooth_l0"
-            if isinstance(self.cfg, SmoothL0ImportanceMinimalityLossConfig)
-            else "imp"
-        )
-
-    @property
-    def imp_min_param_key(self) -> str:
-        """Penalty-kind-specific metric name for its annealed parameter."""
-        return (
-            "gamma_imp" if isinstance(self.cfg, SmoothL0ImportanceMinimalityLossConfig) else "p_imp"
-        )
+    cfg: ImportanceMinimalityLossConfig
 
 
 @dataclass(frozen=True)
@@ -110,11 +92,7 @@ class ResolvedNonlinearity:
     kind_coefficients: dict[NonlinearityUnitKind, float]
 
     @staticmethod
-    def resolve(
-        term: NonlinearityTerm | None, sites: tuple[SiteSpec, ...]
-    ) -> "ResolvedNonlinearity | None":
-        if term is None:
-            return None
+    def resolve(term: NonlinearityTerm, sites: tuple[SiteSpec, ...]) -> "ResolvedNonlinearity":
         partitions = nonlinearity_partitions(sites)
         assert partitions, "NonlinearityLocalityLoss needs a partitioned site"
         declared_kinds = {p.unit_kind for p in partitions.values()}
@@ -317,13 +295,6 @@ def _collect_terms(
                 assert faith is None
                 faith = FaithfulnessTerm(unique_name(cfg), cfg.coeff)
             case ImportanceMinimalityLossConfig():
-                assert imp is None
-                assert all(k.frac > 0 for k in cfg.pnorm.points), (
-                    f"pnorm knots must all keep frac > 0, got {cfg.pnorm.points}: at p = 0 "
-                    "every (c + eps)^p is 1, so the penalty goes flat and stops teaching"
-                )
-                imp = ImportanceMinimalityTerm(unique_name(cfg), cfg.coeff, cfg)
-            case SmoothL0ImportanceMinimalityLossConfig():
                 assert imp is None
                 assert all(k.frac > 0 for k in cfg.gamma.points), (
                     f"gamma knots must all keep frac > 0, got {cfg.gamma.points}: a zero "
