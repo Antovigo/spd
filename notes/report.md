@@ -1351,3 +1351,49 @@ Two infrastructure findings from the re-harvest:
    which costs sum(k) rather than max(k).
 
 The shareable write-up built on this data is `notes/nonlinearity_penalty.md`.
+
+### 8.27 Per-stream figures, output-only replication, second adversary start (2026-09-03)
+
+Three questions closed on the output-head harvest from 8.26. Jobs 11029-11032 (2x L40 each,
+~58 min per 3-run job, all COMPLETED, zero error lines). Seed 1234 output lives in
+`pgd_curve/`, seed 5678 in `pgd_curve_s5678/`; `pgd_curve.sbatch` now takes `INIT_SEED` and
+`OUTDIR` env vars so the two never collide.
+
+**(a) The share figures were mixing streams silently.** Audit of the 8-figure set committed
+in `39c02a572`: `01` (nonlinearity soft-unit count) is weight-space and belongs to neither
+stream; `02` (L0) and `05` (rounded recon) read `eval/l0/...` and `eval/ce_kl/...`, i.e.
+TARGET only, with no label saying so; `03` (alive components) is an AB-grid census over the
+task prompt grid. Only the four PGD figures were per-stream. Rebuilt as 12 figures with one
+per stream wherever the quantity has a stream, and an on-plot note where it doesn't.
+
+Two findings that were invisible in the target-only set:
+
+- `eval/nontarget_data/ce_kl/kl_rounded_masked` is **0.1182 at every dose**, flat to four
+  digits, against 0.0032 -> 0.0039 on the target stream. Off-distribution, ordinary
+  reconstruction does not notice the penalty at all.
+- `eval/nontarget_data/l0/0.0_*` total goes **0.90 -> 1.94** across the sweep (gate alone
+  0.175 -> 0.82, 4.7x) while target L0 is flat at 22 -> 25. The penalty leaves components
+  materially more willing to fire on text they do not explain. This is the first mechanism
+  candidate for the 8.22/8.24 off-distribution runaway that is measurable from the training
+  logs alone, and it is dose-monotone, which the PGD numbers are not.
+
+**(b) The runaway is not an artefact of the hidden-acts objective.** Harvested the L18-17
+pair (`p-f9417595` output-only control, `p-204fa1bc` output-only + 5e-4) plus `p-118386d3`
+(dual + 5e-4, same lineage). At 80 steps on general text the penalty costs 4.98x / 3.06x
+(output-only) against 4.53x / 3.19x (dual, `p-cbb66ad1` -> `p-55ee815f`) at the two starts.
+Same size. Separately: output-only decompositions are less adversarially robust on the task
+stream to begin with (0.0070 vs 0.0043 at k=20) — the hidden-acts term buys on-task
+robustness and does nothing for the off-distribution cost.
+
+**(c) Second adversary start replicates the shape, not the ranking.** Ratio to control at
+k=80, general text, seed 1234 / seed 5678: 0.125x -> 3.79/3.85, 0.25x -> 2.60/3.62,
+0.5x -> 4.53/3.19, 1x -> 6.06/6.15, 2x -> 6.58/5.47. Flat baseline and a 3-6x penalised
+envelope rising with dose in both; individual doses move up to 40%. `p-118386d3` (the dual
+5e-4 repeat from a different training seed/lineage) gives 3.76x / 1.99x against
+`p-55ee815f`'s 4.53x / 3.19x — **training seed moves the magnitude about as much as attacker
+start does**. Consequence for anything downstream: quote this cost as a range, never as a
+point estimate; 8.24's single-init ratios should be read the same way.
+
+Share doc `notes/nonlinearity_penalty.md` rewritten around this: 7 sections, 12 figures,
+every adversarial figure a two-panel start-point-1 / start-point-2 comparison, and the
+caveat list now states the seed and lineage limits explicitly.
