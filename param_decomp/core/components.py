@@ -291,14 +291,11 @@ consumes neurons). Core never knows which site kind is which — the target says
 
 
 class SiteNeuronAlignment(eqx.Module):
-    """One site's neuron-aligned start (SPEC T13): `component_of_neuron` is `int32[n]`
-    over the site's neuron axis — the subcomponent each neuron is assigned to, `-1` for
-    unassigned. The exact (`neuron_aligned_targeted`) start assigns the top-C neurons one
-    each (slot `i` = the `i`-th ranked neuron); the wrapped (`neuron_aligned_wrap`) start
-    assigns EVERY neuron, rank `j` to slot `j mod C`. Traced through the placed init; the
-    axis is static."""
+    """One site's neuron-aligned start: subcomponent `i` IS neuron `neurons[i]`
+    (SPEC T13). `neurons` is `int32[C]`, distinct, in the caller's rank order (slot `i` =
+    the `i`-th ranked neuron), traced through the placed init; the axis is static."""
 
-    component_of_neuron: Array
+    neurons: Array
     neuron_axis: NeuronAxis = eqx.field(static=True)
 
 
@@ -309,59 +306,43 @@ NeuronAlignment = dict[str, SiteNeuronAlignment]
 
 def validate_neuron_alignment(sites: tuple[SiteSpec, ...], alignment: NeuronAlignment) -> None:
     """Host-side checks the traced init cannot make: every aligned site exists, its
-    assignment spans exactly the neuron axis, names only slots `-1..C-1`, and leaves no
-    subcomponent without a neuron (an unassigned slot would start at exactly zero)."""
+    `neurons` has exactly `C` DISTINCT indices inside the neuron axis."""
     by_name = {spec.name: spec for spec in sites}
     for name, site in alignment.items():
         assert name in by_name, f"neuron alignment names an undecomposed site {name!r}"
         spec = by_name[name]
-        assignment = np.asarray(site.component_of_neuron)
+        neurons = np.asarray(site.neurons)
         n = spec.d_out if site.neuron_axis == "d_out" else spec.d_in
-        assert assignment.shape == (n,) and assignment.dtype.kind == "i", (
+        assert neurons.shape == (spec.C,) and neurons.dtype.kind == "i", (
             name,
-            assignment.shape,
-            n,
-        )
-        assert assignment.min() >= -1 and assignment.max() < spec.C, (
-            name,
-            assignment.min(),
-            assignment.max(),
+            neurons.shape,
             spec.C,
         )
-        missing = set(range(spec.C)) - set(assignment.tolist())
-        assert not missing, f"{name}: subcomponents {sorted(missing)[:8]}… have no neuron"
+        assert len(set(neurons.tolist())) == spec.C, f"{name}: repeated neuron indices"
+        assert neurons.min() >= 0 and neurons.max() < n, (name, neurons.min(), neurons.max(), n)
 
 
 def _neuron_aligned_site_vu(W: Array, site: SiteNeuronAlignment, C: int) -> tuple[Array, Array]:
-    """One site's neuron-aligned V/U from its frozen `W [d_out, d_in]` and its assignment
-    (SPEC T13). With `E [C, n]` the assignment matrix (`E[i, s] = 1` iff neuron `s` is
-    assigned to subcomponent `i`):
+    """One site's neuron-aligned V/U from its frozen `W [d_out, d_in]` and its `C` chosen
+    neurons `S` (SPEC T13). With `E [C, n]` the selection matrix (`E[i, S_i] = 1`):
 
-        writer (neuron axis d_out):  V = (E @ W)ᵀ  [d_in, C],   U = E          [C, d_out]
-        reader (neuron axis d_in):   V = Eᵀ        [d_in, C],   U = E @ Wᵀ     [C, d_out]
+        writer (neuron axis d_out):  V = W[S, :]ᵀ  [d_in, C],   U = E        [C, d_out]
+        reader (neuron axis d_in):   V = Eᵀ        [d_in, C],   U = W[:, S]ᵀ [C, d_out]
 
-    Exact start (one neuron per slot): `(V@U)ᵀ` is `W` restricted to the assigned rows
-    (writer) / columns (reader) and the delta carries the other `n − C` neurons exactly;
-    per subcomponent `‖v_i‖·‖u_i‖` is the neuron's own weight norm, `x @ V` its
-    pre-activation (writer) or post-nonlinearity activation (reader). Wrapped start (k
-    neurons per slot): slot `i` reads the SUM of its neurons' input weights and writes the
-    same value to all of them (writer) / reads all of them and writes the sum of their
-    output weights (reader) — every neuron is touched from step 0, at ~k× a neuron's norm,
-    and the delta carries `W − (V@U)ᵀ`. Nothing is frozen and nothing is perturbed; both
+    so `(V@U)ᵀ` is `W` restricted to the selected rows (writer) / columns (reader) and the
+    delta carries the other `n − C` neurons exactly. Per subcomponent `‖v_i‖·‖u_i‖` is the
+    neuron's own weight norm; `x @ V` is its pre-activation (writer) or its
+    post-nonlinearity activation (reader). Nothing is frozen and nothing is perturbed:
+    one-hot `U`/`V` is the gauge in which each subcomponent IS one neuron, and both
     factors have a dense nonzero gradient from step 0."""
     d_out, d_in = W.shape
-    assignment = site.component_of_neuron
+    neurons = site.neurons
+    assert neurons.shape == (C,), (neurons.shape, C)
     match site.neuron_axis:
         case "d_out":
-            assert assignment.shape == (d_out,), (assignment.shape, d_out)
-            selection = jax.nn.one_hot(
-                assignment, C, dtype=W.dtype
-            ).T  # [C, d_out]; -1 -> zero column
-            return (selection @ W).T, selection
+            return W[neurons, :].T, jax.nn.one_hot(neurons, d_out, dtype=W.dtype)
         case "d_in":
-            assert assignment.shape == (d_in,), (assignment.shape, d_in)
-            selection = jax.nn.one_hot(assignment, C, dtype=W.dtype).T  # [C, d_in]
-            return selection.T, selection @ W.T
+            return jax.nn.one_hot(neurons, d_in, dtype=W.dtype).T, W[:, neurons].T
 
 
 def init_component_stacks_neuron_aligned(

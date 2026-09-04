@@ -7,12 +7,12 @@ block — the top-C by **write energy** on the target prompt pool:
 
 with `h` the post-nonlinearity hidden activation the block's down projection consumes
 (`mlp_hidden` tap: `silu(gate)·up` on the gated anatomy, the post-GELU `fc` output on the
-plain one), the expectation over every pool prompt exactly once (an exhaustive sweep, not
-the trainer's with-replacement sampler) and, per the `bos` policy, over every position or
-every position but the first. Uncentred on purpose: a neuron that fires the same on every
-prompt of a narrow pool is exactly one the decomposition must reconstruct. The down column
-norm turns hidden-unit scale into residual-stream effect, and one block score serves the
-block's writers and reader alike, so a site's top-C is a PREFIX of one ranking.
+plain one) and the expectation over every position of every pool prompt exactly once (an
+exhaustive sweep, not the trainer's with-replacement sampler). Uncentred on purpose: a
+neuron that fires the same on every prompt of a narrow pool is exactly one the
+decomposition must reconstruct. The down column norm turns hidden-unit scale into
+residual-stream effect, and one block score serves the block's writers and reader alike, so
+a site's top-C is a PREFIX of one ranking.
 
 The ranking depends on the target model and the pool only — never on the decomposition —
 so it is harvested once (`experiments.lm.harvest_neuron_ranks`) into an artifact this
@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float
 from pydantic import Field
 
 from param_decomp.core.base_config import BaseConfig
@@ -49,10 +49,6 @@ from param_decomp.targets.glu_transformer import (
     PlainMLP,
 )
 from param_decomp.targets.transformer_taps import mlp_hidden_tap_key
-
-BosPolicy = Literal["exclude", "include"]
-"""Whether position 0 (BOS — identical across the pool, and a massive-activation host in
-Llama-3) counts toward the statistic. An empirical question, so an artifact property."""
 
 STATISTIC = "write_energy"
 NEURON_RANKS_FILENAME = "neuron_ranks.npz"
@@ -132,9 +128,8 @@ def pool_slices(tokens: np.ndarray, batch: int) -> Iterator[tuple[np.ndarray, np
 
 
 class NeuronMoments(eqx.Module):
-    """Per-neuron `Σh`, `Σh²` and the token count they sum over, fp32 on device."""
+    """Per-neuron `Σh²` and the token count it sums over, fp32 on device."""
 
-    sum_h: Float[Array, " n"]
     sum_h2: Float[Array, " n"]
     n_tokens: Float[Array, ""]
 
@@ -142,29 +137,24 @@ class NeuronMoments(eqx.Module):
 MomentsStep = Callable[[Array, Array], dict[int, NeuronMoments]]
 
 
-def make_moments_step(model: PlacedModel, blocks: tuple[int, ...], bos: BosPolicy) -> MomentsStep:
+def make_moments_step(model: PlacedModel, blocks: tuple[int, ...]) -> MomentsStep:
     """One jitted `(tokens [B, T], row_mask [B]) -> {block: moments}` over the frozen
-    forward with the blocks' `mlp_hidden` taps captured. The outputs are declared FULLY
-    REPLICATED, so the batch reduction's collective happens inside the graph and every
-    device (and process) holds the complete `[n]` vectors."""
+    forward with the blocks' `mlp_hidden` taps captured, every position counted. The
+    outputs are declared FULLY REPLICATED, so the batch reduction's collective happens
+    inside the graph and every device (and process) holds the complete `[n]` vectors."""
     assert len(set(blocks)) == len(blocks) and blocks, blocks
     keys = frozenset(mlp_hidden_tap_key(block) for block in blocks)
-    first_position = 1 if bos == "exclude" else 0
     model_arrays, model_static = eqx.partition(model, eqx.is_array)
 
     def step(arrays: PlacedModel, tokens: Array, row_mask: Array) -> dict[int, NeuronMoments]:
         placed: PlacedModel = eqx.combine(arrays, model_static)
         captures = placed.clean_forward(tokens, keys).captures
-        n_positions = tokens.shape[1]
-        position_mask = jnp.arange(n_positions) >= first_position
-        weight = (row_mask[:, None] & position_mask[None, :]).astype(jnp.float32)
+        weight = jnp.broadcast_to(row_mask[:, None], tokens.shape).astype(jnp.float32)
         moments: dict[int, NeuronMoments] = {}
         for block in blocks:
             h = captures[mlp_hidden_tap_key(block)].astype(jnp.float32)
             moments[block] = NeuronMoments(
-                sum_h=jnp.einsum("bt,btn->n", weight, h),
-                sum_h2=jnp.einsum("bt,btn->n", weight, h * h),
-                n_tokens=jnp.sum(weight),
+                sum_h2=jnp.einsum("bt,btn->n", weight, h * h), n_tokens=jnp.sum(weight)
             )
         return moments
 
@@ -180,16 +170,14 @@ def make_moments_step(model: PlacedModel, blocks: tuple[int, ...], bos: BosPolic
 class HostMoments:
     """The float64 host accumulators one block's sweep lands in."""
 
-    sum_h: np.ndarray
     sum_h2: np.ndarray
     n_tokens: float
 
     @classmethod
     def zeros(cls, n_neurons: int) -> "HostMoments":
-        return cls(np.zeros(n_neurons, np.float64), np.zeros(n_neurons, np.float64), 0.0)
+        return cls(np.zeros(n_neurons, np.float64), 0.0)
 
     def add(self, device: NeuronMoments) -> None:
-        self.sum_h += np.asarray(device.sum_h, dtype=np.float64)
         self.sum_h2 += np.asarray(device.sum_h2, dtype=np.float64)
         self.n_tokens += float(device.n_tokens)
 
@@ -247,10 +235,8 @@ class NeuronRanksMeta(BaseConfig):
     n_prompts: int
     prompt_len: int
     statistic: str
-    bos: BosPolicy
     layers: list[int]
     n_neurons: int
-    positions_counted: int
 
 
 @dataclass(frozen=True)
@@ -316,6 +302,8 @@ def read_neuron_ranks(artifact_dir: Path) -> NeuronRanks:
         score = {block: np.asarray(arrays[f"score_{block}"]) for block in meta.layers}
     for block in meta.layers:
         assert rank[block].shape == score[block].shape == (meta.n_neurons,), block
+        # A permutation of 0..n-1, checked rather than trusted: a negative index would
+        # silently fancy-index from the end.
         assert np.array_equal(np.sort(rank[block]), np.arange(meta.n_neurons)), (
             f"block {block}: rank is not a permutation of 0..{meta.n_neurons - 1}"
         )
@@ -344,64 +332,24 @@ def assert_neuron_ranks_provenance(
 # ----------------------------- ranking → alignment -----------------------------
 
 
-NeuronAlignMode = Literal["top", "wrap"]
-"""`top`: the top-C neurons, one per subcomponent (`neuron_aligned_targeted`); `wrap`: every
-neuron, rank `j` to subcomponent `j mod C` (`neuron_aligned_wrap`)."""
-
-
-def component_assignment(rank: np.ndarray, C: int, mode: NeuronAlignMode) -> np.ndarray:
-    """`int32[n]`: the subcomponent each neuron goes to (`-1` = unassigned), from the
-    block's ranking `rank` (neuron indices by descending score)."""
-    n = rank.shape[0]
-    assert C >= 1 and n >= C, (C, n)
-    # A permutation of 0..n-1, checked here rather than trusted from the artifact: a
-    # negative index would silently fancy-index from the end.
-    assert np.array_equal(np.sort(rank), np.arange(n)), "rank is not a permutation of 0..n-1"
-    assignment = np.full(n, -1, dtype=np.int32)
-    positions = np.arange(n, dtype=np.int32)
-    match mode:
-        case "top":
-            assignment[rank[:C]] = positions[:C]
-        case "wrap":
-            assignment[rank] = positions % C
-    return assignment
-
-
-def wraps_per_component(n_neurons: int, C: int) -> int:
-    """How many neurons the fullest subcomponent sums under `wrap`: `ceil(n / C)`."""
-    return -(-n_neurons // C)
-
-
 def neuron_alignment_from_ranks(
-    ranks: NeuronRanks, sites: tuple[SiteSpec, ...], anatomy: Anatomy, mode: NeuronAlignMode
+    ranks: NeuronRanks, sites: tuple[SiteSpec, ...], anatomy: Anatomy
 ) -> NeuronAlignment:
-    """Every MLP site's assignment from its block's ranking: writers on `d_out`, the reader
-    on `d_in`; slot `i` is the block's `i`-th ranked neuron (`top`) or the sum of ranks
-    `i, i+C, i+2C, …` (`wrap`). Attention sites are absent (they take `zero_u`)."""
+    """Every MLP site's top-C: writers select on `d_out`, the reader on `d_in`; slot `i`
+    is the block's `i`-th ranked neuron. Attention sites are absent (they take `zero_u`)."""
     by_name = {spec.name: spec for spec in sites}
     alignment: NeuronAlignment = {}
     for block, block_sites in mlp_blocks_of(sites, anatomy).items():
         rank = ranks.rank[block]
-        if mode == "wrap":
-            # Slot `i` must hold the SAME neuron group in gate, up and down (the group's
-            # gate·up product is what down reads), and `j mod C` only agrees across the
-            # block's sites when they share one C. Refused rather than silently rewritten:
-            # C is a structural, pinned property (checkpoints, placement, the CI heads) —
-            # author the block's MLP sites at the minimum C instead.
-            cs = {name: by_name[name].C for name in block_sites.names}
-            assert len(set(cs.values())) == 1, (
-                f"neuron_aligned_wrap pairs slot i across a block's MLP sites, so they need "
-                f"ONE C; block {block} has {cs} — set them all to the minimum"
-            )
         for name in block_sites.names:
             spec = by_name[name]
             axis: Literal["d_out", "d_in"] = "d_out" if name in block_sites.writers else "d_in"
             n = spec.d_out if axis == "d_out" else spec.d_in
             assert n == rank.shape[0], (name, n, rank.shape)
-            assignment: Int[Array, " n"] = jnp.asarray(
-                component_assignment(rank, spec.C, mode), dtype=jnp.int32
+            assert n >= spec.C, (name, spec.C, n)
+            alignment[name] = SiteNeuronAlignment(
+                neurons=jnp.asarray(rank[: spec.C], dtype=jnp.int32), neuron_axis=axis
             )
-            alignment[name] = SiteNeuronAlignment(component_of_neuron=assignment, neuron_axis=axis)
     return alignment
 
 

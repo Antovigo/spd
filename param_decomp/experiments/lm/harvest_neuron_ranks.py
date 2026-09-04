@@ -16,7 +16,6 @@ def main(
     data_root: Path,
     out_dir: Path,
     local_device_count: int,
-    bos: str = "exclude",
     layers: str | int | list[int] = "all",
     batch_size: int = 128,
 ) -> None:
@@ -24,13 +23,11 @@ def main(
     os.environ.update(runtime.launch_env.as_env())
     from param_decomp.experiments.lm.neuron_ranks_harvest import harvest
 
-    assert bos in ("exclude", "include"), bos
     harvest(
         Path(config),
         Path(data_root),
         Path(out_dir),
         local_device_count,
-        bos="exclude" if bos == "exclude" else "include",
         layers=layers,
         batch_size=batch_size,
     )

@@ -32,7 +32,7 @@ def test_placed_moments_match_the_unplaced_sweep():
     blocks = (0, 3)
 
     unplaced = accumulate_neuron_moments(
-        make_moments_step(PlacedModel(model=model, placement=None), blocks, "exclude"),
+        make_moments_step(PlacedModel(model=model, placement=None), blocks),
         blocks,
         cfg.n_intermediate,
         ((jnp.asarray(r), jnp.asarray(m)) for r, m in pool_slices(tokens, 4)),
@@ -42,7 +42,7 @@ def test_placed_moments_match_the_unplaced_sweep():
     rules = from_config("ddp", mesh, sites)
     placed_model = PlacedModel(model=model, placement=rules)
     with jax.set_mesh(mesh):
-        step = make_moments_step(placed_model, blocks, "exclude")
+        step = make_moments_step(placed_model, blocks)
         sharding = NamedSharding(mesh, P(BATCH_AXES))
 
         def slices():
@@ -54,5 +54,5 @@ def test_placed_moments_match_the_unplaced_sweep():
 
         placed = accumulate_neuron_moments(step, blocks, cfg.n_intermediate, slices())
     for block in blocks:
-        assert placed[block].n_tokens == unplaced[block].n_tokens == 11 * 3
+        assert placed[block].n_tokens == unplaced[block].n_tokens == 11 * 4
         assert np.allclose(placed[block].sum_h2, unplaced[block].sum_h2, rtol=1e-4, atol=1e-6)

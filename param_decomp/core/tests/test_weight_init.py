@@ -109,17 +109,17 @@ def test_placed_init_matches_the_eager_values():
             assert jnp.allclose(placed_site.U, eager_site.U, atol=1e-5), spec.name
 
 
-# ------------------- neuron_aligned_targeted / neuron_aligned_wrap (SPEC T13) -------------------
+# ----------------------------- neuron_aligned_targeted (SPEC T13) -----------------------------
 
 
-def _mixed_sites(down_c: int = 6):
-    """Two blocks: block 0 fully decomposed (q/k/v/o + gate/up/down, gate/up at C=4, down at
-    `down_c`), block 1 attention-only — the non-MLP sites must come out as `zero_u`."""
+def _mixed_sites():
+    """Two blocks: block 0 fully decomposed (q/k/v/o + gate/up/down, gate/up narrower than
+    down), block 1 attention-only — the non-MLP sites must come out as `zero_u`."""
     from param_decomp.core.components import SiteC
     from param_decomp.targets.glu_transformer import canonical_site_cs, site_name
 
     cfg = tiny_glu_cfg()
-    cs = {"q": 3, "k": 3, "v": 3, "o": 5, "gate": 4, "up": 4, "down": down_c}
+    cs = {"q": 3, "k": 3, "v": 3, "o": 5, "gate": 4, "up": 4, "down": 6}
     site_cs = tuple(SiteC(site_name(0, kind), c) for kind in cs for c in (cs[kind],))
     # A kind is one persistence stack across layers, so block 1 repeats block 0's Cs.
     site_cs += tuple(SiteC(site_name(1, kind), cs[kind]) for kind in ("q", "k", "v", "o"))
@@ -134,69 +134,39 @@ RANKING = np.array([5, 0, 9, 2, 7, 1, 8, 3], dtype=np.int32)
 """A hand ranking over the first 10 of the tiny model's 64 neurons."""
 
 
-def _assignment(n: int, C: int, mode: str) -> np.ndarray:
-    """`top`: slot i = RANKING[i]; `wrap`: rank j -> slot j % C over the whole RANKING
-    (the other neurons stay unassigned, as a ranking shorter than n would leave them)."""
-    out = np.full(n, -1, np.int32)
-    if mode == "top":
-        out[RANKING[:C]] = np.arange(C)
-    else:
-        out[RANKING] = np.arange(len(RANKING)) % C
-    return out
-
-
-def _hand_alignment(n_neurons: int, mode: str = "top", down_c: int = 6) -> NeuronAlignment:
-    """One ranking shared by the block's three MLP sites; gate/up at C=4, down at `down_c`
-    (the wrap arm pairs slots across the block, so it is used with `down_c=4`)."""
+def _hand_alignment() -> NeuronAlignment:
+    """One ranking shared by the block's three MLP sites; each takes its prefix."""
     from param_decomp.targets.glu_transformer import site_name
 
     return {
-        site_name(0, "gate"): SiteNeuronAlignment(
-            jnp.asarray(_assignment(n_neurons, 4, mode)), "d_out"
-        ),
-        site_name(0, "up"): SiteNeuronAlignment(
-            jnp.asarray(_assignment(n_neurons, 4, mode)), "d_out"
-        ),
-        site_name(0, "down"): SiteNeuronAlignment(
-            jnp.asarray(_assignment(n_neurons, down_c, mode)), "d_in"
-        ),
+        site_name(0, "gate"): SiteNeuronAlignment(jnp.asarray(RANKING[:4]), "d_out"),
+        site_name(0, "up"): SiteNeuronAlignment(jnp.asarray(RANKING[:4]), "d_out"),
+        site_name(0, "down"): SiteNeuronAlignment(jnp.asarray(RANKING[:6]), "d_in"),
     }
-
-
-def _selection(site_alignment: SiteNeuronAlignment, C: int) -> np.ndarray:
-    """`E [C, n]` from the assignment."""
-    assignment = np.asarray(site_alignment.component_of_neuron)
-    E = np.zeros((C, assignment.shape[0]), np.float32)
-    for neuron, slot in enumerate(assignment):
-        if slot >= 0:
-            E[slot, neuron] = 1.0
-    return E
 
 
 def test_neuron_aligned_init_reads_back_the_selected_neurons_and_leaves_the_rest_to_the_delta():
     model, sites, weights = _mixed_sites()
-    alignment = _hand_alignment(tiny_glu_cfg().n_intermediate)
+    alignment = _hand_alignment()
     validate_neuron_alignment(sites, alignment)
     vu = init_component_stacks_neuron_aligned(sites, weights, alignment, jax.random.PRNGKey(1))
     deltas = model.weight_deltas(vu)
     for name, site_alignment in alignment.items():
         spec = next(s for s in sites if s.name == name)
         W = np.asarray(weights[name])
-        E = _selection(site_alignment, spec.C)
-        S = np.asarray(site_alignment.component_of_neuron)
-        chosen = np.flatnonzero(S >= 0)[np.argsort(S[S >= 0])]  # neurons in slot order
+        S = np.asarray(site_alignment.neurons)
         site = vu.site(name)
         composed = np.asarray((site.V @ site.U).T)
         expected = np.zeros_like(W)
         if site_alignment.neuron_axis == "d_out":
-            expected[chosen, :] = W[chosen, :]
+            expected[S, :] = W[S, :]
             # x @ V is the selected neurons' pre-activation; U is one-hot rows.
-            assert np.allclose(np.asarray(site.V), W[chosen, :].T)
-            assert np.array_equal(np.asarray(site.U), E)
+            assert np.array_equal(np.asarray(site.V), W[S, :].T)
+            assert np.array_equal(np.asarray(site.U), np.asarray(jax.nn.one_hot(S, spec.d_out)))
         else:
-            expected[:, chosen] = W[:, chosen]
-            assert np.array_equal(np.asarray(site.V), E.T)
-            assert np.allclose(np.asarray(site.U), W[:, chosen].T)
+            expected[:, S] = W[:, S]
+            assert np.array_equal(np.asarray(site.V), np.asarray(jax.nn.one_hot(S, spec.d_in)).T)
+            assert np.array_equal(np.asarray(site.U), W[:, S].T)
         assert np.allclose(composed, expected, atol=1e-6), name
         assert np.allclose(
             np.asarray(site_weight_delta(deltas, vu, name)), W - expected, atol=1e-5
@@ -205,108 +175,60 @@ def test_neuron_aligned_init_reads_back_the_selected_neurons_and_leaves_the_rest
         norms = np.linalg.norm(np.asarray(site.V), axis=0) * np.linalg.norm(
             np.asarray(site.U), axis=1
         )
-        selected = W[chosen, :] if site_alignment.neuron_axis == "d_out" else W[:, chosen].T
+        selected = W[S, :] if site_alignment.neuron_axis == "d_out" else W[:, S].T
         assert np.allclose(norms, np.linalg.norm(selected, axis=1), atol=1e-5), name
 
 
-def test_neuron_aligned_wrap_sums_each_slots_neurons_and_pairs_slots_across_the_block():
-    """Slot i reads the SUM of its neurons' input weights and writes to all of them
-    (writer); reads all of them and writes the sum of their output weights (reader) — and
-    holds the SAME neuron group in gate, up and down (one C across the block)."""
-    model, sites, weights = _mixed_sites(down_c=4)
-    alignment = _hand_alignment(tiny_glu_cfg().n_intermediate, mode="wrap", down_c=4)
-    validate_neuron_alignment(sites, alignment)
-    groups = {name: np.asarray(a.component_of_neuron) for name, a in alignment.items()}
-    assert all(np.array_equal(g, groups["layers.0.mlp.gate_proj"]) for g in groups.values())
-    vu = init_component_stacks_neuron_aligned(sites, weights, alignment, jax.random.PRNGKey(1))
-    deltas = model.weight_deltas(vu)
-    for name, site_alignment in alignment.items():
-        spec = next(s for s in sites if s.name == name)
-        W = np.asarray(weights[name])
-        E = _selection(site_alignment, spec.C)
-        assert E.sum() == len(RANKING) and np.all(E.sum(axis=0) <= 1)  # every ranked neuron once
-        assert np.all(E.sum(axis=1) >= 1)  # no empty slot
-        site = vu.site(name)
-        if site_alignment.neuron_axis == "d_out":
-            assert np.allclose(np.asarray(site.V), (E @ W).T, atol=1e-6)
-            assert np.array_equal(np.asarray(site.U), E)
-            # Slot 0 (C=4) holds ranks 0 and 4 -> neurons 5 and 7.
-            assert np.allclose(np.asarray(site.V)[:, 0], W[5] + W[7], atol=1e-6)
-            expected = E.T @ E @ W
-        else:
-            assert np.array_equal(np.asarray(site.V), E.T)
-            assert np.allclose(np.asarray(site.U), E @ W.T, atol=1e-6)
-            assert np.allclose(np.asarray(site.U)[0], W[:, 5] + W[:, 7], atol=1e-6)
-            expected = W @ E.T @ E
-        composed = np.asarray((site.V @ site.U).T)
-        assert np.allclose(composed, expected, atol=1e-5), name
-        assert np.allclose(
-            np.asarray(site_weight_delta(deltas, vu, name)), W - composed, atol=1e-5
-        ), name
-
-
 def test_neuron_aligned_init_gives_every_other_site_the_zero_u_values_bit_for_bit():
-    _model, sites, weights = _mixed_sites(down_c=4)
+    _model, sites, weights = _mixed_sites()
+    alignment = _hand_alignment()
     key = jax.random.PRNGKey(7)
+    aligned = init_component_stacks_neuron_aligned(sites, weights, alignment, key)
     zero_u = with_silenced_u(init_component_stacks_coupled(sites, weights, key))
-    for mode in ("top", "wrap"):
-        alignment = _hand_alignment(tiny_glu_cfg().n_intermediate, mode, down_c=4)
-        aligned = init_component_stacks_neuron_aligned(sites, weights, alignment, key)
-        for spec in sites:
-            if spec.name in alignment:
-                continue
-            assert jnp.array_equal(aligned.site(spec.name).V, zero_u.site(spec.name).V), spec.name
-            assert jnp.array_equal(aligned.site(spec.name).U, zero_u.site(spec.name).U), spec.name
-            assert jnp.all(aligned.site(spec.name).U == 0.0), spec.name
+    for spec in sites:
+        if spec.name in alignment:
+            continue
+        assert jnp.array_equal(aligned.site(spec.name).V, zero_u.site(spec.name).V), spec.name
+        assert jnp.array_equal(aligned.site(spec.name).U, zero_u.site(spec.name).U), spec.name
+        assert jnp.all(aligned.site(spec.name).U == 0.0), spec.name
 
 
 def test_neuron_aligned_prefixes_nest_across_the_block_sites():
     """gate/up take the top-4, down the top-6 of ONE ranking: the writers' neurons are a
     prefix of the reader's, in the same slot order."""
-    alignment = _hand_alignment(tiny_glu_cfg().n_intermediate)
-    gate = np.asarray(alignment["layers.0.mlp.gate_proj"].component_of_neuron)
-    down = np.asarray(alignment["layers.0.mlp.down_proj"].component_of_neuron)
-    for slot in range(4):
-        assert np.flatnonzero(gate == slot).tolist() == np.flatnonzero(down == slot).tolist()
-    assert (gate >= 0).sum() == 4 and (down >= 0).sum() == 6
+    alignment = _hand_alignment()
+    gate = np.asarray(alignment["layers.0.mlp.gate_proj"].neurons)
+    down = np.asarray(alignment["layers.0.mlp.down_proj"].neurons)
+    assert np.array_equal(down[: len(gate)], gate)
+    assert set(gate) < set(down)
 
 
-def test_neuron_alignment_validation_refuses_bad_assignments():
+def test_neuron_alignment_validation_refuses_bad_indices():
     _model, sites, _weights = _mixed_sites()
-    n = tiny_glu_cfg().n_intermediate
-    good = _hand_alignment(n)
+    good = _hand_alignment()
     name = "layers.0.mlp.gate_proj"
     validate_neuron_alignment(sites, good)
-    with pytest.raises(AssertionError, match="have no neuron"):
-        bad = np.asarray(good[name].component_of_neuron).copy()
-        bad[bad == 3] = 2  # slot 3 loses its only neuron
-        validate_neuron_alignment(
-            sites, {**good, name: SiteNeuronAlignment(jnp.asarray(bad), "d_out")}
-        )
+    with pytest.raises(AssertionError, match="repeated"):
+        bad = {**good, name: SiteNeuronAlignment(jnp.asarray([1, 1, 2, 3]), "d_out")}
+        validate_neuron_alignment(sites, bad)
     with pytest.raises(AssertionError):
-        short = np.asarray(good[name].component_of_neuron)[:-1]  # wrong length
-        validate_neuron_alignment(
-            sites, {**good, name: SiteNeuronAlignment(jnp.asarray(short), "d_out")}
-        )
+        bad = {**good, name: SiteNeuronAlignment(jnp.asarray([1, 2, 3]), "d_out")}  # C=4
+        validate_neuron_alignment(sites, bad)
     with pytest.raises(AssertionError):
-        big = np.asarray(good[name].component_of_neuron).copy()
-        big[0] = 4  # slot index == C
-        validate_neuron_alignment(
-            sites, {**good, name: SiteNeuronAlignment(jnp.asarray(big), "d_out")}
-        )
+        n = tiny_glu_cfg().n_intermediate
+        bad = {**good, name: SiteNeuronAlignment(jnp.asarray([0, 1, 2, n]), "d_out")}
+        validate_neuron_alignment(sites, bad)
     with pytest.raises(AssertionError, match="undecomposed"):
         validate_neuron_alignment(sites, {"layers.5.mlp.gate_proj": good[name]})
 
 
-@pytest.mark.parametrize("mode", ["top", "wrap"])
-def test_neuron_aligned_placed_init_matches_the_eager_values(mode: str):
+def test_neuron_aligned_placed_init_matches_the_eager_values():
     from param_decomp.core.init_placed import init_component_stacks_neuron_aligned_placed
     from param_decomp.core.placement import from_config
     from param_decomp.core.sharding import single_device_mesh
 
-    down_c = 6 if mode == "top" else 4
-    model, sites, weights = _mixed_sites(down_c)
-    alignment = _hand_alignment(tiny_glu_cfg().n_intermediate, mode, down_c)
+    model, sites, weights = _mixed_sites()
+    alignment = _hand_alignment()
     mesh = single_device_mesh()
     rules = from_config("ddp", mesh, sites)
     placed = init_component_stacks_neuron_aligned_placed(

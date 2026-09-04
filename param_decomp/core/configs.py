@@ -994,13 +994,7 @@ class PlacementTableConfig(BaseConfig):
     target: TargetPlacementConfig
 
 
-WeightInit = Literal[
-    "default", "coupled", "zero_u", "neuron_aligned_targeted", "neuron_aligned_wrap"
-]
-NEURON_ALIGNED_INITS: frozenset[WeightInit] = frozenset(
-    {"neuron_aligned_targeted", "neuron_aligned_wrap"}
-)
-"""The arms that start from a harvested neuron ranking (`TargetedPDConfig.neuron_ranks`)."""
+WeightInit = Literal["default", "coupled", "zero_u", "neuron_aligned_targeted"]
 """How the subcomponent V/U masters are seeded.
 
 `default`: `V ~ N(0, d_in^-0.5)`, `U ~ N(0, C^-0.5)` — target-blind small random.
@@ -1016,10 +1010,6 @@ has a nonzero gradient from step 0 (`V`'s is zero until `U` moves off zero).
 as ONE neuron — the `i`-th of the block's neurons ranked by write energy on the target
 prompt pool (a harvested artifact, `TargetedPDConfig.neuron_ranks`); every other site
 takes the `zero_u` values. Trainable, unfrozen, C free per site.
-`neuron_aligned_wrap` (tPD only, SPEC T13): the same ranking, but EVERY neuron is assigned —
-rank `j` to subcomponent `j mod C` — so a subcomponent starts as the SUM of its ~n/C
-neurons (reads the sum of their input weights, writes to all of them) rather than one
-neuron exactly. Same artifact, same `zero_u` fallback for the other sites.
 """
 
 
@@ -1125,8 +1115,8 @@ class PDConfig(PDConfigBase):
         faith_terms = [cfg for cfg in self.loss_metrics if isinstance(cfg, FaithfulnessLossConfig)]
         assert len(faith_terms) == 1, f"need exactly one FaithfulnessLoss, got {len(faith_terms)}"
         # The ranking is a statistic of the TARGET prompt pool, which a plain run does not have.
-        assert self.weight_init not in NEURON_ALIGNED_INITS, (
-            f"weight_init: {self.weight_init} is a targeted-run (tPD) init"
+        assert self.weight_init != "neuron_aligned_targeted", (
+            "weight_init: neuron_aligned_targeted is a targeted-run (tPD) init"
         )
         return self
 
@@ -1179,10 +1169,10 @@ class TargetedPDConfig(PDConfigBase):
 
     @model_validator(mode="after")
     def validate_neuron_ranks(self) -> Self:
-        aligned = self.weight_init in NEURON_ALIGNED_INITS
+        aligned = self.weight_init == "neuron_aligned_targeted"
         assert aligned == (self.neuron_ranks is not None), (
-            "`pd.neuron_ranks` is required by, and only by, the neuron-aligned inits "
-            f"{sorted(NEURON_ALIGNED_INITS)} (weight_init={self.weight_init!r}, "
+            "`pd.neuron_ranks` is required by, and only by, "
+            f"`weight_init: neuron_aligned_targeted` (weight_init={self.weight_init!r}, "
             f"neuron_ranks={self.neuron_ranks!r})"
         )
         return self

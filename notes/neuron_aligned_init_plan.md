@@ -283,6 +283,22 @@ rewritten at init). The run therefore sets gate/up/down to the MEAN of the SOTA'
 matches for comparison. BOS arm: exclude only (moot at L18). Config/sbatch:
 `~/pd_scratch/dual_obj_jax/addsub-L18-19-neuronwrap-bosexcl.*`.
 
+### 7c. Outcome and simplification (2026-09-04)
+
+Two findings from the runs, and the code was cut back to match (Antoine's call):
+
+- **BOS in or out makes no difference.** The two top-C twins track each other at every eval
+  (step 13k: target `kl_ci_masked` 0.0036 vs 0.0036, L0 31.2 vs 31.0). The `bos` flag is
+  gone: the statistic counts every position, the artifact meta has no `bos` field.
+- **The wrapped init does not work well.** At step 500 it sits far from the target
+  (`kl_ci_masked` 0.048 vs 0.012 for top-C, CI L0 607 vs 35, non-target L0 1281 vs 12) —
+  every group-sum subcomponent starts "on" and the delta is `W − EᵀE·W`. `neuron_aligned_wrap`
+  is removed; the alignment is back to one neuron per slot (`SiteNeuronAlignment.neurons`).
+
+One init remains: `neuron_aligned_targeted`, top-C, all positions. The new artifact name is
+`addsub1-100_llama31-8b_we` (re-harvested under the simplified schema); the bos-excl/-incl
+pair is readable only by the frozen worktrees of runs 11034/11035/11052, which keep running.
+
 ## 8. First experiments (as planned)
 
 1. Harvest twice from the SOTA config: `--bos exclude` and `--bos include`. Read the two

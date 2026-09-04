@@ -18,14 +18,12 @@ from param_decomp.experiments.lm.resolved import (
 )
 from param_decomp.targets.glu_transformer import GLUDecomposedModel
 from param_decomp.targets.neuron_alignment import (
-    NeuronAlignMode,
     alignment_coverage,
     assert_neuron_ranks_provenance,
     mlp_blocks_of,
     neuron_alignment_from_ranks,
     read_neuron_ranks,
     resolve_neuron_ranks_ref,
-    wraps_per_component,
 )
 
 NEURON_ALIGNMENT_FILENAME = "neuron_alignment.json"
@@ -47,50 +45,36 @@ def load_neuron_alignment(
     pool_tokens: np.ndarray,
     data_root: Path,
     *,
-    mode: NeuronAlignMode,
     write_summary_to: Path | None,
 ) -> NeuronAlignment:
-    """A neuron-aligned run's alignment from its artifact, provenance-checked. Cheap (a
-    file read), so every entry — fresh, requeue, fine-tune — takes it; a restore simply
-    overwrites the aligned reference. `write_summary_to` (rank 0's run dir) gets
-    `neuron_alignment.json`: the artifact, the mode, each site's C, the write-energy
-    fraction its top-C covers and (`wrap`) how many neurons its fullest slot sums."""
+    """The `neuron_aligned_targeted` run's alignment from its artifact, provenance-checked.
+    Cheap (a file read), so every entry — fresh, requeue, fine-tune — takes it; a restore
+    simply overwrites the aligned reference. `write_summary_to` (rank 0's run dir) gets
+    `neuron_alignment.json`: the artifact, each site's C and the write-energy fraction it
+    covers."""
     assert built.pd.neuron_ranks is not None, "validated at parse"
     glu = model.model
     assert isinstance(glu, GLUDecomposedModel), (
-        f"a neuron-aligned init needs a transformer target with MLP blocks, got {type(glu)}"
+        f"neuron_aligned_targeted needs a transformer target with MLP blocks, got {type(glu)}"
     )
     artifact_dir = resolve_neuron_ranks_ref(built.pd.neuron_ranks, data_root)
     ranks = read_neuron_ranks(artifact_dir)
     blocks = tuple(mlp_blocks_of(glu.sites, glu.anatomy))
-    assert blocks, "neuron-aligned init: the decomposition has no MLP site to align"
+    assert blocks, "neuron_aligned_targeted: the decomposition has no MLP site to align"
     assert_neuron_ranks_provenance(ranks.meta, target_identity(built.target), pool_tokens, blocks)
-    alignment = neuron_alignment_from_ranks(ranks, glu.sites, glu.anatomy, mode)
+    alignment = neuron_alignment_from_ranks(ranks, glu.sites, glu.anatomy)
     coverage = alignment_coverage(ranks, glu.sites, glu.anatomy)
     cs = {spec.name: spec.C for spec in glu.sites if spec.name in alignment}
-    wraps = {
-        name: wraps_per_component(ranks.meta.n_neurons, cs[name]) if mode == "wrap" else 1
-        for name in alignment
-    }
     summary = {
         "artifact": str(artifact_dir),
-        "mode": mode,
         "meta": ranks.meta.model_dump(),
         "sites": {
-            name: {
-                "C": cs[name],
-                "top_c_covered_write_energy": coverage[name],
-                "neurons_per_component_max": wraps[name],
-            }
-            for name in alignment
+            name: {"C": cs[name], "covered_write_energy": coverage[name]} for name in alignment
         },
     }
     print(
-        f"neuron-aligned init ({mode}): "
-        + ", ".join(
-            f"{name} C={cs[name]} top-C covers {coverage[name]:.3f} wraps={wraps[name]}"
-            for name in alignment
-        ),
+        "neuron_aligned_targeted: "
+        + ", ".join(f"{name} C={cs[name]} covers {coverage[name]:.3f}" for name in alignment),
         flush=True,
     )
     if write_summary_to is not None:

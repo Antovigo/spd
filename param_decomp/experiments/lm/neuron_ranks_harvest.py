@@ -14,13 +14,13 @@ groups under a byte budget — the forward retains one fp32 `[B, T, n]` slot per
 block.
 
 Output: `<out_dir>/neuron_ranks.npz` (`rank_<b>` int32, `score_<b>` float32 per block) +
-`meta.json` (provenance: target, pool fingerprint, statistic, bos policy, layers).
+`meta.json` (provenance: target, pool fingerprint, statistic, layers).
 Publish the dir into the store as `<data_root>/neuron_ranks/<name>` and reference it as
 `pd.neuron_ranks: {kind: name, name: <name>}`, or point `{kind: dir, dir: <out_dir>}` at it.
 
 Run: `python -m param_decomp.experiments.lm.harvest_neuron_ranks --config <run.yaml>
---data_root <root> --out_dir <abs> --local_device_count N [--bos exclude|include]
-[--layers all|"18,19"] [--batch_size 128]`
+--data_root <root> --out_dir <abs> --local_device_count N [--layers all|"18,19"]
+[--batch_size 128]`
 """
 
 import time
@@ -46,7 +46,6 @@ from param_decomp.infra.dataset_store import read_dataset_meta, resolve_dataset_
 from param_decomp.targets.glu_transformer import GLUDecomposedModel
 from param_decomp.targets.neuron_alignment import (
     STATISTIC,
-    BosPolicy,
     NeuronRanksMeta,
     accumulate_neuron_moments,
     capture_groups,
@@ -80,7 +79,6 @@ def harvest(
     data_root: Path,
     out_dir: Path,
     local_device_count: int,
-    bos: BosPolicy = "exclude",
     layers: str | int | list[int] = "all",
     batch_size: int = 128,
     capture_budget_bytes: int = 1 << 30,
@@ -101,8 +99,6 @@ def harvest(
     tokenizer = pool_tokenizer(target, read_dataset_meta(train_dir).tokenizer_name)
     pool = build_prompt_pool(cfg.prompts, tokenizer)
     n_prompts, prompt_len = pool.tokens.shape
-    positions_counted = prompt_len - (1 if bos == "exclude" else 0)
-    assert positions_counted >= 1, (prompt_len, bos)
 
     model = build_target(target, mesh, data_root, runtime.sharding)
     glu = model.model
@@ -111,7 +107,7 @@ def harvest(
     n_neurons = int(down_column_sq_norms(glu, blocks[0]).shape[0])
     groups = capture_groups(blocks, batch_size, prompt_len, n_neurons, capture_budget_bytes)
     print(
-        f"harvest: target={target_identity(target)} pool={n_prompts}x{prompt_len} bos={bos} "
+        f"harvest: target={target_identity(target)} pool={n_prompts}x{prompt_len} "
         f"layers={blocks} n={n_neurons} batch={batch_size} groups={[len(g) for g in groups]}",
         flush=True,
     )
@@ -120,7 +116,7 @@ def harvest(
     score: dict[int, np.ndarray] = {}
     for group in groups:
         t0 = time.time()
-        step = make_moments_step(model, group, bos)
+        step = make_moments_step(model, group)
         placed = (
             (global_token_batch(rows, mesh, batch_size), jnp.asarray(mask))
             for rows, mask in pool_slices(pool.tokens, batch_size)
@@ -147,10 +143,8 @@ def harvest(
         n_prompts=int(n_prompts),
         prompt_len=int(prompt_len),
         statistic=STATISTIC,
-        bos=bos,
         layers=list(blocks),
         n_neurons=n_neurons,
-        positions_counted=positions_counted,
     )
     write_neuron_ranks(out_dir, meta, rank, score)
     print(f"wrote {out_dir} ({len(blocks)} blocks)", flush=True)

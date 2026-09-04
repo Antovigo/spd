@@ -13,7 +13,7 @@ from jax import random
 from jax.sharding import Mesh
 
 from param_decomp.core.built_run import LAUNCH_CONFIG_FILENAME
-from param_decomp.core.configs import NEURON_ALIGNED_INITS, ResumeProvenance
+from param_decomp.core.configs import ResumeProvenance
 from param_decomp.core.model import PlacedModel, Positioned
 from param_decomp.core.run import (
     MetricsSink,
@@ -139,10 +139,9 @@ def train_targeted(
             model,
             pool.tokens,
             data_root,
-            mode="wrap" if built.pd.weight_init == "neuron_aligned_wrap" else "top",
             write_summary_to=built.run.run_dir if is_main else None,
         )
-        if built.pd.weight_init in NEURON_ALIGNED_INITS
+        if built.pd.weight_init == "neuron_aligned_targeted"
         else None
     )
 
