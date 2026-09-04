@@ -48,6 +48,16 @@ def test_targeted_neuron_aligned_requires_its_artifact_and_only_then():
     )
     assert isinstance(explicit.neuron_ranks, NeuronRanksDir)
     assert TargetedPDConfig.model_validate(_TARGETED_BASE).neuron_ranks is None
+    wrap = TargetedPDConfig.model_validate(
+        {
+            **_TARGETED_BASE,
+            "weight_init": "neuron_aligned_wrap",
+            "neuron_ranks": {"kind": "name", "name": "addsub-l31-8b"},
+        }
+    )
+    assert wrap.weight_init == "neuron_aligned_wrap"
+    with pytest.raises(ValidationError, match="neuron_ranks"):
+        TargetedPDConfig.model_validate({**_TARGETED_BASE, "weight_init": "neuron_aligned_wrap"})
 
 
 def test_neuron_ranks_refs_are_flat_names_or_absolute_dirs():
@@ -70,5 +80,6 @@ def test_plain_pd_refuses_the_targeted_init():
         "batch_size": 8,
     }
     assert PDConfig.model_validate(plain).weight_init == "default"
-    with pytest.raises(ValidationError, match="targeted-run"):
-        PDConfig.model_validate({**plain, "weight_init": "neuron_aligned_targeted"})
+    for init in ("neuron_aligned_targeted", "neuron_aligned_wrap"):
+        with pytest.raises(ValidationError, match="targeted-run"):
+            PDConfig.model_validate({**plain, "weight_init": init})

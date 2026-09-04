@@ -266,6 +266,23 @@ all 32 layers, both BOS arms, ~1 min each on one L40:
   hidden-role L0 76.9 / 71.7 vs 117.6; **non-target** `kl_ci_masked` 0.0052 / 0.0051 vs 0.1248
   and non-target L0 11.8 / 6.5 vs 31.1. One eval point, not a verdict — read again at 4k/20k.
 
+### 7b. `neuron_aligned_wrap` (2026-09-04)
+
+Second arm, Antoine's ask: instead of the top-C neurons one per slot, EVERY neuron is
+assigned — rank `j` to slot `j mod C` — so a subcomponent starts as the SUM of its
+`⌈n/C⌉` ≈ 31 neurons. Same artifact, same formulas with a multi-hot `E`:
+writer `V = (E@W)ᵀ, U = E`; reader `V = Eᵀ, U = E@Wᵀ`. The composed weight is then the
+group-sum `EᵀE·W` / `W·EᵀE`, so the delta is NOT small — this is an every-neuron-touched
+start at ~31× a neuron's norm, not an exact one; worth watching the first eval and the
+uv-norm ratios.
+
+Slot `i` must hold the same neuron group in gate, up and down, which `j mod C` only gives
+when the block's MLP sites share one C — refused otherwise (C is pinned structure; not
+rewritten at init). The run therefore sets gate/up/down to the MEAN of the SOTA's
+456/456/512 → **475/475/475** (1425 MLP subcomponents vs 1424), so the subcomponent total
+matches for comparison. BOS arm: exclude only (moot at L18). Config/sbatch:
+`~/pd_scratch/dual_obj_jax/addsub-L18-19-neuronwrap-bosexcl.*`.
+
 ## 8. First experiments (as planned)
 
 1. Harvest twice from the SOTA config: `--bos exclude` and `--bos include`. Read the two

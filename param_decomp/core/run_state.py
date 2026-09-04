@@ -260,9 +260,11 @@ def init_decomposition(
             components = init_component_stacks_coupled_placed(
                 model, init_key, rules, zero_u=weight_init == "zero_u"
             )
-        case "neuron_aligned_targeted":
+        case "neuron_aligned_targeted" | "neuron_aligned_wrap":
+            # The exact/wrapped distinction is already encoded in the alignment's
+            # per-neuron assignment (built by the composition root from the artifact).
             assert neuron_alignment is not None, (
-                "weight_init: neuron_aligned_targeted needs the harvested neuron alignment"
+                f"weight_init: {weight_init} needs the harvested neuron alignment"
             )
             components = init_component_stacks_neuron_aligned_placed(
                 model, init_key, rules, neuron_alignment

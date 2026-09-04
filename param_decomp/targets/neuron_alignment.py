@@ -316,7 +316,9 @@ def read_neuron_ranks(artifact_dir: Path) -> NeuronRanks:
         score = {block: np.asarray(arrays[f"score_{block}"]) for block in meta.layers}
     for block in meta.layers:
         assert rank[block].shape == score[block].shape == (meta.n_neurons,), block
-        assert len(np.unique(rank[block])) == meta.n_neurons, f"block {block}: not a permutation"
+        assert np.array_equal(np.sort(rank[block]), np.arange(meta.n_neurons)), (
+            f"block {block}: rank is not a permutation of 0..{meta.n_neurons - 1}"
+        )
     return NeuronRanks(meta, rank, score)
 
 
@@ -342,23 +344,64 @@ def assert_neuron_ranks_provenance(
 # ----------------------------- ranking → alignment -----------------------------
 
 
+NeuronAlignMode = Literal["top", "wrap"]
+"""`top`: the top-C neurons, one per subcomponent (`neuron_aligned_targeted`); `wrap`: every
+neuron, rank `j` to subcomponent `j mod C` (`neuron_aligned_wrap`)."""
+
+
+def component_assignment(rank: np.ndarray, C: int, mode: NeuronAlignMode) -> np.ndarray:
+    """`int32[n]`: the subcomponent each neuron goes to (`-1` = unassigned), from the
+    block's ranking `rank` (neuron indices by descending score)."""
+    n = rank.shape[0]
+    assert C >= 1 and n >= C, (C, n)
+    # A permutation of 0..n-1, checked here rather than trusted from the artifact: a
+    # negative index would silently fancy-index from the end.
+    assert np.array_equal(np.sort(rank), np.arange(n)), "rank is not a permutation of 0..n-1"
+    assignment = np.full(n, -1, dtype=np.int32)
+    positions = np.arange(n, dtype=np.int32)
+    match mode:
+        case "top":
+            assignment[rank[:C]] = positions[:C]
+        case "wrap":
+            assignment[rank] = positions % C
+    return assignment
+
+
+def wraps_per_component(n_neurons: int, C: int) -> int:
+    """How many neurons the fullest subcomponent sums under `wrap`: `ceil(n / C)`."""
+    return -(-n_neurons // C)
+
+
 def neuron_alignment_from_ranks(
-    ranks: NeuronRanks, sites: tuple[SiteSpec, ...], anatomy: Anatomy
+    ranks: NeuronRanks, sites: tuple[SiteSpec, ...], anatomy: Anatomy, mode: NeuronAlignMode
 ) -> NeuronAlignment:
-    """Every MLP site's top-C: writers select on `d_out`, the reader on `d_in`; slot `i`
-    is the block's `i`-th ranked neuron. Attention sites are absent (they take `zero_u`)."""
+    """Every MLP site's assignment from its block's ranking: writers on `d_out`, the reader
+    on `d_in`; slot `i` is the block's `i`-th ranked neuron (`top`) or the sum of ranks
+    `i, i+C, i+2C, …` (`wrap`). Attention sites are absent (they take `zero_u`)."""
     by_name = {spec.name: spec for spec in sites}
     alignment: NeuronAlignment = {}
     for block, block_sites in mlp_blocks_of(sites, anatomy).items():
         rank = ranks.rank[block]
+        if mode == "wrap":
+            # Slot `i` must hold the SAME neuron group in gate, up and down (the group's
+            # gate·up product is what down reads), and `j mod C` only agrees across the
+            # block's sites when they share one C. Refused rather than silently rewritten:
+            # C is a structural, pinned property (checkpoints, placement, the CI heads) —
+            # author the block's MLP sites at the minimum C instead.
+            cs = {name: by_name[name].C for name in block_sites.names}
+            assert len(set(cs.values())) == 1, (
+                f"neuron_aligned_wrap pairs slot i across a block's MLP sites, so they need "
+                f"ONE C; block {block} has {cs} — set them all to the minimum"
+            )
         for name in block_sites.names:
             spec = by_name[name]
             axis: Literal["d_out", "d_in"] = "d_out" if name in block_sites.writers else "d_in"
             n = spec.d_out if axis == "d_out" else spec.d_in
             assert n == rank.shape[0], (name, n, rank.shape)
-            assert n >= spec.C, (name, spec.C, n)
-            neurons: Int[Array, " C"] = jnp.asarray(rank[: spec.C], dtype=jnp.int32)
-            alignment[name] = SiteNeuronAlignment(neurons=neurons, neuron_axis=axis)
+            assignment: Int[Array, " n"] = jnp.asarray(
+                component_assignment(rank, spec.C, mode), dtype=jnp.int32
+            )
+            alignment[name] = SiteNeuronAlignment(component_of_neuron=assignment, neuron_axis=axis)
     return alignment
 
 

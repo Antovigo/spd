@@ -20,12 +20,14 @@ from param_decomp.targets.glu_transformer import (
 )
 from param_decomp.targets.neuron_alignment import (
     BosPolicy,
+    NeuronAlignMode,
     NeuronRanks,
     NeuronRanksMeta,
     accumulate_neuron_moments,
     alignment_coverage,
     assert_neuron_ranks_provenance,
     capture_groups,
+    component_assignment,
     down_column_sq_norms,
     frozen_mlp_down_weight,
     make_moments_step,
@@ -35,6 +37,7 @@ from param_decomp.targets.neuron_alignment import (
     pool_tokens_sha256,
     rank_neurons,
     read_neuron_ranks,
+    wraps_per_component,
     write_energy,
     write_neuron_ranks,
 )
@@ -175,12 +178,14 @@ def test_artifact_round_trip_and_provenance_refusals(tmp_path: Path):
         assert_neuron_ranks_provenance(ranks.meta, "tiny", tokens, (1, 2))
 
 
-def test_alignment_from_ranks_takes_prefixes_per_site_axis():
+@pytest.mark.parametrize("mode", ["top", "wrap"])
+def test_alignment_from_ranks_per_site_axis(mode: NeuronAlignMode):
+    down_c = 6 if mode == "top" else 4  # wrap pairs slots across the block: one C
     cfg, sites, _model_ = _model(
         (
             SiteC(site_name(1, "gate"), 4),
             SiteC(site_name(1, "up"), 4),
-            SiteC(site_name(1, "down"), 6),
+            SiteC(site_name(1, "down"), down_c),
             SiteC(site_name(2, "q"), 3),
             SiteC(site_name(3, "down"), 5),
         )
@@ -192,17 +197,55 @@ def test_alignment_from_ranks_takes_prefixes_per_site_axis():
         target="tiny", tokens_sha256="0" * 64, n_prompts=1, prompt_len=2, statistic="write_energy",
         bos="exclude", layers=[1, 3], n_neurons=n, positions_counted=1,
     )  # fmt: skip
-    alignment = neuron_alignment_from_ranks(NeuronRanks(meta, rank, score), sites, GLU_ANATOMY)
+    alignment = neuron_alignment_from_ranks(
+        NeuronRanks(meta, rank, score), sites, GLU_ANATOMY, mode
+    )
     assert set(alignment) == {
-        site_name(1, "gate"),
-        site_name(1, "up"),
-        site_name(1, "down"),
-        site_name(3, "down"),
-    }
+        site_name(1, "gate"), site_name(1, "up"), site_name(1, "down"), site_name(3, "down")
+    }  # fmt: skip
     gate, down = alignment[site_name(1, "gate")], alignment[site_name(1, "down")]
     assert gate.neuron_axis == "d_out" and down.neuron_axis == "d_in"
-    assert np.array_equal(np.asarray(gate.neurons), rank[1][:4])
-    assert np.array_equal(np.asarray(down.neurons), rank[1][:6])
-    assert np.array_equal(np.asarray(alignment[site_name(3, "down")].neurons), rank[3][:5])
+    g, d = np.asarray(gate.component_of_neuron), np.asarray(down.component_of_neuron)
+    assert g.shape == d.shape == (n,)
+    # rank j is neuron n-1-j at block 1; slot i holds rank i (top) or ranks i, i+C, ... (wrap)
+    if mode == "top":
+        assert (g >= 0).sum() == 4 and (d >= 0).sum() == 6
+        assert g[rank[1][0]] == 0 and g[rank[1][3]] == 3 and d[rank[1][5]] == 5
+        assert np.array_equal(g[rank[1][:4]], d[rank[1][:4]])  # nested prefix
+    else:
+        assert (g >= 0).all() and (d >= 0).all()
+        assert np.array_equal(g[rank[1]], np.arange(n) % 4)
+        assert np.array_equal(g, d)  # the same neuron group in every slot across the block
+        assert (g == 0).sum() == wraps_per_component(n, 4) == -(-n // 4)
     coverage = alignment_coverage(NeuronRanks(meta, rank, score), sites, GLU_ANATOMY)
-    assert coverage[site_name(1, "down")] > coverage[site_name(1, "gate")]
+    assert coverage[site_name(3, "down")] > coverage[site_name(1, "gate")]
+
+
+def test_wrap_refuses_unequal_cs_within_a_block():
+    cfg, sites, _model_ = _model(
+        (
+            SiteC(site_name(1, "gate"), 4),
+            SiteC(site_name(1, "up"), 4),
+            SiteC(site_name(1, "down"), 6),
+        )
+    )
+    n = cfg.n_intermediate
+    rank = {1: np.arange(n, dtype=np.int32)}
+    score = {1: np.linspace(1.0, 0.0, n, dtype=np.float32)}
+    meta = NeuronRanksMeta(
+        target="tiny", tokens_sha256="0" * 64, n_prompts=1, prompt_len=2, statistic="write_energy",
+        bos="exclude", layers=[1], n_neurons=n, positions_counted=1,
+    )  # fmt: skip
+    with pytest.raises(AssertionError, match="ONE C"):
+        neuron_alignment_from_ranks(NeuronRanks(meta, rank, score), sites, GLU_ANATOMY, "wrap")
+
+
+def test_component_assignment_wrap_is_a_permutation_by_rank():
+    rank = np.array([3, 0, 2, 1], dtype=np.int32)
+    with pytest.raises(AssertionError, match="permutation"):
+        component_assignment(np.array([3, 0, 2, -1], dtype=np.int32), 2, "top")
+    with pytest.raises(AssertionError, match="permutation"):
+        component_assignment(np.array([3, 0, 2, 2], dtype=np.int32), 2, "wrap")
+    assert component_assignment(rank, 3, "wrap").tolist() == [1, 0, 2, 0]  # neuron -> slot
+    assert component_assignment(rank, 3, "top").tolist() == [1, -1, 2, 0]
+    assert component_assignment(rank, 4, "wrap").tolist() == [1, 3, 2, 0]
