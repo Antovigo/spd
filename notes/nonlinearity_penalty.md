@@ -168,6 +168,11 @@ at their original matrices, so each panel is a self-contained experiment.
 Four blocks, four times the same picture: **penalty off flattens out, penalty on keeps
 climbing.** No block is doing something the others aren't.
 
+![per-block, task distribution](plots/blocks_4l/02_per_block_target.png)
+
+On the task distribution the two runs sit on top of each other in every block — the same
+on/off-distribution split as the single-block sweep, now four times over.
+
 ![per-block cost](plots/blocks_4l/03_per_block_cost.png)
 
 As a cost ratio the four curves nearly overlap — 2.5×, 2.5×, 2.8×, 3.0× at 80 steps — and
