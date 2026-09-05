@@ -29,6 +29,7 @@ from param_decomp.experiments.lm.eval_config import ABGridDatasetConfig
 
 FAST_METRICS = {
     "CEandKLLossesConfig",
+    "CIAnomalyConfig",
     "CIMaskedAttnPatternsReconLossConfig",
     "CIMaskedReconLossConfig",
     "CI_L0Config",

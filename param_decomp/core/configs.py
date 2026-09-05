@@ -722,6 +722,30 @@ reconstruction objective that happens to be measured at internal activations rat
 the output, so nothing about the mask-source algebra changes."""
 
 
+class CIAnomalyPenaltyConfig(BaseConfig):
+    """The CI-ordering ("magenta") penalty (SPEC T14): on the TARGET stream, push a
+    subcomponent's OUTPUT-head CI down wherever it exceeds its HIDDEN-head CI.
+
+    The hidden points sit upstream of the model output, so a subcomponent that matters for
+    the output should matter for some hidden activation too: the expected ordering is
+    `hidden >= output`, and `output > hidden` is the anomaly this penalizes. Per CI value
+    `psi(relu(upper_output - stop_grad(upper_hidden)))`, reduced exactly like
+    importance-minimality (mean over the leading axes, summed over subcomponents and sites),
+    so `coeff` is on the same scale as `impmin_coeff`. Exactly zero — value AND gradient —
+    wherever the ordering already holds; the hidden head is never moved by it."""
+
+    coeff: NonNegativeFloat | ScheduleConfig = Field(
+        ..., description="Strength; comparable to the target pass's imp-min coefficient."
+    )
+    form: Literal["linear", "squared"] = Field(
+        default="linear",
+        description=(
+            "`linear`: `psi(g) = g`, a uniform push wherever the ordering is violated. "
+            "`squared`: `psi(g) = g^2`, smooth at equality, vanishing for small violations."
+        ),
+    )
+
+
 class HiddenPassConfig(BaseConfig):
     """The hidden role's surface (SPEC T12): a second reconstruction objective, scored at named
     internal activations instead of the model output, whose masks come from the CI fn's SECOND
@@ -756,6 +780,15 @@ class HiddenPassConfig(BaseConfig):
     )
     recon: list[Annotated[HiddenReconLossMetricConfig, Discriminator("type")]] = Field(
         ..., min_length=1
+    )
+    ci_anomaly_penalty: CIAnomalyPenaltyConfig | None = Field(
+        default=None,
+        description=(
+            "Optional CI-ordering penalty (SPEC T14) pushing the target-stream OUTPUT-head "
+            "CI down wherever it exceeds the hidden-head CI. Scored in the target-output "
+            "pass; authored here because it relates the two heads and needs this pass to "
+            "exist. None (the default) is byte-inert."
+        ),
     )
 
     @model_validator(mode="after")

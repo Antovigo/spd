@@ -54,6 +54,7 @@ from param_decomp.experiments.lm.arithmetic_eval_operation import make_arithmeti
 from param_decomp.experiments.lm.attn_patterns_eval import attn_output_key_by_site
 from param_decomp.experiments.lm.diagnostic_eval_operations import (
     make_attention_operation,
+    make_ci_anomaly_operation,
     make_nonlinearity_operation,
     make_permutation_operation,
     make_site_figures_operation,
@@ -64,6 +65,7 @@ from param_decomp.experiments.lm.eval_config import (
     ABGridDatasetConfig,
     ArithmeticCIGridConfig,
     CEandKLLossesConfig,
+    CIAnomalyConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
     TwoStreamCIMeanPerComponentConfig,
@@ -302,6 +304,15 @@ def make_lm_evaluation(
                 )
             case TwoStreamCIMeanPerComponentConfig():
                 return (make_two_stream_ci_mean_operation(schedule, compiler_options, renderer),)
+            case CIAnomalyConfig():
+                assert built.ci_fn.dual, (
+                    "CIAnomaly compares the output head against the hidden head; a single-role "
+                    "run has one head (set `decomposition.ci.dual`)"
+                )
+                return tuple(
+                    make_ci_anomaly_operation(schedule, stream, compiler_options)
+                    for stream in data_streams
+                )
             case WeightMagnitudeConfig():
                 return (make_weight_magnitude_operation(schedule, renderer),)
 

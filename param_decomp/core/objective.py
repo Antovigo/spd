@@ -19,6 +19,7 @@ from param_decomp.core.configs import (
     AllRoutingConfig,
     AnyLossMetricConfig,
     AnyReconLossMetricConfig,
+    CIAnomalyPenaltyConfig,
     CIMaskedReconLossConfig,
     CIMaskedReconSubsetLossConfig,
     FaithfulnessLossConfig,
@@ -41,7 +42,7 @@ from param_decomp.core.configs import (
     UnmaskedNoDeltaReconLossConfig,
     UnmaskedReconLossConfig,
 )
-from param_decomp.core.losses import coeff_at, nonlinearity_loss, scheduled_value_at
+from param_decomp.core.losses import CIAnomalyForm, coeff_at, nonlinearity_loss, scheduled_value_at
 from param_decomp.core.nonlinearity import NonlinearityPartition, NonlinearityUnitKind
 from param_decomp.core.recon import (
     AnyReconLossTerm,
@@ -79,6 +80,22 @@ class NonlinearityTerm:
     name: str
     coeff: LossCoeff
     cfg: NonlinearityLocalityLossConfig
+
+
+@dataclass(frozen=True)
+class CIAnomalyTerm:
+    """The CI-ordering penalty (SPEC T14): `Σ psi(relu(output_ci − sg(hidden_ci)))` on the
+    target stream. Relates the two CI heads, so — like the nonlinearity prior — it belongs to
+    no single pass's grid; it is scored once, inside the target-OUTPUT pass, whose head it
+    moves."""
+
+    name: str
+    coeff: LossCoeff
+    form: CIAnomalyForm
+
+    @staticmethod
+    def of(cfg: CIAnomalyPenaltyConfig) -> "CIAnomalyTerm":
+        return CIAnomalyTerm(name="CIAnomalyPenalty", coeff=cfg.coeff, form=cfg.form)
 
 
 @dataclass(frozen=True)
@@ -224,7 +241,15 @@ class TargetedObjective:
     of any pass: it reads `U` alone — no CI, no activations, no stream — so it is scored
     once per step and added once to the total, whatever the pass count."""
 
+    ci_anomaly: CIAnomalyTerm | None = None
+    """The optional CI-ordering penalty (SPEC T14). Reads BOTH target-stream CI heads, so it
+    requires the hidden pass; scored once per step in the target-output pass."""
+
     def __post_init__(self) -> None:
+        assert self.ci_anomaly is None or self.hidden is not None, (
+            "the CI-ordering penalty compares the output head against the hidden head, so it "
+            "needs a hidden pass (SPEC T14)"
+        )
         assert self.nontarget_hidden is None or self.hidden is not None, (
             "a non-target hidden pass needs the target-stream hidden pass, whose `points` it "
             "measures at (SPEC T12)"
@@ -397,6 +422,7 @@ def build_targeted_objective(
 
     hidden_pass = None
     nontarget_hidden_pass = None
+    ci_anomaly = None
     if hidden is not None:
         # The hidden pass's terms go through the SAME walk as the target pass's: a hidden recon
         # term is an ordinary recon term whose comparison happens to be internal activations,
@@ -416,6 +442,8 @@ def build_targeted_objective(
         hidden_pass = HiddenPass(
             recon=h_recon, impmin_coeff=hidden.impmin_coeff, points=hidden.points
         )
+        if hidden.ci_anomaly_penalty is not None:
+            ci_anomaly = CIAnomalyTerm.of(hidden.ci_anomaly_penalty)
         if nontarget.hidden is not None:
             nontarget_hidden_pass = HiddenPass(
                 recon=build_nontarget_hidden_terms(nontarget.hidden.recon, site_names),
@@ -434,6 +462,7 @@ def build_targeted_objective(
         hidden=hidden_pass,
         nontarget_hidden=nontarget_hidden_pass,
         nonlinearity=nonlinearity,
+        ci_anomaly=ci_anomaly,
     )
 
 

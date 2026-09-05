@@ -21,6 +21,7 @@ from jaxtyping import Array
 from param_decomp.core.ci_fn import LayerwiseMLPCIArch, LayerwiseMLPCIFn, build_ci_fn
 from param_decomp.core.components import SiteC, init_component_stacks
 from param_decomp.core.configs import (
+    CIAnomalyPenaltyConfig,
     HiddenPassConfig,
     ImportanceMinimalityLossConfig,
     NonlinearityLocalityLossConfig,
@@ -29,6 +30,7 @@ from param_decomp.core.configs import (
     StochasticReconLossConfig,
     TargetedLossMetricConfig,
 )
+from param_decomp.core.losses import CIAnomalyForm, ci_anomaly_penalty
 from param_decomp.core.model import PlacedModel
 from param_decomp.core.objective import build_targeted_objective
 from param_decomp.core.schedule import ScheduleConfig
@@ -71,13 +73,16 @@ def _nonlinearity_cfg(coeff: float = 0.25) -> NonlinearityLocalityLossConfig:
     )
 
 
-def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
+def _hidden(
+    ci_anomaly: CIAnomalyPenaltyConfig | None = None,
+) -> tuple[HiddenPassConfig, NontargetConfig]:
     hidden = HiddenPassConfig(
         points=HIDDEN_POINTS,
         impmin_coeff=5e-3,
         # An explicit name: the identity is unique across passes because both this and the
         # target pass would otherwise default to the same type literal.
         recon=[StochasticReconLossConfig(coeff=2.0, name="HiddenStochasticRecon")],
+        ci_anomaly_penalty=ci_anomaly,
     )
     nontarget = NontargetConfig(
         batch_size=32,
@@ -90,7 +95,13 @@ def _hidden() -> tuple[HiddenPassConfig, NontargetConfig]:
     return hidden, nontarget
 
 
-def _setup(*, dual: bool, sequential: bool, nonlinearity_coeff: float | None = None):
+def _setup(
+    *,
+    dual: bool,
+    sequential: bool,
+    nonlinearity_coeff: float | None = None,
+    ci_anomaly: CIAnomalyPenaltyConfig | None = None,
+):
     cfg = TMSConfig(n_features=5, n_hidden=2)
     sites = site_specs(cfg, (SiteC("linear1", 8), SiteC("linear2", 6)))
     target = init_tms_target(cfg, jax.random.PRNGKey(0))
@@ -119,8 +130,9 @@ def _setup(*, dual: bool, sequential: bool, nonlinearity_coeff: float | None = N
         ),
     )
     if dual:
-        hidden, nontarget = _hidden()
+        hidden, nontarget = _hidden(ci_anomaly)
     else:
+        assert ci_anomaly is None
         hidden, nontarget = (
             None,
             NontargetConfig(
@@ -344,4 +356,77 @@ def test_a_hidden_pass_cannot_spell_the_nonlinearity_prior() -> None:
             # The type error IS the claim: the union has no nonlinearity member, so this
             # is unrepresentable statically as well as at parse.
             recon=[*hidden.recon, _nonlinearity_cfg()],  # pyright: ignore[reportArgumentType]
+        )
+
+
+# ───────────────────────── T14: the CI-ordering ("magenta") penalty ─────────────────────────
+
+
+def test_ci_anomaly_penalty_is_one_sided_and_moves_only_the_output_head() -> None:
+    """Zero in value and gradient wherever `output <= hidden`; a push on the output side
+    only where it exceeds the hidden side; the hidden side is stop-gradient."""
+    o = {"s": jnp.array([[0.2, 0.9, 1.0, 0.5]], jnp.float32)}
+    h = {"s": jnp.array([[0.5, 0.4, 1.0, 0.0]], jnp.float32)}
+    gaps = np.array([0.0, 0.5, 0.0, 0.5])
+
+    linear, (g_o, g_h) = jax.value_and_grad(
+        lambda o, h: ci_anomaly_penalty(o, h, "linear"), argnums=(0, 1)
+    )(o, h)
+    np.testing.assert_allclose(float(linear), gaps.sum(), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(g_o["s"])[0], (gaps > 0).astype(np.float32))
+    np.testing.assert_array_equal(np.asarray(g_h["s"]), 0.0)
+
+    squared, (g_o, g_h) = jax.value_and_grad(
+        lambda o, h: ci_anomaly_penalty(o, h, "squared"), argnums=(0, 1)
+    )(o, h)
+    np.testing.assert_allclose(float(squared), (gaps**2).sum(), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(g_o["s"])[0], 2 * gaps)
+    np.testing.assert_array_equal(np.asarray(g_h["s"]), 0.0)
+
+    # Reduction matches imp-min's activity term: mean over leading axes, SUM over c and sites.
+    two_sites = {"a": o["s"], "b": o["s"]}
+    two_ref = {"a": h["s"], "b": h["s"]}
+    np.testing.assert_allclose(
+        float(ci_anomaly_penalty(two_sites, two_ref, "linear")), 2 * gaps.sum(), rtol=1e-6
+    )
+
+
+@pytest.mark.parametrize("form", ["linear", "squared"])
+def test_ci_anomaly_penalty_is_reported_and_enters_the_total(form: CIAnomalyForm) -> None:
+    cfg, state, step = _setup(
+        dual=True, sequential=True, ci_anomaly=CIAnomalyPenaltyConfig(coeff=0.5, form=form)
+    )
+    target_batch, broad = _batches(cfg)
+    _, metrics = step(_model_of(), state, target_batch, broad, jax.random.PRNGKey(7))
+    assert "loss/CIAnomalyPenalty" in metrics
+    assert float(metrics["loss/CIAnomalyPenalty"]) >= 0.0
+    # Only the target-output pass scores it: no stream / role-prefixed twin.
+    assert not any(k.endswith("CIAnomalyPenalty") and k != "loss/CIAnomalyPenalty" for k in metrics)
+
+    _, state0, step0 = _setup(dual=True, sequential=True)
+    _, base = step0(_model_of(), state0, target_batch, broad, jax.random.PRNGKey(7))
+    assert "loss/CIAnomalyPenalty" not in base
+    np.testing.assert_allclose(
+        float(metrics["total"]) - float(base["total"]),
+        0.5 * float(metrics["loss/CIAnomalyPenalty"]),
+        rtol=1e-4,
+        atol=1e-6,
+    )
+
+
+def test_ci_anomaly_penalty_needs_a_hidden_pass() -> None:
+    from param_decomp.core.objective import CIAnomalyTerm, TargetedObjective
+
+    objective = build_targeted_objective(
+        _loss_metrics(),
+        NontargetConfig(
+            batch_size=32, impmin_coeff=6e-3, recon=[StochasticReconLossConfig(coeff=1.0)]
+        ),
+        ("linear1", "linear2"),
+    )
+    with pytest.raises(AssertionError, match="needs a hidden pass"):
+        TargetedObjective(
+            target=objective.target,
+            nontarget=objective.nontarget,
+            ci_anomaly=CIAnomalyTerm(name="CIAnomalyPenalty", coeff=1.0, form="linear"),
         )

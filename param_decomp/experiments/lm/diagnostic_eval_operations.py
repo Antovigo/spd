@@ -10,11 +10,13 @@ the trained V/U alone and is a pass-level operation.
 from collections.abc import Callable, Mapping
 from functools import partial
 
+import einops
 import jax
+import jax.numpy as jnp
 import numpy as np
 from jaxtyping import PRNGKeyArray
 
-from param_decomp.core.ci_fn import CIRole
+from param_decomp.core.ci_fn import CIRole, DualCI
 from param_decomp.core.configs import (
     CIHistogramsConfig,
     CIMeanPerComponentConfig,
@@ -24,6 +26,7 @@ from param_decomp.core.configs import (
     UVPlotsConfig,
 )
 from param_decomp.core.eval_schedule import EvalSchedule
+from param_decomp.core.jit_util import filter_jit
 from param_decomp.core.metrics import LogRecord
 from param_decomp.core.model import PlacedModel
 from param_decomp.core.nonlinearity import NonlinearityPartition
@@ -280,6 +283,67 @@ def make_two_stream_ci_mean_operation(
             )
         )
         return {}
+
+    return batched_operation(schedule, init, update, finish)
+
+
+def _ci_anomaly_sums(ci: DualCI) -> dict[str, jax.Array]:
+    """One batch's CI-ordering anomaly statistics (SPEC T14) off both heads' `upper`
+    squashings — the training penalty's own view. `violating_*` are raw counts, ratioed at
+    finish so batches of different size pool exactly."""
+    sums: dict[str, jax.Array] = {}
+    linear = jnp.zeros((), jnp.float32)
+    squared = jnp.zeros((), jnp.float32)
+    violating = jnp.zeros((), jnp.float32)
+    count = jnp.zeros((), jnp.float32)
+    for site, o in ci.output.upper.items():
+        h = ci.hidden.upper[site]
+        gap = jax.nn.relu(o.astype(jnp.float32) - h.astype(jnp.float32))
+        site_linear = jnp.sum(einops.reduce(gap, "... c -> c", "mean"))
+        sums[f"ci_anomaly/linear/{site}"] = site_linear
+        linear = linear + site_linear
+        squared = squared + jnp.sum(einops.reduce(gap * gap, "... c -> c", "mean"))
+        violating = violating + jnp.sum(gap > 0)
+        count = count + gap.size
+    sums["ci_anomaly/linear"] = linear
+    sums["ci_anomaly/squared"] = squared
+    sums["ci_anomaly/violating_count"] = violating
+    sums["ci_anomaly/value_count"] = count
+    return sums
+
+
+def make_ci_anomaly_operation(
+    schedule: EvalSchedule,
+    stream: Stream,
+    compiler_options: dict[str, bool | int | str],
+) -> BatchedOperation[LMEvalPass, LMBatchContext]:
+    """`CIAnomaly` on one stream: the T14 penalty's two forms and the violating share,
+    averaged over the pass's batches. Reads the context's dual envelope directly — both
+    heads at once — so it takes no CI role."""
+    step = filter_jit(_ci_anomaly_sums, compiler_options=compiler_options)
+
+    def init() -> tuple[int, dict[str, jax.Array]]:
+        return 0, {}
+
+    def update(
+        acc: tuple[int, dict[str, jax.Array]], context: LMBatchContext
+    ) -> tuple[int, dict[str, jax.Array]]:
+        if context.stream != stream:
+            return acc
+        n, sums = acc
+        assert isinstance(context.ci, DualCI), "CIAnomaly needs a dual CI fn"
+        values = step(context.ci)
+        return n + 1, {k: sums.get(k, jnp.zeros(())) + v for k, v in values.items()}
+
+    def finish(eval_pass: LMEvalPass, acc: tuple[int, dict[str, jax.Array]]) -> LogRecord:
+        n, sums = acc
+        assert n > 0, f"CIAnomaly saw no {stream} batch"
+        prefix = stream_log_prefix(stream, eval_pass.targeted)
+        violating = float(sums.pop("ci_anomaly/violating_count"))
+        total = float(sums.pop("ci_anomaly/value_count"))
+        record: LogRecord = {f"{prefix}{k}": float(v) / n for k, v in sums.items()}
+        record[f"{prefix}ci_anomaly/violating_fraction"] = violating / total
+        return record
 
     return batched_operation(schedule, init, update, finish)
 

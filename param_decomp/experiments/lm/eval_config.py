@@ -101,6 +101,21 @@ class ABGridDatasetConfig(BaseConfig):
     sharding pad."""
 
 
+class CIAnomalyConfig(BaseConfig):
+    """The CI-ordering anomaly (SPEC T14) MEASURED, per stream, on a dual run: how much the
+    OUTPUT head's CI exceeds the HIDDEN head's, over every (batch, position, subcomponent).
+
+    Emits `ci_anomaly/linear` and `ci_anomaly/squared` — the two training-penalty forms, at
+    the training reduction (mean over leading axes, summed over subcomponents and sites) —
+    plus `ci_anomaly/linear/<site>` per site and `ci_anomaly/violating_fraction`, the share
+    of CI values with `output > hidden`. Reads both heads, so it carries no role segment;
+    the target pool logs bare, the broad corpus under `nontarget_data/`. Refuses on a
+    single-role run, which has nothing to compare."""
+
+    slow: ClassVar[bool] = False
+    type: Literal["CIAnomaly"] = "CIAnomaly"
+
+
 class TwoStreamCIMeanPerComponentConfig(BaseConfig):
     """Both streams' mean CI per component on ONE axis per site, ordered by descending
     TARGET mean and coloured by stream.

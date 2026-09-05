@@ -478,6 +478,33 @@ def importance_minimality_terms(
     )
 
 
+CIAnomalyForm = Literal["linear", "squared"]
+
+
+def ci_anomaly_penalty(
+    output_upper: Mapping[str, Float[Array, "*leading _"]],
+    hidden_upper: Mapping[str, Float[Array, "*leading _"]],
+    form: CIAnomalyForm,
+) -> Float[Array, ""]:
+    """The CI-ordering penalty (SPEC T14): `Σ_s Σ_c mean_{b,t} psi(relu(o − sg(h)))` with `o`
+    the output head's `upper` CI and `h` the hidden head's, `psi` identity or square.
+
+    Same reduction as imp-min's activity term so the coefficient shares its scale. The
+    hidden side is stop-gradient: the penalty lowers the output CI, never raises the hidden
+    one. Zero in value and gradient wherever `o <= h`."""
+    assert output_upper.keys() == hidden_upper.keys(), (
+        sorted(output_upper),
+        sorted(hidden_upper),
+    )
+    total = jnp.zeros((), jnp.float32)
+    for name, o in output_upper.items():
+        h = jax.lax.stop_gradient(hidden_upper[name])
+        gap = jax.nn.relu(o.astype(jnp.float32) - h.astype(jnp.float32))
+        psi = gap if form == "linear" else gap * gap
+        total = total + jnp.sum(einops.reduce(psi, "... c -> c", "mean"))
+    return total
+
+
 def per_component_frequencies(
     ci_upper: dict[str, Float[Array, "*leading _"]],
     gamma: Array,

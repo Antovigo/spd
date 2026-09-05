@@ -136,6 +136,7 @@ The eval pass is **authored-only**: exactly the metrics listed in `eval.metrics`
 | `CIMeanPerComponent` | Sorted mean-CI-per-component spectrum (linear + log) | Sharp alive/dead cutoff ≈ true component count → calibrates `C` (see the C table above). No values near 1 → imp-min coeff too high. |
 | `ComponentActivationDensity` | Per-layer histogram of each component's firing density | Alive-vs-dead split; a smear with no bimodality = components aren't specializing. |
 | `CIHistograms` | Per-layer histograms of CI values (lower-leaky + pre-sigmoid) | Want mass piled at 0 and near 1; everything pinned strictly below 1 = CI collapse (coeff too high). |
+| `CIAnomaly` (dual runs only) | Per stream under `eval/ci_anomaly/` (`eval/nontarget_data/ci_anomaly/` for the broad corpus): `linear`, `squared` (the SPEC T14 penalty forms, training reduction), `linear/<site>`, and `violating_fraction` — the share of CI values where the OUTPUT head exceeds the HIDDEN head. | The expected ordering is hidden ≥ output (the hidden points are upstream of the output). A non-trivial `violating_fraction` or a `linear` value comparable to imp-min's activity marks components important for the output but not for the hidden activations; `pd.hidden.ci_anomaly_penalty` trains against it on the target stream. |
 
 Check every metric above and record the anomalies you find. If one shows the run is broken, launch another sweep that tests a fix rather than stopping at the breakage alone.
 

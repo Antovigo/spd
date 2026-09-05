@@ -65,6 +65,7 @@ from param_decomp.core.losses import (
     FrequencyTerm,
     ReconstructionLoss,
     activity_sum,
+    ci_anomaly_penalty,
     coeff_at,
     imp_min_terms,
     mean_reconstruction_losses,
@@ -1433,6 +1434,9 @@ class _PassAux(NamedTuple):
     imp_activity: Array
     imp_freq: Array
     breakdowns: tuple[ReconstructionLoss, ...]
+    ci_anomaly: Array | None = None
+    """The unweighted CI-ordering penalty (SPEC T14); set on the target-output pass of a run
+    that authors it, `None` everywhere else."""
 
 
 @dataclass(frozen=True)
@@ -1640,6 +1644,9 @@ def make_targeted_train_step[PreparedT](
         coeff_schedules[f"{imp_name}/frequency"] = freq_role.coeff
     if nonlinearity is not None:
         coeff_schedules[nonlinearity.term.name] = nonlinearity.term.coeff
+    ci_anomaly = objective.ci_anomaly
+    if ci_anomaly is not None:
+        coeff_schedules[ci_anomaly.name] = ci_anomaly.coeff
     # Each non-target-output pass's schedules live under its OWN namespace, the same
     # mapping the non-target pass has always used.
     other_pass_schedules: list[tuple[str, dict[str, LossCoeff]]] = [
@@ -1890,11 +1897,24 @@ def make_targeted_train_step[PreparedT](
                     case "scales_model_cotangents":
                         total = total + breakdown.total
                 reported = reported + coeff * breakdown.total
+            # T14: the CI-ordering penalty compares the target stream's two heads and moves
+            # the OUTPUT one, so it is scored exactly once — here, in the target-output pass
+            # — off the same pre-update CI bundle this pass masks with. The hidden side is
+            # stop-gradient inside `ci_anomaly_penalty`.
+            anomaly = None
+            if ci_anomaly is not None and plan is target_plan:
+                anomaly = ci_anomaly_penalty(
+                    ci.upper, ci_for_role(ci_target, "hidden").upper, ci_anomaly.form
+                )
+                weighted = coeff_at(train_frac, ci_anomaly.coeff) * anomaly
+                total = total + weighted
+                reported = reported + weighted
             return total, _PassAux(
                 reported=reported,
                 imp_activity=imp_activity,
                 imp_freq=imp_freq,
                 breakdowns=breakdowns,
+                ci_anomaly=anomaly,
             )
 
         trainable: _Trainable[PreparedT] = (
@@ -2033,6 +2053,9 @@ def make_targeted_train_step[PreparedT](
         )
         reported_total = reported_total + nonlinearity_weighted
         extra_metrics: dict[str, Array] = {}
+        if target_aux.ci_anomaly is not None:
+            assert ci_anomaly is not None
+            extra_metrics[f"loss/{ci_anomaly.name}"] = target_aux.ci_anomaly
         for plan in passes[1:]:
             aux = aux_by_label[plan.label]
             prefix = plan.metric_prefix

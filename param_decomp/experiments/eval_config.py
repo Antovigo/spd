@@ -31,6 +31,7 @@ from param_decomp.experiments.lm.eval_config import (
     ABGridDatasetConfig,
     ArithmeticCIGridConfig,
     CEandKLLossesConfig,
+    CIAnomalyConfig,
     CIMaskedAttnPatternsReconLossConfig,
     StochasticAttnPatternsReconLossConfig,
     TwoStreamCIMeanPerComponentConfig,
@@ -40,6 +41,7 @@ AnyEvalMetricConfig = Annotated[
     ABGridDatasetConfig
     | ArithmeticCIGridConfig
     | CEandKLLossesConfig
+    | CIAnomalyConfig
     | CIHistogramsConfig
     | CI_L0Config
     | CIMaskedAttnPatternsReconLossConfig
