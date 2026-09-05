@@ -151,6 +151,34 @@ Doing so makes the decomposition **1.4–1.8× easier to attack on the task dist
 So it is worth training. It just does not protect you from the penalty's off-distribution
 cost.
 
+## 8. Does this only happen at one layer?
+
+Everything above lives in a decomposition of a single transformer block. To check that the
+runaway is a property of the penalty and not of that one layer, we repeat it on a
+completely separate pair of runs: a **four-block** decomposition (blocks 17–20, 28 sites),
+trained with a **different set of reconstruction losses**, penalty off versus on. Those two
+runs differ in exactly one thing — a config diff turns up the penalty block and the run
+name, nothing else.
+
+Then we attack **one block at a time**. While block *N* is under attack the other three sit
+at their original matrices, so each panel is a self-contained experiment.
+
+![per-block, general text](plots/blocks_4l/01_per_block_nontarget.png)
+
+Four blocks, four times the same picture: **penalty off flattens out, penalty on keeps
+climbing.** No block is doing something the others aren't.
+
+![per-block cost](plots/blocks_4l/03_per_block_cost.png)
+
+As a cost ratio the four curves nearly overlap — 2.5×, 2.5×, 2.8×, 3.0× at 80 steps — and
+on the task distribution all four sit flat between 1.0× and 1.16×. The effect is not
+specific to layer 18, or to any layer.
+
+The dotted line is the same attacker let loose on all four blocks at once. It reaches
+**12.3×**, far above any single block. Attacking the blocks together is worth much more
+than attacking them one at a time, so whatever the penalty leaves exposed is spread across
+the network rather than concentrated in one place.
+
 ---
 
 ## Numbers

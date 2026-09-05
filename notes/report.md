@@ -1445,3 +1445,54 @@ Two consequences, both fixed:
 
 Lesson for the next write-up: run the type-keyed config diff BEFORE asserting "everything
 else is identical". The sweep earned that sentence; the cross-lineage runs never did.
+
+### 8.29 Per-block replication on the 4L17-20 pair (2026-09-05)
+
+Independent replication of 8.22/8.27's adversarial-step result, on a decomposition that
+shares neither the block nor the loss recipe with the L18-16 sweep.
+
+**Pair:** `addsub-4L17-20-nlcontrol` (p-b7fd77f3) vs `addsub-4L17-20-nlpenalty`
+(p-78852086), 1e-3, blocks 17-20, 28 sites, `PersistentPGD` + `StochasticReconSubset`
+recipe. Type-keyed config diff: 19 keys, 18 of them the `NonlinearityLocalityLoss` block,
+plus `run_name`. Clean.
+
+**Block-restricted probe** (`pgd_curve_block.py`, `--blocks`). While block N is attacked the
+other sites are pinned every ascent step to component source 1 AND delta source 1, so
+mask == 1 and the site sums back to the ORIGINAL matrix. The first draft pinned them to
+source 0 (mask == ci_lower), which ablates every component with CI < 1 across three quarters
+of the network -- Antoine caught it. Delta semantics are unchanged from production: pinned
+1.0 throughout the non-target arm, adversarially optimised on the target arm.
+
+**Result -- penalty cost (on/off), general text:**
+
+    block   k=5    k=10   k=20   k=40   k=80
+    17      1.33   1.58   1.97   2.25   2.47
+    18      1.07   1.32   1.76   2.15   2.52
+    19      1.15   1.31   2.08   2.72   2.83
+    20      1.12   1.35   1.82   2.40   2.95
+    all 4   1.07   1.20   1.60   2.25  12.31
+
+Task distribution: flat, 1.00-1.16 at every k for every block. So the off-distribution
+runaway reproduces at FOUR separate depths, with a control that saturates in each
+(e.g. block 18 off: 0.0055 -> 0.0091 over k=5..80, on: 0.0059 -> 0.0228).
+
+**Superadditivity.** All four blocks attacked jointly reach 12.31x, >4x the best single
+block. The exposure the penalty leaves is distributed, not localised -- consistent with
+[[multi-block-targeted-runs]]'s finding that the addsub mechanism spans the network.
+
+**Free reproducibility check.** Block 20 was harvested twice by two sessions with identical
+settings (seed 1234, nb 4, pass 40). Target arm agrees to <1.3%; NON-TARGET arm differs by
+up to **8.9%**. Same seed, same batches, same code -- so ~9% is this probe's own noise floor
+on the non-target arm, presumably bf16 reduction order. Ratios of 2.5-3x clear it; do not
+report non-target differences below ~10% as real.
+
+**Two launcher traps burned time here.** (1) `sbatch --export` uses commas as its OWN
+separator, so `BLOCKS="17,18,19,20"` silently arrives as `BLOCKS=17` -- three jobs looked
+like deliberate single-block runs when they were truncated. `pgd_curve.sbatch` now takes a
+colon-separated list and translates it. (2) Each harvest process writes only its own
+`results` dict, so two block-sets sharing an output filename silently erase each other;
+every block set now gets its own OUTDIR and the figure script globs `pgd_block*` and merges.
+
+Concurrency note: two other sessions were submitting into the same scratch tree during this
+work. Check `squeue` and the JSON `blocks`/`init_seed` metadata before assuming a file is
+yours.
