@@ -160,30 +160,40 @@ trained with a **different set of reconstruction losses**, penalty off versus on
 runs differ in exactly one thing — a config diff turns up the penalty block and the run
 name, nothing else.
 
+First, the attacker is let loose on **all four blocks at once**, from two different start
+points. Every curve below is an absolute reconstruction loss, both runs on one scale — red
+for the penalty-off control, blue for penalty on.
+
+![all four blocks at once](plots/blocks_4l/01_joint_4block.png)
+
+On general text the control flattens out just under 0.05 while the penalised run runs away
+to 0.56 and 1.23 at 80 steps, depending on where the adversary starts — **12.3× and 27.0×
+the control**. On the task distribution the same two runs stay within a factor of ~2 of
+each other and both stay small.
+
+Read the joint magnitude as "several times any single block", not as a number. It is the
+one measurement here whose magnitude moves by 2× between attacker start points, while
+every per-block curve below is stable across the same change.
+
 Then we attack **one block at a time**. While block *N* is under attack the other three sit
-at their original matrices, so each panel is a self-contained experiment.
+at their original matrices, so each figure is a self-contained experiment. The four figures
+share their y-limits per arm, so levels compare across blocks and not only within one.
 
-![per-block, general text](plots/blocks_4l/01_per_block_nontarget.png)
+![block 17](plots/blocks_4l/02_block17.png)
+![block 18](plots/blocks_4l/03_block18.png)
+![block 19](plots/blocks_4l/04_block19.png)
+![block 20](plots/blocks_4l/05_block20.png)
 
-Four blocks, four times the same picture: **penalty off flattens out, penalty on keeps
-climbing.** No block is doing something the others aren't.
+Four blocks, four times the same picture: on general text **penalty off flattens out,
+penalty on keeps climbing** — 2.5×, 2.5×, 2.8×, 3.0× the control at 80 steps. On the task
+distribution the two runs sit nearly on top of each other in every block, between 1.0× and
+1.16×. No block is doing something the others aren't, and the effect is not specific to
+layer 18, or to any layer.
 
-![per-block, task distribution](plots/blocks_4l/02_per_block_target.png)
-
-On the task distribution the two runs sit on top of each other in every block — the same
-on/off-distribution split as the single-block sweep, now four times over.
-
-![per-block cost](plots/blocks_4l/03_per_block_cost.png)
-
-As a cost ratio the four curves nearly overlap — 2.5×, 2.5×, 2.8×, 3.0× at 80 steps — and
-on the task distribution all four sit flat between 1.0× and 1.16×. The effect is not
-specific to layer 18, or to any layer.
-
-The dotted lines are the same attacker let loose on all four blocks at once, from two
-different start points. They reach **12.3× and 27.0×** at 80 steps — far above any single
-block. Attacking the blocks together is worth much more than attacking them one at a time,
-so whatever the penalty leaves exposed is spread across the network rather than
-concentrated in one place.
+That the joint attack (12.3×/27.0×) reaches far beyond any single block (≤3.0×) says
+attacking the blocks together is worth much more than attacking them one at a time, so
+whatever the penalty leaves exposed is spread across the network rather than concentrated
+in one place.
 
 Read that as "several times any single block", not as a number. It is the one measurement
 here whose magnitude moves by 2× between attacker start points, while every per-block curve
