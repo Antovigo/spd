@@ -1496,3 +1496,40 @@ every block set now gets its own OUTDIR and the figure script globs `pgd_block*`
 Concurrency note: two other sessions were submitting into the same scratch tree during this
 work. Check `squeue` and the JSON `blocks`/`init_seed` metadata before assuming a file is
 yours.
+
+### 8.30 Second adversary start for the joint 4-block attack (2026-09-05)
+
+8.29's superadditivity number (12.31x) rested on one adversary start. Job 11079 repeats the
+all-blocks-at-once harvest on the same pair at `--init-seed 5678`. Raw 4-batch means:
+
+```
+                     k5      k10     k20     k40     k80
+off  start1       0.0230  0.0357  0.0423  0.0447  0.0453
+off  start2       0.0218  0.0338  0.0414  0.0447  0.0456
+on   start1       0.0247  0.0429  0.0676  0.1004  0.5584
+on   start2       0.0255  0.0450  0.0706  0.2508  1.2306
+```
+
+Cost ratios, general text: start1 1.07 / 1.20 / 1.60 / 2.25 / **12.31**; start2
+1.17 / 1.33 / 1.71 / 5.61 / **26.99**. The direction replicates and is far above any single
+block (2.47-3.02), but the magnitude moves by 2.2x between starts, and the divergence sets
+in one budget earlier at start 2 (k40 already 5.61 vs 2.25). The CONTROL is stable to 0.7%
+at k80 across the same two starts (0.0453 vs 0.0456), so the instability is a property of
+the penalised decomposition, not of the probe.
+
+Task stream is weaker and start-dependent: start1 1.17/1.16/1.14/1.68/2.13 vs start2
+1.14/1.03/0.98/1.03/1.34. Both exceed the flat per-block curves (1.00-1.16) at k80, but a
+20-step probe sees nothing at either start, and start 2 sees essentially nothing until k80.
+Do NOT quote an on-distribution coordination cost from one start.
+
+Figure `plots/blocks_4l/03_per_block_cost.png` now carries both joint curves; per-block
+curves remain single-start (they are stable enough that a second start was not the
+bottleneck). Share doc section 8 reworded from "12.3x" to "12.3x and 27.0x", with the
+instability stated.
+
+**Process note.** This work collided with a parallel session on the same task: both wrote
+`~/pd_scratch/dual_obj_jax/block_figs.py` and both harvested block 20 (jobs 11072/11073 vs
+11077/11078). The duplicate block-20 harvest turned out to be useful — it is the only
+independent repeat of the probe, and 8.29 uses it as the noise floor — but the scratch-file
+overwrite was silent and cost a figure set. Scratch analysis scripts are not a safe shared
+namespace between sessions.

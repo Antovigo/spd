@@ -174,10 +174,17 @@ As a cost ratio the four curves nearly overlap — 2.5×, 2.5×, 2.8×, 3.0× at
 on the task distribution all four sit flat between 1.0× and 1.16×. The effect is not
 specific to layer 18, or to any layer.
 
-The dotted line is the same attacker let loose on all four blocks at once. It reaches
-**12.3×**, far above any single block. Attacking the blocks together is worth much more
-than attacking them one at a time, so whatever the penalty leaves exposed is spread across
-the network rather than concentrated in one place.
+The dotted lines are the same attacker let loose on all four blocks at once, from two
+different start points. They reach **12.3× and 27.0×** at 80 steps — far above any single
+block. Attacking the blocks together is worth much more than attacking them one at a time,
+so whatever the penalty leaves exposed is spread across the network rather than
+concentrated in one place.
+
+Read that as "several times any single block", not as a number. It is the one measurement
+here whose magnitude moves by 2× between attacker start points, while every per-block curve
+is stable across the same change. The penalty-off run does not do this — its joint curve is
+0.0453 and 0.0456 at the two starts — so the instability belongs to the penalised
+decomposition, which is itself part of the finding.
 
 ---
 
