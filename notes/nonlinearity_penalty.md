@@ -203,6 +203,41 @@ decomposition, which is itself part of the finding.
 
 ---
 
+## 9. What the attacker is actually exploiting
+
+Section 6 showed the divergence needs a patient attacker. This asks which components it
+needs. The adversary is restricted to one group and the curve re-measured; a component
+outside the group keeps its natural causal importance and is simply not attacked. DEAD
+means its causal importance never rises above 0.1 on the measured batches.
+
+![dead vs alive](plots/penalty_share/13_dead_vs_alive.png)
+
+**Neither group alone reproduces the divergence.** In both penalised runs the alive-only
+attack is flat from 20 steps to 80 — the same shape the control has — and dead-only is
+flat too, except in the output-only run where it grows but still reaches a fraction of the
+unrestricted attack. The unrestricted attack, on the same runs and the same budgets, is
+the one that runs away.
+
+**So the effect is an interaction, not a group.** The attacker has to switch dead
+components on *while* perturbing the live circuit; neither move on its own does much
+damage. That is a direct explanation for why the divergence needs so many ascent steps —
+a coordinated subset is a harder thing to search for — and it says the extra weight the
+penalty leaves on dead components is a necessary ingredient rather than a sufficient one.
+
+Two things this figure does not support, both worth stating because the obvious reading
+of it goes further than the data:
+
+- **It does not quantify the interaction.** Comparing "alive + dead" against the joint
+  attack needs a no-attack baseline to subtract, or the unattacked loss is counted twice
+  and the comparison is biased. That baseline was never measured, and over its plausible
+  range the control moves from mildly sub-additive to clearly super-additive — so whether
+  the penalty *changes* the character of the attack surface, as opposed to amplifying it,
+  is still open.
+- **Levels are not comparable across panels.** The two penalised runs use different
+  reconstruction recipes, and each panel has its own alive/dead split (832, 670 and 1104
+  alive of 1952), so the groups differ in size within and between runs. Read the shape and
+  the ordering inside a panel, not the heights across them.
+
 ## Numbers
 
 | penalty (×10⁻³) | nonlin./comp. | L0 task | L0 general | alive | rounded KL task | rounded KL general | PGD task, 20 st | PGD general, 20 st | PGD general, 80 st |

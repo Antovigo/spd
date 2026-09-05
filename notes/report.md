@@ -1269,9 +1269,12 @@ max CI over the fixed batches < 0.1. Same init/batches as 8.22/8.24
 (`pgd_group_ablation.py`); the `all` setting reproduces the production probe as a check.
 Non-target/output arm. Values: `plots/nlpenalty/groupabl_table.md`.
 
-![control](plots/nlpenalty/l18_groupabl_cbb66ad1.png)
-![nl5e4](plots/nlpenalty/l18_groupabl_118386d3.png)
-![output-only + 5e-4](plots/nlpenalty/l18_groupabl_204fa1bc.png)
+Figure moved to the shareable write-up, redrawn as one panel per run with the y axis
+linear from zero: `notes/nonlinearity_penalty.md` section 9
+(`plots/penalty_share/13_dead_vs_alive.png`, built by `pd_scratch/dual_obj_jax/groupabl_figs.py`).
+The three per-run originals under `plots/nlpenalty/l18_groupabl_*.png` are superseded.
+
+![dead vs alive](plots/penalty_share/13_dead_vs_alive.png)
 
 | run | alive/total | setting | k=20 | k=80 | k20->k80 |
 |---|---|---|---|---|---|
@@ -1299,6 +1302,33 @@ Non-target/output arm. Values: `plots/nlpenalty/groupabl_table.md`.
    circuit; neither move alone is damaging. That explains why the divergence needs many
    ascent steps (8.22) — a coordinated subset is a harder search — and it refines 8.23:
    the extra dead-component norm is a necessary ingredient, not a sufficient one.
+
+**CORRECTION 2026-09-05: conclusion 2's additive null is wrong, and the control's sign
+is not established.** The null above is `alive + dead`, which implicitly sets the
+unattacked loss to zero. It is not zero — every curve starts from a nonzero CI-masked
+floor — so that baseline is counted twice and the null is inflated. For EXCESS damage the
+null is `alive + dead - L0`. L0 was never measured; it is bounded above by ~0.0058 (the
+smallest k=5 restricted value), and over that range:
+
+| run | as reported | L0=0.002 | L0=0.004 | L0=0.006 |
+|---|---|---|---|---|
+| control | 0.86x | 1.00x | 1.19x | 1.48x |
+| nl5e4 (dual) | 1.78x | 2.04x | 2.38x | 2.86x |
+| output-only + 5e-4 | 2.95x | 3.26x | 3.64x | 4.13x |
+
+The penalised runs get MORE super-additive under the correction, so that half stands. The
+control, however, crosses from sub-additive to super-additive inside the plausible range —
+and "the penalty turns a sub-additive attack surface into a strongly super-additive one"
+rests entirely on the control being sub-additive. Treat conclusion 2 as: both penalised
+runs show a strong interaction (conclusion 1 and 3 are unaffected, being subset-vs-joint
+comparisons that need no null). Whether the penalty CHANGES the character of the surface
+or merely amplifies it is open until L0 is measured — one extra budget-0 point in
+`pgd_group_ablation.py`, a few GPU-minutes for the three runs.
+
+Also latent for any rerun: the group restriction zeroes the ascent step for the COMPONENT
+channel only (`step_c * sel[s]`); `src.delta` ascends in every setting. Harmless on this
+arm, where `delta_pinned=True` makes the source's delta channel ignored, but a
+`--arm target/output` rerun would let the "restricted" attacks move the delta.
 
 **Caveat, and a correction to 8.24's error budget.** The `all` curves here reproduce
 8.24 at k=20 (within 0.6-3%) but NOT at k=80: nl5e4 reads 0.0285 here vs 0.0732 there
