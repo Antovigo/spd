@@ -153,78 +153,33 @@ cost.
 
 ### Which objective diverges faster?
 
-The ratios above deliberately hide the levels. Here are the raw curves, so the two
-objectives can be compared as they actually sit.
+The ratios above deliberately hide the levels. Here are the raw curves, penalty off on the
+left and penalty on on the right, sharing a y-axis within each row.
 
 ![raw adversarial loss, dual vs output-only](plots/penalty_share/13_raw_dual_vs_outputonly.png)
 
-The comparison that counts is the solid and dotted **blue** lines: same configuration, same
-penalty dose, differing only in whether the hidden-activation objective was trained. (The
-faded lines are the sweep's configuration, a different set of reconstruction losses — they
-show where its levels sit, and should not be read against the others.)
+Everything here is one configuration, one dose and one weight init, so the only thing that
+moves between the two coloured lines is which objectives were trained. That configuration
+has no dual penalty-off run, which is why the left column carries a single line — see the
+caveats.
 
 On general text, **output-only diverges faster**: ×7.2 across the step sweep against ×4.0
-for the dual run. The two curves cross at about 20 steps. Below that the dual run is the
-worse of the pair (0.0085 against 0.0060 at 5 steps — it starts from a higher floor); by 40
-steps output-only is more than twice as bad (0.0292 against 0.0138); by 80 they have nearly
+for the dual run. The two cross at about 20 steps. Below that the dual run is the worse of
+the pair (0.0085 against 0.0060 at 5 steps — it starts from a higher floor); by 40 steps
+output-only is more than twice as bad (0.0292 against 0.0138); by 80 they have nearly
 converged (0.0431 against 0.0343).
 
-So the dual objective does not prevent the runaway — it delays it. The output-only run
-takes off between 10 and 20 steps, the dual one holds a plateau until 40 and then goes.
+So the dual objective does not prevent the runaway — it delays it. Output-only takes off
+between 10 and 20 steps; the dual run holds a plateau until 40 and then goes. Which of the
+two looks better depends entirely on the attack budget you evaluate at.
+
+The left column is the control for all of it: without the penalty the same output-only
+decomposition saturates at 0.0107, and the whole right-hand column sits three to four times
+above it.
 
 On the task distribution neither diverges (×1.2 and ×1.4), but output-only sits
-consistently higher in absolute terms — 0.0098 against 0.0065 at 80 steps — which is the
-same on-task robustness gap as above, now visible as a level rather than a ratio.
-
-## 8. Does this only happen at one layer?
-
-Everything above lives in a decomposition of a single transformer block. To check that the
-runaway is a property of the penalty and not of that one layer, we repeat it on a
-completely separate pair of runs: a **four-block** decomposition (blocks 17–20, 28 sites),
-trained with a **different set of reconstruction losses**, penalty off versus on. Those two
-runs differ in exactly one thing — a config diff turns up the penalty block and the run
-name, nothing else.
-
-First, the attacker is let loose on **all four blocks at once**, from two different start
-points. Every curve below is an absolute reconstruction loss, both runs on one scale — red
-for the penalty-off control, blue for penalty on.
-
-![all four blocks at once](plots/blocks_4l/01_joint_4block.png)
-
-On general text the control flattens out just under 0.05 while the penalised run runs away
-to 0.56 and 1.23 at 80 steps, depending on where the adversary starts — **12.3× and 27.0×
-the control**. On the task distribution the same two runs stay within a factor of ~2 of
-each other and both stay small.
-
-Read the joint magnitude as "several times any single block", not as a number. It is the
-one measurement here whose magnitude moves by 2× between attacker start points, while
-every per-block curve below is stable across the same change.
-
-Then we attack **one block at a time**. While block *N* is under attack the other three sit
-at their original matrices, so each figure is a self-contained experiment. The four figures
-share their y-limits per arm, so levels compare across blocks and not only within one.
-
-![block 17](plots/blocks_4l/02_block17.png)
-![block 18](plots/blocks_4l/03_block18.png)
-![block 19](plots/blocks_4l/04_block19.png)
-![block 20](plots/blocks_4l/05_block20.png)
-
-Four blocks, four times the same picture: on general text **penalty off flattens out,
-penalty on keeps climbing** — 2.5×, 2.5×, 2.8×, 3.0× the control at 80 steps. On the task
-distribution the two runs sit nearly on top of each other in every block, between 1.0× and
-1.16×. No block is doing something the others aren't, and the effect is not specific to
-layer 18, or to any layer.
-
-That the joint attack (12.3×/27.0×) reaches far beyond any single block (≤3.0×) says
-attacking the blocks together is worth much more than attacking them one at a time, so
-whatever the penalty leaves exposed is spread across the network rather than concentrated
-in one place.
-
-Read that as "several times any single block", not as a number. It is the one measurement
-here whose magnitude moves by 2× between attacker start points, while every per-block curve
-is stable across the same change. The penalty-off run does not do this — its joint curve is
-0.0453 and 0.0456 at the two starts — so the instability belongs to the penalised
-decomposition, which is itself part of the finding.
+consistently higher — 0.0098 against 0.0065 at 80 steps — the same on-task robustness gap
+as above, now visible as a level rather than a ratio.
 
 ---
 
@@ -319,6 +274,11 @@ range, not a number.
   adversarial metrics does not — two attacker start points already reorder them.
 - Two attacker start points is enough to confirm the shape and not enough to put error bars
   on individual doses. Quote the adversarial cost as "3–6×", never as a single figure.
+- Section 7's raw figure has no dual penalty-off line because that configuration never
+  had such a run. The one dual penalty-off run sharing its reconstruction losses
+  (`addsub-L18-22-zerou`) uses a different weight init, and
+  [the init comparison](report_init_pgd_robustness.md) measures that choice as worth ~22%
+  off-distribution — the size of the effect under study — so it is not a stand-in.
 - Section 7's pairs come from two different configurations. Every comparison drawn there is
   *within* a configuration or a ratio of two such comparisons; no raw level is compared
   across them, and none should be.
