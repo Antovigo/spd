@@ -151,6 +151,31 @@ Doing so makes the decomposition **1.4–1.8× easier to attack on the task dist
 So it is worth training. It just does not protect you from the penalty's off-distribution
 cost.
 
+### Which objective diverges faster?
+
+The ratios above deliberately hide the levels. Here are the raw curves, so the two
+objectives can be compared as they actually sit.
+
+![raw adversarial loss, dual vs output-only](plots/penalty_share/13_raw_dual_vs_outputonly.png)
+
+The comparison that counts is the solid and dotted **blue** lines: same configuration, same
+penalty dose, differing only in whether the hidden-activation objective was trained. (The
+faded lines are the sweep's configuration, a different set of reconstruction losses — they
+show where its levels sit, and should not be read against the others.)
+
+On general text, **output-only diverges faster**: ×7.2 across the step sweep against ×4.0
+for the dual run. The two curves cross at about 20 steps. Below that the dual run is the
+worse of the pair (0.0085 against 0.0060 at 5 steps — it starts from a higher floor); by 40
+steps output-only is more than twice as bad (0.0292 against 0.0138); by 80 they have nearly
+converged (0.0431 against 0.0343).
+
+So the dual objective does not prevent the runaway — it delays it. The output-only run
+takes off between 10 and 20 steps, the dual one holds a plateau until 40 and then goes.
+
+On the task distribution neither diverges (×1.2 and ×1.4), but output-only sits
+consistently higher in absolute terms — 0.0098 against 0.0065 at 80 steps — which is the
+same on-task robustness gap as above, now visible as a level rather than a ratio.
+
 ## 8. Does this only happen at one layer?
 
 Everything above lives in a decomposition of a single transformer block. To check that the
