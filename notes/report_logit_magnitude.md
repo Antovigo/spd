@@ -81,3 +81,72 @@ Fig 6: (a, b) grids of final residual norm ratio and mean logit shift
 Fig 7: Norm ratios and KL by a+b
 
 ![Norm ratios and KL by a+b](plots/logit_magnitude/fig7_by_sum.png)
+
+## Logit lens along the network (added 2026-09-07, job 11123)
+
+Same emulation; at every layer output 17..31 at "=" we apply the final RMSNorm + unembed
+(the standard logit lens, "normed") and also the bare unembed without the norm ("raw"), and
+track the lens logit of the target model's final top-1 token. Data `logitlens/*.npz` in the
+scratch dir, figures `plots/logit_magnitude/lens*.png`, per-layer table `lens_table.json`.
+
+Deviation (decomposed − target) of the normed lens logit of the final top-1 token, mean over
+prompts and std across prompts (target median at layer 18 is 3.5, at layer 31 11.9):
+
+| layer | dual, output CI | dual, hidden CI | output-only | dual, all on | output-only, all on |
+|---|---|---|---|---|---|
+| 18 | −0.43 ± 0.58 | −0.21 ± 0.39 | −1.18 ± 1.07 | −0.11 ± 0.34 | −1.02 ± 0.97 |
+| 20 | −0.34 ± 0.51 | −0.12 ± 0.32 | −0.64 ± 0.82 | −0.04 ± 0.27 | −0.45 ± 0.66 |
+| 22 | −0.22 ± 0.47 | −0.07 ± 0.27 | −0.23 ± 0.68 | −0.03 ± 0.24 | −0.05 ± 0.51 |
+| 24 | −0.18 ± 0.53 | −0.05 ± 0.29 | −0.05 ± 0.70 | −0.03 ± 0.25 | +0.12 ± 0.49 |
+| 27 | −0.19 ± 0.53 | −0.04 ± 0.32 | −0.08 ± 0.67 | −0.02 ± 0.27 | +0.15 ± 0.46 |
+| 31 | −0.01 ± 0.13 | −0.00 ± 0.11 | −0.05 ± 0.15 | −0.01 ± 0.07 | +0.01 ± 0.10 |
+
+- **Systematic part: a deficit right after layer 18 that the later layers repair.** The lens
+  logit of the eventual answer is lower than the target's at the layer-18 output in every
+  condition (dual −12%, output-only −33% of the target's 3.5), and the deficit decays
+  monotonically: the output-only run's is gone by layer 24-25 (it even overshoots slightly
+  under all-components-on), the dual's shrinks to −0.2 and stays there until layer 27, then
+  vanishes at layers 28-31. In log-prob terms (lens1, row 2) every condition is within
+  ±0.01 of the target from layer 25 on. The raw (un-normed) lens shows the same ordering at
+  a much smaller scale (−0.05 to −0.13), i.e. most of the layer-18 lens deficit is a
+  direction effect, not the residual-norm shortfall of section 1.
+- **Non-systematic part: the prompt-level spread is larger than the mean everywhere and
+  persists to the end.** From layer 22 onward |mean| is 0.01-0.2 while the std across
+  prompts stays at 0.5 (dual) / 0.7 (output-only) through layer 27, and 0.11-0.15 at
+  layer 31 (lens2, lens3). So the mid-network lens deviations are prompt-specific errors of
+  ±0.5 logits with a small common offset, not a uniform shift; and at the output the
+  remaining deviation (std 0.13-0.15, mean ~0) is entirely prompt-level. The all-components-on
+  dual forward has half that spread (0.07 at layer 31).
+- **The prompt-level deviation is reshuffled by the later layers, not carried through.**
+  The correlation across prompts between the deviation at layer 18 and at layer L falls to
+  0.4 by layer 24 and to 0.1 (dual) / 0.03 (output-only) at layer 31; conversely the final
+  deviation is only weakly predicted by any mid-network layer (corr 0.2-0.4 at 24-28,
+  lens4). What the decomposition gets wrong at layer 18 for a given prompt is largely
+  absorbed, and the final per-prompt error is a different, smaller pattern.
+- **Where the deviation lives on the (a, b) grid (lens5).** At layer 19 the output-only
+  deviation is organized along anti-diagonals (constant a+b: the answer/magnitude channel),
+  strongest for a+b in 20-70 and for the largest sums; the dual output-CI deviation sits in
+  blobs (a in 40-55 and 75-90 with b < 30); the dual hidden-CI deviation is small except on
+  the a = b diagonal. By layer 31 all three are unstructured ±0.3 noise.
+- **Argmax and rank are unchanged (lens6).** The answer reaches lens rank 1 at layers 22-23 in
+  every condition. The decomposed lens argmax disagrees with the target's lens argmax on
+  40% (dual) / 69% (output-only) of prompts at layer 18 (where the target's own lens is far
+  from the answer), on <5% from layer 23 on.
+
+Figures: lens1 (curves and deviation bands), lens2 (|mean| vs std per layer), lens3
+(deviation histograms at layers 18-31), lens4 (persistence), lens5 (grids), lens6 (rank).
+
+![lens1](plots/logit_magnitude/lens1_curves.png)
+![lens2](plots/logit_magnitude/lens2_mean_vs_std.png)
+![lens3](plots/logit_magnitude/lens3_hists.png)
+![lens4](plots/logit_magnitude/lens4_persistence.png)
+![lens5](plots/logit_magnitude/lens5_grids.png)
+![lens6](plots/logit_magnitude/lens6_rank.png)
+
+## Follow-up run: the dual recipe without CI-scaled weight decay
+
+`addsub-L18-24-neuronaligned-nowd` (p-2b67abec, job 11124, launched 2026-09-07 17:07,
+3.13 s/step): byte-identical to p-6540dfdd except `pd.ci_scaled_weight_decay: 0.3 -> null`
+(both optimizers' `weight_decay` were already 0). Tests whether SPEC T11's per-step shrink
+of V/U explains the dual run's 3% residual-norm shortfall after layer 18 (section 1).
+Config/sbatch in `~/pd_scratch/dual_obj_jax/addsub-L18-24-neuronaligned-nowd.*`.
