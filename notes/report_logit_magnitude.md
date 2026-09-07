@@ -150,3 +150,20 @@ Figures: lens1 (curves and deviation bands), lens2 (|mean| vs std per layer), le
 (both optimizers' `weight_decay` were already 0). Tests whether SPEC T11's per-step shrink
 of V/U explains the dual run's 3% residual-norm shortfall after layer 18 (section 1).
 Config/sbatch in `~/pd_scratch/dual_obj_jax/addsub-L18-24-neuronaligned-nowd.*`.
+
+### Pre-norm top-token logit at the last layer (lens7)
+
+Raw lens at layer 31 (pre-RMSNorm residual · W_U) for the final top-1 token; target median 10.06
+(5-95%: 8.5..12.3). The two schemes shift it in OPPOSITE directions, by about 1%, and the
+per-prompt difference tracks the residual-norm ratio (corr 0.77-0.88): this is the section-1
+norm effect seen through the unembed, and the final RMSNorm removes it.
+
+| condition | median | diff mean ± std | ratio median (5-95%) | prompts with \|diff\| > 0.5 |
+|---|---|---|---|---|
+| dual, output CI | 9.96 | −0.09 ± 0.23 | 0.991 (0.956..1.028) | 4.7% |
+| dual, hidden CI | 10.02 | −0.04 ± 0.15 | 0.997 (0.973..1.020) | 0.5% |
+| output-only | 10.15 | +0.09 ± 0.29 | 1.009 (0.963..1.054) | 9.1% |
+| dual, all comps on | 10.02 | −0.03 ± 0.12 | 0.997 | 0.2% |
+| output-only, all comps on | 10.22 | +0.16 ± 0.21 | 1.016 | 4.9% |
+
+![lens7](plots/logit_magnitude/lens7_L31_raw_top.png)
