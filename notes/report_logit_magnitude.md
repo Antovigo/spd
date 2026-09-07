@@ -145,11 +145,11 @@ Figures: lens1 (curves and deviation bands), lens2 (|mean| vs std per layer), le
 
 ## Follow-up run: the dual recipe without CI-scaled weight decay
 
-`addsub-L18-24-neuronaligned-nowd` (p-2b67abec, job 11124, launched 2026-09-07 17:07,
+`addsub-L18-23-neuronaligned-nowd` (launched as addsub-L18-24-neuronaligned-nowd, renamed the same day) (p-2b67abec, job 11124, launched 2026-09-07 17:07,
 3.13 s/step): byte-identical to p-6540dfdd except `pd.ci_scaled_weight_decay: 0.3 -> null`
 (both optimizers' `weight_decay` were already 0). Tests whether SPEC T11's per-step shrink
 of V/U explains the dual run's 3% residual-norm shortfall after layer 18 (section 1).
-Config/sbatch in `~/pd_scratch/dual_obj_jax/addsub-L18-24-neuronaligned-nowd.*`.
+Config/sbatch in `~/pd_scratch/dual_obj_jax/addsub-L18-23-neuronaligned-nowd.*`.
 
 ### Pre-norm top-token logit at the last layer (lens7)
 
