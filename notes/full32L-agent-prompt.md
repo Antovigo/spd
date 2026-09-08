@@ -7,14 +7,16 @@ Scale the single-block targeted dual-objective decomposition `addsub-L18-23-neur
 with 8x H100 SXM 80 GB (NVLink). Same recipe, same kind of result: a sparse neuron-aligned
 decomposition whose AB grids show clean arithmetic structure.
 
-Deliverables, all committed to the repo (outside `param_decomp/`, e.g. `runpod/full32L/`):
+Deliverables, all committed to the repo, next to the L18 reference config
+`notes/dual_objective/addsub-L18-sota.yaml` and named consistently with it:
 
-1. `full32L.yaml` — the run config.
-2. A probe ladder: generated trial configs + one driver script + a smoke aimed at the AB grid.
-3. A launcher for the real run (fixed run id, SIGTERM-save trap, hang watchdog, detached).
-4. `full32L-pod-guide.md` — step-by-step pod setup, launch, retrieval, resume, teardown.
+1. `notes/dual_objective/addsub-32L-sota.yaml` — the run config, `run_name: addsub-32L-01`.
+2. `notes/dual_objective/32L-runpod/` — the probe ladder (generated trial configs + one
+   driver script + a smoke aimed at the AB grid), the launcher for the real run (fixed run
+   id, SIGTERM-save trap, hang watchdog, detached), and `pod-guide.md` (step-by-step pod
+   setup, launch, retrieval, resume, teardown).
 
-Work in `~/Code/param-decomp/dual_obj_jax` (branch `feature/dual_obj_jax`, tip 24c36ae25).
+Work in `~/Code/param-decomp/dual_obj_jax` (branch `feature/dual_obj_jax`, current tip).
 You may edit library code under `param_decomp/` only after confirming with me; configs,
 scripts and docs need no confirmation. Read `CLAUDE.md`, `docs/handbook.md`,
 `docs/skill.md`, `CONFIGS.md`, `param_decomp/core/SPEC.md`, `PERF_NOTES.md` first.
@@ -23,6 +25,8 @@ scripts and docs need no confirmation. Read `CLAUDE.md`, `docs/handbook.md`,
 
 - `~/pd_scratch/dual_obj_jax/addsub-L18-23-neuronaligned.yaml` + `.sbatch` — the 1-block
   recipe and the source of every scale-independent value. Its header explains each choice.
+  `notes/dual_objective/addsub-L18-sota.yaml` is the in-tree copy of the same recipe minus
+  the two neuron-aligned init lines; treat the pd_scratch file as authoritative.
 - `~/pd_scratch/dual_obj_jax/addsub-4L18-21-neuronaligned.yaml` + `.sbatch` — the 4-block
   scale-up (run dir `~/out/runs/by-name/addsub-4L18-21-neuronaligned/`, 4.6 s/step on
   4x L40 at batch 128/96, 30 GB/rank). Shows what was and was not adjusted at 1->4.
@@ -145,10 +149,10 @@ exists, keeps the XLA compilation cache on the volume, and writes one markdown t
 
 ## Output
 
-- `full32L.yaml` with a header in the reference style: every field that differs from
-  `addsub-L18-23-neuronaligned.yaml`, what changed and why; every scale-dependent knob
-  deliberately kept, said so.
-- Trial configs generated from `full32L.yaml` by a script (not hand-copied), the driver,
-  the smoke config, the launcher, the guide.
+- `addsub-32L-sota.yaml` with a header in the reference style: every field that differs
+  from `addsub-L18-23-neuronaligned.yaml`, what changed and why; every scale-dependent
+  knob deliberately kept, said so.
+- Trial configs generated from `addsub-32L-sota.yaml` by a script (not hand-copied), the
+  driver, the smoke config, the launcher, the guide.
 - Final message: open decisions for me, the CI-fn sizing numbers, and your step-time and
   wall-clock estimate for 40k steps with the assumptions behind it.
