@@ -190,3 +190,34 @@ reproducing the layer-18 attention/MLP writes at 65-84% of their norm, section 1
 the CI-scaled weight decay. The no-WD run's per-prompt spread is the same (std 0.24 vs 0.23).
 
 ![lens7 wd vs nowd](plots/logit_magnitude/lens7_wd_vs_nowd.png)
+
+### Why the dual decomposition's writes are under-sized (2026-09-08)
+
+MLP-18 output at "=" of the dual run (output CI), projected onto the target's MLP-18 output
+(scale = ⟨y_dec, y_target⟩/‖y_target‖², mean over the grid; clean MLP-18 input, layer-18 weights
+from the HF shard, components from the 20k checkpoint):
+
+| forward | scale | norm ratio |
+|---|---|---|
+| all 456/456/512 components on, delta off | 0.93 | 0.96 |
+| only the alive components (grid CI > 0.05, ~10-13 per site) fully on | 0.81 | 0.88 |
+| alive components at their CI (= the ci-masked eval; unsaved at 0 or 0.03, same) | 0.77 | 0.85 |
+| training-mean mask (1+CI)/2 | 0.83 | 0.88 |
+| hidden-CI mask | 0.90 | 0.94 |
+
+The no-WD twin gives the same numbers to ±0.01. Three additive causes, all deficits:
+1. **The low-CI tail is dropped by the CI mask (12 points).** The ~440 components per site
+   with grid CI < 0.05 collectively carry 12% of the write's scale; the importance-minimality
+   pressure pushed their CI to ~0 while their V/U still contribute in the all-on forward.
+2. **The delta is off (7 points).** Even fully on, the components reproduce only 93% of the
+   write; the training forwards always carry the delta at a U[0,1] mask (mean 0.5), only the
+   0.5-weighted UnmaskedReconLoss sees delta = 0.
+3. **Fractional CI of the alive components (4 points).** 30% of alive components have
+   CI < 0.99 (10th percentile 0.41). Training masks are `ci + (1 - ci)·U`, mean (1+ci)/2, so
+   the deterministic ci-masked forward is the LOW edge of the mask distribution the losses
+   are optimized under (scale 0.77 vs 0.83 at the training mean).
+
+Nothing pushes back: the output losses are on post-RMSNorm logits, which are invariant to the
+residual scale, and a 15-25% shrink of the layer-18 writes at "=" moves the residual norm by
+only 3% and the final logits by nothing after the norm. The attention write follows the same
+pattern more strongly (65% of norm under output CI, 84% hidden CI, 88% all on).
