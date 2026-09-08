@@ -1,3 +1,28 @@
+# addsub-L18-23-neuronaligned: the SOTA recipe (addsub-L18-16-ntmerged-bsc, p-5b7fa697)
+# on the post-#1001 codebase, with ONE recipe change — `initialization:
+# neuron_aligned_targeted` (SPEC T13) starts EVERY decomposed subcomponent, attention
+# included, as one of its matrix's top-C coordinates by activity on the addsub pool, from
+# the harvested artifact named in `neuron_ranks`.
+#
+# IN-TREE SOTA, 2026-09-08: this file IS the addsub-L18-23-neuronaligned recipe
+# (run p-6540dfdd, 20k steps, ab_grids at ~/out/runs/by-name/addsub-L18-23-neuronaligned/),
+# byte-identical to ~/pd_scratch/dual_obj_jax/addsub-L18-23-neuronaligned.yaml apart from
+# this paragraph. It replaces the earlier in-tree copy that ran `initialization: random`
+# (the previous SOTA recipe minus its retired `coupled` init). The full-model scale-up
+# lives next to it as addsub-all-layers-sota.yaml.
+#
+# What "attention included" buys over the retired MLP-only arm: q/k/v/o subcomponents now
+# start as head channels ranked by their own energy (q/k: E[x_j^2] on the projection
+# output; o: E[z_j^2]*||W_o[:,j]||^2; v: that summed over its GQA group) instead of the
+# `zero_u` values. Every C here is far below its coordinate count (q 72 of 4096, k 72 of
+# 1024, v 128 of 1024, o 256 of 4096, gate/up 456 of 14336, down 512 of 14336), so every
+# site is a strict top-C selection and the delta carries the rest.
+#
+# CONTROL NOTE: the comparable arm on this codebase is the SOTA file itself, which now
+# runs `initialization: random` (its `coupled` was retired with `pd.weight_init`). The
+# older neuron-aligned runs (p-222d379b et al.) are MLP-only and pre-#1001 — see
+# `notes/neuron_aligned_init_plan.md` and the cross-code eval caveat there before
+# comparing any `nontarget_data/ce_kl/kl_ci_masked` across the merge.
 # REFERENCE CONFIG — the current state of the art for the JAX targeted
 # (dual-objective) addsub decomposition. This is NOT a canonical seat: it lives
 # outside `param_decomp/experiments/lm/configs/`, so the CONFIGS.md registry cap
@@ -62,7 +87,7 @@
 #
 # `run_name` is left at the generic seat name deliberately: `addsub-L18-16-ntmerged-bsc`
 # already owns a `runs/by-name/` symlink, and reusing it would collide.
-run_name: jax-l18-addsub-targeted
+run_name: addsub-L18-23-neuronaligned
 decomposition:
   sites:
     kind: glu_transformer
@@ -78,6 +103,8 @@ decomposition:
       gate: 456
       up: 456
       down: 512
+    initialization: neuron_aligned_targeted
+    neuron_ranks: {kind: name, name: addsub1-100_llama31-8b_unit-energy}
   ci:
     type: chunkwise_transformer
     # One decomposed block at blocks_per_chunk 1 is a single chunk spanning all seven
