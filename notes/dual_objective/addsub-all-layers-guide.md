@@ -6,7 +6,7 @@ Companion scripts: `addsub-all-layers/` (read its `README.md`). Every command be
 to be pasted in the order given. `<...>` are placeholders you fill in.
 
 Pinned code: `https://github.com/Antovigo/spd.git`, branch `feature/dual_obj_jax`, commit
-`PINNED_COMMIT` (the commit that added this guide; `git log -1 --format=%H -- notes/dual_objective/addsub-all-layers-sota.yaml`
+`7d8421a76b7338be7f1e61d2d7032103ad02d195` (the commit that added this guide; `git log -1 --format=%H -- notes/dual_objective/addsub-all-layers-sota.yaml`
 on that branch prints it). The config parses and builds at that commit (224 sites, 32 CI
 chunks, `input_dim` 26624, checked on CPU).
 
@@ -73,7 +73,7 @@ before launching the real run, step 6b).
 cd /workspace
 git clone https://github.com/Antovigo/spd.git -b feature/dual_obj_jax spd
 cd spd
-git checkout PINNED_COMMIT                      # the pin; `git rev-parse HEAD` must print it
+git checkout 7d8421a76b7338be7f1e61d2d7032103ad02d195                      # the pin; `git rev-parse HEAD` must print it
 curl -LsSf https://astral.sh/uv/install.sh | sh && source "$HOME/.local/bin/env"
 source notes/dual_objective/addsub-all-layers/env.sh   # creates the DATA_ROOT tree, sets UV_CACHE_DIR
 uv python install 3.12
@@ -180,7 +180,7 @@ volume. The ladder's trials carry no `wandb:` block (metrics.jsonl only); the re
 
 ```
 VOLUME=/workspace
-REPO=$VOLUME/spd                              code @ PINNED_COMMIT, venv at $REPO/.venv
+REPO=$VOLUME/spd                              code @ 7d8421a76b7338be7f1e61d2d7032103ad02d195, venv at $REPO/.venv
 DATA_ROOT=$VOLUME/data                        the trainer's positional <data_root>
   runs/<run id>/            launch_config.yaml (pinned), metrics.jsonl, ckpts/<step>/, ab_grids/, hlo/, neuron_alignment.json
   runs/by-name/<run_name>   -> ../<run id>    (symlink, made by pd_run.sh)
@@ -339,7 +339,7 @@ kill): attach the same network volume to a fresh 8x H100 SXM pod, redo `source e
 on the new container, `env.sh` re-creates the symlink), then:
 
 ```bash
-cd $REPO && git rev-parse HEAD                    # must still print PINNED_COMMIT
+cd $REPO && git rev-parse HEAD                    # must still print 7d8421a76b7338be7f1e61d2d7032103ad02d195
 cd notes/dual_objective/addsub-all-layers && ./launch_run.sh
 ```
 
