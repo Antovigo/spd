@@ -1,0 +1,9 @@
+# name	run_id	config	kind	timeout_s
+mesh-c	p-1adde401	mesh-c.yaml	mesh	4500
+mesh-b	p-1adde402	mesh-b.yaml	mesh	4500
+smoke-abgrid-c	p-1adde403	smoke-abgrid-c.yaml	smoke-abgrid	2700
+smoke-resume-c	p-1adde404	smoke-resume-c.yaml	smoke-resume	2700
+fallback-128x96-c	p-1adde405	fallback-128x96-c.yaml	fallback	4500
+smoke-abgrid-b	p-1adde413	smoke-abgrid-b.yaml	smoke-abgrid	2700
+smoke-resume-b	p-1adde414	smoke-resume-b.yaml	smoke-resume	2700
+fallback-128x96-b	p-1adde406	fallback-128x96-b.yaml	fallback	4500
