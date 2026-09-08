@@ -167,3 +167,26 @@ norm effect seen through the unembed, and the final RMSNorm removes it.
 | output-only, all comps on | 10.22 | +0.16 ± 0.21 | 1.016 | 4.9% |
 
 ![lens7](plots/logit_magnitude/lens7_L31_raw_top.png)
+
+### Result: weight decay is not the cause (2026-09-08, job 11126)
+
+The no-WD twin (p-2b67abec, finished 2026-09-08, one leg) reproduces the with-WD run on every
+count. Run-own final evals: target kl_ci_masked 0.00347 vs 0.00344, L0 20.2 vs 20.5, target PGD
+0.0041 vs 0.0041; the decay term's per-step shrink rate had fallen to 5e-6 by the end of the
+with-WD run. Same emulation (output CI, layer 18 masked at "="):
+
+| | with WD 0.3 (p-6540dfdd) | no WD (p-2b67abec) |
+|---|---|---|
+| raw top-token logit at L31, median (target 10.06) | 9.96 | 9.98 |
+| diff vs target, mean ± std | −0.09 ± 0.23 | −0.07 ± 0.24 |
+| prompts off by > 0.5 | 4.7% | 4.6% |
+| normed (post-RMSNorm) diff, mean ± std | −0.01 ± 0.13 | +0.01 ± 0.14 |
+| ‖resid‖ ratio after layer 18 / 19 / 31 | 0.970 / 0.970 / 0.992 | 0.973 / 0.973 / 0.993 |
+| accuracy | 0.947 | 0.946 |
+
+So the 3% residual-norm shortfall after layer 18 and the −1% pre-norm top-token logit at the
+last layer are properties of the dual-objective decomposition itself (the CI-masked forward
+reproducing the layer-18 attention/MLP writes at 65-84% of their norm, section 1), not of
+the CI-scaled weight decay. The no-WD run's per-prompt spread is the same (std 0.24 vs 0.23).
+
+![lens7 wd vs nowd](plots/logit_magnitude/lens7_wd_vs_nowd.png)
