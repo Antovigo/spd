@@ -206,9 +206,11 @@ from the HF shard, components from the 20k checkpoint):
 | hidden-CI mask | 0.90 | 0.94 |
 
 The no-WD twin gives the same numbers to ±0.01. Three additive causes, all deficits:
-1. **The low-CI tail is dropped by the CI mask (12 points).** The ~440 components per site
-   with grid CI < 0.05 collectively carry 12% of the write's scale; the importance-minimality
-   pressure pushed their CI to ~0 while their V/U still contribute in the all-on forward.
+1. **The CI-zero components are dropped (12 points).** The ~440 components per site whose
+   CI at "=" is exactly 0 (the CI fn has hard zeros: only ~2% of components are > 0 at "=",
+   and CI > 0 ≈ CI > 0.05) collectively carry 12% of the write's scale when forced on;
+   they are components used at other positions / on the broad stream, and no mask built
+   from the CI (fractional or rounded) turns them on.
 2. **The delta is off (7 points).** Even fully on, the components reproduce only 93% of the
    write; the training forwards always carry the delta at a U[0,1] mask (mean 0.5), only the
    0.5-weighted UnmaskedReconLoss sees delta = 0.
@@ -221,3 +223,39 @@ Nothing pushes back: the output losses are on post-RMSNorm logits, which are inv
 residual scale, and a 15-25% shrink of the layer-18 writes at "=" moves the residual norm by
 only 3% and the final logits by nothing after the norm. The attention write follows the same
 pattern more strongly (65% of norm under output CI, 84% hidden CI, 88% all on).
+
+
+## Rounded masks (2026-09-08, job 11128) — the comparison Antoine asked for
+
+Everything above used the fractional CI mask. The runs' own eval also reports
+`kl_rounded_masked`, mask = (CI > rounding_threshold) with `rounding_threshold: 0.0`, i.e.
+every component with any nonzero CI at "=" fully on (the CI fn has hard zeros, so this is
+~11/10/13 gate/up/down components for the dual run and ~8/6/8 for output-only, plus 1-4
+q/o components). Same emulation with that mask, output-reconstruction CIs of each run only
+(per-component CI at "=" from the torch CI port, `allpos_ci_*.npz`); figures in
+`plots/logit_magnitude/rounded/`, per-layer table `table.json` there.
+
+Pre-norm top-token logit at layer 31 (target median 10.06):
+
+| condition | median | diff mean ± std | ratio median (5-95%) | prompts with \|diff\| > 0.5 | acc |
+|---|---|---|---|---|---|
+| dual, rounded | 10.00 | −0.05 ± 0.21 | 0.995 | 2.3% | 0.949 |
+| output-only, rounded | 10.19 | +0.13 ± 0.28 | 1.013 | 9.7% | 0.941 |
+| (dual, fractional CI) | 9.96 | −0.09 ± 0.23 | 0.991 | 4.7% | 0.947 |
+| (output-only, fractional CI) | 10.15 | +0.09 ± 0.29 | 1.009 | 9.1% | 0.938 |
+
+Same picture, slightly more separated: rounding the partial CIs up to 1 lifts the dual run
+halfway to the target (−0.09 → −0.05; residual-norm ratio after layer 18 0.970 → 0.976) and
+pushes the output-only run further ABOVE it (+0.09 → +0.13; final residual +1.5%). After the
+final RMSNorm the same token's logit is within +0.01 (dual) / −0.03 (output-only) of the
+target. Along the network the lens deficit right after layer 18 (dual −0.32, output-only
+−1.15 on 3.5) and its repair by layer 24-28 are unchanged, and the prompt-level spread is
+still the dominant term (std 0.45-0.65 mid-network, 0.13-0.14 at layer 31, vs |mean| ≤ 0.1
+from layer 22 on).
+
+![lens7 rounded](plots/logit_magnitude/rounded/lens7_L31_raw_top.png)
+![lens1 rounded](plots/logit_magnitude/rounded/lens1_curves.png)
+![lens8 rounded](plots/logit_magnitude/rounded/lens8_final_logit_stats.png)
+![lens2 rounded](plots/logit_magnitude/rounded/lens2_mean_vs_std.png)
+![lens4 rounded](plots/logit_magnitude/rounded/lens4_persistence.png)
+![lens5 rounded](plots/logit_magnitude/rounded/lens5_grids.png)
