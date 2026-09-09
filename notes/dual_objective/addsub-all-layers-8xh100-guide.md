@@ -14,8 +14,9 @@ restores the checkpoint into the new library. Either avoid pushing to it mid-run
 `cd $REPO && git log -1` on the pod before resuming so you know what it will pick up.
 
 Order of operations: pod (1) → code (2) → data + weights (3) → secrets (4) → env sanity (5)
-→ probe ladder (6a) → **set the mesh winner in the config** → real run (6b) → retrieval (7)
-→ stop / resume / teardown (8).
+→ probe ladder (6a) → **set the mesh winner in the config** → real run (6b) → **start the
+off-pod backup (7)** → stop / resume / teardown (8). On volume disk the backup is part of
+launching, not part of finishing.
 
 ---
 
@@ -494,14 +495,15 @@ backup first (step 7): `ls $DEST/<run id>/ckpts` should show a recent step.
 
 **At the end:**
 
-1. Run one last `./pull_backup.sh --profile 8xh100 --once` so the FINAL checkpoint is off the
-   pod, then confirm `ls ~/out/pod-backup/p-a1132b01/ckpts` shows step 40000. The hourly loop
-   already holds `ab_grids/`, `metrics.jsonl`, `launch_config.yaml`, `logs/` and
-   and — if you want the decomposition offline — the final `ckpts/40000/` (~20 GB; the
-   `decomposition` item alone, ~7 GB, is what every consumer restores).
+1. Run one final `./pull_backup.sh --profile 8xh100 --once`, then confirm
+   `ls ~/out/pod-backup/p-a1132b01/ckpts` shows step 40000. The hourly loop already holds
+   `ab_grids/`, `metrics.jsonl`, `launch_config.yaml`, the logs and `ladder/summary.md`;
+   this last pass is what gets the FINAL checkpoint (~20 GB; the `decomposition` item alone,
+   ~7 GB, is what every consumer restores). Stop the backup loop afterwards.
 2. Delete on the volume: every ladder trial's run dir,
    `awk -F'\t' '!/^#/ {print $2}' trials/manifest.tsv | while read -r id; do rm -rf "$DATA_ROOT/runs/$id"; done`, plus `$DATA_ROOT/runs/p-a1132b01/hlo`,
    `$DATA_ROOT/tmp/*`, `$VOLUME/uv-cache`.
-3. Terminate the pod. Keep the volume while anything on it is still wanted (it bills per
-   GB-month); delete it when the checkpoint has been pulled — the HF cache, venv and XLA
-   cache are all re-creatable from steps 2–3.
+3. Terminate the pod, which destroys the volume disk with it. Do this ONLY after step 1
+   confirms the final checkpoint is off the pod: unlike a network volume there is nothing
+   left to keep or remount. The HF cache, venv and XLA cache are all re-creatable from
+   steps 2 and 3, so they are not worth pulling.
