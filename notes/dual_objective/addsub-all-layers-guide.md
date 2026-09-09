@@ -291,24 +291,32 @@ tail -f $DATA_ROOT/ladder/driver.log          # Ctrl-C detaches from the tail on
 
 What runs, in order (each 30 steps with the step-0 slow eval ON, under `timeout -k 600`):
 
-1. `mesh-c` — replicate 2 / fsdp 4 / zero1 at batch 256/128 (75 min timeout; cold compile)
-2. `mesh-b` — replicate 1 / fsdp 8 / zero1, same batch
-3. `smoke-abgrid-<best>` — the AB-grid smoke at the fastest fitting mesh: `eval.every 10 /
+1. `mesh-c-b256x128` — replicate 2 / fsdp 4 / zero1 at batch 256/128 (75 min timeout; cold
+   compile)
+2. `mesh-b-b256x128` — replicate 1 / fsdp 8 / zero1, same batch
+3. **only if neither fits**, the same two meshes again at 128/96, automatically — "does not
+   fit" is a memory answer, and shrinking the broad stream is the lever
+4. `smoke-abgrid-<winner>` — the AB-grid smoke at the winning (mesh, batch): `eval.every 10 /
    slow_every 20`, `mean_ci_floor 0.0`, grid `[1,10]^2`, checkpointing ON. Pass =
    `ab_grids/step_20.js` written, `eval/ab_grids/saved_components/total` > 0, no traceback.
-4. `smoke-resume-<best>` — `save_every 20`; the driver SIGTERMs the trainer after the
+5. `smoke-resume-<winner>` — `save_every 20`; the driver SIGTERMs the trainer after the
    step-20 log, expects `SIGTERM: checkpoint saved`, relaunches on the same run id, expects
    `resumed from checkpoint step N` and a clean finish at step 30.
 
-Not in the default list (hard time cap): `fallback-128x96-<m>` (target 128 / nontarget 96 /
-eval 96). If NEITHER mesh fits, the driver says so and stops; then run by hand
-`./run_ladder.sh --only fallback-128x96-c` (or `-b`), and `--only smoke-abgrid-<m>` /
-`--only smoke-resume-<m>` at the shape you pick.
+Trial names carry their batch (`<kind>-<mesh>-b<target>x<nontarget>`) because the ladder may
+have to fall back, and the smokes must then run at whatever shape actually won. If nothing
+fits at either batch the driver says so and stops; the next levers are a smaller non-target
+batch, or the eval-only knobs `eval.batch_size` and `PGDReconLoss.n_batches`, which cost
+diagnostic precision rather than training semantics.
+
+There is a second pod shape with its own config, guide and ladder: four H100s at batch
+128/128, via `--profile 4xh100`. See `addsub-all-layers-4xh100-guide.md`. This guide is the
+default profile, `8xh100`, and every command here works without a `--profile` flag.
 
 Output: `$DATA_ROOT/ladder/summary.md` — one table (trial, fits?, peak GB/rank, s/step,
 projected hours for 40k steps, wall minutes, notes). Paste it back. Per-trial logs are
 `$DATA_ROOT/ladder/<trial>.log`; run dirs are `$DATA_ROOT/runs/<run id>` (one fixed id per
-trial, in `trials/manifest.tsv`). The driver skips any trial with a `$DATA_ROOT/ladder/<trial>.rc`;
+trial, DERIVED FROM ITS NAME so the set can change without remapping, in `trials/manifest.tsv`). The driver skips any trial with a `$DATA_ROOT/ladder/<trial>.rc`;
 to redo one, delete that file AND its run dir (fixed run ids: a leftover dir would resume
 or refuse on the pinned config).
 
@@ -330,8 +338,9 @@ Before launching — these are the only edits the config ever gets, and they mus
    to `xla`.
 3. Re-check: `$VENV_PY make_trials.py --check --data-root $DATA_ROOT` (parses the edited
    sota file too). Commit the edit on the pod or note it — the run dir pins the bytes anyway.
-4. Free the volume: `rm -rf $DATA_ROOT/runs/p-1adde403 $DATA_ROOT/runs/p-1adde404 $DATA_ROOT/runs/p-1adde413 $DATA_ROOT/runs/p-1adde414`
-   (the smokes' ~80 GB of checkpoints; `summary.md` and the `.log`s keep the evidence).
+4. Free the volume, dropping the smokes' ~80 GB of checkpoints (`summary.md` and the
+   `.log`s keep the evidence):
+   `awk -F'\t' '$4 ~ /smoke/ {print $2}' trials/manifest.tsv | while read -r id; do rm -rf "$DATA_ROOT/runs/$id"; done`
 
 ```bash
 source /workspace/spd/notes/dual_objective/addsub-all-layers/env.sh
@@ -422,7 +431,8 @@ that matters is under `/workspace` (step 5).
 1. Pull `ab_grids/`, `metrics.jsonl`, `launch_config.yaml`, `logs/`, `ladder/summary.md`,
    and — if you want the decomposition offline — the final `ckpts/40000/` (~20 GB; the
    `decomposition` item alone, ~7 GB, is what every consumer restores).
-2. Delete on the volume: `rm -rf $DATA_ROOT/runs/p-1adde4*` (ladder), `$DATA_ROOT/runs/p-a1132b01/hlo`,
+2. Delete on the volume: every ladder trial's run dir,
+   `awk -F'\t' '!/^#/ {print $2}' trials/manifest.tsv | while read -r id; do rm -rf "$DATA_ROOT/runs/$id"; done`, plus `$DATA_ROOT/runs/p-a1132b01/hlo`,
    `$DATA_ROOT/tmp/*`, `$VOLUME/uv-cache`.
 3. Terminate the pod. Keep the volume while anything on it is still wanted (it bills per
    GB-month); delete it when the checkpoint has been pulled — the HF cache, venv and XLA

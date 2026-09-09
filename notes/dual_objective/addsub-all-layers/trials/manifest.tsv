@@ -1,9 +1,18 @@
+# profile	8xh100
+# devices	8
+# authored_batch	b256x128
+# fallback_batch	b128x96
+# default_meshes	c,b
 # name	run_id	config	kind	timeout_s
-mesh-c	p-1adde401	mesh-c.yaml	mesh	4500
-mesh-b	p-1adde402	mesh-b.yaml	mesh	4500
-smoke-abgrid-c	p-1adde403	smoke-abgrid-c.yaml	smoke-abgrid	2700
-smoke-resume-c	p-1adde404	smoke-resume-c.yaml	smoke-resume	2700
-fallback-128x96-c	p-1adde405	fallback-128x96-c.yaml	fallback	4500
-smoke-abgrid-b	p-1adde413	smoke-abgrid-b.yaml	smoke-abgrid	2700
-smoke-resume-b	p-1adde414	smoke-resume-b.yaml	smoke-resume	2700
-fallback-128x96-b	p-1adde406	fallback-128x96-b.yaml	fallback	4500
+mesh-c-b256x128	p-c4eb42d0	mesh-c-b256x128.yaml	mesh	4500
+smoke-abgrid-c-b256x128	p-0c8c6daf	smoke-abgrid-c-b256x128.yaml	smoke-abgrid	2700
+smoke-resume-c-b256x128	p-ac575196	smoke-resume-c-b256x128.yaml	smoke-resume	2700
+mesh-b-b256x128	p-95f0c84b	mesh-b-b256x128.yaml	mesh	4500
+smoke-abgrid-b-b256x128	p-30458d6d	smoke-abgrid-b-b256x128.yaml	smoke-abgrid	2700
+smoke-resume-b-b256x128	p-99544ca7	smoke-resume-b-b256x128.yaml	smoke-resume	2700
+mesh-c-b128x96	p-0b9d9c05	mesh-c-b128x96.yaml	mesh	4500
+smoke-abgrid-c-b128x96	p-a6665bc4	smoke-abgrid-c-b128x96.yaml	smoke-abgrid	2700
+smoke-resume-c-b128x96	p-9199c7e7	smoke-resume-c-b128x96.yaml	smoke-resume	2700
+mesh-b-b128x96	p-28b5001e	mesh-b-b128x96.yaml	mesh	4500
+smoke-abgrid-b-b128x96	p-1ffc7b08	smoke-abgrid-b-b128x96.yaml	smoke-abgrid	2700
+smoke-resume-b-b128x96	p-bd31eb52	smoke-resume-b-b128x96.yaml	smoke-resume	2700

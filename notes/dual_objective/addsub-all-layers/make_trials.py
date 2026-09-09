@@ -1,42 +1,46 @@
 #!/usr/bin/env python
-"""Generate the probe-ladder configs from `../addsub-all-layers-sota.yaml` (never hand-copy).
+"""Generate a probe ladder's trial configs from a production config (never hand-copy).
 
-    python make_trials.py                # regenerate trials/*.yaml + trials/manifest.tsv
-    python make_trials.py --check        # also parse every output under the run schema
-    python make_trials.py --check --data-root /workspace/data   # + full build (resolves the
-                                         # target arch, datasets and the neuron-ranks artifact)
+    python make_trials.py                                   # the 8x H100 ladder
+    python make_trials.py --profile 4xh100                  # the 4x H100 ladder
+    python make_trials.py --profile 4xh100 --check --data-root $DATA_ROOT
 
-Every trial is the production config with a SMALL, enumerated delta on top; the deltas are
-the ladder's whole content, so they are listed here and nowhere else:
+A PROFILE is one pod shape: which production config it derives from, how many GPUs, which
+meshes to A/B, and where its trials and run ids live. Run ids are disjoint between profiles,
+so the two ladders can share a `$DATA_ROOT` without colliding.
 
-  common      pd.steps 30, cadence.train_log_every 10 (step_time_s lands at steps 10/20/30;
-              the step-10 window still contains the compile, read 20 and 30), no wandb
-              (metrics.jsonl is the record), the trial's own fixed run id and run_name.
-  mesh-<m>    cadence.checkpointing none (a 32-block checkpoint is ~20 GB; the mesh probe
-              measures memory and step time, not the save path) + the mesh under test.
-  smoke-abgrid-<m>
-              the AB-grid smoke aimed at the grid's schedule: eval.every 10, slow_every 20
-              (EveryAfterFirst fires at step 20; report §8.7), mean_ci_floor 0.0 (only a
-              non-empty `saved` set exercises the failing gather; §8.8), a_range/b_range
-              [1, 10] (~100 prompts). Checkpointing ON at the production cadence (saves
-              step 0 and the final step 30) so the save path is exercised once.
-  smoke-resume-<m>
-              save_every 20; the driver SIGTERMs the trainer after the step-20 log, expects
-              a SIGTERM save, relaunches on the same run id, expects "resumed from
-              checkpoint step N" and a clean finish at step 30.
-  fallback-128x96-<m>
-              the reduced batch (target 128 / nontarget 96, eval 96) — generated, NOT in the
-              default ladder (Antoine 2026-09-08: hard time cap); run by hand if both meshes
-              fail: `run_ladder.sh --extra fallback-128x96-<m>`.
+Trial names are `<kind>-<mesh>-b<target>x<nontarget>`, uniformly — the batch is part of the
+identity because the ladder may have to fall back to a smaller one, and the smoke that
+follows must run at whatever shape actually won.
+
+Every trial is the production config with a SMALL, enumerated delta; the deltas are the
+ladder's whole content, so they are listed here and nowhere else:
+
+  common    pd.steps 30, cadence.train_log_every 10 (step_time_s lands at steps 10/20/30;
+            the step-10 window still contains the compile, read 20 and 30), no wandb
+            (metrics.jsonl is the record), the trial's own fixed run id and run_name.
+  mesh      cadence.checkpointing none (a 32-block checkpoint is ~20 GB; a mesh probe
+            measures memory and step time, not the save path) + the mesh + the batch.
+  smoke-abgrid
+            aimed at the AB grid's own schedule: eval.every 10, slow_every 20
+            (EveryAfterFirst fires at step 20; report §8.7), mean_ci_floor 0.0 (only a
+            non-empty `saved` set exercises the failing gather; §8.8), a_range/b_range
+            [1, 10] (~100 prompts). Checkpointing ON at the production cadence, so the save
+            path is exercised once.
+  smoke-resume
+            save_every 20; the driver SIGTERMs the trainer after the step-20 log, expects a
+            SIGTERM save, relaunches on the same run id, expects "resumed from checkpoint
+            step N" and a clean finish at step 30.
 
 `pd.steps` is 30 in EVERY trial so the compiled step is shared through the XLA cache across
-trials at the same mesh (schedules are traced against `steps`).
+trials at the same mesh and batch (schedules are traced against `steps`).
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,57 +48,90 @@ from typing import Any
 import yaml
 
 HERE = Path(__file__).resolve().parent
-SOTA = HERE.parent / "addsub-all-layers-sota.yaml"
-OUT = HERE / "trials"
-
 TRIAL_STEPS = 30
-MESHES: dict[str, dict[str, Any]] = {
-    # (c): half the frozen-target gathers of (b); target replicated 2x (~4 GB/rank).
-    "c": {"replicate": 2, "fsdp": 4, "tp": 1, "sharding": "zero1"},
-    # (b): the H100-validated HSDP seat's layout.
-    "b": {"replicate": 1, "fsdp": 8, "tp": 1, "sharding": "zero1"},
+
+# (replicate, fsdp, tp, sharding). `zero1` shards the optimizer state over the FULL data
+# mesh under every entry here, so these differ in how the frozen target is sharded and how
+# often it is gathered, not in optimizer-state footprint. Never `zero1` at `fsdp: 1`
+# (report §8.5: 26x all-reduce) — the config builder accepts it, so the guard is lore.
+PROFILES: dict[str, dict[str, Any]] = {
+    "8xh100": {
+        "sota": "addsub-all-layers-sota.yaml",
+        "out": "trials",
+        "ladder": "ladder",
+        "run_id": "p-a1132b01",
+        "devices": 8,
+        # (a) `replicate 8 / fsdp 1 / ddp` is deliberately absent: it replicates the whole
+        # trainable state for ~46 GB of static per rank on an 80 GB card.
+        "meshes": {"c": (2, 4, 1, "zero1"), "b": (1, 8, 1, "zero1")},
+        "extra_meshes": {},
+    },
+    "4xh100": {
+        "sota": "addsub-all-layers-4xh100-sota.yaml",
+        "out": "trials-4xh100",
+        "ladder": "ladder-4xh100",
+        "run_id": "p-b4132c01",
+        "devices": 4,
+        "meshes": {"f4": (1, 4, 1, "zero1"), "r2f2": (2, 2, 1, "zero1")},
+        # generated but never in the default order: 45.7 GB static leaves ~29 GB for
+        # activations, which the estimate does not support. `run_ladder.sh --only` it.
+        "extra_meshes": {"ddp": (4, 1, 1, "ddp")},
+    },
 }
-# Fixed ids (`p-<8hex>` is enforced by the trainer) so a rerun of the driver finds and skips
-# finished trials, and so the summary can name run dirs before anything ran.
-RUN_IDS = {
-    "mesh-c": "p-1adde401",
-    "mesh-b": "p-1adde402",
-    "smoke-abgrid-c": "p-1adde403",
-    "smoke-resume-c": "p-1adde404",
-    "smoke-abgrid-b": "p-1adde413",
-    "smoke-resume-b": "p-1adde414",
-    "fallback-128x96-c": "p-1adde405",
-    "fallback-128x96-b": "p-1adde406",
-}
-# Per-trial `timeout` (seconds) — a timeout counts as "does not fit" (a dp>1 OOM hangs).
-TIMEOUTS = {"mesh": 4500, "smoke-abgrid": 2700, "smoke-resume": 2700, "fallback": 4500}
+
+TIMEOUTS = {"mesh": 4500, "smoke-abgrid": 2700, "smoke-resume": 2700}
 # Mesh trials get 75 min: a COLD 32-block compile is silent for tens of minutes before the
 # step-0 slow eval even starts (the 4-block run needed 18 min to step 100 with a WARM cache).
 # The smokes reuse the mesh trial's compiled step from the cache (same mesh, batch, steps).
 
 
+def batch_tag(target: int, nontarget: int) -> str:
+    return f"b{target}x{nontarget}"
+
+
+def trial_run_id(profile: str, name: str) -> str:
+    """A trial's fixed run id, DERIVED FROM ITS NAME rather than its position in the list.
+
+    Run ids must be stable under edits to the trial set. The ladder skips a finished trial
+    by its `.rc` file, but the trainer keys the run DIRECTORY by id, and that directory
+    holds a byte-compared `launch_config.yaml`. Allocated sequentially, adding a mesh or
+    reordering the list would hand an id that already has a run dir to a DIFFERENT trial,
+    which then either resumes an unrelated trajectory or refuses on the pinned config.
+    Hashing the (profile, name) pair makes an id depend on nothing but the identity of the
+    trial, so the set can grow and shrink freely and the profiles cannot collide."""
+    digest = hashlib.blake2b(f"{profile}/{name}".encode(), digest_size=4).hexdigest()
+    return f"p-{digest}"
+
+
 def _common(raw: dict[str, Any], name: str) -> dict[str, Any]:
     cfg = copy.deepcopy(raw)
-    cfg["run_name"] = f"addsub-all-layers-trial-{name}"
+    cfg["run_name"] = f"{raw['run_name']}-trial-{name}"
     cfg["pd"]["steps"] = TRIAL_STEPS
     cfg["cadence"]["train_log_every"] = 10
     cfg.pop("wandb", None)
     return cfg
 
 
-def _with_mesh(cfg: dict[str, Any], mesh: str) -> dict[str, Any]:
-    cfg["runtime"].update(MESHES[mesh])
+def _apply(
+    cfg: dict[str, Any], mesh: tuple[int, int, int, str], batch: tuple[int, int, int]
+) -> dict[str, Any]:
+    replicate, fsdp, tp, sharding = mesh
+    cfg["runtime"].update(replicate=replicate, fsdp=fsdp, tp=tp, sharding=sharding)
+    target, nontarget, eval_batch = batch
+    cfg["pd"]["batch_size"] = target
+    cfg["nontarget"]["batch_size"] = nontarget
+    cfg["eval"]["batch_size"] = eval_batch
     return cfg
 
 
-def mesh_trial(raw: dict[str, Any], mesh: str) -> dict[str, Any]:
-    cfg = _with_mesh(_common(raw, f"mesh-{mesh}"), mesh)
+def mesh_trial(raw, name, mesh, batch):
+    cfg = _apply(_common(raw, name), mesh, batch)
     cfg["cadence"]["checkpointing"] = {"kind": "none"}
     return cfg
 
 
-def smoke_abgrid(raw: dict[str, Any], mesh: str) -> dict[str, Any]:
-    cfg = _with_mesh(_common(raw, f"smoke-abgrid-{mesh}"), mesh)
+def smoke_abgrid(raw, name, mesh, batch):
+    cfg = _apply(_common(raw, name), mesh, batch)
     cfg["eval"]["every"] = 10
     cfg["eval"]["slow_every"] = 20
     grids = [m for m in cfg["eval"]["metrics"] if m["type"] == "ABGridDataset"]
@@ -103,82 +140,63 @@ def smoke_abgrid(raw: dict[str, Any], mesh: str) -> dict[str, Any]:
     return cfg
 
 
-def smoke_resume(raw: dict[str, Any], mesh: str) -> dict[str, Any]:
-    cfg = _with_mesh(_common(raw, f"smoke-resume-{mesh}"), mesh)
+def smoke_resume(raw, name, mesh, batch):
+    cfg = _apply(_common(raw, name), mesh, batch)
     cfg["cadence"]["checkpointing"]["save_every"] = 20
     return cfg
 
 
-def fallback(raw: dict[str, Any], mesh: str) -> dict[str, Any]:
-    cfg = _with_mesh(_common(raw, f"fallback-128x96-{mesh}"), mesh)
-    cfg["cadence"]["checkpointing"] = {"kind": "none"}
-    cfg["pd"]["batch_size"] = 128
-    cfg["nontarget"]["batch_size"] = 96
-    cfg["eval"]["batch_size"] = 96
-    return cfg
+BUILDERS = {"mesh": mesh_trial, "smoke-abgrid": smoke_abgrid, "smoke-resume": smoke_resume}
 
 
-def _header(name: str, run_id: str) -> str:
-    return (
-        f"# GENERATED by make_trials.py from ../addsub-all-layers-sota.yaml — do not edit.\n"
-        f"# Probe-ladder trial `{name}`, run id {run_id}; the delta from the production config\n"
-        f"# is documented in make_trials.py. Comments of the source are not carried over.\n"
+def generate(profile_name: str) -> tuple[Path, list[tuple[str, str, Path, str, int]]]:
+    profile = PROFILES[profile_name]
+    sota = HERE.parent / profile["sota"]
+    raw = yaml.safe_load(sota.read_text())
+    world = raw["runtime"]["replicate"] * raw["runtime"]["fsdp"] * raw["runtime"]["tp"]
+    assert world == profile["devices"], (
+        f"{sota.name} authors a {world}-GPU mesh but profile {profile_name!r} is "
+        f"{profile['devices']} GPUs"
     )
+    authored = (raw["pd"]["batch_size"], raw["nontarget"]["batch_size"], raw["eval"]["batch_size"])
+    fallback = (128, 96, 96)
+    batches = [authored] if authored == fallback else [authored, fallback]
 
-
-def generate() -> list[tuple[str, str, Path, str, int]]:
-    raw = yaml.safe_load(SOTA.read_text())
-    OUT.mkdir(parents=True, exist_ok=True)
-    rows: list[tuple[str, str, Path, str, int]] = []  # name, run_id, path, kind, timeout
-    for mesh in MESHES:
-        rows.append(
-            (
-                f"mesh-{mesh}",
-                RUN_IDS[f"mesh-{mesh}"],
-                mesh_trial(raw, mesh),
-                "mesh",
-                TIMEOUTS["mesh"],
-            )
-        )  # type: ignore[arg-type]
-    for mesh in MESHES:
-        rows.append(
-            (
-                f"smoke-abgrid-{mesh}",
-                RUN_IDS[f"smoke-abgrid-{mesh}"],
-                smoke_abgrid(raw, mesh),
-                "smoke-abgrid",
-                TIMEOUTS["smoke-abgrid"],
-            )
-        )  # type: ignore[arg-type]
-        rows.append(
-            (
-                f"smoke-resume-{mesh}",
-                RUN_IDS[f"smoke-resume-{mesh}"],
-                smoke_resume(raw, mesh),
-                "smoke-resume",
-                TIMEOUTS["smoke-resume"],
-            )
-        )  # type: ignore[arg-type]
-        rows.append(
-            (
-                f"fallback-128x96-{mesh}",
-                RUN_IDS[f"fallback-128x96-{mesh}"],
-                fallback(raw, mesh),
-                "fallback",
-                TIMEOUTS["fallback"],
-            )
-        )  # type: ignore[arg-type]
-    written: list[tuple[str, str, Path, str, int]] = []
-    for name, run_id, cfg, kind, timeout in rows:
-        path = OUT / f"{name}.yaml"
-        path.write_text(_header(name, run_id) + yaml.safe_dump(cfg, sort_keys=False, width=100))
-        written.append((name, run_id, path, kind, timeout))
-    manifest = OUT / "manifest.tsv"
+    out = HERE / profile["out"]
+    out.mkdir(parents=True, exist_ok=True)
+    meshes = {**profile["meshes"], **profile["extra_meshes"]}
+    rows: list[tuple[str, str, Path, str, int]] = []
+    for target, nontarget, eval_batch in batches:
+        tag = batch_tag(target, nontarget)
+        for mesh_name, mesh in meshes.items():
+            for kind, builder in BUILDERS.items():
+                # the smokes exist only for the meshes the driver may choose
+                if kind != "mesh" and mesh_name in profile["extra_meshes"]:
+                    continue
+                name = f"{kind}-{mesh_name}-{tag}"
+                run_id = trial_run_id(profile_name, name)
+                cfg = builder(raw, name, mesh, (target, nontarget, eval_batch))
+                path = out / f"{name}.yaml"
+                path.write_text(
+                    f"# GENERATED by make_trials.py --profile {profile_name} from "
+                    f"../{profile['sota']} — do not edit.\n"
+                    f"# Trial {name!r}, run id {run_id}; the delta from the production config is\n"
+                    f"# documented in make_trials.py. Source comments are not carried over.\n"
+                    + yaml.safe_dump(cfg, sort_keys=False, width=100)
+                )
+                rows.append((name, run_id, path, kind, TIMEOUTS[kind]))
+    ids = [r[1] for r in rows]
+    assert len(set(ids)) == len(ids), f"run id collision in profile {profile_name}: {ids}"
+    manifest = out / "manifest.tsv"
     manifest.write_text(
+        f"# profile\t{profile_name}\n# devices\t{profile['devices']}\n"
+        f"# authored_batch\t{batch_tag(authored[0], authored[1])}\n"
+        f"# fallback_batch\t{batch_tag(fallback[0], fallback[1])}\n"
+        f"# default_meshes\t{','.join(profile['meshes'])}\n"
         "# name\trun_id\tconfig\tkind\ttimeout_s\n"
-        + "".join(f"{n}\t{r}\t{p.name}\t{k}\t{t}\n" for n, r, p, k, t in written)
+        + "".join(f"{n}\t{r}\t{p.name}\t{k}\t{t}\n" for n, r, p, k, t in rows)
     )
-    return written
+    return out, rows
 
 
 def check(paths: list[Path], data_root: Path | None) -> None:
@@ -189,10 +207,15 @@ def check(paths: list[Path], data_root: Path | None) -> None:
 
     for path in paths:
         cfg = LMTargetedExperimentConfig.model_validate(yaml.safe_load(path.read_text()))
-        line = f"parsed  {path.name}: steps={cfg.pd.steps} mesh={cfg.runtime.replicate}x{cfg.runtime.fsdp}x{cfg.runtime.tp}/{cfg.runtime.sharding}"
+        rt = cfg.runtime
+        line = (
+            f"parsed  {path.name:34s} steps={cfg.pd.steps:<6d} "
+            f"mesh={rt.replicate}x{rt.fsdp}x{rt.tp}/{rt.sharding} "
+            f"batch={cfg.pd.batch_size}/{cfg.nontarget.batch_size}"
+        )
         if data_root is not None:
             built = build_targeted_experiment_config(cfg, "p-0000abcd", data_root)
-            line += f" sites={len(built.target.sites)} chunks={len(built.ci_fn.chunks)}"  # type: ignore[attr-defined]
+            line += f" sites={len(built.target.sites)}"
         print(line)
 
 
@@ -200,23 +223,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument(
-        "--check",
-        action="store_true",
-        help="parse every output (and the source) under the run schema",
-    )
-    ap.add_argument(
-        "--data-root",
-        type=Path,
-        default=None,
-        help="with --check: fully build against this data root",
-    )
+    ap.add_argument("--profile", default="8xh100", choices=sorted(PROFILES))
+    ap.add_argument("--check", action="store_true", help="parse every output (and the source)")
+    ap.add_argument("--data-root", type=Path, default=None, help="with --check: also build")
     args = ap.parse_args()
-    written = generate()
-    for _name, run_id, path, kind, timeout in written:
+    out, rows = generate(args.profile)
+    for _name, run_id, path, kind, timeout in rows:
         print(f"wrote {path.relative_to(HERE)}  ({kind}, {run_id}, timeout {timeout}s)")
     if args.check:
-        check([SOTA] + [p for _, _, p, _, _ in written], args.data_root)
+        sota = HERE.parent / PROFILES[args.profile]["sota"]
+        check([sota] + [p for _, _, p, _, _ in rows], args.data_root)
 
 
 if __name__ == "__main__":

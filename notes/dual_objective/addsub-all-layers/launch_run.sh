@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
 # Launch (or RESUME) the real run, detached: survives closing the shell and the laptop.
-#     source env.sh && ./launch_run.sh
-# Fixed run id p-a1132b01 (the trainer enforces `p-<8hex>`): the second and every later
-# invocation resumes from the newest checkpoint in $DATA_ROOT/runs/p-a1132b01/ckpts — the
-# pinned launch_config.yaml is byte-compared, so the config file must be unchanged.
+#     source env.sh && ./launch_run.sh [--profile 4xh100]
+# Each profile has ONE fixed run id (the trainer enforces `p-<8hex>`): the second and every
+# later invocation resumes from the newest checkpoint in $DATA_ROOT/runs/<run id>/ckpts —
+# the pinned launch_config.yaml is byte-compared, so the config file must be unchanged.
+#     8xh100  addsub-all-layers-sota.yaml         -> p-a1132b01
+#     4xh100  addsub-all-layers-4xh100-sota.yaml  -> p-b4132c01
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-: "${REPO:?source env.sh first}" "${DATA_ROOT:?source env.sh first}"
-RUN_ID="${RUN_ID:-p-a1132b01}"
-CONFIG="${CONFIG:-$HERE/../addsub-all-layers-sota.yaml}"
+: "${REPO:?source env.sh first}" "${DATA_ROOT:?source env.sh first}" "${VENV_PY:?source env.sh first}"
+
+# `--profile <name>` picks the pod shape; PROFILES in make_trials.py is the single source of
+# truth for which config and run id each one uses. RUN_ID / CONFIG in the environment still
+# override, for a one-off.
+PROFILE=8xh100
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift ;;
+    *) echo "unknown arg $1"; exit 2 ;;
+  esac; shift
+done
+read -r P_SOTA P_RUN_ID <<<"$("$VENV_PY" -c "
+import sys; sys.path.insert(0, '$HERE')
+from make_trials import PROFILES
+p = PROFILES['$PROFILE']; print(p['sota'], p['run_id'])")"
+RUN_ID="${RUN_ID:-$P_RUN_ID}"
+CONFIG="${CONFIG:-$HERE/../$P_SOTA}"
 RUN_NAME="$(awk -F': *' '/^run_name:/{print $2; exit}' "$CONFIG")"
 LOG="$DATA_ROOT/logs/$RUN_NAME.$(date +%Y%m%d-%H%M%S).log"
 
@@ -24,4 +41,4 @@ echo $! > "$DATA_ROOT/pids/$RUN_ID.runner.pid"
 ln -sfn "$LOG" "$DATA_ROOT/logs/$RUN_NAME.latest.log"
 echo "launched runner pid $(cat "$DATA_ROOT/pids/$RUN_ID.runner.pid"); log: $LOG"
 echo "follow:  tail -f $DATA_ROOT/logs/$RUN_NAME.latest.log"
-echo "stop:    $HERE/stop_run.sh        (SIGTERM -> checkpoint save -> exit)"
+echo "stop:    $HERE/stop_run.sh --profile $PROFILE   (SIGTERM -> checkpoint save -> exit)"
